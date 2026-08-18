@@ -106,9 +106,8 @@ fn imag_program() -> String {
 /// newline, and leaves no *.tmp* file behind.
 #[test]
 fn genlock_write_markers_writes_all_three_atomically() {
-    let dir = std::env::temp_dir().join(format!("cb789-markers-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
     run_sourced(
         &markers_lib(),
         &format!(
@@ -122,7 +121,7 @@ fn genlock_write_markers_writes_all_three_atomically() {
     assert_eq!(g, "aaa111\n", "GENLOCK_BUILD_SHA.txt content");
     assert_eq!(d, "bbb222\n", "DISTROAV_BUILD_SHA.txt content");
     assert_eq!(at, "2026-08-18T00:00:00+00:00\n", "DEPLOYED_AT content");
-    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+    let leftovers: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -132,15 +131,13 @@ fn genlock_write_markers_writes_all_three_atomically() {
         leftovers.is_empty(),
         "temp-then-rename must leave no .tmp file behind, found: {leftovers:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// DEPLOYED_AT defaults to an ISO timestamp when the 4th arg is omitted.
 #[test]
 fn genlock_write_markers_defaults_deployed_at() {
-    let dir = std::env::temp_dir().join(format!("cb789-markers-def-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
     run_sourced(
         &markers_lib(),
         &format!("genlock_write_markers '{}' aaa bbb", dir.display()),
@@ -150,7 +147,6 @@ fn genlock_write_markers_defaults_deployed_at() {
         at.contains("T") && at.len() > 10,
         "DEPLOYED_AT should default to an ISO-8601 timestamp, got {at:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An empty marker dir (or empty genlock sha) is a fail-loud usage error, never a silent no-op.
@@ -197,8 +193,9 @@ fn windows_artifact_and_workflow_by_mode() {
         "obs-genlock-fast-dll"
     );
     assert!(run_sourced(&script(), "fleet_windows_workflow full").contains("windows-genlock.yml"));
-    assert!(run_sourced(&script(), "fleet_windows_workflow fast")
-        .contains("windows-genlock-fast.yml"));
+    assert!(
+        run_sourced(&script(), "fleet_windows_workflow fast").contains("windows-genlock-fast.yml")
+    );
     assert_eq!(
         run_sourced(&script(), "fleet_linux_bundle_artifact").trim(),
         "obs-genlock-linux-x86_64"
@@ -212,9 +209,8 @@ fn windows_artifact_and_workflow_by_mode() {
 /// Retention keeps the newest KEEP dirs and prints the rest as delete candidates (never deletes).
 #[test]
 fn retention_delete_plan_keeps_newest_n() {
-    let parent = std::env::temp_dir().join(format!("cb789-ret-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&parent);
-    std::fs::create_dir_all(&parent).unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let parent = tmp.path();
     // Create 5 backup dirs with strictly increasing mtimes (d0 oldest .. d4 newest).
     for i in 0..5 {
         let d = parent.join(format!("obs-backup-2026-08-1{i}"));
@@ -233,27 +229,42 @@ fn retention_delete_plan_keeps_newest_n() {
         ),
     );
     // The 2 OLDEST (d0, d1) are the delete candidates; the newest 3 (d2,d3,d4) are kept.
-    assert!(out.contains("obs-backup-2026-08-10"), "oldest must be a delete candidate:\n{out}");
-    assert!(out.contains("obs-backup-2026-08-11"), "2nd-oldest must be a delete candidate:\n{out}");
-    assert!(!out.contains("obs-backup-2026-08-14"), "newest must be kept, not listed:\n{out}");
-    assert!(!out.contains("obs-backup-2026-08-12"), "3rd-newest must be kept:\n{out}");
-    let _ = std::fs::remove_dir_all(&parent);
+    assert!(
+        out.contains("obs-backup-2026-08-10"),
+        "oldest must be a delete candidate:\n{out}"
+    );
+    assert!(
+        out.contains("obs-backup-2026-08-11"),
+        "2nd-oldest must be a delete candidate:\n{out}"
+    );
+    assert!(
+        !out.contains("obs-backup-2026-08-14"),
+        "newest must be kept, not listed:\n{out}"
+    );
+    assert!(
+        !out.contains("obs-backup-2026-08-12"),
+        "3rd-newest must be kept:\n{out}"
+    );
 }
 
 #[test]
 fn retention_with_fewer_than_keep_lists_nothing() {
-    let parent = std::env::temp_dir().join(format!("cb789-ret2-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&parent);
-    std::fs::create_dir_all(&parent).unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let parent = tmp.path();
     for i in 0..2 {
         std::fs::create_dir_all(parent.join(format!("obs-backup-{i}"))).unwrap();
     }
     let out = run_sourced(
         &script(),
-        &format!("genlock_retention_delete_plan 3 '{}' 'obs-backup-*'", parent.display()),
+        &format!(
+            "genlock_retention_delete_plan 3 '{}' 'obs-backup-*'",
+            parent.display()
+        ),
     );
-    assert!(out.trim().is_empty(), "2 dirs, keep 3 -> nothing to delete, got:\n{out}");
-    let _ = std::fs::remove_dir_all(&parent);
+    assert!(
+        out.trim().is_empty(),
+        "2 dirs, keep 3 -> nothing to delete, got:\n{out}"
+    );
 }
 
 // ============================================================================================
@@ -263,27 +274,52 @@ fn retention_with_fewer_than_keep_lists_nothing() {
 #[test]
 fn windows_program_is_a_fail_loud_powershell_deploy() {
     let p = win_program("strih", "full", "1");
-    assert!(p.contains("$ErrorActionPreference = 'Stop'"), "must set Stop:\n{p}");
+    assert!(
+        p.contains("$ErrorActionPreference = 'Stop'"),
+        "must set Stop:\n{p}"
+    );
     // clears crash sentinels + stops OBS before copying (locked files otherwise)
     assert!(p.contains(".sentinel"), "must clear crash sentinels:\n{p}");
     assert!(p.contains("obs64"), "must stop obs64 before the copy:\n{p}");
     // markers (BOTH) + DEPLOYED_AT written temp-then-rename (Move-Item -Force)
-    assert!(p.contains("GENLOCK_BUILD_SHA.txt"), "writes the genlock marker:\n{p}");
-    assert!(p.contains("DISTROAV_BUILD_SHA.txt"), "writes the distroav marker:\n{p}");
+    assert!(
+        p.contains("GENLOCK_BUILD_SHA.txt"),
+        "writes the genlock marker:\n{p}"
+    );
+    assert!(
+        p.contains("DISTROAV_BUILD_SHA.txt"),
+        "writes the distroav marker:\n{p}"
+    );
     assert!(p.contains("DEPLOYED_AT"), "writes DEPLOYED_AT:\n{p}");
-    assert!(p.contains("Move-Item") && p.contains("-Force"),
-        "markers must be written temp-then-rename via Move-Item -Force:\n{p}");
+    assert!(
+        p.contains("Move-Item") && p.contains("-Force"),
+        "markers must be written temp-then-rename via Move-Item -Force:\n{p}"
+    );
     // sha256 verify of deployed bytes vs the artifact manifest, fail-closed
-    assert!(p.contains("Get-FileHash") && p.contains("SHA256"), "sha256 verify:\n{p}");
-    assert!(p.contains("BUNDLE_MANIFEST.json"), "verify against the bundle manifest:\n{p}");
+    assert!(
+        p.contains("Get-FileHash") && p.contains("SHA256"),
+        "sha256 verify:\n{p}"
+    );
+    assert!(
+        p.contains("BUNDLE_MANIFEST.json"),
+        "verify against the bundle manifest:\n{p}"
+    );
     assert!(p.contains("match="), "prints per-component match=:\n{p}");
-    assert!(p.to_uppercase().contains("VERIFY FAIL") || p.contains("exit 1"),
-        "a byte mismatch must fail loud (non-zero exit):\n{p}");
+    assert!(
+        p.to_uppercase().contains("VERIFY FAIL") || p.contains("exit 1"),
+        "a byte mismatch must fail loud (non-zero exit):\n{p}"
+    );
     // robocopy 0-7 is success — only >= 8 is failure
-    assert!(p.contains("$LASTEXITCODE") && p.contains("8"),
-        "robocopy exit >= 8 is the only failure (0-7 success):\n{p}");
+    assert!(
+        p.contains("$LASTEXITCODE") && p.contains("8"),
+        "robocopy exit >= 8 is the only failure (0-7 success):\n{p}"
+    );
     // env-free (the genlock build carries no env)
-    for env in ["OBS_GENLOCK_WALL_CLOCK", "OBS_GENLOCK_LATENCY_MS", "OBS_BURN_QR"] {
+    for env in [
+        "OBS_GENLOCK_WALL_CLOCK",
+        "OBS_GENLOCK_LATENCY_MS",
+        "OBS_BURN_QR",
+    ] {
         assert!(!p.contains(env), "must carry no {env}:\n{p}");
     }
 }
@@ -294,44 +330,69 @@ fn windows_full_program_does_the_three_surgical_robocopies() {
     assert!(p.contains("robocopy"), "full deploy uses robocopy:\n{p}");
     assert!(p.contains("bin\\64bit"), "copies bin\\64bit:\n{p}");
     assert!(p.contains("/XF *.pdb"), "PDBs are never deployed:\n{p}");
-    assert!(p.contains("obs-virtualcam-module64.dll"),
-        "data\\ copy must /XF the camera-frame-server-locked virtualcam dll:\n{p}");
-    assert!(p.contains("/XF distroav.dll"),
-        "obs-plugins\\64bit copy must /XF distroav.dll (it lives in ProgramData):\n{p}");
-    assert!(p.contains("/R:2 /W:2"), "short retry cap so a locked file can't hang forever:\n{p}");
+    assert!(
+        p.contains("obs-virtualcam-module64.dll"),
+        "data\\ copy must /XF the camera-frame-server-locked virtualcam dll:\n{p}"
+    );
+    assert!(
+        p.contains("/XF distroav.dll"),
+        "obs-plugins\\64bit copy must /XF distroav.dll (it lives in ProgramData):\n{p}"
+    );
+    assert!(
+        p.contains("/R:2 /W:2"),
+        "short retry cap so a locked file can't hang forever:\n{p}"
+    );
 }
 
 #[test]
 fn windows_fast_program_is_obs_dll_only() {
     let p = win_program("stream", "fast", "0");
     assert!(p.contains("obs.dll"), "fast deploy copies obs.dll:\n{p}");
-    assert!(!p.contains("robocopy"),
-        "fast (libobs-only) deploy must NOT robocopy data/ or obs-plugins/ — obs.dll only:\n{p}");
+    assert!(
+        !p.contains("robocopy"),
+        "fast (libobs-only) deploy must NOT robocopy data/ or obs-plugins/ — obs.dll only:\n{p}"
+    );
     // markers are still written on a fast deploy
-    assert!(p.contains("GENLOCK_BUILD_SHA.txt"), "fast deploy still writes the marker:\n{p}");
+    assert!(
+        p.contains("GENLOCK_BUILD_SHA.txt"),
+        "fast deploy still writes the marker:\n{p}"
+    );
 }
 
 #[test]
 fn windows_ahk_bracket_only_on_strih() {
     let strih = win_program("strih", "full", "1");
     let stream = win_program("stream", "full", "0");
-    assert!(strih.contains("Stop-Process -Name AutoHotkey64"),
-        "strih runs the AHK watchdog — must be stopped before the copy:\n{strih}");
-    assert!(!stream.contains("Stop-Process -Name AutoHotkey64"),
-        "stream has NO AHK watcher — its program must carry no real AutoHotkey64 stop:\n{stream}");
+    assert!(
+        strih.contains("Stop-Process -Name AutoHotkey64"),
+        "strih runs the AHK watchdog — must be stopped before the copy:\n{strih}"
+    );
+    assert!(
+        !stream.contains("Stop-Process -Name AutoHotkey64"),
+        "stream has NO AHK watcher — its program must carry no real AutoHotkey64 stop:\n{stream}"
+    );
 }
 
 #[test]
 fn windows_program_prints_retention_plan_never_silent_delete() {
     let p = win_program("strih", "full", "1");
-    assert!(p.to_uppercase().contains("RETENTION PLAN"), "prints a retention plan:\n{p}");
-    assert!(p.contains("Skip 3") || p.contains("-Skip 3"),
-        "keeps the newest 3 backup dirs:\n{p}");
-    assert!(p.to_lowercase().contains("would delete"),
-        "the retention plan lists what it WOULD delete (agent confirms):\n{p}");
+    assert!(
+        p.to_uppercase().contains("RETENTION PLAN"),
+        "prints a retention plan:\n{p}"
+    );
+    assert!(
+        p.contains("Skip 3") || p.contains("-Skip 3"),
+        "keeps the newest 3 backup dirs:\n{p}"
+    );
+    assert!(
+        p.to_lowercase().contains("would delete"),
+        "the retention plan lists what it WOULD delete (agent confirms):\n{p}"
+    );
     // deletion must be gated behind an explicit confirm — never an unconditional Remove-Item of backups
-    assert!(p.contains("fleetConfirmRetention"),
-        "backup deletion must be gated behind an explicit confirm flag:\n{p}");
+    assert!(
+        p.contains("fleetConfirmRetention"),
+        "backup deletion must be gated behind an explicit confirm flag:\n{p}"
+    );
 }
 
 // ============================================================================================
@@ -341,37 +402,65 @@ fn windows_program_prints_retention_plan_never_silent_delete() {
 #[test]
 fn imag_program_installs_all_four_and_writes_markers_via_the_shared_helper() {
     let p = imag_program();
-    assert!(p.contains("genlock_write_markers"),
-        "imag deploy writes markers via the SHARED helper (single source of truth):\n{p}");
-    assert!(p.contains("genlock-markers.sh"),
-        "the on-imag program sources the scp'd genlock-markers.sh lib:\n{p}");
+    assert!(
+        p.contains("genlock_write_markers"),
+        "imag deploy writes markers via the SHARED helper (single source of truth):\n{p}"
+    );
+    assert!(
+        p.contains("genlock-markers.sh"),
+        "the on-imag program sources the scp'd genlock-markers.sh lib:\n{p}"
+    );
     // all four components installed
     assert!(p.contains("libobs.so.30"), "installs libobs.so.30:\n{p}");
     assert!(p.contains("distroav.so"), "installs distroav.so:\n{p}");
-    assert!(p.contains("libobs-opengl.so.30"), "installs libobs-opengl.so.30 (#756):\n{p}");
-    assert!(p.contains("/usr/bin/obs"), "installs the frontend /usr/bin/obs (#499):\n{p}");
+    assert!(
+        p.contains("libobs-opengl.so.30"),
+        "installs libobs-opengl.so.30 (#756):\n{p}"
+    );
+    assert!(
+        p.contains("/usr/bin/obs"),
+        "installs the frontend /usr/bin/obs (#499):\n{p}"
+    );
     assert!(p.contains("ldconfig"), "runs ldconfig after the swap:\n{p}");
 }
 
 #[test]
 fn imag_program_keeps_the_abi_guards_and_graceful_restart() {
     let p = imag_program();
-    assert!(p.contains("readelf") && p.contains("SONAME"),
-        "SONAME sanity check — refuse a mismatched ABI:\n{p}");
-    assert!(p.contains("obs_display_set_render_divisor"),
-        "nm build-proof — refuse a stock/wrong frontend (#499):\n{p}");
+    assert!(
+        p.contains("readelf") && p.contains("SONAME"),
+        "SONAME sanity check — refuse a mismatched ABI:\n{p}"
+    );
+    assert!(
+        p.contains("obs_display_set_render_divisor"),
+        "nm build-proof — refuse a stock/wrong frontend (#499):\n{p}"
+    );
     // graceful restart via the EXISTING installed helpers, then verify the process actually restarted
-    assert!(p.contains("imag-obs-stop.sh"), "graceful stop via the existing helper:\n{p}");
-    assert!(p.contains("imag-obs-start.sh"), "start via the existing helper:\n{p}");
-    assert!(p.contains("lstart") || p.contains("etimes"),
-        "verify the obs process actually restarted (start-time race, #912):\n{p}");
+    assert!(
+        p.contains("imag-obs-stop.sh"),
+        "graceful stop via the existing helper:\n{p}"
+    );
+    assert!(
+        p.contains("imag-obs-start.sh"),
+        "start via the existing helper:\n{p}"
+    );
+    assert!(
+        p.contains("lstart") || p.contains("etimes"),
+        "verify the obs process actually restarted (start-time race, #912):\n{p}"
+    );
 }
 
 #[test]
 fn imag_program_prints_retention_plan() {
     let p = imag_program();
-    assert!(p.contains("/opt/obs-backup"), "retention runs over /opt/obs-backup:\n{p}");
-    assert!(p.to_uppercase().contains("RETENTION PLAN"), "prints a retention plan:\n{p}");
+    assert!(
+        p.contains("/opt/obs-backup"),
+        "retention runs over /opt/obs-backup:\n{p}"
+    );
+    assert!(
+        p.to_uppercase().contains("RETENTION PLAN"),
+        "prints a retention plan:\n{p}"
+    );
 }
 
 // ============================================================================================
@@ -380,7 +469,10 @@ fn imag_program_prints_retention_plan() {
 
 #[test]
 fn fleet_log_line_is_one_tab_separated_record() {
-    let line = run_sourced(&script(), "fleet_log_line RUN123 abcdef1 strih,stream,imag full");
+    let line = run_sourced(
+        &script(),
+        "fleet_log_line RUN123 abcdef1 strih,stream,imag full",
+    );
     let line = line.trim();
     assert!(line.contains('\t'), "tab-separated:\n{line}");
     for tok in ["RUN123", "abcdef1", "strih,stream,imag", "full"] {
@@ -391,9 +483,8 @@ fn fleet_log_line_is_one_tab_separated_record() {
 
 #[test]
 fn plan_mode_emits_all_box_programs_without_network() {
-    let stage = std::env::temp_dir().join(format!("cb789-stage-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&stage);
-    std::fs::create_dir_all(&stage).unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stage = tmp.path();
     let (code, out, err) = run_script(&[
         "--plan",
         "--run-id",
@@ -408,25 +499,42 @@ fn plan_mode_emits_all_box_programs_without_network() {
     ]);
     assert_eq!(code, 0, "--plan must succeed.\nstdout={out}\nstderr={err}");
     // Windows (strih) program present
-    assert!(out.contains("$ErrorActionPreference = 'Stop'"), "emits the strih PS program:\n{out}");
-    assert!(out.contains("win-strih"), "names the strih MCP for the paste step:\n{out}");
+    assert!(
+        out.contains("$ErrorActionPreference = 'Stop'"),
+        "emits the strih PS program:\n{out}"
+    );
+    assert!(
+        out.contains("win-strih"),
+        "names the strih MCP for the paste step:\n{out}"
+    );
     // imag program present
-    assert!(out.contains("genlock_write_markers"), "emits the imag deploy program:\n{out}");
+    assert!(
+        out.contains("genlock_write_markers"),
+        "emits the imag deploy program:\n{out}"
+    );
     // fleet log line carrying the anchor run id + sha
-    assert!(out.contains("RUN123") && out.contains("abcdef1234"),
-        "emits the fleet log line with run id + sha:\n{out}");
+    assert!(
+        out.contains("RUN123") && out.contains("abcdef1234"),
+        "emits the fleet log line with run id + sha:\n{out}"
+    );
     // stream was NOT requested -> its MCP must not appear
-    assert!(!out.contains("win-stream-snv"), "stream not selected -> not in the plan:\n{out}");
-    let _ = std::fs::remove_dir_all(&stage);
+    assert!(
+        !out.contains("win-stream-snv"),
+        "stream not selected -> not in the plan:\n{out}"
+    );
 }
 
 #[test]
 fn usage_errors_exit_two() {
     // --fast and --full are mutually exclusive
-    let (c1, _o, _e) = run_script(&["--plan", "--run-id", "R", "--sha", "S", "--stage", "/tmp", "--fast", "--full"]);
+    let (c1, _o, _e) = run_script(&[
+        "--plan", "--run-id", "R", "--sha", "S", "--stage", "/tmp", "--fast", "--full",
+    ]);
     assert_eq!(c1, 2, "conflicting --fast --full");
     // an unknown box
-    let (c2, _o, _e) = run_script(&["--plan", "--run-id", "R", "--sha", "S", "--stage", "/tmp", "--boxes", "bogus"]);
+    let (c2, _o, _e) = run_script(&[
+        "--plan", "--run-id", "R", "--sha", "S", "--stage", "/tmp", "--boxes", "bogus",
+    ]);
     assert_eq!(c2, 2, "unknown box");
     // --plan requires --stage and --sha (no network in plan mode)
     let (c3, _o, _e) = run_script(&["--plan", "--run-id", "R"]);
