@@ -3,6 +3,7 @@ paths:
   - "vendor/distroav/src/ndi-source.cpp"
   - "tests/distroav_ndi_reconnect_767.rs"
   - "tests/distroav_recv_create_retry_1080.rs"
+  - "tests/distroav_fresh_finder_connect_1096.rs"
 ---
 
 # DistroAV NDI receiver-thread lifecycle — a `break` is a PERMANENT, reattach-proof death (#1080)
@@ -49,11 +50,39 @@ un-gated, #912) — verify each pwsh literal offline against the `re.sub(r'\s+',
 file (pwsh is not on dev1). A source anchor that only the truth table can't reach (e.g. an
 overflow shift-clamp on x86) still needs an explicit source-anchor assertion.
 
-## Do NOT conflate the `break` silent-death with the #1096 wedge
+## Do NOT conflate the `break` silent-death with the #1096 wedge — and the #1096 fix (LANDED)
 
 The live strih wedge (#1096) is a DIFFERENT failure: `recv_create_v3` SUCCEEDS (non-null) but the
 new receiver, created connect-BY-NAME, never re-resolves a RESTARTED sender (rotated port) because
 the long-lived in-process NDI finder state is poisoned — cured only by an OBS restart. #1080's
-retry (which fires only on a NULL create) does not enter there and does not cure it. The #1096 cure
-direction is a FRESH `NDIlib_find` + connect-by-`p_url_address` (see #1096 comments) — a distinct,
-rig-validated, receive-path change.
+retry (which fires only on a NULL create) does not enter there and does not cure it.
+
+**The #1096 fix is now IMPLEMENTED in the reset block** (`ndi_source_thread`,
+`tests/distroav_fresh_finder_connect_1096.rs`): before `recv_create_v3`, resolve the source through
+a FRESH `NDIlib_find` per reset (`find_create_v2` → bounded `find_wait_for_sources` +
+`find_get_current_sources` → the pure `ndi_find_url_for_source_name` picker → copy the live
+`p_url_address` into `owned_source_url` → `find_destroy`) and connect BY-ADDRESS
+(`source_to_connect_to.p_ndi_name = ""`, `p_url_address = owned_source_url`), bypassing the poisoned
+long-lived finder (the SDK contract: an EMPTY `p_ndi_name` makes it use `p_url_address` directly).
+Fallback when the fresh finder resolves nothing: keep the name-based connect (no worse than
+upstream). The pure picker is the std-only lift-compile/truth-table gate; the impure sequence is
+source-anchored + pwsh-mirrored in both `windows-genlock*.yml`.
+
+**CRITICAL — the recovery has TWO triggers, split by `recv_get_no_connections()`, and BOTH are
+needed** (a fix that only armed one would miss half the sender-restart shapes):
+- **`no_connections > 0` (half-open, e.g. a hard sender reboot with no graceful TCP close):** the
+  #767 stale watchdog fires (genlocked + connected + silent past `GENLOCK_RECONNECT_STALE_NS`) and
+  arms `reset_ndi_receiver` — the reset then runs the fresh finder. #767 is the trigger here.
+- **`no_connections == 0` (a GRACEFUL `systemctl restart camera-box` sends a clean FIN, dropping
+  the receiver to 0):** #767 explicitly returns false for `no_connections <= 0`, and a by-URL
+  receiver has no name for NDI's own internal rebind while a name-based one re-consults the poisoned
+  finder — so this case has NO recovery via #767. #1096 therefore ALSO arms a fresh-finder reset
+  from the `no_connections == 0` steady path: a dedicated `no_conn_since_ns` timer, genlocked-scope
+  (mirroring #767), re-armed at most once per `GENLOCK_RECONNECT_STALE_NS` window (natural backoff
+  while the sender is genuinely down), cleared on reconnect. If you touch the `no_connections == 0`
+  branch, preserve this arm — deleting it silently reopens the wedge for the graceful-restart case,
+  which is the ticket's own primary scenario.
+
+The live cure is NOT offline-verifiable (vendored receive path compiles only on CI, the wedge
+reproduces only live) — the offline gate proves the DECISION logic; the actual receive-path cure is
+confirmed only by a post-deploy rig wedge repro (the supervisor's, after the full-bundle deploy).
