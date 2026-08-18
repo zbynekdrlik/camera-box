@@ -4714,11 +4714,16 @@ fn build_and_print_verdict_with_stream_hashes(
                 // structurally unreachable in the merge gate (0/81 verdicts carried it). Report-only
                 // / calibration-first: `gates_overall_pass()` is false (no calibrated bound yet —
                 // #1101 owns the LIVE flip), so the fold below is a no-op.
-                let dup_hash_source: Option<Vec<u64>> = match &stream_content_hashes {
+                // Each skip REASON is logged HERE during source resolution (accurately — a hash
+                // FAILURE prints its own {e}, a genuine no-source prints the no-carry/no-recording
+                // line), so the consuming match's None arm is a no-op and never double-logs a
+                // contradictory second line (issue-1112 review). Matched by VALUE, so the carried
+                // vector is MOVED, not cloned (`stream_content_hashes` is not read again).
+                let dup_hash_source: Option<Vec<u64>> = match stream_content_hashes {
                     // Merge path (production gate): the stream box already hashed its LOCAL recording
                     // during extract and carried the vector — the ONLY way the pixel-derived hashes
                     // reach the dev1 merge, which has no recording.
-                    Some(carried) => Some(carried.clone()),
+                    Some(carried) => Some(carried),
                     // Fused path (legacy `--stream`): the recording is on this host, recompute it
                     // exactly as before #1112. A hash failure is NON-FATAL for a report-only surface.
                     None => match stream_rec.as_deref() {
@@ -4733,7 +4738,15 @@ fn build_and_print_verdict_with_stream_hashes(
                                 }
                             }
                         }
-                        None => None,
+                        // Genuine no-source: no carry from the box AND no local recording (the
+                        // routine pre-#1112 merge case). Accurate reason, unlike a hash failure.
+                        None => {
+                            println!(
+                                "  #1088 DUP-CADENCE: skipped — no stream content hashes (no carry \
+                                 from the stream box, no local recording to hash)"
+                            );
+                            None
+                        }
                     },
                 };
                 match dup_hash_source {
@@ -4835,12 +4848,8 @@ fn build_and_print_verdict_with_stream_hashes(
                         // (report-only today, so this is a no-op).
                         all_pass &= dup_gate_pass || !dup_gates_overall;
                     }
-                    None => {
-                        println!(
-                            "  #1088 DUP-CADENCE: skipped — no stream content hashes (no carry from \
-                             the stream box, no local recording to hash)"
-                        );
-                    }
+                    // The skip reason was already logged accurately during source resolution above.
+                    None => {}
                 }
 
                 // #768 — REPORT-ONLY cold-cut onset seam. The all-cambox sweep cuts program to each

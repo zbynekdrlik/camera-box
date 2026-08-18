@@ -300,8 +300,10 @@ pub fn gates_overall_pass() -> bool {
 /// to this window (`partition_frames_by_window`), IN window order. `frame_hashes` is the full
 /// per-recording content-hash vector the stream box computed during `--extract-partial stream` and
 /// CARRIED in the partial (`RecordingPartial::content_hashes`), 0-based by `frame_index` — the same
-/// index contract [`hash_recording_frames`](crate::probe::recording::hash_recording_frames) and the
-/// parallel decode both hold (frame `i` ⇒ `frame_hashes[i]`).
+/// index contract `probe::recording::hash_recording_frames` and the parallel decode both hold
+/// (frame `i` ⇒ `frame_hashes[i]`). (Plain reference, not an intra-doc link: that item is behind
+/// `#[cfg(feature = "probe")]`, unresolvable from this default-feature module — same as the
+/// `dupe_decimation::dupe_content_hash` references above.)
 ///
 /// This is the ONE genuinely new pure step of the #1112 emit-wiring — the on-box `hash_recording_frames`
 /// / on-dev1 `partition_frames_by_window` sides are unchanged; this replaces the old inline
