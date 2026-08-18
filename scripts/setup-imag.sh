@@ -1717,6 +1717,16 @@ cat > "$USER_HOME/.config/openbox/menu.xml" <<'MENU_EOF'
         <command>/usr/local/bin/imag-obs-stop.sh</command>
       </action>
     </item>
+    <item label="Systémový monitor (CPU+GPU)">
+      <action name="Execute">
+        <command>x-terminal-emulator -e btop</command>
+      </action>
+    </item>
+    <item label="Terminál">
+      <action name="Execute">
+        <command>x-terminal-emulator</command>
+      </action>
+    </item>
     <separator />
     <item label="Reštartovať počítač">
       <action name="Execute">
@@ -2172,9 +2182,11 @@ step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-p
 # runtime-PM off / the hotplug udev rule were absent entirely -- exactly the EPP-persistence gap the
 # 2026-07-18 audit on this ticket demanded be folded in. Reproduce the live trio so a fresh box is
 # IDENTICAL to today's imag (the ticket mandate). The governor is set redundantly with
-# cpu-performance.service; that redundancy exists on the live box today and reproducing it is parity,
-# not a defect -- consolidating the two units is a separate refactor, not this parity fix. Every knob
-# is [ -f ]/command -v guarded so it stays hardware-agnostic (#816): a box lacking intel_pstate/
+# cpu-performance.service; that redundancy exists on the live box today and reproducing it is the
+# correct parity choice -- NOT a defect and NOT deferred work: consolidating the two units was the
+# explicitly REJECTED alternative (it would change the live box's own unit topology, so it is out of
+# scope for a parity fix). Every knob is [ -f ]/command -v guarded so it stays hardware-agnostic
+# (#816): a box lacking intel_pstate/
 # platform_profile simply skips those writes. verify-imag.sh check (y) reads the service/script/udev
 # presence AND the runtime STATE back and fails loud on any drift.
 mkdir -p /usr/local/sbin
@@ -2213,11 +2225,14 @@ ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"
 MAXPERF_UDEV_EOF
 udevadm control --reload-rules 2>/dev/null || true
 systemctl daemon-reload
-systemctl enable --now imag-maxperf.service >/dev/null 2>&1 \
-    || echo "  WARNING: could not enable imag-maxperf.service"
-grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
-    || fail "issue 756/#791: imag-maxperf did not set the governor to performance"
-echo "  issue 756/#791: full max-performance persistence provisioned (imag-maxperf.service + udev rule)"
+systemctl enable --now imag-maxperf.service \
+    || fail "issue 756/#791: could not enable+start imag-maxperf.service — the full max-performance persistence (EPP/turbo/PCI-PM) would not survive a reboot"
+# Type=oneshot + RemainAfterExit=yes: an ACTIVE unit proves ExecStart (the enforcement script) ran
+# to completion -- a stronger proof than re-checking the governor, which step 4's own
+# cpu-performance.service already set (so a governor grep would pass even if imag-maxperf never ran).
+systemctl is-active --quiet imag-maxperf.service \
+    || fail "issue 756/#791: imag-maxperf.service is not active after enable --now — the boot-enforcement script did not run"
+echo "  issue 756/#791: full max-performance persistence provisioned (imag-maxperf.service active + udev rule)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

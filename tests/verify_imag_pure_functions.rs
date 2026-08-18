@@ -1609,3 +1609,17 @@ fn imag_maxperf_state_ok_rejects_missing_governor_791() {
         "imag_maxperf_state_ok must REJECT a missing GOVERNOR line (unreadable gather, #833/#791): out={out:?} err={err:?}"
     );
 }
+
+#[test]
+fn imag_maxperf_state_ok_is_defined_791() {
+    // The reject-path tests above print REJECT even when the function is UNDEFINED (a bare
+    // `cmd-not-found || echo REJECT`), so they alone do not prove the impl exists. This asserts the
+    // function is actually defined in verify-imag.sh — the genuine RED signal for the impl (#791 review).
+    let (code, out, err) =
+        run_sourced("type imag_maxperf_state_ok >/dev/null 2>&1 && echo DEFINED || echo MISSING");
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("DEFINED"),
+        "imag_maxperf_state_ok must be defined in verify-imag.sh (#791): out={out:?} err={err:?}"
+    );
+}

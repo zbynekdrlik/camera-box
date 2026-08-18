@@ -102,17 +102,25 @@ fn setup_imag_enables_the_maxperf_service_791() {
     );
 }
 
-/// btop is a MENU dependency: setup-imag.sh generates ~/.config/openbox/menu.xml (#785) whose
-/// "Systémový monitor" item runs `x-terminal-emulator -e btop`. The live box has btop installed by
-/// hand; step 15 installs only `openbox lightdm feh wmctrl`, so a fresh box would carry a menu item
-/// pointing at a missing binary. btop must ride along the kiosk-package install.
+/// btop is a MENU dependency: setup-imag.sh's GENERATED ~/.config/openbox/menu.xml (step 16, #785)
+/// must carry a "Systémový monitor" item whose `<command>` runs `x-terminal-emulator -e btop`, and
+/// btop must be installed. The live box has both (btop 1.3.0 + the menu item) — the issue body's own
+/// acceptance lists "Systémový monitor (btop) + Terminál"; the pre-#791 generated menu had neither,
+/// so a fresh box lost the operator's system monitor. The assertion anchors on the generated
+/// `<command>` XML form (NOT a bare "-e btop" that a nearby COMMENT would also match — the #791
+/// review caught that tautology).
 #[test]
 fn setup_imag_installs_btop_791() {
     let body = read(SETUP);
-    // The generated menu item must exist (proves the dependency is real, not invented).
+    // The GENERATED menu item's <command> must exist (the real provisioned entry, not a comment).
     assert!(
-        body.contains("-e btop"),
-        "{SETUP}: the openbox menu's Systémový monitor item runs btop — the dependency this test guards"
+        body.contains("<command>x-terminal-emulator -e btop</command>"),
+        "{SETUP}: the GENERATED openbox menu.xml (step 16) must carry the Systémový monitor <command>x-terminal-emulator -e btop</command> (#791 parity, issue body acceptance)"
+    );
+    // ...and a plain Terminál item, matching the live box + the issue body acceptance.
+    assert!(
+        body.contains("<command>x-terminal-emulator</command>"),
+        "{SETUP}: the GENERATED menu.xml must also carry a Terminál <command>x-terminal-emulator</command> (#791 parity)"
     );
     let install_idx = body
         .find("apt-get install -y openbox lightdm")
