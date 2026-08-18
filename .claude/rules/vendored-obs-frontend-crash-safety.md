@@ -64,3 +64,50 @@ Two frontend-specific differences from the libobs rule:
 - **A frontend change needs a FULL-BUNDLE deploy, never fast-dll** — it lands in `obs64.exe`, not
   `obs.dll` (`obs-titlebar-build-id.md` / `rig-state-inspection.md`). The supervisor/rig-ops owns
   that deploy.
+
+## Sweeping the WHOLE frontend for the class (a shared helper, not #773's file-local guard) (#1106)
+
+`#773` guarded ONE file with a file-local `static` helper + inline coalesce. When the SAME class
+recurs across MANY files (#1106: 47 `std::string`-from-`obs_data_get_json()` construction sites
+across 11 frontend `.cpp`), use ONE shared header-only helper instead of N inline coalesces or N
+file-local copies:
+
+- **`vendor/obs-studio/frontend/utility/obs-data-json-safe.hpp`** — `static inline std::string
+  OBSDataGetJsonSafe(obs_data_t *data, const char *context)` coalescing NULL→`""` +
+  `blog(LOG_WARNING, ...context)`. Self-contained (`#include <string>`, `<obs.h>`, `<util/base.h>`).
+  **Header-only ⇒ NO CMakeLists edit** — existing TUs `#include <utility/obs-data-json-safe.hpp>`
+  (the `frontend/` root is already an include dir, same as `<utility/item-widget-helpers.hpp>`);
+  the compiler resolves it, no source-list entry, no new TU/moc. `static inline` in a header is
+  ODR-safe across the many including TUs.
+- Each of the 11 consumer files gains that one `#include` and replaces its crash-class sites with
+  `OBSDataGetJsonSafe(arg, "tag")`.
+
+**The crash class = a `std::string` BUILT from `obs_data_get_json()`, including IMPLICITLY.** Four
+forms: direct-init `std::string x(obs_data_get_json(y))`, copy-init `std::string x =
+obs_data_get_json(y)`, temporary `std::string(obs_data_get_json(y))`, AND — easy to miss — a bare
+`obs_data_get_json(...)` passed to a `const std::string &` PARAMETER, which constructs
+`std::string(NULL)` implicitly. The last one is `undo_stack::add_action(...)` (its undo/redo
+payloads are `const std::string &`, `utility/undo_stack.hpp`), so `add_action(..., obs_data_get_json(d), ...)`
+IS crash-class. Check every callee's parameter TYPES, not just literal `std::string(` text.
+
+**NOT the crash class — leave byte-identical (churning them = scope creep + subtree-pull conflict):**
+`obs_data_get_json()` fed to a NULL-tolerant C API (`obs_data_set_string`, `config_set_string`,
+`obs_data_create_from_json`), Qt's documented-NULL-safe `QString(const char *)`, and a bare
+discarded `obs_data_get_json(data);`. `std::string(obs_source_get_name(...))` is a DIFFERENT getter,
+out of scope.
+
+**Facet B for a C++ helper needs `c++`, not `cc`.** `#773`'s helper was pure C (`int`/`const char*`,
+compiled with `cc`). A helper returning `std::string` must lift-compile with `c++ -std=c++17
+-Wall -Wextra -Werror` against tiny stubs (`typedef struct obs_data obs_data_t;` + a
+`obs_data_get_json` stub that round-trips the pointer to `const char*` so a NULL models a
+`json_dumps` failure + a no-op `blog` + `enum { LOG_WARNING = ... }`) driving a NULL/non-NULL truth
+table. Write the helper brace-free under the `if` (single-statement `blog`, one `return
+std::string(json ? json : "")`) so the `sig → first "\n}\n"` lift extraction is unambiguous.
+
+**The completeness test is a COUNT invariant, and count OCCURRENCES not LINES.** Per file assert
+`OBSDataGetJsonSafe(` occurrences == crash-class count AND raw `obs_data_get_json(` occurrences ==
+the legit NULL-tolerant remainder (0 for most; e.g. Scenes keeps 1 for its bare discard, Filters
+keeps 2 for its `obs_data_set_string`). Before/after the fix these two counts SWAP, giving a clean
+RED→GREEN. GOTCHA: `grep -c` counts LINES — an `add_action(..., obs_data_get_json(a),
+obs_data_get_json(b))` line has TWO constructions on ONE line (Clipboard), so use occurrence-count
+(`grep -o ... | wc -l`, or Rust `.matches().count()`); a line-based expected count undercounts it.
