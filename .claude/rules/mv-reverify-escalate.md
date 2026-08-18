@@ -63,7 +63,15 @@ inputs active — but a fresh OBS after a force-kill may NOT reopen it (SaveProj
 post-restart re-check sets `PREFLIGHT_MV_REVERIFY_WARM_SETTLE` > 0 (new env seam on the
 `--warm-settle` line) → frozen-camera-gate PREVIEW-activates the input itself (#747, Studio Mode,
 restores the operator's preview) — no projector dependency, no operator-display manipulation.
-Restoring the operator's own strih Multiview after a restart is separate scope: **#1098**.
+
+Restoring the operator's own strih Multiview after a restart is now done ACTIVELY (**#1098**):
+after the WS-return wait + burn sweep-off, `mv_reverify_reopen_multiview_run` re-opens a FULLSCREEN
+Multiview projector over OBS-WS (`obs_phase2.py open-multiview`; monitorIndex DERIVED from
+`GetMonitorList` — strih is single-monitor, so `open-projectors`' dual-monitor panel+HDMI split
+does NOT apply and would fail loud on the absent HDMI monitor). WARN-only (`MV_REVERIFY_REOPEN_MV_CMD`
+seam for tests), so a failed re-open never fails a recovered run. strih runs `SaveProjectors=true`
+but with an EMPTY `SavedProjectors`, and a force-kill never repopulates it — so OBS's own
+save/restore cannot cover this gap; the active re-open is what restores the operator's view.
 
 ## Tier-0 testing
 

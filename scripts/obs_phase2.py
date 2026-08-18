@@ -2126,12 +2126,14 @@ def open_multiview(a):
     strih has ONE monitor and NO Program projector, so reusing open_projectors would raise "no HDMI
     projector monitor detected" and never open the multiview. The monitorIndex is DERIVED from a
     live GetMonitorList (#840 derive-not-hardcode); an explicit --monitor-index overrides it.
-    Idempotent — CloseExistingProjectors replaces a same-target projector, so it is safe to call
-    unconditionally after every restart (mirrors open_projectors' own always-open rationale)."""
+    Idempotent — obs-websocket has no "is a projector open" query, so re-opening on the same monitor
+    just re-positions/replaces the same projector window (harmless), which is what makes it safe to
+    call unconditionally after every restart (mirrors open_projectors' own always-open rationale)."""
     ws = _conn(a.host, a.password)
     try:
         mons = _rpc(ws, "GetMonitorList").get("monitors", [])
-        override = a.monitor_index if getattr(a, "monitor_index", -999) != -999 else None
+        mi = getattr(a, "monitor_index", -999)
+        override = None if mi == -999 else mi  # -999 is the "derive" sentinel
         idx = _multiview_monitor_index(mons, override)
         _rpc(ws, "OpenVideoMixProjector", {
             "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW",

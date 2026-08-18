@@ -310,8 +310,8 @@ mv_reverify_or_escalate() {
   # (SaveProjectors), so the "NDI camN" inputs the reverify relies on can be INACTIVE. Run the single
   # re-check with a POSITIVE warm-settle so frozen-camera-gate PREVIEW-activates the input itself
   # (#747, Studio Mode; it restores the operator's preview afterwards) -- recovery no longer depends
-  # on the projector, and this touches no operator display. (The operator's own strih multiview stays
-  # closed until re-opened -- an inherent property of ANY strih-OBS force-kill, tracked separately.)
+  # on the projector. (The operator's own strih multiview is restored ABOVE by
+  # mv_reverify_reopen_multiview_run, #1098 -- independently of this projector-free re-check.)
   if PREFLIGHT_MV_REVERIFY_WARM_SETTLE="${MV_REVERIFY_RECHECK_WARM_SETTLE:-3}" preflight_mv_reverify "$box" "$cam_n"; then
     echo "    [#1093 escalate] ${box}: recovered after the strih-OBS restart + re-check." >&2
     return 0
