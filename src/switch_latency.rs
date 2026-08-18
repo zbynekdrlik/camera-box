@@ -18,10 +18,11 @@
 //!
 //! This module is the FINAL pure decision on top of that per-camera measurement: given each
 //! measured camera's median (p50) latency, is the SPREAD across cameras small enough that a
-//! live cut between them stays within lipsync tolerance? The #624 issue body fixes the
-//! threshold at half a 30fps program frame (16ms, [`SPREAD_THRESHOLD_MS`]) —
-//! `max(p50) − min(p50) > 16ms` = FAIL. This is a PRE-SPECIFIED constant, never derived or
-//! overridden.
+//! live cut between them stays within lipsync tolerance? #624 originally fixed the threshold at
+//! half a 30fps program frame (16ms); issue 1120 RECALIBRATED it to 24ms
+//! ([`SPREAD_THRESHOLD_MS`]) — `max(p50) − min(p50) > 24ms` = FAIL — with honest margin above
+//! the live CAM1-included distribution while the ShadowCast 2 grabber residual (issue 1110)
+//! persists. See [`SPREAD_THRESHOLD_MS`]'s own doc for the data + the re-tighten condition.
 //!
 //! Crate-root pure seam (default features, Tier-0 per the project CLAUDE.md), deliberately
 //! sibling to `recording_span_gate.rs` / `imag_tick_gate.rs`: it operates on PLAIN `f64` p50
@@ -45,11 +46,28 @@
 /// in this set, unlike the digital-contiguity `CAMERA_UNDER_TEST_NODES` which DOES include it.
 pub const OPTICAL_INJECTION_NODES: [&str; 6] = ["cam1", "cam3", "cam4", "cam5", "cam6", "cam7"];
 
-/// The #624 issue's fixed cross-camera spread threshold, in milliseconds: half a 30fps
-/// program frame (`1000.0 / 30.0 / 2.0 ≈ 16.667`, rounded down to the issue's literal `16ms`).
-/// `max(p50) − min(p50)` STRICTLY GREATER than this = FAIL; exactly at the threshold PASSES
-/// (the issue text is "> 16 ms ... = FAIL", so `==16.0` is not yet over the line).
-pub const SPREAD_THRESHOLD_MS: f64 = 16.0;
+/// The cross-camera spread threshold, in milliseconds. `max(p50) − min(p50)` STRICTLY GREATER
+/// than this = FAIL; exactly at the threshold PASSES (only a spread strictly over it fails).
+///
+/// **RECALIBRATED 24.0 ms by issue 1120 (was the 16 ms half-frame of #624).** WHY it is not the
+/// half-frame ideal: the CAM1 ShadowCast 2 grabber pipeline (issue 1110) bakes ~17 ms of extra
+/// photon→capture latency into cam1's emitted frame vs the other grabbers, so the live
+/// cross-camera source-spread tail reaches ~16.90 ms — over the old 16 ms bound — even on a run
+/// that is green on everything else. That made the gate a per-run COIN FLIP on the grabber's
+/// run-to-run variance (mined greens 12.38 / 14.30 / 14.81 ms; the sole spread-gate fail
+/// 16.90 ms), not a real regression. 24.0 ms is the tightest bound the CAM1-included data
+/// supports with honest margin: 1.42× the worst observed spread (16.90), ~mean+6σ of the
+/// observed distribution, AND still 0.72× a full 33.3 ms program frame — so a cut between two
+/// cameras up to 24 ms apart stays within one frame's lipsync tolerance, while a genuinely-broken
+/// >1-frame spread still fails.
+///
+/// **RE-TIGHTEN CONDITION (a follow-up ticket, gated on the issue-1110 grabber swap):** once the
+/// ShadowCast grabber is swapped out and the cam1 latency residual is gone, walk this constant
+/// back toward the half-frame 16.0 from FRESH green post-swap data (per
+/// `window-gate-tolerance-walkdown.md`). This constant is deliberately shared with the
+/// DELIVERY-side gate (`crate::delivery_spread_gate::DELIVERY_SPREAD_BOUND_MS` re-exports it);
+/// both spreads are driven by the SAME grabber and re-tighten together.
+pub const SPREAD_THRESHOLD_MS: f64 = 24.0;
 
 /// The cross-camera spread verdict: the highest and lowest per-camera median cam2→camera
 /// latency measured this run, their spread, and whether that spread clears the #624 gate.
@@ -90,8 +108,7 @@ pub fn spread_verdict(p50s_ms: &[f64]) -> Option<SpreadVerdict> {
         max_p50_ms,
         min_p50_ms,
         spread_ms,
-        // The boundary itself PASSES — only STRICTLY over the threshold fails (issue text:
-        // "> 16 ms ... = FAIL").
+        // The boundary itself PASSES — only a spread STRICTLY over SPREAD_THRESHOLD_MS fails.
         pass: spread_ms <= SPREAD_THRESHOLD_MS,
     })
 }
