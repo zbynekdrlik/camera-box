@@ -63,12 +63,21 @@ inputs active — but a fresh OBS after a force-kill may NOT reopen it (SaveProj
 post-restart re-check sets `PREFLIGHT_MV_REVERIFY_WARM_SETTLE` > 0 (new env seam on the
 `--warm-settle` line) → frozen-camera-gate PREVIEW-activates the input itself (#747, Studio Mode,
 restores the operator's preview) — no projector dependency, no operator-display manipulation.
-Restoring the operator's own strih Multiview after a restart is separate scope: **#1098**.
+
+Restoring the operator's own strih Multiview after a restart is now done ACTIVELY (**#1098**):
+after the WS-return wait + burn sweep-off, `mv_reverify_reopen_multiview_run` re-opens a FULLSCREEN
+Multiview projector over OBS-WS (`obs_phase2.py open-multiview`; monitorIndex DERIVED from
+`GetMonitorList` — strih is single-monitor, so `open-projectors`' dual-monitor panel+HDMI split
+does NOT apply and would fail loud on the absent HDMI monitor). WARN-only (`MV_REVERIFY_REOPEN_MV_CMD`
+seam for tests), so a failed re-open never fails a recovered run. strih runs `SaveProjectors=true`
+but with an EMPTY `SavedProjectors`, and a force-kill never repopulates it — so OBS's own
+save/restore cannot cover this gap; the active re-open is what restores the operator's view.
 
 ## Tier-0 testing
 
 All pure/builder pieces are unit-tested with fakes on PATH (the #833/#716 pattern) —
 `tests/harness_mv_reverify_escalate_1093.rs`. The env override seams (`MV_REVERIFY_RECEIVED_CMD`,
-`MV_REVERIFY_OBS_RESTART_CMD`, `MV_REVERIFY_SWEEP_CMD`, `MV_REVERIFY_OBS_WS_WAIT_ITERS=0`,
+`MV_REVERIFY_OBS_RESTART_CMD`, `MV_REVERIFY_SWEEP_CMD`, `MV_REVERIFY_REOPEN_MV_CMD` (#1098),
+`MV_REVERIFY_OBS_WS_WAIT_ITERS=0`,
 `MV_REVERIFY_*_GAP_S=0`) let the orchestrator's decision flow run offline with zero ssh/OBS/network.
 The LIVE strih-OBS restart itself is NOT exercisable at Tier-0 — flag it UNVERIFIED for the E2E run.

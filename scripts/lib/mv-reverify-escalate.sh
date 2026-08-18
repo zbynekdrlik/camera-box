@@ -209,6 +209,28 @@ mv_reverify_wait_obs_ws() {
   return 0
 }
 
+# mv_reverify_reopen_multiview_run <strih_ip> -- #1098: (re)open strih's operator FULLSCREEN
+# Multiview projector after the force-kill restart. The AHK respawn only re-launches obs64 (no
+# projector), and strih's SaveProjectors=true has an EMPTY SavedProjectors that a force-kill never
+# repopulates, so OBS restores nothing -- the operator is left without their standing multiview
+# until it is re-opened. obs_phase2.py open-multiview issues OpenVideoMixProjector(MULTIVIEW) on
+# strih's DERIVED single monitor (dev1-side, session-agnostic WS op -- the SAME class as the
+# sweep-off; strih's WS accepts an empty password, like the sweep-off's own obs_burn_filter.py
+# call). WARN-only and ALWAYS returns 0: the leg recovery already succeeded projector-independently
+# (the positive warm-settle activates the input itself), so this operator-facing nicety must NEVER
+# turn a recovered run into a failure. Override with MV_REVERIFY_REOPEN_MV_CMD ("<ip>") for offline
+# tests; timeout-bound like every other OBS-touching call (#328).
+mv_reverify_reopen_multiview_run() {
+  local ip="$1"
+  if [ -n "${MV_REVERIFY_REOPEN_MV_CMD:-}" ]; then
+    $MV_REVERIFY_REOPEN_MV_CMD "$ip" >/dev/null 2>&1 || true
+  else
+    timeout "${MV_REVERIFY_REOPEN_MV_TIMEOUT:-30}" python3 "$HERE/obs_phase2.py" open-multiview --host "$ip" >/dev/null 2>&1 || true
+  fi
+  echo "    [#1098] re-opened strih's operator Multiview projector after the restart (best-effort)" >&2
+  return 0
+}
+
 # ---- the orchestrator --------------------------------------------------------------------------
 # mv_reverify_or_escalate <box> <cam_n> -> 0 if the leg is live (immediately, or after the receiver-
 # wedge escalation recovered it), 1 if it is genuinely dead. The DEPLOY-time drop-in for
@@ -277,12 +299,19 @@ mv_reverify_or_escalate() {
   else
     timeout "${MV_REVERIFY_SWEEP_SSH_TIMEOUT:-30}" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$STRIH" >/dev/null 2>&1 || true
   fi
+  # #1098: restore the operator's own standing FULLSCREEN Multiview projector, which the force-kill
+  # restart dropped (SaveProjectors=true but an EMPTY SavedProjectors + the force-kill bypassing the
+  # graceful save -> OBS restores nothing; the AHK respawn only re-launches obs64). WARN-only, after
+  # the sweep-off (so the fresh OBS's burn is cleared first). This is purely the operator-facing view
+  # -- the re-check below is projector-INDEPENDENT (it PREVIEW-activates the input via the positive
+  # warm-settle), so a failed re-open never affects the run outcome.
+  mv_reverify_reopen_multiview_run "$STRIH"
   # #1093 review finding 1 (CRITICAL): the fresh OBS's built-in Multiview projector may NOT reopen
   # (SaveProjectors), so the "NDI camN" inputs the reverify relies on can be INACTIVE. Run the single
   # re-check with a POSITIVE warm-settle so frozen-camera-gate PREVIEW-activates the input itself
   # (#747, Studio Mode; it restores the operator's preview afterwards) -- recovery no longer depends
-  # on the projector, and this touches no operator display. (The operator's own strih multiview stays
-  # closed until re-opened -- an inherent property of ANY strih-OBS force-kill, tracked separately.)
+  # on the projector. (The operator's own strih multiview is restored ABOVE by
+  # mv_reverify_reopen_multiview_run, #1098 -- independently of this projector-free re-check.)
   if PREFLIGHT_MV_REVERIFY_WARM_SETTLE="${MV_REVERIFY_RECHECK_WARM_SETTLE:-3}" preflight_mv_reverify "$box" "$cam_n"; then
     echo "    [#1093 escalate] ${box}: recovered after the strih-OBS restart + re-check." >&2
     return 0
