@@ -307,6 +307,10 @@ def gather_bundle_state(
     # Program Files, then ProgramData, then %APPDATA% — the primary genlock plugin), so a single
     # observed distroav_dll_sha256 pairs with the manifest's by-basename distroav.dll sha. A
     # shadowing duplicate is a SEPARATE #124 concern (distroav_dll_paths reports the whole set).
+    # #1115: under Option A the deploy (deploy-genlock-fleet.sh FULL) ships the canonical
+    # genlock distroav.dll TO this ProgramData load path, so the FIRST-located copy IS the
+    # deployed canonical build (Program Files stays /XF-excluded => no shadow ahead of it) —
+    # hashing it here is exactly the byte the version-integrity gate compares by basename.
     # Each hash degrades to "" (UNKNOWN downstream, never a guessed/zero SHA) when the file is
     # missing/unreadable — the opt-in landing (#756-shape): a box with no genlock DLL is skipped.
     distroav_paths_csv = bsg.distroav_dll_paths(distroav_scan_roots)

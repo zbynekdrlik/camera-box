@@ -1909,6 +1909,11 @@ compare_observed() {
       # distroav.dll build SHA — only checked when the manifest carries it (the hot-swap fast-dll
       # bundle ships obs.dll only). A manifest that lists distroav.dll demands the live SHA; the live
       # SHA observed without a manifest entry is reported, not silently dropped.
+      # #1115 path mapping (explicit): the manifest key is obs-plugins/64bit/distroav.dll but
+      # the on-box DEPLOYED distroav lives at C:\ProgramData\obs-studio\plugins\distroav\
+      # bin\64bit\distroav.dll (the ONLY path OBS loads it from). manifest_sha_for_component
+      # resolves by BASENAME, so these two different keys map to the same distroav.dll and the
+      # compare is honest once the deploy ships the bundle bytes to that load path (Option A).
       if [ -n "$m_distroav_sha" ]; then
         rc=0
         drift_check "distroav_dll_sha256" exact "$m_distroav_sha" "$o_distroav_sha" || rc=$?
