@@ -58,3 +58,20 @@ preserve: **no data ⇒ ERROR + a page, never a silent green.**
 - **Tier-0 tested via pytest**, not cargo: `tests/python/test_rig_status.py` (CI runs
   `python -m pytest tests/python`, ci.yml). Load the module with `importlib.util.spec_from_file_location`
   (the `rig-health-audit.py` hyphenated-filename pattern) and unit-test the PURE functions — no ssh/WS.
+
+## A feeder facet that COUNTS a remote signal — the remote program IS the counter; never a Python twin (#1108)
+
+When a new facet counts something ON the box (an awk/grep over the existing ssh gather — e.g. the
+`#1108` dantesync step-rate facet counting `[NTP] Stepped` lines), the REMOTE program is the
+production counter: the Python side only parses its emitted marker (`re.search(r"ntp_steps_1h=(\d+)",
+out)`), never re-counts. So make that remote program a module CONSTANT (`NTP_STEP_COUNT_AWK`, the awk
+analogue of `CADENCE_LIB`) used verbatim in every `check_*` ssh command, and unit-test THAT constant
+by shelling out to the real `awk`/`grep` against synthetic journals (`subprocess.run(["awk",
+_mod.NTP_STEP_COUNT_AWK], input=...)`). Do NOT ALSO write a Python re-implementation of the same match
+logic — a `count_ntp_steps(blob)`-style twin is DEAD in production (nothing calls it) and its passing
+tests give FALSE coverage of a path the awk actually owns (the `#1108` review caught exactly this).
+Two placement rules for the awk line in the combined ssh command: keep it so it is NOT the LAST
+`;`-command (a `grep -c` exits 1 on no match → `ssh()` reads returncode≠0 as "unreachable"; `awk`'s
+`END{print}` always exits 0 but still must not displace a positional `lines[-1]` read like check_cam's
+loadavg), and gate its interpretation on a same-journal proxy — an unreadable dantesync journal also
+nulls the `offset:` read, so `off_us is None ⇒ steprate UNKNOWN`, never a false 0 (#833).
