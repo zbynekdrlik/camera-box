@@ -1841,9 +1841,12 @@ fn setup_imag_frontend_versions_together_with_libobs_and_distroav_499() {
     let install_frontend = body
         .find(r#"install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL""#)
         .expect("frontend install must exist");
+    // issue 789: the three marker writes are now the shared genlock_write_markers helper call
+    // (atomic temp-then-rename), not three inline `echo >` lines. The ordering invariant is
+    // unchanged — all four components install before the single marker-writing call.
     let marker_write = body
-        .find(r#"echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt""#)
-        .expect("the build-SHA marker write must exist");
+        .find(r#"genlock_write_markers "$GENLOCK_MARKER_DIR" "$NEW_SHA" "$FAST_SHA""#)
+        .expect("the shared genlock_write_markers call must exist in the deploy block");
     assert!(
         install_libobs < install_distroav
             && install_distroav < install_frontend
