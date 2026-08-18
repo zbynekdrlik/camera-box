@@ -313,11 +313,29 @@ def _section_av_sync(verdict):
             lines.append(f"  ⚪ {cam}: UNKNOWN — {reason}")
 
     if all_silent and cams:
-        lines.append("  ↳ A/V: UNKNOWN — tichá stopa (žiadna kamera nezachytila zvukovú značku)")
-        # #748: never leave the operator with a bare "unknown" — say WHICH chain link to check.
-        lines.append(
-            "  ⚠️ MERACÍ ZVUK TICHÝ — skontroluj mbc Ableton kanál (mute) + Dante routing do stream OBS (#748)"
-        )
+        # #748: never leave the operator with a bare "unknown" — say WHICH chain link to check,
+        # and blame the RIGHT one. The verdict's `av_audio_silent` discriminator (fed by the QPSK
+        # demod's whole-recording preamble-onset count, av_window::classify_av_audio_state)
+        # separates a genuinely silent mbc chain from present-but-undecoded audio:
+        #   None/absent/True -> the safe, loud default: the measurement audio is (or may be) SILENT
+        #                       -> check the mbc mute + Dante routing.
+        #   False            -> the demod SAW preamble energy: audio is PRESENT, the marker just
+        #                       never clustered -> the problem is the QPSK marker / emit (cam2
+        #                       painter) side, NOT an mbc mute.
+        if block.get("av_audio_silent") is False:
+            lines.append(
+                "  ↳ A/V: UNKNOWN — žiadna kamera nedekódovala značku (merací zvuk je PRÍTOMNÝ, nie tichý)"
+            )
+            lines.append(
+                "  ⚠️ A/V ZNAČKA sa NEDEKÓDOVALA, hoci merací zvuk je prítomný — problém je v QPSK značke / emit strane (cam2 painter), NIE mute mbc (#748)"
+            )
+        else:
+            lines.append(
+                "  ↳ A/V: UNKNOWN — tichá stopa (žiadna kamera nezachytila zvukovú značku)"
+            )
+            lines.append(
+                "  ⚠️ MERACÍ ZVUK TICHÝ — skontroluj mbc Ableton kanál (mute) + Dante routing do stream OBS (#748)"
+            )
 
     tolerance = block.get("gate_tolerance_ms")
     gate_pass = block.get("gate_pass")
