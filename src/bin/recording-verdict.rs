@@ -6488,6 +6488,12 @@ fn run_merge(args: &Args) -> Result<()> {
         // decision is the PURE crate-root `partial_schema_gate` seam (Tier-0-tested): it degrades
         // ONLY a clean schema mismatch on a report-only box; strih/stream and every non-schema
         // failure stay fatal.
+        // Why a MISSING / unreadable imag partial staying Fatal is safe here (not a contradiction
+        // with "imag is report-only"): a genuinely-skipped imag leg never reaches this load at all
+        // — recording-e2e.sh `[8/8d]` only appends `--merge-partials imag=<path>` when
+        // `[ -f "$IMAG_PARTIAL" ]` (harness_imag_topology anchors that guard), so the ONLY way an
+        // imag spec arrives is that the file EXISTS. A present-but-schema-stale file is exactly the
+        // degrade case; a present-but-corrupt/unreadable file is a genuine defect worth the Fatal.
         let partial = match RecordingPartial::load(Path::new(path)) {
             Ok(p) => p,
             Err(e) => {

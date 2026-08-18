@@ -37,6 +37,15 @@ fn only_the_imag_leg_is_report_only_today() {
     assert!(!box_is_report_only("strih"));
     assert!(!box_is_report_only("stream"));
     assert!(!box_is_report_only("unknown"));
+    // issue 1118 review — the predicate is DERIVED from the report-only seam, never a 2nd
+    // hardcoded copy: it must always equal `!imag_leg_gate::gates_overall_pass()` for imag, so
+    // when a follow-up flips the imag leg blocking the degrade path can never keep dropping a
+    // now-blocking leg's partial. This guards against someone re-hardcoding `box_is_report_only`.
+    assert_eq!(
+        box_is_report_only("imag"),
+        !camera_box::imag_leg_gate::gates_overall_pass(),
+        "box_is_report_only(imag) must track the imag_leg_gate report-only seam in lockstep"
+    );
 }
 
 #[test]

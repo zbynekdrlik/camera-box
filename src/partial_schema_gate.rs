@@ -47,11 +47,14 @@ pub fn peek_schema_version(json: &str) -> Option<u32> {
 }
 
 /// Is `box_name` a REPORT-ONLY leg whose partial-input errors must never zero the whole gate?
-/// Today only the imag leg is report-only ([`crate::imag_leg_gate::gates_overall_pass`] == `false`).
-/// strih and stream are the hard gate's own inputs — their partial errors stay fatal. When a
-/// follow-up flips the imag leg blocking, this predicate is the ONE place that also changes.
+/// DERIVED from the single source of truth ([`crate::imag_leg_gate::gates_overall_pass`]), never a
+/// second hardcoded copy: the imag leg is the only report-only leg, and ONLY while its seam is
+/// report-only. strih and stream are the hard gate's own inputs — their partial errors always stay
+/// fatal. When a follow-up flips the imag leg blocking (`gates_overall_pass()` → `true`), this
+/// automatically returns `false` for imag too, so a schema-mismatched imag partial then stays FATAL
+/// like strih/stream — the degrade and the gate can never drift out of lockstep (issue 1118 review).
 pub fn box_is_report_only(box_name: &str) -> bool {
-    box_name == "imag"
+    box_name == "imag" && !crate::imag_leg_gate::gates_overall_pass()
 }
 
 /// What to do with a partial whose `load` FAILED: DEGRADE (drop this leg, keep merging the rest,
