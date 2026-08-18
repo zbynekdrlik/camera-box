@@ -109,6 +109,11 @@ check **(x)** asserts it, reading the persisted value sudo-lessly:
 nmcli -g 802-3-ethernet.wake-on-lan connection show imag-lan   # => magic
 ```
 
+(`imag-lan` is the default NM connection id set by `install-imag-nb.sh`; if the box's active
+connection is named otherwise, substitute that name — or read it dynamically:
+`nmcli -t -f NAME,DEVICE con show --active`. `verify-imag.sh` check (x) already resolves it
+dynamically by the box's static rig IP, so its assertion never depends on the connection id.)
+
 Live-confirmed 2026-08-18: the NDI NIC is a USB **r8152 Realtek** dongle (`enx6c1ff766154b`, MAC
 `6C:1F:F7:66:15:4B`), `Supports Wake-on: pumbg`, and after `nmcli con up` the runtime `ethtool
 <nic>` shows `Wake-on: g`.
@@ -133,7 +138,7 @@ a full shutdown unless the BIOS explicitly keeps USB powered in standby. On imag
 - [ ] Enable **Wake on LAN** / **Power On by PCI-E/USB** / **Resume by USB device** (name varies).
 - [ ] Set **ErP Ready** / **EuP** / **Deep Sleep** to **Disabled** (ErP/deep-S5 cuts standby power to
       USB and the NIC and breaks WoL from a full shutdown).
-- [ ] Enable **USB power in S3/S4/S5** ("USB Standby Power" / "Wake from USB" / "XHCI hand-off"), so
+- [ ] Enable **USB power in S3/S4/S5** ("USB Standby Power" / "Wake from USB" / "ErP-exempt USB"), so
       the USB-ethernet dongle stays powered enough to receive the magic packet. Without this, the
       only viable wake is from **S3 sleep** (if the box keeps USB powered in S3), not a full shutdown.
 

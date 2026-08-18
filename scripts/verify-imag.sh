@@ -1256,10 +1256,12 @@ fi
 # the persisted NM setting (802-3-ethernet.wake-on-lan=magic): NM re-applies it on every
 # connection-up, so it survives reboot, and it is readable SUDO-LESSLY (unlike the runtime ethtool
 # Wake-on line, which is root-only). A pure static read, side-effect free, kept ABOVE check (o)'s OBS
-# restart for #884-ordering hygiene. Resolves the NDI NIC via the default route (the rig LAN link)
-# and its active NM connection, mirroring setup-imag.sh step 1's own $CON resolution.
+# restart for #884-ordering hygiene. Resolves the rig NIC by the box's OWN static rig IP ($IMAG_IP,
+# the address this gate is already SSHed in over) -- unambiguous even on a multi-homed notebook where
+# a Wi-Fi default route could otherwise point at a DIFFERENT connection than setup-imag.sh armed --
+# then reads WoL off that NIC's active NM connection.
 rc=0
-WOL_VALUE="$(ssh_box "NIC=\$(ip -o -4 route show default | grep -oP 'dev \K\S+' | head -1); CON=\$(nmcli -t -f NAME,DEVICE con show --active | awk -F: -v d=\"\$NIC\" '\$2==d{print \$1; exit}'); nmcli -g 802-3-ethernet.wake-on-lan connection show \"\$CON\" 2>/dev/null")" || rc=$?
+WOL_VALUE="$(ssh_box "NIC=\$(ip -o -4 addr show | awk -v ip=\"$IMAG_IP\" '{split(\$4,a,\"/\"); if(a[1]==ip){print \$2; exit}}'); CON=\$(nmcli -t -f NAME,DEVICE con show --active | awk -F: -v d=\"\$NIC\" '\$2==d{print \$1; exit}'); nmcli -g 802-3-ethernet.wake-on-lan connection show \"\$CON\" 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ]; then
   fail "Wake-on-LAN NM setting unreadable over SSH (rc=$rc) -- cannot confirm imag-nb is remotely wakeable (#1103)"
 elif imag_wol_enabled_ok "$WOL_VALUE"; then
