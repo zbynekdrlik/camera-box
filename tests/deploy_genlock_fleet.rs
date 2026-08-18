@@ -31,7 +31,7 @@ fn markers_lib() -> PathBuf {
 /// Source `path` and run `body` (which may call the pure functions the file defines). Returns
 /// stdout. Fails the test if the harness exits non-zero.
 fn run_sourced(path: &PathBuf, body: &str) -> String {
-    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\nset +e\n{body}");
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)
@@ -51,7 +51,7 @@ fn run_sourced(path: &PathBuf, body: &str) -> String {
 /// Source `path`, run `body`, and return (exit_code, stdout, stderr) WITHOUT asserting success —
 /// for the error-path guards.
 fn run_sourced_status(path: &PathBuf, body: &str) -> (i32, String, String) {
-    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\nset +e\n{body}");
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)

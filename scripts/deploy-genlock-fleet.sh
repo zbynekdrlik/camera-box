@@ -295,6 +295,9 @@ PS
 #   check. The markers are the shared single source of truth across the deploy legs.
 build_imag_deploy_program() {
   local bundle_dir="$1" marker_dir="$2" backup_root="$3" gsha="$4" dsha="$5" keep="$6" confirm="${7:-0}"
+  # Escape ' for the emitted bash single-quoted strings (' -> '\'') -- parity with the Windows leg's
+  # #789 review #7 defense-in-depth (--sha is operator-supplied and flows into the marker call).
+  local gsha_bq="${gsha//"'"/"'\''"}" dsha_bq="${dsha//"'"/"'\''"}"
   local del_line='  echo "  would delete $d"'
   [ "$confirm" = "1" ] && del_line='  echo "  deleting $d"; rm -rf "$d"'
   cat <<EOS
@@ -368,7 +371,7 @@ nm -D -u "\$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_diviso
   || { echo "post-swap /usr/bin/obs does not reference obs_display_set_render_divisor -- refuse a stock/wrong frontend (#499)" >&2; exit 4; }
 
 # (5) markers via the SHARED helper (bod 4 single source of truth)
-genlock_write_markers "\$MARKER_DIR" '${gsha}' '${dsha}'
+genlock_write_markers "\$MARKER_DIR" '${gsha_bq}' '${dsha_bq}'
 cp -a "\$MANIFEST" "\$MARKER_DIR/BUNDLE_MANIFEST.json"
 
 # (6) box-backup RETENTION (bod 5) -- keep the newest \$KEEP dated dirs; delete the rest ONLY when the
@@ -516,15 +519,15 @@ main() {
   if [ "$plan" = 1 ]; then
     [ -n "$stage" ] || { echo "ERROR: --plan requires --stage (no network in plan mode)" >&2; exit 2; }
     [ -n "$sha_override" ] || { echo "ERROR: --plan requires --sha (no network in plan mode)" >&2; exit 2; }
-    local sha="$sha_override" b
+    local sha="$sha_override"
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
-    local IFS=','
-    for b in $boxes; do
+    # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
+    ( IFS=','; for b in $boxes; do
       case "$b" in
         strih|stream) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
         imag)         emit_imag_plan "$stage" "$sha" "$sha" ;;
       esac
-    done
+    done )
     echo "# fleet-deploy log line (append to ${FLEET_LOG_DEFAULT} once the deploy is done):"
     fleet_log_line "$run_id" "$sha" "$boxes" "$mode"
     exit 0
@@ -546,8 +549,11 @@ main() {
   # shellcheck disable=SC2064
   trap "rm -rf '$workdir'" EXIT
 
-  local want_win=0 want_imag=0 b
-  { local IFS=','; for b in $boxes; do case "$b" in strih|stream) want_win=1 ;; imag) want_imag=1 ;; esac; done; }
+  # detect requested box classes without a `local IFS=','` that would leak past a brace group
+  # (a { …; } group is not a new scope) -- match the comma-list directly.
+  local want_win=0 want_imag=0
+  case ",$boxes," in *,strih,*|*,stream,*) want_win=1 ;; esac
+  case ",$boxes," in *,imag,*) want_imag=1 ;; esac
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
   if [ "$want_win" = 1 ]; then
@@ -559,7 +565,8 @@ main() {
       || { echo "ERROR: download of $win_art (run $win_run) failed" >&2; exit 3; }
     echo "# Windows artifact $win_art (run $win_run) downloaded to $workdir/win"
     echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
-    { local IFS=','; for b in $boxes; do case "$b" in strih|stream) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done; }
+    # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
+    ( IFS=','; for b in $boxes; do case "$b" in strih|stream) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
   fi
 
   # --- imag: download the same-SHA linux artifacts, scp the WHOLE bundle + ssh-run (issue 1026) -----
