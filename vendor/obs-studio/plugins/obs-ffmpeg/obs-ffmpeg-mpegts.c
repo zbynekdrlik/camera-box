@@ -1003,11 +1003,13 @@ static bool ffmpeg_mpegts_finalize(struct ffmpeg_output *stream, struct ffmpeg_c
 		if (!init_streams(stream, ff_data)) {
 			error("mpegts avstream failed to be created");
 			*code = OBS_OUTPUT_ERROR;
+			ffmpeg_mpegts_data_free(stream, &stream->ff_data);
 			return false;
 		}
 		*code = open_output_file(stream, ff_data);
 		if (*code != OBS_OUTPUT_SUCCESS) {
 			error("Failed to open the url");
+			ffmpeg_mpegts_data_free(stream, &stream->ff_data);
 			return false;
 		}
 		av_dump_format(ff_data->output, 0, NULL, 1);
@@ -1018,6 +1020,7 @@ static bool ffmpeg_mpegts_finalize(struct ffmpeg_output *stream, struct ffmpeg_c
 		ffmpeg_mpegts_log_error(LOG_WARNING, &stream->ff_data,
 					"ffmpeg_output_start: Failed to create write thread.");
 		*code = OBS_OUTPUT_ERROR;
+		ffmpeg_mpegts_data_free(stream, &stream->ff_data);
 		return false;
 	}
 	stream->write_thread_active = true;
