@@ -9497,10 +9497,10 @@ mod tests {
     // ALL_CAMBOX sweep cuts each camera into strih program in turn, so its OWN capture-time
     // burn only rides alongside cam2's optical QR while ITS window is live. The per-camera
     // medians then feed the hard cross-camera SPREAD gate
-    // (`camera_box::switch_latency::spread_verdict`): `max(p50) - min(p50) > 16ms` (half a
-    // 30fps frame) = FAIL — a differing photon->dequeue latency `d_X` per camera (#286's root
-    // cause) beyond that floor can visibly break A/V lipsync when the live program cuts
-    // between them.
+    // (`camera_box::switch_latency::spread_verdict`): `max(p50) - min(p50) >
+    // SPREAD_THRESHOLD_MS` (24ms since issue 1120; was a 16ms half-frame) = FAIL — a differing
+    // photon->dequeue latency `d_X` per camera (#286's root cause) beyond that bound can visibly
+    // break A/V lipsync when the live program cuts between them.
 
     /// Build a synthetic single continuous stream recording covering `cameras.len()` contiguous
     /// 5s `--switch-schedule` windows (one per entry), each carrying: the STRIH burn (the
@@ -9596,7 +9596,8 @@ mod tests {
     }
 
     /// #624: cam1/cam3/cam4 all deployed, EACH camera's OWN measured cam2->camera median exactly
-    /// matches its injected latency, and a 25ms cross-camera spread (over the 16ms floor) FAILS
+    /// matches its injected latency, and a genuinely-broken 55ms cross-camera spread (well over
+    /// the recalibrated 24ms bound — issue 1120 — and over a full 33.3ms program frame) FAILS
     /// the gate.
     #[test]
     fn all_cambox_latency_measures_per_camera_windowed_latency_and_fails_a_wide_spread_624() {
@@ -9604,7 +9605,7 @@ mod tests {
             "fail",
             &[
                 ("CAM1", CAM1B, 800_000_000),
-                ("CAM3", super::BURN_RUN_ID_CAM3, 820_000_000),
+                ("CAM3", super::BURN_RUN_ID_CAM3, 850_000_000),
                 ("CAM4", super::BURN_RUN_ID_CAM4, 795_000_000),
             ],
         );
@@ -9621,7 +9622,7 @@ mod tests {
         );
         assert_eq!(
             lat["cam3"]["p50_ms"],
-            serde_json::json!(820.0),
+            serde_json::json!(850.0),
             "#624: cam3's OWN windowed cam2->cam3 latency (generalized from cam1-only): {lat}"
         );
         assert_eq!(
@@ -9631,20 +9632,21 @@ mod tests {
         );
         assert_eq!(
             lat["cross_camera_spread_ms"],
-            serde_json::json!(25.0),
-            "#624: max(820) - min(795) = 25ms: {lat}"
+            serde_json::json!(55.0),
+            "#624: max(850) - min(795) = 55ms: {lat}"
         );
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "#624: a 25ms cross-camera spread is over the 16ms floor -> the gate must FAIL: {lat}"
+            "#1120: a 55ms cross-camera spread is well over the 24ms bound -> the gate must FAIL: \
+             {lat}"
         );
     }
 
-    /// #624: the SAME 3-camera shape, but every camera's injected latency sits within 16ms of
-    /// every other's -> the spread gate PASSES.
+    /// #624: the SAME 3-camera shape, but every camera's injected latency sits within the spread
+    /// bound of every other's -> the spread gate PASSES.
     #[test]
-    fn all_cambox_latency_spread_within_16ms_passes_the_gate_624() {
+    fn all_cambox_latency_spread_within_bound_passes_the_gate_624() {
         let v = build_all_cambox_latency_fixture(
             "pass",
             &[
@@ -9666,7 +9668,7 @@ mod tests {
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(true),
-            "#624: a 10ms cross-camera spread clears the 16ms floor -> PASS: {lat}"
+            "#624: a 10ms cross-camera spread clears the 24ms bound -> PASS: {lat}"
         );
     }
 
@@ -9860,7 +9862,7 @@ mod tests {
             "fail",
             &[
                 ("CAM1", CAM1B, 3_000_000),
-                ("CAM2", CAM2B, 20_000_000),
+                ("CAM2", CAM2B, 30_000_000),
                 ("CAM4", super::BURN_RUN_ID_CAM4, 8_000_000),
             ],
         );
@@ -9878,7 +9880,7 @@ mod tests {
         );
         assert_eq!(
             lat["cam2"]["p50_ms"],
-            serde_json::json!(20.0),
+            serde_json::json!(30.0),
             "#286 Gap 2: cam2 MUST be measured here (its own digital capture burn + its own \
              schedule window make it just as measurable as any other camera — unlike the \
              OPTICAL-INJECTION source-side sweep, which structurally excludes it): {lat}"
@@ -9902,22 +9904,22 @@ mod tests {
         );
         assert_eq!(
             lat["cross_camera_spread_ms"],
-            serde_json::json!(17.0),
-            "#286: max(20.0) - min(3.0) = 17ms: {lat}"
+            serde_json::json!(27.0),
+            "#286: max(30.0) - min(3.0) = 27ms: {lat}"
         );
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "#286: a 17ms delivery spread is over the (report-only) 16ms floor -> FAIL: {lat}"
+            "#1120: a 27ms delivery spread is over the (report-only) 24ms bound -> FAIL: {lat}"
         );
     }
 
-    /// #286: ALL SIX cameras measured (including cam2), each within 16ms of every other's
-    /// injected delivery latency -> the (report-only) spread gate PASSES — mirrors a
+    /// #286: ALL SIX cameras measured (including cam2), each within the spread bound of every
+    /// other's injected delivery latency -> the (report-only) spread gate PASSES — mirrors a
     /// successfully phase-synced rig where the applied differentiated genlock-latency offsets
     /// have collapsed every camera's DELIVERY latency to roughly the same value.
     #[test]
-    fn all_cambox_delivery_latency_all_six_cameras_within_16ms_passes_the_gate_286() {
+    fn all_cambox_delivery_latency_all_six_cameras_within_bound_passes_the_gate_286() {
         let v = build_all_cambox_delivery_latency_fixture(
             "pass",
             &[
@@ -9949,12 +9951,12 @@ mod tests {
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(true),
-            "#286: a 4ms delivery spread across all 6 cameras clears the 16ms floor -> PASS: \
+            "#286: a 4ms delivery spread across all 6 cameras clears the 24ms bound -> PASS: \
              {lat}"
         );
     }
 
-    /// #286: a tight delivery spread (all within 16ms) PASSES the report-only gate.
+    /// #286: a tight delivery spread (all within the spread bound) PASSES the report-only gate.
     #[test]
     fn all_cambox_delivery_latency_tight_spread_passes_gate_286() {
         let v = build_all_cambox_delivery_latency_fixture(
@@ -9975,7 +9977,7 @@ mod tests {
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(true),
-            "#286: a 7ms delivery spread clears the 16ms floor -> PASS: {lat}"
+            "#286: a 7ms delivery spread clears the 24ms bound -> PASS: {lat}"
         );
     }
 
@@ -10000,13 +10002,13 @@ mod tests {
 
         let v = build_all_cambox_delivery_latency_fixture(
             "seam",
-            &[("CAM1", CAM1B, 3_000_000), ("CAM2", CAM2B, 20_000_000)],
+            &[("CAM1", CAM1B, 3_000_000), ("CAM2", CAM2B, 30_000_000)],
         );
         let lat = &v["all_cambox_delivery_latency"];
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "sanity: this fixture's 17ms spread must FAIL the 16ms bound for the point of this \
+            "sanity: this fixture's 27ms spread must FAIL the 24ms bound for the point of this \
              test to hold: {lat}"
         );
         assert!(
@@ -10322,11 +10324,13 @@ mod tests {
     /// layer).
     ///
     /// VACUITY GUARD (review finding on this PR): the fixture's deliveries MUST keep the
-    /// cross-camera spread within `switch_latency::SPREAD_THRESHOLD_MS` (the earlier 800/820ms
-    /// pair had spread 20 > 16, so `all_pass &= sv.pass` already forced `overall_pass=false`
-    /// BEFORE the A/V fold ran — deleting the fold left this test green). The `without_av`
-    /// control proves every OTHER gate passes on this exact fixture, so the failing A/V fold is
-    /// the ONLY thing that can (and must) flip the with-av verdict.
+    /// cross-camera spread within `switch_latency::SPREAD_THRESHOLD_MS` (an earlier 800/820ms
+    /// pair had spread 20, over the 16 ms bound in force when this guard was written — issue 1120
+    /// later recalibrated the bound to 24 ms — so `all_pass &= sv.pass` already forced
+    /// `overall_pass=false` BEFORE the A/V fold ran, which would have left this test green even
+    /// with the fold deleted). The CURRENT 800/810 pair (spread 10 ms, well within the bound)
+    /// avoids that: the `without_av` control proves every OTHER gate passes on this exact fixture,
+    /// so the failing A/V fold is the ONLY thing that can (and must) flip the with-av verdict.
     #[test]
     fn all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_861_rearmed() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
@@ -10338,8 +10342,8 @@ mod tests {
             audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
-        // Spread = 10ms <= the 16ms threshold -> the cross-camera spread gate PASSES; see the
-        // vacuity guard in the doc comment above.
+        // Spread = 10ms <= SPREAD_THRESHOLD_MS (24ms) -> the cross-camera spread gate PASSES; see
+        // the vacuity guard in the doc comment above.
         let cameras: &[(&str, u32, i64)] =
             &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 810_000_000)];
 
@@ -10461,8 +10465,9 @@ mod tests {
             audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
-        // Spread = 815-800 = 15ms <= the 16ms threshold — the earlier 790..820 fixture (spread
-        // 30) made BOTH runs fail on the spread gate, so the with==without equality below was
+        // Spread = 815-800 = 15ms <= SPREAD_THRESHOLD_MS (24ms) — the earlier 790..820 fixture
+        // (spread 30, still over the 24ms bound) made BOTH runs fail on the spread gate, so the
+        // with==without equality below was
         // `false == false` and could not detect a wiring bug that wrongly ANDs a PASSING gate
         // (review finding on this PR). With every gate passing, `without_av` is genuinely true
         // and the equality has bite.

@@ -13,7 +13,7 @@ use camera_box::delivery_spread_gate as gate;
 fn delivery_spread_gate_ships_report_only_1033() {
     // The delivery-spread term flows + is surfaced, but does NOT gate overall_pass yet — because
     // the current fleet data is not tight-green (recent green runs sit at ~66–81 ms spread against
-    // the 16 ms bound, driven by cam1's delivery lottery / issue-909 grabber class). A follow-up
+    // the 24 ms bound, driven by cam1's delivery lottery / issue-909 grabber class). A follow-up
     // flips this to `true` once cam1's lottery is killed and ~5 consecutive green runs hold the
     // spread ≤ ~10 ms. Shipping `true` here would red those recent green runs.
     assert!(
@@ -59,13 +59,15 @@ fn blocking_seam_would_gate_a_wide_spread_1033() {
 }
 
 #[test]
-fn bound_reuses_the_switch_latency_16ms_threshold_1033() {
-    // No new, drifting constant — the delivery-spread bound IS the existing 16 ms
-    // switch_latency::SPREAD_THRESHOLD_MS (half a 30fps program frame, issue 624).
+fn bound_reuses_the_switch_latency_spread_threshold_1033() {
+    // No new, drifting constant — the delivery-spread bound IS the existing
+    // switch_latency::SPREAD_THRESHOLD_MS (recalibrated to 24 ms by issue 1120; was the 16 ms
+    // half-frame of issue 624). Both spreads are driven by the SAME CAM1 grabber (issue 1110)
+    // and re-tighten on the SAME grabber swap, so they deliberately share ONE constant.
     assert_eq!(
         gate::DELIVERY_SPREAD_BOUND_MS,
         camera_box::switch_latency::SPREAD_THRESHOLD_MS,
-        "issue 1033: the gate must reuse the existing 16 ms bound, not define a second one"
+        "issue 1033: the gate must reuse the existing bound, not define a second one"
     );
-    assert_eq!(gate::DELIVERY_SPREAD_BOUND_MS, 16.0);
+    assert_eq!(gate::DELIVERY_SPREAD_BOUND_MS, 24.0);
 }

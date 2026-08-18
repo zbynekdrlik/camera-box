@@ -6,7 +6,8 @@
 //! `all_cambox_delivery_latency.cross_camera_spread_ms` — `max(p50) − min(p50)` of every camera's
 //! own `strih_burn − camera_burn` DELIVERY latency (issue 286) — is already computed + emitted by
 //! `recording-verdict.rs` (`switch_latency::spread_verdict(&delivery_p50s_ms)`), with a
-//! `spread_gate_pass = spread_ms <= `[`crate::switch_latency::SPREAD_THRESHOLD_MS`] (16 ms). But
+//! `spread_gate_pass = spread_ms <= `[`crate::switch_latency::SPREAD_THRESHOLD_MS`] (24 ms since
+//! issue 1120). But
 //! that block, UNLIKE the source-side sweep right above it (which does `all_pass &= sv.pass`),
 //! never touched `all_pass` — the metric was *computed + structurally forbidden from gating*, with
 //! a test pinning the no-fold. There was no gate seam at all — not even flip-ready. Issue 1033
@@ -16,11 +17,12 @@
 //!
 //! Mining all 78 local `/tmp/recording-e2e-*/verdict-*.json`, the delivery spread is NOT in a
 //! tight-green band: the most recent GREEN (`overall_pass=true`) runs carry delivery spreads of
-//! ~66–81 ms (10+ green runs), 4–5× over the 16 ms bound. The spread is driven ENTIRELY by cam1's
+//! ~66–81 ms (10+ green runs), ~2.7–3.4× over the 24 ms bound. The spread is driven ENTIRELY by
+//! cam1's
 //! bimodal delivery latency (healthy p50 ~47–64 ms → spread 3–22 ms; degraded p50 ~88–144 ms →
 //! spread 44–98 ms) while cam2/cam3 stay tight (34–57 ms). This is the same cam1-grabber
 //! (issue 909) territory that keeps [`crate::optical_floor`] / [`crate::frozen_leg`] /
-//! [`crate::av_window`] report-only. Folding LIVE at 16 ms today would red the majority of recent
+//! [`crate::av_window`] report-only. Folding LIVE at 24 ms today would red the majority of recent
 //! green runs — the exact anti-pattern `verdict-gate-seam-calibration.md` bans ("a bound that
 //! would have failed a recent green run is wrong").
 //!
@@ -33,8 +35,10 @@
 //! to `true`): cam1's delivery-latency lottery genuinely killed (the issue-909 grabber) AND ~5
 //! consecutive green E2E runs with delivery spread ≤ ~10 ms — the exact precondition the issue-1033
 //! validator named. The bound itself needs no new constant: it reuses
-//! [`crate::switch_latency::SPREAD_THRESHOLD_MS`] (16 ms — half a 30fps program frame), the same
-//! bound `spread_gate_pass` is already computed against.
+//! [`crate::switch_latency::SPREAD_THRESHOLD_MS`] (24 ms since issue 1120; was the 16 ms
+//! half-frame of issue 624), the same bound `spread_gate_pass` is already computed against —
+//! both spreads are driven by the SAME CAM1 grabber, so they share ONE constant and re-tighten
+//! together.
 //!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
@@ -44,8 +48,9 @@
 //! (probe-gated) only CALLS these; it never re-derives the toggle.
 
 /// The pinned cross-camera DELIVERY-spread bound, in milliseconds. Re-exported from
-/// [`crate::switch_latency::SPREAD_THRESHOLD_MS`] (16 ms — half a 30fps program frame, issue 624)
-/// so a caller/reader of THIS gate names one bound; there is no second, drifting constant.
+/// [`crate::switch_latency::SPREAD_THRESHOLD_MS`] (24 ms since issue 1120; was the 16 ms
+/// half-frame of issue 624) so a caller/reader of THIS gate names one bound; there is no second,
+/// drifting constant.
 pub const DELIVERY_SPREAD_BOUND_MS: f64 = crate::switch_latency::SPREAD_THRESHOLD_MS;
 
 /// Does the ALL-CAMBOX delivery cross-camera-spread term fold into `overall_pass`?
