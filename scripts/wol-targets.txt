@@ -1,0 +1,12 @@
+# scripts/wol-targets.txt -- #1053 Wake-on-LAN target table for scripts/wake-box.sh.
+#
+# Format: box  ip  mac   (whitespace-separated; blank lines and `#` comment lines ignored).
+#
+# MACs are NOT secrets -- read live from each box's ACTIVE NIC (Windows `Get-NetAdapter` MacAddress,
+# the adapter carrying the box IP) over ssh on 2026-08-17. IPs per targets.md. The subnet-directed
+# broadcast address is DERIVED from the /24 (a.b.c.255) by scripts/lib/wol.sh wol_table_lookup, never
+# stored here, so each box has a single source of truth.
+#
+# box     ip             mac
+strih     10.77.9.202    5C:6A:80:F6:6C:F7
+stream    10.77.9.204    E8:9C:25:CE:B6:EA

@@ -1,0 +1,19 @@
+[Unit]
+# Fires the #1069 strih cambox frozen-input alert every 5 min (dev1-side), matching the network-reach
+# / imag-obs / optical-chain / #1052 alert cadence so the fleet's dev1 alert timers stay in lockstep.
+# OnBootSec is offset from the #1052 stream instance (3min) so the two frozen-input instances do not
+# tail their respective OBS logs at the exact same instant. A strih cambox input that silently freezes
+# on its last frame while strih stays reachable + keeps compositing (the #1096 receiver-wedge class)
+# pages within ~10-15 minutes of onset (2-pass confirm) — a class reachability (#1001) and
+# render-liveness (#391) structurally cannot see.
+Description=Run the camera-box strih cambox frozen-input alert every 5 min (#1069)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #797 venue-switch config-drift check HOURLY (dev1-side). Config drift (a reverted
+# shared-buffers, a degraded-negotiated link, a fresh drop-rate storm) is a low-frequency event, not
+# a 5-min liveness poll -- so this timer is deliberately slower than the reachability/liveness timers.
+# A confirmed drift pages within ~2 hours (2-pass confirm) so the next event starts from a known-good
+# switch baseline instead of a hand-ssh scramble mid-incident.
+Description=Run the camera-box venue-switch config-drift check hourly (#797)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=2min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

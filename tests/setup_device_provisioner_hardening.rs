@@ -233,10 +233,15 @@ fn setup_device_alsa_detection_fails_loud_never_defaults_to_card_1() {
         "setup-device.sh must not silently default to ALSA card 1 when auto-detection fails -- a \
          wrong hardcoded card would silently misconfigure the intercom (#450)"
     );
+    // #782 replaced STEP 5's card-NUMBER auto-detection with a by-NAME config (sysdefault:CARD=HID),
+    // which is enumeration-proof (a baked card NUMBER dangles on re-enumeration). The #450 fail-loud
+    // INTENT is preserved -- STEP 5 still hard-fails (never silently misconfigures) when the intercom
+    // headset is absent -- only the mechanism/message changed: it now confirms the HID card exists by
+    // NAME instead of auto-detecting a number.
     assert!(
-        body.contains("could not auto-detect a USB headset"),
-        "setup-device.sh STEP 5 must fail loud when it cannot auto-detect a USB headset card \
-         (#450)"
+        body.contains("no ALSA card named 'HID'"),
+        "setup-device.sh STEP 5 must fail loud when the HID intercom headset card is absent \
+         (#450 fail-loud intent, #782 by-NAME migration)"
     );
 }
 

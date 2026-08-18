@@ -19,7 +19,8 @@ Usage:
   av_sync_measure.py --grab ... --loop 420 --outer-loop --ws-host 10.77.9.204 [...]
       # #806 outer-loop watchdog: every confident window feeds OuterLoopGuard; a correction event
       # applies the new bias over obs-websocket (SetAsrcOuterBiasPpm) and Discord-reports it.
-Exit codes: 0 measured, 2 unmeasurable window (low confidence), 1 error.
+Exit codes: 0 measured, 2 unmeasurable window (low confidence), 1 error,
+            3 NO-SIGNAL (#814: --require-fresh rejected a stale/failed grab -- no verdict emitted).
 """
 
 import argparse
@@ -163,6 +164,23 @@ def run_outer_loop(args, offset_ms: float) -> None:
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def tap_preflight(grab_url: "str | None") -> "tuple[bool, str]":
+    """#802: reader-side SRT-tap preflight. The A/V-sync tap is redesigned as an SRT LISTENER on
+    the OBS side (`scripts/srt_tap.py` -- a listener bind never fails on a missing peer, so it can
+    never crash OBS); this reader grabs FROM it as the CALLER. Returns (ok, reason): a PROVABLY
+    dead tap short-circuits to `(False, 'NO-SIGNAL: ...')` so the caller can exit 3 (#814 family)
+    instead of a doomed ffmpeg connect. Fails OPEN (proceed) when there is no --grab URL, the URL
+    is not srt://, or srt_tap is unavailable -- a live-but-quiet SRT listener is never
+    false-rejected."""
+    if not grab_url:
+        return True, "ok (no --grab)"
+    try:
+        from srt_tap import reader_should_grab
+    except ImportError as exc:
+        return True, f"ok (srt_tap unavailable; tap preflight skipped: {exc})"
+    return reader_should_grab(grab_url)
 
 
 def grab_clip(url: str, secs: int, out: Path) -> None:
@@ -361,8 +379,25 @@ def main() -> int:
                     help="path to syncnet_python checkout (with data/ + s3fd weights)")
     ap.add_argument("--webhook", help="Discord webhook for |offset| >= threshold alerts")
     ap.add_argument("--threshold-ms", type=int, default=60)
+    ap.add_argument(
+        "--require-fresh", action="store_true",
+        help="#814: assert the --media clip is a CURRENT grab (rc==0 + size + mtime age + "
+             "duration, via the shared avsync_freshness gate) BEFORE measuring; a stale/failed "
+             "grab prints 'NO-SIGNAL: <reason>' and exits 3 without ever emitting a verdict",
+    )
+    ap.add_argument(
+        "--grab-rc", type=int, default=0,
+        help="#814: the ffmpeg exit code of the grab that produced --media (used with "
+             "--require-fresh); non-zero => NO-SIGNAL regardless of the clip left on disk",
+    )
     ap.add_argument("--loop", type=int, metavar="SECS",
                     help="daemon mode: repeat every SECS (grab mode only)")
+    ap.add_argument(
+        "--tap-preflight", action="store_true",
+        help="#802: before grabbing, run the reader-side SRT-tap preflight (srt_tap); if the tap "
+             "is PROVABLY not up, print 'NO-SIGNAL: ...' and exit 3 instead of a doomed connect. "
+             "The tap is a listener on the OBS side (crash-safe redesign); this reader is the caller.",
+    )
     ap.add_argument(
         "--calibration-log", default=None,
         help="append each window's raw measurement as JSONL for later baseline aggregation "
@@ -386,6 +421,31 @@ def main() -> int:
     ap.add_argument("--ws-host", default=None, help="obs-websocket host (required with --outer-loop)")
     ap.add_argument("--ws-password", default="", help="obs-websocket password")
     args = ap.parse_args()
+
+    if args.require_fresh:
+        # #814: never emit a verdict on a stale/failed grab. Checked BEFORE the syncnet/ffmpeg
+        # presence checks below so a dead relay (grab rc!=0, possibly no file at all) short-circuits
+        # to NO-SIGNAL without needing either. Uses the SAME pure gate the ps1 + installer use.
+        try:
+            from avsync_freshness import clip_facts, freshness_verdict
+        except ImportError as exc:
+            print(f"NO-SIGNAL: freshness gate unavailable ({exc})")  # fail CLOSED, never measure
+            return 3
+        size, age, dur = (-1, -1.0, -1.0)
+        if args.media:
+            size, age, dur = clip_facts(args.media)
+        allowed, reason = freshness_verdict(args.grab_rc, size, age, dur)
+        if not allowed:
+            print(f"NO-SIGNAL: {reason}")
+            return 3
+
+    if args.tap_preflight:
+        # #802: fail fast + clean if the redesigned SRT-listener tap is provably down, rather than
+        # a doomed ffmpeg connect. Fails OPEN for a live/quiet listener (never a false NO-SIGNAL).
+        ok, reason = tap_preflight(args.grab)
+        if not ok:
+            print(reason)  # already "NO-SIGNAL: ..."
+            return 3
 
     repo = Path(args.repo).resolve()
     if not (repo / "run_syncnet.py").exists():

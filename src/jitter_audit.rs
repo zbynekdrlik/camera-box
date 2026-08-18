@@ -70,6 +70,16 @@ pub struct AuditSample {
     /// a climbing rate). Healthy operation keeps it at 0; the E2E/drift gates assert the
     /// window DELTA stays 0. Absent on pre-#1009 logs — parses as 0.
     pub backward_regime_ticks: u64,
+    /// #800 — wall(RTC / `GetSystemTimePreciseAsFileTime`)-vs-monotonic
+    /// (QPC / `os_gettime_ns`) clock drift (ms) since OBS start, anchored at the first audit
+    /// tick. The video release deadline is WALL-slaved (`genlock_wall_now_ns`) while the render
+    /// tick and audio capture ride the MONOTONIC clock — so a day-long divergence of the two
+    /// clock domains is the leading remaining candidate for the #800 all-day A/V shift the
+    /// instrumented FIFO already ruled out. Process-global (identical on every source's line),
+    /// SIGNED (positive = wall ran FASTER than QPC). Absent on pre-#800 logs — parses as 0. It is
+    /// an instantaneous per-tick value, NOT summarized (like `ts_present`/`ts_due`) — the
+    /// forensic answer is the field itself grepped across a captured day.
+    pub wall_qpc_drift_ms: i64,
 }
 
 /// Parse ONE `genlock-fifo audit` log line into an [`AuditSample`].
@@ -142,6 +152,7 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             "ts_due" => set!(ts_due),
             "ts_head_skew_ms" => set!(ts_head_skew_ms),
             "backward_regime_ticks" => set!(backward_regime_ticks),
+            "wall_qpc_drift_ms" => set!(wall_qpc_drift_ms),
             _ => {}
         }
     }
@@ -538,6 +549,7 @@ mod tests {
         (\u{2248}1 frames @ 30.000fps) src_latency_ms=0 global_latency_ms=3 preload=1 \
         (=33 ms) reserve_ms=3 cap=5 empty_run=0 (re-arm@10) ts_present=123456789012 \
         ts_due=987 ts_head_skew_ms=-2 backward_regime_ticks=4 \
+        wall_qpc_drift_ms=-252 \
         (#70/#97/#126/#147/#148/#184/#235/#245/#401)";
 
     #[test]
@@ -568,6 +580,26 @@ mod tests {
         assert_eq!(s.ts_head_skew_ms, -2);
         // #1009: the re-anchor tick counter parses from its audit token.
         assert_eq!(s.backward_regime_ticks, 4);
+        // #800: the wall-vs-QPC clock-domain drift term parses, SIGNED.
+        assert_eq!(s.wall_qpc_drift_ms, -252);
+    }
+
+    #[test]
+    fn wall_qpc_drift_ms_defaults_to_zero_on_a_pre_800_line() {
+        // A log captured from a pre-#800 build has no wall_qpc_drift_ms= token — the parser
+        // must yield 0, never fail the line (same forward-compat contract as
+        // backward_regime_ticks_defaults_to_zero_on_a_pre_1009_line).
+        let old = SAMPLE_LINE_CAM1.replace("wall_qpc_drift_ms=-252 ", "");
+        let s = parse_audit_line(&old).expect("pre-#800 line must still parse");
+        assert_eq!(s.wall_qpc_drift_ms, 0);
+    }
+
+    #[test]
+    fn wall_qpc_drift_ms_parses_a_positive_drift_800() {
+        // Positive = wall ran faster than QPC (video deadline advancing ahead of audio).
+        let line = SAMPLE_LINE_CAM1.replace("wall_qpc_drift_ms=-252", "wall_qpc_drift_ms=137");
+        let s = parse_audit_line(&line).unwrap();
+        assert_eq!(s.wall_qpc_drift_ms, 137);
     }
 
     #[test]

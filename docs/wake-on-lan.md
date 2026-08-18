@@ -1,0 +1,85 @@
+# Wake-on-LAN remote recovery — strih + stream (#1053)
+
+Remote-recovery counterpart to issue 1001's network-outage **detection** watchdog: 1001 ALERTS on an
+outage; this makes the outage remotely **recoverable** — if a broadcast OBS box has gone to sleep or
+been powered off, a Wake-on-LAN magic packet from dev1 wakes it without hands on the box.
+
+## What was found (STEP-0 live probe, 2026-08-17)
+
+The Windows NIC WoL is **already fully enabled and armed on BOTH boxes** — the remotely-doable half of
+this ticket was effectively already satisfied. Verified live with `scripts/enable-nic-wol.ps1
+-VerifyOnly` (both returned `VERIFY OK`):
+
+| Box | NIC | MAC | `WakeOnMagicPacket` | `wake_armed` | Notes |
+|-----|-----|-----|---------------------|--------------|-------|
+| strih | Marvell AQtion Felicity 10GbE (add-in) | `5C:6A:80:F6:6C:F7` | Enabled | yes | `WakeFromPowerOff=1`; only `S3` sleep available, hibernation off |
+| stream | Realtek PCIe GbE (onboard) | `E8:9C:25:CE:B6:EA` | Enabled | yes | EEE/Green off; only `S3` sleep available, hibernation off |
+
+The only non-desired NIC state is `*WakeOnPattern=1` on both (the "only allow a magic packet"
+hardening — does NOT block a magic-packet wake; apply it with the helper below, elevated).
+
+**So why did the 2026-08-13 magic packet not wake strih?** Not the Windows NIC layer (already enabled).
+The remaining gap is the **BIOS/firmware standby-power** layer (see checklist below) — or the box was
+powered-on-but-network-isolated during the outage, which WoL cannot fix (that is 1001's domain).
+
+## Tools
+
+### `scripts/wake-box.sh` — send the magic packet (run from dev1)
+
+```bash
+scripts/wake-box.sh strih            # wake strih (MAC + subnet broadcast from wol-targets.txt)
+scripts/wake-box.sh stream           # wake stream
+scripts/wake-box.sh strih --dry-run  # show the packet + targets, send nothing
+scripts/wake-box.sh 5C:6A:80:F6:6C:F7 --broadcast 10.77.9.255   # raw MAC form
+```
+
+Sends the 102-byte magic packet (6×0xFF + 16×MAC) to the box's subnet-directed broadcast
+(`10.77.9.255`) AND the limited broadcast (`255.255.255.255`) on UDP ports 9 and 7 — exactly the
+delivery shape the 2026-08-13 cam1 attempt used. Targets come from `scripts/wol-targets.txt`.
+
+dev1 is on the same `10.77.9.0/24` as the rig, so the subnet broadcast reaches the boxes at L2. If
+ever run from OFF the rig segment, `scp` this dir to an on-segment box (a cam box) and send from
+there — a routed directed-broadcast is commonly dropped by switches.
+
+### `scripts/enable-nic-wol.ps1` — enable + verify the Windows NIC WoL (runs on the box)
+
+Idempotent, fail-loud, three modes: default = apply (needs an **elevated** session), `-VerifyOnly`
+(assert desired state, no change), `-DryRun` (report-only). It is a session-agnostic NIC/registry
+operation, so it runs over the sanctioned ssh transport **or** the win-* MCP Shell.
+
+```bash
+# from dev1 over ssh (verify — read-only, no admin needed):
+source scripts/lib/win-ssh-exec.sh
+win_ssh_upload newlevel newlevel 10.77.9.202 scripts/enable-nic-wol.ps1 'C:\Windows\Temp\enable-nic-wol.ps1'
+win_ssh_run    newlevel newlevel 10.77.9.202 '& powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\enable-nic-wol.ps1 -VerifyOnly'
+# to APPLY (sets *WakeOnPattern=0 hardening etc.) an elevated session is required — run it from the
+# box's own elevated PowerShell, or via a mechanism that elevates; -VerifyOnly / -DryRun do not.
+```
+
+## BIOS checklist (hands-on, per box — the remaining gap)
+
+WoL from a full shutdown (S5) needs the firmware to keep the NIC powered in standby. On the box's
+BIOS/UEFI setup screen, per box:
+
+**Both boxes**
+- [ ] Enable **Wake on LAN** / **Power On by PCI-E / PCIe Device** / **Resume by PCI-E** (name varies).
+- [ ] Set **ErP Ready** / **EuP** / **Deep Sleep** to **Disabled** (ErP/deep-S5 cuts standby power to
+      the NIC and BREAKS WoL from a full shutdown). If a granular option exists, keep LAN powered.
+- [ ] Confirm the onboard/NIC power is not gated by an "Energy Saving" master switch.
+
+**strih (Marvell AQtion 10GbE — an ADD-IN PCIe card)**
+- [ ] Confirm the motherboard supplies **standby (5VSB) power to the PCIe slot** in S4/S5. Many boards
+      only keep the ONBOARD LAN powered in S5, not add-in slots — if so, the AQtion card **cannot**
+      wake strih from a full shutdown regardless of BIOS. Fallbacks in that case:
+      - Wake from **S3 sleep** instead of shutdown (S3 is available on strih), OR
+      - Enable WoL on the board's **onboard** NIC and add its MAC to `wol-targets.txt`, OR
+      - Use an out-of-band path (network PDU / IPMI) for cold power-on.
+
+**stream (Realtek onboard GbE)** — onboard NICs typically wake from S5 once the BIOS options above are set.
+
+## Verify after the BIOS visit
+
+1. `scripts/enable-nic-wol.ps1 -VerifyOnly` on the box → `VERIFY OK` (NIC still armed).
+2. Put the box to **sleep** (S3): from dev1 `scripts/wake-box.sh <box>` → box powers on. Record it.
+3. Fully **shut down** the box: from dev1 `scripts/wake-box.sh <box>` → box powers on. Record it.
+4. Note which power states successfully wake per box (esp. strih S5 vs S3, per the add-in caveat).

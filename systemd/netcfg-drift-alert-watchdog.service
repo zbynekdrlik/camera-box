@@ -1,0 +1,21 @@
+[Unit]
+# Venue-switch config-drift alert (#797), DEV1-SIDE. ONE check -> decide -> alert pass. dev1 sits on
+# the rig LAN and already hosts every dev1-side alert timer + the airuleset checkout + Discord
+# credentials -- the SAME topology as network-reach-alert-watchdog.service (#1001) /
+# imag-obs-alert-watchdog.service (#882). It only ever READS the MikroTik chain (no config writes).
+Description=camera-box venue-switch config-drift alert (#797) — one check/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# The MikroTik `admin` password is NOT committed. Put `NETCFG_SWITCH_PW=<pw>` (and any NETCFG_* env
+# overrides) in this operator-owned file on dev1; the leading `-` makes the unit start even if it is
+# absent (it then logs "NETCFG_SWITCH_PW is empty" and exits without paging). See
+# .claude/rules/netcfg-audit.md for the one-time setup.
+EnvironmentFile=-%h/.config/camera-box/netcfg-drift.env
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/netcfg-drift-alert-watchdog.sh
+# Read-only ssh to 5 nodes + a 6 s twin-read drop-rate probe per port whose drops GREW since baseline
+# (usually none). Every ssh is individually `timeout`-bounded (NETCFG_SSH_TIMEOUT, default 8 s), so a
+# hung switch cannot stall the pass; this ceiling is the whole-unit backstop.
+TimeoutStartSec=180

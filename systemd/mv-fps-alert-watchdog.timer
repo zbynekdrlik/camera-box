@@ -1,0 +1,18 @@
+[Unit]
+# Fires the #1083 Multiview-fps alert every 5 min (dev1-side), matching the frozen-input /
+# network-reach / imag-obs / optical-chain alert cadence so the fleet's dev1 alert timers stay in
+# lockstep. A Multiview render cadence that collapses below its floor (target − tolerance) — an
+# app stealing GPU/CPU render budget, a stalled projector — pages within ~10-15 minutes of onset
+# (2-pass confirm). A fresh OBS start's warm-up window never false-pages (the watchdog resets its
+# confirm streak on an OBS-log identity change; autostart-aware).
+Description=Run the camera-box Multiview-fps alert every 5 min (#1083)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

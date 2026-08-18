@@ -54,6 +54,14 @@ IMAG_PW_SSH="${IMAG_PW:-newlevel}"
 CONFIRM_THRESHOLD="${IMAG_OBS_ALERT_CONFIRM_THRESHOLD:-1}"
 ALERT_THROTTLE_PASSES="${IMAG_OBS_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
+# #788: operator-quit discriminator. When OBS is down because the operator DELIBERATELY quit it
+# (a clean imag-obs.service exit, or a fresh operator pause file), never fire a false 'crashed'
+# alarm. PAUSE_FILE is a time-bounded operator override on the imag box (`touch` it before quitting
+# OBS to test latency; a FORGOTTEN pause can never mask a real crash forever -- it expires after
+# PAUSE_WINDOW_S from its mtime).
+PAUSE_FILE="${IMAG_WATCHDOG_PAUSE_FILE:-/tmp/imag-watchdog-pause}"
+PAUSE_WINDOW_S="${IMAG_WATCHDOG_PAUSE_WINDOW_S:-3600}"           # 60 min from the pause file's mtime
+
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${IMAG_OBS_ALERT_REPO:-zbynekdrlik/camera-box}"
 
@@ -188,6 +196,38 @@ main() {
     log "pass end"
     return 0
   fi
+
+  # #788: OBS is down -- distinguish a DELIBERATE operator quit from a real crash before alerting.
+  # Only meaningful when the OBS PROCESS is ABSENT (OBS_PORT_NOT_LISTENING = process up, not a
+  # quit). The authoritative signal is systemd's own Restart=on-failure verdict on imag-obs.service
+  # (issue 882): a clean exit(0) / `systemctl --user stop` -> loaded/inactive/success; a crash-loop
+  # -> failed. A fresh operator pause file is an explicit override. Fail-safe: anything we cannot
+  # PROVE deliberate (ssh failure, unreadable unit, `failed`, `activating`, ...) falls through to
+  # the existing alarm ("bez clean markera = pád -> alarm ako doteraz"). The `|| dd_rc=$?` capture
+  # keeps the second ssh from aborting this pass under the sourced libs' `set -e`.
+  case "$PROBE_OUT" in
+    *OBS_PROCESS_ABSENT*)
+      local dd_probe dd_rc dd_verdict dd_deliberate dd_reason
+      dd_rc=0
+      dd_probe="$(sshpass -p "$IMAG_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+        "${IMAG_USER_SSH}@${IMAG_IP}" "$(imag_obs_deliberate_down_probe_cmd "$PAUSE_FILE" "$PAUSE_WINDOW_S")" 2>/dev/null)" || dd_rc=$?
+      dd_verdict="$(imag_obs_down_is_deliberate "$dd_probe")"
+      dd_deliberate="$(printf '%s\n' "$dd_verdict" | sed -n 's/^deliberate=//p')"
+      dd_reason="$(printf '%s\n' "$dd_verdict" | sed -n 's/^reason=//p')"
+      if [ "${dd_deliberate:-0}" = "1" ]; then
+        log "imag-nb OBS is down but this is a DELIBERATE operator quit ($dd_reason) -- NOT alerting (issue 788: never false-'crashed' on an operator quit)"
+        # A deliberate quit is a clean, intentional state -- treat it exactly like a HEALTHY pass
+        # for alert bookkeeping: clear the confirm counter AND the throttle signature, so a LATER
+        # genuine crash always alerts fresh (never masked by a stale signature from a prior episode).
+        write_state_field confirm 0
+        write_state_field alert_sig ""
+        write_state_field alert_passes 0
+        log "pass end"
+        return 0
+      fi
+      log "imag-nb OBS is down and NOT a deliberate quit ($dd_reason; probe2 ssh rc=$dd_rc, out='$(printf '%s' "$dd_probe" | tr '\n' ' ')') -- proceeding to alert"
+      ;;
+  esac
 
   if [ "${act:-0}" != "1" ]; then
     log "pass end"

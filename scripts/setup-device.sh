@@ -52,6 +52,11 @@ fail() {
                                           # camera_box_free_capture_device_dropin_content (#772) --
                                           # also sourced by verify-device.sh's (y) check; the
                                           # ExecStartPre device-free bake-in for camera-box.service
+# shellcheck source=scripts/lib/interkom-audio.sh
+. "$HERE/lib/interkom-audio.sh"  # interkom_asound_conf_content / interkom_mic_pct / interkom_pcm_pct
+                                  # (#782) -- also sourced by verify-device.sh's (aa) check, single
+                                  # source of truth for the by-NAME asound.conf + per-box interkom
+                                  # Mic/PCM mixer-gain table (STEP 5 write + STEP 16 amixer apply)
 
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
@@ -517,47 +522,19 @@ fi
 echo ""
 echo -e "${GREEN}[5/${TOTAL_STEPS}] Configuring ALSA audio...${NC}"
 
-# Auto-detect USB headset card (CSCTEK USB Audio and HID). `|| true` on each pipeline guards
-# against `set -o pipefail` aborting the whole script on a no-match `grep` (#458 footgun #1) --
-# `head`/`awk` succeed on empty input, but pipefail takes the RIGHTMOST *failing* command's exit
-# code, which is `grep`'s nonzero when nothing matched.
-USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -E 'HID.*USB Audio|USB Audio.*HID' | head -1 | awk '{print $1}' || true)
-if [ -z "$USB_CARD" ]; then
-    # Fallback: try to find any USB audio device
-    USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -i 'usb.*audio\|audio.*usb' | head -1 | awk '{print $1}' || true)
+# #782: write the canonical by-NAME /etc/asound.conf -- reference the CSCTEK "HID" card by NAME
+# (`sysdefault:CARD=HID`), never the enumeration-time card NUMBER. The old hw:<card-number>,0 form
+# baked whatever number the USB headset happened to enumerate as at provisioning time, which
+# DANGLES the moment the box re-enumerates the headset onto a different card (cam7 live proof:
+# provisioned as card 2, today card 1 -> a dead default; the #728 dangling-card class). The lib's
+# `interkom_asound_conf_content` is the single source of truth, byte-identical to the hand-unified
+# live fleet (sha256 d5db405c...). Confirm the HID card exists by NAME first (fail loud, #450
+# posture) -- the config itself needs no number. `grep -q` in an `if !` is fully handled by the if.
+if ! grep -qE '\[HID[[:space:]]*\]' /proc/asound/cards 2>/dev/null; then
+    fail "no ALSA card named 'HID' on /proc/asound/cards -- the CSCTEK USB Audio+HID intercom headset is not enumerated (refusing to write a dangling asound.conf, #782/#450)"
 fi
-# #450: fail loud instead of silently defaulting to card 1 -- a wrong hardcoded card would
-# silently misconfigure the intercom on hardware whose USB audio device enumerates differently.
-[ -n "$USB_CARD" ] || fail "could not auto-detect a USB headset on /proc/asound/cards -- refusing to silently default to card 1"
-echo "  Detected USB headset on card $USB_CARD"
-
-cat > /etc/asound.conf << ALSAEOF
-# Asymmetric config: stereo output, mono input
-# USB headset on card $USB_CARD (auto-detected)
-pcm.!default {
-    type asym
-    playback.pcm {
-        type plug
-        slave {
-            pcm "hw:$USB_CARD,0"
-            channels 2
-        }
-    }
-    capture.pcm {
-        type plug
-        slave {
-            pcm "hw:$USB_CARD,0"
-            channels 1
-        }
-    }
-}
-
-ctl.!default {
-    type hw
-    card $USB_CARD
-}
-ALSAEOF
-echo "  ALSA config: /etc/asound.conf (card $USB_CARD)"
+interkom_asound_conf_content > /etc/asound.conf
+echo "  ALSA config: /etc/asound.conf (by NAME -- sysdefault:CARD=HID, enumeration-proof, #782)"
 
 # =============================================================================
 # STEP 6: Create camera-box config
@@ -1000,6 +977,26 @@ apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-util
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc"
 
+# #782: bake the per-box interkom mixer gains. This MUST run AFTER alsa-utils is installed (amixer/
+# alsactl land above), and it belongs here in STEP 16 rather than STEP 5 for that reason. Previously
+# the mixer gain was never set in provisioning at all -- a fresh box kept the CSCTEK headset's
+# power-on default (Mic 91%/-3dB) while the hand-tuned older boxes ran quieter, so cam5-7 shipped
+# ~5dB louder mics in the intercom. Per-box compensation table (owner 2026-07-15, analog headset
+# differences): cam1-4 Mic 75%/PCM 79%, cam5-7 Mic 80%/PCM 94%. `alsactl store` persists it to
+# /var/lib/alsa/asound.state so it survives the box's next reboot (verify-device.sh's (aa) check
+# reads it back). Best-effort with a warning (never a hard fail): STEP 5 already asserted the HID
+# card is present, so a failure here means a transient amixer/HID glitch, not a wrong box -- and
+# verify-device.sh's post-reboot acceptance gate catches a silently-unset gain anyway.
+MIC_PCT="$(interkom_mic_pct "$DEVICE_NAME")"
+PCM_PCT="$(interkom_pcm_pct "$DEVICE_NAME")"
+if amixer -c HID sset Mic "${MIC_PCT}%" >/dev/null 2>&1 &&
+    amixer -c HID sset PCM "${PCM_PCT}%" >/dev/null 2>&1 &&
+    alsactl store >/dev/null 2>&1; then
+    echo "  Interkom mixer: Mic ${MIC_PCT}% / PCM ${PCM_PCT}% (per-box #782), persisted via alsactl store"
+else
+    warn "could not apply interkom mixer gains (Mic ${MIC_PCT}%/PCM ${PCM_PCT}%) -- amixer/alsactl or the HID card unavailable? verify-device.sh (aa) will catch a wrong/unset gain post-reboot (#782)"
+fi
+
 # #930: ffmpeg + EGL runtime for the lipsync cross-validation TEST-mode variant (any box may take
 # cam2's painter role -- unified provisioning, see the "Unified cam-box provisioning" playbook
 # entry) -- one ffmpeg process feeds BOTH /dev/fb0 (video) and the QPSK marker's ALSA device
@@ -1161,6 +1158,76 @@ systemctl daemon-reload
 systemctl enable dantesync 2>/dev/null || true
 DANTESYNC_INSTALLED=true
 echo "  dantesync: installed and enabled"
+
+# =============================================================================
+# STEP 17b: RemoteOS MCP control-channel agent (#1066) -- cam1-4 parity with the 858 imag fix
+# =============================================================================
+echo ""
+echo -e "${GREEN}[17b] Provisioning RemoteOS MCP control-channel agent...${NC}"
+
+# The linux-camN MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project
+# (ops skill #555). camera-box does NOT re-implement or re-pin the agent -- it INVOKES that
+# project's own canonical install-linux.sh (pip-git install + config.json + systemd unit +
+# enable/start), mirroring setup-imag.sh's own remoteos step and the standing "use the installer,
+# never a bare pip command" discipline. The agent survived only as a hand-install on each live cam
+# box before this step; a fresh reprovision / new box came up with the MCP surface DEAD.
+#
+# Runs HERE, after STEP 17 (dantesync) and BEFORE STEP 18's ro-root flip: the installer writes to
+# /usr + /etc, which must happen while root is still rw. Per this script's enable-only convention
+# (.claude/rules/provisioning-scripts.md), the gate is `systemctl is-enabled` (the reboot-survival
+# property), NOT is-active -- the LIVE :8092 surface is proven post-reboot by verify-device.sh's
+# (ab) acceptance check. curl and the CA store are ensured fail-loud by the pre-flight above (and
+# STEP 16), so both are present by the time this step runs.
+#
+# Auth-key handling (security-boundary): the --auth-key is a full-shell-RCE bearer token bound to
+# 0.0.0.0:8092, so it NEVER lands in this repo. Two paths, mirroring this script's env-secret
+# convention (CAM_PW/GH_TOKEN):
+#   - REMOTEOS_MCP_AUTH_KEY set -> pre-seed /etc/remoteos-mcp/config.json (chmod 600) so the
+#     installer REUSES that known key and dev1's gitignored .mcp.json keeps matching a freshly
+#     hardware'd box (fully closes #1066: a working MCP surface, not just an installed agent).
+#   - unset -> the installer generates a fresh on-box key; update dev1's .mcp.json linux-camN entry.
+REMOTEOS_MCP_INSTALLER_URL="${REMOTEOS_MCP_INSTALLER_URL:-https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh}"
+REMOTEOS_MCP_CONFIG="/etc/remoteos-mcp/config.json"
+if [ -n "${REMOTEOS_MCP_AUTH_KEY:-}" ]; then
+    # Reject any shell/JSON-special char: the installer generates [A-Za-z0-9] keys, and a
+    # non-alphanumeric value in the unquoted heredoc below would break the JSON (the installer then
+    # silently discards it and generates a DIFFERENT key -- dev1's .mcp.json breaks while the
+    # is-enabled gate still passes) or run command substitution. Fail loud instead.
+    case "$REMOTEOS_MCP_AUTH_KEY" in
+        *[!A-Za-z0-9]*) fail "REMOTEOS_MCP_AUTH_KEY must be alphanumeric [A-Za-z0-9] (installer key charset); refusing to write it unsafely (#1066)" ;;
+    esac
+    install -d -m 700 /etc/remoteos-mcp
+    ( umask 077; cat > "$REMOTEOS_MCP_CONFIG" <<CFG
+{
+  "port": 8092,
+  "auth_key": "${REMOTEOS_MCP_AUTH_KEY}",
+  "host": "0.0.0.0"
+}
+CFG
+    )
+    chmod 600 "$REMOTEOS_MCP_CONFIG"
+    echo "  #1066: pre-seeded $REMOTEOS_MCP_CONFIG from REMOTEOS_MCP_AUTH_KEY (installer reuses it; dev1 .mcp.json stays valid)"
+else
+    echo "  #1066: REMOTEOS_MCP_AUTH_KEY unset -- the installer will generate a fresh on-box key; update dev1's .mcp.json linux-camN entry to match"
+fi
+REMOTEOS_MCP_INSTALLER_TMP="$(mktemp /tmp/remoteos-mcp-install-linux.XXXXXX.sh)"
+curl -fsSL "$REMOTEOS_MCP_INSTALLER_URL" -o "$REMOTEOS_MCP_INSTALLER_TMP" \
+    || fail "cannot fetch remoteos-mcp installer from $REMOTEOS_MCP_INSTALLER_URL (#1066)"
+bash "$REMOTEOS_MCP_INSTALLER_TMP" \
+    || fail "canonical remoteos-mcp install-linux.sh failed (#1066)"
+rm -f "$REMOTEOS_MCP_INSTALLER_TMP"
+# Enable-only convention: ensure the reboot-survival symlink exists (idempotent if the installer
+# already did `enable --now`), then gate on is-enabled. verify-device.sh's (ab) check proves the
+# LIVE :8092 surface after the box reboots.
+systemctl enable remoteos-mcp 2>/dev/null || true
+# Compare the LITERAL is-enabled state, not `--quiet`'s exit code: `is-enabled --quiet` returns 0
+# for a `static` unit (no [Install] section) too, which is NOT pulled in at boot -- the exact
+# reboot-survival property this gate claims to prove. A literal `= enabled` compare rejects that
+# (review 🔵); verify-device.sh's (ab) check makes the same strict compare post-reboot.
+REMOTEOS_MCP_ENABLED_STATE="$(systemctl is-enabled remoteos-mcp 2>/dev/null || true)"
+[ "$REMOTEOS_MCP_ENABLED_STATE" = "enabled" ] \
+    || fail "remoteos-mcp.service is not enabled (is-enabled='${REMOTEOS_MCP_ENABLED_STATE:-<none>}') after install -- the linux-camN MCP surface would be dead on next boot (#1066)"
+echo "  #1066: remoteos-mcp agent installed + enabled (linux-camN MCP surface :8092; proven live post-reboot by verify-device.sh (ab))"
 
 # =============================================================================
 # STEP 18: Configure read-only root filesystem

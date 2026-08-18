@@ -100,6 +100,15 @@
 #       it) AND the box is ACTUALLY publishing the secondary "CAMn (30p)" 30fps blend stream right
 #       now (the issue-792 publisher's own journal output). A re-provisioned box that lost the
 #       drop-in, or an old binary predating issue 792, FAILs instead of regressing to 60p-only (#1087).
+#   (aa) interkom audio bake-in (#782): /etc/asound.conf is the by-NAME form (CARD=HID, not the old
+#       enumeration-time card NUMBER that dangles on re-enumeration), alsa-utils is installed, and
+#       the live `amixer -c HID` Mic/PCM percents match this box's per-box table (cam1-4 75%/79%,
+#       cam5-7 80%/94%). A re-provisioned box that drifts back to a dangling config or the CSCTEK
+#       power-on gain (Mic 91%) FAILs.
+#   (ab) RemoteOS MCP control-channel agent (#1066): remoteos-mcp.service (the linux-camN MCP surface
+#       on :8092, provisioned by setup-device.sh STEP 17b) is ENABLED (reboot-survival) AND active
+#       AND :8092 is listening. A fresh box that never provisioned the agent FAILs instead of coming
+#       up with a dead MCP surface.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -135,6 +144,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/camera-box-free-device.sh" # camera_box_free_device_dropin_wired/
                                         # camera_box_free_device_script_is_burn_scoped -- the (y)
                                         # ExecStartPre device-free bake-in check (#772)
+# shellcheck source=scripts/lib/interkom-audio.sh
+. "$HERE/lib/interkom-audio.sh"  # interkom_asound_by_name_count/interkom_amixer_pct/interkom_mic_pct/
+                                 # interkom_pcm_pct -- the (aa) interkom-audio bake-in check (#782)
 # clock-offset-guard.sh is sourced ONLY for its pure functions; its own
 # `[ "${BASH_SOURCE[0]}" != "${0}" ]` guard skips clock-offset-guard.sh's own `main "$@"` flow.
 # shellcheck source=scripts/clock-offset-guard.sh
@@ -592,6 +604,10 @@ Checks:
       /dev/video from a killed E2E run's stray capture burn (#772)
   (z) publish-30p.conf drop-in present (CAMERA_BOX_PUBLISH_30P=1) AND the box is actually
       publishing the secondary "CAMn (30p)" 30fps blend stream (issue 792 / #1087)
+  (aa) interkom audio bake-in: by-NAME /etc/asound.conf (CARD=HID), alsa-utils installed, and the
+      live amixer Mic/PCM gain matches the per-box table (cam1-4 75%/79%, cam5-7 80%/94%) (#782)
+  (ab) RemoteOS MCP agent: remoteos-mcp.service enabled (reboot-survival) + active, :8092 listening
+      (the linux-camN MCP control surface, provisioned by setup-device.sh STEP 17b) (#1066)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1113,6 +1129,67 @@ elif [ "$(publish_30p_stream_live "$CB_JOURNAL")" != "0" ]; then
   ok "publish-30p.conf CAMERA_BOX_PUBLISH_30P=1 and the '(30p)' blend stream is live (issue 792 / #1087)"
 else
   fail "publish-30p.conf enabled but NO '(30p)' publisher activity in the last 300 journal lines -- the secondary blend stream is NOT being published (old binary predating issue 792? issue 792 / #1087)"
+fi
+
+# (aa) interkom audio bake-in: by-NAME asound.conf + per-box Mic/PCM mixer gains + alsa-utils
+# installed (#782) ------------------------------------------------------------------------------
+# Provisioning must reproduce the hand-unified fleet audio state so a re-provisioned box does not
+# drift back to the enumeration-time card-NUMBER asound.conf (dangling on re-enumeration, #728) or
+# the CSCTEK headset's power-on default gain (Mic 91%). THREE facets, all FAIL on any miss: (1)
+# /etc/asound.conf is the by-NAME form (contains CARD=HID), (2) alsa-utils is installed (else the
+# gain is neither readable nor persisted across boot -- the cam1/cam3 drift), (3) the LIVE
+# `amixer -c HID` Mic/PCM percents match this box's per-box table (interkom_mic_pct/pcm_pct).
+# Every ssh_box read is `|| rc=$?`-guarded (the (e)/(z) shape) so an unreachable box FALLS to the
+# first fail branch, never aborts the gate. Inserted BEFORE (q) -- (q) stays the LAST check.
+asrc=0
+ASOUND_CONF="$(ssh_box "cat /etc/asound.conf 2>/dev/null")" || asrc=$?
+autrc=0
+ALSA_UTILS_N="$(ssh_box "dpkg -l alsa-utils 2>/dev/null | grep -c '^ii' || true")" || autrc=$?
+micrc=0
+MIC_AMIXER="$(ssh_box "amixer -c HID sget Mic 2>/dev/null")" || micrc=$?
+pcmrc=0
+PCM_AMIXER="$(ssh_box "amixer -c HID sget PCM 2>/dev/null")" || pcmrc=$?
+MIC_ACTUAL="$(interkom_amixer_pct "$MIC_AMIXER")"
+PCM_ACTUAL="$(interkom_amixer_pct "$PCM_AMIXER")"
+MIC_EXPECT="$(interkom_mic_pct "$NAME_UPPER")"
+PCM_EXPECT="$(interkom_pcm_pct "$NAME_UPPER")"
+if [ "$(interkom_asound_by_name_count "$ASOUND_CONF")" = "0" ]; then
+  fail "/etc/asound.conf is not the by-NAME form (no CARD=HID -- old card-number/dangling config, ssh rc=$asrc) (#782)"
+elif [ "${ALSA_UTILS_N:-0}" = "0" ]; then
+  fail "alsa-utils not installed (ssh rc=$autrc) -- interkom Mic/PCM gain is neither readable nor persisted across boot (#782)"
+elif [ -z "$MIC_ACTUAL" ] || [ -z "$PCM_ACTUAL" ]; then
+  fail "could not read interkom Mic/PCM gain via 'amixer -c HID' (Mic='${MIC_ACTUAL:-<none>}' PCM='${PCM_ACTUAL:-<none>}', ssh rc=$micrc/$pcmrc) (#782)"
+elif [ "$MIC_ACTUAL" != "$MIC_EXPECT" ] || [ "$PCM_ACTUAL" != "$PCM_EXPECT" ]; then
+  fail "interkom mixer gain drift on $NAME_UPPER: Mic ${MIC_ACTUAL}% (expect ${MIC_EXPECT}%) / PCM ${PCM_ACTUAL}% (expect ${PCM_EXPECT}%) (#782)"
+else
+  ok "interkom audio: by-NAME asound.conf + Mic ${MIC_ACTUAL}%/PCM ${PCM_ACTUAL}% (per-box #782) + alsa-utils installed"
+fi
+
+# (ab) RemoteOS MCP control-channel agent (#1066) ----------------------------------------------
+# The linux-camN MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp agent
+# (remoteos-mcp.service), provisioned by setup-device.sh STEP 17b. This POST-REBOOT check proves
+# the LIVE surface (where setup-device.sh's enable-only gate deliberately stops): the unit is
+# ENABLED (reboot-survival) AND active AND :8092 is listening. Every ssh_box read is `|| rc=$?`-
+# guarded (the (aa)/(e)/(z) shape) so an unreachable box FALLS to the first fail branch, never
+# aborts the gate. Inserted BEFORE (q) -- (q) stays the LAST check.
+mcpenr=0
+# tr runs on the REMOTE (inside ssh_box's command) so the local `|| mcpenr=$?` captures ssh's OWN
+# rc (255 on an unreachable box), not the always-0 exit of a local `| tr` pipe -- an accurate
+# `ssh rc=` in the fail message (review 🔵). The verdict itself is fail-closed either way (empty
+# state never equals "enabled").
+MCP_ENABLED="$(ssh_box "systemctl is-enabled remoteos-mcp 2>/dev/null | tr -d '[:space:]'")" || mcpenr=$?
+mcpacr=0
+MCP_ACTIVE="$(ssh_box "systemctl is-active remoteos-mcp 2>/dev/null | tr -d '[:space:]'")" || mcpacr=$?
+mcplr=0
+MCP_LISTEN="$(ssh_box "ss -ltn 2>/dev/null | grep -cE ':8092([^0-9]|\$)' || true")" || mcplr=$?
+if [ "${MCP_ENABLED:-}" != "enabled" ]; then
+  fail "remoteos-mcp.service is not enabled (is-enabled='${MCP_ENABLED:-<none>}', ssh rc=$mcpenr) -- the linux-camN MCP surface would be dead after a reboot (#1066)"
+elif [ "${MCP_ACTIVE:-}" != "active" ]; then
+  fail "remoteos-mcp.service is not active (is-active='${MCP_ACTIVE:-<none>}', ssh rc=$mcpacr) -- the linux-camN MCP :8092 surface is down (#1066)"
+elif [ "${MCP_LISTEN:-0}" = "0" ]; then
+  fail "remoteos-mcp is not listening on :8092 (ss rc=$mcplr) -- the linux-camN MCP surface is unreachable (#1066)"
+else
+  ok "remoteos-mcp agent enabled + active + listening on :8092 (linux-camN MCP surface, #1066)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

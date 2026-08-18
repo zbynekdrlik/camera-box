@@ -79,3 +79,28 @@ frozen_input_alert_detail() {
   printf "%s: received=%s not advancing (input frozen on last frame while box reachable)\n" \
     "$source" "$received"
 }
+
+# frozen_input_cambox_sources [include_regex] [exclude_regex]
+#   stdin: raw OBS-log text (a `genlock-fifo audit '<src>': …` tail); stdout: newline-separated,
+#   UNIQUE (first-seen order) source names that name a CAMBOX camera input on the receiver.
+#   DYNAMIC enumeration (#1069): the watched cambox set is derived from live OBS-log reality each
+#   pass, never a static cam-number list. A source is a cambox input iff its name (a) appears in a
+#   `genlock-fifo audit '<src>':` line, (b) MATCHES include_regex (default `cam`, case-insensitive),
+#   and (c) does NOT match exclude_regex (default the program/preview/multiview feed labels). On the
+#   live rig the camera branch is `NDI cam1`..`NDI camN`; `NDI 2ME PGM (mv)` / `NDI 2ME PVW` are the
+#   program/preview feeds and are excluded. Self-filters to the EXPECTED-LIVE set: a source only
+#   prints an audit line while OBS is receiving it, and a WEDGED receiver keeps printing the line with
+#   a STUCK `received=` (issue-1096), so a frozen input stays enumerated (the classify then flags it
+#   FROZEN) while a legitimately-removed source simply drops out (never a false page). Pure: no I/O.
+frozen_input_cambox_sources() {
+  local inc="${1:-cam}" exc="${2:-2me|pgm|pvw|multiview|preview|program}"
+  # Extract the quoted source name from every audit line, then include/exclude filter + dedup. The
+  # trailing `|| true` makes "no cambox sources this pass" a NORMAL exit-0 result (grep exits 1 on no
+  # match) instead of a pipeline failure -- the callers key on the empty OUTPUT (the enum-blind guard),
+  # never on the exit code, and must not treat "nothing matched" as an error under `set -o pipefail`.
+  { grep -oE "genlock-fifo audit '[^']*':" \
+    | sed -E "s/^genlock-fifo audit '(.*)':$/\1/" \
+    | grep -iE -- "$inc" \
+    | grep -ivE -- "$exc" \
+    | awk '!seen[$0]++'; } || true
+}

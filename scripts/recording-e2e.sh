@@ -124,12 +124,24 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # a failed restore leaves the (now periodic ~5-min) dead-man armed to self-heal.
 # shellcheck source=scripts/lib/cam2-painter-restore-retry.sh
 . "$HERE/lib/cam2-painter-restore-retry.sh"
+# #1093: ORDERING PROOF (cam2-painter must be PAINTING before the cam-pixel probe -- cam1's picture
+# IS the painter's HDMI) + RECEIVER-WEDGE ESCALATION (issue 1096: strih's DistroAV never re-locks
+# after a sender bounce -> restart strih OBS once, re-check once). All logic lives in the lib; this
+# script gains only the source line, one painter-up wait before cam1's probe, and two call-site
+# swaps (preflight_mv_reverify -> mv_reverify_or_escalate at the deploy sites; the #675 pattern).
+# shellcheck source=scripts/lib/mv-reverify-escalate.sh
+. "$HERE/lib/mv-reverify-escalate.sh"
 # #860: the SHARED pure optical-chain decision core + its [0/8] preflight fail-fast (the #675
 # sourced-lib pattern -- the preflight is invoked with ONE line below, no anchored line edited).
 # shellcheck source=scripts/lib/optical-chain-health.sh
 . "$HERE/lib/optical-chain-health.sh"
 # shellcheck source=scripts/lib/optical-chain-preflight.sh
 . "$HERE/lib/optical-chain-preflight.sh"
+# #780: the SHARED imag display-path drift gather + verdict (picom off, iGPU max-freq pin, tap conf)
+# -- the SAME lib scripts/drift-guard.sh's --check-imag facet uses. Its [0/8] preflight fail-fast is
+# invoked with ONE line below (the #675 sourced-lib pattern -- no anchored line edited).
+# shellcheck source=scripts/lib/imag-display-path.sh
+. "$HERE/lib/imag-display-path.sh"
 # #878 (same family as #844/#869/#872): the PURE decision for the STARTUP self-heal below -- a
 # dead harness only ever restores rig state inside cleanup() (the bash EXIT trap), which SIGKILL
 # never reaches, so the leftover camera-box.service/painter/burn state strands until a human
@@ -161,6 +173,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # actual persist call site is tagged with its own distinct marker below (after the run).
 # shellcheck source=scripts/lib/cbox-burn-log-persist.sh
 . "$HERE/lib/cbox-burn-log-persist.sh"
+# issue 798: emit ONE loud, greppable IMAG-LEG-VERIFIED / IMAG-LEG-NOT-VERIFIED run-log marker at
+# the imag extract, naming WHY the leg was skipped when it is. Pure source-only lib (one function);
+# the real call site is tagged with its own distinct marker after the extract runs below.
+# shellcheck source=scripts/lib/imag-leg-marker.sh
+. "$HERE/lib/imag-leg-marker.sh"
 # #887: imag's zero-loss proof used to stop at OBS's own self-reported compositor stats. A
 # REPORT-ONLY (never touches $GATE) independent check now compares the compositor's own
 # produced-frame count (imag_produced_frame_check.py, GetStats) against the i915 kernel's
@@ -205,6 +222,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$HERE/lib/cambox-offline-ack.sh"
+# issue 1013: imag-nb's OFFLINE-ACK leg-skip note. imag is wired into the SAME cambox-offline-ack
+# mechanism above (it is just another "box" name); when it is acked-offline the gate sets
+# IMAG_OFFLINE_ACKED=1 (in the [0/8] reachability preflight below) and SKIPS every imag step,
+# emitting this loud, greppable, report-only NOTE per skipped step so a green run never reads back
+# as if the imag leg had passed (ONE full test, no partials, issue 798).
+# shellcheck source=scripts/lib/imag-offline-ack.sh
+. "$HERE/lib/imag-offline-ack.sh"
 # shellcheck source=scripts/lib/preflight-fleet-check.sh
 . "$HERE/lib/preflight-fleet-check.sh"
 # #827: the CI workflow has no way to feed CAMBOX_OFFLINE_ACK for the automatic pull_request gate
@@ -214,6 +238,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # [0/8] fleet preflight reads CAMBOX_OFFLINE_ACK.
 RIG_FLEET_ACK_FILE="${RIG_FLEET_ACK_FILE:-$HERE/../rig-fleet.txt}"
 CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$RIG_FLEET_ACK_FILE")"
+# issue 1013: the imag-nb offline-ack gate flag + reason. imag is acked exactly like a cam box —
+# `imag:<reason>` in CAMBOX_OFFLINE_ACK / rig-fleet.txt. The flag starts at 0 and is flipped to 1
+# ONLY by the [0/8] reachability preflight below, when imag is BOTH acked AND genuinely unreachable
+# (an acked-but-reachable imag is a STALE ack that fails there instead). Every downstream imag step
+# consults IMAG_OFFLINE_ACKED to skip itself with a loud report-only note (imag_leg_skip_note).
+IMAG_OFFLINE_ACKED=0
+IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # #758 item 3 — the in-run freeze watch: polls the SAME MV-clone mechanism DURING the recording
 # window (StartRecord through StopRecord) so a mid-run freeze fails the run within ~30s of onset,
 # not at decode time.
@@ -224,6 +255,13 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 # decision lives here so classify() itself (src/render_budget.rs) stays untouched/strict.
 # shellcheck source=scripts/lib/render-health-warmup.sh
 . "$HERE/lib/render-health-warmup.sh"
+# issue 1091 (issue 771 point 3): synchronous MV-fps floor preflight — read each OBS box's newest
+# log's latest `multiview-audit:` sample and fail loud (only on a CONFIRMED sustained collapse) before
+# the run, so the gate never wastes a ~40-min recording on a box whose Multiview render already
+# collapsed. Consumes the same mv-fps-gate binary + mv_audit::gate_log the issue-1083 live watchdog
+# uses; the #675 sourced-lib pattern (source + ONE call line below, no anchored line edited).
+# shellcheck source=scripts/lib/mv-fps-preflight.sh
+. "$HERE/lib/mv-fps-preflight.sh"
 # #833: a MISSING tool on imag-nb (wmctrl, nm) must never be read as a MEASURED zero/empty
 # result -- the #756 projector-count preflight and the [1/8] nm divisor-capability check both
 # shell a remote helper on imag-nb; an absent helper used to be silently misread as "0 projectors"
@@ -528,6 +566,20 @@ echo "==========================================================================
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
 for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"
+  # issue 1013: imag (and ONLY imag) is ackable in this loop, via the SAME cambox-offline-ack
+  # mechanism the cam boxes use (#758/#827). An operator-acknowledged absent notebook
+  # (imag:<reason> in CAMBOX_OFFLINE_ACK / rig-fleet.txt) SKIPS the imag leg instead of aborting;
+  # source/painter/strih/stream stay unconditionally mandatory (they have no ack path by design).
+  if [ "$_name" = "imag" ] && cambox_offline_ack_is_acked "imag"; then
+    if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then
+      # acked but REACHABLE -> STALE ack (the box is back; the ack must be removed) -> fail loud.
+      cambox_offline_ack_stale_message "imag" >&2; exit 1
+    fi
+    cambox_offline_ack_note "imag"
+    IMAG_OFFLINE_ACKED=1
+    echo "    skipped: imag ($_ip) — operator-acknowledged offline; the imag leg is SKIPPED this run (issue 1013)"
+    continue
+  fi
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then echo "    ok: $_name ($_ip)"; else
     echo "ERROR: $_name ($_ip) UNREACHABLE from dev1 — fix route/host, then re-run." >&2; exit 1; fi
 done
@@ -541,6 +593,20 @@ done
 # Plain statement (never $()/pipeline) so its `exit 1` propagates to the harness.
 echo "[0/8] optical injection leg preflight — a standing dead cam2 painter must fail-fast, not waste a run (#860)"
 optical_chain_preflight_assert "$PAINTER_IP" root "$CAM_PW" "$STRIH" "${OBS_PASSWORD:-}" "$HERE"
+
+# #780: imag display-path config drift preflight — picom running (a compositor breaks the tear-free
+# direct scanout), the #841 iGPU max-freq pin down, or the #779 tap conf gone are DETERMINISTIC
+# config states that live BELOW every other measurement in this gate (OBS render / recording verdict
+# / screenshots all end before the display path). Fail-fast HERE, at minute 0, instead of projecting
+# a laggy/torn 40-min run. UNKNOWN facets (an SSH hiccup — the earlier fleet-reachability step above,
+# imag included, owns genuine unreachability) only WARN; a proven DRIFT aborts. Same shared verdict
+# lib the --check-imag facet runs, so the two can never diverge.
+echo "[0/8] imag display-path config preflight — a compositor / idle-GPU / lost-tap drift must fail-fast, not waste a run (#780)"
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[0/8] imag display-path config preflight (#780)" "$IMAG_OFFLINE_ACK_REASON"
+else
+  imag_display_path_preflight_assert "$IMAG_IP" "${IMAG_USER:-newlevel}" || exit 1
+fi
 
 # #977/#958: obs64/AHK Windows-session-visibility gate. A session-0 obs64 (launched via
 # ssh+Invoke-CimMethod) answers OBS WebSocket, serves NDI, and writes a normal log -- so it sails
@@ -629,14 +695,24 @@ VERSION_STREAM_STATE="${VERSION_STREAM_STATE:-$OUTDIR/version-stream.json}"
 # file there via the win-* MCP. (The DanteSync gate above no longer uses this file-relay pattern —
 # it queries strih/stream LIVE over HTTP via dantesync-gate.sh's --win-http, #648 — but this
 # version-integrity gate still does; #123/#119 is unrelated, separate scope.)
+# shellcheck source=scripts/lib/bundle-state-selfheal.sh
+. "$HERE/lib/bundle-state-selfheal.sh"   # #817: gate-time self-heal for a dead :8899 BundleStateServer
 fetch_box_state() {
-  local host="$1" dest="$2"
+  local host="$1" dest="$2" _bs_user _bs_pw
+  # #817: resolve per-box ssh creds so a fetch failure can trigger the SAME session-agnostic restart
+  # the dev1 issue-732 watchdog uses (schtasks /run), then re-fetch — before refusing the whole run.
+  case "$host" in
+    "$STREAM") _bs_user="$STREAM_USER"; _bs_pw="$STREAM_PW" ;;
+    *)         _bs_user="$STRIH_USER";  _bs_pw="$STRIH_PW" ;;
+  esac
   [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
   if curl -fsS --max-time 10 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
     echo "    fetched version-integrity state from ${host}:${WIN_BUNDLE_STATE_PORT} -> $dest"
   else
-    echo "    NOTE: could not fetch version-integrity state from ${host} (http :$WIN_BUNDLE_STATE_PORT) — the" >&2
-    echo "          win-* MCP holder must write the drift-guard observed values to $dest, else the gate refuses." >&2
+    # #817: :8899 is not answering — self-heal (schtasks /run over ssh) + a bounded re-fetch, then an
+    # HONEST one-line fault if it stays down, instead of the pre-#817 misleading version-drift note.
+    bundle_state_selfheal_fetch "$host" "$dest" "$WIN_BUNDLE_STATE_PORT" "$_bs_user" "$_bs_pw" \
+      && echo "    self-healed bundle-state-server on ${host}: re-fetched -> $dest"
   fi
 }
 fetch_box_state "$STRIH"  "$VERSION_STRIH_STATE"  || true
@@ -669,13 +745,49 @@ check_recordings_budget stream "$STREAM"
 # boxes report a SHA (opt-in rollout), never a spurious refuse. Mirrors the [4d/8] imag ssh (l.1412).
 IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
   "${IMAG_USER:-newlevel}@$IMAG_IP" 'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null | head -1' 2>/dev/null | tr -d '[:space:]' || true)"
+# #1082 -- best-effort BYTE-parity inputs for the version-integrity gate, so the [0/8] byte facet
+# compares each box's DEPLOYED bytes against CI truth, not just the hand-written marker. All
+# best-effort via scripts/lib/manifest-autosource.sh: any fetch/gather failure yields "" -> the arg
+# is OMITTED -> the facet stays DORMANT (opt-in), never a spurious refuse (the ENFORCE flip is
+# deferred, #1082). shellcheck source=scripts/lib/manifest-autosource.sh
+. "$HERE/lib/manifest-autosource.sh"
+VERSION_GATE_REPO="${VERSION_GATE_REPO:-zbynekdrlik/camera-box}"
+# Windows FAST manifest (strih+stream share ONE build -> one manifest), keyed on strih's OWN reported
+# marker SHA. The gate applies this GLOBAL --manifest to BOTH --win-state boxes (strih AND stream), and
+# a manifest activates the obs_dll_sha256 byte compare AND the genlock_capability check on each box. So
+# supplying it while EITHER box has not yet reported those keys flips that box to UNKNOWN = a spurious
+# gate-blocking refuse (exactly the partial-rollout split this opt-in exists to protect). Gate on BOTH
+# boxes ALREADY reporting BOTH keys, so the auto-source stays fully dormant until the #770 on-box byte
+# gather is live fleet-wide and can never introduce a UNKNOWN. VERSION_GATE_MANIFEST (if pre-set) wins.
+AUTO_WIN_MANIFEST="${VERSION_GATE_MANIFEST:-}"
+if [ -z "$AUTO_WIN_MANIFEST" ] \
+   && manifest_autosource_state_has_key "$VERSION_STRIH_STATE"  obs_dll_sha256 \
+   && manifest_autosource_state_has_key "$VERSION_STREAM_STATE" obs_dll_sha256 \
+   && manifest_autosource_state_has_key "$VERSION_STRIH_STATE"  genlock_capability \
+   && manifest_autosource_state_has_key "$VERSION_STREAM_STATE" genlock_capability; then
+  AUTO_WIN_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" windows-genlock-fast.yml obs-genlock-fast-dll \
+    "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-fast-manifest.json")"
+fi
+# imag linux .so byte gather (ssh) + its own CI manifest, keyed on imag's marker SHA. The manifest is
+# fetched only when the .so gather actually returned SHAs, so a failed gather leaves the facet dormant.
+AUTO_IMAG_MANIFEST=""
+IMAG_SO_CSV=""
+if [ -n "$IMAG_GENLOCK_SHA" ]; then
+  IMAG_SO_PROBE="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_so_gather_cmd)" 2>/dev/null || true)"
+  IMAG_SO_CSV="$(imag_so_bytes_csv "$IMAG_SO_PROBE")"
+  [ -n "$IMAG_SO_CSV" ] && AUTO_IMAG_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" linux-genlock.yml obs-genlock-linux-x86_64 \
+    "$IMAG_GENLOCK_SHA" "$OUTDIR/imag-linux-manifest.json")"
+fi
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
 "$HERE/version-integrity-gate.sh" \
-  ${VERSION_GATE_MANIFEST:+--manifest "$VERSION_GATE_MANIFEST"} \
+  ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
   --win-state "strih=$VERSION_STRIH_STATE" \
   --win-state "stream=$VERSION_STREAM_STATE" \
-  --genlock-sha "imag=$IMAG_GENLOCK_SHA"
+  --genlock-sha "imag=$IMAG_GENLOCK_SHA" \
+  ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
+  ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"}
 
 # dantesync fleet-wide VERSION-PARITY gate (#862) — alongside the DanteSync NTP+PTP gate (#7) and
 # the version-integrity gate (#123) above. Those two measure LIVE BEHAVIOUR (offset/lock, OBS/
@@ -697,7 +809,15 @@ DANTESYNC_VERSION_LINUX="$CAMERA_NAME=root@$CAM1_IP cam2=root@$PAINTER_IP"
 for _dv_cn in $(camera_active_excluding "$CAMERA_NAME cam2"); do
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX ${_dv_cn}=root@$(camera_secondary_ip "$_dv_cn")"
 done
-DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}@$IMAG_IP"
+# issue 1013: DROP imag-nb from the dantesync version pin gate when imag is acked-offline. That
+# gate treats an UNREAD node as UNKNOWN and REFUSES the whole run (exit 11); its own ack-exclusion
+# keys on the node name, and here imag is named "imag-nb" (not the "imag" the ack uses), so the
+# exclusion would never match — dropping the entry is the correct, matching-free skip.
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[0/8] dantesync version pin gate (imag-nb dropped from the gate)" "$IMAG_OFFLINE_ACK_REASON"
+else
+  DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}@$IMAG_IP"
+fi
 "$HERE/dantesync-version-gate.sh" \
   --linux "$DANTESYNC_VERSION_LINUX" \
   --local dev1 \
@@ -979,6 +1099,13 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # generic message (hardcoding a connector pair that isn't even present on this box) even when
   # the true cause was "OBS was not running at all" -- a one-line honest diagnosis here replaces
   # what was ~30 minutes of investigation.
+  # issue 1013: skip the whole imag OBS-prep leg (reachability probe / projectors / wmctrl / heal /
+  # studio-mode) when imag is acked-offline — every step below hard-aborts (exit 1) on an absent
+  # box. The body stays at its original indent under this guard (bash-legal; the static-anchor
+  # tests match substrings, not indentation) to keep the diff minimal in this anchor-dense region.
+  if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+    imag_leg_skip_note "[0/8] imag OBS-prep (reachability probe / projectors / wmctrl / studio-mode)" "$IMAG_OFFLINE_ACK_REASON"
+  else
   echo "[0/8] imag-nb OBS reachability probe (process/port) — #882"
   _imag_reach_probe="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
     "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_obs_reachability_probe_cmd)" 2>/dev/null || true)"
@@ -1071,6 +1198,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # temporarily-toggled-off preview.
   echo "[0/8] imag Studio Mode must be ON (production parity — Preview cell needs it, #767)"
   python3 "$HERE/obs_phase2.py" ensure-studio-mode-on --host "$IMAG_IP" 2>&1 | sed 's/^/    [imag studio-mode] /'
+  fi   # issue 1013: end of the IMAG_OFFLINE_ACKED skip-guard over the imag OBS-prep leg
 fi
 
 # Capture-delivery-rate preflight (#656 prevention item 2): the appliance's OWN capture loop
@@ -1160,7 +1288,7 @@ preflight_mv_reverify() {
   local a
   for a in $(seq 1 "$attempts"); do
     if timeout "$call_timeout" python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
+        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle "${PREFLIGHT_MV_REVERIFY_WARM_SETTLE:-0}" \
         --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
       if [ "$a" -gt 1 ]; then
         echo "    [sender-bounce] ${box} recovered on attempt ${a}/${attempts}" >&2
@@ -1293,6 +1421,10 @@ cleanup() {
   # the SIGKILL. Backgrounding cam1 + cam2 too closes that remaining gap.
   CAMBOX_PARALLEL_PIDS=()
   CAMBOX_PARALLEL_LABELS=()
+  # #1085: record each backgrounded restore's EXPLICIT target IP in lockstep with PIDS/LABELS so the
+  # sequential retry (cambox_parallel_retry_failed) no longer has to parse the IP out of the display
+  # label -- the interim label->IP coupling #715's mitigation introduced is retired here.
+  CAMBOX_PARALLEL_IPS=()
   # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
   # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
   # #626: the pattern MUST be anchored ('camera-box-burn-[a-z0-9]') — a bare 'camera-box-burn-'
@@ -1317,6 +1449,7 @@ cleanup() {
   # #713: backgrounded ( ... ) & -- collected+waited in the shared group below, alongside
   # cam3/4 and cam2/painter.
   (
+    cambox_parallel_stagger
     timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
       "systemctl stop camera-box-burn-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${RUN_ID} 2>/dev/null; \
        pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
@@ -1325,6 +1458,7 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("$CAMERA_NAME (source, $CAM1_IP)")
+  CAMBOX_PARALLEL_IPS+=("$CAM1_IP")
   # #624/#312: every ACTIVE secondary camera (camera_active_secondary_set(), #827) — same restore
   # as cam1, ONLY when the ALL_CAMBOX deploy above actually ran (gated the same way) so a plain
   # single-camera run never touches these boxes at all. #827 (binding owner directive): iterating
@@ -1341,6 +1475,7 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
       # #668: same stop-the-unit-first ordering as cam1 above — never let the pkill race a respawn.
       # #712: backgrounded ( ... ) & — every active secondary box restores IN PARALLEL, collected+waited below.
       (
+        cambox_parallel_stagger
         timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
           "systemctl stop camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; \
            pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
@@ -1349,6 +1484,7 @@ $(camera_box_verify_active_cmds "$_ccn ($_cip)")"
       ) &
       CAMBOX_PARALLEL_PIDS+=("$!")
       CAMBOX_PARALLEL_LABELS+=("$_ccn ($_cip)")
+      CAMBOX_PARALLEL_IPS+=("$_cip")
     done
     # #713: no per-loop wait here any more -- the SHARED wait below (after cam2/painter is
     # armed) covers cam1 + this loop + cam2/painter in one pass.
@@ -1362,6 +1498,7 @@ $(camera_box_verify_active_cmds "$_ccn ($_cip)")"
   # path, where [2b/8] never ran.
   # #713: backgrounded ( ... ) & -- collected+waited in the shared group, same as cam1/cam3-4.
   (
+    cambox_parallel_stagger
     timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
 systemctl stop camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
 systemctl reset-failed camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
@@ -1381,6 +1518,7 @@ fi"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("cam2/painter, $PAINTER_IP")
+  CAMBOX_PARALLEL_IPS+=("$PAINTER_IP")
   # #713: ONE shared wait for cam1 + (cam3/4 if ALL_CAMBOX) + cam2/painter -- the whole
   # device-restore phase's wall-clock is now bounded by the SLOWEST single box, not the sum of
   # up to 6 sequential ssh round trips.
@@ -1451,6 +1589,9 @@ fi"
   echo "[cleanup] #246/#257 clear + verify OBS burns OFF (genlock_burn=false) on strih + stream"
   for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (defined before the trap)
     _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
+    # issue 1013: an acked-offline imag never had a burn applied ([4b/8] skipped it) and is not
+    # reachable to clear/verify — skip its triple so cleanup never WARNs a phantom "burn still on".
+    if [ "$_bn" = "imag" ] && [ "$IMAG_OFFLINE_ACKED" = 1 ]; then continue; fi
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" remove --host "$_bip" --input "$_bsrc" 2>&1 \
       | sed "s/^/    [$_bn burn-clear] /" || true
     _vrf="$(timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" check --host "$_bip" --input "$_bsrc" 2>&1 || true)"
@@ -1729,6 +1870,12 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # 60fps thresholds (2fps tolerance, 1000/60≈16.67ms budget) already ARE the "activeFps >= 58 /
   # averageFrameRenderTime < 16.7ms" bar from the #758 spec — no new threshold invented here,
   # single source of truth stays the Rust binary.
+  # issue 1013: skip the imag render-health + MV-divisor leg when imag is acked-offline (both
+  # hard-abort exit 1 on an absent box). Body kept at its original indent under this guard
+  # (bash-legal; substring anchors, not indentation), matching the [0/8] imag OBS-prep guard above.
+  if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+    imag_leg_skip_note "[1/8] imag render-health + MV-divisor capability" "$IMAG_OFFLINE_ACK_REASON"
+  else
   echo "[1/8] imag render-health preflight — PROGRAM must hold its 60fps budget with MV open, sustained (#758)"
   RENDER_HEALTH_WINDOWS="${RENDER_HEALTH_WINDOWS:-5}"
   RENDER_HEALTH_WINDOW_S="${RENDER_HEALTH_WINDOW_S:-6}"
@@ -1807,6 +1954,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     fi
     echo "[preflight] WARN: ${_divisor_msg}"
   fi
+  fi   # issue 1013: end of the IMAG_OFFLINE_ACKED skip-guard over the imag render-health + divisor leg
 fi
 
 echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ $CAMERA_NAME mark, NO grab #179)"
@@ -1867,7 +2015,12 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
      --setenv=CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      $CAM1_BURN_BIN"
 sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
-preflight_mv_reverify "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
+# #1093 (a): cam1's picture is cam2-painter's HDMI, so prove the painter is genuinely PAINTING
+# before the cam-pixel probe -- a mid-restart painter must not read as a false dead leg (ordering,
+# not a longer blind window). ONCE, here only: the ALL_CAMBOX loop below runs while the painter is
+# deliberately stopped ([2b/8] -> [3/8]), so it must not wait on it. WARN-only (never blocks).
+mv_reverify_painter_up_wait "$CAM_PW" "$PAINTER_IP"
+mv_reverify_or_escalate "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 
 # #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4 into strih program —
 # without their OWN capture-burn deployed the SAME way as cam1 above, recording-verdict's
@@ -1936,7 +2089,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # sleep above (a SEPARATE pass over the same box list, so the settle timing above is unchanged).
   for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_burn%%=*}"
-    preflight_mv_reverify "$_cn" "${_cn#cam}" || exit 1
+    # #1093 (b): a wedged strih receiver here (issue 1096, cam2/cam3 legs too) escalates to the ONE
+    # per-run strih-OBS restart + a single re-check; no painter-up wait (the painter is stopped now).
+    mv_reverify_or_escalate "$_cn" "${_cn#cam}" || exit 1
   done
 fi
 
@@ -2134,10 +2289,14 @@ sleep 6  # let both OBS chains stabilise before recording
 # it to the camera-under-test's OWN scene via obs_phase2.py's existing `switch` subcommand -- the
 # SAME non-black self-check the #312 all-cambox sweep already uses, so a missing/dead imag scene
 # FAILS LOUD (bare `set -e` propagation) here instead of silently wasting the whole run.
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[4a/8] imag program-scene routing (#682)" "$IMAG_OFFLINE_ACK_REASON"
+else
 echo "[4a/8] #682 imag program-scene routing — must show $CAMERA_NAME (the camera under test)"
 IMAG_PREV_SCENE="$(python3 "$HERE/obs_phase2.py" program-scene --host "$IMAG_IP")"
 echo "    imag was on '$IMAG_PREV_SCENE' — routing to '$IMAG_PROG_SCENE' ($CAMERA_NAME)"
 python3 "$HERE/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" >/dev/null
+fi
 
 # #195/#257: PRE-RECORD BURN-ON GATE — burns MUST be ON before recording, else the run is wasted.
 # #257 made the burn a per-source `genlock_burn` bool (no OBS_BURN_QR env, no relaunch): the strih
@@ -2150,6 +2309,11 @@ python3 "$HERE/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PR
 echo "[4b/8] #195/#257 pre-record burn-ON gate — genlock_burn MUST be ON on strih + stream before recording"
 for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (same set cleanup() clears)
   _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"; _bsrc="${_brest#*=}"
+  # issue 1013: skip the imag triple when imag is acked-offline — its burn cannot be applied on an
+  # absent box, and the burn_on=True check below hard-aborts (exit 1). strih/stream stay mandatory.
+  if [ "$_bn" = "imag" ] && [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+    imag_leg_skip_note "[4b/8] imag burn-ON gate (#195/#257)" "$IMAG_OFFLINE_ACK_REASON"; continue
+  fi
   # First turn the burn ON over WebSocket (idempotent, no relaunch — #257). `|| true` so a non-zero
   # exit (e.g. OBS unreachable) does not set -e-abort before our own clear diagnostic on the check.
   python3 "$HERE/obs_burn_filter.py" add --host "$_bip" --input "$_bsrc" 2>&1 \
@@ -2316,6 +2480,17 @@ if [ "$frozen_ok" -ne 1 ]; then
   exit 1
 fi
 
+echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors must not already be rendering below floor (target − tolerance) before we commit a ~40-min run; an unreadable box / a box not yet on the #771 genlock build is report-only, only a CONFIRMED sustained collapse aborts (never false-abort a CI gate)"
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[4d1/8] imag MV-fps floor preflight (#771) — strih still checked" "$IMAG_OFFLINE_ACK_REASON"
+  mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
+    "strih|$STRIH|win|$STRIH_USER|$STRIH_PW"
+else
+mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
+  "strih|$STRIH|win|$STRIH_USER|$STRIH_PW" \
+  "imag|$IMAG_IP|linux|${IMAG_USER:-newlevel}|${IMAG_PW:-newlevel}"
+fi
+
 echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, strih+stream MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too); imag is measured too (60fps) and is STRICT as well (issue 888) — the step aborts if any of the three boxes misses its budget"
 # The 2026-07-02 regression (found when strih was STILL the 60fps LED-wall IMAG box, pre-#459): a
 # measurement burn left ON dropped strih RENDER 60->27fps (36ms > 16.6ms/60fps budget) while the
@@ -2354,6 +2529,9 @@ fi
 # under-1ms margin that motivated the relaxation. See the design comment on issue 888 for the full
 # dataset. This call is strict again: same abort shape as strih/stream, same underlying
 # render-budget-gate.py / render_budget::classify threshold (untouched throughout).
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[4d/8] imag render-budget gate (#405/#888)" "$IMAG_OFFLINE_ACK_REASON"
+else
 if ! OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
     python3 "$HERE/render-budget-gate.py" \
       --box "imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}" \
@@ -2366,7 +2544,11 @@ if ! OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
   echo "    regression, not the original #865/#886 marginal-headroom condition. See issue 888 for history." >&2
   exit 1
 fi
+fi
 
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[4e/8] imag-nb headroom preflight (#709/#845)" "$IMAG_OFFLINE_ACK_REASON"
+else
 echo "[4e/8] #709/#845 imag-nb headroom preflight — StartRecord's encoder needs real free memory (dGPU VRAM if this box has one, else system RAM on an iGPU-only box)"
 # #845: the replacement imag notebook (10.77.9.187, #816) has NO discrete GPU (Intel iGPU / i915
 # only) -- the nvidia-smi-based check below is structurally unsatisfiable there and used to abort
@@ -2439,6 +2621,7 @@ else
   fi
   echo "    ok: imag-nb has no discrete GPU (Intel iGPU / i915, unified memory) -- ${IMAG_MEM_AVAILABLE_MIB}MiB system RAM available (>= ${IMAG_MEM_MIN_AVAILABLE_MIB}MiB required)"
 fi
+fi   # issue 1013: end of the IMAG_OFFLINE_ACKED skip-guard over the [4e/8] imag headroom preflight
 
 # ============================================================================
 # #137 OPTIONAL MODE — OBS-restart A/V-sync SURVIVAL gate. OFF by default.
@@ -2990,9 +3173,13 @@ fi
 # or its success/failure — imag's fixed floor is a standing invariant, not a calibration output.
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   set +e
+  if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+    imag_leg_skip_note "[4g/8b] imag 3ms latency-floor enforce (#757)" "$IMAG_OFFLINE_ACK_REASON"
+  else
   echo "[4g/8b] #757 enforcing imag's fixed 3ms floor on every NDI input (self-healing, imag never gets per-camera equalization)"
   python3 "$HERE/imag_latency_enforce.py" --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" 2>&1 \
     | sed 's/^/    [imag-latency] /'
+  fi
   set -e
 fi
 
@@ -3096,8 +3283,12 @@ python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action start
 STRIH_RECORDING_STARTED=1   # #649: flag so cleanup()'s StopRecord-first block stops THIS box
 python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start
 STREAM_RECORDING_STARTED=1  # #649: same — set only once this box's OWN StartRecord succeeded
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[5/8] imag StartRecord (#462)" "$IMAG_OFFLINE_ACK_REASON"
+else
 python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action start
 IMAG_RECORDING_STARTED=1    # #649: same — set only once this box's OWN StartRecord succeeded
+fi
 
 # #705: snapshot the recording window's START epoch (wall clock) — the mid-recording
 # capture-rate check ([7b/8] below) bounds its journal read to EXACTLY this window, so a
@@ -3305,8 +3496,12 @@ STRIH_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STRIH"  --action
   || echo "WARNING: strih StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
 STREAM_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop) \
   || echo "WARNING: stream StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[7/8] imag StopRecord (#462)" "$IMAG_OFFLINE_ACK_REASON"
+else
 IMAG_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action stop) \
   || echo "WARNING: imag StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
+fi
 # #705: snapshot the recording window's END epoch — pairs with CAPTURE_RATE_WINDOW_START_EPOCH
 # ([5/8] above) to bound the mid-recording capture-rate check immediately below.
 CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
@@ -3940,6 +4135,15 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     echo "WARNING: #462 no imag recording path (StopRecord returned none) — imag partial NOT produced;" >&2
     echo "         the merge below will run WITHOUT --merge-partials imag=... (cam→imag proof skipped)." >&2
   fi
+  # issue 798: LOUD run-log twin of the verdict's full_chain.imag_leg_verified field — one distinct
+  # greppable line, emitted the moment the [8/8c] outcome is known, naming the skip REASON. A green
+  # run that silently skips the imag leg is a hidden partial (ONE full test, no partials). Report-
+  # only — gates nothing. NEW call line only; the imag extract lines above are byte-unchanged (#675).
+  # issue 1013: pass the acked-offline reason (3rd arg) so the marker names the true cause when imag
+  # was a KNOWN-ABSENT box this run. IMAG_OFFLINE_ACK_REASON is non-empty ONLY when imag was acked
+  # (an acked-but-reachable imag exits at the [0/8] reachability preflight, never reaching here), so
+  # a normal run passes an empty 3rd arg and keeps the unchanged #798 behaviour.
+  echo "    $(imag_leg_run_marker "${IMAG_PARTIAL:-}" "${IMAG_HOST_PATH:-}" "${IMAG_OFFLINE_ACK_REASON:-}")"
 
   # #703: EXECUTE mode — the strih [8/8a] + stream [8/8b] extracts were launched BACKGROUNDED
   # above (in parallel with each other AND with imag's own synchronous [8/8c] extract just

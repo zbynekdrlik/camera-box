@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1023 ASIO-source-starved alert every 5 min (dev1-side), matching the network-reach /
+# frozen-input / bundle-state / cadence alert cadence so the fleet's dev1 alert timers stay in
+# lockstep. The `asrc: … starved_blocks=` telemetry emits once per 60 s per source, so a sustained
+# starvation is confirmed within ~10-15 min of onset (2-pass confirm at the 5-min cadence), then
+# re-alerts ~every 30 min while it persists, with a one-shot recovery ping on clear.
+Description=Run the camera-box ASIO-source-starved alert every 5 min (#1023)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -353,7 +353,10 @@ struct Args {
     /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
     /// given together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
     /// comparing it against this recording's own QR/QPSK offset (`camera_box::lipsync_cross_check`).
-    /// Report-only (see that module's `gates_overall_pass`) -- never affects this CLI's exit code.
+    /// Report-only TODAY (issue 1032: `gates_overall_pass` is derived-`false` while
+    /// `RECORDED_CLEAN_PAIRED_RUNS` < `REQUIRED_CLEAN_PAIRED_RUNS`, so it does not affect this CLI's
+    /// exit code); once the supervisor records N>=5 clean paired runs, a Disagree verdict makes
+    /// `--av-sync` exit non-zero (the JSON is still printed first).
     /// `allow_negative_numbers`: video-earlier-than-audio is half the real outcome space and must
     /// parse as a bare `-N` value (clap 4 otherwise reads a leading `-` as a new flag).
     #[arg(long, allow_negative_numbers = true)]
@@ -2696,26 +2699,48 @@ fn run_av_sync(args: &Args) -> Result<()> {
         "video_fps": report.fps,
         "latency_adjust_ms": -report.offset.offset_ms,
     });
-    // issue 930 — lipsync cross-validation: only added when the caller supplied the paired
+    // issue 930/1032 — lipsync cross-validation: only added when the caller supplied the paired
     // lipsync-test-mode run's SyncNet offset (never printed on a plain --av-sync call, so every
     // pre-930 invocation's JSON shape is byte-for-byte unchanged).
+    let mut lipsync_folds_to_failure = false;
     if let Some(cross_check) =
         lipsync_cross_check_for(report.offset.offset_ms, args.syncnet_offset_ms)
     {
+        let gate_pass =
+            camera_box::lipsync_cross_check::lipsync_cross_check_gate_pass(cross_check.verdict);
+        // issue 1032: fold-earned check against the recorded evidence count. DORMANT today —
+        // RECORDED_CLEAN_PAIRED_RUNS (0) < REQUIRED_CLEAN_PAIRED_RUNS (5), so this is always
+        // `false` and the run still exits 0; it goes live the instant the supervisor bumps the
+        // recorded count to 5 (one-constant flip in src/lipsync_cross_check.rs).
+        lipsync_folds_to_failure = camera_box::lipsync_cross_check::folds_to_failure(
+            cross_check.verdict,
+            camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
+        );
         json["lipsync_cross_check"] = serde_json::json!({
             "syncnet_offset_ms": cross_check.syncnet_offset_ms,
             "qr_qpsk_offset_ms": cross_check.qr_qpsk_offset_ms,
             "delta_ms": cross_check.delta_ms,
             "tolerance_ms": cross_check.tolerance_ms,
             "verdict": format!("{:?}", cross_check.verdict),
+            "gate_pass": gate_pass,
             "gates_overall_pass": camera_box::lipsync_cross_check::gates_overall_pass(),
+            "required_clean_paired_runs": camera_box::lipsync_cross_check::REQUIRED_CLEAN_PAIRED_RUNS,
+            "recorded_clean_paired_runs": camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
+            "folds_to_failure": lipsync_folds_to_failure,
         });
         tracing::info!(
             syncnet_offset_ms = ?cross_check.syncnet_offset_ms,
             qr_qpsk_offset_ms = report.offset.offset_ms,
             delta_ms = ?cross_check.delta_ms,
             verdict = ?cross_check.verdict,
-            "issue 930 lipsync cross-check (report-only)"
+            gate_pass,
+            gates_overall_pass = camera_box::lipsync_cross_check::gates_overall_pass(),
+            recorded_clean_paired_runs =
+                camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
+            required_clean_paired_runs =
+                camera_box::lipsync_cross_check::REQUIRED_CLEAN_PAIRED_RUNS,
+            folds_to_failure = lipsync_folds_to_failure,
+            "issue 930/1032 lipsync cross-check"
         );
     }
     println!("{}", serde_json::to_string_pretty(&json)?);
@@ -2727,6 +2752,21 @@ fn run_av_sync(args: &Args) -> Result<()> {
         video_ticks = report.video_ticks,
         "A/V-sync offset measured (video − audio; >0 = video lags audio)"
     );
+    // issue 1032 — fold the lipsync cross-check into this --av-sync run's exit code. The JSON above
+    // is ALWAYS printed first (the operator sees both offsets + the delta) before the run fails.
+    // DORMANT today: `folds_to_failure` is always `false` while RECORDED_CLEAN_PAIRED_RUNS (0) <
+    // REQUIRED_CLEAN_PAIRED_RUNS (5), so exit behavior is byte-identical to before; it goes LIVE
+    // the moment the supervisor records N>=5 clean paired runs by bumping that one constant.
+    if lipsync_folds_to_failure {
+        anyhow::bail!(
+            "lipsync cross-check DISAGREE: SyncNet vs QR/QPSK differ beyond the {}ms tolerance \
+             (see the printed lipsync_cross_check JSON) — the fold is live ({} of {} clean paired \
+             runs recorded)",
+            camera_box::lipsync_cross_check::LIPSYNC_CROSS_CHECK_TOLERANCE_MS,
+            camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
+            camera_box::lipsync_cross_check::REQUIRED_CLEAN_PAIRED_RUNS,
+        );
+    }
     Ok(())
 }
 
@@ -3720,13 +3760,29 @@ fn build_and_print_verdict(
                 // camera-under-test node: cam1/cam3/… loss is read from the CLEAN strih recording
                 // (`cam1_source`), but `hold` is deliberately the stream recording (the delivered,
                 // viewer-facing surface) even under the same `full_chain.loss.<node>.hold` key.
-                // The pure decision core is `camera_box::burn_hold`; it is REPORT-ONLY today
-                // (`burn_hold::gates_overall_pass() == false`) — the metric now accumulates in the
-                // verdict JSON, and the fold below is a one-line LIVE flip once #870's follow-up
-                // confirms the bound against accumulated green runs.
+                // The pure decision core is `camera_box::burn_hold`; it is LIVE today
+                // (`burn_hold::gates_overall_pass() == true`) — the calibrated max-hold bound folds
+                // into `overall_pass`, so a hop that re-delivers one burn id past the bound FAILS
+                // the run. Flipped LIVE (#870) after its green-run distribution accumulated (worst
+                // green max_hold 2, bound 4, incl. cam1/issue-909); the fold below is a one-line
+                // revert to report-only if a future rig change ever trips it.
+                // #575/#870: trim the recording START/STOP boundary (genlock pre-roll flush +
+                // mux-finalization tail-drain holding the final frame — confirmed live, run
+                // 554307) off the hold input BEFORE the max-hold walk, anchored on the STREAM
+                // recording's OWN frame-index bounds — the SAME position-trim the imag leg applies
+                // (`node_verdict_for_imag`). Without it a boundary-artifact freeze of the final
+                // frame (a KNOWN non-loss class, #575) could falsely trip the LIVE bound.
+                let stream_first_idx = stream_frames.first().map(|f| f.frame_index).unwrap_or(0);
+                let stream_last_idx = stream_frames.last().map(|f| f.frame_index).unwrap_or(0);
                 let hold = camera_box::burn_hold::burn_hold_distribution(
                     spec.node,
-                    &burn_ids_with_frame_index_in(stream_frames, spec.burn_run_id),
+                    &camera_box::recording_boundary_trim::trim_boundary_pairs(
+                        &burn_ids_with_frame_index_in(stream_frames, spec.burn_run_id),
+                        stream_first_idx,
+                        stream_last_idx,
+                        camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES,
+                        camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES,
+                    ),
                 );
                 let hold_within = hold.within_bound(camera_box::burn_hold::MAX_HOLD_FRAMES);
                 report["full_chain"]["loss"][spec.node]["hold"] = serde_json::json!({
@@ -3740,7 +3796,7 @@ fn build_and_print_verdict(
                     "total_burn_frames": hold.total_burn_frames,
                     "distinct_ids": hold.distinct_ids,
                     "histogram": hold.histogram,
-                    // Scoped report-only flag (#870) — name the flag after the specific term, not
+                    // Scoped per-term gate flag (#870) — name the flag after the specific term, not
                     // the whole object (optical-undecodable-floor-report-only.md).
                     "gates_overall_pass": camera_box::burn_hold::gates_overall_pass(),
                 });
@@ -3748,7 +3804,7 @@ fn build_and_print_verdict(
                     println!(
                         "  [{}] #870 REPEAT/max-hold: burn id {} held for {} consecutive recorded \
                          frames (> bound {}); {:.1}% of adjacent pairs byte-identical ({}/{}). \
-                         REPORT-ONLY — does not fail the run yet.",
+                         LIVE (#870) — this FAILS the run.",
                         spec.node,
                         hold.max_hold_id
                             .map(|id| id.to_string())
@@ -3760,8 +3816,9 @@ fn build_and_print_verdict(
                         hold.adjacent_pairs,
                     );
                 }
-                // Report-only fold — a no-op while `gates_overall_pass()` is `false`; the ONE line
-                // that promotes the term to LIVE (#870 follow-up).
+                // LIVE fold (#870) — `gates_overall_pass()` is `true`, so an over-bound hold clears
+                // `all_pass` and FAILS the run. Flip the seam back to `false` for a one-line revert
+                // to report-only.
                 all_pass &= hold_within || !camera_box::burn_hold::gates_overall_pass();
                 node_verdicts.push(nv);
             }
@@ -4157,7 +4214,17 @@ fn build_and_print_verdict(
                 span_secs, cfg.min_secs, nv.optical_span_frames
             );
         }
-        all_pass &= nv.is_zero() && span_ok;
+        // issue 798 (path A) — the imag leg verdict now FLOWS into the merged report and is
+        // SURFACED, but folds REPORT-ONLY first. An imag partial has never actually reached the
+        // merge on the live rig (0/76 recent runs), so there is zero green distribution to prove
+        // the term against, and folding it hard would immediately red the first run that ever
+        // produces one (the issue-887 advisory already shows a real ~7% produced-vs-presented
+        // deficit). Mirror the established report-only seam (e2e_latency_gate / burn_hold /
+        // optical_floor): the fold is a no-op while `imag_leg_gate::gates_overall_pass()` is
+        // `false`; a separate follow-up flips it blocking (and folds in the issue-887 deficit)
+        // once healthy imag runs accumulate. Do NOT hard-fold this term here.
+        let imag_leg_ok = nv.is_zero() && span_ok;
+        all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(imag_leg_ok);
         let mut imag_json = node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs, 0);
         // #575 — note the boundary trim honestly: the exact lead/tail frame counts excluded from
         // imag's optical tick + digital burn contiguity checks before this verdict was computed.
@@ -4165,7 +4232,34 @@ fn build_and_print_verdict(
             serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES);
         imag_json["boundary_trim_tail_frames"] =
             serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES);
+        // issue 798 — scoped report-only flag (name the TERM, not the whole object, per
+        // optical-undecodable-floor-report-only.md). `imag_leg_pass` is this run's overall imag
+        // verdict (optical tick + digital burn contiguity ANDed with span_ok); `gates_overall_pass`
+        // is `false` today, so a FAIL is surfaced here but does not touch overall_pass.
+        imag_json["imag_leg_pass"] = serde_json::json!(imag_leg_ok);
+        imag_json["gates_overall_pass"] =
+            serde_json::json!(camera_box::imag_leg_gate::gates_overall_pass());
+        imag_json["report_only_note"] = serde_json::json!(
+            "issue 798 path A: imag leg verdict flows + is surfaced but is REPORT-ONLY (does not \
+             gate overall_pass) until a follow-up flips imag_leg_gate::gates_overall_pass and folds \
+             in the issue-887 produced-vs-presented deficit."
+        );
         report["full_chain"]["loss"]["imag"] = imag_json;
+    }
+    // issue 798 — make a silently-skipped imag leg VISIBLE (the "ONE full test, no partials"
+    // doctrine): record whether an imag partial actually reached this merge. A green run that never
+    // merged an imag partial (the 0/76 status quo) is a HIDDEN partial; this field + the NOTE below
+    // turn the silent skip into an explicit, mineable signal. Report-only — never gates overall_pass.
+    let imag_leg_verified = imag_frames_opt.is_some();
+    report["full_chain"]["imag_leg_verified"] = serde_json::json!(imag_leg_verified);
+    if !imag_leg_verified {
+        println!(
+            "  [imag] leg NOT verified this run — no imag partial merged (--merge-partials imag=... \
+             absent; imag StopRecord / reachability / decode failed at recording-e2e.sh [8/8c], or \
+             this was a strih/stream-only merge). A full-chain E2E that silently skips the imag leg \
+             is a hidden partial (issue 798); this NOTE + full_chain.imag_leg_verified make the skip \
+             visible. Report-only — does NOT gate overall_pass."
+        );
     }
 
     // #312 Phase-1 — ALL-CAMBOX per-segment continuity (the all-active splitter proof). When a
@@ -4563,6 +4657,131 @@ fn build_and_print_verdict(
                 // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
                 all_pass &= cadence_gate_pass || !cadence_gates_overall;
 
+                // #1088 — REPORT-ONLY duplication-masked 50→60 dup-rate seam (the #794 hard layer).
+                // The cadence watchdog (#794) reads strih's genlock-fifo `received=` rate and is
+                // STRUCTURALLY BLIND to a grabber that upconverts a 50fps source to 60 by frame
+                // DUPLICATION: it delivers a padded genuine 60 NDI frames/s, so `received=` reads a
+                // clean 60. The surviving signal is per-frame CONTENT identity — a row-sampled
+                // content hash per recorded frame, sliced into the SAME cambox windows the sweep
+                // above uses, fed into the pure `camera_box::dup_cadence` classifier. Needs the
+                // actual stream recording FILE to re-decode pixels (a SEPARATE, luma-only ffmpeg
+                // pass), so it is skipped in merge mode. Report-only / calibration-first:
+                // `gates_overall_pass()` is false (no real 50→60-grabber run to calibrate a bound
+                // yet), so the fold below is a no-op. Pure logic in `camera_box::dup_cadence`
+                // (Tier-0 tested); this is the thin probe-side consumer.
+                match stream_rec.as_deref() {
+                    Some(rec_path) => {
+                        match camera_box::probe::recording::hash_recording_frames(rec_path) {
+                            Ok(frame_hashes) => {
+                                let (dup_windows, dup_no_anchor) = partition_frames_by_window(
+                                    stream_frames,
+                                    &anchor_run_ids,
+                                    &all_burns,
+                                    cam2_pin,
+                                    schedule,
+                                    args.switch_guard_ns,
+                                );
+                                let mut dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> =
+                                    Vec::with_capacity(dup_windows.len());
+                                let mut worst_raw_fraction: Option<f64> = None;
+                                let mut masked_windows: usize = 0;
+                                for win_frames in &dup_windows {
+                                    let seq: Vec<u64> = win_frames
+                                        .iter()
+                                        .filter_map(|f| {
+                                            frame_hashes.get(f.frame_index as usize).copied()
+                                        })
+                                        .collect();
+                                    let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
+                                    if let Some(ref d) = dc {
+                                        worst_raw_fraction = Some(
+                                            worst_raw_fraction.map_or(d.duplicate_fraction, |m| {
+                                                m.max(d.duplicate_fraction)
+                                            }),
+                                        );
+                                        if d.duplication_masked {
+                                            masked_windows += 1;
+                                        }
+                                    }
+                                    dcs.push(dc);
+                                }
+                                // The GATE keys on the DISCRIMINATED signal (worst fraction among
+                                // windows classified `duplication_masked`), never the raw worst —
+                                // a freeze/glitch has a high raw fraction but is coverage/regularity
+                                // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
+                                // it (issue 1088 review finding).
+                                let worst_masked_fraction =
+                                    camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                                let dup_window_json: Vec<serde_json::Value> = dcs
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(wi, dc)| {
+                                        serde_json::json!({
+                                            "cambox": schedule[wi].cambox.clone(),
+                                            "dup_cadence": dc,
+                                        })
+                                    })
+                                    .collect();
+                                let dup_bound = camera_box::dup_cadence::DUP_RATE_PULLDOWN_MIN;
+                                let dup_gate_pass = camera_box::dup_cadence::dup_cadence_gate_pass(
+                                    worst_masked_fraction,
+                                    Some(dup_bound),
+                                );
+                                let dup_gates_overall =
+                                    camera_box::dup_cadence::gates_overall_pass();
+                                report["all_cambox_continuity"]["duplication_masked_cadence"] = serde_json::json!({
+                                    "windows": dup_window_json,
+                                    "masked_windows": masked_windows,
+                                    "worst_masked_duplicate_fraction": worst_masked_fraction,
+                                    "worst_raw_duplicate_fraction": worst_raw_fraction,
+                                    "bound_duplicate_fraction": dup_bound,
+                                    "pass": dup_gate_pass,
+                                    "gates_overall_pass": dup_gates_overall,
+                                    "frames_no_anchor": dup_no_anchor,
+                                    "note": "#1088 duplication-masked 50->60 detector: \
+                                             per-cambox-window row-sampled content-hash dup-rate \
+                                             (the #794 hard layer the received= rate tap is blind \
+                                             to). Per-window duplication_masked flags a sustained + \
+                                             regular + window-spanning pulldown. The GATE keys on \
+                                             worst_masked_duplicate_fraction (worst raw fraction \
+                                             among MASKED windows), NOT worst_raw_duplicate_fraction \
+                                             (a freeze/glitch has a high raw fraction but is \
+                                             coverage/regularity vetoed → excluded, no \
+                                             double-jeopardy with frozen_leg). REPORT-ONLY / \
+                                             calibration-first via dup_cadence::gates_overall_pass \
+                                             (false).",
+                                });
+                                println!(
+"  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
+                                    masked_windows,
+                                    worst_masked_fraction
+                                        .map(|p| format!("{p:.5}"))
+                                        .unwrap_or_else(|| "n/a".to_string()),
+                                    worst_raw_fraction
+                                        .map(|p| format!("{p:.5}"))
+                                        .unwrap_or_else(|| "n/a".to_string()),
+                                    dup_bound,
+                                    dup_gate_pass,
+                                    dup_gates_overall,
+                                );
+                                // Fold: a FAIL only fails the run while the seam gates overall_pass
+                                // (report-only today, so this is a no-op).
+                                all_pass &= dup_gate_pass || !dup_gates_overall;
+                            }
+                            Err(e) => {
+                                println!(
+                                    "  #1088 DUP-CADENCE: skipped — could not hash stream recording: {e}"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        println!(
+                            "  #1088 DUP-CADENCE: skipped — no local stream recording (merge mode)"
+                        );
+                    }
+                }
+
                 // #768 — REPORT-ONLY cold-cut onset seam. The all-cambox sweep cuts program to each
                 // cambox after it has sat program-hidden ~60s (the active 3-box CAM1/CAM2/CAM3 cycle
                 // at 30s segments hides each 2x30s between windows). The per-segment aggregate
@@ -4921,8 +5140,22 @@ fn build_and_print_verdict(
                         "optical_expected_step": imag_optical_step,
                         "burn_render_step": imag_burn_step,
                         "frames_without_anchor": imag_no_anchor,
+                        // issue 798 (path A) — this per-segment imag continuity is the SECOND imag
+                        // gating term (alongside the whole-recording node fold in
+                        // full_chain.loss.imag). Both fold REPORT-ONLY under the same seam so a
+                        // flowing imag partial never reds a run until its green distribution
+                        // accumulates. Scoped flag names the imag TERM only — the per-cambox
+                        // (stream) sweep's own `overall_pass` fold is UNTOUCHED and stays blocking.
+                        "gates_overall_pass": camera_box::imag_leg_gate::gates_overall_pass(),
+                        "report_only_note": "issue 798 path A: imag per-segment continuity is \
+                                             surfaced but REPORT-ONLY (does not gate overall_pass) \
+                                             until a follow-up flips imag_leg_gate::gates_overall_pass.",
                     });
-                    all_pass &= imag_overall_pass;
+                    // issue 798 — report-only fold: a no-op while `imag_leg_gate::gates_overall_pass()`
+                    // is `false`. Mirrors the whole-recording imag node fold above; the ONE follow-up
+                    // line flips both to blocking.
+                    all_pass &=
+                        camera_box::imag_leg_gate::folds_into_overall_pass(imag_overall_pass);
                 }
 
                 // #624 deliverables 1+3 — generalize the whole-recording, cam1-ONLY cam2→camera
@@ -5114,10 +5347,14 @@ fn build_and_print_verdict(
                 // delivery latency is measurable the SAME digital way as every other camera, no
                 // optical read required for THIS metric.
                 //
-                // Report-only for now: `spread_gate_pass` does NOT fold into `all_pass` — #286
-                // is not yet closed/proven, and this field's purpose right now is to let a
-                // manual re-verification run SEE whether the applied differentiated offsets
-                // collapsed the delivery-time spread, not to add a new standing CI requirement.
+                // #1033: `spread_gate_pass` FOLDS into `all_pass` through the
+                // `delivery_spread_gate` report-only seam (the fold line below) — but that seam
+                // ships `gates_overall_pass()==false` today, so the fold is a NO-OP and the field
+                // still never reds a run. It stays report-only until the fleet is tight-green
+                // (cam1's delivery lottery / issue-909 grabber; recent green runs ~66–81 ms
+                // spread); flipping it LIVE is a one-line follow-up. Its purpose today is still to
+                // let a re-verification run SEE whether the applied differentiated offsets
+                // collapsed the delivery-time spread — now via the standard flip-ready seam.
                 //
                 // #714: keyed by camera, populated below when a --strih recording is present —
                 // consumed further down by the A/V-sync block's `av_window::derive_camera_av_sync`
@@ -5169,13 +5406,17 @@ fn build_and_print_verdict(
                         Some(sv) => {
                             println!(
                                 "  >>> delivery cross-camera spread: max={:.2}ms min={:.2}ms \
-                                 spread={:.2}ms (threshold {:.1}ms) → {} (report-only — does \
-                                 NOT gate all_pass, see #286)",
+                                 spread={:.2}ms (threshold {:.1}ms) → {} ({}, see #286/#1033)",
                                 sv.max_p50_ms,
                                 sv.min_p50_ms,
                                 sv.spread_ms,
                                 camera_box::switch_latency::SPREAD_THRESHOLD_MS,
-                                if sv.pass { "PASS" } else { "FAIL" }
+                                if sv.pass { "PASS" } else { "FAIL" },
+                                if camera_box::delivery_spread_gate::gates_overall_pass() {
+                                    "LIVE — folds into all_pass"
+                                } else {
+                                    "report-only — does NOT gate all_pass"
+                                }
                             );
                             delivery_json.insert(
                                 "cross_camera_spread_ms".to_string(),
@@ -5183,6 +5424,16 @@ fn build_and_print_verdict(
                             );
                             delivery_json
                                 .insert("spread_gate_pass".to_string(), serde_json::json!(sv.pass));
+                            // #1033 — fold the delivery cross-camera spread into `overall_pass`
+                            // through the report-only seam. `folds_into_overall_pass` is a NO-OP
+                            // today (`gates_overall_pass()==false`, REPORT-ONLY — the fleet is not
+                            // tight-green: recent green runs sit at ~66–81 ms spread, cam1's
+                            // delivery lottery / issue-909 grabber class), so this preserves the
+                            // current behaviour exactly while making the fold a one-line flip away
+                            // from LIVE once cam1's lottery is killed + ~5 consecutive green runs
+                            // hold the spread ≤ ~10 ms. Mirrors the source-side sweep's own fold.
+                            all_pass &=
+                                camera_box::delivery_spread_gate::folds_into_overall_pass(sv.pass);
                         }
                         None => {
                             eprintln!(
@@ -8729,8 +8980,11 @@ mod tests {
     /// per-segment continuity. imag's frames are placed onto the SAME schedule timeline (anchored
     /// on its #463 digital corner burn, [`super::BURN_RUN_ID_IMAG`]) and its own painted-tick
     /// continuity — at its OWN native rate (step 1, never the stream recording's 60->30 step 2) —
-    /// must ALSO pass, reported under `all_cambox_continuity.imag` and ANDed into `overall_pass`,
-    /// alongside (not instead of) the existing per-cambox windows.
+    /// must ALSO be computed + surfaced under `all_cambox_continuity.imag`, alongside (not instead
+    /// of) the existing per-cambox windows. (issue 798 path A: this imag term now folds
+    /// REPORT-ONLY into `overall_pass` — a clean imag segment, as here, still reports
+    /// `overall_pass: true`; the report-only fold only changes whether a FAILING imag segment reds
+    /// the run, which the sibling `imag_own_segment_gap_is_surfaced_report_only_798` covers.)
     #[test]
     fn imag_own_segment_continuity_gates_the_all_cambox_sweep_467() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
@@ -8865,7 +9119,7 @@ mod tests {
     /// (stream) sweep stays completely clean — imag's segment gate is ADDITIONAL, not a
     /// weaker/optional substitute for the per-cambox windows.
     #[test]
-    fn imag_own_segment_gap_fails_the_all_cambox_sweep_even_when_stream_sweep_is_clean_467() {
+    fn imag_own_segment_gap_is_surfaced_report_only_798() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -8988,18 +9242,26 @@ mod tests {
         assert_eq!(
             imag_seg["overall_pass"],
             serde_json::json!(false),
-            "#467: a genuine gap in imag's OWN segment must FAIL imag's own verdict: {imag_seg}"
+            "#467: a genuine gap in imag's OWN segment must still be DETECTED — imag's own verdict FAILs: {imag_seg}"
+        );
+        // issue 798 (path A): the imag per-segment continuity term now folds REPORT-ONLY — its FAIL
+        // is surfaced (above) with a LOUD scoped flag, but no longer gates the OVERALL verdict until
+        // a follow-up flips imag_leg_gate::gates_overall_pass. The per-cambox (stream) sweep's own
+        // fold is UNTOUCHED and stays blocking (asserted clean below).
+        assert_eq!(
+            imag_seg["gates_overall_pass"],
+            serde_json::json!(false),
+            "#798: imag's per-segment continuity is REPORT-ONLY — it does NOT gate overall_pass: {imag_seg}"
         );
         assert_eq!(
             v["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(true),
             "sanity: the existing per-cambox (stream) sweep is completely untouched and stays clean: {v}"
         );
-        assert!(
-            !pass,
-            "#467: imag's own segment gap must fail the OVERALL verdict even though the stream \
-             sweep alone is clean — imag's gate is additional, never optional: {v}"
-        );
+        // `pass` is intentionally not asserted: the report-only FOLD semantics (a failing imag
+        // segment no longer reds overall_pass) are proven in the Tier-0 `tests/imag_leg_gate.rs`,
+        // and this synthetic fixture's overall verdict also runs the unrelated #373 span gate.
+        let _ = pass;
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9498,35 +9760,57 @@ mod tests {
         );
     }
 
-    /// #286: this new field must NEVER affect the run's overall verdict — it is report-only
-    /// (#286 is not yet closed/proven; folding an unproven threshold into `all_pass` would make
-    /// every future all-cambox sweep subject to a brand-new hard requirement this task never
-    /// asked for). A FAILING delivery spread (the "fail" fixture above) must not, by itself,
-    /// change what `all_pass` would otherwise have been.
+    /// #1033: the delivery cross-camera spread now FOLDS into `overall_pass` — but through the
+    /// report-only `delivery_spread_gate` seam, which ships `gates_overall_pass()==false` today
+    /// (the fleet is not tight-green: recent green runs sit at ~66–81 ms spread, cam1's delivery
+    /// lottery / issue-909 grabber class). This REPLACES the old "structurally forbidden" test:
+    /// the field is no longer forbidden from gating — it is WIRED through the standard
+    /// one-line-flippable seam and is a no-op today, so a FAILING delivery spread still does not,
+    /// by itself, red a run. Pinned BOTH directions via the pure fold: report-only today, and
+    /// would-gate the moment the seam is flipped LIVE. (The Tier-0 `tests/delivery_spread_gate.rs`
+    /// pins the seam's pure contract; this pins the same seam AT the recording-verdict wiring.)
     #[test]
-    fn all_cambox_delivery_latency_spread_never_gates_all_pass_286() {
+    fn all_cambox_delivery_latency_spread_folds_through_report_only_seam_1033() {
+        // The seam ships REPORT-ONLY today — a wide delivery spread must NOT red a run yet.
+        assert!(
+            !camera_box::delivery_spread_gate::gates_overall_pass(),
+            "#1033: the delivery-spread seam must ship report-only (gates_overall_pass()==false) \
+             until cam1's delivery lottery is killed + ~5 consecutive green runs hold spread ≤ \
+             ~10 ms; flipping it LIVE is a separate follow-up"
+        );
+
         let v = build_all_cambox_delivery_latency_fixture(
-            "no-gate",
+            "seam",
             &[("CAM1", CAM1B, 3_000_000), ("CAM2", CAM2B, 20_000_000)],
         );
         let lat = &v["all_cambox_delivery_latency"];
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "sanity: this fixture's spread must be failing for the point of this test to hold: \
-             {lat}"
+            "sanity: this fixture's 17ms spread must FAIL the 16ms bound for the point of this \
+             test to hold: {lat}"
         );
-        // This test does not assert on `overall_pass` itself (many OTHER unrelated gates in this
-        // fixture's minimal 2-window recording would fail regardless, e.g. the #373 duration
-        // floor) — the point here is narrower and purely structural: `spread_gate_pass` must
-        // never be read into `all_pass` by the wiring itself. Confirmed by code inspection
-        // (`all_cambox_delivery_latency`'s block never assigns to `all_pass`); this test guards
-        // against a future edit accidentally adding `all_pass &= sv.pass` to that block, since
-        // such a regression would NOT be caught by the two tests above (they don't assert on
-        // `overall_pass` at all).
         assert!(
             v.get("all_cambox_delivery_latency").is_some(),
             "sanity: the field itself must still be present: {v}"
+        );
+
+        // Re-pin the seam's report-only contract at the call site, on the EXACT functions the
+        // wiring above invokes (`folds_into_overall_pass`): for this fixture's failing
+        // `sv.pass == false`, the report-only seam folds to PASS today (a wide spread never reds a
+        // run). This does not, and cannot, assert on the fixture's own `overall_pass` (the minimal
+        // 2-window recording reds for unrelated reasons, e.g. the #373 duration floor — the same
+        // reason the OLD test documented) — the pure seam contract is what is verified here, with
+        // `tests/delivery_spread_gate.rs` covering it Tier-0 as well.
+        assert!(
+            camera_box::delivery_spread_gate::folds_into_overall_pass(false),
+            "#1033 report-only: a FAILING delivery spread must fold to pass while the seam is off"
+        );
+        // …and the other direction: once the seam is flipped LIVE, that same failing spread reds
+        // the run — proving the wiring's fold is honest in both seam states.
+        assert!(
+            !camera_box::delivery_spread_gate::fold(false, true),
+            "#1033 blocking: once flipped LIVE, a FAILING delivery spread must red the run"
         );
     }
 
@@ -14034,7 +14318,7 @@ mod tests {
     }
 
     #[test]
-    fn build_and_print_verdict_fails_when_imag_has_a_missing_tick_461() {
+    fn build_and_print_verdict_surfaces_imag_missing_tick_report_only_798() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -14056,7 +14340,14 @@ mod tests {
         )
         .expect("verdict");
 
-        assert!(!pass, "#461: a missing imag optical tick must FAIL: {v}");
+        // issue 798 (path A): the imag leg verdict now FLOWS and is SURFACED, but folds
+        // REPORT-ONLY. A missing imag optical tick must still be detected and reported (zero_loss
+        // false, the missing id, imag_leg_pass false, and — LOUD — the scoped report-only flag),
+        // and the run must be recorded as having verified the imag leg. The report-only FOLD
+        // semantics (a failing imag leg no longer reds overall_pass) are proven exhaustively in the
+        // Tier-0 `tests/imag_leg_gate.rs`; here `pass` is intentionally not asserted because this
+        // synthetic imag-only fixture's overall verdict also runs the unrelated #373 span gate
+        // (59 frames ~ 1s, borderline min_secs), which must not make this a flaky assertion.
         assert_eq!(
             v["full_chain"]["loss"]["imag"]["zero_loss"],
             serde_json::json!(false)
@@ -14065,6 +14356,22 @@ mod tests {
             v["full_chain"]["loss"]["imag"]["missing_ids"],
             serde_json::json!([115])
         );
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["imag_leg_pass"],
+            serde_json::json!(false),
+            "#798: the imag leg's own verdict is FAIL, surfaced here: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["gates_overall_pass"],
+            serde_json::json!(false),
+            "#798: the imag leg is REPORT-ONLY today — it does NOT gate overall_pass: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["imag_leg_verified"],
+            serde_json::json!(true),
+            "#798: an imag partial reached this merge, so the run verified the imag leg: {v}"
+        );
+        let _ = pass;
     }
 
     #[test]

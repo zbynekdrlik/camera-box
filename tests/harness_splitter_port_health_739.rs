@@ -139,6 +139,44 @@ fn parse_reachable_but_no_recent_capture_line() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// #1079 — the parser must carry the new per-frame spatial-roughness metric (rough=), so the dev1
+// watchdog can read + surface it fleet-wide alongside u_dev/v_dev to catch the Elgato purple-noise
+// no-signal mode the colour/grayscale label alone misses. Backward-compatible: an old (not-yet-
+// redeployed) cambox's chroma line has no rough= and must yield rough=- (a placeholder, never a
+// bogus number), so a rolling fleet redeploy is safe.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn parse_carries_rough_when_present_1079() {
+    let out = stdout_of(
+        "splitter_health_parse_probe $'PROBE_OK\\ncapture chroma: u_dev=6.1 v_dev=8.8 rough=52.3 -> colour'",
+    );
+    assert!(
+        out.contains("rough=52.3"),
+        "must carry rough when present: {out}"
+    );
+    // the pre-existing fields are unchanged by the additive rough= term.
+    assert!(out.contains("colour=1"), "'-> colour' still parses: {out}");
+    assert!(
+        out.contains("u_dev=6.1") && out.contains("v_dev=8.8"),
+        "u/v unchanged: {out}"
+    );
+}
+
+#[test]
+fn parse_rough_is_dash_when_absent_1079() {
+    // an old cambox logs the OLD line (no rough=) -> the record must still carry rough=- so the
+    // field is always present and the watchdog's read-once consumer never mis-aligns.
+    let out = stdout_of(
+        "splitter_health_parse_probe $'PROBE_OK\\ncapture chroma: u_dev=7.2 v_dev=15.9 -> colour'",
+    );
+    assert!(
+        out.contains("rough=-"),
+        "old line (no rough=) must yield rough=-: {out}"
+    );
+    assert!(out.contains("u_dev=7.2"), "u_dev still parsed: {out}");
+}
+
+// ---------------------------------------------------------------------------------------------
 // splitter_health_is_healthy <reachable> <capturing> <colour> -> 1 | 0
 //   A "proven-good sibling": reachable AND capturing AND colour.
 // ---------------------------------------------------------------------------------------------

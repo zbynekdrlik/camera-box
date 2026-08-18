@@ -318,10 +318,22 @@ void OBSBasicProperties::on_buttonBox_clicked(QAbstractButton *button)
 		obs_data_set_string(new_settings, "undo_uuid", obs_source_get_uuid(source));
 		obs_data_set_string(oldSettings, "undo_uuid", obs_source_get_uuid(source));
 
-		std::string undo_data(obs_data_get_json(oldSettings));
-		std::string redo_data(obs_data_get_json(new_settings));
+		/* camera-box #773: obs_data_get_json() can return NULL (json_dumps failure);
+		 * std::string(NULL) is undefined behaviour (crash), the same NULL-deref class
+		 * as CheckSettings above. NULL-coalesce before constructing the strings, log the
+		 * anomaly, and skip registering an undo action we cannot faithfully reconstruct. */
+		const char *undo_json = obs_data_get_json(oldSettings);
+		const char *redo_json = obs_data_get_json(new_settings);
+		if (!undo_json || !redo_json)
+			blog(LOG_WARNING,
+			     "OBSBasicProperties: settings JSON unavailable on save (undo=%s redo=%s) "
+			     "for '%s' -- skipping undo action (camera-box #773)",
+			     undo_json ? "ok" : "null", redo_json ? "ok" : "null",
+			     obs_source_get_name(source));
+		std::string undo_data(undo_json ? undo_json : "");
+		std::string redo_data(redo_json ? redo_json : "");
 
-		if (undo_data.compare(redo_data) != 0)
+		if (undo_json && redo_json && undo_data.compare(redo_data) != 0)
 			main->undo_s.add_action(QTStr("Undo.Properties").arg(obs_source_get_name(source)), undo_redo,
 						undo_redo, undo_data, redo_data);
 
@@ -461,13 +473,43 @@ void OBSBasicProperties::Init()
 	show();
 }
 
+/* camera-box #773: NULL-safe settings-JSON comparison. obs_data_get_json() returns NULL when
+ * json_dumps() fails (libobs/obs-data.c) -- the reachable trigger here (the dialog holds a strong
+ * source ref, so obs_source_get_settings() is non-NULL; the !oldJson leg is defensive against an
+ * obs_data_get_json(NULL) should that invariant ever change). Stock CheckSettings passed the
+ * result straight into strcmp(), and the live strih crash log (Crash 2026-07-15 18-46-03.txt)
+ * shows an access violation inside ucrtbase!strcmp reached from CheckSettings+0x3b via closeEvent
+ * -> reject -> CheckSettings -- consistent with a NULL json (the printed Params[0]=0x0 corroborates
+ * but the x64 crash handler prints stack home slots, not the live strcmp register args, so it is
+ * corroborating, not conclusive). Treat an unreadable current/old JSON as "no detectable change"
+ * (0) so the dialog closes cleanly instead of dereferencing NULL -- and without popping a
+ * Save/Discard prompt on settings we cannot even serialise. This helper stays PURE (it is
+ * lift-compiled under -Werror by tests/prop_dialog_checksettings_null_guard_773.rs); the anomaly
+ * is logged at the CALL SITES. */
+static int settings_json_diff(const char *currentJson, const char *oldJson)
+{
+	if (!currentJson || !oldJson)
+		return 0;
+	return strcmp(currentJson, oldJson);
+}
+
 int OBSBasicProperties::CheckSettings()
 {
 	OBSDataAutoRelease currentSettings = obs_source_get_settings(source);
 	const char *oldSettingsJson = obs_data_get_json(oldSettings);
 	const char *currentSettingsJson = obs_data_get_json(currentSettings);
 
-	return strcmp(currentSettingsJson, oldSettingsJson);
+	/* camera-box #773: surface the anomaly instead of silently swallowing it -- a NULL here means
+	 * obs_data_get_json() could not serialise the settings (json_dumps failure), the exact state
+	 * behind the original crash. Log it so a recurrence leaves a trace in the OBS log. */
+	if (!currentSettingsJson || !oldSettingsJson)
+		blog(LOG_WARNING,
+		     "OBSBasicProperties::CheckSettings: settings JSON unavailable (current=%s old=%s) "
+		     "for '%s' -- treating as unchanged (camera-box #773)",
+		     currentSettingsJson ? "ok" : "null", oldSettingsJson ? "ok" : "null",
+		     obs_source_get_name(source));
+
+	return settings_json_diff(currentSettingsJson, oldSettingsJson);
 }
 
 bool OBSBasicProperties::ConfirmQuit()

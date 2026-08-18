@@ -214,12 +214,29 @@ pub mod zero_loss_restart_survival;
 // `docs/genlock-latency-floor-rationale.md`.
 pub mod jitter_audit;
 
+// #811 — resolume-snv (CG box) frame-loss-free playback verdict. Given ONE
+// resolume NDI input's genlock-FIFO AuditSummary window (from the jitter_audit
+// pipeline above), decide PASS/FAIL against the ticket's acceptance bounds
+// (skew flat ±20 ms + zero drop/underrun/relock/late-hold/backward-regime
+// deltas). Cadence-agnostic (resolume is a non-60 CG source, #787). Pure
+// Tier-0 std, self-contained (standalone-rustc testable); the crate consumer
+// is `genlock-jitter-report --verdict-source`.
+pub mod resolume_playback;
+
 // #771 — MV fps observability: parse the vendored libobs `multiview-audit:` log line (the
 // per-projector real render cadence emitted every ~5s by render_display()) + apply the
-// canvas/2 alarm floor (byte-identical to obs_multiview_floor_fps() in obs-display-budget.h).
+// target − tol alarm floor (target = canvas/effective_divisor; byte-identical to
+// obs_multiview_floor_fps() in obs-display-budget.h, #776).
 // Pure Tier-0 (no probe/OBS/rig); the E2E-preflight / drift-guard consumer is the thin
 // `src/bin/mv-fps-gate.rs`. The receive-side NDI cadence is separate (jitter_audit above).
 pub mod mv_audit;
+
+// #1029 — PROGRAM-render observability: parse the vendored libobs `program-render-audit:` log
+// line (the PROGRAM output's own render_fps + renderSkipped/lagged delta emitted every ~5s by
+// obs_graphics_thread_loop()) + the `is_render_path_jump` discriminator. Pure Tier-0 (no
+// probe/OBS/rig), report-only (the gate for this class is issue 798). Sibling of mv_audit (the
+// monitoring-surface render cadence) and jitter_audit (the receive-side NDI cadence).
+pub mod program_render_audit;
 
 // #624 — cross-camera cam2->camera switch-latency SPREAD gate (pure decision): given each
 // camera's measured cam2->camera median (p50) latency (the per-camera photon->dequeue latency
@@ -317,6 +334,15 @@ pub mod capture_stall;
 // field on `CamboxSegment` (REPORTED metric first — not yet gate-enforced pending calibration).
 pub mod presentation_cadence;
 
+// #1088 — duplication-masked 50->60 source-cadence detector (pure decision). Given a sequence of
+// per-frame CONTENT hashes in recorded order, counts exact consecutive duplicates and classifies
+// whether the pattern is the sustained, regularly-spaced duplication of a 5:6 pulldown (a grabber
+// padding a 50fps source up to 60 — the #794 hard layer the receiver-side `received=` rate tap is
+// structurally blind to) versus the isolated free-running beat / over-rate baselines. No probe
+// deps, so it unit-tests Tier-0; the probe-gated `bin/recording-verdict.rs` computes the per-frame
+// hash from the offline recording and reports the result REPORT-ONLY (pending calibration).
+pub mod dup_cadence;
+
 // #707 EVENT-FORENSICS — per-event residual copy/gap detection (pure decision). Given the same
 // per-frame painted-tick data `presentation_cadence`/`painted_tick_gaps` already consume, locates
 // SPECIFIC recorded frames as Copy/Gap events (frame index, tick values, wall-clock second, switch-
@@ -364,7 +390,18 @@ pub mod burn_hold;
 // that let issue 767 through). Pure crate-root logic (Tier-0), consumed thinly by recording-verdict.
 pub mod cold_cut;
 pub mod e2e_latency_gate;
+// issue 798 (path A) — REPORT-ONLY seam for the imag-leg recording verdict: makes the imag verdict
+// flow into overall_pass as a report-only term first (the imag partial reaches the merge 0/76 runs
+// today), one-line-flippable to blocking by a follow-up. Pure crate-root logic (Tier-0), consumed
+// thinly by recording-verdict.
+pub mod imag_leg_gate;
 pub mod optical_floor;
+
+// issue 1033 — the ALL-CAMBOX cross-camera DELIVERY-latency spread gate: REPORT-ONLY today (the
+// fleet data is not tight-green — cam1's delivery lottery), one-line-flippable to blocking by a
+// follow-up. Pure crate-root logic (Tier-0), consumed thinly by recording-verdict; reuses the
+// switch_latency 16 ms bound (no new constant).
+pub mod delivery_spread_gate;
 
 // #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become
 // REPORT-ONLY (still computed, still printed, no longer fail the window/run). No probe deps, so

@@ -4,13 +4,14 @@
 //! Multiview projector, a line carrying its ACTUAL measured render cadence:
 //!
 //! ```text
-//! multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=1920 cy=1080
+//! multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080
 //! ```
 //!
 //! so the multiview fps is VISIBLE in the OBS log and can be alarmed on a collapse (the user's
 //! binding "multiview musí byť plynulé a merané" requirement). This module is the pure Tier-0
 //! authority (default features, no probe/OBS/rig) for:
-//!   - `mv_floor_fps` — the `canvas/2 − tolerance` alarm floor, byte-identical to the C
+//!   - `mv_floor_fps` — the `target − tolerance` alarm floor (target = canvas/effective_divisor,
+//!     the ~30fps-cell rate the projector actually renders at post-#776), byte-identical to the C
 //!     `obs_multiview_floor_fps()` in `obs-display-budget.h` so the emitter, the E2E gate, and
 //!     drift-guard all apply the SAME threshold;
 //!   - `parse_audit_line` — a mutually-non-substring `multiview-audit:` marker + `key=value`
@@ -21,7 +22,7 @@
 //! The receive-side NDI cadence is a SEPARATE, already-covered layer (`genlock-fifo audit
 //! received=/consumed=`, `jitter_audit.rs`); this module is strictly the MV RENDER cadence.
 
-/// fps jitter band subtracted below the `canvas/2` floor. Same 2 fps band as
+/// fps jitter band subtracted below the target floor. Same 2 fps band as
 /// `render_budget::FPS_TOLERANCE`; byte-identical to `MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS` in
 /// `obs-display-budget.h`.
 pub const MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS: f64 = 2.0;
@@ -30,12 +31,19 @@ pub const MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS: f64 = 2.0;
 /// all parser families can run over one log independently.
 pub const MARKER: &str = "multiview-audit:";
 
-/// The MV-fps alarm floor for a canvas rate: `canvas_fps/2 − tolerance` (#771 design), clamped
-/// to `>= 0`. Byte-identical to the C `obs_multiview_floor_fps()` — the emitter prints this and
-/// the gate re-derives it, so they can never diverge. The `canvas/2` model is the design
-/// default; the exact floor is calibrated against a measured-healthy rig (the ticket flags this).
-pub fn mv_floor_fps(canvas_fps: f64) -> f64 {
-    let floor = canvas_fps / 2.0 - MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS;
+/// The MV-fps alarm floor for a projector's TARGET rate: `target_fps − tolerance`, clamped to
+/// `>= 0`. `target_fps = canvas_fps / effective_divisor` — the ~30fps-cell rate the projector
+/// actually renders at (both broadcast boxes: strih 30fps canvas / divisor 1, imag 60fps canvas
+/// / divisor 2, both → target 30 → floor 28). Byte-identical to the C `obs_multiview_floor_fps()`
+/// — the emitter prints this (feeding it the same `target_fps` it computed) and the gate reads it
+/// back off the line, so they can never diverge.
+///
+/// #776: the floor tracks the TARGET, not `canvas/2`. The pre-#776 `canvas/2` model assumed every
+/// throttleable projector used divisor 2 (MV = canvas/2); once #879 derives the divisor from the
+/// canvas rate, a 30fps-canvas box renders MV at divisor 1 = 30fps, so `canvas/2` (= 13) is half
+/// the real target and a genuine collapse to ~14–27fps would slip under it unalarmed.
+pub fn mv_floor_fps(target_fps: f64) -> f64 {
+    let floor = target_fps - MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS;
     if floor < 0.0 {
         0.0
     } else {
@@ -221,13 +229,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn floor_matches_the_canvas_over_two_minus_tolerance_model() {
-        // strih 30fps canvas -> 30/2 - 2 = 13
-        assert_eq!(mv_floor_fps(30.0), 13.0);
-        // imag 60fps canvas -> 60/2 - 2 = 28
-        assert_eq!(mv_floor_fps(60.0), 28.0);
-        // degenerate low canvas never yields a negative floor
-        assert_eq!(mv_floor_fps(1.0), 0.0);
+    fn floor_tracks_the_effective_target_not_canvas_over_two() {
+        // #776: after the canvas-rate divisor derivation, BOTH broadcast boxes render
+        // Multiview cells at 30fps -- strih (30fps canvas, effective divisor 1) and imag
+        // (60fps canvas, effective divisor 2). The alarm floor must track that ACTUAL target
+        // (30fps), NOT the pre-#776 `canvas/2` assumption -- which put strih's floor at
+        // 30/2 - 2 = 13 (half the real 30fps target), so a collapse of the 30fps strih MV to
+        // ~14-27fps slipped under the floor unalarmed. mv_floor_fps takes the TARGET fps.
+        use crate::render_budget::effective_render_divisor;
+
+        // strih: 30fps canvas (interval 33.3ms) -> effective divisor 1 -> target 30fps.
+        let strih_target = 30.0 / effective_render_divisor(2, 33_333_333) as f64;
+        // imag: 60fps canvas (interval 16.7ms) -> effective divisor 2 -> target 30fps.
+        let imag_target = 60.0 / effective_render_divisor(2, 16_666_667) as f64;
+        assert_eq!(strih_target, 30.0);
+        assert_eq!(imag_target, 30.0);
+
+        // Both boxes now floor at target - tolerance = 28 (the already-proven-healthy imag
+        // floor; strih was wrongly 13 while its MV renders 30fps).
+        assert_eq!(mv_floor_fps(strih_target), 28.0);
+        assert_eq!(mv_floor_fps(imag_target), 28.0);
+
+        // Degenerate: never a negative floor.
+        assert_eq!(mv_floor_fps(2.0), 0.0); // 2 - 2 = 0 exactly
+        assert_eq!(mv_floor_fps(1.0), 0.0); // clamped
         assert_eq!(mv_floor_fps(0.0), 0.0);
     }
 
@@ -241,27 +266,30 @@ mod tests {
 
     #[test]
     fn classify_passes_at_or_above_floor_and_alarms_below() {
-        assert!(classify(30.0, 13.0).is_pass());
-        assert!(classify(13.0, 13.0).is_pass()); // exactly at the floor passes
-        assert!(!classify(12.9, 13.0).is_pass());
-        assert!(!classify(0.0, 13.0).is_pass()); // frozen
-        assert!(!classify(f64::NAN, 13.0).is_pass()); // non-finite alarms
+        assert!(classify(30.0, 28.0).is_pass());
+        assert!(classify(28.0, 28.0).is_pass()); // exactly at the floor passes
+        assert!(!classify(27.9, 28.0).is_pass());
+        assert!(!classify(0.0, 28.0).is_pass()); // frozen
+        assert!(!classify(f64::NAN, 28.0).is_pass()); // non-finite alarms
     }
 
     #[test]
     fn parse_a_real_emitted_line() {
-        let line = "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=1920 cy=1080";
+        let line = "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080";
         let s = parse_audit_line(line).expect("should parse");
         assert_eq!(s.monitor, 1);
         assert_eq!(s.divisor, 1);
         assert!((s.rendered_fps - 30.0).abs() < 1e-9);
         assert!((s.target_fps - 30.0).abs() < 1e-9);
-        assert!((s.floor_fps - 13.0).abs() < 1e-9);
+        assert!((s.floor_fps - 28.0).abs() < 1e-9);
         assert_eq!(s.cx, 1920);
         assert_eq!(s.cy, 1080);
-        // canvas reconstructed from target*divisor, and the printed floor matches mv_floor_fps
+        // canvas reconstructed from target*divisor; the printed floor matches mv_floor_fps applied
+        // to the TARGET (post-#776 the floor tracks target, not canvas -- here canvas==target==30
+        // because divisor==1, but for a divisor=2 imag line canvas=60/target=30 and only target
+        // yields the correct floor).
         assert!((s.canvas_fps() - 30.0).abs() < 1e-9);
-        assert!((mv_floor_fps(s.canvas_fps()) - s.floor_fps).abs() < 1e-9);
+        assert!((mv_floor_fps(s.target_fps) - s.floor_fps).abs() < 1e-9);
     }
 
     #[test]
@@ -287,9 +315,9 @@ mod tests {
     #[test]
     fn latest_per_monitor_keeps_the_last_sample_per_projector() {
         let log = "\
-multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=1920 cy=1080
+multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080
 multiview-audit: monitor=2 divisor=2 rendered_fps=30.0 target=30 floor=28.0 cx=1280 cy=720
-multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=1920 cy=1080
+multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=1920 cy=1080
 ";
         let latest = latest_per_monitor(log);
         assert_eq!(latest.len(), 2);
@@ -306,16 +334,16 @@ multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=19
         );
 
         let clean = "\
-multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=1920 cy=1080
+multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080
 multiview-audit: monitor=2 divisor=2 rendered_fps=29.0 target=30 floor=28.0 cx=1280 cy=720
 ";
         assert!(matches!(gate_log(clean), GateOutcome::Clean(v) if v.len() == 2));
 
-        // monitor=1 collapses to 9fps (< floor 13) on its latest sample -> Breach.
+        // monitor=1 collapses to 9fps (< floor 28) on its latest sample -> Breach.
         let breach = "\
-multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=1920 cy=1080
+multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080
 multiview-audit: monitor=2 divisor=2 rendered_fps=29.0 target=30 floor=28.0 cx=1280 cy=720
-multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=1920 cy=1080
+multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=1920 cy=1080
 ";
         match gate_log(breach) {
             GateOutcome::Breach(b) => {

@@ -610,3 +610,105 @@ update dev1's `.mcp.json` `linux-imag-nb` entry. The key is charset-guarded (`ca
 would make the installer silently discard the pre-seed and generate a DIFFERENT key while the
 `systemctl is-active` gate still passes) or run command substitution. cam1-4 remain hand-installed
 until `setup-device.sh` gains the same step (a candidate follow-up).
+
+## Projector openers must be COUNT-FIRST — the SEEDER dedups, not just the gate (#769)
+
+`OpenVideoMixProjector` (obs-websocket) ALWAYS opens a NEW window — the protocol has no "is a
+projector open" query. OBS's own `CloseExistingProjectors=true` replace-loop (seeded by
+`setup-imag.sh`, #756) only closes projectors whose INTERNAL `GetMonitor() == the target monitor`,
+so a launch-restore stray (recreated WINDOWED, internal monitor = -1) is invisible to it. So a BLIND
+opener stacks one more window every call while any stray survives → the live "3× Multiview, gate
+refuse" incident (2026-07-15).
+
+- **`imag_scenes.py::projector(obs, host)` is count-first (#769):** after opening each kind it
+  enumerates `Projector - <kind>` windows with `wmctrl -l` and closes the OLDER strays, KEEPING THE
+  NEWEST (highest numeric X window id == the one it just opened on the correct monitor). This runs on
+  every boot (`imag-obs-start.sh`) and every watchdog tier-a relaunch (`imag-obs-watchdog.py`), which
+  both call `--host 127.0.0.1` — so the stack never forms on the LIVE box between gate runs, and the
+  watchdog inherits the fix for free (it calls the same seed).
+- **KEEP NEWEST, never keep-oldest + re-fullscreen** (the ticket's original prescription was WRONG):
+  `wmctrl -b add,fullscreen` changes the X window state, NOT OBS's internal monitor index, so the
+  replace loop still can't see a windowed stray — see `scripts/lib/imag-projector-heal.sh`'s own
+  header. The fresh open always has the highest id, so keep-newest keeps the correctly-placed window.
+- **wmctrl local vs remote, mirroring `_lspci_query_local`/`_lspci_query_remote` + `_is_local_host`:**
+  local subprocess for the loopback boot/watchdog path, `sshpass` (`IMAG_USER`/`IMAG_PW`, via the
+  shared `_ssh_base()`) for a dev1-manual `--host <ip>`. A missing OR failing (`rc != 0`) wmctrl warns
+  LOUD BY NAME and SKIPS dedup — NEVER read as "0 windows" (imag-ssh-remote-tool-preflight), NEVER
+  raises (it runs under `imag-obs-start.sh`'s `set -euo pipefail`, same discipline as
+  `clear_measurement_burns`, imag-obs-supervision.md).
+- **The GATE keeps its OWN post-hoc heal:** `recording-e2e.sh` `[0/8]` still opens via
+  `obs_phase2.py open-projectors` (blind) then sources `imag-projector-heal.sh` (same keep-newest) +
+  the hard 1+1 count check. `verify-imag.sh` check (o) is count-ONLY (never opens, #840); its
+  restart-repopulate step now flows through the idempotent seeder. So no path stacks windows.
+- The pure decision (`projector_window_ids` / `projector_strays_to_close`) is extracted for an offline
+  `wmctrl`-fixture pytest (`tests/python/test_imag_scenes_projector_idempotent_769.py`).
+## Stopping the SUPERVISED OBS gracefully FROM setup-imag.sh's ROOT context (step 12, #785)
+
+`imag-obs-supervision.md` already states the general rule: a deliberate stop of a supervised OBS
+MUST go through `systemctl --user stop imag-obs.service` (a raw `pkill`/`kill` of the tracked
+process looks like a crash and refights `Restart=on-failure`). The setup-imag.sh-specific wrinkle
+is that **step 12 (the genlock hot-swap) runs as ROOT, and `systemctl --user` from root talks to
+root's own (nonexistent) `newlevel` user bus — `systemctl --user is-active` from root returns
+FALSE even when the unit is genuinely active on the desktop user's session.** So step 12 cannot
+call `imag-obs-stop.sh` directly (from root it would misjudge the unit inactive and fall through to
+the raw signal ladder, refighting Restart). The correct graceful-first ladder from root:
+
+1. `sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR=/run/user/$(id -u "$DESKTOP_USER") DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus systemctl --user is-active --quiet imag-obs.service` → if active, `... systemctl --user stop imag-obs.service` (same env). This is the ONE path that lets systemd own the stop and suppress Restart.
+2. else `sudo -u "$DESKTOP_USER" DISPLAY=:0 XDG_RUNTIME_DIR=... DBUS_SESSION_BUS_ADDRESS=... /usr/local/bin/imag-obs-stop.sh` (the installed helper — its wmctrl-c→SIGTERM ladder saves the collection).
+3. else inline `pkill -TERM -x obs` (OBS saves on its own signal handler).
+4. bounded wait (`for _ in $(seq 1 25); do ... sleep 1`), and ONLY THEN `pkill -9 -x obs` as the last resort on a wedged process, keeping the `would not die after SIGKILL` fail-loud.
+
+The mirror of the same `sudo -u … systemctl --user …` invoke already exists as the `u_systemctl`
+helper elsewhere in setup-imag.sh — reuse that env shape, don't reinvent it.
+
+## Anchor trick: adding a SECOND wait-for-death loop near the swap-kill loop (#785, #784/#842 anchor)
+
+The existing test `setup_imag_swap_kill_uses_sigkill_and_waits_for_death` (tests/setup_imag_guards.rs)
+anchors on `body.find("pkill -9 -x obs")` < `body.find("pgrep -x obs >/dev/null 2>&1 || break")` <
+`"would not die after SIGKILL"`. If you add a NEW wait loop (e.g. a graceful-stop wait BEFORE the
+SIGKILL last resort) using the SAME `pgrep -x obs >/dev/null 2>&1 || break` literal, that test's
+middle `.find()` latches onto YOUR new loop instead of the SIGKILL one and the ordering assertion
+breaks. **Write the new wait loop in a DIFFERENT form** — `if ! pgrep -x obs >/dev/null 2>&1; then
+break; fi` — so the `... || break` literal stays unique to the SIGKILL loop. Keep the SIGKILL
+last-resort block's `pkill -9 -x obs` → `pgrep … || break` → `would not die after SIGKILL` bytes
+exactly as they were.
+
+## `cat > "$USER_HOME/.config/openbox/menu.xml"` is NOT caught by the #841 xorg.conf.d ban (#785)
+
+Adding a `cat > …/menu.xml` (or any new `cat > …` heredoc write) to setup-imag.sh is safe against
+`setup_imag_does_not_ship_the_dead_tearfree_option_841` — that negative anchor filters lines that
+`starts_with("cat > /etc/X11/xorg.conf.d/")` specifically, so an openbox-config write under
+`$USER_HOME` never matches it. Still run the full NEGATIVE-anchor grep (`grep -rniE 'assert!\(!|
+must NOT|!.*contains' tests/`) for any OTHER token your addition introduces — the openbox menu adds
+`systemctl reboot`/`systemctl poweroff`, and the only bans on those live in
+`tests/imag_obs_watchdog_unit_778.rs`, which reads the `systemd/imag-obs-watchdog.service` FILE, not
+setup-imag.sh, so a menu.xml poweroff/reboot entry never trips them.
+
+## The #785 menu is only REACHABLE if rc.xml binds the desktop right-click to it — verify ASSERTS it, never rewrites operator rc.xml (#1095)
+
+`verify-imag.sh` asserts BOTH that `~/.config/openbox/menu.xml` is present (#791) AND — since
+#1095 — that the openbox rc.xml actually BINDS the desktop right-click to it
+(`imag_openbox_root_menu_bound`). The #785 `menu.xml` (`<menu id="root-menu">`) is only reachable
+because the rc.xml's Root mouse-context Right-button binds `ShowMenu root-menu`; a stale hand-placed
+`~/.config/openbox/rc.xml` (the "hand-placed, not provisioned" class #785 exists to close) could
+bind the desktop click elsewhere and silently orphan the menu, with no gate catching it.
+
+- **Design (b) — ASSERT-ONLY, never provision/rewrite rc.xml.** Provisioning a full stock rc.xml
+  (option a) or patching just the binding into it (option c) would clobber an operator's hand-tuned
+  openbox config (keybindings, etc.) — the same operator-state concern #785 is about. The gate
+  fails loud and names the offending file; the operator fixes it by hand. This is the
+  `minimal-fix-inform-dont-force` model — the right default for ANY "the box has an operator-owned
+  config file" reachability check here (weigh it before reaching for a provision/overwrite fix).
+- **Read the EFFECTIVE rc.xml, not a fixed path.** openbox loads `~/.config/openbox/rc.xml` when
+  present, else the stock `/etc/xdg/openbox/rc.xml`. The check does a remote
+  `[ -f <user> ] && echo user || echo stock` to pick whichever openbox will ACTUALLY load, asserts
+  on THAT file, and names it in the failure. A fresh box (no user rc.xml) passes on the stock
+  default; only a stale USER rc.xml binding elsewhere fails — which is exactly the target case.
+- **`grep -P` is fine in a verify-imag.sh helper — it runs LOCALLY on dev1, not on the box.** The
+  helper flattens the ssh-read rc.xml text and uses `grep -oP`/`-qP` (PCRE2) to scope the match to
+  the `<context name="Root">` block (so a `root-menu` named only in a keybind, or a Root right-click
+  bound to a different menu, does NOT falsely pass; `[\x22\x27]` tolerates both attribute quote
+  styles). GOTCHA when TESTING such a helper: on dev1 the interactive `grep` is a **ugrep wrapper
+  FUNCTION** (Claude Code shell integration), but `/usr/bin/grep` is GNU grep 3.11 and CI runs GNU
+  grep — verify your exact patterns under `/usr/bin/grep` (GNU), not only the interactive wrapper.
+  Both provide -P/PCRE2 and agreed here, but the wrapper is not what the deployed script or CI runs.

@@ -7,6 +7,9 @@ paths:
   - "scripts/avsync-heartbeat-alert-watchdog.sh"
   - "scripts/lib/avsync-heartbeat.sh"
   - "systemd/avsync-heartbeat-alert-watchdog*"
+  - "scripts/avsync-lineup-alert-watchdog.sh"
+  - "scripts/avsync_lineup.py"
+  - "systemd/avsync-lineup-alert-watchdog*"
 ---
 
 # Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (#812/#807)
@@ -160,3 +163,80 @@ convention) — read at runtime from the local uncommitted `~/.claude/channels/d
 SAME state-file mechanism the confirm/throttle legs already use, so a repeated pass with the SAME
 epoch never double-posts, and `--dry-run` still advances that state (mirrors `process_leg`'s own
 convention — only the actual POST is skipped, never the bookkeeping).
+
+# Measurement-line GO/NO-GO + stream-state-bound liveness alarm (#813)
+
+`scripts/avsync_lineup.py` (PURE decider, mirror of `avsync_freshness.py`/`event_assert.py`) +
+`scripts/avsync-lineup-alert-watchdog.sh` (dev1 timer, two modes: default run-time liveness pass +
+`--assert` one-shot pre-event GO/NO-GO). Distinct from the `#812` heartbeat watchdog above: that one
+alarms on heartbeat STALENESS only + unconditionally; this one binds to STREAM state and the audio
+CONTENT, catching a live-stream-but-dead-line that a fresh heartbeat hides.
+
+## The content-liveness signal is the audio dB — NOT the SyncNet verdict text (the whole #813 bug)
+
+The first cut classified "is the measurement valid" from the heartbeat STATUS text and keyed on
+`unknown`/`candidates: 0`. **That string is the E2E `recording-verdict --av-sync` path's vocabulary,
+NOT what writes the on-box heartbeat.** `avsync-watchdog.ps1` writes `measured: <last line of
+av_sync_measure.py>`, and `av_sync_measure.py` (verified: ZERO hits for `unknown`/`candidates`)
+prints `[stamp] UNMEASURABLE window (...)` for silent/undecodable content and `[stamp] AV offset ...
+:: A/V sync OK / ZNIZ / ZVYS` for a real reading. So the decider was classifying a case reality
+never produces, and the tests were green against a fabricated string — a review caught it, not the
+suite. **Two durable lessons:**
+
+1. **When a dev1 decider classifies an on-box producer's output, verify the ACTUAL producer's
+   vocabulary** (`grep` the real `print(...)`/`Write-Heartbeat` source), never a similar-looking
+   string from a DIFFERENT path. The E2E recording-verdict and the SyncNet watchdog are two separate
+   measurement paths with two separate output vocabularies.
+2. **`UNMEASURABLE` cannot distinguish SILENT AUDIO from a normal no-face band/graphics segment** —
+   av_sync_measure.py prints it for BOTH ("band/graphics segments are expected to skip"). The only
+   signal that distinguishes the 2026-08-17 silent-chain incident from an ordinary band segment is
+   the audio LEVEL in dB (digital silence ~-91 dB vs a live QPSK marker ~-5 dB — the
+   `audio-presence-preflight.sh` -60 dB floor). `avsync-watchdog.ps1` now prefixes the heartbeat with
+   `db=<max_volume>` (ffmpeg volumedetect on the SAME clip already grabbed each pass — no second grab,
+   no fourth measurement path), and `avsync_lineup.py` classifies content-liveness on `db >= -60`.
+
+## A fresh `measured:` heartbeat IMPLIES the stream is publishing — don't make the alarm depend on the OBS-WS read for the content-death case
+
+The ps1's grab only SUCCEEDS when the RTMP relay is serving, i.e. the stream is live (the `#814`
+freshness gate guarantees the clip is fresh). So a fresh `measured:` heartbeat is itself proof the
+stream is publishing — the liveness alarm pages on silent audio (`db < -60`) WITHOUT needing an
+`obs_phase2.py stream-status` read at all. The OBS-WS `outputActive` read only gates the AMBIGUOUS
+cases (a `no-signal:` heartbeat = grab failed, or a STALE heartbeat = process dead), where the stream
+might be legitimately off. This matters because the WS read is easily mis-configured to fail (an
+empty password defaults to `None` -> SUPPRESSED forever -> an inert alarm); keying the headline case
+off the heartbeat instead of the WS read makes the alarm robust to that. `--assert` still REQUIRES
+the WS read to return a definite True/False (a `None` = NO-GO), so a mis-set password is caught
+before the event rather than silently muting the alarm during it. Default the OBS-WS password to
+`OBS_WS_PASSWORD` (rig-mode.sh's convention), never an empty string.
+
+## Two shell gotchas this watchdog hit (both cost a debug/CI cycle)
+
+- **A sourced lib's `set -euo pipefail` LEAKS `-e` into the caller, and `set -uo pipefail` does NOT
+  clear it.** `avsync-heartbeat.sh` sets `-euo pipefail`; sourcing it turns `-e` ON in the watchdog.
+  A `var="$(python3 decider ...)"` where the decider legitimately exits non-zero (a preflight NO-GO,
+  exit 1) then ABORTS the whole pass at the ASSIGNMENT — before the verdict is ever printed and
+  before the fail-loud alert fires (observed: `--assert` NO-GO produced EMPTY stdout + no alert).
+  Fix: explicit `set +e -uo pipefail` after the sources (`set -uo pipefail` alone only turns options
+  ON). This is ci-testing-gotchas.md's leaked-`set -e` note, applied to the `var="$(gate)"` shape.
+- **The `avsync-watchdog.ps1` log line `"LIVE :: $out"` is a static test anchor**
+  (`harness_avsync_watchdog_812.rs` does `body.find("LIVE :: $out")`). Appending to it is safe only if
+  the exact prefix survives — `"LIVE :: $out (db=$db)"` keeps it. But a NEW COMMENT that spells out
+  the literal anchor string creates an EARLIER occurrence that `.find()` grabs first (the self-
+  collision class the top-level CLAUDE.md documents, hit again here). Reword any comment near that
+  line to not contain the anchor string; verify `grep -c 'LIVE :: \$out' scripts/avsync-watchdog.ps1`
+  is 1 before trusting the harness.
+
+## Throttle the alarm on a COARSE stamp-free signature, never the timestamped heartbeat text
+
+The decider emits a coarse `sig=` token (`no-audio`/`wedged`/`stale`/`no-signal`/`ok`/etc.); the
+watchdog throttles on `lineup:$sig`. Building the signature from the raw heartbeat status (which
+carries a `[stamp]` that changes every ~90 s) would change the signature every pass and defeat
+`obs_watchdog_alert_throttle` into re-paging every 5 min instead of ~1 h — the same trap the `#812`
+sibling avoids with its stable `"${leg}:stale"` token.
+
+## Fail LOUD on a missing tool — a dev1 alarm must never fail OPEN on a tooling gap
+
+`require_tools sshpass ssh python3 jq` (+ `curl` for a non-dry `--assert`) runs first: a missing jq
+would otherwise yield empty facts -> the decider's `json.load` errors (swallowed by `2>/dev/null`)
+-> `action=""` -> no alarm AND the pending state resets, i.e. a silent mute. Mirror the sibling dev1
+watchdogs' fail-loud-by-name discipline.

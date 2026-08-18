@@ -281,6 +281,17 @@ jobs:
           # through to the checked-in rig-fleet.txt default. A manual workflow_dispatch's
           # offline_ack input, when non-empty, overrides that default outright.
           CAMBOX_OFFLINE_ACK: ${{ github.event_name == 'workflow_dispatch' && inputs.offline_ack || '' }}
+          # issue 1093 (2026-08-17): recalibrate the post-deploy sender-bounce reverify budget via
+          # the harness's own env seam. The default budget (attempts=3, settle=6 -> ~24s) was sized
+          # "comfortably above" a 2026-07-14 measured re-lock of 11.4s; a fresh live measurement
+          # (systemctl restart camera-box on cam1 + frozen-camera-gate polling against strih)
+          # showed natural re-lock now at t+20s, eating the whole margin — 3 consecutive PR-gate
+          # attempts coin-flipped on it. attempts=5 x ~4s checks + 4 x 8s settles ≈ 52s, sized by
+          # the same comfortably-above principle. Harness defaults stay untouched (pinned by
+          # tests/harness_sender_bounce_reverify_758.rs); the ordering fix + the re-lock slowdown
+          # root-cause stay open on the ticket.
+          PREFLIGHT_MV_REVERIFY_ATTEMPTS: "5"
+          PREFLIGHT_MV_REVERIFY_SETTLE_S: "8"
         # #832: this workflow never hardcodes an imag-nb address itself — recording-e2e.sh
         # resolves the ACTIVE imag host from scripts/imag-host.sh (the ONE declared source of
         # truth, reversible between the incumbent 10.77.9.182 and the replacement 10.77.9.187).

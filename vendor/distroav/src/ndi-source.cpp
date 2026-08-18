@@ -145,6 +145,27 @@ static inline bool genlock_reconnect_decision(bool genlock_active, int no_connec
 	return (now_ns - last_frame_ns) >= stale_ns;
 }
 
+/* camera-box #1080: back-off (ns) before the next recv_create_v3 retry after a create FAILURE.
+ * recv_create_v3 realistically fails only under transient resource exhaustion; hammering it in a
+ * tight loop worsens the exhaustion. Exponential from 250 ms, doubling, capped at 3 s -- fast
+ * recovery from a one-off blip, gentle under sustained pressure. `consecutive_failures` is 1-based
+ * (the count INCLUDING this failure); 0 folds to the base; a large count is shift-clamped (no shift
+ * UB) and stays at the cap. PURE (only primitives) so it lift-compiles + truth-table-tests offline
+ * -- CI is otherwise the first compiler for this file (tests/distroav_recv_create_retry_1080.rs).
+ * This helper NEVER caps the retry COUNT (the caller loops on it forever): the receiver thread must
+ * never die on a create failure, or it becomes a permanent, reattach-proof black -- a break there
+ * leaves s->running true, so ndi_source_update's `if (s->running)` never restarts it. */
+static inline uint64_t ndi_recv_create_retry_backoff_ns(unsigned consecutive_failures)
+{
+	const uint64_t base_ns = 250ULL * 1000ULL * 1000ULL;        /* 250 ms */
+	const uint64_t cap_ns = 3ULL * 1000ULL * 1000ULL * 1000ULL; /* 3 s */
+	unsigned shift = consecutive_failures > 1 ? consecutive_failures - 1 : 0;
+	if (shift > 5)
+		shift = 5; /* 250 ms << 5 = 8 s already exceeds the 3 s cap; also caps the shift < 64 (no UB) */
+	uint64_t backoff_ns = base_ns << shift;
+	return backoff_ns < cap_ns ? backoff_ns : cap_ns;
+}
+
 /* camera-box #257: per-source MEASUREMENT-BURN setter, runtime-resolved by name — same
  * rationale as the fifo/latency setters: the Windows DistroAV build fetches stock OBS SDK
  * headers (no genlock symbols), so a link-time call cannot build; resolve at runtime so
@@ -680,6 +701,10 @@ void *ndi_source_thread(void *data)
 	 * judged against frames from the previous (or never-existent) connection epoch. */
 	bool was_disconnected = true;
 
+	/* camera-box #1080: consecutive recv_create_v3 failures, driving the retry backoff below. Reset
+	 * to 0 on the next successful create so a one-off blip does not leave the backoff escalated. */
+	unsigned recv_create_fail_count = 0;
+
 	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
 	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
 	 * dominated by obs_source_output_video) per VIDEO frame; logs a 5s summary per
@@ -819,13 +844,40 @@ void *ndi_source_thread(void *data)
 				"'%s' ndi_source_thread: reset_ndi_receiver: -ndi_receiver = ndiLib->recv_create_v3(&recv_desc)",
 				obs_source_name);
 			if (!ndi_receiver) {
-				obs_log(LOG_ERROR, "ERR-407 - Error creating the NDI Receiver '%s' set for '%s'",
-					recv_desc.source_to_connect_to.p_ndi_name, obs_source_name);
-				obs_log(LOG_DEBUG,
-					"'%s' ndi_source_thread: reset_ndi_receiver: Cannot create ndi_receiver for NDI source '%s'",
-					obs_source_name, recv_desc.source_to_connect_to.p_ndi_name);
-				break;
+				//
+				// camera-box #1080: NEVER break here. A break exits the receiver loop but leaves
+				// s->running TRUE, so ndi_source_update's `if (s->running)` never restarts the
+				// thread -- the source is permanently, reattach-proof black until a human recreates
+				// it. Since #767 the stale-reconnect watchdog enters this reset path AUTONOMOUSLY,
+				// so a transient recv_create_v3 failure here would be an UNATTENDED permanent death.
+				// Instead keep the thread (and the #767 watchdog living in it) ALIVE: blank the
+				// source, back off (bounded exponential, NEVER capping the retry COUNT), re-arm
+				// reset_ndi_receiver, and let the next loop iteration re-attempt the create.
+				//
+				recv_create_fail_count++;
+				obs_log(LOG_ERROR,
+					"ERR-407 - Error creating the NDI Receiver '%s' set for '%s' (attempt %u); keeping the receiver thread alive and retrying with backoff",
+					recv_desc.source_to_connect_to.p_ndi_name, obs_source_name,
+					recv_create_fail_count);
+				process_empty_frame(s);
+				// Give the freshly (re)connected receiver a full #767 stale window once it comes
+				// back, instead of judging it against this failed epoch.
+				was_disconnected = true;
+				// Back off before the retry, chunked in 100 ms slices so OBS shutdown
+				// (s->running=false) is never blocked for the whole backoff.
+				uint64_t retry_backoff_ns = ndi_recv_create_retry_backoff_ns(recv_create_fail_count);
+				uint64_t retry_waited_ns = 0;
+				while (s->running && retry_waited_ns < retry_backoff_ns) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(100));
+					retry_waited_ns += 100ULL * 1000ULL * 1000ULL;
+				}
+				pthread_mutex_lock(&s->config_mutex);
+				s->config.reset_ndi_receiver = true;
+				pthread_mutex_unlock(&s->config_mutex);
+				continue;
 			}
+			// camera-box #1080: a successful create clears the retry backoff.
+			recv_create_fail_count = 0;
 
 			if (snap_hw_accel_enabled) {
 				//
@@ -897,6 +949,16 @@ void *ndi_source_thread(void *data)
 		// check if there are any connections.
 		// If not then micro-pause and restart the loop.
 		//
+		// camera-box #1080: defensive -- a create failure left ndi_receiver NULL and re-armed
+		// reset_ndi_receiver; if a racing ndi_source_update cleared that flag before this iteration
+		// read it, the reset block was skipped with ndi_receiver still NULL. Re-arm + retry rather
+		// than dereference NULL in recv_get_no_connections below.
+		if (!ndi_receiver) {
+			pthread_mutex_lock(&s->config_mutex);
+			s->config.reset_ndi_receiver = true;
+			pthread_mutex_unlock(&s->config_mutex);
+			continue;
+		}
 		int no_conn = ndiLib->recv_get_no_connections(ndi_receiver);
 		if (no_conn == 0) {
 #if 0

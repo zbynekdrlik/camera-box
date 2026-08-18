@@ -82,7 +82,8 @@ jobs:
           # configured hold) — without it a regime leaves the FIFO at the live edge FOREVER.
           if ($src -notmatch [regex]::Escape('genlock_backward_regime_end(source, reserve_ms);')) { Write-Error "backward-step regime-exit SELF-HEAL gone (#1009) — a hold collapse would be a permanent absorbing state again"; exit 1 }
           if ($src -notmatch [regex]::Escape('backward_regime_ticks=%llu')) { Write-Error "backward_regime_ticks audit exposure gone (#1009) — a sustained hold-bypass regime would be invisible to the E2E/drift gates"; exit 1 }
-          Write-Output "#136/#257 ts-align + render tick build-default (no env) + #147/#1009 re-qualified backward-step recovery + self-heal present — OK"
+          if ($src -notmatch [regex]::Escape('wall_qpc_drift_ms=%lld') -or $src -notmatch [regex]::Escape('static long long genlock_wall_qpc_drift_ms(void)') -or $src -notmatch [regex]::Escape('genlock_wall_qpc_drift_ms());')) { Write-Error "wall-vs-QPC clock-drift audit term/helper gone (#800) — the remaining A/V-shift candidate (WALL-slaved video vs QPC-slaved audio) would be invisible"; exit 1 }
+          Write-Output "#136/#257 ts-align + render tick build-default (no env) + #147/#1009 re-qualified backward-step recovery + self-heal + #800 wall-qpc drift present — OK"
 
       # #940 piece 1: fail fast if the per-event relock phase-evidence log line is missing —
       # mirrors the Linux-CI guard
@@ -247,6 +248,9 @@ jobs:
           # camera-box #767: reconnect-on-sender-restart watchdog (this FAST path ships distroav.dll for hot-swap, so re-assert the tokens here too — mirrors tests/distroav_ndi_reconnect_767.rs).
           if ($ndi -notmatch [regex]::Escape('static inline bool genlock_reconnect_decision(')) { Write-Error "ndi-source.cpp: the #767 genlock_reconnect_decision watchdog helper is gone -- a genlocked source never rebinds when its sender instance restarts"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('genlock_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,')) { Write-Error "ndi-source.cpp: the receiver loop no longer CALLS the #767 reconnect watchdog -- a stale genlocked source is never force-rebound"; exit 1 }
+          # camera-box #1080: a failed recv_create_v3 in the reset path must back off + retry, never break (a break there leaves s->running true so ndi_source_update never restarts the thread — reattach-proof black; this FAST path ships distroav.dll for hot-swap, so re-assert here too — mirrors tests/distroav_recv_create_retry_1080.rs).
+          if ($ndi -notmatch [regex]::Escape('static inline uint64_t ndi_recv_create_retry_backoff_ns(')) { Write-Error "ndi-source.cpp: the #1080 ndi_recv_create_retry_backoff_ns backoff helper is gone -- a transient recv_create_v3 failure permanently kills the receiver thread"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(recv_create_fail_count)')) { Write-Error "ndi-source.cpp: the reset block no longer CALLS ndi_recv_create_retry_backoff_ns(recv_create_fail_count) -- a failed recv_create_v3 reverts to the permanent-death break"; exit 1 }
           # #795: list-only (non-editable) NDI source selector + saved-name preservation (this FAST path ships distroav.dll for hot-swap, so gate here too — mirrors tests/distroav_genlock_lockdown.rs).
           if ($ndi -match [regex]::Escape('OBS_COMBO_TYPE_EDITABLE')) { Write-Error "ndi-source.cpp: OBS_COMBO_TYPE_EDITABLE is BACK — #795 the genlock NDI source selector must be list-only (a free-text combo black-screened a live event 2026-07-17)"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING')) { Write-Error "ndi-source.cpp: the PROP_SOURCE selector is no longer a LIST combo (OBS_COMBO_TYPE_LIST) — #795 reverted"; exit 1 }
@@ -470,13 +474,13 @@ jobs:
           if ($disp -notmatch [regex]::Escape('display->render_audit_render_count++;')) { Write-Error "obs-display.c: #771 real-render counter not bumped -- rendered_fps would always read 0"; exit 1 }
           if ($disp -notmatch [regex]::Escape('display->render_audit_id = ++next_audit_id;')) { Write-Error "obs-display.c: #771 stable per-projector audit id assignment gone -- monitor=N would be unstable"; exit 1 }
           $bud = (Get-Content "vendor/obs-studio/libobs/obs-display-budget.h" -Raw) -replace '\s+', ' '
-          if ($bud -notmatch [regex]::Escape('static inline double obs_multiview_floor_fps(double canvas_fps)')) { Write-Error "obs-display-budget.h: #771 pure canvas/2 floor helper gone -- the C log line and the Rust gate would diverge"; exit 1 }
+          if ($bud -notmatch [regex]::Escape('static inline double obs_multiview_floor_fps(double target_fps)')) { Write-Error "obs-display-budget.h: #771/#776 pure target floor helper gone -- the C log line and the Rust gate would diverge"; exit 1 }
           if ($bud -notmatch [regex]::Escape('#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL')) { Write-Error "obs-display-budget.h: #771 5s audit-window constant gone"; exit 1 }
           $hdr = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
           if ($hdr -notmatch [regex]::Escape('uint32_t render_audit_id;')) { Write-Error "obs-internal.h: #771 obs_display.render_audit_id missing"; exit 1 }
           if ($hdr -notmatch [regex]::Escape('uint64_t render_audit_window_start_ns;')) { Write-Error "obs-internal.h: #771 obs_display.render_audit_window_start_ns missing"; exit 1 }
           if ($hdr -notmatch [regex]::Escape('uint32_t render_audit_render_count;')) { Write-Error "obs-internal.h: #771 obs_display.render_audit_render_count missing"; exit 1 }
-          Write-Output "#771 multiview-audit fps observability line + canvas/2 floor present -- OK"
+          Write-Output "#771 multiview-audit fps observability line + #776 target floor present -- OK"
 
       # #152 (the #269 YAML lock-step): OBSBasic.cpp (UpdateTitleBar) is frontend-only — the
       # FAST path does NOT build the frontend — but the source-text check still catches a

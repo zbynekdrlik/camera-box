@@ -323,7 +323,10 @@ void render_display(struct obs_display *display)
 				const double canvas_fps = (interval != 0) ? 1000000000.0 / (double)interval : 0.0;
 				const double target_fps =
 					(effective_divisor != 0) ? canvas_fps / (double)effective_divisor : canvas_fps;
-				const double floor_fps = obs_multiview_floor_fps(canvas_fps);
+				/* #776: floor tracks the effective TARGET (canvas/effective_divisor), not
+				 * canvas/2 -- a 30fps-canvas box renders MV at divisor 1 = 30fps, so a
+				 * canvas/2 floor (13) would be half the real target. */
+				const double floor_fps = obs_multiview_floor_fps(target_fps);
 				blog(LOG_INFO,
 				     "multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u",
 				     display->render_audit_id, effective_divisor, rendered_fps, target_fps, floor_fps,

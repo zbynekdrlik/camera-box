@@ -260,9 +260,14 @@ fn write_driver(
         None => String::new(),
     };
 
+    // #1085: this driver isolates ssh-ROUND-TRIP concurrency (the parallelism this file asserts).
+    // The launch-site stagger (#1085) is a SEPARATE behaviour proven in
+    // tests/harness_cambox_parallel_stagger_1085.rs; disable it here so its added delay never
+    // muddies this file's round-trip wall-clock bound (it would otherwise add (N-1)*gap ms).
     let driver = format!(
         "#!/usr/bin/env bash\n\
          set -uo pipefail\n\
+         export CAMBOX_PARALLEL_STAGGER_MS=0\n\
          {active_set_export}\
          source {camera_set_sh:?}\n\
          source {parallel_lib:?}\n\
