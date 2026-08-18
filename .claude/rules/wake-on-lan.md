@@ -61,3 +61,35 @@ comment in the last 180s — a later comment of another kind shadows it). Retry 
 appears, then DELETE the dup comments a flapping outage left behind (`gh api -X DELETE
 .../issues/comments/<id>`). git-over-https (push) keeps working even when the api.github.com REST/
 GraphQL endpoints flap, so the `refs/autopilot-wip/*` backup push is unaffected.
+
+## imag-nb — the LINUX WoL path (#1103), the NM-managed counterpart
+
+imag-nb (10.77.9.182) extends WoL to a Linux box; the mechanism differs from the Windows boxes above.
+Reuse this pattern for any other NM-managed Linux target:
+
+- **Persist via NetworkManager, not a systemd/udev mechanism.** `setup-imag.sh` step 1 arms it on the
+  SAME `$CON` it already pins the static IP on: `nmcli con mod "$CON" 802-3-ethernet.wake-on-lan magic
+  802-3-ethernet.wake-on-lan-password ""`. NM re-applies it on every connection-up (every boot), so
+  it survives reboot, and it keeps ONE source of truth (the connection profile) rather than a second
+  ethtool-in-a-systemd-unit mechanism. `nmcli con mod` only writes the profile (no hardware
+  validation), so it is safe under the script's `set -euo pipefail` — it won't abort a provision on a
+  box whose driver lacks WoL; the verify gate catches that instead.
+- **Verify SUDO-LESSLY off the persisted NM value, not the runtime ethtool line.** `verify-imag.sh`
+  check (x) reads `nmcli -g 802-3-ethernet.wake-on-lan connection show <con>` (== `magic`) — the
+  durable source of truth, readable as the plain SSH user. The runtime `ethtool <nic> | grep Wake-on`
+  (`g`) needs root, so it is NOT the gate's signal. The pure `imag_wol_enabled_ok` requires EXACTLY
+  `magic` (a `magic secureon` = password-protected wake our passwordless `wake-box.sh` cannot trigger,
+  so it must FAIL).
+- **Resolve the rig NIC by the box's OWN static rig IP, never the default route.** imag-nb is a
+  notebook — a Wi-Fi default route could point at a DIFFERENT connection than the one setup armed. The
+  (x) check resolves the NIC via `ip -o -4 addr show | awk` matching `$IMAG_IP` (the address the gate
+  is SSHed in over), which is unambiguous on a multi-homed box.
+- **The sender needs NO code change — it is table-driven.** Adding the `imag-nb 10.77.9.182 <mac>` row
+  to `scripts/wol-targets.txt` is all `wake-box.sh imag-nb` needs (the `wol.sh`/`wake-box.sh` core is
+  reused, never a second sender). The MAC is the box's NDI-NIC MAC, live-read (`cat
+  /sys/class/net/<nic>/address`).
+- **USB-dongle S5 caveat (worse than strih's add-in-card caveat).** imag-nb's NDI NIC is a USB r8152
+  Realtek dongle. `Supports Wake-on: pumbg` includes `g` (magic), but a USB host controller usually
+  loses power in S5, so the dongle typically CANNOT wake the box from a full shutdown unless the BIOS
+  keeps USB powered in standby (ErP/EuP/Deep-Sleep disabled + a "USB power in S3/S4/S5" option). That
+  BIOS layer is the owner's hands-on step — the OS half (NM `magic`) is all the repo can provision.

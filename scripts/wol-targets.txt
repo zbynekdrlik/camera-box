@@ -10,3 +10,8 @@
 # box     ip             mac
 strih     10.77.9.202    5C:6A:80:F6:6C:F7
 stream    10.77.9.204    E8:9C:25:CE:B6:EA
+# imag-nb (#1103): the imag projection notebook. NIC is a USB r8152 Realtek dongle (enx<mac>) whose
+# MAC was live-read on 2026-08-18 (`cat /sys/class/net/<nic>/address`, `Supports Wake-on: pumbg`).
+# The imag ROLE permanently owns .182 (scripts/imag-host.sh); WoL from a full shutdown additionally
+# needs the box's BIOS to keep the USB port powered in standby -- see docs/wake-on-lan.md.
+imag-nb   10.77.9.182    6C:1F:F7:66:15:4B
