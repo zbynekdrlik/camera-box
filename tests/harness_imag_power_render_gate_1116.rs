@@ -497,8 +497,62 @@ fn throttle_clamp_with_healthy_render_still_advances_dedup_state_1116() {
         "log-only clamp still records the episode signature: {s:?}"
     );
     assert_eq!(
+        field(&s, "throttle_passes"),
+        "1",
+        "log-only clamp STILL advances the throttle dedup counter (0 -> 1): {s:?}"
+    );
+    assert_eq!(
         field(&s, "throttle_clear_passes"),
         "0",
         "an active (clamped) pass keeps the healthy streak at 0 even when log-only: {s:?}"
+    );
+}
+
+// A render-healthy log-only clamp pass advances the throttle dedup counter (proven above). The
+// documented, INTENTIONAL consequence: if render then DEGRADES mid-episode while the same clamp
+// persists, the first degraded pass sees prior_sig==current_sig with the counter already part-way
+// to the throttle window, so its page is deferred until the throttle re-arms (up to ~1h). This is
+// accepted for a chronic condition whose real fix is cooling (issue 1043); it is BOUNDED, never
+// permanently silent. These two tests pin BOTH halves of that contract.
+
+#[test]
+fn throttle_healthy_primed_then_degraded_defers_to_the_1h_throttle_1116() {
+    // State as a render-healthy log-only pass would leave it (sig set, counter mid-window). A
+    // render-DEGRADED pass now is throttle-suppressed (no page THIS pass) — the intentional ≤1h
+    // first-page latency on a mid-episode healthy->degraded transition.
+    let rec = drive_notify(
+        "throttle_sig=imag-throttle:under-floor\nthrottle_passes=1\n",
+        &format!(
+            "BURST={}\nRENDER={}",
+            shell_quote(CLAMPED_BURST),
+            shell_quote(DEGRADED_RENDER)
+        ),
+        "alert_from_throttle",
+    );
+    assert!(
+        rec.is_empty(),
+        "a degraded pass mid-throttle-window (primed by a prior log-only healthy pass) is \
+         deferred, not paged this pass — the documented ≤1h latency: recorder={rec:?}"
+    );
+}
+
+#[test]
+fn throttle_healthy_primed_degraded_repages_after_the_throttle_window_1116() {
+    // BOUNDED, never permanently silent: once the counter reaches ALERT_THROTTLE_PASSES (12), the
+    // same persisting clamp-with-degraded-render re-arms and pages — the deferral above is at most
+    // one throttle window (~1h), not a lost alert.
+    let rec = drive_notify(
+        "throttle_sig=imag-throttle:under-floor\nthrottle_passes=12\n",
+        &format!(
+            "BURST={}\nRENDER={}",
+            shell_quote(CLAMPED_BURST),
+            shell_quote(DEGRADED_RENDER)
+        ),
+        "alert_from_throttle",
+    );
+    assert!(
+        rec.contains("notify"),
+        "at the throttle-window edge the degraded clamp re-arms and PAGES (bounded, never silent): \
+         recorder={rec:?}"
     );
 }

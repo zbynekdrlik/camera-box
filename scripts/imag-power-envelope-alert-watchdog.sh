@@ -207,7 +207,7 @@ alert_from_throttle() {
     return 0
   fi
 
-  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes detail render_gate
+  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes detail render_gate clamp_hyst
   # STABLE episode signature (NOT the fluctuating clamped/total count) so a sustained clamp pages
   # once then suppresses for ~1h, instead of re-paging every pass as the count wobbles.
   current_sig="$(imag_power_throttle_alert_sig "$(printf '%s' "$markers" | tail -1)")"
@@ -218,29 +218,42 @@ alert_from_throttle() {
   new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
   new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
   write_state_field throttle_sig "$new_sig"
+  # NOTE (#1116, INTENTIONAL): throttle_passes advances on EVERY clamp pass, INCLUDING a
+  # render-healthy log-only pass (the ticket's "dedup state still advances" contract). Bounded
+  # consequence: if render is healthy for a while under a PERSISTING clamp and THEN degrades
+  # mid-episode, the first render-degraded pass sees prior_sig==current_sig with the counter already
+  # part-way to ALERT_THROTTLE_PASSES, so its page can be deferred by up to ~1h (until the throttle
+  # re-arms). Accepted for a CHRONIC condition whose real fix is cooling (issue 1043): the alert only
+  # makes the throttling VISIBLE (the operator cannot act faster than ~1h anyway), and the
+  # alternatives (not advancing on a log-only pass, or folding render into the signature) would
+  # reintroduce re-spam on a render-flap. It is BOUNDED, never permanently silent -- it re-arms after
+  # ALERT_THROTTLE_PASSES. Pinned by throttle_healthy_primed_then_degraded_* in the 1116 harness.
   write_state_field throttle_passes "$new_passes"
-  # #1116: an active clamp breaks any run of consecutive healthy passes -> reset the clear-hysteresis
-  # streak so the ~1h resolve window restarts from the next healthy pass.
-  write_state_field throttle_clear_passes 0
+  # #1116: an active clamp is an `episode` pass -> route it through the SAME pure clear-hysteresis
+  # decision (the single source of truth for all 3 pass classes), which breaks any run of consecutive
+  # healthy passes (streak -> 0) so the ~1h resolve window restarts from the next healthy pass.
+  clamp_hyst="$(obs_watchdog_clear_hysteresis episode "$(read_state_field throttle_clear_passes 0)" "$THROTTLE_CLEAR_PASSES")"
+  write_state_field throttle_clear_passes "$(printf '%s\n' "$clamp_hyst" | sed -n 's/^clear_passes=//p')"
 
   detail="$(printf '%s' "$markers" | tail -1)"
 
   # #1116: gate the PAGE on whether OBS render is ACTUALLY suffering. The under-floor clamp is a
   # chronic hardware-envelope condition (the issue-1043 cooling residual) that carries NO actionable
   # signal while render is within the 60fps budget -- paging it every pass is exactly the spam this
-  # ticket fixes. So a render-HEALTHY clamp is LOG-ONLY (the dedup state above STILL advances, so a
-  # later render-degraded pass is correctly throttled). Fail-open: a degraded / stalled / unreadable
-  # render PAGES (imag_power_throttle_render_gate returns `page` for anything but a clean 60fps read)
-  # -- an unreadable render must never SILENTLY suppress a real clamp alert.
+  # ticket fixes. So a render-HEALTHY clamp is LOG-ONLY (the dedup state above STILL advances). Fail-open:
+  # a degraded / stalled / unreadable render PAGES (imag_power_throttle_render_gate returns `page` for
+  # anything but a clean 60fps read) -- an unreadable render must never SILENTLY suppress a real clamp alert.
   render_gate="$(imag_power_throttle_render_gate "${RENDER:-}")"
 
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD alert: imag-nb iGPU throttle-under-floor ($detail) alert_now=$alert_now render_gate=$render_gate"
+  # Render healthy -> log-only, no page. Checked BEFORE the dry-run branch so the dry-run "WOULD alert"
+  # log is only reached on the genuinely-paging path (render_gate is always `page` past here).
+  if [ "$render_gate" = "log-only" ]; then
+    log "imag-nb iGPU throttle-under-floor present but OBS render HEALTHY (within the 60fps budget) -- log-only, no page ($detail)"
     return 0
   fi
 
-  if [ "$render_gate" = "log-only" ]; then
-    log "imag-nb iGPU throttle-under-floor present but OBS render HEALTHY (within the 60fps budget) -- log-only, no page ($detail)"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: imag-nb iGPU throttle-under-floor ($detail) alert_now=$alert_now render_gate=$render_gate"
     return 0
   fi
 
