@@ -47,6 +47,10 @@ IMAG_USER_SSH="${IMAG_USER:-newlevel}"
 IMAG_PW_SSH="${IMAG_PW:-newlevel}"
 WINDOW="${IMAG_POWER_ALERT_WINDOW:--10min}"                       # journal look-back window
 ALERT_THROTTLE_PASSES="${IMAG_POWER_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
+THROTTLE_CLEAR_PASSES="${IMAG_POWER_THROTTLE_CLEAR_PASSES:-12}"   # #1116 hysteresis: N consecutive
+                                                                 # measured-healthy passes before the
+                                                                 # throttle dedup signature is cleared
+                                                                 # (12 = 1h at the 5-min cadence)
 IMAG_RENDER_WINDOW_S="${IMAG_RENDER_WINDOW_S:-4}"                 # #799 OBS-WS render delta window (s)
 
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
@@ -169,23 +173,41 @@ alert_from_throttle() {
   local markers
   markers="$(imag_power_throttle_alert_condition "${BURST:-}")"
   if [ -z "$markers" ]; then
-    # #1076: no THROTTLE-UNDER-FLOOR marker is TWO distinct states the 2-state condition collapses.
-    # Use the 3-state imag_power_throttle_state to tell them apart: `unknown` (no FLOOR / too few
-    # samples = an ssh/burst hiccup) is UNMEASURED -> PRESERVE the dedup signature + passes so a
-    # persistent clamp stays deduped across a transient gap; `clean` (a valid burst = the GPU has
-    # headroom) is MEASURED-healthy -> the clamp genuinely resolved -> reset so a later new clamp
-    # pages fresh.
-    if [ "$(imag_power_throttle_state "${BURST:-}")" = "unknown" ]; then
-      log "imag-nb iGPU freq: throttle burst UNMEASURED (no FLOOR / too few samples) -- preserving dedup signature"
+    # #1076/#1116: no THROTTLE-UNDER-FLOOR marker is TWO distinct states the 2-state condition
+    # collapses. Use the 3-state imag_power_throttle_state to tell them apart:
+    #   * `unknown` (no FLOOR / too few samples = an ssh/burst hiccup) is UNMEASURED -> #1076:
+    #     PRESERVE the dedup signature + passes so a persistent clamp stays deduped across a transient
+    #     gap; the clear-hysteresis streak is likewise preserved (the `unmeasured` pass class advances
+    #     nothing).
+    #   * `clean` (a valid burst = the GPU has headroom) is ONE MEASURED-healthy pass. #1116: do NOT
+    #     reset the dedup signature on a SINGLE healthy pass -- the clamp is chronically borderline
+    #     (the issue-1043 cooling residual) and flaps clean<->clamped across 5-min passes, so an
+    #     immediate reset lets every re-onset re-page (defeating the ~1h throttle). Instead count
+    #     CONSECUTIVE healthy passes (obs_watchdog_clear_hysteresis) and clear the signature only
+    #     after THROTTLE_CLEAR_PASSES of them (~1h) -- the original once-per-episode design intent.
+    local tstate pass_class prior_clear hyst_out clear_action new_clear
+    tstate="$(imag_power_throttle_state "${BURST:-}")"
+    if [ "$tstate" = "unknown" ]; then pass_class="unmeasured"; else pass_class="healthy"; fi
+    prior_clear="$(read_state_field throttle_clear_passes 0)"
+    hyst_out="$(obs_watchdog_clear_hysteresis "$pass_class" "$prior_clear" "$THROTTLE_CLEAR_PASSES")"
+    clear_action="$(printf '%s\n' "$hyst_out" | sed -n 's/^action=//p')"
+    new_clear="$(printf '%s\n' "$hyst_out" | sed -n 's/^clear_passes=//p')"
+    write_state_field throttle_clear_passes "$new_clear"
+    if [ "$pass_class" = "unmeasured" ]; then
+      log "imag-nb iGPU freq: throttle burst UNMEASURED (no FLOOR / too few samples) -- preserving dedup signature (#1076)"
       return 0
     fi
-    log "imag-nb iGPU freq: no sustained throttle-under-floor in this burst (GPU headroom) -- healthy"
-    write_state_field throttle_sig ""
-    write_state_field throttle_passes 0
+    if [ "$clear_action" = "clear" ]; then
+      log "imag-nb iGPU freq: GPU headroom sustained ${THROTTLE_CLEAR_PASSES} consecutive passes -- clamp resolved, clearing dedup"
+      write_state_field throttle_sig ""
+      write_state_field throttle_passes 0
+    else
+      log "imag-nb iGPU freq: GPU headroom this pass (healthy streak ${new_clear}/${THROTTLE_CLEAR_PASSES}) -- preserving dedup during the hysteresis window (#1116)"
+    fi
     return 0
   fi
 
-  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes detail
+  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes detail render_gate
   # STABLE episode signature (NOT the fluctuating clamped/total count) so a sustained clamp pages
   # once then suppresses for ~1h, instead of re-paging every pass as the count wobbles.
   current_sig="$(imag_power_throttle_alert_sig "$(printf '%s' "$markers" | tail -1)")"
@@ -197,11 +219,28 @@ alert_from_throttle() {
   new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
   write_state_field throttle_sig "$new_sig"
   write_state_field throttle_passes "$new_passes"
+  # #1116: an active clamp breaks any run of consecutive healthy passes -> reset the clear-hysteresis
+  # streak so the ~1h resolve window restarts from the next healthy pass.
+  write_state_field throttle_clear_passes 0
 
   detail="$(printf '%s' "$markers" | tail -1)"
 
+  # #1116: gate the PAGE on whether OBS render is ACTUALLY suffering. The under-floor clamp is a
+  # chronic hardware-envelope condition (the issue-1043 cooling residual) that carries NO actionable
+  # signal while render is within the 60fps budget -- paging it every pass is exactly the spam this
+  # ticket fixes. So a render-HEALTHY clamp is LOG-ONLY (the dedup state above STILL advances, so a
+  # later render-degraded pass is correctly throttled). Fail-open: a degraded / stalled / unreadable
+  # render PAGES (imag_power_throttle_render_gate returns `page` for anything but a clean 60fps read)
+  # -- an unreadable render must never SILENTLY suppress a real clamp alert.
+  render_gate="$(imag_power_throttle_render_gate "${RENDER:-}")"
+
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD alert: imag-nb iGPU throttle-under-floor ($detail) alert_now=$alert_now"
+    log "[dry-run] WOULD alert: imag-nb iGPU throttle-under-floor ($detail) alert_now=$alert_now render_gate=$render_gate"
+    return 0
+  fi
+
+  if [ "$render_gate" = "log-only" ]; then
+    log "imag-nb iGPU throttle-under-floor present but OBS render HEALTHY (within the 60fps budget) -- log-only, no page ($detail)"
     return 0
   fi
 

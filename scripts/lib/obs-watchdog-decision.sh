@@ -58,3 +58,44 @@ obs_watchdog_alert_throttle() {
     printf 'alert_now=0\nnew_sig=%s\nnew_passes=%s\n' "$current_sig" "$new_p"
   fi
 }
+
+# obs_watchdog_clear_hysteresis <pass_class> <prior_clear_passes> [clear_n=12]
+#   pass_class ∈ episode | healthy | unmeasured
+#   -> stdout: action=<keep|clear>  clear_passes=<n>
+#   Hysteresis on CLEARING a dedup signature so a chronically FLAPPING condition (healthy/unhealthy
+#   alternating across passes) is treated as ONE ongoing episode instead of re-paging on every
+#   re-onset. The alert-throttle above suppresses REPEAT pages of a persistent condition, but the
+#   moment a single healthy pass resets the signature, the next re-onset reads as a brand-new
+#   condition (current_sig != prior_sig) and pages again — so a borderline condition that flaps
+#   across 5-min passes defeats the ~1h throttle entirely. This gate decides whether a healthy pass
+#   has actually RESOLVED the episode: only after `clear_n` CONSECUTIVE measured-healthy passes.
+#     - `episode`    (the condition is active this pass) -> keep the signature; RESET the healthy
+#                    streak to 0 (any re-onset breaks the run of clean passes).
+#     - `healthy`    (a MEASURED-healthy pass) -> increment the streak; CLEAR only once it reaches
+#                    clear_n consecutive healthy passes (streak reset to 0); otherwise keep the
+#                    signature (a shorter healthy run is still inside the hysteresis window).
+#     - `unmeasured` (this pass carried no reading) -> advance NOTHING (the #1076 contract): keep
+#                    the signature AND leave the streak unchanged, so a measurement gap neither
+#                    counts toward clearing nor resets the healthy run.
+obs_watchdog_clear_hysteresis() {
+  local cls="${1:-}" prior="${2:-0}" clear_n="${3:-12}"
+  case "$prior$clear_n" in *[!0-9]* | "") prior=0; clear_n=12 ;; esac
+
+  case "$cls" in
+    episode)
+      printf 'action=keep\nclear_passes=0\n'
+      ;;
+    healthy)
+      local new_streak=$(( prior + 1 ))
+      if [ "$new_streak" -ge "$clear_n" ]; then
+        printf 'action=clear\nclear_passes=0\n'
+      else
+        printf 'action=keep\nclear_passes=%s\n' "$new_streak"
+      fi
+      ;;
+    *)
+      # unmeasured (or any unexpected token, fail-safe): advance nothing, preserve everything.
+      printf 'action=keep\nclear_passes=%s\n' "$prior"
+      ;;
+  esac
+}
