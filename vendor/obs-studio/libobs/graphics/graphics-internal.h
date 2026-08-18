@@ -104,6 +104,9 @@ struct gs_exports {
 			     uint8_t stencil);
 	bool (*device_is_present_ready)(gs_device_t *device);
 	void (*device_present)(gs_device_t *device);
+	/* camera-box #1107: OPTIONAL — only the GL/EGL backend implements it (D3D11/Metal leave
+	 * it NULL, so gs_present_vsync() is a no-op and their present path is byte-identical). */
+	void (*device_present_set_vsync)(gs_device_t *device, bool vsync);
 	void (*device_flush)(gs_device_t *device);
 	void (*device_set_cull_mode)(gs_device_t *device, enum gs_cull_mode mode);
 	enum gs_cull_mode (*device_get_cull_mode)(const gs_device_t *device);
