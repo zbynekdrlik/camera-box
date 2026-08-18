@@ -89,22 +89,30 @@ fn optical_chain_page_text_is_slovak_with_ownership() {
 // ---------------------------------------------------------------------------------------------
 
 /// (script path, a Slovak marker that MUST appear in its page text after translation).
+// #1117 review: every marker is a distinctive Slovak PAGE-BODY phrase absent from the
+// pre-translation origin/dev file (verified `git show origin/dev:<f> | grep -cF <marker>` == 0),
+// so each is a genuine translation guard -- a vacuous marker (a technical term like `imag` /
+// `BundleStateServer` / `HDMI splitter` that already appears in comments/code) would pass even
+// against the untranslated file and guard nothing.
 const SWEEP: &[(&str, &str)] = &[
     ("scripts/cadence-alert-watchdog.sh", "kadencia kamery"),
-    ("scripts/splitter-port-alert-watchdog.sh", "HDMI splitter"),
+    (
+        "scripts/splitter-port-alert-watchdog.sh",
+        "opäť sníma vo farbe",
+    ),
     ("scripts/mv-fps-alert-watchdog.sh", "Multiview fps"),
     ("scripts/network-reach-alert-watchdog.sh", "nedostupný box"),
     (
         "scripts/avsync-heartbeat-alert-watchdog.sh",
         "A/V-sync monitor",
     ),
-    (
-        "scripts/bundle-state-alert-watchdog.sh",
-        "BundleStateServer",
-    ),
+    ("scripts/bundle-state-alert-watchdog.sh", "hoci box beží"),
     ("scripts/obs-liveness-watchdog.sh", "OBS zamrznuté"),
     ("scripts/imag-obs-alert-watchdog.sh", "imag OBS"),
-    ("scripts/imag-power-envelope-alert-watchdog.sh", "imag"),
+    (
+        "scripts/imag-power-envelope-alert-watchdog.sh",
+        "napájací limit",
+    ),
 ];
 
 #[test]
