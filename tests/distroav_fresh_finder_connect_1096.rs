@@ -110,18 +110,60 @@ fn reset_block_uses_a_fresh_finder_and_connects_by_url() {
         "{NDI_SOURCE}: #1096 — the resolved URL must be bstrdup'd into owned_source_url BEFORE \
          find_destroy (the finder owns the source pointers). Re-apply the owned-copy."
     );
+    // Must appear at least TWICE: the loop-internal free before the bstrdup AND the thread-exit
+    // free. Count >= 1 alone would be satisfied by the loop-internal free even if the thread-exit
+    // free were dropped (a leak on every source-thread teardown).
     assert!(
-        src.matches("bfree(owned_source_url);").count() >= 1,
-        "{NDI_SOURCE}: #1096 — owned_source_url is never bfree'd (leak on reset/thread-exit). \
+        src.matches("bfree(owned_source_url);").count() >= 2,
+        "{NDI_SOURCE}: #1096 — owned_source_url is not bfree'd in BOTH the reset loop AND on thread \
+         exit (found < 2 frees); a missing thread-exit free leaks the URL on every teardown. \
          Re-apply the frees."
     );
     // The safe fallback: when no fresh URL is resolved, the name-based connect is kept (no worse
     // than upstream).
+    // The safe fallback branch is anchored on its UNIQUE line `p_url_address = nullptr;` — the
+    // #93 unconditional copy at :803 already contains `p_ndi_name = owned_source_name;`, so anchoring
+    // on that would pass even if the whole else branch were deleted (leaving a stale/NULL url).
     assert!(
-        src.contains("recv_desc.source_to_connect_to.p_ndi_name = owned_source_name;"),
-        "{NDI_SOURCE}: #1096 — the name-based fallback connect \
-         (recv_desc.source_to_connect_to.p_ndi_name = owned_source_name) is gone; a fresh-finder miss \
-         must fall back to the name path, never leave the source unconnectable."
+        src.contains("recv_desc.source_to_connect_to.p_url_address = nullptr;"),
+        "{NDI_SOURCE}: #1096 — the name-based fallback branch (which sets \
+         recv_desc.source_to_connect_to.p_url_address = nullptr so a stale URL from a prior reset \
+         cannot bleed into a name-based connect) is gone; a fresh-finder miss must fall back to the \
+         name path with a cleared url, never leave the source unconnectable."
+    );
+}
+
+#[test]
+fn no_connection_path_rearms_the_fresh_finder_reset() {
+    // The no_connections==0 steady path must autonomously trigger the reset block's fresh finder
+    // after a stale window — a GRACEFUL cambox restart (clean FIN) drops the strih receiver to
+    // no_connections==0, where the #767 watchdog (no_connections>0 only) never fires and a by-URL
+    // receiver cannot self-rebind. Without this, the fresh-finder cure is unreachable for the
+    // ticket's own `systemctl restart camera-box` scenario when it produces a clean close.
+    let src = squish(&vendor_file(NDI_SOURCE));
+    assert!(
+        src.contains("uint64_t no_conn_since_ns = 0;"),
+        "{NDI_SOURCE}: #1096 patch missing — the no_conn_since_ns disconnect timer is gone, so the \
+         no_connections==0 path can no longer arm a stale-window fresh-finder reset (a graceful \
+         sender restart would leave the source black). Re-apply the #1096 no-connection recovery."
+    );
+    // The no_connections==0 branch must re-arm reset_ndi_receiver, gated on the same stale window +
+    // genlock scope as #767. Slice from the disconnect-timer arm to the sleep-and-continue and
+    // require both the window check and the reset re-arm inside it.
+    let start = src
+        .find("if (no_conn_since_ns == 0)")
+        .expect("#1096: no_conn_since_ns arm anchor not found in the no_connections==0 path");
+    let end_rel = src[start..]
+        .find("std::this_thread::sleep_for(std::chrono::milliseconds(100)); continue;")
+        .expect("#1096: the no_connections==0 sleep+continue anchor not found after the timer arm");
+    let branch = &src[start..start + end_rel];
+    assert!(
+        branch.contains(">= GENLOCK_RECONNECT_STALE_NS")
+            && branch.contains("genlock_source_is_active(s->obs_source)")
+            && branch.contains("s->config.reset_ndi_receiver = true;"),
+        "{NDI_SOURCE}: #1096 — the no_connections==0 path no longer forces a fresh-finder reset \
+         after GENLOCK_RECONNECT_STALE_NS for a genlocked source, so a graceful sender restart has \
+         no autonomous recovery:\n{branch}"
     );
 }
 
@@ -176,33 +218,75 @@ fn c_str(v: Option<&str>) -> String {
 
 fn vectors() -> Vec<Vector> {
     vec![
-        Vector { name: Some("CAM1"), sources: vec![(Some("CAM1"), Some("tcp://10.0.0.5:5962"))],
-                 expect: Some("tcp://10.0.0.5:5962"), why: "exact match with URL -> connect by that URL" },
-        Vector { name: Some("CAM1"), sources: vec![(Some("CAM1"), Some(""))],
-                 expect: None, why: "match but EMPTY url -> NULL (fall back to name)" },
-        Vector { name: Some("CAM1"), sources: vec![(Some("CAM1"), None)],
-                 expect: None, why: "match but NULL url -> NULL (fall back to name)" },
-        Vector { name: Some("CAM1"), sources: vec![(Some("CAM2"), Some("tcp://10.0.0.6:5961"))],
-                 expect: None, why: "name not in list -> NULL (fall back to name)" },
-        Vector { name: Some("CAM1"), sources: vec![],
-                 expect: None, why: "empty finder list -> NULL (fall back to name)" },
-        Vector { name: Some(""), sources: vec![(Some(""), Some("tcp://x:1"))],
-                 expect: None, why: "EMPTY requested name -> NULL (never match an empty name)" },
-        Vector { name: None, sources: vec![(Some("CAM1"), Some("tcp://x:1"))],
-                 expect: None, why: "NULL requested name -> NULL" },
-        Vector { name: Some("Cam 3 (usb)"),
-                 sources: vec![(Some("Cam 1 (usb)"), Some("tcp://10.0.0.1:5961")),
-                               (Some("Cam 3 (usb)"), Some("tcp://10.0.0.9:5962"))],
-                 expect: Some("tcp://10.0.0.9:5962"),
-                 why: "match at index 1 -> that URL (not index-0's, not a constant)" },
-        Vector { name: Some("CAM1"),
-                 sources: vec![(None, Some("tcp://skip:1")), (Some("CAM1"), Some("tcp://10.0.0.5:7001"))],
-                 expect: Some("tcp://10.0.0.5:7001"),
-                 why: "NULL-named source skipped, later name match wins (different URL value)" },
-        Vector { name: Some("CAM1"),
-                 sources: vec![(Some("CAM1"), Some("tcp://first:1")), (Some("CAM1"), Some("tcp://second:2"))],
-                 expect: Some("tcp://first:1"),
-                 why: "first name match wins over a later duplicate" },
+        Vector {
+            name: Some("CAM1"),
+            sources: vec![(Some("CAM1"), Some("tcp://10.0.0.5:5962"))],
+            expect: Some("tcp://10.0.0.5:5962"),
+            why: "exact match with URL -> connect by that URL",
+        },
+        Vector {
+            name: Some("CAM1"),
+            sources: vec![(Some("CAM1"), Some(""))],
+            expect: None,
+            why: "match but EMPTY url -> NULL (fall back to name)",
+        },
+        Vector {
+            name: Some("CAM1"),
+            sources: vec![(Some("CAM1"), None)],
+            expect: None,
+            why: "match but NULL url -> NULL (fall back to name)",
+        },
+        Vector {
+            name: Some("CAM1"),
+            sources: vec![(Some("CAM2"), Some("tcp://10.0.0.6:5961"))],
+            expect: None,
+            why: "name not in list -> NULL (fall back to name)",
+        },
+        Vector {
+            name: Some("CAM1"),
+            sources: vec![],
+            expect: None,
+            why: "empty finder list -> NULL (fall back to name)",
+        },
+        Vector {
+            name: Some(""),
+            sources: vec![(Some(""), Some("tcp://x:1"))],
+            expect: None,
+            why: "EMPTY requested name -> NULL (never match an empty name)",
+        },
+        Vector {
+            name: None,
+            sources: vec![(Some("CAM1"), Some("tcp://x:1"))],
+            expect: None,
+            why: "NULL requested name -> NULL",
+        },
+        Vector {
+            name: Some("Cam 3 (usb)"),
+            sources: vec![
+                (Some("Cam 1 (usb)"), Some("tcp://10.0.0.1:5961")),
+                (Some("Cam 3 (usb)"), Some("tcp://10.0.0.9:5962")),
+            ],
+            expect: Some("tcp://10.0.0.9:5962"),
+            why: "match at index 1 -> that URL (not index-0's, not a constant)",
+        },
+        Vector {
+            name: Some("CAM1"),
+            sources: vec![
+                (None, Some("tcp://skip:1")),
+                (Some("CAM1"), Some("tcp://10.0.0.5:7001")),
+            ],
+            expect: Some("tcp://10.0.0.5:7001"),
+            why: "NULL-named source skipped, later name match wins (different URL value)",
+        },
+        Vector {
+            name: Some("CAM1"),
+            sources: vec![
+                (Some("CAM1"), Some("tcp://first:1")),
+                (Some("CAM1"), Some("tcp://second:2")),
+            ],
+            expect: Some("tcp://first:1"),
+            why: "first name match wins over a later duplicate",
+        },
     ]
 }
 
