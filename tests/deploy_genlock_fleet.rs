@@ -422,6 +422,63 @@ fn windows_fast_program_is_obs_dll_only() {
         "fast deploy still writes the marker:\n{p}"
     );
 }
+/// issue 1115 — Option A: the FULL deploy ALSO ships the bundle's genlock distroav.dll to the REAL
+/// ProgramData OBS load path (backup + fail-closed byte verify), so the loaded plugin IS the
+/// canonical build and the byte-parity gather/compare against the manifest becomes real.
+#[test]
+fn windows_full_deploys_distroav_to_programdata_load_path_1115() {
+    let p = win_program("strih", "full", "1");
+    // OBS loads DistroAV ONLY from the ProgramData bin\64bit path — the deploy must write THERE.
+    assert!(
+        p.contains(r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"),
+        "FULL deploy must ship the bundle distroav.dll to the ProgramData load path:\n{p}"
+    );
+    // sourced from the staged bundle's obs-plugins\64bit\distroav.dll via an explicit CODE-side path
+    // map -- anchor on the code line (Join-Path $stage '...'), not the loose basename which also
+    // appears in the adjacent comment (review 🔵: keep the anchor code-unique, #1115).
+    assert!(
+        p.contains(r"Join-Path $stage 'obs-plugins\64bit\distroav.dll'"),
+        "the deployed distroav.dll is sourced from the staged bundle obs-plugins\\64bit:\n{p}"
+    );
+    // the pre-deploy ProgramData distroav.dll is backed up alongside obs.dll.pre-789 (instant rollback)
+    assert!(
+        p.contains("distroav.dll.pre-789"),
+        "must back up the pre-deploy ProgramData distroav.dll (rollback):\n{p}"
+    );
+    // fail-closed sha256 verify of the DEPLOYED ProgramData distroav.dll vs the manifest distroav entry
+    assert!(
+        p.contains("VERIFY distroav.dll"),
+        "must byte-verify the deployed ProgramData distroav.dll (mirrors the obs.dll verify):\n{p}"
+    );
+    assert!(
+        p.contains("VERIFY FAIL: deployed distroav.dll"),
+        "a distroav byte mismatch must fail loud (VERIFY FAIL + non-zero exit):\n{p}"
+    );
+    // the Program Files obs-plugins copy STAYS /XF-excluded (a copy there is the shadow drift-guard flags)
+    assert!(
+        p.contains("/XF distroav.dll"),
+        "the Program Files obs-plugins shadow copy stays /XF-excluded:\n{p}"
+    );
+}
+
+/// issue 1115 — the FAST (obs.dll-only) bundle carries no distroav.dll, so a FAST deploy must never
+/// touch the ProgramData distroav (only a FULL bundle deploy ships the plugin).
+#[test]
+fn windows_fast_does_not_touch_programdata_distroav_1115() {
+    let p = win_program("stream", "fast", "0");
+    assert!(
+        !p.contains(r"C:\ProgramData\obs-studio\plugins\distroav"),
+        "FAST (obs.dll-only) deploy must NOT touch the ProgramData distroav:\n{p}"
+    );
+    assert!(
+        !p.contains("distroav.dll.pre-789"),
+        "FAST deploy does not back up distroav (no distroav in the fast bundle):\n{p}"
+    );
+    assert!(
+        !p.contains("VERIFY distroav.dll"),
+        "FAST deploy has no distroav byte verify:\n{p}"
+    );
+}
 
 #[test]
 fn windows_ahk_bracket_only_on_strih() {
