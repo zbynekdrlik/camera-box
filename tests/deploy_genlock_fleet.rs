@@ -246,6 +246,30 @@ fn windows_artifact_and_workflow_by_mode() {
     );
 }
 
+/// fleet_pick_run_at_sha selects the FIRST successful run whose headSha matches — the heart of
+/// "same canonical SHA across the separate windows/linux workflows".
+#[test]
+fn pick_run_at_sha_selects_first_successful_same_sha_run() {
+    let json = r#"[{"databaseId":111,"headSha":"aaaa","conclusion":"failure"},{"databaseId":222,"headSha":"bbbb","conclusion":"success"},{"databaseId":333,"headSha":"aaaa","conclusion":"success"},{"databaseId":444,"headSha":"aaaa","conclusion":"success"}]"#;
+    let out = run_sourced(
+        &script(),
+        &format!("printf '%s' '{json}' | fleet_pick_run_at_sha aaaa"),
+    );
+    assert_eq!(
+        out.trim(),
+        "333",
+        "must pick the FIRST successful run at the SHA (not the failed one, not a different SHA)"
+    );
+    let out2 = run_sourced(
+        &script(),
+        &format!("printf '%s' '{json}' | fleet_pick_run_at_sha zzzz"),
+    );
+    assert!(
+        out2.trim().is_empty(),
+        "no successful run at the SHA -> empty (caller fails loud):\n{out2}"
+    );
+}
+
 /// Retention keeps the newest KEEP dirs and prints the rest as delete candidates (never deletes).
 #[test]
 fn retention_delete_plan_keeps_newest_n() {
@@ -346,12 +370,12 @@ fn windows_program_is_a_fail_loud_powershell_deploy() {
     );
     assert!(p.contains("match="), "prints per-component match=:\n{p}");
     assert!(
-        p.to_uppercase().contains("VERIFY FAIL") || p.contains("exit 1"),
-        "a byte mismatch must fail loud (non-zero exit):\n{p}"
+        p.to_uppercase().contains("VERIFY FAIL"),
+        "a byte mismatch must fail loud (VERIFY FAIL + non-zero exit):\n{p}"
     );
     // robocopy 0-7 is success — only >= 8 is failure
     assert!(
-        p.contains("$LASTEXITCODE") && p.contains("8"),
+        p.contains("$LASTEXITCODE -ge 8"),
         "robocopy exit >= 8 is the only failure (0-7 success):\n{p}"
     );
     // env-free (the genlock build carries no env)
@@ -407,9 +431,38 @@ fn windows_ahk_bracket_only_on_strih() {
         strih.contains("Stop-Process -Name AutoHotkey64"),
         "strih runs the AHK watchdog — must be stopped before the copy:\n{strih}"
     );
+    // #789 review #1: strih MUST restart AHK verified before exiting (leaving it running so the
+    // STEP-2 launch-obs-genlock.sh session gate passes) — launch only restarts AHK it stopped itself.
+    assert!(
+        strih.contains("ahkRelaunchVerified") && strih.contains("exit 9"),
+        "strih must restart AHK VERIFIED and fail loud if it doesn't come back (#789 review #1):\n{strih}"
+    );
     assert!(
         !stream.contains("Stop-Process -Name AutoHotkey64"),
         "stream has NO AHK watcher — its program must carry no real AutoHotkey64 stop:\n{stream}"
+    );
+    assert!(
+        !stream.contains("ahkRelaunchVerified"),
+        "stream must carry no AHK restart (no watcher on this box):\n{stream}"
+    );
+}
+
+/// --yes wires the retention deletion confirm through the emitted Windows program.
+#[test]
+fn windows_confirm_wires_retention_deletion() {
+    // 10th arg = confirm=1
+    let confirmed = run_sourced(
+        &script(),
+        "build_windows_deploy_program strih full 'C:\\st' 'C:\\Program Files\\obs-studio' 1 'C:\\obs-backup' 3 SHA DSHA 1",
+    );
+    assert!(
+        confirmed.contains("$fleetConfirmRetention = $true"),
+        "confirm=1 must set $fleetConfirmRetention = $true:\n{confirmed}"
+    );
+    let default = win_program("strih", "full", "1"); // confirm defaults to 0
+    assert!(
+        default.contains("$fleetConfirmRetention = $false"),
+        "default (no --yes) must keep retention print-only ($false):\n{default}"
     );
 }
 
@@ -465,11 +518,41 @@ fn imag_program_installs_all_four_and_writes_markers_via_the_shared_helper() {
 }
 
 #[test]
+fn imag_program_ships_full_bundle_and_verifies_bytes() {
+    // #789 review #2 (issue 1026): the imag deploy must ship the WHOLE bundle (every obs-plugins/*.so
+    // with libobs — a hand-picked subset over a new libobs is a latent SIGSEGV), NOT a 4-file install.
+    let p = imag_program();
+    assert!(
+        p.contains("cp -a \"$BUNDLE/lib/x86_64-linux-gnu/.\""),
+        "installs the WHOLE bundle lib dir (all obs-plugins/*.so), never a hand-picked subset:\n{p}"
+    );
+    assert!(
+        !p.contains("install -m 0644 -o root -g root \"$STAGE/libobs.so.30\""),
+        "must NOT be the old 4-file hand-picked install (issue 1026):\n{p}"
+    );
+    // #789 review #5: sha256-verify the staged bytes against the manifest before installing.
+    assert!(
+        p.contains("verify_sha") && p.contains("sha256sum") && p.contains("BUNDLE_MANIFEST.json"),
+        "must sha256-verify the staged files against the bundle manifest (fail-closed):\n{p}"
+    );
+    // #789 review #2: the mandatory 1026 WS filter-enum survival check is directed after restart.
+    assert!(
+        p.contains("obs_burn_filter.py check"),
+        "must direct the 1026 WS filter-enum survival check after restart:\n{p}"
+    );
+}
+
+#[test]
 fn imag_program_keeps_the_abi_guards_and_graceful_restart() {
     let p = imag_program();
     assert!(
         p.contains("readelf") && p.contains("SONAME"),
         "SONAME sanity check — refuse a mismatched ABI:\n{p}"
+    );
+    // #789 review #5: BOTH libobs AND the separate libobs-opengl (#756) get a SONAME check.
+    assert!(
+        p.contains("libobs\\.so\\.30") && p.contains("libobs-opengl\\.so\\.30"),
+        "SONAME check must cover BOTH libobs.so.30 and libobs-opengl.so.30 (#756):\n{p}"
     );
     assert!(
         p.contains("obs_display_set_render_divisor"),
@@ -500,6 +583,24 @@ fn imag_program_prints_retention_plan() {
     assert!(
         p.to_uppercase().contains("RETENTION PLAN"),
         "prints a retention plan:\n{p}"
+    );
+    // default (confirm=0) is print-only ("would delete"), never a silent rm.
+    assert!(
+        p.contains("would delete") && !p.contains("rm -rf \"$d\""),
+        "default imag retention lists candidates, never deletes:\n{p}"
+    );
+}
+
+/// --yes (confirm=1) wires the imag retention to actually delete the stale backup dirs.
+#[test]
+fn imag_program_confirm_deletes_stale_backups() {
+    let p = run_sourced(
+        &script(),
+        "build_imag_deploy_program /tmp/genlock-stage-RUN /opt/obs-genlock /opt/obs-backup SHA789 DSHA789 3 1",
+    );
+    assert!(
+        p.contains("rm -rf \"$d\""),
+        "confirm=1 must actually delete the stale backup dirs:\n{p}"
     );
 }
 

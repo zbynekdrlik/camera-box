@@ -50,6 +50,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "$HERE/lib/genlock-markers.sh"
+# shellcheck source=scripts/lib/ahk-watchdog.sh
+# The strih AHK watchdog restart (#789 issue-review #1): the deploy program stops AHK to copy, then
+# MUST restart it before handing off to launch-obs-genlock.sh -- launch only restarts AHK IF IT
+# stopped it itself and its #978 session gate then hard-fails (exit 8) on AHK count != 1. Reuse the
+# ONE verified relaunch helper launch itself uses, never a fork.
+. "$HERE/lib/ahk-watchdog.sh"
 
 GENLOCK_REPO="zbynekdrlik/camera-box"
 FLEET_LOG_DEFAULT="${HOME}/.camera-box/genlock-fleet-deploy.log"
@@ -103,6 +109,17 @@ fleet_windows_workflow() {
 fleet_linux_bundle_artifact()   { echo "obs-genlock-linux-x86_64"; }
 fleet_linux_distroav_artifact() { echo "distroav-linux-fast-so"; }
 
+# fleet_pick_run_at_sha SHA  (stdin: a `gh run list --json databaseId,headSha,conclusion` JSON array)
+#   -> the databaseId of the FIRST successful run whose headSha == SHA, or empty. This is the heart
+#   of "one canonical version everywhere": the anchor run id designates a commit SHA, and each box's
+#   artifact must come from a run of ITS workflow at the SAME SHA (Windows and Linux genlock build in
+#   SEPARATE workflows/run-ids). Pure (stdin -> stdout via jq) so it is unit-tested with a fixture.
+fleet_pick_run_at_sha() {
+  local sha="${1:-}"
+  [ -n "$sha" ] || { echo "fleet_pick_run_at_sha: SHA required" >&2; return 2; }
+  jq -r --arg s "$sha" '[.[] | select(.headSha == $s and .conclusion == "success")][0].databaseId // empty'
+}
+
 # fleet_box_mcp / fleet_box_ip / fleet_box_has_ahk -- per-box constants (only strih runs the
 # NL_STARTUP.ahk auto-respawn watcher, so only strih's program stops AutoHotkey64).
 fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; *) return 2 ;; esac; }
@@ -117,24 +134,45 @@ fleet_box_has_ahk() { case "${1:-}" in strih) echo "1" ;; *) echo "0" ;; esac; }
 #   manifest (fail-closed), and prints a box-backup RETENTION PLAN (keep newest KEEP; delete only
 #   when $fleetConfirmRetention). Env-free (the genlock build carries no OBS_GENLOCK_*/OBS_BURN_*).
 build_windows_deploy_program() {
-  local box="$1" mode="$2" stage="$3" obs_dir="$4" has_ahk="$5" backup_root="$6" keep="$7" gsha="$8" dsha="$9"
-  # Escape ' for the PowerShell single-quoted strings (double it).
+  local box="$1" mode="$2" stage="$3" obs_dir="$4" has_ahk="$5" backup_root="$6" keep="$7" gsha="$8" dsha="$9" confirm="${10:-0}"
+  # Escape ' for the PowerShell single-quoted strings (double it) -- incl. gsha/dsha (--sha is
+  # operator-supplied in plan mode and also flows into $stage paths; #789 review #7 defense-in-depth).
   local stage_ps="${stage//\'/\'\'}" obs_ps="${obs_dir//\'/\'\'}" back_ps="${backup_root//\'/\'\'}"
+  local gsha_ps="${gsha//\'/\'\'}" dsha_ps="${dsha//\'/\'\'}"
+  local confirm_ps='$false'; [ "$confirm" = "1" ] && confirm_ps='$true'
 
-  local ahk_stop
+  local ahk_stop ahk_restart
   if [ "$has_ahk" = "1" ]; then
     ahk_stop=$(cat <<'PSAHK'
 # (1) Stop the strih AHK watchdog FIRST -- NL_STARTUP.ahk respawns obs64 via the bare exe within
 #     seconds of the window vanishing, which would re-lock data\ + obs-plugins\ files mid-copy
-#     (robocopy exit >= 8) AND drop the shortcut params. Restart it via launch-obs-genlock.sh on
-#     relaunch (STEP 2 of the plan), never here.
+#     (robocopy exit >= 8) AND drop the shortcut params. This program RESTARTS it at the end (step 8)
+#     so the box is left consistent and launch-obs-genlock.sh's #978 session gate (AHK count == 1)
+#     passes at STEP 2 -- launch only restarts AHK it stopped ITSELF, so we must not leave it down.
 if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
   Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
 }
 PSAHK
 )
+    # #789 review #1: restart AHK VERIFIED via the ONE shared helper launch-obs-genlock.sh uses
+    # (scripts/lib/ahk-watchdog.sh) -- never a fork. Fail loud if it does not come back.
+    local ahk_relaunch_ps; ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
+    ahk_restart=$(cat <<PSAHKR
+# (8) Restart the strih AHK watchdog we stopped in step (1), VERIFIED (leaves AHK running so the
+#     STEP-2 launch-obs-genlock.sh session gate passes). AHK's app1_run then keeps obs64 alive via
+#     the .lnk; the STEP-2 launch (--force) does the deterministic relaunch + render-tick verify.
+${ahk_relaunch_ps}
+if (\$ahkRelaunchVerified) {
+  Write-Host "#789: AHK watchdog restarted via \$ahkRelaunchTarget."
+} else {
+  Write-Error "#789 FAIL: AutoHotkey64 did not come back after the deploy (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher; investigate before trusting this box."
+  exit 9
+}
+PSAHKR
+)
   else
     ahk_stop='# (1) AutoHotkey64 watchdog: no-op (this box runs no AHK auto-respawn watcher).'
+    ahk_restart='# (8) AutoHotkey64 restart: no-op (no AHK watcher on this box).'
   fi
 
   local copy_block
@@ -176,7 +214,7 @@ PSFAST
 \$stage       = '${stage_ps}'
 \$obsDir      = '${obs_ps}'
 \$backupRoot  = '${back_ps}'
-\$fleetConfirmRetention = \$false   # set \$true to actually delete old backups; default = PLAN ONLY.
+\$fleetConfirmRetention = ${confirm_ps}   # --yes wires this to \$true; default \$false = PLAN ONLY.
 
 # (0) preflight -- the staged bundle must already be on the box (STEP 0 of the plan uploads it).
 if (-not (Test-Path \$stage))  { Write-Error "stage \$stage not found -- upload the artifact first (plan STEP 0)"; exit 2 }
@@ -207,8 +245,8 @@ function Write-MarkerAtomic(\$dest, \$content) {
   Set-Content -Path \$tmp -Value \$content -Encoding ascii
   Move-Item -Force \$tmp \$dest
 }
-Write-MarkerAtomic (Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt')  '${gsha}'
-Write-MarkerAtomic (Join-Path \$obsDir 'DISTROAV_BUILD_SHA.txt') '${dsha}'
+Write-MarkerAtomic (Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt')  '${gsha_ps}'
+Write-MarkerAtomic (Join-Path \$obsDir 'DISTROAV_BUILD_SHA.txt') '${dsha_ps}'
 Write-MarkerAtomic (Join-Path \$obsDir 'DEPLOYED_AT')            (Get-Date -Format o)
 
 # (6) sha256 verify the DEPLOYED obs.dll bytes against the bundle manifest (fail-closed) -- proof the
@@ -236,41 +274,70 @@ foreach (\$s in \$stale) {
   else                        { Write-Host "  would delete \$(\$s.FullName)" }
 }
 
-Write-Host "#789 FLEET DEPLOY OK: ${box} swapped to ${gsha} (marker written, obs.dll byte-verified). Relaunch via launch-obs-genlock.sh (plan STEP 2)."
+${ahk_restart}
+
+Write-Host "#789 FLEET DEPLOY OK: ${box} swapped to ${gsha_ps} (marker written, obs.dll byte-verified). Relaunch OBS via launch-obs-genlock.sh --box ${box} --force (plan STEP 2)."
 exit 0
 PS
 }
 
-# build_imag_deploy_program STAGE MARKER_DIR BACKUP_ROOT GSHA DSHA KEEP
-#   Emit the on-imag bash program the fleet script scp's + runs over ssh. It installs the four
-#   genlock components from STAGE, runs the ABI guards (SONAME + the #499 nm build-proof), writes the
-#   markers via the SHARED genlock_write_markers helper (scp'd alongside), applies retention, and
-#   restarts OBS via the existing imag-obs-stop.sh/imag-obs-start.sh helpers + a start-time re-check
-#   (the #912 stop-race). STAGE holds the 4 flat files + genlock-markers.sh (the fleet script stages
-#   them). Faithful to setup-imag.sh step 12; the markers are the shared single source of truth.
+# build_imag_deploy_program BUNDLE_DIR MARKER_DIR BACKUP_ROOT GSHA DSHA KEEP CONFIRM
+#   Emit the on-imag bash program the fleet script scp's + runs (sudo) over ssh. BUNDLE_DIR is the
+#   scp'd FULL linux-genlock bundle root (bin/, lib/x86_64-linux-gnu/ incl EVERY obs-plugins/*.so,
+#   share/obs/, BUNDLE_MANIFEST.json) + the shared genlock-markers.sh. It sha256-VERIFIES the staged
+#   key files against the bundle manifest (fail-closed), installs the WHOLE bundle -- NOT a hand-picked
+#   4-file list: on Linux the plugins link against libobs's INTERNAL struct layout, so a stale
+#   obs-plugins/*.so over a new libobs.so.30 is a latent SIGSEGV (issue 1026 -- the exact overnight
+#   OBS-crash + genlock_parity-refusal class #789 exists to end) -- runs the SONAME (libobs +
+#   libobs-opengl) + #499 nm ABI guards, writes the markers via the SHARED genlock_write_markers
+#   helper, applies retention (delete only when CONFIRM=1), restarts OBS via the existing
+#   imag-obs-stop.sh/imag-obs-start.sh helpers, and directs the mandatory 1026 WS filter-enum survival
+#   check. The markers are the shared single source of truth across the deploy legs.
 build_imag_deploy_program() {
-  local stage="$1" marker_dir="$2" backup_root="$3" gsha="$4" dsha="$5" keep="$6"
+  local bundle_dir="$1" marker_dir="$2" backup_root="$3" gsha="$4" dsha="$5" keep="$6" confirm="${7:-0}"
+  local del_line='  echo "  would delete $d"'
+  [ "$confirm" = "1" ] && del_line='  echo "  deleting $d"; rm -rf "$d"'
   cat <<EOS
 #!/usr/bin/env bash
-# issue 789 on-imag genlock deploy (run over ssh; mirrors setup-imag.sh step 12; markers via the
-# SHARED scripts/lib/genlock-markers.sh helper scp'd into the stage).
+# issue 789 on-imag genlock deploy (run sudo over ssh). Ships the FULL bundle (issue 1026 -- a
+# hand-picked subset over a new libobs is a latent SIGSEGV); markers via the SHARED
+# scripts/lib/genlock-markers.sh helper scp'd into the bundle.
 set -euo pipefail
-STAGE='${stage}'
+BUNDLE='${bundle_dir}'
 MARKER_DIR='${marker_dir}'
 BACKUP_ROOT='${backup_root}'
 KEEP='${keep}'
-LIBOBS_REAL='/usr/lib/x86_64-linux-gnu/libobs.so.30'
-DISTROAV_REAL='/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so'
+MANIFEST="\$BUNDLE/BUNDLE_MANIFEST.json"
+LIBDIR='/usr/lib/x86_64-linux-gnu'
+LIBOBS_REAL="\$LIBDIR/libobs.so.30"
+DISTROAV_REAL="\$LIBDIR/obs-plugins/distroav.so"
 OBS_FRONTEND_REAL='/usr/bin/obs'
-LIBOBS_OPENGL_REAL='/usr/lib/x86_64-linux-gnu/libobs-opengl.so.30'
+LIBOBS_OPENGL_REAL="\$LIBDIR/libobs-opengl.so.30"
 
-# shared marker helper (single source of truth; scp'd into the stage)
-. "\$STAGE/genlock-markers.sh"
+# shared marker helper (single source of truth; scp'd into the bundle)
+. "\$BUNDLE/genlock-markers.sh"
 
 command -v readelf >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 || { echo "readelf/nm (binutils) missing" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "jq missing (needed for the manifest sha256 verify)" >&2; exit 1; }
+[ -f "\$MANIFEST" ] || { echo "bundle missing BUNDLE_MANIFEST.json -- refuse an unverifiable deploy" >&2; exit 4; }
 
-# (1) back up the currently-installed components (instant rollback), one dated dir per deploy + the
-#     overwritten 'previous' rollback dir setup-imag.sh/drift-guard expect.
+# (1) sha256 VERIFY the staged key files against the bundle manifest BEFORE installing (fail-closed;
+#     the #121/#122 deploy contract -- a corrupt scp/download never reaches the live install).
+verify_sha() {  # RELPATH  STAGED_FILE
+  local relpath="\$1" f="\$2" want got
+  want="\$(jq -r --arg p "\$relpath" '.files[] | select(.path == \$p) | .sha256' "\$MANIFEST")"
+  [ -n "\$want" ] || { echo "manifest lists no \$relpath -- refuse an unverifiable file" >&2; exit 4; }
+  [ -f "\$f" ] || { echo "staged bundle missing \$f" >&2; exit 4; }
+  got="\$(sha256sum "\$f" | awk '{print \$1}')"
+  [ "\$want" = "\$got" ] || { echo "sha256 MISMATCH for \$relpath (want \$want got \$got) -- refuse to deploy" >&2; exit 4; }
+}
+verify_sha 'lib/x86_64-linux-gnu/libobs.so.30'                "\$BUNDLE/lib/x86_64-linux-gnu/libobs.so.30"
+verify_sha 'lib/x86_64-linux-gnu/libobs-opengl.so.30'         "\$BUNDLE/lib/x86_64-linux-gnu/libobs-opengl.so.30"
+verify_sha 'bin/obs'                                          "\$BUNDLE/bin/obs"
+verify_sha 'lib/x86_64-linux-gnu/obs-plugins/distroav.so'    "\$BUNDLE/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
+
+# (2) back up the components we overwrite (instant rollback), one dated dir + the 'previous' dir
+#     setup-imag.sh/drift-guard expect.
 STAMP="\$(date +%Y-%m-%dT%H-%M-%S)"
 BK="\$BACKUP_ROOT/\$STAMP-789"
 mkdir -p "\$BK" "\$BACKUP_ROOT/previous"
@@ -279,34 +346,41 @@ for f in "\$LIBOBS_REAL" "\$DISTROAV_REAL" "\$OBS_FRONTEND_REAL" "\$LIBOBS_OPENG
   [ -f "\$f" ] && cp -a "\$f" "\$BACKUP_ROOT/previous/\$(basename "\$f")"
 done
 
-# (2) install the FOUR components together (they version as one build) -- libobs, distroav, the
-#     frontend exe (#499), and the SEPARATE libobs-opengl (#756).
-install -m 0644 -o root -g root "\$STAGE/libobs.so.30"        "\$LIBOBS_REAL"        || { echo "libobs install failed" >&2; exit 4; }
-install -m 0644 -o root -g root "\$STAGE/distroav.so"         "\$DISTROAV_REAL"      || { echo "distroav install failed" >&2; exit 4; }
-install -m 0755 -o root -g root "\$STAGE/obs"                 "\$OBS_FRONTEND_REAL"  || { echo "frontend /usr/bin/obs install failed" >&2; exit 4; }
-install -m 0644 -o root -g root "\$STAGE/libobs-opengl.so.30" "\$LIBOBS_OPENGL_REAL" || { echo "libobs-opengl install failed" >&2; exit 4; }
+# (3) install the WHOLE bundle (issue 1026): libobs + libobs-opengl + EVERY obs-plugins/*.so built
+#     together + the frontend exe + share/obs data -- never a hand-picked subset. cp -a merges the
+#     bundle's OBS libs into the system dir (nothing else lives under obs-plugins/); chown root:root
+#     the copied OBS files (cp -a preserves the CI runner's uid otherwise).
+cp -a "\$BUNDLE/lib/x86_64-linux-gnu/." "\$LIBDIR/" || { echo "install of the bundle libs failed" >&2; exit 4; }
+chown root:root "\$LIBOBS_REAL" "\$LIBOBS_OPENGL_REAL" 2>/dev/null || true
+[ -d "\$LIBDIR/obs-plugins" ] && chown -R root:root "\$LIBDIR/obs-plugins" 2>/dev/null || true
+install -m 0755 -o root -g root "\$BUNDLE/bin/obs" "\$OBS_FRONTEND_REAL" || { echo "frontend /usr/bin/obs install failed" >&2; exit 4; }
+if [ -d "\$BUNDLE/share/obs" ]; then mkdir -p /usr/share/obs; cp -a "\$BUNDLE/share/obs/." /usr/share/obs/; chown -R root:root /usr/share/obs 2>/dev/null || true; fi
 ldconfig
 
-# (3) ABI guards -- refuse a mismatched SONAME or a stock/wrong frontend (no grep -q on a piped
-#     external cmd under pipefail; read the full output -- the setup-imag.sh SIGPIPE footgun).
+# (4) ABI guards -- refuse a mismatched SONAME (libobs AND the SEPARATE libobs-opengl, #756) or a
+#     stock/wrong frontend. No grep -q on a piped external cmd under pipefail (the setup-imag.sh
+#     SIGPIPE footgun); read the full output.
 readelf -d "\$LIBOBS_REAL" 2>/dev/null | grep 'SONAME.*\[libobs\.so\.30\]' >/dev/null \
   || { echo "post-swap libobs.so.30 SONAME check failed -- refuse a mismatched ABI" >&2; exit 4; }
+readelf -d "\$LIBOBS_OPENGL_REAL" 2>/dev/null | grep 'SONAME.*\[libobs-opengl\.so\.30\]' >/dev/null \
+  || { echo "post-swap libobs-opengl.so.30 SONAME check failed -- refuse a mismatched ABI (#756)" >&2; exit 4; }
 nm -D -u "\$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_divisor' >/dev/null \
   || { echo "post-swap /usr/bin/obs does not reference obs_display_set_render_divisor -- refuse a stock/wrong frontend (#499)" >&2; exit 4; }
 
-# (4) markers via the SHARED helper (bod 4 single source of truth)
+# (5) markers via the SHARED helper (bod 4 single source of truth)
 genlock_write_markers "\$MARKER_DIR" '${gsha}' '${dsha}'
-[ -f "\$STAGE/BUNDLE_MANIFEST.json" ] && cp -a "\$STAGE/BUNDLE_MANIFEST.json" "\$MARKER_DIR/BUNDLE_MANIFEST.json"
+cp -a "\$MANIFEST" "\$MARKER_DIR/BUNDLE_MANIFEST.json"
 
-# (5) box-backup RETENTION PLAN (bod 5) -- keep the newest \$KEEP dated dirs; list the rest.
+# (6) box-backup RETENTION (bod 5) -- keep the newest \$KEEP dated dirs; delete the rest ONLY when the
+#     operator confirmed (--yes), else print the plan.
 echo "RETENTION PLAN (keep newest \$KEEP of \$BACKUP_ROOT/*-789):"
 genlock_retention_delete_plan "\$KEEP" "\$BACKUP_ROOT" '*-789' | while IFS= read -r d; do
-  echo "  would delete \$d"
+${del_line}
 done
 
-# (6) graceful OBS restart via the EXISTING installed helpers, then VERIFY the process actually
-#     restarted after the swap (the #912 stop-race: a one-shot stop->install->start can leave the
-#     OLD obs mapped). SIGKILL only as the last resort on a wedged process.
+# (7) graceful OBS restart via the EXISTING installed helpers. The pkill -9 guarantees the OLD obs
+#     (old libobs still mapped -- the #912 stop-race) is gone, so a fresh obs seen below IS the
+#     restarted one; its lstart is shown for the record. SIGKILL only as the last resort.
 if [ -x /usr/local/bin/imag-obs-stop.sh ]; then sudo -u "\${SUDO_USER:-newlevel}" DISPLAY=:0 /usr/local/bin/imag-obs-stop.sh || true; fi
 pkill -9 -x obs 2>/dev/null || true
 sleep 2
@@ -314,10 +388,15 @@ rm -f "/home/\${SUDO_USER:-newlevel}/.config/obs-studio/.sentinel/"* 2>/dev/null
 if [ -x /usr/local/bin/imag-obs-start.sh ]; then setsid nohup sudo -u "\${SUDO_USER:-newlevel}" DISPLAY=:0 /usr/local/bin/imag-obs-start.sh >/dev/null 2>&1 & fi
 sleep 5
 if ps -o pid,lstart,cmd -C obs 2>/dev/null | grep -q obs; then
-  echo "#789 IMAG DEPLOY OK: swapped to ${gsha}; obs restarted:"; ps -o pid,lstart,cmd -C obs
+  echo "#789 IMAG DEPLOY OK: swapped to ${gsha}; obs up after the swap:"; ps -o pid,lstart,cmd -C obs
 else
   echo "#789 IMAG WARN: obs not seen after restart -- verify from a fresh ssh (ps -o pid,lstart -C obs)" >&2
 fi
+
+# (8) MANDATORY 1026 survival check (dev1-side WS op -- run AFTER this program returns): exercise a
+#     WS filter-enum to prove the previously-crashing get_const_root <- obs_enum path survives the
+#     full-bundle swap:  python3 scripts/obs_burn_filter.py check --host <imag-ip>   (from dev1).
+echo "#789 NEXT (issue 1026): from dev1 run 'python3 scripts/obs_burn_filter.py check --host <imag-ip>' to prove the WS filter-enum path survives."
 EOS
 }
 
@@ -367,17 +446,18 @@ EOF
 
 # emit the plan for one Windows box (STEP 0 upload -> the deploy program -> STEP 2 relaunch).
 emit_windows_plan() {
-  local box="$1" mode="$2" stage="$3" gsha="$4" dsha="$5"
+  local box="$1" mode="$2" stage="$3" gsha="$4" dsha="$5" confirm="${6:-0}"
   local mcp ip has_ahk win_stage program artifact
   mcp="$(fleet_box_mcp "$box")"; ip="$(fleet_box_ip "$box")"; has_ahk="$(fleet_box_has_ahk "$box")"
   artifact="$(fleet_windows_artifact "$mode")"
   win_stage="C:\\stage-genlock-${gsha}"
-  program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha")"
+  program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha" "$confirm")"
   cat <<PLAN
 # ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} =================
-# STEP 0 (once per box): upload the downloaded '${artifact}' bytes to the box at ${win_stage}
-#         via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip + Expand-Archive on the box),
-#         then run the program below in the ${mcp} MCP Shell (timeout >= 240 s):
+# STEP 0 (once per box): upload the downloaded '${artifact}' bytes (staged locally at ${stage}) to
+#         the box at ${win_stage} via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip +
+#         Expand-Archive on the box), then run the program below in the ${mcp} MCP Shell
+#         (timeout >= 240 s):
 # ----------------------------------------------------------------------------------------------------
 ${program}
 # ----------------------------------------------------------------------------------------------------
@@ -389,15 +469,16 @@ PLAN
 
 # emit the imag plan (STEP 0 scp -> run the on-imag program over ssh).
 emit_imag_plan() {
-  local stage="$1" gsha="$2" dsha="$3"
+  local stage="$1" gsha="$2" dsha="$3" confirm="${4:-0}"
   local imag_stage="/tmp/genlock-stage-${gsha}"
   local program
-  program="$(build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$gsha" "$dsha" "$RETENTION_KEEP")"
+  program="$(build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$gsha" "$dsha" "$RETENTION_KEEP" "$confirm")"
   cat <<PLAN
 # ================= FLEET PLAN: box=imag (ssh newlevel@imag) =================
-# STEP 0: scp the 4 staged files (libobs.so.30, distroav.so, obs, libobs-opengl.so.30) + BUNDLE_MANIFEST.json
-#         + scripts/lib/genlock-markers.sh from ${stage} to imag:${imag_stage}, then run over ssh
-#         (sudo, DISPLAY=:0). The on-imag program:
+# STEP 0: scp the FULL linux-genlock bundle (bin/, lib/x86_64-linux-gnu/ incl EVERY obs-plugins/*.so,
+#         share/obs/, BUNDLE_MANIFEST.json -- issue 1026: never a hand-picked subset) + the shared
+#         scripts/lib/genlock-markers.sh from ${stage} to imag:${imag_stage}, then run the program
+#         below over ssh (sudo, DISPLAY=:0):
 # ----------------------------------------------------------------------------------------------------
 ${program}
 # ----------------------------------------------------------------------------------------------------
@@ -450,20 +531,83 @@ main() {
   fi
 
   # --- execute mode -------------------------------------------------------------------------------
-  # Resolve the anchor headSha, download the same-SHA artifacts, emit the Windows plan, ssh-deploy
-  # imag, append the fleet log. (Live deploy is driven by the supervisor -- see the ticket: #789
-  # stays OPEN until the new path is driven live once.)
+  # Resolve the anchor headSha, resolve + download the SAME-SHA artifacts across the (separate)
+  # windows/linux workflows, emit the Windows plan (agent uploads + pastes into the win-* MCP Shell),
+  # ssh-deploy imag, and append one fleet-deploy log line. The worker never runs this; the supervisor
+  # drives it live (the ticket stays OPEN until then).
   command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI required for execute mode" >&2; exit 3; }
+  command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required for execute mode" >&2; exit 3; }
   local sha; sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
-    || { echo "ERROR: could not resolve headSha for run $run_id" >&2; exit 3; }
-  [ -n "$sha" ] || { echo "ERROR: empty headSha for run $run_id" >&2; exit 3; }
-  echo "# anchor run $run_id -> canonical SHA $sha; requested boxes: $boxes (mode $mode)"
-  echo "# retention auto-confirm (--yes): $yes"
-  echo "# (execute mode resolves the same-SHA windows/linux artifacts, emits the Windows MCP plan,"
-  echo "#  and ssh-deploys imag. Drive the printed Windows program via the win-* MCP Shell.)"
-  echo "# NOTE: full download+ssh execution is driven live by the supervisor; re-run with --plan for"
-  echo "#       the offline plan. Fleet log target: ${FLEET_LOG_DEFAULT}"
-  # (The download/scp/ssh steps run live under the supervisor; not exercised by the worker.)
+    || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
+  [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
+  echo "# anchor run $run_id -> canonical SHA $sha; boxes: $boxes (mode $mode; retention --yes=$yes)"
+
+  local workdir; workdir="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$workdir'" EXIT
+
+  local want_win=0 want_imag=0 b
+  { local IFS=','; for b in $boxes; do case "$b" in strih|stream) want_win=1 ;; imag) want_imag=1 ;; esac; done; }
+
+  # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
+  if [ "$want_win" = 1 ]; then
+    local win_wf win_art win_run
+    win_wf="$(fleet_windows_workflow "$mode")"; win_art="$(fleet_windows_artifact "$mode")"
+    win_run="$(gh run list --repo "$GENLOCK_REPO" --workflow "$win_wf" --json databaseId,headSha,conclusion --limit 50 2>/dev/null | fleet_pick_run_at_sha "$sha")" || true
+    [ -n "$win_run" ] || { echo "ERROR: no successful $win_wf run at $sha -- build the Windows artifact at that commit first (gh workflow run / a tag dispatch)" >&2; exit 3; }
+    gh run download "$win_run" --repo "$GENLOCK_REPO" -n "$win_art" -D "$workdir/win" \
+      || { echo "ERROR: download of $win_art (run $win_run) failed" >&2; exit 3; }
+    echo "# Windows artifact $win_art (run $win_run) downloaded to $workdir/win"
+    echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
+    { local IFS=','; for b in $boxes; do case "$b" in strih|stream) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done; }
+  fi
+
+  # --- imag: download the same-SHA linux artifacts, scp the WHOLE bundle + ssh-run (issue 1026) -----
+  if [ "$want_imag" = 1 ]; then
+    local lrun
+    lrun="$(gh run list --repo "$GENLOCK_REPO" --workflow linux-genlock.yml --json databaseId,headSha,conclusion --limit 50 2>/dev/null | fleet_pick_run_at_sha "$sha")" || true
+    [ -n "$lrun" ] || { echo "ERROR: no successful linux-genlock.yml run at $sha -- build the imag artifact at that commit first (a tag dispatch, per the issue-923 recipe)" >&2; exit 3; }
+    gh run download "$lrun" --repo "$GENLOCK_REPO" -n "$(fleet_linux_bundle_artifact)"   -D "$workdir/bundle" \
+      || { echo "ERROR: download of the linux bundle (run $lrun) failed" >&2; exit 3; }
+    gh run download "$lrun" --repo "$GENLOCK_REPO" -n "$(fleet_linux_distroav_artifact)" -D "$workdir/fast" \
+      || { echo "ERROR: download of the linux distroav (run $lrun) failed" >&2; exit 3; }
+    # Overlay the freshly-built fast distroav.so into the bundle tree (byte-identical to the bundle's
+    # own per setup-imag's cross-check, but this pins the compile-check job's exact output), then ship
+    # the WHOLE bundle (issue 1026 -- every obs-plugins/*.so must travel with libobs). Add the shared
+    # marker lib + the emitted program into the bundle root the on-imag program reads.
+    [ -f "$workdir/fast/distroav.so" ] || { echo "ERROR: fast artifact missing distroav.so" >&2; exit 3; }
+    [ -d "$workdir/bundle/lib/x86_64-linux-gnu/obs-plugins" ] || { echo "ERROR: bundle missing lib/x86_64-linux-gnu/obs-plugins" >&2; exit 3; }
+    cp -f "$workdir/fast/distroav.so" "$workdir/bundle/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
+    cp "$HERE/lib/genlock-markers.sh" "$workdir/bundle/genlock-markers.sh" || { echo "ERROR: cannot stage genlock-markers.sh" >&2; exit 3; }
+
+    # imag transport: the repo's established pattern (sshpass, IMAG_IP from scripts/imag-host.sh,
+    # sudo -S with the password on stdin -- same as recording-e2e.sh / dantesync-fleet-upgrade.sh).
+    command -v sshpass >/dev/null 2>&1 || { echo "ERROR: sshpass required for the imag ssh deploy (apt-get install sshpass)" >&2; exit 3; }
+    local imag_ip="${IMAG_IP:-}"
+    if [ -z "$imag_ip" ] && [ -f "$HERE/imag-host.sh" ]; then
+      # shellcheck source=scripts/imag-host.sh
+      . "$HERE/imag-host.sh"; imag_ip="${IMAG_HOST_IP:-}"
+    fi
+    imag_ip="${imag_ip:-10.77.9.182}"
+    local imag_user="${IMAG_USER:-newlevel}" imag_pw="${IMAG_PW:-newlevel}"
+    local imag_stage="/tmp/genlock-stage-$sha"
+    build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$sha" "$sha" "$RETENTION_KEEP" "$yes" > "$workdir/bundle/deploy.sh"
+
+    echo "# imag: staging the FULL bundle $workdir/bundle -> ${imag_user}@${imag_ip}:$imag_stage and running the on-imag deploy (sudo) over ssh..."
+    sshpass -p "$imag_pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=12 "${imag_user}@${imag_ip}" "rm -rf '$imag_stage' && mkdir -p '$imag_stage'" \
+      || { echo "ERROR: imag stage mkdir failed" >&2; exit 4; }
+    sshpass -p "$imag_pw" scp -O -r -o StrictHostKeyChecking=no "$workdir/bundle/." "${imag_user}@${imag_ip}:$imag_stage/" \
+      || { echo "ERROR: imag scp failed" >&2; exit 4; }
+    sshpass -p "$imag_pw" ssh -o StrictHostKeyChecking=no "${imag_user}@${imag_ip}" "printf '%s\\n' '$imag_pw' | sudo -S -p '' bash '$imag_stage/deploy.sh'" \
+      || { echo "ERROR: imag deploy failed (see the on-imag output above)" >&2; exit 4; }
+    echo "# imag deploy done. Verify from a fresh ssh: ps -o pid,lstart -C obs (started after the swap) + 'render tick ENABLED' in the newest OBS log."
+    echo "# issue 1026 survival check: python3 scripts/obs_burn_filter.py check --host ${imag_ip}   (run from dev1)"
+  fi
+
+  # --- durable fleet-deploy log line ---------------------------------------------------------------
+  mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
+  fleet_log_line "$run_id" "$sha" "$boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
+  echo "# fleet-deploy log appended: $FLEET_LOG_DEFAULT"
   exit 0
 }
 
