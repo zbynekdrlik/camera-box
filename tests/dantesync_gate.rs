@@ -3761,16 +3761,60 @@ fn gate_win_http_master_bounded_step_sawtooth_passes_via_step_cap_1119() {
     let base = now_epoch();
     let responses = vec![
         http_status_master_1119(base, 2400, "1000", false, "85", true, "LOCK", "10.77.9.184"),
-        http_status_master_1119(base + 5, 2600, "1000", false, "85", true, "LOCK", "10.77.9.184"),
-        http_status_master_1119(base + 10, 2699, "1000", false, "85", true, "LOCK", "10.77.9.184"),
-        http_status_master_1119(base + 15, 2900, "1000", false, "85", true, "LOCK", "10.77.9.184"),
-        http_status_master_1119(base + 20, 3100, "1000", false, "86", true, "LOCK", "10.77.9.184"),
+        http_status_master_1119(
+            base + 5,
+            2600,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 10,
+            2699,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 15,
+            2900,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 20,
+            3100,
+            "1000",
+            false,
+            "86",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
     ];
     let p = write_multi_read_fixture("strih_1119_sawtooth", &responses);
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "strih=10.77.9.202", "--samples", "5", "--min-distinct",
-            "5", "--window-s", "0",
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "5",
+            "--window-s",
+            "0",
         ],
         &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
     );
@@ -3796,14 +3840,40 @@ fn gate_win_http_master_step_storm_fails_even_with_in_bound_median_1119() {
     let base = now_epoch();
     let responses = vec![
         http_status_master_1119(base, 1400, "1000", true, "240", true, "LOCK", "10.77.9.184"),
-        http_status_master_1119(base + 5, 1500, "1000", true, "240", true, "LOCK", "10.77.9.184"),
-        http_status_master_1119(base + 10, 1600, "1000", true, "245", true, "LOCK", "10.77.9.184"),
+        http_status_master_1119(
+            base + 5,
+            1500,
+            "1000",
+            true,
+            "240",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 10,
+            1600,
+            "1000",
+            true,
+            "245",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
     ];
     let p = write_multi_read_fixture("strih_1119_storm", &responses);
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "strih=10.77.9.202", "--samples", "3", "--min-distinct",
-            "3", "--window-s", "0",
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
         ],
         &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
     );
@@ -3811,7 +3881,10 @@ fn gate_win_http_master_step_storm_fails_even_with_in_bound_median_1119() {
         code, 20,
         "an affirmative ntp_step_storm must FAIL even with an in-bound median. stdout={stdout} stderr={stderr}"
     );
-    assert!(stdout.contains("STORM"), "stdout must name the storm: {stdout}");
+    assert!(
+        stdout.contains("STORM"),
+        "stdout must name the storm: {stdout}"
+    );
 }
 
 #[test]
@@ -3820,15 +3893,50 @@ fn gate_win_http_master_huge_offset_still_fails_under_step_cap_1119() {
     // (a genuine desync the bounded step cannot produce) must still DRIFT far beyond 3500us.
     let base = now_epoch();
     let responses = vec![
-        http_status_master_1119(base, 15000, "1000", false, "85", true, "LOCK", "10.77.9.184"),
-        http_status_master_1119(base + 5, 15100, "1000", false, "85", true, "LOCK", "10.77.9.184"),
-        http_status_master_1119(base + 10, 14900, "1000", false, "85", true, "LOCK", "10.77.9.184"),
+        http_status_master_1119(
+            base,
+            15000,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 5,
+            15100,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 10,
+            14900,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
     ];
     let p = write_multi_read_fixture("strih_1119_huge_offset", &responses);
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "strih=10.77.9.202", "--samples", "3", "--min-distinct",
-            "3", "--window-s", "0",
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
         ],
         &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
     );
@@ -3846,14 +3954,40 @@ fn gate_win_http_master_unlocked_still_fails_1119() {
     let base = now_epoch();
     let responses = vec![
         http_status_master_1119(base, 500, "1000", false, "85", false, "NTP", "10.77.9.184"),
-        http_status_master_1119(base + 5, 550, "1000", false, "85", false, "NTP", "10.77.9.184"),
-        http_status_master_1119(base + 10, 520, "1000", false, "85", false, "NTP", "10.77.9.184"),
+        http_status_master_1119(
+            base + 5,
+            550,
+            "1000",
+            false,
+            "85",
+            false,
+            "NTP",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 10,
+            520,
+            "1000",
+            false,
+            "85",
+            false,
+            "NTP",
+            "10.77.9.184",
+        ),
     ];
     let p = write_multi_read_fixture("strih_1119_unlocked", &responses);
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "strih=10.77.9.202", "--samples", "3", "--min-distinct",
-            "3", "--window-s", "0",
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
         ],
         &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
     );
@@ -3871,14 +4005,40 @@ fn gate_win_http_master_foreign_gm_still_fails_under_enforce_1119() {
     let base = now_epoch();
     let responses = vec![
         http_status_master_1119(base, 500, "1000", false, "85", true, "LOCK", "10.77.7.109"),
-        http_status_master_1119(base + 5, 550, "1000", false, "85", true, "LOCK", "10.77.7.109"),
-        http_status_master_1119(base + 10, 520, "1000", false, "85", true, "LOCK", "10.77.7.109"),
+        http_status_master_1119(
+            base + 5,
+            550,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.7.109",
+        ),
+        http_status_master_1119(
+            base + 10,
+            520,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.7.109",
+        ),
     ];
     let p = write_multi_read_fixture("strih_1119_foreign_gm", &responses);
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "strih=10.77.9.202", "--samples", "3", "--min-distinct",
-            "3", "--window-s", "0",
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
         ],
         &[
             ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string()),

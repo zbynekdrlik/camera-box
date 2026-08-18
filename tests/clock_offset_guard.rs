@@ -3560,25 +3560,41 @@ fn ntp_master_step_storm_verdict_reads_true_false_null_and_absent_1119() {
     // fail), false=ok, null/absent=unknown (report-first for a pre-field payload, never a fail).
     let storm = pipe_json_master_1119("1000", "true", "240");
     assert_eq!(
-        run_sourced("ntp_master_step_storm_verdict \"$JSON\"", &[("JSON", storm.as_str())]).trim(),
+        run_sourced(
+            "ntp_master_step_storm_verdict \"$JSON\"",
+            &[("JSON", storm.as_str())]
+        )
+        .trim(),
         "storm",
         "ntp_step_storm:true -> storm"
     );
     let ok = pipe_json_master_1119("1000", "false", "85");
     assert_eq!(
-        run_sourced("ntp_master_step_storm_verdict \"$JSON\"", &[("JSON", ok.as_str())]).trim(),
+        run_sourced(
+            "ntp_master_step_storm_verdict \"$JSON\"",
+            &[("JSON", ok.as_str())]
+        )
+        .trim(),
         "ok",
         "ntp_step_storm:false -> ok"
     );
     let null = pipe_json_master_1119("1000", "null", "null");
     assert_eq!(
-        run_sourced("ntp_master_step_storm_verdict \"$JSON\"", &[("JSON", null.as_str())]).trim(),
+        run_sourced(
+            "ntp_master_step_storm_verdict \"$JSON\"",
+            &[("JSON", null.as_str())]
+        )
+        .trim(),
         "unknown",
         "ntp_step_storm:null -> unknown (never a fail)"
     );
     let absent = pipe_json_deadband("1000"); // no ntp_step_storm field at all
     assert_eq!(
-        run_sourced("ntp_master_step_storm_verdict \"$JSON\"", &[("JSON", absent.as_str())]).trim(),
+        run_sourced(
+            "ntp_master_step_storm_verdict \"$JSON\"",
+            &[("JSON", absent.as_str())]
+        )
+        .trim(),
         "unknown",
         "absent ntp_step_storm -> unknown"
     );
@@ -3588,17 +3604,29 @@ fn ntp_master_step_storm_verdict_reads_true_false_null_and_absent_1119() {
 fn ntp_steps_last_hour_from_pipe_json_reads_numeric_null_and_absent_1119() {
     let s = pipe_json_master_1119("1000", "false", "85");
     assert_eq!(
-        run_sourced("ntp_steps_last_hour_from_pipe_json \"$JSON\"", &[("JSON", s.as_str())]).trim(),
+        run_sourced(
+            "ntp_steps_last_hour_from_pipe_json \"$JSON\"",
+            &[("JSON", s.as_str())]
+        )
+        .trim(),
         "85"
     );
     let n = pipe_json_master_1119("1000", "false", "null");
     assert_eq!(
-        run_sourced("ntp_steps_last_hour_from_pipe_json \"$JSON\"", &[("JSON", n.as_str())]).trim(),
+        run_sourced(
+            "ntp_steps_last_hour_from_pipe_json \"$JSON\"",
+            &[("JSON", n.as_str())]
+        )
+        .trim(),
         "null"
     );
     let a = pipe_json_deadband("1000");
     assert_eq!(
-        run_sourced("ntp_steps_last_hour_from_pipe_json \"$JSON\"", &[("JSON", a.as_str())]).trim(),
+        run_sourced(
+            "ntp_steps_last_hour_from_pipe_json \"$JSON\"",
+            &[("JSON", a.as_str())]
+        )
+        .trim(),
         "",
         "absent field -> empty"
     );
