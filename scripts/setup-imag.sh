@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=25
+TOTAL_STEPS=26
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -1472,8 +1472,11 @@ step 15 "Kiosk environment (#504): openbox+lightdm autologin, DM→lightdm, disa
 #     #833: wmctrl rides along here too — recording-e2e.sh's [0/8] projector-count preflight (and
 #     the #769 windowed-stray heal) shell out to it over SSH; a freshly provisioned box without it
 #     made that preflight misread "tool absent" as "0 projectors" (three wasted gate re-runs).
+#     #791: btop rides along too — the generated openbox menu (step 16, #785) "Systémový monitor"
+#     item runs `x-terminal-emulator -e btop`; the live box has it hand-installed, so a fresh box
+#     without it would carry a menu item pointing at a missing binary.
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl \
+DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop \
     || fail "#504: openbox+lightdm install failed — cannot convert imag-nb to the kiosk WM"
 
 # (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same
@@ -1712,6 +1715,16 @@ cat > "$USER_HOME/.config/openbox/menu.xml" <<'MENU_EOF'
     <item label="Zastav OBS (korektne)">
       <action name="Execute">
         <command>/usr/local/bin/imag-obs-stop.sh</command>
+      </action>
+    </item>
+    <item label="Systémový monitor (CPU+GPU)">
+      <action name="Execute">
+        <command>x-terminal-emulator -e btop</command>
+      </action>
+    </item>
+    <item label="Terminál">
+      <action name="Execute">
+        <command>x-terminal-emulator</command>
       </action>
     </item>
     <separator />
@@ -2155,6 +2168,71 @@ Section "InputClass"
 EndSection
 EOF
 echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 50)"
+
+# =============================================================================
+step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-profile/runtime-PM via imag-maxperf.service + hotplug udev rule"
+# =============================================================================
+# The incumbent's full performance persistence lived in imag-maxperf.service (issue 756) ->
+# /usr/local/sbin/imag-maxperf.sh, plus a hotplug-persistent udev rule -- NEVER tracked in the repo
+# (a live audit's `grep -rn imag-maxperf scripts/ tests/` returned nothing), hand-placed and never
+# ported to this generator (the same "provisioning gap hidden by a hand patch" class issue 840
+# documented for imag-obs-start.sh, issue 841 for the NVIDIA tuning, issue 858 for remoteos-mcp).
+# Step 4 (cpu-performance.service + rc.local) persists ONLY the governor + per-device USB/NET
+# power/control; EPP / intel_pstate no_turbo=0 / platform_profile / usbcore autosuspend / all-PCI
+# runtime-PM off / the hotplug udev rule were absent entirely -- exactly the EPP-persistence gap the
+# 2026-07-18 audit on this ticket demanded be folded in. Reproduce the live trio so a fresh box is
+# IDENTICAL to today's imag (the ticket mandate). The governor is set redundantly with
+# cpu-performance.service; that redundancy exists on the live box today and reproducing it is the
+# correct parity choice -- NOT a defect and NOT deferred work: consolidating the two units was the
+# explicitly REJECTED alternative (it would change the live box's own unit topology, so it is out of
+# scope for a parity fix). Every knob is [ -f ]/command -v guarded so it stays hardware-agnostic
+# (#816): a box lacking intel_pstate/
+# platform_profile simply skips those writes. verify-imag.sh check (y) reads the service/script/udev
+# presence AND the runtime STATE back and fails loud on any drift.
+mkdir -p /usr/local/sbin
+cat > /usr/local/sbin/imag-maxperf.sh <<'MAXPERF_EOF'
+#!/usr/bin/env bash
+# airuleset:script-ok boot enforcement must continue past missing knobs; every failure is logged loudly
+# imag max-perf boot enforcement (idempotent) -- issue 756 / #791 reprovision parity.
+set -u
+log(){ echo "imag-maxperf: $*"; }
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g" 2>/dev/null || log "governor write FAILED: $g"; done
+for e in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do [ -f "$e" ] && { echo performance > "$e" 2>/dev/null || log "EPP write FAILED: $e"; }; done
+[ -f /sys/devices/system/cpu/intel_pstate/no_turbo ] && { echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || log "no_turbo write FAILED"; }
+[ -f /sys/firmware/acpi/platform_profile ] && { echo performance > /sys/firmware/acpi/platform_profile 2>/dev/null || log "platform_profile write FAILED"; }
+command -v powerprofilesctl >/dev/null && { powerprofilesctl set performance 2>/dev/null || log "powerprofilesctl FAILED (daemon not up yet?)"; }
+[ -f /sys/module/usbcore/parameters/autosuspend ] && { echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null || log "usb autosuspend write FAILED"; }
+for p in /sys/bus/pci/devices/*/power/control; do echo on > "$p" 2>/dev/null || log "pci runtime-pm write FAILED: $p"; done
+log "applied: governor=$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | tr '\n' ' ') profile=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)"
+MAXPERF_EOF
+chmod 755 /usr/local/sbin/imag-maxperf.sh
+cat > /etc/systemd/system/imag-maxperf.service <<'MAXPERF_SVC_EOF'
+[Unit]
+Description=Force full max-performance (CPU/platform/USB/PCI) -- imag issue 756
+After=multi-user.target power-profiles-daemon.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/imag-maxperf.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+MAXPERF_SVC_EOF
+cat > /etc/udev/rules.d/99-imag-maxperf-pm.rules <<'MAXPERF_UDEV_EOF'
+# imag max-perf (issue 756 / #791): force runtime PM OFF (power/control=on) on device add -- NDI
+# NICs/peripherals must never power-dip; makes the boot-time write survive USB/PCI hotplug.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"
+MAXPERF_UDEV_EOF
+udevadm control --reload-rules 2>/dev/null || true
+systemctl daemon-reload
+systemctl enable --now imag-maxperf.service \
+    || fail "issue 756/#791: could not enable+start imag-maxperf.service — the full max-performance persistence (EPP/turbo/PCI-PM) would not survive a reboot"
+# Type=oneshot + RemainAfterExit=yes: an ACTIVE unit proves ExecStart (the enforcement script) ran
+# to completion -- a stronger proof than re-checking the governor, which step 4's own
+# cpu-performance.service already set (so a governor grep would pass even if imag-maxperf never ran).
+systemctl is-active --quiet imag-maxperf.service \
+    || fail "issue 756/#791: imag-maxperf.service is not active after enable --now — the boot-enforcement script did not run"
+echo "  issue 756/#791: full max-performance persistence provisioned (imag-maxperf.service active + udev rule)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

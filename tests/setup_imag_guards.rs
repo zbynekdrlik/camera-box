@@ -1672,9 +1672,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 25,
-        "TOTAL_STEPS must be 25 after #779 added the touchpad-usability provisioning step \
-         (step 24 was #764's imag-obs-watchdog step)"
+        declared, 26,
+        "TOTAL_STEPS must be 26 after #791 added the imag-maxperf max-performance persistence step \
+         (step 25 was #779's touchpad-usability step)"
     );
     assert_eq!(
         actual, declared,

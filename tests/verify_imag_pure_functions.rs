@@ -1493,3 +1493,133 @@ fn verify_imag_wires_the_779_touchpad_check_into_the_live_flow() {
         "verify-imag.sh check (w) (#779) must run BEFORE check (o)'s OBS restart (#884 ordering)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #791 — imag-maxperf runtime STATE parity (check (y))
+// ---------------------------------------------------------------------------------------------
+// `imag_maxperf_state_ok STATE_TEXT` returns 0 iff the gathered performance state reads
+// performance. STATE_TEXT is labelled KNOB=VALUE lines gathered over SSH:
+//   GOVERNOR=<value>          (mandatory — always exists; must be `performance`)
+//   EPP=<value|absent>        (optional; if present must be `performance`)
+//   NO_TURBO=<value|absent>   (optional; if present must be `0`)
+//   PLATFORM_PROFILE=<value|absent>  (optional; if present must be `performance`)
+// The optional-knob tolerance keeps the check hardware-agnostic (#816) — a box without
+// intel_pstate/platform_profile simply omits those knobs, exactly as imag-maxperf.sh only writes
+// the knobs that exist (`[ -f ]` guarded). The governor is the mandatory backbone.
+
+const GOOD_MAXPERF_STATE: &str =
+    "GOVERNOR=performance\nEPP=performance\nNO_TURBO=0\nPLATFORM_PROFILE=performance\n";
+
+#[test]
+fn imag_maxperf_state_ok_accepts_full_performance_state_791() {
+    let harness = format!(
+        "S={q}{good}{q}\nimag_maxperf_state_ok \"$S\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        good = GOOD_MAXPERF_STATE
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("ACCEPT"),
+        "imag_maxperf_state_ok must ACCEPT a full performance state (#791): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_maxperf_state_ok_rejects_powersave_governor_791() {
+    let bad = GOOD_MAXPERF_STATE.replace("GOVERNOR=performance", "GOVERNOR=powersave");
+    let harness = format!(
+        "S={q}{bad}{q}\nimag_maxperf_state_ok \"$S\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        bad = bad
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("REJECT"),
+        "imag_maxperf_state_ok must REJECT a powersave governor (#791): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_maxperf_state_ok_rejects_non_performance_epp_791() {
+    let bad = GOOD_MAXPERF_STATE.replace("EPP=performance", "EPP=power");
+    let harness = format!(
+        "S={q}{bad}{q}\nimag_maxperf_state_ok \"$S\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        bad = bad
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("REJECT"),
+        "imag_maxperf_state_ok must REJECT a present-but-non-performance EPP (#791): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_maxperf_state_ok_rejects_turbo_disabled_791() {
+    // no_turbo=1 means turbo is DISABLED — the opposite of max performance.
+    let bad = GOOD_MAXPERF_STATE.replace("NO_TURBO=0", "NO_TURBO=1");
+    let harness = format!(
+        "S={q}{bad}{q}\nimag_maxperf_state_ok \"$S\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        bad = bad
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("REJECT"),
+        "imag_maxperf_state_ok must REJECT no_turbo=1 (turbo disabled) (#791): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_maxperf_state_ok_tolerates_absent_optional_knobs_791() {
+    // A hardware-agnostic box may lack intel_pstate/platform_profile — governor performance alone,
+    // with the optional knobs reported `absent`, must still PASS (the #816 principle).
+    let state = "GOVERNOR=performance\nEPP=absent\nNO_TURBO=absent\nPLATFORM_PROFILE=absent\n";
+    let harness = format!(
+        "S={q}{s}{q}\nimag_maxperf_state_ok \"$S\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        s = state
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("ACCEPT"),
+        "imag_maxperf_state_ok must TOLERATE absent optional knobs when governor is performance (#816/#791): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_maxperf_state_ok_rejects_missing_governor_791() {
+    // The governor line is the mandatory backbone — its absence (an unreadable gather) must FAIL,
+    // never silently pass (the #833 measured-zero class).
+    let state = "EPP=performance\nNO_TURBO=0\nPLATFORM_PROFILE=performance\n";
+    let harness = format!(
+        "S={q}{s}{q}\nimag_maxperf_state_ok \"$S\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        s = state
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("REJECT"),
+        "imag_maxperf_state_ok must REJECT a missing GOVERNOR line (unreadable gather, #833/#791): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_maxperf_state_ok_is_defined_791() {
+    // The reject-path tests above print REJECT even when the function is UNDEFINED (a bare
+    // `cmd-not-found || echo REJECT`), so they alone do not prove the impl exists. This asserts the
+    // function is actually defined in verify-imag.sh — the genuine RED signal for the impl (#791 review).
+    let (code, out, err) =
+        run_sourced("type imag_maxperf_state_ok >/dev/null 2>&1 && echo DEFINED || echo MISSING");
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("DEFINED"),
+        "imag_maxperf_state_ok must be defined in verify-imag.sh (#791): out={out:?} err={err:?}"
+    );
+}
