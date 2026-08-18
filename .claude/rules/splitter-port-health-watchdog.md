@@ -97,6 +97,48 @@ consumers of the line (`splitter-health.sh`, `verify-device.sh::chroma_check`) k
 `-> colour|grayscale` tail with u_dev/v_dev at unchanged positions, so the `rough=` term sitting BEFORE
 the `->` is fully additive — no consumer needed a change beyond the watchdog that reads it.
 
+## Calibration status (#1099) — STILL report-only; blocked on fleet deployment, seam decided
+
+The `rough=` metric is calibratable but **NOT yet flipped live** — as of 2026-08-18 the data that would
+justify a threshold + a live page does **not exist**, so `is_likely_noise` / `NOISE_ROUGHNESS_THRESHOLD`
+stay DORMANT and `splitter_health_classify` is UNCHANGED. The blocker is deployment, not effort:
+
+- **No `rough=` telemetry on the fleet.** #1079 is on `dev` but not `main` and not deployed to any
+  cambox. A live read-only journal probe (2026-08-18) found CAM1/CAM2/CAM3 on `1.7.0-dev.462`, CAM4 on
+  `1.7.0-dev.403` (all BELOW the #1079 `dev.468` bump), CAM5/6/7 off the wire, and **`grep -c rough=`
+  over each box's whole journal = 0** — the boxes still log the OLD `capture chroma:` line with no
+  `rough=`. A frame-grab probe is also not cleanly available: the capture devices are held by lingering
+  processes even while the service reads `inactive` (so grabbing would disturb the rig), and `v4l2-ctl`
+  is not uniformly installed (absent on CAM3).
+- **The separation known today is synthetic/analytic only, NOT a live calibration.** Structured flat
+  colour → `rough ≈ 0`; real structured content typ. `< 15`; pure per-pixel-UNCORRELATED luma on the
+  16-235 video range → `E[|Y0−Y1|] = (235−16)/3 ≈ 73`; the unit-test max-difference extreme = `219`. So
+  the provisional `30.0` sits in the `15..73` gap — a defensible conservative mid-band placeholder, but
+  UNVALIDATED. It is deliberately left UNCHANGED: retuning a page-capable threshold on synthetic-only
+  data is the blind tuning the data-first / window-gate-tolerance-walkdown / no-overstatement discipline
+  forbids.
+- **Calibration RISK that decides the seam:** sharp high-frequency STRUCTURED content — the QR/Vernier
+  TEST pattern the rig displays, fine text, detailed texture — can elevate `rough` even though it is a
+  real picture. So the healthy CEILING must be measured against the WORST-case structured content the
+  boxes show (the test card), not just a scene, and a per-box standalone threshold (a cambox-side label)
+  would false-page whenever the shared source shows such a pattern.
+- **Seam decided for the eventual flip (Approach 2):** route `is_likely_noise` through the SAME
+  self-anchoring sibling-comparison DEAD_PORT already uses — a box is a NOISE suspect only if it reads
+  colour+high-roughness WHILE ≥1 sibling on the same camera+splitter reads colour+LOW-roughness; if
+  EVERY reachable box is equally rough → SOURCE_WIDE (report-only), which neutralizes the shared
+  test-pattern false positive. This adds ONE branch to `splitter_health_classify` (a `NOISE` verdict
+  beside `DEAD_PORT`, same `>=1 proven-good sibling` anchor), reusing the existing dev1 alert framework
+  with no cambox code change — NOT a per-box cambox-side label (rejected: loses the fleet self-anchor).
+
+**Flip criteria (what the live flip still needs — do NOT flip without all four):** (1) deploy #1079
+(`dev.468`+) to the fleet, especially the Elgato boxes (CAM1/CAM6/CAM7) whose no-signal mode is the
+purple-noise positive class; (2) mine each box's `rough=` over a meaningful window across BOTH real-scene
+AND QR/Vernier TEST-pattern content, recording the healthy ceiling per grabber family; (3) capture a real
+Elgato no-signal `rough=` for the positive class (a genuine event or a reproduction that does NOT unplug
+the live rig signal path) — if it cannot be obtained, the flip STAYS report-only; (4) set the threshold at
+healthy-ceiling + margin AND clearly below the noise floor, then flip via Approach 2 with a RED→GREEN test
+in `tests/harness_splitter_port_*_739.rs`. Full analysis: #1099 design comment.
+
 ## Suspect-hardware (technician list, #688)
 
 The HDMI splitter is a single point of failure for the whole test harness and degraded once already
