@@ -9,11 +9,11 @@
 //! (`recording-verdict --extract-partial <box>`) into this partial; dev1 combines the partials
 //! (`recording-verdict --merge-partials strih=… stream=…`) into the identical full verdict.
 //!
-//! ## JSON schema (`schema_version = 3`)
+//! ## JSON schema (`schema_version = 4`)
 //!
 //! ```json
 //! {
-//!   "schema_version": 3,
+//!   "schema_version": 4,
 //!   "box": "strih",                 // which box decoded this — "strih" | "stream"
 //!   "recording": "strih-1234.mkv",  // basename of the local recording (provenance only)
 //!   "expected_burns": [911001, 911002],  // node-burn run_ids this extract decoded for (#207)
@@ -26,9 +26,13 @@
 //!   ],
 //!   "colour": null,                 // #377 per-recording NodeColourSummary (Some only after a
 //!                                   // --colour-gate extract; absent/null on delivery-only runs)
-//!   "av_sync": null                 // #312 item 2 (PR A) per-recording AvMarkerInputs (Some only
+//!   "av_sync": null,                // #312 item 2 (PR A) per-recording AvMarkerInputs (Some only
 //!                                   // after `--extract-partial stream --av-marker-log <path>`;
 //!                                   // absent/null on a run without the continuous QPSK marker)
+//!   "content_hashes": null          // #1112 per-frame row-sampled content hash (Some only after a
+//!                                   // STREAM all-cambox extract; 0-based by frame_index; feeds the
+//!                                   // #1088 dup-cadence surface in the dev1 merge — absent/null
+//!                                   // on strih/imag boxes and on non-all-cambox runs)
 //! }
 //! ```
 //!
@@ -56,7 +60,15 @@ use std::path::Path;
 /// [`AvMarkerInputs`] the STREAM box computed on-host during `--extract-partial stream
 /// --av-marker-log <path>` (the only box that has both the audio marker track and the cam2
 /// dual-QR video co-located), carried through to the dev1 merge exactly like `colour` above.
-pub const PARTIAL_SCHEMA_VERSION: u32 = 3;
+///
+/// v4 (#1112) adds the optional `content_hashes` field — the per-frame row-sampled content hash
+/// (0-based by `frame_index`) the STREAM box computed on-host during an all-cambox
+/// `--extract-partial stream`, carried so the dev1 merge can slice it per cambox window and feed
+/// the #1088 dup-cadence surface WITHOUT the recording (the recording never leaves the box). The
+/// field is additive + optional (`#[serde(default)]`), so an older v3 reader would ignore it and a
+/// newer reader defaults it to `None`; the strict version check still guards against a genuinely
+/// incompatible mix, and extract + merge always run from the SAME binary build within one E2E run.
+pub const PARTIAL_SCHEMA_VERSION: u32 = 4;
 
 /// One box's decode-in-place result — the small JSON the cross-box merge consumes (#208).
 ///
@@ -96,6 +108,18 @@ pub struct RecordingPartial {
     /// old behaviour is unchanged.
     #[serde(default)]
     pub av_sync: Option<AvMarkerInputs>,
+    /// #1112 — the STREAM recording's per-frame row-sampled content hashes
+    /// ([`crate::dup_cadence::frame_content_hash`]), 0-based by `frame_index` (index `i` is
+    /// `frames[i].frame_index == i`, the same contract `hash_recording_frames` holds). Computed ON
+    /// the stream box during an all-cambox `--extract-partial stream` (the pixels are local there),
+    /// so the dev1 merge can slice them per cambox window (`dup_cadence::window_content_hashes`) and
+    /// feed the #1088 duplication-masked 50->60 dup-cadence surface WITHOUT the recording — the ONE
+    /// `all_cambox_continuity` term that needs the recording pixels, which are gone by merge time.
+    /// `None` on strih/imag boxes and on any stream extract without a `--switch-schedule` (non
+    /// all-cambox), so old behaviour is unchanged; the surface simply stays report-only-and-skipped
+    /// there exactly as before.
+    #[serde(default)]
+    pub content_hashes: Option<Vec<u64>>,
 }
 
 impl RecordingPartial {
@@ -119,6 +143,7 @@ impl RecordingPartial {
             frames,
             colour: None,
             av_sync: None,
+            content_hashes: None,
         }
     }
 
@@ -136,6 +161,15 @@ impl RecordingPartial {
     /// ids+timestamps constructor and the ffmpeg/ffprobe I/O lives in the probe-gated caller.
     pub fn with_av_sync(mut self, av_sync: Option<AvMarkerInputs>) -> Self {
         self.av_sync = av_sync;
+        self
+    }
+
+    /// Attach the STREAM recording's per-frame content hashes (#1112) — set by
+    /// `--extract-partial stream` on an all-cambox run, after hashing THIS box's recording's decoded
+    /// luma frames. Builder so `from_frames` stays a pure ids+timestamps constructor and the
+    /// ffmpeg/hash I/O lives in the probe-gated caller (mirrors `with_colour` / `with_av_sync`).
+    pub fn with_content_hashes(mut self, content_hashes: Option<Vec<u64>>) -> Self {
+        self.content_hashes = content_hashes;
         self
     }
 
@@ -260,10 +294,18 @@ mod tests {
         // without the field must deserialize to None via #[serde(default)], never error.
         let p = RecordingPartial::from_frames("strih", Path::new("strih-1.mkv"), &[], vec![]);
         assert_eq!(p.colour, None, "from_frames defaults colour to None");
-        let j = r#"{"schema_version":3,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
+        assert_eq!(
+            p.content_hashes, None,
+            "from_frames defaults content_hashes to None (#1112)"
+        );
+        let j = r#"{"schema_version":4,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
         let restored = RecordingPartial::from_json(j).unwrap();
         assert_eq!(restored.colour, None, "absent colour field ⇒ None");
         assert_eq!(restored.av_sync, None, "absent av_sync field ⇒ None");
+        assert_eq!(
+            restored.content_hashes, None,
+            "absent content_hashes field ⇒ None (#1112 additive #[serde(default)])"
+        );
     }
 
     #[test]
@@ -292,6 +334,28 @@ mod tests {
             restored.av_sync,
             Some(av),
             "the carried A/V-sync inputs must survive the roundtrip exactly"
+        );
+    }
+
+    #[test]
+    fn content_hashes_survive_the_partial_roundtrip_1112() {
+        // #1112 — the STREAM box's per-frame content hashes must round-trip through the partial
+        // JSON so the dev1 merge (no recording) can slice them per window and feed the #1088
+        // dup-cadence surface. Values chosen to include 0 (the degenerate-frame sentinel) and a
+        // full u64 so no width truncation slips in.
+        let hashes: Vec<u64> = vec![0, 1, 0xcbf2_9ce4_8422_2325, u64::MAX, 42];
+        let p = RecordingPartial::from_frames(
+            "stream",
+            Path::new("stream-1112.mp4"),
+            &[911001, 911002, 911004],
+            vec![],
+        )
+        .with_content_hashes(Some(hashes.clone()));
+        let restored = RecordingPartial::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(
+            restored.content_hashes,
+            Some(hashes),
+            "the carried per-frame content hashes must survive the JSON roundtrip exactly"
         );
     }
 
