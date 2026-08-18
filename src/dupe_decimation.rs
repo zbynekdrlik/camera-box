@@ -21,6 +21,17 @@
 //! that crossed the boundary is NOT a dupe, or a dupe was already deferred once for this
 //! boundary, behavior is IDENTICAL to the pre-fix blind pacing drop.
 //!
+//! (#1111) A deferral holds the wall-clock boundary for one extra capture, which is lag-neutral
+//! ONLY in the on-time/surplus regime (the replacement capture still lands inside the SAME
+//! interval). At a genuine over-rate like ~62 fps, a dupe often arrives while the gate is already
+//! in the CATCH-UP regime (the frame is late); deferring THERE holds the boundary while the wall
+//! clock runs on, ratcheting the gate's lag +1 interval per deferral until it trips
+//! `ndi::genlock_emit_gate`'s #707 resync (~9 boundaries leapt at once) — the issue-1110 CAM1
+//! judder. So the deferral is gated on `ndi::genlock_emit_on_time`: a dupe is deferred only when
+//! on-time; a LATE dupe is EMITTED instead (a repeated frame — invisible, and the mathematically
+//! unavoidable ~2 copies/s when a ~58-unique-fps grabber must feed a steady 60), keeping the emit
+//! grid locked to wall-clock. That emitted-copy is counted in [`DupeShedLog`] for live visibility.
+//!
 //! Default ON, every grabber model, no env knob (the standing "a needed feature is always on,
 //! never a forgettable toggle" rule) — self-neutralizing on a healthy card: shedding only
 //! happens when the pacing gate would shed ANYWAY (over-rate forcing a drop), and dupe
@@ -201,14 +212,21 @@ impl DecimationGate {
             if !emit {
                 // The ORIGINAL blind pacing drop (between boundaries) -- unchanged pre-fix.
                 self.shed_log.record_shed(false);
+            } else if is_dupe {
+                // (#1111) The late-dupe release valve fired: a content-dupe was EMITTED (a copy)
+                // rather than deferred, because deferring it would have ratcheted the boundary lag
+                // into the #707 resync. Count it so a live box shows the valve working -- the ~2/s
+                // mathematical floor of feeding a steady 60 from a ~58-unique-fps grabber -- rather
+                // than the mechanism being observable only as the ABSENCE of the #707 SKIPPED WARN.
+                self.shed_log.record_dupe_emitted();
             }
         }
         emit
     }
 
-    /// Drain the accumulated `(dupe_shed, blind_shed)` counters for the periodic INFO log — see
-    /// [`DupeShedLog::take`].
-    pub fn take_shed_counts(&mut self) -> (u64, u64) {
+    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted)` counters for the periodic
+    /// INFO log — see [`DupeShedLog::take`].
+    pub fn take_shed_counts(&mut self) -> (u64, u64, u64) {
         self.shed_log.take()
     }
 }
@@ -217,12 +235,14 @@ impl DecimationGate {
 
 /// Per-run accumulator proving the mechanism is live on a real box: counts how many captured
 /// frames were shed because they were the preferred-dupe victim vs the pre-fix blind pacing
-/// drop, drained on the SAME 5s Streaming-report cadence as
+/// drop, PLUS (#1111) how many content-dupes were EMITTED as the late-dupe release valve (a copy
+/// passed downstream), drained on the SAME 5s Streaming-report cadence as
 /// [`crate::emit_skip_log::EmitGateSkipLog`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DupeShedLog {
     dupe_shed: u64,
     blind_shed: u64,
+    dupe_emitted: u64,
 }
 
 impl DupeShedLog {
@@ -241,11 +261,18 @@ impl DupeShedLog {
         }
     }
 
-    /// Drain the accumulated `(dupe_shed, blind_shed)` counts and RESET.
-    pub fn take(&mut self) -> (u64, u64) {
-        let out = (self.dupe_shed, self.blind_shed);
+    /// (#1111) Record ONE content-dupe that was EMITTED (a copy) rather than shed — the late-dupe
+    /// release valve keeping the emit grid boundary-locked at an over-rate. See [`DecimationGate::poll`].
+    pub fn record_dupe_emitted(&mut self) {
+        self.dupe_emitted = self.dupe_emitted.saturating_add(1);
+    }
+
+    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted)` counts and RESET.
+    pub fn take(&mut self) -> (u64, u64, u64) {
+        let out = (self.dupe_shed, self.blind_shed, self.dupe_emitted);
         self.dupe_shed = 0;
         self.blind_shed = 0;
+        self.dupe_emitted = 0;
         out
     }
 }
@@ -254,10 +281,16 @@ impl DupeShedLog {
 /// window (while genlock decimation is active) so a live box shows the mechanism working —
 /// never suppressed on an all-zero window (a healthy card legitimately shows 0/0, which is the
 /// self-neutralizing behavior by design, not the mechanism being off).
-pub fn dupe_shed_summary(dupe_shed: u64, blind_shed: u64, window_secs: u64) -> String {
+pub fn dupe_shed_summary(
+    dupe_shed: u64,
+    blind_shed: u64,
+    dupe_emitted: u64,
+    window_secs: u64,
+) -> String {
     format!(
         "(#889) dupe-preferring decimation: {dupe_shed} dupe-victim shed / {blind_shed} \
-         blind-pacing shed over the last ~{window_secs}s"
+         blind-pacing shed / {dupe_emitted} late-dupe copies emitted (#1111 grid-lock valve) \
+         over the last ~{window_secs}s"
     )
 }
 
@@ -400,16 +433,19 @@ mod tests {
         log.record_shed(true);
         log.record_shed(true);
         log.record_shed(false);
-        assert_eq!(log.take(), (2, 1));
-        assert_eq!(log.take(), (0, 0), "take() must reset");
+        log.record_dupe_emitted();
+        assert_eq!(log.take(), (2, 1, 1));
+        assert_eq!(log.take(), (0, 0, 0), "take() must reset");
     }
 
     #[test]
     fn summary_names_both_counts_and_the_889_tag() {
-        let s = dupe_shed_summary(4, 12, 5);
+        let s = dupe_shed_summary(4, 12, 7, 5);
         assert!(s.contains("#889"));
+        assert!(s.contains("#1111"), "names the late-dupe copy valve");
         assert!(s.contains('4'));
         assert!(s.contains("12"));
+        assert!(s.contains('7'), "names the emitted-copy count");
         assert!(s.contains('5'));
     }
 
@@ -608,7 +644,7 @@ mod tests {
             total_skips +=
                 crate::ndi::boundary_skip_count(prev, gate.next_boundary_ns(), emit_interval_ns);
         }
-        let (dupe_shed, _blind_shed) = gate.take_shed_counts();
+        let (dupe_shed, _blind_shed, _dupe_emitted) = gate.take_shed_counts();
 
         assert_eq!(total_skips, 0, "exact-60 input never skips a boundary");
         assert_eq!(
