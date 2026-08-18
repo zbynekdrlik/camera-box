@@ -50,7 +50,10 @@ fn imag_schema_mismatch_degrades_not_dies() {
     );
     if let PartialLoadDisposition::Degrade { reason } = &d {
         // The reason must be a real, mineable string naming the box + the version delta.
-        assert!(reason.contains("imag"), "reason must name the box: {reason:?}");
+        assert!(
+            reason.contains("imag"),
+            "reason must name the box: {reason:?}"
+        );
         assert!(
             reason.contains('3') && reason.contains('4'),
             "reason must name the found vs expected schema: {reason:?}"

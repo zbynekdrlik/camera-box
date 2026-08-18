@@ -402,6 +402,10 @@ pub mod e2e_latency_gate;
 // thinly by recording-verdict.
 pub mod imag_leg_gate;
 pub mod optical_floor;
+// issue 1118 — REPORT-ONLY leg schema-degrade seam: a schema-mismatched imag partial DEGRADES
+// (drop the leg, verdict from strih+stream) instead of the fatal `load(path)?` killing the
+// whole merge. Pure crate-root decision (Tier-0), consumed thinly by recording-verdict::run_merge.
+pub mod partial_schema_gate;
 
 // issue 1033 — the ALL-CAMBOX cross-camera DELIVERY-latency spread gate: REPORT-ONLY today (the
 // fleet data is not tight-green — cam1's delivery lottery), one-line-flippable to blocking by a
