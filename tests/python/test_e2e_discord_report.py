@@ -643,3 +643,30 @@ class TestMvSkewSection:
         mv_skew = {"error": "connect failed: timeout", "cameras": {}}
         report = edr.compose_report(self.verdict, {"run_id": "x", "mv_skew": mv_skew})
         assert "nemeralo sa: connect failed: timeout" in report
+
+
+class TestAvPresentUndecodedFixture:
+    """#748 point 3 — every judged camera has candidates==0 (an all-silent A/V run), but the
+    verdict's `all_cambox_av_sync.av_audio_silent` is False: the QPSK demod saw preamble energy,
+    so the MEASUREMENT AUDIO IS PRESENT and the marker simply never decoded (emit/painter side or
+    a decode regression). The report must NOT blame the mbc mute — that would send the operator
+    to check a mute that is not the cause."""
+
+    def setup_method(self):
+        self.verdict = _load("verdict_av_present_undecoded_748.json")
+        self.report = edr.compose_report(
+            self.verdict, {"run_id": "3", "event": "CI PR gate"}
+        )
+
+    def test_does_not_blame_the_mbc_mute_when_audio_is_present(self):
+        # The silent-chain line is the WRONG alert here — audio was present, so it must be absent.
+        assert "MERACÍ ZVUK TICHÝ" not in self.report
+
+    def test_states_the_marker_did_not_decode_though_audio_present(self):
+        # A distinct, operator-actionable line pointing at the QPSK marker / emit side, not a mute.
+        assert "NEDEKÓDOVALA" in self.report
+        assert "merací zvuk je prítomný" in self.report
+
+    def test_overall_is_still_red_because_of_the_av_gate(self):
+        # A run with no A/V measurement still fails the gate, whatever the cause.
+        assert "❌ RED" in self.report
