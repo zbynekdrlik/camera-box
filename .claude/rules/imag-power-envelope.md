@@ -215,3 +215,38 @@ functions with no side effects — set `IMAG_POWER_ALERT_STATE_FILE` to a per-te
 path, seed it, set the per-path input var (`JOURNAL`/`BURST`/`RENDER`) + `DRY_RUN=1`, call the
 function, and `cat` the state file back. See `tests/harness_imag_power_dedup_preserve_1076.rs`
 (`drive()` helper). The unmeasured branches return BEFORE any notify, so `DRY_RUN` is belt-and-braces.
+
+## Clear-HYSTERESIS + render-GATE on the throttle path — a chronically-flapping condition needs both (#1116)
+
+Two defects made `alert_from_throttle` spam Discord (141 pages in 7 days vs a designed max 1/h),
+BOTH surviving the #1076 dedup fix, because #1076 only addressed the UNMEASURED case:
+
+- **Flap-reset:** #1076 preserves the dedup signature on an `unknown` (unmeasured) pass but still
+  RESET it on a single MEASURED-`clean` pass. The iGPU is chronically borderline at the PL1 floor
+  (the issue-1043 cooling residual), so `imag_power_throttle_state` genuinely flaps
+  clean<->clamped across 5-min passes — every re-onset after ONE clean pass saw `prior_sig=""` and
+  paged immediately. **The lesson: for a chronically-FLAPPING condition, an alert-throttle that
+  re-pages on signature change is defeated the instant a single healthy pass clears the signature.
+  Add clear-HYSTERESIS: clear the dedup only after N CONSECUTIVE measured-healthy passes**
+  (`obs_watchdog_clear_hysteresis <episode|healthy|unmeasured> <prior_clear_passes> [clear_n=12]`,
+  the generic seam beside `obs_watchdog_confirm`/`obs_watchdog_alert_throttle`; state key
+  `throttle_clear_passes`, env `IMAG_POWER_THROTTLE_CLEAR_PASSES`). An `episode` (active) pass
+  resets the healthy streak; `unmeasured` advances nothing (keeps the #1076 contract) — so an
+  unknown pass counts NEITHER toward clearing NOR resets the run.
+- **No render gating on the page:** the under-floor clamp is a chronic HARDWARE-envelope condition
+  with no actionable signal while OBS render is within the 60fps budget (the live-grounding note
+  above: clamped while `RENDER|60.00|9.34|0.0000|true` HEALTHY). **The lesson: gate a
+  chronic-hardware-condition PAGE on whether the downstream SYMPTOM is actually present** —
+  `imag_power_throttle_render_gate <render_line>` reuses the EXISTING
+  `imag_render_degraded_from_sample` classifier (no second WS probe): `log-only` only when render
+  reads a clean `healthy` sample, `page` for everything else. **FAIL-OPEN is mandatory** — a
+  `stalled`/`unknown`/unreadable/malformed render must PAGE, never silently suppress a real clamp
+  alert (the standing rig-alert rule: loud, never silent). The render-healthy log-only path STILL
+  advances the dedup state, so a later render-degraded pass is correctly throttled.
+
+**Testing the page-vs-log-only decision offline (extends the #1076 `. "$WD"` sourcing pattern):**
+`harness_imag_power_dedup_preserve_1076.rs`'s `drive()` (DRY_RUN=1, reads the state file) proves
+the hysteresis STATE transitions; to prove the actual PAGE was fired-or-not, source the watchdog
+with DRY_RUN=0 and stub `AIRULESET_NOTIFY` at a tiny recorder script (`python3 <stub> notify
+--body ...` appends its argv to a `REC_FILE`), then assert the recorder is empty (log-only) or
+contains `notify` (paged) — see `tests/harness_imag_power_render_gate_1116.rs`'s `drive_notify()`.
