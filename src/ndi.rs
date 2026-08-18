@@ -587,7 +587,11 @@ pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -
     // and the gate would wedge at emit=false (0 NDI emitted) until a warm restart.
     // Re-latch to the rewound clock (same formula as the init / forward-resync
     // branches) so emit resumes within one interval, exactly as a restart does.
-    let boundary = genlock_latched_boundary(now_ns, next_boundary_ns, interval_ns);
+    let boundary = if next_boundary_ns == 0 || next_boundary_ns > now_ns + interval_ns {
+        now_ns - (now_ns % interval_ns) + interval_ns
+    } else {
+        next_boundary_ns
+    };
     if now_ns < boundary {
         // Between boundaries — decimate this capture (do not emit).
         return (false, boundary);
@@ -616,43 +620,6 @@ pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -
         // un-emitted boundary → no emit-rate deficit).
     }
     (true, next)
-}
-
-/// #1111 — the wall-clock boundary [`genlock_emit_gate`] latches for `now_ns`, factored out so
-/// [`genlock_emit_on_time`] computes the IDENTICAL boundary without duplicating the #131
-/// backward-step / init re-latch formula. The caller guards `interval_ns != 0`.
-fn genlock_latched_boundary(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> u64 {
-    if next_boundary_ns == 0 || next_boundary_ns > now_ns + interval_ns {
-        now_ns - (now_ns % interval_ns) + interval_ns
-    } else {
-        next_boundary_ns
-    }
-}
-
-/// #1111 — is `now_ns` an ON-TIME boundary crossing (the "surplus" regime), as opposed to a LATE
-/// catch-up crossing? True iff the capture has reached the pending boundary AND the NEXT boundary
-/// is still in the future (`boundary + interval > now`). It is FALSE both between boundaries
-/// (`now < boundary` — [`genlock_emit_gate`] returns emit=false) and once the gate has fallen
-/// behind (`boundary + interval <= now`, the catch-up / #707-resync regime where
-/// [`genlock_emit_gate`] emits a merely-late frame).
-///
-/// This is the signal `dupe_decimation`'s issue-889 dupe-preferring shed needs to stay
-/// boundary-neutral (#1111). DEFERRING a dupe (holding the boundary for the next capture) only
-/// avoids lag in the on-time/surplus case — the deferred frame is then replaced by a capture that
-/// still lands inside the SAME interval, so the boundary advances exactly once for the pair.
-/// Deferring a LATE dupe instead holds the boundary while the wall clock keeps running, ratcheting
-/// the gate's lag by one interval per deferral until it trips the #707 resync (the issue-1110 CAM1
-/// judder). So the shed defers a dupe only when this returns true; a late dupe is emitted instead
-/// (a repeated frame, invisible — and mathematically unavoidable when a 58-unique-fps source must
-/// feed a steady 60), which keeps the emit grid locked to wall-clock. Shares
-/// [`genlock_latched_boundary`] with [`genlock_emit_gate`] so the two never disagree on where the
-/// boundary sits.
-pub fn genlock_emit_on_time(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> bool {
-    if interval_ns == 0 {
-        return false;
-    }
-    let boundary = genlock_latched_boundary(now_ns, next_boundary_ns, interval_ns);
-    now_ns >= boundary && boundary + interval_ns > now_ns
 }
 
 /// #707 — how many WHOLE emit-boundary intervals were SKIPPED (never emitted) between the
@@ -2031,45 +1998,6 @@ mod tests {
         assert!(!emit, "init frame must not emit");
         assert_eq!(next, now - (now % I30) + I30);
         assert!(next > now, "boundary must be strictly after now");
-    }
-
-    #[test]
-    fn genlock_emit_on_time_true_only_for_a_surplus_crossing_1111() {
-        // (#1111) ON-TIME (surplus regime): at/just-past the boundary, the next boundary still
-        // in the future -> true. This is the ONLY regime in which dupe_decimation may defer a
-        // dupe (lag-neutral, a replacement capture lands in the SAME interval).
-        let boundary = 7 * I30;
-        assert!(genlock_emit_on_time(boundary, boundary, I30));
-        assert!(genlock_emit_on_time(boundary + 5, boundary, I30));
-        assert!(genlock_emit_on_time(boundary + I30 - 1, boundary, I30));
-    }
-
-    #[test]
-    fn genlock_emit_on_time_false_between_boundaries_and_when_late_1111() {
-        let boundary = 10 * I30;
-        // Between boundaries (now < boundary): genlock_emit_gate returns emit=false here.
-        assert!(!genlock_emit_on_time(boundary - 5, boundary, I30));
-        // LATE / catch-up (now >= boundary + interval): deferring a dupe here is the lag ratchet.
-        assert!(!genlock_emit_on_time(boundary + I30, boundary, I30));
-        assert!(!genlock_emit_on_time(boundary + 3 * I30, boundary, I30));
-        // interval 0 (genlock off) is never on-time.
-        assert!(!genlock_emit_on_time(12_345, 6_789, 0));
-    }
-
-    #[test]
-    fn genlock_emit_on_time_agrees_with_gate_on_a_surplus_crossing_1111() {
-        // Shares genlock_latched_boundary with genlock_emit_gate, so on a surplus crossing the
-        // predicate is TRUE exactly when the gate emits with its next boundary strictly ahead.
-        let boundary = 4 * I30;
-        for delta in [0u64, 5, I30 - 1] {
-            let now = boundary + delta;
-            let (emit, next) = genlock_emit_gate(now, boundary, I30);
-            assert_eq!(
-                genlock_emit_on_time(now, boundary, I30),
-                emit && next > now,
-                "delta={delta}"
-            );
-        }
     }
 
     #[test]
