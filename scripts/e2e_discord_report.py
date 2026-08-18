@@ -256,14 +256,21 @@ def _section_video_sync(verdict):
     return "\n".join(lines)
 
 
-def _av_reason(node):
-    """Honest, specific reason string for a non-'measured' A/V verdict — never a bare UNKNOWN."""
+def _av_reason(node, av_audio_silent=None):
+    """Honest, specific reason string for a non-'measured' A/V verdict — never a bare UNKNOWN.
+
+    `av_audio_silent` is the block-level #748 discriminator: when it is explicitly False the
+    measurement audio was PRESENT (the demod saw preamble energy), so a `candidates == 0` camera
+    means the marker never decoded — not a silent track. Keeps the per-camera line consistent with
+    the block summary instead of contradicting it with "tichá stopa"."""
     verdict = node.get("verdict")
     candidates = node.get("candidates", 0) or 0
     cluster_samples = node.get("cluster_samples", 0) or 0
     if verdict == "measured":
         return None
     if candidates == 0:
+        if av_audio_silent is False:
+            return "značka nedekódovaná (zvuk je prítomný)"
         return "tichá stopa"
     if cluster_samples == 0:
         return "nedostatok konzistentných vzoriek"
@@ -309,15 +316,33 @@ def _section_av_sync(verdict):
             reason = node.get("exclude_reason") or "operátorom potvrdené offline"
             lines.append(f"  ⏸️ {cam}: VYNECHANÉ (potvrdené offline — {reason})")
         else:
-            reason = _av_reason(node)
+            reason = _av_reason(node, block.get("av_audio_silent"))
             lines.append(f"  ⚪ {cam}: UNKNOWN — {reason}")
 
     if all_silent and cams:
-        lines.append("  ↳ A/V: UNKNOWN — tichá stopa (žiadna kamera nezachytila zvukovú značku)")
-        # #748: never leave the operator with a bare "unknown" — say WHICH chain link to check.
-        lines.append(
-            "  ⚠️ MERACÍ ZVUK TICHÝ — skontroluj mbc Ableton kanál (mute) + Dante routing do stream OBS (#748)"
-        )
+        # #748: never leave the operator with a bare "unknown" — say WHICH chain link to check,
+        # and blame the RIGHT one. The verdict's `av_audio_silent` discriminator (fed by the QPSK
+        # demod's whole-recording preamble-onset count, av_window::classify_av_audio_state)
+        # separates a genuinely silent mbc chain from present-but-undecoded audio:
+        #   None/absent/True -> the safe, loud default: the measurement audio is (or may be) SILENT
+        #                       -> check the mbc mute + Dante routing.
+        #   False            -> the demod SAW preamble energy: audio is PRESENT, the marker just
+        #                       never clustered -> the problem is the QPSK marker / emit (cam2
+        #                       painter) side, NOT an mbc mute.
+        if block.get("av_audio_silent") is False:
+            lines.append(
+                "  ↳ A/V: UNKNOWN — žiadna kamera nedekódovala značku (merací zvuk je PRÍTOMNÝ, nie tichý)"
+            )
+            lines.append(
+                "  ⚠️ A/V ZNAČKA sa NEDEKÓDOVALA, hoci merací zvuk je prítomný — problém je v QPSK značke / emit strane (cam2 painter), NIE mute mbc (#748)"
+            )
+        else:
+            lines.append(
+                "  ↳ A/V: UNKNOWN — tichá stopa (žiadna kamera nezachytila zvukovú značku)"
+            )
+            lines.append(
+                "  ⚠️ MERACÍ ZVUK TICHÝ — skontroluj mbc Ableton kanál (mute) + Dante routing do stream OBS (#748)"
+            )
 
     tolerance = block.get("gate_tolerance_ms")
     gate_pass = block.get("gate_pass")

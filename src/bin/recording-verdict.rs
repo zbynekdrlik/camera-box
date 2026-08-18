@@ -5871,6 +5871,43 @@ fn build_and_print_verdict_with_stream_hashes(
                             )
                         }),
                     );
+                    // #748: silent-vs-undecoded discriminator. When EVERY judged (not
+                    // operator-ack-excluded) camera produced zero candidates, `candidates == 0`
+                    // alone cannot say WHY — a genuinely silent mbc chain (mute / Dante misroute)
+                    // vs audio present but the QPSK marker never clustered. The whole-recording
+                    // preamble-onset count (`av.audio_preamble_screens_passed`, measured from the
+                    // ACTUAL recorded audio) separates them via the pure `classify_av_audio_state`.
+                    // `_section_av_sync` reads `av_audio_silent` to blame the right link (null/absent
+                    // keeps the safe, loud "check the mbc mute" default).
+                    let mut av_all_zero = true;
+                    let mut av_judged = 0usize;
+                    for &camera in CAMERA_UNDER_TEST_NODES.iter() {
+                        if offline_ack_map.get(camera).is_some() {
+                            continue;
+                        }
+                        if let Some(cs) = cam_syncs.get(camera) {
+                            av_judged += 1;
+                            if cs.candidates != 0 {
+                                av_all_zero = false;
+                            }
+                        }
+                    }
+                    let av_audio_state = av_window::classify_av_audio_state(
+                        av_judged,
+                        av_all_zero,
+                        av.audio_preamble_screens_passed,
+                    );
+                    av_json.insert(
+                        "av_audio_silent".to_string(),
+                        match av_audio_state.av_audio_silent_flag() {
+                            Some(silent) => serde_json::json!(silent),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                    av_json.insert(
+                        "av_audio_preamble_screens".to_string(),
+                        serde_json::json!(av.audio_preamble_screens_passed),
+                    );
                     report["all_cambox_av_sync"] = serde_json::Value::Object(av_json);
                     // #861: folds into `all_pass` again — a no-op when the gate PASSES (av_all_pass
                     // == true) or when `gates_overall_pass()` reverts to report-only in the future
@@ -10105,6 +10142,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let v = build_all_cambox_av_sync_fixture(
@@ -10239,6 +10277,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         // Spread = 10ms <= the 16ms threshold -> the cross-camera spread gate PASSES; see the
@@ -10300,6 +10339,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -10360,6 +10400,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         // Spread = 815-800 = 15ms <= the 16ms threshold — the earlier 790..820 fixture (spread
@@ -10436,6 +10477,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] =
@@ -10500,6 +10542,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -10552,6 +10595,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -10725,6 +10769,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         // cam1: delivery p50 = 800ms. cam3: delivery p50 = 840ms (40ms above cam1's) — mean of
@@ -10810,6 +10855,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         // cam1: 800ms delivery. cam3: 2×(tolerance+10ms) above cam1's, so with the two-camera
