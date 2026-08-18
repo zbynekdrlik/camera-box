@@ -67,3 +67,44 @@ launches + liveness-checks its own painter, and prod-scene has its own non-black
 at the START of each call — the caller reads it AFTER); `cambox_parallel_surface_painter_failure`
 turns a `cam2/painter` failure into a GitHub `::error::` annotation (other boxes `::warning::`).
 NEVER `exit` from this lib — cleanup()'s EXIT trap (`set +e`) must always run to completion.
+
+## #1117 — false PAINTER-DEAD page during a live E2E + owner-facing page-text doctrine
+
+Two independent false-page gaps (live 2026-08-18T22:59:57): the watchdog paged `alert:PAINTER-DEAD`
+while a Full-path E2E run legitimately `systemctl stop cam2-painter.service` (issue-872 stop+restore)
+and ran its own transient `frame-probe --paint-only` — the pass even measured `optical=OK`.
+
+**E2E-window signal — REUSE `rig_heartbeat_active`, never invent a busy detector.**
+`scripts/lib/rig-heartbeat.sh`'s `rig_heartbeat_active` (the FRESH #281 rig-active heartbeat that
+`recording-e2e.sh` starts + refreshes every 30s and whose refresher removes it the instant the
+harness dies) IS the dev1-side "a live gate/TEST harness is coordinating the rig RIGHT NOW" signal.
+`obs-burn-reconcile-watchdog.sh` (#1060) already reuses it as "defer, never fight a live harness".
+The optical-chain watchdog now sources it and passes `rig_busy` as the 4th arg of
+`optical_chain_alert_condition <expected> <alive> <optical> [rig_busy]` (default 0 → 3-arg callers
+unchanged). Do NOT use a transient-frame-probe ssh probe or the rig-lease as a second detector.
+NB: the #281 heartbeat is stale-after-10-min BY DESIGN — correct here (an ACTIVE run keeps it fresh),
+but it is the WRONG gate for an IDLE standing TEST painter (that is the pidfile/service `painter_expected`
+signal, above). A genuinely dead standing painter OUTSIDE a run (rig_busy=0, optical≠OK) still pages.
+
+**Outcome veto is the generalizable fix, not blanket E2E silencing.** `optical=OK` on a painter-dead
+pass → `log-only:PAINTER-DEAD-optical-ok` (the monitored cam2→cam1 hop is provably readable, so
+whatever paints the monitor works). This ALONE would have stopped the live page. `log-only:*` verdicts
+route to `clear_throttle` like a healthy pass, with a distinct suppression log line.
+
+**When to add E2E-window suppression to ANOTHER dev1 watchdog (the #1117 gap-b audit rule):** ONLY
+where the E2E harness DELIBERATELY creates the exact condition the watchdog pages on. optical-chain
+(painter stopped by design) qualifies; splitter-port already reports its `systemctl stop camera-box`
+E2E-stop as report-only `NO_CAPTURE`. cadence / mv-fps / network-reach / avsync-heartbeat /
+bundle-state / obs-liveness / imag-obs / imag-power-envelope page on conditions the E2E does NOT
+deliberately create — suppressing them during a run would MASK a real fault in the exact window it
+matters, so they get NO suppression.
+
+**Owner-facing PAGE text doctrine (`notify --body` only; internal log lines stay English):** plain
+Slovak, outcome-first (what it means for the rig), with EXPLICIT ownership — agent-recoverable →
+"Rieši Claude automaticky, ty nemusíš nič robiť"; a genuinely physical fault (HDMI splitter cable,
+dead NIC / box off, cooling) → an honest "Potrebný fyzický zásah — …" human step; report-only /
+operator-domain → "len INFO …". Never a false "Claude rieši" for something Claude can't auto-fix. The
+owner must never wonder "co mam akoze ja s tym robit". Guarded by
+`tests/harness_optical_chain_watchdog_1117.rs` (static anchors on the Slovak markers + the dropped
+English "Confirmed over …" phrase). The airuleset#546 machine-channel ROUTING of agent-recoverable
+pages is an `airuleset.py notify` feature (out of camera-box scope) — here only the page TEXT changed.
