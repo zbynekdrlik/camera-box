@@ -188,10 +188,20 @@ pub fn select_irq_target_cores(
     capture_core: usize,
     online: &[usize],
 ) -> Vec<usize> {
-    // RED stub (issue 899): always route onto the capture core — the pre-fix
-    // behaviour setup_irq_affinity had. The GREEN commit replaces this body.
-    let _ = (is_preempt_rt, online);
-    vec![capture_core]
+    if is_preempt_rt {
+        // RT: threaded handler below the grab's priority → co-locate on the core.
+        return vec![capture_core];
+    }
+    // non-RT: route onto every online core EXCEPT the capture core, so the
+    // non-preemptible handler runs on the general cores. If that leaves nothing
+    // (single-core box where the only core IS the capture core), fall back to
+    // the capture core rather than an empty mask.
+    let general: Vec<usize> = online.iter().copied().filter(|&c| c != capture_core).collect();
+    if general.is_empty() {
+        vec![capture_core]
+    } else {
+        general
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +240,16 @@ fn read_isolated_cores() -> Vec<usize> {
     std::fs::read_to_string("/sys/devices/system/cpu/isolated")
         .map(|s| parse_cpulist(&s))
         .unwrap_or_default()
+}
+
+/// Whether the running kernel is PREEMPT_RT (issue 899), read from `/proc/version`
+/// plus the RT-only `/sys/kernel/realtime` flag. Both reads are best-effort — an
+/// absent/unreadable file just contributes nothing, so a stock kernel reads as
+/// non-RT (the conservative default: route the capture IRQ off the grab core).
+fn read_kernel_is_preempt_rt() -> bool {
+    let proc_version = std::fs::read_to_string("/proc/version").unwrap_or_default();
+    let sys_realtime = std::fs::read_to_string("/sys/kernel/realtime").ok();
+    kernel_is_preempt_rt(&proc_version, sys_realtime.as_deref())
 }
 
 /// Pin the CURRENT thread to `cores` via `sched_setaffinity`. Returns whether the
@@ -326,9 +346,16 @@ pub fn setup_irq_affinity() {
         );
         return;
     }
-    let mask = smp_affinity_mask_hex(&[core]);
+    // issue 899 defect 3: on a stock (non-PREEMPT_RT) kernel the xhci hardirq
+    // handler is NOT threaded, so routing it onto the isolated grab core steals
+    // cycles from even the prio-90 FIFO grab. Route it onto the general cores
+    // instead; only on a real PREEMPT_RT kernel (threaded, sub-grab priority) do
+    // we co-locate it on the capture core, as #289 intended.
+    let is_rt = read_kernel_is_preempt_rt();
+    let target = select_irq_target_cores(is_rt, core, &online);
+    let mask = smp_affinity_mask_hex(&target);
     tracing::info!(
-        "#289 IRQ affinity: routing capture IRQs {irqs:?} to core {core} (smp_affinity={mask})"
+        "#289/899 IRQ affinity: kernel preempt_rt={is_rt}; routing capture IRQs {irqs:?} to cores {target:?} (capture core={core}, smp_affinity={mask})"
     );
     for irq in irqs {
         let path = format!("/proc/irq/{irq}/smp_affinity");
