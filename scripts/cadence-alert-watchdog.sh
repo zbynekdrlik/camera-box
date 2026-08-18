@@ -283,7 +283,7 @@ handle_source() {
         else
           log "ALERT: firing Discord notification for '$source' tap broken"
           python3 "$NOTIFY" notify --body \
-            "⚠️ #794 cadence: no usable \`genlock-fifo audit '$source'\` sample (received= + timestamp) on $CADENCE_NAME for $unk consecutive passes ($REPO_SLUG). The cadence TAP for this source is BLIND (source renamed / dropped from the scene, camera absent, CADENCE_SOURCES drifted, or the log prefix is unparseable) -- non-60 cadence coverage for '$source' is OFF until fixed." \
+            "⚠️ kadencia kamery ($REPO_SLUG): meranie kadencie zdroja '$source' na $CADENCE_NAME je SLEPÉ už $unk kontrol po sebe (premenovaný/chýbajúci zdroj, kamera preč alebo nečitateľný log) — kontrola 60 fps pre tento zdroj je vypnutá, kým sa to neopraví. Rieši Claude automaticky, ty nemusíš nič robiť." \
             >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
         fi
         write_state_field "tap_broken_${k}" 1
@@ -302,7 +302,7 @@ handle_source() {
       else
         log "RECOVERY: '$source' cadence OK again -- firing recovery notification"
         python3 "$NOTIFY" notify --body \
-          "✅ #794 cadence: **$source** on $CADENCE_NAME is back to ~${CADENCE_EXPECTED_FPS} fps ($REPO_SLUG)." \
+          "✅ kadencia kamery ($REPO_SLUG): **$source** na $CADENCE_NAME je späť na ~${CADENCE_EXPECTED_FPS} fps." \
           >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
       fi
       write_state_field "alerted_${k}" 0
@@ -357,7 +357,7 @@ handle_source() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for '$source' wrong cadence"
     python3 "$NOTIFY" notify --body \
-      "🚨 #794 cadence: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes while $CADENCE_NAME is reachable -- this camera is likely switched to a non-60 fps mode. Prepni ju spat na 60 fps." \
+      "🚨 kadencia kamery ($REPO_SLUG): **$detail**. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol, $CADENCE_NAME je dostupný — kamera je zrejme prepnutá mimo 60 fps. Potrebný zásah — skontroluj a prepni kameru späť na 60 fps." \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

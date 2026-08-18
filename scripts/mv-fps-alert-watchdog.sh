@@ -234,7 +234,7 @@ handle_box() {
       else
         log "RECOVERY: $name MV fps recovered -- firing recovery notification"
         python3 "$NOTIFY" notify --body \
-          "✅ #1083 mv-fps: **$name** Multiview render fps is back above floor ($REPO_SLUG)." \
+          "✅ Multiview fps ($REPO_SLUG): **$name** Multiview render fps je opäť nad minimom." \
           >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
       fi
       write_state_field "alerted_${k}" 0
@@ -271,7 +271,7 @@ handle_box() {
         else
           log "ALERT: firing Discord notification for $name MV-fps tap blind"
           python3 "$NOTIFY" notify --body \
-            "⚠️ #1083 mv-fps: **$name** MV-fps tap is BLIND for $unk consecutive passes ($REPO_SLUG) -- OBS is up but $reason. MV-fps coverage for $name is OFF until fixed." \
+            "⚠️ Multiview fps ($REPO_SLUG): meranie Multiview fps pre **$name** je SLEPÉ už $unk kontrol po sebe — OBS beží, ale $reason. Kontrola Multiview fps pre $name je vypnutá, kým sa to neopraví. Rieši Claude automaticky, ty nemusíš nič robiť." \
             >/dev/null 2>&1 || log "tap-blind: airuleset.py notify failed (non-fatal)"
         fi
         write_state_field "tap_blind_${k}" 1
@@ -317,7 +317,7 @@ handle_box() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for $name MV fps collapse"
     python3 "$NOTIFY" notify --body \
-      "🚨 #1083 mv-fps: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes -- the Multiview projector render cadence fell below its floor (target − tolerance). Restart OBS on $name or find the process stealing GPU/CPU render budget. NEVER reboot the host." \
+      "🚨 Multiview fps ($REPO_SLUG): **$detail**. Render Multiview projektora na $name klesol pod povolené minimum (cieľ − tolerancia). Rieši Claude automaticky (reštart OBS na $name, resp. nájde proces, čo kradne GPU/CPU; nikdy nereštartuje celý počítač), ty nemusíš nič robiť. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol." \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

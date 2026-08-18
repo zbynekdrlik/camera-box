@@ -233,7 +233,7 @@ process_leg() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for $leg"
     python3 "$NOTIFY" notify --body \
-      "🚨 avsync-heartbeat-alert-watchdog: stream-box $leg heartbeat is STALE (last=${epoch_display}, threshold=${STALE_S}s) ($REPO_SLUG)." \
+      "🚨 A/V-sync monitor ($REPO_SLUG): heartbeat vetvy $leg na stream-boxe je STARÝ (naposledy=${epoch_display}, limit=${STALE_S}s) — monitorovanie A/V-sync/VLC na stream-boxe zrejme spadlo. Rieši Claude automaticky, ty nemusíš nič robiť." \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle for $leg (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
