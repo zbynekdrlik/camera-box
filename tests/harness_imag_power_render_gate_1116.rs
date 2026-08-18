@@ -60,7 +60,10 @@ fn shell_quote(s: &str) -> String {
 /// Source the imag lib (+ timesync-authority.sh, whose generic helpers its verdict path reuses) and
 /// run `body` against its pure functions. Returns (exit_code, stdout).
 fn run_imag(body: &str) -> (i32, String) {
-    let harness = format!("set -uo pipefail\n. \"$TSLIB\"\n. \"$LIB\"\n{body}", body = body);
+    let harness = format!(
+        "set -uo pipefail\n. \"$TSLIB\"\n. \"$LIB\"\n{body}",
+        body = body
+    );
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)
@@ -282,7 +285,10 @@ fn hysteresis_healthy_below_threshold_keeps_and_increments_1116() {
     // A single (or sub-threshold run of) measured-healthy passes must NOT clear — this is the
     // flap-reset fix: it increments the streak and keeps the dedup signature.
     let (action, passes) = hyst("healthy", "0", "12");
-    assert_eq!(action, "keep", "1st healthy pass (0->1 of 12) must keep, not clear");
+    assert_eq!(
+        action, "keep",
+        "1st healthy pass (0->1 of 12) must keep, not clear"
+    );
     assert_eq!(passes, "1", "healthy streak advances to 1");
 
     let (action2, passes2) = hyst("healthy", "5", "12");
@@ -304,7 +310,10 @@ fn hysteresis_unmeasured_pass_advances_nothing_1116() {
     // healthy streak unchanged (it must not count toward clearing).
     let (action, passes) = hyst("unmeasured", "4", "12");
     assert_eq!(action, "keep", "unmeasured -> keep");
-    assert_eq!(passes, "4", "unmeasured -> healthy streak unchanged (advances nothing)");
+    assert_eq!(
+        passes, "4",
+        "unmeasured -> healthy streak unchanged (advances nothing)"
+    );
 }
 
 // =================================================================================================
@@ -352,7 +361,11 @@ fn throttle_clears_dedup_only_after_full_hysteresis_window_1116() {
         "",
         "the 12th consecutive clean pass resolves the episode -> clear the sig: {s:?}"
     );
-    assert_eq!(field(&s, "throttle_passes"), "0", "resolved -> reset passes: {s:?}");
+    assert_eq!(
+        field(&s, "throttle_passes"),
+        "0",
+        "resolved -> reset passes: {s:?}"
+    );
     assert_eq!(
         field(&s, "throttle_clear_passes"),
         "0",
