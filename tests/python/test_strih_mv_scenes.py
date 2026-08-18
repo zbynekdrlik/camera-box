@@ -281,8 +281,11 @@ def test_reattach_skips_the_set_when_the_bound_source_is_absent_from_a_non_empty
 
 
 def test_reattach_sets_once_the_finder_list_is_non_empty(monkeypatch):
-    # The happy path with a populated finder list still re-applies the input's own current name —
-    # the #795 guard must only skip the EMPTY case, never the normal reconnect nudge.
+    # The happy path with a populated finder list nudges the input's own current name — the #795
+    # guard must only skip the EMPTY case, never the normal reconnect nudge.
+    # issue 1114: the nudge is now a CLEAR-then-SET (was a single same-name re-apply, which is a
+    # no-op for the receiver — see test_reattach_clears_name_then_resets_to_force_a_fresh_receiver_1114
+    # and reattach()'s docstring). The finder-list guard still applies to the SET-back only.
     fake = _FakeObsRpcWithFinder(
         {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
         finder_items=[{"itemValue": "CAM3 (usb)"}, {"itemValue": "CAM1 (usb)"}],
@@ -298,9 +301,114 @@ def test_reattach_sets_once_the_finder_list_is_non_empty(monkeypatch):
     assert set_calls == [
         (
             "SetInputSettings",
+            {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": ""}},
+        ),
+        (
+            "SetInputSettings",
             {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
-        )
+        ),
     ]
+
+
+def test_reattach_clears_name_then_resets_to_force_a_fresh_receiver_1114(monkeypatch):
+    # issue 1114 (E2E burn-deploy handover race): re-applying the SAME ndi_source_name via
+    # SetInputSettings is a NO-OP for the receiver -- vendored ndi_source_update() computes
+    # reset_ndi_receiver from a NAME CHANGE (safe_strcmp(config.ndi_source_name, new) != 0), so an
+    # unchanged name leaves reset_ndi_receiver=false and (the receiver thread being alive after the
+    # issue-1096 retry-in-place) the update does nothing. The receiver stays stuck on the DEAD
+    # pre-bounce sender until the passive ~2min fresh-finder timer, which the [2/8] ~52s budget
+    # never covers -> false "camera leg dead" + the heavy #1093 strih-OBS force-kill.
+    #
+    # The cure is a CLEAR-then-SET: first SetInputSettings {ndi_source_name: ""} (=>
+    # ndi_source_thread_stop: the stuck receiver is torn down cleanly, s->running=false), THEN
+    # SetInputSettings {ndi_source_name: X} (=> ndi_source_thread_start: a FRESH receiver thread
+    # whose reset_ndi_receiver=true runs the issue-1096 fresh finder and resolves the live
+    # post-bounce sender by URL). So the recorded SetInputSettings sequence must be exactly
+    # ["" , X] -- the targeted per-input equivalent of the OBS force-kill, without killing OBS.
+    fake = _FakeObsRpcWithFinder(
+        {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        finder_items=[{"itemValue": "CAM3 (usb)"}, {"itemValue": "CAM1 (usb)"}],
+    )
+    monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
+
+    result = strih_mv_scenes.reattach(
+        object(), 3, finder_retries=3, finder_wait_s=0, sleep=lambda *_a, **_k: None
+    )
+
+    assert result == "CAM3 (usb)"
+    set_calls = [c for c in fake.calls if c[0] == "SetInputSettings"]
+    assert set_calls == [
+        (
+            "SetInputSettings",
+            {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": ""}},
+        ),
+        (
+            "SetInputSettings",
+            {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        ),
+    ], (
+        "issue 1114: reattach must CLEAR the name to '' (forces ndi_source_thread_stop) then SET it "
+        f"back to the real name (forces a fresh ndi_source_thread_start) -- got {set_calls}"
+    )
+
+
+class _FakeObsRpcWithChangingFinder:
+    """issue 1114: a fake whose finder list CHANGES across successive
+    GetInputPropertiesListPropertyItems calls (a scripted queue) — so the mangle-window re-check
+    (source present at the up-front guard, then vanished right before the set-back) can be exercised
+    without a live OBS."""
+
+    def __init__(self, get_settings_response, finder_items_sequence):
+        self.calls = []
+        self._get_settings_response = get_settings_response
+        self._finder_items_sequence = list(finder_items_sequence)
+        self._finder_idx = 0
+
+    def rpc(self, _obs, rtype, rdata=None, ignore_err=False):
+        self.calls.append((rtype, rdata))
+        if rtype == "GetInputSettings":
+            return self._get_settings_response
+        if rtype == "GetInputPropertiesListPropertyItems":
+            idx = min(self._finder_idx, len(self._finder_items_sequence) - 1)
+            self._finder_idx += 1
+            return {"propertyItems": self._finder_items_sequence[idx]}
+        if rtype == "SetInputSettings":
+            return {}
+        raise AssertionError(f"unexpected rpc call: {rtype}")
+
+
+def test_reattach_skips_setback_if_source_vanishes_during_the_clear_settle_1114(monkeypatch):
+    # issue 1114 review (#795 mangle window): the CLEAR + settle widened the window between the
+    # up-front finder-list guard and the SET-back. If the sender drops out of the finder list
+    # DURING that window, re-applying its name would MANGLE it (OBS strips a name absent from the
+    # combo list) — so reattach must re-check right before the set-back and, on a vanish, SKIP the
+    # set-back: leave the input cleared to "" (a clean, no-garbage state) and return the
+    # NDI_SOURCE_NOT_DISCOVERABLE sentinel. The recorded SetInputSettings must be ONLY the clear.
+    fake = _FakeObsRpcWithChangingFinder(
+        {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        # 1st call (up-front guard): present. 2nd call (pre-set-back re-check): vanished.
+        finder_items_sequence=[
+            [{"itemValue": "CAM3 (usb)"}, {"itemValue": "CAM1 (usb)"}],
+            [{"itemValue": "CAM1 (usb)"}],
+        ],
+    )
+    monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
+
+    result = strih_mv_scenes.reattach(
+        object(), 3, finder_retries=3, finder_wait_s=0, sleep=lambda *_a, **_k: None
+    )
+
+    assert result is strih_mv_scenes.NDI_SOURCE_NOT_DISCOVERABLE
+    set_calls = [c for c in fake.calls if c[0] == "SetInputSettings"]
+    assert set_calls == [
+        (
+            "SetInputSettings",
+            {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": ""}},
+        )
+    ], (
+        "issue 1114: on a mid-reattach vanish the set-back must be SKIPPED (clear only, no mangled "
+        f"re-apply); got {set_calls}"
+    )
 
 
 # --- #753 (2026-07-14): cam7 physical box exists -- seed() must pick up its 'Cam 7' scene too --
