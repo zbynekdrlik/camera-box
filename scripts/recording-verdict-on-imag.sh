@@ -67,6 +67,26 @@ onimag_decode_core_range() {
   echo "${lo}-$(( 10#$n - 1 ))"
 }
 
+# onimag_upload_decision <force> <present> <local_sha> <remote_sha> — issue 1118.
+# Pure/testable (no network): echo "upload" or "skip" for STEP 1's binary deploy. main() runs the
+# actual sha256 probes and feeds them here. The VERSION GATE: an already-present binary whose sha256
+# DIFFERS from the local one must be re-uploaded — a schema bump (e.g. #1112's RecordingPartial
+# v3->v4) leaves a stale on-imag binary emitting the OLD schema, whose partial the fresh dev1 merge
+# rejected and (pre-1118) killed the WHOLE verdict.
+#   force=1                               -> upload  (--force-upload always wins)
+#   present!=1 (absent / not executable)  -> upload  (unchanged pre-1118 behaviour)
+#   present=1 but local_sha empty         -> upload  (can't verify identity -> fail-safe, never skip blind)
+#   present=1 and local_sha != remote_sha -> upload  (VERSION GATE: stale emitter after a schema bump)
+#   present=1 and local_sha == remote_sha (non-empty) -> skip (fast idempotent path preserved)
+onimag_upload_decision() {
+  local force="${1:-0}" present="${2:-0}" local_sha="${3:-}" remote_sha="${4:-}"
+  [ "$force" = "1" ] && { echo "upload"; return 0; }
+  [ "$present" = "1" ] || { echo "upload"; return 0; }
+  [ -n "$local_sha" ] || { echo "upload"; return 0; }
+  [ "$local_sha" = "$remote_sha" ] && { echo "skip"; return 0; }
+  echo "upload"
+}
+
 build_onimag_command() {
   local exe="$1" core_range="${2:-}"; shift 2
   # #767: the decode is a BATCH job on a box running PRODUCTION OBS — with the keep-alive build all
@@ -140,23 +160,32 @@ main() {
   local -a SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10)
   local TARGET="${IMAG_USER}@${IMAG_BOX}"
 
-  # STEP 1: deploy the Linux verdict binary to imag — ONLY if missing/not-executable there, or
-  # --force-upload/--verdict-bin's caller explicitly wants a fresh copy. Skipping a needless
-  # re-upload keeps a re-dispatched worker's repeat runs fast (#281 idempotency spirit).
+  # STEP 1: deploy the Linux verdict binary to imag — ONLY if missing/not-executable there, its
+  # sha256 DIFFERS from the local binary, or --force-upload is given. issue 1118: the sha256
+  # VERSION GATE is the fix — before it, STEP 1 re-uploaded only when the binary was ABSENT, so a
+  # PARTIAL_SCHEMA_VERSION bump (#1112 v3->v4) left imag on a stale v3-emitting binary whose partial
+  # the fresh dev1 merge rejected. Skipping a needless re-upload (identical sha) keeps a
+  # re-dispatched worker's repeat runs fast (#281 idempotency spirit).
   if [ -n "$VERDICT_BIN" ]; then
-    local need_upload=0
-    if [ "$FORCE_UPLOAD" = "1" ]; then
-      need_upload=1
-    elif ! sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" \
-        "[ -x '$REMOTE_BIN' ]" 2>/dev/null; then
-      need_upload=1
+    local present=0 local_sha="" remote_sha=""
+    # Only probe the box when we are NOT force-uploading (force always re-uploads).
+    if [ "$FORCE_UPLOAD" != "1" ] \
+       && sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "[ -x '$REMOTE_BIN' ]" 2>/dev/null; then
+      present=1
+      # sha256 of the LOCAL (dev1) binary about to be deployed, and of the on-imag one. Either
+      # failing leaves the sha EMPTY, which onimag_upload_decision treats as "re-upload" (fail-safe).
+      local_sha="$(sha256sum "$VERDICT_BIN" 2>/dev/null | cut -d' ' -f1)" || local_sha=""
+      remote_sha="$(sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" \
+          "sha256sum '$REMOTE_BIN' 2>/dev/null | cut -d' ' -f1" 2>/dev/null | tr -dc '0-9a-f')" || remote_sha=""
     fi
-    if [ "$need_upload" = "1" ]; then
-      echo "[recording-verdict-on-imag] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN}"
+    local decision
+    decision="$(onimag_upload_decision "$FORCE_UPLOAD" "$present" "$local_sha" "$remote_sha")"
+    if [ "$decision" = "upload" ]; then
+      echo "[recording-verdict-on-imag] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN} (force=$FORCE_UPLOAD present=$present local_sha=${local_sha:0:12} remote_sha=${remote_sha:0:12})"
       sshpass -p "$IMAG_PW" scp "${SSH_OPTS[@]}" "$VERDICT_BIN" "${TARGET}:${REMOTE_BIN}"
       sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "chmod +x '$REMOTE_BIN'"
     else
-      echo "[recording-verdict-on-imag] $REMOTE_BIN already present+executable on imag — skipping upload"
+      echo "[recording-verdict-on-imag] $REMOTE_BIN already present+executable AND identical sha256 on imag — skipping upload (issue 1118 version gate)"
     fi
   fi
 

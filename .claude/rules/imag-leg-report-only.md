@@ -67,8 +67,31 @@ or the recording — a failing `taskset` aborts the whole command before recordi
 And when a box is swapped, sweep EVERY hardcoded core reference (`grep -rn 'taskset -c'`), not just
 the isolation plan.
 
-Latent (not a current defect, no ticket): recording-verdict-on-imag.sh STEP 1 re-uploads the binary
-only when it is absent/non-executable (`[ -x ]`) — it does NOT compare versions, so a FUTURE
-`PARTIAL_SCHEMA_VERSION` bump would leave imag on a stale binary whose partial the fresh dev1 merge
-rejects. Harmless while the schema stays at 3; if you bump the schema, add a checksum/version gate
-to STEP 1 (or have recording-e2e.sh pass `--force-upload`).
+## The stale-on-imag-binary landmine FIRED on the v3->v4 bump — FIXED both sides (issue 1118)
+
+The latent landmine below fired on its first possible run (E2E 32178766136): the dup-cadence work
+bumped `PARTIAL_SCHEMA_VERSION` 3->4, and because `recording-verdict-on-imag.sh` STEP 1 re-uploaded
+the on-imag binary only when it was absent/non-executable (`[ -x ]`, no version compare), imag kept
+its stale v3-emitting binary. The fresh dev1 merge then HARD-DIED — `RecordingPartial::load(path)?`
+propagated `recording partial schema_version 3 is not supported` before any verdict JSON was written,
+so the fail-closed E2E guard reds a run a strih+stream-only merge scores `overall_pass=true`. Two
+fixes landed (both crate-root-pure so they Tier-0-test despite the probe gate on recording-verdict):
+
+1. **STEP 1 version-gate** (`onimag_upload_decision`, pure/sourced): STEP 1 now sha256-compares the
+   on-imag binary against the local one and re-uploads on a mismatch (identical sha keeps the fast
+   skip; `--force-upload` still wins; any unreadable sha re-uploads fail-safe). A schema bump can
+   never again leave imag on a stale emitter.
+2. **Merge-side degrade** (`src/partial_schema_gate.rs` seam, called by `run_merge`): a schema-
+   mismatched partial for the REPORT-ONLY imag box now DEGRADES — drop it, loud stderr WARNING,
+   `full_chain.imag_leg_verified=false` + `full_chain.imag_leg_skip_reason`, verdict computed from
+   the remaining strih+stream partials. `classify_load_failure(box, found_schema, expected_schema)`
+   degrades ONLY a clean schema mismatch on a report-only box; **strih/stream and every non-schema
+   failure (unreadable/corrupt JSON, a same-schema error) STAY FATAL** — their binaries come fresh
+   from CI each run, so a mismatch there is a genuine hard-gate defect. The skip reason threads
+   through `build_and_print_verdict_with_stream_hashes` as a trailing `Option<String>` (the 8-arg
+   back-compat wrapper passes `None`), mirroring the issue-1112 `stream_content_hashes` carry.
+
+Note the earlier issue-1094 section's aside ("emits `schema_version=3`, exactly what the current
+merge expects") was true at issue-1094 time; the schema is 4 now, which is exactly why the landmine
+fired. If you bump `PARTIAL_SCHEMA_VERSION` again, the STEP-1 sha gate handles the redeploy and the
+degrade path keeps a still-stale report-only imag leg from ever zeroing the whole verdict.

@@ -238,6 +238,59 @@ fn onimag_decode_core_range_maps_cpu_count_to_top_four_cores() {
     }
 }
 
+/// issue 1118 — STEP 1 must VERSION-GATE the on-imag binary upload. `onimag_upload_decision` is the
+/// pure/sourced (no-network) decision: `--force-upload` always uploads; an absent binary uploads;
+/// an already-present binary whose sha256 DIFFERS from the local one re-uploads (the fix — a stale
+/// v3-emitting binary after the #1112 v3->v4 PARTIAL_SCHEMA_VERSION bump); an IDENTICAL sha keeps
+/// the fast idempotent skip; a can't-hash-local case re-uploads (fail-safe). Before this, STEP 1
+/// only re-uploaded when the binary was ABSENT/non-executable, so a schema bump left imag stale and
+/// the fresh dev1 merge rejected its partial and (pre-1118) killed the whole verdict.
+#[test]
+fn onimag_upload_decision_version_gates_the_binary() {
+    // force, present, local_sha, remote_sha  =>  expected decision
+    let cases = [
+        // --force-upload always wins, even when the shas match.
+        ("1", "1", "aaaa", "aaaa", "upload"),
+        ("1", "0", "", "", "upload"),
+        // Absent / not-executable on imag -> upload (unchanged pre-1118 behaviour).
+        ("0", "0", "aaaa", "aaaa", "upload"),
+        // THE FIX: present but the on-imag sha DIFFERS from the local binary -> re-upload
+        // (stale emitter after a schema bump).
+        ("0", "1", "aaaa", "bbbb", "upload"),
+        // Present AND identical sha -> keep the fast idempotent skip.
+        ("0", "1", "aaaa", "aaaa", "skip"),
+        // Present but the local binary could not be hashed -> re-upload (fail-safe, never skip blind).
+        ("0", "1", "", "bbbb", "upload"),
+        // Present, remote sha empty (couldn't read it) but local known -> differ -> upload.
+        ("0", "1", "aaaa", "", "upload"),
+    ];
+    for (force, present, local_sha, remote_sha, want) in cases {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(". \"$1\"; onimag_upload_decision \"$2\" \"$3\" \"$4\" \"$5\"")
+            .arg("bash")
+            .arg(script())
+            .arg(force)
+            .arg(present)
+            .arg(local_sha)
+            .arg(remote_sha)
+            .output()
+            .expect("run onimag_upload_decision");
+        assert!(
+            out.status.success(),
+            "onimag_upload_decision({force},{present},{local_sha:?},{remote_sha:?}) exited nonzero: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            got.trim(),
+            want,
+            "onimag_upload_decision({force},{present},{local_sha:?},{remote_sha:?}) => {:?}, want {want:?}",
+            got.trim()
+        );
+    }
+}
+
 /// `--skip-if-exists <path>` must return BEFORE any ssh/scp when the partial already exists on
 /// dev1 (the #281 durable-idempotency contract every per-box helper shares) — proven end-to-end
 /// with NO network access: main() must reach the early `return 0` and never attempt to parse
