@@ -1,7 +1,7 @@
 name: Windows genlock build (vendored OBS + DistroAV)
 
 # Builds the PRODUCTION Windows artifact for strih/stream from the vendored,
-# genlock-patched tree (#42): OBS 32.1.2 (browser ON for production parity,
+# genlock-patched tree (#42): OBS 32.2.0 (browser ON for production parity,
 # What's New / update prompts OFF per #43) + DistroAV 6.2.1 against it.
 # Manual dispatch; artifacts are deployed off-air to the boxes (portable mode
 # first — never overwriting the production install).
@@ -919,7 +919,7 @@ jobs:
           }
           Write-Output "Genlock NDI-source HARD-LOCK present (#257: GENLOCK_FORCED_SETTINGS table forces sync/behavior/bw/latency/hw_accel/audio/framesync/alpha/ptz; whitelist UI = source/Genlock/Latency/burn; burn applied at runtime; #795 source selector is LIST-only + saved-name preserved) — OK"
 
-      # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
+      # cmake steps run under bash: pwsh tokenization splits -DNAME=32.2.0 at the
       # #111: assert the QR render-time burn filter (Path B) is present + build-wired in
       # the vendored DistroAV BEFORE the 150-min build, so a future `git subtree pull`
       # (#44) or a build-wiring regression that drops the burn filter fails HERE rather
@@ -984,7 +984,7 @@ jobs:
         shell: bash
         run: >
           cmake --preset windows-x64
-          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF
           -DENABLE_VLC=OFF

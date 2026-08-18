@@ -86,7 +86,7 @@ fn write_state(name: &str, json: &str) -> PathBuf {
 /// (the 60fps IMAG role moved to imag-nb, #458/#463) -- its observed output_fps must match the
 /// re-pinned `output_fps_strih=30`.
 const STRIH_PINNED: &str = "{\
-\"obs_version\":\"32.1.2\",\
+\"obs_version\":\"32.2.0\",\
 \"distroav_version\":\"6.2.1\",\
 \"ndi_runtime\":\"6.3.2.0\",\
 \"output_fps\":\"30\",\
@@ -100,7 +100,7 @@ const STRIH_PINNED: &str = "{\
 /// pass-through, no further decimation), so its observed output_fps is 30 (matches the
 /// host-keyed `output_fps_stream` pin, unchanged by this topology move).
 const STREAM_PINNED: &str = "{\
-\"obs_version\":\"32.1.2\",\
+\"obs_version\":\"32.2.0\",\
 \"distroav_version\":\"6.2.1\",\
 \"ndi_runtime\":\"6.3.2.0\",\
 \"output_fps\":\"30\",\
@@ -122,7 +122,7 @@ fn compare_args_from_state_emits_drift_guard_key_vals() {
     );
     let lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
     assert!(
-        lines.iter().any(|l| l == "obs_version=32.1.2"),
+        lines.iter().any(|l| l == "obs_version=32.2.0"),
         "must emit obs_version: {out:?}"
     );
     assert!(
@@ -407,7 +407,7 @@ fn gate_refuses_when_a_box_has_drifted() {
     // strih is on a DIFFERENT obs version than the pinned 32.1.2 (a randomly-deployed / stale build).
     // The gate must REFUSE (exit 20) — running the rig test on a drifted stack would produce a
     // worthless result (#123/#119). It names the box + the engine's DRIFT line.
-    let drifted = STRIH_PINNED.replace("\"obs_version\":\"32.1.2\"", "\"obs_version\":\"31.0.0\"");
+    let drifted = STRIH_PINNED.replace("\"obs_version\":\"32.2.0\"", "\"obs_version\":\"31.0.0\"");
     let s = write_state("strih_drift", &drifted);
     let t = write_state("stream_pin2", STREAM_PINNED);
     let (code, stdout, stderr) = run_gate(&[
@@ -548,7 +548,7 @@ const PINNED_SHORTCUT: &str =
 // #1067 — the pinned OBS version vendor/README.md carries for `vendor/obs-studio` (32.1.2). Used as
 // the healthy `port4455_owner_version` now that port4455_identity is ENFORCED (a matching owner
 // version passes port_identity_verdict; pinned_obs_version(readme) reads the same value).
-const PINNED_OBS_VERSION: &str = "32.1.2";
+const PINNED_OBS_VERSION: &str = "32.2.0";
 
 #[test]
 fn state_json_value_is_the_generic_single_key_parser() {
@@ -851,7 +851,7 @@ fn gate_enforces_startup_chain_on_strih_even_without_ahk_826() {
             &[
                 ("obs_installs", PINNED_OBS_EXE),
                 ("port4455_owner_path", PINNED_OBS_EXE),
-                ("port4455_owner_version", "32.1.2"),
+                ("port4455_owner_version", "32.2.0"),
                 ("obs_process_count", "1"),
             ],
         ),
@@ -1062,7 +1062,7 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
             &[
                 ("obs_installs", PINNED_OBS_EXE),
                 ("port4455_owner_path", PINNED_OBS_EXE),
-                ("port4455_owner_version", "32.1.2"),
+                ("port4455_owner_version", "32.2.0"),
                 ("obs_process_count", "1"),
             ],
         ),

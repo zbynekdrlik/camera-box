@@ -565,7 +565,7 @@ fn compare_clean_when_observed_matches_the_pinned_set() {
     let (code, stdout, _stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -613,7 +613,7 @@ fn compare_never_silently_passes_when_a_value_is_unread() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "output_fps=30",
         "genlock_wall_clock=1",
@@ -709,7 +709,7 @@ fn compare_input_latency_unknown_when_not_read() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=stream",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -829,7 +829,7 @@ fn compare_plugin_paths_unknown_when_not_read() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1010,7 +1010,7 @@ fn compare_labels_unverified_distroav_sha_as_skipped_not_ok() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1161,7 +1161,7 @@ fn compare_clean_when_build_sha_and_capability_match_the_manifest() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1267,7 +1267,7 @@ fn compare_build_sha_unknown_when_manifest_supplied_but_dll_sha_unread() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1301,7 +1301,7 @@ fn compare_build_sha_facet_dormant_without_a_manifest() {
     let (code, stdout, _stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1447,7 +1447,7 @@ fn compare_clean_when_every_bundle_file_matches_the_manifest() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1523,7 +1523,7 @@ fn compare_bundle_files_unknown_when_a_listed_file_was_unread() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1559,7 +1559,7 @@ fn compare_whole_bundle_facet_dormant_without_bundle_hashes() {
     let (code, stdout, _stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1686,7 +1686,7 @@ fn compare_clean_when_prod_burn_env_is_none() {
     let (code, stdout, _stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -1710,7 +1710,7 @@ fn compare_burn_env_facet_dormant_without_the_key() {
     let (code, stdout, _stderr) = run_script(&[
         "--compare",
         "host=strih",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -2001,7 +2001,7 @@ fn compare_does_not_false_alarm_when_live_av_align_diverges_from_stale_pin() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=stream",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",
@@ -2072,7 +2072,7 @@ fn compare_passes_when_live_value_matches_last_calibrated_value() {
     let (code, stdout, stderr) = run_script(&[
         "--compare",
         "host=stream",
-        "obs_version=32.1.2",
+        "obs_version=32.2.0",
         "distroav_version=6.2.1",
         "ndi_runtime=6.3.2.0",
         "output_fps=30",

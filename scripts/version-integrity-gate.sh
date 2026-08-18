@@ -29,7 +29,7 @@
 # does; #123/#119 is unrelated, separate scope.)
 #
 # State file = a flat JSON object of the drift-guard --compare observed keys for that box, e.g.
-#   { "obs_version":"32.1.2", "distroav_version":"6.2.1", "ndi_runtime":"6.3.2.0",
+#   { "obs_version":"32.2.0", "distroav_version":"6.2.1", "ndi_runtime":"6.3.2.0",
 #     "output_fps":"30", "genlock_wall_clock":"1",
 #     "ndi_input_latency":"NDI cam5=0,NDI cam1=0,NDI cam3=0",
 #     "distroav_dll_paths":"C:\\ProgramData\\obs-studio\\plugins\\distroav\\bin\\64bit\\distroav.dll",

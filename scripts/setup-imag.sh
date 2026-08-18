@@ -36,7 +36,7 @@ NDI_PEER_CANDIDATES="${NDI_PEER_CANDIDATES:-10.77.9.61 10.77.9.62 10.77.9.63 10.
 # any stock plugin built against a NEWER libobs ("compiled with newer libobs 32.2"), which on the
 # .187 bring-up left OBS with only distroav.so loaded: no obs-websocket, no encoders. Overridable;
 # bump it together with the vendored genlock build (#825).
-IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.1.2-0obsproject1~noble}"
+IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.2.0-0obsproject1~noble}"
 NDI_PEER="${NDI_PEER:-}"         # resolved at first use from NDI_PEER_CANDIDATES (or pinned by env)
 NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
@@ -1321,7 +1321,7 @@ EOF
         fi
     fi
     if ! grep -q '^LastVersion=' "$f"; then
-        printf '\n[General]\nLastVersion=536936450\n' >> "$f"   # 32.1.2 — suppress first-run wizard
+        printf '\n[General]\nLastVersion=537001984\n' >> "$f"   # 32.2.0 — suppress first-run wizard
     fi
     if ! grep -q '^DockState=' "$f"; then
         # #791: OBS only persists [BasicWindow] geometry/DockState on a CLEAN exit -- imag-nb has
@@ -1337,7 +1337,7 @@ EOF
         # docked column after Controls, then a clean File > Exit so OBS ITSELF wrote these into its
         # own global.ini. Qt's dock-widget object names (scenesDock/sourcesDock/mixerDock/
         # transitionsDock/controlsDock/statsDock) have been stable across OBS's Qt frontend for
-        # years, so this applies cleanly to the box's actual OBS 32.1.2 genlock build too --
+        # years, so this applies cleanly to the box's actual OBS 32.2.0 genlock build too --
         # Qt's restoreState() is best-effort per-widget-by-objectName, so even a future OBS build
         # that adds/removes an unrelated dock degrades to "some docks not repositioned", never a
         # crash or a corrupted layout.

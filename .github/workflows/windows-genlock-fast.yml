@@ -513,7 +513,7 @@ jobs:
         shell: bash
         run: >
           cmake --preset windows-x64
-          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF
           -DENABLE_VLC=OFF
@@ -600,13 +600,13 @@ jobs:
       # Configure the vendored OBS exactly like the production build (same preset, same
       # disable flags), but with ENABLE_BROWSER=OFF: the CEF/browser download + build is
       # the bulk of the 150-min full build and is not needed to compile-check the
-      # vendored C++. bash quoting is exact — pwsh would split -DNAME=32.1.2 at the dots.
+      # vendored C++. bash quoting is exact — pwsh would split -DNAME=32.2.0 at the dots.
       - name: Configure OBS (windows-x64 preset, browser OFF for the compile gate)
         working-directory: vendor/obs-studio
         shell: bash
         run: >
           cmake --preset windows-x64
-          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_BROWSER=OFF
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF

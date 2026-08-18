@@ -103,7 +103,7 @@ When a NEXT swap fails, check this list before theorising:
   `/lib/systemd/system/lightdm.service` can never match. Canonicalise BOTH sides
   (`imag_same_unit`).
 - **The OBS base version must MATCH the genlock build (#824).** The PPA moved to 32.2.0 while the
-  genlock build is 32.1.2; libobs then refuses every stock plugin (`compiled with newer libobs
+  genlock build is 32.2.0; libobs then refuses every stock plugin (`compiled with newer libobs
   32.2` × 41) and OBS comes up with ONLY `distroav.so` — no obs-websocket (so `imag_scenes.py`
   gets `ConnectionRefused` on :4455) and no encoders. `IMAG_OBS_BASE_VERSION` pins it; a superseded
   PPA binary is gone from the pool but still served by
@@ -304,7 +304,7 @@ HOME=/tmp/throwaway-home DISPLAY=:77 obs --disable-shutdown-check &
 # $HOME/.config/obs-studio/global.ini -- grep those two keys out and seed them elsewhere.
 ```
 
-A DIFFERENT, older OBS version (30.0.2 stock vs the rig's 32.1.2 genlock build) is fine for this --
+A DIFFERENT, older OBS version (30.0.2 stock vs the rig's 32.2.0 genlock build) is fine for this --
 Qt's dock-widget object names (`scenesDock`/`sourcesDock`/`mixerDock`/`transitionsDock`/
 `controlsDock`/`statsDock`) have been stable for years, and `restoreState()` degrades gracefully
 (best-effort per-widget-by-name) if a future build adds/removes an unrelated dock.
