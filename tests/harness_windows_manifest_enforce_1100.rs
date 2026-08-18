@@ -14,6 +14,11 @@
 //! that stops reporting its bytes flips to a gate-blocking UNKNOWN — every box is REQUIRED to report.
 //! Same 756->758 second step #1067 applied to `port4455_identity`.
 //!
+//! Activating the manifest re-arms MORE than obs.dll on each box: drift-guard also makes the
+//! `genlock_capability` check gate-blocking (an obs.dll-only FAST manifest leaves distroav SKIPPED,
+//! not UNKNOWN — by design), so the enforce surface is obs.dll bytes + genlock_capability. The live
+//! precondition covered both keys on both boxes, so the flip is GREEN today.
+//!
 //! Static-text guard on scripts/recording-e2e.sh (the same model tests/harness_recording_e2e_*.rs
 //! use): it runs on every push, on any host, with no rig. The DEFINITIVE proof is a green Full-path
 //! E2E [0/8] log showing obs.dll byte parity OK on both Windows boxes.
@@ -26,18 +31,22 @@ fn recording_e2e() -> String {
 }
 
 /// The Windows FAST-manifest auto-source must NO LONGER gate on the #1082 opt-in
-/// `manifest_autosource_state_has_key` guard — the ENFORCE flip runs it unconditionally so a box
-/// that stops reporting obs_dll_sha256 becomes a gate-blocking UNKNOWN, not a silent skip (#1100).
-/// (The `manifest_autosource_state_has_key` LIB function is kept + unit-tested; only its USE as the
-/// recording-e2e.sh opt-in guard is removed — so its total absence from THIS script is the anchor.)
+/// `manifest_autosource_state_has_key` reporting guard — the ENFORCE flip runs it unconditionally so
+/// a box that stops reporting obs_dll_sha256 becomes a gate-blocking UNKNOWN, not a silent skip
+/// (#1100). Anchored on the guard's OWN usage shape (the helper keyed on the per-box `$VERSION_*_STATE`
+/// files) rather than the bare helper name, so it stays a precise "the opt-in guard is gone" assertion
+/// and does not forbid a future, legitimately-opt-in facet from reusing the (kept + unit-tested)
+/// `manifest_autosource_state_has_key` LIB function elsewhere in the script.
 #[test]
 fn windows_manifest_autosource_is_enforced_not_opt_in_gated() {
     let s = recording_e2e();
     assert!(
-        !s.contains("manifest_autosource_state_has_key"),
-        "#1100: the Windows FAST-manifest auto-source must NOT gate on \
-         manifest_autosource_state_has_key (the #1082 opt-in guard) — the ENFORCE flip runs it \
-         unconditionally so an un-reporting box flips to a gate-blocking UNKNOWN, not a silent skip."
+        !s.contains("manifest_autosource_state_has_key \"$VERSION_STRIH_STATE\"")
+            && !s.contains("manifest_autosource_state_has_key \"$VERSION_STREAM_STATE\""),
+        "#1100: the Windows FAST-manifest auto-source must NOT gate on the #1082 opt-in reporting \
+         guard (manifest_autosource_state_has_key against the per-box $VERSION_STRIH_STATE / \
+         $VERSION_STREAM_STATE files) — the ENFORCE flip runs it unconditionally so an un-reporting \
+         box flips to a gate-blocking UNKNOWN, not a silent skip."
     );
 }
 
