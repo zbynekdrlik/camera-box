@@ -909,6 +909,17 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('uint64_t no_conn_since_ns = 0;')) {
             Write-Error "ndi-source.cpp: the #1096 no_conn_since_ns disconnect timer is gone -- the no_connections==0 path can no longer arm a fresh-finder reset, so a GRACEFUL cambox restart (clean FIN -> no_conn==0, where #767 never fires) leaves the strih source black. Re-apply the #1096 no-connection recovery"; exit 1
           }
+          # camera-box #1097: the framesync_create failure branch in the reset path must retry (not
+          # break) -- the dormant sibling of #1080 (framesync forced OFF today, but a break there is
+          # the SAME permanent, reattach-proof receiver-thread death). It uses its OWN
+          # framesync_create_fail_count with the SHARED #1080 backoff helper. A subtree pull
+          # re-importing stock DistroAV silently drops this (mirrors tests/distroav_framesync_create_retry_1097.rs).
+          if ($ndi -notmatch [regex]::Escape('unsigned framesync_create_fail_count = 0;')) {
+            Write-Error "ndi-source.cpp: the #1097 framesync_create_fail_count retry counter is gone -- a transient framesync_create failure would break the receiver loop and permanently kill the thread (reattach-proof black). Re-apply the #1097 retry"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(framesync_create_fail_count)')) {
+            Write-Error "ndi-source.cpp: the #1097 framesync branch no longer CALLS ndi_recv_create_retry_backoff_ns(framesync_create_fail_count) -- a failed framesync_create reverts to the permanent-death break. Re-apply the #1097 retry"; exit 1
+          }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the
           # 4 whitelist props and the forced knobs (e.g. behavior list) must NOT be added.
