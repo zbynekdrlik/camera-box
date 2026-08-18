@@ -104,13 +104,21 @@ impl Hasher for FnvHasher {
 /// for the CURRENT pending boundary, decide whether to emit it now.
 ///
 /// - `would_emit == false` (still between boundaries): unchanged blind pacing — never emit.
-/// - `would_emit == true` and this frame is a FRESH dupe (not yet deferred this boundary): SHED
-///   it instead of emitting — the caller must NOT advance its boundary state, so the very next
-///   captured frame is re-evaluated against the SAME still-pending boundary.
-/// - `would_emit == true` and (NOT a dupe, OR a dupe was already deferred once this boundary):
-///   emit — either genuinely unique, or the bounded one-deferral fallback (validated dupes are
-///   always isolated pairs, so a second consecutive dupe is not expected on real hardware; the
-///   bound protects every grabber model against ever starving emission indefinitely).
+/// - `would_emit == true`, this frame is a FRESH dupe (not yet deferred this boundary), AND the
+///   crossing is ON-TIME (`on_time` — the surplus regime, the next boundary still in the future):
+///   SHED it instead of emitting — the caller must NOT advance its boundary state, so the very
+///   next captured frame is re-evaluated against the SAME still-pending boundary. The `on_time`
+///   guard is the #1111 fix: a dupe is deferred ONLY when a replacement capture still lands inside
+///   the SAME interval, so the boundary advances exactly once for the pair (lag-neutral).
+/// - `would_emit == true` and (NOT a dupe, OR a dupe already deferred once this boundary, OR a
+///   LATE dupe — `!on_time`, the catch-up regime): emit — either genuinely unique, the bounded
+///   one-deferral fallback (validated dupes are always isolated pairs, so a second consecutive
+///   dupe is not expected on real hardware; the bound protects every grabber model against ever
+///   starving emission indefinitely), or the #1111 late-dupe release valve. Deferring a late dupe
+///   would hold the boundary while the wall clock runs on, ratcheting the gate's lag until it
+///   trips the #707 resync (issue-1110 CAM1 judder); emitting it (a repeated frame, invisible, and
+///   mathematically unavoidable when a 58-unique-fps source feeds a steady 60) keeps the grid
+///   boundary-locked.
 ///
 /// Returns `(emit, deferred_as_dupe)`. The caller advances its boundary state IFF
 /// `!deferred_as_dupe` — see [`DecimationGate::poll`] for the wiring.
@@ -118,11 +126,12 @@ pub fn dupe_preferring_decimate(
     would_emit: bool,
     is_dupe: bool,
     already_deferred_this_boundary: bool,
+    on_time: bool,
 ) -> (bool, bool) {
     if !would_emit {
         return (false, false);
     }
-    if is_dupe && !already_deferred_this_boundary {
+    if is_dupe && !already_deferred_this_boundary && on_time {
         return (false, true);
     }
     (true, false)
@@ -168,12 +177,16 @@ impl DecimationGate {
         }
         let (would_emit, candidate_next) =
             crate::ndi::genlock_emit_gate(now_ns, self.next_boundary_ns, interval_ns);
+        // (#1111) is this an ON-TIME/surplus crossing (deferring a dupe is lag-neutral) or a LATE
+        // catch-up crossing (deferring would ratchet the lag into the #707 resync -> issue-1110
+        // judder)? Shares the boundary math with `genlock_emit_gate` above.
+        let on_time = crate::ndi::genlock_emit_on_time(now_ns, self.next_boundary_ns, interval_ns);
 
         let is_dupe = self.prev_hash == Some(content_hash);
         self.prev_hash = Some(content_hash);
 
         let (emit, deferred) =
-            dupe_preferring_decimate(would_emit, is_dupe, self.deferred_this_boundary);
+            dupe_preferring_decimate(would_emit, is_dupe, self.deferred_this_boundary, on_time);
 
         if deferred {
             // Shed the dupe, keep the SAME boundary pending -- the next captured frame is
@@ -319,27 +332,64 @@ mod tests {
 
     #[test]
     fn between_boundaries_never_emits_regardless_of_dupe() {
+        // would_emit == false: on_time is irrelevant (always false between boundaries).
         assert_eq!(
-            dupe_preferring_decimate(false, false, false),
+            dupe_preferring_decimate(false, false, false, false),
             (false, false)
         );
-        assert_eq!(dupe_preferring_decimate(false, true, false), (false, false));
+        assert_eq!(
+            dupe_preferring_decimate(false, true, false, false),
+            (false, false)
+        );
     }
 
     #[test]
-    fn fresh_dupe_at_boundary_is_deferred_not_emitted() {
-        assert_eq!(dupe_preferring_decimate(true, true, false), (false, true));
+    fn fresh_on_time_dupe_at_boundary_is_deferred_not_emitted() {
+        // An ON-TIME (surplus-regime) fresh dupe is the case #889 defers — a replacement capture
+        // still lands inside the same interval, so the deferral is lag-neutral.
+        assert_eq!(
+            dupe_preferring_decimate(true, true, false, true),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn late_dupe_is_not_deferred_but_emitted_1111() {
+        // (#1111) A LATE (catch-up regime, `!on_time`) fresh dupe must NOT be deferred: holding
+        // the boundary while the wall clock runs on is exactly the lag ratchet that trips the
+        // #707 resync and produces the issue-1110 CAM1 judder. It emits instead (a repeated
+        // frame), keeping the emit grid locked to wall-clock.
+        assert_eq!(
+            dupe_preferring_decimate(true, true, false, false),
+            (true, false)
+        );
     }
 
     #[test]
     fn already_deferred_dupe_falls_back_to_blind_emit() {
-        assert_eq!(dupe_preferring_decimate(true, true, true), (true, false));
+        // Even on-time, a SECOND consecutive dupe for the same boundary emits (bounded to one
+        // deferral) — validated dupes are isolated pairs, never triples.
+        assert_eq!(
+            dupe_preferring_decimate(true, true, true, true),
+            (true, false)
+        );
     }
 
     #[test]
     fn non_dupe_at_boundary_emits_unchanged() {
-        assert_eq!(dupe_preferring_decimate(true, false, false), (true, false));
-        assert_eq!(dupe_preferring_decimate(true, false, true), (true, false));
+        // A genuine unique tick always emits, regardless of the deferral/on_time flags.
+        assert_eq!(
+            dupe_preferring_decimate(true, false, false, true),
+            (true, false)
+        );
+        assert_eq!(
+            dupe_preferring_decimate(true, false, true, true),
+            (true, false)
+        );
+        assert_eq!(
+            dupe_preferring_decimate(true, false, false, false),
+            (true, false)
+        );
     }
 
     // ── DupeShedLog ────────────────────────────────────────────────────────
@@ -486,8 +536,11 @@ mod tests {
             let prev_boundary_ns = gate.next_boundary_ns();
             let emit = gate.poll(*now_ns, emit_interval_ns, *content_id);
             let next_boundary_ns = gate.next_boundary_ns();
-            total_skips +=
-                crate::ndi::boundary_skip_count(prev_boundary_ns, next_boundary_ns, emit_interval_ns);
+            total_skips += crate::ndi::boundary_skip_count(
+                prev_boundary_ns,
+                next_boundary_ns,
+                emit_interval_ns,
+            );
             if emit {
                 emitted_ids.push(*content_id);
             }
@@ -558,7 +611,10 @@ mod tests {
         let (dupe_shed, _blind_shed) = gate.take_shed_counts();
 
         assert_eq!(total_skips, 0, "exact-60 input never skips a boundary");
-        assert_eq!(dupe_shed, 0, "exact-60 dupe-free input never sheds a dupe victim");
+        assert_eq!(
+            dupe_shed, 0,
+            "exact-60 dupe-free input never sheds a dupe victim"
+        );
         assert_eq!(
             emits, 479,
             "exact-60 emits every capture but the cold-start one (480 captures -> 479 emitted)"
