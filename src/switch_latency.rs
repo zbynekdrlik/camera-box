@@ -101,10 +101,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn threshold_constant_matches_the_624_issue_text() {
+    fn threshold_constant_is_the_1120_recalibrated_bound() {
+        // issue 1120: recalibrated from the 16 ms half-frame ideal to 24 ms with honest margin
+        // above the live CAM1-included distribution (worst observed source spread 16.90 ms; the
+        // ShadowCast 2 grabber residual, issue 1110). 24 ms = 1.42x the worst observed spread AND
+        // still 0.72x a full 33.3 ms program frame (under a full frame's lipsync tolerance).
         assert_eq!(
-            SPREAD_THRESHOLD_MS, 16.0,
-            "#624 issue body: half a 30fps program frame"
+            SPREAD_THRESHOLD_MS, 24.0,
+            "issue 1120: recalibrated cross-camera spread bound (was 16.0)"
+        );
+    }
+
+    #[test]
+    fn live_16_9_spread_passes_after_1120_recalibration() {
+        // The exact E2E-attempt-4 failure (verdict 675817084): a 16.90 ms cross-camera source
+        // spread (cam1 66.53 ms vs cam3 49.64 ms) that was overall-green on EVERYTHING else red
+        // the run at the old 16.0 ms bound — a per-run coin flip on the CAM1 grabber's variance,
+        // not a real regression. After the issue-1120 recalibration to 24 ms it must PASS.
+        let v = spread_verdict(&[49.635_278, 66.534_963]).expect("2 measured cameras");
+        assert!(
+            (v.spread_ms - 16.899_685).abs() < 1e-6,
+            "reproduces the live spread: {v:?}"
+        );
+        assert!(
+            v.pass,
+            "the live 16.90 ms spread must PASS after the 24 ms recalibration: {v:?}"
         );
     }
 
@@ -136,39 +157,42 @@ mod tests {
     }
 
     #[test]
-    fn spread_over_16ms_fails_the_gate() {
-        // 825 - 795 = 30ms > 16ms => FAIL.
-        let v = spread_verdict(&[795.0, 810.0, 825.0]).expect("3 measured cameras");
-        assert_eq!(v.spread_ms, 30.0);
+    fn spread_well_over_the_bound_fails_the_gate() {
+        // A genuinely-broken cross-camera spread — 850 - 790 = 60ms, well over a full 33.3ms
+        // program frame — must FAIL regardless of the (recalibrated) 24ms bound. This is the
+        // "a genuinely-broken spread above the new bound must FAIL" guard for issue 1120.
+        let v = spread_verdict(&[790.0, 810.0, 850.0]).expect("3 measured cameras");
+        assert_eq!(v.spread_ms, 60.0);
         assert!(
             !v.pass,
-            "a 30ms cross-camera spread must FAIL the #624 gate: {v:?}"
+            "a 60ms cross-camera spread must FAIL the gate: {v:?}"
         );
     }
 
     #[test]
-    fn spread_exactly_at_16ms_passes_the_boundary() {
-        // Boundary convention (issue text "> 16 ms ... = FAIL"): ==16.0 PASSES.
-        let v = spread_verdict(&[800.0, 816.0]).expect("2 measured cameras");
-        assert_eq!(v.spread_ms, 16.0);
+    fn spread_exactly_at_24ms_passes_the_boundary() {
+        // Boundary convention (spread STRICTLY over the threshold = FAIL): ==SPREAD_THRESHOLD_MS
+        // (24.0 since issue 1120) PASSES.
+        let v = spread_verdict(&[800.0, 824.0]).expect("2 measured cameras");
+        assert_eq!(v.spread_ms, 24.0);
         assert!(
             v.pass,
-            "exactly 16.0ms must PASS — only STRICTLY over 16.0 fails: {v:?}"
+            "exactly 24.0ms must PASS — only STRICTLY over 24.0 fails: {v:?}"
         );
     }
 
     #[test]
-    fn spread_just_over_16ms_fails() {
-        let v = spread_verdict(&[800.0, 816.01]).expect("2 measured cameras");
-        assert!((v.spread_ms - 16.01).abs() < 1e-9);
-        assert!(!v.pass, "16.01ms is strictly over the 16.0ms floor: {v:?}");
+    fn spread_just_over_24ms_fails() {
+        let v = spread_verdict(&[800.0, 824.01]).expect("2 measured cameras");
+        assert!((v.spread_ms - 24.01).abs() < 1e-9);
+        assert!(!v.pass, "24.01ms is strictly over the 24.0ms bound: {v:?}");
     }
 
     #[test]
-    fn spread_just_under_16ms_passes() {
-        let v = spread_verdict(&[800.0, 815.99]).expect("2 measured cameras");
-        assert!((v.spread_ms - 15.99).abs() < 1e-9);
-        assert!(v.pass, "15.99ms is under the 16.0ms floor: {v:?}");
+    fn spread_just_under_24ms_passes() {
+        let v = spread_verdict(&[800.0, 823.99]).expect("2 measured cameras");
+        assert!((v.spread_ms - 23.99).abs() < 1e-9);
+        assert!(v.pass, "23.99ms is under the 24.0ms bound: {v:?}");
     }
 
     #[test]
