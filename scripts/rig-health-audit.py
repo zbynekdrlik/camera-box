@@ -43,6 +43,12 @@ NTP_STEP_HEALTHY_CEIL = 72     # steps/h; healthy ceiling (baseline was ~30-36/h
 NTP_STEP_STORM_BOUND = 120     # steps/h; mirrors dantesync's OWN step-storm boundary (dantesync
                                # issue 91 / v1.8.45); the issue-1108 storm floor measured 129/h,
                                # strih peaked 147-180/h -> FAIL at or above (WARN in the 73-119 band)
+# The Linux-node counter: count dantesync `[NTP] Stepped` events over the last hour, on the box (one
+# bounded line of output regardless of storm size). ONE source of truth -- used verbatim in the
+# check_cam + check_imag ssh commands AND pinned by a test that runs THIS exact awk against synthetic
+# journals (the awk analogue of the CADENCE_LIB shell kernel), so there is no second Python copy of
+# the match logic to drift. `\[NTP\]` matches the literal bracket; END always prints (0 on no match).
+NTP_STEP_COUNT_AWK = r'/\[NTP\] Stepped/{c++} END{print "ntp_steps_1h=" c+0}'
 AUDIT_RE = re.compile(r"^(\d+):(\d+):(\d+)\.(\d+): genlock-fifo audit '([^']+)': received=(\d+)")
 BUF_RE = re.compile(r"total audio buffering is now (\d+) milliseconds")
 # #794/#1089: the shared PURE cadence kernel (measure + classify), reused by shelling out so the
@@ -209,12 +215,6 @@ def box_verdict(problems: list[str]) -> str:
     return "WARN" if not hard else "FAIL"
 
 
-def count_ntp_steps(journal_text: str) -> int:
-    """Count dantesync `[NTP] Stepped` events in a journal/log blob (one per stepped clock adjust).
-    The Linux-node signal behind the issue-1108 step-storm -- graded by grade_ntp_steprate()."""
-    return sum(1 for ln in (journal_text or "").splitlines() if "[NTP] Stepped" in ln)
-
-
 def parse_ntp_status(json_text: str | None) -> tuple[int | None, bool | None]:
     """Pull (ntp_steps_last_hour, ntp_step_storm) from a dantesync :8898 status JSON body (the
     Windows-node signal). Both fields are ADDITIVE (dantesync >= 1.8.45); a body that LACKS them
@@ -238,17 +238,26 @@ def parse_ntp_status(json_text: str | None) -> tuple[int | None, bool | None]:
 def grade_ntp_steprate(steps: int | None, storm: bool | None = None) -> tuple[str, str, list[str]]:
     """Grade a node's dantesync NTP step-rate for the issue-787 status page (issue-1108 observability).
     Returns (verdict, display, problems), verdict in OK|WARN|FAIL|UNKNOWN:
-      * an explicit storm flag (Windows :8898 >= 1.8.45) OR steps >= NTP_STEP_STORM_BOUND -> FAIL,
-        mirroring dantesync's own 120/h step-storm boundary (issue-1108 storm floor 129/h).
+      * steps >= NTP_STEP_STORM_BOUND -> FAIL, mirroring dantesync's own 120/h step-storm boundary
+        (issue-1108 storm floor 129/h); the problem cites the count that crossed the bound.
+      * an explicit storm flag (Windows :8898 >= 1.8.45) with a count UNDER the bound -> FAIL too, but
+        the problem names the dantesync FLAG as the authoritative trigger (never a misleading
+        `(>=120/h)` on a sub-120 count -- issue-1108 review).
       * NTP_STEP_HEALTHY_CEIL < steps < NTP_STEP_STORM_BOUND -> WARN (elevated, not yet a storm).
       * steps <= NTP_STEP_HEALTHY_CEIL -> OK (baseline ~30-36/h, healthy ceiling ~72/h).
       * steps is None (unreadable journal / absent additive field) -> UNKNOWN, surfaced BY NAME
         (`n/a`), never a false 0 or a false alarm.
-    `problems` uses the feeder's soft/hard convention -- a `warn:`-prefixed entry folds to WARN via
-    box_verdict, a bare entry to FAIL -- so a step-storm turns the status-page node red + pages."""
-    if storm is True or (steps is not None and steps >= NTP_STEP_STORM_BOUND):
-        shown = f"{steps}/h" if steps is not None else "storm"
-        return "FAIL", shown, [f"ntp-step-storm={shown}(>={NTP_STEP_STORM_BOUND}/h)"]
+    The returned VERDICT is the per-FACET classification -- distinct from box_verdict()'s per-NODE
+    aggregate (which folds ALL of a node's problems). The production wiring drives the node color off
+    `problems` via box_verdict, but the facet verdict is the tested contract of the grading itself and
+    the natural signal for a future dedicated step-rate column / dev1 alert-watchdog (mirroring how
+    cadence_verdict returns a verdict cadence_check consumes). `problems` uses the feeder's soft/hard
+    convention -- a `warn:`-prefixed entry folds to WARN, a bare entry to FAIL."""
+    if steps is not None and steps >= NTP_STEP_STORM_BOUND:
+        return "FAIL", f"{steps}/h", [f"ntp-step-storm={steps}/h(>={NTP_STEP_STORM_BOUND}/h)"]
+    if storm is True:
+        shown = f"{steps}/h" if steps is not None else "flag"
+        return "FAIL", shown, ["ntp-step-storm=dantesync-flag"]
     if steps is None:
         return "UNKNOWN", "n/a", []
     if steps > NTP_STEP_HEALTHY_CEIL:
@@ -274,8 +283,7 @@ def check_cam(name: str, ip: str) -> None:
                   "journalctl -u camera-box -n 120 --no-pager | grep -E 'Streaming:|capture chroma' | tail -4; "
                   "journalctl -u dantesync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
                   "awk '$2==\"/\"{print $4}' /proc/mounts | cut -d, -f1; "
-                  "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | "
-                  "awk '/\\[NTP\\] Stepped/{c++} END{print \"ntp_steps_1h=\" c+0}'; "
+                  "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
                   "cut -d' ' -f1 /proc/loadavg")
     if out is None:
         emit("FAIL", name, "unreachable over ssh")
@@ -328,8 +336,7 @@ def check_imag() -> None:
                     "grep -o isolcpus /proc/cmdline || echo cmdline-clean; "
                     "journalctl -u dantesync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
                     "cut -d' ' -f1 /proc/loadavg; "
-                    "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | "
-                    "awk '/\\[NTP\\] Stepped/{c++} END{print \"ntp_steps_1h=\" c+0}'; "
+                    "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
                     "tail -400 \"$(ls -t ~/.config/obs-studio/logs/*.txt | head -1)\" | grep 'genlock-fifo audit'",
               user="newlevel", timeout=25)
     if out is None:

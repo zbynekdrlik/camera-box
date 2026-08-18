@@ -7,7 +7,10 @@ master jumps every box's genlock timecode -> FIFO underruns -> visible skips). I
 OBSERVABILITY for the status page; it never touches the E2E gate or dantesync-gate.sh.
 
 These pin the PURE pieces (no ssh / no WS / no HTTP):
-  * count_ntp_steps()    -- count `[NTP] Stepped` lines in a journal blob (Linux nodes).
+  * NTP_STEP_COUNT_AWK    -- the REAL Linux-node counter (the awk program embedded verbatim in the
+                            check_cam/check_imag ssh commands); tested by running it against
+                            synthetic journals, so the PRODUCTION counter itself is covered -- no
+                            second Python copy to drift (the awk analogue of the cadence kernel).
   * parse_ntp_status()   -- pull (ntp_steps_last_hour, ntp_step_storm) from the dantesync
                             :8898 JSON (Windows nodes); ADDITIVE fields -> (None, None) when a
                             body lacks them (dantesync < 1.8.45) or is unparseable.
@@ -16,6 +19,8 @@ These pin the PURE pieces (no ssh / no WS / no HTTP):
   * box_verdict()        -- the shared three-tier fold (reused, already tested elsewhere too).
 """
 import importlib.util
+import re
+import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -33,7 +38,7 @@ def _load_module():
 _mod = _load_module()
 
 
-# --------------------------------------------------------------- count_ntp_steps
+# --------------------------------------------------------------- NTP_STEP_COUNT_AWK (the real counter)
 def _journal(n_steps, extra_lines=0):
     lines = []
     for i in range(n_steps):
@@ -43,22 +48,36 @@ def _journal(n_steps, extra_lines=0):
     return "\n".join(lines)
 
 
-def test_count_ntp_steps_counts_only_stepped_lines():
-    assert _mod.count_ntp_steps(_journal(28, extra_lines=40)) == 28
+def _count_via_real_awk(journal_text):
+    """Run the ACTUAL awk program the feeder ships in its ssh command against `journal_text`, and
+    parse the `ntp_steps_1h=<N>` line exactly as check_cam/check_imag do. This covers the REAL
+    production Linux counter, not a Python re-implementation of it."""
+    out = subprocess.run(["awk", _mod.NTP_STEP_COUNT_AWK], input=journal_text,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr        # END always prints -> awk must exit 0
+    m = re.search(r"ntp_steps_1h=(\d+)", out.stdout)
+    assert m, f"awk emitted no ntp_steps_1h= line: {out.stdout!r}"
+    return int(m.group(1))
 
 
-def test_count_ntp_steps_zero_on_no_steps():
-    assert _mod.count_ntp_steps(_journal(0, extra_lines=12)) == 0
+def test_real_awk_counts_only_stepped_lines():
+    assert _count_via_real_awk(_journal(28, extra_lines=40)) == 28
 
 
-def test_count_ntp_steps_empty_blob():
-    assert _mod.count_ntp_steps("") == 0
+def test_real_awk_zero_on_no_steps():
+    assert _count_via_real_awk(_journal(0, extra_lines=12)) == 0
 
 
-def test_count_ntp_steps_does_not_match_bare_stepped_word():
+def test_real_awk_empty_blob_prints_zero():
+    # END runs even on empty input -> `ntp_steps_1h=0`, so a readable-but-idle journal is a real 0,
+    # not an absent line (the off_us proxy is what turns an UNREADABLE journal into UNKNOWN).
+    assert _count_via_real_awk("") == 0
+
+
+def test_real_awk_does_not_match_bare_stepped_word():
     # a decoy line mentioning "Stepped" without the "[NTP] " prefix must NOT be counted.
     log = "Aug 18 09:00:00 CAM1 other[9]: Stepped over a config value\n" + _journal(3)
-    assert _mod.count_ntp_steps(log) == 3
+    assert _count_via_real_awk(log) == 3
 
 
 # --------------------------------------------------------------- parse_ntp_status
@@ -151,6 +170,24 @@ def test_grade_storm_flag_false_does_not_force_fail():
     v, _, probs = _mod.grade_ntp_steprate(30, storm=False)
     assert v == "OK"
     assert probs == []
+
+
+def test_grade_storm_flag_low_count_names_the_flag_not_a_false_boundary_crossing():
+    # issue-1108 review: a storm FLAG with a sub-120 count must NOT annotate the count as (>=120/h)
+    # (that read as self-contradictory on the page). Show the honest count, name the flag as trigger.
+    v, disp, probs = _mod.grade_ntp_steprate(5, storm=True)
+    assert v == "FAIL"
+    assert disp == "5/h"                          # the real observed count is still shown, honestly
+    assert len(probs) == 1
+    assert "(>=" not in probs[0]                  # no misleading "crossed the storm bound" claim
+    assert "flag" in probs[0]                     # the dantesync :8898 storm flag is named as trigger
+
+
+def test_grade_count_at_boundary_still_cites_the_count_not_the_flag():
+    # the count-triggered FAIL keeps its explicit (>=120/h) annotation (that IS a boundary crossing).
+    _, disp, probs = _mod.grade_ntp_steprate(120)
+    assert disp == "120/h"
+    assert "(>=120/h)" in probs[0] and "flag" not in probs[0]
 
 
 # --------------------------------------------------------------- integration fold
