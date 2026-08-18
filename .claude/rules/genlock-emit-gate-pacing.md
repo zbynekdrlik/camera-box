@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/dupe_decimation.rs"
+  - "src/genlock_pacing.rs"
   - "src/ndi.rs"
   - "src/emit_skip_log.rs"
 ---
@@ -12,15 +13,22 @@ wall-clock 60 fps grid before NDI-emitting to the strih genlock-FIFO. Four coope
 all pure `cfg(target_os="linux")` logic (NOT probe-gated → Tier-0 testable via `cargo test
 --no-run --lib` then running `target/debug/deps/camera_box-*` directly):
 
-- `ndi::genlock_emit_gate(now, next_boundary, interval)` → `(would_emit, next)` — the wall-clock
-  grid. Emits the first capture at/after each boundary; `#707` resync branch leaps forward only
-  when lag > `GENLOCK_MAX_CATCHUP_INTERVALS` (8) = a real clock STEP.
-- `ndi::genlock_emit_on_time(...)` (#1111) → is this an ON-TIME/surplus crossing vs a LATE
-  catch-up crossing? Shares `genlock_latched_boundary` with the gate so the two never disagree.
+The pacing GATE math lives in its own crate-root module `src/genlock_pacing.rs` (issue 1113 —
+extracted verbatim out of the then-2555-line `ndi.rs`), gated `#[cfg(target_os="linux")]` in
+lock-step with `ndi`. Gotcha when you move doc-commented code between modules like this: BARE-name
+intra-doc links (`[`next_boundary_100ns`]`) that resolved inside `ndi.rs` BREAK in the new module —
+re-qualify them to `[`crate::ndi::…`]`. `ndi.rs` still owns the NDI-timecode grid
+(`next_boundary_100ns` / `fps_from_frame_rate`) the gate complements but does not depend on.
+
+- `genlock_pacing::genlock_emit_gate(now, next_boundary, interval)` → `(would_emit, next)` — the
+  wall-clock grid. Emits the first capture at/after each boundary; `#707` resync branch leaps
+  forward only when lag > `GENLOCK_MAX_CATCHUP_INTERVALS` (8) = a real clock STEP.
+- `genlock_pacing::genlock_emit_on_time(...)` (#1111) → is this an ON-TIME/surplus crossing vs a
+  LATE catch-up crossing? Shares `genlock_latched_boundary` with the gate so the two never disagree.
 - `dupe_decimation::DecimationGate` (#889) — dupe-preferring victim selection: at an over-rate
   the surplus shed prefers a byte-identical grabber dupe over the unique tick.
-- `ndi::boundary_skip_count` (#707) + `emit_skip_log` (#752) — the `#707 SKIPPED boundaries`
-  diagnostic (the WARN is throttled to one aggregate per 5s report).
+- `genlock_pacing::boundary_skip_count` (#707) + `emit_skip_log` (#752) — the `#707 SKIPPED
+  boundaries` diagnostic (the WARN is throttled to one aggregate per 5s report).
 
 ## GOTCHA — a #889 dupe DEFERRAL must NEVER hold the boundary in the catch-up regime (#1111)
 
