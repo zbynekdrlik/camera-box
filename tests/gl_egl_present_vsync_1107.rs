@@ -222,3 +222,21 @@ fn projector_marks_only_the_fullscreen_nonmultiview_program_display() {
          obs_display_set_vsync(GetDisplay(), true), mirroring the #276 isMultiview→divisor mark."
     );
 }
+
+#[test]
+fn projector_rearms_vsync_on_the_runtime_fullscreen_windowed_toggles() {
+    // The DisplayCreated mark runs ONCE; the runtime toggles mutate fullscreen state after, so
+    // they must re-arm/clear vsync or a windowed→fullscreen program tears again and a
+    // fullscreen→windowed projector keeps a needless blocking present (#1107 review 🟡).
+    let src = squish(&vendor_file(OBS_PROJECTOR_CPP));
+    assert!(
+        src.contains("obs_display_set_vsync(GetDisplay(), type != ProjectorType::Multiview);"),
+        "{OBS_PROJECTOR_CPP}: #1107 — OpenFullScreenProjector() must re-arm vsync for a \
+         non-multiview (program) projector when it becomes fullscreen at runtime."
+    );
+    assert!(
+        src.contains("obs_display_set_vsync(GetDisplay(), false);"),
+        "{OBS_PROJECTOR_CPP}: #1107 — OpenWindowedProjector() must CLEAR vsync so a windowed \
+         projector does not keep a blocking vblank present acquired while fullscreen."
+    );
+}
