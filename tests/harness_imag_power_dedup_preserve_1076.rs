@@ -193,20 +193,32 @@ fn throttle_measured_clean_burst_still_resets_1076() {
     // A CLEAN burst (>= min samples, FLOOR present, no clamp) is MEASURED-healthy (state == clean),
     // NOT unknown — the GPU has headroom, so the dedup state must still reset. (Guards that the fix
     // does not over-preserve a genuinely-resolved clamp.)
+    //
+    // #1116 REFINEMENT: a resolved clamp now clears only after N CONSECUTIVE measured-healthy passes
+    // (clear-hysteresis), not on a SINGLE one — the chronically-flapping clamp otherwise re-paged on
+    // every re-onset. This test's INTENT (a genuinely-resolved clamp DOES reset, no over-preserve) is
+    // preserved by seeding the healthy streak at the (default 12) window edge so THIS 12th consecutive
+    // clean pass genuinely clears. The single-clean-pass PRESERVE behavior is pinned separately by
+    // throttle_single_clean_pass_preserves_dedup_signature_not_flap_reset_1116.
     let s = drive(
-        "throttle_sig=imag-throttle:under-floor\nthrottle_passes=4\n",
+        "throttle_sig=imag-throttle:under-floor\nthrottle_passes=4\nthrottle_clear_passes=11\n",
         &format!("BURST={}", shell_quote(CLEAN_BURST)),
         "alert_from_throttle",
     );
     assert_eq!(
         field(&s, "throttle_sig"),
         "",
-        "a clean measured burst (GPU headroom) resolves the clamp -> reset the sig: {s:?}"
+        "a clean burst completing the hysteresis window (12 consecutive) resolves the clamp -> reset the sig: {s:?}"
     );
     assert_eq!(
         field(&s, "throttle_passes"),
         "0",
-        "clean measured burst -> reset passes: {s:?}"
+        "clamp resolved after the full window -> reset passes: {s:?}"
+    );
+    assert_eq!(
+        field(&s, "throttle_clear_passes"),
+        "0",
+        "clearing the resolved clamp also resets the consecutive-healthy streak: {s:?}"
     );
 }
 
