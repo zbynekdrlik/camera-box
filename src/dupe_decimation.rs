@@ -456,4 +456,112 @@ mod tests {
              missing unique ids: {missing:?}"
         );
     }
+
+    // ── (#1111) over-60 grabber: emit-gate must stay boundary-locked, no SKIPPED-boundary jumps ─
+
+    /// (#1111) Root-cause reproduction. A GENKI ShadowCast 2 grabber delivers ~62 fps against a
+    /// 60 Hz source with a byte-identical internal-buffer dupe ~every 15 captures (validated live,
+    /// CAM1 10.77.9.61). Before the fix, every #889 dupe DEFERRAL held the wall-clock boundary
+    /// while `now` advanced, ratcheting the gate's lag +1 interval per deferral until it crossed
+    /// `crate::ndi::GENLOCK_MAX_CATCHUP_INTERVALS` (8) and `ndi::genlock_emit_gate`'s resync branch
+    /// leapt ~9 boundaries at once — the `#707 SKIPPED boundaries ... 9 boundary interval(s)` WARN
+    /// seen live every ~12 s, dipping the emitted rate to ~58 fps and driving the strih
+    /// genlock-FIFO to relock (visible judder). This drives the EXACT production wiring
+    /// (`DecimationGate::poll` + `ndi::boundary_skip_count`, as `src/main.rs` wires it) and asserts
+    /// the fix: the boundary grid stays locked to wall-clock (zero skips), the emitted rate holds
+    /// ~60.00, and not one unique tick is dropped. RED before the fix (~18 skipped intervals over
+    /// 8 s), GREEN after.
+    #[test]
+    fn over_rate_dupe_input_stays_boundary_locked_at_60_without_skips_1111() {
+        // ~8 s of the validated ShadowCast pattern: 62 fps captured, an isolated dupe every 15th.
+        let seconds = 8usize;
+        let captures = synthetic_889_capture_sequence(62.0, 62 * seconds, 15);
+        let emit_interval_ns = 1_000_000_000u64 / 60;
+
+        let mut gate = DecimationGate::new();
+        let mut emitted_ids: Vec<u64> = Vec::new();
+        let mut total_skips: u64 = 0;
+        for (now_ns, content_id, _is_dupe) in &captures {
+            // EXACT src/main.rs wiring: snapshot the boundary, poll, then measure the #707 skip.
+            let prev_boundary_ns = gate.next_boundary_ns();
+            let emit = gate.poll(*now_ns, emit_interval_ns, *content_id);
+            let next_boundary_ns = gate.next_boundary_ns();
+            total_skips +=
+                crate::ndi::boundary_skip_count(prev_boundary_ns, next_boundary_ns, emit_interval_ns);
+            if emit {
+                emitted_ids.push(*content_id);
+            }
+        }
+
+        // (1) The fix: a 62 fps over-rate + frequent dupes must NOT trip the #707 resync — the
+        // boundary grid never leaps. Before the fix this is ~18 (two ~9-interval leaps over 8 s).
+        assert_eq!(
+            total_skips, 0,
+            "over-60 capture must stay boundary-locked (zero #707 SKIPPED boundaries); got \
+             {total_skips} skipped interval(s) — the #889 dupe-deferral lag ratchet is back"
+        );
+
+        // (2) The emitted rate holds ~60.00 (the receiver's stable-60 requirement). Before the fix
+        // the periodic skips drag it to ~57.4 fps.
+        let emit_rate = emitted_ids.len() as f64 / seconds as f64;
+        assert!(
+            (59.5..=60.2).contains(&emit_rate),
+            "emitted rate must hold ~60.00 fps from an over-60 source; got {emit_rate:.2} fps \
+             ({} emitted over {seconds}s)",
+            emitted_ids.len()
+        );
+
+        // (3) Not one unique tick is dropped (a dropped unique = a genlock-FIFO gap). The ~2
+        // mathematically-unavoidable repeats/s (58 unique fps -> 60 emitted) land on the grabber's
+        // OWN late dupes, never on a genuine unique frame. Skip the cold-start warm-up (the first
+        // boundary latches one interval after the first capture, so the opening capture or two are
+        // blind-decimated by simulation-start phase, unrelated to this fix — same WARMUP note as
+        // the #889 test above).
+        const WARMUP_CAPTURES: usize = 4;
+        let all_unique_ids: std::collections::BTreeSet<u64> = captures
+            .iter()
+            .skip(WARMUP_CAPTURES)
+            .filter(|(_, _, is_dupe)| !is_dupe)
+            .map(|(_, id, _)| *id)
+            .collect();
+        let emitted_set: std::collections::BTreeSet<u64> = emitted_ids.iter().copied().collect();
+        let missing: Vec<u64> = all_unique_ids.difference(&emitted_set).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "no unique tick may be dropped by the over-60 gate; missing ids: {missing:?}"
+        );
+    }
+
+    /// (#1111) Regression guard for the acceptance clause "behavior for an exact-60.0 input
+    /// (cam3/cam4 ezcap/NZXT) byte-identical". A perfectly-60.0, dupe-free capture stream never
+    /// engages the dupe-preference path at all, so the `on_time` gate added for #1111 is inert:
+    /// every capture but the cold-start one emits, zero boundaries are skipped, and zero dupe
+    /// victims are shed — identical with or without the fix.
+    #[test]
+    fn exact_60_input_is_boundary_locked_and_never_defers_1111() {
+        // dupe_period 10_000 (> the 480 captures) => a dupe-free exact-60.0 stream.
+        let captures = synthetic_889_capture_sequence(60.0, 480, 10_000);
+        let emit_interval_ns = 1_000_000_000u64 / 60;
+
+        let mut gate = DecimationGate::new();
+        let mut emits = 0usize;
+        let mut total_skips = 0u64;
+        for (now_ns, content_id, is_dupe) in &captures {
+            assert!(!is_dupe, "exact-60 fixture must be dupe-free");
+            let prev = gate.next_boundary_ns();
+            if gate.poll(*now_ns, emit_interval_ns, *content_id) {
+                emits += 1;
+            }
+            total_skips +=
+                crate::ndi::boundary_skip_count(prev, gate.next_boundary_ns(), emit_interval_ns);
+        }
+        let (dupe_shed, _blind_shed) = gate.take_shed_counts();
+
+        assert_eq!(total_skips, 0, "exact-60 input never skips a boundary");
+        assert_eq!(dupe_shed, 0, "exact-60 dupe-free input never sheds a dupe victim");
+        assert_eq!(
+            emits, 479,
+            "exact-60 emits every capture but the cold-start one (480 captures -> 479 emitted)"
+        );
+    }
 }
