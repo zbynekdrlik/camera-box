@@ -281,8 +281,11 @@ def test_reattach_skips_the_set_when_the_bound_source_is_absent_from_a_non_empty
 
 
 def test_reattach_sets_once_the_finder_list_is_non_empty(monkeypatch):
-    # The happy path with a populated finder list still re-applies the input's own current name —
-    # the #795 guard must only skip the EMPTY case, never the normal reconnect nudge.
+    # The happy path with a populated finder list nudges the input's own current name — the #795
+    # guard must only skip the EMPTY case, never the normal reconnect nudge.
+    # issue 1114: the nudge is now a CLEAR-then-SET (was a single same-name re-apply, which is a
+    # no-op for the receiver — see test_reattach_clears_name_then_resets_to_force_a_fresh_receiver_1114
+    # and reattach()'s docstring). The finder-list guard still applies to the SET-back only.
     fake = _FakeObsRpcWithFinder(
         {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
         finder_items=[{"itemValue": "CAM3 (usb)"}, {"itemValue": "CAM1 (usb)"}],
@@ -298,8 +301,12 @@ def test_reattach_sets_once_the_finder_list_is_non_empty(monkeypatch):
     assert set_calls == [
         (
             "SetInputSettings",
+            {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": ""}},
+        ),
+        (
+            "SetInputSettings",
             {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
-        )
+        ),
     ]
 
 
