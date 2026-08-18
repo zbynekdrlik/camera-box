@@ -603,8 +603,10 @@ main() {
     echo "# imag: staging the FULL bundle $workdir/bundle -> ${imag_user}@${imag_ip}:$imag_stage and running the on-imag deploy (sudo) over ssh..."
     sshpass -p "$imag_pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=12 "${imag_user}@${imag_ip}" "rm -rf '$imag_stage' && mkdir -p '$imag_stage'" \
       || { echo "ERROR: imag stage mkdir failed" >&2; exit 4; }
-    sshpass -p "$imag_pw" scp -O -r -o StrictHostKeyChecking=no "$workdir/bundle/." "${imag_user}@${imag_ip}:$imag_stage/" \
-      || { echo "ERROR: imag scp failed" >&2; exit 4; }
+    # rsync, not scp: newer OpenSSH scp -O rejects a "dir/." source ("unexpected filename: .",
+    # hit on the first live run 2026-08-18); rsync -a copies the bundle CONTENTS incl. dotfiles.
+    sshpass -p "$imag_pw" rsync -a -e "ssh -o StrictHostKeyChecking=no" "$workdir/bundle/" "${imag_user}@${imag_ip}:$imag_stage/" \
+      || { echo "ERROR: imag bundle rsync failed" >&2; exit 4; }
     sshpass -p "$imag_pw" ssh -o StrictHostKeyChecking=no "${imag_user}@${imag_ip}" "printf '%s\\n' '$imag_pw' | sudo -S -p '' bash '$imag_stage/deploy.sh'" \
       || { echo "ERROR: imag deploy failed (see the on-imag output above)" >&2; exit 4; }
     echo "# imag deploy done. Verify from a fresh ssh: ps -o pid,lstart -C obs (started after the swap) + 'render tick ENABLED' in the newest OBS log."
