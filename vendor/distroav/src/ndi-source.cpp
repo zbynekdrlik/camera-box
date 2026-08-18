@@ -745,6 +745,14 @@ void *ndi_source_thread(void *data)
 	 * to 0 on the next successful create so a one-off blip does not leave the backoff escalated. */
 	unsigned recv_create_fail_count = 0;
 
+	/* camera-box #1097: consecutive framesync_create failures, driving the SAME #1080 exponential
+	 * backoff for the (currently dormant -- framesync forced OFF) framesync-create retry-in-place.
+	 * Its OWN counter (not the shared recv_create_fail_count) so the live #1080 recv_create retry
+	 * path stays byte-for-byte unchanged, and so a pure-framesync-failure loop escalates correctly
+	 * (a successful recv_create would otherwise reset a shared counter every iteration). Reset to 0
+	 * on framesync-create success, mirroring recv_create_fail_count. */
+	unsigned framesync_create_fail_count = 0;
+
 	/* camera-box #1096: os_gettime_ns() at which no_connections first became 0 (0 = currently
 	 * connected). A GRACEFUL cambox restart drops the strih receiver to no_connections==0
 	 * (clean FIN), where the #767 watchdog (no_connections>0 only) never fires and a by-URL
@@ -1031,14 +1039,43 @@ void *ndi_source_thread(void *data)
 					obs_source_name, //
 					ndi_frame_sync);
 				if (!ndi_frame_sync) {
+					//
+					// camera-box #1097: NEVER break here -- same permanent, reattach-proof death as
+					// the #1080 recv_create_v3 break. A break exits the receiver loop but leaves
+					// s->running TRUE, so ndi_source_update's `if (s->running)` never restarts the
+					// (dead) thread; since #767 the stale watchdog reaches this reset block
+					// unattended, so a transient framesync_create failure here is an UNATTENDED
+					// permanent death. Retry in place instead: blank the source, back off (its own
+					// counter drives the SHARED #1080 exponential backoff), re-arm reset_ndi_receiver,
+					// and continue. A valid ndi_receiver already exists, so the NEXT iteration's reset
+					// block (recv_destroy frees the valid receiver; framesync_destroy is skipped by its null-guard) cleans up before recreating.
+					// Dormant on this appliance (GENLOCK_FORCED_SETTINGS forces PROP_FRAMESYNC false),
+					// kept correct so a future framesync-on config can never wedge here.
+					//
+					framesync_create_fail_count++;
 					obs_log(LOG_ERROR,
-						"ERR-408 - Error creating the NDI Frame Sync for '%s' for '%s'",
-						recv_desc.source_to_connect_to.p_ndi_name, obs_source_name);
-					obs_log(LOG_DEBUG,
-						"'%s' ndi_source_thread: Cannot create ndi_frame_sync for NDI source '%s'",
-						obs_source_name, recv_desc.source_to_connect_to.p_ndi_name);
-					break;
+						"ERR-408 - Error creating the NDI Frame Sync for '%s' for '%s' (attempt %u); keeping the receiver thread alive and retrying with backoff",
+						recv_desc.source_to_connect_to.p_ndi_name, obs_source_name,
+						framesync_create_fail_count);
+					process_empty_frame(s);
+					// Give the freshly (re)connected receiver a full #767 stale window once it comes
+					// back, instead of judging it against this failed epoch.
+					was_disconnected = true;
+					// Back off before the retry, chunked in 100 ms slices so OBS shutdown
+					// (s->running=false) is never blocked for the whole backoff.
+					uint64_t fs_retry_backoff_ns = ndi_recv_create_retry_backoff_ns(framesync_create_fail_count);
+					uint64_t fs_retry_waited_ns = 0;
+					while (s->running && fs_retry_waited_ns < fs_retry_backoff_ns) {
+						std::this_thread::sleep_for(std::chrono::milliseconds(100));
+						fs_retry_waited_ns += 100ULL * 1000ULL * 1000ULL;
+					}
+					pthread_mutex_lock(&s->config_mutex);
+					s->config.reset_ndi_receiver = true;
+					pthread_mutex_unlock(&s->config_mutex);
+					continue;
 				}
+				// camera-box #1097: a successful framesync create clears its retry backoff.
+				framesync_create_fail_count = 0;
 			}
 		}
 		//
