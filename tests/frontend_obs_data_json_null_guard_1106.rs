@@ -6,8 +6,9 @@
 //! as a temporary (`std::string(obs_data_get_json(w))`), OR implicitly when passed to a
 //! `const std::string &` parameter (`undo_stack::add_action(...)`, `utility/undo_stack.hpp`) — is
 //! undefined behaviour (the `c0000005` in `ucrtbase!strcmp`/string-copy that #773 fixed for
-//! `OBSBasicProperties`). #773 guarded ONE file; this ticket sweeps the 46 remaining construction
-//! sites across 11 files and routes each through a single NULL-safe helper.
+//! `OBSBasicProperties`). #773 guarded ONE file; this ticket sweeps the 47 remaining construction
+//! sites across 11 files (one `add_action(...)` line in `OBSBasic_Clipboard.cpp` builds two) and
+//! routes each through a single NULL-safe helper.
 //!
 //! Fix = a header-only `static inline std::string OBSDataGetJsonSafe(obs_data_t *, const char *)`
 //! (`vendor/obs-studio/frontend/utility/obs-data-json-safe.hpp`) that coalesces a NULL result to
@@ -41,17 +42,61 @@ const HELPER: &str = "vendor/obs-studio/frontend/utility/obs-data-json-safe.hpp"
 /// truth on the pre-fix tree; the fix must make each file's `OBSDataGetJsonSafe(` count equal the
 /// first and its remaining raw `obs_data_get_json(` count equal the second.
 const CONSUMERS: &[(&str, usize, usize)] = &[
-    ("vendor/obs-studio/frontend/widgets/OBSBasic_Dropfiles.cpp", 1, 0),
-    ("vendor/obs-studio/frontend/widgets/OBSBasic_Transitions.cpp", 4, 0),
-    ("vendor/obs-studio/frontend/widgets/OBSBasic_Preview.cpp", 2, 0),
-    ("vendor/obs-studio/frontend/widgets/OBSBasic_Clipboard.cpp", 3, 0),
-    ("vendor/obs-studio/frontend/widgets/OBSBasic_SceneItems.cpp", 20, 0),
-    ("vendor/obs-studio/frontend/widgets/OBSBasic_Scenes.cpp", 3, 1),
-    ("vendor/obs-studio/frontend/widgets/OBSBasicPreview.cpp", 2, 0),
-    ("vendor/obs-studio/frontend/dialogs/OBSBasicFilters.cpp", 6, 2),
-    ("vendor/obs-studio/frontend/components/SourceToolbar.cpp", 2, 0),
-    ("vendor/obs-studio/frontend/dialogs/OBSBasicSourceSelect.cpp", 1, 0),
-    ("vendor/obs-studio/frontend/dialogs/OBSBasicTransform.cpp", 2, 0),
+    (
+        "vendor/obs-studio/frontend/widgets/OBSBasic_Dropfiles.cpp",
+        1,
+        0,
+    ),
+    (
+        "vendor/obs-studio/frontend/widgets/OBSBasic_Transitions.cpp",
+        4,
+        0,
+    ),
+    (
+        "vendor/obs-studio/frontend/widgets/OBSBasic_Preview.cpp",
+        2,
+        0,
+    ),
+    (
+        "vendor/obs-studio/frontend/widgets/OBSBasic_Clipboard.cpp",
+        4,
+        0,
+    ),
+    (
+        "vendor/obs-studio/frontend/widgets/OBSBasic_SceneItems.cpp",
+        20,
+        0,
+    ),
+    (
+        "vendor/obs-studio/frontend/widgets/OBSBasic_Scenes.cpp",
+        3,
+        1,
+    ),
+    (
+        "vendor/obs-studio/frontend/widgets/OBSBasicPreview.cpp",
+        2,
+        0,
+    ),
+    (
+        "vendor/obs-studio/frontend/dialogs/OBSBasicFilters.cpp",
+        6,
+        2,
+    ),
+    (
+        "vendor/obs-studio/frontend/components/SourceToolbar.cpp",
+        2,
+        0,
+    ),
+    (
+        "vendor/obs-studio/frontend/dialogs/OBSBasicSourceSelect.cpp",
+        1,
+        0,
+    ),
+    (
+        "vendor/obs-studio/frontend/dialogs/OBSBasicTransform.cpp",
+        2,
+        0,
+    ),
 ];
 
 fn repo(rel: &str) -> PathBuf {
@@ -149,9 +194,9 @@ fn every_consumer_routes_crash_class_through_the_helper_1106() {
 fn helper_lift_compiles_and_computes_the_null_safe_truth_table_1106() {
     let raw = read(HELPER);
     let sig = "static inline std::string OBSDataGetJsonSafe(obs_data_t *data, const char *context)";
-    let start = raw
-        .find(sig)
-        .unwrap_or_else(|| panic!("#1106: {HELPER} no longer defines OBSDataGetJsonSafe — nothing to compile."));
+    let start = raw.find(sig).unwrap_or_else(|| {
+        panic!("#1106: {HELPER} no longer defines OBSDataGetJsonSafe — nothing to compile.")
+    });
     let end = raw[start..]
         .find("\n}\n")
         .map(|i| start + i + 3)
@@ -204,7 +249,9 @@ fn helper_lift_compiles_and_computes_the_null_safe_truth_table_1106() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let run = Command::new(&bin).output().expect("run the compiled harness");
+    let run = Command::new(&bin)
+        .output()
+        .expect("run the compiled harness");
     assert!(
         run.status.success(),
         "#1106: the harness crashed at runtime (a NULL was dereferenced — the helper is not NULL-safe)."

@@ -16,6 +16,7 @@
 ******************************************************************************/
 
 #include "OBSBasic.hpp"
+#include <utility/obs-data-json-safe.hpp>
 
 #include <algorithm>
 
@@ -923,8 +924,8 @@ void OBSBasic::PasteShowHideTransition(obs_sceneitem_t *item, bool show, obs_sou
 
 	OBSDataAutoRelease transitionData = obs_sceneitem_transition_save(item, show);
 
-	std::string undo_data(obs_data_get_json(oldTransitionData));
-	std::string redo_data(obs_data_get_json(transitionData));
+	std::string undo_data = OBSDataGetJsonSafe(oldTransitionData, "OBSBasic transitions undo");
+	std::string redo_data = OBSDataGetJsonSafe(transitionData, "OBSBasic transitions redo");
 	if (undo_data.compare(redo_data) == 0)
 		return;
 
@@ -996,8 +997,8 @@ QMenu *OBSBasic::CreateVisibilityTransitionMenu(bool visible)
 				CreatePropertiesWindow(tr);
 		}
 		OBSDataAutoRelease newTransitionData = obs_sceneitem_transition_save(sceneItem, visible);
-		std::string undo_data(obs_data_get_json(oldTransitionData));
-		std::string redo_data(obs_data_get_json(newTransitionData));
+		std::string undo_data = OBSDataGetJsonSafe(oldTransitionData, "OBSBasic transitions undo");
+		std::string redo_data = OBSDataGetJsonSafe(newTransitionData, "OBSBasic transitions redo");
 		if (undo_data.compare(redo_data) != 0)
 			main->undo_s.add_action(QTStr(visible ? "Undo.ShowTransition" : "Undo.HideTransition")
 							.arg(obs_source_get_name(obs_sceneitem_get_source(sceneItem))),

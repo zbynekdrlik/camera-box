@@ -16,6 +16,7 @@
 ******************************************************************************/
 
 #include "OBSBasicSourceSelect.hpp"
+#include <utility/obs-data-json-safe.hpp>
 
 #include <qt-wrappers.hpp>
 
@@ -354,7 +355,7 @@ void OBSBasicSourceSelect::on_buttonBox_accepted()
 			obs_sceneitem_set_id(item, (int64_t)obs_data_get_int(dat, "item_id"));
 		};
 		undo_s.add_action(QTStr("Undo.Add").arg(ui->sourceName->text()), undo, redo,
-				  std::string(obs_source_get_name(newSource)), std::string(obs_data_get_json(wrapper)));
+				  std::string(obs_source_get_name(newSource)), OBSDataGetJsonSafe(wrapper, "OBSBasicSourceSelect add"));
 	}
 
 	done(DialogCode::Accepted);

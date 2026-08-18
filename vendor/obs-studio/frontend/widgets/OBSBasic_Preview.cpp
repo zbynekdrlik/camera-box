@@ -18,6 +18,7 @@
 ******************************************************************************/
 
 #include "OBSBasic.hpp"
+#include <utility/obs-data-json-safe.hpp>
 
 #include <utility/display-helpers.hpp>
 #include <widgets/OBSProjector.hpp>
@@ -347,12 +348,12 @@ void OBSBasic::Nudge(int dist, MoveDir dir)
 	if (!recent_nudge) {
 		recent_nudge = true;
 		OBSDataAutoRelease wrapper = obs_scene_save_transform_states(GetCurrentScene(), true);
-		std::string undo_data(obs_data_get_json(wrapper));
+		std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic preview undo");
 
 		nudge_timer = new QTimer;
 		QObject::connect(nudge_timer, &QTimer::timeout, this, [this, &recent_nudge = recent_nudge, undo_data]() {
 			OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), true);
-			std::string redo_data(obs_data_get_json(rwrapper));
+			std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic preview redo");
 
 			undo_s.add_action(QTStr("Undo.Transform").arg(obs_source_get_name(GetCurrentSceneSource())),
 					  undo_redo, undo_redo, undo_data, redo_data);

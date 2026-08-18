@@ -1,4 +1,5 @@
 #include "SourceToolbar.hpp"
+#include <utility/obs-data-json-safe.hpp>
 
 #include <widgets/OBSBasic.hpp>
 
@@ -49,8 +50,8 @@ void SourceToolbar::SetUndoProperties(obs_source_t *source, bool repeatable)
 	obs_data_apply(new_settings, curr_settings);
 	obs_data_set_string(new_settings, "undo_suuid", obs_source_get_uuid(source));
 
-	std::string undo_data(obs_data_get_json(oldData));
-	std::string redo_data(obs_data_get_json(new_settings));
+	std::string undo_data = OBSDataGetJsonSafe(oldData, "SourceToolbar undo");
+	std::string redo_data = OBSDataGetJsonSafe(new_settings, "SourceToolbar redo");
 
 	if (undo_data.compare(redo_data) != 0)
 		main->undo_s.add_action(QTStr("Undo.Properties").arg(obs_source_get_name(source)), undo_redo, undo_redo,

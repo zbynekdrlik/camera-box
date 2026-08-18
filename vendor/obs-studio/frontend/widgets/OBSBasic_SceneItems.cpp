@@ -18,6 +18,7 @@
 ******************************************************************************/
 
 #include "OBSBasic.hpp"
+#include <utility/obs-data-json-safe.hpp>
 #include "ColorSelect.hpp"
 #include "OBSProjector.hpp"
 
@@ -1154,8 +1155,8 @@ void OBSBasic::on_actionRotate90CW_triggered()
 	obs_scene_enum_items(GetCurrentScene(), RotateSelectedSources, &f90CW);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.Rotate").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);
@@ -1168,8 +1169,8 @@ void OBSBasic::on_actionRotate90CCW_triggered()
 	obs_scene_enum_items(GetCurrentScene(), RotateSelectedSources, &f90CCW);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.Rotate").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);
@@ -1182,8 +1183,8 @@ void OBSBasic::on_actionRotate180_triggered()
 	obs_scene_enum_items(GetCurrentScene(), RotateSelectedSources, &f180);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.Rotate").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);
@@ -1222,8 +1223,8 @@ void OBSBasic::on_actionFlipHorizontal_triggered()
 	obs_scene_enum_items(GetCurrentScene(), MultiplySelectedItemScale, &scale);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.HFlip").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);
@@ -1237,8 +1238,8 @@ void OBSBasic::on_actionFlipVertical_triggered()
 	obs_scene_enum_items(GetCurrentScene(), MultiplySelectedItemScale, &scale);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.VFlip").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);
@@ -1281,8 +1282,8 @@ void OBSBasic::on_actionFitToScreen_triggered()
 	obs_scene_enum_items(GetCurrentScene(), CenterAlignSelectedItems, &boundsType);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.FitToScreen").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);
@@ -1295,8 +1296,8 @@ void OBSBasic::on_actionStretchToScreen_triggered()
 	obs_scene_enum_items(GetCurrentScene(), CenterAlignSelectedItems, &boundsType);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(QTStr("Undo.Transform.StretchToScreen")
 				  .arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 			  undo_redo, undo_redo, undo_data, redo_data);
@@ -1392,8 +1393,8 @@ void OBSBasic::on_actionCenterToScreen_triggered()
 	CenterSelectedSceneItems(centerType);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.Center").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);
@@ -1406,8 +1407,8 @@ void OBSBasic::on_actionVerticalCenter_triggered()
 	CenterSelectedSceneItems(centerType);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.VCenter").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);
@@ -1420,8 +1421,8 @@ void OBSBasic::on_actionHorizontalCenter_triggered()
 	CenterSelectedSceneItems(centerType);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene items undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene items redo");
 	undo_s.add_action(
 		QTStr("Undo.Transform.HCenter").arg(obs_source_get_name(obs_scene_get_source(GetCurrentScene()))),
 		undo_redo, undo_redo, undo_data, redo_data);

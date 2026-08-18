@@ -1,4 +1,5 @@
 #include "OBSBasicTransform.hpp"
+#include <utility/obs-data-json-safe.hpp>
 
 #include <widgets/OBSBasic.hpp>
 
@@ -111,7 +112,7 @@ OBSBasicTransform::OBSBasicTransform(OBSSceneItem item, OBSBasic *parent)
 	setWindowTitle(QTStr("Basic.TransformWindow.Title").arg(name.c_str()));
 
 	OBSDataAutoRelease wrapper = obs_scene_save_transform_states(main->GetCurrentScene(), false);
-	undo_data = std::string(obs_data_get_json(wrapper));
+	undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasicTransform undo");
 
 	adjustSize();
 	setMinimumSize(size());
@@ -129,7 +130,7 @@ OBSBasicTransform::~OBSBasicTransform()
 		obs_scene_load_transform_states(data.c_str());
 	};
 
-	std::string redo_data(obs_data_get_json(wrapper));
+	std::string redo_data = OBSDataGetJsonSafe(wrapper, "OBSBasicTransform redo");
 	if (undo_data.compare(redo_data) != 0)
 		main->undo_s.add_action(
 			QTStr("Undo.Transform").arg(obs_source_get_name(obs_scene_get_source(main->GetCurrentScene()))),
