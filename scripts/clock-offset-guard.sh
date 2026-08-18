@@ -1240,7 +1240,7 @@ ntp_deadband_us_from_pipe_json() {
 # dantesync-gate.sh's grade_http_node for the GATE_NTP_MASTER_NAME/"median-only" node; a client
 # row's own bound is never touched regardless of what its payload happens to contain.
 ntp_master_effective_bound_us() {
-  local status="$1" bound="$2" margin="$3" deadband floor
+  local status="$1" bound="$2" margin="$3" step_cap="${4:-0}" deadband floor step_cap_floor
   if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
     printf '%s' "$bound"
     return 0
@@ -1268,11 +1268,64 @@ ntp_master_effective_bound_us() {
   # handle a sign) -- a leading zero always means decimal to a human reading a CLI flag/JSON
   # number, never octal.
   floor=$((10#$deadband + 10#$margin))
+  # #1119: dantesync v1.8.46 reports ntp_deadband_us as the no-step THRESHOLD (live: 1000us), NOT
+  # the <=2500us bounded PER-STEP cap the master's own UTC offset actually sawtooths toward under a
+  # slow grandmaster (root-caused 2026-08-18). deadband(1000)+margin(1000)=2000 gives NO widening,
+  # so a healthy sawtooth median (live failed run: 2699us) false-DRIFTs the bare 2000us bound. When
+  # STEP_CAP_US is a valid positive int, the floor ALSO includes step_cap + margin (2500+1000=3500),
+  # grading the master's median against the step-cap ceiling instead of the too-small deadband
+  # floor. Gated on the numeric deadband already validated above (the dantesync-#84+ bounded-step
+  # regime marker): a pre-#84 master (no field) returned before here and keeps the bare bound,
+  # preserving #1021's backward-compat tests -- and the step-cap term only ever bites when the
+  # reported deadband is SMALLER than the step-cap (exactly the v1.8.46 regime). "0"/absent/
+  # non-numeric STEP_CAP_US (every pre-#1119 3-arg caller) skips the term entirely, so the result
+  # stays byte-for-byte the pre-#1119 deadband-only floor. Same #595 validate-before-arithmetic
+  # + `10#` octal-safety discipline as the deadband/margin above.
+  if printf '%s' "$step_cap" | grep -qE '^[0-9]+$' && [ "$step_cap" -gt 0 ]; then
+    step_cap_floor=$((10#$step_cap + 10#$margin))
+    [ "$step_cap_floor" -gt "$floor" ] && floor="$step_cap_floor"
+  fi
   if [ "$floor" -gt "$bound" ]; then
     printf '%s' "$floor"
   else
     printf '%s' "$bound"
   fi
+}
+
+# ntp_steps_last_hour_from_pipe_json TEXT -> the RAW text of the "ntp_steps_last_hour" JSON value
+# (#1119): a plain non-negative integer string, the literal "null" (a client node, which never
+# acts as NTP master), or "" if the field is absent (a pre-storm-field dantesync payload). Mirrors
+# ntp_deadband_us_from_pipe_json's raw-accessor shape -- used ONLY for the operator-facing storm
+# line, never for a numeric decision, so it stays unparsed.
+ntp_steps_last_hour_from_pipe_json() {
+  printf '%s\n' "$1" \
+    | grep -oE '"ntp_steps_last_hour"[[:space:]]*:[[:space:]]*(null|-?[0-9]+)' \
+    | sed -n 's/.*:[[:space:]]*\(null\|-\{0,1\}[0-9][0-9]*\).*/\1/p' \
+    | tail -1 || true
+}
+
+# ntp_master_step_storm_verdict STATUS_JSON -> "storm" | "ok" | "unknown" (#1119). The NTP master's
+# own UTC offset is a by-design bounded-step sawtooth under a slow grandmaster (graded via the
+# step-cap-widened median above), so the raw median alone can no longer distinguish a HEALTHY
+# sawtooth from a THRASHING master whose median happens to land in-band. dantesync's own
+# "ntp_step_storm" boolean -- true once it crosses its 120-steps/hour alarm -- IS that honest
+# pathology signal, single-sourced from the daemon rather than re-derived gate-side:
+#   * "true"           -> "storm" (a hard master failure regardless of median; the caller fails it)
+#   * "false"          -> "ok"
+#   * null / absent    -> "unknown" (a pre-storm-field payload, or a client node that never carries
+#                         the field) -> NEVER a fail; report-first, exactly like #834's GM UNKNOWN.
+# A malformed value that is neither true nor false is also "unknown" (test-strictness: never grade a
+# signal we could not read as an affirmative storm).
+ntp_master_step_storm_verdict() {
+  local storm
+  storm="$(printf '%s' "$1" \
+    | grep -oE '"ntp_step_storm"[[:space:]]*:[[:space:]]*(true|false|null)' \
+    | sed -n 's/.*:[[:space:]]*\(true\|false\|null\).*/\1/p' | tail -1 || true)"
+  case "$storm" in
+    true) printf 'storm' ;;
+    false) printf 'ok' ;;
+    *) printf 'unknown' ;;
+  esac
 }
 
 # --- CLIENT-row deadband step-chase widening (#1022) ------------------------------------------

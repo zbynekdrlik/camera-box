@@ -3721,3 +3721,348 @@ fn gate_passes_a_node_on_the_rig_grandmaster_under_enforce_834() {
     assert!(stdout.contains("GM OK"), "stdout={stdout}");
     assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
 }
+
+// --- #1119: master-scope the median bound (step-cap ceiling) + step-storm guard ---------------
+//
+// v1.8.46 reports ntp_deadband_us=1000 (the no-step threshold), NOT the ≤2500us bounded per-step
+// CAP the master's own UTC offset actually sawtooths toward under a slow grandmaster (root-caused
+// 2026-08-18). deadband(1000)+margin(1000)=2000 gives NO widening (#1021), so a healthy sawtooth
+// median (live failed run: 2699us) false-DRIFTs the bare 2000us bound -- a per-window coin flip.
+// The gate now grades the master's median against the step-cap ceiling (2500+1000=3500us) AND
+// hard-fails on dantesync's own ntp_step_storm=true. CLIENT rows' 2000us bound is UNTOUCHED.
+
+/// The v1.8.46 master `/status` shape: adds ntp_step_storm + ntp_steps_last_hour to the #1021
+/// deadband payload, and lets is_locked/mode/gm_source_ip vary for the failure fixtures.
+#[allow(clippy::too_many_arguments)]
+fn http_status_master_1119(
+    ts: u64,
+    offset_us: i64,
+    deadband_raw: &str,
+    storm: bool,
+    steps_raw: &str,
+    is_locked: bool,
+    mode: &str,
+    gm_ip: &str,
+) -> String {
+    format!(
+        "{{\"gm_source_ip\":\"{gm_ip}\",\"settled\":true,\"updated_ts\":{ts},\
+         \"is_locked\":{is_locked},\"ntp_offset_us\":{offset_us},\"mode\":\"{mode}\",\
+         \"ntp_failed\":false,\"ntp_updated_ts\":{ts},\"ntp_age_s\":0,\
+         \"ntp_deadband_us\":{deadband_raw},\"ntp_step_storm\":{storm},\
+         \"ntp_steps_last_hour\":{steps_raw}}}"
+    )
+}
+
+#[test]
+fn gate_win_http_master_bounded_step_sawtooth_passes_via_step_cap_1119() {
+    // The exact round-33 failed-run shape: median 2699us, deadband 1000, LOCK, GM OK, storm false.
+    // Pre-#1119 this false-DRIFTs the bare 2000us bound (proven live 2026-08-19); after, the
+    // step-cap floor (3500us) must let it PASS.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_master_1119(base, 2400, "1000", false, "85", true, "LOCK", "10.77.9.184"),
+        http_status_master_1119(
+            base + 5,
+            2600,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 10,
+            2699,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 15,
+            2900,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 20,
+            3100,
+            "1000",
+            false,
+            "86",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+    ];
+    let p = write_multi_read_fixture("strih_1119_sawtooth", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "5",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "median 2699us with deadband 1000 must PASS via the step-cap floor (3500us), not \
+         false-DRIFT the bare 2000us bound. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+    assert!(!stdout.contains("DRIFT"), "stdout={stdout}");
+    let low = stdout.to_lowercase();
+    assert!(
+        low.contains("step-cap") || low.contains("bounded-step"),
+        "the widened-bound note must say WHY the master is graded on the step-cap, not raw median: {stdout}"
+    );
+}
+
+#[test]
+fn gate_win_http_master_step_storm_fails_even_with_in_bound_median_1119() {
+    // A thrashing master (ntp_step_storm=true, steps/h past its 120 alarm) whose median sits
+    // in-bound must be a HARD fail regardless of median -- the step-cap widening must never let a
+    // storming master through. Pre-#1119 this PASSES (proven live 2026-08-19); after, it FAILS.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_master_1119(base, 1400, "1000", true, "240", true, "LOCK", "10.77.9.184"),
+        http_status_master_1119(
+            base + 5,
+            1500,
+            "1000",
+            true,
+            "240",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 10,
+            1600,
+            "1000",
+            true,
+            "245",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+    ];
+    let p = write_multi_read_fixture("strih_1119_storm", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "an affirmative ntp_step_storm must FAIL even with an in-bound median. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("STORM"),
+        "stdout must name the storm: {stdout}"
+    );
+}
+
+#[test]
+fn gate_win_http_master_huge_offset_still_fails_under_step_cap_1119() {
+    // The step-cap floor is a numeric gross-desync ceiling, not a blanket pass: a 15ms offset
+    // (a genuine desync the bounded step cannot produce) must still DRIFT far beyond 3500us.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_master_1119(
+            base,
+            15000,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 5,
+            15100,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 10,
+            14900,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.9.184",
+        ),
+    ];
+    let p = write_multi_read_fixture("strih_1119_huge_offset", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "a genuine 15ms offset must still DRIFT beyond the step-cap ceiling (3500us). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("DRIFT"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_win_http_master_unlocked_still_fails_1119() {
+    // is_locked=false / mode not NANO|LOCK -> PTP DEGRADED -> node BAD, regardless of the widened
+    // offset bound. The step-cap median widening must not shadow the PTP-lock gate.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_master_1119(base, 500, "1000", false, "85", false, "NTP", "10.77.9.184"),
+        http_status_master_1119(
+            base + 5,
+            550,
+            "1000",
+            false,
+            "85",
+            false,
+            "NTP",
+            "10.77.9.184",
+        ),
+        http_status_master_1119(
+            base + 10,
+            520,
+            "1000",
+            false,
+            "85",
+            false,
+            "NTP",
+            "10.77.9.184",
+        ),
+    ];
+    let p = write_multi_read_fixture("strih_1119_unlocked", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "an unlocked master (PTP degraded) must FAIL even with a tiny in-bound offset. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("PTP DEGRADED"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_win_http_master_foreign_gm_still_fails_under_enforce_1119() {
+    // With DANTESYNC_GATE_GM_ENFORCE=1, a master PTP-locked to a FOREIGN grandmaster must FAIL
+    // even with a tiny offset and LOCKED -- the step-cap widening must not shadow the #834 GM gate.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_master_1119(base, 500, "1000", false, "85", true, "LOCK", "10.77.7.109"),
+        http_status_master_1119(
+            base + 5,
+            550,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.7.109",
+        ),
+        http_status_master_1119(
+            base + 10,
+            520,
+            "1000",
+            false,
+            "85",
+            true,
+            "LOCK",
+            "10.77.7.109",
+        ),
+    ];
+    let p = write_multi_read_fixture("strih_1119_foreign_gm", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string()),
+            ("DANTESYNC_GATE_GM_ENFORCE", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a foreign-GM master under enforce must FAIL despite a tiny offset + LOCK. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GM FOREIGN"), "stdout={stdout}");
+}
+
+#[test]
+fn help_describes_the_master_step_cap_1119() {
+    let (code, stdout, _e) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    let low = stdout.to_lowercase();
+    assert!(
+        low.contains("step-cap") || low.contains("step cap"),
+        "#1119: usage must document the master step-cap median treatment: {stdout}"
+    );
+    assert!(
+        low.contains("ntp_step_storm") || low.contains("storm"),
+        "#1119: usage must document the master step-storm guard: {stdout}"
+    );
+}

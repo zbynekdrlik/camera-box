@@ -174,3 +174,31 @@ It ALWAYS prints its `GM OK/FOREIGN/UNKNOWN` line, but its rc only feeds `node_v
   `env_remove` it in the harness for a genuine RED; assert `ENFORCE=1`. A static "text present"
   check cannot prove the prefix is on the right line or well-formed. See
   `tests/harness_recording_e2e_gm_enforce_1073.rs`.
+## `ntp_deadband_us` is the NO-STEP threshold, NOT the per-step CAP — master bound floors at the step-cap (#1119)
+Two DIFFERENT quantities, easy to conflate: `ntp_deadband_us` (live v1.8.46: **1000us**) is the
+threshold below which the master does not step; the **≤2500us bounded PER-STEP cap** (dantesync
+v1.8.46 design) is what the master's own `ntp_offset_us` actually sawtooths TOWARD under a slow
+grandmaster (~23ppm). The step-cap is **NOT exposed over `/status`**. So the #1021 deadband widening
+(`ntp_master_effective_bound_us` = max(2000, deadband+margin) = max(2000, 1000+1000) = 2000) produces
+**no widening** on v1.8.46, and a healthy sawtooth median (failed run: 2699us) false-DRIFTs the bare
+2000us bound — a per-window coin flip on the NTP master ALONE. Fix (#1119): the master's median bound
+also floors at a **gate-side** step-cap constant `GATE_NTP_MASTER_STEP_CAP_US` (default 2500,
+`DANTESYNC_NTP_MASTER_STEP_CAP_US`), i.e. `ntp_master_effective_bound_us STATUS BOUND MARGIN
+[STEP_CAP_US]` → max(bound, deadband+margin, step_cap+margin) = 3500us. **Gated on a numeric
+`ntp_deadband_us` being present** (the dantesync-#84+ bounded-step regime marker) so a pre-#84 master
+keeps the bare bound (preserves the #1021 no/null-deadband tests); the step-cap term only bites when
+the reported deadband is SMALLER than the step-cap — exactly the v1.8.46 regime. The optional 4th arg
+defaults "0" → byte-identical pre-#1119 for every 3-arg caller/unit-test.
+
+Because the master's raw UTC median is thus no longer a health signal up to the step-cap, the master
+is ALSO hard-failed on dantesync's OWN `ntp_step_storm:true` (its >120-steps/hour thrashing alarm) via
+`ntp_master_step_storm_verdict` — a HARD fail regardless of median, in the median-only branch, only on
+a freshly-graded payload (`rc_off != 3`), false/null/absent never fails (report-first). `ntp_step_storm`
+and `ntp_steps_last_hour` are **MASTER-only fields** (null on clients, exactly like `ntp_deadband_us`).
+The #1055 slew rescue never applied here: it is a LINUX-CLIENT journal rescue; strih is a `--win-http`
+node with no journal, so the master's only widening path is `ntp_master_effective_bound_us`. Genlock
+FIFO pacing is monotonic-clock-based, so this UTC sawtooth is harmless to the recording path — only the
+gate's median term coin-flips. Long-term GM-frequency fix is the owner's Dante-device court + dantesync
+issue 95. Local RED→GREEN needs no cargo: run `scripts/dantesync-gate.sh` directly with a fresh
+`DANTESYNC_GATE_WIN_HTTP_STRIH` executable fixture (fresh `updated_ts` — the 300s freshness window
+ages a stale fixture into NTP STALE).
