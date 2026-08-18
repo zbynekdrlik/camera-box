@@ -4749,107 +4749,104 @@ fn build_and_print_verdict_with_stream_hashes(
                         }
                     },
                 };
-                match dup_hash_source {
-                    Some(frame_hashes) => {
-                        let (dup_windows, dup_no_anchor) = partition_frames_by_window(
-                            stream_frames,
-                            &anchor_run_ids,
-                            &all_burns,
-                            cam2_pin,
-                            schedule,
-                            args.switch_guard_ns,
+                // The skip reason for a None dup_hash_source was already logged accurately during
+                // source resolution above, so the None arm needs no body — if let, per clippy.
+                if let Some(frame_hashes) = dup_hash_source {
+                    let (dup_windows, dup_no_anchor) = partition_frames_by_window(
+                        stream_frames,
+                        &anchor_run_ids,
+                        &all_burns,
+                        cam2_pin,
+                        schedule,
+                        args.switch_guard_ns,
+                    );
+                    let mut dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> =
+                        Vec::with_capacity(dup_windows.len());
+                    let mut worst_raw_fraction: Option<f64> = None;
+                    let mut masked_windows: usize = 0;
+                    for win_frames in &dup_windows {
+                        // #1112 — slice the (carried or locally-recomputed) per-frame
+                        // hash vector into THIS window's sequence, by frame_index (the
+                        // pure Tier-0 helper — index-alignment is the one fragile part
+                        // and is unit-tested there).
+                        let win_idxs: Vec<u64> = win_frames.iter().map(|f| f.frame_index).collect();
+                        let seq = camera_box::dup_cadence::window_content_hashes(
+                            &win_idxs,
+                            &frame_hashes,
                         );
-                        let mut dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> =
-                            Vec::with_capacity(dup_windows.len());
-                        let mut worst_raw_fraction: Option<f64> = None;
-                        let mut masked_windows: usize = 0;
-                        for win_frames in &dup_windows {
-                            // #1112 — slice the (carried or locally-recomputed) per-frame
-                            // hash vector into THIS window's sequence, by frame_index (the
-                            // pure Tier-0 helper — index-alignment is the one fragile part
-                            // and is unit-tested there).
-                            let win_idxs: Vec<u64> =
-                                win_frames.iter().map(|f| f.frame_index).collect();
-                            let seq = camera_box::dup_cadence::window_content_hashes(
-                                &win_idxs,
-                                &frame_hashes,
+                        let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
+                        if let Some(ref d) = dc {
+                            worst_raw_fraction = Some(
+                                worst_raw_fraction
+                                    .map_or(d.duplicate_fraction, |m| m.max(d.duplicate_fraction)),
                             );
-                            let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
-                            if let Some(ref d) = dc {
-                                worst_raw_fraction =
-                                    Some(worst_raw_fraction.map_or(d.duplicate_fraction, |m| {
-                                        m.max(d.duplicate_fraction)
-                                    }));
-                                if d.duplication_masked {
-                                    masked_windows += 1;
-                                }
+                            if d.duplication_masked {
+                                masked_windows += 1;
                             }
-                            dcs.push(dc);
                         }
-                        // The GATE keys on the DISCRIMINATED signal (worst fraction among
-                        // windows classified `duplication_masked`), never the raw worst —
-                        // a freeze/glitch has a high raw fraction but is coverage/regularity
-                        // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
-                        // it (issue 1088 review finding).
-                        let worst_masked_fraction =
-                            camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
-                        let dup_window_json: Vec<serde_json::Value> = dcs
-                            .iter()
-                            .enumerate()
-                            .map(|(wi, dc)| {
-                                serde_json::json!({
-                                    "cambox": schedule[wi].cambox.clone(),
-                                    "dup_cadence": dc,
-                                })
-                            })
-                            .collect();
-                        let dup_bound = camera_box::dup_cadence::DUP_RATE_PULLDOWN_MIN;
-                        let dup_gate_pass = camera_box::dup_cadence::dup_cadence_gate_pass(
-                            worst_masked_fraction,
-                            Some(dup_bound),
-                        );
-                        let dup_gates_overall = camera_box::dup_cadence::gates_overall_pass();
-                        report["all_cambox_continuity"]["duplication_masked_cadence"] = serde_json::json!({
-                            "windows": dup_window_json,
-                            "masked_windows": masked_windows,
-                            "worst_masked_duplicate_fraction": worst_masked_fraction,
-                            "worst_raw_duplicate_fraction": worst_raw_fraction,
-                            "bound_duplicate_fraction": dup_bound,
-                            "pass": dup_gate_pass,
-                            "gates_overall_pass": dup_gates_overall,
-                            "frames_no_anchor": dup_no_anchor,
-                            "note": "#1088 duplication-masked 50->60 detector: \
-                                     per-cambox-window row-sampled content-hash dup-rate \
-                                     (the #794 hard layer the received= rate tap is blind \
-                                     to). Per-window duplication_masked flags a sustained + \
-                                     regular + window-spanning pulldown. The GATE keys on \
-                                     worst_masked_duplicate_fraction (worst raw fraction \
-                                     among MASKED windows), NOT worst_raw_duplicate_fraction \
-                                     (a freeze/glitch has a high raw fraction but is \
-                                     coverage/regularity vetoed → excluded, no \
-                                     double-jeopardy with frozen_leg). REPORT-ONLY / \
-                                     calibration-first via dup_cadence::gates_overall_pass \
-                                     (false).",
-                        });
-                        println!(
-"  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
-                                    masked_windows,
-                                    worst_masked_fraction
-                                        .map(|p| format!("{p:.5}"))
-                                        .unwrap_or_else(|| "n/a".to_string()),
-                                    worst_raw_fraction
-                                        .map(|p| format!("{p:.5}"))
-                                        .unwrap_or_else(|| "n/a".to_string()),
-                                    dup_bound,
-                                    dup_gate_pass,
-                                    dup_gates_overall,
-                                );
-                        // Fold: a FAIL only fails the run while the seam gates overall_pass
-                        // (report-only today, so this is a no-op).
-                        all_pass &= dup_gate_pass || !dup_gates_overall;
+                        dcs.push(dc);
                     }
-                    // The skip reason was already logged accurately during source resolution above.
-                    None => {}
+                    // The GATE keys on the DISCRIMINATED signal (worst fraction among
+                    // windows classified `duplication_masked`), never the raw worst —
+                    // a freeze/glitch has a high raw fraction but is coverage/regularity
+                    // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
+                    // it (issue 1088 review finding).
+                    let worst_masked_fraction =
+                        camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                    let dup_window_json: Vec<serde_json::Value> = dcs
+                        .iter()
+                        .enumerate()
+                        .map(|(wi, dc)| {
+                            serde_json::json!({
+                                "cambox": schedule[wi].cambox.clone(),
+                                "dup_cadence": dc,
+                            })
+                        })
+                        .collect();
+                    let dup_bound = camera_box::dup_cadence::DUP_RATE_PULLDOWN_MIN;
+                    let dup_gate_pass = camera_box::dup_cadence::dup_cadence_gate_pass(
+                        worst_masked_fraction,
+                        Some(dup_bound),
+                    );
+                    let dup_gates_overall = camera_box::dup_cadence::gates_overall_pass();
+                    report["all_cambox_continuity"]["duplication_masked_cadence"] = serde_json::json!({
+                        "windows": dup_window_json,
+                        "masked_windows": masked_windows,
+                        "worst_masked_duplicate_fraction": worst_masked_fraction,
+                        "worst_raw_duplicate_fraction": worst_raw_fraction,
+                        "bound_duplicate_fraction": dup_bound,
+                        "pass": dup_gate_pass,
+                        "gates_overall_pass": dup_gates_overall,
+                        "frames_no_anchor": dup_no_anchor,
+                        "note": "#1088 duplication-masked 50->60 detector: \
+                                 per-cambox-window row-sampled content-hash dup-rate \
+                                 (the #794 hard layer the received= rate tap is blind \
+                                 to). Per-window duplication_masked flags a sustained + \
+                                 regular + window-spanning pulldown. The GATE keys on \
+                                 worst_masked_duplicate_fraction (worst raw fraction \
+                                 among MASKED windows), NOT worst_raw_duplicate_fraction \
+                                 (a freeze/glitch has a high raw fraction but is \
+                                 coverage/regularity vetoed → excluded, no \
+                                 double-jeopardy with frozen_leg). REPORT-ONLY / \
+                                 calibration-first via dup_cadence::gates_overall_pass \
+                                 (false).",
+                    });
+                    println!(
+"  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
+                                masked_windows,
+                                worst_masked_fraction
+                                    .map(|p| format!("{p:.5}"))
+                                    .unwrap_or_else(|| "n/a".to_string()),
+                                worst_raw_fraction
+                                    .map(|p| format!("{p:.5}"))
+                                    .unwrap_or_else(|| "n/a".to_string()),
+                                dup_bound,
+                                dup_gate_pass,
+                                dup_gates_overall,
+                            );
+                    // Fold: a FAIL only fails the run while the seam gates overall_pass
+                    // (report-only today, so this is a no-op).
+                    all_pass &= dup_gate_pass || !dup_gates_overall;
                 }
 
                 // #768 — REPORT-ONLY cold-cut onset seam. The all-cambox sweep cuts program to each
