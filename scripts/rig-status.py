@@ -31,7 +31,9 @@ DEPLOYMENT (dev1, SHIPS DISABLED -- sibling convention, e.g. bundle-state #732 /
   The page is then reachable on dev1's private interfaces (never localhost, never public):
     http://10.77.9.103:8790/    (rig LAN)      http://100.104.8.125:8790/    (tailscale)
 
-Serve dir defaults to ~/.camera-box/rig-status/ (index.html + status.json + history.jsonl).
+Serve dir (--dir) defaults to ~/.camera-box/rig-status/ and holds ONLY the published index.html +
+status.json (what http.server exposes). Private state (history.jsonl + alert.state) lives in a
+separate --state-dir (~/.camera-box/rig-status-state/) so the web root never leaks internal files.
 """
 from __future__ import annotations
 
@@ -51,9 +53,14 @@ THROTTLE_LIB = os.path.join(HERE, "lib", "obs-watchdog-decision.sh")
 DEFAULT_DIR = os.path.expanduser("~/.camera-box/rig-status")
 NOTIFY = os.environ.get("AIRULESET_NOTIFY", os.path.expanduser("~/devel/airuleset/airuleset.py"))
 
+DEFAULT_STATE_DIR = os.path.expanduser("~/.camera-box/rig-status-state")  # private: history + alert.state
 HISTORY_MAX = 500                                                    # rolling JSONL cap on disk
 HISTORY_SHOWN = 20                                                   # rows rendered on the page
 ALERT_THROTTLE_PASSES = int(os.environ.get("RIG_STATUS_ALERT_THROTTLE_PASSES", "12"))  # ~1h @5min
+# The audit sweeps 7 cams + imag + strih + stream sequentially; worst realistic (all reachable but
+# slow) is ~225 s, so 300 s leaves margin. A hang past this is caught as a DEGRADED prober, never a
+# crash (see _run_audit) -- and the systemd unit's TimeoutStartSec is sized above this.
+AUDIT_TIMEOUT_S = int(os.environ.get("RIG_STATUS_AUDIT_TIMEOUT_S", "300"))
 
 _NODE_RE = re.compile(r"^\[(PASS|WARN|FAIL)\]\s+(\S+)\s+(.*)$")
 _PROBLEMS_RE = re.compile(r"\s*<<(.*)>>\s*$")
@@ -112,6 +119,29 @@ def alert_signature(records):
     return ",".join(sorted(r["node"] for r in records if r["verdict"] == "FAIL"))
 
 
+def overall_state(records, exit_code=None):
+    """The AUTHORITATIVE page verdict. A crashed / empty / timed-out audit (0 node lines, or an
+    exit code outside the audit's own 0/1/2 contract) is ERROR -- never PASS. This is the guard
+    against the false-green a bare summarize([]) would produce: the whole point of the page is that
+    a green banner PROVES health, so "no data" must scream, not affirm all-healthy."""
+    if not records:
+        return "ERROR"
+    if exit_code is not None and exit_code not in (0, 1, 2):
+        return "ERROR"
+    return summarize(records)["overall"]
+
+
+def alert_condition(records, exit_code=None):
+    """What is worth paging Discord about: a DOWN prober (no data / crash exit) OR any FAIL node.
+    Returns a stable signature string (deduped by the throttle), or '' when everything is healthy
+    (WARN never pages). A down prober pages too -- a silent status page over a dead audit is the
+    exact 'tiché unknown' the rig-degradation-alert rule forbids."""
+    if not records or (exit_code is not None and exit_code not in (0, 1, 2)):
+        return f"prober-down:exit{exit_code}"
+    fails = alert_signature(records)
+    return f"fail:{fails}" if fails else ""
+
+
 def history_entry(text, exit_code, ts):
     """One JSONL history row from a captured audit run: ts, exit code, counts, and a compact
     per-node (verdict + problems) list -- enough to re-render a run's shape without its full text."""
@@ -124,13 +154,14 @@ def history_entry(text, exit_code, ts):
 
 
 # --------------------------------------------------------------------------- pure: render
-def render_json(records, version, generated_at, history=None):
+def render_json(records, version, generated_at, history=None, exit_code=None):
     """Machine-readable page payload (status.json)."""
     s = summarize(records)
     payload = {
         "version": version,
         "generated_at": generated_at,
-        "overall": s["overall"],
+        "overall": overall_state(records, exit_code),
+        "exit_code": exit_code,
         "counts": {"pass": s["pass"], "warn": s["warn"], "fail": s["fail"]},
         "nodes": records,
         "history": (history or [])[-HISTORY_SHOWN:],
@@ -153,6 +184,7 @@ h1{margin:0;font-size:1.35rem}h2{font-size:1.05rem;margin:1.6rem 0 .5rem}
 .b-PASS{background:var(--pass-bg);color:var(--pass-fg)}
 .b-WARN{background:var(--warn-bg);color:var(--warn-fg)}
 .b-FAIL{background:var(--fail-bg);color:var(--fail-fg)}
+.b-ERROR{background:var(--fail-bg);color:var(--fail-fg)}
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);
 border-radius:.5rem;overflow:hidden;font-size:.9rem}
 th,td{text-align:left;padding:.5rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
@@ -204,13 +236,19 @@ def _history_table(history):
             '<th>verdikt</th><th>počty</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table>")
 
 
-def render_html(records, version, generated_at, history=None):
+def render_html(records, version, generated_at, history=None, exit_code=None):
     """The status page. version-on-dashboard: the version is DOM-readable (a data-version
-    attribute AND visible text) alongside the page generation timestamp."""
+    attribute AND visible text) alongside the page generation timestamp. `exit_code` (the audit's
+    exit) turns an empty / crashed sweep into an explicit ERROR banner, never a false green."""
     s = summarize(records)
-    overall = s["overall"]
+    overall = overall_state(records, exit_code)
     ordered = sorted(records, key=lambda r: (_BADGE_ORDER.get(r["verdict"], 9), r["node"]))
-    banner_text = "VŠETKY NODY ZDRAVÉ" if overall == "PASS" else "PROBLÉMY NIŽŠIE — POZRI TABUĽKU"
+    banner_text = {
+        "PASS": "VŠETKY NODY ZDRAVÉ",
+        "WARN": "PROBLÉMY NIŽŠIE — POZRI TABUĽKU",
+        "FAIL": "PROBLÉMY NIŽŠIE — POZRI TABUĽKU",
+        "ERROR": "AUDIT ZLYHAL — ŽIADNE ZDRAVOTNÉ DÁTA (prober down, pozri dev1 log)",
+    }.get(overall, "PROBLÉMY NIŽŠIE — POZRI TABUĽKU")
     head = (
         '<!doctype html><html lang="sk"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -223,8 +261,12 @@ def render_html(records, version, generated_at, history=None):
         f' · vygenerované <time datetime="{_esc(generated_at)}">{_esc(generated_at)}</time>'
         f' · <b>{s["pass"]}</b> PASS / <b>{s["warn"]}</b> WARN / <b>{s["fail"]}</b> FAIL</div></header>')
     banner = f'<div class="banner b-{overall}" data-overall="{overall}">{banner_text} — {overall}</div>'
+    body_rows = ("".join(_node_row(r) for r in ordered) if ordered
+                 else '<tr class="v-FAIL"><td class="badge b-ERROR">ERROR</td>'
+                      '<td class="node">—</td><td class="facets">žiadne dáta z '
+                      'rig-health-audit.py (prober zlyhal alebo timeout — pozri dev1 log)</td></tr>')
     table = ('<table class="nodes"><thead><tr><th>verdikt</th><th>node</th><th>signály</th></tr>'
-             '</thead><tbody>' + "".join(_node_row(r) for r in ordered) + "</tbody></table>")
+             '</thead><tbody>' + body_rows + "</tbody></table>")
     footer = ('<footer>zdroj: rig-health-audit.py (jediný prober) · read-only · dev1 · '
               'obnovuje sa každých 60 s · #787</footer>')
     return (head + '<body>' + header + banner + table + _history_table(history) + footer
@@ -249,8 +291,20 @@ def _now_iso():
 
 
 def _run_audit():
-    proc = subprocess.run([sys.executable, AUDIT], capture_output=True, text=True, timeout=180)
-    return proc.stdout, proc.returncode
+    """Run rig-health-audit.py, return (stdout, exit_code). A hang past AUDIT_TIMEOUT_S or a spawn
+    failure NEVER crashes the updater -- it degrades to a sentinel exit (124 timeout / 127 spawn)
+    with whatever partial output was captured, so the page renders an explicit ERROR, not nothing."""
+    try:
+        proc = subprocess.run([sys.executable, AUDIT], capture_output=True, text=True,
+                              timeout=AUDIT_TIMEOUT_S)
+        return proc.stdout, proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.output or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        return partial, 124
+    except OSError:
+        return "", 127
 
 
 def _atomic_write(path, text):
@@ -271,8 +325,9 @@ def _append_history(entry, path):
     _atomic_write(path, "\n".join(lines) + "\n")
 
 
-def _load_history(path):
+def _load_history(path, log=None):
     out = []
+    skipped = 0
     if not os.path.exists(path):
         return out
     with open(path, encoding="utf-8") as fh:
@@ -283,7 +338,9 @@ def _load_history(path):
             try:
                 out.append(json.loads(line))
             except json.JSONDecodeError:
-                continue          # a truncated final line survives a crash; skip it, never crash
+                skipped += 1       # a truncated/corrupt row; skip it, never crash -- but surface it
+    if skipped and log:
+        log(f"history: skipped {skipped} corrupt JSONL row(s) in {path}")
     return out
 
 
@@ -322,33 +379,42 @@ def _throttle(current_sig, prior_sig, prior_passes, throttle_n):
         if "=" in line:
             k, v = line.split("=", 1)
             out[k] = v
+    out.setdefault("alert_now", "1")     # kernel always prints it; a missing key = fail LOUD, never drop
     return out
 
 
-def _maybe_alert(records, state_dir, notify, dry_run, log):
-    sig = alert_signature(records)
+def _maybe_alert(records, exit_code, state_dir, notify, dry_run, log):
+    sig = alert_condition(records, exit_code)
     state_path = os.path.join(state_dir, "alert.state")
     prior = _read_state(state_path)
     if not sig:
-        # no FAIL -> clear the fingerprint so the next FAIL re-pings immediately, not throttled.
-        _write_state(state_path, {"alert_sig": "", "alert_passes": "0"})
+        # healthy -> clear the fingerprint so the next problem re-pings immediately. NEVER on a dry
+        # run: a --dry-run must leave persistent throttle state untouched, or it silently consumes
+        # the fingerprint and suppresses the next REAL alert for a throttle window.
+        if not dry_run:
+            _write_state(state_path, {"alert_sig": "", "alert_passes": "0"})
         return False
-    t = _throttle("fail:" + sig, prior.get("alert_sig", ""),
-                  prior.get("alert_passes", "0"), ALERT_THROTTLE_PASSES)
+    t = _throttle(sig, prior.get("alert_sig", ""), prior.get("alert_passes", "0"),
+                  ALERT_THROTTLE_PASSES)
+    if dry_run:
+        would = "alert" if t.get("alert_now") == "1" else "suppress"
+        log(f"[dry-run] WOULD {would} ({sig}); throttle state UNCHANGED")
+        return False
     _write_state(state_path, {"alert_sig": t.get("new_sig", ""),
                               "alert_passes": t.get("new_passes", "0")})
     if t.get("alert_now") != "1":
-        log(f"FAIL alert suppressed by throttle (sig={sig})")
+        log(f"alert suppressed by throttle ({sig})")
         return False
-    if dry_run:
-        log(f"[dry-run] WOULD alert: rig node(s) FAIL ({sig})")
-        return False
-    body = (f"\U0001F6A8 #787 rig-status: rig node(s) FAIL ({sig}) -- camera-box. "
-            f"Pozri status stranku.")
+    if sig.startswith("prober-down"):
+        body = (f"\U0001F6A8 #787 rig-status: rig-health-audit PROBER FAILED ({sig}) -- camera-box. "
+                f"Status stranka nema data -- pozri dev1 log.")
+    else:
+        body = (f"\U0001F6A8 #787 rig-status: rig node(s) FAIL ({sig}) -- camera-box. "
+                f"Pozri status stranku.")
     try:
         subprocess.run([sys.executable, notify, "notify", "--body", body],
                        capture_output=True, timeout=30)
-        log(f"ALERT: fired Discord notification (sig={sig})")
+        log(f"ALERT: fired Discord notification ({sig})")
     except (subprocess.TimeoutExpired, OSError) as exc:
         log(f"ALERT: airuleset notify failed (non-fatal): {exc}")
     return True
@@ -359,7 +425,9 @@ def cmd_update(args):
     def log(msg):
         print(f"{_now_iso()} [rig-status] {msg}", file=sys.stderr)
 
-    state_dir = args.dir
+    serve_dir = args.dir            # PUBLISHED artifacts only: index.html + status.json
+    state_dir = args.state_dir      # PRIVATE: history.jsonl + alert.state (never web-served)
+    os.makedirs(serve_dir, exist_ok=True)
     os.makedirs(state_dir, exist_ok=True)
     text, exit_code = _run_audit()
     ts = _now_iso()
@@ -367,19 +435,24 @@ def cmd_update(args):
     _append_history(history_entry(text, exit_code, ts), hist_path)
     records = parse_audit(text)
     version = _read_version()
-    history = _load_history(hist_path)
-    _atomic_write(os.path.join(state_dir, "index.html"),
-                  render_html(records, version, ts, history))
-    _atomic_write(os.path.join(state_dir, "status.json"),
-                  render_json(records, version, ts, history))
-    _maybe_alert(records, state_dir, args.notify, args.dry_run, log)
+    history = _load_history(hist_path, log)
+    _atomic_write(os.path.join(serve_dir, "index.html"),
+                  render_html(records, version, ts, history, exit_code))
+    _atomic_write(os.path.join(serve_dir, "status.json"),
+                  render_json(records, version, ts, history, exit_code))
+    _maybe_alert(records, exit_code, state_dir, args.notify, args.dry_run, log)
     s = summarize(records)
-    log(f"exit={exit_code} {s['pass']}P/{s['warn']}W/{s['fail']}F -> {state_dir}/index.html")
+    log(f"exit={exit_code} overall={overall_state(records, exit_code)} "
+        f"{s['pass']}P/{s['warn']}W/{s['fail']}F -> {serve_dir}/index.html")
     return 0
 
 
 def cmd_render(args):
-    text = sys.stdin.read() if args.input == "-" else open(args.input, encoding="utf-8").read()
+    if args.input == "-":
+        text = sys.stdin.read()
+    else:
+        with open(args.input, encoding="utf-8") as fh:
+            text = fh.read()
     records = parse_audit(text)
     version = args.version or _read_version()
     out = render_html(records, version, _now_iso())
@@ -395,7 +468,10 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     up = sub.add_parser("update", help="run the audit, append history, render the page, alert on FAIL")
-    up.add_argument("--dir", default=DEFAULT_DIR, help="serve dir (index.html + status.json + history.jsonl)")
+    up.add_argument("--dir", default=DEFAULT_DIR,
+                    help="SERVE dir (published index.html + status.json; this is what http.server exposes)")
+    up.add_argument("--state-dir", default=DEFAULT_STATE_DIR,
+                    help="PRIVATE state dir (history.jsonl + alert.state; never web-served)")
     up.add_argument("--notify", default=NOTIFY, help="airuleset.py path for the Discord alert")
     up.add_argument("--dry-run", action="store_true", help="render + decide, but never fire the Discord alert")
     up.set_defaults(func=cmd_update)

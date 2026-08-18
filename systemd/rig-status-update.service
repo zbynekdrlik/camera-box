@@ -9,4 +9,4 @@ Type=oneshot
 # alert on FAIL. dev1-side, mirrors the imag-obs / network-reach / optical-chain alert timers.
 # rig-health-audit.py is the ONE prober; this service never probes a node itself.
 ExecStart=%h/devel/camera-box/scripts/rig-status.py update
-TimeoutStartSec=200
+TimeoutStartSec=360
