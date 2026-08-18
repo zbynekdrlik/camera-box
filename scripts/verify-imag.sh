@@ -133,6 +133,13 @@ set -euo pipefail
 #       config, set live 2026-07-15). setup-imag.sh step 25 provisions it; a re-provision that
 #       silently dropped it (or regenerated a partial/wrong file) must FAIL here. Pure static file
 #       read (side-effect free), so it runs BEFORE check (o)'s restart (#884 ordering).
+#   (x) Wake-on-LAN armed (#1103): the persisted NM setting 802-3-ethernet.wake-on-lan=magic on the
+#       NDI-NIC connection, so a post-event powered-down/slept imag-nb is remotely wakeable via a
+#       magic packet from dev1 (scripts/wake-box.sh imag-nb). NM re-applies it on every connection-up
+#       (durable across reboot) and it reads SUDO-LESSLY, unlike the root-only runtime ethtool
+#       Wake-on line. setup-imag.sh step 1 arms it; a re-provision that lost it must FAIL here. Pure
+#       static read (side-effect free), so it runs BEFORE check (o)'s restart (#884 ordering). The
+#       BIOS standby-power layer is a separate hands-on step (docs/wake-on-lan.md), not gated here.
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -669,6 +676,20 @@ imag_touchpad_conf_ok() {
     grep -qE "$pat" <<<"$conf" || return 1
   done
   return 0
+}
+
+# imag_wol_enabled_ok WOL_VALUE -> 0 iff WOL_VALUE (the `nmcli -g 802-3-ethernet.wake-on-lan
+# connection show <con>` output, trimmed) is EXACTLY "magic" -- the persisted magic-packet
+# Wake-on-LAN setting on imag's NDI-NIC connection (#1103, provisioned by setup-imag.sh step 1). NM
+# re-applies this on every connection-up, so it is the DURABLE source of truth (survives reboot) and
+# is readable SUDO-LESSLY, unlike the runtime `ethtool <nic>` Wake-on line (root-only). A
+# "default"/"none"/empty value FAILs (WoL not provisioned -> a post-event powered-down box would not
+# be remotely wakeable); so does "g" (that is the runtime ethtool word, not the NM value) and a
+# "magic secureon" (password-protected wake our passwordless wake-box.sh sender cannot trigger).
+# Purely textual (unit-tested), whitespace-tolerant. Pure.
+imag_wol_enabled_ok() {
+  local v; v="$(printf '%s' "${1:-}" | tr -d '[:space:]')"
+  [ "$v" = "magic" ]
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
@@ -1228,6 +1249,23 @@ elif imag_touchpad_conf_ok "$TOUCHPAD_CONF"; then
   ok "touchpad usability config present + correct (tap-to-click + natural scroll + ScrollPixelDistance 50, #779)"
 else
   fail "30-touchpad-tap.conf present but INCOMPLETE/WRONG (#779) -- must carry the selector (MatchIsTouchpad \"on\" + Driver \"libinput\") AND Tapping/TappingDrag/NaturalScrolling \"on\" + ScrollPixelDistance \"50\"; a reprovision regenerated a partial/wrong file"
+fi
+
+# (x) Wake-on-LAN armed on the NDI NIC (#1103) -- a post-event powered-down/slept imag-nb must be
+# remotely wakeable via a magic packet from dev1 (scripts/wake-box.sh imag-nb). The DURABLE signal is
+# the persisted NM setting (802-3-ethernet.wake-on-lan=magic): NM re-applies it on every
+# connection-up, so it survives reboot, and it is readable SUDO-LESSLY (unlike the runtime ethtool
+# Wake-on line, which is root-only). A pure static read, side-effect free, kept ABOVE check (o)'s OBS
+# restart for #884-ordering hygiene. Resolves the NDI NIC via the default route (the rig LAN link)
+# and its active NM connection, mirroring setup-imag.sh step 1's own $CON resolution.
+rc=0
+WOL_VALUE="$(ssh_box "NIC=\$(ip -o -4 route show default | grep -oP 'dev \K\S+' | head -1); CON=\$(nmcli -t -f NAME,DEVICE con show --active | awk -F: -v d=\"\$NIC\" '\$2==d{print \$1; exit}'); nmcli -g 802-3-ethernet.wake-on-lan connection show \"\$CON\" 2>/dev/null")" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  fail "Wake-on-LAN NM setting unreadable over SSH (rc=$rc) -- cannot confirm imag-nb is remotely wakeable (#1103)"
+elif imag_wol_enabled_ok "$WOL_VALUE"; then
+  ok "Wake-on-LAN armed (NM 802-3-ethernet.wake-on-lan=magic on the NDI NIC, #1103)"
+else
+  fail "Wake-on-LAN NOT armed (NM value='${WOL_VALUE}', want 'magic') -- a powered-down imag-nb would not be remotely wakeable; setup-imag.sh step 1 arms it (#1103)"
 fi
 
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)

@@ -289,8 +289,16 @@ if command -v nmcli >/dev/null 2>&1; then
     [ -n "$DNS" ] || DNS="$GW"
     nmcli con mod "$CON" ipv4.method manual \
         ipv4.addresses "${STATIC_IP}/${PREFIX}" ipv4.gateway "$GW" ipv4.dns "${DNS// /,}"
+    # #1103: Wake-on-LAN -- arm the NDI NIC for a magic-packet wake so a post-event powered-down /
+    # slept imag-nb is remotely recoverable (the imag counterpart of issue 1053's strih/stream WoL).
+    # Set on the SAME $CON as the static IP above (ONE source of truth); NM re-applies it on every
+    # connection-up (every boot), so it survives reboot. Live-confirmed the NIC supports it (r8152 USB
+    # dongle: Supports Wake-on: pumbg). The BIOS standby-power layer is a separate hands-on step
+    # (docs/wake-on-lan.md) -- this arms the OS half. The one con up below applies IP + WoL together.
+    nmcli con mod "$CON" 802-3-ethernet.wake-on-lan magic 802-3-ethernet.wake-on-lan-password ""
     nmcli con up "$CON" >/dev/null || true   # same IP — session survives
     echo "  static ${STATIC_IP}/${PREFIX} gw=$GW dns=$DNS on $NIC ($CON)"
+    echo "  #1103: Wake-on-LAN armed (802-3-ethernet.wake-on-lan=magic) on $CON"
 else
     fail "nmcli missing — desktop Ubuntu expected (netplan-only path not implemented)"
 fi
