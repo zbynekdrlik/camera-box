@@ -156,6 +156,13 @@ fn cond(exp: &str, alv: &str, opt: &str) -> String {
     stdout_of(&format!("optical_chain_alert_condition {exp} {alv} {opt}"))
 }
 
+// #1117: the 4th arg is `rig_busy` (1 = a live gate/TEST harness holds the rig this pass, from a
+// fresh #281 rig-active heartbeat). Defaults to 0 when omitted (the 3-arg calls above), so the
+// signature stays backward-compatible.
+fn cond4(exp: &str, alv: &str, opt: &str, busy: &str) -> String {
+    stdout_of(&format!("optical_chain_alert_condition {exp} {alv} {opt} {busy}"))
+}
+
 #[test]
 fn condition_skip_when_no_painter_expected() {
     // EVENT mode / never-tested: a dark monitor is CORRECT -> never alert, regardless of optical.
@@ -166,11 +173,67 @@ fn condition_skip_when_no_painter_expected() {
 
 #[test]
 fn condition_painter_dead_alerts() {
-    // TEST mode, painter expected but dead -> the 2026-08-14 incident. Alert regardless of optical
-    // (a dead painter needs no OBS confirmation).
+    // TEST mode, painter expected but dead, NOT during an E2E, and the optical leg is NOT provably
+    // OK -> the genuine 2026-08-14 incident: a dead standing painter with a dark/unverifiable
+    // monitor. Alert.
+    //
+    // #1117: the `cond("1","0","OK")` case previously asserted here is DELIBERATELY MOVED to
+    // `condition_optical_ok_vetoes_painter_dead` below — an optical=OK pass means the monitored
+    // OUTCOME (a readable cam2->cam1 hop) is provably fine, so it must NOT page. That old
+    // assertion baked the exact 22:59:57 false-page bug into the test; correcting it is part of
+    // this fix (a genuinely-wrong test fixed in its own change, with justification).
     assert_eq!(cond("1", "0", "UNKNOWN"), "alert:PAINTER-DEAD");
     assert_eq!(cond("1", "0", "BLACK"), "alert:PAINTER-DEAD");
-    assert_eq!(cond("1", "0", "OK"), "alert:PAINTER-DEAD");
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1117 fix 2 — optical=OK veto: a pass that measures the optical leg OK never pages PAINTER-DEAD.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn condition_optical_ok_vetoes_painter_dead() {
+    // The exact live 22:59:57 pass: painter_expected=1 painter_alive=0 optical=OK. The standing
+    // pidfile/service is down, but the cam2->cam1 optical hop is provably readable (the transient
+    // E2E painter is painting), so the monitored outcome is fine -> log only, never a page.
+    assert_eq!(cond("1", "0", "OK"), "log-only:PAINTER-DEAD-optical-ok");
+    // Same veto with the 4-arg form (rig_busy explicitly 0): still the optical-ok veto, not a page.
+    assert_eq!(cond4("1", "0", "OK", "0"), "log-only:PAINTER-DEAD-optical-ok");
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1117 fix 1 — E2E-window suppression: while a live gate/TEST harness holds the rig (rig_busy=1,
+// a fresh #281 rig-active heartbeat), a would-be alert is expected-by-design -> log only.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn condition_e2e_window_suppresses_painter_dead() {
+    // recording-e2e.sh `systemctl stop cam2-painter` BY DESIGN during a run -> painter_alive=0 is
+    // expected this window. Suppress regardless of the optical read (OK / UNKNOWN / BLACK).
+    assert_eq!(cond4("1", "0", "UNKNOWN", "1"), "log-only:PAINTER-DEAD-e2e-window");
+    assert_eq!(cond4("1", "0", "BLACK", "1"), "log-only:PAINTER-DEAD-e2e-window");
+    // Both fixes apply here (dead + rig_busy + optical OK); the E2E-window reason takes precedence.
+    assert_eq!(cond4("1", "0", "OK", "1"), "log-only:PAINTER-DEAD-e2e-window");
+}
+
+#[test]
+fn condition_e2e_window_suppresses_optical_black() {
+    // Painter ALIVE but strih program reads BLACK DURING a run: the harness reroutes/rebuilds the
+    // program, so a transient BLACK is expected-by-design -> log only, never a page.
+    assert_eq!(cond4("1", "1", "BLACK", "1"), "log-only:OPTICAL-BLACK-e2e-window");
+}
+
+#[test]
+fn condition_e2e_window_does_not_downgrade_healthy_or_skip() {
+    // rig_busy only ever DOWNGRADES a would-be alert to log-only; it never changes a healthy /
+    // healthy-unverified / skip verdict.
+    assert_eq!(cond4("1", "1", "OK", "1"), "healthy");
+    assert_eq!(cond4("1", "1", "UNKNOWN", "1"), "healthy-unverified");
+    assert_eq!(cond4("0", "0", "BLACK", "1"), "skip");
+}
+
+#[test]
+fn condition_outside_e2e_a_genuine_black_still_pages() {
+    // The complement of the suppression: painter alive, optical BLACK, NO live harness (rig_busy=0)
+    // -> a genuine #901/#754 dark monitor still pages.
+    assert_eq!(cond4("1", "1", "BLACK", "0"), "alert:OPTICAL-BLACK");
 }
 
 #[test]
