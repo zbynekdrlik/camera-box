@@ -110,8 +110,10 @@ fn main_dantesync_gate_is_invoked_with_gm_enforce_on_1073() {
     );
     let calls = fs::read_to_string(&call_log).unwrap_or_default();
     assert!(
-        calls.contains("--win-http") && calls.contains("stream=10.77.9.204"),
-        "#1073 sanity: the main DanteSync gate must be invoked grading strih+stream. Got calls={calls:?}"
+        calls.contains("cam2=10.77.9.62")
+            && calls.contains("--win-http")
+            && calls.contains("stream=10.77.9.204"),
+        "#1073 sanity: the main DanteSync gate must be invoked grading cam1/cam2 + strih/stream. Got calls={calls:?}"
     );
     assert!(
         calls.contains("ENFORCE=1"),
