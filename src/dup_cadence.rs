@@ -293,6 +293,30 @@ pub fn gates_overall_pass() -> bool {
     false
 }
 
+/// #1112 — slice a carried per-frame content-hash vector into ONE cambox window's hash sequence,
+/// in the window's own frame order, ready for [`measure_dup_cadence`].
+///
+/// `frame_indices` are the `RecordingFrame::frame_index` values of the frames the merge attributed
+/// to this window (`partition_frames_by_window`), IN window order. `frame_hashes` is the full
+/// per-recording content-hash vector the stream box computed during `--extract-partial stream` and
+/// CARRIED in the partial (`RecordingPartial::content_hashes`), 0-based by `frame_index` — the same
+/// index contract [`hash_recording_frames`](crate::probe::recording::hash_recording_frames) and the
+/// parallel decode both hold (frame `i` ⇒ `frame_hashes[i]`).
+///
+/// This is the ONE genuinely new pure step of the #1112 emit-wiring — the on-box `hash_recording_frames`
+/// / on-dev1 `partition_frames_by_window` sides are unchanged; this replaces the old inline
+/// `win.iter().filter_map(|f| frame_hashes.get(f.frame_index as usize).copied())` in the merge so it
+/// can be Tier-0 tested (no probe compile path exists for the merge consumer). A frame index at or
+/// beyond `frame_hashes.len()` is SKIPPED, not defaulted — a hash gap must not manufacture a false
+/// "duplicate" (two skipped frames would otherwise look identical); the resulting shorter sequence is
+/// exactly what `measure_dup_cadence`'s own `MIN_SAMPLE_FRAMES` / fraction math already handles.
+pub fn window_content_hashes(frame_indices: &[u64], frame_hashes: &[u64]) -> Vec<u64> {
+    frame_indices
+        .iter()
+        .filter_map(|&idx| frame_hashes.get(idx as usize).copied())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,6 +715,68 @@ mod tests {
             !dup_cadence_gate_pass(Some(v.duplicate_fraction), Some(DUP_RATE_PULLDOWN_MIN)),
             "the pulldown fraction ({}) must fail the bound",
             v.duplicate_fraction
+        );
+    }
+
+    // ---- window_content_hashes (#1112 — the carry→slice glue) --------------------------
+
+    #[test]
+    fn window_content_hashes_picks_by_frame_index_not_position() {
+        // The full per-recording hash vector (0-based by frame_index).
+        let all: Vec<u64> = vec![100, 101, 102, 103, 104, 105, 106];
+        // A window whose attributed frames are NON-contiguous, out of the natural 0..n order —
+        // exactly what partition_frames_by_window produces when a cambox owns scattered frames.
+        let idxs: Vec<u64> = vec![2, 5, 3];
+        assert_eq!(
+            window_content_hashes(&idxs, &all),
+            vec![102, 105, 103],
+            "each window frame's hash is looked up by its frame_index, in window order"
+        );
+    }
+
+    #[test]
+    fn window_content_hashes_contiguous_matches_direct_slice() {
+        let all: Vec<u64> = (0..50).map(|x| x as u64 * 7 + 1).collect();
+        let idxs: Vec<u64> = (10..20).collect();
+        let got = window_content_hashes(&idxs, &all);
+        assert_eq!(
+            got,
+            all[10..20].to_vec(),
+            "contiguous window == the raw slice"
+        );
+    }
+
+    #[test]
+    fn window_content_hashes_skips_out_of_range_index() {
+        // A frame_index past the end of the carried hash vector (a hash gap) must be DROPPED, not
+        // defaulted — two dropped-then-defaulted frames would read as a false duplicate downstream.
+        let all: Vec<u64> = vec![10, 11, 12];
+        let idxs: Vec<u64> = vec![0, 9, 2, 100];
+        assert_eq!(
+            window_content_hashes(&idxs, &all),
+            vec![10, 12],
+            "indices 9 and 100 are out of range and skipped; only 0 and 2 survive, in order"
+        );
+    }
+
+    #[test]
+    fn window_content_hashes_empty_inputs_are_empty() {
+        assert!(window_content_hashes(&[], &[1, 2, 3]).is_empty());
+        assert!(window_content_hashes(&[0, 1, 2], &[]).is_empty());
+    }
+
+    #[test]
+    fn window_content_hashes_feeds_measure_dup_cadence_unchanged() {
+        // End-to-end: a carried pulldown hash vector, sliced 1:1 (window == whole recording),
+        // yields the SAME DupCadence as feeding the raw vector — the slice is a faithful pass-through.
+        let all = pulldown_hashes(120, 6);
+        let idxs: Vec<u64> = (0..all.len() as u64).collect();
+        let sliced = window_content_hashes(&idxs, &all);
+        assert_eq!(sliced, all, "1:1 window reproduces the input exactly");
+        assert_eq!(
+            measure_dup_cadence(&sliced),
+            measure_dup_cadence(&all),
+            "the classifier sees an identical sequence through the slice"
         );
     }
 }
