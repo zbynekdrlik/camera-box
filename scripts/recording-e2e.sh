@@ -781,17 +781,19 @@ IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecki
 VERSION_GATE_REPO="${VERSION_GATE_REPO:-zbynekdrlik/camera-box}"
 # Windows FAST manifest (strih+stream share ONE build -> one manifest), keyed on strih's OWN reported
 # marker SHA. The gate applies this GLOBAL --manifest to BOTH --win-state boxes (strih AND stream), and
-# a manifest activates the obs_dll_sha256 byte compare AND the genlock_capability check on each box. So
-# supplying it while EITHER box has not yet reported those keys flips that box to UNKNOWN = a spurious
-# gate-blocking refuse (exactly the partial-rollout split this opt-in exists to protect). Gate on BOTH
-# boxes ALREADY reporting BOTH keys, so the auto-source stays fully dormant until the #770 on-box byte
-# gather is live fleet-wide and can never introduce a UNKNOWN. VERSION_GATE_MANIFEST (if pre-set) wins.
+# a manifest activates the obs_dll_sha256 byte compare AND the genlock_capability check on each box.
+# ENFORCED (#1100, the #758-shape second step): the auto-source runs UNCONDITIONALLY -- the #1082 opt-in
+# guard (which required BOTH boxes to ALREADY report obs_dll_sha256 + genlock_capability before sourcing
+# the manifest) is REMOVED, so a box that stops reporting its deployed obs.dll sha now flips to a
+# gate-blocking UNKNOWN (drift-guard compares a manifest sha vs an empty observed) instead of a silent
+# skip -- every box is REQUIRED to report its bytes. Precondition verified LIVE before the flip:
+# strih+stream both serve obs_dll_sha256 + distroav_dll_sha256 + genlock_capability on :8899, and the CI
+# FAST manifest at the fleet marker SHA carries the same obs.dll (the #770 on-box byte gather is now
+# deployed fleet-wide -- the #1067 port4455 class). The fetch stays best-effort: a gh/network failure
+# (or an unresolvable marker SHA) yields "" -> the manifest is omitted for THAT run (a fetch outage is
+# not a box-drift signal), never a false refuse. VERSION_GATE_MANIFEST (if pre-set) wins.
 AUTO_WIN_MANIFEST="${VERSION_GATE_MANIFEST:-}"
-if [ -z "$AUTO_WIN_MANIFEST" ] \
-   && manifest_autosource_state_has_key "$VERSION_STRIH_STATE"  obs_dll_sha256 \
-   && manifest_autosource_state_has_key "$VERSION_STREAM_STATE" obs_dll_sha256 \
-   && manifest_autosource_state_has_key "$VERSION_STRIH_STATE"  genlock_capability \
-   && manifest_autosource_state_has_key "$VERSION_STREAM_STATE" genlock_capability; then
+if [ -z "$AUTO_WIN_MANIFEST" ]; then
   AUTO_WIN_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" windows-genlock-fast.yml obs-genlock-fast-dll \
     "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-fast-manifest.json")"
 fi
