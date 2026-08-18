@@ -240,3 +240,25 @@ sibling avoids with its stable `"${leg}:stale"` token.
 would otherwise yield empty facts -> the decider's `json.load` errors (swallowed by `2>/dev/null`)
 -> `action=""` -> no alarm AND the pending state resets, i.e. a silent mute. Mirror the sibling dev1
 watchdogs' fail-loud-by-name discipline.
+
+## Verifying the v1 A/V-sync meter is ALIVE in production — read-only agent-session recipe (#801)
+
+"Is the SyncNet av-sync daemon actually running on the stream box?" is answered read-only from an
+AGENT session via the `win-stream-snv` MCP (never ssh for a Windows box in an agent session —
+`win-ssh-vs-mcp.md`), safe even while a Full-path E2E rerun is in flight:
+
+- `TaskList` / `Get-ScheduledTaskInfo avsync-keepalive` → `LastResult=0` + a recent `LastRunTime`
+  (runs every ~5 min). `avsync-keepalive.log` tail shows `watchdog.ps1 already running (pid N) - no-op`
+  AND `avsync-vlc-monitor.ps1 already running (pid N) - no-op` — that no-op pair IS the liveness proof
+  (the keep-alive found both loops alive). A relaunch line instead means it just restarted one.
+- Heartbeat files `avsync-watchdog-heartbeat.txt` / `avsync-vlc-monitor-heartbeat.txt` fresh (mtime
+  within a few min) confirm the loops are writing.
+- **There is NO separate `av_sync_measure.py --loop` process, and NO srt://:9998 tap** — the
+  production wiring is `watchdog.ps1` (deployed from `scripts/avsync-watchdog.ps1`) grabbing from
+  `rtmp://127.0.0.1:1234/live/obs-e2e-test` and calling `av_sync_measure.py --media` one-shot. So
+  `ListProcesses python` shows restreamer/MCP/bundle-state python, NOT the meter — do NOT read that
+  absence as "the daemon is down". Judge liveness by the keepalive task + heartbeats, not a python PID.
+- `watchdog.log` reading `NO-SIGNAL - no verdict (ffmpeg rc=-5 (relay/stream down))` when no event is
+  live is NORMAL healthy self-skip (nothing to measure off-air), not a fault — same as the `#814`
+  no-signal semantics above. A GAP would be a STALE heartbeat (process dead) or `avsync-keepalive`
+  `LastResult != 0`.
