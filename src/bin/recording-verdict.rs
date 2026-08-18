@@ -2911,6 +2911,7 @@ fn build_and_print_verdict(
         imag,
         stream_av_sync,
         None,
+        None, // issue 1118: the fused/test path never degrades an imag partial (no schema skip)
     )
 }
 
@@ -2944,6 +2945,11 @@ fn build_and_print_verdict_with_stream_hashes(
     // in the #208 merge path on an all-cambox stream extract; see above). Fed to the #1088
     // dup-cadence block so it emits in the production `VERDICT_ON_STREAM=1` merge gate.
     stream_content_hashes: Option<Vec<u64>>,
+    // issue 1118 — `Some(reason)` when `run_merge` DROPPED a schema-mismatched imag partial (the
+    // report-only degrade path); surfaced at `full_chain.imag_leg_skip_reason` beside
+    // `imag_leg_verified` so a degraded run is mineable, never silent. `None` on every normal run
+    // and on the fused/test path.
+    imag_skip_reason: Option<String>,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -4299,6 +4305,19 @@ fn build_and_print_verdict_with_stream_hashes(
              this was a strih/stream-only merge). A full-chain E2E that silently skips the imag leg \
              is a hidden partial (issue 798); this NOTE + full_chain.imag_leg_verified make the skip \
              visible. Report-only — does NOT gate overall_pass."
+        );
+    }
+    // issue 1118 — when the imag partial was DROPPED because its schema mismatched this build (a
+    // stale on-imag emitter after a PARTIAL_SCHEMA_VERSION bump), record WHY beside the bare
+    // `imag_leg_verified=false`, so a degraded run is mineable rather than looking like a plain
+    // "imag never ran". Report-only: the imag leg is report-only, so dropping it never touches
+    // overall_pass — the verdict is computed from strih+stream exactly as every pre-1094 run was.
+    if let Some(reason) = &imag_skip_reason {
+        report["full_chain"]["imag_leg_skip_reason"] = serde_json::json!(reason);
+        println!(
+            "  [imag] leg DEGRADED this run (report-only, issue 1118): {reason} \
+             Verdict computed from the remaining (strih+stream) partials; \
+             does NOT gate overall_pass."
         );
     }
 
@@ -6455,12 +6474,44 @@ fn run_merge(args: &Args) -> Result<()> {
     // Each box's partial path, so after the verdict we can point the operator at the #186 pixel
     // proofs that box wrote during `--extract-partial` and the harness pulled back beside it.
     let mut box_paths: Vec<(String, PathBuf)> = Vec::new();
+    // issue 1118 — the reason the imag leg was DROPPED this run (a schema-mismatched report-only
+    // partial), surfaced at `full_chain.imag_leg_skip_reason` so a degraded run is mineable, not
+    // silent. `None` on a normal run.
+    let mut imag_skip_reason: Option<String> = None;
     for spec in &args.merge_partials {
         let (box_name, path) = spec
             .split_once('=')
             .with_context(|| format!("--merge-partials expects BOX=JSON, got {spec:?}"))?;
-        let partial = RecordingPartial::load(Path::new(path))
-            .with_context(|| format!("load partial {path}"))?;
+        // issue 1118 — the imag leg is REPORT-ONLY (`imag_leg_gate::gates_overall_pass()==false`),
+        // so a schema-mismatched imag partial must DEGRADE (drop it, keep merging strih+stream),
+        // never abort the whole merge with no verdict JSON (the fatal `load(path)?` before). The
+        // decision is the PURE crate-root `partial_schema_gate` seam (Tier-0-tested): it degrades
+        // ONLY a clean schema mismatch on a report-only box; strih/stream and every non-schema
+        // failure stay fatal.
+        let partial = match RecordingPartial::load(Path::new(path)) {
+            Ok(p) => p,
+            Err(e) => {
+                let found = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|s| camera_box::partial_schema_gate::peek_schema_version(&s));
+                match camera_box::partial_schema_gate::classify_load_failure(
+                    box_name,
+                    found,
+                    camera_box::probe::recording_partial::PARTIAL_SCHEMA_VERSION,
+                ) {
+                    camera_box::partial_schema_gate::PartialLoadDisposition::Degrade { reason } => {
+                        eprintln!(
+                            "WARNING: --merge-partials {box_name}={path}: {reason} Load error: {e:#}"
+                        );
+                        imag_skip_reason = Some(reason);
+                        continue;
+                    }
+                    camera_box::partial_schema_gate::PartialLoadDisposition::Fatal => {
+                        return Err(e).with_context(|| format!("load partial {path}"));
+                    }
+                }
+            }
+        };
         // The partial's recorded box name MUST match the slot it is assigned to — a strih
         // partial can NEVER be merged as the stream input (the #208 box-to-box guard, enforced
         // at the data level, not just the path).
@@ -6555,6 +6606,7 @@ fn run_merge(args: &Args) -> Result<()> {
         imag,
         stream_av_sync, // #312 item 2 (PR A): carried from the stream partial's --av-marker-log extract
         stream_content_hashes, // #1112: carried from the stream partial's all-cambox extract
+        imag_skip_reason, // issue 1118: Some when a schema-mismatched imag partial was dropped (degrade)
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
