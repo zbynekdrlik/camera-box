@@ -367,13 +367,16 @@ pub fn classify_av_audio_state(
     all_judged_candidates_zero: bool,
     preamble_screens_passed: u64,
 ) -> AvAudioState {
-    // STUB (#748 RED): always Measured — the real classification lands in the GREEN commit.
-    let _ = (
-        judged_cameras,
-        all_judged_candidates_zero,
-        preamble_screens_passed,
-    );
-    AvAudioState::Measured
+    if judged_cameras == 0 || !all_judged_candidates_zero {
+        // Nothing judged (vacuous all-zero), or a real measurement exists -> N/A. Never accuse
+        // the mbc chain of being silent on a run that actually measured something.
+        return AvAudioState::Measured;
+    }
+    if preamble_screens_passed == 0 {
+        AvAudioState::Silent
+    } else {
+        AvAudioState::PresentUndecoded
+    }
 }
 
 #[cfg(test)]
