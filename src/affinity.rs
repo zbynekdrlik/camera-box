@@ -374,7 +374,7 @@ pub fn setup_irq_affinity() {
         }
         match std::fs::write(&path, format!("{mask}\n")) {
             Ok(()) => {
-                tracing::info!("#289 IRQ {irq}: smp_affinity {prev} -> {mask} (capture core {core})")
+                tracing::info!("#289/899 IRQ {irq}: smp_affinity {prev} -> {mask} (target cores {target:?}, rt={is_rt}, capture core {core})")
             }
             // Managed (kernel-affinity) MSI IRQs reject smp_affinity writes (EIO) — non-fatal:
             // the cmdline irqaffinity=0-2 path that covers those ships via setup-device.sh STEP 10
