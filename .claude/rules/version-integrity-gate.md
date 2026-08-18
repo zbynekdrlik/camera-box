@@ -161,3 +161,28 @@ state JSONs carrying the byte-facet keys (`obs_dll_sha256`, `distroav_dll_sha256
 --genlock-sha imag=<sha>` from the repo root and assert exit 20 (byte drift → REFUSE, names the
 drifted component + box) / exit 0 (bytes match → GATE PASS). This is the genuine offline verification
 for the Rust fixtures (which only compile+run at CI/integration).
+
+## #1100 — imag byte facet ENFORCED; Windows half STAGED (the bundle-state-server can be STALE)
+
+`version-integrity-gate.sh`'s imag `.so` byte facet is now ENFORCED (the #758-shape flip of #1082's
+opt-in landing): `imag_bytes_verdict`'s two DORMANT `return 10` branches are UNKNOWN `return 11`, and
+`main()` runs the facet UNCONDITIONALLY (the `if [ -n "$imag_bytes" ] || [ -n "$imag_manifest" ]`
+guard removed) — an absent imag gather/manifest is now a gate-blocking UNKNOWN. Enforced-fixture tests
+carry clean imag args via the new `clean_imag_bytes_1100(tag)` helper (the imag analogue of
+`with_sha`/`with_obs_identity_ok`). Preconditions verified live before flipping: imag `.so`s present +
+hashable at `/usr/lib/x86_64-linux-gnu/`, and `imag_so_bytes OK` on the last green E2E `[0/8]` log.
+
+**The WINDOWS obs.dll/distroav.dll byte half is STILL STAGED (the #1100 follow-up):** removing the
+`manifest_autosource_state_has_key … obs_dll_sha256` opt-in guard in `recording-e2e.sh` requires
+strih+stream to actually serve `obs_dll_sha256`/`distroav_dll_sha256` on `:8899`. **Root cause it did
+NOT (2026-08-18): the deployed `C:\ProgramData\camera-box\bundle-state-server.py` +
+`bundle_state_gather.py` are deployed by a SEPARATE mechanism from the OBS genlock bundle, so a
+full-bundle OBS redeploy to a fresh canonical SHA does NOT update them.** They were dated 2026-08-16
+21:03 — PREDATING #770's byte-gather (`61b128162`, 22:46) — and had no `component_sha256`/
+`obs_dll_sha256` code at all, so the keys were omit-when-empty absent even though obs.dll/distroav.dll
+were present + hashable on-box. **Verify precondition 1 by the DEPLOYED SERVER, never the OBS bundle
+SHA:** `curl http://<box>:8899/bundle-state.json` must show `obs_dll_sha256` + `distroav_dll_sha256`
+(or grep the deployed `.py` for `component_sha256`). **Unblock:** redeploy the current
+bundle-state-server scripts to strih+stream + restart the `BundleStateServer` scheduled task, confirm
+the keys appear on BOTH, THEN remove the `recording-e2e.sh` guard — same LIVE-Windows-property class as
+#1067's port4455 caveat.
