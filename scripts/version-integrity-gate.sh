@@ -343,10 +343,10 @@ Options:
                     here). Repeatable. A box with no
                     file is UNKNOWN -> the gate refuses.
   --imag-manifest PATH  #1082 -- the CI-authoritative linux BUNDLE_MANIFEST.json for imag's build,
-                    against which imag's DEPLOYED .so bytes are compared. OPT-IN.
+                    against which imag's DEPLOYED .so bytes are compared. ENFORCED (#1100).
   --imag-bytes LABEL=path=sha,...  #1082 -- imag's DEPLOYED libobs.so.30 / distroav.so /
                     libobs-opengl.so.30 sha256s (gathered over ssh; imag is not a --win-state box).
-                    OPT-IN: absent -> the imag byte facet is DORMANT (never a spurious refuse).
+                    ENFORCED (#1100): absent -> the imag byte facet is UNKNOWN -> the gate refuses.
 
 Exit: 0 = every box matches the pinned set (proceed), 20 = a box DRIFTED (REFUSED),
 11 = a box UNKNOWN/unread (INCOMPLETE, not clean), 1 = usage error.
@@ -363,7 +363,7 @@ main() {
   local -a genlock_sha=()
   # #1082 -- imag (Linux) .so BYTE parity: a linux BUNDLE_MANIFEST for imag's build + imag's DEPLOYED
   # .so sha256s (LABEL=path=sha,...), gathered over ssh (imag is NOT a --win-state bundle-state box).
-  # Both OPT-IN: absent -> the facet is DORMANT (skipped), never a spurious refuse.
+  # Both ENFORCED (#758-shape, #1100): absent -> the facet is UNKNOWN -> the gate refuses.
   local imag_manifest="" imag_bytes=""
   while [ $# -gt 0 ]; do
     case "$1" in

@@ -1284,8 +1284,8 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
 // component resolver knows only the Windows DLL basenames. The gate now takes a TARGETED per-.so
 // facet (--imag-manifest + --imag-bytes) that resolves each gathered .so path via manifest_sha_for_path
 // (the linux resolver) — a per-path compare, NOT the whole-bundle walk, so a partial 3-file ssh gather
-// never flips the gate UNKNOWN. OPT-IN (#756-shape): DORMANT when the gather/manifest is absent, so a
-// live gather/auto-source failure never spuriously refuses (the ENFORCE flip, #1082 part 3, is deferred).
+// never flips the gate UNKNOWN. ENFORCED (#758-shape, #1100): an absent gather/manifest is a
+// gate-blocking UNKNOWN, so every box must report its .so bytes (the #1082-part-3 flip, landed in #1100).
 
 const LIBOBS_SO_PATH_1082: &str = "lib/x86_64-linux-gnu/libobs.so.30";
 const DISTROAV_SO_PATH_1082: &str = "lib/x86_64-linux-gnu/obs-plugins/distroav.so";
