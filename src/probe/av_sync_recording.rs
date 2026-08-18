@@ -10,9 +10,9 @@
 
 use crate::probe::recording::analyze_recording;
 use crate::qpsk_marker::{
-    av_offset_candidates_deduped, cluster_offset_ms, decode_markers, marker_coverage_gap_message,
-    marker_coverage_overlaps_video_ticks, parse_ffprobe_start_time, parse_qpsk_marker_log,
-    AudioParams, AvOffset, DEDUPE_SAME_FID_WINDOW_S,
+    av_offset_candidates_deduped, cluster_offset_ms, decode_markers, decode_markers_with_stats,
+    marker_coverage_gap_message, marker_coverage_overlaps_video_ticks, parse_ffprobe_start_time,
+    parse_qpsk_marker_log, AudioParams, AvOffset, DEDUPE_SAME_FID_WINDOW_S,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -270,6 +270,14 @@ pub struct AvMarkerInputs {
     /// caller pairs these directly against `(tick, video_ts)` samples built on the SAME container
     /// timeline (see `crate::av_window::window_ticks`).
     pub audio_markers: Vec<(f64, u8)>,
+    /// #748: total QPSK preamble-onset count over the whole recording's audio
+    /// ([`crate::qpsk_marker::DecodeStats::preamble_screens_passed`]). Zero means the demod never
+    /// saw preamble energy (no/near-silent signal) — the discriminator the fused verdict uses to
+    /// tell a silent mbc chain apart from a present-but-undecoded one when `candidates == 0`
+    /// everywhere. `#[serde(default)]` so an older partial JSON (before this field existed)
+    /// deserializes to 0 — the safe, loud default (treated as silent on an all-zero run).
+    #[serde(default)]
+    pub audio_preamble_screens_passed: u64,
 }
 
 /// Decode the [`AvMarkerInputs`] for `recording` — the exact SAME ffmpeg/ffprobe glue
@@ -299,7 +307,11 @@ pub fn decode_av_marker_inputs(
     let video_start = probe_stream_start_time(recording, "v:0")?;
     let audio_start = probe_stream_start_time(recording, &format!("a:{audio_track}"))?;
     let audio = extract_audio_mono_f32(recording, audio_track, params.sample_rate)?;
-    let audio_markers: Vec<(f64, u8)> = decode_markers(&audio, params, threshold)
+    // #748: keep the decode STATS — `preamble_screens_passed` is the silent-vs-undecoded signal
+    // the fused verdict emits (see `AvMarkerInputs::audio_preamble_screens_passed`). Same decode
+    // as before, stats no longer discarded.
+    let (decoded, stats) = decode_markers_with_stats(&audio, params, threshold);
+    let audio_markers: Vec<(f64, u8)> = decoded
         .into_iter()
         .map(|(ts, idx)| (audio_start + ts, idx))
         .collect();
@@ -308,5 +320,6 @@ pub fn decode_av_marker_inputs(
         video_start_s: video_start,
         emit_log,
         audio_markers,
+        audio_preamble_screens_passed: stats.preamble_screens_passed,
     })
 }

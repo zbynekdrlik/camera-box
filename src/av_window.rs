@@ -319,11 +319,11 @@ pub fn derive_camera_av_sync(
 
 /// #748 — the discriminator for a fused A/V-sync run in which EVERY judged camera produced zero
 /// candidate offsets. `candidates == 0` alone conflates two very different causes, and the
-/// operator alert must not blame the wrong one:
-///   * a genuinely SILENT measurement chain (mbc Ableton mic muted / Dante misroute) — the #748
-///     incident, where a full cycle burned reported only as a quiet `candidates: 0`; and
-///   * audio PRESENT but the QPSK marker never clustered (a broken emit/painter side, or a
-///     marker-decode regression) — the mbc mute is NOT the cause there.
+/// operator alert must not blame the wrong one: (a) a genuinely SILENT measurement chain (mbc
+/// Ableton mic muted / Dante misroute) — the #748 incident, where a full cycle burned reported
+/// only as a quiet `candidates: 0`; versus (b) audio PRESENT but the QPSK marker never clustered
+/// (a broken emit/painter side, or a marker-decode regression) — where the mbc mute is NOT the
+/// cause.
 /// The QPSK demod already separates them: [`crate::qpsk_marker::DecodeStats::preamble_screens_passed`]
 /// counts sample onsets whose preamble screen crossed threshold — zero means the demod never saw
 /// anything resembling the marker (no/near-silent signal), so a positive count on an all-silent

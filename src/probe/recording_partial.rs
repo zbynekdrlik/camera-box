@@ -321,6 +321,7 @@ mod tests {
                 (1, 260, 1_700_000_003_000_000_000),
             ],
             audio_markers: vec![(0.812, 0), (3.805, 1)],
+            audio_preamble_screens_passed: 2, // #748: proves the new field round-trips
         };
         let p = RecordingPartial::from_frames(
             "stream",
