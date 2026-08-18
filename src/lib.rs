@@ -23,13 +23,19 @@ pub mod grab_record;
 pub mod intercom;
 #[cfg(target_os = "linux")]
 pub mod ndi;
+// (#1113) genlock capture->emit pacing gate — the pure wall-clock decimation math extracted out of
+// the 2555-line `ndi.rs` (issue-1111 review). Linux-gated in lock-step with `ndi` (whose
+// NDI-timecode grid it complements); pure `u64` logic otherwise, Tier-0 tests on the Linux `test`
+// CI job (default features), mirroring the `genlock_stamp` / `dupe_decimation` sibling precedents.
+#[cfg(target_os = "linux")]
+pub mod genlock_pacing;
 // #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Linux-gated because it reuses
 // the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
 #[cfg(target_os = "linux")]
 pub mod genlock_stamp;
 // (#889) dupe-preferring decimation for the genlock capture->emit gate — a fast/over-rate
 // grabber's internal-buffer repeat gets preferentially shed over the genuine unique tick next to
-// it. Linux-gated because it wraps the ndi boundary math (`ndi::genlock_emit_gate`) and is
+// it. Linux-gated because it wraps the ndi boundary math (`genlock_pacing::genlock_emit_gate`) and is
 // shaped around a raw V4L2 YUYV422 frame; pure logic otherwise, unit-tests Tier-0 on the Linux
 // `test` CI job (default features).
 #[cfg(target_os = "linux")]
