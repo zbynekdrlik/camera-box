@@ -1842,6 +1842,55 @@ def switch(a):
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
 
 
+def _idle_restore_settings(restore):
+    """#1086 keepalive-bypass PRIMITIVE (PURE, testable — no I/O): the ``SetInputSettings`` payload
+    to idle (tear down) or restore a strih NDI receiver.
+
+    - ``restore`` falsy → clear ``ndi_source_name`` (+ ``genlock_fifo`` off): DistroAV tears the
+      receiver down cleanly — the SAME idle discipline ``_quiesce_probe_input``/teardown already
+      use — so the source goes GENUINELY cold even under the #767 ``PROP_BEHAVIOR_KEEP_ACTIVE``
+      keep-alive build (which otherwise keeps every receiver warm off-program).
+    - ``restore`` a name → set ``ndi_source_name`` back (+ ``genlock_fifo`` on): re-create the
+      receiver from cold so the caller's next program cut measures the cold wake-up onset.
+
+    Always applied with ``overlay: True`` (see ``idle_receiver``), so ONLY these two keys change —
+    the per-source ``genlock_latency_ms_src`` pin and everything else are preserved, and the input
+    ends the test exactly as it started once restored.
+    """
+    if restore:
+        return {"ndi_source_name": restore, "genlock_fifo": True}
+    return {"ndi_source_name": "", "genlock_fifo": False}
+
+
+def idle_receiver(a):
+    """#1086 keepalive-bypass PRIMITIVE: idle (``--input`` only) or restore (``--restore <name>``)
+    a strih NDI receiver by input name, to force a GENUINELY-cold cold cut under the #767 keep-alive
+    build. TEST TOOLING ONLY — never run in a normal E2E (recording-e2e.sh gates every call on
+    ``COLD_CUT_BYPASS_CAM``; see scripts/lib/cold-cut-step.sh).
+
+    On idle it first READS + prints the input's current ``ndi_source_name`` (``PREV_NDI_NAME=<name>``
+    on stdout) so the caller can pass it back to ``--restore`` after the cold hold; then clears it.
+    ``overlay: True`` keeps the genlock latency pin intact (see ``_idle_restore_settings``). After the
+    write it waits one render tick (``_QUIESCE_RENDER_TICK_S``) for DistroAV's av_thread to finish
+    tearing down / rebinding, mirroring ``_quiesce_probe_input``."""
+    ws = _conn(a.host, a.password)
+    try:
+        if not a.restore:
+            prev = _rpc(ws, "GetInputSettings", {"inputName": a.input}, ignore_err=True)
+            prev_name = (prev.get("inputSettings") or {}).get("ndi_source_name", "")
+            print(f"PREV_NDI_NAME={prev_name}")
+        _rpc(ws, "SetInputSettings", {
+            "inputName": a.input,
+            "inputSettings": _idle_restore_settings(a.restore),
+            "overlay": True,
+        })
+        time.sleep(_QUIESCE_RENDER_TICK_S)
+    finally:
+        ws.close()
+    action = f"restored to {a.restore!r}" if a.restore else "idled (torn down cold)"
+    print(f"[obs] {a.host}: #1086 receiver '{a.input}' {action}")
+
+
 def _rig_busy_partition(diagnostics):
     """#649/#657 (pure, testable — no I/O): partition per-box streaming/recording booleans into
     the three mutually-exclusive categories both _rig_busy_hint (the human-readable diagnosis)
@@ -2327,7 +2376,7 @@ def main():
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
         "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
-        "republish-black-check",
+        "republish-black-check", "idle-receiver",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -2434,6 +2483,12 @@ def main():
             # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
             # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
             p.add_argument("--program-scene", required=True)
+        if name == "idle-receiver":
+            # #1086 keepalive-bypass PRIMITIVE (TEST TOOLING ONLY): --input is the strih NDI
+            # input to idle/restore. Omit --restore to idle (tear the receiver down cold + print
+            # PREV_NDI_NAME=...); pass --restore <ndi_name> to re-point it after the cold hold.
+            p.add_argument("--input", required=True)
+            p.add_argument("--restore", default="")
     # #406/#312 item5: `rig-busy-check` queries TWO hosts (strih + stream), not the single --host
     # every other subcommand takes above — its own parser, added separately.
     rbc = sub.add_parser("rig-busy-check")
@@ -2450,7 +2505,8 @@ def main():
      "program-rendered-input": program_rendered_input,
      "assert-program-nonblack": assert_program_nonblack,
      "mbc-input-check": mbc_input_check,
-     "republish-black-check": republish_black_check}[a.cmd](a)
+     "republish-black-check": republish_black_check,
+     "idle-receiver": idle_receiver}[a.cmd](a)
 
 
 if __name__ == "__main__":
