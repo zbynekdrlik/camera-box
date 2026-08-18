@@ -143,3 +143,34 @@ constraints baked in:
   fixtures already carry `gm_source_ip`; a foreign-GM test just sets it to a non-rig IP, and
   `DANTESYNC_GATE_GM_ENFORCE=1` (env) exercises the blocking path. A stream-only invocation still
   needs `--ntp-master ""` to pass the master-name guard (unrelated to GM).
+
+## `DANTESYNC_GATE_GM_ENFORCE` — grandmaster IDENTITY enforcement (LIVE since #1073)
+
+`gm_check` (`clock-offset-guard.sh:658`, rc 0 OK / 2 FOREIGN / 3 UNKNOWN) checks every HTTP-graded
+node's `gm_source_ip` against `GATE_GRANDMASTER_IP` (`RIG_GRANDMASTER_IP`, default `10.77.9.184`).
+It ALWAYS prints its `GM OK/FOREIGN/UNKNOWN` line, but its rc only feeds `node_verdict` when
+`GATE_GM_ENFORCE=1` (`dantesync-gate.sh:600`). Env: `DANTESYNC_GATE_GM_ENFORCE`, default `0`
+(report-first, `dantesync-gate.sh:169`); `!=0 && !=1` is a hard config error (`:920`).
+
+- **What it gates: IDENTITY only, never OFFSET.** A node PTP-locked to a FOREIGN grandmaster (the
+  stream-on-`10.77.7.109` false-green issue 834) passes the offset+PTP grade while being on a
+  different timebase — `gm_check` is the only term that catches it. The ~23ppm GM-frequency
+  step-storm is a SEPARATE offset-gate concern (issue 1108), untouched by this flag.
+- **Flipped LIVE at BOTH `recording-e2e.sh` invocations** (main `[0/8]` gate ~line 705 grading
+  cam1/cam2/strih/stream; `#947` secondary ~line 1071 grading strih) via an env PREFIX
+  `DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh"`. The gate's own DEFAULT stays `0`, so
+  standalone/dry-run callers and `verify-imag.sh` (which enforces via its OWN direct
+  `gm_check`→`fail`, ~line 1087) are unaffected — do NOT change the gate default to enforce.
+- **Only HTTP-graded nodes are gm_checked.** The journal FALLBACK path returns BEFORE `gm_check`
+  (journald carries no `gm_source_ip`); the grandmaster device itself is never a graded node. On
+  enforce: FOREIGN→exit 20, UNKNOWN (unread `gm_source_ip`)→exit 11.
+- **Verify-before-flip (never flip a gate red):** the enforced condition = every HTTP-graded node
+  reports `gm_source_ip=RIG_GRANDMASTER_IP`. Prove it live by SOURCING `clock-offset-guard.sh` and
+  running `gm_check <node> "$(gm_source_ip_from_pipe_json "$(curl -fsS http://<ip>:8898/status)")"
+  10.77.9.184` on each graded node — all must be rc=0. Never enforce while any graded node is on a
+  foreign/unreadable GM (that is exactly why #834 shipped report-first).
+- **TDD an env-var flip on a subprocess call by asserting the ENV VALUE, not argv:** run the REAL
+  script region against a fake `dantesync-gate.sh` that logs `${DANTESYNC_GATE_GM_ENFORCE:-UNSET}`;
+  `env_remove` it in the harness for a genuine RED; assert `ENFORCE=1`. A static "text present"
+  check cannot prove the prefix is on the right line or well-formed. See
+  `tests/harness_recording_e2e_gm_enforce_1073.rs`.
