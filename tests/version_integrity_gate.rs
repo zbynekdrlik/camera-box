@@ -162,6 +162,7 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
         "stream_pin",
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("both");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -169,6 +170,10 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(
         code, 0,
@@ -181,6 +186,7 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
 
 #[test]
@@ -231,6 +237,7 @@ fn gate_passes_when_fleet_genlock_builds_are_in_parity_756() {
         "stream_parity_ok",
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("parity756");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -238,6 +245,10 @@ fn gate_passes_when_fleet_genlock_builds_are_in_parity_756() {
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(
         code, 0,
@@ -250,6 +261,7 @@ fn gate_passes_when_fleet_genlock_builds_are_in_parity_756() {
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
 
 #[test]
@@ -337,6 +349,7 @@ fn gate_passes_when_a_windows_only_vendor_change_advances_strih_stream_past_imag
         "stream_949_incident",
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, WIN_INCIDENT_SHA_949), false),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("vendor949");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -344,6 +357,10 @@ fn gate_passes_when_a_windows_only_vendor_change_advances_strih_stream_past_imag
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={IMAG_INCIDENT_SHA_949}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(
         code, 0,
@@ -361,6 +378,7 @@ fn gate_passes_when_a_windows_only_vendor_change_advances_strih_stream_past_imag
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
 
 #[test]
@@ -1067,6 +1085,7 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
             ],
         ),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("noahk826");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -1074,6 +1093,10 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(
@@ -1082,6 +1105,7 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
 
 // ── #770: byte-derived DistroAV/libobs parity — the [0/8] gate compares the DEPLOYED plugin/core
@@ -1223,6 +1247,7 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
             false,
         ),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("bytes770");
     let (code, stdout, stderr) = run_gate(&[
         "--manifest",
         manifest.to_str().unwrap(),
@@ -1232,6 +1257,10 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(
         code, 0,
@@ -1244,6 +1273,7 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
     let _ = std::fs::remove_file(&manifest);
 }
 
@@ -1287,6 +1317,18 @@ fn clean_fleet_states_1082(sha: &str, tag: &str) -> (PathBuf, PathBuf) {
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, sha), false),
     );
     (s, t)
+}
+
+/// #1100 — the imag .so byte facet is now ENFORCED, so a GATE-PASS fixture must ALSO carry a matching
+/// imag manifest + gathered bytes (the imag analogue of with_sha / with_obs_identity_ok's enforced-key
+/// injection). Writes a clean linux manifest and returns (manifest_path, imag_bytes_csv) whose bytes
+/// match it -> imag_bytes_verdict OK. `tag` = caller-unique suffix (parallel tests share one pid dir).
+fn clean_imag_bytes_1100(tag: &str) -> (PathBuf, String) {
+    const LIBOBS: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    let manifest = write_linux_manifest(&format!("imag_clean_1100_{tag}"), LIBOBS, DISTROAV);
+    let csv = format!("imag={LIBOBS_SO_PATH_1082}={LIBOBS},{DISTROAV_SO_PATH_1082}={DISTROAV}");
+    (manifest, csv)
 }
 
 #[test]
