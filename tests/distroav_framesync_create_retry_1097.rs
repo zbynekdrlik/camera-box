@@ -20,7 +20,7 @@
 //! (`process_empty_frame`), give the reconnect a fresh #767 stale window (`was_disconnected = true`),
 //! back off (the SHARED pure `ndi_recv_create_retry_backoff_ns(unsigned)` helper — generic bounded
 //! exponential, retry COUNT never capped), re-arm `reset_ndi_receiver` under `config_mutex`, and
-//! `continue` so the next iteration's reset block (recv_destroy + framesync_destroy(nullptr))
+//! `continue` so the next iteration's reset block (recv_destroy frees the valid receiver; framesync_destroy is skipped by its null-guard)
 //! cleans up and re-creates. It uses its OWN `framesync_create_fail_count`, NOT the shared
 //! `recv_create_fail_count`, so (a) the live-tested #1080 recv_create retry path stays byte-for-byte
 //! unchanged and (b) a pure-framesync-failure loop still escalates its backoff (a successful

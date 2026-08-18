@@ -1048,7 +1048,7 @@ void *ndi_source_thread(void *data)
 					// permanent death. Retry in place instead: blank the source, back off (its own
 					// counter drives the SHARED #1080 exponential backoff), re-arm reset_ndi_receiver,
 					// and continue. A valid ndi_receiver already exists, so the NEXT iteration's reset
-					// block (recv_destroy + framesync_destroy(nullptr)) cleans up before recreating.
+					// block (recv_destroy frees the valid receiver; framesync_destroy is skipped by its null-guard) cleans up before recreating.
 					// Dormant on this appliance (GENLOCK_FORCED_SETTINGS forces PROP_FRAMESYNC false),
 					// kept correct so a future framesync-on config can never wedge here.
 					//
