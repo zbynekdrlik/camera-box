@@ -384,6 +384,10 @@ void render_display(struct obs_display *display)
 
 		GS_DEBUG_MARKER_END();
 
+		/* camera-box #1107: arm this display's present-vsync mode immediately before the
+		 * swap. Re-armed every tick per display on the single graphics thread (no race) →
+		 * the device-level flag is per-display-correct even across swapchain recreation. */
+		gs_present_vsync(display->vsync);
 		gs_present();
 
 		/* camera-box #278: update this monitoring display's render-cost EWMA (α=1/4) from
@@ -449,6 +453,16 @@ void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)
 			display->render_audit_id = ++next_audit_id;
 		}
 	}
+}
+
+/* camera-box #1107: mark this display's present as vsync'd (tear-free, eglSwapInterval 1 on the
+ * EGL winsys) or not. Set once from the Qt create thread (OBSProjector, for the fullscreen
+ * program projector only), read + armed on the graphics thread — same single-writer discipline
+ * as obs_display_set_render_divisor above. */
+void obs_display_set_vsync(obs_display_t *display, bool vsync)
+{
+	if (display)
+		display->vsync = vsync;
 }
 
 void obs_display_size(obs_display_t *display, uint32_t *width, uint32_t *height)

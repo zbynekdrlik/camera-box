@@ -692,6 +692,9 @@ EXPORT void gs_load_swapchain(gs_swapchain_t *swapchain);
 EXPORT void gs_clear(uint32_t clear_flags, const struct vec4 *color, float depth, uint8_t stencil);
 EXPORT bool gs_is_present_ready(void);
 EXPORT void gs_present(void);
+/* camera-box #1107: arm vsync (interval 1) for the next gs_present() on the current device;
+ * no-op on backends without the optional device_present_set_vsync export (D3D11/Metal). */
+EXPORT void gs_present_vsync(bool vsync);
 EXPORT void gs_flush(void);
 
 EXPORT void gs_set_cull_mode(enum gs_cull_mode mode);

@@ -1989,6 +1989,20 @@ void gs_present(void)
 	graphics->exports.device_present(graphics->device);
 }
 
+/* camera-box #1107: set the vsync mode for the NEXT gs_present() on the current device. Backed by
+ * the OPTIONAL device export device_present_set_vsync — only the GL/EGL backend implements it, so
+ * on D3D11/Metal the pointer is NULL and this is a no-op (their present path is unchanged). */
+void gs_present_vsync(bool vsync)
+{
+	graphics_t *graphics = thread_graphics;
+
+	if (!gs_valid("gs_present_vsync"))
+		return;
+
+	if (graphics->exports.device_present_set_vsync)
+		graphics->exports.device_present_set_vsync(graphics->device, vsync);
+}
+
 void gs_flush(void)
 {
 	graphics_t *graphics = thread_graphics;

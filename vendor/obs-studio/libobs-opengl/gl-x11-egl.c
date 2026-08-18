@@ -565,7 +565,11 @@ static void gl_x11_egl_device_present(gs_device_t *device)
 		free(xcb_event);
 	}
 
-	if (eglSwapInterval(device->plat->edisplay, 0) == EGL_FALSE) {
+	/* camera-box #1107: vsync (interval 1) ONLY when this device's present is armed for it
+	 * (render_display() sets it for the fullscreen program projector); interval 0 otherwise,
+	 * exactly as before. The interval is (re-)applied per present because it is per-bound-
+	 * surface EGL state and OBS presents several surfaces on this one context each tick. */
+	if (eglSwapInterval(device->plat->edisplay, device->present_vsync ? 1 : 0) == EGL_FALSE) {
 		blog(LOG_ERROR, "eglSwapInterval failed");
 	}
 	if (!eglSwapBuffers(device->plat->edisplay, device->cur_swap->wi->surface))

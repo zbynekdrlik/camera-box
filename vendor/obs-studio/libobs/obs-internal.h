@@ -331,6 +331,14 @@ struct obs_display {
 	uint32_t render_consecutive_skips;
 	uint32_t render_frame_counter;
 
+	/* camera-box #1107: when true, this display's present uses vsync (eglSwapInterval 1) so
+	 * its scanout is tear-free. Set ONLY for the fullscreen program projector (OBSProjector,
+	 * savedMonitor > -1 && !isMultiview) via obs_display_set_vsync(); every other display —
+	 * the OBS main window, the preview, the multiview — leaves it false → interval 0 → no
+	 * added blocking present. Armed each tick by render_display() (graphics-thread-only,
+	 * single-writer, same discipline as render_divisor). */
+	bool vsync;
+
 	/* camera-box #771: MV fps observability. A throttleable monitoring display (the
 	 * Multiview projector) emits a `multiview-audit:` line every ~5s carrying its ACTUAL
 	 * measured render cadence (real renders / window) so operators + drift-guard + the E2E

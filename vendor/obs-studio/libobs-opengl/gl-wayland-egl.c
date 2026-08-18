@@ -332,7 +332,11 @@ static void gl_wayland_egl_device_present(gs_device_t *device)
 {
 	struct gl_platform *plat = device->plat;
 	struct gl_windowinfo *wi = device->cur_swap->wi;
-	if (eglSwapInterval(plat->display, 0) == EGL_FALSE) {
+	/* camera-box #1107: parity with the x11 present — vsync (interval 1) only when this
+	 * device's present is armed for it, else 0 as before. The flag lives on gs_device (not
+	 * gl_windowinfo) precisely so this wayland path shares it with x11 without touching the
+	 * winsys-private, bmalloc'd windowinfo. */
+	if (eglSwapInterval(plat->display, device->present_vsync ? 1 : 0) == EGL_FALSE) {
 		blog(LOG_ERROR, "eglSwapInterval failed");
 	}
 	if (eglSwapBuffers(plat->display, wi->egl_surface) == EGL_FALSE) {

@@ -628,6 +628,14 @@ struct gs_device {
 	struct gl_platform *plat;
 	enum copy_type copy_type;
 
+	/* camera-box #1107: per-present vsync desire. Set by device_present_set_vsync() (driven
+	 * from gs_present_vsync(), which render_display() calls for the fullscreen program
+	 * projector ONLY) and READ by the EGL present (gl-x11-egl.c / gl-wayland-egl.c) to pick
+	 * eglSwapInterval 1 (vsync → tear-free scanout) vs 0 (immediate). Default false (this
+	 * struct is bzalloc'd in device_create) = the historic interval-0 behavior, so every
+	 * UNMARKED display (main window, preview, multiview) presents exactly as before. */
+	bool present_vsync;
+
 	GLuint empty_vao;
 	gs_samplerstate_t *raw_load_sampler;
 

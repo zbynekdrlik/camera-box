@@ -324,6 +324,18 @@ fail:
 	return errorcode;
 }
 
+/* camera-box #1107: mark whether the NEXT present on this device should vsync (eglSwapInterval 1,
+ * tear-free) or swap immediately (0). render_display() (obs-display.c) re-arms this every tick per
+ * display via gs_present_vsync(), so a single device-level flag is per-display-correct on the
+ * single serialized graphics thread even though it lives on the device rather than the swapchain.
+ * Exported (default visibility, like device_create above) so graphics-imports.c can
+ * GRAPHICS_IMPORT_OPTIONAL it; the D3D11/Metal backends do NOT define it, so gs_present_vsync() is
+ * a no-op there and their present path stays byte-identical. Read by the EGL present functions. */
+void device_present_set_vsync(gs_device_t *device, bool vsync)
+{
+	device->present_vsync = vsync;
+}
+
 void device_destroy(gs_device_t *device)
 {
 	if (device) {

@@ -82,6 +82,14 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, 
 		// output + preview keep divisor 1 (render every frame) and are unaffected.
 		if (isMultiview)
 			obs_display_set_render_divisor(GetDisplay(), 2);
+		// camera-box #1107: a FULLSCREEN (savedMonitor > -1) NON-multiview projector is a
+		// program output on a physical display (imag-nb: the HDMI-1 IMAG projection). Mark
+		// its display vsync so the EGL present swaps tear-free (eglSwapInterval 1). Windowed
+		// projectors, the preview, the OBS main window and the multiview all stay interval-0
+		// (no added blocking present — multiview tear is acceptable operator monitoring, and
+		// render_divisor <= 1 alone cannot discriminate program from the divisor-0 main window).
+		if (savedMonitor > -1 && !isMultiview)
+			obs_display_set_vsync(GetDisplay(), true);
 	};
 
 	connect(this, &OBSQTDisplay::DisplayCreated, this, addDrawCallback);
