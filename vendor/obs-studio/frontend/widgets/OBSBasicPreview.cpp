@@ -1,4 +1,5 @@
 #include "OBSBasicPreview.hpp"
+#include <utility/obs-data-json-safe.hpp>
 
 #include <utility/display-helpers.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -787,8 +788,8 @@ void OBSBasicPreview::mouseReleaseEvent(QMouseEvent *event)
 	};
 
 	if (wrapper && rwrapper) {
-		std::string undo_data(obs_data_get_json(wrapper));
-		std::string redo_data(obs_data_get_json(rwrapper));
+		std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasicPreview undo");
+		std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasicPreview redo");
 		if (changed && undo_data.compare(redo_data) != 0)
 			main->undo_s.add_action(
 				QTStr("Undo.Transform").arg(obs_source_get_name(main->GetCurrentSceneSource())),

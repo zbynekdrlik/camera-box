@@ -18,6 +18,7 @@
 ******************************************************************************/
 
 #include "OBSBasic.hpp"
+#include <utility/obs-data-json-safe.hpp>
 
 #include <components/VolumeControl.hpp>
 #include <dialogs/OBSBasicFilters.hpp>
@@ -59,8 +60,8 @@ void OBSBasic::on_actionPasteTransform_triggered()
 
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(GetCurrentScene(), false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic clipboard filters undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic clipboard filters redo");
 	undo_s.add_action(QTStr("Undo.Transform.Paste").arg(obs_source_get_name(GetCurrentSceneSource())), undo_redo,
 			  undo_redo, undo_data, redo_data);
 }
@@ -264,7 +265,7 @@ void OBSBasic::CreateFilterPasteUndoRedoAction(const QString &text, obs_source_t
 	obs_data_set_string(undo_data, "uuid", uuid);
 	obs_data_set_string(redo_data, "uuid", uuid);
 
-	undo_s.add_action(text, undo_redo, undo_redo, obs_data_get_json(undo_data), obs_data_get_json(redo_data));
+	undo_s.add_action(text, undo_redo, undo_redo, OBSDataGetJsonSafe(undo_data, "OBSBasic clipboard paste undo"), OBSDataGetJsonSafe(redo_data, "OBSBasic clipboard paste redo"));
 }
 
 void OBSBasic::on_actionPasteFilters_triggered()

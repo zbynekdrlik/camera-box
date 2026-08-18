@@ -18,6 +18,7 @@
 ******************************************************************************/
 
 #include "OBSBasic.hpp"
+#include <utility/obs-data-json-safe.hpp>
 
 #include <qt-wrappers.hpp>
 
@@ -207,7 +208,7 @@ void OBSBasic::AddDropSource(const char *data, DropType image)
 		};
 
 		undo_s.add_action(QTStr("Undo.Add").arg(sourceName.c_str()), undo, redo, "",
-				  std::string(obs_data_get_json(wrapper)));
+				  OBSDataGetJsonSafe(wrapper, "OBSBasic dropfiles add"));
 		obs_scene_add(scene, source);
 	}
 }

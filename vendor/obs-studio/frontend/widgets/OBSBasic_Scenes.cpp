@@ -18,6 +18,7 @@
 ******************************************************************************/
 
 #include "OBSBasic.hpp"
+#include <utility/obs-data-json-safe.hpp>
 #include "OBSProjector.hpp"
 
 #include <dialogs/NameDialog.hpp>
@@ -455,7 +456,7 @@ void OBSBasic::RemoveSelectedScene()
 	obs_data_set_int(data, "index", ui->scenes->currentRow());
 
 	const char *scene_name = obs_source_get_name(source);
-	undo_s.add_action(QTStr("Undo.Delete").arg(scene_name), undo, redo, obs_data_get_json(data), scene_name);
+	undo_s.add_action(QTStr("Undo.Delete").arg(scene_name), undo, redo, OBSDataGetJsonSafe(data, "OBSBasic scene delete"), scene_name);
 
 	/* --------------------------- */
 	/* remove                      */
@@ -962,8 +963,8 @@ void OBSBasic::on_actionResetTransform_triggered()
 	obs_scene_enum_items(scene, reset_tr, nullptr);
 	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(scene, false);
 
-	std::string undo_data(obs_data_get_json(wrapper));
-	std::string redo_data(obs_data_get_json(rwrapper));
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic scene undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic scene redo");
 	undo_s.add_action(QTStr("Undo.Transform.Reset").arg(obs_source_get_name(obs_scene_get_source(scene))),
 			  undo_redo, undo_redo, undo_data, redo_data);
 
