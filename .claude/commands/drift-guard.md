@@ -82,7 +82,7 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    key so the engine reports UNKNOWN rather than a false clean.
 
 1d. **Gather each component's live BUILD SHA + the genlock CAPABILITY marker (#122).** A stock OBS
-   32.1.2 is byte-for-byte a DIFFERENT build from our genlock 32.1.2 but reports the IDENTICAL
+   32.2.0 is byte-for-byte a DIFFERENT build from our genlock 32.2.0 but reports the IDENTICAL
    marketing version — the marketing-version facet above cannot tell them apart (the #119/#120
    wrong-build-right-version that silently shipped). #122 closes that: read the deployed `obs.dll` +
    `distroav.dll` **Get-FileHash SHA256** (the actual bytes on the box) and the **genlock capability
@@ -266,7 +266,7 @@ deploy where even one non-DLL file is stale must never pass — deploy-from-clea
   deploys are user-timed). Run it read-only any time: `./scripts/drift-guard.sh --check-imag`.
 - The OBS **auto-update dialog disabled** (#43) is a *build* property, not runtime-readable off a
   running box, so it is guarded against the vendored source by `tests/obs_updater_disabled.rs`, not
-  here. A box running stock OBS 32.1.2 instead of our genlock build USED to be indistinguishable by
+  here. A box running stock OBS 32.2.0 instead of our genlock build USED to be indistinguishable by
   version alone — **#122 closes that**: step 1d reads each component's live BUILD SHA (obs.dll /
   distroav.dll Get-FileHash) + the genlock capability markers and step 2 fails on any mismatch vs the
   #120 manifest, so a stock/wrong build is now caught even when the marketing version matches. (The

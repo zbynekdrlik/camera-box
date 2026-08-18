@@ -1,7 +1,8 @@
 # Building the vendored AV stack
 
-Proven build (dev1, Ubuntu 24.04, 2026-06-12): vendored OBS 32.1.2 frontend binary +
-DistroAV 6.2.1 `distroav.so` against it, exit 0.
+Target: vendored OBS **32.2.0** frontend binary + DistroAV 6.2.1 `distroav.so` against it
+(rebased onto the current PPA base per #825; the pre-#825 32.1.2 build was proven on dev1,
+Ubuntu 24.04, 2026-06-12 — the recipe below is unchanged, the CI genlock workflows reprove it).
 
 ## Linux prototype build (dev1)
 
@@ -42,5 +43,5 @@ with the user, off-air.
   libobs core (where the genlock work lives — `ready_async_frame`/render tick), so
   prototype findings transfer to the production build.
 - rnnoise: cmake warns, then uses OBS's internal copy — fine.
-- Plugin ABI: DistroAV built against 32.1.2 libobs must ship together with that exact
+- Plugin ABI: DistroAV built against 32.2.0 libobs must ship together with that exact
   OBS — never mix with a stock OBS install (#45 drift guard enforces this).

@@ -126,11 +126,11 @@ fn manifest_lists_every_component_with_pinned_version_and_commit() {
     // REAL vendor/README.md pin table (single source of truth shared with drift-guard.sh). These are
     // the current pins; if a /update-av-stack bump re-pins them, the assertion documents the change.
     assert!(
-        m.contains("\"pinned_version\": \"32.1.2\""),
-        "OBS pinned_version 32.1.2 missing:\n{m}"
+        m.contains("\"pinned_version\": \"32.2.0\""),
+        "OBS pinned_version 32.2.0 missing:\n{m}"
     );
     assert!(
-        m.contains("\"pinned_commit\": \"fb4d98bf8\""),
+        m.contains("\"pinned_commit\": \"7546be726\""),
         "OBS pinned_commit missing:\n{m}"
     );
     assert!(

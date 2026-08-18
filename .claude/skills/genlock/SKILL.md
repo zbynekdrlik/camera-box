@@ -275,7 +275,7 @@ Both production broadcast OBS boxes upgraded in-place to the camera-box genlock 
 
 | | strih (10.77.9.202) | stream (10.77.9.204) |
 |---|---|---|
-| OBS version | 32.1.2 | 32.1.2 |
+| OBS version | 32.2.0 | 32.2.0 |
 | Build SHA | cf7b0606 | cf7b0606 |
 | Genlock active | YES | YES |
 | Genlock env | none — build default (#257) | none — build default (#257) |
@@ -482,7 +482,7 @@ execute the built `target/debug/deps/obs_titlebar_newlevel_parse-*` directly (no
 
 Two LAYERS guard "the deployed stack is the build we think it is":
 
-- **drift-guard (#45)** — marketing versions + critical settings (OBS 32.1.2 / DistroAV
+- **drift-guard (#45)** — marketing versions + critical settings (OBS 32.2.0 / DistroAV
   6.2.1 / fps / genlock gate / input latency / canonical plugin path).
   `scripts/drift-guard.sh --check-pins` (CI) + `--compare` (live box). Pins live in
   the `vendor/README.md` version + settings tables. The version+settings facet alone
@@ -523,7 +523,7 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   `bin/64bit/obs.dll` + `obs-plugins/64bit/distroav.dll` resolve) AND the genlock
   CAPABILITY marker text (`genlock_capability=` — the build-unique `render tick ENABLED`
   / `sub-frame jitter reserve` / `timestamp-aligned release` log lines). A STOCK OBS
-  32.1.2 (same version, different bytes, emits NO genlock marker) → DRIFT (exit 20) even
+  32.2.0 (same version, different bytes, emits NO genlock marker) → DRIFT (exit 20) even
   though every version/setting line reads OK — closes the #119 gap the marketing-version
   facet alone could not. Facet is OPT-IN: no `manifest=` → historic version-only contract;
   with it, an unread live SHA/capability is UNKNOWN (exit 11), never a silent clean. New
@@ -691,7 +691,7 @@ is captured here. Do NOT copy or commit changes to them for new work.
 ## Drift Guard
 
 `scripts/drift-guard.sh` + `/drift-guard` enforces the pinned zero-loss set:
-OBS 32.1.2, DistroAV 6.2.1, NDI runtime 6.3.2.0, genlock_wall_clock=1, and the per-box output fps.
+OBS 32.2.0, DistroAV 6.2.1, NDI runtime 6.3.2.0, genlock_wall_clock=1, and the per-box output fps.
 `--check-pins` in CI, `--compare` read-only live. Both boxes verified NO DRIFT (2026-06-14).
 
 **output_fps is HOST-KEYED.** The single `output_fps` pin is gone; the manifest pins

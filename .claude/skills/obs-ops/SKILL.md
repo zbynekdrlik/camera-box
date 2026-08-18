@@ -197,7 +197,7 @@ The user has repeated this 2-3× and gets angry when re-asked which recovery met
 
 1. **Normal case:** graceful shutdown via OBS WebSocket `ExitOBS`
    (ws://<box>:4455; strih pwd: <OBS-strih-WS-pwd — NOT committed; in the box's OBS config / password store> if required; stream: no auth).
-   **NB (#225):** the **genlock OBS build 32.1.2 / obs-websocket 5.7.3 does NOT expose `ExitOBS`**
+   **NB (#225):** the **genlock OBS build 32.2.0 / obs-websocket 5.7.3 does NOT expose `ExitOBS`**
    in its `availableRequests` — the request returns code 204 `UnknownRequestType`. So a graceful
    WebSocket exit is unavailable on this build; to restart it for a config change, gracefully
    `StopStream`/`StopRecord` over WS first (clean disconnect from the restreamer), then fall through

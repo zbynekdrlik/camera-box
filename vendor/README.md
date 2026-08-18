@@ -7,7 +7,7 @@ an unpinned/stock build.
 
 | dir | upstream | version | imported as |
 |---|---|---|---|
-| `vendor/obs-studio` | github.com/obsproject/obs-studio | **32.1.2** (commit `fb4d98bf8`) | git subtree --squash |
+| `vendor/obs-studio` | github.com/obsproject/obs-studio | **32.2.0** (commit `7546be726`) | git subtree --squash |
 | `vendor/distroav` | github.com/DistroAV/DistroAV | **6.2.1** (commit `038d9d6`) | git subtree --squash |
 | `vendor/av-sync-dock` | github.com/norihiro/obs-audio-video-sync-dock | **0.1.4** | vendored files (#188 A/V-sync dock) |
 | `vendor/av-sync-dock/deps/quirc` | github.com/dlbeer/quirc | commit `927d680904dc95fdff4cd9d022eb374b438ff8f2` | vendored `lib/` sources (pin in `deps/quirc/QUIRC_PINNED_SHA.txt`) |
@@ -83,7 +83,7 @@ CI runners can't reach the production LAN, so the live facet is operator/agent-d
 
 ## Per-component SHA manifest in the bundle (#120, EPIC #125)
 
-drift-guard above pins the **marketing versions** (OBS 32.1.2 / DistroAV 6.2.1) — it cannot catch a
+drift-guard above pins the **marketing versions** (OBS 32.2.0 / DistroAV 6.2.1) — it cannot catch a
 build that shipped the *right version* but the *wrong bytes*. That is exactly #119: the
 windows-genlock artifact once bundled a **pre-#97 DistroAV** (a stale prebuilt `distroav.dll`), so the
 preload knob was inert even though every version check passed. The windows-genlock build now

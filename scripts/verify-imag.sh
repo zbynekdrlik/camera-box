@@ -217,7 +217,7 @@ DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
 RIG_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
 # #824: same pin + same default setup-imag.sh itself uses -- a superseded PPA binary breaks every
 # stock plugin (obs-websocket included) if the base version drifts past the genlock build's own.
-IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.1.2-0obsproject1~noble}"
+IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.2.0-0obsproject1~noble}"
 IMAG_HOSTNAME_EXPECT="${IMAG_HOSTNAME_EXPECT:-imag-nb}"
 
 # =================================================================================================

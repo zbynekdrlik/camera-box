@@ -1,6 +1,6 @@
 name: Linux genlock build (vendored OBS + DistroAV, imag-nb parity)
 
-# camera-box #460: builds the vendored, genlock-patched OBS 32.1.2 + DistroAV for LINUX
+# camera-box #460: builds the vendored, genlock-patched OBS 32.2.0 + DistroAV for LINUX
 # (imag-nb, Ubuntu 24.04/noble) — the user mandates the CUSTOM genlock stack on imag-nb; the
 # stock DistroAV bootstrap there was only ever a placeholder. Research (2026-07-03, issue #460)
 # found the patch surface is ALREADY Linux-ready — every genlock/DistroAV patch that touches
@@ -107,7 +107,7 @@ jobs:
         working-directory: vendor/obs-studio
         run: >
           cmake --preset ubuntu-ci
-          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_BROWSER=OFF
           -DENABLE_FRONTEND=OFF
           -DENABLE_PLUGINS=OFF
@@ -185,7 +185,7 @@ jobs:
         working-directory: vendor/obs-studio
         run: >
           cmake --preset ubuntu-ci
-          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF
           -DENABLE_VLC=OFF
