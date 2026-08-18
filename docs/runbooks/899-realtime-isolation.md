@@ -36,11 +36,15 @@ These interact — the fix is one coherent decision, not three independent patch
   reboot.
 - **Defect 2's false comment corrected.** `systemd/camera-box.service` now states the honest state
   (whole-process FIFO 50; grab raised to 90; a hardirq still preempts on non-RT) and points here.
-- **verify-device.sh gains a lock** (check `(r)`): on a non-RT kernel it FAILs if the capture IRQ
-  is on the grab core, PASSes when it is on the general cores; on an RT kernel the reverse. It also
-  reports the PREEMPT_RT status as a WARN (informational — the fleet is not RT yet, so it never
-  fails provisioning on that account). A box still running the pre-899 binary will fail check `(r)`
-  until it is redeployed — that is the acceptance gate correctly flagging "not yet at target".
+- **verify-device.sh surfaces the drift** (check `(ac)`, WARN-only for now): it reports the
+  PREEMPT_RT status (defect 1 — informational, the fleet is not RT yet) and whether the xhci capture
+  IRQ is routed OFF the isolated grab core on a stock kernel (defect 3). A box still running the
+  pre-899 binary WARNs (`capture IRQ … is on the isolated grab core … — redeploy the issue-899
+  binary`); a redeployed box reads `ok-off-grab`. It is WARN-only deliberately so it never
+  red-fails the current fleet's acceptance gate before the coordinated redeploy — the flip to a
+  hard FAIL is a documented follow-up gated on that redeploy (mirroring the repo's established
+  report-only→blocking seam pattern). On a PREEMPT_RT kernel it instead expects the IRQ co-located
+  on the grab core (`ok-on-grab`).
 
 ## STAGED step A — PREEMPT_RT kernel, fleet-wide (reboot-class — supervisor only)
 
