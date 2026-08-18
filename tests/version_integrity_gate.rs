@@ -1273,13 +1273,17 @@ fn write_linux_manifest(name: &str, libobs_sha: &str, distroav_sha: &str) -> Pat
 /// Build a clean, PASSING fleet (strih/stream pinned + obs-identity + a matching genlock_build_sha,
 /// imag's marker matching via --genlock-sha) so the ONLY signal a byte test can move is the imag .so
 /// facet. Returns (strih_state, stream_state) paths.
-fn clean_fleet_states_1082(sha: &str) -> (PathBuf, PathBuf) {
+fn clean_fleet_states_1082(sha: &str, tag: &str) -> (PathBuf, PathBuf) {
+    // `tag` = caller-unique suffix: the _1082 tests all share one SHA const, run in PARALLEL
+    // threads of ONE process (same pid dir), and each removes its state files at the end -- a
+    // shared name lets test A's cleanup delete the file test B's gate subprocess is about to
+    // read (observed as a strih UNKNOWN flake on the CI coverage job, 2026-08-18).
     let s = write_state(
-        &format!("strih_1082_{}", &sha[..8]),
+        &format!("strih_1082_{}_{}", &sha[..8], tag),
         &with_obs_identity_ok(&with_sha(STRIH_PINNED, sha), true),
     );
     let t = write_state(
-        &format!("stream_1082_{}", &sha[..8]),
+        &format!("stream_1082_{}_{}", &sha[..8], tag),
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, sha), false),
     );
     (s, t)
@@ -1299,7 +1303,7 @@ fn gate_refuses_when_imag_so_bytes_mismatch_the_manifest_1082() {
     const LIBOBS_STALE: &str = "9999999999999999999999999999999999999999999999999999999999999999";
     let manifest =
         write_linux_manifest("imag_bundle_1082_drift", LIBOBS_MANIFEST, DISTROAV_MANIFEST);
-    let (s, t) = clean_fleet_states_1082(SHA);
+    let (s, t) = clean_fleet_states_1082(SHA, "refuses_when_imag_so_bytes_mismatch_the_");
     // imag: stale libobs.so.30 bytes, distroav.so bytes correct — isolates the DRIFT to libobs.so.30.
     let imag_bytes = format!(
         "imag={LIBOBS_SO_PATH_1082}={LIBOBS_STALE},{DISTROAV_SO_PATH_1082}={DISTROAV_MANIFEST}"
@@ -1346,7 +1350,7 @@ fn gate_passes_when_imag_so_bytes_match_the_manifest_1082() {
     const DISTROAV_MANIFEST: &str =
         "2222222222222222222222222222222222222222222222222222222222222222";
     let manifest = write_linux_manifest("imag_bundle_1082_ok", LIBOBS_MANIFEST, DISTROAV_MANIFEST);
-    let (s, t) = clean_fleet_states_1082(SHA);
+    let (s, t) = clean_fleet_states_1082(SHA, "passes_when_imag_so_bytes_match_the_mani");
     let imag_bytes = format!(
         "imag={LIBOBS_SO_PATH_1082}={LIBOBS_MANIFEST},{DISTROAV_SO_PATH_1082}={DISTROAV_MANIFEST}"
     );
@@ -1387,7 +1391,7 @@ fn gate_stays_dormant_when_imag_so_bytes_not_gathered_1082() {
         "1111111111111111111111111111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222222222222222222222222222",
     );
-    let (s, t) = clean_fleet_states_1082(SHA);
+    let (s, t) = clean_fleet_states_1082(SHA, "stays_dormant_when_imag_so_bytes_not_gat");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -1423,7 +1427,7 @@ fn gate_unknown_when_imag_so_path_not_in_manifest_1082() {
         "1111111111111111111111111111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222222222222222222222222222",
     );
-    let (s, t) = clean_fleet_states_1082(SHA);
+    let (s, t) = clean_fleet_states_1082(SHA, "unknown_when_imag_so_path_not_in_manifes");
     // A path NOT in the manifest -> UNKNOWN.
     let imag_bytes = "imag=lib/x86_64-linux-gnu/libobs-opengl.so.30=abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca";
     let (code, stdout, stderr) = run_gate(&[
