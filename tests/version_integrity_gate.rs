@@ -1381,17 +1381,20 @@ fn gate_passes_when_imag_so_bytes_match_the_manifest_1082() {
 }
 
 #[test]
-fn gate_stays_dormant_when_imag_so_bytes_not_gathered_1082() {
-    // OPT-IN safety: a manifest is auto-sourced but the imag .so gather returned nothing (--imag-bytes
-    // empty). The facet must go DORMANT — NOT UNKNOWN/DRIFT — so a live ssh gather failure never
-    // spuriously refuses the run while the ENFORCE flip (#1082 part 3) is still deferred.
+fn gate_refuses_when_imag_so_bytes_not_gathered_1100() {
+    // #1100 ENFORCE (was gate_stays_dormant_..._1082): the imag .so byte facet is now enforced
+    // (#758-shape) — its live gather is deployed + verified on the rig. A manifest auto-sourced but
+    // an EMPTY imag .so gather (--imag-bytes empty) is no longer a silent DORMANT skip; it is a
+    // gate-blocking UNKNOWN (11), so a live ssh gather failure REFUSES the run rather than passing a
+    // run whose imag bytes were never verified. The exact flip of the former opt-in behavior, the
+    // same 756->758 second step #1067 applied to port4455_identity.
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
     let manifest = write_linux_manifest(
-        "imag_bundle_1082_dormant",
+        "imag_bundle_1100_empty",
         "1111111111111111111111111111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222222222222222222222222222",
     );
-    let (s, t) = clean_fleet_states_1082(SHA, "stays_dormant_when_imag_so_bytes_not_gat");
+    let (s, t) = clean_fleet_states_1082(SHA, "refuses_when_imag_so_bytes_not_gathered_1");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -1405,12 +1408,15 @@ fn gate_stays_dormant_when_imag_so_bytes_not_gathered_1082() {
         "imag=",
     ]);
     assert_eq!(
-        code, 0,
-        "an empty imag byte gather must stay DORMANT + PASS, never refuse. stdout={stdout} stderr={stderr}"
+        code, 11,
+        "an empty imag byte gather must now REFUSE as UNKNOWN (11), not silently pass. \
+         stdout={stdout} stderr={stderr}"
     );
+    assert!(!stdout.contains("GATE PASS"), "must not pass: {stdout}");
+    let all = format!("{stdout}{stderr}");
     assert!(
-        stdout.contains("imag_so_bytes") && stdout.contains("DORMANT"),
-        "the facet must report DORMANT (opt-in), not UNKNOWN/DRIFT: {stdout}"
+        all.contains("imag_so_bytes") && all.contains("UNKNOWN"),
+        "the facet must report UNKNOWN (enforced), not DORMANT: {all}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
@@ -1455,4 +1461,35 @@ fn gate_unknown_when_imag_so_path_not_in_manifest_1082() {
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
     let _ = std::fs::remove_file(&manifest);
+}
+
+#[test]
+fn gate_enforces_imag_bytes_when_unreported_1100() {
+    // #1100: the imag .so byte facet is ENFORCED (its opt-in main() guard removed) now that the live
+    // gather is deployed + verified on the rig. A fleet healthy on every OTHER facet but supplying NO
+    // imag bytes/manifest at all is a gate-blocking UNKNOWN (11), never the old silent opt-in skip.
+    // The exact flip of the former DORMANT behavior, mirroring gate_enforces_port4455_identity_..._1067.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let (s, t) = clean_fleet_states_1082(SHA, "enforces_imag_bytes_when_unreported_1100_");
+    // No --imag-manifest / --imag-bytes at all: the facet must engage unconditionally and UNKNOWN.
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(
+        code, 11,
+        "a fleet reporting no imag bytes must be UNKNOWN (11), not a silent pass. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(!stdout.contains("GATE PASS"), "must not pass: {stdout}");
+    assert!(
+        stdout.contains("imag_so_bytes") && stdout.contains("UNKNOWN"),
+        "imag byte facet must engage unconditionally + report UNKNOWN: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
 }
