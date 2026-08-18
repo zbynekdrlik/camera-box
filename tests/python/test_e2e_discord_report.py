@@ -670,3 +670,10 @@ class TestAvPresentUndecodedFixture:
     def test_overall_is_still_red_because_of_the_av_gate(self):
         # A run with no A/V measurement still fails the gate, whatever the cause.
         assert "❌ RED" in self.report
+
+    def test_per_camera_lines_do_not_say_silent_track_when_audio_present(self):
+        # The per-camera reason must match the summary — no "tichá stopa" (silent) when the
+        # discriminator says the audio was present but undecoded.
+        av_section = self.report.split("4️⃣")[1].split("5️⃣")[0]
+        assert "tichá stopa" not in av_section
+        assert "značka nedekódovaná" in av_section

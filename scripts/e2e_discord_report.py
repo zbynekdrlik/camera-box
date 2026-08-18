@@ -256,14 +256,21 @@ def _section_video_sync(verdict):
     return "\n".join(lines)
 
 
-def _av_reason(node):
-    """Honest, specific reason string for a non-'measured' A/V verdict — never a bare UNKNOWN."""
+def _av_reason(node, av_audio_silent=None):
+    """Honest, specific reason string for a non-'measured' A/V verdict — never a bare UNKNOWN.
+
+    `av_audio_silent` is the block-level #748 discriminator: when it is explicitly False the
+    measurement audio was PRESENT (the demod saw preamble energy), so a `candidates == 0` camera
+    means the marker never decoded — not a silent track. Keeps the per-camera line consistent with
+    the block summary instead of contradicting it with "tichá stopa"."""
     verdict = node.get("verdict")
     candidates = node.get("candidates", 0) or 0
     cluster_samples = node.get("cluster_samples", 0) or 0
     if verdict == "measured":
         return None
     if candidates == 0:
+        if av_audio_silent is False:
+            return "značka nedekódovaná (zvuk je prítomný)"
         return "tichá stopa"
     if cluster_samples == 0:
         return "nedostatok konzistentných vzoriek"
@@ -309,7 +316,7 @@ def _section_av_sync(verdict):
             reason = node.get("exclude_reason") or "operátorom potvrdené offline"
             lines.append(f"  ⏸️ {cam}: VYNECHANÉ (potvrdené offline — {reason})")
         else:
-            reason = _av_reason(node)
+            reason = _av_reason(node, block.get("av_audio_silent"))
             lines.append(f"  ⚪ {cam}: UNKNOWN — {reason}")
 
     if all_silent and cams:
