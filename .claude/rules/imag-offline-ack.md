@@ -34,6 +34,7 @@ NEXT one. The full set guarded by `IMAG_OFFLINE_ACKED` (issue 1013):
 |---|---|
 | `[0/8] reachability preflight` loop | `exit 1` on unreachable (sets the flag here) |
 | `[0/8] imag display-path preflight` | `imag_display_path_preflight_assert … \|\| exit 1` (degrades on unreachable, but guarded to skip cleanly) |
+| `[0/8] imag cmdline-isolation preflight` | `imag_cmdline_isolation_preflight_assert … \|\| exit 1` (issue 1105 — the issue-784 lib's E2E consumer; UNKNOWN warns, so it degrades on unreachable, but guarded to skip cleanly) |
 | ALL_CAMBOX `[0/8]` imag OBS-prep | reachability probe / projectors / wmctrl / heal all `exit 1` |
 | ALL_CAMBOX `[1/8]` imag render-health + MV-divisor | `exit 1` |
 | `[0/8] dantesync-version-gate` | **names imag `imag-nb`, not `imag`** — its own ack-exclusion never matches the `imag` ack, and it REFUSES (exit 11) on an UNREAD node → drop `imag-nb` from `DANTESYNC_VERSION_LINUX` when acked |

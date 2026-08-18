@@ -141,8 +141,12 @@ fn preflight_fails_fast_on_an_isolcpus_drift_naming_the_token_1105() {
 #[test]
 fn preflight_fails_fast_on_a_scoped_rcu_nocbs_drift_1105() {
     // A SCOPED per-core rcu_nocbs (NOT =all) is the isolation family -> DRIFT -> return 1.
-    let (rc, _stdout, stderr) = run_preflight("CMDLINE|root=UUID=x ro preempt=full rcu_nocbs=2-11\n");
-    assert_eq!(rc, 1, "a scoped rcu_nocbs must fail-fast: stderr={stderr:?}");
+    let (rc, _stdout, stderr) =
+        run_preflight("CMDLINE|root=UUID=x ro preempt=full rcu_nocbs=2-11\n");
+    assert_eq!(
+        rc, 1,
+        "a scoped rcu_nocbs must fail-fast: stderr={stderr:?}"
+    );
     assert!(
         stderr.contains("rcu_nocbs=2-11"),
         "the scoped rcu_nocbs value must be named: {stderr:?}"
@@ -198,7 +202,9 @@ fn recording_e2e_calls_the_cmdline_preflight_fail_fast_guarded_before_dantesync_
     // The [0/8] preflight call must exist, target the imag host, and hard-exit on a proven drift.
     let call = body
         .find(r#"imag_cmdline_isolation_preflight_assert "$IMAG_IP""#)
-        .expect("recording-e2e.sh must call imag_cmdline_isolation_preflight_assert with the imag host");
+        .expect(
+            "recording-e2e.sh must call imag_cmdline_isolation_preflight_assert with the imag host",
+        );
     let win = &body[call..(call + 120).min(body.len())];
     assert!(
         win.contains("|| exit 1"),
