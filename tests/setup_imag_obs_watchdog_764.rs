@@ -38,14 +38,14 @@ fn watchdog_region(body: &str) -> String {
     rest[..end].to_string()
 }
 
-/// TOTAL_STEPS must be 25 (after #779's step 25) and a `step 24` banner must announce the watchdog
+/// TOTAL_STEPS must be 26 (after #791's step 26) and a `step 24` banner must announce the watchdog
 /// provisioning, or the `[N/TOTAL]` progress display would be wrong and a dropped step would go unnoticed.
 #[test]
 fn setup_imag_provisions_watchdog_step_24_764() {
     let body = body();
     assert!(
-        body.contains("TOTAL_STEPS=25"),
-        "{SETUP}: TOTAL_STEPS must be 25 (step 24 imag-obs-watchdog #764 + step 25 touchpad usability #779) — the watchdog step must still be counted"
+        body.contains("TOTAL_STEPS=26"),
+        "{SETUP}: TOTAL_STEPS must be 26 (step 24 imag-obs-watchdog #764 + step 25 touchpad usability #779 + step 26 imag-maxperf #791) — the watchdog step must still be counted"
     );
     assert!(
         body.contains("step 24 \""),

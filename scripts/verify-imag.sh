@@ -140,6 +140,12 @@ set -euo pipefail
 #       Wake-on line. setup-imag.sh step 1 arms it; a re-provision that lost it must FAIL here. Pure
 #       static read (side-effect free), so it runs BEFORE check (o)'s restart (#884 ordering). The
 #       BIOS standby-power layer is a separate hands-on step (docs/wake-on-lan.md), not gated here.
+#   (y) full max-performance persistence (#756/#791): the imag-maxperf trio -- imag-maxperf.service
+#       enabled+active, /usr/local/sbin/imag-maxperf.sh present, /etc/udev/rules.d/
+#       99-imag-maxperf-pm.rules present -- AND the runtime STATE reads performance (governor + EPP +
+#       intel_pstate no_turbo=0 + platform_profile, optional knobs `absent`-tolerant for hardware
+#       agnosticism, #816). Closes the hand-placed-never-provisioned gap #791 exists for; setup-imag.sh
+#       step 26 provisions it. Pure sysfs/systemd reads (side-effect free), so it runs BEFORE check (o).
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -690,6 +696,37 @@ imag_touchpad_conf_ok() {
 imag_wol_enabled_ok() {
   local v; v="$(printf '%s' "${1:-}" | tr -d '[:space:]')"
   [ "$v" = "magic" ]
+}
+
+# imag_maxperf_state_ok STATE_TEXT -> 0 iff the gathered max-performance runtime STATE (#756/#791)
+# reads performance. STATE_TEXT is labelled KNOB=VALUE lines gathered over SSH:
+#   GOVERNOR=<value>                 (mandatory backbone -- must be `performance`; a missing/empty
+#                                     line means the gather was unreadable and must FAIL, never
+#                                     silently pass -- the #833 measured-zero class)
+#   EPP=<value|absent>               (optional; if present must be `performance`)
+#   NO_TURBO=<value|absent>          (optional; if present must be `0` -- turbo ENABLED)
+#   PLATFORM_PROFILE=<value|absent>  (optional; if present must be `performance`)
+# The optional-knob `absent` tolerance keeps the check hardware-agnostic (#816): a box without
+# intel_pstate/platform_profile simply omits those knobs, exactly as imag-maxperf.sh only writes the
+# knobs that exist (`[ -f ]`/`command -v` guarded). This proves the persistence actually TOOK EFFECT
+# (the #840 lesson: presence of the unit != the state it should produce), not merely that the unit
+# file exists. Purely textual (unit-tested), here-string fed (no SIGPIPE-under-pipefail risk, #1047).
+imag_maxperf_state_ok() {
+  local state="${1:-}" k v
+  local gov="" epp="" turbo="" prof=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      GOVERNOR) gov="$v" ;;
+      EPP) epp="$v" ;;
+      NO_TURBO) turbo="$v" ;;
+      PLATFORM_PROFILE) prof="$v" ;;
+    esac
+  done <<<"$state"
+  [ "$gov" = performance ] || return 1
+  case "$epp"   in ''|absent|performance) ;; *) return 1 ;; esac
+  case "$turbo" in ''|absent|0)           ;; *) return 1 ;; esac
+  case "$prof"  in ''|absent|performance) ;; *) return 1 ;; esac
+  return 0
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
@@ -1268,6 +1305,46 @@ elif imag_wol_enabled_ok "$WOL_VALUE"; then
   ok "Wake-on-LAN armed (NM 802-3-ethernet.wake-on-lan=magic on the NDI NIC, #1103)"
 else
   fail "Wake-on-LAN NOT armed (NM value='${WOL_VALUE}', want 'magic') -- a powered-down imag-nb would not be remotely wakeable; setup-imag.sh step 1 arms it (#1103)"
+fi
+
+# (y) full max-performance persistence (#756/#791) ---------------------------------------------
+# The imag-maxperf trio (imag-maxperf.service + /usr/local/sbin/imag-maxperf.sh + the hotplug udev
+# rule) MUST be provisioned AND the runtime STATE must read performance -- governor + EPP +
+# intel_pstate no_turbo=0 + platform_profile. This closes the exact hand-placed-never-provisioned
+# gap #791 exists for (the trio lived only on the live box, never in the generator, so a fresh box
+# silently lost EPP/turbo/PCI-PM persistence -- the 2026-07-18 audit demand). setup-imag.sh step 26
+# provisions it. Reads artifact presence + the live sysfs STATE with no side effect (systemctl
+# is-enabled/is-active + sysfs reads), so it is kept ABOVE check (o)'s OBS restart (#884 ordering).
+# The optional-knob `absent` tolerance in imag_maxperf_state_ok keeps this hardware-agnostic (#816).
+rc=0
+MP_GATHER="$(ssh_box '
+printf "SVC_ENABLED=%s\n" "$(systemctl is-enabled imag-maxperf.service 2>/dev/null || echo unknown)"
+printf "SVC_ACTIVE=%s\n"  "$(systemctl is-active  imag-maxperf.service 2>/dev/null || echo unknown)"
+[ -x /usr/local/sbin/imag-maxperf.sh ] && echo SCRIPT_PRESENT=yes || echo SCRIPT_PRESENT=no
+[ -f /etc/udev/rules.d/99-imag-maxperf-pm.rules ] && echo UDEV_PRESENT=yes || echo UDEV_PRESENT=no
+printf "GOVERNOR=%s\n" "$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | paste -sd, -)"
+mp_epp=$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference 2>/dev/null | paste -sd, -); printf "EPP=%s\n" "${mp_epp:-absent}"
+if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then printf "NO_TURBO=%s\n" "$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null)"; else echo NO_TURBO=absent; fi
+if [ -f /sys/firmware/acpi/platform_profile ]; then printf "PLATFORM_PROFILE=%s\n" "$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)"; else echo PLATFORM_PROFILE=absent; fi
+')" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$MP_GATHER" ]; then
+  fail "could not read the max-performance state over SSH (rc=$rc) -- cannot verify imag-maxperf.service/script/udev + governor/EPP/turbo/profile (#756/#791)"
+else
+  MP_SVC_ENABLED="$(printf '%s\n' "$MP_GATHER" | sed -n 's/^SVC_ENABLED=//p')"
+  MP_SVC_ACTIVE="$(printf '%s\n' "$MP_GATHER" | sed -n 's/^SVC_ACTIVE=//p')"
+  MP_SCRIPT="$(printf '%s\n' "$MP_GATHER" | sed -n 's/^SCRIPT_PRESENT=//p')"
+  MP_UDEV="$(printf '%s\n' "$MP_GATHER" | sed -n 's/^UDEV_PRESENT=//p')"
+  if [ "$MP_SVC_ENABLED" != enabled ] || [ "$MP_SVC_ACTIVE" != active ]; then
+    fail "imag-maxperf.service not enabled+active (enabled='${MP_SVC_ENABLED}' active='${MP_SVC_ACTIVE}') -- max-performance persistence (EPP/turbo/PCI-PM) would not survive reboot (#756/#791); setup-imag.sh step 26"
+  elif [ "$MP_SCRIPT" != yes ]; then
+    fail "/usr/local/sbin/imag-maxperf.sh missing -- imag-maxperf.service would fail at boot (#756/#791); setup-imag.sh step 26 provisions it"
+  elif [ "$MP_UDEV" != yes ]; then
+    fail "/etc/udev/rules.d/99-imag-maxperf-pm.rules missing -- PCI/USB runtime-PM would revert on hotplug (#756/#791)"
+  elif imag_maxperf_state_ok "$MP_GATHER"; then
+    ok "full max-performance persistence: imag-maxperf.service active + governor/EPP/turbo/platform-profile all performance (#756/#791)"
+  else
+    fail "max-performance runtime STATE not performance ($(printf '%s\n' "$MP_GATHER" | grep -E '^(GOVERNOR|EPP|NO_TURBO|PLATFORM_PROFILE)=' | paste -sd' ' -)) -- imag-maxperf did not take effect (#756/#791)"
+  fi
 fi
 
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)
