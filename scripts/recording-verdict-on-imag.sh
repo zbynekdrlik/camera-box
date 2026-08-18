@@ -49,15 +49,42 @@ set -euo pipefail
 # decode progress is visible (the agent's liveness signal) in the ssh output. Pure-string function
 # so a unit test can source the script and assert the command is well-formed (imag-local paths
 # only, %q-quoted — no dev1 path, no unescaped argument) WITHOUT touching the network.
+# onimag_decode_core_range <ncpus> — issue 1094. Pure/testable (no nproc, no network): echo the
+# batch-decode CPU-pin range "LO-HI" for a box with <ncpus> online CPUs — the top min(4,ncpus)
+# cores (the E-cores on Intel hybrid: 8-11 on the i5-13420H's 12 threads, and 12-15 on the retired
+# 16-thread box, reproducing #767's original pin there), always OFF the lower-numbered P-cores OBS
+# is pinned to. A non-numeric / absent / zero count echoes EMPTY, telling the caller to run the
+# decode UNPINNED rather than emit a broken taskset (fail-open — see build_onimag_command).
+onimag_decode_core_range() {
+  local n="${1:-}" lo
+  case "$n" in ''|*[!0-9]*) echo ""; return 0 ;; esac
+  [ "$n" -ge 1 ] 2>/dev/null || { echo ""; return 0; }
+  # force base-10: an all-digit token with a leading zero (e.g. 08/09) is octal to $(( )) and 08/09
+  # are invalid octal digits -> an arithmetic error that (under the caller's set -e) would abort the
+  # extract, defeating the fail-open contract. nproc never emits one, but a leading zero must stay
+  # harmless. `[ -ge ]` above already compares in base-10, so this also removes that inconsistency.
+  lo=$(( 10#$n > 4 ? 10#$n - 4 : 0 ))
+  echo "${lo}-$(( 10#$n - 1 ))"
+}
+
 build_onimag_command() {
-  local exe="$1"; shift
-  # #767: the decode is a BATCH job on a box running PRODUCTION OBS — with the keep-alive build
-  # all 16 NDI receivers decode continuously (~4 cores), and an unthrottled decode (313% CPU +
-  # ffmpeg child) drove load to 27 → starved NDI threads → user-visible stutter on the
-  # projection while the compositor still reported 60fps (live, 2026-07-15). nice 19 + pinned
-  # to cores 12-15, fully OFF the cores OBS is pinned to (taskset -c 2-11 at launch). The
-  # ffmpeg child inherits both. Decode takes longer on 4 E-cores — irrelevant for a batch job.
-  printf 'nice -n 19 taskset -c 12-15 env RUST_LOG=info %q' "$exe"
+  local exe="$1" core_range="${2:-}"; shift 2
+  # #767: the decode is a BATCH job on a box running PRODUCTION OBS — with the keep-alive build all
+  # NDI receivers decode continuously, and an unthrottled decode (313% CPU + ffmpeg child) once
+  # drove load to 27 → starved NDI threads → user-visible stutter on the projection while the
+  # compositor still reported 60fps (live, 2026-07-15). So: nice -n 19 (batch priority) + pinned to
+  # the box's E-cores, fully OFF the P-cores OBS runs on. The ffmpeg child inherits both. Decode
+  # takes longer on 4 E-cores — irrelevant for a batch job.
+  #
+  # issue 1094: the pin range is RESOLVED FROM THE ACTUAL BOX by main() (onimag_decode_core_range
+  # over the live nproc + a taskset probe), NOT hardcoded — the retired 16-thread box's literal
+  # `taskset -c 12-15` silently failed EVERY extract on the 12-thread i5-13420H replacement (cores
+  # 12-15 do not exist → taskset aborts before recording-verdict runs → 0/76 imag-leg verification,
+  # issue 1094). FAIL-OPEN: an empty core_range emits NO taskset, so the decode still runs
+  # (unpinned, nice 19 alone) instead of a broken taskset aborting the whole extract.
+  local ts=""
+  [ -n "$core_range" ] && ts="taskset -c ${core_range} "
+  printf 'nice -n 19 %senv RUST_LOG=info %q' "$ts" "$exe"
   local a
   for a in "$@"; do
     printf ' %q' "$a"
@@ -133,9 +160,30 @@ main() {
     fi
   fi
 
+  # issue 1094: resolve the batch-decode CPU pin FROM THE ACTUAL BOX. A hardware swap silently
+  # broke the old hardcoded `taskset -c 12-15` on the 12-thread i5-13420H replacement (cores 12-15
+  # do not exist) — every [8/8c] imag extract failed at taskset, zeroing the imag leg in 0/76 runs.
+  # Ask the box its online-CPU count, derive the top-4-cores (E-core) range, and PROBE that taskset
+  # accepts it. FAIL-OPEN: any hiccup (unparseable nproc / rejected probe / ssh error) leaves the
+  # range EMPTY and the decode runs UNPINNED (nice 19 alone still keeps it off production OBS),
+  # never aborting the extract on a pin error again.
+  local CORE_RANGE NPROC_REMOTE
+  NPROC_REMOTE="$(sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" 'nproc' 2>/dev/null | tr -dc '0-9' || true)"
+  CORE_RANGE="$(onimag_decode_core_range "$NPROC_REMOTE")"
+  if [ -n "$CORE_RANGE" ] \
+     && ! sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "taskset -c '$CORE_RANGE' true" 2>/dev/null; then
+    echo "[recording-verdict-on-imag] WARNING: taskset -c $CORE_RANGE rejected on $IMAG_BOX (nproc=${NPROC_REMOTE:-?}) — decoding UNPINNED (nice 19 only)." >&2
+    CORE_RANGE=""
+  fi
+  if [ -n "$CORE_RANGE" ]; then
+    echo "[recording-verdict-on-imag] decode pin: taskset -c $CORE_RANGE (nproc=$NPROC_REMOTE, E-cores off the OBS P-cores)"
+  else
+    echo "[recording-verdict-on-imag] decode pin: none (unpinned, nice 19 only) -- nproc=${NPROC_REMOTE:-?}"
+  fi
+
   # STEP 2: run the verdict ON imag against the LOCAL recording (NEVER copied off-box).
   local ONIMAG_CMD
-  ONIMAG_CMD="$(build_onimag_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
+  ONIMAG_CMD="$(build_onimag_command "$REMOTE_BIN" "$CORE_RANGE" "${PASS_ARGS[@]}")"
   echo "[recording-verdict-on-imag] running on imag (${IMAG_BOX}): $ONIMAG_CMD"
   sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" \
     "mkdir -p '$OUT_DIR' && $ONIMAG_CMD"
