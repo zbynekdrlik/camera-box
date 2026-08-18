@@ -142,17 +142,22 @@ pub enum OnsetMissAttribution {
 /// #1086 part-4 — sustained delivered-frame rate over a window: `delivered / span_secs`. Returns
 /// `None` when the span is non-positive or fewer than 2 frames were delivered (a rate is
 /// undefined). REPORT-ONLY.
-pub fn sustained_fps(_delivered: u32, _span_ns: i64) -> Option<f64> {
-    // RED stub (#1086) — not yet implemented; the tests below pin the real behavior.
-    None
+pub fn sustained_fps(delivered: u32, span_ns: i64) -> Option<f64> {
+    if span_ns <= 0 || delivered < 2 {
+        return None;
+    }
+    Some(delivered as f64 / (span_ns as f64 / 1e9))
 }
 
 /// #1086 part-4 — classify a window's sustained receive fps against the target. `None` fps →
 /// `Unknown`; below `TARGET_RECEIVE_FPS - SUSTAINED_FPS_TOLERANCE` → `Degraded`; otherwise
 /// `Healthy`. REPORT-ONLY.
-pub fn receive_health(_fps: Option<f64>) -> ReceiveHealth {
-    // RED stub (#1086) — not yet implemented; the tests below pin the real behavior.
-    ReceiveHealth::Unknown
+pub fn receive_health(fps: Option<f64>) -> ReceiveHealth {
+    match fps {
+        None => ReceiveHealth::Unknown,
+        Some(f) if f < TARGET_RECEIVE_FPS - SUSTAINED_FPS_TOLERANCE => ReceiveHealth::Degraded,
+        Some(_) => ReceiveHealth::Healthy,
+    }
 }
 
 /// #1086 part-4 (RESCOPE confound) — attribute a cold-cut onset miss. `has_miss` is whether the
@@ -160,9 +165,14 @@ pub fn receive_health(_fps: Option<f64>) -> ReceiveHealth {
 /// `secs_since_run_start` is `(switch_ns - run_start_ns) / 1e9`. A clean transition returns
 /// `NoMiss`; otherwise a switch earlier than `SEGFAULT_WINDOW_MAX_SECS` into the run is
 /// `PossibleSegfaultWindow`, a later one `GenuineColdCutMiss`. REPORT-ONLY.
-pub fn onset_miss_attribution(_has_miss: bool, _secs_since_run_start: f64) -> OnsetMissAttribution {
-    // RED stub (#1086) — not yet implemented; the tests below pin the real behavior.
-    OnsetMissAttribution::NoMiss
+pub fn onset_miss_attribution(has_miss: bool, secs_since_run_start: f64) -> OnsetMissAttribution {
+    if !has_miss {
+        OnsetMissAttribution::NoMiss
+    } else if secs_since_run_start < SEGFAULT_WINDOW_MAX_SECS {
+        OnsetMissAttribution::PossibleSegfaultWindow
+    } else {
+        OnsetMissAttribution::GenuineColdCutMiss
+    }
 }
 
 /// A decoded frame that landed inside a transition's onset window.
