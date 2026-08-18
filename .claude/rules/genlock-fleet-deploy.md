@@ -60,3 +60,28 @@ and directs the mandatory post-restart WS filter-enum survival check
 a behaviorally-identical INLINE copy (it ships standalone to the box, so it cannot source the sibling
 lib) locked by a byte-parity test. Retention (`genlock_retention_delete_plan`, keep newest N=3) is
 PLAN-ONLY by default (`--yes` gates actual deletion; the deploy never silently `rm`s a backup).
+
+## GOTCHA — DistroAV loads ONLY from ProgramData; the FULL deploy ships + byte-verifies it there (#1115)
+
+OBS loads DistroAV EXCLUSIVELY from `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\
+distroav.dll` — NEVER from `C:\Program Files\obs-studio\obs-plugins\64bit\distroav.dll` (that path is
+absent on the boxes; a copy there is a shadow `drift-guard.sh` #124 flags). The FULL `copy_block`
+therefore `/XF distroav.dll` on the Program-Files obs-plugins robocopy — that exclusion STAYS. What
+`build_windows_deploy_program` FULL mode ALSO does (the `(6b)` block, #1115 / Option A): explicit
+path-mapped `Copy-Item` of the staged bundle's `obs-plugins\64bit\distroav.dll` → the ProgramData
+load path, a `distroav.dll.pre-789` backup alongside `obs.dll.pre-789`, and a fail-closed sha256
+verify of the DEPLOYED ProgramData DLL against the manifest's distroav entry (mirrors the obs.dll
+verify). FAST is obs.dll-only → the block is a no-op there (no distroav in the fast bundle).
+
+- **DLL-scoped on purpose.** The `distroav\data\` tree is NOT mirrored: the byte-parity gate hashes
+  only the DLL, and DistroAV data is stable across genlock rebuilds at the pinned 6.2.1. The
+  bundle→ProgramData layout is NOT 1:1 (bundle `obs-plugins/64bit/distroav.dll` + `data/obs-plugins/
+  distroav/`; on-box `plugins\distroav\bin\64bit\` + `plugins\distroav\data\`) — so it is an
+  EXPLICIT one-DLL path map, never a bulk `robocopy` of the wrong tree.
+- **The three-layer facet:** deploy writes the ProgramData DLL → `bundle-state-server.py` hashes the
+  distroav FIRST-located copy (= ProgramData, since Program Files carries no shadow) into
+  `distroav_dll_sha256` → `drift-guard.sh --compare` matches it to the manifest's `obs-plugins/64bit/
+  distroav.dll` BY BASENAME. So Option A makes the gathered ProgramData sha equal the manifest sha.
+- **Runtime ENABLE of the distroav compare is separate (issue 1100 / issue 1082 ENFORCE):** the gate
+  auto-sources the FAST obs.dll-only manifest, so distroav is labelled SKIPPED at runtime until a
+  distroav-bearing (FULL) manifest is auto-sourced — do NOT "fix" the FAST manifest to add distroav.
