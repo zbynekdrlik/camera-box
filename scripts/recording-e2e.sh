@@ -697,7 +697,12 @@ fi
 # DANTESYNC_GATE_WIN_HTTP_<NAME> env var is the offline/fixture test seam now, mirroring its
 # existing DANTESYNC_GATE_LINUX_JOURNAL_<NAME> convention for the Linux nodes.)
 echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must ALL be synced+locked (#7/#8/#648)"
-"$HERE/dantesync-gate.sh" \
+# Enforce grandmaster IDENTITY (was report-first per issue 834). gm_check ships report-only in
+# dantesync-gate.sh (DANTESYNC_GATE_GM_ENFORCE default 0); every fleet node now holds the rig
+# grandmaster 10.77.9.184 (dantesync election + PTP-interface fix v1.8.42-1.8.46), so a node
+# PTP-locked to a foreign/unreadable GM now HARD-fails here (FOREIGN->20, UNKNOWN->11) instead of
+# only being reported — the stream-on-a-foreign-GM false-green issue 834/1073 is about.
+DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
   --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
@@ -1061,7 +1066,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # strih here, a secondary camera is graded against the BARE bound and false-fails on the
     # master's routine ~2.5ms step propagation. Passing strih also re-grades strih itself in this
     # call (harmless, already proven clean by the main gate above).
-    "$HERE/dantesync-gate.sh" \
+    # Enforce grandmaster identity here too (issue 1073): this call grades strih (the NTP master),
+    # whose grandmaster identity must be enforced exactly like the main gate above.
+    DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \
       --win-http "strih=$STRIH" \
