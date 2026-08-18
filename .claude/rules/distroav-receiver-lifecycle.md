@@ -86,3 +86,16 @@ needed** (a fix that only armed one would miss half the sender-restart shapes):
 The live cure is NOT offline-verifiable (vendored receive path compiles only on CI, the wedge
 reproduces only live) — the offline gate proves the DECISION logic; the actual receive-path cure is
 confirmed only by a post-deploy rig wedge repro (the supervisor's, after the full-bundle deploy).
+
+## #1114 — re-applying the SAME `ndi_source_name` over WS is a receiver NO-OP; force a fresh receiver with CLEAR-then-SET
+
+`ndi_source_update()` derives `reset_ndi_receiver` from a NAME CHANGE (`safe_strcmp != 0`), so a
+`SetInputSettings ndi_source_name` re-apply of the unchanged name never touches the receiver thread —
+a "reattach" built that way is a silent no-op while the issue-1096 retry-in-place thread sits on a
+dead pre-bounce sender (the E2E [2/8] ~52s-budget false "camera leg dead", plus the stretched-preflight
+FATAL issue-359 painter-freshness casualty when retries "save" the run). The targeted per-input
+equivalent of an OBS force-kill: CLEAR the name to `""` (→ `ndi_source_thread_stop`,
+behaviour-independent) then SET it back (→ `ndi_source_thread_start` with `reset_ndi_receiver=true`
+→ fresh issue-1096 finder resolves the live sender). Implemented in `scripts/strih_mv_scenes.py
+reattach()` with a discoverability re-check before the set-back (a vanished source leaves `""` and
+returns NOT_DISCOVERABLE instead of re-pinning a dead name into the issue-795 mangle window).
