@@ -4808,11 +4808,20 @@ fn build_and_print_verdict(
                                 decodable: f.tick.is_some(),
                             })
                             .collect();
+                        // #1086 part-4: total delivered frames across the WHOLE window
+                        // [start_ns, end_ns) (not just the onset) for the sustained-receive-fps
+                        // health check. Reads seg_frames directly (bypasses the segmenter guard),
+                        // same as the onset read above.
+                        let window_frames = seg_frames
+                            .iter()
+                            .filter(|f| f.gen_ts_ns >= w.start_ns && f.gen_ts_ns < w.end_ns)
+                            .count() as u32;
                         camera_box::cold_cut::ColdCutWindow {
                             cambox: w.cambox.clone(),
                             start_ns: w.start_ns,
                             end_ns: w.end_ns,
                             onset_frames,
+                            window_frames,
                         }
                     })
                     .collect();
@@ -4830,22 +4839,27 @@ fn build_and_print_verdict(
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(
-                            "#768 report-only -- the cold-cut onset (first 1s after a switch to a \
-                             cambox hidden >= 60s) is NOT gated pending a warm baseline + a \
-                             deliberate keepalive-bypass cold cut (issue #768); measures wake-up \
-                             latency + onset undecodable so a future run can calibrate a LIVE bound"
+                            "#768/#1086 report-only -- the cold-cut onset (first 1s after a switch \
+                             to a cambox hidden >= 60s) is NOT gated pending a warm baseline + a \
+                             deliberate keepalive-bypass cold cut (COLD_CUT_BYPASS_CAM, #1086); \
+                             measures wake-up latency + onset undecodable + (phase-2) sustained \
+                             receive-fps health + the issue-793 startup-segfault vs genuine \
+                             cold-cut-miss attribution so a future run can calibrate a LIVE bound"
                         ),
                     );
                 }
                 report["all_cambox_continuity"]["cold_cut_onset"] = cold_json;
                 println!(
-                    "  #768 COLD-CUT onset: {} cold transition(s) (hidden >= {}s), worst wakeup {} (report-only, gates_overall_pass={})",
+                    "  #768/#1086 COLD-CUT onset: {} cold transition(s) (hidden >= {}s), worst wakeup {}, receive_degraded={}, possible_segfault_miss={}, genuine_cold_cut_miss={} (report-only, gates_overall_pass={})",
                     cold_report.cold_transitions_found,
                     cold_report.cold_hidden_secs,
                     cold_report
                         .worst_wakeup_latency_ns
                         .map(|w| format!("{w} ns"))
                         .unwrap_or_else(|| "n/a".to_string()),
+                    cold_report.any_receive_degraded,
+                    cold_report.any_miss_possibly_segfault,
+                    cold_report.any_genuine_cold_cut_miss,
                     cold_gates_overall,
                 );
                 // Fold: report-only, so this is a no-op while gates_overall_pass() is false.

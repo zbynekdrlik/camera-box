@@ -217,6 +217,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # tmpfs that CAN fill outright (CAM1 + CAM6 both hit 100% live) and fail the deploy hard.
 # shellcheck source=scripts/lib/tmp-burn-sweep.sh
 . "$HERE/lib/tmp-burn-sweep.sh"
+# #1086: the deliberate keepalive-bypass COLD CUT step for the all-cambox sweep (OPT-IN, OFF by
+# default via COLD_CUT_BYPASS_CAM). Pure gating + a small state machine; the two sweep-loop call
+# sites below are inert no-ops unless COLD_CUT_BYPASS_CAM names a sweep label, so a normal run is
+# byte-for-byte unchanged.
+# shellcheck source=scripts/lib/cold-cut-step.sh
+. "$HERE/lib/cold-cut-step.sh"
 # #707 B1 (freeze+jump discriminator, second prong): the per-cambox TCP-transport + NIC sampler.
 # Pure REMOTE-COMMAND-STRING builders (no ssh at source time) — launched in [5b/8], harvested in
 # [7c/8]. See the lib header for WHY (record Send-Q/retrans/NIC counters during the window so the
@@ -1561,6 +1567,10 @@ fi"
   # never had its program scene routed by THIS harness" note (rig-mode.sh test used to be the ONLY
   # thing that ever touched it) — [4a/8] above now routes + saves it, so cleanup() restores it too.
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
+  # #1086: best-effort FINAL restore of the keepalive-bypass target's strih receiver, in case the
+  # run was interrupted during the cold hold (or a single-appearance sweep) left it idled/black.
+  # Inert no-op unless COLD_CUT_BYPASS_CAM was set AND the machine is still at phase=idled.
+  cold_cut_cleanup_restore "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
   # #691: pass the calibrated cross-check value through ONLY when the caller supplied one
   # (empty by default — the common unattended-CI case simply skips the check).
   _stream_teardown_args=(teardown --host "$STREAM")
@@ -3468,12 +3478,21 @@ if [ "$ALL_CAMBOX" = "1" ]; then
   _SEG_BOUNDARIES=()         # epoch-ns CLOSING each segment (the next switch, then the final stop)
   _seg_i=0
   _seg_n="${#_SWEEP_PLAN[@]}"
+  # #1086: arm the deliberate keepalive-bypass cold cut (no-op unless COLD_CUT_BYPASS_CAM is set).
+  cold_cut_reset_state
   for _seg in "${_SWEEP_PLAN[@]}"; do
     _scene="${_seg%%$'\t'*}"; _label="${_seg##*$'\t'}"
+    # #1086: if this segment is the bypass target and its receiver is idled, RESTORE it (topping up
+    # the cold hold) right before the cut so the switch lands on a receiver re-created from cold.
+    # Inert no-op unless COLD_CUT_BYPASS_CAM is set; always returns 0 (never trips set -e).
+    cold_cut_before_segment "$_label" "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
     # Cut strih PROGRAM to this cambox's scene; the subcommand prints the switch epoch-ns
     # (time.time_ns()) on stdout and fails loud if the scene renders black (dead cambox).
     _switch_ns="$(python3 "$HERE/obs_phase2.py" switch --host "$STRIH" --program-scene "$_scene")"
     echo "    [seg $((_seg_i+1))/${_seg_n}] $_label via '$_scene' switched at ${_switch_ns} ns"
+    # #1086: once the target has appeared and the sweep has moved OFF it, IDLE its receiver so it
+    # goes genuinely cold for the hidden window. Inert no-op by default; always returns 0.
+    cold_cut_after_segment "$_label" "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
     if [ -z "$_SWITCH_START_NS" ]; then
       _SWITCH_START_NS="$_switch_ns"          # first switch = window 0 start
     else
