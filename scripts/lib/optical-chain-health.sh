@@ -85,22 +85,54 @@ optical_chain_painter_alive_from_snapshot() {
   fi
 }
 
-# optical_chain_alert_condition <painter_expected 0|1> <painter_alive 0|1> <optical OK|BLACK|UNKNOWN>
+# optical_chain_alert_condition <painter_expected 0|1> <painter_alive 0|1> <optical OK|BLACK|UNKNOWN> [rig_busy 0|1]
 #   -> stdout: skip | alert:PAINTER-DEAD | alert:OPTICAL-BLACK | healthy | healthy-unverified
+#            | log-only:PAINTER-DEAD-e2e-window | log-only:PAINTER-DEAD-optical-ok
+#            | log-only:OPTICAL-BLACK-e2e-window
 #   The pure verdict both surfaces act on. Any value other than 1 for expected/alive is treated as
-#   0/not-alive (defensive). Unrecognized optical token is treated as UNKNOWN.
+#   0/not-alive (defensive). Unrecognized optical token is treated as UNKNOWN. `rig_busy` defaults
+#   to 0 (omitting it keeps the historic 3-arg behaviour); it is 1 when a live gate/TEST harness is
+#   coordinating the rig THIS pass (a fresh #281 rig-active heartbeat, per rig-heartbeat.sh).
+#
+#   #1117: a `log-only:*` verdict is NOT a page — the caller logs it and treats it like a
+#   healthy/skip pass (clear_throttle). Two independent reasons downgrade a would-be alert:
+#     - fix 1 (E2E window): rig_busy=1 -> recording-e2e.sh `systemctl stop cam2-painter` BY DESIGN
+#       and reroutes the program while it runs, so a down standing service (PAINTER-DEAD) or a
+#       transient BLACK read is expected-by-design; the harness's own [0/8] preflight + verdict
+#       gate are the authoritative outcome judge during a run.
+#     - fix 2 (optical=OK veto): even OUTSIDE an E2E, when the painter pidfile/service is down but
+#       the optical leg reads OK, the monitored OUTCOME (a readable cam2->cam1 hop) is provably
+#       fine, so whatever is painting the monitor works -- not an outcome failure, never a page.
+#   A genuine dead painter with a dark/unverifiable monitor OUTSIDE an E2E (rig_busy=0, optical !=
+#   OK) still pages -- the 2026-08-14 #860 incident is unaffected.
 optical_chain_alert_condition() {
-  local expected="${1:-0}" alive="${2:-0}" optical="${3:-UNKNOWN}"
+  local expected="${1:-0}" alive="${2:-0}" optical="${3:-UNKNOWN}" rig_busy="${4:-0}"
   if [ "$expected" != "1" ]; then
     printf 'skip\n'
     return 0
   fi
   if [ "$alive" != "1" ]; then
-    printf 'alert:PAINTER-DEAD\n'
+    # Painter pidfile/service is DOWN. Decide whether that is an incident.
+    if [ "$rig_busy" = "1" ]; then
+      printf 'log-only:PAINTER-DEAD-e2e-window\n'      # fix 1: expected during a live run
+      return 0
+    fi
+    if [ "$optical" = "OK" ]; then
+      printf 'log-only:PAINTER-DEAD-optical-ok\n'      # fix 2: monitored outcome provably fine
+      return 0
+    fi
+    printf 'alert:PAINTER-DEAD\n'                       # genuine dead painter, dark/unverified
     return 0
   fi
+  # Painter ALIVE.
   case "$optical" in
-    BLACK) printf 'alert:OPTICAL-BLACK\n' ;;
+    BLACK)
+      if [ "$rig_busy" = "1" ]; then
+        printf 'log-only:OPTICAL-BLACK-e2e-window\n'   # fix 1: program reroute during a run
+      else
+        printf 'alert:OPTICAL-BLACK\n'
+      fi
+      ;;
     OK)    printf 'healthy\n' ;;
     *)     printf 'healthy-unverified\n' ;;
   esac
