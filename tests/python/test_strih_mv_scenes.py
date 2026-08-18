@@ -352,6 +352,65 @@ def test_reattach_clears_name_then_resets_to_force_a_fresh_receiver_1114(monkeyp
     )
 
 
+class _FakeObsRpcWithChangingFinder:
+    """issue 1114: a fake whose finder list CHANGES across successive
+    GetInputPropertiesListPropertyItems calls (a scripted queue) — so the mangle-window re-check
+    (source present at the up-front guard, then vanished right before the set-back) can be exercised
+    without a live OBS."""
+
+    def __init__(self, get_settings_response, finder_items_sequence):
+        self.calls = []
+        self._get_settings_response = get_settings_response
+        self._finder_items_sequence = list(finder_items_sequence)
+        self._finder_idx = 0
+
+    def rpc(self, _obs, rtype, rdata=None, ignore_err=False):
+        self.calls.append((rtype, rdata))
+        if rtype == "GetInputSettings":
+            return self._get_settings_response
+        if rtype == "GetInputPropertiesListPropertyItems":
+            idx = min(self._finder_idx, len(self._finder_items_sequence) - 1)
+            self._finder_idx += 1
+            return {"propertyItems": self._finder_items_sequence[idx]}
+        if rtype == "SetInputSettings":
+            return {}
+        raise AssertionError(f"unexpected rpc call: {rtype}")
+
+
+def test_reattach_skips_setback_if_source_vanishes_during_the_clear_settle_1114(monkeypatch):
+    # issue 1114 review (#795 mangle window): the CLEAR + settle widened the window between the
+    # up-front finder-list guard and the SET-back. If the sender drops out of the finder list
+    # DURING that window, re-applying its name would MANGLE it (OBS strips a name absent from the
+    # combo list) — so reattach must re-check right before the set-back and, on a vanish, SKIP the
+    # set-back: leave the input cleared to "" (a clean, no-garbage state) and return the
+    # NDI_SOURCE_NOT_DISCOVERABLE sentinel. The recorded SetInputSettings must be ONLY the clear.
+    fake = _FakeObsRpcWithChangingFinder(
+        {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        # 1st call (up-front guard): present. 2nd call (pre-set-back re-check): vanished.
+        finder_items_sequence=[
+            [{"itemValue": "CAM3 (usb)"}, {"itemValue": "CAM1 (usb)"}],
+            [{"itemValue": "CAM1 (usb)"}],
+        ],
+    )
+    monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
+
+    result = strih_mv_scenes.reattach(
+        object(), 3, finder_retries=3, finder_wait_s=0, sleep=lambda *_a, **_k: None
+    )
+
+    assert result is strih_mv_scenes.NDI_SOURCE_NOT_DISCOVERABLE
+    set_calls = [c for c in fake.calls if c[0] == "SetInputSettings"]
+    assert set_calls == [
+        (
+            "SetInputSettings",
+            {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": ""}},
+        )
+    ], (
+        "issue 1114: on a mid-reattach vanish the set-back must be SKIPPED (clear only, no mangled "
+        f"re-apply); got {set_calls}"
+    )
+
+
 # --- #753 (2026-07-14): cam7 physical box exists -- seed() must pick up its 'Cam 7' scene too --
 
 def test_cams_covers_all_seven_cameras():

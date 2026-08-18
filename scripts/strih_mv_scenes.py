@@ -306,6 +306,15 @@ def reattach(obs, cam_n: int, *, finder_retries: int = 6, finder_wait_s: float =
             {"inputName": input_name, "inputSettings": {"ndi_source_name": ""}},
             ignore_err=True)
     sleep(reset_settle_s)
+    # issue 1114 review (#795 window): the clear + settle above widened the mangle window between
+    # the up-front finder-list check and this set-back. Re-verify the bound name is STILL
+    # discoverable right before re-applying it. If the sender vanished during the settle, SKIP the
+    # set-back — leave the input cleared to "" (a clean, no-garbage state; never mangle a name
+    # absent from the combo list) and return NDI_SOURCE_NOT_DISCOVERABLE, exactly as the up-front
+    # guard does. The caller (preflight_mv_reverify) swallows this and lets the pixel re-sample
+    # fail loud on the genuinely-dead leg.
+    if ndi_name not in op._ndi_source_list(obs, input_name):
+        return NDI_SOURCE_NOT_DISCOVERABLE
     op._rpc(obs, "SetInputSettings",
             {"inputName": input_name, "inputSettings": {"ndi_source_name": ndi_name}},
             ignore_err=True)
