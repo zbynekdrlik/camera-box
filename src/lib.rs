@@ -247,7 +247,8 @@ pub mod program_render_audit;
 // #624 — cross-camera cam2->camera switch-latency SPREAD gate (pure decision): given each
 // camera's measured cam2->camera median (p50) latency (the per-camera photon->dequeue latency
 // d_X baked in by the #286 root cause), computes the cross-camera spread and gates it against
-// the issue's fixed half-a-30fps-frame threshold (16ms). No probe deps, so it unit-tests
+// the SPREAD_THRESHOLD_MS bound (24ms since issue 1120; was #624's 16ms half-frame — recalibrated
+// for the CAM1 grabber residual, issue 1110). No probe deps, so it unit-tests
 // Tier-0; the probe-gated measurement (generalizing `probe::recording_latency::
 // cam2_cam1_samples_from_burn`/`_from_flip` from cam1-only to cam1/cam3/cam4, per
 // `--switch-schedule` window) lives in `bin/recording-verdict`.
@@ -406,7 +407,7 @@ pub mod optical_floor;
 // issue 1033 — the ALL-CAMBOX cross-camera DELIVERY-latency spread gate: REPORT-ONLY today (the
 // fleet data is not tight-green — cam1's delivery lottery), one-line-flippable to blocking by a
 // follow-up. Pure crate-root logic (Tier-0), consumed thinly by recording-verdict; reuses the
-// switch_latency 16 ms bound (no new constant).
+// switch_latency SPREAD_THRESHOLD_MS bound (24 ms since issue 1120; no new constant).
 pub mod delivery_spread_gate;
 
 // #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become

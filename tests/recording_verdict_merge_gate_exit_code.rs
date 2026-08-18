@@ -401,8 +401,9 @@ fn merge_subprocess_exits_nonzero_when_av_sync_unknown_from_silent_audio_861_rea
 /// — a DIFFERENT measurement than the AV-sync gate above: `cam2->camera` capture latency, not
 /// audio/video offset) ALSO folds into `all_pass` via the SAME `all_pass &= sv.pass` pattern
 /// (`src/bin/recording-verdict.rs`, the `all_cambox_latency` block) — proven here the same way:
-/// two cameras whose measured p50 latencies differ by far more than the 16ms
-/// `switch_latency::SPREAD_THRESHOLD_MS` MUST make the merge subprocess exit non-zero.
+/// two cameras whose measured p50 latencies differ by far more than the
+/// `switch_latency::SPREAD_THRESHOLD_MS` bound (24ms since issue 1120) MUST make the merge
+/// subprocess exit non-zero.
 ///
 /// (NOT the SAME gate as the #286/#1033 `all_cambox_delivery_latency`/`cross_camera_spread_ms`
 /// block — that one now folds THROUGH the report-only `delivery_spread_gate` seam, which ships
@@ -417,7 +418,7 @@ fn merge_subprocess_exits_nonzero_when_cross_camera_latency_spread_gate_fails_70
     let dir = tempdir("spread-fail");
     let base = 5_000 * ONE_S_NS;
     let win = 5 * ONE_S_NS;
-    // CAM1 at 0ms injected latency, CAM3 at 50ms -- spread=50ms, far over the 16ms threshold.
+    // CAM1 at 0ms injected latency, CAM3 at 50ms -- spread=50ms, far over the 24ms bound.
     let mut frames = window_frames(0, base, Some((BURN_RUN_ID_CAM1, 0)));
     frames.extend(window_frames(
         20,
@@ -448,14 +449,14 @@ fn merge_subprocess_exits_nonzero_when_cross_camera_latency_spread_gate_fails_70
 
     assert_ne!(
         code, 0,
-        "#703/#624: a 50ms cross-camera delivery-latency spread (>> the 16ms threshold) MUST \
+        "#703/#624: a 50ms cross-camera delivery-latency spread (>> the 24ms bound) MUST \
          make the merge PROCESS exit non-zero: exit={code} output={text}"
     );
     let v = json.unwrap_or_else(|| panic!("verdict JSON not written at {json_path:?}: {text}"));
     assert_eq!(
         v["all_cambox_latency"]["spread_gate_pass"],
         serde_json::json!(false),
-        "#624: the 50ms spread must fail the 16ms gate: {v}"
+        "#624: the 50ms spread must fail the 24ms gate: {v}"
     );
     assert_eq!(
         v["overall_pass"],
