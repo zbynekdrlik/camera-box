@@ -99,11 +99,41 @@ cold_cut_before_segment() {
       interruptible_sleep "$(( hold - waited ))" 2>/dev/null || sleep "$(( hold - waited ))" || true
     fi
   fi
-  local prev_ndi
+  _cold_cut_do_restore "$host" "$pw" "$obs_py" "for the genuine cold cut to ${label}"
+  return 0
+}
+
+# Restore the idled target receiver to its captured prev ndi name (shared by before_segment's
+# pre-cut restore AND cleanup's abort/single-appearance restore). GUARD: never restore to an EMPTY
+# name — `idle-receiver --restore ""` is falsy and would RE-IDLE (leaving the input black); if the
+# capture was empty (a failed idle-time read / a genuinely source-less input) warn LOUDLY and mark
+# the run skipped instead. Marks phase=restored on a real restore. ALWAYS returns 0.
+#   $1 host  $2 password  $3 obs_phase2.py path  $4 reason (for the log line)
+_cold_cut_do_restore() {
+  local host="$1" pw="$2" obs_py="$3" reason="$4" prev_ndi
   prev_ndi="$(_cold_cut_get prev_ndi)"
-  echo "    #1086: RESTORING '$(cold_cut_bypass_input)' -> '${prev_ndi}' for the genuine cold cut to ${label}"
+  if [ -z "$prev_ndi" ]; then
+    echo "    WARNING #1086: no captured prev ndi_source_name for '$(cold_cut_bypass_input)' — NOT restoring (restoring to an empty name would re-idle it black); the input may need a manual OBS re-point. Marking the bypass skipped." >&2
+    _cold_cut_set phase skipped
+    return 0
+  fi
+  echo "    #1086: RESTORING '$(cold_cut_bypass_input)' -> '${prev_ndi}' ${reason}"
   python3 "$obs_py" idle-receiver --host "$host" --password "$pw" --input "$(cold_cut_bypass_input)" --restore "$prev_ndi" 2>&1 | sed 's/^/      [cold-cut restore] /' || true
   _cold_cut_set phase restored
+  return 0
+}
+
+# Best-effort FINAL restore, for recording-e2e.sh's cleanup() EXIT trap: if the target receiver was
+# idled but never restored (the run was interrupted during the cold hold, or the sweep cut to the
+# target only ONCE so before_segment's restore never fired), re-point it so a live strih input is
+# never left torn down black. A NO-OP when the bypass is off, or when the machine already reached
+# restored/skipped. ALWAYS returns 0 (a cleanup trap must never abort).
+#   $1 host  $2 password  $3 obs_phase2.py path
+cold_cut_cleanup_restore() {
+  cold_cut_bypass_active || return 0
+  [ "$(_cold_cut_get phase)" = "idled" ] || return 0
+  echo "[cleanup] #1086: the keepalive-bypass target '$(cold_cut_bypass_input)' was left idled (run interrupted, or single-appearance sweep) — restoring its receiver"
+  _cold_cut_do_restore "$1" "$2" "$3" "(cleanup: restore an idled-but-never-restored receiver)"
   return 0
 }
 
@@ -127,6 +157,9 @@ cold_cut_after_segment() {
   out="$(python3 "$obs_py" idle-receiver --host "$host" --password "$pw" --input "$(cold_cut_bypass_input)" 2>&1)" || true
   printf '%s\n' "$out" | sed 's/^/      [cold-cut idle] /'
   prev_ndi="$(printf '%s\n' "$out" | sed -n 's/^PREV_NDI_NAME=//p' | tail -1)"
+  if [ -z "$prev_ndi" ]; then
+    echo "    WARNING #1086: idled '$(cold_cut_bypass_input)' but captured an EMPTY prev ndi_source_name (source-less input, or the idle-time read failed) — the receiver cannot be auto-restored; a manual OBS re-point may be needed." >&2
+  fi
   _cold_cut_set prev_ndi "$prev_ndi"
   _cold_cut_set idle_ts "$(date +%s)"
   _cold_cut_set phase idled

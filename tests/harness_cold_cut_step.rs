@@ -78,29 +78,40 @@ fn cold_cut_call_sites_forward_host_and_obs_phase2_path() {
 // Functional: drive the lib's state machine with a stub obs_phase2.py
 // ---------------------------------------------------------------------------
 
-/// Run a bash script that sources the lib and drives a fake sweep. Returns (stdout, the stub's call
-/// log). `env` sets COLD_CUT_* for the run; `sweep` is the space-separated label order.
+/// Convenience wrapper: drive a sweep with a healthy stub (captures "CAM1 (usb)") and no trailing
+/// cleanup. Returns (stdout, the stub's call log, success).
 fn run_sweep(env: &[(&str, &str)], sweep: &[&str]) -> (String, String, bool) {
-    // A UNIQUE dir per invocation — the tests run in parallel in one process, so a dir keyed only on
-    // the pid would let one test's remove_dir_all wipe another's stub/state mid-run.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let uid = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("coldcut-1086-{}-{}", std::process::id(), uid));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    run_scenario(env, sweep, false, "CAM1 (usb)")
+}
+
+/// Run a bash script that sources the lib and drives a fake sweep. `env` sets COLD_CUT_* for the
+/// run; `sweep` is the label order. `call_cleanup` appends a `cold_cut_cleanup_restore` call (the
+/// EXIT-trap path). `prev_ndi` is what the stub prints as the captured `PREV_NDI_NAME` on idle
+/// (empty ⇒ a source-less / failed-read input).
+fn run_scenario(
+    env: &[(&str, &str)],
+    sweep: &[&str],
+    call_cleanup: bool,
+    prev_ndi: &str,
+) -> (String, String, bool) {
+    // A kernel-atomic UNIQUE dir per invocation (#975: never hand-roll a pid+timestamp temp path —
+    // the tests run in parallel in one process and would race). tempfile auto-removes on Drop.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
     let stub = dir.join("obs_stub.py");
     let calls = dir.join("calls.log");
     let state = dir.join("state");
+    // The stub prints `PREV_NDI_NAME=<prev_ndi>` on idle (an empty value ⇒ just the bare prefix).
     fs::write(
         &stub,
         format!(
             "import sys\n\
              a=sys.argv[1:]\n\
-             open(r'{}','a').write(' '.join(a)+'\\n')\n\
-             if 'idle-receiver' in a and '--restore' not in a:\n    print('PREV_NDI_NAME=CAM1 (usb)')\n\
+             open(r'{calls}','a').write(' '.join(a)+'\\n')\n\
+             if 'idle-receiver' in a and '--restore' not in a:\n    print('PREV_NDI_NAME={prev}')\n\
              print('stub ok')\n",
-            calls.display()
+            calls = calls.display(),
+            prev = prev_ndi
         ),
     )
     .unwrap();
@@ -122,6 +133,12 @@ fn run_sweep(env: &[(&str, &str)], sweep: &[&str]) -> (String, String, bool) {
             s = stub.display()
         ));
     }
+    if call_cleanup {
+        body.push_str(&format!(
+            "cold_cut_cleanup_restore host \"\" \"{}\"\n",
+            stub.display()
+        ));
+    }
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(&body);
     cmd.env("COLD_CUT_STATE_FILE", &state);
@@ -129,10 +146,14 @@ fn run_sweep(env: &[(&str, &str)], sweep: &[&str]) -> (String, String, bool) {
         cmd.env(k, v);
     }
     let out = cmd.output().expect("run bash");
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    // Combine stdout + stderr — the lib writes WARNING lines to stderr, and callers assert on them.
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let call_log = fs::read_to_string(&calls).unwrap_or_default();
-    let _ = fs::remove_dir_all(&dir);
-    (stdout, call_log, out.status.success())
+    (combined, call_log, out.status.success())
 }
 
 #[test]
@@ -196,5 +217,81 @@ fn active_bypass_without_input_fails_loud() {
     assert!(
         calls.trim().is_empty(),
         "#1086: it must fail BEFORE any obs call; got:\n{calls}"
+    );
+}
+
+#[test]
+fn recording_e2e_cleanup_calls_cold_cut_cleanup_restore() {
+    // The EXIT-trap cleanup() must call the best-effort final restore so an interrupted / single-
+    // appearance run never leaves a strih receiver idled black.
+    let s = read("scripts/recording-e2e.sh");
+    let cleanup = s
+        .find("cleanup() {")
+        .map(|i| &s[i..])
+        .expect("#1086: recording-e2e.sh must define cleanup()");
+    assert!(
+        cleanup.contains("cold_cut_cleanup_restore \"$STRIH\""),
+        "#1086: cleanup() must call cold_cut_cleanup_restore with the strih host"
+    );
+}
+
+#[test]
+fn cleanup_restores_a_single_appearance_idled_receiver() {
+    // The target is cut to program only ONCE, so before_segment's restore never fires — the
+    // receiver is left idled. cold_cut_cleanup_restore (the EXIT-trap path) must re-point it.
+    let (stdout, calls, ok) = run_scenario(
+        &[
+            ("COLD_CUT_BYPASS_CAM", "CAM1"),
+            ("COLD_CUT_BYPASS_INPUT", "NDI cam1"),
+            ("COLD_CUT_HOLD_SECS", "1"),
+        ],
+        &["CAM1", "CAM2", "CAM3"], // CAM1 appears once
+        true,                      // then cleanup fires
+        "CAM1 (usb)",
+    );
+    assert!(ok, "the run must complete under set -e; stdout:\n{stdout}");
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "#1086: one idle (during the sweep) + one restore (in cleanup); got:\n{calls}"
+    );
+    assert!(
+        lines[0].contains("idle-receiver") && !lines[0].contains("--restore"),
+        "#1086: first the idle; got: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("--restore CAM1 (usb)"),
+        "#1086: cleanup must restore the captured prev name; got: {}",
+        lines[1]
+    );
+}
+
+#[test]
+fn empty_prev_ndi_never_restores_to_black() {
+    // If the idle-time capture came back EMPTY, restoring with `--restore ""` would re-idle the
+    // input black. The restore must be SKIPPED (with a loud warning), never issued.
+    let (stdout, calls, ok) = run_scenario(
+        &[
+            ("COLD_CUT_BYPASS_CAM", "CAM1"),
+            ("COLD_CUT_BYPASS_INPUT", "NDI cam1"),
+            ("COLD_CUT_HOLD_SECS", "1"),
+        ],
+        &["CAM1", "CAM2", "CAM3", "CAM1"], // CAM1 reappears -> before_segment would try to restore
+        true,
+        "", // stub captures an EMPTY prev ndi name
+    );
+    assert!(ok, "the run must complete under set -e; stdout:\n{stdout}");
+    // Exactly ONE obs call (the idle); NO restore call is ever issued.
+    let restore_calls = calls.lines().filter(|l| l.contains("--restore")).count();
+    assert_eq!(
+        restore_calls, 0,
+        "#1086: an empty captured prev name must NEVER produce a restore call (that would re-idle \
+         the input black); got:\n{calls}"
+    );
+    assert!(
+        stdout.contains("WARNING #1086"),
+        "#1086: an empty captured prev name must warn loudly; stdout:\n{stdout}"
     );
 }

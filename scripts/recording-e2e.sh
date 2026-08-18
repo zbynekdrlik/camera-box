@@ -1546,6 +1546,10 @@ fi"
   # never had its program scene routed by THIS harness" note (rig-mode.sh test used to be the ONLY
   # thing that ever touched it) — [4a/8] above now routes + saves it, so cleanup() restores it too.
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
+  # #1086: best-effort FINAL restore of the keepalive-bypass target's strih receiver, in case the
+  # run was interrupted during the cold hold (or a single-appearance sweep) left it idled/black.
+  # Inert no-op unless COLD_CUT_BYPASS_CAM was set AND the machine is still at phase=idled.
+  cold_cut_cleanup_restore "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
   # #691: pass the calibrated cross-check value through ONLY when the caller supplied one
   # (empty by default — the common unattended-CI case simply skips the check).
   _stream_teardown_args=(teardown --host "$STREAM")
