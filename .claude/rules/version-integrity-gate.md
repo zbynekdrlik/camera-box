@@ -186,3 +186,44 @@ SHA:** `curl http://<box>:8899/bundle-state.json` must show `obs_dll_sha256` + `
 bundle-state-server scripts to strih+stream + restart the `BundleStateServer` scheduled task, confirm
 the keys appear on BOTH, THEN remove the `recording-e2e.sh` guard — same LIVE-Windows-property class as
 #1067's port4455 caveat.
+
+## #1100 (Windows half) — ENFORCED (the staged half, unblocked 2026-08-18)
+
+Precondition 1 was unblocked by the supervisor (~19:30) redeploying the current bundle-state-server +
+restarting BundleStateServer. Re-verified LIVE, read-only, at canonical SHA `03cd9c073`: strih
+(10.77.9.202) AND stream (10.77.9.204) `:8899/bundle-state.json` now BOTH serve `obs_dll_sha256`
+(`200e34dc…`) + `distroav_dll_sha256` (`d6077c16…`) + `genlock_capability`; the deployed
+`C:\Program Files\obs-studio\BUNDLE_MANIFEST.json` records `bin/64bit/obs.dll` = `200e34dc…`; and the
+CI FAST manifest (`windows-genlock-fast.yml` / `obs-genlock-fast-dll`) at that SHA (run `32140701978`)
+carries `obs.dll` = `200e34dc…`. So the enforced gate stays GREEN today AND a box that stops reporting
+its bytes now refuses.
+
+The flip: **`recording-e2e.sh`'s Windows FAST-manifest auto-source guard was collapsed from
+`if [ -z "$AUTO_WIN_MANIFEST" ] && manifest_autosource_state_has_key … obs_dll_sha256 (×2) +
+genlock_capability (×2); then` down to `if [ -z "$AUTO_WIN_MANIFEST" ]; then`** — the manifest is now
+auto-sourced UNCONDITIONALLY (when `VERSION_GATE_MANIFEST` is unset), so it is applied to both
+`--win-state` boxes and a box missing `obs_dll_sha256` flips to a gate-blocking UNKNOWN via drift-guard
+(the same 756→758 second step `#1067` applied to `port4455_identity`, mirrored in recording-e2e.sh
+rather than the gate main). The `manifest_autosource_state_has_key` LIB function is KEPT (still
+exported + unit-tested); only its USE as the opt-in guard is removed.
+
+- **Residual (in-scope, documented, NOT a refuse):** `manifest_autosource_fetch` stays best-effort — a
+  gh/network failure OR an unresolvable strih marker SHA (`[ -n "$sha" ] || return 0`) yields `""` → the
+  manifest is omitted for THAT run → the Windows byte facet is dormant for that run. That is a
+  fetch-side outage, not a box-drift signal, so it never false-refuses (matches the lib's documented
+  contract). The enforce covers "a box PRESENT but NOT reporting its bytes → refuse", which the guard
+  removal delivers.
+- **The FAST manifest is obs.dll-ONLY, so ONLY the libobs core is byte-enforced on Windows; distroav
+  stays SKIPPED (by design).** Found while verifying: the deployed/OBS-loaded distroav is
+  `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll` (`d6077c16…`, served, identical
+  on both boxes), while the FULL BUNDLE_MANIFEST records `obs-plugins/64bit/distroav.dll` (`796b9513…`)
+  at a path that does NOT exist under `C:\Program Files\obs-studio`. Filed as #1115 — widening Windows
+  distroav byte enforcement to the FULL bundle manifest needs that reconciled first (the "separate
+  decision" the design deferred).
+- **TEST (Tier-0-only):** new `tests/harness_windows_manifest_enforce_1100.rs` — a static-text guard on
+  recording-e2e.sh (RED asserts the enforce = no `manifest_autosource_state_has_key` gate, GREEN after
+  removal; a regression guard that the `manifest_autosource_fetch … windows-genlock-fast.yml
+  obs-genlock-fast-dll` auto-source still runs). Its own body must NEVER contain the literal
+  `manifest_autosource_state_has_key` (the assertion forbids it fleet-wide) — the #832 self-collision
+  class. Editing recording-e2e.sh MANDATES the full `cargo test` suite at integration (per the
+  static-anchor GOTCHA); no test anchors on this block or the removed comment text (verified by grep).
