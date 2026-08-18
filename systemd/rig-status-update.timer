@@ -1,0 +1,16 @@
+[Unit]
+# Fires the #787 rig-health status-page update every 5 min (dev1-side), matching the imag-obs /
+# network-reach / optical-chain / bundle-state alert-timer cadence so the fleet's dev1 timers stay
+# in lockstep. SHIPS DISABLED (no setup-*.sh enables it); enable opt-in on dev1 with:
+#   systemctl --user enable --now rig-status-update.timer rig-status-page.service
+Description=Run the camera-box rig-health status-page update every 5 min (#787)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
