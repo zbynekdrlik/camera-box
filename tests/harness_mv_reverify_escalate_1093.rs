@@ -686,3 +686,100 @@ fn orchestrator_restart_budget_allows_a_second_restart_within_cap() {
         restarts.lines().count()
     );
 }
+
+// ---- #1098: restore strih's operator Multiview projector after the force-kill restart ----------
+
+#[test]
+fn orchestrator_reopens_strih_multiview_after_a_receiver_wedge_restart() {
+    // #1098: a force-kill restart of strih OBS (the receiver-wedge escalation) leaves the operator
+    // without their standing FULLSCREEN Multiview projector -- strih's SaveProjectors=true but
+    // SavedProjectors is EMPTY, and a force-kill never repopulates it, so OBS restores nothing and
+    // the AHK respawn only re-launches obs64 (no projector). After the restart + WS-return wait +
+    // burn sweep-off, mv_reverify_or_escalate MUST re-open the Multiview projector over OBS WS
+    // (mv_reverify_reopen_multiview_run -> obs_phase2.py open-multiview), overridable for tests via
+    // MV_REVERIFY_REOPEN_MV_CMD, WARN-only. This drives a receiver-wedge recovery and asserts the
+    // re-open command actually ran.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reopen_log = dir.path().join("reopen.log");
+    let reopen_stub = dir.path().join("reopen-stub.sh");
+    std::fs::write(
+        &reopen_stub,
+        format!(
+            "#!/usr/bin/env bash\necho \"REOPENED $1\" >> {}\n",
+            reopen_log.display()
+        ),
+    )
+    .expect("write reopen stub");
+    make_exec(&reopen_stub);
+
+    let restart_stub = dir.path().join("restart-stub.sh");
+    std::fs::write(&restart_stub, "#!/usr/bin/env bash\necho RESTARTED\n").expect("write restart");
+    make_exec(&restart_stub);
+
+    // preflight FAILS on the 1st call, SUCCEEDS on the 2nd (the post-restart re-check).
+    let cnt = dir.path().join("pf.cnt");
+    let script = format!(
+        "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
+         HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
+         MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
+         MV_REVERIFY_SWEEP_CMD='/bin/true'\nMV_REVERIFY_REOPEN_MV_CMD='{reopen}'\n\
+         MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=0\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
+         preflight_mv_reverify() {{ n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; [ $n -ge 2 ]; }}\n\
+         mv_reverify_or_escalate cam1 1; echo RC=$?\n",
+        lib = lib_path().display(),
+        here = manifest_dir().join("scripts").display(),
+        rx = frozen_rx_stub(),
+        restart = restart_stub.display(),
+        reopen = reopen_stub.display(),
+        c = cnt.display(),
+    );
+    let out = Command::new("bash").arg("-c").arg(&script).output().expect("run");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rc = extract_rc(&combined);
+    let reopened = std::fs::read_to_string(&reopen_log).unwrap_or_default();
+    assert!(
+        reopened.contains("REOPENED 10.0.0.9"),
+        "#1098: after the force-kill restart the orchestrator MUST re-open strih's Multiview \
+         projector (mv_reverify_reopen_multiview_run $STRIH); reopen.log=\n{reopened}\nout=\n{combined}"
+    );
+    assert_eq!(
+        rc, 0,
+        "#1098: the leg still recovers after the restart + re-check (the re-open is WARN-only); out=\n{combined}"
+    );
+}
+
+#[test]
+fn reopen_multiview_run_is_warn_only_and_never_fails_the_run() {
+    // #1098: a failing re-open (nonzero exit) must NOT fail -- the operator-facing restore is
+    // best-effort; the leg recovery already succeeded projector-independently (positive warm-settle).
+    let (_ok, out) = run(
+        "MV_REVERIFY_REOPEN_MV_CMD='/bin/false' mv_reverify_reopen_multiview_run 10.0.0.9; echo RC=$?",
+    );
+    assert!(
+        out.lines().any(|l| l.trim() == "RC=0"),
+        "#1098: mv_reverify_reopen_multiview_run must be WARN-only (return 0) even when the re-open \
+         command fails; out=\n{out}"
+    );
+}
+
+#[test]
+fn orchestrator_reopens_multiview_after_sweep_off_in_the_wiring() {
+    // Static ordering guard: in mv_reverify_or_escalate the Multiview re-open call must sit AFTER
+    // the burn sweep-off (both are post-restart, session-agnostic WS ops), so the fresh OBS's burn
+    // is cleared before the operator's multiview is restored.
+    let s = std::fs::read_to_string(lib_path()).expect("read lib");
+    let esc = s.find("mv_reverify_or_escalate()").expect("orchestrator fn present");
+    let body = &s[esc..];
+    let sweep = body.find("MV_REVERIFY_SWEEP_CMD").expect("#1098: sweep-off must exist in the orchestrator");
+    let reopen = body
+        .find("mv_reverify_reopen_multiview_run")
+        .expect("#1098: the orchestrator must call mv_reverify_reopen_multiview_run after the restart");
+    assert!(
+        sweep < reopen,
+        "#1098: the Multiview re-open must run AFTER the burn sweep-off in mv_reverify_or_escalate"
+    );
+}
