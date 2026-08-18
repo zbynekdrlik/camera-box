@@ -278,3 +278,44 @@ def test_dry_run_never_mutates_throttle_state(tmp_path):
     assert fired is False
     # a dry run must leave NO throttle fingerprint behind, or it silently eats the next real alert.
     assert not os.path.exists(os.path.join(state, "alert.state"))
+
+
+# --------------------------------------------- issue 1108: dantesync NTP step-rate feeder facet
+# The step-rate facet the FEEDER (rig-health-audit.py) adds renders through the SAME generic parser
+# with zero page code -- this pins that forward-compat contract at the renderer layer (no rig-status
+# change was needed for it, exactly like the cadence #1089 / build-sha #789 facets).
+_STEPRATE_AUDIT = """\
+[PASS] cam1    svc=active fps=60.0/60.0 chroma=colour dante=+12us root=ro load=0.35 steprate=28/h
+[FAIL] strih   obs64=1 render=30.0fps/6.2ms audio_buf=64ms arrivals[cam1=60] cadence[cam1=60] steprate=147/h  <<ntp-step-storm=147/h(>=120/h)>>
+[PASS] stream  obs64=1 render=30.0fps/6.2ms audio_buf=64ms arrivals[PGM=30] steprate=n/a pgm_latency_ms=3
+
+=== RIG AUDIT: 2 PASS / 0 WARN / 1 FAIL (PROBLEMS ABOVE) ===
+"""
+
+
+def test_steprate_facet_parses_as_a_generic_chip():
+    recs = _mod.parse_audit(_STEPRATE_AUDIT)
+    assert _facet(_rec(recs, "cam1"), "steprate") == "28/h"
+    # `steprate=n/a` (a slash, no internal `=`/bracket) parses as ONE chip too.
+    assert _facet(_rec(recs, "stream"), "steprate") == "n/a"
+
+
+def test_steprate_storm_problem_is_captured_not_swallowed():
+    strih = _rec(_mod.parse_audit(_STEPRATE_AUDIT), "strih")
+    assert strih["problems"] == "ntp-step-storm=147/h(>=120/h)"
+    # the graded facet chip is still present before the <<...>> block.
+    assert _facet(strih, "steprate") == "147/h"
+
+
+def test_steprate_facet_renders_on_the_page():
+    html = _mod.render_html(_mod.parse_audit(_STEPRATE_AUDIT),
+                            "1.7.0-dev.474", "2026-08-18T09:00:00Z")
+    assert "steprate" in html
+    assert "28/h" in html and "147/h" in html          # a healthy + a storm value both shown
+    assert "ntp-step-storm" in html                    # the FAIL problem visible so the operator sees WHY
+
+
+def test_steprate_storm_drives_overall_fail_and_pages():
+    recs = _mod.parse_audit(_STEPRATE_AUDIT)
+    assert _mod.overall_state(recs, 2) == "FAIL"
+    assert _mod.alert_condition(recs, 2) == "fail:strih"   # only the storm node pages
