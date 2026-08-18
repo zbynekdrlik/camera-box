@@ -205,8 +205,8 @@ void FilterChangeUndoRedo(void *vp, obs_data_t *nd_old_settings, obs_data_t *new
 
 	main->undo_s.enable();
 
-	std::string undo_data = OBSDataGetJsonSafe(undo_wrapper, "OBSBasic filters undo");
-	std::string redo_data = OBSDataGetJsonSafe(redo_wrapper, "OBSBasic filters redo");
+	std::string undo_data = OBSDataGetJsonSafe(undo_wrapper, "OBSBasic_Filters change undo");
+	std::string redo_data = OBSDataGetJsonSafe(redo_wrapper, "OBSBasic_Filters change redo");
 	main->undo_s.add_action(QTStr("Undo.Filters").arg(name), undo_redo, undo_redo, undo_data, redo_data);
 
 	obs_source_update(source, new_settings);
@@ -577,8 +577,8 @@ void OBSBasicFilters::AddNewFilter(const char *id)
 			obs_source_filter_add(source, filter);
 		};
 
-		std::string undo_data = OBSDataGetJsonSafe(uwrapper, "OBSBasic filters undo");
-		std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic filters redo");
+		std::string undo_data = OBSDataGetJsonSafe(uwrapper, "OBSBasic_Filters add undo");
+		std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic_Filters add redo");
 		main->undo_s.add_action(QTStr("Undo.Add").arg(obs_source_get_name(filter)), undo, redo, undo_data,
 					redo_data, false);
 	}
@@ -1094,8 +1094,8 @@ void OBSBasicFilters::delete_filter(OBSSource filter)
 		obs_source_filter_remove(source, filter);
 	};
 
-	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic filters undo");
-	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic filters redo");
+	std::string undo_data = OBSDataGetJsonSafe(wrapper, "OBSBasic_Filters delete undo");
+	std::string redo_data = OBSDataGetJsonSafe(rwrapper, "OBSBasic_Filters delete redo");
 	main->undo_s.add_action(QTStr("Undo.Delete").arg(obs_source_get_name(filter)), undo, redo, undo_data, redo_data,
 				false);
 	obs_source_filter_remove(source, filter);
