@@ -113,8 +113,9 @@ stay DORMANT and `splitter_health_classify` is UNCHANGED. The blocker is deploym
 - **The separation known today is synthetic/analytic only, NOT a live calibration.** Structured flat
   colour → `rough ≈ 0`; real structured content typ. `< 15`; pure per-pixel-UNCORRELATED luma on the
   16-235 video range → `E[|Y0−Y1|] = (235−16)/3 ≈ 73`; the unit-test max-difference extreme = `219`. So
-  the provisional `30.0` sits in the `15..73` gap — a defensible conservative mid-band placeholder, but
-  UNVALIDATED. It is deliberately left UNCHANGED: retuning a page-capable threshold on synthetic-only
+  the provisional `30.0` sits in the `15..73` gap — the LOWER part of that gap (nearer the ~15 real-content floor than the ~73 noise
+  expectation), so for a `rough > threshold` page it errs toward SENSITIVITY, not conservatism — an
+  untuned placeholder, UNVALIDATED. It is deliberately left UNCHANGED: retuning a page-capable threshold on synthetic-only
   data is the blind tuning the data-first / window-gate-tolerance-walkdown / no-overstatement discipline
   forbids.
 - **Calibration RISK that decides the seam:** sharp high-frequency STRUCTURED content — the QR/Vernier
