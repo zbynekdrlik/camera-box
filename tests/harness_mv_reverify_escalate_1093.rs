@@ -309,7 +309,7 @@ fn run_orchestrator(preflight_body: &str, received_cmd: &str) -> (String, i32) {
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
          MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
-         MV_REVERIFY_SWEEP_CMD=/bin/true\n\
+         MV_REVERIFY_SWEEP_CMD=/bin/true\nMV_REVERIFY_REOPEN_MV_CMD=/bin/true\n\
          MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=0\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
          {preflight}\n\
          mv_reverify_or_escalate cam1 1; echo RC=$?\n",
@@ -658,7 +658,7 @@ fn orchestrator_restart_budget_allows_a_second_restart_within_cap() {
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
          MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
-         MV_REVERIFY_SWEEP_CMD='/bin/true'\n\
+         MV_REVERIFY_SWEEP_CMD='/bin/true'\nMV_REVERIFY_REOPEN_MV_CMD='/bin/true'\n\
          MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=1\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
          preflight_mv_reverify() {{ return 1; }}\n\
          mv_reverify_or_escalate cam2 2; echo RC1=$?\n\
@@ -733,7 +733,11 @@ fn orchestrator_reopens_strih_multiview_after_a_receiver_wedge_restart() {
         reopen = reopen_stub.display(),
         c = cnt.display(),
     );
-    let out = Command::new("bash").arg("-c").arg(&script).output().expect("run");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("run");
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -772,12 +776,16 @@ fn orchestrator_reopens_multiview_after_sweep_off_in_the_wiring() {
     // the burn sweep-off (both are post-restart, session-agnostic WS ops), so the fresh OBS's burn
     // is cleared before the operator's multiview is restored.
     let s = std::fs::read_to_string(lib_path()).expect("read lib");
-    let esc = s.find("mv_reverify_or_escalate()").expect("orchestrator fn present");
+    let esc = s
+        .find("mv_reverify_or_escalate()")
+        .expect("orchestrator fn present");
     let body = &s[esc..];
-    let sweep = body.find("MV_REVERIFY_SWEEP_CMD").expect("#1098: sweep-off must exist in the orchestrator");
-    let reopen = body
-        .find("mv_reverify_reopen_multiview_run")
-        .expect("#1098: the orchestrator must call mv_reverify_reopen_multiview_run after the restart");
+    let sweep = body
+        .find("MV_REVERIFY_SWEEP_CMD")
+        .expect("#1098: sweep-off must exist in the orchestrator");
+    let reopen = body.find("mv_reverify_reopen_multiview_run").expect(
+        "#1098: the orchestrator must call mv_reverify_reopen_multiview_run after the restart",
+    );
     assert!(
         sweep < reopen,
         "#1098: the Multiview re-open must run AFTER the burn sweep-off in mv_reverify_or_escalate"

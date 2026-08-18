@@ -2098,6 +2098,53 @@ def open_projectors(a):
         ws.close()
 
 
+def _multiview_monitor_index(monitors, override=None):
+    """#1098 (pure, testable): pick the monitorIndex for a SINGLE-monitor box's fullscreen
+    Multiview projector (strih). Unlike open_projectors (imag-nb dual-monitor: panel=Multiview +
+    HDMI=Program), strih has ONE monitor and NO Program projector, so this selects the ONE monitor
+    the operator's multiview belongs on — DERIVED, never hardcoded (#840). Rule: an explicit
+    *override* wins; else the monitor at the origin (0,0) = primary; else the first monitor; else 0
+    (never crash — the caller's OpenVideoMixProjector fails loud on a bad index instead)."""
+    if override is not None:
+        return int(override)
+    if not monitors:
+        return 0
+    for m in monitors:
+        if m.get("monitorPositionX", 0) == 0 and m.get("monitorPositionY", 0) == 0:
+            return int(m["monitorIndex"])
+    return int(monitors[0]["monitorIndex"])
+
+
+def open_multiview(a):
+    """#1098 — (re)open a FULLSCREEN Multiview projector on a SINGLE-monitor box after a force-kill
+    OBS restart left the operator without their standing multiview. strih's SaveProjectors=true but
+    SavedProjectors is EMPTY, and a force-kill never repopulates it, so OBS restores nothing on the
+    AHK respawn — the operator sees no multiview until it is re-opened. This is that active re-open.
+
+    Deliberately multiview-ONLY, distinct from open_projectors (which REQUIRES both a non-HDMI panel
+    AND an HDMI monitor and FAILS LOUD without both, tailored to imag-nb's dual-monitor layout):
+    strih has ONE monitor and NO Program projector, so reusing open_projectors would raise "no HDMI
+    projector monitor detected" and never open the multiview. The monitorIndex is DERIVED from a
+    live GetMonitorList (#840 derive-not-hardcode); an explicit --monitor-index overrides it.
+    Idempotent — CloseExistingProjectors replaces a same-target projector, so it is safe to call
+    unconditionally after every restart (mirrors open_projectors' own always-open rationale)."""
+    ws = _conn(a.host, a.password)
+    try:
+        mons = _rpc(ws, "GetMonitorList").get("monitors", [])
+        override = a.monitor_index if getattr(a, "monitor_index", -999) != -999 else None
+        idx = _multiview_monitor_index(mons, override)
+        _rpc(ws, "OpenVideoMixProjector", {
+            "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW",
+            "monitorIndex": idx,
+        })
+        name = next((m.get("monitorName") for m in mons
+                     if m.get("monitorIndex") == idx), "?")
+        print(f"opened/confirmed Multiview projector on monitorIndex {idx} ({name}) "
+              f"[{a.host}, single-monitor]")
+    finally:
+        ws.close()
+
+
 def ensure_studio_mode_on(a):
     """#767 preflight — Studio Mode must be ON on EVERY broadcast box, imag included (user hard
     rule, 2026-07-15: without Studio Mode the multiview's Preview cell is DEAD — "studio mode je
@@ -2325,13 +2372,19 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
-        "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
+        "stream-status", "latency-check", "open-projectors", "open-multiview",
+        "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
         "republish-black-check",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
+        if name == "open-multiview":
+            # #1098: single-monitor box (strih) — the fullscreen Multiview projector's monitorIndex
+            # is DERIVED from GetMonitorList (#840) by default; -999 is the "derive" sentinel, an
+            # explicit index (incl. -1 for a windowed projector) overrides it.
+            p.add_argument("--monitor-index", type=int, default=-999)
         if name == "republish-black-check":
             # #1006: the DIFFERENTIAL republish-black probe. --reference is the upstream NDI input
             # carrying the real content (e.g. `cg`); --subject is the Spout republish of it (e.g.
@@ -2446,6 +2499,7 @@ def main():
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
      "stream-status": stream_status, "latency-check": latency_check,
      "open-projectors": open_projectors,
+     "open-multiview": open_multiview,
      "ensure-studio-mode-on": ensure_studio_mode_on,
      "program-rendered-input": program_rendered_input,
      "assert-program-nonblack": assert_program_nonblack,
