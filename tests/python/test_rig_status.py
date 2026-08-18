@@ -20,6 +20,7 @@ pieces that carry all the logic, with NO ssh / WS / subprocess to the rig:
 """
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -217,3 +218,63 @@ def test_render_html_escapes_markup():
     html = _mod.render_html(recs, "v", "t")
     assert "<script>x</script>" not in html
     assert "&lt;script&gt;" in html
+
+
+# --------------------------------------------- #787 review 🔴: no false-green on a broken audit
+def test_overall_state_empty_records_is_error_not_pass():
+    # a crashed/empty audit (0 node lines) must NEVER read as PASS -- it is UNKNOWN, and the whole
+    # point of the page is that a green banner PROVES health. summarize([]) alone returns PASS,
+    # which is the exact false-green this guards against.
+    assert _mod.overall_state([], 0) == "ERROR"
+    assert _mod.overall_state([], None) == "ERROR"
+    assert _mod.overall_state([], 2) == "ERROR"
+
+
+def test_overall_state_crash_exit_is_error():
+    recs = _mod.parse_audit("[PASS] cam1    svc=active\n")           # non-empty, but...
+    assert _mod.overall_state(recs, 124) == "ERROR"                  # ...the audit timed out/crashed
+    assert _mod.overall_state(recs, 127) == "ERROR"
+
+
+def test_overall_state_normal_exit_uses_verdicts():
+    assert _mod.overall_state(_mod.parse_audit(_AUDIT), 2) == "FAIL"
+    assert _mod.overall_state(_mod.parse_audit("[PASS] cam1    svc=active\n"), 0) == "PASS"
+    assert _mod.overall_state(_mod.parse_audit("[WARN] cam1    x=1  <<warn:y>>\n"), 1) == "WARN"
+
+
+def test_render_html_empty_audit_is_never_green():
+    html = _mod.render_html([], "1.7.0-dev.473", "2026-08-17T21:00:00Z", exit_code=0)
+    assert 'data-overall="ERROR"' in html
+    assert 'data-overall="PASS"' not in html
+    assert "VŠETKY NODY ZDRAVÉ" not in html
+
+
+def test_render_json_empty_audit_overall_error():
+    payload = json.loads(_mod.render_json([], "v", "t", exit_code=0))
+    assert payload["overall"] == "ERROR"
+
+
+# --------------------------------------------- #787 review 🔴/dedup: alert also on a down prober
+def test_alert_condition_fires_on_prober_down():
+    assert _mod.alert_condition([], 0) == "prober-down:exit0"
+    assert _mod.alert_condition(_mod.parse_audit("[PASS] cam1    x=1\n"), 124) == "prober-down:exit124"
+
+
+def test_alert_condition_fires_on_fail_nodes():
+    assert _mod.alert_condition(_mod.parse_audit(_AUDIT), 2) == "fail:cam3,stream"
+
+
+def test_alert_condition_empty_when_healthy():
+    assert _mod.alert_condition(_mod.parse_audit("[PASS] cam1    x=1\n"), 0) == ""
+    assert _mod.alert_condition(_mod.parse_audit("[WARN] cam1    x=1  <<warn:y>>\n"), 1) == ""
+
+
+# --------------------------------------------- #787 review 🟡: --dry-run must not mutate state
+def test_dry_run_never_mutates_throttle_state(tmp_path):
+    recs = _mod.parse_audit(_AUDIT)                                  # cam3 + stream FAIL
+    state = str(tmp_path)
+    fired = _mod._maybe_alert(recs, 2, state, "/nonexistent-notify",
+                              dry_run=True, log=lambda *_: None)
+    assert fired is False
+    # a dry run must leave NO throttle fingerprint behind, or it silently eats the next real alert.
+    assert not os.path.exists(os.path.join(state, "alert.state"))
