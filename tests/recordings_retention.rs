@@ -80,8 +80,14 @@ fn newest_n_runs_are_kept_rest_deleted() {
     );
     let kept: Vec<&str> = p.keep.iter().map(|k| k.file.name.as_str()).collect();
     let del: Vec<&str> = p.delete.iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(kept, vec!["2026-01-04 10-00-00.mkv", "2026-01-03 10-00-00.mkv"]);
-    assert_eq!(del, vec!["2026-01-02 10-00-00.mkv", "2026-01-01 10-00-00.mkv"]);
+    assert_eq!(
+        kept,
+        vec!["2026-01-04 10-00-00.mkv", "2026-01-03 10-00-00.mkv"]
+    );
+    assert_eq!(
+        del,
+        vec!["2026-01-02 10-00-00.mkv", "2026-01-01 10-00-00.mkv"]
+    );
     assert!(p.keep.iter().all(|k| k.reason == KeepReason::NewestRuns));
 }
 
@@ -149,7 +155,11 @@ fn foreign_file_never_deleted_even_when_ancient_and_huge() {
     // and can NEVER be in the delete set. Only the timestamp-named runs are deletable.
     let now = 1_000_000.0;
     let files = vec![
-        f("strih700105.mkv", 400 * 1024 * 1024 * 1024, now - 700.0 * SECONDS_PER_DAY),
+        f(
+            "strih700105.mkv",
+            400 * 1024 * 1024 * 1024,
+            now - 700.0 * SECONDS_PER_DAY,
+        ),
         f("2026-01-01 10-00-00.mkv", 10, now - 700.0 * SECONDS_PER_DAY),
     ];
     let p = plan(
@@ -199,9 +209,13 @@ fn zero_n_zero_d_deletes_all_matching_keeps_foreign() {
 fn totals_sum_only_the_delete_set() {
     let now = 1_000_000.0;
     let files = vec![
-        f("2026-01-01 10-00-00.mkv", 1000, now - 40.0 * SECONDS_PER_DAY), // delete
-        f("2026-01-02 10-00-00.mkv", 2000, now - 1.0 * SECONDS_PER_DAY),  // keep (newest)
-        f("keepme-operator.mkv", 9999, now - 500.0 * SECONDS_PER_DAY),    // protected
+        f(
+            "2026-01-01 10-00-00.mkv",
+            1000,
+            now - 40.0 * SECONDS_PER_DAY,
+        ), // delete
+        f("2026-01-02 10-00-00.mkv", 2000, now - 1.0 * SECONDS_PER_DAY), // keep (newest)
+        f("keepme-operator.mkv", 9999, now - 500.0 * SECONDS_PER_DAY),   // protected
     ];
     let p = plan(
         &files,
@@ -225,7 +239,16 @@ fn realistic_strih_scenario_brings_under_budget_and_protects_foreign() {
     let gib = 1024u64 * 1024 * 1024;
     let mut files = vec![f("strih700105.mkv", 5 * gib, now - 300.0 * SECONDS_PER_DAY)];
     // 8 runs, oldest→newest, the two oldest are the space hogs.
-    let sizes = [46 * gib, 33 * gib, 8 * gib, 8 * gib, 1 * gib, 1 * gib, 1 * gib, 1 * gib];
+    let sizes = [
+        46 * gib,
+        33 * gib,
+        8 * gib,
+        8 * gib,
+        1 * gib,
+        1 * gib,
+        1 * gib,
+        1 * gib,
+    ];
     for (i, sz) in sizes.iter().enumerate() {
         let age_days = (8 - i) as f64 * 5.0; // 40,35,...,5 days
         files.push(f(
@@ -248,7 +271,10 @@ fn realistic_strih_scenario_brings_under_budget_and_protects_foreign() {
     assert!(p.delete.iter().any(|d| d.name == "2026-01-01 10-00-00.mkv"));
     assert!(p.delete.iter().any(|d| d.name == "2026-01-02 10-00-00.mkv"));
     // Newest 3 runs kept.
-    assert!(p.keep.iter().any(|k| k.file.name == "2026-01-08 10-00-00.mkv"));
+    assert!(p
+        .keep
+        .iter()
+        .any(|k| k.file.name == "2026-01-08 10-00-00.mkv"));
     // Freed bytes are dominated by the two hogs.
     assert!(p.bytes_to_delete() >= 79 * gib);
 }
