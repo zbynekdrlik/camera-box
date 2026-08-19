@@ -85,3 +85,36 @@ verify). FAST is obs.dll-only → the block is a no-op there (no distroav in the
 - **Runtime ENABLE of the distroav compare is separate (issue 1100 / issue 1082 ENFORCE):** the gate
   auto-sources the FAST obs.dll-only manifest, so distroav is labelled SKIPPED at runtime until a
   distroav-bearing (FULL) manifest is auto-sourced — do NOT "fix" the FAST manifest to add distroav.
+
+## imag post-swap restart HANDS OFF to imag-obs.service — never a raw setsid/nohup launch (#789 residual)
+
+The imag leg's step (7) restarts OBS THROUGH the durable systemd USER unit, never a session-tied
+raw launch. The first live fleet run (2026-08-18) `setsid nohup … imag-obs-start.sh &`'d OBS OUTSIDE
+the `imag-obs.service` cgroup (no `Restart=on-failure`, `ExecStop=` bypassed, the launch tied to the
+ssh session) — it died in ~21s and needed a hand `systemctl --user restart`. That is exactly the
+`imag-obs-supervision.md` "never launch obs directly with setsid/nohup" trap, in the deploy leg. The
+corrected shape (mirrors the strih AHK stop→verify→relaunch ordering):
+
+- **The unit is a USER unit — reach its bus from the root deploy program via
+  `sudo -u <user> env XDG_RUNTIME_DIR=/run/user/$(id -u <user>) systemctl --user …`.** Use `env` to
+  set `XDG_RUNTIME_DIR`, NOT a bare `sudo -u u XDG_RUNTIME_DIR=… systemctl` — sudo's `env_reset`
+  policy can strip a command-line `VAR=val`, and a stripped `XDG_RUNTIME_DIR` silently loses the
+  user bus (`Failed to connect to bus`) and re-creates the unsupervised-launch failure. `env` sets
+  it in the child, bypassing sudo's env filtering entirely (issue 998 is the ssh half of the same
+  user-bus requirement).
+- **Order: `systemctl --user stop` → `pkill -9 -x obs` (kill any stray from a prior raw-launch
+  deploy; safe once the unit is stopped) → clear sentinels → `reset-failed` → `systemctl --user
+  restart`.** The stop-then-pkill kills the OLD obs (old libobs still mapped, #912 stop-race) before
+  the fresh supervised start; the idempotent guard in `imag-obs-start.sh` (`if pgrep -x obs; exit 0`)
+  means a surviving stray would make the unit's ExecStart a no-op and leave it unsupervised, so the
+  pkill is load-bearing, not decoration.
+- **Verify three things, fail-loud `exit 4` on any miss:** `systemctl --user is-active` (bounded
+  poll), the running obs pid actually sits inside the `imag-obs.service` cgroup
+  (`grep imag-obs.service /proc/<pid>/cgroup` — the verify-imag.sh issue-1015 discriminator: systemd
+  bookkeeping can say active while the real obs sits outside the cgroup), and the render-tick log
+  (`/tmp/imag-obs-start.log` reaching `OK: OBS bezi`, the imag analogue of the Windows render-tick
+  verify). Read the log only PAST the pre-restart `wc -l` line count so a stale `OK: OBS bezi` from a
+  previous start cannot false-pass.
+- The emitted-program assertions live in `tests/deploy_genlock_fleet.rs`
+  (`imag_program_restarts_through_the_systemd_unit_not_a_raw_launch_789`) — a `!contains("setsid")`
+  / `!contains("nohup")` negative anchor, so keep those words out of the emitted step's own comments.
