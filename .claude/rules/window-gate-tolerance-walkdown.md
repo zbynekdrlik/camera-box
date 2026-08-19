@@ -6,6 +6,32 @@ paths:
 
 # Walking WINDOW_COPIES_GAPS_TOLERANCE down (or up) is a DATA-FIRST step, gated on rig-verified deploy segregation
 
+## #1132 (owner mandate, 2026-08-19) — the tolerance NO LONGER folds into `overall_pass`
+
+The relaxed copies/gaps RESCUE was removed from the BLOCKING fused verdict (a hardware-sick CAM1 leg
+with copies=1/gaps<=3 passed green for a week, masking the defect). There are now THREE independent
+copies/gaps-related seams in `window_gate.rs`, do not conflate them:
+
+1. **`WINDOW_COPIES_GAPS_TOLERANCE`** (the const this rule is about) — still walked 0..3, still used
+   by `relaxed_pass`, but `relaxed_pass` is now **REPORTED-ONLY** (observability), it no longer gates.
+2. **`copies_gaps_tolerance_gates_overall_pass() -> false`** (#1132, mirrors
+   `optical_floor::gates_overall_pass`) — the DISARM flag. While `false`, the run fold uses the new
+   `WindowGateDecision::overall_pass_term` = `frames>0 && floor_term && copies==0 && gaps==0` (strict;
+   ANY nonzero copies/gaps fails). `segment_continuity()` folds `overall_pass_term`, NOT `relaxed_pass`.
+3. **`optical_floor::gates_overall_pass()`** — the SEPARATE optical undecodable floor seam (issue
+   915/905). `overall_pass_term` shares `relaxed_pass`'s floor term EXACTLY, so #1132 did NOT re-gate
+   the floor — a window over the floor but clean on copies/gaps still passes the blocking verdict.
+
+**Consequence for a future walk-down:** stepping `WINDOW_COPIES_GAPS_TOLERANCE` now only moves the
+REPORTED `relaxed_pass` verdict + `windows_over_copies_gaps_tolerance` count; it does NOT change what
+gates `overall_pass` (which is already strict 0/0). REACTIVATING the tolerance rescue (e.g. because the
+upstream residual is genuinely bounded again and the sick leg is fixed/excluded — #1110/#1134) is a
+flip of `copies_gaps_tolerance_gates_overall_pass()` back to `true`, after which `overall_pass_term ==
+relaxed_pass` and the walked const governs the blocking fold again. The walk-down to 0 stays this
+ticket's separate track; #1132's disarm and #1031's walk-down are orthogonal.
+
+---
+
 `WINDOW_COPIES_GAPS_TOLERANCE` (`src/window_gate.rs`) is the per-window `copies`/`gaps` tolerance the
 RELAXED verdict applies. It is walked between 0 and 3 as the upstream genlock residual changes
 (issue 889 walked it UP 0→3; issue 1031 walked it back DOWN 3→1). Each step is decided from the
