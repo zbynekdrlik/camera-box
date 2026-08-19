@@ -10,7 +10,10 @@
 //!
 //! - [`genlock_emit_gate`] — the wall-clock decimation grid: emit the first capture at/after each
 //!   boundary; #707 B1 catches up a bounded buffered-drain one interval at a time and grid-resyncs
-//!   only past a real clock STEP (`> `[`GENLOCK_MAX_CATCHUP_INTERVALS`]).
+//!   only past a real clock STEP (`> `[`GENLOCK_MAX_CATCHUP_INTERVALS`]) — and #1131 further
+//!   suppresses that resync entirely while a captured frame is still buffered in the V4L2 queue
+//!   (`queue_had_frame`), so a sick/wobbly grabber's late buffered frames are never leaped-past and
+//!   discarded in a run (the multi-slot-skip judder).
 //! - [`genlock_emit_on_time`] (#1111) — is this an ON-TIME/surplus crossing vs a LATE catch-up
 //!   crossing? Shares [`genlock_latched_boundary`] with the gate so the two never disagree; this is
 //!   the signal `crate::dupe_decimation`'s #889 dupe-preferring shed needs to stay boundary-neutral.
@@ -24,10 +27,12 @@
 
 /// NDI sender wrapper - optimized for low latency
 /// Genlock decimation gate (#11): given the current wall-clock time `now_ns`, the
-/// next emit boundary `next_boundary_ns` (0 = uninitialized), and the boundary
-/// `interval_ns` (1e9 / target_fps), decide whether THIS captured frame should be
-/// emitted — it is the first capture at/after a boundary — and return the updated
-/// next boundary. The faster capture (e.g. 60 fps) is decimated onto the DanteSync
+/// next emit boundary `next_boundary_ns` (0 = uninitialized), the boundary
+/// `interval_ns` (1e9 / target_fps), and `queue_had_frame` (#1131 — did THIS frame
+/// come from a NON-EMPTY V4L2 queue, i.e. already buffered? see
+/// [`crate::capture_stall::frame_from_nonempty_queue`]), decide whether THIS captured
+/// frame should be emitted — it is the first capture at/after a boundary — and return
+/// the updated next boundary. The faster capture (e.g. 60 fps) is decimated onto the DanteSync
 /// wall-clock boundaries of the slower genlock/broadcast rate (e.g. 30 fps) so a
 /// downstream genlocked OBS consumes exactly one frame per render tick (zero loss).
 /// Pure + fully mutation-tested; the capture loop wires it to `wall_clock_ns()`.
@@ -53,6 +58,12 @@
 /// reaches the resync branch), and a real cold-boot NTP acquire steps by seconds (hundreds of
 /// intervals >> 8) → still grid-resyncs, exactly as before (#131). See
 /// [`genlock_emit_gate`]'s resync branch.
+///
+/// #1131 — this fixed bound is now the resync trigger ONLY for a frame that came from an EMPTY
+/// queue (`!queue_had_frame` — the loop genuinely waited for it: a device stall that produced
+/// nothing, or a real clock STEP). A frame that came from a NON-EMPTY queue (buffered — a real
+/// captured frame is being drained late, the 0-capture-dropped sick-grabber case) NEVER resyncs
+/// however large the lag: it catches up one interval so no buffered captured frame is discarded.
 pub const GENLOCK_MAX_CATCHUP_INTERVALS: u64 = 8;
 
 pub fn genlock_emit_gate(
@@ -66,10 +77,6 @@ pub fn genlock_emit_gate(
     if interval_ns == 0 {
         return (false, next_boundary_ns);
     }
-    // #1131 (RED): the queue-occupancy signal is now threaded in, but the forward-resync below
-    // does NOT yet consult it — so a buffered drain past the catch-up bound is still leaped-past
-    // (the multi-slot-skip judder). The GREEN commit gates the resync on `!queue_had_frame`.
-    let _ = queue_had_frame;
     // Initialize (or keep) the next absolute wall-clock boundary.
     //
     // #131: guard a BACKWARD clock step, symmetric to the forward resync below.
@@ -100,8 +107,18 @@ pub fn genlock_emit_gate(
         // as buffered frames — it must be a real clock STEP) grid-resyncs, as before (#131), so an
         // NTP/PTP jump never triggers a pathologically long stale catch-up.
         let lag_intervals = (now_ns - boundary) / interval_ns; // >= 1 here (next <= now_ns)
-        if lag_intervals > GENLOCK_MAX_CATCHUP_INTERVALS {
-            // Real discontinuity — resync forward to the grid boundary just after `now`.
+        if lag_intervals > GENLOCK_MAX_CATCHUP_INTERVALS && !queue_had_frame {
+            // #1131: resync (leap the grid forward past the intervening boundaries) ONLY when this
+            // frame did NOT come from a buffered V4L2 queue — i.e. the loop genuinely WAITED for it
+            // (an EMPTY queue: a device stall that produced nothing, or a real wall-clock STEP), so
+            // those boundaries had NO captured content and skipping them is honest (#131 cold-boot
+            // resync preserved). When `queue_had_frame` is set, a real captured frame WAS buffered
+            // and is being drained right now: a lag beyond the fixed catch-up bound is a late
+            // BUFFERED-DRAIN (0 capture-dropped — the frames exist), NOT a discontinuity, so we
+            // catch up ONE interval below (fill the next un-emitted boundary) instead of leaping
+            // past the buffered frames and discarding them in a run (the issue-1131 multi-slot
+            // judder). The next buffered frame re-evaluates against the following boundary, draining
+            // the whole backlog one-per-frame with ZERO skipped boundaries.
             next = now_ns - (now_ns % interval_ns) + interval_ns;
         }
         // else: keep next = boundary + interval_ns — emit this (fresh, merely-late) frame for the

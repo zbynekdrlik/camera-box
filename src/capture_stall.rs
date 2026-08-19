@@ -199,4 +199,51 @@ mod tests {
         let msg = capture_stall_warning(100.0, 16.7, 60.0);
         assert!(msg.to_lowercase().contains("not ndi send"));
     }
+
+    // #1131 — frame_from_nonempty_queue: the queue-occupancy decision.
+
+    #[test]
+    fn buffered_frame_returns_well_under_one_interval_is_nonempty_queue() {
+        // A healthy V4L2 dequeue with a buffer ALREADY ready: 60fps -> 16.7ms interval, the
+        // blocking dequeue returns sub-millisecond -> the queue was non-empty (frame buffered).
+        assert!(frame_from_nonempty_queue(0.5, 16.7));
+        assert!(frame_from_nonempty_queue(0.0, 16.7));
+    }
+
+    #[test]
+    fn normal_single_frame_wait_is_not_a_nonempty_queue() {
+        // A dequeue that took ~one full capture interval means the loop WAITED for the device to
+        // complete the next frame (an EMPTY queue in steady state, the loop out-running capture).
+        assert!(!frame_from_nonempty_queue(16.7, 16.7));
+        assert!(!frame_from_nonempty_queue(15.0, 16.7)); // just under a full interval, still a wait
+    }
+
+    #[test]
+    fn just_below_half_interval_is_buffered_at_or_above_is_not() {
+        // The BUFFERED_DEQUEUE_FRACTION (0.5) boundary is exclusive-below = buffered.
+        let interval = 16.7;
+        let half = interval * BUFFERED_DEQUEUE_FRACTION;
+        assert!(frame_from_nonempty_queue(half - 0.1, interval));
+        assert!(!frame_from_nonempty_queue(half, interval)); // AT the threshold = not buffered
+        assert!(!frame_from_nonempty_queue(half + 0.1, interval));
+    }
+
+    #[test]
+    fn a_long_stall_dequeue_is_never_read_as_buffered() {
+        // A frame delivered after a genuine stall (>= the capture-stall factor) is emphatically
+        // NOT buffered — the loop waited far past one interval. Keeps the gate's honest resync.
+        assert!(!frame_from_nonempty_queue(26.4, 16.7)); // the live #707 CAM1 dequeue-stall value
+        assert!(!frame_from_nonempty_queue(150.0, 16.7));
+    }
+
+    #[test]
+    fn unknown_or_bad_measurement_is_not_buffered_fail_safe() {
+        // Capture fps unknown/zero, or a non-finite/negative reading -> assume freshly-awaited
+        // (queue-blind resync preserved), so a bad measurement can never SUPPRESS an honest skip.
+        assert!(!frame_from_nonempty_queue(0.5, 0.0));
+        assert!(!frame_from_nonempty_queue(0.5, -16.7));
+        assert!(!frame_from_nonempty_queue(f64::NAN, 16.7));
+        assert!(!frame_from_nonempty_queue(-1.0, 16.7));
+        assert!(!frame_from_nonempty_queue(f64::INFINITY, 16.7));
+    }
 }
