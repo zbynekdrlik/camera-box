@@ -1,0 +1,17 @@
+{
+  "_comment": "#1003 MEASUREMENT-WINDOW per-camera equalization profile -- NOT production. This is applied ONLY during a profile-mode E2E run (MEASUREMENT_EQ=1) via obs_phase2.py apply-measurement-pins, snapshot-set-restore, so production (strih 3/6/20 + stream NDI 2ME PGM 971) is untouched and stays the drift-guard source of truth in scripts/latency-pins-baseline.json. Stores the MEASURED INPUTS (per-camera production pin + measured delivery p50 + measured A/V offset, the production stream hold, and the chosen common delivery target); scripts/e2e_measurement_pins.py DERIVES the equalized-deep pins, the coherent test hold, and --av-expected-ms from these -- the magic outputs (90/168/184/789) are never hand-committed. To RE-DERIVE after a staleness report: take a recent green profile-mode run's all_cambox_delivery_latency[camN].p50_ms + all_cambox_av_sync[camN].av_offset_ms measured AT THE CURRENT production pins, update the per-camera production_delivery_p50_ms / production_av_offset_ms below, and re-run scripts/e2e_measurement_pins.py resolve to confirm coherence. Seeded 2026-08-19 from the supervisor's Stage-1 delivery measurement (issue 1003 issuecomment-5336139196 / 5336411164): delivery p50 cam1 ~120 / cam2 44.5 / cam3 42.6 and A/V offsets cam1 95.2 / cam2 24.1 / cam3 15.4 at production pins 3/6/20 + hold 971. Caveat (no-overstatement): a STATIC profile is accurate only to ~+/-1 frame per camera per run (#757 per-restart re-phasing) -- fine under the current +/-90ms gate, but it cannot support acceptance item 2's tighten-to-+/-20 (that follow-up must re-derive per run, not blame this lane).",
+  "target_delivery_ms": 207,
+  "min_deep_pin_ms": 80,
+  "leftover_slack_ms": 40,
+  "staleness_frames": 1.5,
+  "av_expected_ms": 0,
+  "cameras": {
+    "NDI cam1": {"production_pin_ms": 3, "production_delivery_p50_ms": 120.0, "production_av_offset_ms": 95.2},
+    "NDI cam2": {"production_pin_ms": 6, "production_delivery_p50_ms": 44.5, "production_av_offset_ms": 24.1},
+    "NDI cam3": {"production_pin_ms": 20, "production_delivery_p50_ms": 42.6, "production_av_offset_ms": 15.4}
+  },
+  "stream": {
+    "source": "NDI 2ME PGM",
+    "production_hold_ms": 971
+  }
+}
