@@ -128,6 +128,43 @@ fn within_days_kept_even_beyond_newest_n() {
 }
 
 #[test]
+fn age_exactly_keep_within_days_is_deleted_strict_boundary() {
+    // Locks the STRICT `<` horizon (mirrored by the .ps1's `-lt`): a matching file aged EXACTLY
+    // keep_within_days, and outside the newest-N, is DELETED, not kept. Guards against an
+    // accidental flip to `<=` that would silently change the retention semantics.
+    let now = 1_000_000.0;
+    let files = vec![
+        f("2026-01-01 10-00-00.mkv", 10, now - 3.0 * SECONDS_PER_DAY), // age == 3d horizon
+    ];
+    let p = plan(
+        &files,
+        &RetentionPolicy {
+            keep_newest_runs: 0,
+            keep_within_days: 3.0,
+        },
+        now,
+    );
+    let del: Vec<&str> = p.delete.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(del, vec!["2026-01-01 10-00-00.mkv"]);
+    // And one epsilon younger IS kept (the strict-inequality's other side).
+    let younger = vec![f(
+        "2026-01-01 10-00-00.mkv",
+        10,
+        now - 3.0 * SECONDS_PER_DAY + 1.0,
+    )];
+    let p2 = plan(
+        &younger,
+        &RetentionPolicy {
+            keep_newest_runs: 0,
+            keep_within_days: 3.0,
+        },
+        now,
+    );
+    assert_eq!(p2.delete.len(), 0);
+    assert_eq!(p2.keep[0].reason, KeepReason::WithinDays);
+}
+
+#[test]
 fn within_newest_but_old_is_still_kept() {
     // A file inside the newest-N but OLDER than the day-horizon is kept (union) with the
     // newest-runs reason — the newest-N floor never expires.

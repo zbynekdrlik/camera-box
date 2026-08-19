@@ -39,7 +39,10 @@ $ErrorActionPreference = "Stop"
 # The EXPLICIT allowlist -- OBS FilenameFormatting `%CCYY-%MM-%DD %hh-%mm-%ss` + a recording
 # extension + an OPTIONAL OBS ` (n)` dedup suffix. Case-SENSITIVE (`-cmatch`): OBS writes lowercase,
 # and a `.MKV` / custom-named file must stay protected. Mirrors is_harness_recording() in Rust.
-$allow = '^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}( \(\d+\))?\.(mkv|mp4)$'
+# `[0-9]`, NOT `\d`: .NET `\d` also matches Unicode decimal digits (fullwidth/Arabic/Devanagari),
+# which would make the executor MORE permissive than the Rust spec's `is_ascii_digit()` — the wrong
+# direction for a delete gate. `[0-9]` keeps the mirror byte-exact with the canonical decision.
+$allow = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}-[0-9]{2}-[0-9]{2}( \([0-9]+\))?\.(mkv|mp4)$'
 
 function Format-Gb([long]$bytes) { return ("{0:N1} GB" -f ($bytes / 1GB)) }
 
@@ -58,7 +61,10 @@ if (-not (Test-Path -LiteralPath $RecordDir -PathType Container)) {
 $files = @(Get-ChildItem -LiteralPath $RecordDir -File)
 $now = Get-Date
 
-$matching  = @($files | Where-Object { $_.Name -cmatch $allow } | Sort-Object LastWriteTime -Descending)
+# Newest first, with a deterministic Name tie-break (mtime desc, then name asc) so the on-box plan
+# matches the Rust spec's ordering at an exact LastWriteTime tie (PS 5.1 Sort-Object is not stable).
+$matching  = @($files | Where-Object { $_.Name -cmatch $allow } |
+    Sort-Object @{ Expression = 'LastWriteTime'; Descending = $true }, @{ Expression = 'Name'; Descending = $false })
 $protected = @($files | Where-Object { $_.Name -cnotmatch $allow })
 
 $keep = New-Object System.Collections.Generic.List[object]
