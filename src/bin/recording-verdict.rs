@@ -8495,9 +8495,9 @@ mod tests {
     /// SINGLE stale/frozen painted-tick copy in the single all-cambox window (undecodable=0) sits
     /// WITHIN the per-window tolerance (`copies<=WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated
     /// 1 → 2 → 3 on 2026-08-06, ticket 889 comments 5198131539 / 5200533407) — it must still be
-    /// COMPUTED and printed in the verdict JSON, must still fail that window's STRICT `pass`, but
-    /// must NOT fail `all_cambox_continuity.overall_pass` (the tolerance absorbs a single copy
-    /// either way) — and
+    /// COMPUTED and printed in the verdict JSON, must still fail that window's STRICT `pass`, AND
+    /// (issue 1132, 2026-08-19) now ALSO fails `all_cambox_continuity.overall_pass` — the
+    /// tolerance rescue is disarmed (dormant, reported-only) — and
     /// `windows_failed_report_only` must still report it (strict-zero visibility is unaffected by
     /// the re-gate). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
     /// implied copies never gate at all, which stopped being true once the re-gate landed; a
@@ -8603,8 +8603,9 @@ mod tests {
         );
         assert_eq!(
             seg["overall_pass"],
-            serde_json::json!(true),
-            "889: a copy alone (undecodable=0) no longer fails overall_pass: {seg}"
+            serde_json::json!(false),
+            "1132 strict: ANY copy fails overall_pass -- the 889 tolerance rescue is disarmed \
+             (dormant, reported-only): {seg}"
         );
         assert_eq!(
             seg["windows_failed_report_only"],
@@ -8781,9 +8782,10 @@ mod tests {
             "{at_seg}"
         );
         assert_eq!(
-            clean["all_cambox_continuity"]["overall_pass"], at_seg["overall_pass"],
-            "889 re-gate: copies AND gaps together must be a no-op on overall_pass (both at the \
-             tolerance): clean={clean}, at_tolerance={at_tolerance}"
+            at_seg["overall_pass"],
+            serde_json::json!(false),
+            "1132 strict: copies AND gaps at the (dormant) tolerance now FAIL overall_pass -- \
+             the rescue is disarmed: clean={clean}, at_tolerance={at_tolerance}"
         );
         assert_eq!(
             at_seg["windows_over_copies_gaps_tolerance"],

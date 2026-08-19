@@ -52,19 +52,19 @@ if out="$(camera_source_box 2>/dev/null)"; then printf 'OK\t%s' "$out"; else pri
 }
 
 #[test]
-fn camera_source_box_defaults_to_cam3_now_that_cam1_is_retired() {
-    // The whole point of #1134: with the new default active set (cam2 cam3), the source role is
-    // the FIRST strih-routable member = cam3 (cam2 is the painter and camera_strih_route rejects
-    // it, so it is skipped). cam1 is out of the set, so it can never be selected as source.
+fn camera_source_box_defaults_to_cam1_first_member_of_the_returned_set() {
+    // #1134 mechanism with the cam1-returned default (issue 1130 exoneration, 2026-08-19):
+    // the source role is the FIRST strih-routable member of CAMERA_ACTIVE_SET = cam1. The
+    // derivation (not a literal) is the point -- retiring cam1 again just changes the set.
     let (ok, got) = source_box(None, None);
     assert!(
         ok,
         "#1134: camera_source_box must resolve a source for the default active set"
     );
     assert_eq!(
-        got, "cam3",
-        "#1134: the default source box must be cam3 (first strih-routable member of the new \
-         default CAMERA_ACTIVE_SET='cam2 cam3'; cam1 retired, #1110/#1130)"
+        got, "cam1",
+        "#1134 mechanism: the default source box must be cam1 (first strih-routable member of \
+         the returned default CAMERA_ACTIVE_SET='cam1 cam2 cam3')"
     );
 }
 
