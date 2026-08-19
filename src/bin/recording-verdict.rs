@@ -5629,12 +5629,12 @@ fn build_and_print_verdict_with_stream_hashes(
                 // delivery latency is measurable the SAME digital way as every other camera, no
                 // optical read required for THIS metric.
                 //
-                // #1033: `spread_gate_pass` FOLDS into `all_pass` through the
-                // `delivery_spread_gate` report-only seam (the fold line below) — but that seam
-                // ships `gates_overall_pass()==false` today, so the fold is a NO-OP and the field
-                // still never reds a run. It stays report-only until the fleet is tight-green
-                // (cam1's delivery lottery / issue-909 grabber; recent green runs ~66–81 ms
-                // spread); flipping it LIVE is a one-line follow-up. Its purpose today is still to
+                // #1033 -> #1142: `spread_gate_pass` FOLDS into `all_pass` through the
+                // `delivery_spread_gate` seam, now BLOCKING (`gates_overall_pass()==true`, owner
+                // mandate 2026-08-19) — a wide delivery spread REDs the run at the shared
+                // SPREAD_THRESHOLD_MS bound (the SOURCE side already blocked). The "green" runs it
+                // used to pass were falsely green (the phase lottery hid a real spread failure).
+                // Its purpose today is still to
                 // let a re-verification run SEE whether the applied differentiated offsets
                 // collapsed the delivery-time spread — now via the standard flip-ready seam.
                 //
@@ -10103,12 +10103,12 @@ mod tests {
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "#1120: a 27ms delivery spread is over the (report-only) 24ms bound -> FAIL: {lat}"
+            "#1120: a 27ms delivery spread is over the (now BLOCKING, #1142) 24ms bound -> FAIL: {lat}"
         );
     }
 
     /// #286: ALL SIX cameras measured (including cam2), each within the spread bound of every
-    /// other's injected delivery latency -> the (report-only) spread gate PASSES — mirrors a
+    /// other's injected delivery latency -> the (blocking since #1142) spread gate PASSES — mirrors a
     /// successfully phase-synced rig where the applied differentiated genlock-latency offsets
     /// have collapsed every camera's DELIVERY latency to roughly the same value.
     #[test]
@@ -10149,7 +10149,7 @@ mod tests {
         );
     }
 
-    /// #286: a tight delivery spread (all within the spread bound) PASSES the report-only gate.
+    /// #286: a tight delivery spread (all within the spread bound) PASSES the gate (blocking since #1142).
     #[test]
     fn all_cambox_delivery_latency_tight_spread_passes_gate_286() {
         let v = build_all_cambox_delivery_latency_fixture(
