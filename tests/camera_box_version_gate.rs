@@ -1,17 +1,22 @@
-//! Behavioral guard for `scripts/camera-box-version-gate.sh` — the cross-box camera-box BINARY
-//! version-parity precondition gate (#875). The user's requirement: a fleet whose cam boxes run
-//! DIFFERENT camera-box builds (live 2026-07-29 cam4 was three builds behind cam1/2/3 and was the
-//! only box missing the publish-30p fix) must never be discoverable only by eye or by post-mortem —
-//! the gate must REFUSE (fail-closed) the moment ANY active box's camera-box version disagrees with
-//! the others.
+//! Behavioral guard for `scripts/camera-box-version-gate.sh` — the camera-box BINARY version gate.
+//! The user's requirement: a fleet whose cam boxes run a camera-box build OTHER than main's release
+//! (a single box behind — live 2026-07-29 cam4 three builds behind — OR the WHOLE fleet uniformly
+//! stale — live: dev.462 for a week while main carried the #1111 fix) must never be discoverable only
+//! by eye or by post-mortem; the gate must REFUSE (fail-closed).
 //!
-//! This is a DELIBERATE follow-up split from `dantesync-version-gate.sh` (#862) because the two
-//! signals need DIFFERENT comparison models: dantesync uses a FIXED PIN (upgrades rarely), while the
-//! camera-box binary is deployed continuously (`1.7.0-dev.NNN` grows on almost every PR) and so has
-//! no canonical value to pin against — the only checkable invariant is RELATIVE cross-box parity
-//! (every active box agrees with every other), the same model `drift-guard.sh`'s genlock_build_sha
-//! parity engine uses. These tests pin the gate's PURE functions (version extraction, the modal
-//! reference, the per-box verdict, the fleet-wide roll-up + table print) and its end-to-end exit-code
+//! TWO comparison layers (issue 1136 added the pin on top of the original #875 parity):
+//!   * PIN-to-origin/main (DEFAULT) — every active box must run the version in origin/main's
+//!     Cargo.toml. This catches a UNIFORMLY-stale fleet, which parity alone misses. The pin is a
+//!     MOVING reference (read from origin/main, advanced automatically by the push-to-main
+//!     auto-deploy), not the spurious-fail-prone FIXED pin the #875 header once rejected. Fail
+//!     CLOSED when the pin itself is unreadable.
+//!   * RELATIVE cross-box parity (SUPPLEMENT, `--no-main-pin`) — the legacy #875 model: every active
+//!     box agrees with every other (no fixed value), `drift-guard.sh`'s genlock_build_sha shape. The
+//!     dormant path for a deliberate pre-merge / operator soak where the fleet is knowingly not yet
+//!     on main.
+//!
+//! These tests pin the gate's PURE functions (version extraction, the modal reference, the per-box
+//! parity AND pin verdicts, the fleet-wide roll-ups + table prints) and its end-to-end exit-code
 //! contract over fixture files (the path that needs no live rig).
 
 use std::path::PathBuf;
@@ -279,6 +284,9 @@ fn cli_fleet_that_disagrees_refuses_with_a_table() {
         &[
             "--fleet-file",
             "/dev/null",
+            // #1136: the pin-to-main layer is now ON by default; this test exercises the parity
+            // SUPPLEMENT in isolation, so it runs with --no-main-pin (the legacy #875 behaviour).
+            "--no-main-pin",
             "--linux",
             "cam1=root@x cam2=root@y cam3=root@z",
         ],
@@ -314,6 +322,9 @@ fn cli_fleet_that_agrees_passes() {
         &[
             "--fleet-file",
             "/dev/null",
+            // #1136: the pin-to-main layer is now ON by default; this test exercises the parity
+            // SUPPLEMENT in isolation, so it runs with --no-main-pin (the legacy #875 behaviour).
+            "--no-main-pin",
             "--linux",
             "cam1=root@x cam2=root@y cam3=root@z",
         ],
@@ -400,5 +411,111 @@ fn cli_uniformly_stale_fleet_is_refused_against_the_main_pin_1136() {
     assert!(
         stdout.contains("1.7.0-dev.487"),
         "the refusal must show the expected main pin 1.7.0-dev.487.\nstdout={stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1136 PURE pin functions — camera_box_version_from_cargo_toml (Cargo.toml
+// parse), camera_box_pin_verdict (per-box vs the pin), camera_box_fleet_report_pinned
+// (fleet roll-up vs the pin). Mirror the parity pure-function tests above.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cargo_toml_version_extracts_package_version_ignoring_deps() {
+    let out = run_sourced(
+        r#"camera_box_version_from_cargo_toml "$(printf '[package]\nname = "camera-box"\nversion = "1.7.0-dev.487"\n\n[dependencies]\nserde = { version = "1.0.200" }\n')""#,
+        &[],
+    );
+    assert_eq!(out.trim(), "1.7.0-dev.487");
+}
+
+#[test]
+fn cargo_toml_version_empty_when_no_package_version() {
+    let out = run_sourced(
+        r#"camera_box_version_from_cargo_toml "$(printf '[dependencies]\nserde = { version = "1.0" }\n')""#,
+        &[],
+    );
+    assert_eq!(out.trim(), "");
+}
+
+#[test]
+fn pin_verdict_ok_when_version_matches_the_main_pin() {
+    let out = run_sourced(
+        r#"camera_box_pin_verdict cam1 "1.7.0-dev.487" "1.7.0-dev.487"; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.contains("cam1") && out.contains("OK"));
+    assert!(out.contains("RC=0"));
+}
+
+#[test]
+fn pin_verdict_drift_when_version_differs_from_the_main_pin() {
+    let out = run_sourced(
+        r#"camera_box_pin_verdict cam1 "1.7.0-dev.100" "1.7.0-dev.487" 2>&1; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.contains("cam1") && out.contains("PIN-DRIFT") && out.contains("1.7.0-dev.487"));
+    assert!(out.contains("RC=20"));
+}
+
+#[test]
+fn pin_verdict_unknown_when_version_unread() {
+    let out = run_sourced(
+        r#"camera_box_pin_verdict cam3 "" "1.7.0-dev.487"; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.contains("cam3") && out.to_uppercase().contains("UNKNOWN"));
+    assert!(out.contains("RC=11"));
+}
+
+#[test]
+fn pinned_fleet_report_uniformly_stale_fails_proving_pin_not_parity() {
+    // The PARITY report PASSES this exact fleet (fleet_report_uniformly_newer_fleet_still_passes_...);
+    // the PIN report must FAIL it — the whole point of #1136.
+    let out = run_sourced(
+        r#"camera_box_fleet_report_pinned "1.7.0-dev.487" "cam1=1.7.0-dev.100" "cam2=1.7.0-dev.100" "cam3=1.7.0-dev.100" 2>&1; echo "RC=$?""#,
+        &[],
+    );
+    assert!(
+        out.contains("GATE FAILED"),
+        "uniformly-stale fleet must FAIL the pin: {out:?}"
+    );
+    assert!(out.contains("RC=20"));
+}
+
+#[test]
+fn pinned_fleet_report_all_on_pin_passes() {
+    let out = run_sourced(
+        r#"camera_box_fleet_report_pinned "1.7.0-dev.487" "cam1=1.7.0-dev.487" "cam2=1.7.0-dev.487"; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.contains("GATE PASS"));
+    assert!(out.contains("RC=0"));
+}
+
+#[test]
+fn pinned_fleet_report_unread_box_is_unknown_not_a_silent_pass() {
+    let out = run_sourced(
+        r#"camera_box_fleet_report_pinned "1.7.0-dev.487" "cam1=1.7.0-dev.487" "cam3=" 2>&1; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.to_uppercase().contains("UNKNOWN"));
+    assert!(out.contains("RC=11"));
+}
+
+#[test]
+fn pinned_fleet_report_acked_offline_box_is_excluded_not_judged() {
+    // cam3 is OFF the pin but acked offline -> EXCLUDED, must NOT fail the pin gate.
+    let out = run_sourced(
+        r#"camera_box_fleet_report_pinned "1.7.0-dev.487" "cam1=1.7.0-dev.487" "cam3=1.7.0-dev.100"; echo "RC=$?""#,
+        &[("CAMBOX_OFFLINE_ACK", "cam3:powered-off")],
+    );
+    assert!(
+        out.contains("EXCLUDED"),
+        "acked box must be excluded: {out:?}"
+    );
+    assert!(
+        out.contains("RC=0"),
+        "acked-offline off-pin box must not fail: {out:?}"
     );
 }
