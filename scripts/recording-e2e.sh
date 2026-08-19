@@ -302,7 +302,15 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # camera).
 # shellcheck source=scripts/lib/self-heal-attribution.sh
 . "$HERE/lib/self-heal-attribution.sh"
-camera_resolve "${CAM:-cam1}"
+# #1134: the SOURCE-camera role (the "cam1 role") is no longer hard-pinned to cam1 -- it is the
+# first strih-routable member of CAMERA_ACTIVE_SET (camera_source_box, scripts/camera-set.sh), so
+# retiring cam1 from the active set (its USB grabber hw-faulted -- #1110 -EPROTO, owner order
+# #1130) moves the source role to the next healthy box (cam3 today) with zero edit here. CAM= (a
+# one-off recording-e2e override) and CAMERA_SOURCE_BOX (the fleet-level override in camera-set.sh)
+# both still win over the derivation. Bare (set -e) so an active set with no strih-routable source
+# fails loudly here, never silently certifies the wrong box.
+E2E_SOURCE_BOX="$(camera_source_box)"
+camera_resolve "${CAM:-$E2E_SOURCE_BOX}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
 # cam1/cam3/cam4/cam5/cam6/cam7 (camera_strih_route() resolves any of them — a pure FACT lookup,
@@ -323,7 +331,7 @@ camera_strih_route "$CAMERA_NAME"
 # IPs. Picking a non-default SOURCE camera at the same time is not supported at all — it would
 # risk double-deploying a physical box under two different burn binaries (a real device/process
 # conflict). Reject the combination loudly instead.
-if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "$CAMERA_NAME" != "cam1" ]; then
+if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "$CAMERA_NAME" != "$E2E_SOURCE_BOX" ]; then
   echo "ERROR: CAM='$CAMERA_NAME' + ALL_CAMBOX=1 is not supported — ALL_CAMBOX's own [2b/8]" >&2
   echo "       loop already deploys cam2 + every active secondary camera at their fixed IPs" >&2
   echo "       alongside the primary; picking a non-default SOURCE camera too risks" >&2
@@ -958,8 +966,11 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # camera_active_secondary_set() (camera-set.sh) — the ONE place fleet membership is declared.
   # Re-enabling a retired camera (e.g. cam5) is adding it to CAMERA_ACTIVE_SET there; this loop
   # picks it up automatically, no change needed here.
-  PREFLIGHT_TARGETS=("cam1=$CAM1_IP" "cam2=$PAINTER_IP")
-  PREFLIGHT_TARGET_NAMES="cam1 cam2"
+  # #1134: label the SOURCE node with $CAMERA_NAME (the resolved source, camera_source_box), never
+  # the literal cam1 -- with cam1 acked in rig-fleet.txt, labelling the resolved source IP "cam1"
+  # would make the stale-ack guard fire on a healthy cam3.
+  PREFLIGHT_TARGETS=("$CAMERA_NAME=$CAM1_IP" "cam2=$PAINTER_IP")
+  PREFLIGHT_TARGET_NAMES="$CAMERA_NAME cam2"
   for _pf_cn in $(camera_active_secondary_set); do
     PREFLIGHT_TARGETS+=("${_pf_cn}=$(camera_secondary_ip "$_pf_cn")")
     PREFLIGHT_TARGET_NAMES="$PREFLIGHT_TARGET_NAMES $_pf_cn"

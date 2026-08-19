@@ -64,7 +64,22 @@
 # enabled. Its per-source phase-sync hold sits at the 3 ms floor; recalibrate from the first green
 # E2E run's own verdict JSON if the measured delivery spread demands it (see
 # .claude/rules/phase-sync-calibrator-testing.md).
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
+#
+# cam1 RETIRED 2026-08-19 (issue 1134, owner order #1130): its USB grabber is hardware-faulted
+# (#1110 -EPROTO — live capture reads grayscale, its camera-box.service was stopped by the owner:
+# "no measuring on a broken instrument"). cam1 was ALSO the hard-pinned PRIMARY/source node of the
+# E2E chain (cam2 paints -> SOURCE films cam2's monitor -> strih -> stream), so its retirement is
+# the first that had to move the SOURCE role, not just drop a secondary. #1134 extends this file's
+# retirement=membership doctrine to the source role via camera_source_box() below: the source is
+# now the FIRST strih-routable member of CAMERA_ACTIVE_SET (cam3 today), so dropping cam1 from the
+# default set here moves the source to cam3 with no other edit. Membership-retired exactly like
+# cam4/cam5/cam6/cam7 — cam1's IP / NDI source / strih route stay fully resolvable below. cam1 is
+# ALSO acked in rig-fleet.txt (usb-eproto-grabber-hw-fault-2026-08-19); a box OUTSIDE the active
+# set is never a preflight target, so the stale-ack guard never fires on it (the cam4 precedent).
+# RE-ENABLE (once the grabber is replaced): add "cam1" back to CAMERA_ACTIVE_SET AND delete cam1's
+# rig-fleet.txt ack line — nothing else (the source role follows automatically, cam1 being the
+# first strih-routable member of a cam1-first set again).
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.
@@ -163,19 +178,54 @@ camera_is_active() {
   esac
 }
 
+# camera_source_box -> prints (stdout) the box currently filling the SOURCE-camera role (the
+# "cam1 role": films cam2's monitor, carries the #174 render-time capture burn, is routed onto the
+# strih PROGRAM as a camera-under-test). #1134: this is the PRIMARY analogue of the
+# retirement=membership doctrine — the source is DERIVED, never hard-pinned to a name:
+#   * CAMERA_SOURCE_BOX (env) wins outright if set — the operator's explicit one-off override,
+#     same trust model as recording-e2e.sh's CAM= (a member of CAMERA_ACTIVE_SET is expected).
+#   * otherwise: the FIRST member of CAMERA_ACTIVE_SET that camera_strih_route accepts. cam2 (the
+#     fixed painter) is NOT strih-routable and is skipped automatically, so a default set of
+#     "cam2 cam3" resolves to cam3, while any legacy cam1-first set still resolves to cam1
+#     (byte-identical to the pre-#1134 hard-pin — full back-compat).
+# Fails loudly (nonzero, stderr) when NO member is strih-routable (e.g. a painter-only set) —
+# never silently certify a chain with no source. The camera_strih_route probe runs in a SUBSHELL
+# so it cannot leak CAMERA_STRIH_SCENE/CAMERA_STRIH_SOURCE into the caller (the caller re-resolves
+# those itself via its own camera_strih_route call). Reuses camera_strih_route as the single
+# authority on source-eligibility — never a second cam list (the 1:1 mapping is decided once).
+camera_source_box() {
+  if [ -n "${CAMERA_SOURCE_BOX:-}" ]; then
+    printf '%s' "$CAMERA_SOURCE_BOX"
+    return 0
+  fi
+  local cam
+  for cam in $CAMERA_ACTIVE_SET; do
+    if ( camera_strih_route "$cam" ) >/dev/null 2>&1; then
+      printf '%s' "$cam"
+      return 0
+    fi
+  done
+  echo "camera-set: no strih-routable SOURCE camera in CAMERA_ACTIVE_SET='${CAMERA_ACTIVE_SET}' (set CAMERA_SOURCE_BOX, or add a source-eligible camera to the active set)" >&2
+  return 1
+}
+
 # camera_active_secondary_set -> prints (space-separated, stdout) CAMERA_ACTIVE_SET with cam1 and
 # cam2 removed — the "other camera-under-test boxes" the ALL_CAMBOX sweep cuts into strih program
-# alongside the resolved SOURCE camera (cam1 role) and the fixed painter (cam2). This is the ONE
+# alongside the resolved SOURCE camera (the "cam1 role", #1134: DERIVED via camera_source_box, no
+# longer the literal cam1) and the fixed painter (cam2). This is the ONE
 # place recording-e2e.sh's preflight/deploy/restore/transport-sampler loops derive their
 # secondary-camera membership from — adding/removing a camera from CAMERA_ACTIVE_SET flows
 # through here automatically, never a second independently-maintained list.
 camera_active_secondary_set() {
-  local cam out=""
+  local cam src out=""
+  # #1134: exclude whichever box camera_source_box resolves as the SOURCE (the "cam1 role"), not
+  # the literal cam1 — so a cam1-first legacy set excludes cam1 exactly as before, while the
+  # cam2 cam3 default (source=cam3) correctly excludes cam3 and yields an empty secondary set.
+  src="$(camera_source_box 2>/dev/null)" || src=""
   for cam in $CAMERA_ACTIVE_SET; do
-    case "$cam" in
-      cam1|cam2) continue ;;
-      *) out="${out:+$out }$cam" ;;
-    esac
+    [ "$cam" = cam2 ] && continue
+    [ "$cam" = "$src" ] && continue
+    out="${out:+$out }$cam"
   done
   printf '%s' "$out"
 }
@@ -316,5 +366,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     printf 'STRIH_SCENE=%q STRIH_SOURCE=%q\n' "$CAMERA_STRIH_SCENE" "$CAMERA_STRIH_SOURCE"
   fi
   printf 'CAMERA_ACTIVE_SET=%q\n' "$CAMERA_ACTIVE_SET"
+  printf 'CAMERA_SOURCE_BOX=%q\n' "$(camera_source_box 2>/dev/null || echo '<none>')"
   printf 'CAMERA_ACTIVE_SECONDARY_SET=%q\n' "$(camera_active_secondary_set)"
 fi
