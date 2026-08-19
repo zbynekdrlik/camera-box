@@ -349,3 +349,56 @@ fn cli_refuses_when_no_node_is_given() {
     );
     assert!(stderr.to_lowercase().contains("no node"));
 }
+
+// ---------------------------------------------------------------------------
+// #1136 — PIN-to-main layer. Relative parity alone lets a UNIFORMLY-STALE fleet
+// pass (every box agrees on an OLD build, live: dev.462 fleet for a week while
+// main carried the #1111 fix). With the origin/main Cargo.toml pin available, a
+// uniformly-stale fleet MUST be REFUSED — the owner's exact requirement. The pin
+// is injected via the CAMERA_BOX_VERSION_GATE_MAIN_PIN fixture seam (production
+// reads it from `git show origin/main:Cargo.toml`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_uniformly_stale_fleet_is_refused_against_the_main_pin_1136() {
+    // Every active box AGREES on an OLD version -> parity-only PASSES. The main
+    // pin is NEWER -> the pin layer must REFUSE (exit 20), naming the pin.
+    let stale_a = write_version_fixture("stale1136-a", "camera-box 1.7.0-dev.100\n");
+    let stale_b = write_version_fixture("stale1136-b", "camera-box 1.7.0-dev.100\n");
+    let stale_c = write_version_fixture("stale1136-c", "camera-box 1.7.0-dev.100\n");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--fleet-file",
+            "/dev/null",
+            "--linux",
+            "cam1=x cam2=x cam3=x",
+        ],
+        &[
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.487"),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &stale_a.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &stale_b.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM3",
+                &stale_c.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a uniformly-stale fleet must be REFUSED against the main pin (20), never a silent PASS.\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.to_uppercase().contains("PIN"),
+        "the refusal table must name the pin model.\nstdout={stdout}"
+    );
+    assert!(
+        stdout.contains("1.7.0-dev.487"),
+        "the refusal must show the expected main pin 1.7.0-dev.487.\nstdout={stdout}"
+    );
+}
