@@ -3655,14 +3655,25 @@ fn client_max_step_threshold_us_from_journal_picks_the_max_not_the_freshest_1123
         "client_max_step_threshold_us_from_journal \"$J\"",
         &[("J", DS_STRADDLE_JOURNAL)],
     );
-    assert_eq!(out.trim(), "6860", "must pick the MAX threshold over the window, not tail-1: {out:?}");
+    assert_eq!(
+        out.trim(),
+        "6860",
+        "must pick the MAX threshold over the window, not tail-1: {out:?}"
+    );
 }
 
 #[test]
 fn client_max_step_threshold_us_from_journal_returns_empty_when_absent_1123() {
     let journal = "11:16:58 [NTP] offset:+23us\n11:17:29 [NTP] offset:+23us\n";
-    let out = run_sourced("client_max_step_threshold_us_from_journal \"$J\"", &[("J", journal)]);
-    assert_eq!(out.trim(), "", "no threshold: annotation -> empty, never a guess: {out:?}");
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_journal \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "no threshold: annotation -> empty, never a guess: {out:?}"
+    );
     let out = run_sourced("client_max_step_threshold_us_from_journal \"\"", &[]);
     assert_eq!(out.trim(), "", "empty journal -> empty");
 }
@@ -3683,8 +3694,15 @@ fn client_chase_stability_us_never_lowers_below_the_fixed_stability_1123() {
     // A tiny threshold+margin must never DROP the spread bound below the caller's GATE_STABILITY_US
     // (a widening FLOOR, never a ceiling override) -- a genuinely-scattered client still fails.
     let journal = "10:00:00 CAM3 dantesync[1]: [NTP] offset:+300us (threshold:500us, adaptive)\n";
-    let out = run_sourced("client_chase_stability_us 2000 1000 \"$J\"", &[("J", journal)]);
-    assert_eq!(out.trim(), "2000", "max(2000, 500+1000=1500)=2000, never lowered: {out:?}");
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, 500+1000=1500)=2000, never lowered: {out:?}"
+    );
 }
 
 #[test]
@@ -3693,14 +3711,35 @@ fn client_chase_stability_us_falls_back_when_journal_has_no_threshold_1123() {
     // fallback) is used; an omitted fallback reproduces the pre-#1123 fixed bound (fallback 0).
     let journal = "10:00:00 CAM3 dantesync[1]: [NTP] offset:+300us\n";
     // fallback 700 -> max(2000, 700+1000)=2000
-    let out = run_sourced("client_chase_stability_us 2000 1000 \"$J\" 700", &[("J", journal)]);
-    assert_eq!(out.trim(), "2000", "fallback 700 -> max(2000, 700+1000)=2000: {out:?}");
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\" 700",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "fallback 700 -> max(2000, 700+1000)=2000: {out:?}"
+    );
     // a LARGE fallback still widens (an unreachable client whose real envelope is known-large)
-    let out = run_sourced("client_chase_stability_us 2000 1000 \"$J\" 6000", &[("J", journal)]);
-    assert_eq!(out.trim(), "7000", "fallback 6000 -> max(2000, 6000+1000)=7000: {out:?}");
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\" 6000",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "7000",
+        "fallback 6000 -> max(2000, 6000+1000)=7000: {out:?}"
+    );
     // omitted fallback (0) -> fixed 2000, byte-identical pre-#1123
-    let out = run_sourced("client_chase_stability_us 2000 1000 \"$J\"", &[("J", journal)]);
-    assert_eq!(out.trim(), "2000", "omitted fallback -> fixed 2000: {out:?}");
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "omitted fallback -> fixed 2000: {out:?}"
+    );
 }
 
 #[test]

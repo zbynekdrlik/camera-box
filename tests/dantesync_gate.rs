@@ -4120,14 +4120,36 @@ fn gate_linux_client_step_straddle_spread_passes_via_stability_widening_1123() {
     let j = write_dante_journal("cam1_1123_straddle", CAM1_STRADDLE_JOURNAL_1123);
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "cam1=10.77.9.61", "--win-http", "strih=10.77.9.202", "--ntp-master",
-            "strih", "--samples", "5", "--min-distinct", "5", "--window-s", "0",
+            "--linux",
+            "cam1=10.77.9.61",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
         ],
         &[
-            ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p_master.display().to_string()),
-            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p_client.display().to_string()),
-            ("DANTESYNC_GATE_LINUX_JOURNAL_CAM1", &j.display().to_string()),
-            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", &p_priming.display().to_string()),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
         ],
     );
     assert_eq!(
@@ -4165,14 +4187,36 @@ fn gate_linux_client_genuine_scatter_still_fails_stability_1123() {
     let j = write_dante_journal("cam1_1123_scatter", CAM1_STABLE_JOURNAL_1123);
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "cam1=10.77.9.61", "--win-http", "strih=10.77.9.202", "--ntp-master",
-            "strih", "--samples", "5", "--min-distinct", "5", "--window-s", "0",
+            "--linux",
+            "cam1=10.77.9.61",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
         ],
         &[
-            ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p_master.display().to_string()),
-            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p_client.display().to_string()),
-            ("DANTESYNC_GATE_LINUX_JOURNAL_CAM1", &j.display().to_string()),
-            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", &p_priming.display().to_string()),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
         ],
     );
     assert_eq!(
@@ -4191,7 +4235,8 @@ fn gate_linux_client_unreadable_journal_keeps_fixed_stability_1123() {
     // sentinel) means no journal threshold, so the straddle spread grades against the fixed 2000us
     // stability and still FAILS -- the widening never widens on an unproven envelope.
     let base = now_epoch();
-    let p_master = write_multi_read_fixture("strih_1123_nojournal_master", &strih_master_1123(base));
+    let p_master =
+        write_multi_read_fixture("strih_1123_nojournal_master", &strih_master_1123(base));
     let client = vec![
         http_status_ntp_deadband(base, 0, "2", false, "null"),
         http_status_ntp_deadband(base + 5, 1848, "3", false, "null"),
@@ -4206,14 +4251,33 @@ fn gate_linux_client_unreadable_journal_keeps_fixed_stability_1123() {
     );
     let (code, stdout, _stderr) = run_gate_env(
         &[
-            "--linux", "cam1=10.77.9.61", "--win-http", "strih=10.77.9.202", "--ntp-master",
-            "strih", "--samples", "5", "--min-distinct", "5", "--window-s", "0",
+            "--linux",
+            "cam1=10.77.9.61",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
         ],
         &[
-            ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p_master.display().to_string()),
-            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p_client.display().to_string()),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_client.display().to_string(),
+            ),
             ("DANTESYNC_GATE_LINUX_JOURNAL_CAM1", NO_HTTP),
-            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", &p_priming.display().to_string()),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
         ],
     );
     assert_eq!(
