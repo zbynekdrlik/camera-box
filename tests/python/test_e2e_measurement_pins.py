@@ -125,9 +125,16 @@ class TestClassifyLeftover:
     def test_live_equal_to_the_test_value_is_leftover(self):
         assert mp.classify_leftover(90, production_ref_ms=3, test_value_ms=90, slack_ms=40) == "leftover-test"
 
-    def test_live_far_from_production_is_leftover_even_if_not_the_test_value(self):
-        # a prior run left it at 500 (neither prod 3 nor test 90) -> beyond slack -> leftover.
-        assert mp.classify_leftover(500, production_ref_ms=3, test_value_ms=90, slack_ms=40) == "leftover-test"
+    def test_live_far_from_production_and_not_the_test_value_is_stale(self):
+        # a prior run left it at 500 (neither prod 3 nor test 90) -> beyond slack, NOT the test
+        # value -> STALE (the caller must fail loud, never auto-write a constant over the live rig).
+        assert mp.classify_leftover(500, production_ref_ms=3, test_value_ms=90, slack_ms=40) == "stale"
+
+    def test_a_legitimate_operator_retune_of_the_stream_hold_is_stale_not_stomped(self):
+        # the 2026-08-19 revert class: prod hold legitimately re-tuned to 915 (its drift baseline),
+        # beyond slack 40 of the profile's 971 ref, NOT the test value 788 -> STALE -> fail loud,
+        # never silently restore 971 over it.
+        assert mp.classify_leftover(915, production_ref_ms=971, test_value_ms=788, slack_ms=40) == "stale"
 
     def test_live_within_slack_of_production_is_snapshotted(self):
         assert mp.classify_leftover(35, production_ref_ms=3, test_value_ms=90, slack_ms=40) == "snapshot"

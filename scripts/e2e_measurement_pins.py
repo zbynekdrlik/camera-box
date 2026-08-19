@@ -185,41 +185,58 @@ def coherence_check(profile: dict) -> list:
             problems.append(
                 f"{src}: derived pin {pin} < min_deep_pin_ms {min_deep:g} "
                 f"(not in the deep-phase regime)")
+        # Invariant 2 is a DEFENSIVE tautology-guard: resolve_pins derives `pin = round(target -
+        # transport)`, so this can only fire if a FUTURE change breaks that derivation. Kept
+        # deliberately (cheap, catches a derivation regression), not a check a hand-authored value
+        # can trip.
         eq_delivery = pin + transport_ms(cam)
         if abs(eq_delivery - target) > 1.0:
             problems.append(
                 f"{src}: pin+transport {eq_delivery:.1f} != target {target:g} "
-                f"(delivery not equalized)")
+                f"(delivery not equalized -- resolve_pins derivation regression)")
+        # Invariant 3 (genuinely falsifiable): the cameras share ONE physical audio path, so each
+        # camera's audio reference (delivery - av_offset) should be ~equal; a single hold can only
+        # re-zero all of them to av_expected if that spread is small. 8ms (~1/4 frame) tolerates
+        # ordinary re-measurement noise while still catching a profile whose per-camera A/V offsets
+        # are inconsistent with its delivery measurements.
         audio_ref_i = float(cam["production_delivery_p50_ms"]) - float(cam["production_av_offset_ms"])
         predicted_av = target - audio_ref_i - hold_drop
-        if abs(predicted_av - av_expected) > 5.0:
+        if abs(predicted_av - av_expected) > 8.0:
             problems.append(
-                f"{src}: predicted equalized A/V {predicted_av:.1f} not within 5ms of "
-                f"av_expected {av_expected:g}")
+                f"{src}: predicted equalized A/V {predicted_av:.1f} not within 8ms of "
+                f"av_expected {av_expected:g} (inconsistent per-camera audio refs)")
     return problems
 
 
 def classify_leftover(live_ms, production_ref_ms, test_value_ms, slack_ms: float) -> str:
-    """PURE: at snapshot time, is `live_ms` a genuine production value to snapshot, or a leftover
-    test state a prior crashed run left behind?
+    """PURE: at snapshot time, is `live_ms` a genuine production value to snapshot, a leftover test
+    state a prior crashed run left behind, or a value the profile no longer agrees with?
 
     Returns one of:
       "snapshot"        -- live matches the production reference (within slack) -> snapshot it as-is.
-      "leftover-test"   -- live equals the profile's test value, OR deviates from the production
-                           reference beyond slack -> restore the production reference FIRST (loud),
-                           then snapshot THAT, so a stuck-production run can never perpetuate.
+      "leftover-test"   -- live EQUALS the profile's own test value -> a prior crashed run left the
+                           test value in force. CERTAIN inference: restore the production reference
+                           FIRST (loud), then snapshot THAT, so a stuck-test run can never perpetuate.
+      "stale"           -- live is beyond `slack_ms` of the production reference AND is not the test
+                           value -> the LIVE RIG DISAGREES with the profile (the profile's production
+                           reference is stale, or the rig legitimately re-tuned). This is a GUESS,
+                           not a certainty, so the caller must FAIL LOUD and never auto-write a
+                           checked-in constant over the live value (the 2026-08-19 revert incident:
+                           the stream hold is an operator-retunable value; silently restoring it to a
+                           file constant and leaving it there is exactly the stomp that was reverted).
       "unknown"         -- live could not be read (None) -> caller decides (never treated as prod).
 
-    This kills the stuck-production incident class the 2026-08-19 revert hit head-on: the harness
-    never adopts a leftover 789 (or deep strih pin) as production."""
+    The KEY distinction from the naive earlier form: "beyond slack" is split from "equals the test
+    value". Only the latter is a certain leftover to auto-recover; the former is a stale-profile /
+    rig-drift signal to REFUSE on, never to overwrite from the profile."""
     if live_ms is None:
         return "unknown"
     live = float(live_ms)
     if test_value_ms is not None and abs(live - float(test_value_ms)) < 0.5:
         return "leftover-test"
-    if production_ref_ms is not None and abs(live - float(production_ref_ms)) > float(slack_ms):
-        return "leftover-test"
-    return "snapshot"
+    if production_ref_ms is None or abs(live - float(production_ref_ms)) <= float(slack_ms):
+        return "snapshot"
+    return "stale"
 
 
 def staleness_report(profile: dict, observed_delivery_ms: dict, staleness_frames: float) -> dict:

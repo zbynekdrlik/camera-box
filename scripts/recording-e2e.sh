@@ -2284,15 +2284,40 @@ GENLOCK_TEST_LATENCY_SOURCE="${GENLOCK_TEST_LATENCY_SOURCE:-$STREAM_PROG_SOURCE}
 MEASUREMENT_EQ="${MEASUREMENT_EQ:-0}"
 MEASUREMENT_EQ_PROFILE="${MEASUREMENT_EQ_PROFILE:-$HERE/e2e-measurement-pins.json}"
 if measurement_eq_enabled; then
+  # #1003 review: measurement-eq is only coherent for the ALL_CAMBOX per-camera run -- the
+  # strih pin apply + verify are ALL_CAMBOX-gated, so without it the stream hold would drop while
+  # pins stay production (every camera A/V ~-183ms -> a guaranteed-fail ~25-min run). Refuse early.
+  if [ "${ALL_CAMBOX:-0}" != "1" ]; then
+    echo "ERROR: [preflight] FAIL: #1003 MEASUREMENT_EQ=1 requires ALL_CAMBOX=1 (per-camera equalization); refusing an incoherent single-camera measurement-eq run." >&2
+    exit 1
+  fi
+  # #1003 review: an EXPLICIT GENLOCK_TEST_LATENCY_MS and the profile hold would BOTH pass
+  # --test-latency-ms (argparse last-wins would silently override the operator's explicit value,
+  # breaking #691's "explicit always wins"). Refuse the ambiguous combination loudly.
+  if [ -n "$GENLOCK_TEST_LATENCY_MS" ]; then
+    echo "ERROR: [preflight] FAIL: #1003 MEASUREMENT_EQ=1 and an explicit GENLOCK_TEST_LATENCY_MS are mutually exclusive (both set the stream hold). Unset one." >&2
+    exit 1
+  fi
   MEQ_PLAN="$(measurement_eq_plan_json "$MEASUREMENT_EQ_PROFILE")" || {
     echo "ERROR: [preflight] FAIL: #1003 measurement-eq profile did not resolve (missing/malformed/INCOHERENT) — $MEASUREMENT_EQ_PROFILE" >&2
     exit 1
   }
+  # #1003 review: the profile MUST cover every active camera (the #900 re-anchor it replaces had an
+  # explicit coverage-fail) -- else a future CAMERA_ACTIVE_SET change silently measures an
+  # unequalized camera against a rebalanced hold.
+  MEASUREMENT_EQ_MISSING="$(measurement_eq_missing_active "$MEQ_PLAN" "$CAMERA_ACTIVE_SET")"
+  if [ -n "$MEASUREMENT_EQ_MISSING" ]; then
+    echo "ERROR: [preflight] FAIL: #1003 measurement-eq profile $MEASUREMENT_EQ_PROFILE does not cover active camera(s): $MEASUREMENT_EQ_MISSING — re-derive the profile for the current CAMERA_ACTIVE_SET." >&2
+    exit 1
+  fi
   MEASUREMENT_EQ_HOLD="$(measurement_eq_hold_ms "$MEQ_PLAN")"
   MEASUREMENT_EQ_PROD_HOLD="$(measurement_eq_prod_hold_ms "$MEQ_PLAN")"
   MEASUREMENT_EQ_AV_EXPECTED="$(measurement_eq_av_expected_ms "$MEQ_PLAN")"
   MEASUREMENT_EQ_SLACK="$(measurement_eq_slack_ms "$MEASUREMENT_EQ_PROFILE")"
-  echo "[4/8 meq] #1003 measurement-eq ON — strih deep pins + stream hold ${MEASUREMENT_EQ_HOLD}ms (prod ${MEASUREMENT_EQ_PROD_HOLD}), --av-expected ${MEASUREMENT_EQ_AV_EXPECTED}ms; the #900 re-anchor is forced OFF (both write strih pins)"
+  # #1003 review finding 2: raise the LIVE #1035 cam->strih p99 bound by the marker camera's pin
+  # delta so the deep cam2 pin does not false-fail that separate, pin-dependent gate.
+  MEASUREMENT_EQ_CAM_STRIH_BOUND="$(measurement_eq_cam_strih_bound_ms "$MEQ_PLAN" 400)"
+  echo "[4/8 meq] #1003 measurement-eq ON — strih deep pins + stream hold ${MEASUREMENT_EQ_HOLD}ms (prod ${MEASUREMENT_EQ_PROD_HOLD}), --av-expected ${MEASUREMENT_EQ_AV_EXPECTED}ms, cam-strih p99 bound ${MEASUREMENT_EQ_CAM_STRIH_BOUND}ms; the #900 re-anchor is forced OFF (both write strih pins)"
 fi
 
 # #406/#312 item5: belt-and-braces re-check, immediately before rerouting strih/stream's
@@ -4032,6 +4057,10 @@ AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
 # a re-derived profile that dials a nonzero expectation carries the gate with it.
 measurement_eq_enabled && AV_EXPECTED_MS="$MEASUREMENT_EQ_AV_EXPECTED"
 VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")
+# #1003 review finding 2: in measurement-eq mode raise the LIVE #1035 cam->strih p99 bound by the
+# marker camera's pin delta (else the deep cam2 pin false-fails that separate pin-dependent gate by
+# construction). Only the ALL_CAMBOX merge path runs in profile mode, but set it here too for parity.
+measurement_eq_enabled && VERDICT_ARGS+=(--max-cam-strih-p99-latency-ms "$MEASUREMENT_EQ_CAM_STRIH_BOUND")
 # #855: thread the SAME operator ack (CAMBOX_OFFLINE_ACK, already resolved above from either an
 # explicit override or the repo-level rig-fleet.txt default) straight through to recording-verdict
 # unchanged -- no shell-side re-parsing. Consumed ONLY by the all_cambox_av_sync gate: an acked
@@ -4314,6 +4343,9 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   if [ -n "$CG" ]; then MERGE_ARGS+=("$CG"); fi
   if [ -f "$PAINTER_CSV" ]; then MERGE_ARGS+=(--painter "$PAINTER_CSV"); fi
   if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
+  # #1003 review finding 2: raise the LIVE #1035 cam->strih p99 bound by the marker camera's pin
+  # delta in measurement-eq mode (the merge path is the one profile mode actually uses).
+  if measurement_eq_enabled; then MERGE_ARGS+=(--max-cam-strih-p99-latency-ms "$MEASUREMENT_EQ_CAM_STRIH_BOUND"); fi
   # #332 all-cambox: feed the per-segment switch schedule into the MERGE step so the per-cambox
   # `all_cambox_continuity` is computed ON the stream box (this default decode-on-stream path),
   # NOT forced onto dev1. The merge reads the stream partial's per-frame ticks + gen_ts and the

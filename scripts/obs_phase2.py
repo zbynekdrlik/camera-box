@@ -492,6 +492,19 @@ def _snapshot_and_set_test_latency(ws, host, source_name, requested_test_latency
                 "overlay": True,
             }, ignore_err=True)
             prod_latency = production_ref_ms
+        elif decision == "stale":
+            # The live hold is beyond slack of the profile's production reference AND is not the
+            # test value: the profile disagrees with the live rig (a stale profile, or a legitimate
+            # operator re-tune). NEVER auto-write a checked-in constant over it (the 2026-08-19
+            # revert incident — the stream hold is operator-retunable). FAIL LOUD; re-derive the
+            # profile against the current production hold, or fix the rig, before a measurement run.
+            raise SystemExit(
+                f"[obs] {host}: #1003 measurement-eq profile is STALE vs the live rig — "
+                f"'{source_name}' genlock_latency_ms_src={prod_latency} is beyond "
+                f"{leftover_slack_ms}ms of the profile's production reference "
+                f"{production_ref_ms} (and is not the test value {test_latency_ms}). Re-derive the "
+                f"measurement-eq profile against the current production hold, or restore the rig, "
+                f"before running a measurement-eq E2E.")
 
     # Read current gpu_delay filters.
     filter_list = _rpc(ws, "GetSourceFilterList", {"sourceName": source_name},
@@ -681,10 +694,28 @@ def apply_measurement_pins(a):
     ws = _conn(a.host, a.password)
     snapshot = {}
     try:
+        # First pass: classify every source and FAIL LOUD on any 'stale' BEFORE touching the rig,
+        # so a profile that disagrees with the live pins never triggers a partial apply / a silent
+        # overwrite of a legitimately-retuned live value (the 2026-08-19 revert incident class).
+        classified = {}
+        stale = []
+        for source, test_pin in pins.items():
+            live = read_current_pin(ws, source)
+            decision = mp.classify_leftover(live, prod_pins[source], test_pin, slack)
+            classified[source] = (live, decision)
+            if decision == "stale":
+                stale.append(
+                    f"'{source}': live={live} is beyond {slack:g}ms of the production reference "
+                    f"{prod_pins[source]} (and is not the test value {test_pin})")
+        if stale:
+            raise SystemExit(
+                f"[obs] {a.host}: #1003 measurement-eq profile is STALE vs the live rig — "
+                f"re-derive the profile against the current production pins, or restore the rig, "
+                f"before a measurement-eq E2E:\n  " + "\n  ".join(stale))
+        # Second pass: snapshot the PRODUCTION value (restoring a leftover test value first).
         for source, test_pin in pins.items():
             prod_ref = prod_pins[source]
-            live = read_current_pin(ws, source)
-            decision = mp.classify_leftover(live, prod_ref, test_pin, slack)
+            live, decision = classified[source]
             if decision == "leftover-test":
                 sys.stderr.write(
                     f"[obs] {a.host}: #1003 leftover test state on '{source}' "
@@ -732,12 +763,20 @@ def read_current_pin(ws, source):
 
 def _restore_measurement_pins(ws, host, state):
     """#1003: restore the PRODUCTION strih per-camera pins snapshotted by apply_measurement_pins,
-    verify each read-back (LOUD warn on mismatch), and clear the state entry. No-op when nothing
-    was snapshotted. Called from teardown() on the STRIH host — rides the existing cleanup path."""
+    verify each read-back (LOUD warn on mismatch), and clear the state entry ONLY when every
+    read-back matched. No-op when nothing was snapshotted. Called from teardown() on the STRIH host
+    — rides the existing cleanup path.
+
+    #1003 review: the snapshot is the ONE durable artifact that lets a second cleanup() invocation
+    or the next run retry the restore. Clearing it after a transient-WS-failure mismatch would
+    convert a retryable state into a manual repair (the #134 "gate on the artifact, not the intent"
+    lesson). So on ANY mismatch the state entry is KEPT — the next apply_measurement_pins overwrites
+    it safely after its own leftover-anchored re-snapshot."""
     host_state = state.get(host, {})
     saved = host_state.get(_MEASUREMENT_EQ_STATE_KEY)
     if not saved:
         return
+    all_ok = True
     for source, prod_pin in saved.get("pins", {}).items():
         _rpc(ws, "SetInputSettings", {
             "inputName": source,
@@ -748,15 +787,17 @@ def _restore_measurement_pins(ws, host, state):
                     ignore_err=True).get("inputSettings", {})
         actual = back.get(_GENLOCK_SRC_LATENCY_KEY)
         if actual != prod_pin:
+            all_ok = False
             sys.stderr.write(
                 f"[obs] {host}: #1003 WARN mismatch after restore — '{source}' "
                 f"genlock_latency_ms_src read-back={actual!r} expected={prod_pin}; production "
-                f"pins may be off! Manual check required.\n")
+                f"pins may be off! Snapshot KEPT for retry. Manual check required.\n")
         else:
             sys.stderr.write(
                 f"[obs] {host}: #1003 RESTORED '{source}' genlock_latency_ms_src -> {prod_pin}\n")
-    host_state.pop(_MEASUREMENT_EQ_STATE_KEY, None)
-    _save_state(state)
+    if all_ok:
+        host_state.pop(_MEASUREMENT_EQ_STATE_KEY, None)
+        _save_state(state)
 
 
 def measurement_pins_mismatches(role, plan, live):
@@ -786,8 +827,9 @@ def verify_measurement_pins(a):
     values are ACTUALLY in force instead). --role strih reads every strih source's live pin;
     --role stream reads the stream hold. Exit 0 = all in force, 1 = a mismatch (a surviving writer,
     a failed apply, or wrong input names -> the measurement would run on the wrong config; fail
-    BEFORE StartRecord). Also used post-record as a stomp re-check (the harness treats a post-record
-    mismatch as a loud REPORT-ONLY diagnostic, never a post-facto abort)."""
+    BEFORE StartRecord). The harness wires it PRE-record today; a POST-record stomp re-check
+    (report-only) + the staleness report are the deferred follow-up #1124 — this command already
+    supports being called again post-record for that purpose, the harness just does not yet."""
     mp = _measurement_pins_module()
     profile = mp.load_profile(a.profile)
     plan = mp.resolve_plan(profile)

@@ -100,12 +100,16 @@ class TestApplyMeasurementPins:
         assert state["strih"][obs_phase2._MEASUREMENT_EQ_STATE_KEY]["pins"]["NDI cam1"] == 3
         assert pins["NDI cam1"] == 90  # test pin still ends applied
 
-    def test_leftover_far_from_production_is_restored(self, monkeypatch, tmp_path):
-        # cam2 stuck at 500 (neither prod 6 nor test 168) -> beyond slack -> snapshot prod 6.
-        state, _ = _install(monkeypatch, {"NDI cam1": 3, "NDI cam2": 500, "NDI cam3": 20})
-        obs_phase2.apply_measurement_pins(
-            _Args(host="strih", password="", profile=_profile_file(tmp_path)))
-        assert state["strih"][obs_phase2._MEASUREMENT_EQ_STATE_KEY]["pins"]["NDI cam2"] == 6
+    def test_stale_pin_far_from_production_fails_loud_and_writes_nothing(self, monkeypatch, tmp_path):
+        # cam2 at 500 (neither prod 6 nor test 168) -> beyond slack, NOT the test value -> STALE:
+        # the profile disagrees with the live rig, so apply must FAIL LOUD before writing anything
+        # (never auto-restore a checked-in constant over a possibly-legitimately-retuned live value).
+        state, pins = _install(monkeypatch, {"NDI cam1": 3, "NDI cam2": 500, "NDI cam3": 20})
+        with pytest.raises(SystemExit):
+            obs_phase2.apply_measurement_pins(
+                _Args(host="strih", password="", profile=_profile_file(tmp_path)))
+        assert obs_phase2._MEASUREMENT_EQ_STATE_KEY not in state.get("strih", {})  # no snapshot saved
+        assert pins == {"NDI cam1": 3, "NDI cam2": 500, "NDI cam3": 20}  # nothing applied
 
     def test_unreadable_pin_snapshots_production_defensively(self, monkeypatch, tmp_path):
         state, _ = _install(monkeypatch, {"NDI cam1": None, "NDI cam2": 6, "NDI cam3": 20})
@@ -162,6 +166,24 @@ class TestRestoreMeasurementPins:
         obs_phase2._restore_measurement_pins(_WS(), "strih", state)
         assert pins == {"NDI cam1": 90}  # untouched
 
+    def test_read_back_mismatch_KEEPS_the_snapshot_for_retry(self, monkeypatch):
+        # a WS that silently drops SetInputSettings -> read-back stays at the test value != snapshot.
+        # The snapshot is the one durable artifact for a retry, so it must NOT be cleared on mismatch.
+        state = {"strih": {obs_phase2._MEASUREMENT_EQ_STATE_KEY: {
+            "pins": {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}}}}
+        live = {"NDI cam1": 90, "NDI cam2": 168, "NDI cam3": 184}
+
+        def stuck_rpc(ws, op, payload=None, ignore_err=False, timeout_s=None):
+            payload = payload or {}
+            if op == "GetInputSettings":
+                return {"inputSettings": {_GK: live[payload["inputName"]]}}
+            return {}  # SetInputSettings silently drops -> read-back never matches
+
+        monkeypatch.setattr(obs_phase2, "_rpc", stuck_rpc)
+        monkeypatch.setattr(obs_phase2, "_save_state", lambda s: None)
+        obs_phase2._restore_measurement_pins(_WS(), "strih", state)
+        assert obs_phase2._MEASUREMENT_EQ_STATE_KEY in state["strih"]  # snapshot KEPT for retry
+
 
 class TestStreamHoldLeftoverDetection:
     def test_leftover_hold_789_is_restored_to_production_971_before_snapshot(self, monkeypatch):
@@ -178,6 +200,16 @@ class TestStreamHoldLeftoverDetection:
             _WS(), "stream", "NDI 2ME PGM", 788, state,
             production_ref_ms=971, leftover_slack_ms=40)
         assert state["stream"][obs_phase2._TEST_LATENCY_STATE_KEY]["latency_ms"] == 971
+
+    def test_stale_hold_fails_loud_and_does_not_stomp(self, monkeypatch):
+        # live hold 915 (a legitimate operator re-tune, beyond slack of the profile's 971 ref, NOT
+        # the test value 788) -> STALE -> fail loud, never silently restore 971 over it.
+        state, pins = _install(monkeypatch, {"NDI 2ME PGM": 915})
+        with pytest.raises(SystemExit):
+            obs_phase2._snapshot_and_set_test_latency(
+                _WS(), "stream", "NDI 2ME PGM", 788, state,
+                production_ref_ms=971, leftover_slack_ms=40)
+        assert pins["NDI 2ME PGM"] == 915  # untouched — no stomp to 971
 
     def test_backward_compatible_without_prod_ref(self, monkeypatch):
         # no production_ref_ms -> today's exact #691 behavior: snapshot whatever is live.
