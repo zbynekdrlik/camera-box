@@ -53,6 +53,41 @@ So the fix TRADES #707 skips (gaps + relock) for ~2 steady byte-identical copies
 land in the E2E verdict `copies` windows and must be re-checked against
 `WINDOW_COPIES_GAPS_TOLERANCE` at deploy (that tolerance predates them).
 
+## GOTCHA — the #707 resync is QUEUE-BLIND; gate it on the dequeue signal, not just a lag bound (#1131)
+
+`genlock_emit_gate`'s forward-resync (`lag > GENLOCK_MAX_CATCHUP_INTERVALS`) is BLIND to whether the
+skipped boundaries actually had captured frames. On a sick/wobbly grabber a single poll's wall-clock
+lag can exceed 8 intervals while the V4L2 driver has REAL captured frames buffered (the live
+signature: `#707 SKIPPED ... 9 boundary interval(s)` with **0 capture-dropped** = the frames exist,
+just delivered late) — the resync leaps past them and they are decimated (discarded in a run) = the
+visible multi-frame content judder (issue 1110/1130 P0).
+
+The fix (#1131): thread a per-frame `queue_had_frame` bool — `capture_stall::frame_from_nonempty_queue(dequeue_duration_ms, capture_interval_ms)`,
+true when the blocking VIDIOC_DQBUF returned in `< 0.5×` the capture interval (the driver already had
+it buffered) — from `main.rs` → `DecimationGate::poll` → `genlock_emit_gate`, and change the resync
+trigger to `lag > GENLOCK_MAX_CATCHUP_INTERVALS && !queue_had_frame`. A buffered frame catches up ONE
+interval (fills its boundary, never leaps); an EMPTY-queue frame (the loop genuinely WAITED for it — a
+device stall that produced nothing, or a real clock STEP) keeps the resync (honest skip).
+
+Why the dequeue signal is the RIGHT discriminator (and why raising the bound alone is wrong):
+- A long **DQBUF** block ⟺ the device produced nothing (that's WHY dequeue blocked) → those
+  boundaries genuinely had no content → resync is honest. `dequeue_duration_ms` is large → `false`.
+- An emit-loop-side block (send/processing) leaves the device producing → frames buffer → on resume
+  DQBUF returns fast → `dequeue_duration_ms` small → `true` → catch up (the frames exist).
+- A cold-boot NTP step (#131) inflates `now_ns` (CLOCK_REALTIME) but NOT the dequeue duration (a
+  monotonic `Instant::elapsed()`), so the post-step frame reads as a normal single-frame wait →
+  `false` → still resyncs. **This is why #131 is preserved for free** — do NOT just raise the fixed
+  bound (that would make a genuine multi-second step creep through hundreds of stale-frame emits).
+
+Three-band read of the ONE `dequeue_duration_ms` signal: `(0, 0.5×)` buffered / `[0.5×, 1.5×)` normal
+single-frame wait / `≥ 1.5×` stall (`CAPTURE_STALL_FACTOR`). `frame_from_nonempty_queue` and
+`is_capture_stall` are the two ends. Fail-safe: an unknown/non-finite measurement → `false`
+(queue-blind = today's behavior), so a bad reading can never SUPPRESS an honest skip — and guard
+`frame_interval_ms` for finiteness too (a `+inf` interval would otherwise falsely read "buffered",
+the unsafe direction). All Tier-0 (`cfg(target_os="linux")`, not probe-gated): verify via
+`rustc --edition 2021 --test src/genlock_pacing.rs` (and `src/capture_stall.rs`) standalone — a
+combined build with `genlock_pacing`/`capture_stall` as submodules runs the real `DecimationGate::poll`.
+
 ## Root-causing method that worked: faithful Python port + live journal cross-check
 
 Port `genlock_emit_gate` + `DecimationGate` + `boundary_skip_count` verbatim to a Python sim and
