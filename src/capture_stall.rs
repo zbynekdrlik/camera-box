@@ -98,9 +98,25 @@ pub const BUFFERED_DEQUEUE_FRACTION: f64 = 0.5;
 /// queue-blind resync behaviour, so a bad reading can never SUPPRESS an honest skip. Mirrors
 /// [`is_capture_stall`]'s exact guard shape, on the SAME `dequeue_duration_ms` measurement.
 pub fn frame_from_nonempty_queue(duration_ms: f64, frame_interval_ms: f64) -> bool {
-    if frame_interval_ms <= 0.0 || !duration_ms.is_finite() || duration_ms < 0.0 {
+    // Guard `frame_interval_ms` for finiteness too, not just sign (review #1131 🔵1): a +inf
+    // interval passes a bare `<= 0.0` check and then `duration_ms < inf * 0.5 == inf` is true for
+    // any finite duration — the UNSAFE direction (falsely "buffered" → suppresses an honest skip),
+    // the one outcome this fail-safe must never produce. (`is_capture_stall`'s mirror guard errs the
+    // opposite, SAFE way — a +inf interval there just never WARNs — so it needs no such change.)
+    // Unreachable from the sole caller (`main.rs` computes the interval only under
+    // `configured_capture_fps > 0.0`), but a fail-safe with a hole is not a fail-safe.
+    if !frame_interval_ms.is_finite()
+        || frame_interval_ms <= 0.0
+        || !duration_ms.is_finite()
+        || duration_ms < 0.0
+    {
         return false;
     }
+    // A genuinely-measured 0.0 here is a legitimately-instant dequeue (buffer already ready) →
+    // buffered, correctly. The `FrameInfo::dequeue_duration_ms == 0.0` "no real measurement"
+    // sentinel (review #1131 🔵2) never reaches this gate: the production poll (`main.rs`
+    // `process_frame`) always feeds a real `Instant::elapsed()` reading; the sentinel exists only on
+    // `FrameInfo`'s static getters/fixtures, which are not on the emit path.
     duration_ms < frame_interval_ms * BUFFERED_DEQUEUE_FRACTION
 }
 
@@ -245,5 +261,10 @@ mod tests {
         assert!(!frame_from_nonempty_queue(f64::NAN, 16.7));
         assert!(!frame_from_nonempty_queue(-1.0, 16.7));
         assert!(!frame_from_nonempty_queue(f64::INFINITY, 16.7));
+        // (review #1131 🔵1) a non-finite INTERVAL must also fail-safe to NOT-buffered — the unsafe
+        // direction: a +inf interval would make `duration < inf*0.5` true for any finite duration
+        // and falsely SUPPRESS an honest skip.
+        assert!(!frame_from_nonempty_queue(0.5, f64::INFINITY));
+        assert!(!frame_from_nonempty_queue(0.5, f64::NAN));
     }
 }
