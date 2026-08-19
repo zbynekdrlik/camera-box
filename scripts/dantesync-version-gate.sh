@@ -80,7 +80,7 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Bumped 2026-08-16 (same day, evening): fleet rolled to v1.8.43 (dantesync PR 90 — multi-homed
 # PTP capture interface selection by trusted GM subnet; stream locked to the RIG grandmaster
 # 10.77.9.184 for the first time — the live-event stutter root cause, issue 1073 forensics).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.46}"
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.47}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
