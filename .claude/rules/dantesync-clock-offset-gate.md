@@ -202,3 +202,31 @@ gate's median term coin-flips. Long-term GM-frequency fix is the owner's Dante-d
 issue 95. Local RED→GREEN needs no cargo: run `scripts/dantesync-gate.sh` directly with a fresh
 `DANTESYNC_GATE_WIN_HTTP_STRIH` executable fixture (fresh `updated_ts` — the 300s freshness window
 ages a stale fixture into NTP STALE).
+
+## The client STABILITY (spread) term needs the SAME step-awareness as the median — via the WINDOW-MAX threshold (#1123)
+Sibling of #1119, but on the CLIENT spread side. The #1022/#1041 client MEDIAN widening
+(`client_chase_bound_us`) is step-aware, but the STABILITY (spread) bound stayed fixed at
+`GATE_STABILITY_US` (2000us). A client chases the master's by-design UTC sawtooth with its OWN
+bounded steps; a step landing mid-sample-window makes the 6 samples straddle it, so the SPREAD ≈ the
+client's step MAGNITUDE (live cam1 2026-08-19: 2938us, == its own `[NTP] Stepped +2938us`) → false
+`UNSTABLE (median 1924us <= 2775us bound; spread 2938us > 2000us stability)` while PTP LOCKED + GM OK.
+
+**Key subtlety: the spread exceeds even the WIDENED median bound** (2775us here) — because the median
+widening reads `client_step_threshold_us_from_journal` = the **tail-1** (freshest) adaptive threshold
+(775us at grade time), while cam1's adaptive `threshold` jittered up to **6860us** in the same window.
+The median is a point estimate → tail-1; the SPREAD is a WINDOW-WIDE range → the **window-MAX**
+threshold. Fix: NEW pure `client_max_step_threshold_us_from_journal` (max of every `threshold:Nus`
+via `sort -n | tail -1`) + `client_chase_stability_us STABILITY MARGIN JOURNAL [FALLBACK]` =
+max(STABILITY, max_threshold+margin); wired in `grade_http_node`'s client branch right after the
+median widening, reusing the already-read `$client_journal` (no extra SSH). A spread beyond the
+client's own journal envelope (or no readable journal) still FAILS; a gross desync fails on MEDIAN
+(drift), never reaching the spread question. No master-deadband term for the spread — the client's own
+adaptive threshold already bakes in the master excursion it chases.
+
+**Why NOT a post-step-cluster recency rescue (the #1055 lineage):** cam1's failure is a RISING-EDGE
+straddle — the offset is ramping toward a step NOT YET made at grade time, so there are no post-step
+survivors in the window to grade. A recency-anchored "grade the tight post-step cluster" rescue
+structurally cannot catch a pre-step ramp. Local RED→GREEN with NO cargo: `rustc --edition 2021 --test
+tests/<file>.rs` standalone (provide `CARGO_MANIFEST_DIR=<worktree>`; the harness tests only use std +
+shell out), then run the binary; OR run the pure bash fn under `bash -c 'set -uo pipefail; . scripts/
+clock-offset-guard.sh; ...'` (`cargo test --no-run` is now hook-blocked too, #477 tightening).

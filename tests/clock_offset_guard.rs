@@ -3631,3 +3631,129 @@ fn ntp_steps_last_hour_from_pipe_json_reads_numeric_null_and_absent_1119() {
         "absent field -> empty"
     );
 }
+
+// --- #1123: client STABILITY (spread) bound step-aware -----------------------------------------
+//
+// The issue-1022/1041 client MEDIAN widening reads the tail-1 adaptive threshold; the STABILITY
+// (spread) term stayed fixed at 2000us. A client's own bounded step landing mid-window makes the
+// samples straddle the step -> spread ~= the client's step MAGNITUDE (live cam1: 2938us), which
+// exceeds even the widened median bound (2775us) because the median formula uses the tail-1
+// threshold (775us) while the true sawtooth amplitude is the window-MAX tolerance (6860us). So the
+// spread references the MAX threshold over the window (a window-wide statistic), not the tail-1.
+
+const DS_STRADDLE_JOURNAL: &str = "\
+2026-08-19T01:33:11+00:00 CAM1 dantesync[1450558]: [NTP] offset:+1869us (threshold:2640us, adaptive)\n\
+2026-08-19T01:33:42+00:00 CAM1 dantesync[1450558]: [NTP] offset:+1848us (threshold:6860us, adaptive)\n\
+2026-08-19T01:34:30+00:00 CAM1 dantesync[1450558]: [NTP] offset:+2938us (threshold:775us, adaptive)\n\
+2026-08-19T01:34:45+00:00 CAM1 dantesync[1450558]: [NTP] Stepped +2938us\n";
+
+#[test]
+fn client_max_step_threshold_us_from_journal_picks_the_max_not_the_freshest_1123() {
+    // The window's thresholds are 2640, 6860, 775 -- the tail-1 reader (median widening) picks 775;
+    // the spread widening must pick the MAX (6860), because the spread spans the whole window.
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_journal \"$J\"",
+        &[("J", DS_STRADDLE_JOURNAL)],
+    );
+    assert_eq!(
+        out.trim(),
+        "6860",
+        "must pick the MAX threshold over the window, not tail-1: {out:?}"
+    );
+}
+
+#[test]
+fn client_max_step_threshold_us_from_journal_returns_empty_when_absent_1123() {
+    let journal = "11:16:58 [NTP] offset:+23us\n11:17:29 [NTP] offset:+23us\n";
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_journal \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "no threshold: annotation -> empty, never a guess: {out:?}"
+    );
+    let out = run_sourced("client_max_step_threshold_us_from_journal \"\"", &[]);
+    assert_eq!(out.trim(), "", "empty journal -> empty");
+}
+
+#[test]
+fn client_chase_stability_us_widens_to_max_threshold_plus_margin_1123() {
+    // cam1's window max threshold 6860 -> stability floor max(2000, 6860+1000)=7860, so its
+    // straddle spread 2938 grades tight, not #836 scatter.
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\"",
+        &[("J", DS_STRADDLE_JOURNAL)],
+    );
+    assert_eq!(out.trim(), "7860", "max(2000, 6860+1000)=7860: {out:?}");
+}
+
+#[test]
+fn client_chase_stability_us_never_lowers_below_the_fixed_stability_1123() {
+    // A tiny threshold+margin must never DROP the spread bound below the caller's GATE_STABILITY_US
+    // (a widening FLOOR, never a ceiling override) -- a genuinely-scattered client still fails.
+    let journal = "10:00:00 CAM3 dantesync[1]: [NTP] offset:+300us (threshold:500us, adaptive)\n";
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, 500+1000=1500)=2000, never lowered: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_stability_us_falls_back_when_journal_has_no_threshold_1123() {
+    // No threshold match -> the conservative STEP_FALLBACK_US (matching the median widening's own
+    // fallback) is used; an omitted fallback reproduces the pre-#1123 fixed bound (fallback 0).
+    let journal = "10:00:00 CAM3 dantesync[1]: [NTP] offset:+300us\n";
+    // fallback 700 -> max(2000, 700+1000)=2000
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\" 700",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "fallback 700 -> max(2000, 700+1000)=2000: {out:?}"
+    );
+    // a LARGE fallback still widens (an unreachable client whose real envelope is known-large)
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\" 6000",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "7000",
+        "fallback 6000 -> max(2000, 6000+1000)=7000: {out:?}"
+    );
+    // omitted fallback (0) -> fixed 2000, byte-identical pre-#1123
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "omitted fallback -> fixed 2000: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_stability_us_fails_closed_on_malformed_stability_or_margin_1123() {
+    for args in ["abc 1000 \"$J\"", "2000 xy \"$J\""] {
+        let out = run_sourced(
+            &format!("client_chase_stability_us {args}"),
+            &[("J", DS_STRADDLE_JOURNAL)],
+        );
+        // a malformed stability prints the stability arg unchanged; a malformed margin prints
+        // the (numeric) stability unchanged -- never a crash under set -e, same #595 discipline.
+        assert!(
+            out.trim() == "abc" || out.trim() == "2000",
+            "malformed input must fall back to the unmodified stability, never crash: {args} -> {out:?}"
+        );
+    }
+}

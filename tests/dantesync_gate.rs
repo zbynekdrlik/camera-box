@@ -4066,3 +4066,223 @@ fn help_describes_the_master_step_cap_1119() {
         "#1119: usage must document the master step-storm guard: {stdout}"
     );
 }
+
+// --- #1123: client STABILITY (spread) bound is step-aware ---------------------------------------
+//
+// The issue-1022/1041 median widening learned the step-chase envelope; the STABILITY (spread, fixed
+// 2000us) bound did not. A linux client whose own bounded step lands mid-window straddles the step
+// -> spread ~= its step magnitude (live cam1: 2938us) -> false UNSTABLE while PTP LOCKED + GM OK.
+// The stability bound now widens to the client's own journal step envelope (max threshold + margin).
+
+/// The real cam1 journal shape around its 2026-08-19T01:34 failure: adaptive thresholds jitter up
+/// to 6860us while the offset ramps toward a +2938us step.
+const CAM1_STRADDLE_JOURNAL_1123: &str = "\
+2026-08-19T01:33:11+00:00 CAM1 dantesync[1450558]: [NTP] offset:+1869us (threshold:2640us, adaptive)\n\
+2026-08-19T01:33:42+00:00 CAM1 dantesync[1450558]: [NTP] offset:+1848us (threshold:6860us, adaptive)\n\
+2026-08-19T01:34:12+00:00 CAM1 dantesync[1450558]: [PTP] NANO Drift: 3 ns\n\
+2026-08-19T01:34:30+00:00 CAM1 dantesync[1450558]: [NTP] offset:+2938us (threshold:775us, adaptive)\n\
+2026-08-19T01:34:45+00:00 CAM1 dantesync[1450558]: [NTP] Stepped +2938us\n";
+
+/// A stable client's journal -- only tiny adaptive thresholds, so a big spread cannot be excused.
+const CAM1_STABLE_JOURNAL_1123: &str = "\
+2026-08-19T01:33:11+00:00 CAM1 dantesync[1450558]: [NTP] offset:+120us (threshold:500us, adaptive)\n\
+2026-08-19T01:34:12+00:00 CAM1 dantesync[1450558]: [PTP] NANO Drift: 3 ns\n\
+2026-08-19T01:34:30+00:00 CAM1 dantesync[1450558]: [NTP] offset:+140us (threshold:520us, adaptive)\n";
+
+/// A healthy master (strih) priming/status fixture: deadband 1000, LOCK, small median.
+fn strih_master_1123(base: u64) -> Vec<String> {
+    vec![
+        http_status_ntp_deadband(base, 428, "2", false, "1000"),
+        http_status_ntp_deadband(base + 5, 512, "3", false, "1000"),
+        http_status_ntp_deadband(base + 10, 470, "2", false, "1000"),
+    ]
+}
+
+#[test]
+fn gate_linux_client_step_straddle_spread_passes_via_stability_widening_1123() {
+    // cam1's exact failed shape: samples 0/1848/1924/2900/2938 -> median 1924, spread 2938. Its own
+    // journal shows an adaptive threshold up to 6860us -> stability floor max(2000,6860+1000)=7860,
+    // so the straddle spread grades tight. Pre-#1123 this false-UNSTABLE (proven live 2026-08-19).
+    let base = now_epoch();
+    let p_master = write_multi_read_fixture("strih_1123_straddle_master", &strih_master_1123(base));
+    let client = vec![
+        http_status_ntp_deadband(base, 0, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 1848, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 1924, "2", false, "null"),
+        http_status_ntp_deadband(base + 15, 2900, "3", false, "null"),
+        http_status_ntp_deadband(base + 20, 2938, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("cam1_1123_straddle_client", &client);
+    let p_priming = write_win_http_fixture(
+        "strih_1123_straddle_priming",
+        &http_status_ntp_deadband(base, 470, "2", false, "1000"),
+    );
+    let j = write_dante_journal("cam1_1123_straddle", CAM1_STRADDLE_JOURNAL_1123);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a client step-straddle (median 1924us, spread 2938us) whose own journal step envelope is \
+         6860us must PASS, not false-UNSTABLE against the fixed 2000us stability. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+    assert!(!stdout.contains("UNSTABLE"), "stdout={stdout}");
+    let low = stdout.to_lowercase();
+    assert!(
+        low.contains("stability") && (low.contains("step") || low.contains("threshold")),
+        "the widened note must say the stability bound is step-aware and WHY: {stdout}"
+    );
+}
+
+#[test]
+fn gate_linux_client_genuine_scatter_still_fails_stability_1123() {
+    // A genuinely-scattered client (spread 15000us) whose own journal shows only a tiny threshold
+    // (500us) must STILL FAIL -- the step-aware widening is bounded by the client's OWN envelope.
+    let base = now_epoch();
+    let p_master = write_multi_read_fixture("strih_1123_scatter_master", &strih_master_1123(base));
+    let client = vec![
+        http_status_ntp_deadband(base, 0, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 500, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 900, "2", false, "null"),
+        http_status_ntp_deadband(base + 15, 8000, "3", false, "null"),
+        http_status_ntp_deadband(base + 20, 15000, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("cam1_1123_scatter_client", &client);
+    let p_priming = write_win_http_fixture(
+        "strih_1123_scatter_priming",
+        &http_status_ntp_deadband(base, 470, "2", false, "1000"),
+    );
+    let j = write_dante_journal("cam1_1123_scatter", CAM1_STABLE_JOURNAL_1123);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a genuine 15000us-spread scatter whose own journal envelope is only 500us must still FAIL. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("UNSTABLE") || stdout.contains("DRIFT"),
+        "must name the scatter failure: {stdout}"
+    );
+}
+
+#[test]
+fn gate_linux_client_unreadable_journal_keeps_fixed_stability_1123() {
+    // "Cannot prove the step envelope -> do not widen": an unreadable journal (the #686 NO_HTTP
+    // sentinel) means no journal threshold, so the straddle spread grades against the fixed 2000us
+    // stability and still FAILS -- the widening never widens on an unproven envelope.
+    let base = now_epoch();
+    let p_master =
+        write_multi_read_fixture("strih_1123_nojournal_master", &strih_master_1123(base));
+    let client = vec![
+        http_status_ntp_deadband(base, 0, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 1848, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 1924, "2", false, "null"),
+        http_status_ntp_deadband(base + 15, 2900, "3", false, "null"),
+        http_status_ntp_deadband(base + 20, 2938, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("cam1_1123_nojournal_client", &client);
+    let p_priming = write_win_http_fixture(
+        "strih_1123_nojournal_priming",
+        &http_status_ntp_deadband(base, 470, "2", false, "1000"),
+    );
+    let (code, stdout, _stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_client.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_JOURNAL_CAM1", NO_HTTP),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "no readable journal -> no step envelope -> the fixed 2000us stability still fails the 2938us spread. stdout={stdout}"
+    );
+    assert!(stdout.contains("UNSTABLE"), "stdout={stdout}");
+}

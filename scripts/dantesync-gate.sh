@@ -485,6 +485,17 @@ grade_http_node() {
     if [ "$bound" != "$orig_bound" ]; then
       deadband_note=" -- bound widened to ${bound}us for the master's own PTP-locked step-chase envelope (${GATE_NTP_MASTER_NAME}'s ntp_deadband_us capped at ${client_chase_ceiling}us + client step threshold via ${step_source} + ${deadband_margin}us margin, #1022/#1041; base bound ${orig_bound}us)"
     fi
+    # #1123: the MEDIAN bound above is step-aware, but a client's own bounded step landing mid-window
+    # makes the samples straddle the step -> SPREAD ~= its step magnitude, false-UNSTABLE against the
+    # fixed stability. Widen the STABILITY (spread) bound to the client's OWN journal step envelope
+    # (the WINDOW-MAX threshold + margin -- see clock-offset-guard.sh's client_chase_stability_us),
+    # reusing the $client_journal already read above (no extra SSH). A genuinely-scattered client
+    # (spread beyond its own envelope, or no readable journal) still fails on the unchanged floor.
+    local orig_stability="$stability"
+    stability="$(client_chase_stability_us "$stability" "$deadband_margin" "$client_journal" "$client_step_fallback")"
+    if [ "$stability" != "$orig_stability" ]; then
+      deadband_note="${deadband_note} -- stability (spread) bound widened to ${stability}us, step-aware (client's own journal max step threshold + ${deadband_margin}us margin, #1123): a client step straddling the sample window spreads by ~its own step magnitude while every sample stays inside the median bound; base stability ${orig_stability}us"
+    fi
   fi
   now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
   local issue_ref="648"
