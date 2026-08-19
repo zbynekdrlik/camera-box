@@ -128,17 +128,19 @@ fn help_exits_zero() {
     );
 }
 
-/// #531: the pre-event imag-nb genlock-staleness alert must be WIRED on both the event and test
-/// paths, and be ADVISORY (never hard-blocks going live) keyed on drift-guard's exact "genlock
-/// STALE" DRIFT phrase. This is the recurrence guard for #530 (imag-nb ran a stale genlock build at
-/// a live event -> 45fps). Content-asserted (matching the harness_av_restart pattern) — the compute
-/// LOGIC itself is unit-tested deterministically in tests/drift_guard.rs (imag_build_drift_report_*).
+/// #531 + #789: the imag-nb genlock-staleness check is WIRED on the EVENT path as an ADVISORY
+/// alert (never hard-blocks going live) keyed on drift-guard's exact "genlock STALE" DRIFT phrase.
+/// The TEST path was ADVISORY too until #789 — per the owner's 2026-08-19 HARD-BLOCK decision it is
+/// now a fail-closed gate, covered by test_entry_hard_blocks_on_imag_genlock_fleet_drift_789 below.
+/// Recurrence guard for #530 (imag-nb ran a stale genlock build at a live event -> 45fps). The
+/// compute LOGIC itself is unit-tested deterministically in tests/drift_guard.rs
+/// (imag_build_drift_report_*).
 #[test]
-fn pre_event_genlock_staleness_check_wired_advisory_on_both_paths_531() {
+fn pre_event_genlock_staleness_check_wired_advisory_on_event_path_531() {
     let src = std::fs::read_to_string(script()).expect("read rig-mode.sh");
     assert!(
         src.contains("warn_imag_genlock_stale()"),
-        "#531: rig-mode.sh must define warn_imag_genlock_stale (the pre-event drift alert)"
+        "#531: rig-mode.sh must define warn_imag_genlock_stale (the advisory drift alert)"
     );
     assert!(
         src.contains("drift-guard.sh --check-imag"),
@@ -150,16 +152,121 @@ fn pre_event_genlock_staleness_check_wired_advisory_on_both_paths_531() {
     );
     assert!(
         src.contains("advisory: a drift check must NEVER fail rig-mode"),
-        "#531: the pre-event check must be ADVISORY — a drift check must NEVER hard-block a live event"
+        "#531: the advisory event check must never hard-block a live event"
     );
-    // Wired on BOTH mode entry points (the distinctive echo line I added in each).
+    // Wired on the EVENT entry point (the distinctive echo line — advisory for going live).
     assert!(
         src.contains("never blocks going live"),
-        "#531: do_event (EVENT path) must run the pre-event genlock-staleness check"
+        "#531: do_event (EVENT path) must run the advisory pre-event genlock-staleness check"
+    );
+}
+
+/// The text of do_test's body — from its own definition to do_event's (brace-anchored, the #901
+/// lesson: never a bare `funcname()` that a comment could also carry).
+fn do_test_body(src: &str) -> &str {
+    src.split("\ndo_test() {")
+        .nth(1)
+        .and_then(|s| s.split("\ndo_event() {").next())
+        .expect("rig-mode.sh must define do_test() then do_event()")
+}
+
+/// The text of do_event's body — from its own definition to main's.
+fn do_event_body(src: &str) -> &str {
+    src.split("\ndo_event() {")
+        .nth(1)
+        .and_then(|s| s.split("\nmain() {").next())
+        .expect("rig-mode.sh must define do_event() then main()")
+}
+
+/// Run the pure #789 verdict function over a captured `--check-imag` OUTPUT + its exit RC.
+fn genlock_verdict(out: &str, rc: &str) -> String {
+    run_sourced(&format!("imag_genlock_gate_verdict '{out}' {rc}"))
+        .trim()
+        .to_string()
+}
+
+/// #789 (owner ROZHODNUTÉ 2026-08-19, comment 5337986800: HARD-BLOCK, gates maximálne striktné): the
+/// `rig-mode.sh test` ENTRY must REFUSE to enter TEST mode when imag-nb's deployed genlock OBS build
+/// is not provably current — no WARN-and-proceed. The EVENT path stays advisory (blocking a live
+/// event on a drift check is worse than the drift). Content-asserted for the wiring + fail-closed
+/// exit + the named operator remedy, and DETERMINISTICALLY unit-tested (Tier-0, #477) for the pure
+/// genlock_build-facet verdict over every state: OK -> PASS, DRIFT/UNKNOWN/absent -> BLOCK.
+#[test]
+fn test_entry_hard_blocks_on_imag_genlock_fleet_drift_789() {
+    let src = std::fs::read_to_string(script()).expect("read rig-mode.sh");
+
+    // The two new functions are defined.
+    assert!(
+        src.contains("imag_genlock_gate_verdict()"),
+        "#789: rig-mode.sh must define the pure verdict function imag_genlock_gate_verdict"
     );
     assert!(
-        src.contains("never blocks the switch"),
-        "#531: do_test (TEST path) must run the pre-event genlock-staleness check"
+        src.contains("require_imag_genlock_current()"),
+        "#789: rig-mode.sh must define the fail-closed gate require_imag_genlock_current"
+    );
+
+    // TEST path hard-blocks (calls the gate, no longer the advisory warn).
+    let dt = do_test_body(&src);
+    assert!(
+        dt.contains("require_imag_genlock_current"),
+        "#789: do_test (TEST path) must call the fail-closed gate require_imag_genlock_current"
+    );
+    assert!(
+        !dt.contains("warn_imag_genlock_stale"),
+        "#789: do_test must NO LONGER run the advisory warn_imag_genlock_stale (it is now HARD-BLOCK)"
+    );
+
+    // EVENT path stays advisory (never hard-block going live).
+    let de = do_event_body(&src);
+    assert!(
+        de.contains("warn_imag_genlock_stale"),
+        "#789: do_event (EVENT path) must keep the advisory warn_imag_genlock_stale"
+    );
+    assert!(
+        !de.contains("require_imag_genlock_current"),
+        "#789: do_event must NEVER hard-block going live on a drift check"
+    );
+
+    // The gate reuses --check-imag, keys on the genlock_build PIN facet, fails closed with a
+    // distinct exit, and names the ONE fleet deploy remedy for the operator.
+    assert!(
+        src.contains("drift-guard.sh --check-imag"),
+        "#789: the gate must reuse drift-guard.sh --check-imag (the imag-vs-origin/main PIN check)"
+    );
+    assert!(
+        src.contains("$1==\"genlock_build\""),
+        "#789: the verdict must key on the genlock_build facet line (genlock-scoped, not aggregate rc)"
+    );
+    assert!(
+        src.contains("exit 30"),
+        "#789: refusing TEST entry must use the distinct non-clean exit 30"
+    );
+    assert!(
+        src.contains("deploy-genlock-fleet.sh"),
+        "#789: the hard-block message must name the ONE fleet deploy remedy (deploy-genlock-fleet.sh)"
+    );
+
+    // Deterministic verdict over every genlock_build-facet state (Tier-0 pure function).
+    let ok = "  genlock_build          OK       (box=abc1234 is current with origin/main vendored-genlock HEAD)";
+    let drift = "  genlock_build          DRIFT    (imag-nb genlock STALE: box=abc1234 is 3 genlock-commit(s) behind origin/main [a,b,c]; deploy the latest build via setup-imag.sh step-12 at a safe off-event time)";
+    let unknown = "  genlock_build          UNKNOWN  (genlock build SHA not read on imag-nb)";
+    let absent = "  distroav_sha           OK       (matches pin)\n  genlock_capability     OK       (marker present)";
+
+    assert!(
+        genlock_verdict(ok, "0").starts_with("PASS"),
+        "#789: a genlock_build OK facet (box current with origin/main) must PASS"
+    );
+    assert!(
+        genlock_verdict(drift, "20").starts_with("BLOCK"),
+        "#789: a genlock_build DRIFT facet (imag STALE) must BLOCK"
+    );
+    assert!(
+        genlock_verdict(unknown, "11").starts_with("BLOCK"),
+        "#789: a genlock_build UNKNOWN facet (SHA unread) must BLOCK (fail-closed)"
+    );
+    assert!(
+        genlock_verdict(absent, "0").starts_with("BLOCK"),
+        "#789: an ABSENT genlock_build facet must BLOCK (fail-closed — the check never reported)"
     );
 }
 
