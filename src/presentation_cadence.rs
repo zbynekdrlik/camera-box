@@ -297,9 +297,11 @@ pub fn cadence_uniformity_gate_pass(worst_uniform_fraction: Option<f64>, min: Op
 /// report-only ONLY if a future rig change proves the floor false-reds a genuinely-clean run (then
 /// RECALIBRATE, never just relax).
 pub fn uniformity_gates_overall_pass() -> bool {
-    // #1142 [red] — NOT yet flipped in this commit; the [green] commit sets this to `true`. The test
-    // `uniformity_gate_is_live_since_1142` FAILS here to prove the flip is what makes it blocking.
-    false
+    // #1142 — BLOCKING (owner mandate 2026-08-19): the cadence-uniformity floor folds into
+    // overall_pass, so the current rig's ~0.70 worst uniform_fraction REDs the run — the intended
+    // outcome (surface the visual judder, never hide it). Flip to `false` for a one-line revert to
+    // report-only ONLY if a future rig change proves the floor false-reds a genuinely-clean run.
+    true
 }
 
 #[cfg(test)]
@@ -686,7 +688,10 @@ mod tests {
     fn uniformity_no_cadence_window_is_not_applicable_pass() {
         // `worst = None` = the run produced no cadence-bearing window at all → "not applicable",
         // never a failure (a zeroed-out cadence run is already hard-failed by copies/gaps/undec).
-        assert!(cadence_uniformity_gate_pass(None, Some(UNIFORM_FRACTION_MIN)));
+        assert!(cadence_uniformity_gate_pass(
+            None,
+            Some(UNIFORM_FRACTION_MIN)
+        ));
     }
 
     #[test]
@@ -697,7 +702,10 @@ mod tests {
             !cadence_uniformity_gate_pass(Some(0.6720), Some(UNIFORM_FRACTION_MIN)),
             "the sick-rig worst uniform_fraction (0.672, run 426009366) must FAIL the {UNIFORM_FRACTION_MIN} floor"
         );
-        assert!(!cadence_uniformity_gate_pass(Some(0.6828), Some(UNIFORM_FRACTION_MIN)));
+        assert!(!cadence_uniformity_gate_pass(
+            Some(0.6828),
+            Some(UNIFORM_FRACTION_MIN)
+        ));
         assert!(
             !cadence_uniformity_gate_pass(Some(0.7746), Some(UNIFORM_FRACTION_MIN)),
             "even the freshest post-fix run (1288585861, worst 0.775) must FAIL — still not clean"
@@ -707,8 +715,14 @@ mod tests {
     #[test]
     fn healthy_uniformity_passes_the_floor() {
         // A healthy 60fps-through-30fps chain reads ~1.0 → passes.
-        assert!(cadence_uniformity_gate_pass(Some(1.0), Some(UNIFORM_FRACTION_MIN)));
-        assert!(cadence_uniformity_gate_pass(Some(0.97), Some(UNIFORM_FRACTION_MIN)));
+        assert!(cadence_uniformity_gate_pass(
+            Some(1.0),
+            Some(UNIFORM_FRACTION_MIN)
+        ));
+        assert!(cadence_uniformity_gate_pass(
+            Some(0.97),
+            Some(UNIFORM_FRACTION_MIN)
+        ));
     }
 
     #[test]

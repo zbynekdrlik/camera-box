@@ -4825,6 +4825,71 @@ fn build_and_print_verdict_with_stream_hashes(
                 // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
                 all_pass &= cadence_gate_pass || !cadence_gates_overall;
 
+                // #1142 — the NEW cadence-UNIFORMITY floor gate (owner mandate 2026-08-19): a broad
+                // companion to the paired-judder gate above. Bound the WORST (minimum) per-window
+                // `uniform_fraction` across every cadence-bearing cambox window — the fraction of
+                // frames that advanced by exactly `expected_step` (a smooth 60→30 downsample reads
+                // ~1.0; the 60→30 + FIFO limit-cycle churn drops it to ~0.67-0.78 on today's rig,
+                // issue 1130). A per-window RATE (like the judder gate) so a single per-window-MIN
+                // term is honest (no run-wide second term). `None` worst = no cadence window (mass
+                // decode failure, already hard-failed by copies/gaps/undecodable) = not applicable,
+                // passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass` — the 0.95
+                // floor REDs the current sick rig BY DESIGN.
+                let worst_cadence_uniform_fraction: Option<f64> = seg
+                    .segments
+                    .iter()
+                    .filter_map(|s| {
+                        s.presentation_cadence
+                            .as_ref()
+                            .map(|pc| pc.uniform_fraction)
+                    })
+                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                // Diagnostic-only: the self-consistent (mode-derived) reading, surfaced so a future
+                // switch away from the raw field (if it ever false-reds a clean-but-jittery run) is
+                // a one-field change. NOT gated — see src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
+                let worst_cadence_derived_uniform_fraction: Option<f64> = seg
+                    .segments
+                    .iter()
+                    .filter_map(|s| {
+                        s.presentation_cadence
+                            .as_ref()
+                            .map(|pc| pc.derived_uniform_fraction)
+                    })
+                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                let uniformity_floor = camera_box::presentation_cadence::UNIFORM_FRACTION_MIN;
+                let uniformity_gate_pass =
+                    camera_box::presentation_cadence::cadence_uniformity_gate_pass(
+                        worst_cadence_uniform_fraction,
+                        Some(uniformity_floor),
+                    );
+                let uniformity_gates_overall =
+                    camera_box::presentation_cadence::uniformity_gates_overall_pass();
+                report["all_cambox_continuity"]["cadence_uniformity_gate"] = serde_json::json!({
+                    "min_uniform_fraction": uniformity_floor,
+                    "worst_uniform_fraction": worst_cadence_uniform_fraction,
+                    "worst_derived_uniform_fraction": worst_cadence_derived_uniform_fraction,
+                    "pass": uniformity_gate_pass,
+                    "gates_overall_pass": uniformity_gates_overall,
+                    "note": "#1142 cadence-uniformity FLOOR (owner mandate). Worst per-window \
+                             presentation_cadence.uniform_fraction across cambox windows must be >= \
+                             min_uniform_fraction (0.95); a smooth 60->30 chain reads ~1.0, the \
+                             current rig ~0.67-0.78 (issue 1130 60->30 + FIFO churn) so this REDs \
+                             the sick rig by design. None = no cadence window (not applicable, \
+                             passes). worst_derived_uniform_fraction is the self-consistent reading, \
+                             DIAGNOSTIC only. LIVE via presentation_cadence::uniformity_gates_overall_pass.",
+                });
+                println!(
+ "  #1142 CADENCE-UNIFORMITY gate: worst uniform_fraction={} (floor {}, pass={}, gates_overall_pass={})",
+                    worst_cadence_uniform_fraction
+                        .map(|p| format!("{p:.5}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    uniformity_floor,
+                    uniformity_gate_pass,
+                    uniformity_gates_overall,
+                );
+                // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
+                all_pass &= uniformity_gate_pass || !uniformity_gates_overall;
+
                 // #1088/#1112 — REPORT-ONLY duplication-masked 50→60 dup-rate seam (the #794 hard
                 // layer). The cadence watchdog (#794) reads strih's genlock-fifo `received=` rate
                 // and is STRUCTURALLY BLIND to a grabber that upconverts a 50fps source to 60 by
