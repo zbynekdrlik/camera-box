@@ -185,3 +185,56 @@ class TestStreamHoldLeftoverDetection:
         obs_phase2._snapshot_and_set_test_latency(
             _WS(), "stream", "NDI 2ME PGM", None, state)
         assert state["stream"][obs_phase2._TEST_LATENCY_STATE_KEY]["latency_ms"] == 923
+
+
+class TestMeasurementPinsMismatches:
+    def _plan(self):
+        return {
+            "strih_pins": {"NDI cam1": 90, "NDI cam2": 168, "NDI cam3": 184},
+            "stream_source": "NDI 2ME PGM", "stream_hold_ms": 788, "av_expected_ms": 0,
+        }
+
+    def test_strih_all_in_force_no_problems(self):
+        live = {"NDI cam1": 90, "NDI cam2": 168, "NDI cam3": 184}
+        assert obs_phase2.measurement_pins_mismatches("strih", self._plan(), live) == []
+
+    def test_strih_a_stomped_pin_is_flagged(self):
+        live = {"NDI cam1": 3, "NDI cam2": 168, "NDI cam3": 184}  # cam1 stomped back to prod
+        problems = obs_phase2.measurement_pins_mismatches("strih", self._plan(), live)
+        assert len(problems) == 1 and "NDI cam1" in problems[0]
+
+    def test_strih_an_unreadable_pin_is_flagged(self):
+        live = {"NDI cam1": None, "NDI cam2": 168, "NDI cam3": 184}
+        assert obs_phase2.measurement_pins_mismatches("strih", self._plan(), live) != []
+
+    def test_stream_in_force_no_problems(self):
+        assert obs_phase2.measurement_pins_mismatches("stream", self._plan(), 788) == []
+
+    def test_stream_stomped_hold_is_flagged(self):
+        problems = obs_phase2.measurement_pins_mismatches("stream", self._plan(), 971)
+        assert len(problems) == 1 and "NDI 2ME PGM" in problems[0]
+
+
+class TestVerifyMeasurementPins:
+    def test_pass_when_strih_pins_in_force(self, monkeypatch, tmp_path):
+        _install(monkeypatch, {"NDI cam1": 90, "NDI cam2": 168, "NDI cam3": 184})
+        # no SystemExit == pass
+        obs_phase2.verify_measurement_pins(
+            _Args(host="strih", password="", profile=_profile_file(tmp_path), role="strih"))
+
+    def test_fail_when_a_strih_pin_was_stomped(self, monkeypatch, tmp_path):
+        _install(monkeypatch, {"NDI cam1": 3, "NDI cam2": 168, "NDI cam3": 184})
+        with pytest.raises(SystemExit):
+            obs_phase2.verify_measurement_pins(
+                _Args(host="strih", password="", profile=_profile_file(tmp_path), role="strih"))
+
+    def test_pass_when_stream_hold_in_force(self, monkeypatch, tmp_path):
+        _install(monkeypatch, {"NDI 2ME PGM": 788})
+        obs_phase2.verify_measurement_pins(
+            _Args(host="stream", password="", profile=_profile_file(tmp_path), role="stream"))
+
+    def test_fail_when_stream_hold_stomped(self, monkeypatch, tmp_path):
+        _install(monkeypatch, {"NDI 2ME PGM": 971})
+        with pytest.raises(SystemExit):
+            obs_phase2.verify_measurement_pins(
+                _Args(host="stream", password="", profile=_profile_file(tmp_path), role="stream"))
