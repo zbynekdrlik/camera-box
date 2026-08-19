@@ -251,3 +251,34 @@ fn return_procedure_is_membership_plus_ack_only() {
         "#1134: cam1's ack line is the second (and last) knob of the return procedure."
     );
 }
+
+#[test]
+fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
+    // #1134 doctrine: the CAMERA_ACTIVE_SET default is ONE declared list. camera-set.sh is
+    // authoritative; every standalone Python subprocess that self-defaults CAMERA_ACTIVE_SET (its
+    // env-fallback, hit when the caller passes no --active-set and the var is not exported) MUST
+    // mirror the SAME literal, or a future retirement that edits camera-set.sh but misses one
+    // silently re-selects a retired camera in a standalone run (the camera-active-set drift risk).
+    // set-ndi-mapping.py is ALSO locked against camera-set.sh by harness_rig_ndi_mapping.rs; this
+    // extends the lock to the other four mirrors so none can silently diverge.
+    let sh = read("scripts/camera-set.sh");
+    assert!(
+        sh.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3}\""),
+        "#1134: camera-set.sh must default CAMERA_ACTIVE_SET to \"cam2 cam3\""
+    );
+    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3")"#;
+    for py in [
+        "scripts/set-ndi-mapping.py",
+        "scripts/phase_sync_calibrate.py",
+        "scripts/phase_sync_active_floor_check.py",
+        "scripts/phase_sync_reanchor.py",
+        "scripts/latency_pins_snapshot.py",
+    ] {
+        assert!(
+            read(py).contains(fallback),
+            "#1134: {py} must mirror camera-set.sh's CAMERA_ACTIVE_SET default via the identical \
+             env-fallback os.environ.get(\"CAMERA_ACTIVE_SET\", \"cam2 cam3\") -- a diverged \
+             fallback silently re-selects a retired camera in a standalone run"
+        );
+    }
+}

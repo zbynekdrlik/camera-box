@@ -183,7 +183,10 @@ camera_is_active() {
 # strih PROGRAM as a camera-under-test). #1134: this is the PRIMARY analogue of the
 # retirement=membership doctrine — the source is DERIVED, never hard-pinned to a name:
 #   * CAMERA_SOURCE_BOX (env) wins outright if set — the operator's explicit one-off override,
-#     same trust model as recording-e2e.sh's CAM= (a member of CAMERA_ACTIVE_SET is expected).
+#     same trust model as recording-e2e.sh's CAM= (a member of CAMERA_ACTIVE_SET is expected). An
+#     override that is NOT a strih-routable camera is printed as-is here (not validated in this
+#     function), and fails loud downstream at recording-e2e.sh's camera_resolve/camera_strih_route
+#     under set -e — never a silent wrong-box certification.
 #   * otherwise: the FIRST member of CAMERA_ACTIVE_SET that camera_strih_route accepts. cam2 (the
 #     fixed painter) is NOT strih-routable and is skipped automatically, so a default set of
 #     "cam2 cam3" resolves to cam3, while any legacy cam1-first set still resolves to cam1

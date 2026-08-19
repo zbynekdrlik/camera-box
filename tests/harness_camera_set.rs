@@ -529,10 +529,10 @@ fn camera_active_excluding_subtracts_the_acked_offline_list_within_the_active_se
     // cam4 acked-offline (e.g. grabber card removed) must drop out, but only cam4 -- the other
     // active cameras stay, and no retired camera ever appears.
     assert_eq!(
-        active_excluding(None, "cam4"),
-        "cam2 cam3",
-        "camera_active_excluding must drop an acked-offline camera from the active set (cam4 was \
-         never in the cam2 cam3 default anyway; the active set is returned unchanged)"
+        active_excluding(None, "cam3"),
+        "cam2",
+        "camera_active_excluding must drop an acked-offline camera that IS in the active set \
+         (excluding cam3 from the cam2 cam3 default leaves only cam2) -- honest to the test name"
     );
 }
 
