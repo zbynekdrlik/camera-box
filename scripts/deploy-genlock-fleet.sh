@@ -426,20 +426,72 @@ genlock_retention_delete_plan "\$KEEP" "\$BACKUP_ROOT" '*-789' | while IFS= read
 ${del_line}
 done
 
-# (7) graceful OBS restart via the EXISTING installed helpers. The pkill -9 guarantees the OLD obs
-#     (old libobs still mapped -- the #912 stop-race) is gone, so a fresh obs seen below IS the
-#     restarted one; its lstart is shown for the record. SIGKILL only as the last resort.
-if [ -x /usr/local/bin/imag-obs-stop.sh ]; then sudo -u "\${SUDO_USER:-newlevel}" DISPLAY=:0 /usr/local/bin/imag-obs-stop.sh || true; fi
+# (7) supervised OBS restart THROUGH the durable systemd USER unit (issue 789 handoff residual).
+#     The first live fleet run (2026-08-18) background-launched imag-obs-start.sh OUTSIDE the
+#     imag-obs.service cgroup: no Restart=on-failure, ExecStop= ladder bypassed, the launch tied to
+#     the ssh session -- it died in ~21s and needed a hand systemctl --user restart. imag-obs.service
+#     is a USER unit (issue 998): over a non-login ssh sudo the user bus needs XDG_RUNTIME_DIR
+#     exported; we act as \${SUDO_USER:-newlevel}. Stop-then-pkill guarantees the OLD obs (old libobs
+#     still mapped -- the #912 stop-race; and any stray from a prior background-launch deploy) is gone
+#     before the fresh supervised start. This mirrors the strih AHK stop->verify->relaunch ordering.
+IMAG_USER="\${SUDO_USER:-newlevel}"
+IMAG_UID="\$(id -u "\$IMAG_USER")"
+# env sets XDG_RUNTIME_DIR + DBUS in the CHILD, bypassing sudo env_reset (a bare sudo -u user VAR=val
+# form can be stripped by sudoers env policy -- a stripped XDG_RUNTIME_DIR silently loses the user bus
+# and re-creates the exact unsupervised-launch failure this fix exists to kill; DBUS mirrors
+# setup-imag.sh's live-proven u_systemctl). NO backticks in this heredoc body -- unquoted EOS would
+# command-substitute them at emit time.
+uctl() { sudo -u "\$IMAG_USER" env XDG_RUNTIME_DIR="/run/user/\$IMAG_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/\$IMAG_UID/bus" systemctl --user "\$@"; }
+OBS_START_LOG="/tmp/imag-obs-start.log"
+prev_log_lines="\$(wc -l < "\$OBS_START_LOG" 2>/dev/null || echo 0)"
+uctl stop imag-obs.service 2>/dev/null || true
 pkill -9 -x obs 2>/dev/null || true
 sleep 2
-rm -f "/home/\${SUDO_USER:-newlevel}/.config/obs-studio/.sentinel/"* 2>/dev/null || true
-if [ -x /usr/local/bin/imag-obs-start.sh ]; then setsid nohup sudo -u "\${SUDO_USER:-newlevel}" DISPLAY=:0 /usr/local/bin/imag-obs-start.sh >/dev/null 2>&1 & fi
-sleep 5
-if ps -o pid,lstart,cmd -C obs 2>/dev/null | grep -q obs; then
-  echo "#789 IMAG DEPLOY OK: swapped to ${gsha}; obs up after the swap:"; ps -o pid,lstart,cmd -C obs
-else
-  echo "#789 IMAG WARN: obs not seen after restart -- verify from a fresh ssh (ps -o pid,lstart -C obs)" >&2
-fi
+rm -f "/home/\$IMAG_USER/.config/obs-studio/.sentinel/"* 2>/dev/null || true
+uctl reset-failed imag-obs.service 2>/dev/null || true
+uctl restart imag-obs.service || { echo "#789 IMAG FAIL: systemctl --user restart imag-obs.service failed -- the supervised unit did not come up" >&2; exit 4; }
+
+# (7a) bounded supervised-verify: the unit reports active AND the RUNNING obs lives inside the unit
+#      cgroup (verify-imag.sh issue-1015 discriminator -- systemd bookkeeping can say active while
+#      the real obs sits OUTSIDE the cgroup, launched by a bypassed path). All THREE checks share ONE
+#      retry loop: imag-obs.service is Type=simple, so is-active flips true the moment the ExecStart
+#      WRAPPER forks -- BEFORE it forks obs itself (it logs + clears sentinels + reads the CPU pin
+#      first), so a single un-retried pgrep right after is-active races the wrapper->obs fork and can
+#      false-exit-4 on a healthy bringup. Poll all three together instead. If a stray survived the
+#      kill, the wrapper's own idempotent guard (it exits 0 when obs already runs) makes ExecStart a
+#      no-op -> the unit goes
+#      inactive -> is-active stays false -> the loop times out -> exit 4 (never a silent unsupervised
+#      pass). obs_pid stays visible to the record echo below.
+imag_supervised=0
+obs_pid=""
+for _ in \$(seq 1 30); do
+  if uctl is-active --quiet imag-obs.service; then
+    obs_pid="\$(pgrep -x obs | head -n1 || true)"
+    if [ -n "\$obs_pid" ] && grep -q imag-obs.service "/proc/\$obs_pid/cgroup" 2>/dev/null; then imag_supervised=1; break; fi
+  fi
+  sleep 2
+done
+[ "\$imag_supervised" = 1 ] || { echo "#789 IMAG FAIL: imag-obs.service did not come up SUPERVISED (active + obs in its cgroup) after restart (obs_pid=\${obs_pid:-none}) -- refuse an unsupervised deploy (issue 789 was exactly this)" >&2; exit 4; }
+
+# (7b) render-tick log verify the launch contract demands: imag-obs.service's ExecStart
+#      (imag-obs-start.sh) writes /tmp/imag-obs-start.log and prints 'OK: OBS bezi' only AFTER the WS
+#      came up + scenes seeded -- the on-box proof the fresh instance actually rendered, the imag
+#      analogue of the Windows leg's render-tick verify. Read only the tail PAST prev_log_lines so a
+#      STALE 'OK: OBS bezi' from a previous start cannot false-pass. Budget 75x2=150s comfortably
+#      EXCEEDS imag-obs-start.sh's own 90s WS deadline + the sleep/bootstrap/projector seed after it
+#      (a false FAIL on a slow-but-healthy bringup would be worse than the wait). Buffer-then-match,
+#      never a tail-piped-into-grep-q -- a SIGPIPE'd tail under pipefail can drop a real match (the same-file
+#      SIGPIPE footgun the ABI-guard step above already avoids).
+imag_tick=0
+for _ in \$(seq 1 75); do
+  new_log="\$(tail -n +\$((prev_log_lines + 1)) "\$OBS_START_LOG" 2>/dev/null || true)"
+  case "\$new_log" in *"OK: OBS bezi"*) imag_tick=1; break ;; esac
+  pgrep -x obs >/dev/null 2>&1 || break
+  sleep 2
+done
+[ "\$imag_tick" = 1 ] || { echo "#789 IMAG FAIL: imag-obs-start.log never reached 'OK: OBS bezi' after the swap -- OBS did not render/seed" >&2; exit 4; }
+echo "#789 IMAG DEPLOY OK: swapped to ${gsha}; obs (pid \$obs_pid) SUPERVISED in imag-obs.service, WS up + scenes seeded:"
+ps -o pid,lstart,cmd -C obs 2>/dev/null || true
 
 # (8) MANDATORY 1026 survival check (dev1-side WS op -- run AFTER this program returns): exercise a
 #     WS filter-enum to prove the previously-crashing get_const_root <- obs_enum path survives the
