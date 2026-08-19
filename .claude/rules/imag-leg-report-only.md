@@ -7,6 +7,39 @@ paths:
 
 # imag leg recording verdict — report-only seam + its TWO gating paths (issue 798)
 
+## #1142 (2026-08-19) — the imag leg is now SPLIT: presence BLOCKS, per-frame content REPORT-ONLY
+
+The single `gates_overall_pass()` "flip ONE fn" model below is SUPERSEDED. #1142 (owner mandate)
+proved via issue 1130 (comment 5347311707) that the imag ~19.5% `imag_optical_stuck` is an x264
+record-load OBSERVER EFFECT (the E2E recording starves the imag iGPU past its 16.7ms budget → OBS
+repeats whole renders during the record window only; "churn, not loss"). So the imag leg was SPLIT:
+
+- **`imag_leg_gate::gates_overall_pass()` -> `true` (PRESENCE/VERIFICATION, BLOCKING):** folds
+  `imag_leg_verified` (a silently-skipped or schema-degraded leg REDs — the ONE sanctioned skip is an
+  operator-offline-acked imag, #1013, exempted via `--offline-ack-cams`), the analyzed-span floor,
+  the cam2 undecodable moiré floor, and colour. Two fold sites in the WHOLE-recording node block
+  (`imag_presence_ok`) + the `imag_leg_verified` fold (outside the `if let Some(imag_frames)` block).
+- **`imag_leg_gate::content_gates_overall_pass()` -> `false` (PER-FRAME CONTENT, REPORT-ONLY):**
+  folds the digital-burn contiguity + optical-beat (`imag_content_ok`) AND the per-segment
+  `all_cambox_continuity.imag` sweep. Confounded by the observer effect → pending the issue 1143 imag
+  encoder fix (`TODO(#1143)` in `src/imag_leg_gate.rs`), then flip `content_gates_overall_pass` true.
+- **`partial_schema_gate::box_is_report_only` was RENAMED `box_degrades_on_schema_mismatch`** and
+  DECOUPLED from the gate flip (unconditionally `true` for imag): a schema-mismatched imag partial
+  still DEGRADES (drop the leg + write a verdict from strih+stream) instead of hard-dying, but the
+  dropped leg now REDs via `imag_leg_verified` (owner mandate: "degrade smie ostať degrade, ale musí
+  RED-ovať"). Do NOT re-couple it to `gates_overall_pass` (that would make a stale-emitter imag
+  partial a fatal no-verdict crash again).
+- Verdict JSON now carries: `full_chain.loss.imag.{imag_presence_pass,imag_content_pass,
+  gates_overall_pass,content_gates_overall_pass}` + `full_chain.{imag_leg_verified_offline_acked,
+  imag_leg_verified_gates_overall_pass}`; the per-segment block's `gates_overall_pass` reads the
+  CONTENT seam. `e2e_discord_report.py`: imag PRESENCE → `_blocking_failures`, imag CONTENT →
+  `_report_only_tripped`.
+
+The rest of this file (below) is the pre-#1142 issue-798 history — still accurate for the CONTENT
+seam's report-only rationale, but the "flip ONE fn to make BOTH blocking" instruction is retired.
+
+---
+
 The imag leg's frame-by-frame recording verdict is REPORT-ONLY today via
 `camera_box::imag_leg_gate::gates_overall_pass()` (returns `false`), mirroring
 `optical_floor` / `e2e_latency_gate` / `burn_hold`. Two non-obvious facts a future change MUST know:
