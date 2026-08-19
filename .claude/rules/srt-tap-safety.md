@@ -45,11 +45,27 @@ peer). Gate it on `ffmpeg -protocols | grep -qw srt` (SKIP where the local ffmpe
 run it on the bench OBS box). Everything is pure-stdlib / pytest, Tier-0 (`python -m pytest
 tests/python/test_srt_tap.py`) — no rig.
 
-## The vendored-C leak stays bench-gated (issue 1104)
+## The vendored-C ff_data leak is FIXED (issue 1104, v1.7.0-dev.473)
 
-`obs-ffmpeg-mpegts.c`'s `ffmpeg_mpegts_finalize` leaks `ff_data` on the "Failed to open the url"
-early-return (the `data_init`-failure branch frees it; this one doesn't). Filed as issue 1104 —
-NOT patched blind: unprovable as THE crash without a WER/gdb backtrace (crash was live, no
-coredump, not reproducible in Tier-0), high blast-radius (same output type OBS uses for real
-SRT/RTMP streaming), needs the full vendored-libobs-change-safety gauntlet + a bench repro first.
-The listener redesign already removes the trigger, so that fix is defense-in-depth, not primary.
+`obs-ffmpeg-mpegts.c`'s `ffmpeg_mpegts_finalize` used to leak `ff_data` on every failed-start
+early-return EXCEPT the `data_init`-failure branch (which already freed it): `init_streams` fail,
+`open_output_file != SUCCESS` (the "Failed to open the url" SRT-unreachable crash path), and
+`pthread_create != 0` all `return false` without freeing — and the caller's `set_config` `fail:` →
+`stop()` skips `full_stop()`/`data_free` because `active()` is false on a failed start. FIXED by
+inserting `ffmpeg_mpegts_data_free(stream, &stream->ff_data)` before each of the three early returns
+(it is partial-init-safe: guards each field, gates the SRT close on `has_connected`, `av_write_trailer`
+on `initialized`, `memset`s at the end — so it is the correct idempotent cleanup at every early exit).
+Still defense-in-depth — the listener redesign already removed the crash TRIGGER — so a WER/gdb bench
+repro of the ORIGINAL live crash remains the separate, un-done item the ticket describes.
+
+**Reusable pattern — asserting a leak-free on a vendored-C ORCHESTRATOR's early-returns.** A function
+like `ffmpeg_mpegts_finalize` calls ~8 helpers + macros, so it can't be feasibly lift-compiled (a
+partial lift is a retyped fragment, which `vendored-libobs-change-safety.md` cautions against). The
+Tier-0 proof is a static anchor gate (`tests/mpegts_finalize_frees_ff_data_1104.rs`, the
+`aux_sender_teardown_ordering_877` idiom): slice the function body (sig → first column-0 `}`), and for
+each failure-branch anchor assert the window [anchor → its FIRST `return false;`] contains the cleanup
+call — window-to-first-return scoping stops a LATER branch's free from satisfying an EARLIER branch.
+Bake in a mutation proof (the SAME predicate over a synthetic no-free fixture that MUST fail + a
+with-free one that MUST pass) and watch RED→GREEN via the #1026 `rustc --test` recipe. NB: this rule's
+own `paths:` do NOT cover `vendor/obs-studio/plugins/obs-ffmpeg/**`, so it won't auto-load when editing
+that plugin — the mpegts output is the same vendored-C / CI-first-compile / anchor-gate class as libobs.

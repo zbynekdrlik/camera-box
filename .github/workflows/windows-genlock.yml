@@ -1,7 +1,7 @@
 name: Windows genlock build (vendored OBS + DistroAV)
 
 # Builds the PRODUCTION Windows artifact for strih/stream from the vendored,
-# genlock-patched tree (#42): OBS 32.1.2 (browser ON for production parity,
+# genlock-patched tree (#42): OBS 32.2.0 (browser ON for production parity,
 # What's New / update prompts OFF per #43) + DistroAV 6.2.1 against it.
 # Manual dispatch; artifacts are deployed off-air to the boxes (portable mode
 # first — never overwriting the production install).
@@ -886,6 +886,40 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(recv_create_fail_count)')) {
             Write-Error "ndi-source.cpp: the reset block no longer CALLS ndi_recv_create_retry_backoff_ns(recv_create_fail_count) -- a failed recv_create_v3 is no longer backed off + retried (reverts to the permanent-death break). Re-apply the #1080 retry"; exit 1
           }
+          # camera-box #1096: the strih receiver wedges after a cambox sender restart -- recv_create_v3
+          # connect-by-name re-consults the poisoned long-lived per-process finder (stale rotated-port
+          # address) and never re-resolves; only an OBS restart clears it. The fix resolves the source
+          # via a FRESH NDIlib_find per reset and connects BY-ADDRESS (p_url_address). A subtree pull
+          # re-importing stock DistroAV silently drops this (mirrors tests/distroav_fresh_finder_connect_1096.rs).
+          if ($ndi -notmatch [regex]::Escape('static inline const char *ndi_find_url_for_source_name(')) {
+            Write-Error "ndi-source.cpp: the #1096 ndi_find_url_for_source_name URL-picker helper is gone -- the receiver can no longer connect BY-ADDRESS and stays wedged after a sender restart. Re-apply the #1096 fix"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndiLib->find_create_v2(')) {
+            Write-Error "ndi-source.cpp: the #1096 reset block no longer creates a FRESH NDIlib_find (find_create_v2) -- the receiver keeps resolving through the poisoned long-lived finder. Re-apply the #1096 fix"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_find_url_for_source_name(owned_source_name,')) {
+            Write-Error "ndi-source.cpp: the #1096 reset block no longer calls ndi_find_url_for_source_name(owned_source_name, ...) to pick the fresh URL. Re-apply the #1096 wiring"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('recv_desc.source_to_connect_to.p_url_address = owned_source_url;')) {
+            Write-Error "ndi-source.cpp: the #1096 reset block no longer binds the fresh URL onto recv_desc.source_to_connect_to.p_url_address -- it still connects by name through the poisoned finder. Re-apply the #1096 connect-by-URL"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndiLib->find_destroy(')) {
+            Write-Error "ndi-source.cpp: the #1096 fresh finder is never find_destroy'd (per-reset leak). Re-apply the #1096 fix"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('uint64_t no_conn_since_ns = 0;')) {
+            Write-Error "ndi-source.cpp: the #1096 no_conn_since_ns disconnect timer is gone -- the no_connections==0 path can no longer arm a fresh-finder reset, so a GRACEFUL cambox restart (clean FIN -> no_conn==0, where #767 never fires) leaves the strih source black. Re-apply the #1096 no-connection recovery"; exit 1
+          }
+          # camera-box #1097: the framesync_create failure branch in the reset path must retry (not
+          # break) -- the dormant sibling of #1080 (framesync forced OFF today, but a break there is
+          # the SAME permanent, reattach-proof receiver-thread death). It uses its OWN
+          # framesync_create_fail_count with the SHARED #1080 backoff helper. A subtree pull
+          # re-importing stock DistroAV silently drops this (mirrors tests/distroav_framesync_create_retry_1097.rs).
+          if ($ndi -notmatch [regex]::Escape('unsigned framesync_create_fail_count = 0;')) {
+            Write-Error "ndi-source.cpp: the #1097 framesync_create_fail_count retry counter is gone -- a transient framesync_create failure would break the receiver loop and permanently kill the thread (reattach-proof black). Re-apply the #1097 retry"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(framesync_create_fail_count)')) {
+            Write-Error "ndi-source.cpp: the #1097 framesync branch no longer CALLS ndi_recv_create_retry_backoff_ns(framesync_create_fail_count) -- a failed framesync_create reverts to the permanent-death break. Re-apply the #1097 retry"; exit 1
+          }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the
           # 4 whitelist props and the forced knobs (e.g. behavior list) must NOT be added.
@@ -919,7 +953,7 @@ jobs:
           }
           Write-Output "Genlock NDI-source HARD-LOCK present (#257: GENLOCK_FORCED_SETTINGS table forces sync/behavior/bw/latency/hw_accel/audio/framesync/alpha/ptz; whitelist UI = source/Genlock/Latency/burn; burn applied at runtime; #795 source selector is LIST-only + saved-name preserved) — OK"
 
-      # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
+      # cmake steps run under bash: pwsh tokenization splits -DNAME=32.2.0 at the
       # #111: assert the QR render-time burn filter (Path B) is present + build-wired in
       # the vendored DistroAV BEFORE the 150-min build, so a future `git subtree pull`
       # (#44) or a build-wiring regression that drops the burn filter fails HERE rather
@@ -984,7 +1018,7 @@ jobs:
         shell: bash
         run: >
           cmake --preset windows-x64
-          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF
           -DENABLE_VLC=OFF

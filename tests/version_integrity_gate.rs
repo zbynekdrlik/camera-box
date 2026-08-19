@@ -86,7 +86,7 @@ fn write_state(name: &str, json: &str) -> PathBuf {
 /// (the 60fps IMAG role moved to imag-nb, #458/#463) -- its observed output_fps must match the
 /// re-pinned `output_fps_strih=30`.
 const STRIH_PINNED: &str = "{\
-\"obs_version\":\"32.1.2\",\
+\"obs_version\":\"32.2.0\",\
 \"distroav_version\":\"6.2.1\",\
 \"ndi_runtime\":\"6.3.2.0\",\
 \"output_fps\":\"30\",\
@@ -100,7 +100,7 @@ const STRIH_PINNED: &str = "{\
 /// pass-through, no further decimation), so its observed output_fps is 30 (matches the
 /// host-keyed `output_fps_stream` pin, unchanged by this topology move).
 const STREAM_PINNED: &str = "{\
-\"obs_version\":\"32.1.2\",\
+\"obs_version\":\"32.2.0\",\
 \"distroav_version\":\"6.2.1\",\
 \"ndi_runtime\":\"6.3.2.0\",\
 \"output_fps\":\"30\",\
@@ -122,7 +122,7 @@ fn compare_args_from_state_emits_drift_guard_key_vals() {
     );
     let lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
     assert!(
-        lines.iter().any(|l| l == "obs_version=32.1.2"),
+        lines.iter().any(|l| l == "obs_version=32.2.0"),
         "must emit obs_version: {out:?}"
     );
     assert!(
@@ -162,6 +162,7 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
         "stream_pin",
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("both");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -169,6 +170,10 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(
         code, 0,
@@ -181,6 +186,7 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
 
 #[test]
@@ -231,6 +237,7 @@ fn gate_passes_when_fleet_genlock_builds_are_in_parity_756() {
         "stream_parity_ok",
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("parity756");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -238,6 +245,10 @@ fn gate_passes_when_fleet_genlock_builds_are_in_parity_756() {
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(
         code, 0,
@@ -250,6 +261,7 @@ fn gate_passes_when_fleet_genlock_builds_are_in_parity_756() {
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
 
 #[test]
@@ -337,6 +349,7 @@ fn gate_passes_when_a_windows_only_vendor_change_advances_strih_stream_past_imag
         "stream_949_incident",
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, WIN_INCIDENT_SHA_949), false),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("vendor949");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -344,6 +357,10 @@ fn gate_passes_when_a_windows_only_vendor_change_advances_strih_stream_past_imag
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={IMAG_INCIDENT_SHA_949}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(
         code, 0,
@@ -361,6 +378,7 @@ fn gate_passes_when_a_windows_only_vendor_change_advances_strih_stream_past_imag
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
 
 #[test]
@@ -407,7 +425,7 @@ fn gate_refuses_when_a_box_has_drifted() {
     // strih is on a DIFFERENT obs version than the pinned 32.1.2 (a randomly-deployed / stale build).
     // The gate must REFUSE (exit 20) — running the rig test on a drifted stack would produce a
     // worthless result (#123/#119). It names the box + the engine's DRIFT line.
-    let drifted = STRIH_PINNED.replace("\"obs_version\":\"32.1.2\"", "\"obs_version\":\"31.0.0\"");
+    let drifted = STRIH_PINNED.replace("\"obs_version\":\"32.2.0\"", "\"obs_version\":\"31.0.0\"");
     let s = write_state("strih_drift", &drifted);
     let t = write_state("stream_pin2", STREAM_PINNED);
     let (code, stdout, stderr) = run_gate(&[
@@ -548,7 +566,7 @@ const PINNED_SHORTCUT: &str =
 // #1067 — the pinned OBS version vendor/README.md carries for `vendor/obs-studio` (32.1.2). Used as
 // the healthy `port4455_owner_version` now that port4455_identity is ENFORCED (a matching owner
 // version passes port_identity_verdict; pinned_obs_version(readme) reads the same value).
-const PINNED_OBS_VERSION: &str = "32.1.2";
+const PINNED_OBS_VERSION: &str = "32.2.0";
 
 #[test]
 fn state_json_value_is_the_generic_single_key_parser() {
@@ -851,7 +869,7 @@ fn gate_enforces_startup_chain_on_strih_even_without_ahk_826() {
             &[
                 ("obs_installs", PINNED_OBS_EXE),
                 ("port4455_owner_path", PINNED_OBS_EXE),
-                ("port4455_owner_version", "32.1.2"),
+                ("port4455_owner_version", "32.2.0"),
                 ("obs_process_count", "1"),
             ],
         ),
@@ -1062,11 +1080,12 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
             &[
                 ("obs_installs", PINNED_OBS_EXE),
                 ("port4455_owner_path", PINNED_OBS_EXE),
-                ("port4455_owner_version", "32.1.2"),
+                ("port4455_owner_version", "32.2.0"),
                 ("obs_process_count", "1"),
             ],
         ),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("noahk826");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -1074,6 +1093,10 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(
@@ -1082,6 +1105,7 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
 
 // ── #770: byte-derived DistroAV/libobs parity — the [0/8] gate compares the DEPLOYED plugin/core
@@ -1223,6 +1247,7 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
             false,
         ),
     );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("bytes770");
     let (code, stdout, stderr) = run_gate(&[
         "--manifest",
         manifest.to_str().unwrap(),
@@ -1232,6 +1257,10 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
         &format!("stream={}", t.display()),
         "--genlock-sha",
         &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
     ]);
     assert_eq!(
         code, 0,
@@ -1244,6 +1273,7 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
     let _ = std::fs::remove_file(&manifest);
 }
 
@@ -1254,8 +1284,8 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
 // component resolver knows only the Windows DLL basenames. The gate now takes a TARGETED per-.so
 // facet (--imag-manifest + --imag-bytes) that resolves each gathered .so path via manifest_sha_for_path
 // (the linux resolver) — a per-path compare, NOT the whole-bundle walk, so a partial 3-file ssh gather
-// never flips the gate UNKNOWN. OPT-IN (#756-shape): DORMANT when the gather/manifest is absent, so a
-// live gather/auto-source failure never spuriously refuses (the ENFORCE flip, #1082 part 3, is deferred).
+// never flips the gate UNKNOWN. ENFORCED (#758-shape, #1100): an absent gather/manifest is a
+// gate-blocking UNKNOWN, so every box must report its .so bytes (the #1082-part-3 flip, landed in #1100).
 
 const LIBOBS_SO_PATH_1082: &str = "lib/x86_64-linux-gnu/libobs.so.30";
 const DISTROAV_SO_PATH_1082: &str = "lib/x86_64-linux-gnu/obs-plugins/distroav.so";
@@ -1273,16 +1303,32 @@ fn write_linux_manifest(name: &str, libobs_sha: &str, distroav_sha: &str) -> Pat
 /// Build a clean, PASSING fleet (strih/stream pinned + obs-identity + a matching genlock_build_sha,
 /// imag's marker matching via --genlock-sha) so the ONLY signal a byte test can move is the imag .so
 /// facet. Returns (strih_state, stream_state) paths.
-fn clean_fleet_states_1082(sha: &str) -> (PathBuf, PathBuf) {
+fn clean_fleet_states_1082(sha: &str, tag: &str) -> (PathBuf, PathBuf) {
+    // `tag` = caller-unique suffix: the _1082 tests all share one SHA const, run in PARALLEL
+    // threads of ONE process (same pid dir), and each removes its state files at the end -- a
+    // shared name lets test A's cleanup delete the file test B's gate subprocess is about to
+    // read (observed as a strih UNKNOWN flake on the CI coverage job, 2026-08-18).
     let s = write_state(
-        &format!("strih_1082_{}", &sha[..8]),
+        &format!("strih_1082_{}_{}", &sha[..8], tag),
         &with_obs_identity_ok(&with_sha(STRIH_PINNED, sha), true),
     );
     let t = write_state(
-        &format!("stream_1082_{}", &sha[..8]),
+        &format!("stream_1082_{}_{}", &sha[..8], tag),
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, sha), false),
     );
     (s, t)
+}
+
+/// #1100 — the imag .so byte facet is now ENFORCED, so a GATE-PASS fixture must ALSO carry a matching
+/// imag manifest + gathered bytes (the imag analogue of with_sha / with_obs_identity_ok's enforced-key
+/// injection). Writes a clean linux manifest and returns (manifest_path, imag_bytes_csv) whose bytes
+/// match it -> imag_bytes_verdict OK. `tag` = caller-unique suffix (parallel tests share one pid dir).
+fn clean_imag_bytes_1100(tag: &str) -> (PathBuf, String) {
+    const LIBOBS: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    let manifest = write_linux_manifest(&format!("imag_clean_1100_{tag}"), LIBOBS, DISTROAV);
+    let csv = format!("imag={LIBOBS_SO_PATH_1082}={LIBOBS},{DISTROAV_SO_PATH_1082}={DISTROAV}");
+    (manifest, csv)
 }
 
 #[test]
@@ -1299,7 +1345,7 @@ fn gate_refuses_when_imag_so_bytes_mismatch_the_manifest_1082() {
     const LIBOBS_STALE: &str = "9999999999999999999999999999999999999999999999999999999999999999";
     let manifest =
         write_linux_manifest("imag_bundle_1082_drift", LIBOBS_MANIFEST, DISTROAV_MANIFEST);
-    let (s, t) = clean_fleet_states_1082(SHA);
+    let (s, t) = clean_fleet_states_1082(SHA, "refuses_when_imag_so_bytes_mismatch_the_");
     // imag: stale libobs.so.30 bytes, distroav.so bytes correct — isolates the DRIFT to libobs.so.30.
     let imag_bytes = format!(
         "imag={LIBOBS_SO_PATH_1082}={LIBOBS_STALE},{DISTROAV_SO_PATH_1082}={DISTROAV_MANIFEST}"
@@ -1346,7 +1392,7 @@ fn gate_passes_when_imag_so_bytes_match_the_manifest_1082() {
     const DISTROAV_MANIFEST: &str =
         "2222222222222222222222222222222222222222222222222222222222222222";
     let manifest = write_linux_manifest("imag_bundle_1082_ok", LIBOBS_MANIFEST, DISTROAV_MANIFEST);
-    let (s, t) = clean_fleet_states_1082(SHA);
+    let (s, t) = clean_fleet_states_1082(SHA, "passes_when_imag_so_bytes_match_the_mani");
     let imag_bytes = format!(
         "imag={LIBOBS_SO_PATH_1082}={LIBOBS_MANIFEST},{DISTROAV_SO_PATH_1082}={DISTROAV_MANIFEST}"
     );
@@ -1377,17 +1423,20 @@ fn gate_passes_when_imag_so_bytes_match_the_manifest_1082() {
 }
 
 #[test]
-fn gate_stays_dormant_when_imag_so_bytes_not_gathered_1082() {
-    // OPT-IN safety: a manifest is auto-sourced but the imag .so gather returned nothing (--imag-bytes
-    // empty). The facet must go DORMANT — NOT UNKNOWN/DRIFT — so a live ssh gather failure never
-    // spuriously refuses the run while the ENFORCE flip (#1082 part 3) is still deferred.
+fn gate_refuses_when_imag_so_bytes_not_gathered_1100() {
+    // #1100 ENFORCE (was gate_stays_dormant_..._1082): the imag .so byte facet is now enforced
+    // (#758-shape) — its live gather is deployed + verified on the rig. A manifest auto-sourced but
+    // an EMPTY imag .so gather (--imag-bytes empty) is no longer a silent DORMANT skip; it is a
+    // gate-blocking UNKNOWN (11), so a live ssh gather failure REFUSES the run rather than passing a
+    // run whose imag bytes were never verified. The exact flip of the former opt-in behavior, the
+    // same 756->758 second step #1067 applied to port4455_identity.
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
     let manifest = write_linux_manifest(
-        "imag_bundle_1082_dormant",
+        "imag_bundle_1100_empty",
         "1111111111111111111111111111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222222222222222222222222222",
     );
-    let (s, t) = clean_fleet_states_1082(SHA);
+    let (s, t) = clean_fleet_states_1082(SHA, "refuses_when_imag_so_bytes_not_gathered_1");
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -1401,12 +1450,15 @@ fn gate_stays_dormant_when_imag_so_bytes_not_gathered_1082() {
         "imag=",
     ]);
     assert_eq!(
-        code, 0,
-        "an empty imag byte gather must stay DORMANT + PASS, never refuse. stdout={stdout} stderr={stderr}"
+        code, 11,
+        "an empty imag byte gather must now REFUSE as UNKNOWN (11), not silently pass. \
+         stdout={stdout} stderr={stderr}"
     );
+    assert!(!stdout.contains("GATE PASS"), "must not pass: {stdout}");
+    let all = format!("{stdout}{stderr}");
     assert!(
-        stdout.contains("imag_so_bytes") && stdout.contains("DORMANT"),
-        "the facet must report DORMANT (opt-in), not UNKNOWN/DRIFT: {stdout}"
+        all.contains("imag_so_bytes") && all.contains("UNKNOWN"),
+        "the facet must report UNKNOWN (enforced), not DORMANT: {all}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
@@ -1423,7 +1475,7 @@ fn gate_unknown_when_imag_so_path_not_in_manifest_1082() {
         "1111111111111111111111111111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222222222222222222222222222",
     );
-    let (s, t) = clean_fleet_states_1082(SHA);
+    let (s, t) = clean_fleet_states_1082(SHA, "unknown_when_imag_so_path_not_in_manifes");
     // A path NOT in the manifest -> UNKNOWN.
     let imag_bytes = "imag=lib/x86_64-linux-gnu/libobs-opengl.so.30=abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca";
     let (code, stdout, stderr) = run_gate(&[
@@ -1451,4 +1503,35 @@ fn gate_unknown_when_imag_so_path_not_in_manifest_1082() {
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
     let _ = std::fs::remove_file(&manifest);
+}
+
+#[test]
+fn gate_enforces_imag_bytes_when_unreported_1100() {
+    // #1100: the imag .so byte facet is ENFORCED (its opt-in main() guard removed) now that the live
+    // gather is deployed + verified on the rig. A fleet healthy on every OTHER facet but supplying NO
+    // imag bytes/manifest at all is a gate-blocking UNKNOWN (11), never the old silent opt-in skip.
+    // The exact flip of the former DORMANT behavior, mirroring gate_enforces_port4455_identity_..._1067.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let (s, t) = clean_fleet_states_1082(SHA, "enforces_imag_bytes_when_unreported_1100_");
+    // No --imag-manifest / --imag-bytes at all: the facet must engage unconditionally and UNKNOWN.
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(
+        code, 11,
+        "a fleet reporting no imag bytes must be UNKNOWN (11), not a silent pass. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(!stdout.contains("GATE PASS"), "must not pass: {stdout}");
+    assert!(
+        stdout.contains("imag_so_bytes") && stdout.contains("UNKNOWN"),
+        "imag byte facet must engage unconditionally + report UNKNOWN: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
 }

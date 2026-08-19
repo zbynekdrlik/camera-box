@@ -23,13 +23,19 @@ pub mod grab_record;
 pub mod intercom;
 #[cfg(target_os = "linux")]
 pub mod ndi;
+// (#1113) genlock capture->emit pacing gate — the pure wall-clock decimation math extracted out of
+// the 2555-line `ndi.rs` (issue-1111 review). Linux-gated in lock-step with `ndi` (whose
+// NDI-timecode grid it complements); pure `u64` logic otherwise, Tier-0 tests on the Linux `test`
+// CI job (default features), mirroring the `genlock_stamp` / `dupe_decimation` sibling precedents.
+#[cfg(target_os = "linux")]
+pub mod genlock_pacing;
 // #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Linux-gated because it reuses
 // the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
 #[cfg(target_os = "linux")]
 pub mod genlock_stamp;
 // (#889) dupe-preferring decimation for the genlock capture->emit gate — a fast/over-rate
 // grabber's internal-buffer repeat gets preferentially shed over the genuine unique tick next to
-// it. Linux-gated because it wraps the ndi boundary math (`ndi::genlock_emit_gate`) and is
+// it. Linux-gated because it wraps the ndi boundary math (`genlock_pacing::genlock_emit_gate`) and is
 // shaped around a raw V4L2 YUYV422 frame; pure logic otherwise, unit-tests Tier-0 on the Linux
 // `test` CI job (default features).
 #[cfg(target_os = "linux")]
@@ -241,7 +247,8 @@ pub mod program_render_audit;
 // #624 — cross-camera cam2->camera switch-latency SPREAD gate (pure decision): given each
 // camera's measured cam2->camera median (p50) latency (the per-camera photon->dequeue latency
 // d_X baked in by the #286 root cause), computes the cross-camera spread and gates it against
-// the issue's fixed half-a-30fps-frame threshold (16ms). No probe deps, so it unit-tests
+// the SPREAD_THRESHOLD_MS bound (24ms since issue 1120; was #624's 16ms half-frame — recalibrated
+// for the CAM1 grabber residual, issue 1110). No probe deps, so it unit-tests
 // Tier-0; the probe-gated measurement (generalizing `probe::recording_latency::
 // cam2_cam1_samples_from_burn`/`_from_flip` from cam1-only to cam1/cam3/cam4, per
 // `--switch-schedule` window) lives in `bin/recording-verdict`.
@@ -385,6 +392,10 @@ pub mod offline_ack;
 // `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
 // together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
 pub mod burn_hold;
+// #1122 — PURE, dependency-free E2E recordings retention decision (keep newest-N runs UNION
+// younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
+// a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 mirrors.
+pub mod recordings_retention;
 // #768 — REPORT-ONLY cold-cut onset seam: the first ~1s after a program switch to a cambox hidden
 // >= 60s (the transition the segmenter's guard discards, so nothing measured it — the blind spot
 // that let issue 767 through). Pure crate-root logic (Tier-0), consumed thinly by recording-verdict.
@@ -396,11 +407,15 @@ pub mod e2e_latency_gate;
 // thinly by recording-verdict.
 pub mod imag_leg_gate;
 pub mod optical_floor;
+// issue 1118 — REPORT-ONLY leg schema-degrade seam: a schema-mismatched imag partial DEGRADES
+// (drop the leg, verdict from strih+stream) instead of the fatal `load(path)?` killing the
+// whole merge. Pure crate-root decision (Tier-0), consumed thinly by recording-verdict::run_merge.
+pub mod partial_schema_gate;
 
 // issue 1033 — the ALL-CAMBOX cross-camera DELIVERY-latency spread gate: REPORT-ONLY today (the
 // fleet data is not tight-green — cam1's delivery lottery), one-line-flippable to blocking by a
 // follow-up. Pure crate-root logic (Tier-0), consumed thinly by recording-verdict; reuses the
-// switch_latency 16 ms bound (no new constant).
+// switch_latency SPREAD_THRESHOLD_MS bound (24 ms since issue 1120; no new constant).
 pub mod delivery_spread_gate;
 
 // #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become

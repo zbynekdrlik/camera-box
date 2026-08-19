@@ -1,0 +1,17 @@
+[Unit]
+Description=camera-box rig-health status page — read-only static HTTP server over the render dir (#787)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+# A stock read-only static server over the rendered page dir; it NEVER runs the audit (that is the
+# rig-status-update.timer's job) — keeping serving decoupled from probing is the load-bearing
+# "renderer, not prober" boundary. Bound to dev1's STABLE tailscale interface (100.104.8.125) per the
+# address-by-tailscale rule (the rig LAN IP drifts when equipment travels to events); for a rig-LAN
+# bind edit --bind to 10.77.9.103. NEVER localhost, NEVER the box's public IP. Page: http://100.104.8.125:8790/
+ExecStartPre=-/usr/bin/mkdir -p %h/.camera-box/rig-status
+ExecStart=/usr/bin/python3 -m http.server 8790 --bind 100.104.8.125 --directory %h/.camera-box/rig-status
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

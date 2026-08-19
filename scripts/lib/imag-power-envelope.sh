@@ -467,6 +467,23 @@ imag_render_cause_from_signals() {
   esac
 }
 
+# imag_power_throttle_render_gate RENDER_LINE -> echoes `page | log-only`. Gates the #880
+# throttle-under-floor Discord PAGE on whether OBS render is ACTUALLY suffering. The iGPU sitting
+# below the pinned floor is a CHRONIC hardware condition (the punit steers below the software floor
+# at the power/thermal envelope; the cooling residual is the technician ticket, issue 1043) — a page
+# on it is only ACTIONABLE when it is degrading OBS render. So: `log-only` (no Discord) only when the
+# render sample reads a clean, advancing 60fps render (`healthy`); `page` for everything else. This
+# FAILS OPEN on `stalled`/`unknown`/unreadable/malformed render — an unreadable render sample must
+# NEVER SILENTLY suppress a real clamp alert (the standing rig-alert rule: loud, never silent). Pure:
+# reuses the same imag_render_degraded_from_sample classifier the #799 discriminator uses, so there is
+# no second WS probe and the two paths can never disagree about what "render healthy" means.
+imag_power_throttle_render_gate() {
+  case "$(imag_render_degraded_from_sample "${1:-}")" in
+    healthy) printf 'log-only\n' ;;
+    *)       printf 'page\n' ;;
+  esac
+}
+
 # imag_power_envelope_gather_remote_snippet -> the REMOTE shell command (a string) both callers run
 # over their own transport to collect the observed envelope state into the `|`-delimited block
 # imag_power_envelope_verdict parses. Hardware-agnostic (issue 816): a box with no mmio RAPL zone

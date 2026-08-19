@@ -95,6 +95,19 @@ GATE_NTP_MASTER_NAME="${DANTESYNC_NTP_MASTER_NAME:-strih}"
 # "ntp_deadband_us" -- see clock-offset-guard.sh's ntp_master_effective_bound_us for the full
 # derivation. Absent/null field (older dantesync, or any client node) -> unchanged fixed bound.
 GATE_DEADBAND_MARGIN_US="${DANTESYNC_DEADBAND_MARGIN_US:-1000}"
+# #1119 (root-caused 2026-08-18): dantesync v1.8.46 reports "ntp_deadband_us" as the no-step
+# THRESHOLD (live: 1000us), NOT the <=2500us bounded PER-STEP cap the master's own UTC offset
+# actually sawtooths toward under a slow grandmaster (~23ppm). So the #1021 deadband widening
+# (deadband 1000 + margin 1000 = 2000) produces NO widening, and a healthy sawtooth median (the
+# round-33 failed run: 2699us) false-DRIFTs the bare 2000us bound -- a per-window coin flip on the
+# NTP master alone. The step-cap is a dantesync DESIGN constant not exposed over /status, so the
+# gate carries it: the master's median bound floors at max(#1021 deadband floor, step_cap + margin)
+# = 2500 + 1000 = 3500us. A genuine gross desync (>>3500us) still DRIFTs; a healthy 2699us passes.
+# This is MASTER-only (median-only mode); CLIENT rows sync to strih, not UTC, and keep the 2000us
+# bound untouched. Genlock FIFO pacing is monotonic-clock-based, so this UTC sawtooth is harmless
+# to the recording path (0 underruns/28k frames live) -- only the gate's median term coin-flips.
+# Default 2500us (v1.8.46's documented step cap); DANTESYNC_NTP_MASTER_STEP_CAP_US overrides.
+GATE_NTP_MASTER_STEP_CAP_US="${DANTESYNC_NTP_MASTER_STEP_CAP_US:-2500}"
 # #1022 (dantesync-gate: client rows can ALSO false-DRIFT during the master's OWN deadband
 # step-chase window -- #1021 explicitly left client rows untouched): the CAP on the deadband
 # component of a CLIENT row's widened bound -- see clock-offset-guard.sh's client_chase_bound_us
@@ -445,12 +458,16 @@ grade_http_node() {
   # with no master configured never pays this extra SSH call.
   if [ "$mode" = "median-only" ]; then
     local orig_bound="$bound"
-    bound="$(ntp_master_effective_bound_us "$status" "$bound" "$deadband_margin")"
+    # #1119: the master's median bound floors at max(#1021 deadband floor, step_cap + margin) --
+    # v1.8.46's reported ntp_deadband_us (1000us) is the no-step THRESHOLD, not the <=2500us
+    # bounded per-step cap the offset sawtooths toward, so the step-cap ceiling (2500+1000=3500us)
+    # is what keeps a healthy sawtooth from false-DRIFTing. See GATE_NTP_MASTER_STEP_CAP_US.
+    bound="$(ntp_master_effective_bound_us "$status" "$bound" "$deadband_margin" "$GATE_NTP_MASTER_STEP_CAP_US")"
     if [ "$bound" != "$orig_bound" ]; then
       # No "NTP MASTER:" prefix here -- sampled_offset_check's own median-only-mode note (#1014)
       # already opens with "NTP MASTER:" on this SAME printed line, so repeating it would render
       # as "NTP MASTER: ... -- NTP MASTER: ..." (review finding, #1021).
-      deadband_note=" -- bound widened to ${bound}us (dantesync ntp_deadband_us + ${deadband_margin}us margin, #1021; base bound ${orig_bound}us)"
+      deadband_note=" -- master graded on the step-cap ceiling, not raw UTC median: bound widened to ${bound}us = max(ntp_deadband_us + ${deadband_margin}us margin [#1021], step-cap ${GATE_NTP_MASTER_STEP_CAP_US}us + ${deadband_margin}us margin [#1119]; base bound ${orig_bound}us). The master's UTC offset is a by-design bounded-step sawtooth under a slow grandmaster (dantesync issue 71/95), harmless to monotonic-clock genlock pacing"
     fi
   elif [ -n "$master_chase_status" ]; then
     local orig_bound="$bound" step_source="fallback(${client_step_fallback}us)"
@@ -467,6 +484,17 @@ grade_http_node() {
       "$client_chase_ceiling" "$client_journal" "$client_step_fallback")"
     if [ "$bound" != "$orig_bound" ]; then
       deadband_note=" -- bound widened to ${bound}us for the master's own PTP-locked step-chase envelope (${GATE_NTP_MASTER_NAME}'s ntp_deadband_us capped at ${client_chase_ceiling}us + client step threshold via ${step_source} + ${deadband_margin}us margin, #1022/#1041; base bound ${orig_bound}us)"
+    fi
+    # #1123: the MEDIAN bound above is step-aware, but a client's own bounded step landing mid-window
+    # makes the samples straddle the step -> SPREAD ~= its step magnitude, false-UNSTABLE against the
+    # fixed stability. Widen the STABILITY (spread) bound to the client's OWN journal step envelope
+    # (the WINDOW-MAX threshold + margin -- see clock-offset-guard.sh's client_chase_stability_us),
+    # reusing the $client_journal already read above (no extra SSH). A genuinely-scattered client
+    # (spread beyond its own envelope, or no readable journal) still fails on the unchanged floor.
+    local orig_stability="$stability"
+    stability="$(client_chase_stability_us "$stability" "$deadband_margin" "$client_journal" "$client_step_fallback")"
+    if [ "$stability" != "$orig_stability" ]; then
+      deadband_note="${deadband_note} -- stability (spread) bound widened to ${stability}us, step-aware (client's own journal max step threshold + ${deadband_margin}us margin, #1123): a client step straddling the sample window spreads by ~its own step magnitude while every sample stays inside the median bound; base stability ${orig_stability}us"
     fi
   fi
   now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
@@ -581,6 +609,23 @@ grade_http_node() {
       esac
       ;;
   esac
+  # #1119: NTP-master step-storm guard. The step-cap widening above lets a healthy bounded-step
+  # sawtooth median pass, so the raw median can no longer distinguish a healthy sawtooth from a
+  # THRASHING master whose median happens to land in-band. dantesync's own ntp_step_storm=true
+  # (set when it crosses its 120-steps/hour alarm) IS that pathology signal -- a hard master
+  # failure regardless of median. Master-only (median-only mode) and ONLY on a freshly-graded
+  # payload (rc_off != 3): a stale/unknown payload cannot be trusted for the storm field either, so
+  # it stays UNKNOWN rather than being flipped to BAD. false/null/absent never fails (report-first
+  # for a client node or a pre-storm-field payload). Default-on, no opt-out env -- an affirmative
+  # storm makes cross-node timestamps unreliable, exactly what this precondition gate exists to
+  # catch. clock-offset-guard.sh's ntp_master_step_storm_verdict is the single-sourced verdict.
+  if [ "$mode" = "median-only" ] && [ "$rc_off" != 3 ] \
+     && [ "$(ntp_master_step_storm_verdict "$status")" = storm ]; then
+    local steps_h; steps_h="$(ntp_steps_last_hour_from_pipe_json "$status")"
+    printf '  %-14s NTP STORM    (dantesync ntp_step_storm=true%s -- master thrashing, hard fail regardless of median, #1119)\n' \
+      "$name" "$([ -n "$steps_h" ] && [ "$steps_h" != null ] && printf ', %s steps/hour past its 120/h alarm' "$steps_h")"
+    rc_off=2
+  fi
   ptp="$(ptp_locked_from_pipe_json "$status")"
   rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
   # #834: grandmaster IDENTITY -- gm_check ALWAYS prints its GM OK/FOREIGN/UNKNOWN line (report), but
@@ -701,6 +746,23 @@ Options:
                        the deadband before the next correction lands). Absent/null
                        ntp_deadband_us (older dantesync, or any client node) -> unmodified
                        --bound-us, exactly as before #1021.
+
+  NTP-master step-cap + step-storm (#1119, env-controlled -- no CLI flag, default-on):
+    DANTESYNC_NTP_MASTER_STEP_CAP_US   dantesync v1.8.46 reports "ntp_deadband_us" as the no-step
+                       THRESHOLD (live: 1000us), NOT the <=2500us bounded PER-STEP cap the master's
+                       own UTC offset actually sawtooths toward under a slow grandmaster -- so the
+                       #1021 deadband widening (1000+1000=2000) gives NO widening and a healthy
+                       sawtooth median (the round-33 failed run: 2699us) false-DRIFTs the bare
+                       2000us bound. The master's median bound therefore ALSO floors at
+                       (step-cap + --deadband-margin-us) = ${GATE_NTP_MASTER_STEP_CAP_US}+${GATE_DEADBAND_MARGIN_US}=$((GATE_NTP_MASTER_STEP_CAP_US + GATE_DEADBAND_MARGIN_US))us
+                       (default ${GATE_NTP_MASTER_STEP_CAP_US}, v1.8.46's documented step cap). Master-only (median-only
+                       row); a genuine gross desync (well beyond that ceiling) still DRIFTs, CLIENT rows keep the
+                       fixed 2000us bound. Gated on a numeric ntp_deadband_us being present, so a
+                       pre-dantesync-#84 master keeps the bare bound. Since the master's raw UTC
+                       median is thus no longer a health signal up to the step-cap, the master is
+                       ALSO hard-failed on dantesync's own "ntp_step_storm":true (its >120-steps/
+                       hour thrashing alarm) regardless of median -- a healthy bounded-step
+                       sawtooth passes, a thrashing/unlocked/foreign-GM/grossly-out master fails.
   --client-chase-ceiling-us N  #1022 (dantesync-gate: client rows can ALSO false-DRIFT during
                        the master's OWN deadband step-chase window -- #1021 explicitly left
                        client rows untouched): a CLIENT (non-master) row's median bound ALSO

@@ -86,6 +86,25 @@ same attribution the sweep uses — no `recording_segments.rs` churn). Before wr
 check `dupe_decimation::dupe_content_hash` (#889) — a proven row-sampled FNV-1a already exists for the
 OPPOSITE (over-rate) phenomenon (investigate-existing-first).
 
+**TRAP (issue 1101) — "the offline pass" that computes `all_cambox_continuity` is the dev1 MERGE,
+which has NO recording. A pixel/content metric gated behind `stream_rec` (the fused `--stream` path)
+is STRUCTURALLY UNREACHABLE in the production gate and produces ZERO data.** The production ALL_CAMBOX
+gate runs `VERDICT_ON_STREAM=1` (the default, `recording-e2e.sh`): each Windows box `--extract-partial`s
+its LOCAL recording (the partial carries per-frame ticks/`gen_ts`/`frame_index` — NOT the recording,
+NOT content hashes), and the dev1 `--merge-partials` step COMPUTES `all_cambox_continuity` with no
+recording on dev1. So `stream_rec` (set only from `--stream <recording>`) is `None` in the merge, and
+any block written as `match stream_rec.as_deref() { Some(rec) => hash_recording_frames(rec) ... None =>
+skip }` takes the skip arm — it fires ONLY in the legacy `VERDICT_ON_STREAM=0` fused path, which the
+rig does not use. The issue-1088 dup-cadence surface shipped this way and appeared in 0 of 81 retained
+`verdict-*.json` (healthy runs included) — not a thin sample, structurally none. So §7's "compute it
+in the offline pass THERE" is only half the pattern: `read_frames`/`hash_recording_frames` do decode
+every frame, but the pass that actually decodes the recording in production is the ON-BOX
+`--extract-partial`, NOT the dev1 merge. A content metric that must reach `all_cambox_continuity` has
+to be computed on the box during extract and CARRIED in the partial's schema (like the per-frame ticks
+already are), so the merge can slice it per window without the recording. Verify a new content/pixel
+term actually emits on a real production merge-gate `verdict-*.json` BEFORE building a calibration or a
+LIVE flip on it — a report-only term nobody can see is not "shipped", it is dormant.
+
 ## 8. GATE on the DISCRIMINATED signal, never the raw metric (#1088 review)
 
 When the metric builds a multi-condition classification (e.g. #1088 `duplication_masked` = rate ∧
@@ -106,3 +125,30 @@ through that fn's RETURN TYPE churns every caller — all CI-first-compile, high
 ADDITIVE separate pass (a new fn with zero existing-call-site edits) is the lower-risk trade even at
 the cost of an extra offline decode, for a report-only first cut. Note the fold-into-main-pass
 optimization as a follow-up (gated on the metric proving its value), don't do it blind.
+
+## 10. Two ZERO-churn plumbing moves for a merge-carried metric (#1112)
+
+§7 says a content/pixel metric must be computed ON the box during `--extract-partial` and CARRIED to
+the dev1 merge. Two techniques land that carry WITHOUT the blind CI-first-compile churn §9 warns
+about — both proven wiring the #1088 dup-cadence surface into the production merge gate (#1112):
+
+- **Carry a per-box value via a `RecordingPartial` builder — ZERO caller churn.** `RecordingPartial`
+  is constructed ONLY through `from_frames(...)` + chained `.with_colour()`/`.with_av_sync()`
+  builders (never a struct literal outside `from_frames`). Add an optional field
+  (`content_hashes: Option<Vec<u64>>`, `#[serde(default)]`) + a `with_content_hashes` builder;
+  `from_frames` defaults it to `None`, so every existing `from_frames` call site is unchanged and the
+  new value is opt-in. Bump `PARTIAL_SCHEMA_VERSION` per the file's convention (grep tests for any
+  hardcoded old-version JSON literal — the strict `from_json` check rejects a stale version). The
+  struct derives `PartialEq` not `Eq`, so a `Vec`/`f64`-bearing field is fine.
+- **Thread a new value into a many-call-site verdict fn via a same-signature WRAPPER — ZERO
+  call-site churn.** `build_and_print_verdict` has ~37 call sites (mostly probe-gated tests, all
+  CI-first-compile). Adding a param directly = 37 blind edits. Instead: rename the body to
+  `build_and_print_verdict_with_<x>(..., new_param)` and keep a thin `build_and_print_verdict`
+  wrapper with the ORIGINAL signature that delegates with the neutral default (`None`). Only the ONE
+  new caller (the merge) calls the `_with_<x>` form; every existing caller (tests + the fused main)
+  is byte-for-byte unchanged. This is the call-site-churn analogue of §9's return-type-churn trade.
+
+Both keep the risk surface to the FEW lines that genuinely change, which is the whole game on a file
+with no local type check. Verify with `cargo fmt --all --check` (parses the probe files) + a hand
+type-audit of the new arg types and EVERY call site's arity (`grep -n 'build_and_print_verdict'` — a
+stray 8-arg call to the 9-arg fn is a CI-only red).

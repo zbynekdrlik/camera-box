@@ -3443,3 +3443,317 @@ fn slew_excluded_survivors_us_recency_floor_keeps_only_post_epoch_samples_1055()
     );
     assert_eq!(out.trim(), "-114 -111 -113");
 }
+
+// --- #1119: master step-cap floor + step-storm verdict --------------------------------------
+//
+// dantesync v1.8.46 reports ntp_deadband_us=1000 (the no-step threshold), NOT the ≤2500us
+// bounded PER-STEP cap the master's own UTC offset actually sawtooths toward under a slow
+// grandmaster. deadband(1000)+margin(1000)=2000 gives NO widening, so a healthy sawtooth median
+// false-DRIFTs the bare 2000us bound (issue 1119). ntp_master_effective_bound_us gains an
+// OPTIONAL 4th STEP_CAP_US param: when present (and a numeric deadband is too), the floor ALSO
+// includes step_cap+margin. Gated on a numeric deadband so a pre-#84 master (no field) keeps the
+// bare bound -- the change only bites when the reported deadband is SMALLER than the step-cap.
+
+/// pipe_json_deadband + the v1.8.46 storm fields (ntp_step_storm / ntp_steps_last_hour).
+fn pipe_json_master_1119(deadband_raw: &str, storm: &str, steps_raw: &str) -> String {
+    format!(
+        "{{\"updated_ts\":1000,\"ntp_offset_us\":100,\"is_locked\":true,\"mode\":\"LOCK\",\
+         \"ntp_deadband_us\":{deadband_raw},\"ntp_step_storm\":{storm},\
+         \"ntp_steps_last_hour\":{steps_raw}}}"
+    )
+}
+
+#[test]
+fn ntp_master_effective_bound_us_step_cap_floor_widens_when_deadband_below_step_cap_1119() {
+    // The LIVE v1.8.46 shape: deadband=1000 (< the 2500us step-cap). Pre-#1119 (3-arg) this
+    // returns max(2000, 1000+1000)=2000 -- NO widening. With the step-cap 4th arg the floor also
+    // includes 2500+1000=3500, which wins.
+    let status = pipe_json_deadband("1000");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 1000 2500",
+        &[("JSON", status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3500",
+        "max(2000, 1000+1000, 2500+1000)=3500 -- the step-cap floor wins when deadband<step-cap: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_omitted_step_cap_is_byte_identical_pre_1119() {
+    // Backward compat: a 3-arg call (no step-cap) must reproduce the exact pre-#1119 deadband-only
+    // floor -- every existing caller/test that never passes a 4th arg is unchanged.
+    let status = pipe_json_deadband("1000");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 1000",
+        &[("JSON", status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "3-arg call -> deadband-only floor max(2000, 1000+1000)=2000, no step-cap term: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_step_cap_never_lowers_a_bigger_deadband_floor_1119() {
+    // A deadband ABOVE the step-cap keeps the (bigger) deadband floor -- the step-cap term is a
+    // max() contributor, never a ceiling. deadband 5000 dominates step-cap 2500.
+    let status = pipe_json_deadband("5000");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 1000 2500",
+        &[("JSON", status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "6000",
+        "max(2000, 5000+1000, 2500+1000)=6000 -- the deadband floor wins when it exceeds step-cap: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_step_cap_never_applies_without_a_numeric_deadband_1119() {
+    // The step-cap floor is gated on a numeric deadband being present (the #84+ bounded-step
+    // regime marker): a null/absent deadband keeps the bare bound EVEN with a step-cap arg, so a
+    // pre-#84 master still grades on the fixed 2000us bound (preserves the #1021 backward-compat).
+    for db in ["null", ""] {
+        let status = if db.is_empty() {
+            "{\"updated_ts\":1000,\"ntp_offset_us\":100,\"is_locked\":true,\"mode\":\"LOCK\"}"
+                .to_string()
+        } else {
+            pipe_json_deadband(db)
+        };
+        let out = run_sourced(
+            "ntp_master_effective_bound_us \"$JSON\" 2000 1000 2500",
+            &[("JSON", status.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            "2000",
+            "deadband={db:?}: no numeric deadband -> the step-cap floor never applies, bare 2000us bound: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn ntp_master_effective_bound_us_step_cap_zero_or_malformed_is_ignored_1119() {
+    // A "0" / non-numeric step-cap 4th arg falls back to the deadband-only floor (byte-identical
+    // to omitting it) -- same #595 validate-before-arithmetic discipline as the other params.
+    let status = pipe_json_deadband("1000");
+    for step_cap in ["0", "abc", "-500"] {
+        let out = run_sourced(
+            &format!("ntp_master_effective_bound_us \"$JSON\" 2000 1000 {step_cap}"),
+            &[("JSON", status.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            "2000",
+            "step_cap={step_cap:?}: invalid/zero -> deadband-only floor, no step-cap term: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn ntp_master_step_storm_verdict_reads_true_false_null_and_absent_1119() {
+    // The daemon's own ntp_step_storm boolean is the honest thrashing signal: true=storm (hard
+    // fail), false=ok, null/absent=unknown (report-first for a pre-field payload, never a fail).
+    let storm = pipe_json_master_1119("1000", "true", "240");
+    assert_eq!(
+        run_sourced(
+            "ntp_master_step_storm_verdict \"$JSON\"",
+            &[("JSON", storm.as_str())]
+        )
+        .trim(),
+        "storm",
+        "ntp_step_storm:true -> storm"
+    );
+    let ok = pipe_json_master_1119("1000", "false", "85");
+    assert_eq!(
+        run_sourced(
+            "ntp_master_step_storm_verdict \"$JSON\"",
+            &[("JSON", ok.as_str())]
+        )
+        .trim(),
+        "ok",
+        "ntp_step_storm:false -> ok"
+    );
+    let null = pipe_json_master_1119("1000", "null", "null");
+    assert_eq!(
+        run_sourced(
+            "ntp_master_step_storm_verdict \"$JSON\"",
+            &[("JSON", null.as_str())]
+        )
+        .trim(),
+        "unknown",
+        "ntp_step_storm:null -> unknown (never a fail)"
+    );
+    let absent = pipe_json_deadband("1000"); // no ntp_step_storm field at all
+    assert_eq!(
+        run_sourced(
+            "ntp_master_step_storm_verdict \"$JSON\"",
+            &[("JSON", absent.as_str())]
+        )
+        .trim(),
+        "unknown",
+        "absent ntp_step_storm -> unknown"
+    );
+}
+
+#[test]
+fn ntp_steps_last_hour_from_pipe_json_reads_numeric_null_and_absent_1119() {
+    let s = pipe_json_master_1119("1000", "false", "85");
+    assert_eq!(
+        run_sourced(
+            "ntp_steps_last_hour_from_pipe_json \"$JSON\"",
+            &[("JSON", s.as_str())]
+        )
+        .trim(),
+        "85"
+    );
+    let n = pipe_json_master_1119("1000", "false", "null");
+    assert_eq!(
+        run_sourced(
+            "ntp_steps_last_hour_from_pipe_json \"$JSON\"",
+            &[("JSON", n.as_str())]
+        )
+        .trim(),
+        "null"
+    );
+    let a = pipe_json_deadband("1000");
+    assert_eq!(
+        run_sourced(
+            "ntp_steps_last_hour_from_pipe_json \"$JSON\"",
+            &[("JSON", a.as_str())]
+        )
+        .trim(),
+        "",
+        "absent field -> empty"
+    );
+}
+
+// --- #1123: client STABILITY (spread) bound step-aware -----------------------------------------
+//
+// The issue-1022/1041 client MEDIAN widening reads the tail-1 adaptive threshold; the STABILITY
+// (spread) term stayed fixed at 2000us. A client's own bounded step landing mid-window makes the
+// samples straddle the step -> spread ~= the client's step MAGNITUDE (live cam1: 2938us), which
+// exceeds even the widened median bound (2775us) because the median formula uses the tail-1
+// threshold (775us) while the true sawtooth amplitude is the window-MAX tolerance (6860us). So the
+// spread references the MAX threshold over the window (a window-wide statistic), not the tail-1.
+
+const DS_STRADDLE_JOURNAL: &str = "\
+2026-08-19T01:33:11+00:00 CAM1 dantesync[1450558]: [NTP] offset:+1869us (threshold:2640us, adaptive)\n\
+2026-08-19T01:33:42+00:00 CAM1 dantesync[1450558]: [NTP] offset:+1848us (threshold:6860us, adaptive)\n\
+2026-08-19T01:34:30+00:00 CAM1 dantesync[1450558]: [NTP] offset:+2938us (threshold:775us, adaptive)\n\
+2026-08-19T01:34:45+00:00 CAM1 dantesync[1450558]: [NTP] Stepped +2938us\n";
+
+#[test]
+fn client_max_step_threshold_us_from_journal_picks_the_max_not_the_freshest_1123() {
+    // The window's thresholds are 2640, 6860, 775 -- the tail-1 reader (median widening) picks 775;
+    // the spread widening must pick the MAX (6860), because the spread spans the whole window.
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_journal \"$J\"",
+        &[("J", DS_STRADDLE_JOURNAL)],
+    );
+    assert_eq!(
+        out.trim(),
+        "6860",
+        "must pick the MAX threshold over the window, not tail-1: {out:?}"
+    );
+}
+
+#[test]
+fn client_max_step_threshold_us_from_journal_returns_empty_when_absent_1123() {
+    let journal = "11:16:58 [NTP] offset:+23us\n11:17:29 [NTP] offset:+23us\n";
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_journal \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "no threshold: annotation -> empty, never a guess: {out:?}"
+    );
+    let out = run_sourced("client_max_step_threshold_us_from_journal \"\"", &[]);
+    assert_eq!(out.trim(), "", "empty journal -> empty");
+}
+
+#[test]
+fn client_chase_stability_us_widens_to_max_threshold_plus_margin_1123() {
+    // cam1's window max threshold 6860 -> stability floor max(2000, 6860+1000)=7860, so its
+    // straddle spread 2938 grades tight, not #836 scatter.
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\"",
+        &[("J", DS_STRADDLE_JOURNAL)],
+    );
+    assert_eq!(out.trim(), "7860", "max(2000, 6860+1000)=7860: {out:?}");
+}
+
+#[test]
+fn client_chase_stability_us_never_lowers_below_the_fixed_stability_1123() {
+    // A tiny threshold+margin must never DROP the spread bound below the caller's GATE_STABILITY_US
+    // (a widening FLOOR, never a ceiling override) -- a genuinely-scattered client still fails.
+    let journal = "10:00:00 CAM3 dantesync[1]: [NTP] offset:+300us (threshold:500us, adaptive)\n";
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, 500+1000=1500)=2000, never lowered: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_stability_us_falls_back_when_journal_has_no_threshold_1123() {
+    // No threshold match -> the conservative STEP_FALLBACK_US (matching the median widening's own
+    // fallback) is used; an omitted fallback reproduces the pre-#1123 fixed bound (fallback 0).
+    let journal = "10:00:00 CAM3 dantesync[1]: [NTP] offset:+300us\n";
+    // fallback 700 -> max(2000, 700+1000)=2000
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\" 700",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "fallback 700 -> max(2000, 700+1000)=2000: {out:?}"
+    );
+    // a LARGE fallback still widens (an unreachable client whose real envelope is known-large)
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\" 6000",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "7000",
+        "fallback 6000 -> max(2000, 6000+1000)=7000: {out:?}"
+    );
+    // omitted fallback (0) -> fixed 2000, byte-identical pre-#1123
+    let out = run_sourced(
+        "client_chase_stability_us 2000 1000 \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "omitted fallback -> fixed 2000: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_stability_us_fails_closed_on_malformed_stability_or_margin_1123() {
+    for args in ["abc 1000 \"$J\"", "2000 xy \"$J\""] {
+        let out = run_sourced(
+            &format!("client_chase_stability_us {args}"),
+            &[("J", DS_STRADDLE_JOURNAL)],
+        );
+        // a malformed stability prints the stability arg unchanged; a malformed margin prints
+        // the (numeric) stability unchanged -- never a crash under set -e, same #595 discipline.
+        assert!(
+            out.trim() == "abc" || out.trim() == "2000",
+            "malformed input must fall back to the unmodified stability, never crash: {args} -> {out:?}"
+        );
+    }
+}

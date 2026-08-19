@@ -1,0 +1,12 @@
+[Unit]
+Description=camera-box rig-health status-page update (#787) — one audit sweep -> render -> alert-on-FAIL
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# One read-only rig-health-audit.py sweep (ssh/WS reads across every node) -> append a JSONL history
+# row -> render index.html + status.json into ~/.camera-box/rig-status/ -> fire a deduped Discord
+# alert on FAIL. dev1-side, mirrors the imag-obs / network-reach / optical-chain alert timers.
+# rig-health-audit.py is the ONE prober; this service never probes a node itself.
+ExecStart=%h/devel/camera-box/scripts/rig-status.py update
+TimeoutStartSec=360

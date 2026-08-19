@@ -1842,6 +1842,55 @@ def switch(a):
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
 
 
+def _idle_restore_settings(restore):
+    """#1086 keepalive-bypass PRIMITIVE (PURE, testable — no I/O): the ``SetInputSettings`` payload
+    to idle (tear down) or restore a strih NDI receiver.
+
+    - ``restore`` falsy → clear ``ndi_source_name`` (+ ``genlock_fifo`` off): DistroAV tears the
+      receiver down cleanly — the SAME idle discipline ``_quiesce_probe_input``/teardown already
+      use — so the source goes GENUINELY cold even under the #767 ``PROP_BEHAVIOR_KEEP_ACTIVE``
+      keep-alive build (which otherwise keeps every receiver warm off-program).
+    - ``restore`` a name → set ``ndi_source_name`` back (+ ``genlock_fifo`` on): re-create the
+      receiver from cold so the caller's next program cut measures the cold wake-up onset.
+
+    Always applied with ``overlay: True`` (see ``idle_receiver``), so ONLY these two keys change —
+    the per-source ``genlock_latency_ms_src`` pin and everything else are preserved, and the input
+    ends the test exactly as it started once restored.
+    """
+    if restore:
+        return {"ndi_source_name": restore, "genlock_fifo": True}
+    return {"ndi_source_name": "", "genlock_fifo": False}
+
+
+def idle_receiver(a):
+    """#1086 keepalive-bypass PRIMITIVE: idle (``--input`` only) or restore (``--restore <name>``)
+    a strih NDI receiver by input name, to force a GENUINELY-cold cold cut under the #767 keep-alive
+    build. TEST TOOLING ONLY — never run in a normal E2E (recording-e2e.sh gates every call on
+    ``COLD_CUT_BYPASS_CAM``; see scripts/lib/cold-cut-step.sh).
+
+    On idle it first READS + prints the input's current ``ndi_source_name`` (``PREV_NDI_NAME=<name>``
+    on stdout) so the caller can pass it back to ``--restore`` after the cold hold; then clears it.
+    ``overlay: True`` keeps the genlock latency pin intact (see ``_idle_restore_settings``). After the
+    write it waits one render tick (``_QUIESCE_RENDER_TICK_S``) for DistroAV's av_thread to finish
+    tearing down / rebinding, mirroring ``_quiesce_probe_input``."""
+    ws = _conn(a.host, a.password)
+    try:
+        if not a.restore:
+            prev = _rpc(ws, "GetInputSettings", {"inputName": a.input}, ignore_err=True)
+            prev_name = (prev.get("inputSettings") or {}).get("ndi_source_name", "")
+            print(f"PREV_NDI_NAME={prev_name}")
+        _rpc(ws, "SetInputSettings", {
+            "inputName": a.input,
+            "inputSettings": _idle_restore_settings(a.restore),
+            "overlay": True,
+        })
+        time.sleep(_QUIESCE_RENDER_TICK_S)
+    finally:
+        ws.close()
+    action = f"restored to {a.restore!r}" if a.restore else "idled (torn down cold)"
+    print(f"[obs] {a.host}: #1086 receiver '{a.input}' {action}")
+
+
 def _rig_busy_partition(diagnostics):
     """#649/#657 (pure, testable — no I/O): partition per-box streaming/recording booleans into
     the three mutually-exclusive categories both _rig_busy_hint (the human-readable diagnosis)
@@ -2098,6 +2147,55 @@ def open_projectors(a):
         ws.close()
 
 
+def _multiview_monitor_index(monitors, override=None):
+    """#1098 (pure, testable): pick the monitorIndex for a SINGLE-monitor box's fullscreen
+    Multiview projector (strih). Unlike open_projectors (imag-nb dual-monitor: panel=Multiview +
+    HDMI=Program), strih has ONE monitor and NO Program projector, so this selects the ONE monitor
+    the operator's multiview belongs on — DERIVED, never hardcoded (#840). Rule: an explicit
+    *override* wins; else the monitor at the origin (0,0) = primary; else the first monitor; else 0
+    (never crash — the caller's OpenVideoMixProjector fails loud on a bad index instead)."""
+    if override is not None:
+        return int(override)
+    if not monitors:
+        return 0
+    for m in monitors:
+        if m.get("monitorPositionX", 0) == 0 and m.get("monitorPositionY", 0) == 0:
+            return int(m["monitorIndex"])
+    return int(monitors[0]["monitorIndex"])
+
+
+def open_multiview(a):
+    """#1098 — (re)open a FULLSCREEN Multiview projector on a SINGLE-monitor box after a force-kill
+    OBS restart left the operator without their standing multiview. strih's SaveProjectors=true but
+    SavedProjectors is EMPTY, and a force-kill never repopulates it, so OBS restores nothing on the
+    AHK respawn — the operator sees no multiview until it is re-opened. This is that active re-open.
+
+    Deliberately multiview-ONLY, distinct from open_projectors (which REQUIRES both a non-HDMI panel
+    AND an HDMI monitor and FAILS LOUD without both, tailored to imag-nb's dual-monitor layout):
+    strih has ONE monitor and NO Program projector, so reusing open_projectors would raise "no HDMI
+    projector monitor detected" and never open the multiview. The monitorIndex is DERIVED from a
+    live GetMonitorList (#840 derive-not-hardcode); an explicit --monitor-index overrides it.
+    Idempotent — obs-websocket has no "is a projector open" query, so re-opening on the same monitor
+    just re-positions/replaces the same projector window (harmless), which is what makes it safe to
+    call unconditionally after every restart (mirrors open_projectors' own always-open rationale)."""
+    ws = _conn(a.host, a.password)
+    try:
+        mons = _rpc(ws, "GetMonitorList").get("monitors", [])
+        mi = getattr(a, "monitor_index", -999)
+        override = None if mi == -999 else mi  # -999 is the "derive" sentinel
+        idx = _multiview_monitor_index(mons, override)
+        _rpc(ws, "OpenVideoMixProjector", {
+            "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW",
+            "monitorIndex": idx,
+        })
+        name = next((m.get("monitorName") for m in mons
+                     if m.get("monitorIndex") == idx), "?")
+        print(f"opened/confirmed Multiview projector on monitorIndex {idx} ({name}) "
+              f"[{a.host}, single-monitor]")
+    finally:
+        ws.close()
+
+
 def ensure_studio_mode_on(a):
     """#767 preflight — Studio Mode must be ON on EVERY broadcast box, imag included (user hard
     rule, 2026-07-15: without Studio Mode the multiview's Preview cell is DEAD — "studio mode je
@@ -2325,13 +2423,19 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
-        "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
+        "stream-status", "latency-check", "open-projectors", "open-multiview",
+        "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
-        "republish-black-check",
+        "republish-black-check", "idle-receiver",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
+        if name == "open-multiview":
+            # #1098: single-monitor box (strih) — the fullscreen Multiview projector's monitorIndex
+            # is DERIVED from GetMonitorList (#840) by default; -999 is the "derive" sentinel, an
+            # explicit index (incl. -1 for a windowed projector) overrides it.
+            p.add_argument("--monitor-index", type=int, default=-999)
         if name == "republish-black-check":
             # #1006: the DIFFERENTIAL republish-black probe. --reference is the upstream NDI input
             # carrying the real content (e.g. `cg`); --subject is the Spout republish of it (e.g.
@@ -2434,6 +2538,12 @@ def main():
             # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
             # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
             p.add_argument("--program-scene", required=True)
+        if name == "idle-receiver":
+            # #1086 keepalive-bypass PRIMITIVE (TEST TOOLING ONLY): --input is the strih NDI
+            # input to idle/restore. Omit --restore to idle (tear the receiver down cold + print
+            # PREV_NDI_NAME=...); pass --restore <ndi_name> to re-point it after the cold hold.
+            p.add_argument("--input", required=True)
+            p.add_argument("--restore", default="")
     # #406/#312 item5: `rig-busy-check` queries TWO hosts (strih + stream), not the single --host
     # every other subcommand takes above — its own parser, added separately.
     rbc = sub.add_parser("rig-busy-check")
@@ -2446,11 +2556,13 @@ def main():
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
      "stream-status": stream_status, "latency-check": latency_check,
      "open-projectors": open_projectors,
+     "open-multiview": open_multiview,
      "ensure-studio-mode-on": ensure_studio_mode_on,
      "program-rendered-input": program_rendered_input,
      "assert-program-nonblack": assert_program_nonblack,
      "mbc-input-check": mbc_input_check,
-     "republish-black-check": republish_black_check}[a.cmd](a)
+     "republish-black-check": republish_black_check,
+     "idle-receiver": idle_receiver}[a.cmd](a)
 
 
 if __name__ == "__main__":

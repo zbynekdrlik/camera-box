@@ -36,6 +36,19 @@ STRIH = "10.77.9.202"
 STREAM = "10.77.9.204"
 DANTE_BOUND_US = 2000          # clock-offset-guard verdict bound
 AUDIO_BUF_BOUND_MS = 100       # #786 launch-gate bound (box standard 64/85)
+# issue-1108 dantesync NTP step-rate facet: how often dantesync STEPPED the clock in the last hour.
+# A step-storm on the strih NTP master jumps every box's genlock timecode -> per-source FIFO
+# underruns -> the QR/burn ball skipping fleet-wide. Grade tiers from the issue's measured data:
+NTP_STEP_HEALTHY_CEIL = 72     # steps/h; healthy ceiling (baseline was ~30-36/h) -> OK at or below
+NTP_STEP_STORM_BOUND = 120     # steps/h; mirrors dantesync's OWN step-storm boundary (dantesync
+                               # issue 91 / v1.8.45); the issue-1108 storm floor measured 129/h,
+                               # strih peaked 147-180/h -> FAIL at or above (WARN in the 73-119 band)
+# The Linux-node counter: count dantesync `[NTP] Stepped` events over the last hour, on the box (one
+# bounded line of output regardless of storm size). ONE source of truth -- used verbatim in the
+# check_cam + check_imag ssh commands AND pinned by a test that runs THIS exact awk against synthetic
+# journals (the awk analogue of the CADENCE_LIB shell kernel), so there is no second Python copy of
+# the match logic to drift. `\[NTP\]` matches the literal bracket; END always prints (0 on no match).
+NTP_STEP_COUNT_AWK = r'/\[NTP\] Stepped/{c++} END{print "ntp_steps_1h=" c+0}'
 AUDIT_RE = re.compile(r"^(\d+):(\d+):(\d+)\.(\d+): genlock-fifo audit '([^']+)': received=(\d+)")
 BUF_RE = re.compile(r"total audio buffering is now (\d+) milliseconds")
 # #794/#1089: the shared PURE cadence kernel (measure + classify), reused by shelling out so the
@@ -202,11 +215,75 @@ def box_verdict(problems: list[str]) -> str:
     return "WARN" if not hard else "FAIL"
 
 
+def parse_ntp_status(json_text: str | None) -> tuple[int | None, bool | None]:
+    """Pull (ntp_steps_last_hour, ntp_step_storm) from a dantesync :8898 status JSON body (the
+    Windows-node signal). Both fields are ADDITIVE (dantesync >= 1.8.45); a body that LACKS them
+    (older version -- the live reality on strih/stream today) OR an unparseable/empty/wrong-shape
+    body yields (None, None) -- UNKNOWN, never a false 0 and never a false alarm (issue-833 missing-
+    tool trap + the additive-JSON tolerance)."""
+    try:
+        d = json.loads(json_text or "")
+    except (ValueError, TypeError):
+        return None, None
+    if not isinstance(d, dict):
+        return None, None
+    raw_steps = d.get("ntp_steps_last_hour")
+    raw_storm = d.get("ntp_step_storm")
+    # a JSON bool is an int in Python -- reject it as a count (True must not read as 1 step).
+    steps = int(raw_steps) if isinstance(raw_steps, (int, float)) and not isinstance(raw_steps, bool) else None
+    storm = bool(raw_storm) if isinstance(raw_storm, bool) else None
+    return steps, storm
+
+
+def grade_ntp_steprate(steps: int | None, storm: bool | None = None) -> tuple[str, str, list[str]]:
+    """Grade a node's dantesync NTP step-rate for the issue-787 status page (issue-1108 observability).
+    Returns (verdict, display, problems), verdict in OK|WARN|FAIL|UNKNOWN:
+      * steps >= NTP_STEP_STORM_BOUND -> FAIL, mirroring dantesync's own 120/h step-storm boundary
+        (issue-1108 storm floor 129/h); the problem cites the count that crossed the bound.
+      * an explicit storm flag (Windows :8898 >= 1.8.45) with a count UNDER the bound -> FAIL too, but
+        the problem names the dantesync FLAG as the authoritative trigger (never a misleading
+        `(>=120/h)` on a sub-120 count -- issue-1108 review).
+      * NTP_STEP_HEALTHY_CEIL < steps < NTP_STEP_STORM_BOUND -> WARN (elevated, not yet a storm).
+      * steps <= NTP_STEP_HEALTHY_CEIL -> OK (baseline ~30-36/h, healthy ceiling ~72/h).
+      * steps is None (unreadable journal / absent additive field) -> UNKNOWN, surfaced BY NAME
+        (`n/a`), never a false 0 or a false alarm.
+    The returned VERDICT is the per-FACET classification -- distinct from box_verdict()'s per-NODE
+    aggregate (which folds ALL of a node's problems). The production wiring drives the node color off
+    `problems` via box_verdict, but the facet verdict is the tested contract of the grading itself and
+    the natural signal for a future dedicated step-rate column / dev1 alert-watchdog (mirroring how
+    cadence_verdict returns a verdict cadence_check consumes). `problems` uses the feeder's soft/hard
+    convention -- a `warn:`-prefixed entry folds to WARN, a bare entry to FAIL."""
+    if steps is not None and steps >= NTP_STEP_STORM_BOUND:
+        return "FAIL", f"{steps}/h", [f"ntp-step-storm={steps}/h(>={NTP_STEP_STORM_BOUND}/h)"]
+    if storm is True:
+        shown = f"{steps}/h" if steps is not None else "flag"
+        return "FAIL", shown, ["ntp-step-storm=dantesync-flag"]
+    if steps is None:
+        return "UNKNOWN", "n/a", []
+    if steps > NTP_STEP_HEALTHY_CEIL:
+        return "WARN", f"{steps}/h", [f"warn:ntp-step-rate={steps}/h(>{NTP_STEP_HEALTHY_CEIL})"]
+    return "OK", f"{steps}/h", []
+
+
+def http_get(url: str, timeout: int = 6) -> str | None:
+    """Read-only HTTP GET FROM dev1 (the audit's box), used for the Windows dantesync :8898 status
+    JSON. Returns the body text, or None on ANY error (unreachable / timeout / non-200) -- the caller
+    treats None as UNKNOWN, never a crash."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"    (http {url}: {type(e).__name__}: {e})", file=sys.stderr)
+        return None
+
+
 def check_cam(name: str, ip: str) -> None:
     out = ssh(ip, "systemctl is-active camera-box; "
                   "journalctl -u camera-box -n 120 --no-pager | grep -E 'Streaming:|capture chroma' | tail -4; "
                   "journalctl -u dantesync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
                   "awk '$2==\"/\"{print $4}' /proc/mounts | cut -d, -f1; "
+                  "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
                   "cut -d' ' -f1 /proc/loadavg")
     if out is None:
         emit("FAIL", name, "unreachable over ssh")
@@ -239,9 +316,15 @@ def check_cam(name: str, ip: str) -> None:
         problems.append(f"dante={off_us}us")
     if ro != "ro":
         problems.append("root=rw")
+    # issue-1108 dantesync NTP step-rate facet. Same-journal proxy for a read failure: an unreadable
+    # dantesync journal also nulls the offset above, so off_us is None -> UNKNOWN, never a false 0.
+    steps_m = re.search(r"ntp_steps_1h=(\d+)", out)
+    ntp_steps = int(steps_m.group(1)) if (steps_m and off_us is not None) else None
+    _, steprate_disp, steprate_problems = grade_ntp_steprate(ntp_steps)
+    problems += steprate_problems
     verdict = box_verdict(problems)
-    detail = (f"svc={svc} fps={fps_s} chroma={chroma} dante={off_us:+d}us root={ro} load={load}"
-              if off_us is not None else f"svc={svc} fps={fps_s} chroma={chroma} dante=? root={ro} load={load}")
+    detail = (f"svc={svc} fps={fps_s} chroma={chroma} dante={off_us:+d}us root={ro} load={load} steprate={steprate_disp}"
+              if off_us is not None else f"svc={svc} fps={fps_s} chroma={chroma} dante=? root={ro} load={load} steprate={steprate_disp}")
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
     emit(verdict, name, detail)
@@ -253,6 +336,7 @@ def check_imag() -> None:
                     "grep -o isolcpus /proc/cmdline || echo cmdline-clean; "
                     "journalctl -u dantesync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
                     "cut -d' ' -f1 /proc/loadavg; "
+                    "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
                     "tail -400 \"$(ls -t ~/.config/obs-studio/logs/*.txt | head -1)\" | grep 'genlock-fifo audit'",
               user="newlevel", timeout=25)
     if out is None:
@@ -290,8 +374,14 @@ def check_imag() -> None:
         problems.append("arrivals-low:" + ",".join(low))
     if len(cam_rates) < 7:
         problems.append(f"cam-arrivals-seen={len(cam_rates)}/7")
+    # issue-1108 dantesync NTP step-rate facet (same-journal off_us proxy for a read failure).
+    steps_m = re.search(r"ntp_steps_1h=(\d+)", out)
+    ntp_steps = int(steps_m.group(1)) if (steps_m and off_us is not None) else None
+    _, steprate_disp, steprate_problems = grade_ntp_steprate(ntp_steps)
+    problems += steprate_problems
     verdict = box_verdict(problems)
-    detail = f"render={render} arrivals[{fmt_rates(rates)}] isolcpus=none dante={off_us:+d}us" if off_us is not None else f"render={render} arrivals[{fmt_rates(rates)}]"
+    detail = (f"render={render} arrivals[{fmt_rates(rates)}] isolcpus=none dante={off_us:+d}us steprate={steprate_disp}"
+              if off_us is not None else f"render={render} arrivals[{fmt_rates(rates)}] steprate={steprate_disp}")
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
     emit(verdict, "imag", detail)
@@ -359,8 +449,15 @@ def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: 
         cad_display, cad_problems = cadence_check(log)
         problems += cad_problems
         cad = " cadence[" + ",".join(f"{s}={v}" for s, v in sorted(cad_display.items())) + "]"
+    # issue-1108 dantesync NTP step-rate facet -- read the ADDITIVE ntp_steps_last_hour/ntp_step_storm
+    # from the box's dantesync :8898 status JSON (dev1-side HTTP read). Absent fields (dantesync <
+    # 1.8.45, the live reality on strih/stream today) or an unreachable port -> UNKNOWN (`n/a`), never
+    # a false alarm.
+    w_steps, w_storm = parse_ntp_status(http_get(f"http://{ip}:8898/"))
+    _, steprate_disp, steprate_problems = grade_ntp_steprate(w_steps, w_storm)
+    problems += steprate_problems
     verdict = box_verdict(problems)
-    detail = f"obs64={obs_count} render={render} audio_buf={buf_peak}ms arrivals[{fmt_rates(rates)}]{cad}{lat}"
+    detail = f"obs64={obs_count} render={render} audio_buf={buf_peak}ms arrivals[{fmt_rates(rates)}]{cad} steprate={steprate_disp}{lat}"
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
     emit(verdict, name, detail)

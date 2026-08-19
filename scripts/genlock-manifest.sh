@@ -75,7 +75,7 @@ pinned_subtree_version() {
 }
 
 # pinned_subtree_commit README PREFIX -> the `commit` hash on PREFIX's subtree table row
-# (e.g. "fb4d98bf8"). The README row is `… (commit `<hash>`) …`; the back-ticked token after the
+# (e.g. "7546be726"). The README row is `… (commit `<hash>`) …`; the back-ticked token after the
 # word "commit" is the vendored subtree's upstream import commit.
 pinned_subtree_commit() {
   local readme="$1" prefix="$2"

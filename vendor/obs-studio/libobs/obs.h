@@ -1034,6 +1034,13 @@ EXPORT void obs_display_set_background_color(obs_display_t *display, uint32_t co
 EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor);
 
 /*
+ * camera-box #1107: mark a display's present as vsync'd (tear-free scanout). Set true ONLY for
+ * the fullscreen program projector; every other display stays interval-0 (no added blocking
+ * present). No-op on non-EGL backends (D3D11/Metal).
+ */
+EXPORT void obs_display_set_vsync(obs_display_t *display, bool vsync);
+
+/*
  * camera-box #879: aux NDI sender budget gate. Returns true iff a throttleable aux
  * monitoring sender (an ndi_filter republish -- interkom / MULTIVIEW / Grading on strih,
  * render_divisor > 1) should SKIP its render + send this tick because its measured cost
@@ -2688,6 +2695,10 @@ EXPORT void obs_source_frame_copy(struct obs_source_frame *dst, const struct obs
 /* ------------------------------------------------------------------------- */
 /* Get source icon type */
 EXPORT enum obs_icon_type obs_source_get_icon_type(const char *id);
+
+/* Get dark and light versions of custom icons */
+EXPORT const char *obs_source_get_dark_icon(const char *id);
+EXPORT const char *obs_source_get_light_icon(const char *id);
 
 /* ------------------------------------------------------------------------- */
 /* Canvases */

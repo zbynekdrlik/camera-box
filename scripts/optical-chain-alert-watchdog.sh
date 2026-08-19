@@ -38,6 +38,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-watchdog-decision.sh"
 # shellcheck source=scripts/lib/optical-chain-health.sh
 . "$HERE/lib/optical-chain-health.sh"
+# #1117: the "a live gate/TEST harness is coordinating the rig THIS pass" signal -- the SAME fresh
+# #281 rig-active heartbeat recording-e2e.sh / rig-mode.sh maintain, reused exactly as
+# obs-burn-reconcile-watchdog.sh (#1060) already reuses it. recording-e2e.sh `systemctl stop
+# cam2-painter` BY DESIGN during a run, so a would-be PAINTER-DEAD/OPTICAL-BLACK verdict is
+# expected-by-design this window -> log only, never a page. No second busy-detector.
+# shellcheck source=scripts/lib/rig-heartbeat.sh
+. "$HERE/lib/rig-heartbeat.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -126,15 +133,30 @@ main() {
     return 0
   fi
 
-  local painter_expected painter_alive optical verdict
+  local painter_expected painter_alive optical rig_busy verdict
   painter_expected="$(optical_chain_painter_expected_from_snapshot "$SNAPSHOT")"
   painter_alive="$(optical_chain_painter_alive_from_snapshot "$SNAPSHOT")"
   optical="$(optical_chain_classify_nonblack_probe "$OPTICAL_RC" "$OPTICAL_OUT")"
-  verdict="$(optical_chain_alert_condition "$painter_expected" "$painter_alive" "$optical")"
-  log "painter_expected=$painter_expected painter_alive=$painter_alive optical=$optical -> verdict=$verdict"
+  # #1117: is a live gate/TEST harness holding the rig RIGHT NOW? A FRESH #281 rig-active heartbeat
+  # (dev1-side, no ssh) means recording-e2e.sh / rig-mode.sh is coordinating the rig -- the standing
+  # cam2-painter.service is stopped BY DESIGN and the program is rerouted, so a would-be alert is
+  # expected-by-design this window (fix 1). Reused verbatim from obs-burn-reconcile-watchdog.sh.
+  if rig_heartbeat_active; then rig_busy=1; else rig_busy=0; fi
+  verdict="$(optical_chain_alert_condition "$painter_expected" "$painter_alive" "$optical" "$rig_busy")"
+  log "painter_expected=$painter_expected painter_alive=$painter_alive optical=$optical rig_busy=$rig_busy -> verdict=$verdict"
 
   case "$verdict" in
-    alert:*) : ;;   # an incident this pass -- confirm across passes below before paging
+    alert:*) : ;;   # a genuine incident this pass -- confirm across passes below before paging
+    log-only:*)
+      # #1117: a would-be alert DOWNGRADED to log-only -- either an E2E window (painter stopped by
+      # design / program rerouted, rig_busy=1) or a proven-OK optical outcome (optical=OK veto).
+      # NOT a page; record WHY, then treat it like a healthy/skip pass (clear the confirm/throttle
+      # so a genuine later incident outside the run still pages fresh after the threshold).
+      log "optical-chain would-be alert SUPPRESSED as expected-by-design this pass ($verdict) -- log only, not paging"
+      clear_throttle
+      log "pass end"
+      return 0
+      ;;
     *)
       # skip (EVENT mode / not-expected), healthy, or healthy-unverified -- no incident.
       log "no optical-chain incident this pass ($verdict)"
@@ -173,11 +195,16 @@ main() {
   write_state_field alert_sig "$new_sig"
   write_state_field alert_passes "$new_passes"
 
+  # #1117: owner-facing PAGE text -> plain Slovak, outcome-first, with explicit ownership. Both
+  # conditions are agent-recoverable (Claude re-runs rig-mode test), so the owner is told Claude
+  # rieši it -- they must never wonder "co mam akoze ja s tym robit". Internal log lines above stay
+  # English. A page reaches here ONLY for a genuine incident (dead painter with a dark/unverified
+  # monitor OUTSIDE a run, or a real BLACK program) -- the E2E-window / optical-OK cases never page.
   case "$verdict" in
     alert:PAINTER-DEAD)
-      detail="cam2 painter DEAD while a painter is expected (pidfile present or ${PAINTER_SERVICE} enabled, but neither alive) — cam2 monitor is dark, the cam2→cam1 optical leg cannot be read. Restore: scripts/rig-mode.sh test" ;;
+      detail="cam2 painter je mŕtvy a monitor cam2 je tmavý — kamera cam1 nemá čo snímať, optická vetva cam2→cam1 je mimo. Rieši Claude automaticky (reštart painteru cez rig-mode test), ty nemusíš nič robiť" ;;
     alert:OPTICAL-BLACK)
-      detail="cam2 painter process ALIVE but strih program renders BLACK (issue 901/754 class — process-alive is not QR-on-screen). Check the monitor / painter output; scripts/rig-mode.sh test re-verifies non-black" ;;
+      detail="cam2 painter beží, ale obraz na strihu je ČIERNY (proces žije ≠ QR na obrazovke) — optická vetva cam2→cam1 je mimo. Rieši Claude automaticky (rig-mode test znovu overí ne-čierny obraz), ty nemusíš nič robiť" ;;
     *) detail="$verdict" ;;
   esac
 
@@ -190,7 +217,7 @@ main() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for optical-chain incident"
     python3 "$NOTIFY" notify --body \
-      "🚨 #860 optical-chain: ${detail} (${REPO_SLUG})." \
+      "🚨 optická vetva cam2 (${REPO_SLUG}): ${detail}." \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

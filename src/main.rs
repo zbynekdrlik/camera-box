@@ -1056,7 +1056,7 @@ async fn run_capture_loop(
 
                 if out_interval_ns > 0 {
                     // (#889) dupe-preferring decimation: pacing still decides WHEN a captured
-                    // frame must be shed (`ndi::genlock_emit_gate`, unchanged); the content hash
+                    // frame must be shed (`genlock_pacing::genlock_emit_gate`, unchanged); the content hash
                     // now decides WHICH captured frame is the victim — prefer shedding a
                     // grabber-repeat dupe over the unique tick captured right next to it. See
                     // `dupe_decimation`'s module doc for the full root-cause -> fix writeup.
@@ -1074,8 +1074,8 @@ async fn run_capture_loop(
                     // can leap the gate's boundary past one or more intervals that are then
                     // NEVER emitted — the missing direct evidence for whether a clock step is
                     // what's behind a #666/#707-class transient emit-rate deficit. See
-                    // `ndi::boundary_skip_count`'s own doc comment.
-                    let skipped = camera_box::ndi::boundary_skip_count(
+                    // `genlock_pacing::boundary_skip_count`'s own doc comment.
+                    let skipped = camera_box::genlock_pacing::boundary_skip_count(
                         prev_boundary_ns,
                         next_boundary_ns,
                         out_interval_ns,
@@ -1321,11 +1321,15 @@ async fn run_capture_loop(
                             // window (never suppressed on 0/0 — a healthy card legitimately
                             // shows 0/0, which is the self-neutralizing behavior by design, not
                             // the mechanism being off).
-                            let (dupe_shed, blind_shed) = decimation_gate.take_shed_counts();
+                            let (dupe_shed, blind_shed, dupe_emitted) =
+                                decimation_gate.take_shed_counts();
                             tracing::info!(
                                 "{}",
                                 camera_box::dupe_decimation::dupe_shed_summary(
-                                    dupe_shed, blind_shed, 5
+                                    dupe_shed,
+                                    blind_shed,
+                                    dupe_emitted,
+                                    5
                                 )
                             );
 

@@ -1240,7 +1240,7 @@ ntp_deadband_us_from_pipe_json() {
 # dantesync-gate.sh's grade_http_node for the GATE_NTP_MASTER_NAME/"median-only" node; a client
 # row's own bound is never touched regardless of what its payload happens to contain.
 ntp_master_effective_bound_us() {
-  local status="$1" bound="$2" margin="$3" deadband floor
+  local status="$1" bound="$2" margin="$3" step_cap="${4:-0}" deadband floor step_cap_floor
   if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
     printf '%s' "$bound"
     return 0
@@ -1268,11 +1268,64 @@ ntp_master_effective_bound_us() {
   # handle a sign) -- a leading zero always means decimal to a human reading a CLI flag/JSON
   # number, never octal.
   floor=$((10#$deadband + 10#$margin))
+  # #1119: dantesync v1.8.46 reports ntp_deadband_us as the no-step THRESHOLD (live: 1000us), NOT
+  # the <=2500us bounded PER-STEP cap the master's own UTC offset actually sawtooths toward under a
+  # slow grandmaster (root-caused 2026-08-18). deadband(1000)+margin(1000)=2000 gives NO widening,
+  # so a healthy sawtooth median (live failed run: 2699us) false-DRIFTs the bare 2000us bound. When
+  # STEP_CAP_US is a valid positive int, the floor ALSO includes step_cap + margin (2500+1000=3500),
+  # grading the master's median against the step-cap ceiling instead of the too-small deadband
+  # floor. Gated on the numeric deadband already validated above (the dantesync-#84+ bounded-step
+  # regime marker): a pre-#84 master (no field) returned before here and keeps the bare bound,
+  # preserving #1021's backward-compat tests -- and the step-cap term only ever bites when the
+  # reported deadband is SMALLER than the step-cap (exactly the v1.8.46 regime). "0"/absent/
+  # non-numeric STEP_CAP_US (every pre-#1119 3-arg caller) skips the term entirely, so the result
+  # stays byte-for-byte the pre-#1119 deadband-only floor. Same #595 validate-before-arithmetic
+  # + `10#` octal-safety discipline as the deadband/margin above.
+  if printf '%s' "$step_cap" | grep -qE '^[0-9]+$' && [ "$step_cap" -gt 0 ]; then
+    step_cap_floor=$((10#$step_cap + 10#$margin))
+    [ "$step_cap_floor" -gt "$floor" ] && floor="$step_cap_floor"
+  fi
   if [ "$floor" -gt "$bound" ]; then
     printf '%s' "$floor"
   else
     printf '%s' "$bound"
   fi
+}
+
+# ntp_steps_last_hour_from_pipe_json TEXT -> the RAW text of the "ntp_steps_last_hour" JSON value
+# (#1119): a plain non-negative integer string, the literal "null" (a client node, which never
+# acts as NTP master), or "" if the field is absent (a pre-storm-field dantesync payload). Mirrors
+# ntp_deadband_us_from_pipe_json's raw-accessor shape -- used ONLY for the operator-facing storm
+# line, never for a numeric decision, so it stays unparsed.
+ntp_steps_last_hour_from_pipe_json() {
+  printf '%s\n' "$1" \
+    | grep -oE '"ntp_steps_last_hour"[[:space:]]*:[[:space:]]*(null|-?[0-9]+)' \
+    | sed -n 's/.*:[[:space:]]*\(null\|-\{0,1\}[0-9][0-9]*\).*/\1/p' \
+    | tail -1 || true
+}
+
+# ntp_master_step_storm_verdict STATUS_JSON -> "storm" | "ok" | "unknown" (#1119). The NTP master's
+# own UTC offset is a by-design bounded-step sawtooth under a slow grandmaster (graded via the
+# step-cap-widened median above), so the raw median alone can no longer distinguish a HEALTHY
+# sawtooth from a THRASHING master whose median happens to land in-band. dantesync's own
+# "ntp_step_storm" boolean -- true once it crosses its 120-steps/hour alarm -- IS that honest
+# pathology signal, single-sourced from the daemon rather than re-derived gate-side:
+#   * "true"           -> "storm" (a hard master failure regardless of median; the caller fails it)
+#   * "false"          -> "ok"
+#   * null / absent    -> "unknown" (a pre-storm-field payload, or a client node that never carries
+#                         the field) -> NEVER a fail; report-first, exactly like #834's GM UNKNOWN.
+# A malformed value that is neither true nor false is also "unknown" (test-strictness: never grade a
+# signal we could not read as an affirmative storm).
+ntp_master_step_storm_verdict() {
+  local storm
+  storm="$(printf '%s' "$1" \
+    | grep -oE '"ntp_step_storm"[[:space:]]*:[[:space:]]*(true|false|null)' \
+    | sed -n 's/.*:[[:space:]]*\(true\|false\|null\).*/\1/p' | tail -1 || true)"
+  case "$storm" in
+    true) printf 'storm' ;;
+    false) printf 'ok' ;;
+    *) printf 'unknown' ;;
+  esac
 }
 
 # --- CLIENT-row deadband step-chase widening (#1022) ------------------------------------------
@@ -1402,6 +1455,78 @@ client_chase_bound_us() {
     printf '%s' "$floor"
   else
     printf '%s' "$bound"
+  fi
+}
+
+# --- CLIENT-row step-aware STABILITY (spread) widening (#1123) --------------------------------
+#
+# #1022/#1041 (client_chase_bound_us, above) made a CLIENT row's MEDIAN bound step-aware, but the
+# STABILITY (spread) bound stayed fixed at GATE_STABILITY_US. A client chases the master's by-design
+# UTC sawtooth with its OWN bounded steps; when a step lands mid-sample-window the samples straddle
+# it, so the SPREAD ~= the client's step MAGNITUDE (live cam1 2026-08-19: 2938us, == its own
+# "[NTP] Stepped +2938us"), which false-reads as #836 scatter against the fixed 2000us stability
+# even though every sample is inside the (widened) median bound.
+#
+# The honest bound on a step-straddle SPREAD is the client's OWN journal step envelope. Unlike the
+# MEDIAN widening -- which reads the tail-1 (freshest) adaptive threshold because the median is a
+# point estimate of the CURRENT offset -- the SPREAD is a WINDOW-WIDE range, so it references the
+# WINDOW-WIDE MAX of the client's own adaptive tolerance: client_max_step_threshold_us_from_journal
+# (below) parses EVERY "threshold:NNNus" match and returns the LARGEST, i.e. the biggest offset its
+# own daemon tolerated before stepping anywhere in the read window. A spread within that envelope is
+# the client operating inside its own adaptive tolerance; a spread FAR beyond it (with no
+# correspondingly-large threshold in its journal) is genuine scatter and still fails. A genuine
+# gross desync fails on the MEDIAN (drift), never reaching this spread question.
+
+# client_max_step_threshold_us_from_journal TEXT -> the LARGEST "threshold:[0-9]+us" value anywhere
+# in TEXT ("" if none). The window-MAX sibling of client_step_threshold_us_from_journal's tail-1:
+# same literal shapes (controller.rs "(threshold:520us, adaptive)" / "step candidate ...
+# (threshold:665us)"), but `sort -n | tail -1` for the max instead of the freshest. `|| true`
+# survives a no-match under set -e.
+client_max_step_threshold_us_from_journal() {
+  printf '%s\n' "$1" \
+    | grep -oE 'threshold:[0-9]+us' \
+    | sed -n 's/.*threshold:\([0-9][0-9]*\)us/\1/p' \
+    | sort -n | tail -1 || true
+}
+
+# client_chase_stability_us STABILITY_US MARGIN_US CLIENT_JOURNAL [STEP_FALLBACK_US] -> the spread
+# bound to grade a CLIENT node's SPREAD against (#1123): max(STABILITY_US, max_journal_threshold +
+# MARGIN_US), where max_journal_threshold is client_max_step_threshold_us_from_journal(CLIENT_JOURNAL),
+# falling back to STEP_FALLBACK_US (default "0", so an OMITTED fallback reproduces the exact pre-#1123
+# fixed bound -- byte-for-byte for every unreachable/no-threshold client) when the journal is empty or
+# carries no threshold. NEVER LOWER than STABILITY_US (a widening FLOOR, never a ceiling override). A
+# malformed STABILITY_US/MARGIN_US (validated with `grep -qE '^[0-9]+$'` BEFORE any arithmetic -- the
+# #595 discipline) falls back to the UNMODIFIED STABILITY_US. Mirrors client_chase_bound_us's own
+# shape/fallbacks; deliberately takes NO master status -- the client's own step envelope already
+# reflects the full offset it chases (the master's excursion is baked into the client's own adaptive
+# threshold), so no separate master-deadband term is needed for the spread.
+client_chase_stability_us() {
+  local stability="$1" margin="$2" client_journal="${3:-}" step_fallback="${4:-0}"
+  local max_threshold step floor
+  if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+    printf '%s' "$stability"
+    return 0
+  fi
+  if ! printf '%s' "$margin" | grep -qE '^[0-9]+$'; then
+    printf '%s' "$stability"
+    return 0
+  fi
+  max_threshold="$(client_max_step_threshold_us_from_journal "$client_journal")"
+  step="$max_threshold"
+  if [ -z "$step" ] || ! printf '%s' "$step" | grep -qE '^[0-9]+$'; then
+    if printf '%s' "$step_fallback" | grep -qE '^[0-9]+$'; then
+      step="$step_fallback"
+    else
+      step=0
+    fi
+  fi
+  # #595/#1022 octal-safety: `10#` forces base-10 on both operands (both proven `^[0-9]+$`
+  # non-negative above) before the ONE arithmetic expression.
+  floor=$((10#$step + 10#$margin))
+  if [ "$floor" -gt "$stability" ]; then
+    printf '%s' "$floor"
+  else
+    printf '%s' "$stability"
   fi
 }
 

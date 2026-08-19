@@ -2,6 +2,16 @@
 paths:
   - "vendor/obs-studio/libobs/obs-source.c"
   - "vendor/obs-studio/libobs/obs-internal.h"
+  - "vendor/obs-studio/libobs/obs-display.c"
+  - "vendor/obs-studio/libobs/graphics/graphics.c"
+  - "vendor/obs-studio/libobs/graphics/graphics-internal.h"
+  - "vendor/obs-studio/libobs/graphics/graphics-imports.c"
+  - "vendor/obs-studio/libobs-opengl/gl-x11-egl.c"
+  - "vendor/obs-studio/libobs-opengl/gl-wayland-egl.c"
+  - "vendor/obs-studio/libobs-opengl/gl-subsystem.h"
+  - "vendor/obs-studio/libobs-opengl/gl-subsystem.c"
+  - "vendor/obs-studio/frontend/widgets/OBSProjector.cpp"
+  - "tests/gl_egl_present_vsync_1107.rs"
   - "tests/genlock_release_cadence.rs"
   - "tests/genlock_relock_selection_parity.rs"
   - "vendor/obs-studio/libobs/obs.c"
@@ -373,3 +383,55 @@ needs two non-obvious facts about the DistroAV `ndi_filter` (interkom / MULTIVIE
   the previous async buffer); three aux senders going silent/renegotiating at once churns the shared
   per-process NDI transmit/connection threads and can block the program's next async send. Not
   fixable/confirmable from the vendored source; confirming it needs a live rig repro (a rig write).
+
+## Adding a per-display / per-present GL behavior WITHOUT touching the D3D11 (Windows) path (#1107)
+
+imag-nb runs the ONLY Linux OBS (EGL/X11); strih+stream are libobs-d3d11. A change to the GL
+winsys present (`gl-x11-egl.c` / `gl-wayland-egl.c`) is byte-identical for strih/stream by
+construction — but a NEW per-present/per-display PROPERTY that must plumb from the frontend down to
+the GL present can still force a cross-backend vtable touch. The pattern that keeps D3D11
+byte-identical (used for #1107's tear-free vsync — vsync the fullscreen program projector only):
+
+- Store the property on the GL `struct gs_device` (gl-subsystem.h), defaulting the SAFE/old value:
+  `device_create` uses `bzalloc`, so a `bool` starts false = old behavior. Read it in the EGL
+  present (`eglSwapInterval(edisplay, device->present_vsync ? 1 : 0)`) — x11 AND the wayland twin.
+- Expose a setter as a NEW backend export `device_present_set_vsync` in gl-subsystem.c (default
+  visibility, like `device_create`). Add it to the `gs_exports` vtable (graphics-internal.h) but
+  import it with **`GRAPHICS_IMPORT_OPTIONAL`** (graphics-imports.c), NOT `GRAPHICS_IMPORT`.
+  OPTIONAL = a bare `os_dlsym` with no failure flag, so libobs-d3d11/metal — which never define the
+  symbol — leave the pointer NULL; a mandatory `GRAPHICS_IMPORT` sets `success=false` and BREAKS
+  their module load. This is the whole trick: the Windows D3D path is untouched and cannot even see
+  the feature. The public `gs_present_vsync(bool)` wrapper (graphics.c/.h) NULL-guards the optional
+  export, so it is a no-op on D3D11.
+- libobs side: a `bool` on `struct obs_display` + `obs_display_set_vsync()` (obs-display.c/obs.h);
+  `render_display()` arms it each tick IMMEDIATELY before `gs_present()`. A DEVICE-level present
+  flag re-armed per-display each tick is correct BECAUSE render_display runs sequentially on the ONE
+  graphics thread. Do NOT put it on the swapchain / `gl_windowinfo` (winsys-private, and the wayland
+  windowinfo is bmalloc'd → no safe zero default).
+
+**Identifying "the program projector" — `render_divisor` is NOT the discriminator.** imag's OBS
+display list has THREE displays: the OBS main window + preview (render_divisor 0, on eDP-1,
+occluded but STILL rendered+presented — no compositor), the Multiview projector (render_divisor 2,
+eDP-1), and the Program projector (render_divisor 0, HDMI-1). So `render_divisor <= 1` matches BOTH
+the main window AND the program — vsyncing both stacks two DIFFERENT-monitor blocking presents per
+tick and can drop the genlock 60fps. The program is identified in the FRONTEND (`OBSProjector.cpp`)
+by `savedMonitor > -1 && !isMultiview` (fullscreen, non-multiview), mirroring the #276
+`isMultiview → obs_display_set_render_divisor` mark. `savedMonitor` (a member set by `SetMonitor()`
+in the ctor synchronously, BEFORE the async DisplayCreated lambda) is the fullscreen signal; re-arm
+it on the runtime `OpenFullScreenProjector`/`OpenWindowedProjector` toggles too (the DisplayCreated
+mark runs only ONCE — the #1107 review 🟡).
+
+**Two live pre-deploy checks for any imag EGL vsync change:** (1) confirm imag's OBS launch env has
+NO `vblank_mode`/MESA/driconf clamp (a `vblank_mode=0` FORCES interval 0 and silently defeats
+`eglSwapInterval(1)`) — imag currently launches plain `obs --disable-shutdown-check`, clean. (2) A
+blocking vsync present on the program couples the genlock render thread to the panel clock
+(video_sleep→genlock_next_deadline targets ABSOLUTE DanteSync boundaries; a late arrival →
+`count>=2` → a duplicate encode frame) — keep it to ONE present (program only) and rig-verify render
+stays 60.00fps / 0 renderSkip / 0 lagged_frames growth; fallback is a +50–100 ppm-fast HDMI-1
+modeline.
+
+**Testing + deploy:** a `tests/*.rs` text-anchor guard (pure std, the #756 gl-x11-egl precedent,
+run via the #1026 standalone-rustc recipe) goes RED if the patch regresses — the vendored C
+compiles only on `linux-genlock.yml`, and this change spans the FRONTEND (obs binary) too, so the
+imag deploy is FULL-BUNDLE (frontend + libobs + libobs-opengl.so via setup-imag.sh), never a
+libobs-opengl-only hot-swap.

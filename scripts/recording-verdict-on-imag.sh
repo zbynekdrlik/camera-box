@@ -49,15 +49,62 @@ set -euo pipefail
 # decode progress is visible (the agent's liveness signal) in the ssh output. Pure-string function
 # so a unit test can source the script and assert the command is well-formed (imag-local paths
 # only, %q-quoted — no dev1 path, no unescaped argument) WITHOUT touching the network.
+# onimag_decode_core_range <ncpus> — issue 1094. Pure/testable (no nproc, no network): echo the
+# batch-decode CPU-pin range "LO-HI" for a box with <ncpus> online CPUs — the top min(4,ncpus)
+# cores (the E-cores on Intel hybrid: 8-11 on the i5-13420H's 12 threads, and 12-15 on the retired
+# 16-thread box, reproducing #767's original pin there), always OFF the lower-numbered P-cores OBS
+# is pinned to. A non-numeric / absent / zero count echoes EMPTY, telling the caller to run the
+# decode UNPINNED rather than emit a broken taskset (fail-open — see build_onimag_command).
+onimag_decode_core_range() {
+  local n="${1:-}" lo
+  case "$n" in ''|*[!0-9]*) echo ""; return 0 ;; esac
+  [ "$n" -ge 1 ] 2>/dev/null || { echo ""; return 0; }
+  # force base-10: an all-digit token with a leading zero (e.g. 08/09) is octal to $(( )) and 08/09
+  # are invalid octal digits -> an arithmetic error that (under the caller's set -e) would abort the
+  # extract, defeating the fail-open contract. nproc never emits one, but a leading zero must stay
+  # harmless. `[ -ge ]` above already compares in base-10, so this also removes that inconsistency.
+  lo=$(( 10#$n > 4 ? 10#$n - 4 : 0 ))
+  echo "${lo}-$(( 10#$n - 1 ))"
+}
+
+# onimag_upload_decision <force> <present> <local_sha> <remote_sha> — issue 1118.
+# Pure/testable (no network): echo "upload" or "skip" for STEP 1's binary deploy. main() runs the
+# actual sha256 probes and feeds them here. The VERSION GATE: an already-present binary whose sha256
+# DIFFERS from the local one must be re-uploaded — a schema bump (e.g. #1112's RecordingPartial
+# v3->v4) leaves a stale on-imag binary emitting the OLD schema, whose partial the fresh dev1 merge
+# rejected and (pre-1118) killed the WHOLE verdict.
+#   force=1                               -> upload  (--force-upload always wins)
+#   present!=1 (absent / not executable)  -> upload  (unchanged pre-1118 behaviour)
+#   present=1 but local_sha empty         -> upload  (can't verify identity -> fail-safe, never skip blind)
+#   present=1 and local_sha != remote_sha -> upload  (VERSION GATE: stale emitter after a schema bump)
+#   present=1 and local_sha == remote_sha (non-empty) -> skip (fast idempotent path preserved)
+onimag_upload_decision() {
+  local force="${1:-0}" present="${2:-0}" local_sha="${3:-}" remote_sha="${4:-}"
+  [ "$force" = "1" ] && { echo "upload"; return 0; }
+  [ "$present" = "1" ] || { echo "upload"; return 0; }
+  [ -n "$local_sha" ] || { echo "upload"; return 0; }
+  [ "$local_sha" = "$remote_sha" ] && { echo "skip"; return 0; }
+  echo "upload"
+}
+
 build_onimag_command() {
-  local exe="$1"; shift
-  # #767: the decode is a BATCH job on a box running PRODUCTION OBS — with the keep-alive build
-  # all 16 NDI receivers decode continuously (~4 cores), and an unthrottled decode (313% CPU +
-  # ffmpeg child) drove load to 27 → starved NDI threads → user-visible stutter on the
-  # projection while the compositor still reported 60fps (live, 2026-07-15). nice 19 + pinned
-  # to cores 12-15, fully OFF the cores OBS is pinned to (taskset -c 2-11 at launch). The
-  # ffmpeg child inherits both. Decode takes longer on 4 E-cores — irrelevant for a batch job.
-  printf 'nice -n 19 taskset -c 12-15 env RUST_LOG=info %q' "$exe"
+  local exe="$1" core_range="${2:-}"; shift 2
+  # #767: the decode is a BATCH job on a box running PRODUCTION OBS — with the keep-alive build all
+  # NDI receivers decode continuously, and an unthrottled decode (313% CPU + ffmpeg child) once
+  # drove load to 27 → starved NDI threads → user-visible stutter on the projection while the
+  # compositor still reported 60fps (live, 2026-07-15). So: nice -n 19 (batch priority) + pinned to
+  # the box's E-cores, fully OFF the P-cores OBS runs on. The ffmpeg child inherits both. Decode
+  # takes longer on 4 E-cores — irrelevant for a batch job.
+  #
+  # issue 1094: the pin range is RESOLVED FROM THE ACTUAL BOX by main() (onimag_decode_core_range
+  # over the live nproc + a taskset probe), NOT hardcoded — the retired 16-thread box's literal
+  # `taskset -c 12-15` silently failed EVERY extract on the 12-thread i5-13420H replacement (cores
+  # 12-15 do not exist → taskset aborts before recording-verdict runs → 0/76 imag-leg verification,
+  # issue 1094). FAIL-OPEN: an empty core_range emits NO taskset, so the decode still runs
+  # (unpinned, nice 19 alone) instead of a broken taskset aborting the whole extract.
+  local ts=""
+  [ -n "$core_range" ] && ts="taskset -c ${core_range} "
+  printf 'nice -n 19 %senv RUST_LOG=info %q' "$ts" "$exe"
   local a
   for a in "$@"; do
     printf ' %q' "$a"
@@ -113,29 +160,59 @@ main() {
   local -a SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10)
   local TARGET="${IMAG_USER}@${IMAG_BOX}"
 
-  # STEP 1: deploy the Linux verdict binary to imag — ONLY if missing/not-executable there, or
-  # --force-upload/--verdict-bin's caller explicitly wants a fresh copy. Skipping a needless
-  # re-upload keeps a re-dispatched worker's repeat runs fast (#281 idempotency spirit).
+  # STEP 1: deploy the Linux verdict binary to imag — ONLY if missing/not-executable there, its
+  # sha256 DIFFERS from the local binary, or --force-upload is given. issue 1118: the sha256
+  # VERSION GATE is the fix — before it, STEP 1 re-uploaded only when the binary was ABSENT, so a
+  # PARTIAL_SCHEMA_VERSION bump (#1112 v3->v4) left imag on a stale v3-emitting binary whose partial
+  # the fresh dev1 merge rejected. Skipping a needless re-upload (identical sha) keeps a
+  # re-dispatched worker's repeat runs fast (#281 idempotency spirit).
   if [ -n "$VERDICT_BIN" ]; then
-    local need_upload=0
-    if [ "$FORCE_UPLOAD" = "1" ]; then
-      need_upload=1
-    elif ! sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" \
-        "[ -x '$REMOTE_BIN' ]" 2>/dev/null; then
-      need_upload=1
+    local present=0 local_sha="" remote_sha=""
+    # Only probe the box when we are NOT force-uploading (force always re-uploads).
+    if [ "$FORCE_UPLOAD" != "1" ] \
+       && sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "[ -x '$REMOTE_BIN' ]" 2>/dev/null; then
+      present=1
+      # sha256 of the LOCAL (dev1) binary about to be deployed, and of the on-imag one. Either
+      # failing leaves the sha EMPTY, which onimag_upload_decision treats as "re-upload" (fail-safe).
+      local_sha="$(sha256sum "$VERDICT_BIN" 2>/dev/null | cut -d' ' -f1)" || local_sha=""
+      remote_sha="$(sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" \
+          "sha256sum '$REMOTE_BIN' 2>/dev/null | cut -d' ' -f1" 2>/dev/null | tr -dc '0-9a-f')" || remote_sha=""
     fi
-    if [ "$need_upload" = "1" ]; then
-      echo "[recording-verdict-on-imag] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN}"
+    local decision
+    decision="$(onimag_upload_decision "$FORCE_UPLOAD" "$present" "$local_sha" "$remote_sha")"
+    if [ "$decision" = "upload" ]; then
+      echo "[recording-verdict-on-imag] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN} (force=$FORCE_UPLOAD present=$present local_sha=${local_sha:0:12} remote_sha=${remote_sha:0:12})"
       sshpass -p "$IMAG_PW" scp "${SSH_OPTS[@]}" "$VERDICT_BIN" "${TARGET}:${REMOTE_BIN}"
       sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "chmod +x '$REMOTE_BIN'"
     else
-      echo "[recording-verdict-on-imag] $REMOTE_BIN already present+executable on imag — skipping upload"
+      echo "[recording-verdict-on-imag] $REMOTE_BIN already present+executable AND identical sha256 on imag — skipping upload (issue 1118 version gate)"
     fi
+  fi
+
+  # issue 1094: resolve the batch-decode CPU pin FROM THE ACTUAL BOX. A hardware swap silently
+  # broke the old hardcoded `taskset -c 12-15` on the 12-thread i5-13420H replacement (cores 12-15
+  # do not exist) — every [8/8c] imag extract failed at taskset, zeroing the imag leg in 0/76 runs.
+  # Ask the box its online-CPU count, derive the top-4-cores (E-core) range, and PROBE that taskset
+  # accepts it. FAIL-OPEN: any hiccup (unparseable nproc / rejected probe / ssh error) leaves the
+  # range EMPTY and the decode runs UNPINNED (nice 19 alone still keeps it off production OBS),
+  # never aborting the extract on a pin error again.
+  local CORE_RANGE NPROC_REMOTE
+  NPROC_REMOTE="$(sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" 'nproc' 2>/dev/null | tr -dc '0-9' || true)"
+  CORE_RANGE="$(onimag_decode_core_range "$NPROC_REMOTE")"
+  if [ -n "$CORE_RANGE" ] \
+     && ! sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "taskset -c '$CORE_RANGE' true" 2>/dev/null; then
+    echo "[recording-verdict-on-imag] WARNING: taskset -c $CORE_RANGE rejected on $IMAG_BOX (nproc=${NPROC_REMOTE:-?}) — decoding UNPINNED (nice 19 only)." >&2
+    CORE_RANGE=""
+  fi
+  if [ -n "$CORE_RANGE" ]; then
+    echo "[recording-verdict-on-imag] decode pin: taskset -c $CORE_RANGE (nproc=$NPROC_REMOTE, E-cores off the OBS P-cores)"
+  else
+    echo "[recording-verdict-on-imag] decode pin: none (unpinned, nice 19 only) -- nproc=${NPROC_REMOTE:-?}"
   fi
 
   # STEP 2: run the verdict ON imag against the LOCAL recording (NEVER copied off-box).
   local ONIMAG_CMD
-  ONIMAG_CMD="$(build_onimag_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
+  ONIMAG_CMD="$(build_onimag_command "$REMOTE_BIN" "$CORE_RANGE" "${PASS_ARGS[@]}")"
   echo "[recording-verdict-on-imag] running on imag (${IMAG_BOX}): $ONIMAG_CMD"
   sshpass -p "$IMAG_PW" ssh "${SSH_OPTS[@]}" "$TARGET" \
     "mkdir -p '$OUT_DIR' && $ONIMAG_CMD"

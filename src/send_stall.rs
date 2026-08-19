@@ -37,7 +37,7 @@ pub const SEND_STALL_FACTOR: f64 = 1.5;
 ///
 /// A non-positive `frame_interval_ms` (genlock/send rate off, fps 0 or unset) never stalls —
 /// there is no per-frame budget to have blown, mirroring the zero-interval guard
-/// `ndi::genlock_emit_gate` already uses for the same "genlock off" case. A non-finite or
+/// `genlock_pacing::genlock_emit_gate` already uses for the same "genlock off" case. A non-finite or
 /// negative `duration_ms` (should never happen from a real `Instant::elapsed()` reading, but a
 /// defensive guard costs nothing) also never stalls — never fabricate a WARN from a bad
 /// measurement.
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn zero_frame_interval_never_stalls_genlock_off_case() {
-        // Mirrors `ndi::genlock_emit_gate`'s own zero-interval guard (genlock/send-rate off).
+        // Mirrors `genlock_pacing::genlock_emit_gate`'s own zero-interval guard (genlock/send-rate off).
         assert!(!is_send_stall(1000.0, 0.0));
     }
 

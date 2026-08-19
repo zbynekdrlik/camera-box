@@ -237,17 +237,31 @@ def measure_stats(obs, seconds: float) -> dict:
 
 
 def reattach(obs, cam_n: int, *, finder_retries: int = 6, finder_wait_s: float = 1.0,
-             sleep=time.sleep):
+             reset_settle_s: float = 0.25, sleep=time.sleep):
     """#758 item 2 — sender-bounce re-attach: re-read an input's OWN current ndi_source_name and
-    re-apply the EXACT same value via SetInputSettings, forcing OBS to tear down and
-    re-establish its DistroAV NDI receive for that source. This is the SAME "SetInputSettings
-    ndi_source_name" re-bind the #758 spec calls for: after a [2/8]/[2b/8] service->burn-unit
+    force OBS to tear down and re-establish its DistroAV NDI receive for that source via a
+    CLEAR-then-SET of ndi_source_name (issue 1114). After a [2/8]/[2b/8] service->burn-unit
     swap (or during a cleanup restore), a camera's NDI sender can come back up with a receiver
-    that never re-locks on its own — re-applying its OWN bound source name (never inventing a
-    new one) nudges OBS's NDI input to reconnect. Returns the ndi_source_name that was
-    re-applied, or None if the input doesn't exist / has no ndi_source_name set (caller then
-    treats this as "cannot re-attach, still dead -> fail loud", never silently invents a fallback
-    source name).
+    that never re-locks on its own — this nudges the input's OWN bound source (never inventing a
+    new one) to reconnect. Returns the ndi_source_name that was re-applied, or None if the input
+    doesn't exist / has no ndi_source_name set (caller then treats this as "cannot re-attach,
+    still dead -> fail loud", never silently invents a fallback source name).
+
+    issue 1114 (E2E burn-deploy handover race): re-applying the SAME ndi_source_name via
+    SetInputSettings is a NO-OP for the receiver — vendored ndi_source_update() computes
+    reset_ndi_receiver from a NAME CHANGE (safe_strcmp(config.ndi_source_name, new) != 0), so an
+    unchanged name leaves reset_ndi_receiver=false and (the receiver thread being alive after the
+    issue-1096 retry-in-place) the update does nothing. The receiver stays stuck on the DEAD
+    pre-bounce sender until the passive ~2min fresh-finder timer, which the [2/8] ~52s reverify
+    budget never covers → false "camera leg dead" + the heavy issue-1093 strih-OBS force-kill. The
+    cure is a CLEAR-then-SET: first SetInputSettings {ndi_source_name: ""} (the empty-name branch
+    of ndi_source_update ALWAYS calls ndi_source_thread_stop, behaviour-independent → s->running
+    =false, the stuck receiver torn down cleanly), settle one render tick, THEN set it back to the
+    real name (thread not running → ndi_source_thread_start under the KEEP_ACTIVE default, which
+    sets reset_ndi_receiver=true → a FRESH receiver thread whose issue-1096 fresh finder resolves
+    the live post-bounce sender BY URL). This is the same clear-then-set idle discipline
+    obs_phase2._quiesce_probe_input uses, and the targeted per-input equivalent of the issue-1093
+    OBS force-kill — without killing the operator's whole OBS.
 
     #761 (2026-07-15, user-directed, KEPT): strih's "MV Cam N" scenes were switched to
     SAME-SOURCE — they now render the MAIN "NDI camN" input, and the old "MV NDI camN"
@@ -281,6 +295,25 @@ def reattach(obs, cam_n: int, *, finder_retries: int = 6, finder_wait_s: float =
         if attempt < finder_retries - 1:
             sleep(finder_wait_s)
     else:
+        return NDI_SOURCE_NOT_DISCOVERABLE
+    # issue 1114: CLEAR the name to "" (→ ndi_source_thread_stop: tears the stuck receiver down
+    # cleanly, s->running=false), settle one render tick for the av_thread to exit, THEN set it
+    # back (→ ndi_source_thread_start: a fresh receiver whose issue-1096 fresh finder resolves the
+    # live post-bounce sender). A same-name re-apply would be a no-op (no reset_ndi_receiver). The
+    # SET-back is still guarded by the #795 finder-list check above (mangle protection); clearing
+    # to "" never mangles (it is the valid "no source selected" state).
+    op._rpc(obs, "SetInputSettings",
+            {"inputName": input_name, "inputSettings": {"ndi_source_name": ""}},
+            ignore_err=True)
+    sleep(reset_settle_s)
+    # issue 1114 review (#795 window): the clear + settle above widened the mangle window between
+    # the up-front finder-list check and this set-back. Re-verify the bound name is STILL
+    # discoverable right before re-applying it. If the sender vanished during the settle, SKIP the
+    # set-back — leave the input cleared to "" (a clean, no-garbage state; never mangle a name
+    # absent from the combo list) and return NDI_SOURCE_NOT_DISCOVERABLE, exactly as the up-front
+    # guard does. The caller (preflight_mv_reverify) swallows this and lets the pixel re-sample
+    # fail loud on the genuinely-dead leg.
+    if ndi_name not in op._ndi_source_list(obs, input_name):
         return NDI_SOURCE_NOT_DISCOVERABLE
     op._rpc(obs, "SetInputSettings",
             {"inputName": input_name, "inputSettings": {"ndi_source_name": ndi_name}},

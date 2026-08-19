@@ -143,3 +143,90 @@ constraints baked in:
   fixtures already carry `gm_source_ip`; a foreign-GM test just sets it to a non-rig IP, and
   `DANTESYNC_GATE_GM_ENFORCE=1` (env) exercises the blocking path. A stream-only invocation still
   needs `--ntp-master ""` to pass the master-name guard (unrelated to GM).
+
+## `DANTESYNC_GATE_GM_ENFORCE` — grandmaster IDENTITY enforcement (LIVE since #1073)
+
+`gm_check` (`clock-offset-guard.sh:658`, rc 0 OK / 2 FOREIGN / 3 UNKNOWN) checks every HTTP-graded
+node's `gm_source_ip` against `GATE_GRANDMASTER_IP` (`RIG_GRANDMASTER_IP`, default `10.77.9.184`).
+It ALWAYS prints its `GM OK/FOREIGN/UNKNOWN` line, but its rc only feeds `node_verdict` when
+`GATE_GM_ENFORCE=1` (`dantesync-gate.sh:600`). Env: `DANTESYNC_GATE_GM_ENFORCE`, default `0`
+(report-first, `dantesync-gate.sh:169`); `!=0 && !=1` is a hard config error (`:920`).
+
+- **What it gates: IDENTITY only, never OFFSET.** A node PTP-locked to a FOREIGN grandmaster (the
+  stream-on-`10.77.7.109` false-green issue 834) passes the offset+PTP grade while being on a
+  different timebase — `gm_check` is the only term that catches it. The ~23ppm GM-frequency
+  step-storm is a SEPARATE offset-gate concern (issue 1108), untouched by this flag.
+- **Flipped LIVE at BOTH `recording-e2e.sh` invocations** (main `[0/8]` gate ~line 705 grading
+  cam1/cam2/strih/stream; `#947` secondary ~line 1071 grading strih) via an env PREFIX
+  `DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh"`. The gate's own DEFAULT stays `0`, so
+  standalone/dry-run callers and `verify-imag.sh` (which enforces via its OWN direct
+  `gm_check`→`fail`, ~line 1087) are unaffected — do NOT change the gate default to enforce.
+- **Only HTTP-graded nodes are gm_checked.** The journal FALLBACK path returns BEFORE `gm_check`
+  (journald carries no `gm_source_ip`); the grandmaster device itself is never a graded node. On
+  enforce: FOREIGN→exit 20, UNKNOWN (unread `gm_source_ip`)→exit 11.
+- **Verify-before-flip (never flip a gate red):** the enforced condition = every HTTP-graded node
+  reports `gm_source_ip=RIG_GRANDMASTER_IP`. Prove it live by SOURCING `clock-offset-guard.sh` and
+  running `gm_check <node> "$(gm_source_ip_from_pipe_json "$(curl -fsS http://<ip>:8898/status)")"
+  10.77.9.184` on each graded node — all must be rc=0. Never enforce while any graded node is on a
+  foreign/unreadable GM (that is exactly why #834 shipped report-first).
+- **TDD an env-var flip on a subprocess call by asserting the ENV VALUE, not argv:** run the REAL
+  script region against a fake `dantesync-gate.sh` that logs `${DANTESYNC_GATE_GM_ENFORCE:-UNSET}`;
+  `env_remove` it in the harness for a genuine RED; assert `ENFORCE=1`. A static "text present"
+  check cannot prove the prefix is on the right line or well-formed. See
+  `tests/harness_recording_e2e_gm_enforce_1073.rs`.
+## `ntp_deadband_us` is the NO-STEP threshold, NOT the per-step CAP — master bound floors at the step-cap (#1119)
+Two DIFFERENT quantities, easy to conflate: `ntp_deadband_us` (live v1.8.46: **1000us**) is the
+threshold below which the master does not step; the **≤2500us bounded PER-STEP cap** (dantesync
+v1.8.46 design) is what the master's own `ntp_offset_us` actually sawtooths TOWARD under a slow
+grandmaster (~23ppm). The step-cap is **NOT exposed over `/status`**. So the #1021 deadband widening
+(`ntp_master_effective_bound_us` = max(2000, deadband+margin) = max(2000, 1000+1000) = 2000) produces
+**no widening** on v1.8.46, and a healthy sawtooth median (failed run: 2699us) false-DRIFTs the bare
+2000us bound — a per-window coin flip on the NTP master ALONE. Fix (#1119): the master's median bound
+also floors at a **gate-side** step-cap constant `GATE_NTP_MASTER_STEP_CAP_US` (default 2500,
+`DANTESYNC_NTP_MASTER_STEP_CAP_US`), i.e. `ntp_master_effective_bound_us STATUS BOUND MARGIN
+[STEP_CAP_US]` → max(bound, deadband+margin, step_cap+margin) = 3500us. **Gated on a numeric
+`ntp_deadband_us` being present** (the dantesync-#84+ bounded-step regime marker) so a pre-#84 master
+keeps the bare bound (preserves the #1021 no/null-deadband tests); the step-cap term only bites when
+the reported deadband is SMALLER than the step-cap — exactly the v1.8.46 regime. The optional 4th arg
+defaults "0" → byte-identical pre-#1119 for every 3-arg caller/unit-test.
+
+Because the master's raw UTC median is thus no longer a health signal up to the step-cap, the master
+is ALSO hard-failed on dantesync's OWN `ntp_step_storm:true` (its >120-steps/hour thrashing alarm) via
+`ntp_master_step_storm_verdict` — a HARD fail regardless of median, in the median-only branch, only on
+a freshly-graded payload (`rc_off != 3`), false/null/absent never fails (report-first). `ntp_step_storm`
+and `ntp_steps_last_hour` are **MASTER-only fields** (null on clients, exactly like `ntp_deadband_us`).
+The #1055 slew rescue never applied here: it is a LINUX-CLIENT journal rescue; strih is a `--win-http`
+node with no journal, so the master's only widening path is `ntp_master_effective_bound_us`. Genlock
+FIFO pacing is monotonic-clock-based, so this UTC sawtooth is harmless to the recording path — only the
+gate's median term coin-flips. Long-term GM-frequency fix is the owner's Dante-device court + dantesync
+issue 95. Local RED→GREEN needs no cargo: run `scripts/dantesync-gate.sh` directly with a fresh
+`DANTESYNC_GATE_WIN_HTTP_STRIH` executable fixture (fresh `updated_ts` — the 300s freshness window
+ages a stale fixture into NTP STALE).
+
+## The client STABILITY (spread) term needs the SAME step-awareness as the median — via the WINDOW-MAX threshold (#1123)
+Sibling of #1119, but on the CLIENT spread side. The #1022/#1041 client MEDIAN widening
+(`client_chase_bound_us`) is step-aware, but the STABILITY (spread) bound stayed fixed at
+`GATE_STABILITY_US` (2000us). A client chases the master's by-design UTC sawtooth with its OWN
+bounded steps; a step landing mid-sample-window makes the 6 samples straddle it, so the SPREAD ≈ the
+client's step MAGNITUDE (live cam1 2026-08-19: 2938us, == its own `[NTP] Stepped +2938us`) → false
+`UNSTABLE (median 1924us <= 2775us bound; spread 2938us > 2000us stability)` while PTP LOCKED + GM OK.
+
+**Key subtlety: the spread exceeds even the WIDENED median bound** (2775us here) — because the median
+widening reads `client_step_threshold_us_from_journal` = the **tail-1** (freshest) adaptive threshold
+(775us at grade time), while cam1's adaptive `threshold` jittered up to **6860us** in the same window.
+The median is a point estimate → tail-1; the SPREAD is a WINDOW-WIDE range → the **window-MAX**
+threshold. Fix: NEW pure `client_max_step_threshold_us_from_journal` (max of every `threshold:Nus`
+via `sort -n | tail -1`) + `client_chase_stability_us STABILITY MARGIN JOURNAL [FALLBACK]` =
+max(STABILITY, max_threshold+margin); wired in `grade_http_node`'s client branch right after the
+median widening, reusing the already-read `$client_journal` (no extra SSH). A spread beyond the
+client's own journal envelope (or no readable journal) still FAILS; a gross desync fails on MEDIAN
+(drift), never reaching the spread question. No master-deadband term for the spread — the client's own
+adaptive threshold already bakes in the master excursion it chases.
+
+**Why NOT a post-step-cluster recency rescue (the #1055 lineage):** cam1's failure is a RISING-EDGE
+straddle — the offset is ramping toward a step NOT YET made at grade time, so there are no post-step
+survivors in the window to grade. A recency-anchored "grade the tight post-step cluster" rescue
+structurally cannot catch a pre-step ramp. Local RED→GREEN with NO cargo: `rustc --edition 2021 --test
+tests/<file>.rs` standalone (provide `CARGO_MANIFEST_DIR=<worktree>`; the harness tests only use std +
+shell out), then run the binary; OR run the pure bash fn under `bash -c 'set -uo pipefail; . scripts/
+clock-offset-guard.sh; ...'` (`cargo test --no-run` is now hook-blocked too, #477 tightening).

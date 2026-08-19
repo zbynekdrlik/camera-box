@@ -222,7 +222,7 @@ handle_box() {
       else
         log "RECOVERY: $box :$BUNDLE_PORT serving again -- firing recovery notification"
         python3 "$NOTIFY" notify --body \
-          "✅ #732 bundle-state: **$box** ($ip) :$BUNDLE_PORT is serving again ($REPO_SLUG)." \
+          "✅ BundleStateServer ($REPO_SLUG): **$box** ($ip) :$BUNDLE_PORT opäť obsluhuje." \
           >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
       fi
       write_state_field "alerted_${box}" 0
@@ -281,7 +281,7 @@ handle_box() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for $box :$BUNDLE_PORT down"
     python3 "$NOTIFY" notify --body \
-      "🚨 #732 bundle-state: **$box** ($ip) :$BUNDLE_PORT (BundleStateServer) is DOWN while the box is UP ($REPO_SLUG). ${detail}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes -- Task Scheduler will NOT self-restart a terminated task. ${restart_note}. If it does not recover next pass, run \`schtasks /run /tn BundleStateServer\` on $box." \
+      "🚨 BundleStateServer ($REPO_SLUG): **$box** ($ip) :$BUNDLE_PORT je DOLE, hoci box beží. ${detail}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol — Task Scheduler ukončenú úlohu sám nereštartuje. Rieši Claude automaticky (${restart_note}), ty nemusíš nič robiť." \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- restart still attempted every pass"

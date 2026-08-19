@@ -142,6 +142,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # invoked with ONE line below (the #675 sourced-lib pattern -- no anchored line edited).
 # shellcheck source=scripts/lib/imag-display-path.sh
 . "$HERE/lib/imag-display-path.sh"
+# issue 1105: the SHARED imag kernel-cmdline ISOLATION drift gather + verdict (isolcpus/nohz_full/
+# scoped-rcu_nocbs) -- the SAME issue-784 lib scripts/drift-guard.sh's --check-imag facet uses. Its
+# [0/8] preflight fail-fast is invoked with ONE guarded block below (the #675 sourced-lib pattern --
+# no anchored line edited).
+# shellcheck source=scripts/lib/imag-cmdline-isolation.sh
+. "$HERE/lib/imag-cmdline-isolation.sh"
 # #878 (same family as #844/#869/#872): the PURE decision for the STARTUP self-heal below -- a
 # dead harness only ever restores rig state inside cleanup() (the bash EXIT trap), which SIGKILL
 # never reaches, so the leftover camera-box.service/painter/burn state strands until a human
@@ -211,6 +217,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # tmpfs that CAN fill outright (CAM1 + CAM6 both hit 100% live) and fail the deploy hard.
 # shellcheck source=scripts/lib/tmp-burn-sweep.sh
 . "$HERE/lib/tmp-burn-sweep.sh"
+# #1086: the deliberate keepalive-bypass COLD CUT step for the all-cambox sweep (OPT-IN, OFF by
+# default via COLD_CUT_BYPASS_CAM). Pure gating + a small state machine; the two sweep-loop call
+# sites below are inert no-ops unless COLD_CUT_BYPASS_CAM names a sweep label, so a normal run is
+# byte-for-byte unchanged.
+# shellcheck source=scripts/lib/cold-cut-step.sh
+. "$HERE/lib/cold-cut-step.sh"
 # #707 B1 (freeze+jump discriminator, second prong): the per-cambox TCP-transport + NIC sampler.
 # Pure REMOTE-COMMAND-STRING builders (no ssh at source time) — launched in [5b/8], harvested in
 # [7c/8]. See the lib header for WHY (record Send-Q/retrans/NIC counters during the window so the
@@ -608,6 +620,21 @@ else
   imag_display_path_preflight_assert "$IMAG_IP" "${IMAG_USER:-newlevel}" || exit 1
 fi
 
+# issue 1105: imag kernel-cmdline ISOLATION drift preflight — the SAME shared issue-784 lib the
+# --check-imag facet uses. isolcpus=/nohz_full=/scoped-rcu_nocbs on /proc/cmdline (the issue-784/842
+# footgun re-appearing via a stray grub.d drop-in or hand-edit) strips CPUs from the scheduler
+# load-balancing domain and piles OBS's ~119-thread pool onto one core → NDI 60→~53fps, underruns.
+# Fail-fast HERE at minute 0 instead of projecting a starved ~40-min run. UNKNOWN (an SSH hiccup —
+# the fleet-reachability step above, imag included, owns genuine unreachability) only WARNs; a proven
+# DRIFT aborts. New imag hard-abort site → wrapped in the IMAG_OFFLINE_ACKED guard
+# (.claude/rules/imag-offline-ack.md), exactly like the display-path preflight above.
+echo "[0/8] imag kernel-cmdline isolation preflight — an isolcpus/nohz_full/scoped-rcu_nocbs drift must fail-fast, not starve a run (issue 1105 · issue-784 follow-up)"
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[0/8] imag kernel-cmdline isolation preflight (issue 1105)" "$IMAG_OFFLINE_ACK_REASON"
+else
+  imag_cmdline_isolation_preflight_assert "$IMAG_IP" "${IMAG_USER:-newlevel}" || exit 1
+fi
+
 # #977/#958: obs64/AHK Windows-session-visibility gate. A session-0 obs64 (launched via
 # ssh+Invoke-CimMethod) answers OBS WebSocket, serves NDI, and writes a normal log -- so it sails
 # through every OTHER [0/8] term below while being fully invisible to the operator on the console.
@@ -670,7 +697,12 @@ fi
 # DANTESYNC_GATE_WIN_HTTP_<NAME> env var is the offline/fixture test seam now, mirroring its
 # existing DANTESYNC_GATE_LINUX_JOURNAL_<NAME> convention for the Linux nodes.)
 echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must ALL be synced+locked (#7/#8/#648)"
-"$HERE/dantesync-gate.sh" \
+# Enforce grandmaster IDENTITY (was report-first per issue 834). gm_check ships report-only in
+# dantesync-gate.sh (DANTESYNC_GATE_GM_ENFORCE default 0); every fleet node now holds the rig
+# grandmaster 10.77.9.184 (dantesync election + PTP-interface fix v1.8.42-1.8.46), so a node
+# PTP-locked to a foreign/unreadable GM now HARD-fails here (FOREIGN->20, UNKNOWN->11) instead of
+# only being reported — the stream-on-a-foreign-GM false-green issue 834/1073 is about.
+DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
   --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
@@ -754,17 +786,19 @@ IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecki
 VERSION_GATE_REPO="${VERSION_GATE_REPO:-zbynekdrlik/camera-box}"
 # Windows FAST manifest (strih+stream share ONE build -> one manifest), keyed on strih's OWN reported
 # marker SHA. The gate applies this GLOBAL --manifest to BOTH --win-state boxes (strih AND stream), and
-# a manifest activates the obs_dll_sha256 byte compare AND the genlock_capability check on each box. So
-# supplying it while EITHER box has not yet reported those keys flips that box to UNKNOWN = a spurious
-# gate-blocking refuse (exactly the partial-rollout split this opt-in exists to protect). Gate on BOTH
-# boxes ALREADY reporting BOTH keys, so the auto-source stays fully dormant until the #770 on-box byte
-# gather is live fleet-wide and can never introduce a UNKNOWN. VERSION_GATE_MANIFEST (if pre-set) wins.
+# a manifest activates the obs_dll_sha256 byte compare AND the genlock_capability check on each box.
+# ENFORCED (#1100, the #758-shape second step): the auto-source runs UNCONDITIONALLY -- the #1082 opt-in
+# guard (which required BOTH boxes to ALREADY report obs_dll_sha256 + genlock_capability before sourcing
+# the manifest) is REMOVED, so a box that stops reporting its deployed obs.dll sha now flips to a
+# gate-blocking UNKNOWN (drift-guard compares a manifest sha vs an empty observed) instead of a silent
+# skip -- every box is REQUIRED to report its bytes. Precondition verified LIVE before the flip:
+# strih+stream both serve obs_dll_sha256 + distroav_dll_sha256 + genlock_capability on :8899, and the CI
+# FAST manifest at the fleet marker SHA carries the same obs.dll (the #770 on-box byte gather is now
+# deployed fleet-wide -- the #1067 port4455 class). The fetch stays best-effort: a gh/network failure
+# (or an unresolvable marker SHA) yields "" -> the manifest is omitted for THAT run (a fetch outage is
+# not a box-drift signal), never a false refuse. VERSION_GATE_MANIFEST (if pre-set) wins.
 AUTO_WIN_MANIFEST="${VERSION_GATE_MANIFEST:-}"
-if [ -z "$AUTO_WIN_MANIFEST" ] \
-   && manifest_autosource_state_has_key "$VERSION_STRIH_STATE"  obs_dll_sha256 \
-   && manifest_autosource_state_has_key "$VERSION_STREAM_STATE" obs_dll_sha256 \
-   && manifest_autosource_state_has_key "$VERSION_STRIH_STATE"  genlock_capability \
-   && manifest_autosource_state_has_key "$VERSION_STREAM_STATE" genlock_capability; then
+if [ -z "$AUTO_WIN_MANIFEST" ]; then
   AUTO_WIN_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" windows-genlock-fast.yml obs-genlock-fast-dll \
     "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-fast-manifest.json")"
 fi
@@ -1032,7 +1066,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # strih here, a secondary camera is graded against the BARE bound and false-fails on the
     # master's routine ~2.5ms step propagation. Passing strih also re-grades strih itself in this
     # call (harmless, already proven clean by the main gate above).
-    "$HERE/dantesync-gate.sh" \
+    # Enforce grandmaster identity here too (issue 1073): this call grades strih (the NTP master),
+    # whose grandmaster identity must be enforced exactly like the main gate above.
+    DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \
       --win-http "strih=$STRIH" \
@@ -1540,6 +1576,10 @@ fi"
   # never had its program scene routed by THIS harness" note (rig-mode.sh test used to be the ONLY
   # thing that ever touched it) — [4a/8] above now routes + saves it, so cleanup() restores it too.
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
+  # #1086: best-effort FINAL restore of the keepalive-bypass target's strih receiver, in case the
+  # run was interrupted during the cold hold (or a single-appearance sweep) left it idled/black.
+  # Inert no-op unless COLD_CUT_BYPASS_CAM was set AND the machine is still at phase=idled.
+  cold_cut_cleanup_restore "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
   # #691: pass the calibrated cross-check value through ONLY when the caller supplied one
   # (empty by default — the common unattended-CI case simply skips the check).
   _stream_teardown_args=(teardown --host "$STREAM")
@@ -3447,12 +3487,21 @@ if [ "$ALL_CAMBOX" = "1" ]; then
   _SEG_BOUNDARIES=()         # epoch-ns CLOSING each segment (the next switch, then the final stop)
   _seg_i=0
   _seg_n="${#_SWEEP_PLAN[@]}"
+  # #1086: arm the deliberate keepalive-bypass cold cut (no-op unless COLD_CUT_BYPASS_CAM is set).
+  cold_cut_reset_state
   for _seg in "${_SWEEP_PLAN[@]}"; do
     _scene="${_seg%%$'\t'*}"; _label="${_seg##*$'\t'}"
+    # #1086: if this segment is the bypass target and its receiver is idled, RESTORE it (topping up
+    # the cold hold) right before the cut so the switch lands on a receiver re-created from cold.
+    # Inert no-op unless COLD_CUT_BYPASS_CAM is set; always returns 0 (never trips set -e).
+    cold_cut_before_segment "$_label" "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
     # Cut strih PROGRAM to this cambox's scene; the subcommand prints the switch epoch-ns
     # (time.time_ns()) on stdout and fails loud if the scene renders black (dead cambox).
     _switch_ns="$(python3 "$HERE/obs_phase2.py" switch --host "$STRIH" --program-scene "$_scene")"
     echo "    [seg $((_seg_i+1))/${_seg_n}] $_label via '$_scene' switched at ${_switch_ns} ns"
+    # #1086: once the target has appeared and the sweep has moved OFF it, IDLE its receiver so it
+    # goes genuinely cold for the hidden window. Inert no-op by default; always returns 0.
+    cold_cut_after_segment "$_label" "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
     if [ -z "$_SWITCH_START_NS" ]; then
       _SWITCH_START_NS="$_switch_ns"          # first switch = window 0 start
     else

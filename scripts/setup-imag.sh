@@ -36,7 +36,7 @@ NDI_PEER_CANDIDATES="${NDI_PEER_CANDIDATES:-10.77.9.61 10.77.9.62 10.77.9.63 10.
 # any stock plugin built against a NEWER libobs ("compiled with newer libobs 32.2"), which on the
 # .187 bring-up left OBS with only distroav.so loaded: no obs-websocket, no encoders. Overridable;
 # bump it together with the vendored genlock build (#825).
-IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.1.2-0obsproject1~noble}"
+IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.2.0-0obsproject1~noble}"
 NDI_PEER="${NDI_PEER:-}"         # resolved at first use from NDI_PEER_CANDIDATES (or pinned by env)
 NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=25
+TOTAL_STEPS=26
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -82,6 +82,51 @@ manifest_sha_for_path() {
         || fail "cannot parse $manifest"
     [ -n "$sha" ] || fail "#460 manifest lists no entry for $relpath — refuse to trust an unverifiable file"
     printf '%s\n' "$sha"
+}
+
+# _genlock_marker_atomic / genlock_write_markers — issue 789: the shared genlock deploy marker
+# writer, kept BEHAVIORALLY IDENTICAL to scripts/lib/genlock-markers.sh's copy of the same name and
+# locked to it by tests/deploy_genlock_fleet.rs::inline_genlock_write_markers_matches_the_shared_lib.
+# setup-imag.sh is scp'd to the box STANDALONE (no sibling scripts/lib checked out there — same
+# reason manifest_sha_for_path cannot shell out to the repo's own tool), so it carries this inline
+# copy rather than sourcing the lib; the fleet script's on-imag program sources the lib instead.
+# Writes each marker temp-then-rename (a POSIX same-dir `mv -f`) so a concurrent drift-guard reader
+# never sees a half-written marker. A missing MARKER_DIR/GENLOCK_SHA/DISTROAV_SHA is fail-loud
+# (return 2), never a silent partial write — under this script's `set -e` a non-zero return aborts.
+_genlock_marker_atomic() {
+    local dest="$1" content="$2" tmp
+    tmp="${dest}.tmp.$$"
+    if ! printf '%s\n' "$content" > "$tmp" 2>/dev/null; then
+        echo "genlock_write_markers: could not write temp file $tmp" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+    if ! mv -f "$tmp" "$dest" 2>/dev/null; then
+        echo "genlock_write_markers: could not rename $tmp -> $dest" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+    return 0
+}
+genlock_write_markers() {
+    local marker_dir="${1:-}" genlock_sha="${2:-}" distroav_sha="${3:-}" deployed_at="${4:-}"
+    if [ -z "$marker_dir" ]; then
+        echo "genlock_write_markers: MARKER_DIR (arg 1) is required" >&2; return 2
+    fi
+    if [ -z "$genlock_sha" ]; then
+        echo "genlock_write_markers: GENLOCK_SHA (arg 2) is required" >&2; return 2
+    fi
+    if [ -z "$distroav_sha" ]; then
+        echo "genlock_write_markers: DISTROAV_SHA (arg 3) is required" >&2; return 2
+    fi
+    [ -n "$deployed_at" ] || deployed_at="$(date -Is)"
+    if ! mkdir -p "$marker_dir" 2>/dev/null; then
+        echo "genlock_write_markers: could not create marker dir $marker_dir" >&2; return 1
+    fi
+    _genlock_marker_atomic "$marker_dir/GENLOCK_BUILD_SHA.txt"  "$genlock_sha"  || return 1
+    _genlock_marker_atomic "$marker_dir/DISTROAV_BUILD_SHA.txt" "$distroav_sha" || return 1
+    _genlock_marker_atomic "$marker_dir/DEPLOYED_AT"           "$deployed_at"  || return 1
+    return 0
 }
 
 # imag_cpu_isolation_plan  (stdin: one "CPU SIBLINGS_LIST" line per logical CPU, numerically
@@ -289,8 +334,16 @@ if command -v nmcli >/dev/null 2>&1; then
     [ -n "$DNS" ] || DNS="$GW"
     nmcli con mod "$CON" ipv4.method manual \
         ipv4.addresses "${STATIC_IP}/${PREFIX}" ipv4.gateway "$GW" ipv4.dns "${DNS// /,}"
+    # #1103: Wake-on-LAN -- arm the NDI NIC for a magic-packet wake so a post-event powered-down /
+    # slept imag-nb is remotely recoverable (the imag counterpart of issue 1053's strih/stream WoL).
+    # Set on the SAME $CON as the static IP above (ONE source of truth); NM re-applies it on every
+    # connection-up (every boot), so it survives reboot. Live-confirmed the NIC supports it (r8152 USB
+    # dongle: Supports Wake-on: pumbg). The BIOS standby-power layer is a separate hands-on step
+    # (docs/wake-on-lan.md) -- this arms the OS half. The one con up below applies IP + WoL together.
+    nmcli con mod "$CON" 802-3-ethernet.wake-on-lan magic 802-3-ethernet.wake-on-lan-password ""
     nmcli con up "$CON" >/dev/null || true   # same IP — session survives
     echo "  static ${STATIC_IP}/${PREFIX} gw=$GW dns=$DNS on $NIC ($CON)"
+    echo "  #1103: Wake-on-LAN armed (802-3-ethernet.wake-on-lan=magic) on $CON"
 else
     fail "nmcli missing — desktop Ubuntu expected (netplan-only path not implemented)"
 fi
@@ -1137,10 +1190,12 @@ else
     nm -D -u "$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_divisor' >/dev/null \
         || fail "post-swap /usr/bin/obs does not reference obs_display_set_render_divisor — refuse a stock/wrong frontend binary (#499: multiview render-budget decouple would be missing)"
 
-    echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt"
-    echo "$FAST_SHA" > "$GENLOCK_MARKER_DIR/DISTROAV_BUILD_SHA.txt"
+    # issue 789: write GENLOCK_BUILD_SHA.txt + DISTROAV_BUILD_SHA.txt + DEPLOYED_AT via the shared
+    # marker helper (atomic temp-then-rename) so this provisioning path and deploy-genlock-fleet.sh
+    # can never drift on HOW a box records its deployed build. The manifest copy stays here (the
+    # helper writes only the three text markers).
+    genlock_write_markers "$GENLOCK_MARKER_DIR" "$NEW_SHA" "$FAST_SHA"
     cp -a "$MANIFEST" "$GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json"
-    date -Is > "$GENLOCK_MARKER_DIR/DEPLOYED_AT"
 
     # Prevent an unattended `apt upgrade` from silently reverting libobs.so.30 back to PPA-stock
     # bytes behind the operator's back (dpkg still tracks obs-studio) — drift must be a deliberate
@@ -1266,7 +1321,7 @@ EOF
         fi
     fi
     if ! grep -q '^LastVersion=' "$f"; then
-        printf '\n[General]\nLastVersion=536936450\n' >> "$f"   # 32.1.2 — suppress first-run wizard
+        printf '\n[General]\nLastVersion=537001984\n' >> "$f"   # 32.2.0 — suppress first-run wizard
     fi
     if ! grep -q '^DockState=' "$f"; then
         # #791: OBS only persists [BasicWindow] geometry/DockState on a CLEAN exit -- imag-nb has
@@ -1282,7 +1337,7 @@ EOF
         # docked column after Controls, then a clean File > Exit so OBS ITSELF wrote these into its
         # own global.ini. Qt's dock-widget object names (scenesDock/sourcesDock/mixerDock/
         # transitionsDock/controlsDock/statsDock) have been stable across OBS's Qt frontend for
-        # years, so this applies cleanly to the box's actual OBS 32.1.2 genlock build too --
+        # years, so this applies cleanly to the box's actual OBS 32.2.0 genlock build too --
         # Qt's restoreState() is best-effort per-widget-by-objectName, so even a future OBS build
         # that adds/removes an unrelated dock degrades to "some docks not repositioned", never a
         # crash or a corrupted layout.
@@ -1417,8 +1472,11 @@ step 15 "Kiosk environment (#504): openbox+lightdm autologin, DM→lightdm, disa
 #     #833: wmctrl rides along here too — recording-e2e.sh's [0/8] projector-count preflight (and
 #     the #769 windowed-stray heal) shell out to it over SSH; a freshly provisioned box without it
 #     made that preflight misread "tool absent" as "0 projectors" (three wasted gate re-runs).
+#     #791: btop rides along too — the generated openbox menu (step 16, #785) "Systémový monitor"
+#     item runs `x-terminal-emulator -e btop`; the live box has it hand-installed, so a fresh box
+#     without it would carry a menu item pointing at a missing binary.
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl \
+DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop \
     || fail "#504: openbox+lightdm install failed — cannot convert imag-nb to the kiosk WM"
 
 # (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same
@@ -1657,6 +1715,16 @@ cat > "$USER_HOME/.config/openbox/menu.xml" <<'MENU_EOF'
     <item label="Zastav OBS (korektne)">
       <action name="Execute">
         <command>/usr/local/bin/imag-obs-stop.sh</command>
+      </action>
+    </item>
+    <item label="Systémový monitor (CPU+GPU)">
+      <action name="Execute">
+        <command>x-terminal-emulator -e btop</command>
+      </action>
+    </item>
+    <item label="Terminál">
+      <action name="Execute">
+        <command>x-terminal-emulator</command>
       </action>
     </item>
     <separator />
@@ -2100,6 +2168,71 @@ Section "InputClass"
 EndSection
 EOF
 echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 50)"
+
+# =============================================================================
+step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-profile/runtime-PM via imag-maxperf.service + hotplug udev rule"
+# =============================================================================
+# The incumbent's full performance persistence lived in imag-maxperf.service (issue 756) ->
+# /usr/local/sbin/imag-maxperf.sh, plus a hotplug-persistent udev rule -- NEVER tracked in the repo
+# (a live audit's `grep -rn imag-maxperf scripts/ tests/` returned nothing), hand-placed and never
+# ported to this generator (the same "provisioning gap hidden by a hand patch" class issue 840
+# documented for imag-obs-start.sh, issue 841 for the NVIDIA tuning, issue 858 for remoteos-mcp).
+# Step 4 (cpu-performance.service + rc.local) persists ONLY the governor + per-device USB/NET
+# power/control; EPP / intel_pstate no_turbo=0 / platform_profile / usbcore autosuspend / all-PCI
+# runtime-PM off / the hotplug udev rule were absent entirely -- exactly the EPP-persistence gap the
+# 2026-07-18 audit on this ticket demanded be folded in. Reproduce the live trio so a fresh box is
+# IDENTICAL to today's imag (the ticket mandate). The governor is set redundantly with
+# cpu-performance.service; that redundancy exists on the live box today and reproducing it is the
+# correct parity choice -- NOT a defect and NOT deferred work: consolidating the two units was the
+# explicitly REJECTED alternative (it would change the live box's own unit topology, so it is out of
+# scope for a parity fix). Every knob is [ -f ]/command -v guarded so it stays hardware-agnostic
+# (#816): a box lacking intel_pstate/
+# platform_profile simply skips those writes. verify-imag.sh check (y) reads the service/script/udev
+# presence AND the runtime STATE back and fails loud on any drift.
+mkdir -p /usr/local/sbin
+cat > /usr/local/sbin/imag-maxperf.sh <<'MAXPERF_EOF'
+#!/usr/bin/env bash
+# airuleset:script-ok boot enforcement must continue past missing knobs; every failure is logged loudly
+# imag max-perf boot enforcement (idempotent) -- issue 756 / #791 reprovision parity.
+set -u
+log(){ echo "imag-maxperf: $*"; }
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g" 2>/dev/null || log "governor write FAILED: $g"; done
+for e in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do [ -f "$e" ] && { echo performance > "$e" 2>/dev/null || log "EPP write FAILED: $e"; }; done
+[ -f /sys/devices/system/cpu/intel_pstate/no_turbo ] && { echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || log "no_turbo write FAILED"; }
+[ -f /sys/firmware/acpi/platform_profile ] && { echo performance > /sys/firmware/acpi/platform_profile 2>/dev/null || log "platform_profile write FAILED"; }
+command -v powerprofilesctl >/dev/null && { powerprofilesctl set performance 2>/dev/null || log "powerprofilesctl FAILED (daemon not up yet?)"; }
+[ -f /sys/module/usbcore/parameters/autosuspend ] && { echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null || log "usb autosuspend write FAILED"; }
+for p in /sys/bus/pci/devices/*/power/control; do echo on > "$p" 2>/dev/null || log "pci runtime-pm write FAILED: $p"; done
+log "applied: governor=$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | tr '\n' ' ') profile=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)"
+MAXPERF_EOF
+chmod 755 /usr/local/sbin/imag-maxperf.sh
+cat > /etc/systemd/system/imag-maxperf.service <<'MAXPERF_SVC_EOF'
+[Unit]
+Description=Force full max-performance (CPU/platform/USB/PCI) -- imag issue 756
+After=multi-user.target power-profiles-daemon.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/imag-maxperf.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+MAXPERF_SVC_EOF
+cat > /etc/udev/rules.d/99-imag-maxperf-pm.rules <<'MAXPERF_UDEV_EOF'
+# imag max-perf (issue 756 / #791): force runtime PM OFF (power/control=on) on device add -- NDI
+# NICs/peripherals must never power-dip; makes the boot-time write survive USB/PCI hotplug.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"
+MAXPERF_UDEV_EOF
+udevadm control --reload-rules 2>/dev/null || true
+systemctl daemon-reload
+systemctl enable --now imag-maxperf.service \
+    || fail "issue 756/#791: could not enable+start imag-maxperf.service — the full max-performance persistence (EPP/turbo/PCI-PM) would not survive a reboot"
+# Type=oneshot + RemainAfterExit=yes: an ACTIVE unit proves ExecStart (the enforcement script) ran
+# to completion -- a stronger proof than re-checking the governor, which step 4's own
+# cpu-performance.service already set (so a governor grep would pass even if imag-maxperf never ran).
+systemctl is-active --quiet imag-maxperf.service \
+    || fail "issue 756/#791: imag-maxperf.service is not active after enable --now — the boot-enforcement script did not run"
+echo "  issue 756/#791: full max-performance persistence provisioned (imag-maxperf.service active + udev rule)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

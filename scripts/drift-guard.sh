@@ -37,7 +37,7 @@
 #
 # Usage:
 #   scripts/drift-guard.sh [--check-pins] [--readme PATH]              # default: validate the pin set (CI)
-#   scripts/drift-guard.sh --compare host=strih obs_version=32.1.2 \
+#   scripts/drift-guard.sh --compare host=strih obs_version=32.2.0 \
 #       distroav_version=6.2.1 ndi_runtime=6.3.2.0 output_fps=30 genlock_wall_clock=1 \   # host=strih→30, host=stream→30 (#459, was strih→60/#11)
 #       ndi_input_latency="NDI cam5=0,NDI cam1=0,NDI cam3=0" \
 #       distroav_dll_paths="C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"
@@ -131,7 +131,7 @@ pinned_setting() {
     | sed -n 's/^[^|]*|[^|]*|[[:space:]]*`\([^`]*\)`.*/\1/p' | head -1 || true
 }
 
-# obs_version_from_log TEXT -> "32.1.2"  (OBS log header line "OBS 32.1.2 (64-bit, windows)").
+# obs_version_from_log TEXT -> "32.2.0"  (OBS log header line "OBS 32.2.0 (64-bit, windows)").
 obs_version_from_log() {
   printf '%s\n' "$1" \
     | sed -n 's/.*OBS \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1
@@ -1687,7 +1687,7 @@ Usage:
   distroav_dll_sha256 (the deployed distroav.dll Get-FileHash SHA256, read live off the box),
   genlock_capability (the live OBS-log genlock marker text — the build-unique
     `genlock: … render tick ENABLED` / `sub-frame jitter reserve` / `timestamp-aligned release`
-    lines; a STOCK OBS 32.1.2 emits NONE -> DRIFT even though its version matches).
+    lines; a STOCK OBS 32.2.0 emits NONE -> DRIFT even though its version matches).
   With a manifest supplied, an unread live SHA or capability marker is UNKNOWN (exit 11), never a
   silent clean — a wrong build we failed to hash is exactly the false-negative this facet prevents.
 
@@ -1869,7 +1869,7 @@ compare_observed() {
   [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
 
   # Per-component BUILD SHA + genlock capability (#122, EPIC #125). The marketing-version checks
-  # above pass a STOCK OBS 32.1.2 — byte-for-byte a different build from our genlock 32.1.2, but the
+  # above pass a STOCK OBS 32.2.0 — byte-for-byte a different build from our genlock 32.2.0, but the
   # identical version (the #119/#120 wrong-build-right-version that silently shipped). This facet
   # compares the LIVE rig's obs.dll/distroav.dll Get-FileHash against the #120 bundle manifest's
   # recorded sha256 AND asserts the genlock capability marker only our build emits is present, so a
@@ -1909,6 +1909,11 @@ compare_observed() {
       # distroav.dll build SHA — only checked when the manifest carries it (the hot-swap fast-dll
       # bundle ships obs.dll only). A manifest that lists distroav.dll demands the live SHA; the live
       # SHA observed without a manifest entry is reported, not silently dropped.
+      # #1115 path mapping (explicit): the manifest key is obs-plugins/64bit/distroav.dll but
+      # the on-box DEPLOYED distroav lives at C:\ProgramData\obs-studio\plugins\distroav\
+      # bin\64bit\distroav.dll (the ONLY path OBS loads it from). manifest_sha_for_component
+      # resolves by BASENAME, so these two different keys map to the same distroav.dll and the
+      # compare is honest once the deploy ships the bundle bytes to that load path (Option A).
       if [ -n "$m_distroav_sha" ]; then
         rc=0
         drift_check "distroav_dll_sha256" exact "$m_distroav_sha" "$o_distroav_sha" || rc=$?

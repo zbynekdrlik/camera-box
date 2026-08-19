@@ -101,6 +101,7 @@ bool load_graphics_imports(struct gs_exports *exports, void *module, const char 
 	GRAPHICS_IMPORT(device_clear);
 	GRAPHICS_IMPORT(device_is_present_ready);
 	GRAPHICS_IMPORT(device_present);
+	GRAPHICS_IMPORT_OPTIONAL(device_present_set_vsync); /* camera-box #1107 — GL/EGL only */
 	GRAPHICS_IMPORT(device_flush);
 	GRAPHICS_IMPORT(device_set_cull_mode);
 	GRAPHICS_IMPORT(device_get_cull_mode);

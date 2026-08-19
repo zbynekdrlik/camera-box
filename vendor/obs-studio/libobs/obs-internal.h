@@ -331,6 +331,14 @@ struct obs_display {
 	uint32_t render_consecutive_skips;
 	uint32_t render_frame_counter;
 
+	/* camera-box #1107: when true, this display's present uses vsync (eglSwapInterval 1) so
+	 * its scanout is tear-free. Set ONLY for the fullscreen program projector (OBSProjector,
+	 * savedMonitor > -1 && !isMultiview) via obs_display_set_vsync(); every other display —
+	 * the OBS main window, the preview, the multiview — leaves it false → interval 0 → no
+	 * added blocking present. Armed each tick by render_display() (graphics-thread-only,
+	 * single-writer, same discipline as render_divisor). */
+	bool vsync;
+
 	/* camera-box #771: MV fps observability. A throttleable monitoring display (the
 	 * Multiview projector) emits a `multiview-audit:` line every ~5s carrying its ACTUAL
 	 * measured render cadence (real renders / window) so operators + drift-guard + the E2E
@@ -807,6 +815,7 @@ extern obs_canvas_t *obs_create_main_canvas(void);
 extern void obs_canvas_destroy(obs_canvas_t *canvas);
 extern void obs_canvas_clear_mix(obs_canvas_t *canvas);
 extern void obs_free_canvas_mixes(void);
+extern bool obs_canvas_has_valid_video_info(obs_canvas_t *canvas);
 extern bool obs_canvas_reset_video_internal(obs_canvas_t *canvas, struct obs_video_info *ovi);
 extern void obs_canvas_insert_source(obs_canvas_t *canvas, obs_source_t *source);
 extern void obs_canvas_remove_source(obs_source_t *source);
@@ -1508,6 +1517,14 @@ struct obs_encoder_group {
 
 	uint32_t num_encoders_started;
 	uint64_t start_timestamp;
+
+	uint32_t frame_rate_divisors_lcm;
+
+	uint64_t reconfigure_request;
+	int64_t next_pts;
+	uint32_t encoders_updated_next_pts;
+	uint32_t encoders_reconfigured;
+	bool reconfigure_again;
 };
 
 struct obs_encoder {
@@ -1581,6 +1598,8 @@ struct obs_encoder {
 
 	/* track encoders that are part of a gop-aligned multi track group */
 	struct obs_encoder_group *encoder_group;
+	uint64_t last_reconfigure_request;
+	uint64_t last_handled_reconfigure_request;
 
 	pthread_mutex_t outputs_mutex;
 	DARRAY(obs_output_t *) outputs;

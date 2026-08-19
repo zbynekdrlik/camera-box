@@ -42,3 +42,56 @@ against, and there were ZERO imag runs at report-only-land time. The follow-up m
 rig-side extract is healthy so imag partials flow (a live E2E — supervisor/rig-ops scope), (2)
 accumulate green imag runs, (3) flip `gates_overall_pass()` to `true`, and (4) fold in the issue-887
 produced-vs-presented ~7% deficit as a blocking term. Do NOT flip it blind.
+
+## The 0/76 root cause was the decode CPU-PIN, not StopRecord/reachability/decode (issue 1094, FIXED)
+
+The `[8/8c]` extract ran `recording-verdict-on-imag.sh`, whose `build_onimag_command` hardcoded
+`nice -n 19 taskset -c 12-15 …`. That range was the E-cores of the RETIRED 16-thread imag notebook.
+The box was swapped to an **i5-13420H (12 threads, online cpus 0-11, E-cores 8-11)** — cores 12-15
+do not exist, so `taskset -c 12-15` exits **rc=1 "Invalid argument" BEFORE it can exec
+recording-verdict**. No partial was ever produced → `[8/8c]` "extract failed" → `[8/8d]` omitted
+`--merge-partials imag=…` → `imag_leg_verified=false` on EVERY run. The setup-imag.sh CPU-isolation
+plan was already made topology-agnostic for this same swap (`imag_cpu_isolation_plan`, #833/#841),
+but the DECODE pin in recording-verdict-on-imag.sh was a SEPARATE hardcoded core reference the swap
+sweep missed.
+
+Fixed (1094): `onimag_decode_core_range <ncpus>` (pure, Tier-0-tested) → top min(4,ncpus) cores
+(8-11 here, 12-15 on the old box); `main()` resolves it from the LIVE box (nproc over ssh + a
+`taskset` probe) and FAILS OPEN (empty range → decode runs unpinned, nice 19 only), so a pin error
+can never again silently zero the imag leg. The stale on-box binary is NOT a factor — it supports
+`--extract-partial imag` and emits `schema_version=3`, exactly what the current merge expects.
+
+Diagnostic tells: an imag extract that fails with **no decode-progress log line at all** (no
+`recording decode progress frames_read=…`) points at the PREFIX (`taskset`/`nice`), not the binary
+or the recording — a failing `taskset` aborts the whole command before recording-verdict starts.
+And when a box is swapped, sweep EVERY hardcoded core reference (`grep -rn 'taskset -c'`), not just
+the isolation plan.
+
+## The stale-on-imag-binary landmine FIRED on the v3->v4 bump — FIXED both sides (issue 1118)
+
+The latent landmine below fired on its first possible run (E2E 32178766136): the dup-cadence work
+bumped `PARTIAL_SCHEMA_VERSION` 3->4, and because `recording-verdict-on-imag.sh` STEP 1 re-uploaded
+the on-imag binary only when it was absent/non-executable (`[ -x ]`, no version compare), imag kept
+its stale v3-emitting binary. The fresh dev1 merge then HARD-DIED — `RecordingPartial::load(path)?`
+propagated `recording partial schema_version 3 is not supported` before any verdict JSON was written,
+so the fail-closed E2E guard reds a run a strih+stream-only merge scores `overall_pass=true`. Two
+fixes landed (both crate-root-pure so they Tier-0-test despite the probe gate on recording-verdict):
+
+1. **STEP 1 version-gate** (`onimag_upload_decision`, pure/sourced): STEP 1 now sha256-compares the
+   on-imag binary against the local one and re-uploads on a mismatch (identical sha keeps the fast
+   skip; `--force-upload` still wins; any unreadable sha re-uploads fail-safe). A schema bump can
+   never again leave imag on a stale emitter.
+2. **Merge-side degrade** (`src/partial_schema_gate.rs` seam, called by `run_merge`): a schema-
+   mismatched partial for the REPORT-ONLY imag box now DEGRADES — drop it, loud stderr WARNING,
+   `full_chain.imag_leg_verified=false` + `full_chain.imag_leg_skip_reason`, verdict computed from
+   the remaining strih+stream partials. `classify_load_failure(box, found_schema, expected_schema)`
+   degrades ONLY a clean schema mismatch on a report-only box; **strih/stream and every non-schema
+   failure (unreadable/corrupt JSON, a same-schema error) STAY FATAL** — their binaries come fresh
+   from CI each run, so a mismatch there is a genuine hard-gate defect. The skip reason threads
+   through `build_and_print_verdict_with_stream_hashes` as a trailing `Option<String>` (the 8-arg
+   back-compat wrapper passes `None`), mirroring the issue-1112 `stream_content_hashes` carry.
+
+Note the earlier issue-1094 section's aside ("emits `schema_version=3`, exactly what the current
+merge expects") was true at issue-1094 time; the schema is 4 now, which is exactly why the landmine
+fired. If you bump `PARTIAL_SCHEMA_VERSION` again, the STEP-1 sha gate handles the redeploy and the
+degrade path keeps a still-stale report-only imag leg from ever zeroing the whole verdict.

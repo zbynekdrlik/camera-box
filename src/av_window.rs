@@ -317,9 +317,125 @@ pub fn derive_camera_av_sync(
     })
 }
 
+/// #748 — the discriminator for a fused A/V-sync run in which EVERY judged camera produced zero
+/// candidate offsets. `candidates == 0` alone conflates two very different causes, and the
+/// operator alert must not blame the wrong one: (a) a genuinely SILENT measurement chain (mbc
+/// Ableton mic muted / Dante misroute) — the #748 incident, where a full cycle burned reported
+/// only as a quiet `candidates: 0`; versus (b) audio PRESENT but the QPSK marker never clustered
+/// (a broken emit/painter side, or a marker-decode regression) — where the mbc mute is NOT the
+/// cause.
+/// The QPSK demod already separates them: [`crate::qpsk_marker::DecodeStats::preamble_screens_passed`]
+/// counts sample onsets whose preamble screen crossed threshold — zero means the demod never saw
+/// anything resembling the marker (no/near-silent signal), so a positive count on an all-silent
+/// run means the audio WAS present, the marker just did not decode. Measured from the ACTUAL
+/// recorded audio, so it catches a chain that went silent mid-record too, not only pre-record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvAudioState {
+    /// At least one judged camera produced candidates (a real measurement), or no camera was
+    /// judged at all — the silent-vs-undecoded discriminator does not apply.
+    Measured,
+    /// Every judged camera had zero candidates AND the demod saw zero preamble onsets: the
+    /// measurement-audio chain is SILENT (mbc mute / Dante misroute).
+    Silent,
+    /// Every judged camera had zero candidates BUT the demod DID see preamble onsets: the audio is
+    /// present, the marker just never clustered (emit-side / QPSK decode problem, NOT a mute).
+    PresentUndecoded,
+}
+
+impl AvAudioState {
+    /// The machine-readable `av_audio_silent` flag emitted into the `all_cambox_av_sync` verdict
+    /// block: `Some(true)` for a silent chain, `Some(false)` for present-but-undecoded audio, and
+    /// `None` (JSON `null`) when the discriminator does not apply (a real measurement, or nothing
+    /// judged) — a consumer that reads `null`/absent keeps the safe, loud default (blame the mbc
+    /// mute) rather than suppressing the alert.
+    pub fn av_audio_silent_flag(self) -> Option<bool> {
+        match self {
+            AvAudioState::Silent => Some(true),
+            AvAudioState::PresentUndecoded => Some(false),
+            AvAudioState::Measured => None,
+        }
+    }
+}
+
+/// #748 pure discriminator (Tier-0). `judged_cameras` is how many cameras were actually judged
+/// (not operator-ack-excluded); `all_judged_candidates_zero` is whether EVERY one of those had
+/// `candidates == 0`; `preamble_screens_passed` is the whole-recording QPSK preamble-onset count.
+/// Fails CLOSED toward "measured/N/A" (never a false silent claim) when nothing was judged, and
+/// toward SILENT only when a real all-zero run also saw zero preamble energy.
+pub fn classify_av_audio_state(
+    judged_cameras: usize,
+    all_judged_candidates_zero: bool,
+    preamble_screens_passed: u64,
+) -> AvAudioState {
+    if judged_cameras == 0 || !all_judged_candidates_zero {
+        // Nothing judged (vacuous all-zero), or a real measurement exists -> N/A. Never accuse
+        // the mbc chain of being silent on a run that actually measured something.
+        return AvAudioState::Measured;
+    }
+    if preamble_screens_passed == 0 {
+        AvAudioState::Silent
+    } else {
+        AvAudioState::PresentUndecoded
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------------
+    // classify_av_audio_state — #748 silent-vs-undecoded discriminator
+    // ---------------------------------------------------------------------
+    #[test]
+    fn av_audio_all_silent_with_zero_preamble_energy_is_silent_chain_748() {
+        // Every judged camera candidates==0 AND the demod saw NO preamble onsets -> the mbc
+        // measurement chain is genuinely silent (the #748 incident shape).
+        assert_eq!(classify_av_audio_state(6, true, 0), AvAudioState::Silent);
+        assert_eq!(
+            classify_av_audio_state(6, true, 0).av_audio_silent_flag(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn av_audio_all_silent_but_preamble_energy_present_is_undecoded_not_a_mute_748() {
+        // candidates==0 everywhere BUT the demod DID screen preamble onsets -> the audio was
+        // present, the marker never decoded (emit/painter or decode problem), NOT an mbc mute.
+        assert_eq!(
+            classify_av_audio_state(6, true, 42),
+            AvAudioState::PresentUndecoded
+        );
+        assert_eq!(
+            classify_av_audio_state(6, true, 42).av_audio_silent_flag(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn av_audio_with_any_candidates_is_measured_discriminator_does_not_apply_748() {
+        // A real measurement (at least one camera had candidates) -> the discriminator is N/A,
+        // regardless of the preamble count.
+        assert_eq!(classify_av_audio_state(6, false, 0), AvAudioState::Measured);
+        assert_eq!(
+            classify_av_audio_state(6, false, 99),
+            AvAudioState::Measured
+        );
+        assert_eq!(
+            classify_av_audio_state(6, false, 0).av_audio_silent_flag(),
+            None
+        );
+    }
+
+    #[test]
+    fn av_audio_zero_judged_cameras_never_claims_silent_748() {
+        // Fail closed: if no camera was judged (e.g. every box operator-ack-excluded), the
+        // all-zero condition is vacuous -> never accuse the mbc chain of being silent.
+        assert_eq!(classify_av_audio_state(0, true, 0), AvAudioState::Measured);
+        assert_eq!(
+            classify_av_audio_state(0, true, 0).av_audio_silent_flag(),
+            None
+        );
+    }
 
     // ---------------------------------------------------------------------
     // gates_overall_pass (issue 861 re-arm)

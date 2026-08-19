@@ -103,7 +103,7 @@ When a NEXT swap fails, check this list before theorising:
   `/lib/systemd/system/lightdm.service` can never match. Canonicalise BOTH sides
   (`imag_same_unit`).
 - **The OBS base version must MATCH the genlock build (#824).** The PPA moved to 32.2.0 while the
-  genlock build is 32.1.2; libobs then refuses every stock plugin (`compiled with newer libobs
+  genlock build is 32.2.0; libobs then refuses every stock plugin (`compiled with newer libobs
   32.2` × 41) and OBS comes up with ONLY `distroav.so` — no obs-websocket (so `imag_scenes.py`
   gets `ConnectionRefused` on :4455) and no encoders. `IMAG_OBS_BASE_VERSION` pins it; a superseded
   PPA binary is gone from the pool but still served by
@@ -193,6 +193,29 @@ edit run the **full** `cargo test` (`# airuleset:build-ok`), not just the file y
 elsewhere right after touching this script is far more likely a textual collision than a real
 regression. Same trap as `scripts/recording-e2e.sh` (see the project CLAUDE.md GOTCHA).
 
+**Adding a new `step N`/bumping `TOTAL_STEPS` touches THREE test files, not one (#791, 2026-08-18).**
+`TOTAL_STEPS=<N>` is pinned in `tests/setup_imag_guards.rs` (the `declared == N && declared ==
+actual-step-count` invariant) AND independently in `tests/setup_imag_obs_watchdog_764.rs`
+(`body.contains("TOTAL_STEPS=25")`) AND `tests/setup_imag_remoteos_mcp_858.rs` (same literal) —
+those two hardcode the count to prove THEIR OWN step is still counted. Bumping only the guards test
+leaves the other two RED, and because they read the script text they surface only at RUN time (not
+`cargo test --no-run`), so a Tier-0 worker sees them only when running each compiled binary. Grep
+`grep -rn 'TOTAL_STEPS=' tests/` before finishing and bump every literal in lock-step. #791 added
+step 26 (imag-maxperf max-performance persistence) and hit exactly this — two GREEN-phase failures
+after the guards test was already updated.
+
+**The `imag-maxperf` trio (`imag-maxperf.service` + `/usr/local/sbin/imag-maxperf.sh` +
+`99-imag-maxperf-pm.rules`, issue 756) IS now provisioned by `setup-imag.sh` step 26 (#791).** It
+persists the FULL performance profile beyond step 4's governor: EPP=performance, intel_pstate
+`no_turbo=0`, `platform_profile=performance`, `powerprofilesctl set performance`, usbcore
+autosuspend, all-PCI runtime-PM off, plus the hotplug udev rule so a re-plugged USB/PCI device keeps
+runtime-PM off. It was the last "hand-placed hidden by a hand patch" gap on the live box (same class
+as imag-obs-start.sh #840 / NVIDIA tuning #841 / remoteos-mcp #858) — the 2026-07-18 EPP-persistence
+audit demand. `verify-imag.sh` check (y) gates it (`imag_maxperf_state_ok`, `absent`-tolerant per
+#816). The governor is set redundantly with `cpu-performance.service` — that redundancy exists on the
+live box and is reproduced for parity, NOT a defect to "fix" (consolidation would be a separate,
+box-touching refactor).
+
 **A NEGATIVE anchor (`!body.contains(...)` / "must NOT") is tripped by ADDING a matching string, not
 by duplicating one — and a Tier-0 worker who cannot run the full suite MUST grep for it explicitly
 (#779, 2026-08-17).** The usual anchor sweep (grep your new literal + the `.find()`/`.split()`
@@ -281,7 +304,7 @@ HOME=/tmp/throwaway-home DISPLAY=:77 obs --disable-shutdown-check &
 # $HOME/.config/obs-studio/global.ini -- grep those two keys out and seed them elsewhere.
 ```
 
-A DIFFERENT, older OBS version (30.0.2 stock vs the rig's 32.1.2 genlock build) is fine for this --
+A DIFFERENT, older OBS version (30.0.2 stock vs the rig's 32.2.0 genlock build) is fine for this --
 Qt's dock-widget object names (`scenesDock`/`sourcesDock`/`mixerDock`/`transitionsDock`/
 `controlsDock`/`statsDock`) have been stable for years, and `restoreState()` degrades gracefully
 (best-effort per-widget-by-name) if a future build adds/removes an unrelated dock.

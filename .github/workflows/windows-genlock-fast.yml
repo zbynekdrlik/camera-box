@@ -251,6 +251,16 @@ jobs:
           # camera-box #1080: a failed recv_create_v3 in the reset path must back off + retry, never break (a break there leaves s->running true so ndi_source_update never restarts the thread — reattach-proof black; this FAST path ships distroav.dll for hot-swap, so re-assert here too — mirrors tests/distroav_recv_create_retry_1080.rs).
           if ($ndi -notmatch [regex]::Escape('static inline uint64_t ndi_recv_create_retry_backoff_ns(')) { Write-Error "ndi-source.cpp: the #1080 ndi_recv_create_retry_backoff_ns backoff helper is gone -- a transient recv_create_v3 failure permanently kills the receiver thread"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(recv_create_fail_count)')) { Write-Error "ndi-source.cpp: the reset block no longer CALLS ndi_recv_create_retry_backoff_ns(recv_create_fail_count) -- a failed recv_create_v3 reverts to the permanent-death break"; exit 1 }
+          # camera-box #1096: the strih receiver wedges after a cambox sender restart -- connect-by-name re-consults the poisoned long-lived per-process finder (stale rotated-port address) and never re-resolves; only an OBS restart clears it. The fix resolves via a FRESH NDIlib_find per reset and connects BY-ADDRESS. This FAST path ships distroav.dll for hot-swap, so re-assert here too -- mirrors tests/distroav_fresh_finder_connect_1096.rs.
+          if ($ndi -notmatch [regex]::Escape('static inline const char *ndi_find_url_for_source_name(')) { Write-Error "ndi-source.cpp: the #1096 ndi_find_url_for_source_name URL-picker helper is gone -- the receiver can no longer connect BY-ADDRESS and stays wedged after a sender restart"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('ndiLib->find_create_v2(')) { Write-Error "ndi-source.cpp: the #1096 reset block no longer creates a FRESH NDIlib_find (find_create_v2) -- it keeps resolving through the poisoned long-lived finder"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('ndi_find_url_for_source_name(owned_source_name,')) { Write-Error "ndi-source.cpp: the #1096 reset block no longer calls ndi_find_url_for_source_name(owned_source_name, ...) to pick the fresh URL"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('recv_desc.source_to_connect_to.p_url_address = owned_source_url;')) { Write-Error "ndi-source.cpp: the #1096 reset block no longer binds the fresh URL onto recv_desc.source_to_connect_to.p_url_address -- it still connects by name through the poisoned finder"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('ndiLib->find_destroy(')) { Write-Error "ndi-source.cpp: the #1096 fresh finder is never find_destroy'd (per-reset leak)"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('uint64_t no_conn_since_ns = 0;')) { Write-Error "ndi-source.cpp: the #1096 no_conn_since_ns disconnect timer is gone -- a graceful cambox restart (no_conn==0, #767 never fires) leaves the source black"; exit 1 }
+          # camera-box #1097: framesync_create failure must retry (not break) -- dormant sibling of #1080 (framesync forced OFF, but a break there is the SAME permanent reattach-proof receiver death). This FAST path ships distroav.dll for hot-swap, so gate here too -- mirrors tests/distroav_framesync_create_retry_1097.rs.
+          if ($ndi -notmatch [regex]::Escape('unsigned framesync_create_fail_count = 0;')) { Write-Error "ndi-source.cpp: the #1097 framesync_create_fail_count retry counter is gone -- a transient framesync_create failure would break the receiver loop and permanently kill the thread"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(framesync_create_fail_count)')) { Write-Error "ndi-source.cpp: the #1097 framesync branch no longer CALLS ndi_recv_create_retry_backoff_ns(framesync_create_fail_count) -- reverts to the permanent-death break"; exit 1 }
           # #795: list-only (non-editable) NDI source selector + saved-name preservation (this FAST path ships distroav.dll for hot-swap, so gate here too — mirrors tests/distroav_genlock_lockdown.rs).
           if ($ndi -match [regex]::Escape('OBS_COMBO_TYPE_EDITABLE')) { Write-Error "ndi-source.cpp: OBS_COMBO_TYPE_EDITABLE is BACK — #795 the genlock NDI source selector must be list-only (a free-text combo black-screened a live event 2026-07-17)"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING')) { Write-Error "ndi-source.cpp: the PROP_SOURCE selector is no longer a LIST combo (OBS_COMBO_TYPE_LIST) — #795 reverted"; exit 1 }
@@ -513,7 +523,7 @@ jobs:
         shell: bash
         run: >
           cmake --preset windows-x64
-          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF
           -DENABLE_VLC=OFF
@@ -600,13 +610,13 @@ jobs:
       # Configure the vendored OBS exactly like the production build (same preset, same
       # disable flags), but with ENABLE_BROWSER=OFF: the CEF/browser download + build is
       # the bulk of the 150-min full build and is not needed to compile-check the
-      # vendored C++. bash quoting is exact — pwsh would split -DNAME=32.1.2 at the dots.
+      # vendored C++. bash quoting is exact — pwsh would split -DNAME=32.2.0 at the dots.
       - name: Configure OBS (windows-x64 preset, browser OFF for the compile gate)
         working-directory: vendor/obs-studio
         shell: bash
         run: >
           cmake --preset windows-x64
-          '-DOBS_VERSION_OVERRIDE=32.1.2'
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_BROWSER=OFF
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF

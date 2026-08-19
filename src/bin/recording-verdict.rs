@@ -2884,8 +2884,45 @@ fn stream_diag_cfg(base: &VerdictConfig, stream_capture_fps: f64) -> VerdictConf
 /// below immediately tripped `-D warnings` in the `--all-features` Lint CI job (never visible
 /// locally — Tier-0 policy bans compiling `--features probe` on this box). Moved to the correct
 /// item.
+/// #1112 back-compat wrapper — preserves the original 8-arg signature so every existing (test +
+/// fused-`main`) call site is byte-for-byte unchanged. The fused path carries no per-frame content
+/// hashes (the #1088 dup-cadence block recomputes them from the LOCAL `stream_rec` there), so it
+/// delegates with `None`; only the #208 merge path (`run_merge`, which has no recording on dev1)
+/// calls [`build_and_print_verdict_with_stream_hashes`] with the vector carried in the stream
+/// partial (`RecordingPartial::content_hashes`).
 #[allow(clippy::too_many_arguments)]
 fn build_and_print_verdict(
+    args: &Args,
+    strih: Option<DecodedRec>,
+    stream: Option<DecodedRec>,
+    cam1: Cam1Source,
+    strih_colour: Option<camera_box::colour_verify::NodeColourSummary>,
+    stream_colour: Option<camera_box::colour_verify::NodeColourSummary>,
+    imag: Option<DecodedRec>,
+    stream_av_sync: Option<AvMarkerInputs>,
+) -> Result<(serde_json::Value, bool)> {
+    build_and_print_verdict_with_stream_hashes(
+        args,
+        strih,
+        stream,
+        cam1,
+        strih_colour,
+        stream_colour,
+        imag,
+        stream_av_sync,
+        None,
+        None, // issue 1118: the fused/test path never degrades an imag partial (no schema skip)
+    )
+}
+
+/// [`build_and_print_verdict`] + the STREAM recording's per-frame content hashes carried from the
+/// #208 merge. `stream_content_hashes` is `Some` ONLY in the merge path on an all-cambox stream
+/// extract (see `run_merge` / `RecordingPartial::content_hashes`); `None` on the fused path (there
+/// the #1088 dup-cadence block recomputes them from the local `stream_rec`) and on any run without
+/// the carried vector. Consumed ONLY by the #1088 dup-cadence block below — every other term is
+/// unaffected by this argument.
+#[allow(clippy::too_many_arguments)]
+fn build_and_print_verdict_with_stream_hashes(
     args: &Args,
     strih: Option<DecodedRec>,
     stream: Option<DecodedRec>,
@@ -2904,6 +2941,15 @@ fn build_and_print_verdict(
     // on the fused path — there, `all_cambox_av_sync` decodes directly from `args.stream` +
     // `args.av_marker_log` when both are given (see the `--switch-schedule` block below).
     stream_av_sync: Option<AvMarkerInputs>,
+    // #1112 — the STREAM recording's per-frame content hashes carried from the merge (`Some` only
+    // in the #208 merge path on an all-cambox stream extract; see above). Fed to the #1088
+    // dup-cadence block so it emits in the production `VERDICT_ON_STREAM=1` merge gate.
+    stream_content_hashes: Option<Vec<u64>>,
+    // issue 1118 — `Some(reason)` when `run_merge` DROPPED a schema-mismatched imag partial (the
+    // report-only degrade path); surfaced at `full_chain.imag_leg_skip_reason` beside
+    // `imag_leg_verified` so a degraded run is mineable, never silent. `None` on every normal run
+    // and on the fused/test path.
+    imag_skip_reason: Option<String>,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -4261,6 +4307,19 @@ fn build_and_print_verdict(
              visible. Report-only — does NOT gate overall_pass."
         );
     }
+    // issue 1118 — when the imag partial was DROPPED because its schema mismatched this build (a
+    // stale on-imag emitter after a PARTIAL_SCHEMA_VERSION bump), record WHY beside the bare
+    // `imag_leg_verified=false`, so a degraded run is mineable rather than looking like a plain
+    // "imag never ran". Report-only: the imag leg is report-only, so dropping it never touches
+    // overall_pass — the verdict is computed from strih+stream exactly as every pre-1094 run was.
+    if let Some(reason) = &imag_skip_reason {
+        report["full_chain"]["imag_leg_skip_reason"] = serde_json::json!(reason);
+        println!(
+            "  [imag] leg DEGRADED this run (report-only, issue 1118): {reason} \
+             Verdict computed from the remaining (strih+stream) partials; \
+             does NOT gate overall_pass."
+        );
+    }
 
     // #312 Phase-1 — ALL-CAMBOX per-segment continuity (the all-active splitter proof). When a
     // switch schedule is supplied, partition the SINGLE continuous stream recording into the per-
@@ -4657,129 +4716,156 @@ fn build_and_print_verdict(
                 // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
                 all_pass &= cadence_gate_pass || !cadence_gates_overall;
 
-                // #1088 — REPORT-ONLY duplication-masked 50→60 dup-rate seam (the #794 hard layer).
-                // The cadence watchdog (#794) reads strih's genlock-fifo `received=` rate and is
-                // STRUCTURALLY BLIND to a grabber that upconverts a 50fps source to 60 by frame
-                // DUPLICATION: it delivers a padded genuine 60 NDI frames/s, so `received=` reads a
-                // clean 60. The surviving signal is per-frame CONTENT identity — a row-sampled
-                // content hash per recorded frame, sliced into the SAME cambox windows the sweep
-                // above uses, fed into the pure `camera_box::dup_cadence` classifier. Needs the
-                // actual stream recording FILE to re-decode pixels (a SEPARATE, luma-only ffmpeg
-                // pass), so it is skipped in merge mode. Report-only / calibration-first:
-                // `gates_overall_pass()` is false (no real 50→60-grabber run to calibrate a bound
-                // yet), so the fold below is a no-op. Pure logic in `camera_box::dup_cadence`
-                // (Tier-0 tested); this is the thin probe-side consumer.
-                match stream_rec.as_deref() {
-                    Some(rec_path) => {
-                        match camera_box::probe::recording::hash_recording_frames(rec_path) {
-                            Ok(frame_hashes) => {
-                                let (dup_windows, dup_no_anchor) = partition_frames_by_window(
-                                    stream_frames,
-                                    &anchor_run_ids,
-                                    &all_burns,
-                                    cam2_pin,
-                                    schedule,
-                                    args.switch_guard_ns,
-                                );
-                                let mut dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> =
-                                    Vec::with_capacity(dup_windows.len());
-                                let mut worst_raw_fraction: Option<f64> = None;
-                                let mut masked_windows: usize = 0;
-                                for win_frames in &dup_windows {
-                                    let seq: Vec<u64> = win_frames
-                                        .iter()
-                                        .filter_map(|f| {
-                                            frame_hashes.get(f.frame_index as usize).copied()
-                                        })
-                                        .collect();
-                                    let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
-                                    if let Some(ref d) = dc {
-                                        worst_raw_fraction = Some(
-                                            worst_raw_fraction.map_or(d.duplicate_fraction, |m| {
-                                                m.max(d.duplicate_fraction)
-                                            }),
-                                        );
-                                        if d.duplication_masked {
-                                            masked_windows += 1;
-                                        }
-                                    }
-                                    dcs.push(dc);
+                // #1088/#1112 — REPORT-ONLY duplication-masked 50→60 dup-rate seam (the #794 hard
+                // layer). The cadence watchdog (#794) reads strih's genlock-fifo `received=` rate
+                // and is STRUCTURALLY BLIND to a grabber that upconverts a 50fps source to 60 by
+                // frame DUPLICATION: it delivers a padded genuine 60 NDI frames/s, so `received=`
+                // reads a clean 60. The surviving signal is per-frame CONTENT identity — a
+                // row-sampled content hash per recorded frame, sliced into the SAME cambox windows
+                // the sweep above uses, fed into the pure `camera_box::dup_cadence` classifier.
+                //
+                // #1112 — the hashes need the recording PIXELS, which in the production
+                // `VERDICT_ON_STREAM=1` merge are NOT on dev1. So the STREAM box computes them
+                // during `--extract-partial stream` (recording local) and CARRIES them in the
+                // partial (`stream_content_hashes`); the fused `--stream` path still has the
+                // recording here and recomputes them from `stream_rec`. Either way the SAME
+                // windowing + classifier runs — this closes the #1101 finding that the surface was
+                // structurally unreachable in the merge gate (0/81 verdicts carried it). Report-only
+                // / calibration-first: `gates_overall_pass()` is false (no calibrated bound yet —
+                // #1101 owns the LIVE flip), so the fold below is a no-op.
+                // Each skip REASON is logged HERE during source resolution (accurately — a hash
+                // FAILURE prints its own {e}, a genuine no-source prints the no-carry/no-recording
+                // line), so the consuming match's None arm is a no-op and never double-logs a
+                // contradictory second line (issue-1112 review). Matched by VALUE, so the carried
+                // vector is MOVED, not cloned (`stream_content_hashes` is not read again).
+                let dup_hash_source: Option<Vec<u64>> = match stream_content_hashes {
+                    // Merge path (production gate): the stream box already hashed its LOCAL recording
+                    // during extract and carried the vector — the ONLY way the pixel-derived hashes
+                    // reach the dev1 merge, which has no recording.
+                    Some(carried) => Some(carried),
+                    // Fused path (legacy `--stream`): the recording is on this host, recompute it
+                    // exactly as before #1112. A hash failure is NON-FATAL for a report-only surface.
+                    None => match stream_rec.as_deref() {
+                        Some(rec_path) => {
+                            match camera_box::probe::recording::hash_recording_frames(rec_path) {
+                                Ok(h) => Some(h),
+                                Err(e) => {
+                                    println!(
+                                        "  #1088 DUP-CADENCE: skipped — could not hash stream recording: {e}"
+                                    );
+                                    None
                                 }
-                                // The GATE keys on the DISCRIMINATED signal (worst fraction among
-                                // windows classified `duplication_masked`), never the raw worst —
-                                // a freeze/glitch has a high raw fraction but is coverage/regularity
-                                // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
-                                // it (issue 1088 review finding).
-                                let worst_masked_fraction =
-                                    camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
-                                let dup_window_json: Vec<serde_json::Value> = dcs
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(wi, dc)| {
-                                        serde_json::json!({
-                                            "cambox": schedule[wi].cambox.clone(),
-                                            "dup_cadence": dc,
-                                        })
-                                    })
-                                    .collect();
-                                let dup_bound = camera_box::dup_cadence::DUP_RATE_PULLDOWN_MIN;
-                                let dup_gate_pass = camera_box::dup_cadence::dup_cadence_gate_pass(
-                                    worst_masked_fraction,
-                                    Some(dup_bound),
-                                );
-                                let dup_gates_overall =
-                                    camera_box::dup_cadence::gates_overall_pass();
-                                report["all_cambox_continuity"]["duplication_masked_cadence"] = serde_json::json!({
-                                    "windows": dup_window_json,
-                                    "masked_windows": masked_windows,
-                                    "worst_masked_duplicate_fraction": worst_masked_fraction,
-                                    "worst_raw_duplicate_fraction": worst_raw_fraction,
-                                    "bound_duplicate_fraction": dup_bound,
-                                    "pass": dup_gate_pass,
-                                    "gates_overall_pass": dup_gates_overall,
-                                    "frames_no_anchor": dup_no_anchor,
-                                    "note": "#1088 duplication-masked 50->60 detector: \
-                                             per-cambox-window row-sampled content-hash dup-rate \
-                                             (the #794 hard layer the received= rate tap is blind \
-                                             to). Per-window duplication_masked flags a sustained + \
-                                             regular + window-spanning pulldown. The GATE keys on \
-                                             worst_masked_duplicate_fraction (worst raw fraction \
-                                             among MASKED windows), NOT worst_raw_duplicate_fraction \
-                                             (a freeze/glitch has a high raw fraction but is \
-                                             coverage/regularity vetoed → excluded, no \
-                                             double-jeopardy with frozen_leg). REPORT-ONLY / \
-                                             calibration-first via dup_cadence::gates_overall_pass \
-                                             (false).",
-                                });
-                                println!(
-"  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
-                                    masked_windows,
-                                    worst_masked_fraction
-                                        .map(|p| format!("{p:.5}"))
-                                        .unwrap_or_else(|| "n/a".to_string()),
-                                    worst_raw_fraction
-                                        .map(|p| format!("{p:.5}"))
-                                        .unwrap_or_else(|| "n/a".to_string()),
-                                    dup_bound,
-                                    dup_gate_pass,
-                                    dup_gates_overall,
-                                );
-                                // Fold: a FAIL only fails the run while the seam gates overall_pass
-                                // (report-only today, so this is a no-op).
-                                all_pass &= dup_gate_pass || !dup_gates_overall;
-                            }
-                            Err(e) => {
-                                println!(
-                                    "  #1088 DUP-CADENCE: skipped — could not hash stream recording: {e}"
-                                );
                             }
                         }
-                    }
-                    None => {
-                        println!(
-                            "  #1088 DUP-CADENCE: skipped — no local stream recording (merge mode)"
+                        // Genuine no-source: no carry from the box AND no local recording (the
+                        // routine pre-#1112 merge case). Accurate reason, unlike a hash failure.
+                        None => {
+                            println!(
+                                "  #1088 DUP-CADENCE: skipped — no stream content hashes (no carry \
+                                 from the stream box, no local recording to hash)"
+                            );
+                            None
+                        }
+                    },
+                };
+                // The skip reason for a None dup_hash_source was already logged accurately during
+                // source resolution above, so the None arm needs no body — if let, per clippy.
+                if let Some(frame_hashes) = dup_hash_source {
+                    let (dup_windows, dup_no_anchor) = partition_frames_by_window(
+                        stream_frames,
+                        &anchor_run_ids,
+                        &all_burns,
+                        cam2_pin,
+                        schedule,
+                        args.switch_guard_ns,
+                    );
+                    let mut dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> =
+                        Vec::with_capacity(dup_windows.len());
+                    let mut worst_raw_fraction: Option<f64> = None;
+                    let mut masked_windows: usize = 0;
+                    for win_frames in &dup_windows {
+                        // #1112 — slice the (carried or locally-recomputed) per-frame
+                        // hash vector into THIS window's sequence, by frame_index (the
+                        // pure Tier-0 helper — index-alignment is the one fragile part
+                        // and is unit-tested there).
+                        let win_idxs: Vec<u64> = win_frames.iter().map(|f| f.frame_index).collect();
+                        let seq = camera_box::dup_cadence::window_content_hashes(
+                            &win_idxs,
+                            &frame_hashes,
                         );
+                        let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
+                        if let Some(ref d) = dc {
+                            worst_raw_fraction = Some(
+                                worst_raw_fraction
+                                    .map_or(d.duplicate_fraction, |m| m.max(d.duplicate_fraction)),
+                            );
+                            if d.duplication_masked {
+                                masked_windows += 1;
+                            }
+                        }
+                        dcs.push(dc);
                     }
+                    // The GATE keys on the DISCRIMINATED signal (worst fraction among
+                    // windows classified `duplication_masked`), never the raw worst —
+                    // a freeze/glitch has a high raw fraction but is coverage/regularity
+                    // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
+                    // it (issue 1088 review finding).
+                    let worst_masked_fraction =
+                        camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                    let dup_window_json: Vec<serde_json::Value> = dcs
+                        .iter()
+                        .enumerate()
+                        .map(|(wi, dc)| {
+                            serde_json::json!({
+                                "cambox": schedule[wi].cambox.clone(),
+                                "dup_cadence": dc,
+                            })
+                        })
+                        .collect();
+                    let dup_bound = camera_box::dup_cadence::DUP_RATE_PULLDOWN_MIN;
+                    let dup_gate_pass = camera_box::dup_cadence::dup_cadence_gate_pass(
+                        worst_masked_fraction,
+                        Some(dup_bound),
+                    );
+                    let dup_gates_overall = camera_box::dup_cadence::gates_overall_pass();
+                    report["all_cambox_continuity"]["duplication_masked_cadence"] = serde_json::json!({
+                        "windows": dup_window_json,
+                        "masked_windows": masked_windows,
+                        "worst_masked_duplicate_fraction": worst_masked_fraction,
+                        "worst_raw_duplicate_fraction": worst_raw_fraction,
+                        "bound_duplicate_fraction": dup_bound,
+                        "pass": dup_gate_pass,
+                        "gates_overall_pass": dup_gates_overall,
+                        "frames_no_anchor": dup_no_anchor,
+                        "note": "#1088 duplication-masked 50->60 detector: \
+                                 per-cambox-window row-sampled content-hash dup-rate \
+                                 (the #794 hard layer the received= rate tap is blind \
+                                 to). Per-window duplication_masked flags a sustained + \
+                                 regular + window-spanning pulldown. The GATE keys on \
+                                 worst_masked_duplicate_fraction (worst raw fraction \
+                                 among MASKED windows), NOT worst_raw_duplicate_fraction \
+                                 (a freeze/glitch has a high raw fraction but is \
+                                 coverage/regularity vetoed → excluded, no \
+                                 double-jeopardy with frozen_leg). REPORT-ONLY / \
+                                 calibration-first via dup_cadence::gates_overall_pass \
+                                 (false).",
+                    });
+                    println!(
+"  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
+                                masked_windows,
+                                worst_masked_fraction
+                                    .map(|p| format!("{p:.5}"))
+                                    .unwrap_or_else(|| "n/a".to_string()),
+                                worst_raw_fraction
+                                    .map(|p| format!("{p:.5}"))
+                                    .unwrap_or_else(|| "n/a".to_string()),
+                                dup_bound,
+                                dup_gate_pass,
+                                dup_gates_overall,
+                            );
+                    // Fold: a FAIL only fails the run while the seam gates overall_pass
+                    // (report-only today, so this is a no-op).
+                    all_pass &= dup_gate_pass || !dup_gates_overall;
                 }
 
                 // #768 — REPORT-ONLY cold-cut onset seam. The all-cambox sweep cuts program to each
@@ -4808,11 +4894,20 @@ fn build_and_print_verdict(
                                 decodable: f.tick.is_some(),
                             })
                             .collect();
+                        // #1086 part-4: total delivered frames across the WHOLE window
+                        // [start_ns, end_ns) (not just the onset) for the sustained-receive-fps
+                        // health check. Reads seg_frames directly (bypasses the segmenter guard),
+                        // same as the onset read above.
+                        let window_frames = seg_frames
+                            .iter()
+                            .filter(|f| f.gen_ts_ns >= w.start_ns && f.gen_ts_ns < w.end_ns)
+                            .count() as u32;
                         camera_box::cold_cut::ColdCutWindow {
                             cambox: w.cambox.clone(),
                             start_ns: w.start_ns,
                             end_ns: w.end_ns,
                             onset_frames,
+                            window_frames,
                         }
                     })
                     .collect();
@@ -4830,22 +4925,27 @@ fn build_and_print_verdict(
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(
-                            "#768 report-only -- the cold-cut onset (first 1s after a switch to a \
-                             cambox hidden >= 60s) is NOT gated pending a warm baseline + a \
-                             deliberate keepalive-bypass cold cut (issue #768); measures wake-up \
-                             latency + onset undecodable so a future run can calibrate a LIVE bound"
+                            "#768/#1086 report-only -- the cold-cut onset (first 1s after a switch \
+                             to a cambox hidden >= 60s) is NOT gated pending a warm baseline + a \
+                             deliberate keepalive-bypass cold cut (COLD_CUT_BYPASS_CAM, #1086); \
+                             measures wake-up latency + onset undecodable + (phase-2) sustained \
+                             receive-fps health + the issue-793 startup-segfault vs genuine \
+                             cold-cut-miss attribution so a future run can calibrate a LIVE bound"
                         ),
                     );
                 }
                 report["all_cambox_continuity"]["cold_cut_onset"] = cold_json;
                 println!(
-                    "  #768 COLD-CUT onset: {} cold transition(s) (hidden >= {}s), worst wakeup {} (report-only, gates_overall_pass={})",
+                    "  #768/#1086 COLD-CUT onset: {} cold transition(s) (hidden >= {}s), worst wakeup {}, receive_degraded={}, possible_segfault_miss={}, genuine_cold_cut_miss={} (report-only, gates_overall_pass={})",
                     cold_report.cold_transitions_found,
                     cold_report.cold_hidden_secs,
                     cold_report
                         .worst_wakeup_latency_ns
                         .map(|w| format!("{w} ns"))
                         .unwrap_or_else(|| "n/a".to_string()),
+                    cold_report.any_receive_degraded,
+                    cold_report.any_miss_possibly_segfault,
+                    cold_report.any_genuine_cold_cut_miss,
                     cold_gates_overall,
                 );
                 // Fold: report-only, so this is a no-op while gates_overall_pass() is false.
@@ -5790,6 +5890,43 @@ fn build_and_print_verdict(
                             )
                         }),
                     );
+                    // #748: silent-vs-undecoded discriminator. When EVERY judged (not
+                    // operator-ack-excluded) camera produced zero candidates, `candidates == 0`
+                    // alone cannot say WHY — a genuinely silent mbc chain (mute / Dante misroute)
+                    // vs audio present but the QPSK marker never clustered. The whole-recording
+                    // preamble-onset count (`av.audio_preamble_screens_passed`, measured from the
+                    // ACTUAL recorded audio) separates them via the pure `classify_av_audio_state`.
+                    // `_section_av_sync` reads `av_audio_silent` to blame the right link (null/absent
+                    // keeps the safe, loud "check the mbc mute" default).
+                    let mut av_all_zero = true;
+                    let mut av_judged = 0usize;
+                    for &camera in CAMERA_UNDER_TEST_NODES.iter() {
+                        if offline_ack_map.contains_key(camera) {
+                            continue;
+                        }
+                        if let Some(cs) = cam_syncs.get(camera) {
+                            av_judged += 1;
+                            if cs.candidates != 0 {
+                                av_all_zero = false;
+                            }
+                        }
+                    }
+                    let av_audio_state = av_window::classify_av_audio_state(
+                        av_judged,
+                        av_all_zero,
+                        av.audio_preamble_screens_passed,
+                    );
+                    av_json.insert(
+                        "av_audio_silent".to_string(),
+                        match av_audio_state.av_audio_silent_flag() {
+                            Some(silent) => serde_json::json!(silent),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                    av_json.insert(
+                        "av_audio_preamble_screens".to_string(),
+                        serde_json::json!(av.audio_preamble_screens_passed),
+                    );
                     report["all_cambox_av_sync"] = serde_json::Value::Object(av_json);
                     // #861: folds into `all_pass` again — a no-op when the gate PASSES (av_all_pass
                     // == true) or when `gates_overall_pass()` reverts to report-only in the future
@@ -6287,9 +6424,44 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     } else {
         None
     };
+    // #1112 — when the STREAM box extracts for an all-cambox run (`--switch-schedule` is present,
+    // which the production `VERDICT_ON_STREAM=1` gate ALWAYS pushes to the stream box — so this is
+    // default-on, never a new forgettable flag), row-sample every recorded frame's content hash ON
+    // this box (the recording is LOCAL here) and CARRY it in the partial. The dev1 merge — which
+    // has no recording — then slices it per cambox window to feed the #1088 dup-cadence surface;
+    // without this carry that surface is structurally unreachable in the merge gate (#1101 finding:
+    // 0/81 verdicts). Gated on box+schedule so a delivery-only / non-all-cambox extract pays
+    // nothing. A hash failure is NON-FATAL: the surface is report-only, so a hiccup must never fail
+    // the extract — log and carry `None` (the merge then simply skips the surface, as before).
+    // NOTE: a SEPARATE luma-only ffmpeg pass for now (`hash_recording_frames`); folding it into the
+    // existing burns/ticks decode to avoid the second pass is #1101 Part 2's optimization.
+    let content_hashes: Option<Vec<u64>> = if box_name == "stream" && args.switch_schedule.is_some()
+    {
+        match camera_box::probe::recording::hash_recording_frames(rec_path) {
+            Ok(h) => {
+                println!(
+                    "#1112 dup-cadence [stream]: row-sampled content hashes for {} frames carried in \
+                     the partial (feeds the #1088 duplication-masked 50->60 surface in the dev1 merge).",
+                    h.len()
+                );
+                Some(h)
+            }
+            Err(e) => {
+                eprintln!(
+                    "WARNING: #1112 dup-cadence [stream]: could not hash the stream recording ({e}) \
+                     — carrying no content hashes; the report-only dup-cadence surface will be \
+                     skipped in the merge (never fails the run)."
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames)
         .with_colour(colour)
-        .with_av_sync(av_sync);
+        .with_av_sync(av_sync)
+        .with_content_hashes(content_hashes);
     partial.save(&out)?;
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -6331,15 +6503,58 @@ fn run_merge(args: &Args) -> Result<()> {
     // (the audio marker track + the cam2 dual-QR video are co-located there only), mirroring
     // `stream_colour` above.
     let mut stream_av_sync: Option<AvMarkerInputs> = None;
+    // #1112 — the stream partial's carried per-frame content hashes (Some only when the stream box
+    // extracted on an all-cambox run). Only the STREAM recording feeds the #1088 dup-cadence
+    // surface, mirroring `stream_av_sync` above; the dev1 merge has no recording, so this carry is
+    // the ONLY way the pixel-derived hashes reach the merge verdict.
+    let mut stream_content_hashes: Option<Vec<u64>> = None;
     // Each box's partial path, so after the verdict we can point the operator at the #186 pixel
     // proofs that box wrote during `--extract-partial` and the harness pulled back beside it.
     let mut box_paths: Vec<(String, PathBuf)> = Vec::new();
+    // issue 1118 — the reason the imag leg was DROPPED this run (a schema-mismatched report-only
+    // partial), surfaced at `full_chain.imag_leg_skip_reason` so a degraded run is mineable, not
+    // silent. `None` on a normal run.
+    let mut imag_skip_reason: Option<String> = None;
     for spec in &args.merge_partials {
         let (box_name, path) = spec
             .split_once('=')
             .with_context(|| format!("--merge-partials expects BOX=JSON, got {spec:?}"))?;
-        let partial = RecordingPartial::load(Path::new(path))
-            .with_context(|| format!("load partial {path}"))?;
+        // issue 1118 — the imag leg is REPORT-ONLY (`imag_leg_gate::gates_overall_pass()==false`),
+        // so a schema-mismatched imag partial must DEGRADE (drop it, keep merging strih+stream),
+        // never abort the whole merge with no verdict JSON (the fatal `load(path)?` before). The
+        // decision is the PURE crate-root `partial_schema_gate` seam (Tier-0-tested): it degrades
+        // ONLY a clean schema mismatch on a report-only box; strih/stream and every non-schema
+        // failure stay fatal.
+        // Why a MISSING / unreadable imag partial staying Fatal is safe here (not a contradiction
+        // with "imag is report-only"): a genuinely-skipped imag leg never reaches this load at all
+        // — recording-e2e.sh `[8/8d]` only appends `--merge-partials imag=<path>` when
+        // `[ -f "$IMAG_PARTIAL" ]` (harness_imag_topology anchors that guard), so the ONLY way an
+        // imag spec arrives is that the file EXISTS. A present-but-schema-stale file is exactly the
+        // degrade case; a present-but-corrupt/unreadable file is a genuine defect worth the Fatal.
+        let partial = match RecordingPartial::load(Path::new(path)) {
+            Ok(p) => p,
+            Err(e) => {
+                let found = std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|s| camera_box::partial_schema_gate::peek_schema_version(&s));
+                match camera_box::partial_schema_gate::classify_load_failure(
+                    box_name,
+                    found,
+                    camera_box::probe::recording_partial::PARTIAL_SCHEMA_VERSION,
+                ) {
+                    camera_box::partial_schema_gate::PartialLoadDisposition::Degrade { reason } => {
+                        eprintln!(
+                            "WARNING: --merge-partials {box_name}={path}: {reason} Load error: {e:#}"
+                        );
+                        imag_skip_reason = Some(reason);
+                        continue;
+                    }
+                    camera_box::partial_schema_gate::PartialLoadDisposition::Fatal => {
+                        return Err(e).with_context(|| format!("load partial {path}"));
+                    }
+                }
+            }
+        };
         // The partial's recorded box name MUST match the slot it is assigned to — a strih
         // partial can NEVER be merged as the stream input (the #208 box-to-box guard, enforced
         // at the data level, not just the path).
@@ -6369,10 +6584,11 @@ fn run_merge(args: &Args) -> Result<()> {
             }
         }
         box_paths.push((box_name.to_string(), PathBuf::from(path)));
-        // #377/#312 — take the carried colour summary + A/V-sync inputs before `frames` moves
-        // into the DecodedRec.
+        // #377/#312/#1112 — take the carried colour summary + A/V-sync inputs + content hashes
+        // before `frames` moves into the DecodedRec.
         let colour = partial.colour;
         let av_sync = partial.av_sync;
+        let content_hashes = partial.content_hashes;
         let rec = DecodedRec {
             frames: partial.frames,
             rec_path: None, // merge: the recording is on its own box, never on dev1
@@ -6386,6 +6602,7 @@ fn run_merge(args: &Args) -> Result<()> {
                 stream = Some(rec);
                 stream_colour = colour;
                 stream_av_sync = av_sync;
+                stream_content_hashes = content_hashes;
             }
             // #461: imag carries no burns, so there is no colour to carry either in this ticket.
             "imag" => {
@@ -6422,7 +6639,7 @@ fn run_merge(args: &Args) -> Result<()> {
     );
     // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
     // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
-    let (_report, all_pass) = build_and_print_verdict(
+    let (_report, all_pass) = build_and_print_verdict_with_stream_hashes(
         args,
         strih,
         stream,
@@ -6431,6 +6648,8 @@ fn run_merge(args: &Args) -> Result<()> {
         stream_colour,
         imag,
         stream_av_sync, // #312 item 2 (PR A): carried from the stream partial's --av-marker-log extract
+        stream_content_hashes, // #1112: carried from the stream partial's all-cambox extract
+        imag_skip_reason, // issue 1118: Some when a schema-mismatched imag partial was dropped (degrade)
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
@@ -9278,10 +9497,10 @@ mod tests {
     // ALL_CAMBOX sweep cuts each camera into strih program in turn, so its OWN capture-time
     // burn only rides alongside cam2's optical QR while ITS window is live. The per-camera
     // medians then feed the hard cross-camera SPREAD gate
-    // (`camera_box::switch_latency::spread_verdict`): `max(p50) - min(p50) > 16ms` (half a
-    // 30fps frame) = FAIL — a differing photon->dequeue latency `d_X` per camera (#286's root
-    // cause) beyond that floor can visibly break A/V lipsync when the live program cuts
-    // between them.
+    // (`camera_box::switch_latency::spread_verdict`): `max(p50) - min(p50) >
+    // SPREAD_THRESHOLD_MS` (24ms since issue 1120; was a 16ms half-frame) = FAIL — a differing
+    // photon->dequeue latency `d_X` per camera (#286's root cause) beyond that bound can visibly
+    // break A/V lipsync when the live program cuts between them.
 
     /// Build a synthetic single continuous stream recording covering `cameras.len()` contiguous
     /// 5s `--switch-schedule` windows (one per entry), each carrying: the STRIH burn (the
@@ -9377,7 +9596,8 @@ mod tests {
     }
 
     /// #624: cam1/cam3/cam4 all deployed, EACH camera's OWN measured cam2->camera median exactly
-    /// matches its injected latency, and a 25ms cross-camera spread (over the 16ms floor) FAILS
+    /// matches its injected latency, and a genuinely-broken 55ms cross-camera spread (well over
+    /// the recalibrated 24ms bound — issue 1120 — and over a full 33.3ms program frame) FAILS
     /// the gate.
     #[test]
     fn all_cambox_latency_measures_per_camera_windowed_latency_and_fails_a_wide_spread_624() {
@@ -9385,7 +9605,7 @@ mod tests {
             "fail",
             &[
                 ("CAM1", CAM1B, 800_000_000),
-                ("CAM3", super::BURN_RUN_ID_CAM3, 820_000_000),
+                ("CAM3", super::BURN_RUN_ID_CAM3, 850_000_000),
                 ("CAM4", super::BURN_RUN_ID_CAM4, 795_000_000),
             ],
         );
@@ -9402,7 +9622,7 @@ mod tests {
         );
         assert_eq!(
             lat["cam3"]["p50_ms"],
-            serde_json::json!(820.0),
+            serde_json::json!(850.0),
             "#624: cam3's OWN windowed cam2->cam3 latency (generalized from cam1-only): {lat}"
         );
         assert_eq!(
@@ -9412,20 +9632,21 @@ mod tests {
         );
         assert_eq!(
             lat["cross_camera_spread_ms"],
-            serde_json::json!(25.0),
-            "#624: max(820) - min(795) = 25ms: {lat}"
+            serde_json::json!(55.0),
+            "#624: max(850) - min(795) = 55ms: {lat}"
         );
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "#624: a 25ms cross-camera spread is over the 16ms floor -> the gate must FAIL: {lat}"
+            "#1120: a 55ms cross-camera spread is well over the 24ms bound -> the gate must FAIL: \
+             {lat}"
         );
     }
 
-    /// #624: the SAME 3-camera shape, but every camera's injected latency sits within 16ms of
-    /// every other's -> the spread gate PASSES.
+    /// #624: the SAME 3-camera shape, but every camera's injected latency sits within the spread
+    /// bound of every other's -> the spread gate PASSES.
     #[test]
-    fn all_cambox_latency_spread_within_16ms_passes_the_gate_624() {
+    fn all_cambox_latency_spread_within_bound_passes_the_gate_624() {
         let v = build_all_cambox_latency_fixture(
             "pass",
             &[
@@ -9447,7 +9668,7 @@ mod tests {
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(true),
-            "#624: a 10ms cross-camera spread clears the 16ms floor -> PASS: {lat}"
+            "#624: a 10ms cross-camera spread clears the 24ms bound -> PASS: {lat}"
         );
     }
 
@@ -9641,7 +9862,7 @@ mod tests {
             "fail",
             &[
                 ("CAM1", CAM1B, 3_000_000),
-                ("CAM2", CAM2B, 20_000_000),
+                ("CAM2", CAM2B, 30_000_000),
                 ("CAM4", super::BURN_RUN_ID_CAM4, 8_000_000),
             ],
         );
@@ -9659,7 +9880,7 @@ mod tests {
         );
         assert_eq!(
             lat["cam2"]["p50_ms"],
-            serde_json::json!(20.0),
+            serde_json::json!(30.0),
             "#286 Gap 2: cam2 MUST be measured here (its own digital capture burn + its own \
              schedule window make it just as measurable as any other camera — unlike the \
              OPTICAL-INJECTION source-side sweep, which structurally excludes it): {lat}"
@@ -9683,22 +9904,22 @@ mod tests {
         );
         assert_eq!(
             lat["cross_camera_spread_ms"],
-            serde_json::json!(17.0),
-            "#286: max(20.0) - min(3.0) = 17ms: {lat}"
+            serde_json::json!(27.0),
+            "#286: max(30.0) - min(3.0) = 27ms: {lat}"
         );
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "#286: a 17ms delivery spread is over the (report-only) 16ms floor -> FAIL: {lat}"
+            "#1120: a 27ms delivery spread is over the (report-only) 24ms bound -> FAIL: {lat}"
         );
     }
 
-    /// #286: ALL SIX cameras measured (including cam2), each within 16ms of every other's
-    /// injected delivery latency -> the (report-only) spread gate PASSES — mirrors a
+    /// #286: ALL SIX cameras measured (including cam2), each within the spread bound of every
+    /// other's injected delivery latency -> the (report-only) spread gate PASSES — mirrors a
     /// successfully phase-synced rig where the applied differentiated genlock-latency offsets
     /// have collapsed every camera's DELIVERY latency to roughly the same value.
     #[test]
-    fn all_cambox_delivery_latency_all_six_cameras_within_16ms_passes_the_gate_286() {
+    fn all_cambox_delivery_latency_all_six_cameras_within_bound_passes_the_gate_286() {
         let v = build_all_cambox_delivery_latency_fixture(
             "pass",
             &[
@@ -9730,12 +9951,12 @@ mod tests {
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(true),
-            "#286: a 4ms delivery spread across all 6 cameras clears the 16ms floor -> PASS: \
+            "#286: a 4ms delivery spread across all 6 cameras clears the 24ms bound -> PASS: \
              {lat}"
         );
     }
 
-    /// #286: a tight delivery spread (all within 16ms) PASSES the report-only gate.
+    /// #286: a tight delivery spread (all within the spread bound) PASSES the report-only gate.
     #[test]
     fn all_cambox_delivery_latency_tight_spread_passes_gate_286() {
         let v = build_all_cambox_delivery_latency_fixture(
@@ -9756,7 +9977,7 @@ mod tests {
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(true),
-            "#286: a 7ms delivery spread clears the 16ms floor -> PASS: {lat}"
+            "#286: a 7ms delivery spread clears the 24ms bound -> PASS: {lat}"
         );
     }
 
@@ -9781,13 +10002,13 @@ mod tests {
 
         let v = build_all_cambox_delivery_latency_fixture(
             "seam",
-            &[("CAM1", CAM1B, 3_000_000), ("CAM2", CAM2B, 20_000_000)],
+            &[("CAM1", CAM1B, 3_000_000), ("CAM2", CAM2B, 30_000_000)],
         );
         let lat = &v["all_cambox_delivery_latency"];
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "sanity: this fixture's 17ms spread must FAIL the 16ms bound for the point of this \
+            "sanity: this fixture's 27ms spread must FAIL the 24ms bound for the point of this \
              test to hold: {lat}"
         );
         assert!(
@@ -9981,6 +10202,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let v = build_all_cambox_av_sync_fixture(
@@ -10102,11 +10324,13 @@ mod tests {
     /// layer).
     ///
     /// VACUITY GUARD (review finding on this PR): the fixture's deliveries MUST keep the
-    /// cross-camera spread within `switch_latency::SPREAD_THRESHOLD_MS` (the earlier 800/820ms
-    /// pair had spread 20 > 16, so `all_pass &= sv.pass` already forced `overall_pass=false`
-    /// BEFORE the A/V fold ran — deleting the fold left this test green). The `without_av`
-    /// control proves every OTHER gate passes on this exact fixture, so the failing A/V fold is
-    /// the ONLY thing that can (and must) flip the with-av verdict.
+    /// cross-camera spread within `switch_latency::SPREAD_THRESHOLD_MS` (an earlier 800/820ms
+    /// pair had spread 20, over the 16 ms bound in force when this guard was written — issue 1120
+    /// later recalibrated the bound to 24 ms — so `all_pass &= sv.pass` already forced
+    /// `overall_pass=false` BEFORE the A/V fold ran, which would have left this test green even
+    /// with the fold deleted). The CURRENT 800/810 pair (spread 10 ms, well within the bound)
+    /// avoids that: the `without_av` control proves every OTHER gate passes on this exact fixture,
+    /// so the failing A/V fold is the ONLY thing that can (and must) flip the with-av verdict.
     #[test]
     fn all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_861_rearmed() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
@@ -10115,10 +10339,11 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
-        // Spread = 10ms <= the 16ms threshold -> the cross-camera spread gate PASSES; see the
-        // vacuity guard in the doc comment above.
+        // Spread = 10ms <= SPREAD_THRESHOLD_MS (24ms) -> the cross-camera spread gate PASSES; see
+        // the vacuity guard in the doc comment above.
         let cameras: &[(&str, u32, i64)] =
             &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 810_000_000)];
 
@@ -10176,6 +10401,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -10236,10 +10462,12 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
-        // Spread = 815-800 = 15ms <= the 16ms threshold — the earlier 790..820 fixture (spread
-        // 30) made BOTH runs fail on the spread gate, so the with==without equality below was
+        // Spread = 815-800 = 15ms <= SPREAD_THRESHOLD_MS (24ms) — the earlier 790..820 fixture
+        // (spread 30, still over the 24ms bound) made BOTH runs fail on the spread gate, so the
+        // with==without equality below was
         // `false == false` and could not detect a wiring bug that wrongly ANDs a PASSING gate
         // (review finding on this PR). With every gate passing, `without_av` is genuinely true
         // and the equality has bite.
@@ -10312,6 +10540,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] =
@@ -10376,6 +10605,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -10428,6 +10658,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -10601,6 +10832,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         // cam1: delivery p50 = 800ms. cam3: delivery p50 = 840ms (40ms above cam1's) — mean of
@@ -10686,6 +10918,7 @@ mod tests {
             fps: 30.0,
             video_start_s: 0.0,
             emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
             audio_markers,
         };
         // cam1: 800ms delivery. cam3: 2×(tolerance+10ms) above cam1's, so with the two-camera
