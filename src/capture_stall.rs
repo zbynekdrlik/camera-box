@@ -67,6 +67,43 @@ pub fn capture_stall_warning(
     )
 }
 
+/// (#1131) Fraction of the capture device's own frame interval below which a blocking VIDIOC_DQBUF
+/// return proves this frame came from a NON-EMPTY V4L2 queue (the driver already had it buffered),
+/// as opposed to the loop genuinely WAITING for the device to complete the next frame. A buffered
+/// frame returns in well under one capture interval (measured sub-millisecond on a healthy stream —
+/// see [`is_capture_stall`]'s own "0.5ms" test); a freshly-awaited frame returns in ~one full
+/// capture interval (the emit loop out-runs the capture rate in steady state) or, on a stall, far
+/// longer. Half the interval cleanly separates the two with wide margin for ordinary scheduling
+/// jitter, and is deliberately the OTHER side of the same `dequeue_duration_ms` signal from
+/// [`CAPTURE_STALL_FACTOR`] (1.5x): `(0, 0.5x)` = buffered, `[0.5x, 1.5x)` = a normal single-frame
+/// wait, `>= 1.5x` = a stall — all three read off the ONE measurement.
+pub const BUFFERED_DEQUEUE_FRACTION: f64 = 0.5;
+
+/// Pure decision: did THIS captured frame come from a NON-EMPTY V4L2 queue (i.e. the driver already
+/// had it buffered when we asked)? `duration_ms` is the measured wall-clock time `process_frame`'s
+/// blocking `self.stream.next()` (VIDIOC_DQBUF) took; `frame_interval_ms` is
+/// `1000.0 / configured_capture_fps`.
+///
+/// This is the queue-occupancy signal the #1131 emit-gate robustness fix needs: a frame that
+/// returned in under [`BUFFERED_DEQUEUE_FRACTION`] of one capture interval was ALREADY waiting in
+/// the queue, which PROVES a real captured frame exists to fill the next un-emitted emit boundary —
+/// so `genlock_pacing::genlock_emit_gate` must catch up one interval at a time and NEVER grid-resync
+/// past it (the issue-1131 multi-slot-skip judder: buffered captured frames leaped-past and
+/// discarded in a run). A frame the loop had to WAIT for (`>= BUFFERED_DEQUEUE_FRACTION` of the
+/// interval — an EMPTY queue: a normal single-frame wait, a device stall, or a real clock gap) does
+/// NOT prove buffered content, so the gate keeps its pre-existing #131 forward-resync there.
+///
+/// A non-positive `frame_interval_ms` (capture fps unknown/zero) or a non-finite/negative
+/// `duration_ms` (a bad measurement) returns `false` — assume freshly-awaited, i.e. keep the
+/// queue-blind resync behaviour, so a bad reading can never SUPPRESS an honest skip. Mirrors
+/// [`is_capture_stall`]'s exact guard shape, on the SAME `dequeue_duration_ms` measurement.
+pub fn frame_from_nonempty_queue(duration_ms: f64, frame_interval_ms: f64) -> bool {
+    if frame_interval_ms <= 0.0 || !duration_ms.is_finite() || duration_ms < 0.0 {
+        return false;
+    }
+    duration_ms < frame_interval_ms * BUFFERED_DEQUEUE_FRACTION
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
