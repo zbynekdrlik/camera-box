@@ -36,19 +36,27 @@ def _profile():
 
 
 class TestResolvePins:
-    def test_derives_the_delivery_equalized_deep_pins(self):
-        # transports 117/38.5/22.6 -> pins target(207) - transport, all deep (>=80).
-        assert mp.resolve_pins(_profile()) == {"NDI cam1": 90, "NDI cam2": 168, "NDI cam3": 184}
+    def test_derives_the_delivery_equalized_deep_then_phase_snapped_pins(self):
+        # transports 117/38.5/22.6 -> equalized 90/168.5/184.4; cam2 168 (frac 0.04) is
+        # limit-cycle-prone -> phase-snapped to 160 (frac 0.80). cam1 90 (0.70) + cam3 184 (0.52)
+        # are already phase-safe and unchanged.
+        assert mp.resolve_pins(_profile()) == {"NDI cam1": 90, "NDI cam2": 160, "NDI cam3": 184}
 
     def test_every_derived_pin_is_deep(self):
         pins = mp.resolve_pins(_profile())
         assert all(p >= 80 for p in pins.values())
 
-    def test_pin_plus_transport_equalizes_delivery_to_target(self):
+    def test_the_UNsnapped_equalized_pin_exactly_equalizes_delivery(self):
+        # the PRIMARY objective, before the phase snap: equalized_pin + transport == target exactly.
         prof = _profile()
-        pins = mp.resolve_pins(prof)
-        for src, cam in prof["cameras"].items():
-            assert abs(pins[src] + mp.transport_ms(cam) - prof["target_delivery_ms"]) <= 1.0
+        for cam in prof["cameras"].values():
+            assert abs(mp.equalized_pin_ms(prof, cam) + mp.transport_ms(cam)
+                       - prof["target_delivery_ms"]) < 1e-9
+
+    def test_every_resolved_pin_is_phase_safe(self):
+        # the whole point: no shipped pin may sit in the limit-cycle-prone band (frac < 0.5).
+        pins = mp.resolve_pins(_profile())
+        assert all(not mp._phase_is_prone(p) for p in pins.values())
 
     def test_a_faster_camera_gets_a_deeper_pin(self):
         # cam3 (fastest transport 22.6) must get the DEEPEST pin; cam1 (slowest 117) the shallowest.
@@ -56,10 +64,29 @@ class TestResolvePins:
         assert pins["NDI cam3"] > pins["NDI cam2"] > pins["NDI cam1"]
 
 
+class TestPhaseSnap:
+    def test_snaps_a_prone_pin_to_the_nearest_safe_lower_value(self):
+        # equalized 168.5 -> round 168 (frac 0.04, prone) -> nearest safe centre-band value is 160
+        # (frac 0.80, dist 8), preferred over 176 (frac 0.28, would be prone anyway) — lower wins.
+        assert mp.phase_snap_pin(168.5) == 160
+        assert mp.PHASE_SAFE_LO_FRAC <= mp._phase_frac(160) <= mp.PHASE_SAFE_HI_FRAC
+
+    def test_leaves_an_already_phase_safe_pin_alone(self):
+        assert mp.phase_snap_pin(90.0) == 90       # frac 0.70, safe
+        assert mp.phase_snap_pin(184.4) == 184     # frac 0.52, safe (>= 0.5, round-up overshoot)
+
+    def test_a_prone_pin_is_moved_out_of_the_band(self):
+        # 200 -> frac(200/33.333)=0.0 (prone). Must land phase-safe.
+        snapped = mp.phase_snap_pin(200.0)
+        assert not mp._phase_is_prone(snapped)
+        assert abs(snapped - 200) <= mp.PHASE_SNAP_MAX_COST_MS
+
+
 class TestResolveHold:
-    def test_rebalances_the_hold_to_re_zero_the_common_level(self):
-        # audio_ref ~= 24.13, common level 207-24.13 ~= 182.87 -> hold 971-182.87 ~= 788.
-        assert mp.resolve_hold(_profile()) == 788
+    def test_rebalances_the_hold_to_re_zero_the_MEAN_snapped_delivery(self):
+        # snapped deliveries 207/198.5/206.6 -> mean 204.03; audio_ref ~= 24.13; common level
+        # 179.9 -> hold 971-179.9 ~= 791 (the mean-snapped-delivery centring, not target 207).
+        assert mp.resolve_hold(_profile()) == 791
 
     def test_hold_is_below_production_hold(self):
         prof = _profile()
@@ -117,6 +144,14 @@ class TestCoherenceCheck:
         prof["av_expected_ms"] = 20
         assert mp.coherence_check(prof) == []
 
+    def test_flags_a_prone_pin_that_cannot_be_snapped_within_budget(self, monkeypatch):
+        # shrink the snap budget to 0 so a prone equalized pin (cam2 168, frac 0.04) has NO safe pin
+        # in range -> phase_snap returns it still-prone -> the phase-safety invariant FIRES (a
+        # genuine "cannot equalize AND phase-fix within budget" state, never silently shipped).
+        monkeypatch.setattr(mp, "PHASE_SNAP_MAX_COST_MS", 0)
+        problems = mp.coherence_check(_profile())
+        assert any("limit-cycle-prone" in p for p in problems)
+
 
 class TestClassifyLeftover:
     def test_live_matching_production_is_snapshotted(self):
@@ -148,16 +183,18 @@ class TestClassifyLeftover:
 
 
 class TestStalenessReport:
-    def test_not_stale_when_observed_delivery_is_at_target(self):
+    def test_not_stale_when_observed_delivery_is_near_the_per_camera_snapped_expected(self):
+        # expected (snapped) deliveries: cam1 207, cam2 198.5, cam3 206.6. Observed near each.
         prof = _profile()
-        observed = {"NDI cam1": 207.0, "NDI cam2": 205.0, "NDI cam3": 209.0}
+        observed = {"NDI cam1": 207.0, "NDI cam2": 200.0, "NDI cam3": 205.0}
         rep = mp.staleness_report(prof, observed, staleness_frames=1.5)
         assert rep["stale"] is False
+        assert rep["cameras"]["NDI cam2"]["expected_ms"] == 198.5  # NOT the 207 target
 
     def test_stale_when_a_camera_drifts_beyond_the_frame_threshold(self):
         prof = _profile()
-        # 1.5 frames ~= 50ms; cam1 at 270 is 63ms off target 207 -> stale.
-        observed = {"NDI cam1": 270.0, "NDI cam2": 205.0, "NDI cam3": 209.0}
+        # 1.5 frames ~= 50ms; cam1 at 270 is 63ms off its expected 207 -> stale.
+        observed = {"NDI cam1": 270.0, "NDI cam2": 200.0, "NDI cam3": 205.0}
         rep = mp.staleness_report(prof, observed, staleness_frames=1.5)
         assert rep["stale"] is True
         assert rep["cameras"]["NDI cam1"]["stale"] is True
@@ -180,8 +217,8 @@ class TestLoadProfile:
         path = os.path.join(_SCRIPTS, "e2e-measurement-pins.json")
         prof = mp.load_profile(path)
         assert mp.coherence_check(prof) == [], "the checked-in profile must always be coherent"
-        assert mp.resolve_pins(prof) == {"NDI cam1": 90, "NDI cam2": 168, "NDI cam3": 184}
-        assert mp.resolve_hold(prof) == 788
+        assert mp.resolve_pins(prof) == {"NDI cam1": 90, "NDI cam2": 160, "NDI cam3": 184}
+        assert mp.resolve_hold(prof) == 791
 
     def test_missing_file_fails_loud(self, tmp_path):
         with pytest.raises(SystemExit):
