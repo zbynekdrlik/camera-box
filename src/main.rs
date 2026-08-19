@@ -1067,8 +1067,29 @@ async fn run_capture_loop(
                         info.height as usize,
                         info.stride as usize,
                     );
-                    let emit =
-                        decimation_gate.poll(wall_clock_ns(), out_interval_ns, content_hash);
+                    // #1131 — did THIS frame come from a NON-EMPTY V4L2 queue (the driver already
+                    // had it buffered, i.e. its blocking dequeue returned in well under one capture
+                    // interval)? A buffered frame PROVES a real captured frame exists to fill the
+                    // next un-emitted boundary, so the gate catches up one interval instead of
+                    // grid-resyncing past it (the #1131 multi-slot-skip judder on a sick/wobbly
+                    // grabber, whose 0-capture-dropped signature confirms the frames exist). A
+                    // frame from an empty queue (the loop genuinely waited — a device/clock gap)
+                    // keeps the pre-existing #131 forward-resync. Same `dequeue_duration_ms` signal
+                    // the #707 capture-stall WARN reads, thresholded the other way.
+                    let queue_had_frame = if configured_capture_fps > 0.0 {
+                        camera_box::capture_stall::frame_from_nonempty_queue(
+                            info.dequeue_duration_ms,
+                            1000.0 / configured_capture_fps,
+                        )
+                    } else {
+                        false
+                    };
+                    let emit = decimation_gate.poll(
+                        wall_clock_ns(),
+                        out_interval_ns,
+                        content_hash,
+                        queue_had_frame,
+                    );
                     let next_boundary_ns = decimation_gate.next_boundary_ns();
                     // #707 — a clock discontinuity (DanteSync NTP/PTP step, or a stalled poll)
                     // can leap the gate's boundary past one or more intervals that are then

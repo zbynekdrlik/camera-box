@@ -10,7 +10,10 @@
 //!
 //! - [`genlock_emit_gate`] — the wall-clock decimation grid: emit the first capture at/after each
 //!   boundary; #707 B1 catches up a bounded buffered-drain one interval at a time and grid-resyncs
-//!   only past a real clock STEP (`> `[`GENLOCK_MAX_CATCHUP_INTERVALS`]).
+//!   only past a real clock STEP (`> `[`GENLOCK_MAX_CATCHUP_INTERVALS`]) — and #1131 further
+//!   suppresses that resync entirely while a captured frame is still buffered in the V4L2 queue
+//!   (`queue_had_frame`), so a sick/wobbly grabber's late buffered frames are never leaped-past and
+//!   discarded in a run (the multi-slot-skip judder).
 //! - [`genlock_emit_on_time`] (#1111) — is this an ON-TIME/surplus crossing vs a LATE catch-up
 //!   crossing? Shares [`genlock_latched_boundary`] with the gate so the two never disagree; this is
 //!   the signal `crate::dupe_decimation`'s #889 dupe-preferring shed needs to stay boundary-neutral.
@@ -24,10 +27,12 @@
 
 /// NDI sender wrapper - optimized for low latency
 /// Genlock decimation gate (#11): given the current wall-clock time `now_ns`, the
-/// next emit boundary `next_boundary_ns` (0 = uninitialized), and the boundary
-/// `interval_ns` (1e9 / target_fps), decide whether THIS captured frame should be
-/// emitted — it is the first capture at/after a boundary — and return the updated
-/// next boundary. The faster capture (e.g. 60 fps) is decimated onto the DanteSync
+/// next emit boundary `next_boundary_ns` (0 = uninitialized), the boundary
+/// `interval_ns` (1e9 / target_fps), and `queue_had_frame` (#1131 — did THIS frame
+/// come from a NON-EMPTY V4L2 queue, i.e. already buffered? see
+/// [`crate::capture_stall::frame_from_nonempty_queue`]), decide whether THIS captured
+/// frame should be emitted — it is the first capture at/after a boundary — and return
+/// the updated next boundary. The faster capture (e.g. 60 fps) is decimated onto the DanteSync
 /// wall-clock boundaries of the slower genlock/broadcast rate (e.g. 30 fps) so a
 /// downstream genlocked OBS consumes exactly one frame per render tick (zero loss).
 /// Pure + fully mutation-tested; the capture loop wires it to `wall_clock_ns()`.
@@ -53,9 +58,20 @@
 /// reaches the resync branch), and a real cold-boot NTP acquire steps by seconds (hundreds of
 /// intervals >> 8) → still grid-resyncs, exactly as before (#131). See
 /// [`genlock_emit_gate`]'s resync branch.
+///
+/// #1131 — this fixed bound is now the resync trigger ONLY for a frame that came from an EMPTY
+/// queue (`!queue_had_frame` — the loop genuinely waited for it: a device stall that produced
+/// nothing, or a real clock STEP). A frame that came from a NON-EMPTY queue (buffered — a real
+/// captured frame is being drained late, the 0-capture-dropped sick-grabber case) NEVER resyncs
+/// however large the lag: it catches up one interval so no buffered captured frame is discarded.
 pub const GENLOCK_MAX_CATCHUP_INTERVALS: u64 = 8;
 
-pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> (bool, u64) {
+pub fn genlock_emit_gate(
+    now_ns: u64,
+    next_boundary_ns: u64,
+    interval_ns: u64,
+    queue_had_frame: bool,
+) -> (bool, u64) {
     // Guard the divisor: a zero interval means genlock is off — never emit, and
     // never modulo/divide by zero (would panic on this pub API surface).
     if interval_ns == 0 {
@@ -91,8 +107,18 @@ pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -
         // as buffered frames — it must be a real clock STEP) grid-resyncs, as before (#131), so an
         // NTP/PTP jump never triggers a pathologically long stale catch-up.
         let lag_intervals = (now_ns - boundary) / interval_ns; // >= 1 here (next <= now_ns)
-        if lag_intervals > GENLOCK_MAX_CATCHUP_INTERVALS {
-            // Real discontinuity — resync forward to the grid boundary just after `now`.
+        if lag_intervals > GENLOCK_MAX_CATCHUP_INTERVALS && !queue_had_frame {
+            // #1131: resync (leap the grid forward past the intervening boundaries) ONLY when this
+            // frame did NOT come from a buffered V4L2 queue — i.e. the loop genuinely WAITED for it
+            // (an EMPTY queue: a device stall that produced nothing, or a real wall-clock STEP), so
+            // those boundaries had NO captured content and skipping them is honest (#131 cold-boot
+            // resync preserved). When `queue_had_frame` is set, a real captured frame WAS buffered
+            // and is being drained right now: a lag beyond the fixed catch-up bound is a late
+            // BUFFERED-DRAIN (0 capture-dropped — the frames exist), NOT a discontinuity, so we
+            // catch up ONE interval below (fill the next un-emitted boundary) instead of leaping
+            // past the buffered frames and discarding them in a run (the issue-1131 multi-slot
+            // judder). The next buffered frame re-evaluates against the following boundary, draining
+            // the whole backlog one-per-frame with ZERO skipped boundaries.
             next = now_ns - (now_ns % interval_ns) + interval_ns;
         }
         // else: keep next = boundary + interval_ns — emit this (fresh, merely-late) frame for the
@@ -179,7 +205,7 @@ mod tests {
     fn genlock_gate_init_does_not_emit_and_sets_next_boundary() {
         // next_boundary 0 => initialize to the next boundary above `now`, no emit.
         let now = 5 * I30 + 1000; // just past the 5th boundary
-        let (emit, next) = genlock_emit_gate(now, 0, I30);
+        let (emit, next) = genlock_emit_gate(now, 0, I30, false);
         assert!(!emit, "init frame must not emit");
         assert_eq!(next, now - (now % I30) + I30);
         assert!(next > now, "boundary must be strictly after now");
@@ -215,7 +241,7 @@ mod tests {
         let boundary = 4 * I30;
         for delta in [0u64, 5, I30 - 1] {
             let now = boundary + delta;
-            let (emit, next) = genlock_emit_gate(now, boundary, I30);
+            let (emit, next) = genlock_emit_gate(now, boundary, I30, false);
             assert_eq!(
                 genlock_emit_on_time(now, boundary, I30),
                 emit && next > now,
@@ -229,7 +255,7 @@ mod tests {
         // now strictly before the pending boundary => decimate, boundary unchanged.
         let boundary = 10 * I30;
         let now = boundary - 5; // just before
-        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        let (emit, next) = genlock_emit_gate(now, boundary, I30, false);
         assert!(!emit, "capture before the boundary must be decimated");
         assert_eq!(next, boundary, "boundary must not move when skipping");
     }
@@ -238,7 +264,7 @@ mod tests {
     fn genlock_gate_emits_at_boundary_and_advances_one_interval() {
         // now exactly at the boundary => emit, advance by exactly one interval.
         let boundary = 7 * I30;
-        let (emit, next) = genlock_emit_gate(boundary, boundary, I30);
+        let (emit, next) = genlock_emit_gate(boundary, boundary, I30, false);
         assert!(emit, "capture at the boundary must emit");
         assert_eq!(next, boundary + I30, "advance exactly one interval");
     }
@@ -247,7 +273,7 @@ mod tests {
     fn genlock_gate_emits_just_after_boundary() {
         let boundary = 7 * I30;
         let now = boundary + 100; // first capture after the boundary
-        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        let (emit, next) = genlock_emit_gate(now, boundary, I30, false);
         assert!(emit);
         assert_eq!(next, boundary + I30);
     }
@@ -256,10 +282,10 @@ mod tests {
     fn genlock_gate_zero_interval_does_not_panic_and_never_emits() {
         // interval_ns == 0 (genlock off) must NOT panic (no modulo/divide by
         // zero) and must never emit, leaving the boundary untouched.
-        let (emit, next) = genlock_emit_gate(123_456_789, 0, 0);
+        let (emit, next) = genlock_emit_gate(123_456_789, 0, 0, false);
         assert!(!emit);
         assert_eq!(next, 0);
-        let (emit2, next2) = genlock_emit_gate(999, 555, 0);
+        let (emit2, next2) = genlock_emit_gate(999, 555, 0, false);
         assert!(!emit2);
         assert_eq!(next2, 555);
     }
@@ -318,7 +344,7 @@ mod tests {
         let boundary = 10 * I30;
         let jump = GENLOCK_MAX_CATCHUP_INTERVALS + 4; // 12 intervals — past the catch-up bound
         let jumped_now = boundary + jump * I30 + 500; // 12+ intervals past the pending boundary
-        let (emit, next) = genlock_emit_gate(jumped_now, boundary, I30);
+        let (emit, next) = genlock_emit_gate(jumped_now, boundary, I30, false);
         assert!(emit, "a capture at/after the boundary always emits");
         assert_eq!(
             boundary_skip_count(boundary, next, I30),
@@ -355,7 +381,7 @@ mod tests {
         let mut emitted = 0u64;
         for k in 0..depth {
             let now = resume + k; // k ns apart — all inside the same interval
-            let (emit, nb) = genlock_emit_gate(now, next_boundary, i);
+            let (emit, nb) = genlock_emit_gate(now, next_boundary, i, false);
             next_boundary = nb;
             if emit {
                 emitted += 1;
@@ -380,7 +406,7 @@ mod tests {
         // (resync would give 8*I30, the correct advance gives 8*I30 + 5).
         let boundary = 7 * I30 + 5;
         let now = boundary;
-        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        let (emit, next) = genlock_emit_gate(now, boundary, I30, false);
         assert!(emit);
         assert_eq!(next, boundary + I30);
         assert_ne!(next, now - (now % I30) + I30); // != the resync-realigned value
@@ -394,7 +420,7 @@ mod tests {
         let boundary = 3 * I30;
         let lag = GENLOCK_MAX_CATCHUP_INTERVALS + 4; // safely past the catch-up bound
         let now = boundary + lag * I30 + 17;
-        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        let (emit, next) = genlock_emit_gate(now, boundary, I30, false);
         assert!(emit);
         let realigned = now - (now % I30) + I30;
         assert_eq!(
@@ -415,7 +441,7 @@ mod tests {
         let boundary = 7 * I30 + 5;
         let lag = GENLOCK_MAX_CATCHUP_INTERVALS; // exactly at the bound → still catch up (> is the resync gate)
         let now = boundary + lag * I30 + 11;
-        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        let (emit, next) = genlock_emit_gate(now, boundary, I30, false);
         assert!(emit);
         assert_eq!(
             next,
@@ -447,7 +473,7 @@ mod tests {
 
         // First frame after the backward step must NOT wedge: it re-latches and the
         // returned boundary must be just above the rewound `now`, not the stale future T.
-        let (_emit0, nb0) = genlock_emit_gate(rewound, boundary, I30);
+        let (_emit0, nb0) = genlock_emit_gate(rewound, boundary, I30, false);
         assert!(
             nb0 <= rewound + I30,
             "backward step must re-latch the boundary to the rewound clock \
@@ -465,7 +491,7 @@ mod tests {
         let mut emitted = 0;
         for k in 0..3u64 {
             let now = rewound + k * I30 + I30; // step forward one interval each frame
-            let (emit, nb) = genlock_emit_gate(now, next_b, I30);
+            let (emit, nb) = genlock_emit_gate(now, next_b, I30, false);
             next_b = nb;
             if emit {
                 emitted += 1;
@@ -488,7 +514,7 @@ mod tests {
         let start = 1_000_000_000u64; // arbitrary absolute ns
         for k in 0..60u64 {
             let now = start + k * cap_interval;
-            let (emit, nb) = genlock_emit_gate(now, next_b, I30);
+            let (emit, nb) = genlock_emit_gate(now, next_b, I30, false);
             next_b = nb;
             if emit {
                 emitted += 1;
@@ -497,6 +523,94 @@ mod tests {
         assert!(
             (29..=31).contains(&emitted),
             "60fps capture must decimate to ~30 emits, got {emitted}"
+        );
+    }
+
+    // #1131 — queue-occupancy-aware catch-up: never grid-resync (multi-slot skip) while a real
+    // captured frame is buffered in the V4L2 queue (the issue-1131 judder; the symptom's 0
+    // capture-dropped signature PROVES the frames exist, they were just delivered late).
+
+    #[test]
+    fn emit_gate_never_resyncs_a_buffered_drain_while_frames_available_1131() {
+        // A wall-clock lag BEYOND GENLOCK_MAX_CATCHUP_INTERVALS on a frame that came from a
+        // NON-EMPTY queue (`queue_had_frame == true` — the driver already had it buffered): a real
+        // captured frame exists to fill the next un-emitted boundary, so the gate must catch up
+        // ONE interval (emit for boundary+interval), NEVER grid-resync past it. A misaligned
+        // boundary distinguishes the +interval advance from the resync-realigned value.
+        let boundary = 7 * I30 + 5;
+        let lag = GENLOCK_MAX_CATCHUP_INTERVALS + 3; // 11 intervals — well past the resync bound
+        let now = boundary + lag * I30 + 11;
+        let (emit, next) = genlock_emit_gate(now, boundary, I30, true);
+        assert!(emit, "a capture at/after the boundary always emits");
+        assert_eq!(
+            next,
+            boundary + I30,
+            "a buffered frame past the catch-up bound must catch up ONE interval, not grid-resync \
+             (else the buffered captured frames behind it are leaped-past and discarded — #1131)"
+        );
+        assert_ne!(
+            next,
+            now - (now % I30) + I30,
+            "must NOT resync-realign while a buffered frame is available"
+        );
+    }
+
+    #[test]
+    fn emit_gate_buffered_drain_emits_every_frame_with_zero_skip_1131() {
+        // End-to-end: the CAM1 judder mechanism. The emit poll is blocked for `block` intervals
+        // (a long send/processing hiccup); the V4L2 driver buffers the real captured frames
+        // meanwhile (0 capture-dropped), and on resume the loop drains them back-to-back at ~the
+        // same wall clock. With the queue-occupancy signal set (buffered frames), EVERY drained
+        // frame must EMIT and boundary_skip_count must stay 0 — vs the queue-blind gate which
+        // emits 1 and skips `block-1`.
+        let i = I30;
+        let b0 = 100 * i;
+        let block = 10u64; // wall clock advanced ~10 intervals during the block (> the 8 bound)
+        let buffered = 6u64; // 6 real captured frames waiting in the queue on resume
+        let resume = b0 + block * i;
+        let mut next_boundary = b0;
+        let mut emitted = 0u64;
+        let mut total_skip = 0u64;
+        for k in 0..buffered {
+            let now = resume + k; // buffered drain: all within one interval
+            let prev = next_boundary;
+            let (emit, nb) = genlock_emit_gate(now, next_boundary, i, true); // queue non-empty
+            total_skip += boundary_skip_count(prev, nb, i);
+            next_boundary = nb;
+            if emit {
+                emitted += 1;
+            }
+        }
+        assert_eq!(
+            emitted, buffered,
+            "every buffered captured frame must emit (fill its own boundary), not be leaped-past \
+             and discarded — a {buffered}-frame drain that emits fewer is the #1131 multi-slot judder"
+        );
+        assert_eq!(
+            total_skip, 0,
+            "no boundary may be SKIPPED while buffered captured frames are available (#1131)"
+        );
+    }
+
+    #[test]
+    fn emit_gate_still_resyncs_a_genuine_gap_when_queue_empty_1131() {
+        // The #131 cold-boot / true-gap case is UNCHANGED: a frame from an EMPTY queue
+        // (`queue_had_frame == false` — the loop genuinely WAITED, the device produced nothing)
+        // with a lag beyond the catch-up bound still grid-resyncs (an honest skip — those
+        // boundaries had no captured content). This is exactly today's behaviour.
+        let boundary = 3 * I30;
+        let lag = GENLOCK_MAX_CATCHUP_INTERVALS + 4;
+        let now = boundary + lag * I30 + 17;
+        let (emit, next) = genlock_emit_gate(now, boundary, I30, false);
+        assert!(emit);
+        assert_eq!(
+            next,
+            now - (now % I30) + I30,
+            "an empty-queue frame past the catch-up bound must still resync (honest skip, #131)"
+        );
+        assert!(
+            boundary_skip_count(boundary, next, I30) >= 1,
+            "the true gap is an honest skip"
         );
     }
 }

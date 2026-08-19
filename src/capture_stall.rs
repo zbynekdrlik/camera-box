@@ -67,6 +67,59 @@ pub fn capture_stall_warning(
     )
 }
 
+/// (#1131) Fraction of the capture device's own frame interval below which a blocking VIDIOC_DQBUF
+/// return proves this frame came from a NON-EMPTY V4L2 queue (the driver already had it buffered),
+/// as opposed to the loop genuinely WAITING for the device to complete the next frame. A buffered
+/// frame returns in well under one capture interval (measured sub-millisecond on a healthy stream —
+/// see [`is_capture_stall`]'s own "0.5ms" test); a freshly-awaited frame returns in ~one full
+/// capture interval (the emit loop out-runs the capture rate in steady state) or, on a stall, far
+/// longer. Half the interval cleanly separates the two with wide margin for ordinary scheduling
+/// jitter, and is deliberately the OTHER side of the same `dequeue_duration_ms` signal from
+/// [`CAPTURE_STALL_FACTOR`] (1.5x): `(0, 0.5x)` = buffered, `[0.5x, 1.5x)` = a normal single-frame
+/// wait, `>= 1.5x` = a stall — all three read off the ONE measurement.
+pub const BUFFERED_DEQUEUE_FRACTION: f64 = 0.5;
+
+/// Pure decision: did THIS captured frame come from a NON-EMPTY V4L2 queue (i.e. the driver already
+/// had it buffered when we asked)? `duration_ms` is the measured wall-clock time `process_frame`'s
+/// blocking `self.stream.next()` (VIDIOC_DQBUF) took; `frame_interval_ms` is
+/// `1000.0 / configured_capture_fps`.
+///
+/// This is the queue-occupancy signal the #1131 emit-gate robustness fix needs: a frame that
+/// returned in under [`BUFFERED_DEQUEUE_FRACTION`] of one capture interval was ALREADY waiting in
+/// the queue, which PROVES a real captured frame exists to fill the next un-emitted emit boundary —
+/// so `genlock_pacing::genlock_emit_gate` must catch up one interval at a time and NEVER grid-resync
+/// past it (the issue-1131 multi-slot-skip judder: buffered captured frames leaped-past and
+/// discarded in a run). A frame the loop had to WAIT for (`>= BUFFERED_DEQUEUE_FRACTION` of the
+/// interval — an EMPTY queue: a normal single-frame wait, a device stall, or a real clock gap) does
+/// NOT prove buffered content, so the gate keeps its pre-existing #131 forward-resync there.
+///
+/// A non-positive `frame_interval_ms` (capture fps unknown/zero) or a non-finite/negative
+/// `duration_ms` (a bad measurement) returns `false` — assume freshly-awaited, i.e. keep the
+/// queue-blind resync behaviour, so a bad reading can never SUPPRESS an honest skip. Mirrors
+/// [`is_capture_stall`]'s exact guard shape, on the SAME `dequeue_duration_ms` measurement.
+pub fn frame_from_nonempty_queue(duration_ms: f64, frame_interval_ms: f64) -> bool {
+    // Guard `frame_interval_ms` for finiteness too, not just sign (review #1131 🔵1): a +inf
+    // interval passes a bare `<= 0.0` check and then `duration_ms < inf * 0.5 == inf` is true for
+    // any finite duration — the UNSAFE direction (falsely "buffered" → suppresses an honest skip),
+    // the one outcome this fail-safe must never produce. (`is_capture_stall`'s mirror guard errs the
+    // opposite, SAFE way — a +inf interval there just never WARNs — so it needs no such change.)
+    // Unreachable from the sole caller (`main.rs` computes the interval only under
+    // `configured_capture_fps > 0.0`), but a fail-safe with a hole is not a fail-safe.
+    if !frame_interval_ms.is_finite()
+        || frame_interval_ms <= 0.0
+        || !duration_ms.is_finite()
+        || duration_ms < 0.0
+    {
+        return false;
+    }
+    // A genuinely-measured 0.0 here is a legitimately-instant dequeue (buffer already ready) →
+    // buffered, correctly. The `FrameInfo::dequeue_duration_ms == 0.0` "no real measurement"
+    // sentinel (review #1131 🔵2) never reaches this gate: the production poll (`main.rs`
+    // `process_frame`) always feeds a real `Instant::elapsed()` reading; the sentinel exists only on
+    // `FrameInfo`'s static getters/fixtures, which are not on the emit path.
+    duration_ms < frame_interval_ms * BUFFERED_DEQUEUE_FRACTION
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +214,57 @@ mod tests {
         // apart in the log — the message must say so explicitly.
         let msg = capture_stall_warning(100.0, 16.7, 60.0);
         assert!(msg.to_lowercase().contains("not ndi send"));
+    }
+
+    // #1131 — frame_from_nonempty_queue: the queue-occupancy decision.
+
+    #[test]
+    fn buffered_frame_returns_well_under_one_interval_is_nonempty_queue() {
+        // A healthy V4L2 dequeue with a buffer ALREADY ready: 60fps -> 16.7ms interval, the
+        // blocking dequeue returns sub-millisecond -> the queue was non-empty (frame buffered).
+        assert!(frame_from_nonempty_queue(0.5, 16.7));
+        assert!(frame_from_nonempty_queue(0.0, 16.7));
+    }
+
+    #[test]
+    fn normal_single_frame_wait_is_not_a_nonempty_queue() {
+        // A dequeue that took ~one full capture interval means the loop WAITED for the device to
+        // complete the next frame (an EMPTY queue in steady state, the loop out-running capture).
+        assert!(!frame_from_nonempty_queue(16.7, 16.7));
+        assert!(!frame_from_nonempty_queue(15.0, 16.7)); // just under a full interval, still a wait
+    }
+
+    #[test]
+    fn just_below_half_interval_is_buffered_at_or_above_is_not() {
+        // The BUFFERED_DEQUEUE_FRACTION (0.5) boundary is exclusive-below = buffered.
+        let interval = 16.7;
+        let half = interval * BUFFERED_DEQUEUE_FRACTION;
+        assert!(frame_from_nonempty_queue(half - 0.1, interval));
+        assert!(!frame_from_nonempty_queue(half, interval)); // AT the threshold = not buffered
+        assert!(!frame_from_nonempty_queue(half + 0.1, interval));
+    }
+
+    #[test]
+    fn a_long_stall_dequeue_is_never_read_as_buffered() {
+        // A frame delivered after a genuine stall (>= the capture-stall factor) is emphatically
+        // NOT buffered — the loop waited far past one interval. Keeps the gate's honest resync.
+        assert!(!frame_from_nonempty_queue(26.4, 16.7)); // the live #707 CAM1 dequeue-stall value
+        assert!(!frame_from_nonempty_queue(150.0, 16.7));
+    }
+
+    #[test]
+    fn unknown_or_bad_measurement_is_not_buffered_fail_safe() {
+        // Capture fps unknown/zero, or a non-finite/negative reading -> assume freshly-awaited
+        // (queue-blind resync preserved), so a bad measurement can never SUPPRESS an honest skip.
+        assert!(!frame_from_nonempty_queue(0.5, 0.0));
+        assert!(!frame_from_nonempty_queue(0.5, -16.7));
+        assert!(!frame_from_nonempty_queue(f64::NAN, 16.7));
+        assert!(!frame_from_nonempty_queue(-1.0, 16.7));
+        assert!(!frame_from_nonempty_queue(f64::INFINITY, 16.7));
+        // (review #1131 🔵1) a non-finite INTERVAL must also fail-safe to NOT-buffered — the unsafe
+        // direction: a +inf interval would make `duration < inf*0.5` true for any finite duration
+        // and falsely SUPPRESS an honest skip.
+        assert!(!frame_from_nonempty_queue(0.5, f64::INFINITY));
+        assert!(!frame_from_nonempty_queue(0.5, f64::NAN));
     }
 }

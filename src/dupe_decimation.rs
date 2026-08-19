@@ -178,16 +178,34 @@ impl DecimationGate {
     }
 
     /// Feed ONE captured frame (`now_ns` wall-clock capture instant, `content_hash` from
-    /// [`dupe_content_hash`]) through the pacing + dupe-preference gate. `interval_ns == 0`
-    /// disables decimation entirely (mirrors [`crate::genlock_pacing::genlock_emit_gate`]'s own guard) —
+    /// [`dupe_content_hash`], `queue_had_frame` from
+    /// [`crate::capture_stall::frame_from_nonempty_queue`] — was this frame already buffered in the
+    /// V4L2 queue?) through the pacing + dupe-preference gate. `interval_ns == 0` disables
+    /// decimation entirely (mirrors [`crate::genlock_pacing::genlock_emit_gate`]'s own guard) —
     /// always emits, no hashing/state kept. Returns whether THIS captured frame should be
     /// emitted.
-    pub fn poll(&mut self, now_ns: u64, interval_ns: u64, content_hash: u64) -> bool {
+    pub fn poll(
+        &mut self,
+        now_ns: u64,
+        interval_ns: u64,
+        content_hash: u64,
+        queue_had_frame: bool,
+    ) -> bool {
         if interval_ns == 0 {
             return true;
         }
-        let (would_emit, candidate_next) =
-            crate::genlock_pacing::genlock_emit_gate(now_ns, self.next_boundary_ns, interval_ns);
+        // (#1131) `queue_had_frame` — did THIS captured frame come from a NON-EMPTY V4L2 queue (the
+        // driver already had it buffered, per `capture_stall::frame_from_nonempty_queue`)? A buffered
+        // frame PROVES a real captured frame exists to fill the next un-emitted boundary, so the gate
+        // must catch up one interval and never grid-resync past it (the #1131 multi-slot-skip judder,
+        // whose 0-capture-dropped signature confirms the frames exist). A frame from an empty queue
+        // (the loop genuinely waited — a device/clock gap) keeps the pre-existing #131 resync.
+        let (would_emit, candidate_next) = crate::genlock_pacing::genlock_emit_gate(
+            now_ns,
+            self.next_boundary_ns,
+            interval_ns,
+            queue_had_frame,
+        );
         // (#1111) is this an ON-TIME/surplus crossing (deferring a dupe is lag-neutral) or a LATE
         // catch-up crossing (deferring would ratchet the lag into the #707 resync -> issue-1110
         // judder)? Shares the boundary math with `genlock_emit_gate` above.
@@ -510,7 +528,7 @@ mod tests {
         let mut emitted_ids: Vec<u64> = Vec::new();
         let mut emitted_a_dupe = false;
         for (now_ns, content_id, is_dupe) in &captures {
-            if gate.poll(*now_ns, emit_interval_ns, *content_id) {
+            if gate.poll(*now_ns, emit_interval_ns, *content_id, false) {
                 emitted_ids.push(*content_id);
                 if *is_dupe {
                     emitted_a_dupe = true;
@@ -571,7 +589,7 @@ mod tests {
         for (now_ns, content_id, _is_dupe) in &captures {
             // EXACT src/main.rs wiring: snapshot the boundary, poll, then measure the #707 skip.
             let prev_boundary_ns = gate.next_boundary_ns();
-            let emit = gate.poll(*now_ns, emit_interval_ns, *content_id);
+            let emit = gate.poll(*now_ns, emit_interval_ns, *content_id, false);
             let next_boundary_ns = gate.next_boundary_ns();
             total_skips += crate::genlock_pacing::boundary_skip_count(
                 prev_boundary_ns,
@@ -639,7 +657,7 @@ mod tests {
         for (now_ns, content_id, is_dupe) in &captures {
             assert!(!is_dupe, "exact-60 fixture must be dupe-free");
             let prev = gate.next_boundary_ns();
-            if gate.poll(*now_ns, emit_interval_ns, *content_id) {
+            if gate.poll(*now_ns, emit_interval_ns, *content_id, false) {
                 emits += 1;
             }
             total_skips += crate::genlock_pacing::boundary_skip_count(
@@ -658,6 +676,56 @@ mod tests {
         assert_eq!(
             emits, 479,
             "exact-60 emits every capture but the cold-start one (480 captures -> 479 emitted)"
+        );
+    }
+
+    /// (#1131) The sick-grabber judder, end-to-end through the production `DecimationGate::poll`
+    /// wiring. The emit poll is blocked for ~10 emit-intervals (a send/processing hiccup on a sick
+    /// box); the V4L2 driver buffers the real captured frames meanwhile (0 capture-dropped — the
+    /// live symptom's signature), and on resume the loop drains them back-to-back at ~the same wall
+    /// clock, each flagged `queue_had_frame = true` (they returned from a non-empty queue). Every
+    /// drained frame must EMIT and `boundary_skip_count` must stay 0 — vs the queue-blind gate,
+    /// which emits 1 and skips ~9 (`#707 SKIPPED ... 9 boundary interval(s)`). RED before the
+    /// `!queue_had_frame` resync guard, GREEN after.
+    #[test]
+    fn buffered_drain_after_a_stall_emits_every_frame_zero_skip_1131() {
+        let emit_interval_ns = 1_000_000_000u64 / 60;
+        let mut gate = DecimationGate::new();
+
+        // Warm the gate to a latched boundary with one on-time capture, then read where it sits.
+        let start = 1_000_000_000u64;
+        let _ = gate.poll(start, emit_interval_ns, 1, false);
+        let boundary = gate.next_boundary_ns();
+        assert!(boundary > 0, "gate latched a boundary");
+
+        // Block ~10 intervals, then drain 6 buffered frames (unique content) at ~the same wall
+        // clock, all from a NON-EMPTY queue (queue_had_frame = true).
+        let block = 10u64;
+        let buffered = 6u64;
+        let resume = boundary + block * emit_interval_ns;
+        let mut emitted = 0u64;
+        let mut total_skips = 0u64;
+        for k in 0..buffered {
+            let now = resume + k;
+            let content_id = 100 + k; // all unique — a real captured burst, not dupes
+            let prev = gate.next_boundary_ns();
+            if gate.poll(now, emit_interval_ns, content_id, true) {
+                emitted += 1;
+            }
+            total_skips += crate::genlock_pacing::boundary_skip_count(
+                prev,
+                gate.next_boundary_ns(),
+                emit_interval_ns,
+            );
+        }
+        assert_eq!(
+            emitted, buffered,
+            "every buffered captured frame must emit through DecimationGate::poll, not be \
+             leaped-past and discarded — the #1131 judder"
+        );
+        assert_eq!(
+            total_skips, 0,
+            "no boundary may be SKIPPED while buffered captured frames are available (#1131)"
         );
     }
 }
