@@ -156,3 +156,30 @@ def test_parse_vaapi_clean_stats_no_lagged_line_means_zero():
 def test_parse_returns_none_without_stop_stats():
     m = _mod()
     assert m.parse_obs_record_stats("just some log lines\nnothing useful\n") is None
+
+
+# ---- record_encoder_apply_plan (the conditional make-it-live decision) ------
+def test_apply_plan_ok_when_already_vaapi_and_json_present():
+    """Disk is already the VAAPI target AND recordEncoder.json matches -> OBS booted into VAAPI,
+    no restart needed (a no-op verify)."""
+    m = _mod()
+    assert m.record_encoder_apply_plan("ffmpeg_vaapi_tex", "ffmpeg_vaapi_tex", True) == "ok"
+
+
+def test_apply_plan_apply_when_encoder_still_x264():
+    """The first run after deploy: disk RecEncoder is still x264 -> write VAAPI + restart."""
+    m = _mod()
+    assert m.record_encoder_apply_plan("obs_x264", "ffmpeg_vaapi_tex", False) == "apply"
+
+
+def test_apply_plan_apply_when_encoder_matches_but_json_missing():
+    """RecEncoder says VAAPI but recordEncoder.json is absent/wrong -> OBS would use VAAPI defaults
+    (CBR2500), not the CQP settings -> apply to fix the on-disk json + restart."""
+    m = _mod()
+    assert m.record_encoder_apply_plan("ffmpeg_vaapi_tex", "ffmpeg_vaapi_tex", False) == "apply"
+
+
+def test_apply_plan_ok_when_target_is_x264_and_running_x264():
+    """A no-dGPU box WITHOUT VAAPI available (target x264): already x264, no restart, no json."""
+    m = _mod()
+    assert m.record_encoder_apply_plan("obs_x264", "obs_x264", True) == "ok"

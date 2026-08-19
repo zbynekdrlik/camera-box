@@ -170,3 +170,26 @@ def _slice_record_window(log_text: str, recording_basename: str) -> str | None:
         return "\n".join(lines[start:])
     # include a small tail so the drawn/attempted/lagged lines (emitted just after "stopped") are in
     return "\n".join(lines[start : stop + 8])
+
+
+def record_encoder_apply_plan(current_encoder: str, target_encoder: str, record_json_ok: bool) -> str:
+    """Decide whether the harness must (re)apply the record encoder to make ``target_encoder`` LIVE.
+
+    OBS only rebuilds the record encoder at (re)start / ResetOutputs -- a WebSocket param change on
+    an already-current profile does NOT go live (proven #1143). So the make-it-live restart is
+    needed ONLY when something is off on disk:
+
+    - "ok"    -> already live: RecEncoder already IS the target AND (for VAAPI) recordEncoder.json is
+                 present+correct; OBS booted into it. No restart.
+    - "apply" -> RecEncoder differs from target, OR the VAAPI target lacks its recordEncoder.json
+                 (OBS would fall back to VAAPI defaults, not the CQP settings). Write config +
+                 restart (WS RecEncoder FIRST -> stop -> write json -> start).
+
+    ``record_json_ok`` is only meaningful for the VAAPI target (x264/NVENC read no recordEncoder.json
+    the harness manages), so it is ignored when the target is not VAAPI.
+    """
+    if current_encoder != target_encoder:
+        return "apply"
+    if target_encoder == VAAPI_TEX_ENCODER and not record_json_ok:
+        return "apply"
+    return "ok"
