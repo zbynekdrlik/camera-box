@@ -517,6 +517,57 @@ jobs:
       - name: Shellcheck (warning severity, binary gate)
         run: shellcheck -S warning scripts/*.sh scripts/lib/*.sh
 
+  deploy-fleet:
+    name: Deploy to camera fleet (post-merge, main only)
+    # #1136: automatic post-merge fleet deploy — closes the hole where a merged fix sat in main
+    # UNDEPLOYED for a week (the fleet ran a stale build while the E2E gate stayed green). Runs ONLY
+    # on a push to main (never dev — dev builds must not auto-deploy to prod cameras), on the
+    # self-hosted dev1 runner (the ONLY box with SSH to the rig LAN). Downloads the
+    # camera-box-linux-amd64 artifact built by THIS SAME run's `build` job and deploys it to every
+    # ACTIVE cam box (CAMERA_ACTIVE_SET minus acked-offline, via scripts/lib/deploy-set.sh) by
+    # REUSING scripts/deploy-fleet.sh (stop → remount,rw → scp → start → remount,ro → byte-verify →
+    # version read-back → genlock-emit check — no new deploy code, no new credential: deploy-fleet.sh
+    # already defaults SSH_PASS to the fleet-wide value). Fails LOUDLY on any active-and-unacked box
+    # that mismatches or is unreachable; an acked-offline box is skipped. The push:[dev,main] E2E
+    # gate's #1136 pin layer then holds "fleet == main" as a hard invariant on every run.
+    needs: [lint, test, build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: [self-hosted, linux, camera-lan]
+    # Share the E2E hardware-serialization slot (loopback-e2e.yml / full-path-e2e.yml's group) so a
+    # deploy NEVER restarts camera-box mid-E2E. cancel-in-progress:false = queue, never cancel.
+    concurrency:
+      group: loopback-e2e-hardware
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download camera-box binary (this run's build job)
+        uses: actions/download-artifact@v4
+        with:
+          name: camera-box-linux-amd64
+          path: dist
+
+      - name: Deploy to the active cam fleet (acked-offline boxes skipped)
+        run: |
+          set -euo pipefail
+          chmod +x dist/camera-box
+          echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to the active fleet"
+          # shellcheck source=scripts/camera-set.sh
+          . scripts/camera-set.sh            # CAMERA_ACTIVE_SET
+          # shellcheck source=scripts/lib/cambox-offline-ack.sh
+          . scripts/lib/cambox-offline-ack.sh
+          # shellcheck source=scripts/lib/deploy-set.sh
+          . scripts/lib/deploy-set.sh
+          # Effective offline-ack = rig-fleet.txt default (the automatic push carries no override).
+          ack="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" rig-fleet.txt)"
+          deploy_set="$(deploy_set_active_minus_acked "$CAMERA_ACTIVE_SET" "$ack")"
+          if [ -z "$deploy_set" ]; then
+            echo "::error::no active cam box to deploy to (every box in CAMERA_ACTIVE_SET is acked-offline in rig-fleet.txt) — refusing a vacuous deploy"
+            exit 1
+          fi
+          echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
+          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box
+
   notify-on-failure:
     name: Notify on red
     # Fires only when a gate above goes RED — replaces silent-red eyeballing
@@ -527,7 +578,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, build, windows-probe, security, drift-guard, shellcheck]
+    needs: [lint, test, coverage, mutants, python-tests, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:
