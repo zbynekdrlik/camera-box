@@ -28,8 +28,21 @@ This is why it is a SEPARATE profile, not a floor/margin bolted onto the re-anch
 - **Config `scripts/e2e-measurement-pins.json`**: stores MEASURED inputs (per-cam production pin +
   measured delivery p50 + measured A/V offset, production stream hold, common delivery target), NOT
   the magic outputs. `scripts/e2e_measurement_pins.py` (PURE, Tier-0) DERIVES pins/hold/av-expected
-  (`pin_i=round(target−transport_i)`; `hold=prod_hold−(target−mean_audio_ref−av_expected)`), with a
-  coherence check. Re-derive per the config's own `_comment` instructions after a staleness signal.
+  in TWO steps: (1) equalize `eq_i=target−transport_i`; (2) FRAME-GRID PHASE snap (below). The hold
+  then `= prod_hold − (mean_SNAPPED_delivery − mean_audio_ref − av_expected)` (centres the MEAN
+  snapped delivery, since the snap leaves deliveries slightly unequal). Coherence check + re-derive
+  per the config's own `_comment` after a staleness signal.
+- **FRAME-GRID PHASE constraint (`phase_snap_pin`, 2026-08-19 live validation, verdict 1804432786)**:
+  the equalization worked (delivery spread 81-94ms→3.67ms, A/V uniform-pass) but exposed cam2 at pin
+  168 (frac(168/33.33)=0.04) hitting the #998/#1049 FIFO limit-cycle-prone band — `frac(pin/frame)<0.5`
+  → the round-to-nearest release target rounds DOWN and undershoots → copies≈gaps churn per segment
+  (see `.claude/rules/genlock-fifo-limit-cycle-diagnosis.md`). So after equalizing, snap any prone pin
+  to the nearest integer pin whose frac is in the robust CENTRE band `[0.6, 0.8]` (clear of BOTH the
+  0.5 round-down cliff AND the 1.0 wrap — an NTP step storm smears phase fleet-wide, camera-box#1130).
+  cam2 168→160 (frac 0.80, 8ms cost); cam1 90 (0.70) + cam3 184 (0.52) already safe (frac≥0.5, kept).
+  Phase-safety OVERRIDES exact equality (secondary term) by up to `PHASE_SNAP_MAX_COST_MS`=20; the
+  hold re-centring keeps the residual spread ~4ms. A pin at frac≥0.5 (round-UP overshoot) is safe and
+  left alone — do NOT snap a merely-borderline-clean pin (adds spread for nothing).
 - **#900 re-anchor + #893 floor gate**: `MEASUREMENT_EQ=1` FORCES `PHASE_REANCHOR=0` (one flag, they
   can never disagree — both write strih pins) and the `[4h/8]` #893 floor gate is SKIPPED (the deep
   pins deliberately violate its min==3ms invariant); it is REPLACED by `obs_phase2.py
