@@ -436,7 +436,10 @@ done
 #     before the fresh supervised start. This mirrors the strih AHK stop->verify->relaunch ordering.
 IMAG_USER="\${SUDO_USER:-newlevel}"
 IMAG_UID="\$(id -u "\$IMAG_USER")"
-uctl() { sudo -u "\$IMAG_USER" XDG_RUNTIME_DIR="/run/user/\$IMAG_UID" systemctl --user "\$@"; }
+# `env` sets XDG_RUNTIME_DIR in the CHILD, bypassing sudo's env_reset (a bare `sudo -u u VAR=val`
+# can be stripped by sudoers env policy -- and a stripped XDG_RUNTIME_DIR silently loses the user
+# bus, re-creating the exact unsupervised-launch failure this fix exists to kill).
+uctl() { sudo -u "\$IMAG_USER" env XDG_RUNTIME_DIR="/run/user/\$IMAG_UID" systemctl --user "\$@"; }
 OBS_START_LOG="/tmp/imag-obs-start.log"
 prev_log_lines="\$(wc -l < "\$OBS_START_LOG" 2>/dev/null || echo 0)"
 uctl stop imag-obs.service 2>/dev/null || true
