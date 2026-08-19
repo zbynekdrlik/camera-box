@@ -201,18 +201,18 @@ fn camera_set_reject_message_still_lists_all_seven_cameras() {
 }
 
 #[test]
-fn camera_active_set_default_is_exactly_cam1_cam2_cam3_939() {
-    // CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed TODAY. #898
-    // (2026-07-31): cam3's grabber card was physically destroyed (moved into cam1 during the
-    // #728/#688 recovery) -- retired from the active set exactly like cam5/cam6/cam7 (#827).
-    // issue 947 (2026-08-02): cam4 retired too -- its NZXT Signal HD60 grabber wedges the capture
-    // leg within minutes of every start (process stays alive emitting nothing), so it is
-    // membership-retired until the hardware call is made at the rig.
+fn camera_active_set_default_is_exactly_cam2_cam3_1134() {
+    // CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed TODAY. #1134
+    // (2026-08-19, owner order #1130): cam1 RETIRED -- its USB grabber is hardware-faulted
+    // (#1110 -EPROTO, live grayscale capture, camera-box.service stopped). cam1 was ALSO the
+    // hard-pinned PRIMARY/source node, so #1134 made the source role derivable (camera_source_box)
+    // and dropped cam1 from the default set. cam3/cam4..cam7 handled as before (cam4/5/6/7 out,
+    // cam3 in as the source). Membership-retired: cam1's facts stay resolvable below.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}\""),
-        "issue 939: CAMERA_ACTIVE_SET default must be exactly the three active cameras (cam1, \
-         cam2, cam3 re-activated 2026-08-13) -- cam4/cam5/cam6/cam7 out."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3}\""),
+        "issue 1134: CAMERA_ACTIVE_SET default must be exactly the two active cameras (cam2 \
+         painter, cam3 source) -- cam1 retired (grabber hw fault), cam4/cam5/cam6/cam7 out."
     );
 }
 
@@ -289,16 +289,16 @@ camera_active_secondary_set
 }
 
 #[test]
-fn camera_active_secondary_set_excludes_cam1_and_cam2_by_default() {
-    // issue 947: the default active set is now cam1/cam2 only (cam3 and cam4 both retired), so
-    // there is NO secondary camera left for the ALL_CAMBOX sweep to cut in -- the derived set is
-    // empty, and that must be expressed as an empty string rather than silently falling back to
-    // some literal camera list.
+fn camera_active_secondary_set_is_empty_for_the_default_source_plus_painter_1134() {
+    // #1134: the default active set is "cam2 cam3" -- cam3 is the DERIVED source (camera_source_box),
+    // cam2 the painter, so NO secondary camera is left for the ALL_CAMBOX sweep to cut in. The
+    // secondary set now excludes the DERIVED source (cam3), not the literal cam1, and yields an
+    // empty string rather than wrongly including cam3 (the source) or falling back to a literal.
     assert_eq!(
         active_secondary_set(None),
-        "cam3",
-        "issue 939: cam3 re-activated -- with cam1=source and cam2=painter, cam3 is the one \
-         secondary camera the ALL_CAMBOX sweep cuts in"
+        "",
+        "#1134: with source=cam3 (derived) and cam2=painter, the default active set has no \
+         secondary camera -- the derived set must be empty"
     );
 }
 
@@ -346,7 +346,14 @@ camera_is_active "$NAME" && echo YES || echo NO
 fn camera_is_active_matches_whole_words_only() {
     // #827: a substring match would wrongly treat "cam1" as active just because "cam10" (a
     // hypothetical future name) appears in the set -- must be an exact word match.
-    assert!(is_active("cam1", None), "cam1 must be active by default");
+    assert!(
+        is_active("cam3", None),
+        "cam3 must be active by default (the source, #1134)"
+    );
+    assert!(
+        !is_active("cam1", None),
+        "cam1 must NOT be active by default (retired #1134 -- grabber hw fault)"
+    );
     assert!(
         !is_active("cam5", None),
         "cam5 must NOT be active by default (retired)"
@@ -511,9 +518,9 @@ fn camera_active_excluding_never_includes_a_retired_camera_even_with_empty_exclu
     // reflect exactly that, regardless of what (if anything) is passed as excluded.
     assert_eq!(
         active_excluding(None, ""),
-        "cam1 cam2 cam3",
-        "issue 939: camera_active_excluding with no exclusion must return exactly the active set \
-         (cam3 re-activated; cam4/cam5/cam6/cam7 out)"
+        "cam2 cam3",
+        "issue 1134: camera_active_excluding with no exclusion must return exactly the active set \
+         (cam2 painter + cam3 source; cam1 retired, cam4/cam5/cam6/cam7 out)"
     );
 }
 
@@ -522,9 +529,10 @@ fn camera_active_excluding_subtracts_the_acked_offline_list_within_the_active_se
     // cam4 acked-offline (e.g. grabber card removed) must drop out, but only cam4 -- the other
     // active cameras stay, and no retired camera ever appears.
     assert_eq!(
-        active_excluding(None, "cam4"),
-        "cam1 cam2 cam3",
-        "camera_active_excluding must drop an acked-offline camera from the active set"
+        active_excluding(None, "cam3"),
+        "cam2",
+        "camera_active_excluding must drop an acked-offline camera that IS in the active set \
+         (excluding cam3 from the cam2 cam3 default leaves only cam2) -- honest to the test name"
     );
 }
 
@@ -573,12 +581,12 @@ fn camera_active_ndi_sources_excluding_csv_never_includes_a_retired_camera() {
     // still sampled by the [1/8] frozen-camera preflight if the derivation leaks it.
     let csv = active_ndi_sources_excluding_csv(None, "");
     assert_eq!(
-        csv, "NDI cam1,NDI cam2,NDI cam3",
-        "issue 939: cam3 re-activated -- the derived NDI source CSV carries exactly the active \
-         set; a retired camera (cam4/cam5/cam6/cam7) must never appear regardless of whether \
-         its strih OBS input still exists"
+        csv, "NDI cam2,NDI cam3",
+        "issue 1134: cam1 retired -- the derived NDI source CSV carries exactly the active set \
+         (cam2, cam3); a retired camera (cam1/cam4/cam5/cam6/cam7) must never appear regardless \
+         of whether its strih OBS input still exists"
     );
-    for retired in ["NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7"] {
+    for retired in ["NDI cam1", "NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7"] {
         assert!(
             !csv.contains(retired),
             "{retired} must not appear in the derived source list -- it is retired from \
@@ -594,8 +602,9 @@ fn camera_active_ndi_sources_excluding_csv_also_drops_acked_offline_within_activ
     // through unchanged.
     assert_eq!(
         active_ndi_sources_excluding_csv(None, "cam3"),
-        "NDI cam1,NDI cam2",
-        "an acked-offline camera within the active set must be excluded from the CSV"
+        "NDI cam2",
+        "an acked-offline camera within the active set must be excluded from the CSV (excluding \
+         cam3 from the cam2 cam3 default leaves only cam2)"
     );
 }
 

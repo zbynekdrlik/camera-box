@@ -667,12 +667,12 @@ class TestCLI:
 # ---------------------------------------------------------------------------
 
 class TestActiveNdiSources:
-    def test_default_is_cam1_cam2_cam3(self, monkeypatch):
-        # #939 (2026-08-13): cam3 re-activated (Cam Link 4K fitted); default mirrors
-        # camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3".
+    def test_default_is_cam2_cam3(self, monkeypatch):
+        # #1134 (2026-08-19): cam1 retired (grabber hw fault #1110); default mirrors
+        # camera-set.sh's CAMERA_ACTIVE_SET = "cam2 cam3".
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         assert phase_sync_calibrate.active_ndi_sources() == {
-            "NDI cam1", "NDI cam2", "NDI cam3",
+            "NDI cam2", "NDI cam3",
         }
 
     def test_env_override_narrows_and_widens(self, monkeypatch):
