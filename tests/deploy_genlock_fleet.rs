@@ -615,18 +615,64 @@ fn imag_program_keeps_the_abi_guards_and_graceful_restart() {
         p.contains("obs_display_set_render_divisor"),
         "nm build-proof — refuse a stock/wrong frontend (#499):\n{p}"
     );
-    // graceful restart via the EXISTING installed helpers, then verify the process actually restarted
+    // #789 handoff residual: restart routes THROUGH the durable systemd user unit (a raw background
+    // launch put OBS outside the unit cgroup and died in ~21s live, 2026-08-18), then records the
+    // restarted obs for the #912 start-time race.
     assert!(
-        p.contains("imag-obs-stop.sh"),
-        "graceful stop via the existing helper:\n{p}"
+        p.contains("systemctl --user") && p.contains("stop imag-obs.service"),
+        "graceful stop routes through the systemd user unit:\n{p}"
     );
     assert!(
-        p.contains("imag-obs-start.sh"),
-        "start via the existing helper:\n{p}"
+        p.contains("restart imag-obs.service"),
+        "start routes through the systemd user unit (restart), never a raw launch:\n{p}"
     );
     assert!(
         p.contains("lstart") || p.contains("etimes"),
-        "verify the obs process actually restarted (start-time race, #912):\n{p}"
+        "still records the restarted obs process (start-time race, #912):\n{p}"
+    );
+}
+
+/// #789 handoff residual: the first live fleet run (2026-08-18) raw-launched imag-obs-start.sh
+/// OUTSIDE the imag-obs.service cgroup (no Restart=on-failure, ExecStop bypassed, launch tied to
+/// the ssh session) and it died in ~21s. The imag deploy leg must instead HAND OFF to the durable
+/// systemd USER unit + verify it (active + cgroup + render-tick), never a session-tied raw launch.
+#[test]
+fn imag_program_restarts_through_the_systemd_unit_not_a_raw_launch_789() {
+    let p = imag_program();
+    // relaunch = systemctl --user restart imag-obs.service (a USER unit, issue 998 -> XDG_RUNTIME_DIR).
+    assert!(
+        p.contains("systemctl --user") && p.contains("restart imag-obs.service"),
+        "must relaunch through `systemctl --user restart imag-obs.service`:\n{p}"
+    );
+    assert!(
+        p.contains("XDG_RUNTIME_DIR"),
+        "a USER unit over non-login ssh needs XDG_RUNTIME_DIR exported (issue 998):\n{p}"
+    );
+    // NEVER a session-tied raw launch that escapes the unit cgroup.
+    assert!(
+        !p.contains("setsid") && !p.contains("nohup"),
+        "must NOT raw-launch OBS with setsid/nohup (escapes systemd supervision):\n{p}"
+    );
+    // bounded active-verify + the cgroup discriminator (systemd bookkeeping can say active while the
+    // real obs sits OUTSIDE the unit cgroup, launched by a bypassed path -- verify-imag.sh issue 1015).
+    assert!(
+        p.contains("is-active"),
+        "must poll `systemctl --user is-active` after the restart (bounded active-verify):\n{p}"
+    );
+    assert!(
+        p.contains("/proc/") && p.contains("cgroup") && p.contains("imag-obs.service"),
+        "must verify the running obs pid lives inside the imag-obs.service cgroup:\n{p}"
+    );
+    // render-tick log verify the launch contract demands: the unit's ExecStart (imag-obs-start.sh)
+    // prints 'OK: OBS bezi' to /tmp/imag-obs-start.log only after WS up + scenes seeded.
+    assert!(
+        p.contains("imag-obs-start.log") && p.contains("OK: OBS bezi"),
+        "must render-tick verify via /tmp/imag-obs-start.log reaching 'OK: OBS bezi':\n{p}"
+    );
+    // fail-loud (never a silent WARN) if the supervised restart never comes up.
+    assert!(
+        p.contains("IMAG FAIL") && p.contains("exit 4"),
+        "must fail loud (exit 4) if the supervised unit does not come up:\n{p}"
     );
 }
 
