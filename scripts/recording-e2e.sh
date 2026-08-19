@@ -2274,6 +2274,27 @@ TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 
 GENLOCK_TEST_LATENCY_MS="${GENLOCK_TEST_LATENCY_MS:-}"
 GENLOCK_TEST_LATENCY_SOURCE="${GENLOCK_TEST_LATENCY_SOURCE:-$STREAM_PROG_SOURCE}"
 
+# #1003: measurement-window per-camera equalization (opt-in MEASUREMENT_EQ=1, default OFF —
+# cautious #757 precedent; the supervisor enables it for the live validation E2E). When ON it
+# applies delivery-equalized-deep strih test pins + a coherent stream hold for the MEASUREMENT
+# WINDOW ONLY (snapshot-restore; production 3/6/20 + 971 untouched) and makes --av-expected-ms
+# coherent. Resolved ONCE here (from the checked-in profile of MEASURED inputs, coherence-checked)
+# so the stream prod-scene call below and the strih pin-apply step further down share the values.
+. "$HERE/lib/measurement-eq.sh"
+MEASUREMENT_EQ="${MEASUREMENT_EQ:-0}"
+MEASUREMENT_EQ_PROFILE="${MEASUREMENT_EQ_PROFILE:-$HERE/e2e-measurement-pins.json}"
+if measurement_eq_enabled; then
+  MEQ_PLAN="$(measurement_eq_plan_json "$MEASUREMENT_EQ_PROFILE")" || {
+    echo "ERROR: [preflight] FAIL: #1003 measurement-eq profile did not resolve (missing/malformed/INCOHERENT) — $MEASUREMENT_EQ_PROFILE" >&2
+    exit 1
+  }
+  MEASUREMENT_EQ_HOLD="$(measurement_eq_hold_ms "$MEQ_PLAN")"
+  MEASUREMENT_EQ_PROD_HOLD="$(measurement_eq_prod_hold_ms "$MEQ_PLAN")"
+  MEASUREMENT_EQ_AV_EXPECTED="$(measurement_eq_av_expected_ms "$MEQ_PLAN")"
+  MEASUREMENT_EQ_SLACK="$(measurement_eq_slack_ms "$MEASUREMENT_EQ_PROFILE")"
+  echo "[4/8 meq] #1003 measurement-eq ON — strih deep pins + stream hold ${MEASUREMENT_EQ_HOLD}ms (prod ${MEASUREMENT_EQ_PROD_HOLD}), --av-expected ${MEASUREMENT_EQ_AV_EXPECTED}ms; the #900 re-anchor is forced OFF (both write strih pins)"
+fi
+
 # #406/#312 item5: belt-and-braces re-check, immediately before rerouting strih/stream's
 # PRODUCTION program scenes. The CI-level scripts/rig-busy-gate.sh check (when this harness
 # runs under the automatic pull_request-triggered full-path-e2e.yml gate) may have passed
@@ -2316,6 +2337,15 @@ _stream_prod_scene_args=(prod-scene --host "$STREAM" \
   --test-latency-source "$GENLOCK_TEST_LATENCY_SOURCE")
 if [ -n "$GENLOCK_TEST_LATENCY_MS" ]; then
   _stream_prod_scene_args+=(--test-latency-ms "$GENLOCK_TEST_LATENCY_MS")
+fi
+# #1003: in measurement-eq mode set the stream hold to the profile's coherent test hold, with the
+# PRODUCTION hold passed as the baseline reference so the snapshot is leftover-anchored (a stuck
+# test hold a prior crashed run left is never adopted as production — the 2026-08-19 revert class).
+# Restored to production on teardown by the existing `teardown --host STREAM` path.
+if measurement_eq_enabled; then
+  _stream_prod_scene_args+=(--test-latency-ms "$MEASUREMENT_EQ_HOLD" \
+    --test-latency-prod-ref "$MEASUREMENT_EQ_PROD_HOLD" \
+    --test-latency-slack "$MEASUREMENT_EQ_SLACK")
 fi
 STREAM_OUT=$(python3 "$HERE/obs_phase2.py" "${_stream_prod_scene_args[@]}")
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
@@ -3236,6 +3266,11 @@ fi
 # genuine "no calibration basis" state -- exit before StartRecord rather than reach [4h/8] behind
 # pins nobody established. It reads phase-sync-last.json but NEVER clobbers it (the applied set is
 # recorded only to a run-scoped file).
+# #1003: in measurement-eq mode the [4h/8eq] apply below writes the delivery-equalized-deep strih
+# pins, which is MUTUALLY EXCLUSIVE with the #900 re-anchor (both write strih pins). ONE flag
+# forces the re-anchor off so the two can never disagree; the verbatim default-ON line below is
+# unchanged (0 is set+non-empty, so `${PHASE_REANCHOR:-1}` keeps it 0).
+measurement_eq_enabled && PHASE_REANCHOR=0
 PHASE_REANCHOR="${PHASE_REANCHOR:-1}"
 if [ "$PHASE_REANCHOR" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "[4h/8pre] #900 phase-sync re-anchor — establish the ACTIVE floor pin set from persisted transits (no new measurement) before the [4h/8] floor gate"
@@ -3250,6 +3285,27 @@ if [ "$PHASE_REANCHOR" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
     }
 fi
 
+# [4h/8eq] #1003 — MEASUREMENT-WINDOW equalization apply + pre-record read-back verify (profile
+# mode only). Applies the delivery-equalized-deep per-camera STRIH pins (snapshot-set; restored on
+# teardown via the existing `teardown --host STRIH` path), then read-back VERIFIES both boxes' values
+# are actually in force before StartRecord. This REPLACES the [4h/8] #893 floor gate below in profile
+# mode (the deep pins deliberately violate the min==3ms floor invariant #893 checks, so #893 would
+# false-fail a correct profile run); the verify catches a surviving writer / failed apply / wrong
+# input name that #893 never could. The stream hold was set at [4/8]; verified here too. FAIL-LOUD
+# before StartRecord, never behind a broken measurement config.
+if measurement_eq_enabled && [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  echo "[4h/8eq] #1003 measurement-eq — apply delivery-equalized-deep strih pins + verify both boxes in force"
+  python3 "$HERE/obs_phase2.py" apply-measurement-pins --host "$STRIH" --password "$STRIH_PW" \
+    --profile "$MEASUREMENT_EQ_PROFILE" \
+    || { echo "ERROR: [preflight] FAIL: #1003 apply-measurement-pins failed on strih" >&2; exit 1; }
+  python3 "$HERE/obs_phase2.py" verify-measurement-pins --host "$STRIH" --password "$STRIH_PW" \
+    --profile "$MEASUREMENT_EQ_PROFILE" --role strih \
+    || { echo "ERROR: [preflight] FAIL: #1003 strih equalized pins not in force before StartRecord" >&2; exit 1; }
+  python3 "$HERE/obs_phase2.py" verify-measurement-pins --host "$STREAM" --password "$STREAM_PW" \
+    --profile "$MEASUREMENT_EQ_PROFILE" --role stream \
+    || { echo "ERROR: [preflight] FAIL: #1003 stream hold not in force before StartRecord" >&2; exit 1; }
+fi
+
 # [4h/8] #893 — machine-checked gate: at least one camera in CAMERA_ACTIVE_SET must sit at the
 # strih phase-sync floor (min(pin[c] for c in CAMERA_ACTIVE_SET) == 3ms -- the "slowest active
 # camera pinned at the floor" convention phase_sync_calibrate.py implements). Reads the LIVE
@@ -3259,7 +3315,7 @@ fi
 # StartRecord, rather than after a ~25-minute recording. Owner directive (#893): "nech to je tiez
 # v gate ze minimalne jedna aktivna kamera musi mat latenciu 3ms, nech sa tu dalsie tyzdne
 # nekrutime vo veciach ktore uz si vedel".
-if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+if [ "${ALL_CAMBOX:-0}" = "1" ] && ! measurement_eq_enabled; then
   echo "[4h/8] #893 phase-sync active-floor gate — at least one ACTIVE strih camera must sit at the 3ms floor"
   python3 "$HERE/phase_sync_active_floor_check.py" --host "$STRIH" --password "$STRIH_PW" \
     --active-set "$CAMERA_ACTIVE_SET" \
@@ -3970,6 +4026,11 @@ fi
 # nonzero value. Always passed (matches the CLI's own default) so the gate is explicit in the
 # printed command, not silently implicit.
 AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
+# #1003: in measurement-eq mode the A/V gate must expect the value the pin+hold DESIGN implies
+# (the profile's coherent av_expected — derived so the equalized-deep pins + rebalanced hold land
+# the common A/V level there), NOT a blindly-inherited 0. With the shipped profile this IS 0, but
+# a re-derived profile that dials a nonzero expectation carries the gate with it.
+measurement_eq_enabled && AV_EXPECTED_MS="$MEASUREMENT_EQ_AV_EXPECTED"
 VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")
 # #855: thread the SAME operator ack (CAMBOX_OFFLINE_ACK, already resolved above from either an
 # explicit override or the repo-level rig-fleet.txt default) straight through to recording-verdict
