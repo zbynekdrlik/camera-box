@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 
@@ -625,6 +626,256 @@ def _section_residual_events(verdict):
     )
 
 
+# ===========================================================================
+# #1127 — the REDESIGNED, phone-readable Discord SUMMARY (owner directive 2026-08-19).
+#
+# The owner's complaint: the per-run Discord report is a multi-page wall — "ani test pass neviem
+# najst" — and a PASS run shows ❌ on REPORT-ONLY metrics (run 1104689227: overall_pass=true, yet
+# ❌ on the imag leg + the 84.7ms delivery-side spread), so the verdict is impossible to find.
+#
+# The new summary is verdict-FIRST, tiny, and NEVER renders a report-only metric as ❌:
+#   PASS  -> exactly 3 lines: verdict, one zero-loss summary, one link to the CI run/artifact.
+#   FAIL  -> verdict + ONLY the failing BLOCKING gates (one line each, plain Slovak + #1117
+#            ownership), then at most ONE collapsed "ℹ️ sledované (negatuje verdikt)" line.
+#
+# BLOCKING-vs-REPORT-ONLY is DERIVED from the verdict JSON's own gate semantics, mirroring how
+# src/bin/recording-verdict.rs folds `all_pass`: a LIVE-toggleable seam blocks only while its own
+# node carries `gates_overall_pass=true`; a report-only seam ships `gates_overall_pass=false` and
+# is never a blocking failure. The full detail moves OUT of Discord — it stays the plain-text /
+# CI-log rendering (`compose_report`, unchanged) and lives in the uploaded verdict JSON artifact.
+# ===========================================================================
+
+_OWN_CLAUDE = "Rieši Claude."
+
+
+def _fmt_duration(secs):
+    """`None` -> None (verdict line omits duration); else a human "45s" / "5m 25s"."""
+    if secs is None:
+        return None
+    try:
+        secs = int(secs)
+    except (TypeError, ValueError):
+        return None
+    if secs < 0:
+        return None
+    if secs < 60:
+        return f"{secs}s"
+    return f"{secs // 60}m {secs % 60}s"
+
+
+def _camera_plural(n):
+    """Slovak count-noun for cameras: 1 kamera, 2-4 kamery, 0/5+ kamier."""
+    if n == 1:
+        return "kamera"
+    if 2 <= n <= 4:
+        return "kamery"
+    return "kamier"
+
+
+def _upper_join(cams):
+    return ", ".join(str(c).upper() for c in cams)
+
+
+def _stream_drop_total(verdict, cams):
+    """Total real frames lost on the camera->stream path: per-camera digital-burn real_drops plus
+    any V4L2 capture-card drops. On a PASS this is 0 (headline zero-loss held)."""
+    loss = _g(verdict, "full_chain", "loss", default={}) or {}
+    total = 0
+    for cam in cams:
+        rd = _g(loss, cam, "real_drops")
+        if isinstance(rd, (int, float)):
+            total += rd
+    for key, node in loss.items():
+        if key.startswith("cam2_") and isinstance(node, dict):
+            v4 = node.get("v4l2_dropped")
+            if isinstance(v4, (int, float)):
+                total += v4
+    return int(total)
+
+
+def _blocking_failures(verdict):
+    """Ordered list of `(label, ownership)` for every BLOCKING gate that FAILED in this verdict.
+
+    'Blocking' == folds into recording-verdict.rs's `all_pass` and is LIVE today. A LIVE-toggleable
+    seam is honored via its own `gates_overall_pass` field (so if a seam is ever flipped to
+    report-only, this report auto-follows). The report-only seams (imag leg, delivery-side spread,
+    cold_cut, frozen_leg, self_heal, dup_cadence, undecodable_floor) are NEVER returned here — see
+    `_report_only_tripped`. Ownership follows the #1117 convention: agent-recoverable ->
+    "Rieši Claude."; a genuine physical fault (capture card, silent mbc chain) -> a "Treba fyzicky
+    skontrolovať …" human step."""
+    out = []
+    cams = _cameras_present(verdict)
+    loss = _g(verdict, "full_chain", "loss", default={}) or {}
+
+    # 1) Digital burn contiguity into stream (headline zero-loss), per camera. `full_chain.zero_loss`
+    #    already EXCLUDES the imag leg (report-only), so a per-cam burn miss here is genuinely
+    #    blocking. imag/strih/stream aggregate + cam2_* capture nodes are handled separately.
+    burn_fail = [c for c in cams if _g(loss, c, "zero_loss") is False]
+    if burn_fail:
+        out.append((
+            f"Strata snímok na ceste do stream OBS (digitálny burn): ZLYHALA — {_upper_join(burn_fail)}",
+            _OWN_CLAUDE,
+        ))
+
+    # 2) V4L2 capture-card drops on the camera leg (`full_chain.loss.cam2_*`) — a physical fault.
+    capture_fail = []
+    for key, node in loss.items():
+        if key.startswith("cam2_") and isinstance(node, dict) and node.get("zero_loss") is False:
+            capture_fail.append(str(node.get("source") or key.replace("cam2_", "")))
+    if capture_fail:
+        out.append((
+            f"Snímková strata na zachytení z kamery (V4L2 capture-karta): ZLYHALA — {_upper_join(capture_fail)}",
+            "Treba fyzicky skontrolovať (kamera / kábel / capture-karta).",
+        ))
+
+    # 3) Per-cambox STREAM continuity (copies/gaps/undecodable per window) — BLOCKING unconditionally
+    #    (`all_pass &= seg.overall_pass`, aggregated into all_cambox_continuity.overall_pass).
+    if _g(verdict, "all_cambox_continuity", "overall_pass") is False:
+        tol = _g(verdict, "all_cambox_continuity", "copies_gaps_tolerance", default=0) or 0
+        segs = _g(verdict, "all_cambox_continuity", "segments", default=[]) or []
+        over = []
+        for s in segs:
+            if not isinstance(s, dict):
+                continue
+            if (s.get("copies", 0) or 0) > tol or (s.get("gaps", 0) or 0) > tol:
+                cb = str(s.get("cambox", "")).strip()
+                if cb and cb not in over:
+                    over.append(cb)
+        who = f" — {', '.join(over)}" if over else ""
+        out.append((
+            f"Plynulosť/kontinuita v stream OBS: ZLYHALA{who} (strata/duplicita snímok nad toleranciou)",
+            _OWN_CLAUDE,
+        ))
+
+    # 4) A/V synchronizácia (stream OBS) — LIVE seam (`av_window::gates_overall_pass()==true`).
+    av = _g(verdict, "all_cambox_av_sync", default={}) or {}
+    if av.get("gate_pass") is False and av.get("gates_overall_pass") is True:
+        if av.get("av_audio_silent") is True:
+            out.append((
+                "A/V synchronizácia (stream OBS): ZLYHALA — merací zvuk je tichý",
+                "Treba fyzicky skontrolovať (mbc mute / Dante routing do stream OBS).",
+            ))
+        else:
+            out.append((
+                "A/V synchronizácia (stream OBS): ZLYHALA — offset mimo tolerancie",
+                _OWN_CLAUDE,
+            ))
+
+    # 5) Absolute cam->strih p99 latency bound — LIVE seam (e2e_latency_gate::gates_overall_pass).
+    lg = _g(verdict, "latency", "cam_strih_gate", default={}) or {}
+    if lg.get("pass") is False and lg.get("gates_overall_pass") is True:
+        p99 = lg.get("p99_ms")
+        bound = lg.get("bound_p99_ms")
+        detail = f" (p99 {_fmt_ms(p99)} nad limitom {_fmt_ms(bound)})" if p99 is not None else ""
+        out.append((f"Absolútna latencia kamera→strih: ZLYHALA{detail}", _OWN_CLAUDE))
+
+    # 6) SOURCE cross-camera latency spread — BLOCKING unconditionally (`all_pass &= sv.pass`).
+    if _g(verdict, "all_cambox_latency", "spread_gate_pass") is False:
+        spread = _g(verdict, "all_cambox_latency", "cross_camera_spread_ms")
+        detail = f" ({_fmt_ms(spread)})" if spread is not None else ""
+        out.append((f"Rozptyl latencie medzi kamerami (zdroj): ZLYHAL{detail}", _OWN_CLAUDE))
+
+    # 7) Cadence-judder gate — LIVE seam (presentation_cadence::gates_overall_pass).
+    cj = _g(verdict, "all_cambox_continuity", "cadence_judder_gate", default={}) or {}
+    if cj.get("pass") is False and cj.get("gates_overall_pass") is True:
+        out.append(("Rovnomernosť obrazu (judder 15↔30 fps): ZLYHALA", _OWN_CLAUDE))
+
+    return out
+
+
+def _report_only_tripped(verdict):
+    """Short Slovak names of REPORT-ONLY metrics that 'tripped' in this verdict — for the single
+    optional 'ℹ️ sledované (negatuje verdikt)' line on a FAIL. These NEVER gate overall_pass (each
+    seam ships gates_overall_pass=false) and are NEVER rendered as a ❌ failure — issue #1127 pt.4.
+    Exactly the report-only seams the issue names."""
+    names = []
+    if (_g(verdict, "all_cambox_continuity", "imag", "overall_pass") is False
+            or _g(verdict, "full_chain", "loss", "imag", "zero_loss") is False):
+        names.append("IMAG vetva")
+    if _g(verdict, "all_cambox_delivery_latency", "spread_gate_pass") is False:
+        names.append("rozptyl doručenia (strih)")
+    if _g(verdict, "all_cambox_continuity", "cold_cut_onset", "any_genuine_cold_cut_miss") is True:
+        names.append("cold-cut")
+    fl = _g(verdict, "frozen_leg", default={}) or {}
+    if fl.get("frozen") or fl.get("stale_replay"):
+        names.append("zamrznutá/stale vetva")
+    sh = _g(verdict, "self_heal_reset", default={}) or {}
+    if sh.get("attributed"):
+        names.append("self-heal reset")
+    if (_g(verdict, "all_cambox_continuity", "duplication_masked_cadence", "masked_windows",
+           default=0) or 0) > 0:
+        names.append("duplikačná kadencia")
+    if _g(verdict, "all_cambox_continuity", "run_wide_undecodable_within_floor") is False:
+        names.append("optická čitateľnosť (floor)")
+    return names
+
+
+def _verdict_line(verdict, meta):
+    passed = bool(verdict.get("overall_pass"))
+    head = "✅ E2E TEST PREŠIEL" if passed else "❌ E2E TEST ZLYHAL"
+    run_id = meta.get("run_id") or "?"
+    tail = f" — beh {run_id}"
+    dur = _fmt_duration(meta.get("duration_secs"))
+    if dur:
+        tail += f" · {dur}"
+    return head + tail
+
+
+def _link_line(meta):
+    url = meta.get("run_url")
+    if url:
+        return f"🔗 Plný detail: {url}"
+    return f"🔗 Plný detail: verdikt JSON v artefaktoch CI behu {meta.get('run_id') or '?'}"
+
+
+def compose_summary(verdict: dict, meta: dict | None = None) -> str:
+    """#1127 — PURE: verdict JSON dict + small meta dict -> the short, phone-readable Slovak
+    summary the Discord path (`--json-chunks`) sends.
+
+    PASS -> 3 lines (verdict, zero-loss summary, link). FAIL -> verdict + only the failing BLOCKING
+    gates (with #1117 ownership) + at most one collapsed report-only ℹ️ line + link. A report-only
+    seam is NEVER rendered as a ❌. A FAIL with no recognized blocking gate still emits a generic
+    blocking line pointing at the CI log — a FAIL is never silently hidden."""
+    meta = meta or {}
+    lines = [_verdict_line(verdict, meta)]
+    if bool(verdict.get("overall_pass")):
+        cams = _cameras_present(verdict)
+        n = len(cams)
+        drops = _stream_drop_total(verdict, cams)
+        lines.append(
+            f"📷 {n} {_camera_plural(n)} · {drops} stratených snímok (celá cesta kamera → stream)"
+        )
+        lines.append(_link_line(meta))
+        return "\n".join(lines)
+
+    failures = _blocking_failures(verdict)
+    if not failures:
+        # Safety net: overall_pass is false but no enumerated blocking gate matched (e.g. a
+        # burn_hold-only fold, or a shape this summary doesn't itemize). Never look PASS-ish.
+        failures = [(
+            "Test zlyhal — konkrétnu blokujúcu bránu sa nepodarilo rozpoznať, pozri CI log",
+            _OWN_CLAUDE,
+        )]
+    for label, owner in failures:
+        lines.append(f"• {label} — {owner}")
+    tripped = _report_only_tripped(verdict)
+    if tripped:
+        lines.append(f"ℹ️ sledované (negatuje verdikt): {', '.join(tripped)}")
+    lines.append(_link_line(meta))
+    return "\n".join(lines)
+
+
+def _ci_run_url():
+    """The GitHub Actions run URL from standard env vars, or None outside CI. Read in the impure
+    CLI wrapper only — `compose_summary` stays pure (it renders `meta['run_url']`)."""
+    server = os.environ.get("GITHUB_SERVER_URL")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    run = os.environ.get("GITHUB_RUN_ID")
+    if server and repo and run:
+        return f"{server}/{repo}/actions/runs/{run}"
+    return None
+
+
 def compose_report(verdict: dict, meta: dict | None = None) -> str:
     """Pure: verdict JSON dict + small meta dict -> Slovak markdown report text.
 
@@ -698,9 +949,18 @@ def main(argv=None):
         "supplied",
     )
     ap.add_argument(
+        "--run-url",
+        default=None,
+        help="#1127: the CI run / artifact URL for the summary's link line (Discord path). When "
+        "omitted it is derived from GITHUB_SERVER_URL/GITHUB_REPOSITORY/GITHUB_RUN_ID; outside CI "
+        "the link line falls back to naming the verdict-JSON artifact.",
+    )
+    ap.add_argument(
         "--json-chunks",
         action="store_true",
-        help="print a JSON array of Discord-sized message chunks instead of the raw text",
+        help="print a JSON array of Discord-sized message chunks of the SHORT #1127 summary "
+        "(verdict-first, PASS=3 lines, FAIL=only failing blocking gates). Without this flag the "
+        "FULL detailed report is printed instead (the plain-text / CI-log rendering).",
     )
     args = ap.parse_args(argv)
 
@@ -724,12 +984,15 @@ def main(argv=None):
         "gate_exit": args.gate_exit,
         "pins": pins,
         "mv_skew": mv_skew,
+        "run_url": args.run_url or _ci_run_url(),
     }
-    text = compose_report(verdict, meta)
     if args.json_chunks:
-        print(json.dumps(chunk_for_discord(text)))
+        # #1127: Discord carries only the short, verdict-first summary.
+        print(json.dumps(chunk_for_discord(compose_summary(verdict, meta))))
     else:
-        print(text)
+        # Plain mode = the FULL detail (the CI-log / manual-inspection rendering). The Discord
+        # body no longer carries this wall (#1127); the detail lives here + in the verdict JSON.
+        print(compose_report(verdict, meta))
     return 0
 
 
