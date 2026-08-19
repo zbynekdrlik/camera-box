@@ -61,8 +61,26 @@ scripts/strih-recordings-retention.sh --execute
 
 ## Tier-0 verification
 
-The pure decision has no local cargo path (#477 blocks all local cargo compilation, `--no-run`
-included). Verify the module + tests by copying them into a scratch dir and compiling standalone
-with `rustc --edition 2021 --test` (rustc is not cargo, so it is not blocked) — or let CI's
-`cargo test` run `tests/recordings_retention.rs`. The `.ps1`/`.sh` are verified with `bash -n` +
-`shellcheck` and a live DRY-RUN against strih (read-only).
+The pure decision has no local cargo path (#477/#557 block ALL local cargo compilation — `--no-run`
+INCLUDED, contra the top-level CLAUDE.md Local Build Policy which still describes `cargo test
+--no-run` as allowed; the live `block-tier0-local-build.sh` hook blocks every compiling cargo shape).
+Verify the module + tests by copying them into a scratch dir as `mod recordings_retention { … }` +
+the test file (strip its leading `//!` header) and compiling standalone with `rustc --edition 2021
+--test scratch.rs && ./scratch` — rustc is not cargo, so the hook does not touch it, and it runs the
+pure logic RED→GREEN with zero repo `target/`. Also run `cargo fmt --all --check` (allowed,
+non-compiling — it parses the Rust). The `.ps1`/`.sh` are verified with `bash -n` + `shellcheck` and
+a live DRY-RUN against strih (read-only, deletes nothing).
+
+## Two gotchas when a `.ps1` mirrors a Rust decision AND travels over scp (both proven live, #1122)
+
+- **A scp'd `.ps1` MUST be pure ASCII.** PowerShell on the box reads the transferred file in a
+  non-UTF-8 codepage, so a non-ASCII char in a STRING (an em-dash `—`, `∪`, `≈`) is mangled and
+  BREAKS parsing (the first live run failed with `Unexpected token ')'` where an `—` sat inside a
+  `Write-Output` string). Keep every scp'd `.ps1` ASCII-only (`grep -nP '[^\x00-\x7F]'` before
+  deploying); em-dashes are fine in the sibling `.sh` (it never leaves dev1).
+- **Use `[0-9]`, never `\d`, in the `.ps1` allowlist regex.** .NET regex `\d` (without
+  `RegexOptions.ECMAScript`, which `-cmatch`/`-cnotmatch` do not set) also matches Unicode decimal
+  digits (fullwidth `２`, Arabic-Indic, Devanagari), so `\d` makes the on-box executor MORE
+  permissive than the Rust spec's `is_ascii_digit()` — the wrong direction for a DELETE gate. `[0-9]`
+  keeps the PowerShell mirror byte-exact with the canonical Rust decision. Same lesson applies to any
+  future Rust↔PowerShell parity mirror in this repo.
