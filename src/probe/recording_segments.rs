@@ -882,8 +882,8 @@ mod tests {
             v.segments[0]
         );
         assert!(
-            v.overall_pass,
-            "889: overall_pass now folds relaxed_pass, so this run PASSES: {v:?}"
+            !v.overall_pass,
+            "#1132: the copies/gaps rescue is DISARMED -- a copy within tolerance no longer rescues overall_pass (the optical floor stays report-only): {v:?}"
         );
         assert_eq!(v.windows_failed_report_only, 1);
     }
@@ -991,10 +991,11 @@ mod tests {
     }
 
     #[test]
-    fn copy_stale_frame_in_one_window_fails_strict_but_889_relaxes_overall() {
+    fn copy_stale_frame_in_one_window_fails_strict_and_1132_gates_overall() {
         // cam2 repeats a painted tick (500,500,501) → a stale/frozen copy → STRICT FAIL.
-        // Issue 889 (2026-07-30 user decision on issue 883): `copies` is report-only now, so
-        // `overall_pass` (which folds `relaxed_pass`) PASSES this run (undecodable=0).
+        // #1132 (owner mandate 2026-08-19): the copies/gaps rescue is DISARMED, so `overall_pass`
+        // (which now folds the STRICT-copies-gaps `overall_pass_term`) FAILS this run on the copy.
+        // `relaxed_pass` still reports the pre-#1132 tolerant verdict (observability).
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 4, 1, 100);
         frames.extend([
@@ -1016,8 +1017,8 @@ mod tests {
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert!(
-            v.overall_pass,
-            "889: a copy alone no longer fails overall_pass: {v:?}"
+            !v.overall_pass,
+            "#1132: a copy alone now fails overall_pass again (rescue disarmed): {v:?}"
         );
         assert!(v.segments[0].pass);
         assert!(
@@ -1027,7 +1028,7 @@ mod tests {
         );
         assert!(
             v.segments[1].relaxed_pass,
-            "889: the relaxed verdict passes despite the copy: {:?}",
+            "the relaxed verdict still reports pass despite the copy (observability): {:?}",
             v.segments[1]
         );
         assert_eq!(
@@ -1083,15 +1084,15 @@ mod tests {
             "the real drop is counted as a gap, not silently cleared: {:?}",
             v.segments[0]
         );
-        // 889: undecodable=0 and frame_count>0, so the RELAXED verdict (which ignores gaps) now
-        // passes -- proving `gaps` is still computed correctly even though it no longer gates.
+        // undecodable=0 and frame_count>0, so the RELAXED verdict (which absorbs gaps within
+        // tolerance) still reports pass -- proving `gaps` is still computed correctly.
         assert!(
             v.segments[0].relaxed_pass,
-            "889: relaxed verdict ignores gaps (undecodable within floor): {v:?}"
+            "relaxed verdict absorbs gaps within tolerance (reported): {v:?}"
         );
         assert!(
-            v.overall_pass,
-            "889: overall_pass folds relaxed_pass: {v:?}"
+            !v.overall_pass,
+            "#1132: overall_pass now folds the STRICT-copies-gaps term -- the real drop fails it: {v:?}"
         );
     }
 
@@ -1184,12 +1185,12 @@ mod tests {
             "exactly the one genuinely-missing tick, reorder or not: {:?}",
             v.segments[0]
         );
-        // 889: undecodable=0 here, so the relaxed verdict (which ignores gaps) passes -- proving
-        // the gap is still correctly located/counted even though it no longer gates overall_pass.
+        // undecodable=0 here, so the relaxed verdict (which absorbs gaps within tolerance) still
+        // reports pass -- proving the gap is still correctly located/counted.
         assert!(v.segments[0].relaxed_pass);
         assert!(
-            v.overall_pass,
-            "889: overall_pass folds relaxed_pass: {v:?}"
+            !v.overall_pass,
+            "#1132: the genuinely-missing tick fails overall_pass -- copies/gaps rescue disarmed: {v:?}"
         );
     }
 
@@ -1778,9 +1779,9 @@ mod tests {
 
     #[test]
     fn windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889() {
-        // 3 windows: cam1 clean, cam2 has a copy only (would have failed strict), cam3 clean.
-        // `overall_pass` folds the RELAXED verdict -> PASSES; `windows_failed_report_only` still
-        // honestly counts the one window that would have failed under the pre-889 strict rule.
+        // 3 windows: cam1 clean, cam2 has a copy only (fails strict), cam3 clean. #1132: the
+        // copies/gaps rescue is disarmed, so `overall_pass` now FAILS on cam2's copy;
+        // `windows_failed_report_only` still honestly counts the one window that fails strict.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 2000),
@@ -1807,8 +1808,8 @@ mod tests {
         frames.extend(clean_frames(2000, 100, 4, 1, 900));
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert!(
-            v.overall_pass,
-            "889: only a report-only term is dirty anywhere in this run: {v:?}"
+            !v.overall_pass,
+            "#1132: a copy anywhere now fails overall_pass -- the copies/gaps rescue is disarmed: {v:?}"
         );
         assert!(v.segments[0].pass, "cam1 clean");
         assert!(!v.segments[1].pass, "cam2 has the copy -> STRICT fail");
@@ -1820,11 +1821,12 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_over_floor_combined_with_a_copy_now_passes_overall_915() {
-        // Issue 915 (2026-08-01 user decision): the optical floor is now report-only too, on TOP
-        // of issue 889's copies/gaps relaxation -- a window that fails STRICT for BOTH an
-        // over-floor undecodable count AND a copy still passes the RELAXED verdict, and this run's
-        // total (5) is within the run-wide floor (8) as well, so `overall_pass` PASSES.
+    fn undecodable_over_floor_combined_with_a_copy_now_fails_overall_on_the_copy_1132() {
+        // #1132 (owner mandate 2026-08-19): the copies/gaps rescue is DISARMED. This window fails
+        // STRICT for BOTH an over-floor undecodable count AND a copy. Under #1132 `overall_pass`
+        // now FAILS -- but on the COPY (copies/gaps strict), NOT on the floor: the optical floor
+        // stays report-only (issue 915/905), proven by `relaxed_pass` still reporting pass (the
+        // floor did not gate). This run's undecodable total (5) is within the run-wide floor (8).
         // 1000,1000(copy),1001, then 5x None (undecodable -- over the per-window floor of 4), then 1002.
         let schedule = vec![win("cam2", 0, 10_000)];
         let mut frames = vec![
@@ -1862,12 +1864,12 @@ mod tests {
         assert!(!v.segments[0].pass, "strict fails: {:?}", v.segments[0]);
         assert!(
             v.segments[0].relaxed_pass,
-            "#915: relaxed now passes -- the optical floor (undecodable=5 > 4) is report-only too: {:?}",
+            "the optical floor (undecodable=5 > 4) stays report-only -- relaxed still reports pass, proving #1132 did NOT re-gate the floor: {:?}",
             v.segments[0]
         );
         assert!(
-            v.overall_pass,
-            "#915: the optical floor no longer gates overall_pass, even combined with a copy: {v:?}"
+            !v.overall_pass,
+            "#1132: overall_pass now fails on the COPY (copies/gaps rescue disarmed); the floor is still report-only: {v:?}"
         );
         assert_eq!(v.windows_failed_report_only, 1);
     }
@@ -1956,13 +1958,14 @@ mod tests {
     }
 
     #[test]
-    fn windows_at_copies_gaps_tolerance_still_pass_overall_889_regate() {
-        // Same shape as `windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889`
-        // -- proves the tolerance value itself, not just its absence. Issue 1031 (2026-08-14):
-        // re-tightened 3 -> 1, so cam2 now carries exactly 1 copy (the recalibrated tolerance
-        // value) to stay AT the boundary rather than under it. Same "at-boundary fixture moves
-        // with the const" recalibration the 1 -> 2 -> 3 walk-up already did to it -- not a
-        // weakening: the window still sits exactly AT the tolerance and still must pass.
+    fn windows_at_copies_gaps_tolerance_now_gate_overall_1132() {
+        // #1132 (owner mandate 2026-08-19) -- THE key test for the removed rescue. A window with
+        // exactly ONE copy sits AT/within the (still-live, reported) copies/gaps tolerance, so
+        // `relaxed_pass` still reports pass and `windows_over_copies_gaps_tolerance` stays 0.
+        // Pre-#1132 this window did NOT gate `overall_pass` (the rescue). #1132 DISARMS that
+        // rescue: `overall_pass` now folds the STRICT-copies-gaps `overall_pass_term`, so this
+        // within-tolerance window FAILS the run -- escalate, never mask. This is exactly the
+        // CAM1-class rescue (green run 97792938: seg0 gaps=2 / seg6 copies=1) the owner removed.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 2000),
@@ -1991,16 +1994,16 @@ mod tests {
         assert_eq!(v.segments[1].copies, 1, "{:?}", v.segments[1]);
         assert!(
             v.segments[1].relaxed_pass,
-            "889 re-gate: copies AT the tolerance stay within it: {:?}",
+            "the relaxed verdict still reports the copy within tolerance (observability): {:?}",
             v.segments[1]
         );
         assert!(
-            v.overall_pass,
-            "889 re-gate: within-tolerance windows must not gate overall_pass: {v:?}"
+            !v.overall_pass,
+            "#1132: a within-tolerance copy now GATES overall_pass -- the rescue is disarmed: {v:?}"
         );
         assert_eq!(
             v.windows_over_copies_gaps_tolerance, 0,
-            "no window exceeds the tolerance: {v:?}"
+            "#1132: the window is still WITHIN the reported tolerance (count stays 0) yet gates overall_pass anyway -- the fold no longer keys off over-tolerance: {v:?}"
         );
         assert_eq!(
             v.windows_failed_report_only, 1,
