@@ -52,6 +52,48 @@ import sys
 # 30fps canvas -- the strih/stream program grid the recording-verdict scores against.
 FRAME_PERIOD_MS = 1000.0 / 30.0
 
+# #1003 FRAME-GRID PHASE constraint (2026-08-19 live validation, verdict 1804432786): a pin whose
+# release phase frac(pin/frame) < 0.5 sits in the #998/#1049 FIFO limit-cycle-prone band (the
+# round-to-nearest target rounds DOWN and undershoots the natural hold -> copies≈gaps churn per
+# segment). The live run reproduced it EXACTLY at cam2 pin 168 (frac 0.04): seg copies≈gaps 5/4,
+# 7/7, 5/4. So after delivery-equalizing, snap a prone pin to the nearest integer pin whose frac is
+# in a ROBUST CENTRE band -- clear of BOTH the 0.5 round-down cliff AND the 1.0 wrap (an NTP step
+# storm smears timecode phase fleet-wide, camera-box#1130, so a thin margin above 0.5 is not enough;
+# a value near 1.0 can wrap into the prone band under a step). Delivery-equality is the SECONDARY
+# term: only prone pins move, to the nearest safe value (cam2 168->160 costs 8ms, keeps equality).
+PHASE_PRONE_MAX_FRAC = 0.5   # frac(pin/frame) < this = limit-cycle-prone; a pin at/above it is left alone
+PHASE_SAFE_LO_FRAC = 0.6     # snap a prone pin to a frac in [LO, HI] -- centred, margin from both edges
+PHASE_SAFE_HI_FRAC = 0.8
+PHASE_SNAP_MAX_COST_MS = 20  # a prone pin must find a safe pin within this many ms (else INCOHERENT)
+
+
+def _phase_frac(pin_ms) -> float:
+    """The release-phase fraction frac(pin/frame_period) in [0, 1)."""
+    return (float(pin_ms) / FRAME_PERIOD_MS) % 1.0
+
+
+def _phase_is_prone(pin_ms) -> bool:
+    """True iff `pin_ms`'s release phase is in the #998/#1049 FIFO limit-cycle-prone band."""
+    return _phase_frac(pin_ms) < PHASE_PRONE_MAX_FRAC
+
+
+def phase_snap_pin(equalized_ms: float) -> int:
+    """PURE: the phase-safe integer pin for a real-valued equalized (delivery-equal) pin.
+
+    `round()` it; if that is NOT prone (frac >= 0.5, round-up overshoot = safe), keep it. Otherwise
+    return the NEAREST integer pin whose frac is in the robust centre band [LO, HI], searched
+    outward up to PHASE_SNAP_MAX_COST_MS (checking the lower candidate first at each distance, so a
+    tie resolves toward LESS latency -- cam2 168 -> 160, not 176). Returns the still-prone rounded
+    pin if none is found in range; coherence_check flags that so a prone pin never silently ships."""
+    r = int(round(equalized_ms))
+    if not _phase_is_prone(r):
+        return r
+    for d in range(1, int(PHASE_SNAP_MAX_COST_MS) + 1):
+        for cand in (r - d, r + d):  # lower-first: a tie resolves toward less latency
+            if PHASE_SAFE_LO_FRAC <= _phase_frac(cand) <= PHASE_SAFE_HI_FRAC:
+                return cand
+    return r
+
 
 def load_profile(path: str) -> dict:
     """Load + structurally validate the measurement-eq profile JSON.
@@ -93,20 +135,35 @@ def transport_ms(cam: dict) -> float:
     return float(cam["production_delivery_p50_ms"]) - float(cam["production_pin_ms"])
 
 
-def resolve_pins(profile: dict) -> dict:
-    """PURE: derive the delivery-equalized-deep per-camera test pins.
+def equalized_pin_ms(profile: dict, cam: dict) -> float:
+    """The real-valued delivery-EQUALIZED pin (before the frame-grid phase snap): `target -
+    transport`, so pin + transport == target for every camera. The PRIMARY objective."""
+    return float(profile["target_delivery_ms"]) - transport_ms(cam)
 
-    Every camera's (transport + pin) is driven to the SAME `target_delivery_ms`, so all cameras
-    deliver at the same instant and the inter-camera A/V spread collapses. The slowest-transport
-    camera gets the smallest pin; the target is chosen (in the profile) so even that smallest pin
-    sits at/above `min_deep_pin_ms` -- deep enough to be out of the shallow phase-churn regime
-    the #1003 finding names. Returns {source: pin_ms(int)}.
+
+def resolve_pins(profile: dict) -> dict:
+    """PURE: derive the delivery-equalized-deep per-camera test pins, THEN frame-grid phase-snap.
+
+    Step 1 (equality, PRIMARY): each camera's (transport + pin) is driven to the SAME
+    `target_delivery_ms` so all cameras deliver together and the inter-camera A/V spread collapses.
+    The target is chosen so even the smallest (slowest-transport) pin sits at/above `min_deep_pin_ms`.
+    Step 2 (phase-safety, overriding): `phase_snap_pin` moves any pin whose release phase is in the
+    #998/#1049 FIFO limit-cycle-prone band (frac<0.5) to the nearest safe pin -- the 2026-08-19 live
+    validation exposed cam2 pin 168 (frac 0.04) churning copies≈gaps, so phase-safety overrides
+    exact equality by up to PHASE_SNAP_MAX_COST_MS. Returns {source: pin_ms(int)}.
     """
-    target = float(profile["target_delivery_ms"])
     return {
-        src: int(round(target - transport_ms(cam)))
+        src: phase_snap_pin(equalized_pin_ms(profile, cam))
         for src, cam in profile["cameras"].items()
     }
+
+
+def _expected_deliveries(profile: dict) -> dict:
+    """Per-camera expected delivery under the RESOLVED (phase-snapped) pins: `snapped_pin +
+    transport`. After phase-snapping these are no longer all == target (a prone pin was moved off
+    the grid), so the hold, the coherence A/V check, and staleness all key on THESE, not on target."""
+    pins = resolve_pins(profile)
+    return {src: pins[src] + transport_ms(cam) for src, cam in profile["cameras"].items()}
 
 
 def _mean_audio_ref_ms(profile: dict) -> float:
@@ -123,17 +180,20 @@ def _mean_audio_ref_ms(profile: dict) -> float:
 def resolve_hold(profile: dict) -> int:
     """PURE: derive the coherent stream test hold.
 
-    Equalizing delivery to `target_delivery_ms` raises every camera's A/V offset to a common
-    level `target - audio_ref` under the production hold. Lowering the stream hold by
-    `(common_level - av_expected)` re-zeroes it to `av_expected`. So:
-        test_hold = prod_hold - (target - audio_ref - av_expected)
+    Equalizing delivery raises every camera's A/V offset to a common level under the production
+    hold; lowering the stream hold by `(common_level - av_expected)` re-zeroes it to `av_expected`.
+    Because the frame-grid phase snap leaves per-camera deliveries slightly UNEQUAL, the hold centres
+    on the MEAN snapped delivery (not `target`), so the MEAN A/V lands at av_expected with only the
+    small per-camera snap residual as spread:
+        test_hold = prod_hold - (mean_snapped_delivery - mean_audio_ref - av_expected)
     Returns an int (genlock_latency_ms_src is an integer OBS setting).
     """
-    target = float(profile["target_delivery_ms"])
     av_expected = float(profile["av_expected_ms"])
     audio_ref = _mean_audio_ref_ms(profile)
     prod_hold = float(profile["stream"]["production_hold_ms"])
-    common_level = target - audio_ref
+    deliveries = _expected_deliveries(profile)
+    mean_delivery = sum(deliveries.values()) / len(deliveries)
+    common_level = mean_delivery - audio_ref
     return int(round(prod_hold - (common_level - av_expected)))
 
 
@@ -163,15 +223,17 @@ def resolve_plan(profile: dict) -> dict:
 
 
 def coherence_check(profile: dict) -> list:
-    """PURE: return a list of coherence-violation strings (empty == coherent). The invariants the
-    #1003 consult mandated, so a bad profile edit is caught at Tier-0 rather than on the rig:
+    """PURE: return a list of coherence-violation strings (empty == coherent), caught at Tier-0
+    rather than on the rig:
       1. every derived pin >= min_deep_pin_ms (deep-phase regime);
-      2. pin_i + transport_i == target for every camera (delivery equalized, +/-1ms rounding);
-      3. the predicted equalized A/V per camera under the derived hold is within a small band of
-         av_expected (the pins<->hold<->av_expected triple is self-consistent).
+      2. PHASE-SAFETY: no derived pin sits in the FIFO limit-cycle-prone band (frac<0.5) -- fires
+         only when a prone equalized pin had NO safe pin within PHASE_SNAP_MAX_COST_MS;
+      3. PHASE-SNAP COST: each pin is within PHASE_SNAP_MAX_COST_MS of its equalized value (the snap
+         did not wander far from delivery-equality);
+      4. the predicted per-camera A/V under the SNAPPED delivery + the mean-centred hold is within a
+         small band of av_expected (the pins<->hold<->av_expected triple is self-consistent).
     """
     problems = []
-    target = float(profile["target_delivery_ms"])
     min_deep = float(profile["min_deep_pin_ms"])
     av_expected = float(profile["av_expected_ms"])
     pins = resolve_pins(profile)
@@ -185,26 +247,32 @@ def coherence_check(profile: dict) -> list:
             problems.append(
                 f"{src}: derived pin {pin} < min_deep_pin_ms {min_deep:g} "
                 f"(not in the deep-phase regime)")
-        # Invariant 2 is a DEFENSIVE tautology-guard: resolve_pins derives `pin = round(target -
-        # transport)`, so this can only fire if a FUTURE change breaks that derivation. Kept
-        # deliberately (cheap, catches a derivation regression), not a check a hand-authored value
-        # can trip.
-        eq_delivery = pin + transport_ms(cam)
-        if abs(eq_delivery - target) > 1.0:
+        # Invariant 2 -- phase-safety: resolve_pins snaps a prone equalized pin to a safe one, so
+        # this only fires when NO safe pin existed within PHASE_SNAP_MAX_COST_MS (phase_snap_pin
+        # returned the still-prone rounded value). That is a genuine "cannot equalize AND phase-fix
+        # this camera within budget" state -- surface it, never ship a prone pin.
+        if _phase_is_prone(pin):
             problems.append(
-                f"{src}: pin+transport {eq_delivery:.1f} != target {target:g} "
-                f"(delivery not equalized -- resolve_pins derivation regression)")
-        # Invariant 3 (genuinely falsifiable): the cameras share ONE physical audio path, so each
-        # camera's audio reference (delivery - av_offset) should be ~equal; a single hold can only
-        # re-zero all of them to av_expected if that spread is small. 8ms (~1/4 frame) tolerates
-        # ordinary re-measurement noise while still catching a profile whose per-camera A/V offsets
-        # are inconsistent with its delivery measurements.
+                f"{src}: derived pin {pin} frac {_phase_frac(pin):.2f} < {PHASE_PRONE_MAX_FRAC:g} "
+                f"-- FIFO limit-cycle-prone (no safe pin within {PHASE_SNAP_MAX_COST_MS:g}ms of the "
+                f"equalized value; widen the profile target or investigate the transport)")
+        # Invariant 3 -- phase-snap cost bounded.
+        equalized = equalized_pin_ms(profile, cam)
+        if abs(pin - equalized) > PHASE_SNAP_MAX_COST_MS:
+            problems.append(
+                f"{src}: phase-snap moved the pin {abs(pin - equalized):.1f}ms off the equalized "
+                f"value {equalized:.1f} (> {PHASE_SNAP_MAX_COST_MS:g}ms budget)")
+        # Invariant 4 (genuinely falsifiable): the cameras share ONE physical audio path, so each
+        # camera's audio reference (delivery - av_offset) should be ~equal; the mean-centred hold can
+        # only re-zero all of them to av_expected if that spread (plus the per-camera snap residual)
+        # is small. 8ms (~1/4 frame) tolerates ordinary re-measurement noise + the phase-snap
+        # residual while catching a profile whose per-camera A/V offsets are inconsistent.
         audio_ref_i = float(cam["production_delivery_p50_ms"]) - float(cam["production_av_offset_ms"])
-        predicted_av = target - audio_ref_i - hold_drop
+        predicted_av = (pin + transport_ms(cam)) - audio_ref_i - hold_drop
         if abs(predicted_av - av_expected) > 8.0:
             problems.append(
                 f"{src}: predicted equalized A/V {predicted_av:.1f} not within 8ms of "
-                f"av_expected {av_expected:g} (inconsistent per-camera audio refs)")
+                f"av_expected {av_expected:g} (inconsistent per-camera audio refs or excess snap)")
     return problems
 
 
@@ -249,7 +317,10 @@ def staleness_report(profile: dict, observed_delivery_ms: dict, staleness_frames
     {stale: bool, threshold_ms: float, cameras: {src: {observed, expected, residual, stale}}}.
     Never raises on a camera missing from `observed_delivery_ms` (it is simply skipped -- a
     partial verdict is not evidence of staleness)."""
-    target = float(profile["target_delivery_ms"])
+    # Key on the per-camera EXPECTED delivery under the RESOLVED (phase-snapped) pins, not `target`
+    # -- after the frame-grid snap a camera's expected delivery is snapped_pin + transport, which
+    # need not equal target (cam2 168->160 -> expected ~198.5, not 207).
+    expected = _expected_deliveries(profile)
     threshold = staleness_frames * FRAME_PERIOD_MS
     cams = {}
     any_stale = False
@@ -257,12 +328,13 @@ def staleness_report(profile: dict, observed_delivery_ms: dict, staleness_frames
         if src not in observed_delivery_ms or observed_delivery_ms[src] is None:
             continue
         observed = float(observed_delivery_ms[src])
-        residual = abs(observed - target)
+        exp = expected[src]
+        residual = abs(observed - exp)
         stale = residual > threshold
         any_stale = any_stale or stale
         cams[src] = {
             "observed_ms": round(observed, 1),
-            "expected_ms": round(target, 1),
+            "expected_ms": round(exp, 1),
             "residual_ms": round(residual, 1),
             "stale": stale,
         }
