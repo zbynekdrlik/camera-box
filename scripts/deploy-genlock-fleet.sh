@@ -436,10 +436,12 @@ done
 #     before the fresh supervised start. This mirrors the strih AHK stop->verify->relaunch ordering.
 IMAG_USER="\${SUDO_USER:-newlevel}"
 IMAG_UID="\$(id -u "\$IMAG_USER")"
-# `env` sets XDG_RUNTIME_DIR in the CHILD, bypassing sudo's env_reset (a bare `sudo -u u VAR=val`
-# can be stripped by sudoers env policy -- and a stripped XDG_RUNTIME_DIR silently loses the user
-# bus, re-creating the exact unsupervised-launch failure this fix exists to kill).
-uctl() { sudo -u "\$IMAG_USER" env XDG_RUNTIME_DIR="/run/user/\$IMAG_UID" systemctl --user "\$@"; }
+# env sets XDG_RUNTIME_DIR + DBUS in the CHILD, bypassing sudo env_reset (a bare sudo -u user VAR=val
+# form can be stripped by sudoers env policy -- a stripped XDG_RUNTIME_DIR silently loses the user bus
+# and re-creates the exact unsupervised-launch failure this fix exists to kill; DBUS mirrors
+# setup-imag.sh's live-proven u_systemctl). NO backticks in this heredoc body -- unquoted EOS would
+# command-substitute them at emit time.
+uctl() { sudo -u "\$IMAG_USER" env XDG_RUNTIME_DIR="/run/user/\$IMAG_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/\$IMAG_UID/bus" systemctl --user "\$@"; }
 OBS_START_LOG="/tmp/imag-obs-start.log"
 prev_log_lines="\$(wc -l < "\$OBS_START_LOG" 2>/dev/null || echo 0)"
 uctl stop imag-obs.service 2>/dev/null || true
@@ -449,28 +451,41 @@ rm -f "/home/\$IMAG_USER/.config/obs-studio/.sentinel/"* 2>/dev/null || true
 uctl reset-failed imag-obs.service 2>/dev/null || true
 uctl restart imag-obs.service || { echo "#789 IMAG FAIL: systemctl --user restart imag-obs.service failed -- the supervised unit did not come up" >&2; exit 4; }
 
-# (7a) bounded active-verify: the unit reports active AND the RUNNING obs lives inside the unit
+# (7a) bounded supervised-verify: the unit reports active AND the RUNNING obs lives inside the unit
 #      cgroup (verify-imag.sh issue-1015 discriminator -- systemd bookkeeping can say active while
-#      the real obs sits OUTSIDE the cgroup, launched by a bypassed path).
-imag_active=0
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if uctl is-active --quiet imag-obs.service; then imag_active=1; break; fi
+#      the real obs sits OUTSIDE the cgroup, launched by a bypassed path). All THREE checks share ONE
+#      retry loop: imag-obs.service is Type=simple, so is-active flips true the moment the ExecStart
+#      WRAPPER forks -- BEFORE it forks obs itself (it logs + clears sentinels + reads the CPU pin
+#      first), so a single un-retried pgrep right after is-active races the wrapper->obs fork and can
+#      false-exit-4 on a healthy bringup. Poll all three together instead. If a stray survived the
+#      kill, the wrapper's own idempotent guard (it exits 0 when obs already runs) makes ExecStart a
+#      no-op -> the unit goes
+#      inactive -> is-active stays false -> the loop times out -> exit 4 (never a silent unsupervised
+#      pass). obs_pid stays visible to the record echo below.
+imag_supervised=0
+obs_pid=""
+for _ in \$(seq 1 30); do
+  if uctl is-active --quiet imag-obs.service; then
+    obs_pid="\$(pgrep -x obs | head -n1 || true)"
+    if [ -n "\$obs_pid" ] && grep -q imag-obs.service "/proc/\$obs_pid/cgroup" 2>/dev/null; then imag_supervised=1; break; fi
+  fi
   sleep 2
 done
-[ "\$imag_active" = 1 ] || { echo "#789 IMAG FAIL: imag-obs.service not active after restart" >&2; exit 4; }
-obs_pid="\$(pgrep -x obs | head -n1 || true)"
-[ -n "\$obs_pid" ] || { echo "#789 IMAG FAIL: no obs process after the supervised restart" >&2; exit 4; }
-grep -q imag-obs.service "/proc/\$obs_pid/cgroup" 2>/dev/null \
-  || { echo "#789 IMAG FAIL: obs (pid \$obs_pid) is NOT in the imag-obs.service cgroup -- running UNSUPERVISED (issue 789 was exactly this)" >&2; exit 4; }
+[ "\$imag_supervised" = 1 ] || { echo "#789 IMAG FAIL: imag-obs.service did not come up SUPERVISED (active + obs in its cgroup) after restart (obs_pid=\${obs_pid:-none}) -- refuse an unsupervised deploy (issue 789 was exactly this)" >&2; exit 4; }
 
 # (7b) render-tick log verify the launch contract demands: imag-obs.service's ExecStart
 #      (imag-obs-start.sh) writes /tmp/imag-obs-start.log and prints 'OK: OBS bezi' only AFTER the WS
 #      came up + scenes seeded -- the on-box proof the fresh instance actually rendered, the imag
 #      analogue of the Windows leg's render-tick verify. Read only the tail PAST prev_log_lines so a
-#      STALE 'OK: OBS bezi' from a previous start cannot false-pass.
+#      STALE 'OK: OBS bezi' from a previous start cannot false-pass. Budget 75x2=150s comfortably
+#      EXCEEDS imag-obs-start.sh's own 90s WS deadline + the sleep/bootstrap/projector seed after it
+#      (a false FAIL on a slow-but-healthy bringup would be worse than the wait). Buffer-then-match,
+#      never a tail-piped-into-grep-q -- a SIGPIPE'd tail under pipefail can drop a real match (the same-file
+#      SIGPIPE footgun the ABI-guard step above already avoids).
 imag_tick=0
-for _ in \$(seq 1 45); do
-  if tail -n +\$((prev_log_lines + 1)) "\$OBS_START_LOG" 2>/dev/null | grep -q 'OK: OBS bezi'; then imag_tick=1; break; fi
+for _ in \$(seq 1 75); do
+  new_log="\$(tail -n +\$((prev_log_lines + 1)) "\$OBS_START_LOG" 2>/dev/null || true)"
+  case "\$new_log" in *"OK: OBS bezi"*) imag_tick=1; break ;; esac
   pgrep -x obs >/dev/null 2>&1 || break
   sleep 2
 done
