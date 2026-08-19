@@ -65,12 +65,14 @@ def test_select_rec_encoder_nvenc_when_discrete_nvidia_present():
     assert mod.select_rec_encoder(True) == "obs_nvenc_h264_tex"
 
 
-def test_select_rec_encoder_x264_when_no_discrete_nvidia():
-    """#847: x264, NOT qsv -- QSV was live-tested and confirmed unreliable on this hardware/build
-    (see the module docstring + the #847 issue design comment); shipping it would silently
-    reproduce the exact zero-bytes failure this ticket exists to fix."""
+def test_select_rec_encoder_vaapi_tex_when_no_discrete_nvidia():
+    """#1143 SUPERSEDES the #847 x264 decision: the no-dGPU (Intel iGPU) choice is now the HARDWARE
+    encoder ffmpeg_vaapi_tex -- live-proven to record valid H.264 High 1080p60 while holding render
+    at ~4ms/~0% lagged, eliminating the x264 observer effect (#1130). QSV stays NEVER-chosen (#847
+    live-proved it broken here); x264 is only the graceful fallback when VAAPI is unavailable
+    (tests/python/test_imag_record_encoder_1143.py covers the available-set branches)."""
     mod = _scenes_module()
-    assert mod.select_rec_encoder(False) == "obs_x264"
+    assert mod.select_rec_encoder(False) == "ffmpeg_vaapi_tex"
 
 
 def test_select_rec_encoder_never_returns_qsv():
@@ -158,11 +160,15 @@ def test_seed_profile_sets_nvenc_when_discrete_nvidia_present():
     assert _rec_encoder_calls(obs) == ["obs_nvenc_h264_tex"]
 
 
-def test_seed_profile_sets_x264_when_no_discrete_nvidia():
+def test_seed_profile_sets_vaapi_tex_when_no_discrete_nvidia():
+    """#1143: seed_profile seeds the VAAPI-tex default on the no-dGPU box (available=None -> trust
+    the Intel bundle). The recordEncoder.json CQP settings are NOT written here (OBS is up during a
+    seed -- a clean-shutdown save would clobber them); the E2E ensure-rec-encoder step writes them
+    while OBS is DOWN and restarts to make VAAPI live (#847 restart rule)."""
     mod = _scenes_module()
     obs = FakeProfileObs()
     mod.seed_profile(obs, has_discrete_nvidia=False)
-    assert _rec_encoder_calls(obs) == ["obs_x264"]
+    assert _rec_encoder_calls(obs) == ["ffmpeg_vaapi_tex"]
 
 
 def test_is_local_host_recognizes_loopback_forms():

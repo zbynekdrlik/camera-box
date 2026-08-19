@@ -56,6 +56,13 @@ BOOTSTRAP = "--bootstrap" in sys.argv
 
 from websocket import create_connection
 
+# #1143: the pure record-encoder logic (decision / VAAPI CQP settings / OBS-log parsers) lives in a
+# sibling module so it stays Tier-0 pytest-testable on its own. imag_scenes.py runs either on the box
+# (openbox autostart) or from dev1 with --host; both add THIS file's dir to sys.path[0] when run as a
+# script, but the #847/#1143 importlib tests load this file by path, so add the dir explicitly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import imag_record_encoder  # noqa: E402  (sibling module; needs the sys.path insert just above)
+
 # #526: VERIFIED physical camera <-> NDI-name mapping (live-checked 2026-07-05, all 6 boxes up;
 # cam7 added #753/#791, box 10.77.9.67 -> "CAM7 (usb)"). The fleet advertises a clean 1:1 by box
 # number: box 10.77.9.61 -> "CAM1 (usb)", .62 -> "CAM2", .63 -> "CAM3", .64 -> "CAM4",
@@ -170,10 +177,15 @@ class Obs:
 # "x264 is the safe fallback if QSV proves unreliable" guidance).
 
 
-def select_rec_encoder(has_discrete_nvidia: bool) -> str:
-    """Pure decision -- the OBS RecEncoder id to use for THIS box's hardware. See the comment
-    block above for the live investigation that ruled out QSV as the no-dGPU fallback."""
-    return "obs_nvenc_h264_tex" if has_discrete_nvidia else "obs_x264"
+def select_rec_encoder(has_discrete_nvidia: bool, available_encoders=None) -> str:
+    """The OBS RecEncoder id for THIS box's hardware -- delegates to the Tier-0-tested pure decision
+    in imag_record_encoder. #1143 CHANGED the no-dGPU choice from x264 to the Intel iGPU HARDWARE
+    encoder ffmpeg_vaapi_tex (live-proven to record valid H.264 High 1080p60 while holding render at
+    ~4ms/~0% lagged, eliminating the x264 observer effect #1130). x264 stays the graceful fallback
+    when VAAPI is genuinely unavailable; QSV is NEVER chosen (#847 live-proved it broken here).
+    ``available_encoders`` is None on the seed path (no OBS log to probe) -> trust the Intel bundle's
+    ffmpeg_vaapi_tex; the E2E ensure-rec-encoder step passes the real advertised set."""
+    return imag_record_encoder.choose_record_encoder(has_discrete_nvidia, available_encoders)
 
 
 # Mirrors scripts/setup-imag.sh's `imag_has_discrete_nvidia` bash function EXACTLY (the SAME
