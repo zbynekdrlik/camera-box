@@ -276,16 +276,7 @@ fn realistic_strih_scenario_brings_under_budget_and_protects_foreign() {
     let gib = 1024u64 * 1024 * 1024;
     let mut files = vec![f("strih700105.mkv", 5 * gib, now - 300.0 * SECONDS_PER_DAY)];
     // 8 runs, oldest→newest, the two oldest are the space hogs.
-    let sizes = [
-        46 * gib,
-        33 * gib,
-        8 * gib,
-        8 * gib,
-        1 * gib,
-        1 * gib,
-        1 * gib,
-        1 * gib,
-    ];
+    let sizes = [46 * gib, 33 * gib, 8 * gib, 8 * gib, gib, gib, gib, gib];
     for (i, sz) in sizes.iter().enumerate() {
         let age_days = (8 - i) as f64 * 5.0; // 40,35,...,5 days
         files.push(f(
