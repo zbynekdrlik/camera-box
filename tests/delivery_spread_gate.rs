@@ -27,7 +27,10 @@ fn delivery_spread_gate_is_blocking_since_1142() {
 fn blocking_fold_reds_a_wide_spread_since_1142() {
     // Blocking fold (gates_overall == true): a FAILING (wide) delivery spread now REDs overall.
     // The pure `fold` pins both seam states, and the LIVE call-site helper the verdict makes.
-    assert!(!gate::fold(false, true), "blocking: a wide spread reds the run");
+    assert!(
+        !gate::fold(false, true),
+        "blocking: a wide spread reds the run"
+    );
     assert!(gate::fold(true, true), "blocking: a tight spread passes");
     assert!(
         !gate::folds_into_overall_pass(false),
@@ -35,7 +38,10 @@ fn blocking_fold_reds_a_wide_spread_since_1142() {
     );
     assert!(gate::folds_into_overall_pass(true));
     // The report-only fold direction is still pinned (a hypothetical revert): fold(_, false) passes.
-    assert!(gate::fold(false, false), "report-only direction: a wide spread would not red");
+    assert!(
+        gate::fold(false, false),
+        "report-only direction: a wide spread would not red"
+    );
 }
 
 #[test]

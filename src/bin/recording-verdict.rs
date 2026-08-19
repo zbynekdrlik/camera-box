@@ -5706,14 +5706,19 @@ fn build_and_print_verdict_with_stream_hashes(
                             );
                             delivery_json
                                 .insert("spread_gate_pass".to_string(), serde_json::json!(sv.pass));
-                            // #1033 — fold the delivery cross-camera spread into `overall_pass`
-                            // through the report-only seam. `folds_into_overall_pass` is a NO-OP
-                            // today (`gates_overall_pass()==false`, REPORT-ONLY — the fleet is not
-                            // tight-green: recent green runs sit at ~66–81 ms spread, cam1's
-                            // delivery lottery / issue-909 grabber class), so this preserves the
-                            // current behaviour exactly while making the fold a one-line flip away
-                            // from LIVE once cam1's lottery is killed + ~5 consecutive green runs
-                            // hold the spread ≤ ~10 ms. Mirrors the source-side sweep's own fold.
+                            // #1033 -> #1142 — fold the delivery cross-camera spread into
+                            // `overall_pass` through the seam, now BLOCKING (owner mandate
+                            // 2026-08-19): a wide spread (> SPREAD_THRESHOLD_MS) REDs the run. The
+                            // "green" runs this used to pass were FALSELY green (the phase lottery,
+                            // 3.97 vs 85 ms, hid a real delivery-spread failure); #1142 stops that.
+                            // The SOURCE-side spread already blocks at the same bound; this makes the
+                            // DELIVERY side block too. Mirrors the source-side sweep's own fold.
+                            delivery_json.insert(
+                                "gates_overall_pass".to_string(),
+                                serde_json::json!(
+                                    camera_box::delivery_spread_gate::gates_overall_pass()
+                                ),
+                            );
                             all_pass &=
                                 camera_box::delivery_spread_gate::folds_into_overall_pass(sv.pass);
                         }
@@ -10169,23 +10174,19 @@ mod tests {
         );
     }
 
-    /// #1033: the delivery cross-camera spread now FOLDS into `overall_pass` — but through the
-    /// report-only `delivery_spread_gate` seam, which ships `gates_overall_pass()==false` today
-    /// (the fleet is not tight-green: recent green runs sit at ~66–81 ms spread, cam1's delivery
-    /// lottery / issue-909 grabber class). This REPLACES the old "structurally forbidden" test:
-    /// the field is no longer forbidden from gating — it is WIRED through the standard
-    /// one-line-flippable seam and is a no-op today, so a FAILING delivery spread still does not,
-    /// by itself, red a run. Pinned BOTH directions via the pure fold: report-only today, and
-    /// would-gate the moment the seam is flipped LIVE. (The Tier-0 `tests/delivery_spread_gate.rs`
-    /// pins the seam's pure contract; this pins the same seam AT the recording-verdict wiring.)
+    /// #1033 -> #1142: the delivery cross-camera spread FOLDS into `overall_pass` through the
+    /// `delivery_spread_gate` seam, now BLOCKING (`gates_overall_pass()==true`, owner mandate
+    /// 2026-08-19). It shipped report-only under issue 1033 (the fleet was not tight-green), but the
+    /// "green" runs it passed were FALSELY green — the phase lottery (3.97 vs 85 ms) hid a real
+    /// delivery-spread failure — so #1142 flips it LIVE. Pinned BOTH directions via the pure fold at
+    /// the wiring, plus the surfaced `gates_overall_pass` JSON field. (The Tier-0
+    /// `tests/delivery_spread_gate.rs` pins the seam's pure contract; this pins it AT the wiring.)
     #[test]
-    fn all_cambox_delivery_latency_spread_folds_through_report_only_seam_1033() {
-        // The seam ships REPORT-ONLY today — a wide delivery spread must NOT red a run yet.
+    fn all_cambox_delivery_latency_spread_folds_blocking_since_1142() {
+        // #1142 — the seam is BLOCKING: a wide delivery spread now REDs a run.
         assert!(
-            !camera_box::delivery_spread_gate::gates_overall_pass(),
-            "#1033: the delivery-spread seam must ship report-only (gates_overall_pass()==false) \
-             until cam1's delivery lottery is killed + ~5 consecutive green runs hold spread ≤ \
-             ~10 ms; flipping it LIVE is a separate follow-up"
+            camera_box::delivery_spread_gate::gates_overall_pass(),
+            "#1142: the delivery-spread seam must be BLOCKING (gates_overall_pass()==true)"
         );
 
         let v = build_all_cambox_delivery_latency_fixture(
@@ -10199,27 +10200,32 @@ mod tests {
             "sanity: this fixture's 27ms spread must FAIL the 24ms bound for the point of this \
              test to hold: {lat}"
         );
-        assert!(
-            v.get("all_cambox_delivery_latency").is_some(),
-            "sanity: the field itself must still be present: {v}"
+        // #1142 — the block now surfaces the LIVE seam state so the report consumer + a miner can
+        // tell blocking from report-only.
+        assert_eq!(
+            lat["gates_overall_pass"],
+            serde_json::json!(true),
+            "#1142: the delivery block must surface the BLOCKING seam state: {lat}"
         );
 
-        // Re-pin the seam's report-only contract at the call site, on the EXACT functions the
-        // wiring above invokes (`folds_into_overall_pass`): for this fixture's failing
-        // `sv.pass == false`, the report-only seam folds to PASS today (a wide spread never reds a
-        // run). This does not, and cannot, assert on the fixture's own `overall_pass` (the minimal
-        // 2-window recording reds for unrelated reasons, e.g. the #373 duration floor — the same
-        // reason the OLD test documented) — the pure seam contract is what is verified here, with
+        // Re-pin the seam's BLOCKING contract at the call site, on the EXACT function the wiring
+        // above invokes (`folds_into_overall_pass`): for this fixture's failing `sv.pass == false`,
+        // the blocking seam now folds to FAIL (a wide spread REDs the run). This does not assert on
+        // the fixture's own `overall_pass` (the minimal 2-window recording reds for unrelated
+        // reasons too, e.g. the #373 duration floor) — the pure seam contract is verified here, with
         // `tests/delivery_spread_gate.rs` covering it Tier-0 as well.
         assert!(
-            camera_box::delivery_spread_gate::folds_into_overall_pass(false),
-            "#1033 report-only: a FAILING delivery spread must fold to pass while the seam is off"
+            !camera_box::delivery_spread_gate::folds_into_overall_pass(false),
+            "#1142 blocking: a FAILING delivery spread must fold to FAIL while the seam is LIVE"
         );
-        // …and the other direction: once the seam is flipped LIVE, that same failing spread reds
-        // the run — proving the wiring's fold is honest in both seam states.
         assert!(
-            !camera_box::delivery_spread_gate::fold(false, true),
-            "#1033 blocking: once flipped LIVE, a FAILING delivery spread must red the run"
+            camera_box::delivery_spread_gate::folds_into_overall_pass(true),
+            "a TIGHT delivery spread passes"
+        );
+        // The report-only fold direction stays pinned (a hypothetical revert): fold(_, false) passes.
+        assert!(
+            camera_box::delivery_spread_gate::fold(false, false),
+            "report-only direction: a wide spread would not red if the seam were reverted"
         );
     }
 

@@ -815,6 +815,43 @@ def _blocking_failures(verdict):
     if cj.get("pass") is False and cj.get("gates_overall_pass") is True:
         out.append(("Rovnomernosť obrazu (judder 15↔30 fps): ZLYHALA", _OWN_CLAUDE))
 
+    # 9) Cadence-UNIFORMITY floor — #1142 NEW LIVE seam
+    #    (presentation_cadence::uniformity_gates_overall_pass). Only fires on a #1142-shape verdict
+    #    that carries the block with gates_overall_pass=true.
+    cu = _g(verdict, "all_cambox_continuity", "cadence_uniformity_gate", default={}) or {}
+    if cu.get("pass") is False and cu.get("gates_overall_pass") is True:
+        worst = cu.get("worst_uniform_fraction")
+        detail = f" (najhoršia rovnomernosť {worst:.2f})" if isinstance(worst, (int, float)) else ""
+        out.append((f"Rovnomernosť obrazu (plynulý pohyb 60→30): ZLYHALA{detail}", _OWN_CLAUDE))
+
+    # 10) DELIVERY-side cross-camera spread — #1142: now BLOCKING (delivery_spread_gate::
+    #     gates_overall_pass). The SOURCE-side spread (item 7) was always blocking; #1142 makes the
+    #     DELIVERY side block too. Only fires on a #1142-shape verdict (gates_overall_pass=true).
+    dl = _g(verdict, "all_cambox_delivery_latency", default={}) or {}
+    if dl.get("spread_gate_pass") is False and dl.get("gates_overall_pass") is True:
+        spread = dl.get("cross_camera_spread_ms")
+        detail = f" ({_fmt_ms(spread)})" if spread is not None else ""
+        out.append((f"Rozptyl doručovacej latencie medzi kamerami (strih): ZLYHAL{detail}", _OWN_CLAUDE))
+
+    # 11) IMAG PRESENCE/VERIFICATION — #1142: now BLOCKING (imag_leg_gate::gates_overall_pass). A run
+    #     that silently skipped the imag leg (or dropped it via the schema-degrade) REDs, UNLESS imag
+    #     is operator-offline-acked (the ONE sanctioned skip). The PER-FRAME CONTENT terms stay
+    #     report-only (→ _report_only_tripped). Only fires on a #1142-shape verdict.
+    fc = _g(verdict, "full_chain", default={}) or {}
+    if (fc.get("imag_leg_verified") is False
+            and fc.get("imag_leg_verified_offline_acked") is not True
+            and fc.get("imag_leg_verified_gates_overall_pass") is True):
+        out.append((
+            "IMAG vetva nebola overená (nevznikol imag partial — beh nie je úplný): ZLYHALA",
+            _OWN_CLAUDE,
+        ))
+    if (_g(verdict, "full_chain", "loss", "imag", "imag_presence_pass") is False
+            and _g(verdict, "full_chain", "loss", "imag", "gates_overall_pass") is True):
+        out.append((
+            "IMAG vetva — prezenčná kontrola (dĺžka záznamu / optická čitateľnosť / farba): ZLYHALA",
+            _OWN_CLAUDE,
+        ))
+
     return out
 
 
@@ -824,10 +861,22 @@ def _report_only_tripped(verdict):
     (each seam ships gates_overall_pass=false) and are NEVER rendered as a ❌ failure — #1127 pt.4.
     Exactly the report-only seams the issue names."""
     names = []
-    if (_g(verdict, "all_cambox_continuity", "imag", "overall_pass") is False
-            or _g(verdict, "full_chain", "loss", "imag", "zero_loss") is False):
+    # #1142 — the imag leg is now SPLIT: PRESENCE/VERIFICATION blocks (→ _blocking_failures),
+    # PER-FRAME CONTENT (burn contiguity + optical beat + per-segment continuity) stays report-only.
+    # A #1142-shape verdict carries `imag_content_pass`; a pre-#1142 verdict does not, and its whole
+    # imag leg was report-only (fall back to zero_loss then).
+    imag_content = _g(verdict, "full_chain", "loss", "imag", "imag_content_pass")
+    imag_seg_content = _g(verdict, "all_cambox_continuity", "imag", "overall_pass")
+    if imag_content is not None:
+        if imag_content is False or imag_seg_content is False:
+            names.append("IMAG vetva (obsah/plynulosť)")
+    elif imag_seg_content is False or _g(verdict, "full_chain", "loss", "imag", "zero_loss") is False:
         names.append("IMAG vetva")
-    if _g(verdict, "all_cambox_delivery_latency", "spread_gate_pass") is False:
+    # #1142 — the delivery-side spread is now BLOCKING (its seam ships gates_overall_pass=true), so
+    # it moves to _blocking_failures. It stays report-only ONLY on a pre-#1142 verdict that carries
+    # no `gates_overall_pass` on the delivery block (the field auto-follows the seam flip).
+    if (_g(verdict, "all_cambox_delivery_latency", "spread_gate_pass") is False
+            and _g(verdict, "all_cambox_delivery_latency", "gates_overall_pass") is not True):
         names.append("rozptyl doručenia (strih)")
     if _g(verdict, "all_cambox_continuity", "cold_cut_onset", "any_genuine_cold_cut_miss") is True:
         names.append("cold-cut")
