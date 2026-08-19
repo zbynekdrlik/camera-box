@@ -146,8 +146,12 @@ fn recording_e2e_scans_all_active_cameras_not_just_cam1() {
     let s = read("scripts/recording-e2e.sh");
     // Mirrors the #894 burn-unit-integrity-check's OWN ALL_CAMBOX loop shape (CAMBOX_SECONDARY_DEPLOY) --
     // the self-heal scan must sweep the same set, not just CAM1_IP.
+    // Anchor on the CALL-SITE form ("$(fn ...") -- the bare fn name also appears in a header
+    // comment (line ~299), and .find() on it latched the comment; the +-2000 window around the
+    // comment only coincidentally contained ALL_CAMBOX until the issue-1134 edits shifted text
+    // (the #832 anchor-uniqueness gotcha).
     let scan_start = s
-        .find("self_heal_reset_window_journalctl_cmd")
+        .find("$(self_heal_reset_window_journalctl_cmd ")
         .expect("scan call site must exist");
     let region = &s[scan_start.saturating_sub(2000)..(scan_start + 2000).min(s.len())];
     assert!(
