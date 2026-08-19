@@ -79,7 +79,7 @@
 # RE-ENABLE (once the grabber is replaced): add "cam1" back to CAMERA_ACTIVE_SET AND delete cam1's
 # rig-fleet.txt ack line — nothing else (the source role follows automatically, cam1 being the
 # first strih-routable member of a cam1-first set again).
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3}"
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

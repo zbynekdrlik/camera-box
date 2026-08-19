@@ -133,14 +133,14 @@ def test_cambox_sweep_default_covers_every_camera_in_the_canonical_active_mappin
     )
 
 
-def test_default_active_set_is_exactly_cam2_cam3_1134():
+def test_default_active_set_is_exactly_cam1_cam2_cam3_1134():
     """#827: cam5/cam6/cam7 retired. #947: cam4 retired. #939 (2026-08-13): cam3 re-activated.
     #1134 (2026-08-19): cam1 RETIRED (USB grabber hw fault #1110, owner order #1130) and its
     hard-pinned E2E source role moved to cam3 -- today's declared active fleet is exactly
-    cam2 (painter) / cam3 (source)."""
+    cam2 (painter) / cam3. REVÍZIA v ten istý deň: cam1 VRÁTENÁ (issue 1130 — judder bol emit-gate regresia v nasadenej binárke, nie karta) — dnešný aktívny fleet = cam1/cam2/cam3, source = cam1 (prvý v sete)."""
     canonical = _scene_to_camera_from_active_map()
-    assert set(canonical.values()) == {"CAM2", "CAM3"}, canonical
-    for retired in ("CAM1", "CAM4", "CAM5", "CAM6", "CAM7"):
+    assert set(canonical.values()) == {"CAM1", "CAM2", "CAM3"}, canonical
+    for retired in ("CAM4", "CAM5", "CAM6", "CAM7"):
         assert retired not in canonical.values(), (
             f"{retired} is retired from CAMERA_ACTIVE_SET -- it must not appear in the "
             f"default resolved map: {canonical}"

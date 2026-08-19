@@ -20,7 +20,10 @@
 # remove it the moment the notebook is back. (Remote wake / WoL for imag is separate hardware work,
 # tracked apart from this gate change; issue 1053 is its strih/stream counterpart.)
 #
-# Current physical state (2026-08-19, issue-1134 cam1 source-role retirement):
+# Current physical state (2026-08-19): cam1 RETURNED same day — issue 1130 proved the judder was an
+# emit-gate regression in the deployed dev.462 binary (fixed by deploying dev.481), NOT the grabber;
+# the issue-1134 source-role mechanism stays (source = first strih-routable member of the set).
+# Historic note (issue-1134 cam1 source-role retirement, superseded same day):
 # cam1: RETIRED 2026-08-19 (issue 1134, owner order #1130) -- its USB grabber is hardware-faulted
 #   (#1110 -EPROTO; live capture reads grayscale, camera-box.service stopped). cam1 was ALSO the
 #   hard-pinned PRIMARY/source node of the E2E chain, so #1134 made the source role derivable off
@@ -44,7 +47,6 @@
 # Without the remaining acks the re-armed A/V-offset gate (issue 861) fails closed forever on
 # their UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design
 # (#855).
-cam1:usb-eproto-grabber-hw-fault-2026-08-19
 cam4:on-air-but-outside-measured-set-2026-08-07
 cam5:powered-off-2026-07-27
 cam6:powered-off-2026-07-27
