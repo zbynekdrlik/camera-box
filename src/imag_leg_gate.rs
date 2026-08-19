@@ -56,10 +56,10 @@
 /// sub-floor analyzed span (#373), an above-moiré-floor cam2 undecodable rate (#376), or a colour
 /// failure now REDs the run. These are honesty signals NOT confounded by the #1130 observer effect.
 pub fn gates_overall_pass() -> bool {
-    // #1142 [red] — presence seam NOT yet flipped in this commit (still the issue 798 path A
-    // report-only value). The [green] commit flips this to `true`; the test
-    // `presence_seam_is_blocking_since_1142` FAILS here to prove the flip is what changes it.
-    false
+    // #1142 — BLOCKING: the imag presence/verification terms gate overall_pass (owner mandate
+    // 2026-08-19). Was `false` (issue 798 path A report-only); the per-frame content terms stay
+    // report-only via `content_gates_overall_pass` below (issue 1130 observer effect).
+    true
 }
 
 /// #1142 — does the imag leg's PER-FRAME CONTENT verdict (digital-burn contiguity + optical-beat

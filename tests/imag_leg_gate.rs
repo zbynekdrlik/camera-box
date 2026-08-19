@@ -41,7 +41,10 @@ fn presence_fold_reds_a_failing_presence_term_content_fold_never_does() {
         !imag_leg_gate::fold(false, true),
         "blocking: a failing presence term reds the run"
     );
-    assert!(imag_leg_gate::fold(true, true), "blocking: a passing term passes");
+    assert!(
+        imag_leg_gate::fold(true, true),
+        "blocking: a passing term passes"
+    );
     assert!(
         imag_leg_gate::content_folds_into_overall_pass(false),
         "report-only content: a failing per-frame term must NOT red the run"
@@ -55,7 +58,10 @@ fn verified_leg_ok_reds_a_silent_skip_but_exempts_an_offline_ack() {
     // acked) — the "hidden partial" the "ONE full test, no partials" doctrine (#798) bans — fails;
     // a genuinely present leg passes. The ONE sanctioned skip is an operator-acknowledged offline
     // imag (#1013): an absent leg is EXPECTED there, so it must not red.
-    assert!(imag_leg_gate::verified_leg_ok(true, false), "a present imag leg passes");
+    assert!(
+        imag_leg_gate::verified_leg_ok(true, false),
+        "a present imag leg passes"
+    );
     assert!(
         !imag_leg_gate::verified_leg_ok(false, false),
         "#1142: a silently-skipped imag leg (verified=false, not acked) reds the run"
