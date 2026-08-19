@@ -166,6 +166,28 @@
 /// resumes on issue 1031 after the cam1 card swap + consecutive greens.
 pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 3;
 
+/// #1132 (owner mandate 2026-08-19): whether the per-window copies/gaps TOLERANCE
+/// ([`WINDOW_COPIES_GAPS_TOLERANCE`]) is allowed to RESCUE the verdict folded into `overall_pass`
+/// ([`WindowGateDecision::overall_pass_term`]). Hardcoded `false` — the owner ordered the relaxed
+/// copies/gaps rescue removed after the CAM1 grabber incident (a hardware-sick leg with
+/// copies=1/gaps<=3 passed green for a week, masking the defect; every multi-frame event must now
+/// be RED + escalated, never absorbed). While `false`, `overall_pass_term` requires `copies == 0
+/// && gaps == 0`; the tolerance MECHANISM (`relaxed_pass`, [`WINDOW_COPIES_GAPS_TOLERANCE`], its
+/// walk-down history — issue 1031/1121 —, and the whole reporting/JSON path) stays DORMANT and
+/// fully computed for observability, it just no longer rescues (the
+/// `gate-allowance-restore-red-green` dormant-mechanism pattern). Mirrors
+/// `crate::optical_floor::gates_overall_pass`'s dormant-seam shape EXACTLY, and is INDEPENDENT of
+/// it — #1132 touches ONLY copies/gaps; the optical undecodable floor stays report-only on its own
+/// separate seam (issue 915/905), never re-gated by this change.
+///
+/// **Restore path:** flip this ONE function back to `true` once the sick leg is physically
+/// fixed/excluded (issue 1110/1134) AND the walk-down (issue 1031) resumes to its data-supported
+/// value; then `overall_pass_term == relaxed_pass` again and the tolerance folds exactly as it did
+/// pre-#1132.
+pub fn copies_gaps_tolerance_gates_overall_pass() -> bool {
+    false
+}
+
 /// The strict-vs-relaxed decision for one cambox window, given its already-computed counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowGateDecision {
@@ -178,7 +200,21 @@ pub struct WindowGateDecision {
     /// WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE` — `copies`/`gaps` are
     /// no longer fully report-only, they are tolerated up to the calibrated per-window threshold
     /// and gate again above it.
+    ///
+    /// **#1132 (owner mandate 2026-08-19): this field is now REPORTED-ONLY for observability — it
+    /// no longer folds into `overall_pass`.** The run fold uses [`Self::overall_pass_term`]
+    /// instead. Kept computed (with the tolerance) so the JSON shows what the relaxed verdict
+    /// WOULD say — a `relaxed_pass == true` window whose `overall_pass_term == false` is the
+    /// disarmed rescue visibly doing nothing, never a hidden mask.
     pub relaxed_pass: bool,
+    /// #1132 (owner mandate 2026-08-19): the verdict ACTUALLY folded into the run-level
+    /// `overall_pass` (`crate::probe::recording_segments::segment_continuity`). STRICTER than
+    /// [`Self::relaxed_pass`] on copies/gaps — the copies/gaps tolerance no longer rescues it
+    /// (`copies_gaps_tolerance_gates_overall_pass() == false`), so a single copy or gap fails.
+    /// The optical undecodable floor stays report-only here EXACTLY as in `relaxed_pass` (the SAME
+    /// `crate::optical_floor::gates_overall_pass()` term — #1132 does NOT touch the floor). When
+    /// `copies_gaps_tolerance_gates_overall_pass()` is flipped back on, this equals `relaxed_pass`.
+    pub overall_pass_term: bool,
 }
 
 impl WindowGateDecision {
@@ -213,9 +249,21 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     // 5200533407).
     let within_tolerance =
         copies <= WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE;
-    let relaxed_pass = frame_count > 0
-        && (undecodable_ok || !crate::optical_floor::gates_overall_pass())
-        && within_tolerance;
+    // The optical-floor term is shared by BOTH the relaxed verdict and the #1132 blocking verdict
+    // below -- report-only while `gates_overall_pass()` is false (issue 915/905), UNCHANGED by #1132.
+    let floor_term = undecodable_ok || !crate::optical_floor::gates_overall_pass();
+    let relaxed_pass = frame_count > 0 && floor_term && within_tolerance;
+    // #1132 (owner mandate 2026-08-19): the term ACTUALLY folded into `overall_pass`. The
+    // copies/gaps rescue is DISARMED for the blocking verdict -- strict `copies == 0 && gaps == 0`
+    // unless `copies_gaps_tolerance_gates_overall_pass()` is restored to `true` (then this equals
+    // `relaxed_pass`). The optical-floor term is IDENTICAL to `relaxed_pass` -- #1132 does NOT
+    // touch the floor's report-only status (issue 915/905, its own separate seam).
+    let copies_gaps_ok = if copies_gaps_tolerance_gates_overall_pass() {
+        within_tolerance
+    } else {
+        copies == 0 && gaps == 0
+    };
+    let overall_pass_term = frame_count > 0 && floor_term && copies_gaps_ok;
     // `strict_pass` keeps its pre-889-AND-pre-915 meaning byte-for-byte: frame_count>0 &&
     // undecodable within floor && copies==0 && gaps==0 -- computed directly (no longer derived
     // from `relaxed_pass`, since issue 915 decoupled the floor from that derivation).
@@ -223,6 +271,7 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     WindowGateDecision {
         strict_pass,
         relaxed_pass,
+        overall_pass_term,
     }
 }
 

@@ -4421,13 +4421,31 @@ fn build_and_print_verdict_with_stream_hashes(
                                 );
                             }
                             if s.copies != 0 || s.gaps != 0 {
-                                println!(
-                                    "      ⚠ #889 WITHIN TOLERANCE: copies={} gaps={} fails the \
-                                     pre-889 strict rule, but stays within the per-window \
-                                     singleton tolerance ({}) and does NOT gate overall_pass \
-                                     (see issue #889 for the decision record).",
-                                    s.copies, s.gaps, seg.copies_gaps_tolerance
-                                );
+                                // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance
+                                // rescue is DISARMED, so a within-tolerance nonzero copies/gaps
+                                // window (relaxed_pass == true) now GATES overall_pass. The old
+                                // "does NOT gate" wording would be a LIE here (the exact masking
+                                // the owner removed) -- key the message off the live seam so it can
+                                // never claim "does NOT gate" for a window that actually fails.
+                                if camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass(
+                                ) {
+                                    println!(
+                                        "      ⚠ #889 WITHIN TOLERANCE: copies={} gaps={} fails the \
+                                         pre-889 strict rule, but stays within the per-window \
+                                         singleton tolerance ({}) and does NOT gate overall_pass \
+                                         (see issue #889 for the decision record).",
+                                        s.copies, s.gaps, seg.copies_gaps_tolerance
+                                    );
+                                } else {
+                                    println!(
+                                        "      ⚠ #1132 STRICT-ESCALATE: copies={} gaps={} -- the \
+                                         relaxed copies/gaps rescue is DISARMED (owner mandate); \
+                                         this window FAILS overall_pass and must be escalated, never \
+                                         masked (see issue #1132). relaxed_pass reports the old \
+                                         tolerant verdict above for observability only.",
+                                        s.copies, s.gaps
+                                    );
+                                }
                             }
                         } else {
                             // `relaxed_pass` fails too — name every real reason via the pure,
@@ -4555,12 +4573,32 @@ fn build_and_print_verdict_with_stream_hashes(
                 );
                 println!(
                     "  ⚠ #889 RE-GATE (singleton tolerance={}): {}/{} cambox window(s) exceed the \
-                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — THESE \
-                     windows DO gate overall_pass again (see issue #889 for the decision record).",
+                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — a \
+                     SUBSET of what now gates under #1132 (see the #1132 line below and issue #889 \
+                     for the decision record).",
                     seg.copies_gaps_tolerance,
                     seg.windows_over_copies_gaps_tolerance,
                     seg.segments.len()
                 );
+                // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance rescue is DISARMED
+                // (`window_gate::copies_gaps_tolerance_gates_overall_pass() == false`), so ANY
+                // window with nonzero copies OR gaps (not only OVER the tolerance) FAILS
+                // overall_pass -- count them so the escalation is loud, never masked. When the seam
+                // is re-armed this line falls silent (the #889 tolerance line above governs again).
+                if !camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass() {
+                    let windows_with_copies_or_gaps = seg
+                        .segments
+                        .iter()
+                        .filter(|s| s.frames > 0 && (s.copies != 0 || s.gaps != 0))
+                        .count();
+                    println!(
+                        "  ⚠ #1132 STRICT: copies/gaps rescue DISARMED — {}/{} cambox window(s) \
+                         carry any copies/gaps and FAIL overall_pass (escalate, never mask; the \
+                         within-tolerance ones would have been rescued pre-#1132). See issue #1132.",
+                        windows_with_copies_or_gaps,
+                        seg.segments.len()
+                    );
+                }
                 // Issue 915 (2026-08-01 user decision) visibility requirement, mirrors #889
                 // requirement 3 — prints UNCONDITIONALLY whether or not the run-wide floor was
                 // exceeded, so silence is never mistaken for strictness. Hardcoded,
@@ -4622,16 +4660,34 @@ fn build_and_print_verdict_with_stream_hashes(
                     // Finding 5 of the issue-889 re-gate deep review — a self-describing prose
                     // gate key, mirroring `undecodable_floor_gate`'s idiom immediately above but
                     // SCOPED by name to `copies`/`gaps` specifically (issue-915 lesson: never a
-                    // blanket "gate" key on the whole object). Unlike `undecodable_floor_gate`,
-                    // this one describes a term that DOES gate again above its tolerance — the
-                    // JSON is self-describing without needing the binary's source to know that.
+                    // blanket "gate" key on the whole object). #1132 (2026-08-19): the tolerance
+                    // rescue is DISARMED, so the prose now describes the STRICT policy (any nonzero
+                    // copies/gaps gates) while it is disarmed, and reverts to the #889 tolerance
+                    // wording if the seam is re-armed -- the JSON self-describes either way.
+                    let copies_gaps_tol_gates =
+                        camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass();
                     obj.insert(
                         "copies_gaps_gate".to_string(),
-                        serde_json::json!(format!(
-                            "gates overall_pass above the per-window singleton tolerance ({}) -- \
-                             see issue #889 for the decision record",
-                            seg.copies_gaps_tolerance
-                        )),
+                        serde_json::json!(if copies_gaps_tol_gates {
+                            format!(
+                                "gates overall_pass above the per-window singleton tolerance ({}) -- \
+                                 see issue #889 for the decision record",
+                                seg.copies_gaps_tolerance
+                            )
+                        } else {
+                            "#1132: the copies/gaps tolerance rescue is DISARMED -- overall_pass \
+                             gates on ANY nonzero copies/gaps (strict copies==0 && gaps==0); the \
+                             tolerance is dormant/reported-only. See issue #1132."
+                                .to_string()
+                        }),
+                    );
+                    // #1132 (owner mandate 2026-08-19): the machine-readable companion to the prose
+                    // above, mirroring `undecodable_floor_gates_overall_pass`. `false` = the rescue
+                    // is disarmed, so overall_pass folds strict copies==0 && gaps==0; flip the seam
+                    // (`window_gate::copies_gaps_tolerance_gates_overall_pass`) to re-arm it.
+                    obj.insert(
+                        "copies_gaps_tolerance_gates_overall_pass".to_string(),
+                        serde_json::json!(copies_gaps_tol_gates),
                     );
                 }
                 report["all_cambox_continuity"] = seg_json;
