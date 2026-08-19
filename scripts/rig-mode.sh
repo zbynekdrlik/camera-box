@@ -644,6 +644,75 @@ BANNER
   return 0   # advisory: a drift check must NEVER fail rig-mode / block a live event
 }
 
+# imag_genlock_gate_verdict CHECK_OUTPUT CHECK_RC -> the #789 TEST-entry HARD-BLOCK decision (owner
+# ROZHODNUTE 2026-08-19, comment 5337986800: HARD-BLOCK, gates maximalne striktne, no WARN-and-
+# proceed). Reads ONLY the `genlock_build` facet of `drift-guard.sh --check-imag` output — the
+# imag-vs-origin/main PIN check, the early-gate-pin doctrine's PRIMARY signal (it catches even a
+# uniformly-stale fleet that bare cross-box parity would pass, and it is genlock-scoped so an
+# unrelated facet drift never blocks TEST). Prints:
+#   PASS               -> the genlock_build facet reports OK (box current with origin/main HEAD)
+#   BLOCK <reason>     -> DRIFT (imag STALE), UNKNOWN (SHA unread / git compare failed), the facet
+#                         line ABSENT, or the subprocess itself failed (fail-CLOSED — anything short
+#                         of a proven-OK genlock_build line REFUSES).
+# Pure (no I/O), ALWAYS returns 0 (verdict is on stdout) so tests/rig_mode.rs can source rig-mode.sh
+# and exercise every branch (Tier-0, #477). awk field-splitting ignores leading whitespace, so $1 is
+# the exact `genlock_build` label and $2 the STATE; `exit` after the first match (--check-imag emits
+# this facet exactly once). No `grep -q` (SIGPIPE-under-pipefail footgun under this file's set -e).
+imag_genlock_gate_verdict() {
+  local out="$1" rc="$2" state
+  state="$(printf '%s\n' "$out" | awk '$1=="genlock_build"{print $2; exit}')"
+  if [ "$state" = "OK" ]; then
+    printf 'PASS\n'
+    return 0
+  fi
+  if [ -z "$state" ]; then
+    printf 'BLOCK (imag genlock build state UNKNOWN — drift-guard --check-imag reported no genlock_build facet [exit=%s]; fail-closed)\n' "$rc"
+    return 0
+  fi
+  printf 'BLOCK (imag genlock build %s — not provably current with origin/main [exit=%s]; fail-closed)\n' "$state" "$rc"
+  return 0
+}
+
+# require_imag_genlock_current -> #789 TEST-entry HARD-BLOCK gate (owner ROZHODNUTE 2026-08-19). Runs
+# `drift-guard.sh --check-imag` against the ACTIVE imag host, feeds its output to
+# imag_genlock_gate_verdict, and REFUSES to enter TEST mode (exit 30 — a distinct non-clean exit per
+# the early-gate-pin doctrine) with a named Slovak operator message unless the imag genlock build is
+# provably current. TEST path ONLY: going LIVE at an event must never be blocked by a drift check, so
+# the EVENT path keeps the advisory warn_imag_genlock_stale. Guards its own `cd` under this file's
+# set -e (an unread host must fail CLOSED via the verdict, not crash here). Same --check-imag
+# mechanism as the advisory warn, opposite (fail-closed) contract.
+require_imag_genlock_current() {
+  local here out rc=0 verdict
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  echo "[#789] TEST-entry HARD-BLOCK: imag-nb's deployed genlock OBS build MUST be current with origin/main (gates maximalne striktne — owner 2026-08-19):"
+  out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag "host=$IMAG_IP" 2>&1 )" || rc=$?
+  printf '%s\n' "$out" | sed 's/^/    [imag genlock] /'
+  echo "    [imag genlock] drift-guard --check-imag exit=${rc}"
+  verdict="$(imag_genlock_gate_verdict "$out" "$rc")"
+  case "$verdict" in
+    PASS*)
+      echo "    [imag genlock] OK — imag genlock build je aktualny s origin/main; TEST rezim pokracuje."
+      return 0
+      ;;
+  esac
+  cat >&2 <<BANNER
+
+################################################################################
+## HARD-BLOCK [#789]: imag-nb NIE JE na kanonickom genlock OBS builde rigu.
+## ${verdict#BLOCK }
+## TEST rezim sa NESPUSTA — meranie na nekonzistentnom imagu je zakazane
+## (owner 2026-08-19: gates maximalne striktne, ziadne WARN-and-proceed).
+## NAPRAVA: nasad kanonicky fleet build na VSETKY boxy jedinou cestou:
+##   scripts/deploy-genlock-fleet.sh --run-id <CI run> --full
+## (alebo na samotny imag: scripts/setup-imag.sh step-12), potom znova:
+##   scripts/rig-mode.sh test
+## Detail vyssie v riadkoch [imag genlock].
+################################################################################
+
+BANNER
+  exit 30
+}
+
 # burn_action_for_mode MODE -> the obs_burn_filter.py action (test=add/on, event=remove/off).
 burn_action_for_mode() {
   case "${1:-}" in
@@ -1018,8 +1087,8 @@ do_test() {
     && echo "[#281] rig-active heartbeat SET ($(rig_heartbeat_path))" \
     || echo "WARNING: could not set rig-active heartbeat (#281)" >&2
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
-  echo "[obs] #531 pre-event genlock-staleness check on imag-nb (advisory, never blocks the switch):"
-  warn_imag_genlock_stale
+  echo "[obs] #789 TEST-entry HARD-BLOCK: imag genlock build must be current before any measurement (owner 2026-08-19 — gates maximalne striktne, no WARN-and-proceed):"
+  require_imag_genlock_current
   echo
   echo "[cam2 ${PAINTER_IP}] #725 resolve the QPSK audio-marker device from cam2's LIVE aplay -l (never trust the hardcoded default):"
   local resolved_marker_device
