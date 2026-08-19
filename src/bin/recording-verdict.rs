@@ -4689,6 +4689,22 @@ fn build_and_print_verdict_with_stream_hashes(
                         "copies_gaps_tolerance_gates_overall_pass".to_string(),
                         serde_json::json!(copies_gaps_tol_gates),
                     );
+                    // #1132 review finding (2026-08-19): the EXACT count of windows that GATE
+                    // overall_pass under the disarmed rescue (any nonzero copies/gaps on a
+                    // non-empty window) -- serialized for mineability parity. Neither existing
+                    // count is an exact substitute: `windows_over_copies_gaps_tolerance` is now
+                    // only a SUBSET (it misses within-tolerance nonzero windows that gate under
+                    // #1132), and `windows_failed_report_only` is a SUPERSET (it also counts
+                    // floor-only strict failures that stay report-only). Same value the #1132
+                    // STRICT stdout summary prints.
+                    obj.insert(
+                        "windows_with_copies_or_gaps".to_string(),
+                        serde_json::json!(seg
+                            .segments
+                            .iter()
+                            .filter(|s| s.frames > 0 && (s.copies != 0 || s.gaps != 0))
+                            .count()),
+                    );
                 }
                 report["all_cambox_continuity"] = seg_json;
                 all_pass &= seg.overall_pass;
