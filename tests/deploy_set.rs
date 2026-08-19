@@ -58,7 +58,10 @@ fn acked_box_dropped_via_ambient_env() {
 #[test]
 fn exact_name_match_never_substring() {
     // cam7 acked must NOT drop cam70 (exact-name match, mirroring cambox_offline_ack_is_acked).
-    let out = run(r#"deploy_set_active_minus_acked "cam7 cam70" "cam7:off""#, &[]);
+    let out = run(
+        r#"deploy_set_active_minus_acked "cam7 cam70" "cam7:off""#,
+        &[],
+    );
     assert_eq!(out.trim(), "cam70");
 }
 
