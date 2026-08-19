@@ -77,7 +77,7 @@ class TestRealPassSummary:
     def test_report_only_metrics_are_not_mentioned_on_pass(self):
         # imag leg + delivery-side spread both "tripped" (report-only) in this fixture — they must
         # NOT appear at all on a PASS (that was the owner's confusion).
-        assert "IMAG" not in self.summary.upper() or "imag" not in self.summary.lower()
+        assert "imag" not in self.summary.lower()
         assert "84.7" not in self.summary
         assert "spread" not in self.summary.lower()
 
@@ -121,7 +121,7 @@ class TestRealFailSummary:
         assert len(info) <= 1
         for ln in info:
             assert "❌" not in ln
-            assert "negatuje" in ln  # explicitly marked as non-gating
+            assert "neovplyvňuje" in ln  # explicitly marked as non-gating, plain Slovak
 
     def test_a_link_line_is_present_on_fail_too(self):
         assert "Plný detail" in self.summary
@@ -154,6 +154,42 @@ class TestBlockingClassification:
         assert "imag" in joined
         assert "doručen" in joined  # delivery-side spread
 
+    def test_strih_stream_aggregate_zero_loss_node_is_blocking(self):
+        # recording-verdict.rs :3795 folds full_chain.loss.strih / .stream (aggregate delivery
+        # nodes) into all_pass — a per-cam scan alone would miss a stream-only failure.
+        v = {
+            "overall_pass": False,
+            "full_chain": {"zero_loss": False, "loss": {"stream": {"zero_loss": False}}},
+        }
+        failures = edr._blocking_failures(v)
+        assert failures, "a failing strih/stream aggregate node must be a named blocking gate"
+        assert any("STREAM" in label for label, _ in failures)
+        summary = edr.compose_summary(v, {"run_id": "x"})
+        assert "konkrétnu blokujúcu bránu sa nepodarilo rozpoznať" not in summary  # not the fallback
+
+    def test_burn_hold_over_bound_is_blocking(self):
+        # recording-verdict.rs :3868 LIVE burn_hold fold; JSON at full_chain.loss.<node>.hold.
+        v = {
+            "overall_pass": False,
+            "full_chain": {
+                "zero_loss": True,
+                "loss": {"stream": {"zero_loss": True,
+                                    "hold": {"within_bound": False, "gates_overall_pass": True}}},
+            },
+        }
+        failures = edr._blocking_failures(v)
+        assert any("max-hold" in label for label, _ in failures)
+
+    def test_burn_hold_report_only_when_seam_off_is_not_blocking(self):
+        # If the seam is ever flipped to report-only (gates_overall_pass=false), an over-bound hold
+        # must NOT be a blocking failure — the classifier follows the JSON seam.
+        v = {
+            "overall_pass": True,
+            "full_chain": {"loss": {"stream": {"zero_loss": True,
+                           "hold": {"within_bound": False, "gates_overall_pass": False}}}},
+        }
+        assert not any("max-hold" in label for label, _ in edr._blocking_failures(v))
+
     def test_report_only_seams_never_leak_into_blocking(self):
         # A synthetic verdict whose ONLY failing thing is a report-only imag leg must be PASS-shaped:
         # zero blocking failures.
@@ -175,15 +211,20 @@ class TestBlockingClassification:
 
 class TestOwnershipDerivation:
     def test_v4l2_capture_drop_is_a_physical_fault(self):
+        # Use the REAL verbose `source` shape recording-verdict.rs writes, to prove the label is
+        # derived from the cam2_<label> KEY and never echoes that whole sentence into the line.
+        real_source = "cam1 V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare"
         v = {
             "overall_pass": False,
             "full_chain": {
                 "zero_loss": False,
-                "loss": {"cam2_cam1": {"zero_loss": False, "v4l2_dropped": 12, "source": "cam1"}},
+                "loss": {"cam2_cam1": {"zero_loss": False, "v4l2_dropped": 12, "source": real_source}},
             },
         }
         summary = edr.compose_summary(v, {"run_id": "x"})
         assert "fyzicky skontrol" in summary  # a capture-card drop needs a human check
+        assert "CAM1" in summary              # attributed from the cam2_cam1 key
+        assert "sequence-gap" not in summary  # the verbose source sentence must NOT reach the line
 
     def test_silent_audio_av_failure_is_physical(self):
         v = {

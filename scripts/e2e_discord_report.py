@@ -676,6 +676,14 @@ def _upper_join(cams):
     return ", ".join(str(c).upper() for c in cams)
 
 
+def _order_nodes(keys):
+    """Stable, readable order for full_chain.loss node keys: cameras first (CAMERA_ORDER), then the
+    strih/stream aggregate nodes, then anything else."""
+    order = {c: i for i, c in enumerate(CAMERA_ORDER)}
+    order["strih"], order["stream"] = 90, 91
+    return sorted(keys, key=lambda k: order.get(k, 80))
+
+
 def _stream_drop_total(verdict, cams):
     """Total real frames lost on the camera->stream path: per-camera digital-burn real_drops plus
     any V4L2 capture-card drops. On a PASS this is 0 (headline zero-loss held)."""
@@ -699,36 +707,61 @@ def _blocking_failures(verdict):
     'Blocking' == folds into recording-verdict.rs's `all_pass` and is LIVE today. A LIVE-toggleable
     seam is honored via its own `gates_overall_pass` field (so if a seam is ever flipped to
     report-only, this report auto-follows). The report-only seams (imag leg, delivery-side spread,
-    cold_cut, frozen_leg, self_heal, dup_cadence, undecodable_floor) are NEVER returned here — see
-    `_report_only_tripped`. Ownership follows the #1117 convention: agent-recoverable ->
+    cold_cut, frozen_leg, self_heal, dup_cadence, undecodable_floor, lipsync) are NEVER returned
+    here — see `_report_only_tripped`. Ownership follows the #1117 convention: agent-recoverable ->
     "Rieši Claude."; a genuine physical fault (capture card, silent mbc chain) -> a "Treba fyzicky
-    skontrolovať …" human step."""
+    skontrolovať …" human step.
+
+    KEEP IN SYNC with recording-verdict.rs's `all_pass &= …` folds (grep `all_pass` there): this
+    classifier hand-mirrors that fold list (unavoidable at Tier-0 — python cannot import the Rust).
+    A blocking gate added there but missed here degrades to the compose_summary safety-net line (a
+    FAIL is never hidden, just unnamed), so add its branch when a fold changes."""
     out = []
-    cams = _cameras_present(verdict)
     loss = _g(verdict, "full_chain", "loss", default={}) or {}
 
-    # 1) Digital burn contiguity into stream (headline zero-loss), per camera. `full_chain.zero_loss`
-    #    already EXCLUDES the imag leg (report-only), so a per-cam burn miss here is genuinely
-    #    blocking. imag/strih/stream aggregate + cam2_* capture nodes are handled separately.
-    burn_fail = [c for c in cams if _g(loss, c, "zero_loss") is False]
-    if burn_fail:
+    # 1) Zero-loss into stream (headline). Every full_chain.loss node with zero_loss=False EXCEPT the
+    #    imag leg (report-only -> _report_only_tripped) and the cam2_* V4L2 capture nodes (physical,
+    #    item 2). Covers per-camera digital burn (cam1..7) AND the strih/stream aggregate delivery
+    #    nodes (recording-verdict.rs :3795 `all_pass &= is_zero_within_allowance && span_ok`).
+    zl_fail = [
+        key for key, node in loss.items()
+        if isinstance(node, dict) and key != "imag" and not key.startswith("cam2_")
+        and node.get("zero_loss") is False
+    ]
+    if zl_fail:
         out.append((
-            f"Strata snímok na ceste do stream OBS (digitálny burn): ZLYHALA — {_upper_join(burn_fail)}",
+            f"Strata snímok na ceste do stream OBS (zero-loss): ZLYHALA — {_upper_join(_order_nodes(zl_fail))}",
             _OWN_CLAUDE,
         ))
 
     # 2) V4L2 capture-card drops on the camera leg (`full_chain.loss.cam2_*`) — a physical fault.
-    capture_fail = []
-    for key, node in loss.items():
-        if key.startswith("cam2_") and isinstance(node, dict) and node.get("zero_loss") is False:
-            capture_fail.append(str(node.get("source") or key.replace("cam2_", "")))
-    if capture_fail:
+    #    Label from the cam2_<label> KEY: the node's verbose `source` sentence ("… V4L2 sequence-gap
+    #    capture-drop (camera leg) — not a painter-tick compare") is exactly the wall #1127 kills.
+    cap_fail = [
+        key[len("cam2_"):] for key, node in loss.items()
+        if key.startswith("cam2_") and isinstance(node, dict) and node.get("zero_loss") is False
+    ]
+    if cap_fail:
         out.append((
-            f"Snímková strata na zachytení z kamery (V4L2 capture-karta): ZLYHALA — {_upper_join(capture_fail)}",
+            f"Snímková strata na zachytení z kamery (V4L2 capture-karta): ZLYHALA — {_upper_join(cap_fail)}",
             "Treba fyzicky skontrolovať (kamera / kábel / capture-karta).",
         ))
 
-    # 3) Per-cambox STREAM continuity (copies/gaps/undecodable per window) — BLOCKING unconditionally
+    # 3) burn_hold — per-hop repeat / max-hold. LIVE seam (recording-verdict.rs :3868), JSON at
+    #    full_chain.loss.<node>.hold (within_bound + gates_overall_pass).
+    hold_fail = [
+        key for key, node in loss.items()
+        if isinstance(node, dict) and isinstance(node.get("hold"), dict)
+        and node["hold"].get("within_bound") is False
+        and node["hold"].get("gates_overall_pass") is True
+    ]
+    if hold_fail:
+        out.append((
+            f"Opakovanie/držanie snímky (burn max-hold) na {_upper_join(_order_nodes(hold_fail))}: ZLYHALO",
+            _OWN_CLAUDE,
+        ))
+
+    # 4) Per-cambox STREAM continuity (copies/gaps/undecodable per window) — BLOCKING unconditionally
     #    (`all_pass &= seg.overall_pass`, aggregated into all_cambox_continuity.overall_pass).
     if _g(verdict, "all_cambox_continuity", "overall_pass") is False:
         tol = _g(verdict, "all_cambox_continuity", "copies_gaps_tolerance", default=0) or 0
@@ -741,13 +774,15 @@ def _blocking_failures(verdict):
                 cb = str(s.get("cambox", "")).strip()
                 if cb and cb not in over:
                     over.append(cb)
-        who = f" — {', '.join(over)}" if over else ""
-        out.append((
-            f"Plynulosť/kontinuita v stream OBS: ZLYHALA{who} (strata/duplicita snímok nad toleranciou)",
-            _OWN_CLAUDE,
-        ))
+        if over:
+            detail = f" — {', '.join(over)} (strata/duplicita snímok nad toleranciou)"
+        else:
+            # A segment can fail for a non-copies/gaps reason (empty schedule / frame_count==0,
+            # recording-verdict.rs :4638) — don't claim the wrong cause.
+            detail = " (chyba kontinuity — pozri CI log)"
+        out.append((f"Plynulosť/kontinuita v stream OBS: ZLYHALA{detail}", _OWN_CLAUDE))
 
-    # 4) A/V synchronizácia (stream OBS) — LIVE seam (`av_window::gates_overall_pass()==true`).
+    # 5) A/V synchronizácia (stream OBS) — LIVE seam (`av_window::gates_overall_pass()==true`).
     av = _g(verdict, "all_cambox_av_sync", default={}) or {}
     if av.get("gate_pass") is False and av.get("gates_overall_pass") is True:
         if av.get("av_audio_silent") is True:
@@ -761,7 +796,7 @@ def _blocking_failures(verdict):
                 _OWN_CLAUDE,
             ))
 
-    # 5) Absolute cam->strih p99 latency bound — LIVE seam (e2e_latency_gate::gates_overall_pass).
+    # 6) Absolute cam->strih p99 latency bound — LIVE seam (e2e_latency_gate::gates_overall_pass).
     lg = _g(verdict, "latency", "cam_strih_gate", default={}) or {}
     if lg.get("pass") is False and lg.get("gates_overall_pass") is True:
         p99 = lg.get("p99_ms")
@@ -769,13 +804,13 @@ def _blocking_failures(verdict):
         detail = f" (p99 {_fmt_ms(p99)} nad limitom {_fmt_ms(bound)})" if p99 is not None else ""
         out.append((f"Absolútna latencia kamera→strih: ZLYHALA{detail}", _OWN_CLAUDE))
 
-    # 6) SOURCE cross-camera latency spread — BLOCKING unconditionally (`all_pass &= sv.pass`).
+    # 7) SOURCE cross-camera latency spread — BLOCKING unconditionally (`all_pass &= sv.pass`).
     if _g(verdict, "all_cambox_latency", "spread_gate_pass") is False:
         spread = _g(verdict, "all_cambox_latency", "cross_camera_spread_ms")
         detail = f" ({_fmt_ms(spread)})" if spread is not None else ""
         out.append((f"Rozptyl latencie medzi kamerami (zdroj): ZLYHAL{detail}", _OWN_CLAUDE))
 
-    # 7) Cadence-judder gate — LIVE seam (presentation_cadence::gates_overall_pass).
+    # 8) Cadence-judder gate — LIVE seam (presentation_cadence::gates_overall_pass).
     cj = _g(verdict, "all_cambox_continuity", "cadence_judder_gate", default={}) or {}
     if cj.get("pass") is False and cj.get("gates_overall_pass") is True:
         out.append(("Rovnomernosť obrazu (judder 15↔30 fps): ZLYHALA", _OWN_CLAUDE))
@@ -785,8 +820,8 @@ def _blocking_failures(verdict):
 
 def _report_only_tripped(verdict):
     """Short Slovak names of REPORT-ONLY metrics that 'tripped' in this verdict — for the single
-    optional 'ℹ️ sledované (negatuje verdikt)' line on a FAIL. These NEVER gate overall_pass (each
-    seam ships gates_overall_pass=false) and are NEVER rendered as a ❌ failure — issue #1127 pt.4.
+    optional 'ℹ️ sledované (neovplyvňuje verdikt)' line on a FAIL. These NEVER gate overall_pass
+    (each seam ships gates_overall_pass=false) and are NEVER rendered as a ❌ failure — #1127 pt.4.
     Exactly the report-only seams the issue names."""
     names = []
     if (_g(verdict, "all_cambox_continuity", "imag", "overall_pass") is False
@@ -807,6 +842,12 @@ def _report_only_tripped(verdict):
         names.append("duplikačná kadencia")
     if _g(verdict, "all_cambox_continuity", "run_wide_undecodable_within_floor") is False:
         names.append("optická čitateľnosť (floor)")
+    # lipsync cross-check (issue 1032) — report-only; JSON node lives under all_cambox_av_sync or
+    # top-level depending on run shape (absent on ~all runs today). Guarded so absent -> no-op.
+    lip = (_g(verdict, "all_cambox_av_sync", "lipsync_cross_check", default=None)
+           or _g(verdict, "lipsync_cross_check", default=None))
+    if isinstance(lip, dict) and lip.get("gate_pass") is False:
+        names.append("lipsync")
     return names
 
 
@@ -842,9 +883,11 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
         cams = _cameras_present(verdict)
         n = len(cams)
         drops = _stream_drop_total(verdict, cams)
-        lines.append(
-            f"📷 {n} {_camera_plural(n)} · {drops} stratených snímok (celá cesta kamera → stream)"
-        )
+        # On a PASS `drops` is normally 0; it can be a small nonzero under the #904 real-drops
+        # allowance (still within tolerance, so the run PASSED) — say so rather than pair ✅ with a
+        # bare loss count.
+        loss_txt = "0 stratených snímok" if drops == 0 else f"{drops} stratených snímok (v rámci tolerancie)"
+        lines.append(f"📷 {n} {_camera_plural(n)} · {loss_txt} (celá cesta kamera → stream)")
         lines.append(_link_line(meta))
         return "\n".join(lines)
 
@@ -860,7 +903,7 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
         lines.append(f"• {label} — {owner}")
     tripped = _report_only_tripped(verdict)
     if tripped:
-        lines.append(f"ℹ️ sledované (negatuje verdikt): {', '.join(tripped)}")
+        lines.append(f"ℹ️ sledované (neovplyvňuje verdikt): {', '.join(tripped)}")
     lines.append(_link_line(meta))
     return "\n".join(lines)
 
