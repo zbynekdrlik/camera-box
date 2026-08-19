@@ -73,6 +73,15 @@ on:
         # pull_request gate below (which carries NO inputs) always falls through to rig-fleet.txt.
         description: "CAMBOX_OFFLINE_ACK override (comma 'box:reason' pairs; empty = use rig-fleet.txt)"
         default: ""
+      no_main_pin:
+        # #1136: DISABLE the camera-box pin-to-origin/main gate for a DELIBERATE pre-merge operator
+        # soak of a build you have MANUALLY deployed to the fleet that is NOT yet on main (the
+        # documented escape in .claude/rules/early-gate-pin-doctrine.md). Leave false (default) so the
+        # gate enforces "every active box == origin/main"; the automatic pull_request gate below
+        # carries no inputs, so it ALWAYS enforces the pin.
+        description: "Disable the camera-box main-pin gate (pre-merge soak of a manually-deployed build)"
+        type: boolean
+        default: false
   # #406/#312 item5: the automatic BLOCKING merge gate. Fires on every dev->main PR
   # open/update — the busy-gate step protects the live rig, so this can safely run
   # unattended (never on every push to dev — only when a PR targeting main exists/changes).
@@ -281,6 +290,9 @@ jobs:
           # through to the checked-in rig-fleet.txt default. A manual workflow_dispatch's
           # offline_ack input, when non-empty, overrides that default outright.
           CAMBOX_OFFLINE_ACK: ${{ github.event_name == 'workflow_dispatch' && inputs.offline_ack || '' }}
+          # #1136: only a workflow_dispatch soak may disable the camera-box main-pin gate; the
+          # automatic pull_request gate leaves this empty and always enforces the pin.
+          CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN: ${{ github.event_name == 'workflow_dispatch' && inputs.no_main_pin && '1' || '' }}
           # issue 1093 (2026-08-17): recalibrate the post-deploy sender-bounce reverify budget via
           # the harness's own env seam. The default budget (attempts=3, settle=6 -> ~24s) was sized
           # "comfortably above" a 2026-07-14 measured re-lock of 11.4s; a fresh live measurement

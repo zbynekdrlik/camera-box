@@ -530,7 +530,13 @@ jobs:
     # already defaults SSH_PASS to the fleet-wide value). Fails LOUDLY on any active-and-unacked box
     # that mismatches or is unreachable; an acked-offline box is skipped. The push:[dev,main] E2E
     # gate's #1136 pin layer then holds "fleet == main" as a hard invariant on every run.
-    needs: [lint, test, build]
+    # Gate on every job that bears on the SHIPPED Linux binary or the deploy SCRIPTS this job
+    # reuses: lint+test (binary correctness), build (the artifact), security (cargo audit — an
+    # advisory DB can turn a yesterday-green commit red), shellcheck (guards deploy-fleet.sh /
+    # deploy-set.sh / camera-set.sh — a shell bug here can brick a box). A RED in any of these must
+    # NOT auto-deploy to prod cameras. (coverage/mutants/python-tests/windows-probe/drift-guard are
+    # deliberately excluded — they don't bear on the Linux binary or the deploy shell.)
+    needs: [lint, test, build, security, shellcheck]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: [self-hosted, linux, camera-lan]
     # Share the E2E hardware-serialization slot (loopback-e2e.yml / full-path-e2e.yml's group) so a

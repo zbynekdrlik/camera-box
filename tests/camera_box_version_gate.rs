@@ -385,6 +385,9 @@ fn cli_uniformly_stale_fleet_is_refused_against_the_main_pin_1136() {
             "cam1=x cam2=x cam3=x",
         ],
         &[
+            // Explicit empty ack (mirrors the sibling cli_* tests) so a polluted ambient
+            // CAMBOX_OFFLINE_ACK can never mask a box as excluded in this refusal test.
+            ("CAMBOX_OFFLINE_ACK", ""),
             ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.487"),
             (
                 "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
