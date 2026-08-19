@@ -759,6 +759,55 @@ def _restore_measurement_pins(ws, host, state):
     _save_state(state)
 
 
+def measurement_pins_mismatches(role, plan, live):
+    """#1003 PURE: given a role ('strih' | 'stream'), the resolved profile `plan`, and the live
+    values read over WS (`live`: for strih a {source: pin_or_None} dict; for stream a single
+    hold_or_None), return a list of human-readable mismatch strings (empty == all in force). Pure
+    so the read-back verify decision is Tier-0 testable without a WS."""
+    problems = []
+    if role == "strih":
+        for source, want in plan["strih_pins"].items():
+            got = live.get(source)
+            if got != want:
+                problems.append(f"strih '{source}': live={got!r} != profile {want}")
+    elif role == "stream":
+        want = plan["stream_hold_ms"]
+        if live != want:
+            problems.append(f"stream '{plan['stream_source']}': live={live!r} != profile {want}")
+    else:
+        problems.append(f"unknown role {role!r}")
+    return problems
+
+
+def verify_measurement_pins(a):
+    """#1003 verify-measurement-pins: the pre-record read-back verify that REPLACES the #893
+    active-floor gate in profile mode (the deep equalized pins deliberately violate the min==floor
+    invariant #893 checks, so #893 is wrong for a profile run; this verifies the intended profile
+    values are ACTUALLY in force instead). --role strih reads every strih source's live pin;
+    --role stream reads the stream hold. Exit 0 = all in force, 1 = a mismatch (a surviving writer,
+    a failed apply, or wrong input names -> the measurement would run on the wrong config; fail
+    BEFORE StartRecord). Also used post-record as a stomp re-check (the harness treats a post-record
+    mismatch as a loud REPORT-ONLY diagnostic, never a post-facto abort)."""
+    mp = _measurement_pins_module()
+    profile = mp.load_profile(a.profile)
+    plan = mp.resolve_plan(profile)
+    ws = _conn(a.host, a.password)
+    try:
+        if a.role == "strih":
+            live = {src: read_current_pin(ws, src) for src in plan["strih_pins"]}
+        else:
+            live = read_current_pin(ws, plan["stream_source"])
+    finally:
+        ws.close()
+    problems = measurement_pins_mismatches(a.role, plan, live)
+    if problems:
+        sys.stderr.write(
+            f"[obs] {a.host}: #1003 measurement-eq {a.role} pins NOT in force:\n  "
+            + "\n  ".join(problems) + "\n")
+        raise SystemExit(1)
+    sys.stderr.write(f"[obs] {a.host}: #1003 measurement-eq {a.role} pins verified in force\n")
+
+
 def _diverging_locked_keys(certified, probe, keys=_LOCKED_BASELINE_KEYS):
     """#149 self-verify CORE (pure, testable): given the CERTIFIED prod genlock input's
     settings *certified* and the PROBE ingest's effective settings *probe*, return the
@@ -2610,6 +2659,7 @@ def main():
         "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
         "republish-black-check", "idle-receiver", "apply-measurement-pins",
+        "verify-measurement-pins",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -2619,6 +2669,12 @@ def main():
             # measurement-eq profile for the measurement window (snapshot-set; restored by
             # `teardown --host STRIH`). Mutually exclusive with the [4h/8pre] #900 re-anchor.
             p.add_argument("--profile", required=True)
+        if name == "verify-measurement-pins":
+            # #1003: pre-record read-back verify (the #893 replacement in profile mode) + a
+            # post-record stomp re-check. --role strih verifies the per-camera pins on STRIH;
+            # --role stream verifies the hold on STREAM. Exit 1 on any mismatch.
+            p.add_argument("--profile", required=True)
+            p.add_argument("--role", required=True, choices=("strih", "stream"))
         if name == "open-multiview":
             # #1098: single-monitor box (strih) — the fullscreen Multiview projector's monitorIndex
             # is DERIVED from GetMonitorList (#840) by default; -999 is the "derive" sentinel, an
@@ -2757,7 +2813,8 @@ def main():
      "mbc-input-check": mbc_input_check,
      "republish-black-check": republish_black_check,
      "idle-receiver": idle_receiver,
-     "apply-measurement-pins": apply_measurement_pins}[a.cmd](a)
+     "apply-measurement-pins": apply_measurement_pins,
+     "verify-measurement-pins": verify_measurement_pins}[a.cmd](a)
 
 
 if __name__ == "__main__":
