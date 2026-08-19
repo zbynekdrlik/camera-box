@@ -71,11 +71,12 @@
 # E2E chain (cam2 paints -> SOURCE films cam2's monitor -> strih -> stream), so its retirement is
 # the first that had to move the SOURCE role, not just drop a secondary. #1134 extends this file's
 # retirement=membership doctrine to the source role via camera_source_box() below: the source is
-# now the FIRST strih-routable member of CAMERA_ACTIVE_SET (cam3 today), so dropping cam1 from the
-# default set here moves the source to cam3 with no other edit. Membership-retired exactly like
-# cam4/cam5/cam6/cam7 — cam1's IP / NDI source / strih route stay fully resolvable below. cam1 is
-# ALSO acked in rig-fleet.txt (usb-eproto-grabber-hw-fault-2026-08-19); a box OUTSIDE the active
-# set is never a preflight target, so the stale-ack guard never fires on it (the cam4 precedent).
+# now the FIRST strih-routable member of CAMERA_ACTIVE_SET (cam1 today — RETURNED 2026-08-19 the
+# same day: issue 1130 proved the judder was an emit-gate regression in the deployed binary, not
+# the grabber; the retire+return round trip below was exercised for real within hours).
+# A retirement is membership-only, exactly like cam4/cam5/cam6/cam7 — the box's IP / NDI source /
+# strih route stay fully resolvable below, and its rig-fleet.txt ack line is added on retire and
+# DELETED on return (a box OUTSIDE the active set is never a preflight target — cam4 precedent).
 # RE-ENABLE (once the grabber is replaced): add "cam1" back to CAMERA_ACTIVE_SET AND delete cam1's
 # rig-fleet.txt ack line — nothing else (the source role follows automatically, cam1 being the
 # first strih-routable member of a cam1-first set again).

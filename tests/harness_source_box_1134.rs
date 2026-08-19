@@ -211,23 +211,23 @@ fn recording_e2e_fleet_preflight_labels_the_source_with_camera_name() {
 // --- retirement: default set drops cam1, rig-fleet.txt acks it (cam4 precedent) -----------------
 
 #[test]
-fn camera_active_set_default_drops_cam1() {
+fn camera_active_set_default_includes_the_returned_cam1() {
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3}\""),
-        "#1134: camera-set.sh's default CAMERA_ACTIVE_SET must drop cam1 (grabber hw fault \
-         #1110, owner order #1130) — the two active cameras are cam2 (painter) + cam3 (source)."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}\""),
+        "cam1 returned 2026-08-19 (issue 1130 exoneration — the judder was an emit-gate \
+         regression in the deployed binary, not the grabber) — the default set is cam1 cam2 cam3."
     );
 }
 
 #[test]
-fn rig_fleet_acks_cam1_offline_with_the_hw_fault_reason() {
+fn rig_fleet_no_longer_acks_the_returned_cam1() {
     let s = read("rig-fleet.txt");
     assert!(
-        s.contains("cam1:usb-eproto-grabber-hw-fault-2026-08-19"),
-        "#1134: rig-fleet.txt must ack cam1 offline with the #1110 USB -EPROTO grabber hw-fault \
-         reason (cam4 precedent: a box OUTSIDE the active set is acked but never a preflight \
-         target, so the stale-ack guard never fires on it)."
+        !s.lines().any(|l| l.trim_start().starts_with("cam1:")),
+        "cam1 returned 2026-08-19 (issue 1130) — its ack line must be DELETED (an acked \
+         healthy in-set box trips the stale-ack guard); the historic note may mention cam1 in \
+         comments only."
     );
 }
 
@@ -238,17 +238,16 @@ fn return_procedure_is_membership_plus_ack_only() {
     // cam1-specific state: cam1 is absent from the default active set AND present in rig-fleet.
     let cs = read("scripts/camera-set.sh");
     let rf = read("rig-fleet.txt");
-    // cam1 out of the default set (its case arms / facts stay — resolvable, membership-retired).
+    // The return procedure was EXECUTED 2026-08-19 (issue 1130): membership restored, ack
+    // deleted — and cam1's facts stayed resolvable throughout (the reversible doctrine).
     assert!(
-        cs.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3}\"")
+        cs.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}\"")
             && cs.contains("cam1) CAMERA_IP=10.77.9.61"),
-        "#1134: cam1 must be membership-retired (out of the default set) yet still fully \
-         resolvable (its case arm intact) — the reversible-retirement doctrine."
+        "cam1 returned: membership present AND its case arm intact — the reversible doctrine."
     );
-    // cam1 ack present (the second knob).
     assert!(
-        rf.contains("cam1:usb-eproto-grabber-hw-fault-2026-08-19"),
-        "#1134: cam1's ack line is the second (and last) knob of the return procedure."
+        !rf.lines().any(|l| l.trim_start().starts_with("cam1:")),
+        "cam1 returned: its ack line must be gone (second knob of the return procedure)."
     );
 }
 
@@ -263,10 +262,10 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
     // extends the lock to the other four mirrors so none can silently diverge.
     let sh = read("scripts/camera-set.sh");
     assert!(
-        sh.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3}\""),
-        "#1134: camera-set.sh must default CAMERA_ACTIVE_SET to \"cam2 cam3\""
+        sh.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}\""),
+        "camera-set.sh must default CAMERA_ACTIVE_SET to \"cam1 cam2 cam3\""
     );
-    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3")"#;
+    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")"#;
     for py in [
         "scripts/set-ndi-mapping.py",
         "scripts/phase_sync_calibrate.py",
@@ -277,7 +276,7 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
         assert!(
             read(py).contains(fallback),
             "#1134: {py} must mirror camera-set.sh's CAMERA_ACTIVE_SET default via the identical \
-             env-fallback os.environ.get(\"CAMERA_ACTIVE_SET\", \"cam2 cam3\") -- a diverged \
+             env-fallback os.environ.get(\"CAMERA_ACTIVE_SET\", \"cam1 cam2 cam3\") -- a diverged \
              fallback silently re-selects a retired camera in a standalone run"
         );
     }

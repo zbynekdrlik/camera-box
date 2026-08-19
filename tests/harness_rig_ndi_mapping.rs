@@ -195,7 +195,7 @@ fn default_active_set_env_var_matches_camera_set_sh_exactly() {
          fallback camera-set.sh itself defaults to (cam3 re-activated 2026-08-13)"
     );
     assert!(
-        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3}""#),
+        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}""#),
         "#898/#939: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
     );
 }
