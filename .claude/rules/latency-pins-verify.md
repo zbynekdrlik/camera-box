@@ -93,6 +93,19 @@ There are TWO per-source strih latency facets, and they must not be confused:
    re-go-stale on the next operator re-tune. Never re-hardcode the live values (`cam1=3,cam2=6,...`)
    into it; they belong in the baseline json.
 
+## Editing the baseline VALUES couples to a hardcoded verify-test fixture
+
+`tests/python/test_latency_pins_verify.py::test_main_drift_exits_1_clean_exits_0` hardcodes the
+strih baseline pins as a fixture (the "clean" live read that must exit 0, plus a revert that must
+exit 1). So ANY change to the strih/stream baseline VALUES in `latency-pins-baseline.json` must
+update that fixture in the same PR, or it goes RED (the clean read now looks like drift). The
+`normalize_spec`/`diff_pin`/`verify_box` tests use their OWN in-test literals (not the file), and
+`test_baseline_file_loads_and_has_the_three_boxes` only checks STRUCTURE — only the drift fixture
+carries the concrete values. When promoting/re-tuning pins, `grep -n "NDI cam1" tests/python/` +
+run `pytest tests/python/test_latency_pins_verify.py` before pushing (Tier-0: pytest runs freely,
+no cargo). #1003 promotion changed strih 3/6/20→90/160/184 + stream 915→791 and had to update this
+one fixture.
+
 ## Local verification of a `vendor/README.md` pin/doc edit — Tier-0 blocks `cargo test`
 
 camera-box Tier-0 forbids local `cargo test` runs AND disables the `# airuleset:build-ok` bypass
