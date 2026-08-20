@@ -9,11 +9,11 @@
 //! (`recording-verdict --extract-partial <box>`) into this partial; dev1 combines the partials
 //! (`recording-verdict --merge-partials strih=… stream=…`) into the identical full verdict.
 //!
-//! ## JSON schema (`schema_version = 4`)
+//! ## JSON schema (`schema_version = 5`)
 //!
 //! ```json
 //! {
-//!   "schema_version": 4,
+//!   "schema_version": 5,
 //!   "box": "strih",                 // which box decoded this — "strih" | "stream"
 //!   "recording": "strih-1234.mkv",  // basename of the local recording (provenance only)
 //!   "expected_burns": [911001, 911002],  // node-burn run_ids this extract decoded for (#207)

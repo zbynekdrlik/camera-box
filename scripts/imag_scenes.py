@@ -816,6 +816,17 @@ def _obs_available_encoders(host):
     return imag_record_encoder.parse_available_encoders(out) or None
 
 
+def _ws_connect(host, port, password):
+    """Connect the OBS WebSocket with a CLEAN error on a down OBS instead of a raw traceback.
+    ensure-rec-encoder is best-effort (recording-e2e.sh wraps the call and the [1/8] render-health
+    preflight then catches a genuinely down OBS), so a clean nonzero exit here is the right shape."""
+    try:
+        return Obs(host, port, password)
+    except Exception as e:  # noqa: BLE001 -- OBS WS unreachable; fail clean, never a traceback
+        sys.exit(f"FAIL: imag OBS WebSocket unreachable at {host}:{port} ({e}) — cannot ensure the "
+                 "record encoder (best-effort; the render-health preflight catches a genuinely down OBS)")
+
+
 def _current_profile_dir(host, port, password):
     """Resolve the on-disk profile DIR for the CURRENT OBS profile. OBS strips non-alphanumeric
     chars from the display name for the dir ('imag-60fps' -> 'imag60fps'); verified against the live
@@ -823,7 +834,7 @@ def _current_profile_dir(host, port, password):
     override = os.environ.get("IMAG_PROFILE_DIR")
     if override:
         return override
-    obs = Obs(host, port, password)
+    obs = _ws_connect(host, port, password)
     try:
         name = obs.req("GetProfileList", ignore_err=True).get("currentProfileName", "")
     finally:
@@ -911,7 +922,7 @@ def ensure_rec_encoder(host, port, password):
 
     base = f"~/.config/obs-studio/basic/profiles/{profile_dir}"
     # 1) WS RecEncoder FIRST (persists into OBS memory so its own shutdown save keeps the new value)
-    obs = Obs(host, port, password)
+    obs = _ws_connect(host, port, password)
     try:
         obs.req("SetProfileParameter", {
             "parameterCategory": "AdvOut", "parameterName": "RecEncoder",
