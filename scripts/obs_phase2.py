@@ -1258,6 +1258,42 @@ def _ndi_source_list(ws, inp):
     return [it.get("itemValue") for it in items if it.get("itemValue")]
 
 
+# camera-box #1158: shared "re-enforce an NDI input's source name, safely" primitive. The SINGLE
+# home for the empty/drifted-name recovery POLICY so the two callers -- strih_mv_scenes.reattach()'s
+# vanished-branch and set-ndi-mapping.py's --heal mode -- can never disagree on it (the way the #399
+# enforce and the #1114 reattach leave-empty once did). WHY it exists: an EMPTY ndi_source_name STOPS
+# the DistroAV receiver thread ("No NDI Source selected; Requesting Source Thread Stop"), so the
+# in-loop #767/#1096 auto-rebind watchdogs can NEVER fire for it -> a permanent wedge until a name is
+# re-applied. So re-apply the DESIRED (baseline) name -- but ONLY when it is discoverable in the
+# DistroAV finder list, because SetInputSettings of a name absent from the editable-combo list
+# MANGLES it (#795). Verify via read-back so a mangle is a LOUD detected result, never silent
+# corruption. When the desired sender is offline, do NOT set (avoids the proven mangle) and report
+# OFFLINE so the caller screams / fails loud -- an offline baseline is a real rig degradation, never
+# a silent retry.
+REENFORCE_HEALED = "healed"                # set + read-back-verified to `desired`
+REENFORCE_OFFLINE = "offline"             # `desired` not in the finder list -> not set (input left as-is)
+REENFORCE_VERIFY_FAILED = "verify_failed"  # set, but read-back != desired (a #795 mangle / RPC failure)
+
+
+def reenforce_ndi_name(ws, input_name, desired_name):
+    """#1158: re-apply `desired_name` to `input_name`'s ndi_source_name, discoverability-gated and
+    read-back-verified. Returns REENFORCE_HEALED / REENFORCE_OFFLINE / REENFORCE_VERIFY_FAILED.
+    NEVER raises on an OBS request error (this is a best-effort recovery path); a read that cannot
+    confirm the applied name surfaces as REENFORCE_VERIFY_FAILED (not a silent success)."""
+    if not desired_name:
+        return REENFORCE_OFFLINE  # an empty desired is not a re-enforce target
+    if desired_name not in _ndi_source_list(ws, input_name):
+        return REENFORCE_OFFLINE  # sender offline / not in the finder -> never set (would mangle, #795)
+    _rpc(ws, "SetInputSettings",
+         {"inputName": input_name,
+          "inputSettings": {"ndi_source_name": desired_name},
+          "overlay": True},
+         ignore_err=True)
+    back = (_rpc(ws, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
+            .get("inputSettings", {}) or {}).get("ndi_source_name", "")
+    return REENFORCE_HEALED if back == desired_name else REENFORCE_VERIFY_FAILED
+
+
 def _match_full(vals, bare):
     """Map a bare NDI name to its full 'MACHINE (name)' form from `vals`; returns
     `bare` unchanged if it is already full or no candidate matches."""

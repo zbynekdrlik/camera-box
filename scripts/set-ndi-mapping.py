@@ -124,6 +124,18 @@ def active_map(active_set=None):
     return [(inp, snd) for inp, snd in FULL_MAP if _camera_name_of(inp) in names]
 
 
+def baseline_sender_for(input_name):
+    """#1158: the CANONICAL #399 baseline NDI sender for a strih input label (e.g. 'NDI cam1' ->
+    'CAM1 (usb)'), or None if the input is not in the FULL_MAP fact table. This is the SINGLE source
+    of truth the #1158 recovery paths (strih_mv_scenes.reattach() + obs_phase2.reenforce_ndi_name)
+    re-enforce -- never a stale/drifted saved-scene name and never a hardcoded 'CAM{N} (usb)'
+    duplicate that could drift from FULL_MAP."""
+    for inp, snd in FULL_MAP:
+        if inp == input_name:
+            return snd
+    return None
+
+
 # websocket-client is imported LAZILY (inside the WS helpers), not at module top: the pure helpers
 # (parse_map_args / duplicates / active_map) must be importable + unit-testable WITHOUT the WS
 # dependency (a top-level import here made harness_rig_ndi_mapping.rs fail on a CI runner that has no
@@ -207,6 +219,85 @@ def _get_binding(ws, inp):
         .get("inputSettings", {}).get("ndi_source_name", "")
 
 
+def heal_active_mapping(op, ws, want, get_binding, log_err):
+    """#1158 self-heal: re-enforce ONLY the DRIFTED-or-EMPTY inputs among `want`
+    [(input, baseline), ...] -- discoverability-gated + read-back-verified via
+    op.reenforce_ndi_name. Correct inputs are left UNTOUCHED (so this never fights a healthy
+    mapping), and an empty/drifted input whose baseline sender is OFFLINE is left as-is + logged
+    LOUD (a real rig degradation, never a silent mangle-attempt). Pure/dependency-injected (op, ws,
+    get_binding, log_err) so it is fully unit-testable with fakes, no live OBS. Heals by
+    DIFFERS-FROM-BASELINE, never empty-only: a #795 mangle yields a drifted NON-empty name that
+    #1096 can never rebind either, so the empty-only criterion would miss it. Returns
+    (healed, offline, failed, skipped)."""
+    healed = offline = failed = skipped = 0
+    for inp, snd in want:
+        cur = get_binding(ws, inp)
+        if cur == snd:
+            skipped += 1
+            continue
+        status = op.reenforce_ndi_name(ws, inp, snd)
+        if status == op.REENFORCE_HEALED:
+            log_err(f"#1158 auto-revive: '{inp}' ndi_source_name {cur!r} -> {snd!r} "
+                    f"(re-enforced #399 baseline, read-back verified)")
+            healed += 1
+        elif status == op.REENFORCE_OFFLINE:
+            log_err(f"#1158 auto-revive: '{inp}' is {cur!r} (drifted/empty) but baseline {snd!r} is "
+                    f"OFFLINE (absent from the DistroAV finder) -- left as-is; a real rig degradation")
+            offline += 1
+        else:  # REENFORCE_VERIFY_FAILED
+            log_err(f"#1158 auto-revive: '{inp}' set to baseline {snd!r} but read-back MISMATCHED "
+                    f"(possible #795 mangle) -- treat as unhealed")
+            failed += 1
+    return healed, offline, failed, skipped
+
+
+def _heal_exit_code(healed, offline, failed):
+    """#1158 --heal exit contract (pure, testable): 1 iff a read-back verify FAILED (loud, do not
+    trust); 0 iff >=1 input HEALED (the caller re-samples a revived leg); 3 otherwise (nothing was
+    drifted, or every drifted input's baseline is offline -> no heal possible, the caller proceeds
+    to its own fail-loud path, the #1158 log lines already surfaced why)."""
+    if failed > 0:
+        return 1
+    if healed > 0:
+        return 0
+    return 3
+
+
+def _run_heal_mode(args, want):
+    """#1158 --heal: connect via the shared obs_phase2 client and run heal_active_mapping over the
+    active baselines. Exits per _heal_exit_code (0 healed / 1 verify-failed / 2 WS error / 3
+    nothing-healable). Kept out of main()'s normal enforce path so rig-activation behaviour is
+    unchanged."""
+    import obs_phase2 as op  # lazy: the pure helpers above stay importable without websocket/obs_phase2
+    try:
+        ws = op._conn(args.host, args.password)
+    except Exception as e:
+        print(f"ERROR: OBS WS connect {args.host}: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    def _get_cur(ws_, inp):
+        return (op._rpc(ws_, "GetInputSettings", {"inputName": inp}, ignore_err=True)
+                .get("inputSettings", {}) or {}).get("ndi_source_name", "")
+
+    try:
+        healed, offline, failed, skipped = heal_active_mapping(
+            op, ws, want, _get_cur, lambda m: print(m, file=sys.stderr))
+    except Exception as e:
+        print(f"ERROR: OBS WS request: {e}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            # airuleset:script-ok best-effort ws.close() on an already-torn-down socket — mirrors
+            # main()'s own close pattern; a close failure has no recovery path and no signal.
+            pass
+
+    print(f"#1158 heal: {healed} healed, {offline} offline (baseline absent), {failed} verify-failed, "
+          f"{skipped} already-correct (of {len(want)} active inputs)")
+    sys.exit(_heal_exit_code(healed, offline, failed))
+
+
 def main():
     ap = argparse.ArgumentParser(description="#399 enforce strih NDI mapping")
     ap.add_argument("--host", required=True)
@@ -219,12 +310,23 @@ def main():
         "$CAMERA_ACTIVE_SET env, or 'cam2 cam3'). Ignored when --map is given explicitly.",
     )
     ap.add_argument("--verify-only", action="store_true", help="check + report, do not set")
+    ap.add_argument(
+        "--heal",
+        action="store_true",
+        help="#1158 self-heal: re-enforce ONLY the drifted/emptied active inputs "
+        "(discoverability-gated + read-back-verified via obs_phase2.reenforce_ndi_name); "
+        "exit 0 iff >=1 healed (caller re-samples), 1 verify-failed, 2 WS error, 3 nothing healable.",
+    )
     args = ap.parse_args()
 
     try:
         want = parse_map_args(args.map, args.active)
     except ValueError as e:
         sys.exit(f"ERROR: {e}")
+
+    if args.heal:
+        _run_heal_mode(args, want)  # exits
+        return
 
     try:
         ws = _conn(args.host, args.password)
