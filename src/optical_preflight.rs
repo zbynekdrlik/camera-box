@@ -141,14 +141,11 @@ pub fn classify(rough_samples: &[f32]) -> OpticalPreflightVerdict {
     }
 }
 
-/// The full operator-facing ERROR line, composing the camera name + observed median roughness +
-/// the fixed [`OPTICAL_PREFLIGHT_ABORT_MESSAGE`]. The shell lib composes the SAME shape.
-pub fn abort_line(cam_name: &str, median_rough: f32) -> String {
-    format!(
-        "[0/8] optický head-end preflight: {cam_name} {OPTICAL_PREFLIGHT_ABORT_MESSAGE} \
-(median rough={median_rough:.1} ≤ podlaha {OPTICAL_PREFLIGHT_ROUGH_FLOOR:.1})"
-    )
-}
+// #1141 [review]: the operator-facing ERROR line is composed by the SHELL (optical_preflight_assert
+// in scripts/lib/optical-preflight.sh) — the layer that actually runs the preflight. A Rust-side
+// composer would be production-dead here and could silently drift from the message users see (the
+// parity that matters — the fixed OPTICAL_PREFLIGHT_ABORT_MESSAGE — is pinned by the harness test),
+// so no `abort_line` is kept (MVP: no dead code).
 
 #[cfg(test)]
 mod tests {
@@ -227,14 +224,5 @@ capture chroma: u_dev=5.9 v_dev=9.2 rough=1.4 -> colour";
         assert_eq!(classify(&at_floor), OpticalPreflightVerdict::SickBlur);
         let just_above = [OPTICAL_PREFLIGHT_ROUGH_FLOOR + 0.5; OPTICAL_PREFLIGHT_MIN_SAMPLES];
         assert_eq!(classify(&just_above), OpticalPreflightVerdict::Healthy);
-    }
-
-    #[test]
-    fn abort_line_carries_camera_name_and_ownership_1141() {
-        let line = abort_line("cam1", 1.2);
-        assert!(line.contains("cam1"));
-        assert!(line.contains("FYZICKY"));
-        assert!(line.contains(OPTICAL_PREFLIGHT_ABORT_MESSAGE));
-        assert!(line.contains("median rough=1.2"));
     }
 }

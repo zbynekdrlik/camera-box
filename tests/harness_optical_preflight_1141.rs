@@ -7,7 +7,7 @@
 //! against the Rust classify on shared fixtures, and asserts the recording-e2e.sh wiring is present.
 
 use camera_box::optical_preflight::{
-    classify, OpticalPreflightVerdict, OPTICAL_PREFLIGHT_ABORT_MESSAGE,
+    classify, median, OpticalPreflightVerdict, OPTICAL_PREFLIGHT_ABORT_MESSAGE,
     OPTICAL_PREFLIGHT_MIN_SAMPLES, OPTICAL_PREFLIGHT_ROUGH_FLOOR,
 };
 use std::path::PathBuf;
@@ -114,7 +114,8 @@ fn shell_abort_message_matches_rust_byte_for_byte_1141() {
 fn assert_agree(samples: &[f32]) {
     let rust = classify(samples);
     let shell = classify_shell(&journal_of(samples));
-    let shell_state = shell.split_whitespace().next().unwrap_or("");
+    let mut toks = shell.split_whitespace();
+    let shell_state = toks.next().unwrap_or("");
     let expect = match rust {
         OpticalPreflightVerdict::Healthy => "HEALTHY",
         OpticalPreflightVerdict::SickBlur => "SICK_BLUR",
@@ -124,6 +125,23 @@ fn assert_agree(samples: &[f32]) {
         shell_state, expect,
         "shell/Rust classify disagree on {samples:?}: rust={rust:?} shell={shell:?}"
     );
+    // A DECIDED verdict also prints the median — it must agree with the Rust median, so an awk
+    // sort/median bug that kept the verdict on the correct side of the floor still can't slip
+    // through (the #1141 review's median-cross-check hardening).
+    if matches!(
+        rust,
+        OpticalPreflightVerdict::Healthy | OpticalPreflightVerdict::SickBlur
+    ) {
+        let shell_median: f32 = toks
+            .next()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or_else(|| panic!("a decided shell verdict must carry a median: {shell:?}"));
+        let rust_median = median(samples).expect("a decided verdict has a median");
+        assert!(
+            (shell_median - rust_median).abs() < 0.01,
+            "shell/Rust median disagree on {samples:?}: rust={rust_median} shell={shell_median}"
+        );
+    }
 }
 
 #[test]
