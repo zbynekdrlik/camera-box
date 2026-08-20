@@ -4263,3 +4263,44 @@ fn drift_guard_sources_the_shared_projector_vsync_lib_1151() {
         "the facet must run projector_vsync_verdict over the already-gathered log (#1151)"
     );
 }
+
+#[test]
+fn check_imag_report_projector_vsync_unknown_row_does_not_bump_the_unknown_counter_1151() {
+    // The report-only exit_code_unchanged test above uses a 9-arg call, so facets 6-11 already
+    // saturate `unknown` at exit 11 — it proves a spurious `drift++` (11->20) cannot happen but NOT
+    // a spurious `unknown++` (already 11). This locks the `$unknown`-neutrality from a CLEAN BASELINE:
+    // the SAME full-16-arg clean call the sibling clean tests use (all facets match -> exit 0), but
+    // with the projector-vsync marker ABSENT so facet #12 genuinely prints UNKNOWN. If the facet
+    // wrongly did `unknown++`, the exit would flip 0->11; report-only -> it stays 0.
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}"); // NO projector-vsync marker
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(
+        body,
+        &[
+            ("LOG", log.as_str()),
+            ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
+            ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
+            ("POWER", POWER_GATHER_CLEAN_29W),
+            ("DP", DISPLAY_PATH_GATHER_CLEAN),
+            ("CL", CMDLINE_GATHER_CLEAN),
+        ],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "projector_vsync's UNKNOWN row must NOT bump the unknown counter — a clean baseline stays \
+         exit 0 with the marker absent (report-only): {out:?}"
+    );
+    let row = out
+        .lines()
+        .find(|l| l.contains("projector_vsync"))
+        .unwrap_or_else(|| panic!("no projector_vsync row printed: {out:?}"));
+    assert!(
+        row.contains("UNKNOWN"),
+        "the marker is absent, so the facet must genuinely print UNKNOWN (else the exit-0 assertion \
+         above proves nothing): {row:?}"
+    );
+}
