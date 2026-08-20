@@ -363,6 +363,10 @@ echo "  Hostname set to: $DEVICE_NAME"
 # =============================================================================
 echo ""
 echo -e "${GREEN}[2/${TOTAL_STEPS}] Configuring static IP...${NC}"
+# #1155: pin the LAN stanza to the PCI NIC by NAME (enp*), never the driver wildcard. A
+# driver-wildcard match also claims a USB CDC-NCM camera link (bkshading, issue 808) and hands
+# it this box's static IP + a duplicate default route -- which lands the dantesync PTP multicast
+# join on the camera link and makes the box PTP-deaf (cam1 live incident 2026-08-20).
 cat > /etc/netplan/01-netcfg.yaml << EOF
 network:
   version: 2
@@ -370,7 +374,7 @@ network:
   ethernets:
     all-ethernet:
       match:
-        driver: "*"
+        name: "enp*"
       addresses:
         - ${DEVICE_IP}/23
       routes:
