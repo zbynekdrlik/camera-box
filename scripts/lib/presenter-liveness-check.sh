@@ -60,14 +60,19 @@ while [ \$i -lt 20 ]; do
   if cat "$log_file" 2>/dev/null | _cb_paint_signal "$fb_device" >/dev/null 2>&1; then break; fi
   sleep 0.5; i=\$((i+1))
 done
-_reason="\$(cat "$log_file" 2>/dev/null | _cb_paint_signal "$fb_device")"
+# NOTE the trailing '|| true': the production caller embeds this snippet under set -e (rig-mode.sh
+# painter_launch_remote). Without it a FAIL token (non-zero return) aborts THIS assignment before
+# the case runs, silently swallowing the granular FAIL message + log tail (a silent exit 1 - the
+# 464 operator-blindness this check exists to prevent). The token is still captured (it is echoed
+# before the function returns non-zero), so the case runs and the FAIL arm exits 1 with diagnostics.
+_reason="\$(cat "$log_file" 2>/dev/null | _cb_paint_signal "$fb_device" || true)"
 _tok="\${_reason%% *}"; _dev="\${_reason#* }"
 case "\$_tok" in
   KMS_OK)
     echo "PASS: #464 KMS presenter (\$_dev) alive + vblank-locked (tear-free page-flip; /dev/fb0 is NOT expected to be held)"
     ;;
   KMS_NODRM)
-    echo "FAIL: #464 KMS presenter (\$_dev) selected but that DRM device is not held (see $log_file):" >&2
+    echo "FAIL: #464 KMS presenter selected (\$_dev) but that DRM device is not held (see $log_file):" >&2
     tail -n 20 "$log_file" >&2 2>/dev/null || true
     exit 1
     ;;
