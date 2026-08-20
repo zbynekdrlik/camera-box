@@ -291,6 +291,13 @@ pub mod capture_rate_health;
 // the #656 WARN fires.
 pub mod capture_rate_selfheal;
 
+// #1128 — fast-capture grabber STUCK detector (ShadowCast ~62.5 fps + persistent corrupted). The
+// discriminator the existing capture_rate_selfheal lacks: over-rate AND persistent corrupted, both
+// sustained, so a benign over-rate wobble (0 corrupted, absorbed by the decimation gate — #909) is
+// never declared stuck. Pure decision + report-line formatting, no probe deps — Tier-0 tested; the
+// dev1 alert watchdog greps the `#1128 grabber STUCK` marker this module's message emits.
+pub mod grabber_stuck;
+
 // #625 — order-independent REAL-DROP ("gap") detection for the all-cambox painted-tick window
 // continuity check: the stream recording is documented (`#133`/`#196`/`#216`) to occasionally
 // deliver frames "softened"/out of order (a one-frame-late 60->30 straddle); a RECORDED-order
