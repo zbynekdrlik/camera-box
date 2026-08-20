@@ -198,5 +198,27 @@ class TestCompositedImageResolvesPainter:
         for r, rnd in enumerate(rounds_ticks):
             for i, src in enumerate(SOURCES):
                 assert rnd[src] is not None, f"round {r} {src} undecoded from the composited image"
-                assert rnd[src][0] == _painter_fid(r, i), (
-                    f"round {r} {src} latched {rnd[src][0]} (burn), not painter {_painter_fid(r, i)}")
+                # The painter dual-QR carries frame_id and frame_id-1; cv2 may drop the higher
+                # (even) half, so pick_painter_tick can legitimately return frame_id-1. The
+                # invariant this proves is "the painter, never the burn" -- tolerate the ±1 half.
+                assert rnd[src][0] in (_painter_fid(r, i), _painter_fid(r, i) - 1), (
+                    f"round {r} {src} latched {rnd[src][0]} (not the painter dual-QR "
+                    f"{_painter_fid(r, i)}/{_painter_fid(r, i) - 1})")
+
+
+class TestNodeBurnRunIdMirror:
+    def test_python_mirror_matches_the_rust_authority(self):
+        """qr_align_pins.NODE_BURN_RUN_IDS is a hand-mirror of the Rust node-burn ids. Guard it
+        against silent drift: parse every `pub const BURN_RUN_ID_*: u32 = N;` from the authority
+        (src/probe/recording_latency.rs -- the values behind src/probe/recording.rs::
+        NODE_BURN_RUN_IDS) and assert set-equality with the Python mirror. If a new BURN_RUN_ID_CAM8
+        is ever added on the Rust side, this fails loudly instead of letting that burn silently
+        hijack the aligner's run_id auto-detect again (#1159)."""
+        import re
+        repo = pathlib.Path(__file__).resolve().parents[2]
+        rust = (repo / "src" / "probe" / "recording_latency.rs").read_text()
+        rust_ids = {int(v) for v in re.findall(r"pub const BURN_RUN_ID_[A-Z0-9]+: u32 = (\d+);", rust)}
+        assert rust_ids, "parsed no BURN_RUN_ID_* consts -- the authority file moved or changed shape"
+        assert rust_ids == set(qa.NODE_BURN_RUN_IDS), (
+            f"NODE_BURN_RUN_IDS mirror drift: python={sorted(qa.NODE_BURN_RUN_IDS)} "
+            f"rust={sorted(rust_ids)}")

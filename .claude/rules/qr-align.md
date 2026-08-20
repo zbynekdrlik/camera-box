@@ -63,3 +63,42 @@ model (90/160/184) was owner-REJECTED and REVERTED — never re-derive absolute 
   validated by the supervisor. The revert left DANGLING tests asserting the deep pins
   (`test_apply_latency_pins TestPromotedBaseline`, the `test_latency_pins_verify` drift fixture) — a
   baseline-VALUES change (either direction) MUST update those fixtures in the same change.
+
+## The burn QR shares the painter's EXACT wire format — exclude burn run_ids (#1159)
+
+Under E2E the `[4i/8align]` step runs AFTER the measurement burns are added (`[4b/8]`
+`obs_burn_filter.py add`), so every barrier screenshot carries the painter dual-QR **and** the
+per-source burn QR. The burn (`vendor/distroav/src/ndi-burn-filter.cpp`) emits its QR in the
+**BYTE-IDENTICAL** painter wire format `P{run_id}.{frame_id}.{gen_ts_ns}.{crc}` — it differs ONLY
+in `run_id` (a fixed per-node id derived from the host role: **strih=911002 on EVERY strih input**,
+stream=911004, imag=911003, plus per-camera capture burns — the full set is
+`NODE_BURN_RUN_IDS` = 911001-911012, mirrored in `qr_align_pins.py` from
+`src/probe/recording.rs::NODE_BURN_RUN_IDS`). So `parse_payload` accepts a burn as a valid painter
+payload; a "filter by payload SHAPE" cannot tell them apart — **the discriminator is the run_id.**
+
+Two defects both followed from this (fixed #1159):
+- **run_id auto-detect picked the burn.** The strih burn 911002 is present on all on-air inputs,
+  so it TIES the painter on screenshot-count, and `mv_skew_snapshot.dominant_run_id` breaks ties to
+  the **SMALLEST** id — 911002 << the painter's ~1.8e9 epoch — so the burn won. Combined with cv2's
+  flaky multi-QR decode (it intermittently drops the burn on some shot every round), the chosen
+  (burn) id was absent somewhere every round → "0 fully-decodable measurement rounds". Fix:
+  `painter_run_id()` strips `NODE_BURN_RUN_IDS` before delegating to `dominant_run_id`.
+- **The decode recovery-ladder guard was fooled.** `decode_qr_texts`'s `any(t.startswith("P"))`
+  guard treated a decoded burn as "painter found" and skipped the upscale/threshold pass that would
+  still recover a missed painter. Fix: `has_painter_payload()` (parse + non-burn run_id).
+- `pick_painter_tick` also excludes burn run_ids (defense in depth).
+
+**mv_skew_snapshot's `dominant_run_id`/`tick_map` were left UNTOUCHED** — the burn-exclusion lives
+in `qr_align_pins.py` only (scope). If mv-skew is ever run WHILE measurement burns are ON, it has
+the same latent bug and would need the same `painter_run_id`-style exclusion.
+
+**cv2 multi-QR decode is genuinely flaky** — with 3 QRs in a frame it drops symbols
+non-deterministically (measured: the burn missed on ~1/12 shots; larger QRs missed MORE, not less).
+So a composited-image test CANNOT be a reliable RED; the deterministic reproduction is a **pure
+`ticks_from_raw()` test over synthetic decoded-text lists**. A composited painter+burn PNG decoded
+through cv2 is fine as a GREEN integration proof (the painter itself decodes reliably), but assert
+the burn genuinely coexisted (`burn_seen`) so the test still exercises the condition.
+
+**FAIL diagnostics:** every abort path now prints `format_round_table()` (round × camera decoded
+frame_id, `--` = undecoded, per-camera `decoded N/R`) so the operator can tell undecodable from
+unstable-spread from one-dead-camera.
