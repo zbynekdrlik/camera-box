@@ -6,6 +6,8 @@ paths:
   - "scripts/imag-wallpaper-refresh.sh"
   - "scripts/imag-obs-alert-watchdog.sh"
   - "scripts/lib/imag-obs-reachability.sh"
+  - "scripts/lib/imag-obs-restart-storm.sh"
+  - "scripts/setup-imag.sh"
   - "scripts/lib/obs-watchdog-decision.sh"
   - "systemd/imag-obs*"
   - "systemd/imag-wallpaper-refresh*"
@@ -205,3 +207,19 @@ healthy-pass branch) and returns without paging. A time-bounded operator overrid
 real crash forever) is the explicit escape hatch. The `imag_obs_reachability_probe_cmd`/`_message`
 functions the [0/8] preflight uses are UNTOUCHED — the preflight legitimately fails on any
 OBS-absent, deliberate or not; the discriminator is ONLY for the alert path.
+
+## An imported Python sibling must ride the SAME setup-imag.sh install list as its importer, or a deploy seed-loops OBS (#1156)
+
+The flat-file deploy gotcha above ("a standalone on-box script that sources a sibling `scripts/lib/*.sh` breaks unless you ALSO deploy the lib") has a Python twin. `setup-imag.sh` fetches on-box python by an EXPLICIT `gh api …contents/scripts/<file>.py?ref=dev` list — it does NOT walk imports. So when a lane adds `import <sibling>` to `imag_scenes.py` (the #1143 lane added `import imag_record_encoder`) WITHOUT adding the sibling to setup-imag.sh's fetch list, a deploy pushes the importer WITHOUT the imported module → every `imag-obs-start.sh` seed dies on `ModuleNotFoundError` → `imag-obs.service` `Restart=on-failure` relaunches the whole cgroup (OBS included) → an unbounded crash-loop (the live incident: 1737 restarts / 8.5 h, zero alert).
+
+- **Rule:** any NEW `import <local sibling>` in an on-box-installed python (`imag_scenes.py`, `imag-obs-watchdog.py`, …) MUST get a matching `<VAR>="/usr/local/bin/<sibling>.py"` + `gh api …contents/scripts/<sibling>.py?ref=dev` + `chmod 755` block in setup-imag.sh, ALONGSIDE the importer's own block. Audit the whole chain before assuming one block is enough: `grep -nE '^import|^from|import imag' scripts/imag_scenes.py` AND the sibling itself (imag_record_encoder.py imports only stdlib, so the chain ends there).
+- **Fail-fast guard (imag-obs-start.sh):** an `import` preflight — `python3 -c "import sys; sys.path.insert(0,'/usr/local/bin'); import imag_scenes"` — runs BEFORE the `taskset … obs … &` launch (and after the idempotent `pgrep -x obs` early-exit). A missing sibling then fails the unit cleanly (named `FAIL: imag_scenes import preflight` + `exit 1`) instead of launching-then-seed-failing, which is what loops a HEALTHY OBS 1700×. `import imag_scenes` is side-effect-free (it has an `if __name__=="__main__"` guard; `create_connection` is only called inside a method), so the preflight is cheap and also transitively validates the sibling + the `websocket` dep.
+
+## dev1-side restart-STORM alert for imag-obs.service (#1156)
+
+`scripts/imag-obs-alert-watchdog.sh` also detects a restart STORM: each pass it reads `imag-obs.service`'s `NRestarts` counter (`systemctl --user show imag-obs.service -p NRestarts --value`, over ssh with `XDG_RUNTIME_DIR` for the user bus, issue 998) and pages ONE deduped Discord alert when it storms — the alert the 8.5 h incident lacked. Reusable design points for any counter-based storm detector:
+
+- **Fold into the EXISTING dev1 prober — never a second prober.** The pure seam is `scripts/lib/imag-obs-restart-storm.sh` (`imag_obs_restart_counter_probe_cmd` builder + a time-windowed `imag_obs_restart_storm_classify`), and it reuses `obs_watchdog_alert_throttle` for dedup (sig `imag-restart-storm`, ~1 h reminder, cleared on any non-storm pass — the SAME direct `write_state_field alert_sig ""` the down-alert path already uses at ~lines 280/313; this watchdog does NOT use `obs_watchdog_clear_hysteresis`, so a storm-only hysteresis would just diverge from the sibling clears).
+- **Ships DISABLED via `IMAG_OBS_RESTART_STORM_ENABLE` (default 0).** Folding into an already-live watchdog can't ship disabled by a not-enabled timer, so the "ships disabled" convention is an env gate the supervisor flips with `Environment=IMAG_OBS_RESTART_STORM_ENABLE=1` on the `.service`.
+- **Fail-safe = never false-page:** unreadable counter → preserve the anchor (no page); `cur<prev` → re-baseline (reboot/`reset-failed`/reinstall); storm only on a real `delta≥threshold` within `window_s`. The probe seams `IMAG_OBS_RESTART_PROBE_CMD` (fixture cat) + `IMAG_OBS_RESTART_NOW` (clock) make the whole composition Tier-0 testable by SOURCING the watchdog (never running `main()`) under the caller's real `set -euo pipefail`.
+- **GOTCHA — force base-10 in bash arithmetic on a counter value.** A bare `$(( cur - prev ))` reads a leading-zero value as OCTAL, and under the watchdog's inherited `set -e` an `08`/`09` aborts the WHOLE pass (`value too great for base`, error token `08`) — which, since the storm check runs first in `main()`, also skips the down-alert. Coerce every parsed numeric with `10#$x` (e.g. `x=$((10#$x))` right after the all-digit validation) before any `$(( ))`. `[ -lt ]`/`[ -ge ]` are already base-10; only `$(( ))` is octal-hazardous.
