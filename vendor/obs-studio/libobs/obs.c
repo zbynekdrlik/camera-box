@@ -23,6 +23,7 @@
 #include "obs.h"
 #include "obs-internal.h"
 #include "obs-display-budget.h" /* camera-box #879: aux sender budget gate */
+#include "obs-drm-output.h"     /* camera-box #1152: DEFAULT-OFF in-OBS DRM-lease HDMI output */
 
 struct obs_core *obs = NULL;
 
@@ -1337,6 +1338,15 @@ bool obs_startup(const char *locale, const char *module_config_path, profiler_na
 	profile_end(obs_startup_name);
 	if (!success)
 		obs_shutdown();
+
+#if defined(__linux__)
+	/* camera-box #1152: DEFAULT-OFF DRM-lease HDMI output autostart. A no-op unless the config
+	 * file ~/.camera-box/drm-output.json exists with "enabled": true — so it changes no OBS
+	 * behaviour until deliberately opted in. Linux-only (obs-drm-output.c is built only via
+	 * cmake/os-linux.cmake). */
+	if (success)
+		obs_drm_output_maybe_autostart();
+#endif
 
 	return success;
 }

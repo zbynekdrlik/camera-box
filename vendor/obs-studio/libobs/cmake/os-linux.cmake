@@ -1,12 +1,17 @@
 find_package(LibUUID REQUIRED)
 find_package(X11 REQUIRED)
 find_package(X11_XCB REQUIRED)
-find_package(XCB REQUIRED XCB OPTIONAL_COMPONENTS XINPUT)
+# camera-box #1152: RANDR is REQUIRED for the DRM-lease output (xcb_randr_create_lease).
+find_package(XCB REQUIRED XCB RANDR OPTIONAL_COMPONENTS XINPUT)
+# camera-box #1152: Libdrm for the in-OBS DRM-lease page-flip output (obs-drm-output.c).
+find_package(Libdrm REQUIRED)
 find_package(Gio)
 
 target_sources(
   libobs
   PRIVATE
+    obs-drm-output.c
+    obs-drm-output.h
     obs-nix-platform.c
     obs-nix-platform.h
     obs-nix-x11.c
@@ -50,6 +55,8 @@ target_link_libraries(
     X11::X11
     X11::XCB
     XCB::XCB
+    XCB::RANDR # camera-box #1152: xcb_randr_create_lease for the DRM-lease output
+    Libdrm::Libdrm # camera-box #1152: drmModePageFlip page-flip onto the leased HDMI connector
     LibUUID::LibUUID
     ${CMAKE_DL_LIBS}
     $<$<NOT:$<BOOL:${HAVE_MATH_IN_STD_LIB}>>:m>
