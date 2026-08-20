@@ -899,7 +899,8 @@ for _cb_cn in $(camera_active_excluding "$CAMERA_NAME cam2"); do
   CAMBOX_VERSION_LINUX="$CAMBOX_VERSION_LINUX ${_cb_cn}=root@$(camera_secondary_ip "$_cb_cn")"
 done
 "$HERE/camera-box-version-gate.sh" \
-  --linux "$CAMBOX_VERSION_LINUX"
+  --linux "$CAMBOX_VERSION_LINUX" \
+  --candidate-pin "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$HERE/../Cargo.toml" | head -1)"
 
 # dev1<->painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326, #312 Phase-2 robustness). The
 # all-cambox sweep ([6/8] below) stamps each program-switch WINDOW boundary on dev1's
