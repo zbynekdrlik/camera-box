@@ -110,6 +110,15 @@ signal (KMS device held + `vblank-locked`, OR `/dev/fb0` held), never on absence
 absence IS the #863 black-monitor case a prune must never mask. Same discipline for any future
 prune/gating reuse of a WARN-only signal.
 
-**Duplication debt:** this paint signal now lives in 5 libs (verify / retry-adjacent / handoff /
-presenter-liveness / mv-reverify-escalate / this recheck) — follow-up #1148 tracks consolidating
-them (a fix to the signal in one copy must not silently leave the others false-passing).
+**Consolidated (#1148):** the presenter-aware paint SIGNAL itself — the KMS-line parse + `fuser`
+device-held check + `vblank-locked` confirmation + `/dev/fb0` fallback — is now the SINGLE
+`_cb_paint_signal` (emitted by `cam2_paint_signal_remote_fn` in `scripts/lib/cam2-paint-signal.sh`).
+The five builders (`cam2_painter_restore_verify_cmds` / `cam2_painter_steady_state_handoff_cmds` /
+`painter_liveness_check_cmds` / `mv_reverify_painter_up_cmds` / `cam2_painter_genuine_paint_check_cmd`)
+each lazy-source it and pipe their own log source into it; they keep only their own poll counts +
+exit semantics (WARN-only / FAIL-LOUD / exit-0-1 prune / PAINTER_UP / the file-reading granular
+messages). A future correction to the signal (an OBS presenter-log rename, a new presenter backend)
+now lands in ONE place — `tests/harness_cam2_paint_signal_1148.rs` is where it is tested — instead
+of risking five divergent copies that false-pass a black monitor. (`scripts/verify-device.sh` keeps
+its own REDUCED dev1-side variant — journal-only, no `fuser`/fb0 because it runs the check from
+dev1, not on the box — deliberately out of scope.)
