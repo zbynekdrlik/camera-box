@@ -10,6 +10,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Rig ops (DanteSync clock, device deploy, recovery) → load `.claude/skills/ops`
 - Provisioning / new cam box (build USB → setup-device.sh → verify-device.sh acceptance gate, #448-#454) → load `.claude/skills/provision`
 - V4L2 capture controls (colour vs sharp sets, device-state persistence, NZXT CAM4 no-controls, grayscale/tint, the #299 colour-capture chroma metric) → load `.claude/skills/capture`
+- Head-end OPTICAL blur/shutter `[0/8]` preflight (the head-end `rough=` signal + healthy 7.1–8.0 baseline; the observer-effect trap — never calibrate a camera-health gate from imag `stuck_density`; no on-box zbar/probe so journal-mine not a v4l2 grab; pure-Rust-classifier + shell-replica + parity-harness; Tier-0 #557 kills `--no-run` so verify via fmt + a language replica + direct bash, #1141) → `.claude/rules/optical-head-end-preflight.md` (auto-loads on its `paths:`)
 - Genlock OBS (deployed state, monorepo direction, NDI input mapping, timecode lag) → load `.claude/skills/genlock`
   - Genlock latency is ONE user knob in MS (#235): `OBS_GENLOCK_LATENCY_MS=N` (canonical; `OBS_GENLOCK_RESERVE_MS` is the back-compat alias; prod=3ms). Setting it implies ts-align on; preload is internal/auto-derived. Display: `latency = N ms (≈ M frames)`.
 - OBS launch/recovery on strih/stream → load `.claude/skills/obs-ops`
