@@ -40,10 +40,17 @@ set -euo pipefail
 #                This is the "verify availability after wake" half of remote recovery -- so a
 #                detect-down (issue 1001) -> wake -> confirm-up loop is ONE composable command. The
 #                poll host is the box's table ip; for a raw-MAC target pass --wait-host. The probe is
-#                `${WOL_PING_CMD:-ping -c1 -W1}` (env-overridable, e.g. a TCP-port check), the poll
-#                interval `${WOL_WAIT_INTERVAL:-3}`s.
+#                `${WOL_PING_CMD:-ping -c1 -W1}` (env-overridable, e.g. `nc -z host port`; split on
+#                WHITESPACE into an argv -- a whitespace-separated command only, no shell quoting), the
+#                poll interval `${WOL_WAIT_INTERVAL:-3}`s (a positive integer).
 #   --wait-host IP  the host to poll for --wait (required for a raw-MAC target, which carries no IP;
 #                overrides a box's table ip otherwise).
+#
+# Exit codes: 0 = packet sent (and, with --wait, box reachable);  2 = misuse (bad args / an
+#   unresolvable --wait target);  3 = send error (a target rejected the packet) WITHOUT --wait;
+#   4 = --wait budget elapsed, box still unreachable (WAKE-VERIFY STILL-DOWN). With --wait, a partial
+#   send error does NOT short-circuit -- the box may have woken from a target that DID receive it, so
+#   the reachability poll (the real proof) still runs.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/wol.sh
@@ -92,10 +99,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Validate the --wait budget up front (a non-integer must fail loud, never default silently).
-if [ "$WAIT" -eq 1 ] && ! printf '%s' "$WAIT_SECS" | grep -qE '^[0-9]+$'; then
-  echo "wake-box.sh: --wait budget must be a non-negative integer (got: $WAIT_SECS)" >&2
-  exit 2
+# Validate the --wait inputs up front (a bad value must fail loud, never default silently). The
+# budget is a non-negative integer; the poll interval must be a POSITIVE integer -- a 0 interval with
+# a non-blocking probe (e.g. WOL_PING_CMD=false) would busy-spin the CPU for the whole budget.
+if [ "$WAIT" -eq 1 ]; then
+  if ! printf '%s' "$WAIT_SECS" | grep -qE '^[0-9]+$'; then
+    echo "wake-box.sh: --wait budget must be a non-negative integer (got: $WAIT_SECS)" >&2
+    exit 2
+  fi
+  if ! printf '%s' "${WOL_WAIT_INTERVAL:-3}" | grep -qE '^[1-9][0-9]*$'; then
+    echo "wake-box.sh: WOL_WAIT_INTERVAL must be a positive integer (got: ${WOL_WAIT_INTERVAL:-3})" >&2
+    exit 2
+  fi
 fi
 
 [ -n "$TARGET" ] || { echo "wake-box.sh: missing <box|MAC> argument" >&2; usage; exit 2; }
@@ -150,7 +165,10 @@ if [ "$DRYRUN" -eq 1 ]; then
 fi
 
 # Impure send: python3 sets SO_BROADCAST (bash /dev/udp cannot) and sends the raw magic packet.
-python3 - "$PACKET_HEX" "${TARGETS[@]}" <<'PY'
+# Capture the send's exit code WITHOUT letting set -e abort here (exit 3 = a target rejected the
+# packet), so the --wait verify below still runs.
+send_rc=0
+python3 - "$PACKET_HEX" "${TARGETS[@]}" <<'PY' || send_rc=$?
 import binascii, socket, sys
 pkt = binascii.unhexlify(sys.argv[1])
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -163,10 +181,18 @@ for tgt in sys.argv[2:]:
         print("SENT %d bytes -> %s:%s" % (len(pkt), addr, port))
     except OSError as e:
         print("SEND-FAIL %s:%s -> %s" % (addr, port, e), file=sys.stderr)
-        rc = 1
+        rc = 3
 s.close()
 sys.exit(rc)
 PY
+
+# A send failure (>=1 target rejected the packet). Without --wait that is the terminal result. WITH
+# --wait, do NOT short-circuit: the box may have woken from a target that DID accept the packet, and
+# the reachability poll below is the real proof either way.
+if [ "$send_rc" -ne 0 ]; then
+  echo "wake-box.sh: send error (a target rejected the packet, exit $send_rc)" >&2
+  [ "$WAIT" -eq 1 ] || exit "$send_rc"
+fi
 
 # --wait: poll the target for reachability until it responds (WAKE-VERIFY UP, exit 0) or the budget
 # elapses (WAKE-VERIFY STILL-DOWN, exit 4 -- distinct from exit 2 for bad args, so a recovery caller

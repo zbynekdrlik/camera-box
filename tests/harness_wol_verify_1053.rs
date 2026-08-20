@@ -37,22 +37,25 @@ fn run_wol(code: &str) -> (String, bool) {
 }
 
 /// A temp dir holding a stub `python3` (drains stdin + args, sends NOTHING) so a non-dry-run
-/// wake-box.sh run performs NO real UDP broadcast. Returns a PATH prepending it to the real PATH.
-fn stub_python_path(tag: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("wol_verify_1053_{tag}_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let py = dir.join("python3");
+/// wake-box.sh run performs NO real UDP broadcast. Returns the kept TempDir guard (drop it to clean
+/// up -- keep it alive across the wake_box call) plus a PATH prepending the dir to the real PATH.
+/// Uses tempfile::tempdir() (a kernel-atomic unique name, the repo's #975 convention) rather than a
+/// hand-rolled pid path, so there is no collision or leak.
+fn stub_python_path() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let py = dir.path().join("python3");
     std::fs::write(&py, "#!/bin/sh\ncat >/dev/null 2>&1 || true\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    format!(
+    let path = format!(
         "{}:{}",
-        dir.display(),
+        dir.path().display(),
         std::env::var("PATH").unwrap_or_default()
-    )
+    );
+    (dir, path)
 }
 
 fn wake_box(args: &[&str], envs: &[(&str, &str)], path_override: Option<&str>) -> Output {
@@ -185,7 +188,7 @@ fn wait_dry_run_prints_the_verify_plan_and_sends_nothing() {
 
 #[test]
 fn wait_reports_up_when_the_probe_succeeds() {
-    let path = stub_python_path("up");
+    let (_stub, path) = stub_python_path();
     let out = wake_box(
         &["strih", "--wait=6"],
         &[("WOL_PING_CMD", "true"), ("WOL_WAIT_INTERVAL", "1")],
@@ -205,7 +208,7 @@ fn wait_reports_up_when_the_probe_succeeds() {
 
 #[test]
 fn wait_reports_still_down_and_exits_4_on_timeout() {
-    let path = stub_python_path("down");
+    let (_stub, path) = stub_python_path();
     let out = wake_box(
         &["strih", "--wait=2"],
         &[("WOL_PING_CMD", "false"), ("WOL_WAIT_INTERVAL", "1")],
