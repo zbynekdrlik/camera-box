@@ -133,40 +133,33 @@ class TestApplyPins:
 # the committed baseline is the PROMOTED aligned set AND matches the resolver (#1003 lock)
 # ---------------------------------------------------------------------------
 class TestPromotedBaseline:
+    """OWNER-REJECTED promotion (2026-08-20): the 90/160/184 + hold-791 set was applied live,
+    rejected within minutes, and reverted (see the ticket's ODMIETNUTE comment). The baseline is
+    back to the shallow agreed set until the floor-3 auto-align rework lands; these tests now pin
+    THAT state so a stray re-promotion of the rejected values fails loudly here (Tier-0)."""
+
     def _load(self):
         base = json.loads((_SCRIPTS / "latency-pins-baseline.json").read_text(encoding="utf-8"))
         return base
 
-    def test_strih_pins_are_the_promoted_aligned_set(self):
+    def test_strih_pins_are_the_reverted_shallow_set(self):
         strih = self._load()["strih"]
-        assert strih["NDI cam1"] == 90
-        assert strih["NDI cam2"] == 160
-        assert strih["NDI cam3"] == 184
+        assert strih["NDI cam1"] == 3
+        assert strih["NDI cam2"] == 6
+        assert strih["NDI cam3"] == 20
 
-    def test_stream_hold_is_the_coherent_promoted_value(self):
+    def test_stream_hold_is_the_operator_band(self):
         pgm = self._load()["stream"]["NDI 2ME PGM"]
-        assert pgm["want_ms"] == 791
-        assert pgm["tolerance_ms"] == 60  # band kept -- catches a gross revert (0/915/971)
+        assert pgm["want_ms"] == 915
+        assert pgm["tolerance_ms"] == 60  # band kept -- catches a gross revert (0/3/1000)
 
     def test_imag_floor_untouched(self):
         assert self._load()["imag"]["_all_ndi_inputs_ms"] == 3
 
-    def test_baseline_equals_the_measurement_eq_resolver_output(self):
-        """PROVENANCE guard: the promoted production pins MUST be exactly what the measurement-eq
-        resolver derives from the current profile (the values validated at MEQ run 66065064). A
-        hand-edit that drifts the baseline off its derivation -- OR a profile re-derivation without
-        a matching baseline re-promotion -- fails HERE (Tier-0), never silently on the rig."""
-        import e2e_measurement_pins as m  # noqa: PLC0415
-        prof = m.load_profile(str(_SCRIPTS / "e2e-measurement-pins.json"))
-        assert m.coherence_check(prof) == []  # the profile itself is coherent
-        base = self._load()
-        assert base["strih"] == m.resolve_pins(prof)                  # 90/160/184
-        assert base["stream"]["NDI 2ME PGM"]["want_ms"] == m.resolve_hold(prof)  # 791
-
     def test_extract_on_the_real_baseline(self):
         base = self._load()
         assert alp.explicit_pins_for_box("strih", base["strih"]) == {
-            "NDI cam1": 90, "NDI cam2": 160, "NDI cam3": 184}
-        assert alp.explicit_pins_for_box("stream", base["stream"]) == {"NDI 2ME PGM": 791}
+            "NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}
+        assert alp.explicit_pins_for_box("stream", base["stream"]) == {"NDI 2ME PGM": 915}
         with pytest.raises(SystemExit):
             alp.explicit_pins_for_box("imag", base["imag"])
