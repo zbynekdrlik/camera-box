@@ -202,7 +202,7 @@ PSAHKR
   local keepalive_disable keepalive_restore
   local ka_tasks; ka_tasks="$(fleet_box_keepalive_tasks "$box")"
   if [ -n "$ka_tasks" ]; then
-    local -a ka_arr=(); read -r -a ka_arr <<< "$ka_tasks"
+    local -a ka_arr=(); IFS=' ' read -r -a ka_arr <<< "$ka_tasks"
     local ps_arr="" t t_ps
     for t in "${ka_arr[@]}"; do
       t_ps="${t//\'/\'\'}"   # double any single quote for the PowerShell single-quoted literal
