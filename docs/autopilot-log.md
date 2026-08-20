@@ -9837,9 +9837,16 @@ No push/PR/rig touch (worktree worker).
   (4/4) green. Rust unit tests (tests/preview.rs) run on CI. Feature-gated real-NDI path is UNVERIFIED
   against a live source in this lane -> named follow-up (verify end-to-end vs live cambox NDI + libndi
   provisioning on the strih box + full fourcc coverage).
-- Review: self-applied /review + /requesting-code-review standards (a fresh-context general-purpose
-  dispatch orphaned/did-not-return within ~12 min — the async-dispatch fragility class — so the review
-  was done inline, which is sanctioned). 0 blocking findings; residual risk = the ndi-feature FFI is
-  first-compiled on CI (its own clippy --features ndi job) and runtime-unverified (follow-up above).
+- Review: fresh-context general-purpose reviewer completed (~16 min). Verdict 0 red / 2 yellow / 6 blue.
+  Both YELLOW fixed: (Y1) branch was 2 commits behind origin/dev which now carries the Rust 1.98
+  as_chunks fix -> merged origin/dev (base-sync, no conflicts, main crate now clean of chunks_exact);
+  (Y2) example.toml fps was a TOML integer for an f64 field -> 3.0 + a Rust [preview] parse test
+  (tests/service.rs). BLUE: #3 monotonic decimation clock (Instant, immune to NTP step), #5 web preview
+  error-backoff, #6 uyvy even-width doc note = FIXED. #1 per-source libndi load (mirrors the appliance's
+  own per-receiver NdiLib::load; NDI init/destroy is refcounted -> correct), #2 color-format enum value
+  (copied verbatim from src/ndi.rs; the fourcc dispatch makes decode correct either way), #4 tight_rows
+  extra copy (negligible at preview res) = reason-dropped into the live-NDI follow-up (feature OFF +
+  unverified). Residual risk = the ndi-feature FFI is first-compiled on CI (its own clippy --features
+  ndi job) and runtime-unverified (follow-up above).
 - WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/merge/
   deploy/run-card by the worker.
