@@ -53,6 +53,58 @@ So the fix TRADES #707 skips (gaps + relock) for ~2 steady byte-identical copies
 land in the E2E verdict `copies` windows and must be re-checked against
 `WINDOW_COPIES_GAPS_TOLERANCE` at deploy (that tolerance predates them).
 
+**SUPERSEDED at a GENUINE over-rate by #1145 — the copies are the floor ONLY when the source is
+UNIQUE-STARVED (unique rate < 60), never at a plain over-rate.** The arithmetic above conflated two
+cases. A grabber over-rating a true-60 source (cam1/cam2 ShadowCast, takt 61.x) delivers ~60 UNIQUE
+fps (the over-rate delta IS the dupe rate), so ZERO copies are needed — every dupe can be shed. The
+~2 copies/s the pre-#1145 valve emitted there were a BUG: at over-rate the unique rate is exactly 60,
+so the emit-gate lag is a driftless random walk and jitter pushes an on-time deferral over the lag==0
+hair-trigger, so the next dupe arrives LATE and #1111 copies it (a delta-0 downstream) + a
+compensating dropped-unique = the paired "15fps-judder" the #1142 uniformity gate REDs. Only a source
+whose UNIQUE rate is genuinely < 60 (a 58-unique grabber, or a 50->60 pulldown padding a sub-60
+source by duplication) truly needs copies to hold a steady 60.
+
+## #1145 — stale-boundary RETIREMENT: absorb the over-rate takt without emitting a copy
+
+The FIFTH cooperating piece. A content-dupe crossing an ALREADY-STALE boundary (`lag >= 1` —
+`genlock_pacing::genlock_lag_intervals`, the numeric sibling of `genlock_emit_on_time`) is RETIRED
+instead of copied: shed the dupe AND advance the stale boundary one interval, emitting NOTHING. The
+boundary's downstream hold already happened one interval ago, so retiring it costs no new artifact,
+sacrifices no unique, AND drains the dupe-driven lag (the restoring force the bounded-defer variant
+lacked — "defer iff lag<BOUND" only postpones the copy, it never CANCELS the debt, so a driftless
+walk still eventually trips the resync). Bounded by `RETIRE_MAX_LAG_INTERVALS=4` (<< the resync 8);
+above it the #1111 copy valve fires (a panic floor). `genlock_emit_gate` + its resync are UNTOUCHED.
+
+- **Retirement is gated on the UNIQUE rate, NOT the capture takt.** A trailing 2 s `VecDeque` COUNT
+  of unique (non-dupe) captures (`RETIRE_MIN_UNIQUES_IN_WINDOW=118`, ~59 fps) is the robust "enough
+  distinct content to hold 60 without copies" signal — a windowed COUNT reads the true unique rate
+  regardless of per-frame jitter / dupe clustering (an interval EMA does NOT: it reads local capture
+  spacing during a run of consecutive uniques and leaks). A capture-TAKT gate is WRONG: a takt>60.3
+  excess-dupe deficit (unique < 60) would be wrongly retired, dropping the emit rate + blinding the
+  duplication-masked pulldown detector (`dup_cadence.rs`) + tripping the #666 emit-deficit gate. The
+  unique-rate gate keeps a genuinely starved source (50->60 pulldown) on the #1111 copy path
+  byte-identical (holds 60, keeps the content-dupes in the recording for `dup_cadence`).
+- Decision is the pure `dupe_decimation::dupe_shed_action(...) -> ShedAction {Emit{copy}, Defer,
+  Retire, BlindShed}` (replaced `dupe_preferring_decimate`). `DupeShedLog` gained a `retired` counter
+  (the summary line is now 4-count; `main.rs` wires the 4-tuple). Live: retired ≈ over-rate delta,
+  copies ≈ 0 on cam1/cam2, all-zero on cam3.
+
+## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
+
+The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
+hand-SIMPLIFIED re-model silently DIVERGES. A shortened `DecimationGate`/`Cur` re-write disagreed
+with the real #1111 test (it read emit 58 at 62/period-15 where the real code holds ~60 via copies),
+which would have mis-designed the fix. The authoritative off-rig check is the CLAUDE.md/#557 SCRATCH
+route: copy the ACTUAL `src/genlock_pacing.rs` + `src/dupe_decimation.rs` into a scratch dir with a
+`root.rs` that `mod`s both, `sed 's/crate::genlock_pacing:://g'` inside dupe_decimation, then
+`rustc --edition 2021 --test root.rs` runs the REAL `DecimationGate::poll` + the real test suite. For
+a design sweep, drive that real gate with a synthetic capture stream (periodic isolated dupes at the
+over-rate delta + INDEPENDENT timestamp jitter — content-dupeness is a hash property, NOT a
+sampling-phase artifact; a source-sampling model that ties dupeness to the jittered timestamp
+mis-models the ShadowCast, which stays clean at exactly 60). The downstream uniformity a genlocked
+strih sees is the emitted source-tick sequence decimated in-order by 2 (NOT resampled by the jittery
+emit timestamps — the emit grid is wall-clock-gridded, the FIFO genlocked).
+
 ## GOTCHA — the #707 resync is QUEUE-BLIND; gate it on the dequeue signal, not just a lag bound (#1131)
 
 `genlock_emit_gate`'s forward-resync (`lag > GENLOCK_MAX_CATCHUP_INTERVALS`) is BLIND to whether the
