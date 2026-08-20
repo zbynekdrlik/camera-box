@@ -53,6 +53,24 @@ fn run_ok(body: &str) -> String {
     out
 }
 
+/// Source the lib and run `body` under the CALLER's EXACT `set -euo pipefail` context (what
+/// recording-e2e.sh uses) — NOT the `-uo`-only context `run_sourced_status` uses. This is what
+/// exposes a `set -e`-abort phantom-fail (a report-only probe that returns non-zero on an empty
+/// read would `set -e`-kill the whole run). Returns (stdout, success).
+fn run_under_set_e(body: &str) -> (String, bool) {
+    let harness = format!("set -euo pipefail\n. \"$SCRIPT\"\n{body}");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", lib_script())
+        .output()
+        .expect("failed to run bash harness");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    )
+}
+
 /// grep -Ec the pattern the lib function `pattern_fn` returns, against fixture `fx`.
 fn grep_count(pattern_fn: &str, fx: &str) -> u32 {
     let body = format!(
@@ -379,6 +397,75 @@ fn end_to_end_sick_journal_over_threshold_healthy_under() {
     assert!(
         ok2,
         "the post-.481 residual fixture leg must pass end-to-end"
+    );
+}
+
+/// #1133 review 🔴 regression: a report-only cap-1s band warn must NEVER abort the run under the
+/// caller's `set -euo pipefail`, on an EMPTY read (failed/timed-out ssh, or a just-restarted box
+/// with no cap-1s dump yet) OR a non-empty read with no cap-1s line. Before the fix, the grep
+/// pipeline exited 1 on no-match and `set -e` killed the whole E2E run before the `ok:` line.
+#[test]
+fn cap1s_band_warn_never_aborts_the_run_under_set_e_on_an_empty_or_nomatch_read() {
+    // empty read -> must reach the sentinel (not die).
+    let (out, ok) =
+        run_under_set_e("leg_health_cap1s_band_warn cam1 \"\"; echo REACHED_AFTER_EMPTY");
+    assert!(
+        ok,
+        "band_warn on an empty read must NOT set-e-abort: {out:?}"
+    );
+    assert!(
+        out.contains("REACHED_AFTER_EMPTY"),
+        "the run must continue past band_warn: {out:?}"
+    );
+    // non-empty but no cap-1s line -> also must not abort.
+    let (out2, ok2) = run_under_set_e(
+        "leg_health_cap1s_band_warn cam3 'a stall line, no cap dump'; echo REACHED2",
+    );
+    assert!(
+        ok2 && out2.contains("REACHED2"),
+        "no-cap-1s-match must not abort: {out2:?}"
+    );
+}
+
+/// #1133 review 🔴: the FULL per-box wiring sequence (extract -> classify -> band_warn) on a
+/// failed/empty ssh read (`_lhout=""`) must classify HEALTHY and reach the `ok:` line under
+/// `set -euo pipefail`, never phantom-fail. This is the exact production sequence recording-e2e.sh
+/// runs per box.
+#[test]
+fn empty_ssh_read_flows_through_the_whole_wiring_to_ok_under_set_e() {
+    let (out, ok) = run_under_set_e(
+        "OUT=''; \
+         S=$(leg_health_extract STALL \"$OUT\"); K=$(leg_health_extract SKIP \"$OUT\"); E=$(leg_health_extract EPROTO \"$OUT\"); \
+         if ! M=$(leg_health_classify cam1 \"$S\" \"$K\" \"$E\"); then echo \"ABORT:$M\"; exit 1; fi; \
+         leg_health_cap1s_band_warn cam1 \"$(leg_health_extract_cap1s \"$OUT\")\"; \
+         echo \"OK_LINE stall=$S skip=$K eproto=$E\"",
+    );
+    assert!(ok, "an empty ssh read must not fail the run: {out:?}");
+    assert!(
+        out.contains("OK_LINE stall=0 skip=0 eproto=0"),
+        "empty read -> healthy, ok line reached: {out:?}"
+    );
+    assert!(
+        !out.contains("ABORT:"),
+        "must not classify an empty read as a defect: {out:?}"
+    );
+}
+
+/// And the same sequence on a SICK read still ABORTS under `set -euo pipefail` (the fix must not
+/// have neutered the real gate).
+#[test]
+fn sick_read_still_aborts_under_set_e() {
+    let sick = "LEGHEALTH_STALL=12\\nLEGHEALTH_SKIP=10\\nLEGHEALTH_EPROTO=9\\nLEGHEALTH_CAP1S_BEGIN\\nx cap-1s: [62, 63]\\nLEGHEALTH_CAP1S_END";
+    let (out, ok) = run_under_set_e(&format!(
+        "OUT=$(printf '%b' '{sick}'); \
+         S=$(leg_health_extract STALL \"$OUT\"); K=$(leg_health_extract SKIP \"$OUT\"); E=$(leg_health_extract EPROTO \"$OUT\"); \
+         if ! M=$(leg_health_classify cam1 \"$S\" \"$K\" \"$E\"); then echo \"ABORT_OK\"; exit 1; fi; \
+         echo \"WRONGLY_PASSED\""
+    ));
+    assert!(!ok, "a sick read must still fail the run");
+    assert!(
+        out.contains("ABORT_OK") && !out.contains("WRONGLY_PASSED"),
+        "must abort on the sick read: {out:?}"
     );
 }
 

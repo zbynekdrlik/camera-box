@@ -231,7 +231,11 @@ leg_health_read_all_cmd() {
 # non-zero count -- leg_health_classify treats 0 as healthy). FIELD is STALL|SKIP|EPROTO.
 leg_health_extract() {
   local field="$1" output="$2" val
-  val="$(printf '%s\n' "$output" | sed -n "s/^LEGHEALTH_${field}=\\([0-9][0-9]*\\).*/\\1/p" | head -1)"
+  # `sed | head -1` is closed early by head on a multi-match input, which SIGPIPEs sed; the
+  # trailing `|| true` keeps that from failing under a `pipefail`+`-e` caller (defensive -- the
+  # read_all output emits exactly one line per field today, so it is not yet triggerable, #1133
+  # review 🔵). An empty/garbled read then falls through to 0 (never a phantom non-zero count).
+  val="$(printf '%s\n' "$output" | sed -n "s/^LEGHEALTH_${field}=\\([0-9][0-9]*\\).*/\\1/p" | head -1 || true)"
   case "$val" in '' | *[!0-9]*) echo 0 ;; *) echo "$val" ;; esac
 }
 
@@ -250,19 +254,28 @@ leg_health_extract_cap1s() {
 # the raw `#707 emit-1s: [...] cap-1s: [...]` line(s) leg_health_cap1s_read_cmd returned.
 leg_health_cap1s_band_warn() {
   local box="$1" text="$2"
+  # A REPORT-ONLY probe must NEVER abort the run: an empty read (failed/timed-out ssh, or a
+  # just-restarted box whose instance-scoped window has no cap-1s dump yet) returns immediately.
+  # This is load-bearing because the caller (recording-e2e.sh, `set -euo pipefail`) invokes this
+  # as a bare statement, NOT an `if`-condition -- so any non-zero return would `set -e`-abort the
+  # whole E2E run, a silent phantom-fail (#1133 review, 🔴).
+  [ -n "$text" ] || return 0
   local low high frac_pct min_buckets
   low="$(leg_health_cap1s_band_low)"
   high="$(leg_health_cap1s_band_high)"
   frac_pct="$(leg_health_cap1s_warn_fraction_pct)"
   min_buckets="$(leg_health_cap1s_warn_min_buckets)"
   # Extract every integer that appears inside a `cap-1s: [ ... ]` array across all lines. Strip
-  # everything up to and including `cap-1s: [`, then take digits up to the closing `]`.
+  # everything up to and including `cap-1s: [`, then take digits up to the closing `]`. The
+  # trailing `|| true` keeps a ZERO-match pipeline (text present but no cap-1s line -- log-format
+  # drift, a window with only stall/skip lines) from failing under the caller's `pipefail`+`-e`
+  # (grep -oE exits 1 on no match; without this it would abort the run, same phantom-fail class).
   local caps total=0 out=0 n
   caps="$(printf '%s\n' "$text" \
     | grep -oE 'cap-1s: \[[0-9, ]*\]' \
     | grep -oE '\[[0-9, ]*\]' \
     | tr -d '[]' \
-    | tr ',' ' ')"
+    | tr ',' ' ' || true)"
   for n in $caps; do
     case "$n" in '' | *[!0-9]*) continue ;; esac
     total=$((total + 1))
