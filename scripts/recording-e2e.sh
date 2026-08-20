@@ -1927,6 +1927,13 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     imag_leg_skip_note "[1/8] imag render-health + MV-divisor capability" "$IMAG_OFFLINE_ACK_REASON"
   else
+  # #1143: make VAAPI-tex the LIVE record encoder BEFORE the render-health windows (software x264
+  # overloads the render thread → the #1130 observer effect). The make-it-live OBS restart fires
+  # only when the disk config drifted from the target (a no-op on the steady state); its settle is
+  # absorbed by window 1's #882 warm-up. Best-effort — a nonzero return WARNs, never aborts.
+  if ! python3 "$HERE/imag_scenes.py" --ensure-rec-encoder --host "$IMAG_IP"; then
+    echo "    WARNING: #1143 imag ensure-rec-encoder nonzero (best-effort) — continuing; the render-health preflight below still catches a down OBS, record_render_lagged_pct a stale encoder" >&2
+  fi
   echo "[1/8] imag render-health preflight — PROGRAM must hold its 60fps budget with MV open, sustained (#758)"
   RENDER_HEALTH_WINDOWS="${RENDER_HEALTH_WINDOWS:-5}"
   RENDER_HEALTH_WINDOW_S="${RENDER_HEALTH_WINDOW_S:-6}"
@@ -4269,6 +4276,15 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # WARNING; }` degrades gracefully instead: the imag leg is skipped, $IMAG_PARTIAL stays absent,
   # and the merge command below (guarded by `if [ -f "$IMAG_PARTIAL" ]`) simply omits it.
   if [ -n "${IMAG_HOST_PATH:-}" ]; then
+    # #1143: capture OBS's OWN record-session render stats (drawn/attempted/lagged frames +
+    # lagged_pct + max in-record render ms) from the imag OBS log stop-stats and thread them into
+    # the imag extract, so the merged verdict's imag block carries the observer-effect proof
+    # REPORT-ONLY (a high lagged_pct ⇒ the RECORDER juddered the chain, not the delivery — #1130).
+    # Best-effort: empty on ANY failure, and the flag is added ONLY when non-empty (an empty value
+    # would fail the extract's JSON parse). Never aborts the extract (report-only observability).
+    IMAG_RECORD_STATS_ARGS=()
+    _imag_rrstats="$(python3 "$HERE/imag_record_stats_capture.py" --host "$IMAG_IP" --recording "$IMAG_HOST_PATH" 2>/dev/null || true)"
+    [ -n "$_imag_rrstats" ] && IMAG_RECORD_STATS_ARGS=(--record-render-stats "$_imag_rrstats")
     # #832: recording-verdict-on-imag.sh has its OWN independent IMAG_BOX default (it is a
     # standalone tool, also runnable by hand) -- pass the SAME resolved host recording-e2e.sh
     # itself is targeting (scripts/imag-host.sh), so this [8/8c] decode step never silently
@@ -4277,7 +4293,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
       --verdict-bin "$VERDICT_BIN" --out-dir "$IMAG_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
       --imag-rec "$IMAG_HOST_PATH" \
       -- --extract-partial imag --imag "$IMAG_HOST_PATH" --imag-capture-fps "$IMAG_CAPTURE_FPS" \
-         --out "$IMAG_REMOTE_PARTIAL" \
+         --out "$IMAG_REMOTE_PARTIAL" "${IMAG_RECORD_STATS_ARGS[@]}" \
     && echo "    pulled back to dev1: $IMAG_PARTIAL  (+ the #186 pixel-proof dir $IMAG_PIXELS, if any)" \
     || echo "WARNING: #462 recording-verdict-on-imag.sh failed (imag unreachable / stale binary / ssh hiccup) — \
 continuing WITHOUT the imag partial; the merge below will omit --merge-partials imag=... (cam→imag proof skipped this run)." >&2
