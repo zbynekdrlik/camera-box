@@ -195,3 +195,56 @@ fn resolve_wait_does_not_add_a_second_reattach() {
          frozen-camera-gate.py, not a second strih_mv_scenes.py reattach"
     );
 }
+
+/// #1114 review 🟡-2 / repo rule #1133 (.claude/rules/ci-testing-gotchas.md): mv_reverify_resolve_wait
+/// runs under the caller's `set -euo pipefail`, wrapped `if mv_reverify_resolve_wait ...; then`. The
+/// drive_resolve_wait helper sources under `set -uo` (no -e), so it is blind to a `set -e` abort. This
+/// case sources under the caller's EXACT `set -euo pipefail`, invokes it the SAME `if`-wrapped way, and
+/// asserts a sentinel after it is reached on BOTH recovery and deadline — locking the run can never abort.
+#[test]
+fn resolve_wait_never_aborts_the_caller_under_set_euo_pipefail() {
+    let lib = escalate_lib();
+    // succeed_at 2 = recovers; succeed_at 0 = deadline (RESOLVE_SETTLE_S=2s).
+    for (succeed_at, settle) in [(2u32, 30u32), (0u32, 2u32)] {
+        let script = format!(
+            r#"
+set -euo pipefail
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+cat > "$TMP/frozen-camera-gate.py" <<'PY'
+import os, sys
+cf = os.environ["FAKE_COUNTER"]
+n = 0
+try:
+    n = int(open(cf).read().strip())
+except Exception:
+    pass
+n += 1
+open(cf, "w").write(str(n))
+sat = int(os.environ.get("FAKE_SUCCEED_AT", "0"))
+sys.exit(0 if (sat and n >= sat) else 1)
+PY
+mkdir -p "$TMP/probebin"
+: > "$TMP/probebin/frozen-camera-gate"
+export HERE="$TMP" STRIH="strih.invalid" PROBE_BIN_DIR="$TMP/probebin"
+export FAKE_COUNTER="$TMP/counter" FAKE_SUCCEED_AT="{succeed_at}"
+export PREFLIGHT_MV_REVERIFY_RESOLVE_SETTLE_S="{settle}" PREFLIGHT_MV_REVERIFY_RESOLVE_CADENCE_S="1"
+source '{lib}'
+if mv_reverify_resolve_wait "cam1" "1" "5"; then :; else :; fi
+echo "REACHED_END"
+"#
+        );
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run set-e resolve-wait driver");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("REACHED_END"),
+            "#1114/#1133: mv_reverify_resolve_wait (succeed_at={succeed_at}) must never set -e-abort \
+             its `if`-wrapped caller under `set -euo pipefail`. stdout:\n{stdout}"
+        );
+    }
+}

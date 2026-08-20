@@ -338,17 +338,21 @@ mv_reverify_resolve_wait() {
   local box="$1" cam_n="$2" call_timeout="${3:-30}"
   local resolve_s="${PREFLIGHT_MV_REVERIFY_RESOLVE_SETTLE_S:-120}"
   local cadence="${PREFLIGHT_MV_REVERIFY_RESOLVE_CADENCE_S:-6}"
-  local waited=0
-  while [ "$waited" -lt "$resolve_s" ]; do
+  # #1114 review 🔵-2: bound the WALL CLOCK, not just the accumulated sleeps. Each iteration also
+  # spends one frozen-camera-gate.py probe (~a few s, up to call_timeout), so a sleep-only counter
+  # would run ~2x past the documented measured window. A SECONDS-based deadline makes RESOLVE_SETTLE_S
+  # a truthful wall-clock bound on how long the fresh finder is given to re-resolve.
+  local start="$SECONDS" deadline=$((SECONDS + resolve_s)) waited
+  while [ "$SECONDS" -lt "$deadline" ]; do
     sleep "$cadence"
-    waited=$((waited + cadence))
     if timeout "$call_timeout" python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
         --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle "${PREFLIGHT_MV_REVERIFY_WARM_SETTLE:-0}" \
         --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
+      waited=$((SECONDS - start))
       echo "    [sender-bounce] ${box} recovered ${waited}s after the receiver reset — fresh finder re-resolved the live burn sender (issue 1114)" >&2
       return 0
     fi
   done
-  echo "    [sender-bounce] ${box} still no pixel change ${resolve_s}s after the receiver reset — fresh finder did not re-resolve within the measured window (issue 1114)" >&2
+  echo "    [sender-bounce] ${box} still no pixel change ${resolve_s}s (wall clock) after the receiver reset — fresh finder did not re-resolve within the measured window (issue 1114)" >&2
   return 1
 }
