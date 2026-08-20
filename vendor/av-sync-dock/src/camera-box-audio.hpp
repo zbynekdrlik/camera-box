@@ -189,7 +189,10 @@ cb_decode_markers_with_stats(const std::vector<float> &samples, uint32_t sample_
 				uint32_t sym = (uint32_t)(im > 0.0 ? 2 : 0) | (uint32_t)(re > 0.0 ? 1 : 0);
 				word |= sym << (CB_N_PAYLOAD_BITS - 2 - 2 * k);
 			}
-			if (((word >> 16) & 0xF) == CB_PREAMBLE_NIBBLE && cb_crc4_check(word, CB_N_PAYLOAD_BITS) == 0) {
+			// #1153: mirror qpsk_marker's zero-nibble gate — the emitter always sends bits[15:12]==0;
+			// checking it reclaims 4 bits of redundancy and cuts the false-decode flood ~16x.
+			if (((word >> 16) & 0xF) == CB_PREAMBLE_NIBBLE && ((word >> 12) & 0xF) == 0 &&
+			    cb_crc4_check(word, CB_N_PAYLOAD_BITS) == 0) {
 				stats.crc_ok++;
 				out.push_back(std::make_pair((double)base / ar, (uint8_t)((word >> 4) & 0xFF)));
 				i = base + sig_len; // markers are far apart; skip past this one

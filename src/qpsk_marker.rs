@@ -69,7 +69,7 @@ pub fn crc4_check(mut data: u32, size: u32) -> u32 {
     data
 }
 
-/// 20-bit payload word: bits[19:16]=0xF preamble, bits[15:8]=index, bits[7:4]=0, bits[3:0]=CRC4.
+/// 20-bit payload word: bits[19:16]=0xF preamble, bits[15:12]=0 (zero nibble), bits[11:4]=index, bits[3:0]=CRC4.
 pub fn payload_word(index: u8) -> u32 {
     let data16 = 0xF000u32 | (index as u32 & 0xFF);
     (data16 << 4) | crc4(data16, 16)
@@ -145,7 +145,14 @@ pub fn signal_len(p: &AudioParams) -> usize {
 
 /// The 10-symbol QPSK waveform for `index`, mono f32 in [-1,1] (no lead silence, amplitude 1.0).
 pub fn marker_signal(index: u8, p: &AudioParams) -> Vec<f32> {
-    let word = payload_word(index);
+    marker_signal_for_word(payload_word(index), p)
+}
+
+/// The 10-symbol QPSK waveform for an ARBITRARY 20-bit payload `word` (not just a valid marker),
+/// so a test can synthesize a CRC-valid-but-structurally-invalid "poison" word (#1153). Real emit
+/// always uses [`marker_signal`] (word = [`payload_word`], which has a zero nibble at bits[15:12]);
+/// this shared renderer lets the decoder-hardening test drive a nonzero zero-nibble through it.
+pub(crate) fn marker_signal_for_word(word: u32, p: &AudioParams) -> Vec<f32> {
     let s = symbols(word);
     let ar = p.sample_rate as f64;
     let f = p.carrier_hz as f64;
@@ -364,7 +371,16 @@ pub fn decode_markers_with_stats(
                 let sym = (if im > 0.0 { 2u32 } else { 0 }) | (if re > 0.0 { 1 } else { 0 });
                 word |= sym << (N_PAYLOAD_BITS - 2 - 2 * k as u32);
             }
-            if (word >> 16) & 0xF == PREAMBLE_NIBBLE && crc4_check(word, N_PAYLOAD_BITS) == 0 {
+            // #1153: the emitter ALWAYS sends the zero nibble (bits[15:12]) == 0, but only the
+            // preamble nibble + CRC-4 (8 bits) were ever checked — leaving the CRC-passing
+            // accept-space 16x too large (256 valid vs 3840 "poison" words a music mix decodes
+            // from noise). Enforcing the zero nibble reclaims those 4 bits of built-in
+            // redundancy and cuts the false-decode flood ~16x, with no real marker lost (a real
+            // marker's zero nibble is 0 and is already covered by the CRC).
+            if (word >> 16) & 0xF == PREAMBLE_NIBBLE
+                && (word >> 12) & 0xF == 0
+                && crc4_check(word, N_PAYLOAD_BITS) == 0
+            {
                 stats.crc_ok += 1;
                 out.push((base as f64 / ar, ((word >> 4) & 0xFF) as u8));
                 i = base + sig_len; // markers are far apart; skip past this one
@@ -1580,5 +1596,75 @@ mod tests {
         // taken, else a stale value could keep polluting the display forever.
         assert_eq!(last, 300_000_000);
         assert_eq!(history.len(), 1, "stale sample should have been pruned");
+    }
+
+    // -----------------------------------------------------------------
+    // #1153 — enforce the always-zero nibble (bits[15:12]) in the accept gate
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn decode_rejects_crc_valid_word_with_nonzero_zero_nibble_1153() {
+        // The emitter ALWAYS sends the zero-nibble (bits[15:12]) == 0 (`payload_word`), but the
+        // decoder historically checked only the preamble nibble (0xF) + CRC-4 = 8 bits, leaving the
+        // CRC-passing accept-space 16x too large: of the 4096 words that pass preamble+CRC, only
+        // 256 are valid markers and 3840 are "poison" (nonzero zero-nibble) decoded from noise. A
+        // poison word must be REJECTED. 0xF1002: preamble=0xF, zero-nibble=0x1, crc-4 valid.
+        let poison = 0xF1002u32;
+        assert_eq!(
+            (poison >> 16) & 0xF,
+            PREAMBLE_NIBBLE,
+            "poison has a valid preamble nibble"
+        );
+        assert_eq!(
+            crc4_check(poison, N_PAYLOAD_BITS),
+            0,
+            "poison passes CRC-4 (that's the trap)"
+        );
+        assert_ne!(
+            (poison >> 12) & 0xF,
+            0,
+            "poison has a NONZERO zero-nibble (what makes it fake)"
+        );
+        let p = AudioParams::rig60();
+        let sig = marker_signal_for_word(poison, &p);
+        let mut buf = vec![0f32; p.sample_rate as usize / 2]; // 0.5 s
+        let start = p.sample_rate as usize / 10; // 0.1 s lead silence
+        buf[start..start + sig.len()].copy_from_slice(&sig);
+        let (found, stats) = decode_markers_with_stats(&buf, &p, 0.4);
+        assert!(
+            found.is_empty(),
+            "poison word must not decode as a marker: {found:?}"
+        );
+        assert_eq!(
+            stats.crc_ok, 0,
+            "poison word must not count as crc_ok: {stats:?}"
+        );
+        // It WAS screened + fully attempted (valid preamble + CRC), then rejected on the zero-nibble.
+        assert!(
+            stats.crc_fail >= 1,
+            "poison word is screened+attempted, then rejected: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn decode_still_accepts_a_real_marker_and_every_index_has_zero_nibble_1153() {
+        // The new conjunct must NEVER reject a REAL marker: every valid index's payload word carries
+        // a zero nibble == 0 by construction, so the gate is free for all 256 real markers.
+        for idx in 0u32..256 {
+            assert_eq!(
+                (payload_word(idx as u8) >> 12) & 0xF,
+                0,
+                "index {idx}: a valid marker's zero-nibble must be 0"
+            );
+        }
+        let p = AudioParams::rig60();
+        let sig = marker_signal(123, &p);
+        let mut buf = vec![0f32; p.sample_rate as usize / 2];
+        let start = p.sample_rate as usize / 10;
+        buf[start..start + sig.len()].copy_from_slice(&sig);
+        let (found, stats) = decode_markers_with_stats(&buf, &p, 0.4);
+        assert_eq!(found.len(), 1, "a real marker still decodes: {found:?}");
+        assert_eq!(found[0].1, 123, "recovers the right index");
+        assert_eq!(stats.crc_ok, 1, "real marker: crc_ok == 1: {stats:?}");
     }
 }
