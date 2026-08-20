@@ -2,10 +2,12 @@
 paths:
   - "scripts/latency_pins_verify.py"
   - "scripts/latency_pins_snapshot.py"
+  - "scripts/apply_latency_pins.py"
   - "scripts/imag_latency_enforce.py"
   - "scripts/latency-pins-baseline.json"
   - "scripts/bundle_state_gather.py"
   - "tests/python/test_latency_pins_verify.py"
+  - "tests/python/test_apply_latency_pins_1003.py"
   - "scripts/drift-guard.sh"
   - "vendor/README.md"
 ---
@@ -33,6 +35,21 @@ the #1057 burn sweep-off (a burn is never legitimate operator state, so it IS fo
 legitimate re-tune is recorded by updating the baseline in a PR. `latency_pins_verify.py` exits
 0=on-baseline / 1=drift(loud, names box+input+got+want) / 2=connect-or-enumeration failure.
 
+## `apply_latency_pins.py` is the DELIBERATE writer counterpart (#1003) — DRY-RUN default
+
+The verify path is passive-report; to actually PUSH a newly-agreed baseline onto a live box there
+is `scripts/apply_latency_pins.py` — the ONLY sanctioned WRITER of `genlock_latency_ms_src` here.
+It reads the SAME baseline json and applies each explicit per-source pin over WS, but is
+**DRY-RUN by default** (prints `live -> want` per source, writes nothing); `--execute` is the only
+path that writes, so a promotion is deliberate + operator-invoked in a **NO-E2E maintenance
+window**, never automatic at launch. Idempotent (a source already on-baseline is a no-op),
+read-back verified, FAIL LOUD on a read-back mismatch (never a half-set source). It REFUSES the
+imag floor-sentinel box (`_all_ndi_inputs_ms`) — imag's 3ms floor is `imag_latency_enforce.py`'s
+domain (`imag-min-latency-3ms-always`), never promoted. CLI mirrors the verify tool:
+`apply_latency_pins.py --box strih --host 10.77.9.202 [--execute]` (DRY-RUN without `--execute`).
+This is the sanctioned "operator/gate legitimately re-tunes → record in a PR → apply to the rig"
+loop; the verify-at-start still never writes.
+
 ## Fail CLOSED on enumeration, honest-None on a per-input read (two different rules)
 
 The imag floor path enumerates live NDI inputs; a failed/malformed `GetInputList` must FAIL CLOSED
@@ -46,8 +63,20 @@ missing source/key is an honest `None` (N/A), never a fabricated floor value —
 
 strih baseline covers the default `CAMERA_ACTIVE_SET` (cam1/cam2/cam3); retired-grabber pins
 (cam4..7) are deliberately excluded so a stale pin is never checked. stream pins `NDI 2ME PGM`
-with a `{want_ms, tolerance_ms}` band (the A/V-align hold re-tunes around ~923ms; a band absorbs
-that while catching a gross revert). imag uses the `_all_ndi_inputs_ms` floor sentinel (always 3).
+with a `{want_ms, tolerance_ms}` band (the A/V-align hold; a band absorbs ordinary re-tuning while
+catching a gross revert). imag uses the `_all_ndi_inputs_ms` floor sentinel (always 3).
+
+**Post-#1003 promotion (2026-08-20): strih carries the DELIVERY-equalized aligned DEEP pins
+`cam1=90/cam2=160/cam3=184` (NOT the old shallow `3/6/20`) and the stream hold is `791` (NOT 915).**
+These are the measurement-eq resolver's output — `python3 scripts/e2e_measurement_pins.py resolve
+--profile scripts/e2e-measurement-pins.json` prints exactly `{cam1:90, cam2:160, cam3:184}` +
+`stream_hold_ms 791`, locked by `test_apply_latency_pins_1003.py`'s provenance test. A profile
+re-derivation (staleness) that changes those numbers therefore fails that Tier-0 test until the
+baseline is RE-PROMOTED — the deliberate coupling that keeps production == the validated derivation.
+CAVEAT: after promotion the measurement-eq profile's own `production_pin_ms`/`production_hold_ms`
+references (`3/6/20`, `971`) are STALE (production IS the deep pins now), so `MEASUREMENT_EQ=1` must
+NOT be re-run against the promoted production without first re-basing the profile — the profile was
+the vehicle to VALIDATE the pins; once promoted it is redundant for pin-setting.
 
 ## Two per-source-latency mechanisms coexist — the baseline json is authoritative (#757)
 
@@ -63,6 +92,19 @@ There are TWO per-source strih latency facets, and they must not be confused:
    the same #390 model as `genlock_source_latency_stream`) — NOT hard-pinned ms values, which
    re-go-stale on the next operator re-tune. Never re-hardcode the live values (`cam1=3,cam2=6,...`)
    into it; they belong in the baseline json.
+
+## Editing the baseline VALUES couples to a hardcoded verify-test fixture
+
+`tests/python/test_latency_pins_verify.py::test_main_drift_exits_1_clean_exits_0` hardcodes the
+strih baseline pins as a fixture (the "clean" live read that must exit 0, plus a revert that must
+exit 1). So ANY change to the strih/stream baseline VALUES in `latency-pins-baseline.json` must
+update that fixture in the same PR, or it goes RED (the clean read now looks like drift). The
+`normalize_spec`/`diff_pin`/`verify_box` tests use their OWN in-test literals (not the file), and
+`test_baseline_file_loads_and_has_the_three_boxes` only checks STRUCTURE — only the drift fixture
+carries the concrete values. When promoting/re-tuning pins, `grep -n "NDI cam1" tests/python/` +
+run `pytest tests/python/test_latency_pins_verify.py` before pushing (Tier-0: pytest runs freely,
+no cargo). #1003 promotion changed strih 3/6/20→90/160/184 + stream 915→791 and had to update this
+one fixture.
 
 ## Local verification of a `vendor/README.md` pin/doc edit — Tier-0 blocks `cargo test`
 
