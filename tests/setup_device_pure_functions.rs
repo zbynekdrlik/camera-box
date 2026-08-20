@@ -662,3 +662,29 @@ fn setup_device_wires_per_box_gain_table() {
         "cam1-4 = Mic 75/PCM 79, cam5-7 = Mic 80/PCM 94 (owner's per-box table)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #1155 -- both netplan writers must pin the LAN stanza to the PCI NIC name (`enp*`), never a
+// `driver: "*"` wildcard that also claims a USB CDC-NCM camera link and hands it the box IP + a
+// duplicate default route (cam1 went PTP-deaf when a BMPCC camera was USB-plugged, 2026-08-20).
+// ---------------------------------------------------------------------------------------------
+
+/// BOTH writers -- setup-device.sh STEP 2 (static IP) and create-usb-linux.sh chroot base image
+/// (DHCP) -- must carry `match: name: "enp*"` on a real (non-comment) config line and must NOT
+/// carry `driver: "*"` on any non-comment line.
+#[test]
+fn both_netplan_writers_pin_lan_stanza_to_enp_never_driver_wildcard() {
+    let setup = std::fs::read_to_string(script()).unwrap();
+    let usb = usb_script_body();
+    for (name, body) in [("setup-device.sh", &setup), ("create-usb-linux.sh", &usb)] {
+        assert!(
+            on_noncomment_line(body, r#"name: "enp*""#),
+            "{name} netplan LAN stanza must pin `match: name: \"enp*\"` (the PCI NIC) (#1155)"
+        );
+        assert!(
+            !on_noncomment_line(body, r#"driver: "*""#),
+            "{name} must NOT match the LAN stanza with `driver: \"*\"` -- it also claims a USB \
+             CDC-NCM camera link and steals the box IP (#1155)"
+        );
+    }
+}
