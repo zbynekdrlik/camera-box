@@ -54,6 +54,22 @@ fn run_sourced(body: &str, extra_env: &[(&str, &str)]) -> String {
 fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new(script());
     cmd.args(args).current_dir(manifest_dir());
+    // #1139 hermeticity: the report-only tray + pin-lag sections do live I/O (gh release
+    // download/list; ssh certutil per --win node). Seed the seams by default so the pre-existing
+    // subprocess tests stay OFFLINE — a test that exercises those sections overrides them via
+    // extra_env. Cover the two win node names the suite uses (strih/stream); a new win name would
+    // need its own seam.
+    let has = |k: &str| extra_env.iter().any(|(ek, _)| *ek == k);
+    for (k, v) in [
+        ("DANTESYNC_NEWEST_RELEASE", "0.0.0-hermetic"),
+        ("DANTESYNC_TRAY_EXPECTED_SHA", "hermetic"),
+        ("DANTESYNC_TRAY_SHA_STRIH", "hermetic"),
+        ("DANTESYNC_TRAY_SHA_STREAM", "hermetic"),
+    ] {
+        if !has(k) {
+            cmd.env(k, v);
+        }
+    }
     for (k, v) in extra_env {
         cmd.env(k, v);
     }

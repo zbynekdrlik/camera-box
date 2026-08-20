@@ -67,6 +67,21 @@ fn run_gate(args: &[&str]) -> (i32, String, String) {
 fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new(script());
     cmd.args(args).current_dir(manifest_dir());
+    // #1137 hermeticity: the report-only vendor-pin section runs a live `git fetch origin` +
+    // `git log origin/main` whenever VERSION_INTEGRITY_GATE_VENDOR_NEWEST is unset. Seed both seams
+    // by default so the pre-existing subprocess tests stay OFFLINE (no fetch, no side-effect on the
+    // shared checkout's refs) — a test that exercises the vendor pin overrides them via extra_env.
+    // Defaults: a fixed newest sha + an empty pending list => the section reports OK, zero git.
+    let has = |k: &str| extra_env.iter().any(|(ek, _)| *ek == k);
+    if !has("VERSION_INTEGRITY_GATE_VENDOR_NEWEST") {
+        cmd.env(
+            "VERSION_INTEGRITY_GATE_VENDOR_NEWEST",
+            "0000000hermetictest",
+        );
+    }
+    if !has("VERSION_INTEGRITY_GATE_VENDOR_PENDING") {
+        cmd.env("VERSION_INTEGRITY_GATE_VENDOR_PENDING", "");
+    }
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -1588,7 +1603,10 @@ fn vendor_pin_alarm_names_pending_commits() {
         out.contains("f70317e81") && out.contains("2386b60d9"),
         "the alarm MUST name the pending vendor commits: {out}"
     );
-    assert!(out.contains('2'), "must state the count (2 pending): {out}");
+    assert!(
+        out.contains("2 undeployed"),
+        "must state the count (2 undeployed vendor commits): {out}"
+    );
 }
 
 #[test]
