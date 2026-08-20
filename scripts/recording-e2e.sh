@@ -300,6 +300,12 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # failure -- the same class as #833's missing-tool check above, applied to OBS liveness itself.
 # shellcheck source=scripts/lib/imag-obs-reachability.sh
 . "$HERE/lib/imag-obs-reachability.sh"
+# #1151: the SHARED reader of the issue-1146 `projector-vsync: present-vsync ARMED` OBS-log marker --
+# the SAME lib scripts/drift-guard.sh's --check-imag facet uses. Its [0/8] preflight surface is a
+# REPORT-ONLY line invoked below AFTER the Program projector is opened (the marker is emitted at
+# projector open), via the $(fn) gather-snippet embed (the #675 sourced-lib pattern); NEVER fails run.
+# shellcheck source=scripts/lib/obs-projector-vsync.sh
+. "$HERE/lib/obs-projector-vsync.sh"
 # #835: a dante-*.json file already sitting in $OUTDIR that this harness did not write is the
 # artifact of a stale manual pre-fetch runbook (removed by #648, but nothing warned when someone
 # still followed it) or a reused RUN_ID whose dir was never cleaned -- must announce itself, not
@@ -1262,6 +1268,19 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # temporarily-toggled-off preview.
   echo "[0/8] imag Studio Mode must be ON (production parity — Preview cell needs it, #767)"
   python3 "$HERE/obs_phase2.py" ensure-studio-mode-on --host "$IMAG_IP" 2>&1 | sed 's/^/    [imag studio-mode] /'
+
+  # #1151 REPORT-ONLY: confirm the issue-1146 `projector-vsync: present-vsync ARMED` marker is armed
+  # in imag's OBS log. Placed AFTER the projector-open step (the marker is emitted at Program-projector
+  # OPEN, one-shot-on-change, so a check before the projectors are opened reads nothing after a restart).
+  # Reads the newest OBS .txt log via the SHARED projector_vsync_gather_remote_snippet ($(fn) embed,
+  # the #675 sourced-lib pattern), formats via the SHARED projector_vsync_report_line. NEVER fails the
+  # run (issue 781: proves the tear-free present MECHANISM is engaged, never that scanout tearing is
+  # gone — objective proof needs the physical HDMI tap). Same lib the drift-guard --check-imag facet
+  # uses, so the marker string lives in ONE place.
+  echo "[0/8] imag Program present-vsync marker check (report-only — #1151, issue 1146/1107)"
+  _imag_vsync_log="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(projector_vsync_gather_remote_snippet)" 2>/dev/null || true)"
+  echo "    [imag projector-vsync] $(projector_vsync_report_line "$_imag_vsync_log")"
   fi   # issue 1013: end of the IMAG_OFFLINE_ACKED skip-guard over the imag OBS-prep leg
 fi
 
