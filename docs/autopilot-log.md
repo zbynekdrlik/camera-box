@@ -9800,3 +9800,46 @@ No push/PR/rig touch (worktree worker).
   reason, fsyntax-net, M1 rig runbook, M2 hook, lifecycle invariants) + CLAUDE.md router line.
 - Rig: READ-ONLY only (STEP-0 live verify on imag-nb); M1 activation is the supervisor's step
   after CI build + full-bundle deploy (runbook in the rule + the worker evidence block).
+
+## #808 M2 — bkshading live camera preview pipeline (worktree lane, 2026-08-20)
+- Owner architecture (binding, 2026-08-20): cambox publishes ONE NDI stream (strih OBS + bkshading
+  service both consume it); service subscribes to the NDI LOW-quality variant, decimates, JPEG-encodes,
+  serves the latest frame into the web UI 4+4 preview blocks; NDI->web via presenter technique. M1
+  shipped the placeholder ("NDI preview — M2"); M2 is the real pipeline.
+- Presenter technique (dev2 read-only): NDI recv = dynamic libloading of libndi.so (presenter-ndi
+  src/ndi_sdk.rs), web delivery = gstreamer ndisrc -> webrtcsink (WHEP/WebRTC, gst-plugin-ndi 0.15).
+  DECISION: WebRTC+gstreamer is too heavy + CI-unverifiable for a ~3fps shading preview; extracted only
+  the minimal "NDI recv -> per-frame" pattern; delivery is JPEG-over-HTTP instead.
+- KEY reuse: the APPLIANCE already has a full native NDI receiver at src/ndi.rs (NdiReceiver::connect +
+  capture_frame, recv_create_v3 with bandwidth field, recv_capture_v3, recv_free_video_v2). The real
+  preview receiver mirrors that FFI exactly, only swapping bandwidth HIGHEST(100) -> LOWEST(0). Source
+  naming = substring match, convention "NAME (hostname)" (matches M1 ndi_preview = "CAM1 (usb)").
+- Design (NON-TRIVIAL design comment on the ticket): Approach 1 (CHOSEN) stub-source-default +
+  real-NDI feature-gated OFF + pure decimate/encode/convert core + JPEG over HTTP latest-frame.
+  Approach 2 REJECTED = WebRTC/WHEP like presenter (heavy, CI-unverifiable). Approach 3 REJECTED for M2
+  = WS binary push (M1 has no WS surface; more moving parts, worse through cloudflare, marginal at 3fps).
+- Structure: new preview module in bkshading/service. Pure/CI-tested: frame, pattern, decimate, encode
+  (jpeg-encoder 0.7, pure Rust), convert (UYVY/BGRA/RGBA->RGB), store (per-camera latest JPEG). Runtime
+  glue: source (PreviewSource trait + StubSource), worker (one OS thread per camera, backoff reconnect).
+  Feature ndi (OFF by default): ndi_source.rs = minimal libloading FFI mirror of src/ndi.rs at LOWEST.
+  HTTP: GET /api/cameras/<id>/preview.jpg (image/jpeg, no-store; 404 unknown cam, 503 until first frame).
+  Web UI: 4+4 preview block renders a live <img> reloaded ~3x/s; no-preview camera stays params-only.
+- Commits: dbe0088ef feat (service code + web + Rust tests + example), 762dd3f2e test (python web-UI/
+  config asserts + CI clippy on the ndi feature). Backup ref refs/autopilot-wip/808-m2-preview.
+- GOTCHAS captured (see .claude/rules/bkshading.md candidate): (1) jpeg-encoder 0.7 Encoder::new(w,q)
+  returns Encoder NOT Result; encode(self, &[u8], u16, u16, ColorType). (2) Rust 1.98 clippy rejects
+  chunks_exact(N) with a constant N -> use index math (or as_chunks::<N>().0). (3) FFI init: inline
+  *lib.get(...)? temporaries in a struct literal live to end-of-statement, so moving the Library into the
+  last field is E0505 — deref-copy each fn pointer into its own `let` FIRST (each ? temp ends per stmt),
+  then move lib into _library. (4) private unread fields on #[repr(C)] FFI structs trip dead_code under
+  -D warnings -> #[allow(dead_code)] (appliance src/ndi.rs used pub fields instead).
+- Tier-0 verify (no cargo compile per 557): cargo fmt --all --check clean; python web-UI (5/5) + config
+  (4/4) green. Rust unit tests (tests/preview.rs) run on CI. Feature-gated real-NDI path is UNVERIFIED
+  against a live source in this lane -> named follow-up (verify end-to-end vs live cambox NDI + libndi
+  provisioning on the strih box + full fourcc coverage).
+- Review: self-applied /review + /requesting-code-review standards (a fresh-context general-purpose
+  dispatch orphaned/did-not-return within ~12 min — the async-dispatch fragility class — so the review
+  was done inline, which is sanctioned). 0 blocking findings; residual risk = the ndi-feature FFI is
+  first-compiled on CI (its own clippy --features ndi job) and runtime-unverified (follow-up above).
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/merge/
+  deploy/run-card by the worker.
