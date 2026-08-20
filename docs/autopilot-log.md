@@ -9778,3 +9778,25 @@ No push/PR/rig touch (worktree worker).
 - Review (fresh-context general-purpose dispatch, NOT the built-in review Skill): 0 red / 0 yellow / 0 blue. Confirmed env! resolves for all 4 crates, all readers safe (run live), test genuine RED->GREEN, no miss. The "1.7.0-dev.516" literals still in service/tests/service.rs:60 + relay/tests/relay.rs are INERT test inputs (passed into CameraSession::new / a fixture and echoed back, decoupled from env!) — do NOT break CI, left as-is (out of ticket scope).
 - Bump discipline going forward = edit the ONE [workspace.package].version line. GOTCHA: a blanket `sed 's/^version = "OLD"$/.../'` also rewrites that literal (the only column-0 version line now) — target it specifically.
 - WORKTREE MODE — stopped at green LOCAL result; supervisor integrates (merge/CI). No deploy (Cargo.toml/version wiring only, no runtime behavior change to the appliance binary).
+
+## #1152 M1 — in-OBS vendored DRM-lease HDMI output (worktree lane, 2026-08-20)
+- Owner KOREKCIA: NDI-loopback REJECTED → forked OBS itself leases the HDMI connector (RandR
+  output lease) and page-flips directly (render→scanout, no NDI hop, no external presenter).
+- Version 1.7.0-dev.518 → 1.7.0-dev.522 (commit 47577bd0b).
+- New libobs module obs-drm-output.{c,h} (lease via xcb_randr_create_lease + libdrm dumb-BO
+  page-flip on a vblank-locked pthread; DEFAULT-OFF autostart from ~/.camera-box/drm-output.json;
+  unique `drm-output:` log prefix). os-linux.cmake links Libdrm::Libdrm + XCB::RANDR; the module
+  lives in libobs (not a plugin) because linux-genlock.yml is ENABLE_PLUGINS=OFF. obs.c calls the
+  __linux__-guarded autostart in obs_startup + stop in obs_shutdown.
+- TDD: RED anchor+lift-compile gate tests/drm_output_lease_1152.rs (4ac611661) → GREEN impl
+  (4b63e61cc). Pure drm_output_pick_free_crtc truth-tabled; mutation 9/10 vectors diverge.
+- Adversarial review (Fable, gate OPEN): 0 red / 3 yellow / 6 blue, ALL fixed same-branch
+  (4f32e0960): obs_shutdown teardown, double-stop guard, poll-loop robustness (POLLERR/HUP/NVAL +
+  drmHandleEvent rc + wedge warn), os_atomic running, argb-black configurable, log throttle.
+- Local net: gcc -fsyntax-only -Wall -Wextra -Wformat=2 -Wconversion vs REAL xcb/xcb-randr/libdrm
+  headers = zero warnings; anchor test 5/5 GREEN via standalone rustc. CI (linux-genlock.yml) is
+  the first real type-check; full CI at supervisor integration.
+- Playbook: new .claude/rules/obs-drm-output.md (RandR-vs-DRM name gotcha, libobs-not-plugin CI
+  reason, fsyntax-net, M1 rig runbook, M2 hook, lifecycle invariants) + CLAUDE.md router line.
+- Rig: READ-ONLY only (STEP-0 live verify on imag-nb); M1 activation is the supervisor's step
+  after CI build + full-bundle deploy (runbook in the rule + the worker evidence block).
