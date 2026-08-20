@@ -1598,6 +1598,17 @@ gh api -H "Accept: application/vnd.github.raw" \
     > "$SCN" \
     || fail "could not fetch scripts/imag_scenes.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$SCN"
+# #1156: imag_scenes.py imports the imag_record_encoder sibling module (the #1143 record-encoder
+# lane). An imported sibling MUST ride the SAME on-box install list, fetched the SAME way -- or a
+# deploy pushes the importer WITHOUT the imported module and every imag-obs-start.sh seed dies on
+# ModuleNotFoundError, Restart-looping OBS (the 1737-restart / 8.5h incident this closes).
+REC_ENC="/usr/local/bin/imag_record_encoder.py"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag_record_encoder.py?ref=dev" \
+    > "$REC_ENC" \
+    || fail "could not fetch scripts/imag_record_encoder.py from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$REC_ENC"
+
 
 # #840: install the operator start/stop scripts onto the box too -- the openbox autostart below
 # now launches OBS THROUGH imag-obs-start.sh (the SAME path the operator's right-click "Spustit
