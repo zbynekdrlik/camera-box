@@ -56,6 +56,13 @@ BOOTSTRAP = "--bootstrap" in sys.argv
 
 from websocket import create_connection
 
+# #1143: the pure record-encoder logic (decision / VAAPI CQP settings / OBS-log parsers) lives in a
+# sibling module so it stays Tier-0 pytest-testable on its own. imag_scenes.py runs either on the box
+# (openbox autostart) or from dev1 with --host; both add THIS file's dir to sys.path[0] when run as a
+# script, but the #847/#1143 importlib tests load this file by path, so add the dir explicitly.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import imag_record_encoder  # noqa: E402  (sibling module; needs the sys.path insert just above)
+
 # #526: VERIFIED physical camera <-> NDI-name mapping (live-checked 2026-07-05, all 6 boxes up;
 # cam7 added #753/#791, box 10.77.9.67 -> "CAM7 (usb)"). The fleet advertises a clean 1:1 by box
 # number: box 10.77.9.61 -> "CAM1 (usb)", .62 -> "CAM2", .63 -> "CAM3", .64 -> "CAM4",
@@ -170,10 +177,15 @@ class Obs:
 # "x264 is the safe fallback if QSV proves unreliable" guidance).
 
 
-def select_rec_encoder(has_discrete_nvidia: bool) -> str:
-    """Pure decision -- the OBS RecEncoder id to use for THIS box's hardware. See the comment
-    block above for the live investigation that ruled out QSV as the no-dGPU fallback."""
-    return "obs_nvenc_h264_tex" if has_discrete_nvidia else "obs_x264"
+def select_rec_encoder(has_discrete_nvidia: bool, available_encoders=None) -> str:
+    """The OBS RecEncoder id for THIS box's hardware -- delegates to the Tier-0-tested pure decision
+    in imag_record_encoder. #1143 CHANGED the no-dGPU choice from x264 to the Intel iGPU HARDWARE
+    encoder ffmpeg_vaapi_tex (live-proven to record valid H.264 High 1080p60 while holding render at
+    ~4ms/~0% lagged, eliminating the x264 observer effect #1130). x264 stays the graceful fallback
+    when VAAPI is genuinely unavailable; QSV is NEVER chosen (#847 live-proved it broken here).
+    ``available_encoders`` is None on the seed path (no OBS log to probe) -> trust the Intel bundle's
+    ffmpeg_vaapi_tex; the E2E ensure-rec-encoder step passes the real advertised set."""
+    return imag_record_encoder.choose_record_encoder(has_discrete_nvidia, available_encoders)
 
 
 # Mirrors scripts/setup-imag.sh's `imag_has_discrete_nvidia` bash function EXACTLY (the SAME
@@ -762,6 +774,201 @@ def clear_measurement_burns(obs: Obs) -> None:
               f"gate run's [0/8] sweep-off is the authoritative backstop.")
 
 
+# ======================= #1143 record-encoder ensure (make-it-live) =======================
+# The IMPURE make-it-live orchestration for the imag OBS record encoder. The pure decision +
+# settings + apply-plan live in imag_record_encoder (Tier-0 pytest-tested); this wires them to the
+# box. A record-encoder value written over the WebSocket does NOT take effect on an already-running
+# OBS -- OBS only rebuilds the Advanced-output encoder at (re)start / ResetOutputs (#847). So this
+# applies the #847-proven ordering ONLY when the pure apply-plan says the disk config is not already
+# the live HW target: WS SetProfileParameter(RecEncoder) FIRST (survives OBS's own shutdown save) ->
+# systemctl --user stop imag-obs -> write recordEncoder.json while OBS is DOWN (a running OBS would
+# clobber it on a clean-shutdown save) -> systemctl --user start imag-obs -> reconnect WS + verify.
+# Called by recording-e2e.sh at pre-record, EARLY (before the #882 render-health warm-up window,
+# which absorbs the post-restart NDI/shader settle). It is NEVER on the OBS start path (#866), so a
+# genuinely-down OBS after the restart fails LOUD (the E2E can't run anyway); a config hiccup that
+# leaves OBS UP is best-effort (warn + return -- the verdict's report-only lagged% still catches a
+# stale x264 encoder and attributes the observer-effect confound). Restart via the USER unit only
+# (#1015 -- never a direct imag-obs-start.sh call, which bypasses supervision).
+_ENSURE_XDG = "export XDG_RUNTIME_DIR=/run/user/$(id -u); "
+
+
+def _ssh_capture(host, remote_cmd, timeout=30):
+    """Run REMOTE_CMD on HOST (local shell on loopback, ssh otherwise); return (rc, stdout). Never
+    raises -- a failure is (nonzero, '') for the caller to fail-open on."""
+    argv = (["bash", "-lc", remote_cmd] if _is_local_host(host)
+            else _ssh_base(host) + [remote_cmd])
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+        return r.returncode, r.stdout
+    except Exception as e:  # noqa: BLE001 -- ssh/timeout hiccup must not crash the ensure step
+        print(f"[ensure-rec-encoder] WARN: remote cmd failed ({e})")
+        return 1, ""
+
+
+def _obs_available_encoders(host):
+    """The video encoder ids OBS advertised (newest OBS log 'Available Encoders' block). None on any
+    read failure -> select_rec_encoder trusts the Intel bundle default (#1143)."""
+    rc, out = _ssh_capture(
+        host, "LOG=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); "
+              "sed -n '1,220p' \"$LOG\" 2>/dev/null")
+    if rc != 0 or not out:
+        return None
+    return imag_record_encoder.parse_available_encoders(out) or None
+
+
+def _ws_connect(host, port, password):
+    """Connect the OBS WebSocket with a CLEAN error on a down OBS instead of a raw traceback.
+    ensure-rec-encoder is best-effort (recording-e2e.sh wraps the call and the [1/8] render-health
+    preflight then catches a genuinely down OBS), so a clean nonzero exit here is the right shape."""
+    try:
+        return Obs(host, port, password)
+    except Exception as e:  # noqa: BLE001 -- OBS WS unreachable; fail clean, never a traceback
+        sys.exit(f"FAIL: imag OBS WebSocket unreachable at {host}:{port} ({e}) — cannot ensure the "
+                 "record encoder (best-effort; the render-health preflight catches a genuinely down OBS)")
+
+
+def _current_profile_dir(host, port, password):
+    """Resolve the on-disk profile DIR for the CURRENT OBS profile. OBS strips non-alphanumeric
+    chars from the display name for the dir ('imag-60fps' -> 'imag60fps'); verified against the live
+    profiles/ listing, falling back to the single non-'Untitled' dir. Env override IMAG_PROFILE_DIR."""
+    override = os.environ.get("IMAG_PROFILE_DIR")
+    if override:
+        return override
+    obs = _ws_connect(host, port, password)
+    try:
+        name = obs.req("GetProfileList", ignore_err=True).get("currentProfileName", "")
+    finally:
+        obs.ws.close()
+    cand = re.sub(r"[^A-Za-z0-9]", "", name)
+    _, out = _ssh_capture(host, "ls ~/.config/obs-studio/basic/profiles/ 2>/dev/null")
+    dirs = [d for d in out.split() if d]
+    if cand and cand in dirs:
+        return cand
+    non_default = [d for d in dirs if d != "Untitled"]
+    if len(non_default) == 1:
+        return non_default[0]
+    if cand:
+        return cand
+    sys.exit(f"FAIL: cannot resolve the imag OBS profile dir (name={name!r} dirs={dirs}) — "
+             "set IMAG_PROFILE_DIR")
+
+
+def _read_rec_encoder_config(host, profile_dir):
+    """(current [AdvOut] RecEncoder or None, recordEncoder.json text or '') read off the box.
+
+    basic.ini has TWO `RecEncoder=` keys — `[SimpleOutput]` (`x264`) and `[AdvOut]` (`obs_x264`).
+    The advanced record output (Mode=Advanced here) reads the `[AdvOut]` one, so a plain
+    `grep -m1 '^RecEncoder='` would wrongly return the SimpleOutput value and break idempotency
+    (always reading `x264` -> always 'apply' -> a restart every run). Scope the read to `[AdvOut]`."""
+    base = f"~/.config/obs-studio/basic/profiles/{profile_dir}"
+    adv = ("awk '/^\\[AdvOut\\]/{a=1;next} /^\\[/{a=0} "
+           "a && /^RecEncoder=/{sub(/^RecEncoder=/,\"\");print;exit}'")
+    _, out = _ssh_capture(
+        host, f"{adv} {base}/basic.ini 2>/dev/null; "
+              f"echo '---SEP---'; cat {base}/recordEncoder.json 2>/dev/null")
+    parts = out.split("---SEP---", 1)
+    enc = parts[0].strip() or None
+    renc_txt = parts[1].strip() if len(parts) > 1 else ""
+    return enc, renc_txt
+
+
+def _record_json_matches(renc_txt, want):
+    """True iff the on-disk recordEncoder.json already carries the target VAAPI CQP settings."""
+    if not renc_txt:
+        return False
+    try:
+        got = json.loads(renc_txt)
+    except Exception:  # noqa: BLE001
+        return False
+    return all(got.get(k) == want[k] for k in ("rate_control", "qp", "vaapi_device"))
+
+
+def _obs_started_after_record_json(host, profile_dir):
+    """True iff the RUNNING OBS was started AFTER the recordEncoder.json was written -- i.e. OBS
+    actually BUILT the encoder from the vaapi config (OBS builds the Advanced-output encoder at
+    startup from disk; a config written to disk while OBS runs does not rebuild it, #847). Without
+    this, a disk that says vaapi while OBS is still running the pre-vaapi obs_x264 encoder would be
+    misjudged 'live'. Fail-CLOSED (return False -> force an apply/restart) on any read hiccup."""
+    base = f"~/.config/obs-studio/basic/profiles/{profile_dir}"
+    rc, out = _ssh_capture(
+        host, _ENSURE_XDG
+        + "j=$(stat -c %Y " + base + "/recordEncoder.json 2>/dev/null); "
+          "t=$(systemctl --user show imag-obs -p ActiveEnterTimestamp --value 2>/dev/null); "
+          "o=$(date -d \"$t\" +%s 2>/dev/null); "
+          "if [ -n \"$j\" ] && [ -n \"$o\" ] && [ \"$o\" -gt \"$j\" ]; then echo LIVE; else echo STALE; fi")
+    return rc == 0 and "LIVE" in out
+
+
+def ensure_rec_encoder(host, port, password):
+    """Ensure the record encoder is the HW target AND live, applying the #847 ordering only when the
+    pure apply-plan says a make-it-live restart is needed."""
+    has_dgpu = detect_has_discrete_nvidia(host)
+    available = _obs_available_encoders(host)
+    target = select_rec_encoder(has_dgpu, available)
+    profile_dir = _current_profile_dir(host, port, password)
+    enc, renc_txt = _read_rec_encoder_config(host, profile_dir)
+    want = imag_record_encoder.vaapi_record_encoder_settings()
+    # renc_ok requires BOTH the correct on-disk settings AND that OBS actually booted with them
+    # (built the vaapi encoder), so a disk-says-vaapi-but-OBS-still-runs-x264 window forces an apply.
+    renc_ok = (_record_json_matches(renc_txt, want)
+               and _obs_started_after_record_json(host, profile_dir))
+    plan = imag_record_encoder.record_encoder_apply_plan(enc or "", target, renc_ok)
+    print(f"[ensure-rec-encoder] host={host} profile={profile_dir} target={target} "
+          f"current={enc!r} renc_ok={renc_ok} "
+          f"available={'?' if available is None else sorted(available)} -> {plan}")
+    if plan == "ok":
+        print(f"[ensure-rec-encoder] record encoder already {target} + live — no restart")
+        return
+
+    base = f"~/.config/obs-studio/basic/profiles/{profile_dir}"
+    # 1) WS RecEncoder FIRST (persists into OBS memory so its own shutdown save keeps the new value)
+    obs = _ws_connect(host, port, password)
+    try:
+        obs.req("SetProfileParameter", {
+            "parameterCategory": "AdvOut", "parameterName": "RecEncoder",
+            "parameterValue": target}, ignore_err=True)
+    finally:
+        obs.ws.close()
+    # 2) stop OBS through the USER unit (#847/#1015)
+    rc, _ = _ssh_capture(host, _ENSURE_XDG + "systemctl --user stop imag-obs")
+    print(f"[ensure-rec-encoder] stop imag-obs rc={rc}")
+    time.sleep(3)
+    # 3) write/remove recordEncoder.json while OBS is DOWN
+    if target == imag_record_encoder.VAAPI_TEX_ENCODER:
+        payload = json.dumps(want)
+        rc, _ = _ssh_capture(host, f"cat > {base}/recordEncoder.json <<'JSON'\n{payload}\nJSON")
+        print(f"[ensure-rec-encoder] wrote recordEncoder.json rc={rc}: {payload}")
+    else:
+        rc, _ = _ssh_capture(host, f"rm -f {base}/recordEncoder.json")
+        print(f"[ensure-rec-encoder] removed recordEncoder.json (target {target}) rc={rc}")
+    # 4) start OBS
+    rc, _ = _ssh_capture(host, _ENSURE_XDG + "systemctl --user start imag-obs")
+    print(f"[ensure-rec-encoder] start imag-obs rc={rc}")
+    # 5) wait for WS back + verify read-back
+    deadline = time.time() + 90
+    live = None
+    while time.time() < deadline:
+        try:
+            obs = Obs(host, port, password)
+            try:
+                live = obs.req("GetProfileParameter", {
+                    "parameterCategory": "AdvOut", "parameterName": "RecEncoder"},
+                    ignore_err=True).get("parameterValue")
+            finally:
+                obs.ws.close()
+            break
+        except Exception:  # noqa: BLE001 -- OBS still coming up; retry until the deadline
+            time.sleep(3)
+    if live is None:
+        sys.exit(f"FAIL: imag OBS WebSocket never returned after the record-encoder restart "
+                 f"(host={host}) — OBS may be down; check `systemctl --user status imag-obs`")
+    if live != target:
+        print(f"[ensure-rec-encoder] WARN: read-back RecEncoder={live!r} != target {target!r} — "
+              "proceeding (the verdict's report-only lagged% will surface a stale encoder)")
+    else:
+        print(f"[ensure-rec-encoder] OK: record encoder is now {target}, live (restart applied)")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", required=True)
@@ -776,7 +983,16 @@ def main() -> None:
     ap.add_argument("--verify-parity", action="store_true",
                     help="#791: read-only check that the full canonical scene ORDER + NDI-source "
                          "bindings match (never seeds/creates anything)")
+    ap.add_argument("--ensure-rec-encoder", action="store_true",
+                    help="#1143: ensure the record encoder is the HW target (VAAPI-tex on Intel) and "
+                         "LIVE — applies WS RecEncoder + recordEncoder.json + a USER-unit restart "
+                         "ONLY when the disk config is not already the live target. Manages its own "
+                         "OBS restart, so it is dispatched BEFORE the WS connection below.")
     args = ap.parse_args()
+    if args.ensure_rec_encoder:
+        # #1143: ensure_rec_encoder stops/starts OBS itself, so it must NOT reuse a pre-opened WS.
+        ensure_rec_encoder(args.host, args.port, args.password)
+        return
     obs = Obs(args.host, args.port, args.password)
     if args.projector:
         projector(obs, args.host)

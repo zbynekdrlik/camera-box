@@ -119,6 +119,13 @@ pub mod recording_span_gate;
 // extracts `RecordingFrame::tick` for imag's recording and feeds it here.
 pub mod imag_tick_gate;
 
+// #1143 — OBS record-session render accounting (report-only). The imag E2E recording must not
+// perturb the measurement: recording with SOFTWARE x264 overloaded the render thread → ~18.4%
+// lagged → ~19.5% repeated recorded frames (observer effect). The fix moves the record encoder to
+// the Intel iGPU HW ffmpeg_vaapi_tex; this crate-root (Tier-0-testable) struct carries OBS's own
+// stop-stats lagged% through the imag partial so a stale encoder is surfaced + attributed.
+pub mod record_render_stats;
+
 // #575 — recording START/STOP boundary artifact trim (pure kernel). A recording's genlock-fifo
 // pre-roll flush (start) and mux-finalization tail-drain (stop) can inject non-real-time gaps
 // that are not pipeline loss. Trims a small, bounded, named lead/tail frame-position window
