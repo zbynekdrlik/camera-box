@@ -360,6 +360,13 @@ jobs:
       - name: Clippy (bkshading members)
         run: cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading --all-targets -- -D warnings
 
+      # The real NDI preview receive path (issue 808 M2) is feature-gated OFF by default so
+      # the service builds/runs with the stub test-pattern source and NO libndi. libloading is
+      # a RUNTIME dynamic load, so `--features ndi` still compiles here without libndi present
+      # — this proves the feature-gated FFI stays clippy-clean.
+      - name: Clippy (bkshading service, --features ndi)
+        run: cargo clippy -p bkshading --features ndi --all-targets -- -D warnings
+
       - name: Test (bkshading members)
         run: cargo test -p bkshading-proto -p bkshading-relay -p bkshading
 
