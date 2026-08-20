@@ -120,12 +120,25 @@ pub fn median(samples: &[f32]) -> Option<f32> {
 
 /// Classify the head-end optical health from recent `rough=` samples.
 ///
-/// #1141 RED STUB: detection is not implemented yet — a blurred camera is NEVER caught, exactly
-/// the pre-#1141 world this ticket exists to fix. The GREEN commit replaces this with the real
-/// median-vs-floor decision.
+/// - Fewer than [`OPTICAL_PREFLIGHT_MIN_SAMPLES`] finite samples → [`OpticalPreflightVerdict::InsufficientData`]
+///   (NOTE + proceed; never abort on thin telemetry).
+/// - Median roughness AT OR BELOW [`OPTICAL_PREFLIGHT_ROUGH_FLOOR`] → [`OpticalPreflightVerdict::SickBlur`]
+///   (a blurred, misconfigured camera — ABORT).
+/// - Otherwise → [`OpticalPreflightVerdict::Healthy`].
+///
+/// The MEDIAN (not the mean or a single dip) is the "sustained" test: a systematic blur pulls the
+/// whole distribution below the floor, while a lone spurious low sample cannot cross it — the
+/// owner's hardest constraint that a healthy run is never false-aborted.
 pub fn classify(rough_samples: &[f32]) -> OpticalPreflightVerdict {
-    let _ = rough_samples;
-    OpticalPreflightVerdict::Healthy
+    let finite = rough_samples.iter().filter(|x| x.is_finite()).count();
+    if finite < OPTICAL_PREFLIGHT_MIN_SAMPLES {
+        return OpticalPreflightVerdict::InsufficientData;
+    }
+    match median(rough_samples) {
+        Some(m) if m <= OPTICAL_PREFLIGHT_ROUGH_FLOOR => OpticalPreflightVerdict::SickBlur,
+        Some(_) => OpticalPreflightVerdict::Healthy,
+        None => OpticalPreflightVerdict::InsufficientData,
+    }
 }
 
 /// The full operator-facing ERROR line, composing the camera name + observed median roughness +
@@ -153,7 +166,10 @@ capture chroma: u_dev=5.9 v_dev=9.2 rough=1.4 -> colour";
 
     #[test]
     fn parse_rough_samples_skips_garbage_and_nonfinite_1141() {
-        assert_eq!(parse_rough_samples("rough=abc rough= rough=inf rough=3.2"), vec![3.2]);
+        assert_eq!(
+            parse_rough_samples("rough=abc rough= rough=inf rough=3.2"),
+            vec![3.2]
+        );
         assert!(parse_rough_samples("no rough here").is_empty());
     }
 
@@ -197,7 +213,10 @@ capture chroma: u_dev=5.9 v_dev=9.2 rough=1.4 -> colour";
     /// Thin telemetry (fewer than the minimum) never aborts — it NOTEs and proceeds.
     #[test]
     fn thin_telemetry_is_insufficient_data_1141() {
-        assert_eq!(classify(&[1.0, 1.0]), OpticalPreflightVerdict::InsufficientData);
+        assert_eq!(
+            classify(&[1.0, 1.0]),
+            OpticalPreflightVerdict::InsufficientData
+        );
         assert_eq!(classify(&[]), OpticalPreflightVerdict::InsufficientData);
     }
 
