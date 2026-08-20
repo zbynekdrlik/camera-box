@@ -1,6 +1,13 @@
-//! issue 899 (lane 2) — pure-function guard for `scripts/lib/rt-kernel-plan.sh`, the PREEMPT_RT
-//! kernel provisioning DECISION logic (defect 1: the fleet runs a stock PREEMPT_DYNAMIC kernel,
-//! not PREEMPT_RT). Lane 1 (merged: `src/affinity.rs` capture-IRQ routing) already fixed defect 3.
+//! issue 899 (lane 3) — pure-function guard for `scripts/lib/rt-kernel-plan.sh`, the low-latency
+//! kernel provisioning DECISION logic (defect 1: the fleet runs a stock PREEMPT_DYNAMIC kernel with
+//! no full preemption). Lane 1 (merged: `src/affinity.rs` capture-IRQ routing) already fixed
+//! defect 3.
+//!
+//! OWNER DECISION (2026-08-20): Ubuntu Pro is REJECTED. STEP 1 is the FREE official-archive
+//! `linux-lowlatency-hwe-24.04` (a config meta dropping preempt=full via `lowlatency-kernel` — the
+//! imag-nb precedent). This file was reworked from the pro-attach PREEMPT_RT design: the Ubuntu Pro
+//! axis is gone, the flavour is the lowlatency meta, and `blocked:no-rt-candidate` is KEPT as the
+//! fail-closed shape for a genuinely-missing package.
 //!
 //! Same convention as `tests/verify_device_pure_functions.rs` / `tests/clock_offset_guard.rs`:
 //! every pure function is sourced + called directly. The library is side-effect-free (no `$0`
@@ -8,7 +15,8 @@
 //! supervisor's step (`scripts/rt-kernel-upgrade.sh` only PLANS, read-only), so it is deliberately
 //! NOT exercised here — only the pure planner is.
 //!
-//! RED before `scripts/lib/rt-kernel-plan.sh` exists (sourcing fails, every test fails); GREEN after.
+//! RED before `scripts/lib/rt-kernel-plan.sh` carries the lowlatency logic (the flavour/tokens
+//! differ, tests fail); GREEN after.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -43,23 +51,27 @@ fn run_sourced(body: &str) -> (i32, String, String) {
 // --- rt_kernel_flavour -------------------------------------------------------------------------
 
 #[test]
-fn flavour_is_the_single_decided_realtime_package() {
+fn flavour_is_the_single_decided_lowlatency_package() {
     let (code, out, err) = run_sourced("rt_kernel_flavour");
     assert_eq!(code, 0, "harness must not crash. stderr: {err}");
-    assert_eq!(out.trim(), "linux-image-realtime");
+    // The FREE Ubuntu main-archive low-latency meta (no Pro) — NOT linux-image-realtime.
+    assert_eq!(out.trim(), "linux-lowlatency-hwe-24.04");
 }
 
 // --- rt_kernel_readiness_verdict ---------------------------------------------------------------
 
 #[test]
-fn readiness_covers_all_four_states() {
+fn readiness_covers_all_three_states() {
+    // Args: RUNNING_LOWLAT LOWLAT_INSTALLED CANDIDATE_PRESENT. The INSTALLED axis keeps the verdict
+    // consistent with the plan's own blocked condition (`!inst && !cand`), so an installed box whose
+    // candidate has aged out reads `ready`, never a spurious `no-rt-candidate` while the plan proceeds.
     for (args, want) in [
-        ("1 1 1", "already-realtime"), // running RT already
-        ("1 0 0", "already-realtime"), // running RT dominates every other input
-        ("0 1 1", "ready"),            // candidate + pro attached
-        ("0 1 0", "needs-pro-attach"), // candidate but pro not attached (today's fleet)
-        ("0 0 0", "no-rt-candidate"),  // no realtime package resolvable
-        ("0 0 1", "no-rt-candidate"),  // candidate absence dominates pro state
+        ("1 0 0", "already-lowlatency"), // running preempt=full already dominates
+        ("1 1 1", "already-lowlatency"), // running dominates every other axis
+        ("0 0 1", "ready"),              // candidate present, not installed (no Pro needed)
+        ("0 1 0", "ready"), // installed but candidate aged out -> still ready, no false block
+        ("0 1 1", "ready"), // installed AND candidate
+        ("0 0 0", "no-rt-candidate"), // neither installed nor a candidate (fail-closed)
     ] {
         let (code, out, err) = run_sourced(&format!("rt_kernel_readiness_verdict {args}"));
         assert_eq!(code, 0, "harness must not crash. stderr: {err}");
@@ -70,104 +82,130 @@ fn readiness_covers_all_four_states() {
 // --- rt_kernel_upgrade_plan --------------------------------------------------------------------
 
 #[test]
-fn plan_is_noop_when_already_realtime() {
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 1 0 0 0 0 1");
+fn plan_is_noop_when_already_lowlatency() {
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 1 0 0 0 1");
     assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out.trim(), "noop:already-realtime");
+    assert_eq!(out.trim(), "noop:already-lowlatency");
 }
 
 #[test]
-fn plan_is_blocked_when_no_pro_and_not_installed() {
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 0 1 saved 1");
-    assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out.trim(), "blocked:need-pro-attach");
-}
-
-#[test]
-fn plan_is_blocked_when_pro_attached_but_no_apt_candidate() {
-    // Pro attached but `pro enable realtime-kernel` not run: candidate absent, not installed.
-    // The plan must NOT print a full install sequence (which would apt-get install with no
-    // candidate) -- it must agree with the readiness verdict and block.
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 1 0 0 0");
+fn plan_is_blocked_when_no_candidate_and_not_installed() {
+    // The fail-closed shape kept from the pro-attach design: package not resolvable + not installed.
+    // (5th axis cand=0.) The plan must agree with the readiness verdict and block, never print a
+    // full install sequence that would apt-get install a package with no candidate.
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 1 saved 0");
     assert_eq!(code, 0, "stderr: {err}");
     assert_eq!(out.trim(), "blocked:no-rt-candidate");
 }
 
 #[test]
-fn plan_full_sequence_reboots_into_rt_before_purging_generic() {
-    // cam2 shape: non-rt, not installed, pro attached, generic present, GRUB_DEFAULT=saved, candidate.
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 1 1 saved 1");
+fn plan_full_sequence_reboots_before_purging_superseded_generic() {
+    // cam2 shape: not running preempt=full, not installed, superseded-generic will remain (HWE meta
+    // absent), GRUB_DEFAULT=saved, candidate present.
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 1 saved 1");
     assert_eq!(code, 0, "stderr: {err}");
     let steps: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(
         steps,
         vec![
-            "install-rt-kernel",
-            "verify-rt-initrd",
+            "install-lowlatency",
+            "verify-lowlatency-config",
             "grub-pin:saved",
-            "update-grub",
-            "reboot-into-rt",
-            "confirm-running-realtime",
-            "purge-generic",
+            "safe-grub-regen",
+            "reboot-into-lowlatency",
+            "confirm-running-lowlatency",
+            "purge-superseded-generic",
             "verify-single-kernel",
             "post-verify",
         ],
-        "the SAFE atomic order: reboot INTO rt, confirm, THEN purge the now-unused generic"
+        "the SAFE atomic order: reboot INTO lowlatency, confirm, THEN purge the now-superseded generic"
     );
     // The purge must come strictly AFTER the reboot+confirm (never removes the running kernel).
-    let ir = steps.iter().position(|s| *s == "reboot-into-rt").unwrap();
+    let ir = steps
+        .iter()
+        .position(|s| *s == "reboot-into-lowlatency")
+        .unwrap();
     let ic = steps
         .iter()
-        .position(|s| *s == "confirm-running-realtime")
+        .position(|s| *s == "confirm-running-lowlatency")
         .unwrap();
-    let ip = steps.iter().position(|s| *s == "purge-generic").unwrap();
+    let ip = steps
+        .iter()
+        .position(|s| *s == "purge-superseded-generic")
+        .unwrap();
     assert!(ir < ic && ic < ip, "purge must follow reboot+confirm");
 }
 
 #[test]
-fn plan_skips_install_when_already_installed_and_skips_purge_when_no_generic() {
-    // cam1 shape: non-rt, RT already installed, pro attached, NO generic meta, GRUB_DEFAULT=0.
-    // Candidate axis is irrelevant once already installed (pass 0 to prove it does not block).
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 1 1 0 0 0");
+fn plan_skips_install_when_installed_and_skips_purge_when_no_superseded() {
+    // imag-like shape: not running preempt=full yet, lowlatency config ALREADY installed, NO
+    // superseded generic (the HWE meta is present → config-only install, no new image),
+    // GRUB_DEFAULT=0. Candidate axis irrelevant once installed (pass 0 to prove it does not block).
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 1 0 0 0");
     assert_eq!(code, 0, "stderr: {err}");
     let steps: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
     assert!(
-        !steps.contains(&"install-rt-kernel"),
+        !steps.contains(&"install-lowlatency"),
         "already installed => no install step"
     );
     assert!(
-        !steps.contains(&"purge-generic"),
-        "no generic meta => no purge step"
+        !steps.contains(&"purge-superseded-generic"),
+        "no superseded generic => no purge step"
     );
     assert!(
         steps.contains(&"grub-pin:menuentry"),
         "numeric GRUB_DEFAULT => menuentry pin"
     );
     assert!(!steps.contains(&"grub-pin:saved"));
+    // The config guard is ALWAYS present, even when install is skipped (verify the drop landed).
+    assert!(steps.contains(&"verify-lowlatency-config"));
 }
 
 // --- rt_kernel_step_command --------------------------------------------------------------------
 
 #[test]
 fn step_command_maps_known_tokens_and_flags_unknown() {
-    let (code, out, err) = run_sourced("rt_kernel_step_command install-rt-kernel");
+    let (code, out, err) = run_sourced("rt_kernel_step_command install-lowlatency");
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
-        out.contains("apt-get install -y linux-image-realtime"),
-        "got: {out}"
+        out.contains("apt-get install")
+            && out.contains("linux-lowlatency-hwe-24.04")
+            && out.contains("--allow-change-held-packages"),
+        "install command installs the lowlatency meta with --allow-change-held-packages: {out}"
     );
     assert!(
         out.contains("remount,rw") && out.contains("remount,ro"),
         "wraps the ro remount"
     );
 
-    let (_c, purge, _e) = run_sourced("rt_kernel_step_command purge-generic");
-    assert!(purge.contains("apt-get purge"), "got: {purge}");
+    // The purge MUST be a supervisor note that never blanket-purges generic (that would remove the
+    // new running kernel), and must call out the --allow-change-held-packages requirement.
+    let (_c, purge, _e) = run_sourced("rt_kernel_step_command purge-superseded-generic");
+    assert!(
+        purge.trim_start().starts_with('#'),
+        "purge is a SUPERVISOR note (per-box exact version), not a blind command: {purge}"
+    );
+    assert!(
+        !purge.contains("linux-image-*generic"),
+        "must never blanket-purge generic — that removes the new running kernel: {purge}"
+    );
+    assert!(
+        purge.contains("--allow-change-held-packages"),
+        "the held pre-upgrade image needs --allow-change-held-packages: {purge}"
+    );
 
-    let (_c, reboot, _e) = run_sourced("rt_kernel_step_command reboot-into-rt");
+    let (_c, reboot, _e) = run_sourced("rt_kernel_step_command reboot-into-lowlatency");
     assert!(
         reboot.trim_start().starts_with('#'),
         "reboot is a SUPERVISOR note, not a command"
+    );
+
+    // The confirm step must check preempt=full, NOT a *-lowlatency uname (the config meta keeps the
+    // generic image), matching the imag-nb reality.
+    let (_c, confirm, _e) = run_sourced("rt_kernel_step_command confirm-running-lowlatency");
+    assert!(
+        confirm.contains("preempt=full"),
+        "confirm checks preempt=full is active: {confirm}"
     );
 
     let (_c, bogus, _e) = run_sourced("rt_kernel_step_command not-a-real-token");
@@ -201,10 +239,10 @@ fn functions_never_abort_a_set_e_caller() {
          rt_kernel_flavour >/dev/null; \
          rt_kernel_readiness_verdict 1 1 1 >/dev/null; \
          rt_kernel_readiness_verdict 0 0 0 >/dev/null; \
-         rt_kernel_upgrade_plan 1 0 0 0 0 1 >/dev/null; \
-         rt_kernel_upgrade_plan 0 0 0 0 0 0 >/dev/null; \
-         rt_kernel_upgrade_plan 0 0 1 1 saved 1 >/dev/null; \
-         rt_kernel_step_command purge-generic >/dev/null; \
+         rt_kernel_upgrade_plan 1 0 0 0 1 >/dev/null; \
+         rt_kernel_upgrade_plan 0 0 1 saved 0 >/dev/null; \
+         rt_kernel_upgrade_plan 0 0 1 saved 1 >/dev/null; \
+         rt_kernel_step_command purge-superseded-generic >/dev/null; \
          rt_kernel_step_command not-a-real-token >/dev/null; \
          echo ALIVE",
     );
