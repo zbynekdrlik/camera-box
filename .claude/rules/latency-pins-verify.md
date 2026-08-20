@@ -48,7 +48,11 @@ imag floor-sentinel box (`_all_ndi_inputs_ms`) — imag's 3ms floor is `imag_lat
 domain (`imag-min-latency-3ms-always`), never promoted. CLI mirrors the verify tool:
 `apply_latency_pins.py --box strih --host 10.77.9.202 [--execute]` (DRY-RUN without `--execute`).
 This is the sanctioned "operator/gate legitimately re-tunes → record in a PR → apply to the rig"
-loop; the verify-at-start still never writes.
+loop; the verify-at-start still never writes. **`--pins '{"NDI cam1":3,...}'` (JSON inline or
+`@file`) pushes a COMPUTED set instead of the committed baseline** — the entry point the #1003
+floor-3 aligner (`scripts/qr_align_pins.py`) uses to apply its per-run plan through the SAME
+read-back-verified, fail-loud writer (`apply_pins`). The aligner is only ever handed the strih
+align sources, so `--pins` never carries an imag/stream-hold key.
 
 ## Fail CLOSED on enumeration, honest-None on a per-input read (two different rules)
 
@@ -61,22 +65,47 @@ missing source/key is an honest `None` (N/A), never a fabricated floor value —
 
 ## Baseline scope
 
-strih baseline covers the default `CAMERA_ACTIVE_SET` (cam1/cam2/cam3); retired-grabber pins
-(cam4..7) are deliberately excluded so a stale pin is never checked. stream pins `NDI 2ME PGM`
-with a `{want_ms, tolerance_ms}` band (the A/V-align hold; a band absorbs ordinary re-tuning while
-catching a gross revert). imag uses the `_all_ndi_inputs_ms` floor sentinel (always 3).
+strih baseline (the DRIFT-GUARD reference) covers the default `CAMERA_ACTIVE_SET` (cam1/cam2/cam3);
+retired-grabber pins (cam4..7) are deliberately excluded so a stale pin is never *drift-checked*.
+stream pins `NDI 2ME PGM` with a `{want_ms, tolerance_ms}` band (the A/V-align hold; a band absorbs
+ordinary re-tuning while catching a gross revert). imag uses the `_all_ndi_inputs_ms` floor
+sentinel (always 3). **NOTE the split (#1003):** the drift-guard REFERENCE set (this file) ≠ the
+per-run ALIGNMENT set. Alignment covers `CAMERA_ALIGN_SET` (a SUPERSET incl. cam4 — every on-air
+strih camera), because cam4 is on-air even though excluded from the measurable E2E sweep; the
+per-run floor-3 pins are re-derived live, never committed here.
 
-**Post-#1003 promotion (2026-08-20): strih carries the DELIVERY-equalized aligned DEEP pins
-`cam1=90/cam2=160/cam3=184` (NOT the old shallow `3/6/20`) and the stream hold is `791` (NOT 915).**
-These are the measurement-eq resolver's output — `python3 scripts/e2e_measurement_pins.py resolve
---profile scripts/e2e-measurement-pins.json` prints exactly `{cam1:90, cam2:160, cam3:184}` +
-`stream_hold_ms 791`, locked by `test_apply_latency_pins_1003.py`'s provenance test. A profile
-re-derivation (staleness) that changes those numbers therefore fails that Tier-0 test until the
-baseline is RE-PROMOTED — the deliberate coupling that keeps production == the validated derivation.
-CAVEAT: after promotion the measurement-eq profile's own `production_pin_ms`/`production_hold_ms`
-references (`3/6/20`, `971`) are STALE (production IS the deep pins now), so `MEASUREMENT_EQ=1` must
-NOT be re-run against the promoted production without first re-basing the profile — the profile was
-the vehicle to VALIDATE the pins; once promoted it is redundant for pin-setting.
+## Production alignment = the per-run FLOOR-3 auto-align, NOT a hand-baked baseline (#1003 owner rework, 2026-08-20)
+
+**The DELIVERY-equalized DEEP promotion (`cam1=90/cam2=160/cam3=184` + stream hold `791`) was
+REJECTED by the owner and REVERTED (`0aaa2fc93`) to the shallow `3/6/20` + `915`.** The owner's
+binding corrections, now the model:
+
+1. **FLOOR-3, relative-only, never absolute depth.** The slowest (max-transport) on-air strih
+   camera gets pin **3** (floor); every other gets `3 + its RELATIVE delivery delta`. The rejected
+   deep set added ~180 ms of needless chain latency. Alignment compensates ONLY relative inter-card
+   differences.
+2. **Deltas are RE-DERIVED robustly**, from the SIMULTANEOUS painter-QR screenshot spread (a
+   barrier `GetSourceScreenshot` of every on-air strih input → painter dual-QR decode → the EXACT
+   `gen_ts_ns` delivery delta), medianed over rounds, underrun/undecodable-excluded. NOT the MEQ
+   single delivery-p50 sample (which baked in a degraded cam1 grabber — a 94 ms delta between
+   identical cards on one switch is nonsense).
+3. **ALL on-air cameras incl. cam4** are aligned (`CAMERA_ALIGN_SET`, a SUPERSET of
+   `CAMERA_ACTIVE_SET` — the offline-ack "outside-measured-set" covers only the E2E sweep, never
+   production alignment).
+4. **It is an AUTOMATIC per-run process**: `scripts/qr_align_pins.py`, wired as
+   `recording-e2e.sh`'s BLOCKING `[4i/8align]` step — measure → align (floor 3) → RE-MEASURE →
+   ABORT the run (per-camera named reason) if it stays misaligned (`frame_id` spread ≤ 1 is the
+   owner's "same monotonic + time in every QR" parity gate).
+
+So the strih block in `latency-pins-baseline.json` is now ONLY the reverted-shallow drift-guard
+REFERENCE (report-only, `latency_pins_verify.py`); the AUTHORITATIVE per-run pins are re-derived
+LIVE each run and are NEVER committed (owner: "nie jednorazová ručne pečená baseline"). The
+baseline's `_align_model` key documents this. **DOMAINS the aligner never crosses:** the stream
+`NDI 2ME PGM` hold (operator A/V-align domain) and imag's 3 ms floor are never in the align set, so
+they are never written; the independent SOURCE-side cross-camera spread gate (recording-verdict)
+stays a separate blocking proof. The `MEASUREMENT_EQ=1` deep-pin profile is a SEPARATE opt-in
+experiment (superseded by floor-3 for production alignment), mutually exclusive with the
+`[4i/8align]` step in one run.
 
 ## Two per-source-latency mechanisms coexist — the baseline json is authoritative (#757)
 
@@ -103,8 +132,12 @@ update that fixture in the same PR, or it goes RED (the clean read now looks lik
 `test_baseline_file_loads_and_has_the_three_boxes` only checks STRUCTURE — only the drift fixture
 carries the concrete values. When promoting/re-tuning pins, `grep -n "NDI cam1" tests/python/` +
 run `pytest tests/python/test_latency_pins_verify.py` before pushing (Tier-0: pytest runs freely,
-no cargo). #1003 promotion changed strih 3/6/20→90/160/184 + stream 915→791 and had to update this
-one fixture.
+no cargo). #1003's deep promotion changed strih 3/6/20→90/160/184 + stream 915→791 and updated this
+fixture; the owner-rework REVERT (`0aaa2fc93`) then changed the baseline VALUES back to 3/6/20 + 915
+but LEFT this fixture (and `test_apply_latency_pins_1003.py::TestPromotedBaseline`) asserting the
+deep numbers — a classic incomplete-revert dangling test. Both were re-pointed to the reverted
+shallow set as part of the floor-3 rework. Lesson restated: a baseline-VALUES change (either
+direction) must update this fixture in the SAME change.
 
 ## Local verification of a `vendor/README.md` pin/doc edit — Tier-0 blocks `cargo test`
 

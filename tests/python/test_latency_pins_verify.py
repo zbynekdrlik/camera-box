@@ -246,16 +246,17 @@ class TestEnumerationFailsClosed:
         assert rc == 2
 
     def test_main_drift_exits_1_clean_exits_0(self, monkeypatch):
-        # #1003 promotion: strih baseline is now the DELIVERY-aligned deep set
-        # cam1=90/cam2=160/cam3=184 (was the shallow 3/6/20); a matching live read -> 0, a
-        # revert to the old shallow pin -> 1.
+        # #1003 owner rework (2026-08-20): the deep promoted 90/160/184 set was REJECTED + REVERTED
+        # to the shallow 3/6/20 drift-guard REFERENCE. A live read matching the reverted baseline ->
+        # 0; any drift off it -> 1. (Production alignment itself is now the per-run floor-3 auto-align,
+        # scripts/qr_align_pins.py; this verify path stays the report-only drift check.)
         monkeypatch.setattr(
             lpv, "read_live_pins",
-            lambda host, pw, names: {"NDI cam1": 90, "NDI cam2": 160, "NDI cam3": 184},
+            lambda host, pw, names: {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20},
         )
         assert lpv.main(["--box", "strih", "--host", "x"]) == 0
         monkeypatch.setattr(
             lpv, "read_live_pins",
-            lambda host, pw, names: {"NDI cam1": 3, "NDI cam2": 160, "NDI cam3": 184},
+            lambda host, pw, names: {"NDI cam1": 90, "NDI cam2": 6, "NDI cam3": 20},
         )
         assert lpv.main(["--box", "strih", "--host", "x"]) == 1
