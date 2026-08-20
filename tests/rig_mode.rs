@@ -72,6 +72,29 @@ fn run_sourced_status(body: &str) -> (i32, String) {
     )
 }
 
+/// #1135: source the script with a specific CAMERA_ACTIVE_SET (exported BEFORE the source, so the
+/// source-role derivation at the top of rig-mode.sh — RIG_SOURCE_BOX etc — sees it) and run `body`,
+/// returning stdout. Asserts success: the derivation resolves cleanly for any active set that has a
+/// strih-routable member (cam1-first legacy sets AND the cam1-retired "cam2 cam3" default).
+fn run_sourced_with_active_set(active_set: &str, body: &str) -> String {
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .env("CAMERA_ACTIVE_SET", active_set)
+        .env_remove("PAINTER_FPS")
+        .output()
+        .expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "sourced harness (CAMERA_ACTIVE_SET={active_set:?}) exited non-zero.\nstdout={:?}\nstderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 /// Run the script as a subprocess; return (exit_code, stdout, stderr).
 fn run_script(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(script())
@@ -778,11 +801,14 @@ fn burn_targets_cover_imag_too() {
     );
 }
 
-/// #462: imag-nb's program-feeding NDI source (the burn target) is a named, overridable constant
-/// — mirroring STRIH_PROG_SOURCE/STREAM_PROG_SOURCE exactly. Default 'NDI CAM1' (the Phase-1 1:1
-/// mapping pins cam1, the SOURCE camera, to 'NDI CAM1' on imag).
+/// #462/#1135: imag-nb's program-feeding NDI source + scene (the burn target + the routed program
+/// scene) are named, overridable constants — mirroring STRIH_PROG_SOURCE/STREAM_PROG_SOURCE. #1135:
+/// their DEFAULTS are no longer the literal cam1 'NDI CAM1'/'Cam 1'; they DERIVE from the resolved
+/// source box (camera_source_box, camera-set.sh) via scripts/lib/imag-scene-route.sh, so a cam1-first
+/// legacy set still yields 'NDI CAM1'/'Cam 1' (back-compat) while a cam1-retired set (source=cam3)
+/// yields 'NDI CAM3'/'Cam 3'.
 #[test]
-fn imag_prog_source_constant_defaults_to_ndi_cam1() {
+fn imag_prog_constants_derive_off_source_box_1135() {
     let s = fs::read_to_string(script()).expect("read rig-mode.sh");
     // #832: IMAG_IP's default is no longer an independently hardcoded literal here -- it is
     // derived by sourcing scripts/imag-host.sh (see tests/harness_imag_host.rs).
@@ -790,14 +816,93 @@ fn imag_prog_source_constant_defaults_to_ndi_cam1() {
         s.contains(". \"$RIG_MODE_DIR/imag-host.sh\""),
         "#832: rig-mode.sh must source scripts/imag-host.sh to derive IMAG_IP."
     );
+    // #1135: the imag routing must be DERIVED from the resolved source role, not hard-pinned to
+    // cam1 — the literal cam1 defaults must be gone.
     assert!(
-        s.contains("IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-NDI CAM1}\""),
-        "#462: rig-mode.sh must define IMAG_PROG_SOURCE (default 'NDI CAM1' — cam1's 1:1-mapped \
-         imag input, Phase 1 #458)."
+        !s.contains("IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-NDI CAM1}\""),
+        "#1135: IMAG_PROG_SOURCE must no longer hard-default to the literal 'NDI CAM1' — it must \
+         derive from the resolved source box (imag_source_for_camera)."
     );
     assert!(
-        s.contains("IMAG_PROG_SCENE=\"${IMAG_PROG_SCENE:-Cam 1}\""),
-        "#462: rig-mode.sh must define IMAG_PROG_SCENE (default 'Cam 1' — the scene showing cam1)."
+        !s.contains("IMAG_PROG_SCENE=\"${IMAG_PROG_SCENE:-Cam 1}\""),
+        "#1135: IMAG_PROG_SCENE must no longer hard-default to the literal 'Cam 1' — it must \
+         derive from the resolved source box (imag_scene_for_camera)."
+    );
+    // Back-compat: a cam1-first active set (legacy default) still resolves imag to cam1's 1:1 pins.
+    let cam1first = run_sourced_with_active_set(
+        "cam1 cam2 cam3",
+        "printf 'SRC=%s\\nSCENE=%s\\n' \"$IMAG_PROG_SOURCE\" \"$IMAG_PROG_SCENE\"",
+    );
+    assert!(
+        cam1first.contains("SRC=NDI CAM1") && cam1first.contains("SCENE=Cam 1"),
+        "#1135: a cam1-first set must resolve imag to 'NDI CAM1'/'Cam 1' (back-compat). got=\n{cam1first}"
+    );
+    // The derivation: with cam1 retired (source=cam3), imag routes to cam3's 1:1 pins.
+    let cam1retired = run_sourced_with_active_set(
+        "cam2 cam3",
+        "printf 'SRC=%s\\nSCENE=%s\\n' \"$IMAG_PROG_SOURCE\" \"$IMAG_PROG_SCENE\"",
+    );
+    assert!(
+        cam1retired.contains("SRC=NDI CAM3") && cam1retired.contains("SCENE=Cam 3"),
+        "#1135: with cam1 retired (source=cam3) imag must route to 'NDI CAM3'/'Cam 3', never the \
+         stale cam1 pins. got=\n{cam1retired}"
+    );
+}
+
+/// #1135: the SOURCE-camera role in rig-mode.sh is DERIVED from camera_source_box (camera-set.sh),
+/// never hard-pinned to cam1. RIG_SOURCE_BOX / RIG_SOURCE_IP / STRIH_PROG_SOURCE all follow the
+/// active set: a cam1-first set resolves cam1 (back-compat, byte-identical to the pre-#1135 pins),
+/// a cam1-retired "cam2 cam3" set resolves cam3.
+#[test]
+fn source_role_derives_off_camera_source_box_1135() {
+    // cam1-first legacy set: source=cam1 (full back-compat with the old hard-pin).
+    let cam1first = run_sourced_with_active_set(
+        "cam1 cam2 cam3",
+        "printf 'BOX=%s\\nIP=%s\\nSTRIH=%s\\n' \"$RIG_SOURCE_BOX\" \"$RIG_SOURCE_IP\" \"$STRIH_PROG_SOURCE\"",
+    );
+    assert!(
+        cam1first.contains("BOX=cam1")
+            && cam1first.contains("IP=10.77.9.61")
+            && cam1first.contains("STRIH=NDI cam1"),
+        "#1135: a cam1-first set must resolve source=cam1 / 10.77.9.61 / 'NDI cam1'. got=\n{cam1first}"
+    );
+    // cam1 retired: source moves to cam3 (the next strih-routable member), and every derived value
+    // follows — this is the whole point of the ticket.
+    let cam1retired = run_sourced_with_active_set(
+        "cam2 cam3",
+        "printf 'BOX=%s\\nIP=%s\\nSTRIH=%s\\n' \"$RIG_SOURCE_BOX\" \"$RIG_SOURCE_IP\" \"$STRIH_PROG_SOURCE\"",
+    );
+    assert!(
+        cam1retired.contains("BOX=cam3")
+            && cam1retired.contains("IP=10.77.9.63")
+            && cam1retired.contains("STRIH=NDI cam3"),
+        "#1135: with cam1 retired, source must resolve to cam3 / 10.77.9.63 / 'NDI cam3', never the \
+         retired cam1. got=\n{cam1retired}"
+    );
+}
+
+/// #1135: the EVENT-mode fleet sweep (event_mode_assert) must base its target list on the RESOLVED
+/// source box (RIG_SOURCE_BOX / RIG_SOURCE_IP), never the literal `cam1=$CAM1_IP` — else a cam1-
+/// retired rig sweeps the broken/absent cam1 and MISSES the real source (cam3).
+#[test]
+fn event_sweep_targets_resolved_source_not_literal_cam1_1135() {
+    let s = fs::read_to_string(script()).expect("read rig-mode.sh");
+    assert!(
+        !s.contains("EVENT_ASSERT_TARGETS=(\"cam1=$CAM1_IP\""),
+        "#1135: the EVENT sweep must not hard-pin its base target to the literal cam1=$CAM1_IP."
+    );
+    assert!(
+        s.contains("EVENT_ASSERT_TARGETS=(\"${RIG_SOURCE_BOX}=$RIG_SOURCE_IP\""),
+        "#1135: the EVENT sweep base must be the resolved source (${{RIG_SOURCE_BOX}}=$RIG_SOURCE_IP) \
+         + cam2, so cam1's retirement moves the swept source automatically."
+    );
+    // The whole active fleet is still covered: with cam1 retired, source=cam3, so cam3 is swept
+    // (via the RIG_SOURCE_BOX base) even though camera_active_secondary_set is then empty.
+    let secondary = run_sourced_with_active_set("cam2 cam3", "camera_active_secondary_set; echo");
+    assert!(
+        secondary.trim().is_empty(),
+        "#1135 sanity: with source=cam3 the secondary set is empty; cam3 must be swept via the \
+         RIG_SOURCE_BOX base, not the (empty) secondary loop. got secondary=\n{secondary}"
     );
 }
 

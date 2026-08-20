@@ -101,6 +101,64 @@ fn imag_scene_for_camera_rejects_an_unknown_name() {
     );
 }
 
+// --- pure function: imag_source_for_camera (#1135 — sibling of imag_scene_for_camera) -------
+
+/// #1135: imag_source_for_camera maps a resolved source camera name to imag-nb's OWN NDI input
+/// name ("cam1" -> "NDI CAM1", "cam3" -> "NDI CAM3", ...) — the SAME 1:1 pin imag_scenes.py seeds
+/// (f"NDI CAM{n}"). rig-mode.sh derives IMAG_PROG_SOURCE off this so the imag burn target follows
+/// the resolved source role, never a hard-pinned 'NDI CAM1'.
+#[test]
+fn imag_source_for_camera_maps_1to1_by_camera_number_1135() {
+    for (cam, want) in [
+        ("cam1", "NDI CAM1"),
+        ("cam2", "NDI CAM2"),
+        ("cam3", "NDI CAM3"),
+        ("cam4", "NDI CAM4"),
+        ("cam5", "NDI CAM5"),
+        ("cam6", "NDI CAM6"),
+    ] {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "set -euo pipefail; . '{}'; imag_source_for_camera '{cam}'",
+                lib_path()
+            ))
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "#1135: imag_source_for_camera({cam}) must succeed. stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            want,
+            "#1135: imag_source_for_camera({cam}) must print '{want}' (imag_scenes.py's own \
+             f\"NDI CAM{{n}}\" 1:1 pin)"
+        );
+    }
+}
+
+#[test]
+fn imag_source_for_camera_rejects_an_unknown_name_1135() {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -uo pipefail; . '{}'; imag_source_for_camera 'cam99'",
+            lib_path()
+        ))
+        .output()
+        .expect("run bash");
+    assert!(
+        !out.status.success(),
+        "#1135: imag_source_for_camera must FAIL LOUD on an unknown camera name, never guess an input"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).is_empty(),
+        "#1135: an unknown camera name must print no NDI input name at all"
+    );
+}
+
 // --- recording-e2e.sh must source the lib + route + restore ---------------------------------
 
 #[test]
