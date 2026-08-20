@@ -799,7 +799,7 @@ impl NdiSender {
     #[inline]
     fn convert_yuyv_to_uyvy_scalar(&mut self, yuyv: &[u8]) {
         // YUYV: Y0 U0 Y1 V0 -> UYVY: U0 Y0 V0 Y1
-        for chunk in yuyv.chunks_exact(4) {
+        for chunk in yuyv.as_chunks::<4>().0 {
             self.uyvy_buffer.push(chunk[1]); // U0
             self.uyvy_buffer.push(chunk[0]); // Y0
             self.uyvy_buffer.push(chunk[3]); // V0
@@ -1390,7 +1390,7 @@ impl Drop for NdiReceiver {
 /// YUYV: Y0 U0 Y1 V0 -> UYVY: U0 Y0 V0 Y1
 pub fn convert_yuyv_to_uyvy_scalar(yuyv: &[u8]) -> Vec<u8> {
     let mut uyvy = Vec::with_capacity(yuyv.len());
-    for chunk in yuyv.chunks_exact(4) {
+    for chunk in yuyv.as_chunks::<4>().0 {
         uyvy.push(chunk[1]); // U0
         uyvy.push(chunk[0]); // Y0
         uyvy.push(chunk[3]); // V0
