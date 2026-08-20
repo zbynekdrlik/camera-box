@@ -77,6 +77,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # src/capture_rate_health.rs). Used by the [0/8] preflight step below, before any deploy/record.
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"
+# #1133: the per-box capture-leg-health signal set — the appliance's own DEQUEUE-STALL / emit-gate
+# SKIPPED-aggregate / kernel uvcvideo-EPROTO journal signals the #656 fps-only preflight above is
+# blind to (grep patterns + windowed read builders + a pure classifier + report-only cap-1s warn).
+# Consumed by the new fail-fast step further below (see its own banner).
+# shellcheck source=scripts/lib/leg-health-guard.sh
+. "$HERE/lib/leg-health-guard.sh"
 # #675: cleanup()'s cam1/cam3/cam4/cam2 `systemctl restart camera-box` restore used to
 # be a bare `2>/dev/null; true`/`|| true` that silently swallowed a failed restart, leaving the
 # rig's production camera-box.service down and undetected — poll+retry+loud-warn builder.
@@ -1272,6 +1278,66 @@ if [ -n "$CAPTURE_RATE_DEFECT_LINE" ]; then
   exit 1
 fi
 echo "    ok: no sustained capture-rate defect in $CAMERA_NAME's recent journal"
+
+# Leg-health preflight (#1133): the #656 preflight ABOVE only fires on the appliance's own fps
+# DEFECTIVE WARN, which never fires for the #1130/#1110-class defect (cam1 delivered 61-63fps —
+# inside the ShadowCast 2 tolerance — while it stalled/skipped/EPROTO'd for HOURS, and the #656
+# preflight still said "ok"). This step reads the OTHER, orthogonal degradation signals the box
+# genuinely emits (#707 V4L2 DEQUEUE STALL + emit-gate SKIPPED aggregates in the last 5 min, and
+# kernel uvcvideo -EPROTO in the last hour) and ABORTS the run naming the box + signal, so a sick
+# capture leg is a named escalation (fix the hardware, or drop the box from CAMERA_ACTIVE_SET /
+# CAMBOX_OFFLINE_ACK) rather than a 30-minute run measured on a broken tool. cap-1s over-rate is
+# read too but is REPORT-ONLY (the chronic ShadowCast over-rate is absorbed by the genlock
+# decimation, issue #909 — hard-failing it would recreate that mistake). All logic lives in the
+# sourced scripts/lib/leg-health-guard.sh (thresholds calibrated from the #1130/#1110 incident +
+# a live cam1 read; the classifier + patterns are unit-tested in tests/harness_leg_health_guard_1133.rs).
+echo "[0/8] leg-health preflight — every active capture leg must be free of USB EPROTO / DQBUF stalls / emit-gate skips (#1133)"
+# Always check the SOURCE camera (its feed drives the whole verdict); under ALL_CAMBOX also check
+# the reachable+healthy+non-acked secondaries the fleet preflight already vetted
+# (PREFLIGHT_DANTESYNC_LINUX = "box=ip" pairs, so an acked/unreachable box is already absent).
+LEG_HEALTH_TARGETS="$CAMERA_NAME=$CAM1_IP"
+if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -n "${PREFLIGHT_DANTESYNC_LINUX:-}" ]; then
+  for _lhpair in $PREFLIGHT_DANTESYNC_LINUX; do
+    _lhb="${_lhpair%%=*}"
+    [ "$_lhb" = "$CAMERA_NAME" ] && continue # source already in the list
+    LEG_HEALTH_TARGETS="$LEG_HEALTH_TARGETS $_lhpair"
+  done
+fi
+LEG_HEALTH_NOW="$(date +%s)"
+LEG_HEALTH_SINCE=$((LEG_HEALTH_NOW - $(leg_health_journal_window_secs)))
+LEG_HEALTH_EP_SINCE=$((LEG_HEALTH_NOW - $(leg_health_eproto_window_secs)))
+for _lht in $LEG_HEALTH_TARGETS; do
+  _lhbox="${_lht%%=*}"
+  _lhip="${_lht#*=}"
+  # Respect offline-ack: an operator-acked box is not checked (belt-and-braces — a secondary from
+  # PREFLIGHT_DANTESYNC_LINUX is already non-acked, but the source is added unconditionally).
+  if cambox_offline_ack_is_acked "$_lhbox"; then
+    echo "    skip: $_lhbox — operator-acknowledged offline, leg-health not checked"
+    continue
+  fi
+  # Resolve THIS box's CURRENT camera-box.service InvocationID so the journal read is scoped to
+  # the running instance only (#693 — a killed prior instance's sick lines never leak in). The
+  # source reuses the id already resolved by the #656 preflight above.
+  if [ "$_lhbox" = "$CAMERA_NAME" ]; then
+    _lhinv="$CAPTURE_RATE_INVOCATION_ID"
+  else
+    _lhinv="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_lhip" \
+      "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
+  fi
+  _lhout="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_lhip" \
+    "$(leg_health_read_all_cmd "$_lhinv" "$LEG_HEALTH_SINCE" "$LEG_HEALTH_NOW" "$LEG_HEALTH_EP_SINCE" "$LEG_HEALTH_NOW")" \
+    2>/dev/null || true)"
+  _lhstall="$(leg_health_extract STALL "$_lhout")"
+  _lhskip="$(leg_health_extract SKIP "$_lhout")"
+  _lheproto="$(leg_health_extract EPROTO "$_lhout")"
+  if ! _lhmsg="$(leg_health_classify "$_lhbox" "$_lhstall" "$_lhskip" "$_lheproto")"; then
+    echo "ERROR: $_lhmsg" >&2
+    exit 1
+  fi
+  # Report-only: surface a sustained cap-1s over-rate for diagnostics (never aborts, issue #909).
+  leg_health_cap1s_band_warn "$_lhbox" "$(leg_health_extract_cap1s "$_lhout")"
+  echo "    ok: $_lhbox capture leg healthy (stall=$_lhstall skip=$_lhskip eproto=$_lheproto in-window)"
+done
 
 # cam1 v4l2 capture controls (#338/#312, range-aware since #744): apply the device's OWN
 # --list-ctrls default for saturation+contrast BEFORE the run. The old "sharp set" (saturation=0,

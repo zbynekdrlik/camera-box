@@ -390,17 +390,35 @@ fn end_to_end_sick_journal_over_threshold_healthy_under() {
 #[test]
 fn read_all_cmd_embeds_every_signal_read_in_one_script() {
     let out = run_ok("leg_health_read_all_cmd INV9 1000 1300 100 3700");
-    assert!(out.contains("LEGHEALTH_STALL=$("), "must emit a stall count line: {out}");
-    assert!(out.contains("LEGHEALTH_SKIP=$("), "must emit a skip count line: {out}");
-    assert!(out.contains("LEGHEALTH_EPROTO=$("), "must emit an eproto count line: {out}");
+    assert!(
+        out.contains("LEGHEALTH_STALL=$("),
+        "must emit a stall count line: {out}"
+    );
+    assert!(
+        out.contains("LEGHEALTH_SKIP=$("),
+        "must emit a skip count line: {out}"
+    );
+    assert!(
+        out.contains("LEGHEALTH_EPROTO=$("),
+        "must emit an eproto count line: {out}"
+    );
     assert!(
         out.contains("LEGHEALTH_CAP1S_BEGIN") && out.contains("LEGHEALTH_CAP1S_END"),
         "must delimit the cap-1s block: {out}"
     );
     // journal reads scope to the instance + 5-min window; the kernel read uses the 1-hr window.
-    assert!(out.contains("_SYSTEMD_INVOCATION_ID=INV9"), "journal reads instance-scoped: {out}");
-    assert!(out.contains("--since=@1000") && out.contains("--until=@1300"), "journal window: {out}");
-    assert!(out.contains("journalctl -k --since=@100 --until=@3700"), "kernel EPROTO window: {out}");
+    assert!(
+        out.contains("_SYSTEMD_INVOCATION_ID=INV9"),
+        "journal reads instance-scoped: {out}"
+    );
+    assert!(
+        out.contains("--since=@1000") && out.contains("--until=@1300"),
+        "journal window: {out}"
+    );
+    assert!(
+        out.contains("journalctl -k --since=@100 --until=@3700"),
+        "kernel EPROTO window: {out}"
+    );
 }
 
 #[test]
@@ -412,7 +430,10 @@ fn extract_parses_counts_and_defaults_missing_to_zero() {
     );
     assert_eq!(out.trim(), "12 10 9", "must parse each count line");
     // absent field / empty output -> 0 (a truncated ssh read must not manufacture a non-zero count).
-    assert_eq!(run_ok("leg_health_extract EPROTO 'nothing here'").trim(), "0");
+    assert_eq!(
+        run_ok("leg_health_extract EPROTO 'nothing here'").trim(),
+        "0"
+    );
     assert_eq!(run_ok("leg_health_extract SKIP ''").trim(), "0");
 }
 
@@ -426,7 +447,10 @@ fn extract_cap1s_returns_only_the_lines_between_the_markers() {
         out.contains("foo cap-1s: [62, 63]") && out.contains("bar cap-1s: [60, 61]"),
         "must return the cap-1s lines: {out:?}"
     );
-    assert!(!out.contains("LEGHEALTH_"), "must strip the marker lines: {out:?}");
+    assert!(
+        !out.contains("LEGHEALTH_"),
+        "must strip the marker lines: {out:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
