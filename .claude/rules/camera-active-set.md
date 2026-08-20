@@ -71,11 +71,18 @@ a `<box>:<reason>` line to `rig-fleet.txt`. A box OUTSIDE the active set is neve
 so its ack never trips the stale-ack guard (the cam4 precedent — `cam4:on-air-but-outside-measured-set`).
 RE-ENABLE = add the name back to `CAMERA_ACTIVE_SET` + delete its `rig-fleet.txt` ack line.
 
-**`rig-mode.sh` (the TEST/EVENT switch) still hard-pins cam1 as the source** (its `CAM1_IP` default,
-`event_mode_assert`'s `EVENT_ASSERT_TARGETS=("cam1=$CAM1_IP" ...)`, and the IMAG program-scene
-routing/TEST prints) — that is a SEPARATE cross-cutting concern tracked as **#1135**, NOT done by
-#1134. #1134's `camera_active_secondary_set` change does not break rig-mode (its EVENT-mode loop
-just does not iterate on an empty secondary set; TEST mode never calls it).
+**`rig-mode.sh` (the TEST/EVENT switch) derives the source role too since #1135.** It resolves ONE
+`RIG_SOURCE_BOX="$(camera_source_box)"` in its pinned-constants block (above the source-guard, so
+`tests/rig_mode.rs` sees the derived facts on source), then `camera_resolve` → `RIG_SOURCE_IP`,
+`camera_strih_route` → `RIG_SOURCE_STRIH_SOURCE`, and `imag_scene_for_camera`/`imag_source_for_camera`
+(`scripts/lib/imag-scene-route.sh`) → the imag scene/input. The five former cam1 hardcodes now read
+the role: `CAM1_IP` is gone (override is `CAMERA_SOURCE_BOX`), `STRIH_PROG_SOURCE`/`IMAG_PROG_SOURCE`/
+`IMAG_PROG_SCENE` default to the derived values, `EVENT_ASSERT_TARGETS=("${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP")`
+sweeps the resolved source (so a cam1-retired rig sweeps cam3, not the broken cam1), and the
+TEST-mode prints name the resolved box. NOTE the imag pair `imag_scene_for_camera`/`imag_source_for_camera`
+must stay lock-step (same cam1-cam6 `case` set) so a source resolves BOTH or fails loud on BOTH.
+`recording-e2e.sh`'s own `IMAG_PROG_SOURCE="NDI CAM1"` is a residual left to the E2E-gate/#1134 side
+(imag leg is report-only + offline-ackable), NOT folded into #1135.
 
 ## The fix pattern — two small pure helpers, not three separate inline loops
 
