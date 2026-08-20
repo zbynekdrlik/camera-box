@@ -3464,3 +3464,45 @@ fn setup_imag_provisions_openbox_menu_with_graceful_stop_785() {
          script is installed (#785/#840)"
     );
 }
+
+/// #1156: the #1143 record-encoder lane added `import imag_record_encoder` to imag_scenes.py, but
+/// setup-imag.sh never learned to fetch that sibling onto the box — so a deploy pushed the importer
+/// WITHOUT the imported module and imag-obs seed-looped 1737× over 8.5h. An imported sibling MUST
+/// ride the SAME on-box deploy list (gh-api fetch + chmod 755) as its importer imag_scenes.py.
+#[test]
+fn setup_imag_installs_imag_record_encoder_sibling_1156() {
+    let body = read(SETUP);
+    // Guard against this test going vacuous if the import is ever removed from imag_scenes.py.
+    let scenes = read(SCENES);
+    assert!(
+        scenes.contains("import imag_record_encoder"),
+        "{SCENES} must still import imag_record_encoder for this deploy guard to be meaningful (#1156)"
+    );
+    assert!(
+        body.contains(r#"REC_ENC="/usr/local/bin/imag_record_encoder.py""#),
+        "{SETUP} must resolve a fixed on-box install path for the imag_record_encoder.py sibling (#1156)"
+    );
+    assert!(
+        body.contains("scripts/imag_record_encoder.py?ref=dev") && body.contains("gh api"),
+        "{SETUP} must actually fetch scripts/imag_record_encoder.py from the genlock repo via gh api \
+         (#1156) — an imported sibling must ride the SAME deploy list as its importer, not just be referenced"
+    );
+    assert!(
+        body.contains(r#"chmod 755 "$REC_ENC""#),
+        "{SETUP} must chmod 755 the installed imag_record_encoder.py sibling (#1156)"
+    );
+    // The sibling install must sit in the SAME block as imag_scenes.py so the two can never again
+    // drift apart on a deploy (a loose adjacency bound — same block, not the whole script apart).
+    let scn = body
+        .find(r#"SCN="/usr/local/bin/imag_scenes.py""#)
+        .expect("{SETUP} must still install imag_scenes.py (#522)");
+    let rec = body
+        .find(r#"REC_ENC="/usr/local/bin/imag_record_encoder.py""#)
+        .expect("{SETUP} must install the imag_record_encoder.py sibling (#1156)");
+    let span = &body[scn.min(rec)..scn.max(rec)];
+    assert!(
+        span.lines().count() <= 25,
+        "{SETUP}: the imag_record_encoder.py install must sit in the SAME block as imag_scenes.py \
+         so the importer + its sibling never drift on a deploy (#1156)"
+    );
+}
