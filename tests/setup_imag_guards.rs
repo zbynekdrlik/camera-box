@@ -1672,9 +1672,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 26,
-        "TOTAL_STEPS must be 26 after #791 added the imag-maxperf max-performance persistence step \
-         (step 25 was #779's touchpad-usability step)"
+        declared, 27,
+        "TOTAL_STEPS must be 27 after issue 1146 added the picom vsync-compositor step (step 27) \
+         on top of #791's imag-maxperf step 26 and #779's touchpad step 25"
     );
     assert_eq!(
         actual, declared,
@@ -2016,28 +2016,33 @@ fn setup_imag_writes_openbox_autostart_522() {
     );
 }
 
-/// The autostart script must set the non-HDMI PANEL primary at 1920x1080@60 — and must NEVER
-/// apply --primary to the HDMI projector output (the exact #522/#488 regression: the
-/// hand-edited autostart wrongly primaried HDMI instead of the panel).
+/// issue 1146 (REVERSES #522/#488): the autostart script must set the HDMI PROJ (projector)
+/// primary at 1920x1080@60 — and must NEVER apply --primary to the PANEL. imag drives two
+/// independent-crystal 60Hz outputs; GL/scanout vsyncs only the primary CRTC, so the PROJECTOR must
+/// be primary or its clock beats against the panel -> the walking tear line this ticket fixes. The
+/// #522/#488 "panel primary" doctrine is retired (its real regression was a lost projector
+/// self-heal, now handled by imag-obs.service); projector placement is by connector type
+/// (imag_scenes.py), independent of the --primary flag, so the flip is safe.
 #[test]
-fn setup_imag_autostart_primaries_panel_not_hdmi_522() {
+fn setup_imag_autostart_primaries_hdmi_not_panel_1146() {
     let body = read(SETUP);
     assert!(
         body.contains(r#"$1 !~ /^HDMI/"#) && body.contains(r#"$1 ~  /^HDMI/"#),
         "{SETUP}: the autostart script must select PANEL as the connected non-HDMI output and \
          PROJ as the connected HDMI output (xrandr awk filters) — matches imag_scenes.py's \
-         HDMI-vs-panel rule (#522)"
+         HDMI-vs-panel rule (issue 1146)"
     );
     assert!(
-        body.contains(r#"xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60"#),
-        "{SETUP}: the autostart script must set the PANEL primary at 1920x1080@60 — the \
-         #522/#488 regression was the hand-edited autostart wrongly setting HDMI primary instead"
+        body.contains(r#"xrandr --output "$PROJ" --primary --mode 1920x1080 --rate 60"#),
+        "{SETUP}: the autostart script must set the HDMI PROJ primary at 1920x1080@60 — the \
+         projector is the vsync anchor for the tear-free picom present (issue 1146)"
     );
-    // The bug this ticket fixes: --primary must be scoped to $PANEL only, never to $PROJ/HDMI.
+    // issue 1146: --primary must be scoped to $PROJ only, never to $PANEL (which would re-make the
+    // panel the vsync anchor and re-introduce the projector tearing).
     assert!(
-        !body.contains(r#"xrandr --output "$PROJ" --primary"#),
-        "{SETUP}: the autostart script must NEVER set --primary on $PROJ (the HDMI projector) — \
-         that was the exact #522/#488 hand-edited-box regression this ticket fixes"
+        !body.contains(r#"xrandr --output "$PANEL" --primary"#),
+        "{SETUP}: the autostart script must NEVER set --primary on $PANEL — that makes the panel \
+         the vsync anchor and the HDMI projector tears (issue 1146 reverses the #522 panel-primary)"
     );
 }
 
