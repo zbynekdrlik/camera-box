@@ -9698,3 +9698,11 @@ No push/PR/rig touch (worktree worker).
 - Runbook (in issue comment): the [0/8] camera-box version-parity gate refuses a mixed fleet (exit 20, unconditional). Verified-real neutralization: local E2E via E2E_EXECUTE_VERDICT=1 + WIN_VERDICT_EXE_LOCAL (recording-e2e.sh:4253-4264, NOT the PR gate); CAMERA_ACTIVE_SET restriction + CAMERA_BOX_VERSION_GATE_MAIN_PIN (honest) OR per-node CAMERA_BOX_VERSION_GATE_VERSION_* fixtures. MAIN_PIN alone does NOT pass a mixed fleet. Caveat: ci.yml deploy-fleet job auto-deploys on push to main -> ack cam1+cam2 offline in rig-fleet.txt during the window.
 - Playbook: added .claude/rules/historical-build-bisect.md + CLAUDE.md router line.
 - WORKTREE MODE — stopped at green LOCAL result; supervisor integrates (merge/CI). E2E bisect runs are the supervisor's manual step BETWEEN points.
+
+## 1152 — imag HDMI Program output outside Xorg (DRM/KMS presenter) — DESIGN-only lane (2026-08-20)
+- Version bump 1.7.0-dev.512 -> 1.7.0-dev.517 (748a8c58f). Spec commit 2e851ea75.
+- Deliverable: docs/superpowers/specs/2026-08-20-imag-hdmi-drm-presenter-design.md (213 lines) + STEP-0 validated comment + non-trivial design comment (3 approaches) + durable spec-pointer comment on the ticket.
+- Live read-only probe on imag 10.77.9.182 (E2E-safe, nothing changed): single i915 /dev/dri/card1, modesetting DDX xserver 21.1.12 (RandR 1.6 RRCreateLease supported), 4 CRTCs, eDP+HDMI connected, cage/weston ABSENT, v4l2loopback NOT loaded, DistroAV present w/ 10 NDI inputs but NO Program NDI output yet.
+- CHOSEN: DRM-lease (RandR output lease of HDMI-A-1 out of X) + dedicated NDI->DRM presenter reusing src/probe/kms.rs page-flip engine + src/ndi.rs receive stack; NDI-loopback Program feed for v1, dma-buf a future latency optimization. Wayland kiosk + Xorg fuses rejected. dev2 "presenter" is a church-lyrics web app (NDI ingest, no DRM out) — shares only the name, not reusable.
+- Honest stance: NDI loopback adds a Program-feed FIFO -> latency must be MEASURED (M2), no improvement claim; scanout tear machine-measurement blocked on the 781 tap; imag 3ms NDI-input mandate unchanged. Milestones M1-M5 in the design comment + spec.
+- WORKTREE MODE — no rig implementation; branch worktree-1152-drmdesign, backup ref refs/autopilot-wip/1152-drmdesign. Supervisor integrates.
