@@ -66,7 +66,11 @@ optical_preflight_classify() {
   local floor min
   floor="$(optical_preflight_rough_floor)"
   min="$(optical_preflight_min_samples)"
-  awk -v floor="$floor" -v min="$min" '
+  # LC_ALL=C: force '.'-decimal parsing — the rough= journal values, the floor, and the median
+  # are all '.'-decimal, but mawk/gawk string->number conversion is locale-sensitive (strtod), so a
+  # comma-locale box could mis-parse "2.5"/"7.6" and shift the floor comparison. Locale-hardened like
+  # the repo's own grep call sites.
+  LC_ALL=C awk -v floor="$floor" -v min="$min" '
     {
       for (i = 1; i <= NF; i++) {
         tok = $i
