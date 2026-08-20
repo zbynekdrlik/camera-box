@@ -2716,6 +2716,14 @@ PYEOF
 )"
   echo "    [frozen-camera-gate] derived sources: ${FROZEN_CAM_SOURCES} (excluded any bound to '${FROZEN_CAM_EXCLUDE_SENDER}')"
 fi
+# #1158 auto-revive self-heal (an emptied/drifted ndi_source_name — e.g. a mid-run reattach clear
+# left "" when the sender vanished, or a force-kill OBS restart reloaded a drifted saved scene —
+# STOPS/misroutes the DistroAV receiver, which the in-loop #767/#1096 watchdogs can never fix). The
+# helper delegates to set-ndi-mapping.py --heal (discoverability-gated + read-back-verified). It is
+# ALWAYS called in an `if`-condition, never a bare statement: it exits non-zero when nothing was
+# healable, and under this script's `set -euo pipefail` a bare non-zero would abort the whole run
+# (the #1133 report-only-probe class); an `if` suppresses `set -e` inside it.
+. "$HERE/lib/ndi-name-selfheal.sh"
 frozen_ok=0
 for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
   if python3 "$HERE/frozen-camera-gate.py" \
@@ -2728,6 +2736,9 @@ for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
     break
   fi
   if [ "$frozen_attempt" -lt "$FROZEN_CAM_ATTEMPTS" ]; then
+    if ndi_name_selfheal_run "$STRIH" "$CAMERA_ACTIVE_SET" "$HERE"; then
+      echo "    [frozen-camera-gate] #1158 auto-revive re-enforced an emptied/drifted NDI mapping — re-sampling after the settle"
+    fi
     echo "    [frozen-camera-gate] attempt ${frozen_attempt}/${FROZEN_CAM_ATTEMPTS} FROZEN — settling ${FROZEN_CAM_RETRY_SLEEP}s for the post-[3/8] NDI reconnect, then re-sampling"
     sleep "$FROZEN_CAM_RETRY_SLEEP"
   fi
