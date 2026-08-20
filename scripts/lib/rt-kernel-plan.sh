@@ -49,18 +49,22 @@ _rt_truthy() {
   esac
 }
 
-# rt_kernel_readiness_verdict RUNNING_LOWLAT CANDIDATE_PRESENT -> one verdict token.
+# rt_kernel_readiness_verdict RUNNING_LOWLAT LOWLAT_INSTALLED CANDIDATE_PRESENT -> one verdict token.
 # Describes whether a box CAN be upgraded to the low-latency profile right now. There is NO Ubuntu
-# Pro axis any more (the free main-archive package needs no subscription), so a resolvable candidate
-# is immediately `ready`:
+# Pro axis any more (the free main-archive package needs no subscription). The verdict is kept
+# CONSISTENT with rt_kernel_upgrade_plan's own blocked condition (`!inst && !cand`) by taking the
+# INSTALLED axis too: a box that already has the config package installed is `ready` to finish the
+# upgrade even if the apt candidate has since aged out -- so the readiness header can NEVER read
+# `no-rt-candidate` while the plan below correctly proceeds because it is already installed.
 #   already-lowlatency : the box already runs the low-latency profile (preempt=full active)
-#   ready              : the linux-lowlatency-hwe-24.04 candidate is apt-resolvable (free, no Pro)
-#   no-rt-candidate    : the package is not resolvable from apt at all (fail-closed -- kept from the
-#                        pro-attach design for the genuinely-missing-package case)
+#   ready              : the config package is installed OR a linux-lowlatency-hwe-24.04 candidate is
+#                        apt-resolvable (free, no Pro)
+#   no-rt-candidate    : NOT installed AND no apt candidate (fail-closed -- kept from the pro-attach
+#                        design for the genuinely-missing-package case)
 rt_kernel_readiness_verdict() {
-  local run="${1:-}" cand="${2:-}"
+  local run="${1:-}" inst="${2:-}" cand="${3:-}"
   if _rt_truthy "$run"; then printf 'already-lowlatency'; return 0; fi
-  if ! _rt_truthy "$cand"; then printf 'no-rt-candidate'; return 0; fi
+  if ! _rt_truthy "$inst" && ! _rt_truthy "$cand"; then printf 'no-rt-candidate'; return 0; fi
   printf 'ready'
 }
 

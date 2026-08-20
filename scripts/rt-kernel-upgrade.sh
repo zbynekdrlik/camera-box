@@ -90,7 +90,7 @@ emit_plan() {
   set -- $facts
   local run="${1:-}" inst="${2:-}" gen="${3:-}" gd="${4:-0}" cand="${5:-1}"
   echo "# facts: running_lowlat=$run lowlat_installed=$inst superseded_generic=$gen grub_default=$gd rt_candidate=$cand"
-  echo "# readiness: $(rt_kernel_readiness_verdict "$run" "$cand")"
+  echo "# readiness: $(rt_kernel_readiness_verdict "$run" "$inst" "$cand")"
   echo "# kernel choice: $(rt_kernel_flavour)  (free Ubuntu main archive, no Pro -- STEP 1)"
   echo "# ---- atomic per-box plan (SUPERVISOR applies; reboot-class, one box at a time) ----"
   local plan tok

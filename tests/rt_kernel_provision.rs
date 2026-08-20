@@ -62,11 +62,16 @@ fn flavour_is_the_single_decided_lowlatency_package() {
 
 #[test]
 fn readiness_covers_all_three_states() {
+    // Args: RUNNING_LOWLAT LOWLAT_INSTALLED CANDIDATE_PRESENT. The INSTALLED axis keeps the verdict
+    // consistent with the plan's own blocked condition (`!inst && !cand`), so an installed box whose
+    // candidate has aged out reads `ready`, never a spurious `no-rt-candidate` while the plan proceeds.
     for (args, want) in [
-        ("1 1", "already-lowlatency"), // running preempt=full already
-        ("1 0", "already-lowlatency"), // running dominates the candidate axis
-        ("0 1", "ready"),              // candidate present, no Pro needed (free package)
-        ("0 0", "no-rt-candidate"),    // no lowlatency package resolvable (fail-closed)
+        ("1 0 0", "already-lowlatency"), // running preempt=full already dominates
+        ("1 1 1", "already-lowlatency"), // running dominates every other axis
+        ("0 0 1", "ready"),              // candidate present, not installed (no Pro needed)
+        ("0 1 0", "ready"), // installed but candidate aged out -> still ready, no false block
+        ("0 1 1", "ready"), // installed AND candidate
+        ("0 0 0", "no-rt-candidate"), // neither installed nor a candidate (fail-closed)
     ] {
         let (code, out, err) = run_sourced(&format!("rt_kernel_readiness_verdict {args}"));
         assert_eq!(code, 0, "harness must not crash. stderr: {err}");
@@ -232,8 +237,8 @@ fn functions_never_abort_a_set_e_caller() {
     let (code, out, err) = run_sourced(
         "set -euo pipefail; \
          rt_kernel_flavour >/dev/null; \
-         rt_kernel_readiness_verdict 1 1 >/dev/null; \
-         rt_kernel_readiness_verdict 0 0 >/dev/null; \
+         rt_kernel_readiness_verdict 1 1 1 >/dev/null; \
+         rt_kernel_readiness_verdict 0 0 0 >/dev/null; \
          rt_kernel_upgrade_plan 1 0 0 0 1 >/dev/null; \
          rt_kernel_upgrade_plan 0 0 1 saved 0 >/dev/null; \
          rt_kernel_upgrade_plan 0 0 1 saved 1 >/dev/null; \
