@@ -135,6 +135,7 @@ fleet_box_has_ahk() { case "${1:-}" in strih) echo "1" ;; *) echo "0" ;; esac; }
 # lists none. The emitted program disables+restores ONLY a task that is PRESENT and ENABLED, so a
 # name absent (or deliberately disabled) on the box is a harmless skip -- adding another box's
 # keep-alive here later is a one-line change, not a hardcoded pile inline at the call site.
+# Task names MUST be whitespace-free: the emitter word-splits this space-separated list.
 fleet_box_keepalive_tasks() {
   case "${1:-}" in
     stream) echo 'avsync-keepalive camera-box-obs-self-heal-stream' ;;
@@ -227,9 +228,15 @@ foreach ($t in $keepAliveTasks) {
   $q = schtasks /Query /TN $t /FO LIST /V 2>$null
   if ($LASTEXITCODE -ne 0) { Write-Host "#1140: keep-alive task '$t' not present -- skipping."; continue }
   $stateLine = ($q | Where-Object { $_ -match 'Scheduled Task State:' } | Select-Object -First 1)
+  # FAIL LOUD (never fail-OPEN) if the task is present but its state is unreadable -- silently
+  # treating it as "already disabled" would leave a live keep-alive to respawn obs64 mid-copy, the
+  # exact #1140 incident with no warning. This surfaces the English-locale assumption instead of
+  # hiding it (consistent with the disable/restore fail-closed exits below).
+  if (-not $stateLine) { Write-Error "#1140 FAIL: could not read the Scheduled Task State for '$t' (present but no state line -- unexpected schtasks output/locale); refusing to proceed unprotected. Already-disabled keep-alive task(s) needing manual re-enable: $($disabledKeepAlive -join ', ') (schtasks /Change /TN <name> /ENABLE)."; exit 10 }
   if ($stateLine -notmatch 'Enabled') { Write-Host "#1140: keep-alive task '$t' already disabled -- leaving as-is."; continue }
   schtasks /Change /TN $t /DISABLE | Out-Null
-  if ($LASTEXITCODE -ne 0) { Write-Error "#1140 FAIL: could not disable keep-alive task '$t' before the copy -- it could respawn obs64 and corrupt the deploy; aborting."; exit 10 }
+  if ($LASTEXITCODE -ne 0) { Write-Error "#1140 FAIL: could not disable keep-alive task '$t' before the copy -- it could respawn obs64 and corrupt the deploy; aborting. Already-disabled keep-alive task(s) needing manual re-enable: $($disabledKeepAlive -join ', ') (schtasks /Change /TN <name> /ENABLE)."; exit 10 }
+  schtasks /End /TN $t 2>$null | Out-Null   # terminate any in-flight instance too (parity with the AHK Stop-Process), best-effort
   $disabledKeepAlive += $t
   Write-Host "#1140: disabled keep-alive task '$t' for the deploy."
 }

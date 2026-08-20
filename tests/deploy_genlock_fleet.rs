@@ -607,6 +607,17 @@ fn windows_stream_disables_and_restores_obs_keepalive_tasks_1140() {
         stream.contains("exit 10"),
         "a keep-alive task that does not come back enabled must fail loud (exit 10), mirroring AHK exit 9:\n{stream}"
     );
+    // a present-but-unreadable task state must FAIL LOUD, never silently fail-open (else a live
+    // keep-alive respawns obs64 -- the exact #1140 incident with no warning).
+    assert!(
+        stream.contains("could not read the Scheduled Task State"),
+        "an unreadable task state must fail loud, never be treated as already-disabled:\n{stream}"
+    );
+    // disabling also /End's any in-flight instance (parity with the AHK Stop-Process actor kill).
+    assert!(
+        stream.contains("schtasks /End /TN $t"),
+        "the disable step must also terminate an in-flight keep-alive instance (schtasks /End):\n{stream}"
+    );
     // ORDER: disable BEFORE stopping obs64; restore at the tail (after the AHK restart step).
     let disable_at = stream.find("# (1b)").expect("no # (1b) disable step");
     let obs_stop_at = stream
