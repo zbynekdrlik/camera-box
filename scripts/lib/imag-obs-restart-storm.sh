@@ -59,6 +59,7 @@ imag_obs_restart_storm_classify() {
   case "$threshold" in ''|*[!0-9]*) threshold=10 ;; esac
   case "$window_s" in ''|*[!0-9]*) window_s=600 ;; esac
   case "$now" in ''|*[!0-9]*) now=0 ;; esac
+  now=$(( 10#$now ))   # force base-10: a leading-zero value is octal-hazardous under $(( )) (#1156 review)
 
   # parse the current NRestarts from the probe line.
   local cur=""
@@ -72,6 +73,7 @@ imag_obs_restart_storm_classify() {
     printf 'storm=0\nbaseline=%s\nbaseline_ts=%s\nreason=unreadable-counter\n' "$prev" "$prev_ts"
     return 0
   fi
+  cur=$(( 10#$cur ))   # base-10 (see #1156 review): cur is all-digits here
 
   # validate the prior anchor; either half missing/corrupt = a first pass -> establish baseline.
   case "$prev" in ''|*[!0-9]*) prev="" ;; esac
@@ -80,6 +82,7 @@ imag_obs_restart_storm_classify() {
     printf 'storm=0\nbaseline=%s\nbaseline_ts=%s\nreason=first-pass\n' "$cur" "$now"
     return 0
   fi
+  prev=$(( 10#$prev )); prev_ts=$(( 10#$prev_ts ))   # base-10 (see #1156 review): both all-digits here
 
   if [ "$cur" -lt "$prev" ]; then
     printf 'storm=0\nbaseline=%s\nbaseline_ts=%s\nreason=counter-reset (%s<%s: reboot/reset-failed/reinstall)\n' \

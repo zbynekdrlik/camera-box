@@ -145,6 +145,17 @@ fn unreadable_counter_is_never_a_storm_and_preserves_anchor() {
     assert!(field(&out, "reason").contains("unreadable"), "{out}");
 }
 
+// #1156 review (🔵): a leading-zero counter must be read base-10, never octal -- a bare
+// `$(( 08 - 3 ))` aborts the whole pass under the caller's `set -e`. The classifier coerces with 10#.
+#[test]
+fn leading_zero_counter_is_base10_never_octal_and_never_aborts() {
+    // classify() asserts the bash exited 0 -- before the 10# coercion this ABORTED (exit 1) on `08`.
+    let out = classify("3", "1000", "NRestarts=08", "1300", "10", "600");
+    assert_eq!(field(&out, "storm"), "0", "{out}");
+    // 08 read as base-10 8 -> delta 5 (accumulating), not a storm, no abort.
+    assert!(field(&out, "reason").contains("delta=5"), "{out}");
+}
+
 // ── probe-command builder ───────────────────────────────────────────────────
 fn probe_cmd() -> String {
     let lib = manifest_dir().join(LIB);
