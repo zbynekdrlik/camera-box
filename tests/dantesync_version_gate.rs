@@ -54,6 +54,22 @@ fn run_sourced(body: &str, extra_env: &[(&str, &str)]) -> String {
 fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new(script());
     cmd.args(args).current_dir(manifest_dir());
+    // #1139 hermeticity: the report-only tray + pin-lag sections do live I/O (gh release
+    // download/list; ssh certutil per --win node). Seed the seams by default so the pre-existing
+    // subprocess tests stay OFFLINE — a test that exercises those sections overrides them via
+    // extra_env. Cover the two win node names the suite uses (strih/stream); a new win name would
+    // need its own seam.
+    let has = |k: &str| extra_env.iter().any(|(ek, _)| *ek == k);
+    for (k, v) in [
+        ("DANTESYNC_NEWEST_RELEASE", "0.0.0-hermetic"),
+        ("DANTESYNC_TRAY_EXPECTED_SHA", "hermetic"),
+        ("DANTESYNC_TRAY_SHA_STRIH", "hermetic"),
+        ("DANTESYNC_TRAY_SHA_STREAM", "hermetic"),
+    ] {
+        if !has(k) {
+            cmd.env(k, v);
+        }
+    }
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -371,4 +387,173 @@ fn cli_zero_nodes_is_a_usage_error() {
         "no nodes at all must be refused as a usage error, never a silent pass"
     );
     assert!(err.to_lowercase().contains("no node"));
+}
+
+// ---------------------------------------------------------------------------
+// #1139 — REPORT-ONLY orphan alarms: dantesync-tray.exe sha-pin + pin-vs-newest-release lag.
+// The tray is in NO gate (a daemon roll can leave the tray behind — live 2026-08-20 the deployed
+// tray sha != the pinned v1.8.48 release asset), and the fixed DANTESYNC_VERSION_PIN can lag the
+// newest published release. Both SCREAM (report-only) but never flip the gate exit — the tray is a
+// cosmetic status GUI with no clock role, the pin lag reflects a deliberate canary rollout. The
+// tray is pinned by sha256 against the release asset (#1118 pattern) because it is a GUI-subsystem
+// app with no console --version. Pure verdicts unit-tested by sourcing; report-only wiring by CLI.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tray_verdict_ok_when_deployed_matches_pinned_release() {
+    let out = run_sourced(
+        r#"o="$(dantesync_tray_verdict strih "35d9e631d25f" "35d9e631d25f")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(out.contains("RC=0"), "matching tray must be OK: {out}");
+    assert!(out.contains("OK"), "{out}");
+}
+
+#[test]
+fn tray_verdict_alarms_when_deployed_lags_pinned_release() {
+    let out = run_sourced(
+        r#"o="$(dantesync_tray_verdict strih "35d9e631d25f" "bd45be05c18c")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=30"),
+        "a lagging tray must return the ALARM code 30: {out}"
+    );
+    assert!(out.contains("ALARM"), "must SCREAM ALARM: {out}");
+    assert!(
+        out.contains("bd45be05c18c"),
+        "must name the expected pinned sha: {out}"
+    );
+}
+
+#[test]
+fn tray_verdict_unknown_fail_closed_when_deployed_or_expected_unread() {
+    let a = run_sourced(
+        r#"o="$(dantesync_tray_verdict strih "" "bd45be05")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        a.contains("RC=31") && a.contains("UNKNOWN"),
+        "unread deployed tray -> UNKNOWN(31): {a}"
+    );
+    let b = run_sourced(
+        r#"o="$(dantesync_tray_verdict strih "35d9e631" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        b.contains("RC=31") && b.contains("UNKNOWN"),
+        "unresolved expected sha -> UNKNOWN(31): {b}"
+    );
+}
+
+#[test]
+fn pin_lag_verdict_ok_when_pin_is_newest() {
+    let out = run_sourced(
+        r#"o="$(dantesync_pin_lag_verdict "1.8.48" "1.8.48")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=0") && out.contains("OK"),
+        "pin==newest -> OK: {out}"
+    );
+}
+
+#[test]
+fn pin_lag_verdict_alarms_when_pin_behind_newest() {
+    let out = run_sourced(
+        r#"o="$(dantesync_pin_lag_verdict "1.8.48" "1.8.49")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=32"),
+        "a lagging pin must return the LAG code 32: {out}"
+    );
+    assert!(out.contains("LAG"), "must SCREAM LAG: {out}");
+    assert!(
+        out.contains("1.8.49"),
+        "must name the newest published release: {out}"
+    );
+}
+
+#[test]
+fn pin_lag_verdict_unknown_fail_closed_when_newest_unresolved() {
+    let out = run_sourced(
+        r#"o="$(dantesync_pin_lag_verdict "1.8.48" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=33") && out.contains("UNKNOWN"),
+        "unresolved newest -> UNKNOWN(33): {out}"
+    );
+}
+
+#[test]
+fn tray_alarm_is_report_only_does_not_block_an_otherwise_clean_gate() {
+    // A clean daemon (matches pin) + a LAGGING tray must still PASS (exit 0): the tray ALARM is
+    // report-only. NEWEST==pin isolates the tray alarm from the pin-lag alarm.
+    let dir = tmp_dir("tray_report_only");
+    let path = dir.join("strih.out");
+    std::fs::write(&path, "dantesync 1.8.48\n").unwrap();
+    let (code, out, err) = run_gate_env(
+        &["--pin", "1.8.48", "--win", "strih=newlevel@10.77.9.202"],
+        &[
+            (
+                "DANTESYNC_VERSION_GATE_VERSION_STRIH",
+                path.to_str().unwrap(),
+            ),
+            ("DANTESYNC_TRAY_SHA_STRIH", "35d9e631d25fdeadbeef"),
+            ("DANTESYNC_TRAY_EXPECTED_SHA", "bd45be05c18cdeadbeef"),
+            ("DANTESYNC_NEWEST_RELEASE", "1.8.48"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a lagging TRAY must be report-only (gate still passes). out={out} err={err}"
+    );
+    assert!(
+        out.contains("GATE PASS"),
+        "daemon-clean gate must pass: {out}"
+    );
+    assert!(
+        out.contains("dantesync-tray.exe sha-pin") && out.contains("ALARM"),
+        "the tray section must SCREAM the drift: {out}"
+    );
+    assert!(
+        err.contains("DANTESYNC-TRAY ALARM"),
+        "a loud stderr banner must fire: {err}"
+    );
+}
+
+#[test]
+fn pin_lag_alarm_is_report_only_does_not_block_an_otherwise_clean_gate() {
+    // A clean daemon + a clean tray + a pin BEHIND the newest release must still PASS (exit 0):
+    // the lag alarm is report-only.
+    let dir = tmp_dir("lag_report_only");
+    let path = dir.join("strih.out");
+    std::fs::write(&path, "dantesync 1.8.48\n").unwrap();
+    let (code, out, err) = run_gate_env(
+        &["--pin", "1.8.48", "--win", "strih=newlevel@10.77.9.202"],
+        &[
+            (
+                "DANTESYNC_VERSION_GATE_VERSION_STRIH",
+                path.to_str().unwrap(),
+            ),
+            ("DANTESYNC_TRAY_SHA_STRIH", "cafe"),
+            ("DANTESYNC_TRAY_EXPECTED_SHA", "cafe"),
+            ("DANTESYNC_NEWEST_RELEASE", "1.8.49"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a lagging PIN must be report-only (gate still passes). out={out} err={err}"
+    );
+    assert!(out.contains("GATE PASS"), "{out}");
+    assert!(
+        out.contains("pin vs newest") && out.contains("LAG") && out.contains("1.8.49"),
+        "the pin-lag section must SCREAM the lag: {out}"
+    );
+    assert!(
+        err.contains("DANTESYNC-PIN-LAG ALARM"),
+        "a loud stderr banner must fire: {err}"
+    );
 }

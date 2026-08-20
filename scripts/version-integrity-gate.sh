@@ -248,6 +248,52 @@ startup_chain_verdict() {
   return 0
 }
 
+# genlock_vendor_pin_verdict DEPLOYED_SHA NEWEST_VENDOR_SHA PENDING_LIST -> #1137 REPORT-ONLY
+# vendor-pin ALARM. The gate's only genlock check is CROSS-BOX PARITY (genlock_build_parity_report,
+# #756/#949) -- it PASSES a UNIFORMLY-stale fleet where every box agrees on an OLD build (live:
+# both boxes 03cd9c073 with 2 undeployed #1097 vendor commits). This layer PINS the fleet-deployed
+# genlock_build_sha to the NEWEST origin/main commit touching vendor/** -- the missing PIN the
+# .claude/rules/early-gate-pin-doctrine.md orphan class names ("peer parity is a SUPPLEMENT, never a
+# substitute"):
+#   DEPLOYED_SHA empty       -> UNKNOWN (31): deployed SHA unread, vendor pin unverifiable (fail-closed)
+#   NEWEST_VENDOR_SHA empty   -> UNKNOWN (31): origin/main newest vendor commit unresolved (fail-closed)
+#   PENDING_LIST non-empty    -> ALARM   (30): deployed bundle LAGS -- names every pending vendor commit
+#   else                      -> OK      (0):  deployed bundle is at the newest vendored HEAD
+# PENDING_LIST = newline-separated "<sha> <subject>" of vendor commits newer than DEPLOYED_SHA on
+# origin/main (main() computes it via git rev-list; empty = none). REPORT-ONLY by design: the
+# vendored OBS bundle deploys via COORDINATED OBS restarts (not a hot swap), so a merged-but-not-yet-
+# redeployed vendor commit is a normal transient during dev -- a hard block on every E2E would be
+# "too blunt" (the doctrine's own word), so this component gets an ALARM, not a hard-gate, exactly
+# like the dantesync canary lag (#1139). But it SCREAMS on every run and NAMES the pending commits,
+# so an orphan can never sit silently "discovered by eye weeks later" (#1136 owner directive). It
+# prints its verdict to STDOUT (tests capture it); main() adds a stderr SCREAM banner on ALARM/UNKNOWN
+# and NEVER folds it into the gate's bad/unknown counters (that is what keeps it report-only). The
+# documented two-step upgrade to a hard-gate is: once the vendored bundle is folded into an
+# auto-deploy that advances with origin/main (the camera-box orphan-PROOF shape), flip the ALARM
+# rows into the gate's bad/unknown roll-up.
+genlock_vendor_pin_verdict() {
+  local deployed="$1" newest="$2" pending="$3"
+  if [ -z "$deployed" ]; then
+    printf '  %-22s UNKNOWN  (deployed genlock_build_sha unread -- vendor pin unverifiable, fail-closed)\n' "vendor_pin"
+    return 31
+  fi
+  if [ -z "$newest" ]; then
+    printf '  %-22s UNKNOWN  (origin/main newest vendor/** commit unresolved for %s -- vendor pin unverifiable, fail-closed)\n' "vendor_pin" "$deployed"
+    return 31
+  fi
+  local cleaned n
+  cleaned="$(printf '%s\n' "$pending" | sed '/^[[:space:]]*$/d')"
+  if [ -n "$cleaned" ]; then
+    n="$(printf '%s\n' "$cleaned" | wc -l | tr -d ' ')"
+    printf '  %-22s ALARM    (deployed bundle %s LAGS origin/main vendor HEAD %s -- %s undeployed vendor commit(s), redeploy the fleet):\n' \
+      "vendor_pin" "$deployed" "$newest" "$n"
+    printf '%s\n' "$cleaned" | sed 's/^/                           - /'
+    return 30
+  fi
+  printf '  %-22s OK       (deployed bundle %s is at the newest origin/main vendor HEAD)\n' "vendor_pin" "$deployed"
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), stop here --------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -641,6 +687,64 @@ main() {
     11) unknown=$((unknown + 1)); unknown_boxes+=("imag:so_bytes") ;;
     *)  echo "    !! imag_bytes_verdict exited ${ibrc} (unexpected)" >&2; bad=$((bad + 1)) ;;
   esac
+
+  # #1137 -- REPORT-ONLY vendor-pin ALARM. The cross-box parity above passes a UNIFORMLY-stale fleet
+  # (every box agrees on an OLD genlock build); this PINS the fleet-deployed genlock_build_sha to the
+  # NEWEST origin/main commit touching vendor/** and SCREAMS when it lags. It NEVER touches the gate's
+  # bad/unknown counters (report-only) -- the coordinated-restart bundle deploy makes a hard block on
+  # every E2E too blunt, so #1136's doctrine assigns this component an ALARM (see
+  # genlock_vendor_pin_verdict's header for the two-step upgrade to a hard-gate). Reuses the deployed
+  # SHAs already gathered in parity_args (no new read). Fail-closed-LOUD on an unreadable pin. Fixture
+  # seams for the flow test: VERSION_INTEGRITY_GATE_VENDOR_NEWEST (override the newest vendor HEAD) and
+  # VERSION_INTEGRITY_GATE_VENDOR_PENDING (override the pending list; set-but-empty = "current").
+  echo "  -- vendor-pin alarm (#1137, report-only) --"
+  local repo_root_vp=""
+  repo_root_vp="$(cd "$HERE/.." 2>/dev/null && pwd)" || repo_root_vp=""
+  local -a vp_shas=()
+  local vp_seen=" " pe psha
+  for pe in "${parity_args[@]}"; do
+    psha="${pe#*=}"
+    [ -z "$psha" ] && continue
+    case "$vp_seen" in *" $psha "*) continue ;; esac
+    vp_seen="${vp_seen}${psha} "
+    vp_shas+=("$psha")
+  done
+  local vp_newest=""
+  if [ -n "${VERSION_INTEGRITY_GATE_VENDOR_NEWEST:-}" ]; then
+    vp_newest="$VERSION_INTEGRITY_GATE_VENDOR_NEWEST"
+  elif [ -n "$repo_root_vp" ]; then
+    timeout 15 git -C "$repo_root_vp" fetch origin --quiet 2>/dev/null || true
+    vp_newest="$(git -C "$repo_root_vp" log -1 --format='%H' origin/main -- vendor/ 2>/dev/null || true)"
+  fi
+  if [ "${#vp_shas[@]}" -eq 0 ]; then
+    local vp_out=""; vp_out="$(genlock_vendor_pin_verdict "" "$vp_newest" "")" || true
+    printf '%s\n' "$vp_out" | sed 's/^/    /'
+    echo "!! VENDOR-PIN ALARM: no deployed genlock_build_sha to pin -- vendor currency UNVERIFIED (report-only, does NOT block this run)." >&2
+  else
+    local vp_sha vp_newest_eff vp_pending vp_out vprc
+    for vp_sha in "${vp_shas[@]}"; do
+      vp_newest_eff="$vp_newest"
+      vp_pending=""
+      if [ -n "${VERSION_INTEGRITY_GATE_VENDOR_PENDING+x}" ]; then
+        vp_pending="$VERSION_INTEGRITY_GATE_VENDOR_PENDING"
+      elif [ -n "$repo_root_vp" ] && [ -n "$vp_newest_eff" ]; then
+        if git -C "$repo_root_vp" cat-file -e "${vp_sha}^{commit}" 2>/dev/null; then
+          vp_pending="$(git -C "$repo_root_vp" log --format='%h %s' "${vp_sha}..origin/main" -- vendor/ 2>/dev/null || true)"
+        else
+          # The deployed SHA is unknown to local git -> rev-range would silently return "" and read
+          # as "none pending" (a FALSE OK). Force UNKNOWN (fail-closed) instead.
+          vp_newest_eff=""
+        fi
+      fi
+      vprc=0
+      vp_out="$(genlock_vendor_pin_verdict "$vp_sha" "$vp_newest_eff" "$vp_pending")" || vprc=$?
+      printf '%s\n' "$vp_out" | sed 's/^/    /'
+      case "$vprc" in
+        30) echo "!! VENDOR-PIN ALARM: deployed genlock bundle ${vp_sha} LAGS origin/main vendor HEAD -- undeployed vendor commits pending; redeploy the fleet (report-only, does NOT block this run)." >&2 ;;
+        31) echo "!! VENDOR-PIN ALARM: could not verify deployed genlock bundle ${vp_sha} against origin/main vendor HEAD (report-only)." >&2 ;;
+      esac
+    done
+  fi
 
   echo
   if [ "$bad" -gt 0 ]; then

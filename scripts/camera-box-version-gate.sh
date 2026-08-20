@@ -336,6 +336,108 @@ read_main_cargo_version() {
   camera_box_version_from_cargo_toml "$cargo"
 }
 
+# --- #1138 frame-probe (cam2 painter) sha-pin — REPORT-ONLY, dormant unless an expected sha is
+# supplied ------------------------------------------------------------------------------------
+#
+# /usr/local/bin/frame-probe (the cam2 painter that paints /dev/fb0 + emits the QPSK marker) was
+# UNPINNABLE (no --version -- it is probe-gated CI-built code) and in NO gate, and is NOT auto-
+# deployed (only setup-device.sh provisioning installs it) -- so a stale painter's staleness was
+# detected by NOTHING (the .claude/rules/early-gate-pin-doctrine.md "frame-probe UNPINNABLE" row).
+# This section pins it by sha256 (the #1118 recording-verdict-on-imag sha-compare pattern, which
+# needs no on-box --version): compare each active cam box's DEPLOYED frame-probe sha256 against an
+# EXPECTED sha (the current CI probe-tools-linux-amd64 build). It is REPORT-ONLY (SCREAMS but never
+# flips this gate's exit) AND DORMANT unless an expected sha is supplied (--frame-probe-expected-sha
+# / --frame-probe-expected-bin / FRAME_PROBE_EXPECTED_SHA) -- so it is a no-op with no behaviour
+# change until the supervisor enables it TOGETHER with a frame-probe fleet auto-deploy (a pin without
+# a deploy is perpetual noise; the doctrine's camera-box shape is pin + auto-deploy moving together).
+# Report-only, not hard-gate: frame-probe has no auto-deploy yet (a hard block would halt every E2E),
+# and the painter's correctness is separately gated functionally ([0/8] optical non-black #901 +
+# marker CSV growth). Two-step upgrade to a hard-gate is documented on issue 1138: once frame-probe
+# is folded into the fleet auto-deploy (advancing with origin/main), flip the ALARM into the pinned
+# roll-up.
+
+# frame_probe_pin_verdict NAME DEPLOYED_SHA EXPECTED_SHA -> one row + code (mirrors the #1118
+# onimag_upload_decision / dantesync_tray_verdict sha compare).
+#   DEPLOYED_SHA empty  -> UNKNOWN (31): frame-probe sha unread on the box (fail-closed-LOUD)
+#   EXPECTED_SHA empty   -> UNKNOWN (31): the current-build expected sha could not be resolved
+#   DEPLOYED != EXPECTED -> ALARM   (30): the deployed painter LAGS the current CI build (orphan)
+#   else                 -> OK      (0):  the deployed painter matches the current build
+# Prints to STDOUT (tests capture it); the report runner adds a stderr SCREAM banner on ALARM/UNKNOWN.
+frame_probe_pin_verdict() {
+  local name="$1" deployed="$2" expected="$3"
+  if [ -z "$deployed" ]; then
+    printf '  %-14s %-16s UNKNOWN   (frame-probe sha256 not read on the box -- fail-closed)\n' "$name" "-"
+    return 31
+  fi
+  if [ -z "$expected" ]; then
+    printf '  %-14s %-16s UNKNOWN   (current-build frame-probe sha unresolved -- cannot verify)\n' "$name" "${deployed:0:12}"
+    return 31
+  fi
+  if [ "$deployed" != "$expected" ]; then
+    printf '  %-14s %-16s ALARM     (deployed frame-probe LAGS the current build -- expected %s, redeploy the painter)\n' \
+      "$name" "${deployed:0:12}" "${expected:0:12}"
+    return 30
+  fi
+  printf '  %-14s %-16s OK        (frame-probe matches the current build)\n' "$name" "${deployed:0:12}"
+  return 0
+}
+
+# resolve_frame_probe_expected_sha EXPECTED_SHA EXPECTED_BIN -> the expected frame-probe sha256
+# (lowercase hex): EXPECTED_SHA wins; else sha256 of the local EXPECTED_BIN (the current CI build);
+# else "" (the whole section stays dormant). Best-effort, never fails the caller.
+resolve_frame_probe_expected_sha() {
+  local expected_sha="${1:-}" expected_bin="${2:-}"
+  if [ -n "$expected_sha" ]; then
+    printf '%s' "$expected_sha" | tr '[:upper:]' '[:lower:]'
+    return 0
+  fi
+  if [ -n "$expected_bin" ] && [ -f "$expected_bin" ]; then
+    sha256sum "$expected_bin" 2>/dev/null | awk '{print $1}' | tr '[:upper:]' '[:lower:]' || true
+  fi
+}
+
+# read_frame_probe_sha NAME TARGET -> the deployed /usr/local/bin/frame-probe sha256 (lowercase hex)
+# for a cam box, over ssh. "" if unreachable/absent (UNKNOWN downstream). Override per-node for
+# tests/offline via FRAME_PROBE_GATE_SHA_<NAME> (NAME uppercased, "-" -> "_").
+read_frame_probe_sha() {
+  local name="$1" target="${2:-}" var out
+  var="FRAME_PROBE_GATE_SHA_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
+  if [ -n "${!var:-}" ]; then
+    printf '%s' "${!var}" | tr '[:upper:]' '[:lower:]'
+    return 0
+  fi
+  [ -n "$target" ] || { printf ''; return 0; }
+  out="$(sshpass -p "${CAMERA_BOX_VERSION_GATE_SSH_PASS:-newlevel}" ssh \
+    -o StrictHostKeyChecking=no -o BatchMode=no \
+    -o "ConnectTimeout=${CAMERA_BOX_VERSION_GATE_SSH_TIMEOUT:-8}" \
+    "$target" \
+    'sha256sum /usr/local/bin/frame-probe 2>/dev/null' 2>/dev/null || true)"
+  printf '%s' "$out" | awk '{print $1}' | grep -oiE '^[0-9a-f]{64}$' | head -1 | tr '[:upper:]' '[:lower:]' || true
+}
+
+# frame_probe_pin_report EXPECTED_SHA PAIR... -> REPORT-ONLY: for each "name=target" PAIR, read the
+# deployed frame-probe sha and grade it against EXPECTED_SHA. DORMANT (prints nothing, returns 0)
+# when EXPECTED_SHA is empty. Never touches the caller's rc / the gate exit; a lagging/unread
+# painter SCREAMS a table row + a stderr banner. Honours the SAME CAMBOX_OFFLINE_ACK exclusion.
+frame_probe_pin_report() {
+  local expected="$1"; shift
+  [ -n "$expected" ] || return 0
+  echo "-- frame-probe (cam2 painter) sha-pin (#1138, report-only, ALARM never blocks) --"
+  local pair name target dep frc
+  for pair in "$@"; do
+    name="${pair%%=*}"
+    target="${pair#*=}"
+    cambox_offline_ack_is_acked "$name" && continue
+    dep="$(read_frame_probe_sha "$name" "$target")"
+    frc=0
+    frame_probe_pin_verdict "$name" "$dep" "$expected" || frc=$?
+    case "$frc" in
+      30) echo "!! FRAME-PROBE PIN ALARM: ${name} /usr/local/bin/frame-probe LAGS the current CI build -- redeploy the painter (report-only, does NOT block this run)." >&2 ;;
+      31) echo "!! FRAME-PROBE PIN ALARM: could not verify ${name} /usr/local/bin/frame-probe against the current build (report-only)." >&2 ;;
+    esac
+  done
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -----------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -346,12 +448,16 @@ main() {
   local fleet_file="$DEFAULT_FLEET_FILE"
   local main_pin_opt=""
   local no_main_pin="${CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN:-0}"
+  # #1138 frame-probe sha-pin (report-only, dormant unless one of these is supplied).
+  local fp_expected_sha="${FRAME_PROBE_EXPECTED_SHA:-}" fp_expected_bin=""
   local -a linux_raw=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --fleet-file) shift; fleet_file="${1:-}" ;;
       --main-pin) shift; main_pin_opt="${1:-}" ;;
       --no-main-pin) no_main_pin=1 ;;
+      --frame-probe-expected-sha) shift; fp_expected_sha="${1:-}" ;;
+      --frame-probe-expected-bin) shift; fp_expected_bin="${1:-}" ;;
       --linux) shift; linux_raw+=("${1:-}") ;;
       -h | --help)
         usage
@@ -402,10 +508,15 @@ main() {
   # relative-parity supplement. An explicit --main-pin / CAMERA_BOX_VERSION_GATE_MAIN_PIN wins over
   # the git read (read_main_cargo_version honours the same env seam). An unreadable pin fails CLOSED
   # (exit 11) — a fleet must NEVER run on a random/stale build unverified (the owner's hard rule).
+  # #1138: resolve the expected frame-probe sha ONCE (dormant "" unless supplied).
+  local fp_expected
+  fp_expected="$(resolve_frame_probe_expected_sha "$fp_expected_sha" "$fp_expected_bin")"
+
   local rc=0
   if [ "$no_main_pin" = "1" ]; then
     echo "[camera-box-version-gate] PIN layer DISABLED (--no-main-pin) — relative cross-box parity only (#875)." >&2
     camera_box_fleet_report "${entries[@]}" || rc=$?
+    frame_probe_pin_report "$fp_expected" "${linux_pairs[@]}"
     exit "$rc"
   fi
 
@@ -421,6 +532,7 @@ main() {
     exit 11
   fi
   camera_box_fleet_report_pinned "$pin" "${entries[@]}" || rc=$?
+  frame_probe_pin_report "$fp_expected" "${linux_pairs[@]}"
   exit "$rc"
 }
 
