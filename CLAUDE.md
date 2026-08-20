@@ -8,6 +8,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 ## Playbook router
 
 - Rig ops (DanteSync clock, device deploy, recovery) → load `.claude/skills/ops`
+- Deploying a HISTORICAL camera-box build (bisect/rollback: run-id lookup, deploy-fleet `--run`, the mixed-fleet version-parity gate refusal + neutralization seams, local E2E, the ci.yml auto-deploy clobber) → `.claude/rules/historical-build-bisect.md` (auto-loads on its `paths:`)
 - Provisioning / new cam box (build USB → setup-device.sh → verify-device.sh acceptance gate, #448-#454) → load `.claude/skills/provision`
 - V4L2 capture controls (colour vs sharp sets, device-state persistence, NZXT CAM4 no-controls, grayscale/tint, the #299 colour-capture chroma metric) → load `.claude/skills/capture`
 - Head-end OPTICAL blur/shutter `[0/8]` preflight (the head-end `rough=` signal + healthy 7.1–8.0 baseline; the observer-effect trap — never calibrate a camera-health gate from imag `stuck_density`; no on-box zbar/probe so journal-mine not a v4l2 grab; pure-Rust-classifier + shell-replica + parity-harness; Tier-0 #557 kills `--no-run` so verify via fmt + a language replica + direct bash, #1141) → `.claude/rules/optical-head-end-preflight.md` (auto-loads on its `paths:`)
