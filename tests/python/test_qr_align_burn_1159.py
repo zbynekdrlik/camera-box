@@ -86,3 +86,117 @@ class TestRunIdIgnoresBurn:
                     f"round {r} {src} latched frame_id {rnd[src][0]} (a burn id), not the painter "
                     f"{_painter_fid(r, i)}")
 
+
+
+class TestBurnAwareHelpers:
+    def test_is_burn_run_id(self):
+        assert qa.is_burn_run_id(STRIH_BURN)          # 911002
+        assert qa.is_burn_run_id(911004)              # stream
+        assert not qa.is_burn_run_id(PAINTER_RUN)     # a painter epoch run
+        assert not qa.is_burn_run_id(4242)
+
+    def test_has_painter_payload_rejects_a_burn_only_screenshot(self):
+        # The compounding decode_qr_texts guard bug: a burn is "P"-prefixed, so a plain
+        # startswith("P") check thought a painter had decoded and skipped the recovery ladder.
+        burn = _payload(STRIH_BURN, 200, 111_111)
+        assert not qa.has_painter_payload([burn])
+        assert not qa.has_painter_payload(["garbage", ""])
+        painter = _payload(PAINTER_RUN, 5000, 900_000)
+        assert qa.has_painter_payload([painter])
+        assert qa.has_painter_payload([burn, painter])   # painter present alongside the burn
+
+    def test_painter_run_id_excludes_the_burn(self):
+        maps = [{PAINTER_RUN: 900_000 + i, STRIH_BURN: 111_111 + i} for i in range(4)]
+        assert qa.painter_run_id(maps) == PAINTER_RUN
+        # burn-only screenshots -> no painter run at all
+        assert qa.painter_run_id([{STRIH_BURN: 111_111}, {STRIH_BURN: 222_222}]) is None
+        assert qa.painter_run_id([]) is None
+
+    def test_pick_painter_tick_never_latches_a_burn(self):
+        burn = _payload(STRIH_BURN, 777, 111_111)
+        # Even if a caller pins the run_id to the burn id, a burn is never a painter tick.
+        assert qa.pick_painter_tick([burn], STRIH_BURN) is None
+        painter = _payload(PAINTER_RUN, 5000, 900_000)
+        assert qa.pick_painter_tick([painter, burn], PAINTER_RUN) == (5000, 900_000)
+
+
+class TestRoundTableDiagnostics:
+    def test_table_marks_undecoded_and_summarizes_per_camera(self):
+        rounds = [
+            {"NDI cam1": (100, 0, 0), "NDI cam2": (101, 0, 0), "NDI cam3": None},
+            {"NDI cam1": (104, 0, 0), "NDI cam2": None, "NDI cam3": None},
+        ]
+        table = qa.format_round_table(rounds, ["NDI cam1", "NDI cam2", "NDI cam3"])
+        assert "per-round painter frame_id table" in table
+        assert "-- = undecoded" in table
+        assert "100" in table and "104" in table       # decoded frame_ids shown
+        assert "--" in table                            # undecoded cell marker
+        # one dead camera: cam3 decoded 0/2; cam1 decoded 2/2
+        assert "cam3=0/2" in table
+        assert "cam1=2/2" in table
+
+    def test_spread_is_shown_per_round(self):
+        rounds = [{"NDI cam1": (100, 0, 0), "NDI cam2": (103, 0, 0)}]
+        table = qa.format_round_table(rounds, ["NDI cam1", "NDI cam2"])
+        assert "spread" in table
+        assert "| 3" in table                            # 103 - 100 = 3
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end integration: a REAL composited painter+burn PNG decoded through cv2. This is
+# DETERMINISTIC AFTER THE FIX (the painter always decodes; burn-aware selection resolves it), and
+# proves the whole live decode path -- not just the pure resolver. The deterministic RED lives in
+# TestRunIdIgnoresBurn above; cv2's flaky multi-QR detect makes an image-level RED unreliable, so
+# this test only asserts the fixed invariant. CI installs opencv-python-headless/numpy/Pillow/qrcode.
+# --------------------------------------------------------------------------- #
+def _qr_png_gray(text, box=6, border=2):
+    import qrcode
+    q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=box, border=border)
+    q.add_data(text)
+    q.make(fit=True)
+    return q.make_image(fill_color="black", back_color="white").convert("L")
+
+
+def _compose_shot_png(painter_texts, burn_text, width=1920, height=1080):
+    """A screenshot-shaped PNG: painter dual-QR top-left, the strih burn bottom-left corner
+    (resolve_corner puts the strih burn there) -- the real E2E screenshot layout."""
+    import io
+    from PIL import Image
+    canvas = Image.new("L", (width, height), 255)
+    x = 40
+    for t in painter_texts:
+        im = _qr_png_gray(t)
+        canvas.paste(im, (x, 40))
+        x += im.width + 30
+    burn = _qr_png_gray(burn_text)
+    canvas.paste(burn, (40, height - burn.height - 40))
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class TestCompositedImageResolvesPainter:
+    def test_composited_painter_plus_burn_decodes_the_painter(self):
+        raw = []
+        burn_seen = False
+        for r in range(3):
+            shot = {}
+            for i, src in enumerate(SOURCES):
+                p_fid = 5000 + r * 4 + i
+                p_ts = 900_000 + (r * 4 + i) * ID_NS
+                png = _compose_shot_png(_painter_dual(p_fid, p_ts),
+                                        _payload(STRIH_BURN, 200 + r + i * 3, 111_111 + r))
+                texts = qa.decode_qr_texts(png)
+                # confirm the fixture genuinely exercises burn coexistence
+                if any(t.startswith(f"P{STRIH_BURN}.") for t in texts):
+                    burn_seen = True
+                shot[src] = (texts, 1_000_000 + (r * 4 + i) * 500_000)
+            raw.append(shot)
+        assert burn_seen, "fixture never composited a decodable burn -- not exercising the bug"
+        rounds_ticks, run_id = qa.ticks_from_raw(raw)
+        assert run_id == PAINTER_RUN, f"cv2-decoded run_id was {run_id}, not the painter"
+        for r, rnd in enumerate(rounds_ticks):
+            for i, src in enumerate(SOURCES):
+                assert rnd[src] is not None, f"round {r} {src} undecoded from the composited image"
+                assert rnd[src][0] == _painter_fid(r, i), (
+                    f"round {r} {src} latched {rnd[src][0]} (burn), not painter {_painter_fid(r, i)}")

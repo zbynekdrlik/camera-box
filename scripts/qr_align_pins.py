@@ -61,7 +61,7 @@ if _HERE not in sys.path:
 # parse_payload is the PURE, CRC-validating painter-QR decoder already used by mv_skew_snapshot --
 # reuse it (never a second copy). mv_skew_snapshot imports cv2/numpy LOCALLY, so this import is safe
 # for the pure tests (no display needed).
-from mv_skew_snapshot import parse_payload  # noqa: E402
+from mv_skew_snapshot import dominant_run_id, parse_payload  # noqa: E402
 
 DEFAULT_ROUNDS = 9
 DEFAULT_MIN_VALID_ROUNDS = 5
@@ -79,6 +79,28 @@ DEFAULT_HEIGHT = 1080
 DEFAULT_VERIFY_ROUNDS = 5
 DEFAULT_SETTLE_S = 4.0        # let the genlock FIFO re-lock after a pin change before re-measuring
 
+# The reserved node-burn run_ids -- a MIRROR of src/probe/recording.rs::NODE_BURN_RUN_IDS
+# (BURN_RUN_ID_* in src/probe/recording_latency.rs; keep in sync -- they are load-bearing consts,
+# not tunables). The measurement burn (vendor/distroav/src/ndi-burn-filter.cpp) emits its QR in the
+# BYTE-IDENTICAL painter wire format `P{run_id}.{frame_id}.{gen_ts_ns}.{crc}`, differing ONLY in
+# run_id (derived from the host role: strih=911002 on EVERY strih input, stream=911004, imag=911003,
+# plus the per-camera capture burns). So a "filter by payload SHAPE" cannot tell a burn from the
+# painter; the discriminator is the run_id. Under E2E the align step runs after the burns are added,
+# so the strih burn (911002) rides every screenshot alongside the painter dual-QR and would hijack
+# run_id auto-detect / the decode recovery-ladder guard unless excluded here (#1159).
+NODE_BURN_RUN_IDS = frozenset({
+    911001,  # BURN_RUN_ID_CAM1
+    911002,  # BURN_RUN_ID_STRIH
+    911003,  # BURN_RUN_ID_IMAG
+    911004,  # BURN_RUN_ID_STREAM
+    911007,  # BURN_RUN_ID_CAM4
+    911008,  # BURN_RUN_ID_CAM3
+    911009,  # BURN_RUN_ID_CAM2
+    911010,  # BURN_RUN_ID_CAM5
+    911011,  # BURN_RUN_ID_CAM6
+    911012,  # BURN_RUN_ID_CAM7
+})
+
 
 class AlignmentImpossible(SystemExit):
     """Raised when the run CANNOT be aligned (too few decodable rounds, or a delta beyond the
@@ -89,6 +111,73 @@ class AlignmentImpossible(SystemExit):
 # ---------------------------------------------------------------------------
 # PURE logic (no I/O, unit-tested with no rig)
 # ---------------------------------------------------------------------------
+def is_burn_run_id(run_id):
+    """True when `run_id` is one of the reserved node-burn ids (NODE_BURN_RUN_IDS) -- a digitally
+    burned QR (vendor/distroav/src/ndi-burn-filter.cpp), never the painter's optical dual-QR."""
+    return run_id in NODE_BURN_RUN_IDS
+
+
+def has_painter_payload(qr_texts):
+    """True iff any decoded text is a VALID painter (NON-burn) QR. The measurement burn shares the
+    exact painter wire format (`P{run_id}...`) but a fixed burn run_id, so a plain `startswith("P")`
+    check is satisfied by a decoded BURN -- which made decode_qr_texts skip its upscale/threshold
+    recovery pass while a missed painter QR was still recoverable (#1159). parse_payload validates
+    CRC + shape; is_burn_run_id drops the burns."""
+    for t in qr_texts:
+        p = parse_payload(t)
+        if p is not None and not is_burn_run_id(p[0]):
+            return True
+    return False
+
+
+def painter_run_id(tick_maps):
+    """The painter's universal run_id from per-screenshot {run_id: gen_ts_ns} maps, with the node
+    BURNS excluded FIRST. The measurement burn shares the painter wire format but a fixed per-node
+    run_id (NODE_BURN_RUN_IDS): under E2E the strih burn (911002) is present on EVERY on-air input,
+    so it TIES the painter on screenshot-count -- and since dominant_run_id breaks ties to the
+    SMALLEST id (911002 << the painter's ~1.8e9 epoch), the burn would win and be mistaken for the
+    painter (#1159). Stripping the burn ids first leaves the painter (the only universal NON-burn
+    run_id) to win unambiguously. Returns None when no non-burn run_id decoded anywhere."""
+    filtered = [{r: g for r, g in m.items() if not is_burn_run_id(r)} for m in tick_maps]
+    return dominant_run_id(filtered)
+
+
+def format_round_table(rounds_ticks, sources):
+    """A per-round x per-camera decoded painter frame_id table (undecoded cell = '--') plus a
+    per-camera 'decoded N/R' summary, for the FAIL diagnostics (#1159). It lets the operator tell
+    "undecodable" (mostly '--') from "unstable spread" (decoded but scattered frame_ids) from "one
+    dead camera" (one column all '--'). `rounds_ticks`: [{source: (frame_id, gen_ts_ns,
+    t_send_ns) | None}]; only frame_id (index 0) is shown."""
+    short = [s.replace("NDI ", "") for s in sources]
+    w = max([6] + [len(s) for s in short])
+    header = " round | " + " | ".join(s.rjust(w) for s in short) + " | spread"
+    lines = ["[qr-align] per-round painter frame_id table (-- = undecoded):", header,
+             "-" * len(header)]
+    decoded = {s: 0 for s in sources}
+    for r, rnd in enumerate(rounds_ticks):
+        cells, fids = [], []
+        for s in sources:
+            tk = rnd.get(s) if rnd else None
+            if tk is None:
+                cells.append("--".rjust(w))
+            else:
+                decoded[s] += 1
+                fids.append(tk[0])
+                cells.append(str(tk[0]).rjust(w))
+        spread = str(max(fids) - min(fids)) if len(fids) >= 2 else "n/a"
+        lines.append(f"{r:>6} | " + " | ".join(cells) + f" | {spread}")
+    n = len(rounds_ticks)
+    lines.append("decoded per camera: " + "  ".join(f"{sh}={decoded[s]}/{n}"
+                                                     for s, sh in zip(sources, short)))
+    return "\n".join(lines)
+
+
+def _emit_fail_diagnostics(rounds_ticks, sources):
+    """Print the per-round frame_id diagnostics table to stderr before an AlignmentImpossible abort
+    (#1159), so every FAIL path carries the per-camera/per-round detail, not just the verdict."""
+    sys.stderr.write(format_round_table(rounds_ticks, sources) + "\n")
+
+
 def pick_painter_tick(qr_texts, run_id):
     """From one screenshot's decoded QR texts, return (frame_id, gen_ts_ns) of the MAX-frame_id
     painter payload matching `run_id` (the dual-QR "ber max" rule), or None when no valid matching
@@ -99,6 +188,8 @@ def pick_painter_tick(qr_texts, run_id):
         if p is None:
             continue
         r, frame_id, gen_ts_ns = p
+        if is_burn_run_id(r):
+            continue  # a node burn shares the painter wire format; never latch it as a painter tick
         if r != run_id:
             continue
         if best is None or frame_id > best[0]:
@@ -242,7 +333,7 @@ def decode_qr_texts(png_bytes):
 
     _collect(img)
     # If nothing painter-shaped decoded, try the preprocessing ladder before giving up on this shot.
-    if not any(t.startswith("P") for t in found_texts):
+    if not has_painter_payload(found_texts):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         up = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
         # autocontrast stretch
@@ -253,7 +344,7 @@ def decode_qr_texts(png_bytes):
         for thr in (110, 130, 150):
             _bw = cv2.threshold(up, thr, 255, cv2.THRESH_BINARY)[1]
             _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
-            if any(t.startswith("P") for t in found_texts):
+            if has_painter_payload(found_texts):
                 break
     return list(found_texts)
 
@@ -346,10 +437,10 @@ def ticks_from_raw(raw, run_id=None):
     {source: (frame_id, gen_ts_ns, t_send_ns) | None}. `raw` is a list of rounds, each
     {source: (qr_texts, t_send_ns)}. Extracted from measure_rounds so the run_id-resolution +
     tick-selection path is Tier-0 testable with synthetic decoded-text lists (no rig, no cv2)."""
-    from mv_skew_snapshot import tick_map, dominant_run_id
+    from mv_skew_snapshot import tick_map
     if run_id is None:
         maps = [tick_map(texts) for shot in raw for (texts, _t) in shot.values()]
-        run_id = dominant_run_id(maps)
+        run_id = painter_run_id(maps)  # #1159: exclude node burns so a burn never wins run_id
     rounds_ticks = []
     for shot in raw:
         rnd = {}
@@ -402,6 +493,7 @@ def align(sources, host, password, *, execute, rounds, min_valid_rounds, min_par
     }
 
     if run_id is None:
+        _emit_fail_diagnostics(rounds_ticks, sources)  # #1159: all "--" = nothing decoded on any input
         raise AlignmentImpossible(
             "[qr-align] no painter QR decoded on the on-air strih inputs -- cannot measure "
             f"alignment (sources={sources}). Is the painter running and every input on-air?")
@@ -422,7 +514,11 @@ def align(sources, host, password, *, execute, rounds, min_valid_rounds, min_par
         return result
 
     # NOT aligned -> must re-derive to align; robust_deltas raises if the spread is un-measurable.
-    deltas, n_valid = robust_deltas(rounds_ticks, current_pins, min_valid_rounds)
+    try:
+        deltas, n_valid = robust_deltas(rounds_ticks, current_pins, min_valid_rounds)
+    except AlignmentImpossible:
+        _emit_fail_diagnostics(rounds_ticks, sources)  # #1159: per-camera/per-round detail on abort
+        raise
     result["median_deltas_ms"] = {s: round(v, 2) for s, v in deltas.items()}
     result["valid_rounds"] = n_valid
 
@@ -431,6 +527,7 @@ def align(sources, host, password, *, execute, rounds, min_valid_rounds, min_par
     result["worst_source"] = widest_src
     result["worst_delta_ms"] = round(worst, 2)
     if not ok:
+        _emit_fail_diagnostics(rounds_ticks, sources)  # #1159
         raise AlignmentImpossible(
             f"[qr-align] cannot align: cross-camera spread {worst:.1f} ms exceeds the "
             f"{max_delta_ms:.0f} ms sanity bound -- a degraded/underrun grabber, not a real "
@@ -468,6 +565,7 @@ def align(sources, host, password, *, execute, rounds, min_valid_rounds, min_par
                     post_deltas.setdefault(s, []).append(v)
         named = {s: round(statistics.median(v), 1) for s, v in post_deltas.items()} if post_deltas \
             else "unverifiable"
+        _emit_fail_diagnostics(verify_ticks, sources)  # #1159: the RE-MEASURED rounds
         raise AlignmentImpossible(
             f"[qr-align] applied floor-3 pins {plan} but the re-measured frame_id spread is "
             f"{post_spread} (> {parity_tol_ids}) -- alignment did NOT hold. Per-camera residual "
