@@ -199,6 +199,25 @@ camera_box_pin_verdict() {
   return 0
 }
 
+# camera_box_fleet_candidate_uniform CANDIDATE ENTRY... -> 0 iff EVERY non-acked entry's version
+# equals CANDIDATE exactly (an empty/unread version never matches — fail closed), else 1. The pure
+# decision behind the #1136-addendum --candidate-pin accept: the pre-merge E2E deploys THIS run's
+# merge-candidate build to the fleet to measure it, so a fleet uniformly on that ONE candidate is a
+# valid measurement target; anything else (stale, mixed, unread) falls back to the main-pin refusal.
+camera_box_fleet_candidate_uniform() {
+  local candidate="$1"
+  shift
+  local entry name version
+  [ -n "$candidate" ] || return 1
+  for entry in "$@"; do
+    name="${entry%%=*}"
+    version="${entry#*=}"
+    if cambox_offline_ack_is_acked "$name"; then continue; fi
+    [ "$version" = "$candidate" ] || return 1
+  done
+  return 0
+}
+
 # camera_box_fleet_report_pinned PIN ENTRY... -> ENTRY is "name=version" (version may be empty — an
 # unread box). Grades every active box against PIN (origin/main's camera-box version), honouring the
 # SAME CAMBOX_OFFLINE_ACK exclusion as the parity report. Prints the box->version table and returns
@@ -272,6 +291,11 @@ Options:
                     settable via CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN=1. The documented escape for a
                     deliberate pre-merge / operator soak where the fleet is not yet on main; the
                     automatic push:[dev,main] E2E gate NEVER sets it, so it always enforces the pin.
+  --candidate-pin VERSION  a SECOND accepted uniform target (issue 1136 addendum): the merge-
+                    candidate build THIS CI run built. Accepted ONLY when the whole active fleet is
+                    uniformly on it (unread boxes stay fail-closed; stale/mixed fleets stay
+                    refused) — the pre-merge bootstrap escape that does not reopen the
+                    uniformly-stale hole. Also settable via CAMERA_BOX_VERSION_GATE_CANDIDATE_PIN.
   --linux "N=U@IP ..."  one or more SSH-reachable cam boxes (space-separated "name=user@ip" pairs
                     in ONE argument, mirrors dantesync-version-gate.sh's --linux). Repeatable. Read
                     via \`/usr/local/bin/camera-box --version\` over SSH.
@@ -447,6 +471,7 @@ fi
 main() {
   local fleet_file="$DEFAULT_FLEET_FILE"
   local main_pin_opt=""
+  local candidate_pin="${CAMERA_BOX_VERSION_GATE_CANDIDATE_PIN:-}"
   local no_main_pin="${CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN:-0}"
   # #1138 frame-probe sha-pin (report-only, dormant unless one of these is supplied).
   local fp_expected_sha="${FRAME_PROBE_EXPECTED_SHA:-}" fp_expected_bin=""
@@ -455,6 +480,7 @@ main() {
     case "$1" in
       --fleet-file) shift; fleet_file="${1:-}" ;;
       --main-pin) shift; main_pin_opt="${1:-}" ;;
+      --candidate-pin) shift; candidate_pin="${1:-}" ;;
       --no-main-pin) no_main_pin=1 ;;
       --frame-probe-expected-sha) shift; fp_expected_sha="${1:-}" ;;
       --frame-probe-expected-bin) shift; fp_expected_bin="${1:-}" ;;
@@ -532,6 +558,16 @@ main() {
     exit 11
   fi
   camera_box_fleet_report_pinned "$pin" "${entries[@]}" || rc=$?
+  # --- #1136 addendum: candidate-pin accept — the pre-merge bootstrap escape that does NOT
+  # reopen the uniformly-stale hole. Only an off-pin refusal (20) is reconsidered, and ONLY when
+  # the whole active fleet is uniformly on the ONE named candidate (this run's own merge-candidate
+  # build). UNKNOWN (11) stays fail-closed; a stale or mixed fleet stays refused.
+  if [ "$rc" -eq 20 ] && [ -n "$candidate_pin" ] && [ "$candidate_pin" != "$pin" ]; then
+    if camera_box_fleet_candidate_uniform "$candidate_pin" "${entries[@]}"; then
+      echo "GATE PASS — active fleet is uniformly on the CANDIDATE build ${candidate_pin} (this run's merge candidate; main pin ${pin} not yet advanced — issue 1136 pre-merge accept)."
+      rc=0
+    fi
+  fi
   frame_probe_pin_report "$fp_expected" "${linux_pairs[@]}"
   exit "$rc"
 }
