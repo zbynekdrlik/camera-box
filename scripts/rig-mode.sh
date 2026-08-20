@@ -656,11 +656,12 @@ BANNER
 #                         of a proven-OK genlock_build line REFUSES).
 # Pure (no I/O), ALWAYS returns 0 (verdict is on stdout) so tests/rig_mode.rs can source rig-mode.sh
 # and exercise every branch (Tier-0, #477). awk field-splitting ignores leading whitespace, so $1 is
-# the exact `genlock_build` label and $2 the STATE; `exit` after the first match (--check-imag emits
-# this facet exactly once). No `grep -q` (SIGPIPE-under-pipefail footgun under this file's set -e).
+# the exact `genlock_build` label and $2 the STATE; the awk DRAINS the whole input (first-match latch
+# + END print, NO early `exit`) so printf never takes SIGPIPE under this file's set -euo pipefail —
+# the same drain-safe convention genlock_build_drift_report uses (--check-imag emits this facet once).
 imag_genlock_gate_verdict() {
   local out="$1" rc="$2" state
-  state="$(printf '%s\n' "$out" | awk '$1=="genlock_build"{print $2; exit}')"
+  state="$(printf '%s\n' "$out" | awk '$1=="genlock_build" && s==""{s=$2} END{print s}')"
   if [ "$state" = "OK" ]; then
     printf 'PASS\n'
     return 0
@@ -1081,14 +1082,17 @@ verify_marker_device_monitor() {
 
 do_test() {
   require_sshpass
+  # #789 (owner 2026-08-19): HARD-BLOCK runs FIRST, before ANY state mutation — a refusal (exit 30)
+  # must leave the rig exactly as it was (no heartbeat SET, no burns toggled), so the gate precedes
+  # rig_heartbeat_write. It only needs require_sshpass above (its drift-guard --check-imag ssh'es imag).
+  echo "[obs] #789 TEST-entry HARD-BLOCK: imag genlock build must be current before any measurement (owner 2026-08-19 — gates maximalne striktne, no WARN-and-proceed):"
+  require_imag_genlock_current
   # #281 Fix#3: mark the rig as deliberately in a TEST state so the rig-restore watchdog does not
   # fight an in-progress test (until the marker goes stale — see the lib-source note above).
   rig_heartbeat_write "rig-mode:test" 2>/dev/null \
     && echo "[#281] rig-active heartbeat SET ($(rig_heartbeat_path))" \
     || echo "WARNING: could not set rig-active heartbeat (#281)" >&2
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
-  echo "[obs] #789 TEST-entry HARD-BLOCK: imag genlock build must be current before any measurement (owner 2026-08-19 — gates maximalne striktne, no WARN-and-proceed):"
-  require_imag_genlock_current
   echo
   echo "[cam2 ${PAINTER_IP}] #725 resolve the QPSK audio-marker device from cam2's LIVE aplay -l (never trust the hardcoded default):"
   local resolved_marker_device
