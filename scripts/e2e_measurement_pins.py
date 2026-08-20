@@ -66,6 +66,28 @@ PHASE_SAFE_LO_FRAC = 0.6     # snap a prone pin to a frac in [LO, HI] -- centred
 PHASE_SAFE_HI_FRAC = 0.8
 PHASE_SNAP_MAX_COST_MS = 20  # a prone pin must find a safe pin within this many ms (else INCOHERENT)
 
+# #1124 item 2 -- EDGE-OSCILLATION (FIFO limit-cycle) classifier thresholds. DATA-CALIBRATED from
+# the 19 local verdict JSONs (2026-08-20): the ONLY genuine FIFO-limit-cycle run, verdict
+# 1804432786 (cam2 pin 168, frac 0.04), churned uniform copies-approx-gaps per segment (CAM2 5/4,
+# 7/7, 5/4 -- max magnitude 7); the post-snap healthy MEQ run 66065064 (spread 5.78) had it GONE
+# (CAM2 0/0, 1/6, 1/1); the frozen-camera run 547108056 had CAM1 storm windows (98/1, 845/0). So a
+# per-cambox segment is EDGE-OSCILLATING iff both sides are genuinely present (min>=MIN_BOTH), the
+# churn is MODERATE not a frozen storm (max<=MAX_MAGNITUDE), and it is BALANCED copies-approx-gaps
+# (|c-g| <= BALANCE_FRAC*max). A cambox is a SUSPECT iff it has >=MIN_WINDOWS such windows AND ZERO
+# storm windows (a frozen leg is a DIFFERENT failure class -- it must never be masked as "rerun the
+# profile edge"). Verified this fires on EXACTLY 1804432786/CAM2 and no other of the 19 runs.
+EDGE_OSC_MIN_BOTH = 3          # min(copies, gaps) >= this: both over- AND undershoot present
+EDGE_OSC_MAX_MAGNITUDE = 25    # max(copies, gaps) <= this: moderate churn, NOT a frozen storm
+EDGE_OSC_BALANCE_FRAC = 0.5    # |copies - gaps| <= this * max(copies, gaps): balanced (approx-equal).
+                               # NOTE: 0.5 admits up to a 2:1 ratio (3/6, 4/8) as "balanced" -- looser
+                               # than a strict copies==gaps, DELIBERATELY: the live FIFO signature is
+                               # only approximately balanced (5/4, 7/7) and per-run phase noise skews
+                               # the ratio, so a tight bound would miss real edges. It stays data-safe
+                               # because MIN_BOTH>=3 + MAX_MAGNITUDE<=25 + MIN_WINDOWS>=2 already gate
+                               # it to exactly 1/19 real runs (a lone 3/6 window is a singleton, not a
+                               # sustained edge). Re-tighten only against fresh mined verdict data.
+EDGE_OSC_MIN_WINDOWS = 2       # >= this many oscillating windows on ONE cambox: sustained, not a one-off
+
 
 def _phase_frac(pin_ms) -> float:
     """The release-phase fraction frac(pin/frame_period) in [0, 1)."""
@@ -341,6 +363,110 @@ def staleness_report(profile: dict, observed_delivery_ms: dict, staleness_frames
     return {"stale": any_stale, "threshold_ms": round(threshold, 1), "cameras": cams}
 
 
+def _verdict_cam_key(profile_src: str) -> str:
+    """Map a profile camera key (`"NDI cam1"`) to the verdict's own delivery-latency key
+    (`"cam1"`). The verdict's all_cambox_delivery_latency / all_cambox_continuity blocks key on
+    the bare `camN`; the profile keys on the OBS input name `NDI camN`. The bare token is the
+    last whitespace-delimited word of the OBS input name."""
+    parts = str(profile_src).split()
+    return parts[-1] if parts else str(profile_src)
+
+
+def observed_delivery_from_verdict(verdict: dict, profile: dict) -> dict:
+    """PURE (item 1): build the `{profile_src: observed_delivery_p50_ms}` map staleness_report
+    consumes, from a full verdict JSON's `all_cambox_delivery_latency` block.
+
+    The verdict block keys on bare `camN` -> `{p50_ms, ...}` (or `null` for a camera that did
+    not deliver), plus scalar summary keys (`cross_camera_spread_ms`, `gates_overall_pass`, ...).
+    For each camera IN THE PROFILE, look up its bare `camN` entry; include it ONLY when the entry
+    is a dict carrying a numeric `p50_ms`. A null / absent / non-dict entry is skipped (a partial
+    verdict is not evidence of staleness -- staleness_report already treats a missing camera as
+    non-stale). Never raises on a missing/None block (returns {})."""
+    block = verdict.get("all_cambox_delivery_latency")
+    if not isinstance(block, dict):
+        return {}
+    observed = {}
+    for src in profile.get("cameras", {}):
+        entry = block.get(_verdict_cam_key(src))
+        if isinstance(entry, dict):
+            p50 = entry.get("p50_ms")
+            if isinstance(p50, (int, float)):
+                observed[src] = float(p50)
+    return observed
+
+
+def _edge_window_kind(copies, gaps) -> str:
+    """PURE: classify ONE per-cambox segment's (copies, gaps) for the #1124 edge-oscillation
+    detector. Returns:
+      "oscillating" -- the FIFO limit-cycle signature: both sides genuinely present
+                       (min>=EDGE_OSC_MIN_BOTH), MODERATE (max<=EDGE_OSC_MAX_MAGNITUDE), and
+                       BALANCED (|c-g| <= EDGE_OSC_BALANCE_FRAC*max).
+      "storm"       -- max(copies,gaps) > EDGE_OSC_MAX_MAGNITUDE: a frozen/dead leg, NOT an edge
+                       oscillation (its presence DISQUALIFIES the cambox -- different class).
+      "quiet"       -- anything else (clean, a singleton, or a small asymmetric event).
+    """
+    try:
+        c = int(copies)
+        g = int(gaps)
+    except (TypeError, ValueError):
+        return "quiet"
+    hi = max(c, g)
+    if hi > EDGE_OSC_MAX_MAGNITUDE:
+        return "storm"
+    if min(c, g) >= EDGE_OSC_MIN_BOTH and abs(c - g) <= EDGE_OSC_BALANCE_FRAC * hi:
+        return "oscillating"
+    return "quiet"
+
+
+def edge_oscillation_report(verdict: dict) -> dict:
+    """PURE, REPORT-ONLY (item 2): does the verdict show the uniform copies-approx-gaps FIFO
+    limit-cycle signature on any cambox? Reads `all_cambox_continuity.segments` (each
+    `{cambox, copies, gaps, ...}`), groups by cambox, and flags a cambox as a SUSPECT iff it has
+    >= EDGE_OSC_MIN_WINDOWS oscillating windows AND ZERO storm windows (a frozen leg is a
+    different class -- never mask it as a profile-edge rerun).
+
+    This NEVER decides on its own that the run failed; the harness calls it only on a FAILED
+    profile-mode run and prints "suspect profile edge phase -- rerun" so it reads as the known
+    #757-Correction-2 per-run-phase-relative edge flake rather than a regression. Returns
+    {suspect, suspect_camboxes, camboxes: {CB: {oscillating_windows, storm_windows, suspect,
+    windows}}, threshold}. Never raises on a missing/malformed continuity block."""
+    cont = verdict.get("all_cambox_continuity")
+    segs = cont.get("segments") if isinstance(cont, dict) else None
+    per = {}
+    if isinstance(segs, list):
+        for s in segs:
+            if not isinstance(s, dict):
+                continue
+            cb = s.get("cambox")
+            if cb is None:
+                continue
+            kind = _edge_window_kind(s.get("copies"), s.get("gaps"))
+            entry = per.setdefault(cb, {"oscillating_windows": 0, "storm_windows": 0, "windows": []})
+            entry["windows"].append({
+                "copies": s.get("copies"), "gaps": s.get("gaps"), "kind": kind})
+            if kind == "oscillating":
+                entry["oscillating_windows"] += 1
+            elif kind == "storm":
+                entry["storm_windows"] += 1
+    suspect_camboxes = []
+    for cb, e in per.items():
+        e["suspect"] = (
+            e["oscillating_windows"] >= EDGE_OSC_MIN_WINDOWS and e["storm_windows"] == 0)
+        if e["suspect"]:
+            suspect_camboxes.append(cb)
+    return {
+        "suspect": bool(suspect_camboxes),
+        "suspect_camboxes": sorted(suspect_camboxes),
+        "camboxes": per,
+        "threshold": {
+            "min_both": EDGE_OSC_MIN_BOTH,
+            "max_magnitude": EDGE_OSC_MAX_MAGNITUDE,
+            "balance_frac": EDGE_OSC_BALANCE_FRAC,
+            "min_windows": EDGE_OSC_MIN_WINDOWS,
+        },
+    }
+
+
 def _cmd_resolve(args) -> int:
     profile = load_profile(args.profile)
     problems = coherence_check(profile)
@@ -370,6 +496,48 @@ def _cmd_staleness(args) -> int:
     return 0  # report-only: never fails the caller
 
 
+def _cmd_staleness_from_verdict(args) -> int:
+    """#1124 item 1: harness entry -- read the full verdict JSON, map its
+    all_cambox_delivery_latency onto the profile keys, and run the report-only staleness check.
+    Report-only: always returns 0 (never fails the caller)."""
+    profile = load_profile(args.profile)
+    with open(args.verdict, encoding="utf-8") as fh:
+        verdict = json.load(fh)
+    observed = observed_delivery_from_verdict(verdict, profile)
+    frames = args.staleness_frames
+    if frames is None:
+        frames = float(profile.get("staleness_frames", 1.5))
+    report = staleness_report(profile, observed, frames)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if report["stale"]:
+        sys.stderr.write(
+            "[measurement-eq] measurement profile STALE -- observed delivery drifted "
+            f"> {report['threshold_ms']}ms from the equalization target; re-derive "
+            f"{args.profile} from a fresh delivery measurement.\n")
+    elif not observed:
+        sys.stderr.write(
+            "[measurement-eq] staleness NOT evaluated -- no per-camera delivery in the verdict "
+            f"({args.verdict}); nothing to compare (report-only, no action).\n")
+    return 0  # report-only: never fails the caller
+
+
+def _cmd_edge_oscillation(args) -> int:
+    """#1124 item 2: harness entry -- read the verdict JSON and report the edge-oscillation
+    (FIFO limit-cycle) signature. Report-only: always returns 0."""
+    with open(args.verdict, encoding="utf-8") as fh:
+        verdict = json.load(fh)
+    report = edge_oscillation_report(verdict)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if report["suspect"]:
+        sys.stderr.write(
+            "[measurement-eq] suspect profile edge phase -- rerun. The uniform copies~=gaps FIFO "
+            f"limit-cycle signature is present on: {', '.join(report['suspect_camboxes'])}. This is "
+            "the known per-run-phase-relative edge flake class (#757 Correction 2), NOT a "
+            "regression -- rerun the profile-mode E2E; if it recurs, re-derive the profile pins "
+            "(a persistent edge means a phase-snapped pin drifted onto the FIFO-prone band).\n")
+    return 0  # report-only: never fails the caller
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -385,6 +553,22 @@ def main(argv=None) -> int:
                    help="JSON {source: observed_delivery_p50_ms} from the run's verdict")
     s.add_argument("--staleness-frames", type=float, default=None)
     s.set_defaults(func=_cmd_staleness)
+
+    # #1124 item 1: harness wiring -- staleness straight off a full verdict JSON.
+    sv = sub.add_parser(
+        "staleness-from-verdict",
+        help="report-only: staleness from a run's all_cambox_delivery_latency verdict block")
+    sv.add_argument("--profile", required=True)
+    sv.add_argument("--verdict", required=True, help="the run's full verdict-<id>.json")
+    sv.add_argument("--staleness-frames", type=float, default=None)
+    sv.set_defaults(func=_cmd_staleness_from_verdict)
+
+    # #1124 item 2: harness wiring -- edge-oscillation (FIFO limit-cycle) classifier.
+    eo = sub.add_parser(
+        "edge-oscillation",
+        help="report-only: does the verdict show the uniform copies~=gaps FIFO edge signature")
+    eo.add_argument("--verdict", required=True, help="the run's full verdict-<id>.json")
+    eo.set_defaults(func=_cmd_edge_oscillation)
 
     args = ap.parse_args(argv)
     return args.func(args)

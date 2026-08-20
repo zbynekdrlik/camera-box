@@ -245,3 +245,172 @@ class TestLoadProfile:
         p.write_text(json.dumps(prof))
         with pytest.raises(SystemExit):
             mp.load_profile(str(p))
+
+
+# --------------------------------------------------------------------------- #
+# #1124 -- report-only diagnostics wired on top of the #1003 profile: the
+# staleness-from-verdict key mapping (item 1) and the edge-oscillation FIFO
+# classifier (item 2). Both PURE + Tier-0; the harness wiring lives in
+# scripts/lib/measurement-eq.sh + recording-e2e.sh.
+# --------------------------------------------------------------------------- #
+
+class TestObservedDeliveryFromVerdict:
+    """item 1: map the verdict's all_cambox_delivery_latency (keys cam1/cam2/...,
+    each {p50_ms} or null) onto the profile's camera keys (NDI cam1/...) so
+    staleness_report can consume it directly."""
+
+    def _verdict(self, cam1=169.8, cam2=None, cam3=175.6):
+        cams = {}
+        for name, p50 in (("cam1", cam1), ("cam2", cam2), ("cam3", cam3)):
+            cams[name] = None if p50 is None else {"p50_ms": p50, "mean_ms": p50}
+        return {"all_cambox_delivery_latency": cams}
+
+    def test_maps_camN_to_profile_NDI_camN_keys(self):
+        obs = mp.observed_delivery_from_verdict(self._verdict(), _profile())
+        assert obs == {"NDI cam1": 169.8, "NDI cam3": 175.6}  # cam2 null -> skipped
+
+    def test_a_null_camera_is_skipped_not_zeroed(self):
+        obs = mp.observed_delivery_from_verdict(self._verdict(cam2=None), _profile())
+        assert "NDI cam2" not in obs
+
+    def test_a_camera_absent_from_the_verdict_block_is_skipped(self):
+        v = {"all_cambox_delivery_latency": {"cam1": {"p50_ms": 200.0}}}
+        obs = mp.observed_delivery_from_verdict(v, _profile())
+        assert obs == {"NDI cam1": 200.0}
+
+    def test_a_camera_not_in_the_profile_is_ignored(self):
+        # cam7 delivers but the profile only covers cam1..cam3 -> never appears.
+        v = {"all_cambox_delivery_latency": {"cam1": {"p50_ms": 200.0}, "cam7": {"p50_ms": 50.0}}}
+        obs = mp.observed_delivery_from_verdict(v, _profile())
+        assert set(obs) == {"NDI cam1"}
+
+    def test_a_missing_delivery_block_yields_empty_not_error(self):
+        assert mp.observed_delivery_from_verdict({}, _profile()) == {}
+        assert mp.observed_delivery_from_verdict({"all_cambox_delivery_latency": None}, _profile()) == {}
+
+    def test_non_numeric_scalar_summary_keys_are_ignored(self):
+        # the block carries cross_camera_spread_ms / gates_overall_pass scalars alongside cams.
+        v = {"all_cambox_delivery_latency": {
+            "cam1": {"p50_ms": 210.0}, "cross_camera_spread_ms": 5.7, "gates_overall_pass": True}}
+        obs = mp.observed_delivery_from_verdict(v, _profile())
+        assert obs == {"NDI cam1": 210.0}
+
+    def test_feeds_staleness_report_end_to_end(self):
+        # the whole point of item 1: build observed from the verdict, then judge staleness.
+        v = self._verdict(cam1=270.0, cam2=None, cam3=205.0)  # cam1 63ms off its 207 expected
+        obs = mp.observed_delivery_from_verdict(v, _profile())
+        rep = mp.staleness_report(_profile(), obs, staleness_frames=1.5)
+        assert rep["stale"] is True
+        assert rep["cameras"]["NDI cam1"]["stale"] is True
+
+
+class TestEdgeOscillationReport:
+    """item 2: detect the uniform copies-approx-gaps FIFO limit-cycle signature per cambox
+    from the verdict's all_cambox_continuity.segments. DATA-CALIBRATED from the 19 local
+    verdict JSONs: only the genuine FIFO run (1804432786 CAM2) is a suspect."""
+
+    def _verdict(self, segs):
+        return {"all_cambox_continuity": {"segments": [
+            {"cambox": cb, "copies": c, "gaps": g} for (cb, c, g) in segs]}}
+
+    def test_the_live_fifo_validation_signature_is_a_suspect(self):
+        # verdict 1804432786: CAM2 pin 168 (frac 0.04) churned 5/4, 7/7, 5/4 per segment.
+        v = self._verdict([
+            ("CAM1", 0, 0), ("CAM2", 5, 4), ("CAM3", 0, 0),
+            ("CAM1", 1, 3), ("CAM2", 7, 7), ("CAM3", 0, 0),
+            ("CAM1", 2, 2), ("CAM2", 5, 4), ("CAM3", 0, 0),
+            ("CAM1", 1, 0)])
+        rep = mp.edge_oscillation_report(v)
+        assert rep["suspect"] is True
+        assert rep["camboxes"]["CAM2"]["suspect"] is True
+        assert rep["camboxes"]["CAM2"]["oscillating_windows"] == 3
+        assert "CAM2" in rep["suspect_camboxes"]
+
+    def test_the_post_snap_healthy_meq_run_is_not_a_suspect(self):
+        # verdict 66065064 (spread 5.78, post cam2 168->160 snap): the churn is GONE.
+        v = self._verdict([
+            ("CAM1", 2, 3), ("CAM2", 0, 0), ("CAM3", 0, 0),
+            ("CAM1", 1, 0), ("CAM2", 1, 6), ("CAM3", 0, 0),
+            ("CAM1", 0, 1), ("CAM2", 1, 1), ("CAM3", 0, 0),
+            ("CAM1", 1, 0)])
+        rep = mp.edge_oscillation_report(v)
+        assert rep["suspect"] is False
+        assert rep["suspect_camboxes"] == []
+
+    def test_a_frozen_camera_storm_is_not_an_edge_oscillation(self):
+        # verdict 547108056 CAM1: 3/3, 98/1, 845/0, 30/29 -- a DEAD camera, not a FIFO edge.
+        # The storm windows (98/1, 845/0) must EXCLUDE it (a frozen leg is a different class).
+        v = self._verdict([
+            ("CAM1", 3, 3), ("CAM1", 98, 1), ("CAM1", 845, 0), ("CAM1", 30, 29)])
+        rep = mp.edge_oscillation_report(v)
+        assert rep["suspect"] is False
+        assert rep["camboxes"]["CAM1"]["suspect"] is False
+        assert rep["camboxes"]["CAM1"]["storm_windows"] >= 1
+
+    def test_a_single_oscillating_window_is_not_sustained_enough(self):
+        # one 17/17 window alone (66065064 CAM2 had exactly one) is a singleton, not the pattern.
+        v = self._verdict([("CAM2", 17, 17), ("CAM2", 0, 0), ("CAM2", 1, 1)])
+        rep = mp.edge_oscillation_report(v)
+        assert rep["suspect"] is False
+
+    def test_a_gap_heavy_asymmetric_window_is_not_balanced(self):
+        # copies=1 gaps=6 fails the both>=3 test AND the balance test -> not oscillating.
+        v = self._verdict([("CAM2", 1, 6), ("CAM2", 1, 6)])
+        rep = mp.edge_oscillation_report(v)
+        assert rep["suspect"] is False
+
+    def test_missing_continuity_or_segments_is_not_a_suspect_not_an_error(self):
+        assert mp.edge_oscillation_report({})["suspect"] is False
+        assert mp.edge_oscillation_report({"all_cambox_continuity": {}})["suspect"] is False
+        assert mp.edge_oscillation_report(
+            {"all_cambox_continuity": {"segments": []}})["suspect"] is False
+
+    def test_report_carries_the_calibrated_thresholds(self):
+        rep = mp.edge_oscillation_report(self._verdict([("CAM2", 5, 4), ("CAM2", 7, 7)]))
+        assert rep["threshold"]["min_both"] == mp.EDGE_OSC_MIN_BOTH
+        assert rep["threshold"]["max_magnitude"] == mp.EDGE_OSC_MAX_MAGNITUDE
+        assert rep["threshold"]["min_windows"] == mp.EDGE_OSC_MIN_WINDOWS
+
+
+class TestStalenessFromVerdictCLI:
+    def test_reads_a_verdict_and_reports_report_only_exit_0(self, tmp_path, capsys):
+        prof_p = os.path.join(_SCRIPTS, "e2e-measurement-pins.json")
+        v = {"all_cambox_delivery_latency": {"cam1": {"p50_ms": 270.0}, "cam3": {"p50_ms": 205.0}}}
+        vp = tmp_path / "verdict.json"
+        vp.write_text(json.dumps(v))
+        rc = mp.main(["staleness-from-verdict", "--profile", prof_p, "--verdict", str(vp)])
+        out = capsys.readouterr()
+        assert rc == 0  # report-only never fails the caller
+        rep = json.loads(out.out)
+        assert rep["stale"] is True  # cam1 270 vs expected 207
+
+    def test_missing_delivery_block_is_report_only_not_error(self, tmp_path, capsys):
+        prof_p = os.path.join(_SCRIPTS, "e2e-measurement-pins.json")
+        vp = tmp_path / "verdict.json"
+        vp.write_text(json.dumps({"nodes": {}}))
+        rc = mp.main(["staleness-from-verdict", "--profile", prof_p, "--verdict", str(vp)])
+        assert rc == 0
+
+
+class TestEdgeOscillationCLI:
+    def test_reports_suspect_report_only_exit_0(self, tmp_path, capsys):
+        v = {"all_cambox_continuity": {"segments": [
+            {"cambox": "CAM2", "copies": 5, "gaps": 4},
+            {"cambox": "CAM2", "copies": 7, "gaps": 7}]}}
+        vp = tmp_path / "verdict.json"
+        vp.write_text(json.dumps(v))
+        rc = mp.main(["edge-oscillation", "--verdict", str(vp)])
+        out = capsys.readouterr()
+        assert rc == 0
+        rep = json.loads(out.out)
+        assert rep["suspect"] is True
+
+    def test_clean_run_reports_not_suspect(self, tmp_path, capsys):
+        v = {"all_cambox_continuity": {"segments": [
+            {"cambox": "CAM2", "copies": 0, "gaps": 0}]}}
+        vp = tmp_path / "verdict.json"
+        vp.write_text(json.dumps(v))
+        rc = mp.main(["edge-oscillation", "--verdict", str(vp)])
+        out = capsys.readouterr()
+        assert rc == 0
+        assert json.loads(out.out)["suspect"] is False
