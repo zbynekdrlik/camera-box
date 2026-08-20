@@ -848,7 +848,7 @@ def _blocking_failures(verdict):
     if (_g(verdict, "full_chain", "loss", "imag", "imag_presence_pass") is False
             and _g(verdict, "full_chain", "loss", "imag", "gates_overall_pass") is True):
         out.append((
-            "IMAG vetva — prezenčná kontrola (dĺžka záznamu / optická čitateľnosť / farba): ZLYHALA",
+            "IMAG vetva — prezenčná kontrola (dĺžka záznamu / optická čitateľnosť): ZLYHALA",
             _OWN_CLAUDE,
         ))
 

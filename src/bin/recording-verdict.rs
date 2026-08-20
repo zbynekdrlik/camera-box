@@ -379,6 +379,17 @@ struct Args {
     /// downgrade the gate -- this only fixes WHO gets judged).
     #[arg(long, default_value = "")]
     offline_ack_cams: String,
+    /// #1142 — does THIS run's contract REQUIRE a verified imag leg? When set, a silently-skipped
+    /// imag leg (`imag_leg_verified=false` and not operator-offline-acked) or a failing imag
+    /// PRESENCE term (span floor / undecodable moiré floor / colour) REDs `overall_pass` (the owner
+    /// honesty mandate). DEFAULT `false` so the many in-process/unit verdict tests that build a
+    /// verdict WITHOUT an imag partial (isolated strih/stream/cam scenarios) are unaffected — only
+    /// the production full-chain merge declares the imag leg part of its contract. `recording-e2e.sh`
+    /// passes it on the ALL_CAMBOX `[8/8d]` merge (never the strih+stream-only zero-loss-restart
+    /// merge). The imag PER-FRAME CONTENT terms stay report-only regardless (issue 1130 observer
+    /// effect); this flag only governs the BLOCKING presence/verification terms.
+    #[arg(long, default_value_t = false)]
+    require_imag_leg: bool,
     /// #895: a `capture_rate_selfheal` (#663) USB-reset event detected by the harness during THIS
     /// recording window (`scripts/lib/self-heal-attribution.sh`'s mid-recording scan, wired at
     /// `recording-e2e.sh`'s `[7b/8]`), so the `frozen_leg` classifier never misreports the
@@ -4269,13 +4280,24 @@ fn build_and_print_verdict_with_stream_hashes(
         // per-frame terms now would false-red every run on the recorder's own load, not the chain.
         // - PRESENCE/VERIFICATION (BLOCKING now): the cam2 optical undecodable moiré floor (#376 —
         //   a repeated decodable frame is still decodable, so this rate is NOT inflated by the
-        //   repeats), colour, and the analyzed-span floor (#373). Not confounded by frame-repeat.
+        //   repeats) and the analyzed-span floor (#373). Not confounded by frame-repeat. The
+        //   `colour_fail == 0` term is included to make this composite EXACTLY `is_zero()`'s
+        //   decomposition, but it is STRUCTURALLY always-true for imag (`node_verdict_for_imag`
+        //   hardcodes `colour_fail: 0`; imag carries no sampled colour), so it can never itself red
+        //   — do NOT advertise imag colour as an active gate.
         // - PER-FRAME CONTENT (REPORT-ONLY, pending the issue 1143 imag encoder fix): the
         //   optical-beat freeze/stuck verdict (`optical_ok`) + the digital-burn contiguity
         //   (`imag_burn_ok`). Surfaced but never reds a run.
         let imag_presence_ok = nv.optical_undecodable_ok() && nv.colour_fail == 0 && span_ok;
         let imag_content_ok = nv.optical_ok() && nv.imag_burn_ok();
-        all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(imag_presence_ok);
+        // #1142 — the imag PRESENCE terms gate overall_pass ONLY when this run's contract REQUIRES a
+        // verified imag leg (`--require-imag-leg`, set by the production full-chain merge). An
+        // isolated/unit verdict run that happens to carry an imag partial surfaces it but does not
+        // gate on it (so the many imag-less/isolated verdict tests stay green).
+        if args.require_imag_leg {
+            all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(imag_presence_ok);
+        }
+        // The PER-FRAME CONTENT fold is report-only (a no-op) regardless of the flag.
         all_pass &= camera_box::imag_leg_gate::content_folds_into_overall_pass(imag_content_ok);
         // The honest FULL imag verdict (presence AND content), surfaced as `imag_leg_pass`.
         let imag_leg_ok = nv.is_zero() && span_ok;
@@ -4286,10 +4308,12 @@ fn build_and_print_verdict_with_stream_hashes(
             serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES);
         imag_json["boundary_trim_tail_frames"] =
             serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES);
-        // issue 798 — scoped report-only flag (name the TERM, not the whole object, per
-        // optical-undecodable-floor-report-only.md). `imag_leg_pass` is this run's overall imag
-        // verdict (optical tick + digital burn contiguity ANDed with span_ok); `gates_overall_pass`
-        // is `false` today, so a FAIL is surfaced here but does not touch overall_pass.
+        // issue 798 -> #1142 — scoped split flags (name the TERM, not the whole object, per
+        // optical-undecodable-floor-report-only.md). `imag_leg_pass` is this run's FULL imag verdict
+        // (optical beat + digital burn contiguity + undecodable + colour, ANDed with span_ok);
+        // `imag_presence_pass` (BLOCKING when --require-imag-leg) and `imag_content_pass`
+        // (REPORT-ONLY) are the #1142 split. `gates_overall_pass` is `true` (presence seam LIVE);
+        // `content_gates_overall_pass` is `false` (per-frame content report-only, issue 1130).
         imag_json["imag_leg_pass"] = serde_json::json!(imag_leg_ok);
         // #1142 — scoped split: presence/verification BLOCKS, per-frame content report-only.
         imag_json["imag_presence_pass"] = serde_json::json!(imag_presence_ok);
@@ -4300,7 +4324,8 @@ fn build_and_print_verdict_with_stream_hashes(
             serde_json::json!(camera_box::imag_leg_gate::content_gates_overall_pass());
         imag_json["report_only_note"] = serde_json::json!(
             "issue 798 path A -> #1142: the imag PRESENCE/VERIFICATION terms (analyzed-span floor \
-             #373 + cam2 undecodable moiré floor #376 + colour) now BLOCK overall_pass; the \
+             #373 + cam2 undecodable moiré floor #376) now BLOCK overall_pass (only when \
+             --require-imag-leg); the \
              PER-FRAME CONTENT terms (imag_content_pass: digital-burn contiguity + optical beat) \
              stay REPORT-ONLY pending the issue 1143 imag encoder fix (issue 1130 x264 record-load \
              observer effect — content_gates_overall_pass==false)."
@@ -4320,12 +4345,21 @@ fn build_and_print_verdict_with_stream_hashes(
     // red. `verified_leg_ok(verified, offline_acked)` folds through the LIVE presence seam.
     let imag_offline_acked =
         camera_box::offline_ack::parse(&args.offline_ack_cams).contains_key("imag");
-    all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(
-        camera_box::imag_leg_gate::verified_leg_ok(imag_leg_verified, imag_offline_acked),
-    );
+    // #1142 — the verified fold gates ONLY when this run's contract REQUIRES the imag leg
+    // (`--require-imag-leg`, set by the production full-chain merge). Without it (the many
+    // isolated/unit verdict runs with no imag partial), a missing imag leg is surfaced but never
+    // reds. WITH it, a silently-skipped imag leg REDs unless imag is operator-offline-acked (#1013).
+    let imag_leg_verified_gates =
+        args.require_imag_leg && camera_box::imag_leg_gate::gates_overall_pass();
+    if args.require_imag_leg {
+        all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(
+            camera_box::imag_leg_gate::verified_leg_ok(imag_leg_verified, imag_offline_acked),
+        );
+    }
+    report["full_chain"]["imag_leg_required"] = serde_json::json!(args.require_imag_leg);
     report["full_chain"]["imag_leg_verified_offline_acked"] = serde_json::json!(imag_offline_acked);
     report["full_chain"]["imag_leg_verified_gates_overall_pass"] =
-        serde_json::json!(camera_box::imag_leg_gate::gates_overall_pass());
+        serde_json::json!(imag_leg_verified_gates);
     if !imag_leg_verified {
         println!(
             "  [imag] leg NOT verified this run — no imag partial merged (--merge-partials imag=... \
@@ -4827,14 +4861,15 @@ fn build_and_print_verdict_with_stream_hashes(
 
                 // #1142 — the NEW cadence-UNIFORMITY floor gate (owner mandate 2026-08-19): a broad
                 // companion to the paired-judder gate above. Bound the WORST (minimum) per-window
-                // `uniform_fraction` across every cadence-bearing cambox window — the fraction of
-                // frames that advanced by exactly `expected_step` (a smooth 60→30 downsample reads
-                // ~1.0; the 60→30 + FIFO limit-cycle churn drops it to ~0.67-0.78 on today's rig,
-                // issue 1130). A per-window RATE (like the judder gate) so a single per-window-MIN
-                // term is honest (no run-wide second term). `None` worst = no cadence window (mass
-                // decode failure, already hard-failed by copies/gaps/undecodable) = not applicable,
-                // passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass` — the 0.95
-                // floor REDs the current sick rig BY DESIGN.
+                // `derived_uniform_fraction` (the self-consistent mode-based field, #726 fix — NOT
+                // the raw `uniform_fraction`, which false-reds a clean off-expected-step window; on
+                // the real rig the two are equal) across every cadence-bearing cambox window — a
+                // smooth 60→30 downsample reads ~1.0; the 60→30 + FIFO limit-cycle churn drops it to
+                // ~0.67-0.78 on today's rig (issue 1130). A per-window RATE (like the judder gate) so
+                // a single per-window-MIN term is honest (no run-wide second term). `None` worst = no
+                // cadence window (mass decode failure, already hard-failed by copies/gaps/undecodable)
+                // = not applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`
+                // — the 0.95 floor REDs the current sick rig BY DESIGN.
                 let worst_cadence_uniform_fraction: Option<f64> = seg
                     .segments
                     .iter()
@@ -4859,27 +4894,32 @@ fn build_and_print_verdict_with_stream_hashes(
                 let uniformity_floor = camera_box::presentation_cadence::UNIFORM_FRACTION_MIN;
                 let uniformity_gate_pass =
                     camera_box::presentation_cadence::cadence_uniformity_gate_pass(
-                        worst_cadence_uniform_fraction,
+                        worst_cadence_derived_uniform_fraction,
                         Some(uniformity_floor),
                     );
                 let uniformity_gates_overall =
                     camera_box::presentation_cadence::uniformity_gates_overall_pass();
                 report["all_cambox_continuity"]["cadence_uniformity_gate"] = serde_json::json!({
                     "min_uniform_fraction": uniformity_floor,
-                    "worst_uniform_fraction": worst_cadence_uniform_fraction,
-                    "worst_derived_uniform_fraction": worst_cadence_derived_uniform_fraction,
+                    "worst_uniform_fraction": worst_cadence_derived_uniform_fraction,
+                    "worst_raw_uniform_fraction": worst_cadence_uniform_fraction,
                     "pass": uniformity_gate_pass,
                     "gates_overall_pass": uniformity_gates_overall,
                     "note": "#1142 cadence-uniformity FLOOR (owner mandate). Worst per-window \
-                             presentation_cadence.uniform_fraction across cambox windows must be >= \
+                             presentation_cadence.derived_uniform_fraction (the self-consistent \
+                             mode-based field, #726 fix) across cambox windows must be >= \
                              min_uniform_fraction (0.95); a smooth 60->30 chain reads ~1.0, the \
                              current rig ~0.67-0.78 (issue 1130 60->30 + FIFO churn) so this REDs \
-                             the sick rig by design. None = no cadence window (not applicable, \
-                             passes). worst_derived_uniform_fraction is the self-consistent reading, \
-                             DIAGNOSTIC only. LIVE via presentation_cadence::uniformity_gates_overall_pass.",
+                             the sick rig by design. worst_raw_uniform_fraction is the raw reading, \
+                             DIAGNOSTIC only (it false-reds a clean off-expected-step window; \
+                             derived does not). None = no cadence window (not applicable, passes). \
+                             LIVE via presentation_cadence::uniformity_gates_overall_pass.",
                 });
                 println!(
- "  #1142 CADENCE-UNIFORMITY gate: worst uniform_fraction={} (floor {}, pass={}, gates_overall_pass={})",
+ "  #1142 CADENCE-UNIFORMITY gate: worst derived_uniform_fraction={} (raw={}, floor {}, pass={}, gates_overall_pass={})",
+                    worst_cadence_derived_uniform_fraction
+                        .map(|p| format!("{p:.5}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
                     worst_cadence_uniform_fraction
                         .map(|p| format!("{p:.5}"))
                         .unwrap_or_else(|| "n/a".to_string()),
@@ -7203,6 +7243,98 @@ mod tests {
                 frame(i as u64, &ps)
             })
             .collect()
+    }
+
+    /// #1142 — `--require-imag-leg` gates a MISSING imag leg (the honesty flip), with the offline-ack
+    /// exemption. Reuses the SAME clean cam2 scenario as `cam2_digital_burn_..._312` (contiguous
+    /// strih+stream, imag=None, overall PASS by default) so the A/B isolates the flag: without it the
+    /// missing imag leg does not red; with it a non-acked missing leg REDs; with it + an operator
+    /// offline-ack (#1013) it is the ONE sanctioned skip and passes again.
+    #[test]
+    fn require_imag_leg_flag_gates_a_missing_imag_leg_1142() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let mk = || {
+            (
+                Some(DecodedRec {
+                    frames: window_cam2(60, false, None),
+                    rec_path: None,
+                }),
+                Some(DecodedRec {
+                    frames: window_cam2(60, true, None),
+                    rec_path: None,
+                }),
+            )
+        };
+
+        // Flag OFF (default): a missing imag leg is surfaced but does NOT red the run.
+        let args_off = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let (s, st) = mk();
+        let (v_off, pass_off) =
+            build_and_print_verdict(&args_off, s, st, Cam1Source::Absent, None, None, None, None)
+                .expect("verdict");
+        assert!(
+            pass_off,
+            "#1142: without --require-imag-leg a missing imag leg does NOT red: {v_off}"
+        );
+        assert_eq!(
+            v_off["full_chain"]["imag_leg_required"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            v_off["full_chain"]["imag_leg_verified"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            v_off["full_chain"]["imag_leg_verified_gates_overall_pass"],
+            serde_json::json!(false),
+            "flag off ⇒ the verified term does not gate this run: {v_off}"
+        );
+
+        // Flag ON, imag NOT acked: the SAME clean run now REDs — a silently-skipped imag leg is a
+        // hidden partial the full-chain contract forbids (#798 honesty mandate).
+        let args_on =
+            super::Args::parse_from(["recording-verdict", "--min-secs", "1", "--require-imag-leg"]);
+        let (s, st) = mk();
+        let (v_on, pass_on) =
+            build_and_print_verdict(&args_on, s, st, Cam1Source::Absent, None, None, None, None)
+                .expect("verdict");
+        assert!(
+            !pass_on,
+            "#1142: --require-imag-leg + a missing (non-acked) imag leg must RED: {v_on}"
+        );
+        assert_eq!(
+            v_on["full_chain"]["imag_leg_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            v_on["full_chain"]["imag_leg_verified_gates_overall_pass"],
+            serde_json::json!(true),
+            "flag on + seam live ⇒ the verified term gates: {v_on}"
+        );
+
+        // Flag ON + imag operator-offline-acked (#1013): the ONE sanctioned skip — back to PASS.
+        let args_ack = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--require-imag-leg",
+            "--offline-ack-cams",
+            "imag:notebook-away",
+        ]);
+        let (s, st) = mk();
+        let (v_ack, pass_ack) =
+            build_and_print_verdict(&args_ack, s, st, Cam1Source::Absent, None, None, None, None)
+                .expect("verdict");
+        assert!(
+            pass_ack,
+            "#1013: an operator-offline-acked imag is the ONE sanctioned skip — no red: {v_ack}"
+        );
+        assert_eq!(
+            v_ack["full_chain"]["imag_leg_verified_offline_acked"],
+            serde_json::json!(true)
+        );
     }
 
     /// #312 — extends the #186 per-node digital-burn contiguity check to CAM2. A contiguous cam2

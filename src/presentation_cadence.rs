@@ -258,20 +258,26 @@ pub fn gates_overall_pass() -> bool {
 /// supports (the gates-green-first philosophy applies once a clean baseline exists — today NONE
 /// does, so the conservative 0.95 with today's 0.67-0.78 data is the honest starting floor).
 ///
-/// Gated on the RAW `uniform_fraction` (the field the ticket names), which is STRICTER than
-/// `derived_uniform_fraction` (`derived >= uniform` always, since the derived step is the delta
-/// MODE). On today's fixtures the two are EQUAL (the chain's delta mode IS `expected_step`=2), so
-/// the raw field is a true judder signal here; a future clean-but-jittery window whose mode differs
-/// from `expected_step` (the #726 miscalibration shape) could read a low raw `uniform_fraction`
-/// without visual judder — if that ever false-reds a genuinely-clean run, switch the gate to
-/// `derived_uniform_fraction` (the block surfaces BOTH, so the switch is a one-field change).
+/// Gated on `derived_uniform_fraction` — the SELF-CONSISTENT reading (fraction of deltas equal to
+/// the window's OWN delta MODE, the #726 miscalibration fix), NOT the raw `uniform_fraction`
+/// (fraction equal to the caller-supplied `expected_step`). The ticket named `uniform_fraction`,
+/// but the raw field FALSE-REDS a clean window whose per-frame step mode differs from `expected_step`
+/// (the #726 shape) — a genuine hazard: several synthetic switch-schedule test fixtures advance the
+/// tick by +1 under `--switch-expected-step 2`, so their raw `uniform_fraction` reads 0.0 while the
+/// window is perfectly clean (`derived_uniform_fraction` reads 1.0, mode +1). On the REAL rig the
+/// two are EQUAL (the chain's delta mode IS `expected_step`=2, verified across every mined verdict:
+/// worst 0.672–0.775 on both fields), so gating on `derived` REDs the current sick rig IDENTICALLY
+/// while never false-reding a clean-but-jittery window — strictly better, and it is what this
+/// module's own #726 fix introduced `derived_uniform_fraction` for. The block surfaces BOTH (raw
+/// diagnostic + derived gated), so reverting to the raw field is a one-line change if ever wanted.
 pub const UNIFORM_FRACTION_MIN: f64 = 0.95;
 
-/// Does the run's WORST (minimum) per-window `uniform_fraction` satisfy the [`UNIFORM_FRACTION_MIN`]
-/// FLOOR? `worst_uniform_fraction` is the MIN [`CadenceEvenness::uniform_fraction`] across every
-/// cadence-bearing window (a single per-window RATE — the judder/churn pathology depresses the
-/// affected window's uniformity across its whole span, so a per-window-min term has no "spread the
-/// budget" loophole and needs no run-wide second term, mirroring [`cadence_judder_gate_pass`]).
+/// Does the run's WORST (minimum) per-window uniformity satisfy the [`UNIFORM_FRACTION_MIN`] FLOOR?
+/// `worst_uniform_fraction` is the MIN [`CadenceEvenness::derived_uniform_fraction`] across every
+/// cadence-bearing window (the self-consistent field — see [`UNIFORM_FRACTION_MIN`] for why derived,
+/// not raw; a single per-window RATE — the judder/churn pathology depresses the affected window's
+/// uniformity across its whole span, so a per-window-min term has no "spread the budget" loophole
+/// and needs no run-wide second term, mirroring [`cadence_judder_gate_pass`]).
 ///
 /// Arms mirror [`cadence_judder_gate_pass`], with the comparison INVERTED to `>=` (this is a FLOOR,
 /// higher is better; the judder gate is a CEILING, lower is better):
@@ -291,11 +297,10 @@ pub fn cadence_uniformity_gate_pass(worst_uniform_fraction: Option<f64>, min: Op
 
 /// #1142 uniformity report-only / restore seam — mirrors [`gates_overall_pass`]. Whether
 /// [`cadence_uniformity_gate_pass`]'s result folds into the fused verdict's `overall_pass`.
-/// `false` in THIS commit (the [red] commit pins the new tests against the not-yet-flipped seam);
-/// the [green] commit flips it to `true` (BLOCKING) so the current rig's ~0.70 uniformity REDs the
-/// run — the owner-mandated intended outcome. Flip back to `false` for a one-line revert to
-/// report-only ONLY if a future rig change proves the floor false-reds a genuinely-clean run (then
-/// RECALIBRATE, never just relax).
+/// `true` (BLOCKING) since #1142 so the current rig's ~0.70 uniformity REDs the run — the
+/// owner-mandated intended outcome. Flip back to `false` for a one-line revert to report-only ONLY
+/// if a future rig change proves the floor false-reds a genuinely-clean run (then RECALIBRATE, never
+/// just relax).
 pub fn uniformity_gates_overall_pass() -> bool {
     // #1142 — BLOCKING (owner mandate 2026-08-19): the cadence-uniformity floor folds into
     // overall_pass, so the current rig's ~0.70 worst uniform_fraction REDs the run — the intended
@@ -696,8 +701,10 @@ mod tests {
 
     #[test]
     fn sick_rig_uniformity_070_fails_the_floor() {
-        // The load-bearing intent: today's worst per-window uniform_fraction (~0.67-0.78) must FAIL
-        // the 0.95 floor — the owner-mandated RED on the current rig.
+        // The load-bearing intent: today's worst per-window uniformity (~0.67-0.78) must FAIL the
+        // 0.95 floor — the owner-mandated RED on the current rig. These are the REAL-rig values, on
+        // which raw uniform_fraction == derived_uniform_fraction (the mode IS expected_step=2), so
+        // the gated (derived) field reds identically to the raw field the ticket named.
         assert!(
             !cadence_uniformity_gate_pass(Some(0.6720), Some(UNIFORM_FRACTION_MIN)),
             "the sick-rig worst uniform_fraction (0.672, run 426009366) must FAIL the {UNIFORM_FRACTION_MIN} floor"
@@ -739,20 +746,52 @@ mod tests {
 
     #[test]
     fn a_smooth_window_uniformity_passes_end_to_end() {
-        // Wired to the metric: a perfectly smooth 60-in-30 downsample has uniform_fraction 1.0.
+        // Wired to the metric on the GATED field (derived_uniform_fraction): a perfectly smooth
+        // 60-in-30 downsample advances by exactly its own mode step every frame -> derived 1.0.
         let ticks: Vec<u32> = (0..60).step_by(2).collect();
         let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
-        assert_eq!(v.uniform_fraction, 1.0);
+        assert_eq!(v.derived_uniform_fraction, 1.0);
         assert!(cadence_uniformity_gate_pass(
-            Some(v.uniform_fraction),
+            Some(v.derived_uniform_fraction),
             Some(UNIFORM_FRACTION_MIN)
         ));
     }
 
     #[test]
+    fn a_clean_but_off_expected_step_window_passes_via_derived_not_raw() {
+        // #1142 review — the raw-vs-derived hazard, pinned as a test: a perfectly clean window whose
+        // ticks advance +1 while the caller passed expected_step=2 reads raw uniform_fraction 0.0
+        // (would FALSE-RED the floor) but derived_uniform_fraction 1.0 (mode +1). The gate uses
+        // DERIVED, so this clean window PASSES — exactly the synthetic switch-schedule fixtures the
+        // review flagged (tick += 1 under --switch-expected-step 2).
+        let ticks: Vec<u32> = (0..30).collect(); // +1 steps
+        let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
+        assert_eq!(
+            v.uniform_fraction, 0.0,
+            "raw reads 0 at the wrong expected_step"
+        );
+        assert_eq!(
+            v.derived_uniform_fraction, 1.0,
+            "derived reads 1.0 at the real mode (+1)"
+        );
+        assert!(
+            cadence_uniformity_gate_pass(
+                Some(v.derived_uniform_fraction),
+                Some(UNIFORM_FRACTION_MIN)
+            ),
+            "a clean-but-off-expected-step window must PASS (gated on derived, not raw)"
+        );
+        assert!(
+            !cadence_uniformity_gate_pass(Some(v.uniform_fraction), Some(UNIFORM_FRACTION_MIN)),
+            "…and would have FALSE-RED on the raw field — the reason the gate uses derived"
+        );
+    }
+
+    #[test]
     fn the_15fps_judder_window_uniformity_fails_end_to_end() {
-        // Wired to the metric: the 15fps-judder reference (held frame + double jump) has NO
-        // on-cadence frames (uniform_fraction 0.0), so its measured uniformity FAILS the floor.
+        // Wired to the metric on the GATED field: the 15fps-judder reference (held frame + double
+        // jump) is NOT on-cadence under its own mode either — derived_uniform_fraction well below
+        // the floor — so its measured uniformity FAILS.
         let mut ticks = Vec::new();
         for k in 0..15u32 {
             let t = k * 4;
@@ -760,9 +799,13 @@ mod tests {
             ticks.push(t);
         }
         let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
-        assert_eq!(v.uniform_fraction, 0.0);
+        assert!(
+            v.derived_uniform_fraction < UNIFORM_FRACTION_MIN,
+            "judder derived_uniform_fraction {} must be below the floor",
+            v.derived_uniform_fraction
+        );
         assert!(!cadence_uniformity_gate_pass(
-            Some(v.uniform_fraction),
+            Some(v.derived_uniform_fraction),
             Some(UNIFORM_FRACTION_MIN)
         ));
     }
@@ -770,9 +813,8 @@ mod tests {
     #[test]
     fn uniformity_gate_is_live_since_1142() {
         // #1142: the uniformity floor folds into overall_pass (BLOCKING) — the owner mandate flips
-        // it LIVE so the current rig's ~0.70 uniformity REDs the run (the intended outcome). The
-        // [red] commit ships this seam at `false`, so THIS test fails there; the [green] commit
-        // flips it to `true`.
+        // it LIVE so the current rig's ~0.70 uniformity REDs the run (the intended outcome). Flip
+        // `uniformity_gates_overall_pass` to false for a one-line revert to report-only.
         assert!(
             uniformity_gates_overall_pass(),
             "#1142: the cadence-uniformity floor must gate overall_pass (LIVE)"

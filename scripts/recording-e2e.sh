@@ -4347,6 +4347,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   if [ -f "$IMAG_PARTIAL" ]; then
     MERGE_ARGS+=(--merge-partials "imag=$IMAG_PARTIAL")
   fi
+  # #1142 — the full-chain ALL_CAMBOX merge REQUIRES a verified imag leg: a silently-skipped or
+  # schema-degraded imag leg REDs the run (owner honesty mandate 2026-08-19). The ONE sanctioned
+  # skip is an operator-acknowledged offline imag (issue 1013), already threaded via the ack flag
+  # above; the imag per-frame content terms stay report-only regardless (issue 1130 observer
+  # effect). NOT set on the strih+stream-only zero-loss-restart merge (a different code path).
+  MERGE_ARGS+=(--require-imag-leg)
   # #377 — pass --colour-gate to the merge too (defense in depth): with it set, a partial that
   # LACKS its carried colour summary ERRORS LOUDLY ("re-run extract with --colour-gate") instead of
   # silently skipping a requested gate. The carried summary is honored regardless; this just catches
