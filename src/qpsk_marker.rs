@@ -69,7 +69,7 @@ pub fn crc4_check(mut data: u32, size: u32) -> u32 {
     data
 }
 
-/// 20-bit payload word: bits[19:16]=0xF preamble, bits[15:8]=index, bits[7:4]=0, bits[3:0]=CRC4.
+/// 20-bit payload word: bits[19:16]=0xF preamble, bits[15:12]=0 (zero nibble), bits[11:4]=index, bits[3:0]=CRC4.
 pub fn payload_word(index: u8) -> u32 {
     let data16 = 0xF000u32 | (index as u32 & 0xFF);
     (data16 << 4) | crc4(data16, 16)
@@ -152,7 +152,7 @@ pub fn marker_signal(index: u8, p: &AudioParams) -> Vec<f32> {
 /// so a test can synthesize a CRC-valid-but-structurally-invalid "poison" word (#1153). Real emit
 /// always uses [`marker_signal`] (word = [`payload_word`], which has a zero nibble at bits[15:12]);
 /// this shared renderer lets the decoder-hardening test drive a nonzero zero-nibble through it.
-pub fn marker_signal_for_word(word: u32, p: &AudioParams) -> Vec<f32> {
+pub(crate) fn marker_signal_for_word(word: u32, p: &AudioParams) -> Vec<f32> {
     let s = symbols(word);
     let ar = p.sample_rate as f64;
     let f = p.carrier_hz as f64;
