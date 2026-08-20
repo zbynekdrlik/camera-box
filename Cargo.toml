@@ -7,6 +7,19 @@ description = "Simple USB video capture to NDI streaming appliance"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/camera-box"
 
+# --- bkshading M1 workspace (issue 808) -------------------------------------
+# The camera-box appliance stays the workspace ROOT package (its build path is
+# UNCHANGED: every existing CI job runs cargo at the root WITHOUT --workspace, so
+# it still compiles/tests only this root package). The bkshading shading-control
+# service + cambox relay live as SEPARATE members with their own (heavier) deps,
+# so they never touch the appliance's minimal dep tree or its probe feature gating.
+# resolver = "2" pins the SAME feature resolution the root edition-2021 package
+# already used standalone. A dedicated `bkshading` CI job builds/tests the members
+# (see .github/workflows/ci.yml); `cargo fmt --all` already covers them.
+[workspace]
+members = ["bkshading/proto", "bkshading/relay", "bkshading/service"]
+resolver = "2"
+
 [lib]
 name = "camera_box"
 path = "src/lib.rs"
