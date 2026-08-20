@@ -49,9 +49,9 @@ fn run_lib(body: &str) -> String {
 #[test]
 fn recording_e2e_engages_the_frame_probe_report_after_the_probe_build() {
     let s = read("scripts/recording-e2e.sh");
-    let engage = s
-        .find("--frame-probe-only")
-        .expect("#1138: recording-e2e.sh must engage the frame-probe report via --frame-probe-only");
+    let engage = s.find("--frame-probe-only").expect(
+        "#1138: recording-e2e.sh must engage the frame-probe report via --frame-probe-only",
+    );
     // The current-build expected bin is $PROBE_BIN_DIR/frame-probe, resolved at [1/8].
     let window = &s[engage..(engage + 300).min(s.len())];
     assert!(
@@ -172,10 +172,15 @@ fn frame_probe_restore_enable_decision_preserves_state() {
     assert!(en.contains("enable-now"), "enabled must re-arm: {en:?}");
     // disabled (EVENT mode — #892: deliberately dark so a QR never returns onto a live broadcast).
     let dis = run_lib(r#"frame_probe_restore_enable_decision "disabled"; echo"#);
-    assert!(dis.contains("leave") && !dis.contains("enable-now"), "disabled must LEAVE dark (#892): {dis:?}");
+    assert!(
+        dis.contains("leave") && !dis.contains("enable-now"),
+        "disabled must LEAVE dark (#892): {dis:?}"
+    );
     // static / masked / unreadable / not-installed => leave untouched, never re-arm.
     for state in ["static", "masked", "", "not-installed", "enabled-runtime"] {
-        let d = run_lib(&format!(r#"frame_probe_restore_enable_decision "{state}"; echo"#));
+        let d = run_lib(&format!(
+            r#"frame_probe_restore_enable_decision "{state}"; echo"#
+        ));
         assert!(
             d.contains("leave") && !d.contains("enable-now"),
             "state {state:?} must LEAVE untouched (only a persistently-enabled unit re-arms): {d:?}"

@@ -475,6 +475,12 @@ main() {
   local no_main_pin="${CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN:-0}"
   # #1138 frame-probe sha-pin (report-only, dormant unless one of these is supplied).
   local fp_expected_sha="${FRAME_PROBE_EXPECTED_SHA:-}" fp_expected_bin=""
+  # #1138 --frame-probe-only: run ONLY the report-only frame-probe sha-pin (skip the camera-box
+  # parity read) and exit 0. recording-e2e engages this from [1/8], where the current-build
+  # frame-probe exists (it is built at [1/8], AFTER the [0/8] camera-box parity gate — so the
+  # expected bin cannot be wired into that earlier call, and re-running the whole parity gate would
+  # print a confusing second table). cam2-scoped by its caller (frame-probe lives only on cam2).
+  local frame_probe_only=0
   local -a linux_raw=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -484,6 +490,7 @@ main() {
       --no-main-pin) no_main_pin=1 ;;
       --frame-probe-expected-sha) shift; fp_expected_sha="${1:-}" ;;
       --frame-probe-expected-bin) shift; fp_expected_bin="${1:-}" ;;
+      --frame-probe-only) frame_probe_only=1 ;;
       --linux) shift; linux_raw+=("${1:-}") ;;
       -h | --help)
         usage
@@ -520,6 +527,18 @@ main() {
 
   CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$fleet_file")"
   export CAMBOX_OFFLINE_ACK
+
+  # #1138 --frame-probe-only: run ONLY the report-only frame-probe sha-pin over the given nodes and
+  # exit 0 (report-only ALWAYS — a lagging painter SCREAMS but never flips the exit). Skips the
+  # camera-box parity read entirely, so no camera-box --version fixture / origin/main pin is needed.
+  # This is how recording-e2e engages the DORMANT report from [1/8] (where the current-build
+  # frame-probe exists), cam2-scoped, without re-running the [0/8] parity gate.
+  if [ "$frame_probe_only" = "1" ]; then
+    local fp_only_expected
+    fp_only_expected="$(resolve_frame_probe_expected_sha "$fp_expected_sha" "$fp_expected_bin")"
+    frame_probe_pin_report "$fp_only_expected" "${linux_pairs[@]}"
+    exit 0
+  fi
 
   local -a entries=()
   local pair name target version

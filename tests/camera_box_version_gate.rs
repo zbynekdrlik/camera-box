@@ -782,7 +782,10 @@ fn frame_probe_only_mode_reports_ok_and_skips_the_parity_read() {
         ],
         &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
     );
-    assert_eq!(code, 0, "frame-probe-only must always exit 0 (report-only): {out}");
+    assert_eq!(
+        code, 0,
+        "frame-probe-only must always exit 0 (report-only): {out}"
+    );
     assert!(
         out.contains("frame-probe (cam2 painter) sha-pin") && out.contains("OK"),
         "the frame-probe report must run + report OK on a match: {out}"
@@ -806,8 +809,14 @@ fn frame_probe_only_mode_alarm_is_report_only() {
         ],
         &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
     );
-    assert_eq!(code, 0, "frame-probe-only ALARM must be report-only (exit 0): out={out} err={err}");
-    assert!(out.contains("ALARM"), "the drift must be screamed in the report: {out}");
+    assert_eq!(
+        code, 0,
+        "frame-probe-only ALARM must be report-only (exit 0): out={out} err={err}"
+    );
+    assert!(
+        out.contains("ALARM"),
+        "the drift must be screamed in the report: {out}"
+    );
     assert!(
         err.contains("FRAME-PROBE PIN ALARM"),
         "a loud stderr banner must fire: {err}"
