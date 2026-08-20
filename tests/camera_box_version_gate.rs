@@ -758,3 +758,72 @@ fn cli_candidate_pin_refuses_a_mixed_main_and_candidate_fleet_1136() {
          uniformity stays mandatory under --candidate-pin.\nstdout={stdout}\nstderr={stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1138 (residual) — `--frame-probe-only` mode. The merged frame_probe_pin_report is DORMANT
+// because the [0/8] gate call cannot supply an expected bin (the local CI frame-probe is BUILT at
+// [1/8], AFTER [0/8]). This mode lets recording-e2e engage the report from [1/8] — where the
+// current-build frame-probe exists — WITHOUT re-running the camera-box parity read (no second
+// version-parity table). It is ALWAYS report-only (exit 0), cam2-scoped by its caller.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frame_probe_only_mode_reports_ok_and_skips_the_parity_read() {
+    // --frame-probe-only + a matching expected sha: prints the frame-probe OK row, exits 0, and
+    // does NOT run the camera-box parity read (no "GATE PASS", no per-box camera-box version table)
+    // — proving the mode is distinct from the full gate and needs no camera-box version fixture.
+    let (code, out, _err) = run_gate_env(
+        &[
+            "--frame-probe-only",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "d47e43f896917dca",
+        ],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(code, 0, "frame-probe-only must always exit 0 (report-only): {out}");
+    assert!(
+        out.contains("frame-probe (cam2 painter) sha-pin") && out.contains("OK"),
+        "the frame-probe report must run + report OK on a match: {out}"
+    );
+    assert!(
+        !out.contains("GATE PASS"),
+        "frame-probe-only must NOT run the camera-box parity layer: {out}"
+    );
+}
+
+#[test]
+fn frame_probe_only_mode_alarm_is_report_only() {
+    // A lagging painter under --frame-probe-only: ALARM + stderr banner, but STILL exit 0.
+    let (code, out, err) = run_gate_env(
+        &[
+            "--frame-probe-only",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "beefface00000000",
+        ],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(code, 0, "frame-probe-only ALARM must be report-only (exit 0): out={out} err={err}");
+    assert!(out.contains("ALARM"), "the drift must be screamed in the report: {out}");
+    assert!(
+        err.contains("FRAME-PROBE PIN ALARM"),
+        "a loud stderr banner must fire: {err}"
+    );
+}
+
+#[test]
+fn frame_probe_only_mode_is_dormant_without_an_expected_sha() {
+    // No expected sha => the report prints nothing (dormant), and the mode still exits 0.
+    let (code, out, _err) = run_gate_env(
+        &["--frame-probe-only", "--linux", "cam2=root@10.77.9.62"],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("frame-probe (cam2 painter) sha-pin"),
+        "with no expected sha the report must stay dormant (silent): {out}"
+    );
+}
