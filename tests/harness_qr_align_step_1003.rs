@@ -130,7 +130,8 @@ fn aligner_never_writes_the_stream_hold_or_imag_floor() {
         alp.contains("src.startswith(\"_\")") && alp.contains("imag floor sentinel"),
         "apply_latency_pins.py --pins must refuse an underscore / imag-floor-sentinel key."
     );
-    let block = align_block(&read("scripts/recording-e2e.sh"));
+    let e2e = read("scripts/recording-e2e.sh");
+    let block = align_block(&e2e);
     assert!(
         block.contains("strih") && !block.contains("--box stream"),
         "the [4i/8align] step aligns strih only; it must never write the stream box."
