@@ -371,7 +371,16 @@ pub fn decode_markers_with_stats(
                 let sym = (if im > 0.0 { 2u32 } else { 0 }) | (if re > 0.0 { 1 } else { 0 });
                 word |= sym << (N_PAYLOAD_BITS - 2 - 2 * k as u32);
             }
-            if (word >> 16) & 0xF == PREAMBLE_NIBBLE && crc4_check(word, N_PAYLOAD_BITS) == 0 {
+            // #1153: the emitter ALWAYS sends the zero nibble (bits[15:12]) == 0, but only the
+            // preamble nibble + CRC-4 (8 bits) were ever checked — leaving the CRC-passing
+            // accept-space 16x too large (256 valid vs 3840 "poison" words a music mix decodes
+            // from noise). Enforcing the zero nibble reclaims those 4 bits of built-in
+            // redundancy and cuts the false-decode flood ~16x, with no real marker lost (a real
+            // marker's zero nibble is 0 and is already covered by the CRC).
+            if (word >> 16) & 0xF == PREAMBLE_NIBBLE
+                && (word >> 12) & 0xF == 0
+                && crc4_check(word, N_PAYLOAD_BITS) == 0
+            {
                 stats.crc_ok += 1;
                 out.push((base as f64 / ar, ((word >> 4) & 0xFF) as u8));
                 i = base + sig_len; // markers are far apart; skip past this one
