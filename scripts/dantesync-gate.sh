@@ -475,7 +475,11 @@ grade_http_node() {
     # LINUX client overrides it from its journal INSIDE client_chase_bound_us/_stability_us (empty
     # journal -> this fallback), a WINDOWS client overrides it HERE from /status (no journald).
     local client_step_term="$client_step_fallback"
-    local step_env_src="journal"   # #1129: which source the step envelope came from, for the notes
+    # #1129: which source the step envelope actually came from, for the notes. Mirrors step_source's
+    # honest-in-all-states pattern -- starts at the fallback wording and is set to journal / /status
+    # ONLY when that real source yields a value, so a win box NOT yet serving the field (or an
+    # unreadable journal) never mislabels the fallback term as a "journal"/"/status" read.
+    local step_env_src="fallback(${client_step_fallback}us)"
     client_journal=""  # #1055: assign the function-level local (not a new shadow), so the rescue reuses it
     local parsed_step
     if [ "$kind" = "linux" ]; then
@@ -500,6 +504,7 @@ grade_http_node() {
     parsed_step="$(client_step_threshold_us_from_journal "$client_journal")"
     if [ -n "$parsed_step" ]; then
       step_source="its own journal (${parsed_step}us)"
+      step_env_src="journal"   # #1129: a linux journal genuinely provided the step envelope
     fi
     bound="$(client_chase_bound_us "$master_chase_status" "$bound" "$deadband_margin" \
       "$client_chase_ceiling" "$client_journal" "$client_step_term")"

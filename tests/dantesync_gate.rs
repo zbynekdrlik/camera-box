@@ -4357,6 +4357,8 @@ fn gate_win_http_client_step_straddle_spread_passes_via_status_step_threshold_11
             "3",
             "--window-s",
             "0",
+            "--chase-resample-delay-s",
+            "0",
         ],
         &[
             (
