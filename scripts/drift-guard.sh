@@ -73,6 +73,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # cmdline-isolation facet below (check #11) runs the pure verdict instead of a driftable inline copy.
 # shellcheck source=scripts/lib/imag-cmdline-isolation.sh
 . "$HERE/lib/imag-cmdline-isolation.sh"
+# scripts/lib/obs-projector-vsync.sh is sourced ONLY for its pure functions
+# (projector_vsync_verdict + projector_vsync_armed_from_log, #1151) — same extraction discipline as
+# imag-display-path.sh / imag-cmdline-isolation.sh, SHARED with the E2E [0/8] preflight so the
+# --check-imag projector-vsync facet below runs the IDENTICAL verdict against ONE marker string.
+# shellcheck source=scripts/lib/obs-projector-vsync.sh
+. "$HERE/lib/obs-projector-vsync.sh"
 
 DEFAULT_README="vendor/README.md"
 
@@ -1022,6 +1028,24 @@ check_imag_report() {
     done <<< "$(imag_cmdline_isolation_verdict "$obs_cmdline")"
   fi
 
+  # 12. projector present-vsync ARMED marker (#1151, REPORT-ONLY — issue-1107 fullscreen-Program EGL
+  # present-vsync + issue-1146 observability marker). Runs the SHARED projector_vsync_verdict
+  # (scripts/lib/obs-projector-vsync.sh) over the SAME already-gathered $obs_log_text — no extra SSH.
+  # REPORT-ONLY: this facet touches NEITHER $drift NOR $unknown, so it never changes the 20/11/0 exit
+  # contract. A missing marker is a healthy ordering-dependent state (the Program projector was not
+  # (re)opened since OBS start — the marker is one-shot-on-change at projector open), NOT a config
+  # drift; and per issue 781 the marker only proves the tear-free present MECHANISM is engaged, never
+  # that scanout tearing is gone (objective proof needs the physical HDMI tap, ops-wait hardware).
+  # #833: an unreadable/empty log surfaces UNKNOWN via the verdict, never a false OK.
+  local pv_facet pv_status pv_detail
+  while IFS='|' read -r pv_facet pv_status pv_detail; do
+    [ -n "$pv_facet" ] || continue
+    case "$pv_status" in
+      OK) printf '  %-22s OK       (%s)\n' "$pv_facet" "$pv_detail" ;;
+      *)  printf '  %-22s UNKNOWN  (%s)\n' "$pv_facet" "$pv_detail" ;;
+    esac
+  done <<< "$(projector_vsync_verdict "$obs_log_text")"
+
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
   return 0
@@ -1056,9 +1080,10 @@ imag_genlock_range_log() {
 # above). Paths are the ones `scripts/setup-imag.sh` installs to (DESKTOP_USER=newlevel):
 #   - /opt/obs-genlock/GENLOCK_BUILD_SHA.txt   (genlock build identity marker)
 #   - /usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so   (the Linux plugin binary)
-#   - ~/.config/obs-studio/logs/*.log   (OBS log — the MOST RECENT file, same libobs log lines
-#     fps_from_log / genlock_capability_from_log / genlock_latency_ms_from_log already parse on
-#     Windows, since the log format is platform-independent libobs text)
+#   - ~/.config/obs-studio/logs/*.txt   (OBS log — the MOST RECENT file; OBS names logs `.txt`, #1151,
+#     same libobs log lines fps_from_log / genlock_capability_from_log / genlock_latency_ms_from_log /
+#     projector_vsync_verdict already parse on Windows, since the log format is platform-independent
+#     libobs text)
 #   - `journalctl -u dantesync` (#489, spun out of #479) — the SAME PTP LOCK/NANO or NTP-offset
 #     markers scripts/setup-imag.sh's own provisioning-time restart check keys on (setup-imag.sh:230)
 #   - `dpkg -s` + `systemctl is-active`/`is-enabled` for systemd-timesyncd/chrony/ntp/ntpsec/
@@ -1152,9 +1177,15 @@ gather_and_check_imag() {
   else
     plugin_present=0
   fi
-  # Most-recently-modified OBS log file (OBS names logs by timestamp, no "latest" symlink).
+  # Most-recently-modified OBS log file. #1151: OBS names its logs `YYYY-MM-DD HH-MM-SS.txt` (NOT
+  # .log) — confirmed live on imag-nb, and the SAME `*.txt` glob every other imag OBS-log reader uses
+  # (verify-imag.sh, imag_scenes.py, imag-jitter-monitor.sh, rig-health-audit.py, mv-fps-*). The
+  # earlier `*.log` glob matched NOTHING on imag, so every OBS-log facet below (genlock_capability /
+  # output_fps / genlock_latency / rt_pin / projector_vsync) read EMPTY -> chronic UNKNOWN. Fixing
+  # it makes those facets actually read the log; SAFE because rig-mode's only --check-imag HARD-BLOCK
+  # (issue 789) is genlock_build-scoped (the GENLOCK_BUILD_SHA.txt SSH compare), never these facets.
   obs_log="$("${ssh_cmd[@]}" \
-    'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.log 2>/dev/null | head -1); [ -n "$f" ] && cat "$f"' \
+    'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.txt 2>/dev/null | head -1); [ -n "$f" ] && cat "$f"' \
     2>/dev/null || true)"
   obs_fps="$(fps_from_log "$obs_log")"
   obs_latency="$(genlock_latency_ms_from_log "$obs_log")"
@@ -1658,7 +1689,7 @@ Usage:
   obs-studio vendor/distroav`; a non-empty range = the box is BEHIND merged genlock commits =
   STALE = DRIFT, the #530 45fps recurrence guard — no static README pin any more), a SHA256 of
   `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` (the Linux plugin binary), the OBS log
-  (`~/.config/obs-studio/logs/*.log`, most recent file) for the genlock capability marker + the fps +
+  (`~/.config/obs-studio/logs/*.txt`, most recent file — OBS names logs `.txt`, #1151) for the genlock capability marker + the fps +
   latency pins + the #484 render-tick SCHED_FIFO pin outcome (#572 — DRIFT if the log shows the
   WARN-and-continue SCHED_OTHER fallback, i.e. a missing rtprio ulimit grant), and
   `journalctl -u dantesync` (#489) for the DanteSync PTP/NTP clock-lock pin.

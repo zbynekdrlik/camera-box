@@ -6,6 +6,8 @@ paths:
   - "vendor/obs-studio/frontend/widgets/OBSProjector.cpp"
   - "tests/gl_egl_present_vsync_1107.rs"
   - "tests/gl_egl_present_vsync_observability_1146.rs"
+  - "scripts/lib/obs-projector-vsync.sh"
+  - "tests/harness_obs_projector_vsync_1151.rs"
 ---
 
 # imag HDMI tearing → OBS projector present-vsync (issue-1107 fix + issue-1146 observability)
@@ -51,9 +53,28 @@ per-display within one tick, so a device-level one-shot would spam every frame.
 **Verification honesty.** The marker proves the mechanism is ARMED. Objective SCANOUT
 tear-measurement needs the physical HDMI tap (issue-781, `ops-wait` hardware) — until it
 exists, NEVER claim "tearing solved", only "present-vsync armed" + the owner is the sensor.
-Follow-up: wire a drift-guard `--check-imag` / E2E `[0/8]` reader that greps the OBS log for
-`projector-vsync: present-vsync ARMED` once the marker is deployed and its exact shape is
-confirmed live on imag.
+**The reader is IMPLEMENTED (#1151).** `scripts/lib/obs-projector-vsync.sh` is the shared consumer
+core (the `imag-display-path.sh` / `imag-cmdline-isolation.sh` split-lib pattern — ONE marker
+string), sourced by BOTH `drift-guard.sh` (a report-only `projector_vsync` facet in
+`check_imag_report`, check #12) and `recording-e2e.sh` (a report-only `[0/8]` line AFTER the
+projector-open/studio-mode steps, since the marker is emitted at projector OPEN). Three gotchas
+learned wiring it, reusable for ANY new imag OBS-log reader:
+- **OBS names its logs `*.txt`, NOT `*.log`.** Every imag OBS-log reader in the tree globs `*.txt`
+  (verify-imag.sh, imag_scenes.py, imag-jitter-monitor.sh, rig-health-audit.py, mv-fps-*); `#1151`
+  ALSO fixed `drift-guard.sh`'s `gather_and_check_imag`, which uniquely globbed `*.log` (matching
+  NOTHING on imag), so its OBS-log facets (genlock_capability/fps/latency/rt_pin) had been reading
+  EMPTY → chronic UNKNOWN. Un-blinding them is safe: rig-mode's only `--check-imag` HARD-BLOCK
+  (`require_imag_genlock_current`) is `genlock_build`-scoped, never the OBS-log facets.
+- **A report-only facet must touch NEITHER the `drift` NOR the `unknown` counter** — both flip
+  `check_imag_report`'s exit (20/11), so a missing marker (a healthy ordering-dependent state) must
+  print its UNKNOWN row without incrementing either. Prove counter-neutrality from a CLEAN BASELINE
+  (all-args-match → exit 0, marker absent → exit stays 0); a 9-arg call saturates `unknown` at 11
+  and hides a spurious `unknown++` (the #1151 review 🔵).
+- **A report-only bash probe called under the caller's `set -euo pipefail` must never abort on a
+  grep no-match** (`.claude/rules/ci-testing-gotchas.md` #1133): guard grep pipelines with `|| true`
+  and TEST under real `-e` (a `set -uo`-only harness is blind to the abort).
+Objective SCANOUT tear-measurement still needs the physical HDMI tap (issue-781, `ops-wait`); the
+reader only proves the mechanism is ENGAGED, never that tearing is gone.
 
 **Anchor tests (Tier-0 vendored-source, `squish()` + `contains()`, no probe/GPU).**
 `tests/gl_egl_present_vsync_1107.rs` pins the whole EGL vsync chain; the sibling
