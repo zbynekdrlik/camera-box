@@ -1,0 +1,19 @@
+[Unit]
+# Fires the #1128 fast-capture grabber STUCK alert every 5 min (dev1-side), matching the
+# splitter-port / network-reach / optical-chain / imag-obs alert cadence so the fleet's dev1 alert
+# timers stay in lockstep. A genuinely stuck grabber (marker present) pages within ~10 minutes of
+# onset (2-pass confirm) — one ping per episode (discord-volume-near-zero), plus a recovery ping.
+#
+# SHIPS DISABLED — see the .service. Enable deliberately on dev1:
+#   systemctl --user enable --now grabber-stuck-alert-watchdog.timer
+Description=Run the camera-box fast-capture grabber STUCK alert every 5 min (#1128)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
