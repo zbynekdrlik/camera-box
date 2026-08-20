@@ -407,7 +407,10 @@ ssh-keygen -A
 # Enable SSH service
 systemctl enable ssh
 
-# Configure netplan for DHCP on all ethernet interfaces
+# Configure netplan for DHCP on the PCI LAN NIC (enp*) only. #1155: pin the LAN stanza by NIC
+# NAME, never the driver wildcard -- a driver-wildcard match also claims a USB CDC-NCM camera
+# link (bkshading, issue 808) and gives it the box IP + a duplicate default route, making the box
+# PTP-deaf (cam1 live incident 2026-08-20). setup-device.sh STEP 2 later pins the same name: match.
 mkdir -p /etc/netplan
 cat > /etc/netplan/01-netcfg.yaml << 'NETEOF'
 network:
@@ -416,7 +419,7 @@ network:
   ethernets:
     all-ethernet:
       match:
-        driver: "*"
+        name: "enp*"
       dhcp4: true
 NETEOF
 

@@ -114,6 +114,11 @@
 #       the xhci capture IRQ is routed OFF the isolated grab core on a stock kernel (defect 3 -- the
 #       fix is in src/affinity.rs and lands on the next fleet redeploy; a pre-899 box WARNs). The flip
 #       to a hard FAIL is a follow-up gated on the redeploy (docs/runbooks/899-realtime-isolation.md).
+#   (ad) provisioning netplan interface pin (#1155): the installed /etc/netplan/01-netcfg.yaml pins
+#       the LAN stanza to `match: name: "enp*"` (the PCI NIC), never `driver: "*"` -- a driver
+#       wildcard also claims a USB CDC-NCM camera link (bkshading, issue 808) and hands it the box
+#       IP + a duplicate default route, making the box PTP-deaf (cam1 live incident 2026-08-20).
+#       FAILs if the netplan still matches the driver wildcard OR if two interfaces carry the box IP.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -585,6 +590,30 @@ ndi_version_matches() {
 # provisioned BEFORE that fix landed, without failing their acceptance gate for something with
 # zero functional impact.
 
+# --- (ad) provisioning netplan interface pin -- no USB-camera-link IP theft (#1155) --------------
+
+# netplan_driver_wildcard_count TEXT -> COUNT of `driver: "*"` LAN-match lines in the installed
+# netplan TEXT (the #1155 regression signature that also claims a USB CDC-NCM camera link and hands
+# it the box IP + a duplicate default route). "0" iff the LAN stanza is correctly pinned to
+# `match: name: "enp*"`. Tolerates double-quoted / single-quoted / bare `*` and surrounding
+# whitespace. `grep -c` (NEVER -q: -q's early pipe-close can SIGPIPE the upstream printf and, under
+# pipefail, return non-zero even on a real match) + `|| true` (grep -c exits 1 with a printed "0"
+# on no match; the bare-substitution caller must never abort).
+netplan_driver_wildcard_count() {
+  printf '%s\n' "$1" | grep -cE '^[[:space:]]*driver:[[:space:]]*["'\'']?\*["'\'']?[[:space:]]*$' || true
+}
+
+# interfaces_sharing_ip IPBRIEF BOXIP -> COUNT of DISTINCT interfaces in IPBRIEF (an `ip -br addr`
+# dump) whose address column carries "BOXIP/" -- i.e. how many links hold the box's LAN IP. "0"
+# iff none (empty/unreachable input included), "1" on a healthy box, ">=2" when a USB camera link
+# has stolen the box IP alongside the real NIC (the live #1155 signature). The trailing "/" makes
+# it a CIDR-anchored fixed-string match via awk index() (regex-free, so a `.` is literal and
+# .61 never substring-matches .610, and an IPv6 column never false-matches an IPv4 dotted form).
+# `grep -c .` (SIGPIPE-safe, reads all input) + `|| true` (exits 1 with "0" on empty).
+interfaces_sharing_ip() {
+  printf '%s\n' "$1" | awk -v ip="$2/" 'index($0, ip){print $1}' | sort -u | grep -c . || true
+}
+
 # bak_cruft_names LS_TEXT -> newline-separated list of `.bak` / `.bak-*`-suffixed entry names
 # found in LS_TEXT (an `ls -la DIR` or `ls -1 DIR` dump). Empty output means no cruft. Handles
 # both an `ls -1` dump (one bare name per line) and an `ls -la` dump (permission/owner rows,
@@ -667,6 +696,9 @@ Checks:
       (the linux-camN MCP control surface, provisioned by setup-device.sh STEP 17b) (#1066)
   (ac) realtime-isolation drift (issue 899, WARN-only): kernel PREEMPT_RT status + the xhci capture
       IRQ routed off the isolated grab core on a stock kernel (defects 1+3; hard-FAIL flip staged)
+  (ad) provisioning netplan interface pin (#1155): /etc/netplan/01-netcfg.yaml pins the LAN stanza
+      to name: "enp*" (the PCI NIC), never the driver wildcard, and no two interfaces carry the box
+      IP -- so a USB CDC-NCM camera link (bkshading, issue 808) can never steal the IP + PTP route
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1301,6 +1333,33 @@ else
     *)
       warn "could not grade capture-IRQ placement (irq='${RT_IRQN:-}', list='${RT_IRQL:-}', core='${RT_CORE:-}') -- issue-899 check (ac) incomplete" ;;
   esac
+fi
+
+# (ad) provisioning netplan interface pin + no duplicate-IP link (#1155) ------------------------
+# The provisioning netplan (setup-device.sh STEP 2 / create-usb-linux.sh chroot) must pin the LAN
+# stanza to `match: name: "enp*"` (the PCI NIC), never `driver: "*"`. A `driver: "*"` match also
+# claims a USB CDC-NCM camera link (bkshading, issue 808) -- giving it the box's static IP + a
+# duplicate default route, which lands the dantesync PTP multicast join on the camera link and
+# makes the box PTP-deaf (cam1 live incident 2026-08-20). TWO facets, both hard FAILs: (1) the
+# installed /etc/netplan/01-netcfg.yaml must NOT carry a `driver: "*"` match line, and (2) no TWO
+# interfaces may carry the box IP (the live proof the trap has not fired). A remote
+# `[ -f ] && cat || echo <sentinel>` keeps ssh's own exit 0 on a missing file, so a non-zero ssh
+# rc means genuine UNREACHABILITY (transport), distinct from "netplan absent". Inserted BEFORE (q)
+# -- see .claude/rules/provisioning-scripts.md: (q) must remain the intentionally-LAST check.
+adrc=0
+NETPLAN_TEXT="$(ssh_box "if [ -f /etc/netplan/01-netcfg.yaml ]; then cat /etc/netplan/01-netcfg.yaml; else echo __NETPLAN_ABSENT__; fi")" || adrc=$?
+IPBRIEF="$(ssh_box "ip -br addr show 2>/dev/null")" || adrc=$?
+DUP_IF_COUNT="$(interfaces_sharing_ip "$IPBRIEF" "$IP")"
+if [ "$adrc" -ne 0 ]; then
+  fail "could not reach the box to read /etc/netplan/01-netcfg.yaml + interface addresses (ssh rc=$adrc)"
+elif [ -z "$NETPLAN_TEXT" ] || [ "$NETPLAN_TEXT" = "__NETPLAN_ABSENT__" ]; then
+  fail "/etc/netplan/01-netcfg.yaml is missing -- provisioning never wrote the LAN config (#1155)"
+elif [ "$(netplan_driver_wildcard_count "$NETPLAN_TEXT")" != "0" ]; then
+  fail "netplan LAN stanza still matches the driver wildcard -- a USB camera link (enx*/cdc_ncm) will steal the box IP + default route and make the box PTP-deaf; pin it to name: \"enp*\" (#1155)"
+elif [ "$DUP_IF_COUNT" -gt 1 ]; then
+  fail "the box IP $IP is carried by $DUP_IF_COUNT interfaces ($(printf '%s' "$IPBRIEF" | awk -v ip="$IP/" 'index($0, ip){print $1}' | paste -sd, -)) -- a USB camera link has a duplicate IP + default route; PTP will land on the wrong link (#1155)"
+else
+  ok "netplan LAN stanza pinned to name: \"enp*\" and the box IP $IP is on a single interface (#1155)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
