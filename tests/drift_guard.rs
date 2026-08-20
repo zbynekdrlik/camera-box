@@ -3091,7 +3091,14 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     // #596: the 12th arg is a clean per-daemon timesync-authority block (imag-nb's own #591
     // extension) — must ALSO read clean, or this "everything matches" case regresses to UNKNOWN
     // (an unsupplied/empty 12th arg defaults to check #8's UNKNOWN branch, never a false DRIFT).
-    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
+    // #1151: the log ALSO carries the issue-1146 `projector-vsync: present-vsync ARMED` marker so the
+    // new REPORT-ONLY projector_vsync facet (check #12) reads OK — otherwise this "everything matches"
+    // case would print an UNKNOWN row and trip the `!contains("UNKNOWN")` assertion below. The facet
+    // touches no counter, so this addition changes no exit code; it only feeds the OK-row read.
+    let log = format!(
+        "genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}\n\
+         15:52:14.820: projector-vsync: present-vsync ARMED (GL/EGL swap interval 1; no-op on D3D11)"
+    );
     let body = r#"
         rc=0
         check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
@@ -4125,5 +4132,134 @@ fn check_imag_report_cmdline_isolation_unknown_when_not_gathered_backward_compat
     assert!(
         line.contains("UNKNOWN"),
         "an unread cmdline block must report UNKNOWN, never a false DRIFT: {line:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1151 — the REPORT-ONLY projector_vsync facet (check #12) + the OBS-log-glob fix. The facet runs
+// the SHARED projector_vsync_verdict (scripts/lib/obs-projector-vsync.sh) over the already-gathered
+// $obs_log_text and must NEVER change check_imag_report's 20/11/0 exit contract (report-only).
+// ---------------------------------------------------------------------------------------------
+
+/// The issue-1146 marker exactly as it lands on imag (STEP-0 live-confirmed on 10.77.9.182).
+const PROJECTOR_VSYNC_ARMED_LINE: &str =
+    "15:52:14.820: projector-vsync: present-vsync ARMED (GL/EGL swap interval 1; no-op on D3D11)";
+
+#[test]
+fn check_imag_report_projector_vsync_ok_when_marker_present_1151() {
+    // A log carrying the issue-1146 ARMED marker -> the check #12 row reads OK, naming the mechanism.
+    let log = format!("genlock: latency = 3 ms\n{PROJECTOR_VSYNC_ARMED_LINE}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", &log)]);
+    let row = out
+        .lines()
+        .find(|l| l.contains("projector_vsync"))
+        .unwrap_or_else(|| panic!("no projector_vsync row printed: {out:?}"));
+    assert!(
+        row.contains("OK") && !row.contains("UNKNOWN"),
+        "marker present -> projector_vsync OK: {row:?}"
+    );
+    assert!(
+        row.contains("present-vsync armed"),
+        "the OK row must name the armed mechanism (comprehensive-logging): {row:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_projector_vsync_unknown_when_marker_absent_or_log_empty_1151() {
+    // No ARMED marker in a NON-empty log -> UNKNOWN (projector not (re)opened / build predates #1146),
+    // NEVER a DRIFT. An EMPTY log -> UNKNOWN (log not read, #833). Both are report-only.
+    let no_marker = "genlock: latency = 3 ms\nsome other OBS line";
+    let body = r#"
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || true
+    "#;
+    for (label, log) in [("no-marker", no_marker), ("empty", "")] {
+        let out = run_sourced(body, &[("LOG", log)]);
+        let row = out
+            .lines()
+            .find(|l| l.contains("projector_vsync"))
+            .unwrap_or_else(|| panic!("[{label}] no projector_vsync row: {out:?}"));
+        assert!(
+            row.contains("UNKNOWN"),
+            "[{label}] absent/unreadable marker -> UNKNOWN (report-only, fail-closed #833): {row:?}"
+        );
+        assert!(
+            !row.contains("DRIFT"),
+            "[{label}] projector_vsync must NEVER DRIFT (report-only): {row:?}"
+        );
+    }
+}
+
+#[test]
+fn check_imag_report_projector_vsync_is_report_only_exit_code_unchanged_1151() {
+    // The whole point: the facet's OK vs UNKNOWN state must NOT change check_imag_report's exit code.
+    // Same identical call twice, differing ONLY in whether the OBS log carries the ARMED marker; the
+    // RC line must be byte-identical (the facet touches neither $drift nor $unknown).
+    let with_marker = format!("genlock: latency = 3 ms\n{PROJECTOR_VSYNC_ARMED_LINE}");
+    let without_marker = "genlock: latency = 3 ms".to_string();
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out_with = run_sourced(body, &[("LOG", &with_marker)]);
+    let out_without = run_sourced(body, &[("LOG", &without_marker)]);
+    let rc_with = out_with
+        .lines()
+        .find(|l| l.starts_with("RC="))
+        .expect("RC line (with marker)");
+    let rc_without = out_without
+        .lines()
+        .find(|l| l.starts_with("RC="))
+        .expect("RC line (without marker)");
+    assert_eq!(
+        rc_with, rc_without,
+        "projector_vsync is report-only: the exit code must be identical whether or not the ARMED \
+         marker is present (with={rc_with:?} without={rc_without:?})"
+    );
+    // And the two runs genuinely differed in the facet row (guards against the test asserting a tie
+    // because the facet never ran at all).
+    assert!(
+        out_with
+            .lines()
+            .any(|l| l.contains("projector_vsync") && l.contains("OK"))
+            && out_without
+                .lines()
+                .any(|l| l.contains("projector_vsync") && l.contains("UNKNOWN")),
+        "the with/without runs must actually differ in the projector_vsync row"
+    );
+}
+
+#[test]
+fn gather_and_check_imag_reads_txt_not_log_obs_glob_1151() {
+    // #1151 bug: OBS names its logs `YYYY-MM-DD HH-MM-SS.txt`, but gather_and_check_imag uniquely
+    // globbed `logs/*.log` (matching NOTHING on imag) -> its OBS-log facets read EMPTY -> chronic
+    // UNKNOWN on the real box. The fix globs `*.txt` like every other imag OBS-log reader.
+    let src = std::fs::read_to_string(script()).expect("read drift-guard.sh");
+    assert!(
+        src.contains(r#"obs-studio/logs/"*.txt"#),
+        "gather_and_check_imag must glob the OBS log as *.txt (OBS's real extension), #1151"
+    );
+    assert!(
+        !src.contains(r#"obs-studio/logs/"*.log"#),
+        "the OBS-log gather must NOT still glob *.log — it matches nothing on imag (#1151)"
+    );
+}
+
+#[test]
+fn drift_guard_sources_the_shared_projector_vsync_lib_1151() {
+    // The facet must run the SHARED verdict, not an inline copy (single marker-string source).
+    let src = std::fs::read_to_string(script()).expect("read drift-guard.sh");
+    assert!(
+        src.contains(r#". "$HERE/lib/obs-projector-vsync.sh""#),
+        "drift-guard.sh must source scripts/lib/obs-projector-vsync.sh (#1151)"
+    );
+    assert!(
+        src.contains("projector_vsync_verdict \"$obs_log_text\""),
+        "the facet must run projector_vsync_verdict over the already-gathered log (#1151)"
     );
 }
