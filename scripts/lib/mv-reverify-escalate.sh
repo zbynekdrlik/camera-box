@@ -319,3 +319,36 @@ mv_reverify_or_escalate() {
   echo "    [#1093 escalate] ${box}: STILL dead after the strih-OBS restart + single re-check. Failing loud." >&2
   return 1
 }
+
+# mv_reverify_resolve_wait BOX CAM_N [CALL_TIMEOUT] -> issue 1114 REZÍDUUM (harness side). After the
+# merged WS-side CLEAR-then-SET reattach() (strih_mv_scenes.py) TEARS DOWN + rebuilds strih's NDI
+# receiver, its fresh DistroAV finder must RE-RESOLVE the live post-bounce burn sender by URL before
+# any pixel can change again. That re-resolve was MEASURED at up to ~2 min on the live rig (issue
+# 1114 owner comments, 2026-08-19: two cameras per run read "no pixel change" through the whole ~52s
+# [2/8] attempt budget, then recovered), FAR longer than a single per-attempt settle. Give the fresh
+# finder its OWN one-time bounded re-resolve window right after the kick: poll the SAME pixel-change
+# gate (frozen-camera-gate.py, identical flags to preflight_mv_reverify) at RESOLVE_CADENCE_S until
+# the leg delivers a changing frame OR the RESOLVE_SETTLE_S deadline. This is a REAL bounded poll --
+# it RETURNS 0 the instant a pixel changes, so a fast re-lock costs ~0 extra time, and only a
+# genuinely slow re-resolve spends the full window -- NOT a blind sleep and NOT a blind workflow
+# budget bump (no-timeout-band-aids: a MEASURED, documented window for a confirmed-slower op, issue
+# 1114). Reads the same $HERE / $STRIH / $PROBE_BIN_DIR globals preflight_mv_reverify uses. Returns 0
+# on recovery, 1 on deadline; never exits (caller falls back into its own attempt loop / escalation).
+mv_reverify_resolve_wait() {
+  local box="$1" cam_n="$2" call_timeout="${3:-30}"
+  local resolve_s="${PREFLIGHT_MV_REVERIFY_RESOLVE_SETTLE_S:-120}"
+  local cadence="${PREFLIGHT_MV_REVERIFY_RESOLVE_CADENCE_S:-6}"
+  local waited=0
+  while [ "$waited" -lt "$resolve_s" ]; do
+    sleep "$cadence"
+    waited=$((waited + cadence))
+    if timeout "$call_timeout" python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
+        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle "${PREFLIGHT_MV_REVERIFY_WARM_SETTLE:-0}" \
+        --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
+      echo "    [sender-bounce] ${box} recovered ${waited}s after the receiver reset — fresh finder re-resolved the live burn sender (issue 1114)" >&2
+      return 0
+    fi
+  done
+  echo "    [sender-bounce] ${box} still no pixel change ${resolve_s}s after the receiver reset — fresh finder did not re-resolve within the measured window (issue 1114)" >&2
+  return 1
+}

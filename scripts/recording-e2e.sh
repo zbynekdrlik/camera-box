@@ -1428,6 +1428,20 @@ preflight_mv_reverify() {
     if [ "$a" -eq 1 ]; then
       echo "    [sender-bounce] ${box} (NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
       timeout "$call_timeout" python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
+      # #1114: the re-attach above is a CLEAR-then-SET receiver reset (the merged WS-side fix) that
+      # tears down + rebuilds strih's NDI receiver — so its fresh DistroAV
+      # finder must re-resolve the live post-bounce burn sender by URL, MEASURED at up to ~2 min on
+      # the live rig. Give it its OWN bounded re-resolve window right after the kick (mv_reverify_
+      # resolve_wait: a real poll that exits the instant a pixel changes, so a fast re-lock costs ~0
+      # extra), so the short attempt budget below cannot false-fail a genuinely-live-but-still-
+      # resolving leg into the destructive receiver-wedge escalation. Deploy context only — the
+      # cleanup caller (attempts=1) must stay fast enough never to outlast a GH-Actions cancellation
+      # grace window.
+      if [ "${PREFLIGHT_MV_REVERIFY_CONTEXT:-preflight}" != "cleanup" ]; then
+        if mv_reverify_resolve_wait "$box" "$cam_n" "$call_timeout"; then
+          return 0
+        fi
+      fi
     fi
     if [ "$a" -lt "$attempts" ]; then
       echo "    [sender-bounce] ${box} attempt ${a}/${attempts} still no pixel change — settling ${settle_s}s for the NDI reconnect, then re-sampling" >&2

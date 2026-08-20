@@ -31,7 +31,10 @@ fn recording_e2e() -> String {
 }
 
 fn escalate_lib() -> String {
-    format!("{}/scripts/lib/mv-reverify-escalate.sh", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/scripts/lib/mv-reverify-escalate.sh",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 /// Run a bash driver that sources the escalate lib after wiring a fake `frozen-camera-gate.py` into
@@ -106,7 +109,10 @@ fn resolve_wait_returns_zero_the_instant_the_fresh_finder_re_resolves() {
 #[test]
 fn resolve_wait_returns_one_after_a_bounded_deadline_on_a_dead_leg() {
     let (stdout, stderr, rc) = drive_resolve_wait(0, 2);
-    assert_eq!(rc, 0, "the bash driver itself must exit cleanly. stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        rc, 0,
+        "the bash driver itself must exit cleanly. stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(
         stdout.contains("RW_RC=1"),
         "#1114: mv_reverify_resolve_wait must return 1 when the leg never delivers within the \
@@ -177,7 +183,10 @@ fn preflight_calls_resolve_wait_after_the_kick_only_in_the_deploy_context() {
 fn resolve_wait_does_not_add_a_second_reattach() {
     let s = recording_e2e();
     let func_start = s.find("preflight_mv_reverify() {").expect("defined");
-    let func_end = s[func_start..].find("\n}\n").map(|i| func_start + i).expect("closes");
+    let func_end = s[func_start..]
+        .find("\n}\n")
+        .map(|i| func_start + i)
+        .expect("closes");
     let body = &s[func_start..func_end];
     assert_eq!(
         body.matches("strih_mv_scenes.py").count(),
