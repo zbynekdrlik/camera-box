@@ -728,4 +728,97 @@ mod tests {
             "no boundary may be SKIPPED while buffered captured frames are available (#1131)"
         );
     }
+
+    // ── (#1145) over-rate cadence: stale dupes retired, not emitted as content-copies ──────────
+
+    /// (#1145) A deterministic over-rate-with-jitter capture stream reproducing the live
+    /// ShadowCast cam1/cam2 pattern: a true-60 Hz source captured at `takt_fps` (isolated
+    /// content-dupes at the over-rate delta — the grabber repeats its internal buffer once per
+    /// surplus slot), with each capture's PROCESSING timestamp carrying `jitter_frac` of
+    /// pseudo-random scheduling jitter (a seeded LCG, so the whole sequence is reproducible off
+    /// rig). Returns `(now_ns, content_id)` in capture order; a dupe repeats the previous
+    /// `content_id` (content-dupeness is a hash property, INDEPENDENT of the jittered timestamp —
+    /// which is why the stream carries both a periodic dupe pattern AND independent timing jitter).
+    fn synthetic_over_rate_with_jitter(
+        takt_fps: f64,
+        jitter_frac: f64,
+        seed: u64,
+        seconds: usize,
+    ) -> Vec<(u64, u64)> {
+        let over_rate = takt_fps - 60.0;
+        let dupe_period = if over_rate > 0.01 {
+            (takt_fps / over_rate).round() as usize
+        } else {
+            10_000_000
+        };
+        let count = (takt_fps * seconds as f64) as usize;
+        let nominal_interval_ns = 1_000_000_000.0 / takt_fps;
+        let mut lcg: u64 = seed;
+        let mut now: f64 = 0.0;
+        let (mut next_id, mut prev_id): (u64, u64) = (0, 0);
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            lcg = lcg
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let unit = ((lcg >> 11) as f64) / ((1u64 << 53) as f64); // [0, 1)
+            let jitter_ns = (unit * 2.0 - 1.0) * jitter_frac * nominal_interval_ns;
+            if i > 0 {
+                now += nominal_interval_ns + jitter_ns;
+            }
+            let is_dupe = i > 0 && dupe_period > 0 && i % dupe_period == dupe_period - 1;
+            let content_id = if is_dupe {
+                prev_id
+            } else {
+                let id = next_id;
+                next_id += 1;
+                id
+            };
+            prev_id = content_id;
+            out.push((now.max(0.0) as u64, content_id));
+        }
+        out
+    }
+
+    #[test]
+    fn over_rate_stale_dupes_retired_not_emitted_as_content_copies_1145() {
+        // (#1145) RED before the fix / GREEN after. cam1/cam2's ShadowCast drifts its capture takt
+        // to ~61.3 fps against a true-60 Hz source; realistic V4L2 dequeue timestamp jitter
+        // routinely pushes an isolated on-time deferral over the boundary hair-trigger, so the next
+        // content-dupe arrives LATE and the pre-existing late-dupe valve EMITS it as a
+        // content-duplicate (a delta-0 repeat downstream) — the exact copy that, paired with the
+        // compensating dropped-unique, presents as the strih 15fps-judder the presentation-cadence
+        // uniformity gate REDs. v2 retires every stale over-rate dupe (shed it AND advance the
+        // already-stale boundary) instead, so the emitted 60 fps stream carries NO content-copy.
+        //
+        // Summed across several seeds, and past a warm-up window (the unique-rate window fills over
+        // ~2 s before retirement can engage), the emitted stream must contain ZERO
+        // consecutive-identical content ids. RED: the current valve emits 6-11 copies per seed.
+        // GREEN: zero.
+        let emit_interval_ns = 1_000_000_000u64 / 60;
+        const WARMUP_NS: u64 = 4_000_000_000; // exclude the ~2 s unique-rate-window fill + margin
+        let mut total_copies_after_warmup = 0usize;
+        for seed in [1u64, 7, 3, 42, 99] {
+            let captures = synthetic_over_rate_with_jitter(61.3, 0.20, seed, 20);
+            let mut gate = DecimationGate::new();
+            let mut emitted: Vec<(u64, u64)> = Vec::new();
+            for (now_ns, content_id) in &captures {
+                if gate.poll(*now_ns, emit_interval_ns, *content_id, false) {
+                    emitted.push((*now_ns, *content_id));
+                }
+            }
+            let post: Vec<u64> = emitted
+                .iter()
+                .filter(|(now_ns, _)| *now_ns >= WARMUP_NS)
+                .map(|(_, id)| *id)
+                .collect();
+            total_copies_after_warmup += post.windows(2).filter(|w| w[0] == w[1]).count();
+        }
+        assert_eq!(
+            total_copies_after_warmup, 0,
+            "over-rate stale dupes must be retired, not emitted as content-duplicates (the copies \
+             that present as the strih 15fps-judder); got {total_copies_after_warmup} emitted \
+             content-copies across 5 seeds"
+        );
+    }
 }
