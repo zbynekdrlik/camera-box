@@ -42,8 +42,10 @@ _read_log() { [ -f "$BISECT_LOG" ] && cat "$BISECT_LOG" || printf ''; }
 # _point_fields LABEL -> "RUN_ID<TAB>VERSION<TAB>NOTE" for LABEL from the points file (rc!=0 if absent)
 _point_fields() {
   local want="$1" line parsed
-  while IFS= read -r line; do
-    parsed="$(bisect_parse_point_line "$line" 2>/dev/null)" || continue
+  # `|| [ -n "$line" ]` reads a final line lacking a trailing newline; no `2>/dev/null` so a
+  # malformed line (rc=2) shouts instead of vanishing (issue 1150 review 🟡3/🟡4).
+  while IFS= read -r line || [ -n "$line" ]; do
+    parsed="$(bisect_parse_point_line "$line")" || continue
     case "$parsed" in
       "$want"$'\t'*) printf '%s' "${parsed#*$'\t'}"; return 0 ;;
     esac
@@ -85,8 +87,8 @@ _cmd_list() {
   local markers line parsed label rest st
   markers="$(_read_log)"
   printf '%-16s %-14s %-16s %-10s %s\n' POINT RUN_ID VERSION STATUS NOTE
-  while IFS= read -r line; do
-    parsed="$(bisect_parse_point_line "$line" 2>/dev/null)" || continue
+  while IFS= read -r line || [ -n "$line" ]; do
+    parsed="$(bisect_parse_point_line "$line")" || continue
     label="${parsed%%$'\t'*}"; rest="${parsed#*$'\t'}"
     st="$(bisect_latest_status "$label" "$markers")"; [ -n "$st" ] || st="-"
     printf '%-16s %-14s %-16s %-10s %s\n' "$label" "${rest%%$'\t'*}" "$(printf '%s' "$rest" | cut -f2)" "$st" "$(printf '%s' "$rest" | cut -f3-)"
@@ -141,10 +143,20 @@ main() {
     return 0
   fi
 
+  local camset; camset="$(bisect_camera_set)"
   echo ""
-  echo "--execute: deploying $label to cam1+cam2 via deploy-fleet.sh ..."
-  CAMERA_SET="cam1 cam2" "$HERE/deploy-fleet.sh" --run "$run"
-  bisect_marker_line "$label" "$run" "$ver" deployed "cam1,cam2" >> "$BISECT_LOG"
+  echo "--execute: deploying $label to $camset via deploy-fleet.sh ..."
+  # Single-sourced CAMERA_SET (bisect_camera_set) — the SAME value the tested deploy plan prints, so
+  # the literal that actually deploys is the one under test (issue 1150 review 🔴2). On a partial
+  # deploy failure record a durable 'deploy-failed' marker + a loud message before set -e aborts, so
+  # the operator has a trace and does NOT mistake a half-deployed fleet for a clean point (🔵6).
+  if ! CAMERA_SET="$camset" "$HERE/deploy-fleet.sh" --run "$run"; then
+    bisect_marker_line "$label" "$run" "$ver" deploy-failed "$camset" >> "$BISECT_LOG"
+    echo "ERROR: deploy of $label to $camset FAILED — see deploy-fleet.sh output above. Marked deploy-failed in $BISECT_LOG." >&2
+    echo "       The fleet may be half-deployed; do NOT run the E2E for this point until it is re-deployed cleanly." >&2
+    return 1
+  fi
+  bisect_marker_line "$label" "$run" "$ver" deployed "$camset" >> "$BISECT_LOG"
   echo "marker written: $label deployed -> $BISECT_LOG"
   _print_runbook "$label" "$run" "$ver"
 }

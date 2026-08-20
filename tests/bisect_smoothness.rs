@@ -37,7 +37,7 @@ fn driver() -> PathBuf {
 /// Source the LIB (no main to guard — it is a pure lib) and run `body`, returning stdout. Asserts
 /// the harness exited 0.
 fn run_sourced(body: &str) -> String {
-    let harness = format!("set -uo pipefail\n. \"$LIB\"\n{body}");
+    let harness = format!("set -uo pipefail\n. \"$LIB\"\nset +e\n{body}");
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)
@@ -56,7 +56,7 @@ fn run_sourced(body: &str) -> String {
 /// Source the LIB + run `body`, returning (exit_code, stdout) WITHOUT asserting success — for the
 /// pure functions that intentionally return non-zero (parse of a comment / bad run-id).
 fn run_sourced_status(body: &str) -> (i32, String) {
-    let harness = format!("set -uo pipefail\n. \"$LIB\"\n{body}");
+    let harness = format!("set -uo pipefail\n. \"$LIB\"\nset +e\n{body}");
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)
@@ -67,6 +67,21 @@ fn run_sourced_status(body: &str) -> (i32, String) {
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
     )
+}
+
+#[test]
+fn camera_set_is_cam1_cam2_never_cam3() {
+    // bisect_camera_set is the SINGLE source of truth used by BOTH the printed plan AND the real
+    // deploy in the driver, so asserting it here covers the literal that actually deploys (#1150).
+    let out = run_sourced("bisect_camera_set");
+    assert_eq!(
+        out, "cam1 cam2",
+        "the bisect deploy set must be exactly cam1 cam2"
+    );
+    assert!(
+        !out.contains("cam3"),
+        "the bisect deploy set must NEVER contain cam3 (the control box): {out}"
+    );
 }
 
 #[test]

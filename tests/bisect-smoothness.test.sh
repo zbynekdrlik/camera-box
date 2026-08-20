@@ -65,5 +65,24 @@ allmark="$(printf '%b' '2026\tP1\t1\tv\tresult\tx\n2026\tP2\t2\tv\tresult\tx\n20
 rc=0; out="$(bisect_next_pending "$points" "$allmark" 2>/dev/null)" || rc=$?
 check_rc "next pending all-done rc" 1 "$rc"
 
+# --- bisect_camera_set: the single source of truth = cam1 cam2, never cam3 (issue 1150 review 🔴2) ---
+cs="$(bisect_camera_set)"
+check "camera set = cam1 cam2" "cam1 cam2" "$cs"
+case "$cs" in *cam3*) check "camera set never cam3" "no-cam3" "HAS-cam3";; *) check "camera set never cam3" "no-cam3" "no-cam3";; esac
+# and the deploy plan is built FROM it
+check "deploy plan uses the camera set" "CAMERA_SET=\"$cs\" scripts/deploy-fleet.sh --run 9" "$(bisect_deploy_plan L 9 v)"
+
+# --- REAL marker-append round-trip: deployed then result must land on SEPARATE lines and flip
+#     latest_status to result / advance next_pending (issue 1150 review 🔴1). This writes through the
+#     actual `bisect_marker_line ... >> file` path the driver uses, not a synthetic \n-joined string. ---
+rtlog="$(mktemp)"
+BISECT_NOW="2026-08-20T10:00:00Z" bisect_marker_line PX 7 v1 deployed cam1,cam2 >> "$rtlog"
+BISECT_NOW="2026-08-20T11:00:00Z" bisect_marker_line PX 7 v1 result "uniformity=0.99" >> "$rtlog"
+check "two appended markers = two physical lines" "2" "$(wc -l < "$rtlog")"
+check "latest_status after append flips to result" "result" "$(bisect_latest_status PX "$(cat "$rtlog")")"
+rtpoints="$(printf 'PX\t7\tv1\tn\nPY\t8\tv1\tn\n')"
+check "next_pending advances past a resulted point" "PY" "$(bisect_next_pending "$rtpoints" "$(cat "$rtlog")")"
+rm -f "$rtlog"
+
 printf '\n== bisect-smoothness pure tests: %d passed, %d failed ==\n' "$pass" "$fails"
 [ "$fails" -eq 0 ]
