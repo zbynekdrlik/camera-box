@@ -69,3 +69,53 @@ p=json.load(sys.stdin); active=sys.argv[1].split()
 have=set(p["strih_pins"])
 print(" ".join(c for c in active if ("NDI %s"%c) not in have))' "$2"
 }
+
+# #1124 item 3: POST-record stomp re-check (report-only). Re-verify the measurement pins/hold are
+# STILL in force after StopRecord (they are only restored later, by cleanup()'s teardown), so a
+# mid-recording writer that stomped them surfaces as a LOUD diagnostic instead of an opaque
+# A/V-gate result. NEVER gates -- a mismatch prints a WARNING and returns 0. Reuses the SAME
+# obs_phase2.py verify-measurement-pins command the pre-record [4h/8eq] block uses (its docstring
+# already names this deferred post-record re-call). Args: profile strih_host strih_pw stream_host
+# stream_pw. The whole re-check is best-effort: an unreachable box / WS hiccup is itself only a
+# report-only NOTE (the measurement already happened; this is diagnosis on top).
+measurement_eq_post_record_stomp_recheck() {
+  local _prof="$1" _sh="$2" _spw="$3" _mh="$4" _mpw="$5" _sd
+  _sd="$(_meq_scripts_dir)"
+  echo "[7/8 meq] #1124 POST-record stomp re-check (report-only) — are the measurement pins/hold STILL in force after StopRecord? (a mid-run writer stomp would make the A/V-gate result reflect the WRONG config)"
+  python3 "$_sd/obs_phase2.py" verify-measurement-pins --host "$_sh" --password "$_spw" \
+    --profile "$_prof" --role strih 2>&1 | sed 's/^/    [meq-stomp strih] /' \
+    || echo "WARNING #1124: strih measurement pins were STOMPED during the recording (a mid-run writer changed them after [4h/8eq] applied them) — this run's A/V-gate result reflects the STOMPED config, not the profile. Report-only, gate unaffected; re-check the writer." >&2
+  python3 "$_sd/obs_phase2.py" verify-measurement-pins --host "$_mh" --password "$_mpw" \
+    --profile "$_prof" --role stream 2>&1 | sed 's/^/    [meq-stomp stream] /' \
+    || echo "WARNING #1124: stream hold was STOMPED during the recording (a mid-run writer changed it after [4/8] set it) — this run's A/V-gate result reflects the STOMPED config, not the profile. Report-only, gate unaffected; re-check the writer." >&2
+  # #1133: report-only helper called as a bare statement MUST return 0 on every path, or a caller
+  # under `set -euo pipefail` would abort the whole run on a benign non-zero (this one is in the
+  # [7/8] `set +e` region today, but return 0 keeps it safe if the call ever moves).
+  return 0
+}
+
+# #1124 items 1+2: POST-verdict report-only diagnostics off the run's full verdict JSON. Item 1 --
+# staleness: feed the verdict's all_cambox_delivery_latency into the pure staleness decision so a
+# profile that no longer matches the rig's transports surfaces "profile STALE — re-derive". Item 2
+# -- edge-oscillation: ONLY when the run FAILED zero-loss ($gate != 0), classify the uniform
+# copies~=gaps FIFO limit-cycle signature so a phase-edge flake reads as the known #757-Corr-2
+# class, not a regression. Both NEVER gate. Args: profile verdict_json gate. A missing verdict
+# JSON (planner mode never produced one on dev1) is a report-only NOTE, never an error.
+measurement_eq_post_verdict_diagnostics() {
+  local _prof="$1" _verdict="$2" _gate="${3:-0}" _sd
+  _sd="$(_meq_scripts_dir)"
+  if [ ! -f "$_verdict" ]; then
+    echo "    [8/8 meq] #1124 no verdict JSON on dev1 ($_verdict) — skipping report-only staleness/edge diagnostics (planner mode / merge ran elsewhere)"
+    return 0
+  fi
+  echo "[8/8 meq] #1124 staleness report (report-only) — is the checked-in measurement profile still current vs this run's measured delivery?"
+  python3 "$_sd/e2e_measurement_pins.py" staleness-from-verdict --profile "$_prof" --verdict "$_verdict" 2>&1 | sed 's/^/    [meq-staleness] /' || true
+  if [ "$_gate" != "0" ]; then
+    echo "[8/8 meq] #1124 edge-oscillation classifier (report-only) — a FAILED profile run: is it the known FIFO-edge flake or a genuine regression?"
+    python3 "$_sd/e2e_measurement_pins.py" edge-oscillation --verdict "$_verdict" 2>&1 | sed 's/^/    [meq-edge] /' || true
+  fi
+  # #1133: this helper is called as a bare statement in the [8/8] region, which runs under the
+  # caller's re-enabled `set -euo pipefail` — return 0 unconditionally so a benign non-zero (an
+  # empty read, a sed/pipefail hiccup) can NEVER set -e-abort the run before its own `exit $GATE`.
+  return 0
+}

@@ -3740,6 +3740,17 @@ echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
 
+# #1124 item 3 — POST-record stomp re-check (profile mode only, report-only). Runs HERE, right
+# after StopRecord while the measurement pins/hold are STILL in force (cleanup()'s teardown
+# restores them only at exit), so a mid-recording writer that stomped them surfaces as a loud
+# diagnostic instead of an opaque A/V-gate result. The re-check itself is in the sourced lib
+# (#675 anchor-safe pattern); it never gates. Still in the [7/8] `set +e` region.
+if measurement_eq_enabled && [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  # #1133: report-only, never gates — the trailing `|| true` guarantees no abort even if the region
+  # ever leaves `set +e` (the helper also returns 0 internally; belt-and-suspenders).
+  measurement_eq_post_record_stomp_recheck "$MEASUREMENT_EQ_PROFILE" "$STRIH" "$STRIH_PW" "$STREAM" "$STREAM_PW" || true
+fi
+
 # [7b/8] #894: burn-unit run-integrity check. Runs BEFORE the merge/verdict below, so a burn unit
 # that died mid-run (e.g. the exact #894 device-steal race: a hotplug's udev rule restarting
 # production, stealing /dev/videoN back with 77/NOPERM) gets its OWN loud, distinctly-labeled
@@ -4526,6 +4537,17 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     if [ -f "$REPORT_JSON" ]; then
       python3 "$HERE/recording-e2e-report.py" --json "$REPORT_JSON" --out "$REPORT_PNG" || \
         echo "WARNING: report render failed (non-fatal; JSON at $REPORT_JSON)" >&2
+    fi
+    # #1124 items 1+2 — POST-verdict report-only diagnostics (profile mode only). Item 1: staleness
+    # of the checked-in profile vs THIS run's measured delivery (always). Item 2: edge-oscillation
+    # FIFO-limit-cycle classifier, ONLY when the run FAILED ($GATE != 0), so a phase-edge flake
+    # reads as the known #757-Corr-2 class not a regression. Both in the sourced lib (#675
+    # anchor-safe); neither touches $GATE (report-only, run AFTER $GATE is decided above).
+    if measurement_eq_enabled; then
+      # #1133: this region runs under the re-enabled `set -euo pipefail`; the trailing `|| true`
+      # (plus the helper's own `return 0`) guarantees a report-only diagnostic can never set -e-abort
+      # the run before `exit $GATE` below.
+      measurement_eq_post_verdict_diagnostics "$MEASUREMENT_EQ_PROFILE" "$REPORT_JSON" "$GATE" || true
     fi
     # ============================================================================
     # #856 [8/8g] -- combine THIS run's own measured per-camera A/V offsets
