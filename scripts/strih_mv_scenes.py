@@ -8,9 +8,9 @@ replicates that pattern on strih over OBS WebSocket.
 
 strih already has 7 full-bandwidth camera scenes "Cam 1".."Cam 7" (#753, 2026-07-14: cam7 is a
 NEW, direct/non-inverted pin — its scene/input share the same "7"), each wrapping ONE NDI input
-"NDI cam<n>" bound to a real fleet NDI source (the genlock skill's documented INVERTED-label
-mapping for cam1..cam6 — e.g. live-verified 2026-07-13: "NDI cam1" carries "CAM3 (usb)", not
-CAM1). This script
+"NDI cam<n>" bound to a real fleet NDI source (#753 1:1 mapping since 2026-07-14: "NDI cam<n>"
+carries "CAM<n> (usb)" for every n — the pre-2026-07-14 INVERTED offset, e.g. "NDI cam1"→"CAM3
+(usb)", is HISTORY; the canonical fact table is set-ndi-mapping.py's FULL_MAP). This script
 NEVER hardcodes that mapping: it reads each existing input's LIVE `ndi_source_name` over WS and
 wraps that EXACT same value in a new "MV Cam <n>" twin input, `genlock_monitor=true` (the #501
 pattern — the vendored DistroAV genlock lockdown forces LOW-bandwidth NDI receive, ~9x cheaper,
