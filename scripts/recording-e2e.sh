@@ -3480,6 +3480,29 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && ! measurement_eq_enabled; then
     }
 fi
 
+# [4i/8align] #1003 floor-3 per-run camera alignment (owner rework 2026-08-20). The SIMULTANEOUS
+# painter-QR screenshot spread across every on-air strih camera (CAMERA_ALIGN_SET, INCLUDING cam4)
+# is BOTH the alignment basis AND the owner's acceptance instrument ("ak spravím screenshot, musím
+# vidieť rovnaké monotonic a time v KAŽDOM QR"). This BLOCKING preflight measures the spread, applies
+# floor-3 pins (the slowest/max-transport camera -> pin 3, every other -> 3 + its relative delivery
+# delta from the exact gen_ts_ns difference — RELATIVE-only, never the rejected absolute-depth
+# 90/160/184), RE-MEASURES, and ABORTS the run with a per-camera named reason if it stays
+# misaligned. strih per-source pins ONLY: the stream NDI 2ME PGM hold (operator A/V-align domain)
+# and imag's 3ms floor are never in the align set. The independent SOURCE-side cross-camera spread
+# gate (recording-verdict) stays a separate blocking proof, unchanged. Runs on the ALL_CAMBOX path;
+# SKIPPED under MEASUREMENT_EQ (that opt-in profile is the OTHER strih-pin writer) and via QR_ALIGN=0.
+QR_ALIGN="${QR_ALIGN:-1}"
+if [ "$QR_ALIGN" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ] && ! measurement_eq_enabled; then
+  echo "[4i/8align] #1003 floor-3 camera alignment via simultaneous painter-QR spread (strih on-air set incl. cam4)"
+  . "$HERE/lib/qr-align.sh"
+  qr_align_run "$STRIH" "$STRIH_PW" || {
+    echo "ERROR: [4i/8align] FAIL: #1003 cameras could not be floor-3 aligned — see the per-camera reason above. The run is ABORTED (owner rework: measure -> align (floor 3) -> verify -> FAIL if it cannot align)." >&2
+    exit 1
+  }
+else
+  echo "[4i/8align] #1003 floor-3 camera alignment — SKIPPED (QR_ALIGN=$QR_ALIGN, ALL_CAMBOX=${ALL_CAMBOX:-0}, measurement_eq opt-in profile owns strih pins when on)"
+fi
+
 # #758 item 3 — arm the in-run freeze watch for the WHOLE recording window (StartRecord through
 # StopRecord), right before StartRecord. ALL_CAMBOX only (mirrors the [0/8]/[1/8] preflight + [2/8]/[2b/8] reverify's
 # own gating) — excludes any acked-offline camera.
