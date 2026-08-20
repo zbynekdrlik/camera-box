@@ -539,23 +539,38 @@ fn frame_probe_pin_verdict_ok_alarm_unknown() {
         r#"o="$(frame_probe_pin_verdict cam2 "d47e43f8" "d47e43f8")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
         &[],
     );
-    assert!(ok.contains("RC=0") && ok.contains("OK"), "matching painter -> OK: {ok}");
+    assert!(
+        ok.contains("RC=0") && ok.contains("OK"),
+        "matching painter -> OK: {ok}"
+    );
     let alarm = run_sourced(
         r#"o="$(frame_probe_pin_verdict cam2 "d47e43f8" "beef1234")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
         &[],
     );
-    assert!(alarm.contains("RC=30") && alarm.contains("ALARM"), "lagging painter -> ALARM(30): {alarm}");
-    assert!(alarm.contains("beef1234"), "must name the expected current-build sha: {alarm}");
+    assert!(
+        alarm.contains("RC=30") && alarm.contains("ALARM"),
+        "lagging painter -> ALARM(30): {alarm}"
+    );
+    assert!(
+        alarm.contains("beef1234"),
+        "must name the expected current-build sha: {alarm}"
+    );
     let dep_empty = run_sourced(
         r#"o="$(frame_probe_pin_verdict cam2 "" "beef")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
         &[],
     );
-    assert!(dep_empty.contains("RC=31") && dep_empty.contains("UNKNOWN"), "unread deployed -> UNKNOWN(31): {dep_empty}");
+    assert!(
+        dep_empty.contains("RC=31") && dep_empty.contains("UNKNOWN"),
+        "unread deployed -> UNKNOWN(31): {dep_empty}"
+    );
     let exp_empty = run_sourced(
         r#"o="$(frame_probe_pin_verdict cam2 "d47e" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
         &[],
     );
-    assert!(exp_empty.contains("RC=31") && exp_empty.contains("UNKNOWN"), "unresolved expected -> UNKNOWN(31): {exp_empty}");
+    assert!(
+        exp_empty.contains("RC=31") && exp_empty.contains("UNKNOWN"),
+        "unresolved expected -> UNKNOWN(31): {exp_empty}"
+    );
 }
 
 #[test]
@@ -585,8 +600,10 @@ fn frame_probe_pin_alarm_is_report_only_does_not_block_a_clean_gate() {
     let v = write_version_fixture("fp_report_only", "camera-box 1.7.0-dev.497\n");
     let (code, out, err) = run_gate_env(
         &[
-            "--linux", "cam2=root@10.77.9.62",
-            "--frame-probe-expected-sha", "beefface00000000",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "beefface00000000",
         ],
         &[
             ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.497"),
@@ -594,13 +611,19 @@ fn frame_probe_pin_alarm_is_report_only_does_not_block_a_clean_gate() {
             ("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca"),
         ],
     );
-    assert_eq!(code, 0, "a lagging frame-probe must be report-only (gate still passes). out={out} err={err}");
+    assert_eq!(
+        code, 0,
+        "a lagging frame-probe must be report-only (gate still passes). out={out} err={err}"
+    );
     assert!(out.contains("GATE PASS"), "{out}");
     assert!(
         out.contains("frame-probe (cam2 painter) sha-pin") && out.contains("ALARM"),
         "the frame-probe section must SCREAM the drift: {out}"
     );
-    assert!(err.contains("FRAME-PROBE PIN ALARM"), "a loud stderr banner must fire: {err}");
+    assert!(
+        err.contains("FRAME-PROBE PIN ALARM"),
+        "a loud stderr banner must fire: {err}"
+    );
 }
 
 #[test]
@@ -608,8 +631,10 @@ fn frame_probe_pin_ok_when_deployed_matches_current_build() {
     let v = write_version_fixture("fp_ok", "camera-box 1.7.0-dev.497\n");
     let (code, out, _err) = run_gate_env(
         &[
-            "--linux", "cam2=root@10.77.9.62",
-            "--frame-probe-expected-sha", "d47e43f896917dca",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "d47e43f896917dca",
         ],
         &[
             ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.497"),

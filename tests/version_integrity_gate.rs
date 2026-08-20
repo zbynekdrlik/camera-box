@@ -1558,7 +1558,10 @@ fn vendor_pin_ok_when_deployed_at_newest_vendor_head() {
         r#"o="$(genlock_vendor_pin_verdict "46d868a29a7e" "46d868a29a7e" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
         &[],
     );
-    assert!(out.contains("RC=0"), "current bundle must be OK (rc 0): {out}");
+    assert!(
+        out.contains("RC=0"),
+        "current bundle must be OK (rc 0): {out}"
+    );
     assert!(out.contains("OK"), "must report OK: {out}");
     assert!(
         !out.to_uppercase().contains("ALARM") && !out.contains("UNKNOWN"),
@@ -1573,8 +1576,14 @@ fn vendor_pin_alarm_names_pending_commits() {
         r#"pend="$(printf 'f70317e81 fix(#1097): [green] framesync_create failure retries in place\n2386b60d9 docs(#1097): [review] correct the retry-cleanup comment')"; o="$(genlock_vendor_pin_verdict "03cd9c073" "2386b60d9" "$pend")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
         &[],
     );
-    assert!(out.contains("RC=30"), "a lagging bundle must return the ALARM code 30: {out}");
-    assert!(out.to_uppercase().contains("ALARM"), "must SCREAM ALARM: {out}");
+    assert!(
+        out.contains("RC=30"),
+        "a lagging bundle must return the ALARM code 30: {out}"
+    );
+    assert!(
+        out.to_uppercase().contains("ALARM"),
+        "must SCREAM ALARM: {out}"
+    );
     assert!(
         out.contains("f70317e81") && out.contains("2386b60d9"),
         "the alarm MUST name the pending vendor commits: {out}"
@@ -1588,8 +1597,14 @@ fn vendor_pin_unknown_when_deployed_sha_unread() {
         r#"o="$(genlock_vendor_pin_verdict "" "2386b60d9" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
         &[],
     );
-    assert!(out.contains("RC=31"), "an unread deployed SHA must fail-closed to UNKNOWN (31): {out}");
-    assert!(out.contains("UNKNOWN"), "must report UNKNOWN (never a silent OK): {out}");
+    assert!(
+        out.contains("RC=31"),
+        "an unread deployed SHA must fail-closed to UNKNOWN (31): {out}"
+    );
+    assert!(
+        out.contains("UNKNOWN"),
+        "must report UNKNOWN (never a silent OK): {out}"
+    );
 }
 
 #[test]
@@ -1598,7 +1613,10 @@ fn vendor_pin_unknown_when_newest_vendor_unresolved() {
         r#"o="$(genlock_vendor_pin_verdict "46d868a29a7e" "" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
         &[],
     );
-    assert!(out.contains("RC=31"), "an unresolved newest-vendor HEAD must fail-closed to UNKNOWN (31): {out}");
+    assert!(
+        out.contains("RC=31"),
+        "an unresolved newest-vendor HEAD must fail-closed to UNKNOWN (31): {out}"
+    );
     assert!(out.contains("UNKNOWN"), "must report UNKNOWN: {out}");
 }
 
@@ -1645,7 +1663,10 @@ fn vendor_pin_alarm_is_report_only_does_not_block_an_otherwise_clean_gate() {
         code, 0,
         "the vendor-pin ALARM must be REPORT-ONLY (must not flip the gate exit). stdout={stdout} stderr={stderr}"
     );
-    assert!(stdout.contains("GATE PASS"), "gate must still pass: {stdout}");
+    assert!(
+        stdout.contains("GATE PASS"),
+        "gate must still pass: {stdout}"
+    );
     // But it SCREAMS and names the pending commits.
     assert!(
         stdout.contains("vendor-pin alarm (#1137"),
