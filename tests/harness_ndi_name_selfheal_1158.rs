@@ -53,7 +53,10 @@ fn forwards_host_active_and_scripts_to_the_seam() {
     let seam = r#"echo "H=$NDI_NAME_SELFHEAL_HOST A=$NDI_NAME_SELFHEAL_ACTIVE S=$NDI_NAME_SELFHEAL_SCRIPTS"; exit 0"#;
     let (rc, out) = run(seam, "10.77.9.202", "cam2 cam3", "/scr");
     assert_eq!(rc, 0, "healed -> exit 0; got {out}");
-    assert!(out.contains("H=10.77.9.202 A=cam2 cam3 S=/scr"), "seam saw wrong args: {out}");
+    assert!(
+        out.contains("H=10.77.9.202 A=cam2 cam3 S=/scr"),
+        "seam saw wrong args: {out}"
+    );
 }
 
 #[test]
@@ -90,7 +93,16 @@ echo "REACHED_TRAILING_LINE"
         .output()
         .expect("failed to run set-e harness");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "set-e caller aborted on a non-zero heal: {stdout}");
-    assert!(stdout.contains("REACHED_TRAILING_LINE"), "trailing line not reached: {stdout}");
-    assert!(!stdout.contains("HEALED"), "should not claim healed on exit 3: {stdout}");
+    assert!(
+        out.status.success(),
+        "set-e caller aborted on a non-zero heal: {stdout}"
+    );
+    assert!(
+        stdout.contains("REACHED_TRAILING_LINE"),
+        "trailing line not reached: {stdout}"
+    );
+    assert!(
+        !stdout.contains("HEALED"),
+        "should not claim healed on exit 3: {stdout}"
+    );
 }
