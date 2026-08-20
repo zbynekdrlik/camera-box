@@ -122,3 +122,21 @@ now lands in ONE place — `tests/harness_cam2_paint_signal_1148.rs` is where it
 of risking five divergent copies that false-pass a black monitor. (`scripts/verify-device.sh` keeps
 its own REDUCED dev1-side variant — journal-only, no `fuser`/fb0 because it runs the check from
 dev1, not on the box — deliberately out of scope.)
+
+**Extending it (the non-obvious mechanics, so you don't re-derive them):**
+- `_cb_paint_signal` is a REMOTE bash FUNCTION (not a dev1-side one) because the predicate must run
+  `fuser` ON the cam box. The shared thing is therefore emitted TEXT, and each site emits it by
+  calling `cam2_paint_signal_remote_fn` **OUTSIDE its own `cat <<…` heredoc** (in the builder
+  function body, before the heredoc). That is what makes it embed identically into a single-quoted
+  heredoc (`<<'VERIFY'`, `<<'PAINTCHK'` — which cannot do `$(…)`) AND a `\$`-escaped one
+  (`<<HANDOFF`, `<<CMDS`, `<<PCHECK`). Never try to `$(cam2_paint_signal_remote_fn)` inside a site's
+  own heredoc.
+- It uses `return`, never `exit` — safe both inside a `set -e` remote (handoff) and inside
+  cleanup()'s WARN-only EXIT trap (a bare `exit` there aborts the whole trap).
+- It echoes a REASON TOKEN (`KMS_OK <dev>` / `KMS_NODRM <dev>` / `KMS_NOVBLANK <dev>` / `FBDEV_OK` /
+  `FBDEV_DEAD`) so a site that needs granular operator messages (presenter-liveness) maps the token,
+  while the four boolean sites just `_cb_paint_signal >/dev/null`.
+- If you change the signal STRINGS, an anchor test that used to read a lib SOURCE for the literal
+  (`fs::read_to_string(lib).contains("presenter: using DRM/KMS page-flip")`) must instead assert the
+  EMITTED builder output (run the builder, assert its stdout) — the literal now lives only in the
+  shared lib, so a source-read of the individual site is 1→0 (the #1148 recheck-anchor migration).
