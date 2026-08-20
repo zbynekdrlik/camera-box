@@ -4543,6 +4543,9 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     # FIFO-limit-cycle classifier, ONLY when the run FAILED ($GATE != 0), so a phase-edge flake
     # reads as the known #757-Corr-2 class not a regression. Both in the sourced lib (#675
     # anchor-safe); neither touches $GATE (report-only, run AFTER $GATE is decided above).
+    # Guard is `measurement_eq_enabled` alone (no ALL_CAMBOX, unlike the [7/8] stomp check): the
+    # [preflight] refuses MEASUREMENT_EQ=1 without ALL_CAMBOX=1, so profile mode here already implies
+    # it; and the helper degrades to a "staleness NOT evaluated" note if the delivery block is absent.
     if measurement_eq_enabled; then
       # #1133: this region runs under the re-enabled `set -euo pipefail`; the trailing `|| true`
       # (plus the helper's own `return 0`) guarantees a report-only diagnostic can never set -e-abort

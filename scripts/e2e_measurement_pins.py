@@ -78,7 +78,14 @@ PHASE_SNAP_MAX_COST_MS = 20  # a prone pin must find a safe pin within this many
 # profile edge"). Verified this fires on EXACTLY 1804432786/CAM2 and no other of the 19 runs.
 EDGE_OSC_MIN_BOTH = 3          # min(copies, gaps) >= this: both over- AND undershoot present
 EDGE_OSC_MAX_MAGNITUDE = 25    # max(copies, gaps) <= this: moderate churn, NOT a frozen storm
-EDGE_OSC_BALANCE_FRAC = 0.5    # |copies - gaps| <= this * max(copies, gaps): balanced (approx-equal)
+EDGE_OSC_BALANCE_FRAC = 0.5    # |copies - gaps| <= this * max(copies, gaps): balanced (approx-equal).
+                               # NOTE: 0.5 admits up to a 2:1 ratio (3/6, 4/8) as "balanced" -- looser
+                               # than a strict copies==gaps, DELIBERATELY: the live FIFO signature is
+                               # only approximately balanced (5/4, 7/7) and per-run phase noise skews
+                               # the ratio, so a tight bound would miss real edges. It stays data-safe
+                               # because MIN_BOTH>=3 + MAX_MAGNITUDE<=25 + MIN_WINDOWS>=2 already gate
+                               # it to exactly 1/19 real runs (a lone 3/6 window is a singleton, not a
+                               # sustained edge). Re-tighten only against fresh mined verdict data.
 EDGE_OSC_MIN_WINDOWS = 2       # >= this many oscillating windows on ONE cambox: sustained, not a one-off
 
 
@@ -361,7 +368,8 @@ def _verdict_cam_key(profile_src: str) -> str:
     (`"cam1"`). The verdict's all_cambox_delivery_latency / all_cambox_continuity blocks key on
     the bare `camN`; the profile keys on the OBS input name `NDI camN`. The bare token is the
     last whitespace-delimited word of the OBS input name."""
-    return str(profile_src).split()[-1] if str(profile_src).split() else str(profile_src)
+    parts = str(profile_src).split()
+    return parts[-1] if parts else str(profile_src)
 
 
 def observed_delivery_from_verdict(verdict: dict, profile: dict) -> dict:

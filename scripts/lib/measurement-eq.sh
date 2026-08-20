@@ -82,12 +82,16 @@ measurement_eq_post_record_stomp_recheck() {
   local _prof="$1" _sh="$2" _spw="$3" _mh="$4" _mpw="$5" _sd
   _sd="$(_meq_scripts_dir)"
   echo "[7/8 meq] #1124 POST-record stomp re-check (report-only) — are the measurement pins/hold STILL in force after StopRecord? (a mid-run writer stomp would make the A/V-gate result reflect the WRONG config)"
+  # A non-zero exit here means verify could NOT confirm the pins in force — which is EITHER a real
+  # mid-run stomp OR an unreachable box / WS hiccup (indistinguishable by exit code). So the WARNING
+  # names BOTH causes and points at the [meq-stomp …] detail above (never asserts a definite stomp,
+  # which could wrongly discredit a valid run). Report-only, gate unaffected.
   python3 "$_sd/obs_phase2.py" verify-measurement-pins --host "$_sh" --password "$_spw" \
     --profile "$_prof" --role strih 2>&1 | sed 's/^/    [meq-stomp strih] /' \
-    || echo "WARNING #1124: strih measurement pins were STOMPED during the recording (a mid-run writer changed them after [4h/8eq] applied them) — this run's A/V-gate result reflects the STOMPED config, not the profile. Report-only, gate unaffected; re-check the writer." >&2
+    || echo "WARNING #1124: strih measurement pins could NOT be confirmed in force after StopRecord (a mid-run writer stomp, OR the box was unreachable / a WS hiccup — see the [meq-stomp strih] detail above). If a genuine stomp, this run's A/V-gate result reflects the WRONG config. Report-only, gate unaffected." >&2
   python3 "$_sd/obs_phase2.py" verify-measurement-pins --host "$_mh" --password "$_mpw" \
     --profile "$_prof" --role stream 2>&1 | sed 's/^/    [meq-stomp stream] /' \
-    || echo "WARNING #1124: stream hold was STOMPED during the recording (a mid-run writer changed it after [4/8] set it) — this run's A/V-gate result reflects the STOMPED config, not the profile. Report-only, gate unaffected; re-check the writer." >&2
+    || echo "WARNING #1124: stream hold could NOT be confirmed in force after StopRecord (a mid-run writer stomp, OR the box was unreachable / a WS hiccup — see the [meq-stomp stream] detail above). If a genuine stomp, this run's A/V-gate result reflects the WRONG config. Report-only, gate unaffected." >&2
   # #1133: report-only helper called as a bare statement MUST return 0 on every path, or a caller
   # under `set -euo pipefail` would abort the whole run on a benign non-zero (this one is in the
   # [7/8] `set +e` region today, but return 0 keeps it safe if the call ever moves).

@@ -827,9 +827,10 @@ def verify_measurement_pins(a):
     values are ACTUALLY in force instead). --role strih reads every strih source's live pin;
     --role stream reads the stream hold. Exit 0 = all in force, 1 = a mismatch (a surviving writer,
     a failed apply, or wrong input names -> the measurement would run on the wrong config; fail
-    BEFORE StartRecord). The harness wires it PRE-record today; a POST-record stomp re-check
-    (report-only) + the staleness report are the deferred follow-up #1124 — this command already
-    supports being called again post-record for that purpose, the harness just does not yet."""
+    BEFORE StartRecord). The harness wires it PRE-record ([4h/8eq]) AND, since #1124, re-calls it
+    POST-record (report-only, in the [7/8] `set +e` region via
+    measurement_eq_post_record_stomp_recheck) as a stomp re-check while the pins are still in force,
+    so a mid-run writer that stomped them surfaces loudly instead of as an opaque A/V-gate result."""
     mp = _measurement_pins_module()
     profile = mp.load_profile(a.profile)
     plan = mp.resolve_plan(profile)
