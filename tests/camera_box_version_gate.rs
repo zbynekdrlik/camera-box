@@ -648,3 +648,113 @@ fn frame_probe_pin_ok_when_deployed_matches_current_build() {
         "matching painter must report OK: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1136 addendum: --candidate-pin — the pre-merge bootstrap escape that does
+// NOT reopen the uniformly-stale hole. The pull_request E2E deploys THIS run's
+// merge-candidate build to the fleet to measure it; the gate accepts a fleet
+// uniformly on that candidate (or uniformly on main) and refuses everything
+// else exactly as before.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_candidate_pin_accepts_a_fleet_uniformly_on_the_candidate_build_1136() {
+    let a = write_version_fixture("cand1136-a", "camera-box 1.7.0-dev.496\n");
+    let b = write_version_fixture("cand1136-b", "camera-box 1.7.0-dev.496\n");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--fleet-file",
+            "/dev/null",
+            "--candidate-pin",
+            "1.7.0-dev.496",
+            "--linux",
+            "cam1=x cam2=x",
+        ],
+        &[
+            ("CAMBOX_OFFLINE_ACK", ""),
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.481"),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &a.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &b.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a fleet uniformly on the candidate build must PASS when --candidate-pin names it.\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("candidate"),
+        "the PASS must say it accepted the CANDIDATE build (never a silent main-pin pass).\nstdout={stdout}"
+    );
+}
+
+#[test]
+fn cli_candidate_pin_still_refuses_a_uniformly_stale_fleet_1136() {
+    let a = write_version_fixture("candstale1136-a", "camera-box 1.7.0-dev.100\n");
+    let b = write_version_fixture("candstale1136-b", "camera-box 1.7.0-dev.100\n");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--fleet-file",
+            "/dev/null",
+            "--candidate-pin",
+            "1.7.0-dev.496",
+            "--linux",
+            "cam1=x cam2=x",
+        ],
+        &[
+            ("CAMBOX_OFFLINE_ACK", ""),
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.481"),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &a.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &b.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a uniformly-stale fleet (neither main nor candidate) must STAY refused (20) — \
+         --candidate-pin must not reopen the issue-1136 hole.\nstdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn cli_candidate_pin_refuses_a_mixed_main_and_candidate_fleet_1136() {
+    let a = write_version_fixture("candmix1136-a", "camera-box 1.7.0-dev.481\n");
+    let b = write_version_fixture("candmix1136-b", "camera-box 1.7.0-dev.496\n");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--fleet-file",
+            "/dev/null",
+            "--candidate-pin",
+            "1.7.0-dev.496",
+            "--linux",
+            "cam1=x cam2=x",
+        ],
+        &[
+            ("CAMBOX_OFFLINE_ACK", ""),
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.481"),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &a.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &b.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a MIXED fleet (some on main, some on the candidate) must be refused (20) — \
+         uniformity stays mandatory under --candidate-pin.\nstdout={stdout}\nstderr={stderr}"
+    );
+}
