@@ -1342,7 +1342,7 @@ async fn run_capture_loop(
                             // window (never suppressed on 0/0 — a healthy card legitimately
                             // shows 0/0, which is the self-neutralizing behavior by design, not
                             // the mechanism being off).
-                            let (dupe_shed, blind_shed, dupe_emitted) =
+                            let (dupe_shed, blind_shed, dupe_emitted, retired) =
                                 decimation_gate.take_shed_counts();
                             tracing::info!(
                                 "{}",
@@ -1350,6 +1350,7 @@ async fn run_capture_loop(
                                     dupe_shed,
                                     blind_shed,
                                     dupe_emitted,
+                                    retired,
                                     5
                                 )
                             );
