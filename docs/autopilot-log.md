@@ -9731,3 +9731,30 @@ No push/PR/rig touch (worktree worker).
 - Relay transport decision: gphoto2 CLI shell-out (no libgphoto2 build dep -> ARM cross-build clean for Pi handhelds) behind CameraTransport trait (libgphoto2-FFI a future 2nd impl). Rejected FFI binding (build-time C dep) + new bin in root appliance crate (would pull axum into the minimal appliance).
 - Review (gated Fable, general-purpose dispatch, NOT the built-in review Skill): 1 red / 3 yellow / 4 blue, all fixed in fd3859242 except crate-version-drift filed as follow-up issue 1154. Red was a params-only block not hiding its preview (author display:flex beat UA [hidden]).
 - M2+ deferred: NDI low-quality preview via presenter tech; WS push; cloudflare password-remote; SBC/handheld image; gphoto2 into RUNTIME_DEPS + setup-device; automate the issue-220 E2E camera pre-run shutter checklist.
+
+## issue 1151 — projector-vsync marker reader (drift-guard --check-imag + E2E [0/8]) (2026-08-20)
+
+- Wired an automated report-only reader of the issue-1146 `projector-vsync: present-vsync ARMED`
+  OBS-log marker. New shared lib `scripts/lib/obs-projector-vsync.sh` (split-lib pattern of
+  imag-display-path.sh): `projector_vsync_armed_from_log` / `projector_vsync_verdict`
+  (report-only OK/UNKNOWN, never DRIFT) / `projector_vsync_report_line` /
+  `projector_vsync_gather_remote_snippet` (globs OBS's real `*.txt` logs).
+- drift-guard.sh: sourced the lib + added the report-only `projector_vsync` facet (check #12) in
+  `check_imag_report`, touching NEITHER the drift NOR the unknown counter (20/11/0 exit contract
+  unchanged). Also fixed `gather_and_check_imag`'s OBS-log gather glob `*.log` -> `*.txt` — OBS
+  names logs `.txt`, so the imag OBS-log facets (genlock_capability/fps/latency/rt_pin) had been
+  reading EMPTY -> chronic UNKNOWN on the real box; every other imag reader already globs `.txt`.
+  Safe: rig-mode's only --check-imag HARD-BLOCK (require_imag_genlock_current) is
+  genlock_build-scoped, never these OBS-log facets.
+- recording-e2e.sh: sourced the lib + a report-only [0/8] present-vsync check AFTER the
+  studio-mode step (marker is emitted at projector open), via the shared gather snippet ($(fn)
+  embed) + report_line; never exits. Anchor-safe (reworded comments so `open-projectors` count
+  stayed 3 — the reachability `.find()` position holds).
+- STEP-0: marker LIVE-confirmed on imag (read-only, 15:52:14.820 ...); no reader existed.
+- Tests: tests/harness_obs_projector_vsync_1151.rs (lib pure fns + set-e no-abort #1133 +
+  recording-e2e wiring) + tests/drift_guard.rs (facet OK/UNKNOWN report-only + .txt glob pin +
+  clean-fixture marker). Commits: RED 4ea95a2b2, GREEN 9dbab7567, review-fix 16ae09179 (version bump eee3dd027).
+- Local net (Tier-0, no cargo compile): bash -n + shellcheck clean on all 3 shell files; lib +
+  facet source-and-call verified under `set -euo pipefail` (empty/no-match, no abort); python
+  occurrence-sweep on recording-e2e (no position-sensitive anchor moved); cargo fmt --all --check
+  clean.
