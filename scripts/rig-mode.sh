@@ -51,9 +51,11 @@
 #   scp frame-probe root@10.77.9.62:/usr/local/bin/frame-probe
 # If it is absent, TEST mode FAILS LOUD telling the operator to deploy it.
 #
-# cam1 (the SOURCE camera) is NOT reconfigured here: it runs its DEPLOYED camera-box service, which
-# already emits a 30 fps NDI ("CAM1 (usb)") at the certified v4l2 controls (the recording-e2e
-# harness convention — the real camera is already at the test rate). See the e2e playbook skill.
+# The SOURCE camera (#1135: DERIVED via camera_source_box — cam1 on a cam1-first set, cam3 once cam1
+# is retired; RIG_SOURCE_BOX below) is NOT reconfigured here: it runs its DEPLOYED camera-box
+# service, which already emits a 30 fps NDI ("CAMN (usb)") at the certified v4l2 controls (the
+# recording-e2e harness convention — the real camera is already at the test rate). See the e2e
+# playbook skill.
 #
 # Idempotent (re-runnable), self-verifying (prints the achieved state + a clear PASS/FAIL), fail-loud
 # (set -euo pipefail; any verify mismatch exits non-zero).
@@ -102,6 +104,12 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # derives its box list from it too, so re-enabling a retired camera never needs a change here.
 # shellcheck source=scripts/camera-set.sh
 . "$RIG_MODE_DIR/camera-set.sh"
+# #1135: SINGLE SOURCE OF TRUTH for imag-nb's own scene + NDI-input name per physical camera
+# (imag_scene_for_camera / imag_source_for_camera). Sourced so the source-role derivation below can
+# resolve the imag PROGRAM route off the DERIVED source box, not a hard-pinned cam1 (same lib
+# recording-e2e.sh already uses for its imag scene).
+# shellcheck source=scripts/lib/imag-scene-route.sh
+. "$RIG_MODE_DIR/lib/imag-scene-route.sh"
 # shellcheck source=scripts/lib/rig-test-dropin.sh
 . "$RIG_MODE_DIR/lib/rig-test-dropin.sh"
 # #420/#421: SINGLE SOURCE OF TRUTH for the QPSK audio-marker AUDIBLE self-check (ALSA CARD/DEV
@@ -172,7 +180,27 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
-CAM1_IP="${CAM1_IP:-10.77.9.61}"             # cam1 — the SOURCE camera (NOT reconfigured here; for the print)
+# --- #1135: the SOURCE-camera role, DERIVED off camera_source_box (never hard-pinned to cam1) -----
+# The box filling the SOURCE-camera role -- films cam2's monitor, carries the #174 render-time
+# capture burn, and is routed onto strih + imag PROGRAM as the camera-under-test -- is DERIVED from
+# camera-set.sh's camera_source_box() (the SAME single source of truth recording-e2e.sh's E2E gate
+# uses since the issue-1134 change), never a second cam1 literal. Retiring cam1 (dropping it from
+# CAMERA_ACTIVE_SET) therefore moves the EVENT-mode fleet sweep, the strih/imag burn-target program
+# inputs, the imag PROGRAM routing, and the TEST-mode ACHIEVED prints onto the next strih-routable
+# box (cam3 today) with ZERO edits here. CAMERA_SOURCE_BOX (env, honoured by camera_source_box)
+# overrides the box for a one-off run, same trust model as recording-e2e.sh's CAM= -- it replaces
+# the old CAM1_IP override. Resolved ONCE here (above the source-guard, so tests/rig_mode.rs sees
+# the derived facts when it sources this script). camera_resolve / camera_strih_route are FACT
+# lookups (resolve cam1/cam3/... regardless of CAMERA_ACTIVE_SET); the values are captured into
+# RIG_SOURCE_* immediately so a later camera_resolve/camera_strih_route call cannot clobber them.
+RIG_SOURCE_BOX="$(camera_source_box)"        # e.g. cam1 (cam1-first set) / cam3 (cam1 retired)
+camera_resolve "$RIG_SOURCE_BOX"             # -> CAMERA_IP for the source box
+RIG_SOURCE_IP="$CAMERA_IP"                    # the source camera's device IP (the old CAM1_IP role)
+camera_strih_route "$RIG_SOURCE_BOX"         # -> CAMERA_STRIH_SCENE / CAMERA_STRIH_SOURCE
+RIG_SOURCE_STRIH_SCENE="$CAMERA_STRIH_SCENE"   # strih scene showing the source camera ("Cam N")
+RIG_SOURCE_STRIH_SOURCE="$CAMERA_STRIH_SOURCE" # strih NDI input behind it ("NDI camN")
+RIG_SOURCE_IMAG_SCENE="$(imag_scene_for_camera "$RIG_SOURCE_BOX")"    # imag scene ("Cam N")
+RIG_SOURCE_IMAG_SOURCE="$(imag_source_for_camera "$RIG_SOURCE_BOX")"  # imag NDI input ("NDI CAMN")
 # #722: the FULL fleet (targets.md) — used only by the EVENT-mode CONTRACT's fleet-wide
 # paint-process/service/stray-unit sweep (event_mode_assert). cam2 already has PAINTER_IP; the
 # rest were never previously needed as rig-mode.sh constants (only cam2 is reconfigured here).
@@ -512,10 +540,12 @@ REMOTE
 # Overridable; defaults mirror the recording-e2e BURN_TARGETS (the prod program inputs).
 STRIH_IP="${STRIH_IP:-10.77.9.202}"
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
-STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam1}"      # strih program input, cam1 (#246 burn
-                                                          # target; #753 2026-07-14: strih's NDI
-                                                          # mapping pivoted to 1:1, cam1 now rides
-                                                          # 'NDI cam1' not the old 'NDI cam5')
+STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$RIG_SOURCE_STRIH_SOURCE}" # strih program input for the
+                                                          # SOURCE camera (#246 burn target). #1135:
+                                                          # DERIVED off the resolved source box
+                                                          # (RIG_SOURCE_STRIH_SOURCE = 'NDI camN' via
+                                                          # camera_strih_route), not the literal
+                                                          # 'NDI cam1' — an explicit override wins.
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # stream program input (#246 burn target)
 # #985: stream's PRODUCTION program scene -- the calibrated A/V-align target TEST mode must be
 # PARKED on when it returns (never left on the measurement-only PHASE2-PROBE scene). Same
@@ -531,8 +561,14 @@ STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-PRO}"
 # ONE file (or IMAG_HOST_ACTIVE=incumbent for a one-off run), never a hunt through this script.
 # shellcheck source=scripts/imag-host.sh
 . "$RIG_MODE_DIR/imag-host.sh"
-IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"        # imag input showing cam1 (#462 burn target)
-IMAG_PROG_SCENE="${IMAG_PROG_SCENE:-Cam 1}"             # imag scene showing cam1 — routed to PROGRAM in TEST mode
+IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-$RIG_SOURCE_IMAG_SOURCE}" # imag input showing the SOURCE camera
+                                                          # (#462 burn target). #1135: DERIVED off the
+                                                          # resolved source box (imag_source_for_camera
+                                                          # -> 'NDI CAMN'), not the literal 'NDI CAM1'.
+IMAG_PROG_SCENE="${IMAG_PROG_SCENE:-$RIG_SOURCE_IMAG_SCENE}" # imag scene showing the SOURCE camera —
+                                                          # routed to PROGRAM in TEST mode. #1135:
+                                                          # DERIVED (imag_scene_for_camera -> 'Cam N'),
+                                                          # not the literal 'Cam 1'.
 OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}"
 
 # #901: whole-chain TEST-mode verification constants (issue 901). STREAM_USER/STREAM_PW mirror
@@ -785,8 +821,10 @@ enforce_strih_ndi_mapping() {
   return $rc
 }
 
-# set_imag_test_program -> route imag-nb's PROGRAM to the scene showing cam1 (#462, EPIC #466) —
-# the same camera whose feed also proves cam→imag zero-loss (cam1 films cam2's dual-QR monitor).
+# set_imag_test_program -> route imag-nb's PROGRAM to the scene showing the SOURCE camera (#462,
+# EPIC #466; #1135: the source is DERIVED via camera_source_box — IMAG_PROG_SCENE/IMAG_PROG_SOURCE
+# already carry the resolved box, not a hard-pinned cam1) — the same camera whose feed also proves
+# cam→imag zero-loss (the source films cam2's dual-QR monitor).
 # TEST-mode ONLY (EVENT mode does not touch imag's scene, mirroring strih/stream — rig-mode never
 # scene-switches those either). Reuses obs_phase2.py's `switch` action (SetCurrentProgramScene +
 # its shared non-black self-check, #163/#111) — the SAME lightweight mechanism the all-cambox
@@ -795,7 +833,7 @@ enforce_strih_ndi_mapping() {
 set_imag_test_program() {
   local here rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
-  echo "[obs imag ${IMAG_IP}] #462 route PROGRAM to '${IMAG_PROG_SCENE}' (shows cam1 via '${IMAG_PROG_SOURCE}')"
+  echo "[obs imag ${IMAG_IP}] #462 route PROGRAM to '${IMAG_PROG_SCENE}' (shows ${RIG_SOURCE_BOX} via '${IMAG_PROG_SOURCE}')"
   python3 "$here/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" \
     --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [imag program] /' || rc=$?
   return $rc
@@ -1110,7 +1148,7 @@ do_test() {
   echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct):"
   enforce_strih_ndi_mapping
   echo
-  echo "[obs] #462 ensure imag-nb's PROGRAM shows cam1 (EPIC #466 Topology v2 — cam→imag proof):"
+  echo "[obs] #462 ensure imag-nb's PROGRAM shows the source camera ${RIG_SOURCE_BOX} (EPIC #466 Topology v2 — cam→imag proof):"
   set_imag_test_program
   echo
   echo "[obs] #901 gap 2: assert+set stream's PROGRAM = PHASE2-PROBE (was a printed hint, now enforced):"
@@ -1142,9 +1180,9 @@ do_test() {
   echo "ACHIEVED (cam side): cam2 STEADY-STATE painter is now the PERMANENT cam2-painter.service (#1008/#937: durable dual-QR ${QR_SIZE}px + QPSK marker, Restart=always, enabled — survives crash + reboot; the disposable 2h nohup is gone, so TEST mode no longer dies silently)."
   echo "                     cam2 camera-box still ACTIVE in no-display mode (#291: NOT stopped — capture+emit keep running)."
   echo "                     cam2 QPSK audio marker RUNNING+VERIFIED, and the permanent unit's own marker log keeps GROWING (#420/#725/#431: live-resolved device, log ${AUDIO_MARKER_LOG})."
-  echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
+  echo "                     source camera ${RIG_SOURCE_BOX} (${RIG_SOURCE_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream + imag program inputs (WebSocket, no relaunch)."
-  echo "                     imag-nb (${IMAG_IP}) PROGRAM routed to '${IMAG_PROG_SCENE}' (cam1, #462)."
+  echo "                     imag-nb (${IMAG_IP}) PROGRAM routed to '${IMAG_PROG_SCENE}' (${RIG_SOURCE_BOX}, #462)."
   echo "                     stream PROGRAM briefly proved alive on 'PHASE2-PROBE' (#901), then PARKED back on '${STREAM_PROG_SCENE}' (#985 — the calibrated production hold, never left desynced)."
   echo "ACHIEVED (chain, #901): strih's live program scene confirmed NON-BLACK — the camera genuinely sees content, not just a live process."
   echo "                        mbc Dante transport confirmed bound + unmuted on stream."
@@ -1238,11 +1276,15 @@ event_mode_assert() {
   echo "[#722] EVENT-mode CONTRACT -- gathering the 8-item assert-phase facts:"
 
   # --- item 1 + part of item 5: fleet paint-process / service / stray-unit sweep -------------
-  # #827: the sweep target list is cam1 + cam2(painter) + every camera in
+  # #827/#1135: the sweep target list is the RESOLVED source box + cam2(painter) + every camera in
   # camera_active_secondary_set() (camera-set.sh) -- the ONE place fleet membership is declared.
+  # #1135: the base target is RIG_SOURCE_BOX (=$RIG_SOURCE_IP), not the literal cam1 -- with cam1
+  # retired the source is cam3, and camera_active_secondary_set then EXCLUDES it, so the source must
+  # be swept via this base entry (the secondary loop no longer carries it). Source + painter +
+  # secondaries = exactly the full active set.
   local paint_json="{}" active_json="{}" stray_json="{}"
   local box_ip box ip out pc sa su
-  local -a EVENT_ASSERT_TARGETS=("cam1=$CAM1_IP" "cam2=$PAINTER_IP")
+  local -a EVENT_ASSERT_TARGETS=("${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP")
   for box in $(camera_active_secondary_set); do
     EVENT_ASSERT_TARGETS+=("${box}=$(rig_mode_secondary_ip "$box")")
   done
