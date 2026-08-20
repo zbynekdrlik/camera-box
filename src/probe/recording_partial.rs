@@ -29,10 +29,14 @@
 //!   "av_sync": null,                // #312 item 2 (PR A) per-recording AvMarkerInputs (Some only
 //!                                   // after `--extract-partial stream --av-marker-log <path>`;
 //!                                   // absent/null on a run without the continuous QPSK marker)
-//!   "content_hashes": null          // #1112 per-frame row-sampled content hash (Some only after a
+//!   "content_hashes": null,         // #1112 per-frame row-sampled content hash (Some only after a
 //!                                   // STREAM all-cambox extract; 0-based by frame_index; feeds the
 //!                                   // #1088 dup-cadence surface in the dev1 merge — absent/null
 //!                                   // on strih/imag boxes and on non-all-cambox runs)
+//!   "record_render": null           // #1143 OBS record-session render stats (drawn/attempted/
+//!                                   // lagged + max in-record ms) — Some only after an imag extract
+//!                                   // with --record-render-stats; report-only observer-effect
+//!                                   // surface (absent/null on strih/stream + imag runs without it)
 //! }
 //! ```
 //!
@@ -45,6 +49,7 @@
 use crate::colour_verify::NodeColourSummary;
 use crate::probe::av_sync_recording::AvMarkerInputs;
 use crate::probe::recording::RecordingFrame;
+use crate::record_render_stats::RecordRenderStats;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -68,7 +73,16 @@ use std::path::Path;
 /// field is additive + optional (`#[serde(default)]`), so an older v3 reader would ignore it and a
 /// newer reader defaults it to `None`; the strict version check still guards against a genuinely
 /// incompatible mix, and extract + merge always run from the SAME binary build within one E2E run.
-pub const PARTIAL_SCHEMA_VERSION: u32 = 4;
+///
+/// v5 (#1143) adds the optional `record_render` field — OBS's own record-session render stats
+/// ([`RecordRenderStats`]: drawn/attempted/lagged + max in-record render ms) the harness captured
+/// from the imag OBS log stop-stats around the record window and passed to `--extract-partial imag`.
+/// Same additive+optional (`#[serde(default)]`) contract as v2/v3/v4: an older reader ignores it, a
+/// newer reader defaults it to `None`. It is REPORT-ONLY (surfaced under `full_chain.loss.imag`,
+/// never gating `overall_pass`) — the ongoing proof the recording no longer perturbs the measured
+/// chain (a high `lagged_pct` ⇒ a stale x264 encoder, attributed to the recorder). The #1118
+/// sha-gated redeploy pushes the schema-5 binary to imag, so the on-box extract emits v5.
+pub const PARTIAL_SCHEMA_VERSION: u32 = 5;
 
 /// One box's decode-in-place result — the small JSON the cross-box merge consumes (#208).
 ///
@@ -120,6 +134,15 @@ pub struct RecordingPartial {
     /// there exactly as before.
     #[serde(default)]
     pub content_hashes: Option<Vec<u64>>,
+    /// #1143 — OBS's own record-session render stats for THIS box's recording ([`RecordRenderStats`]:
+    /// drawn/attempted/lagged frames + max in-record render ms), captured by the harness from the
+    /// imag OBS log stop-stats around the record window and passed to `--extract-partial imag`. Carried
+    /// so the dev1 merge can surface the observer-effect confound REPORT-ONLY under
+    /// `full_chain.loss.imag` (a high `lagged_pct` ⇒ the recorder itself judders the chain, never the
+    /// delivery). `None` on strih/stream and on any imag extract without the `--record-render-stats`
+    /// flag, so old behaviour is unchanged.
+    #[serde(default)]
+    pub record_render: Option<RecordRenderStats>,
 }
 
 impl RecordingPartial {
@@ -144,6 +167,7 @@ impl RecordingPartial {
             colour: None,
             av_sync: None,
             content_hashes: None,
+            record_render: None,
         }
     }
 
@@ -170,6 +194,15 @@ impl RecordingPartial {
     /// ffmpeg/hash I/O lives in the probe-gated caller (mirrors `with_colour` / `with_av_sync`).
     pub fn with_content_hashes(mut self, content_hashes: Option<Vec<u64>>) -> Self {
         self.content_hashes = content_hashes;
+        self
+    }
+
+    /// Attach OBS's record-session render stats (#1143) — set by `--extract-partial imag` when the
+    /// harness passed `--record-render-stats <json>` (captured from the imag OBS log stop-stats
+    /// around the record window). Builder so `from_frames` stays a pure ids+timestamps constructor
+    /// (mirrors `with_colour` / `with_av_sync` / `with_content_hashes`).
+    pub fn with_record_render(mut self, record_render: Option<RecordRenderStats>) -> Self {
+        self.record_render = record_render;
         self
     }
 
@@ -298,13 +331,17 @@ mod tests {
             p.content_hashes, None,
             "from_frames defaults content_hashes to None (#1112)"
         );
-        let j = r#"{"schema_version":4,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
+        let j = r#"{"schema_version":5,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
         let restored = RecordingPartial::from_json(j).unwrap();
         assert_eq!(restored.colour, None, "absent colour field ⇒ None");
         assert_eq!(restored.av_sync, None, "absent av_sync field ⇒ None");
         assert_eq!(
             restored.content_hashes, None,
             "absent content_hashes field ⇒ None (#1112 additive #[serde(default)])"
+        );
+        assert_eq!(
+            restored.record_render, None,
+            "absent record_render field ⇒ None (#1143 additive #[serde(default)])"
         );
     }
 

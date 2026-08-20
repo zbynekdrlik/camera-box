@@ -264,6 +264,15 @@ struct Args {
     /// dev1 then runs `--merge-partials` to combine them. `<box>` is `strih`, `stream`, or `imag`.
     #[arg(long, value_name = "BOX")]
     extract_partial: Option<String>,
+    /// #1143: OBS's own record-session render stats for the imag recording, as a compact JSON object
+    /// (`{"drawn_frames","attempted_frames","lagged_frames","lagged_pct","max_render_ms"}` — exactly
+    /// what `scripts/imag_record_encoder.parse_obs_record_stats` emits). The harness captures it from
+    /// the imag OBS log stop-stats around the record window and passes it to `--extract-partial imag`;
+    /// it is carried in the partial (`record_render`) and surfaced REPORT-ONLY under
+    /// `full_chain.loss.imag` so a stale x264 encoder's observer effect is attributed to the RECORDER.
+    /// Absent ⇒ no record_render carried (unchanged behaviour). Ignored for strih/stream extracts.
+    #[arg(long)]
+    record_render_stats: Option<String>,
     /// #208: where `--extract-partial` writes the partial JSON. Default: `partial-<box>.json`.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -2912,6 +2921,7 @@ fn build_and_print_verdict(
         stream_av_sync,
         None,
         None, // issue 1118: the fused/test path never degrades an imag partial (no schema skip)
+        None, // #1143: the fused/test path carries no OBS record-render stats
     )
 }
 
@@ -2950,6 +2960,12 @@ fn build_and_print_verdict_with_stream_hashes(
     // `imag_leg_verified` so a degraded run is mineable, never silent. `None` on every normal run
     // and on the fused/test path.
     imag_skip_reason: Option<String>,
+    // #1143 — OBS's own record-session render stats for the imag recording, carried from the imag
+    // partial's `record_render` (Some only when `run_merge` merged an imag partial the harness had
+    // extracted with `--record-render-stats`). Surfaced REPORT-ONLY under `full_chain.loss.imag`
+    // (drawn/attempted/lagged% + max in-record ms) so a stale x264 encoder's observer effect is
+    // attributed to the recorder, never to the delivery chain. `None` on every run without it.
+    imag_record_render: Option<camera_box::record_render_stats::RecordRenderStats>,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -4290,6 +4306,18 @@ fn build_and_print_verdict_with_stream_hashes(
              gate overall_pass) until a follow-up flips imag_leg_gate::gates_overall_pass and folds \
              in the issue-887 produced-vs-presented deficit."
         );
+        // #1143 — surface OBS's own record-session render stats REPORT-ONLY (never gates). A high
+        // `record_render_lagged_pct` means the RECORDER itself juddered the render (the x264
+        // observer effect, #1130) — so a stuck/copy reading on this run is attributable to the
+        // recording load, not the delivery chain. ~18.4% under x264, ~0% under the VAAPI-tex fix.
+        // `max_render_ms` (#1143 Task 4) is the render budget measured DURING the active recording.
+        if let Some(rr) = &imag_record_render {
+            imag_json["record_render_lagged_pct"] = serde_json::json!(rr.lagged_pct);
+            imag_json["record_render_lagged_frames"] = serde_json::json!(rr.lagged_frames);
+            imag_json["record_render_attempted_frames"] = serde_json::json!(rr.attempted_frames);
+            imag_json["record_render_drawn_frames"] = serde_json::json!(rr.drawn_frames);
+            imag_json["record_render_max_render_ms"] = serde_json::json!(rr.max_render_ms);
+        }
         report["full_chain"]["loss"]["imag"] = imag_json;
     }
     // issue 798 — make a silently-skipped imag leg VISIBLE (the "ONE full test, no partials"
@@ -6530,10 +6558,30 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     } else {
         None
     };
+    // #1143 — when the harness passed --record-render-stats for the imag extract, parse OBS's own
+    // record-session render stats (captured from the imag OBS log stop-stats around the record
+    // window) and carry them in the partial. Gated on the imag box (the observer-effect source, the
+    // only box whose recording overloaded a software encoder). A parse failure ERRORS loudly: the
+    // harness only passes a value it already parsed from the log, so a shape mismatch here is a real
+    // extract/merge coupling bug, not a benign skip.
+    let record_render = if box_name == "imag" {
+        match &args.record_render_stats {
+            Some(json) => {
+                let stats: camera_box::record_render_stats::RecordRenderStats =
+                    serde_json::from_str(json)
+                        .with_context(|| format!("parse --record-render-stats JSON {json:?}"))?;
+                Some(stats)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames)
         .with_colour(colour)
         .with_av_sync(av_sync)
-        .with_content_hashes(content_hashes);
+        .with_content_hashes(content_hashes)
+        .with_record_render(record_render);
     partial.save(&out)?;
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -6587,6 +6635,9 @@ fn run_merge(args: &Args) -> Result<()> {
     // partial), surfaced at `full_chain.imag_leg_skip_reason` so a degraded run is mineable, not
     // silent. `None` on a normal run.
     let mut imag_skip_reason: Option<String> = None;
+    // #1143 — OBS's own record-session render stats carried from the imag partial's `record_render`
+    // (Some only when the imag box was extracted with `--record-render-stats`). Surfaced report-only.
+    let mut imag_record_render: Option<camera_box::record_render_stats::RecordRenderStats> = None;
     for spec in &args.merge_partials {
         let (box_name, path) = spec
             .split_once('=')
@@ -6661,6 +6712,7 @@ fn run_merge(args: &Args) -> Result<()> {
         let colour = partial.colour;
         let av_sync = partial.av_sync;
         let content_hashes = partial.content_hashes;
+        let record_render = partial.record_render; // #1143 — carried before `frames` moves below
         let rec = DecodedRec {
             frames: partial.frames,
             rec_path: None, // merge: the recording is on its own box, never on dev1
@@ -6679,6 +6731,7 @@ fn run_merge(args: &Args) -> Result<()> {
             // #461: imag carries no burns, so there is no colour to carry either in this ticket.
             "imag" => {
                 imag = Some(rec);
+                imag_record_render = record_render; // #1143 report-only OBS record-render stats
             }
             other => anyhow::bail!(
                 "--merge-partials: unknown box {other:?} (expected `strih`, `stream`, or `imag`)"
@@ -6722,6 +6775,7 @@ fn run_merge(args: &Args) -> Result<()> {
         stream_av_sync, // #312 item 2 (PR A): carried from the stream partial's --av-marker-log extract
         stream_content_hashes, // #1112: carried from the stream partial's all-cambox extract
         imag_skip_reason, // issue 1118: Some when a schema-mismatched imag partial was dropped (degrade)
+        imag_record_render, // #1143: carried from the imag partial's --record-render-stats extract
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
