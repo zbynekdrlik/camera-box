@@ -323,16 +323,21 @@ pub fn dupe_shed_action(
     if !would_emit {
         return ShedAction::BlindShed;
     }
-    // (#1145 v2) [red] the sustained-over-rate queue-DEPTH drain is NOT YET wired: the over-rate
-    // sawtooth stays unbounded, so `over_rate_queue_depth_drain_bounds_the_sawtooth_1145` FAILS.
-    // GREEN replaces this stub with the real gate. The new inputs are consumed (and the new
-    // ShedAction::Drain variant constructed) so the module still compiles cleanly at RED.
-    let _red_drain_not_yet_wired = ShedAction::Drain;
-    let _ = (
-        queue_depth_intervals,
-        sustained_over_rate,
-        _red_drain_not_yet_wired,
-    );
+    // (#1145 v2) sustained-over-rate queue-DEPTH drain — the continuous over-rate absorption that
+    // keeps the delivery latency flat (see the module + `queue_depth_intervals` docs). Gated on
+    // `sustained_over_rate` so a healthy 60.00 card never reaches it (byte-identical to v1); shed
+    // the oldest frame once its queue residence exceeds the target, one frame at a time.
+    if sustained_over_rate {
+        if queue_depth_intervals >= QUEUE_DEPTH_SHED_INTERVALS {
+            return ShedAction::Drain;
+        }
+        if is_dupe
+            && enough_unique_to_hold_target
+            && queue_depth_intervals >= QUEUE_DEPTH_DUPE_SHED_INTERVALS
+        {
+            return ShedAction::Drain;
+        }
+    }
     if !is_dupe {
         return ShedAction::Emit { copy: false };
     }
