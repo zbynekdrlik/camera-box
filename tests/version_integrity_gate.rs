@@ -1535,3 +1535,62 @@ fn gate_enforces_imag_bytes_when_unreported_1100() {
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
 }
+
+// ---------------------------------------------------------------------------
+// #1137 — genlock_vendor_pin_verdict: the report-only vendor-pin ALARM layer.
+// The existing genlock check is CROSS-BOX PARITY only (drift-guard.sh #756/#949) — it passes a
+// UNIFORMLY-stale fleet (every box agrees on an OLD build). This layer PINS the deployed
+// genlock_build_sha to the newest origin/main commit touching vendor/**, and SCREAMS (report-only,
+// never flips the gate exit) when the deployed bundle lags — the #1136 early-gate-pin-doctrine
+// orphan class. Fail-closed-LOUD on UNKNOWN. Pure function, unit-tested by sourcing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vendor_pin_ok_when_deployed_at_newest_vendor_head() {
+    let out = run_sourced(
+        r#"o="$(genlock_vendor_pin_verdict "46d868a29a7e" "46d868a29a7e" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(out.contains("RC=0"), "current bundle must be OK (rc 0): {out}");
+    assert!(out.contains("OK"), "must report OK: {out}");
+    assert!(
+        !out.to_uppercase().contains("ALARM") && !out.contains("UNKNOWN"),
+        "a current bundle must not alarm: {out}"
+    );
+}
+
+#[test]
+fn vendor_pin_alarm_names_pending_commits() {
+    // The exact #1137 live scenario: deployed 03cd9c073 with 2 undeployed #1097 vendor commits.
+    let out = run_sourced(
+        r#"pend="$(printf 'f70317e81 fix(#1097): [green] framesync_create failure retries in place\n2386b60d9 docs(#1097): [review] correct the retry-cleanup comment')"; o="$(genlock_vendor_pin_verdict "03cd9c073" "2386b60d9" "$pend")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(out.contains("RC=30"), "a lagging bundle must return the ALARM code 30: {out}");
+    assert!(out.to_uppercase().contains("ALARM"), "must SCREAM ALARM: {out}");
+    assert!(
+        out.contains("f70317e81") && out.contains("2386b60d9"),
+        "the alarm MUST name the pending vendor commits: {out}"
+    );
+    assert!(out.contains('2'), "must state the count (2 pending): {out}");
+}
+
+#[test]
+fn vendor_pin_unknown_when_deployed_sha_unread() {
+    let out = run_sourced(
+        r#"o="$(genlock_vendor_pin_verdict "" "2386b60d9" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(out.contains("RC=31"), "an unread deployed SHA must fail-closed to UNKNOWN (31): {out}");
+    assert!(out.contains("UNKNOWN"), "must report UNKNOWN (never a silent OK): {out}");
+}
+
+#[test]
+fn vendor_pin_unknown_when_newest_vendor_unresolved() {
+    let out = run_sourced(
+        r#"o="$(genlock_vendor_pin_verdict "46d868a29a7e" "" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(out.contains("RC=31"), "an unresolved newest-vendor HEAD must fail-closed to UNKNOWN (31): {out}");
+    assert!(out.contains("UNKNOWN"), "must report UNKNOWN: {out}");
+}
