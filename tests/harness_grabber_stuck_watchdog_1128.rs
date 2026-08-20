@@ -121,6 +121,25 @@ fn recovery_ping_fires_once_when_a_paged_box_returns_to_ok() {
 }
 
 #[test]
+fn a_transient_nodata_blip_mid_episode_does_not_produce_a_second_page() {
+    // #1128 review 🔵3 (discord-volume-near-zero): a chronically-stuck box that suffers ONE
+    // transient ssh failure (NODATA) between stuck passes must still page exactly ONCE for the
+    // ongoing episode — NODATA clears only the confirm counter, never the one-ping episode latch.
+    // stuck x2 (page) -> NODATA blip -> stuck x2 (re-confirms) -> still ONE alert total.
+    let seq = format!("main\nmain\nprobe_box() {{ printf ''; }}\nmain\nprobe_box() {{ {STUCK_CASE}; }}\nmain\nmain\n");
+    let log = run_driver(STUCK_CASE, &seq);
+    assert!(
+        log.contains("verdict=NODATA"),
+        "the blip pass reads NODATA: {log}"
+    );
+    assert_eq!(
+        log.matches("WOULD alert").count(),
+        1,
+        "a mid-episode NODATA blip must not produce a second page: {log}"
+    );
+}
+
+#[test]
 fn unreachable_box_never_pages_and_never_false_recovers() {
     // NODATA (ssh fail) is "nothing to decide" — never an alert, never a recovery.
     let log = run_driver(SSH_FAIL, "main\nmain\n");

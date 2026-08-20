@@ -44,7 +44,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -110,14 +110,24 @@ write_state_field() {
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
 }
 
-# A non-STUCK pass (OK / NODATA) is not a confirmed fault: clear this box's confirm counter AND its
-# throttle sig so a genuinely NEW stuck episode later pages fresh. Does NOT clear the `alerted`
-# recovery latch (handled in handle_box so a box we paged for still emits a recovery ping on OK).
+# OK (genuine recovery) — clear this box's confirm counter AND its throttle sig so a genuinely NEW
+# stuck episode later pages fresh. Does NOT clear the `alerted` recovery latch (handled in
+# handle_box so a box we paged for still emits a recovery ping on OK).
 clear_box_throttle() {
   local box="$1"
   write_state_field "confirm_${box}" 0
   write_state_field "alert_sig_${box}" ""
   write_state_field "alert_passes_${box}" 0
+}
+
+# NODATA (a transient ssh/journal blip, NOT a recovery) — clear ONLY the confirm counter, and LEAVE
+# the throttle sig/passes intact. Otherwise a single blip mid-episode would reset the
+# one-ping-per-episode latch, and the next two STUCK passes would page a SECOND time for the SAME
+# ongoing episode (discord-volume-near-zero: a chronic stuck box must page exactly once). A genuine
+# recovery is signalled by an OK pass (full clear above), never by an unreadable one.
+clear_box_confirm_only() {
+  local box="$1"
+  write_state_field "confirm_${box}" 0
 }
 
 # -- per-box decision --------------------------------------------------------------------------
@@ -146,7 +156,7 @@ handle_box() {
 
   if [ "$verdict" = "NODATA" ]; then
     log "$box unreadable (ssh failed / box off) -- nothing to decide for it this pass"
-    clear_box_throttle "$box"
+    clear_box_confirm_only "$box"
     return 0
   fi
 
