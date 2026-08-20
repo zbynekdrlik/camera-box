@@ -69,8 +69,9 @@ struct drm_output_buffer {
 
 static struct {
 	pthread_mutex_t lock;
-	bool active;
-	volatile bool running; /* flip thread run flag */
+	bool active;   /* lease held + flip thread running (guarded by lock) */
+	bool stopping; /* a stop is mid-flight (join in progress) — guarded by lock */
+	volatile bool running; /* flip thread run flag (os_atomic_{set,load}_bool) */
 	pthread_t thread;
 
 	xcb_connection_t *conn;
@@ -268,6 +269,11 @@ static bool drm_output_setup_scanout(uint32_t argb)
 		struct drm_output_buffer *b = &g_drm.buffers[i];
 		if (drmModeCreateDumbBuffer(g_drm.drm_fd, w, h, 32, 0, &b->handle, &b->pitch,
 					    &b->size) != 0) {
+			/* out-params are undefined on failure — clear the handle so teardown does
+			 * not try to destroy a garbage GEM handle. */
+			b->handle = 0;
+			b->fb_id = 0;
+			b->map = NULL;
 			blog(LOG_WARNING, "drm-output: create dumb buffer %d failed (%s)", i,
 			     strerror(errno));
 			return false;
@@ -319,7 +325,8 @@ static void *drm_output_flip_thread(void *arg)
 	evctx.page_flip_handler = drm_output_page_flip_handler;
 
 	int front = 0;
-	while (g_drm.running) {
+	bool fatal = false;
+	while (os_atomic_load_bool(&g_drm.running) && !fatal) {
 		int back = front ^ 1;
 		volatile int pending = 1;
 		if (drmModePageFlip(g_drm.drm_fd, g_drm.crtc_id, g_drm.buffers[back].fb_id,
@@ -328,21 +335,53 @@ static void *drm_output_flip_thread(void *arg)
 			     strerror(errno));
 			break;
 		}
-		/* Wait for the flip-complete vblank event; poll so stop() can break within 1s. */
-		while (g_drm.running && pending) {
+		/* Wait for the flip-complete vblank event; poll so stop() can break within 1s. Any fd
+		 * error (an X-server restart / external lease revoke on the imag rig) or a page-flip that
+		 * never completes must NOT become a 100%-CPU spin on the 25W-clamped box — break out or
+		 * surface a wedge warning (the wedge-watchdog-pattern class). */
+		unsigned overdue = 0;
+		while (os_atomic_load_bool(&g_drm.running) && pending) {
 			struct pollfd pfd;
 			pfd.fd = g_drm.drm_fd;
 			pfd.events = POLLIN;
 			pfd.revents = 0;
 			int pr = poll(&pfd, 1, 1000);
-			if (pr > 0 && (pfd.revents & POLLIN))
-				drmHandleEvent(g_drm.drm_fd, &evctx);
-			else if (pr < 0 && errno != EINTR)
+			if (pr < 0) {
+				if (errno == EINTR)
+					continue;
+				blog(LOG_WARNING, "drm-output: poll on DRM fd failed (%s) — stopping",
+				     strerror(errno));
+				fatal = true;
 				break;
+			}
+			if (pr == 0) {
+				/* No flip-complete within 1s. Keep waiting (stop can still break us),
+				 * but surface a wedge signal after ~5s of silence for the dev1 watchdog. */
+				if (++overdue % 5u == 0u)
+					blog(LOG_WARNING,
+					     "drm-output: page-flip completion overdue (%us) on crtc=%u — "
+					     "possible display wedge",
+					     overdue, (unsigned)g_drm.crtc_id);
+				continue;
+			}
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				blog(LOG_WARNING,
+				     "drm-output: DRM fd error (revents=0x%x) — lease revoked? stopping",
+				     (unsigned)pfd.revents);
+				fatal = true;
+				break;
+			}
+			if ((pfd.revents & POLLIN) && drmHandleEvent(g_drm.drm_fd, &evctx) != 0) {
+				blog(LOG_WARNING, "drm-output: drmHandleEvent failed — stopping");
+				fatal = true;
+				break;
+			}
 		}
 		front = back;
 		g_drm.flips++;
-		if (g_drm.flips % 120ULL == 0ULL)
+		/* Log the first flip (immediate mechanism proof), then ~once/minute at 60Hz so this
+		 * never floods the OBS log the jitter_audit-family parsers grep once M2 runs steady. */
+		if (g_drm.flips == 1ULL || g_drm.flips % 3600ULL == 0ULL)
 			blog(LOG_INFO, "drm-output: page-flip #%llu (vblank-locked, solid M1 pattern)",
 			     g_drm.flips);
 	}
@@ -395,7 +434,16 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 		return false;
 	}
 
+	/* NOTE: the whole start sequence holds g_drm.lock across X round-trips + a full modeset
+	 * (seconds if X is slow). obs_drm_output_active() blocks for that window — fine for M1's
+	 * single-threaded activation; M2 must not call active() from a render-adjacent thread until
+	 * this lock scope is narrowed. */
 	pthread_mutex_lock(&g_drm.lock);
+	if (g_drm.stopping) {
+		pthread_mutex_unlock(&g_drm.lock);
+		blog(LOG_WARNING, "drm-output: start rejected — a stop is in progress");
+		return false;
+	}
 	if (g_drm.active) {
 		pthread_mutex_unlock(&g_drm.lock);
 		blog(LOG_INFO, "drm-output: already active — start ignored");
@@ -412,9 +460,9 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 		return false;
 	}
 
-	g_drm.running = true;
+	os_atomic_set_bool(&g_drm.running, true);
 	if (pthread_create(&g_drm.thread, NULL, drm_output_flip_thread, NULL) != 0) {
-		g_drm.running = false;
+		os_atomic_set_bool(&g_drm.running, false);
 		drm_output_teardown_locked();
 		pthread_mutex_unlock(&g_drm.lock);
 		blog(LOG_WARNING, "drm-output: could not create flip thread");
@@ -430,11 +478,14 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 void obs_drm_output_stop(void)
 {
 	pthread_mutex_lock(&g_drm.lock);
-	if (!g_drm.active) {
+	if (!g_drm.active || g_drm.stopping) {
+		/* Not running, or another stop already claimed the teardown — never join twice
+		 * (joining an already-joined pthread_t is undefined behaviour). */
 		pthread_mutex_unlock(&g_drm.lock);
 		return;
 	}
-	g_drm.running = false;
+	g_drm.stopping = true; /* claim the transition: a racing stop returns above, a racing start rejects */
+	os_atomic_set_bool(&g_drm.running, false);
 	pthread_t th = g_drm.thread;
 	pthread_mutex_unlock(&g_drm.lock);
 
@@ -444,6 +495,7 @@ void obs_drm_output_stop(void)
 	pthread_mutex_lock(&g_drm.lock);
 	drm_output_teardown_locked();
 	g_drm.active = false;
+	g_drm.stopping = false;
 	pthread_mutex_unlock(&g_drm.lock);
 	blog(LOG_INFO, "drm-output: stopped");
 }
@@ -484,6 +536,7 @@ void obs_drm_output_maybe_autostart(void)
 	}
 	bool enabled = obs_data_get_bool(data, "enabled");
 	const char *connector = obs_data_get_string(data, "connector");
+	bool has_argb = obs_data_has_user_value(data, "argb");
 	long long argb_ll = obs_data_get_int(data, "argb");
 
 	if (!enabled) {
@@ -499,11 +552,13 @@ void obs_drm_output_maybe_autostart(void)
 	}
 
 	struct obs_drm_output_config cfg;
-	/* copy the connector name into a stable buffer; obs_data is released below */
-	static char connector_buf[128];
+	/* Copy the connector name onto the stack; obs_drm_output_start() consumes it synchronously
+	 * (strlen/memcmp/log) and never retains the pointer, so it need not outlive this call. */
+	char connector_buf[128];
 	snprintf(connector_buf, sizeof(connector_buf), "%s", connector);
 	cfg.connector_name = connector_buf;
-	cfg.solid_argb = (argb_ll != 0) ? (uint32_t)argb_ll : 0x00202020u; /* default: dark grey */
+	/* Honour an explicit "argb": 0 (solid black); only fall back to dark grey when absent. */
+	cfg.solid_argb = has_argb ? (uint32_t)argb_ll : 0x00202020u;
 
 	blog(LOG_INFO, "drm-output: autostart ENABLED from %s — connector='%s'", path,
 	     cfg.connector_name);

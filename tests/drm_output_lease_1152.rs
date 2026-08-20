@@ -123,15 +123,29 @@ fn obs_startup_calls_the_default_off_autostart() {
         obs.contains("#include \"obs-drm-output.h\""),
         "#1152 M1: {OBS_C} must include obs-drm-output.h to reach the autostart entry."
     );
+    let call = obs.find("obs_drm_output_maybe_autostart();").unwrap_or_else(|| {
+        panic!("#1152 M1: {OBS_C} must call obs_drm_output_maybe_autostart() once at startup — the \
+                DEFAULT-OFF activation (no-op when the config file is absent).")
+    });
+    // The call MUST be Linux-guarded so Windows/macOS libobs never references the symbol — prove
+    // the call sits INSIDE a `#if defined(__linux__)` … `#endif` block (a bare file-wide __linux__
+    // search would go vacuous the day an unrelated upstream __linux__ appears; a fixed byte window
+    // rots when the comment grows — so bound by the guard/endif structure instead).
+    let guard = obs[..call].rfind("#if defined(__linux__)").unwrap_or_else(|| {
+        panic!("#1152 M1: {OBS_C} must guard obs_drm_output_maybe_autostart() with \
+                #if defined(__linux__) — the module is Linux-only.")
+    });
     assert!(
-        obs.contains("obs_drm_output_maybe_autostart();"),
-        "#1152 M1: {OBS_C} must call obs_drm_output_maybe_autostart() once at startup — the \
-         DEFAULT-OFF activation (no-op when the config file is absent)."
+        !obs[guard..call].contains("#endif"),
+        "#1152 M1: {OBS_C} the obs_drm_output_maybe_autostart() call must be INSIDE the \
+         #if defined(__linux__) block (no #endif between the guard and the call)."
     );
-    // Must stay Linux-guarded so the Windows/macOS libobs builds never reference the symbol.
+    // obs_shutdown MUST stop the output before libobs teardown (flip thread must not outlive the
+    // log sink; lease returned to Xorg deterministically, not only by process death).
     assert!(
-        obs.contains("defined(__linux__)") || obs.contains("__linux__"),
-        "#1152 M1: {OBS_C} must guard the autostart call with __linux__ — the module is Linux-only."
+        obs.contains("obs_drm_output_stop();"),
+        "#1152 M1: {OBS_C} obs_shutdown must call obs_drm_output_stop() so the flip thread and the \
+         HDMI lease are torn down before libobs shuts down."
     );
 }
 
@@ -217,7 +231,7 @@ fn pick_free_crtc_computes_the_spec_truth_table() {
     }
     c.push_str("    return 0;\n}\n");
 
-    let dir = std::env::temp_dir().join("drm_output_pick_1152");
+    let dir = std::env::temp_dir().join(format!("drm_output_pick_1152_{}", std::process::id()));
     fs::create_dir_all(&dir).expect("create the scratch dir");
     let cfile = dir.join("pick.c");
     let bin = dir.join("pick.bin");

@@ -1391,6 +1391,14 @@ void obs_shutdown(void)
 {
 	struct obs_module *module;
 
+#if defined(__linux__)
+	/* camera-box #1152: stop the DRM-lease output BEFORE libobs teardown so its flip thread
+	 * never outlives the log sink (crash-at-exit on the unattended imag box) and the leased
+	 * HDMI connector is returned to Xorg deterministically, not only by process death. A no-op
+	 * when the output was never started (obs_drm_output_stop checks active). */
+	obs_drm_output_stop();
+#endif
+
 	obs_wait_for_destroy_queue();
 
 	for (size_t i = 0; i < obs->source_types.num; i++) {
