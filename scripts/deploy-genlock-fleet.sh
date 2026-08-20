@@ -225,7 +225,9 @@ PSKAD_HEAD
 $(cat <<'PSKAD_BODY'
 $disabledKeepAlive = @()
 foreach ($t in $keepAliveTasks) {
+  $eapSave = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
   $q = schtasks /Query /TN $t /FO LIST /V 2>$null
+  $ErrorActionPreference = $eapSave
   if ($LASTEXITCODE -ne 0) { Write-Host "#1140: keep-alive task '$t' not present -- skipping."; continue }
   $stateLine = ($q | Where-Object { $_ -match 'Scheduled Task State:' } | Select-Object -First 1)
   # FAIL LOUD (never fail-OPEN) if the task is present but its state is unreadable -- silently
@@ -250,7 +252,9 @@ PSKAD_BODY
 $keepAliveRestoreFailed = @()
 foreach ($t in $disabledKeepAlive) {
   schtasks /Change /TN $t /ENABLE | Out-Null
+  $eapSave2 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
   $q2 = schtasks /Query /TN $t /FO LIST /V 2>$null
+  $ErrorActionPreference = $eapSave2
   $stateLine2 = ($q2 | Where-Object { $_ -match 'Scheduled Task State:' } | Select-Object -First 1)
   if ($LASTEXITCODE -eq 0 -and $stateLine2 -match 'Enabled') {
     Write-Host "#1140: keep-alive task '$t' re-enabled and verified."
