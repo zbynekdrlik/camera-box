@@ -36,6 +36,7 @@
 
 #include "obs.h"
 #include "obs-drm-output.h"
+#include "util/threading.h"
 
 /* -------------------------------------------------------------------------------------------------
  * Pure decision helper (Tier-0, lift-compiled + truth-table-tested by tests/drm_output_lease_1152.rs).
