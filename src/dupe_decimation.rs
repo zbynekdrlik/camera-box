@@ -1480,7 +1480,7 @@ mod tests {
         assert_eq!(queue_depth_intervals(1000 + 5 * i / 2, 1000, i), 2);
         // a garbage-huge residence is clamped to the sane max (never a runaway shed)
         assert_eq!(
-            queue_depth_intervals(1_000_000 * i, 0 + 1, i),
+            queue_depth_intervals(1_000_000 * i, 1, i),
             QUEUE_DEPTH_SANE_MAX_INTERVALS
         );
     }
