@@ -3319,16 +3319,17 @@ fn check_imag_report_power_envelope_unknown_when_not_gathered_backward_compat_10
     );
 }
 
-// #780/issue 1146: check_imag_report's check #10 — the display-path facet (picom RUNNING with vsync,
-// picom.service enabled, HDMI the xrandr primary, the #841 iGPU max-freq pin, the #779 tap conf) —
-// passed as the 15th (optional) arg. A clean gather is OK; picom NOT running / a non-HDMI primary /
-// a lost tap conf is DRIFT (exit 20); an unread block is UNKNOWN, never a false DRIFT (backward-
-// compat with 9..14-arg call sites). The picom polarity is INVERTED vs the original #780/#841 facet
-// — see scripts/lib/imag-display-path.sh's compositor-doctrine-reversal header (issue 1146).
+// #780/issue 1146 REVERT: check_imag_report's check #10 — the display-path facet (picom NOT
+// running + unit NOT enabled — the compositor cost 21.57% render skips on the 25W envelope, live
+// 2026-08-20, so the #841 picom-off doctrine stands; HDMI the xrandr primary, the #841 iGPU
+// max-freq pin, the #779 tap conf) — passed as the 15th (optional) arg. A clean gather is OK;
+// picom RUNNING / a non-HDMI primary / a lost tap conf is DRIFT (exit 20); an unread block is
+// UNKNOWN, never a false DRIFT (backward-compat with 9..14-arg call sites). Full doctrine
+// history: scripts/lib/imag-display-path.sh's header (reversal + same-day revert).
 const DISPLAY_PATH_GATHER_CLEAN: &str = "\
 PICOM_PGREP|ok
-PICOM_PROC|2038724
-PICOM_SERVICE|enabled
+PICOM_PROC|
+PICOM_SERVICE|disabled
 XRANDR|ok
 PRIMARY_OUTPUT|HDMI-1
 MAXPERF_APPLICABLE|1
@@ -3365,10 +3366,10 @@ fn check_imag_report_display_path_ok_when_every_facet_clean_780() {
 }
 
 #[test]
-fn check_imag_report_display_path_drift_when_picom_not_running_1146() {
-    // issue 1146 reversal: picom NOT running -> the dual-output vsync beat returns -> DRIFT (exit
-    // 20). (The compositor is now the tear-free present, so its ABSENCE is the drift.)
-    let stopped = DISPLAY_PATH_GATHER_CLEAN.replace("PICOM_PROC|2038724", "PICOM_PROC|");
+fn check_imag_report_display_path_drift_when_picom_running_1146_revert() {
+    // issue 1146 REVERT: picom RUNNING starves the OBS render (21.57% skips measured on the 25W
+    // envelope) -> DRIFT (exit 20). The compositor's PRESENCE is the drift again (#841 stands).
+    let stopped = DISPLAY_PATH_GATHER_CLEAN.replace("PICOM_PROC|", "PICOM_PROC|2038724");
     let body = r#"
         rc=0
         check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
@@ -3377,7 +3378,7 @@ fn check_imag_report_display_path_drift_when_picom_not_running_1146() {
     let out = run_sourced(body, &[("DP", &stopped)]);
     assert!(
         out.contains("RC=20"),
-        "picom not running must DRIFT (exit 20): {out:?}"
+        "picom running must DRIFT (exit 20, issue 1146 revert): {out:?}"
     );
     let line = out
         .lines()
@@ -3385,7 +3386,7 @@ fn check_imag_report_display_path_drift_when_picom_not_running_1146() {
         .unwrap_or_else(|| panic!("no picom_process row printed: {out:?}"));
     assert!(
         line.contains("DRIFT"),
-        "picom_process must DRIFT when picom is not running: {line:?}"
+        "picom_process must DRIFT when picom is running: {line:?}"
     );
 }
 
