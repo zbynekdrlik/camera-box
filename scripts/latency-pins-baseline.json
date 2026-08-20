@@ -1,16 +1,16 @@
 {
-  "_comment": "#1061 agreed per-source genlock_latency_ms_src pins baseline (issue 866 latency half). REPORT-ONLY source of truth: scripts/latency_pins_verify.py diffs live pins vs this at OBS start and reports drift LOUD (box+input+got+want) -- it NEVER overwrites, because per-source latency is the operator's A/V-align domain. The DELIBERATE writer counterpart is scripts/apply_latency_pins.py (DRY-RUN default, --execute), run by hand in a NO-E2E maintenance window to PUSH a newly-agreed baseline. When the operator/gate LEGITIMATELY re-tunes a pin, record the new agreement by updating this file in a PR. #1003 PROMOTION (2026-08-20): strih pins moved from the shallow 3/6/20 to the DELIVERY-equalized aligned deep set 90/160/184 + the stream NDI 2ME PGM hold from 915 to 791 -- these are the measurement-eq resolver's output (scripts/e2e_measurement_pins.py resolve over scripts/e2e-measurement-pins.json), validated at MEQ run 66065064 (delivery spread 5.78ms PASS, A/V uniform), promoting the cross-camera alignment from the opt-in MEASUREMENT_EQ window into production. imag is UNTOUCHED (3ms floor, always). strih covers the default CAMERA_ACTIVE_SET (cam1/cam2/cam3); retired-grabber pins (cam4..7) are deliberately excluded so a stale pin is never checked (.claude/rules/camera-active-set.md).",
+  "_comment": "#1061 agreed per-source genlock_latency_ms_src pins baseline (issue 866 latency half). REPORT-ONLY source of truth: scripts/latency_pins_verify.py diffs live pins vs this at OBS start and reports drift LOUD (box+input+got+want) -- it NEVER overwrites, because per-source latency is the operator's A/V-align domain. When the operator/gate LEGITIMATELY re-tunes a pin, record the new agreement by updating this file in a PR. Seeded from the live 2026-08-15 read-only WS snapshot. strih covers the default CAMERA_ACTIVE_SET (cam1/cam2/cam3); retired-grabber pins (cam4..7) are deliberately excluded so a stale pin is never checked (.claude/rules/camera-active-set.md).",
   "strih": {
-    "NDI cam1": 90,
-    "NDI cam2": 160,
-    "NDI cam3": 184
+    "NDI cam1": 3,
+    "NDI cam2": 6,
+    "NDI cam3": 20
   },
   "stream": {
-    "_comment": "NDI 2ME PGM is the A/V-align program hold. #1003 promotion lowered it 915 -> 791 COHERENTLY with the deep strih pins (the aligned strih pins add per-camera hold at ingest; the stream hold drops so total viewer latency stays ~unchanged and the mean A/V lands near av_expected) -- the resolver's resolve_hold output. The +/-60ms band absorbs ordinary re-tuning while still catching a gross revert (0/915/971). Zaloha kamera (standby backup) is intentionally not pinned here.",
-    "NDI 2ME PGM": {"want_ms": 791, "tolerance_ms": 60}
+    "_comment": "NDI 2ME PGM is the A/V-align program hold that tracks the ~1s mastered-audio delay (~923ms design); the +/-60ms band absorbs ordinary re-tuning while still catching a gross revert (0/3/1000). Zaloha kamera (standby backup) is intentionally not pinned here.",
+    "NDI 2ME PGM": {"want_ms": 915, "tolerance_ms": 60}
   },
   "imag": {
-    "_comment": "imag is the low-latency IMAG projection: EVERY NDI input runs the 3ms floor, ALWAYS (imag-min-latency-3ms-always). A floor sentinel (not a per-name list) because imag's input set is dynamic/16-wide; latency_pins_verify enumerates live NDI inputs and every one must equal the floor. UNTOUCHED by the #1003 pin promotion -- alignment is a strih-only concept; apply_latency_pins.py REFUSES the imag box (use imag_latency_enforce.py).",
+    "_comment": "imag is the low-latency IMAG projection: EVERY NDI input runs the 3ms floor, ALWAYS (imag-min-latency-3ms-always). A floor sentinel (not a per-name list) because imag's input set is dynamic/16-wide; latency_pins_verify enumerates live NDI inputs and every one must equal the floor.",
     "_all_ndi_inputs_ms": 3
   }
 }
