@@ -15,7 +15,7 @@
 //! tests/harness_presenter_liveness_check.rs stubs its own `fuser`.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn lib_path() -> PathBuf {
@@ -39,7 +39,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Write a fake `fuser` to `dir` that reports `held_device` (its `-s <dev>` 2nd arg) as HELD
 /// (exit 0) and everything else as not held (exit 1). Pass "" to hold nothing.
-fn stub_fuser(dir: &PathBuf, held_device: &str) {
+fn stub_fuser(dir: &Path, held_device: &str) {
     let p = dir.join("fuser");
     fs::write(
         &p,
