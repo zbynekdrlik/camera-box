@@ -348,3 +348,119 @@ class TestCliRouting:
         stdout = self._run(["--json-chunks", "--run-url", "https://example/actions/runs/999"])
         chunks = json.loads(stdout)
         assert "https://example/actions/runs/999" in "\n".join(chunks)
+
+
+# ---------------------------------------------------------------------------
+# #1142 STRICT flips — delivery spread + cadence uniformity + imag presence now BLOCK
+# ---------------------------------------------------------------------------
+
+class TestStrictFlips1142:
+    def test_delivery_spread_blocks_on_a_1142_shape_verdict(self):
+        # #1142: the DELIVERY-side spread now folds blocking (its block carries gates_overall_pass).
+        v = {
+            "overall_pass": False,
+            "all_cambox_delivery_latency": {
+                "spread_gate_pass": False,
+                "gates_overall_pass": True,
+                "cross_camera_spread_ms": 85.0,
+            },
+        }
+        failures = edr._blocking_failures(v)
+        assert any("doručovacej latencie" in label.lower() or "rozptyl doruč" in label.lower()
+                   for label, _ in failures), failures
+        # …and it must NOT ALSO be listed as report-only (auto-follow, no double-count).
+        assert not any("doručen" in n.lower() for n in edr._report_only_tripped(v))
+
+    def test_delivery_spread_stays_report_only_on_a_pre_1142_verdict(self):
+        # A pre-#1142 verdict has no gates_overall_pass on the delivery block → still report-only.
+        v = {
+            "overall_pass": True,
+            "all_cambox_delivery_latency": {"spread_gate_pass": False, "cross_camera_spread_ms": 85.0},
+        }
+        assert edr._blocking_failures(v) == []
+        assert any("doručen" in n.lower() for n in edr._report_only_tripped(v))
+
+    def test_cadence_uniformity_floor_blocks(self):
+        v = {
+            "overall_pass": False,
+            "all_cambox_continuity": {
+                "cadence_uniformity_gate": {
+                    "pass": False, "gates_overall_pass": True, "worst_uniform_fraction": 0.70,
+                },
+            },
+        }
+        assert any("plynulý pohyb" in label.lower() or "rovnomernosť" in label.lower()
+                   for label, _ in edr._blocking_failures(v))
+
+    def test_cadence_uniformity_report_only_when_seam_off_is_not_blocking(self):
+        v = {
+            "overall_pass": True,
+            "all_cambox_continuity": {
+                "cadence_uniformity_gate": {"pass": False, "gates_overall_pass": False,
+                                            "worst_uniform_fraction": 0.70},
+            },
+        }
+        assert edr._blocking_failures(v) == []
+
+    def test_imag_leg_not_verified_blocks_unless_offline_acked(self):
+        # A run that silently skipped imag (verified=false, not acked) REDs — the honesty flip.
+        v_red = {
+            "overall_pass": False,
+            "full_chain": {
+                "imag_leg_verified": False,
+                "imag_leg_verified_offline_acked": False,
+                "imag_leg_verified_gates_overall_pass": True,
+            },
+        }
+        assert any("nebola overená" in label.lower() for label, _ in edr._blocking_failures(v_red))
+        # The ONE sanctioned skip: operator-offline-acked imag → NOT a blocking failure.
+        v_ack = {
+            "overall_pass": True,
+            "full_chain": {
+                "imag_leg_verified": False,
+                "imag_leg_verified_offline_acked": True,
+                "imag_leg_verified_gates_overall_pass": True,
+            },
+        }
+        assert not any("nebola overená" in label.lower() for label, _ in edr._blocking_failures(v_ack))
+
+    def test_imag_presence_term_blocks_but_content_term_stays_report_only(self):
+        # A #1142-shape verdict: the imag PRESENCE term fails (blocking) while a CONTENT failure is
+        # report-only. The presence failure must be a blocking gate; the content failure must NOT.
+        v = {
+            "overall_pass": False,
+            "full_chain": {
+                "imag_leg_verified": True,
+                "loss": {"imag": {"imag_presence_pass": False, "imag_content_pass": True,
+                                  "gates_overall_pass": True, "content_gates_overall_pass": False}},
+            },
+        }
+        assert any("prezenčná kontrola" in label.lower() for label, _ in edr._blocking_failures(v))
+
+    def test_imag_content_failure_is_report_only_never_blocking(self):
+        # Only the imag per-frame CONTENT fails (presence OK) → report-only, never a blocking ❌.
+        v = {
+            "overall_pass": True,
+            "all_cambox_continuity": {"imag": {"overall_pass": False, "gates_overall_pass": False}},
+            "full_chain": {
+                "imag_leg_verified": True,
+                "loss": {"imag": {"imag_presence_pass": True, "imag_content_pass": False,
+                                  "gates_overall_pass": True, "content_gates_overall_pass": False}},
+            },
+        }
+        assert edr._blocking_failures(v) == []
+        assert any("imag" in n.lower() for n in edr._report_only_tripped(v))
+
+    def test_summary_never_renders_a_report_only_imag_content_failure_as_a_cross(self):
+        # The owner's angry directive: a report-only failure must NEVER render as ❌ on the phone.
+        v = {
+            "overall_pass": True,
+            "all_cambox_continuity": {"overall_pass": True,
+                                      "imag": {"overall_pass": False, "gates_overall_pass": False}},
+            "full_chain": {"zero_loss": True, "imag_leg_verified": True,
+                           "loss": {"imag": {"imag_presence_pass": True, "imag_content_pass": False,
+                                             "gates_overall_pass": True,
+                                             "content_gates_overall_pass": False}}},
+        }
+        summary = edr.compose_summary(v, {"run_id": "x"})
+        assert "❌" not in summary

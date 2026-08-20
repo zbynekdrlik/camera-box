@@ -41,13 +41,20 @@ lists the report-only ones for the `ℹ️` line.
   `full_chain.loss.cam2_*` V4L2 capture nodes (physical fault → "Treba fyzicky skontrolovať"),
   `all_cambox_continuity.overall_pass`, and `all_cambox_latency.spread_gate_pass` (**SOURCE** side).
 - **LIVE seams** (blocking only while their node's `gates_overall_pass==true`): `all_cambox_av_sync`
-  (`gate_pass`), `latency.cam_strih_gate`, `all_cambox_continuity.cadence_judder_gate`.
-- **REPORT-ONLY** (`gates_overall_pass=false`, NEVER a `❌`): imag leg
-  (`all_cambox_continuity.imag` / `full_chain.loss.imag`), **delivery-side** spread
-  (`all_cambox_delivery_latency.spread_gate_pass` — easy to confuse with the SOURCE spread above,
-  which IS blocking), `cold_cut_onset`, `frozen_leg`, `self_heal_reset`,
-  `duplication_masked_cadence`, the optical undecodable floor (`run_wide_undecodable_within_floor`),
-  lipsync.
+  (`gate_pass`), `latency.cam_strih_gate`, `all_cambox_continuity.cadence_judder_gate`, and — since
+  **#1142** — `all_cambox_continuity.cadence_uniformity_gate` (NEW uniformity floor),
+  `all_cambox_delivery_latency` (`spread_gate_pass` + `gates_overall_pass` — the DELIVERY spread,
+  flipped BLOCKING; the block now surfaces `gates_overall_pass` so the classifier auto-follows), and
+  the imag PRESENCE/VERIFICATION terms (`full_chain.imag_leg_verified` not-acked +
+  `full_chain.loss.imag.imag_presence_pass`, both guarded by their `gates_overall_pass`).
+- **REPORT-ONLY** (`gates_overall_pass=false`, NEVER a `❌`): the imag PER-FRAME CONTENT terms only
+  since #1142 (`all_cambox_continuity.imag` continuity + `full_chain.loss.imag.imag_content_pass` —
+  the observer-effect-confounded burn/beat; the imag PRESENCE terms are now BLOCKING above),
+  `cold_cut_onset`, `frozen_leg`, `self_heal_reset`, `duplication_masked_cadence`, the optical
+  undecodable floor (`run_wide_undecodable_within_floor`), lipsync. **NOTE (#1142):** the delivery
+  spread stays report-only ONLY on a PRE-#1142 verdict (no `gates_overall_pass` on its block); the
+  `_report_only_tripped` branch is guarded `gates_overall_pass is not True` so a #1142-shape verdict
+  routes it to blocking instead (no double-count).
 
 **When you add a NEW gate to recording-verdict.rs:** if it folds into `all_pass`, add it to
 `_blocking_failures`; if report-only, add it to `_report_only_tripped`. The summary has a safety net

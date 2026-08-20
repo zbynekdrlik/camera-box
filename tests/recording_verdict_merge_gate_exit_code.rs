@@ -1,6 +1,7 @@
 //! #703 — proves the REAL `recording-verdict --merge-partials` CLI PROCESS actually EXITS
-//! non-zero when the cross-camera delivery-latency-spread gate (#624, the `all_cambox_latency`
-//! block — NOT the #286 `all_cambox_delivery_latency` one, which is report-only) fails — not
+//! non-zero when the cross-camera SOURCE-side latency-spread gate (#624, the `all_cambox_latency`
+//! block — a DIFFERENT block from the #286 `all_cambox_delivery_latency` one, which #1142 also
+//! flipped blocking) fails — not
 //! just that the in-process `build_and_print_verdict()` function RETURNS `all_pass=false`
 //! (already covered, in-process, by
 //! `all_cambox_latency_measures_per_camera_windowed_latency_and_fails_a_wide_spread_624` in
@@ -408,14 +409,12 @@ fn merge_subprocess_exits_nonzero_when_av_sync_unknown_from_silent_audio_861_rea
 /// `switch_latency::SPREAD_THRESHOLD_MS` bound (24ms since issue 1120) MUST make the merge
 /// subprocess exit non-zero.
 ///
-/// (NOT the SAME gate as the #286/#1033 `all_cambox_delivery_latency`/`cross_camera_spread_ms`
-/// block — that one now folds THROUGH the report-only `delivery_spread_gate` seam, which ships
-/// `gates_overall_pass()==false` today (issue 1033: the fleet is not tight-green — cam1's delivery
-/// lottery), so its fold is a NO-OP and it never reds a run yet; pinned by
-/// `all_cambox_delivery_latency_spread_folds_through_report_only_seam_1033` in
-/// `src/bin/recording-verdict.rs`'s own test module. This test targets the #624 `all_cambox_latency`
-/// block specifically, which DOES gate hard — asserting the delivery one gates here would
-/// misrepresent an intentionally report-only signal as a live gate.)
+/// (A DIFFERENT block from the #286/#1033 `all_cambox_delivery_latency`/`cross_camera_spread_ms`
+/// one — though #1142 flipped the DELIVERY-side `delivery_spread_gate` seam BLOCKING too, so BOTH
+/// spreads now gate at the SAME `SPREAD_THRESHOLD_MS` bound; the delivery side is pinned by
+/// `all_cambox_delivery_latency_spread_folds_blocking_since_1142` in
+/// `src/bin/recording-verdict.rs`'s own test module. This test targets the #624 SOURCE-side
+/// `all_cambox_latency` block specifically, which has always gated hard.)
 #[test]
 fn merge_subprocess_exits_nonzero_when_cross_camera_latency_spread_gate_fails_703() {
     let dir = tempdir("spread-fail");

@@ -152,3 +152,55 @@ Both keep the risk surface to the FEW lines that genuinely change, which is the 
 with no local type check. Verify with `cargo fmt --all --check` (parses the probe files) + a hand
 type-audit of the new arg types and EVERY call site's arity (`grep -n 'build_and_print_verdict'` — a
 stray 8-arg call to the 9-arg fn is a CI-only red).
+
+## 11. Flipping a report-only seam BLOCKING, or adding a new blocking gate (#1142 lessons)
+
+Three hard-won patterns from flipping three seams blocking at once (imag leg + cadence uniformity +
+delivery spread):
+
+### RED→GREEN for a PURE crate-root gate module under #557 — `rustc --test` scratch, NEVER cargo
+`#557` (2026-08-18) BANS every compiling cargo shape locally — including `cargo test --no-run`, so
+the "compile with --no-run then run the binary directly" pattern in CLAUDE.md's Local Build Policy is
+STALE. A pure crate-root gate module (`presentation_cadence.rs`, `imag_leg_gate.rs`,
+`delivery_spread_gate.rs`, `partial_schema_gate.rs`) is self-contained enough to compile STANDALONE:
+```bash
+# strip a `serde::Serialize` derive the module carries (serde isn't linkable standalone; the gate
+# tests never serialize), then compile+run as a --test binary:
+sed 's/, serde::Serialize)]/)]/' src/presentation_cadence.rs > /tmp/pc.rs
+rustc --edition 2021 --test /tmp/pc.rs -o /tmp/pc_t && /tmp/pc_t
+```
+For a module with a `crate::` cross-ref (e.g. `delivery_spread_gate` re-exports
+`crate::switch_latency::SPREAD_THRESHOLD_MS`), stub the referenced const in a tiny scratch that
+inlines just the pure fns + the tests. This gives a GENUINE observable RED (seam still false) →
+GREEN (flip) locally, which the probe-gated `recording-verdict.rs` consumer can never (CI-first).
+`cargo fmt --all --check` is still the syntax proof for the probe-gated wiring (it parses cfg-gated
+files); a python replication over `/tmp/recording-e2e-*/verdict-*.json` proves the FOLD flip's real
+effect end-to-end (model each flipped term's pass + whether it now folds; include a synthetic clean
+verdict to prove the gates are not UNCONDITIONALLY red).
+
+### A NEW blocking fold breaks every unit test that builds a verdict WITHOUT that node — scope it with a `--require-<x>` flag
+The imag_leg_verified honesty flip (a missing imag leg REDs) was UNCONDITIONAL at first and reded
+~10 in-process/subprocess verdict tests that build a verdict with `imag: None` (isolated
+strih/stream/cam scenarios) + `merge_gate_exit_code` subprocess controls. Fix: a CLI flag
+(`--require-imag-leg`, `#[arg(long, default_value_t = false)]`) that gates the fold; the PRODUCTION
+path sets it (`recording-e2e.sh` ALL_CAMBOX `[8/8d]` merge, appended via the #675 `MERGE_ARGS+=(...)`
+pattern — NOT the strih+stream-only zero-loss-restart merge), every unit test defaults off. Verify
+the recording-e2e.sh edit anchor-safe: `bash -n` + `shellcheck` + the OLD-vs-NEW literal
+occurrence-count sweep (`camera-active-set.md`'s Tier-0 net). Pin the flag's A/B with a probe-gated
+test reusing a KNOWN-clean imag-None fixture (`window_cam2`): off=pass, on=red, on+offline-ack=pass.
+
+### Gate cadence uniformity on `derived_uniform_fraction`, NOT raw `uniform_fraction`
+The raw `uniform_fraction` (fraction of deltas == the caller's `expected_step`) FALSE-REDS a clean
+window whose per-frame step MODE differs from `expected_step` — several synthetic switch-schedule
+fixtures advance the tick +1 under `--switch-expected-step 2`, so raw reads 0.0 on a perfectly clean
+window (`derived_uniform_fraction`, the #726 mode-based field, reads 1.0). On the REAL rig the two are
+EQUAL (mode IS 2; verified across every mined verdict, worst 0.67–0.78 on both), so gating on
+`derived` REDs the sick rig IDENTICALLY without the synthetic false-red. General rule: when a cadence
+metric offers a caller-`expected_step` field AND a data-mode-`derived` field, gate on the derived
+one and surface the raw as diagnostic.
+
+### Owner-mandated RED-on-current-rig OVERRIDES gates-green-first (§3)
+The standard "a bound that would fail a recent green run is wrong" is REVERSED when the owner
+declares the green runs FALSELY green (hiding visual degradation). #1142's cadence-uniformity 0.95
+floor is RED on today's 0.67–0.78 rig BY DESIGN. Document the deviation loudly in the seam doc + the
+ticket; recalibrate from the first genuinely-clean post-fix run as a named TODO.
