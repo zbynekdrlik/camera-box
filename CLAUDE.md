@@ -650,6 +650,21 @@ Running an already-built binary is not a `cargo` build/test invocation, so the T
 sees it. The test harnesses read their shell/script fixtures at RUNTIME, so after editing a sourced
 lib you can re-run the SAME compiled binary without recompiling. (Confirmed live #715, 2026-08-17.)
 
+**SUPERSEDED for the COMPILE step (airuleset #557, 2026-08-18, confirmed live #789): even
+`cargo test --no-run` is now HARD-BLOCKED** — Tier-0 was tightened to "EVERY compiling cargo shape
+(build/test/bench/run/check/clippy/doc/… , scoped or whole-workspace, `--no-run` or not) runs in CI
+ONLY". So the `--no-run` half of the pattern above no longer works locally; only running an
+ALREADY-built binary from a prior CI/earlier session survives (nothing recompiles it). For a change
+that is PURE bash / shell-anchor (e.g. a `scripts/rig-mode.sh` pure function + wiring, no new Rust
+type), the full LOCAL net with zero cargo compile is: (1) `bash -n` + `shellcheck -S warning`;
+(2) source the script and call the new pure bash function directly over representative fixtures — the
+SAME thing a `tests/rig_mode.rs` `run_sourced` test does, so a green bash-level RED→GREEN predicts
+the Rust test's pass at CI; (3) a python occurrence-count anchor sweep (OLD `git show HEAD:<script>`
+vs NEW, flag any test string-literal whose count went 1→0 or 1→2 — the `camera-active-set.md` net);
+(4) `cargo fmt --all --check` (rustfmt parses even probe-gated + new test files → proves the Rust
+compiles-shaped OK / is brace-balanced). CI is the FIRST place the Rust test actually type-checks +
+runs — expect a TYPE mistake to surface there, not locally.
+
 **No bypass exists for `src/bin/recording-verdict.rs` or any `src/probe/*.rs` file itself** — the
 bin has `required-features = ["probe"]` and every file under `src/probe/` is behind the SAME
 feature gate, so `cargo check`/`clippy`/`test` on DEFAULT features doesn't even attempt to compile
