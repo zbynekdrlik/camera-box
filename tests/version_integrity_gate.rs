@@ -59,11 +59,18 @@ fn run_sourced(body: &str, extra_env: &[(&str, &str)]) -> String {
 
 /// Run the gate as a subprocess; return (exit_code, stdout, stderr).
 fn run_gate(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(script())
-        .args(args)
-        .current_dir(manifest_dir())
-        .output()
-        .expect("run version-integrity-gate.sh");
+    run_gate_env(args, &[])
+}
+
+/// Run the gate as a subprocess WITH extra env (the #1137 vendor-pin fixture seams);
+/// return (exit_code, stdout, stderr).
+fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(script());
+    cmd.args(args).current_dir(manifest_dir());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run version-integrity-gate.sh");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -1593,4 +1600,108 @@ fn vendor_pin_unknown_when_newest_vendor_unresolved() {
     );
     assert!(out.contains("RC=31"), "an unresolved newest-vendor HEAD must fail-closed to UNKNOWN (31): {out}");
     assert!(out.contains("UNKNOWN"), "must report UNKNOWN: {out}");
+}
+
+#[test]
+fn vendor_pin_alarm_is_report_only_does_not_block_an_otherwise_clean_gate() {
+    // #1137 — the report-only property: even when the deployed bundle LAGS origin/main's vendor
+    // HEAD, an otherwise-clean gate must still PASS (exit 0). The vendor-pin layer SCREAMS but never
+    // flips the gate exit (the coordinated-restart bundle deploy makes a hard block too blunt), so a
+    // lagging bundle is loudly surfaced without halting every E2E. Fixture seams override the git
+    // read so the flow is deterministic.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_vendorpin",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_vendorpin",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("vendorpin");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--win-state",
+            &format!("strih={}", s.display()),
+            "--win-state",
+            &format!("stream={}", t.display()),
+            "--genlock-sha",
+            &format!("imag={SHA}"),
+            "--imag-manifest",
+            imag_m.to_str().unwrap(),
+            "--imag-bytes",
+            &imag_b,
+        ],
+        &[
+            ("VERSION_INTEGRITY_GATE_VENDOR_NEWEST", "beefface1234"),
+            (
+                "VERSION_INTEGRITY_GATE_VENDOR_PENDING",
+                "f70317e81 fix: framesync retries in place\n2386b60d9 docs: correct comment",
+            ),
+        ],
+    );
+    // Report-only: the lag does NOT block a green gate.
+    assert_eq!(
+        code, 0,
+        "the vendor-pin ALARM must be REPORT-ONLY (must not flip the gate exit). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "gate must still pass: {stdout}");
+    // But it SCREAMS and names the pending commits.
+    assert!(
+        stdout.contains("vendor-pin alarm (#1137"),
+        "the vendor-pin section must run: {stdout}"
+    );
+    assert!(
+        stdout.contains("ALARM") && stdout.contains("f70317e81") && stdout.contains("2386b60d9"),
+        "the ALARM must name the pending vendor commits: {stdout}"
+    );
+    assert!(
+        stderr.contains("VENDOR-PIN ALARM"),
+        "a loud stderr SCREAM banner must fire: {stderr}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
+}
+
+#[test]
+fn vendor_pin_ok_when_deployed_at_newest_vendor_head_flow() {
+    // The clean case through the flow: deployed SHA == newest vendor HEAD (no pending) -> the
+    // vendor-pin section reports OK and the gate passes.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_vendorpin_ok",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_vendorpin_ok",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("vendorpin_ok");
+    let (code, stdout, _stderr) = run_gate_env(
+        &[
+            "--win-state",
+            &format!("strih={}", s.display()),
+            "--win-state",
+            &format!("stream={}", t.display()),
+            "--genlock-sha",
+            &format!("imag={SHA}"),
+            "--imag-manifest",
+            imag_m.to_str().unwrap(),
+            "--imag-bytes",
+            &imag_b,
+        ],
+        &[
+            ("VERSION_INTEGRITY_GATE_VENDOR_NEWEST", SHA),
+            ("VERSION_INTEGRITY_GATE_VENDOR_PENDING", ""),
+        ],
+    );
+    assert_eq!(code, 0, "clean vendor pin must pass: {stdout}");
+    assert!(
+        stdout.contains("vendor_pin") && stdout.contains("OK"),
+        "vendor_pin must report OK: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
 }
