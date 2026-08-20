@@ -337,6 +337,56 @@ jobs:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: python -m pytest tests/python -v
 
+  bkshading:
+    name: bkshading service + relay (issue 808)
+    # The bkshading shading-control service + cambox relay are SEPARATE workspace members
+    # (bkshading/proto|relay|service). The appliance jobs above run cargo at the root WITHOUT
+    # --workspace, so they never build these; THIS job is their first compile + clippy + tests.
+    # No libv4l/libasound needed — these crates don't depend on the appliance's Linux tree.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bkshading
+
+      - name: Clippy (bkshading members)
+        run: cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading --all-targets -- -D warnings
+
+      - name: Test (bkshading members)
+        run: cargo test -p bkshading-proto -p bkshading-relay -p bkshading
+
+      - name: Build binaries
+        run: cargo build --bins -p bkshading -p bkshading-relay
+
+  bkshading-windows:
+    name: bkshading Windows compile check (issue 808)
+    # The bkshading service runs on the strih PC — Windows FIRST (Linux only after the
+    # frame-loss P0). A Linux compile is not proof the Windows target builds, so cheaply
+    # `cargo check` the members on windows-latest. Pure axum/tokio/reqwest-rustls (no platform
+    # deps) — but "should build on Windows" isn't a build.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bkshading-windows
+
+      - name: Check bkshading members (Windows target)
+        run: cargo check -p bkshading-proto -p bkshading-relay -p bkshading
+
   build:
     name: Build
     runs-on: ubuntu-22.04
@@ -584,7 +634,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:
