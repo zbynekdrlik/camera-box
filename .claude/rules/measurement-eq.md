@@ -76,3 +76,39 @@ This is why it is a SEPARATE profile, not a floor/margin bolted onto the re-anch
   `pytest tests/python/...`, the bash with `bash -n` + `shellcheck -x`, and the Rust static-anchor
   tests by REPLICATING their `.find`/`.contains`/byte-window assertions in a `python3` script against
   the edited `recording-e2e.sh` (the 900/893/paths/691 + report-only-`exit 1`-window tests).
+
+## Report-only diagnostics on top of the profile (#1124)
+
+Three REPORT-ONLY diagnostics ride the profile — NONE gates (`gates_overall_pass()` / `$GATE`
+untouched; data-gated flips have their own tickets). All HARNESS-side (pure python in
+`e2e_measurement_pins.py` + sourced-lib wiring in `measurement-eq.sh`), NOT in probe-gated
+recording-verdict.rs — recording-verdict has no profile-mode context and the signals are fully
+derivable from the verdict JSON the harness already holds post-merge.
+
+- **Staleness (`staleness-from-verdict` CLI)** — `observed_delivery_from_verdict()` maps the
+  verdict `all_cambox_delivery_latency` onto the profile keys, then runs the existing
+  `staleness_report`. Wired post-verdict (always). Surfaces "profile STALE — re-derive".
+- **Edge-oscillation (`edge-oscillation` CLI)** — `edge_oscillation_report()` reads
+  `all_cambox_continuity.segments`; a per-cambox window is EDGE-OSCILLATING iff
+  `min(copies,gaps)>=3 AND max<=25 AND |c-g|<=0.5*max`; a cambox is a SUSPECT iff `>=2` such
+  windows AND ZERO storm windows (`max>25` = a FROZEN leg, a DIFFERENT class — never masked as
+  "rerun the edge"). Wired post-verdict ONLY on a FAILED run (`$GATE!=0`). Thresholds are
+  DATA-calibrated from 19 local verdict JSONs: fires on EXACTLY the FIFO run 1804432786 (CAM2 pin
+  168 frac 0.04, per-seg 5/4,7/7,5/4) and no other (not the healthy post-snap 66065064, not the
+  frozen-storm 547108056). Re-calibrate against `/tmp/recording-e2e-*/verdict-*.json`, never a feel.
+- **Post-record stomp re-check** — reuses `obs_phase2.py verify-measurement-pins --role
+  strih|stream` right after StopRecord (pins still in force; teardown restores only at cleanup exit).
+
+### Gotchas
+- **Verdict cam keys are BARE `camN`; the profile keys are `NDI camN`.** `all_cambox_delivery_latency`
+  and `all_cambox_continuity.segments[].cambox` (uppercase `CAM1`) never carry the `NDI ` prefix.
+  `observed_delivery_from_verdict` maps profile→verdict via `src.split()[-1]`. Any NEW verdict-JSON
+  consumer here must remap; a `null` / absent / non-dict delivery entry is SKIPPED (a partial
+  verdict is not staleness evidence), never zeroed.
+- **A report-only helper called as a BARE statement MUST return 0 on every path (#1133).** The
+  post-verdict call site is under the re-enabled `set -euo pipefail`; the post-record one is in the
+  `[7/8]` `set +e` region. Both helpers end with an explicit `return 0` AND both call sites carry
+  `|| true` (belt-and-suspenders) so a benign non-zero (an empty read, a `python|sed`/pipefail
+  hiccup, a `verify-measurement-pins` mismatch) can never `set -e`-abort the run before `exit $GATE`.
+  RUNTIME-verify by sourcing the lib under `set -euo pipefail` and calling each helper on its
+  failure paths — a `bash -n` / static-anchor test cannot catch this class.
