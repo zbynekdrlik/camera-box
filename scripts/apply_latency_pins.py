@@ -86,6 +86,32 @@ def explicit_pins_for_box(box: str, baseline_box: dict) -> dict:
     return pins
 
 
+def pins_from_arg(pins_arg: str) -> dict:
+    """Parse --pins: a JSON object {source: ms(int)} either inline or as '@path'. This is the
+    COMPUTED-set entry point (the #1003 floor-3 aligner pushes its per-run plan here instead of the
+    committed baseline). Validates non-empty and int-valued; a bool / non-number / empty is a
+    config error, never a vacuous apply. The floor sentinel (imag) has no place here -- the caller
+    only ever passes the strih inputs it aligned, so an imag key would be a caller bug."""
+    raw = pins_arg
+    if pins_arg.startswith("@"):
+        with open(pins_arg[1:], encoding="utf-8") as fh:
+            raw = fh.read()
+    try:
+        obj = json.loads(raw)
+    except ValueError as exc:
+        raise SystemExit(f"[apply-latency-pins] --pins is not valid JSON: {exc}")
+    if not isinstance(obj, dict) or not obj:
+        raise SystemExit(
+            "[apply-latency-pins] --pins must be a non-empty JSON object {source: ms}")
+    pins = {}
+    for src, ms in obj.items():
+        if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+            raise SystemExit(
+                f"[apply-latency-pins] --pins value for {src!r} must be a number, got {ms!r}")
+        pins[src] = int(ms)
+    return pins
+
+
 def plan_pin_changes(want_pins: dict, live_pins: dict) -> list:
     """Pure: per-source apply plan given the target pins and the live-read values ({source:
     int|None}). action='noop' when the live value already equals the target; else 'set'. A missing
@@ -167,23 +193,32 @@ def _print_plan(box: str, host: str, results: list, execute: bool) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--box", required=True, help="baseline box key (strih | stream)")
+    ap.add_argument("--box", required=True,
+                    help="box key: reads scripts/latency-pins-baseline.json[box] unless --pins is "
+                         "given, in which case --box is just the print/host label")
     ap.add_argument("--host", required=True)
     # explicit --password wins over the OBS_PASSWORD env var (the flag's default IS the env value),
     # matching the sibling latency_pins_verify.py precedence.
     ap.add_argument("--password", default=os.environ.get("OBS_PASSWORD", ""))
     ap.add_argument("--baseline", default=DEFAULT_BASELINE)
+    ap.add_argument("--pins",
+                    help="push a COMPUTED {source: ms} set (JSON inline or @file) instead of the "
+                         "committed baseline -- the #1003 floor-3 aligner's per-run plan path")
     ap.add_argument("--execute", action="store_true",
                     help="WRITE the pins (default: DRY-RUN, prints the plan, writes nothing)")
     args = ap.parse_args(argv)
 
-    with open(args.baseline, encoding="utf-8") as fh:
-        baseline = json.load(fh)
-    if args.box not in baseline:
-        raise SystemExit(
-            f"[apply-latency-pins] box {args.box!r} not in baseline {args.baseline} "
-            f"(have: {', '.join(sorted(baseline))})")
-    want_pins = explicit_pins_for_box(args.box, baseline[args.box])
+    if args.pins:
+        # COMPUTED set (e.g. the floor-3 aligner) -- bypass the committed baseline entirely.
+        want_pins = pins_from_arg(args.pins)
+    else:
+        with open(args.baseline, encoding="utf-8") as fh:
+            baseline = json.load(fh)
+        if args.box not in baseline:
+            raise SystemExit(
+                f"[apply-latency-pins] box {args.box!r} not in baseline {args.baseline} "
+                f"(have: {', '.join(sorted(baseline))})")
+        want_pins = explicit_pins_for_box(args.box, baseline[args.box])
 
     ws = _conn(args.host, args.password)
     try:

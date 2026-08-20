@@ -129,44 +129,95 @@ class TestApplyPins:
         assert ws.sets == [("NDI cam1", 90)]  # it TRIED to write, then fail-loud on read-back
 
 
+
 # ---------------------------------------------------------------------------
-# the committed baseline is the PROMOTED aligned set AND matches the resolver (#1003 lock)
+# the committed baseline is the REVERTED shallow drift-guard reference (#1003 owner rework)
 # ---------------------------------------------------------------------------
-class TestPromotedBaseline:
+class TestRevertedBaseline:
+    """The owner REJECTED + REVERTED the deep promoted 90/160/184 + 791 set (2026-08-20): those
+    absolute depths add ~180 ms of needless chain latency. Production alignment is now the per-run
+    floor-3 auto-align (scripts/qr_align_pins.py); the committed baseline is the reverted SHALLOW
+    3/6/20 drift-guard REFERENCE only, never a hand-baked deep set. This locks the reverted state so
+    a future accidental re-promotion of the deep numbers fails HERE, not silently on the rig."""
+
     def _load(self):
-        base = json.loads((_SCRIPTS / "latency-pins-baseline.json").read_text(encoding="utf-8"))
-        return base
+        return json.loads((_SCRIPTS / "latency-pins-baseline.json").read_text(encoding="utf-8"))
 
-    def test_strih_pins_are_the_promoted_aligned_set(self):
+    def test_strih_pins_are_the_reverted_shallow_set_not_the_rejected_deep_set(self):
         strih = self._load()["strih"]
-        assert strih["NDI cam1"] == 90
-        assert strih["NDI cam2"] == 160
-        assert strih["NDI cam3"] == 184
+        assert strih["NDI cam1"] == 3
+        assert strih["NDI cam2"] == 6
+        assert strih["NDI cam3"] == 20
+        assert (strih["NDI cam1"], strih["NDI cam2"], strih["NDI cam3"]) != (90, 160, 184)
 
-    def test_stream_hold_is_the_coherent_promoted_value(self):
+    def test_stream_hold_is_not_the_rejected_deep_reduced_value(self):
         pgm = self._load()["stream"]["NDI 2ME PGM"]
-        assert pgm["want_ms"] == 791
-        assert pgm["tolerance_ms"] == 60  # band kept -- catches a gross revert (0/915/971)
+        # never the rejected coherently-lowered 791 -- floor-3 never lowers the operator hold by an
+        # absolute depth (the A/V-align hold stays the operator's domain).
+        assert pgm["want_ms"] != 791
+        assert pgm["tolerance_ms"] == 60
 
     def test_imag_floor_untouched(self):
         assert self._load()["imag"]["_all_ndi_inputs_ms"] == 3
 
-    def test_baseline_equals_the_measurement_eq_resolver_output(self):
-        """PROVENANCE guard: the promoted production pins MUST be exactly what the measurement-eq
-        resolver derives from the current profile (the values validated at MEQ run 66065064). A
-        hand-edit that drifts the baseline off its derivation -- OR a profile re-derivation without
-        a matching baseline re-promotion -- fails HERE (Tier-0), never silently on the rig."""
-        import e2e_measurement_pins as m  # noqa: PLC0415
-        prof = m.load_profile(str(_SCRIPTS / "e2e-measurement-pins.json"))
-        assert m.coherence_check(prof) == []  # the profile itself is coherent
-        base = self._load()
-        assert base["strih"] == m.resolve_pins(prof)                  # 90/160/184
-        assert base["stream"]["NDI 2ME PGM"]["want_ms"] == m.resolve_hold(prof)  # 791
-
     def test_extract_on_the_real_baseline(self):
         base = self._load()
         assert alp.explicit_pins_for_box("strih", base["strih"]) == {
-            "NDI cam1": 90, "NDI cam2": 160, "NDI cam3": 184}
-        assert alp.explicit_pins_for_box("stream", base["stream"]) == {"NDI 2ME PGM": 791}
+            "NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}
         with pytest.raises(SystemExit):
             alp.explicit_pins_for_box("imag", base["imag"])
+
+
+# ---------------------------------------------------------------------------
+# --pins: push a COMPUTED {source: ms} set (the floor-3 aligner's per-run plan path)
+# ---------------------------------------------------------------------------
+class TestPinsFromArg:
+    def test_inline_json_object(self):
+        assert alp.pins_from_arg('{"NDI cam1": 3, "NDI cam2": 23}') == {
+            "NDI cam1": 3, "NDI cam2": 23}
+
+    def test_from_file(self, tmp_path):
+        p = tmp_path / "pins.json"
+        p.write_text('{"NDI cam3": 45}', encoding="utf-8")
+        assert alp.pins_from_arg(f"@{p}") == {"NDI cam3": 45}
+
+    def test_float_is_coerced_to_int(self):
+        assert alp.pins_from_arg('{"NDI cam1": 3.0}') == {"NDI cam1": 3}
+
+    def test_empty_object_is_refused(self):
+        with pytest.raises(SystemExit):
+            alp.pins_from_arg("{}")
+
+    def test_non_number_value_is_refused(self):
+        with pytest.raises(SystemExit):
+            alp.pins_from_arg('{"NDI cam1": "deep"}')
+
+    def test_bool_value_is_refused(self):
+        with pytest.raises(SystemExit):
+            alp.pins_from_arg('{"NDI cam1": true}')
+
+    def test_malformed_json_is_refused(self):
+        with pytest.raises(SystemExit):
+            alp.pins_from_arg("{not json")
+
+
+class TestMainWithPins:
+    def test_execute_pins_bypasses_baseline_and_writes_the_computed_set(self, monkeypatch):
+        ws = _FakeWs({"NDI cam1": 3, "NDI cam2": 6})
+        monkeypatch.setattr(alp, "_rpc", _fake_rpc)
+        monkeypatch.setattr(alp, "_conn", lambda host, pw="": ws)
+        rc = alp.main(["--box", "strih", "--host", "1.2.3.4",
+                       "--pins", '{"NDI cam1": 3, "NDI cam2": 23}', "--execute"])
+        assert rc == 0
+        assert ws.pins["NDI cam1"] == 3    # already on -> noop
+        assert ws.pins["NDI cam2"] == 23   # the computed floor-3 delta applied
+
+    def test_dry_run_pins_writes_nothing(self, monkeypatch):
+        ws = _FakeWs({"NDI cam1": 3, "NDI cam2": 6})
+        monkeypatch.setattr(alp, "_rpc", _fake_rpc)
+        monkeypatch.setattr(alp, "_conn", lambda host, pw="": ws)
+        rc = alp.main(["--box", "strih", "--host", "1.2.3.4",
+                       "--pins", '{"NDI cam1": 3, "NDI cam2": 23}'])
+        assert rc == 0
+        assert ws.sets == []               # DRY-RUN default -- nothing written
+        assert ws.pins["NDI cam2"] == 6
