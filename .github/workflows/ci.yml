@@ -603,10 +603,20 @@ jobs:
           name: camera-box-linux-amd64
           path: dist
 
+      # #1138: also fetch the frame-probe (cam2 painter) binary from THIS SAME run's build job so
+      # the fleet deploy re-arms cam2's painter on the current build too (closing the "frame-probe
+      # never auto-deployed" hole — it was previously installed only by setup-device.sh provisioning).
+      - name: Download probe tools (frame-probe — this run's build job, #1138)
+        uses: actions/download-artifact@v4
+        with:
+          name: probe-tools-linux-amd64
+          path: dist-probe
+
       - name: Deploy to the active cam fleet (acked-offline boxes skipped)
         run: |
           set -euo pipefail
           chmod +x dist/camera-box
+          chmod +x dist-probe/frame-probe
           echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to the active fleet"
           # shellcheck source=scripts/camera-set.sh
           . scripts/camera-set.sh            # CAMERA_ACTIVE_SET
@@ -622,7 +632,7 @@ jobs:
             exit 1
           fi
           echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
-          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box
+          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe
 
   notify-on-failure:
     name: Notify on red

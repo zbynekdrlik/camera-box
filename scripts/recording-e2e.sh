@@ -2003,6 +2003,20 @@ else
   cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report --bin phase-sync-active-floor-gate  # airuleset:build-ok
 fi
 
+# [1/8] frame-probe (cam2 painter) sha-pin report (#1138) — engage the merged report-only alarm now
+# that the current-build frame-probe exists on $PROBE_BIN_DIR (built/fetched in the [1/8] step just
+# above). It could NOT be wired into the [0/8] camera-box parity gate: that gate runs BEFORE this
+# build, so $PROBE_BIN_DIR/frame-probe does not exist yet there and the report would stay silently
+# dormant. The report-only mode runs ONLY the report (no second camera-box parity table) and ALWAYS
+# exits 0; the `|| true` is belt-and-suspenders — a lagging painter SCREAMS but never fails this run.
+# cam2-scoped: frame-probe is installed ONLY on the painter box (setup-device.sh STEP 3b,
+# cam2_is_painter_box), so a fleet-wide read would UNKNOWN-spam every non-painter box.
+echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs this run's CI build (#1138, report-only)"
+"$HERE/camera-box-version-gate.sh" \
+  --frame-probe-only \
+  --frame-probe-expected-bin "$PROBE_BIN_DIR/frame-probe" \
+  --linux "cam2=root@$PAINTER_IP" || true
+
 # #758 item 1 (continued) — per-camera NDI liveness. Needs frozen-camera-gate (just
 # built/fetched above), so it cannot run at true [0/8] — this is still comfortably BEFORE any
 # deploy/OBS-touching step (StartRecord is 4 more steps away).
