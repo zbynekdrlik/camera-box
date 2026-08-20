@@ -179,9 +179,76 @@ pub fn retire_min_uniques(interval_ns: u64) -> usize {
     (UNIQUE_RATE_WINDOW_NS / interval_ns).saturating_sub(RETIRE_UNIQUE_COUNT_MARGIN) as usize
 }
 
+// ── (#1145 v2) queue-DEPTH-bounded drain: absorb the over-rate takt CONTINUOUSLY ──────────────
+//
+// The merged v1 shed/retire keys on [`crate::genlock_pacing::genlock_lag_intervals`] (BOUNDARY
+// staleness). When the emit loop is send-bound (~60 fps) and the card captures 61.x, the loop
+// processes the OLDEST buffered V4L2 frame each poll and `now` (realtime) lands right on the
+// advancing boundary, so the lag reads ~0 the whole time — v1 is BLIND to the growing
+// capture->emit QUEUE RESIDENCE. The residence sawtooths (delivery lag 67->167 ms, issue
+// 1110/1130) until the 4-deep V4L2 buffer overflow-drops in a burst, and THAT burst is what the
+// #1142 uniformity gate reads at ~0.77-0.89 on cam1. v2 measures the residence DIRECTLY
+// (`now_monotonic - capture_monotonic`) and sheds the oldest frame once it exceeds a small
+// target, draining the over-rate one frame at a time instead of letting it accumulate — GATED on
+// a sustained-over-rate capture takt so a healthy 60.00 card (and a #1131 buffered-drain
+// stall-recovery on one) is byte-identical to v1.
+
+/// (#1145 v2) The over-rate capture takt threshold, as the minimum EMA capture INTERVAL below which
+/// the card is "sustained over-rate": `1e9 / 60.3` ns (~16.584 ms). Integer form to keep it a plain
+/// `const`. The ticket names this bound explicitly ("pri sustained over-rate takt >60.3"): a 60.00
+/// card reads an EMA interval of ~16.667 ms (ABOVE this — NOT over-rate → the whole depth-shed is
+/// OFF, so a healthy card and a transient #1131 stall-recovery on one stay byte-identical to v1),
+/// while a 61.x card reads ~16.3 ms (below → over-rate → depth-shed engages). Deliberately at 60.3
+/// (not 60.0) so ordinary sub-frame jitter on a genuine 60.00 card never trips it.
+pub const RETIRE_MIN_TAKT_INTERVAL_NS: u64 = 1_000_000_000 * 10 / 603;
+
+/// (#1145 v2) Right-shift for the integer EMA that smooths the capture takt: `new = old + ((sample
+/// - old) >> SHIFT)`. `8` gives a ~2^8 = 256-frame (~4 s at 60 fps) time constant — long enough to
+/// integrate out per-frame V4L2 dequeue jitter into the true sustained takt, short enough that a
+/// card that starts drifting is classified over-rate within a few seconds. Init-seeded to the first
+/// observed interval so there is no long cold-start (see [`DecimationGate::note_capture_takt`]).
+pub const TAKT_EMA_SHIFT: u32 = 8;
+
+/// (#1145 v2) The queue-residence depth (in whole emit intervals) at/above which the oldest queued
+/// frame is SHED to drain one interval of delivery latency — the target the over-rate is held to.
+/// `2`: an emitted frame then carries at most ~1 interval of queue residence (fresh), and the
+/// capture-stage residence never climbs toward the 4-deep V4L2 overflow, so the downstream FIFO is
+/// fed fresh content too. A healthy 60.00 card sits at residence ~0-1 and (being NOT over-rate) never
+/// reaches this arm regardless. Calibration value; the live E2E re-measure tunes it.
+pub const QUEUE_DEPTH_SHED_INTERVALS: u64 = 2;
+
+/// (#1145 v2) A DETECTED content-dupe drains one interval EARLIER than [`QUEUE_DEPTH_SHED_INTERVALS`]
+/// — shedding a byte-identical re-sample is always content-safe (its neighbour carries the same
+/// painted frame), so draining it at residence `>= 1` keeps the queue shallower with ZERO risk of
+/// dropping a distinct painted frame. `1`. Only reached when already over-rate.
+pub const QUEUE_DEPTH_DUPE_SHED_INTERVALS: u64 = 1;
+
+/// (#1145 v2) Sanity ceiling on the computed queue-residence depth: a bogus/huge
+/// `capture_monotonic` (or a clock-domain mismatch) must never be read as a runaway depth that
+/// force-sheds far beyond the real 4-deep V4L2 buffer. `8` == the #707/#1131 resync catch-up bound
+/// ([`crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS`]); a real residence cannot exceed the
+/// buffer depth, so clamping here only defends against a garbage timestamp.
+pub const QUEUE_DEPTH_SANE_MAX_INTERVALS: u64 = 8;
+
+/// (#1145 v2) The queue-residence depth of a captured frame, in whole emit intervals: how long the
+/// frame sat between its CAPTURE instant (`capture_mono_ns`, the V4L2 buffer's `CLOCK_MONOTONIC`
+/// timestamp) and the instant the loop PROCESSED it (`now_mono_ns`, `monotonic_clock_ns()`), divided
+/// by `interval_ns`. This is a DURATION, so it is measured on the monotonic clock (immune to the
+/// DanteSync/NTP realtime steps the emit boundary is gridded to). `0` (no drain) when the signal is
+/// unavailable: `interval_ns == 0` (genlock off), `capture_mono_ns == 0` (the FrameInfo "no real
+/// measurement" sentinel), or `now_mono_ns <= capture_mono_ns` (a monotonic non-advance / bogus
+/// stamp). Clamped to [`QUEUE_DEPTH_SANE_MAX_INTERVALS`] so a garbage timestamp can never force a
+/// runaway shed.
+pub fn queue_depth_intervals(now_mono_ns: u64, capture_mono_ns: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 || capture_mono_ns == 0 || now_mono_ns <= capture_mono_ns {
+        return 0;
+    }
+    ((now_mono_ns - capture_mono_ns) / interval_ns).min(QUEUE_DEPTH_SANE_MAX_INTERVALS)
+}
+
 // ── (#889/#1145) victim-selection decision ────────────────────────────────────
 
-/// (#1145) The per-captured-frame shed/emit decision, one of four actions. `would_emit` is the
+/// (#1145) The per-captured-frame shed/emit decision, one of five actions. `would_emit` is the
 /// PACING gate's verdict (did this capture cross the wall-clock boundary?); `is_dupe` whether it is
 /// a byte-identical content dupe of the immediately preceding capture; `lag_intervals` how many
 /// whole boundary intervals `now` sits PAST the pending boundary
@@ -202,6 +269,15 @@ pub enum ShedAction {
     /// downstream hold for it already happened), so retiring it costs no new downstream artifact,
     /// sacrifices no unique, AND drains the dupe-driven lag.
     Retire,
+    /// #1145 v2 queue-DEPTH drain: shed the OLDEST (this) frame AND advance the boundary one
+    /// interval, emitting nothing — the sustained-over-rate absorption. Fires when the capture takt
+    /// is genuine over-rate AND this frame's queue RESIDENCE (`now_monotonic - capture_monotonic`)
+    /// has exceeded the depth target, so the delivery-latency sawtooth is drained one frame at a
+    /// time instead of accumulating into a burst. Distinct from [`Retire`](Self::Retire): Retire keys
+    /// on BOUNDARY lag and only sheds a content-dupe; Drain keys on the queue RESIDENCE and, above
+    /// the target, sheds the oldest frame regardless (its downstream tick has already passed, so it
+    /// is a controlled single-frame drop that pre-empts the uncontrolled V4L2 overflow-drop).
+    Drain,
     /// Between boundaries (`!would_emit`): blind-shed, boundary unchanged — the pre-existing pacing
     /// decimation drop.
     BlindShed,
@@ -222,16 +298,41 @@ pub enum ShedAction {
 /// - content-dupe otherwise (NOT enough unique — genuine starvation; OR `lag > `the retire ceiling
 ///   — a sustained deficit building): [`ShedAction::Emit`]`{ copy: true }` — the #1111 late-dupe
 ///   valve, now a starvation floor that holds the emit grid boundary-locked at 60.
+///
+/// (#1145 v2) BEFORE all of the above, a sustained-over-rate QUEUE-DEPTH drain runs — this is the
+/// arm that actually bounds the delivery-latency sawtooth the lag-based v1 could not see.
+/// `queue_depth_intervals` is the frame's monotonic queue residence ([`queue_depth_intervals`]);
+/// `sustained_over_rate` whether the capture takt EMA is genuine over-rate (a healthy 60.00 card is
+/// FALSE here, so this whole block is skipped and the card is byte-identical to v1 — including a
+/// #1131 buffered-drain stall-recovery on one). When over-rate:
+/// - residence `>= `[`QUEUE_DEPTH_SHED_INTERVALS`] -> [`ShedAction::Drain`]: shed the OLDEST (this)
+///   frame regardless of dupeness — a controlled single-frame drop that drains one interval of
+///   latency and pre-empts the uncontrolled V4L2 overflow-drop (the burst that shows as judder).
+/// - a DETECTED content-dupe at residence `>= `[`QUEUE_DEPTH_DUPE_SHED_INTERVALS`] ->
+///   [`ShedAction::Drain`]: drains one interval EARLIER, always content-safe (a byte-identical
+///   re-sample carries no distinct painted frame).
 pub fn dupe_shed_action(
     would_emit: bool,
     is_dupe: bool,
     already_deferred_this_boundary: bool,
     lag_intervals: u64,
     enough_unique_to_hold_target: bool,
+    queue_depth_intervals: u64,
+    sustained_over_rate: bool,
 ) -> ShedAction {
     if !would_emit {
         return ShedAction::BlindShed;
     }
+    // (#1145 v2) [red] the sustained-over-rate queue-DEPTH drain is NOT YET wired: the over-rate
+    // sawtooth stays unbounded, so `over_rate_queue_depth_drain_bounds_the_sawtooth_1145` FAILS.
+    // GREEN replaces this stub with the real gate. The new inputs are consumed (and the new
+    // ShedAction::Drain variant constructed) so the module still compiles cleanly at RED.
+    let _red_drain_not_yet_wired = ShedAction::Drain;
+    let _ = (
+        queue_depth_intervals,
+        sustained_over_rate,
+        _red_drain_not_yet_wired,
+    );
     if !is_dupe {
         return ShedAction::Emit { copy: false };
     }
@@ -266,6 +367,14 @@ pub struct DecimationGate {
     /// [`UNIQUE_RATE_WINDOW_NS`]. Its length is the measured unique RATE — the robust "enough
     /// distinct content to hold 60 fps" signal that gates retirement vs the starvation copy valve.
     unique_capture_times: VecDeque<u64>,
+    /// (#1145 v2) The MONOTONIC capture instant of the previous frame, to derive the capture
+    /// takt (inter-capture interval) that feeds [`takt_ema_interval_ns`]. `0` = uninitialized.
+    prev_capture_mono_ns: u64,
+    /// (#1145 v2) Integer EMA of the capture takt (inter-capture interval, ns), smoothed with
+    /// [`TAKT_EMA_SHIFT`]. Init-seeded to the first observed interval (no long cold-start). Below
+    /// [`RETIRE_MIN_TAKT_INTERVAL_NS`] means sustained over-rate — the gate that enables the
+    /// queue-depth drain (a healthy 60.00 card reads above it and never drains). `0` = not yet seen.
+    takt_ema_interval_ns: u64,
 }
 
 impl DecimationGate {
@@ -322,6 +431,36 @@ impl DecimationGate {
         }
     }
 
+    /// (#1145 v2) Fold this frame's MONOTONIC capture instant into the capture-takt EMA (the
+    /// inter-capture interval smoothed with [`TAKT_EMA_SHIFT`]). Init-seeded to the first observed
+    /// interval so there is no long cold-start. `capture_mono_ns == 0` (the FrameInfo "no real
+    /// measurement" sentinel) is skipped — it carries no interval; a non-advancing / backward
+    /// monotonic stamp is likewise ignored (a genuine capture clock only moves forward).
+    fn note_capture_takt(&mut self, capture_mono_ns: u64) {
+        if capture_mono_ns == 0 {
+            return;
+        }
+        if self.prev_capture_mono_ns != 0 && capture_mono_ns > self.prev_capture_mono_ns {
+            let interval = capture_mono_ns - self.prev_capture_mono_ns;
+            self.takt_ema_interval_ns = if self.takt_ema_interval_ns == 0 {
+                interval // seed
+            } else {
+                let e = self.takt_ema_interval_ns as i128;
+                (e + ((interval as i128 - e) >> TAKT_EMA_SHIFT)) as u64
+            };
+        }
+        self.prev_capture_mono_ns = capture_mono_ns;
+    }
+
+    /// (#1145 v2) Is the capture takt genuine SUSTAINED over-rate — the gate that enables the
+    /// queue-depth drain? True iff the EMA capture interval is below [`RETIRE_MIN_TAKT_INTERVAL_NS`]
+    /// (`1e9 / 60.3`). A healthy 60.00 card reads ~16.667 ms (ABOVE → false → the depth-drain is off
+    /// and the card is byte-identical to v1, including a #1131 buffered-drain stall-recovery); a
+    /// 61.x card reads ~16.3 ms (below → true → drain engages). `0` (not yet seen) → false.
+    fn sustained_over_rate(&self) -> bool {
+        self.takt_ema_interval_ns != 0 && self.takt_ema_interval_ns < RETIRE_MIN_TAKT_INTERVAL_NS
+    }
+
     /// Feed ONE captured frame (`now_ns` wall-clock capture instant, `content_hash` from
     /// [`dupe_content_hash`], `queue_had_frame` from
     /// [`crate::capture_stall::frame_from_nonempty_queue`] — was this frame already buffered in the
@@ -329,16 +468,30 @@ impl DecimationGate {
     /// decimation entirely (mirrors [`crate::genlock_pacing::genlock_emit_gate`]'s own guard) —
     /// always emits, no hashing/state kept. Returns whether THIS captured frame should be
     /// emitted.
+    ///
+    /// (#1145 v2) `now_mono_ns` (`monotonic_clock_ns()`) and `capture_mono_ns`
+    /// (`FrameInfo::capture_monotonic_100ns * 100`, `0` = no measurement) are the MONOTONIC clocks
+    /// the queue-depth drain needs: their difference is this frame's queue residence
+    /// ([`queue_depth_intervals`]), and consecutive `capture_mono_ns` values feed the capture-takt
+    /// EMA ([`note_capture_takt`](Self::note_capture_takt)). Both are monotonic (a duration + an
+    /// interval), so they are immune to the DanteSync realtime steps `now_ns` is gridded to. Pass `0`
+    /// for both to disable the v2 depth-drain (e.g. a test exercising only the pre-v2 arms).
     pub fn poll(
         &mut self,
         now_ns: u64,
         interval_ns: u64,
         content_hash: u64,
         queue_had_frame: bool,
+        now_mono_ns: u64,
+        capture_mono_ns: u64,
     ) -> bool {
         if interval_ns == 0 {
             return true;
         }
+        // (#1145 v2) fold the capture takt + measure this frame's monotonic queue residence.
+        self.note_capture_takt(capture_mono_ns);
+        let sustained_over_rate = self.sustained_over_rate();
+        let queue_depth = queue_depth_intervals(now_mono_ns, capture_mono_ns, interval_ns);
         // (#1131) `queue_had_frame` — did THIS captured frame come from a NON-EMPTY V4L2 queue (the
         // driver already had it buffered, per `capture_stall::frame_from_nonempty_queue`)? A buffered
         // frame PROVES a real captured frame exists to fill the next un-emitted boundary, so the gate
@@ -395,6 +548,8 @@ impl DecimationGate {
             self.deferred_this_boundary,
             lag_intervals,
             enough_unique,
+            queue_depth,
+            sustained_over_rate,
         ) {
             ShedAction::BlindShed => {
                 // The ORIGINAL blind pacing drop (between boundaries) -- boundary unchanged
@@ -419,6 +574,17 @@ impl DecimationGate {
                 self.shed_log.record_retired();
                 false
             }
+            ShedAction::Drain => {
+                // (#1145 v2) queue-depth drain: shed the OLDEST (this) frame AND advance the
+                // boundary one interval, emitting nothing — the sustained-over-rate absorption. The
+                // next-oldest buffered frame re-evaluates against the advanced boundary, so the
+                // over-rate is drained one frame per over-rate frame (continuous), holding the queue
+                // residence at the target instead of accumulating into a V4L2-overflow burst.
+                self.next_boundary_ns = candidate_next;
+                self.deferred_this_boundary = false;
+                self.shed_log.record_drained();
+                false
+            }
             ShedAction::Emit { copy } => {
                 self.next_boundary_ns = candidate_next;
                 self.deferred_this_boundary = false;
@@ -435,9 +601,9 @@ impl DecimationGate {
         }
     }
 
-    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired)` counters for the
-    /// periodic INFO log — see [`DupeShedLog::take`].
-    pub fn take_shed_counts(&mut self) -> (u64, u64, u64, u64) {
+    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired, drained)` counters for
+    /// the periodic INFO log — see [`DupeShedLog::take`].
+    pub fn take_shed_counts(&mut self) -> (u64, u64, u64, u64, u64) {
         self.shed_log.take()
     }
 }
@@ -455,6 +621,7 @@ pub struct DupeShedLog {
     blind_shed: u64,
     dupe_emitted: u64,
     retired: u64,
+    drained: u64,
 }
 
 impl DupeShedLog {
@@ -486,18 +653,28 @@ impl DupeShedLog {
         self.retired = self.retired.saturating_add(1);
     }
 
-    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired)` counts and RESET.
-    pub fn take(&mut self) -> (u64, u64, u64, u64) {
+    /// (#1145 v2) Record ONE frame SHED by the queue-depth drain (shed the oldest while advancing the
+    /// boundary, under sustained over-rate) — the mechanism that absorbs the over-rate takt
+    /// CONTINUOUSLY, keeping the delivery-latency sawtooth flat. See [`DecimationGate::poll`].
+    pub fn record_drained(&mut self) {
+        self.drained = self.drained.saturating_add(1);
+    }
+
+    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired, drained)` counts and
+    /// RESET.
+    pub fn take(&mut self) -> (u64, u64, u64, u64, u64) {
         let out = (
             self.dupe_shed,
             self.blind_shed,
             self.dupe_emitted,
             self.retired,
+            self.drained,
         );
         self.dupe_shed = 0;
         self.blind_shed = 0;
         self.dupe_emitted = 0;
         self.retired = 0;
+        self.drained = 0;
         out
     }
 }
@@ -511,12 +688,14 @@ pub fn dupe_shed_summary(
     blind_shed: u64,
     dupe_emitted: u64,
     retired: u64,
+    drained: u64,
     window_secs: u64,
 ) -> String {
     format!(
         "(#889) dupe-preferring decimation: {dupe_shed} dupe-victim shed / {blind_shed} \
          blind-pacing shed / {dupe_emitted} late-dupe copies emitted (#1111 grid-lock valve) / \
-         {retired} boundaries retired (#1145 over-rate absorption) over the last ~{window_secs}s"
+         {retired} boundaries retired (#1145 over-rate absorption) / {drained} depth-drained \
+         (#1145 v2 over-rate absorption) over the last ~{window_secs}s"
     )
 }
 
@@ -593,11 +772,11 @@ mod tests {
     fn between_boundaries_blind_sheds_regardless_of_dupe() {
         // would_emit == false: lag/enough are irrelevant between boundaries -> BlindShed.
         assert_eq!(
-            dupe_shed_action(false, false, false, 0, true),
+            dupe_shed_action(false, false, false, 0, true, 0, false),
             ShedAction::BlindShed
         );
         assert_eq!(
-            dupe_shed_action(false, true, false, 0, false),
+            dupe_shed_action(false, true, false, 0, false, 0, false),
             ShedAction::BlindShed
         );
     }
@@ -608,11 +787,11 @@ mod tests {
         // capture still lands inside the same interval, so the deferral is lag-neutral. Independent
         // of the unique-rate signal (deferral neither emits nor advances).
         assert_eq!(
-            dupe_shed_action(true, true, false, 0, true),
+            dupe_shed_action(true, true, false, 0, true, 0, false),
             ShedAction::Defer
         );
         assert_eq!(
-            dupe_shed_action(true, true, false, 0, false),
+            dupe_shed_action(true, true, false, 0, false, 0, false),
             ShedAction::Defer
         );
     }
@@ -622,7 +801,7 @@ mod tests {
         // A SECOND consecutive dupe for the SAME boundary (lag == 0, already deferred once) emits as
         // a copy — bounded to one deferral (validated dupes are isolated pairs, never triples).
         assert_eq!(
-            dupe_shed_action(true, true, true, 0, true),
+            dupe_shed_action(true, true, true, 0, true, 0, false),
             ShedAction::Emit { copy: true }
         );
     }
@@ -635,7 +814,7 @@ mod tests {
         // (the strih 15fps-judder), retirement drains the lag at no downstream cost.
         for lag in 1..=RETIRE_MAX_LAG_INTERVALS {
             assert_eq!(
-                dupe_shed_action(true, true, false, lag, true),
+                dupe_shed_action(true, true, false, lag, true, 0, false),
                 ShedAction::Retire,
                 "lag={lag}"
             );
@@ -651,7 +830,7 @@ mod tests {
         // duplication-masked pulldown detector reads.
         for lag in 1..=(RETIRE_MAX_LAG_INTERVALS + 3) {
             assert_eq!(
-                dupe_shed_action(true, true, false, lag, false),
+                dupe_shed_action(true, true, false, lag, false, 0, false),
                 ShedAction::Emit { copy: true },
                 "lag={lag}"
             );
@@ -664,11 +843,19 @@ mod tests {
         // fires (the panic floor) rather than retiring further, so the lag can never creep toward
         // the #707 resync bound.
         assert_eq!(
-            dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS, true),
+            dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS, true, 0, false),
             ShedAction::Retire
         );
         assert_eq!(
-            dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS + 1, true),
+            dupe_shed_action(
+                true,
+                true,
+                false,
+                RETIRE_MAX_LAG_INTERVALS + 1,
+                true,
+                0,
+                false
+            ),
             ShedAction::Emit { copy: true }
         );
     }
@@ -684,7 +871,7 @@ mod tests {
             (false, 9, true),
         ] {
             assert_eq!(
-                dupe_shed_action(true, false, deferred, lag, enough),
+                dupe_shed_action(true, false, deferred, lag, enough, 0, false),
                 ShedAction::Emit { copy: false },
                 "deferred={deferred} lag={lag} enough={enough}"
             );
@@ -703,8 +890,10 @@ mod tests {
         log.record_retired();
         log.record_retired();
         log.record_retired();
-        assert_eq!(log.take(), (2, 1, 1, 3));
-        assert_eq!(log.take(), (0, 0, 0, 0), "take() must reset");
+        log.record_drained();
+        log.record_drained();
+        assert_eq!(log.take(), (2, 1, 1, 3, 2));
+        assert_eq!(log.take(), (0, 0, 0, 0, 0), "take() must reset");
     }
 
     #[test]
@@ -712,14 +901,22 @@ mod tests {
         // (#1145 review 🔵) Distinctive multi-digit counts that do NOT appear as substrings of the
         // ticket tags (889/1111/1145) or each other, so each assertion actually pins its own count
         // rather than being satisfied by a digit from a ticket number.
-        let s = dupe_shed_summary(41, 23, 67, 94, 36);
+        let s = dupe_shed_summary(41, 23, 67, 94, 58, 36);
         assert!(s.contains("#889"));
         assert!(s.contains("#1111"), "names the late-dupe copy valve");
-        assert!(s.contains("#1145"), "names the retirement mechanism");
+        assert!(
+            s.contains("#1145"),
+            "names the retirement + depth-drain mechanisms"
+        );
         assert!(s.contains("41"), "names the dupe-victim shed count");
         assert!(s.contains("23"), "names the blind-pacing shed count");
         assert!(s.contains("67"), "names the emitted-copy count");
         assert!(s.contains("94"), "names the retired-boundaries count");
+        assert!(s.contains("58"), "names the depth-drained count (#1145 v2)");
+        assert!(
+            s.contains("depth-drained"),
+            "names the v2 depth-drain mechanism"
+        );
         assert!(s.contains("~36s"), "names the window seconds");
     }
 
@@ -783,7 +980,7 @@ mod tests {
         let mut emitted_ids: Vec<u64> = Vec::new();
         let mut emitted_a_dupe = false;
         for (now_ns, content_id, is_dupe) in &captures {
-            if gate.poll(*now_ns, emit_interval_ns, *content_id, false) {
+            if gate.poll(*now_ns, emit_interval_ns, *content_id, false, 0, 0) {
                 emitted_ids.push(*content_id);
                 if *is_dupe {
                     emitted_a_dupe = true;
@@ -850,7 +1047,7 @@ mod tests {
         for (now_ns, content_id, _is_dupe) in &captures {
             // EXACT src/main.rs wiring: snapshot the boundary, poll, then measure the #707 skip.
             let prev_boundary_ns = gate.next_boundary_ns();
-            let emit = gate.poll(*now_ns, emit_interval_ns, *content_id, false);
+            let emit = gate.poll(*now_ns, emit_interval_ns, *content_id, false, 0, 0);
             let next_boundary_ns = gate.next_boundary_ns();
             total_skips += crate::genlock_pacing::boundary_skip_count(
                 prev_boundary_ns,
@@ -861,7 +1058,7 @@ mod tests {
                 emitted.push((*now_ns, *content_id));
             }
         }
-        let (_dupe_shed, _blind_shed, _dupe_emitted, retired) = gate.take_shed_counts();
+        let (_dupe_shed, _blind_shed, _dupe_emitted, retired, _drained) = gate.take_shed_counts();
         let emitted_ids: Vec<u64> = emitted.iter().map(|(_, id)| *id).collect();
 
         // (1) LOAD-BEARING (#1111): a 62 fps over-rate + frequent dupes must NOT trip the #707 resync
@@ -936,7 +1133,7 @@ mod tests {
         for (now_ns, content_id, is_dupe) in &captures {
             assert!(!is_dupe, "exact-60 fixture must be dupe-free");
             let prev = gate.next_boundary_ns();
-            if gate.poll(*now_ns, emit_interval_ns, *content_id, false) {
+            if gate.poll(*now_ns, emit_interval_ns, *content_id, false, 0, 0) {
                 emits += 1;
             }
             total_skips += crate::genlock_pacing::boundary_skip_count(
@@ -945,7 +1142,7 @@ mod tests {
                 emit_interval_ns,
             );
         }
-        let (dupe_shed, _blind_shed, _dupe_emitted, retired) = gate.take_shed_counts();
+        let (dupe_shed, _blind_shed, _dupe_emitted, retired, _drained) = gate.take_shed_counts();
 
         assert_eq!(total_skips, 0, "exact-60 input never skips a boundary");
         assert_eq!(
@@ -977,7 +1174,7 @@ mod tests {
 
         // Warm the gate to a latched boundary with one on-time capture, then read where it sits.
         let start = 1_000_000_000u64;
-        let _ = gate.poll(start, emit_interval_ns, 1, false);
+        let _ = gate.poll(start, emit_interval_ns, 1, false, 0, 0);
         let boundary = gate.next_boundary_ns();
         assert!(boundary > 0, "gate latched a boundary");
 
@@ -992,7 +1189,7 @@ mod tests {
             let now = resume + k;
             let content_id = 100 + k; // all unique — a real captured burst, not dupes
             let prev = gate.next_boundary_ns();
-            if gate.poll(now, emit_interval_ns, content_id, true) {
+            if gate.poll(now, emit_interval_ns, content_id, true, 0, 0) {
                 emitted += 1;
             }
             total_skips += crate::genlock_pacing::boundary_skip_count(
@@ -1087,11 +1284,12 @@ mod tests {
             let mut gate = DecimationGate::new();
             let mut emitted: Vec<(u64, u64)> = Vec::new();
             for (now_ns, content_id) in &captures {
-                if gate.poll(*now_ns, emit_interval_ns, *content_id, false) {
+                if gate.poll(*now_ns, emit_interval_ns, *content_id, false, 0, 0) {
                     emitted.push((*now_ns, *content_id));
                 }
             }
-            let (_dupe_shed, _blind_shed, _dupe_emitted, retired) = gate.take_shed_counts();
+            let (_dupe_shed, _blind_shed, _dupe_emitted, retired, _drained) =
+                gate.take_shed_counts();
             total_retired += retired;
             let post: Vec<u64> = emitted
                 .iter()
@@ -1126,7 +1324,7 @@ mod tests {
         let mut total_skips = 0u64;
         for (now_ns, content_id) in &captures {
             let prev = gate.next_boundary_ns();
-            if gate.poll(*now_ns, emit_interval_ns, *content_id, false) {
+            if gate.poll(*now_ns, emit_interval_ns, *content_id, false, 0, 0) {
                 emitted += 1;
             }
             total_skips += crate::genlock_pacing::boundary_skip_count(
@@ -1173,11 +1371,11 @@ mod tests {
                 id
             };
             prev_id = content_id;
-            if gate.poll(now_ns, emit_interval_ns, content_id, false) {
+            if gate.poll(now_ns, emit_interval_ns, content_id, false, 0, 0) {
                 emitted += 1;
             }
         }
-        let (_dupe_shed, _blind_shed, dupe_emitted, retired) = gate.take_shed_counts();
+        let (_dupe_shed, _blind_shed, dupe_emitted, retired, _drained) = gate.take_shed_counts();
         assert_eq!(
             retired, 0,
             "a starved (sub-60-unique) source must NEVER be retired — that would drop the emit rate \
@@ -1213,7 +1411,7 @@ mod tests {
         // drive the healthy warm-up so retirement is fully engaged before the freeze.
         let mut last_now = 0u64;
         for (now_ns, content_id) in &captures {
-            let _ = gate.poll(*now_ns, emit_interval_ns, *content_id, false);
+            let _ = gate.poll(*now_ns, emit_interval_ns, *content_id, false, 0, 0);
             last_now = *now_ns;
         }
         let _ = gate.take_shed_counts(); // reset counters; measure only the frozen span
@@ -1224,11 +1422,11 @@ mod tests {
         let mut frozen_emitted = 0usize;
         for i in 1..=frozen_captures {
             let now_ns = last_now + i * cap_interval_ns;
-            if gate.poll(now_ns, emit_interval_ns, frozen_hash, false) {
+            if gate.poll(now_ns, emit_interval_ns, frozen_hash, false, 0, 0) {
                 frozen_emitted += 1;
             }
         }
-        let (_dupe_shed, _blind_shed, dupe_emitted, _retired) = gate.take_shed_counts();
+        let (_dupe_shed, _blind_shed, dupe_emitted, _retired, _drained) = gate.take_shed_counts();
         let frozen_emit_rate = frozen_emitted as f64 / 5.0;
         assert!(
             frozen_emit_rate >= 55.0,
@@ -1239,6 +1437,226 @@ mod tests {
         assert!(
             dupe_emitted > 0,
             "the frozen span must fall back to the late-dupe copy valve; dupe_emitted {dupe_emitted}"
+        );
+    }
+
+    // ── (#1145 v2) queue-depth drain ───────────────────────────────────────
+
+    #[test]
+    fn queue_depth_intervals_guards_and_math_1145() {
+        let i = 1_000_000_000u64 / 60; // ~16.667 ms
+                                       // interval 0 (genlock off) -> 0
+        assert_eq!(queue_depth_intervals(10 * i, 5 * i, 0), 0);
+        // capture_mono 0 (no measurement sentinel) -> 0
+        assert_eq!(queue_depth_intervals(10 * i, 0, i), 0);
+        // now <= capture (non-advancing / bogus monotonic) -> 0
+        assert_eq!(queue_depth_intervals(5 * i, 5 * i, i), 0);
+        assert_eq!(queue_depth_intervals(4 * i, 5 * i, i), 0);
+        // 2.5 intervals of residence -> 2 (whole intervals)
+        assert_eq!(queue_depth_intervals(1000 + 5 * i / 2, 1000, i), 2);
+        // a garbage-huge residence is clamped to the sane max (never a runaway shed)
+        assert_eq!(
+            queue_depth_intervals(1_000_000 * i, 0 + 1, i),
+            QUEUE_DEPTH_SANE_MAX_INTERVALS
+        );
+    }
+
+    #[test]
+    fn depth_drain_is_a_distinct_shed_action_1145() {
+        assert_ne!(ShedAction::Drain, ShedAction::Retire);
+        assert_ne!(ShedAction::Drain, ShedAction::BlindShed);
+        assert_ne!(ShedAction::Drain, ShedAction::Emit { copy: false });
+    }
+
+    #[test]
+    fn depth_drain_only_fires_under_sustained_over_rate_1145() {
+        // NOT over-rate: even a deep queue never drains — a healthy 60.00 card (and a #1131
+        // buffered-drain stall-recovery on one) is byte-identical to v1. A unique at depth 3 emits.
+        assert_eq!(
+            dupe_shed_action(true, false, false, 0, true, 3, false),
+            ShedAction::Emit { copy: false },
+            "not over-rate -> no depth drain, even at depth 3"
+        );
+        // OVER-RATE + residence >= QUEUE_DEPTH_SHED_INTERVALS: shed the OLDEST (this) frame
+        // regardless of dupeness — the sawtooth-bounding drain (a controlled single-frame drop).
+        assert_eq!(
+            dupe_shed_action(
+                true,
+                false,
+                false,
+                0,
+                true,
+                QUEUE_DEPTH_SHED_INTERVALS,
+                true
+            ),
+            ShedAction::Drain,
+            "over-rate + depth>=target -> drain the oldest (even a non-dupe)"
+        );
+        // OVER-RATE + a DETECTED dupe at the lower dupe-shed threshold: drain one interval earlier
+        // (content-safe — the neighbour carries the same painted frame).
+        assert_eq!(
+            dupe_shed_action(
+                true,
+                true,
+                false,
+                0,
+                true,
+                QUEUE_DEPTH_DUPE_SHED_INTERVALS,
+                true
+            ),
+            ShedAction::Drain,
+            "over-rate + detected dupe at the dupe-shed depth -> drain"
+        );
+        // OVER-RATE but residence below BOTH thresholds -> falls through to the pre-v2 arms
+        // (a unique emits; a fresh on-time dupe defers).
+        assert_eq!(
+            dupe_shed_action(true, false, false, 0, true, 0, true),
+            ShedAction::Emit { copy: false }
+        );
+        assert_eq!(
+            dupe_shed_action(true, true, false, 0, true, 0, true),
+            ShedAction::Defer
+        );
+    }
+
+    // ── (#1145 v2) end-to-end: the delivery-latency sawtooth REPRODUCER + the depth-drain fix ──
+
+    struct QueueSim {
+        /// Post-warmup (>8 s) maximum queue RESIDENCE any processed frame reached, in whole emit
+        /// intervals — the sawtooth's height. v1 lets this grow toward the V4L2 overflow; v2 bounds it.
+        max_residence_post: u64,
+        /// Post-warmup V4L2 overflow-drops (queue was full when a capture arrived) — the burst that
+        /// shows as judder. v2 pre-empts these with a controlled continuous drain.
+        overflow_steady: u64,
+        emits: u64,
+        drained: u64,
+    }
+
+    /// Drive the REAL [`DecimationGate::poll`] with a capture->process queue whose consumer rate
+    /// depends on the shed decision (an EMITted frame costs ~one interval — the NDI send; a SHED
+    /// frame is cheap), so the loop's max emit rate sits BETWEEN 60.00 and the over-rate. A healthy
+    /// 60.00 card keeps up (and recovers from a transient stall); an over-rate card cannot recover,
+    /// so its queue residence grows into the sawtooth this ticket fixes. Dupes are NOT byte-detected
+    /// (every capture gets a distinct hash — the realistic ShadowCast-noise worst case where the
+    /// depth-drain, not the dupe-shed, must carry the absorption). wall == mono in the sim.
+    fn run_queue_sim(capture_fps: f64, stall_at_frame: u64, secs: f64) -> QueueSim {
+        let cap_int = (1e9 / capture_fps) as u64;
+        let src_int = 1_000_000_000u64 / 60;
+        let emit_int = 1_000_000_000u64 / 60;
+        let send_cost = emit_int * 991 / 1000; // ~16.5 ms -> max emit ~60.5/s (between 60.0 and 61.x)
+        let shed_cost = 1_000_000u64; // 1 ms (hash only)
+        let stall_extra = emit_int * 6; // one deterministic CPU hiccup
+        const MAXQ: usize = 4; // V4L2 buffers (capture.rs: Stream::with_buffers(.., 4))
+        const WARMUP_NS: u64 = 8_000_000_000; // ignore the first 8 s (takt EMA warmup + stall settle)
+        let n = (capture_fps * secs) as u64;
+
+        let mut gate = DecimationGate::new();
+        let mut queue: VecDeque<(u64, u64)> = VecDeque::new();
+        let mut next_cap = 0u64;
+        let mut wall = 0u64;
+        let (mut max_residence_post, mut overflow_steady, mut emits) = (0u64, 0u64, 0u64);
+
+        loop {
+            // admit all captures that have arrived by the loop's wall clock (drop if the queue is full)
+            while next_cap < n {
+                let cap_ns = next_cap * cap_int;
+                if cap_ns > wall {
+                    break;
+                }
+                let src_id = cap_ns / src_int;
+                if queue.len() >= MAXQ {
+                    if cap_ns > WARMUP_NS {
+                        overflow_steady += 1;
+                    }
+                } else {
+                    queue.push_back((cap_ns, src_id));
+                }
+                next_cap += 1;
+            }
+            if queue.is_empty() {
+                if next_cap >= n {
+                    break;
+                }
+                wall = next_cap * cap_int; // the loop waits for the next capture
+                continue;
+            }
+            let (cap_ns, src_id) = queue.pop_front().unwrap();
+            let now = wall;
+            let queue_had_frame = now.saturating_sub(cap_ns) < cap_int / 2;
+            let residence = now.saturating_sub(cap_ns) / emit_int;
+            if now > WARMUP_NS {
+                max_residence_post = max_residence_post.max(residence);
+            }
+            // a distinct hash per capture -> is_dupe is always false (dupes NOT byte-detected)
+            let content_hash = src_id.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(now);
+            let emit = gate.poll(now, emit_int, content_hash, queue_had_frame, now, cap_ns);
+            let mut cost = shed_cost;
+            if emit {
+                cost = send_cost;
+                if next_cap == stall_at_frame {
+                    cost += stall_extra;
+                }
+                emits += 1;
+            }
+            wall += cost;
+            if next_cap >= n && queue.is_empty() {
+                break;
+            }
+        }
+        let (_d, _b, _e, _r, drained) = gate.take_shed_counts();
+        QueueSim {
+            max_residence_post,
+            overflow_steady,
+            emits,
+            drained,
+        }
+    }
+
+    #[test]
+    fn over_rate_queue_depth_drain_bounds_the_sawtooth_1145() {
+        // The fix: at a sustained over-rate (cam1 ShadowCast ~61.5 fps vs a 60 fps source) the
+        // queue-depth drain absorbs the surplus CONTINUOUSLY, so the delivery-latency sawtooth stays
+        // bounded (residence <= QUEUE_DEPTH_SHED_INTERVALS) and the V4L2 buffer never overflow-drops
+        // in a burst. Without the drain (the lag-based v1) the residence grows toward the 4-deep
+        // overflow and bursts — this assertion is the RED that the drain turns GREEN.
+        let s = run_queue_sim(61.5, 120, 30.0);
+        assert!(
+            s.drained > 0,
+            "the depth drain must engage at a sustained over-rate; drained={}",
+            s.drained
+        );
+        assert!(
+            s.max_residence_post <= QUEUE_DEPTH_SHED_INTERVALS,
+            "over-rate delivery latency must stay bounded at the depth target; \
+             max post-warmup residence {} intervals (target {})",
+            s.max_residence_post,
+            QUEUE_DEPTH_SHED_INTERVALS
+        );
+        assert_eq!(
+            s.overflow_steady, 0,
+            "the continuous drain must pre-empt every V4L2 overflow-drop burst; \
+             steady overflow-drops {}",
+            s.overflow_steady
+        );
+    }
+
+    #[test]
+    fn healthy_60fps_never_depth_drains_even_through_a_stall_1145() {
+        // Constraint (c) + #1131: a healthy 60.00 card is NOT over-rate, so the depth drain NEVER
+        // fires — even when a transient stall pushes its queue residence past the depth target
+        // (a #1131 buffered-drain, which must emit all buffered frames, not shed them). The takt
+        // gate keeps v2 provably inert here, so behaviour is byte-identical to v1.
+        let s = run_queue_sim(60.0, 120, 30.0);
+        assert_eq!(
+            s.drained, 0,
+            "a 60.00 card must NEVER depth-drain (takt gate off); drained={}",
+            s.drained
+        );
+        // and it still emits a full ~60 fps (no frames sacrificed by v2).
+        assert!(
+            s.emits >= (60.0 * 30.0 * 0.98) as u64,
+            "a healthy card must keep emitting ~60 fps; emits={}",
+            s.emits
         );
     }
 }

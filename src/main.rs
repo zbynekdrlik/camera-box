@@ -1100,11 +1100,22 @@ async fn run_capture_loop(
                     } else {
                         false
                     };
+                    // #1145 v2 — the MONOTONIC clocks the queue-depth drain needs: `now_mono` is
+                    // read once here, `capture_mono` is the V4L2 buffer's own CLOCK_MONOTONIC
+                    // capture instant (`FrameInfo::capture_monotonic_100ns`, 100ns units; 0 = no
+                    // real measurement -> the drain self-disables for this frame). Their difference
+                    // is this frame's queue residence, and consecutive capture instants feed the
+                    // capture-takt EMA (both monotonic, immune to the DanteSync realtime steps
+                    // `wall_clock_ns()` grids the emit boundary to).
+                    let now_mono_ns = monotonic_clock_ns();
+                    let capture_mono_ns = (info.capture_monotonic_100ns.max(0) as u64) * 100;
                     let emit = decimation_gate.poll(
                         wall_clock_ns(),
                         out_interval_ns,
                         content_hash,
                         queue_had_frame,
+                        now_mono_ns,
+                        capture_mono_ns,
                     );
                     let next_boundary_ns = decimation_gate.next_boundary_ns();
                     // #707 — a clock discontinuity (DanteSync NTP/PTP step, or a stalled poll)
@@ -1358,7 +1369,7 @@ async fn run_capture_loop(
                             // window (never suppressed on 0/0 — a healthy card legitimately
                             // shows 0/0, which is the self-neutralizing behavior by design, not
                             // the mechanism being off).
-                            let (dupe_shed, blind_shed, dupe_emitted, retired) =
+                            let (dupe_shed, blind_shed, dupe_emitted, retired, drained) =
                                 decimation_gate.take_shed_counts();
                             tracing::info!(
                                 "{}",
@@ -1367,6 +1378,7 @@ async fn run_capture_loop(
                                     blind_shed,
                                     dupe_emitted,
                                     retired,
+                                    drained,
                                     5
                                 )
                             );
