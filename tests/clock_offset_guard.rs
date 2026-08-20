@@ -3801,7 +3801,8 @@ fn client_max_step_threshold_us_from_status_lines_ignores_null_and_absent_1129()
     );
     assert_eq!(out.trim(), "", "all-null -> empty, never a guess: {out:?}");
 
-    let absent_lines = "{\"updated_ts\":1,\"ntp_offset_us\":0}\n{\"updated_ts\":2,\"ntp_offset_us\":5}\n";
+    let absent_lines =
+        "{\"updated_ts\":1,\"ntp_offset_us\":0}\n{\"updated_ts\":2,\"ntp_offset_us\":5}\n";
     let out = run_sourced(
         "client_max_step_threshold_us_from_status_lines \"$L\"",
         &[("L", absent_lines)],

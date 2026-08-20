@@ -471,30 +471,54 @@ grade_http_node() {
     fi
   elif [ -n "$master_chase_status" ]; then
     local orig_bound="$bound" step_source="fallback(${client_step_fallback}us)"
+    # #1129: the client step term fed into BOTH widenings below. Defaults to the 700us fallback; a
+    # LINUX client overrides it from its journal INSIDE client_chase_bound_us/_stability_us (empty
+    # journal -> this fallback), a WINDOWS client overrides it HERE from /status (no journald).
+    local client_step_term="$client_step_fallback"
+    local step_env_src="journal"   # #1129: which source the step envelope came from, for the notes
     client_journal=""  # #1055: assign the function-level local (not a new shadow), so the rescue reuses it
     local parsed_step
     if [ "$kind" = "linux" ]; then
       client_journal="$(read_linux_node_journal "$name" "$arg")"
+    elif [ "$kind" = "win" ]; then
+      # #1129: a Windows client has NO journald, so the #1123 journal step envelope never reached it
+      # (it fell back to the fixed 700us term -> stability stayed 2000us -> a healthy ~3.4ms step
+      # straddle false-UNSTABLE'd the whole E2E, PR #1125 attempt 4). dantesync now publishes the
+      # client's OWN currently-active adaptive step threshold in /status (ntp_step_threshold_us, the
+      # SAME quantity a Linux journal logs as "threshold:NNNus"). Read its window-MAX across the
+      # payloads already sampled (no extra network call) and use it as the client step term for BOTH
+      # the median and the spread widening -- the same step-aware treatment cam2 gets from its
+      # journal. A box not yet serving the field (empty) keeps the 700us fallback, still admitted.
+      local win_step
+      win_step="$(client_max_step_threshold_us_from_status_lines "$samples_raw")"
+      if [ -n "$win_step" ]; then
+        client_step_term="$win_step"
+        step_source="its own /status (${win_step}us)"
+        step_env_src="/status"
+      fi
     fi
     parsed_step="$(client_step_threshold_us_from_journal "$client_journal")"
     if [ -n "$parsed_step" ]; then
       step_source="its own journal (${parsed_step}us)"
     fi
     bound="$(client_chase_bound_us "$master_chase_status" "$bound" "$deadband_margin" \
-      "$client_chase_ceiling" "$client_journal" "$client_step_fallback")"
+      "$client_chase_ceiling" "$client_journal" "$client_step_term")"
     if [ "$bound" != "$orig_bound" ]; then
       deadband_note=" -- bound widened to ${bound}us for the master's own PTP-locked step-chase envelope (${GATE_NTP_MASTER_NAME}'s ntp_deadband_us capped at ${client_chase_ceiling}us + client step threshold via ${step_source} + ${deadband_margin}us margin, #1022/#1041; base bound ${orig_bound}us)"
     fi
     # #1123: the MEDIAN bound above is step-aware, but a client's own bounded step landing mid-window
     # makes the samples straddle the step -> SPREAD ~= its step magnitude, false-UNSTABLE against the
-    # fixed stability. Widen the STABILITY (spread) bound to the client's OWN journal step envelope
-    # (the WINDOW-MAX threshold + margin -- see clock-offset-guard.sh's client_chase_stability_us),
-    # reusing the $client_journal already read above (no extra SSH). A genuinely-scattered client
-    # (spread beyond its own envelope, or no readable journal) still fails on the unchanged floor.
+    # fixed stability. Widen the STABILITY (spread) bound to the client's OWN step envelope (the
+    # WINDOW-MAX threshold + margin -- see clock-offset-guard.sh's client_chase_stability_us). A LINUX
+    # client reads that envelope from the $client_journal already fetched above; a WINDOWS client (no
+    # journald) passes the /status-derived $client_step_term as the step_fallback slot (#1129), so the
+    # empty-journal branch of client_chase_stability_us uses IT instead of the bare 700us default. A
+    # genuinely-scattered client (spread beyond its own envelope, or neither source readable) still
+    # fails on the unchanged floor.
     local orig_stability="$stability"
-    stability="$(client_chase_stability_us "$stability" "$deadband_margin" "$client_journal" "$client_step_fallback")"
+    stability="$(client_chase_stability_us "$stability" "$deadband_margin" "$client_journal" "$client_step_term")"
     if [ "$stability" != "$orig_stability" ]; then
-      deadband_note="${deadband_note} -- stability (spread) bound widened to ${stability}us, step-aware (client's own journal max step threshold + ${deadband_margin}us margin, #1123): a client step straddling the sample window spreads by ~its own step magnitude while every sample stays inside the median bound; base stability ${orig_stability}us"
+      deadband_note="${deadband_note} -- stability (spread) bound widened to ${stability}us, step-aware (client's own ${step_env_src} max step threshold + ${deadband_margin}us margin, #1123/#1129): a client step straddling the sample window spreads by ~its own step magnitude while every sample stays inside the median bound; base stability ${orig_stability}us"
     fi
   fi
   now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time

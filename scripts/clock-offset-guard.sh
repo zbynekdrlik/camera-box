@@ -1489,6 +1489,26 @@ client_max_step_threshold_us_from_journal() {
     | sort -n | tail -1 || true
 }
 
+# client_max_step_threshold_us_from_status_lines TEXT -> the LARGEST numeric "ntp_step_threshold_us"
+# JSON value across ALL lines of TEXT (#1129). TEXT is the newline-joined HTTP `/status` payloads
+# gather_http_samples already collected over the sampling window (one JSON object per line). This is
+# the WINDOWS-client sibling of client_max_step_threshold_us_from_journal: a Windows client has no
+# journald, so grade_http_node cannot read its "threshold:NNNus" log lines -- but dantesync (#1129)
+# exposes the client's OWN currently-active adaptive step threshold in `/status` as
+# `ntp_step_threshold_us` (the SAME quantity, `calculate_ntp_adaptive_threshold()`, the journal logs
+# as "threshold:NNNus"). Taking the window-MAX across the sampled payloads mirrors the journal path's
+# window-wide envelope exactly, so a Windows client gets the same step-aware median+spread widening
+# cam2 gets from its journal. A `null` or ABSENT field on any line contributes nothing (the regex
+# matches only a digit run, never "null"); all-null / all-absent / empty input -> "" (never a guess
+# -> the caller's documented 700us fallback, always admitted in the gate note). `|| true` survives a
+# no-match under set -e.
+client_max_step_threshold_us_from_status_lines() {
+  printf '%s\n' "$1" \
+    | grep -oE '"ntp_step_threshold_us"[[:space:]]*:[[:space:]]*[0-9]+' \
+    | sed -n 's/.*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    | sort -n | tail -1 || true
+}
+
 # client_chase_stability_us STABILITY_US MARGIN_US CLIENT_JOURNAL [STEP_FALLBACK_US] -> the spread
 # bound to grade a CLIENT node's SPREAD against (#1123): max(STABILITY_US, max_journal_threshold +
 # MARGIN_US), where max_journal_threshold is client_max_step_threshold_us_from_journal(CLIENT_JOURNAL),
