@@ -34,7 +34,9 @@ qr_align_run() {
   local host="$1" password="${2:-}"
   local here sources rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"        # scripts/ dir (qr_align_pins.py)
-  sources="${QR_ALIGN_SOURCES:-$(camera_align_ndi_sources_csv)}"
+  # Default to the align set MINUS any acked-offline box (#1003 review 🟡): a temporarily wedged/
+  # acked on-air camera must not abort the whole run just because it cannot decode a painter QR.
+  sources="${QR_ALIGN_SOURCES:-$(camera_align_ndi_sources_excluding_csv "${PREFLIGHT_EXCLUDED_CAMS:-}")}"
 
   if [ -z "$sources" ]; then
     echo "::error::[qr-align] no align sources — CAMERA_ALIGN_SET is empty and QR_ALIGN_SOURCES unset" >&2

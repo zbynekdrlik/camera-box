@@ -8,12 +8,13 @@ deliberate WRITER counterpart: it PUSHES that agreed baseline onto a live box ov
 using `genlock_latency_ms_src` (the authoritative pin key), so a PR-recorded re-tune actually takes
 effect on the rig.
 
-The motivating case (#1003 promotion, 2026-08-20): the DELIVERY-equalized aligned strih pins
-(cam1=90/cam2=160/cam3=184) + coherently-lowered stream hold (NDI 2ME PGM = 791) were validated in
-the opt-in MEASUREMENT_EQ window only (MEQ run 66065064, delivery spread 5.78ms PASS); production
-stayed the un-aligned shallow 3/6/20 (the owner saw cameras un-synced on strih). Promoting them =
-recording the new agreement in the baseline (done in the same PR) AND applying it to the boxes with
-this tool.
+The uses (#1003 owner rework, 2026-08-20): the deep DELIVERY-equalized promotion (90/160/184 + 791)
+was REJECTED + REVERTED -- deep absolute pins add ~180 ms of needless chain latency. Production
+alignment is now the per-run FLOOR-3 auto-align (scripts/qr_align_pins.py), which reuses this
+module's `apply_pins` directly to push its computed floor-3 set. This tool's own CLI stays useful
+in two roles: (1) the manual RUNBOOK path to push a computed set with `--pins '{...}'`, and (2) the
+baseline path (`--box`) to push the committed drift-guard REFERENCE. Both go through the same
+DRY-RUN-default, read-back-verified, fail-loud writer.
 
 Design guardrails (mirrors the latency_pins_* family):
   * DRY-RUN BY DEFAULT -- prints the plan (live -> want per source) and writes NOTHING. `--execute`
@@ -105,6 +106,13 @@ def pins_from_arg(pins_arg: str) -> dict:
             "[apply-latency-pins] --pins must be a non-empty JSON object {source: ms}")
     pins = {}
     for src, ms in obj.items():
+        if src.startswith("_"):
+            # Refuse the imag floor sentinel (_all_ndi_inputs_ms) and any underscore/comment key --
+            # this writer only ever pushes NAMED strih inputs; an imag floor pin is never applied
+            # here (imag-min-latency-3ms-always is imag_latency_enforce.py's domain), #1003 review.
+            raise SystemExit(
+                f"[apply-latency-pins] --pins key {src!r} is a sentinel/comment key -- this tool "
+                "only pushes named source pins, never the imag floor sentinel.")
         if isinstance(ms, bool) or not isinstance(ms, (int, float)):
             raise SystemExit(
                 f"[apply-latency-pins] --pins value for {src!r} must be a number, got {ms!r}")

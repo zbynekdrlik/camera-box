@@ -3469,7 +3469,13 @@ fi
 # StartRecord, rather than after a ~25-minute recording. Owner directive (#893): "nech to je tiez
 # v gate ze minimalne jedna aktivna kamera musi mat latenciu 3ms, nech sa tu dalsie tyzdne
 # nekrutime vo veciach ktore uz si vedel".
-if [ "${ALL_CAMBOX:-0}" = "1" ] && ! measurement_eq_enabled; then
+# #1003 review 🔴: SKIP this pre-align floor CHECK when the [4i/8align] floor-3 auto-align OWNS the
+# pins (QR_ALIGN=1, the default) — the two are MUTUALLY EXCLUSIVE floor-enforcers. [4i/8align]
+# ENFORCES "slowest on-air camera at 3ms" (a stronger, verified re-measure) over the whole align set
+# incl. cam4, so this earlier read-only check is redundant AND would otherwise abort a run that
+# [4i/8align] would have rescued (or, cross-run, a prior align that legitimately floored cam4 leaves
+# no ACTIVE-set camera at 3). Same exclusion shape as the measurement_eq guard beside it.
+if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "${QR_ALIGN:-1}" != "1" ] && ! measurement_eq_enabled; then
   echo "[4h/8] #893 phase-sync active-floor gate — at least one ACTIVE strih camera must sit at the 3ms floor"
   python3 "$HERE/phase_sync_active_floor_check.py" --host "$STRIH" --password "$STRIH_PW" \
     --active-set "$CAMERA_ACTIVE_SET" \

@@ -49,10 +49,11 @@ domain (`imag-min-latency-3ms-always`), never promoted. CLI mirrors the verify t
 `apply_latency_pins.py --box strih --host 10.77.9.202 [--execute]` (DRY-RUN without `--execute`).
 This is the sanctioned "operator/gate legitimately re-tunes → record in a PR → apply to the rig"
 loop; the verify-at-start still never writes. **`--pins '{"NDI cam1":3,...}'` (JSON inline or
-`@file`) pushes a COMPUTED set instead of the committed baseline** — the entry point the #1003
-floor-3 aligner (`scripts/qr_align_pins.py`) uses to apply its per-run plan through the SAME
-read-back-verified, fail-loud writer (`apply_pins`). The aligner is only ever handed the strih
-align sources, so `--pins` never carries an imag/stream-hold key.
+`@file`) pushes a COMPUTED set instead of the committed baseline** — the manual RUNBOOK path (a
+supervisor pushing a specific set by hand). The #1003 floor-3 aligner (`scripts/qr_align_pins.py`)
+does NOT shell out to `--pins`; it imports and calls `apply_pins()` DIRECTLY for its per-run plan —
+the SAME read-back-verified, fail-loud writer. Either way the write is strih-only: `--pins` refuses
+an underscore/imag-floor sentinel key, and the aligner is only ever handed the strih align sources.
 
 ## Fail CLOSED on enumeration, honest-None on a per-input read (two different rules)
 

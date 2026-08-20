@@ -84,15 +84,15 @@ class TestPickPainterTick:
 # ---------------------------------------------------------------------------
 class TestFrameIdSpread:
     def test_spread_is_max_minus_min_over_decoded(self):
-        rnd = {"NDI cam1": (100, 0), "NDI cam2": (102, 0), "NDI cam3": (103, 0)}
+        rnd = {"NDI cam1": (100, 0, 0), "NDI cam2": (102, 0, 0), "NDI cam3": (103, 0, 0)}
         assert qa.frame_id_spread(rnd) == 3
 
     def test_zero_when_all_equal(self):
-        rnd = {"NDI cam1": (50, 0), "NDI cam2": (50, 0)}
+        rnd = {"NDI cam1": (50, 0, 0), "NDI cam2": (50, 0, 0)}
         assert qa.frame_id_spread(rnd) == 0
 
     def test_none_when_fewer_than_two_decoded(self):
-        assert qa.frame_id_spread({"NDI cam1": (5, 0), "NDI cam2": None}) is None
+        assert qa.frame_id_spread({"NDI cam1": (5, 0, 0), "NDI cam2": None}) is None
         assert qa.frame_id_spread({}) is None
 
 
@@ -104,9 +104,9 @@ class TestRoundDeltas:
         # cam1 shows the OLDEST frame (smallest gen_ts) but has the smallest pin -> it is the
         # max-transport (slowest) camera and must anchor to delta 0.
         rnd = {
-            "NDI cam1": (100, 0),
-            "NDI cam2": (102, 2 * ID_NS),
-            "NDI cam3": (103, 3 * ID_NS),
+            "NDI cam1": (100, 0, 0),
+            "NDI cam2": (102, 2 * ID_NS, 0),
+            "NDI cam3": (103, 3 * ID_NS, 0),
         }
         pins = {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}
         d = qa.round_deltas(rnd, pins)
@@ -116,11 +116,24 @@ class TestRoundDeltas:
         assert d["NDI cam3"] == pytest.approx(42.0, abs=0.01)
 
     def test_none_when_a_source_is_undecoded(self):
-        rnd = {"NDI cam1": (100, 0), "NDI cam2": None}
+        rnd = {"NDI cam1": (100, 0, 0), "NDI cam2": None}
         assert qa.round_deltas(rnd, {"NDI cam1": 3, "NDI cam2": 6}) is None
 
+    def test_t_send_stagger_is_compensated(self):
+        # Two identical cameras (same pin, same true latency). cam2 was SERVED ~16.67 ms later
+        # (higher t_send), so it latched a ~16.67 ms-NEWER frame (higher gen_ts). Without t_send
+        # compensation cam2 would look 16.67 ms "faster" (a false delta); with it, both read 0.
+        rnd = {
+            "NDI cam1": (100, 0, 0),
+            "NDI cam2": (102, 2 * ID_NS, 2 * ID_NS),
+        }
+        pins = {"NDI cam1": 3, "NDI cam2": 3}
+        d = qa.round_deltas(rnd, pins)
+        assert d["NDI cam1"] == pytest.approx(0.0, abs=0.01)
+        assert d["NDI cam2"] == pytest.approx(0.0, abs=0.01)  # stagger removed, no false delta
+
     def test_none_when_a_pin_is_unknown(self):
-        rnd = {"NDI cam1": (100, 0), "NDI cam2": (101, ID_NS)}
+        rnd = {"NDI cam1": (100, 0, 0), "NDI cam2": (101, ID_NS, 0)}
         assert qa.round_deltas(rnd, {"NDI cam1": 3, "NDI cam2": None}) is None
 
 
@@ -135,9 +148,9 @@ class TestRobustDeltas:
     def test_medians_over_valid_rounds(self):
         pins = {"NDI cam1": 3, "NDI cam2": 6}
         rounds = [
-            {"NDI cam1": (100, 0), "NDI cam2": (101, 1 * ID_NS)},
-            {"NDI cam1": (110, 10 * ID_NS), "NDI cam2": (111, 11 * ID_NS)},
-            {"NDI cam1": (120, 20 * ID_NS), "NDI cam2": (121, 21 * ID_NS)},
+            {"NDI cam1": (100, 0, 0), "NDI cam2": (101, 1 * ID_NS, 0)},
+            {"NDI cam1": (110, 10 * ID_NS, 0), "NDI cam2": (111, 11 * ID_NS, 0)},
+            {"NDI cam1": (120, 20 * ID_NS, 0), "NDI cam2": (121, 21 * ID_NS, 0)},
         ]
         deltas, n_valid = qa.robust_deltas(rounds, pins, min_valid_rounds=2)
         assert n_valid == 3
@@ -148,11 +161,11 @@ class TestRobustDeltas:
     def test_excludes_undecoded_and_outlier_rounds_via_median(self):
         pins = {"NDI cam1": 3, "NDI cam2": 6}
         rounds = [
-            {"NDI cam1": (100, 0), "NDI cam2": (102, 2 * ID_NS)},          # d2 ~ 63.7
-            {"NDI cam1": (110, 10 * ID_NS), "NDI cam2": None},             # DROPPED (undecoded)
-            {"NDI cam1": (120, 20 * ID_NS), "NDI cam2": (122, 22 * ID_NS)},  # d2 ~ 63.7
+            {"NDI cam1": (100, 0, 0), "NDI cam2": (102, 2 * ID_NS, 0)},          # d2 ~ 63.7
+            {"NDI cam1": (110, 10 * ID_NS, 0), "NDI cam2": None},             # DROPPED (undecoded)
+            {"NDI cam1": (120, 20 * ID_NS, 0), "NDI cam2": (122, 22 * ID_NS, 0)},  # d2 ~ 63.7
             # an underrun outlier round: cam2 momentarily 10 frames behind -> median ignores it
-            {"NDI cam1": (130, 30 * ID_NS), "NDI cam2": (140, 40 * ID_NS)},  # d2 ~ 336
+            {"NDI cam1": (130, 30 * ID_NS, 0), "NDI cam2": (140, 40 * ID_NS, 0)},  # d2 ~ 336
         ]
         deltas, n_valid = qa.robust_deltas(rounds, pins, min_valid_rounds=2)
         assert n_valid == 3  # the undecoded round dropped
@@ -161,7 +174,7 @@ class TestRobustDeltas:
 
     def test_fails_when_too_few_valid_rounds(self):
         pins = {"NDI cam1": 3, "NDI cam2": 6}
-        rounds = [{"NDI cam1": (100, 0), "NDI cam2": None}]
+        rounds = [{"NDI cam1": (100, 0, 0), "NDI cam2": None}]
         with pytest.raises(qa.AlignmentImpossible):
             qa.robust_deltas(rounds, pins, min_valid_rounds=3)
 
@@ -190,10 +203,10 @@ class TestFloor3Pins:
         # never the rejected deep 90/160/184.
         base = 188800
         rnd = {
-            "NDI cam1": (base + 0, (base + 0) * ID_NS),
-            "NDI cam2": (base + 2, (base + 2) * ID_NS),
-            "NDI cam3": (base + 3, (base + 3) * ID_NS),
-            "NDI cam4": (base + 3, (base + 3) * ID_NS),
+            "NDI cam1": (base + 0, (base + 0) * ID_NS, 0),
+            "NDI cam2": (base + 2, (base + 2) * ID_NS, 0),
+            "NDI cam3": (base + 3, (base + 3) * ID_NS, 0),
+            "NDI cam4": (base + 3, (base + 3) * ID_NS, 0),
         }
         pins_cur = {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20, "NDI cam4": 3}
         d = qa.round_deltas(rnd, pins_cur)
@@ -208,14 +221,23 @@ class TestFloor3Pins:
 # ---------------------------------------------------------------------------
 class TestSanity:
     def test_small_deltas_pass(self):
-        ok, worst_src, worst = qa.sanity_ok({"a": 0.0, "b": 25.0, "c": 45.0}, max_delta_ms=90.0)
+        ok, slowest, widest, worst = qa.sanity_ok(
+            {"a": 0.0, "b": 25.0, "c": 45.0}, max_delta_ms=90.0)
         assert ok is True
 
     def test_a_degraded_card_blowout_fails(self):
-        ok, worst_src, worst = qa.sanity_ok({"a": 0.0, "b": 117.0}, max_delta_ms=90.0)
+        ok, slowest, widest, worst = qa.sanity_ok({"a": 0.0, "b": 117.0}, max_delta_ms=90.0)
         assert ok is False
-        assert worst_src == "b"
+        assert slowest == "a"   # the min-delta (floored) camera -- the likely-degraded slow card
+        assert widest == "b"    # the biggest gap from the slowest, NOT wrongly blamed as degraded
         assert worst == pytest.approx(117.0)
+
+    def test_default_bound_rejects_the_owner_cited_94ms(self):
+        # #1003 review 🔴: the DEFAULT bound must reject the owner's cited "94 ms between identical
+        # cards is nonsense" -- a 100 ms default silently re-enabled the rejected deep-pin behavior.
+        ok, _slow, _wide, worst = qa.sanity_ok({"a": 0.0, "b": 94.0})  # DEFAULT max_delta_ms
+        assert ok is False and worst == pytest.approx(94.0)
+        assert qa.DEFAULT_MAX_DELTA_MS < 94.0
 
 
 # ---------------------------------------------------------------------------
@@ -223,16 +245,16 @@ class TestSanity:
 # ---------------------------------------------------------------------------
 class TestAlignmentOk:
     def test_within_tolerance_passes(self):
-        rnd = {"NDI cam1": (100, 0), "NDI cam2": (101, 0), "NDI cam3": (100, 0)}
+        rnd = {"NDI cam1": (100, 0, 0), "NDI cam2": (101, 0, 0), "NDI cam3": (100, 0, 0)}
         assert qa.alignment_ok(rnd, tol_frame_ids=1) is True
 
     def test_over_tolerance_fails(self):
-        rnd = {"NDI cam1": (100, 0), "NDI cam2": (103, 0)}
+        rnd = {"NDI cam1": (100, 0, 0), "NDI cam2": (103, 0, 0)}
         assert qa.alignment_ok(rnd, tol_frame_ids=1) is False
 
     def test_unverifiable_round_is_not_a_pass(self):
         # fewer than two decoded -> cannot prove parity -> must NOT report aligned.
-        assert qa.alignment_ok({"NDI cam1": (5, 0), "NDI cam2": None}, tol_frame_ids=1) is False
+        assert qa.alignment_ok({"NDI cam1": (5, 0, 0), "NDI cam2": None}, tol_frame_ids=1) is False
 
 
 # ---------------------------------------------------------------------------

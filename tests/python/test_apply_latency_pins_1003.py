@@ -196,6 +196,14 @@ class TestPinsFromArg:
         with pytest.raises(SystemExit):
             alp.pins_from_arg('{"NDI cam1": true}')
 
+    def test_imag_floor_sentinel_key_is_refused(self):
+        # #1003 review: --pins only pushes NAMED strih inputs; the imag floor sentinel (or any
+        # underscore/comment key) must be refused so this writer can never emit an imag floor pin.
+        with pytest.raises(SystemExit):
+            alp.pins_from_arg('{"_all_ndi_inputs_ms": 3}')
+        with pytest.raises(SystemExit):
+            alp.pins_from_arg('{"_comment": 5, "NDI cam1": 3}')
+
     def test_malformed_json_is_refused(self):
         with pytest.raises(SystemExit):
             alp.pins_from_arg("{not json")

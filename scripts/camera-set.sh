@@ -282,6 +282,24 @@ camera_align_ndi_sources_csv() {
   printf '%s' "$out"
 }
 
+# camera_align_ndi_sources_excluding_csv <excluded> -> the align CSV with any word in EXCLUDED
+# (space-separated cam names) removed -- the offline-ack sibling of camera_align_ndi_sources_csv,
+# mirroring camera_active_ndi_sources_excluding_csv. The floor-3 aligner (#1003 review 🟡) passes
+# recording-e2e.sh's PREFLIGHT_EXCLUDED_CAMS here so an acked-OFFLINE on-air camera (a temporarily
+# wedged cam4) is NOT required to decode a painter QR -- otherwise one acked box would abort the
+# WHOLE run. cam4 is aligned when HEALTHY (it stays in CAMERA_ALIGN_SET); it is dropped only while
+# explicitly acked offline, exactly like the freeze-watch's active-set exclusion. Word-exact match.
+camera_align_ndi_sources_excluding_csv() {
+  local excluded="${1:-}" cam out=""
+  for cam in $CAMERA_ALIGN_SET; do
+    case " ${excluded} " in
+      *" ${cam} "*) continue ;;
+    esac
+    out="${out:+$out,}NDI $cam"
+  done
+  printf '%s' "$out"
+}
+
 # camera_active_excluding <excluded> -> prints (space-separated, stdout) every camera in
 # CAMERA_ACTIVE_SET that is NOT a word in EXCLUDED (space-separated cam names, e.g. the
 # recording-e2e.sh `[0/8]` fleet preflight's own $PREFLIGHT_EXCLUDED_CAMS -- boxes TEMPORARILY

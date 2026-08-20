@@ -104,13 +104,31 @@ fn qr_align_lib_and_tool_exist() {
 
 #[test]
 fn aligner_never_writes_the_stream_hold_or_imag_floor() {
-    // DOMAIN boundary (owner: NEdotýkať stream NDI 2ME PGM hold; imag always 3ms). The aligner is
-    // only ever handed the strih align sources, so it can never emit an imag/stream-hold key --
-    // the tool documents and enforces this, and the step only aligns strih.
-    let tool = read("scripts/qr_align_pins.py");
+    // DOMAIN boundary (owner: NEdotýkať stream NDI 2ME PGM hold; imag always 3ms). Enforced two
+    // concrete ways, not just prose: (1) the align SET is only "cam<N>" tokens -- never a stream or
+    // imag source -- so the aligner is only ever handed strih inputs; (2) the --pins writer REFUSES
+    // an underscore/imag-floor-sentinel key.
+    let cs = read("scripts/camera-set.sh");
+    let align_default = cs
+        .lines()
+        .find(|l| l.trim_start().starts_with("CAMERA_ALIGN_SET=\""))
+        .expect("CAMERA_ALIGN_SET default must exist");
+    // every whitespace-separated token inside the default value is a bare cam name (cam1..camN):
+    let val = align_default
+        .split_once(":-")
+        .and_then(|(_, rest)| rest.split('}').next())
+        .expect("CAMERA_ALIGN_SET default must use the ${VAR:-...} form");
+    for tok in val.split_whitespace() {
+        assert!(
+            tok.starts_with("cam") && tok[3..].chars().all(|c| c.is_ascii_digit()),
+            "CAMERA_ALIGN_SET default token {tok:?} must be a bare cam name -- never a stream/imag \
+             source (the align set is strih inputs only, #1003 domain boundary)."
+        );
+    }
+    let alp = read("scripts/apply_latency_pins.py");
     assert!(
-        tool.contains("NEVER touched") && tool.contains("NDI 2ME PGM"),
-        "qr_align_pins.py must document that the stream NDI 2ME PGM hold is never touched."
+        alp.contains("src.startswith(\"_\")") && alp.contains("imag floor sentinel"),
+        "apply_latency_pins.py --pins must refuse an underscore / imag-floor-sentinel key."
     );
     let block = align_block(&read("scripts/recording-e2e.sh"));
     assert!(
