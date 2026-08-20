@@ -33,6 +33,16 @@
 #                                      picom NOT running -> DRIFT (the dual-output beat returns).
 #   * picom.service ENABLED (user   -> OK: the persistence half — picom launches every graphical
 #     systemd unit)                    session (setup-imag.sh step 27). Not enabled -> DRIFT.
+#
+# REVERTED SAME DAY (issue 1146 revert, live-measured 2026-08-20): the compositor tear fix above
+# cost 21.57% OBS render skips on the 25W power envelope (imag render-health preflight, window 2/5
+# with MV open) — real dropped output frames chain-wide, strictly worse than the display-only
+# tearing it cured; stopping picom returned the same session to 0.00% skips over a 20 s GetStats
+# window. So the #841 "picom off" polarity STANDS (facets below expect picom NOT running / unit NOT
+# enabled), the picom package+config+unit stay installed DORMANT, and the tear-free direction is
+# the OBS projector's own vsync (or a single-display mode) — tracked on issue 1146 / issue 1147.
+# The dual-output beat analysis above remains VALID physics; only the compositor CURE is rejected
+# for its render cost on this box.
 #   * HDMI is xrandr PRIMARY         -> OK: the projector is the vsync anchor. A non-HDMI primary
 #                                      (the panel) -> DRIFT (the panel becomes the anchor and the
 #                                      projector tears). This REVERSES the #522/#488 "panel primary"
@@ -89,9 +99,13 @@ _dp_has() {
 imag_display_path_verdict() {
   local g="$1"
 
-  # --- picom_process (issue 1146): the picom vsync compositor MUST be running — it is the tear-free
-  #     present of the OBS projectors on this dual-output box (reversal of the #841 "picom off"
-  #     facet). #833: a MISSING pgrep must fail loud BY NAME, never read as a measured verdict.
+  # --- picom_process (issue 1146 REVERT, live-measured 2026-08-20): picom must NOT be running.
+  #     The vsync-compositor tear fix cost 21.57% OBS render skips on the 25W envelope (imag
+  #     render-health preflight w2/5); stopping picom returned render to 0.00% skips in the same
+  #     session. Render integrity (real output frames) outranks the display-only tearing, so the
+  #     #841 "picom off" doctrine stands; the tear-free present must come from the OBS projector's
+  #     own vsync (or single-display), never a compositor. #833: a MISSING pgrep must fail loud BY
+  #     NAME, never read as a measured verdict.
   if ! _dp_has "$g" PICOM_PGREP; then
     printf 'picom_process|UNKNOWN|picom-process state not gathered\n'
   elif [ "$(_dp_field "$g" PICOM_PGREP)" = "missing" ]; then
@@ -100,21 +114,22 @@ imag_display_path_verdict() {
     local _proc
     _proc="$(_dp_field "$g" PICOM_PROC)"
     if [ -n "$_proc" ]; then
-      printf 'picom_process|OK|picom vsync compositor running (pid %s) — tear-free present of the OBS projectors (issue 1146)\n' "$_proc"
+      printf 'picom_process|DRIFT|picom running (pid %s) — the compositor starves the OBS render (21.57%% skips measured on the 25W envelope, issue 1146 revert); stop+disable it\n' "$_proc"
     else
-      printf 'picom_process|DRIFT|picom NOT running — the dual-output vsync beat returns and the HDMI projector tears (issue 1146)\n'
+      printf 'picom_process|OK|picom not running — full render budget for OBS (issue 1146 revert; tear-free present is the OBS projector vsync direction, not a compositor)\n'
     fi
   fi
 
-  # --- picom_service (issue 1146): the persistence half — picom.service (user systemd unit) must be
-  #     ENABLED so the compositor launches every graphical session (setup-imag.sh step 27). Read
+  # --- picom_service (issue 1146 REVERT): the persistence half — picom.service (user systemd unit)
+  #     must NOT be enabled, or the render-starving compositor comes back at every login (see
+  #     picom_process above). The unit + config stay INSTALLED (dormant) for a future A/B. Read
   #     bus-free from the on-disk *.target.wants symlink so a non-login ssh gather is reliable.
   if ! _dp_has "$g" PICOM_SERVICE; then
     printf 'picom_service|UNKNOWN|picom-service state not gathered\n'
   elif [ "$(_dp_field "$g" PICOM_SERVICE)" = "enabled" ]; then
-    printf 'picom_service|OK|picom.service enabled (user systemd) — the vsync compositor launches every graphical session (issue 1146)\n'
+    printf 'picom_service|DRIFT|picom.service enabled (user systemd) — the render-starving compositor relaunches every login (issue 1146 revert); systemctl --user disable picom.service\n'
   else
-    printf 'picom_service|DRIFT|picom.service NOT enabled — the vsync compositor will not start at login and the dual-output tearing returns (issue 1146)\n'
+    printf 'picom_service|OK|picom.service not enabled — the compositor stays dormant (issue 1146 revert)\n'
   fi
 
   # --- hdmi_primary (issue 1146): HDMI (the projector) must be the xrandr PRIMARY so picom/GL vsync

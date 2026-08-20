@@ -2302,18 +2302,17 @@ chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/picom" "$USER_HOME/.c
 PICOM_UID="$(id -u "$DESKTOP_USER")"
 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
     systemctl --user daemon-reload || fail "issue 1146: systemctl --user daemon-reload failed before enabling picom.service"
-# enable-only (never --now): picom launches on the NEXT graphical session, keeping the provisioning
-# run side-effect-light. A failed bus enable falls back to writing the wants symlink directly on
-# disk (bus-free) so the enable is deterministic even if the user manager is momentarily unavailable.
-if ! sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-        systemctl --user enable picom.service 2>/dev/null; then
-    sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user/graphical-session.target.wants"
-    sudo -u "$DESKTOP_USER" ln -sf ../picom.service \
-        "$USER_HOME/.config/systemd/user/graphical-session.target.wants/picom.service" \
-        || fail "issue 1146: could not enable picom.service (neither systemctl --user enable nor the on-disk wants symlink) -- the vsync compositor would not launch at login"
-    echo "  picom.service enabled via the on-disk graphical-session.target.wants symlink (bus fallback)"
-fi
-echo "  issue 1146: picom vsync compositor provisioned + enabled (launches next graphical session; HDMI stays xrandr primary via step 16)"
+# issue 1146 REVERT (live-measured 2026-08-20): the unit is provisioned DORMANT — installed +
+# configured but DISABLED. Running the compositor cost 21.57% OBS render skips on the 25W power
+# envelope (real dropped output frames chain-wide), strictly worse than the display-only tearing
+# it cured; the tear-free direction is the OBS projector's own vsync / single-display (issue 1146 /
+# issue 1147). The disable is deterministic: `systemctl --user disable` plus a belt-and-braces
+# removal of the on-disk wants symlink (the exact artifact imag-display-path.sh reads), and it
+# never `--now`-stops anything live (enable-only convention applies to the disable direction too).
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+    systemctl --user disable picom.service 2>/dev/null || true
+rm -f "$USER_HOME/.config/systemd/user/graphical-session.target.wants/picom.service"
+echo "  issue 1146 revert: picom provisioned DORMANT (installed+configured, unit disabled — render budget stays with OBS; HDMI stays xrandr primary via step 16)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

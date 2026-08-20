@@ -966,13 +966,15 @@ check_imag_report() {
     done <<< "$(imag_power_envelope_verdict "$obs_power_envelope" "$exp_power_pl1_w")"
   fi
 
-  # 10. display-path config (#780 / issue 1146) — picom RUNNING with vsync, picom.service enabled,
-  # HDMI the xrandr PRIMARY (the projector is the vsync anchor), the #841 iGPU max-freq pin
-  # (imag-igpu-maxperf.service enabled+active + gt_min_freq pinned to gt_RP0 — the Intel
-  # GPUPowerMizerMode=1 counterpart), and the #779 touchpad tap conf. The picom polarity is INVERTED
-  # vs the original #780/#841 "picom off" doctrine — imag drives two independent-crystal 60Hz outputs
-  # and the vsync compositor anchored on the HDMI primary is what stops the dual-output tearing beat
-  # (see scripts/lib/imag-display-path.sh's compositor-doctrine-reversal header). Runs the SHARED
+  # 10. display-path config (#780 / issue 1146 REVERT) — picom NOT running + picom.service NOT
+  # enabled (the compositor tear fix cost 21.57% OBS render skips on the 25W envelope, live
+  # 2026-08-20 — the #841 "picom off" doctrine stands; the package/config/unit stay installed
+  # dormant), HDMI the xrandr PRIMARY, the #841 iGPU max-freq pin (imag-igpu-maxperf.service
+  # enabled+active + gt_min_freq pinned to gt_RP0 — the Intel GPUPowerMizerMode=1 counterpart),
+  # and the #779 touchpad tap conf. See scripts/lib/imag-display-path.sh's doctrine header for the
+  # full reversal→revert history (the dual-output beat physics stays valid; only the compositor
+  # CURE is rejected for its render cost — the tear-free direction is the OBS projector's own
+  # vsync / single-display, issue 1146 / issue 1147). Runs the SHARED
   # imag_display_path_verdict (scripts/lib/imag-display-path.sh) over the gathered block, mapping each
   # per-facet OK/DRIFT/UNKNOWN into this function's own report rows + exit-code contract — the loop is
   # generic, so new facets flow through with no edit here. Two-tier, same as every check above: an

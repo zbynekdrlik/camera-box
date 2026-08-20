@@ -92,14 +92,14 @@ fn setup_imag_writes_picom_user_service_1146() {
 }
 
 #[test]
-fn setup_imag_enables_picom_but_never_starts_it_live_1146() {
+fn setup_imag_disables_picom_and_never_starts_it_live_1146() {
     let body = read(SETUP);
-    // enable-only convention (provisioning-scripts.md): the step must `systemctl --user enable`
-    // picom.service, never `enable --now`/`start` it live — it takes effect on the next graphical
-    // session; verify-imag.sh check (z) is the post-reboot acceptance gate.
+    // issue 1146 REVERT: the unit is provisioned DORMANT — the step must `systemctl --user
+    // disable` picom.service (the compositor cost 21.57% render skips on the 25W envelope),
+    // and still never `enable --now`/`start` anything live (enable-only convention).
     assert!(
-        body.contains("systemctl --user enable picom.service"),
-        "{SETUP}: step 27 must `systemctl --user enable picom.service` (enable-only)"
+        body.contains("systemctl --user disable picom.service"),
+        "{SETUP}: step 27 must `systemctl --user disable picom.service` (dormant provisioning, issue 1146 revert)"
     );
     assert!(
         !body.contains("systemctl --user enable --now picom.service")

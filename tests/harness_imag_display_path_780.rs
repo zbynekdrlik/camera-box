@@ -85,9 +85,10 @@ fn status_of(lines: &[String], facet: &str) -> String {
 
 #[test]
 fn verdict_emits_one_row_per_facet_780() {
-    // A fully-clean Intel-box gather AFTER the issue-1146 tear fix: picom RUNNING with vsync,
-    // picom.service enabled, HDMI the xrandr primary, maxperf pinned+up, tap on.
-    let g = "PICOM_PGREP|ok\nPICOM_PROC|2038724\nPICOM_SERVICE|enabled\n\
+    // A fully-clean Intel-box gather AFTER the issue-1146 REVERT: picom NOT running (the
+    // compositor cost 21.57% render skips on the 25W envelope), picom.service disabled,
+    // HDMI the xrandr primary, maxperf pinned+up, tap on.
+    let g = "PICOM_PGREP|ok\nPICOM_PROC|\nPICOM_SERVICE|disabled\n\
              XRANDR|ok\nPRIMARY_OUTPUT|HDMI-1\n\
              MAXPERF_APPLICABLE|1\nMAXPERF_MIN|1400\nMAXPERF_RP0|1400\n\
              MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\n\
@@ -108,23 +109,25 @@ fn verdict_emits_one_row_per_facet_780() {
     }
 }
 
-// ---- picom_process (issue 1146: RUNNING with vsync = OK — reversal of the #841 picom-off facet) -
+// ---- picom_process (issue 1146 REVERT: NOT running = OK — the #841 picom-off doctrine stands;
+// the compositor tear fix cost 21.57% OBS render skips on the 25W envelope, live 2026-08-20) ----
 
 #[test]
-fn picom_process_ok_when_running_1146() {
-    // The picom vsync compositor is the tear-free present of the OBS projectors — running is OK.
-    let lines = verdict("PICOM_PGREP|ok\nPICOM_PROC|2038724");
+fn picom_process_ok_when_not_running_1146_revert() {
+    // picom not running -> full render budget for OBS -> OK (issue 1146 revert).
+    let lines = verdict("PICOM_PGREP|ok\nPICOM_PROC|");
     let l = facet_line(&lines, "picom_process");
     assert_eq!(status_of(&lines, "picom_process"), "OK", "{l}");
-    assert!(l.contains("2038724"), "the running pid must be named: {l}");
 }
 
 #[test]
-fn picom_process_drift_when_not_running_1146() {
-    // picom NOT running -> the dual-output vsync beat returns -> DRIFT (issue 1146 reversal).
-    let lines = verdict("PICOM_PGREP|ok\nPICOM_PROC|");
+fn picom_process_drift_when_running_1146_revert() {
+    // picom running -> composites both outputs and starves the OBS render (21.57% skips
+    // measured) -> DRIFT, naming the pid (issue 1146 revert).
+    let lines = verdict("PICOM_PGREP|ok\nPICOM_PROC|2038724");
     let l = facet_line(&lines, "picom_process");
-    assert!(l.contains("|DRIFT|"), "picom not running must DRIFT: {l}");
+    assert!(l.contains("|DRIFT|"), "picom running must DRIFT: {l}");
+    assert!(l.contains("2038724"), "the running pid must be named: {l}");
 }
 
 #[test]
@@ -148,18 +151,19 @@ fn picom_process_unknown_when_not_gathered_780() {
     assert_eq!(status_of(&lines, "picom_process"), "UNKNOWN");
 }
 
-// ---- picom_service (issue 1146: the persistence half — the user systemd unit must be enabled) --
+// ---- picom_service (issue 1146 REVERT: the unit must stay DISABLED so the render-starving
+// compositor never relaunches at login; package+config+unit stay installed dormant) ------------
 
 #[test]
-fn picom_service_ok_when_enabled_1146() {
-    let lines = verdict("PICOM_SERVICE|enabled");
+fn picom_service_ok_when_disabled_1146_revert() {
+    let lines = verdict("PICOM_SERVICE|disabled");
     assert_eq!(status_of(&lines, "picom_service"), "OK");
 }
 
 #[test]
-fn picom_service_drift_when_disabled_1146() {
-    // not enabled -> the vsync compositor never launches at login -> the tearing returns -> DRIFT.
-    let lines = verdict("PICOM_SERVICE|disabled");
+fn picom_service_drift_when_enabled_1146_revert() {
+    // enabled -> the compositor comes back at every login and starves the render -> DRIFT.
+    let lines = verdict("PICOM_SERVICE|enabled");
     assert_eq!(status_of(&lines, "picom_service"), "DRIFT");
 }
 
