@@ -203,10 +203,19 @@ impl Rig {
     }
 
     // One watchdog pass. `enable`=false leaves IMAG_OBS_RESTART_STORM_ENABLE unset (default OFF).
+    // One restart_storm_check pass, run by SOURCING the real watchdog (never executing main(), so
+    // no reachability ssh, no network) and calling restart_storm_check directly under the caller's
+    // EXACT `set -euo pipefail`. That also proves the check is -e-safe: a bare-statement abort under
+    // -e would swallow the log lines this asserts. `enable`=false leaves the flag unset (default OFF).
     fn pass(&self, enable: bool, now: &str) -> String {
+        let wd = manifest_dir().join(WATCHDOG);
+        let script = format!(
+            "set -euo pipefail\nsource '{wd}'\nDRY_RUN=1\nrestart_storm_check\n",
+            wd = wd.display()
+        );
         let mut cmd = Command::new("bash");
-        cmd.arg(manifest_dir().join(WATCHDOG))
-            .arg("--dry-run")
+        cmd.arg("-c")
+            .arg(script)
             .env(
                 "IMAG_OBS_ALERT_STATE_FILE",
                 self.state.display().to_string(),
@@ -217,16 +226,12 @@ impl Rig {
             )
             .env("IMAG_OBS_RESTART_NOW", now)
             .env("IMAG_OBS_RESTART_STORM_THRESHOLD", "10")
-            .env("IMAG_OBS_RESTART_STORM_WINDOW_S", "600")
-            // measure()'s own reachability ssh has no fixture seam; with no `sshpass` reachable it
-            // returns empty and main() treats the pass as "nothing to decide" AFTER the storm check
-            // has already run first — exactly what we want to isolate here.
-            .env("PATH", std::env::var("PATH").unwrap_or_default());
+            .env("IMAG_OBS_RESTART_STORM_WINDOW_S", "600");
         if enable {
             cmd.env("IMAG_OBS_RESTART_STORM_ENABLE", "1");
         }
-        let out = cmd.output().expect("run watchdog pass");
-        // the watchdog logs to stderr
+        let out = cmd.output().expect("run restart_storm_check");
+        // restart_storm_check logs to stderr (via the watchdog's log()).
         String::from_utf8_lossy(&out.stderr).to_string()
     }
 }

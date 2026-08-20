@@ -35,6 +35,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-watchdog-decision.sh"
 # shellcheck source=scripts/lib/imag-obs-reachability.sh
 . "$HERE/lib/imag-obs-reachability.sh"
+# shellcheck source=scripts/lib/imag-obs-restart-storm.sh
+. "$HERE/lib/imag-obs-restart-storm.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -64,6 +66,17 @@ PAUSE_WINDOW_S="${IMAG_WATCHDOG_PAUSE_WINDOW_S:-3600}"           # 60 min from t
 
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${IMAG_OBS_ALERT_REPO:-zbynekdrlik/camera-box}"
+
+# #1156: restart-STORM detection config. imag-obs.service's NRestarts counter is read each pass (a
+# 2nd small ssh) and a STORM (>= THRESHOLD restarts within WINDOW_S) fires ONE deduped page, dedup'd
+# through the SAME #391 obs_watchdog_alert_throttle the down-alert already uses -- never a second
+# mechanism. Ships DISABLED: runs only when IMAG_OBS_RESTART_STORM_ENABLE=1 (a supervisor
+# Environment= edit to imag-obs-alert-watchdog.service enables it), per the dev1-watchdog
+# "ships disabled" convention. NRestarts climbs on the #1156 seed-import-fail Restart loop too, so
+# this is exactly the alert the 1737-restart / 8.5h incident lacked.
+RESTART_STORM_THRESHOLD="${IMAG_OBS_RESTART_STORM_THRESHOLD:-10}"
+RESTART_STORM_WINDOW_S="${IMAG_OBS_RESTART_STORM_WINDOW_S:-600}"
+RESTART_STORM_THROTTLE_PASSES="${IMAG_OBS_RESTART_STORM_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
 # #1070: the REPORT-ONLY latency-pin verify-at-start for imag -- the "outside a gate run" residual
 # of 1061 (during a gate run the issue-1061 self-healer script restores the floor + e2e_discord_report.py
@@ -160,9 +173,86 @@ latency_drift_check() {
   fi
 }
 
+# ── #1156 restart-STORM check (a 2nd small ssh for imag-obs.service's NRestarts) ─────────────
+# Ships DISABLED (IMAG_OBS_RESTART_STORM_ENABLE!=1 -> immediate no-op, no ssh). When enabled: read
+# the NRestarts counter, classify against the persisted baseline+ts (time-windowed "N per window_s",
+# fail-safe = never false-page), and on a STORM fire ONE throttled Discord page (sig imag-restart-storm,
+# ~1h reminder while it persists, cleared on any non-storm pass so a NEW storm pages fresh). The ssh
+# probe is overridable via IMAG_OBS_RESTART_PROBE_CMD and the clock via IMAG_OBS_RESTART_NOW (offline
+# tests). Runs its own ssh, independent of the reachability measure() above -- a storm can flap OBS
+# up/down, so it must be caught regardless of this instant's reachability verdict.
+restart_storm_check() {
+  if [ "${IMAG_OBS_RESTART_STORM_ENABLE:-0}" != "1" ]; then
+    log "restart-storm check disabled (IMAG_OBS_RESTART_STORM_ENABLE!=1) -- skipping"
+    return 0
+  fi
+
+  local now probe
+  now="${IMAG_OBS_RESTART_NOW:-$(date +%s)}"
+  if [ -n "${IMAG_OBS_RESTART_PROBE_CMD:-}" ]; then
+    probe="$(eval "$IMAG_OBS_RESTART_PROBE_CMD" 2>/dev/null || true)"
+  else
+    probe="$(sshpass -p "$IMAG_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+      "${IMAG_USER_SSH}@${IMAG_IP}" "$(imag_obs_restart_counter_probe_cmd)" 2>/dev/null || true)"
+  fi
+
+  case "$probe" in
+    *NRestarts=*) : ;;
+    *)
+      log "restart-storm: could not read imag-obs NRestarts (probe='$probe') -- nothing to decide this pass"
+      return 0
+      ;;
+  esac
+
+  local prev_baseline prev_ts cls storm baseline baseline_ts reason
+  prev_baseline="$(read_state_field restart_baseline "")"
+  prev_ts="$(read_state_field restart_baseline_ts "")"
+  cls="$(imag_obs_restart_storm_classify "$prev_baseline" "$prev_ts" "$probe" "$now" "$RESTART_STORM_THRESHOLD" "$RESTART_STORM_WINDOW_S")"
+  storm="$(printf '%s\n' "$cls" | sed -n 's/^storm=//p')"
+  baseline="$(printf '%s\n' "$cls" | sed -n 's/^baseline=//p')"
+  baseline_ts="$(printf '%s\n' "$cls" | sed -n 's/^baseline_ts=//p')"
+  reason="$(printf '%s\n' "$cls" | sed -n 's/^reason=//p')"
+  write_state_field restart_baseline "${baseline:-}"
+  write_state_field restart_baseline_ts "${baseline_ts:-}"
+  log "restart-storm: ${probe} storm=${storm:-0} (${reason})"
+
+  if [ "${storm:-0}" != "1" ]; then
+    # not storming -> clear the throttle signature so a LATER genuine storm always pages fresh.
+    write_state_field restart_alert_sig ""
+    write_state_field restart_alert_passes 0
+    return 0
+  fi
+
+  local sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
+  sig="imag-restart-storm"
+  prior_sig="$(read_state_field restart_alert_sig "")"
+  prior_passes="$(read_state_field restart_alert_passes 0)"
+  throttle_out="$(obs_watchdog_alert_throttle "$sig" "$prior_sig" "$prior_passes" "$RESTART_STORM_THROTTLE_PASSES")"
+  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
+  new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
+  new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
+  write_state_field restart_alert_sig "$new_sig"
+  write_state_field restart_alert_passes "$new_passes"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: imag-obs RESTART STORM (${reason}) alert_now=${alert_now}"
+    return 0
+  fi
+
+  if [ "${alert_now:-0}" = "1" ]; then
+    log "ALERT: firing Discord notification for imag-obs restart storm"
+    python3 "$NOTIFY" notify --body \
+      "🚨 imag OBS reštart-storm ($REPO_SLUG): imag-obs.service sa reštartuje v slučke (${reason}). Pravdepodobne chýbajúci python sibling po deployi. Rieši Claude automaticky, ty nemusíš nič robiť." \
+      >/dev/null 2>&1 || log "restart-storm ALERT: airuleset.py notify failed (non-fatal)"
+  else
+    log "restart-storm alert suppressed by throttle (pass ${prior_passes}/${RESTART_STORM_THROTTLE_PASSES})"
+  fi
+  return 0
+}
 # ── main pass ────────────────────────────────────────────────────────────────
 main() {
   log "pass start (dry_run=$DRY_RUN, threshold=$CONFIRM_THRESHOLD)"
+  restart_storm_check
 
   measure
   if [ -z "${PROBE_OUT:-}" ]; then
