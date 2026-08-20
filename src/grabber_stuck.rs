@@ -117,9 +117,41 @@ impl GrabberStuckTracker {
     ///   observe of a process (no prior sample) records only the baseline — the delta is unknown
     ///   and treated as 0, so a large cumulative counter carried into a fresh process never
     ///   masquerades as one window's worth of corruption.
-    pub fn observe(&mut self, _captured_fps: f64, _corrupted_total: u64) -> GrabberStuckVerdict {
-        // #1128 RED stub — detection not yet implemented; the pure decision arrives in the GREEN
-        // commit. Every over-rate/corrupted-band test fails against this on purpose.
+    pub fn observe(&mut self, captured_fps: f64, corrupted_total: u64) -> GrabberStuckVerdict {
+        if captured_fps >= self.fps_floor {
+            self.over_rate_run = self.over_rate_run.saturating_add(1);
+        } else {
+            self.over_rate_run = 0;
+        }
+
+        let corrupted_delta = match self.prev_corrupted_total {
+            Some(prev) => corrupted_total.saturating_sub(prev),
+            None => 0,
+        };
+        self.prev_corrupted_total = Some(corrupted_total);
+        if corrupted_delta > 0 {
+            self.corrupted_run = self.corrupted_run.saturating_add(1);
+        } else {
+            self.corrupted_run = 0;
+        }
+
+        // STUCK only when BOTH bands are confirmed. The corrupted band is the discriminator that
+        // keeps a benign over-rate wobble (0 corrupted; absorbed by the decimation gate, #909)
+        // from ever reaching a reset.
+        if self.over_rate_run >= self.confirm_windows && self.corrupted_run >= self.confirm_windows
+        {
+            return GrabberStuckVerdict::Stuck {
+                captured_fps,
+                corrupted_delta,
+                windows: self.over_rate_run.min(self.corrupted_run),
+            };
+        }
+        if self.over_rate_run > 0 || self.corrupted_run > 0 {
+            return GrabberStuckVerdict::Watching {
+                over_rate_windows: self.over_rate_run,
+                corrupted_windows: self.corrupted_run,
+            };
+        }
         GrabberStuckVerdict::Healthy
     }
 }
