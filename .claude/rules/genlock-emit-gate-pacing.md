@@ -76,18 +76,39 @@ walk still eventually trips the resync). Bounded by `RETIRE_MAX_LAG_INTERVALS=4`
 above it the #1111 copy valve fires (a panic floor). `genlock_emit_gate` + its resync are UNTOUCHED.
 
 - **Retirement is gated on the UNIQUE rate, NOT the capture takt.** A trailing 2 s `VecDeque` COUNT
-  of unique (non-dupe) captures (`RETIRE_MIN_UNIQUES_IN_WINDOW=118`, ~59 fps) is the robust "enough
-  distinct content to hold 60 without copies" signal — a windowed COUNT reads the true unique rate
-  regardless of per-frame jitter / dupe clustering (an interval EMA does NOT: it reads local capture
-  spacing during a run of consecutive uniques and leaks). A capture-TAKT gate is WRONG: a takt>60.3
-  excess-dupe deficit (unique < 60) would be wrongly retired, dropping the emit rate + blinding the
-  duplication-masked pulldown detector (`dup_cadence.rs`) + tripping the #666 emit-deficit gate. The
-  unique-rate gate keeps a genuinely starved source (50->60 pulldown) on the #1111 copy path
-  byte-identical (holds 60, keeps the content-dupes in the recording for `dup_cadence`).
+  of unique (non-dupe) captures, pruned by `now_ns` on EVERY poll (honest at every instant), is the
+  robust "enough distinct content to hold the target without copies" signal — a windowed COUNT reads
+  the true unique rate regardless of per-frame jitter / dupe clustering (an interval EMA does NOT: it
+  reads local capture spacing during a run of consecutive uniques and leaks). The floor is PARAMETRIC
+  (`retire_min_uniques(interval_ns) = WINDOW/interval − RETIRE_UNIQUE_COUNT_MARGIN`, = 114 == 57 fps
+  at a 60 fps target). A capture-TAKT gate is WRONG: a takt>60.3 excess-dupe deficit (unique < 60)
+  would be wrongly retired, dropping the emit rate + blinding the duplication-masked pulldown detector
+  (`dup_cadence.rs`) + tripping the #666 emit-deficit gate. A genuinely starved source below the floor
+  (a 50->60 pulldown) stays on the #1111 copy path byte-identical.
+- **A 2 s windowed count CANNOT separate a 60-unique-jittery source from a ~58-unique one** (a 3.5 %
+  rate difference is within the window's edge/jitter noise: the rig at takt 61.3 j30 dips to
+  count ~115, a 57.9-unique 62/period-15 grabber reaches ~117 — they OVERLAP). So the floor is set to
+  prioritise the RIG (retire the true-60 case even at heavy jitter) and DELIBERATELY aligned with the
+  #666 emit-deficit floor (57 fps): a source ABOVE 57 unique fps emits its honest rate (retired, no
+  copies), below it gets copies to hold 60. Consequence: a genuinely-57.9-unique excess-dupe grabber
+  now emits the honest ~57.9 (retired) instead of 60-via-copies — the strih FIFO absorbs the gentle
+  evenly-spread underrun identically (no lag leap to relock), and `dup_cadence` (pulldown floor 10 %)
+  already expects a 6.7 % over-rate dupe rate to be shed. The old #1111 "hold 60 via copies" test was
+  updated to this intentional v2 behavior; the load-bearing 0-skips + no-unique-dropped are unchanged.
+- **GOTCHA (review-found 🔴, do NOT ship a rate-gated shed without it): a FROZEN source is a distinct
+  failure shape.** 100 % content-dupes (a dead painter / wedged upstream — the #1052/#365 class)
+  means no unique ever refreshes the window, so its COUNT stays stale-high and retirement fires
+  FOREVER, collapsing the NDI emit to ~0 fps (a total BLACKOUT — strictly worse than a frozen picture
+  on a broadcast rig). Two guards, both live: (1) prune the window every poll so a dead source's count
+  DRAINS to 0 over the window; (2) a FRESHNESS gate (`RETIRE_UNIQUE_FRESH_BOUND_INTERVALS=5` — retire
+  only when the most recent unique arrived within ~5 emit intervals) that kills a freeze in ~83 ms and
+  ALSO catches a burst-then-freeze the count-drain alone would miss. A freeze then falls back to the
+  #1111 copy valve (a frozen PICTURE on a LIVE, FIFO-fed stream — the pre-#1145 behavior).
 - Decision is the pure `dupe_decimation::dupe_shed_action(...) -> ShedAction {Emit{copy}, Defer,
   Retire, BlindShed}` (replaced `dupe_preferring_decimate`). `DupeShedLog` gained a `retired` counter
   (the summary line is now 4-count; `main.rs` wires the 4-tuple). Live: retired ≈ over-rate delta,
-  copies ≈ 0 on cam1/cam2, all-zero on cam3.
+  copies ≈ 0 on cam1/cam2, all-zero on cam3. Also guard a BACKWARD DanteSync clock step (clear the
+  window if its newest entry is in the future — mirrors `genlock_emit_gate`'s #131 re-latch).
 
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
