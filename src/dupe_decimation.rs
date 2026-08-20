@@ -238,7 +238,10 @@ pub const QUEUE_DEPTH_SANE_MAX_INTERVALS: u64 = 8;
 /// unavailable: `interval_ns == 0` (genlock off), `capture_mono_ns == 0` (the FrameInfo "no real
 /// measurement" sentinel), or `now_mono_ns <= capture_mono_ns` (a monotonic non-advance / bogus
 /// stamp). Clamped to [`QUEUE_DEPTH_SANE_MAX_INTERVALS`] so a garbage timestamp can never force a
-/// runaway shed.
+/// runaway shed. (#1145 v2 review 🔵) The residence trusts `capture_mono_ns` to be the SAME
+/// `CLOCK_MONOTONIC` domain as `now_mono_ns` — the repo-wide #286 assumption for the V4L2 buffer
+/// timestamp; a device stamping a lower-epoch domain would read a huge residence, but the
+/// `QUEUE_DEPTH_SANE_MAX_INTERVALS` clamp bounds the consequence to a bounded (not unbounded) drain.
 pub fn queue_depth_intervals(now_mono_ns: u64, capture_mono_ns: u64, interval_ns: u64) -> u64 {
     if interval_ns == 0 || capture_mono_ns == 0 || now_mono_ns <= capture_mono_ns {
         return 0;
@@ -277,6 +280,13 @@ pub enum ShedAction {
     /// on BOUNDARY lag and only sheds a content-dupe; Drain keys on the queue RESIDENCE and, above
     /// the target, sheds the oldest frame regardless (its downstream tick has already passed, so it
     /// is a controlled single-frame drop that pre-empts the uncontrolled V4L2 overflow-drop).
+    ///
+    /// (#1145 v2 review 🔵) #1131 interaction for an OVER-RATE card: a transient-stall buffered
+    /// drain on an over-rate card now DRAINS (sheds the oldest one at a time) rather than emitting
+    /// every buffered frame — the intended bound-latency behavior (emitting the whole burst would
+    /// just re-judder). This is a SINGLE-frame drop, never a grid-resync leap, so #1131's
+    /// leap-past-and-discard-a-run is still avoided. A 60.00 card is unaffected (not over-rate →
+    /// never drains → emits every buffered frame, byte-identical to v1 — constraint c).
     Drain,
     /// Between boundaries (`!would_emit`): blind-shed, boundary unchanged — the pre-existing pacing
     /// decimation drop.
@@ -328,9 +338,18 @@ pub fn dupe_shed_action(
     // `sustained_over_rate` so a healthy 60.00 card never reaches it (byte-identical to v1); shed
     // the oldest frame once its queue residence exceeds the target, one frame at a time.
     if sustained_over_rate {
+        // (#1145 v2 review 🔵) The FIRST arm INTENTIONALLY sheds the oldest regardless of
+        // `enough_unique_to_hold_target` — when the residence has already reached the target the
+        // latency MUST be bounded, so bounding it overrides the "keep content-dupes for the
+        // duplication-masked pulldown detector" invariant the second arm + retirement preserve. In
+        // practice this only bites a genuinely-starved source captured at an over-rate takt (rare);
+        // there the bounded-latency win outranks preserving a dupe the detector could read.
         if queue_depth_intervals >= QUEUE_DEPTH_SHED_INTERVALS {
             return ShedAction::Drain;
         }
+        // The SECOND arm drains a DETECTED dupe one interval earlier — content-safe, and it DOES
+        // preserve the pulldown invariant (`enough_unique_to_hold_target` gate), so a starved source
+        // never loses its dupes here.
         if is_dupe
             && enough_unique_to_hold_target
             && queue_depth_intervals >= QUEUE_DEPTH_DUPE_SHED_INTERVALS
@@ -1544,6 +1563,14 @@ mod tests {
     /// so its queue residence grows into the sawtooth this ticket fixes. Dupes are NOT byte-detected
     /// (every capture gets a distinct hash — the realistic ShadowCast-noise worst case where the
     /// depth-drain, not the dupe-shed, must carry the absorption). wall == mono in the sim.
+    ///
+    /// (#1145 v2 review 🔵) Why `send_cost` is just UNDER the interval (max emit ~60.5/s) + a
+    /// one-shot stall trigger, NOT `send_cost >= interval`: the field mechanism is that the loop's
+    /// max emit rate sits BETWEEN 60.00 and the over-rate — a 60.00 card RECOVERS from a transient
+    /// perturbation while an over-rate card CANNOT, so the over-rate residence only ever grows after
+    /// a perturbation and then never drains. A `send_cost >= interval` model would make even the
+    /// 60.00 card unable to keep up, destroying the constraint-c separation this harness must show.
+    /// The stall is the realistic trigger (a CPU/#752 hiccup); the over-rate is what sustains it.
     fn run_queue_sim(capture_fps: f64, stall_at_frame: u64, secs: f64) -> QueueSim {
         let cap_int = (1e9 / capture_fps) as u64;
         let src_int = 1_000_000_000u64 / 60;
@@ -1643,6 +1670,36 @@ mod tests {
              steady overflow-drops {}",
             s.overflow_steady
         );
+    }
+
+    #[test]
+    fn over_rate_depth_drain_holds_emit_rate_above_the_666_floor_1145() {
+        // (#1145 v2 review 🟡) Zero-loss is the project's HARD acceptance bar, so the DRAIN path —
+        // which at a genuine over-rate sheds the OLDEST frame regardless of dupeness (the noise-blind
+        // oldest-drop) — must never collapse the emit rate below the #666 emit-deficit floor
+        // (5% of 60 == 57 fps). This is the drain-path counterpart of the retirement path's own
+        // `over_rate_retirement_holds_60_without_skips_1145` guard, closing the review-found asymmetry:
+        // it pins the emit rate + bounded residence against a future constant retune.
+        for &fps in &[61.5_f64, 62.0] {
+            let s = run_queue_sim(fps, 120, 30.0);
+            let emit_fps = s.emits as f64 / 30.0;
+            assert!(
+                emit_fps >= 57.0,
+                "the depth drain must hold the emit rate above the #666 floor (57 fps); \
+                 got {emit_fps:.2} fps at {fps} capture (drained={})",
+                s.drained
+            );
+            assert!(
+                s.max_residence_post <= QUEUE_DEPTH_SHED_INTERVALS,
+                "residence must stay bounded at {fps} capture; max {} intervals",
+                s.max_residence_post
+            );
+            assert_eq!(
+                s.overflow_steady, 0,
+                "no V4L2 overflow-drop burst at {fps} capture; steady overflow {}",
+                s.overflow_steady
+            );
+        }
     }
 
     #[test]
