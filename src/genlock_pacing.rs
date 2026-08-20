@@ -157,6 +157,12 @@ fn genlock_latched_boundary(now_ns: u64, next_boundary_ns: u64, interval_ns: u64
 /// feed a steady 60), which keeps the emit grid locked to wall-clock. Shares
 /// [`genlock_latched_boundary`] with [`genlock_emit_gate`] so the two never disagree on where the
 /// boundary sits.
+///
+/// (#1145) SUPERSEDED as the production shed signal: `dupe_decimation` now keys on the NUMERIC
+/// [`genlock_lag_intervals`] (a late over-rate dupe RETIRES rather than emitting a copy). This
+/// predicate is retained only as the `lag == 0` equivalence anchor (`genlock_emit_on_time(...) ==
+/// (genlock_lag_intervals(...) == 0 && now >= boundary)`) and its own tests; no production path
+/// calls it any more.
 pub fn genlock_emit_on_time(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> bool {
     if interval_ns == 0 {
         return false;

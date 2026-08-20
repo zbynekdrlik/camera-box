@@ -32,6 +32,16 @@
 //! unavoidable ~2 copies/s when a ~58-unique-fps grabber must feed a steady 60), keeping the emit
 //! grid locked to wall-clock. That emitted-copy is counted in [`DupeShedLog`] for live visibility.
 //!
+//! (#1145) SUPERSEDED at a genuine over-rate: the ~2 copies/s above are the floor ONLY when the
+//! source's UNIQUE rate is genuinely below the target (a 58-unique grabber, a 50->60 pulldown). A
+//! plain over-rate on a true-60 source has ~60 unique fps, so ZERO copies are needed and the LATE
+//! dupe above was a jitter-driven bug: it presents as the strih 15fps-judder. v2 RETIRES a late
+//! over-rate dupe instead (shed it AND advance the already-stale boundary, emitting nothing —
+//! [`dupe_shed_action`] / [`ShedAction::Retire`]), gated on a measured trailing UNIQUE rate so a
+//! genuinely starved OR frozen source still falls back to the late-dupe copy valve above.
+//! `genlock_pacing::genlock_emit_on_time` is retained only as the lag==0 equivalence anchor;
+//! production keys on the numeric `genlock_pacing::genlock_lag_intervals` instead.
+//!
 //! Default ON, every grabber model, no env knob (the standing "a needed feature is always on,
 //! never a forgettable toggle" rule) — self-neutralizing on a healthy card: shedding only
 //! happens when the pacing gate would shed ANYWAY (over-rate forcing a drop), and dupe
@@ -127,16 +137,47 @@ pub const RETIRE_MAX_LAG_INTERVALS: u64 = 4;
 /// spacing) yet short enough that retirement engages within ~2 s of a sustained over-rate.
 pub const UNIQUE_RATE_WINDOW_NS: u64 = 2_000_000_000;
 
-/// (#1145) Minimum UNIQUE captures within [`UNIQUE_RATE_WINDOW_NS`] for retirement to engage —
-/// i.e. the source is delivering enough distinct content (`>= ~59 unique fps`) to hold a steady 60
-/// after shedding its surplus dupes. Below this the source is genuinely starved (a sub-60 source
-/// padded to 60 by DUPLICATION — a 50->60 pulldown, or a grabber duping faster than its over-rate):
-/// retirement stays OFF and the pre-existing late-dupe valve emits the copies that hold 60 (keeping
-/// the strih FIFO locked AND leaving the content-dupes in the recording for the duplication-masked
-/// pulldown detector). 118 over 2 s == 59 fps — clear of a true-60 source's ~120/2 s (jitter never
-/// drops the 2 s COUNT below it) yet clearly above a starved source's count. This is the ticket's
-/// "restrict late-dupe injection to genuine starvation" boundary, made a robust measured signal.
-pub const RETIRE_MIN_UNIQUES_IN_WINDOW: usize = 118;
+/// (#1145) Margin (in unique captures) subtracted from the window's theoretical full count
+/// (`UNIQUE_RATE_WINDOW_NS / interval_ns`, e.g. ~120 at a 60 fps target) to derive the retirement
+/// floor ([`retire_min_uniques`]). The source must be delivering nearly the full target's worth of
+/// DISTINCT content over the trailing window for retirement to engage; below it the source is
+/// genuinely starved (a sub-60 source padded to 60 by DUPLICATION — a 50->60 pulldown) and the
+/// late-dupe copy valve stays engaged to hold the emit grid at the target (keeping the strih FIFO
+/// locked AND leaving the content-dupes in the recording for the duplication-masked pulldown
+/// detector). The count is pruned by `now_ns` on EVERY poll (honest at every instant). A true-60
+/// over-rate source's honestly-pruned count dips to ~115 at dupe instants under heavy jitter, while
+/// a 50-fps pulldown reads ~100/2 s — so the floor MUST sit between them, and cannot ALSO be above a
+/// 57.9-unique source (which reads ~114-117, overlapping the jittery-60 case: a 2 s windowed COUNT
+/// genuinely cannot separate 60-unique-with-jitter from 57.9-unique). We prioritize the RIG (unique
+/// 60): `6` -> floor 114 at 60 fps == 57 fps, which reliably retires the rig even at 30 % jitter,
+/// keeps a real pulldown (~100) on the copy valve, and puts the retire/copy boundary at ~57 unique
+/// fps — deliberately aligned with the #666 EMIT-rate-deficit floor (5 % of 60), so any source whose
+/// honest emit would trip #666 (< 57 fps) gets copies to hold 60, and any source above it emits its
+/// honest rate. Parametric on `interval_ns` (#1145 review): follows a non-60 emit target instead of
+/// silently no-oping.
+pub const RETIRE_UNIQUE_COUNT_MARGIN: u64 = 6;
+
+/// (#1145 review 🔴) Freshness bound for retirement, in whole emit intervals: retirement engages only
+/// when the MOST RECENT unique capture arrived within this many intervals of `now`. A genuinely
+/// FROZEN source (a dead painter / wedged upstream feeding a still — the #1052/#365 frozen-input
+/// class) delivers 100% content-dupes: no unique ever refreshes the window, so its stale count stays
+/// high and — without this bound — retirement would fire forever and collapse the NDI emit to ~0 fps
+/// (a total output BLACKOUT, strictly worse than a frozen picture). The freshness bound makes a
+/// freeze fall back to the late-dupe copy valve within ~this many intervals (a frozen PICTURE on a
+/// LIVE, FIFO-fed stream — the pre-#1145 behavior). `5` intervals (~83 ms at 60 fps) is safely above
+/// the largest gap since a unique during healthy over-rate operation (an isolated dupe pair sits ~2-3
+/// intervals after a unique) yet kills a freeze promptly.
+pub const RETIRE_UNIQUE_FRESH_BOUND_INTERVALS: u64 = 5;
+
+/// (#1145) The minimum UNIQUE captures within [`UNIQUE_RATE_WINDOW_NS`] for retirement to engage at
+/// the given emit `interval_ns` — the window's theoretical full count minus
+/// [`RETIRE_UNIQUE_COUNT_MARGIN`]. `interval_ns == 0` (genlock off) never retires.
+pub fn retire_min_uniques(interval_ns: u64) -> usize {
+    if interval_ns == 0 {
+        return usize::MAX;
+    }
+    (UNIQUE_RATE_WINDOW_NS / interval_ns).saturating_sub(RETIRE_UNIQUE_COUNT_MARGIN) as usize
+}
 
 // ── (#889/#1145) victim-selection decision ────────────────────────────────────
 
@@ -239,14 +280,13 @@ impl DecimationGate {
         self.next_boundary_ns
     }
 
-    /// (#1145) Record a UNIQUE capture arriving at `now_ns` into the trailing window (dropping
-    /// entries older than [`UNIQUE_RATE_WINDOW_NS`]) and return whether the window now holds at
-    /// least [`RETIRE_MIN_UNIQUES_IN_WINDOW`] uniques — i.e. the source carries enough distinct
-    /// content to hold a steady 60 fps after shedding its surplus dupes. A COUNT over the window
-    /// (not an interval EMA) reads the true unique RATE regardless of per-frame jitter or dupe
-    /// clustering.
-    fn record_unique_and_enough(&mut self, now_ns: u64) -> bool {
-        self.unique_capture_times.push_back(now_ns);
+    /// (#1145) Prune the trailing unique-capture window to entries within [`UNIQUE_RATE_WINDOW_NS`]
+    /// of `now_ns`. Called on EVERY poll (dupe or unique) so the COUNT is honest at every instant —
+    /// a dupe read must NOT see a stale-high count (that is the #1145-review 🔴 frozen-source
+    /// blackout), and the honest count is what makes the tight over-rate-vs-starved separation
+    /// predictable. A COUNT over the window (not an interval EMA) reads the true unique RATE
+    /// regardless of per-frame jitter or dupe clustering.
+    fn prune_unique_window(&mut self, now_ns: u64) {
         let cutoff = now_ns.saturating_sub(UNIQUE_RATE_WINDOW_NS);
         while let Some(&front) = self.unique_capture_times.front() {
             if front <= cutoff {
@@ -255,7 +295,31 @@ impl DecimationGate {
                 break;
             }
         }
-        self.unique_capture_times.len() >= RETIRE_MIN_UNIQUES_IN_WINDOW
+    }
+
+    /// (#1145) Does the trailing window prove the source carries enough DISTINCT content to hold a
+    /// steady emit at `interval_ns` after shedding its surplus dupes — the signal that gates
+    /// retirement vs the late-dupe copy valve? TWO conditions, both required:
+    /// - COUNT: at least [`retire_min_uniques`] uniques in the trailing [`UNIQUE_RATE_WINDOW_NS`]
+    ///   (a near-full-target unique rate) — separates a genuine over-rate from a starved sub-target
+    ///   source (a 50->60 pulldown), which stays on the copy valve.
+    /// - FRESHNESS (#1145 review 🔴): the most recent unique arrived within
+    ///   [`RETIRE_UNIQUE_FRESH_BOUND_INTERVALS`] emit intervals of `now`. A genuinely FROZEN source
+    ///   (100% content-dupes — a dead painter / wedged upstream) never refreshes the window, so its
+    ///   stale COUNT stays high; without the freshness gate retirement would fire forever and
+    ///   collapse the emit to ~0 fps (a total BLACKOUT). Freshness makes a freeze fall back to the
+    ///   copy valve (a frozen picture on a LIVE stream — the pre-#1145 behavior).
+    fn enough_unique_to_hold_target(&self, now_ns: u64, interval_ns: u64) -> bool {
+        if self.unique_capture_times.len() < retire_min_uniques(interval_ns) {
+            return false;
+        }
+        match self.unique_capture_times.back() {
+            Some(&last_unique_ns) => {
+                now_ns.saturating_sub(last_unique_ns)
+                    <= RETIRE_UNIQUE_FRESH_BOUND_INTERVALS.saturating_mul(interval_ns)
+            }
+            None => false,
+        }
     }
 
     /// Feed ONE captured frame (`now_ns` wall-clock capture instant, `content_hash` from
@@ -297,18 +361,33 @@ impl DecimationGate {
             interval_ns,
         );
 
+        // (#1145 review 🔵) A BACKWARD DanteSync clock step (#131) leaves the window's pre-step
+        // timestamps "in the future" (`> now_ns`), which would block pruning for the step's duration
+        // and inflate the count in the aggressive (retire-forcing) direction. Clear the window so a
+        // capture after a backward step re-latches from scratch — mirrors `genlock_emit_gate`'s own
+        // backward re-latch.
+        if self
+            .unique_capture_times
+            .back()
+            .is_some_and(|&back| back > now_ns)
+        {
+            self.unique_capture_times.clear();
+        }
+
         let is_dupe = self.prev_hash == Some(content_hash);
         self.prev_hash = Some(content_hash);
 
-        // (#1145) A unique capture updates the trailing unique-rate window; a dupe reads it without
-        // touching it (a dupe carries no new distinct content). `enough_unique` is the robust
-        // "source can hold 60 without copies" signal that separates over-rate retirement from a
-        // genuine starved-source (pulldown) where the late-dupe copy valve must stay engaged.
-        let enough_unique = if is_dupe {
-            self.unique_capture_times.len() >= RETIRE_MIN_UNIQUES_IN_WINDOW
-        } else {
-            self.record_unique_and_enough(now_ns)
-        };
+        // (#1145) A unique capture updates the trailing unique-rate window; a dupe carries no new
+        // distinct content so it only READS it. `enough_unique` is the robust "source can hold the
+        // target without copies" signal (a near-full unique rate AND a recent unique) that separates
+        // over-rate retirement from BOTH a genuine starved-source (pulldown — the copy valve holds
+        // the grid) and a frozen source (no recent unique — the copy valve holds a frozen picture on
+        // a live stream, never a blackout).
+        if !is_dupe {
+            self.unique_capture_times.push_back(now_ns);
+        }
+        self.prune_unique_window(now_ns);
+        let enough_unique = self.enough_unique_to_hold_target(now_ns, interval_ns);
 
         match dupe_shed_action(
             would_emit,
@@ -630,15 +709,18 @@ mod tests {
 
     #[test]
     fn summary_names_all_counts_and_the_ticket_tags() {
-        let s = dupe_shed_summary(4, 12, 7, 9, 5);
+        // (#1145 review 🔵) Distinctive multi-digit counts that do NOT appear as substrings of the
+        // ticket tags (889/1111/1145) or each other, so each assertion actually pins its own count
+        // rather than being satisfied by a digit from a ticket number.
+        let s = dupe_shed_summary(41, 23, 67, 94, 36);
         assert!(s.contains("#889"));
         assert!(s.contains("#1111"), "names the late-dupe copy valve");
         assert!(s.contains("#1145"), "names the retirement mechanism");
-        assert!(s.contains('4'));
-        assert!(s.contains("12"));
-        assert!(s.contains('7'), "names the emitted-copy count");
-        assert!(s.contains('9'), "names the retired-boundaries count");
-        assert!(s.contains('5'));
+        assert!(s.contains("41"), "names the dupe-victim shed count");
+        assert!(s.contains("23"), "names the blind-pacing shed count");
+        assert!(s.contains("67"), "names the emitted-copy count");
+        assert!(s.contains("94"), "names the retired-boundaries count");
+        assert!(s.contains("~36s"), "names the window seconds");
     }
 
     // ── the regression test: DecimationGate end-to-end on the validated pattern ─────
@@ -735,29 +817,35 @@ mod tests {
         );
     }
 
-    // ── (#1111) over-60 grabber: emit-gate must stay boundary-locked, no SKIPPED-boundary jumps ─
+    // ── (#1111/#1145) over-60 excess-dupe grabber: no SKIPPED-boundary jumps, no unique dropped ─
 
-    /// (#1111) Root-cause reproduction. A GENKI ShadowCast 2 grabber delivers ~62 fps against a
-    /// 60 Hz source with a byte-identical internal-buffer dupe ~every 15 captures (validated live,
-    /// CAM1 10.77.9.61). Before the fix, every #889 dupe DEFERRAL held the wall-clock boundary
-    /// while `now` advanced, ratcheting the gate's lag +1 interval per deferral until it crossed
-    /// `crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS` (8) and `genlock_pacing::genlock_emit_gate`'s resync branch
-    /// leapt ~9 boundaries at once — the `#707 SKIPPED boundaries ... 9 boundary interval(s)` WARN
-    /// seen live every ~12 s, dipping the emitted rate to ~58 fps and driving the strih
-    /// genlock-FIFO to relock (visible judder). This drives the EXACT production wiring
-    /// (`DecimationGate::poll` + `genlock_pacing::boundary_skip_count`, as `src/main.rs` wires it) and asserts
-    /// the fix: the boundary grid stays locked to wall-clock (zero skips), the emitted rate holds
-    /// ~60.00, and not one unique tick is dropped. RED before the fix (~18 skipped intervals over
-    /// 8 s), GREEN after.
+    /// (#1111 lineage, behavior updated by #1145) A GENKI ShadowCast 2 grabber delivering ~62 fps
+    /// with a byte-identical internal-buffer dupe ~every 15 captures — an EXCESS-dupe pattern whose
+    /// UNIQUE rate is genuinely sub-target (62 - 62/15 = ~57.9 unique fps, NOT the rig's true-60).
+    /// Before #1111 every #889 dupe DEFERRAL ratcheted the lag until it tripped the #707 resync
+    /// (~9-boundary leaps, `#707 SKIPPED boundaries` WARN, strih genlock-FIFO relock). #1111 stopped
+    /// the resync; it then EMITTED the late dupes as ~2 copies/s to hold a steady 60.
+    ///
+    /// #1145 SUPERSEDES the "hold 60 via copies" behavior for THIS input: 57.9 unique fps is a
+    /// genuine sub-target deficit but sits ABOVE the #666 emit-deficit floor (57 fps), so v2 RETIRES
+    /// the surplus dupes and emits the HONEST ~57.9 fps (all unique, zero copies) rather than
+    /// fabricating copies — the strih FIFO absorbs the gentle, EVENLY-SPREAD 2.1 fps underrun exactly
+    /// as it would the 2.1 copies/s (same downstream visual), and there is no lag leap to relock it.
+    /// The LOAD-BEARING guarantees are unchanged and still asserted: ZERO #707 skips and NOT ONE
+    /// unique tick dropped. (A source BELOW 57 unique fps — a real 50->60 pulldown — still gets the
+    /// copy valve; see `starved_source_still_emits_copies_to_hold_60_not_retired_1145`.)
     #[test]
-    fn over_rate_dupe_input_stays_boundary_locked_at_60_without_skips_1111() {
+    fn over_rate_excess_dupe_input_stays_boundary_locked_without_skips_1145() {
         // ~8 s of the validated ShadowCast pattern: 62 fps captured, an isolated dupe every 15th.
         let seconds = 8usize;
         let captures = synthetic_889_capture_sequence(62.0, 62 * seconds, 15);
         let emit_interval_ns = 1_000_000_000u64 / 60;
 
+        // Excludes the ~2 s unique-rate-window warm-up (before retirement engages a dupe emits a
+        // copy) from the steady-state copy assertion, mirroring the #889/#1145 tests' WARMUP note.
+        const WARMUP_NS: u64 = 3_000_000_000;
         let mut gate = DecimationGate::new();
-        let mut emitted_ids: Vec<u64> = Vec::new();
+        let mut emitted: Vec<(u64, u64)> = Vec::new();
         let mut total_skips: u64 = 0;
         for (now_ns, content_id, _is_dupe) in &captures {
             // EXACT src/main.rs wiring: snapshot the boundary, poll, then measure the #707 skip.
@@ -770,34 +858,52 @@ mod tests {
                 emit_interval_ns,
             );
             if emit {
-                emitted_ids.push(*content_id);
+                emitted.push((*now_ns, *content_id));
             }
         }
+        let (_dupe_shed, _blind_shed, _dupe_emitted, retired) = gate.take_shed_counts();
+        let emitted_ids: Vec<u64> = emitted.iter().map(|(_, id)| *id).collect();
 
-        // (1) The fix: a 62 fps over-rate + frequent dupes must NOT trip the #707 resync — the
-        // boundary grid never leaps. Before the fix this is ~18 (two ~9-interval leaps over 8 s).
+        // (1) LOAD-BEARING (#1111): a 62 fps over-rate + frequent dupes must NOT trip the #707 resync
+        // — the boundary grid never leaps. Before #1111 this is ~18 (two ~9-interval leaps over 8 s).
         assert_eq!(
             total_skips, 0,
             "over-60 capture must stay boundary-locked (zero #707 SKIPPED boundaries); got \
              {total_skips} skipped interval(s) — the #889 dupe-deferral lag ratchet is back"
         );
 
-        // (2) The emitted rate holds ~60.00 (the receiver's stable-60 requirement). Before the fix
-        // the periodic skips drag it to ~57.4 fps.
+        // (2) #1145: the surplus dupes are RETIRED (not emitted as copies), so the emitted rate is
+        // the HONEST unique rate ~57.9 (all distinct). Past the warm-up the emitted stream carries
+        // ZERO content-duplicates (retirement, not the copy valve).
+        let steady_copies = emitted
+            .iter()
+            .filter(|(now_ns, _)| *now_ns >= WARMUP_NS)
+            .map(|(_, id)| *id)
+            .collect::<Vec<u64>>()
+            .windows(2)
+            .filter(|w| w[0] == w[1])
+            .count();
+        assert_eq!(
+            steady_copies, 0,
+            "no content-copy may be emitted at a 57.9-unique source above the #666 floor once the \
+             window has filled; got {steady_copies} steady-state copies (should all be retired)"
+        );
+        assert!(
+            retired > 0,
+            "the surplus dupes must be retired; retired {retired}"
+        );
         let emit_rate = emitted_ids.len() as f64 / seconds as f64;
         assert!(
-            (59.5..=60.2).contains(&emit_rate),
-            "emitted rate must hold ~60.00 fps from an over-60 source; got {emit_rate:.2} fps \
-             ({} emitted over {seconds}s)",
+            (57.0..=59.0).contains(&emit_rate),
+            "emitted rate must trend to the honest ~57.9 unique fps (retired surplus dupes); got \
+             {emit_rate:.2} fps ({} emitted over {seconds}s)",
             emitted_ids.len()
         );
 
-        // (3) Not one unique tick is dropped (a dropped unique = a genlock-FIFO gap). The ~2
-        // mathematically-unavoidable repeats/s (58 unique fps -> 60 emitted) land on the grabber's
-        // OWN late dupes, never on a genuine unique frame. Skip the cold-start warm-up (the first
-        // boundary latches one interval after the first capture, so the opening capture or two are
-        // blind-decimated by simulation-start phase, unrelated to this fix — same WARMUP note as
-        // the #889 test above).
+        // (3) LOAD-BEARING: not one unique tick is dropped (a dropped unique = a genlock-FIFO gap).
+        // Retirement sheds only the grabber's OWN dupes, never a genuine unique frame. Skip the
+        // cold-start warm-up (the opening capture or two are blind-decimated by simulation-start
+        // phase, unrelated to this fix — same WARMUP note as the #889 test above).
         const WARMUP_CAPTURES: usize = 4;
         let all_unique_ids: std::collections::BTreeSet<u64> = captures
             .iter()
@@ -1087,6 +1193,52 @@ mod tests {
             (59.0..=60.5).contains(&emit_rate),
             "a starved source must still emit a steady ~60 (via copies), not silently drop; got \
              {emit_rate:.2} fps"
+        );
+    }
+
+    #[test]
+    fn frozen_source_falls_back_to_copies_never_a_blackout_1145() {
+        // (#1145 review 🔴) A genuinely FROZEN source (100% byte-identical captures — a dead painter
+        // / wedged upstream feeding a still) must NOT collapse the emit: without the freshness gate,
+        // the stale unique-rate window keeps `enough_unique` TRUE forever, so every frozen dupe
+        // RETIRES (advancing the boundary without emitting) and the NDI emit falls to ~0 fps (a total
+        // BLACKOUT — strictly worse than a frozen picture on a broadcast rig). The freshness gate
+        // makes a freeze fall back to the late-dupe copy valve within a few intervals, holding a
+        // steady ~60 fps of copies (a frozen PICTURE on a LIVE, FIFO-fed stream — the pre-#1145
+        // behavior). RED before the freshness gate (emit ~0.2 fps), GREEN after.
+        let emit_interval_ns = 1_000_000_000u64 / 60;
+        // 5 s of a healthy over-rate stream (retirement engages), then 5 s frozen (all one hash).
+        let captures = synthetic_over_rate_with_jitter(61.3, 0.20, 1, 5);
+        let mut gate = DecimationGate::new();
+        // drive the healthy warm-up so retirement is fully engaged before the freeze.
+        let mut last_now = 0u64;
+        for (now_ns, content_id) in &captures {
+            let _ = gate.poll(*now_ns, emit_interval_ns, *content_id, false);
+            last_now = *now_ns;
+        }
+        let _ = gate.take_shed_counts(); // reset counters; measure only the frozen span
+                                         // now freeze for 5 s: same hash every capture at the ~61.3 fps takt.
+        let cap_interval_ns = (1_000_000_000.0f64 / 61.3) as u64;
+        let frozen_hash = 999_999_999u64;
+        let frozen_captures = (61.3 * 5.0) as u64;
+        let mut frozen_emitted = 0usize;
+        for i in 1..=frozen_captures {
+            let now_ns = last_now + i * cap_interval_ns;
+            if gate.poll(now_ns, emit_interval_ns, frozen_hash, false) {
+                frozen_emitted += 1;
+            }
+        }
+        let (_dupe_shed, _blind_shed, dupe_emitted, _retired) = gate.take_shed_counts();
+        let frozen_emit_rate = frozen_emitted as f64 / 5.0;
+        assert!(
+            frozen_emit_rate >= 55.0,
+            "a frozen source must keep emitting a steady ~60 fps of copies (a frozen picture on a \
+             live stream), NEVER collapse to a blackout; got {frozen_emit_rate:.2} fps emitted over \
+             the frozen span"
+        );
+        assert!(
+            dupe_emitted > 0,
+            "the frozen span must fall back to the late-dupe copy valve; dupe_emitted {dupe_emitted}"
         );
     }
 }
