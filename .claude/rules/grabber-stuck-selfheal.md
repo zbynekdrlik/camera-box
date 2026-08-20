@@ -70,7 +70,20 @@ pages" pattern as the #663 marker). It reuses `obs-watchdog-decision.sh` (confir
 (splitter-port / network-reach / optical-chain). **discord-volume-near-zero:** the throttle is set
 huge (`GRABBER_STUCK_WATCH_THROTTLE_PASSES=1000000`) so a chronic stuck grabber pages exactly ONCE
 per episode (never a repeated chronic alert); a recovery ping fires once on return-to-OK. NODATA
-(ssh blip / box off) never pages and never false-recovers. `scripts/lib/grabber-stuck-health.sh` is
+(ssh blip / box off) never pages and never false-recovers.
+
+**DELIBERATE deviation from the sibling watchdogs on NODATA — do NOT "align" it back (#1128 review
+🔵).** The siblings (splitter-port / network-reach) call one `clear_box_throttle` on BOTH OK and
+NODATA, which resets the alert signature. Under strict one-ping-per-episode that lets a single
+transient NODATA (ssh blip) BETWEEN two stuck passes clear the latch, so the next confirm cycle
+pages a SECOND time for the SAME episode. This watchdog splits it: OK (a genuine recovery)
+full-clears (`clear_box_throttle`); NODATA clears ONLY the confirm counter
+(`clear_box_confirm_only`) and LEAVES the alert sig/passes intact — a mid-episode blip cannot
+produce a second page. Pinned by
+`a_transient_nodata_blip_mid_episode_does_not_produce_a_second_page`; keep the split if you ever
+refactor toward the sibling convention, or the double-page returns.
+
+`scripts/lib/grabber-stuck-health.sh` is
 the pure classify (`STUCK`/`OK`/`NODATA`) + marker-fps parse — Tier-0 tested
 (`tests/harness_grabber_stuck_health_1128.rs`), the driver by
 `tests/harness_grabber_stuck_watchdog_1128.rs`.
