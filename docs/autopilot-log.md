@@ -9585,3 +9585,33 @@ No push/PR/rig touch (worktree worker).
 - Verified: bash-level RED->GREEN (old lib reports live gather as picom-DRIFT + 4 facets; new lib = 5 OK); LIVE end-to-end gather over ssh from imag-nb = 5/5 OK; drift-guard check_imag_report picom-off + panel-primary each -> exit 20; cargo fmt --all --check clean; bash -n + shellcheck -S error clean on all 3 scripts; anchor occurrence-sweep clean (only the intended primary reversal + TOTAL_STEPS counts changed). Tier-0: no cargo compile locally; the .rs type-check + test run happen on CI.
 - TDD: RED test commit (e27304f60) before GREEN impl (7f11a74b4). Fresh-context adversarial review = 0 red / 1 yellow / 2 blue; the yellow (drift-guard check #10 comment still described the old picom-off doctrine) fixed in-branch (459b404cd); both blue are no-change-required design notes.
 - WORKTREE MODE — stopped at green LOCAL result; supervisor integrates (merge/CI/deploy/card). Rig-side proof that tearing is gone stays owner-sensed until the #781 HDMI tap lands (report-only facets guard the deterministic CONFIG, never the scanout).
+## 2026-08-20 — batch #1114 + #1126 (E2E harness timing races), worktree worker-1114-e2efix
+
+- v1.7.0-dev.498. One PR closes both. Base 4daa892d6.
+- #1114 (harness residual; the WS-side CLEAR-then-SET reattach was already merged): after the
+  reattach resets strih's NDI receiver, the fresh DistroAV finder re-resolves the live burn sender
+  in ~2min > the ~52s [2/8] budget -> false "camera leg is dead" + destructive #1093 force-kill.
+  Fix: new sourced helper `mv_reverify_resolve_wait` (scripts/lib/mv-reverify-escalate.sh) called
+  once inside preflight_mv_reverify after the once-only attempt-1 reattach kick (DEPLOY context
+  only, gated `!= "cleanup"`): a REAL bounded poll of the SAME frozen-camera-gate.py gate, exits
+  the instant a pixel changes; SECONDS-based wall-clock deadline (RESOLVE_SETTLE_S=120,
+  RESOLVE_CADENCE_S=6). RED test harness_mv_reverify_resolve_wait_1114 (7ecb0cdf3) -> GREEN
+  (f5b6c26ab) -> review 91f964abc. GOTCHA relearned: a comment inside preflight_mv_reverify must
+  NOT contain the literal `strih_mv_scenes.py` or it becomes a 2nd body occurrence and breaks the
+  #758 "reattach only once" count.
+- #1126 (cleanup false-red): the cam2/painter restore runs serial work in one 30s ssh; a slow
+  restart SIGKILLs ~47ms before the unit reports active, #715 retry never prunes a painter -> false
+  ::error:: on a GREEN-verdict run. Fix: new lib scripts/lib/cam2-painter-restore-recheck.sh
+  (`cam2_painter_restore_final_recheck`) called in cleanup() between cambox_parallel_wait_and_report
+  and cambox_parallel_surface_painter_failure: ONE separate short bounded ssh re-check of the
+  presenter-aware genuine-painting signal (KMS+vblank / fb0, never bare is-active) that prunes
+  cam2/painter (+ lockstep FAILED_IPS) only when genuinely painting. RED test
+  harness_cam2_painter_restore_recheck_1126 (179639d8c) -> GREEN (31c3e2d98) -> review 3b2b2c0cf.
+  Review 🟡-1: not-installed / list-unit-files-hiccup must EXIT 1 (no false prune) — a prune may
+  only fire on a POSITIVE paint signal, else it masks the #863 black monitor.
+- Review (fresh Explore, Opus 4.8): 0 🔴 2 🟡 4 🔵; all fixed in-branch except 🔵-1 (paint-signal
+  duplicated across 5 libs -> follow-up #1148, Scope-gate: cross-cutting).
+- Tier-0 verify (no cargo compile): bash -n + shellcheck -S error/warning clean; functional bash
+  RED->GREEN + set-euo-pipefail #1133 lock cases for both; python anchor-occurrence sweep clean
+  (no 1->0 / 1->2; strih_mv_scenes.py body count stays 1, whole-file 3); cargo fmt --all --check
+  clean; all #758/#759/#863/#860 structural invariants + lib anchor counts confirmed unchanged.

@@ -4,10 +4,12 @@ paths:
   - "scripts/lib/cam2-painter-handoff.sh"
   - "scripts/lib/cam2-painter-restore-verify.sh"
   - "scripts/lib/cam2-painter-restore-retry.sh"
+  - "scripts/lib/cam2-painter-restore-recheck.sh"
   - "scripts/lib/cam2-painter-deadman.sh"
   - "systemd/cam2-painter.service"
   - "tests/harness_cam2_painter_steady_state_handoff.rs"
   - "tests/harness_cam2_painter_coordination.rs"
+  - "tests/harness_cam2_painter_restore_recheck_1126.rs"
 ---
 
 # cam2 painter lifecycle — WHO paints /dev/fb0 (+ emits the QPSK marker) in each state (#1008/#937)
@@ -86,3 +88,28 @@ combination unifies worst-case recovery to ~5 min on BOTH the clean-cleanup and 
   `systemctl start $service` over ssh + re-probe before the existing `exit 1` fail-closed backstop.
   No retry loop — the periodic on-box dead-man is the net; this is one fast recovery so a
   previous run's leftover-dead painter does not waste the whole gate run.
+
+## cleanup() final restore re-check — a PRUNE decision may fire only on a POSITIVE paint signal (#1126)
+
+`scripts/lib/cam2-painter-restore-recheck.sh` (`cam2_painter_restore_final_recheck`) runs in
+cleanup() BETWEEN `cambox_parallel_wait_and_report` and `cambox_parallel_surface_painter_failure`.
+The cam2/painter restore does a lot of serial work inside ONE `CLEANUP_SSH_TIMEOUT`(=30s) ssh; on a
+slow restart `timeout` SIGKILLs it a hair (~50ms live, run 1104689227) BEFORE cam2-painter.service
+reports active — the restore SUCCEEDED, only the verify window lost the race — and since the #715
+retry never prunes a painter, a false `::error::` reds a GREEN-verdict run. The re-check is ONE
+separate short bounded ssh (its own `CAM2_PAINTER_RECHECK_TIMEOUT`=25s < 30s, so it never widens the
+tight parallel-restore budget / cancellation grace) that prunes cam2/painter from
+`CAMBOX_PARALLEL_FAILED_LABELS` (+ lockstep `_FAILED_IPS`) only when genuinely painting NOW.
+
+**Gotcha — a check whose exit code drives a PRUNE must NOT reuse the WARN-only "unit not installed →
+no-op" convention.** `cam2_painter_restore_verify_cmds` treats "unit not installed" as a harmless
+`[#863] nothing to verify` (it changes no gating decision). But `cam2_painter_genuine_paint_check_cmd`'s
+exit code REMOVES a recorded restore failure + suppresses the #860 `::error::`, so it must EXIT 1
+(not 0) on not-installed / a `list-unit-files` hiccup: a prune may fire ONLY on a POSITIVE paint
+signal (KMS device held + `vblank-locked`, OR `/dev/fb0` held), never on absence-of-painter — that
+absence IS the #863 black-monitor case a prune must never mask. Same discipline for any future
+prune/gating reuse of a WARN-only signal.
+
+**Duplication debt:** this paint signal now lives in 5 libs (verify / retry-adjacent / handoff /
+presenter-liveness / mv-reverify-escalate / this recheck) — follow-up #1148 tracks consolidating
+them (a fix to the signal in one copy must not silently leave the others false-passing).

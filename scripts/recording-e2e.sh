@@ -135,6 +135,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # a failed restore leaves the (now periodic ~5-min) dead-man armed to self-heal.
 # shellcheck source=scripts/lib/cam2-painter-restore-retry.sh
 . "$HERE/lib/cam2-painter-restore-retry.sh"
+# #1126: ONE final bounded genuine-painting re-check AFTER the parallel-restore wait, to prune
+# cam2/painter from the failed ledger when its restore actually SUCCEEDED but the combined 30s
+# restore ssh's verify window lost the race by ~50ms (a false ::error:: on a GREEN-verdict run).
+# shellcheck source=scripts/lib/cam2-painter-restore-recheck.sh
+. "$HERE/lib/cam2-painter-restore-recheck.sh"
 # #1093: ORDERING PROOF (cam2-painter must be PAINTING before the cam-pixel probe -- cam1's picture
 # IS the painter's HDMI) + RECEIVER-WEDGE ESCALATION (issue 1096: strih's DistroAV never re-locks
 # after a sender bounce -> restart strih OBS once, re-check once). All logic lives in the lib; this
@@ -1428,6 +1433,20 @@ preflight_mv_reverify() {
     if [ "$a" -eq 1 ]; then
       echo "    [sender-bounce] ${box} (NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
       timeout "$call_timeout" python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
+      # #1114: the re-attach above is a CLEAR-then-SET receiver reset (the merged WS-side fix) that
+      # tears down + rebuilds strih's NDI receiver — so its fresh DistroAV
+      # finder must re-resolve the live post-bounce burn sender by URL, MEASURED at up to ~2 min on
+      # the live rig. Give it its OWN bounded re-resolve window right after the kick (mv_reverify_
+      # resolve_wait: a real poll that exits the instant a pixel changes, so a fast re-lock costs ~0
+      # extra), so the short attempt budget below cannot false-fail a genuinely-live-but-still-
+      # resolving leg into the destructive receiver-wedge escalation. Deploy context only — the
+      # cleanup caller (attempts=1) must stay fast enough never to outlast a GH-Actions cancellation
+      # grace window.
+      if [ "${PREFLIGHT_MV_REVERIFY_CONTEXT:-preflight}" != "cleanup" ]; then
+        if mv_reverify_resolve_wait "$box" "$cam_n" "$call_timeout"; then
+          return 0
+        fi
+      fi
     fi
     if [ "$a" -lt "$attempts" ]; then
       echo "    [sender-bounce] ${box} attempt ${a}/${attempts} still no pixel change — settling ${settle_s}s for the NDI reconnect, then re-sampling" >&2
@@ -1653,6 +1672,14 @@ fi"
   # device-restore phase's wall-clock is now bounded by the SLOWEST single box, not the sum of
   # up to 6 sequential ssh round trips.
   cambox_parallel_wait_and_report
+  # #1126: ONE final bounded genuine-painting re-check of cam2/painter BEFORE surfacing the failure.
+  # The combined 30s restore ssh can SIGKILL a hair (~50ms) before cam2-painter.service reports
+  # active on a slow restart; the restore succeeded, only the verify window lost the race, and the
+  # #715 retry never prunes a painter — so without this a truthful-but-late success reds a
+  # GREEN-verdict run. This re-check (a separate short ssh, never extending the tight restore budget)
+  # prunes cam2/painter from CAMBOX_PARALLEL_FAILED_LABELS ONLY when it is genuinely painting NOW
+  # (presenter-aware signal, never bare is-active — a dead painter stays and the #860 error fires).
+  cam2_painter_restore_final_recheck "$PAINTER_IP"
   # #860: surface a cam2/painter (or any box) restore failure LOUDLY as a GitHub annotation instead
   # of leaving it a buried stderr WARNING #712 — a chain of failed cleanups left the painter dead +
   # silently poisoned consecutive gate runs (2026-08-14). Reads CAMBOX_PARALLEL_FAILED_LABELS the
