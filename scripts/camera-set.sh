@@ -82,6 +82,16 @@
 # first strih-routable member of a cam1-first set again).
 CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
 
+# CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
+# aligned. This is DELIBERATELY a SUPERSET of CAMERA_ACTIVE_SET, not derived from it: the two answer
+# DIFFERENT questions. CAMERA_ACTIVE_SET = the cameras the measurable E2E sweep decodes/samples (cam4
+# is excluded from it because its own capture leg can wedge, #947). CAMERA_ALIGN_SET = every camera
+# that REALLY goes on-air to strih, which the owner's rework mandate (issue 1003, 2026-08-20) says
+# MUST include cam4 — the offline-ack "outside-measured-set" covers only E2E measurement, never
+# production alignment. So cam4 stays out of the sweep but IS aligned. Override to match the on-air
+# reality if the fleet changes (e.g. a cam5 goes on-air): CAMERA_ALIGN_SET="cam1 cam2 cam3 cam4 cam5".
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-cam1 cam2 cam3 cam4}"
+
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.
 #
@@ -254,6 +264,37 @@ camera_active_sweep_pairs() {
 camera_active_ndi_sources_csv() {
   local cam out=""
   for cam in $CAMERA_ACTIVE_SET; do
+    out="${out:+$out,}NDI $cam"
+  done
+  printf '%s' "$out"
+}
+
+# camera_align_ndi_sources_csv -> prints (stdout) "NDI cam1,NDI cam2,NDI cam3,NDI cam4" -- the
+# comma-joined strih NDI-input list for CAMERA_ALIGN_SET (the on-air alignment superset, incl.
+# cam4). Used by the #1003 floor-3 per-run aligner (scripts/qr_align_pins.py --sources) so the
+# alignment set derives from CAMERA_ALIGN_SET, never a literal cam range. The 1:1 "NDI cam<N>"
+# convention matches camera_strih_route / set-ndi-mapping.py.
+camera_align_ndi_sources_csv() {
+  local cam out=""
+  for cam in $CAMERA_ALIGN_SET; do
+    out="${out:+$out,}NDI $cam"
+  done
+  printf '%s' "$out"
+}
+
+# camera_align_ndi_sources_excluding_csv <excluded> -> the align CSV with any word in EXCLUDED
+# (space-separated cam names) removed -- the offline-ack sibling of camera_align_ndi_sources_csv,
+# mirroring camera_active_ndi_sources_excluding_csv. The floor-3 aligner (#1003 review 🟡) passes
+# recording-e2e.sh's PREFLIGHT_EXCLUDED_CAMS here so an acked-OFFLINE on-air camera (a temporarily
+# wedged cam4) is NOT required to decode a painter QR -- otherwise one acked box would abort the
+# WHOLE run. cam4 is aligned when HEALTHY (it stays in CAMERA_ALIGN_SET); it is dropped only while
+# explicitly acked offline, exactly like the freeze-watch's active-set exclusion. Word-exact match.
+camera_align_ndi_sources_excluding_csv() {
+  local excluded="${1:-}" cam out=""
+  for cam in $CAMERA_ALIGN_SET; do
+    case " ${excluded} " in
+      *" ${cam} "*) continue ;;
+    esac
     out="${out:+$out,}NDI $cam"
   done
   printf '%s' "$out"

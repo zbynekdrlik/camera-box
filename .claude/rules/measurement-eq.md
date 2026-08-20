@@ -9,6 +9,22 @@ paths:
 
 # Measurement-window per-camera A/V equalization (#1003, `MEASUREMENT_EQ`)
 
+> **SUPERSEDED as the production-alignment path (#1003 owner rework, 2026-08-20).** The
+> DELIVERY-equalized DEEP pins this profile derives (`resolve_pins` → 90/160/184, `resolve_hold` →
+> 791) were PROMOTED to production, then REJECTED by the owner and REVERTED (`0aaa2fc93`): absolute
+> deep pins add ~180 ms of needless chain latency, and the single delivery-p50 sample baked in a
+> degraded cam1 grabber. Production alignment is now the per-run **FLOOR-3 auto-align**
+> (`scripts/qr_align_pins.py`, wired as `recording-e2e.sh`'s BLOCKING `[4i/8align]` step): the
+> slowest camera → pin 3, others → 3 + their RELATIVE delta from the exact simultaneous painter-QR
+> `gen_ts_ns` difference (medianed, underrun-excluded), covering ALL on-air cameras incl. cam4
+> (`CAMERA_ALIGN_SET`), verified by re-measuring the `frame_id` spread ≤ 1. See
+> `.claude/rules/latency-pins-verify.md` → "Production alignment = the per-run FLOOR-3 auto-align".
+> This `MEASUREMENT_EQ` profile REMAINS a valid OPT-IN experiment (its own report-only diagnostics
+> unaffected) and is MUTUALLY EXCLUSIVE with the `[4i/8align]` step in one run (both write strih
+> pins), but it is NO LONGER the model for setting production alignment pins. Do NOT re-promote its
+> deep output to the committed baseline. Do NOT hand-bake floor-3 numbers into the profile either —
+> the floor-3 pins are re-derived LIVE per run, never committed.
+
 An OPT-IN (`MEASUREMENT_EQ=1`, default OFF) harness mode that, during an ALL_CAMBOX E2E run, applies
 delivery-equalized-deep strih per-camera pins + a coherent stream hold FOR THE MEASUREMENT WINDOW
 ONLY (snapshot-set-restore), so the inter-camera A/V spread collapses in the measurement without
