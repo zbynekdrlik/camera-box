@@ -165,13 +165,35 @@ fn recheck_uses_the_presenter_aware_painting_signal_not_bare_is_active() {
             && lib.contains("cam2_painter_genuine_paint_check_cmd()"),
         "#1126: the lib must define the recheck + its genuine-paint remote-check builder"
     );
+    // #1148: the SIGNAL itself is now the shared scripts/lib/cam2-paint-signal.sh
+    // `_cb_paint_signal` (single source of truth), lazy-sourced here instead of an inline copy.
     assert!(
-        lib.contains("presenter: using DRM/KMS page-flip")
-            && lib.contains("vblank-locked")
-            && lib.contains("/dev/fb0"),
-        "#1126: the paint check must use the SAME presenter-aware signal (KMS device held + \
-         vblank-locked, OR /dev/fb0 held) as cam2_painter_restore_verify_cmds — never bare \
-         is-active, which cannot tell a painting monitor from a black one (#863/#860)"
+        lib.contains("cam2-paint-signal.sh") && lib.contains("_cb_paint_signal"),
+        "#1148: the recheck must source the shared cam2-paint-signal.sh predicate (single source \
+         of truth), never re-inline the signal literals — a future signal correction must land in \
+         ONE place, not risk five divergent copies (#863/#860)"
+    );
+    // The EMITTED remote command must still carry the presenter-aware signal (via the shared
+    // `_cb_paint_signal` definition the builder emits), so it actually reaches the cam box — never
+    // a bare is-active, which cannot tell a painting monitor from a black one (#863/#860).
+    let emitted = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -uo pipefail; source '{}'; cam2_painter_genuine_paint_check_cmd",
+            lib_path()
+        ))
+        .stdin(Stdio::null())
+        .output()
+        .expect("generate cam2_painter_genuine_paint_check_cmd");
+    let text = String::from_utf8_lossy(&emitted.stdout);
+    assert!(
+        text.contains("presenter: using DRM/KMS page-flip")
+            && text.contains("vblank-locked")
+            && text.contains("/dev/fb0"),
+        "#1126/#1148: the emitted paint check must carry the SAME presenter-aware signal (KMS \
+         device held + vblank-locked, OR /dev/fb0 held) as cam2_painter_restore_verify_cmds — \
+         never bare is-active, which cannot tell a painting monitor from a black one (#863/#860). \
+         Emitted:\n{text}"
     );
 }
 

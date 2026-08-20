@@ -41,44 +41,54 @@
 # came up. LOG_FILE and FB_DEVICE are baked in as literal values at generation time (mirrors every
 # other _cmds builder in this codebase); the `\$`-escaped names below (KMS_LINE, DRM_DEV, i) are
 # runtime bash evaluated on the REMOTE shell.
+
+# #1148: the presenter-appropriate PASS/FAIL predicate is now the shared `_cb_paint_signal`
+# (scripts/lib/cam2-paint-signal.sh), which echoes a reason token (KMS_OK / KMS_NODRM /
+# KMS_NOVBLANK / FBDEV_OK / FBDEV_DEAD + the parsed DRM device). This site keeps its granular,
+# operator-facing FAIL/PASS messages by MAPPING that token, so the SIGNAL lives in one place while
+# the diagnostics stay as detailed as before. Lazy-source it; emit its definition before the poll.
+command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/cam2-paint-signal.sh"
+
 painter_liveness_check_cmds() {
   local log_file="$1"
   local fb_device="${2:-/dev/fb0}"
+  cam2_paint_signal_remote_fn
   cat <<PCHECK
 i=0
 while [ \$i -lt 20 ]; do
-  KMS_LINE=\$(grep 'presenter: using DRM/KMS page-flip' "$log_file" 2>/dev/null | tail -n1 || true)
-  if [ -n "\$KMS_LINE" ]; then
-    DRM_DEV=\${KMS_LINE#*(}; DRM_DEV=\${DRM_DEV%)*}
-    if [ -n "\$DRM_DEV" ] && fuser -s "\$DRM_DEV" 2>/dev/null && grep -q 'vblank-locked' "$log_file" 2>/dev/null; then
-      break
-    fi
-  elif fuser -s "$fb_device" 2>/dev/null; then
-    break
-  fi
+  if cat "$log_file" 2>/dev/null | _cb_paint_signal "$fb_device" >/dev/null 2>&1; then break; fi
   sleep 0.5; i=\$((i+1))
 done
-KMS_LINE=\$(grep 'presenter: using DRM/KMS page-flip' "$log_file" 2>/dev/null | tail -n1 || true)
-if [ -n "\$KMS_LINE" ]; then
-  DRM_DEV=\${KMS_LINE#*(}; DRM_DEV=\${DRM_DEV%)*}
-  if [ -z "\$DRM_DEV" ] || ! fuser -s "\$DRM_DEV" 2>/dev/null; then
-    echo "FAIL: #464 KMS presenter selected (\$DRM_DEV) but that DRM device is not held (see $log_file):" >&2
+# NOTE the trailing '|| true': the production caller embeds this snippet under set -e (rig-mode.sh
+# painter_launch_remote). Without it a FAIL token (non-zero return) aborts THIS assignment before
+# the case runs, silently swallowing the granular FAIL message + log tail (a silent exit 1 - the
+# 464 operator-blindness this check exists to prevent). The token is still captured (it is echoed
+# before the function returns non-zero), so the case runs and the FAIL arm exits 1 with diagnostics.
+_reason="\$(cat "$log_file" 2>/dev/null | _cb_paint_signal "$fb_device" || true)"
+_tok="\${_reason%% *}"; _dev="\${_reason#* }"
+case "\$_tok" in
+  KMS_OK)
+    echo "PASS: #464 KMS presenter (\$_dev) alive + vblank-locked (tear-free page-flip; /dev/fb0 is NOT expected to be held)"
+    ;;
+  KMS_NODRM)
+    echo "FAIL: #464 KMS presenter selected (\$_dev) but that DRM device is not held (see $log_file):" >&2
     tail -n 20 "$log_file" >&2 2>/dev/null || true
     exit 1
-  fi
-  if ! grep -q 'vblank-locked' "$log_file" 2>/dev/null; then
-    echo "FAIL: #464 KMS presenter (\$DRM_DEV) held but no vblank-locked confirmation in $log_file:" >&2
+    ;;
+  KMS_NOVBLANK)
+    echo "FAIL: #464 KMS presenter (\$_dev) held but no vblank-locked confirmation in $log_file:" >&2
     tail -n 20 "$log_file" >&2 2>/dev/null || true
     exit 1
-  fi
-  echo "PASS: #464 KMS presenter (\$DRM_DEV) alive + vblank-locked (tear-free page-flip; /dev/fb0 is NOT expected to be held)"
-else
-  if ! fuser -s "$fb_device" 2>/dev/null; then
+    ;;
+  FBDEV_OK)
+    echo "PASS: fbdev presenter alive + painting $fb_device"
+    ;;
+  *)
     echo "FAIL: painter alive but NOT writing $fb_device (see $log_file):" >&2
     tail -n 20 "$log_file" >&2 2>/dev/null || true
     exit 1
-  fi
-  echo "PASS: fbdev presenter alive + painting $fb_device"
-fi
+    ;;
+esac
 PCHECK
 }

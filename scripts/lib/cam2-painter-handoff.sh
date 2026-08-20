@@ -38,9 +38,15 @@
 # AUDIO_MARKER_LOG default. FAIL LOUD (exit 1) makes the enclosing `cam_ssh` return non-zero, so
 # rig-mode.sh's own `set -euo pipefail` aborts TEST mode -- a durable painter that did not come up
 # is never reported as achieved.
+# #1148: (H5)'s paint check now sources the shared `_cb_paint_signal` (scripts/lib/cam2-paint-
+# signal.sh) instead of an inline copy; lazy-source it and emit its definition before the heredoc.
+command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/cam2-paint-signal.sh"
+
 cam2_painter_steady_state_handoff_cmds() {
   local pidfile="$1"
   local marker_log="${2:-/run/rig-qpsk-markers.csv}"
+  cam2_paint_signal_remote_fn
   cat <<HANDOFF
 set -e
 # (H1) the durable steady-state painter is the PERMANENT cam2-painter.service (#863). It MUST be
@@ -74,21 +80,14 @@ if [ "\$(systemctl is-active cam2-painter.service 2>/dev/null)" != "active" ]; t
   systemctl status cam2-painter.service --no-pager >&2 2>/dev/null || true
   exit 1
 fi
-# (H5) verify it is GENUINELY PAINTING -- presenter-aware (#464): the default --presenter auto
-#      lands on KMS page-flip (holds a DRM card, never /dev/fb0); the fbdev fallback holds
-#      /dev/fb0. Read the SERVICE journal for the presenter-selection line, then assert the
-#      matching held-device + vblank signal. FAIL LOUD -- an "active" unit painting nothing still
-#      leaves the monitor black.
+# (H5) verify it is GENUINELY PAINTING -- presenter-aware (#464), via the shared _cb_paint_signal
+#      (#1148): the default --presenter auto lands on KMS page-flip (holds a DRM card, never
+#      /dev/fb0); the fbdev fallback holds /dev/fb0. FAIL LOUD -- an "active" unit painting nothing
+#      still leaves the monitor black.
 _hp=0; _hok=""
 while [ \$_hp -lt 16 ]; do
   _hj="\$(journalctl -u cam2-painter.service -n 120 --no-pager 2>/dev/null || true)"
-  _hkms="\$(printf '%s\n' "\$_hj" | grep 'presenter: using DRM/KMS page-flip' | tail -n1 || true)"
-  if [ -n "\$_hkms" ]; then
-    _hdrm="\${_hkms#*(}"; _hdrm="\${_hdrm%)*}"
-    if [ -n "\$_hdrm" ] && fuser -s "\$_hdrm" 2>/dev/null && printf '%s' "\$_hj" | grep -q 'vblank-locked'; then _hok=1; break; fi
-  elif fuser -s /dev/fb0 2>/dev/null; then
-    _hok=1; break
-  fi
+  if printf '%s\n' "\$_hj" | _cb_paint_signal >/dev/null 2>&1; then _hok=1; break; fi
   sleep 0.5; _hp=\$((_hp+1))
 done
 if [ -z "\$_hok" ]; then

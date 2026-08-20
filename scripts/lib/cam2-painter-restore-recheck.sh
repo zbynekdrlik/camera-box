@@ -47,7 +47,13 @@
 # WARN-only cam2_painter_restore_verify_cmds. So it may ONLY exit 0 on a POSITIVE paint signal --
 # "unit not installed" (or a transient list-unit-files hiccup, which `if ! ...` also catches) EXITs
 # 1, NOT 0: absence-of-painter is exactly the #863 black-monitor case a prune must never mask.
+# #1148: the paint SIGNAL is now the shared `_cb_paint_signal` (scripts/lib/cam2-paint-signal.sh);
+# lazy-source it and emit its definition before the poll wrapper below.
+command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/cam2-paint-signal.sh"
+
 cam2_painter_genuine_paint_check_cmd() {
+  cam2_paint_signal_remote_fn
   cat <<'PAINTCHK'
 if ! systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then exit 1; fi
 _pc=0
@@ -56,13 +62,7 @@ while [ "$(systemctl is-active cam2-painter.service 2>/dev/null)" != "active" ] 
 _pp=0
 while [ $_pp -lt 6 ]; do
   _pj="$(journalctl -u cam2-painter.service -n 100 --no-pager 2>/dev/null || true)"
-  _kms="$(printf '%s\n' "$_pj" | grep 'presenter: using DRM/KMS page-flip' | tail -n1 || true)"
-  if [ -n "$_kms" ]; then
-    _drmdev="${_kms#*(}"; _drmdev="${_drmdev%)*}"
-    if [ -n "$_drmdev" ] && fuser -s "$_drmdev" 2>/dev/null && printf '%s' "$_pj" | grep -q 'vblank-locked'; then exit 0; fi
-  elif fuser -s /dev/fb0 2>/dev/null; then
-    exit 0
-  fi
+  if printf '%s\n' "$_pj" | _cb_paint_signal >/dev/null 2>&1; then exit 0; fi
   sleep 1; _pp=$((_pp+1))
 done
 exit 1

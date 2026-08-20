@@ -44,6 +44,12 @@
 #             are/again flowing. A first numeric reading with no prior sample cannot prove "stuck".
 #   WEDGE:    curr non-numeric/empty (no `received=` line at all -> "no recv"), OR curr == prev
 #             (both numeric -- the cumulative frame count did not move -> "delta absent").
+
+# #1148: the presenter-aware painting SIGNAL is now the shared `_cb_paint_signal`
+# (scripts/lib/cam2-paint-signal.sh); lazy-source it so mv_reverify_painter_up_cmds can emit its
+# definition and pipe the journal into it (the frame-probe/fb0 fallback below stays site-local).
+command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/cam2-paint-signal.sh"
 mv_reverify_wedge_verdict() {
   local prev="${1:-}" curr="${2:-}"
   case "$curr" in '' | *[!0-9]*) printf 'WEDGE\n'; return 0 ;; esac
@@ -61,19 +67,14 @@ mv_reverify_wedge_verdict() {
 # wait) treats non-UP as WARN-and-proceed, never a new hard gate.
 mv_reverify_painter_up_cmds() {
   local iters="${MV_REVERIFY_PAINTER_UP_ITERS:-12}"
+  cam2_paint_signal_remote_fn
   cat <<CMDS
 _pu=0
 while [ \$_pu -lt $iters ]; do
   _puok=""
   if [ "\$(systemctl is-active cam2-painter.service 2>/dev/null)" = "active" ]; then
     _puj="\$(journalctl -u cam2-painter.service -n 100 --no-pager 2>/dev/null || true)"
-    _pukms="\$(printf '%s\n' "\$_puj" | grep 'presenter: using DRM/KMS page-flip' | tail -n1 || true)"
-    if [ -n "\$_pukms" ]; then
-      _pudrm="\${_pukms#*(}"; _pudrm="\${_pudrm%)*}"
-      if [ -n "\$_pudrm" ] && fuser -s "\$_pudrm" 2>/dev/null && printf '%s' "\$_puj" | grep -q 'vblank-locked'; then
-        _puok=1
-      fi
-    elif fuser -s /dev/fb0 2>/dev/null; then
+    if printf '%s\n' "\$_puj" | _cb_paint_signal >/dev/null 2>&1; then
       _puok=1
     fi
   fi
