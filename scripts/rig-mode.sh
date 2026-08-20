@@ -196,9 +196,10 @@ PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monit
 RIG_SOURCE_BOX="$(camera_source_box)"        # e.g. cam1 (cam1-first set) / cam3 (cam1 retired)
 camera_resolve "$RIG_SOURCE_BOX"             # -> CAMERA_IP for the source box
 RIG_SOURCE_IP="$CAMERA_IP"                    # the source camera's device IP (the old CAM1_IP role)
-camera_strih_route "$RIG_SOURCE_BOX"         # -> CAMERA_STRIH_SCENE / CAMERA_STRIH_SOURCE
-RIG_SOURCE_STRIH_SCENE="$CAMERA_STRIH_SCENE"   # strih scene showing the source camera ("Cam N")
-RIG_SOURCE_STRIH_SOURCE="$CAMERA_STRIH_SOURCE" # strih NDI input behind it ("NDI camN")
+camera_strih_route "$RIG_SOURCE_BOX"         # -> CAMERA_STRIH_SOURCE (also CAMERA_STRIH_SCENE, unused
+                                             # here: rig-mode routes the strih NDI *input*, never
+                                             # scene-switches strih -- so no RIG_SOURCE_STRIH_SCENE)
+RIG_SOURCE_STRIH_SOURCE="$CAMERA_STRIH_SOURCE" # strih NDI input behind the source scene ("NDI camN")
 RIG_SOURCE_IMAG_SCENE="$(imag_scene_for_camera "$RIG_SOURCE_BOX")"    # imag scene ("Cam N")
 RIG_SOURCE_IMAG_SOURCE="$(imag_source_for_camera "$RIG_SOURCE_BOX")"  # imag NDI input ("NDI CAMN")
 # #722: the FULL fleet (targets.md) — used only by the EVENT-mode CONTRACT's fleet-wide
