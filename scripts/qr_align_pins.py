@@ -331,7 +331,6 @@ def measure_rounds(sources, host, password, rounds, width, height, run_id=None):
     per-round t_send compensation in round_deltas). The painter run_id is auto-detected (the run
     present on the MOST cameras) unless pinned. Returns (rounds_ticks, run_id)."""
     import time
-    from mv_skew_snapshot import tick_map, dominant_run_id
 
     n = len(sources)
     raw = []
@@ -339,6 +338,15 @@ def measure_rounds(sources, host, password, rounds, width, height, run_id=None):
         order = sources[r % n:] + sources[:r % n] if n else sources
         raw.append(barrier_screenshot(order, host, password, width, height))
         time.sleep(0.15)
+    return ticks_from_raw(raw, run_id)
+
+
+def ticks_from_raw(raw, run_id=None):
+    """PURE: resolve the painter run_id (when unset) and map each round's decoded screenshots to
+    {source: (frame_id, gen_ts_ns, t_send_ns) | None}. `raw` is a list of rounds, each
+    {source: (qr_texts, t_send_ns)}. Extracted from measure_rounds so the run_id-resolution +
+    tick-selection path is Tier-0 testable with synthetic decoded-text lists (no rig, no cv2)."""
+    from mv_skew_snapshot import tick_map, dominant_run_id
     if run_id is None:
         maps = [tick_map(texts) for shot in raw for (texts, _t) in shot.values()]
         run_id = dominant_run_id(maps)
