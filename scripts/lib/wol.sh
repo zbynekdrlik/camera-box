@@ -71,3 +71,23 @@ wol_table_lookup() {
     *) printf 'wol_table_lookup: unknown field %q (want ip|mac|broadcast)\n' "$field" >&2; return 2 ;;
   esac
 }
+
+# wol_verify_host <table-text> <target> <override> -> stdout: the IP to poll for a post-wake
+#   reachability check (wake-box.sh --wait). Precedence: a non-empty <override> (the --wait-host
+#   value) wins; else a <target> that is a known box in the table resolves to its `ip`; else (a raw
+#   MAC or an unknown box -- neither carries an IP) fail-loud (return 2 + stderr). A --wait verify
+#   must NEVER silently poll the wrong host or no host, so an unresolvable target is a hard error, not
+#   a skipped check. Pure (delegates the box lookup to wol_table_lookup).
+wol_verify_host() {
+  local table="${1:-}" target="${2:-}" override="${3:-}" ip
+  if [ -n "$override" ]; then
+    printf '%s\n' "$override"
+    return 0
+  fi
+  if ip="$(wol_table_lookup "$table" "$target" ip 2>/dev/null)"; then
+    printf '%s\n' "$ip"
+    return 0
+  fi
+  printf 'wol_verify_host: cannot verify %q -- not a known box (give --wait-host <ip> for a raw MAC)\n' "$target" >&2
+  return 2
+}
