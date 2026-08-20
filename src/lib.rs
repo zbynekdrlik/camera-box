@@ -407,6 +407,9 @@ pub mod e2e_latency_gate;
 // thinly by recording-verdict.
 pub mod imag_leg_gate;
 pub mod optical_floor;
+// #1141 — head-end OPTICAL blur/shutter preflight: pure crate-root classifier (Tier-0) over
+// the running service's `rough=` capture telemetry, consumed by scripts/lib/optical-preflight.sh.
+pub mod optical_preflight;
 // issue 1118 — REPORT-ONLY leg schema-degrade seam: a schema-mismatched imag partial DEGRADES
 // (drop the leg, verdict from strih+stream) instead of the fatal `load(path)?` killing the
 // whole merge. Pure crate-root decision (Tier-0), consumed thinly by recording-verdict::run_merge.
