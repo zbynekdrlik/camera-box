@@ -461,8 +461,24 @@ void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)
  * as obs_display_set_render_divisor above. */
 void obs_display_set_vsync(obs_display_t *display, bool vsync)
 {
-	if (display)
-		display->vsync = vsync;
+	if (!display)
+		return;
+
+	/* camera-box #1146: one-shot-on-change observability of the #1107 present-vsync
+	 * decision. The #1107 EGL present logs only on eglSwapInterval FAILURE, never the
+	 * armed state, so nothing (operator, drift-guard, the E2E [0/8] preflight) could
+	 * confirm from the OBS log whether the fullscreen program projector actually
+	 * presents tear-free. Log here - the single source of truth for the per-display
+	 * decision (called ONLY from OBSProjector.cpp) - but ONLY when the flag actually
+	 * changes: the program projector emits exactly one `ARMED` line at open, the
+	 * multiview (flag stays at its false default) emits nothing, and the hot per-tick
+	 * gs_present_vsync() arm in render_display() is untouched (no per-frame spam). */
+	const bool changed = display->vsync != vsync;
+	display->vsync = vsync;
+	if (changed)
+		blog(LOG_INFO,
+		     "projector-vsync: present-vsync %s (GL/EGL swap interval %d; no-op on D3D11)",
+		     vsync ? "ARMED" : "cleared", vsync ? 1 : 0);
 }
 
 void obs_display_size(obs_display_t *display, uint32_t *width, uint32_t *height)
