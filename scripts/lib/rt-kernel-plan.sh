@@ -49,8 +49,15 @@ rt_kernel_readiness_verdict() {
   if _rt_truthy "$pro"; then printf 'ready'; else printf 'needs-pro-attach'; fi
 }
 
-# rt_kernel_upgrade_plan RUNNING_IS_RT RT_INSTALLED PRO_ATTACHED GENERIC_PRESENT GRUB_DEFAULT
+# rt_kernel_upgrade_plan RUNNING_IS_RT RT_INSTALLED PRO_ATTACHED GENERIC_PRESENT GRUB_DEFAULT [RT_CANDIDATE]
 # -> the ORDERED atomic per-box plan, one token per line, OR a single noop:/blocked: token.
+#
+# RT_CANDIDATE (default 1 = present) is the 6th, optional axis: whether `linux-image-realtime` is
+# resolvable from apt. The two blocked verdicts keep the plan consistent with the readiness header:
+# no Pro AND not installed -> `blocked:need-pro-attach` (attach Pro first); Pro attached but the
+# realtime package still has no candidate AND not installed -> `blocked:no-rt-candidate` (run
+# `pro enable realtime-kernel`). Without this axis a Pro-attached-but-not-enabled box printed a full
+# `install-rt-kernel` plan that would hand the supervisor an `apt-get install` with no candidate.
 #
 # The order is the SAFE atomic sequence (an improvement over the merged runbook prose, which
 # purged the generic kernel BEFORE rebooting into RT -- removing the running kernel's own modules):
@@ -58,10 +65,13 @@ rt_kernel_readiness_verdict() {
 # generic kernel and re-check the single-kernel invariant. Per-box GRUB drift is honoured:
 # `saved` boxes pin via grub-set-default, a numeric GRUB_DEFAULT pins the RT menuentry.
 rt_kernel_upgrade_plan() {
-  local run="${1:-}" inst="${2:-}" pro="${3:-}" gen="${4:-}" grubdef="${5:-}"
+  local run="${1:-}" inst="${2:-}" pro="${3:-}" gen="${4:-}" grubdef="${5:-}" cand="${6:-1}"
   if _rt_truthy "$run"; then printf 'noop:already-realtime\n'; return 0; fi
   if ! _rt_truthy "$inst" && ! _rt_truthy "$pro"; then
     printf 'blocked:need-pro-attach\n'; return 0
+  fi
+  if ! _rt_truthy "$inst" && ! _rt_truthy "$cand"; then
+    printf 'blocked:no-rt-candidate\n'; return 0
   fi
   if ! _rt_truthy "$inst"; then printf 'install-rt-kernel\n'; fi
   printf 'verify-rt-initrd\n'
@@ -104,6 +114,8 @@ rt_kernel_step_command() {
       printf '# nothing to do -- box already runs a PREEMPT_RT kernel' ;;
     blocked:need-pro-attach)
       printf '# BLOCKED: attach Ubuntu Pro first (pro attach <token> && pro enable realtime-kernel), then re-plan' ;;
+    blocked:no-rt-candidate)
+      printf '# BLOCKED: Pro is attached but linux-image-realtime has no apt candidate -- run: pro enable realtime-kernel && apt-get update, then re-plan' ;;
     *)
       printf 'unknown-token' ;;
   esac

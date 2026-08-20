@@ -71,22 +71,32 @@ fn readiness_covers_all_four_states() {
 
 #[test]
 fn plan_is_noop_when_already_realtime() {
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 1 0 0 0 0");
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 1 0 0 0 0 1");
     assert_eq!(code, 0, "stderr: {err}");
     assert_eq!(out.trim(), "noop:already-realtime");
 }
 
 #[test]
 fn plan_is_blocked_when_no_pro_and_not_installed() {
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 0 1 saved");
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 0 1 saved 1");
     assert_eq!(code, 0, "stderr: {err}");
     assert_eq!(out.trim(), "blocked:need-pro-attach");
 }
 
 #[test]
+fn plan_is_blocked_when_pro_attached_but_no_apt_candidate() {
+    // Pro attached but `pro enable realtime-kernel` not run: candidate absent, not installed.
+    // The plan must NOT print a full install sequence (which would apt-get install with no
+    // candidate) -- it must agree with the readiness verdict and block.
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 1 0 0 0");
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "blocked:no-rt-candidate");
+}
+
+#[test]
 fn plan_full_sequence_reboots_into_rt_before_purging_generic() {
-    // cam2 shape: non-rt, not installed, pro attached, generic present, GRUB_DEFAULT=saved.
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 1 1 saved");
+    // cam2 shape: non-rt, not installed, pro attached, generic present, GRUB_DEFAULT=saved, candidate.
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 0 1 1 saved 1");
     assert_eq!(code, 0, "stderr: {err}");
     let steps: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(
@@ -117,7 +127,8 @@ fn plan_full_sequence_reboots_into_rt_before_purging_generic() {
 #[test]
 fn plan_skips_install_when_already_installed_and_skips_purge_when_no_generic() {
     // cam1 shape: non-rt, RT already installed, pro attached, NO generic meta, GRUB_DEFAULT=0.
-    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 1 1 0 0");
+    // Candidate axis is irrelevant once already installed (pass 0 to prove it does not block).
+    let (code, out, err) = run_sourced("rt_kernel_upgrade_plan 0 1 1 0 0 0");
     assert_eq!(code, 0, "stderr: {err}");
     let steps: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
     assert!(
@@ -176,5 +187,34 @@ fn sourcing_the_library_prints_nothing() {
     assert_eq!(
         out, "",
         "a pure sourced library must emit nothing on source"
+    );
+}
+
+/// The load-bearing property: the driver sources this lib under `set -euo pipefail`, so no
+/// function may abort the caller (unbound var / a falsy `_rt_truthy` reaching a non-condition
+/// context / a pipefail). Turn on `-e` and drive every function down its truthy AND falsy
+/// branches; if any aborts, the trailing `ALIVE` never prints.
+#[test]
+fn functions_never_abort_a_set_e_caller() {
+    let (code, out, err) = run_sourced(
+        "set -euo pipefail; \
+         rt_kernel_flavour >/dev/null; \
+         rt_kernel_readiness_verdict 1 1 1 >/dev/null; \
+         rt_kernel_readiness_verdict 0 0 0 >/dev/null; \
+         rt_kernel_upgrade_plan 1 0 0 0 0 1 >/dev/null; \
+         rt_kernel_upgrade_plan 0 0 0 0 0 0 >/dev/null; \
+         rt_kernel_upgrade_plan 0 0 1 1 saved 1 >/dev/null; \
+         rt_kernel_step_command purge-generic >/dev/null; \
+         rt_kernel_step_command not-a-real-token >/dev/null; \
+         echo ALIVE",
+    );
+    assert_eq!(
+        code, 0,
+        "a function aborted the set -e caller. stderr: {err}"
+    );
+    assert_eq!(
+        out.trim(),
+        "ALIVE",
+        "the -e caller must survive every function call"
     );
 }

@@ -27,6 +27,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SSH_PW="${RT_KERNEL_SSH_PASS:-newlevel}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=8 -o BatchMode=no"
+SSH_TIMEOUT="${RT_KERNEL_SSH_TIMEOUT:-20}"   # overall session bound (ConnectTimeout bounds connect only)
 
 usage() {
   cat <<'USAGE'
@@ -42,7 +43,7 @@ USAGE
 
 require_tools() {
   local miss=()
-  for t in sshpass ssh; do command -v "$t" >/dev/null 2>&1 || miss+=("$t"); done
+  for t in sshpass ssh timeout; do command -v "$t" >/dev/null 2>&1 || miss+=("$t"); done
   if [ "${#miss[@]}" -gt 0 ]; then
     echo "FATAL: missing required tool(s): ${miss[*]} (apt-get install -y sshpass openssh-client)" >&2
     exit 3
@@ -53,15 +54,18 @@ require_tools() {
 gather_facts() {
   local ip="$1" raw
   require_tools
-  # ONE ssh round-trip, all reads non-mutating.
-  raw="$(sshpass -p "$SSH_PW" ssh $SSH_OPTS "root@$ip" '
+  # ONE ssh round-trip, all reads non-mutating, bounded by an overall session timeout. The remote
+  # collapses GRUB_DEFAULT to its FIRST whitespace-delimited token (${gd%% *}) so a titled value
+  # (e.g. "Advanced options...") can never shift the space-delimited 6-field split below.
+  raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "root@$ip" '
     rt=0; { grep -q PREEMPT_RT /proc/version || [ "$(cat /sys/kernel/realtime 2>/dev/null)" = "1" ]; } && rt=1
     inst=0; dpkg-query -W -f="\${Status}" linux-image-realtime 2>/dev/null | grep -q "install ok installed" && inst=1
     pro=0; command -v pro >/dev/null 2>&1 && pro status --format json 2>/dev/null | grep -q "\"attached\": *true" && pro=1
     gen=0; dpkg-query -W -f="\${Status}" linux-image-generic 2>/dev/null | grep -q "install ok installed" && gen=1
     cand=0; apt-cache policy linux-image-realtime 2>/dev/null | grep -qE "Candidate: [0-9]" && cand=1
     gd="$(sed -nE "s/^GRUB_DEFAULT=(.*)/\1/p" /etc/default/grub 2>/dev/null | tr -d "\"" | head -1)"
-    echo "$rt $inst $pro ${gen} ${gd:-0} ${cand}"
+    gd="${gd:-0}"; gd="${gd%% *}"
+    echo "$rt $inst $pro ${gen} ${gd} ${cand}"
   ' 2>/dev/null)" || { echo "FATAL: could not read box $ip over ssh (rc=$?)" >&2; exit 4; }
   raw="$(printf '%s' "$raw" | tr -s ' ' | tail -1)"
   [ -n "$raw" ] || { echo "FATAL: empty facts from box $ip" >&2; exit 4; }
@@ -78,7 +82,7 @@ emit_plan() {
   echo "# kernel choice: $(rt_kernel_flavour)"
   echo "# ---- atomic per-box plan (SUPERVISOR applies; reboot-class, one box at a time) ----"
   local plan tok
-  plan="$(rt_kernel_upgrade_plan "$run" "$inst" "$pro" "$gen" "$gd")"
+  plan="$(rt_kernel_upgrade_plan "$run" "$inst" "$pro" "$gen" "$gd" "$cand")"
   while IFS= read -r tok; do
     [ -n "$tok" ] || continue
     if [ "$commands" = "1" ]; then
