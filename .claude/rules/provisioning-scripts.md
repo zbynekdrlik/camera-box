@@ -1,6 +1,7 @@
 ---
 paths:
   - "scripts/setup-device.sh"
+  - "scripts/create-usb-linux.sh"
   - "scripts/verify-device.sh"
   - "tests/setup_device_pure_functions.rs"
   - "tests/verify_device_pure_functions.rs"
@@ -132,3 +133,38 @@ The single letters (a)-(z) are exhausted; the two-char scheme continues (aa) int
 (ab) remoteos-mcp (#1066), **(ac) realtime-isolation drift (#899, WARN-only)**. Grep the header /
 usage / exec lists for the next free two-char letter (they are NOT in file order) rather than
 assume — a letter cited only in a `setup-device.sh` comment is not proof the check exists.
+
+## The netplan LAN stanza must match the NIC by NAME (`enp*`), never `driver: "*"` (#1155)
+
+Both netplan writers — `setup-device.sh` STEP 2 (static IP) and `create-usb-linux.sh`'s chroot
+base image (DHCP) — write `/etc/netplan/01-netcfg.yaml`. The LAN stanza is pinned to
+`match: name: "enp*"` (the PCI NIC), **never** `match: driver: "*"`.
+
+**Why (live incident 2026-08-20, cam1):** netplan's `driver: "*"` glob claims EVERY driver-backed
+link. When a camera is plugged into a cam box over USB (the bkshading architecture, issue 808), it
+enumerates as a USB CDC-NCM ethernet device (`enx<MAC>`, driver `cdc_ncm`) and matched the same
+stanza — so it inherited the box's static IP `10.77.9.61/23` **plus a duplicate default route**.
+dantesync's PTP multicast join (224.0.1.129) then bound the camera link instead of the real NIC
+`enp3s0`, and the box went PTP-deaf for ~5 h: free-running crystal, `[NTP] Stepped +12ms` every
+~4 min, every clock gate FAIL, and every E2E verdict after the plug-in carried clock-caused CAM1
+gaps that are NOT content regressions. The whole dantesync 1.8.50/1.8.51 canary chain was misread
+as a servo regression before the duplicate-IP link was found. **The bkshading lane plugs a camera
+into EVERY cam box over USB, so this trap fires on each box the moment the camera is connected.**
+
+- **The discriminator:** PCI/onboard NICs enumerate as `enp*` (`enp3s0` on the current fleet); USB
+  CDC-NCM camera links enumerate as `enx<MAC>`. `match: name: "enp*"` includes the former and
+  structurally excludes the latter. netplan `match: name:` takes a SINGLE shell glob (no
+  `enp*`-OR-`eno*` in one stanza), so the tight `enp*` glob is the correct minimal pin for this
+  all-PCI-NIC fleet. A future box whose onboard NIC enumerates as `eno*` would need the pin
+  widened — but that is not the current fleet, and widening on speculation is wrong.
+- **Do NOT rename the stanza** (`all-ethernet`) or change anything else in the block — only the
+  `match:` key. This is the exact minimal edit the owner applied by hand to cam1 (backup at
+  `/root/netplan-backup-01-netcfg.yaml.bak`).
+- **`verify-device.sh` guards it (check `(ad)`):** FAILs if the installed netplan still matches the
+  driver wildcard (`netplan_driver_wildcard_count`), or if two interfaces carry the box IP
+  (`interfaces_sharing_ip` over `ip -br addr` — the live proof the trap has not fired). Both pure
+  fns are `run_sourced`-tested; the static-anchor test
+  `both_netplan_writers_pin_lan_stanza_to_enp_never_driver_wildcard` pins both writers.
+- **The dedicated camera-link stanza** (its own subnet / link-local, no default route) belongs to
+  the bkshading lane (issue 808), not the LAN pin — it is complementary, not a substitute for the
+  pin above.
