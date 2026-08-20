@@ -44,3 +44,22 @@ per-facet loop so new facets flow automatically), into `recording-e2e.sh`'s `[0/
 recording-e2e.sh static-anchor collision GOTCHA), and into `verify-imag.sh`'s post-reboot acceptance
 gate as check (z). The persistence side lives in `setup-imag.sh`: step 27 installs+enables picom
 (enable-only), step 16 sets HDMI the xrandr primary.
+
+## Maintenance — a facet's OK/DRIFT DOCTRINE is duplicated in ~5 parallel PROSE copies (issue 1146)
+
+When you change a facet's polarity or add/remove a facet, the CODE lives in one place (the pure
+verdict in `scripts/lib/imag-display-path.sh`), but the human-facing DOCTRINE is restated as prose
+in ~5 places that all drift independently — and a review caught the drift-guard one after every
+other copy had been updated (issue 1146 flipped picom-off→picom-on and it was missed):
+
+1. the lib's own compositor-doctrine header comment,
+2. `scripts/drift-guard.sh` check #10's comment block (above the generic facet loop),
+3. `scripts/verify-imag.sh` check (z)'s header comment + the header Checks-list entry,
+4. this rules doc's table + facet list,
+5. every `tests/harness_imag_display_path_780.rs` / `tests/drift_guard.rs` comment + the
+   `DISPLAY_PATH_GATHER_CLEAN` fixture that encodes the "clean" state.
+
+The CODE at (2) needs no edit (the loop is generic), which is exactly why its stale COMMENT is easy
+to miss. When reversing/adding a facet, `grep -rn "picom off\|picom OFF\|picom-off\|<old-doctrine
+phrase>"` across `scripts/` + `tests/` + `.claude/rules/` and update every prose hit in the same
+branch, not just the verdict function.
