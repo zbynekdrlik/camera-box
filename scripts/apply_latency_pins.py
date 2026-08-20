@@ -117,14 +117,17 @@ def _read_pin(ws, source: str) -> "int | None":
 
 
 def apply_pins(ws, want_pins: dict, execute: bool) -> list:
-    """Live: for each source, read the current pin; if already on-baseline -> 'noop' (no write).
-    Otherwise: DRY-RUN (execute=False) records 'planned' and writes NOTHING; --execute SETs the
-    target, re-reads, and requires the read-back to match -> 'applied' (else FAIL LOUD via
-    SystemExit, never leaving a half-set source). Returns one result dict per source, in order."""
+    """Live: read every current pin ONCE, derive the noop/set plan with the PURE (unit-tested)
+    `plan_pin_changes`, then act on it -- a 'noop' source is left untouched; a 'set' source under
+    DRY-RUN (execute=False) records 'planned' and writes NOTHING; a 'set' source under --execute is
+    SET, re-read, and requires the read-back to match -> 'applied' (else FAIL LOUD via SystemExit,
+    never leaving a half-set source). Returns one result dict per source, in order. Routing through
+    `plan_pin_changes` keeps the pure planner (not a re-implemented inline copy) load-bearing."""
+    live_pins = {source: _read_pin(ws, source) for source in want_pins}
     results = []
-    for source, want in want_pins.items():
-        before = _read_pin(ws, source)
-        if before == want:
+    for entry in plan_pin_changes(want_pins, live_pins):
+        source, want, before = entry["source"], entry["want_ms"], entry["live_ms"]
+        if entry["action"] == "noop":
             results.append({"source": source, "want_ms": want, "before_ms": before,
                             "after_ms": before, "action": "noop"})
             continue
@@ -166,12 +169,13 @@ def main(argv=None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--box", required=True, help="baseline box key (strih | stream)")
     ap.add_argument("--host", required=True)
-    ap.add_argument("--password", default="")
+    # explicit --password wins over the OBS_PASSWORD env var (the flag's default IS the env value),
+    # matching the sibling latency_pins_verify.py precedence.
+    ap.add_argument("--password", default=os.environ.get("OBS_PASSWORD", ""))
     ap.add_argument("--baseline", default=DEFAULT_BASELINE)
     ap.add_argument("--execute", action="store_true",
                     help="WRITE the pins (default: DRY-RUN, prints the plan, writes nothing)")
     args = ap.parse_args(argv)
-    password = os.environ.get("OBS_PASSWORD", args.password)
 
     with open(args.baseline, encoding="utf-8") as fh:
         baseline = json.load(fh)
@@ -181,7 +185,7 @@ def main(argv=None) -> int:
             f"(have: {', '.join(sorted(baseline))})")
     want_pins = explicit_pins_for_box(args.box, baseline[args.box])
 
-    ws = _conn(args.host, password)
+    ws = _conn(args.host, args.password)
     try:
         results = apply_pins(ws, want_pins, args.execute)
     finally:
