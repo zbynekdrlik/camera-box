@@ -846,6 +846,22 @@ async fn run_capture_loop(
         // self-heal fires mid-test (review finding, #663).
         let mut pending_self_heal_exit_code: Option<i32> = None;
 
+        // #1128 — fast-capture grabber STUCK detector (ShadowCast ~62.5 fps + persistent
+        // corrupted). Keys on the COMBINED signature (over-rate AND persistent corrupted, both
+        // sustained), which the existing #656/#971 bands miss: the jitter band is deliberately
+        // wide for ShadowCast (never fires at 62.5) and the chronic band waits 15 min, while the
+        // corrupted-frame counter feeds no decision at all. The corrupted band is the
+        // discriminator so a benign over-rate wobble (0 corrupted, absorbed by the decimation
+        // gate) never fires. On a STUCK verdict the `#1128 grabber STUCK` marker is ALWAYS logged
+        // (the dev1 alert watchdog greps it); the actual USB re-auth reuses the SAME #663
+        // rate-limited path but is gated OFF by default — set CAMERA_BOX_GRABBER_STUCK_SELFHEAL=1
+        // to enable live re-auth (a deliberate opt-in, so enabling it on the rig is a supervised
+        // step). Fed one sample per 5 s report window below.
+        let mut grabber_stuck_tracker = camera_box::grabber_stuck::GrabberStuckTracker::new();
+        let grabber_stuck_selfheal_enabled = std::env::var("CAMERA_BOX_GRABBER_STUCK_SELFHEAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
         // each emitted frame off over a bounded ring, so the heavy per-frame QR render no longer
@@ -1655,6 +1671,116 @@ async fn run_capture_loop(
                                             pending_self_heal_exit_code = Some(
                                                 camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE,
                                             );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // #1128 — feed this 5 s window into the grabber-STUCK detector (over-rate
+                        // AND persistent corrupted). Runs every window regardless of the #656/#971
+                        // bands above. On STUCK: ALWAYS log the `#1128 grabber STUCK` marker
+                        // (report-only, no I/O — the dev1 alert watchdog greps it); the actual USB
+                        // re-auth is gated OFF by default and, when enabled, reuses the SAME #663
+                        // rate-limited state so the two triggers share the 600 s throttle +
+                        // escalation. Guarded by `pending_self_heal_exit_code.is_none()` so it
+                        // never double-resets in a window the #971 chronic band already fired.
+                        if let camera_box::grabber_stuck::GrabberStuckVerdict::Stuck {
+                            captured_fps,
+                            corrupted_delta,
+                            windows,
+                        } = grabber_stuck_tracker.observe(cap_fps, corrupted)
+                        {
+                            tracing::warn!(
+                                "{}",
+                                camera_box::grabber_stuck::stuck_warn_message(
+                                    &device_path_owned,
+                                    captured_fps,
+                                    corrupted_delta,
+                                    windows,
+                                )
+                            );
+                            if grabber_stuck_selfheal_enabled
+                                && pending_self_heal_exit_code.is_none()
+                            {
+                                let now_epoch_s = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let state_path = std::path::Path::new(
+                                    camera_box::capture_rate_selfheal::STATE_PATH,
+                                );
+                                let prev_selfheal_state =
+                                    camera_box::capture_rate_selfheal::load_state(state_path);
+                                let (selfheal_decision, next_selfheal_state) =
+                                    camera_box::capture_rate_selfheal::decide_selfheal(
+                                        prev_selfheal_state,
+                                        true,
+                                        now_epoch_s,
+                                        camera_box::capture_rate_selfheal::DEFAULT_MIN_HEAL_INTERVAL_S,
+                                        camera_box::capture_rate_selfheal::DEFAULT_RECURRENCE_WINDOW_S,
+                                        camera_box::capture_rate_selfheal::DEFAULT_CRITICAL_ESCALATION_HEALS,
+                                    );
+                                match selfheal_decision {
+                                    camera_box::capture_rate_selfheal::SelfHealDecision::Healthy => {}
+                                    camera_box::capture_rate_selfheal::SelfHealDecision::Throttled {
+                                        seconds_remaining,
+                                    } => {
+                                        tracing::warn!(
+                                            "#1128 grabber-stuck self-heal rate-limited: the last USB reset attempt was too recent — {}s remaining before another attempt is allowed",
+                                            seconds_remaining
+                                        );
+                                    }
+                                    camera_box::capture_rate_selfheal::SelfHealDecision::Heal {
+                                        attempt_number,
+                                        escalate_critical,
+                                    } => {
+                                        if escalate_critical {
+                                            tracing::error!(
+                                                "{}",
+                                                camera_box::capture_rate_selfheal::critical_escalation_message(
+                                                    &device_path_owned,
+                                                    attempt_number,
+                                                    grabber_model
+                                                )
+                                            );
+                                        }
+                                        if let Err(e) = camera_box::capture_rate_selfheal::save_state(
+                                            state_path,
+                                            &next_selfheal_state,
+                                        ) {
+                                            tracing::error!(
+                                                "#1128 grabber-stuck self-heal: failed to persist self-heal state to {}: {} (rate-limit/escalation count may not survive this restart)",
+                                                camera_box::capture_rate_selfheal::STATE_PATH,
+                                                e
+                                            );
+                                        }
+                                        match camera_box::capture_rate_selfheal::perform_usb_reset(
+                                            &device_path_owned,
+                                        ) {
+                                            Ok(()) => {
+                                                tracing::warn!(
+                                                    "#1128 grabber-stuck self-heal: USB reset attempt #{} succeeded — will exit (code {}) after graceful shutdown so systemd restarts camera-box against the re-enumerated device",
+                                                    attempt_number,
+                                                    camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE
+                                                );
+                                                running_capture.store(false, Ordering::Relaxed);
+                                                pending_self_heal_exit_code = Some(
+                                                    camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE,
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "CRITICAL #1128 grabber-stuck self-heal: USB reset attempt #{} FAILED: {:#} — the capture device may now be in a WORSE state than the original stuck defect (possibly disconnected); exiting (code {}) after graceful shutdown so systemd retries with a fresh process",
+                                                    attempt_number,
+                                                    e,
+                                                    camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE
+                                                );
+                                                running_capture.store(false, Ordering::Relaxed);
+                                                pending_self_heal_exit_code = Some(
+                                                    camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE,
+                                                );
+                                            }
                                         }
                                     }
                                 }
