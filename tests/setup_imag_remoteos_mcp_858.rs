@@ -31,8 +31,8 @@ fn body() -> String {
 fn setup_imag_provisions_remoteos_mcp_step_858() {
     let body = body();
     assert!(
-        body.contains("TOTAL_STEPS=26"),
-        "{SETUP}: TOTAL_STEPS must count the remoteos-mcp provisioning step (#858) — now 26 after #764 (imag-obs-watchdog), #779 (touchpad usability) and #791 (imag-maxperf) added steps 24, 25 and 26"
+        body.contains("TOTAL_STEPS=27"),
+        "{SETUP}: TOTAL_STEPS must count the remoteos-mcp provisioning step (#858) — now 27 after #764 (imag-obs-watchdog), #779 (touchpad usability), #791 (imag-maxperf) and issue 1146 (picom vsync compositor) added steps 24, 25, 26 and 27"
     );
     assert!(
         body.contains("step 23 \""),

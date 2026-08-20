@@ -3319,14 +3319,18 @@ fn check_imag_report_power_envelope_unknown_when_not_gathered_backward_compat_10
     );
 }
 
-// #780: check_imag_report's check #10 — the display-path facet (picom OFF, autostart masked/absent,
-// the #841 iGPU max-freq pin, the #779 tap conf) — passed as the 15th (optional) arg. A clean gather
-// is OK; picom running / a lost tap conf is DRIFT (exit 20); an unread block is UNKNOWN, never a
-// false DRIFT (backward-compat with 9..14-arg call sites).
+// #780/issue 1146: check_imag_report's check #10 — the display-path facet (picom RUNNING with vsync,
+// picom.service enabled, HDMI the xrandr primary, the #841 iGPU max-freq pin, the #779 tap conf) —
+// passed as the 15th (optional) arg. A clean gather is OK; picom NOT running / a non-HDMI primary /
+// a lost tap conf is DRIFT (exit 20); an unread block is UNKNOWN, never a false DRIFT (backward-
+// compat with 9..14-arg call sites). The picom polarity is INVERTED vs the original #780/#841 facet
+// — see scripts/lib/imag-display-path.sh's compositor-doctrine-reversal header (issue 1146).
 const DISPLAY_PATH_GATHER_CLEAN: &str = "\
 PICOM_PGREP|ok
-PICOM_PROC|
-PICOM_AUTOSTART|absent
+PICOM_PROC|2038724
+PICOM_SERVICE|enabled
+XRANDR|ok
+PRIMARY_OUTPUT|HDMI-1
 MAXPERF_APPLICABLE|1
 MAXPERF_MIN|1400
 MAXPERF_RP0|1400
@@ -3349,8 +3353,8 @@ fn check_imag_report_display_path_ok_when_every_facet_clean_780() {
         .filter(|l| l.contains("display_path/"))
         .collect();
     assert!(
-        dp_rows.len() == 4,
-        "expected picom_process/picom_autostart/igpu_maxperf/tap_conf rows: {out:?}"
+        dp_rows.len() == 5,
+        "expected picom_process/picom_service/hdmi_primary/igpu_maxperf/tap_conf rows: {out:?}"
     );
     for l in &dp_rows {
         assert!(
@@ -3361,41 +3365,67 @@ fn check_imag_report_display_path_ok_when_every_facet_clean_780() {
 }
 
 #[test]
-fn check_imag_report_display_path_drift_when_picom_running_780() {
-    // A compositor breaks the tear-free direct scanout — a genuine display-path DRIFT (exit 20).
-    let running = DISPLAY_PATH_GATHER_CLEAN.replace("PICOM_PROC|", "PICOM_PROC|4711");
+fn check_imag_report_display_path_drift_when_picom_not_running_1146() {
+    // issue 1146 reversal: picom NOT running -> the dual-output vsync beat returns -> DRIFT (exit
+    // 20). (The compositor is now the tear-free present, so its ABSENCE is the drift.)
+    let stopped = DISPLAY_PATH_GATHER_CLEAN.replace("PICOM_PROC|2038724", "PICOM_PROC|");
     let body = r#"
         rc=0
         check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
         echo "RC=$rc"
     "#;
-    let out = run_sourced(body, &[("DP", &running)]);
+    let out = run_sourced(body, &[("DP", &stopped)]);
     assert!(
         out.contains("RC=20"),
-        "picom running must DRIFT (exit 20): {out:?}"
+        "picom not running must DRIFT (exit 20): {out:?}"
     );
     let line = out
         .lines()
         .find(|l| l.contains("display_path/picom_process"))
         .unwrap_or_else(|| panic!("no picom_process row printed: {out:?}"));
     assert!(
-        line.contains("DRIFT") && line.contains("4711"),
-        "picom_process must DRIFT naming the pid: {line:?}"
+        line.contains("DRIFT"),
+        "picom_process must DRIFT when picom is not running: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_display_path_drift_when_panel_is_primary_1146() {
+    // issue 1146: the panel as xrandr primary makes IT the vsync anchor -> the projector tears.
+    let panel = DISPLAY_PATH_GATHER_CLEAN.replace("PRIMARY_OUTPUT|HDMI-1", "PRIMARY_OUTPUT|eDP-1");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DP", &panel)]);
+    assert!(
+        out.contains("RC=20"),
+        "a non-HDMI primary must DRIFT (exit 20): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("display_path/hdmi_primary"))
+        .unwrap_or_else(|| panic!("no hdmi_primary row printed: {out:?}"));
+    assert!(
+        line.contains("DRIFT") && line.contains("eDP-1"),
+        "hdmi_primary must DRIFT naming the wrong primary: {line:?}"
     );
 }
 
 #[test]
 fn check_imag_report_display_path_drift_when_tap_conf_gone_780() {
     // #779 tap conf removed — a gathered-but-absent conf is a real DRIFT, not an SSH-hiccup UNKNOWN.
-    let gone = "PICOM_PGREP|ok\nPICOM_PROC|\nPICOM_AUTOSTART|absent\n\
-                MAXPERF_APPLICABLE|1\nMAXPERF_MIN|1400\nMAXPERF_RP0|1400\n\
-                MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\nTAPCONF|absent";
+    // Baseline is the issue-1146 clean gather (picom running, service enabled, HDMI primary) with
+    // ONLY the tap conf gone, so the drift isolates to tap_conf.
+    let gone = DISPLAY_PATH_GATHER_CLEAN
+        .replace("TAPCONF|present\nTAPCONF_TAPPING|on\n", "TAPCONF|absent\n");
     let body = r#"
         rc=0
         check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
         echo "RC=$rc"
     "#;
-    let out = run_sourced(body, &[("DP", gone)]);
+    let out = run_sourced(body, &[("DP", &gone)]);
     assert!(
         out.contains("RC=20"),
         "a lost tap conf must DRIFT (exit 20): {out:?}"

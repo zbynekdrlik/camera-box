@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=26
+TOTAL_STEPS=27
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -1639,14 +1639,20 @@ mkdir -p "$USER_HOME/.config/openbox"
 cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'
 #!/bin/bash
 # imag-nb OBS cutting kiosk boot — WRITTEN BY setup-imag.sh (#522/#488). Do not hand-edit.
-# PANEL (DP-*/eDP-*, notebook screen) = PRIMARY = multiview + OBS UI. PROJ (HDMI-*) = PROGRAM projector.
+# issue 1146: PROJ (HDMI-*, projector) = PRIMARY = the vsync anchor for the tear-free picom present
+# (imag drives two 60Hz outputs on independent crystals; GL/scanout vsyncs only the primary CRTC, so
+# the projector MUST be primary or its clock beats against the panel -> walking tear line). PANEL
+# (DP-*/eDP-*, notebook) is a plain secondary; it still shows the OBS UI + Multiview because
+# imag_scenes.py places projectors by connector TYPE (HDMI vs panel), never by the --primary flag,
+# and OBS restores its own saved main-window geometry on the panel. This REVERSES the #522/#488
+# panel-primary doctrine (its real regression was a lost self-heal, handled by imag-obs.service now).
 sleep 1
 PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
 PROJ=$(xrandr  | awk '/ connected/ && $1 ~  /^HDMI/ {print $1; exit}')
-[ -n "$PANEL" ] && xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null || true
+[ -n "$PANEL" ] && xrandr --output "$PANEL" --mode 1920x1080 --rate 60 2>/dev/null || true
 if [ -n "$PROJ" ]; then
-  { [ -n "$PANEL" ] && xrandr --output "$PROJ" --mode 1920x1080 --rate 60 --left-of "$PANEL" 2>/dev/null; } \
-    || xrandr --output "$PROJ" --mode 1920x1080 --rate 60 2>/dev/null || true
+  { [ -n "$PANEL" ] && xrandr --output "$PROJ" --primary --mode 1920x1080 --rate 60 --left-of "$PANEL" 2>/dev/null; } \
+    || xrandr --output "$PROJ" --primary --mode 1920x1080 --rate 60 2>/dev/null || true
 fi
 xset s off -dpms s noblank 2>/dev/null || true
 # wall-fallback: resolume-imag still ako pozadie -- restart OBS nikdy neukaze ciernu stenu.
@@ -2233,6 +2239,81 @@ systemctl enable --now imag-maxperf.service \
 systemctl is-active --quiet imag-maxperf.service \
     || fail "issue 756/#791: imag-maxperf.service is not active after enable --now — the boot-enforcement script did not run"
 echo "  issue 756/#791: full max-performance persistence provisioned (imag-maxperf.service active + udev rule)"
+
+# =============================================================================
+step 27 "picom vsync compositor (issue 1146): tear-free HDMI-projector present + enable"
+# =============================================================================
+# ROOT CAUSE (issue 1146): imag drives TWO 60Hz outputs (eDP panel + HDMI projector) on independent
+# crystals. GL/scanout presentation vsyncs to only ONE CRTC (the primary), so a compositor-free
+# direct scanout (the #841 doctrine) does not guarantee the PROJECTOR is the sync target -> the two
+# clocks beat -> a walking tear line on the projector, intermittently ("raz dobre, raz zle"). The
+# live fix (deployed by hand 2026-08-20, folded in here for reproducibility): a picom v10 vsync
+# compositor (glx, unredir-if-possible=false so the fullscreen Program projector stays composited,
+# zero eye-candy) ANCHORED on the projector by making HDMI the xrandr primary (step 16 above). Cost
+# is <=1 frame of projector display latency; the NDI 3ms mandate is untouched (picom composites only
+# the local projector present, never the NDI receive path). The inert 20-tearfree.conf on the live
+# box is deliberately NOT provisioned here -- Option "TearFree" is a proven-dead option on this
+# modesetting build (#841), and the picom compositor is the real mechanism.
+#
+# ENABLE-ONLY (never --now): this provisioner defers taking effect to the box's next graphical
+# session, exactly like the touchpad/maxperf steps -- verify-imag.sh check (z) is the post-reboot
+# acceptance gate that proves picom actually came up. `systemctl --user enable` creates the
+# graphical-session.target.wants/picom.service symlink that scripts/lib/imag-display-path.sh reads.
+DEBIAN_FRONTEND=noninteractive apt-get install -y picom >/dev/null \
+    || fail "issue 1146: picom install failed -- the vsync compositor is the tear-free HDMI-projector present; without it the dual-output beat returns"
+
+# picom.conf -- byte-faithful to the live box (glx vsync, keep the fullscreen projector composited,
+# zero eye-candy). QUOTED heredoc: the body is literal (no shell expansion).
+sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/picom"
+cat > "$USER_HOME/.config/picom/picom.conf" <<'PICOM_CONF_EOF'
+# camera-box #1130 tearing fix (2026-08-20): the ONLY job of this compositor is a vsynced
+# present of the OBS projectors (modesetting TearFree is not available in this xorg build).
+backend = "glx";
+vsync = true;
+# NEVER unredirect fullscreen — the fullscreen Program projector is exactly the window
+# that must stay composited/vsynced, or the tearing returns.
+unredir-if-possible = false;
+# zero eye-candy: no shadows/fading/blur — pure sync, minimal latency/CPU.
+shadow = false;
+fading = false;
+blur-background = false;
+PICOM_CONF_EOF
+
+# picom.service (user systemd unit) -- byte-faithful to the live box. QUOTED heredoc: %h stays a
+# literal systemd specifier (never shell-expanded).
+sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user"
+cat > "$USER_HOME/.config/systemd/user/picom.service" <<'PICOM_SVC_EOF'
+[Unit]
+Description=picom vsync compositor (tear-free OBS projectors, camera-box issue 1130)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/picom --config %h/.config/picom/picom.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
+PICOM_SVC_EOF
+chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/picom" "$USER_HOME/.config/systemd"
+
+PICOM_UID="$(id -u "$DESKTOP_USER")"
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+    systemctl --user daemon-reload || fail "issue 1146: systemctl --user daemon-reload failed before enabling picom.service"
+# enable-only (never --now): picom launches on the NEXT graphical session, keeping the provisioning
+# run side-effect-light. A failed bus enable falls back to writing the wants symlink directly on
+# disk (bus-free) so the enable is deterministic even if the user manager is momentarily unavailable.
+if ! sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user enable picom.service 2>/dev/null; then
+    sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user/graphical-session.target.wants"
+    sudo -u "$DESKTOP_USER" ln -sf ../picom.service \
+        "$USER_HOME/.config/systemd/user/graphical-session.target.wants/picom.service" \
+        || fail "issue 1146: could not enable picom.service (neither systemctl --user enable nor the on-disk wants symlink) -- the vsync compositor would not launch at login"
+    echo "  picom.service enabled via the on-disk graphical-session.target.wants symlink (bus fallback)"
+fi
+echo "  issue 1146: picom vsync compositor provisioned + enabled (launches next graphical session; HDMI stays xrandr primary via step 16)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

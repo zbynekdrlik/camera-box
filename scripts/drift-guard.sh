@@ -966,15 +966,21 @@ check_imag_report() {
     done <<< "$(imag_power_envelope_verdict "$obs_power_envelope" "$exp_power_pl1_w")"
   fi
 
-  # 10. display-path config (#780) — picom OFF, its autostart masked/absent, the #841 iGPU
-  # max-freq pin (imag-igpu-maxperf.service enabled+active + gt_min_freq pinned to gt_RP0 — the
-  # Intel GPUPowerMizerMode=1 counterpart), and the #779 touchpad tap conf. Runs the SHARED
-  # imag_display_path_verdict (scripts/lib/imag-display-path.sh) over the gathered block, mapping
-  # each per-facet OK/DRIFT/UNKNOWN into this function's own report rows + exit-code contract.
-  # Two-tier, same as every check above: an EMPTY gathered block (SSH hiccup / not read) is UNKNOWN
-  # per facet, never a false DRIFT; a MISSING pgrep on the box is UNKNOWN by name (#833), never a
-  # false "picom not running = OK". NVIDIA-era ForceFullCompositionPipeline is intentionally absent
-  # (obsolete-by-hardware: the box is Intel-only, no FFCP — #816/#841; see the #780 design comment).
+  # 10. display-path config (#780 / issue 1146) — picom RUNNING with vsync, picom.service enabled,
+  # HDMI the xrandr PRIMARY (the projector is the vsync anchor), the #841 iGPU max-freq pin
+  # (imag-igpu-maxperf.service enabled+active + gt_min_freq pinned to gt_RP0 — the Intel
+  # GPUPowerMizerMode=1 counterpart), and the #779 touchpad tap conf. The picom polarity is INVERTED
+  # vs the original #780/#841 "picom off" doctrine — imag drives two independent-crystal 60Hz outputs
+  # and the vsync compositor anchored on the HDMI primary is what stops the dual-output tearing beat
+  # (see scripts/lib/imag-display-path.sh's compositor-doctrine-reversal header). Runs the SHARED
+  # imag_display_path_verdict (scripts/lib/imag-display-path.sh) over the gathered block, mapping each
+  # per-facet OK/DRIFT/UNKNOWN into this function's own report rows + exit-code contract — the loop is
+  # generic, so new facets flow through with no edit here. Two-tier, same as every check above: an
+  # EMPTY gathered block (SSH hiccup / not read) is UNKNOWN per facet, never a false DRIFT; a MISSING
+  # pgrep/xrandr on the box is UNKNOWN by name (#833), never a false verdict. NVIDIA-era
+  # ForceFullCompositionPipeline is obsolete-by-hardware (the box is Intel-only, no FFCP — #816/#841;
+  # the inert 20-tearfree.conf is deliberately NOT provisioned; the picom vsync compositor is the
+  # real mechanism now — see the issue 1146 design comment).
   if [ -z "$obs_display_path" ]; then
     printf '  %-22s UNKNOWN  (display-path state not read on imag-nb)\n' "display_path"
     unknown=$((unknown + 1))

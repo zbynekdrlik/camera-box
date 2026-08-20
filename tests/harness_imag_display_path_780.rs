@@ -81,19 +81,22 @@ fn status_of(lines: &[String], facet: &str) -> String {
         .to_string()
 }
 
-// ---- the four facets emit exactly one row each ------------------------------------------------
+// ---- the five facets emit exactly one row each ------------------------------------------------
 
 #[test]
 fn verdict_emits_one_row_per_facet_780() {
-    // A fully-clean Intel-box gather: picom off, no autostart, maxperf pinned+up, tap on.
-    let g = "PICOM_PGREP|ok\nPICOM_PROC|\nPICOM_AUTOSTART|absent\n\
+    // A fully-clean Intel-box gather AFTER the issue-1146 tear fix: picom RUNNING with vsync,
+    // picom.service enabled, HDMI the xrandr primary, maxperf pinned+up, tap on.
+    let g = "PICOM_PGREP|ok\nPICOM_PROC|2038724\nPICOM_SERVICE|enabled\n\
+             XRANDR|ok\nPRIMARY_OUTPUT|HDMI-1\n\
              MAXPERF_APPLICABLE|1\nMAXPERF_MIN|1400\nMAXPERF_RP0|1400\n\
              MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\n\
              TAPCONF|present\nTAPCONF_TAPPING|on";
     let lines = verdict(g);
     for f in [
         "picom_process",
-        "picom_autostart",
+        "picom_service",
+        "hdmi_primary",
         "igpu_maxperf",
         "tap_conf",
     ] {
@@ -105,20 +108,23 @@ fn verdict_emits_one_row_per_facet_780() {
     }
 }
 
-// ---- picom_process ----------------------------------------------------------------------------
+// ---- picom_process (issue 1146: RUNNING with vsync = OK — reversal of the #841 picom-off facet) -
 
 #[test]
-fn picom_process_ok_when_not_running_780() {
-    let lines = verdict("PICOM_PGREP|ok\nPICOM_PROC|");
-    assert_eq!(status_of(&lines, "picom_process"), "OK");
+fn picom_process_ok_when_running_1146() {
+    // The picom vsync compositor is the tear-free present of the OBS projectors — running is OK.
+    let lines = verdict("PICOM_PGREP|ok\nPICOM_PROC|2038724");
+    let l = facet_line(&lines, "picom_process");
+    assert_eq!(status_of(&lines, "picom_process"), "OK", "{l}");
+    assert!(l.contains("2038724"), "the running pid must be named: {l}");
 }
 
 #[test]
-fn picom_process_drift_when_running_780() {
-    let lines = verdict("PICOM_PGREP|ok\nPICOM_PROC|4711");
+fn picom_process_drift_when_not_running_1146() {
+    // picom NOT running -> the dual-output vsync beat returns -> DRIFT (issue 1146 reversal).
+    let lines = verdict("PICOM_PGREP|ok\nPICOM_PROC|");
     let l = facet_line(&lines, "picom_process");
-    assert!(l.contains("|DRIFT|"), "picom running must DRIFT: {l}");
-    assert!(l.contains("4711"), "the running pid must be named: {l}");
+    assert!(l.contains("|DRIFT|"), "picom not running must DRIFT: {l}");
 }
 
 #[test]
@@ -142,33 +148,68 @@ fn picom_process_unknown_when_not_gathered_780() {
     assert_eq!(status_of(&lines, "picom_process"), "UNKNOWN");
 }
 
-// ---- picom_autostart --------------------------------------------------------------------------
+// ---- picom_service (issue 1146: the persistence half — the user systemd unit must be enabled) --
 
 #[test]
-fn picom_autostart_ok_when_absent_780() {
-    let lines = verdict("PICOM_AUTOSTART|absent");
-    assert_eq!(status_of(&lines, "picom_autostart"), "OK");
+fn picom_service_ok_when_enabled_1146() {
+    let lines = verdict("PICOM_SERVICE|enabled");
+    assert_eq!(status_of(&lines, "picom_service"), "OK");
 }
 
 #[test]
-fn picom_autostart_ok_when_masked_hidden_true_780() {
-    let lines = verdict("PICOM_AUTOSTART|present\nPICOM_AUTOSTART_HIDDEN|true");
-    assert_eq!(status_of(&lines, "picom_autostart"), "OK");
+fn picom_service_drift_when_disabled_1146() {
+    // not enabled -> the vsync compositor never launches at login -> the tearing returns -> DRIFT.
+    let lines = verdict("PICOM_SERVICE|disabled");
+    assert_eq!(status_of(&lines, "picom_service"), "DRIFT");
 }
 
 #[test]
-fn picom_autostart_drift_when_present_and_not_masked_780() {
-    let lines = verdict("PICOM_AUTOSTART|present\nPICOM_AUTOSTART_HIDDEN|false");
-    assert_eq!(status_of(&lines, "picom_autostart"), "DRIFT");
-    // an entry present with NO Hidden line at all is equally a live autostart -> DRIFT
-    let lines2 = verdict("PICOM_AUTOSTART|present\nPICOM_AUTOSTART_HIDDEN|");
-    assert_eq!(status_of(&lines2, "picom_autostart"), "DRIFT");
-}
-
-#[test]
-fn picom_autostart_unknown_when_not_gathered_780() {
+fn picom_service_unknown_when_not_gathered_1146() {
     let lines = verdict("");
-    assert_eq!(status_of(&lines, "picom_autostart"), "UNKNOWN");
+    assert_eq!(status_of(&lines, "picom_service"), "UNKNOWN");
+}
+
+// ---- hdmi_primary (issue 1146: HDMI must be the xrandr primary — the projector is the vsync anchor)
+
+#[test]
+fn hdmi_primary_ok_when_hdmi_is_primary_1146() {
+    let lines = verdict("XRANDR|ok\nPRIMARY_OUTPUT|HDMI-1");
+    assert_eq!(status_of(&lines, "hdmi_primary"), "OK");
+}
+
+#[test]
+fn hdmi_primary_drift_when_panel_is_primary_1146() {
+    // the panel as primary makes IT the vsync anchor -> the projector tears (the exact #1146 beat).
+    let lines = verdict("XRANDR|ok\nPRIMARY_OUTPUT|eDP-1");
+    let l = facet_line(&lines, "hdmi_primary");
+    assert!(l.contains("|DRIFT|"), "a non-HDMI primary must DRIFT: {l}");
+    assert!(l.contains("eDP-1"), "the wrong primary must be named: {l}");
+}
+
+#[test]
+fn hdmi_primary_unknown_when_xrandr_missing_never_a_false_verdict_1146() {
+    // #833 discipline: a missing xrandr must be UNKNOWN by name, never a false OK/DRIFT.
+    let lines = verdict("XRANDR|missing");
+    let l = facet_line(&lines, "hdmi_primary");
+    assert!(
+        l.contains("|UNKNOWN|"),
+        "missing xrandr must be UNKNOWN: {l}"
+    );
+    assert!(l.to_lowercase().contains("xrandr"), "must name xrandr: {l}");
+}
+
+#[test]
+fn hdmi_primary_unknown_when_primary_unread_1146() {
+    // xrandr present but no primary read (X unreachable over ssh, or no primary set) -> UNKNOWN,
+    // never a false DRIFT.
+    let lines = verdict("XRANDR|ok\nPRIMARY_OUTPUT|");
+    assert_eq!(status_of(&lines, "hdmi_primary"), "UNKNOWN");
+}
+
+#[test]
+fn hdmi_primary_unknown_when_not_gathered_1146() {
+    let lines = verdict("");
+    assert_eq!(status_of(&lines, "hdmi_primary"), "UNKNOWN");
 }
 
 // ---- igpu_maxperf (the Intel GPUPowerMizerMode=1 counterpart, #841) ----------------------------
@@ -269,6 +310,17 @@ fn gather_remote_snippet_is_nonempty_and_names_the_sources_780() {
     assert!(
         out.contains("PICOM_PGREP"),
         "snippet must emit a pgrep-presence marker"
+    );
+    // issue 1146: the snippet must gather the picom.service enable state (the *.target.wants
+    // symlink) and emit a PICOM_SERVICE marker.
+    assert!(
+        out.contains("PICOM_SERVICE") && out.contains(".target.wants/picom.service"),
+        "snippet must gather the picom.service enable symlink (issue 1146): {out}"
+    );
+    // issue 1146: the snippet must probe xrandr (#833) and gather the primary output.
+    assert!(
+        out.contains("xrandr") && out.contains("XRANDR") && out.contains("PRIMARY_OUTPUT"),
+        "snippet must probe xrandr and gather the primary output (issue 1146): {out}"
     );
 }
 

@@ -146,6 +146,13 @@ set -euo pipefail
 #       intel_pstate no_turbo=0 + platform_profile, optional knobs `absent`-tolerant for hardware
 #       agnosticism, #816). Closes the hand-placed-never-provisioned gap #791 exists for; setup-imag.sh
 #       step 26 provisions it. Pure sysfs/systemd reads (side-effect free), so it runs BEFORE check (o).
+#   (z) display-path tear-free config (issue 1146): the picom vsync compositor is RUNNING + its
+#       user systemd unit is ENABLED, HDMI is the xrandr PRIMARY (the projector is the vsync anchor),
+#       the #841 iGPU freq pin holds, and the #779 tap conf is present. Runs the SHARED
+#       imag_display_path_verdict (scripts/lib/imag-display-path.sh) -- the SAME verdict drift-guard
+#       --check-imag and the E2E [0/8] preflight run. setup-imag.sh step 27 provisions picom + step
+#       16 sets HDMI primary; a re-provision that lost either (or picom that failed to come up after
+#       a reboot) must FAIL here. Pure ssh reads (side-effect free), appended at the END.
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -164,6 +171,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/imag-power-envelope.sh" # imag_power_envelope_verdict/imag_power_envelope_gather_
                                      # remote_snippet (#1040) -- SHARED with drift-guard.sh's
                                      # --check-imag power-envelope facet, never a driftable copy
+# shellcheck source=scripts/lib/imag-display-path.sh
+. "$HERE/lib/imag-display-path.sh"   # imag_display_path_verdict/imag_display_path_gather_remote_
+                                     # snippet (#780/issue 1146) -- SHARED with drift-guard.sh's
+                                     # --check-imag display-path facet + the E2E [0/8] preflight
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"      # offset_check/ptp_locked_from_pipe_json/_journal/
                                      # dantesync_offset_verdict/gm_source_ip_from_pipe_json/
@@ -1498,6 +1509,25 @@ elif imag_powerkey_protection_ok "$LOGIND_KEYS" "$MASKED_TARGETS"; then
   ok "power-button/lid/suspend/hibernate keys all ignored + sleep/suspend/hibernate/hybrid-sleep targets masked (#727 -- production box can't be accidentally suspended)"
 else
   fail "#727 power-button protection NOT effective -- need HandlePowerKey/HandleSuspendKey/HandleHibernateKey/HandleLidSwitch =ignore AND the four sleep targets masked. loginctl: $(printf '%s' "$LOGIND_KEYS" | tr '\n' ' ') || masked: $(printf '%s' "$MASKED_TARGETS" | tr '\n' ' ')"
+fi
+
+# (z) display-path tear-free config (issue 1146): picom vsync compositor running + enabled, HDMI
+# the xrandr primary, iGPU freq pinned, tap conf. Reuses the SHARED imag_display_path_verdict --
+# the SAME verdict drift-guard --check-imag and the E2E [0/8] preflight run (no bespoke logic here).
+# A DRIFT (picom off, panel primary, etc.) FAILs; an UNKNOWN (SSH hiccup / unreadable) warns, never
+# a false fail. Pure ssh reads (side-effect free), so it is appended at the END.
+DP_GATHER="$(ssh_box "$(imag_display_path_gather_remote_snippet)" 2>/dev/null || true)"
+if [ -z "$DP_GATHER" ]; then
+  warn "display-path config unreadable over SSH -- cannot verify the issue-1146 tear-free config (picom/HDMI-primary)"
+else
+  while IFS='|' read -r dp_facet dp_status dp_detail; do
+    [ -n "$dp_facet" ] || continue
+    case "$dp_status" in
+      OK)      ok "display-path/${dp_facet}: ${dp_detail}" ;;
+      DRIFT)   fail "display-path/${dp_facet} DRIFT: ${dp_detail}" ;;
+      *)       warn "display-path/${dp_facet} UNKNOWN: ${dp_detail}" ;;
+    esac
+  done <<< "$(imag_display_path_verdict "$DP_GATHER")"
 fi
 
 echo ""
