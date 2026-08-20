@@ -915,8 +915,14 @@ if [ "$INSTALLED_OBS_VERSION" != "$IMAG_OBS_BASE_VERSION" ]; then
     OBS_BASE_PLAN="$(imag_obs_base_plan "$OBS_CANDIDATE" "$IMAG_OBS_BASE_VERSION")" || exit 1
     echo "  #824: OBS base pin ${IMAG_OBS_BASE_VERSION} (PPA candidate ${OBS_CANDIDATE:-none}) -> ${OBS_BASE_PLAN}"
     if [ "$OBS_BASE_PLAN" = "apt" ]; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "obs-studio=${IMAG_OBS_BASE_VERSION}" >/dev/null \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
+            --allow-change-held-packages "obs-studio=${IMAG_OBS_BASE_VERSION}" >/dev/null \
             || fail "#824: obs-studio=${IMAG_OBS_BASE_VERSION} install failed"
+        # The hold is DELIBERATE (issue 824: no unattended PPA upgrades under the hot-swap) — the
+        # pinned install above may legitimately MOVE the held version when the #824 pin advances
+        # with the PPA candidate, so it must be allowed to change a held package; re-assert the
+        # hold right after so the box never floats.
+        apt-mark hold obs-studio >/dev/null 2>&1 || true
     else
         # the PPA moved on — fetch the pinned (superseded) binary from Launchpad's +files endpoint
         OBS_DEB_URL="$(imag_obs_base_deb_url "$IMAG_OBS_BASE_VERSION")"
