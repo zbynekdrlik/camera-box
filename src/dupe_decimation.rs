@@ -42,6 +42,7 @@
 //! is shaped around a raw V4L2 YUYV422 frame); pure logic, unit-tests Tier-0 on the Linux `test`
 //! CI job (default features).
 
+use std::collections::VecDeque;
 use std::hash::Hasher;
 
 // ── (#889) content-dupe detection ─────────────────────────────────────────────
@@ -107,45 +108,102 @@ impl Hasher for FnvHasher {
     }
 }
 
-// ── (#889) victim-selection decision ──────────────────────────────────────────
+// ── (#1145) v2 tuning constants ──────────────────────────────────────────────
 
-/// The dupe-preferring decimation decision: given the PACING gate's verdict for this captured
-/// frame (`would_emit` — did it cross the target-rate wall-clock boundary?), whether it is a
-/// content dupe of the immediately preceding capture, and whether a dupe was ALREADY deferred
-/// for the CURRENT pending boundary, decide whether to emit it now.
+/// (#1145) The largest boundary lag (in whole emit-boundary intervals) at which a stale
+/// over-rate content-dupe is RETIRED rather than emitted as a copy. Chosen well BELOW the #707
+/// resync trigger ([`crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS`] = 8): retirement drains
+/// the dupe-driven lag at up to the dupe rate, so at a genuine over-rate the lag never approaches
+/// the resync bound (measured peak ~4 across seeds/jitter in the off-rig sim). Beyond this ceiling
+/// a genuine sustained deficit is building, so the late-dupe valve emits a copy instead — the
+/// panic floor that keeps the emit grid boundary-locked. `4` gives 0 emitted copies at the rig
+/// takt (61.x) with realistic jitter AND a comfortable margin (4) to the resync bound.
+pub const RETIRE_MAX_LAG_INTERVALS: u64 = 4;
+
+/// (#1145) Trailing wall-clock window over which the UNIQUE (non-dupe) capture arrivals are counted
+/// to decide whether the source carries enough distinct content to hold a steady 60 fps without
+/// fabricating copies. 2 s is long enough to integrate out per-frame jitter and dupe clustering
+/// (a windowed COUNT, unlike an interval EMA, reads the true unique RATE regardless of local
+/// spacing) yet short enough that retirement engages within ~2 s of a sustained over-rate.
+pub const UNIQUE_RATE_WINDOW_NS: u64 = 2_000_000_000;
+
+/// (#1145) Minimum UNIQUE captures within [`UNIQUE_RATE_WINDOW_NS`] for retirement to engage —
+/// i.e. the source is delivering enough distinct content (`>= ~59 unique fps`) to hold a steady 60
+/// after shedding its surplus dupes. Below this the source is genuinely starved (a sub-60 source
+/// padded to 60 by DUPLICATION — a 50->60 pulldown, or a grabber duping faster than its over-rate):
+/// retirement stays OFF and the pre-existing late-dupe valve emits the copies that hold 60 (keeping
+/// the strih FIFO locked AND leaving the content-dupes in the recording for the duplication-masked
+/// pulldown detector). 118 over 2 s == 59 fps — clear of a true-60 source's ~120/2 s (jitter never
+/// drops the 2 s COUNT below it) yet clearly above a starved source's count. This is the ticket's
+/// "restrict late-dupe injection to genuine starvation" boundary, made a robust measured signal.
+pub const RETIRE_MIN_UNIQUES_IN_WINDOW: usize = 118;
+
+// ── (#889/#1145) victim-selection decision ────────────────────────────────────
+
+/// (#1145) The per-captured-frame shed/emit decision, one of four actions. `would_emit` is the
+/// PACING gate's verdict (did this capture cross the wall-clock boundary?); `is_dupe` whether it is
+/// a byte-identical content dupe of the immediately preceding capture; `lag_intervals` how many
+/// whole boundary intervals `now` sits PAST the pending boundary
+/// ([`crate::genlock_pacing::genlock_lag_intervals`]); `enough_unique_to_hold_target` whether the
+/// trailing-window UNIQUE rate proves the source can hold a steady 60 fps without copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShedAction {
+    /// Emit this captured frame and ADVANCE the boundary one interval. `copy == true` marks a
+    /// content-dupe emitted as the late-dupe valve (a repeated frame downstream — the starvation
+    /// floor / double-dupe guard); `false` for a genuinely unique tick.
+    Emit { copy: bool },
+    /// #889 on-time deferral: HOLD the boundary (do NOT advance) and shed this content-dupe — the
+    /// next capture re-evaluates against the SAME still-pending boundary, so the dupe is replaced
+    /// by a unique that still lands inside the interval (lag-neutral).
+    Defer,
+    /// #1145 stale-boundary retirement: shed this content-dupe AND advance the boundary one
+    /// interval, emitting nothing. The boundary the dupe crossed is already stale (`lag >= 1` — the
+    /// downstream hold for it already happened), so retiring it costs no new downstream artifact,
+    /// sacrifices no unique, AND drains the dupe-driven lag.
+    Retire,
+    /// Between boundaries (`!would_emit`): blind-shed, boundary unchanged — the pre-existing pacing
+    /// decimation drop.
+    BlindShed,
+}
+
+/// (#889/#1111/#1145) Decide the [`ShedAction`] for one captured frame. Pure — driven entirely by
+/// its inputs, so the whole cadence policy is testable off real hardware.
 ///
-/// - `would_emit == false` (still between boundaries): unchanged blind pacing — never emit.
-/// - `would_emit == true`, this frame is a FRESH dupe (not yet deferred this boundary), AND the
-///   crossing is ON-TIME (`on_time` — the surplus regime, the next boundary still in the future):
-///   SHED it instead of emitting — the caller must NOT advance its boundary state, so the very
-///   next captured frame is re-evaluated against the SAME still-pending boundary. The `on_time`
-///   guard is the #1111 fix: a dupe is deferred ONLY when a replacement capture still lands inside
-///   the SAME interval, so the boundary advances exactly once for the pair (lag-neutral).
-/// - `would_emit == true` and (NOT a dupe, OR a dupe already deferred once this boundary, OR a
-///   LATE dupe — `!on_time`, the catch-up regime): emit — either genuinely unique, the bounded
-///   one-deferral fallback (validated dupes are always isolated pairs, so a second consecutive
-///   dupe is not expected on real hardware; the bound protects every grabber model against ever
-///   starving emission indefinitely), or the #1111 late-dupe release valve. Deferring a late dupe
-///   would hold the boundary while the wall clock runs on, ratcheting the gate's lag until it
-///   trips the #707 resync (issue-1110 CAM1 judder); emitting it (a repeated frame, invisible, and
-///   mathematically unavoidable when a 58-unique-fps source feeds a steady 60) keeps the grid
-///   boundary-locked.
-///
-/// Returns `(emit, deferred_as_dupe)`. The caller advances its boundary state IFF
-/// `!deferred_as_dupe` — see [`DecimationGate::poll`] for the wiring.
-pub fn dupe_preferring_decimate(
+/// - `!would_emit` (between boundaries) -> [`ShedAction::BlindShed`] (unchanged blind pacing).
+/// - unique tick -> [`ShedAction::Emit`]`{ copy: false }` (unchanged).
+/// - content-dupe, `lag == 0` (on-time/surplus): #889 -> [`ShedAction::Defer`] once; a second dupe
+///   for the SAME boundary (`already_deferred`) -> [`ShedAction::Emit`]`{ copy: true }` (the bounded
+///   one-deferral guard — validated dupes are isolated pairs).
+/// - content-dupe, `1 <= lag <= `[`RETIRE_MAX_LAG_INTERVALS`], AND `enough_unique_to_hold_target`:
+///   #1145 -> [`ShedAction::Retire`]. The boundary is already stale, and the source has enough
+///   distinct content that shedding this dupe won't drop the emit below 60 — so retire it (0 copies,
+///   0 dropped uniques, drains lag).
+/// - content-dupe otherwise (NOT enough unique — genuine starvation; OR `lag > `the retire ceiling
+///   — a sustained deficit building): [`ShedAction::Emit`]`{ copy: true }` — the #1111 late-dupe
+///   valve, now a starvation floor that holds the emit grid boundary-locked at 60.
+pub fn dupe_shed_action(
     would_emit: bool,
     is_dupe: bool,
     already_deferred_this_boundary: bool,
-    on_time: bool,
-) -> (bool, bool) {
+    lag_intervals: u64,
+    enough_unique_to_hold_target: bool,
+) -> ShedAction {
     if !would_emit {
-        return (false, false);
+        return ShedAction::BlindShed;
     }
-    if is_dupe && !already_deferred_this_boundary && on_time {
-        return (false, true);
+    if !is_dupe {
+        return ShedAction::Emit { copy: false };
     }
-    (true, false)
+    if lag_intervals == 0 {
+        if already_deferred_this_boundary {
+            return ShedAction::Emit { copy: true };
+        }
+        return ShedAction::Defer;
+    }
+    if enough_unique_to_hold_target && lag_intervals <= RETIRE_MAX_LAG_INTERVALS {
+        return ShedAction::Retire;
+    }
+    ShedAction::Emit { copy: true }
 }
 
 // ── (#889) per-stream gate (boundary + dupe-preference state) ────────────────
@@ -163,6 +221,10 @@ pub struct DecimationGate {
     prev_hash: Option<u64>,
     deferred_this_boundary: bool,
     shed_log: DupeShedLog,
+    /// (#1145) Trailing wall-clock timestamps of the recent UNIQUE (non-dupe) captures within
+    /// [`UNIQUE_RATE_WINDOW_NS`]. Its length is the measured unique RATE — the robust "enough
+    /// distinct content to hold 60 fps" signal that gates retirement vs the starvation copy valve.
+    unique_capture_times: VecDeque<u64>,
 }
 
 impl DecimationGate {
@@ -175,6 +237,25 @@ impl DecimationGate {
     /// [`crate::genlock_pacing::boundary_skip_count`] diagnostic, unchanged by this ticket.
     pub fn next_boundary_ns(&self) -> u64 {
         self.next_boundary_ns
+    }
+
+    /// (#1145) Record a UNIQUE capture arriving at `now_ns` into the trailing window (dropping
+    /// entries older than [`UNIQUE_RATE_WINDOW_NS`]) and return whether the window now holds at
+    /// least [`RETIRE_MIN_UNIQUES_IN_WINDOW`] uniques — i.e. the source carries enough distinct
+    /// content to hold a steady 60 fps after shedding its surplus dupes. A COUNT over the window
+    /// (not an interval EMA) reads the true unique RATE regardless of per-frame jitter or dupe
+    /// clustering.
+    fn record_unique_and_enough(&mut self, now_ns: u64) -> bool {
+        self.unique_capture_times.push_back(now_ns);
+        let cutoff = now_ns.saturating_sub(UNIQUE_RATE_WINDOW_NS);
+        while let Some(&front) = self.unique_capture_times.front() {
+            if front <= cutoff {
+                self.unique_capture_times.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.unique_capture_times.len() >= RETIRE_MIN_UNIQUES_IN_WINDOW
     }
 
     /// Feed ONE captured frame (`now_ns` wall-clock capture instant, `content_hash` from
@@ -206,46 +287,78 @@ impl DecimationGate {
             interval_ns,
             queue_had_frame,
         );
-        // (#1111) is this an ON-TIME/surplus crossing (deferring a dupe is lag-neutral) or a LATE
-        // catch-up crossing (deferring would ratchet the lag into the #707 resync -> issue-1110
-        // judder)? Shares the boundary math with `genlock_emit_gate` above.
-        let on_time =
-            crate::genlock_pacing::genlock_emit_on_time(now_ns, self.next_boundary_ns, interval_ns);
+        // (#1145) numeric boundary staleness: 0 when on-time/surplus (deferring a dupe is
+        // lag-neutral) or between boundaries; >= 1 once the crossed boundary is already stale (its
+        // downstream hold already happened) so a dupe crossing it can RETIRE it. Shares the boundary
+        // math with `genlock_emit_gate` above.
+        let lag_intervals = crate::genlock_pacing::genlock_lag_intervals(
+            now_ns,
+            self.next_boundary_ns,
+            interval_ns,
+        );
 
         let is_dupe = self.prev_hash == Some(content_hash);
         self.prev_hash = Some(content_hash);
 
-        let (emit, deferred) =
-            dupe_preferring_decimate(would_emit, is_dupe, self.deferred_this_boundary, on_time);
-
-        if deferred {
-            // Shed the dupe, keep the SAME boundary pending -- the next captured frame is
-            // re-evaluated against it (bounded to one deferral, see the module doc).
-            self.deferred_this_boundary = true;
-            self.shed_log.record_shed(true);
+        // (#1145) A unique capture updates the trailing unique-rate window; a dupe reads it without
+        // touching it (a dupe carries no new distinct content). `enough_unique` is the robust
+        // "source can hold 60 without copies" signal that separates over-rate retirement from a
+        // genuine starved-source (pulldown) where the late-dupe copy valve must stay engaged.
+        let enough_unique = if is_dupe {
+            self.unique_capture_times.len() >= RETIRE_MIN_UNIQUES_IN_WINDOW
         } else {
-            self.next_boundary_ns = candidate_next;
-            if would_emit {
-                self.deferred_this_boundary = false;
-            }
-            if !emit {
-                // The ORIGINAL blind pacing drop (between boundaries) -- unchanged pre-fix.
+            self.record_unique_and_enough(now_ns)
+        };
+
+        match dupe_shed_action(
+            would_emit,
+            is_dupe,
+            self.deferred_this_boundary,
+            lag_intervals,
+            enough_unique,
+        ) {
+            ShedAction::BlindShed => {
+                // The ORIGINAL blind pacing drop (between boundaries) -- boundary unchanged
+                // (candidate_next == the pending boundary here), deferral state untouched.
+                self.next_boundary_ns = candidate_next;
                 self.shed_log.record_shed(false);
-            } else if is_dupe {
-                // (#1111) The late-dupe release valve fired: a content-dupe was EMITTED (a copy)
-                // rather than deferred, because deferring it would have ratcheted the boundary lag
-                // into the #707 resync. Count it so a live box shows the valve working -- the ~2/s
-                // mathematical floor of feeding a steady 60 from a ~58-unique-fps grabber -- rather
-                // than the mechanism being observable only as the ABSENCE of the #707 SKIPPED WARN.
-                self.shed_log.record_dupe_emitted();
+                false
+            }
+            ShedAction::Defer => {
+                // #889 on-time deferral: shed the dupe, keep the SAME boundary pending -- the next
+                // captured frame is re-evaluated against it (bounded to one deferral).
+                self.deferred_this_boundary = true;
+                self.shed_log.record_shed(true);
+                false
+            }
+            ShedAction::Retire => {
+                // (#1145) stale-boundary retirement: shed the dupe AND advance the already-stale
+                // boundary one interval, emitting nothing. No copy, no unique sacrificed; drains the
+                // dupe-driven lag so it never reaches the #707 resync.
+                self.next_boundary_ns = candidate_next;
+                self.deferred_this_boundary = false;
+                self.shed_log.record_retired();
+                false
+            }
+            ShedAction::Emit { copy } => {
+                self.next_boundary_ns = candidate_next;
+                self.deferred_this_boundary = false;
+                if copy {
+                    // (#1111) The late-dupe valve fired: a content-dupe was EMITTED (a copy). Under
+                    // v2 this now means genuine starvation (the trailing unique rate cannot hold 60
+                    // -- a sub-60 source padded by duplication) or the bounded double-dupe guard, NOT
+                    // the routine over-rate case (those dupes retire). Count it so a live box shows
+                    // the valve engaging only for a genuine deficit.
+                    self.shed_log.record_dupe_emitted();
+                }
+                true
             }
         }
-        emit
     }
 
-    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted)` counters for the periodic
-    /// INFO log — see [`DupeShedLog::take`].
-    pub fn take_shed_counts(&mut self) -> (u64, u64, u64) {
+    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired)` counters for the
+    /// periodic INFO log — see [`DupeShedLog::take`].
+    pub fn take_shed_counts(&mut self) -> (u64, u64, u64, u64) {
         self.shed_log.take()
     }
 }
@@ -262,6 +375,7 @@ pub struct DupeShedLog {
     dupe_shed: u64,
     blind_shed: u64,
     dupe_emitted: u64,
+    retired: u64,
 }
 
 impl DupeShedLog {
@@ -269,9 +383,9 @@ impl DupeShedLog {
         Self::default()
     }
 
-    /// Record ONE captured frame that was shed (never emitted) this poll: `dupe` when
-    /// [`dupe_preferring_decimate`] preferred it as a content-duplicate victim, otherwise the
-    /// ORIGINAL blind pacing drop (between boundaries, or the bounded fallback).
+    /// Record ONE captured frame that was shed (never emitted) this poll: `dupe` when it was
+    /// preferred as a content-duplicate victim (the #889 on-time deferral), otherwise the ORIGINAL
+    /// blind pacing drop (between boundaries).
     pub fn record_shed(&mut self, dupe: bool) {
         if dupe {
             self.dupe_shed = self.dupe_shed.saturating_add(1);
@@ -281,17 +395,30 @@ impl DupeShedLog {
     }
 
     /// (#1111) Record ONE content-dupe that was EMITTED (a copy) rather than shed — the late-dupe
-    /// release valve keeping the emit grid boundary-locked at an over-rate. See [`DecimationGate::poll`].
+    /// valve keeping the emit grid boundary-locked at a genuine deficit. See [`DecimationGate::poll`].
     pub fn record_dupe_emitted(&mut self) {
         self.dupe_emitted = self.dupe_emitted.saturating_add(1);
     }
 
-    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted)` counts and RESET.
-    pub fn take(&mut self) -> (u64, u64, u64) {
-        let out = (self.dupe_shed, self.blind_shed, self.dupe_emitted);
+    /// (#1145) Record ONE over-rate content-dupe that was RETIRED (shed while advancing the
+    /// already-stale boundary) — the mechanism that absorbs the over-rate takt without emitting a
+    /// copy. See [`DecimationGate::poll`].
+    pub fn record_retired(&mut self) {
+        self.retired = self.retired.saturating_add(1);
+    }
+
+    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired)` counts and RESET.
+    pub fn take(&mut self) -> (u64, u64, u64, u64) {
+        let out = (
+            self.dupe_shed,
+            self.blind_shed,
+            self.dupe_emitted,
+            self.retired,
+        );
         self.dupe_shed = 0;
         self.blind_shed = 0;
         self.dupe_emitted = 0;
+        self.retired = 0;
         out
     }
 }
@@ -304,12 +431,13 @@ pub fn dupe_shed_summary(
     dupe_shed: u64,
     blind_shed: u64,
     dupe_emitted: u64,
+    retired: u64,
     window_secs: u64,
 ) -> String {
     format!(
         "(#889) dupe-preferring decimation: {dupe_shed} dupe-victim shed / {blind_shed} \
-         blind-pacing shed / {dupe_emitted} late-dupe copies emitted (#1111 grid-lock valve) \
-         over the last ~{window_secs}s"
+         blind-pacing shed / {dupe_emitted} late-dupe copies emitted (#1111 grid-lock valve) / \
+         {retired} boundaries retired (#1145 over-rate absorption) over the last ~{window_secs}s"
     )
 }
 
@@ -380,68 +508,108 @@ mod tests {
         assert_eq!(dupe_content_hash(&[1, 2, 3], 4, 1, 0), 0);
     }
 
-    // ── dupe_preferring_decimate ───────────────────────────────────────────
+    // ── dupe_shed_action ───────────────────────────────────────────────────
 
     #[test]
-    fn between_boundaries_never_emits_regardless_of_dupe() {
-        // would_emit == false: on_time is irrelevant (always false between boundaries).
+    fn between_boundaries_blind_sheds_regardless_of_dupe() {
+        // would_emit == false: lag/enough are irrelevant between boundaries -> BlindShed.
         assert_eq!(
-            dupe_preferring_decimate(false, false, false, false),
-            (false, false)
+            dupe_shed_action(false, false, false, 0, true),
+            ShedAction::BlindShed
         );
         assert_eq!(
-            dupe_preferring_decimate(false, true, false, false),
-            (false, false)
+            dupe_shed_action(false, true, false, 0, false),
+            ShedAction::BlindShed
         );
     }
 
     #[test]
     fn fresh_on_time_dupe_at_boundary_is_deferred_not_emitted() {
-        // An ON-TIME (surplus-regime) fresh dupe is the case #889 defers — a replacement capture
-        // still lands inside the same interval, so the deferral is lag-neutral.
+        // An ON-TIME (lag == 0, surplus-regime) fresh dupe is the case #889 defers — a replacement
+        // capture still lands inside the same interval, so the deferral is lag-neutral. Independent
+        // of the unique-rate signal (deferral neither emits nor advances).
         assert_eq!(
-            dupe_preferring_decimate(true, true, false, true),
-            (false, true)
+            dupe_shed_action(true, true, false, 0, true),
+            ShedAction::Defer
+        );
+        assert_eq!(
+            dupe_shed_action(true, true, false, 0, false),
+            ShedAction::Defer
         );
     }
 
     #[test]
-    fn late_dupe_is_not_deferred_but_emitted_1111() {
-        // (#1111) A LATE (catch-up regime, `!on_time`) fresh dupe must NOT be deferred: holding
-        // the boundary while the wall clock runs on is exactly the lag ratchet that trips the
-        // #707 resync and produces the issue-1110 CAM1 judder. It emits instead (a repeated
-        // frame), keeping the emit grid locked to wall-clock.
+    fn already_deferred_on_time_dupe_falls_back_to_copy() {
+        // A SECOND consecutive dupe for the SAME boundary (lag == 0, already deferred once) emits as
+        // a copy — bounded to one deferral (validated dupes are isolated pairs, never triples).
         assert_eq!(
-            dupe_preferring_decimate(true, true, false, false),
-            (true, false)
+            dupe_shed_action(true, true, true, 0, true),
+            ShedAction::Emit { copy: true }
         );
     }
 
     #[test]
-    fn already_deferred_dupe_falls_back_to_blind_emit() {
-        // Even on-time, a SECOND consecutive dupe for the same boundary emits (bounded to one
-        // deferral) — validated dupes are isolated pairs, never triples.
+    fn late_over_rate_dupe_is_retired_not_emitted_as_a_copy_1145() {
+        // (#1145) A LATE fresh dupe (lag >= 1 — the crossed boundary is already stale) at a genuine
+        // over-rate (`enough_unique_to_hold_target`) is RETIRED: shed the dupe AND advance the
+        // stale boundary, emitting nothing. This is the fix — the pre-fix valve emitted a copy here
+        // (the strih 15fps-judder), retirement drains the lag at no downstream cost.
+        for lag in 1..=RETIRE_MAX_LAG_INTERVALS {
+            assert_eq!(
+                dupe_shed_action(true, true, false, lag, true),
+                ShedAction::Retire,
+                "lag={lag}"
+            );
+        }
+    }
+
+    #[test]
+    fn late_dupe_without_enough_unique_is_emitted_as_a_copy_1145() {
+        // (#1145) The late-dupe copy valve is now restricted to GENUINE STARVATION: when the source
+        // does NOT carry enough distinct content to hold 60 (`!enough_unique` — a sub-60 source
+        // padded by duplication, a 50->60 pulldown), a late dupe EMITS a copy exactly as before, so
+        // the emit grid stays boundary-locked at 60 and the recording keeps the content-dupes the
+        // duplication-masked pulldown detector reads.
+        for lag in 1..=(RETIRE_MAX_LAG_INTERVALS + 3) {
+            assert_eq!(
+                dupe_shed_action(true, true, false, lag, false),
+                ShedAction::Emit { copy: true },
+                "lag={lag}"
+            );
+        }
+    }
+
+    #[test]
+    fn retirement_stops_above_the_lag_ceiling_even_with_enough_unique_1145() {
+        // Past RETIRE_MAX_LAG_INTERVALS a genuine sustained deficit is building; the copy valve
+        // fires (the panic floor) rather than retiring further, so the lag can never creep toward
+        // the #707 resync bound.
         assert_eq!(
-            dupe_preferring_decimate(true, true, true, true),
-            (true, false)
+            dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS, true),
+            ShedAction::Retire
+        );
+        assert_eq!(
+            dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS + 1, true),
+            ShedAction::Emit { copy: true }
         );
     }
 
     #[test]
     fn non_dupe_at_boundary_emits_unchanged() {
-        // A genuine unique tick always emits, regardless of the deferral/on_time flags.
-        assert_eq!(
-            dupe_preferring_decimate(true, false, false, true),
-            (true, false)
-        );
-        assert_eq!(
-            dupe_preferring_decimate(true, false, true, true),
-            (true, false)
-        );
-        assert_eq!(
-            dupe_preferring_decimate(true, false, false, false),
-            (true, false)
-        );
+        // A genuine unique tick always emits (copy: false), regardless of lag / deferral / unique
+        // flags — retirement and the copy valve only ever act on content-dupes.
+        for (deferred, lag, enough) in [
+            (false, 0u64, true),
+            (true, 0, true),
+            (false, 3, false),
+            (false, 9, true),
+        ] {
+            assert_eq!(
+                dupe_shed_action(true, false, deferred, lag, enough),
+                ShedAction::Emit { copy: false },
+                "deferred={deferred} lag={lag} enough={enough}"
+            );
+        }
     }
 
     // ── DupeShedLog ────────────────────────────────────────────────────────
@@ -453,18 +621,23 @@ mod tests {
         log.record_shed(true);
         log.record_shed(false);
         log.record_dupe_emitted();
-        assert_eq!(log.take(), (2, 1, 1));
-        assert_eq!(log.take(), (0, 0, 0), "take() must reset");
+        log.record_retired();
+        log.record_retired();
+        log.record_retired();
+        assert_eq!(log.take(), (2, 1, 1, 3));
+        assert_eq!(log.take(), (0, 0, 0, 0), "take() must reset");
     }
 
     #[test]
-    fn summary_names_both_counts_and_the_889_tag() {
-        let s = dupe_shed_summary(4, 12, 7, 5);
+    fn summary_names_all_counts_and_the_ticket_tags() {
+        let s = dupe_shed_summary(4, 12, 7, 9, 5);
         assert!(s.contains("#889"));
         assert!(s.contains("#1111"), "names the late-dupe copy valve");
+        assert!(s.contains("#1145"), "names the retirement mechanism");
         assert!(s.contains('4'));
         assert!(s.contains("12"));
         assert!(s.contains('7'), "names the emitted-copy count");
+        assert!(s.contains('9'), "names the retired-boundaries count");
         assert!(s.contains('5'));
     }
 
@@ -666,12 +839,16 @@ mod tests {
                 emit_interval_ns,
             );
         }
-        let (dupe_shed, _blind_shed, _dupe_emitted) = gate.take_shed_counts();
+        let (dupe_shed, _blind_shed, _dupe_emitted, retired) = gate.take_shed_counts();
 
         assert_eq!(total_skips, 0, "exact-60 input never skips a boundary");
         assert_eq!(
             dupe_shed, 0,
             "exact-60 dupe-free input never sheds a dupe victim"
+        );
+        assert_eq!(
+            retired, 0,
+            "exact-60 dupe-free input never retires a boundary (#1145 acts only on dupes)"
         );
         assert_eq!(
             emits, 479,
@@ -798,6 +975,7 @@ mod tests {
         let emit_interval_ns = 1_000_000_000u64 / 60;
         const WARMUP_NS: u64 = 4_000_000_000; // exclude the ~2 s unique-rate-window fill + margin
         let mut total_copies_after_warmup = 0usize;
+        let mut total_retired = 0u64;
         for seed in [1u64, 7, 3, 42, 99] {
             let captures = synthetic_over_rate_with_jitter(61.3, 0.20, seed, 20);
             let mut gate = DecimationGate::new();
@@ -807,6 +985,8 @@ mod tests {
                     emitted.push((*now_ns, *content_id));
                 }
             }
+            let (_dupe_shed, _blind_shed, _dupe_emitted, retired) = gate.take_shed_counts();
+            total_retired += retired;
             let post: Vec<u64> = emitted
                 .iter()
                 .filter(|(now_ns, _)| *now_ns >= WARMUP_NS)
@@ -819,6 +999,94 @@ mod tests {
             "over-rate stale dupes must be retired, not emitted as content-duplicates (the copies \
              that present as the strih 15fps-judder); got {total_copies_after_warmup} emitted \
              content-copies across 5 seeds"
+        );
+        // The mechanism actually engaged (not merely a no-op): stale over-rate dupes were retired.
+        assert!(
+            total_retired > 0,
+            "retirement must engage at over-rate (retired {total_retired} boundaries across 5 seeds)"
+        );
+    }
+
+    #[test]
+    fn over_rate_retirement_holds_60_without_skips_1145() {
+        // (#1145) At the rig over-rate (unique rate == 60), retiring every stale dupe keeps the
+        // emitted rate at ~60 (all unique) with ZERO #707 boundary skips — no lag ratchet, no
+        // resync leap, and no unique tick dropped in steady state.
+        let emit_interval_ns = 1_000_000_000u64 / 60;
+        let seconds = 20usize;
+        let captures = synthetic_over_rate_with_jitter(61.3, 0.20, 1, seconds);
+        let mut gate = DecimationGate::new();
+        let mut emitted = 0usize;
+        let mut total_skips = 0u64;
+        for (now_ns, content_id) in &captures {
+            let prev = gate.next_boundary_ns();
+            if gate.poll(*now_ns, emit_interval_ns, *content_id, false) {
+                emitted += 1;
+            }
+            total_skips += crate::genlock_pacing::boundary_skip_count(
+                prev,
+                gate.next_boundary_ns(),
+                emit_interval_ns,
+            );
+        }
+        assert_eq!(
+            total_skips, 0,
+            "retirement must never trip the #707 resync at a genuine over-rate; got {total_skips} \
+             skipped boundary interval(s)"
+        );
+        let emit_rate = emitted as f64 / seconds as f64;
+        assert!(
+            (59.0..=60.5).contains(&emit_rate),
+            "emitted rate must hold ~60 (all unique) at over-rate; got {emit_rate:.2} fps"
+        );
+    }
+
+    #[test]
+    fn starved_source_still_emits_copies_to_hold_60_not_retired_1145() {
+        // (#1145) A GENUINELY STARVED source — a 50 Hz source padded to a 60 fps capture by
+        // DUPLICATION (a 5:6 pulldown: an exact content-dupe every 6th capture, unique rate ~50 <
+        // the 59-fps retire floor) — must NOT be retired: retiring would silently drop the emit to
+        // 50 fps (a strih-FIFO underrun) and STRIP the content-dupes the duplication-masked pulldown
+        // detector reads. Retirement stays OFF; the late-dupe copy valve holds the emit grid at 60
+        // and leaves the dupes in the stream, byte-identical to the pre-#1145 behavior.
+        let emit_interval_ns = 1_000_000_000u64 / 60;
+        let capture_interval_ns = 1_000_000_000u64 / 60; // padded 60 fps capture
+        let seconds = 20u64;
+        let count = 60 * seconds;
+        let mut gate = DecimationGate::new();
+        let (mut next_id, mut prev_id): (u64, u64) = (0, 0);
+        let mut emitted = 0usize;
+        for i in 0..count {
+            let now_ns = i * capture_interval_ns;
+            let is_dupe = i > 0 && i % 6 == 5; // 5:6 pulldown
+            let content_id = if is_dupe {
+                prev_id
+            } else {
+                let id = next_id;
+                next_id += 1;
+                id
+            };
+            prev_id = content_id;
+            if gate.poll(now_ns, emit_interval_ns, content_id, false) {
+                emitted += 1;
+            }
+        }
+        let (_dupe_shed, _blind_shed, dupe_emitted, retired) = gate.take_shed_counts();
+        assert_eq!(
+            retired, 0,
+            "a starved (sub-60-unique) source must NEVER be retired — that would drop the emit rate \
+             and blind the pulldown detector; retired {retired}"
+        );
+        assert!(
+            dupe_emitted > 0,
+            "the late-dupe copy valve must stay engaged for a starved source (it holds the emit grid \
+             at 60 and keeps the content-dupes in the recording); dupe_emitted {dupe_emitted}"
+        );
+        let emit_rate = emitted as f64 / seconds as f64;
+        assert!(
+            (59.0..=60.5).contains(&emit_rate),
+            "a starved source must still emit a steady ~60 (via copies), not silently drop; got \
+             {emit_rate:.2} fps"
         );
     }
 }

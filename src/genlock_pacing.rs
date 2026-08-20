@@ -165,6 +165,32 @@ pub fn genlock_emit_on_time(now_ns: u64, next_boundary_ns: u64, interval_ns: u64
     now_ns >= boundary && boundary + interval_ns > now_ns
 }
 
+/// #1145 — how many WHOLE emit-boundary intervals `now_ns` sits PAST the pending boundary: `0`
+/// when the capture is on-time/surplus (`genlock_emit_on_time` is true) OR still between
+/// boundaries (`now < boundary`, where [`genlock_emit_gate`] returns emit=false), and `>= 1` once
+/// the gate has fallen behind (the catch-up / #707-resync regime). Shares
+/// [`genlock_latched_boundary`] with [`genlock_emit_gate`] / [`genlock_emit_on_time`] so all three
+/// agree on where the boundary sits.
+///
+/// This is the numeric "boundary staleness" signal `crate::dupe_decimation`'s #1145 stale-boundary
+/// retirement keys on. [`genlock_emit_on_time`] answers only the binary lag==0 question (defer a
+/// dupe on-time); retirement additionally needs the numeric lag to bound itself well below the
+/// #707 resync trigger ([`GENLOCK_MAX_CATCHUP_INTERVALS`]): a dupe crossing a boundary at lag `>= 1`
+/// is crossing an ALREADY-STALE boundary (the downstream hold for it already happened one interval
+/// ago), so shedding the dupe AND advancing that boundary retires the accounting debt at no new
+/// downstream cost. The caller guards `interval_ns != 0`.
+pub fn genlock_lag_intervals(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 {
+        return 0;
+    }
+    let boundary = genlock_latched_boundary(now_ns, next_boundary_ns, interval_ns);
+    if now_ns >= boundary {
+        (now_ns - boundary) / interval_ns
+    } else {
+        0
+    }
+}
+
 /// #707 — how many WHOLE emit-boundary intervals were SKIPPED (never emitted) between the
 /// `next_boundary_ns` this capture loop held BEFORE calling [`genlock_emit_gate`] and the
 /// boundary it returned. A normal `emit=false` poll (decimated, between boundaries) leaves the
@@ -247,6 +273,39 @@ mod tests {
                 emit && next > now,
                 "delta={delta}"
             );
+        }
+    }
+
+    #[test]
+    fn genlock_lag_intervals_zero_on_time_and_between_boundaries_positive_when_late_1145() {
+        let boundary = 9 * I30;
+        // Between boundaries (now < boundary): lag 0 (nothing is stale yet).
+        assert_eq!(genlock_lag_intervals(boundary - 5, boundary, I30), 0);
+        // On-time / surplus (now in [boundary, boundary+interval)): lag 0.
+        assert_eq!(genlock_lag_intervals(boundary, boundary, I30), 0);
+        assert_eq!(genlock_lag_intervals(boundary + I30 - 1, boundary, I30), 0);
+        // Late / catch-up: exactly how many WHOLE intervals past the boundary.
+        assert_eq!(genlock_lag_intervals(boundary + I30, boundary, I30), 1);
+        assert_eq!(
+            genlock_lag_intervals(boundary + 2 * I30 + 7, boundary, I30),
+            2
+        );
+        assert_eq!(genlock_lag_intervals(boundary + 5 * I30, boundary, I30), 5);
+        // interval 0 (genlock off) reports 0, never divides by zero.
+        assert_eq!(genlock_lag_intervals(12_345, 6_789, 0), 0);
+    }
+
+    #[test]
+    fn genlock_lag_intervals_is_zero_exactly_when_on_time_or_before_boundary_1145() {
+        // lag==0 <=> (genlock_emit_on_time OR now < boundary). Cross-checks the two share the same
+        // latched boundary, so retirement (lag>=1) and the #889 defer (lag==0) never disagree.
+        let boundary = 6 * I30;
+        for delta in [-3i64, 0, 5, I30 as i64 - 1, I30 as i64, 3 * I30 as i64] {
+            let now = (boundary as i64 + delta) as u64;
+            let lag = genlock_lag_intervals(now, boundary, I30);
+            let on_time = genlock_emit_on_time(now, boundary, I30);
+            let before = now < boundary;
+            assert_eq!(lag == 0, on_time || before, "delta={delta}");
         }
     }
 
