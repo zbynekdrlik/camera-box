@@ -110,6 +110,44 @@ above it the #1111 copy valve fires (a panic floor). `genlock_emit_gate` + its r
   copies ≈ 0 on cam1/cam2, all-zero on cam3. Also guard a BACKWARD DanteSync clock step (clear the
   window if its newest entry is in the future — mirrors `genlock_emit_gate`'s #131 re-latch).
 
+## #1145 v2 — queue-DEPTH drain: bound the delivery-latency SAWTOOTH (the SIXTH piece)
+
+The v1 retirement above did NOT fix the owner-visible judder, because it keys on `genlock_lag_intervals`
+(BOUNDARY staleness) — and **boundary lag is NOT the queue depth.** When the emit loop is send-bound
+(~60 fps: NDI encode+send ≈ one interval) and the card captures 61.x, the loop processes the OLDEST
+buffered V4L2 frame each poll and `now` (realtime) lands right on the advancing boundary → `lag` reads
+~0 the whole time, so retirement (lag>=1) never fires and its lag-4 ceiling is irrelevant. Meanwhile
+the capture→emit QUEUE RESIDENCE grows (over-rate refeeds it faster than the loop drains) and the
+4-deep V4L2 buffer periodically overflow-drops in a BURST = the measured delivery-latency sawtooth
+(67→167 ms, issue 1110/1130) = the #1142 uniformity RED. v1 is structurally blind to it.
+
+v2 measures the residence DIRECTLY and sheds to bound it:
+- **Signal = monotonic queue residence**, `queue_depth_intervals(now_mono, capture_mono, interval)` =
+  `(monotonic_clock_ns() − FrameInfo::capture_monotonic_100ns*100) / interval`. It is a DURATION, so
+  it uses CLOCK_MONOTONIC (immune to the DanteSync realtime steps the emit BOUNDARY is gridded to — the
+  boundary still uses `wall_clock_ns()`, so `poll` now takes BOTH clocks). Guards: capture 0 (the
+  FrameInfo no-measurement sentinel) / interval 0 / now≤capture → 0; clamped to
+  `QUEUE_DEPTH_SANE_MAX_INTERVALS`=8 so a bogus stamp can't force a runaway shed.
+- **Action = `ShedAction::Drain`** (the 5th variant; `DupeShedLog` now a 5-tuple with `drained`,
+  summary is 5-count): shed the OLDEST (this) frame + advance the boundary ONE interval, emit nothing —
+  a single-slot drop (never a multi-slot skip, so #1131 is preserved). Over-rate + residence ≥
+  `QUEUE_DEPTH_SHED_INTERVALS`(2) sheds regardless of dupeness (a controlled drop that pre-empts the
+  uncontrolled overflow burst); a DETECTED dupe at residence ≥ `QUEUE_DEPTH_DUPE_SHED_INTERVALS`(1)
+  drains one interval earlier (always content-safe).
+- **Gated on a capture-TAKT EMA, NOT the unique-rate window.** `note_capture_takt` folds consecutive
+  `capture_monotonic` intervals into an integer EMA (`TAKT_EMA_SHIFT`=8, init-seeded);
+  `sustained_over_rate()` = EMA interval < `RETIRE_MIN_TAKT_INTERVAL_NS` (1e9/60.3 ≈ 16.584 ms). This
+  is the essential discriminator: a 60.00 card reads ~16.667 ms (ABOVE → NOT over-rate → the drain is
+  OFF), so it is byte-identical to v1 EVEN through a transient stall (a #1131 buffered-drain, which
+  must emit all buffered frames, not shed them) — that is constraint c. Only a >60.3-fps card engages
+  the drain. (v1's `enough_unique` window does NOT discriminate here: a stall-recovery on a 60fps card
+  also reads unique-rate ~60. The takt is what separates over-rate from stall-recovery.)
+- **Gap note:** shedding a non-dupe at over-rate is content-safe because the surplus capture is a
+  re-sample carrying the SAME painted frame_id as a neighbour; it only risks a painted-id gap if
+  dupe-detection missed a genuine unique, which is far rarer + less visible than the sawtooth it
+  replaces (and strictly better than the indiscriminate V4L2 overflow-drop). Report-only fields feed
+  the live re-measure; the >=0.95 uniformity acceptance is verified on-rig after deploy, not off-rig.
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
