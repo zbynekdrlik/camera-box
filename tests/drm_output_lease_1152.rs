@@ -131,10 +131,14 @@ fn obs_startup_calls_the_default_off_autostart() {
     // the call sits INSIDE a `#if defined(__linux__)` … `#endif` block (a bare file-wide __linux__
     // search would go vacuous the day an unrelated upstream __linux__ appears; a fixed byte window
     // rots when the comment grows — so bound by the guard/endif structure instead).
-    let guard = obs[..call].rfind("#if defined(__linux__)").unwrap_or_else(|| {
-        panic!("#1152 M1: {OBS_C} must guard obs_drm_output_maybe_autostart() with \
-                #if defined(__linux__) — the module is Linux-only.")
-    });
+    let guard = obs[..call]
+        .rfind("#if defined(__linux__)")
+        .unwrap_or_else(|| {
+            panic!(
+                "#1152 M1: {OBS_C} must guard obs_drm_output_maybe_autostart() with \
+                #if defined(__linux__) — the module is Linux-only."
+            )
+        });
     assert!(
         !obs[guard..call].contains("#endif"),
         "#1152 M1: {OBS_C} the obs_drm_output_maybe_autostart() call must be INSIDE the \
@@ -203,16 +207,16 @@ type PickArgs = (u32, i32);
 /// `n`) fails at least one row.
 fn vectors() -> Vec<(PickArgs, i32)> {
     vec![
-        ((0x0, 4), 0),   // all free -> the FIRST CRTC (index 0)
-        ((0x1, 4), 1),   // crtc0 busy -> 1
-        ((0x3, 4), 2),   // crtc0,1 busy -> 2
-        ((0x7, 4), 3),   // crtc0,1,2 busy -> 3 (last free)
-        ((0xF, 4), -1),  // all 4 busy -> none
-        ((0xF, 0), -1),  // n=0 -> none (nothing to scan)
-        ((0x2, 4), 0),   // crtc1 busy but crtc0 free -> 0 (returns the FIRST free, not "the free one")
-        ((0xB, 4), 2),   // 0b1011: bit2 clear -> 2 (a free CRTC in the middle)
-        ((0x3, 2), -1),  // n bounds: bits 0,1 busy AND n=2 -> nothing free in [0,2)
-        ((0x3, 3), 2),   // same mask, n=3 -> bit2 is now in range and free -> 2 (proves n matters)
+        ((0x0, 4), 0),  // all free -> the FIRST CRTC (index 0)
+        ((0x1, 4), 1),  // crtc0 busy -> 1
+        ((0x3, 4), 2),  // crtc0,1 busy -> 2
+        ((0x7, 4), 3),  // crtc0,1,2 busy -> 3 (last free)
+        ((0xF, 4), -1), // all 4 busy -> none
+        ((0xF, 0), -1), // n=0 -> none (nothing to scan)
+        ((0x2, 4), 0), // crtc1 busy but crtc0 free -> 0 (returns the FIRST free, not "the free one")
+        ((0xB, 4), 2), // 0b1011: bit2 clear -> 2 (a free CRTC in the middle)
+        ((0x3, 2), -1), // n bounds: bits 0,1 busy AND n=2 -> nothing free in [0,2)
+        ((0x3, 3), 2), // same mask, n=3 -> bit2 is now in range and free -> 2 (proves n matters)
     ]
 }
 
@@ -280,7 +284,11 @@ fn pick_free_crtc_computes_the_spec_truth_table() {
     let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
     let got: Vec<i32> = stdout
         .lines()
-        .map(|l| l.trim().parse::<i32>().expect("harness printed a non-integer"))
+        .map(|l| {
+            l.trim()
+                .parse::<i32>()
+                .expect("harness printed a non-integer")
+        })
         .collect();
     assert_eq!(
         got.len(),
