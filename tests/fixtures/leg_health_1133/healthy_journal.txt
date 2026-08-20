@@ -1,0 +1,4 @@
+Aug 20 12:05:03 CAM3 camera-box[51001]: 2026-08-20T12:05:03.000000Z  INFO camera_box: Streaming: 60.0 fps captured, 60.0 fps emitted (5s avg)
+Aug 20 12:05:36 CAM3 camera-box[51001]: 2026-08-20T12:05:36.000000Z  INFO camera_box: #707 emit-1s: [60, 60, 60, 60, 60] cap-1s: [60, 60, 60, 60, 60] (1-second buckets, oldest first)
+Aug 20 12:06:41 CAM3 camera-box[51001]: 2026-08-20T12:06:41.000000Z  INFO camera_box: #707 emit-1s: [60, 60, 60, 60, 60] cap-1s: [60, 60, 61, 60, 60] (1-second buckets, oldest first)
+Aug 20 12:07:03 CAM3 camera-box[51001]: 2026-08-20T12:07:03.000000Z  INFO camera_box: Streaming: 60.0 fps captured, 60.0 fps emitted (5s avg)
