@@ -539,7 +539,11 @@ fn recording_e2e_execute_mode_runs_the_merge_and_propagates_its_exit_code() {
     // #761: widened from 6600 to 7500 bytes -- the [8/8f-mv] MV-clone-vs-main skew snapshot step
     // (scripts/mv_skew_snapshot.py invocation + its fail-open comment block) legitimately added
     // ~850 bytes between the merge call and the exit, same justified-growth pattern as above.
-    let window = &s[exec_merge_block..(exec_merge_block + 7500).min(s.len())];
+    // #1124: widened from 7500 to 9000 bytes -- the post-verdict report-only diagnostics
+    // (measurement-eq staleness note + edge-oscillation classifier, both fail-open and
+    // $GATE-untouched) legitimately added ~820 bytes between the merge call and the exit,
+    // same justified-growth pattern as above (measured distance 8319).
+    let window = &s[exec_merge_block..(exec_merge_block + 9000).min(s.len())];
     assert!(
         window.contains(r#"exit "$GATE""#),
         "#703: after running the real merge, the branch must `exit \"$GATE\"` (the merge's own \
