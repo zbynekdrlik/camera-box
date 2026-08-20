@@ -26,7 +26,7 @@ set -euo pipefail
 #   wake-box.sh <box|MAC> [--port P]... [--broadcast ADDR] [--table FILE] [--dry-run]
 #   wake-box.sh --help
 #
-#   <box>        a box name from scripts/wol-targets.txt (strih | stream) -- MAC + subnet broadcast
+#   <box>        a box name from scripts/wol-targets.txt (strih | stream | imag-nb) -- MAC + subnet broadcast
 #                are resolved from the table.
 #   <MAC>        a raw MAC (any of 5c:6a:.., 5C-6A-.., 5c6a.., 5c6a80f66cf7) -- the given --broadcast
 #                (if any) is targeted IN ADDITION to the limited broadcast 255.255.255.255 (always sent).
@@ -42,7 +42,7 @@ source "$HERE/lib/wol.sh"
 usage() {
   cat <<'USAGE'
 Usage: wake-box.sh <box|MAC> [--port P]... [--broadcast ADDR]... [--table FILE] [--dry-run]
-  <box>        box name from scripts/wol-targets.txt (strih | stream) -- MAC + subnet broadcast
+  <box>        box name from scripts/wol-targets.txt (strih | stream | imag-nb) -- MAC + subnet broadcast
                resolved from the table.
   <MAC>        raw MAC (5c:6a:.., 5C-6A-.., 5c6a.., or 5c6a80f66cf7).
   --port P     UDP port (repeatable). Default: 9 and 7.
