@@ -77,6 +77,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # src/capture_rate_health.rs). Used by the [0/8] preflight step below, before any deploy/record.
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"
+# #1141: the head-end OPTICAL blur/shutter fail-fast — reads the source box's rough= capture
+# telemetry (the #216 slow-shutter class the capture-RATE gate above is blind to). Sourced-lib
+# invoked with ONE call line below (the #675 pattern), pinned to src/optical_preflight.rs by
+# tests/harness_optical_preflight_1141.rs. shellcheck source=scripts/lib/optical-preflight.sh
+. "$HERE/lib/optical-preflight.sh"
 # #675: cleanup()'s cam1/cam3/cam4/cam2 `systemctl restart camera-box` restore used to
 # be a bare `2>/dev/null; true`/`|| true` that silently swallowed a failed restart, leaving the
 # rig's production camera-box.service down and undetected — poll+retry+loud-warn builder.
@@ -1272,6 +1277,19 @@ if [ -n "$CAPTURE_RATE_DEFECT_LINE" ]; then
   exit 1
 fi
 echo "    ok: no sustained capture-rate defect in $CAMERA_NAME's recent journal"
+
+# #1141: head-end OPTICAL blur/shutter fail-fast. The capture-RATE gate above (#656) proves the
+# source camera captures at the right RATE, but is BLIND to a camera capturing at that rate yet
+# BLURRED (slow shutter 1/60 / anti-flicker — the #216 class: 16.7 ms exposure smears the moving
+# dual-QR → optically undecodable → a 175 s optical-read gap, no frame loss the rate check can see).
+# Read the source box's head-end rough= capture telemetry (src/capture.rs luma_roughness, #1079) and
+# fail-fast NAMED (Slovak) when it is SUSTAINED below the calibrated floor. Plain statement (never
+# $()/pipeline) so its `exit 1` propagates. NOTEs (never aborts) on thin data / an ssh hiccup — the
+# fleet reachability gate owns genuine unreachability, and the owner's hardest constraint is that a
+# CI gate is never FALSE-aborted. Immune to the imag x264 observer effect (#1130): capture chain,
+# before the recorder.
+echo "[0/8] optical head-end blur/shutter preflight — $CAMERA_NAME must not capture BLURRED (slow shutter/anti-flicker, #1141)"
+optical_preflight_assert "$CAM1_IP" root "$CAM_PW" "$CAMERA_NAME"
 
 # cam1 v4l2 capture controls (#338/#312, range-aware since #744): apply the device's OWN
 # --list-ctrls default for saturation+contrast BEFORE the run. The old "sharp set" (saturation=0,
