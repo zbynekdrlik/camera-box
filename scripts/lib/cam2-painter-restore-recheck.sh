@@ -39,11 +39,17 @@
 # genuinely painting (the SAME presenter-aware signal as cam2_painter_restore_verify_cmds), else
 # EXIT 1. Short bounded poll (~a few seconds) -- the painter is EXPECTED to already be active by the
 # time this runs (it went active a hair after the combined restore ssh's deadline), so this is a
-# confirmation, not a restart. A box without the unit installed EXITs 0 (nothing to restore ->
-# nothing to red). Single-quoted heredoc: every remote $/$(...) is literal (evaluated on the cam box).
+# confirmation, not a restart. Single-quoted heredoc: every remote $/$(...) is literal (evaluated on
+# the cam box).
+#
+# #1126 review 🟡-1: this exit code drives a PRUNE decision (the caller removes cam2/painter from the
+# failed ledger + suppresses the #860 ::error:: on EXIT 0), which is STRONGER semantics than the
+# WARN-only cam2_painter_restore_verify_cmds. So it may ONLY exit 0 on a POSITIVE paint signal --
+# "unit not installed" (or a transient list-unit-files hiccup, which `if ! ...` also catches) EXITs
+# 1, NOT 0: absence-of-painter is exactly the #863 black-monitor case a prune must never mask.
 cam2_painter_genuine_paint_check_cmd() {
   cat <<'PAINTCHK'
-if ! systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then exit 0; fi
+if ! systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then exit 1; fi
 _pc=0
 while [ "$(systemctl is-active cam2-painter.service 2>/dev/null)" != "active" ] && [ $_pc -lt 6 ]; do sleep 1; _pc=$((_pc+1)); done
 [ "$(systemctl is-active cam2-painter.service 2>/dev/null)" = "active" ] || exit 1
@@ -75,8 +81,10 @@ cam2_painter_restore_final_recheck() {
   [ -n "${CAM_PW:-}" ] || return 0
   local _idx _found=""
   for _idx in "${!CAMBOX_PARALLEL_FAILED_LABELS[@]}"; do
+    # #1126 review 🔵-4: match the exact cam2/painter label (recorded as "cam2/painter, <ip>"),
+    # not a broad *painter* — precise + future-proof if another box label ever carries "painter".
     case "${CAMBOX_PARALLEL_FAILED_LABELS[$_idx]}" in
-      *cam2/painter*|*painter*) _found="$_idx"; break ;;
+      *cam2/painter*) _found="$_idx"; break ;;
     esac
   done
   [ -n "$_found" ] || return 0

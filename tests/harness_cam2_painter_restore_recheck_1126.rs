@@ -183,19 +183,84 @@ fn cleanup_calls_recheck_between_wait_and_surface() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/recording-e2e.sh"),
     )
     .expect("read recording-e2e.sh");
-    let wait = s
+    // #1126 review 🔵-3: scope to the cleanup() body so the `wait < recheck` half actually bites
+    // (a global find of "cambox_parallel_wait_and_report" would hit a top-of-file COMMENT, not the
+    // real cleanup() call, and could not catch the recheck being moved before the real wait).
+    let cs = s.find("\ncleanup() {").expect("cleanup() defined");
+    let ce = s[cs..]
+        .find("\n}\n")
+        .map(|i| cs + i)
+        .expect("cleanup() closes");
+    let body = &s[cs..ce];
+    let wait = body
         .find("cambox_parallel_wait_and_report")
-        .expect("wait call present");
-    let recheck = s
+        .expect("#1126: cleanup() must wait for the parallel restore");
+    let recheck = body
         .find("cam2_painter_restore_final_recheck")
         .expect("#1126: cleanup() must call cam2_painter_restore_final_recheck");
-    let surface = s
+    let surface = body
         .find("cambox_parallel_surface_painter_failure")
-        .expect("surface call present");
+        .expect("#1126: cleanup() must surface painter failure");
     assert!(
         wait < recheck && recheck < surface,
         "#1126: the final re-check must run AFTER the parallel wait (so the box has finished \
          restarting) and BEFORE the surface helper (so a pruned painter never fires a false \
          ::error::). wait@{wait} recheck@{recheck} surface@{surface}"
+    );
+}
+
+/// #1126 review 🟡-2 / repo rule #1133 (.claude/rules/ci-testing-gotchas.md): cam2_painter_restore_
+/// final_recheck is invoked as a BARE statement under the caller's `set -euo pipefail` in cleanup().
+/// The `drive()` helper above sources under `set -uo` (no -e), so it is structurally blind to a
+/// `set -e` abort of that bare call. This case sources under the caller's EXACT `set -euo pipefail`,
+/// calls the recheck as a bare statement, and asserts a sentinel AFTER it is reached on BOTH the
+/// prune (painting) and no-prune (dead) inputs — locking that the recheck can never `set -e`-abort
+/// the whole E2E cleanup trap.
+fn drive_under_set_e(paint_ok: i32) -> String {
+    let lib = lib_path();
+    let script = format!(
+        r#"
+set -euo pipefail
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/sshpass" <<STUB
+#!/usr/bin/env bash
+exit {paint_ok}
+STUB
+chmod +x "$TMP/bin/sshpass"
+export PATH="$TMP/bin:$PATH"
+export CAM_PW=secret
+source '{lib}'
+CAMBOX_PARALLEL_FAILED_LABELS=("cam1 (source, 10.77.9.61)" "cam2/painter, 10.77.9.62")
+CAMBOX_PARALLEL_FAILED_IPS=("10.77.9.61" "10.77.9.62")
+cam2_painter_restore_final_recheck "10.77.9.62"
+echo "REACHED_END_LABELS=${{#CAMBOX_PARALLEL_FAILED_LABELS[@]}}"
+"#
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run set-e driver");
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[test]
+fn recheck_never_aborts_the_caller_under_set_euo_pipefail() {
+    // painting -> prune path
+    let prune = drive_under_set_e(0);
+    assert!(
+        prune.contains("REACHED_END_LABELS=1"),
+        "#1126/#1133: the recheck must reach its return (and prune) under `set -euo pipefail` — the \
+         bare-statement call in cleanup() must never set -e-abort the trap. stdout:\n{prune}"
+    );
+    // dead -> no-prune path
+    let keep = drive_under_set_e(1);
+    assert!(
+        keep.contains("REACHED_END_LABELS=2"),
+        "#1126/#1133: the recheck must reach its return (leaving the entry) under `set -euo \
+         pipefail` even when the paint re-check fails. stdout:\n{keep}"
     );
 }
