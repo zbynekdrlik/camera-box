@@ -177,7 +177,7 @@ fn fixture_counts_match_expected() {
 
 #[test]
 fn classify_sick_leg_aborts_and_names_box_and_every_signal() {
-    // sick fixture counts (12 stall, 10 skip, 9 eproto) — all over threshold (8,8,3).
+    // sick fixture counts (12 stall, 10 skip, 9 eproto) — all over threshold (8,8,6).
     let (out, ok) = run_sourced_status("leg_health_classify cam1 12 10 9");
     assert!(
         !ok,
@@ -252,14 +252,17 @@ fn classify_each_signal_fails_alone_at_its_threshold_and_passes_just_below() {
         run_sourced_status("leg_health_classify cam1 0 7 0").1,
         "skip==7 must pass"
     );
-    // EPROTO threshold 3:
+    // EPROTO threshold 6 (recalibrated 2026-08-20: the chronic ShadowCast-model baseline is
+    // 0.66-1.05/hr arriving in 2-3-event clumps — 3-in-an-hour is routine on a functionally
+    // healthy leg; the real sick burst was ~6+/hr WITH stalls. Original 3 chronically
+    // false-aborted two live MEQ runs back-to-back.):
     assert!(
-        !run_sourced_status("leg_health_classify cam1 0 0 3").1,
-        "eproto==3 must fail"
+        !run_sourced_status("leg_health_classify cam1 0 0 6").1,
+        "eproto==6 must fail"
     );
     assert!(
-        run_sourced_status("leg_health_classify cam1 0 0 2").1,
-        "eproto==2 must pass (transient re-enum tolerated)"
+        run_sourced_status("leg_health_classify cam1 0 0 5").1,
+        "eproto==5 must pass (chronic ShadowCast clump baseline tolerated)"
     );
 }
 

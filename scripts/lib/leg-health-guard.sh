@@ -88,10 +88,15 @@ leg_health_eproto_window_secs() { echo 3600; }
 # signal). Sick >> threshold >> healthy/residual, by construction:
 #   STALL 8:  sick ~tens..60 / 5min  >> 8 >>  residual ~1 / 5min.
 #   SKIP  8:  sick ~60 / 5min        >> 8 >>  residual ~1 / 5min.
-#   EPROTO 3: sick ~6 / hr           >  3  >   healthy 0 (tolerates 1-2 transient device re-enum).
+#   EPROTO 6: sick ~6+/hr (the 2026-08-19 cam1 burst: 9/1.5h WITH stalls+skips) > 6 > the CHRONIC
+#   ShadowCast-model baseline measured fleet-wide 2026-08-20: cam1 0.66/hr, cam2 1.05/hr,
+#   cam3 0.88/hr lifetime averages arriving in 2-3-event clumps (3 events inside one hour happens
+#   ROUTINELY on a functionally healthy leg — capture 60fps, no stalls; only the NZXT cam4 reads 0).
+#   The original threshold 3 sat ON that baseline and chronically false-aborted (live: two MEQ runs
+#   2026-08-20 aborted on cam1 then cam2 back-to-back with zero functional symptoms).
 leg_health_stall_fail_threshold() { echo 8; }
 leg_health_skip_fail_threshold() { echo 8; }
-leg_health_eproto_fail_threshold() { echo 3; }
+leg_health_eproto_fail_threshold() { echo 6; }
 
 # Report-only cap-1s band: a captured 1-second bucket OUTSIDE [low, high] fps is "over/under rate".
 # 60 +- 1 == [59, 61] inclusive (a 61 fps bucket is IN band; 62 is out). WARN only when a SUSTAINED
