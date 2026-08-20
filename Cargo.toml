@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.521"
+version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -19,6 +19,14 @@ repository = "https://github.com/zbynekdrlik/camera-box"
 [workspace]
 members = ["bkshading/proto", "bkshading/relay", "bkshading/service"]
 resolver = "2"
+
+# Single source of truth for the version across the appliance + the three bkshading
+# crates (issue 1154). The appliance [package] and every member inherit it via
+# `version.workspace = true`, so ONE bump here propagates to all four CARGO_PKG_VERSION
+# values. The `^version = "X"` readers (camera-box-version-gate.sh, recording-e2e.sh,
+# rig-status.py) still match: this stays the only column-0 `version = "X"` line.
+[workspace.package]
+version = "1.7.0-dev.521"
 
 [lib]
 name = "camera_box"
