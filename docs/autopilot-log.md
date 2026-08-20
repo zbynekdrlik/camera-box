@@ -9731,3 +9731,25 @@ No push/PR/rig touch (worktree worker).
 - Relay transport decision: gphoto2 CLI shell-out (no libgphoto2 build dep -> ARM cross-build clean for Pi handhelds) behind CameraTransport trait (libgphoto2-FFI a future 2nd impl). Rejected FFI binding (build-time C dep) + new bin in root appliance crate (would pull axum into the minimal appliance).
 - Review (gated Fable, general-purpose dispatch, NOT the built-in review Skill): 1 red / 3 yellow / 4 blue, all fixed in fd3859242 except crate-version-drift filed as follow-up issue 1154. Red was a params-only block not hiding its preview (author display:flex beat UA [hidden]).
 - M2+ deferred: NDI low-quality preview via presenter tech; WS push; cloudflare password-remote; SBC/handheld image; gphoto2 into RUNTIME_DEPS + setup-device; automate the issue-220 E2E camera pre-run shutter checklist.
+
+## #1152 M1 — in-OBS vendored DRM-lease HDMI output (worktree lane, 2026-08-20)
+- Owner KOREKCIA: NDI-loopback REJECTED → forked OBS itself leases the HDMI connector (RandR
+  output lease) and page-flips directly (render→scanout, no NDI hop, no external presenter).
+- Version 1.7.0-dev.518 → 1.7.0-dev.522 (commit 47577bd0b).
+- New libobs module obs-drm-output.{c,h} (lease via xcb_randr_create_lease + libdrm dumb-BO
+  page-flip on a vblank-locked pthread; DEFAULT-OFF autostart from ~/.camera-box/drm-output.json;
+  unique `drm-output:` log prefix). os-linux.cmake links Libdrm::Libdrm + XCB::RANDR; the module
+  lives in libobs (not a plugin) because linux-genlock.yml is ENABLE_PLUGINS=OFF. obs.c calls the
+  __linux__-guarded autostart in obs_startup + stop in obs_shutdown.
+- TDD: RED anchor+lift-compile gate tests/drm_output_lease_1152.rs (4ac611661) → GREEN impl
+  (4b63e61cc). Pure drm_output_pick_free_crtc truth-tabled; mutation 9/10 vectors diverge.
+- Adversarial review (Fable, gate OPEN): 0 red / 3 yellow / 6 blue, ALL fixed same-branch
+  (4f32e0960): obs_shutdown teardown, double-stop guard, poll-loop robustness (POLLERR/HUP/NVAL +
+  drmHandleEvent rc + wedge warn), os_atomic running, argb-black configurable, log throttle.
+- Local net: gcc -fsyntax-only -Wall -Wextra -Wformat=2 -Wconversion vs REAL xcb/xcb-randr/libdrm
+  headers = zero warnings; anchor test 5/5 GREEN via standalone rustc. CI (linux-genlock.yml) is
+  the first real type-check; full CI at supervisor integration.
+- Playbook: new .claude/rules/obs-drm-output.md (RandR-vs-DRM name gotcha, libobs-not-plugin CI
+  reason, fsyntax-net, M1 rig runbook, M2 hook, lifecycle invariants) + CLAUDE.md router line.
+- Rig: READ-ONLY only (STEP-0 live verify on imag-nb); M1 activation is the supervisor's step
+  after CI build + full-bundle deploy (runbook in the rule + the worker evidence block).
