@@ -135,7 +135,11 @@ deploy_frame_probe_to_painter() {
   # #892 restore: re-arm ONLY a persistently-enabled unit; leave a disabled (event-mode) unit dark.
   if [ "$restore_action" = "enable-now" ]; then
     if ! ssh_box "$ip" "systemctl enable --now cam2-painter.service && (mount -o remount,ro / 2>/dev/null; true)"; then
-      err "[$painter] cam2-painter.service enable --now failed"; FAILED+=("$painter-painter(restart-failed)"); return 0
+      err "[$painter] cam2-painter.service enable --now failed"; FAILED+=("$painter-painter(restart-failed)")
+      # #1138 (review): the && short-circuits the remount-ro when enable --now fails, leaving root
+      # rw. Re-assert read-only root unconditionally before returning (best-effort).
+      ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+      return 0
     fi
     local active
     active="$(ssh_box "$ip" "systemctl is-active cam2-painter.service 2>/dev/null" || echo inactive)"
@@ -219,7 +223,11 @@ for cam in $SET; do
     continue
   fi
   if ! ssh_box "$ip" "systemctl start camera-box && (mount -o remount,ro / 2>/dev/null; true)"; then
-    err "[$cam] start failed"; FAILED+=("$cam(start-failed)"); continue
+    err "[$cam] start failed"; FAILED+=("$cam(start-failed)")
+    # #1138 (review): the && short-circuits the remount-ro on a failed start, leaving root rw —
+    # re-assert read-only root unconditionally before moving to the next box (best-effort).
+    ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+    continue
   fi
 
   # Byte-verify: the deployed binary must hash-match the artifact we shipped (deploy-from-clean-tree.md
