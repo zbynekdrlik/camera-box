@@ -119,6 +119,12 @@
 #       wildcard also claims a USB CDC-NCM camera link (bkshading, issue 808) and hands it the box
 #       IP + a duplicate default route, making the box PTP-deaf (cam1 live incident 2026-08-20).
 #       FAILs if the netplan still matches the driver wildcard OR if two interfaces carry the box IP.
+#   (ae) NTP-client DSCP marking (dantesync issue 52): nftables installed, a dedicated
+#       `table ip dantesync_dscp` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123)
+#       with DSCP EF, and the dantesync-dscp.service oneshot that applies it at boot is enabled +
+#       active. dantesync's rsntp Linux client cannot setsockopt(IP_TOS) on its own request socket,
+#       so this provisioning rule is the ONLY thing marking the request direction; a box missing
+#       nftables, the rule, or the oneshot FAILs (never a silent pass).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -162,6 +168,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"  # offset_us_from_journal/offset_check/ptp_locked_from_journal/
                                  # _short_iso_epoch/dantesync_offset_verdict/freshest_offset_us (#595)
+# shellcheck source=scripts/lib/dscp-nft.sh
+. "$HERE/lib/dscp-nft.sh"        # dscp_nft_rule_present/dscp_nft_gather_remote_snippet/
+                                 # dscp_nft_verdict -- the (ae) NTP-client DSCP nftables rule check
+                                 # (dantesync issue 52; SAME source of truth as setup-device.sh /
+                                 # create-usb-linux.sh)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -699,6 +710,10 @@ Checks:
   (ad) provisioning netplan interface pin (#1155): /etc/netplan/01-netcfg.yaml pins the LAN stanza
       to name: "enp*" (the PCI NIC), never the driver wildcard, and no two interfaces carry the box
       IP -- so a USB CDC-NCM camera link (bkshading, issue 808) can never steal the IP + PTP route
+  (ae) NTP-client DSCP marking (dantesync issue 52): nftables installed + a dedicated
+      `table ip dantesync_dscp` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
+      DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
+      setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1360,6 +1375,27 @@ elif [ "$DUP_IF_COUNT" -gt 1 ]; then
   fail "the box IP $IP is carried by $DUP_IF_COUNT interfaces ($(printf '%s' "$IPBRIEF" | awk -v ip="$IP/" 'index($0, ip){print $1}' | paste -sd, -)) -- a USB camera link has a duplicate IP + default route; PTP will land on the wrong link (#1155)"
 else
   ok "netplan LAN stanza pinned to name: \"enp*\" and the box IP $IP is on a single interface (#1155)"
+fi
+
+# (ae) NTP-client DSCP marking: nftables OUTPUT-mangle rule + boot oneshot (dantesync issue 52) ----
+# dantesync's Linux NTP client (rsntp) creates its socket internally, so it cannot setsockopt(
+# IP_TOS): the client REQUESTS toward the master (udp dport 123) ship UNMARKED, while the master's
+# replies are EF-marked by dantesync src/dscp.rs. setup-device.sh STEP 17c installs a dedicated
+# `table ip dantesync_dscp` OUTPUT-mangle rule (dscp ef) + the dantesync-dscp oneshot that applies
+# it at boot, so the venue MikroTik CRS switches (TRUST-L3) prioritise the request direction too.
+# This proves the rule is LIVE (nft) AND the oneshot is enabled+active post-reboot. Inserted BEFORE
+# (q) -- see .claude/rules/provisioning-scripts.md ((q) stays the LAST check). Uses fail() (a hard
+# FAIL), so it never trips the check_q_is_wired (q)-to-EOF no-fail slice (it is above (q)). FAILs
+# loud if nftables is absent, the rule is missing, or the oneshot is not enabled/active.
+aerc=0
+DSCP_BLOCK="$(ssh_box "$(dscp_nft_gather_remote_snippet)")" || aerc=$?
+DSCP_VERDICT="$(dscp_nft_verdict "$DSCP_BLOCK")"
+if [ "$aerc" -ne 0 ]; then
+  fail "could not reach the box to read the nftables DSCP rule + dantesync-dscp.service state (ssh rc=$aerc, dantesync issue 52)"
+elif [ "$DSCP_VERDICT" != "ok" ]; then
+  fail "NTP-client DSCP marking not provisioned: $(printf '%s' "$DSCP_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
+else
+  ok "NTP-client DSCP marking live: dantesync_dscp nftables rule present + dantesync-dscp.service enabled+active (dantesync issue 52)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
