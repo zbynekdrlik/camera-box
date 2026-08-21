@@ -805,8 +805,18 @@ check_recordings_budget stream "$STREAM"
 # SHAs flow in via their --win-state bundle-state JSON) and hand it to the gate's CROSS-BOX parity
 # assert. Best-effort: an unreachable imag yields "" -> the parity facet stays dormant until >=2
 # boxes report a SHA (opt-in rollout), never a spurious refuse. Mirrors the [4d/8] imag ssh (l.1412).
+# issue 1164: when imag is acked offline (physically absent, issue 1013), SKIP the imag ssh gathers
+# entirely (no ssh to $IMAG_IP) and leave IMAG_GENLOCK_SHA empty -- the gate is invoked with
+# --imag-acked-offline below (instead of the imag SHA / manifest / bytes args), so an acked-absent
+# imag does NOT UNKNOWN-refuse the whole run. The empty IMAG_GENLOCK_SHA also skips the .so gather
+# block below (its `if [ -n "$IMAG_GENLOCK_SHA" ]` guard). Non-acked path byte-identical.
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[0/8] version-integrity gate imag facets (genlock sha + .so bytes)" "$IMAG_OFFLINE_ACK_REASON"
+  IMAG_GENLOCK_SHA=""
+else
 IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
   "${IMAG_USER:-newlevel}@$IMAG_IP" 'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null | head -1' 2>/dev/null | tr -d '[:space:]' || true)"
+fi
 # #1082 -- best-effort BYTE-parity inputs for the version-integrity gate, so the [0/8] byte facet
 # compares each box's DEPLOYED bytes against CI truth, not just the hand-written marker. All
 # best-effort via scripts/lib/manifest-autosource.sh: any fetch/gather failure yields "" -> the arg
@@ -845,6 +855,17 @@ if [ -n "$IMAG_GENLOCK_SHA" ]; then
 fi
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
+# issue 1164: when imag is acked offline, invoke the gate WITHOUT the imag SHA / manifest / bytes
+# args and WITH --imag-acked-offline, so the gate skips the imag .so byte facet (loud SKIPPED,
+# counted ok) and drops imag from the cross-box parity (which then certifies strih+stream) -- never
+# an UNKNOWN-refuse on the physically-absent, acked box. The else branch is byte-identical to before.
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  "$HERE/version-integrity-gate.sh" \
+    ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
+    --win-state "strih=$VERSION_STRIH_STATE" \
+    --win-state "stream=$VERSION_STREAM_STATE" \
+    --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON"
+else
 "$HERE/version-integrity-gate.sh" \
   ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
   --win-state "strih=$VERSION_STRIH_STATE" \
@@ -852,6 +873,7 @@ fi
   --genlock-sha "imag=$IMAG_GENLOCK_SHA" \
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
   ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"}
+fi
 
 # dantesync fleet-wide VERSION-PARITY gate (#862) — alongside the DanteSync NTP+PTP gate (#7) and
 # the version-integrity gate (#123) above. Those two measure LIVE BEHAVIOUR (offset/lock, OBS/
