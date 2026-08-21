@@ -26,7 +26,7 @@
 //! of `scripts/obs-backup-retention.sh` are faithful ports of THIS decision — this module +
 //! `tests/obs_backup_retention.rs` are the canonical spec; keep the mirrors in sync.
 
-use crate::recordings_retention::{KeepReason, RetentionPolicy};
+use crate::recordings_retention::{KeepReason, RetentionPolicy, SECONDS_PER_DAY};
 
 /// Which deploy artifact a matching directory is — retention keeps the newest-N of EACH kind
 /// separately (so a burst of stage dirs never evicts a recent dated backup, or vice versa).
@@ -93,9 +93,27 @@ impl BackupPlan {
 /// ever emits valid stamps. Stricter than the deploy's own inline `*-789` glob, so a foreign
 /// `something-789` dir stays PROTECTED.
 pub fn is_dated_backup(name: &str) -> bool {
-    // #789 RED stub — real allowlist lands in the GREEN commit.
-    let _ = name;
-    false
+    // DDDD-DD-DDTDD-DD-DD-789
+    const MASK: &[u8] = b"DDDD-DD-DDTDD-DD-DD-789";
+    let b = name.as_bytes();
+    if b.len() != MASK.len() {
+        return false;
+    }
+    for (c, m) in b.iter().zip(MASK) {
+        match m {
+            b'D' => {
+                if !c.is_ascii_digit() {
+                    return false;
+                }
+            }
+            _ => {
+                if c != m {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Does `name` look like a per-sha genlock STAGE dir — `stage-genlock-<sha>` (win, under `C:\`) or
@@ -103,9 +121,14 @@ pub fn is_dated_backup(name: &str) -> bool {
 /// Lowercase-hex only (git writes lowercase), so an unrelated `stage-genlock-notes` dir is
 /// PROTECTED.
 pub fn is_stage_dir(name: &str) -> bool {
-    // #789 RED stub — real allowlist lands in the GREEN commit.
-    let _ = name;
-    false
+    let sha = match name
+        .strip_prefix("stage-genlock-")
+        .or_else(|| name.strip_prefix("genlock-stage-"))
+    {
+        Some(s) => s,
+        None => return false,
+    };
+    !sha.is_empty() && sha.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Classify a directory name against the deploy allowlist. `None` = PROTECTED (never deletable).
@@ -125,17 +148,51 @@ pub fn classify_backup(name: &str) -> Option<BackupKind> {
 /// `keep_within_days` (union); the rest are deleted. Keeping newest-N per kind means a burst of one
 /// kind never evicts a recent dir of the other.
 pub fn plan(dirs: &[BackupDir], policy: &RetentionPolicy, now_epoch: f64) -> BackupPlan {
-    // #789 RED stub — real per-kind newest-N UNION younger-than-D decision lands in GREEN.
-    let _ = (policy, now_epoch);
-    let keep = dirs
-        .iter()
-        .map(|dir| BackupKept {
-            dir: dir.clone(),
-            reason: KeepReason::ProtectedNonMatching,
-        })
-        .collect();
-    BackupPlan {
-        keep,
-        delete: Vec::new(),
+    let horizon = policy.keep_within_days * SECONDS_PER_DAY;
+
+    let mut keep: Vec<BackupKept> = Vec::new();
+    let mut dated: Vec<&BackupDir> = Vec::new();
+    let mut stage: Vec<&BackupDir> = Vec::new();
+    for dir in dirs {
+        match classify_backup(&dir.name) {
+            Some(BackupKind::DatedBackup) => dated.push(dir),
+            Some(BackupKind::Stage) => stage.push(dir),
+            None => keep.push(BackupKept {
+                dir: dir.clone(),
+                reason: KeepReason::ProtectedNonMatching,
+            }),
+        }
     }
+
+    let mut delete: Vec<BackupDir> = Vec::new();
+    for group in [&mut dated, &mut stage] {
+        // Newest first; stable, deterministic tie-break by name so a plan is reproducible.
+        group.sort_by(|a, b| {
+            b.mtime_epoch
+                .partial_cmp(&a.mtime_epoch)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        for (idx, dir) in group.iter().enumerate() {
+            let within_newest = idx < policy.keep_newest_runs;
+            // age >= 0 for a past mtime; a future mtime (age < 0) is treated as young -> kept.
+            let within_days =
+                policy.keep_within_days > 0.0 && (now_epoch - dir.mtime_epoch) < horizon;
+            if within_newest {
+                keep.push(BackupKept {
+                    dir: (*dir).clone(),
+                    reason: KeepReason::NewestRuns,
+                });
+            } else if within_days {
+                keep.push(BackupKept {
+                    dir: (*dir).clone(),
+                    reason: KeepReason::WithinDays,
+                });
+            } else {
+                delete.push((*dir).clone());
+            }
+        }
+    }
+
+    BackupPlan { keep, delete }
 }
