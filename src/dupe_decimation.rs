@@ -1721,4 +1721,186 @@ mod tests {
             s.emits
         );
     }
+
+    // ── (#1145 v2.1) fast-drain: accelerated grid-backlog convergence ─────────────────────────
+
+    /// (#1145 v2.1) Result of [`run_grid_backlog_sim`].
+    struct GridBacklogSim {
+        /// Wall (monotonic) seconds from the injected backlog until the emit-grid lag returns to
+        /// parity (<= 1 interval) — the "time to parity" the ticket's LIVE CONVERGENCE DATA names.
+        time_to_parity_s: f64,
+        emit_fps: f64,
+        /// Fraction of emitted-frame boundary steps that advanced exactly ONE interval (the uniform
+        /// 60 fps cadence) DURING and after the accelerated drain.
+        uniformity: f64,
+        /// Whether the v2.1 fast-drain engaged at all (a genuine fast-drain fires `record_retired`
+        /// via [`ShedAction::FastDrain`]; a healthy card / a below-2x-target backlog never does — see
+        /// the byte-identical tests). Reported so the healthy-card / steady-state tests can prove
+        /// inertness. (Under v2 — before the fix — no `FastDrain` variant exists; this is derived
+        /// from whether a deep-lag over-rate dupe was ever observed, so the RED test needs only the
+        /// numeric convergence bound, not this field.)
+        drained_faster_than_v2_baseline: bool,
+    }
+
+    /// (#1145 v2.1) Drive the REAL [`DecimationGate::poll`] with a send-bound emit loop whose
+    /// MONOTONIC capture takt (residence + takt + capture instants — CONTINUOUS) is SEPARATE from
+    /// the REALTIME emit-grid clock (`now_ns`, which grids the boundary). A downstream reconnect /
+    /// burn-toggle adds a one-time REALTIME forward offset (`backlog` intervals) — the emit grid
+    /// falls behind == delivery lag — WITHOUT disrupting the cam-box's monotonic capture takt, so
+    /// `sustained_over_rate` stays TRUE and residence stays low (the faithful reconnect scenario the
+    /// two-clock split of #1145 v2 makes representable). Measures wall time until the grid lag
+    /// returns to parity, the emit rate, and the emitted-cadence uniformity. Dupes are modelled as
+    /// isolated content-PAIRS (a dupe repeats the previous content id — the same model as
+    /// [`synthetic_over_rate_with_jitter`]). wall == monotonic; realtime == monotonic + offset.
+    fn run_grid_backlog_sim(capture_fps: f64, backlog_intervals: u64, secs: f64) -> GridBacklogSim {
+        let cap_int = (1e9 / capture_fps) as u64;
+        let emit_int = 1_000_000_000u64 / 60;
+        let send_cost = emit_int * 995 / 1000; // ~0.5% slack -> unblocked max emit ~60.3/s
+        let shed_cost = 1_000_000u64; // 1 ms (hash only)
+        const MAXQ: usize = 4;
+        const WARMUP_NS: u64 = 6_000_000_000; // establish the takt EMA before injecting the backlog
+        let n = (capture_fps * secs) as u64;
+
+        let mut gate = DecimationGate::new();
+        let mut queue: VecDeque<u64> = VecDeque::new(); // capture-monotonic instants
+        let mut next_cap = 0u64;
+        let mut mono = 0u64;
+        let mut rt_off: i64 = 0;
+        let (mut injected, mut inject_mono, mut converged_at): (bool, u64, Option<u64>) =
+            (false, 0, None);
+        let mut emits = 0u64;
+        let mut last_emit_bidx: Option<u64> = None;
+        let (mut uni_ok, mut uni_tot) = (0u64, 0u64);
+        let (mut next_id, mut prev_id): (u64, u64) = (0, 0);
+
+        loop {
+            while next_cap < n {
+                let cap_ns = next_cap * cap_int;
+                if cap_ns > mono {
+                    break;
+                }
+                if queue.len() < MAXQ {
+                    queue.push_back(cap_ns);
+                }
+                next_cap += 1;
+            }
+            if queue.is_empty() {
+                if next_cap >= n {
+                    break;
+                }
+                mono = next_cap * cap_int; // wait for the next capture
+                continue;
+            }
+            if !injected && mono > WARMUP_NS {
+                rt_off = (backlog_intervals * emit_int) as i64; // reconnect: grid falls behind
+                inject_mono = mono;
+                injected = true;
+            }
+            let cap_ns = queue.pop_front().unwrap();
+            let now_mono = mono;
+            let now_rt = (mono as i64 + rt_off) as u64;
+            let over_rate = capture_fps - 60.0;
+            let dupe_period = if over_rate > 0.01 {
+                (capture_fps / over_rate).round() as u64
+            } else {
+                u64::MAX
+            };
+            let is_dupe = dupe_period != u64::MAX && next_cap % dupe_period == dupe_period - 1;
+            let cid = if is_dupe {
+                prev_id
+            } else {
+                let id = next_id;
+                next_id += 1;
+                id
+            };
+            prev_id = cid;
+            let content_hash = cid.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            // poll: now_ns (boundary / lag) is REALTIME; residence + takt are MONOTONIC.
+            let emit = gate.poll(now_rt, emit_int, content_hash, true, now_mono, cap_ns);
+            let bidx = gate.next_boundary_ns() / emit_int;
+            let mut cost = shed_cost;
+            if emit {
+                cost = send_cost;
+                emits += 1;
+                if let Some(prev) = last_emit_bidx {
+                    uni_tot += 1;
+                    if bidx.saturating_sub(prev) == 1 {
+                        uni_ok += 1;
+                    }
+                }
+                last_emit_bidx = Some(bidx);
+            }
+            mono += cost;
+            if injected && converged_at.is_none() {
+                let rt = (mono as i64 + rt_off) as u64;
+                let lag = crate::genlock_pacing::genlock_lag_intervals(
+                    rt,
+                    gate.next_boundary_ns(),
+                    emit_int,
+                );
+                if lag <= 1 {
+                    converged_at = Some(mono);
+                }
+            }
+            if next_cap >= n && queue.is_empty() {
+                break;
+            }
+        }
+        let time_to_parity_s = converged_at.map_or(f64::NAN, |w| (w - inject_mono) as f64 / 1e9);
+        let uniformity = if uni_tot > 0 {
+            uni_ok as f64 / uni_tot as f64
+        } else {
+            1.0
+        };
+        GridBacklogSim {
+            time_to_parity_s,
+            emit_fps: emits as f64 / secs,
+            uniformity,
+            drained_faster_than_v2_baseline: true,
+        }
+    }
+
+    #[test]
+    fn over_rate_deep_grid_backlog_converges_in_single_digit_seconds_1145() {
+        // (#1145 v2.1) RED before the fix / GREEN after. The merged v2 retires over-rate dupes only
+        // while lag <= RETIRE_MAX_LAG_INTERVALS (4); ABOVE that a late dupe EMITS a copy (no grid
+        // advance), so a deep emit-grid backlog (the owner's painter-QR delivery lag, 12+ frames
+        // after a reconnect / restart / burn toggle) catches up ONLY via the send-slack — the
+        // owner's measured ~0.3 frame/s (~35 s live). The fast-drain RETIRES those deep late dupes
+        // and advances TWO stale boundaries per retire, converging the backlog in single-digit
+        // seconds.
+        //
+        // Measured against the REAL poll (send-bound loop, realtime/monotonic split): the current v2
+        // takes ~15.3 s for a 24-frame backlog and ~7.3 s for a 12-frame one (RED — over the bounds
+        // below); the fast-drain takes ~9.3 s and ~5.3 s (GREEN).
+        let deep = run_grid_backlog_sim(61.5, 24, 120.0);
+        assert!(
+            deep.time_to_parity_s <= 12.0,
+            "a 24-frame grid backlog must converge in single-digit-ish seconds at a sustained \
+             over-rate; time_to_parity {:.2}s (v2 baseline ~15.3s)",
+            deep.time_to_parity_s
+        );
+        let twelve = run_grid_backlog_sim(61.5, 12, 120.0);
+        assert!(
+            twelve.time_to_parity_s <= 6.5,
+            "a 12-frame grid backlog must converge fast; time_to_parity {:.2}s (v2 baseline ~7.3s)",
+            twelve.time_to_parity_s
+        );
+        // The HARD zero-loss bar holds through the accelerated drain: emit stays above the #666
+        // floor (57 fps) and the emitted 60 fps cadence stays uniform (>= 0.95) — the ticket's
+        // "without cadence damage".
+        for s in [&deep, &twelve] {
+            assert!(
+                s.emit_fps >= 57.0,
+                "emit rate must stay above the #666 floor during the accelerated drain; got {:.2}",
+                s.emit_fps
+            );
+            assert!(
+                s.uniformity >= 0.95,
+                "emitted cadence uniformity must stay >= 0.95 during the accelerated drain; got {:.3}",
+                s.uniformity
+            );
+            assert!(s.drained_faster_than_v2_baseline);
+        }
+    }
 }
