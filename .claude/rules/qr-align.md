@@ -137,3 +137,31 @@ system.**
 - Tier-0: `_stable_tail_start` / `measure_tail_status` are PURE (no rig); `measure_stable_tail` + the
   `align()` flow are tested against a monkeypatched `barrier_screenshot`
   (`tests/python/test_qr_align_tail_1160.py`).
+
+## The floor-3 pin lever CANNOT ADD hold — a pin INCREASE is inert on a live rig (#1161)
+
+The floor-3 model floors the slowest camera to 3 and RAISES the faster ones' pins to delay them into
+parity. That raise is **structurally inert on a live rig** — the aligner cannot move a source's
+presented frame to an OLDER one:
+
+- `obs_source_set_genlock_latency_ms` (`vendor/obs-studio/libobs/obs-source.c`, ~7851) on a value
+  change clears `genlock_phase_anchor_ns` and re-arms the (ms-path-inert) `genlock_filled` latch, but
+  NEVER clears `genlock_locked_next_boundary_ns` (the conveyor) and NEVER forces a re-acquire (the
+  ACQUIRE branch runs only when that boundary `== 0`).
+- The conveyor is a pure DOWNWARD-only FOLLOWER; `should_converge_phase` (`src/genlock_backlog.rs`)
+  only sheds toward `max(reserve, floor)`. Raising `reserve` (= the pin) only raises that shed
+  threshold — it never deepens the hold.
+
+So a per-source pin INCREASE moves only the CONFIG value (read-back confirms it), never the presented
+frame → a one-canvas-frame residual can survive apply, and the re-measured residual reads INFLATED
+(the delta metric `m_i = pin_i − latency_i` folds in the raised pin while the frame stayed put). This
+is NOT a settle-time issue (no upward mechanism to wait for) and NOT fixable by the wall-clock
+frame-grid pin (issue 1003 REJECTED it three ways). The frame-mover is issue 1003's Stage-2 ACQUIRE
+bracketing gate — a genlock-C change, live-only, gated on issue 1004 — OUT of the aligner's reach.
+
+**What the aligner does instead (#1161):** when the re-measured tail STABILIZED but stayed off-parity
+AND the plan asked a source to add hold, `align()` attributes the abort PRECISELY (via
+`pins_requiring_more_hold` + `hold_inert_abort_reason`) — naming the genlock FIFO limit + issue 1003
+— and emits per-source before/after pin+residual telemetry (`format_pin_apply_report`), instead of a
+generic "did NOT hold" that reads as flakiness/settle. It NEVER widens the same-frame parity bar; the
+run still FAILS. All three helpers are pure (Tier-0, `tests/python/test_qr_align_pinapply_1161.py`).

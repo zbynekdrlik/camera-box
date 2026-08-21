@@ -313,6 +313,92 @@ def sanity_ok(deltas, max_delta_ms=DEFAULT_MAX_DELTA_MS):
     return (worst <= max_delta_ms), slowest_src, widest_src, worst
 
 
+# ---------------------------------------------------------------------------
+# #1161 -- WHY a floor-3 apply can leave a one-canvas-frame residual: the pin
+# lever cannot ADD hold. The floor-3 model floors the slowest camera and RAISES
+# the faster ones' pins to delay them into parity -- but a per-source
+# genlock_latency_ms INCREASE is structurally inert on a live rig:
+#   * obs_source_set_genlock_latency_ms (vendor/obs-studio/libobs/obs-source.c)
+#     clears genlock_phase_anchor_ns and re-arms the (ms-path-inert) fill latch,
+#     but NEVER clears genlock_locked_next_boundary_ns (the conveyor) and NEVER
+#     forces a re-acquire (the ACQUIRE branch runs only when that boundary == 0).
+#   * The conveyor is a pure FOLLOWER with no restoring force toward the
+#     configured latency; should_converge_phase (src/genlock_backlog.rs) only
+#     SHEDS DOWNWARD toward max(reserve, floor). Raising reserve only raises that
+#     shed threshold -- it never deepens the hold.
+# So a pin increase moves only the CONFIG value, never the presented frame. The
+# frame-mover is #1003's Stage-2 ACQUIRE bracketing gate (a genlock-C change,
+# live-only, gated on #1004). These pure helpers let align() ATTRIBUTE the
+# residual precisely (instead of a generic "did NOT hold") and emit before/after
+# telemetry -- WITHOUT widening the owner's same-frame parity bar.
+# ---------------------------------------------------------------------------
+def pins_requiring_more_hold(pre_pins, plan, min_increase_ms=1):
+    """{source: increase_ms} for every planned source whose pin EXCEEDS its pre-apply pin by at
+    least `min_increase_ms` -- i.e. the sources the floor-3 plan asks the genlock FIFO to hold LONGER
+    (present an OLDER frame). This is the ONE direction the FIFO cannot execute on a live per-source
+    latency change (see the module note above), so a non-empty result on a persistent post-apply
+    residual is WHY it did not close. A source with an unknown pre-pin is skipped (its delta cannot
+    be computed) -- never fabricated."""
+    out = {}
+    for src, want in plan.items():
+        pre = pre_pins.get(src)
+        if pre is None:
+            continue
+        if want - pre >= min_increase_ms:
+            out[src] = want - pre
+    return out
+
+
+def _delta_str(deltas, src):
+    """A residual-delta cell for the telemetry/report: 'n/a' when the map is absent (unverifiable
+    round set) or the source is missing, else the value with trailing zeros trimmed."""
+    v = deltas.get(src) if isinstance(deltas, dict) else None
+    return "n/a" if v is None else f"{v:g}"
+
+
+def format_pin_apply_report(pre_pins, post_pins, pre_deltas, post_deltas, inert):
+    """Before/after per-source apply telemetry (#1161 item 4): each source's config pin
+    (pre -> read-back) and its cross-camera residual delta (pre -> post), with a HOLD-INERT tag on
+    every source the plan asked to ADD hold (`inert`). It makes visible WHERE a pin increase went --
+    the config moved (read-back), the presented frame did not (the residual did not close). Pure; the
+    caller prints it on the abort path."""
+    srcs = set(pre_pins) | set(post_pins) | (set(inert) if inert else set())
+    lines = ["[qr-align] pin apply before -> after (config pin | cross-camera residual ms):"]
+    for src in sorted(srcs):
+        pre, post = pre_pins.get(src), post_pins.get(src)
+        tag = (f"  HOLD-INERT (wanted +{inert[src]} ms, frame did not move)"
+               if inert and src in inert else "")
+        lines.append(
+            f"  {src!r}: pin {pre}ms -> {post}ms (read-back); "
+            f"residual {_delta_str(pre_deltas, src)} -> {_delta_str(post_deltas, src)} ms{tag}")
+    return "\n".join(lines)
+
+
+def hold_inert_abort_reason(inert, post_pins, post_deltas):
+    """The PRECISE #1161 abort reason: a STABILIZED tail stayed off-parity because the floor-3 plan
+    asked one or more sources to ADD hold (`inert` = pins_requiring_more_hold), which the genlock FIFO
+    cannot execute on a live per-source latency INCREASE. Names each inert source with its requested
+    increase, its read-back-confirmed live pin (so this is provably NOT a WS write failure -- the
+    config DID take), and its residual, then points at the owning fix. Callers use this ONLY when
+    `inert` is non-empty and the tail stabilized but failed parity -- it NEVER widens tolerance, the
+    run still FAILS the owner's same-frame bar."""
+    parts = []
+    for src in sorted(inert, key=lambda s: (-inert[s], s)):
+        resid = post_deltas.get(src) if isinstance(post_deltas, dict) else None
+        rtxt = "" if resid is None else f", residual {resid} ms"
+        parts.append(f"{src!r} wanted +{inert[src]} ms hold "
+                     f"(pin now {post_pins.get(src)} ms, read-back confirmed{rtxt})")
+    return (
+        "[qr-align] the re-measured tail STABILIZED but stayed off-parity because the genlock FIFO "
+        "did NOT add the requested hold: " + "; ".join(parts) + ". A per-source genlock_latency_ms "
+        "INCREASE cannot deepen the FIFO on a live rig (obs_source_set_genlock_latency_ms clears the "
+        "phase anchor but never the locked conveyor boundary and never forces a re-acquire; "
+        "should_converge_phase only sheds DOWNWARD toward max(reserve, floor)). This "
+        "last-canvas-frame residual is a genlock-FIFO structural limit owned by issue 1003's Stage-2 "
+        "ACQUIRE bracketing gate (a genlock-C change, live-only, gated on issue 1004), NOT the "
+        "aligner -- parity tolerance is NOT widened, the run FAILS the owner's same-frame bar.")
+
+
 def alignment_ok(round_ticks, tol_frame_ids=DEFAULT_PARITY_TOL_IDS):
     """The owner's parity gate: True iff the round's frame_id spread <= tol_frame_ids. An
     unverifiable round (fewer than two decoded -> spread None) is NOT a pass -- parity must be
@@ -721,7 +807,23 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
                     post_deltas.setdefault(s, []).append(v)
         named = {s: round(statistics.median(v), 1) for s, v in post_deltas.items()} if post_deltas \
             else "unverifiable"
+        # #1161: which sources did the plan ask to ADD hold (the direction the FIFO cannot execute
+        # on a live pin change)? A non-empty set on a STABILIZED-but-off-parity tail is WHY the
+        # residual did not close -- the config pin moved (read-back confirmed) but the presented
+        # frame did not. Record it + emit before/after telemetry so the operator sees where the pin
+        # went (item 4), then attribute the abort precisely rather than a generic "did NOT hold".
+        inert = pins_requiring_more_hold(current_pins, plan)
+        result["post_residual_deltas_ms"] = named
+        result["hold_inert_ms"] = inert
+        sys.stderr.write(format_pin_apply_report(
+            current_pins, post_pins, result.get("median_deltas_ms"), named, inert) + "\n")
         _emit_fail_diagnostics(verify_ticks, sources, vtail_start)  # the RE-MEASURED rounds
+        if vstatus.done and inert:
+            # The tail STABILIZED but stayed off-parity, and the plan needed more hold the FIFO
+            # cannot add: attribute to the genlock-FIFO structural limit (issue 1003 Stage-2), never
+            # the generic "did NOT hold" (which reads as flakiness/settle and sends the next worker
+            # chasing hypotheses the ticket already ruled out). Parity tolerance is NOT widened.
+            raise AlignmentImpossible(hold_inert_abort_reason(inert, post_pins, named))
         why = ("did not STABILIZE" if not vstatus.done
                else f"stabilized at frame_id spread {post_spread} (> {parity_tol_ids})")
         raise AlignmentImpossible(
