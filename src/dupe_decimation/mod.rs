@@ -54,9 +54,11 @@
 
 // (#1165) File split for the ~1000-line #414 budget — a MOVE-only refactor: every item below
 // keeps its public path `camera_box::dupe_decimation::X` via the glob re-exports, and the
-// submodules carry byte-identical logic. Layered by dependency direction (no cycles):
-// signature (pure hash/sig) <- shed (shed-decision logic + constants) <- gate (the DecimationGate
-// state machine + DupeShedLog + summary). See `.claude/rules/genlock-emit-gate-pacing.md`.
+// submodules carry byte-identical logic. Dependency direction (acyclic): `signature` (pure
+// hash/sig) and `shed` (shed-decision logic + constants) are independent leaves — neither has a
+// code dependency on the other or on `gate`; `gate` (the DecimationGate state machine +
+// DupeShedLog + summary) depends on both via `use super::*`. See
+// `.claude/rules/genlock-emit-gate-pacing.md`.
 mod gate;
 mod shed;
 mod signature;
