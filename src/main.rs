@@ -1118,7 +1118,7 @@ async fn run_capture_loop(
                     // (#1145 round 3) stage this frame's luma lattice for poll's noise-tolerant dupe
                     // compare (armed only under sustained over-rate, never two consecutive frames).
                     // Called immediately before poll, mirroring the hash for this same frame.
-                    decimation_gate.note_frame_luma(&content_luma);
+                    decimation_gate.note_frame_luma(content_luma);
                     let emit = decimation_gate.poll(
                         wall_clock_ns(),
                         out_interval_ns,

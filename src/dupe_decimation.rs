@@ -575,9 +575,10 @@ impl DecimationGate {
     /// marginal over-rate card's noisy re-sample dupes (which the exact `content_hash` misses). NOT
     /// calling it (any pre-round-3 caller) leaves the pending lattice `None`, so the noisy path is
     /// skipped and behavior is byte-identical to the exact-hash-only gate — the self-neutralizing
-    /// fail-safe.
-    pub fn note_frame_luma(&mut self, luma: &[u8]) {
-        self.pending_luma = Some(luma.to_vec());
+    /// fail-safe. Takes the lattice BY VALUE ([`dupe_content_sig`] returns a fresh `Vec`), so the
+    /// per-frame capture loop moves it in with no extra copy.
+    pub fn note_frame_luma(&mut self, luma: Vec<u8>) {
+        self.pending_luma = Some(luma);
     }
 
     /// (#1145) Prune the trailing unique-capture window to entries within [`UNIQUE_RATE_WINDOW_NS`]
@@ -2421,7 +2422,7 @@ mod tests {
             let now_mono = mono;
             let now_rt = mono; // rig realtime == monotonic (no reconnect offset)
             if with_luma {
-                gate.note_frame_luma(&luma);
+                gate.note_frame_luma(luma);
             }
             let emit = gate.poll(now_rt, emit_int, hash, true, now_mono, cap_mono);
             let mut cost = shed_cost;
@@ -2556,6 +2557,15 @@ mod tests {
              fixed skips={} vs baseline {}",
             fixed.skips,
             base.skips
+        );
+        // The over-rate absorption must NOT collapse the emit rate — shedding PROVEN dupes keeps it
+        // above the #666 emit-deficit floor (57 fps); the uniformity gate alone catches a rate drop
+        // only indirectly, so pin it directly.
+        assert!(
+            fixed.emit_fps >= 57.0,
+            "noise-tolerant detection must hold the emit rate above the #666 floor (57 fps); \
+             got {:.2}",
+            fixed.emit_fps
         );
     }
 
