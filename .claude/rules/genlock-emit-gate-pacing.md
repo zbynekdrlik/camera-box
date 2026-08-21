@@ -1,6 +1,6 @@
 ---
 paths:
-  - "src/dupe_decimation.rs"
+  - "src/dupe_decimation/**"
   - "src/genlock_pacing.rs"
   - "src/ndi.rs"
   - "src/emit_skip_log.rs"
@@ -357,9 +357,14 @@ The rule below ("faithful Python port") is right that a port reproduces the live
 hand-SIMPLIFIED re-model silently DIVERGES. A shortened `DecimationGate`/`Cur` re-write disagreed
 with the real #1111 test (it read emit 58 at 62/period-15 where the real code holds ~60 via copies),
 which would have mis-designed the fix. The authoritative off-rig check is the CLAUDE.md/#557 SCRATCH
-route: copy the ACTUAL `src/genlock_pacing.rs` + `src/dupe_decimation.rs` into a scratch dir with a
-`root.rs` that `mod`s both, `sed 's/crate::genlock_pacing:://g'` inside dupe_decimation, then
-`rustc --edition 2021 --test root.rs` runs the REAL `DecimationGate::poll` + the real test suite. For
+route: copy the ACTUAL `src/genlock_pacing.rs` + the whole `src/dupe_decimation/` DIRECTORY (`mod.rs`
++ `signature.rs` + `shed.rs` + `gate.rs` + `tests.rs` — the module was split into a dir for the
+~1000-line budget) into a scratch dir with a `root.rs` that `mod genlock_pacing; mod dupe_decimation;`
+(rustc resolves `dupe_decimation/mod.rs`), then `rustc --edition 2021 --test root.rs` runs the REAL
+`DecimationGate::poll` + the real test suite (70 tests: 44 `dupe_decimation::tests::` + 26
+`genlock_pacing::tests::`). NO `sed` is needed — `crate::genlock_pacing::*` resolves because
+`genlock_pacing` is a top-level `mod` in the scratch crate (the old single-file recipe's
+`sed 's/crate::genlock_pacing:://g'` was never actually required and is retired). For
 a design sweep, drive that real gate with a synthetic capture stream (periodic isolated dupes at the
 over-rate delta + INDEPENDENT timestamp jitter — content-dupeness is a hash property, NOT a
 sampling-phase artifact; a source-sampling model that ties dupeness to the jittered timestamp
