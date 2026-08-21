@@ -114,7 +114,27 @@ $stagePlan = Get-KindPlan $stageDirs $KeepRuns $KeepDays $now
 $keepAll = @($datedPlan.Keep) + @($stagePlan.Keep)
 $deleteAll = @($datedPlan.Delete) + @($stagePlan.Delete)
 
+# Protected (non-matching) dirs. LIST them for the dedicated BackupRoot (the review step's need);
+# for the shared StageParent (C:\) show only a COUNT so we never dump every top-level system dir.
+$datedProtected = @()
+if (Test-Path -LiteralPath $BackupRoot -PathType Container) {
+    $datedProtected = @(Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -cnotmatch $datedRe })
+}
+$stageProtectedCount = 0
+if (Test-Path -LiteralPath $StageParent -PathType Container) {
+    $stageProtectedCount = @(Get-ChildItem -LiteralPath $StageParent -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -cnotmatch $stageRe }).Count
+}
+
 # ---- full plan ---------------------------------------------------------------------------------
+Write-Output "--- PROTECT (non-matching names -- never deleted) ---"
+if ($datedProtected.Count -eq 0) { Write-Output "  (backup root: none)" }
+foreach ($fl in ($datedProtected | Sort-Object Name)) {
+    Write-Output ("  PROTECT  {0,-30}  ({1})" -f $fl.Name, $BackupRoot)
+}
+if ($stageProtectedCount -gt 0) {
+    Write-Output ("  ({0} non-matching top-level dir(s) under {1} protected, not listed)" -f $stageProtectedCount, $StageParent)
+}
+Write-Output ""
 Write-Output "--- KEEP (matching, retained by policy) ---"
 if ($keepAll.Count -eq 0) { Write-Output "  (none)" }
 foreach ($k in $keepAll) {

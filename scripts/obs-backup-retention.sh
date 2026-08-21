@@ -68,7 +68,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ${BASH_SOURCE[0]:-$0}: BASH_SOURCE is unset when this script is fed to `bash -s` (the --imag leg),
+# which would trip `set -u`. HERE is only used by the win/imag driver legs, not --local-sweep.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # EXPLICIT allowlists -- byte-mirror of is_dated_backup()/is_stage_dir() in
 # src/obs_backup_retention.rs. `[0-9]` (never a locale digit class); lowercase-hex sha only.
@@ -89,20 +91,31 @@ obs_backup_sweep() {
 
   local del_total=0
   # $1 = parent dir, $2 = allowlist regex, $3 = human kind label
+  # $4 protect_mode: "list" (dedicated backup root -> show each protected name) or "count" (a shared
+  # parent like /tmp or C:\ -> a count only, so we never dump every system dir).
   _sweep_kind() {
-    local parent="$1" re="$2" label="$3"
-    [ -d "$parent" ] || { echo "NOTE: $label parent not found (nothing to prune): $parent"; echo ""; return 0; }
-    # Collect "mtime<TAB>path" for matching top-level dirs, newest first (mtime desc).
-    local rows; rows="$(
-      for p in "$parent"/*/; do
-        [ -d "$p" ] || continue
-        local name; name="$(basename "$p")"
-        [[ "$name" =~ $re ]] || continue
-        printf '%s\t%s\n' "$(stat -c '%Y' "$p")" "${p%/}"
-      done | sort -rn -k1,1
-    )"
-    local i=0
+    local parent="$1" re="$2" label="$3" protect_mode="${4:-count}"
     echo "--- $label ---"
+    [ -d "$parent" ] || { echo "  NOTE: parent not found (nothing to prune): $parent"; echo ""; return 0; }
+    # One pass: split top-level dirs into matching ("mtime<TAB>path") and protected (non-matching).
+    local rows="" protected_count=0
+    local p name
+    for p in "$parent"/*/; do
+      [ -d "$p" ] || continue
+      name="$(basename "$p")"
+      if [[ "$name" =~ $re ]]; then
+        rows+="$(stat -c '%Y' "$p")"$'\t'"${p%/}"$'\n'
+      else
+        protected_count=$(( protected_count + 1 ))
+        [ "$protect_mode" = "list" ] && printf '  PROTECT  %s\n' "$name"
+      fi
+    done
+    [ "$protect_mode" != "list" ] && [ "$protected_count" -gt 0 ] && \
+      echo "  ($protected_count non-matching top-level dir(s) protected, not listed)"
+    # Newest first: mtime (field 1) numeric-descending, path (field 2) ascending as a deterministic
+    # tie-break — matches obs_backup_retention::plan() and the .ps1 (per-parent, so path-asc == name-asc).
+    rows="$(printf '%s' "$rows" | sort -t"$(printf '\t')" -k1,1rn -k2,2)"
+    local i=0
     [ -z "$rows" ] && { echo "  (none matched)"; echo ""; return 0; }
     while IFS=$'\t' read -r mt path; do
       [ -n "$path" ] || continue
@@ -127,8 +140,8 @@ obs_backup_sweep() {
     echo ""
   }
 
-  _sweep_kind "$BACKUP_ROOT" "$DATED_RE" "dated box-backups (<stamp>-789)"
-  _sweep_kind "$STAGE_PARENT" "$STAGE_RE" "stage dirs (genlock-stage-<sha>)"
+  _sweep_kind "$BACKUP_ROOT" "$DATED_RE" "dated box-backups (<stamp>-789)" "list"
+  _sweep_kind "$STAGE_PARENT" "$STAGE_RE" "stage dirs (genlock-stage-<sha>)" "count"
 
   echo "--- SUMMARY ---"
   echo "  DELETE total : $del_total dir(s)  ($([ "$EXECUTE" = 1 ] && echo 'deleted' || echo 'would delete'))"
@@ -149,10 +162,15 @@ case "$MODE" in
     command -v sshpass >/dev/null || { echo "sshpass not installed (sudo apt-get install -y sshpass)" >&2; exit 1; }
     MODE_ARG=""; [ "$EXECUTE" = 1 ] && MODE_ARG="--execute"
     echo "[imag] ssh ${IMAG_USER}@${IMAG_IP} -> --local-sweep (${BACKUP_ROOT} + ${STAGE_PARENT}) $([ "$EXECUTE" = 1 ] && echo EXECUTE || echo DRY-RUN)"
-    # Pipe THIS script to imag and run it in --local-sweep mode (sudo -- deploy backups are root-owned).
+    # Feed ONE stdin stream to the remote `sudo -S bash -s`: the sudo password line FIRST, then THIS
+    # script as the program. `sudo -S` consumes the first line (password), the child `bash -s`
+    # inherits the same stdin and reads the rest (the program). A `printf|sudo` remote pipeline would
+    # instead leave `bash -s` reading an empty program (the script would land on printf's ignored
+    # stdin) -- a silent no-op. (sudo -- deploy backups are root-owned.)
     # shellcheck disable=SC2029
     sshpass -p "$IMAG_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 "${IMAG_USER}@${IMAG_IP}" \
-      "printf '%s\\n' '$IMAG_PW' | sudo -S -p '' bash -s -- --local-sweep --backup-root '$BACKUP_ROOT' --stage-parent '$STAGE_PARENT' --keep-runs '$KEEP_RUNS' --keep-days '$KEEP_DAYS' $MODE_ARG" < "$HERE/obs-backup-retention.sh"
+      "sudo -S -p '' bash -s -- --local-sweep --backup-root '$BACKUP_ROOT' --stage-parent '$STAGE_PARENT' --keep-runs '$KEEP_RUNS' --keep-days '$KEEP_DAYS' $MODE_ARG" \
+      < <(printf '%s\n' "$IMAG_PW"; cat "$HERE/obs-backup-retention.sh")
     ;;
 
   win)
@@ -166,10 +184,18 @@ case "$MODE" in
     MODE_ARG=""
     if [ "$EXECUTE" = 1 ]; then MODE_ARG="-Execute"; echo "[2/2] run (EXECUTE -- DELETING): $REMOTE_PS1"
     else echo "[2/2] run (DRY-RUN -- no deletion): $REMOTE_PS1"; fi
+    # Build the -BackupRoot/-StageParent args ONLY when they differ from the .ps1's own defaults.
+    # The default -StageParent is `C:\` -- a trailing backslash immediately before the closing `\"`
+    # over ssh reads as an escaped quote and corrupts the arg stream; omitting it lets the .ps1's own
+    # (correctly-parsed) `C:\` default apply. A custom root/parent WITHOUT a trailing `\` is passed as
+    # normal (the recordings precedent only ever passes such paths).
+    PS_PATH_ARGS=""
+    [ "$WIN_BACKUP_ROOT" != 'C:\obs-backup' ] && PS_PATH_ARGS="$PS_PATH_ARGS -BackupRoot \"${WIN_BACKUP_ROOT}\""
+    [ "$WIN_STAGE_PARENT" != 'C:\' ] && PS_PATH_ARGS="$PS_PATH_ARGS -StageParent \"${WIN_STAGE_PARENT}\""
     # `powershell -File` with named params -- NOT a nested `powershell -Command` over ssh.
     # shellcheck disable=SC2029
     sshpass -p "$PW" ssh "${SSH_OPTS[@]}" "${USER}@${HOST}" \
-      "powershell -NoProfile -ExecutionPolicy Bypass -File \"${REMOTE_PS1}\" -BackupRoot \"${WIN_BACKUP_ROOT}\" -StageParent \"${WIN_STAGE_PARENT}\" -KeepRuns ${KEEP_RUNS} -KeepDays ${KEEP_DAYS} ${MODE_ARG}"
+      "powershell -NoProfile -ExecutionPolicy Bypass -File \"${REMOTE_PS1}\"${PS_PATH_ARGS} -KeepRuns ${KEEP_RUNS} -KeepDays ${KEEP_DAYS} ${MODE_ARG}"
     ;;
 
   *) echo "unknown mode: $MODE" >&2; exit 2 ;;
