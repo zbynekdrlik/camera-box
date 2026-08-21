@@ -148,6 +148,41 @@ v2 measures the residence DIRECTLY and sheds to bound it:
   replaces (and strictly better than the indiscriminate V4L2 overflow-drop). Report-only fields feed
   the live re-measure; the >=0.95 uniformity acceptance is verified on-rig after deploy, not off-rig.
 
+## #1145 v2.1 — FAST-drain: accelerate a DEEP grid backlog's convergence (the SEVENTH piece)
+
+The v2 depth-drain bounds the STEADY over-rate sawtooth, but it does NOT converge a DEEP backlog
+fast. After a refilling event (service restart, receiver reconnect, burn toggles) the emit grid can
+fall 12+ intervals behind wall-clock (the delivery latency the owner's painter-QR measures). v2
+retires an over-rate dupe only while `lag <= RETIRE_MAX_LAG_INTERVALS` (4); ABOVE that ceiling it
+EMITS the late dupe as a #1111 COPY — which does NOT advance the grid — so a deep backlog catches up
+ONLY at the tiny send-slack rate (~0.3 frame/s; the owner's live-measured ~35 s for 12 frames). The
+grounding sim (the SCRATCH route below, driving the REAL `DecimationGate::poll` with a
+realtime/monotonic clock split so a reconnect adds a realtime grid-lag WITHOUT disrupting the
+monotonic takt) reproduces exactly this: v2 ~31–54 s at a realistic ~0.3–0.5% send-slack.
+
+v2.1 adds ONE band to the pure `dupe_shed_action` decision:
+- **When `sustained_over_rate && enough_unique_to_hold_target && lag > RETIRE_MAX_LAG_INTERVALS`**
+  (== 2x the `QUEUE_DEPTH_SHED_INTERVALS` depth target — "residence/backlog exceeds 2x target"),
+  return the new **`ShedAction::FastDrain`**: shed the dupe AND advance the boundary by **TWO**
+  intervals ("drain up to 2 slots per emit interval"). The extra boundary is ALSO already stale
+  (lag > 4 >> 2), so it costs no new downstream gap and is guarded in `poll` to never advance the
+  grid into the future (`candidate_next + interval <= now`, else a single-slot fallback). This
+  converts the copies v2 emitted (no grid advance) into boundary-advancing retirements at 2x the
+  dupe rate → the deep backlog converges in single-digit seconds.
+- **DUPES-ONLY, so issue-1131 "never drop a unique while uniques exist" holds** — only a content-dupe
+  takes this path; uniques still emit, and the +2 retires a stale boundary rather than dropping an
+  extra frame, so the emit rate stays >= the #666 floor (57 fps).
+- **Takt-gated → byte-identical below the band.** A healthy 60.00 card is NOT `sustained_over_rate`
+  (the whole band is skipped), and steady over-rate WITHOUT a backlog keeps `lag ~0` (< the 2x-target
+  band) — both are byte-identical to v2. `DupeShedLog` gained a `fast_drained` counter (now a 6-tuple
+  `take()` + a 7-arg `dupe_shed_summary`; `main.rs` wires it) so the live box shows the fast-drain
+  engaging distinctly from the v1 retire / v2 depth-drain.
+- **Sim (REAL poll, realtime/monotonic split):** 12-frame grid backlog v2 7.3 s → v2.1 5.3 s;
+  18 → 11.3/7.3; 24 → 15.3/9.3 (single-digit); emit >= 59.98 fps; uniformity >= 0.997; 60.00 card
+  `fast_drained == 0`. On the rig, where v2's grid drain is slack-limited (~0.3 frame/s), the same
+  mechanism converts the drain to the dupe-retirement rate — the >=0.95 uniformity + convergence
+  acceptance is the live E2E re-measure after deploy (supervisor's step), as with v2.
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
