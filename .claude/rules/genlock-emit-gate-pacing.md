@@ -298,6 +298,59 @@ and `[4i/8align]` holds a stable cross-camera offset.
   mid-band dwell, that generalisation needs a retire-rate token bucket (≤3 unfilled boundaries/s) —
   file it as its own ticket; do not add it without the 64 fps guard.
 
+## #1167 — corrupted-slot MAKE-UP: fill the slot a pre-gate corruption drop vacated (the TENTH piece)
+
+A corrupted V4L2 buffer (`V4L2_BUF_FLAG_ERROR` / short) is dropped in
+`src/capture.rs::process_frame` with `return Ok(())` **BEFORE the callback**, so it NEVER reaches
+`DecimationGate::poll`. At an OVER-RATE that removes a would-be-emitted GOOD frame from the stream,
+and the over-rate absorption (`ShedAction::Retire` / `Drain` — advance the boundary, emit nothing)
+then SKIPS that 60 fps slot instead of filling it → emit under-runs by EXACTLY the corrupted rate
+→ a strih genlock-FIFO hold → the cam1 presented-frame_id align sawtooth → `[4i/8align]` abort.
+An AT-rate box (`sustained_over_rate` false → Retire/Drain OFF) instead fills the same gap with the
+#1111 copy valve, so it holds 60 with identical corruption — that is why ONLY the over-rate box
+breaks. Diagnosed off-rig (real `poll`, scratch route): a true-60 source over-captured at 62 fps
+under 0.8 corrupted/s emits 59.13 fps (== the live "~59.1"; the emit deficit == the corrupted count
+EXACTLY — each corrupted frame costs one slot), vs 59.93 with the fix.
+
+The fix — a BOUNDED make-up deficit (NO new `ShedAction`, NO summary/tuple change):
+- **`DecimationGate::note_corrupted_frame()`** (called from `main.rs` when `capture.corrupted_frames()`
+  increases across a `process_frame` call, guarded by `out_interval_ns > 0`) accrues
+  `corrupted_makeup_deficit` (capped at `CORRUPTED_MAKEUP_MAX_DEFICIT = 8` — beyond a burst this
+  size the source is genuinely starved and the #1111 copy valve / `enough_unique` handoff carries
+  it) AND sets `pending_takt_gap`.
+- **Pure `corrupted_makeup_reclaims(action, deficit)`** = `deficit > 0 && matches!(action, Retire | Drain)`
+  (Tier-0 testable). In `poll`, after the unchanged `dupe_shed_action`, if it fires: decrement the
+  deficit, `next_boundary_ns = candidate_next` (the SAME single-interval advance Retire/Drain/Emit
+  do), clear `deferred_this_boundary`, `record_dupe_emitted()`, `return true` — emit the CURRENT
+  GOOD frame (a dupe/repeat in the Retire case, a fresh good frame in the Drain case). Corrupted
+  CONTENT is never forwarded (it was already dropped in capture.rs); the make-up emits a SUBSEQUENT
+  good frame.
+- **`note_capture_takt` gap-excludes the corrupted-spanning interval** (`pending_takt_gap`): that
+  inter-capture interval spans the missing sample (~32 ms, below the 50 ms `TAKT_GAP_EXCLUDE_NS`, so
+  it would otherwise be folded and creep the EMA toward disarm) — SKIP the fold, advance the
+  baseline, and (review 🟡) leave `consecutive_takt_gaps` UNTOUCHED (a corrupted interval carries no
+  takt evidence, so resetting it would erase #1145 v3 F1 collapse evidence — a dying card with a
+  corrupted storm could latch `sustained_over_rate` on a collapsed source). Keeps the arming armed.
+
+Composition: SINGLE-slot (issue-1131 preserved; `FastDrain` deliberately NOT converted — it is the
+deep-backlog convergence, and a make-up there would fight the drain; the deficit is reclaimed once
+steady Retire/Drain resume); #1111 valve untouched; #1145 v3 arming stays armed; INERT with no
+corruption. The make-up copies land in the reused #1111 `dupe_emitted` counter — attribute them via
+the `corrupted` count on the same `Streaming:` line (a healthy over-rate box shows ~0).
+
+- **Doc-placement GOTCHA (review 🟡):** the pure helper must sit BELOW `dupe_shed_action`, not
+  between that fn's rustdoc block and the fn — rustdoc attaches a contiguous `///` run to the
+  FOLLOWING item, so inserting a helper there silently steals `dupe_shed_action`'s doc.
+- **Stale-deficit carry (accepted by design):** a deficit accrued while the make-up can't fire
+  (at-rate periods / FastDrain backlogs) persists and can later convert up to 8 legitimate over-rate
+  sheds into copies; bounded to 8/episode and self-terminating. If live data ever shows copy bursts
+  trailing a corruption episode, add an aging/clear-on-valve rule.
+- **Tier-0 verify:** the whole cluster is `cfg(target_os="linux")` pure logic → `cargo fmt --all
+  --check` + the rustc `--test` scratch replica (RED with the make-up disabled 59.13 → GREEN 59.93).
+  The Drain leg needs `now_mono` 2+ emit-intervals AHEAD of a monotonic `capture_mono` to reach
+  `queue_depth >= QUEUE_DEPTH_SHED_INTERVALS` (a constant residence-2 drains EVERY frame — model a
+  warmed gate + one drain frame, per `drain_leg_make_up_emits_instead_of_dropping_1167`).
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
