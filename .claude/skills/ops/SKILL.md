@@ -114,6 +114,17 @@ because it carried no dantesync — this brings it under the fleet clock-discipl
   adaptation are NOT gated; the frame-jump signal `backward_regime_ticks` IS). For the 24h
   acceptance (skew flat ±20 ms), sample a long OBS-log window and raise `--min-samples`. The
   supervisor owns the live deploy + the 24h run; this is a verify tool, not a hard E2E gate.
+- **Reachability watchdog — REPORT-ONLY (#811).** resolume is in the dev1-side network-reach
+  watchdog's `BOXES` roster + `NETWORK_REACH_REPORT_ONLY_BOXES` (default `resolume`), so it is
+  probed (ping OR :4455) + logged + per-box state-tracked but **NEVER pages** — its absence is the
+  normal state for a traveling box, so a page would be noise (`.claude/rules/network-reach-watchdog.md`).
+  Once it becomes a permanent fixture, flip it to a paging node by removing `resolume` from
+  `NETWORK_REACH_REPORT_ONLY_BOXES` (it stays in `BOXES`). The watchdog ships DISABLED — enable on
+  dev1 with `systemctl --user enable --now network-reach-alert-watchdog.timer`, unchanged by this.
+- **Remote wake (#811).** resolume's WoL MACs are in `scripts/wol-targets.txt` as TWO rows —
+  `resolume` (primary NIC) + `resolume-alt` (2nd NIC, same `.201`, different MAC). `scripts/wake-box.sh
+  resolume` fires ONLY the primary row's MAC, so when the active NIC is unknown wake BOTH before a
+  maintenance roll: `scripts/wake-box.sh resolume; scripts/wake-box.sh resolume-alt`.
 
 **HARD RULE:** DanteSync OWNS the clock on cam boxes AND dev1. NEVER install/enable
 chrony / ptp4l / systemd-timesyncd / any other NTP/PTP tool, and NEVER run
