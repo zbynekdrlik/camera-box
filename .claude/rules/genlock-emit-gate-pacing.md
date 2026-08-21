@@ -351,6 +351,57 @@ the `corrupted` count on the same `Streaming:` line (a healthy over-rate box sho
   `queue_depth >= QUEUE_DEPTH_SHED_INTERVALS` (a constant residence-2 drains EVERY frame — model a
   warmed gate + one drain frame, per `drain_leg_make_up_emits_instead_of_dropping_1167`).
 
+## #1167 (2026-08-22) — the make-up was a MIS-DIAGNOSIS; the real fix is FILL-EVERY-SLOT (the ELEVENTH piece)
+
+The make-up above (the TENTH piece) **does not fire live, and cannot fix the persistent deficit** —
+hard-debug re-diagnosis proved BOTH of these off-rig against the real `poll`:
+
+- **The `corrupted` count on the `Streaming:` line is CUMULATIVE, not per-window.** `main.rs` resets
+  `frame_count`/`emit_count`/`last_report` every 5 s but NEVER `capture.corrupted_frames()` (its own
+  code comment says "a cumulative count"). "4 corrupted" identical across consecutive windows = 0 NEW
+  corrupted = a frozen STARTUP artifact, misread as "4/5s". So `note_corrupted_frame` fires ~0 times
+  steady-state → the deficit stays 0 → the reclaim never fires (airtight: the deficit has no reset, so
+  a nonzero deficit would eventually surface a `record_dupe_emitted` copy — but `late-dupe copies` is
+  0 in EVERY window). The make-up is INERT, working exactly as designed with nothing to make up. The
+  prior off-rig replica INJECTED `note_corrupted_frame` at 0.8/s — modelling ongoing corruption that
+  does not exist live (the replica-vs-live divergence). **The make-up code is kept but DORMANT.**
+- **The persistent 58.5 fps (over-rate) vs cam3 60.0 (at-rate, identical hardware) is the over-rate
+  absorption SKIPPING emit slots**, NOT corruption. `ShedAction::Drain` (residence≥2) and the
+  shallow-lag `Retire` (lag 1–4) ADVANCE a boundary while emitting NOTHING — a skipped 60fps slot the
+  buffered surplus could have filled. Continuous send-jitter on the busier over-rate box re-injects
+  shallow lag every window (live cam1: `retired`>0, `drained`>0, `fast_drained`==0), so the skip is a
+  CONTINUOUS strih-FIFO hold = the cam1 align sawtooth. The single diagnostic identity, from EXISTING
+  journalctl: `sent + retired + drained + 2×fast_drained ≈ 300/5s` — ~300 ⇒ decimation-limited (the
+  fill reaches 60); short ⇒ a send-throughput residual survives (CPU contention / the #899 lane), a
+  separate ticket. Post-deploy it degenerates to `60 − emit_fps` = the send-limited residual.
+
+The fix — FILL every slot while a good frame is buffered (the owner's invariant: "a single-slot dupe
+is acceptable; a skipped slot is never"), NO new `ShedAction`, the pure `dupe_shed_action` DECISION
+byte-UNCHANGED (so the whole #1145 decision-test surface + deep-backlog convergence are preserved);
+only `poll`'s APPLICATION of two arms changes:
+- **`ShedAction::Drain` HOLDS the boundary** (drop the oldest to bound residence exactly as before,
+  but do NOT advance) → the next fresher frame fills the same slot. Residence stays bounded at
+  `QUEUE_DEPTH_SHED_INTERVALS`; the #1145 v2 sawtooth fix + V4L2-overflow pre-emption hold. A new
+  `consecutive_drain_holds` field + a PANIC FLOOR (after `QUEUE_DEPTH_SANE_MAX_INTERVALS` consecutive
+  holds on one boundary — a bogus stuck-high residence — fill with a copy) makes it fail-SAFE not
+  fail-black. Reset to 0 whenever the boundary advances (any emit / FastDrain).
+- **The shallow-lag `Retire` is REINTERPRETED by a `converging_deep_backlog` LATCH** (set true in the
+  FastDrain arm, cleared at `lag_intervals == 0`): while CONVERGING a deep backlog → RETIRE (advance,
+  emit nothing — the #1145 v2.1 fast-convergence rate is untouched: a copy there advances `now` by the
+  send cost and slows convergence); in STEADY over-rate → FILL the slot with a copy of the nearest
+  good frame (holds 60). A deep reconnect backlog trips FastDrain → latches → retires the shallow tail
+  → converges fast; continuous shallow-lag jitter never trips FastDrain (`fast_drained==0`) → never
+  latches → fills every slot. `FastDrain` (deep band) is byte-unchanged except it sets the latch.
+- **#1142-safe:** a fill during a lag episode occupies a slot NO unique could fill (a missed
+  boundary), so no unique is displaced — an UNPAIRED downstream Δ0, not the paired copy+dropped-unique
+  Δ0/Δ3 churn the pre-#1145 valve caused at lag 0. `retired` now goes ~0 and `dupe_emitted` becomes a
+  LEGITIMATE nonzero on the over-rate box (attribute via the retired count going to 0). The absolute
+  `WINDOW_COPIES_GAPS_TOLERANCE` is the live-E2E re-check after deploy (data-first).
+- **Off-rig (real `poll`, #557 scratch):** the sanctioned `run_queue_sim` over-rate 59.7 → ~60.0
+  (residence still ≤ target, 0 overflow); a 24-frame deep backlog STILL converges in 8.65 s (≤12 s);
+  the at-rate 60.0 control unchanged; 73/73 module tests pass. Design chosen via a gated Fable consult
+  (hybrid: hold-Drain + latch-gated shallow-fill + kept FastDrain + panic floor).
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
