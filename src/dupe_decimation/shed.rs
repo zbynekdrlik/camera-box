@@ -254,13 +254,16 @@ pub enum ShedAction {
 /// - content-dupe, `lag == 0` (on-time/surplus): #889 -> [`ShedAction::Defer`] once; a second dupe
 ///   for the SAME boundary (`already_deferred`) -> [`ShedAction::Emit`]`{ copy: true }` (the bounded
 ///   one-deferral guard — validated dupes are isolated pairs).
-/// - content-dupe, `1 <= lag <= `[`RETIRE_MAX_LAG_INTERVALS`], AND `enough_unique_to_hold_target`:
-///   #1145 -> [`ShedAction::Retire`]. The boundary is already stale, and the source has enough
-///   distinct content that shedding this dupe won't drop the emit below 60 — so retire it (0 copies,
-///   0 dropped uniques, drains lag).
+/// - content-dupe, `1 <= lag <= `[`RETIRE_MAX_LAG_INTERVALS`] (SHALLOW-stale boundary): #1145 ->
+///   [`ShedAction::Retire`] as the DECISION. (#1167) [`crate::dupe_decimation::DecimationGate::poll`]
+///   REINTERPRETS that Retire: in steady over-rate it FILLS the slot with a copy of the nearest good
+///   frame (holds 60 — the ticket invariant, so continuous shallow-lag jitter never leaves a skipped
+///   slot = the cam1 align sawtooth), while during a deep-backlog convergence it retires (advance,
+///   emit nothing) so the grid catches up fast. The decision stays Retire so the #1145 decision tests
+///   + deep-backlog convergence rate are preserved; only the application changed.
 /// - content-dupe otherwise (NOT enough unique — genuine starvation; OR `lag > `the retire ceiling
-///   — a sustained deficit building): [`ShedAction::Emit`]`{ copy: true }` — the #1111 late-dupe
-///   valve, now a starvation floor that holds the emit grid boundary-locked at 60.
+///   but NOT the deep FastDrain band): [`ShedAction::Emit`]`{ copy: true }` — the #1111 late-dupe
+///   valve, a starvation floor that holds the emit grid boundary-locked at 60.
 ///
 /// (#1145 v2) BEFORE all of the above, a sustained-over-rate QUEUE-DEPTH drain runs — this is the
 /// arm that actually bounds the delivery-latency sawtooth the lag-based v1 could not see.
@@ -320,6 +323,12 @@ pub fn dupe_shed_action(
         return ShedAction::Defer;
     }
     if enough_unique_to_hold_target && lag_intervals <= RETIRE_MAX_LAG_INTERVALS {
+        // (#1145) shallow-stale boundary: the DECISION is Retire (drain the dupe-driven lag). (#1167)
+        // its poll APPLICATION now depends on whether the gate is CONVERGING a deep backlog: in steady
+        // over-rate it FILLS the slot with a copy (holds 60 — the ticket invariant), while during a
+        // deep-backlog convergence (a FastDrain fired recently, lag still elevated) it RETIRES (advance,
+        // emit nothing) so the grid catches up fast. Keeping the decision as Retire preserves the whole
+        // #1145 decision-test surface + the deep-backlog convergence rate; only `poll` reinterprets it.
         return ShedAction::Retire;
     }
     // (#1145 v2.1) DEEP backlog (lag > RETIRE_MAX_LAG_INTERVALS == 2x the depth target) at a

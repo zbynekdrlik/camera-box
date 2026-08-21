@@ -417,7 +417,7 @@ fn over_rate_excess_dupe_input_stays_boundary_locked_without_skips_1145() {
             emitted.push((*now_ns, *content_id));
         }
     }
-    let (_dupe_shed, _blind_shed, _dupe_emitted, retired, _drained, _fast_drained) =
+    let (_dupe_shed, _blind_shed, dupe_emitted, retired, _drained, _fast_drained) =
         gate.take_shed_counts();
     let emitted_ids: Vec<u64> = emitted.iter().map(|(_, id)| *id).collect();
 
@@ -429,30 +429,28 @@ fn over_rate_excess_dupe_input_stays_boundary_locked_without_skips_1145() {
              {total_skips} skipped interval(s) — the #889 dupe-deferral lag ratchet is back"
     );
 
-    // (2) #1145: the surplus dupes are RETIRED (not emitted as copies), so the emitted rate is
-    // the HONEST unique rate ~57.9 (all distinct). Past the warm-up the emitted stream carries
-    // ZERO content-duplicates (retirement, not the copy valve).
-    let steady_copies = emitted
-        .iter()
-        .filter(|(now_ns, _)| *now_ns >= WARMUP_NS)
-        .map(|(_, id)| *id)
-        .collect::<Vec<u64>>()
-        .windows(2)
-        .filter(|w| w[0] == w[1])
-        .count();
+    // (2) #1167 (SUPERSEDES the #1145 "retire, emit the honest 57.9" choice for STEADY over-rate):
+    // the surplus shallow-lag dupes now FILL their slots with a copy (holding the emit at 60), so
+    // `retired` -> 0 and the emitted stream carries content-copies (`dupe_emitted` -> nonzero). The
+    // #1145 concern (the Δ0/Δ3 15fps-judder) was a copy PAIRED with a DROPPED UNIQUE; here NO unique
+    // is dropped (verified in part (3) below), so a fill is an unpaired Δ0 — #1142-safe. The unique
+    // rate is unmeasurably close between a true-60 jittery source and this ~57.9 one (the #1145
+    // 2s-window limit), so the fill applies to the whole enough_unique band; the absolute copies/gaps
+    // tolerance is the live-E2E re-check (`WINDOW_COPIES_GAPS_TOLERANCE`).
+    let _ = WARMUP_NS;
     assert_eq!(
-        steady_copies, 0,
-        "no content-copy may be emitted at a 57.9-unique source above the #666 floor once the \
-             window has filled; got {steady_copies} steady-state copies (should all be retired)"
+        retired, 0,
+        "a steady (non-converging) over-rate fills the shallow-lag slots, it does not retire them; \
+             retired {retired}"
     );
     assert!(
-        retired > 0,
-        "the surplus dupes must be retired; retired {retired}"
+        dupe_emitted > 0,
+        "the shallow-lag slot-fills must show as #1111 copies; dupe_emitted {dupe_emitted}"
     );
     let emit_rate = emitted_ids.len() as f64 / seconds as f64;
     assert!(
-        (57.0..=59.0).contains(&emit_rate),
-        "emitted rate must trend to the honest ~57.9 unique fps (retired surplus dupes); got \
+        (59.0..=60.5).contains(&emit_rate),
+        "the #1167 slot-fill must hold the emit at ~60 (not the #1145 honest ~57.9 under-run); got \
              {emit_rate:.2} fps ({} emitted over {seconds}s)",
         emitted_ids.len()
     );
@@ -622,53 +620,63 @@ fn synthetic_over_rate_with_jitter(
 }
 
 #[test]
-fn over_rate_stale_dupes_retired_not_emitted_as_content_copies_1145() {
-    // (#1145) RED before the fix / GREEN after. cam1/cam2's ShadowCast drifts its capture takt
-    // to ~61.3 fps against a true-60 Hz source; realistic V4L2 dequeue timestamp jitter
-    // routinely pushes an isolated on-time deferral over the boundary hair-trigger, so the next
-    // content-dupe arrives LATE and the pre-existing late-dupe valve EMITS it as a
-    // content-duplicate (a delta-0 repeat downstream) — the exact copy that, paired with the
-    // compensating dropped-unique, presents as the strih 15fps-judder the presentation-cadence
-    // uniformity gate REDs. v2 retires every stale over-rate dupe (shed it AND advance the
-    // already-stale boundary) instead, so the emitted 60 fps stream carries NO content-copy.
-    //
-    // Summed across several seeds, and past a warm-up window (the unique-rate window fills over
-    // ~2 s before retirement can engage), the emitted stream must contain ZERO
-    // consecutive-identical content ids. RED: the current valve emits 6-11 copies per seed.
-    // GREEN: zero.
+fn over_rate_stale_dupes_fill_the_slot_holding_60_not_retired_1167() {
+    // (#1167 — SUPERSEDES the #1145 `over_rate_stale_dupes_retired_not_emitted_as_content_copies`
+    // policy for STEADY over-rate.) cam1/cam2's ShadowCast drifts its capture takt to ~61.3 fps
+    // against a true-60 source; jitter routinely pushes an isolated on-time deferral over the
+    // boundary hair-trigger, so the next content-dupe crosses a SHALLOW-stale boundary. #1145 v1
+    // RETIRED it (advance the stale boundary, emit nothing) to avoid a copy — but that SKIPS the
+    // 60fps slot, and continuous jitter makes that a continuous strih-FIFO hold = the cam1
+    // [4i/8align] sawtooth. #1167: in STEADY over-rate (never converging a deep backlog) `poll`
+    // FILLS that slot with a copy of the nearest good frame instead, holding the emit at 60. The
+    // copy is #1142-safe: it fills a slot a missed boundary left owed — no unique is displaced, so
+    // it is NOT the paired Δ0/Δ3 lag-0 churn #1145's judder was (a copy PLUS a dropped unique). So
+    // the emitted stream now carries content-copies (`retired` -> 0, `dupe_emitted` -> nonzero) AND
+    // holds a steady ~60. The absolute per-window copies/gaps tolerance is re-verified on the live
+    // E2E after deploy (`WINDOW_COPIES_GAPS_TOLERANCE`), per the standing data-first rule.
     let emit_interval_ns = 1_000_000_000u64 / 60;
-    const WARMUP_NS: u64 = 4_000_000_000; // exclude the ~2 s unique-rate-window fill + margin
-    let mut total_copies_after_warmup = 0usize;
+    let seconds = 20u64;
+    let mut total_copies = 0u64;
     let mut total_retired = 0u64;
+    let mut total_fast = 0u64;
+    let mut emit_rate_min = f64::INFINITY;
     for seed in [1u64, 7, 3, 42, 99] {
-        let captures = synthetic_over_rate_with_jitter(61.3, 0.20, seed, 20);
+        let captures = synthetic_over_rate_with_jitter(61.3, 0.20, seed, seconds as usize);
         let mut gate = DecimationGate::new();
-        let mut emitted: Vec<(u64, u64)> = Vec::new();
+        let mut emitted = 0u64;
         for (now_ns, content_id) in &captures {
             if gate.poll(*now_ns, emit_interval_ns, *content_id, false, 0, 0) {
-                emitted.push((*now_ns, *content_id));
+                emitted += 1;
             }
         }
-        let (_dupe_shed, _blind_shed, _dupe_emitted, retired, _drained, _fast_drained) =
+        let (_dupe_shed, _blind_shed, dupe_emitted, retired, _drained, fast_drained) =
             gate.take_shed_counts();
+        total_copies += dupe_emitted;
         total_retired += retired;
-        let post: Vec<u64> = emitted
-            .iter()
-            .filter(|(now_ns, _)| *now_ns >= WARMUP_NS)
-            .map(|(_, id)| *id)
-            .collect();
-        total_copies_after_warmup += post.windows(2).filter(|w| w[0] == w[1]).count();
+        total_fast += fast_drained;
+        emit_rate_min = emit_rate_min.min(emitted as f64 / seconds as f64);
     }
-    assert_eq!(
-        total_copies_after_warmup, 0,
-        "over-rate stale dupes must be retired, not emitted as content-duplicates (the copies \
-             that present as the strih 15fps-judder); got {total_copies_after_warmup} emitted \
-             content-copies across 5 seeds"
-    );
-    // The mechanism actually engaged (not merely a no-op): stale over-rate dupes were retired.
+    // The #1167 invariant: every slot filled -> a steady ~60, never the retire-driven under-run.
     assert!(
-        total_retired > 0,
-        "retirement must engage at over-rate (retired {total_retired} boundaries across 5 seeds)"
+        emit_rate_min >= 59.5,
+        "a steady over-rate box must FILL every slot and hold ~60; got a min emit rate of \
+             {emit_rate_min:.2} fps across 5 seeds"
+    );
+    // Steady over-rate (no deep backlog) NEVER converges, so it NEVER retires a shallow-lag dupe —
+    // it fills the slot with a copy instead (the mechanism actually engaged, not a no-op).
+    assert_eq!(
+        total_retired, 0,
+        "a steady (non-converging) over-rate must fill, not retire, the shallow-lag dupes; retired \
+             {total_retired} across 5 seeds"
+    );
+    assert_eq!(
+        total_fast, 0,
+        "steady over-rate with no injected backlog must never FastDrain; fast {total_fast}"
+    );
+    assert!(
+        total_copies > 0,
+        "the shallow-lag slot-fills must show as #1111 copies on the over-rate box; copies \
+             {total_copies} across 5 seeds"
     );
 }
 
@@ -2133,23 +2141,64 @@ fn over_rate_fills_every_60fps_slot_holds_60_not_skipped_1167() {
 #[test]
 fn shallow_lag_over_rate_dupe_fills_slot_with_copy_not_retired_1167() {
     // (#1167 [red] -> [green]) A content-dupe crossing a SHALLOW-stale boundary
-    // (1 <= lag <= RETIRE_MAX_LAG_INTERVALS) at a sustained over-rate with enough distinct content
-    // must FILL the slot with a copy of the nearest good frame (Emit{copy:true}), NOT be RETIRED
-    // (advance the boundary, emit nothing). The #1145 v1 retire skipped the slot; whenever jitter
-    // keeps re-injecting shallow lag (the live cam1 shows `retired`>0 EVERY 5s window) that is a
-    // CONTINUOUS strih-FIFO hold = the cam1 align sawtooth. RED before the fix: dupe_shed_action
-    // returns Retire for the whole shallow band; GREEN after: Emit{copy:true} (fill, never skip).
-    for lag in 1..=RETIRE_MAX_LAG_INTERVALS {
-        assert_eq!(
-            dupe_shed_action(true, true, false, lag, true, 0, true),
-            ShedAction::Emit { copy: true },
-            "a shallow-lag ({lag}) over-rate dupe must fill the slot with a copy, not be retired"
-        );
-    }
-    // The DEEP band (above the ceiling) is STILL FastDrain — a genuine reconnect backlog needs the
-    // slot skip to converge, and the owner carves it out. Unchanged by #1167.
+    // (1 <= lag <= RETIRE_MAX_LAG_INTERVALS) at a sustained over-rate — in STEADY state (NOT
+    // converging a deep backlog) — must FILL the slot: `poll` emits a copy of the nearest good
+    // frame and advances the boundary, NOT retire it (advance, emit nothing). The #1145 v1 retire
+    // skipped the slot; whenever jitter keeps re-injecting shallow lag (the live cam1 shows
+    // `retired`>0 EVERY 5s window, `fast_drained==0` so it never went deep) that is a CONTINUOUS
+    // strih-FIFO hold = the cam1 [4i/8align] sawtooth. The DECISION stays Retire (so #1145's
+    // decision tests + deep-backlog convergence are preserved); `poll` REINTERPRETS it as a fill in
+    // steady over-rate. RED before the fix: the Retire arm advanced + emitted nothing (poll->false,
+    // retired>0); GREEN after: poll->true, copies>0, retired=0.
+    let emit_int = 1_000_000_000u64 / 60;
+    let cap_int = (1e9 / 62.0) as u64;
+    let mut next_i = 0u64;
+    let mut gate = warm_over_rate_gate(&mut next_i); // sustained_over_rate armed, no FastDrain -> not converging
+    let capture_mono = 400u64 * cap_int;
+    let dupe_hash = 0xABCD_1234u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    // 1) a UNIQUE at its on-time boundary: sets prev_hash for the dupe below AND drives lag to 0 so
+    //    the converging latch is provably clear (residence 0 -> no Drain).
+    let b0 = gate.next_boundary_ns();
+    let _ = gate.poll(b0, emit_int, dupe_hash, true, capture_mono, capture_mono);
+    // 2) the DUPE (same hash) crossing a SHALLOW-stale boundary (lag 2): residence 0 (no Drain),
+    //    not converging (no FastDrain occurred) -> the shallow-lag Retire decision, applied as FILL.
+    let now = gate.next_boundary_ns() + emit_int * 2;
+    let cap2 = capture_mono + cap_int;
+    let emit = gate.poll(now, emit_int, dupe_hash, true, cap2, cap2);
+    let (_ds, _bl, copies, retired, drained, _fast) = gate.take_shed_counts();
+    assert!(
+        emit,
+        "a steady-over-rate shallow-lag dupe must FILL the slot (poll emits a copy), not skip it"
+    );
+    assert!(
+        copies >= 1,
+        "the fill is counted as a #1111 copy; copies={copies}"
+    );
     assert_eq!(
-        dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS + 1, true, 0, true),
+        retired, 0,
+        "a steady (non-converging) shallow-lag dupe must NOT retire (that skips the slot); retired={retired}"
+    );
+    assert_eq!(
+        drained, 0,
+        "residence 0 -> the depth-drain must not fire; drained={drained}"
+    );
+    // The DECISION for that band is STILL Retire (only the poll application changed) — and the DEEP
+    // band above the ceiling is STILL FastDrain, so #1145's deep-backlog convergence is untouched.
+    assert_eq!(
+        dupe_shed_action(true, true, false, 2, true, 0, true),
+        ShedAction::Retire,
+        "the shallow-lag DECISION stays Retire (poll reinterprets it) so #1145 is preserved"
+    );
+    assert_eq!(
+        dupe_shed_action(
+            true,
+            true,
+            false,
+            RETIRE_MAX_LAG_INTERVALS + 1,
+            true,
+            0,
+            true
+        ),
         ShedAction::FastDrain,
         "the deep-backlog band above the ceiling stays FastDrain (a skip to converge a reconnect)"
     );
