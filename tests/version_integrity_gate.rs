@@ -1836,6 +1836,13 @@ fn gate_still_refuses_absent_imag_without_the_ack_flag_1164() {
         all.contains("imag_so_bytes") && all.contains("UNKNOWN"),
         "the byte facet must still enforce UNKNOWN when not acked: {all}"
     );
+    // Independently pin the parity-drop's default-OFF behavior: without the flag, imag is STILL
+    // counted in the cross-box parity (UNREAD), so parity stays UNKNOWN -- not silently dropped.
+    assert!(
+        stdout.contains("UNREAD: imag"),
+        "without --imag-acked-offline, the parity-drop must be OFF -- imag must still be counted \
+         UNREAD in the cross-box parity: {stdout}"
+    );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
 }
