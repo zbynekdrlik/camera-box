@@ -209,6 +209,19 @@ impl Hasher for FnvHasher {
 
 // ── (#1145) v2 tuning constants ──────────────────────────────────────────────
 
+/// (#1167) The largest corrupted-slot make-up DEFICIT the gate carries. Each corrupted buffer
+/// dropped in `src/capture.rs::process_frame` (before the emit gate) removes a would-be-emitted
+/// GOOD frame from an over-rate stream, so its 60 fps slot would be absorbed by the over-rate
+/// shed machinery ([`ShedAction::Retire`] / [`ShedAction::Drain`] — advance the boundary, emit
+/// nothing) instead of filled → emit under-runs by exactly the corrupted rate (the strih FIFO
+/// hold → cam1 align sawtooth). [`DecimationGate::note_corrupted_frame`] accrues one unit of this
+/// deficit per corrupted drop; [`DecimationGate::poll`] reclaims it 1:1 by converting the NEXT
+/// slot-skipping Retire/Drain into a copy emit (the nearest good frame). Bounded to `8` (the
+/// #707/#1131 resync catch-up bound): beyond a burst this size the source is genuinely starved
+/// and the existing #1111 copy valve / `enough_unique` handoff carries it, so the make-up never
+/// forces a long tail of copies after corruption stops.
+pub const CORRUPTED_MAKEUP_MAX_DEFICIT: u64 = 8;
+
 /// (#1145) The largest boundary lag (in whole emit-boundary intervals) at which a stale
 /// over-rate content-dupe is RETIRED rather than emitted as a copy. Chosen well BELOW the #707
 /// resync trigger ([`crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS`] = 8): retirement drains
@@ -609,6 +622,14 @@ pub struct DecimationGate {
     /// hard-bounds even a mis-tuned comparator to shedding at most every other frame and kills the
     /// fade-chaining false-positive class.
     prev_was_noisy_dupe: bool,
+    /// (#1167) Pending corrupted-slot make-up deficit: how many GOOD frames a corrupted-buffer drop
+    /// (in `src/capture.rs`, before the emit gate) has removed from the stream that the gate still
+    /// owes a slot-fill for. Accrued by [`note_corrupted_frame`](Self::note_corrupted_frame),
+    /// reclaimed 1:1 in [`poll`](Self::poll) by converting the next slot-skipping
+    /// [`ShedAction::Retire`] / [`ShedAction::Drain`] into a copy emit (the nearest good frame), so
+    /// an over-rate box with corruption holds the target emit instead of under-running by the
+    /// corrupted rate. Bounded by [`CORRUPTED_MAKEUP_MAX_DEFICIT`]. `0` = nothing owed.
+    corrupted_makeup_deficit: u64,
 }
 
 impl DecimationGate {
@@ -644,6 +665,32 @@ impl DecimationGate {
     /// per-frame capture loop moves it in with no extra copy.
     pub fn note_frame_luma(&mut self, luma: Vec<u8>) {
         self.pending_luma = Some(luma);
+    }
+
+    /// (#1167) Register that ONE captured buffer was dropped for content corruption
+    /// (`V4L2_BUF_FLAG_ERROR` / a short buffer) in `src/capture.rs::process_frame` BEFORE it could
+    /// reach [`poll`](Self::poll). At an over-rate that removes a would-be-emitted GOOD frame from
+    /// the stream, so its 60 fps slot would otherwise be absorbed by the over-rate shed machinery
+    /// (a [`ShedAction::Retire`] / [`ShedAction::Drain`] that advances the boundary but emits
+    /// nothing) → the emit rate falls below target by exactly the corrupted rate (a strih genlock
+    /// FIFO hold → the cam1 align sawtooth). This accrues a bounded make-up DEFICIT
+    /// ([`CORRUPTED_MAKEUP_MAX_DEFICIT`]) that [`poll`](Self::poll) reclaims 1:1 on the next
+    /// slot-skipping shed by emitting the nearest good frame as a copy instead. Corrupted CONTENT
+    /// is never forwarded — the make-up emits a subsequent GOOD frame, never the corrupted one.
+    /// Call it (from `main.rs`) exactly once per corrupted-buffer drop, only while genlock
+    /// decimation is active. The corrupted-spanning inter-capture takt sample is also marked as a
+    /// GAP so it is excluded from the over-rate arming EMA (mirrors the #1145 v3 hiccup handling —
+    /// keeps `sustained_over_rate` armed through the drop).
+    pub fn note_corrupted_frame(&mut self) {
+        self.corrupted_makeup_deficit =
+            (self.corrupted_makeup_deficit + 1).min(CORRUPTED_MAKEUP_MAX_DEFICIT);
+    }
+
+    /// (#1167) The pending corrupted-slot make-up deficit — how many corrupted-induced slots the
+    /// gate still owes a fill for (see [`note_corrupted_frame`](Self::note_corrupted_frame)). `0`
+    /// when nothing is owed. Diagnostic/read-only, exercised by the #1167 tests.
+    pub fn corrupted_makeup_deficit(&self) -> u64 {
+        self.corrupted_makeup_deficit
     }
 
     /// (#1145) Prune the trailing unique-capture window to entries within [`UNIQUE_RATE_WINDOW_NS`]
@@ -2952,6 +2999,126 @@ mod tests {
             min_emit_fps >= 57.0,
             "the arming retunes must NOT over-shed in steady state — the emit rate must stay >= the \
              #666 floor (57 fps); got {min_emit_fps:.2} fps (a catastrophic over-shed reads far below)"
+        );
+    }
+
+    /// (#1167) Drive the REAL [`DecimationGate::poll`] with a TRUE-60 source over-captured at 62 fps
+    /// (2 dupes/s so the unique rate is exactly 60) and inject a corrupted-buffer drop at the live
+    /// ~0.8/s rate via [`DecimationGate::note_corrupted_frame`] (a corrupted buffer never reaches
+    /// `poll` — `src/capture.rs::process_frame` drops it before the callback). Residence is 0
+    /// (`now_mono == capture_mono`) to isolate the over-rate RETIRE path; the takt EMA still arms
+    /// `sustained_over_rate`. Returns (emits, corrupted, dupe_emitted).
+    ///
+    /// The invariant (#1167): while ANY captured frame is buffered, every 60 fps emit slot must be
+    /// filled with the nearest good frame — a single-slot dupe is acceptable, a skipped slot never
+    /// is. Without the make-up, each corrupted drop removes a would-be-emitted good frame and the
+    /// over-rate absorption skips its slot → emit under-runs by exactly the corrupted rate
+    /// (measured 59.13 fps == the live "~59.1"). With the make-up, the deficit is reclaimed 1:1 so
+    /// emit holds the same ~60 as the no-corruption control.
+    fn run_corrupted_over_rate_1167(dupe_period: usize, corrupt_period: usize, secs: f64) -> (u64, u64, u64) {
+        let cap_fps = 62.0f64;
+        let cap_int = (1e9 / cap_fps) as u64;
+        let emit_int = 1_000_000_000u64 / 60;
+        let n = (cap_fps * secs) as usize;
+        let mut gate = DecimationGate::new();
+        let (mut emits, mut corrupted) = (0u64, 0u64);
+        let (mut prev_id, mut next_id) = (0u64, 0u64);
+        for i in 0..n {
+            let now = i as u64 * cap_int;
+            let is_corrupt =
+                i > 0 && corrupt_period > 0 && i % corrupt_period == corrupt_period - 1;
+            if is_corrupt {
+                // Corrupted buffer: dropped before the gate (never polled), exactly as
+                // `src/capture.rs::process_frame` does — main.rs then calls note_corrupted_frame.
+                gate.note_corrupted_frame();
+                corrupted += 1;
+                continue;
+            }
+            let is_dupe = i > 0 && dupe_period > 0 && i % dupe_period == dupe_period - 1;
+            let content_id = if is_dupe {
+                prev_id
+            } else {
+                let v = next_id;
+                next_id += 1;
+                v
+            };
+            prev_id = content_id;
+            let content_hash = content_id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            // now_mono == capture_mono == now -> residence 0 (isolate the retire path); the takt
+            // EMA still reads the 62 fps over-rate and arms `sustained_over_rate`.
+            if gate.poll(now, emit_int, content_hash, true, now, now) {
+                emits += 1;
+            }
+        }
+        let (_ds, _bl, dupe_emitted, _r, _d, _fd) = gate.take_shed_counts();
+        (emits, corrupted, dupe_emitted)
+    }
+
+    #[test]
+    fn over_rate_plus_corrupted_holds_target_emit_1167() {
+        let secs = 30.0;
+        // TRUE-60 source over-captured at 62 fps: dupe every 31st -> 2 dupes/s -> unique rate 60.
+        let (control_emits, control_corrupt, _c_copies) = run_corrupted_over_rate_1167(31, 0, secs);
+        // Same source + a corrupted-buffer drop every 77th capture (~0.8/s, the live cam1 rate).
+        let (corrupt_emits, corrupted, makeup_copies) = run_corrupted_over_rate_1167(31, 77, secs);
+
+        assert_eq!(control_corrupt, 0, "control run must inject no corruption");
+        let control_fps = control_emits as f64 / secs;
+        let corrupt_fps = corrupt_emits as f64 / secs;
+
+        // (1) BASELINE: the over-rate itself holds ~60 with no corruption (the honest 60-unique
+        // rate). Passes with or without the fix — it establishes the target the corrupted run
+        // must also reach.
+        assert!(
+            (59.8..=60.05).contains(&control_fps),
+            "over-rate control must hold ~60 fps (60-unique source); got {control_fps:.3} fps"
+        );
+
+        // (2) THE FIX (#1167): the corrupted run must reclaim EVERY corrupted-induced slot, holding
+        // the same ~60 as the control. WITHOUT the make-up the over-rate absorption skips each
+        // corrupted slot and this under-runs by exactly the corrupted count (measured 59.13 fps ==
+        // the live "~59.1") — the RED this test pins. `corrupted > 0` guards a mis-modelled fixture.
+        assert!(corrupted > 0, "the corrupted run must actually inject corruption");
+        assert!(
+            control_emits.saturating_sub(corrupt_emits) <= 1,
+            "every corrupted-induced slot must be reclaimed (a single-slot dupe is acceptable, a \
+             skipped slot never is): control {control_emits} emits vs corrupted {corrupt_emits} \
+             emits (deficit {} over {corrupted} corrupted); WITHOUT the make-up the deficit == the \
+             corrupted count",
+            control_emits.saturating_sub(corrupt_emits)
+        );
+        assert!(
+            corrupt_fps >= 59.8,
+            "an over-rate box WITH corruption must still hold ~60 fps emit; got {corrupt_fps:.3} \
+             fps ({corrupt_emits} emits, {corrupted} corrupted) — the emit under-runs by the \
+             corrupted rate when the corrupted slot is not made up"
+        );
+
+        // (3) The make-up fires as copies of the nearest good frame (reusing the #1111 copy
+        // counter): a non-zero make-up count is the mechanism proof.
+        assert!(
+            makeup_copies >= corrupted.saturating_sub(1),
+            "the corrupted slots must be made up with copies of the nearest good frame; \
+             {makeup_copies} copies emitted for {corrupted} corrupted slots"
+        );
+    }
+
+    #[test]
+    fn no_corruption_is_byte_identical_1167() {
+        // The #1167 fields/logic must be INERT with no corruption: the over-rate control emits the
+        // same 60-unique rate and emits ZERO make-up copies (the #1111 valve stays at its genuine
+        // starvation semantics — 0 here).
+        let secs = 30.0;
+        let (emits, corrupted, makeup_copies) = run_corrupted_over_rate_1167(31, 0, secs);
+        assert_eq!(corrupted, 0);
+        assert_eq!(
+            makeup_copies, 0,
+            "no corruption -> no make-up copy (the #1167 path is inert without note_corrupted_frame)"
+        );
+        let fps = emits as f64 / secs;
+        assert!(
+            (59.8..=60.05).contains(&fps),
+            "no-corruption over-rate holds ~60 fps; got {fps:.3}"
         );
     }
 }
