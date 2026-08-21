@@ -4812,6 +4812,32 @@ fn build_and_print_verdict_with_stream_hashes(
                     // it (issue 1088 review finding).
                     let worst_masked_fraction =
                         camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                    // #1101 — signal-viability self-diagnosis: does the content-hash signal actually
+                    // OBSERVE the duplication the Vernier-tick decoder proves is present? Per window,
+                    // over the SAME frames, cross-check tick-copies (repeated tick = a byte-duplicate
+                    // camera frame, what `copies` counts) against the content-hash duplicates that
+                    // coincide with them. On the lossy stream recording the byte-exact hash misses
+                    // nearly every copy (2/147 measured, issue 1101), so this surfaces the surface's
+                    // own blindness instead of hiding it behind an all-zero duplicate_fraction — a
+                    // false-green guard for the LIVE flip. Pure Tier-0 fns; report-only.
+                    let mut copy_obs: Vec<camera_box::dup_cadence::CopyObservation> =
+                        Vec::with_capacity(dup_windows.len());
+                    for win_frames in &dup_windows {
+                        let win_ticks: Vec<Option<u64>> =
+                            win_frames.iter().map(|f| f.tick.map(u64::from)).collect();
+                        let win_hashes: Vec<Option<u64>> = win_frames
+                            .iter()
+                            .map(|f| frame_hashes.get(f.frame_index as usize).copied())
+                            .collect();
+                        copy_obs.push(camera_box::dup_cadence::copy_observation(
+                            &win_ticks,
+                            &win_hashes,
+                        ));
+                    }
+                    let obs_agg = camera_box::dup_cadence::aggregate_copy_observations(&copy_obs);
+                    let signal_viability = camera_box::dup_cadence::signal_viability(&obs_agg);
+                    let signal_promotable =
+                        camera_box::dup_cadence::signal_promotable(signal_viability);
                     let dup_window_json: Vec<serde_json::Value> = dcs
                         .iter()
                         .enumerate()
@@ -4837,6 +4863,12 @@ fn build_and_print_verdict_with_stream_hashes(
                         "pass": dup_gate_pass,
                         "gates_overall_pass": dup_gates_overall,
                         "frames_no_anchor": dup_no_anchor,
+                        "signal_viability": signal_viability,
+                        "signal_promotable": signal_promotable,
+                        "tick_proven_copies": obs_agg.tick_copies,
+                        "copies_observed_by_content_hash": obs_agg.copies_observed_by_content_hash,
+                        "content_hash_duplicates": obs_agg.content_hash_duplicates,
+                        "copy_observation_rate": obs_agg.copy_observation_rate,
                         "note": "#1088 duplication-masked 50->60 detector: \
                                  per-cambox-window row-sampled content-hash dup-rate \
                                  (the #794 hard layer the received= rate tap is blind \
@@ -4848,7 +4880,13 @@ fn build_and_print_verdict_with_stream_hashes(
                                  coverage/regularity vetoed → excluded, no \
                                  double-jeopardy with frozen_leg). REPORT-ONLY / \
                                  calibration-first via dup_cadence::gates_overall_pass \
-                                 (false).",
+                                 (false). #1101 signal_viability cross-checks the \
+                                 content-hash duplicates against tick_proven_copies \
+                                 (repeated Vernier tick = a byte-duplicate frame): \
+                                 blind = copies present but the hash observed <50% of \
+                                 them (a lossy recording destroys byte identity → a \
+                                 LIVE flip would be a false-green); signal_promotable \
+                                 is the precondition for that flip.",
                     });
                     println!(
 "  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
@@ -4862,6 +4900,17 @@ fn build_and_print_verdict_with_stream_hashes(
                                 dup_bound,
                                 dup_gate_pass,
                                 dup_gates_overall,
+                            );
+                    println!(
+"  #1101 DUP-CADENCE SIGNAL: viability={:?} promotable={} (tick_proven_copies={} observed_by_hash={} rate={})",
+                                signal_viability,
+                                signal_promotable,
+                                obs_agg.tick_copies,
+                                obs_agg.copies_observed_by_content_hash,
+                                obs_agg
+                                    .copy_observation_rate
+                                    .map(|r| format!("{r:.4}"))
+                                    .unwrap_or_else(|| "n/a".to_string()),
                             );
                     // Fold: a FAIL only fails the run while the seam gates overall_pass
                     // (report-only today, so this is a no-op).
