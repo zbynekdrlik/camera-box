@@ -9903,3 +9903,36 @@ No push/PR/rig touch (worktree worker).
 - WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI + deploy + the
   live uniformity>=0.95 + QR-contiguity re-measure — the acceptance is that live step, NOT off-rig).
   No PR/merge/deploy/run-card by the worker. Ticket stays OPEN (acceptance is a live measurement).
+
+## 2026-08-21 — #811 round 2: resolume into reachability watchdog (report-only) + investigation
+- Issue #811 (resolume.lan into maintenance targets) round 2, owner re-approval 2026-08-21
+  ("ROZHODNUTÉ: … pridať do dantesync-gate + reachability watchdogu"). Prior round's code
+  (src/resolume_playback.rs verdict + genlock-jitter-report --verdict-source + targets.md row +
+  ops SKILL §resolume-snv) already merged; this round wires the REACHABILITY coverage. REPO-SIDE +
+  investigation only — the live dantesync canary roll + 24h acceptance stay a supervisor step.
+- ACCESS PROBE (dev1, read-only): getent hosts resolume.lan → 10.77.9.201; ping 100% loss; TCP
+  :22/:4455/:8898/:5960 all closed; ip neigh only a STALE cached MAC 3c:7c:3f:20:22:51. Box is OFF
+  (traveling, power = owner's step) — no live ssh/dantesync-deploy possible this session.
+- FINDINGS: (a) dantesync gates (gate/version-gate/fleet-upgrade) are ARG-DRIVEN, no code roster,
+  invoked ONLY from recording-e2e.sh [0/8] — adding resolume there would fail-close every E2E run
+  when the traveling box is away (rejected). resolume's dantesync coverage is the DOCUMENTED
+  standalone maintenance path (ops SKILL §resolume-snv + rig-fleet.txt acked-offline), already
+  present → no gate-script change. (b) targets.md IS committed in this repo (git ls-files -0) and
+  already carries the resolume-snv DanteSync row — the dispatch's "targets.md not committed" note is
+  inaccurate for camera-box.
+- CHANGE (report-only reachability node): resolume is a TRAVELING box normally OFF, so paging on its
+  absence = noise. Added it as a REPORT-ONLY node in the dev1 network-reach watchdog.
+  RED 8fcb069e2 (tests/harness_network_reach_health_1001.rs net_reach_box_is_report_only cases +
+  new tests/harness_network_reach_watchdog_811.rs: report-only never pages, paging box still does).
+  GREEN 5a0617bf1 (scripts/lib/network-reach-health.sh net_reach_box_is_report_only + watchdog
+  BOXES gains resolume|10.77.9.201, new NETWORK_REACH_REPORT_ONLY_BOXES=resolume, gather skips :8899
+  for report-only, handle_box gates alert+recovery POSTs → logs [report-only] … NOT paging).
+- Tier-0 (no cargo compile #557): bash -n + shellcheck -S warning clean; pure fn matches all 4
+  membership cases; two-pass --dry-run RED→GREEN observed (pass2: WOULD alert: strih vs
+  [report-only] resolume … NOT paging); watchdog exits 0; cargo fmt --all --check clean; static
+  anchors intact (nedostupny box count 2 unchanged, no "Confirmed over"; every anchor count
+  HEAD==NEW). Docs: .claude/rules/network-reach-watchdog.md report-only section + ops SKILL
+  §resolume-snv reachability/WoL bullets.
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/
+  merge/deploy/run-card by the worker. Ticket stays OPEN (commits use fix(#811)/test(#811) paren
+  form, no auto-close) — the live dantesync canary + 24h acceptance are still the supervisor's step.

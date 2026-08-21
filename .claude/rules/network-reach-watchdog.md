@@ -54,6 +54,26 @@ box we actually paged for returns (the `alerted_<box>` latch). No OBS-WS passwor
 on dev1 like the siblings: `systemctl --user enable --now network-reach-alert-watchdog.timer` (units
 in `systemd/`). Runs entirely dev1-side; nothing is deployed to strih/stream.
 
+## resolume — a REPORT-ONLY node (a traveling box, #811)
+
+resolume-snv (RESOLUME-SNV, the CG box) is watched too, but it is a **traveling box normally
+powered off/away between events** — paging on its (normal) absence would be pure false-alarm noise.
+So it is a REPORT-ONLY node: `BOXES` default carries `resolume|10.77.9.201`, and
+`NETWORK_REACH_REPORT_ONLY_BOXES` (default `resolume`) names it. A report-only box is probed,
+classified, logged and per-box state-tracked exactly like strih/stream, but it **NEVER pages** (no
+alert, no recovery ping) — `handle_box` gates both POSTs on `net_reach_box_is_report_only` (the pure
+lib fn) and logs `[report-only] … NOT paging` instead. It is probed on **ping OR :4455 only** (the
+:8899 bundle-state probe is skipped — resolume runs no bundle-state server). Its IP is **not
+pinned** (`.201` is the current event-LAN lease and collides with `bridge` in `targets.md`) — a
+wrong IP only ever logs a report-only "unreachable", never pages; resolve it live with `getent hosts
+resolume.lan` before flipping it required.
+
+**Flip it to a paging node** (once it becomes a permanent fixture, not before): remove `resolume`
+from `NETWORK_REACH_REPORT_ONLY_BOXES` (it stays in `BOXES`) — it then pages like strih/stream with
+all confirm/throttle/recovery state already warm. resolume's dantesync clock-discipline +
+version-parity are a SEPARATE, standalone maintenance step (`.claude/skills/ops` §resolume-snv), not
+this reachability watchdog.
+
 ## Out of scope (follow-up)
 
 The 2026-08-13 comment also floats enabling Wake-on-LAN in strih/stream BIOS + Windows NIC power
