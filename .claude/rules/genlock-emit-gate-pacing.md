@@ -199,6 +199,23 @@ mis-models the ShadowCast, which stays clean at exactly 60). The downstream unif
 strih sees is the emitted source-tick sequence decimated in-order by 2 (NOT resampled by the jittery
 emit timestamps — the emit grid is wall-clock-gridded, the FIFO genlocked).
 
+**Modeling a DEEP grid-backlog convergence (a reconnect/restart/burn-toggle) — the takt-preservation
+trap (#1145 v2.1).** The signal that reaches 12 frames is the emit-GRID boundary lag (delivery
+latency == the painter-QR lag), NOT the local V4L2 residence (capped at the 4-deep buffer). To inject
+that lag in the sim you must fall the emit grid behind WHILE leaving the cam-box's monotonic capture
+TAKT continuous — because `sustained_over_rate` is gated on the takt EMA, and if you inject the lag by
+jumping the wall clock and resetting the capture index, you punch a multi-second GAP into the
+processed-capture-timestamp stream that spikes the takt EMA above the 60.3 threshold and SILENTLY
+holds `sustained_over_rate == false` for ~18 s — so the fast-drain never arms and the sim shows ZERO
+change (the exact dead-end that cost ~5 iterations here). The faithful model uses a REALTIME/MONOTONIC
+CLOCK SPLIT: `poll(now_ns = realtime, …, now_mono, capture_mono)` where a reconnect adds a one-time
+REALTIME forward offset (the grid falls behind == delivery lag) while `now_mono`/`capture_mono` stay
+continuous (the cam-box kept capturing) — so the takt stays over-rate, residence stays low, only the
+grid lag is deep. Calibrated to a realistic ~0.3–0.5% send-slack this reproduces v2's owner-measured
+~0.3 frame/s (~35 s for 12 frames) and shows the fast-drain converging in single-digit seconds. Also
+model dupes as isolated content-PAIRS (a dupe REPEATS the previous content id) or the gate's byte-hash
+`is_dupe` never fires and no dupe path is exercised at all.
+
 ## GOTCHA — the #707 resync is QUEUE-BLIND; gate it on the dequeue signal, not just a lag bound (#1131)
 
 `genlock_emit_gate`'s forward-resync (`lag > GENLOCK_MAX_CATCHUP_INTERVALS`) is BLIND to whether the
