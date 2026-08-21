@@ -1623,3 +1623,44 @@ fn imag_maxperf_state_ok_is_defined_791() {
         "imag_maxperf_state_ok must be defined in verify-imag.sh (#791): out={out:?} err={err:?}"
     );
 }
+
+#[test]
+fn imag_powerkey_protection_ok_survives_oversized_loginctl_input_1163() {
+    // SIGPIPE-under-pipefail regression (#1163): `printf '%s\n' | grep -q` misgrades a HEALTHY
+    // box as unprotected when grep -q exits at the first match before printf's write completes
+    // (pipefail turns printf's EPIPE into the pipeline rc, `|| return 1` reads it as "absent").
+    // Deterministic repro shape: the matching keys FIRST, then >64KB of distractor lines, so
+    // printf must block past the pipe buffer while grep has already matched and exited. The
+    // here-string form (no pipe) grades this fixture PASS every time. Also loops the exact
+    // 9-line CI fixture 500x — the probabilistic small-input form of the same race (measured
+    // 6/5000 false FAILs pre-fix on dev1).
+    let (code, out, err) = run_sourced(
+        r#"
+        GOOD_KEYS='HandlePowerKey=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore'
+        PAD=$(seq 1 20000 | sed 's/^/Distractor=line/')
+        BIG="$GOOD_KEYS
+$PAD"
+        GOOD_MASK='sleep.target=masked
+suspend.target=masked
+hibernate.target=masked
+hybrid-sleep.target=masked'
+        if imag_powerkey_protection_ok "$BIG" "$GOOD_MASK"; then echo BIG-PASS; else echo BIG-FAIL; fi
+        fails=0
+        for _ in $(seq 1 500); do
+          imag_powerkey_protection_ok "$GOOD_KEYS" "$GOOD_MASK" || fails=$((fails+1))
+        done
+        echo "small-fails=$fails"
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["BIG-PASS", "small-fails=0"],
+        "a healthy box must grade PASS regardless of loginctl dump size or scheduling — \
+         no SIGPIPE-under-pipefail false negative (#1163): {out:?}"
+    );
+}
