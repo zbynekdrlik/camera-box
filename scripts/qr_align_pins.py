@@ -184,7 +184,7 @@ def format_round_table(rounds_ticks, sources, tail_start=None):
                 fids.append(tk[0])
                 cells.append(str(tk[0]).rjust(w))
         spread = str(max(fids) - min(fids)) if len(fids) >= 2 else "n/a"
-        used = (" | " + ("tail" if r >= tail_start else "")) if mark else ""
+        used = (" | tail" if r >= tail_start else "") if mark else ""  # only tail rows are marked
         lines.append(f"{r:>6} | " + " | ".join(cells) + f" | {spread}" + used)
     n = len(rounds_ticks)
     lines.append("decoded per camera: " + "  ".join(f"{sh}={decoded[s]}/{n}"
@@ -632,13 +632,18 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     # the last stable rounds, if any) rather than judge a transient or an unstable window.
     if not status.done:
         _emit_fail_diagnostics(rounds_ticks, sources, tail_start)
+        # The two never-done reasons need different prose (a hardcoded "not mutually stable" lies for
+        # the stable-need-more branch, where the tail IS stable but had too few clean rounds).
+        why = (f"the last {stable_tail_rounds} rounds are not mutually stable (<= {stable_tol_ids} id)"
+               if status.reason == "unstable"
+               else f"the tail is mutually stable but never accumulated {min_valid_rounds} clean "
+                    "(fully-decoded) rounds to re-derive the pins from")
         raise AlignmentImpossible(
             f"[qr-align] the cross-camera spread did not STABILIZE within {measure_budget_s:.0f}s "
-            f"/{len(rounds_ticks)} rounds -- the last {stable_tail_rounds} rounds are not mutually "
-            f"stable (<= {stable_tol_ids} id) with enough clean rounds to judge (status "
-            f"{status.reason!r}), so no steady-state tail could be measured. A converging backlog "
-            "that never settles is a degraded / over-rate grabber (issue 1145). Per-round table "
-            "above (the last stable rounds, if any, marked 'tail').")
+            f"/{len(rounds_ticks)} rounds -- {why} (status {status.reason!r}), so no steady-state "
+            "tail could be measured. A converging backlog that never settles is a degraded / "
+            "over-rate grabber (issue 1145). Per-round table above (the last stable rounds, if "
+            "any, marked 'tail').")
 
     # From here the verdict is judged over the STABLE TAIL only.
     # ALREADY ALIGNED: confirmed on the tail -> return WITHOUT requiring robust_deltas (which would
