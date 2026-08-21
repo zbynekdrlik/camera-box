@@ -306,10 +306,16 @@ pub fn gates_overall_pass() -> bool {
 // The #1088 surface reports a per-window `duplicate_fraction`, but an all-zero distribution is
 // AMBIGUOUS: it means either "healthy rig, no pulldown" (promotable) OR "the content-hash signal
 // is blind, sees nothing" (a false-green if gated). These fns DISAMBIGUATE the two by cross-checking
-// the content-hash duplicates against the Vernier-tick copies the verdict already proves are present
-// (a repeated tick = a byte-duplicate camera frame — the same signal `copies` counts). A signal that
-// observes ~none of the tick-proven copies is structurally blind and MUST NOT be promoted to a LIVE
-// gate. (#1101 measured 2 of 147 tick-copies observed on the lossy stream tap.)
+// the content-hash duplicates against Vernier-tick copies over the SAME consecutive-frame basis: a
+// STRICT-ADJACENT tick repeat (frame `i` and `i-1` BOTH decoded and equal-ticked) is a tick-proven
+// byte-duplicate camera frame. This is a SUBSET of the canonical `copies` metric
+// (`probe::recording_segments`), which additionally bridges an undecodable gap between two equal
+// ticks (its `prev_recorded` skips `None`), so `tick_copies` here is `<=` canonical `copies`; the
+// strict definition is the right one for a consecutive-pair cross-check against the content hashes
+// (both sides on the same adjacency basis), and it is conservative (an undercount only ever yields
+// MORE `Indeterminate`, never a false `Viable`). A signal that observes ~none of the tick-proven
+// copies is structurally blind and MUST NOT be promoted to a LIVE gate. (#1101 measured 2 of 147
+// strict-adjacent tick-copies observed on the lossy stream tap.)
 
 /// Minimum tick-proven copies in a run before "zero content-hash duplicates" is CONCLUSIVE evidence
 /// the content-hash signal is blind (below it → [`SignalViability::Indeterminate`], not a false
@@ -333,7 +339,11 @@ pub struct CopyObservation {
     /// content-hash signal actually observed.
     pub copies_observed_by_content_hash: usize,
     /// Total consecutive-frame pairs with byte-identical content hashes (incl. any not aligned to a
-    /// tick-copy) — informational; the raw firing count of the content-hash signal.
+    /// tick-copy) — informational; the raw firing count of the content-hash signal. NOTE: computed
+    /// over the None-PADDED, position-aligned per-window sequence this fn receives (a hash gap is a
+    /// `None` that never forms a dup), which is NOT the same sequence as the sibling
+    /// `duplicate_fraction` (built via `window_content_hashes`, which COMPACTS out-of-range indices);
+    /// the two can differ by a hash gap. Both are report-only.
     pub content_hash_duplicates: usize,
     /// `copies_observed_by_content_hash / tick_copies` — the observation RATE. `None` when there
     /// were no tick-copies (nothing to observe → not a judgement of the signal).

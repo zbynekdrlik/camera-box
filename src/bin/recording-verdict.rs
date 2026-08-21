@@ -4781,6 +4781,14 @@ fn build_and_print_verdict_with_stream_hashes(
                     );
                     let mut dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> =
                         Vec::with_capacity(dup_windows.len());
+                    // #1101 — signal-viability cross-check, built in the SAME pass (no second
+                    // iteration over dup_windows). Each window's tick-copies (STRICT-adjacent tick
+                    // repeats — a subset of the canonical `copies`, which additionally bridges an
+                    // undecodable gap) are cross-checked against the content-hash duplicates over the
+                    // SAME consecutive-frame basis, so an all-zero duplicate_fraction can't be
+                    // mistaken for a promotable green (the issue-1088 blindness on the lossy tap).
+                    let mut copy_obs: Vec<camera_box::dup_cadence::CopyObservation> =
+                        Vec::with_capacity(dup_windows.len());
                     let mut worst_raw_fraction: Option<f64> = None;
                     let mut masked_windows: usize = 0;
                     for win_frames in &dup_windows {
@@ -4804,25 +4812,10 @@ fn build_and_print_verdict_with_stream_hashes(
                             }
                         }
                         dcs.push(dc);
-                    }
-                    // The GATE keys on the DISCRIMINATED signal (worst fraction among
-                    // windows classified `duplication_masked`), never the raw worst —
-                    // a freeze/glitch has a high raw fraction but is coverage/regularity
-                    // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
-                    // it (issue 1088 review finding).
-                    let worst_masked_fraction =
-                        camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
-                    // #1101 — signal-viability self-diagnosis: does the content-hash signal actually
-                    // OBSERVE the duplication the Vernier-tick decoder proves is present? Per window,
-                    // over the SAME frames, cross-check tick-copies (repeated tick = a byte-duplicate
-                    // camera frame, what `copies` counts) against the content-hash duplicates that
-                    // coincide with them. On the lossy stream recording the byte-exact hash misses
-                    // nearly every copy (2/147 measured, issue 1101), so this surfaces the surface's
-                    // own blindness instead of hiding it behind an all-zero duplicate_fraction — a
-                    // false-green guard for the LIVE flip. Pure Tier-0 fns; report-only.
-                    let mut copy_obs: Vec<camera_box::dup_cadence::CopyObservation> =
-                        Vec::with_capacity(dup_windows.len());
-                    for win_frames in &dup_windows {
+                        // #1101 — parallel per-frame (tick, content-hash) slices for THIS window,
+                        // aligned by construction (both from the same win_frames iteration): tick from
+                        // RecordingFrame::tick, hash by frame_index. A None tick/hash never forms a
+                        // copy/dup (a decode gap must not manufacture a false duplicate).
                         let win_ticks: Vec<Option<u64>> =
                             win_frames.iter().map(|f| f.tick.map(u64::from)).collect();
                         let win_hashes: Vec<Option<u64>> = win_frames
@@ -4834,6 +4827,18 @@ fn build_and_print_verdict_with_stream_hashes(
                             &win_hashes,
                         ));
                     }
+                    // The GATE keys on the DISCRIMINATED signal (worst fraction among
+                    // windows classified `duplication_masked`), never the raw worst —
+                    // a freeze/glitch has a high raw fraction but is coverage/regularity
+                    // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
+                    // it (issue 1088 review finding).
+                    let worst_masked_fraction =
+                        camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                    // #1101 — fold the per-window signal-viability cross-check (built in the loop
+                    // above) into the run-level verdict: does the content-hash signal actually OBSERVE
+                    // the duplication the Vernier-tick copies prove is present? On the lossy stream
+                    // recording the byte-exact hash misses nearly every copy (2/147 measured), so
+                    // `signal_promotable` reads false — a false-green guard for the LIVE flip.
                     let obs_agg = camera_box::dup_cadence::aggregate_copy_observations(&copy_obs);
                     let signal_viability = camera_box::dup_cadence::signal_viability(&obs_agg);
                     let signal_promotable =
