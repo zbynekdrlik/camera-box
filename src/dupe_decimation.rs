@@ -330,6 +330,16 @@ pub const TAKT_EMA_SHIFT: u32 = 8;
 /// USB jitter sample (≤ ~2× nominal) while still excluding any genuine multi-interval stall.
 pub const TAKT_GAP_EXCLUDE_NS: u64 = 3 * (1_000_000_000 / 60);
 
+/// (#1145 v3 review 🟡 F1) How many CONSECUTIVE over-[`TAKT_GAP_EXCLUDE_NS`] inter-capture samples
+/// distinguish a one-off delivery HICCUP (skip the lone outlier) from a GENUINE sustained rate
+/// COLLAPSE (a card dropping below ~20 fps — every interval over-bound). At/above this count the takt
+/// EMA is RESET so `sustained_over_rate` disarms (a collapsed card is NOT over-rate) and re-seeds when
+/// it recovers, instead of latching the over-rate drains on forever. `3` catches a genuine collapse
+/// in ~3 frames while a lone hiccup (exactly ONE over-bound sample) never reaches it — the B.1 fix is
+/// fully preserved. A collapsed `< 20 fps` card is itself an alarm-class failure owned by the
+/// grabber-STUCK self-heal; this just keeps the over-rate arming honest through it.
+pub const TAKT_GAP_SUSTAINED_COUNT: u32 = 3;
+
 /// (#1145 v2) The queue-residence depth (in whole emit intervals) at/above which the oldest queued
 /// frame is SHED to drain one interval of delivery latency — the target the over-rate is held to.
 /// `2`: an emitted frame then carries at most ~1 interval of queue residence (fresh), and the
@@ -525,6 +535,18 @@ pub fn dupe_shed_action(
 
 // ── (#889) per-stream gate (boundary + dupe-preference state) ────────────────
 
+/// (#1145 v3 review 🔵 F4) Drop every front entry `<= cutoff` from a trailing-timestamp window.
+/// Shared by the unique-rate AND all-captures windows so they prune in lock-step by construction.
+fn prune_before(times: &mut VecDeque<u64>, cutoff: u64) {
+    while let Some(&front) = times.front() {
+        if front <= cutoff {
+            times.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
 /// Owns the per-box decimation bookkeeping: the pacing boundary state (mirrors what
 /// `src/main.rs` tracked as a bare `next_boundary_ns` local before this ticket) PLUS the
 /// dupe-preference state (previous captured frame's content hash + whether a dupe was already
@@ -556,6 +578,11 @@ pub struct DecimationGate {
     /// [`RETIRE_MIN_TAKT_INTERVAL_NS`] means sustained over-rate — the gate that enables the
     /// queue-depth drain (a healthy 60.00 card reads above it and never drains). `0` = not yet seen.
     takt_ema_interval_ns: u64,
+    /// (#1145 v3 review 🟡 F1) Run length of CONSECUTIVE over-[`TAKT_GAP_EXCLUDE_NS`] inter-capture
+    /// samples. A one-off hiccup is exactly ONE; at [`TAKT_GAP_SUSTAINED_COUNT`] the takt EMA is reset
+    /// so a genuine sub-20 fps COLLAPSE disarms `sustained_over_rate` instead of latching it forever.
+    /// Reset to 0 by any in-bound sample.
+    consecutive_takt_gaps: u32,
     /// (#1145 v2.1) How many EXTRA boundary intervals the MOST RECENT [`poll`](Self::poll) advanced
     /// beyond the normal single-interval step — i.e. the INTENTIONAL retirement of already-stale
     /// boundaries by [`ShedAction::FastDrain`] (`1` when the +2 fast-drain fired, `0` otherwise).
@@ -627,22 +654,10 @@ impl DecimationGate {
     /// regardless of per-frame jitter or dupe clustering.
     fn prune_unique_window(&mut self, now_ns: u64) {
         let cutoff = now_ns.saturating_sub(UNIQUE_RATE_WINDOW_NS);
-        while let Some(&front) = self.unique_capture_times.front() {
-            if front <= cutoff {
-                self.unique_capture_times.pop_front();
-            } else {
-                break;
-            }
-        }
-        // (#1145 v3) prune the ALL-captures window in lock-step so the occupancy ratio is honest at
-        // every instant (same cutoff, same per-poll cadence as the unique window).
-        while let Some(&front) = self.all_capture_times.front() {
-            if front <= cutoff {
-                self.all_capture_times.pop_front();
-            } else {
-                break;
-            }
-        }
+        // (#1145 v3) prune BOTH the unique-rate AND the all-captures windows with the SAME cutoff on
+        // every poll, so the occupancy ratio is honest at every instant.
+        prune_before(&mut self.unique_capture_times, cutoff);
+        prune_before(&mut self.all_capture_times, cutoff);
     }
 
     /// (#1145) Does the trailing window prove the source carries enough DISTINCT content to hold a
@@ -715,16 +730,29 @@ impl DecimationGate {
             // huge inter-capture interval that is NOT a takt change — fold it and it poisons the
             // ~256-frame EMA, flipping `sustained_over_rate` off for ~7-12 s and disarming every
             // over-rate drain (the #1145 v3 residual). A genuine rate change shows in EVERY sample;
-            // a gap in ONE, so SKIP the outlier (never folded), but still advance
-            // `prev_capture_mono_ns` below so the NEXT interval is measured cleanly from the
-            // post-gap capture. See [`TAKT_GAP_EXCLUDE_NS`].
+            // a one-off gap in ONE, so SKIP a lone outlier (never folded), but still advance
+            // `prev_capture_mono_ns` below so the NEXT interval is measured cleanly. See
+            // [`TAKT_GAP_EXCLUDE_NS`].
             if interval <= TAKT_GAP_EXCLUDE_NS {
+                self.consecutive_takt_gaps = 0;
                 self.takt_ema_interval_ns = if self.takt_ema_interval_ns == 0 {
                     interval // seed
                 } else {
                     let e = self.takt_ema_interval_ns as i128;
                     (e + ((interval as i128 - e) >> TAKT_EMA_SHIFT)) as u64
                 };
+            } else {
+                // (#1145 v3 review 🟡 F1) over-bound sample. A HICCUP is exactly ONE such sample; a
+                // GENUINE rate COLLAPSE (a card dropping to < 20 fps — every interval over-bound) must
+                // NOT latch `sustained_over_rate` on forever (that would keep the unique-blind
+                // depth-Drain arm + the occupancy floor armed for a non-over-rate source). After
+                // [`TAKT_GAP_SUSTAINED_COUNT`] CONSECUTIVE over-bound samples it is no longer a lone
+                // hiccup — RESET the EMA so `sustained_over_rate` disarms and re-seeds cleanly when the
+                // card recovers. K >= 2 fully preserves the one-off-hiccup fix (a hiccup never reaches K).
+                self.consecutive_takt_gaps = self.consecutive_takt_gaps.saturating_add(1);
+                if self.consecutive_takt_gaps >= TAKT_GAP_SUSTAINED_COUNT {
+                    self.takt_ema_interval_ns = 0;
+                }
             }
         }
         self.prev_capture_mono_ns = capture_mono_ns;
@@ -800,20 +828,20 @@ impl DecimationGate {
         // and inflate the count in the aggressive (retire-forcing) direction. Clear the window so a
         // capture after a backward step re-latches from scratch — mirrors `genlock_emit_gate`'s own
         // backward re-latch.
-        if self
+        // (#1145 v3 review 🔵 F3) clear BOTH windows when EITHER holds a future-timestamped entry, so
+        // a backward step can never leave `unique_capture_times` populated while `all_capture_times`
+        // was cleared (which would read a >100% occupancy ratio from mixed clock epochs). Symmetric
+        // by construction.
+        let backward_step = self
             .unique_capture_times
             .back()
             .is_some_and(|&back| back > now_ns)
-        {
+            || self
+                .all_capture_times
+                .back()
+                .is_some_and(|&back| back > now_ns);
+        if backward_step {
             self.unique_capture_times.clear();
-        }
-        // (#1145 v3) the ALL-captures window (superset) re-latches on the SAME backward step so the
-        // occupancy ratio never reads stale future-timestamped entries either.
-        if self
-            .all_capture_times
-            .back()
-            .is_some_and(|&back| back > now_ns)
-        {
             self.all_capture_times.clear();
         }
 
@@ -2740,6 +2768,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn takt_ema_disarms_on_a_sustained_collapse_1145() {
+        // (#1145 v3 review 🟡 F1) the counterpart to the hiccup test: a SUSTAINED rate COLLAPSE (a
+        // card dropping to ~15 fps — EVERY interval over TAKT_GAP_EXCLUDE_NS) must DISARM
+        // `sustained_over_rate`, never latch it on forever. B.1's one-off gap-exclude alone would keep
+        // skipping every sample and never re-learn (the review-found latch); the consecutive-gap
+        // counter RESETS the EMA after TAKT_GAP_SUSTAINED_COUNT so a collapsed (non-over-rate) card
+        // stops arming the over-rate drains. RED on the pre-F1 one-sided exclude, GREEN with the counter.
+        let cap_int = (1_000_000_000.0f64 / 61.5) as u64;
+        let mut gate = DecimationGate::new();
+        let mut t = 0u64;
+        for _ in 0..800 {
+            t += cap_int;
+            gate.note_capture_takt(t);
+        }
+        assert!(
+            gate.sustained_over_rate(),
+            "a warm 61.5 fps EMA must arm sustained_over_rate"
+        );
+        // sustained ~15 fps: every interval ~66 ms, all above the 50 ms exclude bound.
+        let slow_int = 1_000_000_000u64 / 15;
+        let mut disarmed_within = None;
+        for k in 1..=8u64 {
+            t += slow_int;
+            gate.note_capture_takt(t);
+            if !gate.sustained_over_rate() {
+                disarmed_within = Some(k);
+                break;
+            }
+        }
+        assert!(
+            disarmed_within.is_some(),
+            "a sustained sub-20fps collapse must disarm sustained_over_rate (F1 consecutive-gap \
+             reset); it stayed armed for >8 collapsed frames — the one-sided gap-exclude latch"
+        );
+    }
+
     /// (#1145 v3) Drive the REAL [`DecimationGate::poll`] through a send-bound over-rate loop with
     /// CAM1-style byte-identical dupes at the over-rate cadence (a true-60 source captured faster),
     /// real monotonic clocks (wall == mono, no reconnect offset), and ONE injected dequeue GAP after
@@ -2747,7 +2812,7 @@ mod tests {
     /// the gap — the surplus that, once a hiccup disarms the cam-side drains, leaks downstream into
     /// the strih FIFO. Send-bound: an EMITted frame costs ~one interval (the NDI send), a SHED frame
     /// is cheap, so the loop cannot keep up with the over-rate and the queue rides full.
-    fn run_hiccup_copy_export(capture_fps: f64, seed: u64, gap_ns: u64) -> u64 {
+    fn run_hiccup_copy_export(capture_fps: f64, seed: u64, gap_ns: u64) -> (u64, u64) {
         let ei = 1_000_000_000u64 / 60;
         let ci = (1e9 / capture_fps) as u64;
         let send_cost = ei * 995 / 1000; // ~16.58 ms -> send-bound max emit ~60.3/s
@@ -2769,6 +2834,7 @@ mod tests {
         let (mut gap_done, mut post_start) = (false, 0u64);
         let end = warm_ns + post_ns + 4_000_000_000;
         let mut post_copies = 0u64;
+        let mut post_emits = 0u64;
         loop {
             while next_cap <= mono {
                 // inject ONE gap the first time a capture would land at/after the warm mark.
@@ -2814,18 +2880,29 @@ mod tests {
             if post_start > 0 && now >= post_start + post_ns {
                 break; // past the measurement window
             }
+            // (#1145 v3 review 🔵 F5) `queue_had_frame=true` on every poll is a harness
+            // simplification: the REAL loop would pass `false` for the FIRST post-gap frame (its
+            // dequeue genuinely blocked for the gap), letting the #131/#1131 resync clear most of the
+            // deep lag. Passing `true` keeps the gate in the deep-lag catch-up regime (the more
+            // demanding case for this test); the pinned copy-export outcome holds either way (verified
+            // via the scratch route with both variants).
             let emit = gate.poll(now, ei, h, true, now, cap);
-            // a DUPE that EMITTED is a copy-valve emission (Emit{copy:true}) — the surplus that leaks
-            // downstream when the cam-side drains are disarmed. Count it only inside the post-gap window.
-            if post_start > 0 && now >= post_start && is_dupe && emit {
-                post_copies += 1;
+            if post_start > 0 && now >= post_start {
+                // a DUPE that EMITTED is a copy-valve emission (Emit{copy:true}) — the surplus that
+                // leaks downstream when the cam-side drains are disarmed.
+                if is_dupe && emit {
+                    post_copies += 1;
+                }
+                if emit {
+                    post_emits += 1;
+                }
             }
             mono += if emit { send_cost } else { shed_cost };
             if next_cap > end && queue.is_empty() {
                 break;
             }
         }
-        post_copies
+        (post_copies, post_emits)
     }
 
     #[test]
@@ -2840,7 +2917,7 @@ mod tests {
         let gap_ns = 500_000_000u64; // a 500 ms hiccup
         let mut total_post_copies = 0u64;
         for seed in [1u64, 7, 3, 42, 99] {
-            total_post_copies += run_hiccup_copy_export(61.5, seed, gap_ns);
+            total_post_copies += run_hiccup_copy_export(61.5, seed, gap_ns).0;
         }
         assert!(
             total_post_copies <= 5,
@@ -2855,18 +2932,26 @@ mod tests {
     fn steady_over_rate_no_hiccup_never_over_sheds_1145() {
         // (#1145 v3) Anti-over-shed pin: with NO hiccup, the arming retunes (B.1 gap-excluded fold,
         // B.2 occupancy floor) must be provably INERT — a steady over-rate card is byte-identical to
-        // the pre-v3 behaviour (the drains never disarm anyway, so nothing new fires). Zero
-        // copy-valve export in steady state, so a future regression that starts spuriously shedding
-        // (or a mistaken open-loop credit shedder) is caught. `gap_ns == 0` = the same harness with
-        // no dead time injected.
-        let mut total_copies = 0u64;
+        // the pre-v3 behaviour (the drains never disarm anyway, so nothing new fires). Two directions
+        // (review 🔵 F2): ZERO copy-valve export AND a held emit rate — so a future regression that
+        // either starts spuriously shedding OR over-sheds (e.g. a mistaken open-loop credit shedder,
+        // or Drain firing every frame) is caught. `gap_ns == 0` = the same harness, no dead time.
+        let (mut total_copies, mut min_emit_fps) = (0u64, f64::MAX);
+        let post_secs = 8.0; // the harness's post-window length
         for seed in [1u64, 7, 3, 42, 99] {
-            total_copies += run_hiccup_copy_export(61.5, seed, 0);
+            let (copies, emits) = run_hiccup_copy_export(61.5, seed, 0);
+            total_copies += copies;
+            min_emit_fps = min_emit_fps.min(emits as f64 / post_secs);
         }
         assert!(
             total_copies <= 5,
             "a steady over-rate card with NO hiccup must export ~0 copy-valve dupes (the retirement \
              path absorbs the surplus at source); got {total_copies} across 5 seeds"
+        );
+        assert!(
+            min_emit_fps >= 57.0,
+            "the arming retunes must NOT over-shed in steady state — the emit rate must stay >= the \
+             #666 floor (57 fps); got {min_emit_fps:.2} fps (a catastrophic over-shed reads far below)"
         );
     }
 }
