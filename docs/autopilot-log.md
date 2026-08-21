@@ -9850,3 +9850,33 @@ No push/PR/rig touch (worktree worker).
   ndi job) and runtime-unverified (follow-up above).
 - WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/merge/
   deploy/run-card by the worker.
+
+## #789 residual B / criterion 5 — standalone obs-backup/stage-dir retention sweep (worktree-789-retention, 2026-08-21)
+- Residual B of #789: criterion 5 (retention of deploy/backup DIRECTORIES) had no landing evidence.
+  Validated still-real vs dev HEAD 8f079924a: retention exists only INLINE in deploy-genlock-fleet.sh
+  (build_windows_deploy_program step 7 / build_imag_deploy_program step 6), keeps newest RETENTION_KEEP=3
+  of `*-789` only, deletes only on `--yes`, runs only during a deploy, and NEVER touches the stage dirs
+  (`C:\stage-genlock-<sha>` grows 1/sha forever; `/tmp/genlock-stage-<sha>` lingers on imag until reboot).
+  issue 1122 recordings retention is a DIFFERENT artifact (`D:\_REC` `.mkv`), not these dirs.
+- Fix (issue 1122 pattern): pure `src/obs_backup_retention.rs` decision (keep newest-N PER KIND UNION
+  younger-than-D-days; EXPLICIT allowlist is_dated_backup `YYYY-MM-DDTHH-MM-SS-789` + is_stage_dir
+  `stage-genlock`/`genlock-stage`-`<hex>`; everything else incl. imag `previous/` PROTECTED; reuses the
+  neutral RetentionPolicy/KeepReason/SECONDS_PER_DAY from recordings_retention). Windows mirror
+  scripts/obs-backup-retention.ps1 (ASCII-only, `[0-9]` not `\d`, DRY-RUN default, -Execute=supervisor).
+  Driver + imag `--local-sweep` bash in scripts/obs-backup-retention.sh (win scp+run; imag over ssh via
+  one combined-stdin `sudo -S bash -s`). Rule .claude/rules/obs-backup-retention.md + CLAUDE.md router.
+  Nothing wired automatically; inline deploy retention untouched (this sweep is its superset).
+- RED 35f607b36 (test(#789) [red] — tests/obs_backup_retention.rs: allowlist accept/reject, per-kind
+  newest-N, younger-than-D union, strict `<` boundary, protected-never-deleted invariant, byte accounting,
+  future-mtime-kept). GREEN 6b2eb3285 (feat(#789) [green]). Review bb11d61e8 (fix(#789) [review]).
+- Tier-0 (#477/#557: no local cargo, --no-run INCLUDED): pure decision verified standalone `rustc --test`
+  RED 8/9 fail → GREEN 9/9 pass; cargo fmt --all --check clean; scripts via bash -n + shellcheck -S warning
+  + ps1 ASCII grep + real fixture dry-run/execute (foreign dirs protected) + fake-sudo imag-transport repro.
+- Review (fresh-context Opus 4.8, /review + /requesting-code-review + #414 structural): SHIP-WITH-FIXES,
+  1 🔴 + 5 🟡 fixed in bb11d61e8 (imag transport no-op, set-u BASH_SOURCE guard, sort name tie-break,
+  win `-StageParent "C:\"` arg quoting, missing PROTECT section), 2 🔵 reason-dropped (sibling-module
+  duplication is deliberate; shared KeepReason doc is landed issue-1122's, out of scope).
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/merge/
+  deploy/run-card by the worker. Ticket stays OPEN (partial residual — commits use `fix(#789)` paren
+  form, no auto-close); criterion 5 evidence now lands but #789 also awaits the residual-A rig-mode.sh
+  HARD-BLOCK reaching main.
