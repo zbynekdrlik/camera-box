@@ -175,11 +175,15 @@ fn report_only_box_probe_line_is_marked_report_only() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A REACHABLE report-only box takes no action and fires no recovery ping (it never paged).
+// A REACHABLE report-only box fires no recovery ping EVEN WITH a stale alerted latch seeded — a
+// PAGING box in that state would fire exactly one; a report-only box must not (its recovery POST is
+// gated off). Seeding the latch makes this actively prove the suppression, not pass vacuously.
 // ---------------------------------------------------------------------------------------------
 #[test]
-fn reachable_report_only_box_never_recovery_pings() {
+fn reachable_report_only_box_never_recovery_pings_even_when_latched() {
     let rig = Rig::new();
+    // Seed a stale alerted latch for resolume (as if a prior required-mode run had paged it).
+    std::fs::write(&rig.state, "alerted_resolume=1\n").unwrap();
     // resolume (127.0.0.2) answers ping → REACHABLE; reference up too.
     let p = rig.pass("127.0.0.2 127.0.0.9");
     assert!(
@@ -187,8 +191,12 @@ fn reachable_report_only_box_never_recovery_pings() {
         "resolume should classify REACHABLE when its ping answers: {p}"
     );
     assert!(
-        !p.contains("WOULD send recovery") || !p.contains("resolume"),
-        "a report-only box must never fire a recovery ping: {p}"
+        !p.contains("WOULD send recovery"),
+        "a report-only box must never fire a recovery ping, even with a stale alerted latch: {p}"
+    );
+    assert!(
+        p.contains("[report-only]") && p.contains("resolume reachable"),
+        "the report-only reachable branch must log its no-recovery note: {p}"
     );
     assert!(
         !p.contains("WOULD alert"),

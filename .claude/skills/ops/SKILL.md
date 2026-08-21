@@ -121,9 +121,10 @@ because it carried no dantesync — this brings it under the fleet clock-discipl
   Once it becomes a permanent fixture, flip it to a paging node by removing `resolume` from
   `NETWORK_REACH_REPORT_ONLY_BOXES` (it stays in `BOXES`). The watchdog ships DISABLED — enable on
   dev1 with `systemctl --user enable --now network-reach-alert-watchdog.timer`, unchanged by this.
-- **Remote wake (#811).** resolume's WoL MACs are in `scripts/wol-targets.txt` (`resolume` +
-  `resolume-alt` — both NICs); wake a powered-off box with `scripts/wake-box.sh resolume` before a
-  maintenance roll.
+- **Remote wake (#811).** resolume's WoL MACs are in `scripts/wol-targets.txt` as TWO rows —
+  `resolume` (primary NIC) + `resolume-alt` (2nd NIC, same `.201`, different MAC). `scripts/wake-box.sh
+  resolume` fires ONLY the primary row's MAC, so when the active NIC is unknown wake BOTH before a
+  maintenance roll: `scripts/wake-box.sh resolume; scripts/wake-box.sh resolume-alt`.
 
 **HARD RULE:** DanteSync OWNS the clock on cam boxes AND dev1. NEVER install/enable
 chrony / ptp4l / systemd-timesyncd / any other NTP/PTP tool, and NEVER run

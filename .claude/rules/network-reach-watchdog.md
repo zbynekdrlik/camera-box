@@ -64,13 +64,17 @@ classified, logged and per-box state-tracked exactly like strih/stream, but it *
 alert, no recovery ping) — `handle_box` gates both POSTs on `net_reach_box_is_report_only` (the pure
 lib fn) and logs `[report-only] … NOT paging` instead. It is probed on **ping OR :4455 only** (the
 :8899 bundle-state probe is skipped — resolume runs no bundle-state server). Its IP is **not
-pinned** (`.201` is the current event-LAN lease and collides with `bridge` in `targets.md`) — a
-wrong IP only ever logs a report-only "unreachable", never pages; resolve it live with `getent hosts
-resolume.lan` before flipping it required.
+pinned** (`.201` is the current event-LAN lease and collides with `bridge`, an ACTIVE box, in
+`targets.md`) — a wrong/colliding IP may log a FALSE `reachable` (e.g. `bridge` answering at `.201`
+while resolume is off) or a false unreachable, but **never pages**; always confirm box identity with
+`getent hosts resolume.lan` + its OBS profile (`.claude/rules/rig-state-inspection.md` §2) before
+flipping it required.
 
 **Flip it to a paging node** (once it becomes a permanent fixture, not before): remove `resolume`
-from `NETWORK_REACH_REPORT_ONLY_BOXES` (it stays in `BOXES`) — it then pages like strih/stream with
-all confirm/throttle/recovery state already warm. resolume's dantesync clock-discipline +
+from `NETWORK_REACH_REPORT_ONLY_BOXES` (it stays in `BOXES`) — it then pages like strih/stream, with
+its `confirm_<box>` counter already warm (only the confirm counter advances while report-only; the
+`alert_sig`/`alert_passes`/`alerted` latches are untouched until it actually pages, so the first
+confirmed pass after the flip pages with no extra 2-pass grace). resolume's dantesync clock-discipline +
 version-parity are a SEPARATE, standalone maintenance step (`.claude/skills/ops` §resolume-snv), not
 this reachability watchdog.
 

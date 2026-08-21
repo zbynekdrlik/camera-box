@@ -61,10 +61,11 @@ esac
 # The boxes to watch, as "name|ip" pairs (space-separated). strih/stream are permanent PAGING boxes;
 # resolume (#811) is a TRAVELING CG box (RESOLUME-SNV) added here as a REPORT-ONLY node (see below)
 # so it is monitored without false-paging while it is powered off/away between events. resolume.lan
-# currently resolves to 10.77.9.201 (event-LAN DHCP -- may drift, and collides with `bridge` in
-# targets.md) -- harmless for a report-only node (a wrong IP only ever LOGS a report-only
-# "unreachable", never pages); resolve it live with `getent hosts resolume.lan` before ever flipping
-# it to a paging node.
+# currently resolves to 10.77.9.201 (event-LAN DHCP -- may drift, and collides with `bridge`, an
+# ACTIVE box, in targets.md) -- harmless for a report-only node: a wrong/colliding IP may LOG a
+# FALSE reachable (e.g. bridge answering at .201 while resolume is off) or a false unreachable, but
+# NEVER pages. Always confirm box identity with `getent hosts resolume.lan` + its OBS profile
+# (rig-state-inspection.md §2) before ever flipping it to a paging node.
 BOXES="${NETWORK_REACH_BOXES:-strih|10.77.9.202 stream|10.77.9.204 resolume|10.77.9.201}"
 # Report-only boxes (space-separated NAMES): probed + classified + logged + per-box state-tracked
 # exactly like any other, but they NEVER page (no alert, no recovery ping) -- for a TRAVELING box
@@ -195,6 +196,9 @@ handle_box() {
         write_state_field "alerted_${box}" 0
       fi
     else
+      # A report-only box never latches alerted_<box>, but clear it defensively so a
+      # required->report-only flip while the box was paged can never leak a stale recovery latch.
+      write_state_field "alerted_${box}" 0
       log "[report-only] $box reachable (traveling box #811 -- no recovery ping)"
     fi
     clear_box_throttle "$box"
@@ -218,7 +222,13 @@ handle_box() {
   # and never latches the recovery flag -- its absence is the normal state, so a page would be pure
   # noise. Flip it to a paging node by removing its name from NETWORK_REACH_REPORT_ONLY_BOXES.
   if [ "$report_only" = "1" ]; then
-    log "[report-only] $box CONFIRMED unreachable ($(net_reach_alert_detail "$box" "$ping_ok" "$ws_ok" "$bundle_ok")) -- traveling box (#811), NOT paging. Verify manually via ops SKILL resolume-snv."
+    # Report-only detail names ONLY the signals actually probed (ping + :4455); :8899 is deliberately
+    # skipped for a report-only box (no bundle server), so net_reach_alert_detail's bundle field
+    # would misleadingly imply a dead server that was never checked.
+    local p_s="DOWN" w_s="DOWN"
+    [ "$ping_ok" = "1" ] && p_s="up"
+    [ "$ws_ok" = "1" ] && w_s="up"
+    log "[report-only] $box CONFIRMED unreachable (ping $p_s, OBS-WS:$OBS_WS_PORT $w_s; :$BUNDLE_PORT not probed for a report-only box) -- traveling box (#811), NOT paging. Verify manually via ops SKILL resolume-snv."
     return 0
   fi
 
