@@ -227,3 +227,36 @@ exported + unit-tested); only its USE as the opt-in guard is removed.
   `manifest_autosource_state_has_key` (the assertion forbids it fleet-wide) — the #832 self-collision
   class. Editing recording-e2e.sh MANDATES the full `cargo test` suite at integration (per the
   static-anchor GOTCHA); no test anchors on this block or the removed comment text (verified by grep).
+
+## #1164 — `--imag-acked-offline REASON`: an operator-acked absent imag must NOT UNKNOWN-refuse
+
+After the #1100 ENFORCED flip the gate had TWO facets that fail-closed on an absent imag — the
+cross-box genlock parity (empty imag SHA → `UNKNOWN` 11) AND the imag `.so` byte facet (absent
+bytes → `UNKNOWN` 11). An operator-acked, physically-absent imag (rig-fleet.txt `imag:…`, the
+issue-1013 mechanism; recording-e2e.sh sets `IMAG_OFFLINE_ACKED=1`) therefore refused the WHOLE
+E2E even though every OTHER imag site legally skips (run 32480962068: "2 box(es) UNKNOWN:
+genlock_parity imag:so_bytes"). This gate was the one imag hard-abort site the issue-1013
+inventory (`imag-offline-ack.md`) had missed.
+
+- **Flag, not ambient env (the pure-gate contract):** the gate reads NO ack env / rig-fleet.txt
+  itself — the ack decision stays at the recording-e2e.sh call site, which passes
+  `--imag-acked-offline "$IMAG_OFFLINE_ACK_REASON"`. This keeps the gate's verdict a pure function
+  of its args (it is also run standalone by operators + the subprocess tests, where an ambient
+  env-ack would silently change the verdict).
+- **When set:** the imag `.so` byte facet prints a LOUD `imag_so_bytes SKIPPED (imag acked
+  offline: REASON …)` line and counts as ok (never `unknown`, so `imag:so_bytes` never lands in
+  the roll-up), AND any `--genlock-sha` entry labelled exactly `imag` is dropped from the parity
+  args (`[ "${ge%%=*}" = "imag" ]`), so parity certifies the remaining fleet strih+stream.
+- **WITHOUT the flag the gate is byte-identical to #1100** — an absent imag is still fail-closed
+  `UNKNOWN` (both facets). Pinned by `gate_still_refuses_absent_imag_without_the_ack_flag_1164`
+  (asserts exit 11 + `imag_so_bytes UNKNOWN` + `UNREAD: imag` — the parity-drop is OFF by default).
+- **Call site (recording-e2e.sh):** guarded on `IMAG_OFFLINE_ACKED=1` — emits `imag_leg_skip_note`,
+  skips the three imag ssh gathers (SHA read + `.so` probe + manifest fetch, so no ssh to
+  `$IMAG_IP`), and branches the gate invocation (acked → `--imag-acked-offline`; else byte-for-byte
+  the pre-#1164 call). The non-acked `else` branch and the SHA-read `else` are left un-re-indented
+  (bash-legal, smallest diff — the anchor tests match substrings).
+- **Tier-0 proof (no cargo):** build clean strih+stream state fixtures (`with_obs_identity_ok` +
+  `with_sha`), run `bash scripts/version-integrity-gate.sh --win-state strih=… --win-state
+  stream=… --genlock-sha imag= --imag-acked-offline "<reason>"` → exit 0 + `GATE PASS` +
+  `imag_so_bytes SKIPPED`; drop the flag → exit 11. This is the same offline gate-subprocess path
+  the byte-facet tests use.
