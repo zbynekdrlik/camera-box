@@ -1123,11 +1123,17 @@ async fn run_capture_loop(
                     // NEVER emitted — the missing direct evidence for whether a clock step is
                     // what's behind a #666/#707-class transient emit-rate deficit. See
                     // `genlock_pacing::boundary_skip_count`'s own doc comment.
+                    // (#1145 v2.1) DEDUCT the fast-drain's INTENTIONAL extra boundary advance: a
+                    // FastDrain retires an already-stale boundary (advances +2), which
+                    // `boundary_skip_count` would otherwise report as ONE un-emitted-content SKIP —
+                    // the sick-leg / clock-step signature `leg-health-guard.sh` hard-fails on. An
+                    // intentional drain is NOT that, so it must contribute 0 to the #707 diagnostic.
                     let skipped = camera_box::genlock_pacing::boundary_skip_count(
                         prev_boundary_ns,
                         next_boundary_ns,
                         out_interval_ns,
-                    );
+                    )
+                    .saturating_sub(decimation_gate.last_poll_intentional_extra_advance());
                     if skipped > 0 {
                         // #752 — do NOT log per skip (that was the ~10/s storm). Accumulate; the
                         // 5s Streaming report below drains ONE aggregated WARN with the count.
@@ -1369,8 +1375,14 @@ async fn run_capture_loop(
                             // window (never suppressed on 0/0 — a healthy card legitimately
                             // shows 0/0, which is the self-neutralizing behavior by design, not
                             // the mechanism being off).
-                            let (dupe_shed, blind_shed, dupe_emitted, retired, drained) =
-                                decimation_gate.take_shed_counts();
+                            let (
+                                dupe_shed,
+                                blind_shed,
+                                dupe_emitted,
+                                retired,
+                                drained,
+                                fast_drained,
+                            ) = decimation_gate.take_shed_counts();
                             tracing::info!(
                                 "{}",
                                 camera_box::dupe_decimation::dupe_shed_summary(
@@ -1379,6 +1391,7 @@ async fn run_capture_loop(
                                     dupe_emitted,
                                     retired,
                                     drained,
+                                    fast_drained,
                                     5
                                 )
                             );

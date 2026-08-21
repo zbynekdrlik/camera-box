@@ -288,6 +288,21 @@ pub enum ShedAction {
     /// leap-past-and-discard-a-run is still avoided. A 60.00 card is unaffected (not over-rate →
     /// never drains → emits every buffered frame, byte-identical to v1 — constraint c).
     Drain,
+    /// (#1145 v2.1) DEEP-backlog accelerated drain: shed this content-dupe AND advance the boundary
+    /// by TWO intervals (retire an EXTRA already-stale boundary), emitting nothing — the accelerated
+    /// convergence of a deep emit-grid backlog (the delivery-latency lag the owner's painter-QR
+    /// measured at 12+ frames after a reconnect / restart / burn toggle). Fires ONLY at a sustained
+    /// over-rate when the grid lag is DEEP (`lag > `[`RETIRE_MAX_LAG_INTERVALS`], == 2x the
+    /// [`QUEUE_DEPTH_SHED_INTERVALS`] target), where v2 would emit the late dupe as a COPY (no grid
+    /// advance) — so the deep backlog drained only at the send-slack rate (~0.3 frame/s, the owner's
+    /// measured ~35 s). Distinct from [`Retire`](Self::Retire): Retire advances ONE interval (the
+    /// steady over-rate absorption, lag <= 4); FastDrain advances TWO (drain up to 2 slots per emit
+    /// interval) — the extra boundary is ALSO already stale (lag > 4 >> 2), so no new downstream gap
+    /// and no unique dropped (only the dupe is shed; the +2 is guarded in [`DecimationGate::poll`] so
+    /// it never advances the grid into the future). Only DUPES take this path, so the issue-1131
+    /// "never drop a unique while uniques exist" constraint holds and the emit rate stays >= the #666
+    /// floor.
+    FastDrain,
     /// Between boundaries (`!would_emit`): blind-shed, boundary unchanged — the pre-existing pacing
     /// decimation drop.
     BlindShed,
@@ -369,6 +384,21 @@ pub fn dupe_shed_action(
     if enough_unique_to_hold_target && lag_intervals <= RETIRE_MAX_LAG_INTERVALS {
         return ShedAction::Retire;
     }
+    // (#1145 v2.1) DEEP backlog (lag > RETIRE_MAX_LAG_INTERVALS == 2x the depth target) at a
+    // sustained over-rate with enough distinct content: this is a TRANSIENT grid backlog to drain
+    // (a reconnect / restart / burn-toggle left the emit grid behind), NOT a genuine sustained
+    // deficit. v2 emitted these late dupes as COPIES (no grid advance), so a deep backlog drained
+    // only at the send-slack rate. Retire the dupe AND advance TWO stale boundaries (FastDrain), so
+    // the delivery-latency backlog converges at ~2x the dupe rate — single-digit seconds instead of
+    // ~35 s. Gated on `sustained_over_rate` so a healthy 60.00 card (and a non-over-rate deficit)
+    // is UNAFFECTED (below), and on `enough_unique_to_hold_target` so a genuinely starved OR frozen
+    // source still emits the copy (the panic floor). Only dupes take this path — no unique dropped.
+    if sustained_over_rate
+        && enough_unique_to_hold_target
+        && lag_intervals > RETIRE_MAX_LAG_INTERVALS
+    {
+        return ShedAction::FastDrain;
+    }
     ShedAction::Emit { copy: true }
 }
 
@@ -399,6 +429,15 @@ pub struct DecimationGate {
     /// [`RETIRE_MIN_TAKT_INTERVAL_NS`] means sustained over-rate — the gate that enables the
     /// queue-depth drain (a healthy 60.00 card reads above it and never drains). `0` = not yet seen.
     takt_ema_interval_ns: u64,
+    /// (#1145 v2.1) How many EXTRA boundary intervals the MOST RECENT [`poll`](Self::poll) advanced
+    /// beyond the normal single-interval step — i.e. the INTENTIONAL retirement of already-stale
+    /// boundaries by [`ShedAction::FastDrain`] (`1` when the +2 fast-drain fired, `0` otherwise).
+    /// `main.rs` reads it via [`last_poll_intentional_extra_advance`](Self::last_poll_intentional_extra_advance)
+    /// and DEDUCTS it from the `#707` [`crate::genlock_pacing::boundary_skip_count`] diagnostic, so an
+    /// intentional fast-drain is NOT miscounted as an un-emitted-content boundary SKIP (the sick-leg
+    /// / clock-step signature `leg-health-guard.sh` hard-fails on). Reset to 0 at the start of every
+    /// poll.
+    last_poll_fast_drain_extra: u64,
 }
 
 impl DecimationGate {
@@ -411,6 +450,16 @@ impl DecimationGate {
     /// [`crate::genlock_pacing::boundary_skip_count`] diagnostic, unchanged by this ticket.
     pub fn next_boundary_ns(&self) -> u64 {
         self.next_boundary_ns
+    }
+
+    /// (#1145 v2.1) How many EXTRA boundary intervals the MOST RECENT [`poll`](Self::poll) advanced
+    /// beyond a normal single step — the INTENTIONAL stale-boundary retirement of a fast-drain (`1`
+    /// when the +2 fired, else `0`). main.rs DEDUCTS this from the `#707`
+    /// [`crate::genlock_pacing::boundary_skip_count`] before recording, so an intentional fast-drain
+    /// is never miscounted as an un-emitted-content boundary SKIP (the sick-leg / clock-step signal
+    /// `leg-health-guard.sh` hard-fails on). Read it right after `poll`, alongside `next_boundary_ns`.
+    pub fn last_poll_intentional_extra_advance(&self) -> u64 {
+        self.last_poll_fast_drain_extra
     }
 
     /// (#1145) Prune the trailing unique-capture window to entries within [`UNIQUE_RATE_WINDOW_NS`]
@@ -512,6 +561,9 @@ impl DecimationGate {
         if interval_ns == 0 {
             return true;
         }
+        // (#1145 v2.1) reset the per-poll intentional-extra-advance accounting; only the FastDrain
+        // arm sets it (see the field doc — it keeps a fast-drain out of the #707 skip diagnostic).
+        self.last_poll_fast_drain_extra = 0;
         // (#1145 v2) fold the capture takt + measure this frame's monotonic queue residence.
         self.note_capture_takt(capture_mono_ns);
         let sustained_over_rate = self.sustained_over_rate();
@@ -609,6 +661,30 @@ impl DecimationGate {
                 self.shed_log.record_drained();
                 false
             }
+            ShedAction::FastDrain => {
+                // (#1145 v2.1) deep-backlog accelerated drain: shed the dupe AND advance TWO
+                // intervals when the EXTRA boundary is also already stale (never into the future —
+                // `candidate_next` is boundary+1; the extra one is boundary+2, still <= now when the
+                // lag is deep). Retires two stale boundaries per dropped dupe -> the delivery-lag
+                // backlog converges ~2x faster; drops no EXTRA frame (only the dupe), so no unique is
+                // dropped and the emit grid never overshoots wall-clock. Falls back to a single-slot
+                // advance if the +2 would overshoot (a defensive guard; unreachable in the deep band).
+                let fast_next = if candidate_next.saturating_add(interval_ns) <= now_ns {
+                    candidate_next + interval_ns
+                } else {
+                    candidate_next
+                };
+                // (#1145 v2.1 review 🟡) record the INTENTIONAL extra boundary advance (1 when the +2
+                // fired, 0 on the fallback) so main.rs can deduct it from the #707 boundary-skip
+                // diagnostic — an intentional stale-boundary retirement must NOT read as the sick-leg
+                // / clock-step SKIP that `leg-health-guard.sh` hard-fails on.
+                self.last_poll_fast_drain_extra =
+                    (fast_next.saturating_sub(candidate_next)) / interval_ns;
+                self.next_boundary_ns = fast_next;
+                self.deferred_this_boundary = false;
+                self.shed_log.record_fast_drained();
+                false
+            }
             ShedAction::Emit { copy } => {
                 self.next_boundary_ns = candidate_next;
                 self.deferred_this_boundary = false;
@@ -625,9 +701,9 @@ impl DecimationGate {
         }
     }
 
-    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired, drained)` counters for
-    /// the periodic INFO log — see [`DupeShedLog::take`].
-    pub fn take_shed_counts(&mut self) -> (u64, u64, u64, u64, u64) {
+    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired, drained, fast_drained)`
+    /// counters for the periodic INFO log — see [`DupeShedLog::take`].
+    pub fn take_shed_counts(&mut self) -> (u64, u64, u64, u64, u64, u64) {
         self.shed_log.take()
     }
 }
@@ -646,6 +722,7 @@ pub struct DupeShedLog {
     dupe_emitted: u64,
     retired: u64,
     drained: u64,
+    fast_drained: u64,
 }
 
 impl DupeShedLog {
@@ -684,21 +761,31 @@ impl DupeShedLog {
         self.drained = self.drained.saturating_add(1);
     }
 
-    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired, drained)` counts and
-    /// RESET.
-    pub fn take(&mut self) -> (u64, u64, u64, u64, u64) {
+    /// (#1145 v2.1) Record ONE deep-backlog FAST-drain (a content-dupe shed while advancing TWO
+    /// stale boundaries, under sustained over-rate at lag > `RETIRE_MAX_LAG_INTERVALS`) — the
+    /// mechanism that converges a deep delivery-latency backlog in single-digit seconds instead of
+    /// the send-slack-limited ~35 s. See [`DecimationGate::poll`] / [`ShedAction::FastDrain`].
+    pub fn record_fast_drained(&mut self) {
+        self.fast_drained = self.fast_drained.saturating_add(1);
+    }
+
+    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired, drained, fast_drained)`
+    /// counts and RESET.
+    pub fn take(&mut self) -> (u64, u64, u64, u64, u64, u64) {
         let out = (
             self.dupe_shed,
             self.blind_shed,
             self.dupe_emitted,
             self.retired,
             self.drained,
+            self.fast_drained,
         );
         self.dupe_shed = 0;
         self.blind_shed = 0;
         self.dupe_emitted = 0;
         self.retired = 0;
         self.drained = 0;
+        self.fast_drained = 0;
         out
     }
 }
@@ -713,13 +800,15 @@ pub fn dupe_shed_summary(
     dupe_emitted: u64,
     retired: u64,
     drained: u64,
+    fast_drained: u64,
     window_secs: u64,
 ) -> String {
     format!(
         "(#889) dupe-preferring decimation: {dupe_shed} dupe-victim shed / {blind_shed} \
          blind-pacing shed / {dupe_emitted} late-dupe copies emitted (#1111 grid-lock valve) / \
          {retired} boundaries retired (#1145 over-rate absorption) / {drained} depth-drained \
-         (#1145 v2 over-rate absorption) over the last ~{window_secs}s"
+         (#1145 v2 over-rate absorption) / {fast_drained} fast-drained (#1145 v2.1 deep-backlog \
+         convergence) over the last ~{window_secs}s"
     )
 }
 
@@ -863,9 +952,13 @@ mod tests {
 
     #[test]
     fn retirement_stops_above_the_lag_ceiling_even_with_enough_unique_1145() {
-        // Past RETIRE_MAX_LAG_INTERVALS a genuine sustained deficit is building; the copy valve
-        // fires (the panic floor) rather than retiring further, so the lag can never creep toward
-        // the #707 resync bound.
+        // Past RETIRE_MAX_LAG_INTERVALS WITHOUT a sustained over-rate (the 7th arg = false), a
+        // genuine sustained deficit is building; the copy valve fires (the panic floor) rather than
+        // the ordinary +1 retirement, so a non-over-rate lag can never creep toward the #707 resync
+        // bound. (At a SUSTAINED over-rate the deep band instead FastDrains — see
+        // `over_rate_deep_grid_backlog_converges_in_single_digit_seconds_1145`; that is the #1145
+        // v2.1 accelerated convergence, gated on over-rate so this non-over-rate panic floor is
+        // unchanged.)
         assert_eq!(
             dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS, true, 0, false),
             ShedAction::Retire
@@ -882,6 +975,49 @@ mod tests {
             ),
             ShedAction::Emit { copy: true }
         );
+    }
+
+    #[test]
+    fn fast_drain_band_decision_pins_1145() {
+        // (#1145 v2.1) Positive + negative unit pins of the deep-backlog FastDrain band, so a
+        // band-boundary regression fails with a one-line decision assertion instead of an opaque
+        // convergence-time message (review 🔵). All at a SUSTAINED over-rate (7th arg = true).
+        //
+        // At/below the ceiling stays the ordinary +1 Retire (below 2x-target byte-identical):
+        assert_eq!(
+            dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS, true, 0, true),
+            ShedAction::Retire,
+            "lag == ceiling under over-rate is still the +1 Retire, not FastDrain"
+        );
+        // ABOVE the ceiling with enough distinct content -> the +2 FastDrain (the deep-backlog band):
+        assert_eq!(
+            dupe_shed_action(
+                true,
+                true,
+                false,
+                RETIRE_MAX_LAG_INTERVALS + 1,
+                true,
+                0,
+                true
+            ),
+            ShedAction::FastDrain,
+            "a deep over-rate backlog with enough unique fast-drains"
+        );
+
+        // (#1145 v2.1 review 🟡) The frozen/starved (#1052/#365) protection of the NEW band: a
+        // SUSTAINED-OVER-RATE source that does NOT carry enough distinct content (a ShadowCast
+        // capturing 61.x of a FROZEN picture — the realistic frozen case IS over-rate) must NOT
+        // fast-drain; it stays on the #1111 copy valve so the emit grid holds a frozen PICTURE on a
+        // live stream instead of blacking out. This is the exact combination the v1 review flagged
+        // 🔴 and demanded be pinned; without the `enough_unique_to_hold_target` gate this assertion
+        // fails.
+        for lag in (RETIRE_MAX_LAG_INTERVALS + 1)..=(RETIRE_MAX_LAG_INTERVALS + 4) {
+            assert_eq!(
+                dupe_shed_action(true, true, false, lag, false, 0, true),
+                ShedAction::Emit { copy: true },
+                "frozen/starved over-rate at deep lag={lag} must emit a copy, never fast-drain"
+            );
+        }
     }
 
     #[test]
@@ -916,8 +1052,12 @@ mod tests {
         log.record_retired();
         log.record_drained();
         log.record_drained();
-        assert_eq!(log.take(), (2, 1, 1, 3, 2));
-        assert_eq!(log.take(), (0, 0, 0, 0, 0), "take() must reset");
+        log.record_fast_drained();
+        log.record_fast_drained();
+        log.record_fast_drained();
+        log.record_fast_drained();
+        assert_eq!(log.take(), (2, 1, 1, 3, 2, 4));
+        assert_eq!(log.take(), (0, 0, 0, 0, 0, 0), "take() must reset");
     }
 
     #[test]
@@ -925,7 +1065,7 @@ mod tests {
         // (#1145 review 🔵) Distinctive multi-digit counts that do NOT appear as substrings of the
         // ticket tags (889/1111/1145) or each other, so each assertion actually pins its own count
         // rather than being satisfied by a digit from a ticket number.
-        let s = dupe_shed_summary(41, 23, 67, 94, 58, 36);
+        let s = dupe_shed_summary(41, 23, 67, 94, 58, 72, 36);
         assert!(s.contains("#889"));
         assert!(s.contains("#1111"), "names the late-dupe copy valve");
         assert!(
@@ -938,8 +1078,16 @@ mod tests {
         assert!(s.contains("94"), "names the retired-boundaries count");
         assert!(s.contains("58"), "names the depth-drained count (#1145 v2)");
         assert!(
+            s.contains("72"),
+            "names the fast-drained count (#1145 v2.1)"
+        );
+        assert!(
             s.contains("depth-drained"),
             "names the v2 depth-drain mechanism"
+        );
+        assert!(
+            s.contains("fast-drained"),
+            "names the v2.1 fast-drain mechanism"
         );
         assert!(s.contains("~36s"), "names the window seconds");
     }
@@ -1082,7 +1230,8 @@ mod tests {
                 emitted.push((*now_ns, *content_id));
             }
         }
-        let (_dupe_shed, _blind_shed, _dupe_emitted, retired, _drained) = gate.take_shed_counts();
+        let (_dupe_shed, _blind_shed, _dupe_emitted, retired, _drained, _fast_drained) =
+            gate.take_shed_counts();
         let emitted_ids: Vec<u64> = emitted.iter().map(|(_, id)| *id).collect();
 
         // (1) LOAD-BEARING (#1111): a 62 fps over-rate + frequent dupes must NOT trip the #707 resync
@@ -1166,7 +1315,8 @@ mod tests {
                 emit_interval_ns,
             );
         }
-        let (dupe_shed, _blind_shed, _dupe_emitted, retired, _drained) = gate.take_shed_counts();
+        let (dupe_shed, _blind_shed, _dupe_emitted, retired, _drained, _fast_drained) =
+            gate.take_shed_counts();
 
         assert_eq!(total_skips, 0, "exact-60 input never skips a boundary");
         assert_eq!(
@@ -1312,7 +1462,7 @@ mod tests {
                     emitted.push((*now_ns, *content_id));
                 }
             }
-            let (_dupe_shed, _blind_shed, _dupe_emitted, retired, _drained) =
+            let (_dupe_shed, _blind_shed, _dupe_emitted, retired, _drained, _fast_drained) =
                 gate.take_shed_counts();
             total_retired += retired;
             let post: Vec<u64> = emitted
@@ -1399,7 +1549,8 @@ mod tests {
                 emitted += 1;
             }
         }
-        let (_dupe_shed, _blind_shed, dupe_emitted, retired, _drained) = gate.take_shed_counts();
+        let (_dupe_shed, _blind_shed, dupe_emitted, retired, _drained, _fast_drained) =
+            gate.take_shed_counts();
         assert_eq!(
             retired, 0,
             "a starved (sub-60-unique) source must NEVER be retired — that would drop the emit rate \
@@ -1450,7 +1601,8 @@ mod tests {
                 frozen_emitted += 1;
             }
         }
-        let (_dupe_shed, _blind_shed, dupe_emitted, _retired, _drained) = gate.take_shed_counts();
+        let (_dupe_shed, _blind_shed, dupe_emitted, _retired, _drained, _fast_drained) =
+            gate.take_shed_counts();
         let frozen_emit_rate = frozen_emitted as f64 / 5.0;
         assert!(
             frozen_emit_rate >= 55.0,
@@ -1635,7 +1787,7 @@ mod tests {
                 break;
             }
         }
-        let (_d, _b, _e, _r, drained) = gate.take_shed_counts();
+        let (_d, _b, _e, _r, drained, _fast_drained) = gate.take_shed_counts();
         QueueSim {
             max_residence_post,
             overflow_steady,
@@ -1719,6 +1871,268 @@ mod tests {
             s.emits >= (60.0 * 30.0 * 0.98) as u64,
             "a healthy card must keep emitting ~60 fps; emits={}",
             s.emits
+        );
+    }
+
+    // ── (#1145 v2.1) fast-drain: accelerated grid-backlog convergence ─────────────────────────
+
+    /// (#1145 v2.1) Result of [`run_grid_backlog_sim`].
+    struct GridBacklogSim {
+        /// Wall (monotonic) seconds from the injected backlog until the emit-grid lag returns to
+        /// parity (<= 1 interval) — the "time to parity" the ticket's LIVE CONVERGENCE DATA names.
+        time_to_parity_s: f64,
+        emit_fps: f64,
+        /// Fraction of emitted-frame boundary steps that advanced exactly ONE interval (the uniform
+        /// 60 fps cadence) DURING and after the accelerated drain.
+        uniformity: f64,
+        /// (#1145 v2.1) How many times the FastDrain arm engaged over the run — 0 on a healthy 60.00
+        /// card and in steady over-rate with no backlog (the byte-identical proof), > 0 when a deep
+        /// grid backlog was accelerated.
+        fast_drained: u64,
+        /// (#1145 v2.1 review 🔵) The emit rate measured ONLY within the drain window
+        /// (inject..converged), so a sub-#666-floor dip confined to the ~single-digit-second drain is
+        /// not diluted by the steady-state remainder of the run (the full-run `emit_fps` was).
+        drain_window_emit_fps: f64,
+        /// (#1145 v2.1 review 🟡) Accumulated NET `#707` boundary skips after injection == the count
+        /// `main.rs` would feed `emit_skip_log` == `boundary_skip_count` MINUS the intentional
+        /// fast-drain extra advance, summed per poll. Must stay 0 (well under `leg-health-guard.sh`'s
+        /// sick-leg threshold) so an intentional fast-drain never trips the #707 clock-step alarm.
+        net_707_skips_after_inject: u64,
+    }
+
+    /// (#1145 v2.1) Drive the REAL [`DecimationGate::poll`] with a send-bound emit loop whose
+    /// MONOTONIC capture takt (residence + takt + capture instants — CONTINUOUS) is SEPARATE from
+    /// the REALTIME emit-grid clock (`now_ns`, which grids the boundary). A downstream reconnect /
+    /// burn-toggle adds a one-time REALTIME forward offset (`backlog` intervals) — the emit grid
+    /// falls behind == delivery lag — WITHOUT disrupting the cam-box's monotonic capture takt, so
+    /// `sustained_over_rate` stays TRUE and residence stays low (the faithful reconnect scenario the
+    /// two-clock split of #1145 v2 makes representable). Measures wall time until the grid lag
+    /// returns to parity, the emit rate, and the emitted-cadence uniformity. Dupes are modelled as
+    /// isolated content-PAIRS (a dupe repeats the previous content id — the same model as
+    /// [`synthetic_over_rate_with_jitter`]). wall == monotonic; realtime == monotonic + offset.
+    fn run_grid_backlog_sim(capture_fps: f64, backlog_intervals: u64, secs: f64) -> GridBacklogSim {
+        let cap_int = (1e9 / capture_fps) as u64;
+        let emit_int = 1_000_000_000u64 / 60;
+        let send_cost = emit_int * 995 / 1000; // ~0.5% slack -> unblocked max emit ~60.3/s
+        let shed_cost = 1_000_000u64; // 1 ms (hash only)
+        const MAXQ: usize = 4;
+        const WARMUP_NS: u64 = 6_000_000_000; // establish the takt EMA before injecting the backlog
+        let n = (capture_fps * secs) as u64;
+
+        let mut gate = DecimationGate::new();
+        let mut queue: VecDeque<u64> = VecDeque::new(); // capture-monotonic instants
+        let mut next_cap = 0u64;
+        let mut mono = 0u64;
+        let mut rt_off: i64 = 0;
+        let (mut injected, mut inject_mono, mut converged_at): (bool, u64, Option<u64>) =
+            (false, 0, None);
+        let mut emits = 0u64;
+        let mut emits_in_window = 0u64; // emits during inject..converged (review 🔵 #4)
+        let mut net_707_skips = 0u64; // boundary_skip_count - fast-drain extra, after inject (🟡 #1)
+        let mut last_emit_bidx: Option<u64> = None;
+        let (mut uni_ok, mut uni_tot) = (0u64, 0u64);
+        let (mut next_id, mut prev_id): (u64, u64) = (0, 0);
+
+        loop {
+            while next_cap < n {
+                let cap_ns = next_cap * cap_int;
+                if cap_ns > mono {
+                    break;
+                }
+                if queue.len() < MAXQ {
+                    queue.push_back(cap_ns);
+                }
+                next_cap += 1;
+            }
+            if queue.is_empty() {
+                if next_cap >= n {
+                    break;
+                }
+                mono = next_cap * cap_int; // wait for the next capture
+                continue;
+            }
+            if !injected && mono > WARMUP_NS {
+                rt_off = (backlog_intervals * emit_int) as i64; // reconnect: grid falls behind
+                inject_mono = mono;
+                injected = true;
+            }
+            let cap_ns = queue.pop_front().unwrap();
+            let now_mono = mono;
+            let now_rt = (mono as i64 + rt_off) as u64;
+            let over_rate = capture_fps - 60.0;
+            let dupe_period = if over_rate > 0.01 {
+                (capture_fps / over_rate).round() as u64
+            } else {
+                u64::MAX
+            };
+            let is_dupe = dupe_period != u64::MAX && next_cap % dupe_period == dupe_period - 1;
+            let cid = if is_dupe {
+                prev_id
+            } else {
+                let id = next_id;
+                next_id += 1;
+                id
+            };
+            prev_id = cid;
+            let content_hash = cid.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let prev_boundary = gate.next_boundary_ns();
+            // poll: now_ns (boundary / lag) is REALTIME; residence + takt are MONOTONIC.
+            let emit = gate.poll(now_rt, emit_int, content_hash, true, now_mono, cap_ns);
+            // (#1145 v2.1 review 🟡) exactly what main.rs feeds emit_skip_log: the raw #707 skip
+            // MINUS the fast-drain's intentional extra advance. Accumulate after injection.
+            if injected && converged_at.is_none() {
+                let raw_skip = crate::genlock_pacing::boundary_skip_count(
+                    prev_boundary,
+                    gate.next_boundary_ns(),
+                    emit_int,
+                );
+                net_707_skips +=
+                    raw_skip.saturating_sub(gate.last_poll_intentional_extra_advance());
+            }
+            let bidx = gate.next_boundary_ns() / emit_int;
+            let mut cost = shed_cost;
+            if emit {
+                cost = send_cost;
+                emits += 1;
+                if injected && converged_at.is_none() {
+                    emits_in_window += 1;
+                }
+                if let Some(prev) = last_emit_bidx {
+                    uni_tot += 1;
+                    if bidx.saturating_sub(prev) == 1 {
+                        uni_ok += 1;
+                    }
+                }
+                last_emit_bidx = Some(bidx);
+            }
+            mono += cost;
+            if injected && converged_at.is_none() {
+                let rt = (mono as i64 + rt_off) as u64;
+                let lag = crate::genlock_pacing::genlock_lag_intervals(
+                    rt,
+                    gate.next_boundary_ns(),
+                    emit_int,
+                );
+                if lag <= 1 {
+                    converged_at = Some(mono);
+                }
+            }
+            if next_cap >= n && queue.is_empty() {
+                break;
+            }
+        }
+        let (_ds, _bl, _cp, _ret, _drn, fast_drained) = gate.take_shed_counts();
+        let time_to_parity_s = converged_at.map_or(f64::NAN, |w| (w - inject_mono) as f64 / 1e9);
+        let uniformity = if uni_tot > 0 {
+            uni_ok as f64 / uni_tot as f64
+        } else {
+            1.0
+        };
+        // (#1145 v2.1 review 🔵 #4) emit rate measured ONLY across the drain window (inject..converged),
+        // undiluted by steady state. NaN if it never converged (nothing to bound).
+        let drain_window_emit_fps = match converged_at {
+            Some(w) if w > inject_mono => emits_in_window as f64 / ((w - inject_mono) as f64 / 1e9),
+            _ => f64::NAN,
+        };
+        GridBacklogSim {
+            time_to_parity_s,
+            emit_fps: emits as f64 / secs,
+            uniformity,
+            fast_drained,
+            drain_window_emit_fps,
+            net_707_skips_after_inject: net_707_skips,
+        }
+    }
+
+    #[test]
+    fn over_rate_deep_grid_backlog_converges_in_single_digit_seconds_1145() {
+        // (#1145 v2.1) RED before the fix / GREEN after. The merged v2 retires over-rate dupes only
+        // while lag <= RETIRE_MAX_LAG_INTERVALS (4); ABOVE that a late dupe EMITS a copy (no grid
+        // advance), so a deep emit-grid backlog (the owner's painter-QR delivery lag, 12+ frames
+        // after a reconnect / restart / burn toggle) catches up ONLY via the send-slack — the
+        // owner's measured ~0.3 frame/s (~35 s live). The fast-drain RETIRES those deep late dupes
+        // and advances TWO stale boundaries per retire, converging the backlog in single-digit
+        // seconds.
+        //
+        // Measured against the REAL poll (send-bound loop, realtime/monotonic split): the current v2
+        // takes ~15.3 s for a 24-frame backlog and ~7.3 s for a 12-frame one (RED — over the bounds
+        // below); the fast-drain takes ~9.3 s and ~5.3 s (GREEN).
+        let deep = run_grid_backlog_sim(61.5, 24, 120.0);
+        assert!(
+            deep.time_to_parity_s <= 12.0,
+            "a 24-frame grid backlog must converge in single-digit-ish seconds at a sustained \
+             over-rate; time_to_parity {:.2}s (v2 baseline ~15.3s)",
+            deep.time_to_parity_s
+        );
+        let twelve = run_grid_backlog_sim(61.5, 12, 120.0);
+        assert!(
+            twelve.time_to_parity_s <= 6.5,
+            "a 12-frame grid backlog must converge fast; time_to_parity {:.2}s (v2 baseline ~7.3s)",
+            twelve.time_to_parity_s
+        );
+        // The HARD zero-loss bar holds through the accelerated drain: emit stays above the #666
+        // floor (57 fps) and the emitted 60 fps cadence stays uniform (>= 0.95) — the ticket's
+        // "without cadence damage".
+        for s in [&deep, &twelve] {
+            assert!(
+                s.emit_fps >= 57.0,
+                "emit rate must stay above the #666 floor during the accelerated drain; got {:.2}",
+                s.emit_fps
+            );
+            assert!(
+                s.uniformity >= 0.95,
+                "emitted cadence uniformity must stay >= 0.95 during the accelerated drain; got {:.3}",
+                s.uniformity
+            );
+            // (#1145 v2.1 review 🔵 #4) the #666 floor holds WITHIN the drain window itself, not just
+            // averaged over the whole run (a sub-floor dip confined to the ~single-digit-second drain
+            // would otherwise be diluted ~13:1 and pass trivially).
+            assert!(
+                s.drain_window_emit_fps >= 57.0,
+                "emit rate within the drain window must stay above the #666 floor; got {:.2}",
+                s.drain_window_emit_fps
+            );
+            // (#1145 v2.1 review 🟡 #1) an intentional fast-drain must NOT register as a #707
+            // un-emitted-content boundary SKIP (the sick-leg / clock-step signal leg-health-guard.sh
+            // hard-fails on) — main.rs deducts the fast-drain's extra advance, so the NET count stays 0.
+            assert_eq!(
+                s.net_707_skips_after_inject, 0,
+                "fast-drain must not inflate the #707 boundary-skip diagnostic; net skips {}",
+                s.net_707_skips_after_inject
+            );
+            // the mechanism actually engaged (not merely a no-op faster-by-luck).
+            assert!(
+                s.fast_drained > 0,
+                "the v2.1 fast-drain must engage on a deep over-rate backlog; fast_drained={}",
+                s.fast_drained
+            );
+        }
+    }
+
+    #[test]
+    fn fast_drain_never_engages_on_a_healthy_60fps_card_1145() {
+        // Constraint: a healthy 60.00 card is NOT over-rate, so the fast-drain NEVER fires even when
+        // a reconnect leaves it with the SAME deep grid backlog — the takt gate keeps v2.1 provably
+        // inert, so behaviour is byte-identical to v2. (The 60.00 card's own slow slack-only
+        // convergence is a separate, pre-existing issue, not this ticket's over-rate scope.)
+        let s = run_grid_backlog_sim(60.0, 24, 120.0);
+        assert_eq!(
+            s.fast_drained, 0,
+            "a 60.00 card must NEVER fast-drain (takt gate off); fast_drained={}",
+            s.fast_drained
+        );
+    }
+
+    #[test]
+    fn fast_drain_is_inert_in_steady_over_rate_without_a_backlog_1145() {
+        // Constraint: below the 2x-target grid lag (steady over-rate, NO injected backlog -> lag
+        // stays ~0), the fast-drain never fires -> byte-identical to v2. `backlog_intervals = 0`
+        // exercises exactly that (an over-rate card with no reconnect event).
+        let s = run_grid_backlog_sim(61.5, 0, 120.0);
+        assert_eq!(
+            s.fast_drained, 0,
+            "steady over-rate with no deep backlog must NEVER fast-drain; fast_drained={}",
+            s.fast_drained
         );
     }
 }
