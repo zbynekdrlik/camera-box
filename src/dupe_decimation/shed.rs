@@ -168,6 +168,15 @@ pub const QUEUE_DEPTH_DUPE_SHED_INTERVALS: u64 = 1;
 /// buffer depth, so clamping here only defends against a garbage timestamp.
 pub const QUEUE_DEPTH_SANE_MAX_INTERVALS: u64 = 8;
 
+/// (#1167) The Drain-hold PANIC FLOOR: after this many CONSECUTIVE Drain polls have HELD the SAME
+/// boundary (the #1167 Drain drops the oldest to bound residence but no longer advances), fill the
+/// slot with a copy instead of holding forever — the fail-SAFE guard against a bogus stuck-high
+/// residence signal (a garbage `capture_mono`). Aliased to [`QUEUE_DEPTH_SANE_MAX_INTERVALS`]
+/// (the residence clamp), NOT reusing it directly, so a future clamp retune cannot silently move
+/// the floor. A genuine hold run caps at ~4-6 (the 4-deep V4L2 buffer + the 5-interval freshness
+/// bound), so `8` is unreachable except via a garbage timestamp.
+pub const DRAIN_HOLD_PANIC_FLOOR: u64 = QUEUE_DEPTH_SANE_MAX_INTERVALS;
+
 /// (#1145 v2) The queue-residence depth of a captured frame, in whole emit intervals: how long the
 /// frame sat between its CAPTURE instant (`capture_mono_ns`, the V4L2 buffer's `CLOCK_MONOTONIC`
 /// timestamp) and the instant the loop PROCESSED it (`now_mono_ns`, `monotonic_clock_ns()`), divided
@@ -205,16 +214,23 @@ pub enum ShedAction {
     /// next capture re-evaluates against the SAME still-pending boundary, so the dupe is replaced
     /// by a unique that still lands inside the interval (lag-neutral).
     Defer,
-    /// #1145 stale-boundary retirement: shed this content-dupe AND advance the boundary one
-    /// interval, emitting nothing. The boundary the dupe crossed is already stale (`lag >= 1` — the
-    /// downstream hold for it already happened), so retiring it costs no new downstream artifact,
-    /// sacrifices no unique, AND drains the dupe-driven lag.
+    /// #1145 stale-boundary retirement (the DECISION for a shallow-stale over-rate dupe). The
+    /// boundary the dupe crossed is already stale (`lag >= 1` — the downstream hold for it already
+    /// happened), and it sacrifices no unique + drains the dupe-driven lag. **(#1167) `poll` now
+    /// REINTERPRETS this decision by application**: while CONVERGING a deep backlog it advances the
+    /// boundary emitting nothing (as before — fast convergence); in STEADY over-rate it FILLS the
+    /// slot with a copy of the nearest good frame instead (advance + emit), so no 60fps slot is ever
+    /// skipped while a captured frame is buffered (the #1167 invariant). See [`DecimationGate::poll`].
     Retire,
-    /// #1145 v2 queue-DEPTH drain: shed the OLDEST (this) frame AND advance the boundary one
-    /// interval, emitting nothing — the sustained-over-rate absorption. Fires when the capture takt
-    /// is genuine over-rate AND this frame's queue RESIDENCE (`now_monotonic - capture_monotonic`)
-    /// has exceeded the depth target, so the delivery-latency sawtooth is drained one frame at a
-    /// time instead of accumulating into a burst. Distinct from [`Retire`](Self::Retire): Retire keys
+    /// #1145 v2 queue-DEPTH drain: shed the OLDEST (this) frame — the sustained-over-rate absorption —
+    /// to bound the queue RESIDENCE (`now_monotonic - capture_monotonic`) once it exceeds the depth
+    /// target, so the delivery-latency sawtooth is drained one frame at a time instead of a burst.
+    /// **(#1167) `poll` splits the application**: while CONVERGING a deep backlog it ADVANCES the
+    /// boundary (as #1145 v2 did — the drop contributes to convergence); in STEADY over-rate it HOLDS
+    /// the boundary (drops the oldest but does NOT advance) so the next fresher frame fills the same
+    /// slot — never a skipped slot — with a panic-floor copy-fill after
+    /// [`DRAIN_HOLD_PANIC_FLOOR`] consecutive holds. See [`DecimationGate::poll`]. Fires only at a
+    /// genuine over-rate takt. Distinct from [`Retire`](Self::Retire): Retire keys
     /// on BOUNDARY lag and only sheds a content-dupe; Drain keys on the queue RESIDENCE and, above
     /// the target, sheds the oldest frame regardless (its downstream tick has already passed, so it
     /// is a controlled single-frame drop that pre-empts the uncontrolled V4L2 overflow-drop).
@@ -254,13 +270,16 @@ pub enum ShedAction {
 /// - content-dupe, `lag == 0` (on-time/surplus): #889 -> [`ShedAction::Defer`] once; a second dupe
 ///   for the SAME boundary (`already_deferred`) -> [`ShedAction::Emit`]`{ copy: true }` (the bounded
 ///   one-deferral guard — validated dupes are isolated pairs).
-/// - content-dupe, `1 <= lag <= `[`RETIRE_MAX_LAG_INTERVALS`], AND `enough_unique_to_hold_target`:
-///   #1145 -> [`ShedAction::Retire`]. The boundary is already stale, and the source has enough
-///   distinct content that shedding this dupe won't drop the emit below 60 — so retire it (0 copies,
-///   0 dropped uniques, drains lag).
+/// - content-dupe, `1 <= lag <= `[`RETIRE_MAX_LAG_INTERVALS`] (SHALLOW-stale boundary): #1145 ->
+///   [`ShedAction::Retire`] as the DECISION. (#1167) [`crate::dupe_decimation::DecimationGate::poll`]
+///   REINTERPRETS that Retire: in steady over-rate it FILLS the slot with a copy of the nearest good
+///   frame (holds 60 — the ticket invariant, so continuous shallow-lag jitter never leaves a skipped
+///   slot = the cam1 align sawtooth), while during a deep-backlog convergence it retires (advance,
+///   emit nothing) so the grid catches up fast. The decision stays Retire so the #1145 decision tests
+///   + deep-backlog convergence rate are preserved; only the application changed.
 /// - content-dupe otherwise (NOT enough unique — genuine starvation; OR `lag > `the retire ceiling
-///   — a sustained deficit building): [`ShedAction::Emit`]`{ copy: true }` — the #1111 late-dupe
-///   valve, now a starvation floor that holds the emit grid boundary-locked at 60.
+///   but NOT the deep FastDrain band): [`ShedAction::Emit`]`{ copy: true }` — the #1111 late-dupe
+///   valve, a starvation floor that holds the emit grid boundary-locked at 60.
 ///
 /// (#1145 v2) BEFORE all of the above, a sustained-over-rate QUEUE-DEPTH drain runs — this is the
 /// arm that actually bounds the delivery-latency sawtooth the lag-based v1 could not see.
@@ -320,6 +339,12 @@ pub fn dupe_shed_action(
         return ShedAction::Defer;
     }
     if enough_unique_to_hold_target && lag_intervals <= RETIRE_MAX_LAG_INTERVALS {
+        // (#1145) shallow-stale boundary: the DECISION is Retire (drain the dupe-driven lag). (#1167)
+        // its poll APPLICATION now depends on whether the gate is CONVERGING a deep backlog: in steady
+        // over-rate it FILLS the slot with a copy (holds 60 — the ticket invariant), while during a
+        // deep-backlog convergence (a FastDrain fired recently, lag still elevated) it RETIRES (advance,
+        // emit nothing) so the grid catches up fast. Keeping the decision as Retire preserves the whole
+        // #1145 decision-test surface + the deep-backlog convergence rate; only `poll` reinterprets it.
         return ShedAction::Retire;
     }
     // (#1145 v2.1) DEEP backlog (lag > RETIRE_MAX_LAG_INTERVALS == 2x the depth target) at a

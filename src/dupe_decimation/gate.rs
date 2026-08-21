@@ -91,6 +91,27 @@ pub struct DecimationGate {
     /// the #1145 v3 delivery-hiccup handling so a corrupted drop cannot flip `sustained_over_rate`
     /// off. Consumed (cleared) on the next takt fold.
     pending_takt_gap: bool,
+    /// (#1167) How many CONSECUTIVE [`ShedAction::Drain`] polls have HELD the current boundary
+    /// (dropped the oldest to bound residence, emitted nothing) without it advancing. The #1167 Drain
+    /// no longer skips its slot — it holds the boundary so the next fresher frame fills it — but that
+    /// introduces one theoretical loop: a bogus stuck-high residence signal (a garbage `capture_mono`
+    /// clamped at [`QUEUE_DEPTH_SANE_MAX_INTERVALS`]) could hold the SAME boundary forever, collapsing
+    /// the emit to ~0 (fail-black). The PANIC FLOOR: after [`QUEUE_DEPTH_SANE_MAX_INTERVALS`]
+    /// consecutive holds (deeper than any real 4-buffer V4L2 queue), fill the boundary with a copy
+    /// instead — the hold-side analogue of the #1111 double-dupe guard, fail-SAFE not fail-black.
+    /// Reset to 0 whenever the boundary ADVANCES (any emit / fast-drain), so a genuine over-rate that
+    /// alternates drop-and-fill never approaches the floor.
+    consecutive_drain_holds: u64,
+    /// (#1167) Latch: is the gate CONVERGING a deep emit-grid backlog (a reconnect / restart /
+    /// burn-toggle left the grid many intervals behind)? Set true when [`ShedAction::FastDrain`] fires
+    /// (`lag > RETIRE_MAX_LAG_INTERVALS`); cleared once the grid is caught up (`lag == 0`). It selects
+    /// how [`poll`](Self::poll) applies a shallow-lag [`ShedAction::Retire`]: while CONVERGING, RETIRE
+    /// (advance the stale boundary, emit nothing) so the deep backlog catches up fast (the #1145 v2.1
+    /// rate); in STEADY over-rate (never went deep) FILL the slot with a copy (hold 60 — the #1167
+    /// invariant). A brief spike past the ceiling latches converging only for its own short recovery
+    /// tail (an accepted rate dip); continuous shallow-lag jitter (the live cam1, `fast_drained == 0`)
+    /// never latches it, so every slot is filled.
+    converging_deep_backlog: bool,
 }
 
 impl DecimationGate {
@@ -298,6 +319,21 @@ impl DecimationGate {
         self.takt_ema_interval_ns != 0 && self.takt_ema_interval_ns < RETIRE_MIN_TAKT_INTERVAL_NS
     }
 
+    /// (#1167) FILL the current 60fps slot: advance the boundary one interval AND emit the current
+    /// GOOD frame as a #1111 copy (the nearest good frame). The shared tail of the three slot-fill
+    /// sites — the corrupted make-up reclaim, the steady shallow-lag Retire-fill, and the Drain-hold
+    /// panic floor — so they stay lock-step. Resets the deferral + the Drain-hold streak (the boundary
+    /// advanced). Returns `true` (this poll emits). The [`ShedAction::Emit`] arm is deliberately NOT a
+    /// caller: it advances unconditionally but records a copy only for `copy: true`, so it keeps its
+    /// own inline body.
+    fn fill_slot(&mut self, candidate_next: u64) -> bool {
+        self.next_boundary_ns = candidate_next;
+        self.deferred_this_boundary = false;
+        self.consecutive_drain_holds = 0;
+        self.shed_log.record_dupe_emitted();
+        true
+    }
+
     /// Feed ONE captured frame (`now_ns` wall-clock capture instant, `content_hash` from
     /// [`dupe_content_hash`], `queue_had_frame` from
     /// [`crate::capture_stall::frame_from_nonempty_queue`] — was this frame already buffered in the
@@ -353,6 +389,15 @@ impl DecimationGate {
             self.next_boundary_ns,
             interval_ns,
         );
+        // (#1167) The deep-backlog convergence latch clears once the grid is caught up (`lag == 0`) OR
+        // the source is no longer over-rate. Set by the FastDrain arm below (which itself requires
+        // `sustained_over_rate`), it must not persist if over-rate DISARMS (a takt-hiccup EMA reset, or
+        // the card settling at ~60.0) while lag plateaus at 1..4 — otherwise lag never reaches 0
+        // (boundary-advance rate == wall rate) and the latch would strand every shallow-lag dupe on the
+        // RETIRE (no-emit) path forever, re-arming the very deficit this fix removes. (review 🟡)
+        if lag_intervals == 0 || !sustained_over_rate {
+            self.converging_deep_backlog = false;
+        }
 
         // (#1145 review 🔵) A BACKWARD DanteSync clock step (#131) leaves the window's pre-step
         // timestamps "in the future" (`> now_ns`), which would block pruning for the step's duration
@@ -446,10 +491,7 @@ impl DecimationGate {
         // line to attribute it. Advances the boundary one interval, exactly as Retire/Drain/Emit do.
         if corrupted_makeup_reclaims(action, self.corrupted_makeup_deficit) {
             self.corrupted_makeup_deficit -= 1;
-            self.next_boundary_ns = candidate_next;
-            self.deferred_this_boundary = false;
-            self.shed_log.record_dupe_emitted();
-            return true;
+            return self.fill_slot(candidate_next); // advance + emit the nearest good frame as a copy
         }
         match action {
             ShedAction::BlindShed => {
@@ -467,22 +509,61 @@ impl DecimationGate {
                 false
             }
             ShedAction::Retire => {
-                // (#1145) stale-boundary retirement: shed the dupe AND advance the already-stale
-                // boundary one interval, emitting nothing. No copy, no unique sacrificed; drains the
-                // dupe-driven lag so it never reaches the #707 resync.
-                self.next_boundary_ns = candidate_next;
-                self.deferred_this_boundary = false;
-                self.shed_log.record_retired();
-                false
+                // (#1145 v1 decision) shallow-stale over-rate dupe. (#1167) its APPLICATION splits on
+                // whether the gate is CONVERGING a deep backlog:
+                if self.converging_deep_backlog {
+                    // Deep-backlog convergence tail (a FastDrain fired, grid still behind): RETIRE —
+                    // advance the already-stale boundary, emit nothing — so the grid catches up FAST
+                    // (the #1145 v2.1 convergence rate; a copy here would advance `now` by the send
+                    // cost and slow convergence). A brief, accepted rate dip during a rare reconnect.
+                    self.deferred_this_boundary = false;
+                    self.consecutive_drain_holds = 0; // the boundary advances -> hold streak broken
+                    self.next_boundary_ns = candidate_next;
+                    self.shed_log.record_retired();
+                    false
+                } else {
+                    // Steady over-rate (never went deep): FILL the slot with a copy of this good frame
+                    // (the nearest good frame) and advance the boundary — the #1167 invariant: while a
+                    // captured frame is buffered, every 60fps slot is filled, never skipped. Holds the
+                    // emit at 60 through continuous shallow-lag jitter (the cam1 [4i/8align] sawtooth
+                    // fix). #1142-safe: this copy fills a slot a missed boundary left owed (no unique is
+                    // displaced — the shed dupe was surplus), relocating an otherwise-inevitable strih
+                    // FIFO Δ0 upstream instead of the paired Δ0/Δ3 lag-0 churn #1145 removed. Counted as
+                    // a #1111 copy (`record_dupe_emitted`); on the over-rate box these are now a
+                    // legitimate nonzero (cross-reference the retired count, which goes ~0).
+                    self.fill_slot(candidate_next)
+                }
             }
             ShedAction::Drain => {
-                // (#1145 v2) queue-depth drain: shed the OLDEST (this) frame AND advance the
-                // boundary one interval, emitting nothing — the sustained-over-rate absorption. The
-                // next-oldest buffered frame re-evaluates against the advanced boundary, so the
-                // over-rate is drained one frame per over-rate frame (continuous), holding the queue
-                // residence at the target instead of accumulating into a V4L2-overflow burst.
-                self.next_boundary_ns = candidate_next;
+                // (#1145 v2 + #1167) queue-depth drain: shed the OLDEST (this) frame to bound the
+                // residence — the sustained-over-rate absorption that keeps the delivery-latency
+                // sawtooth flat and pre-empts the V4L2-overflow burst. Application splits on whether a
+                // deep backlog is CONVERGING (symmetric with the shallow-lag Retire arm):
                 self.deferred_this_boundary = false;
+                if self.converging_deep_backlog {
+                    // Converging a deep backlog: ADVANCE the boundary exactly as #1145 v2 did, so this
+                    // drop CONTRIBUTES to the convergence — a hold here would ADD a slot to converge,
+                    // eroding the v2.1 deep-backlog rate.
+                    self.consecutive_drain_holds = 0;
+                    self.next_boundary_ns = candidate_next;
+                    self.shed_log.record_drained();
+                    return false;
+                }
+                // Steady over-rate: #1167 HOLDS the boundary (do NOT advance) so the NEXT fresher frame
+                // fills the same 60fps slot — dropping the oldest still bounds residence, but no slot is
+                // ever skipped while a captured frame is buffered (the ticket invariant; the emitted
+                // filler has residence below the threshold, so latency stays bounded).
+                self.consecutive_drain_holds = self.consecutive_drain_holds.saturating_add(1);
+                if self.consecutive_drain_holds >= DRAIN_HOLD_PANIC_FLOOR {
+                    // PANIC FLOOR (fail-SAFE, not fail-black): a bogus stuck-high residence (garbage
+                    // `capture_mono`, clamped at QUEUE_DEPTH_SANE_MAX_INTERVALS) would hold the SAME
+                    // boundary forever -> fill the slot with a copy instead. `fill_slot` EMITS (not a
+                    // shed), so it does NOT `record_drained` — that would over-count `drained` AND
+                    // mislabel the emitted fresh frame, muddying the very diagnostic the floor exists for.
+                    return self.fill_slot(candidate_next);
+                }
+                // HOLD the boundary (do NOT advance) so the next fresher frame fills this slot; the
+                // hold IS a shed (dropped the oldest, emitted nothing).
                 self.shed_log.record_drained();
                 false
             }
@@ -507,12 +588,17 @@ impl DecimationGate {
                     (fast_next.saturating_sub(candidate_next)) / interval_ns;
                 self.next_boundary_ns = fast_next;
                 self.deferred_this_boundary = false;
+                self.consecutive_drain_holds = 0; // (#1167) the grid advanced -> hold streak broken
+                                                  // (#1167) a deep backlog is being converged -> latch it, so the shallow-lag Retire arm
+                                                  // keeps RETIRING (converge fast) instead of filling with copies until lag returns to 0.
+                self.converging_deep_backlog = true;
                 self.shed_log.record_fast_drained();
                 false
             }
             ShedAction::Emit { copy } => {
                 self.next_boundary_ns = candidate_next;
                 self.deferred_this_boundary = false;
+                self.consecutive_drain_holds = 0; // (#1167) an emit fills + advances -> hold streak broken
                 if copy {
                     // (#1111) The late-dupe valve fired: a content-dupe was EMITTED (a copy). Under
                     // v2 this now means genuine starvation (the trailing unique rate cannot hold 60
@@ -576,16 +662,21 @@ impl DupeShedLog {
         self.dupe_emitted = self.dupe_emitted.saturating_add(1);
     }
 
-    /// (#1145) Record ONE over-rate content-dupe that was RETIRED (shed while advancing the
-    /// already-stale boundary) — the mechanism that absorbs the over-rate takt without emitting a
-    /// copy. See [`DecimationGate::poll`].
+    /// (#1145) Record ONE over-rate content-dupe RETIRED (shed while advancing the already-stale
+    /// boundary, emitting nothing). (#1167) On the over-rate box this now goes ~0 in STEADY state —
+    /// `poll` only retires while CONVERGING a deep backlog; a steady shallow-lag dupe FILLS the slot
+    /// (counted as a copy in [`record_dupe_emitted`](Self::record_dupe_emitted)) instead. See
+    /// [`DecimationGate::poll`].
     pub fn record_retired(&mut self) {
         self.retired = self.retired.saturating_add(1);
     }
 
-    /// (#1145 v2) Record ONE frame SHED by the queue-depth drain (shed the oldest while advancing the
-    /// boundary, under sustained over-rate) — the mechanism that absorbs the over-rate takt
-    /// CONTINUOUSLY, keeping the delivery-latency sawtooth flat. See [`DecimationGate::poll`].
+    /// (#1145 v2 + #1167) Record ONE frame SHED by the queue-depth drain (dropped the oldest to bound
+    /// residence). #1145 v2 advanced the boundary on the shed; (#1167) in STEADY over-rate it now
+    /// HOLDS the boundary (the next fresher frame fills the slot) — still a shed, still counted here —
+    /// and advances only while CONVERGING a deep backlog. NOT counted on the panic-floor copy-fill
+    /// (that EMITS, so it lands in [`record_dupe_emitted`](Self::record_dupe_emitted), never here).
+    /// See [`DecimationGate::poll`].
     pub fn record_drained(&mut self) {
         self.drained = self.drained.saturating_add(1);
     }
