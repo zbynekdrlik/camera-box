@@ -587,7 +587,7 @@ pub fn relock_acquire_should_hold(
     // the C mirror (`genlock_relock_acquire_should_hold`) is byte-identical — the parity gate runs
     // both. `reserve_ns` is bounded by the ms latency clamp, so `reserve_ns + interval_ns` cannot
     // overflow at any real value.
-    let cap = (reserve_ns + interval_ns - 1) / interval_ns + ACQUIRE_BRACKET_FAILOPEN_TICKS;
+    let cap = reserve_ns.div_ceil(interval_ns) + ACQUIRE_BRACKET_FAILOPEN_TICKS;
     ticks_held < cap
 }
 
@@ -3195,7 +3195,7 @@ mod tests {
     fn fail_open_cap_forces_acquire_after_the_bounded_hold_1161() {
         let reserve = 53u64 * 1_000_000;
         let young = 20u64 * 1_000_000; // never reaches the reserve on its own in this test
-        let cap = (reserve + I30 - 1) / I30 + ACQUIRE_BRACKET_FAILOPEN_TICKS; // = 5
+        let cap = reserve.div_ceil(I30) + ACQUIRE_BRACKET_FAILOPEN_TICKS; // = 5
         assert_eq!(
             cap, 5,
             "#1161: sanity — the cap derivation is ceil(53/33.3)+3 = 5"
@@ -3241,16 +3241,14 @@ mod tests {
     #[test]
     fn bracketing_gate_holds_from_shallow_then_acquires_within_the_cap_1161() {
         let reserve = 90u64 * 1_000_000;
-        let cap = (reserve + I30 - 1) / I30 + ACQUIRE_BRACKET_FAILOPEN_TICKS;
-        let mut ticks_held = 0u64;
+        let cap = reserve.div_ceil(I30) + ACQUIRE_BRACKET_FAILOPEN_TICKS;
         let mut oldest_age = 4u64 * 1_000_000; // shallow, just re-acquired at the old pin depth
         let mut acquired_at: Option<u64> = None;
-        for tick in 0..40u64 {
-            if !relock_acquire_should_hold(oldest_age, reserve, I30, ticks_held) {
+        for (ticks_held, tick) in (0..40u64).enumerate() {
+            if !relock_acquire_should_hold(oldest_age, reserve, I30, ticks_held as u64) {
                 acquired_at = Some(tick);
                 break;
             }
-            ticks_held += 1;
             oldest_age += I30; // the queue deepens one canvas interval per tick while holding
         }
         let at = acquired_at.expect("#1161: the gate must eventually acquire");
