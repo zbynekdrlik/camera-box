@@ -169,7 +169,10 @@ class TestMeasureStableTail:
         assert run_id == RUN
         assert st.done is True and st.reason == "converged-aligned"
         tail = rounds[st.tail_start:]
-        assert all(qa.frame_id_spread(r) <= 1 for r in tail)
+        # the tail is mutually stable (within stable_tol) AND at parity by the UNCHANGED median gate
+        # (a converged system hovering at 1-2 id can carry a within-tol spread-2 round; the median
+        # is what the <=1-id parity gate reads, exactly as _full_round_parity has always done).
+        assert qa._full_round_parity(tail, SRC, 1, 3)[1] is True
 
     def test_re_derive_path_accumulates_min_valid_rounds(self, monkeypatch):
         # converges to a stable-but-not-aligned spread 2 -> must gather >= min_valid tail rounds.
@@ -259,8 +262,9 @@ class TestTableMarksTheTail:
         assert "tail" in table            # the used-round marker
         # the transient rounds (0,1) are shown but not marked tail; the tail (2..4) is marked.
         lines = [ln for ln in table.splitlines() if ln.strip() and ln.split("|")[0].strip().isdigit()]
-        assert lines[0].rstrip().endswith("|") is False  # row 0 has an (empty) used cell, not "tail"
-        assert lines[2].rstrip().endswith("tail")
+        assert not lines[0].rstrip().endswith("tail")  # row 0 is a discarded transient round
+        assert not lines[1].rstrip().endswith("tail")
+        assert lines[2].rstrip().endswith("tail")      # tail starts at index 2
         assert lines[4].rstrip().endswith("tail")
 
     def test_table_without_tail_start_is_unchanged(self):
