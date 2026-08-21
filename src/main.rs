@@ -1009,6 +1009,14 @@ async fn run_capture_loop(
             // the heartbeat. Reset per iteration; set inside the closure only on a confirmed
             // dispatch.
             let mut frame_dispatched = false;
+            // #1167 — snapshot the corrupted-buffer counter before process_frame. A corrupted
+            // buffer (V4L2_BUF_FLAG_ERROR / short) is DROPPED inside process_frame BEFORE the
+            // callback (capture.rs), so it never reaches decimation_gate.poll below: at an over-rate
+            // that removes a would-be-emitted GOOD frame from the stream, and the over-rate shed
+            // machinery then SKIPS its 60 fps slot (a strih FIFO hold -> the cam1 align sawtooth).
+            // A delta after the call means this iteration dropped one; we register a bounded make-up
+            // so the gate reclaims exactly that slot with the nearest good frame on its next shed.
+            let corrupted_before = capture.corrupted_frames();
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
                 // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
@@ -1305,6 +1313,15 @@ async fn run_capture_loop(
                 wedge_watchdog_epoch.elapsed().as_nanos() as u64,
                 Ordering::Relaxed,
             );
+
+            // #1167 — a corrupted buffer was dropped this iteration (before the emit gate, see the
+            // snapshot above). Only meaningful while genlock decimation is active (out_interval_ns
+            // > 0 — the gate is polled); register one make-up so the gate fills the slot the dropped
+            // frame vacated with the nearest good frame instead of letting the over-rate absorption
+            // skip it. Bounded inside the gate, so this never over-emits.
+            if out_interval_ns > 0 && capture.corrupted_frames() > corrupted_before {
+                decimation_gate.note_corrupted_frame();
+            }
 
             match result {
                 Ok(()) => {

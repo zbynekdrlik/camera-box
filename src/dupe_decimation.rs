@@ -480,6 +480,23 @@ pub enum ShedAction {
 /// - a DETECTED content-dupe at residence `>= `[`QUEUE_DEPTH_DUPE_SHED_INTERVALS`] ->
 ///   [`ShedAction::Drain`]: drains one interval EARLIER, always content-safe (a byte-identical
 ///   re-sample carries no distinct painted frame).
+/// (#1167) Should this poll RECLAIM a corrupted-induced slot — convert a slot-skipping over-rate
+/// shed into a copy emit of the nearest good frame? True iff a make-up is owed
+/// (`corrupted_makeup_deficit > 0`) AND the base [`ShedAction`] would advance the boundary while
+/// emitting NOTHING for a slot that a captured frame IS available to fill: [`ShedAction::Retire`]
+/// (a stale-boundary dupe retirement) or [`ShedAction::Drain`] (a queue-depth over-rate drop).
+///
+/// Deliberately NOT the other actions: [`ShedAction::Emit`] already fills the slot;
+/// [`ShedAction::Defer`] HOLDS the boundary so the next unique still fills it (no slot lost);
+/// [`ShedAction::BlindShed`] is a between-boundaries drop (no slot to fill); and
+/// [`ShedAction::FastDrain`] is the deep-backlog accelerated convergence (issue-1145 v2.1) — a
+/// corruption make-up there would fight the backlog drain, so a deep backlog converges first and
+/// the deficit is reclaimed once steady Retire/Drain resume. Pure — the whole make-up policy is
+/// Tier-0 testable off hardware.
+pub fn corrupted_makeup_reclaims(action: ShedAction, corrupted_makeup_deficit: u64) -> bool {
+    corrupted_makeup_deficit > 0 && matches!(action, ShedAction::Retire | ShedAction::Drain)
+}
+
 pub fn dupe_shed_action(
     would_emit: bool,
     is_dupe: bool,
@@ -630,6 +647,12 @@ pub struct DecimationGate {
     /// an over-rate box with corruption holds the target emit instead of under-running by the
     /// corrupted rate. Bounded by [`CORRUPTED_MAKEUP_MAX_DEFICIT`]. `0` = nothing owed.
     corrupted_makeup_deficit: u64,
+    /// (#1167) Set by [`note_corrupted_frame`](Self::note_corrupted_frame): the NEXT inter-capture
+    /// takt sample spans the dropped (corrupted) frame, so it is a GAP, not a takt change — exclude
+    /// it from the over-rate arming EMA ([`note_capture_takt`](Self::note_capture_takt)), mirroring
+    /// the #1145 v3 delivery-hiccup handling so a corrupted drop cannot flip `sustained_over_rate`
+    /// off. Consumed (cleared) on the next takt fold.
+    pending_takt_gap: bool,
 }
 
 impl DecimationGate {
@@ -684,6 +707,9 @@ impl DecimationGate {
     pub fn note_corrupted_frame(&mut self) {
         self.corrupted_makeup_deficit =
             (self.corrupted_makeup_deficit + 1).min(CORRUPTED_MAKEUP_MAX_DEFICIT);
+        // (#1167) the next inter-capture takt sample spans this dropped frame — mark it a GAP so it
+        // is excluded from the over-rate arming EMA (mirrors the #1145 v3 hiccup handling).
+        self.pending_takt_gap = true;
     }
 
     /// (#1167) The pending corrupted-slot make-up deficit — how many corrupted-induced slots the
@@ -771,7 +797,19 @@ impl DecimationGate {
         if capture_mono_ns == 0 {
             return;
         }
+        // (#1167) a corrupted frame was dropped since the previous good capture (it never reached
+        // poll), so THIS inter-capture interval spans the missing sample — a known benign GAP,
+        // exactly like a #1145 v3 delivery hiccup. Do NOT fold it (folding it would pull the takt
+        // EMA up and risk disarming `sustained_over_rate`); just advance the baseline so the NEXT
+        // interval is measured cleanly. A lone dropped frame is not a rate collapse, so the
+        // consecutive-gap collapse counter is reset (this is a known miss, not a #1145 v3 F1 gap).
+        let pending_takt_gap = core::mem::take(&mut self.pending_takt_gap);
         if self.prev_capture_mono_ns != 0 && capture_mono_ns > self.prev_capture_mono_ns {
+            if pending_takt_gap {
+                self.consecutive_takt_gaps = 0;
+                self.prev_capture_mono_ns = capture_mono_ns;
+                return;
+            }
             let interval = capture_mono_ns - self.prev_capture_mono_ns;
             // (#1145 v3) gap-excluded fold: a delivery HICCUP (a blocked V4L2 dequeue) produces ONE
             // huge inter-capture interval that is NOT a takt change — fold it and it poisons the
@@ -939,7 +977,7 @@ impl DecimationGate {
         let enough_unique =
             self.enough_unique_to_hold_target(now_ns, interval_ns, sustained_over_rate);
 
-        match dupe_shed_action(
+        let action = dupe_shed_action(
             would_emit,
             is_dupe,
             self.deferred_this_boundary,
@@ -947,7 +985,27 @@ impl DecimationGate {
             enough_unique,
             queue_depth,
             sustained_over_rate,
-        ) {
+        );
+        // (#1167) corrupted-slot make-up: a corrupted buffer dropped in `src/capture.rs` before the
+        // gate removed a would-be-emitted GOOD frame from an over-rate stream, so this otherwise
+        // slot-skipping over-rate shed (Retire / Drain — advance the boundary, emit nothing) would
+        // leave a hole the strih genlock FIFO holds through (the cam1 align sawtooth). While a
+        // make-up is owed, RECLAIM the slot: emit the current GOOD frame (a byte/optical dupe in the
+        // Retire case = a repeat of the nearest good frame; a fresh good frame in the Drain case) as
+        // a copy and consume one deficit unit — fills the slot with the nearest good frame (issue's
+        // invariant: a single-slot dupe is acceptable, a skipped slot never is). Corrupted CONTENT is
+        // never forwarded — only a subsequent GOOD frame is emitted. Bounded 1:1 to the corrupted
+        // count, so the genuine over-rate latency drain beyond the deficit is untouched. Counted as a
+        // #1111 copy (`record_dupe_emitted`) — cross-reference the `corrupted` count on the Streaming
+        // line to attribute it. Advances the boundary one interval, exactly as Retire/Drain/Emit do.
+        if corrupted_makeup_reclaims(action, self.corrupted_makeup_deficit) {
+            self.corrupted_makeup_deficit -= 1;
+            self.next_boundary_ns = candidate_next;
+            self.deferred_this_boundary = false;
+            self.shed_log.record_dupe_emitted();
+            return true;
+        }
+        match action {
             ShedAction::BlindShed => {
                 // The ORIGINAL blind pacing drop (between boundaries) -- boundary unchanged
                 // (candidate_next == the pending boundary here), deferral state untouched.
@@ -3015,7 +3073,11 @@ mod tests {
     /// over-rate absorption skips its slot → emit under-runs by exactly the corrupted rate
     /// (measured 59.13 fps == the live "~59.1"). With the make-up, the deficit is reclaimed 1:1 so
     /// emit holds the same ~60 as the no-corruption control.
-    fn run_corrupted_over_rate_1167(dupe_period: usize, corrupt_period: usize, secs: f64) -> (u64, u64, u64) {
+    fn run_corrupted_over_rate_1167(
+        dupe_period: usize,
+        corrupt_period: usize,
+        secs: f64,
+    ) -> (u64, u64, u64) {
         let cap_fps = 62.0f64;
         let cap_int = (1e9 / cap_fps) as u64;
         let emit_int = 1_000_000_000u64 / 60;
@@ -3078,7 +3140,10 @@ mod tests {
         // the same ~60 as the control. WITHOUT the make-up the over-rate absorption skips each
         // corrupted slot and this under-runs by exactly the corrupted count (measured 59.13 fps ==
         // the live "~59.1") — the RED this test pins. `corrupted > 0` guards a mis-modelled fixture.
-        assert!(corrupted > 0, "the corrupted run must actually inject corruption");
+        assert!(
+            corrupted > 0,
+            "the corrupted run must actually inject corruption"
+        );
         assert!(
             control_emits.saturating_sub(corrupt_emits) <= 1,
             "every corrupted-induced slot must be reclaimed (a single-slot dupe is acceptable, a \
@@ -3119,6 +3184,59 @@ mod tests {
         assert!(
             (59.8..=60.05).contains(&fps),
             "no-corruption over-rate holds ~60 fps; got {fps:.3}"
+        );
+    }
+
+    #[test]
+    fn corrupted_makeup_reclaims_only_slot_skipping_sheds_when_owed_1167() {
+        // No deficit -> never reclaim, for EVERY action (byte-identical to today).
+        for a in [
+            ShedAction::Retire,
+            ShedAction::Drain,
+            ShedAction::FastDrain,
+            ShedAction::Defer,
+            ShedAction::BlindShed,
+            ShedAction::Emit { copy: false },
+            ShedAction::Emit { copy: true },
+        ] {
+            assert!(
+                !corrupted_makeup_reclaims(a, 0),
+                "deficit 0 must never reclaim ({a:?})"
+            );
+        }
+        // Deficit owed: reclaim ONLY the slot-skipping over-rate sheds (Retire / Drain).
+        assert!(corrupted_makeup_reclaims(ShedAction::Retire, 1));
+        assert!(corrupted_makeup_reclaims(ShedAction::Drain, 3));
+        // FastDrain (deep-backlog convergence), Defer (boundary held -> slot still filled),
+        // BlindShed (between boundaries) and Emit (already fills the slot) are NEVER reclaimed.
+        assert!(!corrupted_makeup_reclaims(ShedAction::FastDrain, 3));
+        assert!(!corrupted_makeup_reclaims(ShedAction::Defer, 3));
+        assert!(!corrupted_makeup_reclaims(ShedAction::BlindShed, 3));
+        assert!(!corrupted_makeup_reclaims(
+            ShedAction::Emit { copy: false },
+            3
+        ));
+        assert!(!corrupted_makeup_reclaims(
+            ShedAction::Emit { copy: true },
+            3
+        ));
+    }
+
+    #[test]
+    fn note_corrupted_frame_accrues_a_bounded_deficit_1167() {
+        let mut gate = DecimationGate::new();
+        assert_eq!(gate.corrupted_makeup_deficit(), 0);
+        gate.note_corrupted_frame();
+        gate.note_corrupted_frame();
+        assert_eq!(gate.corrupted_makeup_deficit(), 2);
+        // Bounded by CORRUPTED_MAKEUP_MAX_DEFICIT so a corruption burst cannot force a runaway copy
+        // tail after corruption stops.
+        for _ in 0..50 {
+            gate.note_corrupted_frame();
+        }
+        assert_eq!(
+            gate.corrupted_makeup_deficit(),
+            CORRUPTED_MAKEUP_MAX_DEFICIT
         );
     }
 }
