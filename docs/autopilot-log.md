@@ -9936,3 +9936,29 @@ No push/PR/rig touch (worktree worker).
 - WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/
   merge/deploy/run-card by the worker. Ticket stays OPEN (commits use fix(#811)/test(#811) paren
   form, no auto-close) — the live dantesync canary + 24h acceptance are still the supervisor's step.
+
+## issue 1157 — bkshading M2 follow-up: cross-platform NDI discovery + libndi provisioning (worktree lane, 2026-08-21)
+- ROOT CAUSE: the M2 real-preview receiver copied `src/ndi.rs`'s Linux-only `NdiLib::load()`
+  verbatim, but the service ships to strih (Windows) where the runtime is
+  `Processing.NDI.Lib.x64.dll` (`scripts/bundle-state-server.py`) — so `--features ndi` could never
+  load on its ship target, and CI only ever clippy-compiled the feature on Linux.
+- FIX: new PURE default-feature module `bkshading/service/src/preview/ndi_paths.rs`
+  (`NdiOs`/`ndi_search_candidates` — env dirs → per-OS well-known dirs → bare-name fallback; Windows
+  DLL + the documented NDI 6 Tools Runtime dir); `ndi_source.rs::load()` consumes it. RED
+  test(#1157) 5bc1e702e (Linux-only stub → 2 Windows tests fail), GREEN fix(#1157) 8e7d6d398
+  (per-OS tables + wiring → 4/4). Proved standalone via `rustc --edition 2021 --test`.
+- CI ci(#1157) b31a69e9a: `bkshading` job += `cargo test`/`cargo build --bins` `--features ndi`;
+  `bkshading-windows` job += `cargo check --features ndi` (the deployed strih binary shape).
+- PROVISION feat(#1157) f65964a96: `scripts/bkshading-provision-ndi.sh` + source-only helper
+  `scripts/lib/bkshading-ndi-runtime.sh` (idempotent/fail-loud/enable-only) +
+  `tests/python/test_bkshading_ndi_provision_1157.py` (8/8; cross-checks shell dirs/names + the
+  Windows DLL vs `ndi_paths.rs` so they can't drift).
+- Tier-0 (no cargo compile #557): `cargo fmt --all --check` clean; `bash -n` + `shellcheck -S
+  warning` clean; helper fns + `--check` exercised over a fixture NDI dir (found `6.3.2.0` on dev1);
+  python test 8/8 direct + pytest; ndi_paths rustc replica RED→GREEN.
+- STILL supervisor's rig-verify half: run the strih service `--features ndi` vs a live cambox NDI
+  source + confirm the 4+4 preview updates; confirm the 3 M2 SDK deferrals; task 4 (default vs
+  opt-in `--features ndi` for strih) is the owner's call after the live verify (left opt-in).
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/
+  merge/deploy/run-card by the worker. Ticket stays OPEN (commits use fix(#1157)/test(#1157) paren
+  form, no auto-close) — the live end-to-end verify is the supervisor's step.
