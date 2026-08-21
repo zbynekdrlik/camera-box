@@ -9936,3 +9936,36 @@ No push/PR/rig touch (worktree worker).
 - WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/
   merge/deploy/run-card by the worker. Ticket stays OPEN (commits use fix(#811)/test(#811) paren
   form, no auto-close) — the live dantesync canary + 24h acceptance are still the supervisor's step.
+
+## 2026-08-21 — #1161 remainder: Stage-2 ACQUIRE bracketing gate (genlock-C frame-mover) (worktree lane)
+- The DIAGNOSTIC half of #1161 (aligner-side abort attribution, test e6fb5c449 / fix 01621152d)
+  merged earlier; this lane wrote the FRAME-MOVER — issue 1003's Stage-2 ACQUIRE bracketing gate
+  (Approach 3). The absolute wall-clock grid-snap (Approach 1) stays durably REJECTED (issue-1003
+  thread 2026-08-17/18/20); the LATEST validator note (2026-08-21) re-scoped the ACQUIRE gate onto
+  #1161 as the active frame-mover — implemented exactly that.
+- Root cause: a per-source pin INCREASE was inert — obs_source_set_genlock_latency_ms never zeroed
+  the conveyor boundary (so the ACQUIRE branch never re-ran) and the phase-convergence shed is
+  downward-only; even a forced re-acquire would land one canvas frame below the raised target (the
+  phase-pinned deadline qualifies a frame up to one interval younger than the raw reserve).
+- Two coordinated parts: (A) the setter forces a bounded re-acquire on a pin RISE (zero the
+  boundary; a DECREASE keeps its existing shed path); (B) the ACQUIRE branch (N>=2 only) HOLDs via
+  genlock_relock_acquire_should_hold until the oldest queued frame ages to the reserve, then runs
+  the existing genlock_relock_select_nearest byte-identical; fail-open cap =
+  ceil(reserve/interval)+3 ticks (no new hold-collapse mode).
+- Three-layer mirror: authority src/genlock_backlog.rs relock_acquire_should_hold +
+  ACQUIRE_BRACKET_FAILOPEN_TICKS (7 Tier-0 unit tests; RED e88e48b12 → GREEN 686587621); C port in
+  obs-source.c (static inline mirror + setter + ACQUIRE wiring) + new field
+  genlock_acquire_bracket_ticks (obs-internal.h); parity test in
+  tests/genlock_relock_selection_parity.rs; static anchors in tests/genlock_release_cadence.rs
+  mirrored into both windows-genlock*.yml. Probe (src/probe/genlock.rs) deliberately NOT modified
+  (structurally inert against its raw-deadline acquire) — divergence note extended.
+- Local verify (Tier-0, no cargo compile): rustc --test genlock_backlog 57/57 GREEN; cc -Werror
+  -Wconversion -Wformat=2 lift of the C helper matches the Rust authority over 217 vectors;
+  genlock_release_cadence anchor test 16/16 GREEN + proven to bite (mutating the setter re-acquire
+  fails it); cargo fmt --all --check clean; both ymls parse + anchors match the pwsh-squished source.
+- Doc fix folded in: qr-align.md's issue-1161 section said Stage-2 was "gated on issue 1004" (a
+  closed, unrelated dock-display ticket) — corrected to the real 2026-08-17 chain (Stage-1
+  raised-reserve config live + a live discriminator) and marked the gate LANDED in #1161.
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI + live rig
+  verify). No PR/merge/deploy/run-card by the worker. Ticket stays OPEN (fix(#1161)/test(#1161)
+  paren form); the frame-move is vendored-C, live-only-verifiable — the supervisor's live step.

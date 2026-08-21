@@ -156,8 +156,16 @@ So a per-source pin INCREASE moves only the CONFIG value (read-back confirms it)
 frame → a one-canvas-frame residual can survive apply, and the re-measured residual reads INFLATED
 (the delta metric `m_i = pin_i − latency_i` folds in the raised pin while the frame stayed put). This
 is NOT a settle-time issue (no upward mechanism to wait for) and NOT fixable by the wall-clock
-frame-grid pin (issue 1003 REJECTED it three ways). The frame-mover is issue 1003's Stage-2 ACQUIRE
-bracketing gate — a genlock-C change, live-only, gated on issue 1004 — OUT of the aligner's reach.
+frame-grid pin (issue 1003 REJECTED it three ways, 2026-08-17/18/20). The frame-mover is issue 1003's
+Stage-2 ACQUIRE bracketing gate — a genlock-C change (the setter forces a bounded re-acquire on a pin
+RISE by zeroing the conveyor boundary; the ACQUIRE branch, N>=2 only, HOLDs until the oldest queued
+frame ages to the raised reserve — bracketing the target — then re-anchors via the existing
+history-anchored `genlock_relock_select_nearest`; a fail-open cap prevents any new hold-collapse).
+Its sequencing gate was NOT issue 1004 (a closed, unrelated dock-display ticket) — the 2026-08-17
+issue-1003 thread gated it on **Stage-1's raised-reserve config being live + a live discriminator
+confirming the residual is receiver-side**. LANDED in #1161 as `genlock_relock_acquire_should_hold`
+(`src/genlock_backlog.rs` authority + `vendor/obs-studio/libobs/obs-source.c` port) — the frame-move
+now lives in the genlock C, live-only-verifiable, OUT of the aligner's reach.
 
 **What the aligner does instead (#1161):** when the re-measured tail STABILIZED but stayed off-parity
 AND the plan asked a source to add hold, `align()` attributes the abort PRECISELY (via
