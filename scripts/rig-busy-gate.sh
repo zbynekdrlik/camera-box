@@ -243,7 +243,7 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
   # ever counts truly CONSECUTIVE stray polls.
   STRAY_HOSTS_CSV=$(printf '%s' "$OUTPUT" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("stray_hosts", [])))' 2>/dev/null || true)
   for _stray_label in strih stream; do
-    if printf ',%s,' "$STRAY_HOSTS_CSV" | grep -q ",${_stray_label},"; then
+    if grep -q ",${_stray_label}," <<<",${STRAY_HOSTS_CSV},"; then
       STRAY_STREAK[$_stray_label]=$(( STRAY_STREAK[$_stray_label] + 1 ))
     else
       STRAY_STREAK[$_stray_label]=0

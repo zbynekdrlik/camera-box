@@ -153,7 +153,7 @@ main() {
     exit 0
   fi
 
-  if ! printf '%s' "$guard" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$guard"; then
     echo "ERROR: --guard-us must be a positive integer (got '${guard}')." >&2
     exit 1
   fi

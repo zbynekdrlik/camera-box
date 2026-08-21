@@ -953,52 +953,52 @@ main() {
   done
   GATE_NTP_MASTER_NAME="$ntp_master"
 
-  if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$bound"; then
     echo "ERROR: --bound-us must be a positive integer (got '${bound}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$win_http_port" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$win_http_port"; then
     echo "ERROR: --win-http-port must be a positive integer (got '${win_http_port}')." >&2
     exit 1
   fi
   GATE_WIN_HTTP_PORT="$win_http_port"
-  if ! printf '%s' "$samples" | grep -qE '^[0-9]+$' || [ "$samples" -lt 1 ]; then
+  if ! grep -qE '^[0-9]+$' <<<"$samples" || [ "$samples" -lt 1 ]; then
     echo "ERROR: --samples must be a positive integer (got '${samples}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$window" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$window"; then
     echo "ERROR: --window-s must be a non-negative integer (got '${window}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$min_distinct" | grep -qE '^[0-9]+$' || [ "$min_distinct" -lt 1 ]; then
+  if ! grep -qE '^[0-9]+$' <<<"$min_distinct" || [ "$min_distinct" -lt 1 ]; then
     echo "ERROR: --min-distinct must be a positive integer (got '${min_distinct}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$stability"; then
     echo "ERROR: --stability-us must be a non-negative integer (got '${stability}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$deadband_margin" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$deadband_margin"; then
     echo "ERROR: --deadband-margin-us must be a non-negative integer (got '${deadband_margin}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$client_chase_ceiling" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$client_chase_ceiling"; then
     echo "ERROR: --client-chase-ceiling-us must be a non-negative integer (got '${client_chase_ceiling}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$client_step_fallback" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$client_step_fallback"; then
     echo "ERROR: --client-step-threshold-fallback-us must be a non-negative integer (got '${client_step_fallback}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$chase_resample_delay" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$chase_resample_delay"; then
     echo "ERROR: --chase-resample-delay-s must be a non-negative integer (got '${chase_resample_delay}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$slew_step_window" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$slew_step_window"; then
     echo "ERROR: --slew-step-window-s must be a non-negative integer (got '${slew_step_window}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$slew_min_surviving" | grep -qE '^[0-9]+$' || [ "$slew_min_surviving" -lt 1 ]; then
+  if ! grep -qE '^[0-9]+$' <<<"$slew_min_surviving" || [ "$slew_min_surviving" -lt 1 ]; then
     echo "ERROR: --slew-min-surviving must be a positive integer (got '${slew_min_surviving}')." >&2
     exit 1
   fi

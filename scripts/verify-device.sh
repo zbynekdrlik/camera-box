@@ -209,7 +209,7 @@ NDI_VERSION_PIN="${NDI_VERSION_PIN:-6.3.2}"     # fleet NDI runtime pin (#132/#5
 # version_is_valid_format V -> 0 iff V matches the fleet's vMAJOR.MINOR.PATCH[-dev.N] shape (the
 # CI dev-channel form, e.g. "1.7.0-dev.244", or a plain release "1.7.0").
 version_is_valid_format() {
-  printf '%s' "$1" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$'
+  grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$' <<<"$1"
 }
 
 # version_matches_expected ACTUAL EXPECTED -> 0 iff both are non-empty and identical.
@@ -231,13 +231,13 @@ active_state_is_active() {
 # (the shared emit_ok_grep_pattern() from ndi-alive.sh -- genlock decimation report / plain
 # "Streaming: X fps" / generic sender-ready line).
 ndi_emit_ok() {
-  printf '%s\n' "$1" | grep -qE "$(emit_ok_grep_pattern)"
+  grep -qE "$(emit_ok_grep_pattern)" <<<"$1"
 }
 
 # ndi_journal_has_fatal JOURNAL_TEXT -> 0 iff the journal contains a crash signature (the shared
 # fatal_grep_pattern() from ndi-alive.sh).
 ndi_journal_has_fatal() {
-  printf '%s\n' "$1" | grep -qE "$(fatal_grep_pattern)"
+  grep -qE "$(fatal_grep_pattern)" <<<"$1"
 }
 
 # --- (i) colour capture chroma metric (#299) ----------------------------------------------------
@@ -307,7 +307,7 @@ dantesync_journal_fresh() {
   local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
   local now_iso now_e
   # Fail-closed: BOX_NOW must be a clean non-negative integer epoch, or we cannot judge freshness.
-  if [ -z "$box_now" ] || ! printf '%s' "$box_now" | grep -qE '^[0-9]+$'; then
+  if [ -z "$box_now" ] || ! grep -qE '^[0-9]+$' <<<"$box_now"; then
     printf 'stale\n'; return 0
   fi
   now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
@@ -443,7 +443,7 @@ avahi_ndi_discoverable() {
   matches="$(printf '%s\n' "$text" | grep -E '^[+=]' | grep -F '_ndi._tcp' || true)"
   [ -n "$matches" ] || return 1
   [ -z "$want" ] && return 0
-  printf '%s\n' "$matches" | grep -qF "$want"
+  grep -qF "$want" <<<"$matches"
 }
 
 # --- (j)-(o) fleet-uniformity invariants (#547) -------------------------------------------------
@@ -514,7 +514,7 @@ waitonline_masked() {
 cmdline_has_isolation() {
   local cmdline="$1" tok
   for tok in 'isolcpus=3' 'nohz_full=3' 'rcu_nocbs=3' 'irqaffinity=0-2'; do
-    printf '%s' " $cmdline " | grep -qE "[[:space:]]${tok}[[:space:]]" || return 1
+    grep -qE "[[:space:]]${tok}[[:space:]]" <<<" $cmdline " || return 1
   done
   return 0
 }
@@ -1112,13 +1112,13 @@ if [ "$NAME_UPPER" = "CAM2" ]; then
       PAINTER_JOURNAL="$(ssh_box "journalctl -u cam2-painter.service -n 200 --no-pager 2>/dev/null")" || rc=$?
       if [ "$rc" -ne 0 ]; then
         fail "could not read cam2-painter.service journal to confirm it is genuinely painting (ssh rc=$rc)"
-      elif printf '%s' "$PAINTER_JOURNAL" | grep -q 'presenter: using DRM/KMS page-flip'; then
-        if printf '%s' "$PAINTER_JOURNAL" | grep -q 'vblank-locked'; then
+      elif grep -q 'presenter: using DRM/KMS page-flip' <<<"$PAINTER_JOURNAL"; then
+        if grep -q 'vblank-locked' <<<"$PAINTER_JOURNAL"; then
           ok "cam2-painter.service genuinely painting (KMS page-flip, vblank-locked)"
         else
           fail "cam2-painter.service selected KMS but never confirmed vblank-locked (see journalctl -u cam2-painter.service)"
         fi
-      elif printf '%s' "$PAINTER_JOURNAL" | grep -qi 'falling back to fbdev'; then
+      elif grep -qi 'falling back to fbdev' <<<"$PAINTER_JOURNAL"; then
         ok "cam2-painter.service genuinely painting (fbdev fallback presenter)"
       else
         fail "cam2-painter.service active but no presenter-selection log line found -- cannot confirm it is genuinely painting (see journalctl -u cam2-painter.service)"
@@ -1130,7 +1130,7 @@ if [ "$NAME_UPPER" = "CAM2" ]; then
   # in setup-device.sh).
   rc=0
   NODISPLAY_ENV="$(ssh_box "systemctl show -p Environment --value camera-box 2>/dev/null")" || rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s' "$NODISPLAY_ENV" | grep -q 'CAMERA_BOX_NO_DISPLAY=1'; then
+  if [ "$rc" -eq 0 ] && grep -q 'CAMERA_BOX_NO_DISPLAY=1' <<<"$NODISPLAY_ENV"; then
     ok "camera-box permanently no-display on cam2 (#863 -- cam2-painter.service owns /dev/fb0)"
   else
     fail "camera-box on cam2 is NOT permanently no-display (Environment='${NODISPLAY_ENV:-<none>}', ssh rc=$rc) -- it will contest /dev/fb0 with cam2-painter.service"
@@ -1162,7 +1162,7 @@ if [ -e \"\$V4L2_NEUTRAL_NODE\" ]; then echo CAMERA_BOX_VIDEO_NODE_EXISTS=1; els
 $(udev_camera_box_grabber_power_control_read_cmd)")" || pcrc=$?
 if [ "$pcrc" -ne 0 ]; then
   fail "could not read the live capture grabber's USB power/control (ssh rc=$pcrc)"
-elif ! printf '%s' "$POWER_CONTROL_OUT" | grep -q 'CAMERA_BOX_VIDEO_NODE_EXISTS=1'; then
+elif ! grep -q 'CAMERA_BOX_VIDEO_NODE_EXISTS=1' <<<"$POWER_CONTROL_OUT"; then
   ok "no capture grabber fitted -- USB power/control drift check N/A (#828)"
 else
   GRABBER_POWER_CONTROL="$(udev_camera_box_grabber_power_control_from_output "$POWER_CONTROL_OUT")"

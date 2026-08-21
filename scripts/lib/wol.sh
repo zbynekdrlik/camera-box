@@ -28,7 +28,7 @@ wol_normalize_mac() {
   local raw="${1:-}" hex
   hex="${raw//[:.-]/}"   # strip the three common group separators
   hex="${hex// /}"       # and any stray whitespace
-  if [ "${#hex}" -ne 12 ] || printf '%s' "$hex" | grep -qiE '[^0-9a-f]'; then
+  if [ "${#hex}" -ne 12 ] || grep -qiE '[^0-9a-f]' <<<"$hex"; then
     printf 'wol_normalize_mac: invalid MAC %q (need exactly 12 hex nibbles)\n' "$raw" >&2
     return 2
   fi

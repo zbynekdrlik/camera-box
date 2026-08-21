@@ -1781,7 +1781,7 @@ fi"
     # (e.g. the remove SetInputSettings was swallowed by a transient WS hiccup) so a lingering
     # test-burn onto the live broadcast can't pass silently. (cleanup runs in the EXIT trap, so it
     # WARNS rather than exits non-zero; drift-guard --compare burn_env= is the fail-loud gate.)
-    if printf '%s' "$_vrf" | grep -q 'burn_on=True'; then
+    if grep -q 'burn_on=True' <<<"$_vrf"; then
       echo "    [$_bn burn-verify] WARNING #246: genlock_burn still ON after clear — re-clear via" >&2
       echo "        scripts/rig-mode.sh event (or obs_burn_filter.py remove) before any live broadcast." >&2
     fi
@@ -2577,7 +2577,7 @@ for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (same set clea
     | sed "s/^/    [$_bn burn-on] /" || true
   _chk="$(python3 "$HERE/obs_burn_filter.py" check --host "$_bip" --input "$_bsrc" 2>&1 || true)"
   echo "    [$_bn burn-check] $_chk"
-  if ! printf '%s' "$_chk" | grep -q 'burn_on=True'; then
+  if ! grep -q 'burn_on=True' <<<"$_chk"; then
     echo "ERROR: $_bn burn is NOT on (genlock_burn=true) for the recorded input '$_bsrc' — the $_bn" >&2
     echo "       burn would be absent from the recording and the run would be wasted (#195/#257)." >&2
     echo "       Confirm $_bn OBS ($_bip) is up + is the genlock build, then re-run (or scripts/rig-mode.sh test)." >&2

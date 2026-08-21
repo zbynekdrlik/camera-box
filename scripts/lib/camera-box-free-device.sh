@@ -80,10 +80,10 @@ camera_box_free_device_dropin_wired() {
 # never references frame-probe (which would kill the cam2 painter). Pure, no I/O.
 camera_box_free_device_script_is_burn_scoped() {
   local text="${1:-}"
-  printf '%s' "$text" | grep -q 'systemctl stop' || return 1
-  printf '%s' "$text" | grep -q 'camera-box-burn-\*' || return 1
-  printf '%s' "$text" | grep -q 'pkill -9 -x camera-box-burn' || return 1
+  grep -q 'systemctl stop' <<<"$text" || return 1
+  grep -q 'camera-box-burn-\*' <<<"$text" || return 1
+  grep -q 'pkill -9 -x camera-box-burn' <<<"$text" || return 1
   # MUST NOT touch the painter -- a frame-probe reference here is a defect, not a pass.
-  if printf '%s' "$text" | grep -q 'frame-probe'; then return 1; fi
+  if grep -q 'frame-probe' <<<"$text"; then return 1; fi
   return 0
 }
