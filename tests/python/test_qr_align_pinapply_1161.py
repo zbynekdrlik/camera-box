@@ -14,6 +14,7 @@ parity bar. Tier-0: pure classifier/formatter unit tests + an align() flow test 
 monkeypatched barrier/apply seams (no rig, no cargo).
 """
 import pathlib
+import re
 import sys
 import zlib
 
@@ -129,12 +130,26 @@ class TestAbortReason:
 def _align_stuck_after_apply(monkeypatch):
     """Phase1 converges stable-but-not-aligned at spread 2 (the aligner re-derives a floor-3 plan
     that RAISES cam2/3/4's pins); the pin change never moves the frame, so phase2 (verify) STAYS at
-    spread 2. apply_pins is stubbed to echo the plan (read-back == plan), obs WS is stubbed."""
+    spread 2. This models the LIVE #1161 dichotomy end-to-end: the config pin MOVES (the post-apply
+    read-back echoes the applied plan) but the presented frame does NOT (verify still spread 2). So
+    the read_current_pins stub returns floor-3 on the PRE-apply read and the applied plan on every
+    later read-back, and apply_pins echoes + records the plan (the real writer is read-back-verified,
+    so a live post-apply read returns exactly what was written)."""
     import apply_latency_pins
     import obs_phase2
     monkeypatch.setattr(qa, "barrier_screenshot", _ScriptedBarrier([10, 8, 5, 3, 2] + [2] * 20))
-    monkeypatch.setattr(qa, "read_current_pins", lambda s, h, p: {x: 3 for x in SRC})
-    monkeypatch.setattr(apply_latency_pins, "apply_pins", lambda ws, plan, execute: plan)
+
+    applied = {}                       # captures the plan apply_pins wrote (the live rig's read-back)
+
+    def _read_pins(s, h, p):
+        # 1st read = PRE-apply (all at floor 3); once a plan is applied, the read-back reflects it.
+        return dict(applied) if applied else {x: 3 for x in SRC}
+    monkeypatch.setattr(qa, "read_current_pins", _read_pins)
+
+    def _apply(ws, plan, execute):
+        applied.update(plan)
+        return plan
+    monkeypatch.setattr(apply_latency_pins, "apply_pins", _apply)
 
     class _WS:
         def close(self):
@@ -157,3 +172,8 @@ class TestAlignAttributesTheResidual:
         assert "did NOT hold. Per-camera residual deltas" not in msg
         # never widens the owner's same-frame parity bar
         assert "NOT widened" in msg
+        # the config DID move: the post-apply read-back reflects the RAISED pin, not the floor -- the
+        # "pin now N ms, read-back confirmed" clause names a value above the floor, proving the
+        # dichotomy (config moved, frame did not) is exercised end-to-end, not just in the unit tests.
+        pins_now = [int(m) for m in re.findall(r"pin now (\d+) ms", msg)]
+        assert pins_now and max(pins_now) > 3
