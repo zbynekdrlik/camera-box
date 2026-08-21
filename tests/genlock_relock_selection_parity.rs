@@ -504,9 +504,9 @@ fn acquire_hold_vectors() -> Vec<(u64, u64, u64, u64)> {
         (20 * ms, 53 * ms, i30, 4),          // one below cap (5) -> hold
         (20 * ms, 53 * ms, i30, 5),          // at cap -> acquire (fail-open)
         (20 * ms, 53 * ms, i30, 6),          // over cap -> acquire
-        (1 * ms, 3 * ms, i30, 0),            // 3ms prod pin, sub-3ms frame -> hold (rare)
+        (ms, 3 * ms, i30, 0),                // 3ms prod pin, sub-3ms frame -> hold (rare)
         (16 * ms, 3 * ms, i60, 0),           // 3ms prod pin, normal frame -> acquire (inert)
-        (1 * ms, 53 * ms, 0, 0),             // degenerate interval -> acquire (fail open)
+        (ms, 53 * ms, 0, 0),                 // degenerate interval -> acquire (fail open)
         (0, 0, i30, 0),                      // reserve 0 -> acquire
         (90 * ms, 90 * ms, i30, 0),          // at 90ms -> acquire
         (4 * ms, 90 * ms, i30, 2),           // deep target, young, below cap -> hold

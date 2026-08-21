@@ -583,10 +583,10 @@ pub fn relock_acquire_should_hold(
     }
     // Not deep enough yet — HOLD to let the queue deepen, UNLESS the fail-open cap is reached. The
     // cap is `ceil(reserve/interval)` (ticks a from-empty queue needs to age its oldest frame to
-    // the reserve) plus a small jitter margin. Written as the explicit `(a + b - 1) / b` ceil so
-    // the C mirror (`genlock_relock_acquire_should_hold`) is byte-identical — the parity gate runs
-    // both. `reserve_ns` is bounded by the ms latency clamp, so `reserve_ns + interval_ns` cannot
-    // overflow at any real value.
+    // the reserve) plus a small jitter margin. Rust uses `div_ceil` (clippy manual_div_ceil); the
+    // C mirror (`genlock_relock_acquire_should_hold`) keeps the explicit `(a + b - 1) / b` form of
+    // the SAME ceil — the parity gate runs both, and the values are identical for these unsigned
+    // in-range inputs (`reserve_ns` is bounded by the ms latency clamp, no overflow).
     let cap = reserve_ns.div_ceil(interval_ns) + ACQUIRE_BRACKET_FAILOPEN_TICKS;
     ticks_held < cap
 }
