@@ -377,13 +377,28 @@ jobs:
       - name: Test (bkshading service, --features ndi)
         run: cargo test -p bkshading --features ndi
 
-      - name: Build binaries
-        run: cargo build --bins -p bkshading -p bkshading-relay
+      # Build the DEPLOYABLE binaries in RELEASE (issue 808 M3) so a live rig verify of the merged
+      # relay/service has an artifact to deploy — nothing produced one before, though
+      # scripts/bkshading-provision-relay.sh explicitly expects "the CI-built bkshading-relay binary".
+      # Relay = default features (drives the camera via the gphoto2 CLI, no ndi); service =
+      # --features ndi (the exact shape the strih deploy ships, issue 1157). This release build
+      # supersedes the earlier debug --bins compile-proof — clippy --all-targets + the tests above
+      # already prove the crates compile in debug, so a release build is a strictly stronger proof.
+      - name: Build deployable binaries (relay default + service --features ndi)
+        run: |
+          cargo build --release --bins -p bkshading-relay
+          cargo build --release --features ndi --bins -p bkshading
 
-      # Build the actual deployable service binary WITH --features ndi (issue 1157) — the strih
-      # deploy ships this exact shape, so prove it links, not only that clippy is clean.
-      - name: Build binaries (bkshading service, --features ndi)
-        run: cargo build --bins -p bkshading --features ndi
+      # Upload the deployable relay + service binaries (issue 808 M3), mirroring the appliance's
+      # camera-box-linux-amd64 / probe-tools-linux-amd64 upload pattern. scripts/bkshading-deploy-relay.sh
+      # downloads bkshading-relay from this artifact and places it on a cambox (/usr/local/bin).
+      - name: Upload bkshading binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-linux-amd64
+          path: |
+            target/release/bkshading-relay
+            target/release/bkshading
 
   bkshading-windows:
     name: bkshading Windows compile check (issue 808)
@@ -406,12 +421,19 @@ jobs:
       - name: Check bkshading members (Windows target)
         run: cargo check -p bkshading-proto -p bkshading-relay -p bkshading
 
-      # The strih service is deployed WITH --features ndi (issue 1157), so the EXACT Windows
-      # binary that ships must compile — the M2 lane only ever compiled the feature for Linux.
-      # libloading resolves the NDI runtime DLL (Processing.NDI.Lib.x64.dll) at runtime, so this
-      # checks with no libndi installed on the runner.
-      - name: Check bkshading service (--features ndi, Windows target)
-        run: cargo check -p bkshading --features ndi
+      # The strih service is deployed WITH --features ndi (issue 1157) to a Windows PC (Windows
+      # FIRST), so build the actual DEPLOYABLE Windows binary in RELEASE (issue 808 M3) — not just
+      # `cargo check` — and upload it, so the strih service deploy finally has an artifact (nothing
+      # produced one before). libloading resolves the NDI runtime DLL (Processing.NDI.Lib.x64.dll)
+      # at runtime, so this builds with no libndi installed on the runner.
+      - name: Build deployable service binary (--features ndi, Windows target)
+        run: cargo build --release --bins -p bkshading --features ndi
+
+      - name: Upload bkshading Windows service binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-windows-amd64
+          path: target/release/bkshading.exe
 
   build:
     name: Build
