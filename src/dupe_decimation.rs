@@ -744,9 +744,13 @@ impl DecimationGate {
             };
         self.prev_luma = this_luma;
         self.prev_was_noisy_dupe = noisy_dupe;
-        // (#1145 round 3 [red]) the noisy result is computed + tracked but NOT yet folded into
-        // `is_dupe`; the [green] commit ORs it in (one line) so this test-first change REDs first.
-        let is_dupe = exact_dupe;
+        // (#1145 round 3 [green]) fold the noise-tolerant result into `is_dupe`. Exact FIRST (a
+        // byte-identical dupe is proven regardless of the lattice — CAM1 unchanged); the noisy path
+        // only ADDS detections under sustained over-rate, so a marginal card's re-sample dupes are
+        // now shed as PROVEN dupes (retire / dupe-drain) instead of emitted-as-unique + a
+        // compensating shed — killing the Δ1/Δ3 churn. A noisy dupe is also NOT counted below in the
+        // unique-rate window (it carries no distinct content), correcting `enough_unique`.
+        let is_dupe = exact_dupe || noisy_dupe;
 
         // (#1145) A unique capture updates the trailing unique-rate window; a dupe carries no new
         // distinct content so it only READS it. `enough_unique` is the robust "source can hold the
