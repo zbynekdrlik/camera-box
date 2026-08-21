@@ -480,23 +480,6 @@ pub enum ShedAction {
 /// - a DETECTED content-dupe at residence `>= `[`QUEUE_DEPTH_DUPE_SHED_INTERVALS`] ->
 ///   [`ShedAction::Drain`]: drains one interval EARLIER, always content-safe (a byte-identical
 ///   re-sample carries no distinct painted frame).
-/// (#1167) Should this poll RECLAIM a corrupted-induced slot — convert a slot-skipping over-rate
-/// shed into a copy emit of the nearest good frame? True iff a make-up is owed
-/// (`corrupted_makeup_deficit > 0`) AND the base [`ShedAction`] would advance the boundary while
-/// emitting NOTHING for a slot that a captured frame IS available to fill: [`ShedAction::Retire`]
-/// (a stale-boundary dupe retirement) or [`ShedAction::Drain`] (a queue-depth over-rate drop).
-///
-/// Deliberately NOT the other actions: [`ShedAction::Emit`] already fills the slot;
-/// [`ShedAction::Defer`] HOLDS the boundary so the next unique still fills it (no slot lost);
-/// [`ShedAction::BlindShed`] is a between-boundaries drop (no slot to fill); and
-/// [`ShedAction::FastDrain`] is the deep-backlog accelerated convergence (issue-1145 v2.1) — a
-/// corruption make-up there would fight the backlog drain, so a deep backlog converges first and
-/// the deficit is reclaimed once steady Retire/Drain resume. Pure — the whole make-up policy is
-/// Tier-0 testable off hardware.
-pub fn corrupted_makeup_reclaims(action: ShedAction, corrupted_makeup_deficit: u64) -> bool {
-    corrupted_makeup_deficit > 0 && matches!(action, ShedAction::Retire | ShedAction::Drain)
-}
-
 pub fn dupe_shed_action(
     would_emit: bool,
     is_dupe: bool,
@@ -561,6 +544,23 @@ pub fn dupe_shed_action(
         return ShedAction::FastDrain;
     }
     ShedAction::Emit { copy: true }
+}
+
+/// (#1167) Should this poll RECLAIM a corrupted-induced slot — convert a slot-skipping over-rate
+/// shed into a copy emit of the nearest good frame? True iff a make-up is owed
+/// (`corrupted_makeup_deficit > 0`) AND the base [`ShedAction`] would advance the boundary while
+/// emitting NOTHING for a slot that a captured frame IS available to fill: [`ShedAction::Retire`]
+/// (a stale-boundary dupe retirement) or [`ShedAction::Drain`] (a queue-depth over-rate drop).
+///
+/// Deliberately NOT the other actions: [`ShedAction::Emit`] already fills the slot;
+/// [`ShedAction::Defer`] HOLDS the boundary so the next unique still fills it (no slot lost);
+/// [`ShedAction::BlindShed`] is a between-boundaries drop (no slot to fill); and
+/// [`ShedAction::FastDrain`] is the deep-backlog accelerated convergence (issue-1145 v2.1) — a
+/// corruption make-up there would fight the backlog drain, so a deep backlog converges first and
+/// the deficit is reclaimed once steady Retire/Drain resume. Pure — the whole make-up policy is
+/// Tier-0 testable off hardware.
+pub fn corrupted_makeup_reclaims(action: ShedAction, corrupted_makeup_deficit: u64) -> bool {
+    corrupted_makeup_deficit > 0 && matches!(action, ShedAction::Retire | ShedAction::Drain)
 }
 
 // ── (#889) per-stream gate (boundary + dupe-preference state) ────────────────
@@ -801,12 +801,15 @@ impl DecimationGate {
         // poll), so THIS inter-capture interval spans the missing sample — a known benign GAP,
         // exactly like a #1145 v3 delivery hiccup. Do NOT fold it (folding it would pull the takt
         // EMA up and risk disarming `sustained_over_rate`); just advance the baseline so the NEXT
-        // interval is measured cleanly. A lone dropped frame is not a rate collapse, so the
-        // consecutive-gap collapse counter is reset (this is a known miss, not a #1145 v3 F1 gap).
+        // interval is measured cleanly. LEAVE `consecutive_takt_gaps` UNTOUCHED — a corrupted-
+        // spanning interval carries NO evidence about the takt (it was never measured), so it must
+        // neither RESET the #1145 v3 F1 collapse counter (which would erase genuine-collapse
+        // evidence — a dying card producing corrupted storms could then never reach
+        // `TAKT_GAP_SUSTAINED_COUNT` and would latch `sustained_over_rate` on a collapsed source)
+        // nor INCREMENT it (which would falsely count toward collapse). Evidence-neutral.
         let pending_takt_gap = core::mem::take(&mut self.pending_takt_gap);
         if self.prev_capture_mono_ns != 0 && capture_mono_ns > self.prev_capture_mono_ns {
             if pending_takt_gap {
-                self.consecutive_takt_gaps = 0;
                 self.prev_capture_mono_ns = capture_mono_ns;
                 return;
             }
@@ -1120,8 +1123,12 @@ impl DupeShedLog {
         }
     }
 
-    /// (#1111) Record ONE content-dupe that was EMITTED (a copy) rather than shed — the late-dupe
-    /// valve keeping the emit grid boundary-locked at a genuine deficit. See [`DecimationGate::poll`].
+    /// (#1111) Record ONE frame EMITTED as a copy rather than shed. TWO contributors land here:
+    /// the #1111 late-dupe valve (a genuine sub-60 starvation deficit — the historical meaning) AND
+    /// (#1167) a corrupted-slot MAKE-UP (a would-be-skipped over-rate Retire/Drain converted to a
+    /// copy of the nearest good frame to reclaim a slot a corrupted-buffer drop vacated). Attribute
+    /// the two via the `corrupted` count on the same 5s Streaming line (make-ups ≈ the corrupted
+    /// rate; a healthy over-rate box with no corruption shows ~0 here). See [`DecimationGate::poll`].
     pub fn record_dupe_emitted(&mut self) {
         self.dupe_emitted = self.dupe_emitted.saturating_add(1);
     }
@@ -3237,6 +3244,62 @@ mod tests {
         assert_eq!(
             gate.corrupted_makeup_deficit(),
             CORRUPTED_MAKEUP_MAX_DEFICIT
+        );
+    }
+
+    /// (#1167) Warm `sustained_over_rate` on a fresh gate: ~400 polls at a 62 fps takt with residence
+    /// 0 (`now_mono == capture_mono`) — no drain fires (queue_depth 0), all uniques emit, and the
+    /// takt EMA converges over-rate. Continue the timeline from index `next_i`.
+    fn warm_over_rate_gate(next_i: &mut u64) -> DecimationGate {
+        let cap_int = (1e9 / 62.0) as u64;
+        let emit_int = 1_000_000_000u64 / 60;
+        let mut gate = DecimationGate::new();
+        for i in 0..400u64 {
+            let now = i * cap_int;
+            let hash = i.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+            let _ = gate.poll(now, emit_int, hash, true, now, now);
+        }
+        *next_i = 400;
+        gate
+    }
+
+    #[test]
+    fn drain_leg_make_up_emits_instead_of_dropping_1167() {
+        // Directly pins the DRAIN-leg conversion through the real `poll` (the retire path is covered
+        // by over_rate_plus_corrupted_holds_target_emit_1167; the pure helper covers both). A frame
+        // whose queue RESIDENCE >= QUEUE_DEPTH_SHED_INTERVALS at a sustained over-rate is DRAINED
+        // (shed, emits nothing). With a corrupted make-up owed, the SAME drain is reclaimed (emitted).
+        let cap_int = (1e9 / 62.0) as u64;
+        let emit_int = 1_000_000_000u64 / 60;
+
+        let mut next_i = 0u64;
+        // capture_mono continues the monotonic sequence; now_mono is 2.5 emit-intervals AHEAD, so the
+        // queue residence floors to 2 (>= QUEUE_DEPTH_SHED_INTERVALS) -> the first Drain arm fires.
+        let capture_mono = 400u64 * cap_int;
+        let now = capture_mono + emit_int * 5 / 2;
+
+        let mut a = warm_over_rate_gate(&mut next_i);
+        let hash = 0xDEAD_BEEFu64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let emit_a = a.poll(now, emit_int, hash, true, now, capture_mono);
+
+        let mut b = warm_over_rate_gate(&mut next_i);
+        b.note_corrupted_frame();
+        let emit_b = b.poll(now, emit_int, hash, true, now, capture_mono);
+
+        assert!(
+            !emit_a,
+            "without a make-up owed, a residence>=2 over-rate frame is DRAINED (emits nothing) — the \
+             #1145 v2 over-rate absorption"
+        );
+        assert!(
+            emit_b,
+            "with a corrupted make-up owed, the SAME drained slot is RECLAIMED (emitted) — the \
+             Drain-leg #1167 conversion fills the corrupted-vacated slot with the nearest good frame"
+        );
+        assert_eq!(
+            b.corrupted_makeup_deficit(),
+            0,
+            "the Drain-leg make-up consumed the one owed deficit unit"
         );
     }
 }
