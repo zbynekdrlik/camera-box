@@ -632,8 +632,8 @@ mod tests {
         let a: Vec<u8> = vec![7u8; w * h];
         let mut b = a.clone();
         // saturate every pixel of row 0 (always sampled — y starts at 0) to force a big MAD.
-        for x in 0..w {
-            b[x] = 250;
+        for v in b.iter_mut().take(w) {
+            *v = 250;
         }
         assert!(
             frame_row_sampled_mad(&a, &b, w, h) > 0.0,
