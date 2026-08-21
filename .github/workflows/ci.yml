@@ -396,6 +396,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bkshading-linux-amd64
+          # Fail loud if a binary is missing (renamed bin / wrong path) — an empty artifact with a
+          # green CI is exactly the "no deployable artifact" failure this milestone exists to fix.
+          if-no-files-found: error
           path: |
             target/release/bkshading-relay
             target/release/bkshading
@@ -433,6 +436,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bkshading-windows-amd64
+          # Fail loud on a missing binary (see the Linux upload) — never a green empty artifact.
+          if-no-files-found: error
           path: target/release/bkshading.exe
 
   build:
