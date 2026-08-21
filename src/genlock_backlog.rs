@@ -526,6 +526,59 @@ pub fn relock_select_nearest(queue_ts: &[u64], wall_now_ns: u64, anchor_age_ns: 
     best
 }
 
+/// #1161 — the fail-open MARGIN (ticks) the ACQUIRE bracketing gate ([`relock_acquire_should_hold`])
+/// adds on top of `ceil(reserve/interval)` before it force-acquires regardless of queue depth.
+/// `ceil(reserve/interval)` is how many render ticks a from-empty queue needs to deepen the OLDEST
+/// frame to the (raised) reserve; the small extra margin covers arrival jitter. Mirror of the C
+/// `GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS` (obs-source.c).
+pub const ACQUIRE_BRACKET_FAILOPEN_TICKS: u64 = 3;
+
+/// #1161 — the STAGE-2 ACQUIRE BRACKETING GATE decision. Should this ACQUIRE tick HOLD (return
+/// false, present nothing, let the queue deepen) instead of acquiring the lock now? The caller
+/// gates this to N>=2 sources only (see the C `genlock_release_tick` ACQUIRE branch) and increments
+/// `ticks_held` on each hold, resetting it to 0 on any non-holding tick.
+///
+/// WHY it exists (issue 1161). A per-source latency pin INCREASE forces a bounded re-acquire (the
+/// setter zeroes `genlock_locked_next_boundary_ns` on a RISE), but the ACQUIRE branch's
+/// [`relock_select_nearest`] picks the queued frame NEAREST `wall_now − reserve`. Immediately after
+/// a re-acquire the FIFO still holds only the OLD (shallow) depth, so no queued frame has yet aged
+/// to the raised reserve — the selection lands at the achievable FLOOR, up to one canvas frame BELOW
+/// the raised target, and the downward-only [`should_converge_phase`] shed can never raise it back
+/// (the #1161 one-canvas-frame residual). The #940 phase-pinned `due` scan makes this worse: it
+/// floors the deadline to the receiver grid, so a frame up to one interval YOUNGER than the raw
+/// reserve can qualify `due` and let the acquire fire early. This gate holds the acquire until the
+/// oldest queued frame has genuinely aged to the reserve, so a frame AT the target depth exists for
+/// the selection to land on — then the existing selection runs byte-identical (the phase is
+/// re-anchored via history, never free-run).
+///
+/// The decision, in order:
+/// * `interval_ns == 0` (degenerate video info) → NEVER hold — fail open to today's acquire.
+/// * `oldest_queued_age_ns >= reserve_ns` → the queue has bracketed the target; a frame at/past the
+///   reserve exists → acquire now (return false). This is why the gate is INERT at the production
+///   3 ms pin: the oldest queued frame is essentially always older than 3 ms.
+/// * otherwise HOLD, UNLESS the fail-open cap `ceil(reserve/interval) + ACQUIRE_BRACKET_FAILOPEN_TICKS`
+///   ticks have already been spent holding — a pathological queue whose oldest frame is continually
+///   replaced by a fresher one faster than it can age (an overrun-capped delay line) would otherwise
+///   hold forever, a NEW permanent-freeze mode; the cap degrades it to today's acquire instead
+///   (`no-timeout-band-aids.md` — this is a bounded safety valve, never the primary path: in the
+///   ordinary case the oldest frame simply ages to the reserve on its own within a few ticks).
+///
+/// Mirror of the C `genlock_relock_acquire_should_hold()` (obs-source.c) — keep both in lock-step;
+/// the C-vs-Rust parity is asserted by `tests/genlock_relock_selection_parity.rs`.
+pub fn relock_acquire_should_hold(
+    oldest_queued_age_ns: u64,
+    reserve_ns: u64,
+    interval_ns: u64,
+    ticks_held: u64,
+) -> bool {
+    // #1161 [red stub]: the pre-fix behaviour is "no bracketing" — the ACQUIRE branch acquires as
+    // soon as a frame is due, so a raised pin lands at the shallow floor. This stub reproduces that
+    // (never hold); the RED unit test `holds_while_the_queue_has_not_deepened_to_the_reserve_1161`
+    // fails against it. The real decision replaces this body in the GREEN commit.
+    let _ = (oldest_queued_age_ns, reserve_ns, interval_ns, ticks_held);
+    false
+}
+
 // ---------------------------------------------------------------------------------------------
 // #1009 — the backward-clock-step guard, RE-QUALIFIED (Tier-0 mirror of the C guard in
 // obs-source.c's ts-align release, the issue-147 branch).
@@ -3077,6 +3130,121 @@ mod tests {
         assert_eq!(
             drops, 0,
             "the deep 1000 ms hold must never converge (S == configured) — no #1003 regression"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #1161 — the STAGE-2 ACQUIRE BRACKETING GATE (relock_acquire_should_hold).
+    // -----------------------------------------------------------------------------------------
+
+    /// The RED reproduction of #1161: a re-acquire after a pin INCREASE (reserve now 53 ms) over a
+    /// still-shallow queue (oldest only 20 ms old) must HOLD so the queue can deepen to the raised
+    /// target — otherwise the acquire lands one canvas frame below target and the downward-only
+    /// shed can never raise it. The pre-fix behaviour (no bracketing) never holds → the frame
+    /// stays put. This is the test that fails against the [red] stub and passes against the fix.
+    #[test]
+    fn holds_while_the_queue_has_not_deepened_to_the_reserve_1161() {
+        let reserve = 53u64 * 1_000_000;
+        assert!(
+            relock_acquire_should_hold(20 * 1_000_000, reserve, I30, 0),
+            "#1161: an ACQUIRE over a queue whose oldest frame (20 ms) is younger than the raised \
+             reserve (53 ms) must HOLD to let the FIFO deepen, not acquire at the shallow floor."
+        );
+    }
+
+    /// Once the oldest queued frame has aged to (or past) the reserve, a frame at the target depth
+    /// exists for the selection to land on → acquire now (do NOT hold).
+    #[test]
+    fn acquires_once_the_oldest_frame_reaches_the_reserve_1161() {
+        let reserve = 53u64 * 1_000_000;
+        assert!(
+            !relock_acquire_should_hold(54 * 1_000_000, reserve, I30, 0),
+            "#1161: with the oldest frame (54 ms) aged past the raised reserve (53 ms) the gate \
+             must acquire — the queue has bracketed the target."
+        );
+    }
+
+    /// The boundary is inclusive: oldest age EXACTLY == reserve acquires (a frame at the target
+    /// exists), mirroring every other `>=`/`<=` due comparison in this module.
+    #[test]
+    fn acquires_exactly_at_the_reserve_boundary_1161() {
+        let reserve = 40u64 * 1_000_000;
+        assert!(
+            !relock_acquire_should_hold(reserve, reserve, I30, 0),
+            "#1161: oldest age == reserve must acquire (inclusive boundary)."
+        );
+    }
+
+    /// The fail-open cap bounds the hold: `ceil(reserve/interval) + ACQUIRE_BRACKET_FAILOPEN_TICKS`
+    /// ticks. At reserve 53 ms, interval 33.3 ms → ceil(53/33.3)=2, cap = 2 + 3 = 5. The gate holds
+    /// for ticks 0..=4 (queue still shallow) then force-acquires at tick 5 rather than freezing —
+    /// so a pathological never-deepening queue degrades to today's acquire, no new hold-collapse.
+    #[test]
+    fn fail_open_cap_forces_acquire_after_the_bounded_hold_1161() {
+        let reserve = 53u64 * 1_000_000;
+        let young = 20u64 * 1_000_000; // never reaches the reserve on its own in this test
+        let cap = (reserve + I30 - 1) / I30 + ACQUIRE_BRACKET_FAILOPEN_TICKS; // = 5
+        assert_eq!(cap, 5, "#1161: sanity — the cap derivation is ceil(53/33.3)+3 = 5");
+        assert!(
+            relock_acquire_should_hold(young, reserve, I30, cap - 1),
+            "#1161: one tick below the cap must still HOLD"
+        );
+        assert!(
+            !relock_acquire_should_hold(young, reserve, I30, cap),
+            "#1161: at the fail-open cap the gate must force-acquire (never freeze forever)"
+        );
+    }
+
+    /// A degenerate (0) interval — unknown video info — must never hold; fail open to today's
+    /// acquire, never divide by zero computing the cap.
+    #[test]
+    fn degenerate_interval_never_holds_1161() {
+        assert!(
+            !relock_acquire_should_hold(1_000_000, 53 * 1_000_000, 0, 0),
+            "#1161: a 0 interval must fail open (never hold, never divide by zero)."
+        );
+    }
+
+    /// Inert at the production 3 ms pin: once a normal 60 fps frame (~16 ms old) is queued, the
+    /// oldest age already exceeds 3 ms, so the gate acquires immediately — it never adds a hold to
+    /// the default production path (the ACQUIRE branch is only entered at cold start / a forced
+    /// re-acquire, and there the first real frame is already older than 3 ms).
+    #[test]
+    fn inert_at_the_production_pin_once_a_normal_frame_is_queued_1161() {
+        let reserve = 3u64 * 1_000_000;
+        assert!(
+            !relock_acquire_should_hold(16 * 1_000_000, reserve, I60, 0),
+            "#1161: at the 3 ms production pin a normal queued frame (16 ms) acquires immediately — \
+             the gate is inert on the production path."
+        );
+    }
+
+    /// End-to-end shape: a from-shallow re-acquire on an N>=2 (60 fps) source into a 30 fps canvas.
+    /// The oldest frame ages one canvas interval per tick from a shallow 4 ms; the gate HOLDs each
+    /// tick until the oldest brackets the raised 90 ms reserve, THEN acquires — and the whole hold
+    /// stays within the fail-open cap (never trips it in the healthy case).
+    #[test]
+    fn bracketing_gate_holds_from_shallow_then_acquires_within_the_cap_1161() {
+        let reserve = 90u64 * 1_000_000;
+        let cap = (reserve + I30 - 1) / I30 + ACQUIRE_BRACKET_FAILOPEN_TICKS;
+        let mut ticks_held = 0u64;
+        let mut oldest_age = 4u64 * 1_000_000; // shallow, just re-acquired at the old pin depth
+        let mut acquired_at: Option<u64> = None;
+        for tick in 0..40u64 {
+            if !relock_acquire_should_hold(oldest_age, reserve, I30, ticks_held) {
+                acquired_at = Some(tick);
+                break;
+            }
+            ticks_held += 1;
+            oldest_age += I30; // the queue deepens one canvas interval per tick while holding
+        }
+        let at = acquired_at.expect("#1161: the gate must eventually acquire");
+        // ceil(90/33.3) = 3, so the oldest (4 ms + 3*33.3 ms = ~104 ms) brackets 90 ms at tick 3.
+        assert_eq!(at, 3, "#1161: the gate should bracket a 90 ms target in 3 ticks from shallow");
+        assert!(
+            at < cap,
+            "#1161: a healthy deepening queue must acquire by AGING (tick {at}) well before the \
+             fail-open cap ({cap}) — the cap is a safety valve, not the primary path"
         );
     }
 }
