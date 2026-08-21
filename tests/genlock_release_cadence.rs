@@ -1006,4 +1006,39 @@ fn acquire_bracketing_gate_1161() {
          genlock_acquire_bracket_ticks is missing from obs_source; the fail-open cap has nowhere \
          to count. Re-apply."
     );
+
+    // (d) REMEMBERED-STATE SEAM completeness (vendored-libobs-change-safety.md "Adding REMEMBERED
+    // STATE"): genlock_acquire_bracket_ticks is a per-source field that survives across ACQUIRE
+    // ticks, so it MUST be zeroed at every boundary-invalidation seam that begins a fresh acquire
+    // episode — else a stale count undercuts the next re-acquire's fail-open cap (a shallow lock).
+    // The seams are the same ones that clear genlock_phase_anchor_ns (the #1003 seam guard above).
+    // (d.1) EVERY free_async_cache site (the delay line is gone → a fresh episode) must clear the
+    // counter — guarded RELATIONALLY like the #1003 seams==frees check, and placed AFTER
+    // free_async_cache so the #1003 `phase_anchor_ns = 0; free_async_cache(source);` adjacency stays
+    // intact.
+    let fac_counter_clears = src
+        .matches("free_async_cache(source); source->genlock_acquire_bracket_ticks = 0;")
+        .count();
+    let frees = src.matches("free_async_cache(source);").count();
+    assert_eq!(
+        fac_counter_clears, frees,
+        "{OBS_SOURCE}: #1161 — {frees} free_async_cache() site(s) but only {fac_counter_clears} \
+         clear genlock_acquire_bracket_ticks afterwards; a stale bracket count could survive a \
+         mid-episode delay-line drop and fail-open the next re-acquire early into a shallow lock."
+    );
+    // (d.2) genlock_backward_regime_end (zeroes the boundary → a fresh ACQUIRE) must clear it too —
+    // scoped to that function, never a byte window (same discipline as the #1003 anchor check above).
+    let regime_end_1161 = src
+        .split("static void genlock_backward_regime_end(")
+        .nth(1)
+        .expect("#1161: genlock_backward_regime_end must exist");
+    let regime_end_1161 = regime_end_1161
+        .find("static ")
+        .map_or(regime_end_1161, |i| &regime_end_1161[..i]);
+    assert!(
+        regime_end_1161.contains("source->genlock_acquire_bracket_ticks = 0;"),
+        "{OBS_SOURCE}: #1161 — genlock_backward_regime_end no longer clears \
+         genlock_acquire_bracket_ticks; a stale count from an interrupted re-acquire episode would \
+         undercut the post-regime re-acquire's fail-open cap."
+    );
 }

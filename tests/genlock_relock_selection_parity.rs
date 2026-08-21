@@ -260,7 +260,8 @@ fn lift_converge_helper() -> String {
 
 /// Lift a `#define NAME <value>` line VERBATIM from the vendored C so the parity harness compiles
 /// against the SHIPPED constant, never a hard-coded copy that could silently drift (issue-1049
-/// review finding 🟡2). Returns the whole `#define …` line.
+/// review finding 🟡2). Returns the whole `#define …` line. Shared by the #1049 and #1161 gates,
+/// so the not-found panic is issue-AGNOSTIC (naming which constant is missing, not a fixed ticket).
 fn lift_define(name: &str) -> String {
     let src = fs::read_to_string(repo(OBS_SOURCE)).expect("read obs-source.c");
     for line in src.lines() {
@@ -269,7 +270,7 @@ fn lift_define(name: &str) -> String {
             return t.to_string();
         }
     }
-    panic!("#1049: {OBS_SOURCE} no longer defines {name} — parity harness cannot lift it");
+    panic!("{OBS_SOURCE} no longer defines {name} — the parity harness cannot lift it");
 }
 
 /// `(wall_now, boundary, newest_stamp, latency_ms, interval, n, ticks_since_drain)`. `newest_stamp`

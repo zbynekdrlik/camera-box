@@ -9945,8 +9945,10 @@ No push/PR/rig touch (worktree worker).
   #1161 as the active frame-mover — implemented exactly that.
 - Root cause: a per-source pin INCREASE was inert — obs_source_set_genlock_latency_ms never zeroed
   the conveyor boundary (so the ACQUIRE branch never re-ran) and the phase-convergence shed is
-  downward-only; even a forced re-acquire would land one canvas frame below the raised target (the
-  phase-pinned deadline qualifies a frame up to one interval younger than the raw reserve).
+  downward-only; the presented frame never moved to the raised depth (the one-canvas-frame residual).
+  Part A (the forced re-acquire) is the PRIMARY frame-mover; the phase-pin FLOORS the deadline, so a
+  bare re-acquire would land within ~one hysteresis (5 ms) BELOW target — the sub-frame gap Part B
+  closes (an earlier draft mis-stated this as "one interval younger"; corrected per the review).
 - Two coordinated parts: (A) the setter forces a bounded re-acquire on a pin RISE (zero the
   boundary; a DECREASE keeps its existing shed path); (B) the ACQUIRE branch (N>=2 only) HOLDs via
   genlock_relock_acquire_should_hold until the oldest queued frame ages to the reserve, then runs

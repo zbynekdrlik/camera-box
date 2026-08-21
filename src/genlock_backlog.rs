@@ -538,18 +538,19 @@ pub const ACQUIRE_BRACKET_FAILOPEN_TICKS: u64 = 3;
 /// gates this to N>=2 sources only (see the C `genlock_release_tick` ACQUIRE branch) and increments
 /// `ticks_held` on each hold, resetting it to 0 on any non-holding tick.
 ///
-/// WHY it exists (issue 1161). A per-source latency pin INCREASE forces a bounded re-acquire (the
-/// setter zeroes `genlock_locked_next_boundary_ns` on a RISE), but the ACQUIRE branch's
-/// [`relock_select_nearest`] picks the queued frame NEAREST `wall_now − reserve`. Immediately after
-/// a re-acquire the FIFO still holds only the OLD (shallow) depth, so no queued frame has yet aged
-/// to the raised reserve — the selection lands at the achievable FLOOR, up to one canvas frame BELOW
-/// the raised target, and the downward-only [`should_converge_phase`] shed can never raise it back
-/// (the #1161 one-canvas-frame residual). The #940 phase-pinned `due` scan makes this worse: it
-/// floors the deadline to the receiver grid, so a frame up to one interval YOUNGER than the raw
-/// reserve can qualify `due` and let the acquire fire early. This gate holds the acquire until the
-/// oldest queued frame has genuinely aged to the reserve, so a frame AT the target depth exists for
-/// the selection to land on — then the existing selection runs byte-identical (the phase is
-/// re-anchored via history, never free-run).
+/// WHY it exists (issue 1161). The PRIMARY frame-mover is the setter forcing a bounded re-acquire
+/// on a pin RISE (it zeroes `genlock_locked_next_boundary_ns`): that alone lets the ACQUIRE branch
+/// rebuild the FIFO to the raised depth and moves the presented frame off the shallow old-depth
+/// toward the new reserve — it is what closes the ticket's one-canvas-frame residual. THIS gate is
+/// the PRECISION half. Without it, the ACQUIRE branch acquires as soon as a frame is `due`, and
+/// [`relock_select_nearest`] picks the queued frame NEAREST `wall_now − reserve`. Because the #940
+/// phase-pinned deadline FLOORS the raw reserve to the receiver grid, a `due` frame is only at least
+/// `reserve − PHASE_PIN_HYSTERESIS_NS` (5 ms) old — so a bare re-acquire lands up to ~5 ms BELOW the
+/// raised target (and the nearest-selection could pick a slightly-younger neighbour), a SUB-frame
+/// residual the downward-only [`should_converge_phase`] shed can never raise back. This gate holds
+/// the acquire until the oldest queued frame has aged to the FULL reserve, so a frame AT the target
+/// depth exists for the selection to land on — then the existing selection runs byte-identical (the
+/// phase is re-anchored via history, never free-run).
 ///
 /// The decision, in order:
 /// * `interval_ns == 0` (degenerate video info) → NEVER hold — fail open to today's acquire.
