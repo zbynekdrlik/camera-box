@@ -286,9 +286,17 @@ pub fn dup_cadence_gate_pass(
 
 /// #1088 report-only / restore seam — mirrors [`crate::optical_floor::gates_overall_pass`] /
 /// [`crate::presentation_cadence::gates_overall_pass`]. Whether [`dup_cadence_gate_pass`]'s result
-/// folds into the fused verdict's `overall_pass`. `false` today: the metric ships REPORT-ONLY (the
-/// bound is an uncalibrated first-cut and the offline content-dup distribution is not yet measured
-/// on real runs). Flip to `true` for a one-line promotion once calibrated against real runs.
+/// folds into the fused verdict's `overall_pass`. `false` today: the metric ships REPORT-ONLY.
+///
+/// **#1101 calibration verdict — the flip is NOT merely a threshold change.** The current tap hashes
+/// the STREAM box's LOSSY `.mp4` recording, on which byte-exact frame identity does not survive the
+/// encode; the mined production data showed the content-hash observed only 2 of 147 tick-proven
+/// copies (≈1.4%) — the signal is [`SignalViability::Blind`], so a LIVE flip would be a permanent
+/// false-green (a real 50→60 pulldown's duplicate frames also become byte-unique after the lossy
+/// encode). The precondition for the one-line flip is therefore [`signal_promotable`]
+/// ([`signal_viability`]) == `true` on real runs (currently never), AND a calibrated bound on top —
+/// NOT a bare threshold tweak. The signal fix (a codec-tolerant near-duplicate hash, or re-tapping a
+/// lossless stage) is tracked as the #1101 follow-up.
 pub fn gates_overall_pass() -> bool {
     false
 }
@@ -336,26 +344,57 @@ pub struct CopyObservation {
 /// (index `i` is the same recorded frame in both; a `None` on either side never forms a duplicate).
 /// The caller builds both aligned from the same window frames.
 pub fn copy_observation(ticks: &[Option<u64>], content_hashes: &[Option<u64>]) -> CopyObservation {
-    // RED STUB (#1101) — replaced with the real fold in the GREEN commit.
-    let _ = (ticks, content_hashes);
+    let n = ticks.len().min(content_hashes.len());
+    let mut tick_copies = 0usize;
+    let mut copies_observed_by_content_hash = 0usize;
+    let mut content_hash_duplicates = 0usize;
+    for i in 1..n {
+        let tick_copy = ticks[i].is_some() && ticks[i] == ticks[i - 1];
+        let hash_dup = content_hashes[i].is_some() && content_hashes[i] == content_hashes[i - 1];
+        if tick_copy {
+            tick_copies += 1;
+        }
+        if hash_dup {
+            content_hash_duplicates += 1;
+        }
+        if tick_copy && hash_dup {
+            copies_observed_by_content_hash += 1;
+        }
+    }
+    let copy_observation_rate = if tick_copies > 0 {
+        Some(copies_observed_by_content_hash as f64 / tick_copies as f64)
+    } else {
+        None
+    };
     CopyObservation {
-        tick_copies: 0,
-        copies_observed_by_content_hash: 0,
-        content_hash_duplicates: 0,
-        copy_observation_rate: None,
+        tick_copies,
+        copies_observed_by_content_hash,
+        content_hash_duplicates,
+        copy_observation_rate,
     }
 }
 
 /// Fold per-window [`CopyObservation`]s into one run-level observation (sum the counts, recompute
 /// the rate).
 pub fn aggregate_copy_observations(observations: &[CopyObservation]) -> CopyObservation {
-    // RED STUB (#1101) — replaced with the real fold in the GREEN commit.
-    let _ = observations;
+    let mut tick_copies = 0usize;
+    let mut copies_observed_by_content_hash = 0usize;
+    let mut content_hash_duplicates = 0usize;
+    for o in observations {
+        tick_copies += o.tick_copies;
+        copies_observed_by_content_hash += o.copies_observed_by_content_hash;
+        content_hash_duplicates += o.content_hash_duplicates;
+    }
+    let copy_observation_rate = if tick_copies > 0 {
+        Some(copies_observed_by_content_hash as f64 / tick_copies as f64)
+    } else {
+        None
+    };
     CopyObservation {
-        tick_copies: 0,
-        copies_observed_by_content_hash: 0,
-        content_hash_duplicates: 0,
-        copy_observation_rate: None,
+        tick_copies,
+        copies_observed_by_content_hash,
+        content_hash_duplicates,
+        copy_observation_rate,
     }
 }
 
@@ -378,9 +417,16 @@ pub enum SignalViability {
 
 /// Classify a run's aggregate [`CopyObservation`] into a [`SignalViability`].
 pub fn signal_viability(observation: &CopyObservation) -> SignalViability {
-    // RED STUB (#1101) — replaced with the real classification in the GREEN commit.
-    let _ = observation;
-    SignalViability::Viable
+    if observation.tick_copies < MIN_TICK_COPIES_FOR_VIABILITY {
+        SignalViability::Indeterminate
+    } else if observation
+        .copy_observation_rate
+        .is_some_and(|r| r >= COPY_OBSERVATION_RATE_MIN)
+    {
+        SignalViability::Viable
+    } else {
+        SignalViability::Blind
+    }
 }
 
 /// Whether the surface is eligible for a LIVE-gate promotion AT ALL — true ONLY when the signal is
