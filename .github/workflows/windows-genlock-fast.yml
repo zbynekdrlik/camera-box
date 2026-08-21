@@ -195,6 +195,19 @@ jobs:
           if ($src -notmatch [regex]::Escape('source->genlock_converge_sheds++;') -or $src -notmatch [regex]::Escape('converge_sheds=%u')) { Write-Error "the distinct converge-shed observability counter / audit field is gone (#1049)"; exit 1 }
           Write-Output "#1049 steady-conveyor phase convergence present — OK"
 
+      - name: Assert #1161 Stage-2 ACQUIRE bracketing gate present
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          $internal = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('if (clamped > prev) { source->genlock_locked_next_boundary_ns = 0; source->genlock_acquire_bracket_ticks = 0; }')) { Write-Error "obs_source_set_genlock_latency_ms no longer forces a re-acquire on a pin RISE — a raised per-source pin can never move the presented frame deeper (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('static inline bool genlock_relock_acquire_should_hold(')) { Write-Error "the Stage-2 ACQUIRE bracketing gate helper genlock_relock_acquire_should_hold is gone — the frame-mover reverted (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS 3ULL')) { Write-Error "the ACQUIRE bracketing fail-open margin GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS is gone (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('const uint64_t cap = (reserve_ns + interval_ns - 1) / interval_ns + GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS;')) { Write-Error "the ACQUIRE bracketing gate's fail-open cap (ceil(reserve/interval)+margin) is gone — a queue that never deepens could hold forever (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('genlock_relock_acquire_should_hold(oldest_age,') -or $src -notmatch [regex]::Escape('source->genlock_acquire_bracket_ticks++;')) { Write-Error "the ACQUIRE branch no longer calls genlock_relock_acquire_should_hold(oldest_age, ...) / increments genlock_acquire_bracket_ticks (#1161)"; exit 1 }
+          if ($internal -notmatch [regex]::Escape('uint32_t genlock_acquire_bracket_ticks;')) { Write-Error "the ACQUIRE bracket-tick counter field genlock_acquire_bracket_ticks is missing from obs_source (#1161)"; exit 1 }
+          Write-Output "#1161 Stage-2 ACQUIRE bracketing gate present — OK"
+
       # #249: the fast path builds obs.dll from the real vendored source, so a `git subtree pull`
       # (#44) that reverts #245 to inert-but-still-compiling would hot-swap an INERT obs.dll un-gated
       # (the #235 regression: latency collapsed to one GLOBAL env knob, no per-source override). The

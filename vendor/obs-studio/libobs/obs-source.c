@@ -5444,6 +5444,49 @@ static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t r
 					  reserve_ms, interval, n, source->genlock_ticks_since_drain);
 }
 
+/* camera-box #1161: the fail-open MARGIN (ticks) the ACQUIRE bracketing gate
+ * (genlock_relock_acquire_should_hold) adds on top of ceil(reserve/interval) before it
+ * force-acquires regardless of queue depth. Mirror of src/genlock_backlog.rs
+ * ACQUIRE_BRACKET_FAILOPEN_TICKS. */
+#define GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS 3ULL
+
+/* camera-box #1161: the STAGE-2 ACQUIRE BRACKETING GATE decision, PURE part. Self-contained
+ * (only stdint scalars) so tests/genlock_relock_selection_parity.rs can lift it standalone and
+ * prove it byte-identical to the Rust authority src/genlock_backlog.rs relock_acquire_should_hold.
+ *
+ * The floor-3 aligner raises a source's latency pin to move its presented frame DEEPER, but a
+ * per-source pin INCREASE is structurally inert: obs_source_set_genlock_latency_ms re-arms the
+ * ms-path-inert fill latch + clears the phase anchor but (pre-#1161) never zeroed the conveyor
+ * boundary, so the ACQUIRE branch never re-ran; and genlock_phase_converge_due sheds DOWNWARD
+ * only. #1161 zeroes the boundary on a pin RISE (forcing a re-acquire) -- but a bare re-acquire
+ * would genlock_relock_select_nearest(wall - reserve) over the STILL-shallow old-depth queue,
+ * and the #940 phase-pinned deadline can qualify a `due` frame up to one interval YOUNGER than
+ * the raw reserve, so the selection lands at the achievable FLOOR one canvas frame BELOW the
+ * raised target -- which the downward-only shed can never raise back (the #1161 one-canvas-frame
+ * residual). This gate HOLDs the acquire until the OLDEST queued frame has aged to the reserve
+ * (the queue deepens ~one interval/tick and brackets the target within ceil(reserve/interval)
+ * ticks), so a frame AT the target depth exists; the caller then runs the existing
+ * genlock_relock_select_nearest byte-identical (phase re-anchored via history, never free-run).
+ * The fail-open cap (ceil(reserve/interval) + GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS ticks)
+ * degrades a pathological never-deepening queue (an overrun-capped delay line) to today's
+ * acquire rather than freezing -- no new hold-collapse mode. INERT at the production 3 ms pin
+ * (the ACQUIRE branch is only entered at cold start / a forced re-acquire, and the oldest queued
+ * frame is essentially always older than 3 ms), and gated to N>=2 at the call site (the deep
+ * N==1 source is already deterministic on cold acquire). Mirror of src/genlock_backlog.rs
+ * relock_acquire_should_hold (Tier-0 unit-tested) -- keep both in lock-step. */
+static inline bool genlock_relock_acquire_should_hold(uint64_t oldest_queued_age_ns,
+						      uint64_t reserve_ns, uint64_t interval_ns,
+						      uint64_t ticks_held)
+{
+	if (interval_ns == 0)
+		return false;
+	if (oldest_queued_age_ns >= reserve_ns)
+		return false;
+	const uint64_t cap = (reserve_ns + interval_ns - 1) / interval_ns +
+			     GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS;
+	return ticks_held < cap;
+}
+
 static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64_t present_ts,
 				 size_t due, uint64_t interval, uint32_t reserve_ms, uint64_t now_ns)
 {
@@ -5519,6 +5562,35 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		/* #859 follow-up: a fresh lock starts the settle clock over —
 		 * nothing has overshot yet immediately after acquiring. */
 		source->genlock_ticks_since_drain = 0;
+		/* camera-box #1161: ACQUIRE BRACKETING GATE (N>=2 only). A forced re-acquire on a
+		 * per-source latency INCREASE (obs_source_set_genlock_latency_ms zeroes the boundary
+		 * on a RISE) must land AT the raised hold depth, not up to one canvas frame BELOW it:
+		 * the #940 phase-pinned `due` scan can qualify a frame up to one interval YOUNGER than
+		 * the raw reserve, so an immediate acquire would relock-select over a queue whose
+		 * oldest frame has not yet aged to the target and lock at the FLOOR -- which the
+		 * downward-only #1049 shed can never raise (the #1161 residual). HOLD until the oldest
+		 * queued frame has aged to the reserve, THEN fall through to the existing
+		 * genlock_relock_select_nearest below (phase re-anchored via history, never free-run).
+		 * The fail-open cap degrades a queue that never deepens to today's acquire -- no new
+		 * hold-collapse mode. N>=2 ONLY: the deep N==1 source is already deterministic on cold
+		 * acquire, so leave it untouched. Mirror of src/genlock_backlog.rs
+		 * relock_acquire_should_hold (Tier-0 unit-tested) + the C-vs-Rust parity gate. */
+		if (genlock_effective_source_multiple(source, interval) >= 2) {
+			const uint64_t oldest_age =
+				wall_now > source->async_frames.array[0]->timestamp
+					? wall_now - source->async_frames.array[0]->timestamp
+					: 0;
+			if (genlock_relock_acquire_should_hold(oldest_age,
+							       (uint64_t)reserve_ms * 1000000ULL,
+							       interval,
+							       source->genlock_acquire_bracket_ticks)) {
+				source->genlock_acquire_bracket_ticks++;
+				source->genlock_holds++;
+				genlock_audit_log(source, now_ns);
+				return false;
+			}
+		}
+		source->genlock_acquire_bracket_ticks = 0;
 		if (due == 0) {
 			/* #148: a BENIGN source-early HOLD (frames queued, none
 			 * yet due) -> genlock_holds, NOT a true-empty
@@ -7884,6 +7956,23 @@ void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t ms)
 		 * which sheds the overshoot in one relock. Mirror of the Tier-0 sim's
 		 * set_reserve_ms (src/genlock_backlog.rs). */
 		source->genlock_phase_anchor_ns = 0;
+		/* camera-box #1161: force a bounded RE-ACQUIRE on a pin RISE. A per-source latency
+		 * INCREASE asks the conveyor to present an OLDER frame (hold DEEPER), but the phase-
+		 * locked boundary is a downward-only follower with no mechanism to ADD hold --
+		 * genlock_phase_converge_due sheds only toward max(reserve, floor), and clearing only
+		 * the anchor above leaves genlock_locked_next_boundary_ns locked at the OLD shallow
+		 * depth, so the raised pin never moves the presented frame (issue 1161). Zeroing the
+		 * locked boundary re-enters the ACQUIRE branch, where the #1161 bracketing gate holds
+		 * until the queue has deepened to the new reserve and the existing
+		 * genlock_relock_select_nearest then locks AT the raised depth. A DECREASE is
+		 * deliberately left to the existing anchor-clear + backlog relock shed above (a
+		 * re-acquire there would be needless churn -- the FIFO already holds MORE than the
+		 * lowered target and sheds it in one relock). genlock_acquire_bracket_ticks is reset
+		 * so the fail-open cap counts fresh for the new acquire episode. */
+		if (clamped > prev) {
+			source->genlock_locked_next_boundary_ns = 0;
+			source->genlock_acquire_bracket_ticks = 0;
+		}
 	}
 	pthread_mutex_unlock(&source->async_mutex);
 

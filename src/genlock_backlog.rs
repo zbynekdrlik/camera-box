@@ -571,12 +571,23 @@ pub fn relock_acquire_should_hold(
     interval_ns: u64,
     ticks_held: u64,
 ) -> bool {
-    // #1161 [red stub]: the pre-fix behaviour is "no bracketing" — the ACQUIRE branch acquires as
-    // soon as a frame is due, so a raised pin lands at the shallow floor. This stub reproduces that
-    // (never hold); the RED unit test `holds_while_the_queue_has_not_deepened_to_the_reserve_1161`
-    // fails against it. The real decision replaces this body in the GREEN commit.
-    let _ = (oldest_queued_age_ns, reserve_ns, interval_ns, ticks_held);
-    false
+    // Degenerate video info: never hold, and never divide by zero computing the cap.
+    if interval_ns == 0 {
+        return false;
+    }
+    // The queue has bracketed the target — a frame at/past the reserve exists for the selection to
+    // land on. Acquire now. (Inclusive `>=`, matching every other due comparison in this module.)
+    if oldest_queued_age_ns >= reserve_ns {
+        return false;
+    }
+    // Not deep enough yet — HOLD to let the queue deepen, UNLESS the fail-open cap is reached. The
+    // cap is `ceil(reserve/interval)` (ticks a from-empty queue needs to age its oldest frame to
+    // the reserve) plus a small jitter margin. Written as the explicit `(a + b - 1) / b` ceil so
+    // the C mirror (`genlock_relock_acquire_should_hold`) is byte-identical — the parity gate runs
+    // both. `reserve_ns` is bounded by the ms latency clamp, so `reserve_ns + interval_ns` cannot
+    // overflow at any real value.
+    let cap = (reserve_ns + interval_ns - 1) / interval_ns + ACQUIRE_BRACKET_FAILOPEN_TICKS;
+    ticks_held < cap
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3184,7 +3195,10 @@ mod tests {
         let reserve = 53u64 * 1_000_000;
         let young = 20u64 * 1_000_000; // never reaches the reserve on its own in this test
         let cap = (reserve + I30 - 1) / I30 + ACQUIRE_BRACKET_FAILOPEN_TICKS; // = 5
-        assert_eq!(cap, 5, "#1161: sanity — the cap derivation is ceil(53/33.3)+3 = 5");
+        assert_eq!(
+            cap, 5,
+            "#1161: sanity — the cap derivation is ceil(53/33.3)+3 = 5"
+        );
         assert!(
             relock_acquire_should_hold(young, reserve, I30, cap - 1),
             "#1161: one tick below the cap must still HOLD"
@@ -3240,7 +3254,10 @@ mod tests {
         }
         let at = acquired_at.expect("#1161: the gate must eventually acquire");
         // ceil(90/33.3) = 3, so the oldest (4 ms + 3*33.3 ms = ~104 ms) brackets 90 ms at tick 3.
-        assert_eq!(at, 3, "#1161: the gate should bracket a 90 ms target in 3 ticks from shallow");
+        assert_eq!(
+            at, 3,
+            "#1161: the gate should bracket a 90 ms target in 3 ticks from shallow"
+        );
         assert!(
             at < cap,
             "#1161: a healthy deepening queue must acquire by AGING (tick {at}) well before the \

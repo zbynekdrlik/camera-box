@@ -944,3 +944,66 @@ fn release_cadence_extracted_into_genlock_release_tick_1038() {
          #741/#940 enclosing-function slice anchors would resolve past ready_async_frame."
     );
 }
+
+#[test]
+fn acquire_bracketing_gate_1161() {
+    // #1161 — the Stage-2 ACQUIRE bracketing gate + the pin-rise re-acquire that triggers it.
+    // (a) the setter forces a re-acquire on a pin RISE by zeroing the conveyor boundary + the
+    // bracket counter; (b) the ACQUIRE branch (N>=2) holds via genlock_relock_acquire_should_hold
+    // until the queue deepens to the raised reserve; (c) the pure helper + its fail-open #define
+    // exist and are consumed. The behavioral RED->GREEN + the executable C-vs-Rust parity live in
+    // src/genlock_backlog.rs (Tier-0 unit-tested) + tests/genlock_relock_selection_parity.rs; this
+    // default-features guard pins the C PORT so a subtree-pull or edit can't silently revert it
+    // (the vendored C compiles only on CI). Mirror: src/genlock_backlog.rs relock_acquire_should_hold.
+    let src = squish(&vendor_file(OBS_SOURCE));
+    let internal = squish(&vendor_file(OBS_INTERNAL));
+
+    // (a) setter re-acquire on a pin RISE — the frame-mover's trigger (issue 1161 root cause).
+    assert!(
+        src.contains(
+            "if (clamped > prev) { source->genlock_locked_next_boundary_ns = 0; \
+             source->genlock_acquire_bracket_ticks = 0; }"
+        ),
+        "{OBS_SOURCE}: #1161 — obs_source_set_genlock_latency_ms no longer zeroes the conveyor \
+         boundary on a pin RISE; a raised per-source pin can never re-acquire, so the presented \
+         frame never moves deeper (the #1161 residual). Re-apply."
+    );
+
+    // (b) the pure decision + its fail-open margin, mirrored from src/genlock_backlog.rs.
+    assert!(
+        src.contains("#define GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS 3ULL"),
+        "{OBS_SOURCE}: #1161 — the fail-open margin GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS is gone."
+    );
+    assert!(
+        src.contains("static inline bool genlock_relock_acquire_should_hold("),
+        "{OBS_SOURCE}: #1161 — the pure ACQUIRE bracketing gate helper \
+         genlock_relock_acquire_should_hold is gone; the frame-mover reverted. Mirror: \
+         src/genlock_backlog.rs relock_acquire_should_hold."
+    );
+    assert!(
+        src.contains(
+            "const uint64_t cap = (reserve_ns + interval_ns - 1) / interval_ns + \
+             GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS;"
+        ),
+        "{OBS_SOURCE}: #1161 — the fail-open cap ceil(reserve/interval)+margin is gone from the \
+         gate; a queue that never deepens could hold forever (a new hold-collapse mode). Re-apply."
+    );
+
+    // (c) the gate is WIRED into the ACQUIRE branch, N>=2 only, feeding + incrementing the counter.
+    assert!(
+        src.contains("genlock_relock_acquire_should_hold(oldest_age,")
+            && src.contains("source->genlock_acquire_bracket_ticks++;"),
+        "{OBS_SOURCE}: #1161 — the ACQUIRE branch no longer calls \
+         genlock_relock_acquire_should_hold (with oldest_age) / increments \
+         genlock_acquire_bracket_ticks; the bracketing hold is gone and a forced re-acquire would \
+         land one canvas frame below the raised target. Re-apply."
+    );
+
+    // The new remembered-state field must live on obs_source (bzalloc-zeroed with the counters).
+    assert!(
+        internal.contains("uint32_t genlock_acquire_bracket_ticks;"),
+        "{OBS_INTERNAL}: #1161 — the ACQUIRE bracket-tick counter field \
+         genlock_acquire_bracket_ticks is missing from obs_source; the fail-open cap has nowhere \
+         to count. Re-apply."
+    );
+}
