@@ -370,8 +370,20 @@ jobs:
       - name: Test (bkshading members)
         run: cargo test -p bkshading-proto -p bkshading-relay -p bkshading
 
+      # Run the service test suite WITH the real-NDI feature on (issue 1157): this compiles AND
+      # runs the ndi-gated code path plus the ndi_paths cross-platform discovery unit tests
+      # (which pin that the Windows Processing.NDI.Lib runtime DLL is in the search set).
+      # libloading is a runtime dynamic load, so no libndi need be installed to build/run these.
+      - name: Test (bkshading service, --features ndi)
+        run: cargo test -p bkshading --features ndi
+
       - name: Build binaries
         run: cargo build --bins -p bkshading -p bkshading-relay
+
+      # Build the actual deployable service binary WITH --features ndi (issue 1157) — the strih
+      # deploy ships this exact shape, so prove it links, not only that clippy is clean.
+      - name: Build binaries (bkshading service, --features ndi)
+        run: cargo build --bins -p bkshading --features ndi
 
   bkshading-windows:
     name: bkshading Windows compile check (issue 808)
@@ -393,6 +405,13 @@ jobs:
 
       - name: Check bkshading members (Windows target)
         run: cargo check -p bkshading-proto -p bkshading-relay -p bkshading
+
+      # The strih service is deployed WITH --features ndi (issue 1157), so the EXACT Windows
+      # binary that ships must compile — the M2 lane only ever compiled the feature for Linux.
+      # libloading resolves the NDI runtime DLL (Processing.NDI.Lib.x64.dll) at runtime, so this
+      # checks with no libndi installed on the runner.
+      - name: Check bkshading service (--features ndi, Windows target)
+        run: cargo check -p bkshading --features ndi
 
   build:
     name: Build
