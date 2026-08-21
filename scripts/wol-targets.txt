@@ -15,3 +15,9 @@ stream    10.77.9.204    E8:9C:25:CE:B6:EA
 # The imag ROLE permanently owns .182 (scripts/imag-host.sh); WoL from a full shutdown additionally
 # needs the box's BIOS to keep the USB port powered in standby -- see docs/wake-on-lan.md.
 imag-nb   10.77.9.182    6C:1F:F7:66:15:4B
+# resolume (#811): the Resolume Arena CG box, fleet-managed per the owner's 2026-08-21 approval.
+# Owner confirmed Wake-on-LAN works ("simple" mode) and provided BOTH NIC MACs at the rig
+# (2026-08-21) -- primary row below; the second NIC is listed as resolume-alt so a wake sweep
+# can fire both when the active NIC is unknown.
+resolume      10.77.9.201    3C:7C:3F:20:22:51
+resolume-alt  10.77.9.201    E0:51:D8:14:84:98
