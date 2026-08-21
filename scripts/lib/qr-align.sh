@@ -27,9 +27,12 @@
 # qr_align_run <host> <password>
 #   Runs the floor-3 aligner against strih. Sources default to camera_align_ndi_sources_csv (the
 #   caller must already have sourced scripts/camera-set.sh — recording-e2e.sh does). Overridable
-#   knobs (all optional): QR_ALIGN_SOURCES (explicit CSV), QR_ALIGN_ROUNDS, QR_ALIGN_MAX_DELTA_MS,
-#   QR_ALIGN_PARITY_TOL_IDS, QR_ALIGN_EXTRA_ARGS. Returns the aligner's exit code (0 = aligned /
-#   already-aligned; non-zero = could not align — the caller ABORTS the run).
+#   knobs (all optional): QR_ALIGN_SOURCES (explicit CSV), QR_ALIGN_MAX_DELTA_MS,
+#   QR_ALIGN_PARITY_TOL_IDS, QR_ALIGN_EXTRA_ARGS, and the #1160 stable-tail bounds QR_ALIGN_ROUNDS
+#   (→ the --max-measure-rounds cap) + QR_ALIGN_BUDGET_S (→ --measure-budget-s, the ~90 s wall-clock
+#   bound). The ~90 s budget is INTERNAL to qr_align_pins.py, so this step needs NO outer `timeout`
+#   and recording-e2e.sh is untouched. Returns the aligner's exit code (0 = aligned / already-aligned;
+#   non-zero = could not align — the caller ABORTS the run).
 qr_align_run() {
   local host="$1" password="${2:-}"
   local here sources rc=0
@@ -44,7 +47,10 @@ qr_align_run() {
   fi
 
   local -a args=(--host "$host" --password "$password" --sources "$sources" --execute)
-  [ -n "${QR_ALIGN_ROUNDS:-}" ]         && args+=(--rounds "$QR_ALIGN_ROUNDS")
+  # #1160: the measure phase is dynamic (measure-to-a-stable-tail), so QR_ALIGN_ROUNDS is now the
+  # hard round CAP, and QR_ALIGN_BUDGET_S the wall-clock bound.
+  [ -n "${QR_ALIGN_ROUNDS:-}" ]         && args+=(--max-measure-rounds "$QR_ALIGN_ROUNDS")
+  [ -n "${QR_ALIGN_BUDGET_S:-}" ]       && args+=(--measure-budget-s "$QR_ALIGN_BUDGET_S")
   [ -n "${QR_ALIGN_MAX_DELTA_MS:-}" ]   && args+=(--max-delta-ms "$QR_ALIGN_MAX_DELTA_MS")
   [ -n "${QR_ALIGN_PARITY_TOL_IDS:-}" ] && args+=(--parity-tol-ids "$QR_ALIGN_PARITY_TOL_IDS")
   # QR_ALIGN_EXTRA_ARGS is an intentional word-split escape hatch for one-off flags.

@@ -3,6 +3,7 @@ paths:
   - "scripts/qr_align_pins.py"
   - "scripts/lib/qr-align.sh"
   - "tests/python/test_qr_align_pins_1003.py"
+  - "tests/python/test_qr_align_tail_1160.py"
   - "tests/harness_qr_align_step_1003.rs"
 ---
 
@@ -101,4 +102,38 @@ the burn genuinely coexisted (`burn_seen`) so the test still exercises the condi
 
 **FAIL diagnostics:** every abort path now prints `format_round_table()` (round × camera decoded
 frame_id, `--` = undecoded, per-camera `decoded N/R`) so the operator can tell undecodable from
-unstable-spread from one-dead-camera.
+unstable-spread from one-dead-camera. Since #1160 it takes an optional `tail_start` and marks the
+STABLE-TAIL rounds used for the verdict with a `tail` column (2-arg callers get the old format).
+
+## Measure to a STABLE TAIL, never the convergence transient (#1160)
+
+The rig backlog (issue 1145) drains at ~0.3 frame/s, so a fresh restart / receiver reconnect / burn
+toggle in the earlier E2E steps leaves a camera MINUTES over the align bound while it catches up. The
+OLD aligner measured a FIXED 9-round window and medianed the WHOLE window → it judged the transient
+(spreads decaying 10,10,11,12,9,9,9,7,2 id → median 9, worst delta 75 ms > the 66 ms sanity bound →
+abort) though steady state was ≤2 id seconds later. **Never judge a fixed window of a converging
+system.**
+
+- `measure_stable_tail()` (replaced the fixed-count `measure_rounds`) loops barrier rounds until the
+  last **K** (`--stable-tail-rounds`, default 3) rounds are MUTUALLY stable, then judges the STABLE
+  TAIL only. "Mutually stable" = the tail spreads' **max−min ≤ `--stable-tol-ids`** (default 1) — the
+  pairwise form, which subsumes the ticket's "round-to-round ≤1" AND rejects a slow monotonic ramp
+  (spreads 1,2,3 have round-to-round ≤1 but max−min 2 → still diverging → correctly not stable).
+- **Stop decision (`measure_tail_status`, PURE):** stability is judged over the maximal contiguous
+  suffix of **FULL** rounds (a decode-miss round breaks the suffix — `_stable_tail_start`). Then:
+  (a) tail already at parity (median spread ≤ the ≤1-id gate, ≥ `min_parity_rounds` rounds) →
+  `converged-aligned`, PASS fast on just K rounds; (b) tail stable but NOT at parity AND ≥
+  `min_valid_rounds` (5) rounds → `converged-stable`, re-derive floor-3 from the tail; (c) stable but
+  < min_valid rounds → `stable-need-more`, keep measuring. **K=3 < min_valid=5 by design:** the
+  cheap already-aligned confirm needs only 3, but the re-derive path keeps measuring to accumulate 5
+  — no threshold is weakened, each gate (66 ms sanity, ≤1-id parity, min-valid/parity rounds) is
+  applied UNCHANGED to the tail.
+- **Bounded (`--measure-budget-s` ~90 s + `--max-measure-rounds` 30):** a rig that never stabilizes
+  (a degraded/over-rate grabber) still FAILS within the bound with the full table printed. The verify
+  (post-apply) re-measure is stable-tail too, so a pin-change transient is not re-caught.
+- **Wiring:** `qr-align.sh` remaps `QR_ALIGN_ROUNDS` → `--max-measure-rounds` and adds
+  `QR_ALIGN_BUDGET_S` → `--measure-budget-s`. The ~90 s bound is INTERNAL to the python, so the E2E
+  step needs no outer `timeout` and `recording-e2e.sh` is UNTOUCHED (its static anchors stay intact).
+- Tier-0: `_stable_tail_start` / `measure_tail_status` are PURE (no rig); `measure_stable_tail` + the
+  `align()` flow are tested against a monkeypatched `barrier_screenshot`
+  (`tests/python/test_qr_align_tail_1160.py`).

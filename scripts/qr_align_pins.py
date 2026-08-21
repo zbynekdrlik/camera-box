@@ -38,9 +38,10 @@ floor are NEVER touched -- they are simply never in the align set. Writes go thr
 apply_latency_pins.apply_pins (read-back-verified, fail-loud, idempotent).
 
 Tier-0: the pure functions (pick_painter_tick, frame_id_spread, round_deltas, robust_deltas,
-floor3_pins, sanity_ok, alignment_ok) do NO I/O and are unit-tested with no rig
-(tests/python/test_qr_align_pins_1003.py). cv2/threading/obs plumbing is imported LOCALLY inside the
-live functions so the pure logic (and its tests) never need a display or a rig.
+floor3_pins, sanity_ok, alignment_ok, and the #1160 stable-tail decision _stable_tail_start /
+measure_tail_status) do NO I/O and are unit-tested with no rig (tests/python/test_qr_align_pins_1003
+.py + test_qr_align_tail_1160.py). cv2/threading/obs plumbing is imported LOCALLY inside the live
+functions so the pure logic (and its tests) never need a display or a rig.
 
 CLI:
     qr_align_pins.py --host 10.77.9.202 --sources "NDI cam1,NDI cam2,NDI cam3,NDI cam4"  # DRY-RUN
@@ -49,6 +50,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import statistics
@@ -63,10 +65,21 @@ if _HERE not in sys.path:
 # for the pure tests (no display needed).
 from mv_skew_snapshot import dominant_run_id, parse_payload  # noqa: E402
 
-DEFAULT_ROUNDS = 9
 DEFAULT_MIN_VALID_ROUNDS = 5
 DEFAULT_MIN_PARITY_ROUNDS = 3  # full rounds needed to CONFIRM already-aligned (cheaper than re-derive)
 DEFAULT_PARITY_TOL_IDS = 1
+# #1160 -- measure to a STABLE TAIL, never the post-restart convergence transient. The rig backlog
+# (issue 1145) drains at ~0.3 frame/s, so a fresh restart / receiver reconnect / burn toggle leaves
+# a camera MINUTES over the align bound while it catches up; a fixed window judged mid-drain aborts a
+# rig whose steady state is healthy seconds later. Keep measuring until the last K rounds are MUTUALLY
+# stable (their cross-camera spreads within STABLE_TOL of each other -- the pairwise form, which
+# subsumes round-to-round <=1 AND rejects a slow monotonic ramp), then judge the tail ONLY. All the
+# verdict thresholds (66 ms sanity, <=1-id parity, min-valid/parity rounds) are UNCHANGED, applied to
+# the tail. All calibration, live-re-measurable like the other consts.
+DEFAULT_STABLE_TAIL_ROUNDS = 3    # K: consecutive mutually-stable rounds that prove convergence
+DEFAULT_STABLE_TOL_IDS = 1        # tail spreads must lie within this many frame_ids of each other
+DEFAULT_MEASURE_BUDGET_S = 90.0   # total wall-clock bound on the measure phase (never runs away)
+DEFAULT_MAX_MEASURE_ROUNDS = 30   # hard round cap (secondary bound; ~4 s/round => ~90 s at ~22)
 # A median relative delta above this = a degraded/underrun card, NOT a real inter-card difference:
 # FAIL rather than ship a deep pin. Must be BELOW the owner's cited "94 ms between identical cards is
 # nonsense" (a 100 ms default would silently re-enable the exact rejected deep-pin behavior). 66 ms
@@ -76,7 +89,6 @@ DEFAULT_MAX_DELTA_MS = 66.0
 DEFAULT_FLOOR_MS = 3          # imag-min-latency floor; the slowest strih camera anchors here
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
-DEFAULT_VERIFY_ROUNDS = 5
 DEFAULT_SETTLE_S = 4.0        # let the genlock FIFO re-lock after a pin change before re-measuring
 
 # The reserved node-burn run_ids -- a MIRROR of src/probe/recording.rs::NODE_BURN_RUN_IDS
@@ -142,15 +154,22 @@ def painter_run_id(tick_maps):
     return dominant_run_id(filtered)
 
 
-def format_round_table(rounds_ticks, sources):
+def format_round_table(rounds_ticks, sources, tail_start=None):
     """A per-round x per-camera decoded painter frame_id table (undecoded cell = '--') plus a
     per-camera 'decoded N/R' summary, for the FAIL diagnostics (#1159). It lets the operator tell
     "undecodable" (mostly '--') from "unstable spread" (decoded but scattered frame_ids) from "one
     dead camera" (one column all '--'). `rounds_ticks`: [{source: (frame_id, gen_ts_ns,
-    t_send_ns) | None}]; only frame_id (index 0) is shown."""
+    t_send_ns) | None}]; only frame_id (index 0) is shown.
+
+    When `tail_start` is given (#1160), a trailing 'used' column marks the STABLE-TAIL rounds
+    (index >= tail_start) that the verdict was actually computed from -- ALL rounds are still
+    printed, so the discarded convergence-transient rounds are visible too. `tail_start` None keeps
+    the original format byte-for-byte (existing 2-arg callers/tests unchanged)."""
+    mark = tail_start is not None
     short = [s.replace("NDI ", "") for s in sources]
     w = max([6] + [len(s) for s in short])
-    header = " round | " + " | ".join(s.rjust(w) for s in short) + " | spread"
+    header = " round | " + " | ".join(s.rjust(w) for s in short) + " | spread" + \
+        (" | used" if mark else "")
     lines = ["[qr-align] per-round painter frame_id table (-- = undecoded):", header,
              "-" * len(header)]
     decoded = {s: 0 for s in sources}
@@ -165,17 +184,19 @@ def format_round_table(rounds_ticks, sources):
                 fids.append(tk[0])
                 cells.append(str(tk[0]).rjust(w))
         spread = str(max(fids) - min(fids)) if len(fids) >= 2 else "n/a"
-        lines.append(f"{r:>6} | " + " | ".join(cells) + f" | {spread}")
+        used = (" | tail" if r >= tail_start else "") if mark else ""  # only tail rows are marked
+        lines.append(f"{r:>6} | " + " | ".join(cells) + f" | {spread}" + used)
     n = len(rounds_ticks)
     lines.append("decoded per camera: " + "  ".join(f"{sh}={decoded[s]}/{n}"
                                                      for s, sh in zip(sources, short)))
     return "\n".join(lines)
 
 
-def _emit_fail_diagnostics(rounds_ticks, sources):
+def _emit_fail_diagnostics(rounds_ticks, sources, tail_start=None):
     """Print the per-round frame_id diagnostics table to stderr before an AlignmentImpossible abort
-    (#1159), so every FAIL path carries the per-camera/per-round detail, not just the verdict."""
-    sys.stderr.write(format_round_table(rounds_ticks, sources) + "\n")
+    (#1159), so every FAIL path carries the per-camera/per-round detail, not just the verdict. The
+    #1160 `tail_start` marks which rounds fed the verdict (the stable tail)."""
+    sys.stderr.write(format_round_table(rounds_ticks, sources, tail_start) + "\n")
 
 
 def pick_painter_tick(qr_texts, run_id):
@@ -303,6 +324,75 @@ def alignment_ok(round_ticks, tol_frame_ids=DEFAULT_PARITY_TOL_IDS):
 
 
 # ---------------------------------------------------------------------------
+# #1160 -- stable-tail measurement (PURE decision; no I/O, unit-tested with no rig)
+# ---------------------------------------------------------------------------
+# The measure loop's stop decision. `tail_start` indexes the first round of the STABLE TAIL that the
+# verdict is computed from (rounds_ticks[tail_start:]); None when no stable tail exists yet.
+TailStatus = collections.namedtuple("TailStatus", "done reason tail_start")
+
+
+def _is_full_round(round_ticks, sources):
+    """True iff EVERY align source decoded a painter tick this round (a FULL round). Stability is
+    judged over full rounds only, so a decode-miss round never widens/narrows a spread comparison
+    against a different camera set (it simply breaks the contiguous stable suffix). Mirrors the
+    full-round predicate _full_round_parity uses."""
+    return bool(round_ticks) and len(round_ticks) == len(sources) and \
+        all(round_ticks.get(s) is not None for s in sources)
+
+
+def _stable_tail_start(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids):
+    """The start index of the maximal contiguous suffix of FULL rounds, ending at the LAST round,
+    whose cross-camera frame_id spreads all lie within `stable_tol_ids` of each other (max-min <=
+    tol -- the pairwise "mutually stable" form). Returns None when that suffix is shorter than
+    `stable_tail_rounds` (K) -- i.e. the last K rounds are not yet mutually stable. This is a
+    STRONGER test than the ticket's literal "round-to-round <=1": a slow monotonic ramp (spreads
+    1,2,3) has round-to-round deltas <=1 but max-min 2, so it is correctly rejected as still
+    diverging."""
+    n = len(rounds_ticks)
+    lo = hi = None
+    start = n
+    for i in range(n - 1, -1, -1):
+        r = rounds_ticks[i]
+        if not _is_full_round(r, sources):
+            break
+        sp = frame_id_spread(r)
+        if sp is None:  # defensive: a full round of >=2 cams always has a spread
+            break
+        nlo = sp if lo is None else min(lo, sp)
+        nhi = sp if hi is None else max(hi, sp)
+        if nhi - nlo > stable_tol_ids:
+            break
+        lo, hi, start = nlo, nhi, i
+    return start if (n - start) >= stable_tail_rounds else None
+
+
+def measure_tail_status(rounds_ticks, sources, *, stable_tail_rounds, stable_tol_ids,
+                        parity_tol_ids, min_parity_rounds, min_valid_rounds):
+    """Decide, from the rounds accumulated so far, whether the measure phase can STOP and which
+    STABLE-TAIL rounds the verdict should use. Returns a TailStatus:
+      - "converged-aligned": the last K rounds are mutually stable AND already at parity (median
+        spread <= parity_tol over >= min_parity_rounds full rounds) -> STOP, PASS-fast. Needs only
+        K rounds; min_valid_rounds is NOT required (no re-derive).
+      - "converged-stable": the tail is mutually stable but NOT at parity (a static residual delta
+        floor-3 pins can fix) AND has >= min_valid_rounds valid rounds -> STOP, re-derive from tail.
+      - "stable-need-more": the tail is stable but not aligned and has too few rounds to re-derive
+        robustly -> keep measuring (the unchanged min-valid-rounds threshold applied to the tail).
+      - "unstable": the last K rounds are not mutually stable -> keep measuring.
+    All the verdict thresholds are UNCHANGED here -- this only chooses WHEN to stop and WHICH rounds
+    to judge (the tail), never weakening a gate."""
+    start = _stable_tail_start(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids)
+    if start is None:
+        return TailStatus(False, "unstable", None)
+    tail = rounds_ticks[start:]
+    _med, aligned = _full_round_parity(tail, sources, parity_tol_ids, min_parity_rounds)
+    if aligned:
+        return TailStatus(True, "converged-aligned", start)
+    if len(tail) >= min_valid_rounds:
+        return TailStatus(True, "converged-stable", start)
+    return TailStatus(False, "stable-need-more", start)
+
+
+# ---------------------------------------------------------------------------
 # LIVE decode (cv2 + a preprocessing fallback for raw 1920px reads)
 # ---------------------------------------------------------------------------
 def decode_qr_texts(png_bytes):
@@ -415,28 +505,55 @@ def barrier_screenshot(sources, host, password, width, height):
     return results
 
 
-def measure_rounds(sources, host, password, rounds, width, height, run_id=None):
-    """`rounds` simultaneous barrier screenshots -> [{source: (frame_id, gen_ts_ns, t_send_ns)|None}].
-    The source ORDER is ROTATED each round so no camera is systematically served first/last (any
-    residual graphics-thread render-order bias then averages out across rounds, on top of the
-    per-round t_send compensation in round_deltas). The painter run_id is auto-detected (the run
-    present on the MOST cameras) unless pinned. Returns (rounds_ticks, run_id)."""
+def measure_stable_tail(sources, host, password, *, width, height, run_id=None,
+                        stable_tail_rounds=DEFAULT_STABLE_TAIL_ROUNDS,
+                        stable_tol_ids=DEFAULT_STABLE_TOL_IDS,
+                        parity_tol_ids=DEFAULT_PARITY_TOL_IDS,
+                        min_parity_rounds=DEFAULT_MIN_PARITY_ROUNDS,
+                        min_valid_rounds=DEFAULT_MIN_VALID_ROUNDS,
+                        budget_s=DEFAULT_MEASURE_BUDGET_S,
+                        max_rounds=DEFAULT_MAX_MEASURE_ROUNDS,
+                        inter_round_s=0.15):
+    """Barrier-screenshot round by round until the cross-camera spread has STABILIZED to a judgeable
+    tail (#1160), or the time/round budget is hit. After each round measure_tail_status decides
+    whether we can stop (converged-aligned / converged-stable) and which rounds are the stable tail.
+    The source ORDER is ROTATED each round so no camera is systematically served first/last (residual
+    render-order bias averages out, on top of round_deltas' t_send compensation). The painter run_id
+    is auto-detected (present on the MOST cameras) unless pinned. Returns (rounds_ticks, run_id,
+    TailStatus) -- ALL measured rounds (so the diagnostics table shows the discarded transient too),
+    the resolved run_id, and the final stop decision (its tail_start indexes the stable tail)."""
     import time
 
     n = len(sources)
     raw = []
-    for r in range(rounds):
+    rounds_ticks, rid = [], run_id
+    status = TailStatus(False, "unstable", None)
+    t0 = time.monotonic()
+    r = 0
+    while True:
         order = sources[r % n:] + sources[:r % n] if n else sources
         raw.append(barrier_screenshot(order, host, password, width, height))
-        time.sleep(0.15)
-    return ticks_from_raw(raw, run_id)
+        r += 1
+        rounds_ticks, rid = ticks_from_raw(raw, run_id)
+        status = measure_tail_status(
+            rounds_ticks, sources, stable_tail_rounds=stable_tail_rounds,
+            stable_tol_ids=stable_tol_ids, parity_tol_ids=parity_tol_ids,
+            min_parity_rounds=min_parity_rounds, min_valid_rounds=min_valid_rounds)
+        if status.done:
+            break
+        if r >= max_rounds or (time.monotonic() - t0) >= budget_s:
+            break
+        if inter_round_s:
+            time.sleep(inter_round_s)
+    return rounds_ticks, rid, status
 
 
 def ticks_from_raw(raw, run_id=None):
     """PURE: resolve the painter run_id (when unset) and map each round's decoded screenshots to
     {source: (frame_id, gen_ts_ns, t_send_ns) | None}. `raw` is a list of rounds, each
-    {source: (qr_texts, t_send_ns)}. Extracted from measure_rounds so the run_id-resolution +
-    tick-selection path is Tier-0 testable with synthetic decoded-text lists (no rig, no cv2)."""
+    {source: (qr_texts, t_send_ns)}. Extracted from the measure loop (measure_stable_tail) so the
+    run_id-resolution + tick-selection path is Tier-0 testable with synthetic decoded-text lists
+    (no rig, no cv2)."""
     from mv_skew_snapshot import tick_map
     if run_id is None:
         maps = [tick_map(texts) for shot in raw for (texts, _t) in shot.values()]
@@ -475,37 +592,68 @@ def _full_round_parity(rounds_ticks, sources, tol_frame_ids, min_parity_rounds):
     return med, (med <= tol_frame_ids)
 
 
-def align(sources, host, password, *, execute, rounds, min_valid_rounds, min_parity_rounds,
-          max_delta_ms, parity_tol_ids, floor_ms, width, height, verify_rounds, settle_s):
-    """The full per-run alignment: measure -> (already aligned? PASS) -> floor-3 plan -> sanity ->
-    apply (execute) -> settle -> RE-MEASURE -> PASS iff parity holds. Returns a result dict; raises
-    AlignmentImpossible on an un-measurable / un-sane / still-misaligned rig."""
+def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_ids, min_valid_rounds,
+          min_parity_rounds, max_delta_ms, parity_tol_ids, floor_ms, width, height,
+          measure_budget_s, max_measure_rounds, settle_s):
+    """The full per-run alignment: measure to a STABLE TAIL (#1160) -> (already aligned? PASS) ->
+    floor-3 plan from the tail -> sanity -> apply (execute) -> settle -> RE-MEASURE to a stable tail
+    -> PASS iff parity holds. The verdict is always computed from the stabilized tail, never the
+    post-restart convergence transient; every threshold (66 ms sanity, <=1-id parity, min-valid/
+    parity rounds) is UNCHANGED, applied to the tail. Returns a result dict; raises
+    AlignmentImpossible on an un-measurable / never-stabilizing / un-sane / still-misaligned rig."""
     import time
     from apply_latency_pins import apply_pins
 
     current_pins = read_current_pins(sources, host, password)
-    rounds_ticks, run_id = measure_rounds(sources, host, password, rounds, width, height)
-    pre_spread, pre_ok = _full_round_parity(rounds_ticks, sources, parity_tol_ids, min_parity_rounds)
+    rounds_ticks, run_id, status = measure_stable_tail(
+        sources, host, password, width=width, height=height, run_id=None,
+        stable_tail_rounds=stable_tail_rounds, stable_tol_ids=stable_tol_ids,
+        parity_tol_ids=parity_tol_ids, min_parity_rounds=min_parity_rounds,
+        min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds)
+    tail_start = status.tail_start
+    tail = rounds_ticks[tail_start:] if tail_start is not None else rounds_ticks
+    pre_spread, pre_ok = _full_round_parity(tail, sources, parity_tol_ids, min_parity_rounds)
 
     result = {
         "sources": sources, "run_id": run_id, "current_pins": current_pins,
+        "measure_rounds_total": len(rounds_ticks), "tail_rounds": len(tail),
+        "tail_start_index": tail_start, "stable": status.done, "measure_reason": status.reason,
         "pre_spread_ids": pre_spread, "execute": execute,
     }
 
     if run_id is None:
-        _emit_fail_diagnostics(rounds_ticks, sources)  # #1159: all "--" = nothing decoded on any input
+        _emit_fail_diagnostics(rounds_ticks, sources, tail_start)  # all "--" = nothing decoded
         raise AlignmentImpossible(
             "[qr-align] no painter QR decoded on the on-air strih inputs -- cannot measure "
             f"alignment (sources={sources}). Is the painter running and every input on-air?")
 
-    # ALREADY ALIGNED: confirmed on the full rounds -> return WITHOUT requiring robust_deltas (which
-    # would raise on a rig that IS aligned but has fewer full rounds than min_valid_rounds -- the
+    # #1160: the cross-camera spread never STABILIZED within the budget -- a converging backlog that
+    # never settles (a degraded / over-rate grabber, issue 1145). FAIL with the full table (marking
+    # the last stable rounds, if any) rather than judge a transient or an unstable window.
+    if not status.done:
+        _emit_fail_diagnostics(rounds_ticks, sources, tail_start)
+        # The two never-done reasons need different prose (a hardcoded "not mutually stable" lies for
+        # the stable-need-more branch, where the tail IS stable but had too few clean rounds).
+        why = (f"the last {stable_tail_rounds} rounds are not mutually stable (<= {stable_tol_ids} id)"
+               if status.reason == "unstable"
+               else f"the tail is mutually stable but never accumulated {min_valid_rounds} clean "
+                    "(fully-decoded) rounds to re-derive the pins from")
+        raise AlignmentImpossible(
+            f"[qr-align] the cross-camera spread did not STABILIZE within {measure_budget_s:.0f}s "
+            f"/{len(rounds_ticks)} rounds -- {why} (status {status.reason!r}), so no steady-state "
+            "tail could be measured. A converging backlog that never settles is a degraded / "
+            "over-rate grabber (issue 1145). Per-round table above (the last stable rounds, if "
+            "any, marked 'tail').")
+
+    # From here the verdict is judged over the STABLE TAIL only.
+    # ALREADY ALIGNED: confirmed on the tail -> return WITHOUT requiring robust_deltas (which would
+    # raise on a rig that IS aligned but has fewer full tail rounds than min_valid_rounds -- the
     # confirm bar is deliberately lower than the re-derive bar, #1003 review finding).
     if pre_ok:
         result["status"] = "already-aligned"
         result["plan"] = {}
         try:
-            deltas, n_valid = robust_deltas(rounds_ticks, current_pins, min_valid_rounds)
+            deltas, n_valid = robust_deltas(tail, current_pins, min_valid_rounds)
             result["median_deltas_ms"] = {s: round(v, 2) for s, v in deltas.items()}
             result["valid_rounds"] = n_valid
         except AlignmentImpossible as exc:  # best-effort report; the rig is already proven aligned
@@ -513,11 +661,12 @@ def align(sources, host, password, *, execute, rounds, min_valid_rounds, min_par
                 f"NOTE: qr_align: already-aligned; per-camera delta report skipped ({exc})\n")
         return result
 
-    # NOT aligned -> must re-derive to align; robust_deltas raises if the spread is un-measurable.
+    # NOT aligned but STABLE -> re-derive to align FROM THE TAIL; robust_deltas raises if the tail is
+    # un-measurable (min_valid_rounds unchanged, applied to the tail).
     try:
-        deltas, n_valid = robust_deltas(rounds_ticks, current_pins, min_valid_rounds)
+        deltas, n_valid = robust_deltas(tail, current_pins, min_valid_rounds)
     except AlignmentImpossible:
-        _emit_fail_diagnostics(rounds_ticks, sources)  # #1159: per-camera/per-round detail on abort
+        _emit_fail_diagnostics(rounds_ticks, sources, tail_start)  # per-camera/per-round on abort
         raise
     result["median_deltas_ms"] = {s: round(v, 2) for s, v in deltas.items()}
     result["valid_rounds"] = n_valid
@@ -527,7 +676,7 @@ def align(sources, host, password, *, execute, rounds, min_valid_rounds, min_par
     result["worst_source"] = widest_src
     result["worst_delta_ms"] = round(worst, 2)
     if not ok:
-        _emit_fail_diagnostics(rounds_ticks, sources)  # #1159
+        _emit_fail_diagnostics(rounds_ticks, sources, tail_start)
         raise AlignmentImpossible(
             f"[qr-align] cannot align: cross-camera spread {worst:.1f} ms exceeds the "
             f"{max_delta_ms:.0f} ms sanity bound -- a degraded/underrun grabber, not a real "
@@ -550,26 +699,34 @@ def align(sources, host, password, *, execute, rounds, min_valid_rounds, min_par
         ws.close()
 
     time.sleep(settle_s)
-    verify_ticks, _ = measure_rounds(sources, host, password, verify_rounds, width, height,
-                                     run_id=run_id)
-    post_spread, post_ok = _full_round_parity(verify_ticks, sources, parity_tol_ids, min_parity_rounds)
+    # Re-measure to a STABLE TAIL too, so a pin-change transient is not re-caught (#1160).
+    verify_ticks, _, vstatus = measure_stable_tail(
+        sources, host, password, width=width, height=height, run_id=run_id,
+        stable_tail_rounds=stable_tail_rounds, stable_tol_ids=stable_tol_ids,
+        parity_tol_ids=parity_tol_ids, min_parity_rounds=min_parity_rounds,
+        min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds)
+    vtail_start = vstatus.tail_start
+    vtail = verify_ticks[vtail_start:] if vtail_start is not None else verify_ticks
+    post_spread, post_ok = _full_round_parity(vtail, sources, parity_tol_ids, min_parity_rounds)
     result["post_spread_ids"] = post_spread
-    if not post_ok:
-        # Name the still-offending cameras (post-apply per-camera deltas) in the abort.
+    result["verify_stable"] = vstatus.done
+    if not (vstatus.done and post_ok):
+        # Name the still-offending cameras (post-apply per-camera deltas over the verify tail).
         post_pins = read_current_pins(sources, host, password)
         post_deltas = {}
-        for rnd in verify_ticks:
+        for rnd in vtail:
             d = round_deltas(rnd, post_pins)
             if d:
                 for s, v in d.items():
                     post_deltas.setdefault(s, []).append(v)
         named = {s: round(statistics.median(v), 1) for s, v in post_deltas.items()} if post_deltas \
             else "unverifiable"
-        _emit_fail_diagnostics(verify_ticks, sources)  # #1159: the RE-MEASURED rounds
+        _emit_fail_diagnostics(verify_ticks, sources, vtail_start)  # the RE-MEASURED rounds
+        why = ("did not STABILIZE" if not vstatus.done
+               else f"stabilized at frame_id spread {post_spread} (> {parity_tol_ids})")
         raise AlignmentImpossible(
-            f"[qr-align] applied floor-3 pins {plan} but the re-measured frame_id spread is "
-            f"{post_spread} (> {parity_tol_ids}) -- alignment did NOT hold. Per-camera residual "
-            f"deltas (ms): {named}.")
+            f"[qr-align] applied floor-3 pins {plan} but the re-measured tail {why} -- alignment "
+            f"did NOT hold. Per-camera residual deltas (ms): {named}.")
     result["status"] = "aligned"
     return result
 
@@ -581,7 +738,15 @@ def main(argv=None):
     ap.add_argument("--password", default=os.environ.get("OBS_PASSWORD", ""))
     ap.add_argument("--sources", required=True,
                     help="comma-separated strih inputs to align, e.g. 'NDI cam1,NDI cam2,NDI cam4'")
-    ap.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
+    # #1160 stable-tail measurement knobs (replace the old fixed --rounds / --verify-rounds):
+    ap.add_argument("--stable-tail-rounds", type=int, default=DEFAULT_STABLE_TAIL_ROUNDS,
+                    help="K: consecutive mutually-stable rounds that prove convergence (#1160)")
+    ap.add_argument("--stable-tol-ids", type=int, default=DEFAULT_STABLE_TOL_IDS,
+                    help="tail spreads must lie within this many frame_ids of each other (#1160)")
+    ap.add_argument("--measure-budget-s", type=float, default=DEFAULT_MEASURE_BUDGET_S,
+                    help="total wall-clock bound on the measure phase (#1160)")
+    ap.add_argument("--max-measure-rounds", type=int, default=DEFAULT_MAX_MEASURE_ROUNDS,
+                    help="hard round cap on the measure phase (#1160)")
     ap.add_argument("--min-valid-rounds", type=int, default=DEFAULT_MIN_VALID_ROUNDS)
     ap.add_argument("--min-parity-rounds", type=int, default=DEFAULT_MIN_PARITY_ROUNDS)
     ap.add_argument("--max-delta-ms", type=float, default=DEFAULT_MAX_DELTA_MS)
@@ -589,7 +754,6 @@ def main(argv=None):
     ap.add_argument("--floor-ms", type=int, default=DEFAULT_FLOOR_MS)
     ap.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     ap.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
-    ap.add_argument("--verify-rounds", type=int, default=DEFAULT_VERIFY_ROUNDS)
     ap.add_argument("--settle-s", type=float, default=DEFAULT_SETTLE_S)
     ap.add_argument("--execute", action="store_true",
                     help="APPLY the floor-3 pins (default: DRY-RUN -- measure + plan, write nothing)")
@@ -601,22 +765,26 @@ def main(argv=None):
 
     result = align(
         sources, a.host, a.password,
-        execute=a.execute, rounds=a.rounds, min_valid_rounds=a.min_valid_rounds,
-        min_parity_rounds=a.min_parity_rounds,
+        execute=a.execute, stable_tail_rounds=a.stable_tail_rounds, stable_tol_ids=a.stable_tol_ids,
+        min_valid_rounds=a.min_valid_rounds, min_parity_rounds=a.min_parity_rounds,
         max_delta_ms=a.max_delta_ms, parity_tol_ids=a.parity_tol_ids, floor_ms=a.floor_ms,
-        width=a.width, height=a.height, verify_rounds=a.verify_rounds, settle_s=a.settle_s)
+        width=a.width, height=a.height, measure_budget_s=a.measure_budget_s,
+        max_measure_rounds=a.max_measure_rounds, settle_s=a.settle_s)
 
     print(json.dumps(result, default=str))
     status = result.get("status")
+    tail = (f"stable tail {result.get('tail_rounds')}/{result.get('measure_rounds_total')} rounds, "
+            f"{result.get('measure_reason')}")
     if status == "already-aligned":
-        print(f"[qr-align] host={a.host} ALREADY ALIGNED (spread {result['pre_spread_ids']} id).",
-              file=sys.stderr)
+        print(f"[qr-align] host={a.host} ALREADY ALIGNED (spread {result['pre_spread_ids']} id; "
+              f"{tail}).", file=sys.stderr)
     elif status == "plan-only":
-        print(f"[qr-align] host={a.host} DRY-RUN floor-3 plan (spread {result['pre_spread_ids']} id "
-              f"-> would set {result['plan']}); re-run with --execute to apply.", file=sys.stderr)
+        print(f"[qr-align] host={a.host} DRY-RUN floor-3 plan (spread {result['pre_spread_ids']} id; "
+              f"{tail} -> would set {result['plan']}); re-run with --execute to apply.",
+              file=sys.stderr)
     elif status == "aligned":
         print(f"[qr-align] host={a.host} ALIGNED: set {result['plan']}, re-measured spread "
-              f"{result['post_spread_ids']} id (<= {a.parity_tol_ids}).", file=sys.stderr)
+              f"{result['post_spread_ids']} id (<= {a.parity_tol_ids}); {tail}.", file=sys.stderr)
     return 0
 
 
