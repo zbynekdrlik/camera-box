@@ -2090,3 +2090,97 @@ fn drain_leg_make_up_emits_instead_of_dropping_1167() {
         "the Drain-leg make-up consumed the one owed deficit unit"
     );
 }
+
+// ── (#1167) the invariant: fill every 60fps slot while a good frame is buffered ──────────────
+
+#[test]
+fn over_rate_fills_every_60fps_slot_holds_60_not_skipped_1167() {
+    // (#1167 [red] -> [green]) The invariant (owner acceptance): at a sustained over-rate, while
+    // ANY captured frame is buffered, every 60fps emit slot must be FILLED with the nearest good
+    // frame (a single-slot dupe is acceptable; a skipped slot is NEVER). The merged #1145 v2 Drain
+    // (residence>=2) ADVANCES the boundary emitting nothing — it drops the oldest AND skips its slot,
+    // so an over-rate box under a send-bound loop emits BELOW 60 (the cam1 [4i/8align] sawtooth) even
+    // though the buffered surplus could have filled the slot. RED before the fix: the sanctioned
+    // send-bound `run_queue_sim` (all-unique captures — the Drain, not the dupe-shed, carries the
+    // absorption) emits ~59.7 at a genuine over-rate. GREEN after: ~60 (the Drain HOLDS the boundary
+    // so the next fresher frame fills the slot). Residence stays bounded (the fix still drops the
+    // oldest), so the #1145 v2 sawtooth fix + V4L2-overflow pre-emption are preserved.
+    for &fps in &[62.0_f64, 63.0] {
+        let s = run_queue_sim(fps, 120, 30.0);
+        let emit_fps = s.emits as f64 / 30.0;
+        assert!(
+            emit_fps >= 59.9,
+            "an over-rate box must hold ~60 by filling every slot (issue-1167 invariant); got \
+                 {emit_fps:.2} fps at {fps} capture (drained={}) — the merged v2 Drain skips the \
+                 slot instead of filling it with the next good frame",
+            s.drained
+        );
+        assert!(
+            s.max_residence_post <= QUEUE_DEPTH_SHED_INTERVALS,
+            "residence must stay bounded at the depth target even while filling slots; max {} \
+                 intervals (target {})",
+            s.max_residence_post,
+            QUEUE_DEPTH_SHED_INTERVALS
+        );
+        assert_eq!(
+            s.overflow_steady, 0,
+            "filling slots must still pre-empt every V4L2 overflow-drop burst; steady overflow {}",
+            s.overflow_steady
+        );
+    }
+}
+
+#[test]
+fn shallow_lag_over_rate_dupe_fills_slot_with_copy_not_retired_1167() {
+    // (#1167 [red] -> [green]) A content-dupe crossing a SHALLOW-stale boundary
+    // (1 <= lag <= RETIRE_MAX_LAG_INTERVALS) at a sustained over-rate with enough distinct content
+    // must FILL the slot with a copy of the nearest good frame (Emit{copy:true}), NOT be RETIRED
+    // (advance the boundary, emit nothing). The #1145 v1 retire skipped the slot; whenever jitter
+    // keeps re-injecting shallow lag (the live cam1 shows `retired`>0 EVERY 5s window) that is a
+    // CONTINUOUS strih-FIFO hold = the cam1 align sawtooth. RED before the fix: dupe_shed_action
+    // returns Retire for the whole shallow band; GREEN after: Emit{copy:true} (fill, never skip).
+    for lag in 1..=RETIRE_MAX_LAG_INTERVALS {
+        assert_eq!(
+            dupe_shed_action(true, true, false, lag, true, 0, true),
+            ShedAction::Emit { copy: true },
+            "a shallow-lag ({lag}) over-rate dupe must fill the slot with a copy, not be retired"
+        );
+    }
+    // The DEEP band (above the ceiling) is STILL FastDrain — a genuine reconnect backlog needs the
+    // slot skip to converge, and the owner carves it out. Unchanged by #1167.
+    assert_eq!(
+        dupe_shed_action(true, true, false, RETIRE_MAX_LAG_INTERVALS + 1, true, 0, true),
+        ShedAction::FastDrain,
+        "the deep-backlog band above the ceiling stays FastDrain (a skip to converge a reconnect)"
+    );
+}
+
+#[test]
+fn drain_holds_the_boundary_so_the_next_frame_fills_the_slot_1167() {
+    // (#1167 [red] -> [green]) A residence>=2 over-rate Drain must HOLD the boundary (drop the
+    // oldest to bound residence, but NEVER advance/skip) so the NEXT fresher frame fills the same
+    // 60fps slot. RED before the fix: the merged v2 Drain advanced the boundary (skipped the slot);
+    // GREEN after: it holds the boundary (emits nothing THIS poll, but the slot survives to be
+    // filled). Same warmed-over-rate + residence-2 setup as drain_leg_make_up_emits_instead_of_
+    // dropping_1167 (proven to trigger the first Drain arm).
+    let cap_int = (1e9 / 62.0) as u64;
+    let emit_int = 1_000_000_000u64 / 60;
+    let mut next_i = 0u64;
+    let mut gate = warm_over_rate_gate(&mut next_i);
+    let capture_mono = 400u64 * cap_int;
+    let now = capture_mono + emit_int * 5 / 2; // residence floors to 2 -> the first Drain arm
+    let boundary_before = gate.next_boundary_ns();
+    let hash = 0x00C0_FFEEu64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let emit = gate.poll(now, emit_int, hash, true, now, capture_mono);
+    assert!(
+        !emit,
+        "a residence>=2 over-rate frame is still SHED (drained) this poll — the over-rate \
+             absorption still drops the oldest to bound residence"
+    );
+    assert_eq!(
+        gate.next_boundary_ns(),
+        boundary_before,
+        "the Drain must HOLD the boundary (not advance/skip) so the next fresher frame fills the \
+             slot — issue-1167 invariant (a skipped slot is never acceptable)"
+    );
+}
