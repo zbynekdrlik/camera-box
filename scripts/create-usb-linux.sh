@@ -52,6 +52,12 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
                                         # udev_camera_box_helper_script_content (#894) -- SAME
                                         # source of truth as setup-device.sh/verify-device.sh
 
+# shellcheck source=scripts/lib/dscp-nft.sh
+. "$SCRIPT_DIR/lib/dscp-nft.sh"  # dscp_nft_ruleset_content/dscp_nft_service_unit_content
+                                 # (dantesync issue 52) -- SAME source of truth as
+                                 # setup-device.sh/verify-device.sh for the NTP-client DSCP
+                                 # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + oneshot
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -253,6 +259,17 @@ EOF
     udev_camera_box_helper_script_content > "$MOUNT_ROOT/usr/local/bin/camera-box-udev-video-add.sh"
     chmod +x "$MOUNT_ROOT/usr/local/bin/camera-box-udev-video-add.sh"
 
+    # dantesync issue 52 (camera-box provisioning half): bake the NTP-client DSCP nftables rule +
+    # its boot oneshot into the base image too (same dual-bake as the udev/log-diet writes above),
+    # so a freshly-imaged box marks its NTP requests EF from first boot -- before setup-device.sh
+    # ever re-runs. dantesync's rsntp Linux client has no socket handle to setsockopt(IP_TOS); a
+    # dedicated `table ip dantesync_dscp` + oneshot closes the request half (scripts/lib/dscp-nft.sh).
+    # Plain host-side file writes (like the udev bake above); the `nftables` install + `systemctl
+    # enable dantesync-dscp` happen inside the chroot setup.sh below (they need apt/systemctl).
+    mkdir -p "$MOUNT_ROOT$(dirname "$DSCP_NFT_RULESET_PATH")" "$MOUNT_ROOT$(dirname "$DSCP_NFT_SERVICE_PATH")"
+    dscp_nft_ruleset_content > "$MOUNT_ROOT$DSCP_NFT_RULESET_PATH"
+    dscp_nft_service_unit_content > "$MOUNT_ROOT$DSCP_NFT_SERVICE_PATH"
+
     # #448 (2026-07-18 rescope, event finding #8): force-load the Intel iGPU DRM module at boot so a
     # HEADLESS first boot (no monitor attached) still brings up /dev/dri + /dev/fb0 for the painter /
     # cameraman-monitor framebuffer chain. On cam5-class hardware `i915` is only udev-probed when a
@@ -290,6 +307,7 @@ apt-get install -y \
     vim \
     less \
     dhcpcd-base \
+    nftables \
     cloud-guest-utils
 
 # #362: bake the NDI/audio RUNTIME deps into the base image so a fresh clone can RUN camera-box
@@ -432,6 +450,12 @@ netplan generate
 # Enable networkd (netplan uses it as renderer)
 systemctl enable systemd-networkd
 systemctl enable systemd-resolved
+
+# dantesync issue 52 (camera-box provisioning half): enable the boot-time oneshot that applies the
+# NTP-client DSCP nftables rule (its unit + ruleset file were baked into the image host-side above;
+# the `nftables` package is installed above). Enable-only -- the rule applies on first boot. rsntp's
+# Linux client cannot setsockopt(IP_TOS), so this marks the request direction (scripts/lib/dscp-nft.sh).
+systemctl enable dantesync-dscp
 
 # #448: MASK systemd-networkd-wait-online. The base debootstrap pulls it in with NO
 # `--interface`/`--any` bound, so on first boot it waits for EVERY interface to be fully
