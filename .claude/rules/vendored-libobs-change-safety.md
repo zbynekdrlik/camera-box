@@ -141,6 +141,22 @@ the settle-back drain never ran either. 923 → 400 ms parked at the old hold wi
 800 ticks. Guard the *shape*, not just the instance: `tests/genlock_release_cadence.rs` counts
 anchor-clears against `free_async_cache()` call sites, so a fourth seam cannot be added silently.
 
+**Adding a NEW remembered-state field that clears at the SAME seams — put its clear AFTER
+`free_async_cache(source);`, never between it and `genlock_phase_anchor_ns = 0;` (#1161).** The
+#1003 seam guard above counts the exact squished adjacency
+`source->genlock_phase_anchor_ns = 0; free_async_cache(source);` and asserts it equals the
+`free_async_cache(source);` count. A second field (e.g. `genlock_acquire_bracket_ticks`, #1161)
+must clear at the identical three sites, but inserting `source->genlock_new_field = 0;` BETWEEN the
+anchor-clear and the `free_async_cache` call SPLITS that adjacency → the #1003 count drops to 0 and
+its `seams == frees` test fails (cost one live break here). Place the new clear on the line
+*after* `free_async_cache(source);` — functionally identical (both run under `async_mutex`, no tick
+in between, and `free_async_cache` reads neither field) — and guard the new field RELATIONALLY the
+same way: count `free_async_cache(source); source->genlock_new_field = 0;` == the `free_async_cache`
+count, plus a scoped `.contains` check inside `genlock_backward_regime_end`. Never guard it by the
+`phase_anchor = 0; new_field = 0;` adjacency — that adjacency only survives at the regime-end /
+setter sites, not the `free_async_cache` ones, once you (correctly) place the new clear after the
+free.
+
 ## Static anchors slice on expressions you are about to change
 
 Several guards in `tests/genlock_release_cadence.rs` locate the relock branch by `.find()` on a
