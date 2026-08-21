@@ -410,6 +410,12 @@ pub mod burn_hold;
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
 // a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 mirrors.
 pub mod recordings_retention;
+// #789 (residual B / criterion 5) — standalone retention decision for the deploy/backup DIRECTORIES
+// the fleet deploy leaves behind (dated `<stamp>-789` box-backups + per-sha stage dirs); keep newest
+// -N per kind UNION younger-than-D-days, delete ONLY the deploy's OWN naming allowlist (never a
+// generic sweep — `previous/`/operator dirs stay protected). Canonical spec that
+// scripts/obs-backup-retention.{ps1,sh} mirror.
+pub mod obs_backup_retention;
 // #768 — REPORT-ONLY cold-cut onset seam: the first ~1s after a program switch to a cambox hidden
 // >= 60s (the transition the segmenter's guard discards, so nothing measured it — the blind spot
 // that let issue 767 through). Pure crate-root logic (Tier-0), consumed thinly by recording-verdict.
