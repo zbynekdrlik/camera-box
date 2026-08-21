@@ -9880,3 +9880,26 @@ No push/PR/rig touch (worktree worker).
   deploy/run-card by the worker. Ticket stays OPEN (partial residual — commits use `fix(#789)` paren
   form, no auto-close); criterion 5 evidence now lands but #789 also awaits the residual-A rig-mode.sh
   HARD-BLOCK reaching main.
+
+## 2026-08-21 — #1145 round 3: noise-tolerant content-compare dupe detection (CAM2 churn)
+- Issue #1145 (over-rate takt absorbed without cadence damage) round 3. v1 retire / v2 depth-drain /
+  v2.1 fast-drain (merged) removed content-COPIES but left CAM2 at 0.93-0.95 (below the 0.95 floor).
+  Root cause (issue-1130 comment 5364318219): CAM2 is the marginal jittery ~61 fps painter box; over a
+  full optical hop its surplus is a NOISY re-sample (sensor noise), not a byte-identical buffer-repeat
+  like CAM1's steady ~64 — so the exact-FNV `is_dupe` missed it, it emitted as a "unique" (Δ1) and
+  forced a compensating shed (Δ3) = the balanced-pair churn.
+- Fix: `dupe_content_sig` (exact hash + luma lattice, one pass; legacy `dupe_content_hash` delegates)
+  + a noise-tolerant `frames_are_content_dupes` two-threshold sparse-diff (median-offset; theta 48 /
+  max-changed 6) + `note_frame_luma` staged before poll; `is_dupe = exact || (sustained_over_rate &&
+  !prev_was_noisy_dupe && compare)`. Structural cage (over-rate-armed + never-two-consecutive + exact
+  first) makes a false-positive physically impossible for the burn geometry and biases hard to
+  false-negative (a miss = status quo). poll stays 6-arg → all pre-round-3 tests byte-untouched.
+- Commits: 7958d72e0 (bump 526) -> def21ded5 [red] -> 6361c47fa [green] (+ main.rs wiring).
+- Sim (REAL poll, root.rs #[path]): marginal noisy 61.0/61.3 -> 1.0000, 61.5 -> 0.9766 (all >=0.95,
+  Δ1/Δ3 collapsed) vs exact-hash baseline 0.9415/0.9245/0.9130; CAM1-64 byte-identical WITH==WITHOUT
+  note_frame_luma (identical decisions); healthy 60.00 inert. 61/61 pure-seam tests green via
+  rustc --test scratch; cargo fmt --all --check clean. Design pressure-tested via a gated Fable consult.
+- Design gate: STEP-0 validated + non-trivial design comment posted (standalone gh issue comment).
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI + deploy + the
+  live uniformity>=0.95 + QR-contiguity re-measure — the acceptance is that live step, NOT off-rig).
+  No PR/merge/deploy/run-card by the worker. Ticket stays OPEN (acceptance is a live measurement).
