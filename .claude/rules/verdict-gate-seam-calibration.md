@@ -246,3 +246,47 @@ Lessons for the NEXT content/pixel gate:
   dup-cadence reading, but with the signal blind, cam1's windows read 0.0 like every other — there is
   nothing to segregate. Confirm a signal is VIABLE before spending effort segregating known-faulty
   boxes out of its distribution.
+
+## 13. FIXING a blind content/pixel signal — codec-tolerant near-duplicate, validated on retained real pixels (#1166)
+
+§12 diagnosed the #1088 dup-cadence content hash as `Blind` on the lossy stream tap. #1166 FIXED it —
+the reusable playbook for turning a blind pixel signal Viable:
+
+- **A byte-exact per-frame HASH can never survive a lossy encode; a codec-tolerant NEAR-duplicate
+  measure can.** Replace the exact-equality test with a per-pair row-sampled mean-abs-luma-DIFFERENCE
+  (MAD) to the recording predecessor, thresholded (`NEAR_DUP_MAD_MAX`). A byte-duplicate source frame
+  survives the lossy round-trip as a LOW-MAD pair (only global quantization noise); genuine motion is
+  far higher. `frame_content_hash`->`frame_row_sampled_mad`; the classifier consumes an
+  `Option<f64>` per-window sequence and `is_near_duplicate(mad)` instead of `hash[i]==hash[i-1]`.
+
+- **DOWNSCALING DESTROYS the separation — sample FULL-WIDTH rows, never a thumbnail.** Measured on the
+  retained diagnostic PNGs: 8×8/16×16 thumbnail MAD ranges OVERLAP copy-vs-motion (averaging washes
+  out the localised motion that distinguishes a real frame from a duplicate), while FULL-resolution
+  MAD separates cleanly. Full-width row-sampling (~64 of 1080 rows) keeps each sampled row at full
+  horizontal resolution → it preserves the full-res separation at ~6% of the pixel cost. Consequence:
+  the MAD is a PAIRWISE quantity that MUST be computed on the box between consecutive full-res decoded
+  frames (`probe::recording::frame_prev_diffs`) and carried per frame — it cannot be reconstructed in
+  the merge from a compact per-frame thumbnail.
+
+- **The retained diagnostic frame PNGs (`<partial>-pixels/frame-*.png`) ARE a real-lossy validation
+  corpus — use them.** They are dumped around copy/gap events, so adjacent pairs include genuine
+  tick-proven copies AND genuine motion, on the ACTUAL lossy recording. Correlate each adjacent PNG
+  pair's `frame_index` with the partial's per-frame `tick` (a strict-adjacent tick repeat = a
+  tick-proven copy) and compute the candidate metric on the real pixels. #1166: 32 copy pairs vs 381
+  motion pairs across 12 runs → MAD ≤ 10.0 observes 81% of copies at 0% motion false-positive, where
+  the byte-exact hash observed 0/32. This is a genuine local RED→GREEN of the SIGNAL, not just the
+  detector mechanics — embed the measured copy/motion MAD scalars as a locked crate-root fixture test.
+
+- **The signal fix does NOT unblock the LIVE flip — the promotion gate is still DATA-gated.** The
+  PNG-dump corpus is BIASED (frames near events), and the existing partials carry the OLD byte-exact
+  hashes, so the full per-run `signal_viability` distribution + `DUP_RATE_PULLDOWN_MIN` recalibration
+  cannot be produced from retained data — they need a FRESH green run emitting the new signal. Ship
+  the fixed signal REPORT-ONLY (`gates_overall_pass()` stays `false`); the LIVE flip stays gated on
+  `signal_promotable == true` on ≥2 consecutive real runs + a recalibrated bound. State this
+  precisely; keep the ticket OPEN carrying the promote step (window-gate-tolerance-walkdown.md §5).
+
+- **A near-duplicate signal (unlike byte-exact) CAN fire on a genuinely-static-but-distinct scene**
+  (every consecutive pair low-MAD → high rate, regular, window-spanning → the classifier would
+  mis-flag it a pulldown). Harmless while report-only, but the full-run recalibration must judge
+  whether an UPPER rate bound is needed to separate a ~16.7% pulldown from ~100% static (frozen_leg's
+  domain). Not a concern on the animated Vernier/burn test pattern, but note it for the calibration.

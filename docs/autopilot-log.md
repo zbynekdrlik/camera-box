@@ -10069,3 +10069,32 @@ No push/PR/rig touch (worktree worker).
 - WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI + live rig
   verify). Full authority — supervisor opens the PR (Closes #1165), merges, fires the run-card. Branch
   worktree-agent-af7acf810e92e6902 @141efadd7; durability backup refs/autopilot-wip/worktree-agent-af7acf810e92e6902.
+## 2026-08-21 — issue 1166: dup-cadence content-hash was blind on the lossy tap — signal FIXED (codec-tolerant near-duplicate), report-only kept
+- Root cause (re-mined from retained partials): the #1088 dup-cadence surface hashed the STREAM
+  box's lossy .mp4 with a BYTE-EXACT row-sampled FNV-1a; byte identity does not survive H.264, so
+  the 1101 viability cross-check read Blind (run 460600987: 68 tick-copies, 0 observed by hash; 32
+  tick-copy PNG pairs across 12 runs, 0/32 observed).
+- Fix (Approach 1 of the ticket, the only locally-validatable one): replace the per-frame hash with
+  a codec-tolerant near-duplicate signal — a row-sampled mean-abs-luma-DIFFERENCE (MAD) to the
+  recording predecessor, thresholded at NEAR_DUP_MAD_MAX=10.0. Validated on the retained real lossy
+  diagnostic PNGs: 26/32 = 81% of tick-proven copies observed at 0/381 = 0.0% motion false-positive
+  -> SignalViability::Viable. Downscaled thumbnails destroy the separation; full-width row-sampling
+  (MAD_SAMPLE_ROWS=64) preserves the full-res separation cheaply, so the MAD is computed on the box
+  between consecutive full-res frames and carried per frame.
+- Files: src/dup_cadence.rs (frame_content_hash->frame_row_sampled_mad + is_near_duplicate;
+  measure_dup_cadence/copy_observation/window_content_hashes->window_prev_mads re-typed onto
+  Option<f64>; DupCadence.exact_duplicates->near_duplicates; CopyObservation fields renamed; embedded
+  real-lossy-copy fixture test). src/probe/recording.rs (hash_recording_frames->frame_prev_diffs).
+  src/probe/recording_partial.rs (content_hashes->frame_prev_diffs Option<Vec<Option<f64>>>,
+  PARTIAL_SCHEMA_VERSION 5->6). src/bin/recording-verdict.rs (producer + merge + wrapper rename;
+  one window sequence feeds both classifier + cross-check, resolving the 1101 sequence-mismatch).
+  .claude/rules/verdict-gate-seam-calibration.md section 13.
+- LIVE flip stays BLOCKED / report-only: the PNG corpus is biased and existing partials carry the
+  old byte-exact hashes, so the full-run signal_viability distribution + a DUP_RATE_PULLDOWN_MIN
+  recalibration need a fresh green run emitting the new signal. gates_overall_pass() stays false;
+  promotion gated on signal_promotable==true on >=2 consecutive real runs + a recalibrated bound.
+- Tier-0: pure module RED->GREEN via the rustc --test scratch route (28/28 green); probe-gated
+  files verified via cargo fmt --all --check + hand type-audit (no local type-check exists).
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI + a fresh
+  live E2E is what actually re-scores the new signal end-to-end). Ticket stays OPEN carrying the
+  promote step.

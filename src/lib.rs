@@ -361,7 +361,8 @@ pub mod presentation_cadence;
 // padding a 50fps source up to 60 — the #794 hard layer the receiver-side `received=` rate tap is
 // structurally blind to) versus the isolated free-running beat / over-rate baselines. No probe
 // deps, so it unit-tests Tier-0; the probe-gated `bin/recording-verdict.rs` computes the per-frame
-// hash from the offline recording and reports the result REPORT-ONLY (pending calibration).
+// codec-tolerant MAD-to-predecessor near-duplicate signal (#1166) from the offline recording and
+// reports the result REPORT-ONLY (pending calibration).
 pub mod dup_cadence;
 
 // #707 EVENT-FORENSICS — per-event residual copy/gap detection (pure decision). Given the same
