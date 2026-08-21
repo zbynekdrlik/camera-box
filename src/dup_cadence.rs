@@ -139,20 +139,41 @@ pub const MAD_SAMPLE_ROWS: usize = 64;
 /// adjacency/None handling gates it out). Computed on the box between consecutive decoded frames
 /// (`probe::recording::frame_prev_diffs`); carried per frame and thresholded in the merge.
 pub fn frame_row_sampled_mad(prev: &[u8], cur: &[u8], width: usize, height: usize) -> f64 {
-    // #1166 RED STUB — returns a constant so a genuinely-differing frame pair reads as "no
-    // difference"; the GREEN commit replaces this with the real row-sampled MAD.
-    let _ = (prev, cur, width, height);
-    0.0
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+    // A set of full-WIDTH rows spread evenly across the height (NOT a downscale — see
+    // MAD_SAMPLE_ROWS): mirrors the row-selection of the retired `frame_content_hash` (step =
+    // height/rows, y = 0, step, 2*step, …).
+    let step = (height / MAD_SAMPLE_ROWS).max(1);
+    let mut sum: u64 = 0;
+    let mut count: u64 = 0;
+    let mut y = 0usize;
+    while y < height {
+        let row_start = y * width;
+        let row_end = row_start + width;
+        // Only sample a row fully present in BOTH buffers (a truncated trailing/short frame skips
+        // that row rather than panicking or comparing past the end).
+        if row_end <= prev.len() && row_end <= cur.len() {
+            for x in row_start..row_end {
+                sum += u64::from((i32::from(prev[x]) - i32::from(cur[x])).unsigned_abs());
+                count += 1;
+            }
+        }
+        y += step;
+    }
+    if count == 0 {
+        0.0
+    } else {
+        sum as f64 / count as f64
+    }
 }
 
 /// #1166 — whether a per-pair row-sampled [`frame_row_sampled_mad`] counts as a content
 /// NEAR-DUPLICATE (`mad <= NEAR_DUP_MAD_MAX`). A precondition helper the classifier + the
 /// viability cross-check share, so both apply the SAME threshold to the SAME per-window sequence.
 pub fn is_near_duplicate(mad: f64) -> bool {
-    // #1166 RED STUB — always false (never a near-duplicate); the GREEN commit makes this
-    // `mad <= NEAR_DUP_MAD_MAX`.
-    let _ = mad;
-    false
+    mad <= NEAR_DUP_MAD_MAX
 }
 
 /// Per-window duplication-masked-cadence classification, built from a sequence of per-frame
