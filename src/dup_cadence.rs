@@ -523,7 +523,10 @@ pub fn signal_promotable(viability: SignalViability) -> bool {
 /// measures the window pair) AND that carried MAD is `Some`. Position 0, a decode gap, a
 /// non-adjacent window boundary, or an out-of-range index all yield `None` — a near-duplicate can
 /// never be manufactured across a gap or a window seam (two skipped frames must not look identical).
-pub fn window_prev_mads(frame_indices: &[u64], frame_prev_mads: &[Option<f64>]) -> Vec<Option<f64>> {
+pub fn window_prev_mads(
+    frame_indices: &[u64],
+    frame_prev_mads: &[Option<f64>],
+) -> Vec<Option<f64>> {
     frame_indices
         .iter()
         .enumerate()
@@ -627,7 +630,10 @@ mod tests {
         let a: Vec<u8> = vec![100u8; w * h];
         let b: Vec<u8> = vec![140u8; w * h];
         let mad = frame_row_sampled_mad(&a, &b, w, h);
-        assert!((mad - 40.0).abs() < 1e-9, "uniform +40 shift → MAD 40, got {mad}");
+        assert!(
+            (mad - 40.0).abs() < 1e-9,
+            "uniform +40 shift → MAD 40, got {mad}"
+        );
     }
 
     #[test]
@@ -660,7 +666,10 @@ mod tests {
             !is_near_duplicate(NEAR_DUP_MAD_MAX + 0.01),
             "just above the bound is NOT a near-duplicate"
         );
-        assert!(!is_near_duplicate(25.0), "genuine motion is not a near-duplicate");
+        assert!(
+            !is_near_duplicate(25.0),
+            "genuine motion is not a near-duplicate"
+        );
     }
 
     // ---- degenerate inputs -------------------------------------------------------------
@@ -693,7 +702,10 @@ mod tests {
         assert_eq!(v.gap_cv, None);
         assert_eq!(v.coverage, 0.0);
         assert!((v.inferred_source_fps - 60.0).abs() < 1e-9);
-        assert!(!v.duplication_masked, "a smooth 60 source is not masked: {v:?}");
+        assert!(
+            !v.duplication_masked,
+            "a smooth 60 source is not masked: {v:?}"
+        );
     }
 
     #[test]
@@ -702,7 +714,10 @@ mod tests {
         // exactly 6 (perfectly regular), spread across the whole window → the masked signature.
         let v = measure_dup_cadence(&pulldown_mads(120, 6)).expect("120 frames is plenty");
         // duplicates land at indices 6,12,...,114 → 19 duplicates over 119 pairs.
-        assert_eq!(v.near_duplicates, 19, "one dup every 6 frames over 120: {v:?}");
+        assert_eq!(
+            v.near_duplicates, 19,
+            "one dup every 6 frames over 120: {v:?}"
+        );
         assert!(
             (v.duplicate_fraction - 19.0 / 119.0).abs() < 1e-9,
             "≈16% dup fraction: {v:?}"
@@ -711,7 +726,11 @@ mod tests {
             v.duplicate_fraction > DUP_RATE_PULLDOWN_MIN,
             "the pulldown fraction must clear the rate floor: {v:?}"
         );
-        assert_eq!(v.gap_cv, Some(0.0), "a clean pulldown is perfectly regular: {v:?}");
+        assert_eq!(
+            v.gap_cv,
+            Some(0.0),
+            "a clean pulldown is perfectly regular: {v:?}"
+        );
         assert!(v.coverage >= DUP_COVERAGE_MIN, "spans the window: {v:?}");
         assert!(v.duplication_masked, "a 5:6 pulldown IS masked: {v:?}");
         assert!(
@@ -727,9 +746,18 @@ mod tests {
         let dup_at: Vec<usize> = (5..20).collect();
         let v = measure_dup_cadence(&mads_with_dups_at(120, &dup_at)).expect("plenty");
         assert!(v.near_duplicates >= 2, "has duplicates: {v:?}");
-        assert!(v.duplicate_fraction >= DUP_RATE_PULLDOWN_MIN, "high local rate: {v:?}");
-        assert!(v.coverage < DUP_COVERAGE_MIN, "localized, does not span: {v:?}");
-        assert!(!v.duplication_masked, "a localized freeze is NOT masked: {v:?}");
+        assert!(
+            v.duplicate_fraction >= DUP_RATE_PULLDOWN_MIN,
+            "high local rate: {v:?}"
+        );
+        assert!(
+            v.coverage < DUP_COVERAGE_MIN,
+            "localized, does not span: {v:?}"
+        );
+        assert!(
+            !v.duplication_masked,
+            "a localized freeze is NOT masked: {v:?}"
+        );
     }
 
     #[test]
@@ -744,7 +772,10 @@ mod tests {
             v.gap_cv.is_some_and(|cv| cv > DUP_GAP_CV_MAX),
             "irregular spacing exceeds the cv bound: {v:?}"
         );
-        assert!(!v.duplication_masked, "an irregular burst is NOT masked: {v:?}");
+        assert!(
+            !v.duplication_masked,
+            "an irregular burst is NOT masked: {v:?}"
+        );
     }
 
     #[test]
@@ -768,7 +799,10 @@ mod tests {
         let mads = [None, Some(3.0), Some(25.0)]; // frame 1 is a content near-duplicate
         let o = copy_observation(&ticks, &mads);
         assert_eq!(o.tick_copies, 1);
-        assert_eq!(o.copies_observed_by_content, 1, "the near-dup observed the tick-copy");
+        assert_eq!(
+            o.copies_observed_by_content, 1,
+            "the near-dup observed the tick-copy"
+        );
         assert_eq!(o.content_near_dup_pairs, 1);
         assert_eq!(o.copy_observation_rate, Some(1.0));
     }
@@ -781,7 +815,10 @@ mod tests {
         let mads = [None, Some(25.0), Some(25.0)]; // high MAD on the tick-copy pair
         let o = copy_observation(&ticks, &mads);
         assert_eq!(o.tick_copies, 1);
-        assert_eq!(o.copies_observed_by_content, 0, "a high MAD does not observe the copy");
+        assert_eq!(
+            o.copies_observed_by_content, 0,
+            "a high MAD does not observe the copy"
+        );
         assert_eq!(o.copy_observation_rate, Some(0.0));
     }
 
@@ -887,7 +924,11 @@ mod tests {
         // index 5 measures MAD(frame5, frame4), NOT the window pair, so it must be dropped to None.
         let prev = vec![None, Some(2.0), Some(2.0), Some(2.0), Some(2.0), Some(2.0)];
         let out = window_prev_mads(&[2, 5], &prev);
-        assert_eq!(out, vec![None, None], "non-adjacent boundary → None, never a false dup");
+        assert_eq!(
+            out,
+            vec![None, None],
+            "non-adjacent boundary → None, never a false dup"
+        );
     }
 
     #[test]
@@ -914,7 +955,11 @@ mod tests {
         let pulldown = measure_dup_cadence(&pulldown_mads(120, 6));
         let pf = pulldown.as_ref().unwrap().duplicate_fraction;
         let worst = worst_masked_duplicate_fraction(&[freeze, pulldown]);
-        assert_eq!(worst, Some(pf), "only the masked pulldown's fraction counts");
+        assert_eq!(
+            worst,
+            Some(pf),
+            "only the masked pulldown's fraction counts"
+        );
     }
 
     #[test]
@@ -929,11 +974,26 @@ mod tests {
 
     #[test]
     fn worst_below_bound_passes_over_bound_fails() {
-        assert!(dup_cadence_gate_pass(None, Some(0.10)), "no masked window → pass");
-        assert!(dup_cadence_gate_pass(Some(0.09), Some(0.10)), "below bound → pass");
-        assert!(dup_cadence_gate_pass(Some(0.10), Some(0.10)), "at bound → pass");
-        assert!(!dup_cadence_gate_pass(Some(0.11), Some(0.10)), "over bound → fail");
-        assert!(dup_cadence_gate_pass(Some(0.99), None), "no bound (report-only) → pass");
+        assert!(
+            dup_cadence_gate_pass(None, Some(0.10)),
+            "no masked window → pass"
+        );
+        assert!(
+            dup_cadence_gate_pass(Some(0.09), Some(0.10)),
+            "below bound → pass"
+        );
+        assert!(
+            dup_cadence_gate_pass(Some(0.10), Some(0.10)),
+            "at bound → pass"
+        );
+        assert!(
+            !dup_cadence_gate_pass(Some(0.11), Some(0.10)),
+            "over bound → fail"
+        );
+        assert!(
+            dup_cadence_gate_pass(Some(0.99), None),
+            "no bound (report-only) → pass"
+        );
     }
 
     #[test]
@@ -968,7 +1028,10 @@ mod tests {
         // Feed the MEASURED real copy MADs as tick-copy pairs and the motion MADs as motion pairs,
         // and assert the #1166 near-duplicate signal (a) observes >= COPY_OBSERVATION_RATE_MIN of
         // the tick-proven copies (→ Viable) and (b) fires on 0 of the genuine-motion pairs.
-        let observed = REAL_COPY_MADS.iter().filter(|&&m| is_near_duplicate(m)).count();
+        let observed = REAL_COPY_MADS
+            .iter()
+            .filter(|&&m| is_near_duplicate(m))
+            .count();
         let rate = observed as f64 / REAL_COPY_MADS.len() as f64;
         assert!(
             rate >= COPY_OBSERVATION_RATE_MIN,
