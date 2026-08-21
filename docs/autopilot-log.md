@@ -9962,3 +9962,29 @@ No push/PR/rig touch (worktree worker).
 - WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI). No PR/
   merge/deploy/run-card by the worker. Ticket stays OPEN (commits use fix(#1157)/test(#1157) paren
   form, no auto-close) — the live end-to-end verify is the supervisor's step.
+## 2026-08-21 — #1145 v3: keep the over-rate drains armed through a capture hiccup (worktree-agent-a6266803dc48f55c6)
+- Commits: 732ad9e8f (version bump 529->530), c7a689f91 test [red], ccb070c0c fix [green].
+- ROOT CAUSE (traced in code + reproduced off-rig; consult + 3 rustc replicas): the merged
+  rounds bound content-age in STEADY state, but a single capture HICCUP (blocked V4L2 dequeue
+  > ~99 ms) is an ARMING-SIGNAL POISONING cascade — (1) the takt EMA (0.32 ms margin) folds the
+  gap sample and flips sustained_over_rate off for ~7-12 s (τ≈256 frames), killing depth-Drain/
+  FastDrain/round-3 noisy-dupe; (2) the absolute unique COUNT floor drops below retire_min_uniques
+  for ~the gap, forcing dupes onto the copy valve; (3) the surplus then exports into the strih
+  genlock FIFO (the ±5-frame cam1 wobble the qr-align [4i/8align] gate REDs). NOT a steady sawtooth.
+- FIX (retune arming, error-driven family kept; NO new ShedAction, NO micro-shed): B.1 gap-excluded
+  takt fold (TAKT_GAP_EXCLUDE_NS = 3x emit interval = 50ms; skip folding a hiccup outlier, prev
+  still advances); B.2 occupancy-relative unique floor (all_capture_times window +
+  RETIRE_OCCUPANCY_MIN_PERCENT=95 OR-ed with the count+freshness gates, gated on sustained_over_rate
+  so retired emit stays >= 0.95x60 = 57, the issue-666 floor). poll stays 6-arg; no counter change.
+- REJECTED: the dispatch's steady-cadence micro-shed (off-rig replica proved it over-sheds keep-up
+  59.97->59.20 with no age benefit — Defer already absorbs the excess); always-newest (issue-1131
+  multi-slot violation).
+- VERIFIED off-rig via the #1145 scratch route (rustc --test over the REAL genlock_pacing.rs +
+  dupe_decimation.rs): 64/64 pass, 0 warnings; the 2 [red] arming tests GREEN; every preservation
+  test unchanged (starved copy valve, frozen no-blackout, exact-60 inert, issue-666 floor, cam1
+  byte-identical, healthy-60 never-drains) + a steady-no-hiccup anti-over-shed pin. Doc: the
+  genlock-emit-gate-pacing.md NINTH-piece section + the 64fps issue-666 follow-up caveat.
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI + fleet
+  deploy + the live E2E re-measure: converge_sheds quiescent + [4i/8align] stable + the 64fps
+  issue-666 re-check). No PR/merge/deploy/run-card by the worker. Ticket stays OPEN (fix(#1145)/
+  test(#1145) paren form — no auto-close).

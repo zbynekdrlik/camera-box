@@ -244,6 +244,60 @@ blind-tuned threshold.
   attribution paths (a frozen painter now reads as all-dupes → the copy valve holds the grid, arguably
   more correct) is not verified off-rig.
 
+## #1145 v3 — arming-signal robustness through a capture HICCUP (the NINTH piece)
+
+The rounds v1/v2/v2.1/round-3 all bound content-age in STEADY state, but a single capture HICCUP (a
+blocked V4L2 dequeue — a CPU/#752/USB stall of `>~99 ms`) disarms every cam-side over-rate drain for
+SECONDS, so the surplus then leaks into the strih genlock FIFO — the ±5..±11-frame cam1 wobble the
+qr-align `[4i/8align]` gate REDs (the age physically RESIDES in the strih FIFO: skew 126–210 ms vs
+cam3's 76 ms = 3–8 frames; the FIFO's `converge_sheds +4-5/tick` is it honestly draining a real
+backlog while the cam box re-excites it after each hiccup). Diagnosed as an ARMING-SIGNAL POISONING
+CASCADE (NOT a steady sawtooth — in keep-up dupes absorb at `Defer`, age 0):
+
+1. **Takt-EMA poisoning** — the 61.5 fps EMA sits ~0.32 ms below `RETIRE_MIN_TAKT_INTERVAL_NS`, so ONE
+   `>~99 ms` gap sample folded into the ~256-frame EMA flips `sustained_over_rate` off, and the
+   τ≈256-frame recovery holds it off ~7 s (500 ms gap) / ~12 s (1.5 s). While off, depth-Drain,
+   FastDrain AND the round-3 noisy-dupe compare are ALL dead.
+2. **`enough_unique` count depression** — a gap `>~100 ms` drops the ABSOLUTE unique COUNT below
+   `retire_min_uniques` for ~the gap duration → dupes hit the #1111 COPY valve instead of Retire.
+3. **Dead band** — a 6–8-interval hiccup (`<= GENLOCK_MAX_CATCHUP_INTERVALS`=8 → no #131 resync)
+   leaves persistent grid lag while (1)+(2) killed every drain → copies emit at wire rate → the V4L2
+   queue rides full → the `>60/s` surplus exports into the strih FIFO at ~+0.5/s.
+
+The fix RETUNES the two arming signals (error-driven family kept; NO new ShedAction, NO micro-shed —
+an open-loop steady-cadence credit shedder was REJECTED: in keep-up the excess IS the dupes and
+`Defer` already absorbs them at zero age cost, so a credit shedder double-counts that and regresses
+the emit rate 59.97→59.20, off-rig-proven):
+
+- **B.1 gap-excluded takt fold** (`note_capture_takt` + `TAKT_GAP_EXCLUDE_NS` = 3× the 60 fps emit
+  interval = 50 ms): a genuine takt change shows in EVERY sample; a hiccup in ONE — so SKIP folding an
+  inter-capture interval above the bound (still advance `prev_capture_mono_ns` so the next interval is
+  measured cleanly). Keeps `sustained_over_rate` armed through the hiccup.
+- **B.2 occupancy-relative unique floor** (`enough_unique_to_hold_target` + a new `all_capture_times`
+  window + `RETIRE_OCCUPANCY_MIN_PERCENT`=95, `RETIRE_OCCUPANCY_MIN_SAMPLES`=30): OR-in
+  `unique/all >= 95%` alongside the existing absolute count + freshness gates. A gap admits NO
+  captures so it depresses BOTH counts equally → the RATIO is gap-immune. **#666-SAFE by gating on
+  `sustained_over_rate`** (capture rate `> 60.3`): `unique >= 0.95 × total` with total-rate `> 60.3`
+  ⇒ retired emit (= unique rate) `>= 0.95 × 60 = 57` (the #666 floor); an under-rate/starved source
+  (NOT over-rate) never reaches this arm, so retiring can never drop it below 57. Freshness stays
+  FIRST (a frozen source still falls to the copy valve, never a blackout); a 50→60 pulldown (~0.83
+  ratio) stays on the copy valve.
+
+`all_capture_times` is pushed every poll, pruned in lock-step with `unique_capture_times`, and cleared
+on the same #131 backward-clock-step. `poll` stays 6-arg; NO `DupeShedLog`/summary/counter change.
+Verified 64/64 via the scratch route below (the 2 [red] arming tests GREEN, every preservation test
+unchanged + a steady-no-hiccup anti-over-shed pin). **Supervisor's live rig step:** confirm the strih
+`genlock-fifo audit 'NDI cam1'` `converge_sheds` go quiescent (≈0 between events, depth pinned 1–2)
+and `[4i/8align]` holds a stable cross-camera offset.
+
+- **CAVEAT — 64 fps card + the #666 floor (deferred follow-up):** the consult flagged that the
+  EXISTING `+2` FastDrain (and any future "generalise +2 to lag>=2") has a latent #666 hazard at a
+  genuinely 64 fps card — unfilled-boundary rate = 2× (fps−60), so `2×4 = 8 > 3` would emit ~52 fps
+  during episodes (the v2.1 sim only pinned 61.5). This v3 change does NOT touch FastDrain and does
+  NOT add the +2/lag>=2 generalisation (deliberately out of scope). If the rig re-measure still shows
+  mid-band dwell, that generalisation needs a retire-rate token bucket (≤3 unfilled boundaries/s) —
+  file it as its own ticket; do not add it without the 64 fps guard.
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
