@@ -1077,7 +1077,13 @@ async fn run_capture_loop(
                     // grabber-repeat dupe over the unique tick captured right next to it. See
                     // `dupe_decimation`'s module doc for the full root-cause -> fix writeup.
                     let prev_boundary_ns = decimation_gate.next_boundary_ns();
-                    let content_hash = camera_box::dupe_decimation::dupe_content_hash(
+                    // (#1145 round 3) one pass yields BOTH the exact content_hash (byte-identical
+                    // buffer-repeat dupes, e.g. CAM1) AND a luma lattice for the noise-tolerant
+                    // compare a marginal jittery over-rate card needs — its surplus is a noisy
+                    // optical RE-SAMPLE of the same painted frame (sensor noise), which the exact
+                    // hash misses, so it would be emitted as a "unique" (a held painted-id) forcing
+                    // a compensating shed (a skipped painted-id) = the Δ1/Δ3 cadence churn.
+                    let (content_hash, content_luma) = camera_box::dupe_decimation::dupe_content_sig(
                         data,
                         info.width as usize,
                         info.height as usize,
@@ -1109,6 +1115,10 @@ async fn run_capture_loop(
                     // `wall_clock_ns()` grids the emit boundary to).
                     let now_mono_ns = monotonic_clock_ns();
                     let capture_mono_ns = (info.capture_monotonic_100ns.max(0) as u64) * 100;
+                    // (#1145 round 3) stage this frame's luma lattice for poll's noise-tolerant dupe
+                    // compare (armed only under sustained over-rate, never two consecutive frames).
+                    // Called immediately before poll, mirroring the hash for this same frame.
+                    decimation_gate.note_frame_luma(content_luma);
                     let emit = decimation_gate.poll(
                         wall_clock_ns(),
                         out_interval_ns,

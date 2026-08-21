@@ -76,24 +76,113 @@ const DUPE_HASH_SAMPLE_ROWS: usize = 8;
 /// reaches the NDI send path, so two degenerate frames comparing "equal" has no observable
 /// effect.
 pub fn dupe_content_hash(frame: &[u8], width: usize, height: usize, stride: usize) -> u64 {
+    dupe_content_sig(frame, width, height, stride).0
+}
+
+/// (#1145 round 3) Pixel stride (in whole PIXELS) between adjacent luma (Y) samples along each of
+/// the [`DUPE_HASH_SAMPLE_ROWS`] sampled rows for the noise-tolerant signature lattice. `8` → for a
+/// 1920-wide frame, 8 rows × (1920/8) = 1920 lattice points; small enough that a painted QR/burn
+/// flip lands decisively on tens of points, sparse enough to stay cheap at 60 fps 1080p (a few
+/// thousand byte reads/frame, no allocation beyond the small `Vec`).
+pub const DUPE_SIG_PIXEL_STRIDE: usize = 8;
+
+/// (#1145 round 3) The per-point ABSOLUTE luma-diff (after median-offset compensation) at/above
+/// which a sampled lattice point counts as CHANGED between two frames. `48` sits deliberately in
+/// the wide gap between two physically-separated magnitudes: per-point optical sensor NOISE on the
+/// rig path is σ≈2–8 luma (48 is ≥5σ above it, so a genuine noisy re-sample crosses it essentially
+/// never), while a painted QR/burn MODULE flip swings ≈100–180 luma even after optical contrast
+/// loss (48 ≤ half that swing, so a genuinely-different painted frame crosses it decisively).
+/// Calibration value (the ≥5σ / ≤½-swing margins are order-of-magnitude, not tuned); the live E2E
+/// re-measure (uniformity ≥0.95 AND clean QR-contiguity) validates it. See [`frames_are_content_dupes`].
+pub const NOISY_DUPE_DIFF_THETA: i32 = 48;
+
+/// (#1145 round 3) The maximum number of CHANGED lattice points ([`NOISY_DUPE_DIFF_THETA`]) for two
+/// frames to be classified a NOISY content-dupe. `6` (~0.3 % of a ~1920-point lattice) is a small
+/// slack for a handful of hot/outlier pixels while staying FAR below the tens of points a real QR
+/// flip moves — so the false-POSITIVE direction (calling a genuinely-different painted frame a dupe,
+/// which would DROP a real unique) needs a QR flip that somehow touches ≤6 sampled points, which the
+/// [`DUPE_SIG_PIXEL_STRIDE`] density makes impossible for the rig's burn geometry. Calibration value;
+/// biased hard to false-NEGATIVE (a miss just falls back to today's heuristic — status quo).
+pub const NOISY_DUPE_MAX_CHANGED: usize = 6;
+
+/// (#1145 round 3) Single-pass content signature: the exact FNV fingerprint (BYTE-identical to
+/// [`dupe_content_hash`]'s historical value, so a buffer-repeat dupe like CAM1's still short-circuits
+/// on it) PLUS a luma (Y) lattice for the NOISE-TOLERANT compare a marginal jittery over-rate card
+/// (CAM2) needs — its surplus is a noisy optical RE-SAMPLE of the same painted frame, NOT a
+/// byte-identical repeat, so exact equality misses it (#1145 root cause). Samples the SAME
+/// [`DUPE_HASH_SAMPLE_ROWS`] evenly-spaced rows the hash reads (stride-honoring — never padding
+/// bytes), taking the Y byte (even offset in YUYV422) every [`DUPE_SIG_PIXEL_STRIDE`] pixels into
+/// the lattice. A degenerate (zero width/height/stride) frame → `(0, empty)`; an empty lattice
+/// compares not-dupe in [`frames_are_content_dupes`] (fail-safe).
+pub fn dupe_content_sig(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+) -> (u64, Vec<u8>) {
     let row_bytes = width * 2; // YUYV422: 2 bytes/pixel
     if height == 0 || row_bytes == 0 || stride == 0 {
-        return 0;
+        return (0, Vec::new());
     }
     let mut hasher = FnvHasher::new();
+    let mut luma: Vec<u8> = Vec::new();
     let step = (height / DUPE_HASH_SAMPLE_ROWS).max(1);
     let mut y = 0usize;
     while y < height {
         let row_start = y * stride;
         let row_end = row_start + row_bytes;
+        // Exact fingerprint: hash the real pixel bytes of this row (clamped to the buffer), IDENTICAL
+        // to the historical `dupe_content_hash` byte-for-byte (verified by its retained tests).
         if row_end <= frame.len() {
             hasher.write(&frame[row_start..row_end]);
         } else if row_start < frame.len() {
             hasher.write(&frame[row_start..]);
         }
+        // Luma lattice: the Y byte (even offset) every DUPE_SIG_PIXEL_STRIDE pixels along this row.
+        let mut x = 0usize;
+        while x < width {
+            let px = row_start + x * 2;
+            if px < frame.len() {
+                luma.push(frame[px]);
+            }
+            x += DUPE_SIG_PIXEL_STRIDE;
+        }
         y += step;
     }
-    hasher.finish()
+    (hasher.finish(), luma)
+}
+
+/// (#1145 round 3) NOISE-TOLERANT content-dupe test over two luma lattices from [`dupe_content_sig`]
+/// (same length). Two captures of the SAME painted frame differ only by per-point sensor NOISE (a
+/// handful of points, if any, cross [`NOISY_DUPE_DIFF_THETA`]); two DIFFERENT painted frames differ
+/// in the burn/QR region (many points cross it). So: `is_dupe = changed_count ≤ `[`NOISY_DUPE_MAX_CHANGED`].
+///
+/// The per-point diff is compensated by the MEDIAN of all diffs first — a calibration-free global
+/// exposure / display-PWM-backlight-beat offset (a same-frame re-capture can be uniformly a few luma
+/// brighter/darker). The median is robust to the QR outliers (they are a minority, so a real flip
+/// still stands out AFTER the subtraction — a bidirectional flip keeps the median near 0). Mismatched
+/// or empty lattices → NOT a dupe (fail-safe: the caller then keeps today's exact-hash behavior).
+///
+/// Asymmetric by design: a false-NEGATIVE (missing a noisy dupe) only reverts to the pre-existing
+/// heuristic shed (status quo); a false-POSITIVE would DROP a genuine unique (a real gap), so both
+/// thresholds are set well inside the physical margin and the caller arms this ONLY under sustained
+/// over-rate and never on two consecutive frames.
+pub fn frames_are_content_dupes(prev: &[u8], now: &[u8]) -> bool {
+    if prev.is_empty() || prev.len() != now.len() {
+        return false;
+    }
+    let mut diffs: Vec<i32> = now
+        .iter()
+        .zip(prev.iter())
+        .map(|(&a, &b)| a as i32 - b as i32)
+        .collect();
+    diffs.sort_unstable();
+    let median = diffs[diffs.len() / 2];
+    let changed = diffs
+        .iter()
+        .filter(|&&d| (d - median).abs() >= NOISY_DUPE_DIFF_THETA)
+        .count();
+    changed <= NOISY_DUPE_MAX_CHANGED
 }
 
 /// Minimal FNV-1a (64-bit) — no extra crate dependency for a "same vs different" fingerprint.
@@ -438,6 +527,23 @@ pub struct DecimationGate {
     /// / clock-step signature `leg-health-guard.sh` hard-fails on). Reset to 0 at the start of every
     /// poll.
     last_poll_fast_drain_extra: u64,
+    /// (#1145 round 3) The CURRENT frame's luma signature lattice ([`dupe_content_sig`]), staged by
+    /// [`note_frame_luma`](Self::note_frame_luma) immediately BEFORE [`poll`](Self::poll) and consumed
+    /// (`take()`) inside it. `None` = no lattice noted for this poll → the noise-tolerant compare is
+    /// SKIPPED and `prev_luma` is cleared (the fail-safe path: no data → not-dupe → today's exact-hash
+    /// behavior, so every one of the pre-round-3 tests that never call `note_frame_luma` is unchanged).
+    pending_luma: Option<Vec<u8>>,
+    /// (#1145 round 3) The luma lattice noted at the PREVIOUS poll, for the noise-tolerant compare
+    /// against the current one. Rotated from `pending_luma` each poll; cleared on a poll with no
+    /// pending lattice.
+    prev_luma: Option<Vec<u8>>,
+    /// (#1145 round 3) Did the PREVIOUS poll classify a NOISY (not byte-identical) content-dupe? The
+    /// comparator NEVER classifies two CONSECUTIVE frames as noisy-dupes (an exact byte-identical dupe
+    /// is exempt — it is proven): a ~61 fps grabber's surplus is ~1 isolated dupe/s, never a run, so a
+    /// run of "dupes" would be a slow content FADE the sparse-diff cannot tell from a still — this cap
+    /// hard-bounds even a mis-tuned comparator to shedding at most every other frame and kills the
+    /// fade-chaining false-positive class.
+    prev_was_noisy_dupe: bool,
 }
 
 impl DecimationGate {
@@ -460,6 +566,19 @@ impl DecimationGate {
     /// `leg-health-guard.sh` hard-fails on). Read it right after `poll`, alongside `next_boundary_ns`.
     pub fn last_poll_intentional_extra_advance(&self) -> u64 {
         self.last_poll_fast_drain_extra
+    }
+
+    /// (#1145 round 3) Stage this frame's luma signature lattice ([`dupe_content_sig`]'s second
+    /// element) for the NEXT [`poll`](Self::poll) to consume — call it immediately BEFORE `poll`,
+    /// mirroring how `content_hash` is computed for the same frame. `poll` compares it to the
+    /// previous frame's lattice with the noise-tolerant [`frames_are_content_dupes`] test to catch a
+    /// marginal over-rate card's noisy re-sample dupes (which the exact `content_hash` misses). NOT
+    /// calling it (any pre-round-3 caller) leaves the pending lattice `None`, so the noisy path is
+    /// skipped and behavior is byte-identical to the exact-hash-only gate — the self-neutralizing
+    /// fail-safe. Takes the lattice BY VALUE ([`dupe_content_sig`] returns a fresh `Vec`), so the
+    /// per-frame capture loop moves it in with no extra copy.
+    pub fn note_frame_luma(&mut self, luma: Vec<u8>) {
+        self.pending_luma = Some(luma);
     }
 
     /// (#1145) Prune the trailing unique-capture window to entries within [`UNIQUE_RATE_WINDOW_NS`]
@@ -603,8 +722,36 @@ impl DecimationGate {
             self.unique_capture_times.clear();
         }
 
-        let is_dupe = self.prev_hash == Some(content_hash);
+        let exact_dupe = self.prev_hash == Some(content_hash);
         self.prev_hash = Some(content_hash);
+        // (#1145 round 3) noise-tolerant content-dupe detection. A marginal jittery over-rate card
+        // (CAM2, the painter box) delivers surplus dupes that are noisy optical RE-SAMPLES of the
+        // same painted frame — NOT byte-identical repeats like CAM1's steady buffer-repeat — so the
+        // exact hash above reads `is_dupe=false` and the dupe is EMITTED as a "unique" (a held
+        // painted-id downstream = Δ1), leaving the over-rate unabsorbed so a later frame is
+        // force-shed (a skipped painted-id = Δ3): the balanced Δ1/Δ3 aliasing churn the #1142
+        // uniformity gate REDs. Compare this frame's luma lattice to the previous one with the
+        // noise-tolerant test. ARMED only under `sustained_over_rate` (a healthy 60.00 card never
+        // consults it → byte-identical to the exact-hash-only gate) and NEVER on two consecutive
+        // frames (a run would be a content fade, not an isolated grabber dupe). No staged lattice
+        // (any pre-round-3 caller) → clear prev + not-dupe (fail-safe = today's exact behavior).
+        let this_luma = self.pending_luma.take();
+        let noisy_dupe = !exact_dupe
+            && sustained_over_rate
+            && !self.prev_was_noisy_dupe
+            && match (self.prev_luma.as_deref(), this_luma.as_deref()) {
+                (Some(prev), Some(now)) => frames_are_content_dupes(prev, now),
+                _ => false,
+            };
+        self.prev_luma = this_luma;
+        self.prev_was_noisy_dupe = noisy_dupe;
+        // (#1145 round 3 [green]) fold the noise-tolerant result into `is_dupe`. Exact FIRST (a
+        // byte-identical dupe is proven regardless of the lattice — CAM1 unchanged); the noisy path
+        // only ADDS detections under sustained over-rate, so a marginal card's re-sample dupes are
+        // now shed as PROVEN dupes (retire / dupe-drain) instead of emitted-as-unique + a
+        // compensating shed — killing the Δ1/Δ3 churn. A noisy dupe is also NOT counted below in the
+        // unique-rate window (it carries no distinct content), correcting `enough_unique`.
+        let is_dupe = exact_dupe || noisy_dupe;
 
         // (#1145) A unique capture updates the trailing unique-rate window; a dupe carries no new
         // distinct content so it only READS it. `enough_unique` is the robust "source can hold the
@@ -2133,6 +2280,320 @@ mod tests {
             s.fast_drained, 0,
             "steady over-rate with no deep backlog must NEVER fast-drain; fast_drained={}",
             s.fast_drained
+        );
+    }
+
+    // ── (#1145 round 3) noise-tolerant content-dupe detection ──────────────────
+
+    /// Tiny deterministic LCG for repeatable per-capture "sensor noise" in the round-3 sims.
+    fn r3_lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
+    }
+
+    /// Render a small YUYV422 frame for painted `frame_id` with per-capture noise (`seed`): a static
+    /// grey gradient background + a "QR/burn" region whose modules derive from `frame_id` (each id
+    /// increment flips ~half its modules — what makes two DIFFERENT painted frames diverge across the
+    /// sampled lattice while two SAME-id captures differ only by noise). Y (luma) at even byte
+    /// offsets; chroma neutral. `sigma` = ± per-byte luma noise amplitude.
+    fn r3_render(
+        frame_id: u64,
+        seed: u64,
+        w: usize,
+        h: usize,
+        stride: usize,
+        sigma: i32,
+    ) -> Vec<u8> {
+        let mut buf = vec![0u8; stride * h];
+        let mut st = seed ^ 0x1234_5678;
+        for y in 0..h {
+            for x in 0..w {
+                let mut yv: i32 = 90 + (y as i32 * 3 % 40);
+                if (4..28).contains(&y) && (4..60).contains(&x) {
+                    // per-module bit from a splitmix avalanche of (id, y, x) so each module flips
+                    // ~independently (~half per id increment) — a popcount-parity model flips ALL
+                    // modules together or NONE (parity is position-independent), a degenerate "QR".
+                    let mut z = frame_id ^ ((y as u64) << 20) ^ ((x as u64) << 40);
+                    z = z.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    z ^= z >> 29;
+                    z = z.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    let bit = (z >> 33) & 1;
+                    yv = if bit == 1 { 235 } else { 16 };
+                }
+                let noise = (r3_lcg(&mut st) % (2 * sigma as u64 + 1)) as i32 - sigma;
+                yv = (yv + noise).clamp(0, 255);
+                let px = y * stride + x * 2;
+                buf[px] = yv as u8;
+                buf[px + 1] = 128;
+            }
+        }
+        buf
+    }
+
+    struct R3Sim {
+        uniformity: f64,
+        copies: u64,
+        skips: u64,
+        emit_fps: f64,
+        emitted_ids: Vec<u64>,
+    }
+
+    /// Drive the REAL [`DecimationGate::poll`] (send-bound loop, monotonic residence, realtime==
+    /// monotonic — no reconnect) with a marginal over-rate card. `byte_identical` = a dupe re-renders
+    /// with the SAME noise seed (a CAM1 buffer-repeat → identical bytes → the exact hash catches it);
+    /// else a FRESH seed (a CAM2 noisy optical re-sample → distinct hash → only the luma comparator
+    /// can catch it). `with_luma` = call [`note_frame_luma`](DecimationGate::note_frame_luma) before
+    /// each poll (production wiring) vs not (the legacy path). Measures the emitted painted-id cadence
+    /// decimated 60→30 (the `presentation_cadence` uniformity metric) plus the pre-decimation Δ1
+    /// copies (a held id) and Δ3 skips (a skipped id).
+    fn run_r3_sim(
+        capture_fps: f64,
+        secs: f64,
+        sigma: i32,
+        byte_identical: bool,
+        with_luma: bool,
+    ) -> R3Sim {
+        let (w, h, stride) = (64usize, 32usize, 160usize);
+        let cap_int = (1e9 / capture_fps) as u64;
+        let emit_int = 1_000_000_000u64 / 60;
+        let send_cost = emit_int * 995 / 1000; // ~0.5% slack -> unblocked max emit ~60.3/s
+        let shed_cost = 1_000_000u64; // 1 ms (hash + compare only)
+        const MAXQ: usize = 4;
+        let n = (capture_fps * secs) as u64;
+        let over_rate = capture_fps - 60.0;
+        let dupe_period = if over_rate > 0.01 {
+            (capture_fps / over_rate).round() as u64
+        } else {
+            u64::MAX
+        };
+
+        let mut gate = DecimationGate::new();
+        let mut queue: VecDeque<(u64, u64, u64, Vec<u8>)> = VecDeque::new(); // (cap_mono, id, hash, luma)
+        let mut next_cap = 0u64;
+        let mut mono = 0u64;
+        let mut jitter = 0xABCDu64;
+        let mut next_id = 0u64;
+        let mut prev_id = 0u64;
+        let mut prev_seed = 0u64;
+        let mut emitted_ids: Vec<u64> = Vec::new();
+        let mut emits = 0u64;
+
+        loop {
+            while next_cap < n {
+                let base = next_cap * cap_int;
+                let span = (cap_int / 3).max(1);
+                let jit = (r3_lcg(&mut jitter) % span) as i64 - (span / 2) as i64;
+                let cap_ns = (base as i64 + jit).max(0) as u64;
+                if cap_ns > mono {
+                    break;
+                }
+                let is_dupe = dupe_period != u64::MAX && next_cap % dupe_period == dupe_period - 1;
+                let (pid, seed) = if is_dupe {
+                    let s = if byte_identical {
+                        prev_seed
+                    } else {
+                        next_cap.wrapping_mul(0x9E37).wrapping_add(0x5151)
+                    };
+                    (prev_id, s)
+                } else {
+                    let id = next_id;
+                    next_id += 1;
+                    (id, next_cap.wrapping_mul(0x9E37))
+                };
+                prev_id = pid;
+                prev_seed = seed;
+                let frame = r3_render(pid, seed, w, h, stride, sigma);
+                let (hash, luma) = dupe_content_sig(&frame, w, h, stride);
+                if queue.len() < MAXQ {
+                    queue.push_back((cap_ns, pid, hash, luma));
+                }
+                next_cap += 1;
+            }
+            if queue.is_empty() {
+                if next_cap >= n {
+                    break;
+                }
+                mono = next_cap * cap_int; // wait for the next capture
+                continue;
+            }
+            let (cap_mono, pid, hash, luma) = queue.pop_front().unwrap();
+            let now_mono = mono;
+            let now_rt = mono; // rig realtime == monotonic (no reconnect offset)
+            if with_luma {
+                gate.note_frame_luma(luma);
+            }
+            let emit = gate.poll(now_rt, emit_int, hash, true, now_mono, cap_mono);
+            let mut cost = shed_cost;
+            if emit {
+                cost = send_cost;
+                emits += 1;
+                emitted_ids.push(pid);
+            }
+            mono += cost;
+            if next_cap >= n && queue.is_empty() {
+                break;
+            }
+        }
+
+        // pre-decimation Δ1 copies (step 0 = held id) / Δ3 skips (step 2 = skipped id).
+        let mut copies = 0u64;
+        let mut skips = 0u64;
+        for pair in emitted_ids.windows(2) {
+            match pair[1] as i64 - pair[0] as i64 {
+                0 => copies += 1,
+                2 => skips += 1,
+                _ => {}
+            }
+        }
+        // decimate 60->30 (the downstream recording cadence) — uniformity = frac(step == 2).
+        let kept: Vec<u64> = emitted_ids.iter().step_by(2).copied().collect();
+        let (mut uni, mut tot) = (0u64, 0u64);
+        for pair in kept.windows(2) {
+            tot += 1;
+            if pair[1] as i64 - pair[0] as i64 == 2 {
+                uni += 1;
+            }
+        }
+        R3Sim {
+            uniformity: if tot > 0 {
+                uni as f64 / tot as f64
+            } else {
+                1.0
+            },
+            copies,
+            skips,
+            emit_fps: emits as f64 / secs,
+            emitted_ids,
+        }
+    }
+
+    #[test]
+    fn frames_are_content_dupes_catches_noise_rejects_flip_1145() {
+        let (w, h, stride) = (64usize, 32usize, 160usize);
+        // two noisy captures of the SAME painted frame -> a content-dupe (noise below theta).
+        let (_, la) = dupe_content_sig(&r3_render(100, 1, w, h, stride, 4), w, h, stride);
+        let (_, lb) = dupe_content_sig(&r3_render(100, 2, w, h, stride, 4), w, h, stride);
+        assert!(
+            frames_are_content_dupes(&la, &lb),
+            "two noisy captures of the SAME painted frame must be a content-dupe"
+        );
+        // a DIFFERENT painted frame (QR flip) -> NOT a dupe, even with noise.
+        let (_, lc) = dupe_content_sig(&r3_render(101, 3, w, h, stride, 4), w, h, stride);
+        assert!(
+            !frames_are_content_dupes(&la, &lc),
+            "two DIFFERENT painted frames (a QR/burn flip) must NOT be a content-dupe"
+        );
+        // a global exposure offset on the SAME frame -> still a dupe (the median compensates).
+        let bright: Vec<u8> = lb
+            .iter()
+            .map(|&v| (v as i32 + 20).clamp(0, 255) as u8)
+            .collect();
+        assert!(
+            frames_are_content_dupes(&la, &bright),
+            "a uniform exposure offset on the same painted frame must still read as a content-dupe"
+        );
+        // fail-safe: mismatched / empty lattices are NOT dupes.
+        assert!(!frames_are_content_dupes(&[], &[]));
+        assert!(!frames_are_content_dupes(&la, &lb[..lb.len() - 1]));
+    }
+
+    #[test]
+    fn dupe_content_sig_hash_matches_legacy_and_lattice_nonempty_1145() {
+        let (w, h, stride) = (64usize, 32usize, 160usize);
+        let f = r3_render(7, 9, w, h, stride, 3);
+        let (sig_hash, lattice) = dupe_content_sig(&f, w, h, stride);
+        assert_eq!(
+            sig_hash,
+            dupe_content_hash(&f, w, h, stride),
+            "dupe_content_sig's hash must be byte-identical to the legacy dupe_content_hash"
+        );
+        assert!(!lattice.is_empty(), "the luma lattice must be populated");
+        assert_eq!(
+            dupe_content_sig(&[], 0, 0, 0),
+            (0u64, Vec::new()),
+            "a degenerate frame must sign to (0, empty)"
+        );
+    }
+
+    #[test]
+    fn marginal_over_rate_noisy_dupes_content_detection_holds_uniformity_1145() {
+        // (#1145 round 3) RED before the [green] `is_dupe` wiring / GREEN after. A marginal jittery
+        // over-rate card (CAM2, the painter box) whose surplus dupes are NOISY optical re-samples:
+        // the exact content_hash misses them, so each emits as a "unique" (a held painted-id = Δ1)
+        // and forces a compensating shed (a skipped painted-id = Δ3) — the balanced-pair churn the
+        // #1142 uniformity gate REDs (live CAM2 0.93-0.95; the off-rig sim lands ~0.94 at 61.3).
+        //
+        // BASELINE — the legacy exact-hash-only path (no note_frame_luma) CHURNS. Pins the mechanism
+        // and holds in BOTH [red] and [green] (the legacy path never changes).
+        let base = run_r3_sim(61.3, 20.0, 4, false, false);
+        assert!(
+            base.uniformity < 0.95,
+            "legacy exact-hash-only path MUST churn on noisy re-samples (mechanism pin); \
+             uniformity {:.4}",
+            base.uniformity
+        );
+        assert!(
+            base.copies > 0 && base.skips > 0,
+            "legacy path's churn MUST carry the balanced Δ1 copies / Δ3 skips pairs; \
+             copies={} skips={}",
+            base.copies,
+            base.skips
+        );
+        // FIXED — content-compare detection armed via note_frame_luma holds the cadence. FAILS on
+        // [red] (poll ignores the lattice), PASSES on [green].
+        let fixed = run_r3_sim(61.3, 20.0, 4, false, true);
+        assert!(
+            fixed.uniformity >= 0.95,
+            "content-compare detection MUST hold uniformity >= 0.95 on the marginal noisy card; \
+             got {:.4} (baseline {:.4})",
+            fixed.uniformity,
+            base.uniformity
+        );
+        assert!(
+            fixed.skips * 4 < base.skips.max(1),
+            "content-compare detection MUST collapse the compensating unique-skips (Δ3); \
+             fixed skips={} vs baseline {}",
+            fixed.skips,
+            base.skips
+        );
+        // The over-rate absorption must NOT collapse the emit rate — shedding PROVEN dupes keeps it
+        // above the #666 emit-deficit floor (57 fps); the uniformity gate alone catches a rate drop
+        // only indirectly, so pin it directly.
+        assert!(
+            fixed.emit_fps >= 57.0,
+            "noise-tolerant detection must hold the emit rate above the #666 floor (57 fps); \
+             got {:.2}",
+            fixed.emit_fps
+        );
+    }
+
+    #[test]
+    fn cam1_byte_identical_and_healthy_60_unchanged_by_note_frame_luma_1145() {
+        // (#1145 round 3) note_frame_luma must NOT change a card the exact hash already handles: a
+        // CAM1 byte-identical buffer-repeat (the exact short-circuit fires FIRST) and a healthy 60.00
+        // card (never `sustained_over_rate` → the comparator is gated OFF). Drive each WITH and
+        // WITHOUT note_frame_luma; the emitted painted-id sequences must be IDENTICAL — the
+        // byte-untouched proof, differentially in one binary (the legacy WITHOUT variant IS the
+        // pre-round-3 behavior by construction).
+        let cam1_with = run_r3_sim(64.0, 20.0, 4, true, true);
+        let cam1_without = run_r3_sim(64.0, 20.0, 4, true, false);
+        assert_eq!(
+            cam1_with.emitted_ids, cam1_without.emitted_ids,
+            "CAM1 byte-identical dupes: note_frame_luma must not change the emitted cadence (the \
+             exact hash short-circuits first)"
+        );
+        assert!(
+            cam1_with.uniformity >= 0.95,
+            "CAM1 byte-identical must decimate cleanly; uniformity {:.4}",
+            cam1_with.uniformity
+        );
+        let h_with = run_r3_sim(60.0, 20.0, 4, false, true);
+        let h_without = run_r3_sim(60.0, 20.0, 4, false, false);
+        assert_eq!(
+            h_with.emitted_ids, h_without.emitted_ids,
+            "healthy 60.00: note_frame_luma must be inert (never sustained_over_rate)"
         );
     }
 }

@@ -183,6 +183,67 @@ v2.1 adds ONE band to the pure `dupe_shed_action` decision:
   mechanism converts the drain to the dupe-retirement rate — the >=0.95 uniformity + convergence
   acceptance is the live E2E re-measure after deploy (supervisor's step), as with v2.
 
+## #1145 round 3 — noise-tolerant content-compare detection (the EIGHTH piece)
+
+v1/v2/v2.1 all keyed the WHOLE dupe machinery on `is_dupe = prev_hash == content_hash` — EXACT FNV
+equality. That works for CAM1's steady ~64 fps card, whose surplus is a byte-identical BUFFER-REPEAT.
+It does NOT work for CAM2, the marginal jittery ~61 fps PAINTER box: the rig path has a full optical
+hop (painter monitor → camera → HDMI splitter → ShadowCast → USB), so CAM2's surplus is a noisy
+optical RE-SAMPLE of the same painted frame (sensor noise), NOT byte-identical. The exact hash reads
+`is_dupe=false`, the dupe falls out at `if !is_dupe { Emit{copy:false} }` (emitted as a "unique" = a
+held painted-id downstream, Δ1) and the un-absorbed over-rate forces a compensating shed (a skipped
+painted-id, Δ3) — the balanced Δ1/Δ3 aliasing churn the #1142 uniformity gate honestly REDs (live
+CAM2 0.93–0.95; issue-1130 comment 5364318219 attributes it, painter-box CPU contention #899 as the
+jitter amplifier). Off-rig sim (real poll, noisy re-samples) reproduces it to within ~0.005 of the
+live per-segment numbers.
+
+The fix DETECTS the noisy re-sample so the shed prefers a PROVEN dupe (retiring/deferring a proven
+dupe never starves uniqueness). Design + false-positive-safety pressure-tested via a gated Fable
+consult; the ASYMMETRY is the whole design: a false-NEGATIVE (miss a dupe) reverts to the pre-round-3
+heuristic (status quo); a false-POSITIVE (call a genuine UNIQUE a dupe) DROPS a real frame = a genuine
+gap = strictly worse. So it is biased hard to false-negative and caged structurally, NOT by a
+blind-tuned threshold.
+
+- **Signature = `dupe_content_sig(frame,w,h,stride) -> (u64, Vec<u8>)`** — ONE pass yields the exact
+  FNV hash (BYTE-identical to the legacy `dupe_content_hash`, which now delegates — its 4 tests intact,
+  so a byte-identical dupe still short-circuits) PLUS a luma (Y) lattice: the Y byte (even YUYV offset)
+  every `DUPE_SIG_PIXEL_STRIDE`(8) pixels across the SAME `DUPE_HASH_SAMPLE_ROWS`(8) rows the hash
+  reads (stride-honoring).
+- **Comparator = `frames_are_content_dupes(prev,now) -> bool`** — a two-threshold SPARSE-DIFF, NOT a
+  block-mean (mean-preserving on a QR flip → false-POSITIVE), NOT a dHash (threshold-inversion: a small
+  QR's flip-Hamming can be BELOW the flat-region noise-Hamming), NOT a SAD-sum (no physical margin).
+  `changed = |Y_now[i] − Y_prev[i] − median_offset| ≥ NOISY_DUPE_DIFF_THETA(48)`; dupe iff
+  `changed_count ≤ NOISY_DUPE_MAX_CHANGED(6)`. The MEDIAN of the per-point diffs is a calibration-free
+  global exposure / display-PWM-backlight-beat compensation (robust to the QR outliers — they are a
+  minority, and a bidirectional flip keeps the median ~0). Physical margins on EACH threshold: per-point
+  sensor noise σ≈2–8 vs a module-flip swing ≈100–180 luma (θ=48 is ≥5σ above noise, ≤½ the swing);
+  per-count a real flip moves tens of sampled points vs K=6. Empty/mismatched lattices → NOT a dupe
+  (fail-safe). The 3 constants are calibration; the live E2E re-measure validates them.
+- **The structural CAGE (makes the constants efficacy-only, not safety-critical):** (1) the noisy
+  comparator is ARMED only under `sustained_over_rate` (the takt EMA the gate already owns) — a healthy
+  60.00 card NEVER consults it, so it is provably byte-identical; (2) NEVER classify two CONSECUTIVE
+  frames as noisy-dupes (`prev_was_noisy_dupe`; exact dupes exempt) — a ~61 fps surplus is ~1 isolated
+  dupe/s, so a run would be a slow content FADE the sparse-diff cannot tell from a still; the cap
+  hard-bounds even a mis-tuned comparator to every-other-frame and kills the fade-chaining class; (3)
+  the existing nets stay (`enough_unique`, #1131 no-unique-drop, #666 floor 57). A detected noisy dupe
+  is ALSO excluded from the unique-rate window (it carries no distinct content), correcting `enough_unique`.
+- **Wiring keeps `poll` 6-arg** (all pre-round-3 tests byte-untouched): `note_frame_luma(&luma)` is a
+  paired pre-call (main.rs computes `dupe_content_sig` once, stages the lattice, then polls);
+  `is_dupe = exact_dupe || (sustained_over_rate && !prev_was_noisy_dupe && frames_are_content_dupes(...))`,
+  exact FIRST (never demote a byte-identical dupe). A poll with no staged lattice clears prev + returns
+  not-dupe — the self-neutralizing fail-safe that keeps every legacy caller unchanged.
+- **Sim (REAL poll, root.rs `#[path]`):** the marginal noisy card at 61.0/61.3 → 1.0000 and 61.5 →
+  0.9766 (all ≥0.95, Δ1/Δ3 collapsed) vs the exact-hash baseline 0.9415/0.9245/0.9130; CAM1-64
+  byte-identical WITH == WITHOUT `note_frame_luma` (identical decisions); healthy 60.00 inert. Model
+  noisy dupes as a SIGNATURE property (same painted id re-rendered with a FRESH noise draw), NOT a
+  jittered-timestamp artifact — and give the synthetic "QR" a per-module AVALANCHE bit (splitmix of
+  id,y,x), NEVER a popcount-parity model (parity is position-independent → ALL modules flip together or
+  NONE → a degenerate all-or-nothing "QR" that false-passes or false-fails the comparator test). The
+  ≥0.95 uniformity + clean QR-contiguity acceptance is the live E2E re-measure after deploy
+  (supervisor's step). **UNVERIFIED (supervisor's live step):** the interaction with the frozen-leg
+  attribution paths (a frozen painter now reads as all-dupes → the copy valve holds the grid, arguably
+  more correct) is not verified off-rig.
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
