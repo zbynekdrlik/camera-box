@@ -104,7 +104,7 @@ restart_event_kind_for_line() {
   local _line="$1" _label _pat
   while IFS="$(printf '\t')" read -r _label _pat; do
     [ -z "$_label" ] && continue
-    if printf '%s' "$_line" | grep -qE "$_pat"; then
+    if grep -qE "$_pat" <<<"$_line"; then
       printf '%s\n' "$_label"
       return 0
     fi

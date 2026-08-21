@@ -1405,7 +1405,7 @@ drift_check_source_latency() {
           # there is no single correct constant (it changes with every A/V-sync re-calibration).
           local rng rmin rmax
           rng="${exp_lat#range:}"; rmin="${rng%-*}"; rmax="${rng#*-}"
-          if printf '%s' "$obs_lat" | grep -qE '^[0-9]+$' \
+          if grep -qE '^[0-9]+$' <<<"$obs_lat" \
              && [ "$obs_lat" -ge "$rmin" ] && [ "$obs_lat" -le "$rmax" ]; then
             printf '  source %-20s OK       (latency_ms=%s, within calibration-tracked range %s-%s)\n' \
               "$exp_name" "$obs_lat" "$rmin" "$rmax"
@@ -1619,7 +1619,7 @@ drift_check_burn_env() {
 validate_semver() {
   local name="$1" val="$2"
   if [ -z "$val" ]; then echo "  MISSING   $name" >&2; return 1; fi
-  if printf '%s' "$val" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  if grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$val"; then
     echo "  ok        $name = $val"; return 0
   fi
   echo "  MALFORMED $name = '$val' (want X.Y.Z)" >&2; return 1

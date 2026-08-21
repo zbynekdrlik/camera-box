@@ -111,8 +111,8 @@ dscp_nft_rule_present() {
   case "$1" in
     *__NFT_ABSENT__*) return 1 ;;
   esac
-  printf '%s' "$1" | grep -qE 'table (ip|inet) dantesync_dscp' || return 1
-  printf '%s' "$1" | grep -qE 'udp dport 123 ip dscp set (ef|0x2e|46)' || return 1
+  grep -qE 'table (ip|inet) dantesync_dscp' <<<"$1" || return 1
+  grep -qE 'udp dport 123 ip dscp set (ef|0x2e|46)' <<<"$1" || return 1
   return 0
 }
 

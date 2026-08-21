@@ -169,12 +169,12 @@ assert_manifest_complete() {
 # emitted entry explicitly catches exactly what the count guard cannot.
 assert_entry_valid() {
   local path="$1" sha="$2" size="$3"
-  if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{64}$'; then
+  if ! grep -qE '^[0-9a-f]{64}$' <<<"$sha"; then
     echo "!! INVALID MANIFEST ENTRY: '$path' has a bad sha256 ('$sha') — expected 64 lowercase hex" >&2
     echo "!! a staged file's sha256 could not be computed (suppressed set -e in the generate cmdsub) — failing loud" >&2
     return 23
   fi
-  if ! printf '%s' "$size" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$size"; then
     echo "!! INVALID MANIFEST ENTRY: '$path' has a bad size ('$size') — expected a non-negative integer byte count" >&2
     return 23
   fi

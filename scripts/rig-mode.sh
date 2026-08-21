@@ -1221,7 +1221,7 @@ event_mode_ledger_cleanup() {
     echo "[#723] cleaning ledger entry: what=${what:-?} pid_or_unit=$pidunit box=${box:-?}"
     out="$(cam_ssh "$(rig_test_ledger_terminate_entry_cmds "$pidunit" pid)" 2>&1 || true)"
     echo "$out" | sed 's/^/    [ledger cleanup] /'
-    if printf '%s' "$out" | grep -q 'KILL_NEEDED=1'; then
+    if grep -q 'KILL_NEEDED=1' <<<"$out"; then
       echo "[#723] entry required SIGKILL (never got its own graceful teardown) -- running the #660 clean-paint fb0 fallback."
       cam_ssh "$(rig_test_ledger_clean_paint_fallback_cmds)" 2>&1 | sed 's/^/    [ledger cleanup] /' || true
     fi

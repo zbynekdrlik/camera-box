@@ -215,7 +215,7 @@ read_state() {
   local confirm=0 alert_sig="" alert_passes=0
   if [ -f "$STATE_FILE" ]; then
     local raw; raw="$(cat "$STATE_FILE" 2>/dev/null)"
-    if printf '%s\n' "$raw" | grep -q '^confirm='; then
+    if grep -q '^confirm=' <<<"$raw"; then
       # Current key=value format
       confirm="$(printf '%s\n' "$raw" | sed -n 's/^confirm=//p')"
       alert_sig="$(printf '%s\n' "$raw" | sed -n 's/^alert_sig=//p')"
@@ -340,7 +340,7 @@ main() {
   # Names of OBS boxes that were unreadable this pass (missing from obs records → probe failed).
   local obs_unreadable_names=""
   for _box_name in strih stream; do
-    if ! printf '%s\n' "$RIG_OBS" | grep -q "^obs $_box_name "; then
+    if ! grep -q "^obs $_box_name " <<<"$RIG_OBS"; then
       obs_unreadable_names="${obs_unreadable_names:+$obs_unreadable_names }$_box_name"
     fi
   done

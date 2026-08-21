@@ -60,7 +60,7 @@ _cb_paint_signal() {
     if [ -z "$_drm" ] || ! fuser -s "$_drm" 2>/dev/null; then
       echo "KMS_NODRM $_drm"; return 1
     fi
-    if ! printf '%s' "$_log" | grep -q 'vblank-locked'; then
+    if ! grep -q 'vblank-locked' <<<"$_log"; then
       echo "KMS_NOVBLANK $_drm"; return 1
     fi
     echo "KMS_OK $_drm"; return 0

@@ -103,11 +103,11 @@ done
 # budget is a non-negative integer; the poll interval must be a POSITIVE integer -- a 0 interval with
 # a non-blocking probe (e.g. WOL_PING_CMD=false) would busy-spin the CPU for the whole budget.
 if [ "$WAIT" -eq 1 ]; then
-  if ! printf '%s' "$WAIT_SECS" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$WAIT_SECS"; then
     echo "wake-box.sh: --wait budget must be a non-negative integer (got: $WAIT_SECS)" >&2
     exit 2
   fi
-  if ! printf '%s' "${WOL_WAIT_INTERVAL:-3}" | grep -qE '^[1-9][0-9]*$'; then
+  if ! grep -qE '^[1-9][0-9]*$' <<<"${WOL_WAIT_INTERVAL:-3}"; then
     echo "wake-box.sh: WOL_WAIT_INTERVAL must be a positive integer (got: ${WOL_WAIT_INTERVAL:-3})" >&2
     exit 2
   fi
@@ -119,7 +119,7 @@ fi
 # Resolve MAC + broadcast list. A target with exactly 12 hex nibbles (after stripping separators) is a
 # raw MAC; otherwise it is a box name looked up in the table (which also yields its subnet broadcast).
 stripped="${TARGET//[:.-]/}"
-if [ "${#stripped}" -eq 12 ] && ! printf '%s' "$stripped" | grep -qiE '[^0-9a-f]'; then
+if [ "${#stripped}" -eq 12 ] && ! grep -qiE '[^0-9a-f]' <<<"$stripped"; then
   MAC="$(wol_normalize_mac "$TARGET")"
   BOX="(raw MAC)"
 else
