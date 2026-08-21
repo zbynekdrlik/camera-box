@@ -204,3 +204,45 @@ The standard "a bound that would fail a recent green run is wrong" is REVERSED w
 declares the green runs FALSELY green (hiding visual degradation). #1142's cadence-uniformity 0.95
 floor is RED on today's 0.67–0.78 rig BY DESIGN. Document the deviation loudly in the seam doc + the
 ticket; recalibrate from the first genuinely-clean post-fix run as a named TODO.
+## 12. A content/pixel metric needs a VIABILITY cross-check before any threshold calibration (#1101)
+
+§7's reachability trap (does the term EMIT?) is only the first gate. The SECOND, learned calibrating
+the #1088 dup-cadence surface (#1101): a content/pixel metric can emit real per-window data that is
+STRUCTURALLY DEGENERATE — an all-zero distribution that means "signal blind", not "rig clean". The
+#1088 surface hashes the STREAM box's LOSSY `.mp4` recording with a BYTE-EXACT row-sampled FNV-1a;
+byte-exact frame identity does not survive lossy encode+decode, so the content hash observes almost
+none of the duplication that is genuinely present. Mined across 18 production verdicts + their
+`stream-partial-*.json`: **147 tick-proven copies (a repeated Vernier `tick` = a byte-duplicate
+camera frame, exactly what `copies` counts) produced only 2 content-hash duplicates ≈ 1.4%.**
+
+Lessons for the NEXT content/pixel gate:
+
+- **Calibrating a LIVE threshold on an all-zero green distribution is NOT automatically safe.** For a
+  count/rate metric, `green_max == 0` looks like the tightest possible ceiling — but if the signal is
+  blind (can never produce a positive value even under the real defect), a LIVE gate is a permanent
+  FALSE-GREEN: it passes the exact pathology it was written to catch. A gate that can never fire is
+  worse than no gate. This is the OPPOSITE failure mode from §2's "green sits at 0.655, no threshold
+  exists" — here green sits at exactly 0.0 for the wrong reason.
+
+- **Cross-check the metric against an INDEPENDENT ground-truth signal that the SAME recording already
+  carries.** For dup-cadence that is the Vernier tick: a repeated tick is a byte-duplicate camera
+  frame (`copies`), so the content-hash SHOULD register a duplicate on those exact frames. It doesn't
+  → the signal is blind. The self-diagnosis is a pure crate-root classifier
+  (`dup_cadence::copy_observation` / `signal_viability` / `signal_promotable`, #1101): per window,
+  cross-check content-hash duplicates against tick-copies over the SAME frames; `Blind` when ≥
+  `MIN_TICK_COPIES_FOR_VIABILITY` copies occurred but the hash observed < `COPY_OBSERVATION_RATE_MIN`
+  of them. Emit `signal_viability`/`signal_promotable` in the report-only node so an all-zero
+  `duplicate_fraction` can never be mistaken for a promotable green.
+
+- **Make promotion-readiness a COMPUTED, machine-checked property, not a guess.** The LIVE-flip
+  precondition is `signal_promotable(signal_viability(..)) == true` on real runs — the seam's
+  `gates_overall_pass()` flip is gated on that, not merely on a calibrated bound. On the current lossy
+  tap it reads `blind`, so the flip stays blocked; the signal FIX (a codec-tolerant near-duplicate
+  hash, or re-tapping a lossless stage — the strih partial carries no content_hashes today) is a
+  cross-cutting follow-up gated on a real 50→60-pulldown run to validate.
+
+- **A hardware SEGREGATION step (per the dispatch/`window-gate-tolerance-walkdown.md`) is MOOT when
+  the signal is dead.** cam1's known ~61.5fps grabber wobble (issue 1145) could in principle inflate a
+  dup-cadence reading, but with the signal blind, cam1's windows read 0.0 like every other — there is
+  nothing to segregate. Confirm a signal is VIABLE before spending effort segregating known-faulty
+  boxes out of its distribution.

@@ -286,11 +286,164 @@ pub fn dup_cadence_gate_pass(
 
 /// #1088 report-only / restore seam — mirrors [`crate::optical_floor::gates_overall_pass`] /
 /// [`crate::presentation_cadence::gates_overall_pass`]. Whether [`dup_cadence_gate_pass`]'s result
-/// folds into the fused verdict's `overall_pass`. `false` today: the metric ships REPORT-ONLY (the
-/// bound is an uncalibrated first-cut and the offline content-dup distribution is not yet measured
-/// on real runs). Flip to `true` for a one-line promotion once calibrated against real runs.
+/// folds into the fused verdict's `overall_pass`. `false` today: the metric ships REPORT-ONLY.
+///
+/// **#1101 calibration verdict — the flip is NOT merely a threshold change.** The current tap hashes
+/// the STREAM box's LOSSY `.mp4` recording, on which byte-exact frame identity does not survive the
+/// encode; the mined production data showed the content-hash observed only 2 of 147 tick-proven
+/// copies (≈1.4%) — the signal is [`SignalViability::Blind`], so a LIVE flip would be a permanent
+/// false-green (a real 50→60 pulldown's duplicate frames also become byte-unique after the lossy
+/// encode). The precondition for the one-line flip is therefore [`signal_promotable`]
+/// ([`signal_viability`]) == `true` on real runs (currently never), AND a calibrated bound on top —
+/// NOT a bare threshold tweak. The signal fix (a codec-tolerant near-duplicate hash, or re-tapping a
+/// lossless stage) is tracked as the #1101 follow-up.
 pub fn gates_overall_pass() -> bool {
     false
+}
+
+// ── #1101: signal-viability self-diagnosis ──────────────────────────────────────────────────────
+//
+// The #1088 surface reports a per-window `duplicate_fraction`, but an all-zero distribution is
+// AMBIGUOUS: it means either "healthy rig, no pulldown" (promotable) OR "the content-hash signal
+// is blind, sees nothing" (a false-green if gated). These fns DISAMBIGUATE the two by cross-checking
+// the content-hash duplicates against Vernier-tick copies over the SAME consecutive-frame basis: a
+// STRICT-ADJACENT tick repeat (frame `i` and `i-1` BOTH decoded and equal-ticked) is a tick-proven
+// byte-duplicate camera frame. This is a SUBSET of the canonical `copies` metric
+// (`probe::recording_segments`), which additionally bridges an undecodable gap between two equal
+// ticks (its `prev_recorded` skips `None`), so `tick_copies` here is `<=` canonical `copies`; the
+// strict definition is the right one for a consecutive-pair cross-check against the content hashes
+// (both sides on the same adjacency basis), and it is conservative (an undercount only ever yields
+// MORE `Indeterminate`, never a false `Viable`). A signal that observes ~none of the tick-proven
+// copies is structurally blind and MUST NOT be promoted to a LIVE gate. (#1101 measured 2 of 147
+// strict-adjacent tick-copies observed on the lossy stream tap.)
+
+/// Minimum tick-proven copies in a run before "zero content-hash duplicates" is CONCLUSIVE evidence
+/// the content-hash signal is blind (below it → [`SignalViability::Indeterminate`], not a false
+/// [`SignalViability::Blind`]).
+pub const MIN_TICK_COPIES_FOR_VIABILITY: usize = 3;
+
+/// Minimum fraction of tick-proven copies the content-hash must ALSO observe for the signal to be
+/// [`SignalViability::Viable`] (able to see frame duplication at all). A precondition on gate-ability,
+/// NOT a threshold on the defect.
+pub const COPY_OBSERVATION_RATE_MIN: f64 = 0.5;
+
+/// How well the per-frame content-hash duplicate signal TRACKS the ground-truth duplication the
+/// Vernier-tick decoder proves is present. Built from parallel per-window (tick, content-hash)
+/// sequences.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CopyObservation {
+    /// Consecutive-frame pairs whose Vernier tick REPEATED — a tick-proven byte-duplicate camera
+    /// frame (the ground truth the content-hash signal should also see). Only `Some`-tick pairs count.
+    pub tick_copies: usize,
+    /// Of those tick-copy pairs, how many ALSO had byte-identical content hashes — copies the
+    /// content-hash signal actually observed.
+    pub copies_observed_by_content_hash: usize,
+    /// Total consecutive-frame pairs with byte-identical content hashes (incl. any not aligned to a
+    /// tick-copy) — informational; the raw firing count of the content-hash signal. NOTE: computed
+    /// over the None-PADDED, position-aligned per-window sequence this fn receives (a hash gap is a
+    /// `None` that never forms a dup), which is NOT the same sequence as the sibling
+    /// `duplicate_fraction` (built via `window_content_hashes`, which COMPACTS out-of-range indices);
+    /// the two can differ by a hash gap. Both are report-only.
+    pub content_hash_duplicates: usize,
+    /// `copies_observed_by_content_hash / tick_copies` — the observation RATE. `None` when there
+    /// were no tick-copies (nothing to observe → not a judgement of the signal).
+    pub copy_observation_rate: Option<f64>,
+}
+
+/// Build a [`CopyObservation`] from ONE window's parallel per-frame `ticks` and `content_hashes`
+/// (index `i` is the same recorded frame in both; a `None` on either side never forms a duplicate).
+/// The caller builds both aligned from the same window frames.
+pub fn copy_observation(ticks: &[Option<u64>], content_hashes: &[Option<u64>]) -> CopyObservation {
+    let n = ticks.len().min(content_hashes.len());
+    let mut tick_copies = 0usize;
+    let mut copies_observed_by_content_hash = 0usize;
+    let mut content_hash_duplicates = 0usize;
+    for i in 1..n {
+        let tick_copy = ticks[i].is_some() && ticks[i] == ticks[i - 1];
+        let hash_dup = content_hashes[i].is_some() && content_hashes[i] == content_hashes[i - 1];
+        if tick_copy {
+            tick_copies += 1;
+        }
+        if hash_dup {
+            content_hash_duplicates += 1;
+        }
+        if tick_copy && hash_dup {
+            copies_observed_by_content_hash += 1;
+        }
+    }
+    let copy_observation_rate = if tick_copies > 0 {
+        Some(copies_observed_by_content_hash as f64 / tick_copies as f64)
+    } else {
+        None
+    };
+    CopyObservation {
+        tick_copies,
+        copies_observed_by_content_hash,
+        content_hash_duplicates,
+        copy_observation_rate,
+    }
+}
+
+/// Fold per-window [`CopyObservation`]s into one run-level observation (sum the counts, recompute
+/// the rate).
+pub fn aggregate_copy_observations(observations: &[CopyObservation]) -> CopyObservation {
+    let mut tick_copies = 0usize;
+    let mut copies_observed_by_content_hash = 0usize;
+    let mut content_hash_duplicates = 0usize;
+    for o in observations {
+        tick_copies += o.tick_copies;
+        copies_observed_by_content_hash += o.copies_observed_by_content_hash;
+        content_hash_duplicates += o.content_hash_duplicates;
+    }
+    let copy_observation_rate = if tick_copies > 0 {
+        Some(copies_observed_by_content_hash as f64 / tick_copies as f64)
+    } else {
+        None
+    };
+    CopyObservation {
+        tick_copies,
+        copies_observed_by_content_hash,
+        content_hash_duplicates,
+        copy_observation_rate,
+    }
+}
+
+/// Whether the content-hash duplication signal can be trusted to OBSERVE frame duplication — the
+/// #1101 promotion-readiness precondition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalViability {
+    /// The content-hash observed at least [`COPY_OBSERVATION_RATE_MIN`] of the tick-proven copies —
+    /// it demonstrably tracks duplication (NECESSARY, not sufficient, for a LIVE flip).
+    Viable,
+    /// At least [`MIN_TICK_COPIES_FOR_VIABILITY`] tick-proven copies occurred but the content-hash
+    /// observed fewer than [`COPY_OBSERVATION_RATE_MIN`] of them — structurally blind. NOT
+    /// promotable: a LIVE gate would be a false-green.
+    Blind,
+    /// Fewer than [`MIN_TICK_COPIES_FOR_VIABILITY`] tick-proven copies — too little ground-truth
+    /// duplication to judge. Not proven blind, not proven viable.
+    Indeterminate,
+}
+
+/// Classify a run's aggregate [`CopyObservation`] into a [`SignalViability`].
+pub fn signal_viability(observation: &CopyObservation) -> SignalViability {
+    if observation.tick_copies < MIN_TICK_COPIES_FOR_VIABILITY {
+        SignalViability::Indeterminate
+    } else if observation
+        .copy_observation_rate
+        .is_some_and(|r| r >= COPY_OBSERVATION_RATE_MIN)
+    {
+        SignalViability::Viable
+    } else {
+        SignalViability::Blind
+    }
+}
+
+/// Whether the surface is eligible for a LIVE-gate promotion AT ALL — true ONLY when the signal is
+/// [`SignalViability::Viable`]. The precondition [`gates_overall_pass`] must satisfy on real runs
+/// before its one-line flip; on the current lossy stream tap it is `false` (#1101).
+pub fn signal_promotable(viability: SignalViability) -> bool {
+    matches!(viability, SignalViability::Viable)
 }
 
 /// #1112 — slice a carried per-frame content-hash vector into ONE cambox window's hash sequence,
@@ -780,5 +933,180 @@ mod tests {
             measure_dup_cadence(&all),
             "the classifier sees an identical sequence through the slice"
         );
+    }
+
+    // ---- #1101 signal-viability self-diagnosis -----------------------------------------
+
+    #[test]
+    fn viability_constants_are_the_documented_values() {
+        assert_eq!(MIN_TICK_COPIES_FOR_VIABILITY, 3);
+        assert_eq!(COPY_OBSERVATION_RATE_MIN, 0.5);
+    }
+
+    #[test]
+    fn copy_observation_counts_tick_copies_and_the_ones_the_hash_observed() {
+        // 6 frames. Tick repeats at i=2 (2==2) and i=4 (3==3) → 2 tick-copies. The content hash
+        // repeats ONLY at i=2 (a copy the hash observed); at i=4 the hash differs (a copy the hash
+        // MISSED — the lossy-recording blindness this metric exists to surface).
+        let ticks = [Some(1), Some(2), Some(2), Some(3), Some(3), Some(5)];
+        let hashes = [
+            Some(10),
+            Some(20),
+            Some(20), // i=2: tick copy AND hash dup → observed
+            Some(30),
+            Some(31), // i=4: tick copy but hash DIFFERS → missed
+            Some(40),
+        ];
+        let obs = copy_observation(&ticks, &hashes);
+        assert_eq!(obs.tick_copies, 2, "two repeated-tick pairs: {obs:?}");
+        assert_eq!(
+            obs.copies_observed_by_content_hash, 1,
+            "only the i=2 copy was byte-identical: {obs:?}"
+        );
+        assert_eq!(
+            obs.content_hash_duplicates, 1,
+            "one consecutive equal-hash pair total: {obs:?}"
+        );
+        assert_eq!(
+            obs.copy_observation_rate,
+            Some(0.5),
+            "observed 1 of 2 tick-copies: {obs:?}"
+        );
+    }
+
+    #[test]
+    fn copy_observation_none_tick_or_hash_never_forms_a_copy_or_dup() {
+        // Two consecutive None ticks must NOT count as a tick-copy; two consecutive None hashes must
+        // NOT count as a hash-dup (a decode/hash gap must not manufacture a false duplicate).
+        let ticks = [None, None, Some(5), Some(5)];
+        let hashes = [None, None, Some(9), Some(9)];
+        let obs = copy_observation(&ticks, &hashes);
+        assert_eq!(obs.tick_copies, 1, "only the Some(5),Some(5) pair: {obs:?}");
+        assert_eq!(
+            obs.copies_observed_by_content_hash, 1,
+            "the Some(9),Some(9) coincides with the tick copy: {obs:?}"
+        );
+        assert_eq!(obs.content_hash_duplicates, 1, "{obs:?}");
+    }
+
+    #[test]
+    fn copy_observation_no_tick_copies_yields_a_none_rate() {
+        let ticks = [Some(1), Some(2), Some(3)];
+        let hashes = [Some(1), Some(2), Some(3)];
+        let obs = copy_observation(&ticks, &hashes);
+        assert_eq!(obs.tick_copies, 0);
+        assert_eq!(
+            obs.copy_observation_rate, None,
+            "no tick-copies ⇒ nothing to observe ⇒ None rate, not 0.0: {obs:?}"
+        );
+    }
+
+    #[test]
+    fn aggregate_sums_counts_and_recomputes_the_rate() {
+        let a = CopyObservation {
+            tick_copies: 4,
+            copies_observed_by_content_hash: 0,
+            content_hash_duplicates: 0,
+            copy_observation_rate: Some(0.0),
+        };
+        let b = CopyObservation {
+            tick_copies: 2,
+            copies_observed_by_content_hash: 1,
+            content_hash_duplicates: 1,
+            copy_observation_rate: Some(0.5),
+        };
+        let agg = aggregate_copy_observations(&[a, b]);
+        assert_eq!(agg.tick_copies, 6);
+        assert_eq!(agg.copies_observed_by_content_hash, 1);
+        assert_eq!(agg.content_hash_duplicates, 1);
+        assert_eq!(
+            agg.copy_observation_rate,
+            Some(1.0 / 6.0),
+            "run rate is recomputed from the summed counts, not averaged: {agg:?}"
+        );
+    }
+
+    #[test]
+    fn aggregate_of_empty_is_all_zero_none_rate() {
+        let agg = aggregate_copy_observations(&[]);
+        assert_eq!(agg.tick_copies, 0);
+        assert_eq!(agg.copy_observation_rate, None);
+    }
+
+    #[test]
+    fn viability_blind_when_copies_present_but_unobserved() {
+        // The #1101 measured production state: many tick-proven copies, ~zero observed by the hash.
+        let obs = CopyObservation {
+            tick_copies: 68,
+            copies_observed_by_content_hash: 0,
+            content_hash_duplicates: 0,
+            copy_observation_rate: Some(0.0),
+        };
+        assert_eq!(signal_viability(&obs), SignalViability::Blind);
+        assert!(
+            !signal_promotable(signal_viability(&obs)),
+            "a blind signal must NOT be promotable — a LIVE gate would be a false-green"
+        );
+    }
+
+    #[test]
+    fn viability_indeterminate_below_the_min_copies_floor() {
+        // Fewer than MIN_TICK_COPIES_FOR_VIABILITY copies, none observed → not enough ground truth.
+        let obs = CopyObservation {
+            tick_copies: 2,
+            copies_observed_by_content_hash: 0,
+            content_hash_duplicates: 0,
+            copy_observation_rate: Some(0.0),
+        };
+        assert_eq!(signal_viability(&obs), SignalViability::Indeterminate);
+        assert!(!signal_promotable(signal_viability(&obs)));
+    }
+
+    #[test]
+    fn viability_indeterminate_when_no_copies_at_all() {
+        let obs = CopyObservation {
+            tick_copies: 0,
+            copies_observed_by_content_hash: 0,
+            content_hash_duplicates: 0,
+            copy_observation_rate: None,
+        };
+        assert_eq!(signal_viability(&obs), SignalViability::Indeterminate);
+    }
+
+    #[test]
+    fn viability_viable_when_the_hash_observes_enough_copies() {
+        // A working (lossless-stage) signal: observes most tick-copies, clears the rate floor.
+        let obs = CopyObservation {
+            tick_copies: 10,
+            copies_observed_by_content_hash: 9,
+            content_hash_duplicates: 9,
+            copy_observation_rate: Some(0.9),
+        };
+        assert_eq!(signal_viability(&obs), SignalViability::Viable);
+        assert!(signal_promotable(signal_viability(&obs)));
+    }
+
+    #[test]
+    fn viability_at_the_rate_floor_is_viable() {
+        // Exactly at COPY_OBSERVATION_RATE_MIN passes (>= floor).
+        let obs = CopyObservation {
+            tick_copies: 4,
+            copies_observed_by_content_hash: 2,
+            content_hash_duplicates: 2,
+            copy_observation_rate: Some(0.5),
+        };
+        assert_eq!(signal_viability(&obs), SignalViability::Viable);
+    }
+
+    #[test]
+    fn viability_just_below_the_rate_floor_with_enough_copies_is_blind() {
+        // >= MIN copies but observation below the floor → blind (the discriminating case).
+        let obs = CopyObservation {
+            tick_copies: 100,
+            copies_observed_by_content_hash: 49,
+            content_hash_duplicates: 49,
+            copy_observation_rate: Some(0.49),
+        };
+        assert_eq!(signal_viability(&obs), SignalViability::Blind);
     }
 }
