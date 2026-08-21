@@ -327,7 +327,7 @@ jobs:
         # proof) decodes QR codes from OBS screenshots via cv2.QRCodeDetector;
         # headless avoids pulling in GUI/X11 deps this CI runner doesn't have.
         # Pillow + qrcode: test-only, generate REAL fixture QR codes to decode back.
-        run: pip install pytest websocket-client matplotlib opencv-python-headless numpy Pillow qrcode
+        run: pip install pytest websocket-client matplotlib opencv-python-headless numpy Pillow qrcode pyyaml
 
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party
