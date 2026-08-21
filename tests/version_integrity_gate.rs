@@ -1744,3 +1744,105 @@ fn vendor_pin_ok_when_deployed_at_newest_vendor_head_flow() {
     let _ = std::fs::remove_file(&t);
     let _ = std::fs::remove_file(&imag_m);
 }
+
+// ── #1164 — an operator-acked, physically-absent imag must NOT UNKNOWN-refuse the whole gate.
+// After the #1100 ENFORCED flip, an acked-offline imag (rig-fleet.txt `imag:…`, issue 1013) fed no
+// SHA + no .so bytes made BOTH the cross-box genlock parity AND the imag .so byte facet UNKNOWN(11),
+// refusing the whole E2E (run 32480962068: "2 box(es) UNKNOWN: genlock_parity imag:so_bytes") even
+// though every OTHER imag site legally skips. The `--imag-acked-offline REASON` flag closes that gap
+// WITHOUT weakening the fail-closed default — an absent imag still refuses unless explicitly acked.
+
+#[test]
+fn gate_skips_imag_facets_when_acked_offline_1164() {
+    // The exact buggy call shape from run 32480962068 (an EMPTY imag SHA passed because imag was
+    // unreachable) but WITH --imag-acked-offline: the gate must SKIP the imag .so byte facet (a LOUD
+    // greppable line, counted ok, never UNKNOWN) AND drop the `imag` genlock-sha entry from parity
+    // (which then certifies the remaining fleet strih+stream) -> GATE PASS (0). Proves BOTH halves.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_acked_1164",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_acked_1164",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        // the current call site passes an EMPTY imag SHA when imag is unreachable:
+        "--genlock-sha",
+        "imag=",
+        "--imag-acked-offline",
+        "notebook-replacement-issue-1162-new-unit-2026-08-22",
+    ]);
+    assert_eq!(
+        code, 0,
+        "an acked-offline imag must not UNKNOWN-refuse the gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("GATE PASS"),
+        "the gate must PASS with imag acked offline: {stdout}"
+    );
+    assert!(
+        stdout.contains("SKIPPED") && stdout.contains("imag acked offline"),
+        "the imag .so byte facet must emit a LOUD SKIPPED line naming the acked reason: {stdout}"
+    );
+    assert!(
+        stdout.contains("ONE genlock build"),
+        "cross-box parity must certify strih+stream after dropping the acked imag entry: {stdout}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        !all.contains("imag:so_bytes"),
+        "imag:so_bytes must NOT be counted UNKNOWN when acked offline: {all}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_still_refuses_absent_imag_without_the_ack_flag_1164() {
+    // The fail-closed default guard: the SAME absent-imag inputs as the acked test above but WITHOUT
+    // --imag-acked-offline must STILL refuse (11) -- the #1100 ENFORCED contract is unweakened; only
+    // an explicit operator ack changes the verdict. This pins that the new flag is the ONLY escape.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_noack_1164",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_noack_1164",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        "imag=",
+    ]);
+    assert_eq!(
+        code, 11,
+        "an absent imag WITHOUT the ack flag must still refuse (11), not pass. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(!stdout.contains("GATE PASS"), "must not pass: {stdout}");
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("imag_so_bytes") && all.contains("UNKNOWN"),
+        "the byte facet must still enforce UNKNOWN when not acked: {all}"
+    );
+    // Independently pin the parity-drop's default-OFF behavior: without the flag, imag is STILL
+    // counted in the cross-box parity (UNREAD), so parity stays UNKNOWN -- not silently dropped.
+    assert!(
+        stdout.contains("UNREAD: imag"),
+        "without --imag-acked-offline, the parity-drop must be OFF -- imag must still be counted \
+         UNREAD in the cross-box parity: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}

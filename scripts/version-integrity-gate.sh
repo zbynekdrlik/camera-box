@@ -393,6 +393,11 @@ Options:
   --imag-bytes LABEL=path=sha,...  #1082 -- imag's DEPLOYED libobs.so.30 / distroav.so /
                     libobs-opengl.so.30 sha256s (gathered over ssh; imag is not a --win-state box).
                     ENFORCED (#1100): absent -> the imag byte facet is UNKNOWN -> the gate refuses.
+  --imag-acked-offline REASON  #1164 -- imag is physically absent and operator-acked offline
+                    (rig-fleet.txt \`imag:REASON\`, issue 1013). SKIPS the imag .so byte facet (a
+                    loud SKIPPED line, counted OK, never UNKNOWN) and drops any \`imag\`-labelled
+                    --genlock-sha entry from the cross-box parity (which then certifies strih+stream).
+                    WITHOUT this flag an absent imag is still fail-closed UNKNOWN (the #1100 default).
 
 Exit: 0 = every box matches the pinned set (proceed), 20 = a box DRIFTED (REFUSED),
 11 = a box UNKNOWN/unread (INCOMPLETE, not clean), 1 = usage error.
@@ -411,14 +416,21 @@ main() {
   # .so sha256s (LABEL=path=sha,...), gathered over ssh (imag is NOT a --win-state bundle-state box).
   # Both ENFORCED (#758-shape, #1100): absent -> the facet is UNKNOWN -> the gate refuses.
   local imag_manifest="" imag_bytes=""
+  # #1164 -- imag acked-offline (physically absent, operator-acked in rig-fleet.txt, issue 1013).
+  # When set to the ack REASON, the imag .so byte facet is SKIPPED (a loud line, counted ok, never
+  # UNKNOWN) and any --genlock-sha entry labelled exactly `imag` is dropped from the cross-box parity
+  # (which then certifies the remaining fleet strih+stream). WITHOUT this flag the gate is
+  # byte-identical to before -- an absent imag is still fail-closed UNKNOWN(11) (the #1100 contract).
+  local imag_acked_offline=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --readme)        shift; readme="${1:-}" ;;
-      --manifest)      shift; manifest="${1:-}" ;;
-      --win-state)     shift; win_state+=("${1:-}") ;;
-      --genlock-sha)   shift; genlock_sha+=("${1:-}") ;;
-      --imag-manifest) shift; imag_manifest="${1:-}" ;;
-      --imag-bytes)    shift; imag_bytes="${1:-}" ;;
+      --readme)             shift; readme="${1:-}" ;;
+      --manifest)           shift; manifest="${1:-}" ;;
+      --win-state)          shift; win_state+=("${1:-}") ;;
+      --genlock-sha)        shift; genlock_sha+=("${1:-}") ;;
+      --imag-manifest)      shift; imag_manifest="${1:-}" ;;
+      --imag-bytes)         shift; imag_bytes="${1:-}" ;;
+      --imag-acked-offline) shift; imag_acked_offline="${1:-}" ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)            echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -567,6 +579,10 @@ main() {
     parity_args+=("${gname}=${gsha}")
   done
   for ge in "${genlock_sha[@]}"; do
+    # #1164 -- imag acked offline: drop its genlock-sha entry so the parity certifies the remaining
+    # fleet (strih+stream) instead of UNKNOWN-refusing on the physically-absent, acked box. Defense
+    # in depth -- the acked call site (recording-e2e.sh) already omits --genlock-sha imag=... entirely.
+    if [ -n "$imag_acked_offline" ] && [ "${ge%%=*}" = "imag" ]; then continue; fi
     parity_args+=("$ge")
   done
   # #756/#758 — ENFORCED (no longer opt-in/dormant, per the user's explicit escalation after
@@ -676,17 +692,28 @@ main() {
   # enforcement -- removing recording-e2e.sh's manifest-autosource opt-in guard -- stays staged until
   # the bundle-state-server byte gather is redeployed to strih+stream; see #1100.)
   echo "  -- imag .so byte parity (#1082/#1100, enforced) --"
-  local ib_label="imag" ib_csv=""
-  if [ -n "$imag_bytes" ]; then ib_label="${imag_bytes%%=*}"; ib_csv="${imag_bytes#*=}"; fi
-  local ib_out="" ibrc=0
-  ib_out="$(imag_bytes_verdict "${ib_label:-imag}" "$imag_manifest" "$ib_csv")" || ibrc=$?
-  printf '%s\n' "$ib_out" | sed 's/^/    /'
-  case "$ibrc" in
-    0)  ok=$((ok + 1)) ;;
-    20) bad=$((bad + 1)) ;;
-    11) unknown=$((unknown + 1)); unknown_boxes+=("imag:so_bytes") ;;
-    *)  echo "    !! imag_bytes_verdict exited ${ibrc} (unexpected)" >&2; bad=$((bad + 1)) ;;
-  esac
+  if [ -n "$imag_acked_offline" ]; then
+    # #1164 -- imag physically absent + operator-acked offline (rig-fleet.txt `imag:...`, issue 1013).
+    # SKIP the .so byte facet with a LOUD, greppable line instead of the #1100 UNKNOWN(11) refuse --
+    # counted ok (never unknown), never a silent pass (the whole imag leg is a NAMED partial this run,
+    # exactly like every other imag_leg_skip_note site). The #1100 fail-closed default is untouched:
+    # this branch runs ONLY when the operator explicitly acked imag offline.
+    printf '  %-22s SKIPPED  (imag acked offline: %s -- issue-1013 leg skip; facet not judged)\n' \
+      "imag_so_bytes" "$imag_acked_offline" | sed 's/^/    /'
+    ok=$((ok + 1))
+  else
+    local ib_label="imag" ib_csv=""
+    if [ -n "$imag_bytes" ]; then ib_label="${imag_bytes%%=*}"; ib_csv="${imag_bytes#*=}"; fi
+    local ib_out="" ibrc=0
+    ib_out="$(imag_bytes_verdict "${ib_label:-imag}" "$imag_manifest" "$ib_csv")" || ibrc=$?
+    printf '%s\n' "$ib_out" | sed 's/^/    /'
+    case "$ibrc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("imag:so_bytes") ;;
+      *)  echo "    !! imag_bytes_verdict exited ${ibrc} (unexpected)" >&2; bad=$((bad + 1)) ;;
+    esac
+  fi
 
   # #1137 -- REPORT-ONLY vendor-pin ALARM. The cross-box parity above passes a UNIFORMLY-stale fleet
   # (every box agrees on an OLD genlock build); this PINS the fleet-deployed genlock_build_sha to the
