@@ -38,6 +38,7 @@ NEXT one. The full set guarded by `IMAG_OFFLINE_ACKED` (issue 1013):
 | ALL_CAMBOX `[0/8]` imag OBS-prep | reachability probe / projectors / wmctrl / heal all `exit 1` |
 | ALL_CAMBOX `[1/8]` imag render-health + MV-divisor | `exit 1` |
 | `[0/8] dantesync-version-gate` | **names imag `imag-nb`, not `imag`** — its own ack-exclusion never matches the `imag` ack, and it REFUSES (exit 11) on an UNREAD node → drop `imag-nb` from `DANTESYNC_VERSION_LINUX` when acked |
+| `[0/8] version-integrity gate` | issue 1164 — an empty imag genlock SHA → cross-box parity `UNKNOWN` (11), AND the issue-1100 ENFORCED imag `.so` byte facet `UNKNOWN` (11) on absent bytes → the whole E2E refused (run 32480962068: "2 box(es) UNKNOWN: genlock_parity imag:so_bytes"). When acked → skip the imag ssh gathers (SHA read + `.so` probe + manifest fetch) and invoke `version-integrity-gate.sh` with `--imag-acked-offline "$IMAG_OFFLINE_ACK_REASON"` (never `--genlock-sha imag=…`) — the gate then SKIPS the `.so` byte facet (loud line, counted ok) and drops the `imag` parity entry so parity certifies strih+stream. WITHOUT the flag the gate is byte-identical (absent imag still fail-closed UNKNOWN) |
 | `[4a/8]` imag program-scene routing | bare `switch --host "$IMAG_IP"` under `set -e` |
 | `[4d1/8]` MV-fps floor | report-only, but pass strih-only when acked |
 | `[4d/8]` imag render-budget gate | `if ! …; then exit 1` |
