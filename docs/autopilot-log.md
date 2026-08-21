@@ -10031,3 +10031,41 @@ No push/PR/rig touch (worktree worker).
 - WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI + live rig
   verify). No PR/merge/deploy/run-card by the worker. Ticket stays OPEN (fix(#1161)/test(#1161)
   paren form); the frame-move is vendored-C, live-only-verifiable — the supervisor's live step.
+
+## issue 1165 — split src/dupe_decimation.rs into a module dir (move-only, worktree lane, 2026-08-21)
+- Root cause: the file reached 3305 lines (non-test ~1200, over the ~1000 #414 budget after the
+  #1145-v3 arming + the #1167 corrupted-slot make-up). Pure accretion, cluster was already
+  #414-correct — a maintainability split, zero behaviour change.
+- Split into `src/dupe_decimation/`: mod.rs (module doc verbatim + `pub use signature::*/shed::*/
+  gate::*` re-exports so every symbol keeps its public path camera_box::dupe_decimation::X — zero
+  import-site churn in main.rs/lib.rs — + `#[cfg(test)] mod tests;`), signature.rs (hash/sig cluster,
+  byte-identical), shed.rs (ShedAction + shed-decision consts/logic, byte-identical, no imports), gate.rs
+  (DecimationGate + DupeShedLog + dupe_shed_summary + prune_before, byte-identical), tests.rs (~44-test
+  module moved verbatim). Sizes: 69/153/358/642/2092.
+- Necessary non-move edits (no behaviour change): (1) note_capture_takt + sustained_over_rate
+  private -> pub(crate) so the now-SIBLING test submodule can still call them (tests reach only these
+  2 private methods; 0 private fields, 0 other private items); (2) prune_before co-located in gate.rs
+  with its only caller (DecimationGate) so no private item crosses a submodule boundary; (3) shed.rs's
+  6 cross-module intra-doc links repointed to full crate::dupe_decimation::DecimationGate:: paths (its
+  code is self-contained -> `use super::*` would be an unused import = CI clippy -D warnings fail);
+  (4) tests.rs restates `use std::collections::VecDeque;` (was an ambient file-top import) — the sole
+  include-path edit.
+- GOTCHA (this split): the test module lives as a top-level `mod tests;` child of mod.rs (SIBLING of
+  gate.rs), so it can NO LONGER reach DecimationGate's private methods the way an in-file
+  `mod tests {}` child of the impl could — hence the 2 pub(crate) promotions. Alternative (nest tests
+  under gate.rs) was rejected: it would file the signature/shed tests under the gate module and relies
+  on `super::*` transitivity for a std type. Also: rustfmt REQUIRES the moved test body at column 0 for
+  a top-level module file, so it de-indented tests.rs (whitespace + dropped now-optional trailing
+  commas on re-wrapped lines) — token-identical, proven by a whitespace+comma-stripped diff (67425==67425).
+- Verified (Tier-0, ZERO cargo compile per #557): `cargo fmt --all --check` clean (needed 2 apply
+  passes — rustfmt left a leading blank on the first de-indent pass); the rustc `--test` scratch route
+  (copy genlock_pacing.rs + the whole dupe_decimation/ dir, root.rs = `mod genlock_pacing; mod
+  dupe_decimation;`, NO sed) -> 70 passed / 0 failed (44 dupe + 26 genlock), byte-for-byte the same
+  count as the pre-split baseline. Byte-identity of every pure-move region diff-confirmed vs origin/dev.
+- Scratch-route recipe kept true: `.claude/rules/genlock-emit-gate-pacing.md` frontmatter `paths:` ->
+  `src/dupe_decimation/**`, and the recipe text updated to the dir layout + the finding that the old
+  `sed 's/crate::genlock_pacing:://g'` was never actually required (genlock_pacing is a top-level mod
+  in the scratch crate, so crate::genlock_pacing::* resolves directly) — retired it.
+- WORKTREE MODE: stopped at green LOCAL result; supervisor integrates (merge + full CI + live rig
+  verify). Full authority — supervisor opens the PR (Closes #1165), merges, fires the run-card. Branch
+  worktree-agent-af7acf810e92e6902 @141efadd7; durability backup refs/autopilot-wip/worktree-agent-af7acf810e92e6902.
