@@ -397,9 +397,6 @@ fn over_rate_excess_dupe_input_stays_boundary_locked_without_skips_1145() {
     let captures = synthetic_889_capture_sequence(62.0, 62 * seconds, 15);
     let emit_interval_ns = 1_000_000_000u64 / 60;
 
-    // Excludes the ~2 s unique-rate-window warm-up (before retirement engages a dupe emits a
-    // copy) from the steady-state copy assertion, mirroring the #889/#1145 tests' WARMUP note.
-    const WARMUP_NS: u64 = 3_000_000_000;
     let mut gate = DecimationGate::new();
     let mut emitted: Vec<(u64, u64)> = Vec::new();
     let mut total_skips: u64 = 0;
@@ -437,7 +434,6 @@ fn over_rate_excess_dupe_input_stays_boundary_locked_without_skips_1145() {
     // rate is unmeasurably close between a true-60 jittery source and this ~57.9 one (the #1145
     // 2s-window limit), so the fill applies to the whole enough_unique band; the absolute copies/gaps
     // tolerance is the live-E2E re-check (`WINDOW_COPIES_GAPS_TOLERANCE`).
-    let _ = WARMUP_NS;
     assert_eq!(
         retired, 0,
         "a steady (non-converging) over-rate fills the shallow-lag slots, it does not retire them; \
@@ -2216,6 +2212,7 @@ fn drain_holds_the_boundary_so_the_next_frame_fills_the_slot_1167() {
     let emit_int = 1_000_000_000u64 / 60;
     let mut next_i = 0u64;
     let mut gate = warm_over_rate_gate(&mut next_i);
+    let _ = gate.take_shed_counts(); // clear the warm-up's blind-pacing sheds so this poll is isolated
     let capture_mono = 400u64 * cap_int;
     let now = capture_mono + emit_int * 5 / 2; // residence floors to 2 -> the first Drain arm
     let boundary_before = gate.next_boundary_ns();
@@ -2231,5 +2228,67 @@ fn drain_holds_the_boundary_so_the_next_frame_fills_the_slot_1167() {
         boundary_before,
         "the Drain must HOLD the boundary (not advance/skip) so the next fresher frame fills the \
              slot — issue-1167 invariant (a skipped slot is never acceptable)"
+    );
+    // Self-sufficient: prove it was the DRAIN arm that fired (a BlindShed would also be !emit +
+    // boundary-unchanged), so the assertions above cannot pass for the wrong reason.
+    let (_ds, blind, copies, retired, drained, _fast) = gate.take_shed_counts();
+    assert_eq!(
+        (drained, blind, copies, retired),
+        (1, 0, 0, 0),
+        "the HOLD must be recorded as exactly one DRAIN (not a blind-shed / copy / retire)"
+    );
+}
+
+#[test]
+fn drain_hold_panic_floor_fills_after_max_consecutive_holds_1167() {
+    // (#1167) The Drain-hold PANIC FLOOR: a BOGUS stuck-high residence would otherwise hold the SAME
+    // boundary forever (fail-black). After DRAIN_HOLD_PANIC_FLOOR consecutive Drain-HOLDS the gate
+    // must FILL the slot with a copy (advance + emit) — fail-SAFE. Decouple the two clocks: keep the
+    // REALTIME grid on-time (now_ns just past the held boundary, lag ~1 so `would_emit` stays true and
+    // the Drain arm — checked before the lag branches — keeps firing) while the MONOTONIC residence is
+    // pegged at the clamp (now_mono ≫ capture_mono) so `queue_depth >= QUEUE_DEPTH_SHED_INTERVALS`
+    // every poll. UNIQUE hashes (never dupes) so it is the first, dupeness-blind Drain arm.
+    let cap_int = (1e9 / 62.0) as u64;
+    let emit_int = 1_000_000_000u64 / 60;
+    let mut next_i = 0u64;
+    let mut gate = warm_over_rate_gate(&mut next_i); // over-rate armed, not converging (no FastDrain)
+    let _ = gate.take_shed_counts(); // clear the warm-up counters so the floor accounting is isolated
+    let boundary = gate.next_boundary_ns();
+    let now_ns = boundary + emit_int; // lag ~1: would_emit true, but the residence Drain arm wins
+    for hold in 1..DRAIN_HOLD_PANIC_FLOOR {
+        let cap_mono = (399 + hold) * cap_int; // continues the warm-up takt (each interval = cap_int)
+        let now_mono = cap_mono + emit_int * 8; // residence pegged at the clamp -> Drain every poll
+        let hash = hold.wrapping_mul(0x9E37_79B9_7F4A_7C15); // unique -> the dupeness-blind Drain arm
+        let emit = gate.poll(now_ns, emit_int, hash, true, now_mono, cap_mono);
+        assert!(
+            !emit,
+            "hold #{hold} must HOLD (emit nothing), not fill, before the floor"
+        );
+        assert_eq!(
+            gate.next_boundary_ns(),
+            boundary,
+            "hold #{hold} must keep the SAME boundary (a held, un-advanced slot)"
+        );
+    }
+    // The DRAIN_HOLD_PANIC_FLOOR-th consecutive hold trips the floor: FILL (emit a copy) + advance.
+    let cap_mono = (399 + DRAIN_HOLD_PANIC_FLOOR) * cap_int;
+    let now_mono = cap_mono + emit_int * 8;
+    let hash = 0xF100_0000u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let emit = gate.poll(now_ns, emit_int, hash, true, now_mono, cap_mono);
+    assert!(
+        emit,
+        "the {DRAIN_HOLD_PANIC_FLOOR}th consecutive Drain-hold must trip the PANIC FLOOR and FILL \
+             the slot (fail-SAFE, never fail-black)"
+    );
+    assert_eq!(
+        gate.next_boundary_ns(),
+        boundary + emit_int,
+        "the floor fill must ADVANCE the boundary exactly one interval (a single slot)"
+    );
+    let (_ds, _bl, copies, _ret, drained, _fast) = gate.take_shed_counts();
+    assert_eq!(
+        (drained, copies),
+        (DRAIN_HOLD_PANIC_FLOOR - 1, 1),
+        "the floor fill is a COPY (not a drain), so drained counts only the holds before it"
     );
 }
