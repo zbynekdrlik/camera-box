@@ -2596,4 +2596,159 @@ mod tests {
             "healthy 60.00: note_frame_luma must be inert (never sustained_over_rate)"
         );
     }
+
+    // ── (#1145 v3) arming-signal robustness through a capture hiccup ──────────
+
+    #[test]
+    fn takt_ema_survives_a_capture_gap_1145() {
+        // (#1145 v3) RED before the gap-excluded takt fold / GREEN after. The 61.5-fps capture EMA
+        // sits at ~16.26ms, the sustained_over_rate threshold (RETIRE_MIN_TAKT_INTERVAL_NS) at
+        // ~16.584ms — a 0.32ms margin. A SINGLE dequeue hiccup (a blocked V4L2 dequeue, NOT a takt
+        // change) folds one huge sample into the ~256-frame EMA and disarms sustained_over_rate for
+        // ~7s (a 500ms gap), during which depth-Drain, FastDrain AND the round-3 noisy-dupe compare
+        // are ALL dead → the over-rate surplus leaks into the strih FIFO (the #1145 v3 residual).
+        // A genuine takt change shows in EVERY sample; a delivery gap in ONE — so the fold must skip
+        // the outlier. RED: current folds it and stays disarmed for hundreds of post-gap frames.
+        let cap_int = (1_000_000_000.0f64 / 61.5) as u64; // ~16.26 ms over-rate takt
+        let mut gate = DecimationGate::new();
+        let mut t = 0u64;
+        for _ in 0..800 {
+            t += cap_int;
+            gate.note_capture_takt(t);
+        }
+        assert!(
+            gate.sustained_over_rate(),
+            "a warm 61.5 fps capture EMA must arm sustained_over_rate"
+        );
+        // ONE 500 ms dequeue hiccup — a blocked dequeue, NOT a rate change.
+        t += 500_000_000;
+        gate.note_capture_takt(t);
+        // then steady over-rate again; sustained_over_rate must SURVIVE (re-arm within a few frames).
+        let mut rearmed_within = None;
+        for k in 1..=8u64 {
+            t += cap_int;
+            gate.note_capture_takt(t);
+            if gate.sustained_over_rate() {
+                rearmed_within = Some(k);
+                break;
+            }
+        }
+        assert!(
+            rearmed_within.is_some(),
+            "sustained_over_rate must survive a single dequeue hiccup (gap-excluded takt fold); it \
+             stayed disarmed for >8 post-gap frames — the arming-poisoning residual disarms every \
+             over-rate drain for seconds"
+        );
+    }
+
+    /// (#1145 v3) Drive the REAL [`DecimationGate::poll`] through a send-bound over-rate loop with
+    /// CAM1-style byte-identical dupes at the over-rate cadence (a true-60 source captured faster),
+    /// real monotonic clocks (wall == mono, no reconnect offset), and ONE injected dequeue GAP after
+    /// a 10 s warm-up. Returns the copy-valve emissions (a DUPE that EMITTED) in the 8 s window AFTER
+    /// the gap — the surplus that, once a hiccup disarms the cam-side drains, leaks downstream into
+    /// the strih FIFO. Send-bound: an EMITted frame costs ~one interval (the NDI send), a SHED frame
+    /// is cheap, so the loop cannot keep up with the over-rate and the queue rides full.
+    fn run_hiccup_copy_export(capture_fps: f64, seed: u64, gap_ns: u64) -> u64 {
+        let ei = 1_000_000_000u64 / 60;
+        let ci = (1e9 / capture_fps) as u64;
+        let send_cost = ei * 995 / 1000; // ~16.58 ms -> send-bound max emit ~60.3/s
+        let shed_cost = 1_000_000u64; // 1 ms (hash only)
+        const MAXQ: usize = 4; // V4L2 buffers (capture.rs)
+        let warm_ns = 10_000_000_000u64;
+        let post_ns = 8_000_000_000u64;
+        let over = capture_fps - 60.0;
+        let dupe_period = if over > 0.01 {
+            (capture_fps / over).round() as u64
+        } else {
+            u64::MAX
+        };
+        let mut gate = DecimationGate::new();
+        let mut queue: VecDeque<(u64, u64, bool)> = VecDeque::new(); // (cap_mono, hash, is_dupe)
+        let (mut next_cap, mut mono, mut jit, mut nid, mut prev_hash) =
+            (0u64, 0u64, seed, 0u64, 0u64);
+        let mut nc = 0u64;
+        let (mut gap_done, mut post_start) = (false, 0u64);
+        let end = warm_ns + post_ns + 4_000_000_000;
+        let mut post_copies = 0u64;
+        loop {
+            while next_cap <= mono {
+                // inject ONE gap the first time a capture would land at/after the warm mark.
+                if !gap_done && next_cap >= warm_ns {
+                    next_cap += gap_ns;
+                    gap_done = true;
+                    post_start = next_cap;
+                }
+                let cap = next_cap;
+                jit = jit
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let span = (ci / 3).max(1);
+                let j = ((jit >> 33) % span) as i64 - (span / 2) as i64;
+                let cap_j = (cap as i64 + j).max(0) as u64;
+                if cap_j > mono {
+                    break;
+                }
+                let is_dupe = dupe_period != u64::MAX && nc % dupe_period == dupe_period - 1;
+                let h = if is_dupe {
+                    prev_hash
+                } else {
+                    let x = nid.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+                    nid += 1;
+                    x
+                };
+                prev_hash = h;
+                if queue.len() < MAXQ {
+                    queue.push_back((cap_j, h, is_dupe));
+                }
+                nc += 1;
+                next_cap += ci;
+            }
+            if queue.is_empty() {
+                if next_cap > end {
+                    break;
+                }
+                mono = next_cap; // the loop waits for the next capture
+                continue;
+            }
+            let (cap, h, is_dupe) = queue.pop_front().unwrap();
+            let now = mono;
+            if post_start > 0 && now >= post_start + post_ns {
+                break; // past the measurement window
+            }
+            let emit = gate.poll(now, ei, h, true, now, cap);
+            // a DUPE that EMITTED is a copy-valve emission (Emit{copy:true}) — the surplus that leaks
+            // downstream when the cam-side drains are disarmed. Count it only inside the post-gap window.
+            if post_start > 0 && now >= post_start && is_dupe && emit {
+                post_copies += 1;
+            }
+            mono += if emit { send_cost } else { shed_cost };
+            if next_cap > end && queue.is_empty() {
+                break;
+            }
+        }
+        post_copies
+    }
+
+    #[test]
+    fn over_rate_copy_export_survives_a_capture_hiccup_1145() {
+        // (#1145 v3) RED before B.1 (gap-excluded takt fold) + B.2 (occupancy-relative unique floor)
+        // / GREEN after. A single dequeue hiccup poisons BOTH arming signals (the takt EMA disarms
+        // sustained_over_rate; the absolute unique-count floor drops below `retire_min_uniques` for
+        // ~the gap duration), so every over-rate dupe hits the late-dupe COPY valve instead of being
+        // retired — those copies ride at wire rate into the strih FIFO (the ±5-frame cam1 wobble the
+        // qr-align gate REDs). With the fix the drains stay armed through the hiccup and the surplus
+        // is retired at SOURCE, so ~ZERO copies are exported. Summed across seeds past the gap.
+        let gap_ns = 500_000_000u64; // a 500 ms hiccup
+        let mut total_post_copies = 0u64;
+        for seed in [1u64, 7, 3, 42, 99] {
+            total_post_copies += run_hiccup_copy_export(61.5, seed, gap_ns);
+        }
+        assert!(
+            total_post_copies <= 5,
+            "a single capture hiccup must NOT disarm the cam-side over-rate drains (B.1+B.2); the \
+             surplus must be retired at source, not exported as copy-valve dupes into the strih \
+             FIFO. Got {total_post_copies} post-gap copy-valve emissions across 5 seeds (RED: the \
+             arming-poisoning residual exports ~10/seed)"
+        );
+    }
 }
