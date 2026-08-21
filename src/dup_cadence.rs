@@ -25,7 +25,7 @@
 //! [`NEAR_DUP_MAD_MAX`]. A byte-duplicate source frame survives the lossy encode as a LOW-MAD pair
 //! (only global quantization noise between the two), while genuine motion moves image content and
 //! produces a far higher MAD. Validated on the retained REAL lossy diagnostic frame PNGs (32
-//! tick-proven copy pairs vs 381 genuine-motion pairs across 12 runs): at `MAD <= 10.0` the signal
+//! tick-proven copy pairs across 16 runs vs 381 genuine-motion pairs): at `MAD <= 10.0` the signal
 //! observes 26/32 = 81% of the tick-proven copies with 0/381 = 0.0% false positives on genuine
 //! motion — where the byte-exact hash observed 0/32. DOWNSCALED thumbnails destroy the separation
 //! (averaging washes out localised motion); full-WIDTH row-sampled MAD preserves the full-resolution
@@ -132,12 +132,16 @@ pub const MAD_SAMPLE_ROWS: usize = 64;
 /// Tier-0 testable. `prev`/`cur` are each `width * height` (gray8, tightly packed as ffmpeg's
 /// `-pix_fmt gray` emits). Samples a set of full-WIDTH rows spread evenly across the height
 /// ([`MAD_SAMPLE_ROWS`]) and returns the mean absolute per-pixel luma difference over them. Two
-/// byte-identical frames → `0.0`; genuine motion → a far larger value (see [`NEAR_DUP_MAD_MAX`]).
-/// A degenerate (zero width/height) frame, or one where no sampled row is fully present in both
-/// buffers, returns `0.0` (no evidence of difference — the caller treats it like the first frame /
-/// a gap, never a false near-duplicate that manufactures a pulldown, because the window's
-/// adjacency/None handling gates it out). Computed on the box between consecutive decoded frames
-/// (`probe::recording::frame_prev_diffs`); carried per frame and thresholded in the merge.
+/// byte-identical frames → `0.0` (correctly a near-duplicate — that IS the signal). The two
+/// no-comparable-data degenerate cases also return `0.0`: a zero width/height frame, or one where no
+/// sampled row is fully present in both buffers. Neither can arise in production — the producer
+/// (`probe::recording::frame_prev_diffs`) only ever passes two FULL `width*height` buffers of a
+/// non-zero-dimension recording: `read_frames` reads by `read_exact`, so a truncated tail is dropped
+/// (`UnexpectedEof`), never delivered as a short frame. (Were a short/degenerate frame ever passed
+/// for a recording-adjacent in-range position, its `0.0` WOULD count as a near-duplicate — this is a
+/// no-op guard against a caller that does not exist, not a case the window's None-gating catches.)
+/// Computed on the box between consecutive decoded frames; carried per frame and thresholded in the
+/// merge.
 pub fn frame_row_sampled_mad(prev: &[u8], cur: &[u8], width: usize, height: usize) -> f64 {
     if width == 0 || height == 0 {
         return 0.0;
@@ -389,7 +393,11 @@ pub const COPY_OBSERVATION_RATE_MIN: f64 = 0.5;
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct CopyObservation {
     /// Consecutive-frame pairs whose Vernier tick REPEATED — a tick-proven byte-duplicate camera
-    /// frame (the ground truth the content signal should also see). Only `Some`-tick pairs count.
+    /// frame (the ground truth the content signal should also see). Counted ONLY over pairs the
+    /// content signal COULD observe, i.e. RECORDING-ADJACENT ones (`prev_mads[i].is_some()` — the
+    /// exact adjacency `window_prev_mads` gates the MAD on), so this is the honest DENOMINATOR for
+    /// the observation rate: a tick-copy across a within-window attribution gap (which the MAD side
+    /// can never see) does not inflate it. Only `Some`-tick pairs count.
     pub tick_copies: usize,
     /// Of those tick-copy pairs, how many ALSO registered a content NEAR-duplicate (MAD ≤
     /// [`NEAR_DUP_MAD_MAX`]) — copies the content signal actually observed.
@@ -409,13 +417,24 @@ pub struct CopyObservation {
 /// `prev_mads` (index `i` is the same recorded frame in both; a `None` on either side never forms a
 /// duplicate). The caller builds both aligned from the same window frames (`prev_mads` via
 /// [`window_prev_mads`], so its near-dup positions match `measure_dup_cadence`'s exactly).
+///
+/// A tick-copy is counted ONLY where `prev_mads[i].is_some()` — i.e. the pair is RECORDING-ADJACENT
+/// (the exact gate `window_prev_mads` applies: `Some` at position `i` iff frames `i-1`,`i` are
+/// consecutive in the recording and in range). This puts BOTH sides of the cross-check on the SAME
+/// pair basis, so `copy_observation_rate` measures "of the copies the content signal COULD observe,
+/// how many did it" — a tick-copy across a within-window attribution gap (which the MAD side can
+/// never see, its `prev_mads` there being `None`) is excluded from BOTH numerator and denominator,
+/// never depressing the rate below what the signal can actually achieve.
 pub fn copy_observation(ticks: &[Option<u64>], prev_mads: &[Option<f64>]) -> CopyObservation {
     let n = ticks.len().min(prev_mads.len());
     let mut tick_copies = 0usize;
     let mut copies_observed_by_content = 0usize;
     let mut content_near_dup_pairs = 0usize;
     for i in 1..n {
-        let tick_copy = ticks[i].is_some() && ticks[i] == ticks[i - 1];
+        // Only pairs the content signal could observe (recording-adjacent, in-range) are eligible
+        // as tick-copies — `prev_mads[i].is_some()` is exactly that gate (see the fn doc).
+        let recording_adjacent = prev_mads[i].is_some();
+        let tick_copy = recording_adjacent && ticks[i].is_some() && ticks[i] == ticks[i - 1];
         let near_dup = prev_mads[i].is_some_and(is_near_duplicate);
         if tick_copy {
             tick_copies += 1;
@@ -834,6 +853,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tick_copy_across_a_non_adjacent_boundary_is_not_counted() {
+        // #1166 review — the tick-copy basis must match the MAD's recording-adjacency basis: a
+        // repeated tick at a window position the MAD side gated to None (a non-adjacent boundary /
+        // gap) is NOT observable by the content signal, so it must not count as a tick-copy and
+        // depress the observation rate. `window_prev_mads` yields None at such a position.
+        let ticks = [Some(5u64), Some(5)]; // same tick both frames
+        let mads = [None, None]; // position 1 gated to None (non-adjacent / gap)
+        let o = copy_observation(&ticks, &mads);
+        assert_eq!(
+            o.tick_copies, 0,
+            "a tick-copy at a non-recording-adjacent position (MAD None) is not counted"
+        );
+        assert_eq!(o.copy_observation_rate, None);
+
+        // Contrast: the SAME repeated tick at a recording-adjacent position (MAD Some, even if the
+        // MAD itself is high = blind) DOES count as a tick-copy — the denominator the signal is
+        // judged against.
+        let ticks2 = [Some(5u64), Some(5)];
+        let mads2 = [None, Some(25.0)]; // adjacent, but high MAD → blind
+        let o2 = copy_observation(&ticks2, &mads2);
+        assert_eq!(
+            o2.tick_copies, 1,
+            "an adjacent tick-copy counts even when the MAD is blind"
+        );
+        assert_eq!(o2.copies_observed_by_content, 0);
+        assert_eq!(o2.copy_observation_rate, Some(0.0));
+    }
+
+    #[test]
     fn aggregate_sums_counts_and_recomputes_the_rate() {
         let a = CopyObservation {
             tick_copies: 4,
@@ -1007,7 +1055,8 @@ mod tests {
     // ---- #1166 REAL-DATA fixture: the fix turns the viability from Blind to Viable ------
 
     /// The MEASURED row-sampled MAD (rows=64) between every retained adjacent diagnostic-frame PNG
-    /// pair across the 12 runs that retained pixels, split by whether the Vernier tick proved a copy.
+    /// pair across the 22 runs that retained pixels, split by whether the Vernier tick proved a copy
+    /// (the 32 COPY pairs come from 16 of those runs; the 381 MOTION pairs from all 22).
     /// COPY = a tick-proven byte-duplicate camera frame (the ground truth); MOTION = genuine motion.
     /// (The byte-exact FNV-1a observed 0 of these 32 copies — structurally blind, #1101.)
     const REAL_COPY_MADS: &[f64] = &[
@@ -1015,9 +1064,10 @@ mod tests {
         7.16, 7.35, 7.4, 7.52, 7.69, 7.69, 7.86, 8.46, 8.8, 9.43, 9.58, 10.62, 11.39, 17.3, 17.93,
         19.03, 20.34,
     ];
-    /// The genuine-motion floor: the SMALLEST measured MADs among the 381 real motion pairs (the
-    /// values nearest the copy cluster — the ones that would false-positive at too high a threshold).
-    /// The full motion set has min 10.79; every motion pair is ABOVE NEAR_DUP_MAD_MAX.
+    /// The genuine-motion floor: a representative LOW sample of the 381 real motion MADs, near the
+    /// copy cluster (the ones that would false-positive at too high a threshold) and LED BY the true
+    /// minimum. Every value listed is a real measured motion MAD; the full motion set's min is 10.79
+    /// and every one of the 381 motion pairs is ABOVE NEAR_DUP_MAD_MAX (so 0 motion false-positives).
     const REAL_MOTION_MADS_LOW: &[f64] = &[
         10.79, 12.23, 12.7, 12.75, 13.8, 13.84, 13.89, 13.97, 14.33, 14.51, 14.62, 15.5, 16.24,
         17.08, 18.38, 19.1, 20.0, 21.04, 22.07, 25.01,

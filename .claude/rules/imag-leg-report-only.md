@@ -121,8 +121,10 @@ fixes landed (both crate-root-pure so they Tier-0-test despite the probe gate on
    degrades ONLY a clean schema mismatch on a report-only box; **strih/stream and every non-schema
    failure (unreadable/corrupt JSON, a same-schema error) STAY FATAL** — their binaries come fresh
    from CI each run, so a mismatch there is a genuine hard-gate defect. The skip reason threads
-   through `build_and_print_verdict_with_stream_hashes` as a trailing `Option<String>` (the 8-arg
-   back-compat wrapper passes `None`), mirroring the issue-1112 `stream_content_hashes` carry.
+   through `build_and_print_verdict_with_stream_diffs` as a trailing `Option<String>` (the 8-arg
+   back-compat wrapper passes `None`), mirroring the issue-1112/#1166 `stream_frame_prev_diffs` carry
+   (renamed from `..._with_stream_hashes` / `stream_content_hashes` when #1166 replaced the byte-exact
+   content hash with the codec-tolerant MAD-to-predecessor near-duplicate signal).
 
 Note the earlier issue-1094 section's aside ("emits `schema_version=3`, exactly what the current
 merge expects") was true at issue-1094 time; the schema is 4 now, which is exactly why the landmine
