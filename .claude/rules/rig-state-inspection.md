@@ -302,3 +302,9 @@ rig looked half-alive):
    never ssh's own stdin carrying the heredoc — the command "succeeds" printing only the sudo
    prompt, zero script lines executed (round-13 imag install, verified: marker unchanged). Fix:
    scp the script to the box first, then `ssh box 'echo pw | sudo -S bash /tmp/script.sh'`.
+   EQUIVALENT fix that leaves NO temp file on the box (#789 obs-backup-retention.sh --imag, verified
+   with a fake-sudo repro): feed ONE combined stdin stream so `sudo -S` eats the password line and
+   the child `bash -s` reads the rest as its program —
+   `ssh box "sudo -S -p '' bash -s -- <args>" < <(printf '%s\n' "$PW"; cat script.sh)`. The trap
+   either way is a REMOTE `printf|sudo` pipeline: the local `< script` then lands on printf's ignored
+   stdin, never on `bash -s`, which reads sudo's exhausted pipe (empty program) — a silent no-op.
