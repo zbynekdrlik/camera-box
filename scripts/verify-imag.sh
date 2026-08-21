@@ -256,7 +256,7 @@ imag_hostname_matches() {
 imag_static_ip_present() {
   local text="$1" ip="$2"
   [ -n "$ip" ] || return 1
-  printf '%s' " $text " | grep -qF " ${ip} " || printf '%s' " $text " | grep -qF " ${ip}/"
+  grep -qF " ${ip} " <<<" $text " || grep -qF " ${ip}/" <<<" $text "
 }
 
 # --- (b) ssh.service (not ssh.socket) --------------------------------------------------------
@@ -290,7 +290,7 @@ imag_hwe_kernel_installed() {
 # imag_cmdline_has_preempt_full CMDLINE -> 0 iff CMDLINE carries the whole-token `preempt=full`
 # flag (the #482 low-latency-kernel config).
 imag_cmdline_has_preempt_full() {
-  printf '%s' " $1 " | grep -qE '[[:space:]]preempt=full[[:space:]]'
+  grep -qE '[[:space:]]preempt=full[[:space:]]' <<<" $1 "
 }
 
 # imag_cmdline_free_of_kernel_isolation CMDLINE -> 0 iff CMDLINE carries NEITHER an `isolcpus=`
@@ -302,7 +302,7 @@ imag_cmdline_has_preempt_full() {
 # acceptance-gate item, deferred between #780/#791 since 2026-07-15 and the direct cause of the
 # #842 recurrence on the replacement notebook. A hard FAIL, never a warning.
 imag_cmdline_free_of_kernel_isolation() {
-  ! printf '%s' " $1 " | grep -qE '[[:space:]](isolcpus|nohz_full)='
+  ! grep -qE '[[:space:]](isolcpus|nohz_full)=' <<<" $1 "
 }
 
 # --- (e) display-manager -> lightdm + autologin; gdm3 absent ---------------------------------
@@ -312,8 +312,8 @@ imag_cmdline_free_of_kernel_isolation() {
 imag_autologin_conf_ok() {
   local text="$1" user="$2"
   [ -n "$user" ] || return 1
-  printf '%s\n' "$text" | grep -qxF "autologin-user=${user}" \
-    && printf '%s\n' "$text" | grep -qxF "autologin-session=openbox"
+  grep -qxF "autologin-user=${user}" <<<"$text" \
+    && grep -qxF "autologin-session=openbox" <<<"$text"
 }
 
 # imag_pkg_absent STATUS -> 0 iff STATUS shows the package is genuinely NOT installed. The
@@ -336,7 +336,7 @@ imag_failed_units_ok() {
 # contains NO unsubstituted `__WORD__`-shaped placeholder (setup-imag.sh sed's __PYBIN__/__SCN__/
 # __ISOLCPUS__ in at provisioning time -- a leftover literal means the sed step silently no-op'd).
 imag_autostart_placeholders_resolved() {
-  ! printf '%s' "$1" | grep -qE '__[A-Za-z_]+__'
+  ! grep -qE '__[A-Za-z_]+__' <<<"$1"
 }
 
 # imag_regular_file_present MODE -> 0 iff MODE (the first whitespace-token of an `ls -la` line,
@@ -356,7 +356,7 @@ imag_regular_executable_file() {
 # USER -o comm=` dump, one bare process name per line -- exact match avoids a substring false-hit,
 # e.g. "obs" must not match "obs-plugin-helper").
 imag_proc_running() {
-  printf '%s\n' "$1" | grep -qxF "$2"
+  grep -qxF "$2" <<<"$1"
 }
 
 # --- (h) OBS log: genlock tick, no version-mismatch, DistroAV + NDI loaded -------------------
@@ -373,18 +373,18 @@ imag_obs_log_shows_genlock_tick() {
 # than a stock plugin's build refuses to load it; left OBS with ONLY distroav.so, no
 # obs-websocket, no encoders).
 imag_obs_log_no_version_mismatch() {
-  ! printf '%s' "$1" | grep -qi 'compiled with newer libobs'
+  ! grep -qi 'compiled with newer libobs' <<<"$1"
 }
 
 # imag_obs_log_shows_distroav_loaded LOG_TEXT -> 0 iff LOG_TEXT shows the DistroAV plugin loaded
 # (same grep verify-device.sh's own log-verify convention and setup-imag.sh step 18 both use).
 imag_obs_log_shows_distroav_loaded() {
-  printf '%s' "$1" | grep -qi '\[distroav\] plugin loaded'
+  grep -qi '\[distroav\] plugin loaded' <<<"$1"
 }
 
 # imag_obs_log_shows_ndi_loaded LOG_TEXT -> 0 iff LOG_TEXT shows the NDI runtime initialized.
 imag_obs_log_shows_ndi_loaded() {
-  printf '%s' "$1" | grep -qi 'NDI library initialized'
+  grep -qi 'NDI library initialized' <<<"$1"
 }
 
 # --- (j) OBS base version pin + apt-mark hold (#824) ------------------------------------------
@@ -397,7 +397,7 @@ imag_obs_base_version_matches() {
 # imag_pkg_is_held HOLD_LIST_TEXT NAME -> 0 iff NAME appears as an exact line in HOLD_LIST_TEXT
 # (an `apt-mark showhold` dump).
 imag_pkg_is_held() {
-  printf '%s\n' "$1" | grep -qxF "$2"
+  grep -qxF "$2" <<<"$1"
 }
 
 # --- (k2) NVIDIA dGPU: driver + prime-select when present, correctly skipped when absent (#816) -
@@ -449,8 +449,8 @@ imag_scenes_output_ok() {
   # SUBSTRING, so an unanchored -F match would wrongly pass the main-scenes check off the MV line
   # alone even when the main "scenes: N/N" line reports a shortfall. Anchor each to its own
   # line's start.
-  printf '%s\n' "$out" | grep -qE "^scenes: ${count}/${count} OK" \
-    && printf '%s\n' "$out" | grep -qE "^MV scenes: ${count}/${count} \(multiview, low-bw\) OK"
+  grep -qE "^scenes: ${count}/${count} OK" <<<"$out" \
+    && grep -qE "^MV scenes: ${count}/${count} \(multiview, low-bw\) OK" <<<"$out"
 }
 
 # --- (q) canonical scene ORDER + NDI-source bindings (imag_scenes.py --verify-parity, #791) ---
@@ -462,8 +462,8 @@ imag_scenes_output_ok() {
 # scene ORDER) -- (n) above only ever proved the "Cam N"/"MV Cam N" COUNT, never the full 17-scene
 # set (incl. "resolume imag"/"MW resolume imag", which NO automated seeder creates) nor the order.
 imag_parity_output_ok() {
-  printf '%s\n' "$1" | grep -qxF "scene order: OK" \
-    && printf '%s\n' "$1" | grep -qxF "ndi sources: OK"
+  grep -qxF "scene order: OK" <<<"$1" \
+    && grep -qxF "ndi sources: OK" <<<"$1"
 }
 
 # --- (r) OBS stats dock persisted (DockState in global.ini, #791) -----------------------------
@@ -534,7 +534,7 @@ imag_obs_service_restart_cmd() {
 # imag_openbox_menu_looks_valid TEXT -> 0 iff TEXT (the ~/.config/openbox/menu.xml contents) is
 # non-empty and contains a `<menu` tag (basic XML sanity -- never pass on an empty/corrupted file).
 imag_openbox_menu_looks_valid() {
-  [ -n "$(printf '%s' "$1" | tr -d '[:space:]')" ] && printf '%s' "$1" | grep -qi '<menu'
+  [ -n "$(printf '%s' "$1" | tr -d '[:space:]')" ] && grep -qi '<menu' <<<"$1"
 }
 
 # imag_openbox_root_menu_bound RC_XML_TEXT -> 0 iff RC_XML_TEXT (the EFFECTIVE openbox rc.xml the
@@ -558,7 +558,7 @@ imag_openbox_root_menu_bound() {
   flat="$(printf '%s' "$1" | tr '\n\t' '  ' | sed 's/<!--\([^-]\|-[^-]\)*-->//g' | tr -s ' ')"
   root_block="$(printf '%s' "$flat" | grep -oP '<context\s+name=[\x22\x27]Root[\x22\x27]\s*>.*?</context>' || true)"
   [ -n "$root_block" ] || return 1
-  printf '%s' "$root_block" | grep -qP '<mousebind\s[^>]*\bbutton=[\x22\x27]Right[\x22\x27][^>]*>.*?<action\s[^>]*\bname=[\x22\x27]ShowMenu[\x22\x27][^>]*>\s*<menu>\s*root-menu\s*</menu>'
+  grep -qP '<mousebind\s[^>]*\bbutton=[\x22\x27]Right[\x22\x27][^>]*>.*?<action\s[^>]*\bname=[\x22\x27]ShowMenu[\x22\x27][^>]*>\s*<menu>\s*root-menu\s*</menu>' <<<"$root_block"
 }
 
 # imag_watchdog_installed_but_disabled SCRIPT_MODE UNIT_LIST_TEXT IS_ENABLED -> 0 iff the
@@ -573,7 +573,7 @@ imag_watchdog_installed_but_disabled() {
   local script_mode="$1" unit_list="$2" enabled
   enabled="$(printf '%s' "$3" | tr -d '[:space:]')"
   imag_regular_executable_file "$script_mode" || return 1
-  printf '%s' "$unit_list" | grep -qF "imag-obs-watchdog.service" || return 1
+  grep -qF "imag-obs-watchdog.service" <<<"$unit_list" || return 1
   [ "$enabled" = "disabled" ]
 }
 
@@ -616,8 +616,8 @@ imag_obs_service_restart_is_on_failure() {
 imag_autostart_launches_via_service_not_script() {
   local code
   code="$(printf '%s\n' "$1" | grep -vE '^[[:space:]]*#')"
-  printf '%s' "$code" | grep -qF "systemctl --user start imag-obs.service" \
-    && ! printf '%s' "$code" | grep -q "imag-obs-start.sh"
+  grep -qF "systemctl --user start imag-obs.service" <<<"$code" \
+    && ! grep -q "imag-obs-start.sh" <<<"$code"
 }
 
 # imag_core_pattern_captures_dumps CORE_PATTERN_TEXT -> 0 iff CORE_PATTERN_TEXT (the box's
@@ -642,7 +642,7 @@ imag_core_pattern_captures_dumps() {
 # hypothetical differently-named unit sharing a prefix/suffix (e.g. "imag-obs.service-old") never
 # false-matches.
 imag_obs_cgroup_shows_service_unit() {
-  printf '%s\n' "$1" | grep -qE '(^|/)imag-obs\.service($|/)'
+  grep -qE '(^|/)imag-obs\.service($|/)' <<<"$1"
 }
 
 # imag_obs_core_dumps_enabled LIMITS_LINE -> 0 iff LIMITS_LINE (a `grep -i "Max core file size"
@@ -651,7 +651,7 @@ imag_obs_cgroup_shows_service_unit() {
 # merely configured in the unit file -- the #882 root cause: ulimit -c was 0, so the 2026-07-30
 # segfault produced nothing debuggable.
 imag_obs_core_dumps_enabled() {
-  printf '%s' "$1" | grep -qE '^Max core file size[[:space:]]+unlimited[[:space:]]+unlimited'
+  grep -qE '^Max core file size[[:space:]]+unlimited[[:space:]]+unlimited' <<<"$1"
 }
 
 # imag_powerkey_protection_ok LOGINCTL MASKED -> 0 iff the running box is protected against an
@@ -665,10 +665,10 @@ imag_obs_core_dumps_enabled() {
 imag_powerkey_protection_ok() {
   local loginctl="$1" masked="$2" k t
   for k in HandlePowerKey HandleSuspendKey HandleHibernateKey HandleLidSwitch; do
-    printf '%s\n' "$loginctl" | grep -qxF "${k}=ignore" || return 1
+    grep -qxF "${k}=ignore" <<<"$loginctl" || return 1
   done
   for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
-    printf '%s\n' "$masked" | grep -qxF "${t}=masked" || return 1
+    grep -qxF "${t}=masked" <<<"$masked" || return 1
   done
   return 0
 }
