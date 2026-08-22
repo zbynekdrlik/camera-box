@@ -2135,53 +2135,84 @@ fn over_rate_fills_every_60fps_slot_holds_60_not_skipped_1167() {
 }
 
 #[test]
-fn shallow_lag_over_rate_dupe_fills_slot_with_copy_not_retired_1167() {
-    // (#1167 [red] -> [green]) A content-dupe crossing a SHALLOW-stale boundary
-    // (1 <= lag <= RETIRE_MAX_LAG_INTERVALS) at a sustained over-rate — in STEADY state (NOT
-    // converging a deep backlog) — must FILL the slot: `poll` emits a copy of the nearest good
-    // frame and advances the boundary, NOT retire it (advance, emit nothing). The #1145 v1 retire
-    // skipped the slot; whenever jitter keeps re-injecting shallow lag (the live cam1 shows
-    // `retired`>0 EVERY 5s window, `fast_drained==0` so it never went deep) that is a CONTINUOUS
-    // strih-FIFO hold = the cam1 [4i/8align] sawtooth. The DECISION stays Retire (so #1145's
-    // decision tests + deep-backlog convergence are preserved); `poll` REINTERPRETS it as a fill in
-    // steady over-rate. RED before the fix: the Retire arm advanced + emitted nothing (poll->false,
-    // retired>0); GREEN after: poll->true, copies>0, retired=0.
+fn steady_shallow_lag_trickle_drains_paced_then_fills_1167() {
+    // (#1167 v3 [red] -> [green]) SUPERSEDES the v2/eleventh-piece "always FILL" application of a
+    // steady shallow-lag dupe. v2 filled EVERY shallow-lag dupe and never drained the grid lag, so
+    // the ~3.5 fps surplus CREEPS lag past RETIRE_MAX_LAG_INTERVALS, FastDrain fires + LATCHES, and
+    // the shallow tail drains as a BURST (the 300/293 window oscillation + the +2 presented-id jump).
+    // v3 adds a PACED trickle-drain: once lag has crept to SHALLOW_DRAIN_LAG_MIN and the shared
+    // monotonic pace budget allows, a shallow-lag dupe takes ONE single-slot skip (advance, emit
+    // nothing) to bleed the creep off BEFORE it reaches the FastDrain band. When PACED-OUT (a skip
+    // just happened) it still FILLS the slot (the fill-every-slot invariant holds between trickle
+    // skips), so at the slow steady creep rate the trickle fires ~1 skip per gap = 299-300 windows,
+    // never a burst. The DECISION stays Retire (so #1145's decision tests + deep-backlog convergence
+    // are preserved); only poll's application splits.
     let emit_int = 1_000_000_000u64 / 60;
     let cap_int = (1e9 / 62.0) as u64;
-    let mut next_i = 0u64;
-    let mut gate = warm_over_rate_gate(&mut next_i); // sustained_over_rate armed, no FastDrain -> not converging
-    let capture_mono = 400u64 * cap_int;
     let dupe_hash = 0xABCD_1234u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    // 1) a UNIQUE at its on-time boundary: sets prev_hash for the dupe below AND drives lag to 0 so
-    //    the converging latch is provably clear (residence 0 -> no Drain).
-    let b0 = gate.next_boundary_ns();
-    let _ = gate.poll(b0, emit_int, dupe_hash, true, capture_mono, capture_mono);
-    // 2) the DUPE (same hash) crossing a SHALLOW-stale boundary (lag 2): residence 0 (no Drain),
-    //    not converging (no FastDrain occurred) -> the shallow-lag Retire decision, applied as FILL.
-    let now = gate.next_boundary_ns() + emit_int * 2;
-    let cap2 = capture_mono + cap_int;
-    let emit = gate.poll(now, emit_int, dupe_hash, true, cap2, cap2);
-    let (_ds, _bl, copies, retired, drained, _fast) = gate.take_shed_counts();
-    assert!(
-        emit,
-        "a steady-over-rate shallow-lag dupe must FILL the slot (poll emits a copy), not skip it"
-    );
-    assert!(
-        copies >= 1,
-        "the fill is counted as a #1111 copy; copies={copies}"
-    );
-    assert_eq!(
-        retired, 0,
-        "a steady (non-converging) shallow-lag dupe must NOT retire (that skips the slot); retired={retired}"
-    );
-    assert_eq!(
-        drained, 0,
-        "residence 0 -> the depth-drain must not fire; drained={drained}"
-    );
+
+    // CASE A — lag == SHALLOW_DRAIN_LAG_MIN, FRESH pace budget -> the trickle SKIPS (drains the creep).
+    {
+        let mut next_i = 0u64;
+        let mut gate = warm_over_rate_gate(&mut next_i); // sustained_over_rate armed, not converging
+        let cap = 400u64 * cap_int;
+        // a UNIQUE at its on-time boundary sets prev_hash for the dupe below (lag 0, residence 0).
+        let b0 = gate.next_boundary_ns();
+        let _ = gate.poll(b0, emit_int, dupe_hash, true, cap, cap);
+        // the DUPE crossing a shallow-stale boundary at lag == SHALLOW_DRAIN_LAG_MIN, budget fresh
+        // (warm-up never skipped, so last_converge_skip_mono_ns == 0 and now_mono is far past it).
+        let now = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let cap2 = cap + cap_int;
+        let emit = gate.poll(now, emit_int, dupe_hash, true, cap2, cap2);
+        let (_ds, _bl, copies, retired, drained, _fast) = gate.take_shed_counts();
+        assert!(
+            !emit,
+            "a fresh-budget shallow-lag trickle must SKIP (drain the creep), not fill"
+        );
+        assert_eq!(
+            (retired, drained, copies),
+            (1, 0, 0),
+            "the trickle is exactly ONE Retire skip (no drain/copy); \
+                 retired={retired} drained={drained} copies={copies}"
+        );
+    }
+
+    // CASE B — lag == SHALLOW_DRAIN_LAG_MIN but PACED-OUT (a trickle skip just happened) -> FILL.
+    {
+        let mut next_i = 0u64;
+        let mut gate = warm_over_rate_gate(&mut next_i);
+        let cap = 400u64 * cap_int;
+        let b0 = gate.next_boundary_ns();
+        let _ = gate.poll(b0, emit_int, dupe_hash, true, cap, cap);
+        // first shallow-lag dupe -> trickle SKIP, stamps the pace budget at now_mono = cap2.
+        let now1 = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let cap2 = cap + cap_int;
+        let _ = gate.poll(now1, emit_int, dupe_hash, true, cap2, cap2);
+        let _ = gate.take_shed_counts();
+        // second shallow-lag dupe one cap_int later -> now_mono only ~16 ms past cap2, far under
+        // CONVERGE_SKIP_MIN_GAP_INTERVALS * emit_int (500 ms) -> paced-out -> FILL the slot.
+        let now2 = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let cap3 = cap2 + cap_int;
+        let emit = gate.poll(now2, emit_int, dupe_hash, true, cap3, cap3);
+        let (_ds, _bl, copies, retired, _drn, _fast) = gate.take_shed_counts();
+        assert!(
+            emit,
+            "a paced-out shallow-lag dupe must FILL the slot (the fill-every-slot invariant between skips)"
+        );
+        assert!(
+            copies >= 1,
+            "the paced-out fill is counted as a #1111 copy; copies={copies}"
+        );
+        assert_eq!(
+            retired, 0,
+            "a paced-out shallow-lag dupe must not skip; retired={retired}"
+        );
+    }
+
     // The DECISION for that band is STILL Retire (only the poll application changed) — and the DEEP
     // band above the ceiling is STILL FastDrain, so #1145's deep-backlog convergence is untouched.
     assert_eq!(
-        dupe_shed_action(true, true, false, 2, true, 0, true),
+        dupe_shed_action(true, true, false, SHALLOW_DRAIN_LAG_MIN, true, 0, true),
         ShedAction::Retire,
         "the shallow-lag DECISION stays Retire (poll reinterprets it) so #1145 is preserved"
     );
