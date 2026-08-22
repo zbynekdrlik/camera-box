@@ -3947,10 +3947,9 @@ fn build_and_print_verdict_with_stream_diffs(
                 // re-widened the default to the <=1 singleton band and is the re-tighten trail.
                 println!(
                     "  >>> ⚠ #1169 REAL-DROPS SINGLETON ALLOWANCE: real-drops singleton allowance \
-                     consumed: {total_real} — issue 1169 re-tighten trail. {total_real} real \
-                     drop(s) total within the per-node allowance of {real_drops_allowance} on: {} \
-                     — 0 BURN-UNREADABLE, everything else at the usual strict bar; 2+ of anything \
-                     still FAILS. Re-tighten trail: issue 1169.",
+                     consumed: {total_real} — issue 1169 re-tighten trail. Within the per-node \
+                     allowance of {real_drops_allowance} on: {} — 0 BURN-UNREADABLE, everything \
+                     else at the usual strict bar; 2+ of anything still FAILS.",
                     allowance_consumed_nodes.join(", ")
                 );
             } else {
@@ -8412,8 +8411,8 @@ mod tests {
         );
     }
 
-    // ---- #904/#905 — the small, explicit, LOUD real_drops allowance MECHANISM, and the
-    // #905-restored STRICT (zero) default ----
+    // ---- #904/#905/#1169 — the small, explicit, LOUD real_drops allowance MECHANISM, and the
+    // #1169-re-widened <=1 SINGLETON default (issue 905 item 1's zero bar, re-widened by 1169) ----
 
     /// #1169 (owner, 2026-08-22) — SECOND SEAM: RE-WIDENS `REAL_DROPS_ALLOWANCE_DEFAULT` back to
     /// 1 for the sanctioned per-frame delivery SINGLETON (issue-1167 v3 paced-trickle absorption
@@ -8560,8 +8559,9 @@ mod tests {
         assert!(!v.consumed_real_drops_allowance(0));
     }
 
-    /// #905 — the #904 allowance MECHANISM itself is untouched by item 1's revert (only the
-    /// DEFAULT moved back to 0). An EXPLICIT nonzero allowance (e.g. a future incident
+    /// #905/#1169 — the #904 allowance MECHANISM itself is untouched by item 1's revert AND by
+    /// issue 1169's re-widen of the DEFAULT (only the default VALUE has ever moved: 2 -> 0 -> 1).
+    /// An EXPLICIT nonzero allowance ABOVE the default (e.g. a future incident
     /// re-widening it via `CAMERA_BOX_REAL_DROPS_ALLOWANCE`) must still tolerate real drops
     /// within it, and the pass MUST still be visibly distinguishable from a genuine zero-loss
     /// pass: `real_drops_allowance` + `consumed_real_drops_allowance` on the per-node JSON, LOUD
@@ -8608,14 +8608,15 @@ mod tests {
         assert_eq!(
             json["consumed_real_drops_allowance"],
             serde_json::json!(true),
-            "#905: the per-node JSON must LOUDLY carry the consumed signal even though the \
-             DEFAULT is now strict: {json}"
+            "#905/#1169: the per-node JSON must LOUDLY carry the consumed signal at an EXPLICIT \
+             allowance above the compiled default: {json}"
         );
 
-        // At the #905-restored DEFAULT (0), the SAME two drops must FAIL.
+        // At an EXPLICIT allowance of 0 (what the #1169 re-tighten flip restores), the SAME two
+        // drops must FAIL.
         assert!(
             !v.is_zero_within_allowance(0),
-            "#905: with the default reverted to 0, the same 2 drops must FAIL: {v:?}"
+            "#905/#1169: at an explicit allowance of 0, the same 2 drops must FAIL: {v:?}"
         );
         assert!(!v.consumed_real_drops_allowance(0));
     }
