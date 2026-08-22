@@ -1298,6 +1298,13 @@ fn require_imag_genlock_current_consults_offline_ack_1171() {
         gate.contains("1013"),
         "1171: the loud skip must name issue 1013 (the offline-ack mechanism): {gate}"
     );
+    // [review] an acked-but-REACHABLE (stale) ack must be surfaced loudly on the proceed path
+    // (without exiting — the reachable imag is still gated below), so a stale ack does not persist
+    // unnoticed across TEST runs.
+    assert!(
+        gate.contains("cambox_offline_ack_stale_message"),
+        "1171: a stale (acked-but-reachable) imag ack must be surfaced loudly on the proceed path: {gate}"
+    );
     // The existing #789 fail-closed body must remain intact.
     assert!(
         gate.contains("drift-guard.sh --check-imag") && gate.contains("exit 30"),

@@ -760,6 +760,14 @@ require_imag_genlock_current() {
     echo "[#789/#1171] SKIP imag genlock HARD-BLOCK: imag je operator-acknowledged offline (issue 1013: ${ack_reason}) a nedosiahnutelny z dev1 (${IMAG_IP}) — gate sa PRESKAKUJE, TEST rezim pokracuje bez imag legu (rovnaka vynimka ako recording-e2e.sh [0/8] preflight)."
     return 0
   fi
+  # issue 1171 [review]: reaching here with a non-empty ack_reason means acked-BUT-REACHABLE = a
+  # STALE ack (imag is back but still listed). We do NOT exit (rig-mode's contract is to still GATE a
+  # reachable imag — the real drift-guard below enforces), unlike recording-e2e.sh [0/8] which
+  # hard-fails; but surface it LOUDLY so the operator removes the ack instead of it persisting
+  # unnoticed across TEST runs (reuses cambox_offline_ack_stale_message, without its exit).
+  if [ -n "$ack_reason" ]; then
+    cambox_offline_ack_stale_message "imag" >&2
+  fi
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[#789] TEST-entry HARD-BLOCK: imag-nb's deployed genlock OBS build MUST be current with origin/main (gates maximalne striktne — owner 2026-08-19):"
   out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag "host=$IMAG_IP" 2>&1 )" || rc=$?
