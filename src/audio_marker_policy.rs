@@ -223,15 +223,12 @@ impl AudioMarkerRecovery {
     /// is always [`RecoveryStep::Healthy`]; a degraded marker asks for a re-open once the interval
     /// has elapsed ([`RecoveryStep::AttemptReopen`]), otherwise [`RecoveryStep::Waiting`].
     pub fn step(&self, since_last_attempt: Duration) -> RecoveryStep {
-        // #1172 RED STUB: this faithfully reproduces the shipped issue-984 degraded loop — it
-        // NEVER re-attempts the open, it only "waits" (in the real loop: only logs "still
-        // DEGRADED"). The `degraded_marker_retries_after_the_interval` test below is RED against
-        // this until the GREEN commit adds the interval-elapsed `AttemptReopen` path.
-        let _ = (since_last_attempt, self.retry_interval);
-        if self.degraded {
-            RecoveryStep::Waiting
-        } else {
+        if !self.degraded {
             RecoveryStep::Healthy
+        } else if since_last_attempt >= self.retry_interval {
+            RecoveryStep::AttemptReopen
+        } else {
+            RecoveryStep::Waiting
         }
     }
 
