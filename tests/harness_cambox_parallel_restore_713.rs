@@ -289,18 +289,21 @@ fn write_driver(
 }
 
 /// THE HEADLINE REAL PROOF: extract the ACTUAL whole device-restore phase from
-/// recording-e2e.sh (no rig, no ssh) and measure wall-clock with ALL_CAMBOX=1 + the DEFAULT
-/// active set (so cam1 + cam4 + cam2/painter = 3 boxes total are active — #827: cam5/cam6/cam7
-/// retired; #898 (2026-07-31): cam3 also retired, grabber card destroyed). 3 boxes at a
-/// simulated ~300ms round-trip each: SEQUENTIAL would take >=900ms; PARALLEL must take well
-/// under that (bounded here at 600ms) — and all 3 boxes must still have genuinely been
-/// contacted (never skipped for speed).
+/// recording-e2e.sh (no rig, no ssh) and measure wall-clock with ALL_CAMBOX=1 + an EXPLICIT
+/// CAMERA_ACTIVE_SET="cam1 cam2 cam3" override (cam1 was retired from the DEFAULT active set
+/// 2026-08-22, issue 1110, grabber hardware-defective — the override keeps this test's 3-box
+/// parallelism power per .claude/rules/camera-active-set.md's "a default-active-set-proves-
+/// parallelism test can lose its power when the default shrinks"), so cam1 + cam2/painter +
+/// cam3 = 3 boxes total are contacted (cam4 stays excluded — issue 947, grabber wedges the
+/// capture leg). 3 boxes at a simulated ~300ms round-trip each: SEQUENTIAL would take
+/// >=900ms; PARALLEL must take well under that (bounded here at 600ms) — and all 3 boxes must
+/// still have genuinely been contacted (never skipped for speed).
 #[test]
 fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
     let dir = tempfile::tempdir().expect("tempdir");
     let log_path = dir.path().join("calls.log");
     let driver_path = dir.path().join("driver.sh");
-    write_driver(&driver_path, &log_path, None);
+    write_driver(&driver_path, &log_path, Some("cam1 cam2 cam3"));
 
     let start = Instant::now();
     let out = Command::new("bash")
@@ -321,20 +324,24 @@ fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
     for ip in ["10.9.9.1", "10.9.9.2", "10.9.9.3"] {
         assert!(
             log.contains(ip),
-            "#713/#827/issue 939: every one of the 3 default-active boxes (cam1 + cam2/painter \
-             + cam3, re-activated 2026-08-13) must actually be contacted (found in the fake \
-             timeout()'s call log) — parallelizing must never skip a box for speed. Log:\n{log}"
+            "#713/#827/issue 939/issue 1110: with an EXPLICIT CAMERA_ACTIVE_SET=\"cam1 cam2 \
+             cam3\" override (cam1 retired from the DEFAULT active set 2026-08-22, issue 1110 \
+             grabber hw-defect — the override keeps this test's 3-box parallelism power per \
+             .claude/rules/camera-active-set.md), all 3 boxes (cam1 + cam2/painter + cam3) must \
+             actually be contacted (found in the fake timeout()'s call log) — parallelizing \
+             must never skip a box for speed. Log:\n{log}"
         );
     }
     assert!(
         !log.contains("10.9.9.4"),
-        "cam4 (issue 947, grabber wedges the capture leg) is retired from the default active \
-         set and must NOT be contacted by the default-active restore phase. Log:\n{log}"
+        "cam4 (issue 947, grabber wedges the capture leg) is not in the CAMERA_ACTIVE_SET=\"cam1 \
+         cam2 cam3\" override this test drives and must NOT be contacted by the restore phase. \
+         Log:\n{log}"
     );
 
     assert!(
         elapsed.as_millis() < 600,
-        "#713/#898/issue 947: the default-active boxes at a simulated ~300ms round-trip each \
+        "#713/#898/issue 947: the 3 override-active boxes at a simulated ~300ms round-trip each \
          MUST run in PARALLEL (bounded well under the time a SEQUENTIAL phase would take), not \
          one after another. Elapsed: {:?}",
         elapsed
