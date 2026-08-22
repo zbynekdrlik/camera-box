@@ -489,9 +489,15 @@ pub fn segment_continuity(
     // `<=1/<=1` singleton allowance (windows that FAIL strict but PASS `overall_pass` under the
     // soft-release). Computed from the SAME pure seam `overall_pass_term` folded above, so this can
     // never disagree with what actually gated the run.
+    // The `s.frames > 0` guard mirrors `overall_pass_term`'s own empty-window guard (defensive,
+    // #1169 review) so an absent cambox can never be counted as a consumed singleton even if the
+    // copies/gaps computation ever changes -- an empty window already yields 0/0 today.
     let windows_singleton_allowance_consumed = segments
         .iter()
-        .filter(|s| crate::window_gate::segment_singleton_allowance_consumed(s.copies, s.gaps))
+        .filter(|s| {
+            s.frames > 0
+                && crate::window_gate::segment_singleton_allowance_consumed(s.copies, s.gaps)
+        })
         .count() as u32;
 
     SegmentedContinuity {
@@ -640,8 +646,13 @@ fn window_segment(
     // were ABSORBED by the `<=1/<=1` singleton allowance. `Some(..)` iff the allowance was consumed
     // (see `crate::window_gate::segment_singleton_note`) -- `pass` stays false for such a window, so
     // the absorption is never silent. `None` on a clean window and on an over-band window that still
-    // fails (it fails loudly on its own).
-    let singleton_allowance_note = crate::window_gate::segment_singleton_note(copies, gaps);
+    // fails (it fails loudly on its own). The `frame_count > 0` guard (defensive, #1169 review)
+    // keeps an absent cambox noteless even if the copies/gaps computation ever changes.
+    let singleton_allowance_note = if frame_count > 0 {
+        crate::window_gate::segment_singleton_note(copies, gaps)
+    } else {
+        None
+    };
     CamboxSegment {
         cambox: cambox.to_string(),
         start_ns,

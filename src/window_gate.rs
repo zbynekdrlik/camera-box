@@ -343,7 +343,11 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     let overall_pass_term = frame_count > 0 && floor_term && copies_gaps_ok;
     // #1169: whether the singleton allowance is what absorbed this window's nonzero copies/gaps
     // (drives the loud note + the run-level count). See `segment_singleton_allowance_consumed`.
-    let singleton_allowance_consumed = segment_singleton_allowance_consumed(copies, gaps);
+    // The `frame_count > 0` guard mirrors `overall_pass_term`'s own empty-window guard so this
+    // field can never read `true` for an absent cambox even if the copies/gaps computation ever
+    // changes (defensive -- an empty window already yields copies==0 && gaps==0 today; #1169 review).
+    let singleton_allowance_consumed =
+        frame_count > 0 && segment_singleton_allowance_consumed(copies, gaps);
     // `strict_pass` keeps its pre-889-AND-pre-915 meaning byte-for-byte: frame_count>0 &&
     // undecodable within floor && copies==0 && gaps==0 -- computed directly (no longer derived
     // from `relaxed_pass`, since issue 915 decoupled the floor from that derivation).

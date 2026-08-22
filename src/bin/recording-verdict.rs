@@ -4693,10 +4693,11 @@ fn build_and_print_verdict_with_stream_diffs(
                     seg.segments.len()
                 );
                 println!(
-                    "  ⚠ #889 RE-GATE (singleton tolerance={}): {}/{} cambox window(s) exceed the \
+                    "  ⚠ #889 RE-GATE (per-window tolerance={}): {}/{} cambox window(s) exceed the \
                      per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — a \
                      SUBSET of what now gates under #1132 (see the #1132 line below and issue #889 \
-                     for the decision record).",
+                     for the decision record). NOTE: this is the <=3 relaxed tolerance, NOT the \
+                     issue-1169 <=1 SINGLETON allowance (a separate, tighter band; see its own line).",
                     seg.copies_gaps_tolerance,
                     seg.windows_over_copies_gaps_tolerance,
                     seg.segments.len()
