@@ -3324,8 +3324,7 @@ mod tests {
             }
             self.depth_at_audit = q.len();
             let reserve_ns = reserve_ms as u64 * 1_000_000;
-            let deadline =
-                phase_pinned_deadline(wall.saturating_sub(reserve_ns), I30);
+            let deadline = phase_pinned_deadline(wall.saturating_sub(reserve_ns), I30);
             let due = q
                 .iter()
                 .take_while(|&&ts| phase_pinned_is_due(ts, deadline))
@@ -3348,7 +3347,11 @@ mod tests {
                     return None;
                 }
                 let qv: Vec<u64> = q.iter().copied().collect();
-                let sel = relock_select_nearest(&qv, wall, relock_anchor_age_ns(self.anchor_ns, reserve_ms));
+                let sel = relock_select_nearest(
+                    &qv,
+                    wall,
+                    relock_anchor_age_ns(self.anchor_ns, reserve_ms),
+                );
                 for _ in 0..sel {
                     q.pop_front();
                 }
@@ -3546,5 +3549,4 @@ mod tests {
              toward the arrival edge from the post-rise depth ({post_age:.1} ms)"
         );
     }
-
 }
