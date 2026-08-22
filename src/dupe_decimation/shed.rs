@@ -116,20 +116,6 @@ pub const RETIRE_OCCUPANCY_MIN_PERCENT: u64 = 95;
 /// (not 60.0) so ordinary sub-frame jitter on a genuine 60.00 card never trips it.
 pub const RETIRE_MIN_TAKT_INTERVAL_NS: u64 = 1_000_000_000 * 10 / 603;
 
-/// (#1167 v4) The over-EMA-interval threshold ABOVE which the card is "sustained UNDER-rate": the
-/// mirror of [`RETIRE_MIN_TAKT_INTERVAL_NS`] on the slow side. `1e9 / 59.8` ns (~16.722 ms). A
-/// capture-takt EMA ABOVE this means the grabber is genuinely capturing below 60 (the sick
-/// ShadowCast's sub-60 wander to 57.9–59.7), which is what arms the #1167 v4 empty-queue
-/// last-frame repeat. A POSITIVE under-rate signal is required (not merely `!sustained_over_rate`):
-/// a legacy caller that disables the takt EMA (`capture_mono_ns == 0` → `takt_ema == 0`) reads
-/// `!sustained_over_rate` as TRUE even at an over-rate content pattern, so keying the fill on that
-/// would fire it wrongly — this threshold (with `takt_ema != 0`) fires ONLY on a measured under-rate.
-/// At 59.8 (not 60.0) so ordinary sub-frame jitter on a genuine 60.00 card (EMA ~16.667 ms) never
-/// trips it, symmetric to the 60.3 over-rate margin; a deeper collapse (< ~20 fps, every interval
-/// over [`TAKT_GAP_EXCLUDE_NS`]) resets the EMA to 0 and is deliberately NOT filled (a dead leg
-/// must look down). Integer form to keep it a plain `const`.
-pub const STARVATION_MIN_TAKT_INTERVAL_NS: u64 = 1_000_000_000 * 10 / 598;
-
 /// (#1145 v2) Right-shift for the integer EMA that smooths the capture takt: `new = old + ((sample
 /// - old) >> SHIFT)`. `8` gives a ~2^8 = 256-frame (~4 s at 60 fps) time constant — long enough to
 /// integrate out per-frame V4L2 dequeue jitter into the true sustained takt, short enough that a

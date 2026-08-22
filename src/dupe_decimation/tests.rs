@@ -906,6 +906,7 @@ struct QueueSim {
     overflow_steady: u64,
     emits: u64,
     drained: u64,
+    repeats: u64,
 }
 
 /// Drive the REAL [`DecimationGate::poll`] with a capture->process queue whose consumer rate
@@ -939,6 +940,7 @@ fn run_queue_sim(capture_fps: f64, stall_at_frame: u64, secs: f64) -> QueueSim {
     let mut next_cap = 0u64;
     let mut wall = 0u64;
     let (mut max_residence_post, mut overflow_steady, mut emits) = (0u64, 0u64, 0u64);
+    let mut repeats = 0u64;
 
     loop {
         // admit all captures that have arrived by the loop's wall clock (drop if the queue is full)
@@ -974,6 +976,7 @@ fn run_queue_sim(capture_fps: f64, stall_at_frame: u64, secs: f64) -> QueueSim {
         // a distinct hash per capture -> is_dupe is always false (dupes NOT byte-detected)
         let content_hash = src_id.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(now);
         let emit = gate.poll(now, emit_int, content_hash, queue_had_frame, now, cap_ns);
+        repeats += gate.last_poll_starvation_repeats();
         let mut cost = shed_cost;
         if emit {
             cost = send_cost;
@@ -993,6 +996,7 @@ fn run_queue_sim(capture_fps: f64, stall_at_frame: u64, secs: f64) -> QueueSim {
         overflow_steady,
         emits,
         drained,
+        repeats,
     }
 }
 
@@ -2120,7 +2124,10 @@ fn over_rate_fills_every_60fps_slot_holds_60_not_skipped_1167() {
     // oldest), so the #1145 v2 sawtooth fix + V4L2-overflow pre-emption are preserved.
     for &fps in &[62.0_f64, 63.0] {
         let s = run_queue_sim(fps, 120, 30.0);
-        let emit_fps = s.emits as f64 / 30.0;
+        // (#1167 v5) count the WIRE rate: a post-stall empty-queue slot that v2's Drain-hold
+        // filled via a poll-emit is, under v5, filled by a starvation REPEAT instead (the fill now
+        // fires at over-rate). Both land a frame on the wire, so the invariant is (poll-emits + repeats).
+        let emit_fps = (s.emits + s.repeats) as f64 / 30.0;
         assert!(
             emit_fps >= 59.9,
             "an over-rate box must hold ~60 by filling every slot (issue-1167 invariant); got \
@@ -2649,29 +2656,36 @@ fn genuinely_half_rate_leg_is_bounded_by_the_repeat_cap_1167() {
 }
 
 #[test]
-fn over_rate_never_starvation_repeats_1167() {
-    // At a genuine OVER-rate (62 fps, real monotonic takt so `sustained_over_rate` arms and
-    // `sustained_under_rate` is FALSE) the v4 empty-queue fill must stay inert — that regime is
-    // owned by v2/v3 (decoupled). `queue_had_frame=false` is the HARSHER case (v4's !queue_had_frame
-    // gate is satisfied), so this proves the `sustained_under_rate` gate ALONE keeps v4 off.
+fn over_rate_with_a_full_queue_never_starvation_repeats_1167() {
+    // (#1167 v5) At a genuine OVER-rate (62 fps, real monotonic takt so `sustained_over_rate` arms),
+    // a frame drained from a NON-EMPTY queue (`queue_had_frame=true` — the physical reality of an
+    // over-rate box: the queue is backed up, the dequeue is instant) must never trigger a starvation
+    // repeat. v5 made the fill REGIME-INDEPENDENT (a STALL on an over-rate box DOES fill — see
+    // over_rate_empty_queue_stall_fills_every_slot_regardless_of_regime_1167_v5), so the guard that
+    // keeps the over-rate v2/v3 machinery byte-inert is now the EMPTY-queue gate, not a rate gate:
+    // this proves `!queue_had_frame` alone keeps the fill off for the non-empty-queue over-rate case.
+    // (v4 forced `queue_had_frame=false` here to prove its `sustained_under_rate` gate did the work;
+    // under v5 that combination is exactly what SHOULD fill, so the premise is corrected to the real
+    // over-rate state — this test passes on BOTH the pre-fix and post-fix code.)
     let captures = synthetic_889_capture_sequence(62.0, 62 * 8, 15);
     let emit_int = 1_000_000_000u64 / 60;
     let mut gate = DecimationGate::new();
     let mut repeats = 0u64;
     for (now_ns, content_id, _is_dupe) in &captures {
-        let _ = gate.poll(*now_ns, emit_int, *content_id, false, *now_ns, *now_ns);
+        let _ = gate.poll(*now_ns, emit_int, *content_id, true, *now_ns, *now_ns);
         repeats += gate.last_poll_starvation_repeats();
     }
     assert_eq!(
         repeats, 0,
-        "an over-rate source must never trigger a v4 starvation repeat; got {repeats}"
+        "an over-rate source with a full (non-empty) queue must never starvation-repeat; got {repeats}"
     );
 }
 
 #[test]
 fn healthy_60_never_starvation_repeats_1167() {
-    // A healthy 60.00 card (takt ~16.667 ms, neither over- nor under-rate: on the grid, lag 0) must
-    // be byte-inert to v4 — `sustained_under_rate` is false AND lag is 0, so ZERO starvation repeats.
+    // A healthy 60.00 card (takt ~16.667 ms, on the grid: lag 0 every poll) must be byte-inert:
+    // even under v5 (a live capture takt arms `has_live_capture_takt`), the fill's `1 <= lag` gate
+    // excludes an on-grid card, so ZERO starvation repeats.
     let cap_int = 1_000_000_000u64 / 60;
     let emit_int = 1_000_000_000u64 / 60;
     let mut gate = DecimationGate::new();
@@ -2686,4 +2700,184 @@ fn healthy_60_never_starvation_repeats_1167() {
         repeats, 0,
         "a healthy 60.00 card must never trigger a starvation repeat; got {repeats}"
     );
+}
+
+// ── (#1167 v5) empty-queue fill must be REGIME-INDEPENDENT (over-rate + stall) ──────────────
+
+struct OverRateStallSim {
+    /// The capture-takt EMA settled to a genuine OVER-rate (the v4-inert regime this exercises).
+    over_rate: bool,
+    /// Total starvation last-frame repeats emitted post-warmup (the v5 fill firing).
+    repeats: u64,
+    /// Net #707 boundary SKIPS post-warmup (a skipped emit-slot = a wire gap >= 2 intervals).
+    net_skips: u64,
+    /// Max grid lag (intervals) any emit reached post-warmup — how deep the grid fell behind
+    /// before it was caught up (the "no sustained catch-up burst" / recv-cap_max proxy).
+    max_lag: u64,
+    /// Per-5s emit events (poll-emits + repeats), clean post-warmup windows only.
+    windows: Vec<u64>,
+}
+
+/// (#1167 v5) Drive the REAL [`DecimationGate::poll`] with an OVER-rate stream punctuated by
+/// PERIODIC empty-queue capture STALLS (a sick ShadowCast's VIDIOC_DQBUF stalls) — the regime v4
+/// left unfilled because its fill was gated on a POSITIVE sustained-under-rate. Faithful #1131
+/// `queue_had_frame`: FALSE only for the frame the loop BLOCKED on (the post-stall dequeue), TRUE
+/// for every frame drained from a non-empty queue (so the over-rate machinery is byte-inert on
+/// those, exactly as production reads the real dequeue-duration signal). Any `stall_ms` up to ~45
+/// stays < [`TAKT_GAP_EXCLUDE_NS`] (50 ms), so it is folded into the EMA and the card stays a
+/// genuine over-rate — the v4 hole (the live cam1 stall is ~25.6 ms; the test drives 45 ms as a
+/// harsher-than-nominal stress that still folds).
+fn run_over_rate_stall_sim(
+    capture_fps: f64,
+    stall_ms: u64,
+    stall_period_s: f64,
+    secs: f64,
+) -> OverRateStallSim {
+    let cap_int = (1e9 / capture_fps) as u64;
+    let emit_int = 1_000_000_000u64 / 60;
+    let send_cost = emit_int * 991 / 1000; // ~16.5 ms -> max emit ~60.5/s (run_queue_sim model)
+    let shed_cost = 1_000_000u64;
+    let stall_ns = stall_ms * 1_000_000;
+    let stall_period_frames = (capture_fps * stall_period_s) as u64;
+    const MAXQ: usize = 4; // V4L2 buffers (capture.rs: Stream::with_buffers(.., 4))
+    const WARMUP_NS: u64 = 8_000_000_000; // ignore the takt-EMA warmup
+    let n = (capture_fps * secs) as u64;
+
+    // Capture ARRIVAL schedule: an over-rate base with a periodic empty-queue stall gap injected.
+    let mut cap_time = vec![0u64; n as usize];
+    for i in 1..n as usize {
+        let mut gap = cap_int;
+        if (i as u64) % stall_period_frames == 0 {
+            gap += stall_ns;
+        }
+        cap_time[i] = cap_time[i - 1] + gap;
+    }
+
+    let mut gate = DecimationGate::new();
+    let mut queue: VecDeque<(u64, u64)> = VecDeque::new();
+    let mut next_cap = 0usize;
+    let mut wall = 0u64;
+    let (mut repeats, mut net_skips, mut max_lag) = (0u64, 0u64, 0u64);
+    let mut windows: Vec<u64> = Vec::new();
+    let (mut win_events, mut win_start, mut warmup_anchored) = (0u64, 0u64, false);
+    let src_int = emit_int;
+    let mut waited_for_this = false; // FAITHFUL #1131: did the loop BLOCK for the next popped frame?
+
+    loop {
+        while next_cap < n as usize {
+            let c = cap_time[next_cap];
+            if c > wall {
+                break;
+            }
+            let src_id = c / src_int;
+            if queue.len() < MAXQ {
+                queue.push_back((c, src_id));
+            }
+            next_cap += 1;
+        }
+        if queue.is_empty() {
+            if next_cap >= n as usize {
+                break;
+            }
+            wall = cap_time[next_cap]; // loop BLOCKS on the empty queue for the next capture
+            waited_for_this = true;
+            continue;
+        }
+        let (c, src_id) = queue.pop_front().unwrap();
+        let now = wall;
+        let queue_had_frame = !waited_for_this;
+        waited_for_this = false;
+        let prev_b = gate.next_boundary_ns();
+        let lag = crate::genlock_pacing::genlock_lag_intervals(now, prev_b, emit_int);
+        let hash = src_id.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(now);
+        let emit = gate.poll(now, emit_int, hash, queue_had_frame, now, c);
+        let next_b = gate.next_boundary_ns();
+        let r = gate.last_poll_starvation_repeats();
+        let s = crate::genlock_pacing::boundary_skip_count(prev_b, next_b, emit_int)
+            .saturating_sub(gate.last_poll_intentional_extra_advance());
+        let ev = (emit as u64) + r;
+        if now > WARMUP_NS {
+            repeats += r;
+            net_skips += s;
+            max_lag = max_lag.max(lag);
+            if !warmup_anchored {
+                win_start = now;
+                warmup_anchored = true;
+            }
+            win_events += ev;
+            if now.saturating_sub(win_start) >= 5_000_000_000 {
+                windows.push(win_events);
+                win_events = 0;
+                win_start = now;
+            }
+        }
+        wall += if emit { send_cost } else { shed_cost };
+        if next_cap >= n as usize && queue.is_empty() {
+            break;
+        }
+    }
+    OverRateStallSim {
+        over_rate: gate.sustained_over_rate(),
+        repeats,
+        net_skips,
+        max_lag,
+        windows,
+    }
+}
+
+#[test]
+fn over_rate_empty_queue_stall_fills_every_slot_regardless_of_regime_1167_v5() {
+    // (#1167 v5 [red]->[green]) The v4 empty-queue fill was gated on a POSITIVE sustained-under-rate,
+    // so a sick grabber on AVERAGE over-rate (61-63 fps) but with periodic VIDIOC_DQBUF stalls read
+    // over-rate and left every post-stall empty-queue slot UNFILLED: the grid crept behind, the #131
+    // resync skipped the accumulated boundaries (net_skips > 0 = wire gaps), emit under-ran (windows
+    // 295-299) and the strih receiver saw the gap+burst -> the cam1 [4i/8align] sawtooth. v5 keys the
+    // fill on a LIVE capture takt (regime-INDEPENDENT), so an empty-queue slot at a boundary is
+    // filled AT the boundary regardless of the over-rate EMA. RED (v4): over_rate=true, repeats=0,
+    // net_skips>0, max_lag deep (>8, into the resync band), windows drop below 299. GREEN (v5):
+    // repeats>0, net_skips=0, max_lag bounded (the fill catches the grid up immediately), windows
+    // 299-301. The receiver-side recv-cap_max smoothing is the supervisor's live-rig verification;
+    // off-rig these are the faithful sender-side analogues.
+    let s = run_over_rate_stall_sim(62.0, 45, 1.0, 30.0);
+    assert!(
+        s.over_rate,
+        "the sim must stay a genuine OVER-rate EMA (the v4-inert regime this exercises); \
+         sustained_over_rate was false"
+    );
+    assert!(
+        s.repeats > 0,
+        "v5 must FILL the empty-queue slots at over-rate (v4 leaves 0 — the hole); got {} repeats \
+         (windows {:?})",
+        s.repeats,
+        s.windows
+    );
+    assert_eq!(
+        s.net_skips, 0,
+        "no emit-slot may be skipped on the wire (v4 lets the grid creep + #131-resync past them); \
+         got {} net #707 skips (windows {:?})",
+        s.net_skips, s.windows
+    );
+    assert!(
+        s.max_lag <= STARVATION_REPEAT_MAX,
+        "the fill must catch the grid up immediately (never a deep catch-up burst -> no receiver \
+         depth sawtooth); max_lag {} intervals (v4 falls to ~9, into the #131 resync band)",
+        s.max_lag
+    );
+    for &w in &s.windows {
+        // The discriminating invariant is the anti-UNDER-run: v4 leaves the empty-queue slots
+        // unfilled so each stall costs a slot -> windows sag to 295-299; v5 fills them so no window
+        // under-runs. The upper bound is a loose runaway guard — a window may transiently read 302
+        // (60.4 fps) as the fill catches up an accrued lag in the first steady window, still bounded.
+        assert!(
+            w >= 299,
+            "no steady 5s window may under-run below ~60 (v4 drops to 295-297 without the fill); \
+             got {w} in {:?}",
+            s.windows
+        );
+        assert!(
+            w <= 303,
+            "each 5s window stays bounded near 60 (no runaway catch-up burst); got {w} in {:?}",
+            s.windows
+        );
+    }
 }

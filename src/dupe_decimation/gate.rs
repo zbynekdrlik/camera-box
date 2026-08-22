@@ -365,17 +365,27 @@ impl DecimationGate {
         self.takt_ema_interval_ns != 0 && self.takt_ema_interval_ns < RETIRE_MIN_TAKT_INTERVAL_NS
     }
 
-    /// (#1167 v4) Is the capture-takt EMA a MEASURED sustained UNDER-rate (the grabber capturing
-    /// below 60 — the sub-60 wander to 57.9–59.7)? The mirror of
-    /// [`sustained_over_rate`](Self::sustained_over_rate) on the slow side, and the POSITIVE signal
-    /// the empty-queue last-frame repeat is gated on. Requires `takt_ema != 0` (a real measurement),
-    /// so a caller that disables the takt EMA (`capture_mono_ns == 0`) never arms the fill —
-    /// deliberately NOT `!sustained_over_rate`, which reads TRUE with the EMA disabled even at an
-    /// over-rate pattern. Mutually exclusive with `sustained_over_rate` by construction
-    /// (`STARVATION_MIN_TAKT_INTERVAL_NS` > `RETIRE_MIN_TAKT_INTERVAL_NS`).
-    pub(crate) fn sustained_under_rate(&self) -> bool {
+    /// (#1167 v5) Is there a LIVE capture takt — a real, non-collapsed EMA measurement
+    /// (`takt_ema_interval_ns != 0`)? The REGIME-INDEPENDENT arming signal for the empty-queue
+    /// last-frame repeat: v5 replaced v4's positive-`sustained_under_rate` rate gate with this so the
+    /// fill fires in BOTH wander directions. The sick ShadowCast grabber averages OVER-rate
+    /// (61–63 fps) yet a 25–40 ms VIDIOC_DQBUF stall drains the V4L2 queue empty at a 60 fps boundary
+    /// — v4's under-rate gate read that as over-rate and left the slot UNFILLED, so the grid crept
+    /// behind, the #131 resync skipped the accumulated boundaries, emit under-ran, and the strih
+    /// receiver saw the gap+burst → the cam1 [4i/8align] sawtooth. Keyed on the takt EMA (not a rate
+    /// threshold) for the two reasons the rate gate also relied on: (1) a caller that disables the EMA
+    /// (`capture_mono_ns == 0`, the legacy over-rate/starved unit tests) reads `takt_ema == 0` →
+    /// never arms the fill, so it stays byte-inert in exactly those tests (the mono=0 collision that
+    /// broke v4's first `!sustained_over_rate` attempt — solved here identically, since this ALSO
+    /// requires `takt_ema != 0`); (2) a GENUINELY collapsing leg (≥ [`TAKT_GAP_SUSTAINED_COUNT`]
+    /// consecutive > [`TAKT_GAP_EXCLUDE_NS`] gaps — a card dropping below ~20 fps) RESETS the EMA to
+    /// 0, so the fill disarms and the dead leg under-runs, staying visible to #666 / the frozen-leg
+    /// attribution (the ticket's hard constraint — a dead camera must still look down). A live grabber
+    /// near 60 (over/at/under) keeps a non-zero EMA, so the fill is regime-independent. The remaining
+    /// gates (`!copy`, `!queue_had_frame`, `!converging`, the consecutive cap, `1 <= lag <= 8`) do
+    /// the rest — see [`apply_starvation_fill`](Self::apply_starvation_fill).
+    fn has_live_capture_takt(&self) -> bool {
         self.takt_ema_interval_ns != 0
-            && self.takt_ema_interval_ns > STARVATION_MIN_TAKT_INTERVAL_NS
     }
 
     /// (#1167) FILL the current 60fps slot: advance the boundary one interval AND emit the current
@@ -393,19 +403,24 @@ impl DecimationGate {
         true
     }
 
-    /// (#1167 v4) The empty-queue STARVATION fill, applied by the `Emit` arm of [`poll`](Self::poll)
-    /// (extracted for the #414 poll-length budget). At an UNDER-rate the V4L2 queue empties and 60fps
-    /// boundaries pass with NO capture to fill them (the loop genuinely waited → `queue_had_frame ==
-    /// false`); the v2/v3 fills can't help — they only convert a captured frame's shed into a copy,
-    /// none fabricates an emit when no frame arrived. This reports up to [`STARVATION_REPEAT_MAX`]
-    /// last-frame repeats (`main.rs` re-emits the CURRENT GOOD frame — it passed the corruption check,
-    /// so never corrupted content) for the boundaries this dip left unfilled, and advances the grid to
-    /// catch up. Gated: a FRESH unique (`!copy` — a dupe/frozen source takes the copy valve and gets
-    /// NO repeats, so a dead/frozen leg still under-runs), an EMPTY queue, a MEASURED
-    /// [`sustained_under_rate`](Self::sustained_under_rate) and NOT converging (both keep it decoupled
-    /// from the over-rate v2/v3 regime — no shared counter/pace budget), a stale boundary (`lag >= 1`)
-    /// within the non-resync catch-up band (`lag <= GENLOCK_MAX_CATCHUP_INTERVALS`) so a deeper
-    /// empty-queue GAP still resyncs honestly (dead-leg semantics). Bounded to STARVATION_REPEAT_MAX
+    /// (#1167 v4/v5) The empty-queue STARVATION fill, applied by the `Emit` arm of [`poll`](Self::poll)
+    /// (extracted for the #414 poll-length budget). At an empty-queue dip — an UNDER-rate window
+    /// (v4) OR a capture STALL on an AVERAGE-over-rate box (v5: a 25–40 ms VIDIOC_DQBUF stall drains
+    /// the queue) — the V4L2 queue empties and 60fps boundaries pass with NO capture to fill them
+    /// (the loop genuinely waited → `queue_had_frame == false`); the v2/v3 fills can't help — they
+    /// only convert a captured frame's shed into a copy, none fabricates an emit when no frame
+    /// arrived. This reports up to [`STARVATION_REPEAT_MAX`] last-frame repeats (`main.rs` re-emits
+    /// the CURRENT GOOD frame — it passed the corruption check, so never corrupted content) for the
+    /// boundaries this dip left unfilled, and advances the grid to catch up. Gated: a FRESH unique
+    /// (`!copy` — a dupe/frozen source takes the copy valve and gets NO repeats, so a dead/frozen leg
+    /// still under-runs), an EMPTY queue (`!queue_had_frame` — the ONE gate that keeps the over-rate
+    /// v2/v3 machinery byte-unchanged for a NON-empty queue), a LIVE capture takt
+    /// ([`has_live_capture_takt`](Self::has_live_capture_takt) — v5 made this REGIME-INDEPENDENT,
+    /// replacing v4's positive-under-rate gate so a stall on an over-rate box also fills; a collapsed
+    /// leg resets the EMA → not filled → dead-leg semantics) and NOT converging (decoupled from the
+    /// over-rate v2/v3 CONVERGENCE tail — a SEPARATE counter, no shared pace budget), a stale boundary
+    /// (`lag >= 1`) within the non-resync catch-up band (`lag <= GENLOCK_MAX_CATCHUP_INTERVALS`) so a
+    /// deeper empty-queue GAP still resyncs honestly (dead-leg semantics). Bounded to STARVATION_REPEAT_MAX
     /// CONSECUTIVE repeats, RESET by any on-time capture (`lag_intervals == 0`) — so a source that
     /// keeps pace (57.9 fps, crossing a boundary ~2×/s with on-time frames between) is fully filled,
     /// while a source that NEVER catches up (≤~30 fps, every poll late) accumulates to the cap and
@@ -422,7 +437,7 @@ impl DecimationGate {
     ) {
         let starvation_repeats = if !copy
             && !queue_had_frame
-            && self.sustained_under_rate()
+            && self.has_live_capture_takt()
             && !self.converging_deep_backlog
             && (1..=crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS).contains(&lag_intervals)
         {

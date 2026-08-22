@@ -540,6 +540,73 @@ new fields + a const change):
   UNDER-rate window (grabber < 60) with `starvation last-frame repeats` > 0, and `[4i/8align]` cam1
   offset holds ±1 across the wander in BOTH directions.
 
+## #1167 v5 (2026-08-22) — make the empty-queue fill REGIME-INDEPENDENT (the FOURTEENTH piece)
+
+v4 fixed the SUSTAINED under-rate direction, but the causal chain for the cam1 `[4i/8align]`
+sawtooth was still open: cam1 averages OVER-rate (61–63 fps) yet its sick ShadowCast grabber has
+25.6 ms `#707 V4L2 DEQUEUE STALL` episodes. During a stall the queue drains empty, the emit slot
+crosses a boundary from an EMPTY queue — but v4's fill was gated on a POSITIVE
+`sustained_under_rate()` (takt EMA > `STARVATION_MIN_TAKT_INTERVAL_NS`), which reads FALSE on an
+average-over-rate box, so NO fill fired: the slot went out late/gapped, the grid crept behind, the
+#131 resync skipped the accumulated boundaries, emit under-ran (live cam1 windows 297–301), and the
+strih receiver saw a ~37 ms arrival gap + catch-up burst (`recv-timing #797` cap_max=37.48 ms on
+cam1 vs 19–21 on cam2/3/4) → depth 1→8→1 → converge_shed → the presented frame_id sawtooth. The
+live evidence closing the chain: PTP LOCK everywhere + 0 dantesync steps (clock ruled out).
+
+The fix — replace the rate gate with a REGIME-INDEPENDENT "live capture takt" signal so the
+empty-queue fill fires in BOTH wander directions (`src/dupe_decimation/gate.rs`,
+`apply_starvation_fill`'s Emit-arm gate):
+- **`has_live_capture_takt()` = `takt_ema_interval_ns != 0`, replacing `sustained_under_rate()`.**
+  The gate becomes `!copy && !queue_had_frame && has_live_capture_takt() && !converging_deep_backlog
+  && 1 <= lag <= GENLOCK_MAX_CATCHUP_INTERVALS`. A live grabber near 60 (over/at/under) keeps a
+  non-zero EMA, so the fill is no longer rate-gated. `sustained_under_rate()` +
+  `STARVATION_MIN_TAKT_INTERVAL_NS` are REMOVED (dead after v5).
+- **The mono=0 legacy-test collision is solved the SAME way v4's `takt_ema != 0` requirement did,
+  NOT by `!sustained_over_rate`.** A caller that disables the takt EMA (`capture_mono_ns == 0`, the
+  legacy over-rate/starved unit tests) reads `takt_ema == 0` → `has_live_capture_takt()` FALSE →
+  the fill never arms → those tests stay byte-inert. This is why keying on the EMA (not on
+  `!sustained_over_rate`, which reads TRUE with the EMA disabled) is load-bearing — the exact trap
+  that broke v4's first attempt on 5 legacy tests.
+- **Dead-leg semantics preserved FOR FREE.** A genuine collapse (≥ `TAKT_GAP_SUSTAINED_COUNT`
+  consecutive > `TAKT_GAP_EXCLUDE_NS` gaps — a card below ~20 fps) RESETS the takt EMA to 0, so
+  `has_live_capture_takt()` disarms → the dead leg under-runs → visible to #666 / frozen-leg
+  attribution. A frozen source delivers dupes (`Emit{copy:true}`) → the `!copy` gate excludes it.
+  A dead/half-dead camera still looks down (the ticket's hard constraint).
+- **NOT a decoupling violation.** The over-rate v2/v3 machinery acts ONLY on a NON-empty queue; the
+  fill acts ONLY on an empty queue (`!queue_had_frame`) — disjoint by queue state. The measured
+  WIRE rate is IDENTICAL (v4 = v5 = 59.967 fps at 62 fps + a stall): the fill merely moves the
+  post-stall empty-queue slots from LATE Drain-hold poll-emits to ON-boundary repeats, killing the
+  grid lag and the wire gap. The v4 counter, the #707 fold, the boundary math and the `main.rs`
+  forward-fill loop are all byte-unchanged.
+- **Two legacy tests reconciled** (their PREMISE the spec deliberately changes; both green on the
+  pre-fix AND post-fix code, so not fix-tailored): `over_rate_never_starvation_repeats` →
+  `over_rate_with_a_full_queue_never_starvation_repeats` (it forced an over-rate + EMPTY-queue combo
+  that v5 now correctly FILLS; corrected to the physical non-empty-queue over-rate state, where the
+  `!queue_had_frame` gate keeps the fill off); `over_rate_fills_every_60fps_slot` now counts the
+  WIRE rate (poll-emits + starvation repeats) since a post-stall slot is filled by a repeat, not a
+  poll-emit.
+- **Off-rig (real `poll`, #557 scratch):** over-rate 62 fps + periodic 45 ms stalls,
+  `sustained_over_rate=true`. v4: repeats=0, net_skips=18, max_lag=9 (into the resync band), windows
+  295–298. v5: repeats>0, net_skips=0, max_lag≤4, windows 300–302. Full module suite 84/84; `cargo
+  fmt --all --check` clean. The receiver-side recv-cap_max smoothing (the FIFO paces the
+  contiguous-timecode burst) is the supervisor's live-rig verification — the sender-side
+  net_skips/max_lag/windows are the faithful off-rig analogues.
+- **TESTING GOTCHA — model `queue_had_frame` as "did the loop BLOCK for this frame", NOT
+  `run_queue_sim`'s residence proxy.** `run_queue_sim` (the #1145 sawtooth sim) approximates
+  `queue_had_frame = now - cap_ns < cap_int/2` (residence < half an interval). That is WRONG for a
+  backed-up OVER-rate queue: an over-rate frame has a HIGH residence but an INSTANT dequeue (queue
+  full), so the real #1131 `frame_from_nonempty_queue(dequeue_duration_ms, …)` reads TRUE while the
+  proxy reads FALSE — inflating the empty-queue slot count. When you write a NEW empty-queue-fill
+  test (as the v5 `run_over_rate_stall_sim` does), set `queue_had_frame` from whether the loop
+  actually WAITED on an empty queue for that frame (a `waited_for_this` flag), the faithful
+  dequeue-duration analogue — otherwise the sim fires the fill on backed-up over-rate frames that
+  production never would. (The existing `over_rate_fills_…` test tolerates the proxy because it only
+  reads the wire RATE, which is proxy-independent.)
+- **Supervisor's live rig step:** confirm the per-5s `Streaming:` windows hold 299–301 on cam1
+  through the OVER-rate wander (grabber > 60 with `#707` DQBUF stalls) with `starvation last-frame
+  repeats` > 0, the strih `NDI cam1` `recv-timing #797` cap_max drops toward the cam2/3/4 ~20 ms
+  band, converge_sheds stop climbing, and `[4i/8align]` cam1 holds ±1.
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
