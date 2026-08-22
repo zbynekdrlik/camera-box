@@ -48,3 +48,30 @@ beyond `cargo fmt --all --check`).
 
 Items 2 and 3 on issue 905 are excellent candidates to follow this exact recipe when their own
 preconditions land.
+
+## The pattern INVERTED (issue 1169, `REAL_DROPS_ALLOWANCE_DEFAULT` 0 → 1)
+
+Issue 1169 (owner, 2026-08-22) RE-WIDENED `REAL_DROPS_ALLOWANCE_DEFAULT` from the issue-905
+restored 0 back to the LOUD `<=1` SINGLETON band — the SAME recipe run BACKWARDS (a re-relaxation
+with a re-tighten trail, not a restore). Current state:
+
+- **DEFAULT = 1** — a single per-frame delivery singleton (issue-1167 v3 paced-trickle absorption +
+  a FIFO stale_replay in the same event; `burn_unreadable` stays 0) PASSES within the allowance and
+  is reported LOUDLY (per-node + full_chain notes now say "real-drops singleton allowance consumed:
+  N — issue 1169 re-tighten trail"; the JSON already carries `real_drops_allowance` +
+  `real_drops_allowance_consumed_nodes`). `>=2` of anything still FAILS; `burn_unreadable` stays an
+  unconditional hard fail.
+- **Re-tighten = the ONE constant flip back to 0**, landed once a zero-singleton green run holds
+  (e.g. after the issue-1168 floor reduction and/or the cam1-card swap). Issue 1169 stays OPEN as
+  that trail.
+- The inverse of recipe step 4: the issue-356/#571 never-mask SAFETY test's part (b) fixture was
+  LIFTED from 1 gap back to 2 (one PAST the singleton band) so it keeps proving loss BEYOND the
+  allowance — mirroring what issue 904 did for its allowance of 2, re-scaled to band 1.
+- The DORMANT re-tighten proof (`re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`)
+  is the inverse of `single_real_drop_...` above: an EXPLICIT `is_zero_within_allowance(0)` on the
+  same singleton node still FAILS, so flipping the constant back is a proven one-line change.
+
+NOTE: this is a DIFFERENT seam from the segment-bar `<=1/<=1` singleton allowance
+(`window_gate::segment_singleton_allowance_gates_overall_pass()`), which is issue 1169's FIRST
+seam. Both share the ticket and the re-tighten trail; this one is the full_chain `real_drops` path
+in `recording-verdict.rs`, that one is the per-segment copies/gaps path in `window_gate.rs`.
