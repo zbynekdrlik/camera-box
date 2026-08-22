@@ -176,6 +176,12 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # own [4b2/8] preflight call shape exactly.
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$RIG_MODE_DIR/lib/win-ssh-exec.sh"
+# issue 1171: the SAME offline-ack mechanism recording-e2e.sh's [0/8] uses (#758/#827/#1013) — the
+# #789 imag-genlock TEST-entry gate consults cambox_offline_ack_reason "imag" so a legitimately
+# acked-offline imag SKIPS the gate instead of fail-closing. Pure functions, no side effects at
+# source time.
+# shellcheck source=scripts/lib/cambox-offline-ack.sh
+. "$RIG_MODE_DIR/lib/cambox-offline-ack.sh"
 
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
@@ -711,6 +717,26 @@ imag_genlock_gate_verdict() {
   return 0
 }
 
+# imag_genlock_gate_offline_ack_action REASON REACHABLE -> "skip" | "proceed" (issue 1171). The pure
+# decision for whether the #789 TEST-entry gate is SKIPPED because imag is legitimately acked offline
+# (issue 1013 / rig-fleet.txt). Pure (no I/O), ALWAYS returns 0 (verdict on stdout) so tests/rig_mode.rs
+# can source rig-mode.sh and exercise every branch Tier-0 (#477) — same seam pattern as
+# imag_genlock_gate_verdict; the reachability PROBE (ping) stays in the caller, only the yes/no is here.
+#   REASON empty              -> proceed (imag not acked; run the #789 gate normally)
+#   REASON set + REACHABLE=1  -> proceed (acked BUT reachable = STALE ack, NOT exempted -> the real
+#                                gate runs against the now-reachable imag; mirrors recording-e2e.sh
+#                                [0/8]'s stale-ack protection, just falling through instead of a hard fail)
+#   REASON set + REACHABLE=0  -> skip    (acked + genuinely unreachable = issue-1013 legit offline;
+#                                skip the gate, TEST mode proceeds without the imag leg)
+imag_genlock_gate_offline_ack_action() {
+  local reason="$1" reachable="${2:-0}"
+  if [ -n "$reason" ] && [ "$reachable" != "1" ]; then
+    printf 'skip\n'
+  else
+    printf 'proceed\n'
+  fi
+}
+
 # require_imag_genlock_current -> #789 TEST-entry HARD-BLOCK gate (owner ROZHODNUTE 2026-08-19). Runs
 # `drift-guard.sh --check-imag` against the ACTIVE imag host, feeds its output to
 # imag_genlock_gate_verdict, and REFUSES to enter TEST mode (exit 30 — a distinct non-clean exit per
@@ -720,7 +746,20 @@ imag_genlock_gate_verdict() {
 # set -e (an unread host must fail CLOSED via the verdict, not crash here). Same --check-imag
 # mechanism as the advisory warn, opposite (fail-closed) contract.
 require_imag_genlock_current() {
-  local here out rc=0 verdict
+  local here out rc=0 verdict ack_file eff_ack ack_reason reachable=0 action
+  # issue 1171: before fail-closing, honour the issue-1013 offline-ack. Compute the effective ack
+  # the SAME way recording-e2e.sh does (an explicit CAMBOX_OFFLINE_ACK env wins; else rig-fleet.txt),
+  # locally (no top-level source-time side effect). If imag is acked, probe reachability — an
+  # acked-but-REACHABLE imag is a STALE ack and is NOT exempted (it falls through to the real gate).
+  ack_file="${RIG_FLEET_ACK_FILE:-$RIG_MODE_DIR/../rig-fleet.txt}"
+  eff_ack="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$ack_file")"
+  ack_reason="$(CAMBOX_OFFLINE_ACK="$eff_ack" cambox_offline_ack_reason imag)"
+  if [ -n "$ack_reason" ] && ping -c1 -W2 "$IMAG_IP" >/dev/null 2>&1; then reachable=1; fi
+  action="$(imag_genlock_gate_offline_ack_action "$ack_reason" "$reachable")"
+  if [ "$action" = "skip" ]; then
+    echo "[#789/#1171] SKIP imag genlock HARD-BLOCK: imag je operator-acknowledged offline (issue 1013: ${ack_reason}) a nedosiahnutelny z dev1 (${IMAG_IP}) — gate sa PRESKAKUJE, TEST rezim pokracuje bez imag legu (rovnaka vynimka ako recording-e2e.sh [0/8] preflight)."
+    return 0
+  fi
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[#789] TEST-entry HARD-BLOCK: imag-nb's deployed genlock OBS build MUST be current with origin/main (gates maximalne striktne — owner 2026-08-19):"
   out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag "host=$IMAG_IP" 2>&1 )" || rc=$?
