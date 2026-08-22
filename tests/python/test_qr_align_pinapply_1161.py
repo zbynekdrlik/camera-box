@@ -177,3 +177,164 @@ class TestAlignAttributesTheResidual:
         # dichotomy (config moved, frame did not) is exercised end-to-end, not just in the unit tests.
         pins_now = [int(m) for m in re.findall(r"pin now (\d+) ms", msg)]
         assert pins_now and max(pins_now) > 3
+
+
+# --------------------------------------------------------------------------- #
+# #1161 ALIGNER-SIDE FIX: compute pins ABOVE each source's arrival transport floor.
+#
+# The bug: floor3_pins computes `floor(3) + relative_delta`, which in the transport-dominated regime
+# (frames arrive ~59-66 ms old, deltas ~1 canvas frame) lands the raised pins BELOW each source's
+# arrival floor -> structurally inert (latency = max(pin, transport)). The fix targets an ABSOLUTE
+# achievable latency = arrival_floor_i + delta_i (the slowest camera's floor) so the genlock-C
+# ACQUIRE frame-mover (sibling branch) can actually add the hold, while the slowest keeps pin 3.
+# The arrival floor is the strih genlock audit's `latency_ms + mean_head_skew_ms` (pin-clock,
+# DanteSync-synced) -- painter-QR gen_ts is CLOCK_REALTIME vs dev1 CLOCK_MONOTONIC t_send, so the
+# painter-QR gives only RELATIVE deltas, never an absolute floor.
+# --------------------------------------------------------------------------- #
+def _jitter(floors, pins):
+    """A genlock-jitter-report --json dict for the given per-source arrival floors + current pins:
+    latency_ms = the effective pin during the sampled window, mean_head_skew_ms = the signed mean
+    deviation so latency_ms + mean_head_skew_ms == the actual present age (== the arrival floor when
+    the pin sits below it). Keyed by strih source name, exactly as the real report."""
+    return {s: {"samples": 40, "latency_ms": pins[s],
+                "mean_head_skew_ms": float(floors[s] - pins[s]),
+                "mean_abs_head_skew_ms": 2.0, "max_abs_head_skew_ms": 4,
+                "delta_backward_regime_ticks": 0}
+            for s in floors}
+
+
+class TestArrivalFloorsFromJitter:
+    def test_reconstructs_latency_plus_signed_skew_per_source(self):
+        floors = {"NDI cam1": 66.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}
+        pins = {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 17, "NDI cam4": 22}
+        got = qa.arrival_floors_from_jitter(_jitter(floors, pins), SRC)
+        assert got == pytest.approx(floors)
+
+    def test_omits_a_source_absent_or_malformed_in_the_jitter_json(self):
+        j = {"NDI cam1": {"latency_ms": 17, "mean_head_skew_ms": 49.0},   # -> 66
+             "NDI cam2": {"latency_ms": 6},                                # malformed (no skew)
+             "NDI foreign": {"latency_ms": 3, "mean_head_skew_ms": 1.0}}   # not a "NDI cam<N>"
+        got = qa.arrival_floors_from_jitter(j, SRC)
+        assert got == {"NDI cam1": pytest.approx(66.0)}   # cam2 skipped, foreign not requested
+
+
+class TestFloorAwarePins:
+    # The live #1161 case: cam1 slowest (arrival floor 66); the faster ones are ahead by their delta.
+    FLOORS = {"NDI cam1": 66.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}
+    DELTAS = {"NDI cam1": 0.0, "NDI cam2": 3.0, "NDI cam3": 33.0, "NDI cam4": 20.0}  # hold to add
+
+    def test_faster_cameras_are_pinned_at_or_above_their_arrival_floor(self):
+        plan = qa.floor_aware_pins(self.FLOORS, self.DELTAS)
+        # every faster camera's pin >= its own arrival floor -> ABOVE the inert edge (the whole fix)
+        for s in ("NDI cam2", "NDI cam3", "NDI cam4"):
+            assert plan[s] >= self.FLOORS[s], f"{s} pin {plan[s]} must clear its floor {self.FLOORS[s]}"
+        # and they all land at the SAME alignment target = the slowest camera's floor (66)
+        assert plan["NDI cam2"] == 66 and plan["NDI cam3"] == 66 and plan["NDI cam4"] == 66
+
+    def test_slowest_camera_keeps_the_minimum_floor_pin(self):
+        plan = qa.floor_aware_pins(self.FLOORS, self.DELTAS)
+        assert plan["NDI cam1"] == 3   # slowest (delta 0) -> floor, inert, stays at its natural 66
+
+    def test_old_floor3_plan_is_below_the_floor_the_documented_bug(self):
+        # characterizes the bug the fix removes: floor3_pins' faster-camera pins land BELOW their
+        # arrival floors -> inert. (This asserts against the EXISTING function; it documents WHY.)
+        old = qa.floor3_pins(self.DELTAS)
+        assert old["NDI cam3"] < self.FLOORS["NDI cam3"] or old["NDI cam2"] < self.FLOORS["NDI cam2"]
+        # the fix's plan is strictly deeper on the faster cameras than the inert floor3 plan
+        fix = qa.floor_aware_pins(self.FLOORS, self.DELTAS)
+        assert fix["NDI cam2"] > old["NDI cam2"] and fix["NDI cam3"] > old["NDI cam3"]
+
+    def test_fails_loud_when_floor_plus_delta_exceeds_the_abs_ceiling(self):
+        # a transport floor so high that aligning would need a pin beyond the absolute budget ->
+        # FAIL LOUD naming the camera, NEVER silently pin above the bound / widen it.
+        floors = {"NDI cam1": 66.0, "NDI cam3": 66.0}
+        deltas = {"NDI cam1": 0.0, "NDI cam3": 33.0}      # cam3 target 66+33 = 99 > 94
+        with pytest.raises(qa.AlignmentImpossible) as exc:
+            qa.floor_aware_pins(floors, deltas)
+        msg = str(exc.value)
+        assert "NDI cam3" in msg and "99" in msg and "94" in msg
+        assert "do NOT raise the bound" in msg or "do not raise the bound" in msg
+
+    def test_ceiling_is_the_owner_94ms_line_and_below_it_aligns(self):
+        assert qa.DEFAULT_MAX_ABS_LATENCY_MS == 94
+        # floor 60 + delta 33 = 93 <= 94 -> aligns (does NOT fail)
+        plan = qa.floor_aware_pins({"NDI cam1": 60.0, "NDI cam3": 27.0},
+                                   {"NDI cam1": 0.0, "NDI cam3": 33.0})
+        assert plan["NDI cam3"] == 60 and plan["NDI cam1"] == 3
+
+    def test_fails_when_a_faster_camera_has_no_arrival_floor(self):
+        # a faster camera missing from the jitter measurement cannot be pinned honestly -> FAIL,
+        # never a fabricated floor.
+        with pytest.raises(qa.AlignmentImpossible) as exc:
+            qa.floor_aware_pins({"NDI cam1": 66.0}, {"NDI cam1": 0.0, "NDI cam3": 33.0})
+        assert "NDI cam3" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# align() FLOW: with the strih audit floors, the plan sets ABOVE-floor pins and the FIFO (modelled
+# as present_age = max(pin, arrival_floor)) actually MOVES the faster cameras into parity -> aligned.
+# RED (pre-fix): align ignores the floors, uses floor3 (below-floor) pins -> the FIFO stays
+# misaligned -> the run FAILS. GREEN: floor-aware pins clear the floor -> the FIFO moves -> aligned.
+# --------------------------------------------------------------------------- #
+_BASE_NS = 30_000 * ID_NS
+
+
+class _FifoBarrier:
+    """A barrier stand-in that MODELS the genlock FIFO's response to the applied pins: each camera
+    presents a frame of age present_age_i = max(applied_pin_i, arrival_floor_i). gen_ts encodes the
+    present age EXACTLY (older present -> smaller gen_ts), so round_deltas reads the true cross-camera
+    present-age spread; a faster camera pinned AT/ABOVE its floor is delayed to that pin (the
+    genlock-C ACQUIRE frame-mover), closing the spread. Reads the live pins from the shared `applied`
+    capture (empty before apply -> the below-floor current pins)."""
+
+    def __init__(self, floors, current_pins, applied):
+        self.floors, self.current_pins, self.applied = floors, current_pins, applied
+
+    def __call__(self, sources, host, password, width, height):
+        live = self.applied if self.applied else self.current_pins
+        shot = {}
+        for s in sources:
+            present_ms = max(live.get(s, 0), self.floors[s])
+            gen_ts = int(_BASE_NS - present_ms * 1e6)          # older present -> smaller gen_ts
+            fid = int(round(gen_ts / ID_NS))
+            shot[s] = ([_payload(RUN, fid, gen_ts), _payload(RUN, fid - 1, gen_ts - ID_NS)], 0)
+        return shot
+
+
+def _align_with_floors(monkeypatch):
+    import apply_latency_pins
+    import obs_phase2
+    floors = {"NDI cam1": 66.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}
+    current = {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 17, "NDI cam4": 22}   # all BELOW their floor
+    applied = {}
+    monkeypatch.setattr(qa, "barrier_screenshot", _FifoBarrier(floors, current, applied))
+
+    def _read_pins(s, h, p):
+        return dict(applied) if applied else dict(current)
+    monkeypatch.setattr(qa, "read_current_pins", _read_pins)
+
+    def _apply(ws, plan, execute):
+        applied.update(plan)
+        return plan
+    monkeypatch.setattr(apply_latency_pins, "apply_pins", _apply)
+
+    class _WS:
+        def close(self):
+            pass
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, pw: _WS())
+    return qa.align(SRC, "h", "pw", execute=True, stable_tail_rounds=3, stable_tol_ids=1,
+                    min_valid_rounds=5, min_parity_rounds=3, max_delta_ms=66.0, parity_tol_ids=1,
+                    floor_ms=3, width=1920, height=1080, measure_budget_s=1e9,
+                    max_measure_rounds=60, settle_s=0,
+                    jitter_json=_jitter(floors, current))
+
+
+class TestAlignFloorAwareFlow:
+    def test_above_floor_pins_move_the_fifo_into_parity(self, monkeypatch):
+        result = _align_with_floors(monkeypatch)
+        assert result["status"] == "aligned"
+        assert result["post_spread_ids"] == 0
+        # the faster cameras were pinned AT/ABOVE their floor (66), never the inert floor3 plan
+        plan = result["plan"]
+        assert plan["NDI cam2"] >= 63 and plan["NDI cam3"] >= 33 and plan["NDI cam4"] >= 46
+        assert plan["NDI cam1"] == 3
