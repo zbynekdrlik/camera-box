@@ -3263,4 +3263,288 @@ mod tests {
              fail-open cap ({cap}) — the cap is a safety valve, not the primary path"
         );
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // #1161 — END-TO-END pin-rise sim (the proof the merged Stage-2 gate lacked). That gate shipped
+    // with only UNIT tests of `relock_acquire_should_hold`; it passed them yet was INERT live,
+    // because a per-source reserve BELOW the arrival transport floor has no leverage. This drives
+    // the FULL ts-align conveyor — ACQUIRE + the #1161 Part B gate + STEADY N>=2 boundary-follower +
+    // `to_drop` decimation + the #1049 converge shed — applies a mid-stream reserve RISE with Part A
+    // (zero the locked boundary), and proves BOTH regimes:
+    //   * reserve raised ABOVE the source's natural present age -> the presented frame MOVES to
+    //     ~reserve, the queue DEEPENS, and the deep hold STICKS through STEADY N>=2 (no collapse);
+    //   * reserve raised but still BELOW the arrival floor -> INERT (the live #1161 signature:
+    //     depth stuck, present age unchanged) — a PHYSICAL limit the FIFO cannot overcome (it can
+    //     never present a frame fresher than the arrival edge), so the floor-3 aligner must target
+    //     an above-floor pin. This is the arrival-floor limit made executable.
+    // Faithful mirror of the C `genlock_release_tick` ts-align path; reuses this module's authority
+    // functions (`relock_acquire_should_hold` / `relock_select_nearest` / `should_converge_phase` /
+    // `source_interval_from_stamps`). Tier-0 (rustc --test), no rig.
+    struct PinRiseFifo1161 {
+        boundary: u64,
+        last_known_n: u32,
+        bracket_ticks: u64,
+        anchor_ns: u64,
+        ticks_since_drain: u64,
+        depth_at_audit: usize,
+    }
+    impl PinRiseFifo1161 {
+        fn new() -> Self {
+            Self {
+                boundary: 0,
+                last_known_n: 0,
+                bracket_ticks: 0,
+                anchor_ns: 0,
+                ticks_since_drain: 0,
+                depth_at_audit: 0,
+            }
+        }
+        /// Mirror of `genlock_effective_source_multiple` with the sticky-N latch.
+        fn eff_n(&mut self, q: &std::collections::VecDeque<u64>) -> u32 {
+            let s: Vec<u64> = q.iter().take(8).copied().collect();
+            match source_interval_from_stamps(&s) {
+                Some(iv) if iv > 0 => {
+                    let m = ((I30 as f64 / iv as f64).round() as u32).max(1);
+                    self.last_known_n = m;
+                    m
+                }
+                _ => self.last_known_n.max(1),
+            }
+        }
+        /// One render tick; returns the presented on-air age (`wall - stamp`) ns, or None on a hold.
+        /// Mirror of the C `genlock_release_tick` ts-align path (ACQUIRE + Part B gate + STEADY).
+        fn tick(
+            &mut self,
+            wall: u64,
+            reserve_ms: u32,
+            q: &mut std::collections::VecDeque<u64>,
+        ) -> Option<i64> {
+            if q.is_empty() {
+                return None;
+            }
+            self.depth_at_audit = q.len();
+            let reserve_ns = reserve_ms as u64 * 1_000_000;
+            let deadline =
+                phase_pinned_deadline(wall.saturating_sub(reserve_ns), I30);
+            let due = q
+                .iter()
+                .take_while(|&&ts| phase_pinned_is_due(ts, deadline))
+                .count();
+            if self.boundary == 0 {
+                // ACQUIRE. #726 STICKY-N + #859 settle clock reset (mirror the C).
+                self.last_known_n = 0;
+                self.ticks_since_drain = 0;
+                // #1161 Part B bracketing gate (N>=2 only).
+                let n = self.eff_n(q);
+                if n >= 2 {
+                    let oldest_age = wall.saturating_sub(q[0]);
+                    if relock_acquire_should_hold(oldest_age, reserve_ns, I30, self.bracket_ticks) {
+                        self.bracket_ticks += 1;
+                        return None; // HOLD — let the queue deepen to the raised reserve.
+                    }
+                }
+                self.bracket_ticks = 0;
+                if due == 0 {
+                    return None;
+                }
+                let qv: Vec<u64> = q.iter().copied().collect();
+                let sel = relock_select_nearest(&qv, wall, relock_anchor_age_ns(self.anchor_ns, reserve_ms));
+                for _ in 0..sel {
+                    q.pop_front();
+                }
+                let ts = q.pop_front().unwrap();
+                self.anchor_ns = wall.saturating_sub(ts);
+                self.boundary = ts + I30;
+                return Some(wall as i64 - ts as i64);
+            }
+            if *q.front().unwrap() <= self.boundary {
+                // STEADY.
+                let n = self.eff_n(q);
+                let old_boundary = self.boundary;
+                if n >= 2 {
+                    let mature_deadline = self.boundary + I30 / 2;
+                    let matured_n = q
+                        .iter()
+                        .take_while(|&&ts| ts <= mature_deadline)
+                        .count()
+                        .max(1);
+                    for _ in 0..matured_n - 1 {
+                        q.pop_front();
+                    }
+                    let newest = *q.back().unwrap();
+                    if should_converge_phase(
+                        wall,
+                        old_boundary,
+                        newest,
+                        reserve_ms,
+                        I30,
+                        n,
+                        self.ticks_since_drain,
+                    ) && q.len() > 1
+                    {
+                        q.pop_front();
+                        self.ticks_since_drain = 0;
+                    } else {
+                        self.ticks_since_drain += 1;
+                    }
+                    let ts = q.pop_front().unwrap();
+                    self.anchor_ns = wall.saturating_sub(ts);
+                    self.boundary = ts + I30;
+                    return Some(wall as i64 - ts as i64);
+                }
+                let ts = q.pop_front().unwrap();
+                self.anchor_ns = wall.saturating_sub(ts);
+                self.boundary = ts + I30;
+                return Some(wall as i64 - ts as i64);
+            }
+            if deadline >= *q.front().unwrap() {
+                // GAP RESYNC.
+                let ts = q.pop_front().unwrap();
+                self.anchor_ns = wall.saturating_sub(ts);
+                self.boundary = ts + I30;
+                return Some(wall as i64 - ts as i64);
+            }
+            None // HOLD (the boundary's frame has not arrived).
+        }
+    }
+
+    /// Drive the conveyor: 60 fps stamps on the DanteSync grid, arriving at `stamp + skew (+ jitter)`
+    /// (a frame cannot be presented before it arrives — `skew_ns` is the transport floor), consumed
+    /// at 30 fps render ticks with +-2 ms slew. The reserve rises `lo_ms -> hi_ms` at `rise_tick`
+    /// with Part A (boundary=0, bracket=0, anchor=0). Returns (pre_age_ms, pre_depth, post_age_ms,
+    /// post_depth, tail_age_ms) — means over settle windows before/after the rise, plus the last-20
+    /// tail (to prove a deep hold STICKS and does not collapse back).
+    fn run_pin_rise_1161(
+        skew_ns: u64,
+        lo_ms: u32,
+        hi_ms: u32,
+        rise_tick: u64,
+        n_ticks: u64,
+    ) -> (f64, usize, f64, usize, f64) {
+        const BASE: u64 = 1_000_000_000_000;
+        let mut f = PinRiseFifo1161::new();
+        let mut q: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut next = 0u64;
+        let mut reserve = lo_ms;
+        let mut pre: Vec<i64> = Vec::new();
+        let mut post: Vec<i64> = Vec::new();
+        let mut tail: Vec<i64> = Vec::new();
+        let mut pre_depth = 0usize;
+        let mut post_depth = 0usize;
+        for k in 0..n_ticks {
+            let slew: i64 = if k % 2 == 0 { 2_000_000 } else { -2_000_000 };
+            let wall = (BASE + k * I30).saturating_add_signed(slew);
+            loop {
+                let jitter = ((next.wrapping_mul(2_654_435_761)) % 8_000_001) as i64 - 4_000_000;
+                let arr = (BASE + next * I60 + skew_ns).saturating_add_signed(jitter);
+                if arr > wall {
+                    break;
+                }
+                q.push_back(BASE + next * I60);
+                next += 1;
+            }
+            if k == rise_tick {
+                reserve = hi_ms;
+                f.boundary = 0; // Part A
+                f.bracket_ticks = 0;
+                f.anchor_ns = 0;
+            }
+            let age = f.tick(wall, reserve, &mut q);
+            if k >= rise_tick.saturating_sub(40) && k < rise_tick {
+                if let Some(a) = age {
+                    pre.push(a);
+                }
+                pre_depth = f.depth_at_audit;
+            }
+            if k >= rise_tick + 8 && k < rise_tick + 60 {
+                if let Some(a) = age {
+                    post.push(a);
+                }
+                post_depth = f.depth_at_audit;
+            }
+            if k + 20 >= n_ticks {
+                if let Some(a) = age {
+                    tail.push(a);
+                }
+            }
+        }
+        let mean = |v: &[i64]| {
+            if v.is_empty() {
+                0.0
+            } else {
+                v.iter().sum::<i64>() as f64 / v.len() as f64 / 1e6
+            }
+        };
+        (mean(&pre), pre_depth, mean(&post), post_depth, mean(&tail))
+    }
+
+    /// GREEN — the frame-mover WORKS when the raised reserve exceeds the arrival floor: on a shallow
+    /// (skew 8 ms) 60->30 source, a 17->50 ms pin rise moves the presented age from ~17 ms to ~50 ms
+    /// (== the reserve) and DEEPENS the queue. This is the "depth deepening, head-skew ~ reserve"
+    /// behaviour the ticket's off-rig GREEN calls for.
+    #[test]
+    fn pin_rise_above_the_arrival_floor_moves_the_frame_and_deepens_1161() {
+        let (pre_age, pre_depth, post_age, post_depth, _tail) =
+            run_pin_rise_1161(8 * 1_000_000, 17, 50, 400, 700);
+        assert!(
+            pre_age < 30.0,
+            "#1161: PRE present age should sit near the shallow 17 ms pin, got {pre_age:.1} ms"
+        );
+        assert!(
+            (post_age - 50.0).abs() <= 6.0,
+            "#1161: a pin rise ABOVE the arrival floor must move the frame to ~reserve (50 ms); \
+             got {post_age:.1} ms (pre {pre_age:.1} ms)"
+        );
+        assert!(
+            post_depth > pre_depth,
+            "#1161: the raised reserve must DEEPEN the queue (pre depth {pre_depth}, post {post_depth})"
+        );
+    }
+
+    /// RED-in-spirit (the LIVE signature, now locked as a DOCUMENTED physical limit): a 17->50 ms
+    /// pin rise on a transport-dominated source (skew 59 ms -> the live `ts_head_skew_ms ~ 76`,
+    /// `depth 2`) is INERT — the presented age does not move and the queue does not deepen, because
+    /// the reserve (50 ms) sits BELOW the arrival floor (~59-66 ms). No FIFO change can move it (a
+    /// frame cannot be presented before it arrives); the floor-3 aligner must target an above-floor
+    /// pin. This test is WHY the merged gate was inert live.
+    #[test]
+    fn pin_rise_below_the_arrival_floor_is_inert_the_live_signature_1161() {
+        let (pre_age, pre_depth, post_age, post_depth, _tail) =
+            run_pin_rise_1161(59 * 1_000_000, 17, 50, 400, 700);
+        assert!(
+            (post_age - pre_age).abs() < 16.7,
+            "#1161: a below-floor pin rise must be INERT (< one source interval of movement); \
+             pre {pre_age:.1} ms -> post {post_age:.1} ms is the live HOLD-INERT signature"
+        );
+        assert_eq!(
+            post_depth, pre_depth,
+            "#1161: a below-floor pin rise must NOT deepen the queue (the stuck-depth-2 signature)"
+        );
+    }
+
+    /// A DEEP above-floor hold STICKS through STEADY N>=2 — it is NOT collapsed back to the arrival
+    /// edge by the boundary-follower. At skew 59 ms a 17->92 ms rise moves the presented age to
+    /// ~100 ms (one full canvas frame deeper) AND the last-20-tick tail stays there (within one
+    /// source interval), proving the STEADY N>=2 `mature_deadline` follower maintains the raised
+    /// hold rather than draining it. This is what makes an above-floor aligner pin a durable fix.
+    #[test]
+    fn a_deep_above_floor_hold_sticks_through_steady_n2_no_collapse_1161() {
+        let (pre_age, pre_depth, post_age, post_depth, tail_age) =
+            run_pin_rise_1161(59 * 1_000_000, 17, 92, 400, 700);
+        assert!(
+            post_age - pre_age >= 25.0,
+            "#1161: a 92 ms reserve (above the ~66 ms floor) must move the frame ~one canvas frame \
+             deeper; pre {pre_age:.1} ms -> post {post_age:.1} ms"
+        );
+        assert!(
+            post_depth > pre_depth,
+            "#1161: the deep hold must deepen the queue (pre {pre_depth}, post {post_depth})"
+        );
+        assert!(
+            (tail_age - post_age).abs() <= 16.7,
+            "#1161: the deep hold must STICK — the tail ({tail_age:.1} ms) must not collapse back \
+             toward the arrival edge from the post-rise depth ({post_age:.1} ms)"
+        );
+    }
+
 }
