@@ -116,6 +116,20 @@ pub const RETIRE_OCCUPANCY_MIN_PERCENT: u64 = 95;
 /// (not 60.0) so ordinary sub-frame jitter on a genuine 60.00 card never trips it.
 pub const RETIRE_MIN_TAKT_INTERVAL_NS: u64 = 1_000_000_000 * 10 / 603;
 
+/// (#1167 v4) The over-EMA-interval threshold ABOVE which the card is "sustained UNDER-rate": the
+/// mirror of [`RETIRE_MIN_TAKT_INTERVAL_NS`] on the slow side. `1e9 / 59.8` ns (~16.722 ms). A
+/// capture-takt EMA ABOVE this means the grabber is genuinely capturing below 60 (the sick
+/// ShadowCast's sub-60 wander to 57.9–59.7), which is what arms the #1167 v4 empty-queue
+/// last-frame repeat. A POSITIVE under-rate signal is required (not merely `!sustained_over_rate`):
+/// a legacy caller that disables the takt EMA (`capture_mono_ns == 0` → `takt_ema == 0`) reads
+/// `!sustained_over_rate` as TRUE even at an over-rate content pattern, so keying the fill on that
+/// would fire it wrongly — this threshold (with `takt_ema != 0`) fires ONLY on a measured under-rate.
+/// At 59.8 (not 60.0) so ordinary sub-frame jitter on a genuine 60.00 card (EMA ~16.667 ms) never
+/// trips it, symmetric to the 60.3 over-rate margin; a deeper collapse (< ~20 fps, every interval
+/// over [`TAKT_GAP_EXCLUDE_NS`]) resets the EMA to 0 and is deliberately NOT filled (a dead leg
+/// must look down). Integer form to keep it a plain `const`.
+pub const STARVATION_MIN_TAKT_INTERVAL_NS: u64 = 1_000_000_000 * 10 / 598;
+
 /// (#1145 v2) Right-shift for the integer EMA that smooths the capture takt: `new = old + ((sample
 /// - old) >> SHIFT)`. `8` gives a ~2^8 = 256-frame (~4 s at 60 fps) time constant — long enough to
 /// integrate out per-frame V4L2 dequeue jitter into the true sustained takt, short enough that a
@@ -208,6 +222,34 @@ pub const CONVERGE_SKIP_MIN_GAP_INTERVALS: u64 = 30;
 /// engages once a real interval of grid lag has built up (off-rig: `2` reliably prevents the
 /// creep→FastDrain burst where `3` let a burst slip through).
 pub const SHALLOW_DRAIN_LAG_MIN: u64 = 2;
+
+// ── (#1167 v4) bounded last-frame REPEAT on empty-queue STARVATION ────────────────────────────
+
+/// (#1167 v4) The largest number of CONSECUTIVE last-frame repeats the gate emits to fill
+/// empty-queue 60fps slots before it gives up and lets the slot skip (the honest #131 resync). The
+/// whole v2/v3 fill machinery runs inside [`crate::dupe_decimation::DecimationGate::poll`], which
+/// fires ONCE PER CAPTURED FRAME — so when the grabber captures BELOW 60 fps (the sick-ShadowCast
+/// wander dips to 57.9) fewer than 60 polls happen per second and there is nothing to fill the empty
+/// boundaries with. `poll` instead reports up to this many last-frame repeats (re-emit the current
+/// GOOD frame — never corrupted content) for the boundaries an empty-queue dip left unfilled, so emit
+/// holds ~60 in BOTH wander directions. Bounded, and the count is CONSECUTIVE (reset by ANY on-time
+/// capture, see [`crate::dupe_decimation::DecimationGate::poll`]): a source that keeps pace (up to the
+/// mild-wander band, e.g. 57.9 fps — its drift crosses a boundary only ~2×/s, isolated, with on-time
+/// frames between that reset the count) is fully filled. The cap's EXPOSURE reach is precise: it only
+/// bites when EVERY poll is ≥1 interval late so no on-time capture ever resets it — i.e. ≤~30 fps
+/// (a genuinely dead/half-dead leg), which then under-runs and stays visible to #666 / #1133
+/// leg-health. It does NOT by itself expose a moderate SUSTAINED under-rate (~31–56 fps, which has
+/// occasional on-time resets and IS filled to 60 on the emit side); that band is caught by the
+/// capture-rate health guards (#656/#717/#971 self-heal, which read the SAME takt EMA on the capture
+/// side) — see `.claude/rules/self-heal-frozen-leg-attribution.md`. A FROZEN source delivers dupes
+/// (`Emit{copy:true}`), which the `!copy` gate excludes outright → 0 repeats → under-runs regardless.
+/// So a dead/frozen camera always looks down; the cap's job is bounding a burst + killing an infinite
+/// freeze-loop, not classifying every under-rate. `4`: ≥3 (the ticket's floor),
+/// comfortably above a healthy 57.9 fps wobble's isolated single-slot repeats (with margin for a
+/// brief multi-interval stumble), and ≤ the #131 resync catch-up bound
+/// ([`crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS`] = 8) so a capped-out starvation hands
+/// off cleanly to the honest resync-skip. Calibration value; the live E2E re-measures it.
+pub const STARVATION_REPEAT_MAX: u64 = 4;
 
 /// (#1145 v2) The queue-residence depth of a captured frame, in whole emit intervals: how long the
 /// frame sat between its CAPTURE instant (`capture_mono_ns`, the V4L2 buffer's `CLOCK_MONOTONIC`

@@ -1198,109 +1198,129 @@ async fn run_capture_loop(
                 // caps the emit rate; the bounded ring back-pressures (never drops) → the burn id
                 // ↔ emitted-frame mapping stays strictly 1:1. When the burn is OFF (production /
                 // non-burn), control falls through to the verbatim zero-copy send below.
-                #[cfg(feature = "probe")]
-                if let (Some(ring), Some(run_id)) = (burn_ring.as_ref(), burn_run_id) {
-                    // #279 FIX 3 — the NDI sender lives on the burn thread, so EVERY emitted frame
-                    // must route through the ring. The QR is rendered ONLY for YUYV (the burner
-                    // assumes that layout); a v4l2 format substitution yields a non-YUYV frame that
-                    // is sent UNBURNED (passthrough) — never dropped, so a substitution can't kill
-                    // the cam1 feed (restores the pre-#275b `_ => data` graceful degradation).
-                    let fourcc = info.fourcc.str().unwrap_or("");
-                    let render_qr = camera_box::probe::genlock::burn_should_render_qr(fourcc);
-                    if !render_qr {
-                        tracing::warn!(
-                            "#275b burn active but frame fourcc is {} (not YUYV) — emitting UNBURNED passthrough (cam1 should always be YUYV)",
-                            if fourcc.is_empty() { "?" } else { fourcc }
-                        );
-                    }
-                    let frame_id = burn_ids.next_id();
-                    // #280 — copy the mmap frame into a RECYCLED pool buffer (reused, or allocated
-                    // only when the free list is empty) instead of a fresh per-frame `to_vec`. The
-                    // mmap is valid only inside this callback, so a copy is still required to cross
-                    // the thread boundary — but a reused buffer keeps its ~4MB capacity so the
-                    // copy does not reallocate. clear()+extend reuses that capacity in place.
-                    let mut buf = burn_pool.take();
-                    buf.clear();
-                    buf.extend_from_slice(data);
-                    let job = BurnJob {
-                        buf,
-                        info,
-                        run_id,
-                        frame_id,
-                        // #286 BUG SITE #1 FIX — the emitted frame's genlock NDI timecode now
-                        // keys on the real CAPTURE instant (`capture_realtime_100ns`), not the
-                        // arrival-based `boundary_timecode_100ns(send_fps)` this used to call.
-                        // `gen_ts_ns` stays arrival (`emit_wall_ns`) unchanged — it feeds the
-                        // #624/#625 latency measurement, which is out of scope for this fix.
-                        gen_ts_ns: emit_wall_ns,
-                        emit_timecode_100ns: camera_box::genlock_stamp::genlock_emit_timecode_100ns(
-                            capture_realtime_100ns,
-                            // `emit_wall_ns` is nanoseconds; this parameter is 100ns units.
-                            emit_wall_ns / 100,
-                            send_fps as i64,
-                        ),
-                        render_qr,
-                    };
-                    // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
-                    // emit ONLY on success: any Err means the frame was NOT sent, so it must not
-                    // inflate the emitted-fps stat. #279 FIX 2 — a full-ring submit is
-                    // interruptible on shutdown (ShutdownInterrupted), distinct from the burn
-                    // thread being gone (Closed).
-                    // On either Err the un-sent job (and its #280 pooled buffer) is dropped/freed
-                    // — both are TERMINAL paths (shutdown signalled, or the burn thread is gone),
-                    // never steady state, so not returning the buffer to the pool cannot leak.
-                    match ring.submit(job) {
-                        // #944 — a queued burn job is the strongest emit-liveness signal available
-                        // on this thread (the burn thread performs the actual NDI send asynchronously).
-                        Ok(()) => {
-                            emit_count += 1;
-                            frame_dispatched = true;
+                // (#1167 v4) ONE send path (burn or production) for BOTH the current frame and the
+                // empty-queue starvation repeats below, parameterized by the genlock emit timecode.
+                // Factored so a repeat and the current frame can never drift in how they send. Every
+                // capture of `emit_one` is disjoint from the per-poll `decimation_gate` borrow above.
+                let mut emit_one = |emit_timecode_100ns: i64| {
+                    // #275b ASYNC BURN PATH (test mode: probe + CAMERA_BOX_BURN_RUN_ID).
+                    #[cfg(feature = "probe")]
+                    if let (Some(ring), Some(run_id)) = (burn_ring.as_ref(), burn_run_id) {
+                        // #279 FIX 3 — the NDI sender lives on the burn thread, so EVERY emitted frame
+                        // must route through the ring. The QR is rendered ONLY for YUYV (the burner
+                        // assumes that layout); a v4l2 format substitution yields a non-YUYV frame that
+                        // is sent UNBURNED (passthrough) — never dropped, so a substitution can't kill
+                        // the cam1 feed (restores the pre-#275b `_ => data` graceful degradation).
+                        let fourcc = info.fourcc.str().unwrap_or("");
+                        let render_qr = camera_box::probe::genlock::burn_should_render_qr(fourcc);
+                        if !render_qr {
+                            tracing::warn!(
+                                "#275b burn active but frame fourcc is {} (not YUYV) — emitting UNBURNED passthrough (cam1 should always be YUYV)",
+                                if fourcc.is_empty() { "?" } else { fourcc }
+                            );
                         }
-                        Err(SubmitError::ShutdownInterrupted(_)) => tracing::info!(
-                            "#275b cam1-burn submit interrupted by shutdown — frame_id={} not sent",
-                            frame_id
-                        ),
-                        Err(SubmitError::Closed(_)) => tracing::error!(
-                            "#275b cam1-burn ring closed — burn thread gone (frame_id={} run_id={} not sent)",
-                            frame_id, run_id
-                        ),
+                        let frame_id = burn_ids.next_id();
+                        // #280 — copy the mmap frame into a RECYCLED pool buffer (reused, or allocated
+                        // only when the free list is empty) instead of a fresh per-frame `to_vec`. The
+                        // mmap is valid only inside this callback, so a copy is still required to cross
+                        // the thread boundary — but a reused buffer keeps its ~4MB capacity so the
+                        // copy does not reallocate. clear()+extend reuses that capacity in place.
+                        let mut buf = burn_pool.take();
+                        buf.clear();
+                        buf.extend_from_slice(data);
+                        let job = BurnJob {
+                            buf,
+                            info,
+                            run_id,
+                            frame_id,
+                            // #286 BUG SITE #1 FIX — the emitted frame's genlock NDI timecode keys on
+                            // the real CAPTURE instant (`capture_realtime_100ns`), not an arrival-based
+                            // boundary. `gen_ts_ns` stays arrival (`emit_wall_ns`) unchanged — it feeds
+                            // the #624/#625 latency measurement. (#1167 v4) `emit_timecode_100ns` is
+                            // the per-frame boundary timecode (the current frame, or a repeat's own
+                            // earlier boundary), so every send lands in its own downstream FIFO slot.
+                            gen_ts_ns: emit_wall_ns,
+                            emit_timecode_100ns,
+                            render_qr,
+                        };
+                        // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
+                        // emit ONLY on success: any Err means the frame was NOT sent, so it must not
+                        // inflate the emitted-fps stat. #279 FIX 2 — a full-ring submit is
+                        // interruptible on shutdown (ShutdownInterrupted), distinct from the burn
+                        // thread being gone (Closed).
+                        // On either Err the un-sent job (and its #280 pooled buffer) is dropped/freed
+                        // — both are TERMINAL paths (shutdown signalled, or the burn thread is gone),
+                        // never steady state, so not returning the buffer to the pool cannot leak.
+                        match ring.submit(job) {
+                            // #944 — a queued burn job is the strongest emit-liveness signal available
+                            // on this thread (the burn thread performs the actual NDI send asynchronously).
+                            Ok(()) => {
+                                emit_count += 1;
+                                frame_dispatched = true;
+                            }
+                            Err(SubmitError::ShutdownInterrupted(_)) => tracing::info!(
+                                "#275b cam1-burn submit interrupted by shutdown — frame_id={} not sent",
+                                frame_id
+                            ),
+                            Err(SubmitError::Closed(_)) => tracing::error!(
+                                "#275b cam1-burn ring closed — burn thread gone (frame_id={} run_id={} not sent)",
+                                frame_id, run_id
+                            ),
+                        }
+                        tee_grab(data);
+                        return; // handed to the burn thread; the sender lives there now
                     }
-                    tee_grab(data);
-                    return; // handed to the burn thread; the sender lives there now
-                }
 
-                // PRODUCTION / non-burn path: zero-copy direct send (unchanged). Under the probe
-                // build the sender lives in `capture_sender`; it moves to the burn thread ONLY when
-                // the burn is active, and then the handoff above handles every frame and returns —
-                // so this path is reached only when the burn is inactive (`capture_sender` = Some).
-                #[cfg(feature = "probe")]
-                let sender = capture_sender
-                    .as_mut()
-                    .expect("capture_sender is present whenever the burn is inactive");
-                // #286 BUG SITE #2 FIX — pass the CAPTURE-based genlock timecode through to
-                // send_frame_zero_copy so it stamps the real capture instant (under external
-                // pacing) instead of re-deriving an arrival-based boundary at send time.
+                    // PRODUCTION / non-burn path: zero-copy direct send. Under the probe build the
+                    // sender lives in `capture_sender`; it moves to the burn thread ONLY when the burn
+                    // is active, and then the handoff above handles every frame and returns — so this
+                    // path is reached only when the burn is inactive (`capture_sender` = Some).
+                    #[cfg(feature = "probe")]
+                    let sender = capture_sender
+                        .as_mut()
+                        .expect("capture_sender is present whenever the burn is inactive");
+                    // #286 BUG SITE #2 FIX — pass the CAPTURE-based genlock timecode through so
+                    // send_frame_zero_copy stamps the real capture instant (or the repeat's own
+                    // boundary), never re-deriving an arrival-based boundary at send time.
+                    match sender.send_frame_zero_copy(data, info, emit_timecode_100ns) {
+                        // #944 — only a CONFIRMED send proves the NDI output is live; a send that errors
+                        // is itself a silent-frozen mode (nothing reaches NDI while every health signal
+                        // stays green), so it must NOT advance the emit-liveness heartbeat.
+                        Ok(()) => frame_dispatched = true,
+                        Err(e) => tracing::error!("Failed to send frame: {}", e),
+                    }
+                    emit_count += 1; // reached only when the frame passed the gate
+                    tee_grab(data);
+                    // #792 — tee the emitted frame to the optional 30p publisher LAST (one bounded
+                    // memcpy + try_send, drop-on-full: never blocks this 60p hot path). Production
+                    // path only — the probe burn path above returns before reaching here.
+                    if let Some(t) = publish_30p_tee.as_mut() {
+                        t.tee(data, info, emit_timecode_100ns);
+                    }
+                };
+
+                // The current frame's CAPTURE-based genlock timecode (the base boundary).
                 let capture_timecode_100ns = camera_box::genlock_stamp::genlock_emit_timecode_100ns(
                     capture_realtime_100ns,
                     // `emit_wall_ns` is nanoseconds; this parameter is 100ns units.
                     emit_wall_ns / 100,
                     send_fps as i64,
                 );
-                match sender.send_frame_zero_copy(data, info, capture_timecode_100ns) {
-                    // #944 — only a CONFIRMED send proves the NDI output is live; a send that errors
-                    // is itself a silent-frozen mode (nothing reaches NDI while every health signal
-                    // stays green), so it must NOT advance the emit-liveness heartbeat.
-                    Ok(()) => frame_dispatched = true,
-                    Err(e) => tracing::error!("Failed to send frame: {}", e),
+                // (#1167 v4) An UNDER-rate dip left `starvation_repeats` empty-queue 60fps boundaries
+                // unfilled (poll reported them, capped + gated on a measured sustained under-rate). Fill
+                // each by re-emitting the CURRENT good frame (it passed process_frame's corruption
+                // check — never corrupted content), EARLIEST slot first with its own boundary timecode,
+                // THEN emit the current frame. `0` in every healthy / over-rate window, so the loop is a
+                // no-op and the emit is byte-identical to the pre-v4 single send there.
+                let starvation_repeats = decimation_gate.last_poll_starvation_repeats();
+                for j in (1..=starvation_repeats).rev() {
+                    emit_one(camera_box::genlock_pacing::starvation_repeat_timecode_100ns(
+                        capture_timecode_100ns,
+                        j,
+                        send_fps as i64,
+                    ));
                 }
-                emit_count += 1; // reached only when the frame passed the gate
-                tee_grab(data);
-                // #792 — tee the emitted frame to the optional 30p publisher LAST (one bounded
-                // memcpy + try_send, drop-on-full: never blocks this 60p hot path). Production
-                // path only — the probe burn path above returns before reaching here.
-                if let Some(t) = publish_30p_tee.as_mut() {
-                    t.tee(data, info, capture_timecode_100ns);
-                }
+                emit_one(capture_timecode_100ns);
             });
 
             // #945 — heartbeat: `capture.process_frame(...)` above just RETURNED (Ok or Err,
@@ -1410,6 +1430,9 @@ async fn run_capture_loop(
                                 drained,
                                 fast_drained,
                             ) = decimation_gate.take_shed_counts();
+                            // (#1167 v4) the starvation last-frame-repeat count is drained SEPARATELY
+                            // (the 6-tuple above is byte-frozen) and appended to the summary segment.
+                            let starvation_repeats = decimation_gate.take_starvation_repeats();
                             tracing::info!(
                                 "{}",
                                 camera_box::dupe_decimation::dupe_shed_summary(
@@ -1419,6 +1442,7 @@ async fn run_capture_loop(
                                     retired,
                                     drained,
                                     fast_drained,
+                                    starvation_repeats,
                                     5
                                 )
                             );

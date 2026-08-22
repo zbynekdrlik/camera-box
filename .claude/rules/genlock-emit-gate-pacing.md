@@ -455,6 +455,91 @@ only `poll`'s application changes (two new `shed.rs` consts + one `gate.rs` fiel
 - **Supervisor's live rig step:** confirm the `[4i/8align]` cam1 offset holds ±1 across the last
   trilogy of rounds and the per-5s `Streaming:` windows stay 299-300 (no 293 dips) on cam1.
 
+## #1167 v4 (2026-08-22) — bounded last-frame REPEAT on empty-queue STARVATION (the THIRTEENTH piece)
+
+v2/v3 fixed the OVER-rate direction (grabber >60). But the sick ShadowCast grabber's rate WANDERS
+across 60 (live 57.9–63.6 fps). In an UNDER-rate window the whole v2/v3 fill machinery — which runs
+INSIDE `poll`, fired ONCE PER CAPTURED FRAME (`main.rs` polls inside `capture.process_frame`, whose
+blocking `self.stream.next()?` has NO grid timer) — has NOTHING to fill with: it only CONVERTS a
+captured frame's shed into a copy; it cannot fabricate an emit when NO capture arrived. Fewer than 60
+polls/s ⇒ fewer than 60 emits. Each empty-queue boundary (`queue_had_frame==false`, the loop genuinely
+waited) goes unfilled; grid lag creeps until `genlock_emit_gate`'s #131 resync (`lag>8 &&
+!queue_had_frame`) skips it → emit under-runs. Reproduced off-rig (REAL `poll`, #557 scratch, unique
+captures, empty queue): **57.9fps → 290/300 sent, 36 #707 skips/20s, ZERO dupe-decimation events**
+(`sustained_over_rate` FALSE at 57.9: takt 17.27ms > `RETIRE_MIN_TAKT_INTERVAL_NS` 16.58ms) — a
+DIFFERENT regime from v2/v3. The #1145 copy valve can't help (it needs a DUPE arriving to convert; an
+under-CAPTURING source delivers FEWER all-unique frames, not extra dupes).
+
+The fix — FILL empty-queue slots by REPEATING the last frame, bounded, in `poll`'s `Emit` arm (NO new
+`ShedAction`, the pure `dupe_shed_action` DECISION byte-UNCHANGED — only the `Emit` application + two
+new fields + a const change):
+- **Gated on a POSITIVE `sustained_under_rate()`, NOT `!sustained_over_rate`.** `takt_ema != 0 &&
+  takt_ema > STARVATION_MIN_TAKT_INTERVAL_NS` (= `1e9*10/598` = 1e9/59.8 ≈ 16.722ms — the slow-side
+  mirror of the 60.3 over-rate threshold). The `takt_ema != 0` requirement is LOAD-BEARING: a caller
+  that disables the takt EMA (`capture_mono_ns==0` → `takt_ema==0`) reads `!sustained_over_rate` as
+  TRUE even at an over-rate content pattern, so keying the fill on that fired v4 wrongly and broke 5
+  legacy over-rate/starved tests (they pass mono=0). A positive under-rate signal fires ONLY on a
+  measured under-rate; over/under-rate are mutually exclusive (STARVATION_MIN 16.722 > RETIRE_MIN
+  16.584), and a healthy 60.0 card (EMA ~16.667) reads FALSE for both.
+- **Full gate (Emit arm):** `!copy && !queue_had_frame && sustained_under_rate() &&
+  !converging_deep_backlog && 1 <= lag_intervals <= GENLOCK_MAX_CATCHUP_INTERVALS`. `poll` reports
+  `min(lag, STARVATION_REPEAT_MAX - consecutive_starvation_repeats)` repeats via
+  `last_poll_starvation_repeats()` and advances `next_boundary = candidate_next + repeats*interval`
+  (capped so it never overshoots `now`; the `lag<=8` gate guarantees `genlock_emit_gate` did NOT
+  resync, so `candidate_next == boundary+interval`).
+- **FORWARD-FILL (re-emit the CURRENT good frame), NOT a saved last-good buffer.** The dispatch
+  SUGGESTED a saved buffer; that would add a **~4MB memcpy PER FRAME** to the carefully-zero-copy
+  production hot path (the whole point of #279/#280) — a jitter/throughput regression the #899
+  RT-isolation work cannot afford. The current frame passed `process_frame`'s V4L2_BUF_FLAG_ERROR
+  check before the callback (GOOD bytes — the "never emit corrupted content" constraint holds), and
+  showing it ≤`STARVATION_REPEAT_MAX` frames early for a past slot vs a saved previous frame is a
+  ≤4-frame difference the strih genlock FIFO re-times away, IDENTICAL in the id-contiguity
+  ([4i/8align]) + uniformity metrics that gate this.
+- **`main.rs` wiring:** the send path (cfg-split burn/production) is factored into a nested
+  `emit_one(emit_timecode_100ns)` FnMut closure (mirroring the existing `tee_grab` nested-closure
+  pattern); the loop `for j in (1..=starvation_repeats).rev()` emits the current frame at each
+  repeat's own boundary timecode (`genlock_pacing::starvation_repeat_timecode_100ns(base, j, fps)` =
+  `base − j*(10_000_000/fps)`, a pure Tier-0 helper — distinct per-slot timecodes are REQUIRED or the
+  FIFO collapses the repeats into one slot), then `emit_one(capture_timecode_100ns)` for the current.
+  0 repeats in every healthy/over-rate window ⇒ the loop is a no-op, byte-identical to the pre-v4
+  single send.
+- **BOUNDED by `STARVATION_REPEAT_MAX`=4 CONSECUTIVE repeats, reset by ANY on-time capture**
+  (`lag_intervals==0`). A live-but-slow 57.9fps grabber crosses a boundary only ~2×/s with ~27 on-time
+  frames between (each resetting the counter) → never approaches the cap → fully filled. **The cap's
+  EXPOSURE reach is precise (review 🔵):** it bites only when EVERY poll is ≥1 interval late so no
+  on-time capture ever resets it — i.e. ≤~30fps (a genuinely dead/half-dead leg), which then under-runs
+  → visible to #666. It does NOT by itself expose a moderate SUSTAINED under-rate (~31–56fps, which has
+  occasional on-time resets and IS filled to 60 on the emit side); that band's exposure is the
+  capture-rate health guards (#656/#717/#971 self-heal, reading the SAME takt EMA on the CAPTURE side —
+  `.claude/rules/self-heal-frozen-leg-attribution.md`). A FROZEN source delivers DUPES →
+  `Emit{copy:true}` → the `!copy` gate excludes it → 0 repeats → under-runs regardless. So **a
+  dead/frozen camera still looks down** (the ticket's hard constraint); the cap's job is bounding a
+  burst + killing an infinite freeze-loop, not classifying every under-rate. Verified: frozen source 0
+  repeats; 30fps stays exposed under 60.
+- **DECOUPLED from v2/v3** (the dispatch's "a repeat is NOT a convergence skip"): a SEPARATE counter
+  (`DupeShedLog.starvation_repeats`, drained via `take_starvation_repeats()` — the byte-frozen 6-tuple
+  `take_shed_counts` is UNCHANGED), a SEPARATE under-rate gate, and it NEVER touches the v3
+  `last_converge_skip_mono_ns` pace budget or the retire/drain/fast_drain counters. Folded into
+  `last_poll_intentional_extra_advance()` (= `fast_drain_extra + starvation_repeats`, mutually
+  exclusive) so a FILLED slot is deducted from the #707 boundary-skip diagnostic (a fill is not a
+  sick-leg SKIP). APPENDED a summary segment (`{n} starvation last-frame repeats (#1167 v4
+  empty-queue slot-fill)`) — existing substrings byte-frozen.
+- **Off-rig (real `poll`, #557 scratch):** 57.9fps 290→300/window, 59.7 299→300, 0 net #707 skips;
+  over-rate 63.6 + healthy 60.0 byte-inert; frozen source 0 repeats; 30fps half-rate exposed under 60.
+  83/83 module tests pass; `cargo fmt --all --check` clean. **The `#1167 (TENTH piece)` corrupted
+  make-up stays DORMANT** (its own 2026-08-22 note already records it does not fire live — v4 is the
+  real under-rate fix, that was the over-rate corruption case).
+- **Uniformity honesty:** at 57.9fps the repeat rate is ~11/window (3.5% dups → uniformity ~0.965,
+  margin +0.015 over the 0.95 floor). The CONSECUTIVE cap bounds a burst + prevents dead-leg masking,
+  NOT a moderate SUSTAINED under-rate (out of the wander scenario — a deep sustained deficit is caught
+  by the existing uniformity / #666 gates, not papered over).
+- **main.rs is UNVERIFIABLE locally** (Tier-0 #557 blocks all cargo compile) — the `emit_one` closure
+  refactor's type/borrow correctness is CI's first check; `cargo fmt --all --check` (which parses
+  main.rs) is the only local net and was clean.
+- **Supervisor's live rig step:** confirm the per-5s `Streaming:` windows hold 299-300 on cam1 in an
+  UNDER-rate window (grabber < 60) with `starvation last-frame repeats` > 0, and `[4i/8align]` cam1
+  offset holds ±1 across the wander in BOTH directions.
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a
