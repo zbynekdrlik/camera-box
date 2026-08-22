@@ -2747,7 +2747,7 @@ fn run_over_rate_stall_sim(
     let mut cap_time = vec![0u64; n as usize];
     for i in 1..n as usize {
         let mut gap = cap_int;
-        if (i as u64) % stall_period_frames == 0 {
+        if (i as u64).is_multiple_of(stall_period_frames) {
             gap += stall_ns;
         }
         cap_time[i] = cap_time[i - 1] + gap;
