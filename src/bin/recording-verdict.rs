@@ -11081,6 +11081,78 @@ mod tests {
         );
     }
 
+    /// #1169 THIRD SEAM (owner, 2026-08-22) — the cam-leg V4L2 capture-drop counter
+    /// (`full_chain.loss.cam2_*`, the last binding `all_pass &= …` red) gets the SAME loud
+    /// singleton band the two prior seams gave the presented + burn-delivery layers. A
+    /// `v4l2_dropped` count WITHIN `CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` (=2) is an UPSTREAM
+    /// camera-leg buffer drop the issue-1167 emit-fill absorbs by design (the first full verdict
+    /// of the series showed exactly `v4l2_dropped:2` over `frames_captured:35961` = 0.0056%, while
+    /// `full_chain.zero_loss` + `all_cambox_continuity.overall_pass` were already green) — so it
+    /// must PASS `overall_pass` with `zero_loss=true` + a LOUD `note`, NEVER a silent green. This
+    /// is the exact `gate-allowance-restore-red-green.md` shape, third instance; issue 1169 stays
+    /// OPEN as the re-tighten trail (the DEFAULT flips back to 0 once a zero-singleton green run
+    /// holds). Uses the SAME TOP-LEVEL `--cam1-capture-stats` fixture path as the #861 test above.
+    #[test]
+    fn camleg_v4l2_singleton_band_absorbs_two_drops_into_overall_pass_1169() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+
+        let dir = std::env::temp_dir().join(format!("cb-1169-camleg-band-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stats_path = dir.join("cam1-capture-stats.txt");
+        // exactly TWO cam-leg V4L2 capture drops — the sanctioned singleton band (<=2).
+        std::fs::write(&stats_path, "v4l2_dropped=2\nframes_captured=35961\n").unwrap();
+
+        let v = build_all_cambox_av_sync_fixture_with_ack(
+            "camleg-band-1169",
+            cameras,
+            Some(av),
+            500.0,
+            "",
+            Some(&stats_path),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The band ABSORBS the 2 drops: the node reads zero_loss=true (within the band) ...
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["zero_loss"],
+            serde_json::json!(true),
+            "#1169: 2 V4L2 capture drops are WITHIN the singleton band ⇒ zero_loss stays true: {v}"
+        );
+        // ... yet it is LOUD, never a silent green: the band was CONSUMED + carries the note ...
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["camleg_singleton_band_consumed"],
+            serde_json::json!(true),
+            "#1169: a within-band NON-zero drop count must be marked as CONSUMED (loud): {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["v4l2_dropped"],
+            serde_json::json!(2),
+            "#1169: the raw v4l2_dropped count stays honestly reported: {v}"
+        );
+        let note = v["full_chain"]["loss"]["cam2_cam1"]["note"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            note.contains("cam-leg V4L2 singleton band consumed"),
+            "#1169: the consumed band must carry the loud named note: {v}"
+        );
+        // ... and the whole run PASSES (this was the LAST binding red).
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(true),
+            "#1169: 2 capture-leg drops within the band must NOT fail overall_pass: {v}"
+        );
+    }
+
     /// #624 deliverable 4 / #312 item 2 PR B (still true post-#861) — a PASSING av_sync gate
     /// (every one of the 6 CAMERA_UNDER_TEST_NODES measured cleanly within the tolerance of
     /// `--av-expected-ms`) must NOT change the run's overall verdict vs the identical run with no
