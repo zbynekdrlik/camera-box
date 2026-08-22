@@ -14,9 +14,13 @@ paths:
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and active TODAY (default `cam2 cam3` since #1134, 2026-08-19 — cam1 retired, its USB
-grabber hardware-faulted #1110/#1130; cam1/cam4/cam5/cam6/cam7 retired but fully resolvable — see the
-header comment in `camera-set.sh`). **Every place that needs "the list of
+installed and active TODAY (default `cam2 cam3` — cam1 was retired #1134 2026-08-19, briefly returned
+#1130 the same day, then RE-RETIRED for real 2026-08-22 #1110 because its ShadowCast USB grabber is
+hardware-defective beyond software compensation (chronic over-rate, constant corruption, USB re-auth
+does not cure); cam1/cam4/cam5/cam6/cam7 retired but fully resolvable — see the
+header comment in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the on-air alignment superset,
+default `cam2 cam3 cam4`) dropped cam1 in the SAME #1110 retirement — a dead grabber cannot go on-air
+to be aligned. **Every place that needs "the list of
 cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
 literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
 fps, strih scene/route) stay fully resolvable forever (`camera_resolve`/`camera_strih_route` never
