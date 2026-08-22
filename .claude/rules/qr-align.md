@@ -225,3 +225,57 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
   pure/monkeypatched — `tests/python/test_qr_align_pinapply_1161.py`. The `qr-align.sh` two-phase
   reset+fetch is best-effort bash (verified by `bash -n` + shellcheck + a 3-case reset/arg smoke; the
   live reset+fetch is supervisor-verified on the rig).
+
+## Three outcomes for a STABLE tail — WITHIN-BUDGET aligns, UNSTABLE/degraded FAILs, BUDGET-BOUND soft-releases (#1161 final lane / issue 1168)
+
+Once the tail is proven STABLE and within the 66 ms spread sanity, the floor-aware plan has THREE
+outcomes, not two. The split lives in `align()` via the pure `floor_aware_partition(arrival_floors,
+deltas, floor_ms, max_abs_latency_ms, current_pins) -> (plan, over_budget, missing)` (the shared core
+`floor_aware_pins` also delegates to — one copy of the loop, no mirror-drift):
+
+1. **WITHIN-BUDGET correctable — APPLY + verify (byte-unchanged).** Every faster camera's target
+   `arrival_floor_i + delta_i` ≤ the 94 ms ceiling → the plan is applied, re-measured, and PASSes iff
+   parity holds. The pre-#1161-final behaviour, untouched.
+2. **UNSTABLE / degraded / HOLD-INERT — FAIL (byte-unchanged).** A never-stabilizing tail, a spread
+   above the 66 ms sanity, a faster camera missing its arrival floor, or a within-budget pin that is
+   applied but whose frame does NOT move (`floor_aware_stuck_abort_reason` / `hold_inert_abort_reason`)
+   → the run ABORTS with the per-camera named reason. Requirement 4: **HOLD-INERT stays a FAIL** — a
+   real defect is NEVER folded into budget-bound.
+3. **BUDGET-BOUND — SOFT-RELEASE, apply NONE, exit 0 (NEW).** The tail is STABLE and sanity-clean, but
+   ≥1 faster camera's target exceeds the 94 ms ceiling — the constant per-box arrival-floor offset
+   whose correction is physically budget-impossible (a pin above the ceiling is forbidden by the
+   deep-pin doctrine). `align()` sets `status="budget-bound"`, applies NOTHING (the two-phase reset
+   already floored the align set), persists `over_budget` (per-camera `floor/delta/target/bound`) +
+   `report_only_residual_ms` into the result JSON, emits the loud `budget_bound_report()` marker
+   (`arrival floor X + delta Y = Z > bound 94 … REPORT-ONLY RESIDUAL: cross-camera spread ~N ms
+   survives — tracked in issue 1168`), and returns; `main()` exits 0 so the E2E proceeds. Basis: the
+   supervisor's judgment + the owner's 2026-07-31 revision ("zelený gate najprv, pritvrdenie cez
+   tickety; zakázané je len TICHÉ obídenie") — a stable, budget-impossible tail PASSES with a LOUD
+   report-only residual; instability keeps FAILING.
+
+**Why APPLY NONE, not a within-budget partial apply.** The existing verify model requires FULL
+cross-camera parity (`post_ok` over every camera), which can never hold while the over-budget camera
+stays at its floor — so a partial apply cannot be certified by it without new verify logic and a live
+re-measure round, and would risk mis-attributing a genuine hold-inert defect as budget-bound. Apply-
+none is the floor-3 doctrine's honest baseline (every camera at its natural floor), needs no new
+verify, cannot mask a hold-inert defect, and the reported residual IS exactly the per-box floor spread
+issue 1168 reduces. `floor_aware_partition` still clamps the over-budget cameras to the floor (a pin
+we cannot afford is never written up), so the pure plan is ready if a future ticket ever wants partial
+apply.
+
+**Residual visibility.** The align step's channel into the per-run report is its RUN LOG: the result
+JSON (stdout, now carrying `budget_bound`/`over_budget`/`report_only_residual_ms`) + the loud
+`budget_bound_report()` stderr marker — the same greppable-run-log-marker convention
+`IMAG-LEG-NOT-VERIFIED:` uses for a report-only preflight state. The exit-code contract (0 = success)
+flows unchanged through `qr-align.sh` and `recording-e2e.sh`, so neither needs a change (folding the
+residual into the composed Discord report TEXT would need the report composer / verdict JSON — a
+separate report lane).
+
+**Re-tighten (issue 1168).** When the per-box arrival floors are reduced so the max cross-camera floor
+delta drops under the correction budget (94 − floor), REVERT this soft-release: turn the BUDGET-BOUND
+branch back into a hard-FAIL on unalignment. Tracked there.
+
+Tier-0: `floor_aware_partition`, the budget-bound `align()` flow (FIFO-modelling barrier), and the
+byte-unchanged within-budget/unstable/hold-inert regression guards are pytest-verified with no rig
+(`tests/python/test_qr_align_pinapply_1161.py`); the live soft-release is the supervisor's E2E
+acceptance instrument.
