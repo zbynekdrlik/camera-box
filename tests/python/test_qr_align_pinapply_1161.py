@@ -383,7 +383,10 @@ class TestFloorAwarePinsSecondRound:
         msg = qa.floor_aware_stuck_abort_reason(
             {"NDI cam1": 66, "NDI cam2": 5}, {"NDI cam1": 49.0, "NDI cam2": 63.0},
             {"NDI cam1": 66, "NDI cam2": 5}, {"NDI cam1": 3.0}, floor_ms=5)
-        assert "NDI cam1" in msg and "NDI cam2" not in msg
+        # cam1 (66, above the runtime floor 5) is a RAISED-stuck source; cam2 (at the floor 5) is NOT
+        # named as raised (it appears only in the verbatim plan dump, never as a "pinned to" clause).
+        assert "'NDI cam1' pinned to 66 ms" in msg
+        assert "'NDI cam2' pinned to" not in msg
 
 
 class TestAlignSecondRound:
