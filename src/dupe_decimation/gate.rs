@@ -424,8 +424,7 @@ impl DecimationGate {
             && !queue_had_frame
             && self.sustained_under_rate()
             && !self.converging_deep_backlog
-            && lag_intervals >= 1
-            && lag_intervals <= crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS
+            && (1..=crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS).contains(&lag_intervals)
         {
             let budget = STARVATION_REPEAT_MAX.saturating_sub(self.consecutive_starvation_repeats);
             lag_intervals.min(budget)
@@ -912,6 +911,9 @@ impl DupeShedLog {
 /// window (while genlock decimation is active) so a live box shows the mechanism working —
 /// never suppressed on an all-zero window (a healthy card legitimately shows 0/0, which is the
 /// self-neutralizing behavior by design, not the mechanism being off).
+// A flat per-window counter-summary formatter — a params struct would add churn at every
+// call site (incl. the rustc scratch replicas) for zero clarity gain on plain u64 counters.
+#[allow(clippy::too_many_arguments)]
 pub fn dupe_shed_summary(
     dupe_shed: u64,
     blind_shed: u64,
