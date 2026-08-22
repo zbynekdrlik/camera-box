@@ -89,3 +89,42 @@ NOTE: this is a DIFFERENT seam from the segment-bar `<=1/<=1` singleton allowanc
 (`window_gate::segment_singleton_allowance_gates_overall_pass()`), which is issue 1169's FIRST
 seam. Both share the ticket and the re-tighten trail; this one is the full_chain `real_drops` path
 in `recording-verdict.rs`, that one is the per-segment copies/gaps path in `window_gate.rs`.
+
+## The pattern INVERTED, THIRD instance (issue 1169, cam-leg V4L2 capture-drop band `CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` 0 → 2)
+
+Issue 1169's THIRD and LAST seam gives the RAW cam-leg V4L2 capture-drop counter
+(`full_chain.loss.cam2_*.zero_loss` in `recording-verdict.rs`) the SAME loud singleton band. This
+was the last binding `all_pass &= …` red: the strict `capture_zero = v4l2_dropped == 0` fold
+(`all_pass &= capture_zero`) failed `overall_pass` on exactly `v4l2_dropped:2` over
+`frames_captured:35961` (0.0056%) while `full_chain.zero_loss` + `all_cambox_continuity` were
+already green. These raw drops are UPSTREAM camera-leg buffer drops (the kernel `sequence` gap
+`capture.rs` tracks) that the merged issue-1167 v2–v5 paced-trickle + FIFO emit-fill absorbs by
+design — a strict-zero bar on the RAW counter double-reds what the presented layer compensated.
+
+- **DEFAULT = 2** (`CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT`, env-overridable via
+  `CAMERA_BOX_CAMLEG_V4L2_DROP_ALLOWANCE`) — justified from the live data: healthy cam2/cam3
+  routinely log 0–2 capture-dropped per ~10-min run window. The fold became
+  `all_pass &= within_band` where `within_band = camleg_capture_band(v4l2_dropped, allowance)`
+  (a pure Tier-0-testable scalar fn returning `(within_band, band_consumed)`). A `<=2` count PASSES
+  with the node JSON carrying `zero_loss=true` + `camleg_singleton_band_consumed=true` + a loud
+  `note` ("cam-leg V4L2 singleton band consumed: N/2 — absorbed by the issue-1167 emit fill; issue
+  1169 re-tighten trail") + a `>>> ⚠ #1169 CAM-LEG V4L2 SINGLETON BAND` stderr line. `>2` still
+  FAILS unchanged (`zero_loss=false`, band NOT consumed).
+- **Re-tighten = the ONE constant flip back to 0**, landed once a zero-singleton green run holds
+  (issue 1168 floor reduction and/or the cam1-card swap). Dormant proof:
+  `re_tightening_the_camleg_v4l2_band_to_zero_restores_the_strict_bar` (an EXPLICIT
+  `camleg_capture_band(2, 0) == (false, false)`), the inverse of
+  `camleg_v4l2_singleton_band_absorbs_two_drops_into_overall_pass_1169`.
+- **Blast-radius:** the adjacent `#861` `zero_loss_capture_drop_still_fails_overall_pass_...` test
+  (fixture `v4l2_dropped=7`, deliberately WAY over the `<=2` band) stays a hard FAIL, but its
+  narrative comment referenced the old `all_pass &= capture_zero` fold — refreshed IN-BRANCH to
+  `all_pass &= within_band` (the adjacent-stale-comment norm; the ASSERTIONS were already correct).
+- **Downstream mirror:** the Python `scripts/e2e_discord_report.py` needed NO change — its
+  physical-fault blocker (`_blocking_failures` item 2) keys on `cam2_* zero_loss is False`, so a
+  band-consumed `zero_loss=true` auto-drops out of the blocker list, while `_stream_drop_total`
+  keeps counting the raw `v4l2_dropped` honestly. Verified against the sweep.
+
+This one is the RAW capture-leg counter path in `recording-verdict.rs`; distinct from seam 1
+(per-segment copies/gaps in `window_gate.rs`) and seam 2 (per-node `real_drops` delivery counter in
+`recording-verdict.rs`). All three share the ticket + the single re-tighten trail (issue 1169 stays
+OPEN until a zero-singleton green run flips every band back to 0).
