@@ -295,8 +295,8 @@ fn write_driver(
 /// parallelism power per .claude/rules/camera-active-set.md's "a default-active-set-proves-
 /// parallelism test can lose its power when the default shrinks"), so cam1 + cam2/painter +
 /// cam3 = 3 boxes total are contacted (cam4 stays excluded — issue 947, grabber wedges the
-/// capture leg). 3 boxes at a simulated ~300ms round-trip each: SEQUENTIAL would take
-/// >=900ms; PARALLEL must take well under that (bounded here at 600ms) — and all 3 boxes must
+/// capture leg). 3 boxes at a simulated ~300ms round-trip each: SEQUENTIAL would take at
+/// least 900ms; PARALLEL must take well under that (bounded here at 600ms) — and all 3 boxes must
 /// still have genuinely been contacted (never skipped for speed).
 #[test]
 fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
