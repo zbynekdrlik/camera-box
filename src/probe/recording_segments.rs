@@ -173,6 +173,16 @@ pub struct CamboxSegment {
     /// never mistaken for a continuity break. `None` on any covered window (`frames > 0`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// #1169 (owner, 2026-08-22): the LOUD per-segment note when this window's nonzero
+    /// `copies`/`gaps` were ABSORBED by the `<=1/<=1` singleton allowance
+    /// (`crate::window_gate::segment_singleton_note`). `Some(..)` iff the allowance was consumed
+    /// (`copies <= 1 && gaps <= 1` with at least one nonzero, while the `<=3` tolerance rescue is
+    /// disarmed) -- the strict `pass` field STILL reads `false` for such a window (visible), so the
+    /// absorption is never silent (the #1132 masking guard). `None` on a clean window and on an
+    /// over-band window that still FAILS (it fails loudly on its own). Counted run-wide by
+    /// [`SegmentedContinuity::windows_singleton_allowance_consumed`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub singleton_allowance_note: Option<String>,
     /// #726: the presentation-cadence EVENNESS of this window's painted-tick sequence (RECORDED
     /// order) — `None` when this window carries no painted tick at all (any non-cam2 window in a
     /// CAMBOX_SWEEP: `tick` is `None` on every frame, so there is nothing to classify). REPORTED
@@ -262,6 +272,16 @@ pub struct SegmentedContinuity {
     /// tolerance visibly absorbing a bounded residual, not a hidden regression; a nonzero
     /// `windows_over_copies_gaps_tolerance` is a real, loud, gating failure.
     pub windows_over_copies_gaps_tolerance: u32,
+    /// #1169 (owner, 2026-08-22) — how many windows had their nonzero `copies`/`gaps` ABSORBED by
+    /// the `<=1/<=1` singleton allowance (`crate::window_gate::segment_singleton_allowance_consumed`),
+    /// i.e. windows that FAIL the strict absolute-zero bar but PASS `overall_pass` under #1169's
+    /// soft-release. Always serialized, even at 0, mirroring `windows_failed_report_only`'s
+    /// issue-889 visibility precedent -- a nonzero count here with `overall_pass == true` is the
+    /// singleton allowance visibly absorbing the designed paced-trickle residual (each such window
+    /// also carries a `CamboxSegment::singleton_allowance_note`), never a hidden mask. Re-tighten to
+    /// absolute zero (flip `segment_singleton_allowance_gates_overall_pass()` to `false`) makes any
+    /// such window gate again -- issue 1169 owns that trail.
+    pub windows_singleton_allowance_consumed: u32,
     /// #707 EVENT-FORENSICS — every segment's [`CamboxSegment::residual_events`], concatenated in
     /// schedule order, for a caller that wants the whole run's residual events without walking
     /// `segments` itself (e.g. the Discord report / the collector script).
@@ -465,6 +485,15 @@ pub fn segment_continuity(
         .filter(|s| s.copies > copies_gaps_tolerance || s.gaps > copies_gaps_tolerance)
         .count() as u32;
 
+    // #1169 (owner, 2026-08-22) -- how many windows had their nonzero copies/gaps ABSORBED by the
+    // `<=1/<=1` singleton allowance (windows that FAIL strict but PASS `overall_pass` under the
+    // soft-release). Computed from the SAME pure seam `overall_pass_term` folded above, so this can
+    // never disagree with what actually gated the run.
+    let windows_singleton_allowance_consumed = segments
+        .iter()
+        .filter(|s| crate::window_gate::segment_singleton_allowance_consumed(s.copies, s.gaps))
+        .count() as u32;
+
     SegmentedContinuity {
         segments,
         overall_pass,
@@ -473,6 +502,7 @@ pub fn segment_continuity(
         run_wide_undecodable_within_floor,
         copies_gaps_tolerance,
         windows_over_copies_gaps_tolerance,
+        windows_singleton_allowance_consumed,
         guard_ns,
         residual_events: all_residual_events,
         expected_step,
@@ -606,6 +636,12 @@ fn window_segment(
              not emitting NDI? Exclude it from CAMBOX_SWEEP."
         )
     });
+    // #1169 (owner, 2026-08-22): the LOUD per-segment note when this window's nonzero copies/gaps
+    // were ABSORBED by the `<=1/<=1` singleton allowance. `Some(..)` iff the allowance was consumed
+    // (see `crate::window_gate::segment_singleton_note`) -- `pass` stays false for such a window, so
+    // the absorption is never silent. `None` on a clean window and on an over-band window that still
+    // fails (it fails loudly on its own).
+    let singleton_allowance_note = crate::window_gate::segment_singleton_note(copies, gaps);
     CamboxSegment {
         cambox: cambox.to_string(),
         start_ns,
@@ -619,6 +655,7 @@ fn window_segment(
         pass,
         relaxed_pass,
         note,
+        singleton_allowance_note,
         presentation_cadence,
         residual_events,
     }
