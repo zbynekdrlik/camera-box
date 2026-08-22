@@ -173,17 +173,40 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
 - **Absolute floor from the strih genlock audit, NOT the painter QR.** The painter-QR `gen_ts` is
   CLOCK_REALTIME (painter box, DanteSync-synced) while dev1's `t_send` is CLOCK_MONOTONIC — cross-clock,
   so painter-QR gives only RELATIVE cross-camera deltas, never an absolute floor. `arrival_floors_from_jitter`
-  reconstructs each source's ABSOLUTE floor `latency_ms + mean_head_skew_ms` from `genlock-jitter-report
-  --json` (the pin's own DanteSync-synced OBS clock — comparable to the pin), reusing
+  reconstructs each source's `latency_ms + mean_head_skew_ms` from `genlock-jitter-report --json` (the
+  pin's own DanteSync-synced OBS clock — comparable to the pin), reusing
   `prerecord_phase_calibrate.measured_by_camera` (no re-implementation). `qr-align.sh` fetches it into
-  `--jitter-json` (the same OBS-log fetch `[4g/8]` uses; best-effort — see below).
-- **`floor_aware_pins(arrival_floors, deltas, floor_ms, max_abs_latency_ms)`:** the slowest (min-delta)
-  camera → `floor_ms` (inert, stays at its natural floor); every faster camera → `round(arrival_floor_i
-  + pure_delta_i)` (its floor + the PURE present-age hold it must add — `deltas` come from `round_deltas`
-  over ZERO pins so the cross-clock offset still cancels), which sits ABOVE its floor so the genlock-C
+  `--jitter-json` (best-effort — see below).
+- **The audit "arrival floor" is the PRESENT AGE `max(pin, transport)`, NOT the raw transport — so it
+  is only a true transport from an UN-PINNED start.** Pins PERSIST across runs; a prior aligned run
+  leaves them elevated (`{3,66,66,66}`), so run 2+ would read pin-HELD ages, not transports (review 🔴).
+  Hence the **TWO-PHASE RESET (`qr-align.sh` PHASE 0 → `qr_align_pins.py --reset-to-floor` /
+  `reset_pins_to_floor`):** reset every align pin to the floor, settle so the genlock sheds DOWN to the
+  transport, then RE-FETCH the audit (scoped to ONLY the post-settle log lines — the [4g/8]
+  Correction-2 line-count discipline, never a blind `-Tail` that averages `latency_ms` across two pin
+  regimes) so the floors are TRUE transports and the SLOWEST returns to pin 3 EVERY run (the owner's
+  floor-3 doctrine, preserved). The `win_ssh_run` fetches are `timeout`-bounded (win-ssh-exec.sh's own
+  doc: the caller must bound it). `QR_ALIGN_RESET_SETTLE_S` / `QR_ALIGN_AUDIT_WINDOW_S` tune the waits.
+- **`floor_aware_pins(arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins)`:** the slowest
+  (min-delta) camera → `floor_ms` (inert, stays at its natural floor); every faster camera →
+  `max(floor_ms, round(arrival_floor_i + pure_delta_i))` (its floor + the PURE present-age hold it must
+  add — `deltas` come from `round_deltas` over ZERO pins so the cross-clock offset still cancels; the
+  `max(floor_ms, …)` clamp never emits a sub-floor pin), which sits ABOVE its floor so the genlock-C
   frame-mover engages. FAILs LOUD per-camera when a target exceeds `max_abs_latency_ms` (94), and when
-  a faster camera has no arrival floor (never a fabricated floor). Pins reach the SLOWEST's NATURAL
-  floor only — no net latency beyond the physical transport, never the rejected deep 90/160/184.
+  a faster camera has no arrival floor (never a fabricated floor). `current_pins` is a belt-and-suspenders
+  for a DIRECT (no-reset) call: a pin-dominated co-slowest (current_pin ≥ its present age → held by its
+  OWN pin, true transport unobservable below) is NOT torn down to the floor (that would drop it to that
+  lower transport → misaligned); it keeps its pin. On the reset path every pin is at the floor, so this
+  never triggers and the true slowest floors correctly. Pins reach the SLOWEST's NATURAL floor only — no
+  net latency beyond the physical transport, never the rejected deep 90/160/184.
+- **The SPREAD sanity gates the PURE present-age deltas when floors are available** (`sanity_ok(pure_deltas)`),
+  same 66 ms bound — the pin-FOLDED `deltas` over-read by ~the pin elevation from a pinned steady state
+  and would spuriously FAIL a legit drift as a "degraded grabber" (review 🔴); the folded-delta sanity
+  stays for the no-floors fallback (unchanged there).
+- **A PARTIAL audit degrades gracefully, never a hard abort (review 🟡):** if a FASTER camera is missing
+  its floor, `align()` falls back to the (inert-prone) floor+delta plan with a loud warning (the verify
+  re-measure still FAILs a genuine misalignment) — a partial fetch must never be strictly worse than no
+  fetch.
 - **Off-parity attribution splits by which plan ran.** If above-floor pins were applied (jitter JSON
   present) but the re-measured tail STILL stays off-parity → `floor_aware_stuck_abort_reason` (the
   genlock-C frame-mover did not engage: its build is not deployed on strih, or the transport floor
@@ -191,12 +214,14 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
   the pre-fix `hold_inert_abort_reason` (`pins_requiring_more_hold` + `format_pin_apply_report`).
   Either way parity tolerance is NEVER widened — the run FAILS the owner's same-frame bar. The verify
   re-measure is the live acceptance instrument; a wrong computed pin still FAILS it.
-- **Best-effort audit fetch → graceful fallback.** When `qr-align.sh` cannot fetch the audit (standalone
-  call, unreachable log, no audit lines), the aligner falls back to the (inert-prone) floor+delta plan
-  with a loud WARNING rather than aborting — so a missing audit degrades to the pre-fix behavior, never
-  a hard stop. Wire the audit (the normal E2E path does) for the actual fix.
-- **Tier-0:** `arrival_floors_from_jitter`, `floor_aware_pins`, `floor_aware_stuck_abort_reason` and
-  the align() floor-aware flow (a FIFO-modelling barrier: present_age = max(pin, arrival_floor)) are
-  pure/monkeypatched — `tests/python/test_qr_align_pinapply_1161.py`. The `qr-align.sh` audit fetch is
-  best-effort bash (verified by `bash -n` + shellcheck + an arg-passthrough smoke; the live fetch is
-  supervisor-verified on the rig).
+- **Best-effort reset+fetch → graceful fallback.** When `qr-align.sh` cannot run the reset+audit
+  (standalone call with no `win_ssh_run`/`PROBE_BIN_DIR`/`OUTDIR`, a reset failure, an unreachable log,
+  no audit lines), the aligner falls back to the (inert-prone) floor+delta plan with a loud WARNING
+  rather than aborting — so a missing audit degrades to the pre-fix behavior, never a hard stop. The
+  normal E2E path runs the reset+fetch for the actual floor-aware fix.
+- **Tier-0:** `arrival_floors_from_jitter`, `floor_aware_pins` (incl. the clamp + don't-tear-down),
+  `floor_aware_stuck_abort_reason`, `reset_pins_to_floor`, and the align() flow (a FIFO-modelling
+  barrier: present_age = max(pin, arrival_floor); pinned-state sanity + partial-audit fallback) are
+  pure/monkeypatched — `tests/python/test_qr_align_pinapply_1161.py`. The `qr-align.sh` two-phase
+  reset+fetch is best-effort bash (verified by `bash -n` + shellcheck + a 3-case reset/arg smoke; the
+  live reset+fetch is supervisor-verified on the rig).
