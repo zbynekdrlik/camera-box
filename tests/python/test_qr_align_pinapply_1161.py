@@ -338,3 +338,118 @@ class TestAlignFloorAwareFlow:
         plan = result["plan"]
         assert plan["NDI cam2"] >= 63 and plan["NDI cam3"] >= 33 and plan["NDI cam4"] >= 46
         assert plan["NDI cam1"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# #1161 SECOND-ROUND (review findings): the audit "arrival floor" is the PRESENT AGE
+# (max(pin, transport)) -> it equals the raw transport ONLY from an un-pinned start. Pins persist
+# across runs, so run 2+ plans from a pinned steady state. Fixes: two-phase reset (reset_pins_to_floor
+# so the re-fetched floors are true transports), sanity on PURE deltas when floors are present, a
+# don't-tear-down safety for a pin-dominated co-slowest, a partial-audit graceful fallback, a sub-floor
+# clamp, and a runtime floor_ms in the stuck-abort telemetry.
+# --------------------------------------------------------------------------- #
+class TestFloorAwarePinsSecondRound:
+    def test_clamp_never_emits_a_sub_floor_pin(self):
+        # 🔵4: a pathological audit floor below the pin floor must not produce a sub-floor pin.
+        plan = qa.floor_aware_pins({"NDI cam1": 5.0, "NDI cam2": 0.0},
+                                   {"NDI cam1": 0.0, "NDI cam2": 2.0}, floor_ms=3)
+        assert plan["NDI cam2"] >= 3   # target 0+2=2 would be sub-floor -> clamped to 3
+
+    def test_pin_dominated_co_slowest_is_not_torn_down(self, ):
+        # 🔴1: from a pinned steady state, a co-slowest camera held at present 66 ONLY by its 66 pin
+        # (pin-dominated: current_pin >= its audit present age) must NOT be reset to floor 3 (that
+        # drops it to its true lower transport -> misaligned). Keep its pin; bring the faster one up.
+        floors = {"NDI cam1": 49.0, "NDI cam2": 66.0, "NDI cam3": 66.0, "NDI cam4": 66.0}  # present ages
+        deltas = {"NDI cam1": 17.0, "NDI cam2": 0.0, "NDI cam3": 0.0, "NDI cam4": 0.0}      # c1 faster
+        current = {"NDI cam1": 3, "NDI cam2": 66, "NDI cam3": 66, "NDI cam4": 66}
+        plan = qa.floor_aware_pins(floors, deltas, floor_ms=3, current_pins=current)
+        # pin-dominated co-slowest kept at their pin (not torn to 3); faster c1 raised to 49+17=66
+        assert plan["NDI cam2"] == 66 and plan["NDI cam3"] == 66 and plan["NDI cam4"] == 66
+        assert plan["NDI cam1"] == 66
+
+    def test_transport_dominated_slowest_still_floors_after_a_reset(self):
+        # the reset path: all pins at floor 3 (< transport), so no camera is pin-dominated -> the true
+        # slowest floors to 3 and the faster ones are raised to its true transport.
+        floors = {"NDI cam1": 49.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}  # true transports
+        deltas = {"NDI cam1": 14.0, "NDI cam2": 0.0, "NDI cam3": 30.0, "NDI cam4": 17.0}
+        current = {"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 3, "NDI cam4": 3}
+        plan = qa.floor_aware_pins(floors, deltas, floor_ms=3, current_pins=current)
+        assert plan["NDI cam2"] == 3                       # true slowest -> floor
+        assert plan["NDI cam1"] == 63 and plan["NDI cam3"] == 63 and plan["NDI cam4"] == 63
+
+    def test_stuck_abort_reason_uses_runtime_floor_ms(self):
+        # 🔵5: with --floor-ms 5, a source pinned at exactly 5 is a FLOORED (not raised) source and
+        # must not be named as a stuck raised camera.
+        msg = qa.floor_aware_stuck_abort_reason(
+            {"NDI cam1": 66, "NDI cam2": 5}, {"NDI cam1": 49.0, "NDI cam2": 63.0},
+            {"NDI cam1": 66, "NDI cam2": 5}, {"NDI cam1": 3.0}, floor_ms=5)
+        assert "NDI cam1" in msg and "NDI cam2" not in msg
+
+
+class TestAlignSecondRound:
+    def _align(self, monkeypatch, floors, current, jitter=True, apply_reset=True):
+        import apply_latency_pins
+        import obs_phase2
+        applied = {}
+        monkeypatch.setattr(qa, "barrier_screenshot", _FifoBarrier(floors, current, applied))
+
+        def _read_pins(s, h, p):
+            return dict(applied) if applied else dict(current)
+        monkeypatch.setattr(qa, "read_current_pins", _read_pins)
+
+        def _apply(ws, plan, execute):
+            applied.update(plan)
+            return plan
+        monkeypatch.setattr(apply_latency_pins, "apply_pins", _apply)
+
+        class _WS:
+            def close(self):
+                pass
+        monkeypatch.setattr(obs_phase2, "_conn", lambda host, pw: _WS())
+        jj = _jitter(floors, current) if jitter is True else jitter
+        return qa.align(SRC, "h", "pw", execute=True, stable_tail_rounds=3, stable_tol_ids=1,
+                        min_valid_rounds=5, min_parity_rounds=3, max_delta_ms=66.0, parity_tol_ids=1,
+                        floor_ms=3, width=1920, height=1080, measure_budget_s=1e9,
+                        max_measure_rounds=60, settle_s=0, jitter_json=jj)
+
+    def test_pinned_state_does_not_spuriously_fail_sanity(self, monkeypatch):
+        # 🔴2: from a pinned steady state, a legit drift (true present spread 19 <= 66) must NOT hard
+        # FAIL as "degraded grabber" on the pin-FOLDED metric (which over-reads ~82). With sanity on
+        # PURE deltas, the run re-aligns (present ages {85,66,66,66} -> plan brings all to 85).
+        floors = {"NDI cam1": 85.0, "NDI cam2": 66.0, "NDI cam3": 66.0, "NDI cam4": 66.0}
+        current = {"NDI cam1": 3, "NDI cam2": 66, "NDI cam3": 66, "NDI cam4": 66}
+        result = self._align(monkeypatch, floors, current)
+        assert result["status"] == "aligned"     # NOT AlignmentImpossible("degraded/underrun grabber")
+        assert result["post_spread_ids"] == 0
+
+    def test_partial_audit_falls_back_not_abort(self, monkeypatch):
+        # 🟡3: a jitter JSON missing a FASTER camera must degrade to floor3+warning (like a failed
+        # fetch), never hard-abort the whole run.
+        floors = {"NDI cam1": 66.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}
+        current = {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 17, "NDI cam4": 22}
+        partial = _jitter({"NDI cam1": 66.0, "NDI cam2": 63.0}, {"NDI cam1": 3, "NDI cam2": 6})  # cam3/4 absent
+        # the FIFO barrier stays misaligned under the inert floor3 fallback -> the run FAILS, but with
+        # the floor3-fallback reason, NOT the floor-aware missing-floor abort.
+        with pytest.raises(qa.AlignmentImpossible) as exc:
+            self._align(monkeypatch, floors, current, jitter=partial)
+        assert "no arrival-floor measurement" not in str(exc.value)   # not the hard floor-aware abort
+
+
+class TestResetPinsToFloor:
+    def test_applies_the_floor_to_every_source(self, monkeypatch):
+        import apply_latency_pins
+        import obs_phase2
+        applied = {}
+
+        def _apply(ws, plan, execute):
+            applied.update(plan)
+            return plan
+        monkeypatch.setattr(apply_latency_pins, "apply_pins", _apply)
+
+        class _WS:
+            def close(self):
+                pass
+        monkeypatch.setattr(obs_phase2, "_conn", lambda host, pw: _WS())
+        n = qa.reset_pins_to_floor(SRC, "h", "pw", floor_ms=3)
+        assert applied == {s: 3 for s in SRC}
+        assert n == len(SRC)
