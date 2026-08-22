@@ -377,6 +377,23 @@ class TestFloorAwarePinsSecondRound:
         assert plan["NDI cam2"] == 3                       # true slowest -> floor
         assert plan["NDI cam1"] == 63 and plan["NDI cam3"] == 63 and plan["NDI cam4"] == 63
 
+    def test_pin_dominated_kept_despite_positive_skew_in_the_audit(self):
+        # 🔵a: the audit's own +mean_head_skew can read a pin-dominated co-slowest's floor a couple ms
+        # ABOVE its pin (cur 66, fl 68); the slack must still recognise it as pin-dominated, not tear
+        # it down to the floor.
+        plan = qa.floor_aware_pins({"NDI cam1": 49.0, "NDI cam2": 68.0},
+                                   {"NDI cam1": 17.0, "NDI cam2": 0.0}, floor_ms=3,
+                                   current_pins={"NDI cam1": 3, "NDI cam2": 66})
+        assert plan["NDI cam2"] == 66   # kept (pin-dominated within slack), not torn to 3
+
+    def test_pin_dominated_kept_when_absent_from_the_audit(self):
+        # 🔵a: a co-slowest pinned UP (cur > floor) but MISSING from the audit (fl None) must keep its
+        # pin, not floor to 3 (which would drop it to its unobservable lower transport).
+        plan = qa.floor_aware_pins({"NDI cam1": 49.0},
+                                   {"NDI cam1": 17.0, "NDI cam2": 0.0}, floor_ms=3,
+                                   current_pins={"NDI cam1": 3, "NDI cam2": 66})
+        assert plan["NDI cam2"] == 66
+
     def test_stuck_abort_reason_uses_runtime_floor_ms(self):
         # 🔵5: with --floor-ms 5, a source pinned at exactly 5 is a FLOORED (not raised) source and
         # must not be named as a stuck raised camera.
@@ -424,6 +441,18 @@ class TestAlignSecondRound:
         result = self._align(monkeypatch, floors, current)
         assert result["status"] == "aligned"     # NOT AlignmentImpossible("degraded/underrun grabber")
         assert result["post_spread_ids"] == 0
+
+    def test_sanity_abort_message_uses_the_judged_pure_deltas(self, monkeypatch):
+        # 🔵b: on the floor-aware path sanity judges the PURE deltas, so the abort's per-camera map
+        # must be the PURE map, NOT the pin-FOLDED median (cam2 folded ~140 from its 63 ms pin) -- the
+        # folded map would mislead the exact "degraded grabber" diagnosis the owner reads.
+        floors = {"NDI cam1": 70.0, "NDI cam2": 70.0, "NDI cam3": 70.0, "NDI cam4": 150.0}
+        current = {"NDI cam1": 3, "NDI cam2": 63, "NDI cam3": 3, "NDI cam4": 3}
+        with pytest.raises(qa.AlignmentImpossible) as exc:
+            self._align(monkeypatch, floors, current)
+        msg = str(exc.value)
+        assert "140" not in msg      # the pin-folded cam2 delta must NOT appear
+        assert "80.0" in msg         # the pure per-camera delta does
 
     def test_partial_audit_falls_back_not_abort(self, monkeypatch):
         # 🟡3: a jitter JSON missing a FASTER camera must degrade to floor3+warning (like a failed
