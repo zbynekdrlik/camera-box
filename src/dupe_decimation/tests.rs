@@ -2723,9 +2723,10 @@ struct OverRateStallSim {
 /// left unfilled because its fill was gated on a POSITIVE sustained-under-rate. Faithful #1131
 /// `queue_had_frame`: FALSE only for the frame the loop BLOCKED on (the post-stall dequeue), TRUE
 /// for every frame drained from a non-empty queue (so the over-rate machinery is byte-inert on
-/// those, exactly as production reads the real dequeue-duration signal). A `stall_ms` in the 25-40
-/// band stays < [`TAKT_GAP_EXCLUDE_NS`] (50 ms), so it is folded into the EMA and the card stays a
-/// genuine over-rate — the v4 hole.
+/// those, exactly as production reads the real dequeue-duration signal). Any `stall_ms` up to ~45
+/// stays < [`TAKT_GAP_EXCLUDE_NS`] (50 ms), so it is folded into the EMA and the card stays a
+/// genuine over-rate — the v4 hole (the live cam1 stall is ~25.6 ms; the test drives 45 ms as a
+/// harsher-than-nominal stress that still folds).
 fn run_over_rate_stall_sim(
     capture_fps: f64,
     stall_ms: u64,
