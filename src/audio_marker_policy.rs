@@ -31,6 +31,18 @@
 //! `marker_device_resolve_from_aplay` — the SAME "the bracketed monitor name differs from its own
 //! `HDMI N` slot label" decision — so the bash TEST-mode resolution path and this new Rust
 //! default-resolution path make the IDENTICAL decision from the SAME `aplay -l` text.
+//!
+//! ## Self-recovery for the degraded marker (issue 1172)
+//!
+//! Issue 984's soft-degrade path (in `probe::run::run_paint_only`) opened the ALSA PCM ONCE and,
+//! on a transient-busy failure, only LOGGED "still DEGRADED" forever — it never re-attempted the
+//! open, so a marker degraded by a device that was momentarily held at painter start
+//! (`hw:CARD=PCH,DEV=3` still releasing from a lipsync-test ffmpeg) stayed silent until a manual
+//! `systemctl restart cam2-painter`. [`AudioMarkerRecovery`] is the PURE decision seam that closes
+//! that: it tells the (probe-gated, linux-only) control loop WHEN to re-open, so the degraded
+//! marker genuinely re-opens the device each retry cycle and self-recovers once it frees.
+
+use std::time::Duration;
 
 /// The pinned last-resort fallback ALSA device — used only when NO HDMI playback device in a live
 /// `aplay -l` listing carries a genuine (non-generic) monitor name. Matches
@@ -138,6 +150,108 @@ pub fn resolve_marker_device_from_aplay(aplay_text: &str) -> Option<String> {
         .map(|d| format!("hw:CARD={},DEV={}", d.card, d.dev))
 }
 
+/// #1172 — while the SOFT (issue 984) audio marker is degraded (its ALSA PCM could not be opened,
+/// e.g. `hw:CARD=PCH,DEV=3` was transiently held by an ffmpeg/aplay lipsync test still releasing
+/// it at painter start), the emit device is re-opened this often to test whether the holder has
+/// let go. Matches the existing 5 s degraded-log cadence so a freed device resumes the marker
+/// within ~one period: small enough to recover "within a few cycles" (issue 1172), large enough
+/// that a still-busy device is never hammered.
+pub const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// #1172 — what the degraded control loop (`probe::run::run_paint_only`) should do for the audio
+/// marker on a given poll tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryStep {
+    /// A live emitter is running — nothing to do (the caller still polls its `death_reason()`).
+    Healthy,
+    /// Degraded, but still within the retry interval — keep painting, take no action this tick.
+    Waiting,
+    /// Degraded and the retry interval has elapsed — attempt a fresh ALSA re-open NOW.
+    AttemptReopen,
+}
+
+/// #1172 — pure self-recovery state machine for the degraded audio-marker path.
+///
+/// The impure caller (`probe::run::run_paint_only`, linux + probe-gated) owns the ALSA re-open
+/// (`QpskEmitter::spawn`), the `Instant` retry clock, and the tracing; this type owns only the
+/// *timing + degraded-transition decision*, so the whole recovery policy is Tier-0 testable on
+/// default features even though the code that drives it is probe-gated (`src/probe/**`, CI-only
+/// compile). Same PURE-decision seam the crate already uses for NDI re-announce
+/// (`crate::reannounce::ReannounceState`).
+///
+/// The contract this type enforces (and that the shipped issue-984 degraded loop VIOLATED — it
+/// only logged, never re-attempted the open, so a marker degraded by a transient ALSA-busy at
+/// startup stayed silent until a manual `systemctl restart cam2-painter`):
+/// - a degraded marker whose retry interval has elapsed asks the caller to RE-OPEN
+///   ([`RecoveryStep::AttemptReopen`]) — the recovery the old loop never had;
+/// - a SUCCESSFUL re-open clears the degraded state so a subsequent tick is `Healthy` (no more
+///   retries, no spin, no needless re-open of a working device);
+/// - a FAILED re-open LEAVES it degraded so the next interval retries again;
+/// - a healthy marker is always `Healthy` and never retries.
+#[derive(Debug, Clone)]
+pub struct AudioMarkerRecovery {
+    degraded: bool,
+    retry_interval: Duration,
+}
+
+impl AudioMarkerRecovery {
+    /// A marker whose PCM opened cleanly — a live emitter is running.
+    pub fn healthy() -> Self {
+        Self {
+            degraded: false,
+            retry_interval: RECOVERY_RETRY_INTERVAL,
+        }
+    }
+
+    /// A marker whose startup open FAILED (soft degrade) — degraded from the first tick, so the
+    /// retry loop takes over immediately.
+    pub fn degraded() -> Self {
+        Self {
+            degraded: true,
+            retry_interval: RECOVERY_RETRY_INTERVAL,
+        }
+    }
+
+    /// True while no live emitter is running (the periodic `#984` "still DEGRADED" heartbeat and
+    /// the retry path both key on this).
+    pub fn is_degraded(&self) -> bool {
+        self.degraded
+    }
+
+    /// Decide what to do on this poll tick. `since_last_attempt` is the wall time elapsed since
+    /// the last ALSA open attempt (the startup spawn, or the most recent retry). A healthy marker
+    /// is always [`RecoveryStep::Healthy`]; a degraded marker asks for a re-open once the interval
+    /// has elapsed ([`RecoveryStep::AttemptReopen`]), otherwise [`RecoveryStep::Waiting`].
+    pub fn step(&self, since_last_attempt: Duration) -> RecoveryStep {
+        // #1172 RED STUB: this faithfully reproduces the shipped issue-984 degraded loop — it
+        // NEVER re-attempts the open, it only "waits" (in the real loop: only logs "still
+        // DEGRADED"). The `degraded_marker_retries_after_the_interval` test below is RED against
+        // this until the GREEN commit adds the interval-elapsed `AttemptReopen` path.
+        let _ = (since_last_attempt, self.retry_interval);
+        if self.degraded {
+            RecoveryStep::Waiting
+        } else {
+            RecoveryStep::Healthy
+        }
+    }
+
+    /// Record the outcome of a re-open ATTEMPT: `true` (a fresh emitter is running) clears the
+    /// degraded state; `false` (the device is still busy) LEAVES it degraded so the next interval
+    /// retries again. The caller resets its retry clock whenever it makes an attempt, so a failed
+    /// retry waits a full interval before the next one — never a hot spin on a busy device.
+    pub fn record_reopen(&mut self, succeeded: bool) {
+        if succeeded {
+            self.degraded = false;
+        }
+    }
+
+    /// Record that a RUNNING emitter died mid-run (a soft mid-run ALSA failure): drop to degraded
+    /// so the retry loop re-opens a fresh emitter exactly as at a failed startup open.
+    pub fn mark_degraded(&mut self) {
+        self.degraded = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +338,84 @@ card 0: PCH [HDA Intel PCH], device 7: HDMI 1 [HDMI 1]
     #[test]
     fn fallback_device_matches_the_pinned_rig_mode_default() {
         assert_eq!(FALLBACK_MARKER_DEVICE, "hw:CARD=PCH,DEV=3");
+    }
+
+    // --- #1172 AudioMarkerRecovery ------------------------------------------------------------
+
+    #[test]
+    fn healthy_marker_never_retries() {
+        let r = AudioMarkerRecovery::healthy();
+        assert!(!r.is_degraded());
+        assert_eq!(r.step(Duration::from_secs(0)), RecoveryStep::Healthy);
+        // Even long past the interval, a healthy marker never re-opens a working device.
+        assert_eq!(r.step(Duration::from_secs(3600)), RecoveryStep::Healthy);
+    }
+
+    #[test]
+    fn degraded_marker_waits_within_the_interval() {
+        let r = AudioMarkerRecovery::degraded();
+        assert!(r.is_degraded());
+        assert_eq!(r.step(Duration::from_secs(0)), RecoveryStep::Waiting);
+        assert_eq!(
+            r.step(RECOVERY_RETRY_INTERVAL - Duration::from_millis(1)),
+            RecoveryStep::Waiting
+        );
+    }
+
+    #[test]
+    fn degraded_marker_retries_after_the_interval() {
+        // THE issue-1172 bug in pure form: the shipped loop NEVER re-attempts the open — it only
+        // logs "still DEGRADED" forever. Once the retry interval elapses, a degraded marker MUST
+        // ask the caller to re-open. RED against the stub (which returns Waiting forever).
+        let r = AudioMarkerRecovery::degraded();
+        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        assert_eq!(
+            r.step(RECOVERY_RETRY_INTERVAL + Duration::from_secs(10)),
+            RecoveryStep::AttemptReopen
+        );
+    }
+
+    #[test]
+    fn successful_reopen_clears_degraded_and_stops_retrying() {
+        // After the device frees and a re-open succeeds, the marker is healthy again and a later
+        // tick (even long past the interval) must NOT keep retrying — no spin, no needless
+        // re-open of a working device.
+        let mut r = AudioMarkerRecovery::degraded();
+        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        r.record_reopen(true);
+        assert!(!r.is_degraded());
+        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL * 10), RecoveryStep::Healthy);
+    }
+
+    #[test]
+    fn failed_reopen_stays_degraded_and_retries_next_interval() {
+        // A retry against a still-busy device fails; the marker stays degraded and the next
+        // elapsed interval asks to re-open again (self-recovery keeps trying until it frees).
+        let mut r = AudioMarkerRecovery::degraded();
+        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        r.record_reopen(false);
+        assert!(r.is_degraded());
+        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+    }
+
+    #[test]
+    fn mid_run_death_drops_a_healthy_marker_to_degraded_then_recovers() {
+        // A soft mid-run ALSA death degrades a previously-healthy marker; the same retry path then
+        // recovers it exactly as at a failed startup open.
+        let mut r = AudioMarkerRecovery::healthy();
+        assert_eq!(r.step(Duration::from_secs(1)), RecoveryStep::Healthy);
+        r.mark_degraded();
+        assert!(r.is_degraded());
+        assert_eq!(r.step(Duration::ZERO), RecoveryStep::Waiting);
+        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        r.record_reopen(true);
+        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::Healthy);
+    }
+
+    #[test]
+    fn retry_interval_matches_the_degraded_log_cadence() {
+        // The retry cadence tracks the existing 5 s #984 degraded-log heartbeat so a freed device
+        // resumes within ~one log period (issue 1172 "within a few cycles").
+        assert_eq!(RECOVERY_RETRY_INTERVAL, Duration::from_secs(5));
     }
 }
