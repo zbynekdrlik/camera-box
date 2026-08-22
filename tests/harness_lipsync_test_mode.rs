@@ -848,3 +848,103 @@ fn start_fails_loud_on_a_negative_audio_lead_ms_930() {
         "930: failure message must name the bad env var: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------- //
+// issue 1173 — the lipsync asset must be SCALED + CENTRED onto cam2's ACTUAL fb geometry. cam2's
+// fb0 grew 1920x1080 -> 2560x1080 (ultrawide, post #899 kernel-upgrade reboots); the old builders
+// painted the 1920x1080 asset unscaled, so the face landed cropped in a corner and SyncNet read
+// conf 0.0. The builders now read /sys/class/graphics/<fbname>/virtual_size and inject a
+// scale+pad -vf, fail-loud-then-fail-OPEN to unscaled (VF=null) if the geometry is unreadable.
+// ---------------------------------------------------------------------------------------------- //
+
+/// The pure geometry helper emits remote bash that READS the fb's virtual_size and sets a `VF`
+/// shell var to an aspect-preserving scale + centred pad filter — with a loud WARN + fail-open
+/// `VF=null` fallback when the geometry is unreadable (never a silent 1920x1080 assumption).
+#[test]
+fn fb_scale_vf_cmds_reads_geometry_and_builds_centered_filter_1173() {
+    let cmds = run_sourced("lipsync_fb_scale_vf_cmds /dev/fb0");
+    assert!(
+        cmds.contains("/sys/class/graphics/fb0/virtual_size"),
+        "1173: the helper must read the fb's ACTUAL geometry from sysfs: {cmds}"
+    );
+    assert!(
+        cmds.contains("force_original_aspect_ratio=decrease")
+            && cmds.contains("pad=")
+            && cmds.contains("(ow-iw)/2:(oh-ih)/2"),
+        "1173: the helper must build an aspect-preserving scale + CENTRED pad filter: {cmds}"
+    );
+    assert!(
+        cmds.contains("WARN") && cmds.contains("VF=null") && cmds.contains("1173"),
+        "1173: an unreadable/unparseable geometry must WARN loud and fail-open to VF=null: {cmds}"
+    );
+}
+
+/// The persistent (zero-lead) playback command must apply the scale+pad filter to the video map,
+/// reading the actual fb geometry — and still be exactly ONE ffmpeg process.
+#[test]
+fn playback_cmds_scales_and_pads_to_fb_geometry_1173() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        cmds.contains("/sys/class/graphics/fb0/virtual_size"),
+        "1173: playback must READ the fb's actual geometry (never assume 1920x1080): {cmds}"
+    );
+    assert!(
+        cmds.contains("force_original_aspect_ratio=decrease")
+            && cmds.contains("(ow-iw)/2:(oh-ih)/2"),
+        "1173: the video map must scale+centre the asset to fit the fb: {cmds}"
+    );
+    assert!(
+        cmds.contains("-map 0:v -vf \"$VF\""),
+        "1173: the (input 0) video map must apply the computed scale+pad filter: {cmds}"
+    );
+    assert_eq!(
+        cmds.matches("nohup ffmpeg").count(),
+        1,
+        "1173: still exactly ONE ffmpeg process after adding the scale filter: {cmds}"
+    );
+}
+
+/// The audio-lead (itsoffset) branch must ALSO scale+pad the (input 1) video map, still inside the
+/// SAME single ffmpeg process/PID.
+#[test]
+fn playback_cmds_scale_applies_to_the_itsoffset_video_map_1173() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 408",
+    );
+    assert!(
+        cmds.contains("/sys/class/graphics/fb0/virtual_size")
+            && cmds.contains("force_original_aspect_ratio=decrease"),
+        "1173: the audio-lead branch must ALSO scale+pad to the fb geometry: {cmds}"
+    );
+    assert!(
+        cmds.contains("-map 1:v -vf \"$VF\""),
+        "1173: the itsoffset video map (input 1) must carry the scale+pad filter: {cmds}"
+    );
+    assert_eq!(
+        cmds.matches("nohup ffmpeg").count(),
+        1,
+        "1173: audio-lead branch still ONE ffmpeg process: {cmds}"
+    );
+}
+
+/// The pacing-preflight guard must scale+pad to the fb geometry too (it paints the same asset onto
+/// the same fb), while keeping its showinfo cadence instrument.
+#[test]
+fn pacing_guard_scales_to_fb_geometry_1173() {
+    let cmds =
+        run_sourced("lipsync_pacing_guard_cmd /run/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3");
+    assert!(
+        cmds.contains("virtual_size"),
+        "1173: the pacing guard must also read the fb geometry: {cmds}"
+    );
+    assert!(
+        cmds.contains("force_original_aspect_ratio=decrease"),
+        "1173: the pacing guard must scale+pad the asset to the fb like the real playback: {cmds}"
+    );
+    assert!(
+        cmds.contains("showinfo"),
+        "1173: the scale+pad filter must still chain the showinfo cadence instrument: {cmds}"
+    );
+}
