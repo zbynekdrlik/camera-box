@@ -5589,10 +5589,33 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 				wall_now > source->async_frames.array[0]->timestamp
 					? wall_now - source->async_frames.array[0]->timestamp
 					: 0;
-			if (genlock_relock_acquire_should_hold(oldest_age,
+			const bool bracket_hold = genlock_relock_acquire_should_hold(oldest_age,
 							       (uint64_t)reserve_ms * 1000000ULL,
 							       interval,
-							       source->genlock_acquire_bracket_ticks)) {
+							       source->genlock_acquire_bracket_ticks);
+			/* camera-box #1161 OBSERVABILITY (debug direction 3): one line per ACQUIRE-branch
+			 * tick — a RARE, BOUNDED (re)acquire episode (cold start, a pin-RISE forced
+			 * re-acquire via obs_source_set_genlock_latency_ms, or a backward-regime-end), never
+			 * the STEADY path — exposing WHY a raised per-source pin did or did not deepen the
+			 * FIFO. The merged Stage-2 gate was SILENT here, so a live pin rise that stayed
+			 * HOLD-INERT (issue 1161) left no trace beyond the setter's own `(#245)` line. A pin
+			 * BELOW the source's arrival transport floor prints oldest_queued_age_ms >= reserve_ms
+			 * with decision=ACQUIRE -> the bracketing gate cannot engage and
+			 * genlock_relock_select_nearest re-locks at the UNCHANGED shallow phase (the FIFO
+			 * cannot present a frame fresher than the arrival edge; the floor-3 aligner must target
+			 * an above-floor pin). decision=HOLD with a climbing ticks_held is the gate deepening
+			 * the queue toward the raised reserve. Marker string mutually-non-substring vs
+			 * genlock-fifo audit / genlock-relock / genlock-ndi-output per the jitter-audit-parser
+			 * rule; NOT parsed by src/jitter_audit.rs (a one-shot diagnostic, no periodic metric to
+			 * add). */
+			blog(LOG_INFO,
+			     "genlock-acquire-bracket '%s': reserve_ms=%u oldest_queued_age_ms=%llu "
+			     "decision=%s ticks_held=%u depth=%zu (#1161)",
+			     source->context.name ? source->context.name : "?", reserve_ms,
+			     (unsigned long long)(oldest_age / 1000000ULL),
+			     bracket_hold ? "HOLD" : "ACQUIRE",
+			     source->genlock_acquire_bracket_ticks, source->async_frames.num);
+			if (bracket_hold) {
 				source->genlock_acquire_bracket_ticks++;
 				source->genlock_holds++;
 				genlock_audit_log(source, now_ns);

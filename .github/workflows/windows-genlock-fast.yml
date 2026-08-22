@@ -206,6 +206,7 @@ jobs:
           if ($src -notmatch [regex]::Escape('const uint64_t cap = (reserve_ns + interval_ns - 1) / interval_ns + GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS;')) { Write-Error "the ACQUIRE bracketing gate's fail-open cap (ceil(reserve/interval)+margin) is gone — a queue that never deepens could hold forever (#1161)"; exit 1 }
           if ($src -notmatch [regex]::Escape('genlock_relock_acquire_should_hold(oldest_age,') -or $src -notmatch [regex]::Escape('source->genlock_acquire_bracket_ticks++;')) { Write-Error "the ACQUIRE branch no longer calls genlock_relock_acquire_should_hold(oldest_age, ...) / increments genlock_acquire_bracket_ticks (#1161)"; exit 1 }
           if ($internal -notmatch [regex]::Escape('uint32_t genlock_acquire_bracket_ticks;')) { Write-Error "the ACQUIRE bracket-tick counter field genlock_acquire_bracket_ticks is missing from obs_source (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape("genlock-acquire-bracket '%s':") -or $src -notmatch [regex]::Escape('oldest_queued_age_ms=') -or $src -notmatch [regex]::Escape('decision=')) { Write-Error "the #1161 ACQUIRE-bracket observability marker (genlock-acquire-bracket, reserve vs oldest_queued_age + HOLD/ACQUIRE) is gone — a live pin-rise re-acquire leaves no trace, a below-floor inert pin cannot be diagnosed (#1161)"; exit 1 }
           Write-Output "#1161 Stage-2 ACQUIRE bracketing gate present — OK"
 
       # #249: the fast path builds obs.dll from the real vendored source, so a `git subtree pull`

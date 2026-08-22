@@ -1042,3 +1042,36 @@ fn acquire_bracketing_gate_1161() {
          undercut the post-regime re-acquire's fail-open cap."
     );
 }
+
+/// #1161 — the ACQUIRE-bracket OBSERVABILITY marker (debug direction 3). The merged Stage-2 gate
+/// was silent about WHY a raised pin did or did not deepen the FIFO — a live pin-rise re-acquire
+/// left NO trace in the OBS log (the only line was the `#245` setter line), so a below-floor pin
+/// (reserve < the arrival transport floor) that cannot move the frame was indistinguishable from a
+/// working one. This one-per-ACQUIRE-tick marker exposes reserve_ms vs oldest_queued_age_ms and the
+/// HOLD/ACQUIRE decision, so the NEXT live run self-diagnoses a below-floor pin. Emitted in the
+/// N>=2 ACQUIRE branch only (a rare, bounded (re)acquire episode), never on the STEADY path. The
+/// marker string is mutually-non-substring vs the other genlock log families
+/// (`genlock-fifo audit` / `genlock-relock` / `genlock-ndi-*`) per the jitter-audit-parser rule.
+#[test]
+fn acquire_bracket_observability_marker_1161() {
+    let src = vendor_file(OBS_SOURCE);
+    assert!(
+        src.contains("genlock-acquire-bracket '%s':"),
+        "{OBS_SOURCE}: #1161 — the ACQUIRE-bracket observability marker (genlock-acquire-bracket) \
+         is missing; a live pin-rise re-acquire leaves no trace of reserve vs oldest_queued_age, so \
+         a below-floor (inert) pin cannot be diagnosed from the OBS log (debug direction 3)."
+    );
+    // The marker must report BOTH the decision and the two quantities that reveal a below-floor pin
+    // (oldest_queued_age_ms >= reserve_ms with decision=ACQUIRE == the frame will not move).
+    assert!(
+        src.contains("oldest_queued_age_ms=") && src.contains("decision="),
+        "{OBS_SOURCE}: #1161 — the genlock-acquire-bracket marker must carry oldest_queued_age_ms= \
+         and decision= so a below-floor pin (age >= reserve, decision=ACQUIRE) is legible."
+    );
+    // It is a HOLD/ACQUIRE decision on the bracketing gate — both verdicts must be printable.
+    assert!(
+        src.contains("\"HOLD\"") && src.contains("\"ACQUIRE\""),
+        "{OBS_SOURCE}: #1161 — the marker must distinguish decision=HOLD (queue deepening) from \
+         decision=ACQUIRE (locking now — inert if oldest_age already >= reserve)."
+    );
+}

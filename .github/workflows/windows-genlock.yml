@@ -676,6 +676,9 @@ jobs:
           if ($internal -notmatch [regex]::Escape('uint32_t genlock_acquire_bracket_ticks;')) {
             Write-Error "obs-internal.h: the ACQUIRE bracket-tick counter field genlock_acquire_bracket_ticks is missing from obs_source — the fail-open cap has nowhere to count (#1161)"; exit 1
           }
+          if ($src -notmatch [regex]::Escape("genlock-acquire-bracket '%s':") -or $src -notmatch [regex]::Escape('oldest_queued_age_ms=') -or $src -notmatch [regex]::Escape('decision=')) {
+            Write-Error "obs-source.c: the #1161 ACQUIRE-bracket observability marker (genlock-acquire-bracket) is gone — the ACQUIRE branch no longer prints reserve_ms vs oldest_queued_age_ms + the HOLD/ACQUIRE decision, so a live pin-rise re-acquire leaves no trace and a below-floor (inert) pin cannot be diagnosed from the OBS log (#1161 debug direction 3)"; exit 1
+          }
           Write-Output "#1161 Stage-2 ACQUIRE bracketing gate present (pin-rise re-acquire + bracketing hold + fail-open cap) — OK"
 
       # #278/#275: assert the multiview ADAPTIVE budget-based decouple (libobs render path +
