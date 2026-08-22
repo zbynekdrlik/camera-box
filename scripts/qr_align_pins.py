@@ -1028,13 +1028,18 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
         result["present_age_deltas_ms"] = {s: round(v, 2) for s, v in pure_deltas.items()}
         plan, over_budget, missing = floor_aware_partition(
             arrival_floors, pure_deltas, floor_ms, max_abs_latency_ms, current_pins=current_pins)
-        if missing:
+        if missing:  # pragma: no cover -- unreachable unless the faster_missing invariant breaks
+            # `missing` is provably empty here: the faster_missing pre-check above already cleared
+            # arrival_floors (-> the floor3 fallback) for the IDENTICAL "a faster camera lacks a
+            # floor" condition floor_aware_partition uses. Guard it defensively (a broken invariant
+            # fails loud, never silently omits a camera from the plan) with a DISTINCT internal
+            # message -- never re-duplicate floor_aware_pins' user-facing missing-abort wording,
+            # which would silently drift from it (#1161 review).
             _emit_fail_diagnostics(rounds_ticks, sources, tail_start)
             raise AlignmentImpossible(
-                "[qr-align] #1161 cannot compute a floor-aware pin for "
-                + ", ".join(repr(s) for s in missing) + ": no arrival-floor measurement (the strih "
-                "genlock audit head_skew is required -- a pin below the arrival transport floor is "
-                "structurally inert). Provide --jitter-json.")
+                "[qr-align] #1161 internal invariant: faster camera(s) "
+                + ", ".join(repr(s) for s in missing) + " reached the floor-aware partition with no "
+                "arrival floor (the faster_missing pre-check should have fallen back to floor3 first).")
         if over_budget:
             # #1161 BUDGET-BOUND SOFT-RELEASE (issue 1168). The tail is STABLE and within the spread
             # sanity (both proven above), but >=1 faster camera's alignment target exceeds the
@@ -1058,8 +1063,10 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
                  "target_ms": round(t, 1), "bound_ms": max_abs_latency_ms}
                 for s, fl, hl, t in over_budget]
             result["report_only_residual_ms"] = round(worst, 1)
+            # Report-only: the loud budget_bound_report() marker above + the persisted over_budget
+            # / report_only_residual_ms JSON fully surface the residual; the per-round frame_id table
+            # (_emit_fail_diagnostics) is a FAIL-path debugging aid, not emitted on this PASS (#1161 review).
             sys.stderr.write(budget_bound_report(over_budget, worst, max_abs_latency_ms) + "\n")
-            _emit_fail_diagnostics(rounds_ticks, sources, tail_start)  # per-camera table (report-only)
             return result
     else:
         note = ("partial/unusable arrival-floor audit" if jitter_json
