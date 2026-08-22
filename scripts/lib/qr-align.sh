@@ -79,21 +79,32 @@ qr_align_run() {
       # ONLY those lines (win_ssh_run re-sourced in a timeout-bounded subshell; the PS command rides
       # an env var to avoid nested-quoting hazards).
       local _start
+      # `|| true` guards the substitution (review 🔵) -- a bare invocation under set -e would
+      # otherwise abort mid-function on an ssh/pipefail failure.
       _start="$(_qa_ps="(Get-Content ($_newest)).Count" timeout 60 bash -c \
         '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
-        "$here" "$STRIH_USER" "$password" "$host" 2>/dev/null | tr -d '[:space:]')"
-      case "$_start" in ''|*[!0-9]*) _start=0 ;; esac
-      sleep "$_window"
-      if _qa_ps="Get-Content ($_newest) | Select-Object -Skip $_start" timeout 120 bash -c \
-          '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
-          "$here" "$STRIH_USER" "$password" "$host" > "$_log" 2>/dev/null && [ -s "$_log" ] \
-          && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
-          && [ -s "$_jj" ]; then
-        jitter_json="$_jj"
-        echo "[qr-align] #1161 post-reset arrival-floor audit fetched -> $_jj (floor-aware plan enabled)" >&2
-      else
-        echo "WARNING: [qr-align] #1161 could not fetch the post-reset strih genlock audit; the plan falls back to the inert-prone floor+delta — see qr_align_pins.py's own warning." >&2
-      fi
+        "$here" "$STRIH_USER" "$password" "$host" 2>/dev/null | tr -d '[:space:]' || true)"
+      case "$_start" in
+        ''|*[!0-9]*)
+          # A failed/garbled count read must NOT degrade to `-Skip 0` = the WHOLE OBS log: that
+          # re-mixes the PRE-reset pin-held audit lines the two-phase reset exists to separate,
+          # producing regime-mixed garbage floors (review 🟡). Skip the fetch -> floor+delta fallback.
+          echo "WARNING: [qr-align] #1161 could not read the post-settle log line count (ssh flake/timeout); skipping the floor-aware audit to avoid a regime-mixed whole-log fetch — falling back to floor+delta." >&2
+          ;;
+        *)
+          sleep "$_window"
+          if _qa_ps="Get-Content ($_newest) | Select-Object -Skip $_start" timeout 120 bash -c \
+              '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
+              "$here" "$STRIH_USER" "$password" "$host" > "$_log" 2>/dev/null && [ -s "$_log" ] \
+              && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
+              && [ -s "$_jj" ]; then
+            jitter_json="$_jj"
+            echo "[qr-align] #1161 post-reset arrival-floor audit fetched -> $_jj (floor-aware plan enabled)" >&2
+          else
+            echo "WARNING: [qr-align] #1161 could not fetch the post-reset strih genlock audit; the plan falls back to the inert-prone floor+delta — see qr_align_pins.py's own warning." >&2
+          fi
+          ;;
+      esac
     else
       echo "WARNING: [qr-align] #1161 pin reset-to-floor failed (rc=$_rrc); skipping the floor-aware audit — the plan falls back to floor+delta." >&2
     fi

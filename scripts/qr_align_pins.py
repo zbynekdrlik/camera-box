@@ -372,10 +372,14 @@ def floor_aware_pins(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
         if hold < 0.5:                   # co-slowest by present age -> minimum pin, UNLESS pin-dominated
             cur = current_pins.get(src) if current_pins else None
             fl = arrival_floors.get(src)
-            if cur is not None and fl is not None and cur >= fl - 1.0:
-                # pin-dominated: this camera's present age is held by its OWN pin, not the transport
-                # (its true transport is below and unobservable). Do NOT tear the pin down to the
-                # floor (that would drop it to that lower transport -> break parity). Keep the pin.
+            # pin-dominated: this camera's present age is held by its OWN pin, not the transport (its
+            # true transport is below and unobservable). Do NOT tear the pin down to the floor (that
+            # would drop it to that lower transport -> break parity). Keep the pin. The 3 ms slack
+            # absorbs the audit's own +mean_head_skew noise (a floor read a couple ms ABOVE the pin is
+            # still pin-dominated, #1161 review 🔵); a source pinned UP but ABSENT from the audit
+            # (fl None) is kept too (its transport is unknowable, flooring it can only misalign). All
+            # no-ops on the two-phase-reset path, where every pin is at the floor (cur == floor_ms).
+            if cur is not None and cur > floor_ms and (fl is None or cur >= fl - 3.0):
                 plan[src] = max(floor_ms, int(round(cur)))
             else:
                 plan[src] = floor_ms     # transport-dominated slowest -> floor (inert at its floor)
@@ -945,18 +949,22 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     # spuriously FAIL a legit drift as a "degraded grabber". SAME 66 ms bound, correct metric; the
     # folded-delta sanity stays for the no-floors fallback (behaviour there unchanged).
     sanity_deltas = pure_deltas if arrival_floors else deltas
+    result["sanity_deltas_ms"] = {s: round(v, 2) for s, v in sanity_deltas.items()}
     ok, slowest_src, widest_src, worst = sanity_ok(sanity_deltas, max_delta_ms)
     result["slowest_source"] = slowest_src
     result["worst_source"] = widest_src
     result["worst_delta_ms"] = round(worst, 2)
     if not ok:
         _emit_fail_diagnostics(rounds_ticks, sources, tail_start)
+        # #1161 review: print the JUDGED map (sanity_deltas) -- on the floor-aware path that is the
+        # PURE present-age spread, NOT the pin-FOLDED median (which over-reads from a pinned state and
+        # would mislead the "degraded grabber" diagnosis the owner reads).
         raise AlignmentImpossible(
             f"[qr-align] cannot align: cross-camera spread {worst:.1f} ms exceeds the "
             f"{max_delta_ms:.0f} ms sanity bound -- a degraded/underrun grabber, not a real "
             f"inter-card delta (the slowest camera {slowest_src!r} floors to {floor_ms}ms; the "
             f"widest gap is on {widest_src!r}; the anomaly is most likely the slowest card). "
-            f"Per-camera deltas (ms off the slowest): {result['median_deltas_ms']}.")
+            f"Per-camera deltas (ms off the slowest): {result['sanity_deltas_ms']}.")
 
     # FLOOR-AWARE: raise each faster camera ABOVE its arrival floor to the alignment target so the
     # genlock-C ACQUIRE frame-mover can add the hold (a below-floor pin is structurally inert); the
