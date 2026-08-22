@@ -8503,7 +8503,7 @@ mod tests {
 
     /// #1169 (owner, 2026-08-22) — SECOND SEAM: RE-WIDENS `REAL_DROPS_ALLOWANCE_DEFAULT` back to
     /// 1 for the sanctioned per-frame delivery SINGLETON (issue-1167 v3 paced-trickle absorption
-    /// + a FIFO stale_replay in the same event; burn_unreadable stays 0). Owner's 2026-07-31
+    /// plus a FIFO stale_replay in the same event; burn_unreadable stays 0). Owner's 2026-07-31
     /// strict-test revision: "jedna stratená snímka nie je problém." With the DEFAULT now 1 (no
     /// env override), a SINGLE genuine 1:1-hop cam1 real drop PASSES the headline WITHIN the
     /// allowance and is reported LOUDLY (never a silent green) — and 2 drops still FAIL, so the

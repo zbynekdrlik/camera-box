@@ -1229,11 +1229,15 @@ mod tests {
     }
 
     #[test]
-    fn benign_delivery_reorder_never_masks_a_real_drop_625() {
+    fn benign_delivery_reorder_gap_is_counted_and_absorbed_by_the_1169_singleton_never_masked_625() {
         // The reorder-tolerance fix must never MASK a genuine drop either: 1004 is truly missing
         // (never delivered) on top of the same 1002/1006-adjacent reorder pattern. Issue 889
         // (2026-07-30 user decision on issue 883): `gaps` is report-only for `overall_pass` now,
         // but it must still be COMPUTED correctly -- the STRICT per-window `pass` still fails.
+        // Issue 1169 (owner, 2026-08-22): the <=1/<=1 segment singleton allowance now ABSORBS
+        // this single COUNTED gap into `overall_pass` -- LOUDLY (per-segment note + run-level
+        // count), with strict `pass` staying false/visible. The gap is counted, never masked;
+        // TWO missing ticks (the sibling test below) still fail past the allowance.
         let schedule = vec![win("cam1", 0, 10_000)];
         let frames = vec![
             SegmentFrame {
@@ -1260,7 +1264,7 @@ mod tests {
         let v = segment_continuity(&frames, &schedule, 0, 2);
         assert!(
             !v.segments[0].pass,
-            "the genuinely-missing 1004 must still fail STRICT: {v:?}"
+            "the genuinely-missing 1004 must still fail STRICT (visible): {v:?}"
         );
         assert_eq!(
             v.segments[0].gaps, 1,
@@ -1271,8 +1275,72 @@ mod tests {
         // reports pass -- proving the gap is still correctly located/counted.
         assert!(v.segments[0].relaxed_pass);
         assert!(
+            v.segments[0].singleton_allowance_note.is_some(),
+            "issue 1169: the absorbed gap carries a LOUD per-segment note (never silent): {:?}",
+            v.segments[0]
+        );
+        assert_eq!(
+            v.windows_singleton_allowance_consumed, 1,
+            "issue 1169: exactly this window consumed the singleton allowance: {v:?}"
+        );
+        assert_eq!(
+            v.windows_failed_report_only, 1,
+            "issue 1169: the STRICT count still records the gap (report-only, visible): {v:?}"
+        );
+        assert!(
+            v.overall_pass,
+            "issue 1169: a single counted gap is ABSORBED into overall_pass (the singleton \
+             allowance) -- counted, never masked: {v:?}"
+        );
+    }
+
+    #[test]
+    fn benign_delivery_reorder_two_missing_ticks_still_fail_625() {
+        // The never-mask guarantee ABOVE the issue-1169 singleton allowance: the same
+        // 1002/1006-adjacent reorder shape, but TWO ticks (1004 and 1010) are genuinely missing
+        // (never delivered). Two counted gaps exceed the <=1 singleton band, so the segment AND
+        // overall_pass both still FAIL -- the allowance is a strict singleton, never an open door.
+        let schedule = vec![win("cam1", 0, 10_000)];
+        let frames = vec![
+            SegmentFrame {
+                frame_index: 0,
+                gen_ts_ns: 100,
+                tick: Some(1000),
+            },
+            SegmentFrame {
+                frame_index: 1,
+                gen_ts_ns: 200,
+                tick: Some(1006),
+            },
+            SegmentFrame {
+                frame_index: 2,
+                gen_ts_ns: 300,
+                tick: Some(1002),
+            },
+            SegmentFrame {
+                frame_index: 3,
+                gen_ts_ns: 400,
+                tick: Some(1008),
+            },
+            SegmentFrame {
+                frame_index: 4,
+                gen_ts_ns: 500,
+                tick: Some(1012),
+            },
+        ];
+        let v = segment_continuity(&frames, &schedule, 0, 2);
+        assert_eq!(
+            v.segments[0].gaps, 2,
+            "both genuinely-missing ticks are counted, reorder or not: {:?}",
+            v.segments[0]
+        );
+        assert!(
+            !v.segments[0].pass,
+            "two missing ticks must still fail STRICT: {v:?}"
+        );
+        assert!(
             !v.overall_pass,
-            "#1132: the genuinely-missing tick fails overall_pass -- copies/gaps rescue disarmed: {v:?}"
+            "issue 1169: two counted gaps exceed the singleton band -- never absorbed: {v:?}"
         );
     }
 
