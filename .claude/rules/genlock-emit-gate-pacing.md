@@ -591,6 +591,17 @@ empty-queue fill fires in BOTH wander directions (`src/dupe_decimation/gate.rs`,
   fmt --all --check` clean. The receiver-side recv-cap_max smoothing (the FIFO paces the
   contiguous-timecode burst) is the supervisor's live-rig verification — the sender-side
   net_skips/max_lag/windows are the faithful off-rig analogues.
+- **TESTING GOTCHA — model `queue_had_frame` as "did the loop BLOCK for this frame", NOT
+  `run_queue_sim`'s residence proxy.** `run_queue_sim` (the #1145 sawtooth sim) approximates
+  `queue_had_frame = now - cap_ns < cap_int/2` (residence < half an interval). That is WRONG for a
+  backed-up OVER-rate queue: an over-rate frame has a HIGH residence but an INSTANT dequeue (queue
+  full), so the real #1131 `frame_from_nonempty_queue(dequeue_duration_ms, …)` reads TRUE while the
+  proxy reads FALSE — inflating the empty-queue slot count. When you write a NEW empty-queue-fill
+  test (as the v5 `run_over_rate_stall_sim` does), set `queue_had_frame` from whether the loop
+  actually WAITED on an empty queue for that frame (a `waited_for_this` flag), the faithful
+  dequeue-duration analogue — otherwise the sim fires the fill on backed-up over-rate frames that
+  production never would. (The existing `over_rate_fills_…` test tolerates the proxy because it only
+  reads the wire RATE, which is proxy-independent.)
 - **Supervisor's live rig step:** confirm the per-5s `Streaming:` windows hold 299–301 on cam1
   through the OVER-rate wander (grabber > 60 with `#707` DQBUF stalls) with `starvation last-frame
   repeats` > 0, the strih `NDI cam1` `recv-timing #797` cap_max drops toward the cam2/3/4 ~20 ms
