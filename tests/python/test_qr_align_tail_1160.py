@@ -271,3 +271,136 @@ class TestTableMarksTheTail:
         # existing 2-arg callers get the old format (no used column).
         table = qa.format_round_table(_rounds([1, 2]), SRC)
         assert "used" not in table
+
+
+# --------------------------------------------------------------------------- #
+# #1161 -- measurement-window robustness: extend the window AND make the stable
+# tail OUTLIER-TOLERANT so a noisy-but-STATIONARY rig accumulates 5 CLEAN tail
+# rounds instead of running out of window, while a genuinely-unstable rig
+# (converging backlog / degraded grabber / sawtooth) STILL fails.
+#
+# Live evidence (E2E 32568491541 attempt 3): a HEALTHY rig, table 24/24 decoded,
+# spreads centered 2-3 with occasional near-band 4/5/1 blips -- but the width-1
+# "mutually stable" band kept truncating on every blip, the tail formed late
+# (r21), and the 90 s / 24-round window ended with only 3 clean tail rounds < 5.
+# --------------------------------------------------------------------------- #
+# The exact live 24-round cross-camera spread sequence (attempt 3):
+_LIVE_1161 = [2, 3, 2, 3, 4, 3, 5, 1, 3, 3, 1, 3, 1, 2, 2, 3, 1, 2, 2, 4, 1, 3, 2, 2]
+# The old cam1 "sawtooth" INSTABILITY (round-53 offsets -8,-10,-5,-11,-5,-1,-3,
+# -10,-7,-10 -> cross-camera spreads = |offset|, siblings aligned at 0). This is a
+# genuine degraded-grabber signature and MUST STILL FAIL (never absorbed as noise).
+_SAWTOOTH_1161 = [8, 10, 5, 11, 5, 1, 3, 10, 7, 10]
+
+
+class _CyclingBarrier:
+    """Like _ScriptedBarrier but REPEATS the whole spread PATTERN forever (a rig that stays
+    noisy-stationary, never settling to one constant value) -- so a loop test cannot 'pass' merely
+    because _ScriptedBarrier's repeat-last eventually emits K identical rounds."""
+
+    def __init__(self, spreads):
+        self.spreads = list(spreads)
+        self.i = 0
+
+    def __call__(self, sources, host, password, width, height):
+        sp = self.spreads[self.i % len(self.spreads)]
+        self.i += 1
+        return _raw_round(sp, base=30000 + self.i * 20)
+
+
+class TestMeasurementWindowExtended1161:
+    def test_measure_budget_extended_from_90s(self):
+        # sized from the data: a late tail (~r21) + a possible issue-1145 backlog transient need
+        # room for a transient-drain + 5 clean rounds; ~150 s ~= 40 rounds at ~3.75 s/round.
+        assert qa.DEFAULT_MEASURE_BUDGET_S == 150.0
+
+    def test_max_measure_rounds_extended_from_30(self):
+        assert qa.DEFAULT_MAX_MEASURE_ROUNDS == 40
+
+    def test_outlier_tol_const_exists(self):
+        # a skippable outlier must be within this many ids of the tight clean band (a near-band blip).
+        assert qa.DEFAULT_STABLE_OUTLIER_TOL_IDS == 2
+
+
+class TestStableTailOutlierTolerant1161:
+    def test_live_sequence_converges_stable_not_stable_need_more(self):
+        # THE live failure: the current width-1 band truncated to a 3-round tail -> stable-need-more.
+        # A stationary noisy rig must be recognized as STABLE and re-derived from (>= 5 clean rounds).
+        st = _status(_rounds(_LIVE_1161))
+        assert st.done is True and st.reason == "converged-stable"
+
+    def test_a_lone_nearband_spread4_blip_is_skipped_not_reset(self):
+        # a single spread-4 outlier inside a stable-2 run must NOT zero the accumulator (skip, not
+        # reset). Current code truncates at the 4 -> the 3 trailing 2s < 5 -> stable-need-more.
+        st = _status(_rounds([2, 2, 2, 2, 4, 2, 2, 2]))
+        assert st.done is True and st.reason == "converged-stable"
+
+    def test_stable_tail_start_spans_across_a_lone_outlier(self):
+        # the span (start index) extends back across a lone near-band outlier; the current pairwise
+        # band truncates at index 3 (the spread-4), returning 4.
+        assert qa._stable_tail_start(_rounds([2, 2, 2, 4, 2, 2, 2]), SRC, 3, 1) == 0
+
+    def test_clean_count_excludes_the_outlier_so_length_5_stays_strict(self):
+        # 4 clean 2s + one near-band 4 blip = span of 5 FULL rounds but only 4 CLEAN -> NOT enough
+        # to re-derive (min_valid 5 is judged on CLEAN rounds, never span length). Strictness kept.
+        st = _status(_rounds([2, 2, 4, 2, 2]))
+        assert st.done is False and st.reason == "stable-need-more"
+
+
+class TestUnstableRigsStillFail1161:
+    def test_sawtooth_5_to_11_still_fails(self):
+        # the MANDATED regression: large swings are magnitude-rejected, never absorbed as outliers.
+        st = _status(_rounds(_SAWTOOTH_1161))
+        assert st.done is False
+
+    def test_sawtooth_never_converges_even_when_repeated(self):
+        # even given the whole window, the degraded-grabber sawtooth never forms a 5-clean tail.
+        long_saw = _SAWTOOTH_1161 * 4
+        st = _status(_rounds(long_saw))
+        assert st.done is False
+
+    def test_near_band_high_frequency_2cycle_still_fails(self):
+        # a 1<->3 limit cycle (every other round off-band) -> the COUNT bound rejects it (outliers
+        # never stay a minority of clean rounds), so it is not mistaken for stationary noise.
+        st = _status(_rounds([1, 3] * 20))
+        assert st.done is False
+
+    def test_ten_three_bounce_still_fails(self):
+        st = _status(_rounds([10, 3] * 20))
+        assert st.done is False
+
+    def test_monotonic_ramp_still_fails(self):
+        st = _status(_rounds([1, 2, 3, 4, 5, 6, 7, 8]))
+        assert st.done is False
+
+    def test_backlog_decay_tail_unchanged(self):
+        # #1160 invariant preserved byte-for-byte: the FAR convergence transient (7,9,9,9,12) is
+        # magnitude-rejected (never absorbed), so the tail still starts at the converged suffix.
+        assert qa._stable_tail_start(
+            _rounds([10, 10, 11, 12, 9, 9, 9, 7, 2, 2, 1, 1, 1]), SRC, 3, 1) == 8
+
+
+class TestMeasureLoopWindowRobustness1161:
+    def test_loop_over_a_persistently_noisy_rig_converges_within_the_window(self, monkeypatch):
+        # end-to-end: the measure loop over a rig that stays noisy-stationary (never settles to one
+        # constant) must reach converged-stable within the window instead of exhausting it. The
+        # [2,3,4,3] cycle NEVER forms a 5-round WITHIN-1 tail (its longest within-1 run is 3), so the
+        # current pairwise band exhausts the window (done=False); the outlier-tolerant tail skips the
+        # near-band 4 blips and accumulates >= 5 CLEAN rounds. A genuine RED->GREEN, not wrap-luck.
+        monkeypatch.setattr(qa, "barrier_screenshot", _CyclingBarrier([2, 3, 4, 3]))
+        rounds, _run, st = qa.measure_stable_tail(
+            SRC, "h", "pw", width=1920, height=1080, run_id=None,
+            stable_tail_rounds=3, stable_tol_ids=1, parity_tol_ids=1, min_parity_rounds=3,
+            min_valid_rounds=5, budget_s=1e9, max_rounds=qa.DEFAULT_MAX_MEASURE_ROUNDS,
+            inter_round_s=0)
+        assert st.done is True and st.reason == "converged-stable"
+
+    def test_loop_over_a_persistently_sawtoothing_rig_never_converges(self, monkeypatch):
+        # the loop must NOT be fooled: a cycling degraded-grabber sawtooth runs to the round cap
+        # (bounded, never runs away) and returns done=False.
+        monkeypatch.setattr(qa, "barrier_screenshot", _CyclingBarrier(_SAWTOOTH_1161))
+        rounds, _run, st = qa.measure_stable_tail(
+            SRC, "h", "pw", width=1920, height=1080, run_id=None,
+            stable_tail_rounds=3, stable_tol_ids=1, parity_tol_ids=1, min_parity_rounds=3,
+            min_valid_rounds=5, budget_s=1e9, max_rounds=12, inter_round_s=0)
+        assert st.done is False
+        assert len(rounds) == 12
