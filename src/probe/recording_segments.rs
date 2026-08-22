@@ -1011,11 +1011,13 @@ mod tests {
     }
 
     #[test]
-    fn copy_stale_frame_in_one_window_fails_strict_and_1132_gates_overall() {
+    fn copy_stale_frame_fails_strict_but_is_absorbed_by_the_1169_singleton_supersedes_1132() {
         // cam2 repeats a painted tick (500,500,501) → a stale/frozen copy → STRICT FAIL.
-        // #1132 (owner mandate 2026-08-19): the copies/gaps rescue is DISARMED, so `overall_pass`
-        // (which now folds the STRICT-copies-gaps `overall_pass_term`) FAILS this run on the copy.
-        // `relaxed_pass` still reports the pre-#1132 tolerant verdict (observability).
+        // SUPERSEDED by #1169 (owner, 2026-08-22): #1132 made this single copy FAIL overall_pass.
+        // #1169 refines that -- a <=1/<=1 SINGLETON (the designed issue-1167 paced-trickle + FIFO
+        // stale_replay residual) is now ABSORBED into overall_pass, but LOUDLY (a per-segment note
+        // + the run-level count), with strict `pass` staying false/visible; >=2 of either still
+        // fails. CHANGED requirement, updated in its own `[red]` test commit with this justification.
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 4, 1, 100);
         frames.extend([
@@ -1037,19 +1039,28 @@ mod tests {
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert!(
-            !v.overall_pass,
-            "#1132: a copy alone now fails overall_pass again (rescue disarmed): {v:?}"
+            v.overall_pass,
+            "#1169: a single copy is now ABSORBED into overall_pass (the singleton allowance): {v:?}"
         );
         assert!(v.segments[0].pass);
         assert!(
             !v.segments[1].pass,
-            "889: the STRICT verdict still catches the copy: {:?}",
+            "889: the STRICT verdict still catches the copy (visible): {:?}",
             v.segments[1]
         );
         assert!(
             v.segments[1].relaxed_pass,
             "the relaxed verdict still reports pass despite the copy (observability): {:?}",
             v.segments[1]
+        );
+        assert!(
+            v.segments[1].singleton_allowance_note.is_some(),
+            "#1169: the absorbed copy carries a LOUD per-segment note (never silent): {:?}",
+            v.segments[1]
+        );
+        assert_eq!(
+            v.windows_singleton_allowance_consumed, 1,
+            "#1169: exactly cam2's window consumed the singleton allowance: {v:?}"
         );
         assert_eq!(
             v.segments[1].copies, 1,
@@ -1058,7 +1069,10 @@ mod tests {
         );
         assert_eq!(v.segments[1].gaps, 0);
         assert_eq!(v.segments[1].undecodable, 0);
-        assert_eq!(v.windows_failed_report_only, 1);
+        assert_eq!(
+            v.windows_failed_report_only, 1,
+            "#1169: the STRICT count still records the copy (report-only, visible): {v:?}"
+        );
     }
 
     #[test]
@@ -1978,14 +1992,13 @@ mod tests {
     }
 
     #[test]
-    fn windows_at_copies_gaps_tolerance_now_gate_overall_1132() {
-        // #1132 (owner mandate 2026-08-19) -- THE key test for the removed rescue. A window with
-        // exactly ONE copy sits AT/within the (still-live, reported) copies/gaps tolerance, so
-        // `relaxed_pass` still reports pass and `windows_over_copies_gaps_tolerance` stays 0.
-        // Pre-#1132 this window did NOT gate `overall_pass` (the rescue). #1132 DISARMS that
-        // rescue: `overall_pass` now folds the STRICT-copies-gaps `overall_pass_term`, so this
-        // within-tolerance window FAILS the run -- escalate, never mask. This is exactly the
-        // CAM1-class rescue (green run 97792938: seg0 gaps=2 / seg6 copies=1) the owner removed.
+    fn a_single_copy_window_is_absorbed_by_the_1169_singleton_supersedes_1132() {
+        // SUPERSEDED by #1169 (owner, 2026-08-22) -- THE key test, flipped. A window with exactly
+        // ONE copy is a <=1/<=1 SINGLETON: the designed issue-1167 paced-trickle + FIFO
+        // stale_replay residual (post cam1 card swap), NOT a hardware-sick leg. #1132 made it FAIL
+        // overall_pass ("every multi-frame event RED"); #1169 absorbs the SINGLETON loudly (note +
+        // count, strict stays false/visible) while >=2 of either still fails (the multi-frame
+        // intent #1132 protected). CHANGED requirement, updated in its own `[red]` test commit.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 2000),
@@ -2002,7 +2015,7 @@ mod tests {
                 frame_index: 101,
                 gen_ts_ns: 1200,
                 tick: Some(500),
-            }, // cam2 copy #1 -- AT the tolerance (1)
+            }, // cam2 copy #1 -- a <=1/<=1 singleton (absorbed by #1169)
             SegmentFrame {
                 frame_index: 102,
                 gen_ts_ns: 1300,
@@ -2018,16 +2031,71 @@ mod tests {
             v.segments[1]
         );
         assert!(
-            !v.overall_pass,
-            "#1132: a within-tolerance copy now GATES overall_pass -- the rescue is disarmed: {v:?}"
+            v.overall_pass,
+            "#1169: a single copy is ABSORBED into overall_pass (the singleton allowance): {v:?}"
+        );
+        assert!(
+            v.segments[1].singleton_allowance_note.is_some(),
+            "#1169: the absorbed copy carries a LOUD per-segment note: {:?}",
+            v.segments[1]
+        );
+        assert_eq!(
+            v.windows_singleton_allowance_consumed, 1,
+            "#1169: exactly cam2's window consumed the singleton allowance: {v:?}"
         );
         assert_eq!(
             v.windows_over_copies_gaps_tolerance, 0,
-            "#1132: the window is still WITHIN the reported tolerance (count stays 0) yet gates overall_pass anyway -- the fold no longer keys off over-tolerance: {v:?}"
+            "the window is WITHIN the reported <=3 tolerance (count stays 0): {v:?}"
         );
         assert_eq!(
             v.windows_failed_report_only, 1,
-            "still strict-fails (report-only): {v:?}"
+            "still strict-fails (report-only, visible): {v:?}"
+        );
+    }
+
+    #[test]
+    fn two_copies_in_one_window_still_fail_overall_1169() {
+        // #1169 preserves #1132's multi-frame intent: a window with TWO copies (>1) exceeds the
+        // singleton allowance and STILL fails overall_pass -- and it is NOT counted as a consumed
+        // singleton (the count/note are reserved for the absorbed <=1/<=1 case).
+        let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
+        let mut frames = clean_frames(0, 100, 4, 1, 100);
+        frames.extend([
+            SegmentFrame {
+                frame_index: 100,
+                gen_ts_ns: 1100,
+                tick: Some(500),
+            },
+            SegmentFrame {
+                frame_index: 101,
+                gen_ts_ns: 1200,
+                tick: Some(500),
+            }, // copy #1
+            SegmentFrame {
+                frame_index: 102,
+                gen_ts_ns: 1300,
+                tick: Some(500),
+            }, // copy #2 -- over the singleton allowance
+            SegmentFrame {
+                frame_index: 103,
+                gen_ts_ns: 1400,
+                tick: Some(501),
+            },
+        ]);
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(v.segments[1].copies, 2, "{:?}", v.segments[1]);
+        assert!(
+            !v.overall_pass,
+            "#1169: 2 copies exceed the singleton allowance -- must still FAIL overall_pass: {v:?}"
+        );
+        assert!(
+            v.segments[1].singleton_allowance_note.is_none(),
+            "#1169: an over-band window carries no singleton note (it fails loudly on its own): {:?}",
+            v.segments[1]
+        );
+        assert_eq!(
+            v.windows_singleton_allowance_consumed, 0,
+            "#1169: an over-band window is not counted as a consumed singleton: {v:?}"
         );
     }
 }
