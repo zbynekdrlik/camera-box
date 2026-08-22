@@ -238,10 +238,12 @@ const NDILIB_FRAME_TYPE_METADATA: c_int = 3;
 #[allow(dead_code)]
 const NDILIB_FRAME_TYPE_ERROR: c_int = 4;
 
-// Color formats
-const NDILIB_RECV_COLOR_FORMAT_UYVY_BGRA: c_int = 0;
+// Color formats — values per vendor/distroav/lib/ndi/Processing.NDI.Recv.h: BGRX_BGRA = 0,
+// UYVY_BGRA = 1 (the two names were historically swapped here; value 0 = BGRX/BGRA is what
+// this receiver has always requested and handles — label-only fix, behavior unchanged).
+const NDILIB_RECV_COLOR_FORMAT_BGRX_BGRA: c_int = 0;
 #[allow(dead_code)]
-const NDILIB_RECV_COLOR_FORMAT_BGRX_BGRA: c_int = 1;
+const NDILIB_RECV_COLOR_FORMAT_UYVY_BGRA: c_int = 1;
 
 // Bandwidth
 const NDILIB_RECV_BANDWIDTH_HIGHEST: c_int = 100;
@@ -1269,7 +1271,7 @@ impl NdiReceiver {
         let recv_name = CString::new("camera-box-display").unwrap();
         let recv_create = NDIlib_recv_create_v3_t {
             source_to_connect_to: source,
-            color_format: NDILIB_RECV_COLOR_FORMAT_UYVY_BGRA,
+            color_format: NDILIB_RECV_COLOR_FORMAT_BGRX_BGRA,
             bandwidth: NDILIB_RECV_BANDWIDTH_HIGHEST,
             allow_video_fields: false,
             p_ndi_recv_name: recv_name.as_ptr(),
