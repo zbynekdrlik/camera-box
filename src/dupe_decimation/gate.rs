@@ -135,6 +135,16 @@ pub struct DecimationGate {
     /// [`last_poll_intentional_extra_advance`](Self::last_poll_intentional_extra_advance) so a filled
     /// slot is deducted from the #707 boundary-skip diagnostic. Reset to 0 at the start of every poll.
     last_poll_starvation_repeats: u64,
+    /// (#1167 v4) Run length of CONSECUTIVE starvation last-frame repeats emitted WITHOUT an
+    /// intervening on-time capture. The empty-queue fill is bounded by [`STARVATION_REPEAT_MAX`]:
+    /// each poll may emit at most `STARVATION_REPEAT_MAX - consecutive_starvation_repeats` repeats,
+    /// and this is RESET to 0 by any on-time crossing (`lag_intervals == 0` — the source proved it
+    /// is keeping pace). A live-but-slightly-slow grabber (57.9 fps) crosses a boundary only ~2×/s
+    /// with ~27 on-time frames between (each resetting this), so it never approaches the cap and is
+    /// fully filled; a source that NEVER delivers an on-time frame (a genuinely dead/frozen/half-rate
+    /// leg) accumulates to the cap, stops being filled, under-runs, and stays visible to the
+    /// leg-health / frozen-leg attribution — the fail-SAFE that keeps a dead camera looking down.
+    consecutive_starvation_repeats: u64,
 }
 
 impl DecimationGate {
@@ -350,6 +360,19 @@ impl DecimationGate {
     // after the file split. No behaviour change; still crate-internal.
     pub(crate) fn sustained_over_rate(&self) -> bool {
         self.takt_ema_interval_ns != 0 && self.takt_ema_interval_ns < RETIRE_MIN_TAKT_INTERVAL_NS
+    }
+
+    /// (#1167 v4) Is the capture-takt EMA a MEASURED sustained UNDER-rate (the grabber capturing
+    /// below 60 — the sub-60 wander to 57.9–59.7)? The mirror of
+    /// [`sustained_over_rate`](Self::sustained_over_rate) on the slow side, and the POSITIVE signal
+    /// the empty-queue last-frame repeat is gated on. Requires `takt_ema != 0` (a real measurement),
+    /// so a caller that disables the takt EMA (`capture_mono_ns == 0`) never arms the fill —
+    /// deliberately NOT `!sustained_over_rate`, which reads TRUE with the EMA disabled even at an
+    /// over-rate pattern. Mutually exclusive with `sustained_over_rate` by construction
+    /// (`STARVATION_MIN_TAKT_INTERVAL_NS` > `RETIRE_MIN_TAKT_INTERVAL_NS`).
+    pub(crate) fn sustained_under_rate(&self) -> bool {
+        self.takt_ema_interval_ns != 0
+            && self.takt_ema_interval_ns > STARVATION_MIN_TAKT_INTERVAL_NS
     }
 
     /// (#1167) FILL the current 60fps slot: advance the boundary one interval AND emit the current
@@ -670,7 +693,53 @@ impl DecimationGate {
                 false
             }
             ShedAction::Emit { copy } => {
-                self.next_boundary_ns = candidate_next;
+                // (#1167 v4) STARVATION last-frame repeat: at an UNDER-rate the V4L2 queue empties and
+                // 60fps boundaries pass with NO capture to fill them (the loop genuinely waited ->
+                // `queue_had_frame == false`). The v2/v3 fills can't help — they only convert a
+                // captured frame's shed into a copy; none can fabricate an emit when no frame arrived.
+                // Report up to STARVATION_REPEAT_MAX last-frame repeats (main.rs re-emits the CURRENT
+                // GOOD frame — it passed the corruption check, so never corrupted content) for the
+                // boundaries this dip left unfilled, and advance the grid to catch up. Gated: a FRESH
+                // unique (`!copy` — a dupe/frozen source takes the copy valve and gets NO repeats, so a
+                // dead/frozen leg still under-runs), an EMPTY queue, NOT over-rate and NOT converging
+                // (both are v2/v3's regime — decoupled, no shared counter/pace budget), a stale boundary
+                // (`lag >= 1`), and within the non-resync catch-up band (`lag <= 8`) so a deeper
+                // empty-queue GAP still resyncs honestly (dead-leg semantics). Bounded to
+                // STARVATION_REPEAT_MAX CONSECUTIVE repeats (reset by any on-time capture below).
+                let starvation_repeats = if !copy
+                    && !queue_had_frame
+                    && self.sustained_under_rate()
+                    && !self.converging_deep_backlog
+                    && lag_intervals >= 1
+                    && lag_intervals <= crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS
+                {
+                    let budget =
+                        STARVATION_REPEAT_MAX.saturating_sub(self.consecutive_starvation_repeats);
+                    lag_intervals.min(budget)
+                } else {
+                    0
+                };
+                if starvation_repeats > 0 {
+                    self.consecutive_starvation_repeats = self
+                        .consecutive_starvation_repeats
+                        .saturating_add(starvation_repeats);
+                    self.last_poll_starvation_repeats = starvation_repeats;
+                    self.shed_log.record_starvation_repeats(starvation_repeats);
+                    // Advance PAST the repeat-filled boundaries too (capped, never overshooting `now`):
+                    // `candidate_next` is the single-interval catch-up (the `lag <= 8` gate guarantees
+                    // no resync fired, so `candidate_next == boundary + interval`), and
+                    // `repeats <= lag`, so this lands at `boundary + (1 + repeats)*interval` which is
+                    // `<=` the first boundary after `now`. This drains the accumulating lag so it never
+                    // reaches the #131 resync bound.
+                    self.next_boundary_ns = candidate_next + starvation_repeats * interval_ns;
+                } else {
+                    self.next_boundary_ns = candidate_next;
+                }
+                // An on-time capture proves the source is keeping pace -> reset the consecutive-repeat
+                // cap, so a leg that NEVER catches up eventually hits the cap and stays exposed.
+                if lag_intervals == 0 {
+                    self.consecutive_starvation_repeats = 0;
+                }
                 self.deferred_this_boundary = false;
                 self.consecutive_drain_holds = 0; // (#1167) an emit fills + advances -> hold streak broken
                 if copy {
@@ -691,6 +760,13 @@ impl DecimationGate {
     pub fn take_shed_counts(&mut self) -> (u64, u64, u64, u64, u64, u64) {
         self.shed_log.take()
     }
+
+    /// (#1167 v4) Drain + reset the accumulated STARVATION last-frame-repeat count for the periodic
+    /// INFO log — see [`DupeShedLog::take_starvation_repeats`]. Kept SEPARATE from
+    /// [`take_shed_counts`](Self::take_shed_counts) so its byte-frozen 6-tuple is unchanged.
+    pub fn take_starvation_repeats(&mut self) -> u64 {
+        self.shed_log.take_starvation_repeats()
+    }
 }
 
 // ── (#889) mechanism-visibility log (comprehensive-logging) ──────────────────
@@ -708,6 +784,12 @@ pub struct DupeShedLog {
     retired: u64,
     drained: u64,
     fast_drained: u64,
+    /// (#1167 v4) How many STARVATION last-frame repeats were emitted (empty-queue 60fps slots
+    /// filled by re-emitting the current good frame). Drained SEPARATELY via
+    /// [`take_starvation_repeats`](Self::take_starvation_repeats) so the byte-frozen 6-tuple
+    /// [`take`](Self::take) / `take_shed_counts` signature (main.rs destructure + external greps)
+    /// is unchanged; surfaced as an APPENDED segment on the (#889) summary line.
+    starvation_repeats: u64,
 }
 
 impl DupeShedLog {
@@ -767,6 +849,23 @@ impl DupeShedLog {
         self.fast_drained = self.fast_drained.saturating_add(1);
     }
 
+    /// (#1167 v4) Record `n` STARVATION last-frame repeats emitted this poll — empty-queue 60fps
+    /// slots filled by re-emitting the current good frame (see [`DecimationGate::poll`]). Accumulated
+    /// separately from the byte-frozen 6-tuple and drained by
+    /// [`take_starvation_repeats`](Self::take_starvation_repeats).
+    pub fn record_starvation_repeats(&mut self, n: u64) {
+        self.starvation_repeats = self.starvation_repeats.saturating_add(n);
+    }
+
+    /// (#1167 v4) Drain + reset the accumulated starvation-repeat count. Separate from
+    /// [`take`](Self::take) so the byte-frozen 6-tuple signature (main.rs + external greps) is
+    /// unchanged; main.rs calls both each 5s window.
+    pub fn take_starvation_repeats(&mut self) -> u64 {
+        let out = self.starvation_repeats;
+        self.starvation_repeats = 0;
+        out
+    }
+
     /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired, drained, fast_drained)`
     /// counts and RESET.
     pub fn take(&mut self) -> (u64, u64, u64, u64, u64, u64) {
@@ -799,13 +898,17 @@ pub fn dupe_shed_summary(
     retired: u64,
     drained: u64,
     fast_drained: u64,
+    starvation_repeats: u64,
     window_secs: u64,
 ) -> String {
+    // (#1167 v4) The `starvation_repeats` segment is APPENDED — every substring before it is
+    // byte-frozen (main.rs + external journal greps read them), so a new counter is additive only.
     format!(
         "(#889) dupe-preferring decimation: {dupe_shed} dupe-victim shed / {blind_shed} \
          blind-pacing shed / {dupe_emitted} late-dupe copies emitted (#1111 grid-lock valve) / \
          {retired} boundaries retired (#1145 over-rate absorption) / {drained} depth-drained \
          (#1145 v2 over-rate absorption) / {fast_drained} fast-drained (#1145 v2.1 deep-backlog \
-         convergence) over the last ~{window_secs}s"
+         convergence) / {starvation_repeats} starvation last-frame repeats (#1167 v4 empty-queue \
+         slot-fill) over the last ~{window_secs}s"
     )
 }

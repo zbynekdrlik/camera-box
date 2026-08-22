@@ -225,6 +225,29 @@ pub fn boundary_skip_count(old_boundary_ns: u64, new_boundary_ns: u64, interval_
     (advanced / interval_ns).saturating_sub(1)
 }
 
+/// (#1167 v4) The NDI genlock emit timecode (100ns units) for the `repeat_index`-th STARVATION
+/// last-frame repeat — the boundary `repeat_index` whole send-fps frames BEFORE the current frame's
+/// boundary `base_timecode_100ns` (from [`crate::genlock_stamp::genlock_emit_timecode_100ns`]). When
+/// the grabber under-captures, empty-queue 60fps boundaries pass unfilled;
+/// [`crate::dupe_decimation::DecimationGate::poll`] reports how many to fill by re-emitting the
+/// current GOOD frame, and each repeat MUST carry its own consecutive boundary timecode — a shared
+/// timecode would collapse the repeats into ONE slot in the downstream genlock FIFO. One send-fps
+/// frame is `10_000_000 / fps` in 100ns units (`10_000_000` = one second in 100ns units). `fps <= 0`
+/// returns the base timecode unchanged (guarded divisor, mirroring the module's other timecode math).
+/// `repeat_index` is 1-based: `1` = one frame before the current, up to
+/// [`crate::dupe_decimation::STARVATION_REPEAT_MAX`].
+pub fn starvation_repeat_timecode_100ns(
+    base_timecode_100ns: i64,
+    repeat_index: u64,
+    fps: i64,
+) -> i64 {
+    if fps <= 0 {
+        return base_timecode_100ns;
+    }
+    let frame_interval_100ns = 10_000_000 / fps;
+    base_timecode_100ns - (repeat_index as i64) * frame_interval_100ns
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,5 +700,37 @@ mod tests {
             boundary_skip_count(boundary, next, I30) >= 1,
             "the true gap is an honest skip"
         );
+    }
+
+    // --- starvation_repeat_timecode_100ns (#1167 v4) ------------------------
+    #[test]
+    fn starvation_repeat_timecode_steps_back_one_frame_per_index_1167() {
+        // 60 fps -> one frame is 10_000_000/60 = 166_666 (100ns units). Repeat k lands k frames
+        // before the base boundary, strictly decreasing + distinct so the FIFO gives each its own slot.
+        let base = 123_456_789i64;
+        let frame = 10_000_000i64 / 60;
+        assert_eq!(starvation_repeat_timecode_100ns(base, 1, 60), base - frame);
+        assert_eq!(
+            starvation_repeat_timecode_100ns(base, 2, 60),
+            base - 2 * frame
+        );
+        assert_eq!(
+            starvation_repeat_timecode_100ns(base, 4, 60),
+            base - 4 * frame
+        );
+        // strictly monotone-decreasing in the repeat index (distinct consecutive slots).
+        let t1 = starvation_repeat_timecode_100ns(base, 1, 60);
+        let t2 = starvation_repeat_timecode_100ns(base, 2, 60);
+        assert!(
+            t2 < t1 && t1 < base,
+            "each earlier repeat gets a strictly earlier timecode"
+        );
+    }
+
+    #[test]
+    fn starvation_repeat_timecode_guards_zero_fps_1167() {
+        // fps <= 0 (guarded divisor) returns the base unchanged, never divides by zero.
+        assert_eq!(starvation_repeat_timecode_100ns(999, 3, 0), 999);
+        assert_eq!(starvation_repeat_timecode_100ns(999, 3, -5), 999);
     }
 }

@@ -252,13 +252,14 @@ fn summary_names_all_counts_and_the_ticket_tags() {
     // (#1145 review 🔵) Distinctive multi-digit counts that do NOT appear as substrings of the
     // ticket tags (889/1111/1145) or each other, so each assertion actually pins its own count
     // rather than being satisfied by a digit from a ticket number.
-    let s = dupe_shed_summary(41, 23, 67, 94, 58, 72, 36);
+    let s = dupe_shed_summary(41, 23, 67, 94, 58, 72, 85, 36);
     assert!(s.contains("#889"));
     assert!(s.contains("#1111"), "names the late-dupe copy valve");
     assert!(
         s.contains("#1145"),
         "names the retirement + depth-drain mechanisms"
     );
+    assert!(s.contains("#1167"), "names the v4 starvation slot-fill");
     assert!(s.contains("41"), "names the dupe-victim shed count");
     assert!(s.contains("23"), "names the blind-pacing shed count");
     assert!(s.contains("67"), "names the emitted-copy count");
@@ -269,12 +270,20 @@ fn summary_names_all_counts_and_the_ticket_tags() {
         "names the fast-drained count (#1145 v2.1)"
     );
     assert!(
+        s.contains("85"),
+        "names the starvation last-frame-repeat count (#1167 v4)"
+    );
+    assert!(
         s.contains("depth-drained"),
         "names the v2 depth-drain mechanism"
     );
     assert!(
         s.contains("fast-drained"),
         "names the v2.1 fast-drain mechanism"
+    );
+    assert!(
+        s.contains("starvation last-frame repeats"),
+        "names the v4 empty-queue slot-fill mechanism"
     );
     assert!(s.contains("~36s"), "names the window seconds");
 }
@@ -2601,5 +2610,80 @@ fn under_rate_starvation_never_skips_a_slot_1167() {
         "under-rate starvation must not leave a skipped (un-emitted) 60fps slot; got {} net #707 \
          skips (windows {:?})",
         s.net_skips, s.windows
+    );
+}
+
+#[test]
+fn frozen_source_gets_no_starvation_repeat_and_stays_exposed_1167() {
+    // A FROZEN/wedged painter delivers only content-DUPES -> the #1111 copy valve (Emit{copy:true}),
+    // which the v4 `!copy` gate excludes: it receives ZERO starvation repeats, so it emits only at
+    // its (sub-60) capture rate and stays visible to #666 / the frozen-leg attribution — a dead
+    // camera must still look down, never masked to 60 (the ticket's hard constraint).
+    let s = run_starvation_sim(57.9, 20.0, false);
+    assert_eq!(
+        s.repeats, 0,
+        "a frozen (all-dupe) source must never receive a starvation fill; got {} repeats",
+        s.repeats
+    );
+    let rate = s.emit_events as f64 / 20.0;
+    assert!(
+        rate < 59.0,
+        "a frozen source must under-run (stay exposed), not be filled to 60; got {rate:.2} fps"
+    );
+}
+
+#[test]
+fn genuinely_half_rate_leg_is_bounded_by_the_repeat_cap_1167() {
+    // A source so slow it NEVER delivers an on-time capture (30 fps — every frame >= 1 interval late)
+    // can never reset the consecutive-repeat cap, so after STARVATION_REPEAT_MAX repeats the fill
+    // stops and the leg under-runs -> it stays exposed, NOT masked to 60. The cap is the fail-safe
+    // that prevents an infinite freeze-loop from papering over a genuinely half-dead leg.
+    let s = run_starvation_sim(30.0, 20.0, true);
+    let rate = s.emit_events as f64 / 20.0;
+    assert!(
+        rate < 58.0,
+        "the consecutive cap must keep a genuinely half-rate leg exposed (well under 60), not fill \
+         it to target; got {rate:.2} fps ({} repeats)",
+        s.repeats
+    );
+}
+
+#[test]
+fn over_rate_never_starvation_repeats_1167() {
+    // At a genuine OVER-rate (62 fps, real monotonic takt so `sustained_over_rate` arms and
+    // `sustained_under_rate` is FALSE) the v4 empty-queue fill must stay inert — that regime is
+    // owned by v2/v3 (decoupled). `queue_had_frame=false` is the HARSHER case (v4's !queue_had_frame
+    // gate is satisfied), so this proves the `sustained_under_rate` gate ALONE keeps v4 off.
+    let captures = synthetic_889_capture_sequence(62.0, 62 * 8, 15);
+    let emit_int = 1_000_000_000u64 / 60;
+    let mut gate = DecimationGate::new();
+    let mut repeats = 0u64;
+    for (now_ns, content_id, _is_dupe) in &captures {
+        let _ = gate.poll(*now_ns, emit_int, *content_id, false, *now_ns, *now_ns);
+        repeats += gate.last_poll_starvation_repeats();
+    }
+    assert_eq!(
+        repeats, 0,
+        "an over-rate source must never trigger a v4 starvation repeat; got {repeats}"
+    );
+}
+
+#[test]
+fn healthy_60_never_starvation_repeats_1167() {
+    // A healthy 60.00 card (takt ~16.667 ms, neither over- nor under-rate: on the grid, lag 0) must
+    // be byte-inert to v4 — `sustained_under_rate` is false AND lag is 0, so ZERO starvation repeats.
+    let cap_int = 1_000_000_000u64 / 60;
+    let emit_int = 1_000_000_000u64 / 60;
+    let mut gate = DecimationGate::new();
+    let mut repeats = 0u64;
+    for i in 0u64..600 {
+        let now = i * cap_int;
+        let hash = i.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        let _ = gate.poll(now, emit_int, hash, false, now, now);
+        repeats += gate.last_poll_starvation_repeats();
+    }
+    assert_eq!(
+        repeats, 0,
+        "a healthy 60.00 card must never trigger a starvation repeat; got {repeats}"
     );
 }
