@@ -334,7 +334,7 @@ if [ "\$FBW" -gt 0 ] && [ "\$FBH" -gt 0 ]; then
   VF="scale=\$FBW:\$FBH:force_original_aspect_ratio=decrease,pad=\$FBW:\$FBH:(ow-iw)/2:(oh-ih)/2"
 else
   echo "WARN: [lipsync #1173] could not read fb geometry from /sys/class/graphics/$fbname/virtual_size (got '\$FBGEOM') -- painting UNSCALED; the face may be cropped if fb0 is not the asset's native size" >&2
-  VF="null"
+  VF=null
 fi
 CMDS
 }
