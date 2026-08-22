@@ -595,6 +595,52 @@ fn real_drops_allowance() -> u32 {
         .unwrap_or(REAL_DROPS_ALLOWANCE_DEFAULT)
 }
 
+/// **Issue 1169 THIRD SEAM (owner, 2026-08-22)** — the LOUD singleton allowance for the raw
+/// cam-leg V4L2 capture-drop counter (`full_chain.loss.cam2_*.zero_loss`, the LAST binding
+/// `all_pass &= …` red). It is the sibling of the two prior seams: the per-segment `<=1/<=1`
+/// singleton bar (`window_gate::segment_singleton_allowance_*`) and the per-node real-drops
+/// singleton (`REAL_DROPS_ALLOWANCE_DEFAULT`, the delivery-hop counter above). A `v4l2_dropped`
+/// count WITHIN this band is an UPSTREAM camera-leg buffer drop (the kernel `sequence` gap
+/// `capture.rs` tracks) that the merged issue-1167 v2–v5 paced-trickle + FIFO emit-fill absorbs by
+/// design — so a strict-zero bar on the RAW counter double-reds what the presented layer already
+/// compensated. The first full verdict of the series showed exactly `v4l2_dropped:2` over
+/// `frames_captured:35961` (0.0056%) while `full_chain.zero_loss` + `all_cambox_continuity` were
+/// already green. Per the owner's 2026-07-31 strict-test revision ("jedna stratená snímka nie je
+/// problém"), a `v4l2_dropped <= CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` count PASSES within the
+/// allowance and is reported LOUDLY (never a silent green — a `note` + `camleg_singleton_band_consumed`
+/// on the node JSON), while `> CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` still FAILS unchanged. The
+/// default of 2 is justified from the live data: healthy cam2/cam3 routinely log 0–2 capture-dropped
+/// per ~10-min run window. This is the exact `gate-allowance-restore-red-green.md` shape, inverted,
+/// THIRD instance. **Issue 1169 stays OPEN as the RE-TIGHTEN trail** — a one-constant flip back to 0
+/// (proven dormant by `re_tightening_the_camleg_v4l2_band_to_zero_restores_the_strict_bar`), landed
+/// once a zero-singleton green run holds (e.g. after the issue-1168 floor reduction and/or the
+/// cam1-card swap). NEVER widen this band further without a fresh measured incident and its own trail.
+const CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT: u32 = 2;
+
+/// #1169 — env-overridable read of the cam-leg V4L2 capture-drop allowance (mirrors the
+/// [`real_drops_allowance`] idiom above: a non-numeric or absent value silently falls back to
+/// [`CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT`], never panics).
+fn camleg_v4l2_drop_allowance() -> u32 {
+    std::env::var("CAMERA_BOX_CAMLEG_V4L2_DROP_ALLOWANCE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT)
+}
+
+/// #1169 — the PURE cam-leg V4L2 capture-drop band decision (Tier-0 unit-testable; the whole
+/// `recording-verdict` bin is probe-gated with no local compile path, so keeping this a standalone
+/// scalar fn is what lets a rustc-replica prove the boundary). Returns `(within_band,
+/// band_consumed)`:
+/// - `within_band` — `v4l2_dropped <= allowance`; drives the node's `zero_loss` and the `all_pass`
+///   fold (a within-band count PASSES `overall_pass`).
+/// - `band_consumed` — `within_band && v4l2_dropped > 0`; a NON-zero drop count that only cleared
+///   the gate because of the band (the LOUD note case, distinct from a clean strict-zero pass).
+fn camleg_capture_band(v4l2_dropped: u64, allowance: u32) -> (bool, bool) {
+    let within_band = v4l2_dropped <= allowance as u64;
+    let band_consumed = within_band && v4l2_dropped > 0;
+    (within_band, band_consumed)
+}
+
 /// #24/#312 — the node labels that occupy the "camera under test" role: whichever physical
 /// source camera(s) are deployed with `CAMERA_BOX_BURN_RUN_ID` set this run. In the plain
 /// single-camera mode exactly ONE produces a non-empty id set (mutually exclusive); in the
@@ -4240,12 +4286,36 @@ fn build_and_print_verdict_with_stream_diffs(
     // silently ignored while OVERALL printed ZERO loss).
     if let Some(stats_path) = &args.cam1_capture_stats {
         let stats = parse_cam1_capture_stats(stats_path)?;
+        let allowance = camleg_v4l2_drop_allowance();
         let capture_zero = stats.v4l2_dropped == 0;
+        // #1169 THIRD SEAM — a LOUD singleton band on the RAW cam-leg V4L2 capture-drop counter.
+        // A count WITHIN `allowance` is an UPSTREAM camera-leg buffer drop the issue-1167 emit-fill
+        // absorbs by design, so it PASSES with a loud note instead of double-redding what the
+        // presented layer already compensated; `> allowance` still FAILS unchanged.
+        let (within_band, band_consumed) = camleg_capture_band(stats.v4l2_dropped, allowance);
+        let note = band_consumed.then(|| {
+            format!(
+                "cam-leg V4L2 singleton band consumed: {}/{} — absorbed by the issue-1167 emit \
+                 fill; issue 1169 re-tighten trail",
+                stats.v4l2_dropped, allowance
+            )
+        });
         if capture_zero {
             println!(
                 "  [cam2→{camera_under_test_label}] ZERO loss — {camera_under_test_label} V4L2 \
                  capture dropped 0 frames ({} captured).",
                 stats.frames_captured
+            );
+        } else if band_consumed {
+            // Denominator is the TOTAL the device should have produced = delivered + dropped.
+            // LOUD: a PASS, but NOT a strict zero — never let it look like the clean branch above.
+            let total = stats.frames_captured.saturating_add(stats.v4l2_dropped);
+            println!(
+                "  >>> ⚠ #1169 CAM-LEG V4L2 SINGLETON BAND: [cam2→{camera_under_test_label}] \
+                 {camera_under_test_label} V4L2 capture dropped {} of {} frames ({} delivered) — \
+                 WITHIN the singleton band ({allowance}); absorbed by the issue-1167 emit fill; \
+                 issue 1169 re-tighten trail.",
+                stats.v4l2_dropped, total, stats.frames_captured
             );
         } else {
             // Denominator is the TOTAL the device should have produced = delivered + dropped
@@ -4254,19 +4324,26 @@ fn build_and_print_verdict_with_stream_diffs(
             println!(
                 "  [cam2→{camera_under_test_label}] NOT zero — {camera_under_test_label} V4L2 \
                  capture dropped {} of {} frames ({} delivered; REAL capture-card drops on the \
-                 camera leg).",
+                 camera leg — OVER the issue-1169 singleton band of {allowance}).",
                 stats.v4l2_dropped, total, stats.frames_captured
             );
         }
-        all_pass &= capture_zero;
-        report["full_chain"]["loss"][format!("cam2_{camera_under_test_label}")] = serde_json::json!({
-            "zero_loss": capture_zero,
+        all_pass &= within_band;
+        let mut node = serde_json::json!({
+            "zero_loss": within_band,
+            "capture_zero": capture_zero,
             "v4l2_dropped": stats.v4l2_dropped,
             "frames_captured": stats.frames_captured,
+            "camleg_v4l2_drop_allowance": allowance,
+            "camleg_singleton_band_consumed": band_consumed,
             "source": format!(
                 "{camera_under_test_label} V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare"
             ),
         });
+        if let Some(note) = note {
+            node["note"] = serde_json::Value::String(note);
+        }
+        report["full_chain"]["loss"][format!("cam2_{camera_under_test_label}")] = node;
     }
 
     // #461/#463 — imag-nb (EPIC #466 Topology v2): its zero-loss proof is the cam2 OPTICAL
@@ -11029,11 +11106,14 @@ mod tests {
     /// #861 — zero-loss enforcement is completely UNAFFECTED by the A/V-offset term's own
     /// report-only-vs-blocking state (whichever it currently is): a real zero-loss defect (a
     /// cam2→SOURCE V4L2 capture-drop, `--cam1-capture-stats`) still forces `overall_pass=false`,
-    /// unconditionally. This gate (`all_pass &= capture_zero` in `recording-verdict.rs`) is
-    /// TOP-LEVEL — parsed and applied whenever `--cam1-capture-stats` is supplied, with NO
-    /// dependency on `--switch-schedule` / `--stream` / the A/V-sync plumbing at all. The A/V
-    /// inputs here are the same clean 500ms fixture used by the sibling PASS test (does not matter
-    /// either way — the point is the capture-drop alone).
+    /// unconditionally. This gate (`all_pass &= within_band` in `recording-verdict.rs`, where
+    /// `within_band = camleg_capture_band(v4l2_dropped, allowance)`) is TOP-LEVEL — parsed and
+    /// applied whenever `--cam1-capture-stats` is supplied, with NO dependency on
+    /// `--switch-schedule` / `--stream` / the A/V-sync plumbing at all. The A/V inputs here are the
+    /// same clean 500ms fixture used by the sibling PASS test (does not matter either way — the
+    /// point is the capture-drop alone). `v4l2_dropped=7` is deliberately WAY OVER the #1169
+    /// `CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` (=2) singleton band, so it stays a hard FAIL (the band
+    /// only absorbs a `<=2` singleton — see the `..._absorbs_two_drops_...` sibling below).
     #[test]
     fn zero_loss_capture_drop_still_fails_overall_pass_regardless_of_av_gate_861() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
@@ -11078,6 +11158,171 @@ mod tests {
             "#861: a real zero-loss defect (camera-leg V4L2 capture drop) must still force \
              overall_pass=false -- completely unaffected by the A/V-offset term's own \
              report-only-vs-blocking state: {v}"
+        );
+    }
+
+    /// #1169 THIRD SEAM (owner, 2026-08-22) — the cam-leg V4L2 capture-drop counter
+    /// (`full_chain.loss.cam2_*`, the last binding `all_pass &= …` red) gets the SAME loud
+    /// singleton band the two prior seams gave the presented + burn-delivery layers. A
+    /// `v4l2_dropped` count WITHIN `CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` (=2) is an UPSTREAM
+    /// camera-leg buffer drop the issue-1167 emit-fill absorbs by design (the first full verdict
+    /// of the series showed exactly `v4l2_dropped:2` over `frames_captured:35961` = 0.0056%, while
+    /// `full_chain.zero_loss` + `all_cambox_continuity.overall_pass` were already green) — so it
+    /// must PASS `overall_pass` with `zero_loss=true` + a LOUD `note`, NEVER a silent green. This
+    /// is the exact `gate-allowance-restore-red-green.md` shape, third instance; issue 1169 stays
+    /// OPEN as the re-tighten trail (the DEFAULT flips back to 0 once a zero-singleton green run
+    /// holds). Uses the SAME TOP-LEVEL `--cam1-capture-stats` fixture path as the #861 test above.
+    #[test]
+    fn camleg_v4l2_singleton_band_absorbs_two_drops_into_overall_pass_1169() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+
+        let dir = std::env::temp_dir().join(format!("cb-1169-camleg-band-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stats_path = dir.join("cam1-capture-stats.txt");
+        // exactly TWO cam-leg V4L2 capture drops — the sanctioned singleton band (<=2).
+        std::fs::write(&stats_path, "v4l2_dropped=2\nframes_captured=35961\n").unwrap();
+
+        let v = build_all_cambox_av_sync_fixture_with_ack(
+            "camleg-band-1169",
+            cameras,
+            Some(av),
+            500.0,
+            "",
+            Some(&stats_path),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The band ABSORBS the 2 drops: the node reads zero_loss=true (within the band) ...
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["zero_loss"],
+            serde_json::json!(true),
+            "#1169: 2 V4L2 capture drops are WITHIN the singleton band ⇒ zero_loss stays true: {v}"
+        );
+        // ... yet it is LOUD, never a silent green: the band was CONSUMED + carries the note ...
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["camleg_singleton_band_consumed"],
+            serde_json::json!(true),
+            "#1169: a within-band NON-zero drop count must be marked as CONSUMED (loud): {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["v4l2_dropped"],
+            serde_json::json!(2),
+            "#1169: the raw v4l2_dropped count stays honestly reported: {v}"
+        );
+        let note = v["full_chain"]["loss"]["cam2_cam1"]["note"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            note.contains("cam-leg V4L2 singleton band consumed"),
+            "#1169: the consumed band must carry the loud named note: {v}"
+        );
+        // ... and the whole run PASSES (this was the LAST binding red).
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(true),
+            "#1169: 2 capture-leg drops within the band must NOT fail overall_pass: {v}"
+        );
+    }
+
+    /// #1169 THIRD SEAM — the PURE band decision boundary + the compiled DEFAULT. Proven at the
+    /// `camleg_capture_band` level (an explicit allowance, independent of process env) so the
+    /// boundary stays regression-tested without mutating global env state. `<= allowance` is
+    /// within-band; a within-band NON-zero count is `band_consumed` (the loud note); a strict zero
+    /// is within-band but NOT consumed.
+    #[test]
+    fn camleg_capture_band_boundary_and_default_1169() {
+        use super::{camleg_capture_band, CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT};
+        // strict zero: within band, but NOT consumed (a clean pass, no loud note).
+        assert_eq!(camleg_capture_band(0, 2), (true, false));
+        // 1 and 2 drops: within the band, CONSUMED (loud note).
+        assert_eq!(camleg_capture_band(1, 2), (true, true));
+        assert_eq!(camleg_capture_band(2, 2), (true, true));
+        // 3 drops: OVER the band ⇒ not within, not consumed ⇒ a hard fail.
+        assert_eq!(camleg_capture_band(3, 2), (false, false));
+        assert_eq!(
+            CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT, 2,
+            "#1169: the compiled DEFAULT must be the singleton band 2 (the re-tighten trail on \
+             issue 1169 flips this one constant back to 0)"
+        );
+    }
+
+    /// #1169 — DORMANT re-tighten proof: flipping the ONE constant back to 0 (this ticket's
+    /// re-tighten trail, closed only by a zero-singleton green run) restores the STRICT bar.
+    /// Proven at the pure-fn level with an EXPLICIT allowance of 0 (what
+    /// `CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT = 0` yields), independent of the compiled default and of
+    /// process env. Mirrors the `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`
+    /// sibling for the real-drops seam — the mechanism stays dormant, never deleted.
+    #[test]
+    fn re_tightening_the_camleg_v4l2_band_to_zero_restores_the_strict_bar() {
+        use super::camleg_capture_band;
+        // At the DEFAULT band (2) the 2-drop singleton passes on slack, LOUDLY (consumed) ...
+        assert_eq!(camleg_capture_band(2, 2), (true, true));
+        // ... and re-tightening the ONE constant back to 0 restores the strict zero-drop bar:
+        assert_eq!(
+            camleg_capture_band(2, 0),
+            (false, false),
+            "#1169: re-tightening to 0 restores the strict bar for the same 2-drop count"
+        );
+        // a genuine zero still passes cleanly at the strict bar (within-band, not consumed).
+        assert_eq!(camleg_capture_band(0, 0), (true, false));
+    }
+
+    /// #1169 THIRD SEAM — the OVER-band end-to-end fold: 3 cam-leg V4L2 capture drops are OVER the
+    /// `<=2` singleton band, so the node stays `zero_loss=false` and the whole run FAILS
+    /// `overall_pass` (the band never becomes an open door). Same TOP-LEVEL `--cam1-capture-stats`
+    /// fixture path as the `..._absorbs_two_drops_...` sibling above.
+    #[test]
+    fn camleg_v4l2_three_drops_over_band_still_fails_overall_pass_1169() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+
+        let dir = std::env::temp_dir().join(format!("cb-1169-camleg-over-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stats_path = dir.join("cam1-capture-stats.txt");
+        // THREE cam-leg V4L2 capture drops — one past the singleton band (>2).
+        std::fs::write(&stats_path, "v4l2_dropped=3\nframes_captured=35961\n").unwrap();
+
+        let v = build_all_cambox_av_sync_fixture_with_ack(
+            "camleg-over-1169",
+            cameras,
+            Some(av),
+            500.0,
+            "",
+            Some(&stats_path),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["zero_loss"],
+            serde_json::json!(false),
+            "#1169: 3 V4L2 capture drops are OVER the singleton band ⇒ zero_loss stays false: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["camleg_singleton_band_consumed"],
+            serde_json::json!(false),
+            "#1169: an OVER-band count is a genuine fail, never a 'consumed' band: {v}"
+        );
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(false),
+            "#1169: 3 capture-leg drops (over the band) must FAIL overall_pass: {v}"
         );
     }
 
