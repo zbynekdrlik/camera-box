@@ -233,11 +233,18 @@ pub const SHALLOW_DRAIN_LAG_MIN: u64 = 2;
 /// boundaries with. `poll` instead reports up to this many last-frame repeats (re-emit the current
 /// GOOD frame — never corrupted content) for the boundaries an empty-queue dip left unfilled, so emit
 /// holds ~60 in BOTH wander directions. Bounded, and the count is CONSECUTIVE (reset by ANY on-time
-/// capture, see [`crate::dupe_decimation::DecimationGate::poll`]): a source that keeps pace (57.9 fps
-/// — its drift crosses a boundary only ~2×/s, isolated, reset in between) is fully filled, while a
-/// source that NEVER catches up (a genuinely dead/frozen/half-rate leg) hits this cap, stops being
-/// filled, under-runs, and stays visible to #666 / #1133 leg-health / the frozen-leg attribution — a
-/// dead camera must still look down, never an infinite freeze-loop. `4`: ≥3 (the ticket's floor),
+/// capture, see [`crate::dupe_decimation::DecimationGate::poll`]): a source that keeps pace (up to the
+/// mild-wander band, e.g. 57.9 fps — its drift crosses a boundary only ~2×/s, isolated, with on-time
+/// frames between that reset the count) is fully filled. The cap's EXPOSURE reach is precise: it only
+/// bites when EVERY poll is ≥1 interval late so no on-time capture ever resets it — i.e. ≤~30 fps
+/// (a genuinely dead/half-dead leg), which then under-runs and stays visible to #666 / #1133
+/// leg-health. It does NOT by itself expose a moderate SUSTAINED under-rate (~31–56 fps, which has
+/// occasional on-time resets and IS filled to 60 on the emit side); that band is caught by the
+/// capture-rate health guards (#656/#717/#971 self-heal, which read the SAME takt EMA on the capture
+/// side) — see `.claude/rules/self-heal-frozen-leg-attribution.md`. A FROZEN source delivers dupes
+/// (`Emit{copy:true}`), which the `!copy` gate excludes outright → 0 repeats → under-runs regardless.
+/// So a dead/frozen camera always looks down; the cap's job is bounding a burst + killing an infinite
+/// freeze-loop, not classifying every under-rate. `4`: ≥3 (the ticket's floor),
 /// comfortably above a healthy 57.9 fps wobble's isolated single-slot repeats (with margin for a
 /// brief multi-interval stumble), and ≤ the #131 resync catch-up bound
 /// ([`crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS`] = 8) so a capped-out starvation hands

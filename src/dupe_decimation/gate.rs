@@ -141,9 +141,12 @@ pub struct DecimationGate {
     /// and this is RESET to 0 by any on-time crossing (`lag_intervals == 0` — the source proved it
     /// is keeping pace). A live-but-slightly-slow grabber (57.9 fps) crosses a boundary only ~2×/s
     /// with ~27 on-time frames between (each resetting this), so it never approaches the cap and is
-    /// fully filled; a source that NEVER delivers an on-time frame (a genuinely dead/frozen/half-rate
-    /// leg) accumulates to the cap, stops being filled, under-runs, and stays visible to the
-    /// leg-health / frozen-leg attribution — the fail-SAFE that keeps a dead camera looking down.
+    /// fully filled; a source that NEVER delivers an on-time frame (≤~30 fps — every poll ≥1 interval
+    /// late) accumulates to the cap, stops being filled, and under-runs. A moderate sustained
+    /// under-rate (~31–56 fps) still has occasional on-time resets so it is filled to 60 here — its
+    /// exposure is the capture-rate health guards on the same takt EMA, not this cap (see
+    /// [`STARVATION_REPEAT_MAX`]); a FROZEN source (dupes) is excluded by the `!copy` gate. So the cap
+    /// is the fail-SAFE that bounds a burst + keeps a genuinely dead/frozen camera looking down.
     consecutive_starvation_repeats: u64,
 }
 
@@ -388,6 +391,60 @@ impl DecimationGate {
         self.consecutive_drain_holds = 0;
         self.shed_log.record_dupe_emitted();
         true
+    }
+
+    /// (#1167 v4) The empty-queue STARVATION fill, applied by the `Emit` arm of [`poll`](Self::poll)
+    /// (extracted for the #414 poll-length budget). At an UNDER-rate the V4L2 queue empties and 60fps
+    /// boundaries pass with NO capture to fill them (the loop genuinely waited → `queue_had_frame ==
+    /// false`); the v2/v3 fills can't help — they only convert a captured frame's shed into a copy,
+    /// none fabricates an emit when no frame arrived. This reports up to [`STARVATION_REPEAT_MAX`]
+    /// last-frame repeats (`main.rs` re-emits the CURRENT GOOD frame — it passed the corruption check,
+    /// so never corrupted content) for the boundaries this dip left unfilled, and advances the grid to
+    /// catch up. Gated: a FRESH unique (`!copy` — a dupe/frozen source takes the copy valve and gets
+    /// NO repeats, so a dead/frozen leg still under-runs), an EMPTY queue, a MEASURED
+    /// [`sustained_under_rate`](Self::sustained_under_rate) and NOT converging (both keep it decoupled
+    /// from the over-rate v2/v3 regime — no shared counter/pace budget), a stale boundary (`lag >= 1`)
+    /// within the non-resync catch-up band (`lag <= GENLOCK_MAX_CATCHUP_INTERVALS`) so a deeper
+    /// empty-queue GAP still resyncs honestly (dead-leg semantics). Bounded to STARVATION_REPEAT_MAX
+    /// CONSECUTIVE repeats, RESET by any on-time capture (`lag_intervals == 0`) — so a source that
+    /// keeps pace (57.9 fps, crossing a boundary ~2×/s with on-time frames between) is fully filled,
+    /// while a source that NEVER catches up (≤~30 fps, every poll late) accumulates to the cap and
+    /// stays exposed. Advancing `candidate_next + repeats*interval` is `<=` the first boundary after
+    /// `now` (the `lag <= 8` gate guarantees no resync fired, so `candidate_next == boundary +
+    /// interval`, and `repeats <= lag`), so it drains the accumulating lag without overshooting.
+    fn apply_starvation_fill(
+        &mut self,
+        copy: bool,
+        queue_had_frame: bool,
+        lag_intervals: u64,
+        candidate_next: u64,
+        interval_ns: u64,
+    ) {
+        let starvation_repeats = if !copy
+            && !queue_had_frame
+            && self.sustained_under_rate()
+            && !self.converging_deep_backlog
+            && lag_intervals >= 1
+            && lag_intervals <= crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS
+        {
+            let budget = STARVATION_REPEAT_MAX.saturating_sub(self.consecutive_starvation_repeats);
+            lag_intervals.min(budget)
+        } else {
+            0
+        };
+        if starvation_repeats > 0 {
+            self.consecutive_starvation_repeats = self
+                .consecutive_starvation_repeats
+                .saturating_add(starvation_repeats);
+            self.last_poll_starvation_repeats = starvation_repeats;
+            self.shed_log.record_starvation_repeats(starvation_repeats);
+            self.next_boundary_ns = candidate_next + starvation_repeats * interval_ns;
+        } else {
+            self.next_boundary_ns = candidate_next;
+        }
+        if lag_intervals == 0 {
+            self.consecutive_starvation_repeats = 0;
+        }
     }
 
     /// Feed ONE captured frame (`now_ns` wall-clock capture instant, `content_hash` from
@@ -693,53 +750,17 @@ impl DecimationGate {
                 false
             }
             ShedAction::Emit { copy } => {
-                // (#1167 v4) STARVATION last-frame repeat: at an UNDER-rate the V4L2 queue empties and
-                // 60fps boundaries pass with NO capture to fill them (the loop genuinely waited ->
-                // `queue_had_frame == false`). The v2/v3 fills can't help — they only convert a
-                // captured frame's shed into a copy; none can fabricate an emit when no frame arrived.
-                // Report up to STARVATION_REPEAT_MAX last-frame repeats (main.rs re-emits the CURRENT
-                // GOOD frame — it passed the corruption check, so never corrupted content) for the
-                // boundaries this dip left unfilled, and advance the grid to catch up. Gated: a FRESH
-                // unique (`!copy` — a dupe/frozen source takes the copy valve and gets NO repeats, so a
-                // dead/frozen leg still under-runs), an EMPTY queue, NOT over-rate and NOT converging
-                // (both are v2/v3's regime — decoupled, no shared counter/pace budget), a stale boundary
-                // (`lag >= 1`), and within the non-resync catch-up band (`lag <= 8`) so a deeper
-                // empty-queue GAP still resyncs honestly (dead-leg semantics). Bounded to
-                // STARVATION_REPEAT_MAX CONSECUTIVE repeats (reset by any on-time capture below).
-                let starvation_repeats = if !copy
-                    && !queue_had_frame
-                    && self.sustained_under_rate()
-                    && !self.converging_deep_backlog
-                    && lag_intervals >= 1
-                    && lag_intervals <= crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS
-                {
-                    let budget =
-                        STARVATION_REPEAT_MAX.saturating_sub(self.consecutive_starvation_repeats);
-                    lag_intervals.min(budget)
-                } else {
-                    0
-                };
-                if starvation_repeats > 0 {
-                    self.consecutive_starvation_repeats = self
-                        .consecutive_starvation_repeats
-                        .saturating_add(starvation_repeats);
-                    self.last_poll_starvation_repeats = starvation_repeats;
-                    self.shed_log.record_starvation_repeats(starvation_repeats);
-                    // Advance PAST the repeat-filled boundaries too (capped, never overshooting `now`):
-                    // `candidate_next` is the single-interval catch-up (the `lag <= 8` gate guarantees
-                    // no resync fired, so `candidate_next == boundary + interval`), and
-                    // `repeats <= lag`, so this lands at `boundary + (1 + repeats)*interval` which is
-                    // `<=` the first boundary after `now`. This drains the accumulating lag so it never
-                    // reaches the #131 resync bound.
-                    self.next_boundary_ns = candidate_next + starvation_repeats * interval_ns;
-                } else {
-                    self.next_boundary_ns = candidate_next;
-                }
-                // An on-time capture proves the source is keeping pace -> reset the consecutive-repeat
-                // cap, so a leg that NEVER catches up eventually hits the cap and stays exposed.
-                if lag_intervals == 0 {
-                    self.consecutive_starvation_repeats = 0;
-                }
+                // (#1167 v4) empty-queue STARVATION fill: report + record the bounded last-frame
+                // repeats for this poll and set next_boundary. Extracted to `apply_starvation_fill`
+                // (the #414 poll-length budget); it also resets the consecutive-repeat cap on an
+                // on-time capture. 0 repeats in every healthy / over-rate window (byte-inert there).
+                self.apply_starvation_fill(
+                    copy,
+                    queue_had_frame,
+                    lag_intervals,
+                    candidate_next,
+                    interval_ns,
+                );
                 self.deferred_this_boundary = false;
                 self.consecutive_drain_holds = 0; // (#1167) an emit fills + advances -> hold streak broken
                 if copy {
