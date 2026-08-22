@@ -129,6 +129,7 @@ lipsync_pacing_guard_cmd() {
   cat <<CMDS
 python3 - '$media' '$fb' '$audio' <<'PYEOF'
 import os
+import re
 import subprocess
 import sys
 import time
@@ -196,6 +197,33 @@ except ValueError:
     )
     startup_skip_s = 2.0
 
+# issue 1173: scale+centre the asset onto the fb's ACTUAL geometry, exactly like the persistent
+# lipsync_playback_cmds -- the pacing pass paints the same asset onto the same fb, so it must fit
+# it the same way or the cadence measurement is taken on a geometry the real playback never uses.
+# Fail-LOUD then fail-OPEN to showinfo-only (never a silent 1920x1080 assumption).
+fbname = os.path.basename(fb)
+vf = "showinfo"
+try:
+    with open("/sys/class/graphics/%s/virtual_size" % fbname) as _fh:
+        _geom = _fh.read().strip()
+    _m = re.match(r"^(\d+),(\d+)$", _geom)
+    if _m and int(_m.group(1)) > 0 and int(_m.group(2)) > 0:
+        _w, _h = _m.group(1), _m.group(2)
+        vf = (
+            "scale=%s:%s:force_original_aspect_ratio=decrease,"
+            "pad=%s:%s:(ow-iw)/2:(oh-ih)/2,showinfo" % (_w, _h, _w, _h)
+        )
+    else:
+        sys.stderr.write(
+            "WARN: [lipsync #1173] fb geometry {!r} from {} unparseable -- pacing check runs "
+            "UNSCALED\n".format(_geom, fbname)
+        )
+except OSError as _e:
+    sys.stderr.write(
+        "WARN: [lipsync #1173] could not read fb geometry for {} ({}) -- pacing check runs "
+        "UNSCALED\n".format(fbname, _e)
+    )
+
 cmd = [
     "ffmpeg",
     "-y",
@@ -205,7 +233,7 @@ cmd = [
     "-map",
     "0:v",
     "-vf",
-    "showinfo",
+    vf,
     "-pix_fmt",
     "bgra",
     "-nostats",
@@ -280,6 +308,37 @@ PYEOF
 CMDS
 }
 
+# lipsync_fb_scale_vf_cmds FB_DEVICE -- issue 1173: print remote bash that READS the fb's actual
+# geometry from /sys/class/graphics/<fbname>/virtual_size and sets a shell var VF to an
+# aspect-preserving scale + centred pad filtergraph, so the asset fills+centres on the ACTUAL fb at
+# ANY resolution. cam2's fb0 grew 1920x1080 -> 2560x1080 (ultrawide, post #899 kernel-upgrade
+# reboots); the old unscaled paint left the asset top-left, cropping the face -> SyncNet conf 0.0.
+# Fail-LOUD then fail-OPEN: an unreadable/unparseable virtual_size prints a prominent WARN and falls
+# back to VF=null (unscaled passthrough) so TEST mode stays ALIVE -- never a silent 1920x1080
+# assumption, never a dead playback. POSIX-only (no bash arrays) since the remote login shell may be
+# sh. The caller embeds this via a LOCAL var (never $(...) mid-string), so the trailing `fi` is
+# separated from the following ffmpeg line by the caller's own newline (no trailing-newline glue).
+lipsync_fb_scale_vf_cmds() {
+  local fb="$1" fbname
+  fbname="${fb##*/}"
+  cat <<CMDS
+FBGEOM="\$(cat '/sys/class/graphics/$fbname/virtual_size' 2>/dev/null || true)"
+FBW=0
+FBH=0
+case "\$FBGEOM" in
+  *,*) FBW="\${FBGEOM%%,*}"; FBH="\${FBGEOM##*,}" ;;
+esac
+case "\$FBW" in ''|*[!0-9]*) FBW=0 ;; esac
+case "\$FBH" in ''|*[!0-9]*) FBH=0 ;; esac
+if [ "\$FBW" -gt 0 ] && [ "\$FBH" -gt 0 ]; then
+  VF="scale=\$FBW:\$FBH:force_original_aspect_ratio=decrease,pad=\$FBW:\$FBH:(ow-iw)/2:(oh-ih)/2"
+else
+  echo "WARN: [lipsync #1173] could not read fb geometry from /sys/class/graphics/$fbname/virtual_size (got '\$FBGEOM') -- painting UNSCALED; the face may be cropped if fb0 is not the asset's native size" >&2
+  VF="null"
+fi
+CMDS
+}
+
 # lipsync_playback_cmds MEDIA FB_DEVICE AUDIO_DEVICE PLAYBACK_PIDFILE [AUDIO_LEAD_MS] -- the ONE
 # persistent ffmpeg process feeding both sinks (live-verified on cam2, issue 930): bgra pixel
 # format (matches src/probe/fb.rs's own painter convention), -ac 2 (the ALSA device refused a mono
@@ -309,10 +368,16 @@ CMDS
 # apart was deliberately rejected (issue 930 design comment).
 lipsync_playback_cmds() {
   local media="$1" fb="$2" audio="$3" pidfile="$4" lead_ms="${5:-0}"
+  # issue 1173: read the fb geometry remotely and scale+centre the asset onto it. Built into a
+  # LOCAL var (never $(...) embedded mid-string) so its trailing `fi` never glues to the ffmpeg
+  # line. Emitted ONCE before the single ffmpeg invocation; both branches reference "$VF".
+  local vf_prologue
+  vf_prologue="$(lipsync_fb_scale_vf_cmds "$fb")"
   if [ "$lead_ms" -eq 0 ]; then
     cat <<CMDS
+$vf_prologue
 nohup ffmpeg -y -re -stream_loop -1 -i '$media' \\
-  -map 0:v -pix_fmt bgra -f fbdev '$fb' \\
+  -map 0:v -vf "\$VF" -pix_fmt bgra -f fbdev '$fb' \\
   -map 0:a -ac 2 -f alsa '$audio' \\
   > /run/rig-lipsync-playback.log 2>&1 &
 echo \$! > '$pidfile'
@@ -327,9 +392,10 @@ CMDS
   local lead_s
   lead_s="$(awk -v ms="$lead_ms" 'BEGIN { printf "%.3f", ms / 1000 }')"
   cat <<CMDS
+$vf_prologue
 nohup ffmpeg -y -re -stream_loop -1 -i '$media' \\
   -itsoffset $lead_s -re -stream_loop -1 -i '$media' \\
-  -map 1:v -pix_fmt bgra -f fbdev '$fb' \\
+  -map 1:v -vf "\$VF" -pix_fmt bgra -f fbdev '$fb' \\
   -map 0:a -ac 2 -f alsa '$audio' \\
   > /run/rig-lipsync-playback.log 2>&1 &
 echo \$! > '$pidfile'

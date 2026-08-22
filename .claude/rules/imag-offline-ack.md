@@ -1,11 +1,13 @@
 ---
 paths:
   - "scripts/recording-e2e.sh"
+  - "scripts/rig-mode.sh"
   - "scripts/lib/imag-offline-ack.sh"
   - "scripts/lib/imag-leg-marker.sh"
   - "scripts/lib/cambox-offline-ack.sh"
   - "rig-fleet.txt"
   - "tests/harness_imag_offline_ack_1013.rs"
+  - "tests/rig_mode.rs"
 ---
 
 # imag-nb offline-ack leg skip (issue 1013)
@@ -65,6 +67,36 @@ substrings, not indentation) — smallest diff, zero anchor risk. Never remove a
 `\nfi\n` inside the `[8/8d]` merge-adjacency region (`harness_imag_topology` `!between.contains("\nfi\n")`).
 After ANY recording-e2e.sh edit, run every affected static-anchor binary (compile `--no-run`, run
 the compiled binaries directly — Tier-0; #477 disables the build-ok bypass).
+
+## rig-mode.sh's #789 TEST-entry gate is a SECOND imag hard-abort site — also offline-ack-aware (issue 1171)
+
+The `IMAG_OFFLINE_ACKED` flag + inventory above is `recording-e2e.sh`-scoped. `scripts/rig-mode.sh`
+has its OWN imag hard-abort that the E2E flag never reaches: `require_imag_genlock_current` (the #789
+TEST-entry HARD-BLOCK) runs `drift-guard.sh --check-imag` and `exit 30`s on any non-`OK` verdict —
+and an acked-offline+unreachable imag yields `UNKNOWN` → BLOCK → `exit 30`, aborting
+`rig-mode.sh test` and leaving cam2 with no painter (the documented lipsync/TEST restore path; live
+2026-08-22). Since #1171 the gate consults the SAME `cambox-offline-ack.sh` mechanism BEFORE
+fail-closing:
+
+- rig-mode.sh now `. "$RIG_MODE_DIR/lib/cambox-offline-ack.sh"` (it did not before) and computes the
+  effective ack LOCALLY inside the gate (no top-level source-time side effect, so `run_sourced` tests
+  stay clean): `cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$RIG_MODE_DIR/../rig-fleet.txt"`
+  (explicit env wins, same precedence as recording-e2e.sh).
+- The skip/proceed decision is a PURE `imag_genlock_gate_offline_ack_action REASON REACHABLE` (I/O —
+  the `ping -c1 -W2 "$IMAG_IP"` — stays in the caller; the decision is pure + Tier-0 testable, the
+  same seam pattern as `imag_genlock_gate_verdict`). acked+UNREACHABLE → `skip` (loud named skip
+  citing issue 1013 + reason, `return 0`, no drift-guard); acked+REACHABLE = STALE ack → `proceed`
+  (falls through to the byte-unchanged gate — NOT exempted, mirrors the [0/8] stale-ack protection);
+  not-acked → `proceed`.
+- **Any NEW imag gate added to rig-mode.sh must do the same** (consult `cambox_offline_ack_reason
+  "imag"` + a reachability probe before fail-closing) — the "make imag optional" inventory above is
+  per-SCRIPT, and rig-mode.sh is now a second script in scope. The EVENT path stays advisory
+  (`warn_imag_genlock_stale`, never blocks going live) and needs no ack seam.
+- Anchor safety: the new pure function + prologue sit ABOVE `do_test()`/`do_event()`, so the
+  `tests/rig_mode.rs` `do_test_body`/`do_event_body` splits are untouched; the new wiring test slices
+  the gate body between `require_imag_genlock_current() {` and `\nburn_action_for_mode() {` (both
+  count-1 anchors). The `#789` existing-body invariants (do_test calls the gate, do_event keeps only
+  the advisory) still hold.
 
 ## Marker (report-only, #798 twin)
 

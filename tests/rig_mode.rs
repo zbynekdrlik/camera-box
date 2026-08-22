@@ -1216,3 +1216,98 @@ fn event_mode_cam_restore_failure_does_not_strand_the_burn_clear_868() {
          it past the burn-clear must not swallow it. Got tail:\n{tail}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------- //
+// issue 1171 — the #789 imag-genlock TEST-entry HARD-BLOCK must consult the issue-1013 offline-ack
+// before fail-closing. A legitimately absent (acked-offline + unreachable) imag must SKIP the gate
+// (a loud named skip), not exit 30 and abort TEST entry — which left cam2 with no painter
+// (2026-08-22). An acked-but-REACHABLE imag is a STALE ack and is NOT exempted (mirrors the
+// recording-e2e.sh [0/8] reachability probe): it falls through to the real gate.
+// ---------------------------------------------------------------------------------------------- //
+
+/// Run the pure #1171 offline-ack decision function over (reason, reachable).
+fn offline_ack_action(reason: &str, reachable: &str) -> String {
+    run_sourced(&format!(
+        "imag_genlock_gate_offline_ack_action '{reason}' {reachable}"
+    ))
+    .trim()
+    .to_string()
+}
+
+/// Deterministic decision matrix (Tier-0 pure function, #477): only acked+unreachable skips.
+#[test]
+fn imag_genlock_gate_offline_ack_action_decision_matrix_1171() {
+    assert_eq!(
+        offline_ack_action("", "0"),
+        "proceed",
+        "1171: imag NOT acked -> run the #789 gate normally"
+    );
+    assert_eq!(
+        offline_ack_action("", "1"),
+        "proceed",
+        "1171: imag NOT acked (reachable) -> run the gate normally"
+    );
+    assert_eq!(
+        offline_ack_action("notebook-replacement-2026-08-22", "0"),
+        "skip",
+        "1171: acked + UNREACHABLE (issue-1013 legit offline) -> SKIP the gate"
+    );
+    assert_eq!(
+        offline_ack_action("notebook-replacement-2026-08-22", "1"),
+        "proceed",
+        "1171: acked but REACHABLE = STALE ack, NOT exempted -> fall through to the real gate"
+    );
+}
+
+/// The gate must be wired to the offline-ack seam: rig-mode.sh sources the offline-ack lib, defines
+/// the pure decision function, and require_imag_genlock_current consults it (reading the ack reason,
+/// probing reachability, naming issue 1013 in the skip) BEFORE the existing fail-closed body — which
+/// stays intact (drift-guard --check-imag + exit 30).
+#[test]
+fn require_imag_genlock_current_consults_offline_ack_1171() {
+    let src = std::fs::read_to_string(script()).expect("read rig-mode.sh");
+    assert!(
+        src.contains("lib/cambox-offline-ack.sh"),
+        "1171: rig-mode.sh must source the offline-ack lib"
+    );
+    assert!(
+        src.contains("imag_genlock_gate_offline_ack_action()"),
+        "1171: rig-mode.sh must define the pure decision function imag_genlock_gate_offline_ack_action"
+    );
+    // The gate body (from its own definition to the next function) must consult the ack + probe.
+    let gate = src
+        .split("require_imag_genlock_current() {")
+        .nth(1)
+        .and_then(|s| s.split("\nburn_action_for_mode() {").next())
+        .expect(
+            "1171: rig-mode.sh must define require_imag_genlock_current() then burn_action_for_mode()",
+        );
+    assert!(
+        gate.contains("cambox_offline_ack_reason"),
+        "1171: the gate must read the imag offline-ack reason: {gate}"
+    );
+    assert!(
+        gate.contains("imag_genlock_gate_offline_ack_action"),
+        "1171: the gate must delegate the skip/proceed decision to the pure function: {gate}"
+    );
+    assert!(
+        gate.contains("ping "),
+        "1171: the gate must probe imag reachability (stale-ack protection): {gate}"
+    );
+    assert!(
+        gate.contains("1013"),
+        "1171: the loud skip must name issue 1013 (the offline-ack mechanism): {gate}"
+    );
+    // [review] an acked-but-REACHABLE (stale) ack must be surfaced loudly on the proceed path
+    // (without exiting — the reachable imag is still gated below), so a stale ack does not persist
+    // unnoticed across TEST runs.
+    assert!(
+        gate.contains("cambox_offline_ack_stale_message"),
+        "1171: a stale (acked-but-reachable) imag ack must be surfaced loudly on the proceed path: {gate}"
+    );
+    // The existing #789 fail-closed body must remain intact.
+    assert!(
+        gate.contains("drift-guard.sh --check-imag") && gate.contains("exit 30"),
+        "1171: the existing fail-closed gate (drift-guard --check-imag + exit 30) must stay: {gate}"
+    );
+}
