@@ -11171,19 +11171,23 @@ mod tests {
     /// must PASS `overall_pass` with `zero_loss=true` + a LOUD `note`, NEVER a silent green. This
     /// is the exact `gate-allowance-restore-red-green.md` shape, third instance; issue 1169 stays
     /// OPEN as the re-tighten trail (the DEFAULT flips back to 0 once a zero-singleton green run
-    /// holds). Uses the SAME TOP-LEVEL `--cam1-capture-stats` fixture path as the #861 test above.
+    /// holds).
+    ///
+    /// FIXTURE (issue 1169 CI fix): the `--cam1-capture-stats` gate is TOP-LEVEL, but an
+    /// `overall_pass=true` assertion needs EVERY other fold term green too — and the av-sync
+    /// fixture (`build_all_cambox_av_sync_fixture_with_ack`) can never deliver that with ONE
+    /// scheduled camera: its BLOCKING `all_cambox_av_sync` gate fails closed on the
+    /// absent-unacked cam3..cam7 (issue 855 / issue 861), so the old shape read
+    /// `overall_pass=false` for a reason UNRELATED to the band under test. Mirrors the
+    /// otherwise-green `single_real_drop_passes_loudly_within_the_1169_singleton_allowance`
+    /// sibling's fixture instead (clean `window` frames, no schedule, no A/V inputs) — the
+    /// injected capture-drop sidecar is the ONLY non-zero signal, so the camleg band is the
+    /// ONLY term that can flip the verdict.
     #[test]
     fn camleg_v4l2_singleton_band_absorbs_two_drops_into_overall_pass_1169() {
-        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
-        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
-        let av = AvMarkerInputs {
-            fps: 30.0,
-            video_start_s: 0.0,
-            emit_log,
-            audio_preamble_screens_passed: audio_markers.len() as u64,
-            audio_markers,
-        };
-        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        const N: u32 = 600;
 
         let dir = std::env::temp_dir().join(format!("cb-1169-camleg-band-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -11191,14 +11195,34 @@ mod tests {
         // exactly TWO cam-leg V4L2 capture drops — the sanctioned singleton band (<=2).
         std::fs::write(&stats_path, "v4l2_dropped=2\nframes_captured=35961\n").unwrap();
 
-        let v = build_all_cambox_av_sync_fixture_with_ack(
-            "camleg-band-1169",
-            cameras,
-            Some(av),
-            500.0,
-            "",
-            Some(&stats_path),
-        );
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+            "--cam1-capture-stats",
+            stats_path.to_str().unwrap(),
+        ]);
+        // Fully clean recordings (ZERO real drops, contiguous burns, span green at min-secs 1):
+        // every other fold term passes, exactly like the real_drops singleton sibling.
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window(N, false, None),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window(N, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // no imag frames in this test
+            None, // no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
         let _ = std::fs::remove_dir_all(&dir);
 
         // The band ABSORBS the 2 drops: the node reads zero_loss=true (within the band) ...
@@ -11225,7 +11249,12 @@ mod tests {
             note.contains("cam-leg V4L2 singleton band consumed"),
             "#1169: the consumed band must carry the loud named note: {v}"
         );
-        // ... and the whole run PASSES (this was the LAST binding red).
+        // ... and the whole run PASSES (this was the LAST binding red) — both the returned
+        // all_pass fold and the emitted JSON headline agree.
+        assert!(
+            pass,
+            "issue 1169: 2 capture-leg drops within the band must NOT fail the all_pass fold: {v}"
+        );
         assert_eq!(
             v["overall_pass"],
             serde_json::json!(true),
@@ -11278,20 +11307,16 @@ mod tests {
 
     /// #1169 THIRD SEAM — the OVER-band end-to-end fold: 3 cam-leg V4L2 capture drops are OVER the
     /// `<=2` singleton band, so the node stays `zero_loss=false` and the whole run FAILS
-    /// `overall_pass` (the band never becomes an open door). Same TOP-LEVEL `--cam1-capture-stats`
-    /// fixture path as the `..._absorbs_two_drops_...` sibling above.
+    /// `overall_pass` (the band never becomes an open door). Same otherwise-green clean-`window`
+    /// fixture as the `..._absorbs_two_drops_...` sibling above (issue 1169 CI fix — the old
+    /// av-sync fixture left the blocking av-sync gate red on absent-unacked cameras, so the
+    /// asserted `overall_pass=false` was overdetermined and proved nothing about the band): here
+    /// every OTHER term is green, so the over-band drop count is what fails the run.
     #[test]
     fn camleg_v4l2_three_drops_over_band_still_fails_overall_pass_1169() {
-        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
-        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
-        let av = AvMarkerInputs {
-            fps: 30.0,
-            video_start_s: 0.0,
-            emit_log,
-            audio_preamble_screens_passed: audio_markers.len() as u64,
-            audio_markers,
-        };
-        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        const N: u32 = 600;
 
         let dir = std::env::temp_dir().join(format!("cb-1169-camleg-over-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -11299,15 +11324,37 @@ mod tests {
         // THREE cam-leg V4L2 capture drops — one past the singleton band (>2).
         std::fs::write(&stats_path, "v4l2_dropped=3\nframes_captured=35961\n").unwrap();
 
-        let v = build_all_cambox_av_sync_fixture_with_ack(
-            "camleg-over-1169",
-            cameras,
-            Some(av),
-            500.0,
-            "",
-            Some(&stats_path),
-        );
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+            "--cam1-capture-stats",
+            stats_path.to_str().unwrap(),
+        ]);
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window(N, false, None),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window(N, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // no imag frames in this test
+            None, // no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !pass,
+            "issue 1169: 3 capture-leg drops (over the band) must fail the all_pass fold: {v}"
+        );
 
         assert_eq!(
             v["full_chain"]["loss"]["cam2_cam1"]["zero_loss"],
