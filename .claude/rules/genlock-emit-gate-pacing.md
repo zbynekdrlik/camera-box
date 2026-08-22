@@ -687,3 +687,44 @@ drive it with the real pattern (62 fps, isolated dupe every ~15 captures). It re
 EXACT live `9 boundary interval(s)` skip and the 18-skips/8 s rate — pinning the deterministic
 root cause before touching code, and giving exact RED/GREEN test thresholds. Read the live
 proof read-only over ssh: `journalctl -u camera-box | grep -E 'Streaming:|#707|dupe-preferring'`.
+
+## GOTCHA — an emit-side GRACE on the empty-queue fill can't reduce the churn without reintroducing the sawtooth (issue 1170)
+
+**Do NOT try to "grace" the empty-queue starvation fill (#1167 v4/v5) to cut the cadence churn — it
+reintroduces the v4/v5 grid-creep sawtooth on a marginal grabber.** Investigated for issue 1170 (cam2
+`presentation_cadence.derived_uniform_fraction` 0.944 vs the #1142 floor 0.95). Attribution is solid:
+the residual 5.6% is **starvation repeats (~1.5/s, step-1 holds) + the compensating over-rate sheds
+(~1.4/s, step-3 gaps)** — a balanced Δ1≈Δ3 churn from the ShadowCast's UNEVEN capture (`cap` always
+≥ 60 fps, so the empty-queue events are DQBUF TIMING JITTER, not frame loss; the frames exist but
+arrive bunched-then-gapped). cam3 (clean 60.0 grabber, same chain) reads 0.993+.
+
+The tempting fix — an "intra-slot grace" that holds back the repeat so a real (slightly-late) frame
+fills the boundary instead — was validated off-rig (a `rustc` replica of the poll empty-queue path +
+the SAME `run_over_rate_stall_sim` / `run_starvation_sim` harnesses the locked tests use) and is
+UNSAFE:
+
+- **Aggressive grace** (hold back a lone late, confirm on the 2nd consecutive) cuts the churn ~40-50%
+  at cam2's rate BUT **underruns at a slightly higher dip rate** (`net_skips` > 0, `max_lag` = 9 —
+  into the #131 resync band, windows < 299) → the exact v4/v5 sawtooth.
+- **Creep-bounded grace** (grace only the shallowest `lag == 1`, fill fully at `lag ≥ 2`) is safe but
+  DOESN'T reduce the churn (it only defers each repeat by a poll, never eliminates it).
+- **`lag - 1` always** breaks the genuine under-rate fill (57.9 fps → 58.5, net_skips > 0).
+
+**The conservation law that makes this unwinnable on the emit side:** the fill is deliberately EAGER
+(fill every empty boundary at once) to keep the emit grid locked. A marginal grabber's over-rate
+SURPLUS (~1.1/s on cam2) is LESS than its empty-queue DIP rate (~1.5/s), so there is not enough
+surplus to let a real frame recover every grace-deferred boundary — when dip rate ≥ surplus, every
+held-back fill must EITHER be filled anyway (no churn reduction) OR be skipped (underrun/sawtooth).
+So the churn is the CENA of the #1167 grid-lock on this grabber; it is not a fixable premature-repeat
+bug. Closing the gap needs a capture-side change (deeper jitter buffer / RT isolation — a LATENCY
+trade-off, ownerova doména; #899-adjacent), a cleaner grabber (hardware — cam3 proves it vanishes),
+or the owner relaxing the floor (#1142 — never without the owner). Full data + the replica numbers:
+issue 1170 finding comment.
+
+**Method note (reusable):** the `rustc` replica of `DecimationGate::poll`'s empty-queue path is a
+valid Tier-0 (#557: no cargo compile) way to test an emit-fill change — copy `genlock_emit_gate` /
+`genlock_lag_intervals` / `boundary_skip_count` / the takt EMA verbatim, and reuse the EXACT
+`run_over_rate_stall_sim` / `run_starvation_sim` bodies from `dupe_decimation/tests.rs`. For the
+UNIQUE-frame starvation path the dupe arms (Retire/Drain/FastDrain) never fire, so a minimal poll
+(BlindShed between boundaries, Emit{copy:false} at a crossing → `apply_starvation_fill`) is faithful.
+Validate the replica by confirming CURRENT reproduces the locked tests' asserted values FIRST.
