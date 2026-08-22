@@ -126,23 +126,23 @@ assert m.duplicates({"NDI cam1": "CAM4 (usb)", "NDI cam2": "CAM4 (usb)"}), "must
 }
 
 #[test]
-fn active_map_defaults_to_exactly_the_three_active_cameras() {
-    // #827/issue 947/issue 939: with no override, active_map() (and therefore parse_map_args(None),
-    // the no-`--map` path main() takes) must resolve to exactly cam1/cam2/cam3 -- the
-    // DEFAULT_ACTIVE_SET fallback (cam3 re-activated 2026-08-13 with the Cam Link 4K card; cam4
-    // retired 2026-08-02, grabber wedges the capture leg within minutes of every start).
+fn active_map_defaults_to_exactly_the_two_active_cameras() {
+    // #827/issue 947/issue 939/#1110: with no override, active_map() (and therefore
+    // parse_map_args(None), the no-`--map` path main() takes) must resolve to exactly cam2/cam3 --
+    // the DEFAULT_ACTIVE_SET fallback (cam3 re-activated 2026-08-13 with the Cam Link 4K card;
+    // cam4 retired 2026-08-02; cam1 RE-RETIRED 2026-08-22 issue 1110, ShadowCast grabber hw defect).
     let (stdout, stderr) = run_py_check(
         r#"import os
 os.environ.pop("CAMERA_ACTIVE_SET", None)
 want = m.active_map()
 senders = sorted(s.split(" ", 1)[0] for _, s in want)
-assert senders == ["CAM1", "CAM2", "CAM3"], senders
+assert senders == ["CAM2", "CAM3"], senders
 assert m.parse_map_args(None) == want, "no --map -> active_map()"
 "#,
     );
     assert!(
         stdout.contains("OK"),
-        "issue 939 active_map default checks failed:\nstdout:{stdout}\nstderr:{stderr}"
+        "#1110 active_map default checks failed:\nstdout:{stdout}\nstderr:{stderr}"
     );
 }
 
