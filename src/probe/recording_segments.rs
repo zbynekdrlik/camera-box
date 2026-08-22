@@ -913,6 +913,9 @@ mod tests {
         // supersedes exactly that framing for copies/gaps: the STRICT verdict is UNCHANGED
         // (still fails on the copy), but the RELAXED verdict that now feeds `overall_pass`
         // ignores it, since undecodable=1 is within the #881 floor on its own.
+        // Issue 1169 singleton supersedes the 1132 disarmed-rescue expectation: the single copy
+        // (within the <=1/<=1 band) is ABSORBED into `overall_pass` -- LOUDLY (per-segment note +
+        // run-level count), with strict `pass` staying false/visible.
         let schedule = vec![win("cam2", 0, 10_000)];
         let frames = vec![
             SegmentFrame {
@@ -950,10 +953,22 @@ mod tests {
             v.segments[0]
         );
         assert!(
-            !v.overall_pass,
-            "#1132: the copies/gaps rescue is DISARMED -- a copy within tolerance no longer rescues overall_pass (the optical floor stays report-only): {v:?}"
+            v.overall_pass,
+            "issue 1169: the single copy is ABSORBED into overall_pass (the singleton allowance): {v:?}"
         );
-        assert_eq!(v.windows_failed_report_only, 1);
+        assert!(
+            v.segments[0].singleton_allowance_note.is_some(),
+            "issue 1169: the absorbed copy carries a LOUD per-segment note (never silent): {:?}",
+            v.segments[0]
+        );
+        assert_eq!(
+            v.windows_singleton_allowance_consumed, 1,
+            "issue 1169: exactly this window consumed the singleton allowance: {v:?}"
+        );
+        assert_eq!(
+            v.windows_failed_report_only, 1,
+            "issue 1169: the STRICT count still records the copy (report-only, visible): {v:?}"
+        );
     }
 
     #[test]
@@ -1133,6 +1148,9 @@ mod tests {
         // 101) AND a forward skip to 103 (102 dropped). Neither is silently cleared -- issue 889
         // (2026-07-30 user decision on issue 883) only changes whether this window's FAILURE
         // gates `overall_pass`; it does NOT touch whether `gaps` is correctly computed at all.
+        // Issue 1169 singleton supersedes the 1132 disarmed-rescue expectation: the ONE counted
+        // drop (within the <=1/<=1 band) is ABSORBED into `overall_pass` -- LOUDLY (note +
+        // count), strict `pass` stays false/visible; TWO drops (companion below) still fail.
         let schedule = vec![win("cam1", 0, 10_000)];
         let frames = vec![
             SegmentFrame {
@@ -1173,8 +1191,61 @@ mod tests {
             "relaxed verdict absorbs gaps within tolerance (reported): {v:?}"
         );
         assert!(
-            !v.overall_pass,
-            "#1132: overall_pass now folds the STRICT-copies-gaps term -- the real drop fails it: {v:?}"
+            v.segments[0].singleton_allowance_note.is_some(),
+            "issue 1169: the absorbed drop carries a LOUD per-segment note (never silent): {:?}",
+            v.segments[0]
+        );
+        assert_eq!(
+            v.windows_singleton_allowance_consumed, 1,
+            "issue 1169: exactly this window consumed the singleton allowance: {v:?}"
+        );
+        assert_eq!(
+            v.windows_failed_report_only, 1,
+            "issue 1169: the STRICT count still records the hidden drop (report-only, visible): {v:?}"
+        );
+        assert!(
+            v.overall_pass,
+            "issue 1169 singleton supersedes the 1132 disarmed-rescue expectation: the single \
+             counted drop is ABSORBED into overall_pass -- counted, never masked: {v:?}"
+        );
+        // Companion: the SAME freeze-hiding shape with TWO real drops (102 AND 104 missing:
+        // 100,101,100,103,105) exceeds the <=1 singleton band -- overall_pass still FAILS.
+        let frames_two_drops = vec![
+            SegmentFrame {
+                frame_index: 0,
+                gen_ts_ns: 100,
+                tick: Some(100),
+            },
+            SegmentFrame {
+                frame_index: 1,
+                gen_ts_ns: 200,
+                tick: Some(101),
+            },
+            SegmentFrame {
+                frame_index: 2,
+                gen_ts_ns: 300,
+                tick: Some(100),
+            }, // non-adjacent freeze
+            SegmentFrame {
+                frame_index: 3,
+                gen_ts_ns: 400,
+                tick: Some(103),
+            }, // 102 dropped
+            SegmentFrame {
+                frame_index: 4,
+                gen_ts_ns: 500,
+                tick: Some(105),
+            }, // 104 dropped
+        ];
+        let v2 = segment_continuity(&frames_two_drops, &schedule, 0, 1);
+        assert_eq!(
+            v2.segments[0].gaps, 2,
+            "both real drops behind the freeze are counted, never masked: {:?}",
+            v2.segments[0]
+        );
+        assert!(
+            !v2.overall_pass,
+            "issue 1169: two counted drops exceed the singleton band -- never absorbed: {v2:?}"
         );
     }
 
@@ -1229,7 +1300,8 @@ mod tests {
     }
 
     #[test]
-    fn benign_delivery_reorder_gap_is_counted_and_absorbed_by_the_1169_singleton_never_masked_625() {
+    fn benign_delivery_reorder_gap_is_counted_and_absorbed_by_the_1169_singleton_never_masked_625()
+    {
         // The reorder-tolerance fix must never MASK a genuine drop either: 1004 is truly missing
         // (never delivered) on top of the same 1002/1006-adjacent reorder pattern. Issue 889
         // (2026-07-30 user decision on issue 883): `gaps` is report-only for `overall_pass` now,
@@ -1929,9 +2001,11 @@ mod tests {
 
     #[test]
     fn windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889() {
-        // 3 windows: cam1 clean, cam2 has a copy only (fails strict), cam3 clean. #1132: the
-        // copies/gaps rescue is disarmed, so `overall_pass` now FAILS on cam2's copy;
-        // `windows_failed_report_only` still honestly counts the one window that fails strict.
+        // 3 windows: cam1 clean, cam2 has a copy only (fails strict), cam3 clean. Issue 1169
+        // singleton supersedes the 1132 disarmed-rescue expectation: cam2's single copy (within
+        // the <=1/<=1 band) is ABSORBED into `overall_pass` (true, loudly counted);
+        // `windows_failed_report_only` still honestly counts the one window that fails strict --
+        // the counter counts STRICT failures even when absorbed.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 2000),
@@ -1958,12 +2032,16 @@ mod tests {
         frames.extend(clean_frames(2000, 100, 4, 1, 900));
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert!(
-            !v.overall_pass,
-            "#1132: a copy anywhere now fails overall_pass -- the copies/gaps rescue is disarmed: {v:?}"
+            v.overall_pass,
+            "issue 1169: cam2's single copy is ABSORBED into overall_pass (the singleton allowance): {v:?}"
         );
         assert!(v.segments[0].pass, "cam1 clean");
         assert!(!v.segments[1].pass, "cam2 has the copy -> STRICT fail");
         assert!(v.segments[2].pass, "cam3 clean");
+        assert_eq!(
+            v.windows_singleton_allowance_consumed, 1,
+            "issue 1169: exactly cam2's window consumed the singleton allowance: {v:?}"
+        );
         assert_eq!(
             v.windows_failed_report_only, 1,
             "exactly cam2's window would have failed under the strict rule: {v:?}"
@@ -1972,11 +2050,14 @@ mod tests {
 
     #[test]
     fn undecodable_over_floor_combined_with_a_copy_now_fails_overall_on_the_copy_1132() {
-        // #1132 (owner mandate 2026-08-19): the copies/gaps rescue is DISARMED. This window fails
-        // STRICT for BOTH an over-floor undecodable count AND a copy. Under #1132 `overall_pass`
-        // now FAILS -- but on the COPY (copies/gaps strict), NOT on the floor: the optical floor
-        // stays report-only (issue 915/905), proven by `relaxed_pass` still reporting pass (the
-        // floor did not gate). This run's undecodable total (5) is within the run-wide floor (8).
+        // #1132 (owner mandate 2026-08-19) made this window fail `overall_pass` on the COPY
+        // (copies/gaps rescue disarmed). Issue 1169 singleton supersedes the 1132 disarmed-rescue
+        // expectation: the single copy (<=1/<=1 band) is ABSORBED into `overall_pass` -- and the
+        // UNDECODABLE-over-floor term is NOT part of the allowance: it stays report-only on its
+        // OWN seam (issue 915/905, `optical_floor::gates_overall_pass()` false), and the run-wide
+        // sum (5) is within the run-wide floor (8), so nothing reds overall today. STRICT still
+        // fails for BOTH the over-floor undecodable AND the copy (visible); `relaxed_pass` still
+        // proves the floor did not gate.
         // 1000,1000(copy),1001, then 5x None (undecodable -- over the per-window floor of 4), then 1002.
         let schedule = vec![win("cam2", 0, 10_000)];
         let mut frames = vec![
@@ -2018,8 +2099,23 @@ mod tests {
             v.segments[0]
         );
         assert!(
-            !v.overall_pass,
-            "#1132: overall_pass now fails on the COPY (copies/gaps rescue disarmed); the floor is still report-only: {v:?}"
+            v.run_wide_undecodable_within_floor,
+            "sanity: the run-wide sum (5) is within the run-wide floor (8): {v:?}"
+        );
+        assert!(
+            v.overall_pass,
+            "issue 1169: the copy is ABSORBED (singleton allowance); the over-floor undecodable \
+             stays report-only (issue 915/905) and the run-wide sum is within its floor, so \
+             overall now PASSES: {v:?}"
+        );
+        assert!(
+            v.segments[0].singleton_allowance_note.is_some(),
+            "issue 1169: the absorbed copy carries a LOUD per-segment note (never silent): {:?}",
+            v.segments[0]
+        );
+        assert_eq!(
+            v.windows_singleton_allowance_consumed, 1,
+            "issue 1169: exactly this window consumed the singleton allowance: {v:?}"
         );
         assert_eq!(v.windows_failed_report_only, 1);
     }
