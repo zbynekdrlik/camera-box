@@ -3414,16 +3414,26 @@ mod tests {
     /// Drive the conveyor: 60 fps stamps on the DanteSync grid, arriving at `stamp + skew (+ jitter)`
     /// (a frame cannot be presented before it arrives — `skew_ns` is the transport floor), consumed
     /// at 30 fps render ticks with +-2 ms slew. The reserve rises `lo_ms -> hi_ms` at `rise_tick`
-    /// with Part A (boundary=0, bracket=0, anchor=0). Returns (pre_age_ms, pre_depth, post_age_ms,
-    /// post_depth, tail_age_ms) — means over settle windows before/after the rise, plus the last-20
-    /// tail (to prove a deep hold STICKS and does not collapse back).
+    /// with Part A (boundary=0, bracket=0, anchor=0). Returns (pre_age_ms, pre_depth_mean,
+    /// post_age_ms, post_depth_mean, tail_age_ms) — MEANS over settle windows before/after the rise,
+    /// plus the last-20 tail (to prove a deep hold STICKS and does not collapse back). The depths are
+    /// WINDOW MEANS, not single samples: the below-floor conveyor drains every tick so `depth_at_audit`
+    /// oscillates 1-3 with the arrival jitter, and comparing two single samples ~60 ticks apart at
+    /// different jitter phases would be brittle to a one-frame margin (#1161 review finding) — a mean
+    /// over the whole window separates "inert ~2" from "deepened ~3-4" robustly.
+    ///
+    /// Only the ACQUIRE + Part B gate + STEADY N>=2 + converge-shed paths are exercised; the
+    /// BACKLOG-STORM relock branch and the N==1 `should_drain_one` depth drain are deliberately NOT
+    /// reached (every source here is N=2, and the transient hold depth never crosses the backlog
+    /// threshold — `backlog_relock_threshold` is ~15/18 frames at these reserves), so they are left
+    /// unmodeled on purpose — this sim targets the #1161 pin-rise frame-mover, not the full cadence.
     fn run_pin_rise_1161(
         skew_ns: u64,
         lo_ms: u32,
         hi_ms: u32,
         rise_tick: u64,
         n_ticks: u64,
-    ) -> (f64, usize, f64, usize, f64) {
+    ) -> (f64, f64, f64, f64, f64) {
         const BASE: u64 = 1_000_000_000_000;
         let mut f = PinRiseFifo1161::new();
         let mut q: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
@@ -3432,8 +3442,8 @@ mod tests {
         let mut pre: Vec<i64> = Vec::new();
         let mut post: Vec<i64> = Vec::new();
         let mut tail: Vec<i64> = Vec::new();
-        let mut pre_depth = 0usize;
-        let mut post_depth = 0usize;
+        let mut pre_depths: Vec<usize> = Vec::new();
+        let mut post_depths: Vec<usize> = Vec::new();
         for k in 0..n_ticks {
             let slew: i64 = if k % 2 == 0 { 2_000_000 } else { -2_000_000 };
             let wall = (BASE + k * I30).saturating_add_signed(slew);
@@ -3457,13 +3467,13 @@ mod tests {
                 if let Some(a) = age {
                     pre.push(a);
                 }
-                pre_depth = f.depth_at_audit;
+                pre_depths.push(f.depth_at_audit);
             }
             if k >= rise_tick + 8 && k < rise_tick + 60 {
                 if let Some(a) = age {
                     post.push(a);
                 }
-                post_depth = f.depth_at_audit;
+                post_depths.push(f.depth_at_audit);
             }
             if k + 20 >= n_ticks {
                 if let Some(a) = age {
@@ -3478,7 +3488,20 @@ mod tests {
                 v.iter().sum::<i64>() as f64 / v.len() as f64 / 1e6
             }
         };
-        (mean(&pre), pre_depth, mean(&post), post_depth, mean(&tail))
+        let dmean = |v: &[usize]| {
+            if v.is_empty() {
+                0.0
+            } else {
+                v.iter().sum::<usize>() as f64 / v.len() as f64
+            }
+        };
+        (
+            mean(&pre),
+            dmean(&pre_depths),
+            mean(&post),
+            dmean(&post_depths),
+            mean(&tail),
+        )
     }
 
     /// GREEN — the frame-mover WORKS when the raised reserve exceeds the arrival floor: on a shallow
@@ -3499,8 +3522,9 @@ mod tests {
              got {post_age:.1} ms (pre {pre_age:.1} ms)"
         );
         assert!(
-            post_depth > pre_depth,
-            "#1161: the raised reserve must DEEPEN the queue (pre depth {pre_depth}, post {post_depth})"
+            post_depth > pre_depth + 0.8,
+            "#1161: the raised reserve must DEEPEN the queue \
+             (pre depth mean {pre_depth:.1}, post {post_depth:.1})"
         );
     }
 
@@ -3519,9 +3543,10 @@ mod tests {
             "#1161: a below-floor pin rise must be INERT (< one source interval of movement); \
              pre {pre_age:.1} ms -> post {post_age:.1} ms is the live HOLD-INERT signature"
         );
-        assert_eq!(
-            post_depth, pre_depth,
-            "#1161: a below-floor pin rise must NOT deepen the queue (the stuck-depth-2 signature)"
+        assert!(
+            (post_depth - pre_depth).abs() < 1.0,
+            "#1161: a below-floor pin rise must NOT deepen the queue — the window-mean depth stays \
+             put (the stuck-depth-2 signature); pre {pre_depth:.1} -> post {post_depth:.1}"
         );
     }
 
@@ -3540,8 +3565,9 @@ mod tests {
              deeper; pre {pre_age:.1} ms -> post {post_age:.1} ms"
         );
         assert!(
-            post_depth > pre_depth,
-            "#1161: the deep hold must deepen the queue (pre {pre_depth}, post {post_depth})"
+            post_depth > pre_depth + 0.8,
+            "#1161: the deep hold must deepen the queue \
+             (pre depth mean {pre_depth:.1}, post {post_depth:.1})"
         );
         assert!(
             (tail_age - post_age).abs() <= 16.7,
