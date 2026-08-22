@@ -403,6 +403,31 @@ jobs:
             target/release/bkshading-relay
             target/release/bkshading
 
+      # Cross-build the relay for aarch64 (issue 808 SBC/handheld milestone): the handheld runs on a
+      # mini SBC (Pi Zero 2 W) which is ARM and CANNOT run the amd64 binary. The relay is pure Rust
+      # (axum/tokio/serde/clap; no C link deps — no reqwest/rustls/ring on the relay side), so a
+      # rustup target + the gcc-aarch64-linux-gnu linker cross-compile it cleanly. Target choice
+      # justified (aarch64, not armhf) in scripts/lib/bkshading-sbc-runtime.sh + .claude/rules/bkshading.md.
+      - name: Cross-build relay for aarch64 (SBC / Pi Zero 2 W handheld)
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu --bins -p bkshading-relay
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      # Upload the aarch64 relay for the SBC/handheld deploy path
+      # (scripts/bkshading-deploy-relay.sh --arch arm64). Relay-only — the service runs on the strih
+      # PC, never on a handheld — hence the distinct bkshading-relay-linux-arm64 name. Fail loud on a
+      # missing binary (never a green empty artifact), mirroring the amd64 upload above.
+      - name: Upload bkshading relay (aarch64 / SBC handheld)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-relay-linux-arm64
+          if-no-files-found: error
+          path: target/aarch64-unknown-linux-gnu/release/bkshading-relay
+
   bkshading-windows:
     name: bkshading Windows compile check (issue 808)
     # The bkshading service runs on the strih PC — Windows FIRST (Linux only after the
