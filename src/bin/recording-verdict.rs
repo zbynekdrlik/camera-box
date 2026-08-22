@@ -4536,11 +4536,32 @@ fn build_and_print_verdict_with_stream_diffs(
                                          (see issue #889 for the decision record).",
                                         s.copies, s.gaps, seg.copies_gaps_tolerance
                                     );
+                                } else if camera_box::window_gate::segment_singleton_allowance_consumed(
+                                    s.copies, s.gaps,
+                                ) {
+                                    // #1169 (owner, 2026-08-22): a <=1/<=1 SINGLETON is ABSORBED
+                                    // into overall_pass (the designed issue-1167 paced-trickle +
+                                    // FIFO stale_replay residual) -- LOUDLY (strict pass stays
+                                    // false above), never masked. >=2 of either hits the
+                                    // STRICT-ESCALATE branch below and still fails.
+                                    println!(
+                                        "      ⚠ #1169 SINGLETON ALLOWANCE: copies={} gaps={} \
+                                         (<= {}/{} each) -- ABSORBED into overall_pass as the \
+                                         designed issue-1167 paced-trickle + FIFO stale_replay \
+                                         residual; the STRICT verdict still FAILS (report-only, \
+                                         visible) and 2+ of either still fails. Re-tighten trail: \
+                                         issue 1169.",
+                                        s.copies,
+                                        s.gaps,
+                                        camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE,
+                                        camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                                    );
                                 } else {
                                     println!(
                                         "      ⚠ #1132 STRICT-ESCALATE: copies={} gaps={} -- the \
-                                         relaxed copies/gaps rescue is DISARMED (owner mandate); \
-                                         this window FAILS overall_pass and must be escalated, never \
+                                         relaxed copies/gaps rescue is DISARMED (owner mandate) and \
+                                         this is over the issue-1169 singleton allowance; this \
+                                         window FAILS overall_pass and must be escalated, never \
                                          masked (see issue #1132). relaxed_pass reports the old \
                                          tolerant verdict above for observability only.",
                                         s.copies, s.gaps
@@ -4672,30 +4693,52 @@ fn build_and_print_verdict_with_stream_diffs(
                     seg.segments.len()
                 );
                 println!(
-                    "  ⚠ #889 RE-GATE (singleton tolerance={}): {}/{} cambox window(s) exceed the \
+                    "  ⚠ #889 RE-GATE (per-window tolerance={}): {}/{} cambox window(s) exceed the \
                      per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — a \
                      SUBSET of what now gates under #1132 (see the #1132 line below and issue #889 \
-                     for the decision record).",
+                     for the decision record). NOTE: this is the <=3 relaxed tolerance, NOT the \
+                     issue-1169 <=1 SINGLETON allowance (a separate, tighter band; see its own line).",
                     seg.copies_gaps_tolerance,
                     seg.windows_over_copies_gaps_tolerance,
                     seg.segments.len()
                 );
-                // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance rescue is DISARMED
-                // (`window_gate::copies_gaps_tolerance_gates_overall_pass() == false`), so ANY
-                // window with nonzero copies OR gaps (not only OVER the tolerance) FAILS
-                // overall_pass -- count them so the escalation is loud, never masked. When the seam
-                // is re-armed this line falls silent (the #889 tolerance line above governs again).
+                // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance (`<=3`) rescue is
+                // DISARMED. #1169 (owner, 2026-08-22) then RE-INTRODUCED a strictly-tighter
+                // `<=1/<=1` SINGLETON allowance: a single copy/gap is ABSORBED (the designed
+                // issue-1167 paced-trickle + FIFO stale_replay residual) while `>=2` of either
+                // still FAILS. Split the count so both the loud absorption AND the loud escalation
+                // are visible, never masked. When either seam is re-armed/re-tightened these lines
+                // shift accordingly (the #889 tolerance line above governs when re-armed).
                 if !camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass() {
-                    let windows_with_copies_or_gaps = seg
+                    let windows_over_singleton = seg
                         .segments
                         .iter()
-                        .filter(|s| s.frames > 0 && (s.copies != 0 || s.gaps != 0))
+                        .filter(|s| {
+                            s.frames > 0
+                                && (s.copies != 0 || s.gaps != 0)
+                                && !camera_box::window_gate::segment_singleton_allowance_consumed(
+                                    s.copies, s.gaps,
+                                )
+                        })
                         .count();
+                    if seg.windows_singleton_allowance_consumed > 0 {
+                        println!(
+                            "  ⚠ #1169 SINGLETON ALLOWANCE: {}/{} cambox window(s) had a <= {}/{} \
+                             copies/gaps singleton ABSORBED into overall_pass (the designed \
+                             issue-1167 paced-trickle + FIFO stale_replay residual; each carries a \
+                             per-segment note, strict pass stays false/visible). Re-tighten trail: \
+                             issue 1169.",
+                            seg.windows_singleton_allowance_consumed,
+                            seg.segments.len(),
+                            camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE,
+                            camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                        );
+                    }
                     println!(
                         "  ⚠ #1132 STRICT: copies/gaps rescue DISARMED — {}/{} cambox window(s) \
-                         carry any copies/gaps and FAIL overall_pass (escalate, never mask; the \
-                         within-tolerance ones would have been rescued pre-#1132). See issue #1132.",
-                        windows_with_copies_or_gaps,
+                         carry copies/gaps OVER the issue-1169 singleton allowance and FAIL \
+                         overall_pass (escalate, never mask). See issue #1132 / issue #1169.",
+                        windows_over_singleton,
                         seg.segments.len()
                     );
                 }
@@ -4789,14 +4832,58 @@ fn build_and_print_verdict_with_stream_diffs(
                         "copies_gaps_tolerance_gates_overall_pass".to_string(),
                         serde_json::json!(copies_gaps_tol_gates),
                     );
-                    // #1132 review finding (2026-08-19): the EXACT count of windows that GATE
-                    // overall_pass under the disarmed rescue (any nonzero copies/gaps on a
-                    // non-empty window) -- serialized for mineability parity. Neither existing
-                    // count is an exact substitute: `windows_over_copies_gaps_tolerance` is now
-                    // only a SUBSET (it misses within-tolerance nonzero windows that gate under
-                    // #1132), and `windows_failed_report_only` is a SUPERSET (it also counts
-                    // floor-only strict failures that stay report-only). Same value the #1132
-                    // STRICT stdout summary prints.
+                    // #1169 (owner, 2026-08-22): the SINGLETON allowance seam, self-describing in
+                    // the JSON exactly like the copies_gaps keys above -- a DISTINCT, strictly
+                    // tighter (<=1/<=1) band than the disarmed <=3 tolerance. `armed=true` = a
+                    // <=1/<=1 singleton is absorbed into overall_pass (loudly, strict stays false);
+                    // >=2 of either still fails. Re-tighten to absolute zero = flip the arm to false.
+                    let singleton_armed =
+                        camera_box::window_gate::segment_singleton_allowance_gates_overall_pass();
+                    obj.insert(
+                        "segment_singleton_allowance_gates_overall_pass".to_string(),
+                        serde_json::json!(singleton_armed),
+                    );
+                    obj.insert(
+                        "segment_singleton_copies_allowance".to_string(),
+                        serde_json::json!(
+                            camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE
+                        ),
+                    );
+                    obj.insert(
+                        "segment_singleton_gaps_allowance".to_string(),
+                        serde_json::json!(
+                            camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                        ),
+                    );
+                    obj.insert(
+                        "segment_singleton_gate".to_string(),
+                        serde_json::json!(if singleton_armed {
+                            format!(
+                                "#1169: a <= {}/{} copies/gaps SINGLETON is absorbed into \
+                                 overall_pass (the designed issue-1167 paced-trickle + FIFO \
+                                 stale_replay residual), loudly (strict pass stays false, a \
+                                 per-segment singleton_allowance_note fires, \
+                                 windows_singleton_allowance_consumed counts it); 2+ of either \
+                                 still fails. Re-tighten to absolute zero = flip \
+                                 segment_singleton_allowance_gates_overall_pass to false.",
+                                camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE,
+                                camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                            )
+                        } else {
+                            "#1169 singleton allowance DISARMED -- overall_pass folds strict \
+                             copies==0 && gaps==0."
+                                .to_string()
+                        }),
+                    );
+                    // #1132 review finding (2026-08-19): the EXACT count of windows carrying any
+                    // nonzero copies/gaps on a non-empty window -- serialized for mineability
+                    // parity. #1169 (2026-08-22): this is now a SUPERSET of the windows that GATE
+                    // overall_pass -- it also counts the <=1/<=1 SINGLETON windows now ABSORBED (see
+                    // `windows_singleton_allowance_consumed`, already serialized on the object). The
+                    // windows that actually gate = this count MINUS windows_singleton_allowance_consumed.
+                    // `windows_over_copies_gaps_tolerance` remains a SUBSET (misses within-<=3
+                    // nonzero windows), `windows_failed_report_only` a SUPERSET (adds floor-only
+                    // strict failures). Same value the #1132 STRICT stdout summary derives from.
                     obj.insert(
                         "windows_with_copies_or_gaps".to_string(),
                         serde_json::json!(seg

@@ -7,9 +7,14 @@ paths:
 
 `recording-verdict.rs` carries several deliberate, tracked, LOUDLY-reported relaxations of an
 originally-strict verdict gate — `REAL_DROPS_ALLOWANCE_DEFAULT` (issue 904, restored to 0 by
-issue 905 item 1), and issue 905 items 2/3 still pending (`frozen_leg`/`self_heal_reset` back to
+issue 905 item 1); issue 905 items 2/3 still pending (`frozen_leg`/`self_heal_reset` back to
 blocking, per issue 914; the optical undecodable floor's `gates_overall_pass()` back to `true`,
-per issue 915 — see `optical-undecodable-floor-report-only.md`). Each of these follows the SAME
+per issue 915 — see `optical-undecodable-floor-report-only.md`); and the per-segment `<=1/<=1`
+SINGLETON allowance `window_gate::segment_singleton_allowance_gates_overall_pass()` (issue 1169,
+owner 2026-08-22 — the segment-bar copies/gaps soft-release; re-tighten to absolute zero = flip
+that one fn to `false`, the consts `SEGMENT_SINGLETON_{COPIES,GAPS}_ALLOWANCE` stay as the band —
+see `window-gate-tolerance-walkdown.md` seam 4; issue 1169 stays OPEN as the trail, closed only by
+a zero-singleton green run). Each of these follows the SAME
 shape: a relaxation constant/flag was introduced to work around a KNOWN, NAMED root cause while it
 was still unfixed, with an explicit **restore condition** written into its own ticket (usually
 "root cause fixed" + "N consecutive clean runs with the allowance never consumed"). When a
