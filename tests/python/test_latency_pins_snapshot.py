@@ -98,11 +98,11 @@ class TestReadPin:
 # ---------------------------------------------------------------------------
 
 class TestActiveCameraNumbers:
-    def test_default_is_cam1_cam2_cam3(self, monkeypatch):
-        # #1134 (2026-08-19): cam1 retired (grabber hw fault #1110); default mirrors
-        # camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3" (cam1 returned after issue-1130 exoneration).
+    def test_default_is_cam2_cam3(self, monkeypatch):
+        # #1110 (2026-08-22): cam1 RE-RETIRED (ShadowCast grabber hw defect beyond software
+        # compensation); default mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam2 cam3".
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert lps.active_camera_numbers() == (1, 2, 3)
+        assert lps.active_camera_numbers() == (2, 3)
 
     def test_env_override_narrows_the_set(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
@@ -124,9 +124,9 @@ class TestActiveCameraNumbers:
 
 class TestSnapshotBoxPins:
     def test_reads_main_and_mv_for_each_camera_in_the_default_active_set(self, monkeypatch):
-        # #1134 mechanism; cam1 RETURNED 2026-08-19 (issue 1130 exoneration) -> default active set
-        # cam1/cam2/cam3, never the old literal cam1..7 sweep. A retired camera
-        # (cam4/cam5/cam6/cam7) must not even be attempted.
+        # #1110 (2026-08-22): cam1 re-retired (grabber hw defect) -> default active set
+        # cam2/cam3, never the old literal cam1..7 sweep. A retired camera
+        # (cam1/cam4/cam5/cam6/cam7) must not even be attempted.
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
 
@@ -137,8 +137,8 @@ class TestSnapshotBoxPins:
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
         result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
-        assert len(result) == 3
-        assert set(result.keys()) == {"cam1", "cam2", "cam3"}
+        assert len(result) == 2
+        assert set(result.keys()) == {"cam2", "cam3"}
         assert result["cam2"] == {"main_ms": 2, "mv_ms": 102}
 
     def test_camera_active_set_env_override_narrows_the_sweep(self, monkeypatch):

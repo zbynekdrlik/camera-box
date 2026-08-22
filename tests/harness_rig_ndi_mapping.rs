@@ -190,12 +190,12 @@ fn default_active_set_env_var_matches_camera_set_sh_exactly() {
     let py = read("scripts/set-ndi-mapping.py");
     let sh = read("scripts/camera-set.sh");
     assert!(
-        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")"#),
-        "#898/#939: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
-         fallback camera-set.sh itself defaults to (cam3 re-activated 2026-08-13)"
+        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3")"#),
+        "#1110: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
+         fallback camera-set.sh itself defaults to (cam1 re-retired 2026-08-22, grabber hw defect)"
     );
     assert!(
-        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}""#),
-        "#898/#939: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
+        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3}""#),
+        "#1110: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
     );
 }
