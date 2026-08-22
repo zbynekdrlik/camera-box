@@ -46,7 +46,33 @@ qr_align_run() {
     return 2
   fi
 
+  # #1161: fetch the strih genlock audit -> per-source ABSOLUTE arrival transport floor
+  # (latency_ms + mean_head_skew_ms), so qr_align_pins.py can pin each FASTER camera ABOVE its floor
+  # (a pin below the arrival floor is structurally inert — latency = max(pin, transport)). Best-effort
+  # and reusing the SAME fetch mechanism as recording-e2e.sh's [4g/8] pre-record calibration: any
+  # hiccup (a standalone call with no win_ssh_run/PROBE_BIN_DIR, an unreachable log, no audit lines)
+  # just skips --jitter-json, and the aligner falls back to the inert-prone floor+delta plan with its
+  # own loud warning. All on-air strih inputs sit on the always-active Multiview grid, so the genlock
+  # audit fires for them continuously — no preview cycling is needed here (unlike [4g/8]). Override
+  # with QR_ALIGN_JITTER_JSON (an explicit pre-computed path) for a manual run or a test.
+  local jitter_json="${QR_ALIGN_JITTER_JSON:-}"
+  if [ -z "$jitter_json" ] && [ -n "${STRIH_USER:-}" ] && [ -n "${PROBE_BIN_DIR:-}" ] \
+      && [ -n "${OUTDIR:-}" ] && command -v win_ssh_run >/dev/null 2>&1; then
+    local _log="$OUTDIR/qr-align-strih-${RUN_ID:-$$}.log"
+    local _jj="$OUTDIR/qr-align-jitter-${RUN_ID:-$$}.json"
+    local _fetch='Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1) -Tail 600'
+    if win_ssh_run "$STRIH_USER" "$password" "$host" "$_fetch" > "$_log" 2>/dev/null && [ -s "$_log" ] \
+        && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
+        && [ -s "$_jj" ]; then
+      jitter_json="$_jj"
+      echo "[qr-align] #1161 arrival-floor audit fetched -> $_jj (floor-aware plan enabled)" >&2
+    else
+      echo "WARNING: [qr-align] #1161 could not fetch the strih genlock audit (arrival floors); the plan falls back to the inert-prone floor+delta — see qr_align_pins.py's own warning." >&2
+    fi
+  fi
+
   local -a args=(--host "$host" --password "$password" --sources "$sources" --execute)
+  [ -n "$jitter_json" ] && args+=(--jitter-json "$jitter_json")
   # #1160: the measure phase is dynamic (measure-to-a-stable-tail), so QR_ALIGN_ROUNDS is now the
   # hard round CAP, and QR_ALIGN_BUDGET_S the wall-clock bound.
   [ -n "${QR_ALIGN_ROUNDS:-}" ]         && args+=(--max-measure-rounds "$QR_ALIGN_ROUNDS")
