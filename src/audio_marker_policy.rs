@@ -161,7 +161,7 @@ pub const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// #1172 — what the degraded control loop (`probe::run::run_paint_only`) should do for the audio
 /// marker on a given poll tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoveryStep {
+pub enum MarkerRecoveryStep {
     /// A live emitter is running — nothing to do (the caller still polls its `death_reason()`).
     Healthy,
     /// Degraded, but still within the retry interval — keep painting, take no action this tick.
@@ -183,7 +183,7 @@ pub enum RecoveryStep {
 /// only logged, never re-attempted the open, so a marker degraded by a transient ALSA-busy at
 /// startup stayed silent until a manual `systemctl restart cam2-painter`):
 /// - a degraded marker whose retry interval has elapsed asks the caller to RE-OPEN
-///   ([`RecoveryStep::AttemptReopen`]) — the recovery the old loop never had;
+///   ([`MarkerRecoveryStep::AttemptReopen`]) — the recovery the old loop never had;
 /// - a SUCCESSFUL re-open clears the degraded state so a subsequent tick is `Healthy` (no more
 ///   retries, no spin, no needless re-open of a working device);
 /// - a FAILED re-open LEAVES it degraded so the next interval retries again;
@@ -220,15 +220,15 @@ impl AudioMarkerRecovery {
 
     /// Decide what to do on this poll tick. `since_last_attempt` is the wall time elapsed since
     /// the last ALSA open attempt (the startup spawn, or the most recent retry). A healthy marker
-    /// is always [`RecoveryStep::Healthy`]; a degraded marker asks for a re-open once the interval
-    /// has elapsed ([`RecoveryStep::AttemptReopen`]), otherwise [`RecoveryStep::Waiting`].
-    pub fn step(&self, since_last_attempt: Duration) -> RecoveryStep {
+    /// is always [`MarkerRecoveryStep::Healthy`]; a degraded marker asks for a re-open once the interval
+    /// has elapsed ([`MarkerRecoveryStep::AttemptReopen`]), otherwise [`MarkerRecoveryStep::Waiting`].
+    pub fn step(&self, since_last_attempt: Duration) -> MarkerRecoveryStep {
         if !self.degraded {
-            RecoveryStep::Healthy
+            MarkerRecoveryStep::Healthy
         } else if since_last_attempt >= self.retry_interval {
-            RecoveryStep::AttemptReopen
+            MarkerRecoveryStep::AttemptReopen
         } else {
-            RecoveryStep::Waiting
+            MarkerRecoveryStep::Waiting
         }
     }
 
@@ -343,19 +343,22 @@ card 0: PCH [HDA Intel PCH], device 7: HDMI 1 [HDMI 1]
     fn healthy_marker_never_retries() {
         let r = AudioMarkerRecovery::healthy();
         assert!(!r.is_degraded());
-        assert_eq!(r.step(Duration::from_secs(0)), RecoveryStep::Healthy);
+        assert_eq!(r.step(Duration::from_secs(0)), MarkerRecoveryStep::Healthy);
         // Even long past the interval, a healthy marker never re-opens a working device.
-        assert_eq!(r.step(Duration::from_secs(3600)), RecoveryStep::Healthy);
+        assert_eq!(
+            r.step(Duration::from_secs(3600)),
+            MarkerRecoveryStep::Healthy
+        );
     }
 
     #[test]
     fn degraded_marker_waits_within_the_interval() {
         let r = AudioMarkerRecovery::degraded();
         assert!(r.is_degraded());
-        assert_eq!(r.step(Duration::from_secs(0)), RecoveryStep::Waiting);
+        assert_eq!(r.step(Duration::from_secs(0)), MarkerRecoveryStep::Waiting);
         assert_eq!(
             r.step(RECOVERY_RETRY_INTERVAL - Duration::from_millis(1)),
-            RecoveryStep::Waiting
+            MarkerRecoveryStep::Waiting
         );
     }
 
@@ -365,10 +368,13 @@ card 0: PCH [HDA Intel PCH], device 7: HDMI 1 [HDMI 1]
         // logs "still DEGRADED" forever. Once the retry interval elapses, a degraded marker MUST
         // ask the caller to re-open. RED against the stub (which returns Waiting forever).
         let r = AudioMarkerRecovery::degraded();
-        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        assert_eq!(
+            r.step(RECOVERY_RETRY_INTERVAL),
+            MarkerRecoveryStep::AttemptReopen
+        );
         assert_eq!(
             r.step(RECOVERY_RETRY_INTERVAL + Duration::from_secs(10)),
-            RecoveryStep::AttemptReopen
+            MarkerRecoveryStep::AttemptReopen
         );
     }
 
@@ -378,10 +384,16 @@ card 0: PCH [HDA Intel PCH], device 7: HDMI 1 [HDMI 1]
         // tick (even long past the interval) must NOT keep retrying — no spin, no needless
         // re-open of a working device.
         let mut r = AudioMarkerRecovery::degraded();
-        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        assert_eq!(
+            r.step(RECOVERY_RETRY_INTERVAL),
+            MarkerRecoveryStep::AttemptReopen
+        );
         r.record_reopen(true);
         assert!(!r.is_degraded());
-        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL * 10), RecoveryStep::Healthy);
+        assert_eq!(
+            r.step(RECOVERY_RETRY_INTERVAL * 10),
+            MarkerRecoveryStep::Healthy
+        );
     }
 
     #[test]
@@ -389,10 +401,16 @@ card 0: PCH [HDA Intel PCH], device 7: HDMI 1 [HDMI 1]
         // A retry against a still-busy device fails; the marker stays degraded and the next
         // elapsed interval asks to re-open again (self-recovery keeps trying until it frees).
         let mut r = AudioMarkerRecovery::degraded();
-        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        assert_eq!(
+            r.step(RECOVERY_RETRY_INTERVAL),
+            MarkerRecoveryStep::AttemptReopen
+        );
         r.record_reopen(false);
         assert!(r.is_degraded());
-        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        assert_eq!(
+            r.step(RECOVERY_RETRY_INTERVAL),
+            MarkerRecoveryStep::AttemptReopen
+        );
     }
 
     #[test]
@@ -400,13 +418,16 @@ card 0: PCH [HDA Intel PCH], device 7: HDMI 1 [HDMI 1]
         // A soft mid-run ALSA death degrades a previously-healthy marker; the same retry path then
         // recovers it exactly as at a failed startup open.
         let mut r = AudioMarkerRecovery::healthy();
-        assert_eq!(r.step(Duration::from_secs(1)), RecoveryStep::Healthy);
+        assert_eq!(r.step(Duration::from_secs(1)), MarkerRecoveryStep::Healthy);
         r.mark_degraded();
         assert!(r.is_degraded());
-        assert_eq!(r.step(Duration::ZERO), RecoveryStep::Waiting);
-        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::AttemptReopen);
+        assert_eq!(r.step(Duration::ZERO), MarkerRecoveryStep::Waiting);
+        assert_eq!(
+            r.step(RECOVERY_RETRY_INTERVAL),
+            MarkerRecoveryStep::AttemptReopen
+        );
         r.record_reopen(true);
-        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), RecoveryStep::Healthy);
+        assert_eq!(r.step(RECOVERY_RETRY_INTERVAL), MarkerRecoveryStep::Healthy);
     }
 
     #[test]
