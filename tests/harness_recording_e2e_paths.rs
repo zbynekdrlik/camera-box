@@ -1680,7 +1680,13 @@ fn recording_e2e_default_sweep_covers_every_active_camera_including_cam2() {
         "issue 939: cam3 re-activated 2026-08-13 — the default sweep must cover CAM3 via \
          'Cam 3:CAM3': {resolved}"
     );
-    for retired in ["Cam 1:CAM1", "Cam 4:CAM4", "Cam 5:CAM5", "Cam 6:CAM6", "Cam 7:CAM7"] {
+    for retired in [
+        "Cam 1:CAM1",
+        "Cam 4:CAM4",
+        "Cam 5:CAM5",
+        "Cam 6:CAM6",
+        "Cam 7:CAM7",
+    ] {
         assert!(
             !resolved.contains(retired),
             "#1110/#827/issue 947: the default sweep must NOT reference the retired {retired} — \
