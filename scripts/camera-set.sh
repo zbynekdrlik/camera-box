@@ -65,22 +65,33 @@
 # E2E run's own verdict JSON if the measured delivery spread demands it (see
 # .claude/rules/phase-sync-calibrator-testing.md).
 #
-# cam1 RETIRED 2026-08-19 (issue 1134, owner order #1130): its USB grabber is hardware-faulted
-# (#1110 -EPROTO — live capture reads grayscale, its camera-box.service was stopped by the owner:
-# "no measuring on a broken instrument"). cam1 was ALSO the hard-pinned PRIMARY/source node of the
-# E2E chain (cam2 paints -> SOURCE films cam2's monitor -> strih -> stream), so its retirement is
-# the first that had to move the SOURCE role, not just drop a secondary. #1134 extends this file's
-# retirement=membership doctrine to the source role via camera_source_box() below: the source is
-# now the FIRST strih-routable member of CAMERA_ACTIVE_SET (cam1 today — RETURNED 2026-08-19 the
-# same day: issue 1130 proved the judder was an emit-gate regression in the deployed binary, not
-# the grabber; the retire+return round trip below was exercised for real within hours).
-# A retirement is membership-only, exactly like cam4/cam5/cam6/cam7 — the box's IP / NDI source /
-# strih route stay fully resolvable below, and its rig-fleet.txt ack line is added on retire and
-# DELETED on return (a box OUTSIDE the active set is never a preflight target — cam4 precedent).
-# RE-ENABLE (once the grabber is replaced): add "cam1" back to CAMERA_ACTIVE_SET AND delete cam1's
-# rig-fleet.txt ack line — nothing else (the source role follows automatically, cam1 being the
-# first strih-routable member of a cam1-first set again).
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
+# cam1 RE-RETIRED 2026-08-22 (issue 1110): its ShadowCast USB grabber is HARDWARE-DEFECTIVE beyond
+# software compensation — chronic over-rate (61.5 -> 63.1 fps captured, climbing), constant 4
+# corrupted/5s, -EPROTO; USB re-auth does NOT cure it, and the emit-side fixes (issue 1145 v3 /
+# issue 1167) mitigate but do not eliminate. The leg-health gate (issue 1133) rightly REFUSES every
+# E2E run while cam1 is in the set, and cam1 alone oscillates -2..-11 id in [4i/8align] while
+# cam2/cam3/cam4 sit within 0-2 id — the SINGLE deterministic blocker of the green E2E series. The
+# card swap is delivered to the owner (needs-answer on issue 1110); until the grabber is physically
+# swapped, cam1 is retired from the MEASURED fleet so the rest of the stack (emit fixes, pin-mover,
+# preempt=full kernel) can be proven on healthy cameras.
+#
+# HISTORY: cam1 was first retired 2026-08-19 (issue 1134, owner order #1130) and RETURNED the same
+# day (issue 1130 read the judder as an emit-gate regression in the deployed binary, not the card).
+# That return is now superseded — the grabber IS the fault, confirmed over 2026-08-21's E2E series.
+#
+# cam1 was ALSO the hard-pinned PRIMARY/source node of the E2E chain (cam2 paints -> SOURCE films
+# cam2's monitor -> strih -> stream), so its retirement is the first that had to move the SOURCE
+# role, not just drop a secondary. #1134 extended this file's retirement=membership doctrine to the
+# source role via camera_source_box() below: the source is now the FIRST strih-routable member of
+# CAMERA_ACTIVE_SET, so dropping cam1 from the default set here moves the source to cam3 with no
+# other edit. Membership-retired exactly like cam4/cam5/cam6/cam7 — cam1's IP / NDI source / strih
+# route stay fully resolvable below. cam1 is ALSO acked in rig-fleet.txt
+# (grabber-hw-defect-swap-pending-issue-1110); a box OUTSIDE the active set is never a preflight
+# target, so the stale-ack guard never fires on it (the cam4 precedent).
+# RE-ENABLE (once the grabber is swapped): add "cam1" back to CAMERA_ACTIVE_SET (and CAMERA_ALIGN_SET
+# below) AND delete cam1's rig-fleet.txt ack line — nothing else (the source role follows
+# automatically, cam1 being the first strih-routable member of a cam1-first set again).
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3}"
 
 # CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
 # aligned. This is DELIBERATELY a SUPERSET of CAMERA_ACTIVE_SET, not derived from it: the two answer
@@ -88,9 +99,11 @@ CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
 # is excluded from it because its own capture leg can wedge, #947). CAMERA_ALIGN_SET = every camera
 # that REALLY goes on-air to strih, which the owner's rework mandate (issue 1003, 2026-08-20) says
 # MUST include cam4 — the offline-ack "outside-measured-set" covers only E2E measurement, never
-# production alignment. So cam4 stays out of the sweep but IS aligned. Override to match the on-air
-# reality if the fleet changes (e.g. a cam5 goes on-air): CAMERA_ALIGN_SET="cam1 cam2 cam3 cam4 cam5".
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-cam1 cam2 cam3 cam4}"
+# production alignment. So cam4 stays out of the sweep but IS aligned. cam1 is dropped from this set
+# too (issue 1110, 2026-08-22): its grabber is hardware-defective, so it cannot go on-air to be
+# aligned — re-add it here (and to CAMERA_ACTIVE_SET above) once the card is swapped. Override to
+# match the on-air reality if the fleet changes (e.g. a cam5 goes on-air): CAMERA_ALIGN_SET="cam2 cam3 cam4 cam5".
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-cam2 cam3 cam4}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

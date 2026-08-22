@@ -77,8 +77,9 @@ fn align_set_is_a_superset_including_cam4() {
     // measurable E2E sweep (CAMERA_ACTIVE_SET). CAMERA_ALIGN_SET is a deliberate SUPERSET.
     let cs = read("scripts/camera-set.sh");
     assert!(
-        cs.contains("CAMERA_ALIGN_SET=\"${CAMERA_ALIGN_SET:-cam1 cam2 cam3 cam4}\""),
-        "camera-set.sh must default CAMERA_ALIGN_SET to the on-air superset including cam4 (#1003)."
+        cs.contains("CAMERA_ALIGN_SET=\"${CAMERA_ALIGN_SET:-cam2 cam3 cam4}\""),
+        "camera-set.sh must default CAMERA_ALIGN_SET to the on-air superset including cam4 (#1003); \
+         cam1 dropped from alignment too 2026-08-22 (issue 1110, dead grabber can't go on-air)."
     );
     assert!(
         cs.contains("camera_align_ndi_sources_csv"),

@@ -100,7 +100,7 @@ DEFAULT_MAP = FULL_MAP
 # exactly (this module is invoked as a standalone subprocess, so it reads the SAME env var rather
 # than re-declaring its own separate default; when unset, falls back to the identical literal
 # camera-set.sh itself defaults to, so the two can never silently disagree).
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3")
 
 
 def _camera_name_of(ndi_input):

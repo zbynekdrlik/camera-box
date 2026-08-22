@@ -20,18 +20,21 @@
 # remove it the moment the notebook is back. (Remote wake / WoL for imag is separate hardware work,
 # tracked apart from this gate change; issue 1053 is its strih/stream counterpart.)
 #
-# Current physical state (2026-08-19): cam1 RETURNED same day — issue 1130 proved the judder was an
-# emit-gate regression in the deployed dev.462 binary (fixed by deploying dev.481), NOT the grabber;
-# the issue-1134 source-role mechanism stays (source = first strih-routable member of the set).
-# Historic note (issue-1134 cam1 source-role retirement, superseded same day):
-# cam1: RETIRED 2026-08-19 (issue 1134, owner order #1130) -- its USB grabber is hardware-faulted
-#   (#1110 -EPROTO; live capture reads grayscale, camera-box.service stopped). cam1 was ALSO the
-#   hard-pinned PRIMARY/source node of the E2E chain, so #1134 made the source role derivable off
-#   CAMERA_ACTIVE_SET (camera_source_box) and dropped cam1 from the default set (now "cam2 cam3",
-#   source=cam3). Like cam4 below, cam1 is acked here yet OUTSIDE camera-set.sh's CAMERA_ACTIVE_SET,
-#   so it is NOT a preflight target and the stale-ack guard never fires on it. RE-ENABLE once the
-#   grabber is replaced: add "cam1" back to CAMERA_ACTIVE_SET AND delete cam1's line below -- the
-#   source role follows automatically (cam1 first strih-routable member of a cam1-first set again).
+# Current physical state (2026-08-22, issue 1110 cam1 re-retirement -- this time genuinely the grabber):
+# cam1: RE-RETIRED 2026-08-22 (issue 1110) -- its ShadowCast USB grabber is HARDWARE-DEFECTIVE beyond
+#   software compensation (chronic over-rate 61.5->63.1 fps captured, constant 4 corrupted/5s, -EPROTO;
+#   USB re-auth does not cure). It is the SINGLE deterministic blocker of the green E2E series (cam1
+#   alone oscillates -2..-11 id in [4i/8align] while cam2/cam3/cam4 sit within 0-2 id); the leg-health
+#   gate (issue 1133) refuses every run while it is in the set. cam1 was ALSO the hard-pinned
+#   PRIMARY/source node of the E2E chain, so #1134 made the source role derivable off CAMERA_ACTIVE_SET
+#   (camera_source_box) and dropping cam1 from the default set (now "cam2 cam3") moves the source to
+#   cam3. Like cam4 below, cam1 is acked here yet OUTSIDE camera-set.sh's CAMERA_ACTIVE_SET, so it is
+#   NOT a preflight target and the stale-ack guard never fires on it. The card swap is delivered to the
+#   owner (needs-answer on issue 1110). REMOVE this line (and re-add "cam1" to CAMERA_ACTIVE_SET AND
+#   CAMERA_ALIGN_SET) the moment the grabber is swapped -- the source role follows automatically.
+# History: cam1 was first retired 2026-08-19 (issue 1134, owner order #1130) and RETURNED the same day
+#   (issue 1130 read the judder as a deployed emit-gate regression, fixed by dev.481, not the card);
+#   that return is now superseded -- the 2026-08-21 E2E series confirmed the grabber IS the fault.
 # cam3: RE-ACTIVATED 2026-08-13 (issue 939) -- in CAMERA_ACTIVE_SET, a measured preflight
 #   target again; its former ack line is GONE (a healthy acked box trips the stale-ack guard).
 # cam4: ON AIR but OUTSIDE the measured set -- ack RESTORED 2026-08-07 with this exact reason.
@@ -47,6 +50,7 @@
 # Without the remaining acks the re-armed A/V-offset gate (issue 861) fails closed forever on
 # their UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design
 # (#855).
+cam1:grabber-hw-defect-swap-pending-issue-1110
 cam4:on-air-but-outside-measured-set-2026-08-07
 cam5:powered-off-2026-07-27
 cam6:powered-off-2026-07-27

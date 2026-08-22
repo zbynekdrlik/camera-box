@@ -14,9 +14,13 @@ paths:
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and active TODAY (default `cam2 cam3` since #1134, 2026-08-19 — cam1 retired, its USB
-grabber hardware-faulted #1110/#1130; cam1/cam4/cam5/cam6/cam7 retired but fully resolvable — see the
-header comment in `camera-set.sh`). **Every place that needs "the list of
+installed and active TODAY (default `cam2 cam3` — cam1 was retired #1134 2026-08-19, briefly returned
+#1130 the same day, then RE-RETIRED for real 2026-08-22 #1110 because its ShadowCast USB grabber is
+hardware-defective beyond software compensation (chronic over-rate, constant corruption, USB re-auth
+does not cure); cam1/cam4/cam5/cam6/cam7 retired but fully resolvable — see the
+header comment in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the on-air alignment superset,
+default `cam2 cam3 cam4`) dropped cam1 in the SAME #1110 retirement — a dead grabber cannot go on-air
+to be aligned. **Every place that needs "the list of
 cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
 literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
 fps, strih scene/route) stay fully resolvable forever (`camera_resolve`/`camera_strih_route` never
@@ -129,6 +133,8 @@ AND `tests/**/*.rs` AND `tests/python/*.py`** — missing any one of the four Py
 their own default-set unit tests) leaves a script that silently disagrees with camera-set.sh the
 moment it runs without the env var exported (e.g. invoked directly by hand, or by a caller that
 forgot to pass `--active-set`/export the var).
+
+**A grep for the old set LITERAL (`cam1 cam2 cam3`) does NOT find every default-reliant test — some resolve the default INDIRECTLY and assert the RESOLVED shape, not the raw set string (#1110, cost a review round-trip).** Besides the obvious `delenv/pop/None`-on-`CAMERA_ACTIVE_SET` default assertions, there is a SECOND class that reads the default through a derivation helper called with NO argument and then asserts the resolved `Cam N:CAMN` / `["CAMn", …]` / `{"NDI camN"}` shape — which contains NO `camN cam...` set-literal substring at all, so a literal grep sails right past it. Known members (grep these BY THEIR CALL, per retirement): `resolve_cambox_sweep_default(None)` (`tests/harness_recording_e2e_paths.rs` — asserts `resolved.contains("Cam 1:CAM1")` + a retired `["Cam 4:CAM4", …]` loop), `m.active_map()` no-arg (`tests/harness_rig_ndi_mapping.rs` `active_map_defaults_to_exactly_the_*` — asserts `senders == ["CAM1","CAM2","CAM3"]`), and `_scene_to_camera_from_active_map()` no-arg (`tests/python/test_cambox_sweep_mapping.py` `test_default_active_set_is_exactly_*` — asserts `set(canonical.values()) == {"CAM…"}`). When changing the default membership, ALSO `grep -rn 'resolve_cambox_sweep_default(None)\|active_map()\|_scene_to_camera_from_active_map()\|Cam 1:CAM1'` and invert each resolved-shape assertion + move the retired cam into its `retired`/`for retired in [...]` loop — the two lock-tests do NOT cover these (they lock the mirror LITERALS, not the resolved output). Verify the resolved shape cheaply without cargo: `camera_active_sweep_pairs` (bash, prints `Cam N:CAMN`) and `python3 -c "…; m.active_map()"` both derive the same default the tests do.
 
 ## A "default active set proves parallelism" test can lose its power when the default shrinks
 
