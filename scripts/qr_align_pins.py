@@ -337,36 +337,27 @@ def arrival_floors_from_jitter(jitter_json, sources):
     return {s: by_src[s] for s in sources if s in by_src}
 
 
-def floor_aware_pins(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
-                     max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
-    """The FLOOR-AWARE pin plan (#1161). `deltas`: {src: ms >= 0} the PURE cross-camera present-age
-    delta (the hold to add to bring each camera up to the slowest; the slowest anchors to ~0 -- from
-    round_deltas over ZERO pins, so the cross-clock offset still cancels). `arrival_floors`: {src: ms}
-    the ABSOLUTE per-source present age (latency_ms + mean_head_skew_ms). Returns {src: pin_ms(int)}:
-    the slowest (min-delta) camera -> floor_ms (inert, stays at its natural floor); every faster
-    camera -> round(arrival_floor_i + delta_i) = the alignment target (the slowest's floor), which
-    sits ABOVE that camera's own floor so the genlock-C ACQUIRE frame-mover can add the hold.
-
-    `current_pins` (optional, review-hardening #1161): the audit "arrival floor" is the PRESENT AGE
-    (max(pin, transport)), which equals the raw transport ONLY while the pin sits BELOW it. From a
-    pinned steady state (a prior run left the pins elevated), a co-slowest camera can be held at that
-    present age SOLELY by its own pin (pin-dominated: current_pin >= its present age) -- its TRUE
-    transport is below and UNOBSERVABLE. Flooring such a source to floor_ms would drop it to that
-    lower transport -> misaligned. So a pin-dominated co-slowest keeps its current pin (never torn
-    down); a transport-dominated one (the normal case after the two-phase reset, where every pin is
-    at the floor) floors correctly. The PRIMARY fix is the reset (reset_pins_to_floor makes every
-    floor a true transport); this is the belt-and-suspenders for a direct/no-reset call.
-
-    FAILs loud (AlignmentImpossible) if a faster camera's target exceeds max_abs_latency_ms -- the
-    transport floor is too high to align within the latency budget; NEVER silently pins above the
-    bound, NEVER widens it. Also FAILs if a FASTER camera has no arrival-floor measurement (a pin
-    below its floor would be inert -- never a fabricated floor)."""
-    if not deltas:
-        return {}
-    base = min(deltas.values())          # the slowest (max present age / min hold-to-add) anchor
+def floor_aware_partition(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
+                          max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
+    """The PURE core of the floor-aware plan (#1161) that PARTITIONS instead of raising -- returns
+    ``(plan, over_budget, missing)`` so a caller can either HARD-FAIL (floor_aware_pins, below) or
+    SOFT-RELEASE the BUDGET_BOUND case (align(), issue 1168's re-tighten path). The slowest /
+    pin-dominated / clamp / faster-target semantics are EXACTLY floor_aware_pins' -- see its docstring:
+      * ``plan`` -- {src: pin_ms(int)}: the slowest (or pin-dominated co-slowest) camera at floor_ms
+        (or its held pin), every WITHIN-budget faster camera at its alignment target, and every
+        OVER-budget faster camera CLAMPED to floor_ms (a pin we cannot afford is NEVER written up
+        above the ceiling).
+      * ``over_budget`` -- [(src, floor_i, hold, target)] faster cameras whose target
+        (arrival_floor + hold) exceeds ``max_abs_latency_ms``.
+      * ``missing`` -- [src] faster cameras with no arrival-floor measurement.
+    ``floor_aware_pins`` wraps this and RAISES on ``missing``/``over_budget`` (the HARD-FAIL
+    direction, byte-unchanged); ``align`` uses it directly to soft-release the budget-bound case."""
     plan = {}
     over_budget = []
     missing = []
+    if not deltas:
+        return plan, over_budget, missing
+    base = min(deltas.values())          # the slowest (max present age / min hold-to-add) anchor
     for src, d in sorted(deltas.items()):
         hold = d - base
         if hold < 0.5:                   # co-slowest by present age -> minimum pin, UNLESS pin-dominated
@@ -390,8 +381,46 @@ def floor_aware_pins(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
             continue
         target = floor_i + hold
         if target > max_abs_latency_ms:
+            # #1161 over budget: the align pin would exceed the achievable-latency ceiling. Record it
+            # and CLAMP this camera to its floor (never write a pin we cannot afford) -- the caller
+            # (floor_aware_pins) RAISES on this, while align() SOFT-RELEASES it (BUDGET_BOUND).
             over_budget.append((src, floor_i, hold, target))
+            plan[src] = floor_ms
+            continue
         plan[src] = max(floor_ms, int(round(target)))   # #1161 clamp: never a sub-floor pin
+    return plan, over_budget, missing
+
+
+def floor_aware_pins(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
+                     max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
+    """The FLOOR-AWARE pin plan (#1161). `deltas`: {src: ms >= 0} the PURE cross-camera present-age
+    delta (the hold to add to bring each camera up to the slowest; the slowest anchors to ~0 -- from
+    round_deltas over ZERO pins, so the cross-clock offset still cancels). `arrival_floors`: {src: ms}
+    the ABSOLUTE per-source present age (latency_ms + mean_head_skew_ms). Returns {src: pin_ms(int)}:
+    the slowest (min-delta) camera -> floor_ms (inert, stays at its natural floor); every faster
+    camera -> round(arrival_floor_i + delta_i) = the alignment target (the slowest's floor), which
+    sits ABOVE that camera's own floor so the genlock-C ACQUIRE frame-mover can add the hold.
+
+    `current_pins` (optional, review-hardening #1161): the audit "arrival floor" is the PRESENT AGE
+    (max(pin, transport)), which equals the raw transport ONLY while the pin sits BELOW it. From a
+    pinned steady state (a prior run left the pins elevated), a co-slowest camera can be held at that
+    present age SOLELY by its own pin (pin-dominated: current_pin >= its present age) -- its TRUE
+    transport is below and UNOBSERVABLE. Flooring such a source to floor_ms would drop it to that
+    lower transport -> misaligned. So a pin-dominated co-slowest keeps its current pin (never torn
+    down); a transport-dominated one (the normal case after the two-phase reset, where every pin is
+    at the floor) floors correctly. The PRIMARY fix is the reset (reset_pins_to_floor makes every
+    floor a true transport); this is the belt-and-suspenders for a direct/no-reset call.
+
+    FAILs loud (AlignmentImpossible) if a faster camera's target exceeds max_abs_latency_ms -- the
+    transport floor is too high to align within the latency budget; NEVER silently pins above the
+    bound, NEVER widens it. Also FAILs if a FASTER camera has no arrival-floor measurement (a pin
+    below its floor would be inert -- never a fabricated floor). The over-budget/missing DETECTION is
+    shared with align()'s BUDGET_BOUND soft-release via floor_aware_partition (same computation, one
+    copy); this wrapper is the HARD-FAIL direction."""
+    if not deltas:
+        return {}
+    plan, over_budget, missing = floor_aware_partition(
+        arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins)
     if missing:
         raise AlignmentImpossible(
             "[qr-align] #1161 cannot compute a floor-aware pin for "
@@ -399,13 +428,38 @@ def floor_aware_pins(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
             "genlock audit head_skew is required -- a pin below the arrival transport floor is "
             "structurally inert). Provide --jitter-json.")
     if over_budget:
-        parts = [f"{s!r} arrival floor {fl:.0f}ms + delta {hl:.0f}ms = {t:.0f}ms > bound "
-                 f"{max_abs_latency_ms:.0f}ms" for s, fl, hl, t in over_budget]
         raise AlignmentImpossible(
-            "[qr-align] #1161 cannot align within the latency budget: " + "; ".join(parts)
+            "[qr-align] #1161 cannot align within the latency budget: "
+            + over_budget_arithmetic(over_budget, max_abs_latency_ms)
             + " -- the transport floor is too high to align within the budget; investigate the "
             "transport floor, do NOT raise the bound (gate-strictness doctrine).")
     return plan
+
+
+def over_budget_arithmetic(over_budget, max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS):
+    """The per-camera `arrival floor Xms + delta Yms = Zms > bound Bms` phrase list (joined) for an
+    over_budget partition -- shared by floor_aware_pins' hard-fail message and budget_bound_report's
+    soft-release block so the arithmetic reads identically in both."""
+    return "; ".join(
+        f"{s!r} arrival floor {fl:.0f}ms + delta {hl:.0f}ms = {t:.0f}ms > bound "
+        f"{max_abs_latency_ms:.0f}ms" for s, fl, hl, t in over_budget)
+
+
+def budget_bound_report(over_budget, residual_ms, max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS):
+    """The LOUD, named report-only block for the BUDGET_BOUND soft-release (#1161 / issue 1168). Names
+    each over-budget faster camera's `arrival_floor + delta = target > bound` arithmetic, then the
+    surviving cross-camera spread as a REPORT-ONLY RESIDUAL tracked in issue 1168. The run PASSES only
+    because the correction is physically budget-impossible (a pin above the ceiling is forbidden by the
+    deep-pin doctrine) -- NOT because the residual is acceptable, and NO bound is widened."""
+    return (
+        "[qr-align] #1161 BUDGET-BOUND SOFT-RELEASE: the tail is STABLE + within the spread sanity, "
+        "but the alignment correction is physically budget-impossible: "
+        + over_budget_arithmetic(over_budget, max_abs_latency_ms)
+        + " -- correcting these needs a pin above the achievable-latency ceiling (the deep-pin "
+        "doctrine forbids it), so NO alignment pin is applied and the align set stays at its natural "
+        f"floor. REPORT-ONLY RESIDUAL: cross-camera spread ~{residual_ms:.0f}ms survives -- tracked in "
+        "issue 1168 (reduce the per-box arrival floors, then RE-TIGHTEN [4i/8align] to hard-fail). The "
+        "run PROCEEDS (exit 0); the residual is NOT accepted as aligned, and no bound is widened.")
 
 
 def floor_aware_stuck_abort_reason(plan, arrival_floors, post_pins, post_deltas,
@@ -972,12 +1026,48 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     # review). No floors -> the inert-prone floor+delta fallback.
     if arrival_floors:
         result["present_age_deltas_ms"] = {s: round(v, 2) for s, v in pure_deltas.items()}
-        try:
-            plan = floor_aware_pins(arrival_floors, pure_deltas, floor_ms, max_abs_latency_ms,
-                                    current_pins=current_pins)
-        except AlignmentImpossible:
+        plan, over_budget, missing = floor_aware_partition(
+            arrival_floors, pure_deltas, floor_ms, max_abs_latency_ms, current_pins=current_pins)
+        if missing:  # pragma: no cover -- unreachable unless the faster_missing invariant breaks
+            # `missing` is provably empty here: the faster_missing pre-check above already cleared
+            # arrival_floors (-> the floor3 fallback) for the IDENTICAL "a faster camera lacks a
+            # floor" condition floor_aware_partition uses. Guard it defensively (a broken invariant
+            # fails loud, never silently omits a camera from the plan) with a DISTINCT internal
+            # message -- never re-duplicate floor_aware_pins' user-facing missing-abort wording,
+            # which would silently drift from it (#1161 review).
             _emit_fail_diagnostics(rounds_ticks, sources, tail_start)
-            raise
+            raise AlignmentImpossible(
+                "[qr-align] #1161 internal invariant: faster camera(s) "
+                + ", ".join(repr(s) for s in missing) + " reached the floor-aware partition with no "
+                "arrival floor (the faster_missing pre-check should have fallen back to floor3 first).")
+        if over_budget:
+            # #1161 BUDGET-BOUND SOFT-RELEASE (issue 1168). The tail is STABLE and within the spread
+            # sanity (both proven above), but >=1 faster camera's alignment target exceeds the
+            # achievable-latency ceiling -- the per-box arrival-floor difference is physically
+            # budget-impossible to correct (a pin above the ceiling is forbidden by the deep-pin
+            # doctrine). This is NOT a defect (an unstable / degraded-card tail FAILs above); it is the
+            # CONSTANT cross-camera per-box floor offset issue 1168 tracks. Apply NOTHING (the align set
+            # already sits at its natural floor after the two-phase reset), persist the residual into
+            # the result JSON + emit a loud named marker, and PASS (exit 0) so the E2E proceeds. Owner
+            # revision 2026-07-31 ("zelený gate najprv, pritvrdenie cez tickety") + the supervisor's
+            # judgment: a stable, budget-impossible tail passes with a report-only residual; re-tighten
+            # is issue 1168. NO within-budget partial apply -- the existing verify model requires FULL
+            # cross-camera parity (never true while an over-budget camera stays at its floor), so a
+            # partial apply cannot be certified by it; and applying nothing cannot mask a HOLD-INERT
+            # defect (that FAIL stays fully intact on the within-budget-correctable path below).
+            result["status"] = "budget-bound"
+            result["budget_bound"] = True
+            result["plan"] = {}
+            result["over_budget"] = [
+                {"source": s, "arrival_floor_ms": round(fl, 1), "delta_ms": round(hl, 1),
+                 "target_ms": round(t, 1), "bound_ms": max_abs_latency_ms}
+                for s, fl, hl, t in over_budget]
+            result["report_only_residual_ms"] = round(worst, 1)
+            # Report-only: the loud budget_bound_report() marker above + the persisted over_budget
+            # / report_only_residual_ms JSON fully surface the residual; the per-round frame_id table
+            # (_emit_fail_diagnostics) is a FAIL-path debugging aid, not emitted on this PASS (#1161 review).
+            sys.stderr.write(budget_bound_report(over_budget, worst, max_abs_latency_ms) + "\n")
+            return result
     else:
         note = ("partial/unusable arrival-floor audit" if jitter_json
                 else "no per-source arrival-floor measurement (--jitter-json absent)")
@@ -1140,6 +1230,15 @@ def main(argv=None):
     elif status == "aligned":
         print(f"[qr-align] host={a.host} ALIGNED: set {result['plan']}, re-measured spread "
               f"{result['post_spread_ids']} id (<= {a.parity_tol_ids}); {tail}.", file=sys.stderr)
+    elif status == "budget-bound":
+        # #1161 / issue 1168: the correction is physically budget-impossible; PASS with a report-only
+        # residual, exit 0 (the E2E proceeds). The JSON above carries over_budget + report_only_residual_ms.
+        over = ", ".join(o["source"] for o in result.get("over_budget", []))
+        print(f"[qr-align] host={a.host} BUDGET-BOUND (issue 1168): correction budget-impossible for "
+              f"{over} (target > {a.max_abs_latency_ms:.0f}ms ceiling); no pins applied, report-only "
+              f"residual ~{result.get('report_only_residual_ms')} ms survives; {tail}. Re-tighten to "
+              "hard-fail is tracked in issue 1168 (reduce per-box arrival floors first).",
+              file=sys.stderr)
     return 0
 
 

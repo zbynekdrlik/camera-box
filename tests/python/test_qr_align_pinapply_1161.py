@@ -485,3 +485,132 @@ class TestResetPinsToFloor:
         n = qa.reset_pins_to_floor(SRC, "h", "pw", floor_ms=3)
         assert applied == {s: 3 for s in SRC}
         assert n == len(SRC)
+
+
+# --------------------------------------------------------------------------- #
+# #1161 FINAL LANE (issue 1168 re-tighten path): BUDGET_BOUND soft-release. When the tail is STABLE
+# and within the spread sanity, but the alignment correction for >=1 faster camera exceeds the 94 ms
+# achievable-latency ceiling (a per-box arrival-floor difference physically budget-impossible to
+# correct -- a pin above the ceiling is forbidden by the deep-pin doctrine), the run must NOT fail:
+# apply NOTHING, persist the residual into the align JSON + emit a loud named marker, exit 0 so the
+# E2E proceeds. floor_aware_partition() is the pure core that PARTITIONS the over-budget cameras
+# instead of raising; floor_aware_pins() still RAISES on over_budget/missing (byte-unchanged).
+# --------------------------------------------------------------------------- #
+class TestFloorAwarePartition:
+    def test_partitions_over_budget_without_raising(self):
+        # the live issue-1168 shape: cam2/cam3 targets 129 > 94; cam4 within budget; cam1 slowest.
+        floors = {"NDI cam1": 129.0, "NDI cam2": 100.0, "NDI cam3": 79.0, "NDI cam4": 40.0}
+        deltas = {"NDI cam1": 0.0, "NDI cam2": 29.0, "NDI cam3": 50.0, "NDI cam4": 20.0}
+        plan, over, missing = qa.floor_aware_partition(floors, deltas)   # does NOT raise
+        assert missing == []
+        obs = {s: t for s, fl, hl, t in over}
+        assert set(obs) == {"NDI cam2", "NDI cam3"}         # 100+29=129, 79+50=129 -> over 94
+        assert obs["NDI cam3"] == pytest.approx(129.0)
+        assert plan["NDI cam4"] == 60                        # within-budget faster camera keeps its target
+        assert plan["NDI cam1"] == 3                         # slowest floors
+        # over-budget cameras are CLAMPED to the floor (a pin we cannot afford is never written up)
+        assert plan["NDI cam2"] == 3 and plan["NDI cam3"] == 3
+
+    def test_partition_equals_floor_aware_pins_when_all_within_budget(self):
+        # equivalence on the within-budget path: partition's plan == floor_aware_pins' plan.
+        floors = {"NDI cam1": 66.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}
+        deltas = {"NDI cam1": 0.0, "NDI cam2": 3.0, "NDI cam3": 33.0, "NDI cam4": 20.0}
+        plan, over, missing = qa.floor_aware_partition(floors, deltas)
+        assert over == [] and missing == []
+        assert plan == qa.floor_aware_pins(floors, deltas)
+
+    def test_partition_reports_missing_faster_floor_without_raising(self):
+        plan, over, missing = qa.floor_aware_partition({"NDI cam1": 66.0},
+                                                       {"NDI cam1": 0.0, "NDI cam3": 33.0})
+        assert missing == ["NDI cam3"] and over == []
+
+    def test_over_budget_camera_is_clamped_to_floor_not_pinned_up(self):
+        # a pin we cannot afford is NEVER written up to the (over-ceiling) target.
+        plan, over, _ = qa.floor_aware_partition({"NDI cam1": 129.0, "NDI cam3": 79.0},
+                                                 {"NDI cam1": 0.0, "NDI cam3": 50.0}, floor_ms=3)
+        assert [s for s, *_ in over] == ["NDI cam3"]
+        assert plan["NDI cam3"] == 3
+
+    def test_floor_aware_pins_still_raises_over_budget_after_the_refactor(self):
+        # the HARD-FAIL direction is byte-unchanged: floor_aware_pins delegates to the partition then
+        # RAISES on over_budget, naming the exact arithmetic (existing TestFloorAwarePins coverage).
+        with pytest.raises(qa.AlignmentImpossible) as exc:
+            qa.floor_aware_pins({"NDI cam1": 66.0, "NDI cam3": 66.0},
+                                {"NDI cam1": 0.0, "NDI cam3": 33.0})
+        msg = str(exc.value)
+        assert "NDI cam3" in msg and "99" in msg and "94" in msg and "do NOT raise the bound" in msg
+
+
+class TestBudgetBoundSoftRelease:
+    def _budget_align(self, monkeypatch, floors, current):
+        import apply_latency_pins
+        import obs_phase2
+        applied = {}
+        monkeypatch.setattr(qa, "barrier_screenshot", _FifoBarrier(floors, current, applied))
+
+        def _read_pins(s, h, p):
+            return dict(applied) if applied else dict(current)
+        monkeypatch.setattr(qa, "read_current_pins", _read_pins)
+
+        def _apply(ws, plan, execute):
+            applied.update(plan)
+            return plan
+        monkeypatch.setattr(apply_latency_pins, "apply_pins", _apply)
+
+        class _WS:
+            def close(self):
+                pass
+        monkeypatch.setattr(obs_phase2, "_conn", lambda host, pw: _WS())
+        result = qa.align(SRC, "h", "pw", execute=True, stable_tail_rounds=3, stable_tol_ids=1,
+                          min_valid_rounds=5, min_parity_rounds=3, max_delta_ms=66.0, parity_tol_ids=1,
+                          floor_ms=3, width=1920, height=1080, measure_budget_s=1e9,
+                          max_measure_rounds=60, settle_s=0, jitter_json=_jitter(floors, current))
+        return result, applied
+
+    def test_stable_over_budget_tail_soft_releases_not_fails(self, monkeypatch):
+        # present ages {129,100,79,90}: spread 50 <= 66 passes sanity, but every faster camera would
+        # need a pin == 129 > 94 -> budget-impossible. RED (pre-fix): align() RAISES AlignmentImpossible
+        # -> the run FAILS. GREEN: budget-bound soft-release, applies nothing, exit-0-shaped result.
+        floors = {"NDI cam1": 129.0, "NDI cam2": 100.0, "NDI cam3": 79.0, "NDI cam4": 90.0}
+        current = {"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 3, "NDI cam4": 3}   # two-phase reset -> floor
+        result, applied = self._budget_align(monkeypatch, floors, current)
+        assert result["status"] == "budget-bound"
+        assert result["budget_bound"] is True
+        assert result["plan"] == {}          # apply NONE
+        assert applied == {}                  # nothing written to the rig
+        assert result["report_only_residual_ms"] == pytest.approx(50.0, abs=1.0)   # surviving spread
+        srcs = {o["source"] for o in result["over_budget"]}
+        assert "NDI cam3" in srcs
+        for o in result["over_budget"]:
+            assert o["target_ms"] > o["bound_ms"]     # every entry genuinely exceeds the ceiling
+
+    def test_within_budget_still_aligns_never_budget_bound(self, monkeypatch):
+        # REGRESSION: a within-budget floor set (max floor 66 <= 94) must still ALIGN, never soft-release.
+        floors = {"NDI cam1": 66.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}
+        current = {"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 3, "NDI cam4": 3}
+        result, applied = self._budget_align(monkeypatch, floors, current)
+        assert result["status"] == "aligned"
+        assert applied != {}                  # within-budget pins WERE applied (the frame moved)
+        assert "budget_bound" not in result
+
+    def test_hold_inert_within_budget_still_fails_not_budget_bound(self, monkeypatch):
+        # REQUIREMENT 4: a WITHIN-budget pin that is HOLD-INERT (frame does not move) is STILL a FAIL,
+        # never folded into budget-bound. _ScriptedBarrier stays stuck at spread 2 after apply (the pin
+        # config moves but the presented frame does not) and NO jitter -> the inert floor+delta path.
+        with pytest.raises(qa.AlignmentImpossible) as exc:
+            _align_stuck_after_apply(monkeypatch)
+        assert "genlock FIFO did NOT add the requested hold" in str(exc.value)   # a real defect FAIL
+
+    def test_main_exits_zero_on_budget_bound(self, monkeypatch, capsys):
+        # exit 0 -> the E2E proceeds; the JSON persists the residual (stdout) + a loud summary (stderr).
+        fake = {"status": "budget-bound", "budget_bound": True,
+                "over_budget": [{"source": "NDI cam3", "arrival_floor_ms": 79.0, "delta_ms": 50.0,
+                                 "target_ms": 129.0, "bound_ms": 94}],
+                "report_only_residual_ms": 50.0, "plan": {}, "pre_spread_ids": 6,
+                "tail_rounds": 3, "measure_rounds_total": 8, "measure_reason": "converged-stable"}
+        monkeypatch.setattr(qa, "align", lambda *a, **k: fake)
+        rc = qa.main(["--host", "h", "--sources", "NDI cam1,NDI cam3", "--execute"])
+        assert rc == 0
+        out = capsys.readouterr()
+        assert '"status": "budget-bound"' in out.out     # persisted into the align JSON (stdout)
+        assert "1168" in out.err                          # loud summary names the tracking ticket
