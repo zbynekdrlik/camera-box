@@ -70,6 +70,15 @@ with a re-tighten trail, not a restore). Current state:
 - The DORMANT re-tighten proof (`re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`)
   is the inverse of `single_real_drop_...` above: an EXPLICIT `is_zero_within_allowance(0)` on the
   same singleton node still FAILS, so flipping the constant back is a proven one-line change.
+- **Blast-radius gotcha when MOVING this default (either direction): the adjacent, untouched
+  sibling test region's narrative COMMENTS go factually stale — refresh them IN-BRANCH.** These
+  comments are load-bearing in this file, and a default flip silently makes lines like "the DEFAULT
+  is now strict" or "restored zero default" outright FALSE (review caught 4 such spots + 1 false
+  one on the 1169 flip). The ASSERTIONS in the sibling explicit-allowance tests
+  (`real_drops_within_..._905`, `allowance_zero_matches_pre_904...`) stay correct (they pass
+  explicit allowances, never the default) — only the framing prose rots. Audit every `#905`/`#904`
+  comment near the const + the `MECHANISM` test section and fix the stale ones in the same branch
+  (the adjacent-stale-comment norm), not the assertions.
 
 NOTE: this is a DIFFERENT seam from the segment-bar `<=1/<=1` singleton allowance
 (`window_gate::segment_singleton_allowance_gates_overall_pass()`), which is issue 1169's FIRST
