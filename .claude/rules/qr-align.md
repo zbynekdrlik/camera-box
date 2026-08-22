@@ -128,27 +128,47 @@ system.**
 
 - `measure_stable_tail()` (replaced the fixed-count `measure_rounds`) loops barrier rounds until the
   last **K** (`--stable-tail-rounds`, default 3) rounds are MUTUALLY stable, then judges the STABLE
-  TAIL only. "Mutually stable" = the tail spreads' **max−min ≤ `--stable-tol-ids`** (default 1) — the
-  pairwise form, which subsumes the ticket's "round-to-round ≤1" AND rejects a slow monotonic ramp
-  (spreads 1,2,3 have round-to-round ≤1 but max−min 2 → still diverging → correctly not stable).
+  TAIL only. "Mutually stable" = the tail spreads' **max−min ≤ `--stable-tol-ids`** (default 1, the
+  tight CLEAN band) — the pairwise form, which subsumes the ticket's "round-to-round ≤1" AND rejects a
+  slow monotonic ramp (spreads 1,2,3 have round-to-round ≤1 but max−min 2 → still diverging →
+  correctly not stable).
+- **OUTLIER-TOLERANT since #1161 (the measurement-window robustness lane).** A HEALTHY rig with no
+  convergence transient is stationary noise around a center (2-3) with occasional near-band 4/5/1
+  blips; the width-1 band kept truncating the suffix on every blip, so the tail formed late and the
+  window ended before 5 clean rounds accrued (a healthy rig wrongly FAILED, live E2E 32568491541 —
+  spreads `[2,3,2,3,4,3,5,1,3,3,1,3,1,2,2,3,1,2,2,4,1,3,2,2]`, tail only 3). Fix (`_stable_tail`): a
+  round that widens the CLEAN band beyond `--stable-tol-ids` is a SKIPPABLE outlier (the span
+  continues across it, it never extends the band and never counts as a clean round) iff BOTH
+  (a) MAGNITUDE — within `--stable-outlier-tol-ids` (default 2) of the clean band (a near-band blip /
+  measurement-cadence hiccup, NEVER a far convergence transient or a large swing); and (b) COUNT —
+  after skipping, outliers stay STRICTLY FEWER than clean rounds (the in-band core stays the
+  majority). A far/over-budget outlier or a non-FULL round STOPS the walk. `_stable_tail_start` is now
+  a thin wrapper over `_stable_tail` (one algorithm, no mirror-drift).
 - **Stop decision (`measure_tail_status`, PURE):** stability is judged over the maximal contiguous
-  suffix of **FULL** rounds (a decode-miss round breaks the suffix — `_stable_tail_start`). Then:
+  span of **FULL** rounds (a decode-miss round breaks the span — `_stable_tail`). Then:
   (a) tail already at parity (median spread ≤ the ≤1-id gate, ≥ `min_parity_rounds` rounds) →
-  `converged-aligned`, PASS fast on just K rounds; (b) tail stable but NOT at parity AND ≥
-  `min_valid_rounds` (5) rounds → `converged-stable`, re-derive floor-3 from the tail; (c) stable but
-  < min_valid rounds → `stable-need-more`, keep measuring. **K=3 < min_valid=5 by design:** the
-  cheap already-aligned confirm needs only 3, but the re-derive path keeps measuring to accumulate 5
-  — no threshold is weakened, each gate (66 ms sanity, ≤1-id parity, min-valid/parity rounds) is
-  applied UNCHANGED to the tail.
-- **Bounded (`--measure-budget-s` ~90 s + `--max-measure-rounds` 30):** a rig that never stabilizes
-  (a degraded/over-rate grabber) still FAILS within the bound with the full table printed. The verify
-  (post-apply) re-measure is stable-tail too, so a pin-change transient is not re-caught.
+  `converged-aligned`, PASS fast on just K clean rounds; (b) tail stable but NOT at parity AND ≥
+  `min_valid_rounds` (5) **CLEAN** rounds → `converged-stable`, re-derive floor-3 from the tail;
+  (c) stable but < min_valid CLEAN rounds → `stable-need-more`, keep measuring. **K=3 < min_valid=5 by
+  design:** the cheap already-aligned confirm needs only 3, but the re-derive path keeps measuring to
+  accumulate 5. **`min_valid` is judged on the CLEAN (in-band) count, NEVER the span length** — an
+  outlier round never counts toward the 5, so the LENGTH strictness is unchanged; each gate (66 ms
+  sanity, ≤1-id parity, min-valid/parity rounds) is applied UNCHANGED to the tail.
+- **Bounded (`--measure-budget-s` ~150 s + `--max-measure-rounds` 40, extended by #1161):** sized from
+  the data — a late tail (~r21 on the live run) plus a possible issue-1145 backlog transient need room
+  for a transient-drain + 5 clean rounds (~3.75 s/round). A rig that never stabilizes (a
+  degraded/over-rate grabber, a sawtooth ±5-11 whose swings are magnitude-rejected, a near-band
+  high-frequency 2-cycle whose outliers are count-rejected) still FAILS within the bound with the full
+  table printed. The verify (post-apply) re-measure is stable-tail too, so a pin-change transient is
+  not re-caught.
 - **Wiring:** `qr-align.sh` remaps `QR_ALIGN_ROUNDS` → `--max-measure-rounds` and adds
   `QR_ALIGN_BUDGET_S` → `--measure-budget-s`. The ~90 s bound is INTERNAL to the python, so the E2E
   step needs no outer `timeout` and `recording-e2e.sh` is UNTOUCHED (its static anchors stay intact).
-- Tier-0: `_stable_tail_start` / `measure_tail_status` are PURE (no rig); `measure_stable_tail` + the
-  `align()` flow are tested against a monkeypatched `barrier_screenshot`
-  (`tests/python/test_qr_align_tail_1160.py`).
+- Tier-0: `_stable_tail` / `_stable_tail_start` / `measure_tail_status` are PURE (no rig);
+  `measure_stable_tail` + the `align()` flow are tested against a monkeypatched `barrier_screenshot`
+  (`tests/python/test_qr_align_tail_1160.py` — incl. the #1161 outlier-tolerance + extended-window
+  cases: the exact live 24-round sequence converges-stable, a lone near-band blip is skipped not
+  reset, and the sawtooth / [10,3] / [1,3] / ramp / backlog regressions still FAIL).
 
 ## A pin BELOW the arrival floor is inert — pin ABOVE it (the floor-aware fix, #1161)
 

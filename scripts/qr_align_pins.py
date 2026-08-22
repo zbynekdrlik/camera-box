@@ -76,10 +76,26 @@ DEFAULT_PARITY_TOL_IDS = 1
 # subsumes round-to-round <=1 AND rejects a slow monotonic ramp), then judge the tail ONLY. All the
 # verdict thresholds (66 ms sanity, <=1-id parity, min-valid/parity rounds) are UNCHANGED, applied to
 # the tail. All calibration, live-re-measurable like the other consts.
+# #1161 -- measurement-window ROBUSTNESS: a HEALTHY rig with no convergence transient is stationary
+# noise around a center (2-3) with occasional near-band 4/5/1 blips; the width-1 CLEAN band kept
+# truncating the stable suffix on every blip, so the tail formed late and the 90 s window ended before
+# 5 clean rounds accrued (a healthy rig wrongly FAILED, live E2E 32568491541). Fix: the stable tail is
+# now OUTLIER-TOLERANT (a lone near-band spread blip is SKIPPED, not a RESET -- see
+# STABLE_OUTLIER_TOL below) and the window is EXTENDED (150 s / 40 rounds) so a late tail (or a real
+# issue-1145 backlog transient) has room for a transient-drain + 5 CLEAN rounds. The LENGTH strictness
+# is UNCHANGED: min_valid=5 is judged on CLEAN (in-band) rounds only, an outlier NEVER counts toward
+# it; a converging backlog / degraded grabber / sawtooth still FAILS (magnitude + count bounds).
 DEFAULT_STABLE_TAIL_ROUNDS = 3    # K: consecutive mutually-stable rounds that prove convergence
-DEFAULT_STABLE_TOL_IDS = 1        # tail spreads must lie within this many frame_ids of each other
-DEFAULT_MEASURE_BUDGET_S = 90.0   # total wall-clock bound on the measure phase (never runs away)
-DEFAULT_MAX_MEASURE_ROUNDS = 30   # hard round cap (secondary bound; ~4 s/round => ~90 s at ~22)
+DEFAULT_STABLE_TOL_IDS = 1        # the tight CLEAN band: in-band spreads lie within this many ids
+# #1161 -- a noisy-but-STATIONARY rig (center 2-3, occasional near-band 4/5/1 blips) must not have its
+# stable suffix truncated by every ordinary blip. A round that widens the CLEAN band beyond
+# STABLE_TOL is a SKIPPABLE outlier (the span continues across it; it never extends the band and never
+# counts as a clean round) iff it is within STABLE_OUTLIER_TOL ids of the band AND outliers stay a
+# STRICT MINORITY of clean rounds. A FAR outlier (a convergence transient / large swing) or a
+# high-frequency near-band cycle is NOT absorbed -> the suffix STOPS, so a degraded rig still FAILS.
+DEFAULT_STABLE_OUTLIER_TOL_IDS = 2  # a skippable outlier must be within this many ids of the clean band
+DEFAULT_MEASURE_BUDGET_S = 150.0  # total wall-clock bound on the measure phase (never runs away)
+DEFAULT_MAX_MEASURE_ROUNDS = 40   # hard round cap (secondary bound; ~3.75 s/round => ~150 s at ~40)
 # A median relative delta above this = a degraded/underrun card, NOT a real inter-card difference:
 # FAIL rather than ship a deep pin. Must be BELOW the owner's cited "94 ms between identical cards is
 # nonsense" (a 100 ms default would silently re-enable the exact rejected deep-pin behavior). 66 ms
@@ -618,16 +634,33 @@ def _is_full_round(round_ticks, sources):
         all(round_ticks.get(s) is not None for s in sources)
 
 
-def _stable_tail_start(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids):
-    """The start index of the maximal contiguous suffix of FULL rounds, ending at the LAST round,
-    whose cross-camera frame_id spreads all lie within `stable_tol_ids` of each other (max-min <=
-    tol -- the pairwise "mutually stable" form). Returns None when that suffix is shorter than
-    `stable_tail_rounds` (K) -- i.e. the last K rounds are not yet mutually stable. This is a
-    STRONGER test than the ticket's literal "round-to-round <=1": a slow monotonic ramp (spreads
-    1,2,3) has round-to-round deltas <=1 but max-min 2, so it is correctly rejected as still
-    diverging."""
+def _stable_tail(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids,
+                 stable_outlier_tol_ids=DEFAULT_STABLE_OUTLIER_TOL_IDS):
+    """The OUTLIER-TOLERANT stable-tail decision (#1160 + #1161). Returns
+    ``(start_or_None, clean_count)``:
+
+    Walking backward from the LAST round, maintain a TIGHT CLEAN band ``[lo,hi]`` (``hi-lo <=
+    stable_tol_ids``) over the in-band rounds only, and count CLEAN (in-band) rounds. A round that
+    would widen the clean band beyond ``stable_tol_ids`` is an OUTLIER CANDIDATE; it is SKIPPED (the
+    span continues across it, it never extends the band and never counts as a clean round) iff BOTH
+    (a) MAGNITUDE: it is within ``stable_outlier_tol_ids`` ids of the clean band (a NEAR-band blip --
+    a measurement-cadence hiccup / phase jitter -- never a FAR convergence transient or large swing);
+    and (b) COUNT: after skipping it, outliers stay STRICTLY FEWER than clean rounds (the in-band core
+    stays the majority). Any FAR / over-budget out-of-band round, or a non-FULL round (a decode-miss
+    makes parity unverifiable that round), STOPS the walk. ``start`` is the earliest round of the span
+    (which may include skipped outliers); ``clean_count`` is the number of CLEAN rounds in it.
+
+    Returns ``(None, clean_count)`` when ``clean_count < stable_tail_rounds`` (K) -- the tail has too
+    few genuinely-in-band rounds to be called stable. Gating on the CLEAN count (never the span length)
+    is what keeps the min-valid=5 LENGTH strictness intact while tolerating a lone blip, and what keeps
+    the #1160 invariants: a slow monotonic ramp (1,2,3) cannot sustain K clean in-band rounds (each
+    step leaves the width-1 band); a converging backlog's FAR transient is magnitude-rejected (never
+    absorbed); a degraded-grabber sawtooth's large swings are magnitude-rejected and a near-band
+    high-frequency 2-cycle is count-rejected -- so an unstable rig still yields clean < K -> None."""
     n = len(rounds_ticks)
     lo = hi = None
+    clean = 0
+    outliers = 0
     start = n
     for i in range(n - 1, -1, -1):
         r = rounds_ticks[i]
@@ -638,34 +671,58 @@ def _stable_tail_start(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids
             break
         nlo = sp if lo is None else min(lo, sp)
         nhi = sp if hi is None else max(hi, sp)
-        if nhi - nlo > stable_tol_ids:
-            break
-        lo, hi, start = nlo, nhi, i
-    return start if (n - start) >= stable_tail_rounds else None
+        if nhi - nlo <= stable_tol_ids:  # in-band -> extend the clean band, count it
+            lo, hi, clean, start = nlo, nhi, clean + 1, i
+        else:
+            # Out-of-band. SKIP it (near-band blip) only if it stays close to the band AND the clean
+            # core stays the strict majority; otherwise the walk STOPS (a far transient / an
+            # unstable swing must never be absorbed as noise).
+            dev = max(sp - hi, lo - sp)  # distance outside the clean band (band already seeded here)
+            if dev <= stable_outlier_tol_ids and (outliers + 1) < clean:
+                outliers += 1
+                start = i
+            else:
+                break
+    return (start, clean) if clean >= stable_tail_rounds else (None, clean)
+
+
+def _stable_tail_start(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids,
+                       stable_outlier_tol_ids=DEFAULT_STABLE_OUTLIER_TOL_IDS):
+    """The start index of the maximal contiguous STABLE-TAIL span ending at the LAST round (the
+    outlier-tolerant #1161 form -- see `_stable_tail`), or None when the span has fewer than
+    `stable_tail_rounds` (K) CLEAN in-band rounds. Thin wrapper over `_stable_tail` (one algorithm,
+    no mirror-drift)."""
+    return _stable_tail(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids,
+                        stable_outlier_tol_ids)[0]
 
 
 def measure_tail_status(rounds_ticks, sources, *, stable_tail_rounds, stable_tol_ids,
-                        parity_tol_ids, min_parity_rounds, min_valid_rounds):
+                        parity_tol_ids, min_parity_rounds, min_valid_rounds,
+                        stable_outlier_tol_ids=DEFAULT_STABLE_OUTLIER_TOL_IDS):
     """Decide, from the rounds accumulated so far, whether the measure phase can STOP and which
     STABLE-TAIL rounds the verdict should use. Returns a TailStatus:
       - "converged-aligned": the last K rounds are mutually stable AND already at parity (median
         spread <= parity_tol over >= min_parity_rounds full rounds) -> STOP, PASS-fast. Needs only
-        K rounds; min_valid_rounds is NOT required (no re-derive).
+        K clean rounds; min_valid_rounds is NOT required (no re-derive).
       - "converged-stable": the tail is mutually stable but NOT at parity (a static residual delta
-        floor-3 pins can fix) AND has >= min_valid_rounds valid rounds -> STOP, re-derive from tail.
-      - "stable-need-more": the tail is stable but not aligned and has too few rounds to re-derive
-        robustly -> keep measuring (the unchanged min-valid-rounds threshold applied to the tail).
+        floor-3 pins can fix) AND has >= min_valid_rounds CLEAN rounds -> STOP, re-derive from tail.
+      - "stable-need-more": the tail is stable but not aligned and has too few CLEAN rounds to
+        re-derive robustly -> keep measuring (the unchanged min-valid-rounds threshold applied to
+        the tail's CLEAN rounds).
       - "unstable": the last K rounds are not mutually stable -> keep measuring.
     All the verdict thresholds are UNCHANGED here -- this only chooses WHEN to stop and WHICH rounds
-    to judge (the tail), never weakening a gate."""
-    start = _stable_tail_start(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids)
+    to judge (the tail), never weakening a gate. #1161: the tail is OUTLIER-TOLERANT (a lone near-band
+    blip is skipped), so `min_valid_rounds` is judged on the CLEAN (in-band) count, never the span
+    length -- an outlier round never counts toward the 5, so the LENGTH strictness is unchanged."""
+    start, clean = _stable_tail(rounds_ticks, sources, stable_tail_rounds, stable_tol_ids,
+                                stable_outlier_tol_ids)
     if start is None:
         return TailStatus(False, "unstable", None)
     tail = rounds_ticks[start:]
     _med, aligned = _full_round_parity(tail, sources, parity_tol_ids, min_parity_rounds)
     if aligned:
         return TailStatus(True, "converged-aligned", start)
-    if len(tail) >= min_valid_rounds:
+    if clean >= min_valid_rounds:
         return TailStatus(True, "converged-stable", start)
     return TailStatus(False, "stable-need-more", start)
 
@@ -786,6 +843,7 @@ def barrier_screenshot(sources, host, password, width, height):
 def measure_stable_tail(sources, host, password, *, width, height, run_id=None,
                         stable_tail_rounds=DEFAULT_STABLE_TAIL_ROUNDS,
                         stable_tol_ids=DEFAULT_STABLE_TOL_IDS,
+                        stable_outlier_tol_ids=DEFAULT_STABLE_OUTLIER_TOL_IDS,
                         parity_tol_ids=DEFAULT_PARITY_TOL_IDS,
                         min_parity_rounds=DEFAULT_MIN_PARITY_ROUNDS,
                         min_valid_rounds=DEFAULT_MIN_VALID_ROUNDS,
@@ -815,7 +873,8 @@ def measure_stable_tail(sources, host, password, *, width, height, run_id=None,
         rounds_ticks, rid = ticks_from_raw(raw, run_id)
         status = measure_tail_status(
             rounds_ticks, sources, stable_tail_rounds=stable_tail_rounds,
-            stable_tol_ids=stable_tol_ids, parity_tol_ids=parity_tol_ids,
+            stable_tol_ids=stable_tol_ids, stable_outlier_tol_ids=stable_outlier_tol_ids,
+            parity_tol_ids=parity_tol_ids,
             min_parity_rounds=min_parity_rounds, min_valid_rounds=min_valid_rounds)
         if status.done:
             break
@@ -894,6 +953,7 @@ def _full_round_parity(rounds_ticks, sources, tol_frame_ids, min_parity_rounds):
 def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_ids, min_valid_rounds,
           min_parity_rounds, max_delta_ms, parity_tol_ids, floor_ms, width, height,
           measure_budget_s, max_measure_rounds, settle_s,
+          stable_outlier_tol_ids=DEFAULT_STABLE_OUTLIER_TOL_IDS,
           jitter_json=None, max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS):
     """The full per-run alignment: measure to a STABLE TAIL (#1160) -> (already aligned? PASS) ->
     FLOOR-AWARE plan from the tail (#1161) -> sanity -> apply (execute) -> settle -> RE-MEASURE to a
@@ -915,6 +975,7 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     rounds_ticks, run_id, status = measure_stable_tail(
         sources, host, password, width=width, height=height, run_id=None,
         stable_tail_rounds=stable_tail_rounds, stable_tol_ids=stable_tol_ids,
+        stable_outlier_tol_ids=stable_outlier_tol_ids,
         parity_tol_ids=parity_tol_ids, min_parity_rounds=min_parity_rounds,
         min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds)
     tail_start = status.tail_start
@@ -1094,6 +1155,7 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     verify_ticks, _, vstatus = measure_stable_tail(
         sources, host, password, width=width, height=height, run_id=run_id,
         stable_tail_rounds=stable_tail_rounds, stable_tol_ids=stable_tol_ids,
+        stable_outlier_tol_ids=stable_outlier_tol_ids,
         parity_tol_ids=parity_tol_ids, min_parity_rounds=min_parity_rounds,
         min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds)
     vtail_start = vstatus.tail_start
@@ -1157,7 +1219,10 @@ def main(argv=None):
     ap.add_argument("--stable-tail-rounds", type=int, default=DEFAULT_STABLE_TAIL_ROUNDS,
                     help="K: consecutive mutually-stable rounds that prove convergence (#1160)")
     ap.add_argument("--stable-tol-ids", type=int, default=DEFAULT_STABLE_TOL_IDS,
-                    help="tail spreads must lie within this many frame_ids of each other (#1160)")
+                    help="the tight CLEAN band: in-band tail spreads within this many frame_ids (#1160)")
+    ap.add_argument("--stable-outlier-tol-ids", type=int, default=DEFAULT_STABLE_OUTLIER_TOL_IDS,
+                    help="a lone near-band spread blip within this many ids of the clean band is "
+                         "SKIPPED, not a reset -- outlier-tolerant stable tail (#1161)")
     ap.add_argument("--measure-budget-s", type=float, default=DEFAULT_MEASURE_BUDGET_S,
                     help="total wall-clock bound on the measure phase (#1160)")
     ap.add_argument("--max-measure-rounds", type=int, default=DEFAULT_MAX_MEASURE_ROUNDS,
@@ -1210,6 +1275,7 @@ def main(argv=None):
     result = align(
         sources, a.host, a.password,
         execute=a.execute, stable_tail_rounds=a.stable_tail_rounds, stable_tol_ids=a.stable_tol_ids,
+        stable_outlier_tol_ids=a.stable_outlier_tol_ids,
         min_valid_rounds=a.min_valid_rounds, min_parity_rounds=a.min_parity_rounds,
         max_delta_ms=a.max_delta_ms, parity_tol_ids=a.parity_tol_ids, floor_ms=a.floor_ms,
         width=a.width, height=a.height, measure_budget_s=a.measure_budget_s,
