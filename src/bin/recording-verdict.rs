@@ -9047,11 +9047,14 @@ mod tests {
     /// SINGLE stale/frozen painted-tick copy in the single all-cambox window (undecodable=0) sits
     /// WITHIN the per-window tolerance (`copies<=WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated
     /// 1 → 2 → 3 on 2026-08-06, ticket 889 comments 5198131539 / 5200533407) — it must still be
-    /// COMPUTED and printed in the verdict JSON, must still fail that window's STRICT `pass`, AND
-    /// (issue 1132, 2026-08-19) now ALSO fails `all_cambox_continuity.overall_pass` — the
-    /// tolerance rescue is disarmed (dormant, reported-only) — and
+    /// COMPUTED and printed in the verdict JSON and must still fail that window's STRICT `pass`.
+    /// (Issue 1132, 2026-08-19) made a bare copy ALSO fail `all_cambox_continuity.overall_pass` —
+    /// the `<=3` tolerance rescue is disarmed (dormant, reported-only). **SUPERSEDED by issue 1169
+    /// (owner, 2026-08-22): a `<=1/<=1` copies/gaps SINGLETON is now ABSORBED back into
+    /// `overall_pass` (the designed issue-1167 paced-trickle + FIFO stale_replay residual) —
+    /// loudly, through its OWN tighter seam, never a re-arm of the disarmed `<=3` rescue** — and
     /// `windows_failed_report_only` must still report it (strict-zero visibility is unaffected by
-    /// the re-gate). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
+    /// either seam). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
     /// implied copies never gate at all, which stopped being true once the re-gate landed; a
     /// single copy still passes because 1 <= the tolerance, not because the term is inert.
     #[test]
@@ -9155,9 +9158,20 @@ mod tests {
         );
         assert_eq!(
             seg["overall_pass"],
-            serde_json::json!(false),
-            "1132 strict: ANY copy fails overall_pass -- the 889 tolerance rescue is disarmed \
-             (dormant, reported-only): {seg}"
+            serde_json::json!(true),
+            "1169: a single copy is now ABSORBED into overall_pass via the issue-1169 <=1/<=1 \
+             singleton allowance (the designed issue-1167 paced-trickle + FIFO stale_replay \
+             residual) -- loudly, through its OWN tighter seam; the issue-1132 disarmed <=3 \
+             tolerance rescue stays dormant, this is NOT a re-arm of it: {seg}"
+        );
+        assert_eq!(
+            seg["windows_singleton_allowance_consumed"],
+            serde_json::json!(1),
+            "1169: exactly the one window consumed the singleton allowance: {seg}"
+        );
+        assert!(
+            !seg["segments"][0]["singleton_allowance_note"].is_null(),
+            "1169: the absorbed copy carries a LOUD per-segment note (never silent): {seg}"
         );
         assert_eq!(
             seg["windows_failed_report_only"],
