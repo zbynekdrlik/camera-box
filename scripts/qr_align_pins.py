@@ -38,8 +38,9 @@ floor are NEVER touched -- they are simply never in the align set. Writes go thr
 apply_latency_pins.apply_pins (read-back-verified, fail-loud, idempotent).
 
 Tier-0: the pure functions (pick_painter_tick, frame_id_spread, round_deltas, robust_deltas,
-floor3_pins, sanity_ok, alignment_ok, and the #1160 stable-tail decision _stable_tail_start /
-measure_tail_status) do NO I/O and are unit-tested with no rig (tests/python/test_qr_align_pins_1003
+floor3_pins, sanity_ok, alignment_ok, and the #1160/#1161 outlier-tolerant stable-tail decision
+_stable_tail / _stable_tail_start / measure_tail_status) do NO I/O and are unit-tested with no rig
+(tests/python/test_qr_align_pins_1003
 .py + test_qr_align_tail_1160.py). cv2/threading/obs plumbing is imported LOCALLY inside the live
 functions so the pure logic (and its tests) never need a display or a rig.
 
