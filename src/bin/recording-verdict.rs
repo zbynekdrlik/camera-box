@@ -568,7 +568,22 @@ const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 /// artifact class — only the silent DEFAULT moved back to strict. NEVER raise this constant
 /// again without a fresh measured incident and its own re-tighten ticket, same discipline as
 /// [`OPTICAL_UNDECODABLE_RATE_MAX`].
-const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 0;
+///
+/// **Issue 1169 RE-WIDENED this DEFAULT to 1** (owner, 2026-08-22) — the SECOND SEAM of the
+/// zero-loss singleton work (sibling of the per-segment `<=1/<=1` bar). The first full verdict of
+/// the series (859647390) failed `full_chain.zero_loss` on exactly `real_drops:1` over 314.7
+/// analyzed seconds: a single per-frame delivery SINGLETON (the issue-1167 v3 paced-trickle
+/// absorption + a FIFO stale_replay in the same event; `burn_unreadable` stays 0 — a genuine
+/// delivery singleton, not a burn-readability defect). Per the owner's 2026-07-31 strict-test
+/// revision ("jedna stratená snímka nie je problém"), the band re-widens to the LOUD `<=1`
+/// singleton: a single drop PASSES within the allowance and is reported LOUDLY (never a silent
+/// green), while `>=2` of anything still FAILS and `burn_unreadable` stays an unconditional hard
+/// fail. This is the exact `gate-allowance-restore-red-green.md` shape, inverted. **Issue 1169
+/// stays OPEN as the RE-TIGHTEN trail** — a one-constant flip back to 0 (proven dormant by
+/// `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`), landed once a
+/// zero-singleton green run holds (e.g. after the issue-1168 floor reduction and/or the cam1-card
+/// swap). NEVER widen this band further without a fresh measured incident and its own trail.
+const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 1;
 
 /// #904 — env-overridable read of the per-node `real_drops` allowance (mirrors the
 /// `CAMERA_BOX_DECODE_WORKERS` idiom in `src/probe/recording.rs`: a non-numeric or absent value
@@ -1844,12 +1859,12 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool, allowance: u32) -> Vec<Str
         // real_drops allowance (it would have FAILED at allowance 0 — see
         // `consumed_real_drops_allowance`). Printed FIRST, before the "ZERO loss" line below, so
         // it can never be missed scrolling past — a pass that consumed slack must be visibly
-        // distinguishable from a genuine zero-loss pass (#905 tracks re-tightening the bar).
+        // distinguishable from a genuine zero-loss pass (issue 1169 is the re-tighten trail).
         if v.consumed_real_drops_allowance(allowance) {
             lines.push(format!(
-                "  [{}] ZERO loss WITHIN ALLOWANCE — {} real drop(s) consumed the #904 \
-                 per-node allowance of {allowance} (burn_unreadable stays 0; #905 tracks \
-                 re-tightening this back down).",
+                "  [{}] ZERO loss WITHIN ALLOWANCE — real-drops singleton allowance consumed: {} \
+                 — issue 1169 re-tighten trail (#904/#1169 per-node allowance of {allowance}; \
+                 burn_unreadable stays 0).",
                 c.node,
                 v.real_drops()
             ));
@@ -3927,13 +3942,15 @@ fn build_and_print_verdict_with_stream_diffs(
                     "  >>> ZERO loss: all burn-id sequences CONTIGUOUS (no missing id on any node)."
                 );
             } else if all_zero {
-                // #904 — LOUD: a genuine pass, but NOT a strict zero-loss pass — never let this
-                // look identical to the clean branch above. #905 tracks re-tightening the bar.
+                // #904/#1169 — LOUD: a genuine pass, but NOT a strict zero-loss pass — never let
+                // this look identical to the clean branch above. Issue 1169 (owner, 2026-08-22)
+                // re-widened the default to the <=1 singleton band and is the re-tighten trail.
                 println!(
-                    "  >>> ZERO loss WITHIN ALLOWANCE (#904): {total_real} real drop(s) total, \
-                     within the per-node allowance of {real_drops_allowance} on: {} — 0 \
-                     BURN-UNREADABLE, everything else at the usual strict bar. #905 tracks \
-                     putting this allowance back down.",
+                    "  >>> ⚠ #1169 REAL-DROPS SINGLETON ALLOWANCE: real-drops singleton allowance \
+                     consumed: {total_real} — issue 1169 re-tighten trail. {total_real} real \
+                     drop(s) total within the per-node allowance of {real_drops_allowance} on: {} \
+                     — 0 BURN-UNREADABLE, everything else at the usual strict bar; 2+ of anything \
+                     still FAILS. Re-tighten trail: issue 1169.",
                     allowance_consumed_nodes.join(", ")
                 );
             } else {
