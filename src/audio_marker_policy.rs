@@ -191,25 +191,18 @@ pub enum MarkerRecoveryStep {
 #[derive(Debug, Clone)]
 pub struct AudioMarkerRecovery {
     degraded: bool,
-    retry_interval: Duration,
 }
 
 impl AudioMarkerRecovery {
     /// A marker whose PCM opened cleanly — a live emitter is running.
     pub fn healthy() -> Self {
-        Self {
-            degraded: false,
-            retry_interval: RECOVERY_RETRY_INTERVAL,
-        }
+        Self { degraded: false }
     }
 
     /// A marker whose startup open FAILED (soft degrade) — degraded from the first tick, so the
     /// retry loop takes over immediately.
     pub fn degraded() -> Self {
-        Self {
-            degraded: true,
-            retry_interval: RECOVERY_RETRY_INTERVAL,
-        }
+        Self { degraded: true }
     }
 
     /// True while no live emitter is running (the periodic `#984` "still DEGRADED" heartbeat and
@@ -225,7 +218,7 @@ impl AudioMarkerRecovery {
     pub fn step(&self, since_last_attempt: Duration) -> MarkerRecoveryStep {
         if !self.degraded {
             MarkerRecoveryStep::Healthy
-        } else if since_last_attempt >= self.retry_interval {
+        } else if since_last_attempt >= RECOVERY_RETRY_INTERVAL {
             MarkerRecoveryStep::AttemptReopen
         } else {
             MarkerRecoveryStep::Waiting

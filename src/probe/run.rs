@@ -457,6 +457,11 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             last_open_attempt = Instant::now();
             match spawn_emitter() {
                 Ok(emitter) => {
+                    // NOTE: a successful re-open RE-CREATES (truncates) the incremental marker-log
+                    // file (header only) inside `QpskEmitter::spawn`, so the live #420 poller sees
+                    // its row count RESET then grow again on recovery -- growth still proves
+                    // emission, and the FINAL log write below serializes the full accumulated set,
+                    // so a consumer must not assume the incremental file grows monotonically.
                     tracing::info!(
                         device = %cfg.audio_marker_device,
                         "#1172: audio marker RECOVERED -- device reopened, marker emission resumed"
@@ -486,16 +491,17 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     // Join the audio emitter and write its log before returning. #1172: union the markers
     // accumulated across any re-spawns (dropped dead emitters) with the last live emitter's log, so
     // a run that recovered from a degraded/died marker loses none of its emitted markers.
-    let had_emitter = audio_emitter.is_some();
+    let has_emitter_at_end = audio_emitter.is_some();
     if let Some(emitter) = audio_emitter {
         accumulated_markers.extend(emitter.join());
     }
     if let Some(path) = &cfg.marker_log {
-        // Write the marker log when this run ever had a live emitter (initially, or after a
-        // recovery) OR accumulated markers from one that died -- matching the original "only when
-        // there was an emitter" behaviour while also covering the recovered-from-degraded case. A
-        // run that stayed degraded end-to-end (no emitter, no markers) writes nothing, as before.
-        if had_emitter || !accumulated_markers.is_empty() {
+        // Write the marker log when a live emitter is still running at the end (initially opened,
+        // or recovered) OR markers were accumulated from one that died -- matching the original
+        // "only when there was an emitter" behaviour while also covering the recovered-from-degraded
+        // case. A run that stayed degraded end-to-end (no emitter, no markers) writes nothing, as
+        // before.
+        if has_emitter_at_end || !accumulated_markers.is_empty() {
             let csv = crate::qpsk_marker::serialize_qpsk_marker_log(
                 &accumulated_markers,
                 &crate::qpsk_marker::AudioParams::rig60(),
