@@ -104,13 +104,17 @@ pub struct DecimationGate {
     consecutive_drain_holds: u64,
     /// (#1167) Latch: is the gate CONVERGING a deep emit-grid backlog (a reconnect / restart /
     /// burn-toggle left the grid many intervals behind)? Set true when [`ShedAction::FastDrain`] fires
-    /// (`lag > RETIRE_MAX_LAG_INTERVALS`); cleared once the grid is caught up (`lag == 0`). It selects
-    /// how [`poll`](Self::poll) applies a shallow-lag [`ShedAction::Retire`]: while CONVERGING, RETIRE
-    /// (advance the stale boundary, emit nothing) so the deep backlog catches up fast (the #1145 v2.1
-    /// rate); in STEADY over-rate (never went deep) FILL the slot with a copy (hold 60 — the #1167
-    /// invariant). A brief spike past the ceiling latches converging only for its own short recovery
-    /// tail (an accepted rate dip); continuous shallow-lag jitter (the live cam1, `fast_drained == 0`)
-    /// never latches it, so every slot is filled.
+    /// (`lag > RETIRE_MAX_LAG_INTERVALS`); cleared once the grid is caught up (`lag == 0`) or the card
+    /// is no longer over-rate. It selects how [`poll`](Self::poll) applies a shallow-lag
+    /// [`ShedAction::Retire`]: while CONVERGING → a PACED retire (advance the stale boundary, emit
+    /// nothing, but SMEARED to <=1 skip per [`CONVERGE_SKIP_MIN_GAP_INTERVALS`] so the tail never
+    /// bursts; paced-out → FILL). (#1167 v3) When NOT converging (steady over-rate), the shallow Retire
+    /// is no longer an unconditional fill: once lag has crept to [`SHALLOW_DRAIN_LAG_MIN`] it takes a
+    /// PACED single-slot TRICKLE skip to bleed the creep off before it can reach this band and trip a
+    /// FastDrain BURST, and FILLS only below that threshold or when paced-out. So a steady over-rate box
+    /// now shows `retired ≈ 1 per gap` (the trickle), not ~0 — this is the v3 root-cause fix for the
+    /// 300/293 window oscillation, not a regression. FastDrain (deep band) is left UNPACED at +2 (a
+    /// genuine reconnect must converge <=12s); it only fires when a big jitter spike outruns the trickle.
     converging_deep_backlog: bool,
     /// (#1167 v3) The MONOTONIC instant of the most recent convergence slot-SKIP (any boundary-
     /// advance-emit-nothing shed: FastDrain, a latched-Retire, a latched-Drain, or the steady
@@ -711,10 +715,14 @@ impl DupeShedLog {
     }
 
     /// (#1145) Record ONE over-rate content-dupe RETIRED (shed while advancing the already-stale
-    /// boundary, emitting nothing). (#1167) On the over-rate box this now goes ~0 in STEADY state —
-    /// `poll` only retires while CONVERGING a deep backlog; a steady shallow-lag dupe FILLS the slot
-    /// (counted as a copy in [`record_dupe_emitted`](Self::record_dupe_emitted)) instead. See
-    /// [`DecimationGate::poll`].
+    /// boundary, emitting nothing). (#1167 v3) On the over-rate box this is now a LEGITIMATE small
+    /// nonzero in STEADY state — `poll`'s steady shallow-lag TRICKLE (once lag ≥
+    /// [`SHALLOW_DRAIN_LAG_MIN`]) takes a PACED retire skip (≤1 per [`CONVERGE_SKIP_MIN_GAP_INTERVALS`])
+    /// to bleed the grid-lag creep off before it bursts, so expect `retired ≈ 1 per gap`, NOT ~0 (do
+    /// not misread that as a regression). Below the trickle threshold, or when paced-out, a steady
+    /// shallow-lag dupe still FILLS the slot (counted as a copy in
+    /// [`record_dupe_emitted`](Self::record_dupe_emitted)); the CONVERGING tail also records here (its
+    /// paced retire). See [`DecimationGate::poll`].
     pub fn record_retired(&mut self) {
         self.retired = self.retired.saturating_add(1);
     }

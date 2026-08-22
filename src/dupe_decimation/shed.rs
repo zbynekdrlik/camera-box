@@ -248,11 +248,15 @@ pub enum ShedAction {
     Defer,
     /// #1145 stale-boundary retirement (the DECISION for a shallow-stale over-rate dupe). The
     /// boundary the dupe crossed is already stale (`lag >= 1` — the downstream hold for it already
-    /// happened), and it sacrifices no unique + drains the dupe-driven lag. **(#1167) `poll` now
-    /// REINTERPRETS this decision by application**: while CONVERGING a deep backlog it advances the
-    /// boundary emitting nothing (as before — fast convergence); in STEADY over-rate it FILLS the
-    /// slot with a copy of the nearest good frame instead (advance + emit), so no 60fps slot is ever
-    /// skipped while a captured frame is buffered (the #1167 invariant). See [`DecimationGate::poll`].
+    /// happened), and it sacrifices no unique + drains the dupe-driven lag. **(#1167 v3) `poll` now
+    /// REINTERPRETS this decision by application in THREE cases**, all PACED by the shared
+    /// [`crate::dupe_decimation::CONVERGE_SKIP_MIN_GAP_INTERVALS`] budget: (a) while CONVERGING a deep
+    /// backlog → a paced retire (advance, emit nothing; paced-out → FILL); (b) in STEADY over-rate once
+    /// lag has crept to [`SHALLOW_DRAIN_LAG_MIN`] → a paced single-slot TRICKLE retire that bleeds the
+    /// creep off before it can reach the FastDrain band and BURST (the #1167 v3 fix for the 300/293
+    /// oscillation); (c) otherwise (lag below the trickle threshold, or paced-out) → FILL the slot with
+    /// a copy of the nearest good frame, so no 60fps slot is skipped between paced skips. See
+    /// [`DecimationGate::poll`].
     Retire,
     /// #1145 v2 queue-DEPTH drain: shed the OLDEST (this) frame — the sustained-over-rate absorption —
     /// to bound the queue RESIDENCE (`now_monotonic - capture_monotonic`) once it exceeds the depth
@@ -303,12 +307,13 @@ pub enum ShedAction {
 ///   for the SAME boundary (`already_deferred`) -> [`ShedAction::Emit`]`{ copy: true }` (the bounded
 ///   one-deferral guard — validated dupes are isolated pairs).
 /// - content-dupe, `1 <= lag <= `[`RETIRE_MAX_LAG_INTERVALS`] (SHALLOW-stale boundary): #1145 ->
-///   [`ShedAction::Retire`] as the DECISION. (#1167) [`crate::dupe_decimation::DecimationGate::poll`]
-///   REINTERPRETS that Retire: in steady over-rate it FILLS the slot with a copy of the nearest good
-///   frame (holds 60 — the ticket invariant, so continuous shallow-lag jitter never leaves a skipped
-///   slot = the cam1 align sawtooth), while during a deep-backlog convergence it retires (advance,
-///   emit nothing) so the grid catches up fast. The decision stays Retire so the #1145 decision tests
-///   + deep-backlog convergence rate are preserved; only the application changed.
+///   [`ShedAction::Retire`] as the DECISION. (#1167 v3) [`crate::dupe_decimation::DecimationGate::poll`]
+///   REINTERPRETS that Retire, PACED by the shared budget: during a deep-backlog convergence a paced
+///   retire (advance, emit nothing; paced-out → FILL); in STEADY over-rate a paced single-slot TRICKLE
+///   retire ONCE lag has crept to [`crate::dupe_decimation::SHALLOW_DRAIN_LAG_MIN`] (bleeds the creep
+///   off before it bursts — the 300/293 fix), else FILL a copy of the nearest good frame (holds 60
+///   between paced skips). The decision stays Retire so the #1145 decision tests + deep-backlog
+///   convergence rate are preserved; only the application changed.
 /// - content-dupe otherwise (NOT enough unique — genuine starvation; OR `lag > `the retire ceiling
 ///   but NOT the deep FastDrain band): [`ShedAction::Emit`]`{ copy: true }` — the #1111 late-dupe
 ///   valve, a starvation floor that holds the emit grid boundary-locked at 60.

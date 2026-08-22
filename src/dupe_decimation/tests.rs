@@ -2377,7 +2377,6 @@ fn run_over_rate_creep_sim(capture_fps: f64, secs: f64, slack_num: u64) -> Creep
     let mut emits = 0u64;
     let mut last_emit_bidx: Option<u64> = None;
     let mut max_emit_boundary_delta = 0u64;
-    let mut last_skip_wall: Option<u64> = None;
     let mut skips_total = 0u64;
     let mut skip_walls: VecDeque<u64> = VecDeque::new();
     let mut max_burst_in_gap = 0u64;
@@ -2423,11 +2422,6 @@ fn run_over_rate_creep_sim(capture_fps: f64, secs: f64, slack_num: u64) -> Creep
         // a convergence SKIP = the boundary advanced but nothing was emitted this poll.
         if !emit && advanced >= 1 && post_warm {
             skips_total += 1;
-            if let Some(lw) = last_skip_wall {
-                let _gap = now.saturating_sub(lw); // (min-gap is asserted via max_burst_in_gap below)
-                let _ = _gap;
-            }
-            last_skip_wall = Some(now);
             skip_walls.push_back(now);
             while let Some(&front) = skip_walls.front() {
                 if now.saturating_sub(front) >= gap_ns {
