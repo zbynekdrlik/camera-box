@@ -402,6 +402,59 @@ only `poll`'s APPLICATION of two arms changes:
   the at-rate 60.0 control unchanged; 73/73 module tests pass. Design chosen via a gated Fable consult
   (hybrid: hold-Drain + latch-gated shallow-fill + kept FastDrain + panic floor).
 
+## #1167 v3 (2026-08-22) — PACE the convergence so it AMORTIZES, never bursts (the TWELFTH piece)
+
+The eleventh piece (fill-every-slot) raised cam1's AVERAGE emit to 59.94 (299.7/300) but windows
+still oscillated **300/300/293**: the degrading grabber's ~3.5 fps surplus CREEPS grid lag upward
+(steady shallow-lag dupes FILL and never drain the lag; Drain-HOLDs advance the wall clock but not
+the boundary) until it crosses `RETIRE_MAX_LAG_INTERVALS`; then FastDrain fires, LATCHES, and the
+whole shallow tail drains as a **BURST** of ~6-7 advance-emit-nothing sheds in a fraction of a second
+→ one 5s window drops to 293 → cam1's presented-frame_id jumps ~+7 vs its siblings → `[4i/8align]`
+"mutual stability ≤1 id" ABORT. Reproduced off-rig against the REAL `poll` (send-bound 63.5 fps creep
+model, #557 scratch route): current code shows max consecutive-emit boundary **delta = 3** (a +2
+FastDrain jump), skips bunching (min gap 0-17 intervals), a burst of 2-3 skips per 30-interval window.
+
+v3 PACES the convergence — NO new `ShedAction`, the pure `dupe_shed_action` DECISION byte-UNCHANGED,
+only `poll`'s application changes (two new `shed.rs` consts + one `gate.rs` field):
+- **A STEADY shallow-lag trickle-drain.** When `!converging_deep_backlog && sustained_over_rate &&
+  lag >= SHALLOW_DRAIN_LAG_MIN(2)` AND the pace budget allows, a shallow-lag Retire takes ONE
+  single-slot skip (advance, emit nothing) to bleed the creep off BEFORE it reaches the FastDrain
+  band; else it FILLS (the eleventh-piece invariant, unchanged). At the slow steady creep the trickle
+  demand is low → ~1 skip per gap → 299-300 windows, and lag never reaches the FastDrain band so
+  FastDrain essentially never fires steady-state → NO burst.
+- **The latched convergence TAIL (Retire/Drain) is PACED** with the same budget (paced-out Retire →
+  FILL; paced-out Drain → the v2 STEADY-HOLD, NEVER a stale FILL — a Drain's frame is ≥2 intervals
+  stale) so any tail smears to ≤1 skip per gap.
+- **ALL skip sites share ONE MONOTONIC pace budget** `last_converge_skip_mono_ns` (a min-gap
+  predicate — inherently depth-1, no saved-up burst; monotonic so DanteSync realtime steps can neither
+  freeze convergence nor grant a free skip). `CONVERGE_SKIP_MIN_GAP_INTERVALS = 30` (500 ms, ≤2
+  skips/s cap → steady emit floor ~58 fps, above the #666 floor 57).
+- **KEY GOTCHA — FastDrain is DELIBERATELY LEFT UNPACED and at +2; do NOT pace it or halve it to +1.**
+  A design consult argued deep-lag convergence is advance-driven hence pace-independent — the REAL
+  `run_grid_backlog_sim` DISPROVES it: boundary lag drains only when a shed actually SKIPS (a paced-out
+  FILL advances +1 but consumes ~a full interval of `now`, so it does NOT drain lag). Pacing FastDrain
+  OR halving its +2 to +1 throttles the deep drain to the (low) dupe rate and blows the 12s bound —
+  measured **15.3 s** for a 24-frame backlog at the 61.5 fps takt (dupe rate only ~1.5/s), vs 9.3 s
+  with the +2. So FastDrain keeps the v2 +2 burst for a genuine DEEP reconnect (an accepted rare
+  window dip); the STEADY 300/293 oscillation is fixed UPSTREAM by the trickle, not by touching
+  FastDrain. FastDrain still STAMPS the shared budget so the paced tail/trickle around it stay
+  suppressed (one coherent skip stream). The `SHALLOW_DRAIN_LAG_MIN` threshold must be low (`2`, not
+  `3`): off-rig, `3` let a creep→FastDrain burst slip through, `2` reliably prevents it.
+- **Composition:** issue-1131 — every skip is single-slot except FastDrain's deliberate +2 (unchanged,
+  #707-deducted); #666 — the 2/s pace cap keeps steady emit ≥58 fps; #1142 — smearing strictly
+  improves uniformity vs a localized burst; frozen-source — the freshness copy valve is untouched
+  (never a 0 fps blackout); healthy-60 — every new branch is `sustained_over_rate`-gated and the pace
+  stamp only mutates on a performed skip, so a 60.00 card is byte-inert. NO counter/tuple/summary
+  change (`take_shed_counts` stays a 6-tuple; a trickle skip records as `retired`, so on the live
+  over-rate box `retired` goes to ~1 per gap — attribute via the paced cadence). `main.rs` untouched.
+- **Off-rig (real `poll`, #557 scratch):** RED (send-bound 63.5 creep) delta 3 / min-skip-gap 17 /
+  burst 2 → GREEN delta 2 / gap ≥34 / burst 1; the 24-frame deep backlog STILL converges 8.65 s
+  (≤12 s) and 12-frame 4.65 s (≤6.5 s); 75/75 module tests pass. Tune the window-sent proxy against
+  the LIVE slack — the deficit is throughput-slack-dependent (a heavily send-bound sim over-estimates
+  it); the load-bearing invariants are the skip GAP + the ±1 id jump, not the raw window count.
+- **Supervisor's live rig step:** confirm the `[4i/8align]` cam1 offset holds ±1 across the last
+  trilogy of rounds and the per-5s `Streaming:` windows stay 299-300 (no 293 dips) on cam1.
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a

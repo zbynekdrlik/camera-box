@@ -177,6 +177,38 @@ pub const QUEUE_DEPTH_SANE_MAX_INTERVALS: u64 = 8;
 /// bound), so `8` is unreachable except via a garbage timestamp.
 pub const DRAIN_HOLD_PANIC_FLOOR: u64 = QUEUE_DEPTH_SANE_MAX_INTERVALS;
 
+// ── (#1167 v3) PACE the convergence skips so they never BURST ─────────────────────────────────
+
+/// (#1167 v3) The minimum gap, in whole emit intervals of MONOTONIC time, between two convergence
+/// slot-SKIPS (any boundary-advance-emit-nothing shed: a latched-Retire, a latched-Drain, or the
+/// steady shallow trickle-drain). v2/dev.533 held cam1's AVERAGE emit at 59.94 but windows
+/// oscillated 300/300/293: when the degrading grabber's ~3.5fps surplus creeps grid lag past
+/// [`RETIRE_MAX_LAG_INTERVALS`], FastDrain fires and LATCHES, and the whole shallow tail drains as a
+/// BURST of ~6-7 advance-emit-nothing sheds within a fraction of a second — one 5s window drops to
+/// 293 and cam1's presented-frame_id jumps ~+7 vs its siblings (the [4i/8align] "mutual stability
+/// <=1 id" abort). This SMEARS those skips: at most ONE convergence skip per `30` intervals (500ms
+/// == 2 skips/s cap), so the presented-id never jumps more than +1 at a time and the strih FIFO
+/// re-buffers between skips. `30` (2 skips/s) keeps the worst-case steady emit floor at ~58 fps —
+/// comfortably above the #666 emit-deficit floor (57 fps). Measured on the MONOTONIC clock (a
+/// duration between downstream-visible id jumps), NOT `now_ns`: `now_ns` is DanteSync-phase-STEPPED
+/// (a backward step would freeze convergence during exactly the events that inject lag; a forward
+/// step would grant a free skip coincident with a lag injection). FastDrain itself is deliberately
+/// NOT paced (its +2 deep-backlog drain must converge a genuine reconnect within the 12s bound at the
+/// low dupe rate — verified off-rig); the trickle keeps steady lag below the FastDrain band so
+/// FastDrain essentially never fires in steady state.
+pub const CONVERGE_SKIP_MIN_GAP_INTERVALS: u64 = 30;
+
+/// (#1167 v3) The smallest grid lag (in whole boundary intervals) at which the STEADY (non-
+/// converging) shallow-lag Retire path takes a PACED skip instead of filling — the trickle that
+/// drains the slowly-accumulating shallow lag before it can creep past [`RETIRE_MAX_LAG_INTERVALS`]
+/// and trip a FastDrain BURST. Because steady lag accumulates slowly (well under one interval/s), the
+/// trickle demand is low, so with the [`CONVERGE_SKIP_MIN_GAP_INTERVALS`] budget it fires at most ~1
+/// skip per 5s window (299-300, never a burst). `2` keeps a healthy 60.00 card (never over-rate)
+/// and a lag-0/lag-1 steady over-rate box (dupes DEFER / FILL, no skip) untouched — the trickle only
+/// engages once a real interval of grid lag has built up (off-rig: `2` reliably prevents the
+/// creep→FastDrain burst where `3` let a burst slip through).
+pub const SHALLOW_DRAIN_LAG_MIN: u64 = 2;
+
 /// (#1145 v2) The queue-residence depth of a captured frame, in whole emit intervals: how long the
 /// frame sat between its CAPTURE instant (`capture_mono_ns`, the V4L2 buffer's `CLOCK_MONOTONIC`
 /// timestamp) and the instant the loop PROCESSED it (`now_mono_ns`, `monotonic_clock_ns()`), divided
@@ -216,11 +248,15 @@ pub enum ShedAction {
     Defer,
     /// #1145 stale-boundary retirement (the DECISION for a shallow-stale over-rate dupe). The
     /// boundary the dupe crossed is already stale (`lag >= 1` — the downstream hold for it already
-    /// happened), and it sacrifices no unique + drains the dupe-driven lag. **(#1167) `poll` now
-    /// REINTERPRETS this decision by application**: while CONVERGING a deep backlog it advances the
-    /// boundary emitting nothing (as before — fast convergence); in STEADY over-rate it FILLS the
-    /// slot with a copy of the nearest good frame instead (advance + emit), so no 60fps slot is ever
-    /// skipped while a captured frame is buffered (the #1167 invariant). See [`DecimationGate::poll`].
+    /// happened), and it sacrifices no unique + drains the dupe-driven lag. **(#1167 v3) `poll` now
+    /// REINTERPRETS this decision by application in THREE cases**, all PACED by the shared
+    /// [`crate::dupe_decimation::CONVERGE_SKIP_MIN_GAP_INTERVALS`] budget: (a) while CONVERGING a deep
+    /// backlog → a paced retire (advance, emit nothing; paced-out → FILL); (b) in STEADY over-rate once
+    /// lag has crept to [`SHALLOW_DRAIN_LAG_MIN`] → a paced single-slot TRICKLE retire that bleeds the
+    /// creep off before it can reach the FastDrain band and BURST (the #1167 v3 fix for the 300/293
+    /// oscillation); (c) otherwise (lag below the trickle threshold, or paced-out) → FILL the slot with
+    /// a copy of the nearest good frame, so no 60fps slot is skipped between paced skips. See
+    /// [`DecimationGate::poll`].
     Retire,
     /// #1145 v2 queue-DEPTH drain: shed the OLDEST (this) frame — the sustained-over-rate absorption —
     /// to bound the queue RESIDENCE (`now_monotonic - capture_monotonic`) once it exceeds the depth
@@ -271,12 +307,13 @@ pub enum ShedAction {
 ///   for the SAME boundary (`already_deferred`) -> [`ShedAction::Emit`]`{ copy: true }` (the bounded
 ///   one-deferral guard — validated dupes are isolated pairs).
 /// - content-dupe, `1 <= lag <= `[`RETIRE_MAX_LAG_INTERVALS`] (SHALLOW-stale boundary): #1145 ->
-///   [`ShedAction::Retire`] as the DECISION. (#1167) [`crate::dupe_decimation::DecimationGate::poll`]
-///   REINTERPRETS that Retire: in steady over-rate it FILLS the slot with a copy of the nearest good
-///   frame (holds 60 — the ticket invariant, so continuous shallow-lag jitter never leaves a skipped
-///   slot = the cam1 align sawtooth), while during a deep-backlog convergence it retires (advance,
-///   emit nothing) so the grid catches up fast. The decision stays Retire so the #1145 decision tests
-///   + deep-backlog convergence rate are preserved; only the application changed.
+///   [`ShedAction::Retire`] as the DECISION. (#1167 v3) [`crate::dupe_decimation::DecimationGate::poll`]
+///   REINTERPRETS that Retire, PACED by the shared budget: during a deep-backlog convergence a paced
+///   retire (advance, emit nothing; paced-out → FILL); in STEADY over-rate a paced single-slot TRICKLE
+///   retire ONCE lag has crept to [`crate::dupe_decimation::SHALLOW_DRAIN_LAG_MIN`] (bleeds the creep
+///   off before it bursts — the 300/293 fix), else FILL a copy of the nearest good frame (holds 60
+///   between paced skips). The decision stays Retire so the #1145 decision tests + deep-backlog
+///   convergence rate are preserved; only the application changed.
 /// - content-dupe otherwise (NOT enough unique — genuine starvation; OR `lag > `the retire ceiling
 ///   but NOT the deep FastDrain band): [`ShedAction::Emit`]`{ copy: true }` — the #1111 late-dupe
 ///   valve, a starvation floor that holds the emit grid boundary-locked at 60.

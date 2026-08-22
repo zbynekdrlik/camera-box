@@ -104,14 +104,28 @@ pub struct DecimationGate {
     consecutive_drain_holds: u64,
     /// (#1167) Latch: is the gate CONVERGING a deep emit-grid backlog (a reconnect / restart /
     /// burn-toggle left the grid many intervals behind)? Set true when [`ShedAction::FastDrain`] fires
-    /// (`lag > RETIRE_MAX_LAG_INTERVALS`); cleared once the grid is caught up (`lag == 0`). It selects
-    /// how [`poll`](Self::poll) applies a shallow-lag [`ShedAction::Retire`]: while CONVERGING, RETIRE
-    /// (advance the stale boundary, emit nothing) so the deep backlog catches up fast (the #1145 v2.1
-    /// rate); in STEADY over-rate (never went deep) FILL the slot with a copy (hold 60 — the #1167
-    /// invariant). A brief spike past the ceiling latches converging only for its own short recovery
-    /// tail (an accepted rate dip); continuous shallow-lag jitter (the live cam1, `fast_drained == 0`)
-    /// never latches it, so every slot is filled.
+    /// (`lag > RETIRE_MAX_LAG_INTERVALS`); cleared once the grid is caught up (`lag == 0`) or the card
+    /// is no longer over-rate. It selects how [`poll`](Self::poll) applies a shallow-lag
+    /// [`ShedAction::Retire`]: while CONVERGING → a PACED retire (advance the stale boundary, emit
+    /// nothing, but SMEARED to <=1 skip per [`CONVERGE_SKIP_MIN_GAP_INTERVALS`] so the tail never
+    /// bursts; paced-out → FILL). (#1167 v3) When NOT converging (steady over-rate), the shallow Retire
+    /// is no longer an unconditional fill: once lag has crept to [`SHALLOW_DRAIN_LAG_MIN`] it takes a
+    /// PACED single-slot TRICKLE skip to bleed the creep off before it can reach this band and trip a
+    /// FastDrain BURST, and FILLS only below that threshold or when paced-out. So a steady over-rate box
+    /// now shows `retired ≈ 1 per gap` (the trickle), not ~0 — this is the v3 root-cause fix for the
+    /// 300/293 window oscillation, not a regression. FastDrain (deep band) is left UNPACED at +2 (a
+    /// genuine reconnect must converge <=12s); it only fires when a big jitter spike outruns the trickle.
     converging_deep_backlog: bool,
+    /// (#1167 v3) The MONOTONIC instant of the most recent convergence slot-SKIP (any boundary-
+    /// advance-emit-nothing shed: FastDrain, a latched-Retire, a latched-Drain, or the steady
+    /// shallow trickle-drain). The single, shared depth-1 pace budget: a convergence skip is only
+    /// PERFORMED when at least [`CONVERGE_SKIP_MIN_GAP_INTERVALS`] intervals of monotonic time have
+    /// elapsed since this stamp; otherwise the poll FILLS the slot instead (or, for a Drain, falls
+    /// back to the v2 HOLD), so the skips are SMEARED to <=1 per gap and never burst. `0` = never
+    /// skipped (the first skip is allowed immediately). A min-gap predicate on elapsed time is
+    /// inherently depth-1 (no saved-up-burst path), and ALL skip sites share this one field so they
+    /// cannot re-compose the burst between them.
+    last_converge_skip_mono_ns: u64,
 }
 
 impl DecimationGate {
@@ -493,6 +507,14 @@ impl DecimationGate {
             self.corrupted_makeup_deficit -= 1;
             return self.fill_slot(candidate_next); // advance + emit the nearest good frame as a copy
         }
+        // (#1167 v3) the SHARED depth-1 pace budget: is a convergence slot-SKIP allowed this poll?
+        // At least CONVERGE_SKIP_MIN_GAP_INTERVALS of MONOTONIC time must have elapsed since the last
+        // performed skip. A paced-out convergence shed FILLS the slot (Retire/FastDrain) or HOLDS
+        // (Drain) instead — smearing the skips to <=1 per gap so a burst can never bunch into one 5s
+        // window (the cam1 [4i/8align] sawtooth). Monotonic, so DanteSync realtime steps can neither
+        // freeze convergence (backward step) nor grant a free skip (forward step).
+        let paced_skip_ok = now_mono_ns.saturating_sub(self.last_converge_skip_mono_ns)
+            >= CONVERGE_SKIP_MIN_GAP_INTERVALS.saturating_mul(interval_ns);
         match action {
             ShedAction::BlindShed => {
                 // The ORIGINAL blind pacing drop (between boundaries) -- boundary unchanged
@@ -509,28 +531,49 @@ impl DecimationGate {
                 false
             }
             ShedAction::Retire => {
-                // (#1145 v1 decision) shallow-stale over-rate dupe. (#1167) its APPLICATION splits on
-                // whether the gate is CONVERGING a deep backlog:
+                // (#1145 v1 decision) shallow-stale over-rate dupe. (#1167 v3) its APPLICATION now has
+                // THREE cases — deep-convergence retire (paced), steady trickle-drain (paced), or fill:
                 if self.converging_deep_backlog {
-                    // Deep-backlog convergence tail (a FastDrain fired, grid still behind): RETIRE —
-                    // advance the already-stale boundary, emit nothing — so the grid catches up FAST
-                    // (the #1145 v2.1 convergence rate; a copy here would advance `now` by the send
-                    // cost and slow convergence). A brief, accepted rate dip during a rare reconnect.
+                    // Deep-backlog convergence tail (a FastDrain fired, grid still behind): the shallow
+                    // tail must SKIP (advance the already-stale boundary, emit nothing) to finish the
+                    // convergence — but (#1167 v3) PACED, so the tail is smeared to <=1 skip per gap
+                    // instead of a burst. Boundary lag still drains at the over-rate surplus even while
+                    // paced-out (a fill advances +1 too), so the reconnect still converges fast.
+                    if paced_skip_ok {
+                        self.deferred_this_boundary = false;
+                        self.consecutive_drain_holds = 0; // the boundary advances -> hold streak broken
+                        self.next_boundary_ns = candidate_next;
+                        self.last_converge_skip_mono_ns = now_mono_ns; // stamp the shared pace budget
+                        self.shed_log.record_retired();
+                        false
+                    } else {
+                        // paced-out: FILL (the v2 steady behavior) — a dupe in hand is byte/optical
+                        // identical to the current content, so the copy loses nothing; the boundary
+                        // still advances +1 so lag keeps draining.
+                        self.fill_slot(candidate_next)
+                    }
+                } else if sustained_over_rate
+                    && lag_intervals >= SHALLOW_DRAIN_LAG_MIN
+                    && paced_skip_ok
+                {
+                    // (#1167 v3) STEADY shallow trickle-drain: a real interval of grid lag has crept
+                    // in (jitter re-injected it) but we never went deep. Take ONE paced skip to drain
+                    // it before it can accumulate past RETIRE_MAX_LAG_INTERVALS and trip a FastDrain
+                    // BURST — the root-cause fix for the v2 300/293 oscillation. Paced (<=1 per gap),
+                    // so at the slow steady accumulation rate it fires ~1 skip per 5s window (299-300,
+                    // never a burst). Only a dupe reaches here (path 3 routes every unique to Emit
+                    // first), so no unique is dropped; #666 stays safe (>=58 fps at this pace cap).
                     self.deferred_this_boundary = false;
                     self.consecutive_drain_holds = 0; // the boundary advances -> hold streak broken
                     self.next_boundary_ns = candidate_next;
+                    self.last_converge_skip_mono_ns = now_mono_ns; // stamp the shared pace budget
                     self.shed_log.record_retired();
                     false
                 } else {
-                    // Steady over-rate (never went deep): FILL the slot with a copy of this good frame
-                    // (the nearest good frame) and advance the boundary — the #1167 invariant: while a
-                    // captured frame is buffered, every 60fps slot is filled, never skipped. Holds the
-                    // emit at 60 through continuous shallow-lag jitter (the cam1 [4i/8align] sawtooth
-                    // fix). #1142-safe: this copy fills a slot a missed boundary left owed (no unique is
-                    // displaced — the shed dupe was surplus), relocating an otherwise-inevitable strih
-                    // FIFO Δ0 upstream instead of the paired Δ0/Δ3 lag-0 churn #1145 removed. Counted as
-                    // a #1111 copy (`record_dupe_emitted`); on the over-rate box these are now a
-                    // legitimate nonzero (cross-reference the retired count, which goes ~0).
+                    // Steady over-rate, lag below the trickle threshold OR paced-out: FILL the slot
+                    // with a copy of this good frame and advance — the #1167 invariant (every buffered
+                    // 60fps slot filled, never skipped). #1142-safe: fills a slot a missed boundary left
+                    // owed (no unique displaced). Counted as a #1111 copy (`record_dupe_emitted`).
                     self.fill_slot(candidate_next)
                 }
             }
@@ -540,16 +583,19 @@ impl DecimationGate {
                 // sawtooth flat and pre-empts the V4L2-overflow burst. Application splits on whether a
                 // deep backlog is CONVERGING (symmetric with the shallow-lag Retire arm):
                 self.deferred_this_boundary = false;
-                if self.converging_deep_backlog {
-                    // Converging a deep backlog: ADVANCE the boundary exactly as #1145 v2 did, so this
-                    // drop CONTRIBUTES to the convergence — a hold here would ADD a slot to converge,
-                    // eroding the v2.1 deep-backlog rate.
+                if self.converging_deep_backlog && paced_skip_ok {
+                    // Converging a deep backlog, PACED skip available: ADVANCE the boundary (as #1145
+                    // v2 did) so this drop CONTRIBUTES to the convergence, and stamp the shared budget.
+                    // (#1167 v3) A paced-out converging Drain falls through to the v2 STEADY-HOLD below
+                    // (NEVER a FILL — Drain's frame is >=2 intervals STALE, so filling it would emit
+                    // stale content; the HOLD drops it and the next fresher frame fills the slot).
                     self.consecutive_drain_holds = 0;
                     self.next_boundary_ns = candidate_next;
+                    self.last_converge_skip_mono_ns = now_mono_ns; // stamp the shared pace budget
                     self.shed_log.record_drained();
                     return false;
                 }
-                // Steady over-rate: #1167 HOLDS the boundary (do NOT advance) so the NEXT fresher frame
+                // Steady over-rate (or a paced-out converging Drain): #1167 HOLDS the boundary (do NOT advance) so the NEXT fresher frame
                 // fills the same 60fps slot — dropping the oldest still bounds residence, but no slot is
                 // ever skipped while a captured frame is buffered (the ticket invariant; the emitted
                 // filler has residence below the threshold, so latency stays bounded).
@@ -568,30 +614,36 @@ impl DecimationGate {
                 false
             }
             ShedAction::FastDrain => {
-                // (#1145 v2.1) deep-backlog accelerated drain: shed the dupe AND advance TWO
-                // intervals when the EXTRA boundary is also already stale (never into the future —
-                // `candidate_next` is boundary+1; the extra one is boundary+2, still <= now when the
-                // lag is deep). Retires two stale boundaries per dropped dupe -> the delivery-lag
-                // backlog converges ~2x faster; drops no EXTRA frame (only the dupe), so no unique is
-                // dropped and the emit grid never overshoots wall-clock. Falls back to a single-slot
-                // advance if the +2 would overshoot (a defensive guard; unreachable in the deep band).
+                // (#1145 v2.1) deep-backlog accelerated drain: shed the dupe AND advance TWO intervals
+                // (retire an extra already-stale boundary), emitting nothing. (#1167 v3) FastDrain is
+                // DELIBERATELY LEFT UNPACED and at +2: a genuine DEEP backlog (reconnect / restart /
+                // burn-toggle, lag > RETIRE_MAX_LAG_INTERVALS) must converge FAST (<=12s), and boundary
+                // lag drains only when a shed actually SKIPS (a paced-out FILL advances +1 but consumes
+                // ~an interval of `now`, so it does NOT drain lag). Pacing FastDrain OR halving it to +1
+                // throttles the deep drain to the (low) dupe rate and blows the 12s bound — measured
+                // 15.3s at the 61.5 fps rig takt (dupe rate only ~1.5/s), vs 9.3s with the +2 (this is
+                // the empirical correction to the design consult, which assumed lag convergence was
+                // pace-independent). So the deep reconnect keeps the v2 +2 burst (an accepted rare
+                // window dip). The STEADY 300/293 oscillation is NOT fixed here — it is prevented
+                // UPSTREAM by the paced steady trickle-drain (the Retire arm) keeping lag below this
+                // band so FastDrain essentially never fires in steady state; when a big jitter spike
+                // does reach it, the paced converging TAIL below smears the recovery. FastDrain stamps
+                // the shared pace budget so the paced tail/trickle around it stay suppressed (one
+                // coherent skip stream, never re-composed into a double burst).
                 let fast_next = if candidate_next.saturating_add(interval_ns) <= now_ns {
                     candidate_next + interval_ns
                 } else {
                     candidate_next
                 };
-                // (#1145 v2.1 review 🟡) record the INTENTIONAL extra boundary advance (1 when the +2
-                // fired, 0 on the fallback) so main.rs can deduct it from the #707 boundary-skip
-                // diagnostic — an intentional stale-boundary retirement must NOT read as the sick-leg
-                // / clock-step SKIP that `leg-health-guard.sh` hard-fails on.
+                // (#1145 v2.1 review 🟡) record the intentional extra boundary advance so main.rs
+                // deducts it from the #707 boundary-skip diagnostic (a fast-drain is not a sick-leg SKIP).
                 self.last_poll_fast_drain_extra =
                     (fast_next.saturating_sub(candidate_next)) / interval_ns;
                 self.next_boundary_ns = fast_next;
                 self.deferred_this_boundary = false;
-                self.consecutive_drain_holds = 0; // (#1167) the grid advanced -> hold streak broken
-                                                  // (#1167) a deep backlog is being converged -> latch it, so the shallow-lag Retire arm
-                                                  // keeps RETIRING (converge fast) instead of filling with copies until lag returns to 0.
-                self.converging_deep_backlog = true;
+                self.consecutive_drain_holds = 0; // the grid advanced -> hold streak broken
+                self.converging_deep_backlog = true; // latch: the shallow tail keeps converging (paced)
+                self.last_converge_skip_mono_ns = now_mono_ns; // stamp the shared pace budget
                 self.shed_log.record_fast_drained();
                 false
             }
@@ -663,10 +715,14 @@ impl DupeShedLog {
     }
 
     /// (#1145) Record ONE over-rate content-dupe RETIRED (shed while advancing the already-stale
-    /// boundary, emitting nothing). (#1167) On the over-rate box this now goes ~0 in STEADY state —
-    /// `poll` only retires while CONVERGING a deep backlog; a steady shallow-lag dupe FILLS the slot
-    /// (counted as a copy in [`record_dupe_emitted`](Self::record_dupe_emitted)) instead. See
-    /// [`DecimationGate::poll`].
+    /// boundary, emitting nothing). (#1167 v3) On the over-rate box this is now a LEGITIMATE small
+    /// nonzero in STEADY state — `poll`'s steady shallow-lag TRICKLE (once lag ≥
+    /// [`SHALLOW_DRAIN_LAG_MIN`]) takes a PACED retire skip (≤1 per [`CONVERGE_SKIP_MIN_GAP_INTERVALS`])
+    /// to bleed the grid-lag creep off before it bursts, so expect `retired ≈ 1 per gap`, NOT ~0 (do
+    /// not misread that as a regression). Below the trickle threshold, or when paced-out, a steady
+    /// shallow-lag dupe still FILLS the slot (counted as a copy in
+    /// [`record_dupe_emitted`](Self::record_dupe_emitted)); the CONVERGING tail also records here (its
+    /// paced retire). See [`DecimationGate::poll`].
     pub fn record_retired(&mut self) {
         self.retired = self.retired.saturating_add(1);
     }

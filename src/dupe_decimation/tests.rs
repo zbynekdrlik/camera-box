@@ -2135,53 +2135,84 @@ fn over_rate_fills_every_60fps_slot_holds_60_not_skipped_1167() {
 }
 
 #[test]
-fn shallow_lag_over_rate_dupe_fills_slot_with_copy_not_retired_1167() {
-    // (#1167 [red] -> [green]) A content-dupe crossing a SHALLOW-stale boundary
-    // (1 <= lag <= RETIRE_MAX_LAG_INTERVALS) at a sustained over-rate — in STEADY state (NOT
-    // converging a deep backlog) — must FILL the slot: `poll` emits a copy of the nearest good
-    // frame and advances the boundary, NOT retire it (advance, emit nothing). The #1145 v1 retire
-    // skipped the slot; whenever jitter keeps re-injecting shallow lag (the live cam1 shows
-    // `retired`>0 EVERY 5s window, `fast_drained==0` so it never went deep) that is a CONTINUOUS
-    // strih-FIFO hold = the cam1 [4i/8align] sawtooth. The DECISION stays Retire (so #1145's
-    // decision tests + deep-backlog convergence are preserved); `poll` REINTERPRETS it as a fill in
-    // steady over-rate. RED before the fix: the Retire arm advanced + emitted nothing (poll->false,
-    // retired>0); GREEN after: poll->true, copies>0, retired=0.
+fn steady_shallow_lag_trickle_drains_paced_then_fills_1167() {
+    // (#1167 v3 [red] -> [green]) SUPERSEDES the v2/eleventh-piece "always FILL" application of a
+    // steady shallow-lag dupe. v2 filled EVERY shallow-lag dupe and never drained the grid lag, so
+    // the ~3.5 fps surplus CREEPS lag past RETIRE_MAX_LAG_INTERVALS, FastDrain fires + LATCHES, and
+    // the shallow tail drains as a BURST (the 300/293 window oscillation + the +2 presented-id jump).
+    // v3 adds a PACED trickle-drain: once lag has crept to SHALLOW_DRAIN_LAG_MIN and the shared
+    // monotonic pace budget allows, a shallow-lag dupe takes ONE single-slot skip (advance, emit
+    // nothing) to bleed the creep off BEFORE it reaches the FastDrain band. When PACED-OUT (a skip
+    // just happened) it still FILLS the slot (the fill-every-slot invariant holds between trickle
+    // skips), so at the slow steady creep rate the trickle fires ~1 skip per gap = 299-300 windows,
+    // never a burst. The DECISION stays Retire (so #1145's decision tests + deep-backlog convergence
+    // are preserved); only poll's application splits.
     let emit_int = 1_000_000_000u64 / 60;
     let cap_int = (1e9 / 62.0) as u64;
-    let mut next_i = 0u64;
-    let mut gate = warm_over_rate_gate(&mut next_i); // sustained_over_rate armed, no FastDrain -> not converging
-    let capture_mono = 400u64 * cap_int;
     let dupe_hash = 0xABCD_1234u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    // 1) a UNIQUE at its on-time boundary: sets prev_hash for the dupe below AND drives lag to 0 so
-    //    the converging latch is provably clear (residence 0 -> no Drain).
-    let b0 = gate.next_boundary_ns();
-    let _ = gate.poll(b0, emit_int, dupe_hash, true, capture_mono, capture_mono);
-    // 2) the DUPE (same hash) crossing a SHALLOW-stale boundary (lag 2): residence 0 (no Drain),
-    //    not converging (no FastDrain occurred) -> the shallow-lag Retire decision, applied as FILL.
-    let now = gate.next_boundary_ns() + emit_int * 2;
-    let cap2 = capture_mono + cap_int;
-    let emit = gate.poll(now, emit_int, dupe_hash, true, cap2, cap2);
-    let (_ds, _bl, copies, retired, drained, _fast) = gate.take_shed_counts();
-    assert!(
-        emit,
-        "a steady-over-rate shallow-lag dupe must FILL the slot (poll emits a copy), not skip it"
-    );
-    assert!(
-        copies >= 1,
-        "the fill is counted as a #1111 copy; copies={copies}"
-    );
-    assert_eq!(
-        retired, 0,
-        "a steady (non-converging) shallow-lag dupe must NOT retire (that skips the slot); retired={retired}"
-    );
-    assert_eq!(
-        drained, 0,
-        "residence 0 -> the depth-drain must not fire; drained={drained}"
-    );
+
+    // CASE A — lag == SHALLOW_DRAIN_LAG_MIN, FRESH pace budget -> the trickle SKIPS (drains the creep).
+    {
+        let mut next_i = 0u64;
+        let mut gate = warm_over_rate_gate(&mut next_i); // sustained_over_rate armed, not converging
+        let cap = 400u64 * cap_int;
+        // a UNIQUE at its on-time boundary sets prev_hash for the dupe below (lag 0, residence 0).
+        let b0 = gate.next_boundary_ns();
+        let _ = gate.poll(b0, emit_int, dupe_hash, true, cap, cap);
+        // the DUPE crossing a shallow-stale boundary at lag == SHALLOW_DRAIN_LAG_MIN, budget fresh
+        // (warm-up never skipped, so last_converge_skip_mono_ns == 0 and now_mono is far past it).
+        let now = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let cap2 = cap + cap_int;
+        let emit = gate.poll(now, emit_int, dupe_hash, true, cap2, cap2);
+        let (_ds, _bl, copies, retired, drained, _fast) = gate.take_shed_counts();
+        assert!(
+            !emit,
+            "a fresh-budget shallow-lag trickle must SKIP (drain the creep), not fill"
+        );
+        assert_eq!(
+            (retired, drained, copies),
+            (1, 0, 0),
+            "the trickle is exactly ONE Retire skip (no drain/copy); \
+                 retired={retired} drained={drained} copies={copies}"
+        );
+    }
+
+    // CASE B — lag == SHALLOW_DRAIN_LAG_MIN but PACED-OUT (a trickle skip just happened) -> FILL.
+    {
+        let mut next_i = 0u64;
+        let mut gate = warm_over_rate_gate(&mut next_i);
+        let cap = 400u64 * cap_int;
+        let b0 = gate.next_boundary_ns();
+        let _ = gate.poll(b0, emit_int, dupe_hash, true, cap, cap);
+        // first shallow-lag dupe -> trickle SKIP, stamps the pace budget at now_mono = cap2.
+        let now1 = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let cap2 = cap + cap_int;
+        let _ = gate.poll(now1, emit_int, dupe_hash, true, cap2, cap2);
+        let _ = gate.take_shed_counts();
+        // second shallow-lag dupe one cap_int later -> now_mono only ~16 ms past cap2, far under
+        // CONVERGE_SKIP_MIN_GAP_INTERVALS * emit_int (500 ms) -> paced-out -> FILL the slot.
+        let now2 = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let cap3 = cap2 + cap_int;
+        let emit = gate.poll(now2, emit_int, dupe_hash, true, cap3, cap3);
+        let (_ds, _bl, copies, retired, _drn, _fast) = gate.take_shed_counts();
+        assert!(
+            emit,
+            "a paced-out shallow-lag dupe must FILL the slot (the fill-every-slot invariant between skips)"
+        );
+        assert!(
+            copies >= 1,
+            "the paced-out fill is counted as a #1111 copy; copies={copies}"
+        );
+        assert_eq!(
+            retired, 0,
+            "a paced-out shallow-lag dupe must not skip; retired={retired}"
+        );
+    }
+
     // The DECISION for that band is STILL Retire (only the poll application changed) — and the DEEP
     // band above the ceiling is STILL FastDrain, so #1145's deep-backlog convergence is untouched.
     assert_eq!(
-        dupe_shed_action(true, true, false, 2, true, 0, true),
+        dupe_shed_action(true, true, false, SHALLOW_DRAIN_LAG_MIN, true, 0, true),
         ShedAction::Retire,
         "the shallow-lag DECISION stays Retire (poll reinterprets it) so #1145 is preserved"
     );
@@ -2290,5 +2321,181 @@ fn drain_hold_panic_floor_fills_after_max_consecutive_holds_1167() {
         (drained, copies),
         (DRAIN_HOLD_PANIC_FLOOR - 1, 1),
         "the floor fill is a COPY (not a drain), so drained counts only the holds before it"
+    );
+}
+
+// ── (#1167 v3) PACE the convergence: amortize the skips, never a burst ─────────────────────────
+
+/// (#1167 v3) Result of [`run_over_rate_creep_sim`].
+struct CreepSim {
+    /// The MAX boundary delta between two consecutive EMITs (1 = perfect 60fps cadence; 2 = one
+    /// boundary skipped between emits = a +1 presented-id jump; >= 3 = a +2 FastDrain jump / a burst
+    /// = the cam1 [4i/8align] sawtooth this ticket kills). v3 keeps it <= 2 (single-slot skips only).
+    max_emit_boundary_delta: u64,
+    /// The WORST count of convergence SKIPS (advance-emit-nothing sheds) within any single sliding
+    /// window of [`CONVERGE_SKIP_MIN_GAP_INTERVALS`] emit intervals — the BURST size. v2 lets the
+    /// shallow tail drain as a burst (>= 2); v3 paces it to <= 1 per gap.
+    max_burst_in_gap: u64,
+    /// Total convergence skips post-warmup (proves the machinery engaged — not a no-op pass).
+    skips_total: u64,
+    /// Emitted fps over the whole run (holds near 60 — every slot still filled but for the paced skips).
+    emit_fps: f64,
+}
+
+/// (#1167 v3) Drive the REAL [`DecimationGate::poll`] with a SEND-BOUND over-rate emit loop (the
+/// degrading grabber at `capture_fps` > 60 with the NDI send just under one 60fps interval), single
+/// wall==monotonic==grid clock exactly like the live cam box (NO reconnect offset). The send-bound
+/// loop lets the ~(capture-60) fps surplus CREEP grid lag upward (Drain-HOLDs advance the wall clock
+/// but not the boundary) — the live steady mechanism. On v2 the creep reaches the FastDrain band and
+/// the shallow tail drains as a BURST; v3's paced trickle bleeds it off smoothly. `slack_num`/1000 is
+/// the send cost as a fraction of the emit interval (999 = 0.1% slack = send-bound creep). Dupes are
+/// isolated content-pairs at the over-rate delta (the byte-hash `is_dupe` model — same as
+/// [`run_grid_backlog_sim`]).
+fn run_over_rate_creep_sim(capture_fps: f64, secs: f64, slack_num: u64) -> CreepSim {
+    let cap_int = (1e9 / capture_fps) as u64;
+    let emit_int = 1_000_000_000u64 / 60;
+    let send_cost = emit_int * slack_num / 1000;
+    let shed_cost = 1_000_000u64; // 1 ms (hash only)
+    const MAXQ: usize = 4;
+    const WARMUP_NS: u64 = 8_000_000_000; // establish the takt EMA + settle before measuring
+    let gap_ns = CONVERGE_SKIP_MIN_GAP_INTERVALS * emit_int;
+    let n = (capture_fps * secs) as u64;
+
+    let mut gate = DecimationGate::new();
+    let mut queue: VecDeque<u64> = VecDeque::new(); // capture-monotonic instants
+    let mut next_cap = 0u64;
+    let mut wall = 0u64; // single clock: wall == monotonic == grid
+
+    let over_rate = capture_fps - 60.0;
+    let dupe_period = if over_rate > 0.01 {
+        (capture_fps / over_rate).round() as u64
+    } else {
+        u64::MAX
+    };
+    let (mut next_id, mut prev_id): (u64, u64) = (0, 0);
+
+    let mut emits = 0u64;
+    let mut last_emit_bidx: Option<u64> = None;
+    let mut max_emit_boundary_delta = 0u64;
+    let mut skips_total = 0u64;
+    let mut skip_walls: VecDeque<u64> = VecDeque::new();
+    let mut max_burst_in_gap = 0u64;
+
+    loop {
+        while next_cap < n {
+            let cap_ns = next_cap * cap_int;
+            if cap_ns > wall {
+                break;
+            }
+            if queue.len() < MAXQ {
+                queue.push_back(cap_ns);
+            }
+            next_cap += 1;
+        }
+        if queue.is_empty() {
+            if next_cap >= n {
+                break;
+            }
+            wall = next_cap * cap_int;
+            continue;
+        }
+        let cap_ns = queue.pop_front().unwrap();
+        let now = wall;
+
+        let is_dupe = dupe_period != u64::MAX && next_cap % dupe_period == dupe_period - 1;
+        let cid = if is_dupe {
+            prev_id
+        } else {
+            let id = next_id;
+            next_id += 1;
+            id
+        };
+        prev_id = cid;
+        let content_hash = cid.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+
+        let prev_boundary = gate.next_boundary_ns();
+        let emit = gate.poll(now, emit_int, content_hash, true, now, cap_ns);
+        let new_boundary = gate.next_boundary_ns();
+        let advanced = new_boundary.saturating_sub(prev_boundary) / emit_int;
+        let post_warm = now > WARMUP_NS;
+
+        // a convergence SKIP = the boundary advanced but nothing was emitted this poll.
+        if !emit && advanced >= 1 && post_warm {
+            skips_total += 1;
+            skip_walls.push_back(now);
+            while let Some(&front) = skip_walls.front() {
+                if now.saturating_sub(front) >= gap_ns {
+                    skip_walls.pop_front();
+                } else {
+                    break;
+                }
+            }
+            max_burst_in_gap = max_burst_in_gap.max(skip_walls.len() as u64);
+        }
+
+        let mut cost = shed_cost;
+        if emit {
+            cost = send_cost;
+            emits += 1;
+            if let Some(prev) = last_emit_bidx {
+                if post_warm {
+                    max_emit_boundary_delta =
+                        max_emit_boundary_delta.max((new_boundary / emit_int).saturating_sub(prev));
+                }
+            }
+            last_emit_bidx = Some(new_boundary / emit_int);
+        }
+        wall += cost;
+        if next_cap >= n && queue.is_empty() {
+            break;
+        }
+    }
+    CreepSim {
+        max_emit_boundary_delta,
+        max_burst_in_gap,
+        skips_total,
+        emit_fps: emits as f64 / secs,
+    }
+}
+
+#[test]
+fn over_rate_convergence_is_paced_not_bursty_1167() {
+    // (#1167 v3 [red] -> [green]) The v2 fill-every-slot fix held cam1's AVERAGE emit at ~59.94 but
+    // per-5s windows oscillated 300/300/293: at the degrading grabber's ~3.5 fps surplus the grid lag
+    // CREEPS past RETIRE_MAX_LAG_INTERVALS, FastDrain fires and LATCHES, and the whole shallow tail
+    // drains as a BURST of advance-emit-nothing sheds in a fraction of a second -> cam1's presented
+    // frame_id jumps several ahead of its siblings -> [4i/8align] "mutual stability <=1 id" abort.
+    //
+    // v3 PACES the convergence: a steady trickle-drain bleeds the creep off before it reaches the
+    // FastDrain band, and the shared monotonic min-gap budget smears any convergence tail to at most
+    // one single-slot skip per CONVERGE_SKIP_MIN_GAP_INTERVALS. So the presented-id trace becomes
+    // monotone-smooth (a +1 id jump at most) instead of the sawtooth.
+    //
+    // RED before the fix (send-bound creep, 63.5 fps, the REAL poll): max emit-boundary delta = 3 (a
+    // +2 FastDrain jump) and up to 2-3 skips bunch inside one gap window. GREEN after: delta <= 2
+    // (single-slot skips only) and never more than one skip per gap.
+    let s = run_over_rate_creep_sim(63.5, 90.0, 999);
+    assert!(
+        s.skips_total > 0,
+        "the sim must actually exercise the convergence path (over-rate creep); skips={}",
+        s.skips_total
+    );
+    assert!(
+        s.max_emit_boundary_delta <= 2,
+        "v3 must keep every presented-id jump to +1 (single-slot skips only, no +2 FastDrain burst); \
+             max emit-boundary delta {} (v2 bursts to 3)",
+        s.max_emit_boundary_delta
+    );
+    assert!(
+        s.max_burst_in_gap <= 1,
+        "v3 must PACE convergence skips to <= 1 per CONVERGE_SKIP_MIN_GAP_INTERVALS (no burst); \
+             worst burst {} skips in one gap window (v2 bursts to 2-3)",
+        s.max_burst_in_gap
+    );
+    // the emit rate still holds near 60 (every slot filled but for the paced single-slot skips).
+    assert!(
+        s.emit_fps >= 58.0,
+        "the paced convergence must still hold emit above the #666 floor; got {:.2} fps",
+        s.emit_fps
     );
 }
