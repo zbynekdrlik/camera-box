@@ -31,16 +31,28 @@ model (90/160/184) was owner-REJECTED and REVERTED — never re-derive absolute 
   SAME-clock DIFFERENCES (`gen_ts_i − g0`, `t_send_i − t0`) — the cross-clock offset cancels, exactly
   as `mv_skew_snapshot.skew_sample_ms` does. Source order is also rotated per round.
 
-## The floor-3 model + the sanity bound
+## The floor-3 model + the two bounds
 
-- `m_i = current_pin_i − latency_i`; the MAX-transport (slowest) camera has the MIN `m_i`;
-  `new_pin_i = 3 + (m_i − min_k m_k)` — the slowest floors to 3, others get 3 + their RELATIVE delta
-  (relative-only, never absolute depth). Medianed over full rounds, undecodable/underrun excluded.
-- **The sanity bound (`--max-delta-ms`) MUST stay BELOW the owner's "94 ms between identical cards is
-  nonsense"** (default 66 ms ≈ 2 frames). A 100 ms default silently re-enabled the rejected deep-pin
-  behavior (a degraded card would pass sanity, get a ~97 ms pin, and the re-measure would certify
-  it). A delta above the bound = a degraded/underrun card → FAIL; the abort names the SLOWEST
-  (likely-degraded) camera, not a healthy fast one.
+- **FLOOR-AWARE pins (#1161 — supersedes the old `3 + delta` on `--execute`).** `m_i =
+  current_pin_i − latency_i`; the MAX-transport (slowest) camera has the MIN `m_i` and anchors to
+  pin 3 (inert, stays at its natural floor). Every FASTER camera is pinned to `round(arrival_floor_i
+  + pure_delta_i)` — its own ABSOLUTE arrival transport floor plus the RELATIVE hold it must add to
+  match the slowest (= the slowest's floor). The old `new_pin_i = 3 + delta` was INERT because the
+  genlock FIFO is `latency = max(pin, transport)`, not `pin + transport`: in the transport-dominated
+  regime (frames arrive ~59-66 ms old, deltas ~1 canvas frame) `3 + delta` lands BELOW the arrival
+  floor and has no leverage (see the #1161 section below). Still RELATIVE-only in effect (the faster
+  cameras reach the SLOWEST's NATURAL floor — no net latency beyond the physical transport, never the
+  rejected 90/160/184 absolute depth), just computed ABOVE each floor so it actually moves the frame.
+- **Two SEPARATE bounds, both hard, neither ever widened:**
+  - The SPREAD sanity `--max-delta-ms` (default `DEFAULT_MAX_DELTA_MS = 66` ms ≈ 2 frames) — the
+    cross-camera delta (max−min). MUST stay BELOW the owner's "94 ms between identical cards is
+    nonsense". A delta above it = a degraded/underrun card → FAIL, naming the SLOWEST (likely-degraded)
+    camera, not a healthy fast one. UNCHANGED by #1161; runs FIRST.
+  - The ABSOLUTE achievable-latency ceiling `--max-abs-latency-ms` (default `DEFAULT_MAX_ABS_LATENCY_MS
+    = 94` ms, the owner's 94 ms line) — a floor-aware target (`arrival_floor_i + delta_i`) above it =
+    the transport floor is too high to align within budget → `floor_aware_pins` FAILs LOUD per-camera
+    ("cam3 arrival floor 66ms + delta 33ms = 99ms > bound 94ms — investigate the transport floor, do
+    NOT raise the bound"). Never deep-pins, never widens the bound.
 
 ## Gate interactions + set membership (both cost a review round)
 
@@ -138,38 +150,78 @@ system.**
   `align()` flow are tested against a monkeypatched `barrier_screenshot`
   (`tests/python/test_qr_align_tail_1160.py`).
 
-## The floor-3 pin lever CANNOT ADD hold — a pin INCREASE is inert on a live rig (#1161)
+## A pin BELOW the arrival floor is inert — pin ABOVE it (the floor-aware fix, #1161)
 
-The floor-3 model floors the slowest camera to 3 and RAISES the faster ones' pins to delay them into
-parity. That raise is **structurally inert on a live rig** — the aligner cannot move a source's
-presented frame to an OLDER one:
+The genlock FIFO is `latency = max(pin, transport)`, NOT `pin + transport`. So raising a source's
+`genlock_latency_ms` moves the presented frame ONLY when the new pin exceeds that source's arrival
+TRANSPORT floor (how old frames already are when they reach strih). In the transport-dominated regime
+the live rig sits in — frames arrive ~59-66 ms old (head_skew 76/59) while the cross-camera deltas
+are ~1 canvas frame — the OLD `floor(3) + delta` plan (≈ 3-50 ms) lands BELOW the floor, so it is
+structurally INERT: the FIFO cannot present a frame younger than what arrived, and a reserve below the
+arrival edge has no leverage (live E2E 32556463012: cam3 17→50 read-back OK, frame did not move).
+This is NOT a settle-time issue and NOT fixable by the rejected wall-clock frame-grid pin (issue 1003,
+2026-08-17/18/20).
 
-- `obs_source_set_genlock_latency_ms` (`vendor/obs-studio/libobs/obs-source.c`, ~7851) on a value
-  change clears `genlock_phase_anchor_ns` and re-arms the (ms-path-inert) `genlock_filled` latch, but
-  NEVER clears `genlock_locked_next_boundary_ns` (the conveyor) and NEVER forces a re-acquire (the
-  ACQUIRE branch runs only when that boundary `== 0`).
-- The conveyor is a pure DOWNWARD-only FOLLOWER; `should_converge_phase` (`src/genlock_backlog.rs`)
-  only sheds toward `max(reserve, floor)`. Raising `reserve` (= the pin) only raises that shed
-  threshold — it never deepens the hold.
+**The frame-mover LANDED (sibling genlock-C, `genlock_relock_acquire_should_hold` in
+`src/genlock_backlog.rs` + `vendor/obs-studio/libobs/obs-source.c`):** on a pin RISE the setter zeroes
+the conveyor boundary to force a bounded re-acquire, and the ACQUIRE branch (N>=2) HOLDs until the
+oldest queued frame ages to the raised reserve, then re-anchors via the history-anchored
+`genlock_relock_select_nearest` (a fail-open cap prevents a new hold-collapse). It moves the frame
+ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compute above-floor pins.
 
-So a per-source pin INCREASE moves only the CONFIG value (read-back confirms it), never the presented
-frame → a one-canvas-frame residual can survive apply, and the re-measured residual reads INFLATED
-(the delta metric `m_i = pin_i − latency_i` folds in the raised pin while the frame stayed put). This
-is NOT a settle-time issue (no upward mechanism to wait for) and NOT fixable by the wall-clock
-frame-grid pin (issue 1003 REJECTED it three ways, 2026-08-17/18/20). The frame-mover is issue 1003's
-Stage-2 ACQUIRE bracketing gate — a genlock-C change (the setter forces a bounded re-acquire on a pin
-RISE by zeroing the conveyor boundary; the ACQUIRE branch, N>=2 only, HOLDs until the oldest queued
-frame ages to the raised reserve — bracketing the target — then re-anchors via the existing
-history-anchored `genlock_relock_select_nearest`; a fail-open cap prevents any new hold-collapse).
-Its sequencing gate was NOT issue 1004 (a closed, unrelated dock-display ticket) — the 2026-08-17
-issue-1003 thread gated it on **Stage-1's raised-reserve config being live + a live discriminator
-confirming the residual is receiver-side**. LANDED in #1161 as `genlock_relock_acquire_should_hold`
-(`src/genlock_backlog.rs` authority + `vendor/obs-studio/libobs/obs-source.c` port) — the frame-move
-now lives in the genlock C, live-only-verifiable, OUT of the aligner's reach.
-
-**What the aligner does instead (#1161):** when the re-measured tail STABILIZED but stayed off-parity
-AND the plan asked a source to add hold, `align()` attributes the abort PRECISELY (via
-`pins_requiring_more_hold` + `hold_inert_abort_reason`) — naming the genlock FIFO limit + issue 1003
-— and emits per-source before/after pin+residual telemetry (`format_pin_apply_report`), instead of a
-generic "did NOT hold" that reads as flakiness/settle. It NEVER widens the same-frame parity bar; the
-run still FAILS. All three helpers are pure (Tier-0, `tests/python/test_qr_align_pinapply_1161.py`).
+**The aligner's floor-aware fix (#1161, `scripts/qr_align_pins.py`):**
+- **Absolute floor from the strih genlock audit, NOT the painter QR.** The painter-QR `gen_ts` is
+  CLOCK_REALTIME (painter box, DanteSync-synced) while dev1's `t_send` is CLOCK_MONOTONIC — cross-clock,
+  so painter-QR gives only RELATIVE cross-camera deltas, never an absolute floor. `arrival_floors_from_jitter`
+  reconstructs each source's `latency_ms + mean_head_skew_ms` from `genlock-jitter-report --json` (the
+  pin's own DanteSync-synced OBS clock — comparable to the pin), reusing
+  `prerecord_phase_calibrate.measured_by_camera` (no re-implementation). `qr-align.sh` fetches it into
+  `--jitter-json` (best-effort — see below).
+- **The audit "arrival floor" is the PRESENT AGE `max(pin, transport)`, NOT the raw transport — so it
+  is only a true transport from an UN-PINNED start.** Pins PERSIST across runs; a prior aligned run
+  leaves them elevated (`{3,66,66,66}`), so run 2+ would read pin-HELD ages, not transports (review 🔴).
+  Hence the **TWO-PHASE RESET (`qr-align.sh` PHASE 0 → `qr_align_pins.py --reset-to-floor` /
+  `reset_pins_to_floor`):** reset every align pin to the floor, settle so the genlock sheds DOWN to the
+  transport, then RE-FETCH the audit (scoped to ONLY the post-settle log lines — the [4g/8]
+  Correction-2 line-count discipline, never a blind `-Tail` that averages `latency_ms` across two pin
+  regimes) so the floors are TRUE transports and the SLOWEST returns to pin 3 EVERY run (the owner's
+  floor-3 doctrine, preserved). The `win_ssh_run` fetches are `timeout`-bounded (win-ssh-exec.sh's own
+  doc: the caller must bound it). `QR_ALIGN_RESET_SETTLE_S` / `QR_ALIGN_AUDIT_WINDOW_S` tune the waits.
+- **`floor_aware_pins(arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins)`:** the slowest
+  (min-delta) camera → `floor_ms` (inert, stays at its natural floor); every faster camera →
+  `max(floor_ms, round(arrival_floor_i + pure_delta_i))` (its floor + the PURE present-age hold it must
+  add — `deltas` come from `round_deltas` over ZERO pins so the cross-clock offset still cancels; the
+  `max(floor_ms, …)` clamp never emits a sub-floor pin), which sits ABOVE its floor so the genlock-C
+  frame-mover engages. FAILs LOUD per-camera when a target exceeds `max_abs_latency_ms` (94), and when
+  a faster camera has no arrival floor (never a fabricated floor). `current_pins` is a belt-and-suspenders
+  for a DIRECT (no-reset) call: a pin-dominated co-slowest (current_pin ≥ its present age → held by its
+  OWN pin, true transport unobservable below) is NOT torn down to the floor (that would drop it to that
+  lower transport → misaligned); it keeps its pin. On the reset path every pin is at the floor, so this
+  never triggers and the true slowest floors correctly. Pins reach the SLOWEST's NATURAL floor only — no
+  net latency beyond the physical transport, never the rejected deep 90/160/184.
+- **The SPREAD sanity gates the PURE present-age deltas when floors are available** (`sanity_ok(pure_deltas)`),
+  same 66 ms bound — the pin-FOLDED `deltas` over-read by ~the pin elevation from a pinned steady state
+  and would spuriously FAIL a legit drift as a "degraded grabber" (review 🔴); the folded-delta sanity
+  stays for the no-floors fallback (unchanged there).
+- **A PARTIAL audit degrades gracefully, never a hard abort (review 🟡):** if a FASTER camera is missing
+  its floor, `align()` falls back to the (inert-prone) floor+delta plan with a loud warning (the verify
+  re-measure still FAILs a genuine misalignment) — a partial fetch must never be strictly worse than no
+  fetch.
+- **Off-parity attribution splits by which plan ran.** If above-floor pins were applied (jitter JSON
+  present) but the re-measured tail STILL stays off-parity → `floor_aware_stuck_abort_reason` (the
+  genlock-C frame-mover did not engage: its build is not deployed on strih, or the transport floor
+  shifted mid-run). If no arrival floor was available (fallback floor+delta, possibly below-floor) →
+  the pre-fix `hold_inert_abort_reason` (`pins_requiring_more_hold` + `format_pin_apply_report`).
+  Either way parity tolerance is NEVER widened — the run FAILS the owner's same-frame bar. The verify
+  re-measure is the live acceptance instrument; a wrong computed pin still FAILS it.
+- **Best-effort reset+fetch → graceful fallback.** When `qr-align.sh` cannot run the reset+audit
+  (standalone call with no `win_ssh_run`/`PROBE_BIN_DIR`/`OUTDIR`, a reset failure, an unreachable log,
+  no audit lines), the aligner falls back to the (inert-prone) floor+delta plan with a loud WARNING
+  rather than aborting — so a missing audit degrades to the pre-fix behavior, never a hard stop. The
+  normal E2E path runs the reset+fetch for the actual floor-aware fix.
+- **Tier-0:** `arrival_floors_from_jitter`, `floor_aware_pins` (incl. the clamp + don't-tear-down),
+  `floor_aware_stuck_abort_reason`, `reset_pins_to_floor`, and the align() flow (a FIFO-modelling
+  barrier: present_age = max(pin, arrival_floor); pinned-state sanity + partial-audit fallback) are
+  pure/monkeypatched — `tests/python/test_qr_align_pinapply_1161.py`. The `qr-align.sh` two-phase
+  reset+fetch is best-effort bash (verified by `bash -n` + shellcheck + a 3-case reset/arg smoke; the
+  live reset+fetch is supervisor-verified on the rig).

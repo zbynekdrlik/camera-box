@@ -46,7 +46,72 @@ qr_align_run() {
     return 2
   fi
 
+  # #1161 TWO-PHASE reset + audit -> each source's TRUE arrival transport floor, so qr_align_pins.py
+  # can pin each FASTER camera ABOVE its floor (a pin below the floor is structurally inert —
+  # latency = max(pin, transport)). WHY two-phase: the strih genlock audit `latency_ms +
+  # mean_head_skew_ms` is the PRESENT AGE (max(pin, transport)); it equals the TRUE transport only
+  # while the pin sits BELOW it. Pins PERSIST across runs, so a prior aligned run leaves them elevated
+  # and a naive audit would read pin-HELD ages, not transports (review 🔴). PHASE 0: reset every align
+  # pin to the floor; settle so the genlock sheds DOWN to the transport; then fetch the audit scoped
+  # to ONLY the post-settle log lines (the [4g/8] Correction-2 line-count discipline — never a blind
+  # -Tail that averages latency_ms across two pin regimes, review 🟡). The win_ssh_run calls are
+  # `timeout`-bounded (win-ssh-exec.sh's own doc: the caller must bound it; review 🔵). Best-effort
+  # throughout: any hiccup (standalone call with no win_ssh_run/PROBE_BIN_DIR/OUTDIR, reset failure,
+  # unreachable log, no audit lines) skips --jitter-json and qr_align_pins.py falls back to the
+  # inert-prone floor+delta plan with its own loud warning. All on-air strih inputs sit on the
+  # always-active Multiview grid, so the audit fires for them continuously — no preview cycling.
+  # Override with QR_ALIGN_JITTER_JSON (an explicit pre-computed path) for a manual run or a test;
+  # QR_ALIGN_RESET_SETTLE_S (shed) / QR_ALIGN_AUDIT_WINDOW_S (clean-sample accrual) tune the waits.
+  local jitter_json="${QR_ALIGN_JITTER_JSON:-}"
+  if [ -z "$jitter_json" ] && [ -n "${STRIH_USER:-}" ] && [ -n "${PROBE_BIN_DIR:-}" ] \
+      && [ -n "${OUTDIR:-}" ] && command -v win_ssh_run >/dev/null 2>&1; then
+    local _log="$OUTDIR/qr-align-strih-${RUN_ID:-$$}.log"
+    local _jj="$OUTDIR/qr-align-jitter-${RUN_ID:-$$}.json"
+    local _settle="${QR_ALIGN_RESET_SETTLE_S:-15}" _window="${QR_ALIGN_AUDIT_WINDOW_S:-12}"
+    local _newest='Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1'
+    local _rrc=0
+    # PHASE 0: reset every align pin to the floor (so the audit reads TRUE transports), then settle.
+    timeout 120 python3 "$here/qr_align_pins.py" --host "$host" --password "$password" \
+      --sources "$sources" --reset-to-floor >&2 || _rrc=$?
+    if [ "$_rrc" -eq 0 ]; then
+      sleep "$_settle"
+      # Mark the log length AFTER the shed, then let clean post-settle audit lines accrue, then fetch
+      # ONLY those lines (win_ssh_run re-sourced in a timeout-bounded subshell; the PS command rides
+      # an env var to avoid nested-quoting hazards).
+      local _start
+      # `|| true` guards the substitution (review 🔵) -- a bare invocation under set -e would
+      # otherwise abort mid-function on an ssh/pipefail failure.
+      _start="$(_qa_ps="(Get-Content ($_newest)).Count" timeout 60 bash -c \
+        '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
+        "$here" "$STRIH_USER" "$password" "$host" 2>/dev/null | tr -d '[:space:]' || true)"
+      case "$_start" in
+        ''|*[!0-9]*)
+          # A failed/garbled count read must NOT degrade to `-Skip 0` = the WHOLE OBS log: that
+          # re-mixes the PRE-reset pin-held audit lines the two-phase reset exists to separate,
+          # producing regime-mixed garbage floors (review 🟡). Skip the fetch -> floor+delta fallback.
+          echo "WARNING: [qr-align] #1161 could not read the post-settle log line count (ssh flake/timeout); skipping the floor-aware audit to avoid a regime-mixed whole-log fetch — falling back to floor+delta." >&2
+          ;;
+        *)
+          sleep "$_window"
+          if _qa_ps="Get-Content ($_newest) | Select-Object -Skip $_start" timeout 120 bash -c \
+              '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
+              "$here" "$STRIH_USER" "$password" "$host" > "$_log" 2>/dev/null && [ -s "$_log" ] \
+              && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
+              && [ -s "$_jj" ]; then
+            jitter_json="$_jj"
+            echo "[qr-align] #1161 post-reset arrival-floor audit fetched -> $_jj (floor-aware plan enabled)" >&2
+          else
+            echo "WARNING: [qr-align] #1161 could not fetch the post-reset strih genlock audit; the plan falls back to the inert-prone floor+delta — see qr_align_pins.py's own warning." >&2
+          fi
+          ;;
+      esac
+    else
+      echo "WARNING: [qr-align] #1161 pin reset-to-floor failed (rc=$_rrc); skipping the floor-aware audit — the plan falls back to floor+delta." >&2
+    fi
+  fi
+
   local -a args=(--host "$host" --password "$password" --sources "$sources" --execute)
+  [ -n "$jitter_json" ] && args+=(--jitter-json "$jitter_json")
   # #1160: the measure phase is dynamic (measure-to-a-stable-tail), so QR_ALIGN_ROUNDS is now the
   # hard round CAP, and QR_ALIGN_BUDGET_S the wall-clock bound.
   [ -n "${QR_ALIGN_ROUNDS:-}" ]         && args+=(--max-measure-rounds "$QR_ALIGN_ROUNDS")
