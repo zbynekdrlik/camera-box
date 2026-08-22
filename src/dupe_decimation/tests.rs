@@ -2292,3 +2292,185 @@ fn drain_hold_panic_floor_fills_after_max_consecutive_holds_1167() {
         "the floor fill is a COPY (not a drain), so drained counts only the holds before it"
     );
 }
+
+// ── (#1167 v3) PACE the convergence: amortize the skips, never a burst ─────────────────────────
+
+/// (#1167 v3) Result of [`run_over_rate_creep_sim`].
+struct CreepSim {
+    /// The MAX boundary delta between two consecutive EMITs (1 = perfect 60fps cadence; 2 = one
+    /// boundary skipped between emits = a +1 presented-id jump; >= 3 = a +2 FastDrain jump / a burst
+    /// = the cam1 [4i/8align] sawtooth this ticket kills). v3 keeps it <= 2 (single-slot skips only).
+    max_emit_boundary_delta: u64,
+    /// The WORST count of convergence SKIPS (advance-emit-nothing sheds) within any single sliding
+    /// window of [`CONVERGE_SKIP_MIN_GAP_INTERVALS`] emit intervals — the BURST size. v2 lets the
+    /// shallow tail drain as a burst (>= 2); v3 paces it to <= 1 per gap.
+    max_burst_in_gap: u64,
+    /// Total convergence skips post-warmup (proves the machinery engaged — not a no-op pass).
+    skips_total: u64,
+    /// Emitted fps over the whole run (holds near 60 — every slot still filled but for the paced skips).
+    emit_fps: f64,
+}
+
+/// (#1167 v3) Drive the REAL [`DecimationGate::poll`] with a SEND-BOUND over-rate emit loop (the
+/// degrading grabber at `capture_fps` > 60 with the NDI send just under one 60fps interval), single
+/// wall==monotonic==grid clock exactly like the live cam box (NO reconnect offset). The send-bound
+/// loop lets the ~(capture-60) fps surplus CREEP grid lag upward (Drain-HOLDs advance the wall clock
+/// but not the boundary) — the live steady mechanism. On v2 the creep reaches the FastDrain band and
+/// the shallow tail drains as a BURST; v3's paced trickle bleeds it off smoothly. `slack_num`/1000 is
+/// the send cost as a fraction of the emit interval (999 = 0.1% slack = send-bound creep). Dupes are
+/// isolated content-pairs at the over-rate delta (the byte-hash `is_dupe` model — same as
+/// [`run_grid_backlog_sim`]).
+fn run_over_rate_creep_sim(capture_fps: f64, secs: f64, slack_num: u64) -> CreepSim {
+    let cap_int = (1e9 / capture_fps) as u64;
+    let emit_int = 1_000_000_000u64 / 60;
+    let send_cost = emit_int * slack_num / 1000;
+    let shed_cost = 1_000_000u64; // 1 ms (hash only)
+    const MAXQ: usize = 4;
+    const WARMUP_NS: u64 = 8_000_000_000; // establish the takt EMA + settle before measuring
+    let gap_ns = CONVERGE_SKIP_MIN_GAP_INTERVALS * emit_int;
+    let n = (capture_fps * secs) as u64;
+
+    let mut gate = DecimationGate::new();
+    let mut queue: VecDeque<u64> = VecDeque::new(); // capture-monotonic instants
+    let mut next_cap = 0u64;
+    let mut wall = 0u64; // single clock: wall == monotonic == grid
+
+    let over_rate = capture_fps - 60.0;
+    let dupe_period = if over_rate > 0.01 {
+        (capture_fps / over_rate).round() as u64
+    } else {
+        u64::MAX
+    };
+    let (mut next_id, mut prev_id): (u64, u64) = (0, 0);
+
+    let mut emits = 0u64;
+    let mut last_emit_bidx: Option<u64> = None;
+    let mut max_emit_boundary_delta = 0u64;
+    let mut last_skip_wall: Option<u64> = None;
+    let mut skips_total = 0u64;
+    let mut skip_walls: VecDeque<u64> = VecDeque::new();
+    let mut max_burst_in_gap = 0u64;
+
+    loop {
+        while next_cap < n {
+            let cap_ns = next_cap * cap_int;
+            if cap_ns > wall {
+                break;
+            }
+            if queue.len() < MAXQ {
+                queue.push_back(cap_ns);
+            }
+            next_cap += 1;
+        }
+        if queue.is_empty() {
+            if next_cap >= n {
+                break;
+            }
+            wall = next_cap * cap_int;
+            continue;
+        }
+        let cap_ns = queue.pop_front().unwrap();
+        let now = wall;
+
+        let is_dupe = dupe_period != u64::MAX && next_cap % dupe_period == dupe_period - 1;
+        let cid = if is_dupe {
+            prev_id
+        } else {
+            let id = next_id;
+            next_id += 1;
+            id
+        };
+        prev_id = cid;
+        let content_hash = cid.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+
+        let prev_boundary = gate.next_boundary_ns();
+        let emit = gate.poll(now, emit_int, content_hash, true, now, cap_ns);
+        let new_boundary = gate.next_boundary_ns();
+        let advanced = new_boundary.saturating_sub(prev_boundary) / emit_int;
+        let post_warm = now > WARMUP_NS;
+
+        // a convergence SKIP = the boundary advanced but nothing was emitted this poll.
+        if !emit && advanced >= 1 && post_warm {
+            skips_total += 1;
+            if let Some(lw) = last_skip_wall {
+                let _gap = now.saturating_sub(lw); // (min-gap is asserted via max_burst_in_gap below)
+                let _ = _gap;
+            }
+            last_skip_wall = Some(now);
+            skip_walls.push_back(now);
+            while let Some(&front) = skip_walls.front() {
+                if now.saturating_sub(front) >= gap_ns {
+                    skip_walls.pop_front();
+                } else {
+                    break;
+                }
+            }
+            max_burst_in_gap = max_burst_in_gap.max(skip_walls.len() as u64);
+        }
+
+        let mut cost = shed_cost;
+        if emit {
+            cost = send_cost;
+            emits += 1;
+            if let Some(prev) = last_emit_bidx {
+                if post_warm {
+                    max_emit_boundary_delta =
+                        max_emit_boundary_delta.max((new_boundary / emit_int).saturating_sub(prev));
+                }
+            }
+            last_emit_bidx = Some(new_boundary / emit_int);
+        }
+        wall += cost;
+        if next_cap >= n && queue.is_empty() {
+            break;
+        }
+    }
+    CreepSim {
+        max_emit_boundary_delta,
+        max_burst_in_gap,
+        skips_total,
+        emit_fps: emits as f64 / secs,
+    }
+}
+
+#[test]
+fn over_rate_convergence_is_paced_not_bursty_1167() {
+    // (#1167 v3 [red] -> [green]) The v2 fill-every-slot fix held cam1's AVERAGE emit at ~59.94 but
+    // per-5s windows oscillated 300/300/293: at the degrading grabber's ~3.5 fps surplus the grid lag
+    // CREEPS past RETIRE_MAX_LAG_INTERVALS, FastDrain fires and LATCHES, and the whole shallow tail
+    // drains as a BURST of advance-emit-nothing sheds in a fraction of a second -> cam1's presented
+    // frame_id jumps several ahead of its siblings -> [4i/8align] "mutual stability <=1 id" abort.
+    //
+    // v3 PACES the convergence: a steady trickle-drain bleeds the creep off before it reaches the
+    // FastDrain band, and the shared monotonic min-gap budget smears any convergence tail to at most
+    // one single-slot skip per CONVERGE_SKIP_MIN_GAP_INTERVALS. So the presented-id trace becomes
+    // monotone-smooth (a +1 id jump at most) instead of the sawtooth.
+    //
+    // RED before the fix (send-bound creep, 63.5 fps, the REAL poll): max emit-boundary delta = 3 (a
+    // +2 FastDrain jump) and up to 2-3 skips bunch inside one gap window. GREEN after: delta <= 2
+    // (single-slot skips only) and never more than one skip per gap.
+    let s = run_over_rate_creep_sim(63.5, 90.0, 999);
+    assert!(
+        s.skips_total > 0,
+        "the sim must actually exercise the convergence path (over-rate creep); skips={}",
+        s.skips_total
+    );
+    assert!(
+        s.max_emit_boundary_delta <= 2,
+        "v3 must keep every presented-id jump to +1 (single-slot skips only, no +2 FastDrain burst); \
+             max emit-boundary delta {} (v2 bursts to 3)",
+        s.max_emit_boundary_delta
+    );
+    assert!(
+        s.max_burst_in_gap <= 1,
+        "v3 must PACE convergence skips to <= 1 per CONVERGE_SKIP_MIN_GAP_INTERVALS (no burst); \
+             worst burst {} skips in one gap window (v2 bursts to 2-3)",
+        s.max_burst_in_gap
+    );
+    // the emit rate still holds near 60 (every slot filled but for the paced single-slot skips).
+    assert!(
+        s.emit_fps >= 58.0,
+        "the paced convergence must still hold emit above the #666 floor; got {:.2} fps",
+        s.emit_fps
+    );
+}

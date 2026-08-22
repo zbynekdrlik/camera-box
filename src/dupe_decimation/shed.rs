@@ -177,6 +177,38 @@ pub const QUEUE_DEPTH_SANE_MAX_INTERVALS: u64 = 8;
 /// bound), so `8` is unreachable except via a garbage timestamp.
 pub const DRAIN_HOLD_PANIC_FLOOR: u64 = QUEUE_DEPTH_SANE_MAX_INTERVALS;
 
+// ── (#1167 v3) PACE the convergence skips so they never BURST ─────────────────────────────────
+
+/// (#1167 v3) The minimum gap, in whole emit intervals of MONOTONIC time, between two convergence
+/// slot-SKIPS (any boundary-advance-emit-nothing shed: a latched-Retire, a latched-Drain, or the
+/// steady shallow trickle-drain). v2/dev.533 held cam1's AVERAGE emit at 59.94 but windows
+/// oscillated 300/300/293: when the degrading grabber's ~3.5fps surplus creeps grid lag past
+/// [`RETIRE_MAX_LAG_INTERVALS`], FastDrain fires and LATCHES, and the whole shallow tail drains as a
+/// BURST of ~6-7 advance-emit-nothing sheds within a fraction of a second — one 5s window drops to
+/// 293 and cam1's presented-frame_id jumps ~+7 vs its siblings (the [4i/8align] "mutual stability
+/// <=1 id" abort). This SMEARS those skips: at most ONE convergence skip per `30` intervals (500ms
+/// == 2 skips/s cap), so the presented-id never jumps more than +1 at a time and the strih FIFO
+/// re-buffers between skips. `30` (2 skips/s) keeps the worst-case steady emit floor at ~58 fps —
+/// comfortably above the #666 emit-deficit floor (57 fps). Measured on the MONOTONIC clock (a
+/// duration between downstream-visible id jumps), NOT `now_ns`: `now_ns` is DanteSync-phase-STEPPED
+/// (a backward step would freeze convergence during exactly the events that inject lag; a forward
+/// step would grant a free skip coincident with a lag injection). FastDrain itself is deliberately
+/// NOT paced (its +2 deep-backlog drain must converge a genuine reconnect within the 12s bound at the
+/// low dupe rate — verified off-rig); the trickle keeps steady lag below the FastDrain band so
+/// FastDrain essentially never fires in steady state.
+pub const CONVERGE_SKIP_MIN_GAP_INTERVALS: u64 = 30;
+
+/// (#1167 v3) The smallest grid lag (in whole boundary intervals) at which the STEADY (non-
+/// converging) shallow-lag Retire path takes a PACED skip instead of filling — the trickle that
+/// drains the slowly-accumulating shallow lag before it can creep past [`RETIRE_MAX_LAG_INTERVALS`]
+/// and trip a FastDrain BURST. Because steady lag accumulates slowly (well under one interval/s), the
+/// trickle demand is low, so with the [`CONVERGE_SKIP_MIN_GAP_INTERVALS`] budget it fires at most ~1
+/// skip per 5s window (299-300, never a burst). `2` keeps a healthy 60.00 card (never over-rate)
+/// and a lag-0/lag-1 steady over-rate box (dupes DEFER / FILL, no skip) untouched — the trickle only
+/// engages once a real interval of grid lag has built up (off-rig: `2` reliably prevents the
+/// creep→FastDrain burst where `3` let a burst slip through).
+pub const SHALLOW_DRAIN_LAG_MIN: u64 = 2;
+
 /// (#1145 v2) The queue-residence depth of a captured frame, in whole emit intervals: how long the
 /// frame sat between its CAPTURE instant (`capture_mono_ns`, the V4L2 buffer's `CLOCK_MONOTONIC`
 /// timestamp) and the instant the loop PROCESSED it (`now_mono_ns`, `monotonic_clock_ns()`), divided
