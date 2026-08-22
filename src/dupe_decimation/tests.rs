@@ -2499,3 +2499,107 @@ fn over_rate_convergence_is_paced_not_bursty_1167() {
         s.emit_fps
     );
 }
+
+// ── (#1167 v4) under-rate empty-queue STARVATION: bounded last-frame repeat ─────────────────────
+
+/// (#1167 v4) Under-rate STARVATION model driving the REAL [`DecimationGate::poll`]. The sick
+/// grabber captures BELOW 60 fps, so fewer than 60 frames arrive per second and EACH comes from an
+/// EMPTY V4L2 queue (`queue_had_frame = false`: the blocking dequeue genuinely WAITED ~one capture
+/// interval — exactly what `capture_stall::frame_from_nonempty_queue` reads on the live box). Single
+/// wall==mono==grid clock; `now == capture instant` (the loop processed each frame on arrival, the
+/// under-rate has send-slack). `all_unique`: a distinct hash per frame (a live-but-slow source);
+/// `!all_unique`: one constant hash (a FROZEN/wedged painter — every frame a byte-identical dupe).
+/// Returns the total EMIT EVENTS (poll-true PLUS the starvation repeats poll asked main.rs to emit —
+/// exactly the frames main.rs sends), the poll-emit count, the repeat count, the NET #707
+/// boundary-skips (after deducting the intentional fill-advance, mirroring the main.rs #707 wiring),
+/// and the per-5s-window emit-event counts.
+struct StarvationSim {
+    emit_events: u64,
+    poll_emits: u64,
+    repeats: u64,
+    net_skips: u64,
+    windows: Vec<u64>,
+}
+
+fn run_starvation_sim(capture_fps: f64, secs: f64, all_unique: bool) -> StarvationSim {
+    let cap_int = (1e9 / capture_fps) as u64;
+    let emit_int = 1_000_000_000u64 / 60;
+    let n = (capture_fps * secs) as u64;
+    let mut gate = DecimationGate::new();
+    let (mut emit_events, mut poll_emits, mut repeats, mut net_skips) = (0u64, 0u64, 0u64, 0u64);
+    let mut windows: Vec<u64> = Vec::new();
+    let (mut win_events, mut win_start) = (0u64, 0u64);
+    for i in 0..n {
+        let cap_ns = i * cap_int;
+        let now = cap_ns; // UNDER-rate: the loop waited for this frame -> empty queue
+        let queue_had_frame = false;
+        let content_hash = if all_unique {
+            i.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1)
+        } else {
+            0xF00D
+        };
+        let prev_b = gate.next_boundary_ns();
+        let emit = gate.poll(now, emit_int, content_hash, queue_had_frame, now, cap_ns);
+        let next_b = gate.next_boundary_ns();
+        let r = gate.last_poll_starvation_repeats();
+        let s = crate::genlock_pacing::boundary_skip_count(prev_b, next_b, emit_int)
+            .saturating_sub(gate.last_poll_intentional_extra_advance());
+        net_skips += s;
+        repeats += r;
+        let this_events = (emit as u64) + r; // exactly the frames main.rs emits this poll
+        if emit {
+            poll_emits += 1;
+        }
+        emit_events += this_events;
+        win_events += this_events;
+        if now.saturating_sub(win_start) >= 5_000_000_000 {
+            windows.push(win_events);
+            win_events = 0;
+            win_start = now;
+        }
+    }
+    StarvationSim {
+        emit_events,
+        poll_emits,
+        repeats,
+        net_skips,
+        windows,
+    }
+}
+
+#[test]
+fn under_rate_starvation_fills_every_slot_to_hold_60_1167() {
+    // 57.9 fps captured (the live sick-ShadowCast sub-60 wander floor), all-unique, empty queue.
+    // GREEN: bounded last-frame repeats fill the empty-queue slots -> emit holds ~60 (300/window).
+    // RED (pre-fix): poll emits ~57.9/s and asks for ZERO repeats -> ~290/window under-run.
+    let s = run_starvation_sim(57.9, 20.0, true);
+    let rate = s.emit_events as f64 / 20.0;
+    assert!(
+        (59.0..=60.5).contains(&rate),
+        "under-rate starvation must fill every empty-queue slot to hold ~60; got {rate:.2} fps \
+         ({} emit events / 20s, {} poll-emits, {} repeats, windows {:?})",
+        s.emit_events,
+        s.poll_emits,
+        s.repeats,
+        s.windows
+    );
+    assert!(
+        s.repeats > 0,
+        "the fill must come from starvation last-frame repeats; got {} repeats",
+        s.repeats
+    );
+}
+
+#[test]
+fn under_rate_starvation_never_skips_a_slot_1167() {
+    // Every empty-queue boundary is FILLED (a repeat), so the #707 resync never fires and the net
+    // boundary-skip count — after deducting the intentional fill-advance, exactly the main.rs #707
+    // wiring — is 0. RED (pre-fix): the accumulating grid lag trips the #131 resync -> tens of skips.
+    let s = run_starvation_sim(57.9, 20.0, true);
+    assert_eq!(
+        s.net_skips, 0,
+        "under-rate starvation must not leave a skipped (un-emitted) 60fps slot; got {} net #707 \
+         skips (windows {:?})",
+        s.net_skips, s.windows
+    );
+}

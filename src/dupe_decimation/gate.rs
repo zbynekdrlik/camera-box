@@ -126,6 +126,15 @@ pub struct DecimationGate {
     /// inherently depth-1 (no saved-up-burst path), and ALL skip sites share this one field so they
     /// cannot re-compose the burst between them.
     last_converge_skip_mono_ns: u64,
+    /// (#1167 v4) How many STARVATION last-frame repeats the MOST RECENT [`poll`](Self::poll) asks
+    /// `main.rs` to emit — how many empty-queue 60fps boundaries passed with NO capture to fill them
+    /// (an UNDER-rate dip, `queue_had_frame == false`), each to be filled by re-emitting the current
+    /// GOOD frame so emit holds 60. `main.rs` reads it via
+    /// [`last_poll_starvation_repeats`](Self::last_poll_starvation_repeats) and, because a repeat is a
+    /// FILLED boundary (not a sick-leg SKIP), it is ALSO folded into
+    /// [`last_poll_intentional_extra_advance`](Self::last_poll_intentional_extra_advance) so a filled
+    /// slot is deducted from the #707 boundary-skip diagnostic. Reset to 0 at the start of every poll.
+    last_poll_starvation_repeats: u64,
 }
 
 impl DecimationGate {
@@ -147,7 +156,17 @@ impl DecimationGate {
     /// is never miscounted as an un-emitted-content boundary SKIP (the sick-leg / clock-step signal
     /// `leg-health-guard.sh` hard-fails on). Read it right after `poll`, alongside `next_boundary_ns`.
     pub fn last_poll_intentional_extra_advance(&self) -> u64 {
-        self.last_poll_fast_drain_extra
+        self.last_poll_fast_drain_extra + self.last_poll_starvation_repeats
+    }
+
+    /// (#1167 v4) How many STARVATION last-frame repeats the MOST RECENT [`poll`](Self::poll) asks
+    /// `main.rs` to emit for this frame — empty-queue 60fps boundaries that an UNDER-rate capture dip
+    /// left unfilled. `main.rs` re-emits the current GOOD frame this many times (with distinct per-slot
+    /// timecodes) BEFORE emitting the current frame, so emit holds 60 across the grabber's sub-60
+    /// wander. `0` when the source is keeping pace (or over-rate — that regime is v2/v3's). Read it
+    /// right after `poll`, alongside `next_boundary_ns` / `last_poll_intentional_extra_advance`.
+    pub fn last_poll_starvation_repeats(&self) -> u64 {
+        self.last_poll_starvation_repeats
     }
 
     /// (#1145 round 3) Stage this frame's luma signature lattice ([`dupe_content_sig`]'s second
@@ -378,6 +397,9 @@ impl DecimationGate {
         // (#1145 v2.1) reset the per-poll intentional-extra-advance accounting; only the FastDrain
         // arm sets it (see the field doc — it keeps a fast-drain out of the #707 skip diagnostic).
         self.last_poll_fast_drain_extra = 0;
+        // (#1167 v4) reset the per-poll starvation-repeat count; only the Emit arm sets it (an
+        // under-rate empty-queue fill — see the field doc).
+        self.last_poll_starvation_repeats = 0;
         // (#1145 v2) fold the capture takt + measure this frame's monotonic queue residence.
         self.note_capture_takt(capture_mono_ns);
         let sustained_over_rate = self.sustained_over_rate();
