@@ -76,7 +76,7 @@ pub fn parse_display_mode(s: &str) -> Result<ModeOverride, String> {
     if width == 0 || height == 0 {
         return Err(format!("display mode '{s}': width and height must be > 0"));
     }
-    if !(refresh_hz.is_finite() && refresh_hz > 0.0) {
+    if !refresh_hz.is_finite() || refresh_hz <= 0.0 {
         return Err(format!(
             "display mode '{s}': refresh must be a positive number of Hz"
         ));

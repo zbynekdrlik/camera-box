@@ -119,11 +119,20 @@ struct Args {
     /// golden-reference runs: zero hardware in the loop.
     #[arg(long)]
     synth_ndi: Option<String>,
-    /// Canvas size for --synth-ndi (the fb path is fixed 1920x1080)
+    /// Canvas width (the painter/synth-ndi canvas; overridable as a whole via --display-mode)
     #[arg(long, default_value_t = 1920)]
     canvas_w: u32,
+    /// Canvas height (see --canvas-w)
     #[arg(long, default_value_t = 1080)]
     canvas_h: u32,
+    /// #1179: explicit HDMI display-mode override "WxH@RR" (e.g. "2560x1080@100" — the
+    /// LG 34U511A-B native max, issue 881's experiment without a 120 Hz monitor swap). Overrides
+    /// the canvas to WxH, scales the dual-QR proportionally from the 1920/700 baseline, and hands
+    /// RR (Hz, fractional OK) to pick_mode as the mode-SELECTION target. Omitted ⇒ byte-identical
+    /// to today (canvas from --canvas-w/-h, 60.000 Hz selection). A non-60 Hz mode is honestly
+    /// reported NOT 1:1 phase-locked (100 is not an integer multiple of the 60 fps capture).
+    #[arg(long)]
+    display_mode: Option<String>,
     /// #188/#984: emit the QR-based (QPSK, norihiro-compatible) A/V-sync audio marker on the cam2
     /// HDMI audio output at the marker cadence. The emitted (index, frame_id, emit_ts_ns) rows are
     /// written to --marker-log so recording-verdict can pair a decoded audio index → its dual-QR
@@ -264,6 +273,24 @@ fn main() -> Result<()> {
         args.duration_secs
     );
 
+    // #1179: resolve the optional --display-mode override into the canvas params + the
+    // mode-SELECTION refresh. With NO override this is byte-identical to today: the CLI canvas/qr
+    // defaults and the 60.000 Hz capture rate as the selection target. With an override the canvas
+    // follows WxH, the QR scales proportionally from the 1920 baseline, and RR feeds pick_mode.
+    let display_override = match args.display_mode.as_deref() {
+        Some(s) => {
+            Some(camera_box::painter_mode::parse_display_mode(s).map_err(anyhow::Error::msg)?)
+        }
+        None => None,
+    };
+    let resolved_canvas = camera_box::painter_mode::resolve_canvas(
+        display_override,
+        args.canvas_w,
+        args.canvas_h,
+        args.qr_size,
+        camera_box::probe::kms::TARGET_REFRESH_MHZ,
+    );
+
     let cfg = RunConfig {
         mode,
         run_id,
@@ -274,9 +301,10 @@ fn main() -> Result<()> {
         duration: Duration::from_secs(args.duration_secs),
         paint_fps,
         capture_fps: args.capture_fps,
-        canvas_w: args.canvas_w,
-        canvas_h: args.canvas_h,
-        qr_size: args.qr_size,
+        canvas_w: resolved_canvas.canvas_w,
+        canvas_h: resolved_canvas.canvas_h,
+        qr_size: resolved_canvas.qr_size,
+        mode_refresh_mhz: resolved_canvas.mode_refresh_mhz,
         freeze_periods: args.freeze_periods,
         connect_timeout_secs: args.connect_timeout_secs,
         settle_ms: args.settle_ms,

@@ -66,6 +66,13 @@ pub struct PaintParams {
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub qr_size: u32,
+    /// #1179: the mode-SELECTION refresh (milli-Hz) handed to `pick_mode` when opening the KMS
+    /// presenter. Default `TARGET_REFRESH_MHZ` (60_000) selects exactly today's mode; an override
+    /// (e.g. 100_000 for the 2560×1080@100 experiment) selects the higher-refresh mode. It is the
+    /// SELECTION target only — `is_phase_lockable` still measures the 1:1 lock against the fixed
+    /// 60 fps capture rate, so a non-60 Hz run is honestly reported NOT phase-locked. Ignored by the
+    /// fbdev presenter (which paces on `--paint-fps`).
+    pub mode_refresh_mhz: u32,
     /// Clock domain stamped into each frame's `gen_ts_ns`. `false` (default) ⇒
     /// the shared monotonic `Instant` — correct for Phase-1 single-box loopback
     /// where painter+reader share one process clock. `true` ⇒ CLOCK_REALTIME
@@ -277,6 +284,7 @@ pub fn run_painter(
         &params.drm_device,
         params.canvas_w,
         params.canvas_h,
+        params.mode_refresh_mhz,
     )?;
     // #936 review follow-up: seed the heartbeat the INSTANT open_presenter() succeeds, before the
     // paint loop even starts. open_presenter() (device open, acquire_master_lock, connector/mode
@@ -418,6 +426,7 @@ mod tests {
             canvas_w: 64,
             canvas_h: 64,
             qr_size: 32,
+            mode_refresh_mhz: crate::probe::kms::TARGET_REFRESH_MHZ,
             wall_clock: false,
             dual_qr: false,
             colour_scale: false,
@@ -561,6 +570,55 @@ mod tests {
              identical across the tick where only the right half changes — a capture straddling \
              this refresh boundary must read the same bits either side of the seam"
         );
+    }
+
+    /// #1179: the dual-QR must still encode→render→decode cleanly at the 2560×1080 override canvas
+    /// with the proportionally-scaled QR (700 → 933). The half positions are `canvas_w/2`-relative
+    /// in `render_qr_dual_bgra`, so they auto-scale; only `qr_size` changes. Decoded via the SAME
+    /// production path (`decode_qr_luma_all`, through the test's `decode_payload` helper) the
+    /// recording verdict uses — a real-captured-frame fixture is deferred to adoption time.
+    #[test]
+    fn dual_qr_round_trips_at_the_scaled_2560_canvas_geometry_1179() {
+        let (w, h) = (2560u32, 1080u32);
+        let qr =
+            crate::painter_mode::scaled_qr_size(700, crate::painter_mode::BASELINE_CANVAS_W, w);
+        assert_eq!(qr, 933, "scaled QR px for a 2560-wide canvas");
+        let mut p = CapturingPresenter {
+            dims: (w, h),
+            last: None,
+        };
+        let mut params = test_params();
+        params.dual_qr = true;
+        params.canvas_w = w;
+        params.canvas_h = h;
+        params.qr_size = qr;
+        let start = Instant::now();
+        let mut vernier = VernierGenTs::default();
+        // tick 4 → vernier_ids(4) = (4, 3): left=4 (fresh), right=3 (settled). Both halves must
+        // decode to their own payloads from the scaled-geometry render.
+        let (logical_id, gen, _) =
+            paint_one_frame(&mut p, &params, start, 0, 4, &mut vernier).unwrap();
+        assert_eq!(
+            logical_id, 4,
+            "dual-QR logical id is the freshly-painted (max) half"
+        );
+        let bgra = p.last.clone().unwrap();
+        assert_eq!(
+            bgra.len(),
+            (w * h * 4) as usize,
+            "canvas is the full 2560×1080 BGRA frame"
+        );
+
+        let left = decode_payload(&bgra, w, h, 4);
+        let right = decode_payload(&bgra, w, h, 3);
+        assert_eq!(left.run_id, params.run_id);
+        assert_eq!(left.frame_id, 4);
+        assert_eq!(
+            left.gen_ts_ns, gen,
+            "the fresh left half carries this tick's gen_ts_ns"
+        );
+        assert_eq!(right.run_id, params.run_id);
+        assert_eq!(right.frame_id, 3);
     }
 
     #[test]

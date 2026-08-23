@@ -25,6 +25,11 @@ pub struct RunConfig {
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub qr_size: u32,
+    /// #1179: the mode-SELECTION refresh (milli-Hz) for the KMS presenter's `pick_mode` — 60_000
+    /// (the capture rate) by default = today's mode; overridable via `--display-mode` (e.g.
+    /// 100_000 for the 2560×1080@100 experiment). SELECTION only; the 1:1 phase-lock check stays
+    /// against the fixed 60 fps capture.
+    pub mode_refresh_mhz: u32,
     pub freeze_periods: f64,
     pub connect_timeout_secs: u32,
     /// Frames painted within this window of the run end are excluded from the
@@ -201,6 +206,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             canvas_w: cfg.canvas_w,
             canvas_h: cfg.canvas_h,
             qr_size: cfg.qr_size,
+            mode_refresh_mhz: cfg.mode_refresh_mhz,
             // Phase-1 single-box loopback: painter + reader share THIS process's
             // monotonic clock, so latency is exact without any sync. A wall-clock
             // gen here would break that — force monotonic regardless of cfg.
@@ -320,6 +326,7 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             canvas_w: cfg.canvas_w,
             canvas_h: cfg.canvas_h,
             qr_size: cfg.qr_size,
+            mode_refresh_mhz: cfg.mode_refresh_mhz,
             // Multi-node (#7): stamp gen_ts on the DanteSync wall clock when asked
             // so the dev1 endpoint tap's wall-clock recv − this gen is true
             // absolute latency. Defaults false (Phase-2 relative latency only).
