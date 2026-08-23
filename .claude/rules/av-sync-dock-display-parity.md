@@ -62,3 +62,23 @@ offset=... matched=... mad=` lines ARE the characterization; mine their distribu
 win-stream-snv MCP, not ssh) from `$env:APPDATA\obs-studio\logs\<latest>.txt`. Any live-dock-constant
 change is a VALUE seam mirrored byte-for-byte in `camera-box-audio.hpp` (`CB_CLUSTER_TOL_MS` etc.) +
 the ~150min genlock vendored-OBS build — high cost for a monitor whose precision gates nothing.
+
+## The dock's lock/offset display is DECODED-MARKER-driven — an "input gone" state needs a SEPARATE counter-advance detector (#1177)
+`cb_lock_state` (the diag `locked=`), the dock's `statusLabel`, and `latencyDisplay` are updated
+ONLY inside `st_raw_audio_camera_box`'s per-marker loop, via `cb_lock_audit.push(est)` transitions —
+so EVERY unlock / no-signal path is driven by a DECODED audio marker. When the measurement INPUT
+itself disappears (EVENT mode: cam2 QPSK marker + dual-QR off), `markers` is empty on every audio
+callback, the loop body never runs, no `Unlocked`/`signal_lock_state_changed(false)` ever fires, and
+the last locked offset (+ `locked=yes`) is held for hours — an operator reads a frozen number as a
+live A/V-sync measurement. **So any "the instrument is blind" condition CANNOT be surfaced from a
+marker-driven path — it needs a detector that watches whether the decode COUNTERS advance, not one
+that waits for a decoded marker (which by definition can't arrive when the input is what went away).**
+`DockInputStaleness` (Rust) / `CbDockInputStaleness` (`camera-box-audio.hpp`) is that seam: fed the
+#690 diag heartbeat's `video_decoded` + `crc_ok` once per ~10s diag tick (the audio thread keeps
+ticking in EVENT mode even though the counters do not), it flips STALE after `CB_DOCK_INPUT_STALE_NS`
+(30s) of no advance and recovers on any advance. It surfaces via the diag line's `state=LIVE|STALE`
+token, a one-shot `av-sync-dock: measurement input LOST -> STALE` blog() line, the NEW
+`sync_stale_changed(bool)` OBS signal (distinct from `lock_state_changed`, which is marker-driven),
+and the dock's `Status.Stale` + greyed/labelled `latencyDisplay`. It is a parity-mirrored seam like
+the rest of this file — move both sides + the `camera-box-selftest.cpp` CHECK in lockstep. Purely a
+display-layer classifier; it never touches the demod, the cluster, or the gate.
