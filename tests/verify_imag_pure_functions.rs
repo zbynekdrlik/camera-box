@@ -291,6 +291,51 @@ if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#,
     assert_eq!(out.trim(), "NO", "empty thread list must fail: {out:?}");
 }
 
+/// #1183: `ps -L -o psr= -C obs` RIGHT-PADS its single column to the widest value's width, so a
+/// healthy box's REAL output is "  6" / " 11" (verified `cat -A`: "  6$"), NOT the bare "6" the
+/// pre-#1183 `^[0-9]+$` greps assumed. Padded lines matched ZERO -> total=0 -> the function
+/// false-FAILED on a perfectly healthy box. This proves the padded REAL format is tolerated, and
+/// that a genuine pileup STILL fails even when padded (normalisation must not weaken the bound).
+#[test]
+fn imag_obs_thread_concentration_ok_tolerates_space_padded_psr_output_1183() {
+    // A HEALTHY spread, each core number RIGHT-PADDED to width 3 exactly as `ps -L -o psr=` emits
+    // it on a box whose highest core is two digits: "  6" (2 leading spaces) ... " 11" (1 space).
+    // 12+10+14+16+9+11 = 72 threads across 6 cores, max 16 -> 16/72 = 22% (well under the 60% bound).
+    let padded: String = std::iter::repeat_n("  6\n", 12)
+        .chain(std::iter::repeat_n("  7\n", 10))
+        .chain(std::iter::repeat_n("  8\n", 14))
+        .chain(std::iter::repeat_n("  9\n", 16))
+        .chain(std::iter::repeat_n(" 10\n", 9))
+        .chain(std::iter::repeat_n(" 11\n", 11))
+        .collect();
+    let (code, out, err) = run_sourced(&format!(
+        r#"LIST="{padded}"
+if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "YES",
+        "space-padded `ps -L -o psr=` output (the REAL format) must be tolerated, not false-FAIL: {out:?}"
+    );
+
+    // A genuine single-core pileup must STILL fail even when padded -- normalisation strips the
+    // padding, it does not weaken the concentration bound. 60 of 72 on core "  8" -> 83% > 60%.
+    let padded_pileup: String = std::iter::repeat_n("  8\n", 60)
+        .chain(std::iter::repeat_n(" 11\n", 12))
+        .collect();
+    let (code, out, err) = run_sourced(&format!(
+        r#"LIST="{padded_pileup}"
+if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "NO",
+        "a padded single-core pileup must still FAIL -- padding-normalisation must not weaken the bound: {out:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // (e) display-manager -> lightdm + autologin; gdm3 absent
 // ---------------------------------------------------------------------------------------------
@@ -462,6 +507,46 @@ fn imag_obs_log_catches_the_824_version_mismatch_regression() {
         vec!["NO", "NO"],
         "the #824 regression (obs-websocket refused, no genlock tick without websocket) must be \
          caught, not silently pass: {out:?}"
+    );
+}
+
+/// #1183: OBS logs carry raw invalid-UTF-8 bytes (DistroAV mojibake). In a UTF-8 locale, GNU grep
+/// WITHOUT `-a` fails to match a marker that IS present. The fix adds `-a` + `LC_ALL=C` so matching
+/// is deterministic byte-literal regardless of ambient locale or embedded invalid bytes. The
+/// fixture embeds a real invalid-byte sequence (`\x83?\xdd` on the distroav line, `\xe2\x82` in the
+/// genlock marker's `.*` gap) alongside genuine marker lines; `export LC_ALL=C.UTF-8` makes the
+/// pre-fix miss deterministic on any runner (the fixed function carries its OWN `LC_ALL=C`, which
+/// overrides this for the actual match, so the GREEN direction is locale-independent).
+#[test]
+fn imag_obs_log_matchers_survive_invalid_utf8_bytes_1183() {
+    let (code, out, err) = run_sourced(
+        r#"export LC_ALL=C.UTF-8
+LOG="$(printf 'info: [obs-websocket] Server started successfully\ninfo: [distroav] plugin loaded (full NDI features) \x83?\xdd (version 6.3.2)\ninfo: NDI library initialized\ninfo: genlock: wall-clock-slaved \xe2\x82render tick ENABLED (latency = 3 ms)\n')"
+if imag_obs_log_shows_genlock_tick "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_no_version_mismatch "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_shows_distroav_loaded "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_shows_ndi_loaded "$LOG"; then echo YES; else echo NO; fi"#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "YES", "YES", "YES"],
+        "invalid-UTF-8 bytes in the log must not suppress a marker match (#1183): {out:?}"
+    );
+
+    // The #824 'compiled with newer libobs' mismatch must STILL be caught when invalid bytes sit in
+    // the SAME log -- the -a/LC_ALL=C audit fix must not blind the negative check either.
+    let (code, out, err) = run_sourced(
+        r#"export LC_ALL=C.UTF-8
+LOG="$(printf 'warning: [distroav] recv \x83?\xdd frame\nwarning: Module obs-websocket.so \xe2\x82compiled with newer libobs 32.2\n')"
+if imag_obs_log_no_version_mismatch "$LOG"; then echo YES; else echo NO; fi"#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "NO",
+        "the #824 'compiled with newer libobs' mismatch must be caught despite invalid bytes (#1183): {out:?}"
     );
 }
 
