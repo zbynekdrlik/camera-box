@@ -97,6 +97,13 @@ struct FbFixScreenInfo {
 
 /// Double-buffered, vsync-flipping framebuffer presenter.
 pub struct VsyncFb {
+    /// #1186: the fbdev device path (e.g. `/dev/fb0`) this presenter writes,
+    /// stashed so `Drop` can blank it on teardown — the fbdev-fallback sibling of
+    /// `KmsPresenter`'s #660 blank. Unlike KMS (which hands the CRTC back to fbdev
+    /// emulation), `VsyncFb` writes this device DIRECTLY, so a dropped painter
+    /// otherwise leaves its last frame scanned out on the monitor with nothing to
+    /// clear it.
+    device: String,
     file: File,
     width: u32,
     height: u32,
@@ -191,6 +198,7 @@ impl VsyncFb {
         }
 
         Ok(Self {
+            device: device.to_string(),
             file,
             width,
             height,
@@ -266,12 +274,32 @@ impl VsyncFb {
     }
 }
 
+impl Drop for VsyncFb {
+    /// #1186: blank the fbdev device on teardown — the fbdev-fallback sibling of
+    /// `KmsPresenter`'s #660 `Drop` blank. `VsyncFb` writes `self.device`
+    /// DIRECTLY (it IS the scanned-out fbdev), so a dropped painter — a clean
+    /// `--duration-secs` self-exit OR a signal-driven stop that #1186 turned into
+    /// a clean loop break + return — otherwise leaves its last painted frame on
+    /// cam2's HDMI monitor with nothing to clear it. `blank_fbdev` re-opens the
+    /// device (a second handle is fine; `self.file` is still open here, dropped
+    /// only after this method returns) and re-reads the LIVE geometry, so it
+    /// blanks whichever page is currently visible (single- or double-buffered).
+    /// Best-effort — log-and-continue, never panic in `Drop`.
+    fn drop(&mut self) {
+        if let Err(e) = blank_fbdev(&self.device) {
+            tracing::warn!("VsyncFb: blank {} on teardown failed: {:?}", self.device, e);
+        }
+    }
+}
+
 /// #660: write an all-zero (black) frame into `device`'s CURRENTLY visible page,
 /// so a caller handing control of the CRTC back to another display client (the
 /// kernel's fbdev-emulation helper — see `crate::probe::kms::KmsPresenter`'s
 /// `Drop`) reveals a KNOWN black screen, never whatever ARBITRARILY OLD content
-/// (a prior `VsyncFb` run, or camera-box's own `--display` module's last frame)
-/// happened to still be sitting in the device's memory. `KmsPresenter` never
+/// (camera-box's own `--display` module's last frame, or — pre-#1186 — a prior
+/// `VsyncFb` run; since #1186 `VsyncFb` self-blanks in its own `Drop` via this
+/// same function) happened to still be sitting in the device's memory.
+/// `KmsPresenter` never
 /// touches this device itself (it drives the CRTC through its own separate DRM
 /// dumb buffers), so nothing else clears it between painter runs — see
 /// `crate::fb_blank` for the full incident writeup.
