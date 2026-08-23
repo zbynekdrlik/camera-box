@@ -169,3 +169,44 @@ The live wrong-source cure is NOT offline-verifiable (vendored receive path comp
 the reshuffle reproduces only live) — the offline gate proves the DECISION logic; the actual cure
 is confirmed by the supervisor's post-deploy rig verification. NOT in scope for #1180: the NIC
 hardware root cause (separate owned lane) and Studio Monitor on the TVs (stock NewTek code).
+
+### #1181 — SENDER-side port-map stability: operator doctrine + a dev1 baseline watchdog (stock-receiver protection)
+
+**Operator doctrine — adding/removing a dedicated NDI output mid-session reshuffles the NEXT
+restart's port map, so it needs a controlled restart + a baseline re-capture.** Because libndi
+assigns sender ports in CREATION ORDER (above), the moment you ADD or REMOVE ANY dedicated NDI
+output (a `2ME`/main output, or a per-source `ndi_filter` republish like `Grading`) on strih/stream
+DURING a running session, the saved-state creation order no longer matches the running order — so
+the sender port map is deterministic on a CLEAN restart but will RESHUFFLE the first time OBS
+restarts after your change. Stock NDI Studio Monitor on the building TVs (which we cannot patch)
+reconnects by cached port and would then show the WRONG sender. So after ANY such add/remove:
+schedule a CONTROLLED OBS restart OFF-PRODUCTION so every stock receiver re-pins to the new map,
+confirm the TVs show the right sources, and RE-CAPTURE the checked-in baseline
+(`scripts/ndi-portmap-audit.sh --capture`, committed in a PR). Never leave a live-added output to
+reshuffle silently at the next unplanned restart (that is exactly the 2026-08-23 P0 sequence).
+
+**dev1 baseline watchdog (the sender-side prevention layer, ships DISABLED).**
+`scripts/ndi-portmap-alert-watchdog.sh` (5-min dev1 timer, reusing the shared
+`scripts/lib/obs-watchdog-decision.sh` confirm/throttle like every issue-1001-family watchdog) runs
+`scripts/ndi-portmap-audit.sh --check`, which reads the live mDNS map (`avahi-browse -rtp
+_ndi._tcp`), isolates the STRIH-SNV OBS instance by the mDNS-hostname group of the anchor program
+sender (`STRIH-SNV (2ME PGM)` — this EXCLUDES the separate Arena/CG-bridge Spout at the same IP,
+whose port never participates in the OBS reshuffle), and diffs it against the checked-in
+`scripts/ndi-portmap-baseline.json`. A CONFIRMED moved port fires ONE Slovak Discord alert naming
+the affected senders + the operator action above (re-open the stock receivers; re-capture if the
+change was intentional). The pure map-diff (`scripts/lib/ndi-portmap-health.sh`) is Tier-0-testable
+offline (avahi `-p` `\DDD` DECIMAL escapes, hostname-group isolation, OK/MOVED/ABSENT/UNSET →
+CHANGED-only-on-MOVED), fed a `NDI_PORTMAP_AVAHI_FIXTURE` in tests. An empty/anchor-absent live map
+is a GATHER ERROR (exit 2), never a page — OBS-down/box-reachability is #1001's job. Enable on dev1
+with `systemctl --user enable --now ndi-portmap-alert-watchdog.timer` (units in `systemd/`; DISABLED
+by default per the watchdog fleet convention). This protects the receivers #1180 could not — the
+stock TVs — by making any sender-map change LOUD instead of a silent wrong-source-on-air.
+
+**Investigation (pinning `2ME PGM` to the first port) — a filed follow-up, not done here.** See the
+#1181 investigation comment: DistroAV defers `main_output_init()`/`preview_output_init()` to
+`OBS_FRONTEND_EVENT_FINISHED_LOADING` (`plugin-main.cpp`, `Qt::QueuedConnection`), AFTER the
+scene-collection `ndi_filter` republishes, which is WHY the program/preview outputs land on the HIGH
+ports today. Creating the main output's send at `obs_module_post_load` to grab :5961 is feasible only
+as a genuine vendored refactor (pre-create + reuse the send instance) and carries a real
+early-idle-sender caveat; it is tracked as a standalone CI+rig-validated follow-up, never bundled
+into this cheap-layer lane.
