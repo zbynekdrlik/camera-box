@@ -937,6 +937,24 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('uint64_t no_conn_since_ns = 0;')) {
             Write-Error "ndi-source.cpp: the #1096 no_conn_since_ns disconnect timer is gone -- the no_connections==0 path can no longer arm a fresh-finder reset, so a GRACEFUL cambox restart (clean FIN -> no_conn==0, where #767 never fires) leaves the strih source black. Re-apply the #1096 no-connection recovery"; exit 1
           }
+          # camera-box #1180 (P0 2026-08-23): a BY-URL bind (#1096) never verifies the connected
+          # sender's NAME, so a sender-restart NDI port reshuffle can bind the receiver to the WRONG
+          # sender and frames flow from the wrong camera under the stored label with nothing re-checking
+          # (every "2ME PGM" receiver showed Grading/cam3 live). The fix re-resolves the name via a
+          # FRESH finder once frames flow and forces a BY-NAME reset on a confirmed mismatch. A subtree
+          # pull re-importing stock DistroAV silently drops this (mirrors tests/distroav_by_url_identity_verify_1180.rs).
+          if ($ndi -notmatch [regex]::Escape('static inline bool ndi_by_url_identity_mismatch(')) {
+            Write-Error "ndi-source.cpp: the #1180 ndi_by_url_identity_mismatch decision helper is gone -- a BY-URL receiver never re-validates it is bound to the RIGHT sender, so a reshuffled port shows the wrong camera under the stored label. Re-apply the #1180 identity verify"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('if (!force_by_name_1180 && owned_source_name && owned_source_name[0]) {')) {
+            Write-Error "ndi-source.cpp: the #1180 reset block no longer gates the #1096 fresh-finder BY-URL resolution on !force_by_name_1180 -- a confirmed identity mismatch cannot force a BY-NAME reset and would re-resolve the SAME wrong-sender URL. Re-apply the #1180 force-by-name gate"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180)')) {
+            Write-Error "ndi-source.cpp: the #1180 verify block no longer calls ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180) once frames flow -- a wrong-sender BY-URL bind is never detected. Re-apply the #1180 verify wiring"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('force_by_name_next_reset_1180 = true;')) {
+            Write-Error "ndi-source.cpp: the #1180 verify no longer sets force_by_name_next_reset_1180 = true on a mismatch -- the wrong-sender feed is never corrected. Re-apply the #1180 corrective reset"; exit 1
+          }
           # camera-box #1097: the framesync_create failure branch in the reset path must retry (not
           # break) -- the dormant sibling of #1080 (framesync forced OFF today, but a break there is
           # the SAME permanent, reattach-proof receiver-thread death). It uses its OWN

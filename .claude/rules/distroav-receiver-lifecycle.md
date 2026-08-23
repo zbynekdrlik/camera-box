@@ -4,6 +4,7 @@ paths:
   - "tests/distroav_ndi_reconnect_767.rs"
   - "tests/distroav_recv_create_retry_1080.rs"
   - "tests/distroav_fresh_finder_connect_1096.rs"
+  - "tests/distroav_by_url_identity_verify_1180.rs"
 ---
 
 # DistroAV NDI receiver-thread lifecycle — a `break` is a PERMANENT, reattach-proof death (#1080)
@@ -99,3 +100,72 @@ behaviour-independent) then SET it back (→ `ndi_source_thread_start` with `res
 → fresh issue-1096 finder resolves the live sender). Implemented in `scripts/strih_mv_scenes.py
 reattach()` with a discoverability re-check before the set-back (a vanished source leaves `""` and
 returns NOT_DISCOVERABLE instead of re-pinning a dead name into the issue-795 mangle window).
+
+## #1180 — a sender restart can hand your cached NDI port to a SIBLING sender; a BY-URL connect is name-blind, so verify identity AFTER frames flow
+
+**The port-reshuffle hazard (stock receivers included).** An OBS box that publishes SEVERAL NDI
+outputs (strih: `2ME PGM`, `2ME PVW`, `Grading`, `MULTIVIEW`, interkom …) assigns their ports at
+STARTUP in creation order — the aux `ndi_filter` republishes are created during scene-collection
+load, BEFORE the main outputs start, so on a restart they can grab the lower ports and PUSH a main
+output up. Live P0 (2026-08-23 Sunday service): strih's NIC failed, the operator rebooted, and
+after the OBS restart the ports RESHUFFLED — `STRIH-SNV (2ME PGM)` moved `10.77.9.202:5964` →
+`:5965`, and `STRIH-SNV (Grading)` (a full-screen SINGLE camera, cam3 at the time) INHERITED the
+old `:5964`. **Every receiver that reconnected by CACHED URL latched onto the wrong sender** —
+NDI connect-by-URL does not verify the sender's NAME, so whatever now listens on that port is what
+you get. This hit both stock NDI Studio Monitor on the building TVs (unfixable by us — stock NewTek
+code; the real protection there is the NIC fix + a stable sender set) AND our own #1096 BY-URL
+connect. There is NO hidden "fallback to another source" logic anywhere — the reshuffle + a cached
+URL is the entire mechanism. So: **a cached NDI port is NOT a stable identity across a sender
+restart.** Any code (or any doc reasoning) that trusts a remembered URL/port to still be "the same
+sender" after the sender bounced is wrong; identity lives in the NAME, resolved fresh.
+
+**Why #1096's BY-URL connect NEEDS a post-connect identity check (and #1114's reattach does not).**
+#1096 deliberately connects BY-URL to bypass the poisoned long-lived finder after a sender restart
+— exactly the situation where the reshuffle also happens. Its fresh finder can even serve the DYING
+sender's LAST advertisement (name→old URL) during the reshuffle window, so the resolved URL itself
+can already be the wrong-sender port. And once frames flow, the #767 stale watchdog is SILENCE-based
+(`no_connections>0` + no new frame) — it never fires while the WRONG sender delivers frames happily.
+So a BY-URL bind has a wrong-source lock-in window that nothing else closes.
+
+**The #1180 fix (LANDED, `ndi_source_thread`, `tests/distroav_by_url_identity_verify_1180.rs`).**
+After a BY-URL bind (`connected_by_url_1180`, armed from `url_resolved_1096`) STARTS DELIVERING
+FRAMES (`frames_seen_since_reset_1180`), re-run a bounded FRESH finder (`NDI_IDENTITY_VERIFY_MAX_WAITS`,
+the same create→wait→read→`ndi_find_url_for_source_name`→destroy sequence #1096 uses, never under
+`config_mutex`), resolve the configured name → URL, and feed the pure decision helper
+`ndi_by_url_identity_mismatch(connected_url, resolved_url_for_name)`. It returns MISMATCH ONLY when
+both URLs are known AND differ; NOT-a-BY-URL-bind and name-not-currently-discoverable both return
+false (INCONCLUSIVE — never tear down a working feed on a can't-confirm). On a confirmed mismatch it
+sets `force_by_name_next_reset_1180` and re-arms `reset_ndi_receiver`; the reset block CONSUMES that
+flag (`force_by_name_1180`) to SKIP the fresh-finder BY-URL path and connect BY-NAME (loud
+`#1180 connect BY-NAME` log), abandoning the wrong-sender URL — the same recovery reopening Studio
+Monitor did live. The verify is a **ONE-SHOT, EVENT-DRIVEN per reconnect, NOT a steady-state poll**:
+`identity_verify_pending_1180` fires once at the first frames of a BY-URL bind and is re-armed on
+EVERY reset — and every BY-URL reconnect routes through a reset (the #767 stale rebind, the #1096
+`no_connections==0` rebind, or a config change), which is exactly the reshuffle window. A first draft
+added a 60 s periodic re-verify too, but review caught that it ran a BLOCKING fresh finder (~1 s)
+inside the live frame-pull loop for essentially EVERY genlocked BY-URL input in steady state — a
+fleet-wide ~1 s stall every 60 s that drops NDI recv-queue frames and bursts copies/gaps on the
+tightly-gated zero-loss E2E path. Dropped: the per-reset one-shot IS the event-driven coverage
+(re-verify on the disconnect/reconnect transition) with ZERO steady-state stall. If a wrong-sender
+bind's one-shot is genuinely INCONCLUSIVE at first-frames (our configured name not advertising yet),
+no action is correct then anyway — and the next disconnect/reset re-fires it. Scoped to
+`genlock_source_is_active` (mirrors #767/#1096) — a BY-NAME bind never enters the verify path, so
+its behaviour is byte-identical. `force_by_name_next_reset_1180` is also re-armed in the reset
+block's recv/framesync create-FAILURE branches, so a forced BY-NAME reset that hits a transient
+create failure stays BY-NAME on the #1080 retry instead of silently reverting to BY-URL. The pure
+helper is the std-only lift-compile/truth-table gate; the impure sequence is source-anchored +
+pwsh-mirrored in BOTH `windows-genlock*.yml`.
+
+**Why BY-NAME (not re-BY-URL to the freshly-resolved URL) on the recovery.** Re-connecting BY-URL to
+the just-resolved URL carries the SAME name-blindness risk (that URL can reshuffle/race again);
+BY-NAME is the conservative, self-correcting choice (NDI keeps the receiver pointed at whatever
+currently advertises the name, and its own internal rebind is available) and matches what the
+operator's Studio-Monitor re-pick does. Rejected alternatives: dropping #1096 BY-URL entirely
+re-opens the #1096 restart-wedge; verifying INSIDE the reset block (before connect) doesn't help —
+the reshuffle races the reset, so a second finder sampled at the same instant resolves the same
+stale advertisement. The verify MUST be post-connect, after the sender set has settled.
+
+The live wrong-source cure is NOT offline-verifiable (vendored receive path compiles on CI only,
+the reshuffle reproduces only live) — the offline gate proves the DECISION logic; the actual cure
+is confirmed by the supervisor's post-deploy rig verification. NOT in scope for #1180: the NIC
+hardware root cause (separate owned lane) and Studio Monitor on the TVs (stock NewTek code).
