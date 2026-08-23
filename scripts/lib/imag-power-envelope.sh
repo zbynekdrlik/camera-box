@@ -9,9 +9,16 @@
 # regression is a HARDWARE power clamp. thermald's adaptive DPTF policy programmed the MMIO RAPL
 # PL1 long-term constraint to 25 W (MMIO wins over the decorative MSR 200/80 W values), starving
 # the iGPU to gt_act_freq 600-850 MHz while every software freq knob sat at 1400. At a sustainable
-# 29 W the historic ~5 ms/60fps render class is restored (35 W overheats — TCPU 81->90 C in 8 s).
+# 29 W the historic ~5 ms/60fps render class was restored on the ORIGINAL i5 unit (35 W overheated
+# it — TCPU 81->90 C in 8 s).
 #
-# The durable fix pins MMIO PL1 = 29 W + slpc_ignore_eff_freq = 1 at boot (imag-power-envelope.
+# #1162 hardware re-baseline (live calibration on the REPLACEMENT i7-13620H imag-nb, 2026-08-23):
+# 29 W STARVES this unit's iGPU (150-450 MHz, 74-88 ms/frame). Its sustainable ceiling is 45 W
+# (GPU 1200 MHz, 17-21 ms/frame; ACTUAL package draw plateaus ~36 W at the 93 C chassis thermal
+# ceiling), so the default below is re-baselined 29->45 W for it. The step-down (25 W) + guard
+# thresholds (93/85 C) are unchanged; the guard's thermal step-down stays armed.
+#
+# The durable fix pins MMIO PL1 = 45 W + slpc_ignore_eff_freq = 1 at boot (imag-power-envelope.
 # service, a root oneshot), PURGES thermald (not masks — it is the actor that programmed 25 W; a
 # minimalist appliance purges a competing policy engine, same discipline scripts/lib/timesync-
 # authority.sh enforces for competing clock daemons), and supervises the envelope with a LOUD root
@@ -35,7 +42,7 @@
 # setup-imag.sh (the writer), verify-imag.sh (the acceptance gate) and the guard script all agree.
 # The STRICT drift-guard gate reads its own authority (vendor/README.md `power_pl1_w_imag`); these
 # are the fallbacks a caller uses when it has no README pin in hand. Each is overridable by env.
-: "${IMAG_PL1_W:=29}"              # sustainable long-term MMIO RAPL PL1 (watts)
+: "${IMAG_PL1_W:=45}"              # #1162: sustainable long-term MMIO RAPL PL1 (watts) on the i7-13620H
 : "${IMAG_PL1_STEPDOWN_W:=25}"     # the safe step-down the guard drops to on a thermal excursion
 : "${IMAG_TCPU_STEPDOWN_C:=93}"    # TCPU ceiling (Celsius) — 2 consecutive reads at/above -> step down
 : "${IMAG_TCPU_RESTORE_C:=85}"     # TCPU restore threshold — sustained below -> restore full envelope

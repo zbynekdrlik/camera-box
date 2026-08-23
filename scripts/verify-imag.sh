@@ -114,7 +114,7 @@ set -euo pipefail
 #       was launched directly (bypassing systemctl), leaving Restart=on-failure supervising
 #       nothing; this per-PID cgroup read is the independent proof that cannot be spoofed that way
 #   (u) power/thermal envelope (#1040): the MMIO RAPL PL1 long_term pin matches the provisioned
-#       IMAG_PL1_W (default 29 W) and is enabled; every iGPU slpc_ignore_eff_freq knob reads 1;
+#       IMAG_PL1_W (default 45 W, #1162) and is enabled; every iGPU slpc_ignore_eff_freq knob reads 1;
 #       thermald is PURGED (not installed/active/enabled); BOTH imag-power-envelope.service and
 #       imag-power-envelope-guard.timer are enabled+active; TCPU is below the guard's step-down
 #       ceiling (a reading at/above it means a clamp episode is live); and the guard's journald tag
@@ -1268,7 +1268,7 @@ else
   # acceptance gate and the strict gate never check DIFFERENT wattages after a deliberate re-pin.
   # Fall back to the lib/env default only when the README is unreadable.
   PE_PIN="$(imag_power_pl1_pin_from_readme_text "$(cat "$HERE/../vendor/README.md" 2>/dev/null || true)")"
-  [ -n "$PE_PIN" ] || PE_PIN="${IMAG_PL1_W:-29}"
+  [ -n "$PE_PIN" ] || PE_PIN="${IMAG_PL1_W:-45}"
   while IFS='|' read -r pe_facet pe_status pe_detail; do
     [ -n "$pe_facet" ] || continue
     if [ "$pe_status" = "OK" ]; then

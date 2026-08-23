@@ -1997,7 +1997,8 @@ step 22 "Power/thermal envelope (#1040): purge thermald + pin MMIO RAPL PL1 + sl
 # The imag render regression (issues 799/880/1029/1030) was a HARDWARE power clamp: thermald's
 # DPTF policy programmed the MMIO RAPL PL1 long-term constraint to 25 W, starving the iGPU to
 # gt_act_freq 600-850 MHz while every software freq knob sat at 1400. The durable fix pins PL1 to a
-# sustainable 29 W + slpc_ignore_eff_freq=1 at boot, PURGES thermald (the actor that programmed
+# sustainable 45 W (#1162 re-baseline for the replacement i7-13620H — 29 W starved it; 29 W was the
+# original i5 unit's value) + slpc_ignore_eff_freq=1 at boot, PURGES thermald (the actor that programmed
 # 25 W -- a minimalist appliance purges a competing policy engine, same discipline the sole-
 # timesync-authority gate enforces; PROCHOT stays as the hardware backstop), and supervises the
 # envelope with a LOUD root guard that alerts dev1-side instead of silently degrading. Env knobs
@@ -2041,7 +2042,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-Environment=IMAG_PL1_W=${IMAG_PL1_W:-29}
+Environment=IMAG_PL1_W=${IMAG_PL1_W:-45}
 ExecStart=/usr/local/bin/imag-power-envelope.sh
 RemainAfterExit=yes
 
@@ -2056,7 +2057,7 @@ After=imag-power-envelope.service
 
 [Service]
 Type=oneshot
-Environment=IMAG_PL1_W=${IMAG_PL1_W:-29}
+Environment=IMAG_PL1_W=${IMAG_PL1_W:-45}
 Environment=IMAG_PL1_STEPDOWN_W=${IMAG_PL1_STEPDOWN_W:-25}
 Environment=IMAG_TCPU_STEPDOWN_C=${IMAG_TCPU_STEPDOWN_C:-93}
 Environment=IMAG_TCPU_RESTORE_C=${IMAG_TCPU_RESTORE_C:-85}
@@ -2076,12 +2077,27 @@ AccuracySec=5s
 WantedBy=timers.target
 PE_TMR_EOF
 
+# #1162/#784 self-heal: remove any leftover hand-applied PL1 override drop-in from the live
+# re-baseline. The sustainable wattage is now source-controlled (each unit's Environment= above +
+# the shared lib default), so a lingering .service.d/override.conf hand-fix must NOT persist to MASK
+# a future source re-pin (the #784 lesson, mirroring the #842 grub.d self-heal). Idempotent: absent
+# -> no-op. Runs BEFORE daemon-reload so the base unit's Environment wins on reload.
+for _pe_dropin in \
+    /etc/systemd/system/imag-power-envelope.service.d/override.conf \
+    /etc/systemd/system/imag-power-envelope-guard.service.d/override.conf; do
+    if [ -f "$_pe_dropin" ]; then
+        echo -e "  ${YELLOW}#1162: removing leftover hand-applied PL1 drop-in ${_pe_dropin} — PL1 wattage is source-controlled now (unit Environment= + shared lib default)${NC}"
+        rm -f "$_pe_dropin"
+        rmdir "$(dirname "$_pe_dropin")" 2>/dev/null || true
+    fi
+done
+
 systemctl daemon-reload
 systemctl enable --now imag-power-envelope.service >/dev/null 2>&1 \
     || fail "could not enable imag-power-envelope.service -- the boot power envelope would not be pinned"
 systemctl enable --now imag-power-envelope-guard.timer >/dev/null 2>&1 \
     || fail "could not enable imag-power-envelope-guard.timer -- the envelope would be unsupervised"
-echo "  #1040: thermald purged, PL1=${IMAG_PL1_W:-29}W envelope pinned at boot + supervised by the ~45s guard timer"
+echo "  #1040: thermald purged, PL1=${IMAG_PL1_W:-45}W envelope pinned at boot + supervised by the ~45s guard timer"
 
 step 23 "RemoteOS MCP control-channel agent (#858): provision via the canonical zbynekdrlik/remoteos-mcp installer"
 # The linux-imag-nb MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project

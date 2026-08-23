@@ -6,7 +6,7 @@ set -euo pipefail
 # mirroring imag-igpu-maxperf.service) because sysfs values reset on reboot. It pins the
 # SUSTAINABLE power envelope that keeps the imag 60fps render inside budget:
 #   1. slpc_ignore_eff_freq = 1 on every iGPU gt (glob card*, never a hardcoded cardN).
-#   2. MMIO RAPL PL1 long_term = IMAG_PL1_W watts (default 29), enabled, on the package-0 zone —
+#   2. MMIO RAPL PL1 long_term = IMAG_PL1_W watts (default 45, #1162), enabled, on the package-0 zone —
 #      selected by NAME/constraint IDENTITY, never a hardcoded intel-rapl-mmio index.
 # thermald (which programmed the harmful 25 W) is PURGED by setup-imag.sh; PROCHOT stays as the
 # hardware backstop; imag-power-envelope-guard.timer supervises this envelope loudly at runtime.
@@ -25,7 +25,7 @@ for _cand in \
   [ -r "$_cand" ] && { . "$_cand"; break; }
 done
 
-PL1_W="${IMAG_PL1_W:-29}"
+PL1_W="${IMAG_PL1_W:-45}"
 LOG_TAG="${IMAG_POWER_LOG_TAG:-imag-power-envelope}"
 
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; echo "imag-power-envelope: $*"; }

@@ -30,7 +30,7 @@ if ! declare -F imag_power_guard_decision >/dev/null 2>&1; then
   exit 1
 fi
 
-PL1_W="${IMAG_PL1_W:-29}"
+PL1_W="${IMAG_PL1_W:-45}"
 STEPDOWN_W="${IMAG_PL1_STEPDOWN_W:-25}"
 CEIL_C="${IMAG_TCPU_STEPDOWN_C:-93}"
 RESTORE_C="${IMAG_TCPU_RESTORE_C:-85}"
