@@ -307,7 +307,9 @@ void SyncTestDock::start()
 	// output was just freshly created and has decided nothing yet.
 	if (statusLabel)
 		statusLabel->setText(obs_module_text("Status.Measuring"));
-	// #1177: clear any leftover STALE greying/label from a prior run on (re)start.
+	// #1177: clear any leftover STALE greying/label from a prior run on (re)start, and reset the
+	// remembered pre-stale status so a post-restart recovery never claims a stale "Locked".
+	lastStatusKey = "Status.Measuring";
 	if (latencyDisplay)
 		latencyDisplay->setStyleSheet("");
 
@@ -410,7 +412,8 @@ void SyncTestDock::on_sync_found(sync_index data)
 // the first lock, statusLabel stays on its constructor default ("measuring").
 void SyncTestDock::on_lock_state_changed(bool locked)
 {
-	statusLabel->setText(obs_module_text(locked ? "Status.Locked" : "Status.NoSignal"));
+	lastStatusKey = locked ? "Status.Locked" : "Status.NoSignal"; // #1177: remember for stale-recovery
+	statusLabel->setText(obs_module_text(lastStatusKey));
 }
 
 // #1177: the measurement INPUT itself disappeared (EVENT mode: cam2 QPSK marker + dual-QR off) so
@@ -425,7 +428,10 @@ void SyncTestDock::on_sync_stale_changed(bool stale)
 		latencyDisplay->setStyleSheet("color: gray;");
 		latencyPolarity->setText(obs_module_text("Display.Polarity.Stale"));
 	} else {
-		statusLabel->setText(obs_module_text("Status.Measuring"));
+		// #1177 (review 🔵): restore the TRUE pre-stale status (Locked / NoSignal / Measuring), not a
+		// generic "Measuring" -- the held lock is never dropped in EVENT mode and lock_state_changed
+		// is edge-triggered, so nothing else would correct a "Measuring over a live locked value".
+		statusLabel->setText(obs_module_text(lastStatusKey));
 		latencyDisplay->setStyleSheet("");
 	}
 }
