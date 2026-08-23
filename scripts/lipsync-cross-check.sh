@@ -218,8 +218,9 @@ main() {
   [ -n "$verdict_bin" ] || { echo "FAIL: --verdict-bin is required -- download the CI probe-tools-linux-amd64 artifact's recording-verdict binary (Tier 0: never build --features probe locally)" >&2; exit 2; }
   [ -n "$asset_baseline_ms" ] || { echo "FAIL: --asset-baseline-ms is required -- the pinned lipsync asset has an intrinsic A/V offset (see assets/lipsync/PROVENANCE.md's Baseline section) that must be subtracted before the verdict (930, issuecomment-5153948268)" >&2; exit 2; }
 
-  # issue 1174: emit-cadence attribution (independent of the SyncNet pipeline, so print it now --
-  # even if a recording is missing below -- to keep it visible on the same single command). `|| true`
+  # issue 1174: emit-cadence attribution (independent of the SyncNet pipeline). Placed AFTER the
+  # required-flag checks but BEFORE the recording-file-existence checks, so it still prints if a
+  # recording FILE is missing/unreadable below -- keeping it on the same single command. `|| true`
   # because it is report-only and must never abort the run (the #1133 report-only-helper discipline).
   if [ -n "$lipsync_cadence_log" ]; then
     if [ -r "$lipsync_cadence_log" ]; then
