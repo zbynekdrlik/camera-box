@@ -771,6 +771,35 @@ jobs:
           }
           Write-Output "DistroAV real-wall-clock emit-timecode patch present (genlock_emit_timecode_100ns video via #1009 floor boundary + genlock_wall_now_100ns audio, no synthesize assignment) — OK"
 
+      # camera-box #1185: assert the PGM-first-NDI-port reservation is present in the
+      # vendored DistroAV source BEFORE the 150-min build, so a future `git subtree pull`
+      # (#44) that drops it fails HERE rather than shipping a distroav.dll that lets the
+      # program (2ME PGM) reshuffle onto a high NDI port after an OBS restart (issue 1180 /
+      # issue 1181) — handing stock building TVs the wrong sender for the program. Mirrors
+      # the canonical Linux-CI guard tests/distroav_pgm_first_port_1185.rs (that crate is
+      # Linux-only and cannot compile on this Windows runner). Keep both in lock-step.
+      - name: Assert DistroAV PGM-first-NDI-port reservation present (#1185)
+        shell: pwsh
+        run: |
+          $out = (Get-Content "vendor/distroav/src/ndi-output.cpp" -Raw) -replace '\s+', ' '
+          if ($out -notmatch [regex]::Escape('void ndi_output_reserve_main_sender(')) {
+            Write-Error "ndi-output.cpp: #1185 ndi_output_reserve_main_sender missing — the early port reservation was dropped (PGM-first-port pin reverted)"; exit 1
+          }
+          if ($out -notmatch [regex]::Escape('void ndi_output_release_reserved_main_sender(')) {
+            Write-Error "ndi-output.cpp: #1185 ndi_output_release_reserved_main_sender missing — the unadopted-reservation cleanup was dropped"; exit 1
+          }
+          if ($out -notmatch [regex]::Escape('o->ndi_sender = ndi_output_take_reserved_sender(')) {
+            Write-Error "ndi-output.cpp: #1185 ndi_output_start no longer adopts the reserved main sender — the PGM-first-port pin is not wired into the start path"; exit 1
+          }
+          $pm = (Get-Content "vendor/distroav/src/plugin-main.cpp" -Raw) -replace '\s+', ' '
+          if ($pm -notmatch [regex]::Escape('ndi_output_reserve_main_sender(')) {
+            Write-Error "plugin-main.cpp: #1185 obs_module_post_load no longer reserves the main output NDI port before scene load — reverted"; exit 1
+          }
+          if ($pm -notmatch [regex]::Escape('ndi_output_release_reserved_main_sender()')) {
+            Write-Error "plugin-main.cpp: #1185 obs_module_unload no longer releases an unadopted reserved main sender — reverted"; exit 1
+          }
+          Write-Output "DistroAV PGM-first-NDI-port reservation present (reserve at obs_module_post_load + adopt in ndi_output_start, #1185) — OK"
+
       # #93: assert the NDI source-name use-after-free fix is present in the vendored
       # DistroAV source BEFORE the 150-min build, so a future `git subtree pull` (#44)
       # that reverts it fails HERE rather than shipping a distroav.dll that re-crashes
