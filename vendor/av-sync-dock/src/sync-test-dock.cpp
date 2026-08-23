@@ -276,6 +276,16 @@ void SyncTestDock::cb_lock_state_changed(void *param, calldata_t *cd)
 	QMetaObject::invokeMethod(dock, [dock, locked]() { dock->on_lock_state_changed(locked); });
 }
 
+// #1177: the measurement input went STALE (no marker/QR decode advance) or recovered.
+void SyncTestDock::cb_sync_stale_changed(void *param, calldata_t *cd)
+{
+	auto *dock = (SyncTestDock *)param;
+
+	CD_TO_LOCAL(bool, stale, calldata_get_bool);
+
+	QMetaObject::invokeMethod(dock, [dock, stale]() { dock->on_sync_stale_changed(stale); });
+}
+
 void SyncTestDock::start()
 {
 	OBSOutputAutoRelease o = obs_output_create(OUTPUT_ID, "sync-test-output", nullptr, nullptr);
@@ -297,12 +307,16 @@ void SyncTestDock::start()
 	// output was just freshly created and has decided nothing yet.
 	if (statusLabel)
 		statusLabel->setText(obs_module_text("Status.Measuring"));
+	// #1177: clear any leftover STALE greying/label from a prior run on (re)start.
+	if (latencyDisplay)
+		latencyDisplay->setStyleSheet("");
 
 	auto *sh = obs_output_get_signal_handler(o);
 	signal_handler_connect(sh, "video_marker_found", cb_video_marker_found, this);
 	signal_handler_connect(sh, "audio_marker_found", cb_audio_marker_found, this);
 	signal_handler_connect(sh, "sync_found", cb_sync_found, this);
 	signal_handler_connect(sh, "lock_state_changed", cb_lock_state_changed, this); // #926
+	signal_handler_connect(sh, "sync_stale_changed", cb_sync_stale_changed, this); // #1177
 
 	bool success = obs_output_start(o);
 
@@ -381,6 +395,9 @@ void SyncTestDock::on_sync_found(sync_index data)
 	camerabox::CbLatencyDisplay disp =
 		camerabox::cb_dock_latency_display_ms(dock_native_ts_ns, data.gate_convention);
 	latencyDisplay->setText(QStringLiteral("%1 ms").arg(disp.display_ms, 2, 'f', 1));
+	// #1177: a fresh sync_found is a genuinely LIVE value -- clear any STALE greying immediately
+	// (the diag-tick RecoveredLive transition may lag this by up to one ~10s interval).
+	latencyDisplay->setStyleSheet("");
 	indexDisplay->setText(QStringLiteral("%1").arg(data.index));
 	if (disp.polarity == camerabox::CbLatencyPolarity::Positive)
 		latencyPolarity->setText(obs_module_text("Display.Polarity.Positive"));
@@ -394,6 +411,23 @@ void SyncTestDock::on_sync_found(sync_index data)
 void SyncTestDock::on_lock_state_changed(bool locked)
 {
 	statusLabel->setText(obs_module_text(locked ? "Status.Locked" : "Status.NoSignal"));
+}
+
+// #1177: the measurement INPUT itself disappeared (EVENT mode: cam2 QPSK marker + dual-QR off) so
+// the decode counters stopped advancing -- distinct from lock_state_changed above, which is driven
+// by a DECODED marker and so can NEVER fire when the input is exactly what went away. Show an
+// explicit STALE / NO-SIGNAL status and grey + label the frozen offset so an operator reads it as
+// "not live", never as a current measurement. A later sync_found (input resumed) clears the greying.
+void SyncTestDock::on_sync_stale_changed(bool stale)
+{
+	if (stale) {
+		statusLabel->setText(obs_module_text("Status.Stale"));
+		latencyDisplay->setStyleSheet("color: gray;");
+		latencyPolarity->setText(obs_module_text("Display.Polarity.Stale"));
+	} else {
+		statusLabel->setText(obs_module_text("Status.Measuring"));
+		latencyDisplay->setStyleSheet("");
+	}
 }
 
 // #926: poll CAMERA_BOX_ASRC_SOURCE_NAME's current ASRC state/numbers and paint the section.

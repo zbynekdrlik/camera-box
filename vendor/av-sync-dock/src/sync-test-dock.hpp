@@ -77,11 +77,13 @@ private:
 	void on_audio_marker_found(audio_marker_found_s data);
 	void on_sync_found(sync_index data);
 	void on_lock_state_changed(bool locked); // #926
+	void on_sync_stale_changed(bool stale);  // #1177
 
 	static void cb_video_marker_found(void *param, calldata_t *cd);
 	static void cb_audio_marker_found(void *param, calldata_t *cd);
 	static void cb_sync_found(void *param, calldata_t *cd);
 	static void cb_lock_state_changed(void *param, calldata_t *cd); // #926
+	static void cb_sync_stale_changed(void *param, calldata_t *cd); // #1177
 
 	// #690: auto-start the measurement output once OBS has finished loading (vs. sitting stopped on
 	// dashes after every OBS relaunch, waiting for a manual click — the "forgettable toggle" this
