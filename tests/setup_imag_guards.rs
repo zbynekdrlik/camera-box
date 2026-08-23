@@ -2648,6 +2648,90 @@ fn setup_imag_504_verify_step_gated_on_obs_launched_this_run() {
 }
 
 // ============================================================================================
+// #1182 -- steps 21/27 run `systemctl --user ...` (daemon-reload / enable --now / disable), which
+// need the desktop user's systemd USER MANAGER bus (/run/user/<uid>/bus). On a from-scratch box
+// provisioned detached, BEFORE the first kiosk boot, that bus does not exist ("Failed to connect
+// to bus: Connection refused") -- steps 17/18 already DEGRADE on the same missing-session class
+// (`[ -S /tmp/.X11-unix/X0 ]`), but 21/27 used to hard-fail(). They must now gate their
+// `systemctl --user` half on a user-bus liveness guard and DEFER to the first kiosk boot.
+// ============================================================================================
+
+/// #1182: the provisioner must define a `user_bus_alive` guard (the structural analogue of step
+/// 17's `[ -S /tmp/.X11-unix/X0 ]` :0 liveness gate) that tests the desktop user's systemd bus
+/// socket, so steps 21/27 can DEFER their `systemctl --user` half on a session-less from-scratch box
+/// instead of aborting the whole run.
+#[test]
+fn setup_imag_1182_defines_user_bus_liveness_guard() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"user_bus_alive() { [ -S "/run/user/"#),
+        "{SETUP} (#1182) must define a `user_bus_alive()` guard testing the desktop user's systemd \
+         bus socket (/run/user/<uid>/bus) — the analogue of step 17's [ -S /tmp/.X11-unix/X0 ] gate"
+    );
+}
+
+/// #1182: step 21's `systemctl --user daemon-reload`/`enable --now imag-obs.service` hard-fails must
+/// be reachable ONLY behind the `user_bus_alive` guard — a from-scratch box (no bus yet) must DEFER,
+/// never abort the whole provisioning run at step 21 (never reaching steps 22-27). The deferred
+/// branch must (a) explain WHY + WHAT next (mirrors step 17's degrade note) and (b) complete the
+/// ENABLE bus-free by creating the unit's wants-symlink directly (only the `--now` START is deferred
+/// to the kiosk boot's autostart), so verify-imag.sh check (t) passes after ONE reboot with no re-run.
+#[test]
+fn setup_imag_1182_step21_defers_systemctl_user_when_no_bus() {
+    let body = read(SETUP);
+    let s21 = body.find("step 21 \"").expect("{SETUP}: step 21 banner");
+    let s22 = body.find("step 22 \"").expect("{SETUP}: step 22 banner");
+    let region = &body[s21..s22];
+    let guard = region.find("if user_bus_alive; then").expect(
+        "{SETUP} (#1182) step 21 must gate its systemctl --user block on `if user_bus_alive; then`",
+    );
+    let enable = region
+        .find("systemctl --user enable --now imag-obs.service")
+        .expect("{SETUP} (#1182) step 21 must still `systemctl --user enable --now imag-obs.service` (bus-alive branch)");
+    assert!(
+        guard < enable,
+        "{SETUP} (#1182) the hard-failing `enable --now imag-obs.service` must sit BEHIND the \
+         user-bus guard — a session-less from-scratch box must defer, not hard-fail step 21"
+    );
+    assert!(
+        region.contains("deferred to first kiosk boot"),
+        "{SETUP} (#1182) step 21's deferred branch must explain the defer (loud '(fresh box) ... \
+         deferred to first kiosk boot' note, mirroring step 17's degrade note)"
+    );
+    assert!(
+        region.contains("graphical-session.target.wants/imag-obs.service"),
+        "{SETUP} (#1182) step 21's deferred branch must complete the ENABLE bus-free by creating \
+         the imag-obs.service wants-symlink directly (only the --now START is deferred to the \
+         kiosk-boot autostart) — so verify-imag.sh check (t) is-enabled passes after ONE reboot"
+    );
+}
+
+/// #1182: step 27's picom `systemctl --user daemon-reload` hard-fail must ALSO be reachable only
+/// behind the `user_bus_alive` guard — once step 21 no longer aborts, a from-scratch box reaches
+/// step 27, whose `daemon-reload || fail` would then be the new abort point. picom stays DORMANT,
+/// so the deferred branch simply notes the defer (no enable symlink).
+#[test]
+fn setup_imag_1182_step27_defers_picom_daemon_reload_when_no_bus() {
+    let body = read(SETUP);
+    let s27 = body.find("step 27 \"").expect("{SETUP}: step 27 banner");
+    let region = &body[s27..];
+    let guard = region.find("if user_bus_alive; then").expect(
+        "{SETUP} (#1182) step 27 must gate its systemctl --user block on `if user_bus_alive; then`",
+    );
+    let reload = region
+        .find("daemon-reload failed before enabling picom.service")
+        .expect("{SETUP} (#1182) step 27 must still `systemctl --user daemon-reload` (bus-alive branch)");
+    assert!(
+        guard < reload,
+        "{SETUP} (#1182) step 27's picom daemon-reload hard-fail must sit BEHIND the user-bus guard"
+    );
+    assert!(
+        region.contains("deferred to first kiosk boot"),
+        "{SETUP} (#1182) step 27's deferred branch must explain the defer (loud note)"
+    );
+}
+
+// ============================================================================================
 // #484 -- the genlock render-tick thread pin (vendor/obs-studio/libobs/obs-video.c) calls
 // sched_setscheduler(SCHED_FIFO) on the ONE timing-critical graphics thread. OBS runs as the
 // unprivileged desktop user, so without an rtprio ulimit grant that syscall fails EPERM and the
