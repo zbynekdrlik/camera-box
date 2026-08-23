@@ -234,3 +234,104 @@ def test_baseline_json_checked_in_and_captured_from_live():
         "STRIH-SNV (interkom)": 5962,
     }
     assert "never hand-typed" in j["_comment"]
+
+
+# ------------------------------------------------------------------ alert watchdog
+
+def _stub_audit(dirpath, rc, summary):
+    # a fake ndi-portmap-audit.sh that echoes <summary> and exits <rc>, so the watchdog's
+    # confirm/throttle/page flow can be exercised with no avahi and no rig.
+    p = pathlib.Path(dirpath) / "stub-audit.sh"
+    p.write_text(f'#!/usr/bin/env bash\nset -uo pipefail\necho {json.dumps(summary)}\nexit {rc}\n')
+    p.chmod(0o755)
+    return str(p)
+
+
+def _run_watchdog(dirpath, audit_cmd, dry_run=True, prior_state=None):
+    state = str(pathlib.Path(dirpath) / "wd.state")
+    if prior_state is not None:
+        pathlib.Path(state).write_text(prior_state)
+    env = {"PATH": "/usr/bin:/bin", "HOME": dirpath,
+           "NDI_PORTMAP_ALERT_AUDIT_CMD": audit_cmd,
+           "NDI_PORTMAP_ALERT_STATE_FILE": state,
+           "AIRULESET_NOTIFY": "/nonexistent/airuleset.py"}
+    args = ["bash", str(_WATCHDOG)] + (["--dry-run"] if dry_run else [])
+    r = subprocess.run(args, capture_output=True, text=True, env=env)
+    return r, state
+
+
+def test_watchdog_syntax_valid():
+    r = subprocess.run(["bash", "-n", str(_WATCHDOG)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_watchdog_help_exits_0_and_never_leaks_the_set_line():
+    r = subprocess.run(["bash", str(_WATCHDOG), "--help"], capture_output=True, text=True)
+    assert r.returncode == 0
+    out = r.stdout.lower()
+    assert "reshuffle" in out and "studio monitor" in out
+    assert "set -uo pipefail" not in r.stdout
+
+
+def test_watchdog_rejects_unknown_arg():
+    r = subprocess.run(["bash", str(_WATCHDOG), "--nope"], capture_output=True, text=True)
+    assert r.returncode == 2
+
+
+def test_watchdog_reuses_the_shared_obs_watchdog_decision_lib_not_a_second_mechanism():
+    body = _WATCHDOG.read_text()
+    assert "obs-watchdog-decision.sh" in body
+    assert "obs_watchdog_confirm" in body and "obs_watchdog_alert_throttle" in body
+    assert "notify" in body and "airuleset" in body.lower()
+
+
+def test_watchdog_alert_body_is_slovak_and_owner_actionable():
+    body = _WATCHDOG.read_text()
+    # #1117: owner-facing alerts must be Slovak; must name the operator action.
+    assert "NESPRÁVNY zdroj" in body and "prijímače" in body
+    assert "--capture" in body  # the re-capture action
+
+
+def test_watchdog_confirms_across_two_passes_before_paging():
+    with tempfile.TemporaryDirectory() as d:
+        audit = _stub_audit(d, 3, "NDI-PORTMAP-CHANGED: 1 sender(s) moved: STRIH-SNV (2ME PGM) :5965->:5966")
+        # pass 1: CHANGED but not yet confirmed (threshold 2) -> holds, no alert.
+        r1, state = _run_watchdog(d, audit, dry_run=True)
+        assert r1.returncode == 0
+        assert "not yet CONFIRMED" in r1.stderr
+        # pass 2 (reusing the persisted confirm counter): now confirmed -> WOULD alert.
+        r2, _ = _run_watchdog(d, audit, dry_run=True,
+                              prior_state=pathlib.Path(state).read_text())
+        assert "WOULD alert" in r2.stderr
+
+
+def test_watchdog_gather_error_never_pages():
+    # exit 2 (OBS down / avahi unreachable / anchor absent) is "nothing to decide", never a page.
+    with tempfile.TemporaryDirectory() as d:
+        audit = _stub_audit(d, 2, "gather error")
+        r, _ = _run_watchdog(d, audit, dry_run=True)
+        assert r.returncode == 0
+        assert "nothing to decide" in r.stderr
+        assert "WOULD alert" not in r.stderr
+
+
+def test_watchdog_stable_clears_and_recovers():
+    with tempfile.TemporaryDirectory() as d:
+        audit = _stub_audit(d, 0, "NDI-PORTMAP-STABLE: OBS instance port map matches baseline (5 senders)")
+        # a prior state that had already alerted -> a STABLE pass fires the recovery note.
+        r, _ = _run_watchdog(d, audit, dry_run=True, prior_state="alerted=1\nconfirm=2\n")
+        assert r.returncode == 0
+        assert "WOULD send recovery" in r.stderr
+
+
+def test_systemd_units_present_and_disabled_by_default():
+    svc = _SVC.read_text()
+    tmr = _TIMER.read_text()
+    assert "Type=oneshot" in svc
+    assert "ndi-portmap-alert-watchdog.sh" in svc
+    assert "WantedBy=timers.target" in tmr and "OnUnitActiveSec=" in tmr
+    # ships DISABLED: no installer enables these units (setup-device/build-image do not reference them).
+    for installer in ("setup-device.sh", "build-image.sh"):
+        p = _ROOT / "scripts" / installer
+        if p.exists():
+            assert "ndi-portmap-alert-watchdog" not in p.read_text()
