@@ -72,6 +72,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # tests/harness_painter_csv_freshness.rs) — used by the fail-loud gate after the painter pull.
 # shellcheck source=scripts/lib/painter-csv-freshness.sh
 . "$HERE/lib/painter-csv-freshness.sh"
+# #1179: opt-in painter display-mode override passthrough. When PAINTER_DISPLAY_MODE is set to a
+# valid WxH@RR (e.g. 2560x1080@100 -- issue 881's experiment), every painter this harness LAUNCHES
+# gets `--display-mode <mode>`; unset ⇒ byte-identical to today (no flag). Pure helper, embedded at
+# the two painter launch sites the same way the existing optional marker-flags variable is (the
+# #675 sourced-lib pattern).
+# shellcheck source=scripts/lib/painter-display-mode.sh
+. "$HERE/lib/painter-display-mode.sh"
 # #656 prevention item 2: the "source camera capture-delivery-rate defective" preflight signal
 # (pure grep pattern + message formatter — the appliance itself does the fps math, see
 # src/capture_rate_health.rs). Used by the [0/8] preflight step below, before any deploy/record.
@@ -2392,6 +2399,10 @@ fi
 # cmdline (the established convention throughout this codebase — never `pkill -f`).
 _cam2_kill_existing="pkill -x frame-probe 2>/dev/null || true; \
    ki=0; while pgrep -x frame-probe >/dev/null 2>&1 && [ \$ki -lt 20 ]; do sleep 0.5; ki=\$((ki+1)); done;"
+# #1179: opt-in painter display-mode override (mode-independent, so computed once outside the
+# _cam2_prep branch). Empty unless PAINTER_DISPLAY_MODE is a valid WxH@RR; a malformed value
+# FAILS LOUD here (VAR="$(...)" under set -e) before the ssh, not on the box minutes later.
+_cam2_display_mode_flag="$(painter_display_mode_args)"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
   "$_cam2_prep \
    $_cam2_kill_existing \
@@ -2399,6 +2410,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
    (nohup /tmp/frame-probe --paint-only --dual-qr --wall-clock --paint-log /tmp/painter.csv \
       --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION + PAINTER_PRE_RECORD_SLACK_SECS)) \
       $_cam2_marker_flags \
+      $_cam2_display_mode_flag \
       >/tmp/painter.log 2>&1 &); \
    $_cam2_marker_check"
 PAINTER_LAUNCH_EPOCH="$(date +%s)"  # #359: when the painter's --duration-secs lifetime started
@@ -2990,6 +3002,10 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   av_restart_record_and_emit_plan() {
     local label="$1"
     local marker_csv="$OUTDIR/av-restart-${label}-${RUN_ID}.csv"
+    # #1179: same opt-in painter display-mode override as the [3/8] launch (empty unless
+    # PAINTER_DISPLAY_MODE is a valid WxH@RR; a malformed value fails loud here under set -e).
+    local _av_display_mode_flag
+    _av_display_mode_flag="$(painter_display_mode_args)"
     # #772: cam1's camera-box dead-man was armed at [2/8], but THIS restart-survival mode has an
     # UNBOUNDED operator wait between the before/after pair -- so cam1's stale [2/8] timer could
     # fire mid-"after" measurement and kill cam1's burn (cam1's feed IS the AV video path, filming
@@ -3013,6 +3029,7 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
        rm -f /tmp/av-restart-markers.csv; \
        i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
        (nohup /tmp/frame-probe --paint-only --dual-qr --paint-fps $PAINT_FPS --qr-size $QR_SIZE \
+          $_av_display_mode_flag \
           --duration-secs $((AV_RESTART_RECORD_SECS + 30)) --audio-marker \
           --audio-marker-device $AV_RESTART_MARKER_DEVICE \
           --audio-marker-cadence-ticks $AV_RESTART_MARKER_CADENCE \
