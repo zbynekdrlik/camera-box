@@ -1323,7 +1323,12 @@ else
   PE_GUARD_STATE="$(imag_power_guard_stepped_from_state "$PE_GUARD_RAW")"
   PE_PL1_UW="$(imag_power_zone_select "$PE_GATHER" || true)"
   PE_PL1_EN="$(imag_power_pl1_enabled "$PE_GATHER" || true)"
-  PE_STEPDOWN_W="${IMAG_PL1_STEPDOWN_W:-25}"
+  # Prefer the step-down watts the guard ITSELF recorded in its state (its own authority), so a
+  # provisioning-time IMAG_PL1_STEPDOWN_W override baked into the guard unit can never diverge from
+  # verify's independent env default (#1188). Fall back to the env/lib default only for an older
+  # guard that did not record it.
+  PE_GUARD_STEPDOWN_W="$(imag_power_guard_stepdown_w_from_state "$PE_GUARD_RAW")"
+  PE_STEPDOWN_W="${PE_GUARD_STEPDOWN_W:-${IMAG_PL1_STEPDOWN_W:-25}}"
 
   while IFS='|' read -r pe_facet pe_status pe_detail; do
     [ -n "$pe_facet" ] || continue

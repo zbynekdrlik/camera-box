@@ -1257,4 +1257,44 @@ fn guard_writes_its_state_file_world_readable_1188() {
         body.contains("chmod 0644"),
         "the guard must chmod its state file 0644 so the non-root verify SSH can read STEPPED (#1188)"
     );
+    // It must also RECORD its step-down watts so verify compares against the guard's own authority,
+    // not an independent env default (#1188).
+    assert!(
+        body.contains("GUARD_STEPDOWN_W="),
+        "the guard must write GUARD_STEPDOWN_W into its state file so verify reads the guard's OWN step-down value (#1188)"
+    );
+}
+
+#[test]
+fn guard_stepdown_w_from_state_reads_the_recorded_value_1188() {
+    // GUARD_STEPDOWN_W present -> its digits; absent/empty -> empty (verify then falls back to the
+    // env default). Always returns 0 (called inside a `$(...)` under set -euo pipefail).
+    let cases = [
+        ("HOT=0\nCOOL=0\nSTEPPED=1\nGUARD_STEPDOWN_W=25", "25"),
+        ("GUARD_STEPDOWN_W= 25 \n", "25"),
+        // absent -> empty
+        ("HOT=1\nCOOL=0\nSTEPPED=1", ""),
+        ("", ""),
+    ];
+    for (text, want) in cases {
+        let (_c, out, err) = run_sourced(&format!(
+            "imag_power_guard_stepdown_w_from_state {}",
+            shell_quote(text)
+        ));
+        assert_eq!(
+            out.trim(),
+            want,
+            "imag_power_guard_stepdown_w_from_state({text:?}) -> want {want:?}: out={out:?} err={err:?}"
+        );
+    }
+    // set -e contract: an empty/absent read must not abort a set -euo pipefail caller.
+    let (c, out, err) = run_sourced(
+        "set -e\n\
+         imag_power_guard_stepdown_w_from_state '' >/dev/null; echo rc-empty=$?\n\
+         imag_power_guard_stepdown_w_from_state 'GUARD_STEPDOWN_W=25' >/dev/null; echo rc-set=$?",
+    );
+    assert_eq!(c, 0, "harness must not abort: out={out:?} err={err:?}");
+    for line in ["rc-empty=0", "rc-set=0"] {
+        assert!(out.contains(line), "expected {line}: out={out:?}");
+    }
 }

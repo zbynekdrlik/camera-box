@@ -1851,6 +1851,7 @@ fn verify_imag_wires_the_1188_guard_state_awareness_into_check_u() {
     let body = std::fs::read_to_string(script()).unwrap();
     for needle in [
         "imag_power_guard_stepped_from_state",
+        "imag_power_guard_stepdown_w_from_state",
         "imag_power_pl1_guard_reclassify",
         "imag_power_tcpu_guard_verdict",
         "IMAG_POWER_GUARD_STATE_FILE",
@@ -1881,8 +1882,11 @@ fn verify_imag_reads_1188_guard_state_before_the_840_restart_wipes_it() {
     let guard_read = body
         .find("imag_power_guard_stepped_from_state")
         .expect("check (u) must read the guard state (#1188)");
-    // Anchor the restart on the actual CALL, not the fn name (which first appears at its DEFINITION
-    // far above check (u)) — the exact literal the sibling #884/#1015/#1040 ordering tests use.
+    // Anchor the restart on the actual CALL literal — the exact string the sibling #884/#1015/#1040
+    // ordering tests use. (Do NOT anchor on `imag_obs_service_restart_cmd`: THAT fn name first
+    // appears at its DEFINITION far above check (u), so `.find` would resolve above the guard read.
+    // `imag_power_guard_stepped_from_state` above is safe — it is defined in the lib and appears in
+    // verify-imag.sh exactly once, as the check-(u) call.)
     let restart_call = body
         .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
         .expect("check (o)'s restart must exist");

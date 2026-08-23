@@ -315,6 +315,25 @@ imag_power_guard_stepped_from_state() {
   if [ "$val" = "1" ]; then printf 'stepped\n'; else printf 'not-stepped\n'; fi
 }
 
+# imag_power_guard_stepdown_w_from_state STATE_TEXT -> echoes the step-down WATTS the guard recorded
+# in its /run state (the `GUARD_STEPDOWN_W=<watts>` line, written by scripts/imag-power-envelope-
+# guard.sh), or empty when the line is absent (an older guard that predates #1188, or an
+# empty/absent read). Lets verify-imag.sh compare an observed clamp against the guard's OWN step-down
+# authority rather than an independent env default that could diverge from a provisioning-time
+# IMAG_PL1_STEPDOWN_W override (#1188). Pure; text in, no I/O; ALWAYS returns 0 (a set -euo pipefail
+# caller invokes it inside a `$(...)`).
+imag_power_guard_stepdown_w_from_state() {
+  local text="$1" line val=""
+  [ -n "$text" ] || { printf '\n'; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      GUARD_STEPDOWN_W=*) val="${line#GUARD_STEPDOWN_W=}" ;;
+    esac
+  done <<< "$text"
+  # keep only digits (defensive against surrounding whitespace / a stray CR); empty -> empty.
+  printf '%s\n' "$(printf '%s' "$val" | tr -cd '0-9')"
+}
+
 # imag_power_alert_condition JOURNAL -> echoes the concerning-transition marker line(s)
 # (STEP-DOWN | RE-ASSERT) found in a `journalctl -t imag-power-envelope` window, or empty if none.
 # The dev1-side alert watchdog pages on these — a thermal step-down (the box is being clamped) or a
