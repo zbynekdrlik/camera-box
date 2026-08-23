@@ -150,6 +150,11 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # audio_marker_emission_check_cmds (sourced above) for the marker-growth assert.
 # shellcheck source=scripts/lib/cam2-painter-handoff.sh
 . "$RIG_MODE_DIR/lib/cam2-painter-handoff.sh"
+# issue 1175: SINGLE SOURCE OF TRUTH for changing cam2-painter.service's PERSISTENT enable-state on
+# cam2's READ-ONLY root safely (remount-rw window + fail-loud + is-enabled read-back). Used by the
+# EVENT disable (cam2_painter_service_disable_cmds) and the TEST enable (the handoff lib).
+# shellcheck source=scripts/lib/cam2-painter-ro-persist.sh
+. "$RIG_MODE_DIR/lib/cam2-painter-ro-persist.sh"
 # #1075: SINGLE SOURCE OF TRUTH for the transient cam2-painter dead-man arm/disarm builders
 # (shared with recording-e2e.sh). EVENT mode must DISARM the timer (a SIGKILLed recording-e2e run
 # leaves it armed and it periodically restarts cam2-painter -- resurrecting the QR on air), and
@@ -291,11 +296,13 @@ REMOTE
 # incident on #892, a bare reboot re-armed the QR 3h after a manual stop) can bring the QR back on
 # its own. A box without the unit installed is unaffected, same guard shape as #440.
 cam2_painter_service_disable_cmds() {
-  cat <<'REMOTE'
+  # <<REMOTE (unquoted) so the issue-1175 $(cam2_painter_persist_state_cmds disable) expands here --
+  # the rest of this body has no $ / backtick, so nothing else is affected by the unquoted heredoc.
+  cat <<REMOTE
 if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
   echo "[#892] cam2-painter.service present -> stopping + disabling (EVENT mode must never leave a QR painter that can return on its own, whether via a restart call or a later reboot)"
   systemctl stop cam2-painter.service 2>/dev/null || true
-  systemctl disable cam2-painter.service 2>/dev/null || true
+$(cam2_painter_persist_state_cmds disable)
 else
   echo "[#892] cam2-painter.service not installed on this box -> nothing to stop/disable"
 fi
