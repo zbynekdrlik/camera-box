@@ -42,6 +42,11 @@
 # signal.sh) instead of an inline copy; lazy-source it and emit its definition before the heredoc.
 command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
   || . "${BASH_SOURCE[0]%/*}/cam2-paint-signal.sh"
+# #1175: the enable step must be remount-rw-window-safe on cam2's read-only root. Lazy-source the
+# shared persist-state builder (rig-mode.sh already sources it; this covers a test sourcing the
+# handoff lib alone) -- same lazy-source pattern as cam2-paint-signal.sh above.
+command -v cam2_painter_persist_state_cmds >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/cam2-painter-ro-persist.sh"
 
 cam2_painter_steady_state_handoff_cmds() {
   local pidfile="$1"
@@ -70,8 +75,11 @@ if [ -f "$pidfile" ]; then
 fi
 # (H3) hand STEADY STATE to the permanent unit: ENABLE (survive reboot; re-arm after any EVENT #892
 #      disable) + START NOW. reset-failed first so a prior failed state never blocks the start.
+#      #1175: the enable runs inside a remount-rw window and FAILS LOUD + verifies is-enabled=enabled
+#      (cam2's read-only root would otherwise silently swallow the symlink write, leaving the unit
+#      unenabled -> dead at the next reboot while this handoff claimed "survives reboot").
 systemctl reset-failed cam2-painter.service 2>/dev/null || true
-systemctl enable --now cam2-painter.service 2>/dev/null || true
+$(cam2_painter_persist_state_cmds enable-now)
 echo "[#1008] handed TEST-mode steady state to the permanent cam2-painter.service (enabled + started -- Restart=always, survives reboot)"
 # (H4) verify ACTIVE -- FAIL LOUD.
 _h=0; while [ "\$(systemctl is-active cam2-painter.service 2>/dev/null)" != "active" ] && [ \$_h -lt 16 ]; do sleep 0.5; _h=\$((_h+1)); done

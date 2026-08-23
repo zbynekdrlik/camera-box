@@ -150,6 +150,16 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # audio_marker_emission_check_cmds (sourced above) for the marker-growth assert.
 # shellcheck source=scripts/lib/cam2-painter-handoff.sh
 . "$RIG_MODE_DIR/lib/cam2-painter-handoff.sh"
+# issue 1175: SINGLE SOURCE OF TRUTH for changing cam2-painter.service's PERSISTENT enable-state on
+# cam2's READ-ONLY root safely (remount-rw window + fail-loud + is-enabled read-back). Used by the
+# EVENT disable (cam2_painter_service_disable_cmds) and the TEST enable (the handoff lib).
+# shellcheck source=scripts/lib/cam2-painter-ro-persist.sh
+. "$RIG_MODE_DIR/lib/cam2-painter-ro-persist.sh"
+# issue 1176: the unconditional EVENT-stop framebuffer blank -- SIGTERM bypasses the issue-660
+# KmsPresenter-Drop blank, so an EVENT stop must zero /dev/fb0 itself or a leftover lipsync frame
+# lingers on cam2's HDMI monitor via kernel fbdev emulation. Used by painter_stop_remote.
+# shellcheck source=scripts/lib/cam2-fb0-blank.sh
+. "$RIG_MODE_DIR/lib/cam2-fb0-blank.sh"
 # #1075: SINGLE SOURCE OF TRUTH for the transient cam2-painter dead-man arm/disarm builders
 # (shared with recording-e2e.sh). EVENT mode must DISARM the timer (a SIGKILLed recording-e2e run
 # leaves it armed and it periodically restarts cam2-painter -- resurrecting the QR on air), and
@@ -291,11 +301,13 @@ REMOTE
 # incident on #892, a bare reboot re-armed the QR 3h after a manual stop) can bring the QR back on
 # its own. A box without the unit installed is unaffected, same guard shape as #440.
 cam2_painter_service_disable_cmds() {
-  cat <<'REMOTE'
+  # <<REMOTE (unquoted) so the issue-1175 $(cam2_painter_persist_state_cmds disable) expands here --
+  # the rest of this body has no $ / backtick, so nothing else is affected by the unquoted heredoc.
+  cat <<REMOTE
 if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
   echo "[#892] cam2-painter.service present -> stopping + disabling (EVENT mode must never leave a QR painter that can return on its own, whether via a restart call or a later reboot)"
   systemctl stop cam2-painter.service 2>/dev/null || true
-  systemctl disable cam2-painter.service 2>/dev/null || true
+$(cam2_painter_persist_state_cmds disable)
 else
   echo "[#892] cam2-painter.service not installed on this box -> nothing to stop/disable"
 fi
@@ -518,6 +530,11 @@ if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
     systemctl status cam2-painter --no-pager >&2 2>/dev/null || true
     exit 1
   fi
+  # issue 1176: the painter is now dead and fb0 released; on this painter box camera-box (permanent
+  # #863 NO_DISPLAY) never re-grabs fb0, so the kernel fbdev emulation would scan out whatever stale
+  # frame is left in /dev/fb0 (a lipsync raw-fbdev write; SIGTERM bypassed the issue-660 Drop blank).
+  # Zero it UNCONDITIONALLY so an EVENT stop always leaves the HDMI monitor clean, not a frozen frame.
+$(cam2_fb0_blank_cmds)
   echo "PASS: #892 transient painter stopped, camera-box active, permanent cam2-painter stopped+disabled (no QR can return, including across a reboot)"
 else
   #     The EFFECTIVE Environment no longer carries CAMERA_BOX_NO_DISPLAY=1 (same resolved-check
@@ -577,6 +594,15 @@ IMAG_PROG_SCENE="${IMAG_PROG_SCENE:-$RIG_SOURCE_IMAG_SCENE}" # imag scene showin
                                                           # DERIVED (imag_scene_for_camera -> 'Cam N'),
                                                           # not the literal 'Cam 1'.
 OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}"
+
+# issue 1171: the per-switch imag offline-leg flag. Defined at top level so every consumer
+# (toggle_burn / set_imag_test_program / event_mode_assert) can read it under this file's `set -u`
+# even if resolve_imag_offline_leg was never called (e.g. a direct unit-test of one consumer).
+# resolve_imag_offline_leg (below) RE-computes both from the SAME issue-1013 offline-ack mechanism
+# recording-e2e.sh's [0/8] uses. IMAG_OFFLINE_ACKED=1 means imag is operator-acked offline AND
+# genuinely unreachable -> every imag OBS leg SKIPs (loud named note) instead of aborting the switch.
+IMAG_OFFLINE_ACKED="${IMAG_OFFLINE_ACKED:-0}"
+IMAG_OFFLINE_ACK_REASON="${IMAG_OFFLINE_ACK_REASON:-}"
 
 # #901: whole-chain TEST-mode verification constants (issue 901). STREAM_USER/STREAM_PW mirror
 # recording-e2e.sh's own defaults exactly (same box, same creds) — needed here because
@@ -737,6 +763,30 @@ imag_genlock_gate_offline_ack_action() {
   fi
 }
 
+# resolve_imag_offline_leg -> compute the per-switch imag offline-leg decision ONCE (issue 1171) and
+# publish it as the globals IMAG_OFFLINE_ACKED (0/1) + IMAG_OFFLINE_ACK_REASON. do_test/do_event call
+# this at their top; every imag OBS leg (toggle_burn, set_imag_test_program, event_mode_assert) then
+# reads the flag instead of each re-probing. It computes the effective ack the SAME way as
+# require_imag_genlock_current / recording-e2e.sh (an explicit CAMBOX_OFFLINE_ACK env wins; else
+# rig-fleet.txt) and DELEGATES the skip/proceed verdict to the already-tested pure
+# imag_genlock_gate_offline_ack_action -- so a legitimately-absent (acked + UNREACHABLE) imag is
+# skipped, while an acked-but-REACHABLE (stale ack) or not-acked imag runs the leg fail-closed as
+# today. The reachability PROBE (ping) is the only I/O and lives here in the caller; the decision is
+# the tested pure function. ONE ping per switch keeps every leg's decision consistent.
+resolve_imag_offline_leg() {
+  local ack_file eff_ack reachable=0
+  ack_file="${RIG_FLEET_ACK_FILE:-$RIG_MODE_DIR/../rig-fleet.txt}"
+  eff_ack="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$ack_file")"
+  IMAG_OFFLINE_ACK_REASON="$(CAMBOX_OFFLINE_ACK="$eff_ack" cambox_offline_ack_reason imag)"
+  if [ -n "$IMAG_OFFLINE_ACK_REASON" ] && ping -c1 -W2 "$IMAG_IP" >/dev/null 2>&1; then reachable=1; fi
+  if [ "$(imag_genlock_gate_offline_ack_action "$IMAG_OFFLINE_ACK_REASON" "$reachable")" = skip ]; then
+    IMAG_OFFLINE_ACKED=1
+    echo "[#1171] imag je operator-acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) a nedosiahnutelny z dev1 (${IMAG_IP}) -- vsetky imag OBS legy (burn toggle/sweep, program routing, event-assert) sa preskocia s hlasnou poznamkou (rovnaka vynimka ako recording-e2e.sh [0/8] preflight)."
+  else
+    IMAG_OFFLINE_ACKED=0
+  fi
+}
+
 # require_imag_genlock_current -> #789 TEST-entry HARD-BLOCK gate (owner ROZHODNUTE 2026-08-19). Runs
 # `drift-guard.sh --check-imag` against the ACTIVE imag host, feeds its output to
 # imag_genlock_gate_verdict, and REFUSES to enter TEST mode (exit 30 — a distinct non-clean exit per
@@ -816,6 +866,13 @@ toggle_burn() {
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   while IFS='|' read -r ip src box; do
     [ -n "$ip" ] || continue
+    # issue 1171: an operator-acked, unreachable imag (issue 1013) must not abort the whole switch on
+    # 'No route to host' -- SKIP its burn leg loudly, exactly as recording-e2e.sh's [0/8] skips the
+    # imag leg. A reachable/unacked imag is NOT skipped (falls through, fail-closed as today).
+    if [ "$box" = imag ] && [ "${IMAG_OFFLINE_ACKED:-0}" = 1 ]; then
+      echo "    [imag burn] SKIP: imag acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) a nedosiahnutelny -- genlock_burn ${action} sa preskakuje"
+      continue
+    fi
     echo "[obs ${box} ${ip}] genlock_burn ${action} on '${src}' (WebSocket, no relaunch)"
     python3 "$here/obs_burn_filter.py" "$action" --host "$ip" --input "$src" --password "$OBS_WS_PASSWORD" \
       2>&1 | sed "s/^/    [${box} burn] /" || rc=$?
@@ -831,6 +888,11 @@ toggle_burn() {
     local _sbip _sbbox
     while IFS='|' read -r _sbip _ _sbbox; do
       [ -n "$_sbip" ] || continue
+      # issue 1171: skip the exhaustive sweep-off on an acked-offline+unreachable imag (issue 1013).
+      if [ "$_sbbox" = imag ] && [ "${IMAG_OFFLINE_ACKED:-0}" = 1 ]; then
+        echo "    [imag burn-sweep] SKIP: imag acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) a nedosiahnutelny -- sweep-off sa preskakuje"
+        continue
+      fi
       python3 "$here/obs_burn_filter.py" sweep-off --host "$_sbip" --password "$OBS_WS_PASSWORD" \
         2>&1 | sed "s/^/    [${_sbbox} burn-sweep] /" || rc=$?
     done < <(obs_burn_targets)
@@ -881,6 +943,12 @@ enforce_strih_ndi_mapping() {
 set_imag_test_program() {
   local here rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  # issue 1171: an operator-acked, unreachable imag (issue 1013) must not abort do_test on 'No route
+  # to host' -- SKIP the PROGRAM routing loudly (a reachable/unacked imag runs it, fail-closed as today).
+  if [ "${IMAG_OFFLINE_ACKED:-0}" = 1 ]; then
+    echo "[obs imag ${IMAG_IP}] SKIP #462 route PROGRAM: imag acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) a nedosiahnutelny -- routing sa preskakuje"
+    return 0
+  fi
   echo "[obs imag ${IMAG_IP}] #462 route PROGRAM to '${IMAG_PROG_SCENE}' (shows ${RIG_SOURCE_BOX} via '${IMAG_PROG_SOURCE}')"
   python3 "$here/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" \
     --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [imag program] /' || rc=$?
@@ -1173,6 +1241,10 @@ do_test() {
   # rig_heartbeat_write. It only needs require_sshpass above (its drift-guard --check-imag ssh'es imag).
   echo "[obs] #789 TEST-entry HARD-BLOCK: imag genlock build must be current before any measurement (owner 2026-08-19 — gates maximalne striktne, no WARN-and-proceed):"
   require_imag_genlock_current
+  # issue 1171: resolve the imag offline-leg decision ONCE so every imag OBS leg below (toggle_burn,
+  # set_imag_test_program) skips a legitimately-absent (acked-offline+unreachable) imag instead of
+  # aborting the whole TEST switch on 'No route to host'.
+  resolve_imag_offline_leg
   # #281 Fix#3: mark the rig as deliberately in a TEST state so the rig-restore watchdog does not
   # fight an in-progress test (until the marker goes stale — see the lib-source note above).
   rig_heartbeat_write "rig-mode:test" 2>/dev/null \
@@ -1363,6 +1435,13 @@ event_mode_assert() {
   local burn_json="{}" src label burn_on bv
   while IFS='|' read -r ip src box; do
     [ -n "$ip" ] || continue
+    # issue 1171: an acked-offline+unreachable imag (issue 1013) must not FALSELY FAIL the burns-off
+    # contract -- a failed check would fail-closed to burn_on=true. SKIP it (not counted); a
+    # reachable/unacked imag is still checked + fail-closed as today.
+    if [ "$box" = imag ] && [ "${IMAG_OFFLINE_ACKED:-0}" = 1 ]; then
+      echo "    [imag burn] SKIP: imag acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) -- not counted in the burns-off contract"
+      continue
+    fi
     out="$(python3 "$here/obs_burn_filter.py" check --host "$ip" --input "$src" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
     burn_on="$(printf '%s' "$out" | grep -oP 'burn_on=\K(True|False)' || true)"
     bv="$(_bool_or_failclosed "$burn_on")"
@@ -1385,6 +1464,12 @@ event_mode_assert() {
   local _asbip _asbbox sweep_arr sweep_rc
   while IFS='|' read -r _asbip _ _asbbox; do
     [ -n "$_asbip" ] || continue
+    # issue 1171: skip the exhaustive sweep-check on an acked-offline+unreachable imag (issue 1013)
+    # -- otherwise it fail-closes to the sweep-unreachable sentinel and falsely fails the contract.
+    if [ "$_asbbox" = imag ] && [ "${IMAG_OFFLINE_ACKED:-0}" = 1 ]; then
+      echo "    [imag burn-sweep] SKIP: imag acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) -- not swept in the burns-off contract"
+      continue
+    fi
     if sweep_arr="$(python3 "$here/obs_burn_filter.py" sweep-check --host "$_asbip" --password "$OBS_WS_PASSWORD" 2>/dev/null)"; then sweep_rc=0; else sweep_rc=$?; fi
     if [ "$sweep_rc" -eq 2 ] || [ -z "$sweep_arr" ]; then
       burn_json="$(jq --argjson j "$burn_json" --arg k "${_asbbox}:__sweep_unreachable__" -n '$j + {($k): true}')"
@@ -1476,6 +1561,10 @@ event_mode_assert() {
 
 do_event() {
   require_sshpass
+  # issue 1171: resolve the imag offline-leg decision ONCE so the EVENT burn-OFF sweep
+  # and the EVENT-assert item-3 imag legs skip a legitimately-absent (acked-offline+unreachable)
+  # imag instead of aborting the EVENT switch / falsely failing the burns-off contract.
+  resolve_imag_offline_leg
   # #281 Fix#3: clear the rig-active heartbeat — we are returning the rig to a clean prod/EVENT
   # state, so the watchdog need no longer treat it as "a test is running".
   rig_heartbeat_clear 2>/dev/null \

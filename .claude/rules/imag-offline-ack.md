@@ -88,10 +88,32 @@ fail-closing:
   citing issue 1013 + reason, `return 0`, no drift-guard); acked+REACHABLE = STALE ack → `proceed`
   (falls through to the byte-unchanged gate — NOT exempted, mirrors the [0/8] stale-ack protection);
   not-acked → `proceed`.
-- **Any NEW imag gate added to rig-mode.sh must do the same** (consult `cambox_offline_ack_reason
-  "imag"` + a reachability probe before fail-closing) — the "make imag optional" inventory above is
-  per-SCRIPT, and rig-mode.sh is now a second script in scope. The EVENT path stays advisory
-  (`warn_imag_genlock_stale`, never blocks going live) and needs no ack seam.
+- **Any NEW imag gate added to rig-mode.sh must do the same** (consult the offline-ack + a
+  reachability probe before fail-closing) — the "make imag optional" inventory above is per-SCRIPT,
+  and rig-mode.sh is now a second script in scope. The EVENT path's genlock-STALENESS check stays
+  advisory (`warn_imag_genlock_stale`, never blocks going live); but the EVENT path's imag BURN legs
+  DO need the ack seam (see below, #1171).
+
+### #1171: rig-mode.sh's OTHER imag OBS legs (toggle_burn / set_imag_test_program / event_mode_assert) also offline-ack-aware
+
+The #789 gate was only the FIRST imag hard-abort in rig-mode.sh. Every other imag OBS call aborted
+the whole TEST/EVENT switch on an acked-offline+unreachable imag (`OSError: [Errno 113] No route to
+host` under `set -euo pipefail`, live 2026-08-23). Since #1171 they all consult a per-switch flag:
+
+- **`resolve_imag_offline_leg`** (a NEW fn, beside the #789 gate helpers) computes the (ack +
+  reachability) decision ONCE and publishes `IMAG_OFFLINE_ACKED` (0/1) + `IMAG_OFFLINE_ACK_REASON`.
+  It reuses the effective-ack read (`cambox_offline_ack_effective` over `rig-fleet.txt`) + a single
+  `ping` + the **already-tested pure `imag_genlock_gate_offline_ack_action`** for the skip/proceed
+  verdict — no re-implemented logic, ONE ping per switch. `do_test` and `do_event` call it up front.
+- The two flag defaults (`IMAG_OFFLINE_ACKED=0`, `IMAG_OFFLINE_ACK_REASON=""`) are pinned at top
+  level so every consumer reads them under `set -u` even if `resolve_imag_offline_leg` never ran.
+- Consumers guard with `[ "${IMAG_OFFLINE_ACKED:-0}" = 1 ]` → a loud named SKIP (citing issue 1013):
+  `toggle_burn` (the pinned add/remove loop AND the EVENT sweep-off loop), `set_imag_test_program`,
+  and `event_mode_assert` item-3 (the pinned burn-check AND the sweep-check). A reachable/unacked or
+  stale-ack imag is NOT skipped — it runs the leg fail-closed as before; strih/stream untouched; the
+  `__sweep_unreachable__` fail-closed sentinel stays for the non-acked case.
+- **Any FURTHER imag OBS leg added to rig-mode.sh reads `IMAG_OFFLINE_ACKED`** — do NOT re-probe
+  ack/reachability per site (that was the rejected N-pings approach).
 - Anchor safety: the new pure function + prologue sit ABOVE `do_test()`/`do_event()`, so the
   `tests/rig_mode.rs` `do_test_body`/`do_event_body` splits are untouched; the new wiring test slices
   the gate body between `require_imag_genlock_current() {` and `\nburn_action_for_mode() {` (both
