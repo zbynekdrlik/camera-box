@@ -790,9 +790,12 @@ fn setup_device_installs_mpv_for_lipsync_drm_playback_1187() {
         full_line.split_whitespace().any(|t| t == "mpv"),
         "1187: STEP 16 must install mpv (the DRM/KMS lipsync playback runtime): {full_line}"
     );
+    // Anchor on the lipsync-runtime echo specifically: `  Installed:` is a shared prefix used by
+    // several STEP-16 install groups (avahi, udev, ...), so the bare prefix would grab the wrong
+    // (first) one -- `  Installed: ffmpeg` is unique to the lipsync-runtime line.
     let echo_idx = body
-        .find("echo \"  Installed:")
-        .expect("the STEP 16 'Installed:' echo must be present");
+        .find("echo \"  Installed: ffmpeg")
+        .expect("the STEP 16 lipsync-runtime 'Installed:' echo must be present");
     let echo_end = body[echo_idx..]
         .find('\n')
         .map(|e| echo_idx + e)

@@ -93,6 +93,9 @@
 #   (x) ffmpeg is installed AND runs (`ffmpeg -version`) -- the #930 lipsync-test-mode runtime
 #       dependency (scripts/lipsync-test-mode.sh); any box may take cam2's painter role, so this
 #       is checked fleet-wide, never cam2-only.
+#   (x2) mpv is installed AND runs (`mpv --version`) -- the #1187 lipsync-test-mode DRM/KMS
+#       playback runtime (mpv --vo=drm replaced the legacy raw-fbdev ffmpeg write, issue 1176);
+#       checked fleet-wide like (x), never cam2-only.
 #   (y) camera-box.service has the ExecStartPre device-free bake-in (drop-in wired to the helper,
 #       helper stops the stray E2E burn UNIT + pkills the burn, never the painter) so every start
 #       frees /dev/video instead of crash-looping on "Device or resource busy" (#772).
@@ -1140,6 +1143,22 @@ if [ "$rc" -eq 0 ] && [ -n "$FFMPEG_VERSION_LINE" ]; then
 else
   fail "ffmpeg not found/runnable on PATH (ssh rc=$rc) -- scripts/lipsync-test-mode.sh needs it \
 for the lipsync cross-validation TEST-mode variant (#930)"
+fi
+
+# (x2) mpv installed + runnable (#1187 lipsync-test-mode DRM/KMS playback runtime) ---------------
+# setup-device.sh installs mpv (STEP 16) so ANY box can take cam2's lipsync-test-mode painter role
+# via the DRM/KMS playback path (scripts/lipsync-test-mode.sh, issue 1187 -- `mpv --vo=drm` replaced
+# the legacy raw-fbdev ffmpeg write that leaked a stale frame, issue 1176). Confirm mpv is actually
+# present AND runnable, not just that the apt-get step didn't error -- the same "trust but verify"
+# gate as the ffmpeg (x) check above. Inserted BEFORE (q) -- see
+# .claude/rules/provisioning-scripts.md: (q) is the intentionally-LAST check.
+rc=0
+MPV_VERSION_LINE="$(ssh_box "mpv --version 2>/dev/null | head -1")" || rc=$?
+if [ "$rc" -eq 0 ] && [ -n "$MPV_VERSION_LINE" ]; then
+  ok "mpv present and runnable ($MPV_VERSION_LINE) -- #1187 lipsync-test-mode DRM/KMS playback runtime"
+else
+  fail "mpv not found/runnable on PATH (ssh rc=$rc) -- scripts/lipsync-test-mode.sh needs it \
+for the DRM/KMS lipsync playback path (#1187)"
 fi
 
 # (y) camera-box ExecStartPre device-free bake-in (#772) -----------------------------------------
