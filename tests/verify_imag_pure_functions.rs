@@ -1784,3 +1784,108 @@ hybrid-sleep.target=masked'
          no SIGPIPE-under-pipefail false negative (#1163): {out:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (u) power/thermal-envelope ACCEPTANCE reclassification (guard-state-aware, #1188)
+//
+// The SHARED imag_power_envelope_verdict is deliberately guard-BLIND (a pl1 DRIFT on any live !=
+// pinned value — correct for drift-guard's strict [0/8] preflight). verify-imag downgrades that to
+// OK-with-note ONLY when the guard's own /run state proves a LEGITIMATE thermal step-down. These
+// pure functions encode that acceptance-only policy.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn pl1_guard_reclassify_only_downgrades_a_genuine_stepdown_1188() {
+    // Signature: imag_power_pl1_guard_reclassify OBSERVED_UW ENABLED GUARD_STATE STEPDOWN_WATTS
+    // stepdown-ok ONLY when guard==stepped AND observed uW == 25W-in-uW AND enabled==1.
+    let cases = [
+        // legitimate step-down: 25W == 25000000uW, enabled, guard stepped -> stepdown-ok
+        ("25000000 1 stepped 25", "stepdown-ok"),
+        // guard NOT stepped (foreign 25W write) -> drift (never masked)
+        ("25000000 1 not-stepped 25", "drift"),
+        // guard state unknown (unreadable state file) -> drift (never mask on uncertainty)
+        ("25000000 1 unknown 25", "drift"),
+        // stepped but the constraint is DISABLED -> drift (not a normal guard step-down)
+        ("25000000 0 stepped 25", "drift"),
+        // stepped but the observed value is NOT the step-down value (a wrong/foreign clamp) -> drift
+        ("30000000 1 stepped 25", "drift"),
+    ];
+    for (args, want) in cases {
+        let (_c, out, err) = run_sourced(&format!("imag_power_pl1_guard_reclassify {args}"));
+        assert_eq!(
+            out.trim(),
+            want,
+            "imag_power_pl1_guard_reclassify {args} -> want {want:?}: out={out:?} err={err:?}"
+        );
+    }
+}
+
+#[test]
+fn tcpu_guard_verdict_is_stepdown_aware_at_the_ceiling_1188() {
+    // Signature: imag_power_tcpu_guard_verdict TCPU CEIL GUARD_STATE
+    let cases = [
+        ("92 93 stepped", "ok"), // below ceiling -> ok regardless of guard
+        ("92 93 not-stepped", "ok"),
+        ("93 93 stepped", "ok-stepdown"), // at ceiling + guard stepped -> the #1162 steady state
+        ("95 93 stepped", "ok-stepdown"),
+        ("93 93 not-stepped", "over-ceiling"), // at ceiling, guard NOT stepped -> live clamp, FAIL
+        ("93 93 unknown", "over-ceiling"),     // unknown guard -> FAIL (never mask)
+        ("'' 93 stepped", "unreadable"),       // empty TCPU -> unreadable (existing FAIL path)
+        ("abc 93 stepped", "unreadable"),      // non-numeric -> unreadable
+    ];
+    for (args, want) in cases {
+        let (_c, out, err) = run_sourced(&format!("imag_power_tcpu_guard_verdict {args}"));
+        assert_eq!(
+            out.trim(),
+            want,
+            "imag_power_tcpu_guard_verdict {args} -> want {want:?}: out={out:?} err={err:?}"
+        );
+    }
+}
+
+#[test]
+fn verify_imag_wires_the_1188_guard_state_awareness_into_check_u() {
+    // The pure fns are only useful if check (u) actually READS the guard state file and CALLS the
+    // reclassify/tcpu-verdict fns — a defined-but-uncalled fn provides zero acceptance coverage
+    // (same discipline as the #884/#1015/#1040 wiring tests).
+    let body = std::fs::read_to_string(script()).unwrap();
+    for needle in [
+        "imag_power_guard_stepped_from_state",
+        "imag_power_pl1_guard_reclassify",
+        "imag_power_tcpu_guard_verdict",
+        "IMAG_POWER_GUARD_STATE_FILE",
+    ] {
+        assert!(
+            body.contains(needle),
+            "verify-imag.sh check (u) must reference {needle} to become guard-state-aware (#1188)"
+        );
+    }
+    // It must READ the guard's /run state over SSH (a `cat` of the state path).
+    assert!(
+        body.contains("imag-power-envelope-guard.state") || body.contains("IMAG_POWER_GUARD_STATE"),
+        "verify-imag.sh check (u) must read the guard's /run state file (#1188)"
+    );
+    // The legitimate-step-down OK path must be a LOUD note, not a silent pass.
+    assert!(
+        body.contains("guard thermal step-down active"),
+        "the reclassified pl1 OK path must carry a LOUD 'guard thermal step-down active' note (#1188)"
+    );
+}
+
+/// The #1188 guard-state reads (the state-file cat) must run BEFORE check (o)'s OBS restart —
+/// same #884/#1015/#1040 ordering constraint (check (u) already lives above (o); the new reads sit
+/// inside it, so this just re-pins that the whole power block precedes the restart).
+#[test]
+fn verify_imag_reads_1188_guard_state_before_the_840_restart_wipes_it() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_read = body
+        .find("imag_power_guard_stepped_from_state")
+        .expect("check (u) must read the guard state (#1188)");
+    let restart_call = body
+        .find("imag_obs_service_restart_cmd")
+        .expect("check (o)'s restart must exist");
+    assert!(
+        guard_read < restart_call,
+        "the #1188 guard-state read must run BEFORE check (o)'s restart-proof (#840 ordering)"
+    );
+}
