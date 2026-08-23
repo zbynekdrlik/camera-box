@@ -55,7 +55,3 @@ cam4:on-air-but-outside-measured-set-2026-08-07
 cam5:powered-off-2026-07-27
 cam6:powered-off-2026-07-27
 cam7:powered-off-2026-07-27
-# issue 1162 (2026-08-21): imag notebook physically removed for replacement -- owner order: exclude
-# imag for ONE day, the stronger replacement unit arrives 2026-08-22. REMOVE this line the moment
-# the new notebook is provisioned and back on the network (stale-ack guard will fail loudly anyway).
-imag:notebook-replacement-issue-1162-new-unit-2026-08-22
