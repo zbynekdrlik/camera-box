@@ -1,62 +1,87 @@
 #!/usr/bin/env bash
-# lipsync-test-mode.sh -- issue 930: swap cam2's TEST-mode output from the dual-QR/QPSK painter to
-# the lipsync cross-validation asset, and back again.
+# lipsync-test-mode.sh -- issue 930 + issue 1187: swap cam2's TEST-mode output from the dual-QR/QPSK
+# painter to the lipsync cross-validation asset, and back again.
 #
 set -euo pipefail
 #
 # WHY / WHAT (issue 930): rig-mode.sh's TEST mode already puts camera-box on cam2 into no-display
 # mode (fb0 free, capture+emit keep running -- #291/#528) and launches the transient dual-QR
 # painter WITH the QPSK audio-marker thread (#420 -- the marker is a THREAD inside the SAME
-# frame-probe process, not a separate daemon) on /dev/fb0 + hw:CARD=PCH,DEV=3. `start` below just
-# needs to STOP that one process (which frees BOTH fb0 and the ALSA device in one kill, since the
-# marker dies with it) and start ONE ffmpeg process playing the lipsync asset into the SAME two
-# sinks (video -> fbdev, audio -> the SAME ALSA device the QPSK marker used) from a SINGLE
-# demux/decode timeline (verified live on cam2, #930: bgra pixel format matches the painter's own
-# convention in src/probe/fb.rs; `-ac 2` needed -- the ALSA device refuses a mono stream). `stop`
-# kills the ffmpeg playback and calls rig-mode.sh test to fully restore + re-verify TEST mode
-# (dual-QR + QPSK marker, burns, NDI mapping) -- never a partial/ad-hoc restore.
+# frame-probe process, not a separate daemon) on the HDMI CRTC + hw:CARD=PCH,DEV=3. `start` below
+# just needs to STOP that one process (which frees BOTH the display AND the ALSA device in one kill,
+# since the marker dies with it) and start ONE playback process playing the lipsync asset into the
+# SAME two sinks (video -> HDMI, audio -> the SAME ALSA device the QPSK marker used) from a SINGLE
+# demux/decode timeline. `stop` kills the playback and calls rig-mode.sh test to fully restore +
+# re-verify TEST mode (dual-QR + QPSK marker, burns, NDI mapping) -- never a partial/ad-hoc restore.
+#
+# WHY DRM/KMS, not raw fb0 (issue 1187, the owner-preferred ROOT fix of issue 1176 prong 3):
+# the ORIGINAL implementation wrote video into raw /dev/fb0 via `ffmpeg -f fbdev`. fbdev is legacy:
+# it has no CRTC ownership and no exit teardown, so when ffmpeg was killed its last decoded frame
+# STAYED resident in fb0 memory, and the kernel's generic fbdev emulation revealed it on cam2's
+# HDMI monitor the instant the painter's DRM master was released (issue 1176). The fix moves
+# playback onto DRM/KMS via `mpv --vo=drm`: mpv takes the DRM master, page-flips its OWN buffers at
+# vblank (never touches fb0), and cleanly restores the CRTC on exit -- the stale-frame class
+# disappears STRUCTURALLY. mpv also paces off vblank natively, so the old fbdev-specific pacing
+# guard (whose whole reason to exist was "/dev/fb0 has no clock of its own") is replaced by a
+# lightweight decode + presence PREFLIGHT that touches neither fb0 nor the CRTC. The stop path still
+# blanks fb0 belt-and-braces (the #660 mechanism) because after ANY DRM master release the kernel
+# fbdev emulation can re-take scanout from fb0 memory -- neutralizing that legacy surface stays
+# necessary regardless (issue 1176 owner note; relates to the open issue-1173 deadman half). mpv is
+# provisioned by scripts/setup-device.sh STEP 16 and acceptance-checked by scripts/verify-device.sh.
 #
 # Usage:
 #   lipsync-test-mode.sh start [media]   -- stop the TEST-mode painter, play [media] (default
-#                                           assets/lipsync/test.mp4) looped on cam2's fb0+ALSA
-#   lipsync-test-mode.sh stop            -- kill the lipsync playback, restore TEST mode via
-#                                           rig-mode.sh test (dual-QR + QPSK marker back + verified)
+#                                           assets/lipsync/test.mp4) looped on cam2's HDMI+ALSA
+#   lipsync-test-mode.sh stop            -- kill the lipsync playback, blank fb0, restore TEST mode
+#                                           via rig-mode.sh test (dual-QR + QPSK marker back + verified)
 #
 # Env:
 #   PAINTER_IP        cam2 device IP (default 10.77.9.62, matches rig-mode.sh)
 #   CAM_PW            cam2 root ssh password (default newlevel, matches targets.md)
 #   PAINTER_PIDFILE   the TEST-mode painter's pidfile (default /run/rig-painter.pid, matches
 #                     rig-mode.sh's own constant -- MUST stay in lock-step, it is the SAME painter)
-#   LIPSYNC_FB_DEVICE      cam2 framebuffer device (default /dev/fb0)
+#   LIPSYNC_DRM_DEVICE     cam2 DRM/KMS device for mpv's video sink (default empty -- mpv
+#                          auto-selects the connected KMS card; #854: /dev/dri/cardN numbering is not
+#                          a stable ABI, so auto is the safe default, pin only if a box needs it)
+#   LIPSYNC_FB_DEVICE      cam2 framebuffer device to BLANK on stop (default /dev/fb0 -- the legacy
+#                          surface the kernel fbdev emulation re-takes after a DRM master release)
 #   LIPSYNC_AUDIO_DEVICE   cam2 ALSA device for playback audio (default hw:CARD=PCH,DEV=3 -- the
 #                          SAME device the QPSK marker uses, per issue 930's scope item 2)
-#   LIPSYNC_PLAYBACK_PIDFILE  where this script's own ffmpeg PID is tracked on cam2 (default
+#   LIPSYNC_MPV_BIN        mpv binary to use (default mpv -- overridable for a pinned build/test)
+#   LIPSYNC_PLAYBACK_PIDFILE  where this script's own mpv PID is tracked on cam2 (default
 #                             /run/rig-lipsync-playback.pid)
-#   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 408, non-negative
-#                          integer only). Issue 930: two independent paired QR/QPSK-vs-SyncNet
-#                          cross-checks (issuecomment-5190993635, issuecomment-5191187944) derived
-#                          the harness's ALSA output pipeline depth D via R = C + L - D (R =
-#                          SyncNet-measured rig-added offset, C = the chain offset per QR/QPSK at
-#                          the same genlock_latency knob, L = this lead). D landed at ~408ms,
-#                          stable to ~3ms across two days, two different knobs, and two different
-#                          content windows -- NOT a single raw SyncNet reading (an earlier -334ms
-#                          figure silently included a run whose QR/QPSK leg never completed, so it
-#                          wrongly folded a nonzero chain offset into the harness constant; see the
-#                          ticket for the full derivation). LIPSYNC_AUDIO_LEAD_MS cancels D by
-#                          delaying the VIDEO demux by that many ms relative to audio (the ticket's
-#                          own stated equivalent of "advancing audio" -- only the RELATIVE offset
-#                          between the two streams matters for lipsync perception). 0 = today's
-#                          behavior, byte-identical single-demux command (no compensation). A
-#                          paired run at L=408 confirmed the fix: SyncNet-vs-QR/QPSK delta 0.036ms.
+#   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 408, non-negative integer
+#                          only). Issue 930: two independent paired QR/QPSK-vs-SyncNet cross-checks
+#                          (issuecomment-5190993635, issuecomment-5191187944) derived the harness's
+#                          ALSA output pipeline depth D via R = C + L - D (R = SyncNet-measured
+#                          rig-added offset, C = the chain offset per QR/QPSK at the same
+#                          genlock_latency knob, L = this lead). D landed at ~408ms, stable to ~3ms
+#                          across two days, two different knobs, and two different content windows.
+#                          Under issue 1187 the compensation MECHANISM changed from a two-demux
+#                          ffmpeg -itsoffset to mpv's native --audio-delay (a NEGATIVE value, which
+#                          delays VIDEO relative to audio -- the exact equivalent of the old positive
+#                          video -itsoffset). The 408ms VALUE was calibrated on the ffmpeg/ALSA path
+#                          and may need re-derivation for mpv's ALSA buffering; this knob lets the
+#                          supervisor re-tune via the paired cross-check campaign without a code
+#                          change. 0 = no compensation (--audio-delay=0.000). Only the RELATIVE
+#                          offset between the two streams matters for lipsync perception.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 
+# The canonical #660 fb0-blank builder (rig_test_ledger_clean_paint_fallback_cmds) lives here --
+# ONE source of truth for the blank mechanism, reused by the stop path below. rig-test-ledger.sh is
+# a pure function library (it deliberately never sets `set -euo pipefail`, so sourcing it does not
+# mutate this script's shell options).
+. "$HERE/lib/rig-test-ledger.sh"
+
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"
 CAM_PW="${CAM_PW:-newlevel}"
 PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
+LIPSYNC_DRM_DEVICE="${LIPSYNC_DRM_DEVICE:-}"
 LIPSYNC_FB_DEVICE="${LIPSYNC_FB_DEVICE:-/dev/fb0}"
 LIPSYNC_AUDIO_DEVICE="${LIPSYNC_AUDIO_DEVICE:-hw:CARD=PCH,DEV=3}"
+LIPSYNC_MPV_BIN="${LIPSYNC_MPV_BIN:-mpv}"
 LIPSYNC_PLAYBACK_PIDFILE="${LIPSYNC_PLAYBACK_PIDFILE:-/run/rig-lipsync-playback.pid}"
 LIPSYNC_AUDIO_LEAD_MS="${LIPSYNC_AUDIO_LEAD_MS:-408}"
 case "$LIPSYNC_AUDIO_LEAD_MS" in
@@ -74,8 +99,8 @@ esac
 
 # lipsync_stop_painter_cmds PIDFILE -- kill the TEST-mode painter by its OWN pidfile (never a bare
 # `pkill -f frame-probe`, which would also match this very ssh command's cmdline -- same
-# discipline rig-mode.sh's own painter_stop_remote already documents). Killing it frees BOTH
-# /dev/fb0 (video) AND the QPSK marker's ALSA device (audio) in one shot, since the marker is a
+# discipline rig-mode.sh's own painter_stop_remote already documents). Killing it frees BOTH the
+# HDMI display (video) AND the QPSK marker's ALSA device (audio) in one shot, since the marker is a
 # thread inside this same process (#420).
 lipsync_stop_painter_cmds() {
   local pidfile="$1"
@@ -85,9 +110,9 @@ if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
   kill "\$PID" 2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "\$PID" 2>/dev/null || break; sleep 0.3; done
   # issue 930 live incident: a wedged painter SURVIVED the bare TERM (kept flipping KMS pages,
-  # so the whole lipsync recording captured the dual-QR instead of the face while ffmpeg wrote
-  # into an invisible fb0). Escalate to SIGKILL, and FAIL LOUD if even that leaves it alive --
-  # a surviving painter makes the upcoming playback silently unrecordable.
+  # so the whole lipsync recording captured the dual-QR instead of the face). Escalate to SIGKILL,
+  # and FAIL LOUD if even that leaves it alive -- a surviving painter (still holding the DRM
+  # master) makes the upcoming mpv playback silently unstartable/unrecordable.
   if kill -0 "\$PID" 2>/dev/null; then
     kill -9 "\$PID" 2>/dev/null || true
     for _ in 1 2 3 4 5; do kill -0 "\$PID" 2>/dev/null || break; sleep 0.3; done
@@ -101,249 +126,75 @@ rm -f '$pidfile'
 CMDS
 }
 
-# lipsync_pacing_guard_cmd MEDIA FB_DEVICE AUDIO_DEVICE -- issue 930 finding 9 (elapsed-vs-
-# duration budget) + the follow-up pacing-hypothesis measurement (comment on #930): /dev/fb0 has
-# no clock of its own -- ffmpeg's frame pacing rests entirely on ALSA backpressure from the audio
-# sink, and WITHOUT `-re` (real-time input read rate) that backpressure does NOT actually pace the
-# video: a direct wall-clock measurement found frames delivered in 4-5-frame BURSTS ~4ms apart
-# separated by ~80ms STALLS (a ~12.5fps slideshow), while running ~5% cumulatively fast vs audio --
-# and the OLD elapsed-vs-duration-only check PASSED throughout, because ffmpeg's total wall-clock
-# runtime is governed by the audio drain, not by whether the video was paced evenly inside that
-# window. `-re` (added below and in `lipsync_playback_cmds`) fixes the pacing (measured: p50
-# 16.663ms, std 1.7ms, zero stalls, steady-state drift <1ms/40s); this guard now ALSO instruments
-# the SAME foreground pass with `-vf showinfo` and a python3 probe that wall-clock-timestamps every
-# frame the filter reports, so a future pacing regression can never again hide behind a
-# total-elapsed-only budget check. Cadence is asserted from `startup_skip_s` seconds in (default
-# 2s, overridable via LIPSYNC_PACING_STARTUP_SKIP_S -- the fix's own one-time ~0.5s startup step is
-# a documented, accepted exception, not a defect) onward: p95 deviation from the asset's own
-# nominal (fps-derived) frame interval must stay within 5ms, zero deltas may exceed 33ms (a
-# dropped-frame-class stall), and fewer than 2% of deltas may be sub-4ms bursts. Kept as its OWN
-# function/ssh round trip (not folded into `lipsync_playback_cmds`) so it never touches the
-# persistent launch's `/run/*.pid`/`/run/*.log` paths -- those need a real root/remote session,
-# while this guard is independently testable (a fake ffmpeg/ffprobe on PATH, see
-# tests/harness_lipsync_test_mode.rs). The python3 probe is piped to `python3 -` via a nested
-# heredoc rather than written to a file under /run -- same "prints remote bash, no network in the
-# function itself" convention, without needing real filesystem access to construct/test the string.
-lipsync_pacing_guard_cmd() {
-  local media="$1" fb="$2" audio="$3"
+# lipsync_preflight_cmd MEDIA -- issue 1187: a lightweight mpv decode + presence PREFLIGHT that
+# replaces the old fbdev-specific pacing guard. It (1) checks mpv is installed and FAILs loud with a
+# provisioning hint if not (setup-device.sh STEP 16 provisions it), and (2) decodes a bounded number
+# of frames to NULL sinks (`--vo=null --ao=null`) to prove the asset is decodable and mpv is
+# functional. It touches NEITHER /dev/fb0 NOR the DRM/KMS CRTC -- so running it before the painter is
+# even restored can never leave a stale frame or fight the display. The old cadence-measurement
+# apparatus is gone on purpose: mpv paces off vblank natively (`--vo=drm`), so the fbdev-no-clock
+# bug class the guard existed to catch no longer exists. Kept as its OWN function/ssh round trip
+# (not folded into `lipsync_playback_cmds`) so it never touches the persistent launch's
+# /run/*.pid//run/*.log paths -- and stays independently testable (a fake mpv via LIPSYNC_MPV_BIN,
+# see tests/harness_lipsync_test_mode.rs).
+lipsync_preflight_cmd() {
+  local media="$1" mpv_bin="${LIPSYNC_MPV_BIN:-mpv}"
   cat <<CMDS
-python3 - '$media' '$fb' '$audio' <<'PYEOF'
-import os
-import subprocess
-import sys
-import time
-
-media, fb, audio = sys.argv[1:4]
-
-
-def ffprobe(extra_args, what):
-    out = subprocess.run(
-        ["ffprobe"] + extra_args + [media], capture_output=True, text=True
-    )
-    if out.returncode != 0:
-        sys.stderr.write(
-            "FAIL: lipsync playback pacing check -- ffprobe could not determine {} for "
-            "{!r} (exit {}): {}\n".format(what, media, out.returncode, out.stderr.strip())
-        )
-        sys.exit(1)
-    return out.stdout.strip()
-
-
-duration_raw = ffprobe(
-    ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"], "duration"
-)
-try:
-    duration = float(duration_raw)
-except ValueError:
-    sys.stderr.write(
-        "FAIL: lipsync playback pacing check -- ffprobe returned an unparseable duration "
-        "{!r} for {!r}\n".format(duration_raw, media)
-    )
-    sys.exit(1)
-
-fps_raw = ffprobe(
-    [
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=r_frame_rate",
-        "-of",
-        "csv=p=0",
-    ],
-    "fps",
-)
-try:
-    num, _, den = fps_raw.partition("/")
-    fps = float(num) / float(den) if den else float(num)
-    if fps <= 0:
-        raise ValueError(fps)
-except (ValueError, ZeroDivisionError):
-    sys.stderr.write(
-        "WARN: could not parse fps from ffprobe output {!r} -- defaulting to "
-        "60fps for the cadence nominal\n".format(fps_raw)
-    )
-    fps = 60.0
-nominal_ms = 1000.0 / fps
-
-try:
-    startup_skip_s = float(os.environ.get("LIPSYNC_PACING_STARTUP_SKIP_S", "2"))
-except ValueError:
-    sys.stderr.write(
-        "WARN: LIPSYNC_PACING_STARTUP_SKIP_S={!r} is not a number -- defaulting to "
-        "2s\n".format(os.environ.get("LIPSYNC_PACING_STARTUP_SKIP_S"))
-    )
-    startup_skip_s = 2.0
-
-cmd = [
-    "ffmpeg",
-    "-y",
-    "-re",
-    "-i",
-    media,
-    "-map",
-    "0:v",
-    "-vf",
-    "showinfo",
-    "-pix_fmt",
-    "bgra",
-    "-nostats",
-    "-f",
-    "fbdev",
-    fb,
-    "-map",
-    "0:a",
-    "-ac",
-    "2",
-    "-f",
-    "alsa",
-    audio,
-]
-
-start = time.monotonic()
-proc = subprocess.Popen(
-    cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1
-)
-frame_times = []
-for line in proc.stderr:
-    if "Parsed_showinfo" in line and "pts_time" in line:
-        frame_times.append(time.monotonic() - start)
-proc.wait()
-elapsed = time.monotonic() - start
-
-if proc.returncode != 0:
-    sys.stderr.write(
-        "FAIL: lipsync playback pacing check -- ffmpeg exited {} after {:.3f}s ({} frames "
-        "observed before it died) -- not a pacing verdict, the preflight pass itself "
-        "failed\n".format(proc.returncode, elapsed, len(frame_times))
-    )
-    sys.exit(1)
-
-if len(frame_times) == 0:
-    sys.stderr.write(
-        "FAIL: lipsync playback pacing check -- ffmpeg exited 0 after {:.3f}s but the "
-        "showinfo filter produced ZERO parseable frame lines -- cadence was never actually "
-        "observed (instrumentation regression, e.g. ffmpeg's log format changed), this is "
-        "NOT a verified pacing pass\n".format(elapsed)
-    )
-    sys.exit(1)
-
-budget = duration * 0.005 + 1
-elapsed_over = abs(elapsed - duration) > budget
-
-deltas_ms = []
-for i in range(1, len(frame_times)):
-    if frame_times[i] >= startup_skip_s:
-        deltas_ms.append((frame_times[i] - frame_times[i - 1]) * 1000.0)
-
-n = len(deltas_ms)
-stalls = sum(1 for d in deltas_ms if d > 33.0)
-bursts = sum(1 for d in deltas_ms if d < 4.0)
-burst_frac = (bursts / n) if n else 0.0
-devs = sorted(abs(d - nominal_ms) for d in deltas_ms)
-p95_dev = devs[int(0.95 * (len(devs) - 1))] if devs else 0.0
-
-cadence_bad = n > 0 and (p95_dev > 5.0 or stalls > 0 or burst_frac >= 0.02)
-
-summary = (
-    "elapsed={:.3f}s duration={:.3f}s budget={:.3f}s cadence nominal={:.3f}ms "
-    "p95_dev={:.3f}ms stalls(>33.0ms)={} bursts(<4.0ms)={:.1f}% deltas={}"
-).format(elapsed, duration, budget, nominal_ms, p95_dev, stalls, burst_frac * 100.0, n)
-
-if elapsed_over or cadence_bad:
-    sys.stderr.write("FAIL: lipsync playback pacing check -- " + summary + "\n")
-    sys.exit(1)
-
-print("ok: playback pacing check passed (" + summary + ")")
-PYEOF
+command -v $mpv_bin >/dev/null 2>&1 || { echo "FAIL: lipsync preflight -- mpv ('$mpv_bin') not installed on cam2. Provision it via scripts/setup-device.sh (STEP 16 installs mpv) or 'apt-get install -y mpv'." >&2; exit 1; }
+$mpv_bin --no-config --no-terminal --vo=null --ao=null --frames=120 '$media' >/dev/null 2>&1 || { echo "FAIL: lipsync preflight -- mpv ('$mpv_bin') could not decode '$media' (asset missing/corrupt, or mpv broken)." >&2; exit 1; }
+echo "ok: mpv preflight passed (decoded '$media' to null sinks, mpv present + functional)"
 CMDS
 }
 
-# lipsync_playback_cmds MEDIA FB_DEVICE AUDIO_DEVICE PLAYBACK_PIDFILE [AUDIO_LEAD_MS] -- the ONE
-# persistent ffmpeg process feeding both sinks (live-verified on cam2, issue 930): bgra pixel
-# format (matches src/probe/fb.rs's own painter convention), -ac 2 (the ALSA device refused a mono
-# stream in the live sanity test), backgrounded + its PID tracked so `stop` can find it.
-# `-stream_loop -1` loops the (short, ~60s) asset continuously for an arbitrary-length recording
-# window. `-re` (930 pacing follow-up) reads the input in real time -- without it /dev/fb0's own
-# lack of a clock means ALSA backpressure alone does not pace the video (measured: 4-5-frame
-# bursts, ~80ms stalls); same fix as `lipsync_pacing_guard_cmd`'s. Deliberately does NOT carry
-# `-vf showinfo` -- that is a one-shot MEASUREMENT instrument for the preflight guard only.
-# Callers should run `lipsync_pacing_guard_cmd` first (see above).
+# lipsync_playback_cmds MEDIA DRM_DEVICE AUDIO PIDFILE [AUDIO_LEAD_MS] -- issue 1187: the ONE
+# persistent mpv process feeding both sinks. Video goes to DRM/KMS (`--vo=drm`) -- mpv takes the DRM
+# master, page-flips its OWN buffers at vblank (never touches /dev/fb0) and restores the CRTC on
+# exit. Audio goes to the SAME ALSA device (`--audio-device=alsa/<AUDIO>`), forced stereo
+# (`--audio-channels=stereo` -- the live sanity test found the device refuses mono). `--loop-file=inf`
+# loops the (short, ~60s) asset continuously for an arbitrary-length recording window. Backgrounded +
+# its PID tracked so `stop` can find it; fail-loud liveness check (never claim a launch succeeded
+# without checking the process is actually alive). DRM_DEVICE empty = mpv auto-selects the connected
+# KMS card (#854); a non-empty value pins it via `--drm-device`.
 #
-# AUDIO_LEAD_MS (issue 930): two independent paired QR/QPSK-vs-SyncNet cross-checks derived the
-# ALSA output pipeline's depth D (via R = C + L - D, where R is the raw SyncNet-measured
-# rig-added offset and C is the chain offset the QR/QPSK leg measures at the SAME genlock_latency
-# knob) at ~408ms, stable to ~3ms across two days/knobs/content windows -- NOT a bare raw SyncNet
-# reading (an earlier -334ms figure silently folded in a nonzero chain offset from a run whose
-# QR/QPSK leg never completed; see the ticket for the derivation). Omitted or 0 (the default
-# before this knob existed) emits the ORIGINAL single-demux command BYTE-FOR-BYTE -- see
-# tests/harness_lipsync_test_mode.rs playback_cmds_zero_lead_is_byte_identical_to_original_930.
-# A positive value cancels the measured delay by opening a SECOND demux of the SAME asset for
-# VIDEO ONLY, carrying a positive `-itsoffset` (ffmpeg semantics: positive itsoffset DELAYS that
-# input's streams) -- the ticket's own stated equivalent of "advancing audio" (only the RELATIVE
-# offset between the two streams matters for lipsync perception, not which one is nominally
-# "early"/"late" from ffmpeg's own process-start clock). Audio keeps coming from the FIRST,
-# undelayed demux. Still exactly ONE ffmpeg process/PID -- the existing single-pidfile kill
-# lifecycle in `lipsync_stop_playback_cmds` is unchanged; two competing processes that could drift
-# apart was deliberately rejected (issue 930 design comment).
+# AUDIO_LEAD_MS (issue 930, carried into 1187): the calibrated ALSA-output-pipeline-depth
+# compensation. mpv's native `--audio-delay` replaces the old two-demux ffmpeg `-itsoffset`: a
+# NEGATIVE value delays the VIDEO relative to audio (mpv semantics: positive delays audio, negative
+# delays video), the exact equivalent of the old positive `-itsoffset` on the video input -- only
+# the RELATIVE offset between the two streams matters for lipsync perception. 0 (or omitted) emits
+# `--audio-delay=0.000` (no compensation). Still exactly ONE mpv process/PID -- the existing
+# single-pidfile kill lifecycle in `lipsync_stop_playback_cmds` is unchanged.
 lipsync_playback_cmds() {
-  local media="$1" fb="$2" audio="$3" pidfile="$4" lead_ms="${5:-0}"
+  local media="$1" drm="$2" audio="$3" pidfile="$4" lead_ms="${5:-0}" mpv_bin="${LIPSYNC_MPV_BIN:-mpv}"
+  local drm_opt=""
+  [ -n "$drm" ] && drm_opt="--drm-device=$drm "
+  local delay_s
   if [ "$lead_ms" -eq 0 ]; then
-    cat <<CMDS
-nohup ffmpeg -y -re -stream_loop -1 -i '$media' \\
-  -map 0:v -pix_fmt bgra -f fbdev '$fb' \\
-  -map 0:a -ac 2 -f alsa '$audio' \\
-  > /run/rig-lipsync-playback.log 2>&1 &
-echo \$! > '$pidfile'
-disown
-sleep 1
-PID=\$(cat '$pidfile')
-kill -0 "\$PID" 2>/dev/null || { echo "FAIL: lipsync playback ffmpeg (pid \$PID) died immediately -- see /run/rig-lipsync-playback.log" >&2; cat /run/rig-lipsync-playback.log >&2 || true; exit 1; }
-echo "ok: lipsync playback running (pid \$PID, media=$media, fb=$fb, audio=$audio)"
-CMDS
-    return
+    delay_s="0.000"
+  else
+    delay_s="$(awk -v ms="$lead_ms" 'BEGIN { printf "%.3f", -ms / 1000 }')"
   fi
-  local lead_s
-  lead_s="$(awk -v ms="$lead_ms" 'BEGIN { printf "%.3f", ms / 1000 }')"
   cat <<CMDS
-nohup ffmpeg -y -re -stream_loop -1 -i '$media' \\
-  -itsoffset $lead_s -re -stream_loop -1 -i '$media' \\
-  -map 1:v -pix_fmt bgra -f fbdev '$fb' \\
-  -map 0:a -ac 2 -f alsa '$audio' \\
+nohup $mpv_bin --no-config --no-terminal --vo=drm ${drm_opt}--loop-file=inf \\
+  --audio-device=alsa/$audio --audio-channels=stereo \\
+  --audio-delay=$delay_s \\
+  '$media' \\
   > /run/rig-lipsync-playback.log 2>&1 &
 echo \$! > '$pidfile'
 disown
 sleep 1
 PID=\$(cat '$pidfile')
-kill -0 "\$PID" 2>/dev/null || { echo "FAIL: lipsync playback ffmpeg (pid \$PID) died immediately -- see /run/rig-lipsync-playback.log" >&2; cat /run/rig-lipsync-playback.log >&2 || true; exit 1; }
-echo "ok: lipsync playback running (pid \$PID, media=$media, fb=$fb, audio=$audio, audio_lead_ms=$lead_ms)"
+kill -0 "\$PID" 2>/dev/null || { echo "FAIL: lipsync playback mpv (pid \$PID) died immediately -- see /run/rig-lipsync-playback.log" >&2; cat /run/rig-lipsync-playback.log >&2 || true; exit 1; }
+echo "ok: lipsync playback running (pid \$PID, media=$media, drm=${drm:-auto}, audio=$audio, audio_lead_ms=$lead_ms)"
 CMDS
 }
 
-# lipsync_stop_playback_cmds PLAYBACK_PIDFILE -- the counterpart kill for `stop`.
+# lipsync_stop_playback_cmds PLAYBACK_PIDFILE [FB_DEVICE] -- the counterpart kill for `stop`, plus
+# the issue-1187 belt-and-braces fb0 blank. After mpv exits it restores the CRTC, but if the kernel
+# fbdev emulation re-takes scanout from /dev/fb0 memory it could reveal whatever that memory last
+# held -- so zero fb0 now (the canonical #660 mechanism, reused from rig-test-ledger.sh) to
+# guarantee a black screen before rig-mode.sh restores the painter.
 lipsync_stop_playback_cmds() {
-  local pidfile="$1"
+  local pidfile="$1" fb="${2:-/dev/fb0}"
   cat <<CMDS
 PID=\$(cat '$pidfile' 2>/dev/null || true)
 if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
@@ -352,6 +203,7 @@ if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
   kill -9 "\$PID" 2>/dev/null || true
 fi
 rm -f '$pidfile'
+$(rig_test_ledger_clean_paint_fallback_cmds "$fb")
 CMDS
 }
 
@@ -372,7 +224,7 @@ cmd_start() {
   # /run (tmpfs): cam2 is a READ-ONLY-root appliance (issue 547) -- /root is not writable, the
   # first live run failed the scp with `dest open "/root/lipsync-test.mp4": Failure`.
   local remote_media="/run/lipsync-test.mp4"
-  echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping TEST-mode painter (frees /dev/fb0 + the ALSA marker device)"
+  echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping TEST-mode painter (frees the HDMI display + the ALSA marker device)"
   cam_ssh "$(lipsync_stop_painter_cmds "$PAINTER_PIDFILE")"
   # From here on cam2 has NEITHER the QR/QPSK painter NOR (yet) the lipsync playback running -- a
   # scp/ssh failure in either of the next two steps would otherwise abort under `set -e` and leave
@@ -384,17 +236,17 @@ cmd_start() {
   trap 'bash "$HERE/rig-mode.sh" test' ERR
   echo "[lipsync-test-mode] uploading $media -> cam2:$remote_media"
   sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$media" root@"${PAINTER_IP}:${remote_media}"
-  echo "[lipsync-test-mode] cam2: pacing sanity check (fb=${LIPSYNC_FB_DEVICE}, audio=${LIPSYNC_AUDIO_DEVICE})"
-  cam_ssh "$(lipsync_pacing_guard_cmd "$remote_media" "$LIPSYNC_FB_DEVICE" "$LIPSYNC_AUDIO_DEVICE")"
-  echo "[lipsync-test-mode] cam2: starting lipsync playback (fb=${LIPSYNC_FB_DEVICE}, audio=${LIPSYNC_AUDIO_DEVICE}, audio_lead_ms=${LIPSYNC_AUDIO_LEAD_MS})"
-  cam_ssh "$(lipsync_playback_cmds "$remote_media" "$LIPSYNC_FB_DEVICE" "$LIPSYNC_AUDIO_DEVICE" "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_AUDIO_LEAD_MS")"
+  echo "[lipsync-test-mode] cam2: mpv decode preflight (media=$remote_media)"
+  cam_ssh "$(lipsync_preflight_cmd "$remote_media")"
+  echo "[lipsync-test-mode] cam2: starting lipsync playback (drm=${LIPSYNC_DRM_DEVICE:-auto}, audio=${LIPSYNC_AUDIO_DEVICE}, audio_lead_ms=${LIPSYNC_AUDIO_LEAD_MS})"
+  cam_ssh "$(lipsync_playback_cmds "$remote_media" "$LIPSYNC_DRM_DEVICE" "$LIPSYNC_AUDIO_DEVICE" "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_AUDIO_LEAD_MS")"
   trap - ERR
   echo "[lipsync-test-mode] RESULT: lipsync-test mode ACTIVE on cam2 -- record now, then run 'lipsync-test-mode.sh stop' to restore TEST mode"
 }
 
 cmd_stop() {
-  echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping lipsync playback"
-  cam_ssh "$(lipsync_stop_playback_cmds "$LIPSYNC_PLAYBACK_PIDFILE")" || true
+  echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping lipsync playback + blanking fb0"
+  cam_ssh "$(lipsync_stop_playback_cmds "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_FB_DEVICE")" || true
   cam_ssh "rm -f /run/lipsync-test.mp4" || true
   echo "[lipsync-test-mode] restoring TEST mode (dual-QR + QPSK marker) via rig-mode.sh test"
   bash "$HERE/rig-mode.sh" test
