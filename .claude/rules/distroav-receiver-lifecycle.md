@@ -197,10 +197,20 @@ the affected senders + the operator action above (re-open the stock receivers; r
 change was intentional). The pure map-diff (`scripts/lib/ndi-portmap-health.sh`) is Tier-0-testable
 offline (avahi `-p` `\DDD` DECIMAL escapes, hostname-group isolation, OK/MOVED/ABSENT/UNSET →
 CHANGED-only-on-MOVED), fed a `NDI_PORTMAP_AVAHI_FIXTURE` in tests. An empty/anchor-absent live map
-is a GATHER ERROR (exit 2), never a page — OBS-down/box-reachability is #1001's job. Enable on dev1
-with `systemctl --user enable --now ndi-portmap-alert-watchdog.timer` (units in `systemd/`; DISABLED
-by default per the watchdog fleet convention). This protects the receivers #1180 could not — the
-stock TVs — by making any sender-map change LOUD instead of a silent wrong-source-on-air.
+is a GATHER ERROR (exit 2), never a page — OBS-down/box-reachability is #1001's job. Ships DISABLED
+by default per the watchdog fleet convention; enable on dev1 (same multi-step form as the netcfg
+sibling — the repo `systemd/` dir is NOT in systemd's unit search path, so a bare `systemctl enable`
+of the timer fails "Unit file does not exist"):
+
+```bash
+cp systemd/ndi-portmap-alert-watchdog.{timer,service} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now ndi-portmap-alert-watchdog.timer
+```
+
+Optional NDI_PORTMAP_* overrides (box IP, anchor, confirm/throttle) go in
+`~/.config/camera-box/ndi-portmap-alert.env` (the `.service` loads it via an optional
+`EnvironmentFile=-`). This protects the receivers #1180 could not — the stock TVs — by making any
+sender-map change LOUD instead of a silent wrong-source-on-air.
 
 **Investigation (pinning `2ME PGM` to the first port) — a filed follow-up, not done here.** See the
 #1181 investigation comment: DistroAV defers `main_output_init()`/`preview_output_init()` to

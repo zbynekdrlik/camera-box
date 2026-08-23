@@ -89,8 +89,15 @@ main() {
   # Run the read-only audit. stdout carries the one-line summary (NDI-PORTMAP-STABLE / -CHANGED ...);
   # exit 0 = STABLE, 3 = CHANGED, anything else = gather/usage error (OBS down / avahi unreachable /
   # anchor absent -> "nothing to decide", never a change page -- box reachability is #1001's job).
-  local summary rc
-  summary="$("$AUDIT" --check 2>/dev/null)"; rc=$?
+  # Capture the audit's STDERR (not >/dev/null it) so a require_tools FATAL (a missing avahi-browse /
+  # python3 / timeout on dev1) still reaches the journal on the error branch below -- the audit is
+  # built to "fail LOUD by name", and swallowing its stderr would defeat that (a permanently-blind
+  # watchdog). It still never PAGES on an error, so the no-false-page behavior is unchanged.
+  local summary rc auderr_file auderr
+  auderr_file="$(mktemp 2>/dev/null || echo /dev/null)"
+  summary="$("$AUDIT" --check 2>"$auderr_file")"; rc=$?
+  auderr="$(cat "$auderr_file" 2>/dev/null)"
+  [ "$auderr_file" != "/dev/null" ] && rm -f "$auderr_file" 2>/dev/null
   log "audit rc=$rc summary='${summary:-}'"
 
   if [ "$rc" -eq 0 ]; then
@@ -112,7 +119,7 @@ main() {
   fi
 
   if [ "$rc" -ne 3 ]; then
-    log "audit error (rc=$rc) -- nothing to decide this pass (OBS down / avahi unreachable is not this watchdog's job)"
+    log "audit error (rc=$rc) -- nothing to decide this pass (OBS down / avahi unreachable is not this watchdog's job).${auderr:+ audit stderr (may carry a require_tools FATAL): ${auderr}}"
     return 0
   fi
 

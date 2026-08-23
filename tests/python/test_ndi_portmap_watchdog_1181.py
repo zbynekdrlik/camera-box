@@ -117,6 +117,34 @@ def test_select_emits_nothing_when_the_anchor_is_absent():
     assert _bash(build).strip() == ""
 
 
+def test_select_bails_when_anchor_seen_under_two_hostnames():
+    # if the anchor name appears under >1 mDNS hostname (an ambiguous OBS-instance pick), select must
+    # fail SAFE and emit NOTHING (an empty/gather-error map never pages, far better than silently
+    # picking the wrong group the whole tool rests on).
+    dup = _AVAHI_LIVE + (
+        '=;enp2s0;IPv4;STRIH-SNV\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;'
+        'STRIH-SNV-DEAD-BEEF.local;10.77.9.202;5999;"g=P"\n')
+    build = (
+        'block=""; while IFS= read -r l; do p="$(ndi_avahi_parse_resolved "$l")"; '
+        '[ -n "$p" ] && block="${block}${p}"$\'\\n\'; done <<EOF\n' + dup + 'EOF\n'
+        'ndi_portmap_select "$block" "10.77.9.202" "STRIH-SNV" "STRIH-SNV (2ME PGM)"'
+    )
+    assert _bash(build).strip() == ""
+
+
+def test_select_dedupes_a_doubled_resolve():
+    # a multi-homed avahi resolve emitting the SAME name=port line twice must not double-report it.
+    dupline = (f'=;wlan0;IPv4;STRIH-SNV\\032\\040interkom\\041;_ndi._tcp;local;{_H_OBS};10.77.9.202;5962;"g=P"')
+    build = (
+        'block=""; while IFS= read -r l; do p="$(ndi_avahi_parse_resolved "$l")"; '
+        '[ -n "$p" ] && block="${block}${p}"$\'\\n\'; done <<EOF\n' + _AVAHI_LIVE + dupline + '\n' + 'EOF\n'
+        'ndi_portmap_select "$block" "10.77.9.202" "STRIH-SNV" "STRIH-SNV (2ME PGM)"'
+    )
+    out = _bash(build).strip().splitlines()
+    assert out.count("STRIH-SNV (interkom)=5962") == 1
+    assert len(out) == 5
+
+
 def test_classify_port_ok_moved_absent_unset():
     assert _bash('ndi_portmap_classify_port 5965 5965').strip() == "OK"
     assert _bash('ndi_portmap_classify_port 5966 5965').strip() == "MOVED"
@@ -222,6 +250,27 @@ def test_audit_check_new_sender_is_report_only_not_a_page():
         r = _audit("--check", added, base)
         assert r.returncode == 0, (r.stdout, r.stderr)  # a NEW sender does not page
         assert "NEW" in r.stderr and "Aux" in r.stderr
+
+
+def test_audit_check_report_only_absent_with_anchor_present_stays_stable():
+    # a NON-anchor sender removed (anchor still present) -> [report-only ABSENT], still exit 0 (a
+    # removed output reshuffles only the NEXT restart; it is not a live moved port).
+    with tempfile.TemporaryDirectory() as d:
+        base = str(pathlib.Path(d) / "baseline.json")
+        assert _audit("--capture", _AVAHI_LIVE, base).returncode == 0
+        no_interkom = "\n".join(l for l in _AVAHI_LIVE.splitlines() if "interkom" not in l) + "\n"
+        r = _audit("--check", no_interkom, base)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert "ABSENT" in r.stderr and "interkom" in r.stderr
+        assert "NDI-PORTMAP-STABLE" in r.stdout
+
+
+def test_audit_capture_refuses_empty_avahi_writes_no_file():
+    with tempfile.TemporaryDirectory() as d:
+        base = str(pathlib.Path(d) / "baseline.json")
+        r = _audit("--capture", "", base)
+        assert r.returncode == 2, (r.stdout, r.stderr)
+        assert not pathlib.Path(base).exists()  # a failed capture must never write a truncated baseline
 
 
 def test_baseline_json_checked_in_and_captured_from_live():

@@ -77,19 +77,26 @@ ndi_avahi_parse_resolved() {
 #   Spout at the same IP with the same "STRIH-SNV " prefix); grouping by the anchor's hostname isolates
 #   the OBS process and excludes the CG source (whose port never participates in the OBS reshuffle).
 #   If the anchor is absent (OBS down / avahi empty / anchor renamed) -> emits NOTHING; the caller
-#   treats an empty selection as a gather error, never as a port change.
+#   treats an empty selection as a gather error, never as a port change. If the anchor name is seen
+#   under MORE THAN ONE mDNS hostname (a coincidental duplicate that would make the OBS-instance pick
+#   ambiguous) -> also emits NOTHING (fail-safe: an empty/gather-error map never pages, far better than
+#   silently selecting the wrong group the whole tool rests on). Output is `sort -u` so a multi-homed
+#   avahi resolve that emits the same name=port twice never double-reports it.
 ndi_portmap_select() {
   local block="${1:-}" want_ip="${2:-}" prefix="${3:-}" anchor="${4:-}"
   awk -F'\t' -v ip="$want_ip" -v pfx="$prefix" -v anc="$anchor" '
     $2 == ip && index($1, pfx) == 1 {
       k++; nm[k] = $1; pt[k] = $3; hs[k] = $4
-      if ($1 == anc) ahost = $4
+      if ($1 == anc) {
+        if (ahost != "" && $4 != ahost) ambiguous = 1   # anchor under >1 hostname -> fail safe
+        ahost = $4
+      }
     }
     END {
-      if (ahost == "") exit 0
+      if (ahost == "" || ambiguous) exit 0
       for (i = 1; i <= k; i++) if (hs[i] == ahost) print nm[i] "=" pt[i]
     }
-  ' <<<"$block" | sort
+  ' <<<"$block" | sort -u
 }
 
 # ndi_portmap_classify_port <live_port> <baseline_port> -> stdout: OK | MOVED | ABSENT | UNSET
