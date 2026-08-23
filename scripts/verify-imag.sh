@@ -366,8 +366,13 @@ imag_proc_running() {
 # genlock_capability_from_log -- never a second, drifting pattern.
 imag_obs_log_shows_genlock_tick() {
   # #1183: -a + LC_ALL=C -> byte-literal match, so invalid-UTF-8 bytes in the OBS log (DistroAV
-  # mojibake) can never suppress a marker that IS present in a UTF-8 locale.
-  printf '%s' "$1" | LC_ALL=C grep -aiqE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)'
+  # mojibake) can never suppress a marker that IS present in a UTF-8 locale. Here-string, NOT a
+  # `printf '%s' "$1" | grep -q` pipe: under `set -euo pipefail`, grep -q exits at the first match
+  # and SIGPIPEs the printf writer on a >64 KiB log (the marker is a startup line at the top; live
+  # logs are 173 KB-40 MB) -> rc=141 -> pipefail false-FAILs a healthy box. The here-string has no
+  # writer process (bash materializes the body to a temp file), so it is SIGPIPE-immune at any size
+  # -- the issue-1047 sanctioned form, matching the three sibling matchers below.
+  LC_ALL=C grep -aiqE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' <<<"$1"
 }
 
 # imag_obs_log_no_version_mismatch LOG_TEXT -> 0 iff LOG_TEXT contains NO "compiled with newer
