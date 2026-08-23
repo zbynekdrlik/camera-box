@@ -155,6 +155,11 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # EVENT disable (cam2_painter_service_disable_cmds) and the TEST enable (the handoff lib).
 # shellcheck source=scripts/lib/cam2-painter-ro-persist.sh
 . "$RIG_MODE_DIR/lib/cam2-painter-ro-persist.sh"
+# issue 1176: the unconditional EVENT-stop framebuffer blank -- SIGTERM bypasses the issue-660
+# KmsPresenter-Drop blank, so an EVENT stop must zero /dev/fb0 itself or a leftover lipsync frame
+# lingers on cam2's HDMI monitor via kernel fbdev emulation. Used by painter_stop_remote.
+# shellcheck source=scripts/lib/cam2-fb0-blank.sh
+. "$RIG_MODE_DIR/lib/cam2-fb0-blank.sh"
 # #1075: SINGLE SOURCE OF TRUTH for the transient cam2-painter dead-man arm/disarm builders
 # (shared with recording-e2e.sh). EVENT mode must DISARM the timer (a SIGKILLed recording-e2e run
 # leaves it armed and it periodically restarts cam2-painter -- resurrecting the QR on air), and
@@ -525,6 +530,11 @@ if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
     systemctl status cam2-painter --no-pager >&2 2>/dev/null || true
     exit 1
   fi
+  # issue 1176: the painter is now dead and fb0 released; on this painter box camera-box (permanent
+  # #863 NO_DISPLAY) never re-grabs fb0, so the kernel fbdev emulation would scan out whatever stale
+  # frame is left in /dev/fb0 (a lipsync raw-fbdev write; SIGTERM bypassed the issue-660 Drop blank).
+  # Zero it UNCONDITIONALLY so an EVENT stop always leaves the HDMI monitor clean, not a frozen frame.
+$(cam2_fb0_blank_cmds)
   echo "PASS: #892 transient painter stopped, camera-box active, permanent cam2-painter stopped+disabled (no QR can return, including across a reboot)"
 else
   #     The EFFECTIVE Environment no longer carries CAMERA_BOX_NO_DISPLAY=1 (same resolved-check
