@@ -1562,7 +1562,7 @@ event_mode_assert() {
 do_event() {
   require_sshpass
   # issue 1171: resolve the imag offline-leg decision ONCE so the EVENT burn-OFF sweep
-  # and event_mode_assert's item-3 imag legs skip a legitimately-absent (acked-offline+unreachable)
+  # and the EVENT-assert item-3 imag legs skip a legitimately-absent (acked-offline+unreachable)
   # imag instead of aborting the EVENT switch / falsely failing the burns-off contract.
   resolve_imag_offline_leg
   # #281 Fix#3: clear the rig-active heartbeat — we are returning the rig to a clean prod/EVENT
