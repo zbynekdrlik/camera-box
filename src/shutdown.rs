@@ -57,9 +57,9 @@ pub fn is_shutdown_requested() -> bool {
 /// atomic store is the only async-signal-safe work a handler may do (it is a
 /// single lock-free instruction on x86_64, the only target the cameras run; no
 /// allocation, no locks, no I/O).
-//
-// RED stub: a no-op, so the flag never gets set — `flag_round_trip` fails.
-pub fn request_shutdown() {}
+pub fn request_shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+}
 
 /// Test-only reset of the global flag so a unit test can observe the
 /// clear→set→clear round-trip without a cross-test race (only one test touches
@@ -73,11 +73,8 @@ fn reset_for_test() {
 /// Pure loop-decision: the painter keeps painting iff it was NOT locally stopped
 /// AND no shutdown signal has been requested. The deployed `run_painter` loop
 /// calls exactly this, so the Tier-0-tested logic is the shipped logic.
-//
-// RED stub: ignores the `shutdown_requested` term — `painter_stops_on_shutdown`
-// fails.
-pub fn painter_should_continue(local_stop: bool, _shutdown_requested: bool) -> bool {
-    !local_stop
+pub fn painter_should_continue(local_stop: bool, shutdown_requested: bool) -> bool {
+    !local_stop && !shutdown_requested
 }
 
 /// Install the SIGTERM/SIGINT/SIGHUP handlers (idempotent). Call once at painter

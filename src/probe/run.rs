@@ -164,6 +164,10 @@ fn spawn_painter_wedge_watchdog(heartbeat: Arc<AtomicU64>, stop: Arc<AtomicBool>
 }
 
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
+    // #1186: install the graceful-shutdown handler so a signal-driven stop of the single-box
+    // loopback run also breaks the loops cleanly and lets KmsPresenter::Drop blank /dev/fb0
+    // (issue-660). Idempotent.
+    crate::shutdown::install();
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
     let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -217,6 +221,11 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
     let deadline = Instant::now() + cfg.duration;
     while Instant::now() < deadline {
         if painter_handle.is_finished() || reader_handle.is_finished() {
+            break;
+        }
+        // #1186: break on a graceful shutdown signal too, so the painter's presenter Drop runs
+        // the issue-660 fb0 blank on a signal-driven stop of the loopback run.
+        if crate::shutdown::is_shutdown_requested() {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -283,6 +292,12 @@ pub fn serialize_painter_log(emitted: &[(u32, i64, i64)]) -> String {
 /// camera box in Phase 2, where the QR reaches NDI via camera-box's own
 /// capture→NDI path and the taps run elsewhere (dev1).
 pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
+    // #1186: install the SIGTERM/SIGINT/SIGHUP handler so `systemctl stop cam2-painter.service`
+    // (the most common exit path since issue 892) sets the shutdown flag this loop + the painter
+    // thread poll — breaking cleanly so KmsPresenter::Drop runs the issue-660 fb0 blank, instead
+    // of SIGTERM's default disposition killing the process with the last frame frozen on the
+    // monitor. Idempotent.
+    crate::shutdown::install();
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
     let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -394,6 +409,13 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     let mut last_degraded_log = Instant::now();
     while Instant::now() < deadline {
         if painter_handle.is_finished() {
+            break;
+        }
+        // #1186: a graceful shutdown signal (SIGTERM/SIGINT/SIGHUP) requested a stop. Break so the
+        // shared `stop` is set + the painter joined below — its KmsPresenter::Drop runs the #660
+        // blank_fbdev, leaving /dev/fb0 black instead of the last painted frame revealed on cam2's
+        // HDMI monitor by kernel fbdev emulation once the process dies.
+        if crate::shutdown::is_shutdown_requested() {
             break;
         }
         // #936: fail the WHOLE run loudly the moment the QPSK marker thread dies before this
