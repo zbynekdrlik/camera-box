@@ -316,6 +316,14 @@ pub mod genlock_backlog;
 // probe-gated `probe::fb::blank_fbdev` (the actual ioctl + write) uses this geometry decision.
 pub mod fb_blank;
 
+// #1186 — graceful in-process shutdown for the frame-probe painter: an async-signal-safe
+// SIGTERM/SIGINT/SIGHUP handler sets a flag the painter loops poll, so a `systemctl stop
+// cam2-painter.service` runs the SAME issue-660 `blank_fbdev` teardown a clean self-exit does
+// (SIGTERM's default disposition skips `KmsPresenter::Drop`, leaving a stale frame on /dev/fb0).
+// The PURE half (flag + `painter_should_continue`) is std-only and Tier-0-tested; the `install()`
+// sigaction glue is cfg(target_os="linux") on the existing `libc` dep, compiled by CI.
+pub mod shutdown;
+
 // #707 — NDI blocking-send STALL diagnostic (pure decision). Given how long a SINGLE blocking
 // `NDIlib_send_send_video_v2` call took and the sender's configured frame interval, decides
 // whether THIS call stalled — the missing direct evidence the #656/#663/#665/#666/#707
