@@ -167,8 +167,10 @@ genlock_from_log() {
   # and leave printf writing into a closed pipe -> SIGPIPE -> pipefail flips the if-condition false
   # and the function wrongly returns UNKNOWN on a large real log. `grep | head -1` reads the input
   # through instead. `|| true` keeps a no-match from tripping the caller's set -e.
+  # #1184: LC_ALL=C grep -a -> byte-literal, so invalid-UTF-8 bytes (DistroAV mojibake) in the OBS
+  # log cannot suppress a marker that IS present when this greps locally in a UTF-8 locale.
   line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock:.*render tick (ENABLED|DISABLED)' | head -1 || true)"
+    | LC_ALL=C grep -aiE 'genlock:.*render tick (ENABLED|DISABLED)' | head -1 || true)"
   case "$line" in
     *ENABLED*) echo 1 ;;
     *DISABLED*) echo 0 ;;
@@ -336,8 +338,10 @@ drift_check_all_files() {
 # sibling *_from_log parsers — see genlock_from_log's note).
 genlock_capability_from_log() {
   local text="$1" line
+  # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183); this reads
+  # remote OBS-log text but greps LOCALLY (dev1's UTF-8 locale), so it needs the byte-literal match.
   line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' \
+    | LC_ALL=C grep -aiE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' \
     | head -1 || true)"
   # Echo "1" when a build-unique marker is present; otherwise echo NOTHING (the absent signal).
   # `return 0` so the absent case is a clean exit (empty output, not a non-zero status) — the sibling
@@ -392,9 +396,12 @@ genlock_src_latency_for() {
 # genlock_capability_from_log already covers as one of its alternation branches). Drain-safe
 # (grep|sed|head, never grep -q) matching the sibling *_from_log parsers.
 genlock_latency_ms_from_log() {
+  # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183). The `sed`
+  # ALSO needs LC_ALL=C: grep -a passes the raw invalid bytes through, and sed in a UTF-8 locale
+  # chokes on them and fails the extraction (returns the whole mangled line instead of the digits).
   printf '%s\n' "$1" \
-    | grep -iE 'genlock:.*latency = [0-9]+ ms' \
-    | sed -n 's/.*latency = \([0-9][0-9]*\) ms.*/\1/p' | head -1 || true
+    | LC_ALL=C grep -aiE 'genlock:.*latency = [0-9]+ ms' \
+    | LC_ALL=C sed -n 's/.*latency = \([0-9][0-9]*\) ms.*/\1/p' | head -1 || true
 }
 
 # genlock_rt_pin_from_log TEXT -> "ok" if imag-nb's OBS log shows the genlock render-tick thread
@@ -413,15 +420,16 @@ genlock_latency_ms_from_log() {
 # false non-match when the upstream `printf` is SIGPIPE'd after grep's early exit).
 genlock_rt_pin_from_log() {
   local text="$1" ok_line failed_line
+  # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183).
   ok_line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
+    | LC_ALL=C grep -aiE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
     | head -1 || true)"
   if [ -n "$ok_line" ]; then
     printf 'ok\n'
     return 0
   fi
   failed_line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock: could NOT set render-tick thread SCHED_FIFO' \
+    | LC_ALL=C grep -aiE 'genlock: could NOT set render-tick thread SCHED_FIFO' \
     | head -1 || true)"
   [ -n "$failed_line" ] && printf 'failed\n'
   return 0

@@ -1831,15 +1831,17 @@ if [ "$OBS_LAUNCHED_THIS_RUN" -eq 1 ]; then
     LATEST_LOG="$(ls -t "$OBS_LOG_DIR"/*.txt 2>/dev/null | head -1 || true)"
     [ -n "$LATEST_LOG" ] || fail "no OBS log found in $OBS_LOG_DIR — cannot verify the genlock build"
     LOG_TEXT="$(cat "$LATEST_LOG")"
-    echo "$LOG_TEXT" | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
+    # #1184: LC_ALL=C grep -a -> byte-literal match, so invalid-UTF-8 bytes in the OBS log (DistroAV
+    # mojibake) can never suppress a marker that IS present in a UTF-8 locale (same class as #1183).
+    echo "$LOG_TEXT" | LC_ALL=C grep -aiE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
         || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap step)"
     echo "  genlock render tick ENABLED (#460 build proof)"
-    if echo "$LOG_TEXT" | grep -i '\[distroav\] plugin loaded' >/dev/null; then
+    if echo "$LOG_TEXT" | LC_ALL=C grep -ai '\[distroav\] plugin loaded' >/dev/null; then
         echo "  DistroAV plugin loaded"
     else
         echo "  WARNING: no '[distroav] plugin loaded' line yet (may log lazily on first NDI activation)"
     fi
-    if echo "$LOG_TEXT" | grep -i 'NDI library initialized' >/dev/null; then
+    if echo "$LOG_TEXT" | LC_ALL=C grep -ai 'NDI library initialized' >/dev/null; then
         echo "  NDI runtime loaded"
     else
         echo "  WARNING: no 'NDI library initialized' line yet"
