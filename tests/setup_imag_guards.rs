@@ -1583,7 +1583,9 @@ fn setup_imag_self_heals_leftover_pl1_dropin_1162() {
     );
     let rm_at = body
         .find("removing leftover hand-applied PL1 drop-in")
-        .expect("{SETUP} must announce + remove the leftover PL1 drop-in (#1162 self-heal, #784 lesson)");
+        .expect(
+        "{SETUP} must announce + remove the leftover PL1 drop-in (#1162 self-heal, #784 lesson)",
+    );
     let enable_at = body
         .find("systemctl enable --now imag-power-envelope.service")
         .expect("{SETUP} must enable imag-power-envelope.service");
