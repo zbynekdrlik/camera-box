@@ -114,6 +114,21 @@ fn set_fractional_refresh_prints_the_flag() {
 }
 
 #[test]
+fn outer_whitespace_is_trimmed() {
+    // parse_display_mode trims each component; the passthrough trims OUTER whitespace too, so a
+    // trailing/leading space accident works instead of aborting the whole E2E run.
+    let (ok, out, _err) = run(
+        "export PAINTER_DISPLAY_MODE=' 2560x1080@100 '",
+        "painter_display_mode_args",
+    );
+    assert!(
+        ok,
+        "#1179: a space-padded but well-shaped value must be trimmed + accepted, not rejected"
+    );
+    assert_eq!(out, "--display-mode 2560x1080@100");
+}
+
+#[test]
 fn explicit_arg_overrides_env() {
     let (ok, out, _err) = run(
         "export PAINTER_DISPLAY_MODE=2560x1080@100",
@@ -182,6 +197,33 @@ fn malformed_value_aborts_the_caller_under_set_e() {
     );
 }
 
+#[test]
+fn malformed_value_aborts_the_split_local_form_in_a_function_under_set_e() {
+    // The AV_RESTART site uses `local X` then `X="$(painter_display_mode_args)"` INSIDE a function
+    // (split decl/assign — deliberately, because a collapsed `local X="$(...)"` MASKS the command
+    // substitution's exit code (SC2155) and returns 0, silently dropping a malformed value). This
+    // guards that regression: the split form must still abort under set -e.
+    let script = format!(
+        "set -euo pipefail\n. \"{}\"\n\
+         f() {{ local x; x=\"$(PAINTER_DISPLAY_MODE=bad@value painter_display_mode_args)\"; \
+         echo \"REACHED x=[$x]\"; }}\nf",
+        lib_script().display(),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("run bash");
+    assert!(
+        !out.status.success(),
+        "#1179: a malformed value must abort even the AV split-local-in-a-function form under set -e"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("REACHED"),
+        "#1179: the function must NOT continue past a malformed override"
+    );
+}
+
 // --- layer 2: the launch embedding (fake frame-probe on PATH) ---
 
 fn scratch(name: &str) -> PathBuf {
@@ -220,7 +262,9 @@ fn launch_argv(env: &str) -> String {
            --paint-fps 60 --qr-size 700 --run-id 12345 --duration-secs 330 \\\n\
            $_cam2_marker_flags \\\n\
            $_cam2_display_mode_flag \\\n\
-           >/dev/null 2>&1 & )\nwait 2>/dev/null || true\nsleep 0.2\ncat \"{log}\"",
+           >/dev/null 2>&1 & )\nwait 2>/dev/null || true\n\
+         _i=0; while [ ! -s \"{log}\" ] && [ $_i -lt 100 ]; do sleep 0.05; _i=$((_i+1)); done\n\
+         cat \"{log}\"",
         bin = dir.display(),
         log = argv_log.display(),
         lib = lib_script().display(),

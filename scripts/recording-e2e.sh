@@ -2400,8 +2400,9 @@ fi
 _cam2_kill_existing="pkill -x frame-probe 2>/dev/null || true; \
    ki=0; while pgrep -x frame-probe >/dev/null 2>&1 && [ \$ki -lt 20 ]; do sleep 0.5; ki=\$((ki+1)); done;"
 # #1179: opt-in painter display-mode override (mode-independent, so computed once outside the
-# _cam2_prep branch). Empty unless PAINTER_DISPLAY_MODE is a valid WxH@RR; a malformed value
-# FAILS LOUD here (VAR="$(...)" under set -e) before the ssh, not on the box minutes later.
+# _cam2_prep branch). Empty unless PAINTER_DISPLAY_MODE is set to a WxH@RR shape; a mis-shaped or
+# injection value FAILS LOUD here (VAR="$(...)" under set -e) before the ssh. The authoritative
+# range check (dims/refresh > 0, no overflow) is frame-probe's parse_display_mode on the box.
 _cam2_display_mode_flag="$(painter_display_mode_args)"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
   "$_cam2_prep \
@@ -3003,7 +3004,9 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
     local label="$1"
     local marker_csv="$OUTDIR/av-restart-${label}-${RUN_ID}.csv"
     # #1179: same opt-in painter display-mode override as the [3/8] launch (empty unless
-    # PAINTER_DISPLAY_MODE is a valid WxH@RR; a malformed value fails loud here under set -e).
+    # PAINTER_DISPLAY_MODE is set to a WxH@RR shape; a mis-shaped/injection value fails loud here
+    # under set -e; the box's parse_display_mode does the authoritative range check). Split
+    # local-decl / assignment so set -e sees the exit code (a `local X=$(...)` would mask it).
     local _av_display_mode_flag
     _av_display_mode_flag="$(painter_display_mode_args)"
     # #772: cam1's camera-box dead-man was armed at [2/8], but THIS restart-survival mode has an

@@ -23,17 +23,27 @@
 # painter_display_mode_args [MODE] -> print the frame-probe painter display-mode flag args.
 #   MODE defaults to $PAINTER_DISPLAY_MODE. When empty/unset: print NOTHING and return 0 (the
 #   byte-identical-to-today path -- the caller embeds an empty string, no --display-mode token).
-#   When set: validate the WxH@RR shape parse_display_mode accepts (integer W/H, integer-or-
-#   fractional RR) -- this ALSO blocks shell-metacharacter injection into the remote ssh command --
-#   then print `--display-mode <MODE>`. A malformed value is a FAIL-LOUD error (message to stderr,
-#   return 1): captured via `VAR="$(painter_display_mode_args)"` under the caller's `set -euo
-#   pipefail`, that aborts the run in seconds -- before any ssh/deploy -- instead of a painter dying
-#   on the box and being caught by a downstream freshness gate minutes later.
+#   When set: outer whitespace is trimmed (matching parse_display_mode's own .trim(), so a
+#   trailing-space accident works instead of aborting the run), then the value is checked against
+#   the WxH@RR SHAPE (integer W/H, integer-or-fractional RR). This is a COARSE shape + injection
+#   guard, NOT a full mirror of parse_display_mode: it FAILS LOUD locally on a mis-shaped value (a
+#   typo, or any shell-metacharacter injection into the remote ssh command) -- captured via
+#   `VAR="$(painter_display_mode_args)"` under the caller's `set -euo pipefail`, that aborts the run
+#   in seconds, before any ssh/deploy. The AUTHORITATIVE range validation (width/height/refresh > 0,
+#   no u32 overflow) stays with frame-probe's parse_display_mode ON THE BOX: a well-shaped but
+#   out-of-range value (e.g. 0x1080@60) passes this guard and is rejected on the box, where the
+#   painter exits on start -- a narrow, implausible operator-typo class that still fails loud, one
+#   layer later. A perfect regex mirror of parse_display_mode is impossible (it .trim()s each
+#   component, accepts leading zeros, parses refresh as f64), so this deliberately does not attempt
+#   one; it only guarantees shape + injection safety here and defers the range check to the parser.
 painter_display_mode_args() {
   local mode="${1:-${PAINTER_DISPLAY_MODE:-}}"
+  # Trim outer whitespace (parse_display_mode trims too) so a trailing/leading space is not a run abort.
+  mode="${mode#"${mode%%[![:space:]]*}"}"
+  mode="${mode%"${mode##*[![:space:]]}"}"
   [ -n "$mode" ] || return 0
   if ! printf '%s' "$mode" | grep -qE '^[0-9]+x[0-9]+@[0-9]+(\.[0-9]+)?$'; then
-    echo "ERROR: PAINTER_DISPLAY_MODE='$mode' is not a valid WxH@RR display mode (e.g. 2560x1080@100 or 1920x1080@59.94)" >&2
+    echo "ERROR: PAINTER_DISPLAY_MODE='$mode' is not a valid WxH@RR display-mode shape (e.g. 2560x1080@100 or 1920x1080@59.94)" >&2
     return 1
   fi
   printf -- '--display-mode %s' "$mode"
