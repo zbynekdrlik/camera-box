@@ -1881,8 +1881,10 @@ fn verify_imag_reads_1188_guard_state_before_the_840_restart_wipes_it() {
     let guard_read = body
         .find("imag_power_guard_stepped_from_state")
         .expect("check (u) must read the guard state (#1188)");
+    // Anchor the restart on the actual CALL, not the fn name (which first appears at its DEFINITION
+    // far above check (u)) — the exact literal the sibling #884/#1015/#1040 ordering tests use.
     let restart_call = body
-        .find("imag_obs_service_restart_cmd")
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
         .expect("check (o)'s restart must exist");
     assert!(
         guard_read < restart_call,

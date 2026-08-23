@@ -117,9 +117,13 @@ set -euo pipefail
 #       IMAG_PL1_W (default 45 W, #1162) and is enabled; every iGPU slpc_ignore_eff_freq knob reads 1;
 #       thermald is PURGED (not installed/active/enabled); BOTH imag-power-envelope.service and
 #       imag-power-envelope-guard.timer are enabled+active; TCPU is below the guard's step-down
-#       ceiling (a reading at/above it means a clamp episode is live); and the guard's journald tag
-#       is readable. Shares imag_power_envelope_verdict with drift-guard's --check-imag facet. MUST
-#       run BEFORE check (o) below (its restart replaces the tracked obs process, #884 ordering).
+#       ceiling; and the guard's journald tag is readable. Shares imag_power_envelope_verdict with
+#       drift-guard's --check-imag facet. GUARD-STATE-AWARE (#1188): a pl1 DRIFT to the 25 W
+#       step-down value AND a TCPU at/above the ceiling are downgraded to OK-with-note when the
+#       guard's own /run state proves a LEGITIMATE thermal step-down (STEPPED=1) -- on the #1162
+#       unit that clamp is the normal steady state, NOT foreign drift; a step-down the guard did not
+#       make still FAILs. MUST run BEFORE check (o) below (its restart replaces the tracked obs
+#       process, #884 ordering).
 #   (v) power-button + lid + sleep protection (#727): imag-nb is a PRODUCTION box (a short
 #       accidental power-button press suspended it during the 2026-07-12 live event). The running
 #       logind reports HandlePowerKey/HandleSuspendKey/HandleHibernateKey/HandleLidSwitch = ignore
@@ -756,6 +760,45 @@ imag_maxperf_state_ok() {
   return 0
 }
 
+# --- (u) power/thermal-envelope ACCEPTANCE reclassification (guard-state-aware, #1188) --------
+# The SHARED imag_power_envelope_verdict (scripts/lib/imag-power-envelope.sh) is deliberately
+# guard-BLIND: it reports a pl1 DRIFT whenever the live PL1 != the pinned watts. That is CORRECT for
+# drift-guard's STRICT [0/8] preflight (it must refuse a run during a clamp episode), but on the
+# #1162 unit the guard's OWN legitimate thermal step-down (PL1 -> 25 W at >=93 C) is the PERMANENT
+# steady state, so the ACCEPTANCE gate must not read it as foreign drift. These two functions encode
+# the acceptance-ONLY downgrade; the shared verdict stays untouched (drift-guard is unaffected).
+
+# imag_power_pl1_guard_reclassify OBSERVED_UW ENABLED GUARD_STATE STEPDOWN_WATTS -> echoes
+# `stepdown-ok` iff a pl1 DRIFT is FULLY explained by an active guard thermal step-down (GUARD_STATE
+# == stepped AND the live long_term uW == STEPDOWN_WATTS-in-uW AND the constraint is still enabled);
+# otherwise `drift` (foreign re-program, a wrong/disabled value, or the guard is NOT stepped / its
+# state is unreadable -> never mask a genuine drift). Reuses the shared imag_pl1_watts_to_uw for the
+# exact watt->uW comparison. Pure; always returns 0 (called inside a `$(...)` under set -euo pipefail).
+imag_power_pl1_guard_reclassify() {
+  local observed_uw="$1" enabled="$2" guard_state="$3" stepdown_watts="$4" stepdown_uw
+  stepdown_uw="$(imag_pl1_watts_to_uw "$stepdown_watts" 2>/dev/null || true)"
+  if [ "$guard_state" = "stepped" ] && [ -n "$stepdown_uw" ] \
+    && [ "$observed_uw" = "$stepdown_uw" ] && [ "$enabled" = "1" ]; then
+    printf 'stepdown-ok\n'
+  else
+    printf 'drift\n'
+  fi
+}
+
+# imag_power_tcpu_guard_verdict TCPU CEIL GUARD_STATE -> echoes one of `unreadable | ok | ok-stepdown
+# | over-ceiling`. `unreadable` = TCPU/CEIL empty or non-numeric. `ok` = TCPU below the step-down
+# ceiling. `ok-stepdown` = TCPU at/above the ceiling BUT the guard has stepped PL1 down: on the #1162
+# unit the box holds at its thermal ceiling even under the 25 W clamp, so this is the EXPECTED steady
+# state, not a new clamp episode. `over-ceiling` = at/above the ceiling with the guard NOT stepped
+# (or its state unknown) -> a live clamp episode / foreign heat (the existing FAIL). Pure; returns 0.
+imag_power_tcpu_guard_verdict() {
+  local tcpu="$1" ceil="$2" guard_state="$3"
+  case "$tcpu" in '' | *[!0-9-]*) printf 'unreadable\n'; return 0 ;; esac
+  case "$ceil" in '' | *[!0-9-]*) printf 'unreadable\n'; return 0 ;; esac
+  if [ "$tcpu" -lt "$ceil" ]; then printf 'ok\n'; return 0; fi
+  if [ "$guard_state" = "stepped" ]; then printf 'ok-stepdown\n'; else printf 'over-ceiling\n'; fi
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -1269,26 +1312,52 @@ else
   # Fall back to the lib/env default only when the README is unreadable.
   PE_PIN="$(imag_power_pl1_pin_from_readme_text "$(cat "$HERE/../vendor/README.md" 2>/dev/null || true)")"
   [ -n "$PE_PIN" ] || PE_PIN="${IMAG_PL1_W:-45}"
+
+  # #1188: consult the guard's OWN /run state so a LEGITIMATE thermal step-down (the guard clamped
+  # PL1 to the 25 W step-down on a >=93 C excursion -- on the #1162 unit the normal steady state) is
+  # not read as a FOREIGN PL1 re-program. Read the state file over the same SSH (the guard writes it
+  # world-readable, #1188); an unreadable/absent file -> `unknown` -> we keep the strict DRIFT/FAIL
+  # (never mask). The SHARED imag_power_envelope_verdict stays guard-BLIND, so drift-guard's strict
+  # preflight is unaffected -- the downgrade below is acceptance-gate-only.
+  PE_GUARD_RAW="$(ssh_box_timeout "$IMAG_READ_TIMEOUT" "cat ${IMAG_POWER_GUARD_STATE:-$IMAG_POWER_GUARD_STATE_FILE} 2>/dev/null")" || true
+  PE_GUARD_STATE="$(imag_power_guard_stepped_from_state "$PE_GUARD_RAW")"
+  PE_PL1_UW="$(imag_power_zone_select "$PE_GATHER" || true)"
+  PE_PL1_EN="$(imag_power_pl1_enabled "$PE_GATHER" || true)"
+  PE_STEPDOWN_W="${IMAG_PL1_STEPDOWN_W:-25}"
+
   while IFS='|' read -r pe_facet pe_status pe_detail; do
     [ -n "$pe_facet" ] || continue
     if [ "$pe_status" = "OK" ]; then
       ok "power envelope (${pe_facet}): ${pe_detail}"
+    elif [ "$pe_facet" = "pl1" ] && [ "$pe_status" = "DRIFT" ] \
+      && [ "$(imag_power_pl1_guard_reclassify "$PE_PL1_UW" "$PE_PL1_EN" "$PE_GUARD_STATE" "$PE_STEPDOWN_W")" = "stepdown-ok" ]; then
+      ok "power envelope (pl1): long_term=${PE_PL1_UW}uW at the ${PE_STEPDOWN_W}W step-down, guard thermal step-down active -- a legitimate #1040 clamp (guard state STEPPED), NOT foreign drift (#1188)"
     else
       fail "power envelope (${pe_facet}) ${pe_status}: ${pe_detail}"
     fi
   done <<< "$(imag_power_envelope_verdict "$PE_GATHER" "$PE_PIN")"
 
   # TCPU must be BELOW the guard's step-down ceiling -- a reading at/above it means a clamp episode
-  # is live right now (the envelope is thermally degraded, not merely mis-provisioned).
+  # is live right now (the envelope is thermally degraded, not merely mis-provisioned) -- UNLESS the
+  # guard has already stepped PL1 down (#1188): on the #1162 unit the box holds at its thermal
+  # ceiling even under the 25 W clamp, so a stepped-down at/above-ceiling reading is the EXPECTED
+  # steady state, not a new clamp episode.
   PE_TCPU="$(printf '%s\n' "$PE_GATHER" | sed -n 's/^TCPU|//p' | head -1)"
   PE_CEIL="${IMAG_TCPU_STEPDOWN_C:-93}"
-  if [ -z "$PE_TCPU" ]; then
-    fail "TCPU (x86_pkg_temp) unreadable in the envelope gather -- cannot confirm the box is below the ${PE_CEIL}C step-down ceiling (#1040)"
-  elif [ "$PE_TCPU" -lt "$PE_CEIL" ]; then
-    ok "TCPU=${PE_TCPU}C is below the ${PE_CEIL}C guard step-down ceiling (#1040)"
-  else
-    fail "TCPU=${PE_TCPU}C is AT/ABOVE the ${PE_CEIL}C step-down ceiling -- a thermal clamp episode is live (#1040)"
-  fi
+  case "$(imag_power_tcpu_guard_verdict "$PE_TCPU" "$PE_CEIL" "$PE_GUARD_STATE")" in
+    unreadable)
+      fail "TCPU (x86_pkg_temp) unreadable in the envelope gather -- cannot confirm the box is below the ${PE_CEIL}C step-down ceiling (#1040)"
+      ;;
+    ok)
+      ok "TCPU=${PE_TCPU}C is below the ${PE_CEIL}C guard step-down ceiling (#1040)"
+      ;;
+    ok-stepdown)
+      ok "TCPU=${PE_TCPU}C is at/above the ${PE_CEIL}C step-down ceiling BUT the guard has stepped PL1 down (thermal step-down active) -- the expected steady state on this unit under the ${PE_STEPDOWN_W}W clamp (#1162/#1188), not a new clamp episode"
+      ;;
+    *)
+      fail "TCPU=${PE_TCPU}C is AT/ABOVE the ${PE_CEIL}C step-down ceiling -- a thermal clamp episode is live (#1040)"
+      ;;
+  esac
 
   # The guard's journald tag must be readable -- proves its step-down/re-assert transitions are
   # retrievable for the dev1-side alert watchdog (the never-silent-degradation rule).

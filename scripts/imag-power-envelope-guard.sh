@@ -34,7 +34,7 @@ PL1_W="${IMAG_PL1_W:-45}"
 STEPDOWN_W="${IMAG_PL1_STEPDOWN_W:-25}"
 CEIL_C="${IMAG_TCPU_STEPDOWN_C:-93}"
 RESTORE_C="${IMAG_TCPU_RESTORE_C:-85}"
-STATE="${IMAG_POWER_GUARD_STATE:-/run/imag-power-envelope-guard.state}"
+STATE="${IMAG_POWER_GUARD_STATE:-${IMAG_POWER_GUARD_STATE_FILE:-/run/imag-power-envelope-guard.state}}"
 LOG_TAG="${IMAG_POWER_LOG_TAG:-imag-power-envelope}"
 
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; }
@@ -124,10 +124,18 @@ read -r NEW_HOT NEW_COOL NEW_STEPPED <<< "$(imag_power_guard_next_streaks \
   "$ACTION" "$this_hot" "$this_cool" "$HOT" "$COOL" "$STEPPED")"
 
 _tmp="$(mktemp "${STATE}.XXXXXX" 2>/dev/null || echo "${STATE}.tmp")"
-{
+if {
   printf 'HOT=%s\n' "$NEW_HOT"
   printf 'COOL=%s\n' "$NEW_COOL"
   printf 'STEPPED=%s\n' "$NEW_STEPPED"
-} > "$_tmp" 2>/dev/null && mv -f "$_tmp" "$STATE" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+} > "$_tmp" 2>/dev/null; then
+  # World-readable: verify-imag.sh consults STEPPED over a NON-root SSH (newlevel) to tell a
+  # legitimate thermal step-down from foreign drift (#1188). The file holds only HOT/COOL/STEPPED
+  # integers -- no secret. chmod the tmp BEFORE the atomic mv so the installed file is already 0644.
+  chmod 0644 "$_tmp" 2>/dev/null || true
+  mv -f "$_tmp" "$STATE" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+else
+  rm -f "$_tmp" 2>/dev/null || true
+fi
 
 exit 0
