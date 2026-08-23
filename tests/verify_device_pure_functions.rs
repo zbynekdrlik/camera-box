@@ -1777,3 +1777,41 @@ fn verify_device_wires_per_box_gain_table() {
         "cam1-4 = Mic 75/PCM 79, cam5-7 = Mic 80/PCM 94 (owner's per-box table)"
     );
 }
+
+/// issue 1187 — verify-device.sh must ALSO acceptance-check that mpv is present + runnable (the
+/// DRM/KMS lipsync playback runtime that replaced the legacy raw-fbdev ffmpeg write), mirroring the
+/// (x) ffmpeg check. It must be inserted BEFORE the (q) block so (q) stays the intentionally-LAST
+/// check, and it must FAIL loud (never merely warn) when mpv is missing.
+#[test]
+fn verify_device_checks_mpv_present_before_q_1187() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let live_flow = &body[guard_pos..];
+    let mpv_at = live_flow
+        .find("# (x2) mpv installed")
+        .expect("(x2) mpv acceptance-check block must be present in the live flow");
+    let q_at = live_flow
+        .rfind("# (q) .bak cruft drift")
+        .expect("(q) implementation block");
+    assert!(
+        mpv_at < q_at,
+        "the mpv (x2) check must precede the (q) block so (q) stays last (mpv={mpv_at} q={q_at})"
+    );
+    // Scope the slice to the (x2) block ALONE -- it is inserted between (x) ffmpeg and (y), so it
+    // ends at the (y) block that immediately follows it.
+    let mpv_end = live_flow[mpv_at..]
+        .find("\n# (y) ")
+        .map(|i| mpv_at + i)
+        .expect("(y) block start (the check immediately after the (x2) mpv check)");
+    let mpv_block = &live_flow[mpv_at..mpv_end];
+    assert!(
+        mpv_block.contains("mpv --version"),
+        "(x2) must actually probe mpv via `mpv --version`: {mpv_block}"
+    );
+    assert!(
+        mpv_block.contains("fail "),
+        "(x2) must FAIL loud (never merely warn) when mpv is missing/unrunnable: {mpv_block}"
+    );
+}
