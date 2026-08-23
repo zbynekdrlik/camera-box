@@ -957,14 +957,34 @@ impl DockInputStaleness {
         now_ns: u64,
         threshold_ns: u64,
     ) -> DockStaleTransition {
-        // [#1177 red stub] baseline counter tracking only — the stale/recover DECISION is added in
-        // the [green] commit; until then observe() always reports None, so the transition tests fail.
-        let _ = threshold_ns;
-        self.initialized = true;
+        if !self.initialized {
+            self.initialized = true;
+            self.last_video_decoded = video_decoded;
+            self.last_crc_ok = crc_ok;
+            self.last_advance_ns = now_ns;
+            self.stale = false;
+            return DockStaleTransition::None;
+        }
+
+        let advanced = video_decoded > self.last_video_decoded || crc_ok > self.last_crc_ok;
         self.last_video_decoded = video_decoded;
         self.last_crc_ok = crc_ok;
-        self.last_advance_ns = now_ns;
-        let _ = self.stale;
+
+        if advanced {
+            self.last_advance_ns = now_ns;
+            if self.stale {
+                self.stale = false;
+                return DockStaleTransition::RecoveredLive;
+            }
+            return DockStaleTransition::None;
+        }
+
+        // No decode advance since the last observe — check how long it has been.
+        let elapsed = now_ns.saturating_sub(self.last_advance_ns);
+        if !self.stale && elapsed >= threshold_ns {
+            self.stale = true;
+            return DockStaleTransition::EnteredStale;
+        }
         DockStaleTransition::None
     }
 }
