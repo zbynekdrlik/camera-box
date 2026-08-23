@@ -1092,6 +1092,35 @@ fn genlock_capability_parser_detects_the_235_single_knob_latency_line() {
     );
 }
 
+/// #1184: the drift-guard OBS-log matchers grep LOCALLY (drift-guard runs on dev1 over ssh-fetched
+/// REMOTE log text, and the grep that DECIDES runs locally in dev1's UTF-8 locale). OBS logs carry
+/// raw invalid-UTF-8 bytes (DistroAV mojibake); in a UTF-8 locale GNU grep then MISSES an ASCII
+/// marker that IS present, so a healthy box under-reports genlock capability/state/latency/rt-pin.
+/// `LC_ALL=C grep -a` (byte-literal, single-byte locale) is the sanctioned fix (same as issue 1183
+/// in verify-imag.sh). RED against the current non-`-a` greps in this UTF-8 harness locale, GREEN
+/// after `LC_ALL=C grep -a` on the whole `genlock_*_from_log` family.
+#[test]
+fn genlock_log_matchers_survive_invalid_utf8_bytes_1184() {
+    // Each marker line carries an invalid-UTF-8 sequence: `\xe2\x82` in the `.*` gap for the
+    // capability/state/latency regexes, and at the LINE START for the rt-pin regex (which is a
+    // fixed literal with no `.*` to absorb an in-line byte). All markers are otherwise present.
+    let out = run_sourced(
+        r#"LOG="$(printf '07:42:29.658: genlock: wall-clock-slaved \xe2\x82render tick ENABLED (OBS_GENLOCK_WALL_CLOCK, slew cap 2000000 ns/tick)\n07:42:38.746: genlock: \xe2\x82latency = 3 ms (0 frames @ 60.000fps) (OBS_GENLOCK_LATENCY_MS)\n\xe2\x8214:27:54.427: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)\n')"
+printf 'cap=%s\n' "$(genlock_capability_from_log "$LOG")"
+printf 'state=%s\n' "$(genlock_from_log "$LOG")"
+printf 'lat=%s\n' "$(genlock_latency_ms_from_log "$LOG")"
+printf 'rtpin=%s\n' "$(genlock_rt_pin_from_log "$LOG")""#,
+        &[("LC_ALL", "C.UTF-8")],
+    );
+    let got: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        got,
+        vec!["cap=1", "state=1", "lat=3", "rtpin=ok"],
+        "invalid-UTF-8 bytes in the OBS log must not suppress any genlock_*_from_log marker \
+         (#1184, drift-guard the sibling of #1183): {out:?}"
+    );
+}
+
 /// The imag-nb (#484) OBS log lines for the genlock render-tick SCHED_FIFO pin — SUCCESS shape
 /// (`vendor/obs-studio/libobs/obs-video.c genlock_pin_render_tick_thread`, Linux-only).
 const GENLOCK_RT_PIN_OK_LINE: &str =

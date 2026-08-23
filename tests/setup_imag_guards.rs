@@ -753,20 +753,21 @@ fn setup_imag_still_keeps_ndi_symlink_after_genlock_rework() {
 fn setup_imag_step10_verifies_genlock_log_markers() {
     let body = read(SETUP);
     assert!(
-        body.contains("grep -iE 'genlock:.*(render tick ENABLED") && body.contains("$OBS_CFG/logs"),
+        body.contains("LC_ALL=C grep -aiE 'genlock:.*(render tick ENABLED") && body.contains("$OBS_CFG/logs"),
         "{SETUP} step 10 must grep the OBS log for the literal `genlock:.*(render tick ENABLED` \
-         regex — a plain substring check on the unescaped success-echo text would incidentally \
+         regex via `LC_ALL=C grep -a` (#1184: byte-literal, invalid-UTF-8-safe) — a plain substring \
+         check on the unescaped success-echo text would incidentally \
          match the unconditional 'genlock render tick ENABLED (#460 build proof)' print, not the \
          actual functional check"
     );
     assert!(
-        body.contains("grep -i '\\[distroav\\] plugin loaded'"),
+        body.contains("LC_ALL=C grep -ai '\\[distroav\\] plugin loaded'"),
         "{SETUP} step 10 must grep the OBS log for the REGEX-escaped `\\[distroav\\] plugin \
          loaded` pattern — a plain substring check on the unescaped text would incidentally match \
          only the WARNING fallback prose, not the actual functional check"
     );
     assert!(
-        body.contains("grep -i 'NDI library initialized'"),
+        body.contains("LC_ALL=C grep -ai 'NDI library initialized'"),
         "{SETUP} step 10 must grep the OBS log for the literal `NDI library initialized` pattern \
          (the real DistroAV log line, live-verified on imag-nb)"
     );
