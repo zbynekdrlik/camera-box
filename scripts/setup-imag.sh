@@ -2007,9 +2007,11 @@ else
     # #1182: (fresh box) no user bus this run -- the desktop user's systemd manager only comes up on
     # the FIRST kiosk boot (lightdm autologin), exactly like step 17's dead-:0 case. DEFER the `--now`
     # START (it needs X, which the openbox autostart provides on that boot) but complete the ENABLE
-    # right now BUS-FREE: create the units' wants-symlinks by hand -- byte-identical to what
-    # `systemctl --user enable` writes and to the wants-symlink the incumbent box already carries on
-    # every boot -- so verify-imag.sh check (t) reads is-enabled=enabled after ONE reboot with no
+    # right now BUS-FREE: create the units' wants-symlinks by hand -- functionally equivalent to what
+    # `systemctl --user enable` writes (an ABSOLUTE symlink rather than the relative `../<unit>` it
+    # writes, but the manager resolves it identically and is-enabled reads 'enabled' either way) and
+    # the same wants-symlink the incumbent box already carries on every boot -- so verify-imag.sh
+    # check (t) reads is-enabled=enabled after ONE reboot with no
     # re-run. The unit FILES were written to disk above; the fresh boot's user manager reads these
     # symlinks at startup (no daemon-reload needed then). The target dirs mirror each unit's own
     # [Install] WantedBy (systemd/imag-obs.service = graphical-session.target, the timer = timers.target).

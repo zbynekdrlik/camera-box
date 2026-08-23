@@ -122,8 +122,9 @@ When a NEXT swap fails, check this list before theorising:
   defined next to `UBUS`) gates each step's `systemctl --user` half. On the no-bus path step 21
   DEFERS the `--now` START (it needs X, which the openbox autostart provides on the first kiosk boot)
   but completes the ENABLE BUS-FREE — it creates the units' `*.target.wants` symlinks by hand
-  (`ln -sf`, byte-identical to what `systemctl --user enable` writes and to the wants-symlink the
-  incumbent already carries), so `verify-imag.sh` check (t) reads is-enabled=enabled after ONE reboot
+  (`ln -sf`, functionally equivalent to what `systemctl --user enable` writes — an ABSOLUTE symlink
+  rather than the relative `../<unit>` it writes, but is-enabled reads 'enabled' either way — the same
+  wants-symlink the incumbent already carries), so `verify-imag.sh` check (t) reads is-enabled=enabled after ONE reboot
   with no re-run; step 27 just defers picom's daemon-reload/disable (picom must stay DORMANT, so NO
   wants-symlink is created for it). The naive `loginctl enable-linger` fix alone is NOT enough — it
   brings the bus up mid-run, and a bare `enable --now imag-obs.service` would then start OBS with no
