@@ -484,15 +484,15 @@ fn pin_reader_extracts_power_pl1_w_imag_from_the_readme_row() {
     let readme = "| setting | pinned value | live source |\n\
                   |---|---|---|\n\
                   | `output_fps_imag` | `60` | log |\n\
-                  | `power_pl1_w_imag` | `29` | MMIO RAPL PL1 ... |\n";
+                  | `power_pl1_w_imag` | `45` | MMIO RAPL PL1 ... |\n";
     let (_c, out, _e) = run_sourced(&format!(
         "imag_power_pl1_pin_from_readme_text {}",
         shell_quote(readme)
     ));
     assert_eq!(
         out.trim(),
-        "29",
-        "must extract the pinned 29 W from the README row: {out:?}"
+        "45",
+        "must extract the pinned 45 W from the README row (#1162 re-baseline): {out:?}"
     );
 }
 
@@ -694,15 +694,18 @@ fn dev1_alert_watchdog_dry_run_never_fires() {
 }
 
 #[test]
-fn readme_pins_power_pl1_w_imag_at_29() {
+fn readme_pins_power_pl1_w_imag_at_45() {
+    // #1162 re-baseline: the new i7-13620H imag-nb starves the iGPU at the old 29 W; 45 W is the
+    // sustainable ceiling (live calibration). The checker (verify-imag + drift-guard --check-imag)
+    // reads its EXPECTED pin from this README row, so it MUST read 45 or it false-FAILs a healthy box.
     let readme = std::fs::read_to_string(manifest_dir().join("vendor/README.md")).unwrap();
     let has = readme
         .lines()
-        .any(|l| l.contains("power_pl1_w_imag") && l.contains("`29`"));
+        .any(|l| l.contains("power_pl1_w_imag") && l.contains("`45`"));
     assert!(
         has,
-        "vendor/README.md must pin `power_pl1_w_imag` = `29` — without the pin the drift-guard \
-         PL1 facet reads UNKNOWN forever and the strict gate is inert"
+        "vendor/README.md must pin `power_pl1_w_imag` = `45` — without the pin the drift-guard \
+         PL1 facet reads UNKNOWN forever and the strict gate is inert (#1162 re-baseline)"
     );
 }
 

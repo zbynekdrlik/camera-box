@@ -1561,6 +1561,39 @@ fn setup_imag_self_heals_leftover_isolation_dropin_and_regens_grub_842() {
     );
 }
 
+/// #1162/#784: `setup-imag.sh` must SELF-HEAL any leftover hand-applied PL1 override drop-in
+/// (`/etc/systemd/system/imag-power-envelope{,-guard}.service.d/override.conf`) from the live
+/// re-baseline. The sustainable wattage now lives in SOURCE (each unit's own `Environment=` line +
+/// the shared lib default), so a lingering `.service.d/override.conf` hand-fix must not persist to
+/// MASK a future source re-pin — the #784 lesson, mirroring the #842 grub.d self-heal above. The
+/// removal must run BEFORE the power-envelope unit is enabled so the base unit's source-controlled
+/// Environment wins (no lingering drop-in overriding it).
+#[test]
+fn setup_imag_self_heals_leftover_pl1_dropin_1162() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("imag-power-envelope-guard.service.d")
+            || body.contains("imag-power-envelope.service.d"),
+        "{SETUP} must reference the PL1 override drop-in dir \
+         /etc/systemd/system/imag-power-envelope*.service.d/ to self-heal it (#1162/#784)"
+    );
+    assert!(
+        body.contains("override.conf"),
+        "{SETUP} must name the hand-applied override.conf PL1 drop-in it removes (#1162)"
+    );
+    let rm_at = body
+        .find("removing leftover hand-applied PL1 drop-in")
+        .expect("{SETUP} must announce + remove the leftover PL1 drop-in (#1162 self-heal, #784 lesson)");
+    let enable_at = body
+        .find("systemctl enable --now imag-power-envelope.service")
+        .expect("{SETUP} must enable imag-power-envelope.service");
+    assert!(
+        rm_at < enable_at,
+        "{SETUP}: the PL1 drop-in self-heal must run BEFORE the power-envelope unit is enabled \
+         (#1162 ordering — else the stale drop-in would still override the base unit at reload)"
+    );
+}
+
 /// #483/#522/#840: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths —
 /// the boot-time openbox autostart script (via imag-obs-start.sh, #840) AND the script's own
 /// provisioning-time launcher. Without this, isolcpus (once active after the next boot) would
