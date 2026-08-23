@@ -365,7 +365,9 @@ imag_proc_running() {
 # EXACT same regex family as setup-imag.sh's own step-18 verify + scripts/drift-guard.sh's
 # genlock_capability_from_log -- never a second, drifting pattern.
 imag_obs_log_shows_genlock_tick() {
-  printf '%s' "$1" | grep -iqE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)'
+  # #1183: -a + LC_ALL=C -> byte-literal match, so invalid-UTF-8 bytes in the OBS log (DistroAV
+  # mojibake) can never suppress a marker that IS present in a UTF-8 locale.
+  printf '%s' "$1" | LC_ALL=C grep -aiqE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)'
 }
 
 # imag_obs_log_no_version_mismatch LOG_TEXT -> 0 iff LOG_TEXT contains NO "compiled with newer
@@ -373,18 +375,22 @@ imag_obs_log_shows_genlock_tick() {
 # than a stock plugin's build refuses to load it; left OBS with ONLY distroav.so, no
 # obs-websocket, no encoders).
 imag_obs_log_no_version_mismatch() {
-  ! grep -qi 'compiled with newer libobs' <<<"$1"
+  # #1183: -a + LC_ALL=C so invalid-UTF-8 bytes cannot blind this NEGATIVE check into falsely
+  # reporting "no mismatch".
+  ! LC_ALL=C grep -aqi 'compiled with newer libobs' <<<"$1"
 }
 
 # imag_obs_log_shows_distroav_loaded LOG_TEXT -> 0 iff LOG_TEXT shows the DistroAV plugin loaded
 # (same grep verify-device.sh's own log-verify convention and setup-imag.sh step 18 both use).
 imag_obs_log_shows_distroav_loaded() {
-  grep -qi '\[distroav\] plugin loaded' <<<"$1"
+  # #1183: -a + LC_ALL=C (invalid-UTF-8-safe, same audit as the other log-text matchers)
+  LC_ALL=C grep -aqi '\[distroav\] plugin loaded' <<<"$1"
 }
 
 # imag_obs_log_shows_ndi_loaded LOG_TEXT -> 0 iff LOG_TEXT shows the NDI runtime initialized.
 imag_obs_log_shows_ndi_loaded() {
-  grep -qi 'NDI library initialized' <<<"$1"
+  # #1183: -a + LC_ALL=C (invalid-UTF-8-safe, same audit as the other log-text matchers)
+  LC_ALL=C grep -aqi 'NDI library initialized' <<<"$1"
 }
 
 # --- (j) OBS base version pin + apt-mark hold (#824) ------------------------------------------
@@ -495,9 +501,14 @@ imag_dockstate_present() {
 # ONE core; the fixed distribution spreads 19/16/24/26/12/17 across 6 cores (max 23%).
 imag_obs_thread_concentration_ok() {
   local list="$1" total max
-  total="$(printf '%s\n' "$list" | grep -cE '^[0-9]+$')"
+  # #1183: `ps -L -o psr= -C obs` RIGHT-PADS its single column to the widest value's width, so real
+  # lines are "  6" / " 11" (verified cat -A: "  6$"), NOT bare "6". A `^[0-9]+$` grep matches ZERO
+  # padded lines -> total=0 -> false-FAIL on a healthy box. Normalise to the bare core number with
+  # `awk '{print $1}'` FIRST, applied IDENTICALLY to the total count AND the per-core max so the two
+  # can never disagree; keep the `^[0-9]+$` anchor to still reject genuine non-numeric junk.
+  total="$(printf '%s\n' "$list" | awk '{print $1}' | grep -cE '^[0-9]+$')"
   [ "$total" -gt 0 ] || return 1
-  max="$(printf '%s\n' "$list" | grep -E '^[0-9]+$' | sort -n | uniq -c \
+  max="$(printf '%s\n' "$list" | awk '{print $1}' | grep -E '^[0-9]+$' | sort -n | uniq -c \
     | awk '{print $1}' | sort -rn | head -1)"
   [ -n "$max" ] || return 1
   # fail when max/total > 60% -- integer form: max*100 > total*60
