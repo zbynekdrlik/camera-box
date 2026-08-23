@@ -533,6 +533,14 @@ EOF
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
 systemctl restart systemd-logind
 UBUS="unix:path=/run/user/$(id -u $DESKTOP_USER)/bus"
+# #1182: is the desktop user's systemd USER MANAGER bus up? It lives at /run/user/<uid>/bus and
+# exists only once that user has a live login session (the kiosk lightdm autologin) or lingering.
+# On a from-scratch box provisioned detached, BEFORE the first kiosk boot, it does NOT exist yet,
+# so any `sudo -u "$DESKTOP_USER" ... systemctl --user ...` dies "Failed to connect to bus:
+# Connection refused". Steps 21/27 gate their `systemctl --user` half on this and DEFER to the
+# first kiosk boot when it is absent -- the direct structural analogue of step 17's dead-:0 gate
+# ([ -S /tmp/.X11-unix/X0 ] -> defer the OBS launch to the next boot).
+user_bus_alive() { [ -S "/run/user/$(id -u "$DESKTOP_USER")/bus" ]; }
 gs() { sudo -u "$DESKTOP_USER" DBUS_SESSION_BUS_ADDRESS="$UBUS" gsettings set "$@" 2>/dev/null || true; }
 gs org.gnome.desktop.session idle-delay 0
 gs org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type "'nothing'"
@@ -1978,18 +1986,44 @@ done
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/systemd"
 
 UID_DESKTOP="$(id -u "$DESKTOP_USER")"
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-    systemctl --user daemon-reload || fail "systemctl --user daemon-reload failed"
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-    systemctl --user enable --now imag-wallpaper-refresh.timer \
-    || echo "  WARNING: could not enable imag-wallpaper-refresh.timer -- the wall-fallback screenshot will go stale"
-echo "  imag-wallpaper-refresh.timer enabled (wall-fallback screenshot refresh every 5 min; the obs-down Discord alert is a SEPARATE dev1-side watchdog, scripts/imag-obs-alert-watchdog.sh)"
-# issue 884: the autostart heredoc above now calls through this unit instead of the operator
-# script directly, so enable+start is safe here -- see the step header comment for why.
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-    systemctl --user enable --now imag-obs.service \
-    || fail "systemctl --user enable --now imag-obs.service failed"
-echo "  imag-obs.service enabled + started (OBS boot launch is now systemd-supervised, Restart=on-failure; issue 884)"
+# #1182: a from-scratch box provisioned detached has NO user bus yet (see user_bus_alive above), so
+# these `systemctl --user` calls would die "Failed to connect to bus: Connection refused" and their
+# `|| fail` would abort the whole run at step 21 (never reaching steps 22-27). Gate on the bus,
+# mirroring step 17's dead-:0 degrade -- and complete the ENABLE bus-free on the deferred path.
+if user_bus_alive; then
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user daemon-reload || fail "systemctl --user daemon-reload failed"
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user enable --now imag-wallpaper-refresh.timer \
+        || echo "  WARNING: could not enable imag-wallpaper-refresh.timer -- the wall-fallback screenshot will go stale"
+    echo "  imag-wallpaper-refresh.timer enabled (wall-fallback screenshot refresh every 5 min; the obs-down Discord alert is a SEPARATE dev1-side watchdog, scripts/imag-obs-alert-watchdog.sh)"
+    # issue 884: the autostart heredoc above now calls through this unit instead of the operator
+    # script directly, so enable+start is safe here -- see the step header comment for why.
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user enable --now imag-obs.service \
+        || fail "systemctl --user enable --now imag-obs.service failed"
+    echo "  imag-obs.service enabled + started (OBS boot launch is now systemd-supervised, Restart=on-failure; issue 884)"
+else
+    # #1182: (fresh box) no user bus this run -- the desktop user's systemd manager only comes up on
+    # the FIRST kiosk boot (lightdm autologin), exactly like step 17's dead-:0 case. DEFER the `--now`
+    # START (it needs X, which the openbox autostart provides on that boot) but complete the ENABLE
+    # right now BUS-FREE: create the units' wants-symlinks by hand -- functionally equivalent to what
+    # `systemctl --user enable` writes (an ABSOLUTE symlink rather than the relative `../<unit>` it
+    # writes, but the manager resolves it identically and is-enabled reads 'enabled' either way) and
+    # the same wants-symlink the incumbent box already carries on every boot -- so verify-imag.sh
+    # check (t) reads is-enabled=enabled after ONE reboot with no
+    # re-run. The unit FILES were written to disk above; the fresh boot's user manager reads these
+    # symlinks at startup (no daemon-reload needed then). The target dirs mirror each unit's own
+    # [Install] WantedBy (systemd/imag-obs.service = graphical-session.target, the timer = timers.target).
+    sudo -u "$DESKTOP_USER" mkdir -p \
+        "$USER_HOME/.config/systemd/user/graphical-session.target.wants" \
+        "$USER_HOME/.config/systemd/user/timers.target.wants"
+    sudo -u "$DESKTOP_USER" ln -sf "$USER_HOME/.config/systemd/user/imag-obs.service" \
+        "$USER_HOME/.config/systemd/user/graphical-session.target.wants/imag-obs.service"
+    sudo -u "$DESKTOP_USER" ln -sf "$USER_HOME/.config/systemd/user/imag-wallpaper-refresh.timer" \
+        "$USER_HOME/.config/systemd/user/timers.target.wants/imag-wallpaper-refresh.timer"
+    echo "  #1182: (fresh box) no user bus this run -- imag-obs.service + imag-wallpaper-refresh.timer daemon-reload/START deferred to first kiosk boot; both ENABLED bus-free (wants-symlinks on disk), OBS launches via the openbox autostart on the next boot"
+fi
 
 # =============================================================================
 step 22 "Power/thermal envelope (#1040): purge thermald + pin MMIO RAPL PL1 + slpc, supervised by a loud guard"
@@ -2335,17 +2369,30 @@ PICOM_SVC_EOF
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/picom" "$USER_HOME/.config/systemd"
 
 PICOM_UID="$(id -u "$DESKTOP_USER")"
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-    systemctl --user daemon-reload || fail "issue 1146: systemctl --user daemon-reload failed before enabling picom.service"
-# issue 1146 REVERT (live-measured 2026-08-20): the unit is provisioned DORMANT — installed +
-# configured but DISABLED. Running the compositor cost 21.57% OBS render skips on the 25W power
-# envelope (real dropped output frames chain-wide), strictly worse than the display-only tearing
-# it cured; the tear-free direction is the OBS projector's own vsync / single-display (issue 1146 /
-# issue 1147). The disable is deterministic: `systemctl --user disable` plus a belt-and-braces
-# removal of the on-disk wants symlink (the exact artifact imag-display-path.sh reads), and it
-# never `--now`-stops anything live (enable-only convention applies to the disable direction too).
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-    systemctl --user disable picom.service 2>/dev/null || true
+# #1182: same bus-liveness gate as step 21. On a from-scratch box this daemon-reload's `|| fail`
+# was the NEXT abort point once step 21 no longer aborts; defer it (picom must stay DORMANT, so no
+# wants-symlink is ever created for it -- the belt-and-braces rm below and the unit-on-disk keep it
+# present-but-disabled at the next boot).
+if user_bus_alive; then
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user daemon-reload || fail "issue 1146: systemctl --user daemon-reload failed before enabling picom.service"
+    # issue 1146 REVERT (live-measured 2026-08-20): the unit is provisioned DORMANT — installed +
+    # configured but DISABLED. Running the compositor cost 21.57% OBS render skips on the 25W power
+    # envelope (real dropped output frames chain-wide), strictly worse than the display-only tearing
+    # it cured; the tear-free direction is the OBS projector's own vsync / single-display (issue 1146 /
+    # issue 1147). The disable is deterministic: `systemctl --user disable` plus a belt-and-braces
+    # removal of the on-disk wants symlink (the exact artifact imag-display-path.sh reads), and it
+    # never `--now`-stops anything live (enable-only convention applies to the disable direction too).
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user disable picom.service 2>/dev/null || true
+else
+    # #1182: (fresh box) no user bus this run -- picom's daemon-reload/disable is deferred to first
+    # kiosk boot. Nothing else is needed: picom must stay DORMANT, so NO wants-symlink is created
+    # for it (the opposite of imag-obs.service in step 21), the unit file is already on disk, and the
+    # belt-and-braces rm below clears any stale wants-symlink -- the fresh user manager finds picom
+    # present-but-disabled at the next boot, exactly the intended dormant state.
+    echo "  #1182: (fresh box) no user bus this run -- picom daemon-reload/disable deferred to first kiosk boot; picom stays DORMANT (unit on disk, no wants-symlink created)"
+fi
 rm -f "$USER_HOME/.config/systemd/user/graphical-session.target.wants/picom.service"
 echo "  issue 1146 revert: picom provisioned DORMANT (installed+configured, unit disabled — render budget stays with OBS; HDMI stays xrandr primary via step 16)"
 
