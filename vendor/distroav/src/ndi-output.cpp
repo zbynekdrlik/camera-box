@@ -270,10 +270,13 @@ static const std::map<video_format, std::string> video_to_color_format_map = {{V
 // ENABLED+NAMED so a disabled PGM is never advertised.
 //
 // Thread-safety: reserve() runs on the module-load thread (obs_module_post_load);
-// take() / release() run on the main (UI) thread (the queued FINISHED_LOADING
-// init and obs_module_unload). g_reserved_main_mutex guards the holder either
-// way. take() never calls send_destroy and never touches a per-output mutex, so
-// there is no lock-order inversion against o->ndi_sender_mutex.
+// release() runs on the main (UI) thread (obs_module_unload); take() runs on
+// whatever thread starts the output -- the main thread for the queued
+// FINISHED_LOADING init, but also the obs-websocket thread when the main output
+// is started remotely (that is why main-output.cpp connects the output's
+// start/stop signal handlers). g_reserved_main_mutex guards the holder on every
+// one of those. take() never calls send_destroy and never touches a per-output
+// mutex, so there is no lock-order inversion against o->ndi_sender_mutex.
 // ---------------------------------------------------------------------------
 static NDIlib_send_instance_t g_reserved_main_sender = nullptr;
 static std::string g_reserved_main_name;
@@ -462,6 +465,14 @@ bool ndi_output_start(void *data)
 		} else {
 			obs_log(LOG_WARNING, "WARN-415 - NDI Sender data capture failed. '%s'", name);
 			obs_log(LOG_DEBUG, "'%s' ndi_output_start: data capture start failed", name);
+			// camera-box #1185: begin_data_capture failed, so o->started stays false and
+			// neither ndi_output_stop (gated on o->started) nor ndi_output_destroy will ever
+			// free this sender. If it is the port-reserved :5961 PGM instance we just adopted,
+			// leaving it alive advertises the production PGM name FRAMELESS for the whole
+			// session and the next start creates a second same-named sender on a high port --
+			// silently defeating the pin. Destroy it here (safe: capture never began).
+			ndiLib->send_destroy(o->ndi_sender);
+			o->ndi_sender = nullptr;
 		}
 	} else {
 		obs_log(LOG_WARNING, "WARN-416 - NDI Sender initialisation failed. '%s'", name);

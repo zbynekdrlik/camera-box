@@ -792,11 +792,16 @@ jobs:
             Write-Error "ndi-output.cpp: #1185 ndi_output_start no longer adopts the reserved main sender — the PGM-first-port pin is not wired into the start path"; exit 1
           }
           $pm = (Get-Content "vendor/distroav/src/plugin-main.cpp" -Raw) -replace '\s+', ' '
-          if ($pm -notmatch [regex]::Escape('ndi_output_reserve_main_sender(')) {
-            Write-Error "plugin-main.cpp: #1185 obs_module_post_load no longer reserves the main output NDI port before scene load — reverted"; exit 1
+          # Anchor on the CALL SITEs, not the bare function names: both names also appear in the
+          # extern DECLARATIONS at the top of plugin-main.cpp, so a bare-name check would pass on
+          # the decls alone even if a subtree-pull conflict dropped the post_load/unload call hunks
+          # (the #832 unique-anchor class). QT_TO_UTF8(config->OutputName is unique to the reserve
+          # call; "; if (ndiLib) {" right after the release call is unique to the unload site.
+          if ($pm -notmatch [regex]::Escape('ndi_output_reserve_main_sender(QT_TO_UTF8(config->OutputName)')) {
+            Write-Error "plugin-main.cpp: #1185 obs_module_post_load no longer CALLS ndi_output_reserve_main_sender (decl only) — the main output NDI port is not reserved before scene load"; exit 1
           }
-          if ($pm -notmatch [regex]::Escape('ndi_output_release_reserved_main_sender()')) {
-            Write-Error "plugin-main.cpp: #1185 obs_module_unload no longer releases an unadopted reserved main sender — reverted"; exit 1
+          if ($pm -notmatch [regex]::Escape('ndi_output_release_reserved_main_sender(); if (ndiLib) {')) {
+            Write-Error "plugin-main.cpp: #1185 obs_module_unload no longer CALLS ndi_output_release_reserved_main_sender before ndiLib->destroy() (decl only) — an unadopted reservation leaks the port"; exit 1
           }
           Write-Output "DistroAV PGM-first-NDI-port reservation present (reserve at obs_module_post_load + adopt in ndi_output_start, #1185) — OK"
 

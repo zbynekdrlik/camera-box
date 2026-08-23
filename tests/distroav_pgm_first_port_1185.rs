@@ -83,10 +83,15 @@ fn module_post_load_reserves_the_main_output_port() {
         src.contains("void obs_module_post_load(void)"),
         "{PLUGIN_MAIN}: obs_module_post_load is gone/renamed — the #1185 reservation has no home."
     );
+    // Anchor on the CALL SITE, not the bare function name: `ndi_output_reserve_main_sender(` also
+    // appears in the extern DECLARATION at the top of the file, so a bare-name check would pass on
+    // the decl alone even if a subtree-pull conflict dropped the obs_module_post_load call hunk.
+    // The `QT_TO_UTF8(config->OutputName` argument is unique to the real call site.
     assert!(
-        src.contains("ndi_output_reserve_main_sender("),
-        "{PLUGIN_MAIN}: #1185 — obs_module_post_load no longer calls ndi_output_reserve_main_sender; \
-         the program NDI port is no longer reserved before scene load. Re-apply the patch."
+        src.contains("ndi_output_reserve_main_sender(QT_TO_UTF8(config->OutputName)"),
+        "{PLUGIN_MAIN}: #1185 — obs_module_post_load no longer CALLS ndi_output_reserve_main_sender \
+         (only the extern decl remains); the program NDI port is no longer reserved before scene \
+         load. Re-apply the call in obs_module_post_load."
     );
     // Gated on the main output being enabled (so a disabled PGM is never advertised frameless).
     assert!(
@@ -94,11 +99,15 @@ fn module_post_load_reserves_the_main_output_port() {
         "{PLUGIN_MAIN}: #1185 — the reservation is no longer gated on config->OutputEnabled; a \
          disabled PGM could be advertised. Re-apply the config gate."
     );
-    // The unadopted reservation must be cleaned up on module unload.
+    // The unadopted reservation must be cleaned up on module unload. Anchor on the CALL SITE
+    // (the call is immediately followed by the `if (ndiLib) {` destroy block) — the bare
+    // `ndi_output_release_reserved_main_sender()` also appears in the extern decl (followed by a
+    // typedef), so a bare-name check would pass on the decl alone.
     assert!(
-        src.contains("ndi_output_release_reserved_main_sender()"),
-        "{PLUGIN_MAIN}: #1185 — obs_module_unload no longer releases an unadopted reserved main \
-         sender; a disabled/never-adopted PGM reservation would leak the port. Re-apply the patch."
+        src.contains("ndi_output_release_reserved_main_sender(); if (ndiLib) {"),
+        "{PLUGIN_MAIN}: #1185 — obs_module_unload no longer CALLS ndi_output_release_reserved_main_sender \
+         before ndiLib->destroy() (only the extern decl remains); a never-adopted PGM reservation \
+         would leak the port. Re-apply the release call in obs_module_unload."
     );
 }
 

@@ -285,8 +285,11 @@ jobs:
           if ($out -notmatch [regex]::Escape('void ndi_output_release_reserved_main_sender(')) { Write-Error "ndi-output.cpp: #1185 ndi_output_release_reserved_main_sender missing -- reservation cleanup reverted"; exit 1 }
           if ($out -notmatch [regex]::Escape('o->ndi_sender = ndi_output_take_reserved_sender(')) { Write-Error "ndi-output.cpp: #1185 ndi_output_start no longer adopts the reserved main sender -- PGM-first-port pin reverted"; exit 1 }
           $pm = (Get-Content "vendor/distroav/src/plugin-main.cpp" -Raw) -replace '\s+', ' '
-          if ($pm -notmatch [regex]::Escape('ndi_output_reserve_main_sender(')) { Write-Error "plugin-main.cpp: #1185 obs_module_post_load no longer reserves the main output NDI port -- reverted"; exit 1 }
-          if ($pm -notmatch [regex]::Escape('ndi_output_release_reserved_main_sender()')) { Write-Error "plugin-main.cpp: #1185 obs_module_unload no longer releases an unadopted reserved main sender -- reverted"; exit 1 }
+          # Anchor on the CALL SITEs, not the bare function names (which also appear in the extern
+          # decls at the top of plugin-main.cpp) -- else a subtree-pull that drops the call hunks but
+          # keeps the decl hunk hot-swaps a functionally-reverted distroav.dll (the #832 anchor class).
+          if ($pm -notmatch [regex]::Escape('ndi_output_reserve_main_sender(QT_TO_UTF8(config->OutputName)')) { Write-Error "plugin-main.cpp: #1185 obs_module_post_load no longer CALLS ndi_output_reserve_main_sender (decl only) -- port not reserved before scene load"; exit 1 }
+          if ($pm -notmatch [regex]::Escape('ndi_output_release_reserved_main_sender(); if (ndiLib) {')) { Write-Error "plugin-main.cpp: #1185 obs_module_unload no longer CALLS ndi_output_release_reserved_main_sender before ndiLib->destroy() (decl only) -- reservation leaks the port"; exit 1 }
           Write-Output "per-source genlock latency (ms) override + #257 floor 3 + genlock default-ON + whitelist UI + runtime burn + #1009 floor emit stamp + #1185 PGM-first-port reservation — OK"
 
       # #912: ASRC (issue 803's per-source clock-drift servo) must be a BUILD DEFAULT, mirroring
