@@ -136,6 +136,56 @@ lipsync_subtract_baseline() {
   awk -v a="$aggregated_ms" -v b="$baseline_ms" 'BEGIN { printf "%.10g\n", (a - b) }'
 }
 
+# lipsync_cadence_attribution -- issue 1174: read cam2's `dupe-preferring decimation` summary
+# lines (from stdin -- the camera-box journal window captured over the lipsync recording, e.g.
+# `journalctl -u camera-box --since ... | grep 'dupe-preferring decimation'`) and classify whether
+# the emit path warped the lip-motion cadence during that window.
+#
+# WHY this is the decisive #1174 signal: SyncNet correlates lip motion against a clean, continuous
+# audio track (direct cable -> Dante). The Aug-5 healthy baseline predates the ENTIRE dupe-
+# decimation era (#889 onward), so it had ZERO of the motion-WARPING emit events. camera-box's
+# `dupe_shed_summary` (src/dupe_decimation/gate.rs) already logs all seven per-window counters;
+# this splits them by motion effect:
+#   PRESERVING (uniform decimation / true-dup drop, smooth motion): dupe-victim shed, blind-pacing
+#     shed.
+#   WARPING (freeze/jump, added #1111/#1145/#1167): late-dupe copies emitted, boundaries retired,
+#     depth-drained, fast-drained, starvation last-frame repeats.
+# ANY nonzero warp count during the lipsync window is cadence damage absent from the Aug-5 baseline
+# -> the emit path is a contributing cause. Verdict:
+#   CADENCE-WARP     warp events > 0  (emit path warped the lip timeline; confirms suspect #1)
+#   CADENCE-CLEAN    matched >=1 line, warp == 0  (emit path exonerated -> look at moire/exposure)
+#   CADENCE-UNKNOWN  no summary lines matched  (never a false CLEAN -- no data, not "no warp")
+# Grounded in code HISTORY, not a tuned magic threshold; the per-second warp rate is reported as
+# magnitude context. awk-only (already a dependency, see lipsync_subtract_baseline above), no grep,
+# so it ALWAYS exits 0 -- safe to call as a bare/`|| true` statement under the caller's `set -euo
+# pipefail` (the #1133 report-only-helper discipline).
+lipsync_cadence_attribution() {
+  awk '
+    /dupe-preferring decimation/ {
+      matched++
+      for (i = 2; i <= NF; i++) {
+        if      ($i == "dupe-victim")   dupe_shed    += $(i-1) + 0
+        else if ($i == "blind-pacing")  blind_shed   += $(i-1) + 0
+        else if ($i == "late-dupe")     copies       += $(i-1) + 0
+        else if ($i == "boundaries")    retired      += $(i-1) + 0
+        else if ($i == "depth-drained") drained      += $(i-1) + 0
+        else if ($i == "fast-drained")  fast_drained += $(i-1) + 0
+        else if ($i == "starvation")    starvation   += $(i-1) + 0
+        else if ($i == "last")          { w = $(i+1); gsub(/[^0-9]/, "", w); window += w + 0 }
+      }
+    }
+    END {
+      warp = copies + retired + drained + fast_drained + starvation
+      preserving = dupe_shed + blind_shed
+      if (matched == 0)   { verdict = "CADENCE-UNKNOWN"; wps = 0 }
+      else if (warp == 0) { verdict = "CADENCE-CLEAN";   wps = 0 }
+      else                { verdict = "CADENCE-WARP"; wps = (window > 0) ? warp / window : 0 }
+      printf "lipsync_cadence: verdict=%s warp_events=%d warp_per_s=%.2f window_s=%d preserving_events=%d copies=%d retired=%d drained=%d fast_drained=%d starvation=%d dupe_shed=%d blind_shed=%d\n", \
+             verdict, warp, wps, window, preserving, copies, retired, drained, fast_drained, starvation, dupe_shed, blind_shed
+    }
+  '
+}
+
 # --------------------------------------------------------------------------------------------- #
 # Orchestration (real network/filesystem effects) -- exercised end-to-end only by the supervisor
 # on the real rig, per issue 930's own scope boundary (this worker's dispatch delivers the code +
@@ -146,6 +196,10 @@ main() {
   local lipsync_recording="" qrqpsk_recording="" qrqpsk_marker_log="" verdict_bin=""
   local asset_baseline_ms=""
   local workdir=""
+  # issue 1174: optional cam2 emit-cadence journal (captured over the lipsync recording window) --
+  # when given, the same single cross-check command ALSO prints the CADENCE-WARP/CLEAN/UNKNOWN
+  # attribution, so the supervisor's one rig run decides suspect #1 (see lipsync_cadence_attribution).
+  local lipsync_cadence_log=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --lipsync-recording) lipsync_recording="$2"; shift 2 ;;
@@ -154,7 +208,8 @@ main() {
       --verdict-bin) verdict_bin="$2"; shift 2 ;;
       --asset-baseline-ms) asset_baseline_ms="$2"; shift 2 ;;
       --workdir) workdir="$2"; shift 2 ;;
-      *) echo "usage: $0 --lipsync-recording <p> --qrqpsk-recording <p> --qrqpsk-marker-log <p> --verdict-bin <p> --asset-baseline-ms <ms> [--workdir <d>]" >&2; exit 2 ;;
+      --lipsync-cadence-log) lipsync_cadence_log="$2"; shift 2 ;;
+      *) echo "usage: $0 --lipsync-recording <p> --qrqpsk-recording <p> --qrqpsk-marker-log <p> --verdict-bin <p> --asset-baseline-ms <ms> [--workdir <d>] [--lipsync-cadence-log <p>]" >&2; exit 2 ;;
     esac
   done
   [ -n "$lipsync_recording" ] || { echo "FAIL: --lipsync-recording is required" >&2; exit 2; }
@@ -162,6 +217,19 @@ main() {
   [ -n "$qrqpsk_marker_log" ] || { echo "FAIL: --qrqpsk-marker-log is required" >&2; exit 2; }
   [ -n "$verdict_bin" ] || { echo "FAIL: --verdict-bin is required -- download the CI probe-tools-linux-amd64 artifact's recording-verdict binary (Tier 0: never build --features probe locally)" >&2; exit 2; }
   [ -n "$asset_baseline_ms" ] || { echo "FAIL: --asset-baseline-ms is required -- the pinned lipsync asset has an intrinsic A/V offset (see assets/lipsync/PROVENANCE.md's Baseline section) that must be subtracted before the verdict (930, issuecomment-5153948268)" >&2; exit 2; }
+
+  # issue 1174: emit-cadence attribution (independent of the SyncNet pipeline, so print it now --
+  # even if a recording is missing below -- to keep it visible on the same single command). `|| true`
+  # because it is report-only and must never abort the run (the #1133 report-only-helper discipline).
+  if [ -n "$lipsync_cadence_log" ]; then
+    if [ -r "$lipsync_cadence_log" ]; then
+      echo "[lipsync-cross-check] cam2 emit-cadence attribution (issue 1174) from $lipsync_cadence_log:" >&2
+      lipsync_cadence_attribution < "$lipsync_cadence_log" >&2 || true
+    else
+      echo "WARN: [lipsync #1174] --lipsync-cadence-log '$lipsync_cadence_log' not readable -- skipping emit-cadence attribution" >&2
+    fi
+  fi
+
   [ -f "$lipsync_recording" ] || { echo "FAIL: $lipsync_recording not found" >&2; exit 1; }
   [ -f "$qrqpsk_recording" ] || { echo "FAIL: $qrqpsk_recording not found" >&2; exit 1; }
   [ -f "$qrqpsk_marker_log" ] || { echo "FAIL: $qrqpsk_marker_log not found" >&2; exit 1; }
