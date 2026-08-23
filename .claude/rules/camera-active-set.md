@@ -175,3 +175,18 @@ Also confirm your edit site is OUTSIDE any region a test slices between two anch
 inserted line only breaks adjacency if it lands BETWEEN two anchored-adjacent lines. This sweep +
 `cargo fmt --all --check` (rustfmt parses probe-gated code too) + `shellcheck` is the full local
 net when `cargo test` cannot run.
+
+**A WHOLE-FILE occurrence-count sweep is BLIND to a WITHIN-FUNCTION-BODY-SLICE 1→2 (#1171, cost a
+review round-trip).** Several `rig-mode.sh` tests `.find()` a literal SCOPED to a function body they
+first slice out — e.g. `harness_event_artifact_purge_721.rs` does `body.find("event_mode_assert")`
+on the `do_event()`..`main()` slice and asserts `purge_pos < assert_pos`. A NEW COMMENT you add near
+the TOP of `do_event`/`do_test` that merely NAMES a function (`event_mode_assert`, `do_event`, …)
+inserts that literal BEFORE the real call INSIDE the slice — so the scoped `.find` grabs the comment
+and the ordering assertion flips — EVEN THOUGH the whole-file count of that name is high (8→11, not
+1→2) and the sweep never flags it. Tier-0 hides it; it only breaks on CI. Guard: when your edit adds
+a comment inside (or just above) a function whose BODY a test slices, grep that test set for
+`body.find("<any function name your comment mentions>")` / `.split("<name>")` and confirm your
+comment does not add the bare name earlier in the sliced region than the real call. Fix is a reword
+(drop the bare function-name literal from the comment — `EVENT-assert` instead of `event_mode_assert`),
+never a logic change. Same class as the top-level CLAUDE.md "comment duplicates a `.find` anchor"
+GOTCHA, but specifically for the SCOPED-slice case the count sweep cannot see.
