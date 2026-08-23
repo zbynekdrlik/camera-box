@@ -1,0 +1,20 @@
+[Unit]
+# NDI sender port-map change alert (#1181), DEV1-SIDE. ONE check -> decide -> alert pass. dev1 sits on
+# the rig LAN, sees the mDNS (_ndi._tcp) advertisements, and already hosts every dev1-side alert timer
+# + the airuleset checkout + Discord credentials -- the SAME topology as
+# netcfg-drift-alert-watchdog.service (#797) / network-reach-alert-watchdog.service (#1001). It only
+# ever READS mDNS (avahi-browse); it never writes to any rig box.
+Description=camera-box NDI sender port-map change alert (#1181) — one check/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# Optional operator overrides (NDI_PORTMAP_* env: box IP, anchor, confirm/throttle). The leading `-`
+# makes the unit start even if the file is absent (defaults then apply). See
+# .claude/rules/distroav-receiver-lifecycle.md for the one-time enable.
+EnvironmentFile=-%h/.config/camera-box/ndi-portmap-alert.env
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/ndi-portmap-alert-watchdog.sh
+# One `avahi-browse -rtp _ndi._tcp` read (whole-command `timeout`-bounded, NDI_PORTMAP_AVAHI_TIMEOUT,
+# default 15 s) + a pure map diff; this ceiling is the whole-unit backstop.
+TimeoutStartSec=60
