@@ -349,6 +349,55 @@ int main()
 		      "resize cache: a reset must force a fresh resize, even at the SAME size as before");
 	}
 
+	/* 9. #1177: CbDockInputStaleness mirrors av_sync_dock::DockInputStaleness -- the dock's
+	 * measurement-input STALE/NO-SIGNAL classifier. In EVENT mode the marker/QR decode counters
+	 * stop advancing; after CB_DOCK_INPUT_STALE_NS with no advance the display must flip STALE. */
+	{
+		const uint64_t TH = CB_DOCK_INPUT_STALE_NS; // 30 s
+		const uint64_t S = 1000000000ull;           // 1 s in ns
+
+		// first observe seeds the baseline, never stale
+		CbDockInputStaleness s0;
+		CHECK(s0.observe(0, 0, 0, TH) == CbDockStaleTransition::None, "stale: first observe seeds baseline");
+		CHECK(!s0.is_stale(), "stale: first observe not stale");
+
+		// goes stale after the threshold of no advance, one-shot
+		CbDockInputStaleness s;
+		s.observe(5, 3, S, TH);
+		CHECK(s.observe(5, 3, S + 20 * S, TH) == CbDockStaleTransition::None, "stale: 20s < 30s not yet stale");
+		CHECK(!s.is_stale(), "stale: still live at 20s");
+		CHECK(s.observe(5, 3, S + 30 * S, TH) == CbDockStaleTransition::EnteredStale, "stale: 30s no advance -> EnteredStale");
+		CHECK(s.is_stale(), "stale: is_stale after threshold");
+		CHECK(s.observe(5, 3, S + 40 * S, TH) == CbDockStaleTransition::None, "stale: already stale -> no repeated EnteredStale");
+
+		// recovers on a crc_ok advance
+		CbDockInputStaleness r;
+		r.observe(5, 3, 0, TH);
+		CHECK(r.observe(5, 3, 30 * S, TH) == CbDockStaleTransition::EnteredStale, "stale: r entered stale");
+		CHECK(r.observe(5, 4, 31 * S, TH) == CbDockStaleTransition::RecoveredLive, "stale: crc_ok advance -> RecoveredLive");
+		CHECK(!r.is_stale(), "stale: r recovered");
+
+		// recovers on a video_decoded advance
+		CbDockInputStaleness r2;
+		r2.observe(5, 3, 0, TH);
+		CHECK(r2.observe(5, 3, 30 * S, TH) == CbDockStaleTransition::EnteredStale, "stale: r2 entered stale");
+		CHECK(r2.observe(6, 3, 31 * S, TH) == CbDockStaleTransition::RecoveredLive, "stale: video_decoded advance -> RecoveredLive");
+		CHECK(!r2.is_stale(), "stale: r2 recovered");
+
+		// a continuously-advancing live signal never goes stale
+		CbDockInputStaleness live;
+		uint64_t vdec = 0, crc = 0;
+		bool ever_stale = false;
+		for (uint64_t i = 0; i < 100; i++) {
+			vdec++;
+			crc++;
+			live.observe(vdec, crc, i * 10 * S, TH);
+			if (live.is_stale())
+				ever_stale = true;
+		}
+		CHECK(!ever_stale, "stale: continuously-advancing signal never goes stale");
+	}
+
 	if (g_failures == 0) {
 		std::printf("camera-box-selftest: ALL PASS\n");
 		return 0;

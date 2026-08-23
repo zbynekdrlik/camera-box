@@ -55,6 +55,13 @@ private:
 	// runs the same DLL but has no CAMERA_BOX_ASRC_SOURCE_NAME) instead of one line per 1s poll.
 	bool asrcSourceMissingLogged = false;
 
+	// #1177: the plain-language status shown BEFORE the input went STALE. lock_state_changed is
+	// edge-triggered (#926) and the held cluster lock is never dropped during EVENT mode (that is the
+	// exact defect this ticket fixes), so on a stale->recover cycle no lock_state_changed re-fires to
+	// correct the text. Restoring this remembered key on recovery keeps the header honest (Locked /
+	// NoSignal / Measuring as it truly was) instead of a generic "Measuring" over a live locked value.
+	const char *lastStatusKey = "Status.Measuring";
+
 private:
 	OBSOutput sync_test;
 
@@ -77,11 +84,13 @@ private:
 	void on_audio_marker_found(audio_marker_found_s data);
 	void on_sync_found(sync_index data);
 	void on_lock_state_changed(bool locked); // #926
+	void on_sync_stale_changed(bool stale);  // #1177
 
 	static void cb_video_marker_found(void *param, calldata_t *cd);
 	static void cb_audio_marker_found(void *param, calldata_t *cd);
 	static void cb_sync_found(void *param, calldata_t *cd);
 	static void cb_lock_state_changed(void *param, calldata_t *cd); // #926
+	static void cb_sync_stale_changed(void *param, calldata_t *cd); // #1177
 
 	// #690: auto-start the measurement output once OBS has finished loading (vs. sitting stopped on
 	// dashes after every OBS relaunch, waiting for a manual click — the "forgettable toggle" this
