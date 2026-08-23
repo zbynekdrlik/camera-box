@@ -348,6 +348,31 @@ producer script live, or read its exact `print(...)` f-string) against the check
 directly (`. verify-imag.sh; imag_foo_output_ok "<pasted real text>" ...`) before trusting it —
 never assume an old regex still matches after the producer's print format changed.
 
+## OBS-log grep misses are locale + input-source + byte-position sensitive — `LC_ALL=C grep -a` via a here-string (#1183/#1184)
+
+An OBS-log matcher (`verify-imag.sh` (h), `setup-imag.sh` step-18, `drift-guard.sh`'s
+`genlock_*_from_log` family) that greps for an ASCII marker can MISS a marker that IS present, for
+two compounding reasons — fix BOTH:
+
+- **Locale + input source:** OBS/DistroAV logs carry raw invalid-UTF-8 bytes (mojibake). GNU grep
+  in a UTF-8 locale (dev1, imag) then fails to match an ASCII pattern on a line that contains an
+  invalid byte sequence — even a byte at the LINE START or END, not just inside the matched span
+  (confirmed #1184: a line-start `\xe2\x82` suppressed the fixed-literal rt-pin match too). A
+  remote grep run over ssh in the box's C locale never sees this, which is why drift-guard's
+  ssh-SIDE greps pass while its LOCAL `genlock_*_from_log` (grepping remote-fetched text on dev1)
+  missed. **Fix: `LC_ALL=C grep -a`** (byte-literal, single-byte locale). A `sed`/`awk` DOWNSTREAM
+  of the grep needs `LC_ALL=C` too — grep -a passes the raw bytes through and the next stage chokes
+  on them in a UTF-8 locale (the #1184 latency extractor returned a mangled line until its `sed`
+  also got `LC_ALL=C`).
+- **Byte position / SIGPIPE (the #1047 residual, same story):** a matcher fed `printf … | grep -q`
+  SIGPIPEs the writer when grep -q exits early on a match in a >64 KiB log (live OBS logs are
+  173 KB–40 MB; markers are startup lines at the TOP) → rc=141 → pipefail false-FAILs a healthy
+  box. **Fix: a here-string (`grep -a … <<<"$1"`)** — no writer process, SIGPIPE-immune at any
+  size. The SAME here-string remedy the #1047 `imag_pick_ndi_peer` section above documents.
+
+Test both deterministically with a >64 KiB body carrying the marker at the TOP + invalid bytes on
+the marker lines (see `tests/verify_imag_pure_functions.rs` + `tests/drift_guard.rs`).
+
 ## `wmctrl -c` substring-closes the MAIN OBS window safely — Projector titles never collide (#840)
 
 `wmctrl -c "OBS Studio"` (default: case-insensitive SUBSTRING match against the full title,
