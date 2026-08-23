@@ -22,8 +22,10 @@
 //! An async-signal-safe handler for SIGTERM/SIGINT/SIGHUP does the ONLY safe
 //! kind of work a signal handler may do: a single atomic store into a
 //! process-global flag ([`request_shutdown`]). The frame-probe painter loops
-//! ([`crate::probe::painter::run_painter`] and the outer
-//! [`crate::probe::run::run_paint_only`] / [`crate::probe::run::run`] loops)
+//! (`crate::probe::painter::run_painter` and the outer
+//! `crate::probe::run::run_paint_only` / `crate::probe::run::run` loops — plain
+//! code spans, not intra-doc links, because the `probe` module is absent on the
+//! default-feature `cargo doc` build)
 //! poll that flag ([`is_shutdown_requested`] / [`painter_should_continue`]) and
 //! break, so the EXISTING, tested graceful teardown runs: the painter returns,
 //! its `KmsPresenter` drops, `blank_fbdev` clears `/dev/fb0` BEFORE releasing
