@@ -56,6 +56,11 @@ pub mod vban;
 // `probe::presenter::PresenterKind` reference keeps compiling unchanged.
 pub mod presenter_kind;
 
+// #1179 — explicit painter display-mode override (the 2560x1080@100 experiment): pure `WxH@RR`
+// parsing + proportional dual-QR geometry scaling + canvas resolution. No probe deps, so it
+// unit-tests Tier-0; the probe-gated painter/presenter/kms glue threads the resolved values.
+pub mod painter_mode;
+
 // #297 — NDI sender re-announce trigger (pure decision + network signature). Cross-platform
 // (no v4l/libc) so it unit-tests Tier-0; the Linux-only IO (interface read + sender re-create)
 // lives in `ndi`.
