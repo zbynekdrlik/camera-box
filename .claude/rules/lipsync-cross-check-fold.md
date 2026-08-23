@@ -47,3 +47,30 @@ and the real consumer path always supplies both offsets so `Unknown` never arise
 fold happens in `run_av_sync` (an `anyhow::bail!` after the JSON is printed), NOT in
 `build_and_print_verdict`'s `all_pass` accumulator — because the cross-check is a per-`--av-sync`-run
 measurement, not a per-recording verdict term.
+
+## A SyncNet conf ~1.0-on-every-chunk regression with a tracked face + clean audio = emit-CADENCE warp, not a lag (issue 1174)
+
+When SyncNet reads conf ~1.0 on EVERY chunk while the face is fully tracked (S3FD ~419/419) and the
+audio is present + clean (direct cam2-monitor-out → Dante cable, no acoustics), and an offset sweep
+±2.2 s never lifts it — that is NOT an A/V lag (no single offset restores a NON-uniform time warp).
+It is the VIDEO timeline being warped by the camera-box emit path. The prime suspect is
+`src/dupe_decimation/gate.rs`: its `dupe_shed_summary` line (logged ~every 5 s to cam2's journal)
+carries 7 counters that split by MOTION effect —
+- **PRESERVING** (smooth motion; the Aug-5 baseline had only these): `dupe-victim shed`,
+  `blind-pacing shed` (uniform decimation / true-dup drop).
+- **WARPING** (freeze/jump; ALL added AFTER Aug-5 — #1111/#1145/#1167): `late-dupe copies emitted`,
+  `boundaries retired`, `depth-drained`, `fast-drained`, `starvation last-frame repeats`.
+Aug-5 predates the WHOLE dupe-decimation era, so ANY nonzero WARPING count during the lipsync window
+is cadence damage that decorrelates lips from the continuous audio → conf collapses.
+
+**Confirm it in ONE command** (`lipsync-cross-check.sh` gained a code-side diagnostic, issue 1174):
+capture cam2's window (`journalctl -u camera-box --since … --until … | grep 'dupe-preferring
+decimation' > cadence.log`) and pass `--lipsync-cadence-log cadence.log` to the SAME paired-run
+cross-check command. It prints `lipsync_cadence: verdict=CADENCE-WARP|CADENCE-CLEAN|CADENCE-UNKNOWN
+…`: WARP (warp_events>0) = emit path confirmed contributing; CLEAN (=0, ≥1 line) = emit exonerated,
+look at moiré/exposure on the video branch; UNKNOWN (no lines) = re-capture, NEVER read as "no warp".
+The pure parser `lipsync_cadence_attribution` (awk-only, always exit 0 — report-only #1133 discipline)
+is unit-tested in `tests/harness_lipsync_cross_check.rs`. The classifier is grounded in code HISTORY
+(those event types didn't exist on Aug-5), not a tuned threshold. The actual FIX once WARP is
+confirmed is a `needs-user-decision` tradeoff (the valves keep the burn-id grid locked for the burn
+gate) — do NOT change the production emit path blind.
