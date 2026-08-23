@@ -550,6 +550,41 @@ if imag_obs_log_no_version_mismatch "$LOG"; then echo YES; else echo NO; fi"#,
     );
 }
 
+/// #1183 residual: `verify-imag.sh` runs under `set -euo pipefail`, and a matcher fed via
+/// `printf '%s' "$1" | grep -q` SIGPIPEs the writer (rc=141) the instant `grep -q` exits early on
+/// a match -- which it always does, because the genlock marker is a startup line at the TOP while
+/// live OBS logs are 173 KB-40 MB (far over the 64 KiB pipe capacity). `pipefail` then promotes
+/// that 141 to the pipeline status and the matcher false-FAILs a healthy box DESPITE the match.
+/// The sanctioned issue-1047 fix is a here-string (`<<<"$1"`): bash writes the whole body to a
+/// temp file, so there is no live writer to SIGPIPE at ANY size. RED against the pipe form (the
+/// genlock matcher returns NO on an over-capacity log), GREEN after all four (h) matchers feed
+/// grep from a here-string. The small woven fixtures in the sibling invalid-UTF-8 test pass BOTH
+/// ways, which is why the first RED->GREEN missed this -- a >64 KiB body with the marker at the TOP
+/// is the missing coverage (the issue-1047 fixture recipe).
+#[test]
+fn imag_obs_log_matchers_are_sigpipe_immune_over_pipe_capacity_1183() {
+    // >64 KiB body (~200 KB of filler) with the DistroAV/NDI/genlock markers at the very TOP, so
+    // an early-exiting `grep -q` closes the pipe long before a `printf` writer finishes -> SIGPIPE.
+    let (code, out, err) = run_sourced(
+        r#"FILLER="$(head -c 200000 /dev/zero | tr '\0' x)"
+LOG="info: [distroav] plugin loaded (full NDI features) (version 6.3.2)
+info: NDI library initialized
+info: genlock: wall-clock-slaved render tick ENABLED (latency = 3 ms)
+$FILLER"
+if imag_obs_log_shows_genlock_tick "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_no_version_mismatch "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_shows_distroav_loaded "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_shows_ndi_loaded "$LOG"; then echo YES; else echo NO; fi"#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        vec!["YES", "YES", "YES", "YES"],
+        "an over-64-KiB OBS log with the markers at the TOP must not SIGPIPE-false-FAIL any (h) \
+         matcher under pipefail (#1183 residual): {out:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // (j) OBS base version pin + apt-mark hold (#824)
 // ---------------------------------------------------------------------------------------------
