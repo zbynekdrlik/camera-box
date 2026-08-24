@@ -714,3 +714,174 @@ fn playback_cmds_writes_an_mpv_native_log_file_1190() {
          --no-terminal: {cmds}"
     );
 }
+
+// --------------------------------------------------------------------------------------------- //
+// issue 1192 -- speech-arrival VERIFY (envelope correlation vs the local asset) + mpv retry. After
+// the mpv playback starts, cmd_start PROVES the asset speech actually reached the mbc mic chain (a
+// short probe recording on stream OBS, pulled + envelope-correlated against the local asset via
+// scripts/lipsync_envelope_corr.py), and recycles the playback (a fresh audio-stream-start) on a
+// low correlation, up to LIPSYNC_ARRIVAL_RETRIES, failing loud with the attempt matrix on
+// exhaustion. Volumedetect is NOT the criterion (issue 1174: the mic-chain AGC pumps ambient to the
+// ceiling even with dead speech, so a level check false-passes -- the content signal is the
+// envelope correlation). The whole block stays INSIDE the ERR-trap window so a genuine infra
+// failure AND the exhaustion path both restore TEST mode via the existing trap.
+// --------------------------------------------------------------------------------------------- //
+
+/// The three arrival-verify env seams must default exactly to the ticket's values:
+/// LIPSYNC_ARRIVAL_CORR_MIN=0.6, LIPSYNC_ARRIVAL_RETRIES=4, LIPSYNC_ARRIVAL_PROBE_S=15.
+#[test]
+fn lipsync_arrival_env_seams_default_to_ticket_values_1192() {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$1\"; echo \"$LIPSYNC_ARRIVAL_CORR_MIN|$LIPSYNC_ARRIVAL_RETRIES|$LIPSYNC_ARRIVAL_PROBE_S\"")
+        .arg("bash")
+        .arg(script())
+        .output()
+        .expect("spawn bash");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "0.6|4|15",
+        "1192: arrival-verify seams must default to CORR_MIN=0.6, RETRIES=4, PROBE_S=15: {stdout}"
+    );
+}
+
+/// The pure `lipsync_arrival_corr_meets DB MIN` helper decides pass/fail float-safely: a corr at or
+/// above the threshold passes (>=, boundary inclusive), below fails. Mirrors
+/// audio_preflight_is_silent's own strict-boundary convention (there the boundary is audible; here
+/// the boundary meets the threshold).
+#[test]
+fn lipsync_arrival_corr_meets_threshold_helper_1192() {
+    assert_eq!(
+        run_sourced("lipsync_arrival_corr_meets 0.7 0.6").trim(),
+        "true",
+        "1192: corr above threshold must meet it"
+    );
+    assert_eq!(
+        run_sourced("lipsync_arrival_corr_meets 0.35 0.6").trim(),
+        "false",
+        "1192: corr below threshold must NOT meet it (the dead-speech case)"
+    );
+    assert_eq!(
+        run_sourced("lipsync_arrival_corr_meets 0.6 0.6").trim(),
+        "true",
+        "1192: corr exactly at the threshold meets it (>=, boundary inclusive)"
+    );
+    assert_eq!(
+        run_sourced("lipsync_arrival_corr_meets 0.976 0.6").trim(),
+        "true",
+        "1192: the live-verified arrival value (0.976) must pass"
+    );
+}
+
+/// The arrival verify must run AFTER the persistent mpv playback launch and BEFORE the final
+/// `ACTIVE ... record now` message -- it can only test a running playback, and it must gate the
+/// ACTIVE claim (no silent "ACTIVE" while speech is dead). It must ALSO sit BEFORE the `trap - ERR`
+/// clear, so it stays inside the ERR-trap window (the exhaustion path restores TEST mode via it).
+#[test]
+fn start_verifies_speech_arrival_after_playback_before_active_1192() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    let playback_at = s
+        .find("cam_ssh \"$(lipsync_playback_cmds")
+        .expect("initial playback launch present");
+    let arrival_at = s
+        .find("lipsync_envelope_corr.py")
+        .expect("1192: cmd_start must correlate the probe via lipsync_envelope_corr.py");
+    let active_at = s
+        .find("RESULT: lipsync-test mode ACTIVE")
+        .expect("ACTIVE message present");
+    let clear_at = s.find("trap - ERR").expect("trap clear present");
+    assert!(
+        playback_at < arrival_at,
+        "1192: arrival verify must run AFTER the mpv playback launch (it tests a running playback)"
+    );
+    assert!(
+        arrival_at < active_at,
+        "1192: arrival verify must gate the ACTIVE claim -- run BEFORE the 'record now' message"
+    );
+    assert!(
+        arrival_at < clear_at,
+        "1192: arrival verify must sit INSIDE the ERR-trap window (before `trap - ERR`), so the \
+         exhaustion path restores TEST mode via the existing trap"
+    );
+}
+
+/// The arrival probe must record on the STREAM OBS box (obs_phase2.py record start/stop), pull the
+/// recording (win_ssh_download), and correlate it against the LOCAL asset via
+/// lipsync_envelope_corr.py with --probe/--asset and the mbc audio track (--audio-map 0:a:0).
+#[test]
+fn start_arrival_probes_stream_and_correlates_via_helper_1192() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    assert!(
+        s.contains("obs_phase2.py\" record --host \"$STREAM\" --action start"),
+        "1192: the arrival probe must StartRecord on stream OBS"
+    );
+    assert!(
+        s.contains("obs_phase2.py\" record --host \"$STREAM\" --action stop"),
+        "1192: the arrival probe must StopRecord on stream OBS"
+    );
+    assert!(
+        s.contains("win_ssh_download"),
+        "1192: the arrival probe recording must be PULLED to dev1 via win_ssh_download"
+    );
+    assert!(
+        s.contains("lipsync_envelope_corr.py") && s.contains("--probe") && s.contains("--asset"),
+        "1192: the pulled probe must be envelope-correlated against the local asset"
+    );
+    assert!(
+        s.contains("--audio-map 0:a:0"),
+        "1192: the correlation must read the mbc audio track (0:a:0), matching the av-sync convention"
+    );
+}
+
+/// The retry loop must be BOUNDED by LIPSYNC_ARRIVAL_RETRIES (never an unbounded `while true`), and
+/// a low correlation must RECYCLE the mpv playback (a fresh audio-stream-start): stop the playback
+/// then relaunch it via the SAME lipsync_playback_cmds builder. So the playback launch appears at
+/// least twice in the script (the initial launch + the retry relaunch).
+#[test]
+fn start_arrival_retry_is_bounded_and_recycles_mpv_1192() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    assert!(
+        s.contains("seq 1 \"$LIPSYNC_ARRIVAL_RETRIES\""),
+        "1192: the arrival retry loop must be bounded by LIPSYNC_ARRIVAL_RETRIES"
+    );
+    assert!(
+        !s.contains("while true") && !s.contains("while :"),
+        "1192: the arrival retry loop must never be unbounded"
+    );
+    assert!(
+        s.matches("cam_ssh \"$(lipsync_playback_cmds").count() >= 2,
+        "1192: a low-corr retry must recycle mpv -- the playback launch must appear at least twice \
+         (initial + retry relaunch), reusing the same builder"
+    );
+    assert!(
+        s.contains("cam_ssh \"$(lipsync_stop_playback_cmds"),
+        "1192: recycling mpv must first stop the running playback before relaunching it"
+    );
+}
+
+/// On exhaustion (all retries below threshold) the arrival verify must FAIL LOUD with the attempt
+/// matrix -- never a silent ACTIVE -- and the failure must sit inside the ERR-trap window so TEST
+/// mode is restored via the existing `trap 'bash rig-mode.sh test' ERR`.
+#[test]
+fn start_arrival_exhaustion_fails_loud_with_matrix_inside_err_trap_1192() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    let fail_at = s
+        .find("asset speech never reached mbc after")
+        .expect("1192: exhaustion must fail loud naming the arrival failure");
+    assert!(
+        s.contains("Attempt matrix:"),
+        "1192: exhaustion must print the per-attempt correlation matrix"
+    );
+    let clear_at = s.find("trap - ERR").expect("trap clear present");
+    assert!(
+        fail_at < clear_at,
+        "1192: the exhaustion fail-loud must be INSIDE the ERR-trap window (before `trap - ERR`), \
+         so the trap restores TEST mode on exhaustion"
+    );
+}
