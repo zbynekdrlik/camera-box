@@ -58,6 +58,28 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// Source drift-guard.sh under the CALLER's EXACT `set -euo pipefail` context — what the script
+/// itself arms at its own top and what the `--check-imag` caller
+/// (`obs_fps="$(fps_from_log "$obs_log")"`) runs under — and run `body` WITHOUT asserting success.
+/// Returns (exit_code, stdout). This is the only way to observe #1189: a parser that SIGPIPEs (141)
+/// under `set -e` inside a command substitution kills the WHOLE script, so a survival assertion has
+/// to inspect the exit code, never panic on it the way `run_sourced` (which asserts success) would.
+/// It mirrors `run_under_set_e` in tests/harness_leg_health_guard_1133.rs (the canonical repo
+/// pattern for exactly this `set -e`-abort class).
+fn run_sourced_status(body: &str, extra_env: &[(&str, &str)]) -> (i32, String) {
+    let harness = format!("set -euo pipefail\n. \"$SCRIPT\"\n{body}", body = body);
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&harness).env("SCRIPT", script());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
 /// A representative manifest carrying the version table + the pinned-settings table.
 const MANIFEST_FIXTURE: &str = "\
 # vendor
@@ -176,6 +198,88 @@ fn fps_parser_picks_output_fps_not_adapter_fps() {
         "30",
         "must pick the OUTPUT fps inside 'video settings reset:', not the adapter fps"
     );
+}
+
+#[test]
+fn fps_and_version_parsers_survive_a_large_log_without_sigpipe_141_1189() {
+    // #1189: `fps_from_log` (awk `exit` on first match) and the three version parsers
+    // (`obs_version_from_log` / `distroav_version_from_log` / `ndi_runtime_from_log`, each
+    // `printf | sed … | head -1`) lacked the file's own issue-514 drain-safe `|| true`. On a large
+    // real log the early-exiting consumer (awk `exit`, or `head -1` closing after one line) closes
+    // the read end while `printf` is still writing megabytes -> SIGPIPE -> `pipefail` yields 141 ->
+    // the unguarded pipeline propagates it -> under the script's own `set -euo pipefail`, the caller
+    // `obs_fps="$(fps_from_log "$obs_log")"` dies with ZERO output. Live symptom: the issue-789
+    // rig-mode TEST-entry gate read `no genlock_build facet [exit=141]` and fail-closed HARD-BLOCKed
+    // TEST mode, though imag was on the canonical build.
+    //
+    // This must run under the script's real `set -euo pipefail` (via `run_sourced_status`) — the
+    // `-uo`-only `run_sourced` context is structurally blind to a `set -e` abort (the #1133 lesson).
+    // The log is passed via a temp FILE `cat` inside the bash body (not an env var, which would blow
+    // ARG_MAX at spawn), mirroring `genlock_parser_reads_running_state_from_log`.
+    //
+    // Construction that triggers BOTH SIGPIPE shapes in one fixture:
+    //   * many `OBS …` and `NDI Library Version detected: …` header lines EARLY so each version
+    //     parser's `sed` emits many matches and `head -1` closes after the first -> `sed` SIGPIPEs;
+    //   * the `video settings reset:` + `fps: 60/1` block EARLY so `fps_from_log`'s awk `exit`s with
+    //     most of the input unwritten -> `printf` SIGPIPEs;
+    //   * a large filler tail AFTER the block so `printf` is genuinely still writing past the pipe
+    //     buffer (~64 KB) when the consumer exits.
+    let mut big = String::new();
+    for i in 0..2000 {
+        big.push_str(&format!(
+            "11:40:39.376: OBS 32.2.0 (64-bit, windows) hdr {i}\n"
+        ));
+    }
+    for i in 0..2000 {
+        big.push_str(&format!(
+            "11:40:40.100: [distroav] NDI Library Version detected: 6.3.2.0 line {i}\n"
+        ));
+    }
+    big.push_str("11:40:39.714: video settings reset:\n");
+    big.push_str("11:40:39.714: \tfps:               60/1\n");
+    for i in 0..20000 {
+        big.push_str(&format!(
+            "11:40:41.{i:05}: filler log line padding to force printf SIGPIPE after the consumer exits {i}\n"
+        ));
+    }
+    // Sanity: the fixture must exceed the ~64 KB pipe buffer several times over, or neither SIGPIPE
+    // shape fires and the test would pass vacuously even against the buggy code.
+    assert!(
+        big.len() > 1_000_000,
+        "fixture must be > 1 MB to force SIGPIPE, got {}",
+        big.len()
+    );
+    let logfile = std::env::temp_dir().join(format!("dg_1189_biglog_{}.txt", std::process::id()));
+    std::fs::write(&logfile, &big).expect("write big log");
+
+    // (parser, expected value the parser must still return from this fixture)
+    let cases = [
+        ("fps_from_log", "60"),
+        ("obs_version_from_log", "32.2.0"),
+        ("ndi_runtime_from_log", "6.3.2.0"),
+    ];
+    for (parser, want) in cases {
+        let body = format!(
+            "v=\"$({parser} \"$(cat \"$LOGFILE\")\")\"; echo \"SENTINEL_SURVIVED {parser}=[$v]\""
+        );
+        let (code, stdout) = run_sourced_status(&body, &[("LOGFILE", logfile.to_str().unwrap())]);
+        assert_eq!(
+            code, 0,
+            "{parser} must survive a large log without SIGPIPE-141 killing the caller \
+             (exit={code}, stdout={stdout:?}) — this is the #1189 regression"
+        );
+        assert!(
+            stdout.contains("SENTINEL_SURVIVED"),
+            "{parser}: the caller must reach the line AFTER the command substitution \
+             (SIGPIPE-141 under set -e skips it), stdout={stdout:?}"
+        );
+        assert!(
+            stdout.contains(&format!("{parser}=[{want}]")),
+            "{parser} must still extract the correct value [{want}] from the large log, \
+             stdout={stdout:?}"
+        );
+    }
+    let _ = std::fs::remove_file(&logfile);
 }
 
 #[test]
