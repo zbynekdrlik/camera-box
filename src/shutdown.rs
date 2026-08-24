@@ -113,7 +113,10 @@ fn install_posix_handlers() {
     // set, and the handler itself does only an async-signal-safe atomic store.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handle_shutdown_signal as libc::sighandler_t;
+        // fn -> raw-pointer -> integer, never fn -> integer directly: rustc's
+        // `function_casts_as_integer` lint (denied under -D warnings) rejects the
+        // one-step form; the pointer hop is the compiler-suggested spelling.
+        sa.sa_sigaction = handle_shutdown_signal as *const () as libc::sighandler_t;
         sa.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&mut sa.sa_mask);
         for sig in signals {
