@@ -35,6 +35,44 @@ without a code change. It is ORTHOGONAL to `LIPSYNC_AUDIO_LEAD_MS`: gain fixes t
 the lead fixes the A/V OFFSET. Do NOT try to fix the level by touching the production mic-chain AGC —
 that is a live prod path, not this test-mode script's to tune (rig-only-qpsk-marker / minimal-fix).
 
+## The gain is NECESSARY but NOT SUFFICIENT — `cmd_start` VERIFIES speech actually arrived (#1192)
+
+`LIPSYNC_PLAYBACK_GAIN_DB` (#1191) gets the speech LEVEL into the AGC operating point, but the
+HDMI→mic audio SINK LOCK is a SEPARATE, flaky factor: it latches or not **per audio-stream-start**,
+and can unlatch spontaneously mid-run (issue 1174 attempt matrix — round 3 with the merged +9 dB
+script still measured envelope corr 0.23–0.35, speech never arrived). The host side is ALWAYS healthy
+in the dead state (PCM RUNNING, hw_params OK, ELD valid, mode matched), so the lock is UNREADABLE from
+cam2 — the only reliable signal is a CONTENT check on what actually reached the mic. So after the mpv
+playback starts, `cmd_start` runs a speech-arrival VERIFY (issue 1192) before it claims ACTIVE:
+
+- **Probe:** a short throwaway recording on **stream OBS** (`obs_phase2.py record --host "$STREAM"
+  --action start/stop`, ~`LIPSYNC_ARRIVAL_PROBE_S`=15 s), pulled to dev1 via `win_ssh_download`
+  (win-ssh-exec.sh), reusing the audio-presence-preflight record→stop→moov-finalize-retry→delete
+  skeleton (`audio_preflight_delete_ps` cleanup). This needs the stream box (STREAM/STREAM_USER/
+  STREAM_PW, env-overridable, targets.md) — a cam2-only test with no stream OBS sets
+  `LIPSYNC_ARRIVAL_ENABLE=0` to skip it (default 1: the needed check is ON, never a forgettable toggle).
+- **Criterion — envelope correlation, NOT volumedetect.** `scripts/lipsync_envelope_corr.py` decodes
+  the pulled probe's mbc track (`--audio-map 0:a:0`) and the LOCAL asset to 8 kHz mono, takes a 20 ms
+  rectified envelope, and reports the **mean-subtracted normalized (Pearson) correlation maximized
+  over every asset-loop offset** (mpv `--loop-file=inf` → the probe lands at an arbitrary loop phase;
+  the correlation is scale+offset invariant, so the mic-chain AGC's amplification doesn't fool it).
+  A corr `>= LIPSYNC_ARRIVAL_CORR_MIN` (default 0.6) = speech arrived. **Volumedetect is explicitly
+  NOT the criterion:** the AGC pumps ambient up to the universal ~−5.3 dBFS ceiling even with dead
+  speech, so a level gate false-passes (this is exactly why the #901 arrival check false-passed).
+  Live values: ~0.22–0.35 dead vs 0.976 arrived — 0.6 separates them cleanly.
+- **Retry:** a low corr recycles the mpv playback (a fresh audio-stream-start = a new shot at the
+  flaky lock — `lipsync_stop_playback_cmds` then `lipsync_playback_cmds`), up to
+  `LIPSYNC_ARRIVAL_RETRIES` (default 4). Each attempt is logged with its corr.
+- **Exhaustion:** after N failed attempts, FAIL LOUD with the per-attempt matrix — never a silent
+  ACTIVE. The whole block stays INSIDE the ERR-trap window (`trap - ERR` is cleared only after a
+  successful verify), so BOTH a genuine infra failure AND the exhaustion path fire the existing
+  `trap 'bash rig-mode.sh test' ERR` and restore TEST mode.
+- **Pure/testable split (Tier-0):** the correlation math is pure stdlib functions
+  (`rectified_envelope`/`pearson`/`best_loop_correlation`), offline-tested with synthetic
+  sine-envelope fixtures in `tests/python/test_lipsync_envelope_corr.py` (no ffmpeg/numpy/network);
+  the bash side is static-anchor + `lipsync_arrival_corr_meets` (run_sourced) tested in
+  `tests/harness_lipsync_test_mode.rs`. Live probe/pull/correlate on the real rig is a supervisor step.
+
 ## The `--audio-delay` SIGN is the easy thing to get wrong (silent lipsync break) — default is 0 (#1191)
 
 `LIPSYNC_AUDIO_LEAD_MS` compensates any residual ALSA output-pipeline depth on `hw:CARD=PCH,DEV=3` by
