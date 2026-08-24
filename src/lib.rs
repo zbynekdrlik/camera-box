@@ -449,6 +449,12 @@ pub mod e2e_latency_gate;
 // thinly by recording-verdict.
 pub mod imag_leg_gate;
 pub mod optical_floor;
+// issue 781 — REPORT-ONLY projection-tap scanout-TEAR detector: pure crate-root classifier (Tier-0)
+// over the cam2-optical dual-QR Vernier span per captured frame, consumed thinly by
+// recording-verdict's all-cambox sweep. `gates_overall_pass()` is `false` (the payload-level signal
+// is proven-blind on the current single-vertical-band content) with a computed `TearSignalViability`;
+// one-line-flippable to LIVE once the signal is Observed on a known-torn run + a bound is calibrated.
+pub mod tear_detect;
 // #1141 — head-end OPTICAL blur/shutter preflight: pure crate-root classifier (Tier-0) over
 // the running service's `rough=` capture telemetry, consumed by scripts/lib/optical-preflight.sh.
 pub mod optical_preflight;
