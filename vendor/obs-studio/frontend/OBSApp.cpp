@@ -36,7 +36,6 @@
 #endif
 #include <qt-wrappers.hpp>
 
-#include <QCheckBox>
 #include <QDesktopServices>
 #if defined(_WIN32) || defined(ENABLE_SPARKLE_UPDATER)
 #include <QFile>
@@ -83,62 +82,13 @@ extern "C" __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 namespace {
 
-typedef struct UncleanLaunchAction {
-	bool useSafeMode = false;
-	bool sendCrashReport = false;
-} UncleanLaunchAction;
-
-UncleanLaunchAction handleUncleanShutdown(bool enableCrashUpload)
-{
-	UncleanLaunchAction launchAction;
-
-	blog(LOG_WARNING, "Crash or unclean shutdown detected");
-
-	QMessageBox crashWarning;
-
-	crashWarning.setIcon(QMessageBox::Warning);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
-	crashWarning.setOption(QMessageBox::Option::DontUseNativeDialog);
-#endif
-	crashWarning.setWindowTitle(QTStr("CrashHandling.Dialog.Title"));
-	crashWarning.setText(QTStr("CrashHandling.Labels.Text"));
-
-	if (enableCrashUpload) {
-		crashWarning.setInformativeText(QTStr("CrashHandling.Labels.PrivacyNotice"));
-
-		QCheckBox *sendCrashReportCheckbox = new QCheckBox(QTStr("CrashHandling.Checkbox.SendReport"));
-		crashWarning.setCheckBox(sendCrashReportCheckbox);
-	}
-
-	QPushButton *launchSafeButton =
-		crashWarning.addButton(QTStr("CrashHandling.Buttons.LaunchSafe"), QMessageBox::AcceptRole);
-	QPushButton *launchNormalButton =
-		crashWarning.addButton(QTStr("CrashHandling.Buttons.LaunchNormal"), QMessageBox::RejectRole);
-
-	crashWarning.setDefaultButton(launchNormalButton);
-
-	crashWarning.exec();
-
-	bool useSafeMode = crashWarning.clickedButton() == launchSafeButton;
-
-	if (useSafeMode) {
-		launchAction.useSafeMode = true;
-
-		blog(LOG_INFO, "[Safe Mode] Safe mode launch selected, loading third-party plugins is disabled");
-	} else {
-		blog(LOG_WARNING, "[Safe Mode] Normal launch selected, loading third-party plugins is enabled");
-	}
-
-	bool sendCrashReport = (enableCrashUpload) ? crashWarning.checkBox()->isChecked() : false;
-
-	if (sendCrashReport) {
-		launchAction.sendCrashReport = true;
-
-		blog(LOG_INFO, "User selected to send crash report");
-	}
-
-	return launchAction;
-}
+// #1195: the stock OBS unclean-shutdown "Run in Safe Mode?" modal (upstream's
+// crash-warning dialog handler and its launch-action struct) was REMOVED from this
+// newlevel.media rig build. OBSApp::checkForUncleanShutdown() below auto-selects a NORMAL
+// launch instead -- an unattended broadcast box must never stop on a modal, or a crash +
+// AHK respawn leaves OBS dead ~30 min until someone clicks it. A future `git subtree pull`
+// (/update-av-stack) that re-imports the modal must NOT be merged; see
+// checkForUncleanShutdown() + tests/obs_unclean_shutdown_auto_normal_1195.rs.
 
 QAccessibleInterface *alignmentSelectorFactory(const QString &classname, QObject *object)
 {
@@ -1138,17 +1088,16 @@ void OBSApp::AppInit()
 
 void OBSApp::checkForUncleanShutdown()
 {
-	bool hasUncleanShutdown = crashHandler_->hasUncleanShutdown();
-	bool hasNewCrashLog = crashHandler_->hasNewCrashLog();
-
-	if (hasUncleanShutdown) {
-		UncleanLaunchAction launchAction = handleUncleanShutdown(hasNewCrashLog);
-
-		safe_mode = launchAction.useSafeMode;
-
-		if (launchAction.sendCrashReport) {
-			crashHandler_->uploadLastCrashLog();
-		}
+	// #1195: this is the newlevel.media rig build -- an unattended broadcast box must
+	// NEVER stop on a modal. Upstream would pop the "Run in Safe Mode?" crash dialog and
+	// block launch until someone clicked it, so a crash + AHK/wrapper respawn left OBS dead
+	// ~30 min. Auto-select a NORMAL launch: log a WARNING and proceed. safe_mode is left
+	// untouched (an explicit CLI --safe-mode is still honored), and the crash-report upload
+	// question is skipped entirely.
+	if (crashHandler_->hasUncleanShutdown()) {
+		blog(LOG_WARNING,
+		     "Crash or unclean shutdown detected -- "
+		     "auto-selecting NORMAL launch (rig build: never block on a modal)");
 	}
 }
 

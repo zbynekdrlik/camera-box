@@ -35,10 +35,14 @@ Use the win-* MCP `Shell` `cwd` param, or `Start-Process -WorkingDirectory`.
 **NB:** The MCP Shell blocks/times-out on a GUI `Start-Process` but the launch still issues.
 Verify health in a SEPARATE call (don't put a long `Start-Sleep` in the launch command).
 
-Clear `%APPDATA%\obs-studio\.sentinel\*` before relaunch — stale sentinel files trigger
-"OBS Studio Crash Detected" modal, which hangs a headless launch. Both boxes have
-`DisableSafeModePrompt=true` but clearing sentinels is the reliable fix. Avoids safe-mode
-which disables DistroAV + genlock.
+Clear `%APPDATA%\obs-studio\.sentinel\*` before relaunch — stale sentinel files trigger the
+"OBS Studio did not properly shut down / Run in Safe Mode?" modal, which hangs a headless launch.
+The genlock rig build removes that modal at the source (#1195): `checkForUncleanShutdown()`
+auto-selects a NORMAL launch and never shows the dialog (safe mode disables DistroAV + genlock, so
+it stays OFF). There is NO `DisableSafeModePrompt` config key in this vendored 32.x tree — it does
+not exist (an earlier note here claimed it did; that was wrong). Clearing sentinels is the
+belt-&-braces cleanup the launch wrapper (`launch-obs-genlock.sh`) and the strih respawn AHK
+(`scripts/strih/NL_STARTUP.ahk`) both do, so even a not-yet-redeployed binary never hits the modal.
 
 ### GOTCHA — an OBS launched over plain SSH DIES when the ssh session closes (#859, cost a live outage)
 
@@ -118,7 +122,8 @@ is NOT evidence of persistence — it is evidence of a launch that is about to b
 - WorkingSet >100 MB (~900 MB–1.4 GB when healthy)
 - Port 4455 listening
 - Log shows:
-  - `[Safe Mode] Normal launch ... third-party plugins enabled`
+  - NO `Safe Mode enabled.` (safe mode would disable DistroAV + genlock; the distroav/genlock lines below prove it is OFF)
+  - after an unclean shutdown: `Crash or unclean shutdown detected -- auto-selecting NORMAL launch` (#1195 — a NORMAL launch, never a blocking Safe-Mode modal; a clean start logs no safe-mode line at all)
   - `[distroav] plugin loaded`
   - `genlock: ... render tick ENABLED`
   - `[distroav] NDI Main Output started`
