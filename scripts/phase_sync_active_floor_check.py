@@ -35,7 +35,7 @@ from latency_pins_snapshot import read_pin  # reuse the proven honest-None read 
 
 def active_camera_names(explicit: "str | None" = None) -> list:
     """#893 -- the active camera names, split from `explicit` if given, else CAMERA_ACTIVE_SET
-    (env var, default "cam2 cam3" -- #1110: cam1 re-retired 2026-08-22, grabber hw defect)
+    (env var, default "cam3" -- issue 1170: cam2's camera-under-test role retired [grabber cure-decay])
     -- NEVER a literal range (.claude/rules/camera-active-set.md). Read
     fresh on every call.
 
@@ -44,7 +44,7 @@ def active_camera_names(explicit: "str | None" = None) -> list:
     relying on the shell variable happening to be an EXPORTED env var reaching this Python
     subprocess -- the same safer convention that script's own CLI already established.
     """
-    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3")
+    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam3")
     return [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
 
 

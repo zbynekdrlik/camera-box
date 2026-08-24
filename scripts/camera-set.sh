@@ -91,19 +91,36 @@
 # RE-ENABLE (once the grabber is swapped): add "cam1" back to CAMERA_ACTIVE_SET (and CAMERA_ALIGN_SET
 # below) AND delete cam1's rig-fleet.txt ack line — nothing else (the source role follows
 # automatically, cam1 being the first strih-routable member of a cam1-first set again).
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3}"
+#
+# cam2 CAMERA-UNDER-TEST RETIRED 2026-08-24 (issue 1170, owner order): cam2's ShadowCast grabber
+# captures imag-nb's HDMI output, so cam2's leg measures the imag PROJECTION path (issue 781), not a
+# splitter camera feed — and that grabber's cure-decay collapsed from ~2h to ~7min (issue 1193
+# canary journal), so its capture leg cannot survive a 40-min run. cam2 is dropped from the active
+# set so it is no longer a MEASURED camera-under-test: no [2b/8] burn deploy, no capture-leg health
+# check, no sweep window, no verdict window, no alignment. Its PAINTER role stays UNCONDITIONAL
+# (keyed off PAINTER_IP, NOT this set): cam2 still paints the dual-QR + emits the QPSK marker, the
+# source camera still films its monitor, and its DanteSync clock is still gated (the whole run's
+# timebase). Its facts (IP / NDI source) stay fully resolvable below exactly like the other retired
+# cameras — retirement is membership-only. The hardware swap is tracked on issue 1198.
+# RE-ENABLE (once the card is swapped): add "cam2" back to CAMERA_ACTIVE_SET — every camera-under-test
+# facet (deploy, leg-health, sweep, verdict, and CAMERA_ALIGN_SET membership via camera_is_active)
+# flows back automatically, one line, no other edit (see tests/harness_cam2_camera_under_test_gating_1170.rs).
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam3}"
 
 # CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
-# aligned. This is DELIBERATELY a SUPERSET of CAMERA_ACTIVE_SET, not derived from it: the two answer
-# DIFFERENT questions. CAMERA_ACTIVE_SET = the cameras the measurable E2E sweep decodes/samples (cam4
-# is excluded from it because its own capture leg can wedge, #947). CAMERA_ALIGN_SET = every camera
-# that REALLY goes on-air to strih, which the owner's rework mandate (issue 1003, 2026-08-20) says
-# MUST include cam4 — the offline-ack "outside-measured-set" covers only E2E measurement, never
-# production alignment. So cam4 stays out of the sweep but IS aligned. cam1 is dropped from this set
-# too (issue 1110, 2026-08-22): its grabber is hardware-defective, so it cannot go on-air to be
-# aligned — re-add it here (and to CAMERA_ACTIVE_SET above) once the card is swapped. Override to
-# match the on-air reality if the fleet changes (e.g. a cam5 goes on-air): CAMERA_ALIGN_SET="cam2 cam3 cam4 cam5".
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-cam2 cam3 cam4}"
+# aligned. It is a SUPERSET of the MEASURED set: cam4 stays here (on-air but its capture leg wedges,
+# #947, so it is excluded from CAMERA_ACTIVE_SET yet MUST still be aligned — the owner's rework
+# mandate, issue 1003, 2026-08-20; the offline-ack "outside-measured-set" covers only E2E
+# measurement, never production alignment), and cam3 (the source) is the measured base. cam2's
+# membership, by contrast, DERIVES from CAMERA_ACTIVE_SET (issue 1170): cam2 is aligned ONLY while it
+# is a measured camera. cam2's capture leg is retired until the card swap (issue 1170/1198), so it is
+# NOT aligned now — re-adding "cam2" to CAMERA_ACTIVE_SET above restores its alignment automatically
+# (one line — the whole point). cam1 is out of both sets (issue 1110, dead grabber can't go on-air).
+# The default resolves to "cam3 cam4" (cam2 out) or "cam2 cam3 cam4" (cam2 back). Override to match
+# the on-air reality if the fleet changes (e.g. a cam5 goes on-air): CAMERA_ALIGN_SET="cam2 cam3 cam4 cam5".
+# The inline case is a word-exact match on the space-padded set (same #39-injection-safe posture as
+# camera_is_active — it never evals the value); cam3/cam4 are the explicit on-air base.
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(case " $CAMERA_ACTIVE_SET " in *" cam2 "*) printf 'cam2 cam3 cam4' ;; *) printf 'cam3 cam4' ;; esac)}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

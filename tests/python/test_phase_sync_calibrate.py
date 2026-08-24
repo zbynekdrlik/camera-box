@@ -667,12 +667,12 @@ class TestCLI:
 # ---------------------------------------------------------------------------
 
 class TestActiveNdiSources:
-    def test_default_is_cam2_cam3(self, monkeypatch):
-        # #1110 (2026-08-22): cam1 RE-RETIRED (ShadowCast grabber hw defect beyond software
-        # compensation); default mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam2 cam3".
+    def test_default_is_cam3(self, monkeypatch):
+        # issue 1170 (2026-08-24): cam2's camera-under-test role retired (grabber cure-decay);
+        # default mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam3" (cam2 stays the painter only).
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         assert phase_sync_calibrate.active_ndi_sources() == {
-            "NDI cam2", "NDI cam3",
+            "NDI cam3",
         }
 
     def test_env_override_narrows_and_widens(self, monkeypatch):
