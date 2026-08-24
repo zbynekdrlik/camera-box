@@ -78,6 +78,16 @@ set -euo pipefail
 #                          campaign without a code change). 0 = no compensation (--audio-delay=0.000).
 #                          Only the RELATIVE offset between the two streams matters for lipsync
 #                          perception.
+#   LIPSYNC_ARRIVAL_ENABLE  1 (default) = after starting playback, VERIFY the asset speech actually
+#                          reached the mbc mic chain (issue 1192); 0 = skip (cam2-only test, stream
+#                          OBS unreachable). The HDMI->mic audio sink lock is flaky per
+#                          audio-stream-start (issue 1174), so a blind start otherwise wastes whole
+#                          recording rounds with dead speech.
+#   LIPSYNC_ARRIVAL_CORR_MIN  min envelope correlation (probe recording vs local asset) counted as
+#                          "speech arrived" (default 0.6 -- live: ~0.22-0.35 dead, 0.976 arrived).
+#   LIPSYNC_ARRIVAL_RETRIES  max probe attempts; each failed attempt recycles the mpv playback (a
+#                          fresh audio-stream-start = a new chance at the flaky sink lock) (default 4).
+#   LIPSYNC_ARRIVAL_PROBE_S  length of each stream-OBS probe recording, seconds (default 15).
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
@@ -87,6 +97,12 @@ REPO_ROOT="$(cd "$HERE/.." && pwd)"
 # a pure function library (it deliberately never sets `set -euo pipefail`, so sourcing it does not
 # mutate this script's shell options).
 . "$HERE/lib/rig-test-ledger.sh"
+# issue 1192: the speech-arrival VERIFY probes the STREAM OBS box (record + pull) and reuses the
+# throwaway-probe delete builder. win-ssh-exec.sh gives win_ssh_download/win_ssh_run (it sets
+# `set -euo pipefail`, harmless -- this script already does at the top); audio-presence-preflight.sh
+# gives audio_preflight_delete_ps (the same "delete a throwaway probe recording on the box" builder).
+. "$HERE/lib/win-ssh-exec.sh"
+. "$HERE/lib/audio-presence-preflight.sh"
 
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -103,6 +119,25 @@ case "$LIPSYNC_AUDIO_LEAD_MS" in
     exit 1
     ;;
 esac
+
+# --- issue 1192: speech-arrival VERIFY seams ------------------------------------------------- #
+# After the mpv playback starts, PROVE the asset speech reached the mbc mic chain via a short probe
+# recording on stream OBS + envelope correlation vs the local asset, and recycle the playback on a
+# low correlation (the HDMI->mic audio sink lock is flaky per audio-stream-start, issue 1174). ON by
+# default (the needed check must never be a forgettable toggle); ENABLE=0 is the escape for a
+# cam2-only test where stream OBS is unreachable.
+LIPSYNC_ARRIVAL_ENABLE="${LIPSYNC_ARRIVAL_ENABLE:-1}"
+LIPSYNC_ARRIVAL_CORR_MIN="${LIPSYNC_ARRIVAL_CORR_MIN:-0.6}"       # min envelope corr = "speech arrived"
+LIPSYNC_ARRIVAL_RETRIES="${LIPSYNC_ARRIVAL_RETRIES:-4}"           # max probe attempts (each recycles mpv)
+LIPSYNC_ARRIVAL_PROBE_S="${LIPSYNC_ARRIVAL_PROBE_S:-15}"          # probe recording length, seconds
+LIPSYNC_ARRIVAL_SSH_TIMEOUT="${LIPSYNC_ARRIVAL_SSH_TIMEOUT:-90}"  # per scp/ssh bound to the stream box
+LIPSYNC_ARRIVAL_READ_ATTEMPTS="${LIPSYNC_ARRIVAL_READ_ATTEMPTS:-4}"      # pull+decode retries (moov race)
+LIPSYNC_ARRIVAL_READ_RETRY_SLEEP="${LIPSYNC_ARRIVAL_READ_RETRY_SLEEP:-3}" # settle between those retries
+# The stream OBS box that carries the mbc measurement audio (targets.md; env names match
+# scripts/recording-e2e.sh so an operator setting them once covers both scripts).
+STREAM="${STREAM:-10.77.9.204}"
+STREAM_USER="${STREAM_USER:-newlevel}"
+STREAM_PW="${STREAM_PW:-newlevel}"
 
 # --------------------------------------------------------------------------------------------- #
 # PURE functions (print remote-bash text; no network) -- sourced + unit-tested by
@@ -249,6 +284,20 @@ $(rig_test_ledger_clean_paint_fallback_cmds "$fb")
 CMDS
 }
 
+# lipsync_arrival_corr_meets DB MIN -> "true"/"false" (issue 1192). The speech-arrival decision:
+# the measured envelope correlation MEETS the threshold iff DB >= MIN (boundary inclusive -- a corr
+# exactly at the threshold counts as arrived). Float-safe via awk (values like 0.976 / 0.31), same
+# pure-function shape as audio-presence-preflight.sh's audio_preflight_is_silent so it is directly
+# Tier-0 unit-testable by sourcing.
+lipsync_arrival_corr_meets() {
+  local db="$1" min="$2"
+  if awk -v d="$db" -v m="$min" 'BEGIN { exit !((d + 0) >= (m + 0)) }'; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
 cam_ssh() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@"$PAINTER_IP" "$1"
 }
@@ -282,6 +331,72 @@ cmd_start() {
   cam_ssh "$(lipsync_preflight_cmd "$remote_media")"
   echo "[lipsync-test-mode] cam2: starting lipsync playback (drm=${LIPSYNC_DRM_DEVICE:-auto}, audio=${LIPSYNC_AUDIO_DEVICE}, audio_lead_ms=${LIPSYNC_AUDIO_LEAD_MS})"
   cam_ssh "$(lipsync_playback_cmds "$remote_media" "$LIPSYNC_DRM_DEVICE" "$LIPSYNC_AUDIO_DEVICE" "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_AUDIO_LEAD_MS")"
+  # issue 1192: PROVE the asset speech actually reached the mbc mic chain before claiming ACTIVE.
+  # The HDMI->mic (mbc/Dante) audio sink lock is flaky per audio-stream-start (issue 1174); the host
+  # side is always healthy in the dead state, so the ONLY reliable signal is a CONTENT check -- a
+  # short probe recording on stream OBS, pulled and envelope-correlated against the LOCAL asset
+  # (volumedetect is NOT sufficient: the mic-chain AGC pumps ambient to the ceiling even with dead
+  # speech). On a low correlation, recycle the mpv playback (a fresh audio-stream-start = a new shot
+  # at the flaky lock) and retry; fail loud with the attempt matrix on exhaustion. This whole block
+  # stays INSIDE the ERR-trap window (trap cleared only after it), so a genuine infra failure AND the
+  # exhaustion path both restore TEST mode via the trap set above.
+  if [ "$LIPSYNC_ARRIVAL_ENABLE" = "1" ]; then
+    echo "[lipsync-test-mode] arrival verify: proving the asset speech reached mbc on stream OBS (${STREAM}) -- envelope corr >= ${LIPSYNC_ARRIVAL_CORR_MIN}, up to ${LIPSYNC_ARRIVAL_RETRIES} attempts"
+    local arrival_ok=0 arrival_matrix="" arrival_attempt _ap_win _ap_local _ap_corr _ap_out _ap_read
+    for arrival_attempt in $(seq 1 "$LIPSYNC_ARRIVAL_RETRIES"); do
+      # Short throwaway probe recording on stream (the mbc audio rides the program recording). A
+      # leftover from an abort in the probe window self-heals -- obs_phase2.py record --action start
+      # stops any orphan before it re-records.
+      python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start --password "${OBS_PASSWORD:-}" >/dev/null
+      sleep "$LIPSYNC_ARRIVAL_PROBE_S"
+      _ap_win="$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop --password "${OBS_PASSWORD:-}" || true)"
+      if [ -z "$_ap_win" ]; then
+        echo "[lipsync-test-mode] FAIL: stream StopRecord returned no path -- the arrival probe recording never started (OBS-WS/encoder problem on stream)" >&2
+        false  # -> ERR trap: restore TEST mode, exit nonzero
+      fi
+      # Pull the probe to dev1 + envelope-correlate against the local asset, with a bounded retry for
+      # the moov-atom-not-finalized race (StopRecord's RPC reply lands before the mp4 muxer finalizes
+      # -- the same race the audio-presence preflight documents). `timeout` execvp()s its command so
+      # it cannot invoke a shell FUNCTION; re-source the lib inside bash -c so bash resolves it.
+      _ap_local="$(mktemp --suffix=.mp4)"
+      _ap_corr=""
+      _ap_out=""
+      for _ap_read in $(seq 1 "$LIPSYNC_ARRIVAL_READ_ATTEMPTS"); do
+        timeout "$LIPSYNC_ARRIVAL_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_download "$2" "$3" "$4" "$5" "$6"' _ \
+          "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_ap_win" "$_ap_local" >/dev/null 2>&1 || true
+        _ap_out="$(python3 "$HERE/lipsync_envelope_corr.py" --probe "$_ap_local" --asset "$media" --audio-map 0:a:0 2>&1 || true)"
+        _ap_corr="$(printf '%s\n' "$_ap_out" | sed -n 's/^corr=//p' | head -1 || true)"
+        [ -n "$_ap_corr" ] && break
+        [ "$_ap_read" -lt "$LIPSYNC_ARRIVAL_READ_ATTEMPTS" ] && sleep "$LIPSYNC_ARRIVAL_READ_RETRY_SLEEP"
+      done
+      # Best-effort cleanup: delete the throwaway probe on the box + locally (never abort the run).
+      timeout "$LIPSYNC_ARRIVAL_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+        "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_win")" >/dev/null 2>&1 || true
+      rm -f "$_ap_local"
+      if [ -z "$_ap_corr" ]; then
+        echo "[lipsync-test-mode] FAIL: could not decode/correlate the arrival probe recording (ffmpeg/moov). Raw: ${_ap_out}" >&2
+        false  # -> ERR trap: restore TEST mode, exit nonzero
+      fi
+      arrival_matrix="${arrival_matrix}"$'\n'"    attempt ${arrival_attempt}/${LIPSYNC_ARRIVAL_RETRIES}: envelope corr=${_ap_corr} (min ${LIPSYNC_ARRIVAL_CORR_MIN})"
+      echo "[lipsync-test-mode] arrival attempt ${arrival_attempt}/${LIPSYNC_ARRIVAL_RETRIES}: envelope corr=${_ap_corr} (threshold ${LIPSYNC_ARRIVAL_CORR_MIN})"
+      if [ "$(lipsync_arrival_corr_meets "$_ap_corr" "$LIPSYNC_ARRIVAL_CORR_MIN")" = "true" ]; then
+        arrival_ok=1
+        break
+      fi
+      if [ "$arrival_attempt" -lt "$LIPSYNC_ARRIVAL_RETRIES" ]; then
+        echo "[lipsync-test-mode] speech arrival corr ${_ap_corr} < ${LIPSYNC_ARRIVAL_CORR_MIN} -- recycling mpv playback (fresh audio-stream-start) and retrying" >&2
+        cam_ssh "$(lipsync_stop_playback_cmds "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_FB_DEVICE")"
+        cam_ssh "$(lipsync_playback_cmds "$remote_media" "$LIPSYNC_DRM_DEVICE" "$LIPSYNC_AUDIO_DEVICE" "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_AUDIO_LEAD_MS")"
+      fi
+    done
+    if [ "$arrival_ok" != "1" ]; then
+      echo "[lipsync-test-mode] FAIL: asset speech never reached mbc after ${LIPSYNC_ARRIVAL_RETRIES} attempts (envelope corr stayed < ${LIPSYNC_ARRIVAL_CORR_MIN}) -- the HDMI->mic audio sink never locked (issue 1192). Attempt matrix:${arrival_matrix}" >&2
+      false  # -> ERR trap: bash rig-mode.sh test restores TEST mode, script exits nonzero
+    fi
+    echo "[lipsync-test-mode] arrival verify PASSED: asset speech reached mbc (envelope corr ${_ap_corr} >= ${LIPSYNC_ARRIVAL_CORR_MIN})"
+  else
+    echo "[lipsync-test-mode] arrival verify SKIPPED (LIPSYNC_ARRIVAL_ENABLE=0) -- NOT confirming the asset speech reached mbc"
+  fi
   trap - ERR
   echo "[lipsync-test-mode] RESULT: lipsync-test mode ACTIVE on cam2 -- record now, then run 'lipsync-test-mode.sh stop' to restore TEST mode"
 }
