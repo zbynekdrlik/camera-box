@@ -276,12 +276,15 @@ def test_audit_capture_refuses_empty_avahi_writes_no_file():
 def test_baseline_json_checked_in_and_captured_from_live():
     j = json.loads(_BASELINE.read_text())
     assert j["ip"] == "10.77.9.202" and j["anchor"] == "STRIH-SNV (2ME PGM)"
-    # the live baseline facts verified on the rig today.
-    assert j["senders"] == {
-        "STRIH-SNV (2ME PGM)": 5965, "STRIH-SNV (2ME PVW)": 5966,
-        "STRIH-SNV (Grading)": 5964, "STRIH-SNV (MULTIVIEW)": 5963,
-        "STRIH-SNV (interkom)": 5962,
-    }
+    # The checked-in baseline is RE-CAPTURED from the live rig whenever the operating port map
+    # legitimately changes (the rule's own documented procedure), so the exact port VALUES are
+    # ephemeral rig state. Pin the STRUCTURE, not the snapshot — the first documented re-capture
+    # (2026-08-24, after a strih OBS restart reshuffle) broke the old exact-map assertion.
+    senders = j["senders"]
+    assert j["anchor"] in senders
+    assert len(senders) >= 3
+    assert all(isinstance(p, int) and 5961 <= p <= 6010 for p in senders.values())
+    assert len(set(senders.values())) == len(senders)  # one distinct port per sender
     assert "never hand-typed" in j["_comment"]
 
 
