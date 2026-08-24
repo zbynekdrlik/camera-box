@@ -346,7 +346,10 @@ cmd_start() {
     for arrival_attempt in $(seq 1 "$LIPSYNC_ARRIVAL_RETRIES"); do
       # Short throwaway probe recording on stream (the mbc audio rides the program recording). A
       # leftover from an abort in the probe window self-heals -- obs_phase2.py record --action start
-      # stops any orphan before it re-records.
+      # stops any orphan before it re-records. NOTE (deliberate): StartRecord is a bare command with
+      # no `|| true` -- an OBS-WS/encoder failure here is INFRA, not the flaky sink lock, so it fails
+      # loud through the ERR trap (restore TEST mode) rather than being counted as a retry attempt;
+      # the retry loop exists ONLY for the arrival correlation, same split as the [4b2/8] preflight.
       python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start --password "${OBS_PASSWORD:-}" >/dev/null
       sleep "$LIPSYNC_ARRIVAL_PROBE_S"
       _ap_win="$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop --password "${OBS_PASSWORD:-}" || true)"

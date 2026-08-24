@@ -100,6 +100,11 @@ def best_loop_correlation(probe_env, asset_env):
     Requires a non-empty probe and asset. When the probe is LONGER than one asset loop (should
     not happen -- the probe window is ~15 s, the asset ~60 s), the asset is tiled to cover it so
     the comparison stays well-defined.
+
+    Cost is O(asset_windows * probe_windows) pure Python (~2M inner ops for a 60 s asset / 15 s
+    probe at 8 kHz / 20 ms envelopes ≈ 1-2 s per call) -- fine at the probe sizes this ships with;
+    if a much larger asset/probe or a tighter cadence is ever used, this is the place to reach for
+    a vectorized cross-correlation (an FFT-based one) instead.
     """
     p = len(probe_env)
     a = len(asset_env)
@@ -118,16 +123,25 @@ def best_loop_correlation(probe_env, asset_env):
     return best
 
 
-def _decode_pcm(path, sample_rate, audio_map=""):
+def _decode_pcm(path, sample_rate, audio_map="", timeout_s=60):
     """Decode ``path`` to mono ``sample_rate`` Hz signed-16-bit little-endian PCM via ffmpeg and
     return a list of ints. ``audio_map`` (e.g. "0:a:1") selects a specific audio stream; empty
     lets ffmpeg pick the default. Raises RuntimeError on any ffmpeg failure / empty output.
+
+    ``timeout_s`` bounds the decode -- this runs inside lipsync-test-mode.sh's arrival-verify loop
+    on the rig, so a hung ffmpeg (a pathological/partial input) must FAIL LOUD (RuntimeError ->
+    exit 2 -> the caller's retry, then fail-loud) rather than stall the whole rig op. A truncated
+    probe from the moov-atom race errors fast on its own; the timeout is the belt for anything that
+    would otherwise hang.
     """
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", path]
     if audio_map:
         cmd += ["-map", audio_map]
     cmd += ["-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg timed out ({timeout_s}s) decoding {path} -- treating as undecodable")
     if proc.returncode != 0:
         raise RuntimeError(
             f"ffmpeg failed to decode {path} (rc={proc.returncode}): "
