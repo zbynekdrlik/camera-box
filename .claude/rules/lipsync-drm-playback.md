@@ -61,3 +61,25 @@ no local cargo — verify the pure `*_cmds`/`lipsync_preflight_cmd` builders by 
 calling them directly (their generated remote-bash text is asserted byte-for-byte by the harness),
 plus `bash -n` / `shellcheck` / `rustfmt --edition 2021 --check`. Live mpv/DRM playback on cam2 is a
 supervisor rig step (the cam2 painter is untouched by code+tests work).
+
+## STOP THE UNIT before the pidfile kill — a pidfile-only kill loses to `Restart=always` (#1190)
+
+`start` frees cam2's display for mpv by stopping the TEST-mode painter. The steady-state painter runs
+under `cam2-painter.service` with `Restart=always` (cam2-painter-lifecycle), so a pidfile-ONLY kill
+lets systemd respawn it ~100 ms later; the respawn re-takes the DRM master and `mpv --vo=drm` (started
+~10 s later, after scp+preflight) cannot acquire the CRTC and dies instantly. So `lipsync_stop_painter_cmds`
+must `systemctl stop cam2-painter` BEFORE the pidfile kill, then FAIL LOUD (`exit 1`, refuse playback)
+if `systemctl is-active cam2-painter` is still `active`. Key fact: a COMMANDED `systemctl stop` does
+NOT trip `Restart=always` (Restart fires only on an UNEXPECTED exit), so the unit stays down for the
+whole playback window. The pidfile TERM→KILL escalation STAYS after the unit stop, as a belt for the
+transient, unit-less verification-only nohup painter (issue 930/1008 lifecycle — it has no unit). This
+was fbdev-era-latent: while playback wrote raw `/dev/fb0` (issue 1032, pre-1187), a respawned painter
+did not need the DRM master, so the collision was harmless; the #1187 move to `mpv --vo=drm` made it
+fatal. Do NOT `systemctl disable` here (that is EVENT-mode semantics) — only a `stop` is needed. The
+restore is ALREADY handled: `cmd_stop` → `rig-mode.sh test` → `cam2_painter_steady_state_handoff_cmds`
+runs `enable --now cam2-painter.service` (re-STARTS the unit) — never duplicate that.
+
+Diagnosing an instant death: mpv runs `--no-terminal`, which swallows its own log/error output, so the
+plain `> /run/rig-lipsync-playback.log 2>&1` redirect came back EMPTY on the live DRM-master collision.
+Add mpv's NATIVE `--log-file=/run/rig-lipsync-playback.mpv.log` (writes regardless of `--no-terminal`,
+which stays) and `cat` it in the die-immediately FAIL branch so the fatal error is visible from the box.
