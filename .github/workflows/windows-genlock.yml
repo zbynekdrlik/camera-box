@@ -74,6 +74,26 @@ jobs:
           }
           Write-Output "#152/#1018 newlevel.media build identity + deployed SHA in OBS title — OK"
 
+      # #1195: the rig build must NEVER stop on the stock unclean-shutdown "Run in Safe
+      # Mode?" modal -- checkForUncleanShutdown() auto-selects a NORMAL launch instead. The
+      # FULL build compiles the frontend where this lives; assert the auto-normal patch is
+      # present (and the upstream blocking modal is gone) in the vendored source BEFORE the
+      # 150-min build, so a future `git subtree pull` (#44) that re-imports the modal fails
+      # HERE. Mirrors the canonical Linux-CI guard
+      # tests/obs_unclean_shutdown_auto_normal_1195.rs (Linux-only, cannot compile on this
+      # Windows runner). Keep this and the FAST workflow's copy in lock-step.
+      - name: Assert OBS auto-selects a NORMAL launch, never the crash modal (#1195)
+        shell: pwsh
+        run: |
+          $app = (Get-Content "vendor/obs-studio/frontend/OBSApp.cpp" -Raw) -replace '\s+', ' '
+          if ($app -notmatch [regex]::Escape('auto-selecting NORMAL launch (rig build: never block on a modal)')) {
+            Write-Error "OBSApp.cpp: the #1195 auto-normal WARNING is missing -- checkForUncleanShutdown() must auto-select a NORMAL launch instead of the Safe-Mode modal. A subtree pull likely restored the upstream modal; re-apply the #1195 patch."; exit 1
+          }
+          if ($app -match [regex]::Escape('crashWarning.exec()')) {
+            Write-Error "OBSApp.cpp: the upstream blocking Safe-Mode modal (crashWarning.exec()) is BACK -- re-apply the #1195 patch (remove the modal, auto-select NORMAL)."; exit 1
+          }
+          Write-Output "#1195 auto-normal unclean-shutdown launch (no blocking Safe-Mode modal) -- OK"
+
       # #70/#102: assert the genlock FIFO patch is present in the vendored OBS source
       # BEFORE the 150-min build, so a future `git subtree pull` (#44) that reverts the
       # zero-loss fix fails HERE rather than shipping a regressed binary. #102 changed

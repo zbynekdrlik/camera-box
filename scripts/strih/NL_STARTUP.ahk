@@ -62,6 +62,14 @@ app1()
 	Sleep app1_delay
 	if(app1_runas)
 		RunAs app1_user, app1_password
+	; #1195: clear stale OBS crash sentinels before launching OBS, so a crash + this AHK
+	; respawn never lands OBS on the "Run in Safe Mode?" modal (same cleanup the
+	; launch-obs-genlock.sh wrapper does). Best-effort: zero matches or a locked file are fine.
+	try {
+		FileDelete A_AppData "\obs-studio\.sentinel\*"
+	} catch {
+		; no sentinels to clear, or a locked file -- launch anyway
+	}
 	Run app1_path
 	Sleep 3000
 	RunAs

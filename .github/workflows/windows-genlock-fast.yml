@@ -549,6 +549,24 @@ jobs:
           }
           Write-Output "#152/#1018 newlevel.media build identity + deployed SHA in OBS title — OK"
 
+      # #1195 (the #269 YAML lock-step): checkForUncleanShutdown() is frontend-only -- the
+      # FAST path does NOT build the frontend -- but the source-text check still catches a
+      # `git subtree pull` (#44) that re-imports upstream's blocking "Run in Safe Mode?"
+      # crash modal (which would hang an unattended broadcast box). Mirrors
+      # tests/obs_unclean_shutdown_auto_normal_1195.rs (Linux-only, can't compile on this
+      # runner) AND the full windows-genlock.yml #1195 gate; keep all three in lock-step.
+      - name: Assert OBS auto-selects a NORMAL launch, never the crash modal (#1195)
+        shell: pwsh
+        run: |
+          $app = (Get-Content "vendor/obs-studio/frontend/OBSApp.cpp" -Raw) -replace '\s+', ' '
+          if ($app -notmatch [regex]::Escape('auto-selecting NORMAL launch (rig build: never block on a modal)')) {
+            Write-Error "OBSApp.cpp: the #1195 auto-normal WARNING is missing -- checkForUncleanShutdown() must auto-select a NORMAL launch instead of the Safe-Mode modal. A subtree pull likely restored the upstream modal; re-apply the #1195 patch."; exit 1
+          }
+          if ($app -match [regex]::Escape('crashWarning.exec()')) {
+            Write-Error "OBSApp.cpp: the upstream blocking Safe-Mode modal (crashWarning.exec()) is BACK -- re-apply the #1195 patch (remove the modal, auto-select NORMAL)."; exit 1
+          }
+          Write-Output "#1195 auto-normal unclean-shutdown launch (no blocking Safe-Mode modal) -- OK"
+
       # Same configure as the full build (downloads the obs-deps bundle the preset
       # pins); we just build a single target afterwards.
       - name: Configure OBS (windows-x64 preset)
