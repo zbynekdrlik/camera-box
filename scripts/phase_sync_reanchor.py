@@ -193,7 +193,7 @@ def _active_sources(explicit: "str | None") -> list:
     """Split the active-set string into "NDI camN" source names (the strih source naming the pins
     live under). Mirrors phase_sync_active_floor_check's --active-set convention: a caller passes
     "cam2 cam3" (#1110: cam1 re-retired 2026-08-22, grabber hw defect) (space/comma separated); we map each to its "NDI camN" source."""
-    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3")
+    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam3")
     cams = [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
     return [f"NDI {c}" for c in cams]
 

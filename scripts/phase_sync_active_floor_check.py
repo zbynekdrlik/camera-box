@@ -44,7 +44,7 @@ def active_camera_names(explicit: "str | None" = None) -> list:
     relying on the shell variable happening to be an EXPORTED env var reaching this Python
     subprocess -- the same safer convention that script's own CLI already established.
     """
-    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3")
+    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam3")
     return [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
 
 

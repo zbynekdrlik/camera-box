@@ -246,7 +246,7 @@ def active_ndi_sources() -> set:
     retired camera could otherwise corrupt the whole formula's notion of "slowest", and
     --apply could write a pin to a camera that isn't even installed.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam3")
     return {f"NDI {tok.strip()}" for tok in raw.replace(",", " ").split() if tok.strip()}
 
 

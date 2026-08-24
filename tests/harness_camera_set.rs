@@ -201,19 +201,20 @@ fn camera_set_reject_message_still_lists_all_seven_cameras() {
 }
 
 #[test]
-fn camera_active_set_default_is_exactly_cam2_cam3_1134() {
-    // CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed TODAY. #1110
-    // (2026-08-22): cam1 RE-RETIRED -- its ShadowCast USB grabber is hardware-defective beyond
-    // software compensation (chronic over-rate 61.5->63.1 fps, constant corruption, USB re-auth
-    // does not cure); the 2026-08-19 issue-1130 return is now history. cam1 was ALSO the
-    // hard-pinned PRIMARY/source node, so #1134 made the source role derivable (camera_source_box)
-    // and dropping cam1 moves the source to cam3. cam4/cam5/cam6/cam7 out as before.
-    // Membership-retired: cam1's facts stay resolvable below.
+fn camera_active_set_default_is_exactly_cam3_1170() {
+    // CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed + MEASURED TODAY.
+    // issue 1170 (2026-08-24): cam2's camera-under-test participation is RETIRED -- its ShadowCast
+    // grabber (capturing imag-nb's HDMI, issue 781) has a cure-decay collapsed to ~7min (issue 1193),
+    // so its capture leg cannot survive a 40-min run. cam2 stays the fixed PAINTER (keyed off
+    // PAINTER_IP, not this set) but is no longer a measured camera; the source moves to cam3
+    // automatically (camera_source_box, #1134). cam1 re-retired (grabber hw defect, #1110);
+    // cam4/cam5/cam6/cam7 out as before. Membership-retired: every retired cam's facts stay
+    // resolvable below. RE-ENABLE cam2: add it back to CAMERA_ACTIVE_SET (issue 1198 card swap).
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3}\""),
-        "issue 1110: CAMERA_ACTIVE_SET default must be exactly the two active cameras (cam2 \
-         painter, cam3 source) -- cam1 re-retired (grabber hw defect), cam4/cam5/cam6/cam7 out."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam3}\""),
+        "issue 1170: CAMERA_ACTIVE_SET default must be exactly cam3 (the sole measured camera) -- \
+         cam2 camera-under-test retired (grabber cure-decay), cam1 re-retired, cam4/5/6/7 out."
     );
 }
 

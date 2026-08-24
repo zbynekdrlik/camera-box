@@ -1374,6 +1374,16 @@ for _lht in $LEG_HEALTH_TARGETS; do
     echo "    skip: $_lhbox — operator-acknowledged offline, leg-health not checked"
     continue
   fi
+  # issue 1170: cam2's CAPTURE leg is excluded from measurement until the card swap — its grabber
+  # cure-decay collapsed (issue 1193/1198). cam2 stays a PAINTER (its reachability + DanteSync clock
+  # are still gated above), but its sick capture leg must NEVER abort the run, so skip its leg-health
+  # check whenever cam2 is not a measured camera. cam2 is only a leg-health target because it is a
+  # hardcoded painter reachability entry that flows into the healthy-node list; the check returns
+  # automatically once "cam2" is re-added to CAMERA_ACTIVE_SET (camera-set.sh).
+  if [ "$_lhbox" = cam2 ] && ! camera_is_active cam2; then
+    echo "    skip: cam2 — capture leg excluded from measurement (issue 1170, not in CAMERA_ACTIVE_SET); painter clock/reachability still gated"
+    continue
+  fi
   # Resolve THIS box's CURRENT camera-box.service InvocationID so the journal read is scoped to
   # the running instance only (#693 — a killed prior instance's sick lines never leak in). The
   # source reuses the id already resolved by the #656 preflight above.
@@ -2276,7 +2286,17 @@ mv_reverify_or_escalate "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 # camera_active_secondary_set() (camera-set.sh) — the ONE place fleet membership is declared.
 # Re-enabling a retired camera (e.g. cam5) is adding it to CAMERA_ACTIVE_SET there; this loop
 # picks it up automatically, no change needed here.
-CAMBOX_SECONDARY_DEPLOY=("cam2=$PAINTER_IP=$BURN_CAM2_RUN_ID")
+# issue 1170: cam2 is deployed as a camera-under-test node ONLY while it is a MEASURED camera
+# (cam2 in CAMERA_ACTIVE_SET). Its ShadowCast capture leg is retired until the card swap (issue
+# 1198), so with the default active set it is NOT seeded here — its PAINTER role (the painter step
+# below, keyed off PAINTER_IP) is UNAFFECTED. Re-adding "cam2" to CAMERA_ACTIVE_SET (camera-set.sh)
+# restores this deploy automatically, one line. The list starts EMPTY and is conditionally seeded so
+# a plain default run genuinely excludes cam2 (before this the cam2 seed was unconditional, keyed off
+# PAINTER_IP, so plain set-removal did not exclude it).
+CAMBOX_SECONDARY_DEPLOY=()
+if camera_is_active cam2; then
+  CAMBOX_SECONDARY_DEPLOY+=("cam2=$PAINTER_IP=$BURN_CAM2_RUN_ID")
+fi
 for _scn in $(camera_active_secondary_set); do
   CAMBOX_SECONDARY_DEPLOY+=("${_scn}=$(camera_secondary_ip "$_scn")=$(camera_secondary_burn_run_id "$_scn")")
 done

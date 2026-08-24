@@ -1657,11 +1657,13 @@ fn resolve_cambox_sweep_default(active_set_override: Option<&str>) -> String {
 }
 
 #[test]
-fn recording_e2e_default_sweep_covers_every_active_camera_including_cam2() {
+fn recording_e2e_default_sweep_covers_only_cam3_now_cam2_camera_under_test_retired_1170() {
     // #898 retired cam3; #939 (2026-08-13) re-activated it (Cam Link 4K fitted). issue 947
     // (2026-08-02): cam4 stays out (its grabber wedges the capture leg within minutes of every
-    // start). #1110 (2026-08-22): cam1 RE-RETIRED (ShadowCast grabber hw defect beyond software
-    // compensation) -- the default sweep covers exactly cam2/cam3.
+    // start). #1110 (2026-08-22): cam1 RE-RETIRED (ShadowCast grabber hw defect). issue 1170
+    // (2026-08-24): cam2's camera-under-test role RETIRED (grabber cure-decay to ~7min, issue 1193)
+    // -- cam2 stays the fixed PAINTER but is no longer swept as a measured camera, so the default
+    // sweep covers exactly cam3.
     let s = read("scripts/recording-e2e.sh");
     assert!(
         s.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}\""),
@@ -1671,17 +1673,13 @@ fn recording_e2e_default_sweep_covers_every_active_camera_including_cam2() {
 
     let resolved = resolve_cambox_sweep_default(None);
     assert!(
-        resolved.contains("Cam 2:CAM2"),
-        "#312: the default CAMBOX_SWEEP must include cam2 (scene 'Cam 2') — #291 made it a \
-         MEASURABLE camera during a TEST run, so excluding it is now stale: {resolved}"
-    );
-    assert!(
         resolved.contains("Cam 3:CAM3"),
         "issue 939: cam3 re-activated 2026-08-13 — the default sweep must cover CAM3 via \
          'Cam 3:CAM3': {resolved}"
     );
     for retired in [
         "Cam 1:CAM1",
+        "Cam 2:CAM2",
         "Cam 4:CAM4",
         "Cam 5:CAM5",
         "Cam 6:CAM6",
@@ -1689,9 +1687,9 @@ fn recording_e2e_default_sweep_covers_every_active_camera_including_cam2() {
     ] {
         assert!(
             !resolved.contains(retired),
-            "#1110/#827/issue 947: the default sweep must NOT reference the retired {retired} — \
-             that box is not part of the active fleet today (cam1 re-retired 2026-08-22, grabber \
-             hw defect): {resolved}"
+            "issue 1170/#1110/#827/issue 947: the default sweep must NOT reference the retired \
+             {retired} — that box is not a measured camera today (cam2 camera-under-test retired \
+             2026-08-24 grabber cure-decay; cam1 re-retired grabber hw defect): {resolved}"
         );
     }
 }

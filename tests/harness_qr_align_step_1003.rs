@@ -9,10 +9,38 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn read(p: &str) -> String {
     let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), p);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+/// Source camera-set.sh (with an optional CAMERA_ACTIVE_SET override) and return the RESOLVED
+/// `CAMERA_ALIGN_SET` — issue 1170 made cam2's align membership DERIVE from CAMERA_ACTIVE_SET, so
+/// the default is a `$(case …)` command substitution, not a bare literal; the contract to pin is
+/// the resolved value, not the source text.
+fn resolved_align_set(active_override: Option<&str>) -> String {
+    let script = format!("{}/scripts/camera-set.sh", env!("CARGO_MANIFEST_DIR"));
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg("set -uo pipefail\n. \"$SCRIPT\"\nprintf '%s' \"$CAMERA_ALIGN_SET\"")
+        .env("SCRIPT", &script);
+    match active_override {
+        Some(v) => {
+            cmd.env("CAMERA_ACTIVE_SET", v);
+        }
+        None => {
+            cmd.env_remove("CAMERA_ACTIVE_SET");
+        }
+    }
+    cmd.env_remove("CAMERA_ALIGN_SET");
+    let out = cmd.output().expect("failed to source camera-set.sh");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn align_has_word(set: &str, word: &str) -> bool {
+    set.split_whitespace().any(|w| w == word)
 }
 
 /// The [4i/8align] block, sliced from its banner echo to the following freeze-watch step marker.
@@ -72,15 +100,31 @@ fn qr_align_step_is_gated_and_skips_under_measurement_eq() {
 }
 
 #[test]
-fn align_set_is_a_superset_including_cam4() {
+fn align_set_is_a_superset_including_cam4_and_cam2_derives_from_active_1170() {
     // The owner mandate: cam4 is on-air, so it MUST be aligned even though it is excluded from the
-    // measurable E2E sweep (CAMERA_ACTIVE_SET). CAMERA_ALIGN_SET is a deliberate SUPERSET.
-    let cs = read("scripts/camera-set.sh");
+    // measurable E2E sweep (CAMERA_ACTIVE_SET). CAMERA_ALIGN_SET stays a superset of the measured
+    // set. issue 1170 (2026-08-24): cam2's align membership now DERIVES from CAMERA_ACTIVE_SET —
+    // aligned only while it is a measured camera. Default (cam2 out): "cam3 cam4"; re-adding cam2 to
+    // CAMERA_ACTIVE_SET restores it in the align set automatically (one-line reversal).
+    let default_align = resolved_align_set(None);
     assert!(
-        cs.contains("CAMERA_ALIGN_SET=\"${CAMERA_ALIGN_SET:-cam2 cam3 cam4}\""),
-        "camera-set.sh must default CAMERA_ALIGN_SET to the on-air superset including cam4 (#1003); \
-         cam1 dropped from alignment too 2026-08-22 (issue 1110, dead grabber can't go on-air)."
+        align_has_word(&default_align, "cam3") && align_has_word(&default_align, "cam4"),
+        "#1003: the default align set must include cam3 (source) + cam4 (on-air, #947): got [{default_align}]"
     );
+    assert!(
+        !align_has_word(&default_align, "cam2"),
+        "issue 1170: cam2 must be OUT of the default align set (capture leg retired): got [{default_align}]"
+    );
+    assert!(
+        !align_has_word(&default_align, "cam1"),
+        "#1110: cam1 (dead grabber, can't go on-air) must be out of the align set: got [{default_align}]"
+    );
+    let with_cam2 = resolved_align_set(Some("cam2 cam3"));
+    assert!(
+        align_has_word(&with_cam2, "cam2"),
+        "issue 1170 reversal: cam2 back in CAMERA_ACTIVE_SET must flow into the align set: got [{with_cam2}]"
+    );
+    let cs = read("scripts/camera-set.sh");
     assert!(
         cs.contains("camera_align_ndi_sources_csv"),
         "camera-set.sh must provide camera_align_ndi_sources_csv (never a literal cam range)."
@@ -109,22 +153,24 @@ fn aligner_never_writes_the_stream_hold_or_imag_floor() {
     // concrete ways, not just prose: (1) the align SET is only "cam<N>" tokens -- never a stream or
     // imag source -- so the aligner is only ever handed strih inputs; (2) the --pins writer REFUSES
     // an underscore/imag-floor-sentinel key.
-    let cs = read("scripts/camera-set.sh");
-    let align_default = cs
-        .lines()
-        .find(|l| l.trim_start().starts_with("CAMERA_ALIGN_SET=\""))
-        .expect("CAMERA_ALIGN_SET default must exist");
-    // every whitespace-separated token inside the default value is a bare cam name (cam1..camN):
-    let val = align_default
-        .split_once(":-")
-        .and_then(|(_, rest)| rest.split('}').next())
-        .expect("CAMERA_ALIGN_SET default must use the ${VAR:-...} form");
-    for tok in val.split_whitespace() {
+    // issue 1170: the align default is now a `$(case …)` deriving cam2 from CAMERA_ACTIVE_SET, so
+    // parse the RESOLVED set (source camera-set.sh) rather than the raw default text. Assert both the
+    // cam2-out default and the cam2-in reversal produce ONLY bare cam names (never a stream/imag src).
+    for resolved in [
+        resolved_align_set(None),
+        resolved_align_set(Some("cam2 cam3")),
+    ] {
         assert!(
-            tok.starts_with("cam") && tok[3..].chars().all(|c| c.is_ascii_digit()),
-            "CAMERA_ALIGN_SET default token {tok:?} must be a bare cam name -- never a stream/imag \
-             source (the align set is strih inputs only, #1003 domain boundary)."
+            !resolved.is_empty(),
+            "CAMERA_ALIGN_SET must resolve to a non-empty on-air set"
         );
+        for tok in resolved.split_whitespace() {
+            assert!(
+                tok.starts_with("cam") && tok[3..].chars().all(|c| c.is_ascii_digit()),
+                "CAMERA_ALIGN_SET token {tok:?} must be a bare cam name -- never a stream/imag \
+                 source (the align set is strih inputs only, #1003 domain boundary). Got [{resolved}]"
+            );
+        }
     }
     let alp = read("scripts/apply_latency_pins.py");
     assert!(
