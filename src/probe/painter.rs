@@ -335,7 +335,17 @@ pub fn run_painter(
     // #854: per-side last-stamped gen_ts_ns, persisted across ticks — see VernierGenTs.
     let mut vernier_gen = VernierGenTs::default();
 
-    while !stop.load(Ordering::Relaxed) {
+    // #1186: break the paint loop on a graceful shutdown signal (SIGTERM/SIGINT/SIGHUP, e.g.
+    // `systemctl stop cam2-painter.service`) as well as the local `stop` flag. Breaking cleanly
+    // returns from run_painter, which drops `presenter` -> KmsPresenter::Drop runs the #660
+    // blank_fbdev, leaving /dev/fb0 a deterministic black frame instead of the last painted frame
+    // frozen on cam2's HDMI monitor (SIGTERM's default disposition would otherwise skip Drop). The
+    // decision is the Tier-0-tested `shutdown::painter_should_continue` so the shipped logic is the
+    // tested logic.
+    while crate::shutdown::painter_should_continue(
+        stop.load(Ordering::Relaxed),
+        crate::shutdown::is_shutdown_requested(),
+    ) {
         let (logical_id, gen_ts_ns, flip_ts_ns) = paint_one_frame(
             presenter.as_mut(),
             &params,
