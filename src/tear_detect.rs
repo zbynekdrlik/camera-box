@@ -217,7 +217,10 @@ mod tests {
         assert_eq!(s.max_spread, 3);
         assert!((s.tear_fraction - 1.0 / 3.0).abs() < 1e-9);
         assert_eq!(s.viability, TearSignalViability::Observed);
-        assert!(!tear_gate_pass(&s), "a nonzero tear fraction fails the (report-only) gate");
+        assert!(
+            !tear_gate_pass(&s),
+            "a nonzero tear fraction fails the (report-only) gate"
+        );
     }
 
     #[test]

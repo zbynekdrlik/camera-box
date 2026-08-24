@@ -62,7 +62,10 @@ fn a_synthetic_tear_spliced_into_the_real_window_is_detected() {
     // genuine tear even though the real content never produces one (the blindness is a property of
     // the CONTENT, not the detector).
     let mut frames = load_fixture();
-    let base = frames.last().and_then(|f| f.iter().max().copied()).unwrap_or(20_000);
+    let base = frames
+        .last()
+        .and_then(|f| f.iter().max().copied())
+        .unwrap_or(20_000);
     frames.push(vec![base, base + 1, base + 2, base + 3]); // span 3 > VERNIER_MAX_SPREAD
 
     let stats = window_tear_stats(&frames);
