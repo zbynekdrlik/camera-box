@@ -48,9 +48,12 @@ set -euo pipefail
 #   LIPSYNC_AUDIO_DEVICE   cam2 ALSA device for playback audio (default hw:CARD=PCH,DEV=3 -- the
 #                          SAME device the QPSK marker uses, per issue 930's scope item 2)
 #   LIPSYNC_MPV_BIN        mpv binary to use (default mpv -- overridable for a pinned build/test)
-#   LIPSYNC_PLAYBACK_GAIN_DB  peak-normalizing playback gain in dB (default 9), applied via mpv's
-#                          `--af=volume=<N>dB` audio filter. Issue 1191: the asset speech (peak
-#                          -9.8 dBFS) is ~25 dB under the mic-chain AGC operating point set by the
+#   LIPSYNC_PLAYBACK_GAIN_DB  fixed playback gain in dB (default 9), applied via mpv's
+#                          `--af=volume=<N>dB` audio filter. NOTE: this is a FIXED gain, not a
+#                          dynamic peak-normalizer -- +9 dB is CALIBRATED to bring THIS asset's known
+#                          -9.8 dBFS peak to ~-1 dBFS (re-derive it for a different asset). Issue
+#                          1191: the asset speech (peak -9.8 dBFS) is ~25 dB under the mic-chain AGC
+#                          operating point set by the
 #                          loud QPSK marker (~0 dBFS), so un-boosted speech captures ~-50 dBFS and
 #                          SyncNet reads conf ~1 on every chunk (unmeasurable). +9 dB brings speech
 #                          to ~-1 dBFS, into the AGC operating point (live-verified: envelope corr
@@ -181,8 +184,10 @@ CMDS
 # without checking the process is actually alive). DRM_DEVICE empty = mpv auto-selects the connected
 # KMS card (#854); a non-empty value pins it via `--drm-device`.
 #
-# GAIN (issue 1191): `--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB` peak-normalizes the asset speech
-# so it lands in the mic-chain AGC operating point set by the loud QPSK marker (~0 dBFS). Without it
+# GAIN (issue 1191): `--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB` applies a FIXED +N dB gain
+# (default 9, CALIBRATED to THIS asset's -9.8 dBFS peak -> ~-1 dBFS; not a dynamic normalizer) so the
+# asset speech lands in the mic-chain AGC operating point set by the loud QPSK marker (~0 dBFS).
+# Without it
 # the ~25 dB quieter asset speech (peak -9.8 dBFS) captures at ~-50 dBFS and SyncNet reads conf ~1 on
 # every chunk (unmeasurable). The env seam is expanded on the REMOTE (cam2) side -- the default (9)
 # is baked self-documenting into the generated command AND a supervisor can re-tune the gain without
