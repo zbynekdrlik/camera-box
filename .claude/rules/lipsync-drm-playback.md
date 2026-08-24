@@ -161,3 +161,38 @@ Diagnosing an instant death: mpv runs `--no-terminal`, which swallows its own lo
 plain `> /run/rig-lipsync-playback.log 2>&1` redirect came back EMPTY on the live DRM-master collision.
 Add mpv's NATIVE `--log-file=/run/rig-lipsync-playback.mpv.log` (writes regardless of `--no-terminal`,
 which stays) and `cat` it in the die-immediately FAIL branch so the fatal error is visible from the box.
+
+## KILL THE PLAYBACK before the rig-mode TEST restore — the trap-ordering contract (#1194)
+
+The #1190 rule above is the START-side ordering (stop the painter unit before the mpv launch). #1194
+is the mirror-image ordering on the STOP / FAIL side: the mpv playback must be killed BEFORE
+`rig-mode.sh test` restores TEST mode, or the restored painter races the still-running mpv `--vo=drm`
+for the DRM master and the ALSA device — leaving cam2 in a HYBRID state (the painter dies on
+`snd_pcm_open ... Device or resource busy (16)` + a `/dev/dri/card` → fbdev fallback, while mpv keeps
+running: neither lipsync nor TEST). This bit a live incident (2026-08-24): the issue-1192 arrival
+VERIFY honestly exhausted its retries, the `cmd_start` ERR trap fired `bash rig-mode.sh test` — and the
+trap had NO mpv-kill, so the restore landed on a live mpv.
+
+**The contract, enforced by `tests/harness_lipsync_trap_cleanup_1194.rs`:**
+
+- **ONE idempotent `lipsync_playback_cleanup` helper is the single source of truth for the teardown** —
+  it `cam_ssh`s `lipsync_stop_playback_cmds` (kill mpv by pidfile + the #660 fb0 blank) then `cam_ssh`s
+  the `/run` asset removal, BOTH `|| true`. Best-effort by design: it is safe to call when NOTHING is
+  running (a fresh box, an abort before the playback even started — the pidfile read is
+  `2>/dev/null || true`, the kill is `kill -0`-guarded), and it can NEVER itself fail/abort. That
+  never-fail property is load-bearing for the ERR-trap caller: a non-zero command inside the trap
+  would re-enter `set -e`.
+- **Both `cmd_stop` AND the `cmd_start` ERR trap call the SAME helper — no re-inlined copy.** `cmd_stop`
+  already had the correct order (stop → rm → restore) but inline; #1194 extracts it so the trap path
+  gets the identical teardown. The trap is `trap 'lipsync_playback_cleanup; bash "$HERE/rig-mode.sh"
+  test' ERR` — cleanup FIRST, restore SECOND. This covers BOTH the retries-exhausted fail path and any
+  genuine infra failure inside the ERR-trap window (they both reach the trap).
+- **Tier-0 (no local cargo):** the static anchors (helper exists, both sites call it, trap order) plus
+  a HERMETIC functional replica prove it — a fake `sshpass` on PATH emits an ordering sentinel when the
+  ssh it stands in for carries the mpv-kill payload (the #660 `dd if=/dev/zero` fb0-blank signature no
+  other `cmd_start` cam_ssh carries), a fake `rig-mode.sh` emits a restore sentinel, and the test
+  asserts kill-before-restore on the exhaustion path, the infra-fail path, and `stop`. The replica runs
+  the REAL script under its own `set -euo pipefail`+errtrace (a static-anchor-only test is blind to a
+  `set -e`/ordering regression, per `ci-testing-gotchas.md` #1133). Prototype it as a bash replica
+  first; `cargo fmt --all --check` still parses the Rust test. Live cam2 playback stays a supervisor
+  rig step.
