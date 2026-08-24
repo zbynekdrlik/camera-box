@@ -64,6 +64,7 @@ mkdir -p "$TMP/probebin"
 : > "$TMP/probebin/frozen-camera-gate"
 export HERE="$TMP"
 export STRIH="strih.invalid"
+export MV_REVERIFY_HEAL_WAIT_CMD=/bin/true
 export PROBE_BIN_DIR="$TMP/probebin"
 export FAKE_COUNTER="$TMP/counter"
 export FAKE_SUCCEED_AT="{succeed_at}"
@@ -226,7 +227,7 @@ sys.exit(0 if (sat and n >= sat) else 1)
 PY
 mkdir -p "$TMP/probebin"
 : > "$TMP/probebin/frozen-camera-gate"
-export HERE="$TMP" STRIH="strih.invalid" PROBE_BIN_DIR="$TMP/probebin"
+export HERE="$TMP" STRIH="strih.invalid" PROBE_BIN_DIR="$TMP/probebin" MV_REVERIFY_HEAL_WAIT_CMD=/bin/true
 export FAKE_COUNTER="$TMP/counter" FAKE_SUCCEED_AT="{succeed_at}"
 export PREFLIGHT_MV_REVERIFY_RESOLVE_SETTLE_S="{settle}" PREFLIGHT_MV_REVERIFY_RESOLVE_CADENCE_S="1"
 source '{lib}'

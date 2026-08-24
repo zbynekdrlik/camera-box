@@ -310,6 +310,7 @@ fn run_orchestrator(preflight_body: &str, received_cmd: &str) -> (String, i32) {
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
          MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
          MV_REVERIFY_SWEEP_CMD=/bin/true\nMV_REVERIFY_REOPEN_MV_CMD=/bin/true\n\
+         MV_REVERIFY_HEAL_WAIT_CMD=/bin/true\nCAMERA_ACTIVE_SET='cam1 cam2 cam3'\n\
          MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=0\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
          {preflight}\n\
          mv_reverify_or_escalate cam1 1; echo RC=$?\n",
@@ -442,6 +443,7 @@ fn orchestrator_restarts_obs_at_most_once_per_run() {
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
          MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
+         MV_REVERIFY_HEAL_WAIT_CMD=/bin/true\n\
          MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=1\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
          MV_REVERIFY_OBS_RESTARTED=1\n\
          preflight_mv_reverify() {{ return 1; }}\n\
@@ -514,7 +516,7 @@ fn orchestrator_fails_loud_without_killing_when_ahk_absent() {
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
          MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
-         MV_REVERIFY_SWEEP_CMD=/bin/true\n\
+         MV_REVERIFY_SWEEP_CMD=/bin/true\nMV_REVERIFY_HEAL_WAIT_CMD=/bin/true\n\
          MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=0\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
          preflight_mv_reverify() {{ return 1; }}\n\
          mv_reverify_or_escalate cam1 1; echo RC=$?\n",
@@ -659,6 +661,7 @@ fn orchestrator_restart_budget_allows_a_second_restart_within_cap() {
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
          MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
          MV_REVERIFY_SWEEP_CMD='/bin/true'\nMV_REVERIFY_REOPEN_MV_CMD='/bin/true'\n\
+         MV_REVERIFY_HEAL_WAIT_CMD='/bin/true'\nCAMERA_ACTIVE_SET='cam2 cam3'\n\
          MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=1\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
          preflight_mv_reverify() {{ return 1; }}\n\
          mv_reverify_or_escalate cam2 2; echo RC1=$?\n\
@@ -723,6 +726,7 @@ fn orchestrator_reopens_strih_multiview_after_a_receiver_wedge_restart() {
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
          MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
          MV_REVERIFY_SWEEP_CMD='/bin/true'\nMV_REVERIFY_REOPEN_MV_CMD='{reopen}'\n\
+         MV_REVERIFY_HEAL_WAIT_CMD='/bin/true'\nCAMERA_ACTIVE_SET='cam1 cam2 cam3'\n\
          MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=0\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
          preflight_mv_reverify() {{ n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; [ $n -ge 2 ]; }}\n\
          mv_reverify_or_escalate cam1 1; echo RC=$?\n",

@@ -71,3 +71,33 @@ stand-ins — a genuine RED→GREEN. The sourced lib's env-seam (`NDI_NAME_SELFH
 `set -e` safety are a `tests/harness_ndi_name_selfheal_1158.rs` (CI) mirrored by a direct
 `bash -c 'set -euo pipefail; . lib; if ndi_name_selfheal_run …'` locally. The default heal path
 (`python3 set-ndi-mapping.py --heal` against live OBS) is not offline-testable; the seam is.
+
+## The reattach CLEAR itself SELF-INFLICTS the empty-name wedge on a COLD/STALE finder (#1197)
+
+The #1158 recovery above assumed something ELSE empties the name. #1197 found reattach CREATES the
+wedge, live-confirmed by a strih OBS log (gh run 32743557703, 2026-08-24): the CLEAR-then-SET's
+up-front finder pre-check can pass on a STALE DistroAV listing (the finder still lists a sender that
+is mid-deploy-bounce), so the CLEAR fires (`SetInputSettings ndi_source_name=''` →
+`ndi_source_update … No NDI Source selected; Requesting Source Thread Stop`), and by the SET-back's
+re-check the sender has dropped → set-back skipped → the input is LEFT EMPTY. Near-deterministic,
+because a sender is ALWAYS absent from the finder during its own `[2/8]`/`[2b/8]` deploy bounce.
+
+- **reattach must NEVER leave `""` — RESTORE the original bound name in the vanished-branch when the
+  baseline is also offline** (`strih_mv_scenes.reattach()`, #1197). A non-empty name → the receiver
+  thread RESTARTS (recoverable by #1096 / the finder-warm poll), vs `""` = a guaranteed stopped-thread
+  wedge — the strictly-lesser evil, accepting a possible #795 DRIFT the baseline re-enforce corrects.
+  On `REENFORCE_VERIFY_FAILED` the input already holds the just-set (discoverable) baseline, so
+  RETURN there — do NOT then blind-set the known-absent original over it (a pointless #795 mangle).
+- **The RECOVERY primitive for a COLD finder is a bounded discovery-WAIT, not a one-shot heal:**
+  `set-ndi-mapping.py --heal-wait <s>` (`heal_wait_active_mapping` — pure, injected now()/sleep(),
+  Tier-0 pytest-able) polls the finder for each active input's #399 baseline to become discoverable,
+  then re-enforces via the SAME `reenforce_ndi_name` policy (never blind-sets an absent name). It is
+  wall-clock-bounded and early-exits on a warm finder (~one WS round-trip). Wired via the WARN-only
+  `mv_reverify_finder_heal_wait` runner (`scripts/lib/mv-reverify-escalate.sh`, seam
+  `MV_REVERIFY_HEAL_WAIT_CMD`) at TWO sites: `mv_reverify_or_escalate` after the #1093 force-kill
+  restart (ALL active inputs, before the re-check — the fresh OBS's finder is cold) and
+  `mv_reverify_resolve_wait` per-camera (before the pixel poll — recovers an already-emptied leg).
+- **WARN-only lives at the HELPER, not the call shape (#1133):** the runner's `printf|sed` log is
+  `|| true`-guarded and its harness has a `run_under_set_e` case (sources under the real
+  `set -euo pipefail`, calls the runner as a BARE statement, asserts the next line runs) — a
+  `set -uo`-only harness is blind to a set-e abort.

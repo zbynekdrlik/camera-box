@@ -232,6 +232,42 @@ mv_reverify_reopen_multiview_run() {
   return 0
 }
 
+# ---- (issue 1197) bounded COLD-finder discovery-wait + re-enforce ------------------------------
+# mv_reverify_finder_heal_wait <host> <active_spec> <deadline_s> -- ride out a COLD DistroAV finder
+# (right after a strih OBS boot OR the #1093 escalation force-kill restart, where a genuinely-live
+# sender is not-yet-discovered) and re-enforce the #399 baseline of each active input the INSTANT its
+# sender re-appears in the finder. Delegates to set-ndi-mapping.py --heal-wait (the shared
+# obs_phase2.reenforce_ndi_name policy: discoverable -> set -> read-back-verify; NEVER blind-sets a
+# name absent from the finder, the #795 mangle ban). It RETURNS EARLY the instant every input is
+# discoverable+bound, so a warm finder pays ~one WS round-trip. WARN-only: ALWAYS returns 0 -- the
+# pixel re-verify / the next camera's own reverify is the real gate; a leg still absent after the
+# bound is logged LOUD (the python's own #1197 lines) but never aborts the run. Override the WHOLE
+# call with MV_REVERIFY_HEAL_WAIT_CMD (run with "<host> <active> <deadline>") for offline tests.
+mv_reverify_finder_heal_wait() {
+  local host="$1" active_spec="$2" deadline_s="$3" out
+  if [ -n "${MV_REVERIFY_HEAL_WAIT_CMD:-}" ]; then
+    out="$($MV_REVERIFY_HEAL_WAIT_CMD "$host" "$active_spec" "$deadline_s" 2>&1 || true)"
+  else
+    # --heal-wait bounds the python's OWN poll loop to deadline_s; the outer timeout is the #328
+    # belt-and-suspenders bound on the WS connect/init. strih's WS accepts an empty password, like
+    # preflight_mv_reverify's own frozen-camera-gate calls.
+    # #1197 review 🔵-2: coerce to an INTEGER for bash arithmetic -- deadline_s is documented
+    # integer-seconds, but a stray float override (e.g. 90.5) would make $((...)) throw, timeout get
+    # an empty duration, and `|| true` silently swallow the whole heal-wait. `${deadline_s%.*}` drops
+    # any fractional part; python's --heal-wait below accepts the raw value (float-tolerant) fine.
+    out="$(timeout "${MV_REVERIFY_HEAL_WAIT_SSH_TIMEOUT:-$(( ${deadline_s%.*} + 30 ))}" \
+      python3 "$HERE/set-ndi-mapping.py" --host "$host" --password "" \
+      --active "$active_spec" --heal-wait "$deadline_s" \
+      --heal-wait-interval "${MV_REVERIFY_HEAL_WAIT_INTERVAL_S:-4}" 2>&1 || true)"
+  fi
+  # #1197 review 🟡-1: `|| true` so the WARN-only guarantee holds at the HELPER regardless of the
+  # caller's set-e state (the #1133 discipline: never let a report-only probe's own pipeline abort the
+  # run). Both current call sites disable set -e (`… || exit 1` / `if …; then`), but harden here so a
+  # future bare-statement caller under `set -euo pipefail` can never be aborted by this line.
+  printf '%s\n' "$out" | sed 's/^/    [#1197 finder-warm] /' >&2 || true
+  return 0
+}
+
 # ---- the orchestrator --------------------------------------------------------------------------
 # mv_reverify_or_escalate <box> <cam_n> -> 0 if the leg is live (immediately, or after the receiver-
 # wedge escalation recovered it), 1 if it is genuinely dead. The DEPLOY-time drop-in for
@@ -307,6 +343,13 @@ mv_reverify_or_escalate() {
   # -- the re-check below is projector-INDEPENDENT (it PREVIEW-activates the input via the positive
   # warm-settle), so a failed re-open never affects the run outcome.
   mv_reverify_reopen_multiview_run "$STRIH"
+  # issue 1197: the fresh OBS's DistroAV finder is COLD after the force-kill restart. Before the run
+  # proceeds to the NEXT camera's deploy bounce (whose reattach would otherwise hit the cold finder,
+  # empty a correct ndi_source_name and leave a stopped-thread wedge -- gh run 32743557703), warm the
+  # finder + re-enforce the #399 baseline of EVERY active input. Bounded; WARN-only (the re-check
+  # below + the next camera's own reverify are the real gates). Runs AFTER the burn sweep-off so the
+  # fresh OBS's burn is cleared first.
+  mv_reverify_finder_heal_wait "$STRIH" "${CAMERA_ACTIVE_SET:-}" "${MV_REVERIFY_RESTART_HEAL_WAIT_S:-120}"
   # #1093 review finding 1 (CRITICAL): the fresh OBS's built-in Multiview projector may NOT reopen
   # (SaveProjectors), so the "NDI camN" inputs the reverify relies on can be INACTIVE. Run the single
   # re-check with a POSITIVE warm-settle so frozen-camera-gate PREVIEW-activates the input itself
@@ -343,6 +386,12 @@ mv_reverify_resolve_wait() {
   # spends one frozen-camera-gate.py probe (~a few s, up to call_timeout), so a sleep-only counter
   # would run ~2x past the documented measured window. A SECONDS-based deadline makes RESOLVE_SETTLE_S
   # a truthful wall-clock bound on how long the fresh finder is given to re-resolve.
+  # issue 1197: the attempt-1 reattach kick may have EMPTIED this camera's ndi_source_name on a cold
+  # finder (its sender is absent from the finder DURING its own deploy bounce -> a stopped-thread
+  # wedge the pixel poll below can never clear). Before polling, ride out the cold finder for THIS
+  # camera and re-enforce its #399 baseline the instant the sender re-appears (never blind-setting an
+  # absent name, the #795 mangle ban). Bounded; WARN-only -- the pixel poll then confirms recovery.
+  mv_reverify_finder_heal_wait "$STRIH" "$box" "${MV_REVERIFY_FINDER_HEAL_WAIT_S:-90}"
   local start="$SECONDS" deadline=$((SECONDS + resolve_s)) waited
   while [ "$SECONDS" -lt "$deadline" ]; do
     sleep "$cadence"

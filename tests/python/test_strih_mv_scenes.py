@@ -379,16 +379,24 @@ class _FakeObsRpcWithChangingFinder:
 
 def test_reattach_skips_setback_if_source_vanishes_during_the_clear_settle_1114(monkeypatch):
     # issue 1114 review (#795 mangle window): the CLEAR + settle widened the window between the
-    # up-front finder-list guard and the SET-back. If the sender drops out of the finder list
-    # DURING that window, re-applying its name would MANGLE it (OBS strips a name absent from the
-    # combo list) — so reattach must re-check right before the set-back and, on a vanish, SKIP the
-    # set-back: leave the input cleared to "" (a clean, no-garbage state) and return the
-    # NDI_SOURCE_NOT_DISCOVERABLE sentinel. The recorded SetInputSettings must be ONLY the clear.
+    # up-front finder-list guard and the SET-back. If the sender drops out of the finder list DURING
+    # that window, re-applying its name via SetInputSettings would MANGLE it — so reattach re-checks
+    # right before the set-back and SKIPS the same-name set-back on a vanish.
+    #
+    # issue 1197 (smoking gun, gh run 32743557703): but the input must NEVER be left cleared to "" —
+    # an empty ndi_source_name STOPS the DistroAV receiver thread (a permanent wedge the in-loop
+    # #767/#1096 watchdogs can never revive). When the #399 baseline is ALSO offline (here the fake's
+    # finder never re-lists CAM3 (usb)), reattach RESTORES the original bound name so the receiver
+    # thread restarts and the input ends exactly as it started — the recorded SetInputSettings are the
+    # CLEAR then the RESTORE, never a bare clear-to-empty. It still returns NDI_SOURCE_NOT_DISCOVERABLE
+    # (it could not re-lock); the caller's bounded finder-warm poll re-enforces the baseline later.
     fake = _FakeObsRpcWithChangingFinder(
         {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
-        # 1st call (up-front guard): present. 2nd call (pre-set-back re-check): vanished.
+        # 1st call (up-front guard): present. 2nd (pre-set-back re-check): vanished. 3rd (the #1158
+        # baseline discoverability check inside reenforce_ndi_name): baseline also absent.
         finder_items_sequence=[
             [{"itemValue": "CAM3 (usb)"}, {"itemValue": "CAM1 (usb)"}],
+            [{"itemValue": "CAM1 (usb)"}],
             [{"itemValue": "CAM1 (usb)"}],
         ],
     )
@@ -404,10 +412,14 @@ def test_reattach_skips_setback_if_source_vanishes_during_the_clear_settle_1114(
         (
             "SetInputSettings",
             {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": ""}},
-        )
+        ),
+        (
+            "SetInputSettings",
+            {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        ),
     ], (
-        "issue 1114: on a mid-reattach vanish the set-back must be SKIPPED (clear only, no mangled "
-        f"re-apply); got {set_calls}"
+        "issue 1197: on a mid-reattach vanish with the baseline also offline, the input must be "
+        f"RESTORED to its original name (never left empty — a stopped-thread wedge); got {set_calls}"
     )
 
 

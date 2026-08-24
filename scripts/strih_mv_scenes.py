@@ -352,11 +352,33 @@ def reattach(obs, cam_n: int, *, finder_retries: int = 6, finder_wait_s: float =
                   f"{baseline!r} (read-back verified)", file=sys.stderr)
             return baseline
         if status == op.REENFORCE_VERIFY_FAILED:
+            # issue 1197 review 🔵-1: the baseline WAS discoverable (reenforce_ndi_name only reaches
+            # VERIFY_FAILED after SETTING a name present in the finder), so the input already holds
+            # that just-set (mangled) non-empty value -- NOT the stopped-thread empty state. Return
+            # here and leave it as-is: blind-setting the KNOWN-ABSENT original name over it (the
+            # restore below) would be a pointless #795 mangle-set that discards the discoverable-
+            # baseline attempt. The finder-warm poll re-enforces the baseline once it re-appears.
             print(f"#1158 auto-revive: {input_name!r} re-enforce of baseline {baseline!r} FAILED "
-                  f"read-back (possible #795 mangle) — left as-is", file=sys.stderr)
-    print(f"#1158 auto-revive: {input_name!r} left EMPTY — bound {ndi_name!r} AND #399 baseline "
-          f"{baseline!r} both absent from the DistroAV finder (sender offline?); the frozen gate / "
-          f"next enforce must recover it", file=sys.stderr)
+                  f"read-back (possible #795 mangle) — left as-is (non-empty, not restoring the "
+                  f"absent original over it)", file=sys.stderr)
+            return NDI_SOURCE_NOT_DISCOVERABLE
+    # issue 1197 (smoking gun, gh run 32743557703): the CLEAR above already STOPPED the receiver
+    # thread ("No NDI Source selected; Requesting Source Thread Stop"). Returning now with the name
+    # still "" is the self-inflicted PERMANENT wedge — the in-loop #767/#1096 watchdogs can never
+    # revive an empty name (.claude/rules/ndi-name-recovery.md). So RESTORE the ORIGINAL bound name
+    # instead of leaving it EMPTY: a non-empty name -> ndi_source_thread_start, so the receiver thread
+    # RESTARTS and the input ends bound exactly as it started (never worse). Its own #1096 finder + the
+    # harness bounded finder-warm poll (set-ndi-mapping.py --heal-wait) then re-resolve / re-enforce
+    # the #399 baseline once the sender re-appears. Restoring a just-vanished name risks the #795
+    # DRIFT, but a drift is RECOVERABLE (#1096 rebind / the baseline re-enforce) whereas "" is a
+    # GUARANTEED stopped-thread wedge — the strictly-lesser evil, and never left empty.
+    op._rpc(obs, "SetInputSettings",
+            {"inputName": input_name, "inputSettings": {"ndi_source_name": ndi_name}},
+            ignore_err=True)
+    print(f"#1197 reattach: {input_name!r} bound {ndi_name!r} AND #399 baseline {baseline!r} both "
+          f"absent from the DistroAV finder (sender mid-bounce?) — RESTORED the original bound name "
+          f"rather than leaving it EMPTY (a stopped-receiver-thread wedge); the finder-warm poll "
+          f"re-enforces the baseline once the sender re-appears", file=sys.stderr)
     return NDI_SOURCE_NOT_DISCOVERABLE
 
 
