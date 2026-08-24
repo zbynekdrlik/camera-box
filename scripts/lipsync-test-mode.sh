@@ -48,23 +48,36 @@ set -euo pipefail
 #   LIPSYNC_AUDIO_DEVICE   cam2 ALSA device for playback audio (default hw:CARD=PCH,DEV=3 -- the
 #                          SAME device the QPSK marker uses, per issue 930's scope item 2)
 #   LIPSYNC_MPV_BIN        mpv binary to use (default mpv -- overridable for a pinned build/test)
+#   LIPSYNC_PLAYBACK_GAIN_DB  fixed playback gain in dB (default 9), applied via mpv's
+#                          `--af=volume=<N>dB` audio filter. NOTE: this is a FIXED gain, not a
+#                          dynamic peak-normalizer -- +9 dB is CALIBRATED to bring THIS asset's known
+#                          -9.8 dBFS peak to ~-1 dBFS (re-derive it for a different asset). Issue
+#                          1191: the asset speech (peak -9.8 dBFS) is ~25 dB under the mic-chain AGC
+#                          operating point set by the
+#                          loud QPSK marker (~0 dBFS), so un-boosted speech captures ~-50 dBFS and
+#                          SyncNet reads conf ~1 on every chunk (unmeasurable). +9 dB brings speech
+#                          to ~-1 dBFS, into the AGC operating point (live-verified: envelope corr
+#                          0.976, SyncNet conf 6.4). Expanded on the REMOTE (cam2) side so the
+#                          default is baked self-documenting into the generated mpv command; the
+#                          supervisor can re-tune via the paired cross-check campaign without a
+#                          code change.
 #   LIPSYNC_PLAYBACK_PIDFILE  where this script's own mpv PID is tracked on cam2 (default
 #                             /run/rig-lipsync-playback.pid)
-#   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 408, non-negative integer
-#                          only). Issue 930: two independent paired QR/QPSK-vs-SyncNet cross-checks
-#                          (issuecomment-5190993635, issuecomment-5191187944) derived the harness's
-#                          ALSA output pipeline depth D via R = C + L - D (R = SyncNet-measured
-#                          rig-added offset, C = the chain offset per QR/QPSK at the same
-#                          genlock_latency knob, L = this lead). D landed at ~408ms, stable to ~3ms
-#                          across two days, two different knobs, and two different content windows.
-#                          Under issue 1187 the compensation MECHANISM changed from a two-demux
-#                          ffmpeg -itsoffset to mpv's native --audio-delay (a NEGATIVE value, which
-#                          delays VIDEO relative to audio -- the exact equivalent of the old positive
-#                          video -itsoffset). The 408ms VALUE was calibrated on the ffmpeg/ALSA path
-#                          and may need re-derivation for mpv's ALSA buffering; this knob lets the
-#                          supervisor re-tune via the paired cross-check campaign without a code
-#                          change. 0 = no compensation (--audio-delay=0.000). Only the RELATIVE
-#                          offset between the two streams matters for lipsync perception.
+#   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 0, non-negative integer
+#                          only). Issue 930 derived the ffmpeg/ALSA output pipeline depth D at ~408ms
+#                          via R = C + L - D (R = SyncNet-measured rig-added offset, C = the chain
+#                          offset per QR/QPSK at the same genlock_latency knob, L = this lead) and
+#                          used 408 as the default. Issue 1187 changed the compensation MECHANISM
+#                          from a two-demux ffmpeg -itsoffset to mpv's native --audio-delay (a
+#                          NEGATIVE value, which delays VIDEO relative to audio -- the exact
+#                          equivalent of the old positive video -itsoffset). Issue 1191 changes the
+#                          DEFAULT to 0: under mpv the measured offset at lead=0 is +40ms (≈ ±1 frame
+#                          of zero), so 408 was a stale ffmpeg-era constant that injected a false
+#                          ~0.4s shift. 408 stays available via this env seam for re-derivation on
+#                          mpv's ALSA buffering (the supervisor re-tunes via the paired cross-check
+#                          campaign without a code change). 0 = no compensation (--audio-delay=0.000).
+#                          Only the RELATIVE offset between the two streams matters for lipsync
+#                          perception.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
@@ -83,7 +96,7 @@ LIPSYNC_FB_DEVICE="${LIPSYNC_FB_DEVICE:-/dev/fb0}"
 LIPSYNC_AUDIO_DEVICE="${LIPSYNC_AUDIO_DEVICE:-hw:CARD=PCH,DEV=3}"
 LIPSYNC_MPV_BIN="${LIPSYNC_MPV_BIN:-mpv}"
 LIPSYNC_PLAYBACK_PIDFILE="${LIPSYNC_PLAYBACK_PIDFILE:-/run/rig-lipsync-playback.pid}"
-LIPSYNC_AUDIO_LEAD_MS="${LIPSYNC_AUDIO_LEAD_MS:-408}"
+LIPSYNC_AUDIO_LEAD_MS="${LIPSYNC_AUDIO_LEAD_MS:-0}"
 case "$LIPSYNC_AUDIO_LEAD_MS" in
   ''|*[!0-9]*)
     echo "[lipsync-test-mode] FAIL: LIPSYNC_AUDIO_LEAD_MS must be a non-negative integer (ms), got '$LIPSYNC_AUDIO_LEAD_MS'" >&2
@@ -171,6 +184,15 @@ CMDS
 # without checking the process is actually alive). DRM_DEVICE empty = mpv auto-selects the connected
 # KMS card (#854); a non-empty value pins it via `--drm-device`.
 #
+# GAIN (issue 1191): `--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB` applies a FIXED +N dB gain
+# (default 9, CALIBRATED to THIS asset's -9.8 dBFS peak -> ~-1 dBFS; not a dynamic normalizer) so the
+# asset speech lands in the mic-chain AGC operating point set by the loud QPSK marker (~0 dBFS).
+# Without it
+# the ~25 dB quieter asset speech (peak -9.8 dBFS) captures at ~-50 dBFS and SyncNet reads conf ~1 on
+# every chunk (unmeasurable). The env seam is expanded on the REMOTE (cam2) side -- the default (9)
+# is baked self-documenting into the generated command AND a supervisor can re-tune the gain without
+# a code change. It is orthogonal to AUDIO_LEAD_MS (one affects level, the other the A/V offset).
+#
 # AUDIO_LEAD_MS (issue 930, carried into 1187): the calibrated ALSA-output-pipeline-depth
 # compensation. mpv's native `--audio-delay` replaces the old two-demux ffmpeg `-itsoffset`: a
 # NEGATIVE value delays the VIDEO relative to audio (mpv semantics: positive delays audio, negative
@@ -195,6 +217,7 @@ lipsync_playback_cmds() {
 # --no-terminal, so a fatal error is captured; the die-immediately branch below cats it too.
 nohup $mpv_bin --no-config --no-terminal --log-file=/run/rig-lipsync-playback.mpv.log --vo=drm ${drm_opt}--loop-file=inf \\
   --audio-device=alsa/$audio --audio-channels=stereo \\
+  --af=volume=\${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB \\
   --audio-delay=$delay_s \\
   '$media' \\
   > /run/rig-lipsync-playback.log 2>&1 &
