@@ -4989,6 +4989,99 @@ fn build_and_print_verdict_with_stream_diffs(
                 report["all_cambox_continuity"] = seg_json;
                 all_pass &= seg.overall_pass;
 
+                // #781 — REPORT-ONLY projection-tap scanout-TEAR surface. cam2's USB grabber
+                // captures imag-nb's HDMI output, so this all-cambox sweep already records the
+                // physical projection path (imag render -> DRM scanout -> HDMI -> grabber). A
+                // captured frame whose cam2-optical dual-QR Vernier payloads span MORE than the
+                // by-design even/odd adjacency carried >= 2 paint generations = a scanout tear.
+                // Computed from the SAME per-frame payloads + window attribution the strict sweep
+                // uses (`frame_gen_ts_anchor` + `place_frame_in_window`) -- no partial schema change
+                // (the payloads are already carried) and no on-box work. Pure logic lives in
+                // `camera_box::tear_detect` (Tier-0). REPORT-ONLY: `gates_overall_pass()` is `false`,
+                // and the payload-level signal is PROVEN-BLIND on the current single-vertical-band
+                // dual-QR content (a horizontal scanout tear corrupts both QR halves at the same
+                // height -> undecodable, never two clean generations). The computed `viability`
+                // distinguishes "no tears" from "signal blind" so an all-zero reading is never a
+                // false green. NEVER gates and can NEVER newly fail a passing verdict.
+                {
+                    let mut tear_by_window: Vec<Vec<Vec<u32>>> = vec![Vec::new(); schedule.len()];
+                    for f in stream_frames {
+                        if let Some(gen_ts) =
+                            frame_gen_ts_anchor(f, &anchor_run_ids, &all_burns, cam2_pin)
+                        {
+                            if let WindowPlacement::In(wi) =
+                                place_frame_in_window(gen_ts, schedule, args.switch_guard_ns)
+                            {
+                                let optical: Vec<u32> = f
+                                    .payloads
+                                    .iter()
+                                    .filter(|p| {
+                                        !camera_box::probe::recording::NODE_BURN_RUN_IDS
+                                            .contains(&p.run_id)
+                                    })
+                                    .map(|p| p.frame_id)
+                                    .collect();
+                                tear_by_window[wi].push(optical);
+                            }
+                        }
+                    }
+                    let tear_stats: Vec<camera_box::tear_detect::TearStats> = tear_by_window
+                        .iter()
+                        .map(|w| camera_box::tear_detect::window_tear_stats(w))
+                        .collect();
+                    let windows_json: Vec<serde_json::Value> = schedule
+                        .iter()
+                        .zip(&tear_stats)
+                        .map(|(w, stats)| {
+                            let mut v =
+                                serde_json::to_value(stats).unwrap_or(serde_json::Value::Null);
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "cambox".to_string(),
+                                    serde_json::json!(w.cambox.clone()),
+                                );
+                                obj.insert(
+                                    "tear_gate_pass".to_string(),
+                                    serde_json::json!(camera_box::tear_detect::tear_gate_pass(
+                                        stats
+                                    )),
+                                );
+                            }
+                            v
+                        })
+                        .collect();
+                    let total_tears: u32 = tear_stats.iter().map(|s| s.tear_frames).sum();
+                    let any_observed = tear_stats.iter().any(|s| {
+                        s.viability == camera_box::tear_detect::TearSignalViability::Observed
+                    });
+                    println!(
+                        "  #781 projection-tap tear surface (REPORT-ONLY): {} torn frame(s) across \
+                         {} window(s); signal viability {}",
+                        total_tears,
+                        schedule.len(),
+                        if any_observed {
+                            "OBSERVED"
+                        } else {
+                            "UNPROVEN (blind on current single-band dual-QR content)"
+                        }
+                    );
+                    report["all_cambox_continuity"]["tear"] = serde_json::json!({
+                        "gates_overall_pass": camera_box::tear_detect::gates_overall_pass(),
+                        "vernier_max_spread": camera_box::tear_detect::VERNIER_MAX_SPREAD,
+                        "tear_gate": "report-only -- the payload-level tear signal (a captured \
+                            frame carrying >= 2 paint generations, optical span > vernier_max_spread) \
+                            is proven-blind on the current single-vertical-band dual-QR content (a \
+                            horizontal scanout tear corrupts both QR halves -> undecodable, never \
+                            two clean generations). Ships report-only with a computed \
+                            signal_viability; flip gates_overall_pass to true only once the signal \
+                            is Observed on a known-torn run + a bound is calibrated. See issue 781.",
+                        "windows": windows_json,
+                    });
+                    // Report-only fold (no-op while gates_overall_pass()==false): one-line LIVE flip.
+                    all_pass &= camera_box::tear_detect::run_tear_gate_pass(&tear_stats)
+                        || !camera_box::tear_detect::gates_overall_pass();
+                }
+
                 // #859 — REPORT-ONLY painter-pacing attribution. From the cam2 painter's own
                 // `tick,gen_ts_ns,flip_ts_ns` ground truth (already supplied via `--painter`),
                 // decide whether the residual DUPLICATE (`copies`) is the painter's OWN stall (a
