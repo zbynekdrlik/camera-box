@@ -35,7 +35,7 @@ from latency_pins_snapshot import read_pin  # reuse the proven honest-None read 
 
 def active_camera_names(explicit: "str | None" = None) -> list:
     """#893 -- the active camera names, split from `explicit` if given, else CAMERA_ACTIVE_SET
-    (env var, default "cam2 cam3" -- #1110: cam1 re-retired 2026-08-22, grabber hw defect)
+    (env var, default "cam3" -- issue 1170: cam2's camera-under-test role retired [grabber cure-decay])
     -- NEVER a literal range (.claude/rules/camera-active-set.md). Read
     fresh on every call.
 

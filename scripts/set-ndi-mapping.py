@@ -28,8 +28,8 @@ ACTIVE mapping, but REVERSIBLY.** The test rig shrank: cam5/cam6/cam7's USB grab
 returned to their owner and those boxes are powered off. The owner's binding requirement: this
 retirement MUST be a one-line reversal when the boxes come back — so `FULL_MAP` below keeps
 EVERY camera's pin as a FACT (never deleted), and `--active` (defaulting to the `CAMERA_ACTIVE_SET`
-env var camera-set.sh exports, or "cam2 cam3" if that's unset too -- #1134: cam1 retired,
-its grabber hardware-faulted) filters it down to
+env var camera-set.sh exports, or "cam3" if that's unset too -- issue 1170: cam2's
+camera-under-test role retired [grabber cure-decay], cam1 retired earlier) filters it down to
 the pins actually ENFORCED this run. Re-enable procedure: cam5 back? add "cam5" to
 CAMERA_ACTIVE_SET in scripts/camera-set.sh (scripts/rig-mode.sh passes it through automatically
 via `--active "$CAMERA_ACTIVE_SET"`), rerun the gate — nothing here needs to change. Whatever OBS
@@ -431,7 +431,7 @@ def main():
         "--active",
         default=None,
         help="#827/#898: space/comma-separated camera names to enforce (default: "
-        "$CAMERA_ACTIVE_SET env, or 'cam2 cam3'). Ignored when --map is given explicitly.",
+        "$CAMERA_ACTIVE_SET env, or 'cam3'). Ignored when --map is given explicitly.",
     )
     ap.add_argument("--verify-only", action="store_true", help="check + report, do not set")
     ap.add_argument(

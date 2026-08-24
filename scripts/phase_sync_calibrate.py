@@ -233,8 +233,8 @@ def compute_phase_sync_offsets(measured: dict, gate_bin: "str | None" = None) ->
 
 def active_ndi_sources() -> set:
     """#893 -- the 'NDI camN' strih source names for every camera currently in
-    CAMERA_ACTIVE_SET (env var, default "cam2 cam3" -- #1134: cam1 retired 2026-08-19 (grabber
-    box never comes up on the network -- same read convention set-ndi-mapping.py's
+    CAMERA_ACTIVE_SET (env var, default "cam3" -- issue 1170: cam2's camera-under-test role retired
+    [grabber cure-decay] -- same read convention set-ndi-mapping.py's
     DEFAULT_ACTIVE_SET already uses). Mirrors
     scripts/camera-set.sh's camera_active_ndi_sources_excluding_csv naming convention
     ("NDI {cam}") exactly.
