@@ -70,6 +70,9 @@ fn cmd_stop_uses_the_shared_cleanup_helper_not_an_inline_copy_1194() {
         body.contains("lipsync_playback_cleanup"),
         "1194: cmd_stop must call the shared lipsync_playback_cleanup helper: {body}"
     );
+    // The positive assertion above (cmd_stop calls the helper) is the load-bearing "one source of
+    // truth" check; this negative check is the belt that specifically guards against RE-INLINING the
+    // playback-stop cam_ssh back into cmd_stop.
     assert!(
         !body.contains("lipsync_stop_playback_cmds"),
         "1194: cmd_stop must NOT re-inline the playback-stop cam_ssh -- it belongs in the shared \

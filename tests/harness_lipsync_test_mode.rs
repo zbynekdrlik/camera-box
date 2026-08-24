@@ -869,7 +869,8 @@ fn start_arrival_retry_is_bounded_and_recycles_mpv_1192() {
 
 /// On exhaustion (all retries below threshold) the arrival verify must FAIL LOUD with the attempt
 /// matrix -- never a silent ACTIVE -- and the failure must sit inside the ERR-trap window so TEST
-/// mode is restored via the existing `trap 'bash rig-mode.sh test' ERR`.
+/// mode is restored via the ERR trap (`lipsync_playback_cleanup; bash rig-mode.sh test` -- issue
+/// 1194 made the trap kill the playback before restoring).
 #[test]
 fn start_arrival_exhaustion_fails_loud_with_matrix_inside_err_trap_1192() {
     let s = read("scripts/lipsync-test-mode.sh");
