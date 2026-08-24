@@ -71,6 +71,13 @@ struct obs_source_info ndi_burn_filter_info;
 
 const NDIlib_v6 *load_ndilib();
 
+// camera-box #1185: reserve the program's NDI send instance at module post-load
+// so it grabs the first NDI port (:5961) before the scene-collection ndi_filter
+// republishes are created. Defined in ndi-output.cpp; the reserved instance is
+// adopted by ndi_output_start, and an unadopted one is released on unload.
+extern void ndi_output_reserve_main_sender(const char *name, const char *groups);
+extern void ndi_output_release_reserved_main_sender();
+
 typedef const NDIlib_v6 *(*NDIlib_v6_load_)(void);
 QLibrary *loaded_lib = nullptr;
 
@@ -521,6 +528,23 @@ void obs_module_post_load(void)
 {
 	obs_log(LOG_DEBUG, "+obs_module_post_load()");
 
+	// camera-box #1185: reserve the program (2ME PGM) NDI send instance NOW.
+	// obs_module_post_load runs BEFORE the scene collection loads, so this send
+	// instance grabs the first free NDI port (:5961) ahead of every per-source
+	// ndi_filter republish created during scene load. The real ndi_output_start
+	// (fired at OBS_FRONTEND_EVENT_FINISHED_LOADING) adopts this reserved instance
+	// instead of creating its own, pinning the program's port across restarts so a
+	// stock NDI Studio Monitor / building TV reconnecting by cached port can never
+	// be handed the wrong sender for the program (issue 1180 / issue 1181). Gated
+	// on the main output being ENABLED + NAMED so a disabled PGM is never advertised.
+	if (plugin_features_registered && ndiLib) {
+		auto config = Config::Current();
+		if (config->OutputEnabled && !config->OutputName.isEmpty()) {
+			ndi_output_reserve_main_sender(QT_TO_UTF8(config->OutputName),
+						       QT_TO_UTF8(config->OutputGroups));
+		}
+	}
+
 	// Check for new updates after the plugin has loaded.
 	updateCheckStart();
 
@@ -532,6 +556,12 @@ void obs_module_unload(void)
 	obs_log(LOG_DEBUG, "+obs_module_unload()");
 
 	updateCheckStop();
+
+	// camera-box #1185: destroy any reserved main sender that was never adopted by
+	// ndi_output_start (main output disabled after reservation, or OBS closed before
+	// finishing load), so it never leaks the port / a frameless source. MUST run
+	// before ndiLib->destroy() below (it calls ndiLib->send_destroy).
+	ndi_output_release_reserved_main_sender();
 
 	if (ndiLib) {
 		ndiLib->destroy();

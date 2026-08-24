@@ -20,6 +20,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <mutex>
+#include <string>
 
 // #include "plugin-support.h"
 
@@ -241,6 +243,119 @@ static const std::map<video_format, std::string> video_to_color_format_map = {{V
 									      {VIDEO_FORMAT_P216, "P216"},
 									      {VIDEO_FORMAT_P416, "P416"}};
 
+// ---------------------------------------------------------------------------
+// camera-box #1185: PGM-first-port reservation.
+//
+// libndi assigns each NDIlib_send_create a TCP port sequentially from 5961 in
+// CREATION ORDER. DistroAV defers main_output_init()/preview_output_init() to
+// OBS_FRONTEND_EVENT_FINISHED_LOADING (plugin-main.cpp), which fires AFTER the
+// scene collection loads -- so the per-source ndi_filter republishes
+// (Grading/MULTIVIEW/interkom) win the low ports and the program (2ME PGM)
+// lands on a HIGH one. A stock NDI Studio Monitor / building TV that reconnects
+// by CACHED PORT is then handed the wrong sender for the program after any OBS
+// restart (issue 1180 / issue 1181).
+//
+// Fix: RESERVE the program's NDI send instance at obs_module_post_load time --
+// BEFORE the scene collection loads -- so it grabs :5961, then have the real
+// ndi_output_start ADOPT that reserved instance (by exact name+groups match)
+// instead of calling send_create again. The reserved instance persists across
+// the whole load, holding :5961, so the program's port is pinned regardless of
+// how many ndi_filter republishes are created afterward.
+//
+// Bounded caveats (see #1185): the reserved instance advertises the program
+// name FRAMELESS for the ~seconds of OBS load (bounded, and better than the
+// wrong-source-indefinitely reshuffle); only PGM is pinned (PVW + filters still
+// reshuffle among the remaining ports, mitigated by the issue-1181 watchdog);
+// and this is gated (in obs_module_post_load) on the main output being
+// ENABLED+NAMED so a disabled PGM is never advertised.
+//
+// Thread-safety: reserve() runs on the module-load thread (obs_module_post_load);
+// release() runs on the main (UI) thread (obs_module_unload); take() runs on
+// whatever thread starts the output -- the main thread for the queued
+// FINISHED_LOADING init, but also the obs-websocket thread when the main output
+// is started remotely (that is why main-output.cpp connects the output's
+// start/stop signal handlers). g_reserved_main_mutex guards the holder on every
+// one of those. take() never calls send_destroy and never touches a per-output
+// mutex, so there is no lock-order inversion against o->ndi_sender_mutex.
+// ---------------------------------------------------------------------------
+static NDIlib_send_instance_t g_reserved_main_sender = nullptr;
+static std::string g_reserved_main_name;
+static std::string g_reserved_main_groups;
+static std::mutex g_reserved_main_mutex;
+
+// Create the main output's NDI send instance NOW so it reserves the first free
+// NDI port (:5961). Called from obs_module_post_load with the configured main
+// output name+groups when the main output is enabled. Idempotent: a second call
+// while a reservation is already live is a no-op.
+void ndi_output_reserve_main_sender(const char *name, const char *groups)
+{
+	if (!ndiLib || !name || !name[0])
+		return;
+	std::lock_guard<std::mutex> lock(g_reserved_main_mutex);
+	if (g_reserved_main_sender)
+		return; // already reserved
+
+	NDIlib_send_create_t send_desc{};
+	send_desc.p_ndi_name = name;
+	if (groups && groups[0])
+		send_desc.p_groups = groups;
+	else
+		send_desc.p_groups = nullptr;
+	send_desc.clock_video = false;
+	send_desc.clock_audio = false;
+
+	g_reserved_main_sender = ndiLib->send_create(&send_desc);
+	if (g_reserved_main_sender) {
+		g_reserved_main_name = name;
+		g_reserved_main_groups = (groups && groups[0]) ? groups : "";
+		obs_log(LOG_INFO,
+			"ndi_output_reserve_main_sender: reserved the first NDI port for main output '%s' at module post-load (#1185)",
+			name);
+	} else {
+		obs_log(LOG_WARNING,
+			"WARN-1185 - ndi_output_reserve_main_sender: failed to reserve NDI send instance for '%s'",
+			name);
+	}
+}
+
+// Destroy a reservation that was never adopted by ndi_output_start (main output
+// disabled after reservation, name changed, or OBS closed before finishing
+// load), so it never leaks the port / a frameless source. Called from
+// obs_module_unload BEFORE ndiLib->destroy().
+void ndi_output_release_reserved_main_sender()
+{
+	std::lock_guard<std::mutex> lock(g_reserved_main_mutex);
+	if (g_reserved_main_sender && ndiLib) {
+		ndiLib->send_destroy(g_reserved_main_sender);
+		obs_log(LOG_DEBUG,
+			"ndi_output_release_reserved_main_sender: destroyed the unadopted reserved main sender '%s' (#1185)",
+			g_reserved_main_name.c_str());
+	}
+	g_reserved_main_sender = nullptr;
+	g_reserved_main_name.clear();
+	g_reserved_main_groups.clear();
+}
+
+// If a reserved main sender matches (name+groups) the output about to start,
+// hand it over (transferring ownership) and clear the reservation; else return
+// nullptr and the caller creates its own. A non-matching output (preview, the
+// random-named support-test, a renamed PGM) never adopts it.
+static NDIlib_send_instance_t ndi_output_take_reserved_sender(const char *name, const char *groups)
+{
+	std::lock_guard<std::mutex> lock(g_reserved_main_mutex);
+	if (!g_reserved_main_sender)
+		return nullptr;
+	std::string want_name = name ? name : "";
+	std::string want_groups = (groups && groups[0]) ? groups : "";
+	if (want_name != g_reserved_main_name || want_groups != g_reserved_main_groups)
+		return nullptr; // not for this output
+	NDIlib_send_instance_t s = g_reserved_main_sender;
+	g_reserved_main_sender = nullptr;
+	g_reserved_main_name.clear();
+	g_reserved_main_groups.clear();
+	return s;
+}
+
 bool ndi_output_start(void *data)
 {
 	auto o = (ndi_output_t *)data;
@@ -330,7 +445,17 @@ bool ndi_output_start(void *data)
 	send_desc.clock_audio = false;
 
 	pthread_mutex_lock(&o->ndi_sender_mutex);
-	o->ndi_sender = ndiLib->send_create(&send_desc);
+	// camera-box #1185: adopt the port-reserved main sender if this output IS the
+	// main output (name+groups match the reservation made at obs_module_post_load);
+	// else create a fresh sender as stock. Adopting reuses the instance that already
+	// holds :5961, pinning the program's NDI port across restarts.
+	o->ndi_sender = ndi_output_take_reserved_sender(name, groups);
+	if (o->ndi_sender) {
+		obs_log(LOG_INFO, "ndi_output_start: adopted the port-reserved main NDI sender for '%s' (#1185)",
+			name);
+	} else {
+		o->ndi_sender = ndiLib->send_create(&send_desc);
+	}
 
 	if (o->ndi_sender) {
 		o->started = obs_output_begin_data_capture(o->output, flags);
@@ -340,6 +465,14 @@ bool ndi_output_start(void *data)
 		} else {
 			obs_log(LOG_WARNING, "WARN-415 - NDI Sender data capture failed. '%s'", name);
 			obs_log(LOG_DEBUG, "'%s' ndi_output_start: data capture start failed", name);
+			// camera-box #1185: begin_data_capture failed, so o->started stays false and
+			// neither ndi_output_stop (gated on o->started) nor ndi_output_destroy will ever
+			// free this sender. If it is the port-reserved :5961 PGM instance we just adopted,
+			// leaving it alive advertises the production PGM name FRAMELESS for the whole
+			// session and the next start creates a second same-named sender on a high port --
+			// silently defeating the pin. Destroy it here (safe: capture never began).
+			ndiLib->send_destroy(o->ndi_sender);
+			o->ndi_sender = nullptr;
 		}
 	} else {
 		obs_log(LOG_WARNING, "WARN-416 - NDI Sender initialisation failed. '%s'", name);
