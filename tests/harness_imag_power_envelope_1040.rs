@@ -1175,3 +1175,126 @@ fn dev1_alert_watchdog_wires_in_the_render_discriminator_799() {
         "the render path must confirm across >=2 passes (a single 4s window can catch a transient)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #1188 — the guard's /run state PATH constant + the pure STEPPED parser (the acceptance gate,
+// scripts/verify-imag.sh, consults these to tell a LEGITIMATE thermal step-down from foreign drift)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn guard_state_path_is_one_shared_constant_1188() {
+    // Both the guard (the writer) and verify-imag (the reader) must agree on the /run state path,
+    // so the lib exports it as ONE constant rather than each hardcoding its own literal.
+    let (_c, out, err) = run_sourced(r#"printf '%s\n' "${IMAG_POWER_GUARD_STATE_FILE:-UNSET}""#);
+    assert_eq!(
+        out.trim(),
+        "/run/imag-power-envelope-guard.state",
+        "the lib must export IMAG_POWER_GUARD_STATE_FILE = the guard's /run state path (#1188): out={out:?} err={err:?}"
+    );
+    // And the guard script must reference the shared constant, never a second literal copy.
+    let guard = read_script("scripts/imag-power-envelope-guard.sh");
+    assert!(
+        guard.contains("IMAG_POWER_GUARD_STATE_FILE"),
+        "the guard must use the shared IMAG_POWER_GUARD_STATE_FILE constant for its state path (#1188)"
+    );
+}
+
+#[test]
+fn guard_stepped_from_state_reads_the_stepped_flag_1188() {
+    // STEPPED=1 present -> stepped; STEPPED=0/other -> not-stepped; empty or no STEPPED= -> unknown
+    // (never mask a genuine drift when the guard state cannot be confirmed).
+    let cases = [
+        ("HOT=2\nCOOL=0\nSTEPPED=1", "stepped"),
+        ("HOT=0\nCOOL=3\nSTEPPED=0", "not-stepped"),
+        ("STEPPED=1\n", "stepped"),
+        ("STEPPED=0\n", "not-stepped"),
+        // a stray CR / surrounding whitespace on the value must still read as stepped.
+        ("HOT=1\nCOOL=0\nSTEPPED= 1 \n", "stepped"),
+        // absent file / empty read -> unknown.
+        ("", "unknown"),
+        // present but no STEPPED= line (truncated/corrupt) -> unknown, not a false not-stepped.
+        ("HOT=1\nCOOL=0\n", "unknown"),
+        // a garbage STEPPED value with no digit -> not-stepped (safe: keeps the strict fail).
+        ("STEPPED=x", "not-stepped"),
+    ];
+    for (text, want) in cases {
+        let (_c, out, err) = run_sourced(&format!(
+            "imag_power_guard_stepped_from_state {}",
+            shell_quote(text)
+        ));
+        assert_eq!(
+            out.trim(),
+            want,
+            "imag_power_guard_stepped_from_state({text:?}) -> want {want:?}: out={out:?} err={err:?}"
+        );
+    }
+}
+
+#[test]
+fn guard_state_parser_returns_zero_on_every_input_never_aborts_a_set_e_caller_1188() {
+    // verify-imag.sh (set -euo pipefail) calls this in a `$(...)`; it must ALWAYS exit 0 so an empty
+    // / malformed read never set -e-aborts the whole acceptance gate (#1133 class).
+    let (c, out, err) = run_sourced(
+        "set -e\n\
+         imag_power_guard_stepped_from_state '' >/dev/null; echo rc-empty=$?\n\
+         imag_power_guard_stepped_from_state 'HOT=1' >/dev/null; echo rc-nostep=$?\n\
+         imag_power_guard_stepped_from_state 'STEPPED=1' >/dev/null; echo rc-stepped=$?",
+    );
+    assert_eq!(c, 0, "harness must not abort: out={out:?} err={err:?}");
+    for line in ["rc-empty=0", "rc-nostep=0", "rc-stepped=0"] {
+        assert!(out.contains(line), "expected {line}: out={out:?}");
+    }
+}
+
+#[test]
+fn guard_writes_its_state_file_world_readable_1188() {
+    // The guard runs as root and mktemp yields mode 600 — but verify-imag consults STEPPED over a
+    // NON-root SSH (newlevel), so the guard must chmod the state file world-readable before the
+    // atomic mv. Without it, the acceptance gate can never read the guard state and would keep
+    // false-FAILing a legitimate step-down (#1188).
+    let body = read_script("scripts/imag-power-envelope-guard.sh");
+    assert!(
+        body.contains("chmod 0644"),
+        "the guard must chmod its state file 0644 so the non-root verify SSH can read STEPPED (#1188)"
+    );
+    // It must also RECORD its step-down watts so verify compares against the guard's own authority,
+    // not an independent env default (#1188).
+    assert!(
+        body.contains("GUARD_STEPDOWN_W="),
+        "the guard must write GUARD_STEPDOWN_W into its state file so verify reads the guard's OWN step-down value (#1188)"
+    );
+}
+
+#[test]
+fn guard_stepdown_w_from_state_reads_the_recorded_value_1188() {
+    // GUARD_STEPDOWN_W present -> its digits; absent/empty -> empty (verify then falls back to the
+    // env default). Always returns 0 (called inside a `$(...)` under set -euo pipefail).
+    let cases = [
+        ("HOT=0\nCOOL=0\nSTEPPED=1\nGUARD_STEPDOWN_W=25", "25"),
+        ("GUARD_STEPDOWN_W= 25 \n", "25"),
+        // absent -> empty
+        ("HOT=1\nCOOL=0\nSTEPPED=1", ""),
+        ("", ""),
+    ];
+    for (text, want) in cases {
+        let (_c, out, err) = run_sourced(&format!(
+            "imag_power_guard_stepdown_w_from_state {}",
+            shell_quote(text)
+        ));
+        assert_eq!(
+            out.trim(),
+            want,
+            "imag_power_guard_stepdown_w_from_state({text:?}) -> want {want:?}: out={out:?} err={err:?}"
+        );
+    }
+    // set -e contract: an empty/absent read must not abort a set -euo pipefail caller.
+    let (c, out, err) = run_sourced(
+        "set -e\n\
+         imag_power_guard_stepdown_w_from_state '' >/dev/null; echo rc-empty=$?\n\
+         imag_power_guard_stepdown_w_from_state 'GUARD_STEPDOWN_W=25' >/dev/null; echo rc-set=$?",
+    );
+    assert_eq!(c, 0, "harness must not abort: out={out:?} err={err:?}");
+    for line in ["rc-empty=0", "rc-set=0"] {
+        assert!(out.contains(line), "expected {line}: out={out:?}");
+    }
+}

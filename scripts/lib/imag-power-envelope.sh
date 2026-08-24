@@ -53,6 +53,12 @@ IMAG_POWER_GUARD_UNIT="imag-power-envelope-guard.timer"
 # The journald tag every guard transition is logged under (retrievable via `journalctl -t ...`).
 # shellcheck disable=SC2034  # consumed by scripts/imag-power-envelope-guard.sh which SOURCEs this lib
 IMAG_POWER_LOG_TAG="imag-power-envelope"
+# The guard's /run state file (streaks + the stepped-down flag). ONE source of truth for the path,
+# referenced by BOTH scripts/imag-power-envelope-guard.sh (the writer) and scripts/verify-imag.sh
+# (the acceptance gate, which consults STEPPED to tell a LEGITIMATE thermal step-down from foreign
+# drift, #1188) so the two can never drift apart on the path.
+# shellcheck disable=SC2034  # consumed by the guard + verify-imag, both of which SOURCE this lib
+IMAG_POWER_GUARD_STATE_FILE="/run/imag-power-envelope-guard.state"
 
 # imag_pl1_watts_to_uw WATTS -> echoes WATTS * 1_000_000 (RAPL constraints are in micro-watts).
 # Exact integer arithmetic; a non-numeric/empty input echoes nothing and returns 1 (never a
@@ -281,6 +287,51 @@ imag_power_guard_next_streaks() {
       printf '%s %s %s\n' "$nhot" "$ncool" "${stepped:-0}"
       ;;
   esac
+}
+
+# imag_power_guard_stepped_from_state STATE_TEXT -> echoes exactly one of `stepped | not-stepped |
+# unknown`, classifying the guard's /run state file BODY (shell KEY=value lines HOT=/COOL=/STEPPED=,
+# written by imag_power_guard_next_streaks via scripts/imag-power-envelope-guard.sh). `stepped` iff a
+# STEPPED=1 line is present; `not-stepped` iff a STEPPED=<other> line is present; `unknown` for an
+# empty/absent body OR one with no STEPPED= line at all (a truncated/corrupt file, or a box whose
+# guard has not ticked yet) -- so a consumer (verify-imag.sh's acceptance gate, #1188) NEVER masks a
+# genuine foreign drift when it cannot actually CONFIRM the guard stepped down. Co-located here with
+# the state PRODUCER so the format's reader and writer never drift. Pure: takes the file TEXT (the
+# caller reads the file over SSH), no I/O, and ALWAYS returns 0 (a set -euo pipefail caller invokes
+# it inside a `$(...)`, so it must never abort the caller on an empty/malformed read -- the #1133
+# class).
+imag_power_guard_stepped_from_state() {
+  local text="$1" line seen=0 val=""
+  [ -n "$text" ] || { printf 'unknown\n'; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      STEPPED=*) seen=1; val="${line#STEPPED=}" ;;
+    esac
+  done <<< "$text"
+  [ "$seen" -eq 1 ] || { printf 'unknown\n'; return 0; }
+  # keep only digits (a sourced value could carry surrounding whitespace / a stray CR); tr drains
+  # fully so there is no SIGPIPE-under-pipefail hazard here.
+  val="$(printf '%s' "$val" | tr -cd '0-9')"
+  if [ "$val" = "1" ]; then printf 'stepped\n'; else printf 'not-stepped\n'; fi
+}
+
+# imag_power_guard_stepdown_w_from_state STATE_TEXT -> echoes the step-down WATTS the guard recorded
+# in its /run state (the `GUARD_STEPDOWN_W=<watts>` line, written by scripts/imag-power-envelope-
+# guard.sh), or empty when the line is absent (an older guard that predates #1188, or an
+# empty/absent read). Lets verify-imag.sh compare an observed clamp against the guard's OWN step-down
+# authority rather than an independent env default that could diverge from a provisioning-time
+# IMAG_PL1_STEPDOWN_W override (#1188). Pure; text in, no I/O; ALWAYS returns 0 (a set -euo pipefail
+# caller invokes it inside a `$(...)`).
+imag_power_guard_stepdown_w_from_state() {
+  local text="$1" line val=""
+  [ -n "$text" ] || { printf '\n'; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      GUARD_STEPDOWN_W=*) val="${line#GUARD_STEPDOWN_W=}" ;;
+    esac
+  done <<< "$text"
+  # keep only digits (defensive against surrounding whitespace / a stray CR); empty -> empty.
+  printf '%s\n' "$(printf '%s' "$val" | tr -cd '0-9')"
 }
 
 # imag_power_alert_condition JOURNAL -> echoes the concerning-transition marker line(s)

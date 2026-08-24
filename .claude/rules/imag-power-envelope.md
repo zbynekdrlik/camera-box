@@ -250,3 +250,38 @@ the hysteresis STATE transitions; to prove the actual PAGE was fired-or-not, sou
 with DRY_RUN=0 and stub `AIRULESET_NOTIFY` at a tiny recorder script (`python3 <stub> notify
 --body ...` appends its argv to a `REC_FILE`), then assert the recorder is empty (log-only) or
 contains `notify` (paged) — see `tests/harness_imag_power_render_gate_1116.rs`'s `drive_notify()`.
+
+## The ACCEPTANCE gate (verify-imag) is guard-state-aware; the STRICT gate (drift-guard) is not — reclassify in verify ONLY (#1188)
+
+The section above states "an in-progress legitimate guard step-down reads as DRIFT — that is
+CORRECT". That holds for the STRICT gate (drift-guard's `[0/8]` preflight must refuse during a clamp
+episode) but NOT for the ACCEPTANCE gate (`verify-imag.sh` check (u)): on the #1162 unit the box's
+steady-state package temp is 92-93 °C, so the guard's own 25 W thermal step-down is the PERMANENT
+steady state, and reading it as foreign drift false-FAILs a healthy box. The two gates share
+`imag_power_envelope_verdict`, so the split MUST be:
+
+- **Keep `imag_power_envelope_verdict` (and the gather snippet) byte-guard-BLIND** — it still emits
+  `pl1|DRIFT` on any live!=pin mismatch, so drift-guard is unaffected. NEVER teach the shared verdict
+  the guard state; that would silently relax the strict preflight too.
+- **Reclassify in verify-imag ONLY.** `imag_power_pl1_guard_reclassify` / `imag_power_tcpu_guard_verdict`
+  (pure, in verify-imag.sh) downgrade a pl1 DRIFT / a TCPU-at-ceiling to OK-with-note ONLY when the
+  guard's own state proves a step-down; everything else keeps the strict FAIL (fail-safe: an
+  unreadable/unknown state, a disabled constraint, a wrong value → still DRIFT, never mask a genuine
+  foreign re-program).
+
+**The guard state file must be readable by the NON-root verify SSH.** verify-imag SSHes as `newlevel`;
+the guard runs as root and `mktemp` yields mode 600, so the state was unreadable. The guard now
+`chmod 0644`s the state file (HOT/COOL/STEPPED + `GUARD_STEPDOWN_W` — no secret) before its atomic
+`mv`. The path is ONE shared lib constant (`IMAG_POWER_GUARD_STATE_FILE`) both the guard (writer) and
+verify (reader) reference — never a second literal copy.
+
+**A gate reader must compare against the guard's OWN recorded value, not an independent env default.**
+`IMAG_PL1_STEPDOWN_W` (25) is NOT README-pinned like `power_pl1_w_imag` (45) is, so a
+provisioning-time override baked into the guard unit's `Environment=` would diverge from verify's
+dev1 env default and false-FAIL a legitimate step-down. Fix: the guard RECORDS `GUARD_STEPDOWN_W` in
+its state file and verify compares against THAT (env default only as a fallback for an older guard).
+General rule: when two gates must agree on a value, read it from one shared authority (a README pin,
+or the producer's own recorded state) — never let each side default independently. Pure parsers
+(`imag_power_guard_stepped_from_state` / `imag_power_guard_stepdown_w_from_state`) are Tier-0 tested
+by sourcing; use a state-file key (`GUARD_STEPDOWN_W`) distinct from the guard's own live vars
+(`STEPDOWN_W`/`STEPDOWN_UW`) so the guard's `. "$STATE"` source-back never clobbers them.
