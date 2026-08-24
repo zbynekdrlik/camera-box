@@ -41,6 +41,13 @@ calibrated from #1128's non-overlapping live data (healthy 60.0 ± 0.2 fps / 0 c
 non-overlapping and keep the corrupted band mandatory — dropping it turns this back into an
 over-rate-only reset-spammer.**
 
+**Sibling trigger (#1193 sustained OVER-RATE):** `src/capture_overrate.rs` is the THIRD self-heal
+trigger, built on THIS exact two-band-discriminator pattern but for a DIFFERENT signature — over-rate
+(a majority of the `cap-1s` buckets ≥ 61) AND dupe-victim SHED CHURN (≥ 3/window), no corrupted
+requirement. It catches the cam2 ShadowCast state (61.1 fps + ~6 sheds/5 s, 0 corrupted) that stays
+BELOW this STUCK band's 61.5-fps + corrupted signature, so the two detectors are non-overlapping. Same
+env-gated-OFF + shared-`attempt_self_heal` shape; see `.claude/rules/capture-selfheal-action-sequence.md`.
+
 Baseline subtlety: the first `observe` of a fresh process records the corrupted-counter BASELINE
 (delta unknown → 0), so from a cold start into an already-stuck grabber the corrupted band confirms
 one window LATER than the over-rate band (STUCK at window 7, ~35 s, not 6). This is deliberate and
