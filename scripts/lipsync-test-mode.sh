@@ -302,6 +302,22 @@ cam_ssh() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@"$PAINTER_IP" "$1"
 }
 
+# lipsync_playback_cleanup -- issue 1194: idempotent teardown of the lipsync playback on cam2,
+# shared by cmd_stop AND the cmd_start ERR-trap / retries-exhausted fail path (ONE source of truth,
+# never a re-inlined copy). It (1) kills the mpv playback by its pidfile + blanks fb0 (the issue-660
+# belt, reused from lipsync_stop_playback_cmds) and (2) removes the uploaded /run asset. BOTH cam_ssh
+# calls are best-effort (`|| true`) so the helper is safe to call when NOTHING is running (a fresh
+# box, an early abort before the playback even started) and can NEVER itself fail/abort -- essential
+# for the ERR-trap caller, where a non-zero command would re-enter `set -e`. This MUST run BEFORE any
+# rig-mode.sh test restore: a restore that re-launches the cam2 painter while an mpv --vo=drm playback
+# still holds the DRM master + ALSA device produces the issue-1194 hybrid state (painter dead on
+# `snd_pcm_open ... Device or resource busy (16)` + card->fbdev fallback, mpv alive). Mirror of the
+# issue-1190 start-side ordering (stop the resource holder BEFORE launching what needs the resource).
+lipsync_playback_cleanup() {
+  cam_ssh "$(lipsync_stop_playback_cmds "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_FB_DEVICE")" || true
+  cam_ssh "rm -f /run/lipsync-test.mp4" || true
+}
+
 # --------------------------------------------------------------------------------------------- #
 # Subcommands
 # --------------------------------------------------------------------------------------------- #
@@ -324,7 +340,12 @@ cmd_start() {
   # automatically on ANY failure in this window; cleared right before this function returns
   # successfully (930 finding 8).
   set -o errtrace
-  trap 'bash "$HERE/rig-mode.sh" test' ERR
+  # issue 1194: kill the lipsync playback FIRST, THEN restore TEST mode -- a restore that
+  # re-launches the cam2 painter while mpv still holds the DRM master + ALSA device leaves a
+  # hybrid state (painter dead on a busy device, mpv alive). lipsync_playback_cleanup is
+  # idempotent + never-fail (both cam_ssh calls `|| true`), so it is safe to run in the ERR trap
+  # even before playback started, and cannot re-enter `set -e`.
+  trap 'lipsync_playback_cleanup; bash "$HERE/rig-mode.sh" test' ERR
   echo "[lipsync-test-mode] uploading $media -> cam2:$remote_media"
   sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$media" root@"${PAINTER_IP}:${remote_media}"
   echo "[lipsync-test-mode] cam2: mpv decode preflight (media=$remote_media)"
@@ -406,8 +427,9 @@ cmd_start() {
 
 cmd_stop() {
   echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping lipsync playback + blanking fb0"
-  cam_ssh "$(lipsync_stop_playback_cmds "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_FB_DEVICE")" || true
-  cam_ssh "rm -f /run/lipsync-test.mp4" || true
+  # issue 1194: kill mpv (+ blank fb0) and drop the /run asset via the shared idempotent helper --
+  # ONE source of truth with the cmd_start ERR trap, no re-inlined copy. Always BEFORE the restore.
+  lipsync_playback_cleanup
   echo "[lipsync-test-mode] restoring TEST mode (dual-QR + QPSK marker) via rig-mode.sh test"
   bash "$HERE/rig-mode.sh" test
 }
