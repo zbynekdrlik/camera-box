@@ -1686,9 +1686,10 @@ xset s off -dpms s noblank 2>/dev/null || true
 [ -f "$HOME/Pictures/wall-fallback.png" ] && command -v feh >/dev/null && feh --no-fehbg --bg-fill "$HOME/Pictures/wall-fallback.png" 2>/dev/null || true
 # Clear stale OBS crash sentinels BEFORE launch -- a hard/unclean reboot is EXACTLY the case OBS's
 # own "Crash or unclean shutdown detected" modal fires on, which would hang the boot headless and
-# :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 17;
-# there is no OBS CLI flag that suppresses this check -- verified against vendor/obs-studio
-# frontend/OBSApp.cpp, it is a Qt dialog gated on this sentinel file only).
+# :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 17).
+# Since #1195 the genlock build removes that modal at source (OBSApp.cpp checkForUncleanShutdown()
+# auto-selects a NORMAL launch), so this clear is now belt-&-braces for a not-yet-redeployed binary;
+# there is no OBS CLI flag that suppresses the check either way.
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 # #522: strip any saved projectors from the scene-collection JSON so OBS restores NONE on load.
 # OBS restores a scene collection's saved_projectors on launch INDEPENDENT of SaveProjectors=false
