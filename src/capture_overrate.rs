@@ -161,17 +161,42 @@ impl CaptureOverRateTracker {
     /// - churn run: `+1` while `dupe_shed >= churn_min`, else reset to 0 — the discriminator that
     ///   keeps a benign over-rate wobble (0 shed) from ever confirming.
     pub fn observe(&mut self, cap_buckets: &[u32], dupe_shed: u64) -> CaptureOverRateVerdict {
-        // #1193 [red] stub — the real two-band consecutive-window tracker lands in the GREEN commit.
-        let _ = (
-            cap_buckets,
-            dupe_shed,
-            &mut self.over_rate_run,
-            &mut self.churn_run,
-            self.confirm_windows,
-            self.bucket_fps_floor,
-            self.min_buckets_present,
-            self.churn_min,
-        );
+        let present = cap_buckets.len();
+        let over_count = cap_buckets
+            .iter()
+            .filter(|&&b| b >= self.bucket_fps_floor)
+            .count();
+        // "most buckets" = a strict MAJORITY of the buckets present, with a minimum-present guard.
+        let over_rate_window = present >= self.min_buckets_present && over_count * 2 > present;
+        if over_rate_window {
+            self.over_rate_run = self.over_rate_run.saturating_add(1);
+        } else {
+            self.over_rate_run = 0;
+        }
+
+        let churn_window = dupe_shed >= self.churn_min;
+        if churn_window {
+            self.churn_run = self.churn_run.saturating_add(1);
+        } else {
+            self.churn_run = 0;
+        }
+
+        // OVER-RATE only when BOTH bands are confirmed. The churn band is the discriminator that
+        // keeps a benign over-rate wobble (0 shed; absorbed by the decimation gate) from ever
+        // reaching a reset.
+        if self.over_rate_run >= self.confirm_windows && self.churn_run >= self.confirm_windows {
+            return CaptureOverRateVerdict::OverRate {
+                captured_max_bucket: cap_buckets.iter().copied().max().unwrap_or(0),
+                dupe_shed,
+                windows: self.over_rate_run.min(self.churn_run),
+            };
+        }
+        if self.over_rate_run > 0 || self.churn_run > 0 {
+            return CaptureOverRateVerdict::Watching {
+                over_rate_windows: self.over_rate_run,
+                churn_windows: self.churn_run,
+            };
+        }
         CaptureOverRateVerdict::Healthy
     }
 }
@@ -205,9 +230,10 @@ pub fn cooldown_elapsed(
     now_epoch_s: u64,
     min_interval_s: u64,
 ) -> bool {
-    // #1193 [red] stub — the real cooldown predicate lands in the GREEN commit.
-    let _ = (last_heal_epoch_s, now_epoch_s, min_interval_s);
-    false
+    match last_heal_epoch_s {
+        Some(last) => now_epoch_s.saturating_sub(last) >= min_interval_s,
+        None => true,
+    }
 }
 
 #[cfg(test)]
