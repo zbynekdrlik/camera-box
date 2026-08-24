@@ -1018,8 +1018,14 @@ fi
 # libegl-mesa0 are separate from libgl1-mesa-dri and were the actual missing piece behind an
 # initial "EGL not initialized" failure trying an SDL2/KMSDRM alternative (kept here anyway --
 # harmless, and useful if a future variant of this tool ever needs it).
-apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri
-echo "  Installed: ffmpeg, libsdl2-2.0-0, libegl1, libegl-mesa0, libgl1-mesa-dri (#930 lipsync-test-mode runtime)"
+# issue 1187: the lipsync-test-mode playback path moved OFF raw fbdev (ffmpeg -f fbdev, which left
+# a stale frame in /dev/fb0 memory -- issue 1176) ONTO DRM/KMS via `mpv --vo=drm`. mpv is therefore
+# the DRM/KMS lipsync playback runtime and is installed on the SAME fail-loud line as the #930
+# packages (it Depends on the ffmpeg libav* codecs already present, so --no-install-recommends still
+# decodes the H.264 test asset). ffmpeg/EGL stay installed -- harmless, and ffmpeg's libav* are
+# mpv's own decode dependency anyway.
+apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri mpv
+echo "  Installed: ffmpeg, libsdl2-2.0-0, libegl1, libegl-mesa0, libgl1-mesa-dri, mpv (#930/#1187 lipsync-test-mode runtime)"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)
 cat > /etc/rc.local << 'RCEOF'
