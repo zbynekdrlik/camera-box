@@ -48,7 +48,11 @@ fn run(env: &str, snippet: &str) -> (String, bool) {
         "set -uo pipefail\n. \"{}\" 2>/dev/null\n{env}\n{snippet}",
         lib_path().display()
     );
-    let out = Command::new("bash").arg("-c").arg(&script).output().expect("run bash");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("run bash");
     let mut s = String::from_utf8_lossy(&out.stdout).to_string();
     s.push_str(&String::from_utf8_lossy(&out.stderr));
     (s, out.status.success())
@@ -72,7 +76,10 @@ fn finder_heal_wait_runs_the_seam_with_host_active_deadline() {
     let stub = std::env::temp_dir().join(format!("mv_hw_{}.sh", nanos()));
     fs::write(
         &stub,
-        format!("#!/usr/bin/env bash\necho \"HW $1 $2 $3\" >> '{}'\nexit 0\n", log.display()),
+        format!(
+            "#!/usr/bin/env bash\necho \"HW $1 $2 $3\" >> '{}'\nexit 0\n",
+            log.display()
+        ),
     )
     .unwrap();
     make_exec(&stub);
@@ -88,7 +95,10 @@ fn finder_heal_wait_runs_the_seam_with_host_active_deadline() {
         logged.contains("HW 10.0.0.9 cam3 90"),
         "#1197: the seam must be called with host/active/deadline; logged={logged:?} out=\n{out}"
     );
-    assert!(out.contains("RC=0"), "#1197: WARN-only runner returns 0; out=\n{out}");
+    assert!(
+        out.contains("RC=0"),
+        "#1197: WARN-only runner returns 0; out=\n{out}"
+    );
 }
 
 #[test]
@@ -124,7 +134,9 @@ fn default_path_invokes_set_ndi_mapping_heal_wait() {
 fn body_of(fn_header: &str) -> String {
     // Slice from a function header to the next top-level `\n<name>() {` header (or EOF).
     let s = lib_text();
-    let start = s.find(fn_header).unwrap_or_else(|| panic!("no {fn_header} in the lib"));
+    let start = s
+        .find(fn_header)
+        .unwrap_or_else(|| panic!("no {fn_header} in the lib"));
     let after = &s[start + fn_header.len()..];
     // next function definition header at column 0
     let end = after.find("\n}\n").map(|e| e + 3).unwrap_or(after.len());
