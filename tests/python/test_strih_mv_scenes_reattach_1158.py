@@ -66,9 +66,13 @@ def test_reattach_heals_to_baseline_when_bound_vanishes_but_baseline_discoverabl
     assert fake.current == "CAM3 (usb)"
 
 
-def test_reattach_leaves_empty_only_when_baseline_also_offline(monkeypatch):
-    # bound present up-front, then EVERYTHING (bound AND baseline) gone -> genuine sender-down:
-    # leave "" (SCREAM #1158) and return NDI_SOURCE_NOT_DISCOVERABLE.
+def test_reattach_restores_original_when_baseline_also_offline_never_empty(monkeypatch):
+    # issue 1197 (smoking gun, gh run 32743557703): bound present up-front (possibly a STALE finder
+    # listing), then EVERYTHING (bound AND baseline) gone at set-back -> the CLEAR already stopped the
+    # receiver thread. Leaving "" here is the self-inflicted PERMANENT wedge. The reattach must instead
+    # RESTORE the original bound name so the receiver thread RESTARTS and the input ends exactly as it
+    # started (never in the stopped-thread empty state). Still returns NDI_SOURCE_NOT_DISCOVERABLE (it
+    # could not re-lock) — the caller's bounded finder-warm poll re-enforces the baseline later.
     fake = _FakeObs(
         current="CAM3 (usb)",
         finder_queue=[
@@ -81,8 +85,29 @@ def test_reattach_leaves_empty_only_when_baseline_also_offline(monkeypatch):
     result = strih_mv_scenes.reattach(
         object(), 3, finder_retries=3, finder_wait_s=0, sleep=lambda *_a, **_k: None)
     assert result is strih_mv_scenes.NDI_SOURCE_NOT_DISCOVERABLE
-    assert fake.set_calls == [""]  # cleared only; baseline never set (offline -> no mangle)
-    assert fake.current == ""
+    # cleared, then the ORIGINAL is RESTORED (never left empty) — the #1197 stopped-thread-wedge fix
+    assert fake.set_calls == ["", "CAM3 (usb)"]
+    assert fake.current == "CAM3 (usb)"
+
+
+def test_reattach_never_clears_when_bound_name_never_discoverable(monkeypatch):
+    # issue 1197 priority 1 / #795: when the bound name is NEVER in the finder (absent through the whole
+    # up-front pre-check), the CLEAR must NOT fire at all — the input's ORIGINAL binding is left
+    # untouched (never cleared into the stopped-thread state) and the caller waits for rediscovery.
+    fake = _FakeObs(
+        current="CAM3 (usb)",
+        finder_queue=[
+            ["CAM1 (usb)"],  # pre-check attempt 1: bound absent
+            ["CAM1 (usb)"],  # pre-check attempt 2: still absent
+            ["CAM1 (usb)"],  # pre-check attempt 3: still absent
+        ],
+    )
+    _wire(monkeypatch, fake, baseline="CAM3 (usb)")
+    result = strih_mv_scenes.reattach(
+        object(), 3, finder_retries=3, finder_wait_s=0, sleep=lambda *_a, **_k: None)
+    assert result is strih_mv_scenes.NDI_SOURCE_NOT_DISCOVERABLE
+    assert fake.set_calls == []          # the CLEAR never fired — original binding untouched
+    assert fake.current == "CAM3 (usb)"  # left exactly as it started
 
 
 def test_reattach_happy_path_reapplies_bound_name_unchanged(monkeypatch):
