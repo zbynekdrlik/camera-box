@@ -351,6 +351,12 @@ def _run_heal_wait_mode(args, want):
     Kept out of main()'s normal enforce path, mirroring _run_heal_mode, so rig-activation is
     unchanged."""
     import obs_phase2 as op  # lazy: the pure helpers above stay importable without websocket/obs_phase2
+    # #1197 review 🔵-3: an empty active set (--active "" from an unset CAMERA_ACTIVE_SET) has nothing
+    # to warm -- return before opening a socket (which would otherwise burn the 10s connect timeout on
+    # an unreachable OBS only to return (0,0,0)).
+    if not want:
+        print("#1197 heal-wait: no active inputs to warm (empty active set)")
+        sys.exit(0)
     try:
         ws = op._conn(args.host, args.password)
     except Exception as e:

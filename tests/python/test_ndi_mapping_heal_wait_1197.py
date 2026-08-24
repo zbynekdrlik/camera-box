@@ -118,6 +118,20 @@ def test_probe_discoverable_drifted_but_verify_fails_is_failed():
 
 # --- heal_wait_active_mapping (the bounded loop) ----------------------------------------------
 
+def test_empty_want_returns_all_zero_no_sleep_no_probe():
+    # #1197 review 🔵-3: an empty active set (--active "" from an unset CAMERA_ACTIVE_SET) has nothing
+    # to warm -> (0,0,0) with zero probes/sleeps (the CLI mode additionally short-circuits before
+    # opening a WS connection).
+    clk = _Clock()
+    op = _FakeOp({}, {}, clk)
+    logs = []
+    done, waiting, failed = m.heal_wait_active_mapping(
+        op, object(), [], _get_binding_from({}), logs.append,
+        deadline_s=90, interval_s=4, now=clk.now, sleep=clk.sleep)
+    assert (done, waiting, failed) == (0, 0, 0)
+    assert clk.slept == [] and op.list_calls == [] and op.reenforce_calls == []
+
+
 def test_warm_finder_all_correct_returns_immediately_no_sleep_no_set():
     clk = _Clock()
     want = [("NDI cam1", "CAM1 (usb)"), ("NDI cam2", "CAM2 (usb)")]

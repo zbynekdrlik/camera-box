@@ -251,12 +251,20 @@ mv_reverify_finder_heal_wait() {
     # --heal-wait bounds the python's OWN poll loop to deadline_s; the outer timeout is the #328
     # belt-and-suspenders bound on the WS connect/init. strih's WS accepts an empty password, like
     # preflight_mv_reverify's own frozen-camera-gate calls.
-    out="$(timeout "${MV_REVERIFY_HEAL_WAIT_SSH_TIMEOUT:-$((deadline_s + 30))}" \
+    # #1197 review 🔵-2: coerce to an INTEGER for bash arithmetic -- deadline_s is documented
+    # integer-seconds, but a stray float override (e.g. 90.5) would make $((...)) throw, timeout get
+    # an empty duration, and `|| true` silently swallow the whole heal-wait. `${deadline_s%.*}` drops
+    # any fractional part; python's --heal-wait below accepts the raw value (float-tolerant) fine.
+    out="$(timeout "${MV_REVERIFY_HEAL_WAIT_SSH_TIMEOUT:-$(( ${deadline_s%.*} + 30 ))}" \
       python3 "$HERE/set-ndi-mapping.py" --host "$host" --password "" \
       --active "$active_spec" --heal-wait "$deadline_s" \
       --heal-wait-interval "${MV_REVERIFY_HEAL_WAIT_INTERVAL_S:-4}" 2>&1 || true)"
   fi
-  printf '%s\n' "$out" | sed 's/^/    [#1197 finder-warm] /' >&2
+  # #1197 review 🟡-1: `|| true` so the WARN-only guarantee holds at the HELPER regardless of the
+  # caller's set-e state (the #1133 discipline: never let a report-only probe's own pipeline abort the
+  # run). Both current call sites disable set -e (`… || exit 1` / `if …; then`), but harden here so a
+  # future bare-statement caller under `set -euo pipefail` can never be aborted by this line.
+  printf '%s\n' "$out" | sed 's/^/    [#1197 finder-warm] /' >&2 || true
   return 0
 }
 

@@ -58,6 +58,25 @@ fn run(env: &str, snippet: &str) -> (String, bool) {
     (s, out.status.success())
 }
 
+/// #1197 review 🟡-1 / repo rule #1133: source the lib WITHOUT `-e` (so sourcing itself never aborts),
+/// then ENABLE the caller's REAL `set -euo pipefail` before running `snippet` — the precise blind spot
+/// the `set -uo`-only `run` helper cannot see. Proves the runner is WARN-only at the HELPER, not just
+/// because both real call sites happen to disable `-e`.
+fn run_under_set_e(env: &str, snippet: &str) -> (String, bool) {
+    let script = format!(
+        "set -uo pipefail\n. \"{}\" 2>/dev/null\nset -euo pipefail\n{env}\n{snippet}",
+        lib_path().display()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("run bash");
+    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
+    s.push_str(&String::from_utf8_lossy(&out.stderr));
+    (s, out.status.success())
+}
+
 // ---- the runner exists + honors the seam -----------------------------------------------------
 
 #[test]
@@ -114,6 +133,24 @@ fn finder_heal_wait_is_warn_only_even_when_the_seam_fails() {
         out.contains("RC=0"),
         "#1197: mv_reverify_finder_heal_wait must be WARN-only (return 0) even when the heal-wait \
          command fails; out=\n{out}"
+    );
+}
+
+#[test]
+fn finder_heal_wait_never_set_e_aborts_as_a_bare_statement() {
+    // #1197 review 🟡-1 / #1133: under the caller's REAL `set -euo pipefail`, a BARE call to the
+    // runner (not `if …`, not `|| true`) must NEVER abort the shell even when the heal-wait command
+    // fails -- the WARN-only guarantee lives at the helper, not at the call shape. The line AFTER the
+    // bare call must still run.
+    let (out, ok) = run_under_set_e(
+        "MV_REVERIFY_HEAL_WAIT_CMD='/bin/false'\nSTRIH=x",
+        "mv_reverify_finder_heal_wait 10.0.0.9 'cam3' 90\necho REACHED_AFTER",
+    );
+    assert!(ok, "harness ran; out=\n{out}");
+    assert!(
+        out.contains("REACHED_AFTER"),
+        "#1197: a bare mv_reverify_finder_heal_wait under set -euo pipefail must never set-e-abort \
+         the run (WARN-only at the helper); out=\n{out}"
     );
 }
 
