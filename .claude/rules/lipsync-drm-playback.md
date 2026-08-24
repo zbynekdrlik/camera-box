@@ -72,6 +72,16 @@ playback starts, `cmd_start` runs a speech-arrival VERIFY (issue 1192) before it
   sine-envelope fixtures in `tests/python/test_lipsync_envelope_corr.py` (no ffmpeg/numpy/network);
   the bash side is static-anchor + `lipsync_arrival_corr_meets` (run_sourced) tested in
   `tests/harness_lipsync_test_mode.rs`. Live probe/pull/correlate on the real rig is a supervisor step.
+- **The orchestration LOOP has a HERMETIC functional test** (`tests/harness_lipsync_arrival_verify_1192.rs`)
+  — static anchors alone are blind to a `set -e` abort (`ci-testing-gotchas.md` #1133). The reusable
+  pattern for testing a ssh/WS-touching `cmd_start`-style script offline: copy the REAL script + its
+  sourced libs into a tempdir, drop FAKE siblings next to it (`obs_phase2.py`, `lipsync_envelope_corr.py`,
+  `rig-mode.sh`) and a **fake `sshpass` on `PATH`** (one file neutralizes cam2 `cam_ssh` + `win_ssh_download`
+  + `win_ssh_run` at once — for `scp` it `touch`es the last arg, for `ssh` it just exits 0), then run
+  `bash <copy> start <dummy-asset>` with `LIPSYNC_ARRIVAL_PROBE_S=0`/`_READ_RETRY_SLEEP=0` and a scripted
+  `CORR_SEQ`, asserting the four outcomes (pass / recycle-then-pass / exhaustion-fail-loud+ERR-trap-restore
+  / infra-fail+restore) under the script's own `set -euo pipefail`. Prototype the fakes in a local bash
+  replica first (Tier-0 forbids running the Rust test locally; `cargo fmt --all --check` still parses it).
 
 ## The `--audio-delay` SIGN is the easy thing to get wrong (silent lipsync break) — default is 0 (#1191)
 
