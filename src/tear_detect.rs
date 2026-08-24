@@ -66,13 +66,9 @@ pub const TEAR_FRACTION_CEILING: f64 = 0.0;
 /// Vernier payloads (node burns already excluded by the caller). `None` when the frame carries no
 /// optical payload at all (an undecodable frame — counted elsewhere as `undecodable`, never a tear).
 pub fn frame_optical_spread(optical_ids: &[u32]) -> Option<u32> {
-    // STUB (issue 781 [red]): always reports zero span, so no frame is ever torn — the torn-case
-    // unit tests fail against this until the real max-min lands in the [green] commit.
-    if optical_ids.is_empty() {
-        None
-    } else {
-        Some(0)
-    }
+    let min = *optical_ids.iter().min()?;
+    let max = *optical_ids.iter().max()?;
+    Some(max - min)
 }
 
 /// A captured frame is TORN when its cam2-optical Vernier payloads span more than the by-design
