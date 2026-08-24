@@ -357,33 +357,40 @@ jobs:
         with:
           key: bkshading
 
+      # ndi is now the DEFAULT bkshading service build (issue 1157), so this members clippy
+      # already compiles the real NDI FFI path (src/preview/ndi_source.rs) with -D warnings.
+      # libloading is a RUNTIME dynamic load, so it still compiles here without libndi installed.
       - name: Clippy (bkshading members)
         run: cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading --all-targets -- -D warnings
 
-      # The real NDI preview receive path (issue 808 M2) is feature-gated OFF by default so
-      # the service builds/runs with the stub test-pattern source and NO libndi. libloading is
-      # a RUNTIME dynamic load, so `--features ndi` still compiles here without libndi present
-      # — this proves the feature-gated FFI stays clippy-clean.
-      - name: Clippy (bkshading service, --features ndi)
-        run: cargo clippy -p bkshading --features ndi --all-targets -- -D warnings
+      # ndi being default means the members clippy above covers the real path; this step instead
+      # keeps the OTHER config proven — the `--no-default-features` stub (libndi-free) path — so it
+      # stays clippy-clean and can't bit-rot (it was the free default coverage before ndi became
+      # the default build).
+      - name: Clippy (bkshading service, --no-default-features — stub path)
+        run: cargo clippy -p bkshading --no-default-features --all-targets -- -D warnings
 
+      # ndi is the default (issue 1157), so this runs the ndi-gated code path plus the ndi_paths
+      # cross-platform discovery unit tests (which pin that the Windows Processing.NDI.Lib runtime
+      # DLL is in the search set) and the shared_runtime lifecycle tests. libloading is a runtime
+      # dynamic load, so no libndi need be installed to build/run these.
       - name: Test (bkshading members)
         run: cargo test -p bkshading-proto -p bkshading-relay -p bkshading
 
-      # Run the service test suite WITH the real-NDI feature on (issue 1157): this compiles AND
-      # runs the ndi-gated code path plus the ndi_paths cross-platform discovery unit tests
-      # (which pin that the Windows Processing.NDI.Lib runtime DLL is in the search set).
-      # libloading is a runtime dynamic load, so no libndi need be installed to build/run these.
-      - name: Test (bkshading service, --features ndi)
-        run: cargo test -p bkshading --features ndi
+      # Prove the `--no-default-features` stub path still compiles + passes its tests (StubSource +
+      # the pure preview pipeline) so the libndi-free build can't silently break now that it is off
+      # the default.
+      - name: Test (bkshading service, --no-default-features — stub path)
+        run: cargo test -p bkshading --no-default-features
 
       # Build the DEPLOYABLE binaries in RELEASE (issue 808 M3) so a live rig verify of the merged
       # relay/service has an artifact to deploy — nothing produced one before, though
       # scripts/bkshading-provision-relay.sh explicitly expects "the CI-built bkshading-relay binary".
       # Relay = default features (drives the camera via the gphoto2 CLI, no ndi); service =
-      # --features ndi (the exact shape the strih deploy ships, issue 1157). This release build
-      # supersedes the earlier debug --bins compile-proof — clippy --all-targets + the tests above
-      # already prove the crates compile in debug, so a release build is a strictly stronger proof.
+      # --features ndi (kept explicit for intent + deploy-shape clarity; it now equals the service
+      # default since issue 1157 made ndi the default build). This release build supersedes the
+      # earlier debug --bins compile-proof — clippy --all-targets + the tests above already prove
+      # the crates compile in debug, so a release build is a strictly stronger proof.
       - name: Build deployable binaries (relay default + service --features ndi)
         run: |
           cargo build --release --bins -p bkshading-relay
@@ -446,6 +453,10 @@ jobs:
         with:
           key: bkshading-windows
 
+      # ndi is now the DEFAULT service build (issue 1157), so this default-features check compiles
+      # the REAL NDI path (src/preview/ndi_source.rs) on the exact Windows strih ship target —
+      # libloading resolves Processing.NDI.Lib.x64.dll at runtime, so it builds with no libndi on
+      # the runner.
       - name: Check bkshading members (Windows target)
         run: cargo check -p bkshading-proto -p bkshading-relay -p bkshading
 
