@@ -215,11 +215,14 @@ fn fps_and_version_parsers_survive_a_large_log_without_sigpipe_141_1189() {
     // This must run under the script's real `set -euo pipefail` (via `run_sourced_status`) — the
     // `-uo`-only `run_sourced` context is structurally blind to a `set -e` abort (the #1133 lesson).
     // The log is passed via a temp FILE `cat` inside the bash body (not an env var, which would blow
-    // ARG_MAX at spawn), mirroring `genlock_parser_reads_running_state_from_log`.
+    // ARG_MAX at spawn), mirroring `genlock_parser_reads_running_state_from_log`; a `NamedTempFile`
+    // auto-deletes on drop, so a mid-loop assert panic never leaks the ~2 MB fixture (the #975 rule).
     //
-    // Construction that triggers BOTH SIGPIPE shapes in one fixture:
-    //   * many `OBS …` and `NDI Library Version detected: …` header lines EARLY so each version
-    //     parser's `sed` emits many matches and `head -1` closes after the first -> `sed` SIGPIPEs;
+    // Construction that triggers BOTH SIGPIPE shapes in one fixture, for ALL FOUR parsers:
+    //   * many `OBS …`, `DistroAV (Version …)` and `NDI Library Version detected: …` header lines
+    //     EARLY so each version parser's `sed` emits many matches and `head -1` closes after the
+    //     first -> `sed` SIGPIPEs (each parser needs its OWN many-match lines, or that parser's case
+    //     is vacuous — the fix would look "tested" while never reproducing the abort for it);
     //   * the `video settings reset:` + `fps: 60/1` block EARLY so `fps_from_log`'s awk `exit`s with
     //     most of the input unwritten -> `printf` SIGPIPEs;
     //   * a large filler tail AFTER the block so `printf` is genuinely still writing past the pipe
@@ -228,6 +231,11 @@ fn fps_and_version_parsers_survive_a_large_log_without_sigpipe_141_1189() {
     for i in 0..2000 {
         big.push_str(&format!(
             "11:40:39.376: OBS 32.2.0 (64-bit, windows) hdr {i}\n"
+        ));
+    }
+    for i in 0..2000 {
+        big.push_str(&format!(
+            "11:40:40.050: you can haz DistroAV (Version 6.2.1) line {i}\n"
         ));
     }
     for i in 0..2000 {
@@ -249,20 +257,24 @@ fn fps_and_version_parsers_survive_a_large_log_without_sigpipe_141_1189() {
         "fixture must be > 1 MB to force SIGPIPE, got {}",
         big.len()
     );
-    let logfile = std::env::temp_dir().join(format!("dg_1189_biglog_{}.txt", std::process::id()));
-    std::fs::write(&logfile, &big).expect("write big log");
+    let logfile = tempfile::NamedTempFile::new().expect("create temp log file");
+    std::fs::write(logfile.path(), &big).expect("write big log");
 
-    // (parser, expected value the parser must still return from this fixture)
+    // (parser, expected value the parser must still return from this fixture). All four parsers the
+    // #1189 fix touches are covered — each has its own many-match producer lines above, so none is
+    // a vacuous case that would pass against the buggy code.
     let cases = [
         ("fps_from_log", "60"),
         ("obs_version_from_log", "32.2.0"),
+        ("distroav_version_from_log", "6.2.1"),
         ("ndi_runtime_from_log", "6.3.2.0"),
     ];
     for (parser, want) in cases {
         let body = format!(
             "v=\"$({parser} \"$(cat \"$LOGFILE\")\")\"; echo \"SENTINEL_SURVIVED {parser}=[$v]\""
         );
-        let (code, stdout) = run_sourced_status(&body, &[("LOGFILE", logfile.to_str().unwrap())]);
+        let (code, stdout) =
+            run_sourced_status(&body, &[("LOGFILE", logfile.path().to_str().unwrap())]);
         assert_eq!(
             code, 0,
             "{parser} must survive a large log without SIGPIPE-141 killing the caller \
@@ -279,7 +291,7 @@ fn fps_and_version_parsers_survive_a_large_log_without_sigpipe_141_1189() {
              stdout={stdout:?}"
         );
     }
-    let _ = std::fs::remove_file(&logfile);
+    // `logfile` (NamedTempFile) is dropped here — auto-removed even if an assert above panicked.
 }
 
 #[test]

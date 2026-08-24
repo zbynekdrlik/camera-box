@@ -201,7 +201,7 @@ buildspec_version() {
     # Fallback: the top-level key sits at the document's minimum indent (4 spaces); nested
     # dependency "version" keys are deeper, so the 4-space anchor selects the canonical one.
     grep -E '^    "version":' "$f" | head -1 \
-      | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p'
+      | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' || true
   fi
 }
 
