@@ -506,8 +506,10 @@ fn start_sets_an_err_trap_that_restores_test_mode_930() {
          (cam_ssh), not just a bare command: {s}"
     );
     assert!(
-        s.contains(r#"trap 'bash "$HERE/rig-mode.sh" test' ERR"#),
-        "930: cmd_start must set an ERR trap that restores TEST mode via rig-mode.sh: {s}"
+        s.contains(r#"trap 'lipsync_playback_cleanup; bash "$HERE/rig-mode.sh" test' ERR"#),
+        "930/1194: cmd_start must set an ERR trap that cleans up the mpv playback FIRST, then \
+         restores TEST mode via rig-mode.sh (a restore that races a surviving mpv for DRM+ALSA is \
+         the #1194 hybrid state): {s}"
     );
     assert!(
         s.contains("trap - ERR"),
