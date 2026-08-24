@@ -140,19 +140,19 @@ pinned_setting() {
 # obs_version_from_log TEXT -> "32.2.0"  (OBS log header line "OBS 32.2.0 (64-bit, windows)").
 obs_version_from_log() {
   printf '%s\n' "$1" \
-    | sed -n 's/.*OBS \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1
+    | sed -n 's/.*OBS \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1 || true
 }
 
 # distroav_version_from_log TEXT -> "6.2.1"  ("you can haz DistroAV (Version 6.2.1)").
 distroav_version_from_log() {
   printf '%s\n' "$1" \
-    | sed -n 's/.*DistroAV (Version \([0-9][0-9.]*\)).*/\1/p' | head -1
+    | sed -n 's/.*DistroAV (Version \([0-9][0-9.]*\)).*/\1/p' | head -1 || true
 }
 
 # ndi_runtime_from_log TEXT -> "6.3.2.0"  ("[distroav] NDI Library Version detected: 6.3.2.0").
 ndi_runtime_from_log() {
   printf '%s\n' "$1" \
-    | sed -n 's/.*NDI Library Version detected: \([0-9][0-9.]*\).*/\1/p' | head -1
+    | sed -n 's/.*NDI Library Version detected: \([0-9][0-9.]*\).*/\1/p' | head -1 || true
 }
 
 # genlock_from_log TEXT -> "1" if the running OBS reports the wall-clock genlock master gate
@@ -188,7 +188,7 @@ fps_from_log() {
       sub(/[^0-9].*/,    "", line)    # keep the leading integer ("30/1" -> "30")
       print line
       exit
-    }'
+    }' || true
 }
 
 # buildspec_version FILE -> top-level "version" of a DistroAV buildspec.json (vendored source).
