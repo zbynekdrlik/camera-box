@@ -258,6 +258,48 @@ fn playback_cmds_pins_drm_device_only_when_set_1187() {
 }
 
 // --------------------------------------------------------------------------------------------- //
+// issue 1191 — the playback speech must be peak-normalized (+N dB, default 9) into the mic-chain
+// AGC operating point. The asset speech (peak -9.8 dBFS) is ~25dB under the AGC operating point set
+// by the loud QPSK marker (~0 dBFS), so un-boosted speech captures ~-50 dBFS and SyncNet reads
+// conf ~1 on EVERY chunk (unmeasurable). A `--af=volume` filter with the LIPSYNC_PLAYBACK_GAIN_DB
+// env seam (default 9) fixes it (live-verified: envelope corr 0.976, SyncNet conf 6.4 at +9dB).
+// --------------------------------------------------------------------------------------------- //
+
+/// The single mpv playback invocation must carry a peak-normalizing gain filter
+/// `--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB` -- the env seam is expanded on the REMOTE (cam2)
+/// side so the default (9) is baked self-documenting into the generated command and the supervisor
+/// can re-tune the gain via the paired cross-check campaign WITHOUT a code change (same seam
+/// philosophy as LIPSYNC_AUDIO_LEAD_MS). Orthogonal to `--audio-delay`: present whether a lead is
+/// applied or not, and always on the SAME single mpv process (never a second one).
+#[test]
+fn playback_cmds_carries_playback_gain_af_seam_1191() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        cmds.contains("--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB"),
+        "1191: the mpv playback line must peak-normalize speech via --af=volume with the \
+         LIPSYNC_PLAYBACK_GAIN_DB env seam (default 9, remote-side expansion) -- else un-boosted \
+         asset speech stays ~25dB under the marker-set AGC operating point (SyncNet unmeasurable): \
+         {cmds}"
+    );
+    assert_eq!(
+        cmds.matches("nohup mpv").count(),
+        1,
+        "1191: the gain filter must be an arg on the single mpv process, never a second process: \
+         {cmds}"
+    );
+    // The gain seam is orthogonal to the A/V lead -- it must be present with a lead applied too.
+    let with_lead = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 408",
+    );
+    assert!(
+        with_lead.contains("--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB"),
+        "1191: the gain seam must be present regardless of the audio-lead value: {with_lead}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------- //
 // issue 1187 — the mpv decode + presence PREFLIGHT (replaces the fbdev-specific pacing guard).
 // --------------------------------------------------------------------------------------------- //
 
@@ -510,18 +552,19 @@ fn start_with_a_missing_media_file_fails_loud_before_touching_the_network() {
 }
 
 // --------------------------------------------------------------------------------------------- //
-// issue 930 (carried into 1187) — LIPSYNC_AUDIO_LEAD_MS is a static-ms A/V-lead knob. The transport
-// changed (ffmpeg -itsoffset -> mpv --audio-delay) but the KNOB (env var, default, validation) is
-// unchanged: two independent paired QR/QPSK-vs-SyncNet cross-checks derived the ALSA output pipeline
-// depth D at ~408ms. The value was calibrated on the ffmpeg/ALSA path and may need re-derivation for
-// mpv's ALSA buffering -- the knob lets the supervisor re-tune without a code change.
+// issue 930 (carried into 1187/1191) — LIPSYNC_AUDIO_LEAD_MS is a static-ms A/V-lead knob. issue 930
+// derived the ffmpeg/ALSA output pipeline depth D at ~408ms and used it as the DEFAULT; issue 1187
+// moved the transport (ffmpeg -itsoffset -> mpv --audio-delay). issue 1191 changes the DEFAULT to 0:
+// under mpv the measured offset at lead=0 is +40ms ≈ ±1 frame of zero, so 408 was a stale
+// ffmpeg-era constant. The knob (env var, validation) is otherwise unchanged and 408 stays available
+// via the env seam so the supervisor can re-tune without a code change.
 // --------------------------------------------------------------------------------------------- //
 
-/// `LIPSYNC_AUDIO_LEAD_MS` must default to 408 -- the corrected harness ALSA-pipeline-depth
-/// constant, derived via R = C + L - D from two independent paired QR/QPSK-vs-SyncNet cross-checks
-/// (issuecomment-5190993635, issuecomment-5191187944), stable to ~3ms across two days/knobs.
+/// `LIPSYNC_AUDIO_LEAD_MS` must default to 0 -- issue 1191: the mpv-era (issue 1187) measured offset
+/// at lead=0 is +40ms ≈ ±1 frame of zero, so 0 is the correct default. 408 was the stale ffmpeg-era
+/// ALSA-pipeline-depth constant (issue 930); it stays available via the env seam for re-calibration.
 #[test]
-fn lipsync_audio_lead_ms_env_defaults_to_408_930() {
+fn lipsync_audio_lead_ms_env_defaults_to_0_1191() {
     let out = Command::new("bash")
         .arg("-c")
         .arg(". \"$1\"; echo \"$LIPSYNC_AUDIO_LEAD_MS\"")
@@ -537,9 +580,9 @@ fn lipsync_audio_lead_ms_env_defaults_to_408_930() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout.trim(),
-        "408",
-        "930: default audio-lead compensation must be 408ms (corrected harness ALSA-pipeline-depth \
-         constant, see issuecomment-5190993635/issuecomment-5191187944): {stdout}"
+        "0",
+        "1191: default audio-lead compensation must be 0ms (the mpv-era measured offset at lead=0 \
+         is +40ms ≈ ±1 frame of zero; 408 was the stale ffmpeg-era constant): {stdout}"
     );
 }
 
