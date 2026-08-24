@@ -862,6 +862,22 @@ async fn run_capture_loop(
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        // #1193 — sustained OVER-RATE detector (the 3rd self-heal trigger). Keys on the COMBINED
+        // signature over-rate (a majority of the cap-1s buckets >= 61) AND dupe-victim shed churn,
+        // both sustained ~5 min — the state whose manual USB re-auth cure decays in ~2h, which the
+        // #656/#971 bands (wide jitter tolerance / decoupled sustained) and the #1128 STUCK band
+        // (requires corrupted frames) all miss. The churn band is the discriminator (a benign
+        // over-rate wobble sheds 0). On OverRate the `#1193 grabber OVER-RATE` marker is ALWAYS
+        // logged (report-only); the actual USB re-auth reuses the SAME shared self-heal throttle
+        // path but is gated OFF by default — set CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 to enable
+        // live re-auth (a deliberate opt-in, canary-armed on cam2 as a supervised step) — AND a
+        // 30-min per-trigger cooldown floor guards it beyond the shared throttle. Fed one sample
+        // per 5 s report window below.
+        let mut over_rate_tracker = camera_box::capture_overrate::CaptureOverRateTracker::new();
+        let over_rate_selfheal_enabled = std::env::var("CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
         // each emitted frame off over a bounded ring, so the heavy per-frame QR render no longer
@@ -1403,6 +1419,13 @@ async fn run_capture_loop(
                         // failure class (previously invisible to any rate/sequence-based
                         // check) shows up in the routine 5s report.
                         let corrupted = capture.corrupted_frames();
+                        // #1193 — the dupe-victim shed count this window, hoisted here so the
+                        // over-rate self-heal trigger below (outside the `out_interval_ns > 0`
+                        // block) can read it. It is drained from `take_shed_counts()` exactly once
+                        // (inside that block); a non-genlock box (out_interval_ns == 0) never drains
+                        // it, so it stays 0 → the over-rate trigger's churn band never confirms,
+                        // which is correct (no decimation gate → no dupe-victim sheds).
+                        let mut window_dupe_shed: u64 = 0;
                         if out_interval_ns > 0 {
                             let emit_fps = emit_count as f64 / secs;
                             tracing::info!(
@@ -1430,6 +1453,9 @@ async fn run_capture_loop(
                                 drained,
                                 fast_drained,
                             ) = decimation_gate.take_shed_counts();
+                            // #1193 — capture the dupe-victim shed count for the over-rate trigger
+                            // below (this is the ONLY drain of this counter per window).
+                            window_dupe_shed = dupe_shed;
                             // (#1167 v4) the starvation last-frame-repeat count is drained SEPARATELY
                             // (the 6-tuple above is byte-frozen) and appended to the summary segment.
                             let starvation_repeats = decimation_gate.take_starvation_repeats();
@@ -1722,6 +1748,71 @@ async fn run_capture_loop(
                                 {
                                     running_capture.store(false, Ordering::Relaxed);
                                     pending_self_heal_exit_code = Some(code);
+                                }
+                            }
+                        }
+
+                        // #1193 — feed this 5 s window into the sustained OVER-RATE detector: a
+                        // majority of the per-second capture buckets at/above the over-rate floor
+                        // AND dupe-victim shed churn (the drained `window_dupe_shed`), both held for
+                        // ~5 min. This is the cam2 ShadowCast state whose manual USB re-auth cure
+                        // decays in ~2h and which the #656/#971 + #1128 triggers all miss. On
+                        // OverRate the `#1193 grabber OVER-RATE` marker is ALWAYS logged
+                        // (report-only, no I/O — a future dev1 watchdog would grep it); the actual
+                        // USB re-auth reuses the SAME shared self-heal throttle path, is gated OFF
+                        // by default (CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL), guarded by
+                        // `pending_self_heal_exit_code.is_none()` (never double-reset a window
+                        // another band already fired), AND additionally by a 30-min per-trigger
+                        // cooldown floor checked against the SHARED state file — stricter than the
+                        // 10-min shared throttle, so the other two triggers stay untouched.
+                        if let camera_box::capture_overrate::CaptureOverRateVerdict::OverRate {
+                            captured_max_bucket,
+                            dupe_shed,
+                            windows,
+                        } = over_rate_tracker
+                            .observe(&emit_ring.capture_buckets(), window_dupe_shed)
+                        {
+                            tracing::warn!(
+                                "{}",
+                                camera_box::capture_overrate::over_rate_warn_message(
+                                    &device_path_owned,
+                                    captured_max_bucket,
+                                    dupe_shed,
+                                    windows,
+                                )
+                            );
+                            if over_rate_selfheal_enabled && pending_self_heal_exit_code.is_none() {
+                                let now_epoch_s = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let last_heal_epoch_s =
+                                    camera_box::capture_rate_selfheal::load_state(
+                                        std::path::Path::new(
+                                            camera_box::capture_rate_selfheal::STATE_PATH,
+                                        ),
+                                    )
+                                    .last_heal_epoch_s;
+                                if camera_box::capture_overrate::cooldown_elapsed(
+                                    last_heal_epoch_s,
+                                    now_epoch_s,
+                                    camera_box::capture_overrate::OVERRATE_MIN_HEAL_INTERVAL_S,
+                                ) {
+                                    if let Some(code) =
+                                        camera_box::capture_rate_selfheal::attempt_self_heal(
+                                            &device_path_owned,
+                                            grabber_model,
+                                            now_epoch_s,
+                                            std::path::Path::new(
+                                                camera_box::capture_rate_selfheal::STATE_PATH,
+                                            ),
+                                            &camera_box::capture_rate_selfheal::OVER_RATE_SELF_HEAL_MESSAGES,
+                                            camera_box::capture_rate_selfheal::perform_usb_reset,
+                                        )
+                                    {
+                                        running_capture.store(false, Ordering::Relaxed);
+                                        pending_self_heal_exit_code = Some(code);
+                                    }
                                 }
                             }
                         }
