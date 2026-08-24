@@ -599,3 +599,75 @@ fn start_fails_loud_on_a_negative_audio_lead_ms_930() {
         "930: failure message must name the bad env var: {stderr}"
     );
 }
+
+// --------------------------------------------------------------------------------------------- //
+// issue 1190 — the steady-state painter runs under cam2-painter.service (Restart=always, issue 1008
+// model), so a pidfile-ONLY kill lets systemd respawn it ~100ms later; the respawn re-takes the DRM
+// master and `mpv --vo=drm` (started ~10s later, issue 1187) then cannot acquire the CRTC and dies
+// instantly. The painter-stop builder must STOP THE UNIT first (systemd will not respawn a stopped
+// unit) and FAIL LOUD if it stays active; and mpv (run --no-terminal, which swallows its stderr)
+// must write a native --log-file so the death is diagnosable from the box.
+// --------------------------------------------------------------------------------------------- //
+
+/// The painter-stop builder must STOP the `cam2-painter` unit BEFORE the pidfile kill -- otherwise
+/// systemd (`Restart=always`) respawns the painter between the kill and the mpv launch and re-takes
+/// the DRM master. The pidfile kill stays AFTER it as a belt for the transient, unit-less
+/// verification-only nohup painter (cam2-painter-lifecycle rule).
+#[test]
+fn stop_painter_cmds_stops_the_cam2_painter_unit_before_the_pidfile_kill_1190() {
+    let cmds = run_sourced("lipsync_stop_painter_cmds /run/rig-painter.pid");
+    let unit_stop_at = cmds
+        .find("systemctl stop cam2-painter")
+        .expect("1190: must stop the cam2-painter unit so systemd cannot respawn the painter");
+    let pidfile_term_at = cmds
+        .find("kill \"$PID\"")
+        .expect("the pidfile TERM kill must still be present (belt for the transient painter)");
+    assert!(
+        unit_stop_at < pidfile_term_at,
+        "1190: the unit stop must come BEFORE the pidfile kill (else systemd respawns the painter \
+         between the two and re-takes the DRM master): {cmds}"
+    );
+}
+
+/// After stopping the unit + pidfile-killing any transient painter, the builder must FAIL LOUD if
+/// `cam2-painter` is somehow still active -- a live unit would respawn the painter and re-take the
+/// DRM master, making the upcoming mpv playback impossible. Mirrors the existing "survived TERM+KILL"
+/// fail-loud in the same builder (refuse playback, never proceed under a live painter).
+#[test]
+fn stop_painter_cmds_fails_loud_if_the_cam2_painter_unit_is_still_active_1190() {
+    let cmds = run_sourced("lipsync_stop_painter_cmds /run/rig-painter.pid");
+    let is_active_at = cmds
+        .find("systemctl is-active")
+        .expect("1190: must verify cam2-painter is no longer active after the stop");
+    assert!(
+        cmds[is_active_at..].contains("cam2-painter"),
+        "1190: the is-active guard must check the cam2-painter unit: {cmds}"
+    );
+    let after = &cmds[is_active_at..];
+    assert!(
+        after.contains("FAIL") && after.contains("exit 1"),
+        "1190: a still-active unit after the stop must FAIL loud and refuse playback (exit 1): \
+         {cmds}"
+    );
+}
+
+/// The playback builder must add mpv's NATIVE `--log-file` -- mpv runs with `--no-terminal` (which
+/// swallows its stderr), so without a log-file `/run/rig-lipsync-playback.log` is empty and a fatal
+/// error (e.g. DRM master unavailable) is undiagnosable from the box. `--no-terminal` STAYS; the
+/// log-file is the visibility fix, not dropping it.
+#[test]
+fn playback_cmds_writes_an_mpv_native_log_file_1190() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        cmds.contains("--log-file=/run/rig-lipsync-playback.mpv.log"),
+        "1190: mpv --no-terminal swallows its stderr, so an mpv-native --log-file is needed to make \
+         a fatal error (e.g. DRM master unavailable) diagnosable from the box: {cmds}"
+    );
+    assert!(
+        cmds.contains("--no-terminal"),
+        "1190: --no-terminal must stay -- the --log-file is the visibility fix, not dropping \
+         --no-terminal: {cmds}"
+    );
+}
