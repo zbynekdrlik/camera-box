@@ -14,13 +14,15 @@ paths:
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and active TODAY (default `cam2 cam3` — cam1 was retired #1134 2026-08-19, briefly returned
-#1130 the same day, then RE-RETIRED for real 2026-08-22 #1110 because its ShadowCast USB grabber is
-hardware-defective beyond software compensation (chronic over-rate, constant corruption, USB re-auth
-does not cure); cam1/cam4/cam5/cam6/cam7 retired but fully resolvable — see the
-header comment in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the on-air alignment superset,
-default `cam2 cam3 cam4`) dropped cam1 in the SAME #1110 retirement — a dead grabber cannot go on-air
-to be aligned. **Every place that needs "the list of
+installed and MEASURED TODAY (default `cam3` — cam1 retired #1134/#1110; cam2's CAMERA-UNDER-TEST role
+retired issue 1170 2026-08-24 because its ShadowCast grabber's cure-decay collapsed to ~7 min
+(issue 1193) — cam2 stays the fixed PAINTER but is no longer a measured camera, re-enable = add
+"cam2" back after the issue-1198 card swap; cam1/cam2/cam4/cam5/cam6/cam7 retired-from-measured but
+fully resolvable — see the header comment in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the
+on-air alignment superset) is PARTIALLY DERIVED since issue 1170: its default resolves `cam3 cam4`
+(cam3 source + cam4 on-air-not-measured, both explicit) and includes cam2 ONLY when cam2 is in
+`CAMERA_ACTIVE_SET` (an inline word-exact `case`), so re-adding cam2 to the active set restores its
+alignment one-line. **Every place that needs "the list of
 cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
 literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
 fps, strih scene/route) stay fully resolvable forever (`camera_resolve`/`camera_strih_route` never
@@ -114,6 +116,30 @@ property that matters: (a) the default active set never includes a retired camer
 list, even with an empty exclusion, and (b) overriding `CAMERA_ACTIVE_SET` to re-add a retired
 camera makes it flow through to every derived consumer, proving the reversal actually works (not
 just a comment claiming it does).
+
+## A camera can be HARDCODED into a fleet consumer off `$PAINTER_IP`, NOT the set — plain set-removal misses it (issue 1170)
+
+Removing a camera from `CAMERA_ACTIVE_SET` only excludes it from consumers that DERIVE from the set.
+cam2 (the fixed painter, IP `$PAINTER_IP`) has a SECOND identity — a "camera under test" whose grabber
+captures imag-nb's HDMI (issue 781) — and that identity was wired at TWO sites HARDCODED off
+`$PAINTER_IP`, invisible to the set:
+
+1. `recording-e2e.sh` `[2b/8]` deploy seed — `CAMBOX_SECONDARY_DEPLOY=("cam2=$PAINTER_IP=...")` (the
+   secondary-set loop that follows already EXCLUDES cam2, so the seed was the only cam2 entry, and it
+   was unconditional).
+2. `recording-e2e.sh` `[0/8]` — `PREFLIGHT_TARGETS=(... "cam2=$PAINTER_IP")` (a painter REACHABILITY
+   entry, correctly unconditional) flows into `PREFLIGHT_DANTESYNC_LINUX` → the `[0/8]` leg-health
+   preflight, so cam2's (sick) CAPTURE leg was checked and could abort the run.
+
+issue 1170 gated BOTH on `camera_is_active cam2` (the existing word-exact membership fn) so the
+capture-under-test role follows the set, while the PAINTER-role sites keyed off `$PAINTER_IP` (main
+DanteSync clock gate, reachability, `[3/8]` painter launch + QPSK marker, cleanup restore, transport
+sampler, the verdict `--cam2-run-id`/`--burn-cam2-run-id` pins) stay UNCONDITIONAL. **The tell: before
+retiring a camera that ALSO has a fixed non-source role (a painter), `grep -n "$PAINTER_IP"` +
+`grep -n "cam2="` recording-e2e.sh and split each hit into PAINTER-role (keep unconditional) vs
+CAMERA-UNDER-TEST (gate on membership) — a set-only edit silently leaves the hardcoded ones live.**
+The verdict needs NO change either way: per-node analysis is scoped to each node's own switch-schedule
+window, so a camera dropped from the sweep is never analysed/gated (identical to retired cam5/6/7).
 
 ## Retiring a camera — the default LITERAL is independently duplicated in FIVE standalone Python scripts, grep the whole repo before trusting one file's change is enough
 
