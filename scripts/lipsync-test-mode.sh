@@ -105,6 +105,13 @@ esac
 lipsync_stop_painter_cmds() {
   local pidfile="$1"
   cat <<CMDS
+# issue 1190: the steady-state painter runs under cam2-painter.service (Restart=always, issue 1008
+# model). A pidfile-ONLY kill lets systemd respawn it ~100ms later and the respawn re-takes the DRM
+# master, so the mpv --vo=drm playback started ~10s later cannot acquire the CRTC and dies instantly.
+# Stop the UNIT first -- systemd will not respawn a stopped unit; best-effort (the unit may be absent
+# in a transient-only scenario). The pidfile kill below then stays as a belt for the transient,
+# unit-less verification-only nohup painter (issue 930/1008 lifecycle).
+systemctl stop cam2-painter 2>/dev/null || true
 PID=\$(cat '$pidfile' 2>/dev/null || true)
 if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
   kill "\$PID" 2>/dev/null || true
@@ -123,6 +130,14 @@ if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
   fi
 fi
 rm -f '$pidfile'
+# issue 1190: FAIL LOUD if the unit is somehow STILL active after the stop -- a live unit would
+# respawn the painter and re-take the DRM master, making the mpv --vo=drm playback impossible
+# (mirrors the survived-TERM+KILL fail-loud above). A stopped or absent unit reports not-active,
+# which is the pass.
+if [ "\$(systemctl is-active cam2-painter 2>/dev/null)" = "active" ]; then
+  echo "FAIL: cam2-painter.service is still active after 'systemctl stop' -- it would respawn the painter and re-take the DRM master, making mpv --vo=drm playback impossible" >&2
+  exit 1
+fi
 CMDS
 }
 
@@ -174,7 +189,11 @@ lipsync_playback_cmds() {
     delay_s="$(awk -v ms="$lead_ms" 'BEGIN { printf "%.3f", -ms / 1000 }')"
   fi
   cat <<CMDS
-nohup $mpv_bin --no-config --no-terminal --vo=drm ${drm_opt}--loop-file=inf \\
+# issue 1190: mpv runs --no-terminal, which swallows its own log/error output -- when mpv dies
+# instantly (e.g. it cannot acquire the DRM master) /run/rig-lipsync-playback.log is empty and the
+# death is undiagnosable from the box. --log-file is mpv's NATIVE log sink and writes regardless of
+# --no-terminal, so a fatal error is captured; the die-immediately branch below cats it too.
+nohup $mpv_bin --no-config --no-terminal --log-file=/run/rig-lipsync-playback.mpv.log --vo=drm ${drm_opt}--loop-file=inf \\
   --audio-device=alsa/$audio --audio-channels=stereo \\
   --audio-delay=$delay_s \\
   '$media' \\
@@ -183,7 +202,7 @@ echo \$! > '$pidfile'
 disown
 sleep 1
 PID=\$(cat '$pidfile')
-kill -0 "\$PID" 2>/dev/null || { echo "FAIL: lipsync playback mpv (pid \$PID) died immediately -- see /run/rig-lipsync-playback.log" >&2; cat /run/rig-lipsync-playback.log >&2 || true; exit 1; }
+kill -0 "\$PID" 2>/dev/null || { echo "FAIL: lipsync playback mpv (pid \$PID) died immediately -- see /run/rig-lipsync-playback.log and /run/rig-lipsync-playback.mpv.log (mpv's own log)" >&2; cat /run/rig-lipsync-playback.log >&2 || true; cat /run/rig-lipsync-playback.mpv.log >&2 || true; exit 1; }
 echo "ok: lipsync playback running (pid \$PID, media=$media, drm=${drm:-auto}, audio=$audio, audio_lead_ms=$lead_ms)"
 CMDS
 }
