@@ -226,17 +226,6 @@ fn malformed_value_aborts_the_split_local_form_in_a_function_under_set_e() {
 
 // --- layer 2: the launch embedding (fake frame-probe on PATH) ---
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "painter-display-mode-1179-{}-{}",
-        std::process::id(),
-        name
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
-}
-
 /// Install a fake `frame-probe` on PATH that appends its argv (space-joined) to `$ARGV_LOG`.
 fn install_fake_frame_probe(bin_dir: &Path) {
     let script = "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$ARGV_LOG\"\n";
@@ -251,7 +240,12 @@ fn install_fake_frame_probe(bin_dir: &Path) {
 /// `nohup frame-probe --paint-only … $_cam2_marker_flags $_cam2_display_mode_flag …` line) and
 /// return the fake frame-probe's captured argv. `env` is prepended verbatim.
 fn launch_argv(env: &str) -> String {
-    let dir = scratch("launch");
+    // tempfile::tempdir(), NEVER a pid-derived shared path: std::process::id() is constant across
+    // the binary's parallel test threads, so a pid-keyed dir is ONE dir shared by both launch
+    // tests — their fake frame-probes then append into the SAME argv.log and the unset-env test
+    // reads the set-env sibling's line (live CI failure, run 32676111527; the #975 gotcha class).
+    let scratch = tempfile::tempdir().expect("create scratch dir");
+    let dir = scratch.path().to_path_buf();
     install_fake_frame_probe(&dir);
     let argv_log = dir.join("argv.log");
     fs::write(&argv_log, "").expect("create argv log");
