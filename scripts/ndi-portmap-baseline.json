@@ -1,15 +1,15 @@
 {
-  "_captured": "2026-08-23",
+  "_captured": "2026-08-24",
   "_comment": "#1181 STRIH-SNV OBS-instance NDI sender port-map baseline. REPORT-ONLY source of truth: scripts/ndi-portmap-audit.sh --check diffs the live map vs this and reports a moved sender port LOUD; it NEVER overwrites (a deliberate re-capture is recorded by re-running --capture and committing the change in a PR, exactly like scripts/netcfg-baseline.json / scripts/latency-pins-baseline.json). Seeded from a live `avahi-browse -rtp _ndi._tcp` read (never hand-typed). A moved port silently hands stock NDI Studio Monitor / the building TVs the WRONG sender under a cached port. See .claude/rules/distroav-receiver-lifecycle.md.",
   "anchor": "STRIH-SNV (2ME PGM)",
   "box": "STRIH-SNV",
   "ip": "10.77.9.202",
   "name_prefix": "STRIH-SNV",
   "senders": {
-    "STRIH-SNV (2ME PGM)": 5965,
+    "STRIH-SNV (2ME PGM)": 5962,
     "STRIH-SNV (2ME PVW)": 5966,
-    "STRIH-SNV (Grading)": 5964,
-    "STRIH-SNV (MULTIVIEW)": 5963,
-    "STRIH-SNV (interkom)": 5962
+    "STRIH-SNV (Grading)": 5965,
+    "STRIH-SNV (MULTIVIEW)": 5964,
+    "STRIH-SNV (interkom)": 5963
   }
 }
