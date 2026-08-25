@@ -31,7 +31,8 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
 - `scripts/lib/netcfg-audit.sh` — the PURE parse + drift-classify core (no I/O; Tier-0 unit-tested by
   `tests/harness_netcfg_audit_797.rs`). Functions: `netcfg_parse_field`/`netcfg_parse_stat` (RouterOS
   human-output parsers, start-anchored, thousands-space stripped), `netcfg_normalize_rate`/`_version`,
-  `netcfg_classify_match`/`_rate`/`_drop_rate`, `netcfg_drift_verdict`.
+  `netcfg_classify_match`/`_rate`/`_drop_rate`, `netcfg_drift_verdict`,
+  `netcfg_port_is_designated` (#1110 — exact `node|port` membership in the drop-sampler always-probe set).
 - `scripts/netcfg-audit.sh` — the read-only orchestrator. `--capture` writes the baseline, `--check`
   (default) diffs live-vs-baseline (exit 0=CLEAN, 3=DRIFT, 2=error), `--json` prints a snapshot.
   **It NEVER issues a config write** (read-only ops tool).
@@ -51,6 +52,15 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
   is nonzero is re-probed with two `print stats` reads `NETCFG_DROP_WINDOW` (6 s) apart; a rate above
   `NETCFG_DROP_THRESHOLD` (1/s) → `DROPPING` (the microburst-tail-drop signature — check shared-buffers
   / the uplink step-down). This is a LIVE rate, deliberately NOT a cumulative-counter baseline diff.
+  **Designated always-probe set (#1110):** the `node|port` tokens in `NETCFG_DROP_PROBE_PORTS` (default
+  `foh2_video|sfp-sfpplus2` — the strih PC's direct-DAC uplink egress, live-verified 2026-08-25) are
+  re-probed on EVERY `--check` regardless of cumulative growth, so a HEALTHY suspect uplink (dq1 flat
+  at 0, which the growth-gate would otherwise never sample) still yields a fresh live delta — the next
+  starvation episode is caught. `DROPPING` on a designated port pages exactly like any other; a CLEAN
+  designated probe surfaces a report-only `sampled` line (the sampler always leaves a trace). Set
+  `NETCFG_DROP_PROBE_PORTS=` (empty) to restore the pre-#1110 growth-gated-only behaviour. The
+  designation lives in this ENV default (checked-in, PR-reviewed) — NOT in `netcfg-baseline.json`,
+  which stays pure captured-state; the port itself is already in the baseline's per-port diff.
 - **Report-only (surfaced, never pages):** `ABSENT` (a baselined port with no live link — a device
   unplugged between events must not page), `RESET` (drop counters went backwards = the switch rebooted),
   `UNKNOWN` (an unreadable field). The cumulative `dq1`/`fcs`/`running` fields in the baseline are a
