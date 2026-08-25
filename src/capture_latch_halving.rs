@@ -147,7 +147,11 @@ impl CaptureLatchHalvingTracker {
 
     /// A tracker with explicit thresholds (tests use short windows; `confirm_windows` is floored to
     /// 1 so a degenerate 0 can never make an empty run "confirmed", and `min_captures` to 1).
-    pub fn with_thresholds(confirm_windows: u32, halved_fraction_min: f64, min_captures: u64) -> Self {
+    pub fn with_thresholds(
+        confirm_windows: u32,
+        halved_fraction_min: f64,
+        min_captures: u64,
+    ) -> Self {
         Self {
             confirm_windows: confirm_windows.max(1),
             halved_fraction_min,
@@ -164,7 +168,11 @@ impl CaptureLatchHalvingTracker {
     /// it has at least `min_captures` captures (cold-start / stalled-capture guard) AND its dupe
     /// fraction is `>= halved_fraction_min`. The min-captures guard also makes the division safe
     /// (`total_captures >= min_captures >= 1`).
-    pub fn observe(&mut self, dupe_captures: u64, total_captures: u64) -> CaptureLatchHalvingVerdict {
+    pub fn observe(
+        &mut self,
+        dupe_captures: u64,
+        total_captures: u64,
+    ) -> CaptureLatchHalvingVerdict {
         let halved_window = total_captures >= self.min_captures
             && (dupe_captures as f64 / total_captures as f64) >= self.halved_fraction_min;
         if halved_window {
@@ -312,7 +320,10 @@ mod tests {
         let mut t = CaptureLatchHalvingTracker::new();
         for _ in 0..(HALVING_CONFIRM_WINDOWS + 10) {
             let v = t.observe(180, 300);
-            assert!(!is_halved(v), "a dead-zone fraction must not confirm: {v:?}");
+            assert!(
+                !is_halved(v),
+                "a dead-zone fraction must not confirm: {v:?}"
+            );
         }
     }
 
@@ -321,7 +332,10 @@ mod tests {
         // 0.69 (207/300) is just under HALVED_DUPE_FRACTION_MIN — must not confirm.
         let mut t = CaptureLatchHalvingTracker::new();
         let v = drive(&mut t, 207, 300, HALVING_CONFIRM_WINDOWS + 10);
-        assert!(!is_halved(v), "sub-floor fraction must not be Halved: {v:?}");
+        assert!(
+            !is_halved(v),
+            "sub-floor fraction must not be Halved: {v:?}"
+        );
     }
 
     #[test]
@@ -340,7 +354,10 @@ mod tests {
         for _ in 0..(HALVING_CONFIRM_WINDOWS + 10) {
             // 75/100: fraction 0.75 but only 100 captures < 150 floor.
             let v = t.observe(75, 100);
-            assert!(!is_halved(v), "a low-capture window must not confirm: {v:?}");
+            assert!(
+                !is_halved(v),
+                "a low-capture window must not confirm: {v:?}"
+            );
         }
     }
 
@@ -363,7 +380,11 @@ mod tests {
         // now it needs 3 fresh halved windows again:
         for w in 1..=3 {
             let v = t.observe(225, 300);
-            assert_eq!(is_halved(v), w == 3, "Halved only on the 3rd fresh window (w={w})");
+            assert_eq!(
+                is_halved(v),
+                w == 3,
+                "Halved only on the 3rd fresh window (w={w})"
+            );
         }
     }
 
@@ -439,7 +460,11 @@ mod tests {
     fn cooldown_blocks_within_the_interval_and_permits_after() {
         let last = 100_000u64;
         // 29 min later: still within the 30-min floor -> blocked.
-        assert!(!cooldown_elapsed(Some(last), last + 29 * 60, HALVING_MIN_HEAL_INTERVAL_S));
+        assert!(!cooldown_elapsed(
+            Some(last),
+            last + 29 * 60,
+            HALVING_MIN_HEAL_INTERVAL_S
+        ));
         // exactly 30 min later: permitted.
         assert!(cooldown_elapsed(
             Some(last),
@@ -447,7 +472,11 @@ mod tests {
             HALVING_MIN_HEAL_INTERVAL_S
         ));
         // well after: permitted.
-        assert!(cooldown_elapsed(Some(last), last + 2 * 60 * 60, HALVING_MIN_HEAL_INTERVAL_S));
+        assert!(cooldown_elapsed(
+            Some(last),
+            last + 2 * 60 * 60,
+            HALVING_MIN_HEAL_INTERVAL_S
+        ));
     }
 
     #[test]
@@ -455,7 +484,11 @@ mod tests {
         // A backward clock step (now < last) must never underflow into a huge "elapsed" and wrongly
         // permit an attempt — saturating_sub floors it at 0 -> blocked.
         let last = 100_000u64;
-        assert!(!cooldown_elapsed(Some(last), last - 5, HALVING_MIN_HEAL_INTERVAL_S));
+        assert!(!cooldown_elapsed(
+            Some(last),
+            last - 5,
+            HALVING_MIN_HEAL_INTERVAL_S
+        ));
     }
 
     #[test]
