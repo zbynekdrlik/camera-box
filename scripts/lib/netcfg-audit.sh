@@ -130,3 +130,20 @@ netcfg_drift_verdict() {
   done
   printf 'CLEAN\n'
 }
+
+# netcfg_port_is_designated <node> <port> <designated-list> -> exit 0 if "<node>|<port>" is an EXACT
+#   token in the space-separated <designated-list> (each token "node|port"), else exit 1. A designated
+#   port is the drop-RATE probe's ALWAYS-sampled set (#1110): it is live rate-probed on EVERY --check
+#   regardless of cumulative-counter growth, so the audit always carries a fresh drop DELTA from the
+#   suspect uplink for the next starvation episode -- the strih PC is a direct-DAC uplink into
+#   foh2_video port sfp-sfpplus2, so its egress-toward-strih tx-drop-queue1 must be sampled every run
+#   even while flat. Empty node/port/list -> not designated (exit 1). Pure: no I/O.
+netcfg_port_is_designated() {
+  local node="${1:-}" port="${2:-}" list="${3:-}"
+  [ -n "$node" ] && [ -n "$port" ] || return 1
+  local want="$node|$port" tok
+  for tok in $list; do
+    [ "$tok" = "$want" ] && return 0
+  done
+  return 1
+}
