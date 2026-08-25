@@ -282,7 +282,10 @@ mod tests {
         // union {101, 102, 103} spans 2 > VERNIER_MAX_SPREAD.
         assert!(is_torn_frame(&[102, 103], &[101]));
         assert_eq!(frame_union_spread(&[102, 103], &[101]), Some(2));
-        assert!(is_torn_frame(&[102, 103], &[100]), "span 3 via one aux mark");
+        assert!(
+            is_torn_frame(&[102, 103], &[100]),
+            "span 3 via one aux mark"
+        );
     }
 
     #[test]
