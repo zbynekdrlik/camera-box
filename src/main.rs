@@ -1798,7 +1798,9 @@ async fn run_capture_loop(
                         // `pending_self_heal_exit_code.is_none()` (never double-reset a window
                         // another band already fired), AND additionally by a 30-min per-trigger
                         // cooldown floor checked against the SHARED state file — stricter than the
-                        // 10-min shared throttle, so the other two triggers stay untouched.
+                        // 10-min shared throttle, so the other two triggers stay untouched. Since
+                        // #1201 the whole gated sequence is the shared
+                        // capture_rate_selfheal::attempt_floored_self_heal wrapper.
                         if let camera_box::capture_overrate::CaptureOverRateVerdict::OverRate {
                             captured_max_bucket,
                             dupe_shed,
@@ -1815,39 +1817,22 @@ async fn run_capture_loop(
                                     windows,
                                 )
                             );
-                            if over_rate_selfheal_enabled && pending_self_heal_exit_code.is_none() {
-                                let now_epoch_s = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(0);
-                                let last_heal_epoch_s =
-                                    camera_box::capture_rate_selfheal::load_state(
-                                        std::path::Path::new(
-                                            camera_box::capture_rate_selfheal::STATE_PATH,
-                                        ),
-                                    )
-                                    .last_heal_epoch_s;
-                                if camera_box::capture_overrate::cooldown_elapsed(
-                                    last_heal_epoch_s,
-                                    now_epoch_s,
+                            if let Some(code) =
+                                camera_box::capture_rate_selfheal::attempt_floored_self_heal(
+                                    over_rate_selfheal_enabled,
+                                    pending_self_heal_exit_code.is_none(),
                                     camera_box::capture_overrate::OVERRATE_MIN_HEAL_INTERVAL_S,
-                                ) {
-                                    if let Some(code) =
-                                        camera_box::capture_rate_selfheal::attempt_self_heal(
-                                            &device_path_owned,
-                                            grabber_model,
-                                            now_epoch_s,
-                                            std::path::Path::new(
-                                                camera_box::capture_rate_selfheal::STATE_PATH,
-                                            ),
-                                            &camera_box::capture_rate_selfheal::OVER_RATE_SELF_HEAL_MESSAGES,
-                                            camera_box::capture_rate_selfheal::perform_usb_reset,
-                                        )
-                                    {
-                                        running_capture.store(false, Ordering::Relaxed);
-                                        pending_self_heal_exit_code = Some(code);
-                                    }
-                                }
+                                    &device_path_owned,
+                                    grabber_model,
+                                    std::path::Path::new(
+                                        camera_box::capture_rate_selfheal::STATE_PATH,
+                                    ),
+                                    &camera_box::capture_rate_selfheal::OVER_RATE_SELF_HEAL_MESSAGES,
+                                    camera_box::capture_rate_selfheal::perform_usb_reset,
+                                )
+                            {
+                                running_capture.store(false, Ordering::Relaxed);
+                                pending_self_heal_exit_code = Some(code);
                             }
                         }
 
@@ -1862,9 +1847,11 @@ async fn run_capture_loop(
                         // (CAMERA_BOX_GRABBER_HALVING_SELFHEAL), guarded by
                         // `pending_self_heal_exit_code.is_none()` (never double-reset a window
                         // another band already fired), AND additionally by a 30-min per-trigger
-                        // cooldown floor checked against the SHARED state file. The re-auth cure is
-                        // UNPROVEN for this state (it did NOT cure cam3 on 2026-08-25), so the
-                        // marker's detection value is the real deliverable.
+                        // cooldown floor checked against the SHARED state file — since #1201 the
+                        // whole gated sequence is the shared
+                        // capture_rate_selfheal::attempt_floored_self_heal wrapper. The re-auth
+                        // cure is UNPROVEN for this state (it did NOT cure cam3 on 2026-08-25), so
+                        // the marker's detection value is the real deliverable.
                         if let camera_box::capture_latch_halving::CaptureLatchHalvingVerdict::Halved {
                             dupe_fraction,
                             dupe_captures,
@@ -1883,41 +1870,22 @@ async fn run_capture_loop(
                                     windows,
                                 )
                             );
-                            if latch_halving_selfheal_enabled
-                                && pending_self_heal_exit_code.is_none()
-                            {
-                                let now_epoch_s = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(0);
-                                let last_heal_epoch_s =
-                                    camera_box::capture_rate_selfheal::load_state(
-                                        std::path::Path::new(
-                                            camera_box::capture_rate_selfheal::STATE_PATH,
-                                        ),
-                                    )
-                                    .last_heal_epoch_s;
-                                if camera_box::capture_latch_halving::cooldown_elapsed(
-                                    last_heal_epoch_s,
-                                    now_epoch_s,
+                            if let Some(code) =
+                                camera_box::capture_rate_selfheal::attempt_floored_self_heal(
+                                    latch_halving_selfheal_enabled,
+                                    pending_self_heal_exit_code.is_none(),
                                     camera_box::capture_latch_halving::HALVING_MIN_HEAL_INTERVAL_S,
-                                ) {
-                                    if let Some(code) =
-                                        camera_box::capture_rate_selfheal::attempt_self_heal(
-                                            &device_path_owned,
-                                            grabber_model,
-                                            now_epoch_s,
-                                            std::path::Path::new(
-                                                camera_box::capture_rate_selfheal::STATE_PATH,
-                                            ),
-                                            &camera_box::capture_rate_selfheal::LATCH_HALVING_SELF_HEAL_MESSAGES,
-                                            camera_box::capture_rate_selfheal::perform_usb_reset,
-                                        )
-                                    {
-                                        running_capture.store(false, Ordering::Relaxed);
-                                        pending_self_heal_exit_code = Some(code);
-                                    }
-                                }
+                                    &device_path_owned,
+                                    grabber_model,
+                                    std::path::Path::new(
+                                        camera_box::capture_rate_selfheal::STATE_PATH,
+                                    ),
+                                    &camera_box::capture_rate_selfheal::LATCH_HALVING_SELF_HEAL_MESSAGES,
+                                    camera_box::capture_rate_selfheal::perform_usb_reset,
+                                )
+                            {
+                                running_capture.store(false, Ordering::Relaxed);
+                                pending_self_heal_exit_code = Some(code);
                             }
                         }
 

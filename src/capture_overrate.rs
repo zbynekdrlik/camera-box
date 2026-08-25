@@ -32,13 +32,15 @@
 //!
 //! ## Tier-0 pure
 //!
-//! No probe deps, no I/O, no sysfs, no `tracing` — pure decision + formatting + the cooldown
-//! predicate, so it unit-tests on default features. `src/main.rs`'s 5 s report block feeds each
+//! No probe deps, no I/O, no sysfs, no `tracing` — pure decision + formatting (the cooldown
+//! predicate moved to `capture_rate_selfheal` in #1201), so it unit-tests on default features.
+//! `src/main.rs`'s 5 s report block feeds each
 //! window's `emit_ring.capture_buckets()` + the drained `dupe_shed` count into one
 //! [`CaptureOverRateTracker`], logs the report-only [`over_rate_warn_message`] marker on an
 //! [`CaptureOverRateVerdict::OverRate`], and — only when the opt-in
-//! `CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL` env is set AND [`cooldown_elapsed`] permits — funnels that
-//! into the shared `capture_rate_selfheal::attempt_self_heal` throttle + USB-reset path via the
+//! `CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL` env is set AND the shared
+//! `capture_rate_selfheal::cooldown_elapsed` floor permits (#1201 moved the predicate there) —
+//! funnels that into the shared `capture_rate_selfheal::attempt_self_heal` throttle + USB-reset path via the
 //! `OVER_RATE_SELF_HEAL_MESSAGES` const. A future dev1 alert watchdog can grep the exact
 //! `#1193 grabber OVER-RATE` marker, keeping ONE source of truth (Rust decides; the watchdog would
 //! only relay), the same shape as the #1128 `#1128 grabber STUCK` marker.
@@ -218,22 +220,6 @@ pub fn over_rate_warn_message(
          Report-only unless CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL is set.",
         windows as u64 * 5
     )
-}
-
-/// Has enough time passed since the last recorded self-heal (by ANY trigger) for the over-rate
-/// trigger to attempt another USB reset? `last_heal_epoch_s` is read from the SHARED self-heal state
-/// file (`capture_rate_selfheal::load_state(...).last_heal_epoch_s`). A missing value (never healed
-/// this boot) permits the attempt. Pure over `(last, now, interval)` so it is Tier-0 testable and
-/// carries no dependency on the heavy `capture_rate_selfheal` state struct.
-pub fn cooldown_elapsed(
-    last_heal_epoch_s: Option<u64>,
-    now_epoch_s: u64,
-    min_interval_s: u64,
-) -> bool {
-    match last_heal_epoch_s {
-        Some(last) => now_epoch_s.saturating_sub(last) >= min_interval_s,
-        None => true,
-    }
 }
 
 #[cfg(test)]
@@ -512,45 +498,5 @@ mod tests {
         assert!(!m.contains("#663 self-heal"));
         assert!(!m.contains("DEFECTIVE"));
         assert!(!m.contains("CHRONIC"));
-    }
-
-    #[test]
-    fn cooldown_never_healed_permits_the_attempt() {
-        assert!(cooldown_elapsed(None, 10_000, OVERRATE_MIN_HEAL_INTERVAL_S));
-    }
-
-    #[test]
-    fn cooldown_blocks_within_the_interval_and_permits_after() {
-        let last = 100_000u64;
-        // 29 min later: still within the 30-min floor -> blocked.
-        assert!(!cooldown_elapsed(
-            Some(last),
-            last + 29 * 60,
-            OVERRATE_MIN_HEAL_INTERVAL_S
-        ));
-        // exactly 30 min later: permitted.
-        assert!(cooldown_elapsed(
-            Some(last),
-            last + OVERRATE_MIN_HEAL_INTERVAL_S,
-            OVERRATE_MIN_HEAL_INTERVAL_S
-        ));
-        // well after: permitted.
-        assert!(cooldown_elapsed(
-            Some(last),
-            last + 2 * 60 * 60,
-            OVERRATE_MIN_HEAL_INTERVAL_S
-        ));
-    }
-
-    #[test]
-    fn cooldown_is_monotonic_safe_against_a_backward_clock() {
-        // A backward clock step (now < last) must never underflow into a huge "elapsed" and
-        // wrongly permit an attempt — saturating_sub floors it at 0 -> blocked.
-        let last = 100_000u64;
-        assert!(!cooldown_elapsed(
-            Some(last),
-            last - 5,
-            OVERRATE_MIN_HEAL_INTERVAL_S
-        ));
     }
 }

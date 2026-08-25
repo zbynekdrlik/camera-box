@@ -58,13 +58,15 @@
 //!
 //! ## Tier-0 pure
 //!
-//! No probe deps, no I/O, no sysfs, no `tracing` — pure decision + formatting + the cooldown
-//! predicate, so it unit-tests on default features. `src/main.rs`'s capture loop counts the
+//! No probe deps, no I/O, no sysfs, no `tracing` — pure decision + formatting (the cooldown
+//! predicate moved to `capture_rate_selfheal` in #1201), so it unit-tests on default features.
+//! `src/main.rs`'s capture loop counts the
 //! capture-side byte-identical dupe fraction (reusing the SAME `content_hash` the #889 path already
 //! computes — NO change to the decimation gate), feeds each 5 s window's `(dupe_captures,
 //! total_captures)` into one [`CaptureLatchHalvingTracker`], logs the report-only
 //! [`latch_halving_warn_message`] marker on a [`CaptureLatchHalvingVerdict::Halved`], and — only
-//! when the opt-in `CAMERA_BOX_GRABBER_HALVING_SELFHEAL` env is set AND [`cooldown_elapsed`] permits
+//! when the opt-in `CAMERA_BOX_GRABBER_HALVING_SELFHEAL` env is set AND the shared
+//! `capture_rate_selfheal::cooldown_elapsed` floor permits (#1201 moved the predicate there)
 //! — funnels that into the shared `capture_rate_selfheal::attempt_self_heal` throttle + USB-reset
 //! path via the `LATCH_HALVING_SELF_HEAL_MESSAGES` const. A future dev1 alert watchdog can grep the
 //! exact `#1200 grabber LATCH-HALVING` marker, keeping ONE source of truth (Rust decides; the
@@ -265,23 +267,6 @@ pub fn latch_halving_warn_message(
          A `systemctl restart` does NOT clear it; a USB re-enumeration did NOT cure cam3 on 2026-08-25 either, so this is DETECTION/alerting. Report-only unless CAMERA_BOX_GRABBER_HALVING_SELFHEAL is set.",
         windows as u64 * 5
     )
-}
-
-/// Has enough time passed since the last recorded self-heal (by ANY trigger) for the latch-halving
-/// trigger to attempt another USB reset? `last_heal_epoch_s` is read from the SHARED self-heal state
-/// file (`capture_rate_selfheal::load_state(...).last_heal_epoch_s`). A missing value (never healed
-/// this boot) permits the attempt. Pure over `(last, now, interval)` — Tier-0 testable and
-/// dependency-free, mirroring `capture_overrate::cooldown_elapsed` so this module's standalone rustc
-/// replica needs no cross-module import.
-pub fn cooldown_elapsed(
-    last_heal_epoch_s: Option<u64>,
-    now_epoch_s: u64,
-    min_interval_s: u64,
-) -> bool {
-    match last_heal_epoch_s {
-        Some(last) => now_epoch_s.saturating_sub(last) >= min_interval_s,
-        None => true,
-    }
 }
 
 #[cfg(test)]
@@ -509,46 +494,6 @@ mod tests {
         // A degenerate all-dupe window (unique == 0) must not divide by zero in the copies estimate.
         let m = latch_halving_warn_message("/dev/video0", 1.0, 300, 300, 60);
         assert!(m.contains(">4 copies per unique"), "{m}");
-    }
-
-    #[test]
-    fn cooldown_never_healed_permits_the_attempt() {
-        assert!(cooldown_elapsed(None, 10_000, HALVING_MIN_HEAL_INTERVAL_S));
-    }
-
-    #[test]
-    fn cooldown_blocks_within_the_interval_and_permits_after() {
-        let last = 100_000u64;
-        // 29 min later: still within the 30-min floor -> blocked.
-        assert!(!cooldown_elapsed(
-            Some(last),
-            last + 29 * 60,
-            HALVING_MIN_HEAL_INTERVAL_S
-        ));
-        // exactly 30 min later: permitted.
-        assert!(cooldown_elapsed(
-            Some(last),
-            last + HALVING_MIN_HEAL_INTERVAL_S,
-            HALVING_MIN_HEAL_INTERVAL_S
-        ));
-        // well after: permitted.
-        assert!(cooldown_elapsed(
-            Some(last),
-            last + 2 * 60 * 60,
-            HALVING_MIN_HEAL_INTERVAL_S
-        ));
-    }
-
-    #[test]
-    fn cooldown_is_monotonic_safe_against_a_backward_clock() {
-        // A backward clock step (now < last) must never underflow into a huge "elapsed" and wrongly
-        // permit an attempt — saturating_sub floors it at 0 -> blocked.
-        let last = 100_000u64;
-        assert!(!cooldown_elapsed(
-            Some(last),
-            last - 5,
-            HALVING_MIN_HEAL_INTERVAL_S
-        ));
     }
 
     #[test]

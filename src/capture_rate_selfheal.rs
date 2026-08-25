@@ -572,6 +572,27 @@ pub fn reset_failed_message(
     )
 }
 
+/// #1201 — the ONE shared per-trigger cooldown-floor predicate (consolidated here from the two
+/// byte-identical per-module copies in `capture_overrate` / `capture_latch_halving`): has enough
+/// time passed since the last recorded self-heal (by ANY trigger) for a floored trigger to attempt
+/// another USB reset? `last_heal_epoch_s` is read from the SHARED self-heal state file
+/// ([`load_state`]`(...).last_heal_epoch_s`); `min_interval_s` is the calling trigger's OWN
+/// per-trigger cooldown floor (the #1193 `OVERRATE_MIN_HEAL_INTERVAL_S`, the #1200
+/// `HALVING_MIN_HEAL_INTERVAL_S` — both 30 min, deliberately stricter than the shared 10-min
+/// [`DEFAULT_MIN_HEAL_INTERVAL_S`] throttle inside [`attempt_self_heal`], so the other triggers
+/// stay untouched). A missing value (never healed this boot) permits the attempt. Pure over
+/// `(last, now, interval)` so it is Tier-0 testable.
+pub fn cooldown_elapsed(
+    last_heal_epoch_s: Option<u64>,
+    now_epoch_s: u64,
+    min_interval_s: u64,
+) -> bool {
+    match last_heal_epoch_s {
+        Some(last) => now_epoch_s.saturating_sub(last) >= min_interval_s,
+        None => true,
+    }
+}
+
 /// #1149 — the ONE shared in-process USB self-heal action sequence, invoked by BOTH the
 /// #656/#663/#971 capture-rate trigger and the #1128 grabber-STUCK trigger in `src/main.rs`.
 ///
@@ -654,9 +675,51 @@ pub fn attempt_self_heal(
     }
 }
 
+/// #1201 — the ONE shared FLOORED outer wrapper around [`attempt_self_heal`], invoked by the two
+/// per-trigger-floored triggers in `src/main.rs`'s capture loop (#1193 over-rate, #1200
+/// latch-halving). Runs the identical gating sequence both call sites used to inline: env-gate
+/// (`enabled`) → `pending_is_none` (never double-reset a window another band already fired) →
+/// epoch-now read → [`load_state`] of the SHARED state file → the per-trigger [`cooldown_elapsed`]
+/// floor → [`attempt_self_heal`]. Returns `None` (nothing to apply) when any gate blocks —
+/// deliberately WITHOUT a throttled/blocked log line, matching the pre-#1201 inline blocks, whose
+/// floor check was silent — otherwise forwards the inner helper's pending process-exit code, which
+/// the caller applies by stopping capture and setting its own `pending_self_heal_exit_code`.
+///
+/// `reset` is INJECTED (production passes [`perform_usb_reset`]) so the sequencing is unit-testable
+/// without ever firing a real USB re-enumeration; `msgs` selects the trigger-specific log wording;
+/// `min_interval_s` is the calling trigger's OWN cooldown floor (see [`cooldown_elapsed`]).
+#[allow(clippy::too_many_arguments)]
+pub fn attempt_floored_self_heal(
+    enabled: bool,
+    pending_is_none: bool,
+    min_interval_s: u64,
+    device_path: &str,
+    model: GrabberModel,
+    state_path: &Path,
+    msgs: &SelfHealMessages,
+    reset: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> Option<i32> {
+    if !(enabled && pending_is_none) {
+        return None;
+    }
+    let now_epoch_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last_heal_epoch_s = load_state(state_path).last_heal_epoch_s;
+    if !cooldown_elapsed(last_heal_epoch_s, now_epoch_s, min_interval_s) {
+        return None;
+    }
+    attempt_self_heal(device_path, model, now_epoch_s, state_path, msgs, reset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #1201 — the two per-trigger cooldown-floor consts, used by the consolidated cooldown tests
+    // and the floored-wrapper tests below.
+    use crate::capture_latch_halving::HALVING_MIN_HEAL_INTERVAL_S;
+    use crate::capture_overrate::OVERRATE_MIN_HEAL_INTERVAL_S;
 
     // #717 RED marker: `should_trigger_selfheal` is NOT YET IMPLEMENTED — these tests reference
     // it already (RED commit: proves via compile failure the two-band OR combinator does not
@@ -1254,6 +1317,192 @@ mod tests {
             reset_calls, 0,
             "a Throttled decision must never fire a USB reset"
         );
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    // #1201 — the shared cooldown-floor predicate's tests, moved here from the two per-module
+    // copies. Each test iterates over BOTH per-trigger floor consts so the weak value-lock the
+    // per-module copies carried (each floor stays >= ~30 min) is preserved.
+    const TRIGGER_COOLDOWN_FLOORS: [u64; 2] =
+        [OVERRATE_MIN_HEAL_INTERVAL_S, HALVING_MIN_HEAL_INTERVAL_S];
+
+    #[test]
+    fn cooldown_never_healed_permits_the_attempt() {
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            assert!(cooldown_elapsed(None, 10_000, floor));
+        }
+    }
+
+    #[test]
+    fn cooldown_blocks_within_the_interval_and_permits_after() {
+        let last = 100_000u64;
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            // 29 min later: still within the 30-min floor -> blocked.
+            assert!(!cooldown_elapsed(Some(last), last + 29 * 60, floor));
+            // exactly the floor later: permitted.
+            assert!(cooldown_elapsed(Some(last), last + floor, floor));
+            // well after: permitted.
+            assert!(cooldown_elapsed(Some(last), last + 2 * 60 * 60, floor));
+        }
+    }
+
+    #[test]
+    fn cooldown_is_monotonic_safe_against_a_backward_clock() {
+        // A backward clock step (now < last) must never underflow into a huge "elapsed" and
+        // wrongly permit an attempt — saturating_sub floors it at 0 -> blocked.
+        let last = 100_000u64;
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            assert!(!cooldown_elapsed(Some(last), last - 5, floor));
+        }
+    }
+
+    // #1201 — the shared floored outer wrapper: env-gate -> pending-is-none -> cooldown floor ->
+    // attempt_self_heal, exercised with the same fake-reset + temp-state-file pattern as the
+    // attempt_self_heal tests above.
+
+    /// Real "now" for the floored-wrapper tests (the wrapper reads the clock itself, so seeded
+    /// state must be positioned relative to the actual epoch).
+    fn real_now_epoch_s() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_disabled_returns_none_and_never_resets() {
+        let sp = selfheal_temp_state_path("floored-disabled");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let mut reset_calls = 0u32;
+        let code = attempt_floored_self_heal(
+            false,
+            true,
+            OVERRATE_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &OVER_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None);
+        assert_eq!(reset_calls, 0, "the env-gate must block before any reset");
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_pending_exit_blocks_even_when_enabled() {
+        let sp = selfheal_temp_state_path("floored-pending");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let mut reset_calls = 0u32;
+        let code = attempt_floored_self_heal(
+            true,
+            false,
+            HALVING_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &LATCH_HALVING_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None);
+        assert_eq!(
+            reset_calls, 0,
+            "a pending self-heal exit must block a second reset in the same window"
+        );
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_floor_blocks_before_the_shared_throttle_is_consulted() {
+        // Seed the last heal 700 s ago: BEYOND the 600-s shared DEFAULT_MIN_HEAL_INTERVAL_S
+        // throttle (the inner attempt_self_heal would decide Heal and fire the reset) but INSIDE
+        // the 1800-s per-trigger floor — proving the FLOOR gate blocks on its own, before the
+        // inner helper is ever reached. The state file must stay untouched (no save_state ran).
+        let sp = selfheal_temp_state_path("floored-floor");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let seeded_last = real_now_epoch_s() - 700;
+        save_state(
+            &sp,
+            &SelfHealState {
+                last_heal_epoch_s: Some(seeded_last),
+                recurrence_heal_count: 1,
+            },
+        )
+        .expect("seed state");
+        let mut reset_calls = 0u32;
+        let code = attempt_floored_self_heal(
+            true,
+            true,
+            OVERRATE_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &OVER_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None);
+        assert_eq!(
+            reset_calls, 0,
+            "the per-trigger floor must block before the shared throttle is even consulted"
+        );
+        assert_eq!(
+            load_state(&sp).last_heal_epoch_s,
+            Some(seeded_last),
+            "a floor-blocked attempt must never rewrite the shared state file"
+        );
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_permits_and_returns_77_on_success() {
+        // No state file (never healed this boot): the floor permits, the inner helper decides
+        // Heal, the injected reset fires exactly once, and the pending exit code is 77.
+        let sp = selfheal_temp_state_path("floored-ok");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let mut reset_calls = 0u32;
+        let code = attempt_floored_self_heal(
+            true,
+            true,
+            HALVING_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &LATCH_HALVING_SELF_HEAL_MESSAGES,
+            |p: &str| {
+                reset_calls += 1;
+                assert_eq!(p, "/dev/video0");
+                Ok(())
+            },
+        );
+        assert_eq!(code, Some(SELF_HEAL_EXIT_CODE));
+        assert_eq!(reset_calls, 1);
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_reset_failure_returns_the_reset_failed_exit_code() {
+        let sp = selfheal_temp_state_path("floored-err");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let code = attempt_floored_self_heal(
+            true,
+            true,
+            OVERRATE_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &OVER_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| Err(anyhow::anyhow!("simulated reset failure")),
+        );
+        assert_eq!(code, Some(SELF_HEAL_RESET_FAILED_EXIT_CODE));
         std::fs::remove_dir_all(sp.parent().unwrap()).ok();
     }
 }
