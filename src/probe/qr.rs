@@ -327,6 +327,47 @@ pub fn blit_motion_sweep_bgra(canvas: &mut [u8], canvas_w: u32, canvas_h: u32, f
     fill_rect_bgra(canvas, canvas_w, &ball, 0, 255, 255);
 }
 
+/// issue 1196 — blit the aux Vernier tick pair (two small EC-H QRs) into the bottom burn-free
+/// gaps, per the pure [`crate::aux_tick::aux_tick_rects`] layout (derived from the SAME
+/// `qr_size`/`top_margin` the dual-QR was rendered with, so the painter and the Tier-0 geometry
+/// proofs agree). The caller passes payloads built from `vernier_ids` — LEFT carries the latest
+/// EVEN tick, RIGHT the latest ODD tick — under `recording_latency::AUX_TICK_RUN_ID` with
+/// `gen_ts_ns = 0` (constant, so a settled aux mark's rendered pixels are byte-identical across
+/// ticks by construction — the #854 anti-blur property with zero extra state). No-op when the
+/// layout cannot fit (`aux_tick_rects` returns `None`, e.g. the 2560-wide override canvas whose
+/// width-scaled primary leaves no bottom strip). Each mark is clamped to its proven rectangle so
+/// the blit can never reach outside it; every write is bounds-checked (never panics).
+pub fn blit_aux_tick_bgra(
+    canvas: &mut [u8],
+    canvas_w: u32,
+    canvas_h: u32,
+    qr_size: u32,
+    top_margin: u32,
+    left: &Payload,
+    right: &Payload,
+) {
+    let Some(rects) = crate::aux_tick::aux_tick_rects(canvas_w, canvas_h, qr_size, top_margin)
+    else {
+        return;
+    };
+    for (rect, payload) in rects.iter().zip([left, right]) {
+        let qr = render_payload_qr(payload, rect.w.min(rect.h));
+        let (qw, qh) = (qr.width().min(rect.w), qr.height().min(rect.h));
+        for y in 0..qh {
+            for x in 0..qw {
+                let lum = qr.get_pixel(x, y)[0];
+                let ci = (((rect.y + y) * canvas_w + (rect.x + x)) * 4) as usize;
+                if ci + 3 < canvas.len() {
+                    canvas[ci] = lum;
+                    canvas[ci + 1] = lum;
+                    canvas[ci + 2] = lum;
+                    canvas[ci + 3] = 255;
+                }
+            }
+        }
+    }
+}
+
 /// Decode the first QR found in a grayscale image into a Payload, or None.
 pub fn decode_qr_luma(img: GrayImage) -> Option<Payload> {
     let mut prepared = rqrr::PreparedImage::prepare(img);
