@@ -306,9 +306,10 @@ pub mod grabber_stuck;
 // #1193 — cam2 ShadowCast SUSTAINED-OVER-RATE detector: the 3rd self-heal trigger. Keys on the
 // COMBINED signature over-rate (cap-1s buckets) AND dupe-victim shed churn, both sustained — the
 // churn band is the discriminator (a benign over-rate wobble sheds 0, absorbed by the decimation
-// gate) exactly as #1128's corrupted band is. Pure decision + report-line formatting + the cooldown
-// predicate, no probe deps — Tier-0 tested; funnels into the shared capture_rate_selfheal USB-reset
-// path (gated off by CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL) via a new SelfHealMessages const.
+// gate) exactly as #1128's corrupted band is. Pure decision + report-line formatting (the cooldown
+// predicate moved to capture_rate_selfheal in #1201), no probe deps — Tier-0 tested; funnels into
+// the shared capture_rate_selfheal USB-reset path (gated off by
+// CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL) via a new SelfHealMessages const.
 pub mod capture_overrate;
 
 // #1200 — cam3 ShadowCast LATCH-HALVING detector: the 4th self-heal trigger. Keys on the
@@ -316,8 +317,9 @@ pub mod capture_overrate;
 // is ~0.5 (each unique 2x), latch-halved is ~0.75 (each unique 4x, 15 unique/s in 60fps) — bands
 // non-overlapping with a dead-zone, the discriminator role #1128's corrupted band / #1193's shed
 // churn play. Blind spot the other three miss: correct 60fps pace, 0 over-rate, 0 corrupted. Pure
-// decision + report-line formatting + the cooldown predicate, no probe deps — Tier-0 tested; funnels
-// into the shared capture_rate_selfheal USB-reset path (gated off by CAMERA_BOX_GRABBER_HALVING_SELFHEAL).
+// decision + report-line formatting (the cooldown predicate moved to capture_rate_selfheal in
+// #1201), no probe deps — Tier-0 tested; funnels into the shared capture_rate_selfheal USB-reset
+// path (gated off by CAMERA_BOX_GRABBER_HALVING_SELFHEAL).
 pub mod capture_latch_halving;
 
 // #625 — order-independent REAL-DROP ("gap") detection for the all-cambox painted-tick window
