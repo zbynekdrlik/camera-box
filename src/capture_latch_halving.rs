@@ -35,14 +35,26 @@
 //! - LATCH-HALVED cam3 sick: each unique frame captured 4× (15 unique/s in 60 fps) → dupe fraction
 //!   ~0.75.
 //!
-//! A window is HALVED when the dupe fraction is at/above [`HALVED_DUPE_FRACTION_MIN`] (0.70) AND the
-//! window has at least [`HALVING_MIN_CAPTURES_PER_WINDOW`] captures (a cold-start / stalled-capture
-//! guard), held for [`HALVING_CONFIRM_WINDOWS`] consecutive report windows. The bands are
-//! deliberately NON-OVERLAPPING with a dead-zone — `healthy <= `[`HEALTHY_DUPE_FRACTION_MAX`]` (0.55)`
-//! and `halved >= 0.70` — exactly the discriminator role the #1128 corrupted band and the #1193
-//! shed-churn band play, so a healthy card's ordinary ~0.5 dupe fraction can NEVER confirm (the
-//! whole reason the #909/#914 reset-spam class is not re-introduced). The dead-zone is enforced at
-//! compile time by a `const _: () = assert!(...)` next to the constants.
+//! A window is HALVED when the dupe fraction is in the CLOSED band from
+//! [`HALVED_DUPE_FRACTION_MIN`] (0.70) to [`HALVED_DUPE_FRACTION_MAX`] (0.90), AND the window has
+//! at least [`HALVING_MIN_CAPTURES_PER_WINDOW`] captures (a cold-start / stalled-capture guard),
+//! held for [`HALVING_CONFIRM_WINDOWS`] consecutive report windows. The floor separates it from the
+//! HEALTHY band (`<= `[`HEALTHY_DUPE_FRACTION_MAX`]` (0.55)`, a dead-zone between); the CEILING
+//! excludes a FROZEN / no-signal source (fraction ~1.0 — a powered-off camera behind the splitter or
+//! a wedged HDMI feed), which is a DIFFERENT failure (frozen_leg / capture_wedge, #945). These are
+//! exactly the discriminator roles the #1128 corrupted band and the #1193 shed-churn band play, so
+//! neither a healthy card's ~0.5 fraction NOR a frozen source's ~1.0 can confirm (the whole reason
+//! the #909/#914 reset-spam class is not re-introduced). Both bounds are enforced at compile time by
+//! `const _: () = assert!(...)` next to the constants.
+//!
+//! **Scope limits (both are why the reset ships default-OFF):**
+//! - GENLOCK-PACED CAPTURE ONLY: the dupe fraction is counted in `src/main.rs` only where the
+//!   decimation path computes `content_hash` (inside `if out_interval_ns > 0`), so on an unpaced box
+//!   the tracker is never fed and stays `Healthy`. Correct on the rig (every camera-box is paced).
+//! - The bands assume a 30 fps camera captured at 60 fps (healthy 0.5 / halved 0.75). A native-60p
+//!   camera halved reads 0.5 (invisible) and a native-15 fps camera mode reads 0.75 (indistinguishable
+//!   from the defect); the band is not yet per-`GrabberModel`/camera-fps. Detection-only default is
+//!   safe; a LIVE reset gate would need a per-model band first.
 //!
 //! ## Tier-0 pure
 //!
@@ -75,6 +87,20 @@ pub const HEALTHY_DUPE_FRACTION_MAX: f64 = 0.55;
 // `const _: () = assert!(...)` pattern — stronger than a runtime test and clippy-clean). If a
 // future tune ever crosses the two bands, the BUILD fails here.
 const _: () = assert!(HEALTHY_DUPE_FRACTION_MAX < HALVED_DUPE_FRACTION_MIN);
+
+/// The halved-band CEILING — a frozen / no-signal-source EXCLUSION. A powered-off camera behind the
+/// HDMI splitter (a static no-signal pattern) or any wedged HDMI feed delivers byte-identical
+/// consecutive frames → a dupe fraction near 1.0. That is a DIFFERENT failure (frozen_leg /
+/// capture_wedge, #945), NOT latch-halving, so the halved band is a CLOSED interval
+/// `[HALVED_DUPE_FRACTION_MIN, HALVED_DUPE_FRACTION_MAX]` — exactly the false-positive-exclusion role
+/// the #1128 corrupted band and #1193 shed-churn band play. `0.90` keeps the real latch-halving
+/// ratios in (4×→0.75, 5×→0.80, 6×→0.833) while excluding a frozen source (≥~0.99). Fixed sanity
+/// ceiling, not a per-deployment tunable.
+pub const HALVED_DUPE_FRACTION_MAX: f64 = 0.90;
+
+// The halved band must itself be a non-empty interval (floor strictly below ceiling), locked at
+// COMPILE time like the healthy/halved non-overlap above.
+const _: () = assert!(HALVED_DUPE_FRACTION_MIN < HALVED_DUPE_FRACTION_MAX);
 
 /// Minimum captured frames a window must contain before its dupe fraction is judged — a cold-start /
 /// stalled-capture guard so a window with only a handful of captures (a genuine capture stall,
@@ -124,6 +150,7 @@ pub enum CaptureLatchHalvingVerdict {
 pub struct CaptureLatchHalvingTracker {
     confirm_windows: u32,
     halved_fraction_min: f64,
+    halved_fraction_max: f64,
     min_captures: u64,
     halved_run: u32,
 }
@@ -136,11 +163,12 @@ impl Default for CaptureLatchHalvingTracker {
 
 impl CaptureLatchHalvingTracker {
     /// A tracker with the production thresholds ([`HALVING_CONFIRM_WINDOWS`],
-    /// [`HALVED_DUPE_FRACTION_MIN`], [`HALVING_MIN_CAPTURES_PER_WINDOW`]).
+    /// [`HALVED_DUPE_FRACTION_MIN`], [`HALVED_DUPE_FRACTION_MAX`], [`HALVING_MIN_CAPTURES_PER_WINDOW`]).
     pub fn new() -> Self {
         Self::with_thresholds(
             HALVING_CONFIRM_WINDOWS,
             HALVED_DUPE_FRACTION_MIN,
+            HALVED_DUPE_FRACTION_MAX,
             HALVING_MIN_CAPTURES_PER_WINDOW,
         )
     }
@@ -150,11 +178,13 @@ impl CaptureLatchHalvingTracker {
     pub fn with_thresholds(
         confirm_windows: u32,
         halved_fraction_min: f64,
+        halved_fraction_max: f64,
         min_captures: u64,
     ) -> Self {
         Self {
             confirm_windows: confirm_windows.max(1),
             halved_fraction_min,
+            halved_fraction_max,
             min_captures: min_captures.max(1),
             halved_run: 0,
         }
@@ -166,15 +196,23 @@ impl CaptureLatchHalvingTracker {
     ///
     /// The halved run is CONTINUOUS — a single non-halved window resets it. A window is halved when
     /// it has at least `min_captures` captures (cold-start / stalled-capture guard) AND its dupe
-    /// fraction is `>= halved_fraction_min`. The min-captures guard also makes the division safe
+    /// fraction is in the CLOSED band `[halved_fraction_min, halved_fraction_max]` — the upper bound
+    /// excludes a frozen / no-signal source (~1.0), which is a different failure (frozen_leg /
+    /// capture_wedge). The min-captures guard also makes the division safe
     /// (`total_captures >= min_captures >= 1`).
     pub fn observe(
         &mut self,
         dupe_captures: u64,
         total_captures: u64,
     ) -> CaptureLatchHalvingVerdict {
+        let frac = if total_captures >= self.min_captures {
+            dupe_captures as f64 / total_captures as f64
+        } else {
+            0.0
+        };
         let halved_window = total_captures >= self.min_captures
-            && (dupe_captures as f64 / total_captures as f64) >= self.halved_fraction_min;
+            && frac >= self.halved_fraction_min
+            && frac <= self.halved_fraction_max;
         if halved_window {
             self.halved_run = self.halved_run.saturating_add(1);
         } else {
@@ -182,8 +220,10 @@ impl CaptureLatchHalvingTracker {
         }
 
         if self.halved_run >= self.confirm_windows {
+            // Reached only when this window was halved (a non-halved window zeroes halved_run and
+            // confirm_windows >= 1), so `frac` is the real fraction here.
             return CaptureLatchHalvingVerdict::Halved {
-                dupe_fraction: dupe_captures as f64 / total_captures as f64,
+                dupe_fraction: frac,
                 dupe_captures,
                 total_captures,
                 windows: self.halved_run,
@@ -371,7 +411,12 @@ mod tests {
     fn a_single_healthy_window_breaks_the_streak() {
         // The halved run must be CONTINUOUS: one healthy window resets it, so a subsequent sick spell
         // re-accumulates from scratch.
-        let mut t = CaptureLatchHalvingTracker::with_thresholds(3, HALVED_DUPE_FRACTION_MIN, 150);
+        let mut t = CaptureLatchHalvingTracker::with_thresholds(
+            3,
+            HALVED_DUPE_FRACTION_MIN,
+            HALVED_DUPE_FRACTION_MAX,
+            150,
+        );
         for _ in 0..2 {
             assert!(!is_halved(t.observe(225, 300)));
         }
@@ -392,7 +437,12 @@ mod tests {
     fn recovery_after_halved_is_not_latched() {
         // After a Halved spell, a return to the healthy fraction clears the verdict — no latch (the
         // caller / systemd restart owns the action, not a sticky flag here).
-        let mut t = CaptureLatchHalvingTracker::with_thresholds(3, HALVED_DUPE_FRACTION_MIN, 150);
+        let mut t = CaptureLatchHalvingTracker::with_thresholds(
+            3,
+            HALVED_DUPE_FRACTION_MIN,
+            HALVED_DUPE_FRACTION_MAX,
+            150,
+        );
         assert!(is_halved(drive(&mut t, 225, 300, 3)));
         assert_eq!(t.observe(150, 300), CaptureLatchHalvingVerdict::Healthy);
     }
@@ -400,13 +450,23 @@ mod tests {
     #[test]
     fn with_thresholds_floors_a_degenerate_zero_confirm_window_to_one() {
         // confirm_windows(0) must not make an empty run "confirmed" — floored to 1.
-        let mut t = CaptureLatchHalvingTracker::with_thresholds(0, HALVED_DUPE_FRACTION_MIN, 150);
+        let mut t = CaptureLatchHalvingTracker::with_thresholds(
+            0,
+            HALVED_DUPE_FRACTION_MIN,
+            HALVED_DUPE_FRACTION_MAX,
+            150,
+        );
         assert!(is_halved(t.observe(225, 300)));
     }
 
     #[test]
     fn watching_reports_the_building_run_length() {
-        let mut t = CaptureLatchHalvingTracker::with_thresholds(5, HALVED_DUPE_FRACTION_MIN, 150);
+        let mut t = CaptureLatchHalvingTracker::with_thresholds(
+            5,
+            HALVED_DUPE_FRACTION_MIN,
+            HALVED_DUPE_FRACTION_MAX,
+            150,
+        );
         assert_eq!(
             t.observe(225, 300),
             CaptureLatchHalvingVerdict::Watching { halved_windows: 1 }
@@ -492,8 +552,36 @@ mod tests {
     }
 
     #[test]
-    fn bands_stay_non_overlapping() {
-        // The compile-time invariant, mirrored as a runtime sanity check for readers.
-        assert!(HEALTHY_DUPE_FRACTION_MAX < HALVED_DUPE_FRACTION_MIN);
+    fn a_static_source_at_1_0_never_halved() {
+        // A frozen / no-signal source (every frame byte-identical → fraction 1.0) is a DIFFERENT
+        // failure (frozen_leg / capture_wedge), NOT latch-halving. The halved band's ceiling must
+        // exclude it, no matter how long it holds.
+        let mut t = CaptureLatchHalvingTracker::new();
+        for _ in 0..(HALVING_CONFIRM_WINDOWS + 10) {
+            let v = t.observe(300, 300); // 300/300 = 1.0 > HALVED_DUPE_FRACTION_MAX
+            assert!(
+                !is_halved(v),
+                "a frozen source at fraction 1.0 must not be Halved: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fraction_exactly_at_the_ceiling_confirms() {
+        // Exactly HALVED_DUPE_FRACTION_MAX (0.90 = 270/300) is inclusive — it confirms.
+        let mut t = CaptureLatchHalvingTracker::new();
+        let v = drive(&mut t, 270, 300, HALVING_CONFIRM_WINDOWS);
+        assert!(is_halved(v), "the ceiling is inclusive: {v:?}");
+    }
+
+    #[test]
+    fn a_fraction_just_above_the_ceiling_never_halved() {
+        // 0.94 (282/300) is above the ceiling — a near-frozen source, not latch-halving.
+        let mut t = CaptureLatchHalvingTracker::new();
+        let v = drive(&mut t, 282, 300, HALVING_CONFIRM_WINDOWS + 10);
+        assert!(
+            !is_halved(v),
+            "above-ceiling fraction must not be Halved: {v:?}"
+        );
     }
 }

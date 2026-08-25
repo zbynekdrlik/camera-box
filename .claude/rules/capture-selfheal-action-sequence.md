@@ -34,15 +34,16 @@ Every trigger keys on a distinct signature so no two fire on the same defect and
 | #1193 sustained OVER-RATE | over-rate (majority of `cap-1s` buckets `>= 61`) | AND dupe-victim shed churn (`>= 3`/window) | cam2 |
 | #1200 LATCH-HALVING | **exactly on rate (60 fps, correct pace)** | **byte-identical dupe FRACTION `>= 0.70`** | cam3 |
 
-The #1200 dupe-fraction band vs the HEALTHY baseline (a 30fps camera captured at 60fps):
+The #1200 dupe-fraction band vs the HEALTHY baseline (a 30fps camera captured at 60fps). The halved band is a CLOSED interval — a floor (excludes healthy) AND a ceiling (excludes a frozen source):
 
 | State | copies per unique frame | dupe fraction | verdict |
 |---|---|---|---|
 | healthy 30fps-into-60fps | 2× | ~0.50 (`<= HEALTHY_DUPE_FRACTION_MAX` = 0.55) | Healthy |
 | dead-zone | — | 0.55–0.70 | never acts |
-| latch-halved (cam3 sick) | 4× (15 unique/s in 60fps) | ~0.75 (`>= HALVED_DUPE_FRACTION_MIN` = 0.70) | Halved |
+| latch-halved (cam3 sick) | 4× (15 unique/s in 60fps) | ~0.75 (in `[HALVED_DUPE_FRACTION_MIN 0.70, HALVED_DUPE_FRACTION_MAX 0.90]`) | Halved |
+| frozen / no-signal source | ∞ (all frames identical) | ~1.0 (`> HALVED_DUPE_FRACTION_MAX` = 0.90) | never acts (that is frozen_leg / capture_wedge #945, a DIFFERENT failure) |
 
-The two bands are NON-OVERLAPPING with a deliberate dead-zone (`const _: () = assert!(HEALTHY_DUPE_FRACTION_MAX < HALVED_DUPE_FRACTION_MIN)` locks it at compile time), so a healthy card's ordinary ~0.5 fraction can NEVER confirm — the same anti-reset-spam invariant #1128's corrupted band and #1193's shed churn provide. **Note the dupe fraction here is measured on the CAPTURE side (raw `content_hash` compares, before decimation), NOT the recording-verdict delta histogram — the verdict's downstream `dup_fraction ~0.5` reads a different point in the pipeline.**
+All three bounds are NON-OVERLAPPING and compile-locked (`const _: () = assert!(HEALTHY_DUPE_FRACTION_MAX < HALVED_DUPE_FRACTION_MIN)` and `assert!(HALVED_DUPE_FRACTION_MIN < HALVED_DUPE_FRACTION_MAX)`), so neither a healthy card's ~0.5 NOR a frozen source's ~1.0 can confirm — the same anti-reset-spam invariant #1128's corrupted band and #1193's shed churn provide. **Two scope limits (both reasons the reset ships default-OFF):** (1) the dupe fraction is measured on the CAPTURE side (raw `content_hash` compares, before decimation), NOT the recording-verdict delta histogram — the verdict's downstream `dup_fraction ~0.5` reads a different point in the pipeline; (2) the counting lives inside `main.rs`'s `if out_interval_ns > 0` block (GENLOCK-PACED capture only — an unpaced box never feeds the tracker), and the band assumes a 30fps-camera-into-60fps-capture geometry (a native-60p camera halved reads 0.5 and is invisible; a native-15fps mode reads 0.75 and is indistinguishable) — a LIVE reset gate would need a per-`GrabberModel`/camera-fps band first.
 
 **Attribution/watchdog scope (#1193/#1200, mirrors #1128):** the over-rate AND latch-halving reset lines carry distinct tags (`#1193 over-rate self-heal` / `#1200 latch-halving self-heal`), so — like the #1128 reset — neither is matched by `self_heal_reset_grep_pattern` (`#663 self-heal:`) or `capture_rate_defect_grep_pattern_hard`. Threading each into the dev1 self-heal-attribution table (`restart_event_kind_patterns`) + a per-trigger dev1 alert watchdog (the #1128 pattern) is a FOLLOW-UP for when the respective canary graduates — not shipped here, since both resets are default-OFF and both `frozen_leg`/`self_heal_reset` are already report-only (#914), so the attribution gap is cosmetic while the canaries are armed.
 
