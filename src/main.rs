@@ -1827,7 +1827,7 @@ async fn run_capture_loop(
                                         ),
                                     )
                                     .last_heal_epoch_s;
-                                if camera_box::capture_overrate::cooldown_elapsed(
+                                if camera_box::capture_rate_selfheal::cooldown_elapsed(
                                     last_heal_epoch_s,
                                     now_epoch_s,
                                     camera_box::capture_overrate::OVERRATE_MIN_HEAL_INTERVAL_S,
@@ -1897,7 +1897,7 @@ async fn run_capture_loop(
                                         ),
                                     )
                                     .last_heal_epoch_s;
-                                if camera_box::capture_latch_halving::cooldown_elapsed(
+                                if camera_box::capture_rate_selfheal::cooldown_elapsed(
                                     last_heal_epoch_s,
                                     now_epoch_s,
                                     camera_box::capture_latch_halving::HALVING_MIN_HEAL_INTERVAL_S,

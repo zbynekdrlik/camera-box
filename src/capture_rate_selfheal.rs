@@ -572,6 +572,27 @@ pub fn reset_failed_message(
     )
 }
 
+/// #1201 — the ONE shared per-trigger cooldown-floor predicate (consolidated here from the two
+/// byte-identical per-module copies in `capture_overrate` / `capture_latch_halving`): has enough
+/// time passed since the last recorded self-heal (by ANY trigger) for a floored trigger to attempt
+/// another USB reset? `last_heal_epoch_s` is read from the SHARED self-heal state file
+/// ([`load_state`]`(...).last_heal_epoch_s`); `min_interval_s` is the calling trigger's OWN
+/// per-trigger cooldown floor (the #1193 `OVERRATE_MIN_HEAL_INTERVAL_S`, the #1200
+/// `HALVING_MIN_HEAL_INTERVAL_S` — both 30 min, deliberately stricter than the shared 10-min
+/// [`DEFAULT_MIN_HEAL_INTERVAL_S`] throttle inside [`attempt_self_heal`], so the other triggers
+/// stay untouched). A missing value (never healed this boot) permits the attempt. Pure over
+/// `(last, now, interval)` so it is Tier-0 testable.
+pub fn cooldown_elapsed(
+    last_heal_epoch_s: Option<u64>,
+    now_epoch_s: u64,
+    min_interval_s: u64,
+) -> bool {
+    match last_heal_epoch_s {
+        Some(last) => now_epoch_s.saturating_sub(last) >= min_interval_s,
+        None => true,
+    }
+}
+
 /// #1149 — the ONE shared in-process USB self-heal action sequence, invoked by BOTH the
 /// #656/#663/#971 capture-rate trigger and the #1128 grabber-STUCK trigger in `src/main.rs`.
 ///
@@ -1255,5 +1276,43 @@ mod tests {
             "a Throttled decision must never fire a USB reset"
         );
         std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    // #1201 — the shared cooldown-floor predicate's tests, moved here from the two per-module
+    // copies. Each test iterates over BOTH per-trigger floor consts so the weak value-lock the
+    // per-module copies carried (each floor stays >= ~30 min) is preserved.
+    const TRIGGER_COOLDOWN_FLOORS: [u64; 2] = [
+        crate::capture_overrate::OVERRATE_MIN_HEAL_INTERVAL_S,
+        crate::capture_latch_halving::HALVING_MIN_HEAL_INTERVAL_S,
+    ];
+
+    #[test]
+    fn cooldown_never_healed_permits_the_attempt() {
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            assert!(cooldown_elapsed(None, 10_000, floor));
+        }
+    }
+
+    #[test]
+    fn cooldown_blocks_within_the_interval_and_permits_after() {
+        let last = 100_000u64;
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            // 29 min later: still within the 30-min floor -> blocked.
+            assert!(!cooldown_elapsed(Some(last), last + 29 * 60, floor));
+            // exactly the floor later: permitted.
+            assert!(cooldown_elapsed(Some(last), last + floor, floor));
+            // well after: permitted.
+            assert!(cooldown_elapsed(Some(last), last + 2 * 60 * 60, floor));
+        }
+    }
+
+    #[test]
+    fn cooldown_is_monotonic_safe_against_a_backward_clock() {
+        // A backward clock step (now < last) must never underflow into a huge "elapsed" and
+        // wrongly permit an attempt — saturating_sub floors it at 0 -> blocked.
+        let last = 100_000u64;
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            assert!(!cooldown_elapsed(Some(last), last - 5, floor));
+        }
     }
 }
