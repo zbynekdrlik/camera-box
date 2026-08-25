@@ -10497,3 +10497,57 @@ No push/PR/rig touch (worktree worker).
   refs/autopilot-wip/worktree-agent-a2e063ff8381262bd; supervisor integrates.
 - UNVERIFIED: probe-gated recording-verdict.rs wiring type-checks ONLY on CI (no local compile path);
   verified structurally via rustfmt + hand type-audit (serde_to_value serialization, no consumer edit).
+
+## 2026-08-25 — issue 1202 (E2E version-parity treadmill: auto-align the ACTIVE cam set to the run's candidate before the [0/8] camera-box version-parity gate) — worktree worktree-agent-a766a4813e755a2ef, base 9f011ff5b (dev)
+- Root cause: camera-box-version-gate.sh (#875/#1136) reads each active box's /usr/local/bin/camera-box
+  --version and pins it to origin/main, with a --candidate-pin accept that passes only when the whole
+  active fleet is uniformly on THIS run's candidate. During active dev, origin/main lags dev by dozens
+  of builds, so the candidate-pin accept is the ONLY passing path — but each dev commit bumps the
+  candidate, leaving the fleet one build behind. Live killed run 32883434208: pin dev.481, cam3 dev.550,
+  candidate dev.551 → PIN-DRIFT → REFUSED (run 32892551674, headSha 9f011ff5b = this base, same class).
+  recording-e2e.sh [2/8]/[2b/8] scp the candidate only to a transient /tmp burn path (never
+  /usr/local/bin/camera-box, what the gate reads) and run AFTER the gate → every run refused until a
+  manual deploy-fleet.
+- Fix (Approach 1 — pre-gate auto-align step, new source-only lib scripts/lib/camera-box-parity-align.sh,
+  #675 helper pattern): BEFORE the [0/8] gate, read each active box's version and, ONLY when the fleet
+  is uniformly on ONE build != candidate (every active box read), deploy the candidate to
+  /usr/local/bin/camera-box fleet-wide via deploy-fleet.sh, so the gate's EXISTING candidate-pin accept
+  then passes. The gate is UNTOUCHED (pure read-only checker); the align is best-effort (the gate is
+  the authority — a failed/partial align just leaves it to REFUSE). Skipped under --no-main-pin (soak).
+- Mixed-fleet protection preserved: only the ALIGN verdict deploys. cambox_align_action ->
+  NOCANDIDATE|UNKNOWN|MIXED|NOACTIVE|OK|ALIGN (UNKNOWN>MIXED; honours CAMBOX_OFFLINE_ACK). MIXED
+  (versions differ BETWEEN boxes) / UNKNOWN (any unread box) / NOACTIVE / already-OK → NO deploy; the
+  gate refuses/decides those exactly as before.
+- BINARY SOURCE (review 🔴 fix): the CLEAN camera-box-linux-amd64 CI artifact for the candidate,
+  downloaded from the newest successful ci.yml run on the candidate branch — it EXISTS at [0/8] (built
+  on the dev push) whereas $PROBE_BIN_DIR/camera-box is not built until [1/8] (AFTER the align), so the
+  first cut (reusing PROBE_BIN_DIR) would have shipped a stale build or none. Hard version GUARD: if the
+  newest published build != candidate (its own ci.yml not done yet), NOT deployed — never ship a stale
+  build to "align"; the gate refuses and self-heals once ci.yml publishes the candidate. Deploying the
+  CLEAN (not probe-featured) binary is also the architecturally-correct production binary.
+- Review (fresh-context /review + /requesting-code-review, gate CLOSED → Opus 4.8): 1 🔴 (stale/missing
+  candidate binary at [0/8], above) + 1 🟡 (acked boxes leaked into the deploy CAMERA_SET — deploy-fleet
+  does not consult CAMBOX_OFFLINE_ACK; now excluded from `names`) + 3 🔵 (real-deploy-path tests added;
+  set -f word-split guard; deliberate-parser-copy note). ALL fixed same-branch in 939f2f6f4. Verified
+  clean by the review: decision matrix, set -euo pipefail safety (no #1133 abort), gate untouched,
+  pin-mode-only skip, source-only-lib convention, anchor safety, Rust test type-correctness.
+- Design comment: issuecomment-5416319450 (root cause + 3 approaches + Architektúra); STEP-0 validation:
+  issuecomment-5416315865; review pass: issuecomment-5416710511.
+- Anchor safety (recording-e2e.sh minefield): source line + ONE call line inserted; NO anchored line
+  edited; NO camera-box-version-gate.sh literal added (stays count-2, both pre-existing — the [0/8] call
+  + the report-only mode); the [banner..gate] region slice (harness_cam2_camera_under_test_gating_1170)
+  + paths.rs .find/ordering anchors re-verified; occurrence sweep OLD vs NEW = no real anchor change
+  (only the false-positive /usr/local/bin fragment, whose anchor test reads imag-obs-start.sh).
+- Tier-0 verify (zero cargo — #557): bash -n + shellcheck -S warning clean; 25 bash assertions GREEN
+  (decision 11/11, orchestrator 9/9, real-deploy-path 5/5, via the fixture + deploy seams, no gh/ssh);
+  cargo fmt --all --check clean (parses probe-gated + the new test). CI is the first Rust type-check+run.
+- Commits: bump fd9bead6b → [red] 3295be40f → [green] d1a927b2c → [review] 939f2f6f4 → [docs] this entry.
+  Worktree branch worktree-agent-a766a4813e755a2ef; durability backup
+  refs/autopilot-wip/worktree-agent-a766a4813e755a2ef; supervisor integrates (worktree mode — stops at a
+  green LOCAL result, no push/PR/merge/deploy from this lane).
+- UNVERIFIED: the LIVE deploy path (gh run download of camera-box-linux-amd64 → deploy-fleet.sh --binary
+  scp to /usr/local/bin/camera-box + camera-box.service restart + genlock-emit verify) runs only on the
+  real rig during a future E2E — no ssh/scp/MCP/gh-download-to-rig from this lane; the align's decision,
+  version guard, acked exclusion, and wiring are Tier-0 verified. The end-to-end "gate passes on a fresh
+  stale-fleet PR run" (the reviewer's requested fresh-commit verification) is the supervisor's/next
+  E2E's rig step.
