@@ -144,14 +144,13 @@ pub fn frame_union_spread(primary_ids: &[u32], aux_ids: &[u32]) -> Option<u32> {
 /// have no QR centre/bbox), so this count is the only cluster signal available; the true geometric
 /// per-cluster grouping is the named follow-up (see the module doc). `0` for an undecodable frame.
 pub fn frame_cluster_count(primary_ids: &[u32]) -> u32 {
-    // ceil(len / 2) without needing `u32::div_ceil` (edition/toolchain-agnostic).
-    (primary_ids.len() as u32 + 1) / 2
+    (primary_ids.len() as u32).div_ceil(2)
 }
 
 /// issue 1196 (v2.1) — a frame is MULTI-PATH SUSPECT when EITHER band carries more optical QRs than
 /// ONE tile can produce (>= 3 ids => [`frame_cluster_count`] >= 2). One tile's dual-QR yields at
 /// most 2 primary QRs (left even + right odd) AND one tile's aux pair yields at most 2 aux QRs, so
-/// >= 3 in either band means the frame was composited from >= 2 capture paths of the SAME painted
+/// at least 3 in either band means the frame was composited from >= 2 capture paths of the SAME painted
 /// monitor. Its union span then measures inter-path temporal SKEW, not a scanout tear — and without
 /// pixel positions the ids cannot be attributed to a tile, so the frame is UNSCORABLE for tear
 /// (excluded from the tear count, surfaced via [`TearStats::multi_path_suspect_fraction`]). The aux
@@ -164,7 +163,7 @@ pub fn is_multi_path_suspect(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
 /// A captured frame is TORN when it is SINGLE-SOURCE (NOT [`is_multi_path_suspect`] — one tile's
 /// worth of dual-QR in each band) AND the UNION of its primary dual-QR and aux tick-pair `frame_id`s
 /// spans more than the by-design even/odd adjacency ([`VERNIER_MAX_SPREAD`]) — i.e. one tile captured
-/// >= 2 distinct paint generations (issue 781 within one band; issue 1196 across the primary/aux
+/// at least 2 distinct paint generations (issue 781 within one band; issue 1196 across the primary/aux
 /// bands). A multi-source (multi-tile) frame is NEVER torn: its wide span is inter-path skew, not a
 /// tear (issue 1196 v2.1) — scoping it requires per-cluster pixel positions the payloads do not carry.
 pub fn is_torn_frame(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
@@ -177,7 +176,7 @@ pub fn is_torn_frame(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TearSignalViability {
-    /// >= 1 torn frame observed: the signal provably CAN fire on this content/run.
+    /// at least 1 torn frame observed: the signal provably CAN fire on this content/run.
     Observed,
     /// No torn frame observed: cannot distinguish "no tears" from "signal blind on this content"
     /// (the single-vertical-band dual-QR layout, issue 781; or a multi-tile window where every
@@ -236,7 +235,7 @@ pub struct TearStats {
     pub multi_path_suspect_fraction: f64,
     /// issue 1196 (v2.1) — the largest inferred cluster (tile) count over the window's frames
     /// (`ceil(count / 2)`, taken over whichever band shows more QRs). 1 on single-tile content;
-    /// >= 2 whenever any frame carried a multi-tile composite; 0 on an empty / all-undecodable
+    /// at least 2 whenever any frame carried a multi-tile composite; 0 on an empty / all-undecodable
     /// window. Report-only observability of how many capture paths the recording mixed.
     pub max_cluster_count: u32,
     /// issue 1196 (v2.1) — the largest primary∪aux union span among the MULTI-PATH-SUSPECT frames:
@@ -254,7 +253,7 @@ pub struct TearStats {
 /// `primary_ids` = the cam2-optical dual-QR Vernier `frame_id`s (node burns already excluded by
 /// the caller), `aux_ids` = the bottom aux tick pair's `frame_id`s (`AUX_TICK_RUN_ID` payloads,
 /// issue 1196). Undecodable bands are passed as empty slices. issue 1196 v2.1: a frame carrying
-/// >= 3 primary optical ids is MULTI-PATH SUSPECT (composited from >= 2 tiles) and is excluded
+/// at least 3 primary optical ids is MULTI-PATH SUSPECT (composited from >= 2 tiles) and is excluded
 /// from the tear count — only single-source frames are scored (see the module doc).
 pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
     let total_frames = per_frame_ids.len() as u32;
