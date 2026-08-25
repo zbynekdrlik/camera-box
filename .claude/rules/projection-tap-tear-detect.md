@@ -69,6 +69,51 @@ Approach 1 of the design synthesis on that ticket):
   did the small marks survive the lossy chain?) and `primary_dark_aux_alive_fraction` (primary
   empty ∧ both aux decoded — a seam INSIDE the 700px primary band vs a whole-frame blur).
 
+## v2.1 (issue 1196) — MULTI-TILE SAFE: only SINGLE-SOURCE frames are scored for tear
+
+The first real rig run after the aux-painter redeploy (E2E 1859005342, ticket comment 5415952812;
+durable evidence `~/.claude/work-products/1196-fixture/` — verdict JSON + real frames) exposed a
+false positive the plain-union v2 could not see, and killed aux as the cure ON CURRENT CONTENT:
+
+- **`aux_decode_fraction = 0.0` in ALL 10 windows** — the ~210px aux QRs are half-size inside a
+  composited tile and did NOT survive the camera+encode chain. So the aux-based cross-band cure is
+  currently INERT on the real rig; promotion precondition (1) is UNMET (escalate to Approach 2, the
+  full-height tick ladder, if a mined WITH-aux fixture confirms it stays undecodable).
+- **`tear_fraction ~0.99`, `max_spread 4` (one window 14) = MULTI-TILE SKEW, not a tear.** The
+  recorded program is MULTI-TILE — an ALL_CAMBOX composition carries TWO grabber-path tiles of the
+  SAME painted cam2 monitor (plus production scenes), so one recorded frame decodes the primary
+  dual-QR from BOTH paths offset ~2-4 ticks. `recording-verdict.rs`'s `tear_by_window` collects ALL
+  cam2 run_id payloads of a frame into `primary`, so v2's plain union span measured that inter-path
+  temporal skew.
+
+**The v2.1 fix (this sub-step), position-free by necessity:** partial schema v6 `Payload` carries
+only `run_id`/`frame_id`/`gen_ts_ns` — NO pixel positions — so the ids of a multi-tile frame cannot
+be attributed back to their tile MERGE-side. The physical fact used instead: **one tile's dual-QR
+band produces AT MOST 2 optical QRs** (left even + right odd; a tear through one band corrupts, it
+does not multiply — the same single-vertical-band structure that makes v1 blind). So a frame with
+**≥ 3** primary optical ids is composited from **≥ 2** tiles: `tear_detect::frame_cluster_count =
+ceil(count/2)`, `is_multi_path_suspect` = `≥ 2` clusters. `window_tear_stats` scores tear ONLY on
+SINGLE-SOURCE frames (≤ 2 primary ids) and EXCLUDES suspects, surfacing them via new report-only
+fields `multi_path_suspect_frames`/`_fraction`, `max_cluster_count`, `max_multi_path_spread`
+(`max_spread` now stays the clean single-tile tear magnitude). `is_torn_frame` gained the
+single-source guard, so a genuine single-cluster 2-generation frame (`{100,102}`, or a cross-band
+primary∪aux split) still fires. On the real 1859005342 window: `multi_path_suspect_fraction ~0.998`,
+`tear_frames 0`, `viability Unproven` — the honest "multi-tile, tear unscoreable here" verdict
+replacing v2's false 0.99. Real-data regression fixture:
+`tests/fixtures/tear-781/cam2_window_multitile_ids_1196.txt` (first 846 real frames of
+stream-partial-1859005342).
+
+**Honest limitation + the named follow-up:** without positions a genuine tear INSIDE a multi-source
+frame is not separable from inter-tile skew (`{100,101,102,103}` from a single-tile 2-gen tear is
+byte-identical to two tiles offset by 2), so such frames are conservatively suspect-not-torn; and a
+count-2 frame whose two ids come from two tiles' single surviving halves (8 of 9690 real frames)
+still reads single-source. The COMPLETE fix is **geometric per-cluster scoping** — carry the QR
+centre/bbox on each payload (partial schema bump + `src/probe/qr.rs` position capture + fleet
+redeploy), group decoded QRs by pixel position, compute the span WITHIN each tile. That is the
+named follow-up design on the ticket (Approach: "positions available end-to-end → per-cluster
+union"), deliberately OUT of this sub-step's scope. A `multi_path_suspect_fraction` ceiling is added
+to the promotion preconditions so a multi-tile window can never be promoted.
+
 **Promotion preconditions (ALL of them, in order — the LIVE flip stays out of scope until then):**
 
 1. **Real-captured-frame fixture WITH aux marks** — mined from the first rig run after the cam2
@@ -81,9 +126,13 @@ Approach 1 of the design synthesis on that ticket):
    issue-1196 design synthesis) instead of promoting.
 2. **A known-torn calibration run** (imag pre-1107 build or the projector-vsync env escape —
    needs owner agreement, asked at that step) making the signal `Observed`.
-3. **Calibrate `TEAR_FRACTION_CEILING` + an aux-coverage floor** from real green vs torn
-   distributions (`verdict-gate-seam-calibration.md`) — the coverage floor is what makes a silent
-   aux loss demote honestly instead of false-greening.
+3. **Calibrate `TEAR_FRACTION_CEILING` + an aux-coverage floor + a `multi_path_suspect_fraction`
+   ceiling** from real green vs torn distributions (`verdict-gate-seam-calibration.md`) — the
+   coverage floor makes a silent aux loss demote honestly instead of false-greening, and the
+   suspect ceiling (v2.1) is what keeps a MULTI-TILE window (nearly all frames suspect, tear
+   unscoreable) from ever being promoted. On the current multi-tile rig `multi_path_suspect_fraction
+   ~0.998`, so promotion is impossible until the recorded scene is single-tile OR the geometric
+   per-cluster follow-up (schema-carried positions) lands.
 4. Then the one-line `gates_overall_pass() → true` flip + the repo-wide re-arm grep
    (`ci-testing-gotchas.md`'s re-arm section).
 
@@ -103,10 +152,15 @@ Approach 1 of the design synthesis on that ticket):
   the tear windows align 1:1 with the strict `all_cambox_continuity.segments`. Do not re-derive a
   different window/optical definition.
 - **Tier-0:** the pure module RED→GREENs via `rustc --edition 2021 --test` with the `serde::Serialize`
-  derive stripped (the imag-leg-report-only rule's recipe); the real-frame fixture
-  (`tests/fixtures/tear-781/cam2_window_optical_ids.txt`, a real 847-frame CAM2 window) proves the
-  detector against real decode output (`pattern-change-needs-decode-fixture`). `recording-verdict.rs`
-  is probe-gated (CI-first) — verify the wiring with `cargo fmt --all --check` + a hand type-audit.
+  derive stripped (the imag-leg-report-only rule's recipe); TWO real-frame fixtures prove the
+  detector against real decode output (`pattern-change-needs-decode-fixture`) —
+  `tests/fixtures/tear-781/cam2_window_optical_ids.txt` (a real 847-frame single-band CAM2 window,
+  healthy → tear-free/Unproven) and `tests/fixtures/tear-781/cam2_window_multitile_ids_1196.txt`
+  (a real 846-frame MULTI-TILE window from stream-partial-1859005342 → 844 multi_path_suspect,
+  0 torn under v2.1, ~0.99 torn under v2 = the observed RED→GREEN). `recording-verdict.rs`
+  is probe-gated (CI-first) — verify the wiring with `cargo fmt --all --check` + a hand type-audit;
+  the new `TearStats` fields flow into `all_cambox_continuity.tear.windows[]` via `serde_to_value`
+  with no consumer change.
   **Multi-module replica assembly (issue 1196):** when the pure module under test depends on OTHER
   crate-root modules (`aux_tick` needs `colour_scale` + `motion_sweep` + `painter_mode`), assemble
   ONE standalone file that wraps each dependency's test-stripped source as `pub mod <name> { … }`

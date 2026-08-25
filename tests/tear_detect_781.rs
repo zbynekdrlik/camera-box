@@ -16,15 +16,13 @@
 
 use camera_box::tear_detect::{window_tear_stats, TearSignalViability};
 
-/// Parse the fixture: one line per in-window captured frame, space-separated optical `frame_id`s
+/// Parse a fixture file: one line per in-window captured frame, space-separated optical `frame_id`s
 /// (a blank line = an undecodable frame, no optical QR). `#`-prefixed lines are the provenance
 /// header. Returns one `(primary_ids, aux_ids)` per frame — aux always empty (pre-aux content).
-fn load_fixture() -> Vec<(Vec<u32>, Vec<u32>)> {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tear-781/cam2_window_optical_ids.txt"
-    );
-    let text = std::fs::read_to_string(path).expect("fixture readable");
+fn load_fixture_file(rel: &str) -> Vec<(Vec<u32>, Vec<u32>)> {
+    let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel);
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {path} readable: {e}"));
     text.lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .map(|l| {
@@ -36,6 +34,11 @@ fn load_fixture() -> Vec<(Vec<u32>, Vec<u32>)> {
             )
         })
         .collect()
+}
+
+/// The pre-aux SINGLE-BAND fixture (a real 847-frame CAM2 window, healthy single-tile content).
+fn load_fixture() -> Vec<(Vec<u32>, Vec<u32>)> {
+    load_fixture_file("tests/fixtures/tear-781/cam2_window_optical_ids.txt")
 }
 
 #[test]
@@ -72,24 +75,93 @@ fn real_cam2_window_is_tear_free_and_unproven() {
 
 #[test]
 fn a_synthetic_tear_spliced_into_the_real_window_is_detected() {
-    // Take the real window and splice ONE synthetic torn frame (two paint generations captured in
-    // one frame: even/odd of gen G plus even/odd of gen G+1). This proves the detector fires on a
-    // genuine tear even though the real content never produces one (the blindness is a property of
-    // the CONTENT, not the detector).
+    // Take the real window and splice ONE synthetic SINGLE-TILE torn frame: one tile's dual-QR
+    // captured gen G's even and gen G+2's even (2 ids, span 2 > VERNIER_MAX_SPREAD). This proves
+    // the detector fires on a genuine tear even though the real content never produces one (the
+    // blindness is a property of the CONTENT, not the detector). issue 1196 v2.1: the frame must
+    // stay SINGLE-SOURCE (<= 2 primary ids) — a 4-id splice would be multi-path-suspect (a single
+    // band cannot yield 4 clean generations), scored as inter-tile skew, not a tear.
     let mut frames = load_fixture();
     let base = frames
         .last()
         .and_then(|(p, _)| p.iter().max().copied())
         .unwrap_or(20_000);
-    frames.push((vec![base, base + 1, base + 2, base + 3], Vec::new())); // span 3 > VERNIER_MAX_SPREAD
+    frames.push((vec![base, base + 2], Vec::new())); // span 2 > VERNIER_MAX_SPREAD, one tile
 
     let stats = window_tear_stats(&frames);
     assert_eq!(stats.tear_frames, 1, "the spliced torn frame is detected");
     assert!(stats.max_spread >= 2);
     assert_eq!(
+        stats.multi_path_suspect_frames, 0,
+        "the real single-band window carries no multi-tile frames"
+    );
+    assert_eq!(
         stats.viability,
         TearSignalViability::Observed,
         "one real tear makes the signal Observed"
+    );
+}
+
+#[test]
+fn real_multitile_window_is_multi_path_skew_not_torn_1196() {
+    // The issue-1196 finding, proven against REAL data (E2E 1859005342, ticket comment 5415952812):
+    // the recorded program is MULTI-TILE — an ALL_CAMBOX composition carrying TWO grabber-path tiles
+    // of the SAME painted cam2 monitor, offset ~2-4 ticks of inter-path latency. So ~99.8% of frames
+    // decode 3-4 primary optical QRs whose union spans 2-4, which v2 mis-scored as ~99% torn
+    // (verdict-1859005342 all_cambox_continuity.tear: tear_fraction ~0.99, max_spread 4). v2.1's
+    // single-source-only scoping reads this correctly: nearly every frame is MULTI-PATH SUSPECT
+    // (>= 3 primary ids = >= 2 tiles), excluded from the tear count, so tear_frames == 0 and the
+    // signal is Unproven — the honest "multi-tile, tear unscoreable here" verdict.
+    let frames = load_fixture_file("tests/fixtures/tear-781/cam2_window_multitile_ids_1196.txt");
+    assert_eq!(
+        frames.len(),
+        846,
+        "fixture frame count (first 846 real frames)"
+    );
+
+    let stats = window_tear_stats(&frames);
+
+    assert_eq!(stats.total_frames, 846, "every attributed frame counted");
+    // 844 of 846 frames carry >= 3 primary optical ids = a multi-tile composite -> suspect.
+    assert_eq!(
+        stats.multi_path_suspect_frames, 844,
+        "the multi-tile frames are flagged suspect, not scored"
+    );
+    assert!(
+        (stats.multi_path_suspect_fraction - 844.0 / 846.0).abs() < 1e-9,
+        "~0.998 of the window is multi-tile (got {})",
+        stats.multi_path_suspect_fraction
+    );
+    // Only the 2 single-source frames (both healthy adjacent pairs, span 1) are scored.
+    assert_eq!(
+        stats.decodable_frames, 2,
+        "only single-source frames scored"
+    );
+    assert_eq!(
+        stats.tear_frames, 0,
+        "inter-path skew is NOT a tear (v2 read ~844)"
+    );
+    assert_eq!(stats.tear_fraction, 0.0);
+    assert_eq!(
+        stats.max_spread, 1,
+        "the 2 single-source frames are healthy adjacencies"
+    );
+    assert_eq!(
+        stats.max_cluster_count, 2,
+        "peak 2 composited tiles per frame"
+    );
+    assert_eq!(
+        stats.max_multi_path_spread, 3,
+        "peak inter-path skew surfaced separately from the (clean) tear magnitude"
+    );
+    assert_eq!(
+        stats.aux_decode_fraction, 0.0,
+        "aux QRs did not survive the lossy chain on this run"
+    );
+    assert_eq!(
+        stats.viability,
+        TearSignalViability::Unproven,
+        "a fully multi-tile window has no scoreable tear -> Unproven, never a false Observed"
     );
 }
 
