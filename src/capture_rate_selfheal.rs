@@ -699,7 +699,7 @@ pub fn attempt_floored_self_heal(
     msgs: &SelfHealMessages,
     reset: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> Option<i32> {
-    if !enabled || !pending_is_none {
+    if !(enabled && pending_is_none) {
         return None;
     }
     let now_epoch_s = std::time::SystemTime::now()
