@@ -20,7 +20,7 @@ _SCRIPTS = _ROOT / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-import ndi_halving_decision as d  # noqa: E402
+import ndi_halving_decision as d
 
 
 # The real DistroAV recv-timing line shape (vendor/distroav/src/ndi-source.cpp:1477 +
@@ -145,6 +145,46 @@ def test_measure_handles_midnight_wrap_in_the_date_less_log():
 
 
 # =================================================================================================
+# recency anchor -- a source that STOPPED emitting must not yield a stale verdict off old tail lines
+# =================================================================================================
+
+def test_newest_recv_timing_ts_is_the_max_across_all_sources():
+    text = "\n".join([
+        line("14:00:05.017", "NDI 2ME PGM", 75, 65.9),
+        line("14:00:40.017", "NDI cam1", 300, 16.3),   # a later, still-flowing sibling
+    ])
+    assert d.newest_recv_timing_ts(text) == d.ts_to_seconds("14:00:40.017")
+
+def test_newest_recv_timing_ts_none_on_empty():
+    assert d.newest_recv_timing_ts("") is None
+
+def test_measure_stale_pair_far_behind_log_now_is_unmeasurable():
+    # The source's two lines are at :00/:05, but the log's newest line (any source) is 40 s later.
+    m = d.measure(halved_log(), "NDI 2ME PGM",
+                  log_now=d.ts_to_seconds("14:00:55.017"), stale_after_s=12.0)
+    assert m["fps"] is None       # stopped emitting -> stale -> reseed, never a false verdict
+    assert m["samples"] >= 2      # the lines ARE in the tail (tap alive), just old
+
+def test_measure_fresh_pair_within_recency_is_measured():
+    m = d.measure(halved_log(base_ss=0, count=6), "NDI 2ME PGM",
+                  log_now=d.ts_to_seconds("14:00:26.017"), stale_after_s=12.0)
+    assert abs(m["fps"] - 15.0) < 0.2   # newest line at :25, log_now :26 -> not stale
+
+def test_measure_negative_gap_is_never_stale():
+    # This source IS the newest (log_now == curr_ts) -> gap 0 -> measured normally.
+    m = d.measure(halved_log(), "NDI 2ME PGM", log_now=d.ts_to_seconds("14:00:00.000"))
+    assert m["fps"] is not None
+
+def test_analyze_stale_input_reads_unknown_while_a_sibling_flows():
+    # 2ME PGM stopped at :15; cam1 still flowing at :50 -> 2ME PGM is stale -> UNKNOWN (not HALVED).
+    text = halved_log("NDI 2ME PGM", base_ss=0, count=4) + "\n" + \
+        "\n".join(line(f"14:00:{45 + i:02d}.017", "NDI cam1", 300, 16.3) for i in range(3))
+    a = d.analyze(text, "NDI 2ME PGM", 30, 1, 1)
+    assert a["verdict"] == "UNKNOWN"
+    assert a["samples"] >= 2     # tap alive (lines present), but stale -> never a false HALVED
+
+
+# =================================================================================================
 # classify -- the decision bands
 # =================================================================================================
 
@@ -240,7 +280,7 @@ def test_cure_decision_page_when_enabled_but_within_cooldown():
 def _cli(args, stdin=""):
     return subprocess.run(
         [sys.executable, str(_SCRIPTS / "ndi_halving_decision.py"), *args],
-        input=stdin, capture_output=True, text=True,
+        input=stdin, capture_output=True, text=True, check=False,
     )
 
 def _kv(out):

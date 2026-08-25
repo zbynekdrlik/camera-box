@@ -88,6 +88,9 @@ HEALTHY_RATIO="${NDI_HALVING_HEALTHY_RATIO:-0.85}"
 HEALTHY_CAP_MULT="${NDI_HALVING_HEALTHY_CAP_MULT:-1.5}"
 MIN_WINDOW_S="${NDI_HALVING_MIN_WINDOW_S:-3.0}"
 MAX_WINDOW_S="${NDI_HALVING_MAX_WINDOW_S:-15.0}"
+# Recency anchor: an input whose newest recv-timing line sits > this many seconds behind the log's
+# newest overall line has stopped emitting -> UNKNOWN, never a stale HALVED/HEALTHY/false-recovery.
+STALE_AFTER_S="${NDI_HALVING_STALE_AFTER_S:-12.0}"
 
 # Cure arm: DEFAULT OFF (report-only phase first; features-default-on does NOT apply to a self-heal
 # actuator -- mirrors grabber-stuck #1128's CAMERA_BOX_GRABBER_STUCK_SELFHEAL gate). One reattach per
@@ -96,6 +99,10 @@ SELFHEAL="${NDI_HALVING_SELFHEAL:-0}"
 COOLDOWN_S="${NDI_HALVING_COOLDOWN_S:-600}"
 # OBS WebSocket password for the cure (obs_phase2.py idle-receiver). rig-mode convention: OBS_PASSWORD.
 OBS_WS_PW="${NDI_HALVING_OBS_WS_PW:-${OBS_PASSWORD:-}}"
+# Per obs_phase2 WS call cap so idle + both restores stay INSIDE the unit's TimeoutStartSec (a systemd
+# SIGKILL between the CLEAR and the restore would itself manufacture the empty-name wedge). 40s each
+# * (idle + 2 restores) = 120s + the ~20s ssh probe already spent < TimeoutStartSec=180.
+OBS_WS_CALL_TIMEOUT_S="${NDI_HALVING_OBS_WS_CALL_TIMEOUT_S:-40}"
 
 # 2-pass confirm before curing/paging: one noisy window / transient must never act.
 CONFIRM_THRESHOLD="${NDI_HALVING_CONFIRM_THRESHOLD:-2}"
@@ -159,12 +166,17 @@ fetch_box_log() {
     2>/dev/null || true
 }
 
-# attempt_reattach <receiver_ip> <input> -> exit 0 = a reattach was driven; non-zero = the cure could
-# not run. Overridable via NDI_HALVING_CURE_CMD (<ip> <input>). The default idles the receiver (reads
-# + prints PREV_NDI_NAME, clears the name) then RESTORES it (overlay keeps the latency pin). CRITICAL:
-# once idled, the name is EMPTY (a receiver-thread STOP -> permanent wedge per ndi-name-recovery.md),
-# so the restore MUST run whenever PREV was captured -- retried once, and a persistent restore failure
-# is logged LOUD (the operator/alert must know the input may be left idled).
+# attempt_reattach <receiver_ip> <input> -> return code:
+#   0 = reattach driven (idle -> restore ok);
+#   1 = the cure COULD NOT START (no PREV captured, so nothing was idled -> name UNTOUCHED, SAFE);
+#   2 = the input was IDLED but the restore FAILED -> the name may be LEFT EMPTY (a receiver-thread
+#       STOP = permanent wedge per ndi-name-recovery.md) -> the CALLER must page immediately.
+# Overridable via NDI_HALVING_CURE_CMD (<ip> <input>). The default idles the receiver (reads + prints
+# PREV_NDI_NAME, clears the name) then RESTORES it (overlay keeps the latency pin). Each obs_phase2 WS
+# call is BOUNDED by `timeout` so idle + both restores fit inside the unit's TimeoutStartSec -- a
+# systemd SIGKILL landing between the CLEAR and the restore would itself manufacture the empty-name
+# wedge (#1203 review 🟡3). A `timeout` that kills the idle mid-call is SAFE: idle prints PREV BEFORE
+# clearing, so either PREV was captured (we proceed to restore) or it was not (name untouched).
 attempt_reattach() {
   local ip="$1" input="$2"
   if [ -n "${NDI_HALVING_CURE_CMD:-}" ]; then
@@ -172,21 +184,21 @@ attempt_reattach() {
     return $?
   fi
   local idle_out prev
-  idle_out="$(python3 "$OBS_PHASE2" idle-receiver --host "$ip" --password "$OBS_WS_PW" --input "$input" 2>&1)"
+  idle_out="$(timeout "$OBS_WS_CALL_TIMEOUT_S" python3 "$OBS_PHASE2" idle-receiver --host "$ip" --password "$OBS_WS_PW" --input "$input" 2>&1)"
   prev="$(printf '%s\n' "$idle_out" | sed -n 's/^PREV_NDI_NAME=//p' | head -1)"
   if [ -z "$prev" ]; then
-    log "CURE: idle-receiver did not return PREV_NDI_NAME for '$input' (WS auth/reachability?) -- NOT idling; no reattach: $idle_out"
+    log "CURE: idle-receiver did not return PREV_NDI_NAME for '$input' (WS auth/reachability/timeout?) -- name untouched, no reattach: $idle_out"
     return 1
   fi
   local attempt
   for attempt in 1 2; do
-    if python3 "$OBS_PHASE2" idle-receiver --host "$ip" --password "$OBS_WS_PW" --input "$input" --restore "$prev" >/dev/null 2>&1; then
+    if timeout "$OBS_WS_CALL_TIMEOUT_S" python3 "$OBS_PHASE2" idle-receiver --host "$ip" --password "$OBS_WS_PW" --input "$input" --restore "$prev" >/dev/null 2>&1; then
       log "CURE: reattached '$input' (idle -> restore to '$prev'), attempt $attempt"
       return 0
     fi
   done
-  log "CURE: FAILED to restore '$input' to '$prev' after idling -- the input may be LEFT IDLED (empty name); needs a manual set-ndi-mapping"
-  return 1
+  log "CURE: FAILED to restore '$input' to '$prev' after idling -- the input is LEFT IDLED (empty name); needs a manual set-ndi-mapping"
+  return 2
 }
 
 # -- issue-1001 reachability read (never re-probed) ---------------------------------------------
@@ -207,12 +219,24 @@ read_state_field() {
   printf '%s' "${v:-$default}"
 }
 write_state_field() {
-  local key="$1" val="$2" tmp
+  local key="$1" val="$2" tmp existing=""
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+  # Read the OTHER keys into memory FIRST, before any file is opened for writing -- so even the
+  # mktemp-failure fallback (a direct rewrite of STATE_FILE) can never truncate-before-read and drop
+  # them (the previous `tmp=$STATE_FILE` fallback had exactly that latent state-loss bug: a failed
+  # mktemp truncated STATE_FILE via the redirect before `grep` read it, collapsing it to the one
+  # written key and losing every alerted_/cure_ts_ latch). Mirrors network-reach-alert-watchdog.sh.
+  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
+  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$tmp" ]; then
+    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
+      > "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+  else
+    # mktemp unavailable: `existing` is already captured, so a direct (non-atomic) rewrite is safe.
+    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
+      > "$STATE_FILE" 2>/dev/null || true
+  fi
 }
 
 # An input key safe for state-field names (input names carry spaces). A short cksum of the RAW name
@@ -227,13 +251,41 @@ input_key() {
 # Extract a `key=value` token (one per line) from the pure module's output.
 kv_field() { sed -n "s/^${2}=//p" <<<"$1" | tail -1; }
 
-# A HEALTHY input is not an incident: clear its confirm counter + throttle sig + cure state so a
-# genuinely NEW halving later acts fresh. Does NOT clear the `alerted`/`cured` recovery latches.
+# A HEALTHY input is not an incident: clear its confirm counter + alert-throttle signature so a
+# genuinely NEW halving later confirms + pages fresh. Does NOT clear the `alerted`/`cured` recovery
+# latches (the caller fires the recovery ping off them first) NOR `cure_ts_` (the HEALTHY branch
+# clears that separately, so a genuine recovery re-permits an immediate cure on the next episode).
 clear_input_throttle() {
   local k="$1"
   write_state_field "confirm_${k}" 0
   write_state_field "alert_sig_${k}" ""
   write_state_field "alert_passes_${k}" 0
+}
+
+# throttled_notify <key> <current_sig> <body> <log_label>
+# The ONE alert path: obs_watchdog_alert_throttle dedups on <current_sig> (re-alert every
+# ALERT_THROTTLE_PASSES, fresh on a sig change), then POSTs <body> via notify when alert_now=1. In
+# --dry-run the POST is skipped (logs `WOULD alert: <log_label>`) but the throttle state STILL
+# advances (the family bookkeeping convention). Latches alerted_<key>=1 so the recovery ping fires.
+throttled_notify() {
+  local k="$1" sig="$2" body="$3" label="$4"
+  write_state_field "alerted_${k}" 1
+  local prior passes out an
+  prior="$(read_state_field "alert_sig_${k}" "")"
+  passes="$(read_state_field "alert_passes_${k}" 0)"
+  out="$(obs_watchdog_alert_throttle "$sig" "$prior" "$passes" "$ALERT_THROTTLE_PASSES")"
+  an="$(printf '%s\n' "$out" | sed -n 's/^alert_now=//p')"
+  write_state_field "alert_sig_${k}" "$(printf '%s\n' "$out" | sed -n 's/^new_sig=//p')"
+  write_state_field "alert_passes_${k}" "$(printf '%s\n' "$out" | sed -n 's/^new_passes=//p')"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: $label alert_now=$an"
+    return 0
+  fi
+  if [ "${an:-0}" = "1" ]; then
+    python3 "$NOTIFY" notify --body "$body" >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+  else
+    log "ALERT: suppressed by throttle (pass ${passes}/${ALERT_THROTTLE_PASSES})"
+  fi
 }
 
 # Split a `<name>|<fps>` spec (name may contain spaces, never a '|').
@@ -252,7 +304,7 @@ handle_input() {
       --source "$input" --expected-fps "$exp" --box-reachable 1 --expected-live 1 \
       --halving-ratio "$HALVING_RATIO" --cap-mult "$CAP_MULT" \
       --healthy-ratio "$HEALTHY_RATIO" --healthy-cap-mult "$HEALTHY_CAP_MULT" \
-      --min-window-s "$MIN_WINDOW_S" --max-window-s "$MAX_WINDOW_S" 2>/dev/null)"
+      --min-window-s "$MIN_WINDOW_S" --max-window-s "$MAX_WINDOW_S" --stale-after-s "$STALE_AFTER_S" 2>/dev/null)"
   else
     out="verdict=SKIP
 fps=
@@ -316,6 +368,10 @@ samples=0"
         write_state_field "alerted_${k}" 0
         write_state_field "cured_${k}" 0
       fi
+      # A genuine HEALTHY recovery ends the episode -> clear the cure cooldown so a NEW halving later
+      # can cure immediately rather than page (the cooldown only exists to stop reattach-spam WITHIN a
+      # single ongoing episode) (#1203 review 🔵6).
+      write_state_field "cure_ts_${k}" ""
       clear_input_throttle "$k"
       return 0 ;;
     HALVED)
@@ -362,53 +418,52 @@ samples=0"
     # "--dry-run skips the POST/action, never the bookkeeping" convention).
     if [ "$DRY_RUN" -eq 1 ]; then
       log "[dry-run] WOULD cure: reattach '$input' (idle-receiver -> restore); cooldown_ok=$cooldown_ok ($sibling_note)"
-    elif attempt_reattach "$RECV_IP" "$input"; then
-      log "'$input' CONFIRMED halved -> reattach attempted; re-measuring next pass ($sibling_note)"
     else
-      log "'$input' CONFIRMED halved -> reattach could NOT run ($sibling_note)"
+      local rc=0
+      attempt_reattach "$RECV_IP" "$input" || rc=$?
+      case "$rc" in
+        0) log "'$input' CONFIRMED halved -> reattach attempted; re-measuring next pass ($sibling_note)" ;;
+        2) # IDLED but the restore FAILED = the input is LEFT with an EMPTY name (a stopped receiver
+           # thread, the worst state this script can create) -> page IMMEDIATELY (throttle-guarded),
+           # naming the LEFT-IDLED state + the manual remedy (rig-degradation-alerts-immediately).
+           throttled_notify "$k" "idled:${k}" \
+             "🚨 NDI spojenie ($REPO_SLUG): auto-reattach vstupu **$input** na $RECV_NAME ZLYHAL pri obnove názvu — vstup ostal IDLED (prázdny NDI názov = zastavený receiver). Potrebný manuálny zásah: set-ndi-mapping / re-select zdroja v OBS." \
+             "'$input' LEFT IDLED after a failed reattach ($sibling_note)"
+           log "'$input' CONFIRMED halved -> reattach FAILED, LEFT IDLED -> paged ($sibling_note)" ;;
+        *) log "'$input' CONFIRMED halved -> reattach could NOT start (name untouched, safe) ($sibling_note)" ;;
+      esac
     fi
     write_state_field "cure_ts_${k}" "$now"
     write_state_field "cured_${k}" 1
     return 0
   fi
 
-  # PAGE (cure disabled, or a cure already ran this episode and it is still halved -> no spam).
-  write_state_field "alerted_${k}" 1
-  local sig_fps show_fps current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes cure_txt
-  sig_fps="$(LC_ALL=C awk -v f="${fps:-0}" 'BEGIN{printf "%d", f + 0.5}')"
+  # PAGE (cure disabled, or a cure already ran this episode and it is still halved -> no reattach-spam).
+  local show_fps cure_txt
   show_fps="$(LC_ALL=C awk -v f="${fps:-0}" 'BEGIN{printf "%.1f", f + 0}')"
-  current_sig="halved:${k}:${sig_fps}"
-  prior_sig="$(read_state_field "alert_sig_${k}" "")"
-  prior_passes="$(read_state_field "alert_passes_${k}" 0)"
-  throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
-  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
-  new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
-  new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
-  write_state_field "alert_sig_${k}" "$new_sig"
-  write_state_field "alert_passes_${k}" "$new_passes"
-
   if [ "$SELFHEAL" = "1" ]; then
     cure_txt="auto-reattach bol skúšaný, no spojenie ostáva polovičné"
   else
     cure_txt="auto-liečenie je vypnuté (report-only) — reštartuje sa reattach-om vstupu (obs_phase2 idle-receiver → restore)"
   fi
-
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD alert: '$input' CONFIRMED halved (${show_fps} fps, cap ${cap:-?}ms) alert_now=$alert_now ($sibling_note)"
-    return 0
-  fi
-  if [ "${alert_now:-0}" = "1" ]; then
-    python3 "$NOTIFY" notify --body \
-      "🚨 NDI spojenie ($REPO_SLUG): vstup **$input** na $RECV_NAME beží na POLOVIČNEJ kadencii — nameraných ${show_fps} fps (očak. ${exp}), recv cap_avg ${cap:-?} ms. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; $sibling_note. $cure_txt." \
-      >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
-  else
-    log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
-  fi
+  # 🔵9: the throttle signature is COARSE (`halved:<key>`, no fps) — HALVED is the only paging verdict,
+  # so the exact fps adds no discrimination (unlike the cadence sibling, where 50 vs 43 are distinct
+  # faults), and embedding a rounded fps would re-page on every flip across a rounding boundary.
+  throttled_notify "$k" "halved:${k}" \
+    "🚨 NDI spojenie ($REPO_SLUG): vstup **$input** na $RECV_NAME beží na POLOVIČNEJ kadencii — nameraných ${show_fps} fps (očak. ${exp}), recv cap_avg ${cap:-?} ms. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; $sibling_note. $cure_txt." \
+    "'$input' CONFIRMED halved (${show_fps} fps, cap ${cap:-?}ms) ($sibling_note)"
 }
 
 main() {
   log "pass start (dry_run=$DRY_RUN, receiver='$NDI_HALVING_RECEIVER', sender='$SENDER_NAME', selfheal=$SELFHEAL, inputs='$NDI_HALVING_INPUTS')"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
+
+  # 🔵10: armed cure with no OBS-WS password (and no CURE_CMD override) = every confirmed episode burns
+  # a cooldown on a guaranteed-failing default reattach, then pages. Warn LOUD (never page — a config
+  # slip, not a rig fault) so the supervisor sets NDI_HALVING_OBS_WS_PW when arming.
+  if [ "$SELFHEAL" = "1" ] && [ -z "$OBS_WS_PW" ] && [ -z "${NDI_HALVING_CURE_CMD:-}" ]; then
+    log "WARN: NDI_HALVING_SELFHEAL=1 but no OBS WebSocket password (NDI_HALVING_OBS_WS_PW/OBS_PASSWORD) -- the reattach cure will FAIL every episode; set the password or disable the cure arm"
+  fi
 
   # No-double-page guard: BOTH the receiver AND the sender must be reachable per issue-1001's state,
   # else issue-1001 already owns the page and a halving reading is out of scope -> SKIP everything.
@@ -444,7 +499,7 @@ main() {
         --source "$name" --expected-fps "$exp" --box-reachable 1 --expected-live 1 \
         --halving-ratio "$HALVING_RATIO" --cap-mult "$CAP_MULT" \
         --healthy-ratio "$HEALTHY_RATIO" --healthy-cap-mult "$HEALTHY_CAP_MULT" \
-        --min-window-s "$MIN_WINDOW_S" --max-window-s "$MAX_WINDOW_S" 2>/dev/null)"
+        --min-window-s "$MIN_WINDOW_S" --max-window-s "$MAX_WINDOW_S" --stale-after-s "$STALE_AFTER_S" 2>/dev/null)"
       verdict="$(kv_field "$out" verdict)"
       [ "$verdict" = "HEALTHY" ] && healthy_count=$((healthy_count + 1))
     fi

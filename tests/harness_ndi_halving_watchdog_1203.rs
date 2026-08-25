@@ -393,3 +393,121 @@ fn borderline_holds_and_never_pages() {
         rig.notify_bodies()
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (g) attempt_reattach's INTERNAL logic — the actuator's most dangerous branch (#414 / #1203 🟡4).
+//     Driven through the REAL bash function via a FAKE obs_phase2 (NDI_HALVING_OBS_PHASE2), NOT the
+//     whole-function CURE_CMD override — so the PREV parse, the empty-PREV refusal, the restore
+//     retry, and the LEFT-IDLED (restore-failed) page all execute under test.
+// ---------------------------------------------------------------------------------------------
+
+/// A fake obs_phase2.py: records "idle"/"restore" per call to $FAKE_OBS_CALLS; on idle prints
+/// PREV_NDI_NAME=$FAKE_PREV (nothing if empty); on restore exits $FAKE_RESTORE_RC.
+const FAKE_OBS_PHASE2: &str = r#"import sys, os
+open(os.environ["FAKE_OBS_CALLS"], "a").write(("restore" if "--restore" in sys.argv else "idle") + "\n")
+if "--restore" not in sys.argv:
+    p = os.environ.get("FAKE_PREV", "")
+    if p:
+        print("PREV_NDI_NAME=" + p)
+    raise SystemExit(0)
+raise SystemExit(int(os.environ.get("FAKE_RESTORE_RC", "0")))
+"#;
+
+/// Run a confirmed-cure episode (hold @1000, cure @1005) through the REAL attempt_reattach with a
+/// fake obs_phase2. Returns (pass2 stdout+stderr, obs_phase2 call-kinds, notify bodies).
+fn cure_via_fake_obs_phase2(prev: &str, restore_rc: i32) -> (String, String, String) {
+    let rig = Rig::new();
+    let fake = rig._dir.path().join("fake_obs_phase2.py");
+    fs::write(&fake, FAKE_OBS_PHASE2).unwrap();
+    let obs_calls = rig._dir.path().join("obs-phase2-calls.txt");
+
+    let run = |now: u64| -> String {
+        fs::write(&rig.logfix, halved_only()).unwrap();
+        let out = Command::new("bash")
+            .arg(watchdog())
+            .env(
+                "NDI_HALVING_PROBE_CMD",
+                format!("bash {}", rig.probe.display()),
+            )
+            // NO NDI_HALVING_CURE_CMD -> the real attempt_reattach runs, shelling the fake obs_phase2.
+            .env("NDI_HALVING_OBS_PHASE2", &fake)
+            .env("AIRULESET_NOTIFY", &rig.notify)
+            .env("NDI_HALVING_OBS_WS_PW", "x") // non-empty so the armed-passwordless warn stays quiet
+            .env("NDI_HALVING_TEST_LOG", &rig.logfix)
+            .env("NDI_HALVING_STATE_FILE", &rig.state)
+            .env("NDI_HALVING_NETREACH_STATE_FILE", &rig.netreach)
+            .env("NDI_HALVING_INPUTS", PGM_ONLY)
+            .env("NDI_HALVING_SELFHEAL", "1")
+            .env("NDI_HALVING_COOLDOWN_S", "600")
+            .env("NDI_HALVING_NOW", now.to_string())
+            .env("FAKE_OBS_CALLS", &obs_calls)
+            .env("FAKE_PREV", prev)
+            .env("FAKE_RESTORE_RC", restore_rc.to_string())
+            .current_dir(manifest_dir())
+            .output()
+            .expect("run");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    run(1000); // hold
+    let p2 = run(1005); // confirmed -> cure via the real attempt_reattach
+    let calls = fs::read_to_string(&obs_calls).unwrap_or_default();
+    let bodies = fs::read_to_string(&rig.notify_calls).unwrap_or_default();
+    (p2, calls, bodies)
+}
+
+#[test]
+fn reattach_idles_then_restores_when_prev_is_captured() {
+    let (p2, calls, bodies) = cure_via_fake_obs_phase2("CAM2 (usb)", 0);
+    assert!(
+        p2.contains("reattached 'NDI 2ME PGM'") && p2.contains("reattach attempted"),
+        "PREV captured + restore ok must reattach: {p2}"
+    );
+    assert!(
+        calls.contains("idle") && calls.contains("restore"),
+        "must idle THEN restore: {calls}"
+    );
+    assert!(
+        bodies.is_empty(),
+        "a successful reattach must not page: {bodies}"
+    );
+}
+
+#[test]
+fn reattach_refuses_to_idle_when_prev_is_missing() {
+    let (p2, calls, bodies) = cure_via_fake_obs_phase2("", 0);
+    assert!(
+        p2.contains("did not return PREV_NDI_NAME") && p2.contains("name untouched"),
+        "empty PREV must refuse — name untouched, no restore: {p2}"
+    );
+    assert!(
+        calls.contains("idle") && !calls.contains("restore"),
+        "no restore may be attempted when PREV was not captured: {calls}"
+    );
+    assert!(
+        bodies.is_empty(),
+        "a could-not-start cure is safe, must not page: {bodies}"
+    );
+}
+
+#[test]
+fn reattach_failure_leaves_input_idled_and_pages_immediately() {
+    let (p2, calls, bodies) = cure_via_fake_obs_phase2("CAM2 (usb)", 1);
+    assert!(
+        p2.contains("LEFT IDLED"),
+        "a persistent restore failure must log the LEFT-IDLED wedge: {p2}"
+    );
+    // idle once + two restore retries.
+    assert_eq!(
+        calls.matches("restore").count(),
+        2,
+        "the restore must be retried once (two attempts): {calls}"
+    );
+    assert!(
+        bodies.contains("ostal IDLED") && bodies.contains("NDI 2ME PGM"),
+        "a LEFT-IDLED input must page IMMEDIATELY naming the manual remedy: {bodies}"
+    );
+}

@@ -16,9 +16,11 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 Type=oneshot
 # %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
 ExecStart=%h/devel/camera-box/scripts/ndi-halving-watchdog.sh
-# One ssh OBS-log tail to the (reachable) stream box + local state; the CURE (when armed) adds two
-# short obs_phase2 WS calls. Generous but never a hang.
-TimeoutStartSec=120
+# One ssh OBS-log tail (~20s) + local state; the CURE (when armed) adds idle + up to 2 restores, each
+# bounded by NDI_HALVING_OBS_WS_CALL_TIMEOUT_S (40s) = up to 120s. TimeoutStartSec MUST exceed
+# 20 + 120 so a systemd SIGKILL can never land BETWEEN the idle (name cleared) and the restore — that
+# would itself manufacture the empty-name wedge the cure exists to avoid (#1203 review 🟡3).
+TimeoutStartSec=180
 # Ships DISABLED and cure-arm OFF. The supervisor arms the cure deliberately, after a live-verify,
 # by dropping (systemctl --user edit ndi-halving-watchdog.service):
 #   [Service]

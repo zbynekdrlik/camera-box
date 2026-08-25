@@ -35,7 +35,12 @@ depth 11 ≪ cap 69). A `systemctl restart camera-box` does NOT clear it; a rece
 The default `NDI_HALVING_INPUTS` is `NDI 2ME PGM|30` (the live-confirmed leg). It is a `;`-list of
 `<OBS input name>|<expected fps>` — extend it with other continuously-live receiver inputs (each with
 its own expected fps) before enabling; an input that never emits a `recv-timing #797` line fires a
-"tap broken" WARN after ~2 h. Read the live labels + their recv-timing lines:
+"tap broken" WARN after ~2 h. **Note on the cure for non-2ME-PGM inputs:** the default reattach
+(`obs_phase2.py idle-receiver`) restores with `genlock_fifo: True` — correct for the genlocked
+program feed, but a cure on a non-genlock-FIFO input would flip that setting on. If you extend
+`NDI_HALVING_INPUTS` to such an input, either leave the cure arm OFF for it (alert-only is always
+safe) or confirm the restore's genlock_fifo default is right for it first. Read the live labels +
+their recv-timing lines:
 
 ```bash
 sshpass -p newlevel ssh -o StrictHostKeyChecking=no newlevel@10.77.9.204 \
@@ -102,7 +107,9 @@ persistent restore failure. This is why the cure ships OFF and is armed only del
 | `NDI_HALVING_INPUTS` | `NDI 2ME PGM\|30` | `;`-list of `<input>\|<expected_fps>` (SET to the live set) |
 | `NDI_HALVING_SELFHEAL` | `0` | arm the reattach cure (1); default OFF = alert-only |
 | `NDI_HALVING_COOLDOWN_S` | `600` | per-input cure cooldown (one reattach per window) |
-| `NDI_HALVING_OBS_WS_PW` | `$OBS_PASSWORD` | stream OBS WebSocket password (needed only when the cure is armed) |
+| `NDI_HALVING_OBS_WS_PW` | `$OBS_PASSWORD` | stream OBS WebSocket password (needed only when the cure is armed; an armed empty password warns loudly each pass) |
+| `NDI_HALVING_OBS_WS_CALL_TIMEOUT_S` | `40` | per obs_phase2 WS call cap (idle + 2 restores must fit inside the unit's TimeoutStartSec) |
+| `NDI_HALVING_STALE_AFTER_S` | `12.0` | a source whose newest line sits this far behind the log's newest line → UNKNOWN (stopped emitting) |
 | `NDI_HALVING_RATIO` | `0.6` | HALVED if fps ≤ ratio×expected |
 | `NDI_HALVING_CAP_MULT` | `2.0` | HALVED if cap_avg ≥ mult×(1000/expected) ms |
 | `NDI_HALVING_HEALTHY_RATIO` | `0.85` | HEALTHY floor (fps ≥ ratio×expected) |

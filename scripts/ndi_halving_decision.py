@@ -71,13 +71,36 @@ def parse_recv_timing(text, source):
     return rows
 
 
-def measure(text, source, max_window_s=15.0):
+def newest_recv_timing_ts(text):
+    """Newest parseable timestamp across ALL recv-timing #797 lines (ANY source) in *text*, or None.
+    The log's own current clock — used as the recency anchor for measure() (log-clock vs log-clock,
+    never a wall-clock divisor)."""
+    if not text:
+        return None
+    newest = None
+    for ln in text.splitlines():
+        if "recv-timing #797 '" not in ln:
+            continue
+        m = re.match(r"\s*(\d{2}:\d{2}:\d{2}(?:\.\d+)?)", ln)
+        if not m:
+            continue
+        ts = ts_to_seconds(m.group(1))
+        if ts is not None and (newest is None or ts > newest):
+            newest = ts
+    return newest
+
+
+def measure(text, source, max_window_s=15.0, log_now=None, stale_after_s=12.0):
     """WITHIN-PASS rate from the last TWO usable recv-timing lines for *source*.
 
     Returns a dict: samples (count of usable lines found), and fps/window_s/cap_avg/n -- the latter
-    four are None when a rate could NOT be measured (fewer than 2 lines, either timestamp missing,
-    n_curr's cumulative count is nonsensical, or the window is <=0 / > max_window_s -- a pair
-    straddling a freeze/gap). `samples` still reports tap-liveness independent of measurability."""
+    four are None when a rate could NOT be measured: fewer than 2 lines, either timestamp missing, the
+    window is <=0 / > max_window_s (a pair straddling a freeze/gap), OR the pair is STALE -- the
+    source's newest line sits > stale_after_s behind *log_now* (the log's newest overall recv-timing
+    line), i.e. the source stopped emitting while others kept flowing (wedged / renamed / idled). A
+    stale pair yields UNKNOWN so a stopped input can never produce a false HALVED/HEALTHY (or a false
+    recovery ping) off its last in-tail line -- a frozen input is issue-1052's job. `samples` still
+    reports tap-liveness independent of measurability. log_now=None disables the recency check."""
     rows = parse_recv_timing(text, source)
     out = {"samples": len(rows), "fps": None, "window_s": None, "cap_avg": None, "n": None}
     if len(rows) < 2:
@@ -86,6 +109,14 @@ def measure(text, source, max_window_s=15.0):
     (curr_ts, curr_n, curr_cap) = rows[-1]
     if prev_ts is None or curr_ts is None:
         return out
+    # Recency anchor: only when curr_ts sits a SANE positive span behind log_now (a stopped source
+    # while others emit). A negative gap (this source IS the newest) or an implausibly large one
+    # (a midnight wrap / hours-stale watchdog) is NOT treated as stale -- conservative, never a false
+    # stale that would suppress a real halving.
+    if log_now is not None:
+        gap = log_now - curr_ts
+        if stale_after_s < gap <= 3600.0:
+            return out
     w = curr_ts - prev_ts
     if w < 0:
         w += 86400.0  # date-less OBS log: a window straddling midnight
@@ -132,12 +163,16 @@ def classify(fps, cap_avg, expected_fps, window_s, box_reachable, expected_live,
 def analyze(text, source, expected_fps, box_reachable, expected_live, **kw):
     """parse + measure + classify from a raw log tail. When out of scope (box unreachable / not
     expected live) returns SKIP WITHOUT reading the log (samples=0), mirroring the caller's
-    no-double-page guard where the raw log is empty anyway."""
+    no-double-page guard where the raw log is empty anyway. The recency anchor (log_now) is derived
+    from the WHOLE tail so a source that stopped emitting reads UNKNOWN, not a stale verdict."""
+    kw = dict(kw)
+    stale_after_s = kw.pop("stale_after_s", 12.0)
     max_window_s = kw.get("max_window_s", 15.0)
     if box_reachable != 1 or expected_live != 1:
         return {"verdict": "SKIP", "fps": None, "cap_avg": None,
                 "window_s": None, "n": None, "samples": 0}
-    m = measure(text, source, max_window_s=max_window_s)
+    m = measure(text, source, max_window_s=max_window_s,
+                log_now=newest_recv_timing_ts(text), stale_after_s=stale_after_s)
     verdict = classify(m["fps"], m["cap_avg"], expected_fps, m["window_s"],
                        box_reachable, expected_live, **kw)
     return {"verdict": verdict, "fps": m["fps"], "cap_avg": m["cap_avg"],
@@ -187,6 +222,7 @@ def _main(argv):
     a.add_argument("--healthy-cap-mult", type=float, default=1.5)
     a.add_argument("--min-window-s", type=float, default=3.0)
     a.add_argument("--max-window-s", type=float, default=15.0)
+    a.add_argument("--stale-after-s", type=float, default=12.0)
 
     c = sub.add_parser("cure-decision", help="cure vs page for a CONFIRMED-halved input")
     c.add_argument("--cure-enabled", type=int, required=True)
@@ -201,7 +237,8 @@ def _main(argv):
         res = analyze(text, ns.source, ns.expected_fps, ns.box_reachable, ns.expected_live,
                       halving_ratio=ns.halving_ratio, cap_mult=ns.cap_mult,
                       healthy_ratio=ns.healthy_ratio, healthy_cap_mult=ns.healthy_cap_mult,
-                      min_window_s=ns.min_window_s, max_window_s=ns.max_window_s)
+                      min_window_s=ns.min_window_s, max_window_s=ns.max_window_s,
+                      stale_after_s=ns.stale_after_s)
         for k in ("verdict", "fps", "cap_avg", "window_s", "n", "samples"):
             print(f"{k}={_fmt(res[k])}")
         return 0
