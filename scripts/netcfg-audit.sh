@@ -74,7 +74,7 @@ fi
 # post-auth hang) -- same wrap as asio-starve/bundle-state/optical-chain-alert-watchdog.sh.
 _nc_ssh() {
   local ip="$1" cmd="$2"
-  timeout "$NETCFG_SSH_TIMEOUT" sshpass -p "$NETCFG_SWITCH_PW" ssh \
+  timeout "$NETCFG_SSH_TIMEOUT" sshpass -p "$NETCFG_SWITCH_PW" ssh -n \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout="$NETCFG_SSH_TIMEOUT" -o PreferredAuthentications=password \
     "admin@$ip" "$cmd" 2>/dev/null
