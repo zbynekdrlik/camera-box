@@ -106,9 +106,11 @@ def tick_map(qr_texts: "list[str]") -> "dict[int, int]":
 # 911013 (issue 1196) is the PAINTED aux Vernier tick pair: universal on EVERY screenshot even
 # outside E2E burns, and its constant gen_ts_ns=0 would turn every skew sample into pure
 # wall-gap garbage -- it must never be picked as the painter NOR used as a common-sample id.
+AUX_TICK_RUN_ID = 911013  # issue 1196: the painted aux Vernier tick pair (gen_ts_ns always 0)
+
 RESERVED_RUN_IDS = frozenset({
     911001, 911002, 911003, 911004, 911007, 911008, 911009,
-    911010, 911011, 911012, 911013,
+    911010, 911011, 911012, AUX_TICK_RUN_ID,
 })
 
 
@@ -139,7 +141,7 @@ def pick_common_run_id(main_map: dict, mv_map: dict, preferred: "int | None") ->
     eligible as a fallback: their gen_ts is a real per-node render clock). None when the two
     share no usable decoded run_id -- so the caller drops that sample honestly rather than
     fabricating one."""
-    common = (set(main_map) & set(mv_map)) - {911013}
+    common = (set(main_map) & set(mv_map)) - {AUX_TICK_RUN_ID}
     if not common:
         return None
     return preferred if (preferred in common) else min(common)

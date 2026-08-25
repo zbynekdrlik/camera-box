@@ -131,9 +131,12 @@ pub struct TearStats {
     /// The largest union span observed in the window (0 or 1 = clean; >= 2 = a tear occurred).
     pub max_spread: u32,
     /// issue 1196 — fraction of ALL in-window frames ([`Self::total_frames`]) that decoded BOTH
-    /// aux tick marks (the bottom burn-gap pair). The promotion-gating coverage signal: a LIVE
-    /// flip additionally requires this above a calibrated floor on the same run, so a silent aux
-    /// loss demotes honestly instead of false-greening. 0.0 on pre-aux content.
+    /// aux tick marks (>= 2 aux payloads; the bottom burn-gap pair). The promotion-gating
+    /// coverage signal: a LIVE flip additionally requires this above a calibrated floor on the
+    /// same run, so a silent aux loss demotes honestly instead of false-greening. 0.0 on pre-aux
+    /// content. Known bootstrap nuance: on the painter's very first tick BOTH aux marks carry
+    /// frame_id 0, so decode dedup collapses them to ONE payload and that single frame reads as
+    /// not-fully-covered — one frame per painter start, irrelevant at window scale.
     pub aux_decode_fraction: f64,
     /// issue 1196 — fraction of ALL in-window frames where the PRIMARY band decoded NOTHING while
     /// BOTH aux marks decoded: band-localized corruption (e.g. a seam inside the 700px primary

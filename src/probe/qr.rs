@@ -353,10 +353,13 @@ pub fn blit_aux_tick_bgra(
     for (rect, payload) in rects.iter().zip([left, right]) {
         let qr = render_payload_qr(payload, rect.w.min(rect.h));
         let (qw, qh) = (qr.width().min(rect.w), qr.height().min(rect.h));
+        // Center the (possibly module-rounded, slightly smaller) rendered QR inside its proven
+        // rectangle — mirrors blit_qr_bgra's band-centering, keeps the clearances symmetric.
+        let (ox, oy) = (rect.x + (rect.w - qw) / 2, rect.y + (rect.h - qh) / 2);
         for y in 0..qh {
             for x in 0..qw {
                 let lum = qr.get_pixel(x, y)[0];
-                let ci = (((rect.y + y) * canvas_w + (rect.x + x)) * 4) as usize;
+                let ci = (((oy + y) * canvas_w + (ox + x)) * 4) as usize;
                 if ci + 3 < canvas.len() {
                     canvas[ci] = lum;
                     canvas[ci + 1] = lum;
