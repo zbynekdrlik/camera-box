@@ -364,3 +364,26 @@ fn port_is_designated_handles_multi_token_and_empty() {
         "RC=1"
     );
 }
+
+/// #1110 hotfix — `_nc_ssh` MUST pass `-n` to ssh. `_nc_drop_rate_verdict` runs ssh INSIDE the
+/// `--check` drop-probe `while read` loop fed by a herestring, and an ssh without `-n` consumes the
+/// loop's remaining stdin — the loop silently ends after the FIRST probed port, so later nodes
+/// (foh2_video's designated strih-uplink port included) are never probed at all. Live repro
+/// 2026-08-25 (bash -x --check): exactly one `_nc_drop_rate_verdict` call fired (foh1_audio
+/// ether2), then the loop died; the designated foh2_video sfp-sfpplus2 probe never ran.
+#[test]
+fn nc_ssh_is_stdin_safe_for_while_read_loops() {
+    let orch = std::fs::read_to_string(manifest_dir().join("scripts/netcfg-audit.sh")).unwrap();
+    let body = orch
+        .split("_nc_ssh() {")
+        .nth(1)
+        .expect("_nc_ssh function present in scripts/netcfg-audit.sh")
+        .split('}')
+        .next()
+        .expect("function body")
+        .to_string();
+    assert!(
+        body.contains("ssh -n"),
+        "_nc_ssh's ssh call must carry -n (stdin-safe inside while-read loops); body:\n{body}"
+    );
+}
