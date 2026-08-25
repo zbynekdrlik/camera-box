@@ -10435,3 +10435,35 @@ No push/PR/rig touch (worktree worker).
 - Rejected: (2) a _drop_probe_ports field in baseline.json — mixes audit-config into captured-state, couples --capture/orchestrator. (3) rewrite the port comment to "strih-uplink" — false-drift forever vs the live switch value, which I cannot change (no ssh).
 - TDD (Tier-0 #557, ZERO local cargo of any shape): RED — added tests/harness_netcfg_audit_797.rs cases pinning netcfg_port_is_designated + the defined-functions guard; proved RED by sourcing the lib under bash (NOT-DEFINED). GREEN — proved via the EXACT run_sourced bash shape (set -uo pipefail; . lib; call; echo RC=$?): all 8 cases match the Rust expectations (strih-uplink RC=0, other-port/other-switch/empty RC=1, multi-token RC=0). rustfmt --check clean; bash -n + shellcheck -S warning clean on both scripts. Rust type-check happens first at CI (no local compile path).
 - Commits: bump 481->482 (64fe3e352) -> [red] test (7c676305d) -> [green] lib+orchestrator (e2831d596) -> [docs] this entry + rule note. Worktree branch worktree-agent-ac4f7cf521f492f0e; durability backup refs/autopilot-wip/worktree-agent-ac4f7cf521f492f0e; supervisor integrates. #1110 STAYS OPEN (P0; the strih NIC swap + episode-free proof is not this sub-step) — do NOT add a closing keyword for it to the PR body.
+
+## 2026-08-25 — #808 (bkshading): repeatable SERVICE deploy path onto strih (Windows)
+
+- Version 1.7.0-dev.551 -> .552 (8a6b28825).
+- RED test 16da04210 (tests/python/test_bkshading_deploy_service_808.py — 22/23 fail, scripts absent).
+- GREEN c5452113d — new files:
+  - scripts/lib/bkshading-deploy-service-runtime.sh (source-only pure invariants: artifact
+    bkshading-windows-amd64, exe bkshading.exe, install dir C:\bkshading, config bkshading.toml,
+    task bkshading-service, port 8770 == config.rs default_bind, keepalive 5 min).
+  - scripts/bkshading-deploy-service.sh (dev1 orchestrator: resolve/download the
+    bkshading-windows-amd64 artifact or --binary, scp -O exe+config-seed+installer to strih, run the
+    installer via `powershell -File` [never nested -Command]; DRY-RUN default, --execute mutates;
+    fakes via BKSHADING_SVC_GH/SSH/SCP/SSHPASS_PREFIX).
+  - scripts/bkshading-install-service.ps1 (on-box: place exe under C:\bkshading, seed bkshading.toml
+    from the example ONLY IF absent [never clobber a tuned config], register the keep-alive Task
+    Scheduler task [AtLogOn + repetition every N min, action re-runs the DEPLOYED installer
+    -KeepAlive -Execute], verify :8770 Listening; -KeepAlive per-tick relaunch, -Uninstall removes).
+- Design: chose the repo keep-alive idiom (obs-self-heal/avsync-keepalive) over Task Scheduler's
+  weak RestartCount (issue 808 design comment). Service config carries NO credential — nothing
+  secret embedded. Bluetooth appears nowhere (owner hard rule). ASCII-only .ps1 (scp gotcha).
+- Tier-0 verify: bash -n + shellcheck -S warning clean; full tests/python suite 1604 passed
+  (incl. the 26 new tests). No .rs touched -> cargo fmt n/a.
+- Review (fresh-context Fable /review + /requesting-code-review): 1 R / 2 Y / 2 B, ALL fixed
+  same-branch in d27375159 — port-owner verify (no false-green when a stale C:\stage-bkshading holds
+  :8770) + by-name install-time migration stop; sha256 byte-verify of the staged exe (certutil);
+  real keepalive log + service stdout/err redirect; config-absent launches bare; strengthened tests.
+  Final 0/0/0.
+- Commits: bump 8a6b28825 -> [red] 16da04210 -> [green] c5452113d -> [review] d27375159 -> [docs]
+  this entry + rule note. Worktree branch worktree-agent-a200745f1be8412e3; durability backup
+  refs/autopilot-wip/worktree-agent-a200745f1be8412e3; supervisor integrates.
+- UNVERIFIED: the LIVE --execute install against strih (scp + Register-ScheduledTask + :8770 verify)
+  is the supervisor's rig step — no ssh/scp/MCP from this lane.
