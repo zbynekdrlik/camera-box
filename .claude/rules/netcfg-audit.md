@@ -108,3 +108,5 @@ WITHOUT paging, so a mis-provisioned dev1 never spams).
 - **Scope boundary:** this facet is switch/router config + counter drift ONLY. The still-open
   mDNS-discovery flakiness (CAM1 invisible to imag) and the #787 status-page relock/arrival charting
   are separate, out of this facet.
+
+- **`_nc_ssh` carries `ssh -n` — NEVER remove it (#1110 hotfix, 2026-08-25):** `_nc_drop_rate_verdict` runs ssh INSIDE the `--check` drop-probe `while read` loop fed by a herestring; an ssh without `-n` consumes the loop's remaining stdin, so the loop silently dies after the FIRST probed port and later nodes (the designated strih-uplink included) are never probed. Live repro: bash -x showed exactly one probe call, then loop end. Pinned by `nc_ssh_is_stdin_safe_for_while_read_loops` in tests/harness_netcfg_audit_797.rs.
