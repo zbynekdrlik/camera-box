@@ -359,3 +359,158 @@ fn read_e2e() -> String {
     let p = manifest_dir().join("scripts/recording-e2e.sh");
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
+
+// ---- real cambox_align_deploy path (issue 1202 review 🔴/🟡 fix) — the candidate binary's version
+// GUARD (never ship a stale build) + acked exclusion from the deploy CAMERA_SET, via the
+// CAMBOX_ALIGN_CANDIDATE_BIN + CAMBOX_ALIGN_DEPLOY_FLEET seams (no gh / no ssh). ----------------
+
+/// Writes an executable fake `camera-box` that prints `camera-box <ver>` for `--version`.
+fn write_fake_cbox(dir: &std::path::Path, name: &str, ver: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(
+        &p,
+        format!("#!/usr/bin/env bash\necho \"camera-box {ver}\"\n"),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&p).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&p, perms).unwrap();
+    p
+}
+
+/// A fake deploy-fleet.sh that records `set=<CAMERA_SET> bin=<$2>` to a marker and exits 0.
+fn write_fake_fleet(dir: &std::path::Path, marker: &std::path::Path) -> PathBuf {
+    let p = dir.join("deploy-fleet.sh");
+    std::fs::write(
+        &p,
+        format!(
+            "#!/usr/bin/env bash\nprintf 'set=%s bin=%s\\n' \"${{CAMERA_SET:-}}\" \"$2\" > {}\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&p).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&p, perms).unwrap();
+    p
+}
+
+#[test]
+fn align_binary_version_reads_the_last_field() {
+    let d = tempfile::tempdir().unwrap();
+    let bin = write_fake_cbox(d.path(), "camera-box", "1.7.0-dev.551");
+    let lib = manifest_dir().join("scripts/lib/camera-box-parity-align.sh");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg("set -euo pipefail\n. \"$LIB\"\ncambox_align_binary_version \"$BIN\"\n")
+        .env("LIB", &lib)
+        .env("BIN", &bin)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1.7.0-dev.551");
+}
+
+/// Runs `cambox_align_deploy CANDIDATE NAMES` with a fake candidate binary (version `bin_ver`) and a
+/// fake deploy-fleet. Returns (rc_is_zero, Some(marker) | None).
+fn run_deploy(candidate: &str, bin_ver: Option<&str>, names: &str) -> (bool, Option<String>) {
+    let lib = manifest_dir().join("scripts/lib/camera-box-parity-align.sh");
+    let d = tempfile::tempdir().unwrap();
+    let marker = d.path().join("fleet-invoked");
+    let fleet = write_fake_fleet(d.path(), &marker);
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg("set -euo pipefail\n. \"$LIB\"\ncambox_align_deploy \"$CAND\" \"$NAMES\"\n")
+        .env("LIB", &lib)
+        .env("CAND", candidate)
+        .env("NAMES", names)
+        .env("CAMBOX_ALIGN_DEPLOY_FLEET", &fleet);
+    match bin_ver {
+        Some(v) => {
+            let bin = write_fake_cbox(d.path(), "camera-box", v);
+            cmd.env("CAMBOX_ALIGN_CANDIDATE_BIN", &bin);
+        }
+        None => {
+            cmd.env(
+                "CAMBOX_ALIGN_CANDIDATE_BIN",
+                d.path().join("does-not-exist"),
+            );
+        }
+    }
+    let out = cmd.output().unwrap();
+    let deploy = std::fs::read_to_string(&marker).ok();
+    (out.status.success(), deploy)
+}
+
+#[test]
+fn deploy_ships_the_candidate_only_when_the_binary_version_matches() {
+    let (ok, marker) = run_deploy("1.7.0-dev.551", Some("1.7.0-dev.551"), "cam3 cam4");
+    assert!(ok, "a matching-version candidate must deploy (rc=0)");
+    let m = marker.expect("deploy-fleet must be invoked on a version match");
+    assert!(
+        m.contains("set=cam3 cam4 bin="),
+        "deploy-fleet must be invoked with --binary + CAMERA_SET='cam3 cam4': {m}"
+    );
+}
+
+#[test]
+fn deploy_never_ships_a_stale_build_on_version_mismatch() {
+    // The review 🔴: a stale build must NEVER be deployed to "align" (it just needlessly redeploys
+    // and the gate still refuses). Guarded by the candidate-version match.
+    let (ok, marker) = run_deploy("1.7.0-dev.551", Some("1.7.0-dev.550"), "cam3");
+    assert!(
+        !ok,
+        "a version mismatch must return non-zero (deploy refused)"
+    );
+    assert_eq!(
+        marker, None,
+        "deploy-fleet must NOT be invoked when the newest build != candidate (no stale deploy)"
+    );
+}
+
+#[test]
+fn deploy_returns_nonzero_and_skips_when_the_candidate_binary_is_missing() {
+    let (ok, marker) = run_deploy("1.7.0-dev.551", None, "cam3");
+    assert!(!ok, "a missing candidate binary must return non-zero");
+    assert_eq!(
+        marker, None,
+        "deploy-fleet must NOT be invoked with no binary"
+    );
+}
+
+#[test]
+fn orchestrator_excludes_acked_boxes_from_the_deploy_camera_set() {
+    // issue 1202 review 🟡: deploy-fleet.sh does not consult CAMBOX_OFFLINE_ACK, so an acked box must
+    // never enter the deploy CAMERA_SET. cam3 uniform-stale -> ALIGN; cam4 acked -> deploy scope=cam3.
+    let lib = manifest_dir().join("scripts/lib/camera-box-parity-align.sh");
+    let d = tempfile::tempdir().unwrap();
+    let marker = d.path().join("fleet-invoked");
+    let fleet = write_fake_fleet(d.path(), &marker);
+    let cand_bin = write_fake_cbox(d.path(), "camera-box", "1.7.0-dev.551");
+    let f3 = d.path().join("ver-cam3");
+    std::fs::write(&f3, "camera-box 1.7.0-dev.550\n").unwrap();
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg("set -euo pipefail\n. \"$LIB\"\ncambox_parity_align_before_gate \"$NODES\"\n")
+        .env("LIB", &lib)
+        .env("NODES", "cam3=root@10.0.0.3 cam4=root@10.0.0.4")
+        .env("CAMBOX_ALIGN_CANDIDATE", "1.7.0-dev.551")
+        .env("CAMBOX_OFFLINE_ACK", "cam4:battery")
+        .env("CAMERA_BOX_VERSION_GATE_VERSION_CAM3", &f3)
+        .env("CAMBOX_ALIGN_CANDIDATE_BIN", &cand_bin)
+        .env("CAMBOX_ALIGN_DEPLOY_FLEET", &fleet)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "orchestrator must return 0");
+    let m = std::fs::read_to_string(&marker).expect("deploy-fleet must be invoked (cam3 is ALIGN)");
+    assert!(
+        m.contains("set=cam3 bin="),
+        "deploy scope must be exactly cam3: {m}"
+    );
+    assert!(
+        !m.contains("cam4"),
+        "the acked-offline cam4 must NOT appear in the deploy CAMERA_SET: {m}"
+    );
+}

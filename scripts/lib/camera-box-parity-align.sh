@@ -91,7 +91,12 @@ cambox_align_action() {
 
 # cambox_align_version_from_output TEXT -> the camera-box version in TEXT (raw `camera-box
 # --version` stdout). LAST match wins (defensive against a leading SSH banner), "" if none.
-# Mirrors camera-box-version-gate.sh's own parser so the align + the gate read identically.
+# DELIBERATE byte-for-byte copy of camera-box-version-gate.sh's camera_box_version_from_version_output
+# (and cambox_align_candidate_version mirrors its camera_box_version_from_cargo_toml): the align +
+# the gate MUST parse identically, but this lib must NOT `source` the gate -- the gate has a top-level
+# `set -euo pipefail` that would leak into recording-e2e.sh (violating the source-only-lib convention).
+# The copy is the intentional trade-off; a shared set-e-free parser lib both could source would avoid
+# the drift risk if these ever diverge.
 cambox_align_version_from_output() {
   local text="$1"
   printf '%s\n' "$text" \
@@ -143,29 +148,80 @@ cambox_align_read_version() {
     "$target" '/usr/local/bin/camera-box --version' 2>/dev/null || true)"
 }
 
-# cambox_align_deploy CANDIDATE NAMES -> deploy THIS run's candidate binary to /usr/local/bin/
+# cambox_align_binary_version BIN -> the camera-box version a binary reports (`BIN --version` last
+# field), mirroring deploy-fleet.sh's own NEW_VER read, "" if unreadable. Pure over the given file.
+cambox_align_binary_version() {
+  local bin="$1"
+  "$bin" --version 2>/dev/null | awk '{print $NF}' | head -1 || true
+}
+
+# cambox_align_deploy CANDIDATE NAMES -> deploy the CANDIDATE camera-box build to /usr/local/bin/
 # camera-box across the space-separated cam NAMES, via the existing deploy-fleet.sh (its full
-# stop->rw->scp->byte-verify->start->version-verify->genlock-emit cycle; it REFUSES on any
-# mismatch). Returns deploy-fleet's exit. Reuses $PROBE_BIN_DIR/camera-box -- this run's candidate
-# build already in hand (version-identical to the Cargo.toml candidate; the #174 burn is
-# runtime-gated OFF in production, so it is behaviourally identical to the clean binary with the
-# burn env unset) -- so no second artifact download/build; the next push-to-main auto-deploy
-# overwrites /usr/local/bin/camera-box with the clean camera-box-linux-amd64. Test seam:
-# CAMBOX_ALIGN_DEPLOY_CMD (run instead of the real deploy, with CAMERA_SET / CAMBOX_ALIGN_CANDIDATE
-# exported); binary override: CAMBOX_ALIGN_BINARY.
+# stop->rw->scp->byte-verify->start->version-verify->genlock-emit cycle; it REFUSES on any mismatch).
+# Returns deploy-fleet's exit (0 = deployed + verified).
+#
+# BINARY SOURCE (issue 1202 review fix): the CLEAN `camera-box-linux-amd64` CI artifact for the
+# candidate, downloaded from the newest successful ci.yml run on the candidate branch. This binary
+# EXISTS at [0/8] (ci.yml built it on the dev push that produced the candidate), whereas the
+# harness's own $PROBE_BIN_DIR/camera-box is not built until [1/8] -- AFTER this align -- so sourcing
+# it here would deploy a STALE (previous-candidate) build or none (the original review 🔴). Deploying
+# the CLEAN artifact is also the architecturally-correct production binary (not the probe-featured
+# one). A hard version GUARD: if the newest published build != the candidate (the candidate's own
+# ci.yml is not done yet), NOT deployed -- never ship a stale build to "align" (the gate then refuses;
+# it self-heals once ci.yml publishes the candidate). Best-effort: any resolve/download/gh failure ->
+# return non-zero, the gate below decides.
+#
+# Test seams: CAMBOX_ALIGN_DEPLOY_CMD (full override; run instead of the real deploy, with CAMERA_SET
+# / CAMBOX_ALIGN_CANDIDATE exported); CAMBOX_ALIGN_CANDIDATE_BIN (a pre-fetched binary path, skips the
+# gh download); CAMBOX_ALIGN_DEPLOY_FLEET (deploy-fleet.sh path; default the real sibling script);
+# CAMBOX_ALIGN_REPO / CAMBOX_ALIGN_CI_BRANCH (artifact source, default zbynekdrlik/camera-box / dev).
 cambox_align_deploy() {
   local candidate="$1" names="$2"
   if [ -n "${CAMBOX_ALIGN_DEPLOY_CMD:-}" ]; then
     CAMERA_SET="$names" CAMBOX_ALIGN_CANDIDATE="$candidate" bash -c "$CAMBOX_ALIGN_DEPLOY_CMD"
     return $?
   fi
-  local binary="${CAMBOX_ALIGN_BINARY:-${PROBE_BIN_DIR:-target/release}/camera-box}"
-  if [ ! -x "$binary" ]; then
-    echo "[0/8] camera-box parity auto-align (#1202): candidate binary '$binary' missing/not executable -- cannot align; the gate below decides." >&2
+  local deploy_fleet="${CAMBOX_ALIGN_DEPLOY_FLEET:-$_CBPA_HERE/../deploy-fleet.sh}"
+  local bin="${CAMBOX_ALIGN_CANDIDATE_BIN:-}" dist=""
+  if [ -z "$bin" ]; then
+    command -v gh >/dev/null 2>&1 || {
+      echo "[0/8] camera-box parity auto-align (#1202): gh CLI unavailable -- cannot source the candidate camera-box artifact; the gate below decides." >&2
+      return 1
+    }
+    local repo="${CAMBOX_ALIGN_REPO:-${REPO:-zbynekdrlik/camera-box}}"
+    local branch="${CAMBOX_ALIGN_CI_BRANCH:-dev}"
+    local run_id
+    run_id="$(gh run list --repo "$repo" --branch "$branch" --workflow ci.yml --status success --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+    if [ -z "$run_id" ]; then
+      echo "[0/8] camera-box parity auto-align (#1202): no successful ci.yml run on '$branch' to source the candidate camera-box-linux-amd64; the gate below decides." >&2
+      return 1
+    fi
+    dist="$(mktemp -d)"
+    if ! gh run download "$run_id" --repo "$repo" -n camera-box-linux-amd64 --dir "$dist" >/dev/null 2>&1; then
+      echo "[0/8] camera-box parity auto-align (#1202): could not download camera-box-linux-amd64 from ci.yml run $run_id; the gate below decides." >&2
+      rm -rf "$dist"
+      return 1
+    fi
+    bin="$dist/camera-box"
+  fi
+  if [ ! -f "$bin" ]; then
+    echo "[0/8] camera-box parity auto-align (#1202): candidate camera-box artifact missing ('$bin'); the gate below decides." >&2
+    [ -n "$dist" ] && rm -rf "$dist"
     return 1
   fi
+  chmod +x "$bin" 2>/dev/null || true
+  local ver
+  ver="$(cambox_align_binary_version "$bin")"
+  if [ "$ver" != "$candidate" ]; then
+    echo "[0/8] camera-box parity auto-align (#1202): newest ci.yml build is ${ver:-<unreadable>}, not the candidate ${candidate} -- NOT deploying a stale build (the candidate's own ci.yml build is not published yet; the gate refuses and self-heals once it completes)." >&2
+    [ -n "$dist" ] && rm -rf "$dist"
+    return 1
+  fi
+  local rc=0
   CAMERA_SET="$names" SSH_PASS="${CAM_PW:-newlevel}" \
-    "$_CBPA_HERE/../deploy-fleet.sh" --binary "$binary"
+    "$deploy_fleet" --binary "$bin" || rc=$?
+  [ -n "$dist" ] && rm -rf "$dist"
+  return "$rc"
 }
 
 # cambox_parity_align_before_gate NODE_LIST -> the orchestrator recording-e2e.sh calls right before
@@ -185,15 +241,23 @@ cambox_parity_align_before_gate() {
   candidate="$(cambox_align_candidate_version)"
   local -a entries=() names=()
   local pair name target version
-  # NODE_LIST is intentionally word-split into "name=target" pairs (same shape the gate consumes).
+  # NODE_LIST is intentionally word-split into "name=target" pairs (same shape + the same set -f
+  # glob-guard idiom the gate uses on the identical split, camera-box-version-gate.sh).
+  set -f
   # shellcheck disable=SC2086
   for pair in $node_list; do
     name="${pair%%=*}"
     target="${pair#*=}"
     version="$(cambox_align_read_version "$name" "$target")"
+    # entries feed the DECISION (cambox_align_action skips acked boxes itself).
     entries+=("${name}=${version}")
+    # names feed the DEPLOY scope -> exclude acked-offline boxes here too (issue 1202 review 🟡:
+    # deploy-fleet.sh does NOT consult CAMBOX_OFFLINE_ACK, so an acked box must never enter the
+    # deploy CAMERA_SET -- mirror the decision + the gate, cambox-offline-ack.sh).
+    cambox_offline_ack_is_acked "$name" && continue
     names+=("$name")
   done
+  set +f
   if [ "${#entries[@]}" -eq 0 ]; then
     echo "[0/8] camera-box parity auto-align (#1202): no cam nodes in the list -- nothing to align; the gate below decides."
     return 0
