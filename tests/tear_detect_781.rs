@@ -21,7 +21,8 @@ use camera_box::tear_detect::{window_tear_stats, TearSignalViability};
 /// header. Returns one `(primary_ids, aux_ids)` per frame — aux always empty (pre-aux content).
 fn load_fixture_file(rel: &str) -> Vec<(Vec<u32>, Vec<u32>)> {
     let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {path} readable: {e}"));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {path} readable: {e}"));
     text.lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .map(|l| {
@@ -112,7 +113,11 @@ fn real_multitile_window_is_multi_path_skew_not_torn_1196() {
     // (>= 3 primary ids = >= 2 tiles), excluded from the tear count, so tear_frames == 0 and the
     // signal is Unproven — the honest "multi-tile, tear unscoreable here" verdict.
     let frames = load_fixture_file("tests/fixtures/tear-781/cam2_window_multitile_ids_1196.txt");
-    assert_eq!(frames.len(), 846, "fixture frame count (first 846 real frames)");
+    assert_eq!(
+        frames.len(),
+        846,
+        "fixture frame count (first 846 real frames)"
+    );
 
     let stats = window_tear_stats(&frames);
 
@@ -128,16 +133,31 @@ fn real_multitile_window_is_multi_path_skew_not_torn_1196() {
         stats.multi_path_suspect_fraction
     );
     // Only the 2 single-source frames (both healthy adjacent pairs, span 1) are scored.
-    assert_eq!(stats.decodable_frames, 2, "only single-source frames scored");
-    assert_eq!(stats.tear_frames, 0, "inter-path skew is NOT a tear (v2 read ~844)");
+    assert_eq!(
+        stats.decodable_frames, 2,
+        "only single-source frames scored"
+    );
+    assert_eq!(
+        stats.tear_frames, 0,
+        "inter-path skew is NOT a tear (v2 read ~844)"
+    );
     assert_eq!(stats.tear_fraction, 0.0);
-    assert_eq!(stats.max_spread, 1, "the 2 single-source frames are healthy adjacencies");
-    assert_eq!(stats.max_cluster_count, 2, "peak 2 composited tiles per frame");
+    assert_eq!(
+        stats.max_spread, 1,
+        "the 2 single-source frames are healthy adjacencies"
+    );
+    assert_eq!(
+        stats.max_cluster_count, 2,
+        "peak 2 composited tiles per frame"
+    );
     assert_eq!(
         stats.max_multi_path_spread, 3,
         "peak inter-path skew surfaced separately from the (clean) tear magnitude"
     );
-    assert_eq!(stats.aux_decode_fraction, 0.0, "aux QRs did not survive the lossy chain on this run");
+    assert_eq!(
+        stats.aux_decode_fraction, 0.0,
+        "aux QRs did not survive the lossy chain on this run"
+    );
     assert_eq!(
         stats.viability,
         TearSignalViability::Unproven,

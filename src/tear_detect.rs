@@ -165,9 +165,8 @@ pub fn is_multi_path_suspect(primary_ids: &[u32]) -> bool {
 /// A multi-source (multi-tile) frame is NEVER torn: its wide span is inter-path skew, not a tear
 /// (issue 1196 v2.1) — scoping it requires per-cluster pixel positions the payloads do not carry.
 pub fn is_torn_frame(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
-    // [red] not yet wired to is_multi_path_suspect — still the v2 union-global logic that
-    // mis-scores multi-tile skew as a tear. The GREEN commit adds the single-source guard.
-    frame_union_spread(primary_ids, aux_ids).is_some_and(|s| s > VERNIER_MAX_SPREAD)
+    !is_multi_path_suspect(primary_ids)
+        && frame_union_spread(primary_ids, aux_ids).is_some_and(|s| s > VERNIER_MAX_SPREAD)
 }
 
 /// Whether the tear signal has DEMONSTRABLY fired on the analyzed data — the machine-checked
@@ -253,23 +252,38 @@ pub struct TearStats {
 /// >= 3 primary optical ids is MULTI-PATH SUSPECT (composited from >= 2 tiles) and is excluded
 /// from the tear count — only single-source frames are scored (see the module doc).
 pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
-    // [red] still the v2 union-global logic: every decodable frame is scored, multi-tile
-    // composites are NOT excluded, and the new suspect/cluster fields are stubbed to 0. The GREEN
-    // commit wires in the single-source (cluster) scoping. This version therefore FAILS the new
-    // multi-tile-safety assertions (real fixture: 844 suspect vs 0; window_multi_tile_skew).
     let total_frames = per_frame_ids.len() as u32;
     let mut decodable_frames = 0u32;
     let mut tear_frames = 0u32;
     let mut max_spread = 0u32;
     let mut aux_full_frames = 0u32;
     let mut primary_dark_aux_alive = 0u32;
+    let mut multi_path_suspect_frames = 0u32;
+    let mut max_cluster_count = 0u32;
+    let mut max_multi_path_spread = 0u32;
     for (primary, aux) in per_frame_ids {
+        let clusters = frame_cluster_count(primary);
+        if clusters > max_cluster_count {
+            max_cluster_count = clusters;
+        }
         if aux.len() >= 2 {
             aux_full_frames += 1;
             if primary.is_empty() {
                 primary_dark_aux_alive += 1;
             }
         }
+        if is_multi_path_suspect(primary) {
+            // Multi-source frame: its union span is inter-path skew, not a scanout tear, and the
+            // ids cannot be attributed to a tile without pixel positions -> UNSCOREABLE for tear.
+            multi_path_suspect_frames += 1;
+            if let Some(spread) = frame_union_spread(primary, aux) {
+                if spread > max_multi_path_spread {
+                    max_multi_path_spread = spread;
+                }
+            }
+            continue;
+        }
+        // Single-source frame (<= 1 inferred tile): scoreable for tear.
         if let Some(spread) = frame_union_spread(primary, aux) {
             decodable_frames += 1;
             if spread > max_spread {
@@ -280,9 +294,6 @@ pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
             }
         }
     }
-    let multi_path_suspect_frames = 0u32;
-    let max_cluster_count = 0u32;
-    let max_multi_path_spread = 0u32;
     let tear_fraction = if decodable_frames > 0 {
         tear_frames as f64 / decodable_frames as f64
     } else {
@@ -391,7 +402,10 @@ mod tests {
         // treatment of {100,101,102,103} as a single-tile tear (a single band cannot yield 4 clean
         // generations; that shape is a multi-tile composite).
         assert!(is_multi_path_suspect(&[100, 101, 102, 103]));
-        assert!(!is_torn_frame(&[100, 101, 102, 103], &[]), "multi-tile skew, not a tear");
+        assert!(
+            !is_torn_frame(&[100, 101, 102, 103], &[]),
+            "multi-tile skew, not a tear"
+        );
         assert!(is_multi_path_suspect(&[100, 101, 102]), "3 ids = 2 tiles");
         assert!(!is_torn_frame(&[100, 101, 102], &[]));
         assert_eq!(frame_cluster_count(&[]), 0);
@@ -481,7 +495,10 @@ mod tests {
         let s = window_tear_stats(&frames);
         assert_eq!(s.tear_frames, 1);
         assert_eq!(s.max_spread, 3);
-        assert_eq!(s.multi_path_suspect_frames, 0, "all single-source (2 primary ids each)");
+        assert_eq!(
+            s.multi_path_suspect_frames, 0,
+            "all single-source (2 primary ids each)"
+        );
         assert_eq!(s.viability, TearSignalViability::Observed);
     }
 
@@ -502,12 +519,21 @@ mod tests {
         assert_eq!(s.decodable_frames, 0, "no single-source frame to score");
         assert_eq!(s.tear_frames, 0, "inter-path skew is not a tear");
         assert_eq!(s.tear_fraction, 0.0);
-        assert_eq!(s.max_spread, 0, "clean single-tile magnitude untouched by skew");
+        assert_eq!(
+            s.max_spread, 0,
+            "clean single-tile magnitude untouched by skew"
+        );
         assert_eq!(s.max_cluster_count, 2);
-        assert_eq!(s.max_multi_path_spread, 3, "peak inter-path skew surfaced separately");
+        assert_eq!(
+            s.max_multi_path_spread, 3,
+            "peak inter-path skew surfaced separately"
+        );
         assert!((s.multi_path_suspect_fraction - 1.0).abs() < 1e-9);
         assert_eq!(s.viability, TearSignalViability::Unproven);
-        assert!(tear_gate_pass(&s), "a fully-suspect window has no scoreable tear");
+        assert!(
+            tear_gate_pass(&s),
+            "a fully-suspect window has no scoreable tear"
+        );
     }
 
     #[test]
