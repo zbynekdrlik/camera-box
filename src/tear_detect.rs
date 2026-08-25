@@ -164,53 +164,95 @@ pub fn run_tear_gate_pass(stats: &[TearStats]) -> bool {
 mod tests {
     use super::*;
 
+    /// Shorthand: a per-frame `(primary_ids, aux_ids)` pair for `window_tear_stats`.
+    fn f(primary: &[u32], aux: &[u32]) -> (Vec<u32>, Vec<u32>) {
+        (primary.to_vec(), aux.to_vec())
+    }
+
     #[test]
     fn healthy_vernier_pair_is_not_torn() {
-        // LEFT=even 100, RIGHT=odd 101 -> span 1 -> the by-design adjacency, NOT a tear.
-        assert!(!is_torn_frame(&[100, 101]));
-        assert!(!is_torn_frame(&[101, 100]));
+        // LEFT=even 100, RIGHT=odd 101 -> span 1 -> the by-design adjacency, NOT a tear —
+        // with or without the aux pair (issue 1196) echoing the same generation.
+        assert!(!is_torn_frame(&[100, 101], &[]));
+        assert!(!is_torn_frame(&[101, 100], &[]));
+        assert!(!is_torn_frame(&[100, 101], &[100, 101]));
         assert_eq!(frame_optical_spread(&[100, 101]), Some(1));
+        assert_eq!(frame_union_spread(&[100, 101], &[100, 101]), Some(1));
     }
 
     #[test]
     fn single_optical_half_is_not_torn() {
         // Only one half decoded (span 0) — clean, not a tear.
-        assert!(!is_torn_frame(&[100]));
+        assert!(!is_torn_frame(&[100], &[]));
         assert_eq!(frame_optical_spread(&[100]), Some(0));
+        assert_eq!(frame_union_spread(&[100], &[]), Some(0));
     }
 
     #[test]
     fn undecodable_frame_has_no_spread_and_is_not_torn() {
         assert_eq!(frame_optical_spread(&[]), None);
-        assert!(!is_torn_frame(&[]));
+        assert_eq!(frame_union_spread(&[], &[]), None);
+        assert!(!is_torn_frame(&[], &[]));
     }
 
     #[test]
     fn two_generations_in_one_frame_is_torn() {
         // A scanout tear captured gen G (even 100, odd 101) AND gen G+1 (even 102, odd 103):
         // span = 103-100 = 3 > VERNIER_MAX_SPREAD -> TORN.
-        assert!(is_torn_frame(&[100, 101, 102, 103]));
-        assert_eq!(frame_optical_spread(&[100, 101, 102, 103]), Some(3));
+        assert!(is_torn_frame(&[100, 101, 102, 103], &[]));
+        assert_eq!(frame_union_spread(&[100, 101, 102, 103], &[]), Some(3));
         // Minimal tear: span exactly 2 (one generation step beyond the even/odd pair).
-        assert!(is_torn_frame(&[100, 102]));
-        assert_eq!(frame_optical_spread(&[100, 102]), Some(2));
+        assert!(is_torn_frame(&[100, 102], &[]));
+        assert_eq!(frame_union_spread(&[100, 102], &[]), Some(2));
+    }
+
+    #[test]
+    fn cross_band_generation_split_is_torn_1196() {
+        // THE issue-1196 capability: a horizontal seam BETWEEN the primary band and the aux
+        // band — the primary pair decodes gen G+1 (ticks 102/103) while the aux pair still
+        // shows gen G (ticks 100/101). Neither band alone spans > 1, but the UNION does.
+        assert!(!is_torn_frame(&[102, 103], &[]), "primary alone is clean");
+        assert!(!is_torn_frame(&[], &[100, 101]), "aux alone is clean");
+        assert!(
+            is_torn_frame(&[102, 103], &[100, 101]),
+            "the primary-vs-aux generation split IS the tear"
+        );
+        assert_eq!(frame_union_spread(&[102, 103], &[100, 101]), Some(3));
+        // Minimal cross-band tear: a SINGLE aux mark one generation behind is enough —
+        // union {101, 102, 103} spans 2 > VERNIER_MAX_SPREAD.
+        assert!(is_torn_frame(&[102, 103], &[101]));
+        assert_eq!(frame_union_spread(&[102, 103], &[101]), Some(2));
+        assert!(is_torn_frame(&[102, 103], &[100]), "span 3 via one aux mark");
     }
 
     #[test]
     fn window_all_healthy_is_unproven_zero_tears() {
-        let frames = vec![vec![100, 101], vec![102, 103], vec![104], vec![]];
+        let frames = vec![
+            f(&[100, 101], &[100, 101]),
+            f(&[102, 103], &[102, 103]),
+            f(&[104], &[]),
+            f(&[], &[]),
+        ];
         let s = window_tear_stats(&frames);
+        assert_eq!(s.total_frames, 4, "every attributed frame is counted");
         assert_eq!(s.decodable_frames, 3, "undecodable frame excluded");
         assert_eq!(s.tear_frames, 0);
         assert_eq!(s.tear_fraction, 0.0);
         assert_eq!(s.max_spread, 1);
+        // 2 of 4 frames decoded BOTH aux marks.
+        assert!((s.aux_decode_fraction - 0.5).abs() < 1e-9);
+        assert_eq!(s.primary_dark_aux_alive_fraction, 0.0);
         assert_eq!(s.viability, TearSignalViability::Unproven);
         assert!(tear_gate_pass(&s));
     }
 
     #[test]
     fn window_with_a_tear_is_observed() {
-        let frames = vec![vec![100, 101], vec![102, 103, 104, 105], vec![106, 107]];
+        let frames = vec![
+            f(&[100, 101], &[]),
+            f(&[102, 103, 104, 105], &[]),
+            f(&[106, 107], &[]),
+        ];
         let s = window_tear_stats(&frames);
         assert_eq!(s.decodable_frames, 3);
         assert_eq!(s.tear_frames, 1);
@@ -224,16 +266,57 @@ mod tests {
     }
 
     #[test]
+    fn window_cross_band_tear_is_observed_1196() {
+        // A cross-band seam frame inside an otherwise healthy window fires the signal.
+        let frames = vec![
+            f(&[100, 101], &[100, 101]),
+            f(&[102, 103], &[100, 101]), // primary advanced, aux one generation behind
+            f(&[104, 105], &[104, 105]),
+        ];
+        let s = window_tear_stats(&frames);
+        assert_eq!(s.tear_frames, 1);
+        assert_eq!(s.max_spread, 3);
+        assert_eq!(s.viability, TearSignalViability::Observed);
+    }
+
+    #[test]
+    fn primary_dark_aux_alive_discriminator_1196() {
+        // A seam INSIDE the 700px primary band corrupts both primary halves (undecodable
+        // primary) while BOTH bottom aux marks still decode — band-localized corruption, the
+        // exact shape the primary-only v1 detector counted as a plain undecodable. The frame
+        // is decodable via the union (aux) and NOT torn (aux span 1); the discriminator
+        // fraction counts it against ALL attributed frames.
+        let frames = vec![
+            f(&[100, 101], &[100, 101]),
+            f(&[], &[102, 103]), // primary dark, both aux alive
+            f(&[], &[104]),      // primary dark, only ONE aux — NOT the discriminator shape
+            f(&[], &[]),         // fully undecodable
+        ];
+        let s = window_tear_stats(&frames);
+        assert_eq!(s.total_frames, 4);
+        assert_eq!(s.decodable_frames, 3, "union-decodable: frames 0, 1, 2");
+        assert_eq!(s.tear_frames, 0);
+        // Frames 0 and 1 decoded both aux marks: 2/4.
+        assert!((s.aux_decode_fraction - 0.5).abs() < 1e-9);
+        // Only frame 1 is primary-dark with BOTH aux alive: 1/4.
+        assert!((s.primary_dark_aux_alive_fraction - 0.25).abs() < 1e-9);
+        assert_eq!(s.viability, TearSignalViability::Unproven);
+    }
+
+    #[test]
     fn empty_window_is_unproven_and_passes() {
         let s = window_tear_stats(&[]);
+        assert_eq!(s.total_frames, 0);
         assert_eq!(s.decodable_frames, 0);
         assert_eq!(s.tear_fraction, 0.0);
+        assert_eq!(s.aux_decode_fraction, 0.0);
+        assert_eq!(s.primary_dark_aux_alive_fraction, 0.0);
         assert_eq!(s.viability, TearSignalViability::Unproven);
         assert!(tear_gate_pass(&s));
     }
 
     #[test]
     fn report_only_seam_is_disarmed() {
-        assert!(!gates_overall_pass(), "issue 781 ships report-only");
+        assert!(!gates_overall_pass(), "issue 781/1196 ships report-only");
     }
 }
