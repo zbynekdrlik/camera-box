@@ -10467,3 +10467,33 @@ No push/PR/rig touch (worktree worker).
   refs/autopilot-wip/worktree-agent-a200745f1be8412e3; supervisor integrates.
 - UNVERIFIED: the LIVE --execute install against strih (scp + Register-ScheduledTask + :8770 verify)
   is the supervisor's rig step — no ssh/scp/MCP from this lane.
+
+## 2026-08-25 — issue 1196 (sub-step) — tear_detect v2 union-span MULTI-TILE-SAFE [worktree lane; #1196 stays OPEN]
+- Finding (supervisor, first real aux run 1859005342; durable ~/.claude/work-products/1196-fixture/,
+  ticket comment 5415952812): recorded program is MULTI-TILE (ALL_CAMBOX = 2 grabber-path tiles of
+  the SAME painted cam2 monitor), so one frame decodes 3-4 primary optical QRs offset ~2-4 ticks;
+  v2's plain union span read tear_fraction ~0.99 / max_spread 4 (one window 14) = inter-path SKEW,
+  not a scanout tear. Also aux_decode_fraction 0.0 (210px aux QRs halved in a tile, undecodable) —
+  aux cure inert on current content (separate problem, not this sub-step).
+- Design (comment 5416330849): positions NOT carried in partial v6 (Payload = run_id/frame_id/
+  gen_ts_ns only), so geometric per-cluster scoping is the named FOLLOW-UP (schema bump + qr.rs
+  position capture + fleet redeploy). Chose the honest position-free fallback: one tile's dual-QR
+  band yields AT MOST 2 optical QRs, so >=3 primary ids = >=2 tiles = MULTI-PATH SUSPECT,
+  unscoreable for tear; score only single-source (<=2-id) frames. Genuine single-cluster tear
+  ({100,102} / cross-band primary∪aux) preserved. Rejected: per-cluster-with-positions (schema
+  bump, out of scope) + tear-gate-only-on-single-tile-scene (rig scene coordination).
+- Code: src/tear_detect.rs — new frame_cluster_count / is_multi_path_suspect; is_torn_frame gains
+  single-source guard; window_tear_stats excludes suspects + adds multi_path_suspect_frames/_fraction,
+  max_cluster_count, max_multi_path_spread (report-only). recording-verdict.rs unchanged (serde_to_value
+  carries the new fields). Stays REPORT-ONLY (gates_overall_pass()=false).
+- Real-data regression fixture: tests/fixtures/tear-781/cam2_window_multitile_ids_1196.txt (first 846
+  frames of stream-partial-1859005342). Under v2.1: 844 suspect, tear_frames 0, viability Unproven,
+  multi_path_suspect_fraction ~0.998; under v2: 844 torn / tear_fraction 0.9976 (the observed RED).
+- Verify (Tier-0, no cargo): serde-stripped `rustc --edition 2021 --test` replica GREEN 16/16
+  (12 unit + 3 real-fixture integ + 1); RED (v2 logic + new tests) 4 fail. rustfmt --edition 2021
+  --check clean on both touched .rs.
+- Commits: bump cc9fd20a6 -> [red] 0d5994d20 -> [green] 8015bea5e -> [docs] this entry + rule note.
+  Worktree branch worktree-agent-a2e063ff8381262bd; durability backup
+  refs/autopilot-wip/worktree-agent-a2e063ff8381262bd; supervisor integrates.
+- UNVERIFIED: probe-gated recording-verdict.rs wiring type-checks ONLY on CI (no local compile path);
+  verified structurally via rustfmt + hand type-audit (serde_to_value serialization, no consumer edit).
