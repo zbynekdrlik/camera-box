@@ -311,6 +311,15 @@ pub mod grabber_stuck;
 // path (gated off by CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL) via a new SelfHealMessages const.
 pub mod capture_overrate;
 
+// #1200 — cam3 ShadowCast LATCH-HALVING detector: the 4th self-heal trigger. Keys on the
+// capture-side byte-identical dupe FRACTION (reusing the #889 content_hash): healthy 30fps-into-60fps
+// is ~0.5 (each unique 2x), latch-halved is ~0.75 (each unique 4x, 15 unique/s in 60fps) — bands
+// non-overlapping with a dead-zone, the discriminator role #1128's corrupted band / #1193's shed
+// churn play. Blind spot the other three miss: correct 60fps pace, 0 over-rate, 0 corrupted. Pure
+// decision + report-line formatting + the cooldown predicate, no probe deps — Tier-0 tested; funnels
+// into the shared capture_rate_selfheal USB-reset path (gated off by CAMERA_BOX_GRABBER_HALVING_SELFHEAL).
+pub mod capture_latch_halving;
+
 // #625 — order-independent REAL-DROP ("gap") detection for the all-cambox painted-tick window
 // continuity check: the stream recording is documented (`#133`/`#196`/`#216`) to occasionally
 // deliver frames "softened"/out of order (a one-frame-late 60->30 straddle); a RECORDED-order
