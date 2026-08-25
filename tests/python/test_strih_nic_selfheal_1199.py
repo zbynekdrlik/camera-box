@@ -10,9 +10,11 @@ tests/python/test_avsync_lineup.py <-> avsync-watchdog.ps1):
   2. STATIC: validate scripts/strih-nic-selfheal.ps1 + scripts/install-strih-nic-selfheal.ps1
      structurally (there is no pwsh runtime on dev1 CI). Anchors pin the load-bearing invariants:
      ladder thresholds present AND equal to the python constants (the mirror stays in lock-step),
+     NO Restart-NetAdapter rung (owner ruling 2026-08-25 -- disable/enable HANGS on strih),
      `shutdown /r` (a reboot) and NEVER `shutdown /s` (a power-off), the fail-safe UNKNOWN branch,
-     the best-effort OBS-WS graceful-stop guard, the state-file schema, and the SYSTEM-every-2-min
-     scheduled task.
+     the reboot-cap transition logic (#1199 review W3), the reboot-suppressed-on-persist-failure
+     guard (review W2), the best-effort OBS-WS graceful-stop guard, the state-file schema, and the
+     SYSTEM-every-2-min scheduled task.
 """
 
 import pathlib
@@ -43,113 +45,118 @@ def _installer():
 # Layer 1 -- PURE decision core (behavioural, RED->GREEN)
 # =================================================================================================
 
-# --- classify_pass: fail-safe direction ----------------------------------------------------------
+# --- classify_pass: fail-safe direction (reachable, clean, threw) --------------------------------
 
 def test_classify_any_reachable_is_alive():
-    assert d.classify_pass(1, 3, False) == "alive"
-    assert d.classify_pass(3, 3, False) == "alive"
+    assert d.classify_pass(1, 3, 0) == "alive"
+    assert d.classify_pass(3, 3, 0) == "alive"
+
+
+def test_classify_reachable_wins_even_with_a_throw():
+    # a target answered -> the NIC works -> alive, regardless of another target throwing.
+    assert d.classify_pass(1, 2, 1) == "alive"
 
 
 def test_classify_all_clean_negatives_is_dead():
-    assert d.classify_pass(0, 3, False) == "dead"
-    assert d.classify_pass(0, 1, False) == "dead"
+    assert d.classify_pass(0, 3, 0) == "dead"
+    assert d.classify_pass(0, 1, 0) == "dead"
 
 
-def test_classify_probe_error_is_unknown_never_dead():
-    # the WHOLE fail-safe point: a probe that could not run is UNKNOWN, never a dead vote.
-    assert d.classify_pass(0, 0, True) == "unknown"
-    assert d.classify_pass(0, 3, True) == "unknown"
+def test_classify_partial_throw_no_reachable_is_unknown_not_dead():
+    # #1199 review W1: a pass is 'dead' ONLY when EVERY probe returned a clean negative. One throw
+    # with nothing reachable can never PROVE a total outage -> unknown, never dead.
+    assert d.classify_pass(0, 2, 1) == "unknown"
+
+
+def test_classify_all_threw_is_unknown():
+    assert d.classify_pass(0, 0, 3) == "unknown"
 
 
 def test_classify_nothing_probed_is_unknown():
-    assert d.classify_pass(0, 0, False) == "unknown"
+    assert d.classify_pass(0, 0, 0) == "unknown"
 
 
 def test_classify_non_numeric_is_unknown():
-    assert d.classify_pass(None, 3, False) == "unknown"
-    assert d.classify_pass("x", "y", False) == "unknown"
+    assert d.classify_pass(None, 3, 0) == "unknown"
+    assert d.classify_pass("x", "y", "z") == "unknown"
 
 
 # --- constants sanity ----------------------------------------------------------------------------
 
 def test_ladder_constants():
-    assert d.DEAD_PASSES_BEFORE_RESTART == 5
     assert d.DEAD_PASSES_BEFORE_REBOOT == 5
     assert d.MAX_REBOOTS == 2
     assert d.PROBE_INTERVAL_MIN == 2
+    # owner ruling: there is no adapter-restart rung, so no restart threshold exists.
+    assert not hasattr(d, "DEAD_PASSES_BEFORE_RESTART")
+
+
+def test_no_restart_adapter_action_exists():
+    # the ladder's only self-heal action is a reboot -- never an adapter restart.
+    assert "restart_adapter" not in d.ACTIONS
+    assert set(d.ACTIONS) == {"none", "reboot", "give_up"}
 
 
 # --- unknown never advances nor resets -----------------------------------------------------------
 
 def test_unknown_pass_leaves_state_untouched_midstreak():
-    st = {"phase": "normal", "consecutive_dead": 4, "reboots": 0}
+    st = {"phase": "armed", "consecutive_dead": 4, "reboots": 0}
     action, ns, _ = d.decide(st, "unknown")
     assert action == "none"
-    assert ns == {"phase": "normal", "consecutive_dead": 4, "reboots": 0}
+    assert ns == {"phase": "armed", "consecutive_dead": 4, "reboots": 0}
 
 
-def test_unknown_pass_does_not_reset_a_restarted_phase():
-    st = {"phase": "restarted", "consecutive_dead": 3, "reboots": 1}
+def test_unknown_pass_does_not_reset_after_a_reboot():
+    st = {"phase": "armed", "consecutive_dead": 3, "reboots": 1}
     action, ns, _ = d.decide(st, "unknown")
     assert action == "none"
-    assert ns == {"phase": "restarted", "consecutive_dead": 3, "reboots": 1}
+    assert ns == {"phase": "armed", "consecutive_dead": 3, "reboots": 1}
 
 
 # --- alive resets everything ---------------------------------------------------------------------
 
 def test_alive_resets_all_counters_and_phase():
-    st = {"phase": "rebooted", "consecutive_dead": 4, "reboots": 2}
+    st = {"phase": "exhausted", "consecutive_dead": 4, "reboots": 2}
     action, ns, _ = d.decide(st, "alive")
     assert action == "none"
-    assert ns == {"phase": "normal", "consecutive_dead": 0, "reboots": 0}
+    assert ns == {"phase": "armed", "consecutive_dead": 0, "reboots": 0}
 
 
-# --- the ladder: normal -> restart -> reboot -----------------------------------------------------
+# --- the ladder: armed -> reboot (single step, no restart rung) ----------------------------------
 
-def test_normal_below_threshold_just_counts():
+def test_armed_below_threshold_just_counts():
     st = d.initial_state()
-    for i in range(1, d.DEAD_PASSES_BEFORE_RESTART):
+    for i in range(1, d.DEAD_PASSES_BEFORE_REBOOT):
         action, st, _ = d.decide(st, "dead")
         assert action == "none", "pass %d should not act yet" % i
-        assert st["phase"] == "normal"
+        assert st["phase"] == "armed"
         assert st["consecutive_dead"] == i
+        assert st["reboots"] == 0
 
 
-def test_normal_fifth_dead_fires_restart_adapter():
+def test_fifth_dead_fires_reboot_directly_no_restart_first():
     st = d.initial_state()
-    action = "none"
-    for _ in range(d.DEAD_PASSES_BEFORE_RESTART):
-        action, st, _ = d.decide(st, "dead")
-    assert action == "restart_adapter"
-    assert st["phase"] == "restarted"
-    assert st["consecutive_dead"] == 0
-    assert st["reboots"] == 0
-
-
-def test_restarted_fifth_dead_fires_reboot():
-    st = {"phase": "restarted", "consecutive_dead": 0, "reboots": 0}
     action = "none"
     for _ in range(d.DEAD_PASSES_BEFORE_REBOOT):
         action, st, _ = d.decide(st, "dead")
-    assert action == "reboot"
-    assert st["phase"] == "rebooted"
+    assert action == "reboot"       # NOT restart_adapter -- there is no such rung
+    assert st["phase"] == "armed"
     assert st["consecutive_dead"] == 0
     assert st["reboots"] == 1
 
 
-def test_rebooted_still_dead_rearms_with_adapter_restart():
-    st = {"phase": "rebooted", "consecutive_dead": 0, "reboots": 1}
+def test_second_reboot_after_another_dead_window():
+    st = {"phase": "armed", "consecutive_dead": 0, "reboots": 1}
     action = "none"
-    for _ in range(d.DEAD_PASSES_BEFORE_RESTART):
+    for _ in range(d.DEAD_PASSES_BEFORE_REBOOT):
         action, st, _ = d.decide(st, "dead")
-    assert action == "restart_adapter"
-    assert st["phase"] == "restarted"
-    assert st["reboots"] == 1  # a re-arm does not consume another reboot
+    assert action == "reboot"
+    assert st["reboots"] == 2
+    assert st["phase"] == "armed"
 
 
 def test_reboot_cap_gives_up_after_max_reboots():
-    # already used up the reboot budget; the next reboot decision point must GIVE UP, not reboot.
-    st = {"phase": "restarted", "consecutive_dead": 0, "reboots": d.MAX_REBOOTS}
+    st = {"phase": "armed", "consecutive_dead": 0, "reboots": d.MAX_REBOOTS}
     action = "none"
     for _ in range(d.DEAD_PASSES_BEFORE_REBOOT):
         action, st, _ = d.decide(st, "dead")
@@ -158,14 +165,13 @@ def test_reboot_cap_gives_up_after_max_reboots():
     assert st["reboots"] == d.MAX_REBOOTS  # never exceeds the cap
 
 
-def test_exhausted_only_does_cheap_adapter_restarts_never_reboots():
+def test_exhausted_never_reboots_again():
     st = {"phase": "exhausted", "consecutive_dead": 0, "reboots": d.MAX_REBOOTS}
-    action = "none"
-    for _ in range(d.DEAD_PASSES_BEFORE_RESTART):
+    for _ in range(3 * d.DEAD_PASSES_BEFORE_REBOOT):
         action, st, _ = d.decide(st, "dead")
-    assert action == "restart_adapter"
-    assert st["phase"] == "exhausted"
-    assert st["reboots"] == d.MAX_REBOOTS
+        assert action == "none"
+        assert st["phase"] == "exhausted"
+        assert st["reboots"] == d.MAX_REBOOTS
 
 
 def test_full_outage_walk_fires_exactly_two_reboots_then_gives_up():
@@ -182,18 +188,19 @@ def test_full_outage_walk_fires_exactly_two_reboots_then_gives_up():
     assert reboots == d.MAX_REBOOTS
     assert give_ups >= 1
     assert st["reboots"] == d.MAX_REBOOTS
+    assert st["phase"] == "exhausted"
 
 
 def test_decide_never_mutates_input_state():
-    st = {"phase": "normal", "consecutive_dead": 4, "reboots": 0}
+    st = {"phase": "armed", "consecutive_dead": 4, "reboots": 0}
     d.decide(st, "dead")
-    assert st == {"phase": "normal", "consecutive_dead": 4, "reboots": 0}
+    assert st == {"phase": "armed", "consecutive_dead": 4, "reboots": 0}
 
 
-def test_corrupt_state_is_normalized_not_crashed():
+def test_corrupt_state_is_normalized_to_armed_not_crashed():
     action, ns, _ = d.decide({"phase": "garbage", "consecutive_dead": "x", "reboots": None}, "dead")
     assert action == "none"
-    assert ns["phase"] == "normal"
+    assert ns["phase"] == "armed"
     assert ns["consecutive_dead"] == 1
 
 
@@ -208,18 +215,25 @@ def test_watcher_exists():
 def test_watcher_probes_and_reads_nic():
     s = _watcher()
     assert "Test-Connection" in s
-    assert "Get-NetAdapter" in s
-    assert "Restart-NetAdapter" in s
+    assert "Get-NetAdapter" in s  # read-only, for the log
+
+
+def test_watcher_has_no_adapter_restart_rung_owner_ruling():
+    # owner ruling 2026-08-25: NIC disable/enable HANGS on strih -- never any adapter fiddling.
+    s = _watcher()
+    assert "Restart-NetAdapter" not in s
+    assert "Disable-NetAdapter" not in s
+    assert "Enable-NetAdapter" not in s
 
 
 def test_watcher_ladder_constants_match_python_mirror():
     s = _watcher()
-    m_restart = re.search(r"\$DeadPassesBeforeRestart\s*=\s*(\d+)", s)
     m_reboot = re.search(r"\$DeadPassesBeforeReboot\s*=\s*(\d+)", s)
     m_max = re.search(r"\$MaxReboots\s*=\s*(\d+)", s)
-    assert m_restart and int(m_restart.group(1)) == d.DEAD_PASSES_BEFORE_RESTART
     assert m_reboot and int(m_reboot.group(1)) == d.DEAD_PASSES_BEFORE_REBOOT
     assert m_max and int(m_max.group(1)) == d.MAX_REBOOTS
+    # the removed restart-threshold must not linger in the ps1 either.
+    assert "DeadPassesBeforeRestart" not in s
 
 
 def test_watcher_reboots_never_powers_off():
@@ -234,16 +248,30 @@ def test_watcher_failsafe_unknown_branch():
     assert re.search(r"fail[- ]safe|fail toward inaction", s, re.IGNORECASE)
 
 
+def test_watcher_reboot_cap_transition_logic_present():
+    # #1199 review W3: pin the safety-critical transitions, not just the constants (no pwsh on CI).
+    s = _watcher()
+    assert re.search(r"\$rb\s*-lt\s*\$MaxReboots", s), "the reboot-cap guard must be present"
+    assert re.search(r"Reboots\s*=\s*\(\$rb\s*\+\s*1\)", s), "a reboot must increment reboots"
+    assert "give_up" in s and "'exhausted'" in s, "the cap -> give_up/exhausted branch must be present"
+
+
+def test_watcher_refuses_reboot_when_state_not_persisted():
+    # #1199 review W2: a reboot must be gated on the incremented state being durably written,
+    # else after the reboot the box re-reads stale state and reboots past the cap (unbounded loop).
+    s = _watcher()
+    assert re.search(r"REBOOT SUPPRESSED", s)
+    assert re.search(r"if\s*\(\s*\$persisted\s*\)", s)
+
+
 def test_watcher_ws_stop_is_best_effort_never_a_hard_dependency():
     s = _watcher()
     assert "Invoke-ObsGracefulStop" in s
     assert "4455" in s
     assert "ClientWebSocket" in s
-    # a -WsPassword param + env + secret-file fallback
     assert "-WsPassword" in s or "$WsPassword" in s
     assert "STRIH_OBS_WS_PASSWORD" in s
     assert "obs-ws-password.txt" in s
-    # the WS attempt is inside try/catch and the reboot proceeds regardless
     assert re.search(r"\btry\b", s) and re.search(r"\bcatch\b", s)
     assert re.search(r"best[- ]effort", s, re.IGNORECASE)
     assert re.search(r"rebooting anyway|reboot proceeds|proceed(s)? to reboot|regardless", s, re.IGNORECASE)
@@ -281,11 +309,10 @@ def test_installer_registers_system_task_every_2_min():
     assert "New-ScheduledTaskPrincipal" in s
     assert "SYSTEM" in s
     assert re.search(r"RunLevel\s+Highest", s)
-    # the 2-minute cadence: default IntervalMinutes = 2 + a repetition interval trigger
     assert re.search(r"\$IntervalMinutes\s*=\s*2", s)
     assert "RepetitionInterval" in s
     assert "New-TimeSpan -Minutes" in s
-    assert "powershell.exe" in s  # 5.1 semantics to match the watcher's Test-Connection
+    assert "powershell.exe" in s
 
 
 def test_installer_has_uninstall_switch():

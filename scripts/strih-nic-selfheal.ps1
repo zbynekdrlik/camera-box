@@ -13,24 +13,27 @@
   dev1-side reach watchdog (#1001) ALERTS but never self-heals, and WoL from S5 is unverified on
   strih (#1053). Until the card is physically replaced, the box must recover itself.
 
+  OWNER RULING (2026-08-25): there is NO adapter disable/enable/restart rung of any kind. On strih
+  that operation HANGS (the owner tried it by hand; a past session's attempt also failed), so the
+  ONLY self-heal action is a graceful reboot. The ladder is a single step -- keep it small.
+
   THE LOAD-BEARING DESIGN DECISION: the trigger is REACHABILITY of multiple LAN targets, NOT
   `Get-NetAdapter` status. Yesterday the adapter almost certainly read `Up` while dropping every
   packet, so a status=="Down" trigger would have MISSED the exact incident. Adapter status here is
-  advisory/log only and is used only to choose which adapter to Restart-NetAdapter.
+  READ for the log ONLY -- never a trigger, never touched.
 
-  FAIL-SAFE (fail toward inaction): a pass is 'dead' ONLY when every probed target returns a clean
-  negative. Any probe error, or nothing probed at all, is 'unknown' -- it never advances the ladder
-  and never resets it. Any single reachable target is 'alive' and resets every counter.
+  FAIL-SAFE (fail toward inaction): a pass is 'dead' ONLY when EVERY probed target returns a clean
+  negative (no probe threw). Any reachable target is 'alive' and resets every counter; any probe
+  error with nothing reachable, or nothing probed, is 'unknown' -- it never advances the ladder
+  and never resets it.
 
   THE LADDER (constants below, ~2 min cadence; mirrors scripts/strih_nic_selfheal_decision.py --
-  the pure Tier-0-tested source of truth -- byte-for-byte in these three constants):
-    normal    --5 dead (~10 min)--> Restart-NetAdapter, phase=restarted
-    restarted --5 dead (~10 min)--> graceful reboot (best-effort OBS StopStream/StopRecord over the
-                                    local WebSocket, then shutdown /r), phase=rebooted, reboots+1
-    rebooted  --5 dead----------->  re-arm with a cheap adapter restart, phase=restarted
-    reboot cap MaxReboots: once reached, phase=exhausted -- stop rebooting, keep cheap adapter
-                          restarts + loud logging (the physical card replacement is the real fix).
-    alive resets phase=normal, counts=0, reboots=0.
+  the pure Tier-0-tested source of truth -- byte-for-byte in the two constants):
+    armed --5 dead (~10 min)--> graceful reboot (best-effort OBS StopStream/StopRecord over the
+                                local WebSocket, then shutdown /r), reboots+1, stays armed
+    reboot cap MaxReboots: once reached, phase=exhausted -- stop rebooting, keep loud logging
+                          (the physical card replacement is the real fix).
+    alive resets phase=armed, counts=0, reboots=0.
 
 .PARAMETER Targets
   LAN targets to probe. Default: the rig gateway + dev1 + stream. dev1's LAN IP DRIFTS across the
@@ -54,14 +57,14 @@
   Append-only action log. Default C:\ProgramData\camera-box\nic-selfheal.log.
 
 .PARAMETER DryRun
-  Classify + decide + LOG, but perform NO Restart-NetAdapter / reboot (state is still advanced so a
-  dry run can be walked through a simulated outage). For live-verify by the supervisor.
+  Classify + decide + LOG, but perform NO reboot (state is still advanced so a dry run can be
+  walked through a simulated outage). For live-verify by the supervisor.
 
 .NOTES
-  Runs as SYSTEM so Restart-NetAdapter and shutdown /r are permitted. No pwsh runtime is assumed on
-  dev1 CI, so this file is validated STATICALLY (tests/python/test_strih_nic_selfheal_1199.py);
-  the behavioural RED->GREEN tests live against the python mirror. Live install + a real NIC-fail
-  exercise are the supervisor's step after integration (UNVERIFIED here).
+  Runs as SYSTEM so `shutdown /r` is permitted. No pwsh runtime on dev1 CI, so this file is
+  validated STATICALLY (tests/python/test_strih_nic_selfheal_1199.py); the behavioural RED->GREEN
+  tests live against the python mirror. Live install + a real NIC-fail exercise are the
+  supervisor's step after integration (UNVERIFIED here).
 #>
 [CmdletBinding()]
 param(
@@ -77,10 +80,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference     = 'SilentlyContinue'
 
 # --- ladder constants: MIRROR of scripts/strih_nic_selfheal_decision.py (the static test asserts
-# these three lines equal the python constants; keep them in lock-step). ---------------------------
-$DeadPassesBeforeRestart = 5   # ~10 min of confirmed all-targets-dead before Restart-NetAdapter
-$DeadPassesBeforeReboot  = 5   # ~10 min more, still dead after the restart, before a graceful reboot
-$MaxReboots              = 2   # hard cap on self-heal reboots before giving up (physical fix needed)
+# these two lines equal the python constants; keep them in lock-step). -----------------------------
+$DeadPassesBeforeReboot = 5   # ~10 min of confirmed all-targets-dead before a graceful reboot
+$MaxReboots             = 2   # hard cap on self-heal reboots before giving up (physical fix needed)
 
 $TaskName = 'strih-nic-selfheal'
 
@@ -96,17 +98,18 @@ function Write-Log($msg) {
 
 # ------------------------------------------------------------------------------------------------
 # classify-pass -> 'alive' | 'dead' | 'unknown' (mirror of the python classify_pass; fail-safe:
-# anything that is not a CLEAN all-dead result is 'unknown', never 'dead').
+# a pass is 'dead' ONLY when every probed target returned a CLEAN negative -- ANY throw with
+# nothing reachable is 'unknown', never 'dead').
 # ------------------------------------------------------------------------------------------------
-function Get-PassClass([int]$reachable, [int]$clean, [bool]$probeError) {
-  if ($probeError) { return 'unknown' }
-  if ($clean -le 0) { return 'unknown' }   # nothing probed cleanly -> cannot conclude
+function Get-PassClass([int]$reachable, [int]$clean, [int]$threw) {
   if ($reachable -ge 1) { return 'alive' }
-  return 'dead'
+  if ($threw -ge 1) { return 'unknown' }   # a broken probe can never PROVE a total outage
+  if ($clean -ge 1) { return 'dead' }
+  return 'unknown'                          # nothing probed -> cannot conclude
 }
 
 # Probe every target. A target that returns a definite reachable/unreachable answer counts toward
-# `clean`; a target whose probe THREW counts toward neither. If EVERY probe threw -> probeError.
+# `clean`; a target whose probe THREW counts toward `threw`.
 function Invoke-Probe([string[]]$targets, [int]$count) {
   $reachable = 0; $clean = 0; $threw = 0
   foreach ($t in $targets) {
@@ -119,26 +122,27 @@ function Invoke-Probe([string[]]$targets, [int]$count) {
       if ($ok) { $reachable++ }
     } catch {
       $threw++
-      Write-Log ("probe THREW for {0}: {1}" -f $t, $_.Exception.Message)
+      Write-Log ("probe THREW for {0}: {1}" -f $t, $_.Exception.GetBaseException().Message)
     }
   }
-  $probeError = ($threw -gt 0 -and $clean -eq 0)
-  return [pscustomobject]@{ Reachable = $reachable; Clean = $clean; Threw = $threw; ProbeError = $probeError }
+  return [pscustomobject]@{ Reachable = $reachable; Clean = $clean; Threw = $threw }
 }
 
-# Read Get-NetAdapter status for LOGGING/adapter-selection only (never a trigger). Never throws out.
+# Read Get-NetAdapter status for LOGGING only (never a trigger, never touched). Never throws out.
 function Get-NicSummary {
   try {
     $ads = Get-NetAdapter -Physical -ErrorAction Stop
     return ($ads | ForEach-Object { '{0}={1}' -f $_.Name, $_.Status }) -join ', '
   } catch {
-    return ('nic-status-unreadable: {0}' -f $_.Exception.Message)
+    return ('nic-status-unreadable: {0}' -f $_.Exception.GetBaseException().Message)
   }
 }
 
 # ------------------------------------------------------------------------------------------------
 # Get-SelfHealDecision -> @{ Action; Phase; ConsecutiveDead; Reboots; Reason } -- the PowerShell
 # MIRROR of scripts/strih_nic_selfheal_decision.py's decide(). Same state machine, same constants.
+# Any non-'exhausted' phase (incl. a corrupt value) is treated as 'armed', matching python's
+# normalize-to-least-aggressive.
 # ------------------------------------------------------------------------------------------------
 function Get-SelfHealDecision($state, [string]$passClass) {
   $phase = $state.phase; $cd = [int]$state.consecutive_dead; $rb = [int]$state.reboots
@@ -149,67 +153,47 @@ function Get-SelfHealDecision($state, [string]$passClass) {
              Reason = 'unknown pass (probe error or nothing probed) -> fail-safe inaction' }
   }
   if ($passClass -eq 'alive') {
-    return @{ Action = 'none'; Phase = 'normal'; ConsecutiveDead = 0; Reboots = 0;
+    return @{ Action = 'none'; Phase = 'armed'; ConsecutiveDead = 0; Reboots = 0;
              Reason = 'alive (a target answered) -> reset' }
   }
 
   # dead
   $cd++
-  switch ($phase) {
-    'normal' {
-      if ($cd -ge $DeadPassesBeforeRestart) {
-        return @{ Action = 'restart_adapter'; Phase = 'restarted'; ConsecutiveDead = 0; Reboots = $rb;
-                 Reason = ("{0} confirmed dead passes -> Restart-NetAdapter" -f $cd) }
-      }
-      return @{ Action = 'none'; Phase = 'normal'; ConsecutiveDead = $cd; Reboots = $rb;
-               Reason = ("dead {0}/{1} (normal window)" -f $cd, $DeadPassesBeforeRestart) }
-    }
-    'restarted' {
-      if ($cd -ge $DeadPassesBeforeReboot) {
-        if ($rb -lt $MaxReboots) {
-          return @{ Action = 'reboot'; Phase = 'rebooted'; ConsecutiveDead = 0; Reboots = ($rb + 1);
-                   Reason = ("still dead after Restart-NetAdapter -> graceful reboot ({0}/{1})" -f ($rb + 1), $MaxReboots) }
-        }
-        return @{ Action = 'give_up'; Phase = 'exhausted'; ConsecutiveDead = 0; Reboots = $rb;
-                 Reason = ("reboot cap {0} reached -> stop rebooting, keep alerting (physical card fix needed)" -f $MaxReboots) }
-      }
-      return @{ Action = 'none'; Phase = 'restarted'; ConsecutiveDead = $cd; Reboots = $rb;
-               Reason = ("dead {0}/{1} (confirming after restart)" -f $cd, $DeadPassesBeforeReboot) }
-    }
-    'rebooted' {
-      if ($cd -ge $DeadPassesBeforeRestart) {
-        return @{ Action = 'restart_adapter'; Phase = 'restarted'; ConsecutiveDead = 0; Reboots = $rb;
-                 Reason = 'still dead after reboot -> re-arm with a cheap adapter restart' }
-      }
-      return @{ Action = 'none'; Phase = 'rebooted'; ConsecutiveDead = $cd; Reboots = $rb;
-               Reason = ("dead {0}/{1} (post-reboot window)" -f $cd, $DeadPassesBeforeRestart) }
-    }
-    default {
-      # exhausted: cheap adapter restarts only, never reboot again.
-      if ($cd -ge $DeadPassesBeforeRestart) {
-        return @{ Action = 'restart_adapter'; Phase = 'exhausted'; ConsecutiveDead = 0; Reboots = $rb;
-                 Reason = 'exhausted -> cheap adapter restart only, never reboot again' }
-      }
-      return @{ Action = 'none'; Phase = 'exhausted'; ConsecutiveDead = $cd; Reboots = $rb;
-               Reason = ("dead {0}/{1} (exhausted, awaiting physical card replacement)" -f $cd, $DeadPassesBeforeRestart) }
-    }
+  if ($phase -eq 'exhausted') {
+    # reboot cap already spent -- never reboot again; just keep counting + logging loudly.
+    return @{ Action = 'none'; Phase = 'exhausted'; ConsecutiveDead = $cd; Reboots = $rb;
+             Reason = ("dead {0} (exhausted, awaiting physical card replacement)" -f $cd) }
   }
+  # phase 'armed' (also any normalized/corrupt phase)
+  if ($cd -ge $DeadPassesBeforeReboot) {
+    if ($rb -lt $MaxReboots) {
+      return @{ Action = 'reboot'; Phase = 'armed'; ConsecutiveDead = 0; Reboots = ($rb + 1);
+               Reason = ("{0} confirmed dead passes -> graceful reboot ({1}/{2})" -f $cd, ($rb + 1), $MaxReboots) }
+    }
+    return @{ Action = 'give_up'; Phase = 'exhausted'; ConsecutiveDead = 0; Reboots = $rb;
+             Reason = ("reboot cap {0} reached -> stop rebooting, keep alerting (physical card fix needed)" -f $MaxReboots) }
+  }
+  return @{ Action = 'none'; Phase = 'armed'; ConsecutiveDead = $cd; Reboots = $rb;
+           Reason = ("dead {0}/{1} (arming window)" -f $cd, $DeadPassesBeforeReboot) }
 }
 
 # --- state load / save --------------------------------------------------------------------------
 function Read-State {
-  $s = [pscustomobject]@{ phase = 'normal'; consecutive_dead = 0; reboots = 0 }
+  $s = [pscustomobject]@{ phase = 'armed'; consecutive_dead = 0; reboots = 0 }
   try {
     if (Test-Path $StateFile) {
       $j = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
-      if ($j.phase -in @('normal', 'restarted', 'rebooted', 'exhausted')) { $s.phase = $j.phase }
+      if ($j.phase -in @('armed', 'exhausted')) { $s.phase = $j.phase }
       if ($null -ne $j.consecutive_dead) { $s.consecutive_dead = [int]$j.consecutive_dead }
       if ($null -ne $j.reboots) { $s.reboots = [int]$j.reboots }
     }
-  } catch { Write-Log ("state read error (starting fresh): {0}" -f $_.Exception.Message) }
+  } catch { Write-Log ("state read error (starting fresh): {0}" -f $_.Exception.GetBaseException().Message) }
   return $s
 }
 
+# Returns $true iff the new state was durably written. #1199 review W2: a reboot must NOT fire when
+# its incremented-reboots state could not be persisted, or after the reboot the box would re-read
+# stale state and reboot again past the cap (an unbounded loop). Callers gate the reboot on this.
 function Write-State($phase, [int]$cd, [int]$rb, [string]$lastPass, [string]$lastAction) {
   $obj = [ordered]@{
     version          = 1
@@ -224,21 +208,11 @@ function Write-State($phase, [int]$cd, [int]$rb, [string]$lastPass, [string]$las
     $dir = Split-Path -Parent $StateFile
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     ($obj | ConvertTo-Json) | Set-Content -LiteralPath $StateFile -Encoding utf8
-  } catch { Write-Log ("state write error: {0}" -f $_.Exception.Message) }
-}
-
-# --- action: restart the physical up/disconnected adapters --------------------------------------
-function Invoke-AdapterRestart {
-  try {
-    $ads = Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.Status -in @('Up', 'Disconnected') }
-    if (-not $ads) { Write-Log 'Restart-NetAdapter: no physical Up/Disconnected adapter found'; return }
-    foreach ($a in $ads) {
-      try {
-        Write-Log ("Restart-NetAdapter -> {0} [{1}]" -f $a.Name, $a.InterfaceDescription)
-        Restart-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop
-      } catch { Write-Log ("Restart-NetAdapter FAILED for {0}: {1}" -f $a.Name, $_.Exception.Message) }
-    }
-  } catch { Write-Log ("Restart-NetAdapter enumeration failed: {0}" -f $_.Exception.Message) }
+    return $true
+  } catch {
+    Write-Log ("state write error: {0}" -f $_.Exception.GetBaseException().Message)
+    return $false
+  }
 }
 
 # --- BEST-EFFORT OBS graceful stop over the local WebSocket (:4455) ------------------------------
@@ -254,11 +228,13 @@ function Resolve-WsPassword {
 
 function Invoke-ObsGracefulStop {
   # Returns nothing meaningful -- purely best-effort. The reboot NEVER depends on the outcome.
+  $ws = $null; $cts = $null
   try {
     $pw = Resolve-WsPassword
     $ws = New-Object System.Net.WebSockets.ClientWebSocket
     $cts = New-Object System.Threading.CancellationTokenSource
-    $cts.CancelAfter(5000)
+    $cts.CancelAfter(5000)   # ONE 5s budget bounds the WHOLE handshake -- every await below is
+                             # $cts.Token-bound, so a hung OBS THROWS (caught), never HANGS.
     $uri = [Uri]'ws://127.0.0.1:4455'
     $ws.ConnectAsync($uri, $cts.Token).Wait()
 
@@ -298,7 +274,10 @@ function Invoke-ObsGracefulStop {
     }
     try { $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'bye', $cts.Token).Wait() } catch { }
   } catch {
-    Write-Log ("OBS graceful stop SKIPPED (best-effort; rebooting anyway): {0}" -f $_.Exception.Message)
+    Write-Log ("OBS graceful stop SKIPPED (best-effort; rebooting anyway): {0}" -f $_.Exception.GetBaseException().Message)
+  } finally {
+    if ($ws) { try { $ws.Dispose() } catch { } }
+    if ($cts) { try { $cts.Dispose() } catch { } }
   }
 }
 
@@ -318,7 +297,7 @@ try {
   $state = Read-State
   $nic = Get-NicSummary
   $probe = Invoke-Probe $Targets $PingCount
-  $passClass = Get-PassClass $probe.Reachable $probe.Clean $probe.ProbeError
+  $passClass = Get-PassClass $probe.Reachable $probe.Clean $probe.Threw
 
   Write-Log ("pass={0} reachable={1}/{2} threw={3} phase={4} cd={5} reboots={6} nic=[{7}]" -f `
       $passClass, $probe.Reachable, $probe.Clean, $probe.Threw, $state.phase, `
@@ -330,20 +309,28 @@ try {
 
   # Persist the decided state BEFORE acting, so a reboot cannot re-trigger within its own grace
   # window and a crash mid-action still leaves the ladder advanced.
-  Write-State $d.Phase $d.ConsecutiveDead $d.Reboots $passClass $d.Action
+  $persisted = Write-State $d.Phase $d.ConsecutiveDead $d.Reboots $passClass $d.Action
 
   if ($DryRun) {
     Write-Log ("DRY-RUN: would perform '{0}' (no action taken)" -f $d.Action)
   } else {
     switch ($d.Action) {
-      'restart_adapter' { Invoke-AdapterRestart }
-      'reboot'          { Invoke-GracefulReboot }
-      'give_up'         { Write-Log 'GIVE-UP: NIC self-heal exhausted -- physical card replacement required; dev1 reach watchdog (#1001) continues to page.' }
-      default           { }
+      'reboot' {
+        # #1199 review W2: refuse to reboot if the incremented-reboots state was NOT persisted --
+        # otherwise after the reboot we'd re-read stale state and reboot again past MaxReboots (an
+        # unbounded loop). Fail toward NOT rebooting when the watcher cannot remember it did.
+        if ($persisted) {
+          Invoke-GracefulReboot
+        } else {
+          Write-Log 'REBOOT SUPPRESSED: could not persist reboot state (fail-safe against an unbounded reboot loop). Fix the state file, dev1 reach watchdog (#1001) keeps paging.'
+        }
+      }
+      'give_up' { Write-Log 'GIVE-UP: NIC self-heal exhausted -- physical card replacement required; dev1 reach watchdog (#1001) continues to page.' }
+      default   { }
     }
   }
 } catch {
   # Any unexpected internal error is fail-safe UNKNOWN: log, take no action, leave state untouched.
-  Write-Log ("PASS ERROR (fail-safe: no action, state untouched): {0}" -f $_.Exception.Message)
+  Write-Log ("PASS ERROR (fail-safe: no action, state untouched): {0}" -f $_.Exception.GetBaseException().Message)
 }
 exit 0
