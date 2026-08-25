@@ -193,3 +193,46 @@ fn recording_e2e_leg_health_skips_cam2_when_not_a_measured_camera() {
          (`[ \"$_lhbox\" = cam2 ] && ! camera_is_active cam2 && continue`). Region:\n{region}"
     );
 }
+
+#[test]
+fn recording_e2e_gates_cam2_out_of_the_camera_box_version_parity_box_list() {
+    // issue 1170 follow-up: the camera-box BINARY version-parity gate ([0/8]) used to HARDCODE
+    // cam2 into its box list (`CAMBOX_VERSION_LINUX="$CAMERA_NAME=root@$CAM1_IP cam2=root@$PAINTER_IP"`).
+    // A painter-only cam2 is NOT redeployed for the run, so it sits on the fleet build, not the
+    // candidate -- grading it there refused every run on a spurious mismatch (live: gh run
+    // 32770166880). cam2 must be included in this box list ONLY when it is a measured camera.
+    let s = read("scripts/recording-e2e.sh");
+    let start = s
+        .find("[0/8] camera-box version-parity gate")
+        .expect("the #875 camera-box version-parity gate banner must exist");
+    let end = s[start..]
+        .find("camera-box-version-gate.sh")
+        .map(|i| start + i)
+        .expect("the camera-box-version-gate.sh invocation must bound the region");
+    let region = &s[start..end];
+    assert!(
+        region.contains("if camera_is_active cam2"),
+        "issue 1170: cam2 must be added to CAMBOX_VERSION_LINUX only under a `camera_is_active cam2` \
+         guard (the painter box is not redeployed for the run). Region:\n{region}"
+    );
+    assert!(
+        region.contains("CAMBOX_VERSION_LINUX=\"$CAMERA_NAME=root@$CAM1_IP\""),
+        "issue 1170: the CAMBOX_VERSION_LINUX init line must NOT unconditionally hardcode cam2 -- it \
+         must start with just the source box, then conditionally append cam2. Region:\n{region}"
+    );
+}
+
+#[test]
+fn recording_e2e_keeps_cam2_in_the_dantesync_clock_version_gate_painter_role() {
+    // The DANTESYNC (clock) version-parity gate is PAINTER-role: cam2's DanteSync clock is the whole
+    // run's timebase (the painter's QR paint-ts + QPSK marker ride it), and dantesync is a
+    // fleet-uniform pinned component (not the per-run camera-box bump), so cam2 belongs here
+    // UNCONDITIONALLY. This is the guard against over-gating: issue 1170 excludes cam2's CAMERA-box
+    // binary grading, never its clock grading.
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("DANTESYNC_VERSION_LINUX=\"$CAMERA_NAME=root@$CAM1_IP cam2=root@$PAINTER_IP\""),
+        "issue 1170: the dantesync clock version-parity gate must STILL include cam2 unconditionally \
+         (painter clock = the run's timebase) -- only the camera-box BINARY gate excludes it."
+    );
+}
