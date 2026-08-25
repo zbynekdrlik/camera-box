@@ -173,3 +173,189 @@ fn align_action_excludes_acked_box_from_the_uniformity_check() {
         "an acked box's version must not enter the uniformity check"
     );
 }
+
+// ---- orchestrator (cambox_parity_align_before_gate) — reads versions via the gate's fixture seam,
+// decides, and deploys ONLY on ALIGN. Exercised end-to-end (read seam + CAMBOX_ALIGN_DEPLOY_CMD
+// deploy seam) with NO real ssh / deploy. ------------------------------------------------------
+
+/// Runs `cambox_parity_align_before_gate NODE_LIST` under the caller's real `set -euo pipefail`.
+/// `versions` is (cam_name, camera-box-version) — each written to a temp fixture file wired via the
+/// gate's own `CAMERA_BOX_VERSION_GATE_VERSION_<NAME>` seam (an empty version means "no fixture" =
+/// unread). `no_main_pin` sets the operator-soak skip. Returns (orchestrator_rc_is_zero,
+/// combined_output, Some(deploy_marker_contents) | None). The deploy seam writes `set=<CAMERA_SET>
+/// cand=<candidate>` to a marker file iff the orchestrator invokes a deploy.
+fn run_orchestrator(
+    candidate: &str,
+    no_main_pin: bool,
+    node_list: &str,
+    versions: &[(&str, &str)],
+) -> (bool, String, Option<String>) {
+    let lib = manifest_dir().join("scripts/lib/camera-box-parity-align.sh");
+    assert!(lib.exists(), "{} not found", lib.display());
+    // tempfile::tempdir() — kernel-atomic O_EXCL random name, cannot collide across parallel test
+    // threads (the #975 pid+timestamp hazard), auto-removed on drop.
+    let work_dir = tempfile::tempdir().expect("create tempdir");
+    let work = work_dir.path();
+    let marker = work.join("deploy-marker");
+
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg("set -euo pipefail\n. \"$LIB\"\ncambox_parity_align_before_gate \"$NODE_LIST\"\n");
+    cmd.env("LIB", &lib)
+        .env("NODE_LIST", node_list)
+        .env("CAMBOX_ALIGN_CANDIDATE", candidate)
+        .env(
+            "CAMBOX_ALIGN_DEPLOY_CMD",
+            format!(
+                "printf 'set=%s cand=%s' \"$CAMERA_SET\" \"$CAMBOX_ALIGN_CANDIDATE\" > {}",
+                marker.display()
+            ),
+        );
+    if no_main_pin {
+        cmd.env("CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN", "1");
+    }
+    for (name, ver) in versions {
+        if ver.is_empty() {
+            continue; // no fixture -> unread
+        }
+        let fx = work.join(format!("ver-{name}"));
+        std::fs::write(&fx, format!("camera-box {ver}\n")).unwrap();
+        let var = format!(
+            "CAMERA_BOX_VERSION_GATE_VERSION_{}",
+            name.to_uppercase().replace('-', "_")
+        );
+        cmd.env(var, &fx);
+    }
+    let out = cmd.output().expect("failed to run orchestrator harness");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let deploy = std::fs::read_to_string(&marker).ok();
+    (out.status.success(), combined, deploy)
+}
+
+#[test]
+fn orchestrator_aligns_a_uniform_stale_fleet_and_deploys_the_candidate() {
+    let (ok, out, deploy) = run_orchestrator(
+        "1.7.0-dev.551",
+        false,
+        "cam3=root@10.0.0.3",
+        &[("cam3", "1.7.0-dev.550")],
+    );
+    assert!(
+        ok,
+        "orchestrator must return 0 (never abort the harness): {out}"
+    );
+    assert_eq!(
+        deploy.as_deref(),
+        Some("set=cam3 cand=1.7.0-dev.551"),
+        "a uniform-stale fleet must deploy the candidate scoped to CAMERA_SET=cam3. out={out}"
+    );
+    assert!(
+        out.contains("deploying the candidate"),
+        "must log the deploy: {out}"
+    );
+}
+
+#[test]
+fn orchestrator_does_not_deploy_when_fleet_already_on_candidate() {
+    let (ok, out, deploy) = run_orchestrator(
+        "1.7.0-dev.551",
+        false,
+        "cam3=root@10.0.0.3 cam4=root@10.0.0.4",
+        &[("cam3", "1.7.0-dev.551"), ("cam4", "1.7.0-dev.551")],
+    );
+    assert!(ok, "{out}");
+    assert_eq!(
+        deploy, None,
+        "an already-on-candidate fleet must NOT deploy. out={out}"
+    );
+    assert!(out.contains("already on the candidate"), "{out}");
+}
+
+#[test]
+fn orchestrator_never_deploys_a_mixed_fleet() {
+    // The HARD issue-1202 constraint: versions differing BETWEEN boxes must NEVER auto-deploy.
+    let (ok, out, deploy) = run_orchestrator(
+        "1.7.0-dev.552",
+        false,
+        "cam3=root@10.0.0.3 cam4=root@10.0.0.4",
+        &[("cam3", "1.7.0-dev.550"), ("cam4", "1.7.0-dev.551")],
+    );
+    assert!(ok, "{out}");
+    assert_eq!(
+        deploy, None,
+        "a MIXED fleet must stay REFUSED — never auto-aligned (the gate refuses it). out={out}"
+    );
+}
+
+#[test]
+fn orchestrator_never_deploys_when_a_box_is_unread() {
+    let (ok, out, deploy) = run_orchestrator(
+        "1.7.0-dev.552",
+        false,
+        "cam3=root@10.0.0.3 cam4=root@10.0.0.4",
+        &[("cam3", "1.7.0-dev.551"), ("cam4", "")], // cam4 unread
+    );
+    assert!(ok, "{out}");
+    assert_eq!(
+        deploy, None,
+        "an unread box must fail CLOSED — never auto-align a partially-unreachable fleet. out={out}"
+    );
+}
+
+#[test]
+fn orchestrator_skips_align_entirely_under_no_main_pin_operator_soak() {
+    let (ok, out, deploy) = run_orchestrator(
+        "1.7.0-dev.551",
+        true, // --no-main-pin
+        "cam3=root@10.0.0.3",
+        &[("cam3", "1.7.0-dev.550")], // uniform-stale — would ALIGN if the pin were on
+    );
+    assert!(ok, "{out}");
+    assert_eq!(
+        deploy, None,
+        "a --no-main-pin operator soak must NEVER auto-realign over a deliberately-deployed build. out={out}"
+    );
+    assert!(out.contains("SKIPPED"), "must log the soak skip: {out}");
+}
+
+// ---- static-anchor wiring: recording-e2e.sh must run the align BEFORE the [0/8] gate ----------
+
+#[test]
+fn recording_e2e_sources_and_calls_the_parity_align_before_the_gate() {
+    let s = read_e2e();
+    assert!(
+        s.contains(r#". "$HERE/lib/camera-box-parity-align.sh""#),
+        "recording-e2e.sh must source the parity-align lib"
+    );
+    let call = s
+        .find("cambox_parity_align_before_gate \"$CAMBOX_VERSION_LINUX\"")
+        .expect(
+            "recording-e2e.sh must call cambox_parity_align_before_gate on the gate's node list",
+        );
+    let gate = s
+        .find("camera-box-version-gate.sh")
+        .expect("recording-e2e.sh must invoke the camera-box version gate");
+    assert!(
+        call < gate,
+        "issue 1202: the parity auto-align must run BEFORE the [0/8] camera-box version-parity gate \
+         (so the gate's candidate-pin accept then passes)"
+    );
+    // The align must scope to the SAME node list the gate reads.
+    let banner = s
+        .find("[0/8] camera-box version-parity gate")
+        .expect("the [0/8] camera-box gate banner must exist");
+    assert!(
+        banner < call && call < gate,
+        "issue 1202: the align call must sit inside the [0/8] gate block, after CAMBOX_VERSION_LINUX \
+         is built and before the gate invocation"
+    );
+}
+
+fn read_e2e() -> String {
+    let p = manifest_dir().join("scripts/recording-e2e.sh");
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}

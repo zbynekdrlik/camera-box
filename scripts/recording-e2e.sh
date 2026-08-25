@@ -252,6 +252,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # next ~2.7s FREEZE's discriminator — link vs box-emit vs NDI SDK — can be READ, not guessed).
 # shellcheck source=scripts/lib/transport-sampler.sh
 . "$HERE/lib/transport-sampler.sh"
+# issue 1202: pre-[0/8]-gate auto-align of the active cam fleet to THIS run's candidate camera-box
+# build. When the fleet is uniformly on ONE stale build != candidate, deploy the candidate before
+# the version-parity gate so its existing candidate-pin accept passes (no manual deploy-fleet on the
+# treadmill). Mixed/unread fleets are NEVER auto-deployed — the gate keeps deciding those.
+# shellcheck source=scripts/lib/camera-box-parity-align.sh
+. "$HERE/lib/camera-box-parity-align.sh"
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -942,6 +948,11 @@ fi
 for _cb_cn in $(camera_active_excluding "$CAMERA_NAME cam2"); do
   CAMBOX_VERSION_LINUX="$CAMBOX_VERSION_LINUX ${_cb_cn}=root@$(camera_secondary_ip "$_cb_cn")"
 done
+# issue 1202: BEFORE the gate, auto-align the SAME node set to this run's candidate when the fleet
+# is uniformly stale-vs-candidate (deploys the candidate to /usr/local/bin/camera-box so the gate's
+# candidate-pin accept passes). Best-effort: mixed/unread fleets are never auto-deployed, and the
+# gate below is the authority (it REFUSES if the fleet is not on the candidate).
+cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
   --linux "$CAMBOX_VERSION_LINUX" \
   --candidate-pin "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$HERE/../Cargo.toml" | head -1)"
