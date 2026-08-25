@@ -169,7 +169,16 @@ pub struct RecordingFrame {
 /// `forensic-dump`/`recording-probe`/the A/V-sync tool with ZERO accuracy benefit, since
 /// those tools never decode imag's own recording through this generic path) — caught in
 /// review, not by a test (the existing suite has no timing assertion for this gate).
-pub const NODE_BURN_RUN_IDS: [u32; 10] = [
+///
+/// **issue 1196:** the list ALSO carries `recording_latency::AUX_TICK_RUN_ID` — not a burn but
+/// the PAINTED aux Vernier tick pair (bottom burn-gap QRs,
+/// `gen_ts_ns = 0`). Same exclusion rationale as the #463 gotcha above, sharper: on a torn or
+/// band-corrupted frame the aux `frame_id`s carry a DIFFERENT paint generation than the primary
+/// pair, so letting them feed `tick` would silently shift undecodable/continuity/cadence metrics
+/// the strict gates are calibrated on. Only the report-only tear surface (`crate::tear_detect`
+/// v2) reads them, by run_id, explicitly. Appended LAST so index-based test uses (`N[0]` = cam1)
+/// stay stable.
+pub const NODE_BURN_RUN_IDS: [u32; 11] = [
     crate::probe::recording_latency::BURN_RUN_ID_CAM1,
     crate::probe::recording_latency::BURN_RUN_ID_CAM2,
     crate::probe::recording_latency::BURN_RUN_ID_CAM3,
@@ -180,6 +189,7 @@ pub const NODE_BURN_RUN_IDS: [u32; 10] = [
     crate::probe::recording_latency::BURN_RUN_ID_STRIH,
     crate::probe::recording_latency::BURN_RUN_ID_STREAM,
     crate::probe::recording_latency::BURN_RUN_ID_IMAG,
+    crate::probe::recording_latency::AUX_TICK_RUN_ID,
 ];
 
 /// The node-burn run_ids the GENERIC diagnostic tools ([`decode_recording_frame`] /
@@ -1201,6 +1211,20 @@ mod tests {
                 label.to_uppercase()
             );
         }
+    }
+
+    #[test]
+    fn node_burn_run_ids_includes_the_aux_tick_pair_1196() {
+        // issue 1196: the painted aux Vernier tick pair (bottom burn-gap QRs) must be
+        // tick-EXCLUDED exactly like the digital burns — on a torn or band-corrupted frame its
+        // frame_ids carry a DIFFERENT paint generation than the primary pair, and letting them
+        // feed the max() would silently shift the undecodable/continuity metrics the strict
+        // gates are calibrated on. Only the report-only tear surface reads them, by run_id.
+        assert!(
+            NODE_BURN_RUN_IDS.contains(&crate::probe::recording_latency::AUX_TICK_RUN_ID),
+            "AUX_TICK_RUN_ID must be in NODE_BURN_RUN_IDS so the aux marks never hijack the \
+             Vernier tick"
+        );
     }
 
     #[test]

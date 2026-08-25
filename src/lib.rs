@@ -466,6 +466,11 @@ pub mod optical_floor;
 // is proven-blind on the current single-vertical-band content) with a computed `TearSignalViability`;
 // one-line-flippable to LIVE once the signal is Observed on a known-torn run + a bound is calibrated.
 pub mod tear_detect;
+// issue 1196 — the aux Vernier tick pair's PURE geometry (bottom burn-gap placement + the Tier-0
+// no-overlap proofs vs the primary dual-QR / colour column / motion sweep / downstream burn
+// overlays). The probe-gated painter (src/probe/qr.rs::blit_aux_tick_bgra) only calls
+// `aux_tick_rects` to blit — the colour_scale/motion_sweep seam pattern.
+pub mod aux_tick;
 // #1141 — head-end OPTICAL blur/shutter preflight: pure crate-root classifier (Tier-0) over
 // the running service's `rough=` capture telemetry, consumed by scripts/lib/optical-preflight.sh.
 pub mod optical_preflight;

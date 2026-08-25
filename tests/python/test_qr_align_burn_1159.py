@@ -217,7 +217,11 @@ class TestNodeBurnRunIdMirror:
         import re
         repo = pathlib.Path(__file__).resolve().parents[2]
         rust = (repo / "src" / "probe" / "recording_latency.rs").read_text()
-        rust_ids = {int(v) for v in re.findall(r"pub const BURN_RUN_ID_[A-Z0-9]+: u32 = (\d+);", rust)}
+        # issue 1196: AUX_TICK_RUN_ID (the painted aux Vernier tick pair) is tick-excluded exactly
+        # like the burns and lives in the same authority file under its own (non-BURN_) name --
+        # include it, or adding it to the Python mirror would false-fail this drift guard.
+        rust_ids = {int(v) for v in re.findall(
+            r"pub const (?:BURN_RUN_ID_[A-Z0-9]+|AUX_TICK_RUN_ID): u32 = (\d+);", rust)}
         assert rust_ids, "parsed no BURN_RUN_ID_* consts -- the authority file moved or changed shape"
         assert rust_ids == set(qa.NODE_BURN_RUN_IDS), (
             f"NODE_BURN_RUN_IDS mirror drift: python={sorted(qa.NODE_BURN_RUN_IDS)} "

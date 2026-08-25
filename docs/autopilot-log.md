@@ -10392,3 +10392,38 @@ No push/PR/rig touch (worktree worker).
 - **UNVERIFIED:** the main.rs collapse type-checking (CI-first, as with every main.rs change under the build-tier rule); no runtime behavior to verify live — both resets stay default-OFF and every emitted string is anchor-sweep-proven identical.
 - **Playbook:** ran `playbook-review` → updated `.claude/rules/capture-selfheal-action-sequence.md` (the two shared outer pieces + the fifth-trigger guidance split floored/non-floored) + the CLAUDE.md router line.
 - **WORKTREE MODE:** stopped at green LOCAL result; supervisor integrates (merge + full CI). Solo lane. Version bump 1.7.0-dev.549 → 1.7.0-dev.550. Branch worktree-agent-ac7b278e5dedcab5d; durability backup refs/autopilot-wip/worktree-agent-ac7b278e5dedcab5d. Ticket stays OPEN (closed on merge via `Closes #1201` in the supervisor's PR).
+
+## 2026-08-25 — issue 1196 PR-1 (aux Vernier tick pair -> viable tear signal, report-only) [worktree lane]
+
+- **Issue:** 1196 (viable LIVE projection-tap tear gate) — PR-1 ONLY: the report-only Approach-1
+  landing per the supervisor design synthesis (ticket comment 5413331442). Promotion (real-frame
+  fixture, tear-injection calibration run, gates_overall_pass flip) deliberately OUT of scope.
+- **Commits:** version bump 1.7.0-dev.549 -> .550; `test [red]` + `feat [green]` tear_detect v2
+  (union span over (primary, aux) + total_frames/aux_decode_fraction/primary_dark_aux_alive_fraction);
+  `src/aux_tick.rs` (pure geometry: left [466,676)x[745,955), right [1224,1434)x[745,955), 210px,
+  no-overlap proofs incl. the documented imag-burn-zone exception for the LEFT aux);
+  AUX_TICK_RUN_ID=911013 + NODE_BURN_RUN_IDS 10->11 (+ qr_align/mv_skew python mirrors — the aux
+  would win the smallest-id painter auto-detect tie-break and its gen_ts=0 would poison align/skew,
+  the issue-1159 class, found by repo-wide grep beyond the synthesis blast-radius list);
+  painter `blit_aux_tick_bgra` + dual-QR wiring + round-trip decode tests (decode_payload now keyed
+  by run_id+frame_id — aux duplicates the primary frame_ids); recording-verdict tear consumer feeds
+  (primary, aux); rules updated (projection-tap-tear-detect v2 section + promotion preconditions,
+  pattern-change-needs-decode-fixture new-element split).
+- **RED->GREEN:** tear_detect v2 tests committed RED against the v1 impl (rustc replica: 8x
+  E0061/E0425), then GREEN (replica 15/15 incl. the adapted 847-frame real-window fixture tests:
+  cross_band_generation_split_is_torn / primary_dark_aux_alive_discriminator / the two spliced
+  fixture cases).
+- **Local verify (Tier-0, airuleset 557 — zero cargo compile):** rustc replicas: tear_detect 15/15,
+  aux_tick 7/7 (with colour_scale/motion_sweep/painter_mode deps assembled standalone),
+  optical_payload_check 6/6; pytest tests/python 1578/1578; `cargo fmt --all --check` clean (parses
+  the probe-gated painter/qr/verdict halves — CI is their first type-check).
+- **Decisions:** aux placement avoids strih-BL/cambox-center/stream-BR overlays; the LEFT aux
+  deliberately shares imag's BottomCenterLeft burn zone (census-proven absent from the projected
+  path) — pinned by a test; 2560-wide override canvas gets NO aux (933px primary leaves no bottom
+  strip -> aux_tick_rects None, honest degradation); aux excluded from tick/cadence/latency via
+  NODE_BURN_RUN_IDS so no strict metric shifts (report-only invariant held).
+- **UNVERIFIED:** aux decodability through the REAL chain (small-QR through projection -> grabber ->
+  2xNDI -> 4K upscale -> mp4) — THE open risk, arbitrated by the real-frame fixture mined at the
+  first rig run after the painter redeploy (supervisor step; escalation = Approach 2 tick ladder).
+- **WORKTREE MODE:** stopped at green LOCAL result; supervisor integrates. Branch
+  worktree-agent-a9692cd9587485f89; durability backup refs/autopilot-wip/worktree-agent-a9692cd9587485f89.

@@ -186,16 +186,39 @@ fn paint_one_frame(
             frame_id: r,
             gen_ts_ns: vernier_gen.right,
         };
-        (
-            logical_id,
-            render_qr_dual_bgra(
-                &left_payload,
-                &right_payload,
-                params.canvas_w,
-                params.canvas_h,
-                params.qr_size,
-            ),
-        )
+        let mut canvas = render_qr_dual_bgra(
+            &left_payload,
+            &right_payload,
+            params.canvas_w,
+            params.canvas_h,
+            params.qr_size,
+        );
+        // issue 1196: additionally blit the aux Vernier tick pair into the bottom burn-free
+        // gaps — the vertical tick redundancy the projection-tap tear detector needs (a
+        // horizontal scanout seam between the bands then yields a clean generation in EACH
+        // band). Same even/odd discipline (frame_ids l/r), reserved AUX_TICK_RUN_ID,
+        // gen_ts_ns = 0 (constant) — so exactly like the primary pair at most ONE aux mark's
+        // pixels change per refresh, and the settled one is byte-identical with no extra state.
+        let aux_left = Payload {
+            run_id: crate::probe::recording_latency::AUX_TICK_RUN_ID,
+            frame_id: l,
+            gen_ts_ns: 0,
+        };
+        let aux_right = Payload {
+            run_id: crate::probe::recording_latency::AUX_TICK_RUN_ID,
+            frame_id: r,
+            gen_ts_ns: 0,
+        };
+        crate::probe::qr::blit_aux_tick_bgra(
+            &mut canvas,
+            params.canvas_w,
+            params.canvas_h,
+            params.qr_size,
+            crate::probe::qr::TOP_MARGIN_PX,
+            &aux_left,
+            &aux_right,
+        );
+        (logical_id, canvas)
     } else {
         let payload = Payload {
             run_id: params.run_id,
@@ -512,17 +535,24 @@ mod tests {
         }
     }
 
+    // issue 1196: selects by (run_id, frame_id) — since the aux tick pair landed, a frame_id is
+    // no longer unique per canvas (the aux marks deliberately duplicate the primary pair's
+    // frame_ids under AUX_TICK_RUN_ID), so a frame_id-only find would nondeterministically
+    // return either mark.
     fn decode_payload(
         bgra: &[u8],
         w: u32,
         h: u32,
+        run_id: u32,
         frame_id: u32,
     ) -> crate::probe::payload::Payload {
         let luma = crate::probe::luma::bgra_to_luma(bgra, w, h, w * 4);
         crate::probe::qr::decode_qr_luma_all(luma)
             .into_iter()
-            .find(|p| p.frame_id == frame_id)
-            .unwrap_or_else(|| panic!("frame_id {frame_id} not found in decoded payloads"))
+            .find(|p| p.run_id == run_id && p.frame_id == frame_id)
+            .unwrap_or_else(|| {
+                panic!("run_id {run_id} frame_id {frame_id} not found in decoded payloads")
+            })
     }
 
     /// #854 RED: the dual-QR Vernier anti-blur/tear-tolerance guarantee ("the settled half is
@@ -558,9 +588,9 @@ mod tests {
         let (_, gen3, _) = paint_one_frame(&mut p, &params, start, 0, 3, &mut vernier).unwrap();
         let bgra3 = p.last.clone().unwrap();
 
-        let left2 = decode_payload(&bgra2, w, h, 2);
-        let left3 = decode_payload(&bgra3, w, h, 2);
-        let right3 = decode_payload(&bgra3, w, h, 3);
+        let left2 = decode_payload(&bgra2, w, h, params.run_id, 2);
+        let left3 = decode_payload(&bgra3, w, h, params.run_id, 2);
+        let right3 = decode_payload(&bgra3, w, h, params.run_id, 3);
 
         assert_eq!(
             left2.gen_ts_ns, gen2,
@@ -580,6 +610,69 @@ mod tests {
              identical across the tick where only the right half changes — a capture straddling \
              this refresh boundary must read the same bits either side of the seam"
         );
+
+        // issue 1196: the SAME settled-byte-identity property extends to the aux tick pair —
+        // the settled aux-left mark (even tick 2) decodes identically across the tick where only
+        // the right side changes, and its gen_ts_ns is the constant 0 by design.
+        let aux = crate::probe::recording_latency::AUX_TICK_RUN_ID;
+        let aux_left2 = decode_payload(&bgra2, w, h, aux, 2);
+        let aux_left3 = decode_payload(&bgra3, w, h, aux, 2);
+        let aux_right3 = decode_payload(&bgra3, w, h, aux, 3);
+        assert_eq!(
+            aux_left3, aux_left2,
+            "issue 1196: the SETTLED aux-left mark must be byte-identical across the tick"
+        );
+        assert_eq!(
+            aux_left2.gen_ts_ns, 0,
+            "aux marks carry a constant gen_ts of 0"
+        );
+        assert_eq!(aux_right3.gen_ts_ns, 0);
+    }
+
+    /// issue 1196 — the aux Vernier tick pair round-trips through the SAME production decode
+    /// path (`decode_qr_luma_all`) alongside the primary dual-QR at the rig geometry: all four
+    /// marks decode, the aux pair carries the reserved run_id + the primary pair's own even/odd
+    /// frame_ids + a constant `gen_ts_ns = 0`. This is the painter-level render→decode
+    /// round-trip the decode-fixture rule requires for a pattern change; the REAL-captured-frame
+    /// fixture is mined from the first rig run after the painter redeploy (a promotion
+    /// precondition — `.claude/rules/projection-tap-tear-detect.md`).
+    #[test]
+    fn aux_tick_pair_round_trips_alongside_the_dual_qr_1196() {
+        let (w, h, qr) = (1920u32, 1080u32, 700u32);
+        let mut p = CapturingPresenter {
+            dims: (w, h),
+            last: None,
+        };
+        let mut params = test_params();
+        params.dual_qr = true;
+        params.canvas_w = w;
+        params.canvas_h = h;
+        params.qr_size = qr;
+        let start = Instant::now();
+        let mut vernier = VernierGenTs::default();
+        // tick 4 → vernier_ids(4) = (4, 3): primary left fresh (4), right settled (3); the aux
+        // pair mirrors the same ids under AUX_TICK_RUN_ID.
+        let (_, gen, _) = paint_one_frame(&mut p, &params, start, 0, 4, &mut vernier).unwrap();
+        let bgra = p.last.clone().unwrap();
+
+        let aux = crate::probe::recording_latency::AUX_TICK_RUN_ID;
+        let pl = decode_payload(&bgra, w, h, params.run_id, 4);
+        let pr = decode_payload(&bgra, w, h, params.run_id, 3);
+        let al = decode_payload(&bgra, w, h, aux, 4);
+        let ar = decode_payload(&bgra, w, h, aux, 3);
+        assert_eq!(
+            pl.gen_ts_ns, gen,
+            "primary fresh half carries this tick's gen_ts"
+        );
+        assert_eq!(pr.run_id, params.run_id);
+        assert_eq!(al.gen_ts_ns, 0, "aux marks bake a constant gen_ts of 0");
+        assert_eq!(ar.gen_ts_ns, 0);
+        // And the blit target is the pure module's proven layout (the painter passes the same
+        // qr_size/top_margin, so the rendered marks sit inside the machine-proven rectangles).
+        let rects = crate::aux_tick::aux_tick_rects(w, h, qr, crate::probe::qr::TOP_MARGIN_PX)
+            .expect("rig aux layout fits");
+        assert_eq!(rects[0].y, 745, "left aux at the design y");
+        assert_eq!(rects[1].y, 745, "right aux at the design y");
     }
 
     /// #1179: the dual-QR must still encode→render→decode cleanly at the 2560×1080 override canvas
@@ -619,8 +712,8 @@ mod tests {
             "canvas is the full 2560×1080 BGRA frame"
         );
 
-        let left = decode_payload(&bgra, w, h, 4);
-        let right = decode_payload(&bgra, w, h, 3);
+        let left = decode_payload(&bgra, w, h, params.run_id, 4);
+        let right = decode_payload(&bgra, w, h, params.run_id, 3);
         assert_eq!(left.run_id, params.run_id);
         assert_eq!(left.frame_id, 4);
         assert_eq!(
