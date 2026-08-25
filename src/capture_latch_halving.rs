@@ -165,17 +165,27 @@ impl CaptureLatchHalvingTracker {
     /// fraction is `>= halved_fraction_min`. The min-captures guard also makes the division safe
     /// (`total_captures >= min_captures >= 1`).
     pub fn observe(&mut self, dupe_captures: u64, total_captures: u64) -> CaptureLatchHalvingVerdict {
-        // [red] not yet implemented — always Healthy so the halved-band tests fail until the
-        // classification lands in the [green] commit. The `let _` reads every param + field so the
-        // stub compiles clippy-clean (no unused-var / dead-field warnings).
-        let _ = (
-            dupe_captures,
-            total_captures,
-            self.confirm_windows,
-            self.halved_fraction_min,
-            self.min_captures,
-            self.halved_run,
-        );
+        let halved_window = total_captures >= self.min_captures
+            && (dupe_captures as f64 / total_captures as f64) >= self.halved_fraction_min;
+        if halved_window {
+            self.halved_run = self.halved_run.saturating_add(1);
+        } else {
+            self.halved_run = 0;
+        }
+
+        if self.halved_run >= self.confirm_windows {
+            return CaptureLatchHalvingVerdict::Halved {
+                dupe_fraction: dupe_captures as f64 / total_captures as f64,
+                dupe_captures,
+                total_captures,
+                windows: self.halved_run,
+            };
+        }
+        if self.halved_run > 0 {
+            return CaptureLatchHalvingVerdict::Watching {
+                halved_windows: self.halved_run,
+            };
+        }
         CaptureLatchHalvingVerdict::Healthy
     }
 }
