@@ -137,6 +137,12 @@ NODE_BURN_RUN_IDS = frozenset({
     911010,  # BURN_RUN_ID_CAM5
     911011,  # BURN_RUN_ID_CAM6
     911012,  # BURN_RUN_ID_CAM7
+    # issue 1196: AUX_TICK_RUN_ID -- the PAINTED aux Vernier tick pair (bottom burn-gap QRs,
+    # gen_ts_ns = 0). Not a burn, but it shares the painter wire format, is UNIVERSAL on every
+    # screenshot (painted content), and its id is far below the ~1.8e9 epoch -- without this
+    # entry it would win painter_run_id's smallest-id tie-break (the exact #1159 class) and its
+    # constant gen_ts_ns=0 would poison the alignment spread math.
+    911013,  # AUX_TICK_RUN_ID (painted aux tick pair, tick-excluded like the burns)
 })
 
 

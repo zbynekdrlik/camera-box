@@ -99,14 +99,32 @@ def tick_map(qr_texts: "list[str]") -> "dict[int, int]":
     return out
 
 
+# The reserved node ids that must NEVER be auto-detected as "the painter" -- a mirror of
+# qr_align_pins.NODE_BURN_RUN_IDS (itself mirroring src/probe/recording.rs::NODE_BURN_RUN_IDS).
+# 911001-911012 are the digital node burns (#1159 class: universal-on-strih under E2E, id far
+# below the painter's ~1.8e9 epoch, so they win a count tie via the smallest-id tie-break).
+# 911013 (issue 1196) is the PAINTED aux Vernier tick pair: universal on EVERY screenshot even
+# outside E2E burns, and its constant gen_ts_ns=0 would turn every skew sample into pure
+# wall-gap garbage -- it must never be picked as the painter NOR used as a common-sample id.
+RESERVED_RUN_IDS = frozenset({
+    911001, 911002, 911003, 911004, 911007, 911008, 911009,
+    911010, 911011, 911012, 911013,
+})
+
+
 def dominant_run_id(tick_maps: "list[dict]") -> "int | None":
     """The run_id present in the MOST screenshots -- the universal painter dual-QR (same run_id on
     every camera via the one-camera->splitter optical loop), as opposed to a camera-local burn
-    (e.g. the cam1-burn's own run_id, present on cam1 only). Ties break to the smallest run_id for
-    determinism. None when no run_id was decoded anywhere."""
+    (e.g. the cam1-burn's own run_id, present on cam1 only). The RESERVED ids (node burns + the
+    issue-1196 aux tick pair, RESERVED_RUN_IDS) are excluded FIRST -- they are never the painter,
+    and the universal aux marks would otherwise tie the painter and win the smallest-id
+    tie-break (the #1159 class). Ties break to the smallest run_id for determinism. None when no
+    non-reserved run_id was decoded anywhere."""
     counts: "dict[int, int]" = {}
     for m in tick_maps:
         for run_id in m:
+            if run_id in RESERVED_RUN_IDS:
+                continue
             counts[run_id] = counts.get(run_id, 0) + 1
     if not counts:
         return None
@@ -115,9 +133,13 @@ def dominant_run_id(tick_maps: "list[dict]") -> "int | None":
 
 def pick_common_run_id(main_map: dict, mv_map: dict, preferred: "int | None") -> "int | None":
     """A run_id present in BOTH screenshots: `preferred` (the universal painter run_id) when it is
-    common to both, otherwise the smallest common run_id. None when the two share no decoded
-    run_id -- so the caller drops that sample honestly rather than fabricating one."""
-    common = set(main_map) & set(mv_map)
+    common to both, otherwise the smallest common run_id. The issue-1196 aux tick pair
+    (911013) is dropped from `common` outright -- its gen_ts_ns is a constant 0, so a "skew
+    sample" from it would be pure wall-gap, never a real measurement (the node burns stay
+    eligible as a fallback: their gen_ts is a real per-node render clock). None when the two
+    share no usable decoded run_id -- so the caller drops that sample honestly rather than
+    fabricating one."""
+    common = (set(main_map) & set(mv_map)) - {911013}
     if not common:
         return None
     return preferred if (preferred in common) else min(common)

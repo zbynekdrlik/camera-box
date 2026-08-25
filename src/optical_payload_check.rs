@@ -25,7 +25,10 @@ mod tests {
     // The exact fixed node-burn ids from `probe::recording::NODE_BURN_RUN_IDS` (mirrored here so
     // this module stays probe-feature-free; a value drift would only ever make this test SUITE
     // stricter, never silently pass — the ids are load-bearing constants, not tunables).
-    const BURNS: [u32; 3] = [911_001, 911_002, 911_004];
+    // 911_013 is the issue-1196 aux Vernier tick pair (AUX_TICK_RUN_ID): painted, not a burn,
+    // but tick-excluded exactly like the burns — so it appears on stream frames and must NOT
+    // count as "a genuine primary optical read" either.
+    const BURNS: [u32; 4] = [911_001, 911_002, 911_004, 911_013];
 
     #[test]
     fn burn_only_run_ids_is_not_a_non_burn_payload() {
@@ -54,6 +57,19 @@ mod tests {
     #[test]
     fn a_non_burn_id_alone_is_a_non_burn_payload() {
         assert!(has_non_burn_payload([42], &BURNS));
+    }
+
+    #[test]
+    fn burns_plus_aux_tick_marks_only_is_not_a_non_burn_payload_1196() {
+        // issue 1196: a frame whose PRIMARY dual-QR is corrupted while the aux tick pair
+        // (911013) and the node burns decode is still an `undecodable` frame for the tick — the
+        // self-check must agree (mirroring the tick filter), not report a false "sharp optical
+        // read". The aux-alive-primary-dark shape is surfaced separately, report-only, by the
+        // tear detector's discriminator fraction.
+        assert!(!has_non_burn_payload(
+            [911_002, 911_004, 911_013, 911_013],
+            &BURNS
+        ));
     }
 
     #[test]
