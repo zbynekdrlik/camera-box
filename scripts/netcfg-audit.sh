@@ -300,10 +300,22 @@ case "$MODE" in
       [ -n "$ip" ] || continue
       dv="$(_nc_drop_rate_verdict "$ip" "$port")"
       statuses+=("$dv")
+      # A designated port bypasses the growth-gate, so its dq1 may be FLAT vs baseline while the live
+      # two-read window still catches a burst -- cite the live window (not a "$bdq1->$dq1 since
+      # baseline" delta that would misleadingly read "0->0"). Growth-gated ports keep the delta text
+      # (their growth-gate guaranteed dq1 > bdq1).
       case "$dv" in
-        DROPPING) report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s (dq1 $bdq1->$dq1 since baseline) -- microburst tail-drop; check shared-buffers / uplink step-down") ;;
+        DROPPING) if [ "$designated" = 1 ]; then
+                    report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s over the live ${NETCFG_DROP_WINDOW}s window (designated drop-sampler; cumulative dq1=$dq1) -- microburst tail-drop; check shared-buffers / uplink step-down")
+                  else
+                    report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s (dq1 $bdq1->$dq1 since baseline) -- microburst tail-drop; check shared-buffers / uplink step-down")
+                  fi ;;
         RESET)    report+=("  [report-only RESET] $node $port: drop counters went backwards (switch rebooted since read)") ;;
-        UNKNOWN)  report+=("  [report-only UNKNOWN] $node $port: drop-rate probe unreadable (dq1 grew $bdq1->$dq1 but a live re-read failed)") ;;
+        UNKNOWN)  if [ "$designated" = 1 ]; then
+                    report+=("  [report-only UNKNOWN] $node $port: designated drop-sampler live re-read failed (cumulative dq1=$dq1)")
+                  else
+                    report+=("  [report-only UNKNOWN] $node $port: drop-rate probe unreadable (dq1 grew $bdq1->$dq1 but a live re-read failed)")
+                  fi ;;
         OK)       [ "$designated" = 1 ] && report+=("  [report-only sampled] $node $port: designated drop-sampler probe clean (rate <=${NETCFG_DROP_THRESHOLD}/s over ${NETCFG_DROP_WINDOW}s) -- strih uplink #1110") ;;
       esac
     done <<< "$live"
