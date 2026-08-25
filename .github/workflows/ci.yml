@@ -101,11 +101,15 @@ jobs:
           # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
           # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
           # path needs.
-          # PINNED to a DATED (immutable) autobuild tag, NOT the rolling "latest" tag:
-          # "latest" is rebuilt daily and its assets 503 during the replacement window —
-          # two consecutive coverage-job failures on 2026-08-12 were exactly that window.
-          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-11-13-11/ffmpeg-N-126060-g03dc244a69-linux64-gpl.tar.xz
+          # PINNED to a REPO-OWNED mirror release (ci-assets-ffmpeg-*), never any BtbN tag:
+          # BtbN "latest" is rebuilt daily and its assets 503 during the replacement window
+          # (the 2026-08-12 coverage failures), and BtbN PRUNES dated autobuild releases
+          # after ~2 weeks, so a dated-tag pin rots too (2026-08-25: autobuild-2026-08-11
+          # 404'd, Test+Coverage red on the fetch, run 32872811863). An asset mirrored on
+          # THIS repo's own release cannot be pruned by a third party; sha256-verified.
+          url=https://github.com/zbynekdrlik/camera-box/releases/download/ci-assets-ffmpeg-20260825/ffmpeg-N-126264-g007cd1fd43-linux64-gpl.tar.xz
           curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          echo "aa86544042631a525b03d1b732614d705f74ca971efdb73f298d75e50288ed3e  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
           sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
@@ -153,11 +157,15 @@ jobs:
           # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
           # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
           # path needs.
-          # PINNED to a DATED (immutable) autobuild tag, NOT the rolling "latest" tag:
-          # "latest" is rebuilt daily and its assets 503 during the replacement window —
-          # two consecutive coverage-job failures on 2026-08-12 were exactly that window.
-          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-11-13-11/ffmpeg-N-126060-g03dc244a69-linux64-gpl.tar.xz
+          # PINNED to a REPO-OWNED mirror release (ci-assets-ffmpeg-*), never any BtbN tag:
+          # BtbN "latest" is rebuilt daily and its assets 503 during the replacement window
+          # (the 2026-08-12 coverage failures), and BtbN PRUNES dated autobuild releases
+          # after ~2 weeks, so a dated-tag pin rots too (2026-08-25: autobuild-2026-08-11
+          # 404'd, Test+Coverage red on the fetch, run 32872811863). An asset mirrored on
+          # THIS repo's own release cannot be pruned by a third party; sha256-verified.
+          url=https://github.com/zbynekdrlik/camera-box/releases/download/ci-assets-ffmpeg-20260825/ffmpeg-N-126264-g007cd1fd43-linux64-gpl.tar.xz
           curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          echo "aa86544042631a525b03d1b732614d705f74ca971efdb73f298d75e50288ed3e  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
           sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
