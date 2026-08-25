@@ -36,13 +36,26 @@
 //! computed [`TearSignalViability`] so an all-zero reading can never be mistaken for a promotable
 //! green.
 //!
-//! ## Precondition for a future LIVE gate (follow-up)
+//! ## v2 (issue 1196) — the aux Vernier tick pair makes the signal VIABLE
 //!
-//! For the ticket's tear model to be decodable, the painted pattern would need VERTICAL tick
-//! redundancy — a tick indicator in BOTH the top and bottom halves (a second dual-QR row lower down,
-//! or a full-height tick strip). That is a painter change (rig-side) plus a decode change, filed as a
-//! follow-up. Until the signal is observed to actually fire ([`TearSignalViability::Observed`]) on a
-//! known-torn run and a bound is calibrated, [`gates_overall_pass`] stays `false`.
+//! The vertical tick redundancy the paragraph above calls for now exists: the painter additionally
+//! blits a small aux QR pair into the bottom burn-free gaps (`crate::aux_tick` geometry; left =
+//! latest EVEN tick, right = latest ODD tick, reserved `AUX_TICK_RUN_ID`, `gen_ts_ns = 0`). A
+//! horizontal seam between the primary band and the aux band now yields a clean generation in EACH
+//! band, so the v2 detector computes the tear span over the UNION of `(primary_ids, aux_ids)`
+//! ([`frame_union_spread`]). Two report-only companion fields gate the future promotion honestly:
+//! [`TearStats::aux_decode_fraction`] (did the small aux marks actually survive the lossy chain?)
+//! and [`TearStats::primary_dark_aux_alive_fraction`] (a seam INSIDE the primary band corrupts both
+//! primary halves while both aux marks decode — band-localized corruption vs whole-frame blur).
+//!
+//! ## Precondition for a LIVE gate (unchanged — still report-only)
+//!
+//! [`gates_overall_pass`] stays `false` until: (1) the aux marks are proven decodable through the
+//! REAL chain via a mined real-captured-frame fixture (the first rig run after the painter
+//! redeploy — `pattern-change-needs-decode-fixture`), (2) the signal is observed to actually fire
+//! ([`TearSignalViability::Observed`]) on a known-torn calibration run, and (3) a
+//! [`TEAR_FRACTION_CEILING`] + an aux-coverage floor are calibrated from real distributions
+//! (`verdict-gate-seam-calibration.md`). The flip itself is one line, out of this change's scope.
 //!
 //! Mirrors the crate-root `gates_overall_pass()` seam pattern shared by `presentation_cadence` /
 //! `optical_floor` / `e2e_latency_gate` / `imag_leg_gate`: PURE (default features, Tier-0
@@ -62,19 +75,30 @@ pub const VERNIER_MAX_SPREAD: u32 = 1;
 /// `verdict-gate-seam-calibration.md`) before any LIVE flip.
 pub const TEAR_FRACTION_CEILING: f64 = 0.0;
 
-/// The optical `frame_id` span within ONE captured frame — `max - min` over the cam2-optical
-/// Vernier payloads (node burns already excluded by the caller). `None` when the frame carries no
-/// optical payload at all (an undecodable frame — counted elsewhere as `undecodable`, never a tear).
+/// The optical `frame_id` span within ONE band of a captured frame — `max - min` over the given
+/// payload ids (node burns already excluded by the caller). `None` when the band carries no
+/// payload at all (an undecodable band — counted elsewhere as `undecodable`, never a tear).
 pub fn frame_optical_spread(optical_ids: &[u32]) -> Option<u32> {
     let min = *optical_ids.iter().min()?;
     let max = *optical_ids.iter().max()?;
     Some(max - min)
 }
 
-/// A captured frame is TORN when its cam2-optical Vernier payloads span more than the by-design
-/// even/odd adjacency ([`VERNIER_MAX_SPREAD`]) — i.e. it carries >= 2 distinct paint generations.
-pub fn is_torn_frame(optical_ids: &[u32]) -> bool {
-    frame_optical_spread(optical_ids).is_some_and(|s| s > VERNIER_MAX_SPREAD)
+/// issue 1196 (v2) — the `frame_id` span over the UNION of the primary dual-QR band's ids and the
+/// bottom aux tick pair's ids. This is what makes a seam BETWEEN the two bands detectable: the
+/// primary pair reads gen G+1 while the aux pair still reads gen G — neither band alone spans
+/// more than the Vernier adjacency, but the union does. `None` when NEITHER band decoded.
+pub fn frame_union_spread(primary_ids: &[u32], aux_ids: &[u32]) -> Option<u32> {
+    let min = *primary_ids.iter().chain(aux_ids).min()?;
+    let max = *primary_ids.iter().chain(aux_ids).max()?;
+    Some(max - min)
+}
+
+/// A captured frame is TORN when the UNION of its primary dual-QR and aux tick-pair `frame_id`s
+/// spans more than the by-design even/odd adjacency ([`VERNIER_MAX_SPREAD`]) — i.e. the frame
+/// carries >= 2 distinct paint generations (issue 781 within one band; issue 1196 across bands).
+pub fn is_torn_frame(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
+    frame_union_spread(primary_ids, aux_ids).is_some_and(|s| s > VERNIER_MAX_SPREAD)
 }
 
 /// Whether the tear signal has DEMONSTRABLY fired on the analyzed data — the machine-checked
@@ -89,31 +113,56 @@ pub enum TearSignalViability {
     Unproven,
 }
 
-/// Per-window tear report (report-only). Derives only `PartialEq` (not `Eq`) — `tear_fraction` is
+/// Per-window tear report (report-only). Derives only `PartialEq` (not `Eq`) — the fractions are
 /// `f64` (the #726 Eq-on-f64 trap).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TearStats {
-    /// In-window frames that carried at least one optical Vernier payload (undecodable frames
-    /// excluded — a tear is measured only where a tick decoded).
+    /// EVERY frame attributed to this window, including fully undecodable ones — the denominator
+    /// for the aux-coverage fractions (issue 1196: a whole-frame blur kills the aux marks too and
+    /// must lower coverage honestly, so coverage is judged against ALL captured frames).
+    pub total_frames: u32,
+    /// In-window frames whose primary-or-aux UNION carried at least one payload (fully
+    /// undecodable frames excluded — a tear is measured only where a tick decoded).
     pub decodable_frames: u32,
-    /// Frames whose optical span exceeded [`VERNIER_MAX_SPREAD`] (>= 2 paint generations captured).
+    /// Frames whose UNION span exceeded [`VERNIER_MAX_SPREAD`] (>= 2 paint generations captured).
     pub tear_frames: u32,
     /// `tear_frames / decodable_frames` (0.0 when no decodable frame).
     pub tear_fraction: f64,
-    /// The largest optical span observed in the window (0 or 1 = clean; >= 2 = a tear occurred).
+    /// The largest union span observed in the window (0 or 1 = clean; >= 2 = a tear occurred).
     pub max_spread: u32,
+    /// issue 1196 — fraction of ALL in-window frames ([`Self::total_frames`]) that decoded BOTH
+    /// aux tick marks (the bottom burn-gap pair). The promotion-gating coverage signal: a LIVE
+    /// flip additionally requires this above a calibrated floor on the same run, so a silent aux
+    /// loss demotes honestly instead of false-greening. 0.0 on pre-aux content.
+    pub aux_decode_fraction: f64,
+    /// issue 1196 — fraction of ALL in-window frames where the PRIMARY band decoded NOTHING while
+    /// BOTH aux marks decoded: band-localized corruption (e.g. a seam inside the 700px primary
+    /// band, which corrupts both primary halves at the same height) as opposed to a whole-frame
+    /// blur (which kills the aux marks too). Report-only discriminator; 0.0 on pre-aux content.
+    pub primary_dark_aux_alive_fraction: f64,
     /// Whether the signal fired on this window (see [`TearSignalViability`]).
     pub viability: TearSignalViability,
 }
 
-/// Aggregate per-window tear stats from each in-window frame's cam2-optical `frame_id`s (node burns
-/// already excluded, undecodable frames passed as empty slices).
-pub fn window_tear_stats(per_frame_optical_ids: &[Vec<u32>]) -> TearStats {
+/// Aggregate per-window tear stats from each in-window frame's `(primary_ids, aux_ids)` —
+/// `primary_ids` = the cam2-optical dual-QR Vernier `frame_id`s (node burns already excluded by
+/// the caller), `aux_ids` = the bottom aux tick pair's `frame_id`s (`AUX_TICK_RUN_ID` payloads,
+/// issue 1196). Undecodable bands are passed as empty slices.
+pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
+    let total_frames = per_frame_ids.len() as u32;
     let mut decodable_frames = 0u32;
     let mut tear_frames = 0u32;
     let mut max_spread = 0u32;
-    for ids in per_frame_optical_ids {
-        if let Some(spread) = frame_optical_spread(ids) {
+    let mut aux_full_frames = 0u32;
+    let mut primary_dark_aux_alive = 0u32;
+    for (primary, aux) in per_frame_ids {
+        if aux.len() >= 2 {
+            aux_full_frames += 1;
+            if primary.is_empty() {
+                primary_dark_aux_alive += 1;
+            }
+        }
+        if let Some(spread) = frame_union_spread(primary, aux) {
             decodable_frames += 1;
             if spread > max_spread {
                 max_spread = spread;
@@ -128,16 +177,27 @@ pub fn window_tear_stats(per_frame_optical_ids: &[Vec<u32>]) -> TearStats {
     } else {
         0.0
     };
+    let (aux_decode_fraction, primary_dark_aux_alive_fraction) = if total_frames > 0 {
+        (
+            aux_full_frames as f64 / total_frames as f64,
+            primary_dark_aux_alive as f64 / total_frames as f64,
+        )
+    } else {
+        (0.0, 0.0)
+    };
     let viability = if tear_frames > 0 {
         TearSignalViability::Observed
     } else {
         TearSignalViability::Unproven
     };
     TearStats {
+        total_frames,
         decodable_frames,
         tear_frames,
         tear_fraction,
         max_spread,
+        aux_decode_fraction,
+        primary_dark_aux_alive_fraction,
         viability,
     }
 }
