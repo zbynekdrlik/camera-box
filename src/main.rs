@@ -775,6 +775,14 @@ async fn run_capture_loop(
         let mut frame_count: u64 = 0; // frames captured this report window
         let mut emit_count: u64 = 0; // frames actually sent to NDI this window
         let mut last_report = std::time::Instant::now();
+        // #1200 — capture-side byte-identical dupe fraction for the latch-halving detector. Counted
+        // per 5s report window (reusing the SAME #889 content_hash, no change to the decimation
+        // gate) and fed to the tracker in the report block; reset with frame_count. prev_capture_hash
+        // PERSISTS across windows (a window-boundary frame can be a dupe of the previous window's
+        // last captured frame).
+        let mut prev_capture_hash: Option<u64> = None;
+        let mut window_dupe_captures: u64 = 0;
+        let mut window_total_captures: u64 = 0;
         // #707 B1 — per-second emit/capture ring. A MONOTONIC epoch (never the wall clock — this
         // ticket is about DanteSync wall-clock seams) buckets emit/capture into 1-second slices so a
         // sub-5s emit pause (the #707 freeze) surfaces instead of averaging into the 5s report.
@@ -875,6 +883,21 @@ async fn run_capture_loop(
         // per 5 s report window below.
         let mut over_rate_tracker = camera_box::capture_overrate::CaptureOverRateTracker::new();
         let over_rate_selfheal_enabled = std::env::var("CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // #1200 — cam3 ShadowCast LATCH-HALVING detector: the 4th self-heal trigger. Keys on the
+        // capture-side byte-identical dupe FRACTION (healthy 30fps-into-60fps ~0.5, latch-halved
+        // ~0.75), the blind spot the #1193 over-rate (0 over-rate, 0 shed churn) and #1128 STUCK
+        // (0 corrupted) triggers both miss. On Halved the `#1200 grabber LATCH-HALVING` marker is
+        // ALWAYS logged (report-only, no I/O); the actual USB re-auth reuses the SAME shared
+        // self-heal throttle path but is gated OFF by default — set CAMERA_BOX_GRABBER_HALVING_SELFHEAL=1
+        // to enable it (a deliberate opt-in; the re-auth cure is UNPROVEN for latch-halving, so the
+        // marker's detection value is the primary deliverable) — AND a 30-min per-trigger cooldown
+        // floor guards it beyond the shared throttle. Fed one sample per 5 s report window below.
+        let mut latch_halving_tracker =
+            camera_box::capture_latch_halving::CaptureLatchHalvingTracker::new();
+        let latch_halving_selfheal_enabled = std::env::var("CAMERA_BOX_GRABBER_HALVING_SELFHEAL")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
@@ -1113,6 +1136,17 @@ async fn run_capture_loop(
                         info.height as usize,
                         info.stride as usize,
                     );
+                    // #1200 — count the capture-side byte-identical dupe fraction for the
+                    // latch-halving detector (reusing the SAME content_hash just computed; this
+                    // does NOT change any decimation decision below). A window at ~0.75 dupe
+                    // fraction = each unique frame captured ~4x (15 unique/s in a 60fps stream);
+                    // healthy 30fps-into-60fps is ~0.5. Accumulated per 5s report window, drained +
+                    // reset there. prev_capture_hash persists across windows on purpose.
+                    if prev_capture_hash == Some(content_hash) {
+                        window_dupe_captures = window_dupe_captures.saturating_add(1);
+                    }
+                    prev_capture_hash = Some(content_hash);
+                    window_total_captures = window_total_captures.saturating_add(1);
                     // #1131 — did THIS frame come from a NON-EMPTY V4L2 queue (the driver already
                     // had it buffered, i.e. its blocking dequeue returned in well under one capture
                     // interval)? A buffered frame PROVES a real captured frame exists to fill the
@@ -1817,6 +1851,76 @@ async fn run_capture_loop(
                             }
                         }
 
+                        // #1200 — feed this 5 s window's capture-side byte-identical dupe fraction
+                        // into the latch-halving detector: healthy 30fps-into-60fps is ~0.5,
+                        // latch-halved is ~0.75 (each unique frame captured ~4x at a correct 60fps
+                        // pace, 15 unique/s). The #1193 over-rate (0 over-rate, 0 shed) and #1128
+                        // STUCK (0 corrupted) triggers both miss it. On Halved the `#1200 grabber
+                        // LATCH-HALVING` marker is ALWAYS logged (report-only, no I/O — a future
+                        // dev1 watchdog would grep it); the actual USB re-auth reuses the SAME
+                        // shared self-heal throttle path, is gated OFF by default
+                        // (CAMERA_BOX_GRABBER_HALVING_SELFHEAL), guarded by
+                        // `pending_self_heal_exit_code.is_none()` (never double-reset a window
+                        // another band already fired), AND additionally by a 30-min per-trigger
+                        // cooldown floor checked against the SHARED state file. The re-auth cure is
+                        // UNPROVEN for this state (it did NOT cure cam3 on 2026-08-25), so the
+                        // marker's detection value is the real deliverable.
+                        if let camera_box::capture_latch_halving::CaptureLatchHalvingVerdict::Halved {
+                            dupe_fraction,
+                            dupe_captures,
+                            total_captures,
+                            windows,
+                        } = latch_halving_tracker
+                            .observe(window_dupe_captures, window_total_captures)
+                        {
+                            tracing::warn!(
+                                "{}",
+                                camera_box::capture_latch_halving::latch_halving_warn_message(
+                                    &device_path_owned,
+                                    dupe_fraction,
+                                    dupe_captures,
+                                    total_captures,
+                                    windows,
+                                )
+                            );
+                            if latch_halving_selfheal_enabled
+                                && pending_self_heal_exit_code.is_none()
+                            {
+                                let now_epoch_s = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let last_heal_epoch_s =
+                                    camera_box::capture_rate_selfheal::load_state(
+                                        std::path::Path::new(
+                                            camera_box::capture_rate_selfheal::STATE_PATH,
+                                        ),
+                                    )
+                                    .last_heal_epoch_s;
+                                if camera_box::capture_latch_halving::cooldown_elapsed(
+                                    last_heal_epoch_s,
+                                    now_epoch_s,
+                                    camera_box::capture_latch_halving::HALVING_MIN_HEAL_INTERVAL_S,
+                                ) {
+                                    if let Some(code) =
+                                        camera_box::capture_rate_selfheal::attempt_self_heal(
+                                            &device_path_owned,
+                                            grabber_model,
+                                            now_epoch_s,
+                                            std::path::Path::new(
+                                                camera_box::capture_rate_selfheal::STATE_PATH,
+                                            ),
+                                            &camera_box::capture_rate_selfheal::LATCH_HALVING_SELF_HEAL_MESSAGES,
+                                            camera_box::capture_rate_selfheal::perform_usb_reset,
+                                        )
+                                    {
+                                        running_capture.store(false, Ordering::Relaxed);
+                                        pending_self_heal_exit_code = Some(code);
+                                    }
+                                }
+                            }
+                        }
+
                         // #299 — log the most recent chroma sample alongside the fps report.
                         // A "grayscale" line here means the capture card is delivering
                         // monochrome frames — the automatic regression signal for colour-capture.
@@ -1845,6 +1949,11 @@ async fn run_capture_loop(
 
                         frame_count = 0;
                         emit_count = 0;
+                        // #1200 — reset the per-window dupe counters. prev_capture_hash is NOT reset
+                        // (it persists across windows so a window-boundary frame can still be seen
+                        // as a dupe of the previous window's last capture).
+                        window_dupe_captures = 0;
+                        window_total_captures = 0;
                         last_report = std::time::Instant::now();
                     }
 

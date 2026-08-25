@@ -521,6 +521,16 @@ pub const OVER_RATE_SELF_HEAL_MESSAGES: SelfHealMessages = SelfHealMessages {
     defect_word: "over-rate",
 };
 
+/// #1200 LATCH-HALVING self-heal wording — the 4th trigger (`capture_latch_halving`). Its `tag`
+/// shares no substring with the `#663 self-heal` / `#1128 grabber-stuck self-heal` / `#1193
+/// over-rate self-heal` prefixes, so the reset-line grep anchors of the other three triggers never
+/// mis-match this one.
+pub const LATCH_HALVING_SELF_HEAL_MESSAGES: SelfHealMessages = SelfHealMessages {
+    tag: "#1200 latch-halving self-heal",
+    critical_prefix: "CRITICAL #1200 latch-halving self-heal:",
+    defect_word: "latch-halving",
+};
+
 /// `SelfHealDecision::Throttled` WARN line (rate-limited — no reset this window).
 pub fn throttled_message(msgs: &SelfHealMessages, seconds_remaining: u64) -> String {
     format!(
@@ -1144,6 +1154,25 @@ mod tests {
         let s = reset_success_message(m, 1, SELF_HEAL_EXIT_CODE);
         assert!(!s.contains("#663 self-heal: USB reset attempt"));
         assert!(!s.contains("#1128 grabber-stuck self-heal"));
+    }
+
+    #[test]
+    fn latch_halving_self_heal_messages_carry_the_1200_tag_and_no_sibling_anchor() {
+        let m = &LATCH_HALVING_SELF_HEAL_MESSAGES;
+        assert_eq!(
+            reset_success_message(m, 3, SELF_HEAL_EXIT_CODE),
+            "#1200 latch-halving self-heal: USB reset attempt #3 succeeded — will exit (code 77) after graceful shutdown so systemd restarts camera-box against the re-enumerated device"
+        );
+        assert_eq!(
+            reset_failed_message(m, 3, "boom", SELF_HEAL_RESET_FAILED_EXIT_CODE),
+            "CRITICAL #1200 latch-halving self-heal: USB reset attempt #3 FAILED: boom — the capture device may now be in a WORSE state than the original latch-halving defect (possibly disconnected); exiting (code 78) after graceful shutdown so systemd retries with a fresh process"
+        );
+        // The latch-halving reset lines must NOT carry the other three triggers' grep anchors, so
+        // their dev1-watchdog patterns never mis-match this trigger's events.
+        let s = reset_success_message(m, 1, SELF_HEAL_EXIT_CODE);
+        assert!(!s.contains("#663 self-heal: USB reset attempt"));
+        assert!(!s.contains("#1128 grabber-stuck self-heal"));
+        assert!(!s.contains("#1193 over-rate self-heal"));
     }
 
     fn selfheal_temp_state_path(name: &str) -> std::path::PathBuf {
