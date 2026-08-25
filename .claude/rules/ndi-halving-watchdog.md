@@ -77,9 +77,18 @@ HH:MM:SS.mmm: [distroav] recv-timing #797 '<obs input name>': n=<N> cap_avg=<X>m
   the cooldown pages (no reattach-spam), and one PAST it cures again.
 - **The reattach is a two-step idle→restore; the empty-name window is a real hazard** — `idle-receiver`
   clears the NDI name for one render tick (a stopped receiver thread = a permanent wedge, see
-  `.claude/rules/ndi-name-recovery.md`). `attempt_reattach` retries the restore and logs LOUD on a
-  persistent restore failure; the cure is armed only deliberately by the supervisor with the stream
-  OBS-WS password set. `NDI_HALVING_CURE_CMD` overrides the whole reattach for tests.
+  `.claude/rules/ndi-name-recovery.md`). `attempt_reattach` returns a DISTINCT code so the caller can
+  react: 0 = reattached, 1 = could-not-start (no PREV captured → name UNTOUCHED, safe), 2 = idled but
+  restore FAILED → the input is LEFT with an empty name → the caller PAGES IMMEDIATELY (throttle-
+  guarded, sig `idled:<key>`) naming the manual remedy (rig-degradation-alerts-immediately, #1203
+  review 🟡2). Each obs_phase2 WS call is bounded by `timeout NDI_HALVING_OBS_WS_CALL_TIMEOUT_S` so
+  idle + 2 restores fit inside `TimeoutStartSec` (=180) — a systemd SIGKILL landing BETWEEN the clear
+  and the restore would itself manufacture the wedge (🟡3). A `timeout` that kills the idle is SAFE
+  (idle prints PREV before clearing → either PREV captured + we restore, or name untouched). The cure
+  is armed only deliberately by the supervisor with the OBS-WS password set (an armed-but-passwordless
+  pass warns LOUD each pass). `NDI_HALVING_CURE_CMD` overrides the whole reattach for tests; the
+  `NDI_HALVING_OBS_PHASE2` seam overrides just the obs_phase2 binary so the internal branch (PREV
+  parse / retry / LEFT-IDLED page) is offline-testable.
 
 ## Tier-0 verification (#557 — zero cargo)
 
