@@ -107,3 +107,9 @@ Approach 1 of the design synthesis on that ticket):
   (`tests/fixtures/tear-781/cam2_window_optical_ids.txt`, a real 847-frame CAM2 window) proves the
   detector against real decode output (`pattern-change-needs-decode-fixture`). `recording-verdict.rs`
   is probe-gated (CI-first) — verify the wiring with `cargo fmt --all --check` + a hand type-audit.
+  **Multi-module replica assembly (issue 1196):** when the pure module under test depends on OTHER
+  crate-root modules (`aux_tick` needs `colour_scale` + `motion_sweep` + `painter_mode`), assemble
+  ONE standalone file that wraps each dependency's test-stripped source as `pub mod <name> { … }`
+  and KEEP the `crate::` paths verbatim — a standalone rustc file IS its own crate root, so
+  `crate::colour_scale` resolves; a naive `crate::` → `super::` rewrite breaks inside the nested
+  `mod tests` (its `super` is the module, not the root — first attempt failed exactly there).
