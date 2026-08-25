@@ -48,14 +48,57 @@
 //! and [`TearStats::primary_dark_aux_alive_fraction`] (a seam INSIDE the primary band corrupts both
 //! primary halves while both aux marks decode — band-localized corruption vs whole-frame blur).
 //!
+//! ## v2.1 (issue 1196) — MULTI-TILE SAFE: only SINGLE-SOURCE frames are scored for tear
+//!
+//! The first real rig run after the painter redeploy (E2E 1859005342, verdict + real frames in
+//! `~/.claude/work-products/1196-fixture/`; ticket comment 5415952812) exposed a false-positive
+//! the plain-union v2 could not see: the recorded program is **MULTI-TILE** — an ALL_CAMBOX
+//! composition that carries TWO grabber-path tiles of the SAME painted cam2 monitor (plus
+//! production scenes). One recorded frame therefore decodes the primary dual-QR from BOTH capture
+//! paths, offset by ~2-4 ticks of inter-path latency, so ~99% of frames carry 3-4 primary optical
+//! QRs and the plain union span reads 2-4 constantly (`tear_fraction ~0.99`, `max_spread ~4`, one
+//! window 14). That span is **inter-path temporal SKEW, not a scanout tear** — v2 mismeasured it.
+//!
+//! The physical fact v2.1 keys on: **one tile's dual-QR band produces AT MOST 2 optical QRs**
+//! (a LEFT even + a RIGHT odd). A single band cannot yield 3+ clean generations — a horizontal
+//! tear through it corrupts, it does not multiply (the same "single vertical band" structural fact
+//! the blindness paragraph above rests on). So a frame carrying **≥ 3** primary optical ids MUST
+//! have been composited from **≥ 2** capture paths/tiles: `frame_cluster_count(primary) =
+//! ceil(count/2)` is the inferred number of tiles. Without pixel positions in the partial JSON
+//! (schema v6 payloads carry only `run_id`/`frame_id`/`gen_ts_ns`, no QR centre/bbox — see the
+//! follow-up below), the individual ids CANNOT be attributed back to their tile, so a multi-source
+//! frame is **unscorable for tear**: [`is_multi_path_suspect`] flags it, it is EXCLUDED from
+//! `decodable_frames`/`tear_frames`, and it is counted in [`TearStats::multi_path_suspect_frames`]
+//! / [`TearStats::multi_path_suspect_fraction`]. Only SINGLE-SOURCE frames (≤ 2 primary ids = one
+//! tile) are scored, so a genuine single-cluster tear — 2 ids spanning > 1, e.g. `{100, 102}`, or a
+//! cross-band primary∪aux split — still fires ([`is_torn_frame`]). On the real 1859005342 window
+//! this reads `multi_path_suspect_fraction ~0.998`, `tear_frames 0`, `viability Unproven` — the
+//! honest "this window is multi-tile; tear is unscoreable here" verdict, replacing v2's false 0.99.
+//!
+//! **Honest limitation of the position-free fallback:** a genuine tear that lands INSIDE a
+//! multi-source frame is not separable from inter-path skew from the id multiset alone (`{100,101,
+//! 102,103}` from a real single-tile 2-generation tear is byte-identical to two tiles offset by 2),
+//! so such frames are conservatively marked suspect rather than torn. And two tiles that each
+//! decode only ONE half (a count-2 frame whose ids span > 1 — 8 of 9690 real frames) still read as
+//! a single-source "tear"; that residual is the honest cost of no positions, dwarfed by the
+//! ~0.998 suspect fraction that flags the window as untrustworthy for tear scoring anyway. The
+//! **complete** fix — geometric per-cluster scoping (group decoded QRs by pixel position, compute
+//! the span WITHIN each tile) — needs the QR centre/bbox carried on each payload, i.e. a partial
+//! schema bump + a decode-side position capture + a fleet redeploy. That is the named follow-up
+//! design on issue 1196 (Approach: "positions available end-to-end → v2.1 per-cluster union"),
+//! deliberately OUT of this sub-step's scope.
+//!
 //! ## Precondition for a LIVE gate (unchanged — still report-only)
 //!
 //! [`gates_overall_pass`] stays `false` until: (1) the aux marks are proven decodable through the
-//! REAL chain via a mined real-captured-frame fixture (the first rig run after the painter
-//! redeploy — `pattern-change-needs-decode-fixture`), (2) the signal is observed to actually fire
-//! ([`TearSignalViability::Observed`]) on a known-torn calibration run, and (3) a
-//! [`TEAR_FRACTION_CEILING`] + an aux-coverage floor are calibrated from real distributions
-//! (`verdict-gate-seam-calibration.md`). The flip itself is one line, out of this change's scope.
+//! REAL chain via a mined real-captured-frame fixture (aux_decode_fraction was 0.0 on the first
+//! rig run — the ~210px aux QRs are halved in a tile and did not survive the lossy chain, so this
+//! precondition is currently UNMET; `pattern-change-needs-decode-fixture`), (2) the signal is
+//! observed to actually fire ([`TearSignalViability::Observed`]) on a known-torn calibration run,
+//! and (3) a [`TEAR_FRACTION_CEILING`] + an aux-coverage floor + a `multi_path_suspect_fraction`
+//! ceiling are calibrated from real distributions (`verdict-gate-seam-calibration.md`) — the
+//! suspect ceiling is what keeps a multi-tile window from ever being promoted. The flip itself is
+//! one line, out of this change's scope.
 //!
 //! Mirrors the crate-root `gates_overall_pass()` seam pattern shared by `presentation_cadence` /
 //! `optical_floor` / `e2e_latency_gate` / `imag_leg_gate`: PURE (default features, Tier-0
@@ -94,10 +137,36 @@ pub fn frame_union_spread(primary_ids: &[u32], aux_ids: &[u32]) -> Option<u32> {
     Some(max - min)
 }
 
-/// A captured frame is TORN when the UNION of its primary dual-QR and aux tick-pair `frame_id`s
-/// spans more than the by-design even/odd adjacency ([`VERNIER_MAX_SPREAD`]) — i.e. the frame
-/// carries >= 2 distinct paint generations (issue 781 within one band; issue 1196 across bands).
+/// issue 1196 (v2.1) — the number of SPATIAL CLUSTERS (capture paths / composited tiles) inferred
+/// from a frame's PRIMARY optical id count. One tile's dual-QR band produces AT MOST two optical
+/// QRs (a LEFT even + a RIGHT odd), so `ceil(count / 2)` is the minimum number of independent tiles
+/// that could have produced these ids. Positions are not carried in the partial (schema v6 payloads
+/// have no QR centre/bbox), so this count is the only cluster signal available; the true geometric
+/// per-cluster grouping is the named follow-up (see the module doc). `0` for an undecodable frame.
+pub fn frame_cluster_count(primary_ids: &[u32]) -> u32 {
+    // ceil(len / 2) without needing `u32::div_ceil` (edition/toolchain-agnostic).
+    (primary_ids.len() as u32 + 1) / 2
+}
+
+/// issue 1196 (v2.1) — a frame is MULTI-PATH SUSPECT when it carries more primary optical QRs than
+/// ONE tile's dual-QR can produce (>= 3 ids => [`frame_cluster_count`] >= 2). Such a frame was
+/// composited from >= 2 capture paths of the SAME painted monitor, so its union span measures
+/// inter-path temporal SKEW, not a scanout tear — and without pixel positions the ids cannot be
+/// attributed to a tile, so the frame is UNSCORABLE for tear (excluded from the tear count,
+/// surfaced via [`TearStats::multi_path_suspect_fraction`]).
+pub fn is_multi_path_suspect(primary_ids: &[u32]) -> bool {
+    frame_cluster_count(primary_ids) >= 2
+}
+
+/// A captured frame is TORN when it is SINGLE-SOURCE (NOT [`is_multi_path_suspect`] — one tile's
+/// worth of dual-QR) AND the UNION of its primary dual-QR and aux tick-pair `frame_id`s spans more
+/// than the by-design even/odd adjacency ([`VERNIER_MAX_SPREAD`]) — i.e. one tile captured >= 2
+/// distinct paint generations (issue 781 within one band; issue 1196 across the primary/aux bands).
+/// A multi-source (multi-tile) frame is NEVER torn: its wide span is inter-path skew, not a tear
+/// (issue 1196 v2.1) — scoping it requires per-cluster pixel positions the payloads do not carry.
 pub fn is_torn_frame(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
+    // [red] not yet wired to is_multi_path_suspect — still the v2 union-global logic that
+    // mis-scores multi-tile skew as a tear. The GREEN commit adds the single-source guard.
     frame_union_spread(primary_ids, aux_ids).is_some_and(|s| s > VERNIER_MAX_SPREAD)
 }
 
@@ -109,7 +178,9 @@ pub enum TearSignalViability {
     /// >= 1 torn frame observed: the signal provably CAN fire on this content/run.
     Observed,
     /// No torn frame observed: cannot distinguish "no tears" from "signal blind on this content"
-    /// (the single-vertical-band dual-QR layout, issue 781). A LIVE flip stays gated on `Observed`.
+    /// (the single-vertical-band dual-QR layout, issue 781; or a multi-tile window where every
+    /// frame is [`is_multi_path_suspect`] and thus unscoreable, issue 1196 v2.1). A LIVE flip
+    /// stays gated on `Observed`.
     Unproven,
 }
 
@@ -118,23 +189,30 @@ pub enum TearSignalViability {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TearStats {
     /// EVERY frame attributed to this window, including fully undecodable ones — the denominator
-    /// for the aux-coverage fractions (issue 1196: a whole-frame blur kills the aux marks too and
-    /// must lower coverage honestly, so coverage is judged against ALL captured frames).
+    /// for the aux-coverage and multi-path-suspect fractions (issue 1196: a whole-frame blur kills
+    /// the aux marks too and must lower coverage honestly, so coverage is judged against ALL
+    /// captured frames).
     pub total_frames: u32,
-    /// In-window frames whose primary-or-aux UNION carried at least one payload (fully
-    /// undecodable frames excluded — a tear is measured only where a tick decoded).
+    /// In-window SINGLE-SOURCE frames whose primary-or-aux UNION carried at least one payload —
+    /// the tear denominator. Fully undecodable frames AND multi-source (multi-tile) frames are
+    /// excluded: a tear is scored only on a frame that decoded a tick AND presents as one tile
+    /// (issue 1196 v2.1 — multi-source frames are unscoreable without pixel positions).
     pub decodable_frames: u32,
-    /// Frames whose UNION span exceeded [`VERNIER_MAX_SPREAD`] (>= 2 paint generations captured).
+    /// SINGLE-SOURCE frames whose UNION span exceeded [`VERNIER_MAX_SPREAD`] (>= 2 paint
+    /// generations captured in one tile).
     pub tear_frames: u32,
-    /// `tear_frames / decodable_frames` (0.0 when no decodable frame).
+    /// `tear_frames / decodable_frames` (0.0 when no decodable single-source frame).
     pub tear_fraction: f64,
-    /// The largest union span observed in the window (0 or 1 = clean; >= 2 = a tear occurred).
+    /// The largest union span observed among SINGLE-SOURCE frames (0 or 1 = clean; >= 2 = a tear).
+    /// Multi-source frames' (skew) spans are reported separately in [`Self::max_multi_path_spread`]
+    /// so this stays a clean single-tile tear magnitude, never polluted by inter-path skew.
     pub max_spread: u32,
     /// issue 1196 — fraction of ALL in-window frames ([`Self::total_frames`]) that decoded BOTH
     /// aux tick marks (>= 2 aux payloads; the bottom burn-gap pair). The promotion-gating
     /// coverage signal: a LIVE flip additionally requires this above a calibrated floor on the
     /// same run, so a silent aux loss demotes honestly instead of false-greening. 0.0 on pre-aux
-    /// content. Known bootstrap nuance: on the painter's very first tick BOTH aux marks carry
+    /// content (and on the first real rig run, where the ~210px aux QRs did not survive the lossy
+    /// chain). Known bootstrap nuance: on the painter's very first tick BOTH aux marks carry
     /// frame_id 0, so decode dedup collapses them to ONE payload and that single frame reads as
     /// not-fully-covered — one frame per painter start, irrelevant at window scale.
     pub aux_decode_fraction: f64,
@@ -143,6 +221,27 @@ pub struct TearStats {
     /// band, which corrupts both primary halves at the same height) as opposed to a whole-frame
     /// blur (which kills the aux marks too). Report-only discriminator; 0.0 on pre-aux content.
     pub primary_dark_aux_alive_fraction: f64,
+    /// issue 1196 (v2.1) — count of in-window frames flagged [`is_multi_path_suspect`] (>= 3
+    /// primary optical ids => composited from >= 2 capture paths/tiles). These are EXCLUDED from
+    /// `decodable_frames`/`tear_frames` because their union span is inter-path skew, not a tear,
+    /// and cannot be scoped without pixel positions. On a multi-tile recording this is nearly all
+    /// frames.
+    pub multi_path_suspect_frames: u32,
+    /// issue 1196 (v2.1) — `multi_path_suspect_frames / total_frames`. The window's
+    /// trustworthiness flag for tear scoring: ~1.0 means the window is multi-tile and the tear
+    /// reading is unscoreable (a LIVE flip must gate on this staying LOW). 0.0 on single-tile
+    /// content.
+    pub multi_path_suspect_fraction: f64,
+    /// issue 1196 (v2.1) — the largest inferred cluster (tile) count over the window's frames
+    /// (`ceil(primary_count / 2)`). 1 on single-tile content; >= 2 whenever any frame carried a
+    /// multi-tile composite. Report-only observability of how many capture paths the recording mixed.
+    pub max_cluster_count: u32,
+    /// issue 1196 (v2.1) — the largest union span among the MULTI-PATH-SUSPECT frames: the peak
+    /// inter-path temporal skew magnitude (in ticks) between the composited tiles. Report-only —
+    /// this is the number v2 mis-reported as `max_spread`; separating it keeps the honest tear
+    /// magnitude ([`Self::max_spread`]) clean while still surfacing the skew for diagnosis. 0 when
+    /// no suspect frame.
+    pub max_multi_path_spread: u32,
     /// Whether the signal fired on this window (see [`TearSignalViability`]).
     pub viability: TearSignalViability,
 }
@@ -150,8 +249,14 @@ pub struct TearStats {
 /// Aggregate per-window tear stats from each in-window frame's `(primary_ids, aux_ids)` —
 /// `primary_ids` = the cam2-optical dual-QR Vernier `frame_id`s (node burns already excluded by
 /// the caller), `aux_ids` = the bottom aux tick pair's `frame_id`s (`AUX_TICK_RUN_ID` payloads,
-/// issue 1196). Undecodable bands are passed as empty slices.
+/// issue 1196). Undecodable bands are passed as empty slices. issue 1196 v2.1: a frame carrying
+/// >= 3 primary optical ids is MULTI-PATH SUSPECT (composited from >= 2 tiles) and is excluded
+/// from the tear count — only single-source frames are scored (see the module doc).
 pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
+    // [red] still the v2 union-global logic: every decodable frame is scored, multi-tile
+    // composites are NOT excluded, and the new suspect/cluster fields are stubbed to 0. The GREEN
+    // commit wires in the single-source (cluster) scoping. This version therefore FAILS the new
+    // multi-tile-safety assertions (real fixture: 844 suspect vs 0; window_multi_tile_skew).
     let total_frames = per_frame_ids.len() as u32;
     let mut decodable_frames = 0u32;
     let mut tear_frames = 0u32;
@@ -175,19 +280,24 @@ pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
             }
         }
     }
+    let multi_path_suspect_frames = 0u32;
+    let max_cluster_count = 0u32;
+    let max_multi_path_spread = 0u32;
     let tear_fraction = if decodable_frames > 0 {
         tear_frames as f64 / decodable_frames as f64
     } else {
         0.0
     };
-    let (aux_decode_fraction, primary_dark_aux_alive_fraction) = if total_frames > 0 {
-        (
-            aux_full_frames as f64 / total_frames as f64,
-            primary_dark_aux_alive as f64 / total_frames as f64,
-        )
-    } else {
-        (0.0, 0.0)
-    };
+    let (aux_decode_fraction, primary_dark_aux_alive_fraction, multi_path_suspect_fraction) =
+        if total_frames > 0 {
+            (
+                aux_full_frames as f64 / total_frames as f64,
+                primary_dark_aux_alive as f64 / total_frames as f64,
+                multi_path_suspect_frames as f64 / total_frames as f64,
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
     let viability = if tear_frames > 0 {
         TearSignalViability::Observed
     } else {
@@ -201,6 +311,10 @@ pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
         max_spread,
         aux_decode_fraction,
         primary_dark_aux_alive_fraction,
+        multi_path_suspect_frames,
+        multi_path_suspect_fraction,
+        max_cluster_count,
+        max_multi_path_spread,
         viability,
     }
 }
@@ -259,21 +373,40 @@ mod tests {
     }
 
     #[test]
-    fn two_generations_in_one_frame_is_torn() {
-        // A scanout tear captured gen G (even 100, odd 101) AND gen G+1 (even 102, odd 103):
-        // span = 103-100 = 3 > VERNIER_MAX_SPREAD -> TORN.
-        assert!(is_torn_frame(&[100, 101, 102, 103], &[]));
-        assert_eq!(frame_union_spread(&[100, 101, 102, 103], &[]), Some(3));
-        // Minimal tear: span exactly 2 (one generation step beyond the even/odd pair).
+    fn single_cluster_two_generations_is_torn() {
+        // A genuine SINGLE-TILE tear: one tile's dual-QR captured gen G's even (100) and gen G+1's
+        // even (102) — 2 ids, span 2 > VERNIER_MAX_SPREAD -> TORN. This is the "genuine
+        // single-cluster 2-generation frame" v2.1 must still catch (issue 1196).
         assert!(is_torn_frame(&[100, 102], &[]));
         assert_eq!(frame_union_spread(&[100, 102], &[]), Some(2));
+        assert!(!is_multi_path_suspect(&[100, 102]), "2 ids = one tile");
+    }
+
+    #[test]
+    fn three_or_more_primary_ids_is_multi_path_suspect_not_torn_1196() {
+        // A single tile's dual-QR band produces AT MOST 2 optical QRs (left even + right odd), so
+        // a frame with >= 3 primary optical ids was composited from >= 2 capture paths/tiles: it
+        // is MULTI-PATH SUSPECT and NEVER torn — its wide span is inter-path skew, not a scanout
+        // tear, and cannot be scoped without pixel positions (issue 1196 v2.1). This replaces v2's
+        // treatment of {100,101,102,103} as a single-tile tear (a single band cannot yield 4 clean
+        // generations; that shape is a multi-tile composite).
+        assert!(is_multi_path_suspect(&[100, 101, 102, 103]));
+        assert!(!is_torn_frame(&[100, 101, 102, 103], &[]), "multi-tile skew, not a tear");
+        assert!(is_multi_path_suspect(&[100, 101, 102]), "3 ids = 2 tiles");
+        assert!(!is_torn_frame(&[100, 101, 102], &[]));
+        assert_eq!(frame_cluster_count(&[]), 0);
+        assert_eq!(frame_cluster_count(&[100]), 1);
+        assert_eq!(frame_cluster_count(&[100, 101]), 1);
+        assert_eq!(frame_cluster_count(&[100, 101, 102]), 2);
+        assert_eq!(frame_cluster_count(&[100, 101, 102, 103]), 2);
     }
 
     #[test]
     fn cross_band_generation_split_is_torn_1196() {
         // THE issue-1196 capability: a horizontal seam BETWEEN the primary band and the aux
         // band — the primary pair decodes gen G+1 (ticks 102/103) while the aux pair still
-        // shows gen G (ticks 100/101). Neither band alone spans > 1, but the UNION does.
+        // shows gen G (ticks 100/101). Neither band alone spans > 1, but the UNION does. This is
+        // a SINGLE-SOURCE frame (2 primary ids = one tile), so v2.1 scores it.
         assert!(!is_torn_frame(&[102, 103], &[]), "primary alone is clean");
         assert!(!is_torn_frame(&[], &[100, 101]), "aux alone is clean");
         assert!(
@@ -308,21 +441,27 @@ mod tests {
         // 2 of 4 frames decoded BOTH aux marks.
         assert!((s.aux_decode_fraction - 0.5).abs() < 1e-9);
         assert_eq!(s.primary_dark_aux_alive_fraction, 0.0);
+        // All frames are single-source (<= 2 primary ids) -> zero multi-path suspects.
+        assert_eq!(s.multi_path_suspect_frames, 0);
+        assert_eq!(s.multi_path_suspect_fraction, 0.0);
+        assert_eq!(s.max_cluster_count, 1);
+        assert_eq!(s.max_multi_path_spread, 0);
         assert_eq!(s.viability, TearSignalViability::Unproven);
         assert!(tear_gate_pass(&s));
     }
 
     #[test]
-    fn window_with_a_tear_is_observed() {
+    fn window_with_a_single_cluster_tear_is_observed() {
         let frames = vec![
             f(&[100, 101], &[]),
-            f(&[102, 103, 104, 105], &[]),
+            f(&[102, 104], &[]), // ONE tile, 2 ids spanning 2 -> a genuine tear
             f(&[106, 107], &[]),
         ];
         let s = window_tear_stats(&frames);
         assert_eq!(s.decodable_frames, 3);
         assert_eq!(s.tear_frames, 1);
-        assert_eq!(s.max_spread, 3);
+        assert_eq!(s.max_spread, 2);
+        assert_eq!(s.multi_path_suspect_frames, 0);
         assert!((s.tear_fraction - 1.0 / 3.0).abs() < 1e-9);
         assert_eq!(s.viability, TearSignalViability::Observed);
         assert!(
@@ -342,7 +481,33 @@ mod tests {
         let s = window_tear_stats(&frames);
         assert_eq!(s.tear_frames, 1);
         assert_eq!(s.max_spread, 3);
+        assert_eq!(s.multi_path_suspect_frames, 0, "all single-source (2 primary ids each)");
         assert_eq!(s.viability, TearSignalViability::Observed);
+    }
+
+    #[test]
+    fn window_multi_tile_skew_is_suspect_not_torn_1196() {
+        // The core issue-1196 defect: a window where every frame carries the primary dual-QR from
+        // TWO grabber-path tiles of the SAME monitor, offset ~2-3 ticks. Each frame has 3-4 primary
+        // optical ids (a contiguous run) -> MULTI-PATH SUSPECT -> excluded from the tear count. v2
+        // read this as ~100% torn; v2.1 reads it as multi-path skew, 0 tears, Unproven.
+        let frames = vec![
+            f(&[100, 101, 102], &[]),      // 2 tiles offset by 1, one half dropped
+            f(&[104, 105, 106, 107], &[]), // 2 tiles offset by 2
+            f(&[108, 109, 110, 111], &[]),
+        ];
+        let s = window_tear_stats(&frames);
+        assert_eq!(s.total_frames, 3);
+        assert_eq!(s.multi_path_suspect_frames, 3, "every frame is multi-tile");
+        assert_eq!(s.decodable_frames, 0, "no single-source frame to score");
+        assert_eq!(s.tear_frames, 0, "inter-path skew is not a tear");
+        assert_eq!(s.tear_fraction, 0.0);
+        assert_eq!(s.max_spread, 0, "clean single-tile magnitude untouched by skew");
+        assert_eq!(s.max_cluster_count, 2);
+        assert_eq!(s.max_multi_path_spread, 3, "peak inter-path skew surfaced separately");
+        assert!((s.multi_path_suspect_fraction - 1.0).abs() < 1e-9);
+        assert_eq!(s.viability, TearSignalViability::Unproven);
+        assert!(tear_gate_pass(&s), "a fully-suspect window has no scoreable tear");
     }
 
     #[test]
@@ -366,6 +531,8 @@ mod tests {
         assert!((s.aux_decode_fraction - 0.5).abs() < 1e-9);
         // Only frame 1 is primary-dark with BOTH aux alive: 1/4.
         assert!((s.primary_dark_aux_alive_fraction - 0.25).abs() < 1e-9);
+        // Primary-dark frames carry 0 primary ids -> 0 clusters -> never suspect.
+        assert_eq!(s.multi_path_suspect_frames, 0);
         assert_eq!(s.viability, TearSignalViability::Unproven);
     }
 
@@ -377,6 +544,10 @@ mod tests {
         assert_eq!(s.tear_fraction, 0.0);
         assert_eq!(s.aux_decode_fraction, 0.0);
         assert_eq!(s.primary_dark_aux_alive_fraction, 0.0);
+        assert_eq!(s.multi_path_suspect_frames, 0);
+        assert_eq!(s.multi_path_suspect_fraction, 0.0);
+        assert_eq!(s.max_cluster_count, 0);
+        assert_eq!(s.max_multi_path_spread, 0);
         assert_eq!(s.viability, TearSignalViability::Unproven);
         assert!(tear_gate_pass(&s));
     }
