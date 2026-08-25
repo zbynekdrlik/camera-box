@@ -148,24 +148,27 @@ pub fn frame_cluster_count(primary_ids: &[u32]) -> u32 {
     (primary_ids.len() as u32 + 1) / 2
 }
 
-/// issue 1196 (v2.1) — a frame is MULTI-PATH SUSPECT when it carries more primary optical QRs than
-/// ONE tile's dual-QR can produce (>= 3 ids => [`frame_cluster_count`] >= 2). Such a frame was
-/// composited from >= 2 capture paths of the SAME painted monitor, so its union span measures
-/// inter-path temporal SKEW, not a scanout tear — and without pixel positions the ids cannot be
-/// attributed to a tile, so the frame is UNSCORABLE for tear (excluded from the tear count,
-/// surfaced via [`TearStats::multi_path_suspect_fraction`]).
-pub fn is_multi_path_suspect(primary_ids: &[u32]) -> bool {
-    frame_cluster_count(primary_ids) >= 2
+/// issue 1196 (v2.1) — a frame is MULTI-PATH SUSPECT when EITHER band carries more optical QRs than
+/// ONE tile can produce (>= 3 ids => [`frame_cluster_count`] >= 2). One tile's dual-QR yields at
+/// most 2 primary QRs (left even + right odd) AND one tile's aux pair yields at most 2 aux QRs, so
+/// >= 3 in either band means the frame was composited from >= 2 capture paths of the SAME painted
+/// monitor. Its union span then measures inter-path temporal SKEW, not a scanout tear — and without
+/// pixel positions the ids cannot be attributed to a tile, so the frame is UNSCORABLE for tear
+/// (excluded from the tear count, surfaced via [`TearStats::multi_path_suspect_fraction`]). The aux
+/// arm keeps the guard symmetric across bands (a review-hardening — inert while `aux_decode_fraction`
+/// is 0 on the real rig, but the physical "one band, at most 2 QRs" premise applies to aux too).
+pub fn is_multi_path_suspect(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
+    frame_cluster_count(primary_ids) >= 2 || frame_cluster_count(aux_ids) >= 2
 }
 
 /// A captured frame is TORN when it is SINGLE-SOURCE (NOT [`is_multi_path_suspect`] — one tile's
-/// worth of dual-QR) AND the UNION of its primary dual-QR and aux tick-pair `frame_id`s spans more
-/// than the by-design even/odd adjacency ([`VERNIER_MAX_SPREAD`]) — i.e. one tile captured >= 2
-/// distinct paint generations (issue 781 within one band; issue 1196 across the primary/aux bands).
-/// A multi-source (multi-tile) frame is NEVER torn: its wide span is inter-path skew, not a tear
-/// (issue 1196 v2.1) — scoping it requires per-cluster pixel positions the payloads do not carry.
+/// worth of dual-QR in each band) AND the UNION of its primary dual-QR and aux tick-pair `frame_id`s
+/// spans more than the by-design even/odd adjacency ([`VERNIER_MAX_SPREAD`]) — i.e. one tile captured
+/// >= 2 distinct paint generations (issue 781 within one band; issue 1196 across the primary/aux
+/// bands). A multi-source (multi-tile) frame is NEVER torn: its wide span is inter-path skew, not a
+/// tear (issue 1196 v2.1) — scoping it requires per-cluster pixel positions the payloads do not carry.
 pub fn is_torn_frame(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
-    !is_multi_path_suspect(primary_ids)
+    !is_multi_path_suspect(primary_ids, aux_ids)
         && frame_union_spread(primary_ids, aux_ids).is_some_and(|s| s > VERNIER_MAX_SPREAD)
 }
 
@@ -220,8 +223,8 @@ pub struct TearStats {
     /// band, which corrupts both primary halves at the same height) as opposed to a whole-frame
     /// blur (which kills the aux marks too). Report-only discriminator; 0.0 on pre-aux content.
     pub primary_dark_aux_alive_fraction: f64,
-    /// issue 1196 (v2.1) — count of in-window frames flagged [`is_multi_path_suspect`] (>= 3
-    /// primary optical ids => composited from >= 2 capture paths/tiles). These are EXCLUDED from
+    /// issue 1196 (v2.1) — count of in-window frames flagged [`is_multi_path_suspect`] (>= 3 ids in
+    /// EITHER band => composited from >= 2 capture paths/tiles). These are EXCLUDED from
     /// `decodable_frames`/`tear_frames` because their union span is inter-path skew, not a tear,
     /// and cannot be scoped without pixel positions. On a multi-tile recording this is nearly all
     /// frames.
@@ -232,14 +235,16 @@ pub struct TearStats {
     /// content.
     pub multi_path_suspect_fraction: f64,
     /// issue 1196 (v2.1) — the largest inferred cluster (tile) count over the window's frames
-    /// (`ceil(primary_count / 2)`). 1 on single-tile content; >= 2 whenever any frame carried a
-    /// multi-tile composite. Report-only observability of how many capture paths the recording mixed.
+    /// (`ceil(count / 2)`, taken over whichever band shows more QRs). 1 on single-tile content;
+    /// >= 2 whenever any frame carried a multi-tile composite; 0 on an empty / all-undecodable
+    /// window. Report-only observability of how many capture paths the recording mixed.
     pub max_cluster_count: u32,
-    /// issue 1196 (v2.1) — the largest union span among the MULTI-PATH-SUSPECT frames: the peak
-    /// inter-path temporal skew magnitude (in ticks) between the composited tiles. Report-only —
-    /// this is the number v2 mis-reported as `max_spread`; separating it keeps the honest tear
-    /// magnitude ([`Self::max_spread`]) clean while still surfacing the skew for diagnosis. 0 when
-    /// no suspect frame.
+    /// issue 1196 (v2.1) — the largest primary∪aux union span among the MULTI-PATH-SUSPECT frames:
+    /// the peak inter-path skew magnitude (in ticks) between the composited tiles (the union folds
+    /// in any aux component, but on a multi-tile frame every band is the same monitor's tiles, so
+    /// this is skew, not a cross-band tear). Report-only — this is the number v2 mis-reported as
+    /// `max_spread`; separating it keeps the honest tear magnitude ([`Self::max_spread`]) clean
+    /// while still surfacing the skew for diagnosis. 0 when no suspect frame.
     pub max_multi_path_spread: u32,
     /// Whether the signal fired on this window (see [`TearSignalViability`]).
     pub viability: TearSignalViability,
@@ -262,7 +267,8 @@ pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
     let mut max_cluster_count = 0u32;
     let mut max_multi_path_spread = 0u32;
     for (primary, aux) in per_frame_ids {
-        let clusters = frame_cluster_count(primary);
+        // Inferred tile count is the max over both bands — one tile yields at most 2 QRs per band.
+        let clusters = frame_cluster_count(primary).max(frame_cluster_count(aux));
         if clusters > max_cluster_count {
             max_cluster_count = clusters;
         }
@@ -272,7 +278,7 @@ pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
                 primary_dark_aux_alive += 1;
             }
         }
-        if is_multi_path_suspect(primary) {
+        if is_multi_path_suspect(primary, aux) {
             // Multi-source frame: its union span is inter-path skew, not a scanout tear, and the
             // ids cannot be attributed to a tile without pixel positions -> UNSCOREABLE for tear.
             multi_path_suspect_frames += 1;
@@ -390,7 +396,7 @@ mod tests {
         // single-cluster 2-generation frame" v2.1 must still catch (issue 1196).
         assert!(is_torn_frame(&[100, 102], &[]));
         assert_eq!(frame_union_spread(&[100, 102], &[]), Some(2));
-        assert!(!is_multi_path_suspect(&[100, 102]), "2 ids = one tile");
+        assert!(!is_multi_path_suspect(&[100, 102], &[]), "2 ids = one tile");
     }
 
     #[test]
@@ -401,18 +407,37 @@ mod tests {
         // tear, and cannot be scoped without pixel positions (issue 1196 v2.1). This replaces v2's
         // treatment of {100,101,102,103} as a single-tile tear (a single band cannot yield 4 clean
         // generations; that shape is a multi-tile composite).
-        assert!(is_multi_path_suspect(&[100, 101, 102, 103]));
+        assert!(is_multi_path_suspect(&[100, 101, 102, 103], &[]));
         assert!(
             !is_torn_frame(&[100, 101, 102, 103], &[]),
             "multi-tile skew, not a tear"
         );
-        assert!(is_multi_path_suspect(&[100, 101, 102]), "3 ids = 2 tiles");
+        assert!(
+            is_multi_path_suspect(&[100, 101, 102], &[]),
+            "3 ids = 2 tiles"
+        );
         assert!(!is_torn_frame(&[100, 101, 102], &[]));
         assert_eq!(frame_cluster_count(&[]), 0);
         assert_eq!(frame_cluster_count(&[100]), 1);
         assert_eq!(frame_cluster_count(&[100, 101]), 1);
         assert_eq!(frame_cluster_count(&[100, 101, 102]), 2);
         assert_eq!(frame_cluster_count(&[100, 101, 102, 103]), 2);
+    }
+
+    #[test]
+    fn aux_side_multi_tile_is_suspect_not_torn_1196() {
+        // Review hardening: the multi-source guard is symmetric across bands. A frame with a
+        // single-source PRIMARY band (<= 2 ids) but >= 3 AUX ids was still composited from >= 2
+        // tiles (one tile's aux pair yields at most 2 aux QRs), so it must be suspect, not scored
+        // as a spurious aux-side-skew tear. Inert on the real rig (aux_decode_fraction 0.0) but
+        // keeps the physical "one band, at most 2 QRs" premise consistent for both bands.
+        assert!(is_multi_path_suspect(&[100, 101], &[200, 201, 202]));
+        assert!(
+            !is_torn_frame(&[100, 101], &[200, 201, 202]),
+            "aux-side multi-tile skew is not a tear"
+        );
+        // Two aux marks (one tile's pair) is still single-source and scoreable.
+        assert!(!is_multi_path_suspect(&[100, 101], &[200, 201]));
     }
 
     #[test]
