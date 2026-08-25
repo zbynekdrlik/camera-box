@@ -38,7 +38,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$SourceScript = (Join-Path $PSScriptRoot 'strih-nic-selfheal.ps1'),
+  [string]$SourceScript = (Join-Path (Split-Path -Parent $PSCommandPath) 'strih-nic-selfheal.ps1'),
   [string]$InstallDir   = 'C:\ProgramData\camera-box',
   [int]$IntervalMinutes = 2,
   [switch]$Uninstall,
@@ -88,7 +88,7 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
 
 $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
   -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
-  -RepetitionDuration ([TimeSpan]::MaxValue)
+  -RepetitionDuration (New-TimeSpan -Days 3650)
 $triggerBoot = New-ScheduledTaskTrigger -AtStartup
 
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
