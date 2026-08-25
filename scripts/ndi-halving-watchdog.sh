@@ -394,7 +394,7 @@ samples=0"
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD alert: '$input' CONFIRMED halved (${show_fps} fps, cap ${cap:-?}ms) alert_now=$alert_now"
+    log "[dry-run] WOULD alert: '$input' CONFIRMED halved (${show_fps} fps, cap ${cap:-?}ms) alert_now=$alert_now ($sibling_note)"
     return 0
   fi
   if [ "${alert_now:-0}" = "1" ]; then
