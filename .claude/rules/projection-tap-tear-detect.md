@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/tear_detect.rs"
+  - "src/aux_tick.rs"
   - "tests/tear_detect_781.rs"
   - "tests/fixtures/tear-781/**"
 ---
@@ -37,20 +38,66 @@ a QR that exists at only one vertical position. So an all-zero `tear_fraction` m
 (e.g. post the issue-1107 render-side fix) OR "signal blind" — indistinguishable without a known-torn
 run.
 
+## v2 (issue 1196) — the aux Vernier tick pair, the viability cure
+
+The vertical tick redundancy the section above calls for LANDED as PR-1 of issue 1196 (report-only,
+Approach 1 of the design synthesis on that ticket):
+
+- **Painter:** `paint_one_frame`'s dual-QR branch additionally blits two SMALL (~210px,
+  payload-minimal) QRs into the burn-free bottom gaps — geometry in the pure crate-root
+  `src/aux_tick.rs` (left x[466,676), right x[1224,1434), y[745,955) at the rig 1920×1080/700/24
+  layout; machine-proven disjoint from the primary halves, colour column, motion sweep, and the
+  strih-BL/cambox-center/stream-BR burn overlays; returns `None` → no aux where the layout can't
+  fit, e.g. the 2560-wide override canvas). LEFT = latest EVEN tick, RIGHT = latest ODD tick
+  (`vernier_ids`), reserved run_id `recording_latency::AUX_TICK_RUN_ID` (911013), `gen_ts_ns = 0`
+  (constant → the settled aux mark is byte-identical across ticks by construction, the #854
+  property with zero state). **Documented exception:** the LEFT aux sits inside imag's
+  BottomCenterLeft burn zone [382,684) — accepted because the real-partial run_id census proves
+  imag's burn is NOT in the projected-scene path; only imag's OWN leg recording may cover it
+  (lower report-only aux coverage there). Pinned by `left_aux_overlaps_the_imag_burn_zone_by_
+  documented_exception` in `src/aux_tick.rs`.
+- **Decoder: NO changes** — the existing passes find the aux QRs; they flow into the partial's
+  per-frame `payloads` with zero schema change. `AUX_TICK_RUN_ID` joined `NODE_BURN_RUN_IDS`
+  (`[u32; 11]`) so tick/split/optical/cadence/copies/latency all ignore the aux marks
+  automatically; ONLY the tear consumer reads them, by run_id. The python mirrors
+  (`qr_align_pins.py`, `mv_skew_snapshot.py` RESERVED_RUN_IDS) must stay in sync — the aux is
+  UNIVERSAL painted content with a small id and a constant gen_ts=0, so an unmirrored copy would
+  win the smallest-id painter auto-detect tie-break and poison align/skew math (the #1159 class).
+- **Detector v2:** `window_tear_stats` takes per-frame `(primary_ids, aux_ids)`; torn ⇔ span of
+  primary ∪ aux > `VERNIER_MAX_SPREAD` — a seam BETWEEN the bands now fires. Two report-only
+  promotion fields: `aux_decode_fraction` (frames with BOTH aux decoded / ALL attributed frames —
+  did the small marks survive the lossy chain?) and `primary_dark_aux_alive_fraction` (primary
+  empty ∧ both aux decoded — a seam INSIDE the 700px primary band vs a whole-frame blur).
+
+**Promotion preconditions (ALL of them, in order — the LIVE flip stays out of scope until then):**
+
+1. **Real-captured-frame fixture WITH aux marks** — mined from the first rig run after the cam2
+   painter redeploy (supervisor step) and committed under `tests/fixtures/tear-781/`; the
+   painter-level synthetic render→decode round-trip in `src/probe/painter.rs`
+   (`aux_tick_pair_round_trips_alongside_the_dual_qr_1196`) is deliberately NOT sufficient —
+   small-optical-QR decodability through the real chain (projection → grabber → 2×NDI → 4K
+   upscale → mp4) is THE open risk (`pattern-change-needs-decode-fixture`). A LOW real
+   `aux_decode_fraction` here escalates to Approach 2 (the full-height tick ladder — see the
+   issue-1196 design synthesis) instead of promoting.
+2. **A known-torn calibration run** (imag pre-1107 build or the projector-vsync env escape —
+   needs owner agreement, asked at that step) making the signal `Observed`.
+3. **Calibrate `TEAR_FRACTION_CEILING` + an aux-coverage floor** from real green vs torn
+   distributions (`verdict-gate-seam-calibration.md`) — the coverage floor is what makes a silent
+   aux loss demote honestly instead of false-greening.
+4. Then the one-line `gates_overall_pass() → true` flip + the repo-wide re-arm grep
+   (`ci-testing-gotchas.md`'s re-arm section).
+
 ## Consequences for anyone touching this
 
 - **It is REPORT-ONLY and stays report-only until proven.** `gates_overall_pass()` returns `false`
   (mirrors `optical_floor`/`e2e_latency_gate`/`imag_leg_gate`). The emitted `TearSignalViability`
   (`observed`/`unproven`) is the machine-checked promotion gate — a LIVE flip (`gates_overall_pass →
-  true`, one line) is valid ONLY once the signal is `Observed` on a known-torn run AND a bound is
-  calibrated from real data (per `verdict-gate-seam-calibration.md`). Do NOT flip it blind: an
+  true`, one line) is valid ONLY once every precondition above holds. Do NOT flip it blind: an
   all-zero green distribution here is the issue-1101 "blind signal" trap, not a tight ceiling.
-- **The real fix for a VIABLE payload-level LIVE gate is a PAINTER change** (rig-side, out of a
-  software-only lane): the painted pattern needs VERTICAL tick redundancy — a tick indicator in BOTH
-  the top and bottom halves (a second dual-QR row lower down, or a full-height tick strip) — so a
-  horizontal tear yields two clean generations instead of an undecodable. The alternative is a
-  pixel-seam detector on the on-box extract (heavy; a `src/probe/` decode change + schema carry, and
-  per #1166 the lossy `.mp4` may need a codec-tolerant measure to not be blind too).
+- **The pixel-seam detector alternative stays rejected** (heavy; a `src/probe/` decode change +
+  schema carry, and per #1166 the lossy `.mp4` may need a codec-tolerant measure to not be blind
+  too) — Approach 2 (full-height tick ladder, schema v7 + fleet redeploy) is the named escalation
+  if the aux marks prove undecodable through the real chain.
 - **Window attribution reuses the sweep primitives** (`frame_gen_ts_anchor` + `place_frame_in_window`)
   and the `NODE_BURN_RUN_IDS` optical filter — the SAME definition `RecordingFrame::tick` uses — so
   the tear windows align 1:1 with the strict `all_cambox_continuity.segments`. Do not re-derive a

@@ -4,6 +4,8 @@ paths:
   - "tests/av_sync_dock_video_decode*.rs"
   - "tests/fixtures/av-sync-dock-*/**"
   - "src/av_sync_dock.rs"
+  - "src/aux_tick.rs"
+  - "src/probe/painter.rs"
 ---
 
 # Zmena vzoru => decode fixture test (#921, #690, #751/#754)
@@ -59,6 +61,21 @@ quirc is real vendored C and must be treated as such.
 for the working two-compiler-then-link pattern (compile `quirc.c`/`decode.c`/`identify.c`/
 `version_db.c` with `cc -c`, compile the harness `.cpp` with `c++ -std=c++17 -c`, link all objects
 with `c++`).
+
+## A NEW painted-pattern ELEMENT: the synthetic round-trip lands with the change; the REAL-frame fixture is a hard PROMOTION precondition (issue 1196 precedent)
+
+When the change ADDS a new painted element (not just a decode-parameter tweak), the two proof
+layers split in time: (1) the painter-level synthetic render→decode round-trip (the
+`CapturingPresenter` + `decode_qr_luma_all` pattern — see
+`aux_tick_pair_round_trips_alongside_the_dual_qr_1196` in `src/probe/painter.rs`) MUST land in the
+SAME PR as the pattern change — it proves geometry + wire format + decoder reach; (2) the
+REAL-captured-frame fixture structurally CANNOT exist yet (the rig has not painted the new element
+until the painter deploys), so it is mined from the FIRST rig run after the deploy and committed
+then — and until it exists, the new element's signal stays REPORT-ONLY: the real fixture is a hard
+precondition for flipping any gate that depends on the new element decoding through the real lossy
+chain (projection → grabber → NDI → 4K upscale → mp4 — a synthetic crisp canvas proves nothing
+about that). Worked example: the issue-1196 aux tick pair,
+`.claude/rules/projection-tap-tear-detect.md`'s promotion-preconditions list.
 
 ## #921's own finding — a useful discriminator for THIS class of problem
 
