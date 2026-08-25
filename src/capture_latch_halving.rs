@@ -58,8 +58,9 @@
 //!
 //! ## Tier-0 pure
 //!
-//! No probe deps, no I/O, no sysfs, no `tracing` — pure decision + formatting + the cooldown
-//! predicate, so it unit-tests on default features. `src/main.rs`'s capture loop counts the
+//! No probe deps, no I/O, no sysfs, no `tracing` — pure decision + formatting (the cooldown
+//! predicate moved to `capture_rate_selfheal` in #1201), so it unit-tests on default features.
+//! `src/main.rs`'s capture loop counts the
 //! capture-side byte-identical dupe fraction (reusing the SAME `content_hash` the #889 path already
 //! computes — NO change to the decimation gate), feeds each 5 s window's `(dupe_captures,
 //! total_captures)` into one [`CaptureLatchHalvingTracker`], logs the report-only

@@ -32,8 +32,9 @@
 //!
 //! ## Tier-0 pure
 //!
-//! No probe deps, no I/O, no sysfs, no `tracing` — pure decision + formatting + the cooldown
-//! predicate, so it unit-tests on default features. `src/main.rs`'s 5 s report block feeds each
+//! No probe deps, no I/O, no sysfs, no `tracing` — pure decision + formatting (the cooldown
+//! predicate moved to `capture_rate_selfheal` in #1201), so it unit-tests on default features.
+//! `src/main.rs`'s 5 s report block feeds each
 //! window's `emit_ring.capture_buckets()` + the drained `dupe_shed` count into one
 //! [`CaptureOverRateTracker`], logs the report-only [`over_rate_warn_message`] marker on an
 //! [`CaptureOverRateVerdict::OverRate`], and — only when the opt-in
