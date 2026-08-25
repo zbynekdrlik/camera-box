@@ -929,7 +929,16 @@ fi
 # explicitly excluded via the SAME CAMBOX_OFFLINE_ACK/rig-fleet.txt mechanism the fleet preflight and
 # the version-parity gate above already use, never a silent skip.
 echo "[0/8] camera-box version-parity gate — every active cam box must run the SAME camera-box build (issue 875)"
-CAMBOX_VERSION_LINUX="$CAMERA_NAME=root@$CAM1_IP cam2=root@$PAINTER_IP"
+# issue 1170: cam2's camera-box BINARY is version-gated ONLY while cam2 is a MEASURED camera. As a
+# painter-only box it is NOT redeployed for the run (it stays on the fleet-deployed build, not this
+# run's candidate), so grading it here refuses every run on a spurious version mismatch (live: a
+# candidate dev build vs cam2's deployed build). Its PAINTER-role clock IS still gated (the
+# dantesync clock version gate above keeps cam2 — that pins the run's timebase). Re-adding "cam2" to
+# CAMERA_ACTIVE_SET restores this grading, one line. Same set-membership gate as the [2b/8] deploy.
+CAMBOX_VERSION_LINUX="$CAMERA_NAME=root@$CAM1_IP"
+if camera_is_active cam2; then
+  CAMBOX_VERSION_LINUX="$CAMBOX_VERSION_LINUX cam2=root@$PAINTER_IP"
+fi
 for _cb_cn in $(camera_active_excluding "$CAMERA_NAME cam2"); do
   CAMBOX_VERSION_LINUX="$CAMBOX_VERSION_LINUX ${_cb_cn}=root@$(camera_secondary_ip "$_cb_cn")"
 done
