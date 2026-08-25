@@ -100,6 +100,7 @@ fn lib_defines_the_pure_functions() {
         "netcfg_classify_rate",
         "netcfg_classify_drop_rate",
         "netcfg_drift_verdict",
+        "netcfg_port_is_designated",
     ] {
         let out = stdout_of(&format!("type {f} >/dev/null 2>&1 && echo DEFINED"));
         assert_eq!(out, "DEFINED", "{f} is not defined by the lib");
@@ -291,4 +292,75 @@ fn drift_verdict_aggregates() {
     assert_eq!(stdout_of("netcfg_drift_verdict OK DROPPING"), "DRIFT");
     // no args -> CLEAN (nothing to judge)
     assert_eq!(stdout_of("netcfg_drift_verdict"), "CLEAN");
+}
+
+// ------------------------------------------------------------------------------------------------
+// netcfg_port_is_designated — the drop-sampler ALWAYS-probe set (#1110). A `node|port` in the
+// space-separated designated list is live-sampled every `--check` regardless of cumulative-counter
+// growth, so foh2_video's egress toward strih (the direct-DAC uplink `sfp-sfpplus2`) always yields
+// a fresh drop DELTA for the next starvation episode. Exit 0 = designated, exit 1 = plain.
+// ------------------------------------------------------------------------------------------------
+
+/// Run `body` (which itself prints `RC=$?`) against the sourced lib and return the trimmed stdout,
+/// so a non-zero PREDICATE return is observable (unlike `stdout_of`, which asserts the body rc==0).
+fn rc_line(body: &str) -> String {
+    run_sourced(body).1.trim().to_string()
+}
+
+#[test]
+fn port_is_designated_matches_only_exact_node_port_tokens() {
+    let list = "foh2_video|sfp-sfpplus2";
+    // the strih uplink (foh2_video egress toward strih) IS designated -> exit 0
+    assert_eq!(
+        rc_line(&format!(
+            "netcfg_port_is_designated foh2_video sfp-sfpplus2 '{list}'; echo RC=$?"
+        )),
+        "RC=0"
+    );
+    // a DIFFERENT port on the SAME switch is not designated -> exit 1
+    assert_eq!(
+        rc_line(&format!(
+            "netcfg_port_is_designated foh2_video sfp-sfpplus1 '{list}'; echo RC=$?"
+        )),
+        "RC=1"
+    );
+    // the SAME port name on a DIFFERENT switch is not designated (match is exact node|port) -> exit 1
+    assert_eq!(
+        rc_line(&format!(
+            "netcfg_port_is_designated foh1_video sfp-sfpplus2 '{list}'; echo RC=$?"
+        )),
+        "RC=1"
+    );
+}
+
+#[test]
+fn port_is_designated_handles_multi_token_and_empty() {
+    // a multi-token list matches ANY of its exact node|port pairs
+    let two = "foh2_video|sfp-sfpplus2 foh1_video|sfp-sfpplus1";
+    assert_eq!(
+        rc_line(&format!(
+            "netcfg_port_is_designated foh2_video sfp-sfpplus2 '{two}'; echo RC=$?"
+        )),
+        "RC=0"
+    );
+    assert_eq!(
+        rc_line(&format!(
+            "netcfg_port_is_designated foh1_video sfp-sfpplus1 '{two}'; echo RC=$?"
+        )),
+        "RC=0"
+    );
+    // an empty designated list never matches -> exit 1 (the default-off case)
+    assert_eq!(
+        rc_line("netcfg_port_is_designated foh2_video sfp-sfpplus2 ''; echo RC=$?"),
+        "RC=1"
+    );
+    // an empty node or port never matches -> exit 1
+    assert_eq!(
+        rc_line("netcfg_port_is_designated '' sfp-sfpplus2 'foh2_video|sfp-sfpplus2'; echo RC=$?"),
+        "RC=1"
+    );
+    assert_eq!(
+        rc_line("netcfg_port_is_designated foh2_video '' 'foh2_video|sfp-sfpplus2'; echo RC=$?"),
+        "RC=1"
+    );
 }
