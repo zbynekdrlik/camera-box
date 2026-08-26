@@ -5,6 +5,9 @@ find_package(X11_XCB REQUIRED)
 find_package(XCB REQUIRED XCB RANDR OPTIONAL_COMPONENTS XINPUT)
 # camera-box #1152: Libdrm for the in-OBS DRM-lease page-flip output (obs-drm-output.c).
 find_package(Libdrm REQUIRED)
+# camera-box #1152 M2: GBM allocates the Program scanout buffers (dma-buf import into GL).
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(Gbm REQUIRED IMPORTED_TARGET gbm)
 find_package(Gio)
 
 target_sources(
@@ -57,6 +60,7 @@ target_link_libraries(
     XCB::XCB
     XCB::RANDR # camera-box #1152: xcb_randr_create_lease for the DRM-lease output
     Libdrm::Libdrm # camera-box #1152: drmModePageFlip page-flip onto the leased HDMI connector
+    PkgConfig::Gbm # camera-box #1152 M2: gbm_bo_create scanout buffers for the Program dma-buf path
     LibUUID::LibUUID
     ${CMAKE_DL_LIBS}
     $<$<NOT:$<BOOL:${HAVE_MATH_IN_STD_LIB}>>:m>
