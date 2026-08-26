@@ -58,14 +58,20 @@ so there is **no `windows-genlock*.yml` pwsh mirror** (nothing to assert on Wind
   os-linux.cmake link, the `__linux__`-guarded obs.c autostart + obs_shutdown stop). Facet B lifts
   `drm_output_pick_free_crtc` and cc-compiles it under `-Werror -Wconversion` over a truth table —
   mutate the free-test on a scratch copy to prove it bites (9/10 vectors diverge).
-- **fsyntax-only against REAL headers** (stronger than "CI is first compiler"): stub `obs.h`
-  (blog with `__attribute__((format(printf,2,3)))` → `-Wformat=2` checks every blog format string;
-  stub `os_atomic_{set,load}_bool`/`obs_data_*`), stub `util/c99defs.h` (`#define EXPORT`), copy the
-  real `.c` into the stub dir so its `"obs.h"` resolves to the stub, then
-  `gcc -fsyntax-only -std=gnu11 -Wall -Wextra -Wformat=2 -Wconversion -I<stub> -I/usr/include/libdrm
-  $(pkg-config --cflags xcb xcb-randr libdrm) obs-drm-output.c`. Install `libdrm-dev`/`libxcb-randr0-dev`
-  on dev1 if missing. This caught nothing on the clean pass but is the net that would catch a wrong
-  xcb/drm signature or a `%zu`/`%llu` mismatch before a wasted CI cycle.
+- **fsyntax-only against the REAL in-tree libobs headers — the M2-upgraded net (use THIS, not the
+  older stub-obs.h variant):** the whole public libobs header set is self-contained C, so the ONLY
+  stub needed is the CMake-generated `obsconfig.h` — write a minimal one into a scratch dir
+  (OBS_DATA_PATH/OBS_INSTALL_PREFIX/OBS_PLUGIN_DESTINATION + feature defines; **NO
+  `OBS_VERSION`/`OBS_VERSION_CANONICAL` macros** — this tree declares those `extern const char*`
+  in `obsversion.h`, and a macro collides the moment a TU pulls obs-internal.h) — then
+  `gcc -fsyntax-only -std=gnu11 -Wall -Wextra -Wformat=2 -Wconversion -I<scratch>
+  -Ivendor/obs-studio/libobs -I/usr/include/libdrm vendor/obs-studio/libobs/obs-drm-output.c`.
+  Every real prototype (`gs_*`, `obs_*`, `os_atomic_*`, gbm/drm/xcb) is then genuinely
+  signature-checked locally — this net catches the exact M1-class miss (the stubbed obs.h that
+  masked a missing `util/threading.h` include, fda5b2f5d) by construction. `obs-video.c` compiles
+  the same way with `-Ivendor/obs-studio/deps/libcaption` added (obs-internal.h needs it).
+  Install `libdrm-dev`/`libxcb-randr0-dev`/`libgbm-dev` on dev1 if missing. The old stub-obs.h
+  recipe survives only as a fallback for a TU that genuinely cannot include the real headers.
 
 ## DEFAULT-OFF activation + M1 rig runbook (SUPERVISOR step, after CI-green + full-bundle deploy)
 
