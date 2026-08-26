@@ -61,6 +61,15 @@ set -euo pipefail
 #                          default is baked self-documenting into the generated mpv command; the
 #                          supervisor can re-tune via the paired cross-check campaign without a
 #                          code change.
+#   LIPSYNC_AUDIO_RATE     forced mpv audio OUTPUT sample rate in Hz (default 48000), applied via
+#                          `--audio-samplerate=<Hz>` (mpv resamples the asset's native rate to it).
+#                          Issue 1174 round-3/4 diagnosis: the HDMI->mic chain runs 48k natively and
+#                          a 44.1k ALSA stream's mode lock is FLAKY per stream-start (round-1 locked
+#                          spontaneously after 26.8 min; rounds 2-4 never locked, envelope corr
+#                          ~0.23-0.35), while the ONE manual probe played at 48k locked FIRST TRY
+#                          (corr 0.976, SyncNet conf 6.4). Forcing 48k output removes the 44.1k
+#                          mode-switch from the chain entirely. Expanded on the REMOTE (cam2) side
+#                          like the gain seam; set 44100 to reproduce the flaky-lock case.
 #   LIPSYNC_PLAYBACK_PIDFILE  where this script's own mpv PID is tracked on cam2 (default
 #                             /run/rig-lipsync-playback.pid)
 #   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 0, non-negative integer
@@ -252,6 +261,7 @@ lipsync_playback_cmds() {
 # --no-terminal, so a fatal error is captured; the die-immediately branch below cats it too.
 nohup $mpv_bin --no-config --no-terminal --log-file=/run/rig-lipsync-playback.mpv.log --vo=drm ${drm_opt}--loop-file=inf \\
   --audio-device=alsa/$audio --audio-channels=stereo \\
+  --audio-samplerate=\${LIPSYNC_AUDIO_RATE:-48000} \\
   --af=volume=\${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB \\
   --audio-delay=$delay_s \\
   '$media' \\
