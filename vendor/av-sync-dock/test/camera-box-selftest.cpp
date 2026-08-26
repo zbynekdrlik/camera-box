@@ -422,6 +422,160 @@ int main()
 		CHECK(!ever_stale, "stale: continuously-advancing signal never goes stale");
 	}
 
+	/* 10. #1153: CbDockPairingWatchdog mirrors av_sync_dock::DockPairingWatchdog -- the
+	 * dead-pairing (sticky-unlock) recovery classifier. */
+	{
+		const uint64_t S = 1000000000ull;
+		const uint64_t DEAD = CB_DOCK_PAIRING_DEAD_NS; // 300 s epochs
+		const uint64_t MINH = CB_DOCK_PAIRING_MIN_RING_HITS;
+
+		// seed + mid-epoch never fire; a dead epoch with flowing input fires with the deltas.
+		CbDockPairingWatchdog w;
+		CHECK(!w.observe(0, 0, 0, 0, false, 0, DEAD, MINH).fire, "pairing: seed never fires");
+		bool mid_fired = false;
+		for (uint64_t i = 1; i < 30; i++)
+			if (w.observe(i * 600, i * 460, 0, 0, false, i * 10 * S, DEAD, MINH).fire)
+				mid_fired = true;
+		CHECK(!mid_fired, "pairing: mid-epoch observes never fire");
+		CbDockPairingRecovery r = w.observe(30 * 600, 30 * 460, 0, 0, false, 300 * S, DEAD, MINH);
+		CHECK(r.fire, "pairing: dead epoch + live input fires");
+		CHECK(r.window_ns == 300 * S && r.ring_hit_delta == 0 &&
+		      r.video_decoded_delta == 30 * 600 && r.preambles_delta == 30 * 460,
+		      "pairing: fire carries the epoch deltas");
+
+		// healthy convergence / locked-with-pairing never fire; min-1 hits unlocked fires.
+		CbDockPairingWatchdog h;
+		h.observe(0, 0, 0, 0, false, 0, DEAD, MINH);
+		CHECK(!h.observe(18000, 13800, 120, 60, false, 300 * S, DEAD, MINH).fire,
+		      "pairing: converging (60 hits/epoch) is healthy");
+		CHECK(!h.observe(36000, 27600, 130, 62, true, 600 * S, DEAD, MINH).fire,
+		      "pairing: locked with ring advance is healthy");
+		CbDockPairingWatchdog b;
+		b.observe(0, 0, 0, 0, false, 0, DEAD, MINH);
+		CHECK(!b.observe(100, 100, 10, MINH, false, 300 * S, DEAD, MINH).fire,
+		      "pairing: exactly min hits is alive");
+		CHECK(b.observe(200, 200, 20, 2 * MINH - 1, false, 600 * S, DEAD, MINH).fire,
+		      "pairing: min-1 hits, unlocked, live input fires");
+
+		// stale-held lock (zero hits all epoch) fires; input-dead states never fire.
+		CbDockPairingWatchdog sl;
+		sl.observe(0, 0, 0, 278, true, 0, DEAD, MINH);
+		CHECK(sl.observe(18000, 130, 1, 278, true, 300 * S, DEAD, MINH).fire,
+		      "pairing: stale-held lock with zero ring advance fires");
+		CbDockPairingWatchdog di;
+		di.observe(500, 500, 5, 5, false, 0, DEAD, MINH);
+		CHECK(!di.observe(500, 900, 6, 5, false, 300 * S, DEAD, MINH).fire,
+		      "pairing: frozen video = input dead, never fires");
+		CHECK(!di.observe(18500, 900, 6, 5, false, 600 * S, DEAD, MINH).fire,
+		      "pairing: frozen preambles = input dead, never fires");
+	}
+
+	/* 10b. #1153: StreamingMarkerDecoder::reset_window preserves origin continuity + cumulative
+	 * stats, clears the window + dedup (mirrors the Rust
+	 * streaming_decoder_reset_window_preserves_origin_and_stats_and_still_decodes_1153). */
+	{
+		size_t sr = 48000, sig_n = cb_signal_len(48000, 442, 1);
+		StreamingMarkerDecoder dec(48000, 442, 1, CB_QPSK_THRESHOLD, sig_n * 3, (uint64_t)sig_n);
+		std::vector<float> sig = marker_signal(9);
+		std::vector<float> stream(sr * 2, 0.0f);
+		for (size_t j = 0; j < sig.size(); j++)
+			stream[sr + j] = sig[j];
+		std::vector<std::pair<uint64_t, uint8_t>> got;
+		for (size_t off = 0; off < stream.size(); off += 480) {
+			size_t len = std::min((size_t)480, stream.size() - off);
+			std::vector<std::pair<uint64_t, uint8_t>> rr = dec.push(&stream[off], len);
+			got.insert(got.end(), rr.begin(), rr.end());
+		}
+		CHECK(got.size() == 1 && got[0].second == 9, "reset_window: pre-reset marker decodes");
+		CbDecodeStats before = dec.stats;
+		dec.reset_window();
+		CHECK(dec.stats.preamble_screens_passed == before.preamble_screens_passed &&
+		      dec.stats.crc_ok == before.crc_ok && dec.stats.crc_fail == before.crc_fail,
+		      "reset_window: cumulative stats survive");
+		std::vector<float> stream2(sr * 2, 0.0f);
+		for (size_t j = 0; j < sig.size(); j++)
+			stream2[sr / 2 + j] = sig[j];
+		std::vector<std::pair<uint64_t, uint8_t>> got2;
+		for (size_t off = 0; off < stream2.size(); off += 480) {
+			size_t len = std::min((size_t)480, stream2.size() - off);
+			std::vector<std::pair<uint64_t, uint8_t>> rr = dec.push(&stream2[off], len);
+			got2.insert(got2.end(), rr.begin(), rr.end());
+		}
+		CHECK(got2.size() == 1 && got2[0].second == 9, "reset_window: post-reset marker decodes");
+		long long want = (long long)(sr * 2 + sr / 2);
+		CHECK(got2.size() == 1 && std::llabs((long long)got2[0].first - want) < 8,
+		      "reset_window: origin continuity across the reset");
+	}
+
+	/* 11. #1153: the sticky-unlock scenario end-to-end at the pairing layer -- a healthy chain
+	 * locks; a ±1 s video-latency step kills real decodes (the live dead state: chance-level
+	 * decode only, stale-held lock); WITHOUT the watchdog the cluster never re-locks (control);
+	 * WITH it the watchdog fires within its <= 2-epoch budget, the reset clears the in-dock
+	 * state (modeled by the harness as curing the poison), and the cluster re-locks within the
+	 * ~150 s re-convergence -- total re-lock far under the designed ~12.5 min budget, vs 2+ h +
+	 * a manual OBS restart live. */
+	{
+		const uint64_t S = 1000000000ull;
+		const uint64_t DEAD = CB_DOCK_PAIRING_DEAD_NS;
+		const uint64_t MINH = CB_DOCK_PAIRING_MIN_RING_HITS;
+
+		// Control: the dead phase alone (sparse chance-level scattered pushes) never re-locks.
+		{
+			RollingOffsetCluster ctrl = RollingOffsetCluster::dock();
+			double cycle_ms = (double)(256ull * 1000000000ull / 60ull) / 1e6;
+			bool locked_ever = false;
+			for (uint64_t k = 0; k < 50; k++) { // ~one chance decode per minute, ~50 min
+				double r01 = (double)((k * 2654435761ull >> 7) % 100000) / 100000.0;
+				if (ctrl.push(k * 60 * S, (r01 - 0.5) * cycle_ms).ok)
+					locked_ever = true;
+			}
+			CHECK(!locked_ever, "scenario control: chance-level pairing alone never locks");
+		}
+
+		RollingOffsetCluster c = RollingOffsetCluster::dock();
+		CbDockPairingWatchdog w;
+		uint64_t vdec = 0, pre = 0, crc = 0, hits = 0;
+		bool lock_state = false;
+		bool locked_before_step = false;
+		const uint64_t t_step = 600 * S; // healthy 10 min, then the latency step kills decode
+		uint64_t fired_at = 0, relocked_at = 0;
+		for (uint64_t t = 0; t <= 1800 * S && relocked_at == 0; t += 10 * S) {
+			bool healthy_input = t < t_step || fired_at != 0; // the reset cures the poison
+			vdec += 600; // video QRs always flow
+			pre += healthy_input ? 460 : 4; // audio candidates collapse ~100x when dead
+			if (healthy_input) {
+				// ~2 real pairs per 10 s tick at +40 ms (small jitter), like a live chain
+				for (int j = 0; j < 2; j++) {
+					double jit = ((double)((t / S + (uint64_t)j) % 7) - 3.0) * 2.0;
+					CbAvOffset e = c.push(t + (uint64_t)j * 3 * S, 40.0 + jit);
+					lock_state = e.ok;
+					crc++;
+					hits++;
+				}
+				if (t < t_step && lock_state)
+					locked_before_step = true;
+			}
+			CbDockPairingRecovery pr =
+				w.observe(vdec, pre, crc, hits, lock_state, t, DEAD, MINH);
+			if (pr.fire && fired_at == 0) {
+				fired_at = t;
+				// the dock's reset (the sync-test-output.cpp mirror of it): fresh cluster,
+				// stale lock dropped.
+				c = RollingOffsetCluster::dock();
+				lock_state = false;
+			}
+			if (fired_at != 0 && lock_state && relocked_at == 0)
+				relocked_at = t;
+		}
+		CHECK(locked_before_step, "scenario: the healthy phase genuinely locked first");
+		CHECK(fired_at != 0, "scenario: the watchdog fires on the dead window");
+		CHECK(fired_at >= t_step, "scenario: never fires during the healthy phase");
+		CHECK(fired_at - t_step <= 2 * DEAD, "scenario: detection within the 2-epoch budget");
+		CHECK(relocked_at != 0, "scenario: the dock re-locks by itself after the reset");
+		CHECK(relocked_at - fired_at <= 150 * S,
+		      "scenario: re-locks within the re-convergence budget");
+	}
+
 	if (g_failures == 0) {
 		std::printf("camera-box-selftest: ALL PASS\n");
 		return 0;

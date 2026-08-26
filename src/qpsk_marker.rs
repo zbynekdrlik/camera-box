@@ -304,6 +304,9 @@ pub fn decode_markers_with_stats(
     for m in 0..n {
         let ph = m as f64 * w;
         let x = samples[m] as f64;
+        // #1153: a non-finite input sample would otherwise contaminate every prefix sum after it,
+        // silently killing decode for the REST of the window; treat it as silence instead.
+        let x = if x.is_finite() { x } else { 0.0 };
         pc[m + 1] = pc[m] + x * ph.cos();
         ps[m + 1] = ps[m] + x * ph.sin();
         pe[m + 1] = pe[m] + x * x;

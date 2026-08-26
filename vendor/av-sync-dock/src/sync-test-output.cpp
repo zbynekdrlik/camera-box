@@ -257,6 +257,15 @@ struct sync_test_output
 	 * thread (same thread that owns the diag block). */
 	camerabox::CbDockInputStaleness cb_input_staleness;
 
+	/* #1153: dead-pairing watchdog -- fires when the marker<->QR pairing stays dead (no
+	 * meaningful ring-hit advance, no genuine lock) for a full epoch while the measurement input
+	 * itself keeps flowing; the diag tick then resets ALL in-dock pairing state and re-acquires
+	 * from scratch, so a manual OBS restart is never the only cure for a sticky
+	 * post-latency-step unlock. Pure/tested in av_sync_dock.rs, mirrored in
+	 * camera-box-audio.hpp. Touched only on the audio thread (same thread that owns the diag
+	 * block). */
+	camerabox::CbDockPairingWatchdog cb_pairing_watchdog;
+
 	/* #926 fix-up (review finding 9/16): latches so each condition logs ONCE (and again after it
 	 * clears and re-occurs) instead of spamming a blog() line per trusted marker while the
 	 * condition persists. Touched only on the audio thread. */
@@ -1250,8 +1259,14 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 	size_t ch = st->audio_channels;
 	for (size_t i = 0; i < nf; i++) {
 		float acc = 0.0f;
-		for (size_t cix = 0; cix < ch; cix++)
-			acc += ((float *)frames->data[cix])[i];
+		for (size_t cix = 0; cix < ch; cix++) {
+			/* #1153: skip non-finite samples per channel -- a poisoned upstream channel must
+			 * never wipe a marker riding another channel through the mono mixdown (and the
+			 * decode kernel's prefix sums must never see NaN/Inf at all). */
+			float s = ((float *)frames->data[cix])[i];
+			if (std::isfinite(s))
+				acc += s;
+		}
 		mono[i] = ch ? acc / (float)ch : 0.0f;
 	}
 
@@ -1558,6 +1573,49 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		     (unsigned long long)st->cb_audio_dec->stats.crc_fail,
 		     (unsigned long long)st->cb_ring_hits, (unsigned long long)st->cb_ring_misses,
 		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE");
+
+		/* #1153: dead-pairing recovery, evaluated at the SAME ~10s cadence. When the pairing has
+		 * been dead for a full epoch (no meaningful ring-hit advance, no genuine lock) while
+		 * video QRs and audio candidates BOTH keep flowing, reset every piece of in-dock pairing
+		 * state and re-acquire from scratch -- the in-process poison a large video-latency step
+		 * leaves behind must never make a manual OBS restart the only cure. The epoch deltas in
+		 * the evidence line discriminate the poison class from the log alone: crc_ok near the
+		 * ~1/256 chance floor of the preamble delta = the marker waveform is degraded upstream
+		 * of the dock; a healthy crc_ok rate with a dead ring = in-dock pairing state (which
+		 * this reset clears). Input-dead states (EVENT mode) never fire -- they are the
+		 * staleness detector's domain above. Cumulative counters/stats are deliberately NOT
+		 * reset, so the diag line stays monotonic across recoveries. */
+		const camerabox::CbDockPairingRecovery rec = st->cb_pairing_watchdog.observe(
+			vdec, st->cb_audio_dec->stats.preamble_screens_passed,
+			st->cb_audio_dec->stats.crc_ok, st->cb_ring_hits, st->cb_lock_state,
+			frames->timestamp, camerabox::CB_DOCK_PAIRING_DEAD_NS,
+			camerabox::CB_DOCK_PAIRING_MIN_RING_HITS);
+		if (rec.fire) {
+			{
+				std::unique_lock<std::mutex> lock(st->mutex);
+				for (size_t slot = 0; slot < CAMERA_BOX_RING_SLOTS; slot++)
+					st->cb_video_valid[slot] = false;
+			}
+			st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
+			st->cb_offset_history.clear();
+			st->cb_lock_audit = camerabox::CbLockAuditTracker();
+			st->cb_audio_dec->reset_window();
+			if (st->cb_lock_state) {
+				// A stale-held lock (zero ring hits all epoch) must not survive the reset on
+				// the UI either -- the audit tracker could never fire its own Unlocked
+				// transition without a decode to push.
+				st->cb_lock_state = false;
+				signal_lock_state_changed(st->context, false);
+			}
+			blog(LOG_WARNING,
+			     "av-sync-dock: PAIRING-RECOVER dead pairing window (ring_hit +%llu, crc_ok "
+			     "+%llu, preambles +%llu, video_decoded +%llu in %llus) -- reset "
+			     "ring+cluster+decoder window, re-acquiring from scratch",
+			     (unsigned long long)rec.ring_hit_delta, (unsigned long long)rec.crc_ok_delta,
+			     (unsigned long long)rec.preambles_delta,
+			     (unsigned long long)rec.video_decoded_delta,
+			     (unsigned long long)(rec.window_ns / 1000000000ull));
+		}
 	}
 }
 
