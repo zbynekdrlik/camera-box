@@ -229,6 +229,28 @@ def test_per_frame_map_drops_crc_bad_and_malformed():
     assert r._per_frame_map(texts) == {7: 50}
 
 
+def test_per_frame_map_retains_node_burn_anchor_ids():
+    # First live DORMANT run (2026-08-26): the imag DistroAV burn (911003) IS the M3 emit
+    # anchor, but the painter-centric RESERVED drop erased it -> 0/1200 pairable. A node-burn
+    # id must SURVIVE the map; only the aux tick (gen_ts_ns always 0) stays excluded.
+    texts = [_payload(911003, 5, 777), _payload(1787758992, 9, 111), _payload(911013, 1, 0)]
+    m = r._per_frame_map(texts)
+    assert m.get(911003) == 777
+    assert m.get(1787758992) == 111
+    assert 911013 not in m
+
+
+def test_select_run_id_auto_prefers_node_burn_anchor_over_painter():
+    # Same live run: the cam2 painter QR (ad-hoc epoch run_id, monotonic gen_ts) rides in the
+    # same frames as the burn; auto-select must prefer the KNOWN node-burn family anchor.
+    pfm = [
+        {911003: 777, 1787758992: 111},
+        {911003: 778, 1787758992: 112},
+        {1787758992: 113},
+    ]
+    assert r.select_run_id(pfm) == 911003
+
+
 # --------------------------------------------------------------------------- #
 # impure-glue static anchors — the two 🔴 fixes have no local ffmpeg test path,
 # so pin them in the source text (the CLAUDE.md "extra review rigor" net).
