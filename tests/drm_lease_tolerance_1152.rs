@@ -497,7 +497,10 @@ fn verify_imag_gains_the_lease_tolerance_check_1152() {
 fn verify_imag_lease_tolerance_helper_is_pure_and_two_tier_1152() {
     let verify = manifest_dir().join("scripts/verify-imag.sh");
     let run = |args: &str| -> i32 {
-        let harness = format!(". \"$VERIFY\"\nimag_lease_tolerance_ok {args}\necho RC=$?");
+        // Sourcing verify-imag.sh executes its own `set -euo pipefail`, which LEAKS into this
+        // harness shell (the documented sourced-bash-test-harness set-e gotcha) — without the
+        // `set +e` a non-zero helper return kills the shell BEFORE the `echo RC=$?` line.
+        let harness = format!(". \"$VERIFY\"\nset +e\nimag_lease_tolerance_ok {args}\necho RC=$?");
         let out = Command::new("bash")
             .arg("-c")
             .arg(&harness)

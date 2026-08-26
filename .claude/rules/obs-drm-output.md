@@ -206,6 +206,10 @@ contract, still DEFAULT-OFF):
    `drm-lease mode ENABLED` and the Multiview-only projector seed.
 4. From then on the `drm_output` facet (drift-guard / [0/8] / verify (z)) holds the enabled state
    to the LIVE-marker proof.
+5. Known boundary (deliberately NOT M4): the E2E `[0/8]`'s own X-projector count checks and
+   `obs_phase2` projector openers still expect the dormant 1+1 X-window state — teaching the E2E
+   harness the enabled-state expectations (Multiview-only X-side, Program on the scanout) is part
+   of the PERMANENT-flip milestone, so until then run data-collection E2E with the config dormant.
 
 ### Rollback (ORDER MATTERS — X must get the connector back BEFORE the dormant wrapper runs)
 
