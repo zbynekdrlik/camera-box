@@ -276,6 +276,8 @@ fn pick_vectors() -> Vec<((i32, i32, i32, i32), i32)> {
         ((0, -1, 1, 2), 1),   // n=2, no free -> overwrite ready
         ((0, 1, 2, 0), -1),   // n=0 degenerate -> nothing
         ((0, 2, 1, 4), 3),    // n=4 -> the free index past every role
+        ((0, 1, 0, 2), -1),   // ready ALIASES front -> never hand back the on-scanout buffer
+        ((0, 1, 1, 2), -1),   // ready ALIASES pending -> never hand back the flip-queued buffer
     ]
 }
 

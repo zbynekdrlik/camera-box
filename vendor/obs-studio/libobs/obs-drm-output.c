@@ -408,6 +408,12 @@ static bool drm_output_setup_scanout(uint32_t argb)
  * with g_drm.drm_fd still open (RmFB needs it). */
 static void drm_output_program_free_bufs_locked(void)
 {
+	/* Review finding (issue 1152 M2): disarm FIRST — the frame hook must never pass its gate
+	 * once the BOs are gone (the pthread_create-failure path in start() frees the buffers but
+	 * used to leave program_want armed, and the later lazy bind would then dereference a NULL
+	 * bo on the graphics thread). Restores the invariant "armed => buffers exist" on EVERY
+	 * teardown path; stop()'s own earlier disarm makes this a harmless redundancy there. */
+	os_atomic_set_bool(&g_drm.program_want, false);
 	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
 		struct drm_output_pbuffer *p = &g_drm.pbufs[i];
 		if (p->fb_id) {
@@ -495,8 +501,9 @@ static bool drm_output_program_alloc_locked(void)
 /* Import the GBM buffers into the OBS GL context: dma-buf -> EGLImage -> render-target texture,
  * via the UPSTREAM gs_texture_create_from_dmabuf (which returns a GS_RENDER_TARGET texture — no
  * new graphics vtable export needed). Graphics thread only; the caller holds the graphics
- * context + program_lock. On failure the caller frees any partial imports and disarms. */
-static bool drm_output_program_gl_bind_locked(void)
+ * CONTEXT (which alone excludes the GL teardown — the flip thread never reads the textures).
+ * On failure the caller frees any partial imports and disarms. */
+static bool drm_output_program_gl_bind(void)
 {
 	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
 		struct drm_output_pbuffer *p = &g_drm.pbufs[i];
@@ -692,6 +699,11 @@ static void *drm_output_flip_thread(void *arg)
 			blog(LOG_INFO, "drm-output: page-flip #%llu (vblank-locked, solid M1 pattern)",
 			     g_drm.flips);
 	}
+	/* Review finding (issue 1152 M2): a SELF-death of this loop (lease revoke, X restart, a
+	 * failed flip) must also disarm the frame hook — otherwise the graphics thread keeps
+	 * rendering + flushing a full-canvas copy ~60/s into a mailbox nobody drains, permanent
+	 * waste on the 25W-clamped box. stop() disarming again afterwards is harmless. */
+	os_atomic_set_bool(&g_drm.program_want, false);
 	blog(LOG_INFO, "drm-output: flip loop exited after %llu flips", g_drm.flips);
 	return NULL;
 }
@@ -912,30 +924,31 @@ void obs_drm_output_on_frame(void)
 	if (!os_atomic_load_bool(&g_drm.program_want))
 		return;
 
-	/* Lock order (the module's deadlock rule): graphics context FIRST, then program_lock —
-	 * the same order the GL teardown takes; the flip thread takes program_lock alone and
-	 * never the graphics context, so no cycle exists. We run on the graphics thread (the
+	/* Lock discipline (the module's deadlock rule): graphics context FIRST, then program_lock
+	 * — the same order the GL teardown takes; the flip thread takes program_lock alone and
+	 * never the graphics context, so no cycle exists. The CONTEXT alone excludes the GL
+	 * teardown for this whole body (it must enter the context before touching the textures),
+	 * so program_lock is held only for the two mailbox-role transactions (claim + publish),
+	 * never across the GL command recording — the flip thread's vblank loop is never blocked
+	 * behind a render or the one-time lazy bind. We run on the graphics thread (the
 	 * obs_graphics_thread_loop call site), so the enter is a cheap recursive ref. */
 	obs_enter_graphics();
-	pthread_mutex_lock(&g_drm.program_lock);
 
 	if (!os_atomic_load_bool(&g_drm.program_want)) { /* re-check: a stop may have disarmed */
-		pthread_mutex_unlock(&g_drm.program_lock);
 		obs_leave_graphics();
 		return;
 	}
 
 	if (!g_drm.program_gl_ready) {
-		if (!drm_output_program_gl_bind_locked()) {
+		if (!drm_output_program_gl_bind()) {
 			os_atomic_set_bool(&g_drm.program_want, false);
-			/* Free any partially-imported textures right here — we hold ctx + lock. */
+			/* Free any partially-imported textures right here — we hold the context. */
 			for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
 				if (g_drm.pbufs[i].tex) {
 					gs_texture_destroy(g_drm.pbufs[i].tex);
 					g_drm.pbufs[i].tex = NULL;
 				}
 			}
-			pthread_mutex_unlock(&g_drm.program_lock);
 			obs_leave_graphics();
 			return;
 		}
@@ -944,26 +957,27 @@ void obs_drm_output_on_frame(void)
 
 	gs_texture_t *program = obs_get_main_texture();
 	if (!program) { /* nothing rendered yet this session — keep the solid pattern */
-		pthread_mutex_unlock(&g_drm.program_lock);
 		obs_leave_graphics();
 		return;
 	}
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	if (!effect) {
-		pthread_mutex_unlock(&g_drm.program_lock);
 		obs_leave_graphics();
 		return;
 	}
 
+	/* CLAIM: take a buffer out of every mailbox role under the lock. Once claimed it is in
+	 * NO role, so the flip thread cannot select it while we render into it lock-free. */
+	pthread_mutex_lock(&g_drm.program_lock);
 	int idx = drm_output_pick_render_buf(g_drm.p_front, g_drm.p_pending, g_drm.p_ready,
 					     DRM_OUTPUT_PROGRAM_BUFFERS);
+	if (idx == g_drm.p_ready)
+		g_drm.p_ready = -1; /* claim the mailbox slot for overwrite (latest wins) */
+	pthread_mutex_unlock(&g_drm.program_lock);
 	if (idx < 0) {
-		pthread_mutex_unlock(&g_drm.program_lock);
 		obs_leave_graphics();
 		return;
 	}
-	if (idx == g_drm.p_ready)
-		g_drm.p_ready = -1; /* claim the mailbox slot for overwrite (latest wins) */
 
 	/* Raw SDR copy of the Program into the scanout buffer: non-sRGB sampling + framebuffer
 	 * sRGB encode OFF + blending OFF preserves the canvas bytes exactly (the same values a
@@ -1009,7 +1023,12 @@ void obs_drm_output_on_frame(void)
 	 * dma-resv), so scanout can never observe a half-rendered buffer. No glFinish stall. */
 	gs_flush();
 
-	g_drm.p_ready = idx;
+	/* PUBLISH: hand the rendered buffer to the flip thread — flush ordered BEFORE this, so
+	 * the flip always finds the implicit fence attached. Skip when a stop disarmed us
+	 * mid-render (the mailbox is about to be torn down). */
+	pthread_mutex_lock(&g_drm.program_lock);
+	if (os_atomic_load_bool(&g_drm.program_want))
+		g_drm.p_ready = idx;
 	pthread_mutex_unlock(&g_drm.program_lock);
 	obs_leave_graphics();
 }
