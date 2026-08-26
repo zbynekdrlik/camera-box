@@ -14,8 +14,10 @@
 //! DIFFERENT windows of the run, taken verbatim from the box-side pixel-proof retention
 //! (`stream-partial-2099068429-pixels/`). For these exact pixels the run's own partial
 //! (`stream-partial-2099068429.json`) carries both aux payloads, and zbar independently reproduces
-//! them (full-frame AND from the two aux design rectangles alone) — so a decode miss here is a
-//! DECODER regression, never a pixel problem (the #186/#921 discriminator).
+//! them (full-frame AND from margin-padded crops of the two aux design rectangles — pad the exact
+//! rect by a few dozen px when re-checking: zbar needs the QR quiet zone, so the EXACT left rect
+//! alone reads as a miss that is NOT a fixture regression) — so a decode miss here is a DECODER
+//! regression, never a pixel problem (the #186/#921 discriminator).
 //!
 //! Provenance note (honest scope): run 2099068429 was an all-CAM3-window run — these frames come
 //! from cam3's grabber leg of the splitter rig, which traverses the full optical + 2×NDI + 4K +
