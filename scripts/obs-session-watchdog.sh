@@ -153,6 +153,7 @@ process_box() {
     log "ALERT: firing Discord notification for $box"
     python3 "$NOTIFY" notify --body \
       "🚨 #979 obs-session-watchdog: **$box** obs64/AHK is INVISIBLE to the operator ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (agent-driven, win-* MCP Shell): \`bash scripts/launch-obs-genlock.sh --box $box --force\`" \
+      --dedup-key "obs-session-$box" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle for $box (passes=${prior_passes}/${ALERT_THROTTLE_PASSES})"

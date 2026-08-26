@@ -167,6 +167,7 @@ latency_drift_check() {
     log "ALERT: firing Discord report for imag latency-pin DRIFT (REPORT-ONLY, not overwritten)"
     python3 "$NOTIFY" notify --body \
       "⚠️ imag latencia pinov ($REPO_SLUG) — len INFO, piny sa neprepisujú (toto je doména operátora pre A/V zarovnanie): $out" \
+      --dedup-key "imag-obs-latency-drift" \
       >/dev/null 2>&1 || log "latency report: airuleset.py notify failed (non-fatal)"
   else
     log "latency drift report suppressed by throttle (pass ${prior_passes}/${LATENCY_ALERT_THROTTLE_PASSES})"
@@ -243,6 +244,7 @@ restart_storm_check() {
     log "ALERT: firing Discord notification for imag-obs restart storm"
     python3 "$NOTIFY" notify --body \
       "🚨 imag OBS reštart-storm ($REPO_SLUG): imag-obs.service sa reštartuje v slučke (${reason}). Pravdepodobne chýbajúci python sibling po deployi. Rieši Claude automaticky, ty nemusíš nič robiť." \
+      --dedup-key "imag-obs-restart-storm" \
       >/dev/null 2>&1 || log "restart-storm ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "restart-storm alert suppressed by throttle (pass ${prior_passes}/${RESTART_STORM_THROTTLE_PASSES})"
@@ -345,6 +347,7 @@ main() {
     log "ALERT: firing Discord notification for imag-nb"
     python3 "$NOTIFY" notify --body \
       "🚨 imag OBS ($REPO_SLUG): OBS na imag-nb je DOLE. ${msg} Rieši Claude automaticky, ty nemusíš nič robiť." \
+      --dedup-key "imag-obs-down" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

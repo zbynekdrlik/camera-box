@@ -150,10 +150,7 @@ handle_box() {
       if [ "$DRY_RUN" -eq 1 ]; then
         log "[dry-run] WOULD send recovery: $box back to colour"
       else
-        log "RECOVERY: $box back to colour -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ HDMI splitter ($REPO_SLUG): **$box** ($ip) opäť sníma vo farbe." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        log "RECOVERY: $box back to colour -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field "alerted_${box}" 0
     fi
@@ -223,6 +220,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $box splitter-port fault"
     python3 "$NOTIFY" notify --body \
       "🚨 HDMI splitter ($REPO_SLUG): **$box** ($ip) — ${detail}. Iný cambox na tej istej kamere+splitteri je v poriadku, čiže kamera obraz dodáva: chyba je najskôr v HDMI splitter porte / kábli do $box, nie vo farbe kamery. Potrebný fyzický zásah — skontroluj splitter port a kábel do $box. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol." \
+      --dedup-key "splitter-port-$box" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

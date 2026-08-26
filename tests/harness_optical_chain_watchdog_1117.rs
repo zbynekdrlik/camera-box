@@ -97,8 +97,10 @@ fn optical_chain_page_text_is_slovak_with_ownership() {
 const SWEEP: &[(&str, &str)] = &[
     ("scripts/cadence-alert-watchdog.sh", "kadencia kamery"),
     (
+        // #1206 moved the recovery ✅ ping ("opäť sníma vo farbe") to the machine channel, so the
+        // marker now points at a distinctive Slovak phrase in the surviving ALERT page body.
         "scripts/splitter-port-alert-watchdog.sh",
-        "opäť sníma vo farbe",
+        "chyba je najskôr v HDMI splitter porte",
     ),
     ("scripts/mv-fps-alert-watchdog.sh", "Multiview fps"),
     ("scripts/network-reach-alert-watchdog.sh", "nedostupný box"),

@@ -96,10 +96,7 @@ main() {
       if [ "$DRY_RUN" -eq 1 ]; then
         log "[dry-run] WOULD send recovery: venue switch chain matches baseline again"
       else
-        log "RECOVERY: chain matches baseline again -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ #797 netcfg-drift: venue switch chain matches its checked-in baseline again ($REPO_SLUG)." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        log "RECOVERY: chain matches baseline again -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field alerted 0
     fi
@@ -147,6 +144,7 @@ main() {
     log "ALERT: firing Discord notification for netcfg drift"
     python3 "$NOTIFY" notify --body \
       "🚨 #797 netcfg-drift: the venue MikroTik switch chain drifted from its checked-in baseline ($REPO_SLUG). ${summary}. Run \`scripts/netcfg-audit.sh --check\` for the full report; if the change is intentional, update scripts/netcfg-baseline.json in a PR." \
+      --dedup-key "netcfg-drift" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

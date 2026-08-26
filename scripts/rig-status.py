@@ -412,7 +412,8 @@ def _maybe_alert(records, exit_code, state_dir, notify, dry_run, log):
         body = (f"\U0001F6A8 #787 rig-status: rig node(s) FAIL ({sig}) -- camera-box. "
                 f"Pozri status stranku.")
     try:
-        subprocess.run([sys.executable, notify, "notify", "--body", body],
+        subprocess.run([sys.executable, notify, "notify", "--body", body,
+                        "--dedup-key", f"rig-status-{sig}"],
                        capture_output=True, timeout=30)
         log(f"ALERT: fired Discord notification ({sig})")
     except (subprocess.TimeoutExpired, OSError) as exc:

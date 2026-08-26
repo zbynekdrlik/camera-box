@@ -218,6 +218,7 @@ main() {
     log "ALERT: firing Discord notification for optical-chain incident"
     python3 "$NOTIFY" notify --body \
       "🚨 optická vetva cam2 (${REPO_SLUG}): ${detail}." \
+      --dedup-key "optical-chain-$verdict" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

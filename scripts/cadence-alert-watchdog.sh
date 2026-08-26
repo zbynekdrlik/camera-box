@@ -284,6 +284,7 @@ handle_source() {
           log "ALERT: firing Discord notification for '$source' tap broken"
           python3 "$NOTIFY" notify --body \
             "⚠️ kadencia kamery ($REPO_SLUG): meranie kadencie zdroja '$source' na $CADENCE_NAME je SLEPÉ už $unk kontrol po sebe (premenovaný/chýbajúci zdroj, kamera preč alebo nečitateľný log) — kontrola 60 fps pre tento zdroj je vypnutá, kým sa to neopraví. Rieši Claude automaticky, ty nemusíš nič robiť." \
+            --dedup-key "cadence-tap-$source" \
             >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
         fi
         write_state_field "tap_broken_${k}" 1
@@ -300,10 +301,7 @@ handle_source() {
       if [ "$DRY_RUN" -eq 1 ]; then
         log "[dry-run] WOULD send recovery: '$source' cadence back to ~$CADENCE_EXPECTED_FPS"
       else
-        log "RECOVERY: '$source' cadence OK again -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ kadencia kamery ($REPO_SLUG): **$source** na $CADENCE_NAME je späť na ~${CADENCE_EXPECTED_FPS} fps." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        log "RECOVERY: '$source' cadence OK again (~${CADENCE_EXPECTED_FPS} fps) -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field "alerted_${k}" 0
     fi
@@ -358,6 +356,7 @@ handle_source() {
     log "ALERT: firing Discord notification for '$source' wrong cadence"
     python3 "$NOTIFY" notify --body \
       "🚨 kadencia kamery ($REPO_SLUG): **$detail**. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol, $CADENCE_NAME je dostupný — kamera je zrejme prepnutá mimo 60 fps. Potrebný zásah — skontroluj a prepni kameru späť na 60 fps." \
+      --dedup-key "cadence-$source" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

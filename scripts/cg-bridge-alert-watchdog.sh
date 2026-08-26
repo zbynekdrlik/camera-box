@@ -168,6 +168,7 @@ main() {
     log "ALERT: firing Discord notification for cg-bridge republish-black incident"
     python3 "$NOTIFY" notify --body \
       "🚨 #1006 CG bridge: ${detail} (${REPO_SLUG})." \
+      --dedup-key "cg-bridge" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

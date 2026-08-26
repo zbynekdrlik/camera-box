@@ -137,7 +137,7 @@ main() {
     if [[ "$DRY_RUN" -eq 1 ]]; then
         log "[dry-run] WOULD fire Discord: $msg"
     else
-        python3 "$NOTIFY" notify --body "$msg" >/dev/null 2>&1 \
+        python3 "$NOTIFY" notify --body "$msg" --dedup-key "cam-disk" >/dev/null 2>&1 \
             || log "notify failed (non-fatal) — alert still logged above"
     fi
 

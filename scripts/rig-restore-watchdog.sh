@@ -381,7 +381,7 @@ main() {
       msg="⚠️ #281 rig-restore-watchdog: PARTIAL restore — prod NOT fully recovered ($REPO_SLUG). OBS box(es) unreadable: ${unreadable_desc}. Failed teardowns: ${obs_failed}. Failed cam restores: ${cam_failed}. Will retry. Reason: $reason."
     fi
     log "ALERT: firing Discord notification (kind=$restore_kind)"
-    python3 "$NOTIFY" notify --body "$msg" >/dev/null 2>&1 \
+    python3 "$NOTIFY" notify --body "$msg" --dedup-key "rig-restore-$restore_kind" >/dev/null 2>&1 \
       || log "ALERT: airuleset.py notify failed (non-fatal) — restore already executed"
   elif [ "${alert:-0}" = "1" ] && [ "${alert_now:-0}" = "0" ]; then
     log "ALERT: suppressed by throttle (kind=$restore_kind passes=${prior_alert_passes:-0}/${RIG_ALERT_THROTTLE_PASSES:-5} — same partial condition persists)"

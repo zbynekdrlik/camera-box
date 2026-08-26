@@ -232,10 +232,7 @@ handle_box() {
       if [ "$DRY_RUN" -eq 1 ]; then
         log "[dry-run] WOULD send recovery: $name MV fps recovered"
       else
-        log "RECOVERY: $name MV fps recovered -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ Multiview fps ($REPO_SLUG): **$name** Multiview render fps je opäť nad minimom." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        log "RECOVERY: $name MV fps recovered (render fps back above minimum) -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field "alerted_${k}" 0
     fi
@@ -272,6 +269,7 @@ handle_box() {
           log "ALERT: firing Discord notification for $name MV-fps tap blind"
           python3 "$NOTIFY" notify --body \
             "⚠️ Multiview fps ($REPO_SLUG): meranie Multiview fps pre **$name** je SLEPÉ už $unk kontrol po sebe — OBS beží, ale $reason. Kontrola Multiview fps pre $name je vypnutá, kým sa to neopraví. Rieši Claude automaticky, ty nemusíš nič robiť." \
+            --dedup-key "mv-fps-tap-$name" \
             >/dev/null 2>&1 || log "tap-blind: airuleset.py notify failed (non-fatal)"
         fi
         write_state_field "tap_blind_${k}" 1
@@ -318,6 +316,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $name MV fps collapse"
     python3 "$NOTIFY" notify --body \
       "🚨 Multiview fps ($REPO_SLUG): **$detail**. Render Multiview projektora na $name klesol pod povolené minimum (cieľ − tolerancia). Rieši Claude automaticky (reštart OBS na $name, resp. nájde proces, čo kradne GPU/CPU; nikdy nereštartuje celý počítač), ty nemusíš nič robiť. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol." \
+      --dedup-key "mv-fps-$name" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

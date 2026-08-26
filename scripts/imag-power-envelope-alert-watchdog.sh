@@ -158,6 +158,7 @@ alert_from_journal() {
     log "ALERT: firing Discord notification for imag-nb power-envelope transition"
     python3 "$NOTIFY" notify --body \
       "🚨 imag napájací limit ($REPO_SLUG): imag-nb naráža na výkonový/tepelný strop alebo mu niekto prepísal nastavenie. ${detail} Rieši Claude automaticky, ty nemusíš nič robiť." \
+      --dedup-key "imag-power-journal" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
@@ -261,6 +262,7 @@ alert_from_throttle() {
     log "ALERT: firing Discord notification for imag-nb throttle-under-floor"
     python3 "$NOTIFY" notify --body \
       "🚨 imag iGPU takt ($REPO_SLUG): iGPU na imag-nb neudrží nastavené minimum taktu pod záťažou. ${detail}. Softvérové minimum čip pri tepelnom strope aj tak prekročí — trvalé riešenie je lepšie chladenie (potrebný fyzický zásah)." \
+      --dedup-key "imag-power-throttle" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
@@ -338,6 +340,7 @@ alert_from_render_discriminator() {
     log "ALERT: firing Discord notification for imag render churn-leak #799"
     python3 "$NOTIFY" notify --body \
       "🚨 imag OBS render ($REPO_SLUG): render OBS na imag-nb sa zhoršil, hoci GPU má rezervu (nie je to tepelný strop). ${detail}. Rieši Claude automaticky (reštart imag-obs to vyčistí), ty nemusíš nič robiť." \
+      --dedup-key "imag-power-render-churn" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

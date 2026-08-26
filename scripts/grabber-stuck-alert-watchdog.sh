@@ -143,10 +143,7 @@ handle_box() {
       if [ "$DRY_RUN" -eq 1 ]; then
         log "[dry-run] WOULD send recovery: $box grabber back to normal"
       else
-        log "RECOVERY: $box grabber back to normal -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ grabber ($REPO_SLUG): **$box** ($ip) opäť sníma normálne — STUCK stav zmizol (kadencia ~60 fps, žiadne poškodené snímky)." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        log "RECOVERY: $box grabber back to normal (STUCK cleared, ~60 fps, no corrupted frames) -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field "alerted_${box}" 0
     fi
@@ -202,6 +199,7 @@ handle_box() {
   log "ALERT: firing Discord notification for $box grabber STUCK"
   python3 "$NOTIFY" notify --body \
     "🚨 grabber STUCK ($REPO_SLUG): **$box** ($ip) — USB grabber uviazol (~${fps} fps + trvalé poškodené snímky). \`systemctl restart\` to NEopraví; treba USB re-enumeráciu grabbera. Ak je self-heal zapnutý (CAMERA_BOX_GRABBER_STUCK_SELFHEAL), appliance to skúsi sám; inak treba fyzický zásah / výmenu grabbera. Jednorázový alert — potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol." \
+    --dedup-key "grabber-stuck-$box" \
     >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
 }
 

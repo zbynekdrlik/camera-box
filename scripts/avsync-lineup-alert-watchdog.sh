@@ -197,12 +197,12 @@ send_discord_test_ping() {
 }
 
 fire_notify() {
-  local body="$1"
+  local body="$1" key="${2:-avsync-lineup}"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] WOULD alert: $body"
     return 0
   fi
-  python3 "$NOTIFY" notify --body "$body" >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+  python3 "$NOTIFY" notify --body "$body" --dedup-key "$key" >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
 }
 
 # ── run-time liveness pass (default mode) ───────────────────────────────────
@@ -264,7 +264,7 @@ run_liveness_pass() {
   write_state_field "lineup_alert_passes" "$new_passes"
 
   if [ "${alert_now:-0}" = "1" ]; then
-    fire_notify "🚨 avsync-lineup-alert-watchdog: meracia A/V-sync linka je MRTVA pocas ZIVEHO streamu -- ${reason} (${REPO_SLUG})."
+    fire_notify "🚨 avsync-lineup-alert-watchdog: meracia A/V-sync linka je MRTVA pocas ZIVEHO streamu -- ${reason} (${REPO_SLUG})." "avsync-lineup-liveness"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
   fi
@@ -315,7 +315,7 @@ run_preflight_assert() {
   printf '%s\n' "$go_out"
   if [ "$rc" -ne 0 ]; then
     # NO-GO -> loud alert BEFORE the event (not just an exit code buried in a terminal).
-    fire_notify "🚨 avsync-lineup PRE-EVENT NO-GO: meracia A/V-sync linka NIE JE pripravena -- ${go_out} (${REPO_SLUG})."
+    fire_notify "🚨 avsync-lineup PRE-EVENT NO-GO: meracia A/V-sync linka NIE JE pripravena -- ${go_out} (${REPO_SLUG})." "avsync-lineup-preflight-nogo"
   fi
   return "$rc"
 }
