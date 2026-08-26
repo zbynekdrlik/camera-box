@@ -105,6 +105,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # SOURCE camera to imag's own "Cam N" scene name (the SAME 1:1 pattern imag_scenes.py seeds).
 # shellcheck source=scripts/lib/imag-scene-route.sh
 . "$HERE/lib/imag-scene-route.sh"
+# issue 1204: the fail-closed cross-check that imag's burn target IS the input imag renders in
+# program -- used at [4a/8] after the scene route, so a burn can never land on a non-program input
+# (the run 32908274448 failure). (Function names are deliberately NOT spelled here so the [4a/8]
+# call site stays the sole `.find()` anchor for its wiring test, per the #832/#716 comment-collision
+# lesson.)
+# shellcheck source=scripts/lib/imag-burn-verify.sh
+. "$HERE/lib/imag-burn-verify.sh"
 # #723: SINGLE SOURCE OF TRUTH for the rig-test LEDGER — this harness's own cam2 painter launch
 # registers into it too, so rig-mode.sh event's cleanup sweep can find + kill it BY PID even if a
 # run is abandoned mid-flight (never just a name-pattern guess). See scripts/lib/rig-test-ledger.sh.
@@ -1950,11 +1957,16 @@ AV_SYNC_CALIBRATED_MS="${AV_SYNC_CALIBRATED_MS:-}"
 # that ALWAYS runs on exit would otherwise silently overwrite whatever [8/8g] computed.
 AV_SYNC_APPLY_OFFSET_MS="${AV_SYNC_APPLY_OFFSET_MS:-}"
 # #462 (EPIC #466): imag-nb's program-feeding NDI input — the #399-style 1:1 mapping from Phase 1
-# (setup-imag.sh) pins 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)' 1:1, so cam1 (the SOURCE camera that
-# films cam2's monitor) rides 'NDI CAM1'. rig-mode.sh TEST mode is what actually routes imag's
-# PROGRAM onto that scene + toggles this burn ON; this harness defensively ensures/verifies it too
-# (the SAME "single source of truth" BURN_TARGETS array, extended below).
-IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"
+# (setup-imag.sh) pins 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)' 1:1. issue 1204: DERIVE this per
+# camera-under-test via imag_source_for_camera "$CAMERA_NAME" (the SAME resolution IMAG_PROG_SCENE
+# uses below), so the burn target ALWAYS matches the input backing imag's routed program scene —
+# it was previously hard-pinned to the literal 'NDI CAM1', which diverged from the program route
+# the moment CAMERA_NAME != cam1 (cam1 offline-acked, active set = cam3 -> imag recorded zero
+# 911003 anchors, run 32908274448). rig-mode.sh TEST mode is what actually routes imag's PROGRAM
+# onto that scene + toggles this burn ON; this harness defensively ensures/verifies it too (the
+# SAME "single source of truth" BURN_TARGETS array, extended below) AND cross-checks it against the
+# genuinely-rendered input at [4a/8].
+IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-$(imag_source_for_camera "$CAMERA_NAME")}"
 # #682: imag's OWN scene showing the camera-under-test -- resolved per-camera (never hardcoded to
 # 'Cam 1' like rig-mode.sh's set_imag_test_program(), which only ever routes cam1). Declared here
 # (BEFORE the cleanup trap installs, same reasoning as the *_PROG_SOURCE vars above) so cleanup()
@@ -2628,6 +2640,20 @@ echo "[4a/8] #682 imag program-scene routing — must show $CAMERA_NAME (the cam
 IMAG_PREV_SCENE="$(python3 "$HERE/obs_phase2.py" program-scene --host "$IMAG_IP")"
 echo "    imag was on '$IMAG_PREV_SCENE' — routing to '$IMAG_PROG_SCENE' ($CAMERA_NAME)"
 python3 "$HERE/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" >/dev/null
+# issue 1204: fail-closed cross-check — the imag BURN TARGET ($IMAG_PROG_SOURCE, now derived from
+# the camera-under-test via imag_source_for_camera) MUST be the input imag ACTUALLY renders in the
+# program scene we just routed. A stale/divergent derivation (the CAM-default-vs-camera-under-test
+# split, run 32908274448) would silently burn a non-program input, leaving the imag recording with
+# zero 911003 anchors and failing the imag leg on present/span. Read what imag genuinely renders
+# and FAIL LOUD on any mismatch (mirrors the strih/stream #901 "burn what's actually rendered"
+# philosophy) — so the [4b/8] burn-check below (which validates $IMAG_PROG_SOURCE) is proven to be
+# checking the input that IS in program, not one it merely set itself.
+_imag_rendered="$(python3 "$HERE/obs_phase2.py" program-rendered-input --host "$IMAG_IP" || true)"
+if ! imag_burn_target_matches_program "$_imag_rendered" "$IMAG_PROG_SOURCE"; then
+  echo "ERROR: $(imag_burn_mismatch_message "$_imag_rendered" "$IMAG_PROG_SOURCE" "$IMAG_PROG_SCENE")" >&2
+  exit 1
+fi
+echo "    [4a/8] imag burn-target cross-check OK — program renders '$_imag_rendered' == burn target '$IMAG_PROG_SOURCE' (issue 1204)"
 fi
 
 # #195/#257: PRE-RECORD BURN-ON GATE — burns MUST be ON before recording, else the run is wasted.

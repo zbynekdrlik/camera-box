@@ -262,3 +262,93 @@ fn imag_prev_scene_has_a_safe_pretrap_default() {
          does not declare it."
     );
 }
+
+// --- issue 1204: the imag BURN TARGET must follow the imag PROGRAM route, not the CAM default ---
+//
+// Bug (run 32908274448 / verdict 518418121): recording-e2e.sh derived imag's PROGRAM SCENE from the
+// camera-under-test (imag_scene_for_camera "$CAMERA_NAME" -> 'Cam 3' -> renders 'NDI CAM3') but the
+// imag BURN TARGET (IMAG_PROG_SOURCE) was hard-pinned to 'NDI CAM1'. With cam1 offline-acked and the
+// active set = cam3 the two diverged, the burn landed on a NON-program input, and the imag recording
+// carried zero 911003 anchors. #1135 added the sibling resolver imag_source_for_camera and its
+// docstring already states the invariant ("the imag burn target follows the resolved source role,
+// never a hard-pinned 'NDI CAM1'") -- but #1135 only wired it into rig-mode.sh; recording-e2e.sh was
+// missed. These tests complete #1135's intent for the E2E harness.
+
+/// The imag burn target must be DERIVED from the camera-under-test via imag_source_for_camera
+/// "$CAMERA_NAME" -- exactly mirroring the SCENE derivation (imag_scene_for_camera "$CAMERA_NAME"),
+/// so the burn ALWAYS targets the input backing imag's routed program scene.
+#[test]
+fn recording_e2e_derives_imag_burn_target_via_imag_source_for_camera_1204() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("imag_source_for_camera \"$CAMERA_NAME\""),
+        "#1204: recording-e2e.sh must derive the imag burn target (IMAG_PROG_SOURCE) via \
+         imag_source_for_camera \"$CAMERA_NAME\" -- the SAME camera-under-test resolution the \
+         program SCENE already uses (imag_scene_for_camera \"$CAMERA_NAME\") -- never a hard-pinned \
+         'NDI CAM1' (the run 32908274448 zero-anchor failure)."
+    );
+}
+
+/// The old buggy hard-pinned default must be GONE from recording-e2e.sh (the explanatory 1:1-mapping
+/// comment may still MENTION 'NDI CAM1'; only the DEFAULT EXPRESSION must be removed).
+#[test]
+fn recording_e2e_no_longer_hard_pins_imag_burn_target_to_ndi_cam1_1204() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        !s.contains("IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-NDI CAM1}\""),
+        "#1204: recording-e2e.sh must NOT hard-pin IMAG_PROG_SOURCE to 'NDI CAM1' -- that constant \
+         diverges from the program route the moment CAMERA_NAME != cam1 (cam1 offline-acked, active \
+         set = cam3)."
+    );
+}
+
+/// recording-e2e.sh must SOURCE the new fail-closed cross-check helper (the #675 sourced-helper
+/// pattern -- new logic lives in a scripts/lib/*.sh file, not inline in the anchor-minefield).
+#[test]
+fn recording_e2e_sources_imag_burn_verify_lib_1204() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains(". \"$HERE/lib/imag-burn-verify.sh\""),
+        "#1204: recording-e2e.sh must actually `source` scripts/lib/imag-burn-verify.sh"
+    );
+}
+
+/// The [4a/8] imag block must CROSS-CHECK the burn target against the input imag ACTUALLY renders
+/// (obs_phase2.py program-rendered-input) and FAIL LOUD (exit 1) on a mismatch -- so the [4b/8]
+/// burn-check (which validates IMAG_PROG_SOURCE) is proven to be checking the PROGRAM input, and any
+/// future derivation/route divergence fails BEFORE the wasted recording (fail-closed, #901 style).
+#[test]
+fn recording_e2e_cross_checks_imag_burn_target_against_program_rendered_input_1204() {
+    let s = read("scripts/recording-e2e.sh");
+    let read_idx = s.find("program-rendered-input --host \"$IMAG_IP\"").expect(
+        "#1204: recording-e2e.sh must READ imag's actually-rendered program input via \
+             obs_phase2.py program-rendered-input --host \"$IMAG_IP\"",
+    );
+    let call_idx = s.find("imag_burn_target_matches_program").expect(
+        "#1204: recording-e2e.sh must cross-check via imag_burn_target_matches_program (the \
+             pure helper), not an inline ad-hoc comparison",
+    );
+    // The read must precede the comparison (you compare what you just read).
+    assert!(
+        read_idx < call_idx,
+        "#1204: the program-rendered-input read must precede the imag_burn_target_matches_program \
+         cross-check"
+    );
+    // The mismatch path must FAIL LOUD via exit 1 (not a warn-only `|| true`).
+    let after = &s[call_idx..(call_idx + 400).min(s.len())];
+    assert!(
+        after.contains("exit 1"),
+        "#1204: an imag burn-target mismatch must FAIL LOUD (exit 1) -- never a silent warn. \
+         Region after the cross-check:\n{after}"
+    );
+    // The cross-check must live in the [4a/8] imag block, AFTER the scene switch (so it verifies the
+    // routed program), and stay inside the IMAG_OFFLINE_ACKED-guarded else-branch (issue 1013/1171).
+    let switch_idx = s
+        .find("switch --host \"$IMAG_IP\" --program-scene")
+        .expect("#1204: the imag scene switch must exist");
+    assert!(
+        switch_idx < read_idx,
+        "#1204: the burn-target cross-check must run AFTER the [4a/8] scene switch (it verifies the \
+         ROUTED program's rendered input)"
+    );
+}

@@ -87,8 +87,12 @@ the role: `CAM1_IP` is gone (override is `CAMERA_SOURCE_BOX`), `STRIH_PROG_SOURC
 sweeps the resolved source (so a cam1-retired rig sweeps cam3, not the broken cam1), and the
 TEST-mode prints name the resolved box. NOTE the imag pair `imag_scene_for_camera`/`imag_source_for_camera`
 must stay lock-step (same cam1-cam6 `case` set) so a source resolves BOTH or fails loud on BOTH.
-`recording-e2e.sh`'s own `IMAG_PROG_SOURCE="NDI CAM1"` is a residual left to the E2E-gate/#1134 side
-(imag leg is report-only + offline-ackable), NOT folded into #1135.
+`recording-e2e.sh`'s own `IMAG_PROG_SOURCE` was previously a `NDI CAM1` residual left to the
+E2E-gate/#1134 side — CLOSED by #1204: it now derives `$(imag_source_for_camera "$CAMERA_NAME")` (the
+SAME lock-step resolver the SCENE line uses), plus a fail-closed `[4a/8]` read-back cross-check
+(`scripts/lib/imag-burn-verify.sh` vs `obs_phase2.py program-rendered-input`) that fails the run loud
+if the burn target ever diverges from the input imag actually renders. So the imag burn target now
+follows the camera-under-test on BOTH scripts (rig-mode.sh via #1135, recording-e2e.sh via #1204).
 
 ## The fix pattern — two small pure helpers, not three separate inline loops
 
