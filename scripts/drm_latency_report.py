@@ -149,13 +149,22 @@ def delta_table(dormant, enabled, metrics=DELTA_METRICS):
 
 
 def select_run_id(per_frame_maps, override=None):
-    """The burn run_id to pair on: an explicit override, else the DOMINANT non-reserved run_id
-    across all frames (reuses mv_skew_snapshot.dominant_run_id, which already excludes the reserved
-    node-burn / aux-tick ids — e.g. AUX_TICK_RUN_ID 911013 whose gen_ts_ns is always 0). Returns
-    None when nothing decodable was found."""
+    """The burn run_id to pair on: an explicit override, else PREFER the known node-burn family
+    anchor (RESERVED_RUN_IDS minus the aux tick) — the DistroAV burn IS the M3 emit anchor, while
+    the cam2 painter QR rides the same optical frames with an ad-hoc epoch run_id and a MONOTONIC
+    gen_ts_ns (first live DORMANT run 2026-08-26: auto-selecting the painter produced a nonsense
+    ~20.7-day "latency"). Falls back to the dominant non-reserved run_id only when no burn-family
+    id decoded at all. Returns None when nothing decodable was found."""
     if override is not None:
         return int(override)
-    from mv_skew_snapshot import dominant_run_id  # lazy: pure fn, but keep the import local
+    from mv_skew_snapshot import AUX_TICK_RUN_ID, RESERVED_RUN_IDS, dominant_run_id  # lazy: pure
+    burn_counts = {}
+    for m in per_frame_maps:
+        for run_id in m:
+            if run_id in RESERVED_RUN_IDS and run_id != AUX_TICK_RUN_ID:
+                burn_counts[run_id] = burn_counts.get(run_id, 0) + 1
+    if burn_counts:
+        return max(sorted(burn_counts), key=lambda rid: burn_counts[rid])
     return dominant_run_id(per_frame_maps)
 
 
@@ -260,13 +269,14 @@ def _decode_frame_qrs(png_path):
 
 
 def _per_frame_map(qr_texts):
-    """{run_id: newest gen_ts_ns} for one frame, minus the reserved node-burn / aux-tick ids.
-    Reuses mv_skew_snapshot.tick_map (the shared newest-gen_ts_ns-per-run_id fold over CRC-valid
-    payloads) — never a second parser/fold copy — then drops RESERVED_RUN_IDS (esp. AUX_TICK_RUN_ID
-    911013, whose gen_ts_ns is always 0)."""
-    from mv_skew_snapshot import tick_map, RESERVED_RUN_IDS  # local import (pure, no cv2)
+    """{run_id: newest gen_ts_ns} for one frame. Reuses mv_skew_snapshot.tick_map (the shared
+    newest-gen_ts_ns-per-run_id fold over CRC-valid payloads) — never a second parser/fold copy —
+    and drops ONLY AUX_TICK_RUN_ID (911013, gen_ts_ns always 0). The node-burn family ids MUST
+    survive: the imag DistroAV burn (e.g. 911003) is the M3 emit anchor this tool pairs on — the
+    painter-centric whole-RESERVED drop erased it on the first live run (0/1200 pairable)."""
+    from mv_skew_snapshot import tick_map, AUX_TICK_RUN_ID  # local import (pure, no cv2)
     return {run_id: gen_ts_ns for run_id, gen_ts_ns in tick_map(qr_texts).items()
-            if run_id not in RESERVED_RUN_IDS}
+            if run_id != AUX_TICK_RUN_ID}
 
 
 def records_from_capture(capture_path, frames_dir=None, run_id_override=None):
