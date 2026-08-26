@@ -92,6 +92,11 @@ set -euo pipefail
 #   (p) operator scaffolding present (#791): /usr/local/bin/imag-obs-start.sh, wmctrl, the
 #       right-click menu (~/.config/openbox/menu.xml), the wall-fallback image, the watchdog
 #       installed-but-disabled (#756)
+#   (p2) DRM-lease-tolerant wrapper generation (issue 1152 M4): the INSTALLED
+#       /usr/local/bin/imag-obs-start.sh + imag_scenes.py carry the lease-tolerance markers, so
+#       the DEFAULT-OFF ~/.camera-box/drm-output.json flip (the obs-drm-output.md runbook step)
+#       can never crash-loop the supervised unit on an older wrapper pair. Static content greps
+#       only (enable-only: no start/restart; the config itself is NEVER enabled here)
 #   (q) OPERATOR parity (#791): the full canonical 17-scene ORDER (Scene, Cam N..Cam 1, resolume
 #       imag, MV Cam 1..N, MW resolume imag) and all 10 canonical NDI-source bindings (7 fleet
 #       cams + the 3 Resolume/overlay inputs no automated seeder creates) -- via
@@ -150,13 +155,16 @@ set -euo pipefail
 #       intel_pstate no_turbo=0 + platform_profile, optional knobs `absent`-tolerant for hardware
 #       agnosticism, #816). Closes the hand-placed-never-provisioned gap #791 exists for; setup-imag.sh
 #       step 26 provisions it. Pure sysfs/systemd reads (side-effect free), so it runs BEFORE check (o).
-#   (z) display-path tear-free config (issue 1146): the picom vsync compositor is RUNNING + its
-#       user systemd unit is ENABLED, HDMI is the xrandr PRIMARY (the projector is the vsync anchor),
-#       the #841 iGPU freq pin holds, and the #779 tap conf is present. Runs the SHARED
-#       imag_display_path_verdict (scripts/lib/imag-display-path.sh) -- the SAME verdict drift-guard
-#       --check-imag and the E2E [0/8] preflight run. setup-imag.sh step 27 provisions picom + step
-#       16 sets HDMI primary; a re-provision that lost either (or picom that failed to come up after
-#       a reboot) must FAIL here. Pure ssh reads (side-effect free), appended at the END.
+#   (z) display-path config (issue 1146 REVERT + issue 1152): picom NOT running + its user unit
+#       NOT enabled (the vsync-compositor cure cost 21.57% OBS render skips on the 25W envelope --
+#       the #841 picom-off doctrine stands, the package/unit stay installed dormant), HDMI the
+#       xrandr PRIMARY (the projector is the vsync anchor -- UNLESS the issue-1152 DRM output is
+#       ENABLED, when HDMI is leased OUT of X by design and the panel primary is correct), the
+#       #841 iGPU freq pin, the #779 tap conf, and the issue-1152 drm_output facet (dormant
+#       config = OK; enabled demands the OBS log's `program scanout LIVE` proof). Runs the SHARED
+#       imag_display_path_verdict (scripts/lib/imag-display-path.sh) -- the SAME verdict
+#       drift-guard --check-imag and the E2E [0/8] preflight run. A re-provision that drifts any
+#       facet must FAIL here. Pure ssh reads (side-effect free), appended at the END.
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -797,6 +805,18 @@ imag_power_tcpu_guard_verdict() {
   case "$ceil" in '' | *[!0-9-]*) printf 'unreadable\n'; return 0 ;; esac
   if [ "$tcpu" -lt "$ceil" ]; then printf 'ok\n'; return 0; fi
   if [ "$guard_state" = "stepped" ]; then printf 'ok-stepdown\n'; else printf 'over-ceiling\n'; fi
+}
+
+# imag_lease_tolerance_ok START_HITS SCENES_HITS -> 0 iff BOTH installed files carry their
+# issue-1152 lease-tolerance marker (each arg = the on-box `grep -c` hit count for that marker:
+# DRM_LEASE_MODE in imag-obs-start.sh, drm_output_lease_enabled in imag_scenes.py). Two-tier in
+# the hard direction: an EMPTY/non-numeric read (unreadable file, ssh hiccup) returns 1 -- this
+# gate's convention is that an unreadable signal is a FAIL, never a silent pass. Pure.
+imag_lease_tolerance_ok() {
+  local start_c="${1:-}" scn_c="${2:-}"
+  case "$start_c" in '' | *[!0-9]*) return 1 ;; esac
+  case "$scn_c" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$start_c" -ge 1 ] && [ "$scn_c" -ge 1 ]
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
@@ -1570,6 +1590,23 @@ if imag_watchdog_installed_but_disabled "${WATCHDOG_MODE:-}" "${WATCHDOG_UNIT_LI
   ok "imag-obs-watchdog installed but disabled (agreed model: boot autostart + menu, no auto-respawn, #756)"
 else
   fail "imag-obs-watchdog not in the agreed installed-but-disabled state (script mode='${WATCHDOG_MODE:-<none>}', unit='${WATCHDOG_UNIT_LIST:-<none>}', enabled='${WATCHDOG_ENABLED:-<none>}') (#791)"
+fi
+
+# (p2) DRM-lease-tolerant wrapper generation (issue 1152 M4) --------------------------------------
+# The DEFAULT-OFF ~/.camera-box/drm-output.json flip (the obs-drm-output.md runbook step) is only
+# safe when the box's INSTALLED imag-obs-start.sh + imag_scenes.py are the lease-tolerant
+# generation -- an older pair crash-loops the supervised unit the moment the DRM output owns the
+# HDMI connector (the live 2026-08-26 M1 runbook gotcha: projector-step FAIL -> unit exit 1 ->
+# systemd tears OBS down -> Restart=on-failure loop). Static content greps of the installed files
+# only (enable-only: nothing started/restarted, and the config itself is NEVER enabled here), so
+# placement after check (o)'s restart is harmless (#884 ordering -- same static-read argument as
+# the #1095 rc.xml check above). An unreadable file reads non-numeric/empty -> hard FAIL.
+LEASE_START_C="$(ssh_box "grep -c 'DRM_LEASE_MODE' /usr/local/bin/imag-obs-start.sh 2>/dev/null" || true)"
+LEASE_SCN_C="$(ssh_box "grep -c 'drm_output_lease_enabled' /usr/local/bin/imag_scenes.py 2>/dev/null" || true)"
+if imag_lease_tolerance_ok "${LEASE_START_C:-}" "${LEASE_SCN_C:-}"; then
+  ok "installed imag-obs-start.sh + imag_scenes.py are the DRM-lease-tolerant generation (issue 1152 M4 -- a drm-output.json flip cannot crash-loop the unit)"
+else
+  fail "installed wrapper/seeder NOT the DRM-lease-tolerant generation (imag-obs-start.sh DRM_LEASE_MODE hits='${LEASE_START_C:-<none>}', imag_scenes.py drm_output_lease_enabled hits='${LEASE_SCN_C:-<none>}') -- re-run setup-imag.sh to refresh /usr/local/bin BEFORE any drm-output.json flip (issue 1152 M4)"
 fi
 
 # (r) OBS stats dock persistence: global.ini carries a non-empty DockState (#791) --------------

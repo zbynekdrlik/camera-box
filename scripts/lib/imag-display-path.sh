@@ -61,6 +61,14 @@
 #                                      left on the live box is deliberately NOT provisioned (it would
 #                                      fight the #841 "no dead display xorg.conf.d knob" guard).
 #   * touchpad tap conf (#779)      -> still applies (GPU-independent).
+#   * drm_output (issue 1152 M4)    -> the DEFAULT-OFF in-OBS DRM-lease HDMI output
+#                                      (~/.camera-box/drm-output.json, obs-drm-output.md). Dormant
+#                                      = OK (the fleet default — never a false abort); ENABLED
+#                                      demands the current OBS log's `program scanout LIVE` proof
+#                                      = OK, anything else = DRIFT fail-loud. And when ENABLED the
+#                                      hdmi_primary facet flips lease-aware: HDMI is leased OUT of
+#                                      the X layout BY DESIGN, so a panel primary is then OK
+#                                      (pre-M4 it false-DRIFTed and aborted the [0/8] preflight).
 #
 # This lib holds the REMOTE gather snippet + the PURE verdict, SHARED by scripts/drift-guard.sh's
 # `--check-imag` facet, the E2E `[0/8]` preflight (scripts/recording-e2e.sh), and verify-imag.sh's
@@ -92,10 +100,10 @@ _dp_has() {
 }
 
 # imag_display_path_verdict GATHER -> echoes one `<facet>|<STATUS>|<detail>` line per facet
-# (facets: picom_process, picom_service, hdmi_primary, igpu_maxperf, tap_conf; STATUS in OK / DRIFT /
-# UNKNOWN). Both callers iterate the lines and map each to their own report style + exit-code
-# contract. An EMPTY gather (SSH hiccup), an unread facet, or a missing tool is UNKNOWN — never a
-# false OK/DRIFT.
+# (facets: picom_process, picom_service, hdmi_primary, igpu_maxperf, tap_conf, drm_output; STATUS in
+# OK / DRIFT / UNKNOWN). Both callers iterate the lines and map each to their own report style +
+# exit-code contract. An EMPTY gather (SSH hiccup), an unread facet, or a missing tool is UNKNOWN —
+# never a false OK/DRIFT.
 imag_display_path_verdict() {
   local g="$1"
 
@@ -137,7 +145,13 @@ imag_display_path_verdict() {
   #     CRTC). xrandr presence is probed (#833) — a missing xrandr degrades ONLY this facet to
   #     UNKNOWN; an empty read (X unreachable over ssh, or no primary set) is UNKNOWN, never a false
   #     DRIFT; only a real NON-HDMI primary (the panel) is a DRIFT.
-  if ! _dp_has "$g" XRANDR; then
+  if [ "$(_dp_field "$g" DRM_OUTPUT_ENABLED)" = "true" ]; then
+    # issue 1152 M4: with the in-OBS DRM-lease output ENABLED the HDMI connector is leased OUT of
+    # the X layout BY DESIGN — the panel becomes the (only) X primary and that is CORRECT, never
+    # the issue-1146 DRIFT. Whether the Program actually reaches the projector is the drm_output
+    # facet's verdict below, not this one's.
+    printf 'hdmi_primary|OK|drm-output ENABLED (issue 1152) — the HDMI connector is leased OUT of the X layout, so the panel primary is correct by design; projector sync is the DRM page-flip, not the X primary anchor\n'
+  elif ! _dp_has "$g" XRANDR; then
     printf 'hdmi_primary|UNKNOWN|xrandr-primary state not gathered\n'
   elif [ "$(_dp_field "$g" XRANDR)" = "missing" ]; then
     printf 'hdmi_primary|UNKNOWN|xrandr missing on the box — cannot read the primary output; never read as a verdict (#833)\n'
@@ -187,6 +201,36 @@ imag_display_path_verdict() {
     else
       printf 'tap_conf|DRIFT|30-touchpad-tap.conf present but Tapping=%s (expected on, #779)\n' "${_tap:-<none>}"
     fi
+  fi
+
+  # --- drm_output (issue 1152 M4): the DEFAULT-OFF in-OBS DRM-lease HDMI output. Dormant (config
+  #     absent, or present with "enabled" not true) is the fleet default -> OK, so drift-guard /
+  #     the E2E [0/8] preflight / verify (z) never false-abort on a box that simply does not run
+  #     it. ENABLED demands PROOF the Program actually reaches the projector: the current OBS
+  #     session's `program scanout LIVE` marker -> OK; anything else (bind FAILED, solid-only,
+  #     no marker, no readable log, or the M1 "program": false solid DIAGNOSTIC mode — cam2's
+  #     grabber taps this HDMI, a grey pattern would wreck a data run) -> DRIFT, fail loud.
+  #     Two-tier (#833): a partial gather (config read but the log block unread) is UNKNOWN,
+  #     never a false DRIFT; a gathered-but-empty log dir IS a proven "no scanout proof" -> DRIFT.
+  if ! _dp_has "$g" DRM_OUTPUT_CONFIG; then
+    printf 'drm_output|UNKNOWN|drm-output state not gathered\n'
+  elif [ "$(_dp_field "$g" DRM_OUTPUT_CONFIG)" = "absent" ]; then
+    printf 'drm_output|OK|dormant — ~/.camera-box/drm-output.json absent (the DEFAULT-OFF fleet state); Program on the X projector path (issue 1152)\n'
+  elif [ "$(_dp_field "$g" DRM_OUTPUT_ENABLED)" != "true" ]; then
+    printf 'drm_output|OK|dormant — drm-output.json present but not enabled; Program on the X projector path (issue 1152)\n'
+  elif [ "$(_dp_field "$g" DRM_OUTPUT_PROGRAM)" = "false" ]; then
+    printf 'drm_output|DRIFT|drm-output ENABLED in the M1 solid diagnostic mode ("program": false) — the projector carries a grey test pattern, not the Program; not a production state (issue 1152)\n'
+  elif ! _dp_has "$g" DRM_OUTPUT_LOG; then
+    printf 'drm_output|UNKNOWN|drm-output ENABLED but the OBS-log scanout state was not gathered — cannot prove nor disprove the Program scanout (issue 1152)\n'
+  elif [ "$(_dp_field "$g" DRM_OUTPUT_LOG)" != "present" ]; then
+    printf 'drm_output|DRIFT|drm-output ENABLED but no OBS log is readable on the box — no proof the Program reaches the projector (issue 1152)\n'
+  else
+    case "$(_dp_field "$g" DRM_OUTPUT_SCANOUT)" in
+      live)        printf 'drm_output|OK|ENABLED and program scanout LIVE — the Program is page-flipping on the DRM-leased HDMI connector (issue 1152)\n' ;;
+      bind-failed) printf 'drm_output|DRIFT|ENABLED but the program bind FAILED (current OBS log) — the projector shows the solid fallback, not the Program (issue 1152)\n' ;;
+      solid-only)  printf 'drm_output|DRIFT|ENABLED but only the solid pattern is active — no program scanout LIVE marker in the current OBS log (issue 1152)\n' ;;
+      *)           printf 'drm_output|DRIFT|ENABLED but the current OBS log carries NO drm-output scanout marker — the lease/output did not come up (issue 1152)\n' ;;
+    esac
   fi
 }
 
@@ -254,6 +298,44 @@ if [ -e "$_dp_tc" ]; then
 else
   printf 'TAPCONF|absent\n'
 fi
+# --- drm-output (issue 1152 M4): the DEFAULT-OFF in-OBS DRM-lease output config + the CURRENT
+# OBS session's scanout marker. Config: the same machine-written one-line JSON the vendored C
+# module reads (obs-drm-output.md); a grep extract is deliberate (no python dependency in this
+# gather). OBS-log greps are LC_ALL=C grep -a — OBS logs carry raw invalid-UTF-8 bytes and a
+# UTF-8-locale grep can MISS a present ASCII marker (the #1183/#1184 mojibake net). The marker
+# priority order matters: a healthy Program session contains BOTH the solid-phase `ACTIVE` line
+# AND the later `program scanout LIVE` line, so LIVE is checked FIRST. ---
+_dp_cfg="$HOME/.camera-box/drm-output.json"
+if [ -e "$_dp_cfg" ]; then
+  printf 'DRM_OUTPUT_CONFIG|present\n'
+  if LC_ALL=C grep -aqE '"enabled"[[:space:]]*:[[:space:]]*true' "$_dp_cfg" 2>/dev/null; then
+    printf 'DRM_OUTPUT_ENABLED|true\n'
+  else
+    printf 'DRM_OUTPUT_ENABLED|false\n'
+  fi
+  if LC_ALL=C grep -aqE '"program"[[:space:]]*:[[:space:]]*false' "$_dp_cfg" 2>/dev/null; then
+    printf 'DRM_OUTPUT_PROGRAM|false\n'
+  else
+    printf 'DRM_OUTPUT_PROGRAM|true\n'
+  fi
+else
+  printf 'DRM_OUTPUT_CONFIG|absent\n'
+fi
+_dp_obslog="$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -1 || true)"
+if [ -n "$_dp_obslog" ]; then
+  printf 'DRM_OUTPUT_LOG|present\n'
+  if LC_ALL=C grep -aq 'drm-output: program scanout LIVE' "$_dp_obslog" 2>/dev/null; then
+    printf 'DRM_OUTPUT_SCANOUT|live\n'
+  elif LC_ALL=C grep -aq 'drm-output: program bind FAILED' "$_dp_obslog" 2>/dev/null; then
+    printf 'DRM_OUTPUT_SCANOUT|bind-failed\n'
+  elif LC_ALL=C grep -aq 'drm-output: ACTIVE' "$_dp_obslog" 2>/dev/null; then
+    printf 'DRM_OUTPUT_SCANOUT|solid-only\n'
+  else
+    printf 'DRM_OUTPUT_SCANOUT|none\n'
+  fi
+else
+  printf 'DRM_OUTPUT_LOG|none\n'
+fi
 REMOTE
 }
 
@@ -287,6 +369,6 @@ imag_display_path_preflight_assert() {
   if [ -n "$unknowns" ]; then
     printf 'WARN: imag display-path facets UNKNOWN on %s (not read; not a proven drift): %s\n' "$host" "$unknowns" >&2
   fi
-  printf 'imag display-path preflight OK on %s (picom vsync on, HDMI primary, iGPU pinned, tap conf)\n' "$host"
+  printf 'imag display-path preflight OK on %s (picom off, HDMI primary / drm-output coherent, iGPU pinned, tap conf)\n' "$host"
   return 0
 }

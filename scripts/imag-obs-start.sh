@@ -47,6 +47,28 @@ if ! python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import imag_s
     exit 1
 fi
 
+# issue 1152 M4: DRM-lease tolerance. With ~/.camera-box/drm-output.json ENABLED the vendored OBS
+# leases the HDMI connector OUT of the X layout at startup and page-flips the Program onto it
+# directly (render->scanout, obs-drm-output.md) -- so this wrapper must NOT require the HDMI
+# display in X. Two jobs here, both LOUD and both best-effort (never a new unit-abort path -- the
+# issue-866 start-path discipline; the projector-step tolerance itself lives in imag_scenes.py's
+# own lease-mode branch, which EVERY caller of the seed inherits):
+#   1. take the config's connector out of the X layout BEFORE the launch (the idle-connector
+#      lease precondition: never lease an output X is actively displaying), reboot-durable
+#      without touching the openbox autostart;
+#   2. announce the mode, so this log always names WHY no X Program projector opens.
+# Config absent/disabled -> DRM_LEASE_MODE stays 0 and behaviour is byte-identical to before.
+DRM_OUTPUT_CONF="$HOME/.camera-box/drm-output.json"
+DRM_LEASE_MODE=0
+if [ -r "$DRM_OUTPUT_CONF" ] && LC_ALL=C grep -aqE '"enabled"[[:space:]]*:[[:space:]]*true' "$DRM_OUTPUT_CONF"; then
+    DRM_LEASE_MODE=1
+    DRM_CONNECTOR="$(LC_ALL=C sed -nE 's/.*"connector"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$DRM_OUTPUT_CONF" | head -1 || true)"
+    DRM_CONNECTOR="${DRM_CONNECTOR:-HDMI-1}"
+    echo "issue 1152 drm-lease mode ENABLED (${DRM_OUTPUT_CONF}): Program goes out via the DRM-leased ${DRM_CONNECTOR} scanout -- taking ${DRM_CONNECTOR} out of the X layout; only the panel Multiview projector will open X-side"
+    xrandr --output "$DRM_CONNECTOR" --off 2>/dev/null \
+        || echo "WARN #1152: xrandr --output ${DRM_CONNECTOR} --off failed -- if ${DRM_CONNECTOR} is still active in X the in-OBS lease may fail; the drm_output drift facet will name it (continuing, never aborting the unit)"
+fi
+
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 # #840/#841: the CPU pin is env-overridable so the boot-time openbox autostart -- which DOES know
 # this box's own DERIVED isolated-CPU set (#816) -- can pass it through via IMAG_ISOLATED_CPUS.
@@ -86,6 +108,9 @@ sleep 2   # WS port is up; give the ident handshake layer a moment before the se
 
 python3 "$SCN" --host 127.0.0.1 --bootstrap
 python3 "$SCN" --host 127.0.0.1 --projector
+if [ "$DRM_LEASE_MODE" = "1" ]; then
+    echo "issue 1152 drm-lease mode: X-side seeding done -- the Program is on the DRM scanout, only the panel Multiview projector is X-side"
+fi
 echo "OK: OBS bezi, scenes seednute (--bootstrap), projektory otvorene."
 
 # #882: BLOCK here until obs itself exits, then propagate ITS OWN exit status. This makes obs --
