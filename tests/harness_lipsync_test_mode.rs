@@ -300,6 +300,39 @@ fn playback_cmds_carries_playback_gain_af_seam_1191() {
 }
 
 // --------------------------------------------------------------------------------------------- //
+// issue 1174 — the playback audio must be forced to 48 kHz output. The HDMI->mic chain runs 48k
+// natively and a 44.1k ALSA stream's mode lock is FLAKY per stream-start (round-1 locked
+// spontaneously after 26.8 min; rounds 2-4 never locked, envelope corr ~0.23-0.35), while the one
+// manual probe played at 48k locked first try (corr 0.976, SyncNet conf 6.4). Forcing
+// `--audio-samplerate=48000` removes the 44.1k mode-switch from the chain entirely.
+// --------------------------------------------------------------------------------------------- //
+
+/// The single mpv playback invocation must force 48k audio output via the
+/// `--audio-samplerate=${LIPSYNC_AUDIO_RATE:-48000}` env seam -- remote-side expansion like the
+/// 1191 gain seam, so the default is baked self-documenting into the generated command and the
+/// supervisor can reproduce the flaky 44.1k case (LIPSYNC_AUDIO_RATE=44100) without a code change.
+#[test]
+fn playback_cmds_forces_48k_output_rate_seam_1174() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        cmds.contains("--audio-samplerate=${LIPSYNC_AUDIO_RATE:-48000}"),
+        "1174: the mpv playback line must force 48k audio output via the LIPSYNC_AUDIO_RATE env \
+         seam (default 48000, remote-side expansion) -- a 44.1k stream's HDMI->mic mode lock is \
+         flaky per stream-start: {cmds}"
+    );
+    // Orthogonal to the A/V lead -- present with a lead applied too.
+    let with_lead = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 408",
+    );
+    assert!(
+        with_lead.contains("--audio-samplerate=${LIPSYNC_AUDIO_RATE:-48000}"),
+        "1174: the rate seam must be present regardless of the audio-lead value: {with_lead}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------- //
 // issue 1187 — the mpv decode + presence PREFLIGHT (replaces the fbdev-specific pacing guard).
 // --------------------------------------------------------------------------------------------- //
 
