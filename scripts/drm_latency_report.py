@@ -8,8 +8,8 @@ payload.rs). `scripts/drm-latency-measure.sh` captures a short raw-V4L2 clip off
 capture wall-ts (ffmpeg `-use_wallclock_as_timestamps 1`) and scp's it to dev1; this tool decodes
 each frame's burn QR and pairs the capture wall-ts against the decoded emit-ts. Per-frame latency =
 capture_ts_ns − emit_ts_ns; the distribution (median/p95/p99 + jitter) is produced for a DORMANT and
-an ENABLED run, and the DORMANT−ENABLED DELTA cancels the grabber's fixed systematic offset (we want
-the delta, not the absolute number).
+an ENABLED run, and the DORMANT-vs-ENABLED delta (delta = ENABLED − DORMANT) cancels the grabber's
+fixed systematic offset (we want the delta, not the absolute number).
 
 Design split (Tier-0 #557: cargo cannot run locally, so the decision logic is PURE python):
   * PURE core (unit-tested in tests/python/test_drm_latency_report_1152.py, stdlib only):
@@ -218,10 +218,20 @@ def _ffprobe_capture_ts_ns(capture_path):
         try:
             out.append(int(round(float(token) * 1e9)))
         except ValueError:
-            # a non-numeric ffprobe row (e.g. "N/A" for a frame with no PTS) — skip it explicitly,
-            # never swallow silently; the frame/pts truncation guard below reports any resulting gap.
-            sys.stderr.write("[drm-latency] WARNING: non-numeric pts_time %r skipped\n" % token)
-            continue
+            # a non-numeric ffprobe row (e.g. "N/A" for a frame with no PTS): keep POSITION with a
+            # None placeholder (never drop it silently — dropping shifts every later frame's
+            # timestamp by one, a ~16.7ms systematic error). records_from_capture excludes a None ts.
+            sys.stderr.write("[drm-latency] WARNING: non-numeric pts_time %r -> None placeholder\n" % token)
+            out.append(None)
+    # Epoch sanity: with `-copyts` the capture's PTS are CLOCK_REALTIME epoch seconds (~1.78e9 in
+    # 2026). A first valid PTS below year-2001 means ffmpeg rebased the epoch to ~0 (the grab was
+    # made WITHOUT -copyts) and every latency would be garbage — fail LOUD, never report nonsense.
+    first = next((v for v in out if v is not None), None)
+    if first is not None and first < 1_000_000_000_000_000_000:  # < 1e9 s expressed in ns
+        raise RuntimeError(
+            "[drm-latency] capture epoch lost (first pts=%.3fs < 1e9s) — the grab was made WITHOUT "
+            "ffmpeg -copyts, so the wallclock timestamps are meaningless. Re-grab with -copyts." %
+            (first / 1e9))
     return out
 
 
@@ -231,9 +241,12 @@ def _extract_frames(capture_path, frames_dir):
     import subprocess
     os.makedirs(frames_dir, exist_ok=True)
     pattern = os.path.join(frames_dir, "f-%06d.png")
+    # `-fps_mode passthrough` is an OUTPUT option — it MUST come after `-i` (before -i is a fatal
+    # ffmpeg error: "Option fps_mode cannot be applied to input url"). It keeps 1:1 (no dup/drop)
+    # so the Nth PNG lines up with the Nth ffprobe pts entry.
     subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-fps_mode", "passthrough",
-         "-i", capture_path, pattern],
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-i", capture_path, "-fps_mode", "passthrough", pattern],
         check=True)
     return sorted(glob.glob(os.path.join(frames_dir, "f-*.png")))
 
@@ -247,45 +260,58 @@ def _decode_frame_qrs(png_path):
 
 
 def _per_frame_map(qr_texts):
-    """{run_id: newest gen_ts_ns} for one frame, using the shared CRC-validating parse_payload and
-    excluding the reserved node-burn / aux-tick ids (never a second parser copy)."""
-    from mv_skew_snapshot import parse_payload, RESERVED_RUN_IDS  # local import
-    out = {}
-    for text in qr_texts:
-        parsed = parse_payload(text)
-        if parsed is None:
-            continue
-        run_id, _frame_id, gen_ts_ns = parsed
-        if run_id in RESERVED_RUN_IDS:
-            continue
-        if run_id not in out or gen_ts_ns > out[run_id]:
-            out[run_id] = gen_ts_ns
-    return out
+    """{run_id: newest gen_ts_ns} for one frame, minus the reserved node-burn / aux-tick ids.
+    Reuses mv_skew_snapshot.tick_map (the shared newest-gen_ts_ns-per-run_id fold over CRC-valid
+    payloads) — never a second parser/fold copy — then drops RESERVED_RUN_IDS (esp. AUX_TICK_RUN_ID
+    911013, whose gen_ts_ns is always 0)."""
+    from mv_skew_snapshot import tick_map, RESERVED_RUN_IDS  # local import (pure, no cv2)
+    return {run_id: gen_ts_ns for run_id, gen_ts_ns in tick_map(qr_texts).items()
+            if run_id not in RESERVED_RUN_IDS}
 
 
 def records_from_capture(capture_path, frames_dir=None, run_id_override=None):
     """Decode a captured clip into latency records + the chosen burn run_id. IMPURE (ffmpeg +
-    ffprobe + cv2). Returns (records, run_id)."""
+    ffprobe + cv2). Returns (records, run_id). A frame with no capture timestamp (a None pts
+    placeholder) is excluded from pairing but never shifts the others (positional alignment)."""
+    import shutil
     import tempfile
+    created = frames_dir is None
     work = frames_dir or tempfile.mkdtemp(prefix="drm-lat-frames-")
-    frames = _extract_frames(capture_path, work)
-    capture_ts = _ffprobe_capture_ts_ns(capture_path)
-    n = min(len(frames), len(capture_ts))
-    if len(frames) != len(capture_ts):
-        sys.stderr.write(
-            "[drm-latency] WARNING: %d frames vs %d pts entries — truncating to %d "
-            "(fps_mode passthrough should keep them 1:1)\n" % (len(frames), len(capture_ts), n))
-    per_frame_maps = [_per_frame_map(_decode_frame_qrs(f)) for f in frames[:n]]
-    capture_ts = capture_ts[:n]
-    run_id = select_run_id(per_frame_maps, run_id_override)
-    if run_id is None:
-        sys.stderr.write(
-            "[drm-latency] ERROR: no non-reserved burn run_id decoded in any frame — was the burn "
-            "ON on the imag program input during the capture window?\n")
-        records = [{"frame_index": i, "capture_ts_ns": capture_ts[i], "emit_ts_ns": None}
-                   for i in range(n)]
-        return records, None
-    return build_records(per_frame_maps, capture_ts, run_id), run_id
+    try:
+        frames = _extract_frames(capture_path, work)
+        capture_ts = _ffprobe_capture_ts_ns(capture_path)
+        n = min(len(frames), len(capture_ts))
+        if len(frames) != len(capture_ts):
+            sys.stderr.write(
+                "[drm-latency] WARNING: %d frames vs %d pts entries — truncating to %d "
+                "(fps_mode passthrough should keep them 1:1)\n" % (len(frames), len(capture_ts), n))
+        per_frame_maps = [_per_frame_map(_decode_frame_qrs(f)) for f in frames[:n]]
+        capture_ts = capture_ts[:n]
+        run_id = select_run_id(per_frame_maps, run_id_override)
+        # Keep POSITIONAL alignment: drop only the frames with a None capture ts, in lock-step, and
+        # remember each survivor's ORIGINAL frame index for traceability.
+        maps_ok, ts_ok, idx_ok = [], [], []
+        for i in range(n):
+            if capture_ts[i] is None:
+                continue
+            maps_ok.append(per_frame_maps[i])
+            ts_ok.append(capture_ts[i])
+            idx_ok.append(i)
+        if run_id is None:
+            sys.stderr.write(
+                "[drm-latency] ERROR: no non-reserved burn run_id decoded in any frame — was the "
+                "burn ON on the imag program input during the capture window?\n")
+            return ([{"frame_index": idx_ok[k], "capture_ts_ns": ts_ok[k], "emit_ts_ns": None}
+                     for k in range(len(idx_ok))], None)
+        records = build_records(maps_ok, ts_ok, run_id)
+        for rec, original_index in zip(records, idx_ok):
+            rec["frame_index"] = original_index
+        return records, run_id
+    finally:
+        # Clean up the ~hundreds of full-res PNGs we extracted (GBs at 60fps) — but only when WE
+        # created the temp dir; a caller-supplied --frames-dir is left for inspection.
+        if created:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -302,6 +328,10 @@ def _cmd_run(args):
     if run_id is not None:
         summary["burn_run_id"] = run_id
     print(format_run_summary(summary))
+    if args.out_records:
+        with open(args.out_records, "w") as f:
+            json.dump(records, f, indent=2)
+        print("[drm-latency] wrote %s (decoded records — replay with --records)" % args.out_records)
     if args.out:
         with open(args.out, "w") as f:
             json.dump(summary, f, indent=2)
@@ -334,6 +364,8 @@ def main(argv=None):
     prun.add_argument("--frames-dir", help="dir for extracted frames (default: a temp dir)")
     prun.add_argument("--burn-run-id", type=int, help="override the auto-selected burn run_id")
     prun.add_argument("--out", help="write the run summary JSON here")
+    prun.add_argument("--out-records", help="also persist the decoded per-frame records JSON "
+                                            "(replay later with --records, no ffmpeg/cv2 re-decode)")
     prun.set_defaults(func=_cmd_run)
 
     pdel = sub.add_parser("delta", help="DORMANT vs ENABLED delta table from two run summaries")

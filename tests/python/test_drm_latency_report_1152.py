@@ -210,6 +210,43 @@ def test_select_run_id_override_wins():
 
 
 # --------------------------------------------------------------------------- #
+# _per_frame_map — reuse mv_skew_snapshot.tick_map, exclude RESERVED aux ticks
+# --------------------------------------------------------------------------- #
+def _payload(run_id, frame_id, gen_ts_ns):
+    import zlib
+    body = "%d.%d.%d" % (run_id, frame_id, gen_ts_ns)
+    return "P%s.%d" % (body, zlib.crc32(body.encode()) & 0xFFFFFFFF)
+
+
+def test_per_frame_map_newest_per_run_and_excludes_reserved():
+    texts = [_payload(9, 1, 100), _payload(9, 2, 200), _payload(911013, 1, 0)]
+    m = r._per_frame_map(texts)
+    assert m == {9: 200}  # newest gen_ts_ns per run_id; 911013 (aux tick) reserved -> excluded
+
+
+def test_per_frame_map_drops_crc_bad_and_malformed():
+    texts = ["not-a-payload", "P9.1.100.999999", _payload(7, 1, 50)]  # bad CRC + junk dropped
+    assert r._per_frame_map(texts) == {7: 50}
+
+
+# --------------------------------------------------------------------------- #
+# impure-glue static anchors — the two 🔴 fixes have no local ffmpeg test path,
+# so pin them in the source text (the CLAUDE.md "extra review rigor" net).
+# --------------------------------------------------------------------------- #
+def test_py_extract_frames_has_input_before_fps_mode():
+    text = (_SCRIPTS / "drm_latency_report.py").read_text()
+    i_idx = text.find('"-i", capture_path')
+    fps_idx = text.find('"-fps_mode"')
+    assert i_idx != -1 and fps_idx != -1
+    assert i_idx < fps_idx, "-fps_mode (output opt) must come AFTER -i, else ffmpeg errors"
+
+
+def test_py_ffprobe_has_epoch_lost_guard():
+    text = (_SCRIPTS / "drm_latency_report.py").read_text()
+    assert "epoch lost" in text.lower(), "the -copyts epoch-lost sanity guard must be present"
+
+
+# --------------------------------------------------------------------------- #
 # format_* — human output (substring assertions)
 # --------------------------------------------------------------------------- #
 def test_format_run_summary_names_label_and_stats():
@@ -293,13 +330,13 @@ def test_sh_scp_builder_pulls_capture_back():
 
 
 def test_sh_default_mode_is_plan_and_touches_nothing():
-    # Default (no --execute) must PRINT a plan and never touch the rig. It requires --label but
-    # not the rig — run it with --plan explicitly and a label, expect a plan on stdout, rc 0.
+    # The DEFAULT (NO --plan, NO --execute) must be plan/dry-run and touch nothing — assert the real
+    # default, not an explicitly-passed --plan.
     p = subprocess.run(
-        ["bash", str(SH), "--plan", "--label", "DORMANT", "--imag-input", "CAM1 (usb)"],
+        ["bash", str(SH), "--label", "DORMANT", "--imag-input", "CAM1 (usb)"],
         capture_output=True, text=True,
     )
-    assert p.returncode == 0, f"plan mode failed: {p.stderr}"
+    assert p.returncode == 0, f"default mode failed: {p.stderr}"
     low = (p.stdout + p.stderr).lower()
     assert "plan" in low or "dry" in low
     # No ssh/scp actually executed in plan mode — the plan only PRINTS the commands.
@@ -307,12 +344,42 @@ def test_sh_default_mode_is_plan_and_touches_nothing():
     assert "ffmpeg" in p.stdout
 
 
-def test_sh_never_touches_drm_output_json():
+def test_sh_never_writes_drm_output_json():
     # M3 tooling must NEVER flip ~/.camera-box/drm-output.json (that is the M4 supervisor runbook
-    # step) — the DORMANT/ENABLED state is an input --label, not something this script changes.
+    # step). Assert no WRITE-shaped pattern targets it (a bare mention in a comment/echo is fine —
+    # a redirect / tee / cp / mv / sed -i into it is not). The vacuous "or 'never' in text" check
+    # the first cut used would pass for ANY future edit, so pin the write shapes instead.
+    import re
     text = SH.read_text()
-    assert "drm-output.json" not in text or "NEVER" in text or "never" in text, \
-        "drm-output.json must not be written by the measurement tool"
+    write_pats = [
+        r'>\s*\S*drm-output\.json',
+        r'>>\s*\S*drm-output\.json',
+        r'\btee\b[^\n]*drm-output\.json',
+        r'\b(?:cp|mv|install)\b[^\n]*drm-output\.json',
+        r'\bsed\b\s+-i[^\n]*drm-output\.json',
+    ]
+    for pat in write_pats:
+        assert not re.search(pat, text), f"script appears to WRITE drm-output.json (pattern {pat!r})"
+
+
+def test_sh_grab_uses_copyts_and_is_bounded_by_timeout():
+    # The wallclock epoch must survive the copy-mux (-copyts) or every latency is garbage; and the
+    # grab must be bounded (a wedged V4L2 read must not hang the campaign with cam2 stopped).
+    out = _source_and_run(
+        'drm_latency_cam2_program /dev/video0 mjpeg 1920x1080 60 8 /tmp/drm-lat-x.nut DORMANT')
+    assert out.returncode == 0, out.stderr
+    assert "-copyts" in out.stdout, "grab must use ffmpeg -copyts to preserve the wallclock epoch"
+    assert "timeout" in out.stdout, "the remote grab must be bounded by timeout (wedge guard)"
+
+
+def test_sh_rejects_a_label_with_a_space():
+    # A label is interpolated into paths + remote text; a space/slash must be rejected up front.
+    p = subprocess.run(
+        ["bash", str(SH), "--plan", "--label", "bad label", "--imag-input", "X"],
+        capture_output=True, text=True,
+    )
+    assert p.returncode != 0, "a label containing a space must be rejected"
+    assert "label" in (p.stdout + p.stderr).lower()
 
 
 def _which(name):

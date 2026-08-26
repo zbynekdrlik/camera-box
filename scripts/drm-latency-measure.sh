@@ -83,7 +83,7 @@ echo "[drm-latency] stop camera-box to free $node (label=$label)"
 systemctl stop camera-box 2>/dev/null || true
 sleep 1
 echo "[drm-latency] grab ${seconds}s from $node ($fmt $size@$fps) with wallclock ts -> $outfile"
-ffmpeg -hide_banner -loglevel warning -nostdin -use_wallclock_as_timestamps 1 -f v4l2 -input_format $fmt -video_size $size -framerate $fps -i $node -t $seconds -c:v copy -f nut $outfile
+timeout -k 5 $((seconds + 30)) ffmpeg -hide_banner -loglevel warning -nostdin -use_wallclock_as_timestamps 1 -f v4l2 -input_format $fmt -video_size $size -framerate $fps -i $node -t $seconds -copyts -avoid_negative_ts disabled -c:v copy -f nut $outfile
 _drm_rc=\$?
 echo "[drm-latency] grab exit=\$_drm_rc label=$label out=$outfile" ;
 CAM2PROG
@@ -112,6 +112,17 @@ drm_latency_scp_cmd() {
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
 fi
+
+# _drm_burn_off_and_warn HOST INPUT -> turn the measurement burn OFF; if that FAILS, warn LOUDLY
+# (never swallow it -- a leaked live burn is the #246/#938/#1011 fail-closed class). Script scope so
+# the EXIT trap can call it after main() has returned (its locals gone); the host/input are baked
+# into the trap string at set-time and passed here as args.
+_drm_burn_off_and_warn() {
+  local host="$1" input="$2"
+  if ! python3 "$HERE/obs_burn_filter.py" remove --host "$host" --input "$input" --password "${OBS_WS_PASSWORD:-}"; then
+    echo "[drm-latency] WARNING: burn OFF FAILED -- the measurement burn may still be LIVE on '$input' (imag $host). Clear it manually: python3 $HERE/obs_burn_filter.py check --host $host --input \"$input\" ; then 'remove'." >&2
+  fi
+}
 
 usage() {
   sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -142,7 +153,12 @@ main() {
     esac
   done
 
-  [ -n "$label" ] || { echo "drm-latency-measure: --label is REQUIRED" >&2; exit 2; }
+  # --label is interpolated into file paths AND the remote command text, so constrain it hard
+  # (a space / slash would word-split the emitted ffmpeg line -- review 🔵).
+  case "$label" in
+    "") echo "drm-latency-measure: --label is REQUIRED" >&2; exit 2 ;;
+    *[!A-Za-z0-9_-]*) echo "drm-latency-measure: --label must be [A-Za-z0-9_-]+ (got '$label')" >&2; exit 2 ;;
+  esac
   if [ "$mode" = "execute" ] && [ -z "$imag_input" ]; then
     echo "drm-latency-measure: --imag-input is REQUIRED in --execute mode" >&2; exit 2
   fi
@@ -181,13 +197,17 @@ main() {
   echo "[drm-latency] EXECUTE label=$label imag=$imag_host input='$imag_input' cam2=$cam2_user@$cam2_host node=$node ${seconds}s"
   echo "[drm-latency] burn ON $imag_input on imag ($imag_host)"
   python3 "$HERE/obs_burn_filter.py" add --host "$imag_host" --input "$imag_input" --password "${OBS_WS_PASSWORD:-}"
-  # From here on, ALWAYS turn the burn off on exit (a failed grab must never leave a burn live).
+  # From here on, ALWAYS turn the burn off on exit (a failed grab must never leave a burn LIVE). The
+  # host/input are baked into the trap at set-time (SC2064, deliberate) because main's locals are
+  # gone by the time the EXIT trap fires; the callee warns loudly if the remove fails.
   # shellcheck disable=SC2064
-  trap "python3 '$HERE/obs_burn_filter.py' remove --host '$imag_host' --input '$imag_input' --password \"\${OBS_WS_PASSWORD:-}\" 2>/dev/null || true" EXIT
+  trap "_drm_burn_off_and_warn '$imag_host' '$imag_input'" EXIT
 
+  # NOTE (review 🔵): plan mode PRINTS drm_latency_burn_cmd/_scp_cmd for the human; execute uses
+  # direct argv here (safer than eval) -- the two are kept textually parallel by hand.
   echo "[drm-latency] cam2 leg (stop -> grab -> restart+verify) on $cam2_user@$cam2_host"
-  ssh -o ConnectTimeout=15 "$cam2_user@$cam2_host" "bash -s" <<<"$cam2prog" || \
-    echo "[drm-latency] WARNING: cam2 leg returned non-zero (the remote EXIT trap still restarted camera-box)" >&2
+  timeout $((seconds + 90)) ssh -o ConnectTimeout=15 "$cam2_user@$cam2_host" "bash -s" <<<"$cam2prog" || \
+    echo "[drm-latency] WARNING: cam2 leg returned non-zero or timed out (the remote EXIT trap still restarted camera-box)" >&2
 
   echo "[drm-latency] pull capture -> $local_dst"
   scp -O "$cam2_user@$cam2_host:$remote_out" "$local_dst"
