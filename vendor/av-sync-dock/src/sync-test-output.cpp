@@ -1230,6 +1230,42 @@ static void cb_apply_lock_latency_ms(int32_t new_ms)
 	obs_queue_task(OBS_TASK_UI, cb_apply_lock_latency_task, task, false);
 }
 
+/* #1153: apply the dead-pairing recovery the diag-tick watchdog decided on -- reset EVERY piece of
+ * in-dock pairing state so the chain re-acquires from scratch (a sticky post-latency-step unlock
+ * must never need a manual OBS restart). Cumulative counters/stats are deliberately NOT reset (the
+ * diag line must stay monotonic -- supervisors parse it); the evidence line's epoch deltas
+ * discriminate the poison class from the OBS log alone: crc_ok near the ~1/256 chance floor of the
+ * preamble delta = the marker waveform is degraded upstream of the dock, while a healthy crc_ok
+ * rate with a dead ring = in-dock pairing state, which this reset clears. Runs on the audio thread
+ * only, same as its caller (the diag block); the ring is the one mutex-shared piece. */
+static void cb_apply_pairing_recovery(struct sync_test_output *st,
+                                      const camerabox::CbDockPairingRecovery &rec)
+{
+	{
+		std::unique_lock<std::mutex> lock(st->mutex);
+		for (size_t slot = 0; slot < CAMERA_BOX_RING_SLOTS; slot++)
+			st->cb_video_valid[slot] = false;
+	}
+	st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
+	st->cb_offset_history.clear();
+	st->cb_lock_audit = camerabox::CbLockAuditTracker();
+	st->cb_audio_dec->reset_window();
+	if (st->cb_lock_state) {
+		/* A stale-held lock (zero ring hits all epoch) must not survive the reset on the UI
+		 * either -- the audit tracker could never fire its own Unlocked transition without a
+		 * decode to push. */
+		st->cb_lock_state = false;
+		signal_lock_state_changed(st->context, false);
+	}
+	blog(LOG_WARNING,
+	     "av-sync-dock: PAIRING-RECOVER dead pairing window (ring_hit +%llu, crc_ok "
+	     "+%llu, preambles +%llu, video_decoded +%llu in %llus) -- reset "
+	     "ring+cluster+decoder window, re-acquiring from scratch",
+	     (unsigned long long)rec.ring_hit_delta, (unsigned long long)rec.crc_ok_delta,
+	     (unsigned long long)rec.preambles_delta, (unsigned long long)rec.video_decoded_delta,
+	     (unsigned long long)(rec.window_ns / 1000000000ull));
+}
+
 /* #398 fix (Audio Index + Latency never locked): camera-box's OWN audio decode path, used once the
  * video QR has put us in camera-box mode. norihiro's `st_raw_audio*` demod cannot decode our marker
  * at c=1 (its `c1 = c/2` = 0 collapses the preamble finder; its 6-symbol read can't recover the
@@ -1590,32 +1626,8 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			st->cb_audio_dec->stats.crc_ok, st->cb_ring_hits, st->cb_lock_state,
 			frames->timestamp, camerabox::CB_DOCK_PAIRING_DEAD_NS,
 			camerabox::CB_DOCK_PAIRING_MIN_RING_HITS);
-		if (rec.fire) {
-			{
-				std::unique_lock<std::mutex> lock(st->mutex);
-				for (size_t slot = 0; slot < CAMERA_BOX_RING_SLOTS; slot++)
-					st->cb_video_valid[slot] = false;
-			}
-			st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
-			st->cb_offset_history.clear();
-			st->cb_lock_audit = camerabox::CbLockAuditTracker();
-			st->cb_audio_dec->reset_window();
-			if (st->cb_lock_state) {
-				// A stale-held lock (zero ring hits all epoch) must not survive the reset on
-				// the UI either -- the audit tracker could never fire its own Unlocked
-				// transition without a decode to push.
-				st->cb_lock_state = false;
-				signal_lock_state_changed(st->context, false);
-			}
-			blog(LOG_WARNING,
-			     "av-sync-dock: PAIRING-RECOVER dead pairing window (ring_hit +%llu, crc_ok "
-			     "+%llu, preambles +%llu, video_decoded +%llu in %llus) -- reset "
-			     "ring+cluster+decoder window, re-acquiring from scratch",
-			     (unsigned long long)rec.ring_hit_delta, (unsigned long long)rec.crc_ok_delta,
-			     (unsigned long long)rec.preambles_delta,
-			     (unsigned long long)rec.video_decoded_delta,
-			     (unsigned long long)(rec.window_ns / 1000000000ull));
-		}
+		if (rec.fire)
+			cb_apply_pairing_recovery(st, rec);
 	}
 }
 
