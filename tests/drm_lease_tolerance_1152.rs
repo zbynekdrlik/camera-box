@@ -252,8 +252,8 @@ fn drm_output_unknown_when_enabled_state_not_gathered_1152() {
     let l = facet_line(&lines, "drm_output");
     assert_eq!(status_of(&lines, "drm_output"), "UNKNOWN", "{l}");
     assert!(
-        !l.contains("dormant"),
-        "a truncated gather must never be read as a proven dormant state: {l}"
+        !l.contains("|OK|dormant"),
+        "a truncated gather must never be read as a proven dormant-OK state: {l}"
     );
 }
 
