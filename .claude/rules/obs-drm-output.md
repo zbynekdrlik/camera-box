@@ -4,6 +4,7 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output.h"
   - "vendor/obs-studio/libobs/cmake/os-linux.cmake"
   - "tests/drm_output_lease_1152.rs"
+  - "tests/drm_output_program_1152.rs"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -15,9 +16,10 @@ OBS acquires DRM master of the HDMI connector through an **X RandR output LEASE*
 with **NO** NDI hop and **NO** external presenter. The NDI-loopback / external-presenter variant is
 REJECTED (zero-latency mandate); it survives only as an emergency fallback in the spec appendix.
 
-Milestones: **M1** (done) = lease acquire + solid-color flip from the OBS process (mechanism proof,
-NOT bound to the render texture). **M2** = Program texture → dma-buf/EGL export → zero-copy KMS flip.
-**M3** = vsync/latency measurement vs today's projector. **M4** = provisioning + `[0/8]` facets.
+Milestones: **M1** (done, live-verified 2026-08-26: 679 flips ≈ 60/s, clean release) = lease acquire
++ solid-color flip from the OBS process. **M2** (code done, awaiting rig verify) = Program texture →
+GBM dma-buf → zero-copy KMS flip (section below). **M3** = vsync/latency measurement vs today's
+projector. **M4** = provisioning + `[0/8]` facets.
 
 ## Why the module lives in libobs, not a plugin
 
@@ -78,9 +80,56 @@ Activation is a config file, not env (respects the "no env" doctrine): `obs_star
    `ACTIVE` → `page-flip #1` then ~1/min; HDMI shows solid grey, no X window lands on it, eDP untouched.
 4. Rollback: `rm ~/.camera-box/drm-output.json` + restart OBS; `xrandr --output HDMI-1 --auto`.
 
-M1 is SOLID color; the **M2 HOOK** (where the solid fill is replaced by a dma-buf import of the
-Program GL texture) is marked in `drm_output_setup_scanout()`. Scanout tearing stays report-only
-until the #781 physical HDMI tap; M1 claims only the MECHANISM (leased + page-flipping + armed).
+## M2 — Program → GBM dma-buf → zero-copy scanout (the shipped shape)
+
+The chosen path is **render INTO scanout** (the kmscube/wlroots pattern), NOT an EGL export of GL
+textures (a render-chosen Intel CCS modifier can be unscannable) and NOT a CPU readback (violates
+the zero-copy mandate; ~0.5 GB/s + a GPU stall on the 25W box):
+
+- `start()` allocates 3 `gbm_bo_create(XRGB8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING)` BOs
+  on the LEASE fd (scanout-compatible modifier BY CONSTRUCTION) + `drmModeAddFB2WithModifiers`
+  FBs. **The GL import is LAZY** — at `obs_startup` autostart time the graphics subsystem does not
+  exist, so the first `obs_drm_output_on_frame()` call (the graphics thread) imports each BO via
+  the UPSTREAM `gs_texture_create_from_dmabuf` (which returns a `GS_RENDER_TARGET` texture —
+  gl-egl-common.c creates them with that flag, and the GL backend attaches any `GS_TEXTURE_2D` to
+  an FBO), so M2 needed ZERO new graphics vtable exports.
+- The hook sits in `obs_graphics_thread_loop` (obs-video.c) right after `output_frames` under a
+  `#if defined(__linux__)` guard, and raw-copies the Program (`obs_get_main_texture`) into the
+  mailbox back buffer: **non-sRGB sampling + framebuffer-sRGB OFF + blending OFF** = byte-faithful
+  SDR copy (the sRGB decode/encode round-trip of `obs_render_main_texture` is for filtered
+  scaling, not a scanout copy). Aspect-fit letterboxes a mode/canvas mismatch; SDR-only (HDR would
+  need a tonemap pass — out of scope, imag is SDR).
+- **Mailbox triple buffer** (front on scanout / pending flip queued / ready latest-wins): producer
+  = graphics thread (~60 fps DanteSync-locked), consumer = the M1 flip thread (HDMI vblank) — two
+  INDEPENDENT clock domains, so an occasional repeated/overwritten frame is inherent and correct.
+  The pure helpers `drm_output_pick_render_buf` + `drm_output_fit_rect` are truth-tabled in
+  `tests/drm_output_program_1152.rs` (std-only, the same lift-compile model as M1).
+- The first Program frame does a one-shot `drmModeSetCrtc` onto the GBM FB (a legacy page-flip
+  across a modifier change is unreliable — the dumb solid FB and the GBM FB differ), then
+  page-flips run among the identical GBM FBs; when the mailbox is empty the flip thread RE-FLIPS
+  the front FB (vblank pacing with no condvar). GPU→scanout sync is `gs_flush()` + i915/Xe
+  implicit fencing on the BO (the kernel flip waits on dma-resv — no glFinish).
+- **Lock order (deadlock rule): graphics context FIRST, then `program_lock`** — shared by the
+  frame hook and the GL teardown; the flip thread takes `program_lock` alone (briefly, never
+  across the flip wait) and never the graphics context; `g_drm.lock` still never enters the flip
+  loop. `stop()` order: disarm `program_want` → join → GL teardown (ctx + program_lock) →
+  `teardown_locked` (Program FBs/BOs freed BEFORE the fd closes). `obs_shutdown` calls stop
+  BEFORE `stop_video()`, so graphics is still alive for the texture destroy.
+- **Fail-open**: any GBM/AddFB2/import failure logs `program bind FAILED`/`staying on the solid
+  pattern` and the output keeps the M1 solid behaviour (it also shows solid until OBS's first
+  rendered frame). Config: optional `"program": false` in `~/.camera-box/drm-output.json` forces
+  the M1 solid diagnostic pattern; absent/true = Program binding (the default).
+- New CI/link deps: `libgbm-dev` in linux-genlock.yml `OBS_APT_PACKAGES`;
+  `pkg_check_modules(Gbm REQUIRED IMPORTED_TARGET gbm)` + `PkgConfig::Gbm` in os-linux.cmake.
+- New log markers (all M1 `drm-output:` substrings stay byte-identical; these are mutually
+  non-substring): `program buffers allocated`, `program bind ready` / `program bind FAILED`,
+  `program scanout LIVE`, `program-flip #N` (first + ~1/min at 60 Hz). Rig verify (supervisor):
+  enable the config → restart imag OBS → expect `lease acquired` → `mode set` → `program buffers
+  allocated` → `ACTIVE` (solid) → after the first render tick `program bind ready` → `program
+  scanout LIVE` → `program-flip #1`, and the HDMI shows the LIVE Program, not grey.
+
+Scanout tearing stays report-only until the #781 physical HDMI tap; M3 measures vsync/latency
+vs today's projector.
 
 ## Lifecycle invariants (locked by the #1152 review — keep them if you touch the module)
 
