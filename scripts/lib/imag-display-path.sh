@@ -212,10 +212,18 @@ imag_display_path_verdict() {
   #     grabber taps this HDMI, a grey pattern would wreck a data run) -> DRIFT, fail loud.
   #     Two-tier (#833): a partial gather (config read but the log block unread) is UNKNOWN,
   #     never a false DRIFT; a gathered-but-empty log dir IS a proven "no scanout proof" -> DRIFT.
+  #     NB (review): the ENABLED verdict is pure LOG forensics on the NEWEST OBS log — it grades
+  #     the last OBS session's scanout, NOT whether OBS is alive right now (a stopped OBS whose
+  #     final session went LIVE reads OK; liveness is owned by the sibling gates — obs-liveness,
+  #     the reachability watchdogs, verify (h)/(i)). A consumer racing a fresh OBS start reads
+  #     DRIFT until `program scanout LIVE` lands — correct fail-loud for a preflight (a run must
+  #     not start mid-flip).
   if ! _dp_has "$g" DRM_OUTPUT_CONFIG; then
     printf 'drm_output|UNKNOWN|drm-output state not gathered\n'
   elif [ "$(_dp_field "$g" DRM_OUTPUT_CONFIG)" = "absent" ]; then
     printf 'drm_output|OK|dormant — ~/.camera-box/drm-output.json absent (the DEFAULT-OFF fleet state); Program on the X projector path (issue 1152)\n'
+  elif ! _dp_has "$g" DRM_OUTPUT_ENABLED; then
+    printf 'drm_output|UNKNOWN|drm-output config present but the enabled state was not gathered (truncated gather) — never read as dormant (issue 1152)\n'
   elif [ "$(_dp_field "$g" DRM_OUTPUT_ENABLED)" != "true" ]; then
     printf 'drm_output|OK|dormant — drm-output.json present but not enabled; Program on the X projector path (issue 1152)\n'
   elif [ "$(_dp_field "$g" DRM_OUTPUT_PROGRAM)" = "false" ]; then
@@ -224,6 +232,8 @@ imag_display_path_verdict() {
     printf 'drm_output|UNKNOWN|drm-output ENABLED but the OBS-log scanout state was not gathered — cannot prove nor disprove the Program scanout (issue 1152)\n'
   elif [ "$(_dp_field "$g" DRM_OUTPUT_LOG)" != "present" ]; then
     printf 'drm_output|DRIFT|drm-output ENABLED but no OBS log is readable on the box — no proof the Program reaches the projector (issue 1152)\n'
+  elif ! _dp_has "$g" DRM_OUTPUT_SCANOUT; then
+    printf 'drm_output|UNKNOWN|drm-output ENABLED, OBS log present, but the scanout marker read was not gathered (truncated gather) — not a proven drift (issue 1152)\n'
   else
     case "$(_dp_field "$g" DRM_OUTPUT_SCANOUT)" in
       live)        printf 'drm_output|OK|ENABLED and program scanout LIVE — the Program is page-flipping on the DRM-leased HDMI connector (issue 1152)\n' ;;
@@ -305,15 +315,20 @@ fi
 # UTF-8-locale grep can MISS a present ASCII marker (the #1183/#1184 mojibake net). The marker
 # priority order matters: a healthy Program session contains BOTH the solid-phase `ACTIVE` line
 # AND the later `program scanout LIVE` line, so LIVE is checked FIRST. ---
+# The config greps run over a NEWLINE-STRIPPED copy (tr -d) so a pretty-printed multi-line JSON
+# reads the same as the runbook's canonical machine-written one-liner. This grep grammar
+# deliberately OVER-detects "enabled" on a malformed config (the C module + the python classifier
+# parse full JSON and stay dormant): the verdict then DRIFTs loudly (enabled with no LIVE marker,
+# naming the broken config) — the fail-LOUD direction — while the live path stays safely dormant.
 _dp_cfg="$HOME/.camera-box/drm-output.json"
 if [ -e "$_dp_cfg" ]; then
   printf 'DRM_OUTPUT_CONFIG|present\n'
-  if LC_ALL=C grep -aqE '"enabled"[[:space:]]*:[[:space:]]*true' "$_dp_cfg" 2>/dev/null; then
+  if tr -d '\n' <"$_dp_cfg" 2>/dev/null | LC_ALL=C grep -aqE '"enabled"[[:space:]]*:[[:space:]]*true'; then
     printf 'DRM_OUTPUT_ENABLED|true\n'
   else
     printf 'DRM_OUTPUT_ENABLED|false\n'
   fi
-  if LC_ALL=C grep -aqE '"program"[[:space:]]*:[[:space:]]*false' "$_dp_cfg" 2>/dev/null; then
+  if tr -d '\n' <"$_dp_cfg" 2>/dev/null | LC_ALL=C grep -aqE '"program"[[:space:]]*:[[:space:]]*false'; then
     printf 'DRM_OUTPUT_PROGRAM|false\n'
   else
     printf 'DRM_OUTPUT_PROGRAM|true\n'

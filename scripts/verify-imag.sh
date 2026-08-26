@@ -1638,11 +1638,14 @@ else
   fail "#727 power-button protection NOT effective -- need HandlePowerKey/HandleSuspendKey/HandleHibernateKey/HandleLidSwitch =ignore AND the four sleep targets masked. loginctl: $(printf '%s' "$LOGIND_KEYS" | tr '\n' ' ') || masked: $(printf '%s' "$MASKED_TARGETS" | tr '\n' ' ')"
 fi
 
-# (z) display-path tear-free config (issue 1146): picom vsync compositor running + enabled, HDMI
-# the xrandr primary, iGPU freq pinned, tap conf. Reuses the SHARED imag_display_path_verdict --
-# the SAME verdict drift-guard --check-imag and the E2E [0/8] preflight run (no bespoke logic here).
-# A DRIFT (picom off, panel primary, etc.) FAILs; an UNKNOWN (SSH hiccup / unreadable) warns, never
-# a false fail. Pure ssh reads (side-effect free), so it is appended at the END.
+# (z) display-path config (issue 1146 REVERT + issue 1152): picom NOT running + its user unit NOT
+# enabled, HDMI the xrandr primary (unless the issue-1152 DRM output is ENABLED — then HDMI is
+# leased OUT of X and a panel primary is correct by design), iGPU freq pinned, tap conf, and the
+# issue-1152 drm_output facet (dormant config = OK; ENABLED demands the OBS log's scanout proof).
+# Reuses the SHARED imag_display_path_verdict -- the SAME verdict drift-guard --check-imag and the
+# E2E [0/8] preflight run (no bespoke logic here). A DRIFT (picom running, a wrong primary, an
+# armed-but-not-scanning DRM output, etc.) FAILs; an UNKNOWN (SSH hiccup / unreadable) warns,
+# never a false fail. Pure ssh reads (side-effect free), so it is appended at the END.
 DP_GATHER="$(ssh_box "$(imag_display_path_gather_remote_snippet)" 2>/dev/null || true)"
 if [ -z "$DP_GATHER" ]; then
   warn "display-path config unreadable over SSH -- cannot verify the issue-1146 tear-free config (picom/HDMI-primary)"

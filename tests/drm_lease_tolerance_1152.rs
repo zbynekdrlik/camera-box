@@ -242,6 +242,38 @@ fn drm_output_unknown_when_log_block_not_gathered_1152() {
     );
 }
 
+/// Review 🔵 two-tier: a gather truncated one printf after `DRM_OUTPUT_CONFIG|present` (the
+/// ENABLED line cut) must read UNKNOWN — the old fall-through read it as a FALSE dormant-OK,
+/// the silent-pass direction the lib's own header bans.
+#[test]
+fn drm_output_unknown_when_enabled_state_not_gathered_1152() {
+    let g = gather_with_drm("DRM_OUTPUT_CONFIG|present");
+    let lines = verdict(&g);
+    let l = facet_line(&lines, "drm_output");
+    assert_eq!(status_of(&lines, "drm_output"), "UNKNOWN", "{l}");
+    assert!(
+        !l.contains("dormant"),
+        "a truncated gather must never be read as a proven dormant state: {l}"
+    );
+}
+
+/// Review 🔵 two-tier: `DRM_OUTPUT_LOG|present` with the SCANOUT line cut (truncated gather)
+/// must read UNKNOWN — never a false [0/8]-aborting DRIFT.
+#[test]
+fn drm_output_unknown_when_scanout_marker_not_gathered_1152() {
+    let g = gather_with_drm(
+        "DRM_OUTPUT_CONFIG|present\nDRM_OUTPUT_ENABLED|true\nDRM_OUTPUT_PROGRAM|true\n\
+         DRM_OUTPUT_LOG|present",
+    );
+    let lines = verdict(&g);
+    assert_eq!(
+        status_of(&lines, "drm_output"),
+        "UNKNOWN",
+        "{:?}",
+        facet_line(&lines, "drm_output")
+    );
+}
+
 // ================================================================================================
 // B. hdmi_primary must be LEASE-AWARE — with the DRM output enabled the HDMI connector is OUT of
 //    the X layout BY DESIGN, so a panel primary is correct there (the pre-M4 false DRIFT aborted
@@ -328,6 +360,14 @@ fn imag_obs_start_gains_the_lease_mode_branch_1152() {
             "imag-obs-start.sh must contain `{needle}`"
         );
     }
+    // review 🟡 (one grammar): the armed-or-not DECISION must be the shared python classifier
+    // (the C module's own JSON contract, incl. requiring a non-empty connector) — never a
+    // wrapper-local bash grep of the JSON, which once diverged from the C on a malformed config
+    // and re-opened the crash-loop class this milestone kills.
+    assert!(
+        body.contains("drm_output_lease_connector"),
+        "the wrapper must delegate the lease decision to imag_scenes.drm_output_lease_connector"
+    );
     // detection + xrandr --off sit AFTER the import preflight and BEFORE the OBS launch
     let preflight = body
         .find("FAIL: imag_scenes import preflight")

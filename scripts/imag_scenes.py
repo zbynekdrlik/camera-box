@@ -579,17 +579,30 @@ def _heal_projector_strays(host, kinds):
 DRM_OUTPUT_CONF = "~/.camera-box/drm-output.json"
 
 
-def drm_output_lease_enabled(config_text):
-    """issue 1152 pure: True iff the drm-output config JSON arms the in-OBS DRM-lease output
-    (a boolean "enabled": true -- the exact contract the vendored C module reads). Empty /
-    missing / unparseable / non-boolean text -> False: a broken config degrades to the dormant
-    X-projector behaviour, never a crash of the seed."""
+def drm_output_lease_connector(config_text):
+    """issue 1152 pure: the connector name IFF the drm-output config JSON arms the in-OBS
+    DRM-lease output, else "". Mirrors the vendored C module's OWN contract exactly
+    (obs-drm-output.c): full JSON parse (unparseable -> dormant), a boolean "enabled": true,
+    AND a non-empty string "connector" (the C is dormant without one). Matching the C is the
+    review-mandated single grammar: a config the C would ignore must NEVER arm the wrapper or
+    the seeder (a divergent bash-grep reading once re-opened the crash-loop / dark-projector
+    class this milestone kills). Empty / missing / malformed -> "" (dormant), never a raise."""
     if not config_text:
-        return False
+        return ""
     try:
-        return json.loads(config_text).get("enabled") is True
+        cfg = json.loads(config_text)
+        if cfg.get("enabled") is not True:
+            return ""
+        connector = cfg.get("connector")
+        return connector if isinstance(connector, str) and connector else ""
     except (ValueError, AttributeError):
-        return False
+        return ""
+
+
+def drm_output_lease_enabled(config_text):
+    """issue 1152 pure: True iff drm_output_lease_connector() arms -- ONE classifier, one
+    grammar (the C module's), for every consumer."""
+    return drm_output_lease_connector(config_text) != ""
 
 
 def _drm_output_config_text(host):

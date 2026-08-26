@@ -199,13 +199,22 @@ contract, still DEFAULT-OFF):
    the unit the moment the DRM output owns the connector. (Check (o) expects the DORMANT 1+1
    X-projector state, so run the acceptance gate BEFORE the flip, not after.)
 2. Write the config (the M1 runbook's `printf '{"enabled":true,...}'` block above) — no manual
-   `xrandr --off` needed any more; the wrapper does it at every unit start.
+   `xrandr --off` needed any more; the wrapper does it at every unit start. **The machine-written
+   ONE-LINE form with an explicit non-empty `"connector"` is a CONTRACT, not a style**: the C
+   module and the shared python classifier (`imag_scenes.drm_output_lease_connector` — the
+   wrapper's and the seeder's ONE decision grammar) both require a full-JSON-parseable config
+   with a connector to arm, and the facet gather's grep reads a newline-stripped copy. Never
+   hand-edit the file into pretty-printed/partial JSON — a config the C would ignore must stay
+   dormant EVERYWHERE, and a malformed one shows up as a loud `drm_output` DRIFT, never as a
+   half-armed wrapper.
 3. `systemctl --user restart imag-obs` (the supervised path, never a direct script call). Expect,
    in order: OBS log `lease acquired` → `mode set` → `program buffers allocated` → `ACTIVE` →
    `program bind ready` → `program scanout LIVE` → `program-flip #1`; wrapper log
    `drm-lease mode ENABLED` and the Multiview-only projector seed.
 4. From then on the `drm_output` facet (drift-guard / [0/8] / verify (z)) holds the enabled state
-   to the LIVE-marker proof.
+   to the LIVE-marker proof. NB: the facet grades the NEWEST OBS session's LOG — `drm_output|OK`
+   does not by itself prove OBS is alive right now (liveness is the sibling gates' job), and a
+   read racing a fresh OBS start reads DRIFT until `program scanout LIVE` lands.
 5. Known boundary (deliberately NOT M4): the E2E `[0/8]`'s own X-projector count checks and
    `obs_phase2` projector openers still expect the dormant 1+1 X-window state — teaching the E2E
    harness the enabled-state expectations (Multiview-only X-side, Program on the scanout) is part

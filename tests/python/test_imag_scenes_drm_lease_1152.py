@@ -85,6 +85,27 @@ def test_lease_enabled_truth_table():
     assert mod.drm_output_lease_enabled('{"enabled":"true"}') is False
     # a non-object JSON body must degrade to dormant, never raise
     assert mod.drm_output_lease_enabled("[1,2]") is False
+    # the C contract requires a non-empty "connector" too (obs-drm-output.c is dormant without
+    # one) -- enabled-without-connector must NOT arm (review: the wrapper once defaulted HDMI-1
+    # here and blanked a connector the C never took over -> dark projector)
+    assert mod.drm_output_lease_enabled('{"enabled":true}') is False
+
+
+def test_lease_connector_truth_table():
+    """The ONE decision grammar every consumer shares (wrapper + seeder), mirroring the C."""
+    mod = _scenes_module()
+    assert mod.drm_output_lease_connector(ENABLED) == "HDMI-1"
+    assert mod.drm_output_lease_connector(DISABLED) == ""
+    assert mod.drm_output_lease_connector('{"enabled":true}') == ""
+    assert mod.drm_output_lease_connector('{"enabled":true,"connector":""}') == ""
+    assert mod.drm_output_lease_connector('{"enabled":true,"connector":7}') == ""
+    # the review's exact divergence vector: invalid JSON carrying the grep substring -- the C
+    # parser is dormant, so the shared classifier must be dormant too (a bash-grep reading here
+    # once armed the wrapper alone and crash-looped the unit)
+    assert mod.drm_output_lease_connector('{"enabled":true,}') == ""
+    # a pretty-printed MULTI-LINE but VALID config arms (json is not line-based)
+    assert mod.drm_output_lease_connector(
+        '{\n  "enabled": true,\n  "connector": "HDMI-1"\n}\n') == "HDMI-1"
 
 
 # ---------------------------------------------------------------------------
