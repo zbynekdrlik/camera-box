@@ -116,6 +116,10 @@ DEFAULT_FLOOR_MS = 3          # imag-min-latency floor; the slowest strih camera
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
 DEFAULT_SETTLE_S = 4.0        # let the genlock FIFO re-lock after a pin change before re-measuring
+# #1209 -- undecodable-round screenshot persistence: at most this many PNGs saved PER CAMERA (a
+# 30-round all-fail run must not dump 30 full-res PNGs per camera). Over-cap occurrences are COUNTED
+# (surfaced in the summary) but not written. A bounded diagnostic aid, never a disk hazard.
+DEFAULT_SCREENSHOT_SAVE_CAP = 8
 
 # The reserved node-burn run_ids -- a MIRROR of src/probe/recording.rs::NODE_BURN_RUN_IDS
 # (BURN_RUN_ID_* in src/probe/recording_latency.rs; keep in sync -- they are load-bearing consts,
@@ -791,7 +795,99 @@ def _extract_png_bytes(image_data):
     return base64.b64decode(b64)
 
 
-def barrier_screenshot(sources, host, password, width, height):
+def _sanitize_source_name(src):
+    """A filesystem-safe slug for a source name ('NDI cam3' -> 'NDI_cam3'): every non-alnum char
+    maps to '_'. Never empty ('' -> 'src') so the filename is always well-formed."""
+    return "".join(c if c.isalnum() else "_" for c in (src or "")) or "src"
+
+
+class ScreenshotSaver:
+    """#1209: persists the raw PNG of an UNDECODABLE alignment screenshot, so a reproducible
+    [4i/8align] abort can be root-caused from the actual pixels (barrier_screenshot otherwise decodes
+    the screenshot then DISCARDS the bytes, leaving nothing to inspect after the fact). A per-run
+    diagnostic:
+
+      * DISABLED when `directory` is None -> every method is a no-op, so the align gate's decode
+        logic, verdict, and exit codes stay BYTE-IDENTICAL when persistence is off (the default in
+        all existing callers/tests).
+      * BOUNDED: at most `cap` PNGs are written PER CAMERA (a 30-round all-fail run must not dump 30
+        full-res PNGs per camera); over-cap occurrences are COUNTED (surfaced in summary()) but not
+        written.
+      * FAIL-SAFE: any I/O error is logged to stderr and swallowed -- save() NEVER raises, so a save
+        failure can never break a measurement round.
+
+    Thread-safe: barrier_screenshot saves from one thread PER SOURCE, so an internal lock guards the
+    per-camera counters and the write."""
+
+    def __init__(self, directory, cap=DEFAULT_SCREENSHOT_SAVE_CAP):
+        import threading
+        self.dir = directory
+        self.cap = cap
+        self._saved = {}       # src -> count actually written (also the next round<N> index)
+        self._over_cap = {}    # src -> count skipped because the per-camera cap was reached
+        self._errors = 0       # save failures (logged + swallowed)
+        self._lock = threading.Lock()
+
+    def save(self, src, png_bytes):
+        """Persist `png_bytes` as align-undecodable-<sanitized src>-round<N>.png (N = this camera's
+        monotonic save index, so measure + verify phases never collide). Returns the path written, or
+        None when disabled / png missing / over the per-camera cap / on any I/O error. Never raises."""
+        if self.dir is None or png_bytes is None:
+            return None
+        try:
+            with self._lock:
+                n = self._saved.get(src, 0)
+                if n >= self.cap:
+                    self._over_cap[src] = self._over_cap.get(src, 0) + 1
+                    return None
+                os.makedirs(self.dir, exist_ok=True)
+                path = os.path.join(
+                    self.dir, f"align-undecodable-{_sanitize_source_name(src)}-round{n}.png")
+                with open(path, "wb") as fh:
+                    fh.write(png_bytes)
+                self._saved[src] = n + 1     # count only a SUCCESSFUL write (honest counts)
+            return path
+        except Exception as exc:  # noqa: BLE001 -- logged, NEVER propagated (a save must not break a round)
+            with self._lock:
+                self._errors += 1
+            sys.stderr.write(
+                f"WARNING: qr_align: could not persist undecodable screenshot for {src!r}: {exc}\n")
+            return None
+
+    def summary(self):
+        """A one-line run-log summary (near the 'decoded per camera:' diagnostics): how many
+        failing-round screenshots were saved, WHERE, and any over-cap / error counts -- so the CI log
+        points a post-mortem straight at the pixels. Names the dir even when nothing was saved."""
+        if self.dir is None:
+            return "[qr-align] #1209 undecodable-screenshot persistence disabled (no --screenshot-dir)."
+        total = sum(self._saved.values())
+        if total == 0 and not self._over_cap and not self._errors:
+            return (f"[qr-align] #1209 no undecodable-round screenshots persisted "
+                    f"(every round decoded); dir {self.dir!r}.")
+        per = ", ".join(
+            f"{s}={self._saved.get(s, 0)}"
+            + (f"(+{self._over_cap[s]} over cap)" if self._over_cap.get(s) else "")
+            for s in sorted(set(self._saved) | set(self._over_cap)))
+        err = f"; {self._errors} save error(s)" if self._errors else ""
+        return (f"[qr-align] #1209 saved {total} undecodable-round screenshot(s) to {self.dir!r} "
+                f"(cap {self.cap}/camera): {per}{err}")
+
+
+def maybe_save_undecodable_screenshot(saver, src, png_bytes, qr_texts):
+    """#1209 gate: persist `png_bytes` ONLY when the screenshot decoded NO valid painter (non-burn)
+    QR -- the '--' case that makes an align round undecodable for this camera. `saver` None (the
+    default everywhere persistence is not requested) makes this a total no-op, so behaviour + exit
+    codes are byte-identical when off. A frame that DID decode a painter QR (has_painter_payload
+    True) is readable and never persisted; a frame that decoded nothing, or only a node burn, IS the
+    diagnostic target and IS persisted. Returns the saved path or None. Never raises."""
+    if saver is None or png_bytes is None:
+        return None
+    if has_painter_payload(qr_texts):
+        return None
+    return saver.save(src, png_bytes)
+
+
+def barrier_screenshot(sources, host, password, width, height, saver=None):
     """ONE simultaneous round: a dedicated WS connection per source, all released together on a
     threading.Barrier so the GetSourceScreenshot requests leave with minimal send skew. Returns
     {source: (qr_texts, t_send_ns)} -- `t_send_ns` is dev1's monotonic clock captured JUST BEFORE
@@ -831,7 +927,12 @@ def barrier_screenshot(sources, host, password, width, height):
                 results[src] = ([], t_send)
                 return
             png = _extract_png_bytes(res.get("imageData") if isinstance(res, dict) else None)
-            results[src] = (decode_qr_texts(png) if png is not None else [], t_send)
+            texts = decode_qr_texts(png) if png is not None else []
+            # #1209: persist the raw PNG when this shot decoded no painter QR (an undecodable round
+            # for this camera), so a reproducible [4i/8align] abort can be root-caused from the
+            # pixels. No-op + never raises when saver is None (persistence off) or the save fails.
+            maybe_save_undecodable_screenshot(saver, src, png, texts)
+            results[src] = (texts, t_send)
 
         threads = [threading.Thread(target=_shoot, args=(src,)) for src in sources]
         for t in threads:
@@ -856,7 +957,7 @@ def measure_stable_tail(sources, host, password, *, width, height, run_id=None,
                         min_valid_rounds=DEFAULT_MIN_VALID_ROUNDS,
                         budget_s=DEFAULT_MEASURE_BUDGET_S,
                         max_rounds=DEFAULT_MAX_MEASURE_ROUNDS,
-                        inter_round_s=0.15):
+                        inter_round_s=0.15, saver=None):
     """Barrier-screenshot round by round until the cross-camera spread has STABILIZED to a judgeable
     tail (#1160), or the time/round budget is hit. After each round measure_tail_status decides
     whether we can stop (converged-aligned / converged-stable) and which rounds are the stable tail.
@@ -875,7 +976,13 @@ def measure_stable_tail(sources, host, password, *, width, height, run_id=None,
     r = 0
     while True:
         order = sources[r % n:] + sources[:r % n] if n else sources
-        raw.append(barrier_screenshot(order, host, password, width, height))
+        # #1209: keep the OLD call shape when persistence is off (saver None) so the call is
+        # byte-identical to before -- any existing caller / monkeypatched barrier stub is unaffected;
+        # only pass the saver when actually persisting undecodable rounds.
+        if saver is not None:
+            raw.append(barrier_screenshot(order, host, password, width, height, saver=saver))
+        else:
+            raw.append(barrier_screenshot(order, host, password, width, height))
         r += 1
         rounds_ticks, rid = ticks_from_raw(raw, run_id)
         status = measure_tail_status(
@@ -961,7 +1068,7 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
           min_parity_rounds, max_delta_ms, parity_tol_ids, floor_ms, width, height,
           measure_budget_s, max_measure_rounds, settle_s,
           stable_outlier_tol_ids=DEFAULT_STABLE_OUTLIER_TOL_IDS,
-          jitter_json=None, max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS):
+          jitter_json=None, max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, saver=None):
     """The full per-run alignment: measure to a STABLE TAIL (#1160) -> (already aligned? PASS) ->
     FLOOR-AWARE plan from the tail (#1161) -> sanity -> apply (execute) -> settle -> RE-MEASURE to a
     stable tail -> PASS iff parity holds. The verdict is always computed from the stabilized tail,
@@ -984,7 +1091,8 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
         stable_tail_rounds=stable_tail_rounds, stable_tol_ids=stable_tol_ids,
         stable_outlier_tol_ids=stable_outlier_tol_ids,
         parity_tol_ids=parity_tol_ids, min_parity_rounds=min_parity_rounds,
-        min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds)
+        min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds,
+        saver=saver)
     tail_start = status.tail_start
     tail = rounds_ticks[tail_start:] if tail_start is not None else rounds_ticks
     pre_spread, pre_ok = _full_round_parity(tail, sources, parity_tol_ids, min_parity_rounds)
@@ -1164,7 +1272,8 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
         stable_tail_rounds=stable_tail_rounds, stable_tol_ids=stable_tol_ids,
         stable_outlier_tol_ids=stable_outlier_tol_ids,
         parity_tol_ids=parity_tol_ids, min_parity_rounds=min_parity_rounds,
-        min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds)
+        min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds,
+        saver=saver)
     vtail_start = vstatus.tail_start
     vtail = verify_ticks[vtail_start:] if vtail_start is not None else verify_ticks
     post_spread, post_ok = _full_round_parity(vtail, sources, parity_tol_ids, min_parity_rounds)
@@ -1251,6 +1360,15 @@ def main(argv=None):
     ap.add_argument("--max-abs-latency-ms", type=float, default=DEFAULT_MAX_ABS_LATENCY_MS,
                     help="#1161 absolute achievable-latency ceiling; a target above it FAILs loud "
                          "(transport floor too high) rather than deep-pinning (default 94)")
+    # #1209: persist the raw PNG of any UNDECODABLE align screenshot into this dir (the caller passes
+    # the run dir, e.g. recording-e2e's OUTDIR -- the same "caller supplies a path" convention as
+    # --jitter-json), so a reproducible [4i/8align] abort can be root-caused from pixels. Absent =
+    # persistence off (byte-identical gate behaviour + exit codes).
+    ap.add_argument("--screenshot-dir", default=None,
+                    help="#1209 dir to persist undecodable-round screenshots into (default: off)")
+    ap.add_argument("--screenshot-cap", type=int, default=DEFAULT_SCREENSHOT_SAVE_CAP,
+                    help="#1209 max undecodable-round PNGs saved PER CAMERA (default %(default)s; "
+                         "over-cap occurrences are counted, not written)")
     ap.add_argument("--reset-to-floor", action="store_true",
                     help="#1161 two-phase reset PHASE 0: force every --sources pin to --floor-ms and "
                          "exit (the caller settles + re-fetches the audit so floors are TRUE "
@@ -1279,15 +1397,24 @@ def main(argv=None):
                 f"WARNING: [qr-align] #1161 could not read --jitter-json {a.jitter_json!r} "
                 f"({exc}) -- proceeding without arrival-floor measurement (inert-prone fallback).\n")
 
-    result = align(
-        sources, a.host, a.password,
-        execute=a.execute, stable_tail_rounds=a.stable_tail_rounds, stable_tol_ids=a.stable_tol_ids,
-        stable_outlier_tol_ids=a.stable_outlier_tol_ids,
-        min_valid_rounds=a.min_valid_rounds, min_parity_rounds=a.min_parity_rounds,
-        max_delta_ms=a.max_delta_ms, parity_tol_ids=a.parity_tol_ids, floor_ms=a.floor_ms,
-        width=a.width, height=a.height, measure_budget_s=a.measure_budget_s,
-        max_measure_rounds=a.max_measure_rounds, settle_s=a.settle_s,
-        jitter_json=jitter_json, max_abs_latency_ms=a.max_abs_latency_ms)
+    # #1209: a screenshot persister for undecodable align rounds (None = off, byte-identical gate).
+    saver = ScreenshotSaver(a.screenshot_dir, a.screenshot_cap) if a.screenshot_dir else None
+    try:
+        result = align(
+            sources, a.host, a.password,
+            execute=a.execute, stable_tail_rounds=a.stable_tail_rounds,
+            stable_tol_ids=a.stable_tol_ids, stable_outlier_tol_ids=a.stable_outlier_tol_ids,
+            min_valid_rounds=a.min_valid_rounds, min_parity_rounds=a.min_parity_rounds,
+            max_delta_ms=a.max_delta_ms, parity_tol_ids=a.parity_tol_ids, floor_ms=a.floor_ms,
+            width=a.width, height=a.height, measure_budget_s=a.measure_budget_s,
+            max_measure_rounds=a.max_measure_rounds, settle_s=a.settle_s,
+            jitter_json=jitter_json, max_abs_latency_ms=a.max_abs_latency_ms, saver=saver)
+    finally:
+        # #1209: surface the persisted-screenshot summary on BOTH the success and the
+        # AlignmentImpossible abort paths (near the 'decoded per camera:' diagnostics), so the run
+        # log points a post-mortem straight at the pixels.
+        if saver is not None:
+            sys.stderr.write(saver.summary() + "\n")
 
     print(json.dumps(result, default=str))
     status = result.get("status")
