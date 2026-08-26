@@ -78,6 +78,22 @@ Activation is a config file, not env (respects the "no env" doctrine): `obs_star
    `ACTIVE` → `page-flip #1` then ~1/min; HDMI shows solid grey, no X window lands on it, eDP untouched.
 4. Rollback: `rm ~/.camera-box/drm-output.json` + restart OBS; `xrandr --output HDMI-1 --auto`.
 
+**M1 LIVE-VERIFIED 2026-08-26 (new imag-nb) — plus two runbook gotchas the first live pass hit:**
+lease acquired on the real HDMI-1, mode set 1920x1080@60, 679 vblank-locked flips (~60/s), and a
+DETERMINISTIC clean release under a real SIGTERM (obs_shutdown → `lease released — connector
+returned to Xorg` — the review's lifecycle invariant, proven live, not just in code review).
+
+- **Do NOT run the M1/M2 test window under the `imag-obs` user unit's supervision with HDMI-1 off
+  in X.** The unit's wrapper (`imag-obs-start.sh`) runs post-launch bootstrap + `--projector`
+  steps that FAIL when the HDMI display is out of the X layout → wrapper exit 1 → systemd tears
+  OBS down and CRASH-LOOPS the unit (restart counter climbing every ~13 s). For a test window:
+  `systemctl --user stop imag-obs`, launch OBS manually, test, then restore the unit — or defer to
+  an M2-era wrapper that tolerates the leased-connector state.
+- **After a lease, X RandR can stick at `HDMI-1 disconnected`** (kernel status stays `connected`),
+  and a per-output `xrandr --output HDMI-1 --auto --primary` throws `BadAccess (RRSetOutputPrimary)`
+  while a lease is still held. The reliable restore is a GLOBAL `xrandr --auto` after the release —
+  it re-probes and brings HDMI-1 back `connected primary 1920x1080`.
+
 M1 is SOLID color; the **M2 HOOK** (where the solid fill is replaced by a dma-buf import of the
 Program GL texture) is marked in `drm_output_setup_scanout()`. Scanout tearing stays report-only
 until the #781 physical HDMI tap; M1 claims only the MECHANISM (leased + page-flipping + armed).
