@@ -20,12 +20,25 @@ import pathlib
 import sys
 import types
 
+import pytest
+
 
 _SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import av_sync_measure  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stub_alert_delivery(monkeypatch):
+    """#1207: one_measurement() now DELIVERS a `🎯 AV-sync watchdog` alert on the default (no
+    --webhook) path via airuleset notify whenever `|offset| >= threshold_ms`. Several tests here
+    use `webhook=None` with a suprathreshold offset (e.g. 3 frames = 120ms >= the 60ms threshold),
+    so without this stub they would fire a REAL notify subprocess. These tests exercise the JSONL
+    calibration log ONLY, so stub the delivery seam to a no-op — delivery has its own coverage in
+    tests/python/test_av_sync_measure_notify_dedup_1207.py."""
+    monkeypatch.setattr(av_sync_measure, "deliver_alert", lambda *a, **k: None)
 
 
 def _args(tmp_path, calibration_log=None):
