@@ -109,12 +109,19 @@ the zero-copy mandate; ~0.5 GB/s + a GPU stall on the 25W box):
   page-flips run among the identical GBM FBs; when the mailbox is empty the flip thread RE-FLIPS
   the front FB (vblank pacing with no condvar). GPU→scanout sync is `gs_flush()` + i915/Xe
   implicit fencing on the BO (the kernel flip waits on dma-resv — no glFinish).
-- **Lock order (deadlock rule): graphics context FIRST, then `program_lock`** — shared by the
-  frame hook and the GL teardown; the flip thread takes `program_lock` alone (briefly, never
-  across the flip wait) and never the graphics context; `g_drm.lock` still never enters the flip
-  loop. `stop()` order: disarm `program_want` → join → GL teardown (ctx + program_lock) →
-  `teardown_locked` (Program FBs/BOs freed BEFORE the fd closes). `obs_shutdown` calls stop
-  BEFORE `stop_video()`, so graphics is still alive for the texture destroy.
+- **Lock order (deadlock rule): graphics context FIRST, then `program_lock`** — and the frame
+  hook is CLAIM/RENDER/PUBLISH shaped (review finding): the graphics CONTEXT alone excludes the
+  GL teardown for the whole hook body, so `program_lock` is held only for the two mailbox-role
+  transactions (claim a role-free buffer; publish `p_ready` with a `program_want` re-check),
+  never across the GL command recording or the lazy bind. The flip thread takes `program_lock`
+  alone (briefly, never across the flip wait) and never the graphics context; `g_drm.lock` still
+  never enters the flip loop. `stop()` order: disarm `program_want` → join → GL teardown (ctx +
+  program_lock) → `teardown_locked` (Program FBs/BOs freed BEFORE the fd closes). `obs_shutdown`
+  calls stop BEFORE `stop_video()`, so graphics is still alive for the texture destroy.
+  **Disarm invariant (review 🔴/🟡): "armed ⇒ buffers exist" holds on EVERY path** —
+  `drm_output_program_free_bufs_locked` disarms first (covers the pthread_create-failure start
+  path), and the flip loop disarms on SELF-death (lease revoke / failed flip) so the hook never
+  keeps rendering ~60/s into a mailbox nobody drains.
 - **Fail-open**: any GBM/AddFB2/import failure logs `program bind FAILED`/`staying on the solid
   pattern` and the output keeps the M1 solid behaviour (it also shows solid until OBS's first
   rendered frame). Config: optional `"program": false` in `~/.camera-box/drm-output.json` forces
