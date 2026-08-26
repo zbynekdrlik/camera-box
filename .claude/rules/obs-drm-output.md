@@ -5,6 +5,8 @@ paths:
   - "vendor/obs-studio/libobs/cmake/os-linux.cmake"
   - "tests/drm_output_lease_1152.rs"
   - "tests/drm_output_program_1152.rs"
+  - "tests/drm_lease_tolerance_1152.rs"
+  - "scripts/imag-obs-start.sh"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -159,6 +161,61 @@ the zero-copy mandate; ~0.5 GB/s + a GPU stall on the 25W box):
 
 Scanout tearing stays report-only until the #781 physical HDMI tap; M3 measures vsync/latency
 vs today's projector.
+
+## M4 — permanent-deployment tolerance + facets (the shipped shape)
+
+M1/M2 proved the mechanism; M4 makes the ENABLED state deployable unattended. Three pieces, all
+keyed on the ONE config file (`~/.camera-box/drm-output.json` — the module's own activation
+contract, still DEFAULT-OFF):
+
+- **Lease-tolerant wrapper + seeder.** `imag-obs-start.sh` detects an enabled config BEFORE the
+  OBS launch: it announces `drm-lease mode ENABLED` loudly into `/tmp/imag-obs-start.log` and
+  takes the config's `connector` out of the X layout (`xrandr --output <connector> --off`,
+  best-effort + loud WARN — the idle-connector lease precondition from the M1 runbook, now
+  reboot-durable with no openbox-autostart edit). The projector-step tolerance itself lives in
+  `imag_scenes.py`: `projector()` consults the BOX's own config (local read on the loopback path,
+  the sshpass transport for a dev1 `--host <ip>` call) and in lease mode opens ONLY the panel
+  Multiview, closes EVERY restored X `Projector - Program` stray, and NEVER exits non-zero — so
+  the crash-loop from the first M1 runbook gotcha above cannot recur, and every seed caller (unit
+  boot, operator menu, watchdog relaunch, verify repopulate) inherits the tolerance from one
+  place. Dormant config ⇒ both files behave byte-identically to before.
+- **The `drm_output` display-path facet + lease-aware `hdmi_primary`** (shared
+  `scripts/lib/imag-display-path.sh`, flowing into drift-guard `--check-imag` check 10, the E2E
+  `[0/8]` preflight and verify-imag (z) through their generic loops): dormant config = OK (the
+  fleet default never false-aborts a run); ENABLED demands the current OBS log's
+  `program scanout LIVE` marker = OK, while bind FAILED / solid-only (incl. the `"program": false`
+  M1 diagnostic — cam2's grabber taps this HDMI, a grey pattern wrecks a data run) / no marker /
+  no readable log = DRIFT fail-loud. With the config enabled `hdmi_primary` accepts the panel
+  primary as correct-by-design (HDMI is leased OUT of X), instead of the pre-M4 false DRIFT.
+- **Provisioning stays hands-off.** `setup-imag.sh`'s #840 block already fetches
+  `imag-obs-start.sh` + `imag_scenes.py` from `ref=dev`, so a re-run refreshes the pair; it never
+  writes `drm-output.json` (locked by a negative anchor test — enabling is ALWAYS the deliberate
+  runbook step below, never provisioning). verify-imag check (p2) proves the INSTALLED pair is the
+  lease-tolerant generation (static greps for `DRM_LEASE_MODE` / `drm_output_lease_enabled`).
+
+### The ENABLE flip (SUPERVISOR/owner runbook — never automated)
+
+1. `scripts/verify-imag.sh` green FIRST, incl. (p2) — an older installed wrapper pair crash-loops
+   the unit the moment the DRM output owns the connector. (Check (o) expects the DORMANT 1+1
+   X-projector state, so run the acceptance gate BEFORE the flip, not after.)
+2. Write the config (the M1 runbook's `printf '{"enabled":true,...}'` block above) — no manual
+   `xrandr --off` needed any more; the wrapper does it at every unit start.
+3. `systemctl --user restart imag-obs` (the supervised path, never a direct script call). Expect,
+   in order: OBS log `lease acquired` → `mode set` → `program buffers allocated` → `ACTIVE` →
+   `program bind ready` → `program scanout LIVE` → `program-flip #1`; wrapper log
+   `drm-lease mode ENABLED` and the Multiview-only projector seed.
+4. From then on the `drm_output` facet (drift-guard / [0/8] / verify (z)) holds the enabled state
+   to the LIVE-marker proof.
+
+### Rollback (ORDER MATTERS — X must get the connector back BEFORE the dormant wrapper runs)
+
+`rm ~/.camera-box/drm-output.json` → `systemctl --user stop imag-obs` → **explicit
+`xrandr --output HDMI-1 --auto --primary`** (the second M1 runbook gotcha: RandR sticks at
+`disconnected` after a lease, and a global `xrandr --auto` right after teardown can race a
+still-held lease) → `systemctl --user start imag-obs`. Skipping the xrandr step crash-loops the
+DORMANT unit instead: with the config gone the wrapper touches nothing and `projector()` is back
+to hard-failing on a missing HDMI monitor — which is correct for a genuinely unplugged projector
+and exactly why the restore must come first.
 
 ## Lifecycle invariants (locked by the #1152 review — keep them if you touch the module)
 
