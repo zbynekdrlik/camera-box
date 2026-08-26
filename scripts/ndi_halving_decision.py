@@ -233,7 +233,12 @@ def _main(argv):
     ns = ap.parse_args(argv)
 
     if ns.cmd == "analyze":
-        text = sys.stdin.read()
+        # #1203 hotfix: the REAL stream OBS log carries non-UTF-8 bytes (legacy-codepage `÷` in
+        # genlock audit lines) and CRLF tails — a strict-UTF-8 sys.stdin.read() raised
+        # UnicodeDecodeError (swallowed by the caller's 2>/dev/null → samples=0 forever). Read
+        # BYTES and decode tolerantly; splitlines() already handles \r\n, and the value regexes
+        # never touch a line tail, so replace-decoding is lossless for every parsed field.
+        text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
         res = analyze(text, ns.source, ns.expected_fps, ns.box_reachable, ns.expected_live,
                       halving_ratio=ns.halving_ratio, cap_mult=ns.cap_mult,
                       healthy_ratio=ns.healthy_ratio, healthy_cap_mult=ns.healthy_cap_mult,
