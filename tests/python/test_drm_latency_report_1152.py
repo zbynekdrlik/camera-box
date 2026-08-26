@@ -321,7 +321,7 @@ def test_sh_shellcheck_clean():
 
 def test_sh_cam2_program_builder_is_pure_and_shaped():
     out = _source_and_run(
-        'drm_latency_cam2_program /dev/video0 mjpeg 1920x1080 60 8 /tmp/drm-lat-x.nut DORMANT'
+        'drm_latency_cam2_program /dev/video0 mjpeg 1920x1080 60 8 DORMANT'
     )
     assert out.returncode == 0, f"builder failed: {out.stderr}"
     prog = out.stdout
@@ -331,7 +331,33 @@ def test_sh_cam2_program_builder_is_pure_and_shaped():
     assert "use_wallclock_as_timestamps" in prog
     assert "trap" in prog  # the always-restore trap
     assert "systemctl restart camera-box" in prog
-    assert "/tmp/drm-lat-x.nut" in prog
+    assert "-f nut -" in prog  # the capture STREAMS to stdout (dev1 reads the ssh pipe)
+
+
+def test_sh_grab_is_frame_bounded_never_duration_bounded():
+    # `-t N` compares the CLI seconds against the -copyts EPOCH-scale timestamps, so ffmpeg
+    # writes an EMPTY capture (proven live, issue 1152 M3 campaign). Bound by -frames:v.
+    out = _source_and_run('drm_latency_cam2_program /dev/video0 mjpeg 1920x1080 60 8 DORMANT')
+    assert out.returncode == 0, out.stderr
+    prog = out.stdout
+    assert "-frames:v 480" in prog, "grab must be bounded by -frames:v (seconds*fps)"
+    assert " -t " not in prog, "-t with -copyts silently writes an EMPTY capture"
+
+
+def test_sh_remote_program_keeps_stdout_clean_for_the_nut_stream():
+    # stdout IS the NUT capture stream once the grab pipes to dev1 -- every progress echo
+    # (including the spliced restart-verify block's own success line, which prints to stdout)
+    # must be routed to stderr.
+    out = _source_and_run('drm_latency_cam2_program /dev/video0 mjpeg 1920x1080 60 8 DORMANT')
+    assert out.returncode == 0, out.stderr
+    prog = out.stdout
+    for ln in prog.splitlines():
+        if "[drm-latency]" in ln and ln.strip().startswith("echo"):
+            assert ">&2" in ln, f"progress echo would corrupt the NUT stream: {ln!r}"
+    assert "} >&2" in prog, (
+        "the restore fn must redirect its WHOLE body to stderr (the spliced verify block "
+        "echoes its success line to stdout)"
+    )
 
 
 def test_sh_burn_builder_uses_obs_burn_filter():
@@ -343,12 +369,40 @@ def test_sh_burn_builder_uses_obs_burn_filter():
     assert "CAM1 (usb)" in out.stdout
 
 
-def test_sh_scp_builder_pulls_capture_back():
-    out = _source_and_run('drm_latency_scp_cmd root 10.77.9.62 /tmp/drm-lat-x.nut /tmp/local-x.nut')
-    assert out.returncode == 0, out.stderr
-    assert "scp" in out.stdout
-    assert "10.77.9.62" in out.stdout
-    assert "/tmp/drm-lat-x.nut" in out.stdout
+def test_sh_plan_streams_capture_over_ssh_no_scp_pull():
+    # The capture must stream over the ssh pipe straight into the dev1-local file -- a raw grab
+    # cannot fit cam2's /tmp (proven live: raw YUYV overflowed it), so no remote file + no scp.
+    import re
+    p = subprocess.run(
+        ["bash", str(SH), "--label", "DORMANT", "--imag-input", "CAM1 (usb)"],
+        capture_output=True, text=True,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "scp" not in p.stdout, "capture must STREAM to dev1, never land on cam2 /tmp + scp"
+    assert re.search(r"ssh .*bash -s\s*>\s*\S+\.nut", p.stdout), (
+        "plan must show the ssh stdout redirected into the dev1-local capture file"
+    )
+
+
+def test_sh_password_auth_seam_via_cam_pw_env():
+    # The cam fleet authenticates by PASSWORD (sshpass), not keys. CAM_PW set -> the ssh goes
+    # through sshpass; unset -> plain ssh (key auth). The plan must never print the value.
+    env = dict(os.environ)
+    env["CAM_PW"] = "S3cr3tX"
+    p = subprocess.run(
+        ["bash", str(SH), "--label", "DORMANT", "--imag-input", "X"],
+        capture_output=True, text=True, env=env,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "sshpass" in p.stdout, "CAM_PW set -> ssh must go through sshpass"
+    assert "S3cr3tX" not in p.stdout + p.stderr, "the password value must never be printed"
+    env.pop("CAM_PW")
+    p2 = subprocess.run(
+        ["bash", str(SH), "--label", "DORMANT", "--imag-input", "X"],
+        capture_output=True, text=True, env=env,
+    )
+    assert p2.returncode == 0, p2.stderr
+    assert "sshpass" not in p2.stdout, "no CAM_PW -> plain ssh"
 
 
 def test_sh_default_mode_is_plan_and_touches_nothing():
@@ -388,7 +442,7 @@ def test_sh_grab_uses_copyts_and_is_bounded_by_timeout():
     # The wallclock epoch must survive the copy-mux (-copyts) or every latency is garbage; and the
     # grab must be bounded (a wedged V4L2 read must not hang the campaign with cam2 stopped).
     out = _source_and_run(
-        'drm_latency_cam2_program /dev/video0 mjpeg 1920x1080 60 8 /tmp/drm-lat-x.nut DORMANT')
+        'drm_latency_cam2_program /dev/video0 mjpeg 1920x1080 60 8 DORMANT')
     assert out.returncode == 0, out.stderr
     assert "-copyts" in out.stdout, "grab must use ffmpeg -copyts to preserve the wallclock epoch"
     assert "timeout" in out.stdout, "the remote grab must be bounded by timeout (wedge guard)"
