@@ -312,3 +312,29 @@ def test_cli_cure_decision():
     r2 = _cli(["cure-decision", "--cure-enabled", "0", "--last-cure-ts", "",
                "--now", "1700", "--cooldown-s", "600"])
     assert _kv(r2.stdout)["action"] == "page"
+
+
+class TestAnalyzeStdinNonUtf8Crlf:
+    """#1203 hotfix regression: the REAL stream OBS log carries non-UTF-8 bytes (the `÷` in
+    genlock audit lines, some legacy codepage) AND CRLF terminators. `sys.stdin.read()` decodes
+    strict UTF-8, so the analyze subcommand died with UnicodeDecodeError (swallowed by the
+    caller's 2>/dev/null) and every live pass read samples=0 -> UNKNOWN forever. The CLI must
+    decode stdin bytes tolerantly (errors="replace") and the parser must survive \r tails."""
+
+    def test_analyze_cli_survives_non_utf8_bytes_and_crlf(self):
+        import subprocess, sys as _sys, pathlib
+        script = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "ndi_halving_decision.py"
+        raw = (
+            b"02:08:20.456: genlock-fifo audit 'NDI 2ME PGM': latency_ms=1090 (\xf733 frames @ 30.000fps)\r\n"
+            b"02:08:28.559: [distroav] recv-timing #797 'NDI 2ME PGM': n=150 cap_avg=11.98ms cap_max=24.11ms out_avg=0.38ms out_max=1.09ms\r\n"
+            b"02:08:33.563: [distroav] recv-timing #797 'NDI 2ME PGM': n=150 cap_avg=12.08ms cap_max=23.54ms out_avg=0.40ms out_max=1.09ms\r\n"
+        )
+        p = subprocess.run(
+            [_sys.executable, str(script), "analyze", "--source", "NDI 2ME PGM",
+             "--expected-fps", "30", "--box-reachable", "1", "--expected-live", "1"],
+            input=raw, capture_output=True, timeout=30,
+        )
+        assert p.returncode == 0, f"analyze crashed on real-log bytes: {p.stderr!r}"
+        out = p.stdout.decode()
+        assert "samples=2" in out, out
+        assert "verdict=HEALTHY" in out, out
