@@ -76,9 +76,11 @@ durable evidence `~/.claude/work-products/1196-fixture/` — verdict JSON + real
 false positive the plain-union v2 could not see, and killed aux as the cure ON CURRENT CONTENT:
 
 - **`aux_decode_fraction = 0.0` in ALL 10 windows** — the ~210px aux QRs are half-size inside a
-  composited tile and did NOT survive the camera+encode chain. So the aux-based cross-band cure is
-  currently INERT on the real rig; promotion precondition (1) is UNMET (escalate to Approach 2, the
-  full-height tick ladder, if a mined WITH-aux fixture confirms it stays undecodable).
+  composited tile and did NOT survive the camera+encode chain. **SUPERSEDED by the next two runs:**
+  the 0.0 was the MULTI-TILE composition, not chain death — on single-tile content the aux marks
+  decode fine through the full real chain (run 1547854091: 0.679; run 2099068429: 0.60–0.82 across
+  all 10 windows, suspects 0.0). The Approach-2 (full-height tick ladder) escalation is NOT needed;
+  precondition (1) is now LANDED (see below).
 - **`tear_fraction ~0.99`, `max_spread 4` (one window 14) = MULTI-TILE SKEW, not a tear.** The
   recorded program is MULTI-TILE — an ALL_CAMBOX composition carries TWO grabber-path tiles of the
   SAME painted cam2 monitor (plus production scenes), so one recorded frame decodes the primary
@@ -116,14 +118,20 @@ to the promotion preconditions so a multi-tile window can never be promoted.
 
 **Promotion preconditions (ALL of them, in order — the LIVE flip stays out of scope until then):**
 
-1. **Real-captured-frame fixture WITH aux marks** — mined from the first rig run after the cam2
-   painter redeploy (supervisor step) and committed under `tests/fixtures/tear-781/`; the
-   painter-level synthetic render→decode round-trip in `src/probe/painter.rs`
-   (`aux_tick_pair_round_trips_alongside_the_dual_qr_1196`) is deliberately NOT sufficient —
-   small-optical-QR decodability through the real chain (projection → grabber → 2×NDI → 4K
-   upscale → mp4) is THE open risk (`pattern-change-needs-decode-fixture`). A LOW real
-   `aux_decode_fraction` here escalates to Approach 2 (the full-height tick ladder — see the
-   issue-1196 design synthesis) instead of promoting.
+1. **Real-captured-frame fixture WITH aux marks — LANDED** (`tests/fixtures/tear-781/
+   stream-2099068429-frame-{1399,4792}.png` + probe-gated `tests/aux_tick_fixture_decode_1196.rs`):
+   real frames from run 2099068429's box-side pixel-proof retention, pinning that the PRODUCTION
+   stream-extraction decode AND the plain robust decode read both aux marks (ids == the primary
+   pair) and that the ids flow through v2.1 as clean single-source content. The painter-level
+   synthetic round-trip (`aux_tick_pair_round_trips_alongside_the_dual_qr_1196`,
+   `src/probe/painter.rs`) was deliberately NOT sufficient — small-optical-QR decodability through
+   the real chain (optical → grabber → 2×NDI → 4K upscale → mp4) was THE open risk
+   (`pattern-change-needs-decode-fixture`), now proven. HONEST residual: the fixture frames are
+   CAM3-window (the splitter grabber leg) — the run had no cam2/projection window — so the
+   projection-leg confirmation rides the later preconditions. **Mining recipe (reusable):** the
+   `<partial>-pixels/frame-N.png` retention + the partial's own `frames[]` entry for index N (the
+   REAL rqrr output for those exact pixels) is the ground truth; `zbarimg` full-frame + the two
+   aux design-rect crops is the independent second decoder — zero rig access, zero mkv pulls.
 2. **A known-torn calibration run** (imag pre-1107 build or the projector-vsync env escape —
    needs owner agreement, asked at that step) making the signal `Observed`.
 3. **Calibrate `TEAR_FRACTION_CEILING` + an aux-coverage floor + a `multi_path_suspect_fraction`

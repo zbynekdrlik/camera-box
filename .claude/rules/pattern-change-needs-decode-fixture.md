@@ -77,6 +77,20 @@ chain (projection → grabber → NDI → 4K upscale → mp4 — a synthetic cri
 about that). Worked example: the issue-1196 aux tick pair,
 `.claude/rules/projection-tap-tear-detect.md`'s promotion-preconditions list.
 
+## Mining the real-frame fixture from the E2E run's OWN retention — zero rig access (issue 1196 pattern)
+
+When the fixture must come from a REAL rig recording, do NOT pull the multi-GB mkv or drive a new
+extract: the E2E harness already retains flagged frames as `<partial>-pixels/frame-N.png` beside
+each `/tmp/recording-e2e-<RUN>/{stream,strih}-partial-<RUN>.json` on dev1 — real 1920×1080
+grayscale (mode `L`) frames, byte-identical to what the production decoder consumed. Validation is
+double-anchored, entirely on dev1: (1) the partial's own `frames[]` entry for `frame_index` N is
+the REAL production rqrr decode output for those exact pixels — if the payload you want to pin is
+there, the committed test asserting the same decode function on the committed PNG is
+deterministic; (2) `zbarimg -q --raw` (full-frame AND crops of the pattern's design rectangles) is
+the independent second decoder, the #921/#186 "cv2 reads the same pixels" discriminator. Commit
+the PNGs verbatim. Worked example: `tests/aux_tick_fixture_decode_1196.rs` +
+`tests/fixtures/tear-781/stream-2099068429-frame-{1399,4792}.png`.
+
 ## #921's own finding — a useful discriminator for THIS class of problem
 
 Before assuming a live decode-rate defect is a geometry/algorithm bug: build the fixture harness
