@@ -4,6 +4,7 @@ paths:
   - "scripts/*-alert-watchdog.sh"
   - "scripts/cam-disk-guard.sh"
   - "scripts/rig-status.py"
+  - "scripts/av_sync_measure.py"
   - "tests/python/test_notify_dedup_key_sweep_1206.py"
 ---
 
@@ -54,3 +55,38 @@ bash `\` line-continuations, so the `--dedup-key` may sit on its own continuatio
 Delivery layer ONLY. Detection/confirm/throttle lives in `scripts/lib/obs-watchdog-decision.sh`
 (shared) + per-script `*_recovery_decision` — do not touch it for a notify change. NEVER edit
 airuleset itself; `--dedup-key` is an existing airuleset `notify` flag ("same key sends once").
+
+## A RAW-webhook emitter is INVISIBLE to this sweep — route the default through airuleset notify (#1207)
+
+The sweep above discovers ONLY `notify --body` (bash) / `subprocess.run([... "notify" ... "--body"
+...])` (py) call-sites. An alert emitted through a RAW Discord webhook — a bare
+`urllib.request.urlopen()` / `requests.post()` to a `--webhook` URL, with no airuleset in the path —
+is completely invisible to it, so it gets NO `--dedup-key` enforcement and no analyze-not-ping
+doctrine, and it re-POSTs a repeated identical state with nothing collapsing it. `av_sync_measure.py`
+was the last such emitter (#1207); the 22 systemd watchdogs never had this shape.
+
+The fix pattern (delivery layer only — never touch the detection/threshold logic):
+
+1. **Route the DEFAULT through airuleset notify with a stable per-kind `--dedup-key`** (the two rules
+   above apply unchanged: ALERT → stable key like `av-sync-measure-verdict`; a ✅ recovery would go to
+   the machine channel). Add ONE `deliver_alert(args, kind, text)` seam and route every call-site
+   through it, so the key is derived in one place.
+2. **Write the airuleset call as a LITERAL `subprocess.run([...])` with `(` immediately followed by
+   `[`** — that exact shape is what makes THIS sweep's `.py` discovery regex
+   (`subprocess\.run\(\[(.*?)\]`) auto-find and enforce it. A variable-list form
+   (`cmd = [...]; subprocess.run(cmd)`) is NOT discovered — the sweep would silently skip it, exactly
+   the invisibility this section is about. (`test_sweep_covers_the_known_alert_watchdogs`'s `len >= 20`
+   + expected-subset stay green; adding one more emitter only grows the set. av_sync_measure is now the
+   24th.)
+3. **If the tool keeps a raw `--webhook` as an EXPLICIT opt-in override** (a manual/hand-run tool),
+   that raw branch still can't carry `--dedup-key`, so give it its OWN simple in-process per-kind
+   throttle (`_WEBHOOK_LAST_SENT` + `WEBHOOK_THROTTLE_S`, ~20 min mirroring the watchdogs' re-fire
+   cadence) so a sustained state in a `--loop` doesn't re-POST every round.
+
+Test the seam behaviorally (monkeypatch `subprocess.run` + `notify_discord`), not just via the static
+sweep — the sweep proves the key is PRESENT, the behavioral test proves the DEFAULT actually routes
+to airuleset and the webhook branch actually throttles (see
+`tests/python/test_av_sync_measure_notify_dedup_1207.py`). Beware a NEW default-path delivery that
+fires on a path an existing test already exercised with `webhook=None` (av_sync_measure's
+`one_measurement` now delivers on the default path when `|offset| >= threshold`, so the #805
+calibration-log tests had to stub `deliver_alert` to avoid firing a real notify).
