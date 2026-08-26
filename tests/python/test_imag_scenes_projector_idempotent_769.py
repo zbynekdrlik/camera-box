@@ -185,6 +185,10 @@ def test_projector_opens_both_then_dedups(monkeypatch):
     mod = _scenes_module()
     obs = FakeObs()
     closed = []
+    # issue 1152 M4 hermeticity: pin the drm-output config DORMANT so this test never depends on
+    # a stray ~/.camera-box/drm-output.json on the test machine (raising=False keeps it a no-op
+    # on a pre-1152 module).
+    monkeypatch.setattr(mod, "_drm_output_config_text", lambda host: "", raising=False)
     monkeypatch.setattr(mod, "_wmctrl_list_local", lambda: _STACKED)
     monkeypatch.setattr(mod, "_wmctrl_close_local", lambda win_id: closed.append(win_id))
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
@@ -252,6 +256,8 @@ def test_projector_no_panel_opens_and_heals_program_only(monkeypatch, capsys):
     mod = _scenes_module()
     obs = HdmiOnlyObs()
     healed_kinds = []
+    # issue 1152 M4 hermeticity: dormant drm-output config (see the sibling note above).
+    monkeypatch.setattr(mod, "_drm_output_config_text", lambda host: "", raising=False)
     monkeypatch.setattr(mod, "_heal_projector_strays",
                         lambda host, kinds: healed_kinds.extend(kinds))
     mod.projector(obs, "127.0.0.1")

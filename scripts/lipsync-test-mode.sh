@@ -48,19 +48,31 @@ set -euo pipefail
 #   LIPSYNC_AUDIO_DEVICE   cam2 ALSA device for playback audio (default hw:CARD=PCH,DEV=3 -- the
 #                          SAME device the QPSK marker uses, per issue 930's scope item 2)
 #   LIPSYNC_MPV_BIN        mpv binary to use (default mpv -- overridable for a pinned build/test)
-#   LIPSYNC_PLAYBACK_GAIN_DB  fixed playback gain in dB (default 9), applied via mpv's
+#   LIPSYNC_PLAYBACK_GAIN_DB  fixed playback gain in dB (default 15 since round 5 2026-08-26; 9 was the original issue-1191 calibration), applied via mpv's
 #                          `--af=volume=<N>dB` audio filter. NOTE: this is a FIXED gain, not a
-#                          dynamic peak-normalizer -- +9 dB is CALIBRATED to bring THIS asset's known
-#                          -9.8 dBFS peak to ~-1 dBFS (re-derive it for a different asset). Issue
-#                          1191: the asset speech (peak -9.8 dBFS) is ~25 dB under the mic-chain AGC
-#                          operating point set by the
-#                          loud QPSK marker (~0 dBFS), so un-boosted speech captures ~-50 dBFS and
-#                          SyncNet reads conf ~1 on every chunk (unmeasurable). +9 dB brings speech
-#                          to ~-1 dBFS, into the AGC operating point (live-verified: envelope corr
-#                          0.976, SyncNet conf 6.4). Expanded on the REMOTE (cam2) side so the
+#                          dynamic peak-normalizer. Issue 1191 derived +9 (asset peak -9.8 dBFS ->
+#                          ~-1 dBFS, into the mic-chain AGC operating point set by the loud QPSK
+#                          marker; un-boosted speech captures ~-50 dBFS and SyncNet reads conf ~1
+#                          on every chunk). Issue 1174 round 5 (2026-08-26) recalibrated to 15: at
+#                          +9 the speech never acoustically arrived on the rig's CURRENT physical
+#                          level state (envelope corr 0.33-0.37 across 8 recycles, rounds 4+5),
+#                          while +15 passed arrival first try (corr 0.66) and SyncNet measured
+#                          conf 7.1 / offset +40 ms. HONEST TRADEOFF: +15 pushes the asset peak
+#                          ~5 dB past digital full scale, so peaks limit at the ALSA sink
+#                          conversion (mpv's float pipeline) -- accepted, since the measured conf
+#                          7.1 exceeds the +9 gold run's 6.4. Re-derive for a different asset or a
+#                          changed physical rig level. Expanded on the REMOTE (cam2) side so the
 #                          default is baked self-documenting into the generated mpv command; the
-#                          supervisor can re-tune via the paired cross-check campaign without a
-#                          code change.
+#                          supervisor re-tunes via the env seam without a code change.
+#   LIPSYNC_AUDIO_RATE     forced mpv audio OUTPUT sample rate in Hz (default 48000), applied via
+#                          `--audio-samplerate=<Hz>` (mpv resamples the asset's native rate to it).
+#                          Issue 1174 round-3/4 diagnosis: the HDMI->mic chain runs 48k natively and
+#                          a 44.1k ALSA stream's mode lock is FLAKY per stream-start (round-1 locked
+#                          spontaneously after 26.8 min; rounds 2-4 never locked, envelope corr
+#                          ~0.23-0.35), while the ONE manual probe played at 48k locked FIRST TRY
+#                          (corr 0.976, SyncNet conf 6.4). Forcing 48k output removes the 44.1k
+#                          mode-switch from the chain entirely. Expanded on the REMOTE (cam2) side
+#                          like the gain seam; set 44100 to reproduce the flaky-lock case.
 #   LIPSYNC_PLAYBACK_PIDFILE  where this script's own mpv PID is tracked on cam2 (default
 #                             /run/rig-lipsync-playback.pid)
 #   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 0, non-negative integer
@@ -219,8 +231,8 @@ CMDS
 # without checking the process is actually alive). DRM_DEVICE empty = mpv auto-selects the connected
 # KMS card (#854); a non-empty value pins it via `--drm-device`.
 #
-# GAIN (issue 1191): `--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB` applies a FIXED +N dB gain
-# (default 9, CALIBRATED to THIS asset's -9.8 dBFS peak -> ~-1 dBFS; not a dynamic normalizer) so the
+# GAIN (issue 1191, recalibrated by round 5): `--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-15}dB` FIXED gain
+# (default 15 since the round-5 recalibration; not a dynamic normalizer) so the
 # asset speech lands in the mic-chain AGC operating point set by the loud QPSK marker (~0 dBFS).
 # Without it
 # the ~25 dB quieter asset speech (peak -9.8 dBFS) captures at ~-50 dBFS and SyncNet reads conf ~1 on
@@ -252,7 +264,8 @@ lipsync_playback_cmds() {
 # --no-terminal, so a fatal error is captured; the die-immediately branch below cats it too.
 nohup $mpv_bin --no-config --no-terminal --log-file=/run/rig-lipsync-playback.mpv.log --vo=drm ${drm_opt}--loop-file=inf \\
   --audio-device=alsa/$audio --audio-channels=stereo \\
-  --af=volume=\${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB \\
+  --audio-samplerate=\${LIPSYNC_AUDIO_RATE:-48000} \\
+  --af=volume=\${LIPSYNC_PLAYBACK_GAIN_DB:-15}dB \\
   --audio-delay=$delay_s \\
   '$media' \\
   > /run/rig-lipsync-playback.log 2>&1 &

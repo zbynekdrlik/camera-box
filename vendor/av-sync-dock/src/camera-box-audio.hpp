@@ -124,6 +124,11 @@ cb_decode_markers_with_stats(const std::vector<float> &samples, uint32_t sample_
 	for (size_t m = 0; m < n; m++) {
 		double ph = (double)m * w;
 		double x = (double)samples[m];
+		/* #1153: a non-finite input sample would otherwise contaminate every prefix sum after
+		 * it, silently killing decode for the REST of the window; treat it as silence instead.
+		 * Mirrors the identical sanitize in qpsk_marker::decode_markers_with_stats. */
+		if (!std::isfinite(x))
+			x = 0.0;
 		pc[m + 1] = pc[m] + x * std::cos(ph);
 		ps[m + 1] = ps[m] + x * std::sin(ph);
 		pe[m + 1] = pe[m] + x * x;
@@ -268,6 +273,19 @@ struct StreamingMarkerDecoder {
 			}
 		}
 		return out;
+	}
+
+	/* #1153 -- drop the rolling window + dedup anchor while PRESERVING origin continuity (the
+	 * absolute-sample coordinate the caller's own pushed-sample count mirrors) and the cumulative
+	 * `stats` (the live diag counters must stay monotonic across a pairing recovery). Part of the
+	 * dead-pairing reset: the decoder re-acquires from a clean window without disturbing the
+	 * caller's timestamp mapping. Mirror of av_sync_dock::StreamingMarkerDecoder::reset_window. */
+	void reset_window()
+	{
+		origin += (uint64_t)buf.size();
+		buf.clear();
+		have_last = false;
+		last_reported = 0;
 	}
 };
 
@@ -916,6 +934,106 @@ private:
 	uint64_t last_video_decoded_;
 	uint64_t last_crc_ok_;
 	uint64_t last_advance_ns_;
+};
+
+/* #1153 -- how long (ns) the dock's marker<->QR PAIRING may stay dead (no meaningful ring-hit
+ * advance, no genuine lock) while the measurement input itself keeps flowing, before the dock
+ * resets its own pairing state and re-acquires from scratch. 300 s = 2x the observed worst-case
+ * legitimate fresh-lock convergence (~2.5 min after an OBS start, 2026-08-26 controlled
+ * experiment). Byte-for-byte mirror of src/av_sync_dock.rs::DOCK_PAIRING_DEAD_NS. */
+constexpr uint64_t CB_DOCK_PAIRING_DEAD_NS = 300ull * 1000000000ull;
+
+/* #1153 -- minimum ring-hit advance per epoch for pairing to count as alive on its own. 4: far
+ * under a converging chain (~60/epoch at ~1 pair/5 s), far above the dead state's chance-level
+ * pairing (~0.5/epoch). Mirror of src/av_sync_dock.rs::DOCK_PAIRING_MIN_RING_HITS. */
+constexpr uint64_t CB_DOCK_PAIRING_MIN_RING_HITS = 4;
+
+/* One epoch-end verdict from CbDockPairingWatchdog::observe(). fire == true means the pairing was
+ * DEAD for the whole epoch while the input kept flowing -- the caller must reset ALL in-dock
+ * pairing state (ring, cluster, offset history, audit state, decoder window) and log the epoch
+ * deltas carried here (they discriminate the poison class from the OBS log alone: crc_ok_delta
+ * near the 1/256 chance floor of preambles_delta = the marker waveform is degraded UPSTREAM of
+ * the dock; a healthy crc_ok rate with a dead ring = in-dock pairing state, which the reset
+ * clears). A mid-epoch observe returns fire=false with zeroed deltas. Mirror of
+ * src/av_sync_dock.rs::DockPairingRecovery. */
+struct CbDockPairingRecovery {
+	bool fire = false;
+	uint64_t window_ns = 0;
+	uint64_t ring_hit_delta = 0;
+	uint64_t crc_ok_delta = 0;
+	uint64_t preambles_delta = 0;
+	uint64_t video_decoded_delta = 0;
+};
+
+/* #1153 -- the sticky-unlock (dead-pairing) watchdog. After a large video-latency STEP on the
+ * program source (the E2E [5/8] force-set + cleanup restore of ~±1 s) the live dock stayed
+ * UNPAIRED for 2+ hours -- ring hits frozen at chance level, crc_ok at the ~1/256 chance floor --
+ * until a manual OBS restart, while a freshly-started instance locks within ~2.5 min under
+ * identical ambient conditions. Every pre-existing unlock/reset path is decoded-marker-driven and
+ * CbDockInputStaleness is display-only, so nothing ever reset the pairing state. This watchdog
+ * watches the pairing OUTCOME counters at the same ~10 s diag tick: every dead_ns epoch it
+ * evaluates the epoch's deltas -- pairing alive = ring hits advanced >= min_ring_hits, OR locked
+ * with SOME ring advance (a lock with ZERO hits across a full epoch is provably stale: `locked`
+ * only flips on a cluster push, which needs a decode) -- and FIRES only when pairing is dead
+ * while the input is demonstrably alive (video QRs decoding AND audio candidates screening).
+ * Input-dead states (EVENT mode, silence) never fire -- they belong to the staleness detector,
+ * and resetting on them would be a pointless loop. Re-fires once per epoch while the dead state
+ * persists (bounded retry + a periodic evidence line). Byte-for-byte mirror of
+ * src/av_sync_dock.rs::DockPairingWatchdog, tested by the committed C++ self-test. */
+class CbDockPairingWatchdog {
+public:
+	CbDockPairingWatchdog()
+		: initialized_(false), epoch_start_ns_(0), base_video_decoded_(0), base_preambles_(0),
+		  base_crc_ok_(0), base_ring_hit_(0)
+	{
+	}
+
+	// The FIRST call only seeds the epoch baseline (never fires); mid-epoch calls return
+	// fire=false; an epoch end evaluates the deltas and starts the next epoch either way.
+	CbDockPairingRecovery observe(uint64_t video_decoded, uint64_t preambles, uint64_t crc_ok,
+	                              uint64_t ring_hit, bool locked, uint64_t now_ns, uint64_t dead_ns,
+	                              uint64_t min_ring_hits)
+	{
+		CbDockPairingRecovery none;
+		if (!initialized_) {
+			initialized_ = true;
+			epoch_start_ns_ = now_ns;
+			base_video_decoded_ = video_decoded;
+			base_preambles_ = preambles;
+			base_crc_ok_ = crc_ok;
+			base_ring_hit_ = ring_hit;
+			return none;
+		}
+		uint64_t elapsed = now_ns >= epoch_start_ns_ ? now_ns - epoch_start_ns_ : 0;
+		if (elapsed < dead_ns)
+			return none;
+		CbDockPairingRecovery r;
+		r.ring_hit_delta = ring_hit >= base_ring_hit_ ? ring_hit - base_ring_hit_ : 0;
+		r.video_decoded_delta =
+			video_decoded >= base_video_decoded_ ? video_decoded - base_video_decoded_ : 0;
+		r.preambles_delta = preambles >= base_preambles_ ? preambles - base_preambles_ : 0;
+		r.crc_ok_delta = crc_ok >= base_crc_ok_ ? crc_ok - base_crc_ok_ : 0;
+		// Start the next epoch from the current counters regardless of the verdict.
+		epoch_start_ns_ = now_ns;
+		base_video_decoded_ = video_decoded;
+		base_preambles_ = preambles;
+		base_crc_ok_ = crc_ok;
+		base_ring_hit_ = ring_hit;
+		bool pairing_alive =
+			r.ring_hit_delta >= min_ring_hits || (locked && r.ring_hit_delta > 0);
+		bool input_alive = r.video_decoded_delta > 0 && r.preambles_delta > 0;
+		r.fire = !pairing_alive && input_alive;
+		r.window_ns = elapsed;
+		return r;
+	}
+
+private:
+	bool initialized_;
+	uint64_t epoch_start_ns_;
+	uint64_t base_video_decoded_;
+	uint64_t base_preambles_;
+	uint64_t base_crc_ok_;
+	uint64_t base_ring_hit_;
 };
 
 } // namespace camerabox

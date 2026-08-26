@@ -304,6 +304,9 @@ pub fn decode_markers_with_stats(
     for m in 0..n {
         let ph = m as f64 * w;
         let x = samples[m] as f64;
+        // #1153: a non-finite input sample would otherwise contaminate every prefix sum after it,
+        // silently killing decode for the REST of the window; treat it as silence instead.
+        let x = if x.is_finite() { x } else { 0.0 };
         pc[m + 1] = pc[m] + x * ph.cos();
         ps[m + 1] = ps[m] + x * ph.sin();
         pe[m + 1] = pe[m] + x * x;
@@ -1666,5 +1669,51 @@ mod tests {
         assert_eq!(found.len(), 1, "a real marker still decodes: {found:?}");
         assert_eq!(found[0].1, 123, "recovers the right index");
         assert_eq!(stats.crc_ok, 1, "real marker: crc_ok == 1: {stats:?}");
+    }
+
+    // -----------------------------------------------------------------
+    // #1153 (sticky-unlock recovery) — non-finite input samples must not
+    // poison the prefix sums for the rest of the window
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_single_non_finite_sample_must_not_poison_the_rest_of_the_window_1153() {
+        // The decode kernel builds cos/sin/energy PREFIX SUMS over the whole buffer; a single
+        // NaN/Inf sample therefore contaminates EVERY sum after it, silently killing decode for
+        // the remainder of the window (every preamble-screen comparison against NaN is false).
+        // The live dock feeds this kernel a mono mixdown of the OBS program audio — an upstream
+        // in-process poison (a wedged resampler channel emitting non-finite samples) must degrade
+        // at most the poisoned samples, never the whole rolling window. Treat non-finite input as
+        // silence.
+        let p = AudioParams::rig60();
+        let sr = p.sample_rate as usize;
+        let idx = 42u8;
+        let mut buf = vec![0.0f32; sr / 2]; // 0.5 s
+        let start = sr / 10; // 0.1 s lead silence
+        let sig = marker_signal(idx, &p);
+        buf[start..start + sig.len()].copy_from_slice(&sig);
+        // Non-finite garbage well BEFORE the marker — prefix sums past these indices would be
+        // NaN/Inf without the sanitize, so the marker downstream would never decode.
+        buf[10] = f32::NAN;
+        buf[11] = f32::INFINITY;
+        buf[12] = f32::NEG_INFINITY;
+        let (found, stats) = decode_markers_with_stats(&buf, &p, 0.4);
+        assert_eq!(
+            found.len(),
+            1,
+            "a marker after a non-finite sample must still decode: {found:?} {stats:?}"
+        );
+        assert_eq!(found[0].1, idx, "recovers the right index");
+        assert_eq!(stats.crc_ok, 1, "sanitized decode counts crc_ok: {stats:?}");
+
+        // Control (must hold before AND after the fix): non-finite garbage strictly AFTER the
+        // marker's own windows never affected it — the prefix-sum poison only flows forward.
+        let mut buf2 = vec![0.0f32; sr / 2];
+        buf2[start..start + sig.len()].copy_from_slice(&sig);
+        let tail = start + sig.len() + 100;
+        buf2[tail] = f32::NAN;
+        let (found2, _) = decode_markers_with_stats(&buf2, &p, 0.4);
+        assert_eq!(found2.len(), 1, "trailing garbage never hurt: {found2:?}");
+        assert_eq!(found2[0].1, idx);
     }
 }

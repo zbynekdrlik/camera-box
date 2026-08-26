@@ -568,7 +568,120 @@ def _heal_projector_strays(host, kinds):
                   % (kind, win_id))
 
 
+# issue 1152 M4: DRM-lease mode -- the vendored OBS DRM output (.claude/rules/obs-drm-output.md)
+# leases the HDMI connector OUT of the X layout and page-flips the Program onto it directly, so
+# in that mode there is NO HDMI monitor for an X Program projector and none is wanted. The config
+# below is the module's own DEFAULT-OFF activation contract; this seeder consults the SAME file
+# so every caller (unit boot, operator menu, watchdog relaunch, verify repopulate) inherits the
+# tolerance from ONE place. NOTHING in these helpers may abort: they run on the supervised OBS
+# start path, where a non-zero exit crash-loops a healthy OBS on the live projection (issue 866;
+# the live 2026-08-26 M1 runbook gotcha).
+DRM_OUTPUT_CONF = "~/.camera-box/drm-output.json"
+
+
+def drm_output_lease_connector(config_text):
+    """issue 1152 pure: the connector name IFF the drm-output config JSON arms the in-OBS
+    DRM-lease output, else "". Mirrors the vendored C module's OWN contract exactly
+    (obs-drm-output.c): full JSON parse (unparseable -> dormant), a boolean "enabled": true,
+    AND a non-empty string "connector" (the C is dormant without one). Matching the C is the
+    review-mandated single grammar: a config the C would ignore must NEVER arm the wrapper or
+    the seeder (a divergent bash-grep reading once re-opened the crash-loop / dark-projector
+    class this milestone kills). Empty / missing / malformed -> "" (dormant), never a raise."""
+    if not config_text:
+        return ""
+    try:
+        cfg = json.loads(config_text)
+        if cfg.get("enabled") is not True:
+            return ""
+        connector = cfg.get("connector")
+        return connector if isinstance(connector, str) and connector else ""
+    except (ValueError, AttributeError):
+        return ""
+
+
+def drm_output_lease_enabled(config_text):
+    """issue 1152 pure: True iff drm_output_lease_connector() arms -- ONE classifier, one
+    grammar (the C module's), for every consumer."""
+    return drm_output_lease_connector(config_text) != ""
+
+
+def _drm_output_config_text(host):
+    """issue 1152: read the BOX's own drm-output config -- a local open on the loopback
+    boot/watchdog path, the SAME sshpass transport the wmctrl helpers use for a dev1-driven
+    --host <ip> call (NEVER the calling machine's own file in that case). Any failure -> ""
+    (the dormant default; the drm_output drift facet, not this seeder, owns loud enabled-state
+    verdicts)."""
+    if _is_local_host(host):
+        try:
+            with open(os.path.expanduser(DRM_OUTPUT_CONF)) as fh:
+                return fh.read()
+        except OSError:
+            return ""
+    try:
+        r = subprocess.run(_ssh_base(host) + ["cat %s 2>/dev/null || true" % DRM_OUTPUT_CONF],
+                           capture_output=True, text=True, timeout=15, check=False)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _drm_lease_close_program_strays(host):
+    """issue 1152: in DRM-lease mode EVERY X "Projector - Program" window is a stray (OBS's
+    launch-restore can recreate the saved one WINDOWED on the panel once the HDMI monitor left
+    X) -- the Program lives on the DRM scanout, so close them ALL. Same wmctrl transport +
+    missing-tool warn-skip discipline as _heal_projector_strays: warn LOUD by name, never raise,
+    never read a missing tool as "no windows"."""
+    local = _is_local_host(host)
+    out = _wmctrl_list_local() if local else _wmctrl_list_remote(host)
+    if out is None:
+        print("WARN issue 1152: wmctrl not available (%s) -- cannot close restored X Program "
+              "projector strays this run" % ("local" if local else host))
+        return
+    for win_id in projector_window_ids(out, "Program"):
+        if local:
+            _wmctrl_close_local(win_id)
+        else:
+            _wmctrl_close_remote(host, win_id)
+        print("issue 1152 drm-lease mode: closed restored X Program projector %s (the Program "
+              "is on the DRM scanout, not an X window)" % win_id)
+
+
+def _projector_drm_lease_mode(obs, host):
+    """issue 1152: the lease-mode projector seed -- open ONLY the panel Multiview (the Program
+    page-flips on the DRM-leased connector; opening an X Program projector would put a duplicate
+    window on the panel), close every restored X Program stray, and reconcile the Multiview via
+    the #769 keep-newest dedup. Loud on every branch, aborts on none."""
+    print("issue 1152 drm-lease mode ENABLED (%s): Program goes out via the DRM-leased HDMI "
+          "scanout -- skipping the X Program projector, opening ONLY the panel Multiview "
+          "projector" % DRM_OUTPUT_CONF)
+    mons = obs.req("GetMonitorList")["monitors"]
+    panel = [m for m in mons if "HDMI" not in m.get("monitorName", "")]
+    opened_kinds = []
+    if panel:
+        obs.req("OpenVideoMixProjector", {
+            "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW",
+            "monitorIndex": panel[0]["monitorIndex"],
+        })
+        print(f"MULTIVIEW projector -> monitor {panel[0]['monitorIndex']} "
+              f"({panel[0].get('monitorName')}) [panel]")
+        opened_kinds.append("Multiview")
+    else:
+        print("WARN: no panel monitor detected for the MULTIVIEW projector "
+              f"(monitors: {[m.get('monitorName') for m in mons]})")
+    _drm_lease_close_program_strays(host)
+    if opened_kinds:
+        _heal_projector_strays(host, opened_kinds)
+
+
 def projector(obs: Obs, host: str) -> None:
+    # issue 1152 M4: with the DRM output ENABLED the HDMI connector is leased out of the X
+    # layout BY DESIGN -- the old hard fail-exit below would then crash-loop the supervised unit
+    # (the live 2026-08-26 M1 runbook gotcha: restart counter climbing every ~13 s). Consult the
+    # box's own config FIRST; dormant boxes fall through to the original behaviour unchanged,
+    # including the genuinely-unplugged-HDMI loud failure.
+    if drm_output_lease_enabled(_drm_output_config_text(host)):
+        _projector_drm_lease_mode(obs, host)
+        return
     mons = obs.req("GetMonitorList")["monitors"]
     # Robust monitor selection across BOTH known imag-nb GPU generations (#522/#488): the older
     # Intel iGPU enumerated the built-in panel as "eDP-1"; this dGPU (RTX 5050 Laptop, PRIME

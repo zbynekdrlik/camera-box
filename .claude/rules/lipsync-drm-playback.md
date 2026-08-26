@@ -24,12 +24,12 @@ seen across all recordings; the marker keeps the working level pinned to it, and
 sits far under it. (Round-1's ~26.8-min "audio wake-up" was a slow AGC ramp, not a fix — never rely on
 it.)
 
-The fix: `mpv --af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB` applies a FIXED +N dB gain (default 9) —
-NOT a dynamic peak-normalizer; +9 dB is CALIBRATED to bring THIS asset's -9.8 dBFS peak to ~-1 dBFS,
-into the AGC operating point, so it is measurable IMMEDIATELY (live-verified: envelope corr 0.976,
-SyncNet conf 6.4, offset +40 ms at lead=0). Swap the asset and the gain must be re-derived.
-`LIPSYNC_PLAYBACK_GAIN_DB` defaults to 9 and is a CALIBRATION seam. It is expanded on the REMOTE (cam2) side — the heredoc emits the literal
-`--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB`, so the default (9) is baked self-documenting into the
+The fix: `mpv --af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-15}dB` applies a FIXED +N dB gain (default 15 since the issue-1174 round-5 recalibration 2026-08-26; the original issue-1191 value was 9) —
+NOT a dynamic peak-normalizer; issue 1191's +9 brought THIS asset's -9.8 dBFS peak to ~-1 dBFS,
+into the AGC operating point (live-verified then: envelope corr 0.976, SyncNet conf 6.4, offset
++40 ms at lead=0). Swap the asset and the gain must be re-derived.
+`LIPSYNC_PLAYBACK_GAIN_DB` defaults to 15 and is a CALIBRATION seam (round 5: +9 no longer reached the mic on the rig's current physical level state — corr 0.33-0.37; +15 arrived first try, corr 0.66, SyncNet conf 7.1/+40 ms; peaks clip ~5 dB at the sink conversion — accepted tradeoff). It is expanded on the REMOTE (cam2) side — the heredoc emits the literal
+`--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-15}dB`, so the default (15) is baked self-documenting into the
 generated mpv command AND a supervisor can re-tune the gain via the paired cross-check campaign
 without a code change. It is ORTHOGONAL to `LIPSYNC_AUDIO_LEAD_MS`: gain fixes the LEVEL (measurability),
 the lead fixes the A/V OFFSET. Do NOT try to fix the level by touching the production mic-chain AGC —
@@ -102,12 +102,12 @@ precisely so the supervisor re-tunes via the paired cross-check campaign
 ## mpv command shape (one process, one pidfile — unchanged lifecycle)
 
 `nohup mpv --no-config --no-terminal --vo=drm [--drm-device=<dev>] --loop-file=inf
---audio-device=alsa/<AUDIO> --audio-channels=stereo --af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB
+--audio-device=alsa/<AUDIO> --audio-channels=stereo --af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-15}dB
 --audio-delay=<sec> '<media>'` — one process feeds BOTH sinks (video DRM, audio ALSA), tracked by ONE
 pidfile with a fail-loud `kill -0` liveness check. `--audio-channels=stereo` mirrors the old `-ac 2`
 (the device refuses mono). `--af=volume=<gain>dB` applies the fixed calibrated speech gain (#1191, see above);
-`${LIPSYNC_PLAYBACK_GAIN_DB:-9}` is deliberately LEFT LITERAL in the generated command (remote-side
-shell expansion) so the default 9 is self-documenting and overridable, unlike the LOCALLY-resolved
+`${LIPSYNC_PLAYBACK_GAIN_DB:-15}` is deliberately LEFT LITERAL in the generated command (remote-side
+shell expansion) so the default 15 is self-documenting and overridable, unlike the LOCALLY-resolved
 `--audio-delay=<sec>`.
 `LIPSYNC_DRM_DEVICE` empty = mpv auto-selects the connected KMS card (#854: `/dev/dri/cardN` is not a
 stable ABI, so auto is the safe default); a non-empty value pins `--drm-device`.

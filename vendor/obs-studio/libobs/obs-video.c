@@ -32,6 +32,10 @@
 #include "media-io/format-conversion.h"
 #include "media-io/video-frame.h"
 
+#if defined(__linux__)
+#include "obs-drm-output.h" /* camera-box #1152 M2: the DRM-lease Program scanout frame hook */
+#endif
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -1317,6 +1321,14 @@ bool obs_graphics_thread_loop(struct obs_graphics_context *context)
 	profile_start(output_frame_name);
 	output_frames();
 	profile_end(output_frame_name);
+
+#if defined(__linux__)
+	/* camera-box #1152 M2: hand the freshly-composited Program to the DRM-lease HDMI output
+	 * (a cheap atomic no-op while that output is inactive — the DEFAULT-OFF config). Placed
+	 * right after the Program composite for minimum render-to-scanout latency, ahead of the
+	 * monitoring displays' own render cost. */
+	obs_drm_output_on_frame();
+#endif
 
 	profile_start(render_displays_name);
 	render_displays();

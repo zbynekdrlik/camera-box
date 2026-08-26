@@ -30,12 +30,15 @@
 #include <xcb/randr.h>
 #include <xcb/xcb.h>
 
+#include <drm_fourcc.h>
 #include <drm_mode.h>
+#include <gbm.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include "obs.h"
 #include "obs-drm-output.h"
+#include "graphics/vec4.h"
 #include "util/threading.h"
 
 /* -------------------------------------------------------------------------------------------------
@@ -56,9 +59,58 @@ static int drm_output_pick_free_crtc(uint32_t busy_mask, int n)
 }
 
 /* -------------------------------------------------------------------------------------------------
+ * Pure M2 decision helpers (Tier-0, lift-compiled + truth-table-tested by
+ * tests/drm_output_program_1152.rs).
+ *
+ * Mailbox selection for the Program scanout triple buffer: `front` is the buffer currently on
+ * scanout, `pending` has a page-flip queued, `ready` carries the newest completed frame not yet
+ * taken by the flip thread (each -1 when the role is empty). Choose the buffer the graphics
+ * thread may render into: NEVER front or pending (scanout would show a half-rendered frame),
+ * prefer a buffer holding no role, else overwrite ready (latest-wins mailbox), -1 when nothing
+ * is writable. Kept pure (no HW, no globals) so it is unit-testable off-rig.
+ * ------------------------------------------------------------------------------------------------- */
+static int drm_output_pick_render_buf(int front, int pending, int ready, int n)
+{
+	for (int i = 0; i < n; i++) {
+		if (i != front && i != pending && i != ready)
+			return i;
+	}
+	if (ready >= 0 && ready < n && ready != front && ready != pending)
+		return ready;
+	return -1;
+}
+
+/* Aspect-fit `src` into `dst` (centred letterbox/pillarbox, integer maths — the rig case is a
+ * 1:1 1920x1080 pass-through). Any zero input fails open to the full destination rect. */
+static void drm_output_fit_rect(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t *out_x,
+				uint32_t *out_y, uint32_t *out_w, uint32_t *out_h)
+{
+	if (src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0) {
+		*out_x = 0;
+		*out_y = 0;
+		*out_w = dst_w;
+		*out_h = dst_h;
+		return;
+	}
+	uint32_t w, h;
+	if ((uint64_t)src_h * dst_w <= (uint64_t)src_w * dst_h) {
+		w = dst_w;
+		h = (uint32_t)((uint64_t)src_h * dst_w / src_w);
+	} else {
+		h = dst_h;
+		w = (uint32_t)((uint64_t)src_w * dst_h / src_h);
+	}
+	*out_x = (dst_w - w) / 2u;
+	*out_y = (dst_h - h) / 2u;
+	*out_w = w;
+	*out_h = h;
+}
+
+/* -------------------------------------------------------------------------------------------------
  * Module state (single instance; M1 drives one HDMI connector).
  * ------------------------------------------------------------------------------------------------- */
 #define DRM_OUTPUT_BUFFERS 2
+#define DRM_OUTPUT_PROGRAM_BUFFERS 3 /* M2 mailbox: front (scanout) + pending (flip) + render */
 
 struct drm_output_buffer {
 	uint32_t handle; /* GEM handle of the dumb BO */
@@ -66,6 +118,14 @@ struct drm_output_buffer {
 	uint32_t pitch;  /* bytes per scanline */
 	uint64_t size;   /* mmap size */
 	void *map;       /* mmap'd pixels */
+};
+
+/* M2 Program scanout buffer: a GBM BO (scanout-capable by construction) registered as a DRM
+ * framebuffer on the lease fd, imported into the OBS GL context as a render-target texture. */
+struct drm_output_pbuffer {
+	struct gbm_bo *bo;
+	uint32_t fb_id;    /* drmModeAddFB2WithModifiers framebuffer id */
+	gs_texture_t *tex; /* dmabuf import; created LAZILY on the graphics thread */
 };
 
 static struct {
@@ -83,13 +143,35 @@ static struct {
 	uint32_t crtc_id;
 	uint32_t connector_id;
 	drmModeModeInfo mode;
+	uint32_t mode_w; /* the set mode's active area — scanout size + aspect-fit target */
+	uint32_t mode_h;
 
 	struct drm_output_buffer buffers[DRM_OUTPUT_BUFFERS];
 	unsigned long long flips;
+
+	/* ---- M2 Program binding (see obs_drm_output_on_frame) ----
+	 * Lock order (deadlock rule): graphics context FIRST, then program_lock — shared by the
+	 * frame hook and the GL teardown; the flip thread takes program_lock alone (briefly) and
+	 * NEVER the graphics context, so no cycle exists. g_drm.lock never enters the flip loop
+	 * (the M1 invariant). */
+	volatile bool program_want; /* atomic fast-gate for the per-tick frame hook */
+	bool program_gl_ready;      /* textures imported (graphics thread; guarded by program_lock) */
+	bool program_crtc_live;     /* flip thread only: the CRTC scans a Program buffer */
+	struct gbm_device *gbm;
+	struct drm_output_pbuffer pbufs[DRM_OUTPUT_PROGRAM_BUFFERS];
+	pthread_mutex_t program_lock; /* guards the mailbox roles + pbufs[].tex lifetime */
+	int p_front;                  /* buffer on scanout (-1 before the first Program SetCrtc) */
+	int p_pending;                /* buffer with a queued flip (-1 when none) */
+	int p_ready;                  /* newest rendered frame not yet taken (-1 when none) */
+	unsigned long long program_flips;
 } g_drm = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 	.drm_fd = -1,
 	.lease = 0,
+	.program_lock = PTHREAD_MUTEX_INITIALIZER,
+	.p_front = -1,
+	.p_pending = -1,
+	.p_ready = -1,
 };
 
 /* Page-flip completion: the handler clears the pending flag the flip loop waits on. */
@@ -263,6 +345,8 @@ static bool drm_output_setup_scanout(uint32_t argb)
 	g_drm.mode = conn->modes[0];
 	uint32_t w = g_drm.mode.hdisplay;
 	uint32_t h = g_drm.mode.vdisplay;
+	g_drm.mode_w = w;
+	g_drm.mode_h = h;
 	drmModeFreeConnector(conn);
 	drmModeFreeResources(res);
 
@@ -297,10 +381,10 @@ static bool drm_output_setup_scanout(uint32_t argb)
 			     strerror(errno));
 			return false;
 		}
-		/* M2 HOOK: for M1 both buffers carry the SAME solid colour so a page-flip proves the
-		 * vblank-locked scanout path. In M2 this fill is replaced by importing the OBS Program
-		 * GL texture as a dma-buf (EGL export -> drmModeAddFB2WithModifiers) into `back`, so the
-		 * live Program renders straight to this scanout with zero copy. */
+		/* Both dumb buffers carry the SAME solid colour: the M1 mechanism proof, and since M2
+		 * the INITIAL image (scanned out until the first rendered Program frame arrives via
+		 * the frame hook) plus the fail-open fallback when the Program GL bind fails. The M2
+		 * Program path scans out separate GBM buffers instead (see the program helpers). */
 		drm_output_fill_solid(b, argb, h);
 	}
 
@@ -313,6 +397,173 @@ static bool drm_output_setup_scanout(uint32_t argb)
 	blog(LOG_INFO, "drm-output: mode set %ux%u@%uHz crtc=%u connector=%u", w, h,
 	     (unsigned)g_drm.mode.vrefresh, (unsigned)g_drm.crtc_id, (unsigned)g_drm.connector_id);
 	return true;
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * M2 — Program scanout buffers (GBM BO -> drmModeAddFB2WithModifiers -> lazy EGL dma-buf import).
+ * ------------------------------------------------------------------------------------------------- */
+
+/* Free the M2 GBM buffers + their DRM framebuffers (idempotent; safe on partial alloc). The GL
+ * textures must already be gone (drm_output_program_gl_teardown). MUST run under g_drm.lock,
+ * with g_drm.drm_fd still open (RmFB needs it). */
+static void drm_output_program_free_bufs_locked(void)
+{
+	/* Review finding (issue 1152 M2): disarm FIRST — the frame hook must never pass its gate
+	 * once the BOs are gone (the pthread_create-failure path in start() frees the buffers but
+	 * used to leave program_want armed, and the later lazy bind would then dereference a NULL
+	 * bo on the graphics thread). Restores the invariant "armed => buffers exist" on EVERY
+	 * teardown path; stop()'s own earlier disarm makes this a harmless redundancy there. */
+	os_atomic_set_bool(&g_drm.program_want, false);
+	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
+		struct drm_output_pbuffer *p = &g_drm.pbufs[i];
+		if (p->fb_id) {
+			drmModeRmFB(g_drm.drm_fd, p->fb_id);
+			p->fb_id = 0;
+		}
+		if (p->bo) {
+			gbm_bo_destroy(p->bo);
+			p->bo = NULL;
+		}
+	}
+	if (g_drm.gbm) {
+		gbm_device_destroy(g_drm.gbm);
+		g_drm.gbm = NULL;
+	}
+	g_drm.p_front = -1;
+	g_drm.p_pending = -1;
+	g_drm.p_ready = -1;
+	g_drm.program_crtc_live = false;
+	g_drm.program_flips = 0;
+}
+
+/* Allocate the M2 Program scanout buffers: GBM BOs with GBM_BO_USE_SCANOUT (a scanout-compatible
+ * modifier BY CONSTRUCTION — the reason the EGL-export alternative was rejected) + modifier-aware
+ * DRM framebuffers on the leased fd. The GL import happens LAZILY on the graphics thread (at
+ * obs_startup autostart time the graphics subsystem does not exist yet). Failure is fail-open:
+ * the output stays on the M1 solid pattern. MUST run under g_drm.lock (start path). */
+static bool drm_output_program_alloc_locked(void)
+{
+	g_drm.gbm = gbm_create_device(g_drm.drm_fd);
+	if (!g_drm.gbm) {
+		blog(LOG_WARNING, "drm-output: gbm_create_device failed — staying on the solid pattern");
+		return false;
+	}
+	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
+		struct drm_output_pbuffer *p = &g_drm.pbufs[i];
+		p->bo = gbm_bo_create(g_drm.gbm, g_drm.mode_w, g_drm.mode_h, DRM_FORMAT_XRGB8888,
+				      GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+		if (!p->bo) {
+			blog(LOG_WARNING,
+			     "drm-output: gbm_bo_create %d failed (%s) — staying on the solid pattern", i,
+			     strerror(errno));
+			return false;
+		}
+		uint64_t modifier = gbm_bo_get_modifier(p->bo);
+		int n_planes = gbm_bo_get_plane_count(p->bo);
+		if (n_planes < 1 || n_planes > 4)
+			n_planes = 1;
+		uint32_t handles[4] = {0};
+		uint32_t strides[4] = {0};
+		uint32_t offsets[4] = {0};
+		uint64_t modifiers[4] = {0};
+		for (int pl = 0; pl < n_planes; pl++) {
+			handles[pl] = gbm_bo_get_handle_for_plane(p->bo, pl).u32;
+			strides[pl] = gbm_bo_get_stride_for_plane(p->bo, pl);
+			offsets[pl] = gbm_bo_get_offset(p->bo, pl);
+			modifiers[pl] = modifier;
+		}
+		int r;
+		if (modifier != DRM_FORMAT_MOD_INVALID) {
+			r = drmModeAddFB2WithModifiers(g_drm.drm_fd, g_drm.mode_w, g_drm.mode_h,
+						       DRM_FORMAT_XRGB8888, handles, strides, offsets, modifiers,
+						       &p->fb_id, DRM_MODE_FB_MODIFIERS);
+		} else {
+			r = drmModeAddFB2WithModifiers(g_drm.drm_fd, g_drm.mode_w, g_drm.mode_h,
+						       DRM_FORMAT_XRGB8888, handles, strides, offsets, NULL,
+						       &p->fb_id, 0);
+		}
+		if (r != 0) {
+			p->fb_id = 0;
+			blog(LOG_WARNING,
+			     "drm-output: AddFB2 for Program buffer %d failed (%s, modifier=0x%llx) — "
+			     "staying on the solid pattern",
+			     i, strerror(errno), (unsigned long long)modifier);
+			return false;
+		}
+	}
+	blog(LOG_INFO,
+	     "drm-output: program buffers allocated (%d x %ux%u XRGB8888) — GL bind deferred to the "
+	     "graphics thread",
+	     DRM_OUTPUT_PROGRAM_BUFFERS, g_drm.mode_w, g_drm.mode_h);
+	return true;
+}
+
+/* Import the GBM buffers into the OBS GL context: dma-buf -> EGLImage -> render-target texture,
+ * via the UPSTREAM gs_texture_create_from_dmabuf (which returns a GS_RENDER_TARGET texture — no
+ * new graphics vtable export needed). Graphics thread only; the caller holds the graphics
+ * CONTEXT (which alone excludes the GL teardown — the flip thread never reads the textures).
+ * On failure the caller frees any partial imports and disarms. */
+static bool drm_output_program_gl_bind(void)
+{
+	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
+		struct drm_output_pbuffer *p = &g_drm.pbufs[i];
+		uint64_t modifier = gbm_bo_get_modifier(p->bo);
+		int n_planes = gbm_bo_get_plane_count(p->bo);
+		if (n_planes < 1 || n_planes > 4)
+			n_planes = 1;
+		int bo_fd = gbm_bo_get_fd(p->bo);
+		if (bo_fd < 0) {
+			blog(LOG_WARNING,
+			     "drm-output: program bind FAILED (gbm_bo_get_fd %d: %s) — staying on the "
+			     "solid pattern",
+			     i, strerror(errno));
+			return false;
+		}
+		int fds[4] = {-1, -1, -1, -1};
+		uint32_t strides[4] = {0};
+		uint32_t offsets[4] = {0};
+		uint64_t modifiers[4] = {0};
+		for (int pl = 0; pl < n_planes; pl++) {
+			fds[pl] = bo_fd; /* single-BO planes share the one dma-buf */
+			strides[pl] = gbm_bo_get_stride_for_plane(p->bo, pl);
+			offsets[pl] = gbm_bo_get_offset(p->bo, pl);
+			modifiers[pl] = modifier;
+		}
+		p->tex = gs_texture_create_from_dmabuf(g_drm.mode_w, g_drm.mode_h, DRM_FORMAT_XRGB8888, GS_BGRX,
+						       (uint32_t)n_planes, fds, strides, offsets,
+						       modifier != DRM_FORMAT_MOD_INVALID ? modifiers : NULL);
+		close(bo_fd); /* EGL holds its own dma-buf reference after the import */
+		if (!p->tex) {
+			blog(LOG_WARNING,
+			     "drm-output: program bind FAILED (dmabuf import of buffer %d, "
+			     "modifier=0x%llx) — staying on the solid pattern",
+			     i, (unsigned long long)modifier);
+			return false;
+		}
+	}
+	blog(LOG_INFO, "drm-output: program bind ready (%d buffers %ux%u) — Program scanout armed",
+	     DRM_OUTPUT_PROGRAM_BUFFERS, g_drm.mode_w, g_drm.mode_h);
+	return true;
+}
+
+/* Destroy the dmabuf-imported GL textures. Takes the graphics context BEFORE program_lock — the
+ * ONE lock order shared with the frame hook, which can therefore never race a half-destroyed
+ * buffer. Safe when none exist. Called from stop() after the flip thread is joined;
+ * obs_shutdown() stops this output BEFORE stop_video(), so the graphics subsystem is still
+ * alive here (obs_enter_graphics no-ops — and no textures can exist — when it never came up). */
+static void drm_output_program_gl_teardown(void)
+{
+	obs_enter_graphics();
+	pthread_mutex_lock(&g_drm.program_lock);
+	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
+		if (g_drm.pbufs[i].tex) {
+			gs_texture_destroy(g_drm.pbufs[i].tex);
+			g_drm.pbufs[i].tex = NULL;
+		}
+	}
+	g_drm.program_gl_ready = false;
+	pthread_mutex_unlock(&g_drm.program_lock);
+	obs_leave_graphics();
 }
 
 /* The vblank-locked page-flip loop. For M1 it alternates the two solid buffers, waiting on each
@@ -329,9 +580,59 @@ static void *drm_output_flip_thread(void *arg)
 	bool fatal = false;
 	while (os_atomic_load_bool(&g_drm.running) && !fatal) {
 		int back = front ^ 1;
+
+		/* M2: prefer the Program mailbox when a rendered buffer is ready (or one is already
+		 * on scanout); fall back to the M1 solid alternation otherwise. The mailbox roles are
+		 * touched only under program_lock, held briefly — never across the flip wait. */
+		int pnext = -1;
+		bool program = false;
+		pthread_mutex_lock(&g_drm.program_lock);
+		if (g_drm.p_ready >= 0) {
+			pnext = g_drm.p_ready;
+			g_drm.p_ready = -1;
+			g_drm.p_pending = pnext;
+			program = true;
+		} else if (g_drm.program_crtc_live) {
+			/* Nothing new this vblank — re-flip the frame on scanout (keeps the loop
+			 * vblank-paced with no condvar; the producer and the panel are independent
+			 * clock domains, so an occasional repeated frame is inherent and correct). */
+			pnext = g_drm.p_front;
+			program = true;
+		}
+		pthread_mutex_unlock(&g_drm.program_lock);
+
+		uint32_t flip_fb;
+		if (program) {
+			if (!g_drm.program_crtc_live) {
+				/* First Program frame: a one-shot SetCrtc moves scanout from the solid
+				 * dumb FB onto the GBM FB (a legacy page-flip across a modifier change
+				 * is not reliable); page-flips then run among the identical GBM FBs. */
+				uint32_t conn_id = g_drm.connector_id;
+				if (drmModeSetCrtc(g_drm.drm_fd, g_drm.crtc_id, g_drm.pbufs[pnext].fb_id, 0,
+						   0, &conn_id, 1, &g_drm.mode) != 0) {
+					blog(LOG_WARNING,
+					     "drm-output: SetCrtc onto the Program buffer failed (%s) — "
+					     "stopping flip loop",
+					     strerror(errno));
+					break;
+				}
+				g_drm.program_crtc_live = true;
+				blog(LOG_INFO,
+				     "drm-output: program scanout LIVE (Program buffer on the leased CRTC)");
+				pthread_mutex_lock(&g_drm.program_lock);
+				g_drm.p_pending = -1;
+				g_drm.p_front = pnext;
+				pthread_mutex_unlock(&g_drm.program_lock);
+				continue; /* SetCrtc has no vblank event; the next iteration page-flips */
+			}
+			flip_fb = g_drm.pbufs[pnext].fb_id;
+		} else {
+			flip_fb = g_drm.buffers[back].fb_id;
+		}
+
 		volatile int pending = 1;
-		if (drmModePageFlip(g_drm.drm_fd, g_drm.crtc_id, g_drm.buffers[back].fb_id,
-				    DRM_MODE_PAGE_FLIP_EVENT, (void *)&pending) != 0) {
+		if (drmModePageFlip(g_drm.drm_fd, g_drm.crtc_id, flip_fb, DRM_MODE_PAGE_FLIP_EVENT,
+				    (void *)&pending) != 0) {
 			blog(LOG_WARNING, "drm-output: drmModePageFlip failed (%s) — stopping flip loop",
 			     strerror(errno));
 			break;
@@ -378,14 +679,31 @@ static void *drm_output_flip_thread(void *arg)
 				break;
 			}
 		}
-		front = back;
+		if (program) {
+			pthread_mutex_lock(&g_drm.program_lock);
+			if (g_drm.p_pending == pnext)
+				g_drm.p_pending = -1;
+			g_drm.p_front = pnext;
+			pthread_mutex_unlock(&g_drm.program_lock);
+			g_drm.program_flips++;
+			if (g_drm.program_flips == 1ULL || g_drm.program_flips % 3600ULL == 0ULL)
+				blog(LOG_INFO, "drm-output: program-flip #%llu (Program dma-buf scanout)",
+				     g_drm.program_flips);
+		} else {
+			front = back;
+		}
 		g_drm.flips++;
 		/* Log the first flip (immediate mechanism proof), then ~once/minute at 60Hz so this
 		 * never floods the OBS log the jitter_audit-family parsers grep once M2 runs steady. */
-		if (g_drm.flips == 1ULL || g_drm.flips % 3600ULL == 0ULL)
+		if (!program && (g_drm.flips == 1ULL || g_drm.flips % 3600ULL == 0ULL))
 			blog(LOG_INFO, "drm-output: page-flip #%llu (vblank-locked, solid M1 pattern)",
 			     g_drm.flips);
 	}
+	/* Review finding (issue 1152 M2): a SELF-death of this loop (lease revoke, X restart, a
+	 * failed flip) must also disarm the frame hook — otherwise the graphics thread keeps
+	 * rendering + flushing a full-canvas copy ~60/s into a mailbox nobody drains, permanent
+	 * waste on the 25W-clamped box. stop() disarming again afterwards is harmless. */
+	os_atomic_set_bool(&g_drm.program_want, false);
 	blog(LOG_INFO, "drm-output: flip loop exited after %llu flips", g_drm.flips);
 	return NULL;
 }
@@ -394,6 +712,10 @@ static void *drm_output_flip_thread(void *arg)
 static void drm_output_teardown_locked(void)
 {
 	if (g_drm.drm_fd >= 0) {
+		/* M2: Program FBs + GBM BOs first (RmFB needs the still-open fd). The GL textures
+		 * are already gone — stop() runs drm_output_program_gl_teardown before this, and
+		 * the start-failure path never created any. */
+		drm_output_program_free_bufs_locked();
 		for (int i = 0; i < DRM_OUTPUT_BUFFERS; i++) {
 			struct drm_output_buffer *b = &g_drm.buffers[i];
 			if (b->map) {
@@ -451,6 +773,12 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 		return true;
 	}
 	g_drm.flips = 0;
+	g_drm.program_flips = 0;
+	g_drm.program_gl_ready = false;
+	g_drm.program_crtc_live = false;
+	g_drm.p_front = -1;
+	g_drm.p_pending = -1;
+	g_drm.p_ready = -1;
 
 	bool ok = drm_output_acquire_lease(cfg->connector_name) &&
 		  drm_output_setup_scanout(cfg->solid_argb);
@@ -459,6 +787,19 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 		pthread_mutex_unlock(&g_drm.lock);
 		blog(LOG_WARNING, "drm-output: start FAILED for '%s'", cfg->connector_name);
 		return false;
+	}
+
+	/* M2: allocate the Program scanout buffers (fail-open — a failure stays on the solid
+	 * pattern rather than failing the whole output). The frame hook arms only on success. */
+	if (cfg->program) {
+		if (drm_output_program_alloc_locked()) {
+			os_atomic_set_bool(&g_drm.program_want, true);
+		} else {
+			drm_output_program_free_bufs_locked();
+			os_atomic_set_bool(&g_drm.program_want, false);
+		}
+	} else {
+		os_atomic_set_bool(&g_drm.program_want, false);
 	}
 
 	os_atomic_set_bool(&g_drm.running, true);
@@ -487,11 +828,16 @@ void obs_drm_output_stop(void)
 	}
 	g_drm.stopping = true; /* claim the transition: a racing stop returns above, a racing start rejects */
 	os_atomic_set_bool(&g_drm.running, false);
+	os_atomic_set_bool(&g_drm.program_want, false); /* M2: the frame hook stops producing */
 	pthread_t th = g_drm.thread;
 	pthread_mutex_unlock(&g_drm.lock);
 
 	/* Join outside the lock: the flip loop reads g_drm fields but never takes g_drm.lock. */
 	pthread_join(th, NULL);
+
+	/* M2: destroy the GL side BEFORE the DRM/GBM teardown (the textures alias the BOs); it
+	 * takes graphics context + program_lock, so a frame hook mid-render finishes first. */
+	drm_output_program_gl_teardown();
 
 	pthread_mutex_lock(&g_drm.lock);
 	drm_output_teardown_locked();
@@ -539,6 +885,11 @@ void obs_drm_output_maybe_autostart(void)
 	const char *connector = obs_data_get_string(data, "connector");
 	bool has_argb = obs_data_has_user_value(data, "argb");
 	long long argb_ll = obs_data_get_int(data, "argb");
+	/* M2: optional "program" key — false keeps the M1 solid diagnostic pattern; absent or
+	 * true binds the Program (the point of the module). */
+	bool program = true;
+	if (obs_data_has_user_value(data, "program"))
+		program = obs_data_get_bool(data, "program");
 
 	if (!enabled) {
 		blog(LOG_INFO, "drm-output: autostart disabled ({\"enabled\":false} in %s) — dormant",
@@ -560,11 +911,126 @@ void obs_drm_output_maybe_autostart(void)
 	cfg.connector_name = connector_buf;
 	/* Honour an explicit "argb": 0 (solid black); only fall back to dark grey when absent. */
 	cfg.solid_argb = has_argb ? (uint32_t)argb_ll : 0x00202020u;
+	cfg.program = program;
 
 	blog(LOG_INFO, "drm-output: autostart ENABLED from %s — connector='%s'", path,
 	     cfg.connector_name);
 	obs_data_release(data);
 	(void)obs_drm_output_start(&cfg);
+}
+
+void obs_drm_output_on_frame(void)
+{
+	if (!os_atomic_load_bool(&g_drm.program_want))
+		return;
+
+	/* Lock discipline (the module's deadlock rule): graphics context FIRST, then program_lock
+	 * — the same order the GL teardown takes; the flip thread takes program_lock alone and
+	 * never the graphics context, so no cycle exists. The CONTEXT alone excludes the GL
+	 * teardown for this whole body (it must enter the context before touching the textures),
+	 * so program_lock is held only for the two mailbox-role transactions (claim + publish),
+	 * never across the GL command recording — the flip thread's vblank loop is never blocked
+	 * behind a render or the one-time lazy bind. We run on the graphics thread (the
+	 * obs_graphics_thread_loop call site), so the enter is a cheap recursive ref. */
+	obs_enter_graphics();
+
+	if (!os_atomic_load_bool(&g_drm.program_want)) { /* re-check: a stop may have disarmed */
+		obs_leave_graphics();
+		return;
+	}
+
+	if (!g_drm.program_gl_ready) {
+		if (!drm_output_program_gl_bind()) {
+			os_atomic_set_bool(&g_drm.program_want, false);
+			/* Free any partially-imported textures right here — we hold the context. */
+			for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
+				if (g_drm.pbufs[i].tex) {
+					gs_texture_destroy(g_drm.pbufs[i].tex);
+					g_drm.pbufs[i].tex = NULL;
+				}
+			}
+			obs_leave_graphics();
+			return;
+		}
+		g_drm.program_gl_ready = true;
+	}
+
+	gs_texture_t *program = obs_get_main_texture();
+	if (!program) { /* nothing rendered yet this session — keep the solid pattern */
+		obs_leave_graphics();
+		return;
+	}
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	if (!effect) {
+		obs_leave_graphics();
+		return;
+	}
+
+	/* CLAIM: take a buffer out of every mailbox role under the lock. Once claimed it is in
+	 * NO role, so the flip thread cannot select it while we render into it lock-free. */
+	pthread_mutex_lock(&g_drm.program_lock);
+	int idx = drm_output_pick_render_buf(g_drm.p_front, g_drm.p_pending, g_drm.p_ready,
+					     DRM_OUTPUT_PROGRAM_BUFFERS);
+	if (idx == g_drm.p_ready)
+		g_drm.p_ready = -1; /* claim the mailbox slot for overwrite (latest wins) */
+	pthread_mutex_unlock(&g_drm.program_lock);
+	if (idx < 0) {
+		obs_leave_graphics();
+		return;
+	}
+
+	/* Raw SDR copy of the Program into the scanout buffer: non-sRGB sampling + framebuffer
+	 * sRGB encode OFF + blending OFF preserves the canvas bytes exactly (the same values a
+	 * monitor on the X desktop shows). Aspect-fit letterboxes a mode/canvas mismatch (the
+	 * rig runs 1:1 1920x1080). Known limitation: SDR only — HDR would need a tonemap pass. */
+	uint32_t src_w = gs_texture_get_width(program);
+	uint32_t src_h = gs_texture_get_height(program);
+	uint32_t fx, fy, fw, fh;
+	drm_output_fit_rect(src_w, src_h, g_drm.mode_w, g_drm.mode_h, &fx, &fy, &fw, &fh);
+
+	gs_viewport_push();
+	gs_projection_push();
+	gs_matrix_push();
+	gs_matrix_identity();
+
+	gs_set_render_target(g_drm.pbufs[idx].tex, NULL);
+	struct vec4 black;
+	vec4_zero(&black);
+	gs_clear(GS_CLEAR_COLOR, &black, 0.0f, 0);
+	gs_set_viewport((int)fx, (int)fy, (int)fw, (int)fh);
+	gs_ortho(0.0f, (float)src_w, 0.0f, (float)src_h, -100.0f, 100.0f);
+
+	gs_enable_depth_test(false);
+	gs_set_cull_mode(GS_NEITHER);
+	const bool prev_srgb = gs_framebuffer_srgb_enabled();
+	gs_enable_framebuffer_srgb(false);
+	gs_enable_blending(false);
+
+	gs_eparam_t *param = gs_effect_get_param_by_name(effect, "image");
+	gs_effect_set_texture(param, program);
+	while (gs_effect_loop(effect, "Draw"))
+		gs_draw_sprite(program, 0, 0, 0);
+
+	gs_enable_blending(true);
+	gs_enable_framebuffer_srgb(prev_srgb);
+	gs_set_render_target(NULL, NULL);
+
+	gs_matrix_pop();
+	gs_projection_pop();
+	gs_viewport_pop();
+
+	/* Submit now: the kernel page-flip then waits on the BO's implicit fence (i915/Xe
+	 * dma-resv), so scanout can never observe a half-rendered buffer. No glFinish stall. */
+	gs_flush();
+
+	/* PUBLISH: hand the rendered buffer to the flip thread — flush ordered BEFORE this, so
+	 * the flip always finds the implicit fence attached. Skip when a stop disarmed us
+	 * mid-render (the mailbox is about to be torn down). */
+	pthread_mutex_lock(&g_drm.program_lock);
+	if (os_atomic_load_bool(&g_drm.program_want))
+		g_drm.p_ready = idx;
+	pthread_mutex_unlock(&g_drm.program_lock);
+	obs_leave_graphics();
 }
 
 #endif /* defined(__linux__) */

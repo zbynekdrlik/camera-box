@@ -4,6 +4,9 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output.h"
   - "vendor/obs-studio/libobs/cmake/os-linux.cmake"
   - "tests/drm_output_lease_1152.rs"
+  - "tests/drm_output_program_1152.rs"
+  - "tests/drm_lease_tolerance_1152.rs"
+  - "scripts/imag-obs-start.sh"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -15,9 +18,10 @@ OBS acquires DRM master of the HDMI connector through an **X RandR output LEASE*
 with **NO** NDI hop and **NO** external presenter. The NDI-loopback / external-presenter variant is
 REJECTED (zero-latency mandate); it survives only as an emergency fallback in the spec appendix.
 
-Milestones: **M1** (done) = lease acquire + solid-color flip from the OBS process (mechanism proof,
-NOT bound to the render texture). **M2** = Program texture → dma-buf/EGL export → zero-copy KMS flip.
-**M3** = vsync/latency measurement vs today's projector. **M4** = provisioning + `[0/8]` facets.
+Milestones: **M1** (done, live-verified 2026-08-26: 679 flips ≈ 60/s, clean release) = lease acquire
++ solid-color flip from the OBS process. **M2** (code done, awaiting rig verify) = Program texture →
+GBM dma-buf → zero-copy KMS flip (section below). **M3** = vsync/latency measurement vs today's
+projector. **M4** = provisioning + `[0/8]` facets.
 
 ## Why the module lives in libobs, not a plugin
 
@@ -56,14 +60,20 @@ so there is **no `windows-genlock*.yml` pwsh mirror** (nothing to assert on Wind
   os-linux.cmake link, the `__linux__`-guarded obs.c autostart + obs_shutdown stop). Facet B lifts
   `drm_output_pick_free_crtc` and cc-compiles it under `-Werror -Wconversion` over a truth table —
   mutate the free-test on a scratch copy to prove it bites (9/10 vectors diverge).
-- **fsyntax-only against REAL headers** (stronger than "CI is first compiler"): stub `obs.h`
-  (blog with `__attribute__((format(printf,2,3)))` → `-Wformat=2` checks every blog format string;
-  stub `os_atomic_{set,load}_bool`/`obs_data_*`), stub `util/c99defs.h` (`#define EXPORT`), copy the
-  real `.c` into the stub dir so its `"obs.h"` resolves to the stub, then
-  `gcc -fsyntax-only -std=gnu11 -Wall -Wextra -Wformat=2 -Wconversion -I<stub> -I/usr/include/libdrm
-  $(pkg-config --cflags xcb xcb-randr libdrm) obs-drm-output.c`. Install `libdrm-dev`/`libxcb-randr0-dev`
-  on dev1 if missing. This caught nothing on the clean pass but is the net that would catch a wrong
-  xcb/drm signature or a `%zu`/`%llu` mismatch before a wasted CI cycle.
+- **fsyntax-only against the REAL in-tree libobs headers — the M2-upgraded net (use THIS, not the
+  older stub-obs.h variant):** the whole public libobs header set is self-contained C, so the ONLY
+  stub needed is the CMake-generated `obsconfig.h` — write a minimal one into a scratch dir
+  (OBS_DATA_PATH/OBS_INSTALL_PREFIX/OBS_PLUGIN_DESTINATION + feature defines; **NO
+  `OBS_VERSION`/`OBS_VERSION_CANONICAL` macros** — this tree declares those `extern const char*`
+  in `obsversion.h`, and a macro collides the moment a TU pulls obs-internal.h) — then
+  `gcc -fsyntax-only -std=gnu11 -Wall -Wextra -Wformat=2 -Wconversion -I<scratch>
+  -Ivendor/obs-studio/libobs -I/usr/include/libdrm vendor/obs-studio/libobs/obs-drm-output.c`.
+  Every real prototype (`gs_*`, `obs_*`, `os_atomic_*`, gbm/drm/xcb) is then genuinely
+  signature-checked locally — this net catches the exact M1-class miss (the stubbed obs.h that
+  masked a missing `util/threading.h` include, fda5b2f5d) by construction. `obs-video.c` compiles
+  the same way with `-Ivendor/obs-studio/deps/libcaption` added (obs-internal.h needs it).
+  Install `libdrm-dev`/`libxcb-randr0-dev`/`libgbm-dev` on dev1 if missing. The old stub-obs.h
+  recipe survives only as a fallback for a TU that genuinely cannot include the real headers.
 
 ## DEFAULT-OFF activation + M1 rig runbook (SUPERVISOR step, after CI-green + full-bundle deploy)
 
@@ -78,9 +88,147 @@ Activation is a config file, not env (respects the "no env" doctrine): `obs_star
    `ACTIVE` → `page-flip #1` then ~1/min; HDMI shows solid grey, no X window lands on it, eDP untouched.
 4. Rollback: `rm ~/.camera-box/drm-output.json` + restart OBS; `xrandr --output HDMI-1 --auto`.
 
-M1 is SOLID color; the **M2 HOOK** (where the solid fill is replaced by a dma-buf import of the
-Program GL texture) is marked in `drm_output_setup_scanout()`. Scanout tearing stays report-only
-until the #781 physical HDMI tap; M1 claims only the MECHANISM (leased + page-flipping + armed).
+**M1 LIVE-VERIFIED 2026-08-26 (new imag-nb) — plus two runbook gotchas the first live pass hit:**
+lease acquired on the real HDMI-1, mode set 1920x1080@60, 679 vblank-locked flips (~60/s), and a
+DETERMINISTIC clean release under a real SIGTERM (obs_shutdown → `lease released — connector
+returned to Xorg` — the review's lifecycle invariant, proven live, not just in code review).
+
+- **Do NOT run the M1/M2 test window under the `imag-obs` user unit's supervision with HDMI-1 off
+  in X.** The unit's wrapper (`imag-obs-start.sh`) runs post-launch bootstrap + `--projector`
+  steps that FAIL when the HDMI display is out of the X layout → wrapper exit 1 → systemd tears
+  OBS down and CRASH-LOOPS the unit (restart counter climbing every ~13 s). For a test window:
+  `systemctl --user stop imag-obs`, launch OBS manually, test, then restore the unit — or defer to
+  an M2-era wrapper that tolerates the leased-connector state.
+- **After a lease, X RandR can stick at `HDMI-1 disconnected`** (kernel status stays `connected`),
+  and a per-output `xrandr --output HDMI-1 --auto --primary` throws `BadAccess (RRSetOutputPrimary)`
+  while a lease is still held. The reliable restore is a GLOBAL `xrandr --auto` after the release —
+  it re-probes and brings HDMI-1 back `connected primary 1920x1080`.
+
+## M2 — Program → GBM dma-buf → zero-copy scanout (the shipped shape)
+
+The chosen path is **render INTO scanout** (the kmscube/wlroots pattern), NOT an EGL export of GL
+textures (a render-chosen Intel CCS modifier can be unscannable) and NOT a CPU readback (violates
+the zero-copy mandate; ~0.5 GB/s + a GPU stall on the 25W box):
+
+- `start()` allocates 3 `gbm_bo_create(XRGB8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING)` BOs
+  on the LEASE fd (scanout-compatible modifier BY CONSTRUCTION) + `drmModeAddFB2WithModifiers`
+  FBs. **The GL import is LAZY** — at `obs_startup` autostart time the graphics subsystem does not
+  exist, so the first `obs_drm_output_on_frame()` call (the graphics thread) imports each BO via
+  the UPSTREAM `gs_texture_create_from_dmabuf` (which returns a `GS_RENDER_TARGET` texture —
+  gl-egl-common.c creates them with that flag, and the GL backend attaches any `GS_TEXTURE_2D` to
+  an FBO), so M2 needed ZERO new graphics vtable exports.
+- The hook sits in `obs_graphics_thread_loop` (obs-video.c) right after `output_frames` under a
+  `#if defined(__linux__)` guard, and raw-copies the Program (`obs_get_main_texture`) into the
+  mailbox back buffer: **non-sRGB sampling + framebuffer-sRGB OFF + blending OFF** = byte-faithful
+  SDR copy (the sRGB decode/encode round-trip of `obs_render_main_texture` is for filtered
+  scaling, not a scanout copy). Aspect-fit letterboxes a mode/canvas mismatch; SDR-only (HDR would
+  need a tonemap pass — out of scope, imag is SDR).
+- **Mailbox triple buffer** (front on scanout / pending flip queued / ready latest-wins): producer
+  = graphics thread (~60 fps DanteSync-locked), consumer = the M1 flip thread (HDMI vblank) — two
+  INDEPENDENT clock domains, so an occasional repeated/overwritten frame is inherent and correct.
+  The pure helpers `drm_output_pick_render_buf` + `drm_output_fit_rect` are truth-tabled in
+  `tests/drm_output_program_1152.rs` (std-only, the same lift-compile model as M1).
+- The first Program frame does a one-shot `drmModeSetCrtc` onto the GBM FB (a legacy page-flip
+  across a modifier change is unreliable — the dumb solid FB and the GBM FB differ), then
+  page-flips run among the identical GBM FBs; when the mailbox is empty the flip thread RE-FLIPS
+  the front FB (vblank pacing with no condvar). GPU→scanout sync is `gs_flush()` + i915/Xe
+  implicit fencing on the BO (the kernel flip waits on dma-resv — no glFinish).
+- **Lock order (deadlock rule): graphics context FIRST, then `program_lock`** — and the frame
+  hook is CLAIM/RENDER/PUBLISH shaped (review finding): the graphics CONTEXT alone excludes the
+  GL teardown for the whole hook body, so `program_lock` is held only for the two mailbox-role
+  transactions (claim a role-free buffer; publish `p_ready` with a `program_want` re-check),
+  never across the GL command recording or the lazy bind. The flip thread takes `program_lock`
+  alone (briefly, never across the flip wait) and never the graphics context; `g_drm.lock` still
+  never enters the flip loop. `stop()` order: disarm `program_want` → join → GL teardown (ctx +
+  program_lock) → `teardown_locked` (Program FBs/BOs freed BEFORE the fd closes). `obs_shutdown`
+  calls stop BEFORE `stop_video()`, so graphics is still alive for the texture destroy.
+  **Disarm invariant (review 🔴/🟡): "armed ⇒ buffers exist" holds on EVERY path** —
+  `drm_output_program_free_bufs_locked` disarms first (covers the pthread_create-failure start
+  path), and the flip loop disarms on SELF-death (lease revoke / failed flip) so the hook never
+  keeps rendering ~60/s into a mailbox nobody drains.
+- **Fail-open**: any GBM/AddFB2/import failure logs `program bind FAILED`/`staying on the solid
+  pattern` and the output keeps the M1 solid behaviour (it also shows solid until OBS's first
+  rendered frame). Config: optional `"program": false` in `~/.camera-box/drm-output.json` forces
+  the M1 solid diagnostic pattern; absent/true = Program binding (the default).
+- New CI/link deps: `libgbm-dev` in linux-genlock.yml `OBS_APT_PACKAGES`;
+  `pkg_check_modules(Gbm REQUIRED IMPORTED_TARGET gbm)` + `PkgConfig::Gbm` in os-linux.cmake.
+- New log markers (all M1 `drm-output:` substrings stay byte-identical; these are mutually
+  non-substring): `program buffers allocated`, `program bind ready` / `program bind FAILED`,
+  `program scanout LIVE`, `program-flip #N` (first + ~1/min at 60 Hz). Rig verify (supervisor):
+  enable the config → restart imag OBS → expect `lease acquired` → `mode set` → `program buffers
+  allocated` → `ACTIVE` (solid) → after the first render tick `program bind ready` → `program
+  scanout LIVE` → `program-flip #1`, and the HDMI shows the LIVE Program, not grey.
+
+Scanout tearing stays report-only until the #781 physical HDMI tap; M3 measures vsync/latency
+vs today's projector.
+
+## M4 — permanent-deployment tolerance + facets (the shipped shape)
+
+M1/M2 proved the mechanism; M4 makes the ENABLED state deployable unattended. Three pieces, all
+keyed on the ONE config file (`~/.camera-box/drm-output.json` — the module's own activation
+contract, still DEFAULT-OFF):
+
+- **Lease-tolerant wrapper + seeder.** `imag-obs-start.sh` detects an enabled config BEFORE the
+  OBS launch: it announces `drm-lease mode ENABLED` loudly into `/tmp/imag-obs-start.log` and
+  takes the config's `connector` out of the X layout (`xrandr --output <connector> --off`,
+  best-effort + loud WARN — the idle-connector lease precondition from the M1 runbook, now
+  reboot-durable with no openbox-autostart edit). The projector-step tolerance itself lives in
+  `imag_scenes.py`: `projector()` consults the BOX's own config (local read on the loopback path,
+  the sshpass transport for a dev1 `--host <ip>` call) and in lease mode opens ONLY the panel
+  Multiview, closes EVERY restored X `Projector - Program` stray, and NEVER exits non-zero — so
+  the crash-loop from the first M1 runbook gotcha above cannot recur, and every seed caller (unit
+  boot, operator menu, watchdog relaunch, verify repopulate) inherits the tolerance from one
+  place. Dormant config ⇒ both files behave byte-identically to before.
+- **The `drm_output` display-path facet + lease-aware `hdmi_primary`** (shared
+  `scripts/lib/imag-display-path.sh`, flowing into drift-guard `--check-imag` check 10, the E2E
+  `[0/8]` preflight and verify-imag (z) through their generic loops): dormant config = OK (the
+  fleet default never false-aborts a run); ENABLED demands the current OBS log's
+  `program scanout LIVE` marker = OK, while bind FAILED / solid-only (incl. the `"program": false`
+  M1 diagnostic — cam2's grabber taps this HDMI, a grey pattern wrecks a data run) / no marker /
+  no readable log = DRIFT fail-loud. With the config enabled `hdmi_primary` accepts the panel
+  primary as correct-by-design (HDMI is leased OUT of X), instead of the pre-M4 false DRIFT.
+- **Provisioning stays hands-off.** `setup-imag.sh`'s #840 block already fetches
+  `imag-obs-start.sh` + `imag_scenes.py` from `ref=dev`, so a re-run refreshes the pair; it never
+  writes `drm-output.json` (locked by a negative anchor test — enabling is ALWAYS the deliberate
+  runbook step below, never provisioning). verify-imag check (p2) proves the INSTALLED pair is the
+  lease-tolerant generation (static greps for `DRM_LEASE_MODE` / `drm_output_lease_enabled`).
+
+### The ENABLE flip (SUPERVISOR/owner runbook — never automated)
+
+1. `scripts/verify-imag.sh` green FIRST, incl. (p2) — an older installed wrapper pair crash-loops
+   the unit the moment the DRM output owns the connector. (Check (o) expects the DORMANT 1+1
+   X-projector state, so run the acceptance gate BEFORE the flip, not after.)
+2. Write the config (the M1 runbook's `printf '{"enabled":true,...}'` block above) — no manual
+   `xrandr --off` needed any more; the wrapper does it at every unit start. **The machine-written
+   ONE-LINE form with an explicit non-empty `"connector"` is a CONTRACT, not a style**: the C
+   module and the shared python classifier (`imag_scenes.drm_output_lease_connector` — the
+   wrapper's and the seeder's ONE decision grammar) both require a full-JSON-parseable config
+   with a connector to arm, and the facet gather's grep reads a newline-stripped copy. Never
+   hand-edit the file into pretty-printed/partial JSON — a config the C would ignore must stay
+   dormant EVERYWHERE, and a malformed one shows up as a loud `drm_output` DRIFT, never as a
+   half-armed wrapper.
+3. `systemctl --user restart imag-obs` (the supervised path, never a direct script call). Expect,
+   in order: OBS log `lease acquired` → `mode set` → `program buffers allocated` → `ACTIVE` →
+   `program bind ready` → `program scanout LIVE` → `program-flip #1`; wrapper log
+   `drm-lease mode ENABLED` and the Multiview-only projector seed.
+4. From then on the `drm_output` facet (drift-guard / [0/8] / verify (z)) holds the enabled state
+   to the LIVE-marker proof. NB: the facet grades the NEWEST OBS session's LOG — `drm_output|OK`
+   does not by itself prove OBS is alive right now (liveness is the sibling gates' job), and a
+   read racing a fresh OBS start reads DRIFT until `program scanout LIVE` lands.
+5. Known boundary (deliberately NOT M4): the E2E `[0/8]`'s own X-projector count checks and
+   `obs_phase2` projector openers still expect the dormant 1+1 X-window state — teaching the E2E
+   harness the enabled-state expectations (Multiview-only X-side, Program on the scanout) is part
+   of the PERMANENT-flip milestone, so until then run data-collection E2E with the config dormant.
+
+### Rollback (ORDER MATTERS — X must get the connector back BEFORE the dormant wrapper runs)
+
+`rm ~/.camera-box/drm-output.json` → `systemctl --user stop imag-obs` → **explicit
+`xrandr --output HDMI-1 --auto --primary`** (the second M1 runbook gotcha: RandR sticks at
+`disconnected` after a lease, and a global `xrandr --auto` right after teardown can race a
+still-held lease) → `systemctl --user start imag-obs`. Skipping the xrandr step crash-loops the
+DORMANT unit instead: with the config gone the wrapper touches nothing and `projector()` is back
+to hard-failing on a missing HDMI monitor — which is correct for a genuinely unplugged projector
+and exactly why the restore must come first.
 
 ## Lifecycle invariants (locked by the #1152 review — keep them if you touch the module)
 
