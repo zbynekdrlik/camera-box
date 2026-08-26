@@ -369,19 +369,24 @@ main() {
 
   # Fire the Discord alert when the decision says to act AND the throttle permits it.
   if [ "${alert:-0}" = "1" ] && [ "${alert_now:-0}" = "1" ]; then
-    local msg
+    local msg restore_key
     if [ "$restore_kind" = "positive" ]; then
-      # Full positive restore — use the existing AUTO-RECOVERED body (every occurrence pings).
+      # Full positive restore — the AUTO-RECOVERED body. #1206: deduped on a stable per-kind key,
+      # so a repeat AUTO-RECOVERED within the card TTL edits the card instead of re-pinging.
       msg="🛟 #281 rig-restore-watchdog AUTO-RECOVERED a stranded rig ($REPO_SLUG). Reason: $reason. Restored: $actions. (No active E2E heartbeat; ${RIG_CONFIRM_THRESHOLD} consecutive confirmations.)"
+      restore_key="rig-restore-positive"
     else
       # PARTIAL restore — an OBS box unreadable, a teardown failed, or (#396) a cam restore failed.
       # Lower-urgency body; rate-limited to avoid repeated pings while the condition persists. The
       # body states what actually happened — it must never assert a recovery that failed.
       local unreadable_desc="${obs_unreadable_names:-none}"
       msg="⚠️ #281 rig-restore-watchdog: PARTIAL restore — prod NOT fully recovered ($REPO_SLUG). OBS box(es) unreadable: ${unreadable_desc}. Failed teardowns: ${obs_failed}. Failed cam restores: ${cam_failed}. Will retry. Reason: $reason."
+      # #1206: mirror this kind's throttle signature so a DISTINCT partial-failure set (a different
+      # unreadable box / failure combo) pings, while a repeat of the SAME set edits the card.
+      restore_key="rig-restore-partial-${obs_unreadable_names:-none}-${obs_failed:-0}-${cam_failed:-0}"
     fi
     log "ALERT: firing Discord notification (kind=$restore_kind)"
-    python3 "$NOTIFY" notify --body "$msg" --dedup-key "rig-restore-$restore_kind" >/dev/null 2>&1 \
+    python3 "$NOTIFY" notify --body "$msg" --dedup-key "$restore_key" >/dev/null 2>&1 \
       || log "ALERT: airuleset.py notify failed (non-fatal) — restore already executed"
   elif [ "${alert:-0}" = "1" ] && [ "${alert_now:-0}" = "0" ]; then
     log "ALERT: suppressed by throttle (kind=$restore_kind passes=${prior_alert_passes:-0}/${RIG_ALERT_THROTTLE_PASSES:-5} — same partial condition persists)"

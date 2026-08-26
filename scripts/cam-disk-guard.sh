@@ -106,6 +106,10 @@ main() {
     log "pass start (threshold=${CAM_DISK_ALERT_THRESHOLD}%, dry_run=$DRY_RUN)"
 
     local alerts=()
+    # #1206: parallel cam:mount identity tokens (NOT used_pct — which churns per pass) so the
+    # dedup key distinguishes DISTINCT incidents (cam1 / full vs cam4 /var/cache full) while a
+    # repeat of the SAME over-threshold set edits the card instead of re-pinging.
+    local key_ids=()
     # #403: collect in the main shell (no $() subshell per probe) so journald keeps the obs log.
     collect_observations
 
@@ -118,6 +122,7 @@ main() {
         if cam_disk_alert_needed "${used_pct:-0}"; then
             log "ALERT: cam=$cam mount=$mount used=${used_pct}% >= ${CAM_DISK_ALERT_THRESHOLD}%"
             alerts+=("cam $cam $mount ${used_pct}% (≥${CAM_DISK_ALERT_THRESHOLD}%)")
+            key_ids+=("${cam}:${mount}")
         fi
     done <<< "$DISK_OBS"
 
@@ -134,10 +139,12 @@ main() {
     msg+="Root auto-grow runs on first boot (camera-box-grow-root.service); if still high, check."
 
     log "ALERT: ${#alerts[@]} mount(s) over threshold"
+    local disk_key
+    disk_key="cam-disk-$(printf '%s\n' "${key_ids[@]}" | LC_ALL=C sort | tr '\n' ',' | sed 's/,$//')"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        log "[dry-run] WOULD fire Discord: $msg"
+        log "[dry-run] WOULD fire Discord (dedup-key=$disk_key): $msg"
     else
-        python3 "$NOTIFY" notify --body "$msg" --dedup-key "cam-disk" >/dev/null 2>&1 \
+        python3 "$NOTIFY" notify --body "$msg" --dedup-key "$disk_key" >/dev/null 2>&1 \
             || log "notify failed (non-fatal) — alert still logged above"
     fi
 

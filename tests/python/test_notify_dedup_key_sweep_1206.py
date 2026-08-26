@@ -34,10 +34,10 @@ def _iter_notify_scripts():
             continue
         if p.suffix not in (".sh", ".py"):
             continue
-        txt = p.read_text(encoding="utf-8", errors="replace")
-        if "notify --body" in txt:
-            found.append(p)
-        elif '"notify"' in txt and '"--body"' in txt:
+        # Discover on the JOINED logical lines (not raw text) so a call-site written across a
+        # line-continuation — `"$NOTIFY" notify \` ⏎ `--body ...`, or with an arg between them —
+        # is still found and subjected to the invariants below, never a silent false green (#1206).
+        if _notify_body_logical_lines(p):
             found.append(p)
     return found
 
@@ -75,7 +75,10 @@ def _notify_body_logical_lines(path):
             if '"notify"' in seg and '"--body"' in seg:
                 calls.append(" ".join(seg.split()))
         return calls
-    return [ln for ln in _join_bash_continuations(txt) if "notify --body" in ln]
+    # Match `notify ... --body` on the JOINED logical line (regex, not a contiguous-substring
+    # check) so a future call-site that splits `notify \` from `--body`, or inserts an arg
+    # between them, is still caught by both invariants below (#1206 review hardening).
+    return [ln for ln in _join_bash_continuations(txt) if re.search(r"notify\b.*--body", ln)]
 
 
 def test_sweep_covers_the_known_alert_watchdogs():
