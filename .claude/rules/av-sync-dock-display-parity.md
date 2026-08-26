@@ -4,6 +4,7 @@ paths:
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
   - "tests/av_sync_dock_latency_display_*.rs"
   - "tests/av_sync_dock_cpp_mirror_gate.rs"
+  - "tests/av_sync_dock_pairing_recover_1153.rs"
 ---
 
 # A/V-sync dock display: Rust↔C++ parity seam, which box it locks on, residual pairing
@@ -82,3 +83,30 @@ token, a one-shot `av-sync-dock: measurement input LOST -> STALE` blog() line, t
 and the dock's `Status.Stale` + greyed/labelled `latencyDisplay`. It is a parity-mirrored seam like
 the rest of this file — move both sides + the `camera-box-selftest.cpp` CHECK in lockstep. Purely a
 display-layer classifier; it never touches the demod, the cluster, or the gate.
+
+## Dead-PAIRING (sticky unlock) has its own recovery seam — reset, never an OBS restart (#1153)
+A large video-latency STEP on the program source (the E2E `[5/8]` force-set + cleanup restore,
+~±1 s) left the live dock UNPAIRED for 2+ hours (ring_hit frozen at chance, crc_ok at the ~1/256
+chance floor) until a manual OBS restart, while a fresh instance locks in ~2.5 min — and NO
+pre-existing path could ever recover it: every unlock is decoded-marker-driven (#1177 above), and
+`DockInputStaleness` is display-only AND stays LIVE in this failure (video_decoded + crc_ok both
+keep advancing at chance). The recovery seam: `DockPairingWatchdog` ↔ `CbDockPairingWatchdog` (the
+SAME observe-at-the-diag-tick shape as #1177), 300 s epochs — pairing alive = ring_hit +≥4/epoch OR
+locked with SOME ring advance (a lock with ZERO hits across a full epoch is provably STALE: the
+cluster window is 180 s and `locked` only flips on a push, which needs a decode); fires ONLY when
+the input is demonstrably alive (video_decoded AND preambles both advancing — EVENT mode / silence
+stay #1177's domain, never a reset loop). The fire (`cb_apply_pairing_recovery`,
+sync-test-output.cpp, audio thread) resets ALL in-dock pairing state — ring under the mutex, fresh
+cluster, offset history, fresh audit tracker, `StreamingMarkerDecoder::reset_window()`
+(origin-continuous; cumulative stats PRESERVED so the diag counters stay monotonic and BOTH
+counter-advance detectors stay consistent) — drops a stale `cb_lock_state` (+
+`lock_state_changed(false)`), and logs ONE `av-sync-dock: PAIRING-RECOVER` line whose epoch deltas
+DISCRIMINATE the poison class from the OBS log alone: crc_ok near the 1/256 chance floor of the
+preamble delta = the marker WAVEFORM is degraded UPSTREAM of the dock (the reset cannot cure that;
+the periodic recover lines ARE the evidence trail for the follow-up); a healthy crc_ok rate with a
+dead ring = in-dock pairing state (which the reset clears). Every in-dock struct otherwise
+self-heals ≤20 s by design — that code-trace is why a 2-hour sticky state implicates the upstream
+audio chain. Non-finite hardening rides along: the mono mixdown skips NaN/Inf per channel and the
+shared decode kernel sanitizes its prefix-sum input (one NaN otherwise kills the whole ~68 ms
+window, on the live AND offline decode paths). Parity-mirrored + selftest-cross-checked like the
+rest of this file; the wiring/anchors are pinned by `tests/av_sync_dock_pairing_recover_1153.rs`.

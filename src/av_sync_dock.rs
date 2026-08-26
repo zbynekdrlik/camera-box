@@ -321,6 +321,17 @@ impl StreamingMarkerDecoder {
     pub fn stats(&self) -> DecodeStats {
         self.stats
     }
+
+    /// #1153 — drop the rolling window + dedup anchor while PRESERVING origin continuity (the
+    /// absolute-sample coordinate the caller's own pushed-sample count mirrors) and the cumulative
+    /// [`Self::stats`] (the live diag counters must stay monotonic across a pairing recovery).
+    /// Part of the dead-pairing reset: the decoder re-acquires from a clean window without
+    /// disturbing the caller's timestamp mapping. Mirrored by `camera-box-audio.hpp`.
+    pub fn reset_window(&mut self) {
+        self.origin += self.buf.len() as u64;
+        self.buf.clear();
+        self.last_reported = None;
+    }
 }
 
 /// Rolling densest-cluster A/V-offset estimator for the LIVE dock — the robust replacement for the
@@ -986,6 +997,156 @@ impl DockInputStaleness {
             return DockStaleTransition::EnteredStale;
         }
         DockStaleTransition::None
+    }
+}
+
+/// #1153 — how long (ns) the dock's marker↔QR PAIRING may stay dead (no meaningful ring-hit
+/// advance, no genuine lock) while the measurement input itself keeps flowing, before the dock
+/// resets its own pairing state and re-acquires from scratch. 300 s = 2× the observed worst-case
+/// legitimate fresh-lock convergence (~2.5 min after an OBS start, 2026-08-26 controlled
+/// experiment), so a normal acquisition (ring pairs ~1 per 5 s) never trips it, while the sticky
+/// post-latency-step dead window (pairing at chance level, ~12 pairs per 2 h live) fires on the
+/// first full epoch. Mirrored by `camera-box-audio.hpp`'s `CB_DOCK_PAIRING_DEAD_NS`.
+pub const DOCK_PAIRING_DEAD_NS: u64 = 300 * 1_000_000_000;
+
+/// #1153 — minimum ring-hit advance per [`DOCK_PAIRING_DEAD_NS`] epoch for pairing to count as
+/// alive on its own. 4: far under a converging chain (~60/epoch at the observed ~1 pair/5 s) and
+/// far above the dead state's chance-level pairing (~0.5/epoch at the post-hardening 1/256
+/// false-decode floor). Mirrored by `CB_DOCK_PAIRING_MIN_RING_HITS`.
+pub const DOCK_PAIRING_MIN_RING_HITS: u64 = 4;
+
+/// One epoch-end verdict from [`DockPairingWatchdog::observe`]. `fire == true` means the pairing
+/// was DEAD for the whole epoch while the input kept flowing — the caller must reset ALL in-dock
+/// pairing state (ring, cluster, offset history, audit state, decoder window) and log the epoch
+/// deltas carried here: they discriminate the poison class from the OBS log alone (`crc_ok_delta`
+/// near the 1/256 chance floor of `preambles_delta` = the marker waveform is degraded UPSTREAM of
+/// the dock; a healthy crc_ok rate with a dead ring = in-dock pairing state, which the reset
+/// clears). A mid-epoch observe returns `fire: false` with zeroed deltas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DockPairingRecovery {
+    pub fire: bool,
+    /// Actual elapsed ns of the evaluated epoch (>= the configured dead threshold when at an
+    /// epoch end; 0 on a mid-epoch observe).
+    pub window_ns: u64,
+    pub ring_hit_delta: u64,
+    pub crc_ok_delta: u64,
+    pub preambles_delta: u64,
+    pub video_decoded_delta: u64,
+}
+
+impl DockPairingRecovery {
+    fn none() -> Self {
+        DockPairingRecovery {
+            fire: false,
+            window_ns: 0,
+            ring_hit_delta: 0,
+            crc_ok_delta: 0,
+            preambles_delta: 0,
+            video_decoded_delta: 0,
+        }
+    }
+}
+
+/// #1153 — the sticky-unlock (dead-pairing) watchdog: after a large video-latency STEP on the
+/// program source (the E2E `[5/8]` force-set + cleanup restore of ~±1 s), the live dock was
+/// observed to stay UNPAIRED for 2+ hours — ring hits frozen at chance level, crc_ok at the
+/// ~1/256 chance floor — until a manual OBS restart, while a freshly-started instance locks
+/// within ~2.5 min under identical ambient conditions (2026-08-26 controlled experiment). Every
+/// pre-existing unlock/reset path is decoded-marker-driven and [`DockInputStaleness`] is
+/// display-only, so NOTHING ever reset the pairing state: an OBS restart was the only cure.
+///
+/// This watchdog watches the pairing OUTCOME counters at the same ~10 s diag tick that feeds
+/// [`DockInputStaleness`]: every `dead_ns` epoch it compares the epoch's deltas —
+/// `pairing_alive = ring_hit advanced ≥ min_ring_hits, OR locked with SOME ring advance` (a lock
+/// with ZERO ring hits across a full epoch is provably stale: the cluster window is far shorter
+/// than the epoch, and `locked` only flips on a push, which needs a decode) — and FIRES only when
+/// pairing is dead while the input is demonstrably alive (video QRs decoding AND audio candidates
+/// screening). Input-dead states (EVENT mode, silence) never fire — they belong to
+/// [`DockInputStaleness`], and resetting on them would be a pointless loop. While the dead state
+/// persists the watchdog re-fires once per epoch: a bounded retry that also leaves a periodic
+/// evidence line in the OBS log.
+///
+/// Pure/stateful, mirrored byte-for-byte by `camera-box-audio.hpp::CbDockPairingWatchdog` and
+/// cross-checked by the committed C++ self-test (`av_sync_dock_cpp_mirror_gate`). Fed once per
+/// diag tick with the current cumulative counters + the audio-thread clock.
+#[derive(Debug, Clone, Copy)]
+pub struct DockPairingWatchdog {
+    initialized: bool,
+    epoch_start_ns: u64,
+    base_video_decoded: u64,
+    base_preambles: u64,
+    base_crc_ok: u64,
+    base_ring_hit: u64,
+}
+
+impl Default for DockPairingWatchdog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DockPairingWatchdog {
+    pub fn new() -> Self {
+        DockPairingWatchdog {
+            initialized: false,
+            epoch_start_ns: 0,
+            base_video_decoded: 0,
+            base_preambles: 0,
+            base_crc_ok: 0,
+            base_ring_hit: 0,
+        }
+    }
+
+    /// Observe the current cumulative counters at time `now_ns`. The FIRST call only seeds the
+    /// epoch baseline (never fires). Mid-epoch calls return `fire: false`. At an epoch end
+    /// (`now - epoch_start >= dead_ns`) the epoch's deltas are evaluated, a NEW epoch starts
+    /// from the current counters either way, and the verdict (with the evaluated deltas) is
+    /// returned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe(
+        &mut self,
+        video_decoded: u64,
+        preambles: u64,
+        crc_ok: u64,
+        ring_hit: u64,
+        locked: bool,
+        now_ns: u64,
+        dead_ns: u64,
+        min_ring_hits: u64,
+    ) -> DockPairingRecovery {
+        if !self.initialized {
+            self.initialized = true;
+            self.epoch_start_ns = now_ns;
+            self.base_video_decoded = video_decoded;
+            self.base_preambles = preambles;
+            self.base_crc_ok = crc_ok;
+            self.base_ring_hit = ring_hit;
+            return DockPairingRecovery::none();
+        }
+        let elapsed = now_ns.saturating_sub(self.epoch_start_ns);
+        if elapsed < dead_ns {
+            return DockPairingRecovery::none();
+        }
+        let ring_hit_delta = ring_hit.saturating_sub(self.base_ring_hit);
+        let video_decoded_delta = video_decoded.saturating_sub(self.base_video_decoded);
+        let preambles_delta = preambles.saturating_sub(self.base_preambles);
+        let crc_ok_delta = crc_ok.saturating_sub(self.base_crc_ok);
+        // Start the next epoch from the current counters regardless of the verdict.
+        self.epoch_start_ns = now_ns;
+        self.base_video_decoded = video_decoded;
+        self.base_preambles = preambles;
+        self.base_crc_ok = crc_ok;
+        self.base_ring_hit = ring_hit;
+        let pairing_alive = ring_hit_delta >= min_ring_hits || (locked && ring_hit_delta > 0);
+        let input_alive = video_decoded_delta > 0 && preambles_delta > 0;
+        DockPairingRecovery {
+            fire: !pairing_alive && input_alive,
+            window_ns: elapsed,
+            ring_hit_delta,
+            crc_ok_delta,
+            preambles_delta,
+            video_decoded_delta,
+        }
     }
 }
 
@@ -2328,5 +2489,171 @@ mod tests {
             "25s since last advance < 30s: not stale"
         );
         assert!(!s.is_stale());
+    }
+
+    // ---- #1153 DockPairingWatchdog (sticky-unlock / dead-pairing recovery) ----
+
+    const S_NS: u64 = 1_000_000_000;
+    const DEAD: u64 = DOCK_PAIRING_DEAD_NS;
+    const MINH: u64 = DOCK_PAIRING_MIN_RING_HITS;
+
+    fn wd_observe(
+        w: &mut DockPairingWatchdog,
+        vdec: u64,
+        pre: u64,
+        crc: u64,
+        hits: u64,
+        locked: bool,
+        now: u64,
+    ) -> DockPairingRecovery {
+        w.observe(vdec, pre, crc, hits, locked, now, DEAD, MINH)
+    }
+
+    #[test]
+    fn pairing_watchdog_first_observe_seeds_and_mid_epoch_never_fires_1153() {
+        let mut w = DockPairingWatchdog::new();
+        assert!(!wd_observe(&mut w, 0, 0, 0, 0, false, 0).fire, "seed");
+        // Mid-epoch observes (every 10s, dead input) never fire before the epoch elapses.
+        for i in 1..30u64 {
+            let r = wd_observe(&mut w, i * 600, i * 460, 0, 0, false, i * 10 * S_NS);
+            assert!(!r.fire, "tick {i}: still inside the first epoch");
+        }
+        // The 300s tick IS the epoch end — dead pairing + flowing input fires.
+        let r = wd_observe(&mut w, 30 * 600, 30 * 460, 0, 0, false, 300 * S_NS);
+        assert!(
+            r.fire,
+            "epoch end with dead pairing + live input fires: {r:?}"
+        );
+        assert_eq!(r.window_ns, 300 * S_NS);
+        assert_eq!(r.ring_hit_delta, 0);
+        assert_eq!(r.video_decoded_delta, 30 * 600);
+        assert_eq!(r.preambles_delta, 30 * 460);
+    }
+
+    #[test]
+    fn pairing_watchdog_healthy_convergence_and_locked_states_never_fire_1153() {
+        // A fresh converging chain pairs ~1/5s (≈60/epoch) — far over the floor.
+        let mut w = DockPairingWatchdog::new();
+        wd_observe(&mut w, 0, 0, 0, 0, false, 0);
+        let r = wd_observe(&mut w, 18000, 13800, 120, 60, false, 300 * S_NS);
+        assert!(!r.fire, "converging (60 hits/epoch) is healthy: {r:?}");
+        // Locked with SOME pairing (a marginal but genuine lock) is healthy too.
+        let r = wd_observe(&mut w, 36000, 27600, 130, 62, true, 600 * S_NS);
+        assert!(!r.fire, "locked with ring advance is healthy: {r:?}");
+        // Boundary: exactly MINH hits, unlocked → healthy; MINH-1, unlocked → dead.
+        let mut w2 = DockPairingWatchdog::new();
+        wd_observe(&mut w2, 0, 0, 0, 0, false, 0);
+        let r = wd_observe(&mut w2, 100, 100, 10, MINH, false, 300 * S_NS);
+        assert!(!r.fire, "exactly min hits is alive: {r:?}");
+        let r = wd_observe(&mut w2, 200, 200, 20, 2 * MINH - 1, false, 600 * S_NS);
+        assert!(r.fire, "min-1 hits, unlocked, live input fires: {r:?}");
+    }
+
+    #[test]
+    fn pairing_watchdog_stale_held_lock_with_zero_hits_fires_1153() {
+        // `locked` only flips on a cluster push, and pushes need decodes — a dead window that
+        // begins from a locked state can hold a STALE locked=yes for minutes. A lock with ZERO
+        // ring hits across a whole epoch is provably stale (the cluster window is far shorter
+        // than the epoch) and must count as dead, not healthy.
+        let mut w = DockPairingWatchdog::new();
+        wd_observe(&mut w, 0, 0, 0, 278, true, 0);
+        let r = wd_observe(&mut w, 18000, 130, 1, 278, true, 300 * S_NS);
+        assert!(
+            r.fire,
+            "stale-held lock with zero ring advance fires: {r:?}"
+        );
+        assert_eq!(
+            r.crc_ok_delta, 1,
+            "the chance-level crc_ok evidence rides along"
+        );
+    }
+
+    #[test]
+    fn pairing_watchdog_input_dead_states_never_fire_1153() {
+        // EVENT mode: video decode frozen — the staleness detector's domain, never a reset loop.
+        let mut w = DockPairingWatchdog::new();
+        wd_observe(&mut w, 500, 500, 5, 5, false, 0);
+        let r = wd_observe(&mut w, 500, 900, 6, 5, false, 300 * S_NS);
+        assert!(!r.fire, "video frozen = input dead: {r:?}");
+        // Silent audio: preamble screens frozen while video flows — also not ours to reset.
+        let r = wd_observe(&mut w, 18500, 900, 6, 5, false, 600 * S_NS);
+        assert!(!r.fire, "preambles frozen = input dead: {r:?}");
+    }
+
+    #[test]
+    fn pairing_watchdog_refires_each_epoch_while_dead_persists_1153() {
+        // The live sticky state: chance-level pairing (~0-1 hits/epoch), input flowing. The
+        // watchdog must fire once per epoch — a bounded retry that also leaves the periodic
+        // evidence line — and stop the moment pairing recovers.
+        let mut w = DockPairingWatchdog::new();
+        wd_observe(&mut w, 0, 0, 0, 0, false, 0);
+        let mut fires = 0;
+        for e in 1..=4u64 {
+            let r = wd_observe(&mut w, e * 18000, e * 130, e, e, false, e * 300 * S_NS);
+            if r.fire {
+                fires += 1;
+            }
+        }
+        assert_eq!(fires, 4, "one fire per dead epoch");
+        // Pairing recovers (the reset worked) — no further fires.
+        let r = wd_observe(
+            &mut w,
+            5 * 18000,
+            5 * 130 + 400,
+            60,
+            4 + 60,
+            false,
+            5 * 300 * S_NS,
+        );
+        assert!(!r.fire, "recovered pairing stops the retries: {r:?}");
+    }
+
+    #[test]
+    fn streaming_decoder_reset_window_preserves_origin_and_stats_and_still_decodes_1153() {
+        // The reset must keep the ABSOLUTE sample coordinate intact (the caller's own
+        // pushed-sample count maps marker positions to timestamps) and keep the cumulative stats
+        // monotonic — only the window content + dedup anchor drop.
+        let p = AudioParams::rig60();
+        let sr = p.sample_rate as usize;
+        let sig_len = signal_len(&p);
+        let mut dec =
+            StreamingMarkerDecoder::new(p, DOCK_QPSK_THRESHOLD, sig_len * 3, sig_len as u64);
+        let sig = marker_signal(9, &p);
+
+        // One marker at absolute ~1.0s, fed in chunks.
+        let mut stream = vec![0.0f32; sr * 2];
+        stream[sr..sr + sig.len()].copy_from_slice(&sig);
+        let mut got: Vec<(u64, u8)> = Vec::new();
+        for chunk in stream.chunks(480) {
+            got.extend(dec.push(chunk));
+        }
+        assert_eq!(got.len(), 1, "pre-reset marker decodes: {got:?}");
+        assert_eq!(got[0].1, 9);
+        let stats_before = dec.stats();
+        assert!(stats_before.crc_ok >= 1);
+
+        dec.reset_window();
+        assert_eq!(
+            dec.stats(),
+            stats_before,
+            "cumulative stats survive the reset (diag counters stay monotonic)"
+        );
+
+        // A second marker after the reset still lands at the correct ABSOLUTE position:
+        // stream continues at 2.0s; the marker sits at absolute ~2.5s.
+        let mut stream2 = vec![0.0f32; sr * 2];
+        stream2[sr / 2..sr / 2 + sig.len()].copy_from_slice(&sig);
+        let mut got2: Vec<(u64, u8)> = Vec::new();
+        for chunk in stream2.chunks(480) {
+            got2.extend(dec.push(chunk));
+        }
+        assert_eq!(got2.len(), 1, "post-reset marker decodes: {got2:?}");
+        assert_eq!(got2[0].1, 9);
+        let abs = got2[0].0 as i64;
+        let want = (sr * 2 + sr / 2) as i64;
+        assert!(
+            (abs - want).abs() < 8,
+            "origin continuity: abs {abs} vs expected {want}"
+        );
     }
 }
