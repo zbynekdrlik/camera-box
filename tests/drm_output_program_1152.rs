@@ -327,7 +327,9 @@ fn pick_render_buf_computes_the_mailbox_truth_table() {
 
 /// `(src_w, src_h, dst_w, dst_h)` → expected `(x, y, w, h)` aspect-fit rect (letterbox
 /// centred; any zero input fails open to the full destination).
-fn fit_vectors() -> Vec<((u32, u32, u32, u32), (u32, u32, u32, u32))> {
+type FitQuad = (u32, u32, u32, u32);
+
+fn fit_vectors() -> Vec<(FitQuad, FitQuad)> {
     vec![
         ((1920, 1080, 1920, 1080), (0, 0, 1920, 1080)), // 1:1 (the rig case)
         ((1280, 720, 1920, 1080), (0, 0, 1920, 1080)),  // same aspect, upscale
