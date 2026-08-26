@@ -16,6 +16,7 @@
 
 #include <cstdio>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <cstdint>
 
@@ -202,6 +203,29 @@ int main()
 		CHECK(r.first.empty(), "poison word must not decode as a marker");
 		CHECK(r.second.crc_ok == 0, "poison word: crc_ok == 0");
 		CHECK(r.second.crc_fail > 0, "poison word: screened+attempted, then rejected");
+	}
+	{
+		/* 2c. #1153 (sticky-unlock recovery): the decode kernel builds cos/sin/energy PREFIX
+		 * SUMS over the whole buffer, so a single non-finite sample contaminates every sum
+		 * after it and silently kills decode for the REST of the window (every preamble-screen
+		 * comparison against NaN is false). The live dock feeds a mono mixdown of the OBS
+		 * program audio — an in-process upstream poison emitting non-finite samples must
+		 * degrade at most the poisoned samples, never the whole rolling window. Non-finite
+		 * input is treated as silence — mirrors
+		 * qpsk_marker::a_single_non_finite_sample_must_not_poison_the_rest_of_the_window_1153. */
+		std::vector<float> buf(48000 / 2, 0.0f);
+		std::vector<float> sig = marker_signal(42);
+		size_t start = 48000 / 10;
+		for (size_t j = 0; j < sig.size(); j++)
+			buf[start + j] = sig[j];
+		buf[10] = std::numeric_limits<float>::quiet_NaN();
+		buf[11] = std::numeric_limits<float>::infinity();
+		buf[12] = -std::numeric_limits<float>::infinity();
+		std::pair<std::vector<std::pair<double, uint8_t>>, CbDecodeStats> r =
+			cb_decode_markers_with_stats(buf, 48000, 442, 1, 0.4);
+		CHECK(r.first.size() == 1 && r.first[0].second == 42,
+		      "#1153: a marker after a non-finite sample must still decode");
+		CHECK(r.second.crc_ok == 1, "#1153: sanitized decode counts crc_ok");
 	}
 
 	/* 3. Streaming dedup: two markers fed in small chunks, each reported exactly once with the right
