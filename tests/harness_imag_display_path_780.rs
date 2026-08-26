@@ -81,18 +81,20 @@ fn status_of(lines: &[String], facet: &str) -> String {
         .to_string()
 }
 
-// ---- the five facets emit exactly one row each ------------------------------------------------
+// ---- the six facets emit exactly one row each -------------------------------------------------
 
 #[test]
 fn verdict_emits_one_row_per_facet_780() {
     // A fully-clean Intel-box gather AFTER the issue-1146 REVERT: picom NOT running (the
     // compositor cost 21.57% render skips on the 25W envelope), picom.service disabled,
-    // HDMI the xrandr primary, maxperf pinned+up, tap on.
+    // HDMI the xrandr primary, maxperf pinned+up, tap on, and (issue 1152 M4) the DRM-lease
+    // output dormant (config absent -- the fleet DEFAULT-OFF state).
     let g = "PICOM_PGREP|ok\nPICOM_PROC|\nPICOM_SERVICE|disabled\n\
              XRANDR|ok\nPRIMARY_OUTPUT|HDMI-1\n\
              MAXPERF_APPLICABLE|1\nMAXPERF_MIN|1400\nMAXPERF_RP0|1400\n\
              MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\n\
-             TAPCONF|present\nTAPCONF_TAPPING|on";
+             TAPCONF|present\nTAPCONF_TAPPING|on\n\
+             DRM_OUTPUT_CONFIG|absent\nDRM_OUTPUT_LOG|present\nDRM_OUTPUT_SCANOUT|none";
     let lines = verdict(g);
     for f in [
         "picom_process",
@@ -100,6 +102,7 @@ fn verdict_emits_one_row_per_facet_780() {
         "hdmi_primary",
         "igpu_maxperf",
         "tap_conf",
+        "drm_output",
     ] {
         assert_eq!(
             status_of(&lines, f),

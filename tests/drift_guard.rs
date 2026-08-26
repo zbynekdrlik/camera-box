@@ -3491,6 +3491,9 @@ MAXPERF_ENABLED|enabled
 MAXPERF_ACTIVE|active
 TAPCONF|present
 TAPCONF_TAPPING|on
+DRM_OUTPUT_CONFIG|absent
+DRM_OUTPUT_LOG|present
+DRM_OUTPUT_SCANOUT|none
 ";
 
 #[test]
@@ -3506,8 +3509,9 @@ fn check_imag_report_display_path_ok_when_every_facet_clean_780() {
         .filter(|l| l.contains("display_path/"))
         .collect();
     assert!(
-        dp_rows.len() == 5,
-        "expected picom_process/picom_service/hdmi_primary/igpu_maxperf/tap_conf rows: {out:?}"
+        dp_rows.len() == 6,
+        "expected picom_process/picom_service/hdmi_primary/igpu_maxperf/tap_conf/drm_output \
+         rows: {out:?}"
     );
     for l in &dp_rows {
         assert!(

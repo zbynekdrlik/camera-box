@@ -3,6 +3,7 @@ paths:
   - "scripts/lib/imag-display-path.sh"
   - "scripts/drift-guard.sh"
   - "tests/harness_imag_display_path_780.rs"
+  - "tests/drm_lease_tolerance_1152.rs"
 ---
 
 # imag display-path drift facets — the box is Intel-iGPU-only, NVIDIA-era tuning is obsolete (#780)
@@ -27,8 +28,13 @@ the NVIDIA-era display-tuning knobs the older tickets/comments reference **do no
 `scripts/lib/imag-display-path.sh` is the SHARED gather + verdict core (same discipline as
 `imag-power-envelope.sh` #1040 / `timesync-authority.sh` #596): `imag_display_path_verdict GATHER`
 emits `<facet>|<STATUS>|<detail>` lines (facets `picom_process`, `picom_service`, `hdmi_primary`,
-`igpu_maxperf`, `tap_conf`; OK/DRIFT/UNKNOWN — the picom polarity is INVERTED vs the original #780/#841
-"picom off" facet, see the lib's compositor-doctrine-reversal header for issue 1146),
+`igpu_maxperf`, `tap_conf`, `drm_output`; OK/DRIFT/UNKNOWN — the picom polarity is INVERTED vs the
+original #780/#841 "picom off" facet, see the lib's compositor-doctrine-reversal header for issue
+1146; `drm_output` is the issue-1152 M4 facet: the DEFAULT-OFF `~/.camera-box/drm-output.json`
+dormant = OK, ENABLED demands the current OBS log's `program scanout LIVE` proof else DRIFT, and
+with it ENABLED the `hdmi_primary` facet flips lease-aware — HDMI is leased OUT of the X layout by
+design, so a panel primary is then OK, never the issue-1146 DRIFT; full doctrine + the enable/
+rollback runbook in `.claude/rules/obs-drm-output.md`),
 `imag_display_path_gather_remote_snippet` is the remote block, and `imag_display_path_preflight_assert
 HOST [USER]` is the E2E fail-fast (DRIFT aborts; UNKNOWN warns). Two-tier every facet: empty gather
 (SSH hiccup) → UNKNOWN, gathered-but-wrong → DRIFT, never a silent pass. `pgrep`/`xrandr` presence is

@@ -996,7 +996,11 @@ check_imag_report() {
   # pgrep/xrandr on the box is UNKNOWN by name (#833), never a false verdict. NVIDIA-era
   # ForceFullCompositionPipeline is obsolete-by-hardware (the box is Intel-only, no FFCP — #816/#841;
   # the inert 20-tearfree.conf is deliberately NOT provisioned; the picom vsync compositor is the
-  # real mechanism now — see the issue 1146 design comment).
+  # real mechanism now — see the issue 1146 design comment). Since issue 1152 M4 the shared verdict
+  # also carries the drm_output facet (the DEFAULT-OFF in-OBS DRM-lease HDMI output: dormant config
+  # = OK, ENABLED demands the current OBS log's `program scanout LIVE` proof else DRIFT), and
+  # hdmi_primary is lease-aware (DRM output ENABLED ⇒ HDMI is leased OUT of the X layout by design,
+  # so a panel primary is then OK, never the issue-1146 DRIFT) — both flow through this same loop.
   if [ -z "$obs_display_path" ]; then
     printf '  %-22s UNKNOWN  (display-path state not read on imag-nb)\n' "display_path"
     unknown=$((unknown + 1))
