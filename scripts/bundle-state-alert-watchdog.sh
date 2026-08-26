@@ -220,10 +220,7 @@ handle_box() {
       if [ "$DRY_RUN" -eq 1 ]; then
         log "[dry-run] WOULD send recovery: $box :$BUNDLE_PORT serving again"
       else
-        log "RECOVERY: $box :$BUNDLE_PORT serving again -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ BundleStateServer ($REPO_SLUG): **$box** ($ip) :$BUNDLE_PORT opäť obsluhuje." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        log "RECOVERY: $box :$BUNDLE_PORT serving again -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field "alerted_${box}" 0
     fi
@@ -282,6 +279,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $box :$BUNDLE_PORT down"
     python3 "$NOTIFY" notify --body \
       "🚨 BundleStateServer ($REPO_SLUG): **$box** ($ip) :$BUNDLE_PORT je DOLE, hoci box beží. ${detail}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol — Task Scheduler ukončenú úlohu sám nereštartuje. Rieši Claude automaticky (${restart_note}), ty nemusíš nič robiť." \
+      --dedup-key "bundle-state-$box" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- restart still attempted every pass"

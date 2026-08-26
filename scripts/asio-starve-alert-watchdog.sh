@@ -241,6 +241,7 @@ handle_source() {
           log "ALERT: firing Discord notification for '$source' tap broken"
           python3 "$NOTIFY" notify --body \
             "⚠️ #1023 asio-starve: no \`asrc: source '$source'\` sample on $ASIO_STARVE_NAME for $unk consecutive passes ($REPO_SLUG). The ASIO-starve TAP for this source is BLIND (source renamed / dropped from the scene, or ASIO_STARVE_SOURCES drifted) -- silent-audio coverage for '$source' is OFF until fixed." \
+            --dedup-key "asio-starve-tap-$source" \
             >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
         fi
         write_state_field "tap_broken_${k}" 1
@@ -257,10 +258,7 @@ handle_source() {
       if [ "$DRY_RUN" -eq 1 ]; then
         log "[dry-run] WOULD send recovery: '$source' receiving audio again (starved_blocks=${blocks:-0})"
       else
-        log "RECOVERY: '$source' OK again -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ #1023 asio-starve: **$source** on $ASIO_STARVE_NAME is receiving audio again (starved_blocks=${blocks:-0}/60s) ($REPO_SLUG)." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        log "RECOVERY: '$source' OK again (receiving audio, starved_blocks=${blocks:-0}/60s) -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field "alerted_${k}" 0
     fi
@@ -312,6 +310,7 @@ handle_source() {
     log "ALERT: firing Discord notification for '$source' starved"
     python3 "$NOTIFY" notify --body \
       "🚨 #1023 asio-starve: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes -- the ASIO source is silent (OBS likely started before the ASIO device/matrix was ready). LIEK: resetni (reštartni) OBS na $ASIO_STARVE_NAME: \`$RECOVERY_PLAN\`" \
+      --dedup-key "asio-starve-$source" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

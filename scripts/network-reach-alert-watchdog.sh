@@ -194,10 +194,7 @@ handle_box() {
         if [ "$DRY_RUN" -eq 1 ]; then
           log "[dry-run] WOULD send recovery: $box reachable again"
         else
-          log "RECOVERY: $box reachable again -- firing recovery notification"
-          python3 "$NOTIFY" notify --body \
-            "✅ nedostupný box ($REPO_SLUG): **$box** ($ip) je opäť dostupný." \
-            >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+          log "RECOVERY: $box reachable again -- machine-channel only (#1206: recovery is not a phone ping)"
         fi
         write_state_field "alerted_${box}" 0
       fi
@@ -261,6 +258,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $box unreachable"
     python3 "$NOTIFY" notify --body \
       "🚨 nedostupný box ($REPO_SLUG): **$box** ($ip) je NEDOSTUPNÝ z dev1. ${detail}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol. Pravdepodobne mŕtvy NIC / vypnutý box / odpojený kábel — OBS-WS aj ssh aj MCP sú tmavé. Potrebný fyzický zásah — skontroluj box fyzicky (napájanie, sieťový kábel)." \
+      --dedup-key "network-reach-$box" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

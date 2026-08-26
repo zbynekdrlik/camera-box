@@ -152,7 +152,7 @@ alert() {
     log "[dry-run] WOULD alert: $1"
     return 0
   fi
-  python3 "$NOTIFY" notify --body "$1" >/dev/null 2>&1 || log "alert: airuleset.py notify failed (non-fatal)"
+  python3 "$NOTIFY" notify --body "$1" --dedup-key "${2:-obs-burn-reconcile}" >/dev/null 2>&1 || log "alert: airuleset.py notify failed (non-fatal)"
 }
 
 # ── process ONE box: probe -> decide -> reconcile ────────────────────────────
@@ -205,7 +205,8 @@ process_box() {
   if [ "$rc" -eq "$SWEEP_ENUM_FAILED" ]; then
     log "$box: sweep-check FAILED to enumerate after an OBS restart — fail-closed (a burn may be invisible); marked unresolved (will retry)"
     [ "$unresolved" -ne 1 ] && alert \
-      "⚠️ #1060 obs-burn-reconcile-watchdog: **$box** OBS restarted (unattended) but its burn state could NOT be verified ($REPO_SLUG) — GetInputList enumeration failed (fail-closed, guard #246/#844). A resurrected measurement burn may be rendering on the LIVE program. Check + clear from dev1: \`python3 scripts/obs_burn_filter.py sweep-off --host $host\`"
+      "⚠️ #1060 obs-burn-reconcile-watchdog: **$box** OBS restarted (unattended) but its burn state could NOT be verified ($REPO_SLUG) — GetInputList enumeration failed (fail-closed, guard #246/#844). A resurrected measurement burn may be rendering on the LIVE program. Check + clear from dev1: \`python3 scripts/obs_burn_filter.py sweep-off --host $host\`" \
+      "obs-burn-reconcile-unresolved-$box"
     write_state_field "${box}_unresolved" 1
     return 0
   fi
@@ -235,11 +236,13 @@ process_box() {
       if burn_filter sweep-off --host "$host" >/dev/null 2>&1; then
         write_state_field "${box}_unresolved" 0
         alert \
-          "🧹 #1060 obs-burn-reconcile-watchdog: auto-cleared a resurrected QR measurement burn on **$box** after an UNATTENDED OBS restart ($REPO_SLUG) — a saved genlock_burn=true had reloaded onto the LIVE program. Burn(s) forced OFF from dev1 and read-back verified."
+          "🧹 #1060 obs-burn-reconcile-watchdog: auto-cleared a resurrected QR measurement burn on **$box** after an UNATTENDED OBS restart ($REPO_SLUG) — a saved genlock_burn=true had reloaded onto the LIVE program. Burn(s) forced OFF from dev1 and read-back verified." \
+          "obs-burn-reconcile-autocleared-$box"
       else
         log "$box: sweep-off did NOT fully clear (still rendering / enum failed) — marked unresolved (will retry)"
         [ "$unresolved" -ne 1 ] && alert \
-          "🚨 #1060 obs-burn-reconcile-watchdog: **$box** OBS restarted (unattended) with a resurrected measurement burn and the automatic sweep-off did NOT fully clear it ($REPO_SLUG). It will keep retrying; clear it manually before broadcast if it persists: \`python3 scripts/obs_burn_filter.py sweep-off --host $host\`"
+          "🚨 #1060 obs-burn-reconcile-watchdog: **$box** OBS restarted (unattended) with a resurrected measurement burn and the automatic sweep-off did NOT fully clear it ($REPO_SLUG). It will keep retrying; clear it manually before broadcast if it persists: \`python3 scripts/obs_burn_filter.py sweep-off --host $host\`" \
+          "obs-burn-reconcile-sweepfail-$box"
         write_state_field "${box}_unresolved" 1
       fi
       ;;

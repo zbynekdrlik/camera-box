@@ -277,6 +277,7 @@ handle_source() {
             log "ALERT: firing Discord notification for '$source' tap broken"
             python3 "$NOTIFY" notify --body \
               "⚠️ $ALERT_TAG frozen-input: no \`genlock-fifo audit '$source'\` line on $RECEIVER_NAME for $unk consecutive passes ($REPO_SLUG). The freeze TAP for this source is BLIND (source renamed / re-created / dropped from the scene, or FROZEN_INPUT_SOURCES drifted from the live label) -- frozen-input coverage for '$source' is OFF until fixed." \
+              --dedup-key "frozen-input-tap-$RECEIVER_NAME-$source" \
               >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
           fi
           write_state_field "tap_broken_${k}" 1
@@ -297,10 +298,7 @@ handle_source() {
       if [ "$DRY_RUN" -eq 1 ]; then
         log "[dry-run] WOULD send recovery: '$source' advancing again"
       else
-        log "RECOVERY: '$source' advancing again -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ $ALERT_TAG frozen-input: **$source** on $RECEIVER_NAME is advancing again ($REPO_SLUG)." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        log "RECOVERY: '$source' advancing again on $RECEIVER_NAME -- machine-channel only (#1206: recovery is not a phone ping)"
       fi
       write_state_field "alerted_${k}" 0
     fi
@@ -351,6 +349,7 @@ handle_source() {
     log "ALERT: firing Discord notification for '$source' frozen"
     python3 "$NOTIFY" notify --body \
       "🚨 $ALERT_TAG frozen-input: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes while $REACHABLE_PHRASE -- the input is silently frozen on its last frame (a DistroAV receiver-rebind / upstream freeze). $CURE_HINT" \
+      --dedup-key "frozen-input-$RECEIVER_NAME-$source" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
@@ -390,6 +389,7 @@ enumerate_and_guard() {
       log "ALERT: firing Discord notification for enumeration blind on $RECEIVER_NAME"
       python3 "$NOTIFY" notify --body \
         "⚠️ $ALERT_TAG frozen-input: enumeration BLIND on $RECEIVER_NAME -- zero cambox inputs matched (\`genlock-fifo audit '<src>':\` include=/$ENUM_INCLUDE/ exclude=/$ENUM_EXCLUDE/) for $blind consecutive passes ($REPO_SLUG). Frozen-input coverage for the $RECEIVER_NAME cambox branch is OFF (the OBS-log read is failing, or the cambox source labels drifted) -- no frozen-input page can fire until this is fixed." \
+        --dedup-key "frozen-input-enum-$RECEIVER_NAME" \
         >/dev/null 2>&1 || log "enum-blind: airuleset.py notify failed (non-fatal)"
     fi
     write_state_field "enum_blind_alerted" 1

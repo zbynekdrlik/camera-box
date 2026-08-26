@@ -282,7 +282,7 @@ throttled_notify() {
     return 0
   fi
   if [ "${an:-0}" = "1" ]; then
-    python3 "$NOTIFY" notify --body "$body" >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+    python3 "$NOTIFY" notify --body "$body" --dedup-key "ndi-halving-$sig" >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${passes}/${ALERT_THROTTLE_PASSES})"
   fi
@@ -342,6 +342,7 @@ samples=0"
         else
           python3 "$NOTIFY" notify --body \
             "⚠️ NDI spojenie ($REPO_SLUG): meranie kadencie vstupu '$input' na $RECV_NAME je SLEPÉ už $unk kontrol po sebe (premenovaný/chýbajúci vstup alebo nečitateľný log) — kontrola polovičnej kadencie pre tento vstup je vypnutá, kým sa to neopraví. Rieši Claude automaticky." \
+            --dedup-key "ndi-halving-tap-$input" \
             >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
         fi
         write_state_field "tap_broken_${k}" 1
@@ -361,9 +362,7 @@ samples=0"
         if [ "$DRY_RUN" -eq 1 ]; then
           log "[dry-run] WOULD send recovery: '$input' back to ~${exp} fps"
         else
-          python3 "$NOTIFY" notify --body \
-            "✅ NDI spojenie ($REPO_SLUG): **$input** na $RECV_NAME je späť na plnú kadenciu (~${exp} fps)." \
-            >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+          log "RECOVERY: '$input' on $RECV_NAME back to ~${exp} fps -- machine-channel only (#1206: recovery is not a phone ping)"
         fi
         write_state_field "alerted_${k}" 0
         write_state_field "cured_${k}" 0

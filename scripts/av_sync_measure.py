@@ -19,6 +19,12 @@ Usage:
   av_sync_measure.py --grab ... --loop 420 --outer-loop --ws-host 10.77.9.204 [...]
       # #806 outer-loop watchdog: every confident window feeds OuterLoopGuard; a correction event
       # applies the new bias over obs-websocket (SetAsrcOuterBiasPpm) and Discord-reports it.
+
+Alert delivery (#1207): by DEFAULT (no --webhook) the |offset|>=threshold + outer-loop alerts go
+through `airuleset.py notify` with a stable per-kind --dedup-key (fleet-standard since #1206, so a
+repeated identical state edits the existing card instead of re-pinging). Passing `--webhook URL`
+keeps the raw-webhook path (manual opt-in) with a simple per-kind throttle instead.
+
 Exit codes: 0 measured, 2 unmeasurable window (low confidence), 1 error,
             3 NO-SIGNAL (#814: --require-fresh rejected a stale/failed grab -- no verdict emitted).
 """
@@ -158,8 +164,7 @@ def run_outer_loop(args, offset_ms: float) -> None:
         ws.close()
 
     save_outer_loop_state(state_path, guard)
-    if args.webhook:
-        notify_discord(args.webhook, f"🎚️ ASRC outer-loop: {text}")
+    deliver_alert(args, "asrc", f"🎚️ ASRC outer-loop: {text}")
 
 
 def run(cmd, **kw):
@@ -306,6 +311,63 @@ def notify_discord(webhook: str, text: str) -> None:
         print(f"WARN: discord webhook failed: {exc}")
 
 
+# #1207 — alert DELIVERY layer. av_sync_measure was the ONE alert emitter in this repo that still
+# POSTed to a RAW Discord webhook (notify_discord() above → urllib) with no dedup and entirely
+# outside airuleset.py notify, so the #1206 --dedup-key sweep never covered it. The DEFAULT (no
+# --webhook) now routes through airuleset notify with a STABLE per-incident --dedup-key — the
+# fleet-standard path since #1206: a repeated identical state EDITS the existing airuleset card
+# instead of re-pinging, and the analyze-not-ping doctrine applies for free. See
+# .claude/rules/watchdog-notify-dedup.md. Detection/measurement is UNCHANGED — only WHERE the
+# alert is delivered. The `AIRULESET_NOTIFY` env override mirrors the bash watchdogs' own default.
+AIRULESET_NOTIFY = os.environ.get(
+    "AIRULESET_NOTIFY", str(Path.home() / "devel" / "airuleset" / "airuleset.py")
+)
+
+# The EXPLICIT `--webhook URL` override keeps today's raw-webhook path (manual opt-in) but gains a
+# simple in-process per-KIND cooldown so a sustained state in --loop mode does not re-POST every
+# round — the raw webhook has no dedup of its own, which is the whole reason for #1207. 20 min
+# mirrors the fleet alert-watchdogs' own re-fire cadence (airuleset #1206).
+WEBHOOK_THROTTLE_S = 1200
+_WEBHOOK_LAST_SENT: dict = {}  # kind -> time.monotonic() of the last raw-webhook send for that kind
+
+
+def notify_airuleset(text: str, dedup_key: str) -> None:
+    """#1207 — DEFAULT alert delivery: send `text` through airuleset notify with a STABLE
+    per-incident `--dedup-key` (fleet-standard since #1206). Best-effort: a missing/failing
+    airuleset prints a WARN and never aborts a measurement (same tolerance as notify_discord's own
+    OSError guard). Written as a literal `subprocess.run([...])` so the #1206 dedup-key sweep
+    (tests/python/test_notify_dedup_key_sweep_1206.py) auto-discovers + enforces this call too."""
+    try:
+        r = subprocess.run([sys.executable, AIRULESET_NOTIFY, "notify", "--body", text,
+                            "--dedup-key", dedup_key], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"WARN: airuleset notify failed: {exc}")
+        return
+    if r.returncode != 0:
+        # A non-zero exit (missing/misconfigured airuleset — e.g. the Windows stream-box watchdog
+        # with no webhook file invokes a path that doesn't exist there) is NOT an exception, so it
+        # would be silently swallowed without this — surface it (machine channel, never a ping),
+        # matching notify_discord's own WARN-on-failure pattern.
+        print(f"WARN: airuleset notify rc={r.returncode}: {(r.stderr or '').strip()[:200]}")
+
+
+def deliver_alert(args, kind: str, text: str) -> None:
+    """#1207 — the single alert-delivery seam both call-sites route through. `kind` is one of
+    "asrc" / "verdict". DEFAULT (no --webhook): route through airuleset notify with a stable
+    `av-sync-measure-<kind>` dedup key. EXPLICIT `--webhook URL` override: keep the raw-webhook
+    path (manual opt-in), suppressed per-kind within WEBHOOK_THROTTLE_S so a sustained state does
+    not spam. Delivery layer only — the caller's detection/threshold logic is unchanged."""
+    if args.webhook:
+        now = time.monotonic()
+        last = _WEBHOOK_LAST_SENT.get(kind)
+        if last is not None and (now - last) < WEBHOOK_THROTTLE_S:
+            return  # per-kind throttle: same kind fired < WEBHOOK_THROTTLE_S ago
+        _WEBHOOK_LAST_SENT[kind] = now
+        notify_discord(args.webhook, text)
+    else:
+        notify_airuleset(text, f"av-sync-measure-{kind}")
+
+
 def _calibration_record(stamp: str, offset_frames: int, confidence: float, usable: bool,
                          dist_curve) -> dict:
     """#917 -- build one `--calibration-log` JSONL record. `dist_curve` is included ONLY when
@@ -359,8 +421,8 @@ def one_measurement(args, repo: Path) -> int:
         verdict = "A/V sync OK (offset 0 ms)"
     line = f"[{stamp}] AV offset {offset_frames:+d} fr ({offset_ms:+d} ms) conf {conf:.1f} :: {verdict}"
     print(line)
-    if args.webhook and abs(offset_ms) >= args.threshold_ms:
-        notify_discord(args.webhook, f"🎯 AV-sync watchdog: {verdict} (conf {conf:.1f})")
+    if abs(offset_ms) >= args.threshold_ms:
+        deliver_alert(args, "verdict", f"🎯 AV-sync watchdog: {verdict} (conf {conf:.1f})")
     if getattr(args, "outer_loop", False):
         # #806: feed this CONFIDENT measurement into the outer-loop guard. Independent of the
         # --threshold-ms alert above -- the guard has its own 40ms sustained-average threshold and
@@ -377,7 +439,13 @@ def main() -> int:
     ap.add_argument("--secs", type=int, default=20)
     ap.add_argument("--repo", default=str(Path(__file__).resolve().parent.parent / "syncnet_python"),
                     help="path to syncnet_python checkout (with data/ + s3fd weights)")
-    ap.add_argument("--webhook", help="Discord webhook for |offset| >= threshold alerts")
+    ap.add_argument(
+        "--webhook",
+        help="#1207: EXPLICIT raw-webhook override for the |offset| >= threshold + outer-loop "
+             "alerts. DEFAULT (omit this) routes those alerts through `airuleset.py notify` with a "
+             "stable per-kind --dedup-key (fleet-standard since #1206); passing a URL keeps the raw "
+             "webhook (manual opt-in) with a simple per-kind throttle instead.",
+    )
     ap.add_argument("--threshold-ms", type=int, default=60)
     ap.add_argument(
         "--require-fresh", action="store_true",

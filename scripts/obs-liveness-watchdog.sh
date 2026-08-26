@@ -199,7 +199,7 @@ main() {
       local msg
       msg="🚨 OBS zamrznuté ($REPO_SLUG): OBS na **$box** je **$label**. Dôvod: ${reasons:-none}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol (nie je to jednorazový výkyv). Rieši Claude automaticky (win-* MCP plán: \`$(recovery_plan_for "$box" "$label")\`), ty nemusíš nič robiť."
       log "ALERT: firing Discord notification for $box ($label)"
-      python3 "$NOTIFY" notify --body "$msg" >/dev/null 2>&1 \
+      python3 "$NOTIFY" notify --body "$msg" --dedup-key "obs-liveness-$box-$label" >/dev/null 2>&1 \
         || log "ALERT: airuleset.py notify failed (non-fatal)"
     else
       log "ALERT: suppressed by throttle for $box (passes=${prior_passes}/${ALERT_THROTTLE_PASSES} — same condition persists)"
