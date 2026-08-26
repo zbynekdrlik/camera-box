@@ -13,13 +13,19 @@ set -euo pipefail
 # script (run FROM dev1 by the supervisor's rig campaign) does, in order:
 #   1. burn ON the imag program input   (obs_burn_filter.py add, over OBS WebSocket to imag)
 #   2. stop cam2 camera-box.service     (free /dev/video0 -- udev-device-ownership discipline)
-#   3. bounded raw-V4L2 grab on cam2    (ffmpeg -use_wallclock_as_timestamps 1 -> a file in /tmp)
+#   3. bounded V4L2 grab on cam2, STREAMED over the ssh pipe straight into a dev1-local file
+#      (ffmpeg -use_wallclock_as_timestamps 1 ... -f nut - ; a raw grab cannot fit cam2's /tmp,
+#      proven live -- and the remote program keeps stdout CLEAN: every progress echo goes to
+#      stderr, since stdout IS the NUT stream). Bounded by -frames:v (seconds*fps), NEVER -t:
+#      with -copyts the -t seconds compare against EPOCH-scale timestamps -> EMPTY file.
 #   4. restart+verify cam2 camera-box   (scripts/lib/camera-box-restart-verify.sh; a remote EXIT
 #                                        trap ALWAYS restores the service even if the grab fails)
 #   5. burn OFF the imag program input  (a dev1-side EXIT trap ALWAYS turns the burn off)
-#   6. scp the capture back to dev1
 # then the offline decode/report is scripts/drm_latency_report.py (per-frame pairing of the decoded
 # gen_ts_ns against the capture wall-ts; median/p95/p99 + jitter; a DORMANT-ENABLED delta table).
+#
+# AUTH: the cam fleet authenticates by PASSWORD. Export CAM_PW to route the ssh through
+# `sshpass -p "$CAM_PW"`; unset CAM_PW = plain ssh (key auth). The value is never printed.
 #
 # RIG STATE IS AN INPUT, NOT A KNOB: the DORMANT / ENABLED state is passed as --label; this script
 # NEVER writes ~/.camera-box/drm-output.json (the ENABLE flip is the supervisor's M4 runbook step).
@@ -28,15 +34,15 @@ set -euo pipefail
 #
 # SHAPE: this is a PLANNER + bounded ssh-executor in the exact shape of
 # scripts/deploy-genlock-fleet.sh -- pure builder functions (drm_latency_cam2_program /
-# drm_latency_burn_cmd / drm_latency_scp_cmd) that print command text and take NO network, a
-# source-guard so the unit tests (tests/python/test_drm_latency_report_1152.py) can source this
-# file with no rig, then main(). PLAN/dry-run is the DEFAULT; --execute performs the rig I/O.
+# drm_latency_burn_cmd) that print command text and take NO network, a source-guard so the unit
+# tests (tests/python/test_drm_latency_report_1152.py) can source this file with no rig, then
+# main(). PLAN/dry-run is the DEFAULT; --execute performs the rig I/O.
 #
 # Usage (PLAN -- print the whole measurement plan, touch nothing; the DEFAULT):
 #   scripts/drm-latency-measure.sh --label DORMANT --imag-input "CAM1 (usb)"
 #
 # Usage (EXECUTE -- run the measurement against the live rig; supervisor rig-campaign step):
-#   OBS_WS_PASSWORD=... scripts/drm-latency-measure.sh --execute --label DORMANT \
+#   CAM_PW=... OBS_WS_PASSWORD=... scripts/drm-latency-measure.sh --execute --label DORMANT \
 #       --imag-input "CAM1 (usb)" [--imag-host 10.77.9.182] [--cam2-host 10.77.9.62] \
 #       [--cam2-user root] [--node /dev/video0] [--input-format mjpeg] \
 #       [--video-size 1920x1080] [--framerate 60] [--seconds 8] [--outdir /tmp]
@@ -60,32 +66,39 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # sourcing this file; a regression in an emitted program is caught with no rig).
 # --------------------------------------------------------------------------- #
 
-# drm_latency_cam2_program NODE FMT SIZE FPS SECONDS OUTFILE LABEL
+# drm_latency_cam2_program NODE FMT SIZE FPS SECONDS LABEL
 #   -> the full REMOTE bash for the cam2 leg: an EXIT trap that ALWAYS restarts+verifies
 #   camera-box (reusing camera_box_verify_active_cmds), stop camera-box, then a bounded ffmpeg
-#   raw-V4L2 grab with per-frame wall-clock timestamps into OUTFILE. Meant to be fed to
+#   V4L2 grab with per-frame wall-clock timestamps STREAMED to stdout as NUT (`-f nut -`) -- the
+#   caller redirects the ssh pipe into the dev1-local capture file, so nothing lands on cam2's
+#   /tmp (a raw grab overflows it, proven live). stdout is the NUT stream, so EVERY progress echo
+#   here goes to stderr, and the restore fn redirects its WHOLE body to stderr (the spliced
+#   verify block prints its own success line to stdout). The grab is bounded by -frames:v
+#   (seconds*fps); `-t` is FORBIDDEN here -- with -copyts it compares the CLI seconds against
+#   epoch-scale timestamps and silently writes an EMPTY capture (proven live). Meant to be fed to
 #   `ssh <cam2> bash -s` on stdin. The local $args are expanded here; the remote-side $? / $_drm_rc
 #   are backslash-escaped so they survive to the remote shell (unquoted-heredoc idiom, matching
 #   scripts/lib/*.sh). The spliced camera_box_verify_active_cmds output already carries real remote
 #   $ (its own unquoted heredoc consumed the backslashes), and a command substitution's output is
 #   not re-scanned, so it passes through literally.
 drm_latency_cam2_program() {
-  local node="$1" fmt="$2" size="$3" fps="$4" seconds="$5" outfile="$6" label="$7"
+  local node="$1" fmt="$2" size="$3" fps="$4" seconds="$5" label="$6"
+  local frames=$((seconds * fps))
   cat <<CAM2PROG
 set +e
 _drm_restore() {
   echo "[drm-latency] restoring camera-box on cam2 (label=$label)" >&2
   systemctl restart camera-box 2>/dev/null || true
 $(camera_box_verify_active_cmds "cam2 (drm-latency $label)")
-}
+} >&2
 trap _drm_restore EXIT
-echo "[drm-latency] stop camera-box to free $node (label=$label)"
+echo "[drm-latency] stop camera-box to free $node (label=$label)" >&2
 systemctl stop camera-box 2>/dev/null || true
 sleep 1
-echo "[drm-latency] grab ${seconds}s from $node ($fmt $size@$fps) with wallclock ts -> $outfile"
-timeout -k 5 $((seconds + 30)) ffmpeg -hide_banner -loglevel warning -nostdin -use_wallclock_as_timestamps 1 -f v4l2 -input_format $fmt -video_size $size -framerate $fps -i $node -t $seconds -copyts -avoid_negative_ts disabled -c:v copy -f nut $outfile
+echo "[drm-latency] grab $frames frames from $node ($fmt $size@$fps) with wallclock ts, NUT to stdout" >&2
+timeout -k 5 $((seconds + 30)) ffmpeg -hide_banner -loglevel warning -nostdin -use_wallclock_as_timestamps 1 -f v4l2 -input_format $fmt -video_size $size -framerate $fps -i $node -frames:v $frames -copyts -avoid_negative_ts disabled -c:v copy -f nut -
 _drm_rc=\$?
-echo "[drm-latency] grab exit=\$_drm_rc label=$label out=$outfile" ;
+echo "[drm-latency] grab exit=\$_drm_rc label=$label" >&2 ;
 CAM2PROG
 }
 
@@ -97,12 +110,6 @@ drm_latency_burn_cmd() {
   local action="$1" host="$2" input="$3"
   printf 'python3 "%s/obs_burn_filter.py" %s --host %s --input "%s" --password "${OBS_WS_PASSWORD:-}" ;\n' \
     "$HERE" "$action" "$host" "$input"
-}
-
-# drm_latency_scp_cmd USER HOST REMOTE LOCAL -> pull the capture back to dev1 (scp -O).
-drm_latency_scp_cmd() {
-  local user="$1" host="$2" remote="$3" local_dst="$4"
-  printf 'scp -O %s@%s:%s %s ;\n' "$user" "$host" "$remote" "$local_dst"
 }
 
 # ============================================================================================
@@ -125,7 +132,7 @@ _drm_burn_off_and_warn() {
 }
 
 usage() {
-  sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
@@ -164,16 +171,22 @@ main() {
   fi
   [ -n "$imag_input" ] || imag_input="<IMAG_INPUT>"
 
-  local ts remote_out local_dst
+  local ts local_dst
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  remote_out="/tmp/drm-lat-${label}-${ts}.nut"
   local_dst="${outdir%/}/drm-lat-${label}-${ts}.nut"
 
-  local cam2prog burn_on burn_off scp_line
-  cam2prog="$(drm_latency_cam2_program "$node" "$fmt" "$size" "$fps" "$seconds" "$remote_out" "$label")"
+  # Password-auth seam: the cam fleet uses password ssh. CAM_PW set -> sshpass wraps the ssh
+  # (the plan prints the UNEXPANDED "$CAM_PW" reference, never the value); unset -> plain ssh.
+  local ssh_prefix=() ssh_prefix_txt=""
+  if [ -n "${CAM_PW:-}" ]; then
+    ssh_prefix=(sshpass -p "$CAM_PW")
+    ssh_prefix_txt='sshpass -p "$CAM_PW" '
+  fi
+
+  local cam2prog burn_on burn_off
+  cam2prog="$(drm_latency_cam2_program "$node" "$fmt" "$size" "$fps" "$seconds" "$label")"
   burn_on="$(drm_latency_burn_cmd add "$imag_host" "$imag_input")"
   burn_off="$(drm_latency_burn_cmd remove "$imag_host" "$imag_input")"
-  scp_line="$(drm_latency_scp_cmd "$cam2_user" "$cam2_host" "$remote_out" "$local_dst")"
 
   if [ "$mode" = "plan" ]; then
     echo "=== #1152 M3 DRM-latency measurement PLAN (label=$label) -- dry-run, touches nothing ==="
@@ -181,14 +194,13 @@ main() {
     echo
     echo "# 1) burn ON the imag program input (dev1 -> imag OBS WebSocket):"
     echo "$burn_on"
-    echo "# 2-4) on cam2 ($cam2_user@$cam2_host): stop camera-box, grab, restart+verify (EXIT-trap restore):"
-    echo "ssh $cam2_user@$cam2_host bash -s <<'CAM2'"
+    echo "# 2-4) on cam2 ($cam2_user@$cam2_host): stop camera-box, grab, restart+verify (EXIT-trap"
+    echo "#      restore); the NUT capture STREAMS over the ssh pipe into the dev1-local file:"
+    echo "${ssh_prefix_txt}ssh $cam2_user@$cam2_host bash -s > $local_dst <<'CAM2'"
     echo "$cam2prog"
     echo "CAM2"
     echo "# 5) burn OFF the imag program input (also run by the dev1 EXIT trap in execute mode):"
     echo "$burn_off"
-    echo "# 6) pull the capture back to dev1:"
-    echo "$scp_line"
     echo
     echo "# then report:  python3 $HERE/drm_latency_report.py run --label $label --capture $local_dst --out ${outdir%/}/drm-lat-${label}.json"
     return 0
@@ -203,16 +215,18 @@ main() {
   # shellcheck disable=SC2064
   trap "_drm_burn_off_and_warn '$imag_host' '$imag_input'" EXIT
 
-  # NOTE (review 🔵): plan mode PRINTS drm_latency_burn_cmd/_scp_cmd for the human; execute uses
-  # direct argv here (safer than eval) -- the two are kept textually parallel by hand.
-  echo "[drm-latency] cam2 leg (stop -> grab -> restart+verify) on $cam2_user@$cam2_host"
-  timeout $((seconds + 90)) ssh -o ConnectTimeout=15 "$cam2_user@$cam2_host" "bash -s" <<<"$cam2prog" || \
+  # NOTE (review 🔵): plan mode PRINTS drm_latency_burn_cmd for the human; execute uses direct
+  # argv here (safer than eval) -- the two are kept textually parallel by hand.
+  echo "[drm-latency] cam2 leg (stop -> grab -> restart+verify), NUT streaming -> $local_dst"
+  timeout $((seconds + 90)) "${ssh_prefix[@]}" ssh -o ConnectTimeout=15 "$cam2_user@$cam2_host" "bash -s" <<<"$cam2prog" > "$local_dst" || \
     echo "[drm-latency] WARNING: cam2 leg returned non-zero or timed out (the remote EXIT trap still restarted camera-box)" >&2
 
-  echo "[drm-latency] pull capture -> $local_dst"
-  scp -O "$cam2_user@$cam2_host:$remote_out" "$local_dst"
+  if [ ! -s "$local_dst" ]; then
+    echo "[drm-latency] FAIL: capture $local_dst is EMPTY -- the grab produced no frames (device busy? wrong --node/--input-format?)" >&2
+    exit 1
+  fi
 
-  echo "[drm-latency] DONE label=$label capture=$local_dst"
+  echo "[drm-latency] DONE label=$label capture=$local_dst ($(stat -c%s "$local_dst") bytes)"
   echo "[drm-latency] next: python3 $HERE/drm_latency_report.py run --label $label --capture $local_dst --out ${outdir%/}/drm-lat-${label}.json"
 }
 

@@ -11,9 +11,33 @@ Measures the render-tick→HDMI-glass latency + jitter of imag's Program output,
 vs ENABLED (the M1/M2 in-OBS DRM-lease output), to decide the M4 permanent flip. cam2's grabber
 physically taps imag's HDMI (projection-tap, issue 781/1196), so cam2 `/dev/video0` IS the imag
 scanout; imag's Program carries the QR burn whose `gen_ts_ns` is the emit wall clock. `drm-latency-measure.sh`
-grabs a short clip off cam2 with per-frame capture wall-ts and scp's it to dev1; `drm_latency_report.py`
-decodes each frame and pairs capture-ts vs emit-ts. The DORMANT−ENABLED DELTA (delta = ENABLED −
-DORMANT) cancels the grabber's fixed offset — the delta is the answer, not the absolute number.
+grabs a short clip off cam2 with per-frame capture wall-ts, STREAMED over the ssh pipe straight into
+a dev1-local file; `drm_latency_report.py` decodes each frame and pairs capture-ts vs emit-ts. The
+DORMANT−ENABLED DELTA (delta = ENABLED − DORMANT) cancels the grabber's fixed offset — the delta is
+the answer, not the absolute number.
+
+## GOTCHA — `-t N` alongside `-copyts` writes an EMPTY capture; bound the grab by `-frames:v`
+
+With `-copyts` the stream's timestamps stay at EPOCH scale (~1.78e9 s), and ffmpeg's `-t N` output
+duration is evaluated against those timestamps — so recording "stops" immediately and the capture
+file is EMPTY (0 frames, no error; proven live in the M3 campaign). Bound the grab by
+`-frames:v $((seconds * fps))` instead — a frame count is timestamp-independent. The orchestrator's
+`test_sh_grab_is_frame_bounded_never_duration_bounded` pins this.
+
+## GOTCHA — a raw grab cannot fit cam2's /tmp; STREAM the NUT over the ssh pipe to dev1
+
+Raw YUYV 1080p60 is ~4.15 MB/frame (~250 MB/s) — a 20 s grab overflowed cam2's /tmp live ("No space
+left on device"). The orchestrator therefore never writes a remote file: the remote ffmpeg emits
+`-c:v copy -f nut -` to stdout and the dev1-side executor redirects the ssh pipe into the local
+capture (`ssh … bash -s > local.nut`), no scp step. Consequence: the remote program's stdout IS the
+NUT stream — EVERY progress echo goes to `>&2`, and the restore fn redirects its whole body (`} >&2`)
+because the spliced `camera_box_verify_active_cmds` block prints its success line to stdout.
+
+## Fleet auth is by PASSWORD — the `CAM_PW` sshpass seam
+
+The cam boxes authenticate by password, not keys. `CAM_PW` set → the executor wraps ssh in
+`sshpass -p "$CAM_PW"`; unset → plain ssh. The plan prints the UNEXPANDED `"$CAM_PW"` reference —
+the value is never printed (test-pinned).
 
 ## GOTCHA — `ffmpeg -use_wallclock_as_timestamps 1` REQUIRES `-copyts`, or the epoch is silently rebased to ~0
 
