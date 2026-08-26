@@ -36,6 +36,12 @@ struct obs_drm_output_config {
 	const char *connector_name;
 	/* Solid fill colour for the M1 proof pattern, packed 0x00RRGGBB (XRGB8888). */
 	uint32_t solid_argb;
+	/* #1152 M2: bind the OBS Program to the leased connector — GBM scanout buffers rendered
+	 * on the graphics thread, page-flipped by the flip thread (zero-copy dma-buf path).
+	 * false = the M1 solid diagnostic pattern only. The solid pattern also remains the
+	 * initial image (before the first rendered Program frame) and the fail-open fallback
+	 * when the GL bind fails. The autostart config key "program" defaults this to true. */
+	bool program;
 };
 
 /* Start the DRM-lease output: lease {connector + a free CRTC} out of X and page-flip a solid
@@ -53,6 +59,13 @@ EXPORT bool obs_drm_output_active(void);
  * carries "enabled": true, start the output. Absent/disabled => one `drm-output:` log line and no
  * behaviour change. Called once from obs_startup(), under a __linux__ guard at the call site. */
 void obs_drm_output_maybe_autostart(void);
+
+/* #1152 M2 — graphics-thread frame hook: called once per tick by obs_graphics_thread_loop()
+ * right after the Program is composited (output_frames). When the output is active with the
+ * Program binding enabled, it lazily imports the GBM scanout buffers into the OBS GL context
+ * (the graphics subsystem does not exist yet at obs_startup autostart time) and renders the
+ * Program into the mailbox back buffer; a cheap atomic no-op otherwise. Linux-only. */
+void obs_drm_output_on_frame(void);
 
 #ifdef __cplusplus
 }

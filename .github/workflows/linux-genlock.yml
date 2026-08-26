@@ -74,7 +74,7 @@ env:
     libxkbcommon-dev libatk1.0-dev libatk-bridge2.0-dev libxcomposite-dev libxdamage-dev
     libasound2-dev libfdk-aac-dev libfontconfig-dev libfreetype6-dev libjack-jackd2-dev
     libsndio-dev libspeexdsp-dev libudev-dev libv4l-dev libva-dev libvlc-dev
-    libpci-dev libdrm-dev
+    libpci-dev libdrm-dev libgbm-dev
     nlohmann-json3-dev libwebsocketpp-dev libasio-dev libqrcodegencpp-dev
     libffmpeg-nvenc-dev librist-dev libsrt-openssl-dev
     qt6-base-dev libqt6svg6-dev qt6-base-private-dev
