@@ -474,14 +474,18 @@ fn verify_imag_gains_the_lease_tolerance_check_1152() {
         body.contains("grep -c 'drm_output_lease_enabled' /usr/local/bin/imag_scenes.py"),
         "verify-imag must grep the INSTALLED seeder for the lease classifier"
     );
-    // placed in the live flow after the (p) operator-scaffolding family, before the verdict
+    // placed in the live flow after the (p) operator-scaffolding family, before the verdict.
+    // NB: the verdict anchor is the final echo's own unique text — a bare "ALL CLEAR" also
+    // appears in a mid-file COMMENT (the #832 first-occurrence trap, verified with grep -n).
     let p_block = body
         .find("imag-obs-watchdog not in the agreed installed-but-disabled state")
         .expect("the (p) watchdog check must stay");
     let check = body
         .find("grep -c 'DRM_LEASE_MODE'")
         .expect("the lease-tolerance grep must exist");
-    let clear = body.find("ALL CLEAR").expect("the verdict must stay");
+    let clear = body
+        .find("passes every acceptance check")
+        .expect("the verdict must stay");
     assert!(
         p_block < check && check < clear,
         "the lease-tolerance check belongs with the operator-scaffolding family, before the \
