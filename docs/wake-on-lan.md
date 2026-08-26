@@ -41,6 +41,26 @@ dev1 is on the same `10.77.9.0/24` as the rig, so the subnet broadcast reaches t
 ever run from OFF the rig segment, `scp` this dir to an on-segment box (a cam box) and send from
 there — a routed directed-broadcast is commonly dropped by switches.
 
+#### Confirm the box came back — `--wait` (the automated "verify availability after wake")
+
+`--wait[=SECS]` polls the target for reachability AFTER the send, so a recovery is one command
+instead of "send, then manually ping":
+
+```bash
+scripts/wake-box.sh strih --wait          # wake, then poll strih's ip for up to 120s (default)
+scripts/wake-box.sh imag-nb --wait=180    # give a slow box a longer budget
+scripts/wake-box.sh strih --dry-run --wait # show the verify plan (host + budget), send/poll nothing
+scripts/wake-box.sh 5C:6A:80:F6:6C:F7 --wait --wait-host 10.77.9.202   # raw-MAC target: poll host is explicit
+```
+
+It exits **0** and prints `WAKE-VERIFY UP: <box> (<ip>) reachable after ~Ns` once the box answers,
+or exits **4** with `WAKE-VERIFY STILL-DOWN: … not reachable after <SECS>s` if the budget elapses
+(distinct from exit **2** for a misuse, so a recovery loop can tell "sent but never came up" from
+"bad args"). The poll host is the box's `wol-targets.txt` ip; for a raw-MAC target (which carries no
+ip) pass `--wait-host <ip>`. The reachability probe is `${WOL_PING_CMD:-ping -c1 -W1}` (override it
+with e.g. a TCP-port check) and the interval `${WOL_WAIT_INTERVAL:-3}`s. This pairs with issue
+1001's outage detection: detect-down → `wake-box.sh <box> --wait` → confirm-up.
+
 ### `scripts/enable-nic-wol.ps1` — enable + verify the Windows NIC WoL (runs on the box)
 
 Idempotent, fail-loud, three modes: default = apply (needs an **elevated** session), `-VerifyOnly`

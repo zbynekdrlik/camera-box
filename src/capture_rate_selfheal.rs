@@ -479,9 +479,247 @@ pub fn perform_usb_reset(video_device_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #1149 — trigger-specific log-message pieces for the shared self-heal action sequence.
+///
+/// The #656/#663/#971 capture-rate trigger and the #1128 grabber-STUCK trigger run the SAME
+/// destructive `load_state → decide_selfheal → save_state → perform_usb_reset → exit` sequence;
+/// ONLY these three `&'static str` fragments differ between them, so [`attempt_self_heal`] is
+/// parameterized by this struct (two consts below) instead of the ~80 lines being duplicated at
+/// both call sites in `src/main.rs`. The fragments reproduce the pre-#1149 log wording
+/// byte-for-byte (proven by the `*_message` builder tests), so every downstream dev1-watchdog
+/// grep anchor (`#663 self-heal: USB reset attempt`, etc.) stays intact.
+pub struct SelfHealMessages {
+    /// Non-critical line prefix, e.g. `#663 self-heal` / `#1128 grabber-stuck self-heal`.
+    pub tag: &'static str,
+    /// CRITICAL failure-line prefix up to (but excluding) ` USB reset attempt`, e.g.
+    /// `CRITICAL #663: self-heal` / `CRITICAL #1128 grabber-stuck self-heal:`.
+    pub critical_prefix: &'static str,
+    /// The `…WORSE state than the original {} defect…` word: `rate` / `stuck`.
+    pub defect_word: &'static str,
+}
+
+/// #656/#663/#971 capture-delivery-rate self-heal wording.
+pub const CAPTURE_RATE_SELF_HEAL_MESSAGES: SelfHealMessages = SelfHealMessages {
+    tag: "#663 self-heal",
+    critical_prefix: "CRITICAL #663: self-heal",
+    defect_word: "rate",
+};
+
+/// #1128 grabber-STUCK self-heal wording.
+pub const GRABBER_STUCK_SELF_HEAL_MESSAGES: SelfHealMessages = SelfHealMessages {
+    tag: "#1128 grabber-stuck self-heal",
+    critical_prefix: "CRITICAL #1128 grabber-stuck self-heal:",
+    defect_word: "stuck",
+};
+
+/// #1193 sustained-OVER-RATE self-heal wording — the 3rd trigger (`capture_overrate`). Its `tag`
+/// shares no substring with the `#663 self-heal` / `#1128 grabber-stuck self-heal` prefixes, so the
+/// reset-line grep anchors of the other two triggers never mis-match this one.
+pub const OVER_RATE_SELF_HEAL_MESSAGES: SelfHealMessages = SelfHealMessages {
+    tag: "#1193 over-rate self-heal",
+    critical_prefix: "CRITICAL #1193 over-rate self-heal:",
+    defect_word: "over-rate",
+};
+
+/// #1200 LATCH-HALVING self-heal wording — the 4th trigger (`capture_latch_halving`). Its `tag`
+/// shares no substring with the `#663 self-heal` / `#1128 grabber-stuck self-heal` / `#1193
+/// over-rate self-heal` prefixes, so the reset-line grep anchors of the other three triggers never
+/// mis-match this one.
+pub const LATCH_HALVING_SELF_HEAL_MESSAGES: SelfHealMessages = SelfHealMessages {
+    tag: "#1200 latch-halving self-heal",
+    critical_prefix: "CRITICAL #1200 latch-halving self-heal:",
+    defect_word: "latch-halving",
+};
+
+/// `SelfHealDecision::Throttled` WARN line (rate-limited — no reset this window).
+pub fn throttled_message(msgs: &SelfHealMessages, seconds_remaining: u64) -> String {
+    format!(
+        "{} rate-limited: the last USB reset attempt was too recent — {}s remaining before another attempt is allowed",
+        msgs.tag, seconds_remaining
+    )
+}
+
+/// `save_state` failure ERROR line (state persist failed — the reset still proceeds).
+pub fn save_state_failed_message(msgs: &SelfHealMessages, state_path: &str, err: &str) -> String {
+    format!(
+        "{}: failed to persist self-heal state to {}: {} (rate-limit/escalation count may not survive this restart)",
+        msgs.tag, state_path, err
+    )
+}
+
+/// Successful-USB-reset WARN line (process will exit `exit_code` after graceful shutdown).
+pub fn reset_success_message(
+    msgs: &SelfHealMessages,
+    attempt_number: u32,
+    exit_code: i32,
+) -> String {
+    format!(
+        "{}: USB reset attempt #{} succeeded — will exit (code {}) after graceful shutdown so systemd restarts camera-box against the re-enumerated device",
+        msgs.tag, attempt_number, exit_code
+    )
+}
+
+/// Failed-USB-reset CRITICAL line (device possibly disconnected — still exits `exit_code`).
+pub fn reset_failed_message(
+    msgs: &SelfHealMessages,
+    attempt_number: u32,
+    err: &str,
+    exit_code: i32,
+) -> String {
+    format!(
+        "{} USB reset attempt #{} FAILED: {} — the capture device may now be in a WORSE state than the original {} defect (possibly disconnected); exiting (code {}) after graceful shutdown so systemd retries with a fresh process",
+        msgs.critical_prefix, attempt_number, err, msgs.defect_word, exit_code
+    )
+}
+
+/// #1201 — the ONE shared per-trigger cooldown-floor predicate (consolidated here from the two
+/// byte-identical per-module copies in `capture_overrate` / `capture_latch_halving`): has enough
+/// time passed since the last recorded self-heal (by ANY trigger) for a floored trigger to attempt
+/// another USB reset? `last_heal_epoch_s` is read from the SHARED self-heal state file
+/// ([`load_state`]`(...).last_heal_epoch_s`); `min_interval_s` is the calling trigger's OWN
+/// per-trigger cooldown floor (the #1193 `OVERRATE_MIN_HEAL_INTERVAL_S`, the #1200
+/// `HALVING_MIN_HEAL_INTERVAL_S` — both 30 min, deliberately stricter than the shared 10-min
+/// [`DEFAULT_MIN_HEAL_INTERVAL_S`] throttle inside [`attempt_self_heal`], so the other triggers
+/// stay untouched). A missing value (never healed this boot) permits the attempt. Pure over
+/// `(last, now, interval)` so it is Tier-0 testable.
+pub fn cooldown_elapsed(
+    last_heal_epoch_s: Option<u64>,
+    now_epoch_s: u64,
+    min_interval_s: u64,
+) -> bool {
+    match last_heal_epoch_s {
+        Some(last) => now_epoch_s.saturating_sub(last) >= min_interval_s,
+        None => true,
+    }
+}
+
+/// #1149 — the ONE shared in-process USB self-heal action sequence, invoked by BOTH the
+/// #656/#663/#971 capture-rate trigger and the #1128 grabber-STUCK trigger in `src/main.rs`.
+///
+/// Runs the identical destructive flow — `load_state → decide_selfheal → match → save_state →
+/// perform_usb_reset` — and returns the pending process-exit code the caller must apply:
+/// `Some(SELF_HEAL_EXIT_CODE)` (77) on a successful reset, `Some(SELF_HEAL_RESET_FAILED_EXIT_CODE)`
+/// (78) on a failed one, and `None` when the decision was `Healthy`/`Throttled` and NO reset was
+/// attempted. The caller applies a returned `Some(code)` by stopping capture and setting its own
+/// `pending_self_heal_exit_code` — behaviorally identical to the two pre-#1149 inline blocks.
+///
+/// `reset` is INJECTED (production passes [`perform_usb_reset`]) so the sequencing is unit-testable
+/// without ever firing a real USB re-enumeration; `msgs` selects the trigger-specific log wording.
+pub fn attempt_self_heal(
+    device_path: &str,
+    model: GrabberModel,
+    now_epoch_s: u64,
+    state_path: &Path,
+    msgs: &SelfHealMessages,
+    reset: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> Option<i32> {
+    let prev_selfheal_state = load_state(state_path);
+    let (selfheal_decision, next_selfheal_state) = decide_selfheal(
+        prev_selfheal_state,
+        true,
+        now_epoch_s,
+        DEFAULT_MIN_HEAL_INTERVAL_S,
+        DEFAULT_RECURRENCE_WINDOW_S,
+        DEFAULT_CRITICAL_ESCALATION_HEALS,
+    );
+    match selfheal_decision {
+        // Unreachable in production (both call sites only reach this with a confirmed defect),
+        // but map it to a no-op so the shared helper never resets on a Healthy decision.
+        SelfHealDecision::Healthy => None,
+        SelfHealDecision::Throttled { seconds_remaining } => {
+            tracing::warn!("{}", throttled_message(msgs, seconds_remaining));
+            None
+        }
+        SelfHealDecision::Heal {
+            attempt_number,
+            escalate_critical,
+        } => {
+            if escalate_critical {
+                tracing::error!(
+                    "{}",
+                    critical_escalation_message(device_path, attempt_number, model)
+                );
+            }
+            if let Err(e) = save_state(state_path, &next_selfheal_state) {
+                tracing::error!(
+                    "{}",
+                    save_state_failed_message(
+                        msgs,
+                        &state_path.display().to_string(),
+                        &e.to_string()
+                    )
+                );
+            }
+            match reset(device_path) {
+                Ok(()) => {
+                    tracing::warn!(
+                        "{}",
+                        reset_success_message(msgs, attempt_number, SELF_HEAL_EXIT_CODE)
+                    );
+                    Some(SELF_HEAL_EXIT_CODE)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "{}",
+                        reset_failed_message(
+                            msgs,
+                            attempt_number,
+                            &format!("{e:#}"),
+                            SELF_HEAL_RESET_FAILED_EXIT_CODE
+                        )
+                    );
+                    Some(SELF_HEAL_RESET_FAILED_EXIT_CODE)
+                }
+            }
+        }
+    }
+}
+
+/// #1201 — the ONE shared FLOORED outer wrapper around [`attempt_self_heal`], invoked by the two
+/// per-trigger-floored triggers in `src/main.rs`'s capture loop (#1193 over-rate, #1200
+/// latch-halving). Runs the identical gating sequence both call sites used to inline: env-gate
+/// (`enabled`) → `pending_is_none` (never double-reset a window another band already fired) →
+/// epoch-now read → [`load_state`] of the SHARED state file → the per-trigger [`cooldown_elapsed`]
+/// floor → [`attempt_self_heal`]. Returns `None` (nothing to apply) when any gate blocks —
+/// deliberately WITHOUT a throttled/blocked log line, matching the pre-#1201 inline blocks, whose
+/// floor check was silent — otherwise forwards the inner helper's pending process-exit code, which
+/// the caller applies by stopping capture and setting its own `pending_self_heal_exit_code`.
+///
+/// `reset` is INJECTED (production passes [`perform_usb_reset`]) so the sequencing is unit-testable
+/// without ever firing a real USB re-enumeration; `msgs` selects the trigger-specific log wording;
+/// `min_interval_s` is the calling trigger's OWN cooldown floor (see [`cooldown_elapsed`]).
+#[allow(clippy::too_many_arguments)]
+pub fn attempt_floored_self_heal(
+    enabled: bool,
+    pending_is_none: bool,
+    min_interval_s: u64,
+    device_path: &str,
+    model: GrabberModel,
+    state_path: &Path,
+    msgs: &SelfHealMessages,
+    reset: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> Option<i32> {
+    if !(enabled && pending_is_none) {
+        return None;
+    }
+    let now_epoch_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last_heal_epoch_s = load_state(state_path).last_heal_epoch_s;
+    if !cooldown_elapsed(last_heal_epoch_s, now_epoch_s, min_interval_s) {
+        return None;
+    }
+    attempt_self_heal(device_path, model, now_epoch_s, state_path, msgs, reset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #1201 — the two per-trigger cooldown-floor consts, used by the consolidated cooldown tests
+    // and the floored-wrapper tests below.
+    use crate::capture_latch_halving::HALVING_MIN_HEAL_INTERVAL_S;
+    use crate::capture_overrate::OVERRATE_MIN_HEAL_INTERVAL_S;
 
     // #717 RED marker: `should_trigger_selfheal` is NOT YET IMPLEMENTED — these tests reference
     // it already (RED commit: proves via compile failure the two-band OR combinator does not
@@ -908,5 +1146,363 @@ mod tests {
             "a device-level name (no ':<config>.<iface>' suffix) must be rejected — \
              perform_usb_reset's guard depends on this to avoid toggling the wrong sysfs node"
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #1149 — the unified self-heal helper: byte-exact legacy log wording + the destructive
+    // sequence's exit-code mapping (with an INJECTED fake reset so no real USB re-enumeration
+    // fires). The golden strings are copied verbatim from the two pre-#1149 inline blocks in
+    // src/main.rs, so a wording drift on EITHER the #656/#663/#971 or the #1128 path fails here.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn capture_rate_self_heal_messages_byte_match_the_legacy_656_663_971_wording() {
+        let m = &CAPTURE_RATE_SELF_HEAL_MESSAGES;
+        assert_eq!(
+            throttled_message(m, 42),
+            "#663 self-heal rate-limited: the last USB reset attempt was too recent — 42s remaining before another attempt is allowed"
+        );
+        assert_eq!(
+            save_state_failed_message(m, "/run/camera-box/capture-rate-selfheal.state", "boom"),
+            "#663 self-heal: failed to persist self-heal state to /run/camera-box/capture-rate-selfheal.state: boom (rate-limit/escalation count may not survive this restart)"
+        );
+        assert_eq!(
+            reset_success_message(m, 3, SELF_HEAL_EXIT_CODE),
+            "#663 self-heal: USB reset attempt #3 succeeded — will exit (code 77) after graceful shutdown so systemd restarts camera-box against the re-enumerated device"
+        );
+        assert_eq!(
+            reset_failed_message(m, 3, "boom", SELF_HEAL_RESET_FAILED_EXIT_CODE),
+            "CRITICAL #663: self-heal USB reset attempt #3 FAILED: boom — the capture device may now be in a WORSE state than the original rate defect (possibly disconnected); exiting (code 78) after graceful shutdown so systemd retries with a fresh process"
+        );
+        // The dev1-watchdog `self_heal_reset_grep_pattern` and `capture_rate_defect_grep_pattern_hard`
+        // anchors both key on this exact substring — it must never drift.
+        assert!(reset_success_message(m, 1, SELF_HEAL_EXIT_CODE)
+            .contains("#663 self-heal: USB reset attempt"));
+    }
+
+    #[test]
+    fn grabber_stuck_self_heal_messages_byte_match_the_legacy_1128_wording() {
+        let m = &GRABBER_STUCK_SELF_HEAL_MESSAGES;
+        assert_eq!(
+            throttled_message(m, 42),
+            "#1128 grabber-stuck self-heal rate-limited: the last USB reset attempt was too recent — 42s remaining before another attempt is allowed"
+        );
+        assert_eq!(
+            save_state_failed_message(m, "/run/camera-box/capture-rate-selfheal.state", "boom"),
+            "#1128 grabber-stuck self-heal: failed to persist self-heal state to /run/camera-box/capture-rate-selfheal.state: boom (rate-limit/escalation count may not survive this restart)"
+        );
+        assert_eq!(
+            reset_success_message(m, 3, SELF_HEAL_EXIT_CODE),
+            "#1128 grabber-stuck self-heal: USB reset attempt #3 succeeded — will exit (code 77) after graceful shutdown so systemd restarts camera-box against the re-enumerated device"
+        );
+        assert_eq!(
+            reset_failed_message(m, 3, "boom", SELF_HEAL_RESET_FAILED_EXIT_CODE),
+            "CRITICAL #1128 grabber-stuck self-heal: USB reset attempt #3 FAILED: boom — the capture device may now be in a WORSE state than the original stuck defect (possibly disconnected); exiting (code 78) after graceful shutdown so systemd retries with a fresh process"
+        );
+    }
+
+    #[test]
+    fn over_rate_self_heal_messages_carry_the_1193_tag_and_no_sibling_anchor() {
+        let m = &OVER_RATE_SELF_HEAL_MESSAGES;
+        assert_eq!(
+            reset_success_message(m, 3, SELF_HEAL_EXIT_CODE),
+            "#1193 over-rate self-heal: USB reset attempt #3 succeeded — will exit (code 77) after graceful shutdown so systemd restarts camera-box against the re-enumerated device"
+        );
+        assert_eq!(
+            reset_failed_message(m, 3, "boom", SELF_HEAL_RESET_FAILED_EXIT_CODE),
+            "CRITICAL #1193 over-rate self-heal: USB reset attempt #3 FAILED: boom — the capture device may now be in a WORSE state than the original over-rate defect (possibly disconnected); exiting (code 78) after graceful shutdown so systemd retries with a fresh process"
+        );
+        // The over-rate reset lines must NOT carry the other two triggers' grep anchors, so their
+        // dev1-watchdog patterns never mis-match this trigger's events.
+        let s = reset_success_message(m, 1, SELF_HEAL_EXIT_CODE);
+        assert!(!s.contains("#663 self-heal: USB reset attempt"));
+        assert!(!s.contains("#1128 grabber-stuck self-heal"));
+    }
+
+    #[test]
+    fn latch_halving_self_heal_messages_carry_the_1200_tag_and_no_sibling_anchor() {
+        let m = &LATCH_HALVING_SELF_HEAL_MESSAGES;
+        assert_eq!(
+            reset_success_message(m, 3, SELF_HEAL_EXIT_CODE),
+            "#1200 latch-halving self-heal: USB reset attempt #3 succeeded — will exit (code 77) after graceful shutdown so systemd restarts camera-box against the re-enumerated device"
+        );
+        assert_eq!(
+            reset_failed_message(m, 3, "boom", SELF_HEAL_RESET_FAILED_EXIT_CODE),
+            "CRITICAL #1200 latch-halving self-heal: USB reset attempt #3 FAILED: boom — the capture device may now be in a WORSE state than the original latch-halving defect (possibly disconnected); exiting (code 78) after graceful shutdown so systemd retries with a fresh process"
+        );
+        // The latch-halving reset lines must NOT carry the other three triggers' grep anchors, so
+        // their dev1-watchdog patterns never mis-match this trigger's events.
+        let s = reset_success_message(m, 1, SELF_HEAL_EXIT_CODE);
+        assert!(!s.contains("#663 self-heal: USB reset attempt"));
+        assert!(!s.contains("#1128 grabber-stuck self-heal"));
+        assert!(!s.contains("#1193 over-rate self-heal"));
+    }
+
+    fn selfheal_temp_state_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "camera-box-selfheal-1149-{}-{}",
+                name,
+                std::process::id()
+            ))
+            .join("state.txt")
+    }
+
+    #[test]
+    fn attempt_self_heal_heal_success_returns_77_and_calls_reset_exactly_once() {
+        let sp = selfheal_temp_state_path("ok");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let mut reset_calls = 0u32;
+        let code = attempt_self_heal(
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            2_000_000,
+            &sp,
+            &CAPTURE_RATE_SELF_HEAL_MESSAGES,
+            |p: &str| {
+                reset_calls += 1;
+                assert_eq!(p, "/dev/video0");
+                Ok(())
+            },
+        );
+        assert_eq!(code, Some(SELF_HEAL_EXIT_CODE));
+        assert_eq!(reset_calls, 1);
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_self_heal_reset_failure_returns_the_reset_failed_exit_code() {
+        let sp = selfheal_temp_state_path("err");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let code = attempt_self_heal(
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            2_000_000,
+            &sp,
+            &GRABBER_STUCK_SELF_HEAL_MESSAGES,
+            |_: &str| Err(anyhow::anyhow!("simulated reset failure")),
+        );
+        assert_eq!(code, Some(SELF_HEAL_RESET_FAILED_EXIT_CODE));
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_self_heal_throttled_returns_none_and_never_resets() {
+        let sp = selfheal_temp_state_path("throttled");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        // Seed a heal one second ago; DEFAULT_MIN_HEAL_INTERVAL_S (600) has NOT elapsed, so the
+        // decision is Throttled — no reset must fire and the return value is None.
+        save_state(
+            &sp,
+            &SelfHealState {
+                last_heal_epoch_s: Some(2_000_000),
+                recurrence_heal_count: 1,
+            },
+        )
+        .expect("seed state");
+        let mut reset_calls = 0u32;
+        let code = attempt_self_heal(
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            2_000_001,
+            &sp,
+            &CAPTURE_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None);
+        assert_eq!(
+            reset_calls, 0,
+            "a Throttled decision must never fire a USB reset"
+        );
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    // #1201 — the shared cooldown-floor predicate's tests, moved here from the two per-module
+    // copies. Each test iterates over BOTH per-trigger floor consts so the weak value-lock the
+    // per-module copies carried (each floor stays >= ~30 min) is preserved.
+    const TRIGGER_COOLDOWN_FLOORS: [u64; 2] =
+        [OVERRATE_MIN_HEAL_INTERVAL_S, HALVING_MIN_HEAL_INTERVAL_S];
+
+    #[test]
+    fn cooldown_never_healed_permits_the_attempt() {
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            assert!(cooldown_elapsed(None, 10_000, floor));
+        }
+    }
+
+    #[test]
+    fn cooldown_blocks_within_the_interval_and_permits_after() {
+        let last = 100_000u64;
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            // 29 min later: still within the 30-min floor -> blocked.
+            assert!(!cooldown_elapsed(Some(last), last + 29 * 60, floor));
+            // exactly the floor later: permitted.
+            assert!(cooldown_elapsed(Some(last), last + floor, floor));
+            // well after: permitted.
+            assert!(cooldown_elapsed(Some(last), last + 2 * 60 * 60, floor));
+        }
+    }
+
+    #[test]
+    fn cooldown_is_monotonic_safe_against_a_backward_clock() {
+        // A backward clock step (now < last) must never underflow into a huge "elapsed" and
+        // wrongly permit an attempt — saturating_sub floors it at 0 -> blocked.
+        let last = 100_000u64;
+        for floor in TRIGGER_COOLDOWN_FLOORS {
+            assert!(!cooldown_elapsed(Some(last), last - 5, floor));
+        }
+    }
+
+    // #1201 — the shared floored outer wrapper: env-gate -> pending-is-none -> cooldown floor ->
+    // attempt_self_heal, exercised with the same fake-reset + temp-state-file pattern as the
+    // attempt_self_heal tests above.
+
+    /// Real "now" for the floored-wrapper tests (the wrapper reads the clock itself, so seeded
+    /// state must be positioned relative to the actual epoch).
+    fn real_now_epoch_s() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_disabled_returns_none_and_never_resets() {
+        let sp = selfheal_temp_state_path("floored-disabled");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let mut reset_calls = 0u32;
+        let code = attempt_floored_self_heal(
+            false,
+            true,
+            OVERRATE_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &OVER_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None);
+        assert_eq!(reset_calls, 0, "the env-gate must block before any reset");
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_pending_exit_blocks_even_when_enabled() {
+        let sp = selfheal_temp_state_path("floored-pending");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let mut reset_calls = 0u32;
+        let code = attempt_floored_self_heal(
+            true,
+            false,
+            HALVING_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &LATCH_HALVING_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None);
+        assert_eq!(
+            reset_calls, 0,
+            "a pending self-heal exit must block a second reset in the same window"
+        );
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_floor_blocks_before_the_shared_throttle_is_consulted() {
+        // Seed the last heal 700 s ago: BEYOND the 600-s shared DEFAULT_MIN_HEAL_INTERVAL_S
+        // throttle (the inner attempt_self_heal would decide Heal and fire the reset) but INSIDE
+        // the 1800-s per-trigger floor — proving the FLOOR gate blocks on its own, before the
+        // inner helper is ever reached. The state file must stay untouched (no save_state ran).
+        let sp = selfheal_temp_state_path("floored-floor");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let seeded_last = real_now_epoch_s() - 700;
+        save_state(
+            &sp,
+            &SelfHealState {
+                last_heal_epoch_s: Some(seeded_last),
+                recurrence_heal_count: 1,
+            },
+        )
+        .expect("seed state");
+        let mut reset_calls = 0u32;
+        let code = attempt_floored_self_heal(
+            true,
+            true,
+            OVERRATE_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &OVER_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None);
+        assert_eq!(
+            reset_calls, 0,
+            "the per-trigger floor must block before the shared throttle is even consulted"
+        );
+        assert_eq!(
+            load_state(&sp).last_heal_epoch_s,
+            Some(seeded_last),
+            "a floor-blocked attempt must never rewrite the shared state file"
+        );
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_permits_and_returns_77_on_success() {
+        // No state file (never healed this boot): the floor permits, the inner helper decides
+        // Heal, the injected reset fires exactly once, and the pending exit code is 77.
+        let sp = selfheal_temp_state_path("floored-ok");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let mut reset_calls = 0u32;
+        let code = attempt_floored_self_heal(
+            true,
+            true,
+            HALVING_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &LATCH_HALVING_SELF_HEAL_MESSAGES,
+            |p: &str| {
+                reset_calls += 1;
+                assert_eq!(p, "/dev/video0");
+                Ok(())
+            },
+        );
+        assert_eq!(code, Some(SELF_HEAL_EXIT_CODE));
+        assert_eq!(reset_calls, 1);
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn attempt_floored_self_heal_reset_failure_returns_the_reset_failed_exit_code() {
+        let sp = selfheal_temp_state_path("floored-err");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let code = attempt_floored_self_heal(
+            true,
+            true,
+            OVERRATE_MIN_HEAL_INTERVAL_S,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            &sp,
+            &OVER_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| Err(anyhow::anyhow!("simulated reset failure")),
+        );
+        assert_eq!(code, Some(SELF_HEAL_RESET_FAILED_EXIT_CODE));
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
     }
 }

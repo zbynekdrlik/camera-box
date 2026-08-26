@@ -166,6 +166,89 @@
 /// resumes on issue 1031 after the cam1 card swap + consecutive greens.
 pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 3;
 
+/// #1132 (owner mandate 2026-08-19): whether the per-window copies/gaps TOLERANCE
+/// ([`WINDOW_COPIES_GAPS_TOLERANCE`]) is allowed to RESCUE the verdict folded into `overall_pass`
+/// ([`WindowGateDecision::overall_pass_term`]). Hardcoded `false` — the owner ordered the relaxed
+/// copies/gaps rescue removed after the CAM1 grabber incident (a hardware-sick leg with
+/// copies=1/gaps<=3 passed green for a week, masking the defect; every multi-frame event must now
+/// be RED + escalated, never absorbed). While `false`, `overall_pass_term` requires `copies == 0
+/// && gaps == 0`; the tolerance MECHANISM (`relaxed_pass`, [`WINDOW_COPIES_GAPS_TOLERANCE`], its
+/// walk-down history — issue 1031/1121 —, and the whole reporting/JSON path) stays DORMANT and
+/// fully computed for observability, it just no longer rescues (the
+/// `gate-allowance-restore-red-green` dormant-mechanism pattern). Mirrors
+/// `crate::optical_floor::gates_overall_pass`'s dormant-seam shape EXACTLY, and is INDEPENDENT of
+/// it — #1132 touches ONLY copies/gaps; the optical undecodable floor stays report-only on its own
+/// separate seam (issue 915/905), never re-gated by this change.
+///
+/// **Restore path:** flip this ONE function back to `true` once the sick leg is physically
+/// fixed/excluded (issue 1110/1134) AND the walk-down (issue 1031) resumes to its data-supported
+/// value; then `overall_pass_term == relaxed_pass` again and the tolerance folds exactly as it did
+/// pre-#1132.
+pub fn copies_gaps_tolerance_gates_overall_pass() -> bool {
+    false
+}
+
+/// #1169 (owner, 2026-08-22): the per-segment SINGLETON allowance applied to `copies`/`gaps` when
+/// folding them into the BLOCKING verdict ([`WindowGateDecision::overall_pass_term`]). A DISTINCT,
+/// strictly-tighter band than the disarmed (#1132) `WINDOW_COPIES_GAPS_TOLERANCE` (`<=3`) rescue:
+/// a segment with `copies <= SEGMENT_SINGLETON_COPIES_ALLOWANCE && gaps <=
+/// SEGMENT_SINGLETON_GAPS_ALLOWANCE` is ABSORBED into the blocking verdict, while `>=2` of EITHER
+/// still fails. This is the designed absorption cost of the issue-1167 v3 paced-trickle (`<=1` skip
+/// per ~0.5s on an over/near-rate box) + the matching FIFO `stale_replay` (the same event surfaced
+/// twice), post the CAM1 card swap -- NOT a hardware-sick leg.
+///
+/// **Never re-arm `copies_gaps_tolerance_gates_overall_pass()` for this** -- that (`<=3`) band is
+/// exactly the CAM1-class mask #1132 removed. This is a SEPARATE, tighter seam with its own
+/// re-tighten trail (issue 1169). The absorption is LOUD, never silent: `strict_pass`/`pass` stay
+/// false (visible), a per-segment note fires ([`segment_singleton_note`]), and the run-level count
+/// is serialized -- addressing #1132's masking concern while honoring the owner's 2026-07-31
+/// "jedna stratená snímka nie je problém" soft-release doctrine.
+pub const SEGMENT_SINGLETON_COPIES_ALLOWANCE: u32 = 1;
+/// See [`SEGMENT_SINGLETON_COPIES_ALLOWANCE`].
+pub const SEGMENT_SINGLETON_GAPS_ALLOWANCE: u32 = 1;
+
+/// #1169: whether the per-segment SINGLETON allowance is ARMED (folds `<=1/<=1` into the blocking
+/// verdict). Hardcoded `true` -- the sanctioned soft-release to green. **Re-tighten to absolute
+/// zero = flip this ONE function back to `false`** (the `gate-allowance-restore-red-green`
+/// dormant-mechanism pattern, exactly like #1132/#905), after which `overall_pass_term` requires
+/// strict `copies == 0 && gaps == 0` again. Gated on the issue-1168 floor reduction and/or the
+/// cam1 card swap landing + N consecutive zero-singleton green runs -- issue 1169 owns that step
+/// and stays OPEN as the re-tighten trail. Mirrors `copies_gaps_tolerance_gates_overall_pass`'s
+/// shape and is INDEPENDENT of it (the disarmed `<=3` rescue stays disarmed).
+pub fn segment_singleton_allowance_gates_overall_pass() -> bool {
+    true
+}
+
+/// #1169: `true` exactly when a segment's nonzero `copies`/`gaps` are absorbed ONLY by the
+/// singleton allowance -- i.e. the allowance is armed, the (`<=3`) tolerance rescue is disarmed,
+/// there is genuinely something to absorb (`copies > 0 || gaps > 0`), and it sits within the
+/// `<=1/<=1` band. Drives the loud per-segment note + the run-level count; never fires on a clean
+/// segment, an over-band (still-failing) segment, or one rescued by the (dormant) `<=3` tolerance.
+pub fn segment_singleton_allowance_consumed(copies: u32, gaps: u32) -> bool {
+    segment_singleton_allowance_gates_overall_pass()
+        && !copies_gaps_tolerance_gates_overall_pass()
+        && (copies > 0 || gaps > 0)
+        && copies <= SEGMENT_SINGLETON_COPIES_ALLOWANCE
+        && gaps <= SEGMENT_SINGLETON_GAPS_ALLOWANCE
+}
+
+/// #1169: the LOUD per-segment note for an absorbed singleton -- `Some(..)` iff
+/// [`segment_singleton_allowance_consumed`], `None` otherwise (never noise on a clean or
+/// still-failing segment). Flows onto `CamboxSegment::singleton_allowance_note` -> the verdict JSON
+/// + the per-run report, so the absorption is never silent (the #1132 masking guard).
+pub fn segment_singleton_note(copies: u32, gaps: u32) -> Option<String> {
+    if !segment_singleton_allowance_consumed(copies, gaps) {
+        return None;
+    }
+    Some(format!(
+        "#1169 SINGLETON ALLOWANCE consumed: copies={copies} gaps={gaps} (<= {}/{} each) absorbed \
+         into overall_pass -- this segment FAILS the absolute-zero bar (strict pass stays false, \
+         visible), the designed issue-1167 paced-trickle + FIFO stale_replay residual; 2+ of \
+         either still fails. Re-tighten trail: issue 1169.",
+        SEGMENT_SINGLETON_COPIES_ALLOWANCE, SEGMENT_SINGLETON_GAPS_ALLOWANCE
+    ))
+}
+
 /// The strict-vs-relaxed decision for one cambox window, given its already-computed counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowGateDecision {
@@ -178,7 +261,28 @@ pub struct WindowGateDecision {
     /// WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE` — `copies`/`gaps` are
     /// no longer fully report-only, they are tolerated up to the calibrated per-window threshold
     /// and gate again above it.
+    ///
+    /// **#1132 (owner mandate 2026-08-19): this field is now REPORTED-ONLY for observability — it
+    /// no longer folds into `overall_pass`.** The run fold uses [`Self::overall_pass_term`]
+    /// instead. Kept computed (with the tolerance) so the JSON shows what the relaxed verdict
+    /// WOULD say — a `relaxed_pass == true` window whose `overall_pass_term == false` is the
+    /// disarmed rescue visibly doing nothing, never a hidden mask.
     pub relaxed_pass: bool,
+    /// #1132 (owner mandate 2026-08-19): the verdict ACTUALLY folded into the run-level
+    /// `overall_pass` (`crate::probe::recording_segments::segment_continuity`). STRICTER than
+    /// [`Self::relaxed_pass`] on copies/gaps — the copies/gaps tolerance no longer rescues it
+    /// (`copies_gaps_tolerance_gates_overall_pass() == false`), so a single copy or gap fails.
+    /// The optical undecodable floor stays report-only here EXACTLY as in `relaxed_pass` (the SAME
+    /// `crate::optical_floor::gates_overall_pass()` term — #1132 does NOT touch the floor). When
+    /// `copies_gaps_tolerance_gates_overall_pass()` is flipped back on, this equals `relaxed_pass`.
+    pub overall_pass_term: bool,
+    /// #1169: `true` iff this window's nonzero `copies`/`gaps` were ABSORBED into
+    /// [`Self::overall_pass_term`] ONLY by the `<=1/<=1` singleton allowance
+    /// ([`segment_singleton_allowance_consumed`]). Records the absorption loudly (never a silent
+    /// mask): a `singleton_allowance_consumed == true` window has `strict_pass == false` and a
+    /// per-segment note. `false` on a clean window, an over-band (still-failing) window, and a
+    /// window rescued by the (dormant) `<=3` tolerance.
+    pub singleton_allowance_consumed: bool,
 }
 
 impl WindowGateDecision {
@@ -213,9 +317,37 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     // 5200533407).
     let within_tolerance =
         copies <= WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE;
-    let relaxed_pass = frame_count > 0
-        && (undecodable_ok || !crate::optical_floor::gates_overall_pass())
-        && within_tolerance;
+    // The optical-floor term is shared by BOTH the relaxed verdict and the #1132 blocking verdict
+    // below -- report-only while `gates_overall_pass()` is false (issue 915/905), UNCHANGED by #1132.
+    let floor_term = undecodable_ok || !crate::optical_floor::gates_overall_pass();
+    let relaxed_pass = frame_count > 0 && floor_term && within_tolerance;
+    // #1132 (owner mandate 2026-08-19): the term ACTUALLY folded into `overall_pass`. The
+    // copies/gaps rescue is DISARMED for the blocking verdict -- strict `copies == 0 && gaps == 0`
+    // unless `copies_gaps_tolerance_gates_overall_pass()` is restored to `true` (then this equals
+    // `relaxed_pass`). The optical-floor term is IDENTICAL to `relaxed_pass` -- #1132 does NOT
+    // touch the floor's report-only status (issue 915/905, its own separate seam).
+    //
+    // #1169 (owner, 2026-08-22): when the (`<=3`) tolerance rescue is disarmed, a `<=1/<=1`
+    // SINGLETON is ABSORBED (the designed issue-1167 paced-trickle + FIFO stale_replay residual,
+    // loudly reported) instead of failing strict-zero; `>=2` of EITHER still fails. This is a
+    // SEPARATE, strictly-tighter seam -- never a re-arm of the disarmed `<=3` band (that is the
+    // CAM1-class mask #1132 removed). Re-tighten to absolute zero = flip
+    // `segment_singleton_allowance_gates_overall_pass()` to `false`.
+    let copies_gaps_ok = if copies_gaps_tolerance_gates_overall_pass() {
+        within_tolerance
+    } else if segment_singleton_allowance_gates_overall_pass() {
+        copies <= SEGMENT_SINGLETON_COPIES_ALLOWANCE && gaps <= SEGMENT_SINGLETON_GAPS_ALLOWANCE
+    } else {
+        copies == 0 && gaps == 0
+    };
+    let overall_pass_term = frame_count > 0 && floor_term && copies_gaps_ok;
+    // #1169: whether the singleton allowance is what absorbed this window's nonzero copies/gaps
+    // (drives the loud note + the run-level count). See `segment_singleton_allowance_consumed`.
+    // The `frame_count > 0` guard mirrors `overall_pass_term`'s own empty-window guard so this
+    // field can never read `true` for an absent cambox even if the copies/gaps computation ever
+    // changes (defensive -- an empty window already yields copies==0 && gaps==0 today; #1169 review).
+    let singleton_allowance_consumed =
+        frame_count > 0 && segment_singleton_allowance_consumed(copies, gaps);
     // `strict_pass` keeps its pre-889-AND-pre-915 meaning byte-for-byte: frame_count>0 &&
     // undecodable within floor && copies==0 && gaps==0 -- computed directly (no longer derived
     // from `relaxed_pass`, since issue 915 decoupled the floor from that derivation).
@@ -223,6 +355,8 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     WindowGateDecision {
         strict_pass,
         relaxed_pass,
+        overall_pass_term,
+        singleton_allowance_consumed,
     }
 }
 
@@ -565,6 +699,267 @@ mod tests {
                 RelaxedFailureReason::OverCopiesGapsTolerance,
                 RelaxedFailureReason::FloorWithinReportOnly,
             ]
+        );
+    }
+
+    // --- #1132 (owner mandate 2026-08-19): the copies/gaps TOLERANCE no longer RESCUES the
+    // verdict folded into overall_pass. `relaxed_pass` stays tolerant (reported, observability);
+    // the new `overall_pass_term` applies strict copies==0 && gaps==0 while keeping the SAME
+    // report-only optical-floor term as `relaxed_pass`. Mirrors `optical_floor::gates_overall_pass`.
+    // ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn copies_gaps_tolerance_no_longer_gates_overall_pass_1132() {
+        // The dormant restore flag: the copies/gaps tolerance rescue is DISARMED (hardcoded
+        // false) per the owner mandate after the CAM1 grabber incident. Restore = flip this one
+        // function back to `true` (walk-down #1031 resumes), after which `overall_pass_term ==
+        // relaxed_pass` again.
+        assert!(
+            !copies_gaps_tolerance_gates_overall_pass(),
+            "#1132: the copies/gaps tolerance must not rescue overall_pass"
+        );
+    }
+
+    #[test]
+    fn a_single_copy_is_absorbed_by_the_1169_singleton_allowance_supersedes_1132() {
+        // SUPERSEDED by #1169 (owner, 2026-08-22). #1132 (2026-08-19) made a single copy FAIL
+        // `overall_pass_term` ("every multi-frame event RED, never absorbed") after the CAM1
+        // grabber masked a hardware defect for a week. #1169 REFINES that, in #1132's own spirit:
+        // a `<=1/<=1` SINGLETON is the DESIGNED issue-1167 v3 paced-trickle + FIFO stale_replay
+        // residual (post CAM1 card swap), so it is absorbed into the blocking verdict -- but
+        // LOUDLY (`singleton_allowance_consumed`, a note, strict stays false/visible), and `>=2`
+        // of either still fails (the multi-frame intent #1132 protected, see
+        // `two_copies_or_a_gap_pair_still_fail_after_singleton_allowance_1169`). This is a CHANGED
+        // requirement, updated in its own `[red]` test commit with this justification.
+        let d = decide(847, 0, 1, 0);
+        assert!(
+            d.relaxed_pass,
+            "relaxed_pass stays tolerant/reported (observability): {d:?}"
+        );
+        assert!(
+            d.overall_pass_term,
+            "#1169: a single copy is now ABSORBED into the blocking verdict: {d:?}"
+        );
+        assert!(
+            !d.strict_pass,
+            "strict still fails on the copy, unchanged/visible: {d:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_gap_and_a_copy_gap_pair_are_absorbed_by_the_1169_singleton_allowance() {
+        // The live verdict 859647390 shapes: seg[4] CAM2 copies=1 gaps=0, and seg[3] CAM3
+        // copies=1 gaps=1 -- both `<=1/<=1` singletons, both absorbed by #1169. strict stays false.
+        for &(c, g) in &[(1u32, 0u32), (0, 1), (1, 1)] {
+            let d = decide(847, 0, c, g);
+            assert!(
+                d.overall_pass_term,
+                "#1169: copies={c} gaps={g} (<=1 each) absorbed into the blocking verdict: {d:?}"
+            );
+            assert!(!d.strict_pass, "strict still fails, visible: {d:?}");
+        }
+    }
+
+    #[test]
+    fn two_copies_or_a_gap_pair_still_fail_after_singleton_allowance_1169() {
+        // #1169 preserves #1132's core intent for MULTI-frame events: `>=2` of EITHER (or an
+        // asymmetric 1+2 / 2+1) still FAILS the blocking verdict -- only the `<=1/<=1` singleton is
+        // absorbed. This is the regression guard against the CAM1-class defect returning.
+        for &(c, g) in &[(2u32, 0u32), (0, 2), (1, 2), (2, 1), (3, 3)] {
+            let d = decide(847, 0, c, g);
+            assert!(
+                !d.overall_pass_term,
+                "#1169: copies={c} gaps={g} exceeds the singleton allowance -- must still fail: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn overall_pass_term_fails_on_two_gaps_within_relaxed_tolerance_1132_1169() {
+        // gaps=2 sits within the (still-reported) `<=3` relaxed tolerance, but is OVER the #1169
+        // `<=1` singleton allowance -- so it FAILS the blocking verdict under BOTH #1132 (strict
+        // zero) and #1169 (singleton). Unchanged behavior; renamed from
+        // `..._fails_on_a_single_gap_within_tolerance_1132` since gaps=2 is not a single gap and
+        // #1169 now absorbs a genuine single gap (see the `..._supersedes_1132` tests above).
+        let d = decide(847, 0, 0, 2);
+        assert!(
+            d.relaxed_pass,
+            "within the <=3 relaxed tolerance -> relaxed still passes (reported): {d:?}"
+        );
+        assert!(
+            !d.overall_pass_term,
+            "#1169: gaps=2 is over the <=1 singleton allowance -- must still fail the blocking verdict: {d:?}"
+        );
+    }
+
+    #[test]
+    fn overall_pass_term_across_the_band_absorbs_only_the_1169_singleton_supersedes_1132() {
+        // SUPERSEDED by #1169: #1132 had EVERY nonzero copies/gaps count up to the `<=3` tolerance
+        // fail the blocking verdict. #1169 absorbs the `<=1` SINGLETON (n == 1) while `n >= 2`
+        // still fails -- so the blocking verdict now splits the reported `<=3` band. relaxed_pass
+        // is unchanged (still absorbs the whole `<=3` band, reported for observability).
+        for n in 1..=WINDOW_COPIES_GAPS_TOLERANCE {
+            let dc = decide(847, 0, n, 0);
+            let dg = decide(847, 0, 0, n);
+            if n <= SEGMENT_SINGLETON_COPIES_ALLOWANCE {
+                assert!(
+                    dc.overall_pass_term && dg.overall_pass_term,
+                    "#1169: copies/gaps={n} (<= singleton allowance) absorbed into the blocking verdict: {dc:?} {dg:?}"
+                );
+            } else {
+                assert!(
+                    !dc.overall_pass_term && !dg.overall_pass_term,
+                    "#1169: copies/gaps={n} (> singleton allowance) must still fail the blocking verdict: {dc:?} {dg:?}"
+                );
+            }
+            assert!(
+                dc.relaxed_pass && dg.relaxed_pass,
+                "relaxed still absorbs the whole <=3 band (reported): {dc:?} {dg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn overall_pass_term_passes_a_clean_window_1132() {
+        let d = decide(847, 0, 0, 0);
+        assert!(
+            d.overall_pass_term,
+            "a clean window passes the blocking verdict: {d:?}"
+        );
+        assert!(d.strict_pass && d.relaxed_pass);
+    }
+
+    #[test]
+    fn overall_pass_term_keeps_the_optical_floor_report_only_1132() {
+        // CRITICAL separation: #1132 touches ONLY copies/gaps. A window OVER the optical
+        // undecodable floor but clean on copies/gaps must STILL pass the blocking verdict -- the
+        // optical floor stays report-only exactly as `relaxed_pass` has it (issue 915/905).
+        // `strict_pass` fails (it gates the floor); `overall_pass_term` does NOT.
+        let d = decide(10, 5, 0, 0); // 5 undecodable of 10 -- past the per-window floor (4)
+        assert!(
+            !d.strict_pass,
+            "strict still gates the optical floor, unchanged: {d:?}"
+        );
+        assert!(
+            d.overall_pass_term,
+            "#1132 must NOT re-gate the optical floor -- over-floor + clean copies/gaps still \
+             passes the blocking verdict: {d:?}"
+        );
+        assert!(
+            d.relaxed_pass,
+            "relaxed also treats the floor as report-only: {d:?}"
+        );
+    }
+
+    #[test]
+    fn overall_pass_term_empty_window_fails_1132() {
+        let d = decide(0, 0, 0, 0);
+        assert!(
+            !d.overall_pass_term,
+            "an absent cambox fails the blocking verdict: {d:?}"
+        );
+    }
+
+    #[test]
+    fn overall_pass_term_agrees_with_relaxed_on_clean_copies_gaps_1132() {
+        // Invariant: while the tolerance is disarmed, `overall_pass_term` differs from
+        // `relaxed_pass` ONLY when copies/gaps are nonzero. On any window with copies==0 &&
+        // gaps==0 the two agree (the floor term is identical) -- which is what makes reactivation
+        // a pure one-flag flip.
+        for &(f, u) in &[(847u32, 0u32), (10, 5), (0, 0), (847, 1)] {
+            let d = decide(f, u, 0, 0);
+            assert_eq!(
+                d.overall_pass_term, d.relaxed_pass,
+                "clean copies/gaps -> blocking verdict agrees with relaxed: {d:?}"
+            );
+        }
+    }
+
+    // --- #1169 (owner, 2026-08-22): the per-segment SINGLETON allowance. A DISTINCT, strictly
+    // tighter (<=1/<=1) band than the disarmed #1132 <=3 tolerance rescue: a <=1/<=1 singleton is
+    // the designed issue-1167 v3 paced-trickle + FIFO stale_replay residual, absorbed LOUDLY into
+    // overall_pass_term while strict/pass stay false; >=2 of EITHER still fails (the #1132
+    // multi-frame intent). Re-tighten to absolute zero = flip the arm flag to `false`.
+    // ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn singleton_allowance_is_armed_and_calibrated_at_one_1169() {
+        // Pins the calibrated NUMBERS + the arm flag. Re-tighten trail (issue 1169): flip
+        // `segment_singleton_allowance_gates_overall_pass()` to `false` (back to absolute zero)
+        // after the issue-1168 floor reduction and/or the cam1 card swap land + N consecutive
+        // zero-singleton green runs.
+        assert_eq!(SEGMENT_SINGLETON_COPIES_ALLOWANCE, 1);
+        assert_eq!(SEGMENT_SINGLETON_GAPS_ALLOWANCE, 1);
+        assert!(
+            segment_singleton_allowance_gates_overall_pass(),
+            "#1169: the singleton allowance is armed (soft-release to green)"
+        );
+    }
+
+    #[test]
+    fn singleton_allowance_consumed_flag_records_the_absorption_1169() {
+        // A consumed singleton sets both the decision flag AND `segment_singleton_allowance_consumed`.
+        let d = decide(847, 0, 1, 1);
+        assert!(d.overall_pass_term, "absorbed: {d:?}");
+        assert!(
+            d.singleton_allowance_consumed,
+            "#1169: the decision records the absorption loudly: {d:?}"
+        );
+        assert!(
+            segment_singleton_allowance_consumed(1, 0),
+            "copies=1 consumes the allowance"
+        );
+        assert!(
+            segment_singleton_allowance_consumed(0, 1),
+            "gaps=1 consumes the allowance"
+        );
+        assert!(
+            segment_singleton_allowance_consumed(1, 1),
+            "copies=1 gaps=1 consumes the allowance"
+        );
+        // NOT consumed on a clean window, an over-band window, or an empty window.
+        assert!(
+            !segment_singleton_allowance_consumed(0, 0),
+            "clean window consumes nothing"
+        );
+        assert!(
+            !segment_singleton_allowance_consumed(2, 0),
+            "2 copies is over the band, not consumed"
+        );
+        assert!(
+            !segment_singleton_allowance_consumed(1, 2),
+            "gaps=2 is over the band, not consumed"
+        );
+        assert!(
+            !decide(847, 0, 0, 0).singleton_allowance_consumed,
+            "a clean decision never reports the allowance consumed"
+        );
+        assert!(
+            !decide(847, 0, 2, 0).singleton_allowance_consumed,
+            "an over-band decision never reports the allowance consumed"
+        );
+    }
+
+    #[test]
+    fn segment_singleton_note_fires_only_when_consumed_1169() {
+        // The loud, never-silent note: present with the concrete counts iff the allowance was
+        // consumed; absent on a clean window and on an over-band (still-failing) window.
+        let n = segment_singleton_note(1, 1).expect("#1169: a consumed singleton emits a note");
+        assert!(n.contains("copies=1"), "note names the copies count: {n}");
+        assert!(n.contains("gaps=1"), "note names the gaps count: {n}");
+        assert!(
+            n.contains("1169"),
+            "note is traceable to the re-tighten trail: {n}"
+        );
+        assert!(segment_singleton_note(1, 0).is_some());
+        assert!(segment_singleton_note(0, 1).is_some());
+        assert!(
+            segment_singleton_note(0, 0).is_none(),
+            "no note on a clean segment -- the note is never noise"
+        );
+        assert!(
+            segment_singleton_note(2, 0).is_none(),
+            "no note on a still-failing over-band segment (it fails loudly on its own)"
         );
     }
 }

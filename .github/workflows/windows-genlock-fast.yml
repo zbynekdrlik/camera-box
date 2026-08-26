@@ -195,6 +195,20 @@ jobs:
           if ($src -notmatch [regex]::Escape('source->genlock_converge_sheds++;') -or $src -notmatch [regex]::Escape('converge_sheds=%u')) { Write-Error "the distinct converge-shed observability counter / audit field is gone (#1049)"; exit 1 }
           Write-Output "#1049 steady-conveyor phase convergence present — OK"
 
+      - name: Assert #1161 Stage-2 ACQUIRE bracketing gate present
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          $internal = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('if (clamped > prev) { source->genlock_locked_next_boundary_ns = 0; source->genlock_acquire_bracket_ticks = 0; }')) { Write-Error "obs_source_set_genlock_latency_ms no longer forces a re-acquire on a pin RISE — a raised per-source pin can never move the presented frame deeper (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('static inline bool genlock_relock_acquire_should_hold(')) { Write-Error "the Stage-2 ACQUIRE bracketing gate helper genlock_relock_acquire_should_hold is gone — the frame-mover reverted (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS 3ULL')) { Write-Error "the ACQUIRE bracketing fail-open margin GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS is gone (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('const uint64_t cap = (reserve_ns + interval_ns - 1) / interval_ns + GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS;')) { Write-Error "the ACQUIRE bracketing gate's fail-open cap (ceil(reserve/interval)+margin) is gone — a queue that never deepens could hold forever (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('genlock_relock_acquire_should_hold(oldest_age,') -or $src -notmatch [regex]::Escape('source->genlock_acquire_bracket_ticks++;')) { Write-Error "the ACQUIRE branch no longer calls genlock_relock_acquire_should_hold(oldest_age, ...) / increments genlock_acquire_bracket_ticks (#1161)"; exit 1 }
+          if ($internal -notmatch [regex]::Escape('uint32_t genlock_acquire_bracket_ticks;')) { Write-Error "the ACQUIRE bracket-tick counter field genlock_acquire_bracket_ticks is missing from obs_source (#1161)"; exit 1 }
+          if ($src -notmatch [regex]::Escape("genlock-acquire-bracket '%s':") -or $src -notmatch [regex]::Escape('oldest_queued_age_ms=') -or $src -notmatch [regex]::Escape('decision=')) { Write-Error "the #1161 ACQUIRE-bracket observability marker (genlock-acquire-bracket, reserve vs oldest_queued_age + HOLD/ACQUIRE) is gone — a live pin-rise re-acquire leaves no trace, a below-floor inert pin cannot be diagnosed (#1161)"; exit 1 }
+          Write-Output "#1161 Stage-2 ACQUIRE bracketing gate present — OK"
+
       # #249: the fast path builds obs.dll from the real vendored source, so a `git subtree pull`
       # (#44) that reverts #245 to inert-but-still-compiling would hot-swap an INERT obs.dll un-gated
       # (the #235 regression: latency collapsed to one GLOBAL env knob, no per-source override). The
@@ -258,6 +272,11 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('recv_desc.source_to_connect_to.p_url_address = owned_source_url;')) { Write-Error "ndi-source.cpp: the #1096 reset block no longer binds the fresh URL onto recv_desc.source_to_connect_to.p_url_address -- it still connects by name through the poisoned finder"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('ndiLib->find_destroy(')) { Write-Error "ndi-source.cpp: the #1096 fresh finder is never find_destroy'd (per-reset leak)"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('uint64_t no_conn_since_ns = 0;')) { Write-Error "ndi-source.cpp: the #1096 no_conn_since_ns disconnect timer is gone -- a graceful cambox restart (no_conn==0, #767 never fires) leaves the source black"; exit 1 }
+          # camera-box #1180 (P0 2026-08-23): a BY-URL bind (#1096) never verifies the connected sender's NAME, so a sender-restart NDI port reshuffle can bind the receiver to the WRONG sender and frames flow from the wrong camera under the stored label with nothing re-checking (every "2ME PGM" receiver showed Grading/cam3 live). The fix re-resolves the name via a FRESH finder once frames flow and forces a BY-NAME reset on a confirmed mismatch. This FAST path ships distroav.dll for hot-swap, so re-assert here too -- mirrors tests/distroav_by_url_identity_verify_1180.rs.
+          if ($ndi -notmatch [regex]::Escape('static inline bool ndi_by_url_identity_mismatch(')) { Write-Error "ndi-source.cpp: the #1180 ndi_by_url_identity_mismatch decision helper is gone -- a BY-URL receiver never re-validates it is bound to the RIGHT sender, so a reshuffled port shows the wrong camera under the stored label"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('if (!force_by_name_1180 && owned_source_name && owned_source_name[0]) {')) { Write-Error "ndi-source.cpp: the #1180 reset block no longer gates the #1096 fresh-finder BY-URL resolution on !force_by_name_1180 -- a confirmed identity mismatch cannot force a BY-NAME reset and would re-resolve the SAME wrong-sender URL"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180)')) { Write-Error "ndi-source.cpp: the #1180 verify block no longer calls ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180) once frames flow -- a wrong-sender BY-URL bind is never detected"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('force_by_name_next_reset_1180 = true;')) { Write-Error "ndi-source.cpp: the #1180 verify no longer sets force_by_name_next_reset_1180 = true on a mismatch -- the wrong-sender feed is never corrected"; exit 1 }
           # camera-box #1097: framesync_create failure must retry (not break) -- dormant sibling of #1080 (framesync forced OFF, but a break there is the SAME permanent reattach-proof receiver death). This FAST path ships distroav.dll for hot-swap, so gate here too -- mirrors tests/distroav_framesync_create_retry_1097.rs.
           if ($ndi -notmatch [regex]::Escape('unsigned framesync_create_fail_count = 0;')) { Write-Error "ndi-source.cpp: the #1097 framesync_create_fail_count retry counter is gone -- a transient framesync_create failure would break the receiver loop and permanently kill the thread"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(framesync_create_fail_count)')) { Write-Error "ndi-source.cpp: the #1097 framesync branch no longer CALLS ndi_recv_create_retry_backoff_ns(framesync_create_fail_count) -- reverts to the permanent-death break"; exit 1 }
@@ -276,7 +295,21 @@ jobs:
           $out = (Get-Content "vendor/distroav/src/ndi-output.cpp" -Raw) -replace '\s+', ' '
           if ($out -notmatch [regex]::Escape('return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);')) { Write-Error "ndi-output.cpp: #1009 floor emit stamp (genlock_floor_boundary_100ns) gone — the sender future-bias (issue 1007 hair-trigger arming) is back"; exit 1 }
           if ($out -match 'genlock_next_boundary_100ns') { Write-Error "ndi-output.cpp: #1009 — the pre-1009 ceil boundary helper name is back; emit stamps may be future-dated again"; exit 1 }
-          Write-Output "per-source genlock latency (ms) override + #257 floor 3 + genlock default-ON + whitelist UI + runtime burn + #1009 floor emit stamp — OK"
+          # camera-box #1185: PGM-first-NDI-port reservation. This FAST path ships distroav.dll for
+          # hot-swap, so gate the reserve-and-adopt source patch HERE too -- mirrors
+          # tests/distroav_pgm_first_port_1185.rs. A subtree pull dropping it would otherwise
+          # hot-swap a distroav.dll that lets the program (2ME PGM) reshuffle onto a high NDI port
+          # after an OBS restart (issue 1180 / issue 1181), handing stock building TVs the wrong sender.
+          if ($out -notmatch [regex]::Escape('void ndi_output_reserve_main_sender(')) { Write-Error "ndi-output.cpp: #1185 ndi_output_reserve_main_sender missing -- PGM-first-port reservation reverted"; exit 1 }
+          if ($out -notmatch [regex]::Escape('void ndi_output_release_reserved_main_sender(')) { Write-Error "ndi-output.cpp: #1185 ndi_output_release_reserved_main_sender missing -- reservation cleanup reverted"; exit 1 }
+          if ($out -notmatch [regex]::Escape('o->ndi_sender = ndi_output_take_reserved_sender(')) { Write-Error "ndi-output.cpp: #1185 ndi_output_start no longer adopts the reserved main sender -- PGM-first-port pin reverted"; exit 1 }
+          $pm = (Get-Content "vendor/distroav/src/plugin-main.cpp" -Raw) -replace '\s+', ' '
+          # Anchor on the CALL SITEs, not the bare function names (which also appear in the extern
+          # decls at the top of plugin-main.cpp) -- else a subtree-pull that drops the call hunks but
+          # keeps the decl hunk hot-swaps a functionally-reverted distroav.dll (the #832 anchor class).
+          if ($pm -notmatch [regex]::Escape('ndi_output_reserve_main_sender(QT_TO_UTF8(config->OutputName)')) { Write-Error "plugin-main.cpp: #1185 obs_module_post_load no longer CALLS ndi_output_reserve_main_sender (decl only) -- port not reserved before scene load"; exit 1 }
+          if ($pm -notmatch [regex]::Escape('ndi_output_release_reserved_main_sender(); if (ndiLib) {')) { Write-Error "plugin-main.cpp: #1185 obs_module_unload no longer CALLS ndi_output_release_reserved_main_sender before ndiLib->destroy() (decl only) -- reservation leaks the port"; exit 1 }
+          Write-Output "per-source genlock latency (ms) override + #257 floor 3 + genlock default-ON + whitelist UI + runtime burn + #1009 floor emit stamp + #1185 PGM-first-port reservation — OK"
 
       # #912: ASRC (issue 803's per-source clock-drift servo) must be a BUILD DEFAULT, mirroring
       # the #257 render-tick/ts-align hard-lock. The FAST path COMPILES the real vendored C (a
@@ -515,6 +548,24 @@ jobs:
             Write-Error "OBSBasic.cpp: the #1018 title no longer resolves GENLOCK_BUILD_SHA.txt relative to the executable (os_get_executable_path_ptr) — a cwd-relative read regresses to the #1018 'unknown' bug; re-apply"; exit 1
           }
           Write-Output "#152/#1018 newlevel.media build identity + deployed SHA in OBS title — OK"
+
+      # #1195 (the #269 YAML lock-step): checkForUncleanShutdown() is frontend-only -- the
+      # FAST path does NOT build the frontend -- but the source-text check still catches a
+      # `git subtree pull` (#44) that re-imports upstream's blocking "Run in Safe Mode?"
+      # crash modal (which would hang an unattended broadcast box). Mirrors
+      # tests/obs_unclean_shutdown_auto_normal_1195.rs (Linux-only, can't compile on this
+      # runner) AND the full windows-genlock.yml #1195 gate; keep all three in lock-step.
+      - name: Assert OBS auto-selects a NORMAL launch, never the crash modal (#1195)
+        shell: pwsh
+        run: |
+          $app = (Get-Content "vendor/obs-studio/frontend/OBSApp.cpp" -Raw) -replace '\s+', ' '
+          if ($app -notmatch [regex]::Escape('auto-selecting NORMAL launch (rig build: never block on a modal)')) {
+            Write-Error "OBSApp.cpp: the #1195 auto-normal WARNING is missing -- checkForUncleanShutdown() must auto-select a NORMAL launch instead of the Safe-Mode modal. A subtree pull likely restored the upstream modal; re-apply the #1195 patch."; exit 1
+          }
+          if ($app -match [regex]::Escape('crashWarning.exec()')) {
+            Write-Error "OBSApp.cpp: the upstream blocking Safe-Mode modal (crashWarning.exec()) is BACK -- re-apply the #1195 patch (remove the modal, auto-select NORMAL)."; exit 1
+          }
+          Write-Output "#1195 auto-normal unclean-shutdown launch (no blocking Safe-Mode modal) -- OK"
 
       # Same configure as the full build (downloads the obs-deps bundle the preset
       # pins); we just build a single target afterwards.

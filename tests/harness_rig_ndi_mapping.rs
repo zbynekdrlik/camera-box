@@ -126,23 +126,25 @@ assert m.duplicates({"NDI cam1": "CAM4 (usb)", "NDI cam2": "CAM4 (usb)"}), "must
 }
 
 #[test]
-fn active_map_defaults_to_exactly_the_three_active_cameras() {
-    // #827/issue 947/issue 939: with no override, active_map() (and therefore parse_map_args(None),
-    // the no-`--map` path main() takes) must resolve to exactly cam1/cam2/cam3 -- the
-    // DEFAULT_ACTIVE_SET fallback (cam3 re-activated 2026-08-13 with the Cam Link 4K card; cam4
-    // retired 2026-08-02, grabber wedges the capture leg within minutes of every start).
+fn active_map_defaults_to_exactly_the_active_camera_1170() {
+    // #827/issue 947/issue 939/#1110/issue 1170: with no override, active_map() (and therefore
+    // parse_map_args(None), the no-`--map` path main() takes) must resolve to exactly cam3 --
+    // the DEFAULT_ACTIVE_SET fallback (cam3 re-activated 2026-08-13 with the Cam Link 4K card;
+    // cam4 retired 2026-08-02; cam1 RE-RETIRED 2026-08-22 issue 1110; cam2 camera-under-test
+    // retired 2026-08-24 issue 1170, grabber cure-decay -- cam2 stays the PAINTER, not a mapped
+    // measured camera).
     let (stdout, stderr) = run_py_check(
         r#"import os
 os.environ.pop("CAMERA_ACTIVE_SET", None)
 want = m.active_map()
 senders = sorted(s.split(" ", 1)[0] for _, s in want)
-assert senders == ["CAM1", "CAM2", "CAM3"], senders
+assert senders == ["CAM3"], senders
 assert m.parse_map_args(None) == want, "no --map -> active_map()"
 "#,
     );
     assert!(
         stdout.contains("OK"),
-        "issue 939 active_map default checks failed:\nstdout:{stdout}\nstderr:{stderr}"
+        "#1110 active_map default checks failed:\nstdout:{stdout}\nstderr:{stderr}"
     );
 }
 
@@ -190,12 +192,12 @@ fn default_active_set_env_var_matches_camera_set_sh_exactly() {
     let py = read("scripts/set-ndi-mapping.py");
     let sh = read("scripts/camera-set.sh");
     assert!(
-        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")"#),
-        "#898/#939: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
-         fallback camera-set.sh itself defaults to (cam3 re-activated 2026-08-13)"
+        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam3")"#),
+        "issue 1170: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
+         fallback camera-set.sh itself defaults to (cam2 camera-under-test retired, grabber cure-decay)"
     );
     assert!(
-        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}""#),
-        "#898/#939: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
+        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam3}""#),
+        "issue 1170: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
     );
 }

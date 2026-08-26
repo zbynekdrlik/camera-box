@@ -2,6 +2,7 @@
 paths:
   - "scripts/lib/mv-reverify-escalate.sh"
   - "tests/harness_mv_reverify_escalate_1093.rs"
+  - "tests/harness_mv_reverify_resolve_wait_1114.rs"
 ---
 
 # Sender-bounce reverify: painter-order proof + receiver-wedge escalation (#1093)
@@ -81,3 +82,25 @@ All pure/builder pieces are unit-tested with fakes on PATH (the #833/#716 patter
 `MV_REVERIFY_OBS_WS_WAIT_ITERS=0`,
 `MV_REVERIFY_*_GAP_S=0`) let the orchestrator's decision flow run offline with zero ssh/OBS/network.
 The LIVE strih-OBS restart itself is NOT exercisable at Tier-0 — flag it UNVERIFIED for the E2E run.
+
+## After a CLEAR-then-SET receiver reset, give the fresh finder a bounded re-resolve WINDOW (#1114)
+
+The merged WS-side `strih_mv_scenes.py reattach()` is a CLEAR-then-SET that TEARS DOWN + rebuilds
+strih's NDI receiver, so its fresh DistroAV finder must RE-RESOLVE the live post-bounce burn sender
+by URL — MEASURED at up to ~2 min on the live rig — far longer than the ~52s [2/8] attempt budget.
+`mv_reverify_resolve_wait` (called once inside `preflight_mv_reverify`, right after the once-only
+attempt-1 reattach kick, DEPLOY context only via `!= "cleanup"`) polls the SAME `frozen-camera-gate.py`
+gate at `PREFLIGHT_MV_REVERIFY_RESOLVE_CADENCE_S` until a pixel changes OR a SECONDS-based wall-clock
+deadline `PREFLIGHT_MV_REVERIFY_RESOLVE_SETTLE_S` (default 120s). This rides out the re-resolve in
+ONE place and returns success early, removing the false "camera leg is dead" FAIL + the destructive
+#1093 force-kill escalation on a genuinely-live-but-still-resolving leg.
+
+- **Bound the WALL CLOCK, not accumulated sleeps.** Each poll iteration ALSO spends a
+  frozen-camera-gate.py probe, so a `waited += cadence` counter runs ~2x past the documented window;
+  use a `SECONDS`-based deadline so `RESOLVE_SETTLE_S` is a truthful bound (#1114 review 🔵-2).
+- **Cleanup context stays fast:** the re-resolve window is DEPLOY-only — cleanup (`attempts=1`,
+  `CONTEXT=cleanup`) must never outlast a GH-Actions cancellation grace window.
+- **Anchor gotcha:** the resolve-wait uses `frozen-camera-gate.py`, never a 2nd `strih_mv_scenes.py`,
+  so the #758 "reattach once" body-count invariant holds — and a comment inside
+  `preflight_mv_reverify` must NEVER contain the literal `strih_mv_scenes.py` (it would become a 2nd
+  body occurrence and break that count).

@@ -597,3 +597,93 @@ fn asset_baseline_ms_is_required() {
         "930: missing --asset-baseline-ms must fail with a clear message: {stderr}"
     );
 }
+
+// --------------------------------------------------------------------------------------------- //
+// issue 1174 -- the cam2 emit-cadence attribution. `lipsync_cadence_attribution` parses the
+// `dupe_shed_summary` lines camera-box already logs to cam2's journal (`src/dupe_decimation/
+// gate.rs`) and classifies whether the post-Aug-5 motion-WARPING valves (late-dupe copies /
+// retired / drained / fast-drained / starvation repeats) fired during the lipsync recording
+// window. Aug-5 predates the WHOLE dupe-decimation era, so ANY nonzero warp count is the
+// regression signature that decorrelates lips from the clean audio track -> SyncNet conf ~1.0.
+// Pure stdin->one-line function, tested with zero network/decode -- mirrors every other builder.
+// --------------------------------------------------------------------------------------------- //
+
+/// Runs `lipsync_cadence_attribution` with `fixture` piped on stdin, sourcing the real script (so
+/// this exercises the function under the script's own `set -euo pipefail`, per the #1133
+/// report-only-helper-must-return-0 discipline).
+fn attribute(fixture: &str) -> String {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(r#". "$1"; printf '%s\n' "$2" | lipsync_cadence_attribution"#)
+        .arg("bash")
+        .arg(script())
+        .arg(fixture)
+        .output()
+        .expect("spawn bash");
+    assert!(
+        out.status.success(),
+        "1174: attribution must exit 0 on every input (report-only): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+const WARP_FIXTURE: &str = "2026-08-22T21:00:05Z  INFO camera_box: (#889) dupe-preferring decimation: 5 dupe-victim shed / 3 blind-pacing shed / 8 late-dupe copies emitted (#1111 grid-lock valve) / 2 boundaries retired (#1145 over-rate absorption) / 1 depth-drained (#1145 v2 over-rate absorption) / 0 fast-drained (#1145 v2.1 deep-backlog convergence) / 0 starvation last-frame repeats (#1167 v4 empty-queue slot-fill) over the last ~5s
+2026-08-22T21:00:10Z  INFO camera_box: (#889) dupe-preferring decimation: 6 dupe-victim shed / 2 blind-pacing shed / 7 late-dupe copies emitted (#1111 grid-lock valve) / 1 boundaries retired (#1145 over-rate absorption) / 0 depth-drained (#1145 v2 over-rate absorption) / 1 fast-drained (#1145 v2.1 deep-backlog convergence) / 1 starvation last-frame repeats (#1167 v4 empty-queue slot-fill) over the last ~5s";
+
+const CLEAN_FIXTURE: &str = "2026-08-22T21:00:05Z  INFO camera_box: (#889) dupe-preferring decimation: 4 dupe-victim shed / 6 blind-pacing shed / 0 late-dupe copies emitted (#1111 grid-lock valve) / 0 boundaries retired (#1145 over-rate absorption) / 0 depth-drained (#1145 v2 over-rate absorption) / 0 fast-drained (#1145 v2.1 deep-backlog convergence) / 0 starvation last-frame repeats (#1167 v4 empty-queue slot-fill) over the last ~5s";
+
+/// The post-Aug-5 motion-warping valves fired -> CADENCE-WARP, with every counter summed across
+/// the window and the per-second warp rate computed from the window's OWN `~Ns` totals.
+#[test]
+fn cadence_attribution_flags_warp_when_new_valves_fired_1174() {
+    let out = attribute(WARP_FIXTURE);
+    assert!(out.contains("verdict=CADENCE-WARP"), "{out}");
+    // warp = copies(8+7) + retired(2+1) + drained(1+0) + fast_drained(0+1) + starvation(0+1) = 21
+    assert!(out.contains("warp_events=21"), "{out}");
+    assert!(out.contains("copies=15"), "{out}");
+    assert!(out.contains("retired=3"), "{out}");
+    assert!(out.contains("drained=1"), "{out}");
+    assert!(out.contains("fast_drained=1"), "{out}");
+    assert!(out.contains("starvation=1"), "{out}");
+    // preserving = dupe_shed(5+6) + blind_shed(3+2) = 16 ; window = 5+5 = 10s ; 21/10 = 2.10
+    assert!(out.contains("preserving_events=16"), "{out}");
+    assert!(out.contains("window_s=10"), "{out}");
+    assert!(out.contains("warp_per_s=2.10"), "{out}");
+}
+
+/// Only the motion-PRESERVING events (uniform decimation, as the Aug-5 baseline had) -> the emit
+/// path is exonerated: CADENCE-CLEAN, zero warp events.
+#[test]
+fn cadence_attribution_clean_when_only_uniform_decimation_1174() {
+    let out = attribute(CLEAN_FIXTURE);
+    assert!(out.contains("verdict=CADENCE-CLEAN"), "{out}");
+    assert!(out.contains("warp_events=0"), "{out}");
+    assert!(out.contains("preserving_events=10"), "{out}");
+}
+
+/// No decimation summary lines at all (camera-box not logging, or the window missed them) -> must
+/// be CADENCE-UNKNOWN, NEVER a false CLEAN (which would wrongly exonerate the emit path).
+#[test]
+fn cadence_attribution_unknown_on_no_summary_lines_1174() {
+    let out = attribute("some unrelated journal line\nanother line with no decimation summary");
+    assert!(out.contains("verdict=CADENCE-UNKNOWN"), "{out}");
+}
+
+/// `main` must ACCEPT the optional `--lipsync-cadence-log` flag (fall through to the missing-
+/// required-arg check), never reject it as an unknown flag via the `*)` usage arm.
+#[test]
+fn main_accepts_the_optional_lipsync_cadence_log_flag_1174() {
+    let out = Command::new("bash")
+        .arg(script())
+        .arg("--lipsync-cadence-log")
+        .arg("/tmp/does-not-matter.log")
+        .output()
+        .expect("spawn bash");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--lipsync-recording is required"),
+        "1174: the flag must be parsed (reach the required-arg check), not rejected as unknown: {stderr}"
+    );
+}

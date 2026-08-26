@@ -101,11 +101,15 @@ jobs:
           # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
           # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
           # path needs.
-          # PINNED to a DATED (immutable) autobuild tag, NOT the rolling "latest" tag:
-          # "latest" is rebuilt daily and its assets 503 during the replacement window —
-          # two consecutive coverage-job failures on 2026-08-12 were exactly that window.
-          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-11-13-11/ffmpeg-N-126060-g03dc244a69-linux64-gpl.tar.xz
+          # PINNED to a REPO-OWNED mirror release (ci-assets-ffmpeg-*), never any BtbN tag:
+          # BtbN "latest" is rebuilt daily and its assets 503 during the replacement window
+          # (the 2026-08-12 coverage failures), and BtbN PRUNES dated autobuild releases
+          # after ~2 weeks, so a dated-tag pin rots too (2026-08-25: autobuild-2026-08-11
+          # 404'd, Test+Coverage red on the fetch, run 32872811863). An asset mirrored on
+          # THIS repo's own release cannot be pruned by a third party; sha256-verified.
+          url=https://github.com/zbynekdrlik/camera-box/releases/download/ci-assets-ffmpeg-20260825/ffmpeg-N-126264-g007cd1fd43-linux64-gpl.tar.xz
           curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          echo "aa86544042631a525b03d1b732614d705f74ca971efdb73f298d75e50288ed3e  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
           sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
@@ -153,11 +157,15 @@ jobs:
           # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
           # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
           # path needs.
-          # PINNED to a DATED (immutable) autobuild tag, NOT the rolling "latest" tag:
-          # "latest" is rebuilt daily and its assets 503 during the replacement window —
-          # two consecutive coverage-job failures on 2026-08-12 were exactly that window.
-          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-11-13-11/ffmpeg-N-126060-g03dc244a69-linux64-gpl.tar.xz
+          # PINNED to a REPO-OWNED mirror release (ci-assets-ffmpeg-*), never any BtbN tag:
+          # BtbN "latest" is rebuilt daily and its assets 503 during the replacement window
+          # (the 2026-08-12 coverage failures), and BtbN PRUNES dated autobuild releases
+          # after ~2 weeks, so a dated-tag pin rots too (2026-08-25: autobuild-2026-08-11
+          # 404'd, Test+Coverage red on the fetch, run 32872811863). An asset mirrored on
+          # THIS repo's own release cannot be pruned by a third party; sha256-verified.
+          url=https://github.com/zbynekdrlik/camera-box/releases/download/ci-assets-ffmpeg-20260825/ffmpeg-N-126264-g007cd1fd43-linux64-gpl.tar.xz
           curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          echo "aa86544042631a525b03d1b732614d705f74ca971efdb73f298d75e50288ed3e  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
           sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
           ffmpeg -version | head -1
@@ -327,7 +335,7 @@ jobs:
         # proof) decodes QR codes from OBS screenshots via cv2.QRCodeDetector;
         # headless avoids pulling in GUI/X11 deps this CI runner doesn't have.
         # Pillow + qrcode: test-only, generate REAL fixture QR codes to decode back.
-        run: pip install pytest websocket-client matplotlib opencv-python-headless numpy Pillow qrcode
+        run: pip install pytest websocket-client matplotlib opencv-python-headless numpy Pillow qrcode pyyaml
 
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party
@@ -336,6 +344,145 @@ jobs:
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: python -m pytest tests/python -v
+
+  bkshading:
+    name: bkshading service + relay (issue 808)
+    # The bkshading shading-control service + cambox relay are SEPARATE workspace members
+    # (bkshading/proto|relay|service). The appliance jobs above run cargo at the root WITHOUT
+    # --workspace, so they never build these; THIS job is their first compile + clippy + tests.
+    # No libv4l/libasound needed — these crates don't depend on the appliance's Linux tree.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bkshading
+
+      # ndi is now the DEFAULT bkshading service build (issue 1157), so this members clippy
+      # already compiles the real NDI FFI path (src/preview/ndi_source.rs) with -D warnings.
+      # libloading is a RUNTIME dynamic load, so it still compiles here without libndi installed.
+      - name: Clippy (bkshading members)
+        run: cargo clippy -p bkshading-proto -p bkshading-relay -p bkshading --all-targets -- -D warnings
+
+      # ndi being default means the members clippy above covers the real path; this step instead
+      # keeps the OTHER config proven — the `--no-default-features` stub (libndi-free) path — so it
+      # stays clippy-clean and can't bit-rot (it was the free default coverage before ndi became
+      # the default build).
+      - name: Clippy (bkshading service, --no-default-features — stub path)
+        run: cargo clippy -p bkshading --no-default-features --all-targets -- -D warnings
+
+      # ndi is the default (issue 1157), so this runs the ndi-gated code path plus the ndi_paths
+      # cross-platform discovery unit tests (which pin that the Windows Processing.NDI.Lib runtime
+      # DLL is in the search set) and the shared_runtime lifecycle tests. libloading is a runtime
+      # dynamic load, so no libndi need be installed to build/run these.
+      - name: Test (bkshading members)
+        run: cargo test -p bkshading-proto -p bkshading-relay -p bkshading
+
+      # Prove the `--no-default-features` stub path still compiles + passes its tests (StubSource +
+      # the pure preview pipeline) so the libndi-free build can't silently break now that it is off
+      # the default.
+      - name: Test (bkshading service, --no-default-features — stub path)
+        run: cargo test -p bkshading --no-default-features
+
+      # Build the DEPLOYABLE binaries in RELEASE (issue 808 M3) so a live rig verify of the merged
+      # relay/service has an artifact to deploy — nothing produced one before, though
+      # scripts/bkshading-provision-relay.sh explicitly expects "the CI-built bkshading-relay binary".
+      # Relay = default features (drives the camera via the gphoto2 CLI, no ndi); service =
+      # --features ndi (kept explicit for intent + deploy-shape clarity; it now equals the service
+      # default since issue 1157 made ndi the default build). This release build supersedes the
+      # earlier debug --bins compile-proof — clippy --all-targets + the tests above already prove
+      # the crates compile in debug, so a release build is a strictly stronger proof.
+      - name: Build deployable binaries (relay default + service --features ndi)
+        run: |
+          cargo build --release --bins -p bkshading-relay
+          cargo build --release --features ndi --bins -p bkshading
+
+      # Upload the deployable relay + service binaries (issue 808 M3), mirroring the appliance's
+      # camera-box-linux-amd64 / probe-tools-linux-amd64 upload pattern. scripts/bkshading-deploy-relay.sh
+      # downloads bkshading-relay from this artifact and places it on a cambox (/usr/local/bin).
+      - name: Upload bkshading binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-linux-amd64
+          # Fail loud if a binary is missing (renamed bin / wrong path) — an empty artifact with a
+          # green CI is exactly the "no deployable artifact" failure this milestone exists to fix.
+          if-no-files-found: error
+          path: |
+            target/release/bkshading-relay
+            target/release/bkshading
+
+      # Cross-build the relay for aarch64 (issue 808 SBC/handheld milestone): the handheld runs on a
+      # mini SBC (Pi Zero 2 W) which is ARM and CANNOT run the amd64 binary. The relay is pure Rust
+      # (axum/tokio/serde/clap; no C link deps — no reqwest/rustls/ring on the relay side), so a
+      # rustup target + the gcc-aarch64-linux-gnu linker cross-compile it cleanly. Target choice
+      # justified (aarch64, not armhf) in scripts/lib/bkshading-sbc-runtime.sh + .claude/rules/bkshading.md.
+      - name: Cross-build relay for aarch64 (SBC / Pi Zero 2 W handheld)
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu --bins -p bkshading-relay
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      # Upload the aarch64 relay for the SBC/handheld deploy path
+      # (scripts/bkshading-deploy-relay.sh --arch arm64). Relay-only — the service runs on the strih
+      # PC, never on a handheld — hence the distinct bkshading-relay-linux-arm64 name. Fail loud on a
+      # missing binary (never a green empty artifact), mirroring the amd64 upload above.
+      - name: Upload bkshading relay (aarch64 / SBC handheld)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-relay-linux-arm64
+          if-no-files-found: error
+          path: target/aarch64-unknown-linux-gnu/release/bkshading-relay
+
+  bkshading-windows:
+    name: bkshading Windows compile check (issue 808)
+    # The bkshading service runs on the strih PC — Windows FIRST (Linux only after the
+    # frame-loss P0). A Linux compile is not proof the Windows target builds, so cheaply
+    # `cargo check` the members on windows-latest. Pure axum/tokio/reqwest-rustls (no platform
+    # deps) — but "should build on Windows" isn't a build.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bkshading-windows
+
+      # ndi is now the DEFAULT service build (issue 1157), so this default-features check compiles
+      # the REAL NDI path (src/preview/ndi_source.rs) on the exact Windows strih ship target —
+      # libloading resolves Processing.NDI.Lib.x64.dll at runtime, so it builds with no libndi on
+      # the runner.
+      - name: Check bkshading members (Windows target)
+        run: cargo check -p bkshading-proto -p bkshading-relay -p bkshading
+
+      # The strih service is deployed WITH --features ndi (issue 1157) to a Windows PC (Windows
+      # FIRST), so build the actual DEPLOYABLE Windows binary in RELEASE (issue 808 M3) — not just
+      # `cargo check` — and upload it, so the strih service deploy finally has an artifact (nothing
+      # produced one before). libloading resolves the NDI runtime DLL (Processing.NDI.Lib.x64.dll)
+      # at runtime, so this builds with no libndi installed on the runner.
+      - name: Build deployable service binary (--features ndi, Windows target)
+        run: cargo build --release --bins -p bkshading --features ndi
+
+      - name: Upload bkshading Windows service binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-windows-amd64
+          # Fail loud on a missing binary (see the Linux upload) — never a green empty artifact.
+          if-no-files-found: error
+          path: target/release/bkshading.exe
 
   build:
     name: Build
@@ -517,6 +664,73 @@ jobs:
       - name: Shellcheck (warning severity, binary gate)
         run: shellcheck -S warning scripts/*.sh scripts/lib/*.sh
 
+  deploy-fleet:
+    name: Deploy to camera fleet (post-merge, main only)
+    # #1136: automatic post-merge fleet deploy — closes the hole where a merged fix sat in main
+    # UNDEPLOYED for a week (the fleet ran a stale build while the E2E gate stayed green). Runs ONLY
+    # on a push to main (never dev — dev builds must not auto-deploy to prod cameras), on the
+    # self-hosted dev1 runner (the ONLY box with SSH to the rig LAN). Downloads the
+    # camera-box-linux-amd64 artifact built by THIS SAME run's `build` job and deploys it to every
+    # ACTIVE cam box (CAMERA_ACTIVE_SET minus acked-offline, via scripts/lib/deploy-set.sh) by
+    # REUSING scripts/deploy-fleet.sh (stop → remount,rw → scp → start → remount,ro → byte-verify →
+    # version read-back → genlock-emit check — no new deploy code, no new credential: deploy-fleet.sh
+    # already defaults SSH_PASS to the fleet-wide value). Fails LOUDLY on any active-and-unacked box
+    # that mismatches or is unreachable; an acked-offline box is skipped. The push:[dev,main] E2E
+    # gate's #1136 pin layer then holds "fleet == main" as a hard invariant on every run.
+    # Gate on every job that bears on the SHIPPED Linux binary or the deploy SCRIPTS this job
+    # reuses: lint+test (binary correctness), build (the artifact), security (cargo audit — an
+    # advisory DB can turn a yesterday-green commit red), shellcheck (guards deploy-fleet.sh /
+    # deploy-set.sh / camera-set.sh — a shell bug here can brick a box). A RED in any of these must
+    # NOT auto-deploy to prod cameras. (coverage/mutants/python-tests/windows-probe/drift-guard are
+    # deliberately excluded — they don't bear on the Linux binary or the deploy shell.)
+    needs: [lint, test, build, security, shellcheck]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: [self-hosted, linux, camera-lan]
+    # Share the E2E hardware-serialization slot (loopback-e2e.yml / full-path-e2e.yml's group) so a
+    # deploy NEVER restarts camera-box mid-E2E. cancel-in-progress:false = queue, never cancel.
+    concurrency:
+      group: loopback-e2e-hardware
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download camera-box binary (this run's build job)
+        uses: actions/download-artifact@v4
+        with:
+          name: camera-box-linux-amd64
+          path: dist
+
+      # #1138: also fetch the frame-probe (cam2 painter) binary from THIS SAME run's build job so
+      # the fleet deploy re-arms cam2's painter on the current build too (closing the "frame-probe
+      # never auto-deployed" hole — it was previously installed only by setup-device.sh provisioning).
+      - name: Download probe tools (frame-probe — this run's build job, #1138)
+        uses: actions/download-artifact@v4
+        with:
+          name: probe-tools-linux-amd64
+          path: dist-probe
+
+      - name: Deploy to the active cam fleet (acked-offline boxes skipped)
+        run: |
+          set -euo pipefail
+          chmod +x dist/camera-box
+          chmod +x dist-probe/frame-probe
+          echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to the active fleet"
+          # shellcheck source=scripts/camera-set.sh
+          . scripts/camera-set.sh            # CAMERA_ACTIVE_SET
+          # shellcheck source=scripts/lib/cambox-offline-ack.sh
+          . scripts/lib/cambox-offline-ack.sh
+          # shellcheck source=scripts/lib/deploy-set.sh
+          . scripts/lib/deploy-set.sh
+          # Effective offline-ack = rig-fleet.txt default (the automatic push carries no override).
+          ack="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" rig-fleet.txt)"
+          deploy_set="$(deploy_set_active_minus_acked "$CAMERA_ACTIVE_SET" "$ack")"
+          if [ -z "$deploy_set" ]; then
+            echo "::error::no active cam box to deploy to (every box in CAMERA_ACTIVE_SET is acked-offline in rig-fleet.txt) — refusing a vacuous deploy"
+            exit 1
+          fi
+          echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
+          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe
+
   notify-on-failure:
     name: Notify on red
     # Fires only when a gate above goes RED — replaces silent-red eyeballing
@@ -527,7 +741,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, build, windows-probe, security, drift-guard, shellcheck]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

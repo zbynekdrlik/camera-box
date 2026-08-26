@@ -59,11 +59,33 @@ fn run_sourced(body: &str, extra_env: &[(&str, &str)]) -> String {
 
 /// Run the gate as a subprocess; return (exit_code, stdout, stderr).
 fn run_gate(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(script())
-        .args(args)
-        .current_dir(manifest_dir())
-        .output()
-        .expect("run version-integrity-gate.sh");
+    run_gate_env(args, &[])
+}
+
+/// Run the gate as a subprocess WITH extra env (the #1137 vendor-pin fixture seams);
+/// return (exit_code, stdout, stderr).
+fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(script());
+    cmd.args(args).current_dir(manifest_dir());
+    // #1137 hermeticity: the report-only vendor-pin section runs a live `git fetch origin` +
+    // `git log origin/main` whenever VERSION_INTEGRITY_GATE_VENDOR_NEWEST is unset. Seed both seams
+    // by default so the pre-existing subprocess tests stay OFFLINE (no fetch, no side-effect on the
+    // shared checkout's refs) — a test that exercises the vendor pin overrides them via extra_env.
+    // Defaults: a fixed newest sha + an empty pending list => the section reports OK, zero git.
+    let has = |k: &str| extra_env.iter().any(|(ek, _)| *ek == k);
+    if !has("VERSION_INTEGRITY_GATE_VENDOR_NEWEST") {
+        cmd.env(
+            "VERSION_INTEGRITY_GATE_VENDOR_NEWEST",
+            "0000000hermetictest",
+        );
+    }
+    if !has("VERSION_INTEGRITY_GATE_VENDOR_PENDING") {
+        cmd.env("VERSION_INTEGRITY_GATE_VENDOR_PENDING", "");
+    }
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run version-integrity-gate.sh");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -1531,6 +1553,295 @@ fn gate_enforces_imag_bytes_when_unreported_1100() {
     assert!(
         stdout.contains("imag_so_bytes") && stdout.contains("UNKNOWN"),
         "imag byte facet must engage unconditionally + report UNKNOWN: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+// ---------------------------------------------------------------------------
+// #1137 — genlock_vendor_pin_verdict: the report-only vendor-pin ALARM layer.
+// The existing genlock check is CROSS-BOX PARITY only (drift-guard.sh #756/#949) — it passes a
+// UNIFORMLY-stale fleet (every box agrees on an OLD build). This layer PINS the deployed
+// genlock_build_sha to the newest origin/main commit touching vendor/**, and SCREAMS (report-only,
+// never flips the gate exit) when the deployed bundle lags — the #1136 early-gate-pin-doctrine
+// orphan class. Fail-closed-LOUD on UNKNOWN. Pure function, unit-tested by sourcing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vendor_pin_ok_when_deployed_at_newest_vendor_head() {
+    let out = run_sourced(
+        r#"o="$(genlock_vendor_pin_verdict "46d868a29a7e" "46d868a29a7e" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "current bundle must be OK (rc 0): {out}"
+    );
+    assert!(out.contains("OK"), "must report OK: {out}");
+    assert!(
+        !out.to_uppercase().contains("ALARM") && !out.contains("UNKNOWN"),
+        "a current bundle must not alarm: {out}"
+    );
+}
+
+#[test]
+fn vendor_pin_alarm_names_pending_commits() {
+    // The exact #1137 live scenario: deployed 03cd9c073 with 2 undeployed #1097 vendor commits.
+    let out = run_sourced(
+        r#"pend="$(printf 'f70317e81 fix(#1097): [green] framesync_create failure retries in place\n2386b60d9 docs(#1097): [review] correct the retry-cleanup comment')"; o="$(genlock_vendor_pin_verdict "03cd9c073" "2386b60d9" "$pend")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=30"),
+        "a lagging bundle must return the ALARM code 30: {out}"
+    );
+    assert!(
+        out.to_uppercase().contains("ALARM"),
+        "must SCREAM ALARM: {out}"
+    );
+    assert!(
+        out.contains("f70317e81") && out.contains("2386b60d9"),
+        "the alarm MUST name the pending vendor commits: {out}"
+    );
+    assert!(
+        out.contains("2 undeployed"),
+        "must state the count (2 undeployed vendor commits): {out}"
+    );
+}
+
+#[test]
+fn vendor_pin_unknown_when_deployed_sha_unread() {
+    let out = run_sourced(
+        r#"o="$(genlock_vendor_pin_verdict "" "2386b60d9" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=31"),
+        "an unread deployed SHA must fail-closed to UNKNOWN (31): {out}"
+    );
+    assert!(
+        out.contains("UNKNOWN"),
+        "must report UNKNOWN (never a silent OK): {out}"
+    );
+}
+
+#[test]
+fn vendor_pin_unknown_when_newest_vendor_unresolved() {
+    let out = run_sourced(
+        r#"o="$(genlock_vendor_pin_verdict "46d868a29a7e" "" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=31"),
+        "an unresolved newest-vendor HEAD must fail-closed to UNKNOWN (31): {out}"
+    );
+    assert!(out.contains("UNKNOWN"), "must report UNKNOWN: {out}");
+}
+
+#[test]
+fn vendor_pin_alarm_is_report_only_does_not_block_an_otherwise_clean_gate() {
+    // #1137 — the report-only property: even when the deployed bundle LAGS origin/main's vendor
+    // HEAD, an otherwise-clean gate must still PASS (exit 0). The vendor-pin layer SCREAMS but never
+    // flips the gate exit (the coordinated-restart bundle deploy makes a hard block too blunt), so a
+    // lagging bundle is loudly surfaced without halting every E2E. Fixture seams override the git
+    // read so the flow is deterministic.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_vendorpin",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_vendorpin",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("vendorpin");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--win-state",
+            &format!("strih={}", s.display()),
+            "--win-state",
+            &format!("stream={}", t.display()),
+            "--genlock-sha",
+            &format!("imag={SHA}"),
+            "--imag-manifest",
+            imag_m.to_str().unwrap(),
+            "--imag-bytes",
+            &imag_b,
+        ],
+        &[
+            ("VERSION_INTEGRITY_GATE_VENDOR_NEWEST", "beefface1234"),
+            (
+                "VERSION_INTEGRITY_GATE_VENDOR_PENDING",
+                "f70317e81 fix: framesync retries in place\n2386b60d9 docs: correct comment",
+            ),
+        ],
+    );
+    // Report-only: the lag does NOT block a green gate.
+    assert_eq!(
+        code, 0,
+        "the vendor-pin ALARM must be REPORT-ONLY (must not flip the gate exit). stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("GATE PASS"),
+        "gate must still pass: {stdout}"
+    );
+    // But it SCREAMS and names the pending commits.
+    assert!(
+        stdout.contains("vendor-pin alarm (#1137"),
+        "the vendor-pin section must run: {stdout}"
+    );
+    assert!(
+        stdout.contains("ALARM") && stdout.contains("f70317e81") && stdout.contains("2386b60d9"),
+        "the ALARM must name the pending vendor commits: {stdout}"
+    );
+    assert!(
+        stderr.contains("VENDOR-PIN ALARM"),
+        "a loud stderr SCREAM banner must fire: {stderr}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
+}
+
+#[test]
+fn vendor_pin_ok_when_deployed_at_newest_vendor_head_flow() {
+    // The clean case through the flow: deployed SHA == newest vendor HEAD (no pending) -> the
+    // vendor-pin section reports OK and the gate passes.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_vendorpin_ok",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_vendorpin_ok",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("vendorpin_ok");
+    let (code, stdout, _stderr) = run_gate_env(
+        &[
+            "--win-state",
+            &format!("strih={}", s.display()),
+            "--win-state",
+            &format!("stream={}", t.display()),
+            "--genlock-sha",
+            &format!("imag={SHA}"),
+            "--imag-manifest",
+            imag_m.to_str().unwrap(),
+            "--imag-bytes",
+            &imag_b,
+        ],
+        &[
+            ("VERSION_INTEGRITY_GATE_VENDOR_NEWEST", SHA),
+            ("VERSION_INTEGRITY_GATE_VENDOR_PENDING", ""),
+        ],
+    );
+    assert_eq!(code, 0, "clean vendor pin must pass: {stdout}");
+    assert!(
+        stdout.contains("vendor_pin") && stdout.contains("OK"),
+        "vendor_pin must report OK: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
+}
+
+// ── #1164 — an operator-acked, physically-absent imag must NOT UNKNOWN-refuse the whole gate.
+// After the #1100 ENFORCED flip, an acked-offline imag (rig-fleet.txt `imag:…`, issue 1013) fed no
+// SHA + no .so bytes made BOTH the cross-box genlock parity AND the imag .so byte facet UNKNOWN(11),
+// refusing the whole E2E (run 32480962068: "2 box(es) UNKNOWN: genlock_parity imag:so_bytes") even
+// though every OTHER imag site legally skips. The `--imag-acked-offline REASON` flag closes that gap
+// WITHOUT weakening the fail-closed default — an absent imag still refuses unless explicitly acked.
+
+#[test]
+fn gate_skips_imag_facets_when_acked_offline_1164() {
+    // The exact buggy call shape from run 32480962068 (an EMPTY imag SHA passed because imag was
+    // unreachable) but WITH --imag-acked-offline: the gate must SKIP the imag .so byte facet (a LOUD
+    // greppable line, counted ok, never UNKNOWN) AND drop the `imag` genlock-sha entry from parity
+    // (which then certifies the remaining fleet strih+stream) -> GATE PASS (0). Proves BOTH halves.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_acked_1164",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_acked_1164",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        // the current call site passes an EMPTY imag SHA when imag is unreachable:
+        "--genlock-sha",
+        "imag=",
+        "--imag-acked-offline",
+        "notebook-replacement-issue-1162-new-unit-2026-08-22",
+    ]);
+    assert_eq!(
+        code, 0,
+        "an acked-offline imag must not UNKNOWN-refuse the gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("GATE PASS"),
+        "the gate must PASS with imag acked offline: {stdout}"
+    );
+    assert!(
+        stdout.contains("SKIPPED") && stdout.contains("imag acked offline"),
+        "the imag .so byte facet must emit a LOUD SKIPPED line naming the acked reason: {stdout}"
+    );
+    assert!(
+        stdout.contains("ONE genlock build"),
+        "cross-box parity must certify strih+stream after dropping the acked imag entry: {stdout}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        !all.contains("imag:so_bytes"),
+        "imag:so_bytes must NOT be counted UNKNOWN when acked offline: {all}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_still_refuses_absent_imag_without_the_ack_flag_1164() {
+    // The fail-closed default guard: the SAME absent-imag inputs as the acked test above but WITHOUT
+    // --imag-acked-offline must STILL refuse (11) -- the #1100 ENFORCED contract is unweakened; only
+    // an explicit operator ack changes the verdict. This pins that the new flag is the ONLY escape.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_noack_1164",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_noack_1164",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        "imag=",
+    ]);
+    assert_eq!(
+        code, 11,
+        "an absent imag WITHOUT the ack flag must still refuse (11), not pass. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(!stdout.contains("GATE PASS"), "must not pass: {stdout}");
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("imag_so_bytes") && all.contains("UNKNOWN"),
+        "the byte facet must still enforce UNKNOWN when not acked: {all}"
+    );
+    // Independently pin the parity-drop's default-OFF behavior: without the flag, imag is STILL
+    // counted in the cross-box parity (UNREAD), so parity stays UNKNOWN -- not silently dropped.
+    assert!(
+        stdout.contains("UNREAD: imag"),
+        "without --imag-acked-offline, the parity-drop must be OFF -- imag must still be counted \
+         UNREAD in the cross-box parity: {stdout}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);

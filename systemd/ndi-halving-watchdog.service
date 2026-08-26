@@ -1,0 +1,28 @@
+[Unit]
+# NDI PER-CONNECTION RATE-HALVING auto-heal (#1203), DEV1-SIDE. ONE measure -> decide -> (cure)/alert
+# pass. The vendored DistroAV receiver can degrade a per-connection pull to ~HALF the sender's
+# cadence (stream 'NDI 2ME PGM': 15,0/s at a 30,0/s sender; recv_capture_v3 cap_avg ~65,9 ms vs a
+# healthy ~16 ms), starving the genlock FIFO. This watchdog reads the stream (receiver) OBS-log
+# recv-timing #797 lines from dev1, measures the WITHIN-PASS rate (n_curr / the two lines' OWN
+# timestamps — never a wall-clock divisor), and pages on a CONFIRMED halving — plus, when armed
+# (NDI_HALVING_SELFHEAL=1, default OFF), drives the proven cure (obs_phase2 idle-receiver -> restore,
+# overlay keeps the latency pin) with a per-input cooldown. SAME dev1-side topology as
+# cadence-alert-watchdog.service (#794) / frozen-input-alert-watchdog.service (#1052) /
+# network-reach-alert-watchdog.service (#1001) / asio-starve-alert-watchdog.service (#1023).
+Description=camera-box NDI per-connection rate-halving auto-heal (#1203) — one measure/decide/(cure)/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/ndi-halving-watchdog.sh
+# One ssh OBS-log tail (~20s) + local state; the CURE (when armed) adds idle + up to 2 restores, each
+# bounded by NDI_HALVING_OBS_WS_CALL_TIMEOUT_S (40s) = up to 120s. TimeoutStartSec MUST exceed
+# 20 + 120 so a systemd SIGKILL can never land BETWEEN the idle (name cleared) and the restore — that
+# would itself manufacture the empty-name wedge the cure exists to avoid (#1203 review 🟡3).
+TimeoutStartSec=180
+# Ships DISABLED and cure-arm OFF. The supervisor arms the cure deliberately, after a live-verify,
+# by dropping (systemctl --user edit ndi-halving-watchdog.service):
+#   [Service]
+#   Environment=NDI_HALVING_SELFHEAL=1
+#   Environment=NDI_HALVING_OBS_WS_PW=<stream OBS WebSocket password>

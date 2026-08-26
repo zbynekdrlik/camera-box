@@ -7,13 +7,22 @@ paths:
   - "scripts/latency_pins_snapshot.py"
   - "scripts/phase_sync_active_floor_check.py"
   - "scripts/phase_sync_calibrate.py"
+  - "scripts/phase_sync_reanchor.py"
+  - "rig-fleet.txt"
 ---
 
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and active TODAY (default `cam1 cam2 cam3` since #939, 2026-08-13; cam4/cam5/cam6/cam7
-retired but fully resolvable — see the header comment in `camera-set.sh`). **Every place that needs "the list of
+installed and MEASURED TODAY (default `cam3` — cam1 retired #1134/#1110; cam2's CAMERA-UNDER-TEST role
+retired issue 1170 2026-08-24 because its ShadowCast grabber's cure-decay collapsed to ~7 min
+(issue 1193) — cam2 stays the fixed PAINTER but is no longer a measured camera, re-enable = add
+"cam2" back after the issue-1198 card swap; cam1/cam2/cam4/cam5/cam6/cam7 retired-from-measured but
+fully resolvable — see the header comment in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the
+on-air alignment superset) is PARTIALLY DERIVED since issue 1170: its default resolves `cam3 cam4`
+(cam3 source + cam4 on-air-not-measured, both explicit) and includes cam2 ONLY when cam2 is in
+`CAMERA_ACTIVE_SET` (an inline word-exact `case`), so re-adding cam2 to the active set restores its
+alignment one-line. **Every place that needs "the list of
 cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
 literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
 fps, strih scene/route) stay fully resolvable forever (`camera_resolve`/`camera_strih_route` never
@@ -42,6 +51,49 @@ fleet) anywhere in `recording-e2e.sh`/`rig-mode.sh` is the bug pattern, regardle
 exclusion logic sits next to it — an exclusion list built from a DIFFERENT mechanism (acked-offline)
 can never substitute for intersecting with `CAMERA_ACTIVE_SET`.
 
+## The PRIMARY/source role is ALSO derived now (#1134), not hardcoded to cam1
+
+The E2E chain's SOURCE node (the "cam1 role": films cam2's monitor, carries the #174 capture burn,
+routed onto strih PROGRAM) used to be hard-pinned to the literal `cam1` in `recording-e2e.sh`.
+Since #1134 it is DERIVED via `camera_source_box()` (`camera-set.sh`) = the FIRST strih-routable
+member of `CAMERA_ACTIVE_SET` (cam2 the painter is skipped — `camera_strih_route` rejects it), or
+the explicit `CAMERA_SOURCE_BOX` env override (same trust model as `CAM=`). So a cam1-first legacy
+set still resolves source=cam1 (byte-identical back-compat), while the `cam2 cam3` default resolves
+source=cam3. `camera_source_box` probes `camera_strih_route` in a **subshell** so it never leaks
+`CAMERA_STRIH_SCENE`/`CAMERA_STRIH_SOURCE`, and reuses that function as the single source-eligibility
+authority (never a second cam list). `recording-e2e.sh` reads the role at exactly three sites
+(`E2E_SOURCE_BOX="$(camera_source_box)"` → the `camera_resolve "${CAM:-$E2E_SOURCE_BOX}"` default,
+the ALL_CAMBOX guard `[ "$CAMERA_NAME" != "$E2E_SOURCE_BOX" ]`, and the `[0/8]` fleet-preflight
+label `PREFLIGHT_TARGETS=("$CAMERA_NAME=$CAM1_IP" ...)`), and `camera_active_secondary_set` now
+excludes the DERIVED source + cam2 (not the literal `cam1|cam2`). The VERDICT side needs NO change
+for a non-cam1 source: the ALL_CAMBOX MERGE path passes every `--burn-camN-run-id` and the
+`--extract-partial` decode uses the binary DEFAULT `BURN_RUN_ID_CAM<N>` (== the shell
+`BURN_CAM<N>_RUN_ID`), so a cam3 source (deployed with `SRC_BURN_RUN_ID=$BURN_CAM3_RUN_ID`) is
+mapped generically.
+
+**Retiring a source-eligible camera = membership + an ack, nothing else.** Drop it from
+`CAMERA_ACTIVE_SET` (the source role moves to the next strih-routable member automatically) AND add
+a `<box>:<reason>` line to `rig-fleet.txt`. A box OUTSIDE the active set is never a preflight target,
+so its ack never trips the stale-ack guard (the cam4 precedent — `cam4:on-air-but-outside-measured-set`).
+RE-ENABLE = add the name back to `CAMERA_ACTIVE_SET` + delete its `rig-fleet.txt` ack line.
+
+**`rig-mode.sh` (the TEST/EVENT switch) derives the source role too since #1135.** It resolves ONE
+`RIG_SOURCE_BOX="$(camera_source_box)"` in its pinned-constants block (above the source-guard, so
+`tests/rig_mode.rs` sees the derived facts on source), then `camera_resolve` → `RIG_SOURCE_IP`,
+`camera_strih_route` → `RIG_SOURCE_STRIH_SOURCE`, and `imag_scene_for_camera`/`imag_source_for_camera`
+(`scripts/lib/imag-scene-route.sh`) → the imag scene/input. The five former cam1 hardcodes now read
+the role: `CAM1_IP` is gone (override is `CAMERA_SOURCE_BOX`), `STRIH_PROG_SOURCE`/`IMAG_PROG_SOURCE`/
+`IMAG_PROG_SCENE` default to the derived values, `EVENT_ASSERT_TARGETS=("${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP")`
+sweeps the resolved source (so a cam1-retired rig sweeps cam3, not the broken cam1), and the
+TEST-mode prints name the resolved box. NOTE the imag pair `imag_scene_for_camera`/`imag_source_for_camera`
+must stay lock-step (same cam1-cam6 `case` set) so a source resolves BOTH or fails loud on BOTH.
+`recording-e2e.sh`'s own `IMAG_PROG_SOURCE` was previously a `NDI CAM1` residual left to the
+E2E-gate/#1134 side — CLOSED by #1204: it now derives `$(imag_source_for_camera "$CAMERA_NAME")` (the
+SAME lock-step resolver the SCENE line uses), plus a fail-closed `[4a/8]` read-back cross-check
+(`scripts/lib/imag-burn-verify.sh` vs `obs_phase2.py program-rendered-input`) that fails the run loud
+if the burn target ever diverges from the input imag actually renders. So the imag burn target now
+follows the camera-under-test on BOTH scripts (rig-mode.sh via #1135, recording-e2e.sh via #1204).
+
 ## The fix pattern — two small pure helpers, not three separate inline loops
 
 `scripts/camera-set.sh` now has two derivation helpers built for exactly this:
@@ -69,14 +121,38 @@ list, even with an empty exclusion, and (b) overriding `CAMERA_ACTIVE_SET` to re
 camera makes it flow through to every derived consumer, proving the reversal actually works (not
 just a comment claiming it does).
 
-## Retiring a camera (#898, 2026-07-31) — the default LITERAL is independently duplicated in FOUR
-standalone Python scripts, grep the whole repo before trusting one file's change is enough
+## A camera can be HARDCODED into a fleet consumer off `$PAINTER_IP`, NOT the set — plain set-removal misses it (issue 1170)
+
+Removing a camera from `CAMERA_ACTIVE_SET` only excludes it from consumers that DERIVE from the set.
+cam2 (the fixed painter, IP `$PAINTER_IP`) has a SECOND identity — a "camera under test" whose grabber
+captures imag-nb's HDMI (issue 781) — and that identity was wired at TWO sites HARDCODED off
+`$PAINTER_IP`, invisible to the set:
+
+1. `recording-e2e.sh` `[2b/8]` deploy seed — `CAMBOX_SECONDARY_DEPLOY=("cam2=$PAINTER_IP=...")` (the
+   secondary-set loop that follows already EXCLUDES cam2, so the seed was the only cam2 entry, and it
+   was unconditional).
+2. `recording-e2e.sh` `[0/8]` — `PREFLIGHT_TARGETS=(... "cam2=$PAINTER_IP")` (a painter REACHABILITY
+   entry, correctly unconditional) flows into `PREFLIGHT_DANTESYNC_LINUX` → the `[0/8]` leg-health
+   preflight, so cam2's (sick) CAPTURE leg was checked and could abort the run.
+
+issue 1170 gated BOTH on `camera_is_active cam2` (the existing word-exact membership fn) so the
+capture-under-test role follows the set, while the PAINTER-role sites keyed off `$PAINTER_IP` (main
+DanteSync clock gate, reachability, `[3/8]` painter launch + QPSK marker, cleanup restore, transport
+sampler, the verdict `--cam2-run-id`/`--burn-cam2-run-id` pins) stay UNCONDITIONAL. **The tell: before
+retiring a camera that ALSO has a fixed non-source role (a painter), `grep -n "$PAINTER_IP"` +
+`grep -n "cam2="` recording-e2e.sh and split each hit into PAINTER-role (keep unconditional) vs
+CAMERA-UNDER-TEST (gate on membership) — a set-only edit silently leaves the hardcoded ones live.**
+The verdict needs NO change either way: per-node analysis is scoped to each node's own switch-schedule
+window, so a camera dropped from the sweep is never analysed/gated (identical to retired cam5/6/7).
+
+## Retiring a camera — the default LITERAL is independently duplicated in FIVE standalone Python scripts, grep the whole repo before trusting one file's change is enough
 
 Changing which cameras are in the default `CAMERA_ACTIVE_SET` is NOT a one-file edit, even though
-`camera-set.sh` is the "ONE declared list" for every SOURCED bash consumer. Four standalone Python
+`camera-set.sh` is the "ONE declared list" for every SOURCED bash consumer. FIVE standalone Python
 subprocesses (`set-ndi-mapping.py`'s `DEFAULT_ACTIVE_SET`, `latency_pins_snapshot.py`'s
 `active_camera_numbers()`, `phase_sync_active_floor_check.py`'s `active_camera_names()`,
-`phase_sync_calibrate.py`'s `active_ndi_sources()`) each carry their OWN fallback literal matching
+`phase_sync_calibrate.py`'s `active_ndi_sources()`, and `phase_sync_reanchor.py` — the 5th, which
+the pre-#1134 version of this rule MISSED) each carry their OWN fallback literal matching
 camera-set.sh's default — by design (they read the same `$CAMERA_ACTIVE_SET` env var but are never
 `source`d, so each needs its own Python-side default for when the caller invokes them directly
 without exporting the var). This is the exact same class of gotcha `ci-testing-gotchas.md`
@@ -87,6 +163,8 @@ AND `tests/**/*.rs` AND `tests/python/*.py`** — missing any one of the four Py
 their own default-set unit tests) leaves a script that silently disagrees with camera-set.sh the
 moment it runs without the env var exported (e.g. invoked directly by hand, or by a caller that
 forgot to pass `--active-set`/export the var).
+
+**A grep for the old set LITERAL (`cam1 cam2 cam3`) does NOT find every default-reliant test — some resolve the default INDIRECTLY and assert the RESOLVED shape, not the raw set string (#1110, cost a review round-trip).** Besides the obvious `delenv/pop/None`-on-`CAMERA_ACTIVE_SET` default assertions, there is a SECOND class that reads the default through a derivation helper called with NO argument and then asserts the resolved `Cam N:CAMN` / `["CAMn", …]` / `{"NDI camN"}` shape — which contains NO `camN cam...` set-literal substring at all, so a literal grep sails right past it. Known members (grep these BY THEIR CALL, per retirement): `resolve_cambox_sweep_default(None)` (`tests/harness_recording_e2e_paths.rs` — asserts `resolved.contains("Cam 1:CAM1")` + a retired `["Cam 4:CAM4", …]` loop), `m.active_map()` no-arg (`tests/harness_rig_ndi_mapping.rs` `active_map_defaults_to_exactly_the_*` — asserts `senders == ["CAM1","CAM2","CAM3"]`), and `_scene_to_camera_from_active_map()` no-arg (`tests/python/test_cambox_sweep_mapping.py` `test_default_active_set_is_exactly_*` — asserts `set(canonical.values()) == {"CAM…"}`). When changing the default membership, ALSO `grep -rn 'resolve_cambox_sweep_default(None)\|active_map()\|_scene_to_camera_from_active_map()\|Cam 1:CAM1'` and invert each resolved-shape assertion + move the retired cam into its `retired`/`for retired in [...]` loop — the two lock-tests do NOT cover these (they lock the mirror LITERALS, not the resolved output). Verify the resolved shape cheaply without cargo: `camera_active_sweep_pairs` (bash, prints `Cam N:CAMN`) and `python3 -c "…; m.active_map()"` both derive the same default the tests do.
 
 ## A "default active set proves parallelism" test can lose its power when the default shrinks
 
@@ -104,3 +182,41 @@ the timing assertion trivially true. The SIBLING test in `_713.rs` (the whole de
 cam1 + painter + the secondary set) didn't need this treatment because it still had 3 boxes
 (cam1/painter/cam4) after the retirement — check the ACTUAL box count each parallelism test's
 default resolves to, not just whether "some test still covers it".
+
+## The mirror-drift risk is now LOCK-TESTED (#1134), and how to verify recording-e2e.sh edits under Tier-0
+
+Two lock-tests now enforce every Python default-mirror matches `camera-set.sh`:
+`tests/harness_rig_ndi_mapping.rs`'s `default_active_set_env_var_matches_camera_set_sh_exactly`
+(set-ndi-mapping.py) and `tests/harness_source_box_1134.rs`'s
+`every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134` (the other four). If you
+change the default, these two tests go RED until every mirror is updated — so you can no longer
+silently miss one. Still `grep -rn "<old literal>"` the whole repo first; the lock-tests are the net.
+
+**Editing `recording-e2e.sh` (the static-anchor minefield, see the top-level CLAUDE.md) with cargo
+Tier-0-blocked:** the local proof that no OTHER test's `.find()`/`.split()`/`.contains()` anchor
+broke is a python occurrence-count sweep — `git show HEAD:scripts/recording-e2e.sh` (OLD) vs the
+edited file (NEW), extract every string literal from every `tests/*.rs` that references
+`recording-e2e.sh`, and flag any literal whose occurrence count went **1→0** (an anchor you
+removed/renamed that another test needs) or **1→2** (an anchor you duplicated, making a `.find()`
+ambiguous). A count change on a SHORT common fragment (`"strih"`, `"cam1"`) is a false positive
+(it's inside an assertion-MESSAGE string, not an anchor); only a full-literal 1→0 / 1→2 matters.
+Also confirm your edit site is OUTSIDE any region a test slices between two anchors (e.g. the
+`AV_RESTART_GATE:-0`..`[5/8] StartRecord` block, the `# #947` dantesync-secondary region) — an
+inserted line only breaks adjacency if it lands BETWEEN two anchored-adjacent lines. This sweep +
+`cargo fmt --all --check` (rustfmt parses probe-gated code too) + `shellcheck` is the full local
+net when `cargo test` cannot run.
+
+**A WHOLE-FILE occurrence-count sweep is BLIND to a WITHIN-FUNCTION-BODY-SLICE 1→2 (#1171, cost a
+review round-trip).** Several `rig-mode.sh` tests `.find()` a literal SCOPED to a function body they
+first slice out — e.g. `harness_event_artifact_purge_721.rs` does `body.find("event_mode_assert")`
+on the `do_event()`..`main()` slice and asserts `purge_pos < assert_pos`. A NEW COMMENT you add near
+the TOP of `do_event`/`do_test` that merely NAMES a function (`event_mode_assert`, `do_event`, …)
+inserts that literal BEFORE the real call INSIDE the slice — so the scoped `.find` grabs the comment
+and the ordering assertion flips — EVEN THOUGH the whole-file count of that name is high (8→11, not
+1→2) and the sweep never flags it. Tier-0 hides it; it only breaks on CI. Guard: when your edit adds
+a comment inside (or just above) a function whose BODY a test slices, grep that test set for
+`body.find("<any function name your comment mentions>")` / `.split("<name>")` and confirm your
+comment does not add the bare name earlier in the sliced region than the real call. Fix is a reword
+(drop the bare function-name literal from the comment — `EVENT-assert` instead of `event_mode_assert`),
+never a logic change. Same class as the top-level CLAUDE.md "comment duplicates a `.find` anchor"
+GOTCHA, but specifically for the SCOPED-slice case the count sweep cannot see.

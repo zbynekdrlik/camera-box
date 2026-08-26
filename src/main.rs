@@ -775,6 +775,14 @@ async fn run_capture_loop(
         let mut frame_count: u64 = 0; // frames captured this report window
         let mut emit_count: u64 = 0; // frames actually sent to NDI this window
         let mut last_report = std::time::Instant::now();
+        // #1200 — capture-side byte-identical dupe fraction for the latch-halving detector. Counted
+        // per 5s report window (reusing the SAME #889 content_hash, no change to the decimation
+        // gate) and fed to the tracker in the report block; reset with frame_count. prev_capture_hash
+        // PERSISTS across windows (a window-boundary frame can be a dupe of the previous window's
+        // last captured frame).
+        let mut prev_capture_hash: Option<u64> = None;
+        let mut window_dupe_captures: u64 = 0;
+        let mut window_total_captures: u64 = 0;
         // #707 B1 — per-second emit/capture ring. A MONOTONIC epoch (never the wall clock — this
         // ticket is about DanteSync wall-clock seams) buckets emit/capture into 1-second slices so a
         // sub-5s emit pause (the #707 freeze) surfaces instead of averaging into the 5s report.
@@ -845,6 +853,53 @@ async fn run_capture_loop(
         // production, but it would truncate an in-flight `--record-grab` E2E recording if a
         // self-heal fires mid-test (review finding, #663).
         let mut pending_self_heal_exit_code: Option<i32> = None;
+
+        // #1128 — fast-capture grabber STUCK detector (ShadowCast ~62.5 fps + persistent
+        // corrupted). Keys on the COMBINED signature (over-rate AND persistent corrupted, both
+        // sustained), which the existing #656/#971 bands miss: the jitter band is deliberately
+        // wide for ShadowCast (never fires at 62.5) and the chronic band waits 15 min, while the
+        // corrupted-frame counter feeds no decision at all. The corrupted band is the
+        // discriminator so a benign over-rate wobble (0 corrupted, absorbed by the decimation
+        // gate) never fires. On a STUCK verdict the `#1128 grabber STUCK` marker is ALWAYS logged
+        // (the dev1 alert watchdog greps it); the actual USB re-auth reuses the SAME #663
+        // rate-limited path but is gated OFF by default — set CAMERA_BOX_GRABBER_STUCK_SELFHEAL=1
+        // to enable live re-auth (a deliberate opt-in, so enabling it on the rig is a supervised
+        // step). Fed one sample per 5 s report window below.
+        let mut grabber_stuck_tracker = camera_box::grabber_stuck::GrabberStuckTracker::new();
+        let grabber_stuck_selfheal_enabled = std::env::var("CAMERA_BOX_GRABBER_STUCK_SELFHEAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // #1193 — sustained OVER-RATE detector (the 3rd self-heal trigger). Keys on the COMBINED
+        // signature over-rate (a majority of the cap-1s buckets >= 61) AND dupe-victim shed churn,
+        // both sustained ~5 min — the state whose manual USB re-auth cure decays in ~2h, which the
+        // #656/#971 bands (wide jitter tolerance / decoupled sustained) and the #1128 STUCK band
+        // (requires corrupted frames) all miss. The churn band is the discriminator (a benign
+        // over-rate wobble sheds 0). On OverRate the `#1193 grabber OVER-RATE` marker is ALWAYS
+        // logged (report-only); the actual USB re-auth reuses the SAME shared self-heal throttle
+        // path but is gated OFF by default — set CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 to enable
+        // live re-auth (a deliberate opt-in, canary-armed on cam2 as a supervised step) — AND a
+        // 30-min per-trigger cooldown floor guards it beyond the shared throttle. Fed one sample
+        // per 5 s report window below.
+        let mut over_rate_tracker = camera_box::capture_overrate::CaptureOverRateTracker::new();
+        let over_rate_selfheal_enabled = std::env::var("CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // #1200 — cam3 ShadowCast LATCH-HALVING detector: the 4th self-heal trigger. Keys on the
+        // capture-side byte-identical dupe FRACTION (healthy 30fps-into-60fps ~0.5, latch-halved
+        // ~0.75), the blind spot the #1193 over-rate (0 over-rate, 0 shed churn) and #1128 STUCK
+        // (0 corrupted) triggers both miss. On Halved the `#1200 grabber LATCH-HALVING` marker is
+        // ALWAYS logged (report-only, no I/O); the actual USB re-auth reuses the SAME shared
+        // self-heal throttle path but is gated OFF by default — set CAMERA_BOX_GRABBER_HALVING_SELFHEAL=1
+        // to enable it (a deliberate opt-in; the re-auth cure is UNPROVEN for latch-halving, so the
+        // marker's detection value is the primary deliverable) — AND a 30-min per-trigger cooldown
+        // floor guards it beyond the shared throttle. Fed one sample per 5 s report window below.
+        let mut latch_halving_tracker =
+            camera_box::capture_latch_halving::CaptureLatchHalvingTracker::new();
+        let latch_halving_selfheal_enabled = std::env::var("CAMERA_BOX_GRABBER_HALVING_SELFHEAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
@@ -993,6 +1048,14 @@ async fn run_capture_loop(
             // the heartbeat. Reset per iteration; set inside the closure only on a confirmed
             // dispatch.
             let mut frame_dispatched = false;
+            // #1167 — snapshot the corrupted-buffer counter before process_frame. A corrupted
+            // buffer (V4L2_BUF_FLAG_ERROR / short) is DROPPED inside process_frame BEFORE the
+            // callback (capture.rs), so it never reaches decimation_gate.poll below: at an over-rate
+            // that removes a would-be-emitted GOOD frame from the stream, and the over-rate shed
+            // machinery then SKIPS its 60 fps slot (a strih FIFO hold -> the cam1 align sawtooth).
+            // A delta after the call means this iteration dropped one; we register a bounded make-up
+            // so the gate reclaims exactly that slot with the nearest good frame on its next shed.
+            let corrupted_before = capture.corrupted_frames();
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
                 // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
@@ -1061,25 +1124,84 @@ async fn run_capture_loop(
                     // grabber-repeat dupe over the unique tick captured right next to it. See
                     // `dupe_decimation`'s module doc for the full root-cause -> fix writeup.
                     let prev_boundary_ns = decimation_gate.next_boundary_ns();
-                    let content_hash = camera_box::dupe_decimation::dupe_content_hash(
+                    // (#1145 round 3) one pass yields BOTH the exact content_hash (byte-identical
+                    // buffer-repeat dupes, e.g. CAM1) AND a luma lattice for the noise-tolerant
+                    // compare a marginal jittery over-rate card needs — its surplus is a noisy
+                    // optical RE-SAMPLE of the same painted frame (sensor noise), which the exact
+                    // hash misses, so it would be emitted as a "unique" (a held painted-id) forcing
+                    // a compensating shed (a skipped painted-id) = the Δ1/Δ3 cadence churn.
+                    let (content_hash, content_luma) = camera_box::dupe_decimation::dupe_content_sig(
                         data,
                         info.width as usize,
                         info.height as usize,
                         info.stride as usize,
                     );
-                    let emit =
-                        decimation_gate.poll(wall_clock_ns(), out_interval_ns, content_hash);
+                    // #1200 — count the capture-side byte-identical dupe fraction for the
+                    // latch-halving detector (reusing the SAME content_hash just computed; this
+                    // does NOT change any decimation decision below). A window at ~0.75 dupe
+                    // fraction = each unique frame captured ~4x (15 unique/s in a 60fps stream);
+                    // healthy 30fps-into-60fps is ~0.5. Accumulated per 5s report window, drained +
+                    // reset there. prev_capture_hash persists across windows on purpose.
+                    if prev_capture_hash == Some(content_hash) {
+                        window_dupe_captures = window_dupe_captures.saturating_add(1);
+                    }
+                    prev_capture_hash = Some(content_hash);
+                    window_total_captures = window_total_captures.saturating_add(1);
+                    // #1131 — did THIS frame come from a NON-EMPTY V4L2 queue (the driver already
+                    // had it buffered, i.e. its blocking dequeue returned in well under one capture
+                    // interval)? A buffered frame PROVES a real captured frame exists to fill the
+                    // next un-emitted boundary, so the gate catches up one interval instead of
+                    // grid-resyncing past it (the #1131 multi-slot-skip judder on a sick/wobbly
+                    // grabber, whose 0-capture-dropped signature confirms the frames exist). A
+                    // frame from an empty queue (the loop genuinely waited — a device/clock gap)
+                    // keeps the pre-existing #131 forward-resync. Same `dequeue_duration_ms` signal
+                    // the #707 capture-stall WARN reads, thresholded the other way.
+                    let queue_had_frame = if configured_capture_fps > 0.0 {
+                        camera_box::capture_stall::frame_from_nonempty_queue(
+                            info.dequeue_duration_ms,
+                            1000.0 / configured_capture_fps,
+                        )
+                    } else {
+                        false
+                    };
+                    // #1145 v2 — the MONOTONIC clocks the queue-depth drain needs: `now_mono` is
+                    // read once here, `capture_mono` is the V4L2 buffer's own CLOCK_MONOTONIC
+                    // capture instant (`FrameInfo::capture_monotonic_100ns`, 100ns units; 0 = no
+                    // real measurement -> the drain self-disables for this frame). Their difference
+                    // is this frame's queue residence, and consecutive capture instants feed the
+                    // capture-takt EMA (both monotonic, immune to the DanteSync realtime steps
+                    // `wall_clock_ns()` grids the emit boundary to).
+                    let now_mono_ns = monotonic_clock_ns();
+                    let capture_mono_ns = (info.capture_monotonic_100ns.max(0) as u64) * 100;
+                    // (#1145 round 3) stage this frame's luma lattice for poll's noise-tolerant dupe
+                    // compare (armed only under sustained over-rate, never two consecutive frames).
+                    // Called immediately before poll, mirroring the hash for this same frame.
+                    decimation_gate.note_frame_luma(content_luma);
+                    let emit = decimation_gate.poll(
+                        wall_clock_ns(),
+                        out_interval_ns,
+                        content_hash,
+                        queue_had_frame,
+                        now_mono_ns,
+                        capture_mono_ns,
+                    );
                     let next_boundary_ns = decimation_gate.next_boundary_ns();
                     // #707 — a clock discontinuity (DanteSync NTP/PTP step, or a stalled poll)
                     // can leap the gate's boundary past one or more intervals that are then
                     // NEVER emitted — the missing direct evidence for whether a clock step is
                     // what's behind a #666/#707-class transient emit-rate deficit. See
                     // `genlock_pacing::boundary_skip_count`'s own doc comment.
+                    // (#1145 v2.1) DEDUCT the fast-drain's INTENTIONAL extra boundary advance: a
+                    // FastDrain retires an already-stale boundary (advances +2), which
+                    // `boundary_skip_count` would otherwise report as ONE un-emitted-content SKIP —
+                    // the sick-leg / clock-step signature `leg-health-guard.sh` hard-fails on. An
+                    // intentional drain is NOT that, so it must contribute 0 to the #707 diagnostic.
                     let skipped = camera_box::genlock_pacing::boundary_skip_count(
                         prev_boundary_ns,
                         next_boundary_ns,
                         out_interval_ns,
-                    );
+                    )
+                    .saturating_sub(decimation_gate.last_poll_intentional_extra_advance());
                     if skipped > 0 {
                         // #752 — do NOT log per skip (that was the ~10/s storm). Accumulate; the
                         // 5s Streaming report below drains ONE aggregated WARN with the count.
@@ -1126,109 +1248,129 @@ async fn run_capture_loop(
                 // caps the emit rate; the bounded ring back-pressures (never drops) → the burn id
                 // ↔ emitted-frame mapping stays strictly 1:1. When the burn is OFF (production /
                 // non-burn), control falls through to the verbatim zero-copy send below.
-                #[cfg(feature = "probe")]
-                if let (Some(ring), Some(run_id)) = (burn_ring.as_ref(), burn_run_id) {
-                    // #279 FIX 3 — the NDI sender lives on the burn thread, so EVERY emitted frame
-                    // must route through the ring. The QR is rendered ONLY for YUYV (the burner
-                    // assumes that layout); a v4l2 format substitution yields a non-YUYV frame that
-                    // is sent UNBURNED (passthrough) — never dropped, so a substitution can't kill
-                    // the cam1 feed (restores the pre-#275b `_ => data` graceful degradation).
-                    let fourcc = info.fourcc.str().unwrap_or("");
-                    let render_qr = camera_box::probe::genlock::burn_should_render_qr(fourcc);
-                    if !render_qr {
-                        tracing::warn!(
-                            "#275b burn active but frame fourcc is {} (not YUYV) — emitting UNBURNED passthrough (cam1 should always be YUYV)",
-                            if fourcc.is_empty() { "?" } else { fourcc }
-                        );
-                    }
-                    let frame_id = burn_ids.next_id();
-                    // #280 — copy the mmap frame into a RECYCLED pool buffer (reused, or allocated
-                    // only when the free list is empty) instead of a fresh per-frame `to_vec`. The
-                    // mmap is valid only inside this callback, so a copy is still required to cross
-                    // the thread boundary — but a reused buffer keeps its ~4MB capacity so the
-                    // copy does not reallocate. clear()+extend reuses that capacity in place.
-                    let mut buf = burn_pool.take();
-                    buf.clear();
-                    buf.extend_from_slice(data);
-                    let job = BurnJob {
-                        buf,
-                        info,
-                        run_id,
-                        frame_id,
-                        // #286 BUG SITE #1 FIX — the emitted frame's genlock NDI timecode now
-                        // keys on the real CAPTURE instant (`capture_realtime_100ns`), not the
-                        // arrival-based `boundary_timecode_100ns(send_fps)` this used to call.
-                        // `gen_ts_ns` stays arrival (`emit_wall_ns`) unchanged — it feeds the
-                        // #624/#625 latency measurement, which is out of scope for this fix.
-                        gen_ts_ns: emit_wall_ns,
-                        emit_timecode_100ns: camera_box::genlock_stamp::genlock_emit_timecode_100ns(
-                            capture_realtime_100ns,
-                            // `emit_wall_ns` is nanoseconds; this parameter is 100ns units.
-                            emit_wall_ns / 100,
-                            send_fps as i64,
-                        ),
-                        render_qr,
-                    };
-                    // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
-                    // emit ONLY on success: any Err means the frame was NOT sent, so it must not
-                    // inflate the emitted-fps stat. #279 FIX 2 — a full-ring submit is
-                    // interruptible on shutdown (ShutdownInterrupted), distinct from the burn
-                    // thread being gone (Closed).
-                    // On either Err the un-sent job (and its #280 pooled buffer) is dropped/freed
-                    // — both are TERMINAL paths (shutdown signalled, or the burn thread is gone),
-                    // never steady state, so not returning the buffer to the pool cannot leak.
-                    match ring.submit(job) {
-                        // #944 — a queued burn job is the strongest emit-liveness signal available
-                        // on this thread (the burn thread performs the actual NDI send asynchronously).
-                        Ok(()) => {
-                            emit_count += 1;
-                            frame_dispatched = true;
+                // (#1167 v4) ONE send path (burn or production) for BOTH the current frame and the
+                // empty-queue starvation repeats below, parameterized by the genlock emit timecode.
+                // Factored so a repeat and the current frame can never drift in how they send. Every
+                // capture of `emit_one` is disjoint from the per-poll `decimation_gate` borrow above.
+                let mut emit_one = |emit_timecode_100ns: i64| {
+                    // #275b ASYNC BURN PATH (test mode: probe + CAMERA_BOX_BURN_RUN_ID).
+                    #[cfg(feature = "probe")]
+                    if let (Some(ring), Some(run_id)) = (burn_ring.as_ref(), burn_run_id) {
+                        // #279 FIX 3 — the NDI sender lives on the burn thread, so EVERY emitted frame
+                        // must route through the ring. The QR is rendered ONLY for YUYV (the burner
+                        // assumes that layout); a v4l2 format substitution yields a non-YUYV frame that
+                        // is sent UNBURNED (passthrough) — never dropped, so a substitution can't kill
+                        // the cam1 feed (restores the pre-#275b `_ => data` graceful degradation).
+                        let fourcc = info.fourcc.str().unwrap_or("");
+                        let render_qr = camera_box::probe::genlock::burn_should_render_qr(fourcc);
+                        if !render_qr {
+                            tracing::warn!(
+                                "#275b burn active but frame fourcc is {} (not YUYV) — emitting UNBURNED passthrough (cam1 should always be YUYV)",
+                                if fourcc.is_empty() { "?" } else { fourcc }
+                            );
                         }
-                        Err(SubmitError::ShutdownInterrupted(_)) => tracing::info!(
-                            "#275b cam1-burn submit interrupted by shutdown — frame_id={} not sent",
-                            frame_id
-                        ),
-                        Err(SubmitError::Closed(_)) => tracing::error!(
-                            "#275b cam1-burn ring closed — burn thread gone (frame_id={} run_id={} not sent)",
-                            frame_id, run_id
-                        ),
+                        let frame_id = burn_ids.next_id();
+                        // #280 — copy the mmap frame into a RECYCLED pool buffer (reused, or allocated
+                        // only when the free list is empty) instead of a fresh per-frame `to_vec`. The
+                        // mmap is valid only inside this callback, so a copy is still required to cross
+                        // the thread boundary — but a reused buffer keeps its ~4MB capacity so the
+                        // copy does not reallocate. clear()+extend reuses that capacity in place.
+                        let mut buf = burn_pool.take();
+                        buf.clear();
+                        buf.extend_from_slice(data);
+                        let job = BurnJob {
+                            buf,
+                            info,
+                            run_id,
+                            frame_id,
+                            // #286 BUG SITE #1 FIX — the emitted frame's genlock NDI timecode keys on
+                            // the real CAPTURE instant (`capture_realtime_100ns`), not an arrival-based
+                            // boundary. `gen_ts_ns` stays arrival (`emit_wall_ns`) unchanged — it feeds
+                            // the #624/#625 latency measurement. (#1167 v4) `emit_timecode_100ns` is
+                            // the per-frame boundary timecode (the current frame, or a repeat's own
+                            // earlier boundary), so every send lands in its own downstream FIFO slot.
+                            gen_ts_ns: emit_wall_ns,
+                            emit_timecode_100ns,
+                            render_qr,
+                        };
+                        // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
+                        // emit ONLY on success: any Err means the frame was NOT sent, so it must not
+                        // inflate the emitted-fps stat. #279 FIX 2 — a full-ring submit is
+                        // interruptible on shutdown (ShutdownInterrupted), distinct from the burn
+                        // thread being gone (Closed).
+                        // On either Err the un-sent job (and its #280 pooled buffer) is dropped/freed
+                        // — both are TERMINAL paths (shutdown signalled, or the burn thread is gone),
+                        // never steady state, so not returning the buffer to the pool cannot leak.
+                        match ring.submit(job) {
+                            // #944 — a queued burn job is the strongest emit-liveness signal available
+                            // on this thread (the burn thread performs the actual NDI send asynchronously).
+                            Ok(()) => {
+                                emit_count += 1;
+                                frame_dispatched = true;
+                            }
+                            Err(SubmitError::ShutdownInterrupted(_)) => tracing::info!(
+                                "#275b cam1-burn submit interrupted by shutdown — frame_id={} not sent",
+                                frame_id
+                            ),
+                            Err(SubmitError::Closed(_)) => tracing::error!(
+                                "#275b cam1-burn ring closed — burn thread gone (frame_id={} run_id={} not sent)",
+                                frame_id, run_id
+                            ),
+                        }
+                        tee_grab(data);
+                        return; // handed to the burn thread; the sender lives there now
                     }
-                    tee_grab(data);
-                    return; // handed to the burn thread; the sender lives there now
-                }
 
-                // PRODUCTION / non-burn path: zero-copy direct send (unchanged). Under the probe
-                // build the sender lives in `capture_sender`; it moves to the burn thread ONLY when
-                // the burn is active, and then the handoff above handles every frame and returns —
-                // so this path is reached only when the burn is inactive (`capture_sender` = Some).
-                #[cfg(feature = "probe")]
-                let sender = capture_sender
-                    .as_mut()
-                    .expect("capture_sender is present whenever the burn is inactive");
-                // #286 BUG SITE #2 FIX — pass the CAPTURE-based genlock timecode through to
-                // send_frame_zero_copy so it stamps the real capture instant (under external
-                // pacing) instead of re-deriving an arrival-based boundary at send time.
+                    // PRODUCTION / non-burn path: zero-copy direct send. Under the probe build the
+                    // sender lives in `capture_sender`; it moves to the burn thread ONLY when the burn
+                    // is active, and then the handoff above handles every frame and returns — so this
+                    // path is reached only when the burn is inactive (`capture_sender` = Some).
+                    #[cfg(feature = "probe")]
+                    let sender = capture_sender
+                        .as_mut()
+                        .expect("capture_sender is present whenever the burn is inactive");
+                    // #286 BUG SITE #2 FIX — pass the CAPTURE-based genlock timecode through so
+                    // send_frame_zero_copy stamps the real capture instant (or the repeat's own
+                    // boundary), never re-deriving an arrival-based boundary at send time.
+                    match sender.send_frame_zero_copy(data, info, emit_timecode_100ns) {
+                        // #944 — only a CONFIRMED send proves the NDI output is live; a send that errors
+                        // is itself a silent-frozen mode (nothing reaches NDI while every health signal
+                        // stays green), so it must NOT advance the emit-liveness heartbeat.
+                        Ok(()) => frame_dispatched = true,
+                        Err(e) => tracing::error!("Failed to send frame: {}", e),
+                    }
+                    emit_count += 1; // reached only when the frame passed the gate
+                    tee_grab(data);
+                    // #792 — tee the emitted frame to the optional 30p publisher LAST (one bounded
+                    // memcpy + try_send, drop-on-full: never blocks this 60p hot path). Production
+                    // path only — the probe burn path above returns before reaching here.
+                    if let Some(t) = publish_30p_tee.as_mut() {
+                        t.tee(data, info, emit_timecode_100ns);
+                    }
+                };
+
+                // The current frame's CAPTURE-based genlock timecode (the base boundary).
                 let capture_timecode_100ns = camera_box::genlock_stamp::genlock_emit_timecode_100ns(
                     capture_realtime_100ns,
                     // `emit_wall_ns` is nanoseconds; this parameter is 100ns units.
                     emit_wall_ns / 100,
                     send_fps as i64,
                 );
-                match sender.send_frame_zero_copy(data, info, capture_timecode_100ns) {
-                    // #944 — only a CONFIRMED send proves the NDI output is live; a send that errors
-                    // is itself a silent-frozen mode (nothing reaches NDI while every health signal
-                    // stays green), so it must NOT advance the emit-liveness heartbeat.
-                    Ok(()) => frame_dispatched = true,
-                    Err(e) => tracing::error!("Failed to send frame: {}", e),
+                // (#1167 v4) An UNDER-rate dip left `starvation_repeats` empty-queue 60fps boundaries
+                // unfilled (poll reported them, capped + gated on a measured sustained under-rate). Fill
+                // each by re-emitting the CURRENT good frame (it passed process_frame's corruption
+                // check — never corrupted content), EARLIEST slot first with its own boundary timecode,
+                // THEN emit the current frame. `0` in every healthy / over-rate window, so the loop is a
+                // no-op and the emit is byte-identical to the pre-v4 single send there.
+                let starvation_repeats = decimation_gate.last_poll_starvation_repeats();
+                for j in (1..=starvation_repeats).rev() {
+                    emit_one(camera_box::genlock_pacing::starvation_repeat_timecode_100ns(
+                        capture_timecode_100ns,
+                        j,
+                        send_fps as i64,
+                    ));
                 }
-                emit_count += 1; // reached only when the frame passed the gate
-                tee_grab(data);
-                // #792 — tee the emitted frame to the optional 30p publisher LAST (one bounded
-                // memcpy + try_send, drop-on-full: never blocks this 60p hot path). Production
-                // path only — the probe burn path above returns before reaching here.
-                if let Some(t) = publish_30p_tee.as_mut() {
-                    t.tee(data, info, capture_timecode_100ns);
-                }
+                emit_one(capture_timecode_100ns);
             });
 
             // #945 — heartbeat: `capture.process_frame(...)` above just RETURNED (Ok or Err,
@@ -1241,6 +1383,15 @@ async fn run_capture_loop(
                 wedge_watchdog_epoch.elapsed().as_nanos() as u64,
                 Ordering::Relaxed,
             );
+
+            // #1167 — a corrupted buffer was dropped this iteration (before the emit gate, see the
+            // snapshot above). Only meaningful while genlock decimation is active (out_interval_ns
+            // > 0 — the gate is polled); register one make-up so the gate fills the slot the dropped
+            // frame vacated with the nearest good frame instead of letting the over-rate absorption
+            // skip it. Bounded inside the gate, so this never over-emits.
+            if out_interval_ns > 0 && capture.corrupted_frames() > corrupted_before {
+                decimation_gate.note_corrupted_frame();
+            }
 
             match result {
                 Ok(()) => {
@@ -1302,6 +1453,13 @@ async fn run_capture_loop(
                         // failure class (previously invisible to any rate/sequence-based
                         // check) shows up in the routine 5s report.
                         let corrupted = capture.corrupted_frames();
+                        // #1193 — the dupe-victim shed count this window, hoisted here so the
+                        // over-rate self-heal trigger below (outside the `out_interval_ns > 0`
+                        // block) can read it. It is drained from `take_shed_counts()` exactly once
+                        // (inside that block); a non-genlock box (out_interval_ns == 0) never drains
+                        // it, so it stays 0 → the over-rate trigger's churn band never confirms,
+                        // which is correct (no decimation gate → no dupe-victim sheds).
+                        let mut window_dupe_shed: u64 = 0;
                         if out_interval_ns > 0 {
                             let emit_fps = emit_count as f64 / secs;
                             tracing::info!(
@@ -1321,14 +1479,30 @@ async fn run_capture_loop(
                             // window (never suppressed on 0/0 — a healthy card legitimately
                             // shows 0/0, which is the self-neutralizing behavior by design, not
                             // the mechanism being off).
-                            let (dupe_shed, blind_shed, dupe_emitted) =
-                                decimation_gate.take_shed_counts();
+                            let (
+                                dupe_shed,
+                                blind_shed,
+                                dupe_emitted,
+                                retired,
+                                drained,
+                                fast_drained,
+                            ) = decimation_gate.take_shed_counts();
+                            // #1193 — capture the dupe-victim shed count for the over-rate trigger
+                            // below (this is the ONLY drain of this counter per window).
+                            window_dupe_shed = dupe_shed;
+                            // (#1167 v4) the starvation last-frame-repeat count is drained SEPARATELY
+                            // (the 6-tuple above is byte-frozen) and appended to the summary segment.
+                            let starvation_repeats = decimation_gate.take_starvation_repeats();
                             tracing::info!(
                                 "{}",
                                 camera_box::dupe_decimation::dupe_shed_summary(
                                     dupe_shed,
                                     blind_shed,
                                     dupe_emitted,
+                                    retired,
+                                    drained,
+                                    fast_drained,
+                                    starvation_repeats,
                                     5
                                 )
                             );
@@ -1540,102 +1714,178 @@ async fn run_capture_loop(
                                 );
                             }
 
-                            // #663 — self-heal: the #656 fix (a manual USB reset) is only
-                            // TEMPORARY — the same defect recurred within hours, three times in
-                            // one day (live incident). Rate-limited + escalating automatic USB
-                            // reset (see capture_rate_selfheal module doc for the full design).
+                            // #663/#1149 — self-heal via the shared `attempt_self_heal` helper: the
+                            // #656 fix (a manual USB reset) is only TEMPORARY — the same defect
+                            // recurred within hours, three times in one day (live incident).
+                            // Rate-limited + escalating automatic USB reset (see the
+                            // capture_rate_selfheal module doc for the full design). This
+                            // load→decide→save→reset→exit sequence is shared byte-for-byte with the
+                            // #1128 grabber-STUCK trigger below via the ONE #1149 helper.
                             let now_epoch_s = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0);
-                            let state_path =
-                                std::path::Path::new(camera_box::capture_rate_selfheal::STATE_PATH);
-                            let prev_selfheal_state =
-                                camera_box::capture_rate_selfheal::load_state(state_path);
-                            let (selfheal_decision, next_selfheal_state) =
-                                camera_box::capture_rate_selfheal::decide_selfheal(
-                                    prev_selfheal_state,
-                                    true,
-                                    now_epoch_s,
-                                    camera_box::capture_rate_selfheal::DEFAULT_MIN_HEAL_INTERVAL_S,
-                                    camera_box::capture_rate_selfheal::DEFAULT_RECURRENCE_WINDOW_S,
-                                    camera_box::capture_rate_selfheal::DEFAULT_CRITICAL_ESCALATION_HEALS,
-                                );
-                            match selfheal_decision {
-                                camera_box::capture_rate_selfheal::SelfHealDecision::Healthy => {
-                                    // Unreachable: we only reach this block once should_warn (a
-                                    // confirmed sustained deviation) is already true.
-                                }
-                                camera_box::capture_rate_selfheal::SelfHealDecision::Throttled {
-                                    seconds_remaining,
-                                } => {
-                                    tracing::warn!(
-                                        "#663 self-heal rate-limited: the last USB reset attempt was too recent — {}s remaining before another attempt is allowed",
-                                        seconds_remaining
-                                    );
-                                }
-                                camera_box::capture_rate_selfheal::SelfHealDecision::Heal {
-                                    attempt_number,
-                                    escalate_critical,
-                                } => {
-                                    if escalate_critical {
-                                        tracing::error!(
-                                            "{}",
-                                            camera_box::capture_rate_selfheal::critical_escalation_message(
-                                                &device_path_owned,
-                                                attempt_number,
-                                                grabber_model
-                                            )
-                                        );
-                                    }
-                                    if let Err(e) = camera_box::capture_rate_selfheal::save_state(
-                                        state_path,
-                                        &next_selfheal_state,
-                                    ) {
-                                        tracing::error!(
-                                            "#663 self-heal: failed to persist self-heal state to {}: {} (rate-limit/escalation count may not survive this restart)",
-                                            camera_box::capture_rate_selfheal::STATE_PATH,
-                                            e
-                                        );
-                                    }
-                                    match camera_box::capture_rate_selfheal::perform_usb_reset(
+                            if let Some(code) = camera_box::capture_rate_selfheal::attempt_self_heal(
+                                &device_path_owned,
+                                grabber_model,
+                                now_epoch_s,
+                                std::path::Path::new(camera_box::capture_rate_selfheal::STATE_PATH),
+                                &camera_box::capture_rate_selfheal::CAPTURE_RATE_SELF_HEAL_MESSAGES,
+                                camera_box::capture_rate_selfheal::perform_usb_reset,
+                            ) {
+                                running_capture.store(false, Ordering::Relaxed);
+                                pending_self_heal_exit_code = Some(code);
+                            }
+                        }
+
+                        // #1128 — feed this 5 s window into the grabber-STUCK detector (over-rate
+                        // AND persistent corrupted). Runs every window regardless of the #656/#971
+                        // bands above. On STUCK: ALWAYS log the `#1128 grabber STUCK` marker
+                        // (report-only, no I/O — the dev1 alert watchdog greps it); the actual USB
+                        // re-auth is gated OFF by default and, when enabled, reuses the SAME #663
+                        // rate-limited state so the two triggers share the 600 s throttle +
+                        // escalation. Guarded by `pending_self_heal_exit_code.is_none()` so it
+                        // never double-resets in a window the #971 chronic band already fired.
+                        if let camera_box::grabber_stuck::GrabberStuckVerdict::Stuck {
+                            captured_fps,
+                            corrupted_delta,
+                            windows,
+                        } = grabber_stuck_tracker.observe(cap_fps, corrupted)
+                        {
+                            tracing::warn!(
+                                "{}",
+                                camera_box::grabber_stuck::stuck_warn_message(
+                                    &device_path_owned,
+                                    captured_fps,
+                                    corrupted_delta,
+                                    windows,
+                                )
+                            );
+                            if grabber_stuck_selfheal_enabled
+                                && pending_self_heal_exit_code.is_none()
+                            {
+                                let now_epoch_s = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                if let Some(code) =
+                                    camera_box::capture_rate_selfheal::attempt_self_heal(
                                         &device_path_owned,
-                                    ) {
-                                        Ok(()) => {
-                                            tracing::warn!(
-                                                "#663 self-heal: USB reset attempt #{} succeeded — will exit (code {}) after graceful shutdown so systemd restarts camera-box against the re-enumerated device",
-                                                attempt_number,
-                                                camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE
-                                            );
-                                            running_capture.store(false, Ordering::Relaxed);
-                                            pending_self_heal_exit_code = Some(
-                                                camera_box::capture_rate_selfheal::SELF_HEAL_EXIT_CODE,
-                                            );
-                                        }
-                                        Err(e) => {
-                                            // Review finding (#663): a TOTAL reset failure (e.g.
-                                            // the reauthorize retries above all failed) can leave
-                                            // the capture device WORSE than the original rate
-                                            // defect — possibly fully disconnected. That deserves
-                                            // CRITICAL visibility, not a buried error line, and the
-                                            // process should still exit so `systemctl status`
-                                            // visibly reflects the failure and a fresh process gets
-                                            // a clean shot at it next rate-limit window (the state
-                                            // file already recorded this attempt, so the 600s
-                                            // throttle applies regardless of exiting here).
-                                            tracing::error!(
-                                                "CRITICAL #663: self-heal USB reset attempt #{} FAILED: {:#} — the capture device may now be in a WORSE state than the original rate defect (possibly disconnected); exiting (code {}) after graceful shutdown so systemd retries with a fresh process",
-                                                attempt_number,
-                                                e,
-                                                camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE
-                                            );
-                                            running_capture.store(false, Ordering::Relaxed);
-                                            pending_self_heal_exit_code = Some(
-                                                camera_box::capture_rate_selfheal::SELF_HEAL_RESET_FAILED_EXIT_CODE,
-                                            );
-                                        }
-                                    }
+                                        grabber_model,
+                                        now_epoch_s,
+                                        std::path::Path::new(
+                                            camera_box::capture_rate_selfheal::STATE_PATH,
+                                        ),
+                                        &camera_box::capture_rate_selfheal::GRABBER_STUCK_SELF_HEAL_MESSAGES,
+                                        camera_box::capture_rate_selfheal::perform_usb_reset,
+                                    )
+                                {
+                                    running_capture.store(false, Ordering::Relaxed);
+                                    pending_self_heal_exit_code = Some(code);
                                 }
+                            }
+                        }
+
+                        // #1193 — feed this 5 s window into the sustained OVER-RATE detector: a
+                        // majority of the per-second capture buckets at/above the over-rate floor
+                        // AND dupe-victim shed churn (the drained `window_dupe_shed`), both held for
+                        // ~5 min. This is the cam2 ShadowCast state whose manual USB re-auth cure
+                        // decays in ~2h and which the #656/#971 + #1128 triggers all miss. On
+                        // OverRate the `#1193 grabber OVER-RATE` marker is ALWAYS logged
+                        // (report-only, no I/O — a future dev1 watchdog would grep it); the actual
+                        // USB re-auth reuses the SAME shared self-heal throttle path, is gated OFF
+                        // by default (CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL), guarded by
+                        // `pending_self_heal_exit_code.is_none()` (never double-reset a window
+                        // another band already fired), AND additionally by a 30-min per-trigger
+                        // cooldown floor checked against the SHARED state file — stricter than the
+                        // 10-min shared throttle, so the other two triggers stay untouched. Since
+                        // #1201 the whole gated sequence is the shared
+                        // capture_rate_selfheal::attempt_floored_self_heal wrapper.
+                        if let camera_box::capture_overrate::CaptureOverRateVerdict::OverRate {
+                            captured_max_bucket,
+                            dupe_shed,
+                            windows,
+                        } = over_rate_tracker
+                            .observe(&emit_ring.capture_buckets(), window_dupe_shed)
+                        {
+                            tracing::warn!(
+                                "{}",
+                                camera_box::capture_overrate::over_rate_warn_message(
+                                    &device_path_owned,
+                                    captured_max_bucket,
+                                    dupe_shed,
+                                    windows,
+                                )
+                            );
+                            if let Some(code) =
+                                camera_box::capture_rate_selfheal::attempt_floored_self_heal(
+                                    over_rate_selfheal_enabled,
+                                    pending_self_heal_exit_code.is_none(),
+                                    camera_box::capture_overrate::OVERRATE_MIN_HEAL_INTERVAL_S,
+                                    &device_path_owned,
+                                    grabber_model,
+                                    std::path::Path::new(
+                                        camera_box::capture_rate_selfheal::STATE_PATH,
+                                    ),
+                                    &camera_box::capture_rate_selfheal::OVER_RATE_SELF_HEAL_MESSAGES,
+                                    camera_box::capture_rate_selfheal::perform_usb_reset,
+                                )
+                            {
+                                running_capture.store(false, Ordering::Relaxed);
+                                pending_self_heal_exit_code = Some(code);
+                            }
+                        }
+
+                        // #1200 — feed this 5 s window's capture-side byte-identical dupe fraction
+                        // into the latch-halving detector: healthy 30fps-into-60fps is ~0.5,
+                        // latch-halved is ~0.75 (each unique frame captured ~4x at a correct 60fps
+                        // pace, 15 unique/s). The #1193 over-rate (0 over-rate, 0 shed) and #1128
+                        // STUCK (0 corrupted) triggers both miss it. On Halved the `#1200 grabber
+                        // LATCH-HALVING` marker is ALWAYS logged (report-only, no I/O — a future
+                        // dev1 watchdog would grep it); the actual USB re-auth reuses the SAME
+                        // shared self-heal throttle path, is gated OFF by default
+                        // (CAMERA_BOX_GRABBER_HALVING_SELFHEAL), guarded by
+                        // `pending_self_heal_exit_code.is_none()` (never double-reset a window
+                        // another band already fired), AND additionally by a 30-min per-trigger
+                        // cooldown floor checked against the SHARED state file — since #1201 the
+                        // whole gated sequence is the shared
+                        // capture_rate_selfheal::attempt_floored_self_heal wrapper. The re-auth
+                        // cure is UNPROVEN for this state (it did NOT cure cam3 on 2026-08-25), so
+                        // the marker's detection value is the real deliverable.
+                        if let camera_box::capture_latch_halving::CaptureLatchHalvingVerdict::Halved {
+                            dupe_fraction,
+                            dupe_captures,
+                            total_captures,
+                            windows,
+                        } = latch_halving_tracker
+                            .observe(window_dupe_captures, window_total_captures)
+                        {
+                            tracing::warn!(
+                                "{}",
+                                camera_box::capture_latch_halving::latch_halving_warn_message(
+                                    &device_path_owned,
+                                    dupe_fraction,
+                                    dupe_captures,
+                                    total_captures,
+                                    windows,
+                                )
+                            );
+                            if let Some(code) =
+                                camera_box::capture_rate_selfheal::attempt_floored_self_heal(
+                                    latch_halving_selfheal_enabled,
+                                    pending_self_heal_exit_code.is_none(),
+                                    camera_box::capture_latch_halving::HALVING_MIN_HEAL_INTERVAL_S,
+                                    &device_path_owned,
+                                    grabber_model,
+                                    std::path::Path::new(
+                                        camera_box::capture_rate_selfheal::STATE_PATH,
+                                    ),
+                                    &camera_box::capture_rate_selfheal::LATCH_HALVING_SELF_HEAL_MESSAGES,
+                                    camera_box::capture_rate_selfheal::perform_usb_reset,
+                                )
+                            {
+                                running_capture.store(false, Ordering::Relaxed);
+                                pending_self_heal_exit_code = Some(code);
                             }
                         }
 
@@ -1667,6 +1917,11 @@ async fn run_capture_loop(
 
                         frame_count = 0;
                         emit_count = 0;
+                        // #1200 — reset the per-window dupe counters. prev_capture_hash is NOT reset
+                        // (it persists across windows so a window-boundary frame can still be seen
+                        // as a dupe of the previous window's last capture).
+                        window_dupe_captures = 0;
+                        window_total_captures = 0;
                         last_report = std::time::Instant::now();
                     }
 

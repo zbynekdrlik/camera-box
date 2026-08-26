@@ -44,6 +44,25 @@ misleading dead path that caused this incident in the first place. If a genuine 
 dantesync-log-based read ever arises, that is new work with its own live evidence, not a reason to
 resurrect this path from memory.
 
+## The dantesync-TRAY is the EXCEPTION — it has NO console `--version`, pin it by sha256 (#1139)
+
+`dantesync-tray.exe` (the system-tray GUI on strih/stream) does NOT answer `--version` the way the
+daemon does — verified LIVE 2026-08-20: `"C:\Program Files\DanteSync\dantesync-tray.exe" --version`
+over ssh prints **nothing** (rc=0, empty), because it is a Windows GUI-subsystem app with no
+attached console when launched over ssh (session 0), so its stdout goes nowhere. `Get-Item
+….VersionInfo.FileVersion`/`ProductVersion` is ALSO empty (a plain Rust binary carries no PE
+version resource). So neither of the daemon's two read paths works for the tray. The read path that
+DOES work: **sha256 against the release asset.** The dantesync gh release ships
+`dantesync-tray-windows-amd64.exe` + a `.sha256` sidecar asset, so pin the deployed tray's
+`certutil -hashfile … SHA256` (a session-agnostic file read, fine over ssh) against the
+`v{PIN}` release's tray-asset sha — the #1118 `recording-verdict-on-imag.sh` sha-compare pattern,
+which needs no on-box `--version`. Implemented as a REPORT-ONLY alarm in
+`dantesync-version-gate.sh` (`dantesync_tray_verdict`, #1139): the tray plays NO part in the clock
+discipline (a stale tray corrupts no measurement), so a hard block on every E2E is too blunt — it
+SCREAMS the orphan (stdout row + `!! DANTESYNC-TRAY ALARM` stderr banner) without flipping the
+gate exit. This is the SAME "verify the read path against the real target BEFORE designing around
+it" lesson below — a naive `--version`-based tray gate would have read every box UNKNOWN forever.
+
 ## `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt` is generic over ANY node name, not just cams
 
 `scripts/lib/cambox-offline-ack.sh`'s `cambox_offline_ack_is_acked`/`_reason`/`_effective` match

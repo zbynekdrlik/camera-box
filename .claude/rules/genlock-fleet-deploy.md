@@ -118,3 +118,48 @@ corrected shape (mirrors the strih AHK stop→verify→relaunch ordering):
 - The emitted-program assertions live in `tests/deploy_genlock_fleet.rs`
   (`imag_program_restarts_through_the_systemd_unit_not_a_raw_launch_789`) — a `!contains("setsid")`
   / `!contains("nohup")` negative anchor, so keep those words out of the emitted step's own comments.
+
+## GOTCHA — the STREAM box also needs a keep-alive stop→verified-restart contract (scheduled tasks, not AHK) (#1140)
+
+The AHK contract above (stop→verified-restart) covers strih's `NL_STARTUP.ahk` respawn watcher. The
+STREAM box has the SAME hazard through a DIFFERENT mechanism: Task-Scheduler keep-alive job(s) that
+respawn obs64 mid-copy → the deploy program stops obs64, a keep-alive task fires seconds later, the
+running obs64 re-locks `bin\64bit`, and the robocopy dies on ERROR 32 sharing violations (deploy exit
+4). Live incident 2026-08-19 (`build_windows_deploy_program` STREAM), worked around manually
+(disable → deploy → enable). The fix mirrors the AHK contract for scheduled tasks:
+
+- `fleet_box_keepalive_tasks BOX` (a per-box constant next to `fleet_box_has_ahk`) is the SINGLE
+  configurable source of the OBS keep-alive task names to disable — CURATED, never all of a box's
+  ~nine scheduled tasks. stream → `avsync-keepalive camera-box-obs-self-heal-stream`; other boxes → none.
+- **Root cause precision (do NOT mis-attribute):** `avsync-keepalive` (~10 min, #812) does NOT
+  respawn obs64 — its `Ensure-Running` only relaunches the two avsync monitor `.ps1` scripts
+  (`watchdog.ps1`, `avsync-vlc-monitor.ps1`). The ACTUAL obs64 respawner is
+  `camera-box-obs-self-heal-stream` (#411, `--interval-min 2`, relaunches OBS via
+  `build_launch_program`), so BOTH are listed even though the incident named only avsync-keepalive.
+- The emitted program (steps `# (1b)` disable / `# (8b)` verified restore) disables+restores ONLY a
+  task that is PRESENT AND ENABLED (reads `Scheduled Task State:` from `schtasks /Query … /FO LIST /V`),
+  so a deliberately-disabled task (obs-self-heal ships DISABLED) is never re-enabled. Runtime state
+  (which tasks were disabled) lives in the PowerShell `$disabledKeepAlive` array, exactly as AHK's own
+  restart tracks `$ahkRelaunchVerified`. Every fail path exits `10` (loud): a disable failure of an
+  enabled task, an UNREADABLE task state (never fail-OPEN — that silently drops the protection = the
+  exact incident), and a restore-miss. Disable also `schtasks /End`s any in-flight instance (parity
+  with AHK's `Stop-Process`). The `Scheduled Task State:` parse is EN-locale-dependent, consistent
+  with every other schtasks parse in the repo — the fail-loud-on-unreadable path surfaces it instead
+  of hiding it.
+- Assertions: `tests/deploy_genlock_fleet.rs` `windows_stream_disables_and_restores_obs_keepalive_tasks_1140`
+  + `fleet_box_keepalive_tasks_lists_stream_obs_keepalives_1140`, driven purely by box name (the
+  builder computes the list from `$box`, no new arg).
+
+## GOTCHA — the static-anchor self-collision class ALSO bites `deploy-genlock-fleet.sh`'s own emitted-program tests (#1140)
+
+The top-level CLAUDE.md documents the `.find()`/`!contains()` anchor-collision class for
+`recording-e2e.sh` / `rig-mode.sh`. It applies IDENTICALLY to `build_windows_deploy_program`'s emitted
+PowerShell: `tests/deploy_genlock_fleet.rs` asserts both POSITIVE (`p.contains("robocopy")`) and
+NEGATIVE (`windows_fast_program_is_obs_dll_only`: fast stream `!p.contains("robocopy")`) anchors on the
+emitted program TEXT — including comments. Adding a NEW comment to a keep-alive/AHK/copy block that
+merely SPELLS a word an existing negative anchor forbids breaks that test even though the code is
+correct. Live: a `# (1b)` comment saying "mid-robocopy" put the literal `robocopy` into the (comment-
+carrying) fast-mode stream program and broke `!p.contains("robocopy")`. Before adding a comment near
+any emitted block, grep the test file for `!p.contains(` / `!stream.contains(` and keep those words out
+of the comment (reworded to "during the byte copy"). New `# (1b)`/`# (8b)`-style step markers must also
+be UNIQUE in the emitted program (`grep -c` = 1) so an ordering `.find()` anchor can't latch the wrong one.

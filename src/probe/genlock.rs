@@ -1541,12 +1541,27 @@ impl ReleaseCadence {
     /// deadline), so nearest == newest-due there; a SET deep anchor is where the phase differs,
     /// which the demonstrative tests below add. CI is the final arbiter of the probe-test pins.
     ///
-    /// The ONE remaining harness↔C divergence is the SEPARATE #940 piece 3 axis in the note
-    /// above: this sim keeps the RAW `genlock_present_ts_reserve()` deadline where the C
-    /// grid-quantizes it (`genlock_phase_pin_deadline` + `GENLOCK_PHASE_PIN_HYSTERESIS_NS`). That
-    /// deadline change is a distinct question (it re-pins a different set of `due`-scan outcomes)
-    /// and stays out of scope here; `phase_pinned_deadline`/`phase_pinned_is_due` are already
-    /// independently Tier-0 unit-tested against the exact contract the C uses.
+    /// TWO documented harness↔C divergences remain, both DELIBERATE. The first is the SEPARATE
+    /// #940 piece 3 axis in the note above: this sim keeps the RAW `genlock_present_ts_reserve()`
+    /// deadline where the C grid-quantizes it (`genlock_phase_pin_deadline` +
+    /// `GENLOCK_PHASE_PIN_HYSTERESIS_NS`). That deadline change is a distinct question (it re-pins a
+    /// different set of `due`-scan outcomes) and stays out of scope here;
+    /// `phase_pinned_deadline`/`phase_pinned_is_due` are already independently Tier-0 unit-tested
+    /// against the exact contract the C uses.
+    ///
+    /// The second is the #1161 Stage-2 ACQUIRE BRACKETING GATE
+    /// (`crate::genlock_backlog::relock_acquire_should_hold`, wired into the C ACQUIRE branch and
+    /// the `obs_source_set_genlock_latency_ms` pin-rise re-acquire). It is deliberately NOT mirrored
+    /// here, for the SAME reason as the divergence above and one more: the gate exists ONLY to close
+    /// the gap the #940 phase-pinned deadline opens — a frame up to one interval YOUNGER than the raw
+    /// reserve qualifying `due`. This sim uses the RAW deadline, on which `due > 0` already implies
+    /// `oldest_age >= reserve`, so `relock_acquire_should_hold` is STRUCTURALLY inert against a
+    /// raw-deadline acquire (it can never fire here) — mirroring it would be dead code that changes
+    /// no outcome. The gate's proof lives in the Tier-0 authority's own unit tests
+    /// (`src/genlock_backlog.rs`) + the executable C-vs-Rust parity gate
+    /// (`tests/genlock_relock_selection_parity.rs`) + the C-port static anchors
+    /// (`tests/genlock_release_cadence.rs` + both `windows-genlock*.yml`), which is where a
+    /// frame-mover that only bites the phase-pinned production path belongs.
     pub fn tick(
         &mut self,
         wall_now_ns: u64,

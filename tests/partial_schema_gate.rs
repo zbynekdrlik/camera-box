@@ -1,14 +1,16 @@
-//! issue 1118 — a REPORT-ONLY leg's schema-mismatched partial must DEGRADE, not kill the merge.
+//! issue 1118 -> #1142 — the imag leg's schema-mismatched partial must DEGRADE (drop it), not kill
+//! the merge; #1142 makes the dropped leg RED the run instead of silently passing.
 //!
 //! Tier-0 (default features): pins the PURE decision seam `camera_box::partial_schema_gate`, which
 //! the probe-gated `recording-verdict.rs::run_merge` calls (that binary has no local type-check —
 //! CLAUDE.md Tier-0/#477). The bug: a stale imag partial (schema v3 after the #1112 v3->v4 bump)
-//! made `RecordingPartial::load(...)?` abort the WHOLE merge with no verdict JSON — even though the
-//! imag leg is report-only (`imag_leg_gate::gates_overall_pass()==false`) and a strih+stream-only
-//! merge of the same run passes. A report-only leg's INPUT error must never zero the hard gate.
+//! made `RecordingPartial::load(...)?` abort the WHOLE merge with no verdict JSON. The imag leg's
+//! INPUT error must never zero the hard gate by ABORTING — instead it degrades (drop the leg), and
+//! the dropped leg REDs via the now-BLOCKING `imag_leg_verified` fold (#1142).
 
 use camera_box::partial_schema_gate::{
-    box_is_report_only, classify_load_failure, peek_schema_version, PartialLoadDisposition,
+    box_degrades_on_schema_mismatch, classify_load_failure, peek_schema_version,
+    PartialLoadDisposition,
 };
 
 fn is_degrade(d: &PartialLoadDisposition) -> bool {
@@ -30,21 +32,26 @@ fn peek_schema_version_reads_just_the_field() {
 }
 
 #[test]
-fn only_the_imag_leg_is_report_only_today() {
-    // imag_leg_gate::gates_overall_pass()==false — imag is the report-only leg. strih/stream are
-    // the hard gate's own inputs.
-    assert!(box_is_report_only("imag"));
-    assert!(!box_is_report_only("strih"));
-    assert!(!box_is_report_only("stream"));
-    assert!(!box_is_report_only("unknown"));
-    // issue 1118 review — the predicate is DERIVED from the report-only seam, never a 2nd
-    // hardcoded copy: it must always equal `!imag_leg_gate::gates_overall_pass()` for imag, so
-    // when a follow-up flips the imag leg blocking the degrade path can never keep dropping a
-    // now-blocking leg's partial. This guards against someone re-hardcoding `box_is_report_only`.
-    assert_eq!(
-        box_is_report_only("imag"),
-        !camera_box::imag_leg_gate::gates_overall_pass(),
-        "box_is_report_only(imag) must track the imag_leg_gate report-only seam in lockstep"
+fn only_the_imag_leg_degrades_on_schema_mismatch() {
+    // Only imag degrades on a schema mismatch (its on-box binary can legitimately be stale after a
+    // PARTIAL_SCHEMA_VERSION bump). strih/stream are the hard gate's own inputs (fresh from CI).
+    assert!(box_degrades_on_schema_mismatch("imag"));
+    assert!(!box_degrades_on_schema_mismatch("strih"));
+    assert!(!box_degrades_on_schema_mismatch("stream"));
+    assert!(!box_degrades_on_schema_mismatch("unknown"));
+    // #1142 — the degrade is DECOUPLED from the imag gate flip (owner mandate): the imag PRESENCE
+    // seam is now BLOCKING (gates_overall_pass()==true), yet a schema-degraded imag leg must STILL
+    // degrade (drop the leg + write a verdict) rather than hard-abort — the RED comes from
+    // `imag_leg_verified=false` via the BLOCKING verified fold, not from aborting the merge. This
+    // guards against re-coupling `box_degrades_on_schema_mismatch` to `gates_overall_pass` (which
+    // would wrongly turn a stale-emitter imag partial into a fatal no-verdict crash).
+    assert!(
+        camera_box::imag_leg_gate::gates_overall_pass(),
+        "sanity: the imag presence seam is BLOCKING since #1142"
+    );
+    assert!(
+        box_degrades_on_schema_mismatch("imag"),
+        "#1142: imag still degrades on a schema mismatch even though its presence seam is BLOCKING"
     );
 }
 

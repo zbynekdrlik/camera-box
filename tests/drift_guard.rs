@@ -58,6 +58,28 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
     )
 }
 
+/// Source drift-guard.sh under the CALLER's EXACT `set -euo pipefail` context — what the script
+/// itself arms at its own top and what the `--check-imag` caller
+/// (`obs_fps="$(fps_from_log "$obs_log")"`) runs under — and run `body` WITHOUT asserting success.
+/// Returns (exit_code, stdout). This is the only way to observe #1189: a parser that SIGPIPEs (141)
+/// under `set -e` inside a command substitution kills the WHOLE script, so a survival assertion has
+/// to inspect the exit code, never panic on it the way `run_sourced` (which asserts success) would.
+/// It mirrors `run_under_set_e` in tests/harness_leg_health_guard_1133.rs (the canonical repo
+/// pattern for exactly this `set -e`-abort class).
+fn run_sourced_status(body: &str, extra_env: &[(&str, &str)]) -> (i32, String) {
+    let harness = format!("set -euo pipefail\n. \"$SCRIPT\"\n{body}", body = body);
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&harness).env("SCRIPT", script());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
 /// A representative manifest carrying the version table + the pinned-settings table.
 const MANIFEST_FIXTURE: &str = "\
 # vendor
@@ -176,6 +198,100 @@ fn fps_parser_picks_output_fps_not_adapter_fps() {
         "30",
         "must pick the OUTPUT fps inside 'video settings reset:', not the adapter fps"
     );
+}
+
+#[test]
+fn fps_and_version_parsers_survive_a_large_log_without_sigpipe_141_1189() {
+    // #1189: `fps_from_log` (awk `exit` on first match) and the three version parsers
+    // (`obs_version_from_log` / `distroav_version_from_log` / `ndi_runtime_from_log`, each
+    // `printf | sed … | head -1`) lacked the file's own issue-514 drain-safe `|| true`. On a large
+    // real log the early-exiting consumer (awk `exit`, or `head -1` closing after one line) closes
+    // the read end while `printf` is still writing megabytes -> SIGPIPE -> `pipefail` yields 141 ->
+    // the unguarded pipeline propagates it -> under the script's own `set -euo pipefail`, the caller
+    // `obs_fps="$(fps_from_log "$obs_log")"` dies with ZERO output. Live symptom: the issue-789
+    // rig-mode TEST-entry gate read `no genlock_build facet [exit=141]` and fail-closed HARD-BLOCKed
+    // TEST mode, though imag was on the canonical build.
+    //
+    // This must run under the script's real `set -euo pipefail` (via `run_sourced_status`) — the
+    // `-uo`-only `run_sourced` context is structurally blind to a `set -e` abort (the #1133 lesson).
+    // The log is passed via a temp FILE `cat` inside the bash body (not an env var, which would blow
+    // ARG_MAX at spawn), mirroring `genlock_parser_reads_running_state_from_log`; a `NamedTempFile`
+    // auto-deletes on drop, so a mid-loop assert panic never leaks the ~2 MB fixture (the #975 rule).
+    //
+    // Construction that triggers BOTH SIGPIPE shapes in one fixture, for ALL FOUR parsers:
+    //   * many `OBS …`, `DistroAV (Version …)` and `NDI Library Version detected: …` header lines
+    //     EARLY so each version parser's `sed` emits many matches and `head -1` closes after the
+    //     first -> `sed` SIGPIPEs (each parser needs its OWN many-match lines, or that parser's case
+    //     is vacuous — the fix would look "tested" while never reproducing the abort for it);
+    //   * the `video settings reset:` + `fps: 60/1` block EARLY so `fps_from_log`'s awk `exit`s with
+    //     most of the input unwritten -> `printf` SIGPIPEs;
+    //   * a large filler tail AFTER the block so `printf` is genuinely still writing past the pipe
+    //     buffer (~64 KB) when the consumer exits.
+    let mut big = String::new();
+    for i in 0..2000 {
+        big.push_str(&format!(
+            "11:40:39.376: OBS 32.2.0 (64-bit, windows) hdr {i}\n"
+        ));
+    }
+    for i in 0..2000 {
+        big.push_str(&format!(
+            "11:40:40.050: you can haz DistroAV (Version 6.2.1) line {i}\n"
+        ));
+    }
+    for i in 0..2000 {
+        big.push_str(&format!(
+            "11:40:40.100: [distroav] NDI Library Version detected: 6.3.2.0 line {i}\n"
+        ));
+    }
+    big.push_str("11:40:39.714: video settings reset:\n");
+    big.push_str("11:40:39.714: \tfps:               60/1\n");
+    for i in 0..20000 {
+        big.push_str(&format!(
+            "11:40:41.{i:05}: filler log line padding to force printf SIGPIPE after the consumer exits {i}\n"
+        ));
+    }
+    // Sanity: the fixture must exceed the ~64 KB pipe buffer several times over, or neither SIGPIPE
+    // shape fires and the test would pass vacuously even against the buggy code.
+    assert!(
+        big.len() > 1_000_000,
+        "fixture must be > 1 MB to force SIGPIPE, got {}",
+        big.len()
+    );
+    let logfile = tempfile::NamedTempFile::new().expect("create temp log file");
+    std::fs::write(logfile.path(), &big).expect("write big log");
+
+    // (parser, expected value the parser must still return from this fixture). All four parsers the
+    // #1189 fix touches are covered — each has its own many-match producer lines above, so none is
+    // a vacuous case that would pass against the buggy code.
+    let cases = [
+        ("fps_from_log", "60"),
+        ("obs_version_from_log", "32.2.0"),
+        ("distroav_version_from_log", "6.2.1"),
+        ("ndi_runtime_from_log", "6.3.2.0"),
+    ];
+    for (parser, want) in cases {
+        let body = format!(
+            "v=\"$({parser} \"$(cat \"$LOGFILE\")\")\"; echo \"SENTINEL_SURVIVED {parser}=[$v]\""
+        );
+        let (code, stdout) =
+            run_sourced_status(&body, &[("LOGFILE", logfile.path().to_str().unwrap())]);
+        assert_eq!(
+            code, 0,
+            "{parser} must survive a large log without SIGPIPE-141 killing the caller \
+             (exit={code}, stdout={stdout:?}) — this is the #1189 regression"
+        );
+        assert!(
+            stdout.contains("SENTINEL_SURVIVED"),
+            "{parser}: the caller must reach the line AFTER the command substitution \
+             (SIGPIPE-141 under set -e skips it), stdout={stdout:?}"
+        );
+        assert!(
+            stdout.contains(&format!("{parser}=[{want}]")),
+            "{parser} must still extract the correct value [{want}] from the large log, \
+             stdout={stdout:?}"
+        );
+    }
+    // `logfile` (NamedTempFile) is dropped here — auto-removed even if an assert above panicked.
 }
 
 #[test]
@@ -1089,6 +1205,35 @@ fn genlock_capability_parser_detects_the_235_single_knob_latency_line() {
         out2.trim(),
         "1",
         "the alias-sourced #235 latency line must also match: {out2:?}"
+    );
+}
+
+/// #1184: the drift-guard OBS-log matchers grep LOCALLY (drift-guard runs on dev1 over ssh-fetched
+/// REMOTE log text, and the grep that DECIDES runs locally in dev1's UTF-8 locale). OBS logs carry
+/// raw invalid-UTF-8 bytes (DistroAV mojibake); in a UTF-8 locale GNU grep then MISSES an ASCII
+/// marker that IS present, so a healthy box under-reports genlock capability/state/latency/rt-pin.
+/// `LC_ALL=C grep -a` (byte-literal, single-byte locale) is the sanctioned fix (same as issue 1183
+/// in verify-imag.sh). RED against the current non-`-a` greps in this UTF-8 harness locale, GREEN
+/// after `LC_ALL=C grep -a` on the whole `genlock_*_from_log` family.
+#[test]
+fn genlock_log_matchers_survive_invalid_utf8_bytes_1184() {
+    // Each marker line carries an invalid-UTF-8 sequence: `\xe2\x82` in the `.*` gap for the
+    // capability/state/latency regexes, and at the LINE START for the rt-pin regex (which is a
+    // fixed literal with no `.*` to absorb an in-line byte). All markers are otherwise present.
+    let out = run_sourced(
+        r#"LOG="$(printf '07:42:29.658: genlock: wall-clock-slaved \xe2\x82render tick ENABLED (OBS_GENLOCK_WALL_CLOCK, slew cap 2000000 ns/tick)\n07:42:38.746: genlock: \xe2\x82latency = 3 ms (0 frames @ 60.000fps) (OBS_GENLOCK_LATENCY_MS)\n\xe2\x8214:27:54.427: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)\n')"
+printf 'cap=%s\n' "$(genlock_capability_from_log "$LOG")"
+printf 'state=%s\n' "$(genlock_from_log "$LOG")"
+printf 'lat=%s\n' "$(genlock_latency_ms_from_log "$LOG")"
+printf 'rtpin=%s\n' "$(genlock_rt_pin_from_log "$LOG")""#,
+        &[("LC_ALL", "C.UTF-8")],
+    );
+    let got: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        got,
+        vec!["cap=1", "state=1", "lat=3", "rtpin=ok"],
+        "invalid-UTF-8 bytes in the OBS log must not suppress any genlock_*_from_log marker \
+         (#1184, drift-guard the sibling of #1183): {out:?}"
     );
 }
 
@@ -3091,7 +3236,14 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     // #596: the 12th arg is a clean per-daemon timesync-authority block (imag-nb's own #591
     // extension) — must ALSO read clean, or this "everything matches" case regresses to UNKNOWN
     // (an unsupplied/empty 12th arg defaults to check #8's UNKNOWN branch, never a false DRIFT).
-    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
+    // #1151: the log ALSO carries the issue-1146 `projector-vsync: present-vsync ARMED` marker so the
+    // new REPORT-ONLY projector_vsync facet (check #12) reads OK — otherwise this "everything matches"
+    // case would print an UNKNOWN row and trip the `!contains("UNKNOWN")` assertion below. The facet
+    // touches no counter, so this addition changes no exit code; it only feeds the OK-row read.
+    let log = format!(
+        "genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}\n\
+         15:52:14.820: projector-vsync: present-vsync ARMED (GL/EGL swap interval 1; no-op on D3D11)"
+    );
     let body = r#"
         rc=0
         check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
@@ -3319,14 +3471,19 @@ fn check_imag_report_power_envelope_unknown_when_not_gathered_backward_compat_10
     );
 }
 
-// #780: check_imag_report's check #10 — the display-path facet (picom OFF, autostart masked/absent,
-// the #841 iGPU max-freq pin, the #779 tap conf) — passed as the 15th (optional) arg. A clean gather
-// is OK; picom running / a lost tap conf is DRIFT (exit 20); an unread block is UNKNOWN, never a
-// false DRIFT (backward-compat with 9..14-arg call sites).
+// #780/issue 1146 REVERT: check_imag_report's check #10 — the display-path facet (picom NOT
+// running + unit NOT enabled — the compositor cost 21.57% render skips on the 25W envelope, live
+// 2026-08-20, so the #841 picom-off doctrine stands; HDMI the xrandr primary, the #841 iGPU
+// max-freq pin, the #779 tap conf) — passed as the 15th (optional) arg. A clean gather is OK;
+// picom RUNNING / a non-HDMI primary / a lost tap conf is DRIFT (exit 20); an unread block is
+// UNKNOWN, never a false DRIFT (backward-compat with 9..14-arg call sites). Full doctrine
+// history: scripts/lib/imag-display-path.sh's header (reversal + same-day revert).
 const DISPLAY_PATH_GATHER_CLEAN: &str = "\
 PICOM_PGREP|ok
 PICOM_PROC|
-PICOM_AUTOSTART|absent
+PICOM_SERVICE|disabled
+XRANDR|ok
+PRIMARY_OUTPUT|HDMI-1
 MAXPERF_APPLICABLE|1
 MAXPERF_MIN|1400
 MAXPERF_RP0|1400
@@ -3349,8 +3506,8 @@ fn check_imag_report_display_path_ok_when_every_facet_clean_780() {
         .filter(|l| l.contains("display_path/"))
         .collect();
     assert!(
-        dp_rows.len() == 4,
-        "expected picom_process/picom_autostart/igpu_maxperf/tap_conf rows: {out:?}"
+        dp_rows.len() == 5,
+        "expected picom_process/picom_service/hdmi_primary/igpu_maxperf/tap_conf rows: {out:?}"
     );
     for l in &dp_rows {
         assert!(
@@ -3361,41 +3518,67 @@ fn check_imag_report_display_path_ok_when_every_facet_clean_780() {
 }
 
 #[test]
-fn check_imag_report_display_path_drift_when_picom_running_780() {
-    // A compositor breaks the tear-free direct scanout — a genuine display-path DRIFT (exit 20).
-    let running = DISPLAY_PATH_GATHER_CLEAN.replace("PICOM_PROC|", "PICOM_PROC|4711");
+fn check_imag_report_display_path_drift_when_picom_running_1146_revert() {
+    // issue 1146 REVERT: picom RUNNING starves the OBS render (21.57% skips measured on the 25W
+    // envelope) -> DRIFT (exit 20). The compositor's PRESENCE is the drift again (#841 stands).
+    let stopped = DISPLAY_PATH_GATHER_CLEAN.replace("PICOM_PROC|", "PICOM_PROC|2038724");
     let body = r#"
         rc=0
         check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
         echo "RC=$rc"
     "#;
-    let out = run_sourced(body, &[("DP", &running)]);
+    let out = run_sourced(body, &[("DP", &stopped)]);
     assert!(
         out.contains("RC=20"),
-        "picom running must DRIFT (exit 20): {out:?}"
+        "picom running must DRIFT (exit 20, issue 1146 revert): {out:?}"
     );
     let line = out
         .lines()
         .find(|l| l.contains("display_path/picom_process"))
         .unwrap_or_else(|| panic!("no picom_process row printed: {out:?}"));
     assert!(
-        line.contains("DRIFT") && line.contains("4711"),
-        "picom_process must DRIFT naming the pid: {line:?}"
+        line.contains("DRIFT"),
+        "picom_process must DRIFT when picom is running: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_display_path_drift_when_panel_is_primary_1146() {
+    // issue 1146: the panel as xrandr primary makes IT the vsync anchor -> the projector tears.
+    let panel = DISPLAY_PATH_GATHER_CLEAN.replace("PRIMARY_OUTPUT|HDMI-1", "PRIMARY_OUTPUT|eDP-1");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DP", &panel)]);
+    assert!(
+        out.contains("RC=20"),
+        "a non-HDMI primary must DRIFT (exit 20): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("display_path/hdmi_primary"))
+        .unwrap_or_else(|| panic!("no hdmi_primary row printed: {out:?}"));
+    assert!(
+        line.contains("DRIFT") && line.contains("eDP-1"),
+        "hdmi_primary must DRIFT naming the wrong primary: {line:?}"
     );
 }
 
 #[test]
 fn check_imag_report_display_path_drift_when_tap_conf_gone_780() {
     // #779 tap conf removed — a gathered-but-absent conf is a real DRIFT, not an SSH-hiccup UNKNOWN.
-    let gone = "PICOM_PGREP|ok\nPICOM_PROC|\nPICOM_AUTOSTART|absent\n\
-                MAXPERF_APPLICABLE|1\nMAXPERF_MIN|1400\nMAXPERF_RP0|1400\n\
-                MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\nTAPCONF|absent";
+    // Baseline is the issue-1146 clean gather (picom running, service enabled, HDMI primary) with
+    // ONLY the tap conf gone, so the drift isolates to tap_conf.
+    let gone = DISPLAY_PATH_GATHER_CLEAN
+        .replace("TAPCONF|present\nTAPCONF_TAPPING|on\n", "TAPCONF|absent\n");
     let body = r#"
         rc=0
         check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
         echo "RC=$rc"
     "#;
-    let out = run_sourced(body, &[("DP", gone)]);
+    let out = run_sourced(body, &[("DP", &gone)]);
     assert!(
         out.contains("RC=20"),
         "a lost tap conf must DRIFT (exit 20): {out:?}"
@@ -4094,5 +4277,175 @@ fn check_imag_report_cmdline_isolation_unknown_when_not_gathered_backward_compat
     assert!(
         line.contains("UNKNOWN"),
         "an unread cmdline block must report UNKNOWN, never a false DRIFT: {line:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1151 — the REPORT-ONLY projector_vsync facet (check #12) + the OBS-log-glob fix. The facet runs
+// the SHARED projector_vsync_verdict (scripts/lib/obs-projector-vsync.sh) over the already-gathered
+// $obs_log_text and must NEVER change check_imag_report's 20/11/0 exit contract (report-only).
+// ---------------------------------------------------------------------------------------------
+
+/// The issue-1146 marker exactly as it lands on imag (STEP-0 live-confirmed on 10.77.9.182).
+const PROJECTOR_VSYNC_ARMED_LINE: &str =
+    "15:52:14.820: projector-vsync: present-vsync ARMED (GL/EGL swap interval 1; no-op on D3D11)";
+
+#[test]
+fn check_imag_report_projector_vsync_ok_when_marker_present_1151() {
+    // A log carrying the issue-1146 ARMED marker -> the check #12 row reads OK, naming the mechanism.
+    let log = format!("genlock: latency = 3 ms\n{PROJECTOR_VSYNC_ARMED_LINE}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", &log)]);
+    let row = out
+        .lines()
+        .find(|l| l.contains("projector_vsync"))
+        .unwrap_or_else(|| panic!("no projector_vsync row printed: {out:?}"));
+    assert!(
+        row.contains("OK") && !row.contains("UNKNOWN"),
+        "marker present -> projector_vsync OK: {row:?}"
+    );
+    assert!(
+        row.contains("present-vsync armed"),
+        "the OK row must name the armed mechanism (comprehensive-logging): {row:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_projector_vsync_unknown_when_marker_absent_or_log_empty_1151() {
+    // No ARMED marker in a NON-empty log -> UNKNOWN (projector not (re)opened / build predates #1146),
+    // NEVER a DRIFT. An EMPTY log -> UNKNOWN (log not read, #833). Both are report-only.
+    let no_marker = "genlock: latency = 3 ms\nsome other OBS line";
+    let body = r#"
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || true
+    "#;
+    for (label, log) in [("no-marker", no_marker), ("empty", "")] {
+        let out = run_sourced(body, &[("LOG", log)]);
+        let row = out
+            .lines()
+            .find(|l| l.contains("projector_vsync"))
+            .unwrap_or_else(|| panic!("[{label}] no projector_vsync row: {out:?}"));
+        assert!(
+            row.contains("UNKNOWN"),
+            "[{label}] absent/unreadable marker -> UNKNOWN (report-only, fail-closed #833): {row:?}"
+        );
+        assert!(
+            !row.contains("DRIFT"),
+            "[{label}] projector_vsync must NEVER DRIFT (report-only): {row:?}"
+        );
+    }
+}
+
+#[test]
+fn check_imag_report_projector_vsync_is_report_only_exit_code_unchanged_1151() {
+    // The whole point: the facet's OK vs UNKNOWN state must NOT change check_imag_report's exit code.
+    // Same identical call twice, differing ONLY in whether the OBS log carries the ARMED marker; the
+    // RC line must be byte-identical (the facet touches neither $drift nor $unknown).
+    let with_marker = format!("genlock: latency = 3 ms\n{PROJECTOR_VSYNC_ARMED_LINE}");
+    let without_marker = "genlock: latency = 3 ms".to_string();
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out_with = run_sourced(body, &[("LOG", &with_marker)]);
+    let out_without = run_sourced(body, &[("LOG", &without_marker)]);
+    let rc_with = out_with
+        .lines()
+        .find(|l| l.starts_with("RC="))
+        .expect("RC line (with marker)");
+    let rc_without = out_without
+        .lines()
+        .find(|l| l.starts_with("RC="))
+        .expect("RC line (without marker)");
+    assert_eq!(
+        rc_with, rc_without,
+        "projector_vsync is report-only: the exit code must be identical whether or not the ARMED \
+         marker is present (with={rc_with:?} without={rc_without:?})"
+    );
+    // And the two runs genuinely differed in the facet row (guards against the test asserting a tie
+    // because the facet never ran at all).
+    assert!(
+        out_with
+            .lines()
+            .any(|l| l.contains("projector_vsync") && l.contains("OK"))
+            && out_without
+                .lines()
+                .any(|l| l.contains("projector_vsync") && l.contains("UNKNOWN")),
+        "the with/without runs must actually differ in the projector_vsync row"
+    );
+}
+
+#[test]
+fn gather_and_check_imag_reads_txt_not_log_obs_glob_1151() {
+    // #1151 bug: OBS names its logs `YYYY-MM-DD HH-MM-SS.txt`, but gather_and_check_imag uniquely
+    // globbed `logs/*.log` (matching NOTHING on imag) -> its OBS-log facets read EMPTY -> chronic
+    // UNKNOWN on the real box. The fix globs `*.txt` like every other imag OBS-log reader.
+    let src = std::fs::read_to_string(script()).expect("read drift-guard.sh");
+    assert!(
+        src.contains(r#"obs-studio/logs/"*.txt"#),
+        "gather_and_check_imag must glob the OBS log as *.txt (OBS's real extension), #1151"
+    );
+    assert!(
+        !src.contains(r#"obs-studio/logs/"*.log"#),
+        "the OBS-log gather must NOT still glob *.log — it matches nothing on imag (#1151)"
+    );
+}
+
+#[test]
+fn drift_guard_sources_the_shared_projector_vsync_lib_1151() {
+    // The facet must run the SHARED verdict, not an inline copy (single marker-string source).
+    let src = std::fs::read_to_string(script()).expect("read drift-guard.sh");
+    assert!(
+        src.contains(r#". "$HERE/lib/obs-projector-vsync.sh""#),
+        "drift-guard.sh must source scripts/lib/obs-projector-vsync.sh (#1151)"
+    );
+    assert!(
+        src.contains("projector_vsync_verdict \"$obs_log_text\""),
+        "the facet must run projector_vsync_verdict over the already-gathered log (#1151)"
+    );
+}
+
+#[test]
+fn check_imag_report_projector_vsync_unknown_row_does_not_bump_the_unknown_counter_1151() {
+    // The report-only exit_code_unchanged test above uses a 9-arg call, so facets 6-11 already
+    // saturate `unknown` at exit 11 — it proves a spurious `drift++` (11->20) cannot happen but NOT
+    // a spurious `unknown++` (already 11). This locks the `$unknown`-neutrality from a CLEAN BASELINE:
+    // the SAME full-16-arg clean call the sibling clean tests use (all facets match -> exit 0), but
+    // with the projector-vsync marker ABSENT so facet #12 genuinely prints UNKNOWN. If the facet
+    // wrongly did `unknown++`, the exit would flip 0->11; report-only -> it stays 0.
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}"); // NO projector-vsync marker
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(
+        body,
+        &[
+            ("LOG", log.as_str()),
+            ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
+            ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
+            ("POWER", POWER_GATHER_CLEAN_29W),
+            ("DP", DISPLAY_PATH_GATHER_CLEAN),
+            ("CL", CMDLINE_GATHER_CLEAN),
+        ],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "projector_vsync's UNKNOWN row must NOT bump the unknown counter — a clean baseline stays \
+         exit 0 with the marker absent (report-only): {out:?}"
+    );
+    let row = out
+        .lines()
+        .find(|l| l.contains("projector_vsync"))
+        .unwrap_or_else(|| panic!("no projector_vsync row printed: {out:?}"));
+    assert!(
+        row.contains("UNKNOWN"),
+        "the marker is absent, so the facet must genuinely print UNKNOWN (else the exit-0 assertion \
+         above proves nothing): {row:?}"
     );
 }

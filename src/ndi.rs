@@ -238,10 +238,12 @@ const NDILIB_FRAME_TYPE_METADATA: c_int = 3;
 #[allow(dead_code)]
 const NDILIB_FRAME_TYPE_ERROR: c_int = 4;
 
-// Color formats
-const NDILIB_RECV_COLOR_FORMAT_UYVY_BGRA: c_int = 0;
+// Color formats — values per vendor/distroav/lib/ndi/Processing.NDI.Recv.h: BGRX_BGRA = 0,
+// UYVY_BGRA = 1 (the two names were historically swapped here; value 0 = BGRX/BGRA is what
+// this receiver has always requested and handles — label-only fix, behavior unchanged).
+const NDILIB_RECV_COLOR_FORMAT_BGRX_BGRA: c_int = 0;
 #[allow(dead_code)]
-const NDILIB_RECV_COLOR_FORMAT_BGRX_BGRA: c_int = 1;
+const NDILIB_RECV_COLOR_FORMAT_UYVY_BGRA: c_int = 1;
 
 // Bandwidth
 const NDILIB_RECV_BANDWIDTH_HIGHEST: c_int = 100;
@@ -799,7 +801,7 @@ impl NdiSender {
     #[inline]
     fn convert_yuyv_to_uyvy_scalar(&mut self, yuyv: &[u8]) {
         // YUYV: Y0 U0 Y1 V0 -> UYVY: U0 Y0 V0 Y1
-        for chunk in yuyv.chunks_exact(4) {
+        for chunk in yuyv.as_chunks::<4>().0 {
             self.uyvy_buffer.push(chunk[1]); // U0
             self.uyvy_buffer.push(chunk[0]); // Y0
             self.uyvy_buffer.push(chunk[3]); // V0
@@ -1269,7 +1271,7 @@ impl NdiReceiver {
         let recv_name = CString::new("camera-box-display").unwrap();
         let recv_create = NDIlib_recv_create_v3_t {
             source_to_connect_to: source,
-            color_format: NDILIB_RECV_COLOR_FORMAT_UYVY_BGRA,
+            color_format: NDILIB_RECV_COLOR_FORMAT_BGRX_BGRA,
             bandwidth: NDILIB_RECV_BANDWIDTH_HIGHEST,
             allow_video_fields: false,
             p_ndi_recv_name: recv_name.as_ptr(),
@@ -1390,7 +1392,7 @@ impl Drop for NdiReceiver {
 /// YUYV: Y0 U0 Y1 V0 -> UYVY: U0 Y0 V0 Y1
 pub fn convert_yuyv_to_uyvy_scalar(yuyv: &[u8]) -> Vec<u8> {
     let mut uyvy = Vec::with_capacity(yuyv.len());
-    for chunk in yuyv.chunks_exact(4) {
+    for chunk in yuyv.as_chunks::<4>().0 {
         uyvy.push(chunk[1]); // U0
         uyvy.push(chunk[0]); // Y0
         uyvy.push(chunk[3]); // V0

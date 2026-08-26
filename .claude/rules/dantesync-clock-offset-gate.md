@@ -21,6 +21,29 @@ FALLBACK when HTTP is unreachable. On the live rig every cam serves `/status` on
 CLIENT is graded by the HTTP median, not the journal — but the journal is ALSO fetched for a linux
 client to read its adaptive step threshold and (since #1055) the slew step-correlation evidence.
 
+## A WINDOWS client's step envelope comes from /status, not a journal (#1129)
+The #1022/#1041 median widening and the #1123 STABILITY (spread) widening both need the client's own
+adaptive step threshold (the size of offset ITS OWN daemon tolerates before stepping). A **linux**
+client reads it from its journal (`client_step_threshold_us_from_journal` tail-1 for the median,
+`client_max_step_threshold_us_from_journal` window-max for the spread). A **windows** client has NO
+journald, so pre-#1129 `grade_http_node` fell back to the fixed `GATE_CLIENT_STEP_THRESHOLD_FALLBACK_US`
+(700us) → its stability bound stayed the base 2000us and a healthy ~3.4ms step-straddle spread
+false-UNSTABLE'd the whole E2E (PR #1125 attempt 4, "client step threshold via fallback(700us)").
+dantesync (#1129) now publishes the client's OWN currently-active adaptive step threshold in
+`/status` as **`ntp_step_threshold_us`** — the SAME quantity (`calculate_ntp_adaptive_threshold()`)
+a linux journal logs as `threshold:NNNus`, populated for a client too (server nodes report their
+`server_step_threshold_us`). `grade_http_node`'s win branch reads the WINDOW-MAX across the sampled
+payloads (`client_max_step_threshold_us_from_status_lines`) and feeds it as the client step term into
+BOTH `client_chase_bound_us` (median) and `client_chase_stability_us` (spread) — the SAME step-aware
+treatment cam2 gets from its journal. A box NOT yet serving the field (empty / null) keeps the 700us
+fallback, always admitted in the gate note ("via fallback(700us)"); once serving it, the note reads
+"via its own /status (Nus)". This REQUIRES the dantesync field deployed fleet-wide (a canary-first
+fleet upgrade + a `dantesync-version-gate.sh` PIN bump AFTER the upgrade — release=deploy doctrine);
+the gate change is graceful and merges safely before that (unchanged 700us behaviour on the current
+fleet). `ntp_step_threshold_us` is `null` on a box in server mode's pre-lock state only where
+`calculate_ntp_adaptive_threshold`/`server_step_threshold_us` cannot yet be computed — otherwise
+`Some(..)`.
+
 ## The master-slew / bimodal false-DRIFT lineage (#1021 → #1022 → #1041 → #1055)
 When the NTP master (strih) exits its ~2.5 ms deadband and STEPS, every client observes a transient
 +2.7–3.3 ms slew for ~30–60 s. A 30 s HTTP window landing in that plateau reads a majority-elevated

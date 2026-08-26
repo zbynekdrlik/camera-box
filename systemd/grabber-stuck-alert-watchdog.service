@@ -1,0 +1,23 @@
+[Unit]
+# fast-capture grabber STUCK alert (#1128), DEV1-SIDE. ONE measure -> decide -> alert pass.
+# The camboxes have no airuleset checkout / Discord credentials, so the alert MUST come from dev1,
+# which already has the checkout + creds and sits on the same rig LAN. SAME topology as
+# splitter-port-alert-watchdog.service (#739) / network-reach-alert-watchdog.service (#1001) /
+# optical-chain-alert-watchdog.service (#860). Reads each ACTIVE cambox's journal for the report-only
+# `#1128 grabber STUCK` marker the appliance's src/grabber_stuck.rs detector emits, and pages a
+# grabber-STUCK suspicion (ONE ping per episode + a recovery ping).
+#
+# SHIPS DISABLED — not enabled by any provisioning step. Enable on dev1 only deliberately (a
+# supervised step), the same as the sibling dev1 alert timers that ship disabled:
+#   systemctl --user enable --now grabber-stuck-alert-watchdog.timer
+Description=camera-box fast-capture grabber STUCK alert (#1128) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/grabber-stuck-alert-watchdog.sh
+# A few short ssh journal reads to the active cambox fleet; bounded per-box by
+# GRABBER_STUCK_WATCH_SSH_TIMEOUT. No EnvironmentFile: the cambox root credential defaults to the
+# same value the sibling fleet scripts use (override via CAM_PW in the environment for a rotation).
+TimeoutStartSec=120

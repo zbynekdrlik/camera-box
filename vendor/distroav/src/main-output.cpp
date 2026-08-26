@@ -20,6 +20,10 @@
 #include "plugin-main.h"
 #include <random>
 
+// camera-box #1185: release an unadopted port reservation (defined in
+// ndi-output.cpp) when the main output will NOT be created here.
+extern void ndi_output_release_reserved_main_sender();
+
 struct main_output {
 	QString ndi_name;
 	QString ndi_groups;
@@ -215,6 +219,14 @@ void main_output_init()
 				QT_TO_UTF8(context.ndi_name));
 		}
 		main_output_start();
+	} else {
+		// camera-box #1185: the main output will NOT be created here (disabled, an
+		// unsupported format so is_enabled was cleared above, or an empty name), so a
+		// reservation made at obs_module_post_load will never be adopted by
+		// ndi_output_start. Release it now instead of leaving a frameless PGM ghost
+		// advertised on :5961 until obs_module_unload. A no-op when nothing is reserved
+		// (PGM disabled at post-load, or already adopted on a prior init).
+		ndi_output_release_reserved_main_sender();
 	}
 
 	obs_log(LOG_DEBUG, "-main_output_init()");

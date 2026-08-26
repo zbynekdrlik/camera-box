@@ -9,11 +9,11 @@
 //! (`recording-verdict --extract-partial <box>`) into this partial; dev1 combines the partials
 //! (`recording-verdict --merge-partials strih=… stream=…`) into the identical full verdict.
 //!
-//! ## JSON schema (`schema_version = 4`)
+//! ## JSON schema (`schema_version = 6`)
 //!
 //! ```json
 //! {
-//!   "schema_version": 4,
+//!   "schema_version": 6,
 //!   "box": "strih",                 // which box decoded this — "strih" | "stream"
 //!   "recording": "strih-1234.mkv",  // basename of the local recording (provenance only)
 //!   "expected_burns": [911001, 911002],  // node-burn run_ids this extract decoded for (#207)
@@ -29,10 +29,16 @@
 //!   "av_sync": null,                // #312 item 2 (PR A) per-recording AvMarkerInputs (Some only
 //!                                   // after `--extract-partial stream --av-marker-log <path>`;
 //!                                   // absent/null on a run without the continuous QPSK marker)
-//!   "content_hashes": null          // #1112 per-frame row-sampled content hash (Some only after a
-//!                                   // STREAM all-cambox extract; 0-based by frame_index; feeds the
-//!                                   // #1088 dup-cadence surface in the dev1 merge — absent/null
-//!                                   // on strih/imag boxes and on non-all-cambox runs)
+//!   "frame_prev_diffs": null,       // #1112/#1166 per-frame row-sampled MAD-to-predecessor (Some
+//!                                   // only after a STREAM all-cambox extract; 0-based by
+//!                                   // frame_index, index 0 = null; the codec-tolerant
+//!                                   // near-duplicate signal that feeds the #1088 dup-cadence
+//!                                   // surface in the dev1 merge — absent/null on strih/imag boxes
+//!                                   // and on non-all-cambox runs)
+//!   "record_render": null           // #1143 OBS record-session render stats (drawn/attempted/
+//!                                   // lagged + max in-record ms) — Some only after an imag extract
+//!                                   // with --record-render-stats; report-only observer-effect
+//!                                   // surface (absent/null on strih/stream + imag runs without it)
 //! }
 //! ```
 //!
@@ -45,6 +51,7 @@
 use crate::colour_verify::NodeColourSummary;
 use crate::probe::av_sync_recording::AvMarkerInputs;
 use crate::probe::recording::RecordingFrame;
+use crate::record_render_stats::RecordRenderStats;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -61,14 +68,26 @@ use std::path::Path;
 /// --av-marker-log <path>` (the only box that has both the audio marker track and the cam2
 /// dual-QR video co-located), carried through to the dev1 merge exactly like `colour` above.
 ///
-/// v4 (#1112) adds the optional `content_hashes` field — the per-frame row-sampled content hash
-/// (0-based by `frame_index`) the STREAM box computed on-host during an all-cambox
-/// `--extract-partial stream`, carried so the dev1 merge can slice it per cambox window and feed
-/// the #1088 dup-cadence surface WITHOUT the recording (the recording never leaves the box). The
-/// field is additive + optional (`#[serde(default)]`), so an older v3 reader would ignore it and a
-/// newer reader defaults it to `None`; the strict version check still guards against a genuinely
-/// incompatible mix, and extract + merge always run from the SAME binary build within one E2E run.
-pub const PARTIAL_SCHEMA_VERSION: u32 = 4;
+/// v4 (#1112) added an optional per-frame content-hash field for the #1088 dup-cadence surface;
+/// v6 (#1166) RENAMES + retypes it to `frame_prev_diffs: Option<Vec<Option<f64>>>` — the byte-exact
+/// content hash was structurally BLIND on the lossy stream `.mp4` (it observed 2 of 147 tick-proven
+/// copies, #1101), so the signal is now the codec-tolerant per-frame row-sampled
+/// mean-abs-luma-DIFFERENCE to the recording predecessor (0-based by `frame_index`, index 0 =
+/// `None`). Same carry topology as v4: the STREAM box computes it on-host during an all-cambox
+/// `--extract-partial stream`, so the dev1 merge can slice it per cambox window and threshold it
+/// WITHOUT the recording. Additive + optional (`#[serde(default)]`); the strict version check guards
+/// against a genuinely incompatible mix, and extract + merge always run from the SAME binary build
+/// within one E2E run.
+///
+/// v5 (#1143) adds the optional `record_render` field — OBS's own record-session render stats
+/// ([`RecordRenderStats`]: drawn/attempted/lagged + max in-record render ms) the harness captured
+/// from the imag OBS log stop-stats around the record window and passed to `--extract-partial imag`.
+/// Same additive+optional (`#[serde(default)]`) contract as v2/v3/v4: an older reader ignores it, a
+/// newer reader defaults it to `None`. It is REPORT-ONLY (surfaced under `full_chain.loss.imag`,
+/// never gating `overall_pass`) — the ongoing proof the recording no longer perturbs the measured
+/// chain (a high `lagged_pct` ⇒ a stale x264 encoder, attributed to the recorder). The #1118
+/// sha-gated redeploy pushes the schema-5 binary to imag, so the on-box extract emits v5.
+pub const PARTIAL_SCHEMA_VERSION: u32 = 6;
 
 /// One box's decode-in-place result — the small JSON the cross-box merge consumes (#208).
 ///
@@ -108,18 +127,31 @@ pub struct RecordingPartial {
     /// old behaviour is unchanged.
     #[serde(default)]
     pub av_sync: Option<AvMarkerInputs>,
-    /// #1112 — the STREAM recording's per-frame row-sampled content hashes
-    /// ([`crate::dup_cadence::frame_content_hash`]), 0-based by `frame_index` (index `i` is
-    /// `frames[i].frame_index == i`, the same contract `hash_recording_frames` holds). Computed ON
-    /// the stream box during an all-cambox `--extract-partial stream` (the pixels are local there),
-    /// so the dev1 merge can slice them per cambox window (`dup_cadence::window_content_hashes`) and
-    /// feed the #1088 duplication-masked 50->60 dup-cadence surface WITHOUT the recording — the ONE
+    /// #1112 (signal fix #1166) — the STREAM recording's per-frame CODEC-TOLERANT near-duplicate
+    /// signal: the row-sampled mean-abs-luma-DIFFERENCE to the recording predecessor
+    /// ([`crate::dup_cadence::frame_row_sampled_mad`]), 0-based by `frame_index` (index `i` is
+    /// `frames[i].frame_index == i`, the same contract `frame_prev_diffs` holds), with index 0 =
+    /// `None` (no predecessor). Computed ON the stream box during an all-cambox `--extract-partial
+    /// stream` (the FULL-resolution consecutive frames are local there — a downscaled thumbnail would
+    /// lose the copy/motion separation), so the dev1 merge can slice it per cambox window
+    /// (`dup_cadence::window_prev_mads`) and threshold it (`is_near_duplicate`) to feed the #1088
+    /// duplication-masked 50->60 dup-cadence surface WITHOUT the recording — the ONE
     /// `all_cambox_continuity` term that needs the recording pixels, which are gone by merge time.
-    /// `None` on strih/imag boxes and on any stream extract without a `--switch-schedule` (non
-    /// all-cambox), so old behaviour is unchanged; the surface simply stays report-only-and-skipped
-    /// there exactly as before.
+    /// Replaces the v4 byte-exact `content_hashes`, which was structurally blind on the lossy `.mp4`
+    /// (#1101). `None` on strih/imag boxes and on any stream extract without a `--switch-schedule`
+    /// (non all-cambox), so old behaviour is unchanged; the surface simply stays
+    /// report-only-and-skipped there exactly as before.
     #[serde(default)]
-    pub content_hashes: Option<Vec<u64>>,
+    pub frame_prev_diffs: Option<Vec<Option<f64>>>,
+    /// #1143 — OBS's own record-session render stats for THIS box's recording ([`RecordRenderStats`]:
+    /// drawn/attempted/lagged frames + max in-record render ms), captured by the harness from the
+    /// imag OBS log stop-stats around the record window and passed to `--extract-partial imag`. Carried
+    /// so the dev1 merge can surface the observer-effect confound REPORT-ONLY under
+    /// `full_chain.loss.imag` (a high `lagged_pct` ⇒ the recorder itself judders the chain, never the
+    /// delivery). `None` on strih/stream and on any imag extract without the `--record-render-stats`
+    /// flag, so old behaviour is unchanged.
+    #[serde(default)]
+    pub record_render: Option<RecordRenderStats>,
 }
 
 impl RecordingPartial {
@@ -143,7 +175,8 @@ impl RecordingPartial {
             frames,
             colour: None,
             av_sync: None,
-            content_hashes: None,
+            frame_prev_diffs: None,
+            record_render: None,
         }
     }
 
@@ -164,12 +197,22 @@ impl RecordingPartial {
         self
     }
 
-    /// Attach the STREAM recording's per-frame content hashes (#1112) — set by
-    /// `--extract-partial stream` on an all-cambox run, after hashing THIS box's recording's decoded
-    /// luma frames. Builder so `from_frames` stays a pure ids+timestamps constructor and the
-    /// ffmpeg/hash I/O lives in the probe-gated caller (mirrors `with_colour` / `with_av_sync`).
-    pub fn with_content_hashes(mut self, content_hashes: Option<Vec<u64>>) -> Self {
-        self.content_hashes = content_hashes;
+    /// Attach the STREAM recording's per-frame near-duplicate MAD-to-predecessor vector (#1112/#1166)
+    /// — set by `--extract-partial stream` on an all-cambox run, after diffing THIS box's recording's
+    /// consecutive decoded luma frames. Builder so `from_frames` stays a pure ids+timestamps
+    /// constructor and the ffmpeg/diff I/O lives in the probe-gated caller (mirrors `with_colour` /
+    /// `with_av_sync`).
+    pub fn with_frame_prev_diffs(mut self, frame_prev_diffs: Option<Vec<Option<f64>>>) -> Self {
+        self.frame_prev_diffs = frame_prev_diffs;
+        self
+    }
+
+    /// Attach OBS's record-session render stats (#1143) — set by `--extract-partial imag` when the
+    /// harness passed `--record-render-stats <json>` (captured from the imag OBS log stop-stats
+    /// around the record window). Builder so `from_frames` stays a pure ids+timestamps constructor
+    /// (mirrors `with_colour` / `with_av_sync` / `with_frame_prev_diffs`).
+    pub fn with_record_render(mut self, record_render: Option<RecordRenderStats>) -> Self {
+        self.record_render = record_render;
         self
     }
 
@@ -295,16 +338,20 @@ mod tests {
         let p = RecordingPartial::from_frames("strih", Path::new("strih-1.mkv"), &[], vec![]);
         assert_eq!(p.colour, None, "from_frames defaults colour to None");
         assert_eq!(
-            p.content_hashes, None,
-            "from_frames defaults content_hashes to None (#1112)"
+            p.frame_prev_diffs, None,
+            "from_frames defaults frame_prev_diffs to None (#1112/#1166)"
         );
-        let j = r#"{"schema_version":4,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
+        let j = r#"{"schema_version":6,"box":"strih","recording":"x.mkv","expected_burns":[],"frames":[]}"#;
         let restored = RecordingPartial::from_json(j).unwrap();
         assert_eq!(restored.colour, None, "absent colour field ⇒ None");
         assert_eq!(restored.av_sync, None, "absent av_sync field ⇒ None");
         assert_eq!(
-            restored.content_hashes, None,
-            "absent content_hashes field ⇒ None (#1112 additive #[serde(default)])"
+            restored.frame_prev_diffs, None,
+            "absent frame_prev_diffs field ⇒ None (#1112/#1166 additive #[serde(default)])"
+        );
+        assert_eq!(
+            restored.record_render, None,
+            "absent record_render field ⇒ None (#1143 additive #[serde(default)])"
         );
     }
 
@@ -339,24 +386,24 @@ mod tests {
     }
 
     #[test]
-    fn content_hashes_survive_the_partial_roundtrip_1112() {
-        // #1112 — the STREAM box's per-frame content hashes must round-trip through the partial
-        // JSON so the dev1 merge (no recording) can slice them per window and feed the #1088
-        // dup-cadence surface. Values chosen to include 0 (the degenerate-frame sentinel) and a
-        // full u64 so no width truncation slips in.
-        let hashes: Vec<u64> = vec![0, 1, 0xcbf2_9ce4_8422_2325, u64::MAX, 42];
+    fn frame_prev_diffs_survive_the_partial_roundtrip_1166() {
+        // #1112/#1166 — the STREAM box's per-frame near-duplicate MAD-to-predecessor vector must
+        // round-trip through the partial JSON so the dev1 merge (no recording) can slice it per
+        // window and feed the #1088 dup-cadence surface. Values chosen to include index-0 None (no
+        // predecessor), a low MAD (near-duplicate), a high MAD (motion), and a mid-cluster gap None.
+        let diffs: Vec<Option<f64>> = vec![None, Some(2.34), Some(25.87), None, Some(0.0)];
         let p = RecordingPartial::from_frames(
             "stream",
-            Path::new("stream-1112.mp4"),
+            Path::new("stream-1166.mp4"),
             &[911001, 911002, 911004],
             vec![],
         )
-        .with_content_hashes(Some(hashes.clone()));
+        .with_frame_prev_diffs(Some(diffs.clone()));
         let restored = RecordingPartial::from_json(&p.to_json().unwrap()).unwrap();
         assert_eq!(
-            restored.content_hashes,
-            Some(hashes),
-            "the carried per-frame content hashes must survive the JSON roundtrip exactly"
+            restored.frame_prev_diffs,
+            Some(diffs),
+            "the carried per-frame near-duplicate MADs must survive the JSON roundtrip exactly"
         );
     }
 

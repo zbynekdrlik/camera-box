@@ -4286,3 +4286,245 @@ fn gate_linux_client_unreadable_journal_keeps_fixed_stability_1123() {
     );
     assert!(stdout.contains("UNSTABLE"), "stdout={stdout}");
 }
+
+// --- #1129: a WINDOWS client's step envelope comes from /status, not a journal ------------------
+//
+// The #1123 client STABILITY (spread) widening reads the step envelope from the client's own
+// journal -- but grade_http_node reads a journal ONLY for kind="linux". A Windows client (stream)
+// therefore fell back to the fixed 700us step term, so its stability bound stayed the base 2000us
+// and a healthy step-straddle spread (~3.4ms on strih/stream) false-UNSTABLE'd the whole E2E
+// (PR #1125 attempt 4, "client step threshold via fallback(700us)"). dantesync now exposes the
+// client's OWN currently-active adaptive step threshold in /status (ntp_step_threshold_us, the
+// SAME quantity a Linux journal logs as "threshold:NNNus"); the win-http branch reads its window
+// MAX and feeds it into the SAME median + spread widening cam2 gets from its journal.
+
+/// http_status_ntp_deadband plus the #1129 dantesync "ntp_step_threshold_us" field (the client's
+/// own currently-active adaptive step threshold; a plain integer string or the literal "null").
+fn http_status_ntp_step_threshold(
+    ts: u64,
+    offset_us: i64,
+    ntp_age_s_raw: &str,
+    ntp_failed: bool,
+    deadband_raw: &str,
+    step_threshold_raw: &str,
+) -> String {
+    format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{ts},\
+         \"is_locked\":true,\"ntp_offset_us\":{offset_us},\"mode\":\"NANO\",\
+         \"ntp_failed\":{ntp_failed},\"ntp_updated_ts\":{ts},\"ntp_age_s\":{ntp_age_s_raw},\
+         \"ntp_deadband_us\":{deadband_raw},\"ntp_step_threshold_us\":{step_threshold_raw}}}"
+    )
+}
+
+#[test]
+fn gate_win_http_client_step_straddle_spread_passes_via_status_step_threshold_1129() {
+    // stream's exact PR #1125 attempt-4 shape: samples 0/1848/1924/2900/2938 -> median 1924,
+    // spread 2938. Its /status reports ntp_step_threshold_us=3400 -> stability floor
+    // max(2000, 3400+1000)=4400, so the straddle spread grades tight. Pre-#1129 a win client had
+    // no journal, fell back to 700us, kept the 2000us stability, and false-UNSTABLE'd (exit 20).
+    let base = now_epoch();
+    let master = vec![
+        http_status_ntp_deadband(base, 428, "2", false, "1000"),
+        http_status_ntp_deadband(base + 5, 512, "3", false, "1000"),
+        http_status_ntp_deadband(base + 10, 470, "2", false, "1000"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1129_straddle_master", &master);
+    let client = vec![
+        http_status_ntp_step_threshold(base, 0, "2", false, "null", "3400"),
+        http_status_ntp_step_threshold(base + 5, 1848, "3", false, "null", "3400"),
+        http_status_ntp_step_threshold(base + 10, 1924, "2", false, "null", "3400"),
+        http_status_ntp_step_threshold(base + 15, 2900, "3", false, "null", "3400"),
+        http_status_ntp_step_threshold(base + 20, 2938, "2", false, "null", "3400"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1129_straddle_client", &client);
+    let p_priming = write_win_http_fixture(
+        "strih_1129_straddle_priming",
+        &http_status_ntp_deadband(base, 470, "2", false, "1000"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a Windows client step-straddle (median 1924us, spread 2938us) whose /status step \
+         threshold is 3400us must PASS, not false-UNSTABLE on the 700us fallback. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("UNSTABLE"),
+        "stream must not be UNSTABLE after the /status step widening: {stdout}"
+    );
+    let low = stdout.to_lowercase();
+    assert!(
+        low.contains("/status") && low.contains("3400"),
+        "the widened note must admit the /status step threshold source + value: {stdout}"
+    );
+}
+
+#[test]
+fn gate_win_http_client_genuine_scatter_still_fails_stability_1129() {
+    // A genuinely-scattered Windows client (spread 15000us) whose /status step threshold is only
+    // 500us must STILL FAIL -- the widening is bounded by the client's OWN envelope, not blanket.
+    let base = now_epoch();
+    let master = vec![
+        http_status_ntp_deadband(base, 428, "2", false, "1000"),
+        http_status_ntp_deadband(base + 5, 512, "3", false, "1000"),
+        http_status_ntp_deadband(base + 10, 470, "2", false, "1000"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1129_scatter_master", &master);
+    let client = vec![
+        http_status_ntp_step_threshold(base, 0, "2", false, "null", "500"),
+        http_status_ntp_step_threshold(base + 5, 500, "3", false, "null", "500"),
+        http_status_ntp_step_threshold(base + 10, 900, "2", false, "null", "500"),
+        http_status_ntp_step_threshold(base + 15, 8000, "3", false, "null", "500"),
+        http_status_ntp_step_threshold(base + 20, 15000, "2", false, "null", "500"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1129_scatter_client", &client);
+    let p_priming = write_win_http_fixture(
+        "strih_1129_scatter_priming",
+        &http_status_ntp_deadband(base, 470, "2", false, "1000"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a genuine 15000us-spread scatter whose /status envelope is only 500us must still FAIL. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("UNSTABLE") || stdout.contains("DRIFT"),
+        "must name the scatter failure: {stdout}"
+    );
+}
+
+#[test]
+fn gate_win_http_client_missing_step_threshold_field_falls_back_to_700_1129() {
+    // Graceful backward-compat: a Windows client on a box NOT yet serving ntp_step_threshold_us
+    // (no field at all) falls back to the 700us step term exactly as before #1129 -> the 2938us
+    // straddle spread still fails the fixed 2000us stability. Nothing regresses pre-fleet-upgrade;
+    // the note keeps admitting the fallback.
+    let base = now_epoch();
+    let master = vec![
+        http_status_ntp_deadband(base, 428, "2", false, "1000"),
+        http_status_ntp_deadband(base + 5, 512, "3", false, "1000"),
+        http_status_ntp_deadband(base + 10, 470, "2", false, "1000"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1129_nofield_master", &master);
+    let client = vec![
+        http_status_ntp_deadband(base, 0, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 1848, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 1924, "2", false, "null"),
+        http_status_ntp_deadband(base + 15, 2900, "3", false, "null"),
+        http_status_ntp_deadband(base + 20, 2938, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1129_nofield_client", &client);
+    let p_priming = write_win_http_fixture(
+        "strih_1129_nofield_priming",
+        &http_status_ntp_deadband(base, 470, "2", false, "1000"),
+    );
+    let (code, stdout, _stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--ntp-master",
+            "strih",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "no ntp_step_threshold_us field -> 700us fallback -> the fixed 2000us stability still fails the 2938us spread. stdout={stdout}"
+    );
+    assert!(stdout.contains("UNSTABLE"), "stdout={stdout}");
+    assert!(
+        stdout.contains("fallback(700us)"),
+        "the note must still admit the 700us fallback on a box not serving the field: {stdout}"
+    );
+}

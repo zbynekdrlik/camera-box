@@ -7,36 +7,66 @@
 # Root cause (#780): the whole measurement chain (OBS `GetStats`, the E2E recording verdict decoded
 # from a recording branched off BEFORE display, static screenshots) ends PRESENTATIONALLY before the
 # real display path — OBS -> compositor -> GPU scanout -> HDMI. A projection lag/tearing that is
-# actually a CONFIG state (a compositor that shouldn't be running, an iGPU idling its clock, a lost
-# xorg.conf.d option) lived in a layer with no test. These states are DETERMINISTIC, so this lib
-# guards them: a drift FAILs `drift-guard --check-imag` (and the E2E `[0/8]` preflight) loudly,
-# naming the drifted facet, in a minute — instead of surviving every green run.
+# actually a CONFIG state (a compositor state that is wrong for THIS box, an iGPU idling its clock, a
+# lost xorg.conf.d option, the wrong output as vsync anchor) lived in a layer with no test. These
+# states are DETERMINISTIC, so this lib guards them: a drift FAILs `drift-guard --check-imag` (and
+# the E2E `[0/8]` preflight) loudly, naming the drifted facet, in a minute — instead of surviving
+# every green run.
 #
-# HARDWARE REALITY (STEP-0 live validation on 10.77.9.182, read-only, 2026-08-17): the imag box is
-# now Intel-iGPU-only (Raptor Lake-P UHD, `modesetting`+glamor, NO discrete NVIDIA) — so the
-# ticket's NVIDIA-era facets translate as follows (see the #780 validation comment for the full
-# evidence, and #816/#841 which established this in setup-imag.sh):
-#   * picom OFF                    -> still applies (GPU-independent). On `modesetting`, the ABSENCE
-#                                     of a compositor is precisely what gives the tear-free direct
-#                                     Present+PageFlip full-screen scanout (#841) — a compositor
-#                                     re-introduces a frame + tearing risk.
-#   * GPUPowerMizerMode=1 (NVIDIA) -> the genuine Intel counterpart is `imag-igpu-maxperf.service`
-#                                     (#841): it pins the iGPU `gt_min_freq` FLOOR to the hardware's
-#                                     own `gt_RP0` ceiling so the GPU never idles down and ramp-
-#                                     hitches under load. This is NOT the #1040 power-envelope facet
-#                                     (that guards PL1/slpc/thermald — the thermal CEILING), so the
-#                                     two are complementary, not duplicate.
-#   * ForceFullCompositionPipeline -> NVIDIA-only; has NO counterpart on `modesetting` (TearFree is
-#                                     a dead option on this driver, #841 live-verified). #790's
-#                                     +1-frame concern is inherently moot on Intel (no FFCP -> no
-#                                     extra frame), so NO facet is emitted for it — nothing to
-#                                     hardcode that #790 would flip.
-#   * touchpad tap conf (#779)     -> still applies (GPU-independent).
+# HARDWARE REALITY (STEP-0 live validation on 10.77.9.182, read-only): the imag box is Intel-iGPU-
+# only (Raptor Lake-P UHD, `modesetting`+glamor, NO discrete NVIDIA) — so the ticket's NVIDIA-era
+# facets translate as noted below (see the #780 + issue 1146 validation comments and #816/#841 which
+# established the Intel-only reality in setup-imag.sh).
+#
+# COMPOSITOR DOCTRINE REVERSAL (issue 1146, live-validated 2026-08-20 — SUPERSEDES the #841 "picom
+# OFF" facet). #841 concluded "on `modesetting`, the ABSENCE of a compositor gives the tear-free
+# direct Present+PageFlip full-screen scanout" and this lib DRIFTed when picom ran. That holds for a
+# SINGLE output, but imag drives TWO (eDP panel + HDMI projector), each on its own 60 Hz crystal.
+# GL/scanout presentation can vsync to only ONE CRTC (the primary); with a compositor-free direct
+# scanout the projector's CRTC is NOT guaranteed to be the sync target, so the two clocks BEAT — a
+# clean image when the phases align, a walking tear line when they drift apart ("raz dobre, raz zle"
+# = a non-deterministic sync target, not a broken box). The live fix: a picom v10 vsync compositor
+# (glx, `unredir-if-possible=false` so the fullscreen Program projector stays composited/vsynced,
+# zero eye-candy) ANCHORED on the projector by making HDMI the xrandr PRIMARY. So the facet polarity
+# is INVERTED vs #841:
+#   * picom RUNNING with vsync      -> now OK (the deterministic tear-free present of the projectors).
+#                                      picom NOT running -> DRIFT (the dual-output beat returns).
+#   * picom.service ENABLED (user   -> OK: the persistence half — picom launches every graphical
+#     systemd unit)                    session (setup-imag.sh step 27). Not enabled -> DRIFT.
+#
+# REVERTED SAME DAY (issue 1146 revert, live-measured 2026-08-20): the compositor tear fix above
+# cost 21.57% OBS render skips on the 25W power envelope (imag render-health preflight, window 2/5
+# with MV open) — real dropped output frames chain-wide, strictly worse than the display-only
+# tearing it cured; stopping picom returned the same session to 0.00% skips over a 20 s GetStats
+# window. So the #841 "picom off" polarity STANDS (facets below expect picom NOT running / unit NOT
+# enabled), the picom package+config+unit stay installed DORMANT, and the tear-free direction is
+# the OBS projector's own vsync (or a single-display mode) — tracked on issue 1146 / issue 1147.
+# The dual-output beat analysis above remains VALID physics; only the compositor CURE is rejected
+# for its render cost on this box.
+#   * HDMI is xrandr PRIMARY         -> OK: the projector is the vsync anchor. A non-HDMI primary
+#                                      (the panel) -> DRIFT (the panel becomes the anchor and the
+#                                      projector tears). This REVERSES the #522/#488 "panel primary"
+#                                      autostart doctrine — see setup-imag.sh step 16 + the issue
+#                                      1146 design comment; projector placement is by connector type
+#                                      (imag_scenes.py), NOT by the primary flag, so the flip is safe.
+#   * GPUPowerMizerMode=1 (NVIDIA)  -> the genuine Intel counterpart is `imag-igpu-maxperf.service`
+#                                      (#841): it pins the iGPU `gt_min_freq` FLOOR to the hardware's
+#                                      own `gt_RP0` ceiling so the GPU never idles down and ramp-
+#                                      hitches under load. This is NOT the #1040 power-envelope facet
+#                                      (that guards PL1/slpc/thermald — the thermal CEILING), so the
+#                                      two are complementary, not duplicate.
+#   * ForceFullCompositionPipeline  -> NVIDIA-only; the `Option "TearFree"` port was a dead option on
+#                                      `modesetting` (#841 live-verified). The picom vsync compositor
+#                                      above is the real mechanism now; the inert `20-tearfree.conf`
+#                                      left on the live box is deliberately NOT provisioned (it would
+#                                      fight the #841 "no dead display xorg.conf.d knob" guard).
+#   * touchpad tap conf (#779)      -> still applies (GPU-independent).
 #
 # This lib holds the REMOTE gather snippet + the PURE verdict, SHARED by scripts/drift-guard.sh's
-# `--check-imag` facet and the E2E `[0/8]` preflight (scripts/recording-e2e.sh) so the gather and
-# the OK/DRIFT/UNKNOWN verdict never exist as two driftable copies — the SAME extraction discipline
-# #596 (timesync-authority.sh) and #1040 (imag-power-envelope.sh) already apply.
+# `--check-imag` facet, the E2E `[0/8]` preflight (scripts/recording-e2e.sh), and verify-imag.sh's
+# acceptance check — so the gather and the OK/DRIFT/UNKNOWN verdict never exist as driftable copies
+# (the SAME extraction discipline #596 (timesync-authority.sh) and #1040 (imag-power-envelope.sh)
+# already apply).
 #
 # Source-only: defines pure functions + one thin ssh-glue preflight; no side effects at source time.
 
@@ -62,41 +92,63 @@ _dp_has() {
 }
 
 # imag_display_path_verdict GATHER -> echoes one `<facet>|<STATUS>|<detail>` line per facet
-# (facets: picom_process, picom_autostart, igpu_maxperf, tap_conf; STATUS in OK / DRIFT / UNKNOWN).
-# Both callers iterate the lines and map each to their own report style + exit-code contract. An
-# EMPTY gather (SSH hiccup), an unread facet, or a missing tool is UNKNOWN — never a false OK/DRIFT.
+# (facets: picom_process, picom_service, hdmi_primary, igpu_maxperf, tap_conf; STATUS in OK / DRIFT /
+# UNKNOWN). Both callers iterate the lines and map each to their own report style + exit-code
+# contract. An EMPTY gather (SSH hiccup), an unread facet, or a missing tool is UNKNOWN — never a
+# false OK/DRIFT.
 imag_display_path_verdict() {
   local g="$1"
 
-  # --- picom_process: pgrep -x picom must be empty. #833: a MISSING pgrep must fail loud BY NAME,
-  #     never read as a measured "not running = OK".
+  # --- picom_process (issue 1146 REVERT, live-measured 2026-08-20): picom must NOT be running.
+  #     The vsync-compositor tear fix cost 21.57% OBS render skips on the 25W envelope (imag
+  #     render-health preflight w2/5); stopping picom returned render to 0.00% skips in the same
+  #     session. Render integrity (real output frames) outranks the display-only tearing, so the
+  #     #841 "picom off" doctrine stands; the tear-free present must come from the OBS projector's
+  #     own vsync (or single-display), never a compositor. #833: a MISSING pgrep must fail loud BY
+  #     NAME, never read as a measured verdict.
   if ! _dp_has "$g" PICOM_PGREP; then
     printf 'picom_process|UNKNOWN|picom-process state not gathered\n'
   elif [ "$(_dp_field "$g" PICOM_PGREP)" = "missing" ]; then
-    printf 'picom_process|UNKNOWN|pgrep missing on the box — cannot tell if picom runs (install procps); never read as OK (#833)\n'
+    printf 'picom_process|UNKNOWN|pgrep missing on the box — cannot tell if picom runs (install procps); never read as a verdict (#833)\n'
   else
     local _proc
     _proc="$(_dp_field "$g" PICOM_PROC)"
     if [ -n "$_proc" ]; then
-      printf 'picom_process|DRIFT|picom IS running (pid %s) — a compositor breaks the tear-free direct Present+PageFlip scanout (#841)\n' "$_proc"
+      printf 'picom_process|DRIFT|picom running (pid %s) — the compositor starves the OBS render (21.57%% skips measured on the 25W envelope, issue 1146 revert); stop+disable it\n' "$_proc"
     else
-      printf 'picom_process|OK|picom not running (compositor-free direct scanout)\n'
+      printf 'picom_process|OK|picom not running — full render budget for OBS (issue 1146 revert; tear-free present is the OBS projector vsync direction, not a compositor)\n'
     fi
   fi
 
-  # --- picom_autostart: ~/.config/autostart/picom.desktop absent, or present with Hidden=true.
-  if ! _dp_has "$g" PICOM_AUTOSTART; then
-    printf 'picom_autostart|UNKNOWN|picom-autostart state not gathered\n'
-  elif [ "$(_dp_field "$g" PICOM_AUTOSTART)" = "absent" ]; then
-    printf 'picom_autostart|OK|no picom.desktop autostart entry — picom cannot launch at login\n'
+  # --- picom_service (issue 1146 REVERT): the persistence half — picom.service (user systemd unit)
+  #     must NOT be enabled, or the render-starving compositor comes back at every login (see
+  #     picom_process above). The unit + config stay INSTALLED (dormant) for a future A/B. Read
+  #     bus-free from the on-disk *.target.wants symlink so a non-login ssh gather is reliable.
+  if ! _dp_has "$g" PICOM_SERVICE; then
+    printf 'picom_service|UNKNOWN|picom-service state not gathered\n'
+  elif [ "$(_dp_field "$g" PICOM_SERVICE)" = "enabled" ]; then
+    printf 'picom_service|DRIFT|picom.service enabled (user systemd) — the render-starving compositor relaunches every login (issue 1146 revert); systemctl --user disable picom.service\n'
   else
-    local _hidden
-    _hidden="$(_dp_field "$g" PICOM_AUTOSTART_HIDDEN | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-    if [ "$_hidden" = "true" ]; then
-      printf 'picom_autostart|OK|picom.desktop autostart masked (Hidden=true)\n'
-    else
-      printf 'picom_autostart|DRIFT|picom.desktop autostart present and NOT masked (Hidden=%s) — picom would launch at login\n' "${_hidden:-<none>}"
-    fi
+    printf 'picom_service|OK|picom.service not enabled — the compositor stays dormant (issue 1146 revert)\n'
+  fi
+
+  # --- hdmi_primary (issue 1146): HDMI (the projector) must be the xrandr PRIMARY so picom/GL vsync
+  #     anchors on the projector CRTC (the dual-output beat: presentation syncs only the primary
+  #     CRTC). xrandr presence is probed (#833) — a missing xrandr degrades ONLY this facet to
+  #     UNKNOWN; an empty read (X unreachable over ssh, or no primary set) is UNKNOWN, never a false
+  #     DRIFT; only a real NON-HDMI primary (the panel) is a DRIFT.
+  if ! _dp_has "$g" XRANDR; then
+    printf 'hdmi_primary|UNKNOWN|xrandr-primary state not gathered\n'
+  elif [ "$(_dp_field "$g" XRANDR)" = "missing" ]; then
+    printf 'hdmi_primary|UNKNOWN|xrandr missing on the box — cannot read the primary output; never read as a verdict (#833)\n'
+  else
+    local _prim
+    _prim="$(_dp_field "$g" PRIMARY_OUTPUT)"
+    case "$_prim" in
+      "")    printf 'hdmi_primary|UNKNOWN|no primary output read (X unreachable over ssh, or no primary set) — not a proven drift\n' ;;
+      HDMI*) printf 'hdmi_primary|OK|%s is the xrandr primary — the projector is the vsync anchor (issue 1146)\n' "$_prim" ;;
+      *)     printf 'hdmi_primary|DRIFT|primary is %s not HDMI — the panel is the vsync anchor, so the HDMI projector shows the dual-output tearing beat (issue 1146)\n' "$_prim" ;;
+    esac
   fi
 
   # --- igpu_maxperf: the #841 Intel counterpart to GPUPowerMizerMode=1. OK iff the service is
@@ -140,30 +192,38 @@ imag_display_path_verdict() {
 
 # imag_display_path_gather_remote_snippet -> the REMOTE shell command (a string) both callers run
 # over their own transport to collect the observed display-path state into the `|`-delimited block
-# imag_display_path_verdict parses. Uses only ubiquitous tools (cat/systemctl/sed/grep); the ONE
-# not-strictly-guaranteed tool is `pgrep` (procps), so its presence is probed and emitted (#833) —
-# a missing pgrep must never let "picom not running" read as a false OK. This uses an INLINE
-# PICOM_PGREP marker rather than the shared imag_require_remote_tool_cmd (scripts/lib/imag-require-
-# remote-tool.sh) ON PURPOSE: that helper is for a SEPARATE fail-fast preflight probe that HARD-ABORTS
-# the whole run on any absent tool; here the desired semantics are per-facet — a missing pgrep must
-# degrade ONLY the picom_process facet to UNKNOWN while the other three facets (autostart, maxperf,
-# tap) still verdict normally, which the inline marker (read by the verdict's own two-tier) gives.
+# imag_display_path_verdict parses. Uses only ubiquitous tools (cat/systemctl/sed/grep/awk); the two
+# not-strictly-guaranteed tools are `pgrep` (procps) and `xrandr`, so each presence is probed and
+# emitted (#833) — a missing tool must never let a facet read as a false OK/DRIFT. These use INLINE
+# PICOM_PGREP / XRANDR markers rather than the shared imag_require_remote_tool_cmd (scripts/lib/imag-
+# require-remote-tool.sh) ON PURPOSE: that helper is for a SEPARATE fail-fast preflight probe that
+# HARD-ABORTS the whole run on any absent tool; here the desired semantics are per-facet — a missing
+# tool degrades ONLY its own facet to UNKNOWN while the others verdict normally, which the inline
+# marker (read by the verdict's own two-tier) gives.
 imag_display_path_gather_remote_snippet() {
   cat <<'REMOTE'
-# --- picom: pgrep presence (#833) then the picom process itself ---
+# --- picom: pgrep presence (#833) then the picom process itself (issue 1146: running = OK) ---
 if command -v pgrep >/dev/null 2>&1; then
   printf 'PICOM_PGREP|ok\n'
   printf 'PICOM_PROC|%s\n' "$(pgrep -x picom 2>/dev/null | head -1 || true)"
 else
   printf 'PICOM_PGREP|missing\n'
 fi
-# --- picom autostart entry (~/.config/autostart/picom.desktop absent OR Hidden=true) ---
-_dp_as="$HOME/.config/autostart/picom.desktop"
-if [ -e "$_dp_as" ]; then
-  printf 'PICOM_AUTOSTART|present\n'
-  printf 'PICOM_AUTOSTART_HIDDEN|%s\n' "$(sed -n 's/^[[:space:]]*Hidden[[:space:]]*=[[:space:]]*//p' "$_dp_as" 2>/dev/null | head -1 || true)"
+# --- picom user systemd service enabled (issue 1146): the *.target.wants/picom.service enable
+# symlink `systemctl --user enable` creates. A bus-free on-disk check (robust over a non-login ssh
+# gather); glob any *.target.wants/picom.service so the exact WantedBy dir is never hardcoded. ---
+if ls "$HOME"/.config/systemd/user/*.target.wants/picom.service >/dev/null 2>&1; then
+  printf 'PICOM_SERVICE|enabled\n'
 else
-  printf 'PICOM_AUTOSTART|absent\n'
+  printf 'PICOM_SERVICE|disabled\n'
+fi
+# --- HDMI primary (issue 1146): the projector must be the xrandr PRIMARY output so picom/GL vsync
+# anchors on it. xrandr presence probed (#833); DISPLAY=:0 reads the running session's layout. ---
+if command -v xrandr >/dev/null 2>&1; then
+  printf 'XRANDR|ok\n'
+  printf 'PRIMARY_OUTPUT|%s\n' "$(DISPLAY=:0 xrandr --query 2>/dev/null | awk '/ connected primary/{print $1; exit}')"
+else
+  printf 'XRANDR|missing\n'
 fi
 # --- iGPU max-freq pin (#841 imag-igpu-maxperf.service — the Intel GPUPowerMizerMode=1 analog) ---
 # Identity-based: glob card* (never a hardcoded cardN — the presenter-drm renumbering hazard).
@@ -227,6 +287,6 @@ imag_display_path_preflight_assert() {
   if [ -n "$unknowns" ]; then
     printf 'WARN: imag display-path facets UNKNOWN on %s (not read; not a proven drift): %s\n' "$host" "$unknowns" >&2
   fi
-  printf 'imag display-path preflight OK on %s (picom off, iGPU pinned, tap conf)\n' "$host"
+  printf 'imag display-path preflight OK on %s (picom vsync on, HDMI primary, iGPU pinned, tap conf)\n' "$host"
   return 0
 }

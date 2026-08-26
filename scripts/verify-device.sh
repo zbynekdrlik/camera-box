@@ -93,6 +93,9 @@
 #   (x) ffmpeg is installed AND runs (`ffmpeg -version`) -- the #930 lipsync-test-mode runtime
 #       dependency (scripts/lipsync-test-mode.sh); any box may take cam2's painter role, so this
 #       is checked fleet-wide, never cam2-only.
+#   (x2) mpv is installed AND runs (`mpv --version`) -- the #1187 lipsync-test-mode DRM/KMS
+#       playback runtime (mpv --vo=drm replaced the legacy raw-fbdev ffmpeg write, issue 1176);
+#       checked fleet-wide like (x), never cam2-only.
 #   (y) camera-box.service has the ExecStartPre device-free bake-in (drop-in wired to the helper,
 #       helper stops the stray E2E burn UNIT + pkills the burn, never the painter) so every start
 #       frees /dev/video instead of crash-looping on "Device or resource busy" (#772).
@@ -114,6 +117,17 @@
 #       the xhci capture IRQ is routed OFF the isolated grab core on a stock kernel (defect 3 -- the
 #       fix is in src/affinity.rs and lands on the next fleet redeploy; a pre-899 box WARNs). The flip
 #       to a hard FAIL is a follow-up gated on the redeploy (docs/runbooks/899-realtime-isolation.md).
+#   (ad) provisioning netplan interface pin (#1155): the installed /etc/netplan/01-netcfg.yaml pins
+#       the LAN stanza to `match: name: "enp*"` (the PCI NIC), never `driver: "*"` -- a driver
+#       wildcard also claims a USB CDC-NCM camera link (bkshading, issue 808) and hands it the box
+#       IP + a duplicate default route, making the box PTP-deaf (cam1 live incident 2026-08-20).
+#       FAILs if the netplan still matches the driver wildcard OR if two interfaces carry the box IP.
+#   (ae) NTP-client DSCP marking (dantesync issue 52): nftables installed, a dedicated
+#       `table ip dantesync_dscp` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123)
+#       with DSCP EF, and the dantesync-dscp.service oneshot that applies it at boot is enabled +
+#       active. dantesync's rsntp Linux client cannot setsockopt(IP_TOS) on its own request socket,
+#       so this provisioning rule is the ONLY thing marking the request direction; a box missing
+#       nftables, the rule, or the oneshot FAILs (never a silent pass).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -157,6 +171,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"  # offset_us_from_journal/offset_check/ptp_locked_from_journal/
                                  # _short_iso_epoch/dantesync_offset_verdict/freshest_offset_us (#595)
+# shellcheck source=scripts/lib/dscp-nft.sh
+. "$HERE/lib/dscp-nft.sh"        # dscp_nft_rule_present/dscp_nft_gather_remote_snippet/
+                                 # dscp_nft_verdict -- the (ae) NTP-client DSCP nftables rule check
+                                 # (dantesync issue 52; SAME source of truth as setup-device.sh /
+                                 # create-usb-linux.sh)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -193,7 +212,7 @@ NDI_VERSION_PIN="${NDI_VERSION_PIN:-6.3.2}"     # fleet NDI runtime pin (#132/#5
 # version_is_valid_format V -> 0 iff V matches the fleet's vMAJOR.MINOR.PATCH[-dev.N] shape (the
 # CI dev-channel form, e.g. "1.7.0-dev.244", or a plain release "1.7.0").
 version_is_valid_format() {
-  printf '%s' "$1" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$'
+  grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$' <<<"$1"
 }
 
 # version_matches_expected ACTUAL EXPECTED -> 0 iff both are non-empty and identical.
@@ -215,13 +234,13 @@ active_state_is_active() {
 # (the shared emit_ok_grep_pattern() from ndi-alive.sh -- genlock decimation report / plain
 # "Streaming: X fps" / generic sender-ready line).
 ndi_emit_ok() {
-  printf '%s\n' "$1" | grep -qE "$(emit_ok_grep_pattern)"
+  grep -qE "$(emit_ok_grep_pattern)" <<<"$1"
 }
 
 # ndi_journal_has_fatal JOURNAL_TEXT -> 0 iff the journal contains a crash signature (the shared
 # fatal_grep_pattern() from ndi-alive.sh).
 ndi_journal_has_fatal() {
-  printf '%s\n' "$1" | grep -qE "$(fatal_grep_pattern)"
+  grep -qE "$(fatal_grep_pattern)" <<<"$1"
 }
 
 # --- (i) colour capture chroma metric (#299) ----------------------------------------------------
@@ -291,7 +310,7 @@ dantesync_journal_fresh() {
   local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
   local now_iso now_e
   # Fail-closed: BOX_NOW must be a clean non-negative integer epoch, or we cannot judge freshness.
-  if [ -z "$box_now" ] || ! printf '%s' "$box_now" | grep -qE '^[0-9]+$'; then
+  if [ -z "$box_now" ] || ! grep -qE '^[0-9]+$' <<<"$box_now"; then
     printf 'stale\n'; return 0
   fi
   now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
@@ -427,7 +446,7 @@ avahi_ndi_discoverable() {
   matches="$(printf '%s\n' "$text" | grep -E '^[+=]' | grep -F '_ndi._tcp' || true)"
   [ -n "$matches" ] || return 1
   [ -z "$want" ] && return 0
-  printf '%s\n' "$matches" | grep -qF "$want"
+  grep -qF "$want" <<<"$matches"
 }
 
 # --- (j)-(o) fleet-uniformity invariants (#547) -------------------------------------------------
@@ -498,7 +517,7 @@ waitonline_masked() {
 cmdline_has_isolation() {
   local cmdline="$1" tok
   for tok in 'isolcpus=3' 'nohz_full=3' 'rcu_nocbs=3' 'irqaffinity=0-2'; do
-    printf '%s' " $cmdline " | grep -qE "[[:space:]]${tok}[[:space:]]" || return 1
+    grep -qE "[[:space:]]${tok}[[:space:]]" <<<" $cmdline " || return 1
   done
   return 0
 }
@@ -585,6 +604,30 @@ ndi_version_matches() {
 # provisioned BEFORE that fix landed, without failing their acceptance gate for something with
 # zero functional impact.
 
+# --- (ad) provisioning netplan interface pin -- no USB-camera-link IP theft (#1155) --------------
+
+# netplan_driver_wildcard_count TEXT -> COUNT of `driver: "*"` LAN-match lines in the installed
+# netplan TEXT (the #1155 regression signature that also claims a USB CDC-NCM camera link and hands
+# it the box IP + a duplicate default route). "0" iff the LAN stanza is correctly pinned to
+# `match: name: "enp*"`. Tolerates double-quoted / single-quoted / bare `*` and surrounding
+# whitespace. `grep -c` (NEVER -q: -q's early pipe-close can SIGPIPE the upstream printf and, under
+# pipefail, return non-zero even on a real match) + `|| true` (grep -c exits 1 with a printed "0"
+# on no match; the bare-substitution caller must never abort).
+netplan_driver_wildcard_count() {
+  printf '%s\n' "$1" | grep -cE '^[[:space:]]*driver:[[:space:]]*["'\'']?\*["'\'']?[[:space:]]*$' || true
+}
+
+# interfaces_sharing_ip IPBRIEF BOXIP -> COUNT of DISTINCT interfaces in IPBRIEF (an `ip -br addr`
+# dump) whose address column carries "BOXIP/" -- i.e. how many links hold the box's LAN IP. "0"
+# iff none (empty/unreachable input included), "1" on a healthy box, ">=2" when a USB camera link
+# has stolen the box IP alongside the real NIC (the live #1155 signature). The trailing "/" makes
+# it a CIDR-anchored fixed-string match via awk index() (regex-free, so a `.` is literal and
+# .61 never substring-matches .610, and an IPv6 column never false-matches an IPv4 dotted form).
+# `grep -c .` (SIGPIPE-safe, reads all input) + `|| true` (exits 1 with "0" on empty).
+interfaces_sharing_ip() {
+  printf '%s\n' "$1" | awk -v ip="$2/" 'index($0, ip){print $1}' | sort -u | grep -c . || true
+}
+
 # bak_cruft_names LS_TEXT -> newline-separated list of `.bak` / `.bak-*`-suffixed entry names
 # found in LS_TEXT (an `ls -la DIR` or `ls -1 DIR` dump). Empty output means no cruft. Handles
 # both an `ls -1` dump (one bare name per line) and an `ls -la` dump (permission/owner rows,
@@ -667,6 +710,13 @@ Checks:
       (the linux-camN MCP control surface, provisioned by setup-device.sh STEP 17b) (#1066)
   (ac) realtime-isolation drift (issue 899, WARN-only): kernel PREEMPT_RT status + the xhci capture
       IRQ routed off the isolated grab core on a stock kernel (defects 1+3; hard-FAIL flip staged)
+  (ad) provisioning netplan interface pin (#1155): /etc/netplan/01-netcfg.yaml pins the LAN stanza
+      to name: "enp*" (the PCI NIC), never the driver wildcard, and no two interfaces carry the box
+      IP -- so a USB CDC-NCM camera link (bkshading, issue 808) can never steal the IP + PTP route
+  (ae) NTP-client DSCP marking (dantesync issue 52): nftables installed + a dedicated
+      `table ip dantesync_dscp` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
+      DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
+      setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1065,13 +1115,13 @@ if [ "$NAME_UPPER" = "CAM2" ]; then
       PAINTER_JOURNAL="$(ssh_box "journalctl -u cam2-painter.service -n 200 --no-pager 2>/dev/null")" || rc=$?
       if [ "$rc" -ne 0 ]; then
         fail "could not read cam2-painter.service journal to confirm it is genuinely painting (ssh rc=$rc)"
-      elif printf '%s' "$PAINTER_JOURNAL" | grep -q 'presenter: using DRM/KMS page-flip'; then
-        if printf '%s' "$PAINTER_JOURNAL" | grep -q 'vblank-locked'; then
+      elif grep -q 'presenter: using DRM/KMS page-flip' <<<"$PAINTER_JOURNAL"; then
+        if grep -q 'vblank-locked' <<<"$PAINTER_JOURNAL"; then
           ok "cam2-painter.service genuinely painting (KMS page-flip, vblank-locked)"
         else
           fail "cam2-painter.service selected KMS but never confirmed vblank-locked (see journalctl -u cam2-painter.service)"
         fi
-      elif printf '%s' "$PAINTER_JOURNAL" | grep -qi 'falling back to fbdev'; then
+      elif grep -qi 'falling back to fbdev' <<<"$PAINTER_JOURNAL"; then
         ok "cam2-painter.service genuinely painting (fbdev fallback presenter)"
       else
         fail "cam2-painter.service active but no presenter-selection log line found -- cannot confirm it is genuinely painting (see journalctl -u cam2-painter.service)"
@@ -1083,7 +1133,7 @@ if [ "$NAME_UPPER" = "CAM2" ]; then
   # in setup-device.sh).
   rc=0
   NODISPLAY_ENV="$(ssh_box "systemctl show -p Environment --value camera-box 2>/dev/null")" || rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s' "$NODISPLAY_ENV" | grep -q 'CAMERA_BOX_NO_DISPLAY=1'; then
+  if [ "$rc" -eq 0 ] && grep -q 'CAMERA_BOX_NO_DISPLAY=1' <<<"$NODISPLAY_ENV"; then
     ok "camera-box permanently no-display on cam2 (#863 -- cam2-painter.service owns /dev/fb0)"
   else
     fail "camera-box on cam2 is NOT permanently no-display (Environment='${NODISPLAY_ENV:-<none>}', ssh rc=$rc) -- it will contest /dev/fb0 with cam2-painter.service"
@@ -1115,7 +1165,7 @@ if [ -e \"\$V4L2_NEUTRAL_NODE\" ]; then echo CAMERA_BOX_VIDEO_NODE_EXISTS=1; els
 $(udev_camera_box_grabber_power_control_read_cmd)")" || pcrc=$?
 if [ "$pcrc" -ne 0 ]; then
   fail "could not read the live capture grabber's USB power/control (ssh rc=$pcrc)"
-elif ! printf '%s' "$POWER_CONTROL_OUT" | grep -q 'CAMERA_BOX_VIDEO_NODE_EXISTS=1'; then
+elif ! grep -q 'CAMERA_BOX_VIDEO_NODE_EXISTS=1' <<<"$POWER_CONTROL_OUT"; then
   ok "no capture grabber fitted -- USB power/control drift check N/A (#828)"
 else
   GRABBER_POWER_CONTROL="$(udev_camera_box_grabber_power_control_from_output "$POWER_CONTROL_OUT")"
@@ -1140,6 +1190,22 @@ if [ "$rc" -eq 0 ] && [ -n "$FFMPEG_VERSION_LINE" ]; then
 else
   fail "ffmpeg not found/runnable on PATH (ssh rc=$rc) -- scripts/lipsync-test-mode.sh needs it \
 for the lipsync cross-validation TEST-mode variant (#930)"
+fi
+
+# (x2) mpv installed + runnable (#1187 lipsync-test-mode DRM/KMS playback runtime) ---------------
+# setup-device.sh installs mpv (STEP 16) so ANY box can take cam2's lipsync-test-mode painter role
+# via the DRM/KMS playback path (scripts/lipsync-test-mode.sh, issue 1187 -- `mpv --vo=drm` replaced
+# the legacy raw-fbdev ffmpeg write that leaked a stale frame, issue 1176). Confirm mpv is actually
+# present AND runnable, not just that the apt-get step didn't error -- the same "trust but verify"
+# gate as the ffmpeg (x) check above. Inserted BEFORE (q) -- see
+# .claude/rules/provisioning-scripts.md: (q) is the intentionally-LAST check.
+rc=0
+MPV_VERSION_LINE="$(ssh_box "mpv --version 2>/dev/null | head -1")" || rc=$?
+if [ "$rc" -eq 0 ] && [ -n "$MPV_VERSION_LINE" ]; then
+  ok "mpv present and runnable ($MPV_VERSION_LINE) -- #1187 lipsync-test-mode DRM/KMS playback runtime"
+else
+  fail "mpv not found/runnable on PATH (ssh rc=$rc) -- scripts/lipsync-test-mode.sh needs it \
+for the DRM/KMS lipsync playback path (#1187)"
 fi
 
 # (y) camera-box ExecStartPre device-free bake-in (#772) -----------------------------------------
@@ -1301,6 +1367,54 @@ else
     *)
       warn "could not grade capture-IRQ placement (irq='${RT_IRQN:-}', list='${RT_IRQL:-}', core='${RT_CORE:-}') -- issue-899 check (ac) incomplete" ;;
   esac
+fi
+
+# (ad) provisioning netplan interface pin + no duplicate-IP link (#1155) ------------------------
+# The provisioning netplan (setup-device.sh STEP 2 / create-usb-linux.sh chroot) must pin the LAN
+# stanza to `match: name: "enp*"` (the PCI NIC), never `driver: "*"`. A `driver: "*"` match also
+# claims a USB CDC-NCM camera link (bkshading, issue 808) -- giving it the box's static IP + a
+# duplicate default route, which lands the dantesync PTP multicast join on the camera link and
+# makes the box PTP-deaf (cam1 live incident 2026-08-20). TWO facets, both hard FAILs: (1) the
+# installed /etc/netplan/01-netcfg.yaml must NOT carry a `driver: "*"` match line, and (2) no TWO
+# interfaces may carry the box IP (the live proof the trap has not fired). A remote
+# `[ -f ] && cat || echo <sentinel>` keeps ssh's own exit 0 on a missing file, so a non-zero ssh
+# rc means genuine UNREACHABILITY (transport), distinct from "netplan absent". Inserted BEFORE (q)
+# -- see .claude/rules/provisioning-scripts.md: (q) must remain the intentionally-LAST check.
+adrc=0
+NETPLAN_TEXT="$(ssh_box "if [ -f /etc/netplan/01-netcfg.yaml ]; then cat /etc/netplan/01-netcfg.yaml; else echo __NETPLAN_ABSENT__; fi")" || adrc=$?
+IPBRIEF="$(ssh_box "ip -br addr show 2>/dev/null")" || adrc=$?
+DUP_IF_COUNT="$(interfaces_sharing_ip "$IPBRIEF" "$IP")"
+if [ "$adrc" -ne 0 ]; then
+  fail "could not reach the box to read /etc/netplan/01-netcfg.yaml + interface addresses (ssh rc=$adrc)"
+elif [ -z "$NETPLAN_TEXT" ] || [ "$NETPLAN_TEXT" = "__NETPLAN_ABSENT__" ]; then
+  fail "/etc/netplan/01-netcfg.yaml is missing -- provisioning never wrote the LAN config (#1155)"
+elif [ "$(netplan_driver_wildcard_count "$NETPLAN_TEXT")" != "0" ]; then
+  fail "netplan LAN stanza still matches the driver wildcard -- a USB camera link (enx*/cdc_ncm) will steal the box IP + default route and make the box PTP-deaf; pin it to name: \"enp*\" (#1155)"
+elif [ "$DUP_IF_COUNT" -gt 1 ]; then
+  fail "the box IP $IP is carried by $DUP_IF_COUNT interfaces ($(printf '%s' "$IPBRIEF" | awk -v ip="$IP/" 'index($0, ip){print $1}' | paste -sd, -)) -- a USB camera link has a duplicate IP + default route; PTP will land on the wrong link (#1155)"
+else
+  ok "netplan LAN stanza pinned to name: \"enp*\" and the box IP $IP is on a single interface (#1155)"
+fi
+
+# (ae) NTP-client DSCP marking: nftables OUTPUT-mangle rule + boot oneshot (dantesync issue 52) ----
+# dantesync's Linux NTP client (rsntp) creates its socket internally, so it cannot setsockopt(
+# IP_TOS): the client REQUESTS toward the master (udp dport 123) ship UNMARKED, while the master's
+# replies are EF-marked by dantesync src/dscp.rs. setup-device.sh STEP 17c installs a dedicated
+# `table ip dantesync_dscp` OUTPUT-mangle rule (dscp ef) + the dantesync-dscp oneshot that applies
+# it at boot, so the venue MikroTik CRS switches (TRUST-L3) prioritise the request direction too.
+# This proves the rule is LIVE (nft) AND the oneshot is enabled+active post-reboot. Inserted BEFORE
+# (q) -- see .claude/rules/provisioning-scripts.md ((q) stays the LAST check). Uses fail() (a hard
+# FAIL), so it never trips the check_q_is_wired (q)-to-EOF no-fail slice (it is above (q)). FAILs
+# loud if nftables is absent, the rule is missing, or the oneshot is not enabled/active.
+aerc=0
+DSCP_BLOCK="$(ssh_box "$(dscp_nft_gather_remote_snippet)")" || aerc=$?
+DSCP_VERDICT="$(dscp_nft_verdict "$DSCP_BLOCK")"
+if [ "$aerc" -ne 0 ]; then
+  fail "could not reach the box to read the nftables DSCP rule + dantesync-dscp.service state (ssh rc=$aerc, dantesync issue 52)"
+elif [ "$DSCP_VERDICT" != "ok" ]; then
+  fail "NTP-client DSCP marking not provisioned: $(printf '%s' "$DSCP_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
+else
+  ok "NTP-client DSCP marking live: dantesync_dscp nftables rule present + dantesync-dscp.service enabled+active (dantesync issue 52)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

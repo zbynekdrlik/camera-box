@@ -1657,10 +1657,13 @@ fn resolve_cambox_sweep_default(active_set_override: Option<&str>) -> String {
 }
 
 #[test]
-fn recording_e2e_default_sweep_covers_every_active_camera_including_cam2() {
+fn recording_e2e_default_sweep_covers_only_cam3_now_cam2_camera_under_test_retired_1170() {
     // #898 retired cam3; #939 (2026-08-13) re-activated it (Cam Link 4K fitted). issue 947
     // (2026-08-02): cam4 stays out (its grabber wedges the capture leg within minutes of every
-    // start). The default sweep covers cam1/cam2/cam3.
+    // start). #1110 (2026-08-22): cam1 RE-RETIRED (ShadowCast grabber hw defect). issue 1170
+    // (2026-08-24): cam2's camera-under-test role RETIRED (grabber cure-decay to ~7min, issue 1193)
+    // -- cam2 stays the fixed PAINTER but is no longer swept as a measured camera, so the default
+    // sweep covers exactly cam3.
     let s = read("scripts/recording-e2e.sh");
     assert!(
         s.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}\""),
@@ -1670,24 +1673,23 @@ fn recording_e2e_default_sweep_covers_every_active_camera_including_cam2() {
 
     let resolved = resolve_cambox_sweep_default(None);
     assert!(
-        resolved.contains("Cam 2:CAM2"),
-        "#312: the default CAMBOX_SWEEP must include cam2 (scene 'Cam 2') — #291 made it a \
-         MEASURABLE camera during a TEST run, so excluding it is now stale: {resolved}"
-    );
-    assert!(
-        resolved.contains("Cam 1:CAM1"),
-        "#312/#753/#827: the default sweep must still cover CAM1 via 'Cam 1:CAM1': {resolved}"
-    );
-    assert!(
         resolved.contains("Cam 3:CAM3"),
         "issue 939: cam3 re-activated 2026-08-13 — the default sweep must cover CAM3 via \
          'Cam 3:CAM3': {resolved}"
     );
-    for retired in ["Cam 4:CAM4", "Cam 5:CAM5", "Cam 6:CAM6", "Cam 7:CAM7"] {
+    for retired in [
+        "Cam 1:CAM1",
+        "Cam 2:CAM2",
+        "Cam 4:CAM4",
+        "Cam 5:CAM5",
+        "Cam 6:CAM6",
+        "Cam 7:CAM7",
+    ] {
         assert!(
             !resolved.contains(retired),
-            "#827/issue 947: the default sweep must NOT reference the retired {retired} — \
-             that box is not part of the active fleet today: {resolved}"
+            "issue 1170/#1110/#827/issue 947: the default sweep must NOT reference the retired \
+             {retired} — that box is not a measured camera today (cam2 camera-under-test retired \
+             2026-08-24 grabber cure-decay; cam1 re-retired grabber hw defect): {resolved}"
         );
     }
 }
@@ -1888,10 +1890,11 @@ fn recording_e2e_rejects_all_cambox_combined_with_a_non_cam1_source_camera() {
     // just a labeling nit. This combination must fail loudly instead of silently double-deploying.
     let s = read("scripts/recording-e2e.sh");
     assert!(
-        s.contains(r#"[ "${ALL_CAMBOX:-0}" = "1" ] && [ "$CAMERA_NAME" != "cam1" ]"#),
-        "#24: recording-e2e.sh must reject ALL_CAMBOX=1 combined with a non-cam1 CAM -- ALL_CAMBOX's \
-         own [2b/8] loop already deploys cam3/cam4 at their fixed IPs; picking one of them as the \
-         primary SOURCE camera too would double-deploy the same physical box."
+        s.contains(r#"[ "${ALL_CAMBOX:-0}" = "1" ] && [ "$CAMERA_NAME" != "$E2E_SOURCE_BOX" ]"#),
+        "#1134: recording-e2e.sh must reject ALL_CAMBOX=1 combined with a source != the DERIVED \
+         source box (E2E_SOURCE_BOX / camera_source_box), not the literal cam1 -- ALL_CAMBOX's own \
+         [2b/8] loop already deploys the secondary cameras at their fixed IPs; picking a non-default \
+         SOURCE camera too would double-deploy the same physical box."
     );
 }
 

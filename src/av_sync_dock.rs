@@ -880,6 +880,115 @@ pub fn dock_latency_display_ms(dock_native_ts_ns: i64, gate_convention: bool) ->
     }
 }
 
+/// #1177 — how long (ns) the dock's measurement INPUT (audio marker decode + video QR) may stop
+/// advancing before the display degrades to STALE / NO-SIGNAL. 30 s: long enough that a brief decode
+/// gap (a handful of missed markers on a live signal) never flips the display, short enough that an
+/// operator walking up during EVENT mode reads STALE rather than a frozen "live" offset. Mirrored by
+/// `camera-box-audio.hpp`'s `CB_DOCK_INPUT_STALE_NS`.
+pub const DOCK_INPUT_STALE_NS: u64 = 30 * 1_000_000_000;
+
+/// The state transition an [`DockInputStaleness::observe`] call reports, so the caller can fire a
+/// one-shot log line + UI update exactly on the boundary crossing (never per tick).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockStaleTransition {
+    /// No state change on this observe (still live, or still stale).
+    None,
+    /// Fresh → stale: the measurement input just went away (no decode advance for `threshold_ns`).
+    EnteredStale,
+    /// Stale → fresh: the measurement input just resumed (a decode counter advanced again).
+    RecoveredLive,
+}
+
+/// #1177 — tracks whether the dock's measurement INPUT is still advancing, so the display can show an
+/// explicit STALE / NO-SIGNAL state instead of holding the last locked offset forever.
+///
+/// The dock's lock state + displayed offset are updated ONLY when a decoded audio marker is
+/// ring-paired with a video QR (see `sync-test-output.cpp::st_raw_audio_camera_box`). When the rig
+/// enters EVENT mode the cam2 QPSK marker + dual-QR stop entirely, so NO new marker is decoded, NO
+/// `CbLockAuditTracker` `Unlocked` ever fires, and the last locked offset (and `locked=yes`) is held
+/// indefinitely — an operator reads a frozen number as a live A/V-sync measurement. This is the
+/// missing "the instrument is blind" state: it watches the two decode counters the #690 diag
+/// heartbeat already carries — `video_decoded` + `crc_ok` — and reports STALE when NEITHER has
+/// advanced for `threshold_ns`.
+///
+/// Pure/stateful, mirrored byte-for-byte by `camera-box-audio.hpp::CbDockInputStaleness` and
+/// cross-checked by the committed C++ self-test (`av_sync_dock_cpp_mirror_gate`). Fed once per diag
+/// tick with the current cumulative counters + the audio-thread clock. Display-layer only — it never
+/// touches the demod, the cluster, or the gate.
+#[derive(Debug, Clone, Copy)]
+pub struct DockInputStaleness {
+    initialized: bool,
+    stale: bool,
+    last_video_decoded: u64,
+    last_crc_ok: u64,
+    last_advance_ns: u64,
+}
+
+impl Default for DockInputStaleness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DockInputStaleness {
+    pub fn new() -> Self {
+        DockInputStaleness {
+            initialized: false,
+            stale: false,
+            last_video_decoded: 0,
+            last_crc_ok: 0,
+            last_advance_ns: 0,
+        }
+    }
+
+    /// Whether the input is currently classified STALE.
+    pub fn is_stale(&self) -> bool {
+        self.stale
+    }
+
+    /// Observe the current cumulative decode counters at time `now_ns`, returning the state
+    /// transition (if any). The FIRST call only seeds the baseline (never stale, no transition): a
+    /// freshly-started dock has no advance history yet, so it must not immediately flip stale before
+    /// the first real signal has had a chance to arrive.
+    pub fn observe(
+        &mut self,
+        video_decoded: u64,
+        crc_ok: u64,
+        now_ns: u64,
+        threshold_ns: u64,
+    ) -> DockStaleTransition {
+        if !self.initialized {
+            self.initialized = true;
+            self.last_video_decoded = video_decoded;
+            self.last_crc_ok = crc_ok;
+            self.last_advance_ns = now_ns;
+            self.stale = false;
+            return DockStaleTransition::None;
+        }
+
+        let advanced = video_decoded > self.last_video_decoded || crc_ok > self.last_crc_ok;
+        self.last_video_decoded = video_decoded;
+        self.last_crc_ok = crc_ok;
+
+        if advanced {
+            self.last_advance_ns = now_ns;
+            if self.stale {
+                self.stale = false;
+                return DockStaleTransition::RecoveredLive;
+            }
+            return DockStaleTransition::None;
+        }
+
+        // No decode advance since the last observe — check how long it has been.
+        let elapsed = now_ns.saturating_sub(self.last_advance_ns);
+        if !self.stale && elapsed >= threshold_ns {
+            self.stale = true;
+            return DockStaleTransition::EnteredStale;
+        }
+        DockStaleTransition::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2099,5 +2208,125 @@ mod tests {
             with.iter().all(|&v| v >= -1e-9),
             "with rebase the real offset must never go audio-early: {with:?}"
         );
+    }
+
+    // ---- #1177 DockInputStaleness ----
+
+    const TH: u64 = 30 * 1_000_000_000; // 30 s test threshold (matches DOCK_INPUT_STALE_NS)
+
+    #[test]
+    fn stale_first_observe_seeds_baseline_never_stale_1177() {
+        // A freshly-started dock has no advance history — the very first observe must only seed the
+        // baseline and NEVER immediately report stale, even at time 0 with zero counters.
+        let mut s = DockInputStaleness::new();
+        assert_eq!(s.observe(0, 0, 0, TH), DockStaleTransition::None);
+        assert!(!s.is_stale(), "first observe must not be stale");
+    }
+
+    #[test]
+    fn stale_goes_stale_after_threshold_of_no_advance_1177() {
+        // Counters frozen (EVENT mode: no marker/QR decode). After >= threshold with NO advance the
+        // display must flip to STALE, exactly once, on the boundary crossing.
+        let mut s = DockInputStaleness::new();
+        s.observe(5, 3, 1_000_000_000, TH); // seed at t=1s, counters at 5/3
+                                            // A tick still within the window: not yet stale.
+        assert_eq!(
+            s.observe(5, 3, 1_000_000_000 + 20 * 1_000_000_000, TH),
+            DockStaleTransition::None,
+            "20s < 30s: not yet stale"
+        );
+        assert!(!s.is_stale());
+        // Cross the threshold with the counters still frozen.
+        assert_eq!(
+            s.observe(5, 3, 1_000_000_000 + 30 * 1_000_000_000, TH),
+            DockStaleTransition::EnteredStale,
+            "30s of no advance -> STALE"
+        );
+        assert!(s.is_stale());
+        // Still frozen on the next tick — no repeated transition (one-shot).
+        assert_eq!(
+            s.observe(5, 3, 1_000_000_000 + 40 * 1_000_000_000, TH),
+            DockStaleTransition::None,
+            "already stale -> no repeated EnteredStale"
+        );
+        assert!(s.is_stale());
+    }
+
+    #[test]
+    fn stale_recovers_when_either_counter_advances_1177() {
+        // After going stale, ANY advance of EITHER counter (marker/QR decode resumed) recovers to
+        // LIVE, exactly once.
+        let mut s = DockInputStaleness::new();
+        s.observe(5, 3, 0, TH);
+        assert_eq!(
+            s.observe(5, 3, 30 * 1_000_000_000, TH),
+            DockStaleTransition::EnteredStale
+        );
+        // crc_ok advances (a marker decoded again) — recover.
+        assert_eq!(
+            s.observe(5, 4, 31 * 1_000_000_000, TH),
+            DockStaleTransition::RecoveredLive,
+            "a crc_ok advance recovers LIVE"
+        );
+        assert!(!s.is_stale());
+
+        // Same via a video_decoded advance from a fresh instance.
+        let mut s2 = DockInputStaleness::new();
+        s2.observe(5, 3, 0, TH);
+        assert_eq!(
+            s2.observe(5, 3, 30 * 1_000_000_000, TH),
+            DockStaleTransition::EnteredStale
+        );
+        assert_eq!(
+            s2.observe(6, 3, 31 * 1_000_000_000, TH),
+            DockStaleTransition::RecoveredLive,
+            "a video_decoded advance recovers LIVE"
+        );
+        assert!(!s2.is_stale());
+    }
+
+    #[test]
+    fn stale_advance_within_window_resets_the_clock_1177() {
+        // A live signal advancing its counters each tick must NEVER go stale, however long it runs —
+        // each advance resets the no-advance clock.
+        let mut s = DockInputStaleness::new();
+        let (mut vdec, mut crc) = (0u64, 0u64);
+        for i in 0..100u64 {
+            vdec += 1;
+            crc += 1;
+            let t = i * 10 * 1_000_000_000; // a 10s diag tick, always with fresh advance
+            assert_eq!(
+                s.observe(vdec, crc, t, TH),
+                DockStaleTransition::None,
+                "a continuously-advancing live signal never goes stale"
+            );
+            assert!(!s.is_stale());
+        }
+    }
+
+    #[test]
+    fn stale_a_single_stalled_tick_below_threshold_is_not_stale_1177() {
+        // One skipped tick (e.g. a brief decode gap on a live signal) that stays under the window
+        // must NOT flip the display — only a sustained loss does.
+        let mut s = DockInputStaleness::new();
+        s.observe(10, 10, 0, TH);
+        // 10s with no advance — well under 30s.
+        assert_eq!(
+            s.observe(10, 10, 10 * 1_000_000_000, TH),
+            DockStaleTransition::None
+        );
+        assert!(!s.is_stale());
+        // Advance resumes at 20s — clock resets.
+        assert_eq!(
+            s.observe(11, 11, 20 * 1_000_000_000, TH),
+            DockStaleTransition::None
+        );
+        // Now 25s later with no advance is still under the window measured from the 20s advance.
+        assert_eq!(
+            s.observe(11, 11, 45 * 1_000_000_000, TH),
+            DockStaleTransition::None,
+            "25s since last advance < 30s: not stale"
+        );
+        assert!(!s.is_stale());
     }
 }

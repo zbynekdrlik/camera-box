@@ -10,10 +10,12 @@
 //! `/dev/fb0` itself. When it tears down (releases DRM master), the kernel's
 //! generic fbdev-emulation client regains the CRTC and scans out `/dev/fb0`'s
 //! memory again — whatever that memory happens to hold. Nothing else clears
-//! it between painter runs, so it can carry an ARBITRARILY OLD frame: the
-//! fbdev-fallback presenter (`probe::fb::VsyncFb`) and camera-box's own
-//! `--display` module (`display.rs`) both write directly into this same
-//! device and neither clears it on exit.
+//! it between KMS painter runs, so it can carry an ARBITRARILY OLD frame:
+//! camera-box's own `--display` module (`display.rs`) writes directly into
+//! this same device and does not clear it on exit. (The fbdev-fallback
+//! presenter `probe::fb::VsyncFb` used to be in this list too, but since #1186
+//! it blanks the device in its OWN `Drop` — so a `VsyncFb` run no longer leaves
+//! stale content behind; `--display` is now the remaining un-clearing writer.)
 //!
 //! Confirmed live (#660, 2026-07-10): two independent `recording-e2e.sh` runs
 //! each showed a VALID, CRC-passing dual-QR decode frozen for the last

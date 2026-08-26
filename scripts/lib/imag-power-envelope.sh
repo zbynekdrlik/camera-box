@@ -9,9 +9,16 @@
 # regression is a HARDWARE power clamp. thermald's adaptive DPTF policy programmed the MMIO RAPL
 # PL1 long-term constraint to 25 W (MMIO wins over the decorative MSR 200/80 W values), starving
 # the iGPU to gt_act_freq 600-850 MHz while every software freq knob sat at 1400. At a sustainable
-# 29 W the historic ~5 ms/60fps render class is restored (35 W overheats — TCPU 81->90 C in 8 s).
+# 29 W the historic ~5 ms/60fps render class was restored on the ORIGINAL i5 unit (35 W overheated
+# it — TCPU 81->90 C in 8 s).
 #
-# The durable fix pins MMIO PL1 = 29 W + slpc_ignore_eff_freq = 1 at boot (imag-power-envelope.
+# #1162 hardware re-baseline (live calibration on the REPLACEMENT i7-13620H imag-nb, 2026-08-23):
+# 29 W STARVES this unit's iGPU (150-450 MHz, 74-88 ms/frame). Its sustainable ceiling is 45 W
+# (GPU 1200 MHz, 17-21 ms/frame; ACTUAL package draw plateaus ~36 W at the 93 C chassis thermal
+# ceiling), so the default below is re-baselined 29->45 W for it. The step-down (25 W) + guard
+# thresholds (93/85 C) are unchanged; the guard's thermal step-down stays armed.
+#
+# The durable fix pins MMIO PL1 = 45 W + slpc_ignore_eff_freq = 1 at boot (imag-power-envelope.
 # service, a root oneshot), PURGES thermald (not masks — it is the actor that programmed 25 W; a
 # minimalist appliance purges a competing policy engine, same discipline scripts/lib/timesync-
 # authority.sh enforces for competing clock daemons), and supervises the envelope with a LOUD root
@@ -35,7 +42,7 @@
 # setup-imag.sh (the writer), verify-imag.sh (the acceptance gate) and the guard script all agree.
 # The STRICT drift-guard gate reads its own authority (vendor/README.md `power_pl1_w_imag`); these
 # are the fallbacks a caller uses when it has no README pin in hand. Each is overridable by env.
-: "${IMAG_PL1_W:=29}"              # sustainable long-term MMIO RAPL PL1 (watts)
+: "${IMAG_PL1_W:=45}"              # #1162: sustainable long-term MMIO RAPL PL1 (watts) on the i7-13620H
 : "${IMAG_PL1_STEPDOWN_W:=25}"     # the safe step-down the guard drops to on a thermal excursion
 : "${IMAG_TCPU_STEPDOWN_C:=93}"    # TCPU ceiling (Celsius) — 2 consecutive reads at/above -> step down
 : "${IMAG_TCPU_RESTORE_C:=85}"     # TCPU restore threshold — sustained below -> restore full envelope
@@ -46,6 +53,12 @@ IMAG_POWER_GUARD_UNIT="imag-power-envelope-guard.timer"
 # The journald tag every guard transition is logged under (retrievable via `journalctl -t ...`).
 # shellcheck disable=SC2034  # consumed by scripts/imag-power-envelope-guard.sh which SOURCEs this lib
 IMAG_POWER_LOG_TAG="imag-power-envelope"
+# The guard's /run state file (streaks + the stepped-down flag). ONE source of truth for the path,
+# referenced by BOTH scripts/imag-power-envelope-guard.sh (the writer) and scripts/verify-imag.sh
+# (the acceptance gate, which consults STEPPED to tell a LEGITIMATE thermal step-down from foreign
+# drift, #1188) so the two can never drift apart on the path.
+# shellcheck disable=SC2034  # consumed by the guard + verify-imag, both of which SOURCE this lib
+IMAG_POWER_GUARD_STATE_FILE="/run/imag-power-envelope-guard.state"
 
 # imag_pl1_watts_to_uw WATTS -> echoes WATTS * 1_000_000 (RAPL constraints are in micro-watts).
 # Exact integer arithmetic; a non-numeric/empty input echoes nothing and returns 1 (never a
@@ -274,6 +287,51 @@ imag_power_guard_next_streaks() {
       printf '%s %s %s\n' "$nhot" "$ncool" "${stepped:-0}"
       ;;
   esac
+}
+
+# imag_power_guard_stepped_from_state STATE_TEXT -> echoes exactly one of `stepped | not-stepped |
+# unknown`, classifying the guard's /run state file BODY (shell KEY=value lines HOT=/COOL=/STEPPED=,
+# written by imag_power_guard_next_streaks via scripts/imag-power-envelope-guard.sh). `stepped` iff a
+# STEPPED=1 line is present; `not-stepped` iff a STEPPED=<other> line is present; `unknown` for an
+# empty/absent body OR one with no STEPPED= line at all (a truncated/corrupt file, or a box whose
+# guard has not ticked yet) -- so a consumer (verify-imag.sh's acceptance gate, #1188) NEVER masks a
+# genuine foreign drift when it cannot actually CONFIRM the guard stepped down. Co-located here with
+# the state PRODUCER so the format's reader and writer never drift. Pure: takes the file TEXT (the
+# caller reads the file over SSH), no I/O, and ALWAYS returns 0 (a set -euo pipefail caller invokes
+# it inside a `$(...)`, so it must never abort the caller on an empty/malformed read -- the #1133
+# class).
+imag_power_guard_stepped_from_state() {
+  local text="$1" line seen=0 val=""
+  [ -n "$text" ] || { printf 'unknown\n'; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      STEPPED=*) seen=1; val="${line#STEPPED=}" ;;
+    esac
+  done <<< "$text"
+  [ "$seen" -eq 1 ] || { printf 'unknown\n'; return 0; }
+  # keep only digits (a sourced value could carry surrounding whitespace / a stray CR); tr drains
+  # fully so there is no SIGPIPE-under-pipefail hazard here.
+  val="$(printf '%s' "$val" | tr -cd '0-9')"
+  if [ "$val" = "1" ]; then printf 'stepped\n'; else printf 'not-stepped\n'; fi
+}
+
+# imag_power_guard_stepdown_w_from_state STATE_TEXT -> echoes the step-down WATTS the guard recorded
+# in its /run state (the `GUARD_STEPDOWN_W=<watts>` line, written by scripts/imag-power-envelope-
+# guard.sh), or empty when the line is absent (an older guard that predates #1188, or an
+# empty/absent read). Lets verify-imag.sh compare an observed clamp against the guard's OWN step-down
+# authority rather than an independent env default that could diverge from a provisioning-time
+# IMAG_PL1_STEPDOWN_W override (#1188). Pure; text in, no I/O; ALWAYS returns 0 (a set -euo pipefail
+# caller invokes it inside a `$(...)`).
+imag_power_guard_stepdown_w_from_state() {
+  local text="$1" line val=""
+  [ -n "$text" ] || { printf '\n'; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      GUARD_STEPDOWN_W=*) val="${line#GUARD_STEPDOWN_W=}" ;;
+    esac
+  done <<< "$text"
+  # keep only digits (defensive against surrounding whitespace / a stray CR); empty -> empty.
+  printf '%s\n' "$(printf '%s' "$val" | tr -cd '0-9')"
 }
 
 # imag_power_alert_condition JOURNAL -> echoes the concerning-transition marker line(s)

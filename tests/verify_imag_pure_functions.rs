@@ -291,6 +291,51 @@ if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#,
     assert_eq!(out.trim(), "NO", "empty thread list must fail: {out:?}");
 }
 
+/// #1183: `ps -L -o psr= -C obs` RIGHT-PADS its single column to the widest value's width, so a
+/// healthy box's REAL output is "  6" / " 11" (verified `cat -A`: "  6$"), NOT the bare "6" the
+/// pre-#1183 `^[0-9]+$` greps assumed. Padded lines matched ZERO -> total=0 -> the function
+/// false-FAILED on a perfectly healthy box. This proves the padded REAL format is tolerated, and
+/// that a genuine pileup STILL fails even when padded (normalisation must not weaken the bound).
+#[test]
+fn imag_obs_thread_concentration_ok_tolerates_space_padded_psr_output_1183() {
+    // A HEALTHY spread, each core number RIGHT-PADDED to width 3 exactly as `ps -L -o psr=` emits
+    // it on a box whose highest core is two digits: "  6" (2 leading spaces) ... " 11" (1 space).
+    // 12+10+14+16+9+11 = 72 threads across 6 cores, max 16 -> 16/72 = 22% (well under the 60% bound).
+    let padded: String = std::iter::repeat_n("  6\n", 12)
+        .chain(std::iter::repeat_n("  7\n", 10))
+        .chain(std::iter::repeat_n("  8\n", 14))
+        .chain(std::iter::repeat_n("  9\n", 16))
+        .chain(std::iter::repeat_n(" 10\n", 9))
+        .chain(std::iter::repeat_n(" 11\n", 11))
+        .collect();
+    let (code, out, err) = run_sourced(&format!(
+        r#"LIST="{padded}"
+if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "YES",
+        "space-padded `ps -L -o psr=` output (the REAL format) must be tolerated, not false-FAIL: {out:?}"
+    );
+
+    // A genuine single-core pileup must STILL fail even when padded -- normalisation strips the
+    // padding, it does not weaken the concentration bound. 60 of 72 on core "  8" -> 83% > 60%.
+    let padded_pileup: String = std::iter::repeat_n("  8\n", 60)
+        .chain(std::iter::repeat_n(" 11\n", 12))
+        .collect();
+    let (code, out, err) = run_sourced(&format!(
+        r#"LIST="{padded_pileup}"
+if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "NO",
+        "a padded single-core pileup must still FAIL -- padding-normalisation must not weaken the bound: {out:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // (e) display-manager -> lightdm + autologin; gdm3 absent
 // ---------------------------------------------------------------------------------------------
@@ -462,6 +507,81 @@ fn imag_obs_log_catches_the_824_version_mismatch_regression() {
         vec!["NO", "NO"],
         "the #824 regression (obs-websocket refused, no genlock tick without websocket) must be \
          caught, not silently pass: {out:?}"
+    );
+}
+
+/// #1183: OBS logs carry raw invalid-UTF-8 bytes (DistroAV mojibake). In a UTF-8 locale, GNU grep
+/// WITHOUT `-a` fails to match a marker that IS present. The fix adds `-a` + `LC_ALL=C` so matching
+/// is deterministic byte-literal regardless of ambient locale or embedded invalid bytes. The
+/// fixture embeds a real invalid-byte sequence (`\x83?\xdd` on the distroav line, `\xe2\x82` in the
+/// genlock marker's `.*` gap) alongside genuine marker lines; `export LC_ALL=C.UTF-8` makes the
+/// pre-fix miss deterministic on any runner (the fixed function carries its OWN `LC_ALL=C`, which
+/// overrides this for the actual match, so the GREEN direction is locale-independent).
+#[test]
+fn imag_obs_log_matchers_survive_invalid_utf8_bytes_1183() {
+    let (code, out, err) = run_sourced(
+        r#"export LC_ALL=C.UTF-8
+LOG="$(printf 'info: [obs-websocket] Server started successfully\ninfo: [distroav] plugin loaded (full NDI features) \x83?\xdd (version 6.3.2)\ninfo: NDI library initialized\ninfo: genlock: wall-clock-slaved \xe2\x82render tick ENABLED (latency = 3 ms)\n')"
+if imag_obs_log_shows_genlock_tick "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_no_version_mismatch "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_shows_distroav_loaded "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_shows_ndi_loaded "$LOG"; then echo YES; else echo NO; fi"#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "YES", "YES", "YES"],
+        "invalid-UTF-8 bytes in the log must not suppress a marker match (#1183): {out:?}"
+    );
+
+    // The #824 'compiled with newer libobs' mismatch must STILL be caught when invalid bytes sit in
+    // the SAME log -- the -a/LC_ALL=C audit fix must not blind the negative check either.
+    let (code, out, err) = run_sourced(
+        r#"export LC_ALL=C.UTF-8
+LOG="$(printf 'warning: [distroav] recv \x83?\xdd frame\nwarning: Module obs-websocket.so \xe2\x82compiled with newer libobs 32.2\n')"
+if imag_obs_log_no_version_mismatch "$LOG"; then echo YES; else echo NO; fi"#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "NO",
+        "the #824 'compiled with newer libobs' mismatch must be caught despite invalid bytes (#1183): {out:?}"
+    );
+}
+
+/// #1183 residual: `verify-imag.sh` runs under `set -euo pipefail`, and a matcher fed via
+/// `printf '%s' "$1" | grep -q` SIGPIPEs the writer (rc=141) the instant `grep -q` exits early on
+/// a match -- which it always does, because the genlock marker is a startup line at the TOP while
+/// live OBS logs are 173 KB-40 MB (far over the 64 KiB pipe capacity). `pipefail` then promotes
+/// that 141 to the pipeline status and the matcher false-FAILs a healthy box DESPITE the match.
+/// The sanctioned issue-1047 fix is a here-string (`<<<"$1"`): bash writes the whole body to a
+/// temp file, so there is no live writer to SIGPIPE at ANY size. RED against the pipe form (the
+/// genlock matcher returns NO on an over-capacity log), GREEN after all four (h) matchers feed
+/// grep from a here-string. The small woven fixtures in the sibling invalid-UTF-8 test pass BOTH
+/// ways, which is why the first RED->GREEN missed this -- a >64 KiB body with the marker at the TOP
+/// is the missing coverage (the issue-1047 fixture recipe).
+#[test]
+fn imag_obs_log_matchers_are_sigpipe_immune_over_pipe_capacity_1183() {
+    // >64 KiB body (~200 KB of filler) with the DistroAV/NDI/genlock markers at the very TOP, so
+    // an early-exiting `grep -q` closes the pipe long before a `printf` writer finishes -> SIGPIPE.
+    let (code, out, err) = run_sourced(
+        r#"FILLER="$(head -c 200000 /dev/zero | tr '\0' x)"
+LOG="info: [distroav] plugin loaded (full NDI features) (version 6.3.2)
+info: NDI library initialized
+info: genlock: wall-clock-slaved render tick ENABLED (latency = 3 ms)
+$FILLER"
+if imag_obs_log_shows_genlock_tick "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_no_version_mismatch "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_shows_distroav_loaded "$LOG"; then echo YES; else echo NO; fi
+if imag_obs_log_shows_ndi_loaded "$LOG"; then echo YES; else echo NO; fi"#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        vec!["YES", "YES", "YES", "YES"],
+        "an over-64-KiB OBS log with the markers at the TOP must not SIGPIPE-false-FAIL any (h) \
+         matcher under pipefail (#1183 residual): {out:?}"
     );
 }
 
@@ -1621,5 +1741,157 @@ fn imag_maxperf_state_ok_is_defined_791() {
     assert!(
         out.contains("DEFINED"),
         "imag_maxperf_state_ok must be defined in verify-imag.sh (#791): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_powerkey_protection_ok_survives_oversized_loginctl_input_1163() {
+    // SIGPIPE-under-pipefail regression (#1163): `printf '%s\n' | grep -q` misgrades a HEALTHY
+    // box as unprotected when grep -q exits at the first match before printf's write completes
+    // (pipefail turns printf's EPIPE into the pipeline rc, `|| return 1` reads it as "absent").
+    // Deterministic repro shape: the matching keys FIRST, then >64KB of distractor lines, so
+    // printf must block past the pipe buffer while grep has already matched and exited. The
+    // here-string form (no pipe) grades this fixture PASS every time. Also loops the exact
+    // 9-line CI fixture 500x — the probabilistic small-input form of the same race (measured
+    // 6/5000 false FAILs pre-fix on dev1).
+    let (code, out, err) = run_sourced(
+        r#"
+        GOOD_KEYS='HandlePowerKey=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore'
+        PAD=$(seq 1 20000 | sed 's/^/Distractor=line/')
+        BIG="$GOOD_KEYS
+$PAD"
+        GOOD_MASK='sleep.target=masked
+suspend.target=masked
+hibernate.target=masked
+hybrid-sleep.target=masked'
+        if imag_powerkey_protection_ok "$BIG" "$GOOD_MASK"; then echo BIG-PASS; else echo BIG-FAIL; fi
+        fails=0
+        for _ in $(seq 1 500); do
+          imag_powerkey_protection_ok "$GOOD_KEYS" "$GOOD_MASK" || fails=$((fails+1))
+        done
+        echo "small-fails=$fails"
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["BIG-PASS", "small-fails=0"],
+        "a healthy box must grade PASS regardless of loginctl dump size or scheduling — \
+         no SIGPIPE-under-pipefail false negative (#1163): {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// (u) power/thermal-envelope ACCEPTANCE reclassification (guard-state-aware, #1188)
+//
+// The SHARED imag_power_envelope_verdict is deliberately guard-BLIND (a pl1 DRIFT on any live !=
+// pinned value — correct for drift-guard's strict [0/8] preflight). verify-imag downgrades that to
+// OK-with-note ONLY when the guard's own /run state proves a LEGITIMATE thermal step-down. These
+// pure functions encode that acceptance-only policy.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn pl1_guard_reclassify_only_downgrades_a_genuine_stepdown_1188() {
+    // Signature: imag_power_pl1_guard_reclassify OBSERVED_UW ENABLED GUARD_STATE STEPDOWN_WATTS
+    // stepdown-ok ONLY when guard==stepped AND observed uW == 25W-in-uW AND enabled==1.
+    let cases = [
+        // legitimate step-down: 25W == 25000000uW, enabled, guard stepped -> stepdown-ok
+        ("25000000 1 stepped 25", "stepdown-ok"),
+        // guard NOT stepped (foreign 25W write) -> drift (never masked)
+        ("25000000 1 not-stepped 25", "drift"),
+        // guard state unknown (unreadable state file) -> drift (never mask on uncertainty)
+        ("25000000 1 unknown 25", "drift"),
+        // stepped but the constraint is DISABLED -> drift (not a normal guard step-down)
+        ("25000000 0 stepped 25", "drift"),
+        // stepped but the observed value is NOT the step-down value (a wrong/foreign clamp) -> drift
+        ("30000000 1 stepped 25", "drift"),
+    ];
+    for (args, want) in cases {
+        let (_c, out, err) = run_sourced(&format!("imag_power_pl1_guard_reclassify {args}"));
+        assert_eq!(
+            out.trim(),
+            want,
+            "imag_power_pl1_guard_reclassify {args} -> want {want:?}: out={out:?} err={err:?}"
+        );
+    }
+}
+
+#[test]
+fn tcpu_guard_verdict_is_stepdown_aware_at_the_ceiling_1188() {
+    // Signature: imag_power_tcpu_guard_verdict TCPU CEIL GUARD_STATE
+    let cases = [
+        ("92 93 stepped", "ok"), // below ceiling -> ok regardless of guard
+        ("92 93 not-stepped", "ok"),
+        ("93 93 stepped", "ok-stepdown"), // at ceiling + guard stepped -> the #1162 steady state
+        ("95 93 stepped", "ok-stepdown"),
+        ("93 93 not-stepped", "over-ceiling"), // at ceiling, guard NOT stepped -> live clamp, FAIL
+        ("93 93 unknown", "over-ceiling"),     // unknown guard -> FAIL (never mask)
+        ("'' 93 stepped", "unreadable"),       // empty TCPU -> unreadable (existing FAIL path)
+        ("abc 93 stepped", "unreadable"),      // non-numeric -> unreadable
+    ];
+    for (args, want) in cases {
+        let (_c, out, err) = run_sourced(&format!("imag_power_tcpu_guard_verdict {args}"));
+        assert_eq!(
+            out.trim(),
+            want,
+            "imag_power_tcpu_guard_verdict {args} -> want {want:?}: out={out:?} err={err:?}"
+        );
+    }
+}
+
+#[test]
+fn verify_imag_wires_the_1188_guard_state_awareness_into_check_u() {
+    // The pure fns are only useful if check (u) actually READS the guard state file and CALLS the
+    // reclassify/tcpu-verdict fns — a defined-but-uncalled fn provides zero acceptance coverage
+    // (same discipline as the #884/#1015/#1040 wiring tests).
+    let body = std::fs::read_to_string(script()).unwrap();
+    for needle in [
+        "imag_power_guard_stepped_from_state",
+        "imag_power_guard_stepdown_w_from_state",
+        "imag_power_pl1_guard_reclassify",
+        "imag_power_tcpu_guard_verdict",
+        "IMAG_POWER_GUARD_STATE_FILE",
+    ] {
+        assert!(
+            body.contains(needle),
+            "verify-imag.sh check (u) must reference {needle} to become guard-state-aware (#1188)"
+        );
+    }
+    // It must READ the guard's /run state over SSH (a `cat` of the state path).
+    assert!(
+        body.contains("imag-power-envelope-guard.state") || body.contains("IMAG_POWER_GUARD_STATE"),
+        "verify-imag.sh check (u) must read the guard's /run state file (#1188)"
+    );
+    // The legitimate-step-down OK path must be a LOUD note, not a silent pass.
+    assert!(
+        body.contains("guard thermal step-down active"),
+        "the reclassified pl1 OK path must carry a LOUD 'guard thermal step-down active' note (#1188)"
+    );
+}
+
+/// The #1188 guard-state reads (the state-file cat) must run BEFORE check (o)'s OBS restart —
+/// same #884/#1015/#1040 ordering constraint (check (u) already lives above (o); the new reads sit
+/// inside it, so this just re-pins that the whole power block precedes the restart).
+#[test]
+fn verify_imag_reads_1188_guard_state_before_the_840_restart_wipes_it() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_read = body
+        .find("imag_power_guard_stepped_from_state")
+        .expect("check (u) must read the guard state (#1188)");
+    // Anchor the restart on the actual CALL literal — the exact string the sibling #884/#1015/#1040
+    // ordering tests use. (Do NOT anchor on `imag_obs_service_restart_cmd`: THAT fn name first
+    // appears at its DEFINITION far above check (u), so `.find` would resolve above the guard read.
+    // `imag_power_guard_stepped_from_state` above is safe — it is defined in the lib and appears in
+    // verify-imag.sh exactly once, as the check-(u) call.)
+    let restart_call = body
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("check (o)'s restart must exist");
+    assert!(
+        guard_read < restart_call,
+        "the #1188 guard-state read must run BEFORE check (o)'s restart-proof (#840 ordering)"
     );
 }

@@ -91,6 +91,28 @@ def test_pick_common_run_id_none_when_no_common():
     assert mvs.pick_common_run_id({1: 10}, {2: 20}, preferred=99) is None
 
 
+# ------------------------------------------------- issue 1196: aux tick pair (911013) exclusion
+def test_dominant_run_id_never_picks_a_reserved_id_even_when_universal():
+    # The painted aux tick pair (911013) is on EVERY screenshot -- it TIES the painter on count
+    # and its small id would win the tie-break, poisoning every skew sample with its constant
+    # gen_ts_ns=0 (the #1159 class, recurring for painted content). The painter epoch id must win.
+    maps = [{1_800_000_000: 1, 911013: 0}, {1_800_000_000: 2, 911013: 0}]
+    assert mvs.dominant_run_id(maps) == 1_800_000_000
+    # Burn-only / aux-only maps yield None (no non-reserved candidate), never a reserved pick.
+    assert mvs.dominant_run_id([{911013: 0, 911002: 5}, {911013: 0}]) is None
+
+
+def test_pick_common_run_id_never_samples_the_aux_tick_pair():
+    # gen_ts_ns of the aux marks is a constant 0 -> a "skew sample" from 911013 would be pure
+    # wall-gap. With only aux in common the sample is dropped honestly (None)...
+    assert mvs.pick_common_run_id({911013: 0}, {911013: 0}, preferred=None) is None
+    # ...and with a burn also common, the burn fallback (a real per-node render clock) still wins
+    # over the aux even though 911013 would be the smaller... (911002 < 911013 anyway; pin the
+    # exclusion with an id ordering where aux WOULD win min()):
+    assert mvs.pick_common_run_id({911013: 0, 911002: 7}, {911013: 0, 911002: 9},
+                                  preferred=None) == 911002
+
+
 # --------------------------------------------------------------------------- skew_sample_ms (CORE)
 def test_skew_sample_compensates_the_wall_gap():
     # True skew S = +5ms (MV presents 5ms LATER). Between the two shots the frame advanced by the

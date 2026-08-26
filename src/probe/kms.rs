@@ -341,15 +341,29 @@ mod hw {
 
     impl KmsPresenter {
         /// Open `device` (e.g. `/dev/dri/card1`), take DRM master (detaching
-        /// fbcon if needed), pick the 60 Hz HDMI mode that matches the painter's
+        /// fbcon if needed), pick the HDMI mode that matches the painter's
         /// `canvas_w`×`canvas_h` (the fixed QR canvas, e.g. 1920×1080 — driving a
-        /// larger mode the painter cannot fill is the live cam2 bug this guards),
-        /// allocate two dumb BOs, and set the initial scanout. Returns an error
-        /// (so the caller can fall back to fbdev) if any step fails.
+        /// larger mode the painter cannot fill is the live cam2 bug this guards)
+        /// AND runs at `mode_refresh_mhz` (default `TARGET_REFRESH_MHZ` = 60_000,
+        /// the capture rate; #1179 overrides it, e.g. 100_000 for the
+        /// 2560×1080@100 experiment), allocate two dumb BOs, and set the initial
+        /// scanout. Returns an error (so the caller can fall back to fbdev) if any
+        /// step fails.
+        ///
+        /// `mode_refresh_mhz` is the mode-SELECTION target only; the tear-free 1:1
+        /// phase-lock check ([`is_phase_lockable`]) stays against the fixed 60 fps
+        /// capture rate (`TARGET_REFRESH_MHZ`), so a non-60 Hz override run is
+        /// honestly reported NOT phase-locked (100 is not a multiple of 60).
         ///
         /// `fb_device` (e.g. `/dev/fb0`) is stashed ONLY for the `Drop` teardown
         /// blank (#660) — this presenter never touches it otherwise.
-        pub fn open(device: &str, fb_device: &str, canvas_w: u32, canvas_h: u32) -> Result<Self> {
+        pub fn open(
+            device: &str,
+            fb_device: &str,
+            canvas_w: u32,
+            canvas_h: u32,
+            mode_refresh_mhz: u32,
+        ) -> Result<Self> {
             // Detaching fbcon frees the CRTC so DRM master can drive it. Best
             // effort: if there is no fbcon (already detached / headless) this is
             // a no-op. We record whether WE detached it so drop rebinds it.
@@ -362,18 +376,24 @@ mod hw {
             // compositor, or no canvas-matching mode → the bail below) would
             // leave the live HDMI console orphaned while the caller "falls back
             // to fbdev". So run the fallible body, and on error rebind fbcon.
-            Self::open_inner(device, fb_device, canvas_w, canvas_h, detached_fbcon).inspect_err(
-                |_| {
-                    if detached_fbcon {
-                        if let Err(e) = super::fbcon::attach() {
-                            tracing::warn!(
-                                "KmsPresenter: rebind fbcon after failed open() failed: {:?}",
-                                e
-                            );
-                        }
-                    }
-                },
+            Self::open_inner(
+                device,
+                fb_device,
+                canvas_w,
+                canvas_h,
+                mode_refresh_mhz,
+                detached_fbcon,
             )
+            .inspect_err(|_| {
+                if detached_fbcon {
+                    if let Err(e) = super::fbcon::attach() {
+                        tracing::warn!(
+                            "KmsPresenter: rebind fbcon after failed open() failed: {:?}",
+                            e
+                        );
+                    }
+                }
+            })
         }
 
         /// The fallible body of [`open`](Self::open). Any DRM master it acquires
@@ -385,6 +405,7 @@ mod hw {
             fb_device: &str,
             canvas_w: u32,
             canvas_h: u32,
+            mode_refresh_mhz: u32,
             detached_fbcon: bool,
         ) -> Result<Self> {
             // O_NONBLOCK so `receive_events()` returns EAGAIN instead of blocking
@@ -407,7 +428,14 @@ mod hw {
             // Master is held now; every error path below must release it (the
             // `Card` File close alone does NOT drop master cleanly on all
             // kernels). `with_master` runs the rest and releases on Err.
-            Self::with_master(card, fb_device, canvas_w, canvas_h, detached_fbcon)
+            Self::with_master(
+                card,
+                fb_device,
+                canvas_w,
+                canvas_h,
+                mode_refresh_mhz,
+                detached_fbcon,
+            )
         }
 
         /// Runs the post-master setup; releases the DRM master lock if any step
@@ -417,9 +445,17 @@ mod hw {
             fb_device: &str,
             canvas_w: u32,
             canvas_h: u32,
+            mode_refresh_mhz: u32,
             detached_fbcon: bool,
         ) -> Result<Self> {
-            match Self::build(card, fb_device, canvas_w, canvas_h, detached_fbcon) {
+            match Self::build(
+                card,
+                fb_device,
+                canvas_w,
+                canvas_h,
+                mode_refresh_mhz,
+                detached_fbcon,
+            ) {
                 Ok(this) => Ok(this),
                 Err((card, e)) => {
                     if let Err(re) = card.release_master_lock() {
@@ -441,6 +477,7 @@ mod hw {
             fb_device: &str,
             canvas_w: u32,
             canvas_h: u32,
+            mode_refresh_mhz: u32,
             detached_fbcon: bool,
         ) -> std::result::Result<Self, (Card, anyhow::Error)> {
             macro_rules! tryc {
@@ -461,7 +498,11 @@ mod hw {
             // Find a connected connector (prefer HDMI) and its modes.
             let (connector, modes) = tryc!(Self::find_connected(&card, &res));
             let candidates: Vec<ModeCandidate> = modes.iter().map(Self::mode_candidate).collect();
-            let chosen = match pick_mode(&candidates, canvas_w, canvas_h, TARGET_REFRESH_MHZ) {
+            // #1179: `mode_refresh_mhz` is the mode-SELECTION target (60_000 by default = today's
+            // behaviour; overridable to e.g. 100_000). `is_phase_lockable` below stays on the
+            // CONSTANT `TARGET_REFRESH_MHZ` (the 60 fps capture rate) — the two are distinct, so a
+            // 100 Hz override selects the 100 Hz mode yet is honestly reported NOT 1:1 phase-locked.
+            let chosen = match pick_mode(&candidates, canvas_w, canvas_h, mode_refresh_mhz) {
                 Some(c) => c,
                 None => bailc!("connector has no usable mode"),
             };
@@ -881,6 +922,50 @@ mod tests {
         let got = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
         assert_eq!(got.refresh_mhz, 60_000);
         assert!(is_phase_lockable(&got, TARGET_REFRESH_MHZ));
+    }
+
+    #[test]
+    fn pick_mode_selects_2560x1080_at_100hz_for_the_1179_override() {
+        // #1179: the LG 34U511A-B lists 2560x1080 at 60/75/100 (+ a 1920x1080@60). With the
+        // override CANVAS 2560x1080 and the override SELECTION target 100_000 mHz, pick_mode's
+        // step 1 (canvas-match AND exact refresh) must land on 2560x1080@100 — and that mode is
+        // NOT 1:1 phase-lockable against the 60 fps capture (100 is not a multiple of 60), so a run
+        // on it must be reported honestly as non-locked.
+        const CW2: u32 = 2560;
+        const CH2: u32 = 1080;
+        let modes = [
+            m(1920, 1080, 60_000, true),
+            m(2560, 1080, 60_000, false),
+            m(2560, 1080, 75_000, false),
+            m(2560, 1080, 100_000, false),
+        ];
+        let got = pick_mode(&modes, CW2, CH2, 100_000).unwrap();
+        assert_eq!(
+            (got.width, got.height, got.refresh_mhz),
+            (2560, 1080, 100_000),
+            "override must select the canvas-matching 100 Hz mode"
+        );
+        assert!(
+            !is_phase_lockable(&got, TARGET_REFRESH_MHZ),
+            "100 Hz is not a multiple of the 60 fps capture — must NOT report 1:1 phase lock"
+        );
+
+        // Same panel, DEFAULT selection target (60_000) at the 2560 canvas → the 60 Hz mode, so
+        // the selection target is genuinely what drives the choice, not the canvas alone.
+        let got60 = pick_mode(&modes, CW2, CH2, TARGET_REFRESH_MHZ).unwrap();
+        assert_eq!(
+            (got60.width, got60.height, got60.refresh_mhz),
+            (2560, 1080, 60_000)
+        );
+        assert!(is_phase_lockable(&got60, TARGET_REFRESH_MHZ));
+
+        // And the byte-identical default: 1920 canvas at 60_000 still picks 1920x1080@60 even with
+        // the 2560 modes present — no --display-mode ⇒ exactly today's choice.
+        let got_def = pick_mode(&modes, CW, CH, TARGET_REFRESH_MHZ).unwrap();
+        assert_eq!(
+            (got_def.width, got_def.height, got_def.refresh_mhz),
+            (1920, 1080, 60_000)
+        );
     }
 
     #[test]

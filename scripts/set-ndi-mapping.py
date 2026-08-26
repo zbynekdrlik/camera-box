@@ -28,7 +28,8 @@ ACTIVE mapping, but REVERSIBLY.** The test rig shrank: cam5/cam6/cam7's USB grab
 returned to their owner and those boxes are powered off. The owner's binding requirement: this
 retirement MUST be a one-line reversal when the boxes come back — so `FULL_MAP` below keeps
 EVERY camera's pin as a FACT (never deleted), and `--active` (defaulting to the `CAMERA_ACTIVE_SET`
-env var camera-set.sh exports, or "cam1 cam2 cam3" if that's unset too) filters it down to
+env var camera-set.sh exports, or "cam3" if that's unset too -- issue 1170: cam2's
+camera-under-test role retired [grabber cure-decay], cam1 retired earlier) filters it down to
 the pins actually ENFORCED this run. Re-enable procedure: cam5 back? add "cam5" to
 CAMERA_ACTIVE_SET in scripts/camera-set.sh (scripts/rig-mode.sh passes it through automatically
 via `--active "$CAMERA_ACTIVE_SET"`), rerun the gate — nothing here needs to change. Whatever OBS
@@ -99,7 +100,7 @@ DEFAULT_MAP = FULL_MAP
 # exactly (this module is invoked as a standalone subprocess, so it reads the SAME env var rather
 # than re-declaring its own separate default; when unset, falls back to the identical literal
 # camera-set.sh itself defaults to, so the two can never silently disagree).
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam3")
 
 
 def _camera_name_of(ndi_input):
@@ -121,6 +122,18 @@ def active_map(active_set=None):
     else:
         names = set(active_set)
     return [(inp, snd) for inp, snd in FULL_MAP if _camera_name_of(inp) in names]
+
+
+def baseline_sender_for(input_name):
+    """#1158: the CANONICAL #399 baseline NDI sender for a strih input label (e.g. 'NDI cam1' ->
+    'CAM1 (usb)'), or None if the input is not in the FULL_MAP fact table. This is the SINGLE source
+    of truth the #1158 recovery paths (strih_mv_scenes.reattach() + obs_phase2.reenforce_ndi_name)
+    re-enforce -- never a stale/drifted saved-scene name and never a hardcoded 'CAM{N} (usb)'
+    duplicate that could drift from FULL_MAP."""
+    for inp, snd in FULL_MAP:
+        if inp == input_name:
+            return snd
+    return None
 
 
 # websocket-client is imported LAZILY (inside the WS helpers), not at module top: the pure helpers
@@ -206,6 +219,209 @@ def _get_binding(ws, inp):
         .get("inputSettings", {}).get("ndi_source_name", "")
 
 
+def heal_active_mapping(op, ws, want, get_binding, log_err):
+    """#1158 self-heal: re-enforce ONLY the DRIFTED-or-EMPTY inputs among `want`
+    [(input, baseline), ...] -- discoverability-gated + read-back-verified via
+    op.reenforce_ndi_name. Correct inputs are left UNTOUCHED (so this never fights a healthy
+    mapping), and an empty/drifted input whose baseline sender is OFFLINE is left as-is + logged
+    LOUD (a real rig degradation, never a silent mangle-attempt). Pure/dependency-injected (op, ws,
+    get_binding, log_err) so it is fully unit-testable with fakes, no live OBS. Heals by
+    DIFFERS-FROM-BASELINE, never empty-only: a #795 mangle yields a drifted NON-empty name that
+    #1096 can never rebind either, so the empty-only criterion would miss it. Returns
+    (healed, offline, failed, skipped)."""
+    healed = offline = failed = skipped = 0
+    for inp, snd in want:
+        cur = get_binding(ws, inp)
+        if cur == snd:
+            skipped += 1
+            continue
+        status = op.reenforce_ndi_name(ws, inp, snd)
+        if status == op.REENFORCE_HEALED:
+            log_err(f"#1158 auto-revive: '{inp}' ndi_source_name {cur!r} -> {snd!r} "
+                    f"(re-enforced #399 baseline, read-back verified)")
+            healed += 1
+        elif status == op.REENFORCE_OFFLINE:
+            log_err(f"#1158 auto-revive: '{inp}' is {cur!r} (drifted/empty) but baseline {snd!r} is "
+                    f"OFFLINE (absent from the DistroAV finder) -- left as-is; a real rig degradation")
+            offline += 1
+        else:  # REENFORCE_VERIFY_FAILED
+            log_err(f"#1158 auto-revive: '{inp}' set to baseline {snd!r} but read-back MISMATCHED "
+                    f"(possible #795 mangle) -- treat as unhealed")
+            failed += 1
+    return healed, offline, failed, skipped
+
+
+def _heal_exit_code(healed, offline, failed):
+    """#1158 --heal exit contract (pure, testable): 1 iff a read-back verify FAILED (loud, do not
+    trust); 0 iff >=1 input HEALED (the caller re-samples a revived leg); 3 otherwise (nothing was
+    drifted, or every drifted input's baseline is offline -> no heal possible, the caller proceeds
+    to its own fail-loud path, the #1158 log lines already surfaced why)."""
+    if failed > 0:
+        return 1
+    if healed > 0:
+        return 0
+    return 3
+
+
+# ─── #1197: bounded COLD-finder discovery-wait heal ──────────────────────────
+# WHY (issue 1197): right after a strih OBS BOOT or the #1093 escalation force-kill restart, the
+# fresh DistroAV finder is COLD — a genuinely-live sender is simply not-yet-discovered. The #1114
+# reattach CLEAR-then-SET then EMPTIES a correct ndi_source_name and (mangle-protection) refuses to
+# re-apply it, leaving "" — a stopped-receiver PERMANENT wedge (#1158) — and nothing WAITS for the
+# finder to warm up and re-enforce the #399 baseline. `--heal` fires once and gives up; this rides
+# out the cold finder with a bounded wall-clock poll, re-enforcing each baseline the instant it is
+# discoverable (never blind-setting one that is absent — the #795 mangle ban).
+
+def _discover_reenforce_once(op, ws, inp, baseline, get_binding):
+    """One discovery+re-enforce probe for a single input. Returns:
+      "waiting" — `baseline` is NOT in the DistroAV finder yet (cold finder) → keep waiting; never set
+                  (setting a name absent from the finder MANGLES it, #795).
+      "done"    — `baseline` is discoverable AND the input is bound to it (already correct, or just
+                  re-enforced + read-back verified).
+      "failed"  — set, but read-back MISMATCHED (a #795 mangle / RPC failure) → loud, do not trust.
+    Uses the SHARED obs_phase2.reenforce_ndi_name policy for the set+verify (never a second path)."""
+    if baseline not in op._ndi_source_list(ws, inp):
+        return "waiting"
+    if get_binding(ws, inp) == baseline:
+        return "done"  # discoverable + already correct — never fight a healthy mapping
+    status = op.reenforce_ndi_name(ws, inp, baseline)
+    if status == op.REENFORCE_HEALED:
+        return "done"
+    if status == op.REENFORCE_VERIFY_FAILED:
+        return "failed"
+    return "waiting"  # OFFLINE — vanished between the finder read and the set; retry next iteration
+
+
+def heal_wait_active_mapping(op, ws, want, get_binding, log_err, deadline_s,
+                             interval_s=4.0, now=time.monotonic, sleep=time.sleep):
+    """#1197: bounded-wall-clock discovery-wait heal over `want` [(input, baseline), ...]. Polls the
+    DistroAV finder for each baseline to become discoverable, then re-enforces it via
+    _discover_reenforce_once. RETURNS EARLY the instant every input is discoverable+bound (a warm
+    finder pays ~one probe per input, no sleep), so only a genuinely cold finder spends real time —
+    always bounded by `deadline_s` WALL CLOCK (not accumulated sleeps: each iteration also spends the
+    per-input probes, so a sleep-counter would overrun the documented window, the #1114 review 🔵-2
+    discipline). A done input is never re-probed; a failed input is terminal (loud). Pure/dependency-
+    injected (op, ws, get_binding, log_err, now, sleep) so it is Tier-0 pytest-able with fakes and
+    zero real sleep. Returns (done, waiting, failed)."""
+    pending = list(want)   # [(input, baseline), ...] not yet resolved
+    done = failed = 0
+    start = now()
+    deadline = start + deadline_s
+    while True:
+        still = []
+        for inp, snd in pending:
+            r = _discover_reenforce_once(op, ws, inp, snd, get_binding)
+            if r == "done":
+                log_err(f"#1197 finder-warm: {inp!r} baseline {snd!r} discoverable + bound "
+                        f"(+{(now() - start):.0f}s)")
+                done += 1
+            elif r == "failed":
+                log_err(f"#1197 finder-warm: {inp!r} baseline {snd!r} set but read-back MISMATCHED "
+                        f"(possible #795 mangle) — left as-is")
+                failed += 1
+            else:  # waiting
+                still.append((inp, snd))
+        pending = still
+        if not pending or now() >= deadline:
+            break
+        sleep(interval_s)
+    for inp, snd in pending:
+        log_err(f"#1197 finder-warm: {inp!r} baseline {snd!r} STILL absent from the DistroAV finder "
+                f"after {deadline_s:.0f}s (sender offline? still-cold finder?) — left as-is, a real "
+                f"rig degradation")
+    return done, len(pending), failed
+
+
+def _heal_wait_exit_code(done, waiting, failed):
+    """#1197 --heal-wait exit contract (pure, testable): 1 iff a read-back verify FAILED (loud, do
+    not trust); 3 iff any input never became discoverable within the bound (the caller logs loud +
+    proceeds — the pixel re-verify / the next camera's own reverify is the real gate); 0 iff every
+    targeted input ended discoverable + bound."""
+    if failed > 0:
+        return 1
+    if waiting > 0:
+        return 3
+    return 0
+
+
+def _run_heal_wait_mode(args, want):
+    """#1197 --heal-wait: connect via the shared obs_phase2 client and run heal_wait_active_mapping
+    over the active baselines, bounded by --heal-wait SECONDS. Exits per _heal_wait_exit_code
+    (0 all discoverable+bound / 1 verify-failed / 2 WS error / 3 timed-out-with-inputs-still-absent).
+    Kept out of main()'s normal enforce path, mirroring _run_heal_mode, so rig-activation is
+    unchanged."""
+    import obs_phase2 as op  # lazy: the pure helpers above stay importable without websocket/obs_phase2
+    # #1197 review 🔵-3: an empty active set (--active "" from an unset CAMERA_ACTIVE_SET) has nothing
+    # to warm -- return before opening a socket (which would otherwise burn the 10s connect timeout on
+    # an unreachable OBS only to return (0,0,0)).
+    if not want:
+        print("#1197 heal-wait: no active inputs to warm (empty active set)")
+        sys.exit(0)
+    try:
+        ws = op._conn(args.host, args.password)
+    except Exception as e:
+        print(f"ERROR: OBS WS connect {args.host}: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    def _get_cur(ws_, inp):
+        return (op._rpc(ws_, "GetInputSettings", {"inputName": inp}, ignore_err=True)
+                .get("inputSettings", {}) or {}).get("ndi_source_name", "")
+
+    try:
+        done, waiting, failed = heal_wait_active_mapping(
+            op, ws, want, _get_cur, lambda m: print(m, file=sys.stderr),
+            args.heal_wait, args.heal_wait_interval)
+    except Exception as e:
+        print(f"ERROR: OBS WS request: {e}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            # airuleset:script-ok best-effort ws.close() on an already-torn-down socket — mirrors
+            # _run_heal_mode's own close pattern; a close failure has no recovery path and no signal.
+            pass
+
+    print(f"#1197 heal-wait: {done} discoverable+bound, {waiting} still absent, {failed} verify-failed "
+          f"(of {len(want)} active inputs, bound {args.heal_wait:.0f}s)")
+    sys.exit(_heal_wait_exit_code(done, waiting, failed))
+
+
+def _run_heal_mode(args, want):
+    """#1158 --heal: connect via the shared obs_phase2 client and run heal_active_mapping over the
+    active baselines. Exits per _heal_exit_code (0 healed / 1 verify-failed / 2 WS error / 3
+    nothing-healable). Kept out of main()'s normal enforce path so rig-activation behaviour is
+    unchanged."""
+    import obs_phase2 as op  # lazy: the pure helpers above stay importable without websocket/obs_phase2
+    try:
+        ws = op._conn(args.host, args.password)
+    except Exception as e:
+        print(f"ERROR: OBS WS connect {args.host}: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    def _get_cur(ws_, inp):
+        return (op._rpc(ws_, "GetInputSettings", {"inputName": inp}, ignore_err=True)
+                .get("inputSettings", {}) or {}).get("ndi_source_name", "")
+
+    try:
+        healed, offline, failed, skipped = heal_active_mapping(
+            op, ws, want, _get_cur, lambda m: print(m, file=sys.stderr))
+    except Exception as e:
+        print(f"ERROR: OBS WS request: {e}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            # airuleset:script-ok best-effort ws.close() on an already-torn-down socket — mirrors
+            # main()'s own close pattern; a close failure has no recovery path and no signal.
+            pass
+
+    print(f"#1158 heal: {healed} healed, {offline} offline (baseline absent), {failed} verify-failed, "
+          f"{skipped} already-correct (of {len(want)} active inputs)")
+    sys.exit(_heal_exit_code(healed, offline, failed))
+
+
 def main():
     ap = argparse.ArgumentParser(description="#399 enforce strih NDI mapping")
     ap.add_argument("--host", required=True)
@@ -215,15 +431,48 @@ def main():
         "--active",
         default=None,
         help="#827/#898: space/comma-separated camera names to enforce (default: "
-        "$CAMERA_ACTIVE_SET env, or 'cam1 cam2 cam3'). Ignored when --map is given explicitly.",
+        "$CAMERA_ACTIVE_SET env, or 'cam3'). Ignored when --map is given explicitly.",
     )
     ap.add_argument("--verify-only", action="store_true", help="check + report, do not set")
+    ap.add_argument(
+        "--heal",
+        action="store_true",
+        help="#1158 self-heal: re-enforce ONLY the drifted/emptied active inputs "
+        "(discoverability-gated + read-back-verified via obs_phase2.reenforce_ndi_name); "
+        "exit 0 iff >=1 healed (caller re-samples), 1 verify-failed, 2 WS error, 3 nothing healable.",
+    )
+    ap.add_argument(
+        "--heal-wait",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="#1197 bounded COLD-finder discovery-wait heal: poll the DistroAV finder up to SECONDS "
+        "(wall clock) for each active input's #399 baseline to become discoverable, then re-enforce "
+        "it (shared obs_phase2.reenforce_ndi_name policy; never blind-sets an absent name). Returns "
+        "early the instant every input is discoverable+bound. exit 0 all recovered, 1 verify-failed, "
+        "2 WS error, 3 timed out with input(s) still absent.",
+    )
+    ap.add_argument(
+        "--heal-wait-interval",
+        type=float,
+        default=4.0,
+        metavar="SECONDS",
+        help="#1197 poll cadence for --heal-wait (default 4s).",
+    )
     args = ap.parse_args()
 
     try:
         want = parse_map_args(args.map, args.active)
     except ValueError as e:
         sys.exit(f"ERROR: {e}")
+
+    if args.heal_wait is not None:
+        _run_heal_wait_mode(args, want)  # exits
+        return
+
+    if args.heal:
+        _run_heal_mode(args, want)  # exits
+        return
 
     try:
         ws = _conn(args.host, args.password)

@@ -40,7 +40,16 @@
 # is-active (~8s), then check the presenter-appropriate painting signal from its journal (~8s),
 # WARNING loud to stderr on either failure -- never exit. A box without the unit installed is a
 # guarded no-op (#440's existing guard convention), never a failure.
+
+# #1148: the painting SIGNAL itself (KMS-line parse + fuser + vblank-locked + /dev/fb0 fallback) is
+# now the SINGLE-SOURCE-OF-TRUTH `_cb_paint_signal` in scripts/lib/cam2-paint-signal.sh (this used
+# to be copy-pasted into 5 builders). Lazy-source it (the bundle-state-selfheal.sh idiom); the
+# builder emits its definition, then this WARN-only 8x poll pipes the journal into it.
+command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/cam2-paint-signal.sh"
+
 cam2_painter_restore_verify_cmds() {
+  cam2_paint_signal_remote_fn
   cat <<'VERIFY'
 if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
   _cpv=0
@@ -54,13 +63,7 @@ if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
     _cpok=""
     while [ $_cpp -lt 8 ]; do
       _cpj="$(journalctl -u cam2-painter.service -n 100 --no-pager 2>/dev/null || true)"
-      _kms="$(printf '%s\n' "$_cpj" | grep 'presenter: using DRM/KMS page-flip' | tail -n1 || true)"
-      if [ -n "$_kms" ]; then
-        _drmdev="${_kms#*(}"; _drmdev="${_drmdev%)*}"
-        if [ -n "$_drmdev" ] && fuser -s "$_drmdev" 2>/dev/null && printf '%s' "$_cpj" | grep -q 'vblank-locked'; then
-          _cpok=1; break
-        fi
-      elif fuser -s /dev/fb0 2>/dev/null; then
+      if printf '%s\n' "$_cpj" | _cb_paint_signal >/dev/null 2>&1; then
         _cpok=1; break
       fi
       sleep 1; _cpp=$((_cpp+1))

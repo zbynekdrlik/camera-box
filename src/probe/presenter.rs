@@ -69,8 +69,10 @@ impl Presenter for VsyncFb {
 /// `drm_device` (DRM card path). The KMS path drives the HDMI mode matching the
 /// painter's `canvas_w`×`canvas_h` (it cannot scan out a different size than the
 /// painter renders — driving a larger mode the painter can't fill is the live
-/// cam2 bug this guards). `Auto` tries KMS then falls back to fbdev, logging
-/// which path it landed on.
+/// cam2 bug this guards) AND running at `mode_refresh_mhz` (default 60_000 = the
+/// capture rate; #1179 overrides it, e.g. 100_000 for the 2560×1080@100
+/// experiment — the mode-SELECTION target only, never the phase-lock reference).
+/// `Auto` tries KMS then falls back to fbdev, logging which path it landed on.
 #[cfg(target_os = "linux")]
 pub fn open_presenter(
     kind: PresenterKind,
@@ -78,12 +80,17 @@ pub fn open_presenter(
     drm_device: &str,
     canvas_w: u32,
     canvas_h: u32,
+    mode_refresh_mhz: u32,
 ) -> Result<Box<dyn Presenter>> {
     use crate::probe::kms::KmsPresenter;
     match kind {
         PresenterKind::Fbdev => Ok(Box::new(VsyncFb::open(fb_device)?)),
         PresenterKind::Kms => Ok(Box::new(KmsPresenter::open(
-            drm_device, fb_device, canvas_w, canvas_h,
+            drm_device,
+            fb_device,
+            canvas_w,
+            canvas_h,
+            mode_refresh_mhz,
         )?)),
         PresenterKind::Auto => {
             // #464: the actual KMS-open ATTEMPT stays here (it's the I/O); which presenter is
@@ -96,7 +103,8 @@ pub fn open_presenter(
             // #660: `fb_device` is passed through even on the KMS path so its `Drop` can blank
             // that device before releasing DRM master — see `crate::fb_blank`. KMS itself still
             // never reads/writes it during normal operation.
-            let mut kms_result = KmsPresenter::open(drm_device, fb_device, canvas_w, canvas_h);
+            let mut kms_result =
+                KmsPresenter::open(drm_device, fb_device, canvas_w, canvas_h, mode_refresh_mhz);
             let mut opened_device = drm_device.to_string();
             // #854: `/dev/dri/cardN` numbering is NOT a stable ABI — a kernel/driver update or a
             // reboot can renumber the i915 KMS device on a single-GPU box with no other change at
@@ -115,7 +123,13 @@ pub fn open_presenter(
                         if candidate == opened_device {
                             continue; // already tried above
                         }
-                        match KmsPresenter::open(&candidate, fb_device, canvas_w, canvas_h) {
+                        match KmsPresenter::open(
+                            &candidate,
+                            fb_device,
+                            canvas_w,
+                            canvas_h,
+                            mode_refresh_mhz,
+                        ) {
                             Ok(p) => {
                                 tracing::warn!(
                                     "presenter: configured DRM device {} unavailable, found a \
@@ -169,6 +183,7 @@ pub fn open_presenter(
     _drm_device: &str,
     _canvas_w: u32,
     _canvas_h: u32,
+    _mode_refresh_mhz: u32,
 ) -> Result<Box<dyn Presenter>> {
     match kind {
         PresenterKind::Kms => anyhow::bail!("DRM/KMS presenter is Linux-only"),

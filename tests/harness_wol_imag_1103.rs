@@ -171,3 +171,19 @@ fn verify_imag_wol_check_is_wired_before_the_o_restart() {
         "#1103: the (x) WoL check must sit BEFORE check (o)'s OBS restart (#884 ordering)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// 5. scripts/wake-box.sh -- its OWN usage/help documents imag-nb as a target
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn wake_box_usage_lists_imag_nb_as_a_target() {
+    // #1103 added imag-nb as a wake target (the wol-targets.txt row + table-driven send). The
+    // sender's OWN usage/help must document it too, not just the original strih | stream, so a
+    // `wake-box.sh --help` actually lists the imag box a recovery run would target.
+    let s = read("scripts/wake-box.sh");
+    assert!(
+        s.contains("strih | stream | imag-nb"),
+        "#1103: wake-box.sh usage/help must list imag-nb alongside strih | stream"
+    );
+}

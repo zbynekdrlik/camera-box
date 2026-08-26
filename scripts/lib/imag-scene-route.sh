@@ -49,3 +49,28 @@ imag_scene_for_camera() {
       ;;
   esac
 }
+
+# imag_source_for_camera NAME -> imag-nb's own NDI INPUT name for that physical camera
+# ("cam1" -> "NDI CAM1", "cam3" -> "NDI CAM3", ...) -- the burn-target / program-feeding input,
+# the sibling of imag_scene_for_camera above (which gives the SCENE). Prints "" and returns 1 on
+# an unrecognised name (#1135): NEVER guesses an input for a camera outside the known cam1-cam6
+# fleet, and stays in lock-step with imag_scene_for_camera's SAME case set so a resolved source box
+# either resolves BOTH (scene + input) or fails loud on BOTH -- never a half-resolved imag route.
+# The mapping is the SAME 1:1 pin imag_scenes.py seeds (f"NDI CAM{n}" -> "CAMx (usb)", #458) and
+# rig-mode.sh's IMAG_PROG_SOURCE default already assumed as the literal "NDI CAM1" (cam1-only);
+# #1135 derives it per resolved source box instead. Injection-safe literal `case` (same #39
+# threat-model style as imag_scene_for_camera / camera_strih_route).
+imag_source_for_camera() {
+  local name="${1:-}" n
+  case "$name" in
+    cam1|cam2|cam3|cam4|cam5|cam6)
+      n="${name#cam}"
+      printf 'NDI CAM%s' "$n"
+      return 0
+      ;;
+    *)
+      printf ''
+      return 1
+      ;;
+  esac
+}

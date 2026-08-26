@@ -144,7 +144,7 @@ updated_ts_from_pipe_json() {
 #   fresh  -- updated_ts is within FRESHNESS_S of NOW_EPOCH.
 pipe_json_freshness_verdict() {
   local text="$1" now="$2" fresh="$3" ts delta
-  if ! printf '%s' "$now" | grep -qE '^[0-9]+$' || ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$now" || ! grep -qE '^[0-9]+$' <<<"$fresh"; then
     printf 'absent\n'
     return 0
   fi
@@ -232,7 +232,7 @@ ntp_freshness_verdict() {
     printf 'never\n'
     return 0
   fi
-  if ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$fresh"; then
     printf 'absent\n'
     return 0
   fi
@@ -304,7 +304,7 @@ freshest_offset_us() {
   local journal="$1" fresh="$2"
   local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
   local off_line off_iso off_us now_iso now_e off_e
-  if ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$fresh"; then
     printf ''
     return 0
   fi
@@ -319,7 +319,7 @@ freshest_offset_us() {
     return 0
   fi
   off_us="$(printf '%s' "$off_line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
-  if [ -z "$off_us" ] || ! printf '%s' "$off_us" | grep -qE '^-?[0-9]+$'; then
+  if [ -z "$off_us" ] || ! grep -qE '^-?[0-9]+$' <<<"$off_us"; then
     printf ''
     return 0
   fi
@@ -339,7 +339,7 @@ _fresh_offset_samples_us() {
   local journal="$1" fresh="$2" k="${3:-5}"
   local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
   local now_iso now_e lines line off_iso off_e off_us
-  printf '%s' "$fresh" | grep -qE '^[0-9]+$' || return 0
+  grep -qE '^[0-9]+$' <<<"$fresh" || return 0
   now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
   now_e="$(_short_iso_epoch "$now_iso")"
   [ -n "$now_e" ] || return 0
@@ -351,7 +351,7 @@ _fresh_offset_samples_us() {
     [ -n "$off_e" ] || continue
     [ "$((now_e - off_e))" -le "$fresh" ] || continue
     off_us="$(printf '%s' "$line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
-    printf '%s' "$off_us" | grep -qE '^-?[0-9]+$' || continue
+    grep -qE '^-?[0-9]+$' <<<"$off_us" || continue
     printf '%s\n' "$off_us"
   done <<< "$lines"
   # A conditionally-skipped `printf` as the loop's last statement can leave a non-zero exit under
@@ -436,7 +436,7 @@ dantesync_offset_verdict() {
   # present-but-non-numeric bound fails closed to unstable (never a silent pass on a broken knob,
   # the #595 numeric-guard gotcha). >=2 samples required, since spread_of_ints returns "" for one.
   if [ -n "$stability" ]; then
-    if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+    if ! grep -qE '^[0-9]+$' <<<"$stability"; then
       unstable=1
     else
       spread="$(_fresh_offset_spread_us "$journal" "$fresh" 11)"
@@ -680,7 +680,7 @@ offset_check() {
     printf '  %-14s UNKNOWN  (offset unread; bound %s us)\n' "$label" "$bound"
     return 3
   fi
-  if ! printf '%s' "$offset" | grep -qE '^[+-]?[0-9]+$'; then
+  if ! grep -qE '^[+-]?[0-9]+$' <<<"$offset"; then
     printf '  %-14s UNKNOWN  (malformed offset %s; bound %s us)\n' "$label" "$offset" "$bound"
     return 3
   fi
@@ -768,7 +768,7 @@ spread_of_ints() {
   n="$(printf '%s\n' "$list" | grep -cE '^-?[0-9]+$' || true)"
   [ "${n:-0}" -ge 2 ] || { printf ''; return 0; }
   while IFS= read -r v; do
-    printf '%s' "$v" | grep -qE '^-?[0-9]+$' || continue
+    grep -qE '^-?[0-9]+$' <<<"$v" || continue
     if [ "$first" = 1 ]; then
       max="$v"; min="$v"; first=0
     else
@@ -798,7 +798,7 @@ spread_of_ints() {
 #                   to the unchanged legacy sampled_offset_check grading.
 frozen_sample_verdict() {
   local payloads="$1" min_distinct="$2" samples n spread
-  if ! printf '%s' "$min_distinct" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$min_distinct"; then
     printf 'insufficient\n'
     return 0
   fi
@@ -839,9 +839,9 @@ frozen_sample_verdict() {
 sampled_offset_verdict() {
   local payloads="$1" bound="$2" stability="$3" min_distinct="$4" mode="${5:-full}"
   local samples n median spread drift=0 unstable=0
-  if ! printf '%s' "$bound" | grep -qE '^[0-9]+$' \
-     || ! printf '%s' "$stability" | grep -qE '^[0-9]+$' \
-     || ! printf '%s' "$min_distinct" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$bound" \
+     || ! grep -qE '^[0-9]+$' <<<"$stability" \
+     || ! grep -qE '^[0-9]+$' <<<"$min_distinct"; then
     printf 'insufficient\n'
     return 0
   fi
@@ -964,7 +964,7 @@ sampled_offset_check() {
 max_abs_of_ints() {
   local list="$1" v mag max=""
   while IFS= read -r v; do
-    printf '%s' "$v" | grep -qE '^-?[0-9]+$' || continue
+    grep -qE '^-?[0-9]+$' <<<"$v" || continue
     mag="$(abs_int "$v")"
     if [ -z "$max" ] || [ "$mag" -gt "$max" ]; then
       max="$mag"
@@ -1125,11 +1125,11 @@ chase_bimodal_exclusion_verdict() {
 # Non-integer lines / a malformed STABILITY_US yield nothing (empty) -- never a guessed partition.
 chase_bimodal_partition_us() {
   local list="$1" stability="$2" which="$3" v mag
-  if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$stability"; then
     return 0
   fi
   while IFS= read -r v; do
-    printf '%s' "$v" | grep -qE '^-?[0-9]+$' || continue
+    grep -qE '^-?[0-9]+$' <<<"$v" || continue
     mag="$(abs_int "$v")"
     if [ "$which" = "baseline" ]; then
       [ "$mag" -le "$stability" ] && printf '%s\n' "$v"
@@ -1241,17 +1241,17 @@ ntp_deadband_us_from_pipe_json() {
 # row's own bound is never touched regardless of what its payload happens to contain.
 ntp_master_effective_bound_us() {
   local status="$1" bound="$2" margin="$3" step_cap="${4:-0}" deadband floor step_cap_floor
-  if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$bound"; then
     printf '%s' "$bound"
     return 0
   fi
-  if ! printf '%s' "$margin" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$margin"; then
     printf '%s' "$bound"
     return 0
   fi
   deadband="$(ntp_deadband_us_from_pipe_json "$status")"
   if [ -z "$deadband" ] || [ "$deadband" = "null" ] \
-     || ! printf '%s' "$deadband" | grep -qE '^-?[0-9]+$'; then
+     || ! grep -qE '^-?[0-9]+$' <<<"$deadband"; then
     printf '%s' "$bound"
     return 0
   fi
@@ -1281,7 +1281,7 @@ ntp_master_effective_bound_us() {
   # non-numeric STEP_CAP_US (every pre-#1119 3-arg caller) skips the term entirely, so the result
   # stays byte-for-byte the pre-#1119 deadband-only floor. Same #595 validate-before-arithmetic
   # + `10#` octal-safety discipline as the deadband/margin above.
-  if printf '%s' "$step_cap" | grep -qE '^[0-9]+$' && [ "$step_cap" -gt 0 ]; then
+  if grep -qE '^[0-9]+$' <<<"$step_cap" && [ "$step_cap" -gt 0 ]; then
     step_cap_floor=$((10#$step_cap + 10#$margin))
     [ "$step_cap_floor" -gt "$floor" ] && floor="$step_cap_floor"
   fi
@@ -1408,21 +1408,21 @@ client_chase_bound_us() {
   local status="$1" bound="$2" margin="$3" ceiling="$4"
   local client_journal="${5:-}" step_fallback="${6:-0}"
   local deadband capped step floor
-  if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$bound"; then
     printf '%s' "$bound"
     return 0
   fi
-  if ! printf '%s' "$margin" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$margin"; then
     printf '%s' "$bound"
     return 0
   fi
-  if ! printf '%s' "$ceiling" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$ceiling"; then
     printf '%s' "$bound"
     return 0
   fi
   deadband="$(ntp_deadband_us_from_pipe_json "$status")"
   if [ -z "$deadband" ] || [ "$deadband" = "null" ] \
-     || ! printf '%s' "$deadband" | grep -qE '^-?[0-9]+$'; then
+     || ! grep -qE '^-?[0-9]+$' <<<"$deadband"; then
     printf '%s' "$bound"
     return 0
   fi
@@ -1437,8 +1437,8 @@ client_chase_bound_us() {
   # and never a crash. A pre-#1041 4-arg caller passes neither param, so client_journal="" and
   # step_fallback="0" here reproduce the exact pre-#1041 formula byte-for-byte.
   step="$(client_step_threshold_us_from_journal "$client_journal")"
-  if [ -z "$step" ] || ! printf '%s' "$step" | grep -qE '^[0-9]+$'; then
-    if printf '%s' "$step_fallback" | grep -qE '^[0-9]+$'; then
+  if [ -z "$step" ] || ! grep -qE '^[0-9]+$' <<<"$step"; then
+    if grep -qE '^[0-9]+$' <<<"$step_fallback"; then
       step="$step_fallback"
     else
       step=0
@@ -1489,6 +1489,26 @@ client_max_step_threshold_us_from_journal() {
     | sort -n | tail -1 || true
 }
 
+# client_max_step_threshold_us_from_status_lines TEXT -> the LARGEST numeric "ntp_step_threshold_us"
+# JSON value across ALL lines of TEXT (#1129). TEXT is the newline-joined HTTP `/status` payloads
+# gather_http_samples already collected over the sampling window (one JSON object per line). This is
+# the WINDOWS-client sibling of client_max_step_threshold_us_from_journal: a Windows client has no
+# journald, so grade_http_node cannot read its "threshold:NNNus" log lines -- but dantesync (#1129)
+# exposes the client's OWN currently-active adaptive step threshold in `/status` as
+# `ntp_step_threshold_us` (the SAME quantity, `calculate_ntp_adaptive_threshold()`, the journal logs
+# as "threshold:NNNus"). Taking the window-MAX across the sampled payloads mirrors the journal path's
+# window-wide envelope exactly, so a Windows client gets the same step-aware median+spread widening
+# cam2 gets from its journal. A `null` or ABSENT field on any line contributes nothing (the regex
+# matches only a digit run, never "null"); all-null / all-absent / empty input -> "" (never a guess
+# -> the caller's documented 700us fallback, always admitted in the gate note). `|| true` survives a
+# no-match under set -e.
+client_max_step_threshold_us_from_status_lines() {
+  printf '%s\n' "$1" \
+    | grep -oE '"ntp_step_threshold_us"[[:space:]]*:[[:space:]]*[0-9]+' \
+    | sed -n 's/.*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    | sort -n | tail -1 || true
+}
+
 # client_chase_stability_us STABILITY_US MARGIN_US CLIENT_JOURNAL [STEP_FALLBACK_US] -> the spread
 # bound to grade a CLIENT node's SPREAD against (#1123): max(STABILITY_US, max_journal_threshold +
 # MARGIN_US), where max_journal_threshold is client_max_step_threshold_us_from_journal(CLIENT_JOURNAL),
@@ -1503,18 +1523,18 @@ client_max_step_threshold_us_from_journal() {
 client_chase_stability_us() {
   local stability="$1" margin="$2" client_journal="${3:-}" step_fallback="${4:-0}"
   local max_threshold step floor
-  if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$stability"; then
     printf '%s' "$stability"
     return 0
   fi
-  if ! printf '%s' "$margin" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$margin"; then
     printf '%s' "$stability"
     return 0
   fi
   max_threshold="$(client_max_step_threshold_us_from_journal "$client_journal")"
   step="$max_threshold"
-  if [ -z "$step" ] || ! printf '%s' "$step" | grep -qE '^[0-9]+$'; then
-    if printf '%s' "$step_fallback" | grep -qE '^[0-9]+$'; then
+  if [ -z "$step" ] || ! grep -qE '^[0-9]+$' <<<"$step"; then
+    if grep -qE '^[0-9]+$' <<<"$step_fallback"; then
       step="$step_fallback"
     else
       step=0
@@ -1591,8 +1611,8 @@ painter_offset_check() {
       "$label" "${dev1:-<none>}" "${painter:-<none>}" "$guard"
     return 3
   fi
-  if ! printf '%s' "$dev1" | grep -qE '^[+-]?[0-9]+$' \
-     || ! printf '%s' "$painter" | grep -qE '^[+-]?[0-9]+$'; then
+  if ! grep -qE '^[+-]?[0-9]+$' <<<"$dev1" \
+     || ! grep -qE '^[+-]?[0-9]+$' <<<"$painter"; then
     printf '  %-18s UNKNOWN  (malformed offset: dev1=%s painter=%s; guard %s us)\n' \
       "$label" "$dev1" "$painter" "$guard"
     return 3
@@ -1655,11 +1675,11 @@ slew_excluded_survivors_us() {
   # #595 bash-gotcha: validate every numeric input BEFORE any arithmetic/`-le` comparison; a
   # malformed value would otherwise throw "integer expression expected" (a FAILED test) and could
   # silently defeat the exclusion. A bad input yields NOTHING -- never a guessed survivor set.
-  printf '%s' "$fresh" | grep -qE '^[0-9]+$' || return 0
-  printf '%s' "$win" | grep -qE '^[0-9]+$' || return 0
-  printf '%s' "$k" | grep -qE '^[0-9]+$' || return 0
+  grep -qE '^[0-9]+$' <<<"$fresh" || return 0
+  grep -qE '^[0-9]+$' <<<"$win" || return 0
+  grep -qE '^[0-9]+$' <<<"$k" || return 0
   if [ -n "$min_epoch" ]; then
-    printf '%s' "$min_epoch" | grep -qE '^-?[0-9]+$' || return 0
+    grep -qE '^-?[0-9]+$' <<<"$min_epoch" || return 0
   fi
   now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
   now_e="$(_short_iso_epoch "$now_iso")"
@@ -1682,7 +1702,7 @@ slew_excluded_survivors_us() {
     [ "$((now_e - off_e))" -le "$fresh" ] || continue
     [ -z "$min_epoch" ] || [ "$off_e" -gt "$min_epoch" ] || continue
     off_us="$(printf '%s' "$line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
-    printf '%s' "$off_us" | grep -qE '^-?[0-9]+$' || continue
+    grep -qE '^-?[0-9]+$' <<<"$off_us" || continue
     near=0
     for se in ${steps[@]+"${steps[@]}"}; do
       d=$(( off_e - se ))
@@ -1741,11 +1761,11 @@ _newest_correction_epoch() {
 slew_transient_exclusion_verdict() {
   local journal="$1" fresh="$2" bound="$3" win="$4" min_surv="$5" k="${6:-11}"
   local survivors n newest_step recent n_recent median
-  printf '%s' "$bound" | grep -qE '^[0-9]+$' || { printf 'no\n'; return 0; }
-  printf '%s' "$min_surv" | grep -qE '^[0-9]+$' || { printf 'no\n'; return 0; }
+  grep -qE '^[0-9]+$' <<<"$bound" || { printf 'no\n'; return 0; }
+  grep -qE '^[0-9]+$' <<<"$min_surv" || { printf 'no\n'; return 0; }
   # Condition 1: evidence of an active correction (fresh/win/k are validated inside
   # slew_excluded_survivors_us, where a bad one simply yields no survivors -> "no").
-  printf '%s\n' "$journal" | grep -qE '\[NTP\] (Stepped|step candidate)' \
+  grep -qE '\[NTP\] (Stepped|step candidate)' <<<"$journal" \
     || { printf 'no\n'; return 0; }
   # Condition 2: window sanity -- enough step-excluded baseline SOMEWHERE in the window.
   survivors="$(slew_excluded_survivors_us "$journal" "$fresh" "$win" "$k")"
@@ -1871,11 +1891,11 @@ main() {
     shift || true
   done
 
-  if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$bound"; then
     echo "ERROR: --bound-us must be a positive integer (got '${bound}')." >&2
     exit 1
   fi
-  if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+  if ! grep -qE '^[0-9]+$' <<<"$stability"; then
     echo "ERROR: --stability-us must be a non-negative integer (got '${stability}')." >&2
     exit 1
   fi

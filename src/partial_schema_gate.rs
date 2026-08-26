@@ -1,19 +1,31 @@
-//! issue 1118 — a REPORT-ONLY leg's schema-mismatched partial must DEGRADE, not kill the merge.
+//! issue 1118 -> #1142 — the imag leg's schema-mismatched partial must DEGRADE (drop it), not kill
+//! the merge; #1142 then makes the DROPPED leg RED the run instead of silently passing.
 //!
 //! ## Why this exists
 //!
 //! The #208 cross-box verdict merges per-box `RecordingPartial` JSONs
 //! ([`crate::probe::recording_partial`]). Each partial carries a `schema_version`, and
 //! `RecordingPartial::from_json` refuses an unknown version (so an incompatible file is never
-//! silently mis-read). The imag leg is REPORT-ONLY today
-//! ([`crate::imag_leg_gate::gates_overall_pass`] returns `false`) — its verdict flows + is
-//! surfaced but never reds a run. So its INPUT must be report-only too: a schema-mismatched imag
-//! partial (issue 1118: a stale on-imag binary emitting the OLD schema after the #1112 v3->v4
-//! bump) must DEGRADE — drop the leg, warn loudly, compute the verdict from strih+stream — never
-//! abort the whole merge with no verdict JSON, which is exactly what the fatal `load(path)?` did
-//! (E2E 32178766136: the whole run reds even though a strih+stream-only merge scores
-//! `overall_pass=true`). strih/stream are the hard gate's own inputs — their partials come fresh
-//! from CI each run, so a schema mismatch there is a genuine defect and stays FATAL.
+//! silently mis-read). A schema-mismatched imag partial (issue 1118: a stale on-imag binary
+//! emitting the OLD schema after the #1112 v3->v4 bump) must DEGRADE — drop the imag leg, warn
+//! loudly, compute the verdict from strih+stream — never abort the whole merge with no verdict JSON,
+//! which is exactly what the fatal `load(path)?` did (E2E 32178766136: the whole run reds with NO
+//! verdict even though a strih+stream-only merge would have scored a real verdict). strih/stream are
+//! the hard gate's own inputs — their partials come fresh from CI each run, so a schema mismatch
+//! there is a genuine defect and stays FATAL.
+//!
+//! ## #1142 — DEGRADE is decoupled from the imag GATE flip (owner mandate 2026-08-19)
+//!
+//! Before #1142 the imag leg was WHOLESALE report-only, and this degrade was DERIVED from
+//! [`crate::imag_leg_gate::gates_overall_pass`] (`false`) on the theory "when imag flips blocking, a
+//! schema mismatch should become fatal too, so the two never drift". #1142 SPLIT the imag leg —
+//! presence/verification BLOCKS, per-frame content stays report-only — and the owner mandate is
+//! explicit that a schema-degraded imag leg "smie ostať degrade, ale musí RED-ovať, nie ticho
+//! prejsť" (may stay a degrade, but must RED, not silently pass). So the degrade is now DECOUPLED
+//! from the gate: [`box_degrades_on_schema_mismatch`] is unconditionally `true` for imag (the
+//! merge still drops the leg + writes a real verdict instead of hard-dying), and the DROPPED leg's
+//! `imag_leg_verified=false` is what REDs the run via the now-BLOCKING `imag_leg_verified` fold in
+//! `recording-verdict.rs`. Degrading (a RED verdict) still beats aborting (no verdict at all).
 //!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
@@ -46,15 +58,21 @@ pub fn peek_schema_version(json: &str) -> Option<u32> {
         .map(|p| p.schema_version)
 }
 
-/// Is `box_name` a REPORT-ONLY leg whose partial-input errors must never zero the whole gate?
-/// DERIVED from the single source of truth ([`crate::imag_leg_gate::gates_overall_pass`]), never a
-/// second hardcoded copy: the imag leg is the only report-only leg, and ONLY while its seam is
-/// report-only. strih and stream are the hard gate's own inputs — their partial errors always stay
-/// fatal. When a follow-up flips the imag leg blocking (`gates_overall_pass()` → `true`), this
-/// automatically returns `false` for imag too, so a schema-mismatched imag partial then stays FATAL
-/// like strih/stream — the degrade and the gate can never drift out of lockstep (issue 1118 review).
-pub fn box_is_report_only(box_name: &str) -> bool {
-    box_name == "imag" && !crate::imag_leg_gate::gates_overall_pass()
+/// #1142 — does a schema-mismatched partial for `box_name` DEGRADE (drop the leg, keep merging the
+/// rest) rather than hard-abort the whole merge? `true` ONLY for the imag leg: its on-box binary can
+/// legitimately be stale after a `PARTIAL_SCHEMA_VERSION` bump (the issue 1118 landmine), so a
+/// schema mismatch there degrades to a dropped leg — and the dropped leg then REDs the run via the
+/// now-BLOCKING `imag_leg_verified` fold (#1142), so degrading is NOT "swallow the error", it is
+/// "produce a RED verdict instead of a fatal no-verdict crash". strih and stream are the hard gate's
+/// own inputs — their partials come fresh from CI each run, so a schema mismatch there is a genuine
+/// defect and stays FATAL.
+///
+/// DECOUPLED from [`crate::imag_leg_gate::gates_overall_pass`] as of #1142 (owner mandate): the imag
+/// PRESENCE seam is now BLOCKING, but a schema-degraded imag leg must still DEGRADE (not go fatal) —
+/// the RED comes from `imag_leg_verified=false`, not from aborting the merge. So this is a
+/// deliberate, single hardcoded `== "imag"`, no longer tied to the gate flip.
+pub fn box_degrades_on_schema_mismatch(box_name: &str) -> bool {
+    box_name == "imag"
 }
 
 /// What to do with a partial whose `load` FAILED: DEGRADE (drop this leg, keep merging the rest,
@@ -71,23 +89,25 @@ pub enum PartialLoadDisposition {
 
 /// Classify a partial-load failure. `found_schema` is the version peeked from the file
 /// ([`peek_schema_version`]) — `None` when the file was not even valid JSON with a numeric
-/// `schema_version` (a non-schema failure). DEGRADES iff: the box is report-only ([`box_is_report_only`])
-/// AND a schema version WAS peeked AND it differs from `expected`. Every other failure — a hard-gate
-/// box, a report-only box whose failure is NOT a clean schema mismatch (`None`), or a same-schema
-/// error — stays [`PartialLoadDisposition::Fatal`].
+/// `schema_version` (a non-schema failure). DEGRADES iff: the box degrades on a schema mismatch
+/// ([`box_degrades_on_schema_mismatch`] — imag only) AND a schema version WAS peeked AND it differs
+/// from `expected`. Every other failure — a hard-gate box (strih/stream), the imag box whose
+/// failure is NOT a clean schema mismatch (`None`), or a same-schema error — stays
+/// [`PartialLoadDisposition::Fatal`].
 pub fn classify_load_failure(
     box_name: &str,
     found_schema: Option<u32>,
     expected_schema: u32,
 ) -> PartialLoadDisposition {
     match found_schema {
-        Some(found) if found != expected_schema && box_is_report_only(box_name) => {
+        Some(found) if found != expected_schema && box_degrades_on_schema_mismatch(box_name) => {
             PartialLoadDisposition::Degrade {
                 reason: format!(
                     "{box_name} partial schema_version {found} != this build's {expected_schema} \
-                     (report-only leg, issue 1118): dropped — verdict computed from the remaining \
-                     (strih+stream) partials; imag_leg_verified=false. Re-run once the on-{box_name} \
-                     binary is redeployed (recording-verdict-on-imag.sh now version-gates the upload)."
+                     (issue 1118): dropped — verdict computed from the remaining (strih+stream) \
+                     partials; imag_leg_verified=false, which #1142 makes BLOCKING so this run REDs \
+                     (unless imag is operator-offline-acked). Re-run once the on-{box_name} binary \
+                     is redeployed (recording-verdict-on-imag.sh now version-gates the upload)."
                 ),
             }
         }

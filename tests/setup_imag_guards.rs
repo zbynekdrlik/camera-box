@@ -753,20 +753,21 @@ fn setup_imag_still_keeps_ndi_symlink_after_genlock_rework() {
 fn setup_imag_step10_verifies_genlock_log_markers() {
     let body = read(SETUP);
     assert!(
-        body.contains("grep -iE 'genlock:.*(render tick ENABLED") && body.contains("$OBS_CFG/logs"),
+        body.contains("LC_ALL=C grep -aiE 'genlock:.*(render tick ENABLED") && body.contains("$OBS_CFG/logs"),
         "{SETUP} step 10 must grep the OBS log for the literal `genlock:.*(render tick ENABLED` \
-         regex — a plain substring check on the unescaped success-echo text would incidentally \
+         regex via `LC_ALL=C grep -a` (#1184: byte-literal, invalid-UTF-8-safe) — a plain substring \
+         check on the unescaped success-echo text would incidentally \
          match the unconditional 'genlock render tick ENABLED (#460 build proof)' print, not the \
          actual functional check"
     );
     assert!(
-        body.contains("grep -i '\\[distroav\\] plugin loaded'"),
+        body.contains("LC_ALL=C grep -ai '\\[distroav\\] plugin loaded'"),
         "{SETUP} step 10 must grep the OBS log for the REGEX-escaped `\\[distroav\\] plugin \
          loaded` pattern — a plain substring check on the unescaped text would incidentally match \
          only the WARNING fallback prose, not the actual functional check"
     );
     assert!(
-        body.contains("grep -i 'NDI library initialized'"),
+        body.contains("LC_ALL=C grep -ai 'NDI library initialized'"),
         "{SETUP} step 10 must grep the OBS log for the literal `NDI library initialized` pattern \
          (the real DistroAV log line, live-verified on imag-nb)"
     );
@@ -1560,6 +1561,41 @@ fn setup_imag_self_heals_leftover_isolation_dropin_and_regens_grub_842() {
     );
 }
 
+/// #1162/#784: `setup-imag.sh` must SELF-HEAL any leftover hand-applied PL1 override drop-in
+/// (`/etc/systemd/system/imag-power-envelope{,-guard}.service.d/override.conf`) from the live
+/// re-baseline. The sustainable wattage now lives in SOURCE (each unit's own `Environment=` line +
+/// the shared lib default), so a lingering `.service.d/override.conf` hand-fix must not persist to
+/// MASK a future source re-pin — the #784 lesson, mirroring the #842 grub.d self-heal above. The
+/// removal must run BEFORE the power-envelope unit is enabled so the base unit's source-controlled
+/// Environment wins (no lingering drop-in overriding it).
+#[test]
+fn setup_imag_self_heals_leftover_pl1_dropin_1162() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("imag-power-envelope-guard.service.d")
+            || body.contains("imag-power-envelope.service.d"),
+        "{SETUP} must reference the PL1 override drop-in dir \
+         /etc/systemd/system/imag-power-envelope*.service.d/ to self-heal it (#1162/#784)"
+    );
+    assert!(
+        body.contains("override.conf"),
+        "{SETUP} must name the hand-applied override.conf PL1 drop-in it removes (#1162)"
+    );
+    let rm_at = body
+        .find("removing leftover hand-applied PL1 drop-in")
+        .expect(
+        "{SETUP} must announce + remove the leftover PL1 drop-in (#1162 self-heal, #784 lesson)",
+    );
+    let enable_at = body
+        .find("systemctl enable --now imag-power-envelope.service")
+        .expect("{SETUP} must enable imag-power-envelope.service");
+    assert!(
+        rm_at < enable_at,
+        "{SETUP}: the PL1 drop-in self-heal must run BEFORE the power-envelope unit is enabled \
+         (#1162 ordering — else the stale drop-in would still override the base unit at reload)"
+    );
+}
+
 /// #483/#522/#840: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths —
 /// the boot-time openbox autostart script (via imag-obs-start.sh, #840) AND the script's own
 /// provisioning-time launcher. Without this, isolcpus (once active after the next boot) would
@@ -1672,9 +1708,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 26,
-        "TOTAL_STEPS must be 26 after #791 added the imag-maxperf max-performance persistence step \
-         (step 25 was #779's touchpad-usability step)"
+        declared, 27,
+        "TOTAL_STEPS must be 27 after issue 1146 added the picom vsync-compositor step (step 27) \
+         on top of #791's imag-maxperf step 26 and #779's touchpad step 25"
     );
     assert_eq!(
         actual, declared,
@@ -2016,28 +2052,33 @@ fn setup_imag_writes_openbox_autostart_522() {
     );
 }
 
-/// The autostart script must set the non-HDMI PANEL primary at 1920x1080@60 — and must NEVER
-/// apply --primary to the HDMI projector output (the exact #522/#488 regression: the
-/// hand-edited autostart wrongly primaried HDMI instead of the panel).
+/// issue 1146 (REVERSES #522/#488): the autostart script must set the HDMI PROJ (projector)
+/// primary at 1920x1080@60 — and must NEVER apply --primary to the PANEL. imag drives two
+/// independent-crystal 60Hz outputs; GL/scanout vsyncs only the primary CRTC, so the PROJECTOR must
+/// be primary or its clock beats against the panel -> the walking tear line this ticket fixes. The
+/// #522/#488 "panel primary" doctrine is retired (its real regression was a lost projector
+/// self-heal, now handled by imag-obs.service); projector placement is by connector type
+/// (imag_scenes.py), independent of the --primary flag, so the flip is safe.
 #[test]
-fn setup_imag_autostart_primaries_panel_not_hdmi_522() {
+fn setup_imag_autostart_primaries_hdmi_not_panel_1146() {
     let body = read(SETUP);
     assert!(
         body.contains(r#"$1 !~ /^HDMI/"#) && body.contains(r#"$1 ~  /^HDMI/"#),
         "{SETUP}: the autostart script must select PANEL as the connected non-HDMI output and \
          PROJ as the connected HDMI output (xrandr awk filters) — matches imag_scenes.py's \
-         HDMI-vs-panel rule (#522)"
+         HDMI-vs-panel rule (issue 1146)"
     );
     assert!(
-        body.contains(r#"xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60"#),
-        "{SETUP}: the autostart script must set the PANEL primary at 1920x1080@60 — the \
-         #522/#488 regression was the hand-edited autostart wrongly setting HDMI primary instead"
+        body.contains(r#"xrandr --output "$PROJ" --primary --mode 1920x1080 --rate 60"#),
+        "{SETUP}: the autostart script must set the HDMI PROJ primary at 1920x1080@60 — the \
+         projector is the vsync anchor for the tear-free picom present (issue 1146)"
     );
-    // The bug this ticket fixes: --primary must be scoped to $PANEL only, never to $PROJ/HDMI.
+    // issue 1146: --primary must be scoped to $PROJ only, never to $PANEL (which would re-make the
+    // panel the vsync anchor and re-introduce the projector tearing).
     assert!(
-        !body.contains(r#"xrandr --output "$PROJ" --primary"#),
-        "{SETUP}: the autostart script must NEVER set --primary on $PROJ (the HDMI projector) — \
-         that was the exact #522/#488 hand-edited-box regression this ticket fixes"
+        !body.contains(r#"xrandr --output "$PANEL" --primary"#),
+        "{SETUP}: the autostart script must NEVER set --primary on $PANEL — that makes the panel \
+         the vsync anchor and the HDMI projector tears (issue 1146 reverses the #522 panel-primary)"
     );
 }
 
@@ -2603,6 +2644,90 @@ fn setup_imag_504_verify_step_gated_on_obs_launched_this_run() {
         gate_idx < ws_wait_idx && gate_idx < genlock_marker_idx && gate_idx < skip_msg_idx,
         "{SETUP} (#504) the OBS_LAUNCHED_THIS_RUN gate must wrap BOTH the WS-wait and the genlock \
          log-verify hard-fails, with the skip message in the else branch"
+    );
+}
+
+// ============================================================================================
+// #1182 -- steps 21/27 run `systemctl --user ...` (daemon-reload / enable --now / disable), which
+// need the desktop user's systemd USER MANAGER bus (/run/user/<uid>/bus). On a from-scratch box
+// provisioned detached, BEFORE the first kiosk boot, that bus does not exist ("Failed to connect
+// to bus: Connection refused") -- steps 17/18 already DEGRADE on the same missing-session class
+// (`[ -S /tmp/.X11-unix/X0 ]`), but 21/27 used to hard-fail(). They must now gate their
+// `systemctl --user` half on a user-bus liveness guard and DEFER to the first kiosk boot.
+// ============================================================================================
+
+/// #1182: the provisioner must define a `user_bus_alive` guard (the structural analogue of step
+/// 17's `[ -S /tmp/.X11-unix/X0 ]` :0 liveness gate) that tests the desktop user's systemd bus
+/// socket, so steps 21/27 can DEFER their `systemctl --user` half on a session-less from-scratch box
+/// instead of aborting the whole run.
+#[test]
+fn setup_imag_1182_defines_user_bus_liveness_guard() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"user_bus_alive() { [ -S "/run/user/"#),
+        "{SETUP} (#1182) must define a `user_bus_alive()` guard testing the desktop user's systemd \
+         bus socket (/run/user/<uid>/bus) — the analogue of step 17's [ -S /tmp/.X11-unix/X0 ] gate"
+    );
+}
+
+/// #1182: step 21's `systemctl --user daemon-reload`/`enable --now imag-obs.service` hard-fails must
+/// be reachable ONLY behind the `user_bus_alive` guard — a from-scratch box (no bus yet) must DEFER,
+/// never abort the whole provisioning run at step 21 (never reaching steps 22-27). The deferred
+/// branch must (a) explain WHY + WHAT next (mirrors step 17's degrade note) and (b) complete the
+/// ENABLE bus-free by creating the unit's wants-symlink directly (only the `--now` START is deferred
+/// to the kiosk boot's autostart), so verify-imag.sh check (t) passes after ONE reboot with no re-run.
+#[test]
+fn setup_imag_1182_step21_defers_systemctl_user_when_no_bus() {
+    let body = read(SETUP);
+    let s21 = body.find("step 21 \"").expect("{SETUP}: step 21 banner");
+    let s22 = body.find("step 22 \"").expect("{SETUP}: step 22 banner");
+    let region = &body[s21..s22];
+    let guard = region.find("if user_bus_alive; then").expect(
+        "{SETUP} (#1182) step 21 must gate its systemctl --user block on `if user_bus_alive; then`",
+    );
+    let enable = region
+        .find("systemctl --user enable --now imag-obs.service")
+        .expect("{SETUP} (#1182) step 21 must still `systemctl --user enable --now imag-obs.service` (bus-alive branch)");
+    assert!(
+        guard < enable,
+        "{SETUP} (#1182) the hard-failing `enable --now imag-obs.service` must sit BEHIND the \
+         user-bus guard — a session-less from-scratch box must defer, not hard-fail step 21"
+    );
+    assert!(
+        region.contains("deferred to first kiosk boot"),
+        "{SETUP} (#1182) step 21's deferred branch must explain the defer (loud '(fresh box) ... \
+         deferred to first kiosk boot' note, mirroring step 17's degrade note)"
+    );
+    assert!(
+        region.contains("graphical-session.target.wants/imag-obs.service"),
+        "{SETUP} (#1182) step 21's deferred branch must complete the ENABLE bus-free by creating \
+         the imag-obs.service wants-symlink directly (only the --now START is deferred to the \
+         kiosk-boot autostart) — so verify-imag.sh check (t) is-enabled passes after ONE reboot"
+    );
+}
+
+/// #1182: step 27's picom `systemctl --user daemon-reload` hard-fail must ALSO be reachable only
+/// behind the `user_bus_alive` guard — once step 21 no longer aborts, a from-scratch box reaches
+/// step 27, whose `daemon-reload || fail` would then be the new abort point. picom stays DORMANT,
+/// so the deferred branch simply notes the defer (no enable symlink).
+#[test]
+fn setup_imag_1182_step27_defers_picom_daemon_reload_when_no_bus() {
+    let body = read(SETUP);
+    let s27 = body.find("step 27 \"").expect("{SETUP}: step 27 banner");
+    let region = &body[s27..];
+    let guard = region.find("if user_bus_alive; then").expect(
+        "{SETUP} (#1182) step 27 must gate its systemctl --user block on `if user_bus_alive; then`",
+    );
+    let reload = region
+        .find("daemon-reload failed before enabling picom.service")
+        .expect("{SETUP} (#1182) step 27 must still `systemctl --user daemon-reload` (bus-alive branch)");
+    assert!(
+        guard < reload,
+        "{SETUP} (#1182) step 27's picom daemon-reload hard-fail must sit BEHIND the user-bus guard"
+    );
+    assert!(
+        region.contains("deferred to first kiosk boot"),
+        "{SETUP} (#1182) step 27's deferred branch must explain the defer (loud note)"
     );
 }
 
@@ -3457,5 +3582,47 @@ fn setup_imag_provisions_openbox_menu_with_graceful_stop_785() {
         stop_install < menu_write,
         "{SETUP}: menu.xml (which references imag-obs-stop.sh) must be written AFTER the stop \
          script is installed (#785/#840)"
+    );
+}
+
+/// #1156: the #1143 record-encoder lane added `import imag_record_encoder` to imag_scenes.py, but
+/// setup-imag.sh never learned to fetch that sibling onto the box — so a deploy pushed the importer
+/// WITHOUT the imported module and imag-obs seed-looped 1737× over 8.5h. An imported sibling MUST
+/// ride the SAME on-box deploy list (gh-api fetch + chmod 755) as its importer imag_scenes.py.
+#[test]
+fn setup_imag_installs_imag_record_encoder_sibling_1156() {
+    let body = read(SETUP);
+    // Guard against this test going vacuous if the import is ever removed from imag_scenes.py.
+    let scenes = read(SCENES);
+    assert!(
+        scenes.contains("import imag_record_encoder"),
+        "{SCENES} must still import imag_record_encoder for this deploy guard to be meaningful (#1156)"
+    );
+    assert!(
+        body.contains(r#"REC_ENC="/usr/local/bin/imag_record_encoder.py""#),
+        "{SETUP} must resolve a fixed on-box install path for the imag_record_encoder.py sibling (#1156)"
+    );
+    assert!(
+        body.contains("scripts/imag_record_encoder.py?ref=dev") && body.contains("gh api"),
+        "{SETUP} must actually fetch scripts/imag_record_encoder.py from the genlock repo via gh api \
+         (#1156) — an imported sibling must ride the SAME deploy list as its importer, not just be referenced"
+    );
+    assert!(
+        body.contains(r#"chmod 755 "$REC_ENC""#),
+        "{SETUP} must chmod 755 the installed imag_record_encoder.py sibling (#1156)"
+    );
+    // The sibling install must sit in the SAME block as imag_scenes.py so the two can never again
+    // drift apart on a deploy (a loose adjacency bound — same block, not the whole script apart).
+    let scn = body
+        .find(r#"SCN="/usr/local/bin/imag_scenes.py""#)
+        .expect("{SETUP} must still install imag_scenes.py (#522)");
+    let rec = body
+        .find(r#"REC_ENC="/usr/local/bin/imag_record_encoder.py""#)
+        .expect("{SETUP} must install the imag_record_encoder.py sibling (#1156)");
+    let span = &body[scn.min(rec)..scn.max(rec)];
+    assert!(
+        span.lines().count() <= 25,
+        "{SETUP}: the imag_record_encoder.py install must sit in the SAME block as imag_scenes.py \
+         so the importer + its sibling never drift on a deploy (#1156)"
     );
 }

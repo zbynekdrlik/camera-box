@@ -28,6 +28,12 @@
 # Per-box state, so strih and stream page independently. A recovery ("reachable again") ping fires
 # once when a box we paged for returns.
 #
+# NOTE (issue 1199): strih ALSO carries an ON-BOX NIC-fail self-heal watcher
+# (scripts/strih-nic-selfheal.ps1, a SYSTEM scheduled task) that, until the flaky card is physically
+# replaced, restarts the NIC and then gracefully reboots strih on a confirmed total LAN outage. This
+# dev1-side alert is unchanged and complementary: it still pages so a human knows, while the on-box
+# watcher attempts recovery -- do NOT wait for a manual fix on a strih outage.
+#
 # DEV1-SIDE-OUTAGE GUARD: before deciding, probe a set of REFERENCE rig nodes (cam1/cam2/imag-nb --
 # nodes that share the rig's network fate). If NONE answer, dev1's own path to the rig subnet is down
 # (or the whole rig link stalled, e.g. an event-day mobile uplink) -> "nothing to decide" this pass,
@@ -58,10 +64,23 @@ case "${1:-}" in
 esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
-# The two OBS boxes to watch, as "name|ip" pairs (space-separated).
-BOXES="${NETWORK_REACH_BOXES:-strih|10.77.9.202 stream|10.77.9.204}"
-OBS_WS_PORT="${NETWORK_REACH_OBS_WS_PORT:-4455}"       # OBS WebSocket, live on both boxes
-BUNDLE_PORT="${NETWORK_REACH_BUNDLE_PORT:-8899}"       # bundle-state HTTP, live on both boxes (#650)
+# The boxes to watch, as "name|ip" pairs (space-separated). strih/stream are permanent PAGING boxes;
+# resolume (#811) is a TRAVELING CG box (RESOLUME-SNV) added here as a REPORT-ONLY node (see below)
+# so it is monitored without false-paging while it is powered off/away between events. resolume.lan
+# currently resolves to 10.77.9.201 (event-LAN DHCP -- may drift, and collides with `bridge`, an
+# ACTIVE box, in targets.md) -- harmless for a report-only node: a wrong/colliding IP may LOG a
+# FALSE reachable (e.g. bridge answering at .201 while resolume is off) or a false unreachable, but
+# NEVER pages. Always confirm box identity with `getent hosts resolume.lan` + its OBS profile
+# (rig-state-inspection.md §2) before ever flipping it to a paging node.
+BOXES="${NETWORK_REACH_BOXES:-strih|10.77.9.202 stream|10.77.9.204 resolume|10.77.9.201}"
+# Report-only boxes (space-separated NAMES): probed + classified + logged + per-box state-tracked
+# exactly like any other, but they NEVER page (no alert, no recovery ping) -- for a TRAVELING box
+# whose absence is the NORMAL state (resolume, #811). A supervisor "flips one required" by removing
+# its name here (it stays in BOXES), at which point it pages like strih/stream with all
+# confirm/throttle/recovery state already warm. net_reach_box_is_report_only (lib) is the pure test.
+REPORT_ONLY_BOXES="${NETWORK_REACH_REPORT_ONLY_BOXES:-resolume}"
+OBS_WS_PORT="${NETWORK_REACH_OBS_WS_PORT:-4455}"       # OBS WebSocket, live on both OBS boxes
+BUNDLE_PORT="${NETWORK_REACH_BUNDLE_PORT:-8899}"       # bundle-state HTTP, on strih/stream only (#650)
 # Reference rig nodes that share the rig's network fate (cam1 cam2 imag-nb) -- the dev1-side-outage
 # anchor. If NONE answer, dev1's own path to the rig subnet is down -> nothing to decide.
 REFERENCE_HOSTS="${NETWORK_REACH_REFERENCE_HOSTS:-10.77.9.61 10.77.9.62 10.77.9.182}"
@@ -160,25 +179,33 @@ clear_box_throttle() {
 # handle_box <box> <ip> <ping_ok> <ws_ok> <bundle_ok> — the probe results are gathered ONCE in main()
 # (so they can also feed the dev1-side-outage anchor) and passed in, never re-probed here.
 handle_box() {
-  local box="$1" ip="$2" ping_ok="$3" ws_ok="$4" bundle_ok="$5"
+  local box="$1" ip="$2" ping_ok="$3" ws_ok="$4" bundle_ok="$5" report_only="${6:-0}"
   local verdict
   verdict="$(net_reach_classify_box "$ping_ok" "$ws_ok" "$bundle_ok")"
-  log "$box ($ip): ping=$ping_ok ws:$OBS_WS_PORT=$ws_ok bundle:$BUNDLE_PORT=$bundle_ok -> $verdict"
+  log "$box ($ip): ping=$ping_ok ws:$OBS_WS_PORT=$ws_ok bundle:$BUNDLE_PORT=$bundle_ok report_only=$report_only -> $verdict"
 
   if [ "$verdict" = "REACHABLE" ]; then
-    local was_alerted recover
-    was_alerted="$(read_state_field "alerted_${box}" 0)"
-    recover="$(net_reach_recovery_decision "$was_alerted" 1 | sed -n 's/^recover=//p')"
-    if [ "$recover" = "1" ]; then
-      if [ "$DRY_RUN" -eq 1 ]; then
-        log "[dry-run] WOULD send recovery: $box reachable again"
-      else
-        log "RECOVERY: $box reachable again -- firing recovery notification"
-        python3 "$NOTIFY" notify --body \
-          "✅ nedostupný box ($REPO_SLUG): **$box** ($ip) je opäť dostupný." \
-          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+    # A report-only box never paged, so it has no recovery ping to fire -- log + clear only.
+    if [ "$report_only" != "1" ]; then
+      local was_alerted recover
+      was_alerted="$(read_state_field "alerted_${box}" 0)"
+      recover="$(net_reach_recovery_decision "$was_alerted" 1 | sed -n 's/^recover=//p')"
+      if [ "$recover" = "1" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+          log "[dry-run] WOULD send recovery: $box reachable again"
+        else
+          log "RECOVERY: $box reachable again -- firing recovery notification"
+          python3 "$NOTIFY" notify --body \
+            "✅ nedostupný box ($REPO_SLUG): **$box** ($ip) je opäť dostupný." \
+            >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+        fi
+        write_state_field "alerted_${box}" 0
       fi
+    else
+      # A report-only box never latches alerted_<box>, but clear it defensively so a
+      # required->report-only flip while the box was paged can never leak a stale recovery latch.
       write_state_field "alerted_${box}" 0
+      log "[report-only] $box reachable (traveling box #811 -- no recovery ping)"
     fi
     clear_box_throttle "$box"
     return 0
@@ -194,6 +221,20 @@ handle_box() {
   log "$box confirm=$prev_confirm -> $confirm act=$act (threshold=$CONFIRM_THRESHOLD)"
   if [ "${act:-0}" != "1" ]; then
     log "$box UNREACHABLE this pass but not yet CONFIRMED across $CONFIRM_THRESHOLD passes -- holding"
+    return 0
+  fi
+
+  # CONFIRMED outage. A REPORT-ONLY box (a traveling box, #811) is tracked + logged but NEVER pages
+  # and never latches the recovery flag -- its absence is the normal state, so a page would be pure
+  # noise. Flip it to a paging node by removing its name from NETWORK_REACH_REPORT_ONLY_BOXES.
+  if [ "$report_only" = "1" ]; then
+    # Report-only detail names ONLY the signals actually probed (ping + :4455); :8899 is deliberately
+    # skipped for a report-only box (no bundle server), so net_reach_alert_detail's bundle field
+    # would misleadingly imply a dead server that was never checked.
+    local p_s="DOWN" w_s="DOWN"
+    [ "$ping_ok" = "1" ] && p_s="up"
+    [ "$ws_ok" = "1" ] && w_s="up"
+    log "[report-only] $box CONFIRMED unreachable (ping $p_s, OBS-WS:$OBS_WS_PORT $w_s; :$BUNDLE_PORT not probed for a report-only box) -- traveling box (#811), NOT paging. Verify manually via ops SKILL resolume-snv."
     return 0
   fi
 
@@ -230,13 +271,19 @@ main() {
   log "pass start (dry_run=$DRY_RUN, boxes='$BOXES')"
 
   # -- gather each box's multi-signal probe ONCE (feeds both the anchor and the per-box decision) --
-  local pair box ip names=() ips=() pings=() wss=() bundles=()
+  local pair box ip names=() ips=() pings=() wss=() bundles=() ronly=()
   local reach_flags=()
   for pair in $BOXES; do
     box="${pair%%|*}"; ip="${pair##*|}"
     names+=("$box"); ips+=("$ip")
+    local ro
+    ro="$(net_reach_box_is_report_only "$box" "$REPORT_ONLY_BOXES" | sed -n 's/^report_only=//p')"
+    ronly+=("$ro")
     local p w b
-    p="$(probe_ping "$ip")"; w="$(probe_tcp "$ip" "$OBS_WS_PORT")"; b="$(probe_tcp "$ip" "$BUNDLE_PORT")"
+    p="$(probe_ping "$ip")"; w="$(probe_tcp "$ip" "$OBS_WS_PORT")"
+    # A report-only box (resolume) has no bundle-state :8899 server -- skip that probe (it would only
+    # ever read a meaningless "down"); classify it on ping OR :4455 only (#811).
+    if [ "$ro" = "1" ]; then b=0; else b="$(probe_tcp "$ip" "$BUNDLE_PORT")"; fi
     pings+=("$p"); wss+=("$w"); bundles+=("$b")
     reach_flags+=("$([ "$(net_reach_classify_box "$p" "$w" "$b")" = REACHABLE ] && echo 1 || echo 0)")
   done
@@ -262,7 +309,7 @@ main() {
 
   local i
   for i in "${!names[@]}"; do
-    handle_box "${names[$i]}" "${ips[$i]}" "${pings[$i]}" "${wss[$i]}" "${bundles[$i]}"
+    handle_box "${names[$i]}" "${ips[$i]}" "${pings[$i]}" "${wss[$i]}" "${bundles[$i]}" "${ronly[$i]}"
   done
   log "pass end"
 }

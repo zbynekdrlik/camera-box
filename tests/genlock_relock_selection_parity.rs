@@ -21,7 +21,7 @@
 //! that silently passes when it never ran is worse than no test.
 
 use camera_box::genlock_backlog::{
-    relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
+    relock_acquire_should_hold, relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -260,7 +260,8 @@ fn lift_converge_helper() -> String {
 
 /// Lift a `#define NAME <value>` line VERBATIM from the vendored C so the parity harness compiles
 /// against the SHIPPED constant, never a hard-coded copy that could silently drift (issue-1049
-/// review finding 🟡2). Returns the whole `#define …` line.
+/// review finding 🟡2). Returns the whole `#define …` line. Shared by the #1049 and #1161 gates,
+/// so the not-found panic is issue-AGNOSTIC (naming which constant is missing, not a fixed ticket).
 fn lift_define(name: &str) -> String {
     let src = fs::read_to_string(repo(OBS_SOURCE)).expect("read obs-source.c");
     for line in src.lines() {
@@ -269,7 +270,7 @@ fn lift_define(name: &str) -> String {
             return t.to_string();
         }
     }
-    panic!("#1049: {OBS_SOURCE} no longer defines {name} — parity harness cannot lift it");
+    panic!("{OBS_SOURCE} no longer defines {name} — the parity harness cannot lift it");
 }
 
 /// `(wall_now, boundary, newest_stamp, latency_ms, interval, n, ticks_since_drain)`. `newest_stamp`
@@ -458,6 +459,148 @@ fn c_phase_convergence_matches_the_rust_authority_1049() {
         diffs.is_empty(),
         "#1049: the vendored C phase-convergence decision DIVERGED from the Tier-0 Rust authority \
          on {} of {} vectors — the deployed shed is not the behaviour the unit tests cover:\n{}",
+        diffs.len(),
+        vs.len(),
+        diffs.join("\n")
+    );
+}
+
+/// #1161 — the SAME executable-parity discipline for the Stage-2 ACQUIRE bracketing gate. Lifts the
+/// self-contained `genlock_relock_acquire_should_hold` helper VERBATIM from obs-source.c, compiles
+/// it standalone under `-Werror`, and requires byte-identical booleans from
+/// [`camera_box::genlock_backlog::relock_acquire_should_hold`] over a boundary-spread of vectors —
+/// a flipped comparison, a lost interval-0 guard, or a wrong `ceil(reserve/interval)` cap fails
+/// here in seconds rather than surviving to the rig.
+fn lift_acquire_hold_helper() -> String {
+    let path = repo(OBS_SOURCE);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("static inline bool genlock_relock_acquire_should_hold(")
+        .unwrap_or_else(|| {
+            panic!(
+                "#1161: {OBS_SOURCE} no longer defines genlock_relock_acquire_should_hold — the \
+                 ACQUIRE bracketing gate helper is gone, so there is nothing to check parity against."
+            )
+        });
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|i| start + i + 3)
+        .expect("#1161: genlock_relock_acquire_should_hold has no closing brace");
+    src[start..end].to_string()
+}
+
+/// `(oldest_queued_age_ns, reserve_ns, interval_ns, ticks_held)`.
+fn acquire_hold_vectors() -> Vec<(u64, u64, u64, u64)> {
+    let i30 = 33_333_333u64;
+    let i60 = 16_666_667u64;
+    let ms = 1_000_000u64;
+    // ceil(53/33.3)=2 -> cap 5; ceil(90/33.3)=3 -> cap 6.
+    let mut v: Vec<(u64, u64, u64, u64)> = vec![
+        (20 * ms, 53 * ms, i30, 0),          // young -> hold
+        (54 * ms, 53 * ms, i30, 0),          // aged past reserve -> acquire
+        (53 * ms, 53 * ms, i30, 0),          // exactly at reserve -> acquire (inclusive)
+        (53 * ms - 1, 53 * ms, i30, 0),      // one ns under reserve -> hold
+        (0, 53 * ms, i30, 0),                // fresh queue -> hold
+        (20 * ms, 53 * ms, i30, 4),          // one below cap (5) -> hold
+        (20 * ms, 53 * ms, i30, 5),          // at cap -> acquire (fail-open)
+        (20 * ms, 53 * ms, i30, 6),          // over cap -> acquire
+        (ms, 3 * ms, i30, 0),                // 3ms prod pin, sub-3ms frame -> hold (rare)
+        (16 * ms, 3 * ms, i60, 0),           // 3ms prod pin, normal frame -> acquire (inert)
+        (ms, 53 * ms, 0, 0),                 // degenerate interval -> acquire (fail open)
+        (0, 0, i30, 0),                      // reserve 0 -> acquire
+        (90 * ms, 90 * ms, i30, 0),          // at 90ms -> acquire
+        (4 * ms, 90 * ms, i30, 2),           // deep target, young, below cap -> hold
+        (4 * ms, 90 * ms, i30, 6),           // deep target, young, at cap -> acquire
+        (2000 * ms - 1, 2000 * ms, i30, 62), // max reserve, one under cap -> hold
+        (2000 * ms - 1, 2000 * ms, i30, 63), // max reserve, at cap ceil(2000/33.3)=61 +3 -> acquire
+    ];
+    // A deterministic LCG spread over the argument space.
+    let mut x: u64 = 0x0fed_cba9_8765_4321;
+    for _ in 0..160 {
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let reserve = ((x >> 20) % 2001) * ms; // 0..2000 ms
+        let interval = if x & 1 == 0 { i30 } else { i60 };
+        let oldest = (x >> 25) % (2100 * ms); // 0..~2100 ms, straddles the reserve boundary
+        let ticks = (x >> 7) % 80;
+        v.push((oldest, reserve, interval, ticks));
+    }
+    v
+}
+
+#[test]
+fn c_acquire_bracketing_gate_matches_the_rust_authority_1161() {
+    let helper = lift_acquire_hold_helper();
+    let vs = acquire_hold_vectors();
+
+    // Lift the fail-open margin from the SHIPPED C, never hard-code it.
+    let mut c = format!(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n",
+        lift_define("GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS"),
+    );
+    c.push_str(&helper);
+    c.push_str("int main(void){\n");
+    for (oldest, reserve, interval, ticks) in &vs {
+        c.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_relock_acquire_should_hold({oldest}ULL, {reserve}ULL, \
+             {interval}ULL, {ticks}ULL));\n"
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_acquire_hold_parity_1161");
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("acquire_hold.c");
+    let bin = dir.join("acquire_hold.bin");
+    fs::write(&cfile, &c).expect("write the parity harness");
+
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args(["-std=gnu99", "-Wall", "-Wextra", "-Wconversion", "-Werror", "-O1"])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "#1161: could not run the C compiler `{cc}` ({e}). This gate compiles the vendored \
+                 genlock_relock_acquire_should_hold to prove the C and the Rust authority agree; it \
+                 must FAIL rather than skip when the toolchain is absent. Install a C compiler or set CC."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "#1161: genlock_relock_acquire_should_hold lifted from {OBS_SOURCE} does NOT COMPILE \
+         standalone under -Wall -Wextra -Wconversion -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let run = Command::new(&bin)
+        .output()
+        .expect("#1161: the compiled parity harness failed to execute");
+    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
+    let c_out: Vec<bool> = stdout.lines().map(|l| l.trim() == "1").collect();
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "#1161: harness printed the wrong count"
+    );
+
+    let mut diffs = Vec::new();
+    for (i, ((oldest, reserve, interval, ticks), got_c)) in vs.iter().zip(&c_out).enumerate() {
+        let got_rs = relock_acquire_should_hold(*oldest, *reserve, *interval, *ticks);
+        if got_rs != *got_c {
+            diffs.push(format!(
+                "  vector {i}: oldest={oldest} reserve={reserve} interval={interval} ticks={ticks} \
+                 -> C {got_c}, Rust {got_rs}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "#1161: the vendored C ACQUIRE bracketing gate DIVERGED from the Tier-0 Rust authority on \
+         {} of {} vectors — the deployed re-acquire is not the behaviour the unit tests cover:\n{}",
         diffs.len(),
         vs.len(),
         diffs.join("\n")

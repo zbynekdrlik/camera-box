@@ -10,37 +10,38 @@
 use camera_box::delivery_spread_gate as gate;
 
 #[test]
-fn delivery_spread_gate_ships_report_only_1033() {
-    // The delivery-spread term flows + is surfaced, but does NOT gate overall_pass yet — because
-    // the current fleet data is not tight-green (recent green runs sit at ~66–81 ms spread against
-    // the 24 ms bound, driven by cam1's delivery lottery / issue-909 grabber class). A follow-up
-    // flips this to `true` once cam1's lottery is killed and ~5 consecutive green runs hold the
-    // spread ≤ ~10 ms. Shipping `true` here would red those recent green runs.
+fn delivery_spread_gate_is_blocking_since_1142() {
+    // #1142 (owner mandate 2026-08-19): the delivery-spread term now BLOCKS overall_pass — the
+    // "green" runs it used to pass were FALSELY green (the phase lottery, 3.97 vs 85 ms, hid a real
+    // delivery-spread failure behind a green gate). At the existing SPREAD_THRESHOLD_MS=24 bound a
+    // wide spread now REDs the run. Was report-only (issue 1033); the [red] commit keeps the seam at
+    // `false` while this test already asserts the blocking contract, so it FAILS there; the [green]
+    // commit flips it.
     assert!(
-        !gate::gates_overall_pass(),
-        "issue 1033: the delivery-spread gate must ship REPORT-ONLY (gates_overall_pass()==false); \
-         the fleet data is not tight-green — flipping it blocking is a separate follow-up ticket"
+        gate::gates_overall_pass(),
+        "#1142: the delivery-spread gate must be BLOCKING (gates_overall_pass()==true)"
     );
 }
 
 #[test]
-fn report_only_never_reds_a_run_even_when_the_spread_is_wide_1033() {
-    // Report-only fold (gates_overall == false): a FAILING (wide) delivery spread still passes
-    // overall — the whole point today (surface, never red).
+fn blocking_fold_reds_a_wide_spread_since_1142() {
+    // Blocking fold (gates_overall == true): a FAILING (wide) delivery spread now REDs overall.
+    // The pure `fold` pins both seam states, and the LIVE call-site helper the verdict makes.
     assert!(
-        gate::fold(false, false),
-        "report-only: a wide delivery spread must NOT red the run"
+        !gate::fold(false, true),
+        "blocking: a wide spread reds the run"
     );
+    assert!(gate::fold(true, true), "blocking: a tight spread passes");
     assert!(
-        gate::fold(true, false),
-        "report-only: a tight delivery spread passes"
-    );
-    // …and via the LIVE-seam call-site helper (the exact call `recording-verdict.rs` makes):
-    assert!(
-        gate::folds_into_overall_pass(false),
-        "with the seam report-only today, even a wide delivery spread must fold to pass"
+        !gate::folds_into_overall_pass(false),
+        "#1142: with the seam blocking, a wide delivery spread must fold to FAIL"
     );
     assert!(gate::folds_into_overall_pass(true));
+    // The report-only fold direction is still pinned (a hypothetical revert): fold(_, false) passes.
+    assert!(
+        gate::fold(false, false),
+        "report-only direction: a wide spread would not red"
+    );
 }
 
 #[test]

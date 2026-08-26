@@ -59,8 +59,20 @@ The vendored frontend `.cpp` compiles ONLY on CI (`# airuleset:build-ok` disable
 
 Two frontend-specific differences from the libobs rule:
 
-- **No `windows-genlock*.yml` pwsh mirror.** Those workflows anchor libobs genlock tokens; they do
-  NOT reference `frontend/**` (grep confirms), so a frontend anchor is Rust-test-only.
+- **pwsh mirror: NO for a #773-class NULL-guard, YES for a rig-critical BEHAVIORAL divergence
+  (corrected #1195).** The original claim here — "the windows-genlock ymls do NOT reference
+  `frontend/**`, so a frontend anchor is Rust-test-only" — is **FALSE**: both `windows-genlock.yml`
+  and `windows-genlock-fast.yml` already carry frontend source-text anchors (OBSApp.cpp `#43`
+  IsUpdaterDisabled in the full yml; OBSBasic.cpp `#152` titlebar + OBSProjector `#276` in BOTH).
+  The real discriminator is the CHANGE CLASS, not the file: a #773-style defensive NULL-guard is
+  Rust-test-only (a missing guard is caught by the full build's own compilation, and the ymls were
+  never given one), but a rig-critical BEHAVIORAL divergence from upstream that STILL COMPILES
+  either way and that a `git subtree pull` would silently revert (the #43/#152 class, and #1195's
+  auto-normal unclean-shutdown launch — `tests/obs_unclean_shutdown_auto_normal_1195.rs`) gets a
+  pwsh source-text anchor in BOTH ymls, mirroring the Rust guard — exactly as
+  `vendored-libobs-change-safety.md` + `av-sync-dock-anchor-refactor-safety.md` mandate for any
+  vendored guard. Decide by: "would a subtree pull silently revert a behavior we depend on, while
+  still compiling?" → mirror to BOTH ymls; a pure crash/NULL safety guard → Rust anchor only.
 - **A frontend change needs a FULL-BUNDLE deploy, never fast-dll** — it lands in `obs64.exe`, not
   `obs.dll` (`obs-titlebar-build-id.md` / `rig-state-inspection.md`). The supervisor/rig-ops owns
   that deploy.

@@ -545,6 +545,102 @@ fn windows_program_prints_retention_plan_never_silent_delete() {
     );
 }
 
+/// #1140 — the per-box source of the OBS keep-alive SCHEDULED-TASK names a deploy must disable so
+/// none respawns obs64 mid-copy. stream runs the #812 avsync-keepalive (~10 min) AND the #411
+/// obs-self-heal (~2 min, the actual obs64 respawner), so BOTH are listed; strih's keep-alive is
+/// the AHK watcher (the has_ahk path), so it lists none. Curated per box — never all of a box's
+/// scheduled tasks.
+#[test]
+fn fleet_box_keepalive_tasks_lists_stream_obs_keepalives_1140() {
+    let stream = run_sourced(&script(), "fleet_box_keepalive_tasks stream");
+    assert!(
+        stream.contains("avsync-keepalive"),
+        "stream must list the #812 avsync-keepalive task (the named minimum):\n{stream}"
+    );
+    assert!(
+        stream.contains("camera-box-obs-self-heal-stream"),
+        "stream must list the #411 obs-self-heal task (the 2-min obs64 respawner):\n{stream}"
+    );
+    let strih = run_sourced(&script(), "fleet_box_keepalive_tasks strih");
+    assert!(
+        strih.trim().is_empty(),
+        "strih lists NO keep-alive scheduled task (its keep-alive is the AHK watcher):\n{strih:?}"
+    );
+    let unknown = run_sourced(&script(), "fleet_box_keepalive_tasks nope");
+    assert!(
+        unknown.trim().is_empty(),
+        "an unknown box lists no keep-alive tasks:\n{unknown:?}"
+    );
+}
+
+/// #1140 — the stream deploy program must DISABLE the OBS keep-alive scheduled tasks BEFORE it
+/// stops obs64 (so none respawns obs64 mid-robocopy → the 2026-08-19 ERROR 32 sharing violation)
+/// and RE-ENABLE + VERIFY exactly those it disabled at the end, mirroring the strih AHK
+/// stop→verified-restart contract. strih carries no such block (AHK watcher path only).
+#[test]
+fn windows_stream_disables_and_restores_obs_keepalive_tasks_1140() {
+    let stream = win_program("stream", "full", "0");
+    // the named tasks appear (avsync-keepalive at minimum; the obs-self-heal respawner too)
+    assert!(
+        stream.contains("'avsync-keepalive'"),
+        "stream program must disable the avsync-keepalive task:\n{stream}"
+    );
+    assert!(
+        stream.contains("'camera-box-obs-self-heal-stream'"),
+        "stream program must disable the obs-self-heal task (the real obs64 respawner):\n{stream}"
+    );
+    // the disable half: an schtasks /DISABLE, gated on the task being PRESENT and ENABLED first
+    assert!(
+        stream.contains("schtasks /Change /TN $t /DISABLE"),
+        "stream must schtasks /DISABLE each keep-alive task:\n{stream}"
+    );
+    assert!(
+        stream.contains("Scheduled Task State"),
+        "only a PRESENT+ENABLED task is disabled+restored (reads its state first):\n{stream}"
+    );
+    // the restore half: re-enable exactly the tasks it disabled, verified, fail-loud on a miss
+    assert!(
+        stream.contains("$disabledKeepAlive") && stream.contains("schtasks /Change /TN $t /ENABLE"),
+        "stream must re-enable exactly the tasks it disabled:\n{stream}"
+    );
+    assert!(
+        stream.contains("exit 10"),
+        "a keep-alive task that does not come back enabled must fail loud (exit 10), mirroring AHK exit 9:\n{stream}"
+    );
+    // a present-but-unreadable task state must FAIL LOUD, never silently fail-open (else a live
+    // keep-alive respawns obs64 -- the exact #1140 incident with no warning).
+    assert!(
+        stream.contains("could not read the Scheduled Task State"),
+        "an unreadable task state must fail loud, never be treated as already-disabled:\n{stream}"
+    );
+    // disabling also /End's any in-flight instance (parity with the AHK Stop-Process actor kill).
+    assert!(
+        stream.contains("schtasks /End /TN $t"),
+        "the disable step must also terminate an in-flight keep-alive instance (schtasks /End):\n{stream}"
+    );
+    // ORDER: disable BEFORE stopping obs64; restore at the tail (after the AHK restart step).
+    let disable_at = stream.find("# (1b)").expect("no # (1b) disable step");
+    let obs_stop_at = stream
+        .find("Get-Process obs64,obs-browser-page")
+        .expect("no obs64 stop line");
+    let restore_at = stream.find("# (8b)").expect("no # (8b) restore step");
+    let ahk_restart_at = stream.find("# (8)").expect("no # (8) restart step");
+    assert!(
+        disable_at < obs_stop_at,
+        "keep-alive tasks must be disabled BEFORE obs64 is stopped (else one respawns it):\n{stream}"
+    );
+    assert!(
+        restore_at > ahk_restart_at,
+        "keep-alive restore (8b) comes at the tail, after the AHK restart step (8):\n{stream}"
+    );
+    // strih carries NO scheduled-task keep-alive block (its keep-alive is the AHK watcher).
+    let strih = win_program("strih", "full", "1");
+    assert!(
+        !strih.contains("avsync-keepalive") && !strih.contains("$disabledKeepAlive"),
+        "strih must carry no scheduled-task keep-alive handling (AHK watcher path only):\n{strih}"
+    );
+}
+
 // ============================================================================================
 // build_imag_deploy_program — the emitted on-imag bash (run over ssh).
 // ============================================================================================

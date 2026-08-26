@@ -768,3 +768,41 @@ fn setup_device_ffmpeg_install_fails_loud_930() {
          swallowing a real apt failure): {full_line}"
     );
 }
+
+/// issue 1187 — the lipsync-test-mode playback path moved off raw fbdev onto DRM/KMS via
+/// `mpv --vo=drm`, so mpv is now a runtime dependency of every box that can take cam2's
+/// lipsync-test-mode painter role. STEP 16 must install it (on the SAME lipsync-runtime install
+/// line as ffmpeg, so it inherits the same fail-loud posture proven above), and the "Installed:"
+/// echo must advertise it for operator visibility.
+#[test]
+fn setup_device_installs_mpv_for_lipsync_drm_playback_1187() {
+    let body = read_script();
+    let idx = body
+        .find("--no-install-recommends ffmpeg libsdl2-2.0-0")
+        .expect("the STEP 16 lipsync-runtime apt-get install line must be present");
+    let line_start = body[..idx].rfind('\n').map(|nl| nl + 1).unwrap_or(0);
+    let line_end = body[idx..]
+        .find('\n')
+        .map(|e| idx + e)
+        .unwrap_or(body.len());
+    let full_line = &body[line_start..line_end];
+    assert!(
+        full_line.split_whitespace().any(|t| t == "mpv"),
+        "1187: STEP 16 must install mpv (the DRM/KMS lipsync playback runtime): {full_line}"
+    );
+    // Anchor on the lipsync-runtime echo specifically: `  Installed:` is a shared prefix used by
+    // several STEP-16 install groups (avahi, udev, ...), so the bare prefix would grab the wrong
+    // (first) one -- `  Installed: ffmpeg` is unique to the lipsync-runtime line.
+    let echo_idx = body
+        .find("echo \"  Installed: ffmpeg")
+        .expect("the STEP 16 lipsync-runtime 'Installed:' echo must be present");
+    let echo_end = body[echo_idx..]
+        .find('\n')
+        .map(|e| echo_idx + e)
+        .unwrap_or(body.len());
+    assert!(
+        body[echo_idx..echo_end].contains("mpv"),
+        "1187: the STEP 16 'Installed:' echo must advertise mpv: {}",
+        &body[echo_idx..echo_end]
+    );
+}

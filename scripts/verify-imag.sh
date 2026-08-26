@@ -114,12 +114,16 @@ set -euo pipefail
 #       was launched directly (bypassing systemctl), leaving Restart=on-failure supervising
 #       nothing; this per-PID cgroup read is the independent proof that cannot be spoofed that way
 #   (u) power/thermal envelope (#1040): the MMIO RAPL PL1 long_term pin matches the provisioned
-#       IMAG_PL1_W (default 29 W) and is enabled; every iGPU slpc_ignore_eff_freq knob reads 1;
+#       IMAG_PL1_W (default 45 W, #1162) and is enabled; every iGPU slpc_ignore_eff_freq knob reads 1;
 #       thermald is PURGED (not installed/active/enabled); BOTH imag-power-envelope.service and
 #       imag-power-envelope-guard.timer are enabled+active; TCPU is below the guard's step-down
-#       ceiling (a reading at/above it means a clamp episode is live); and the guard's journald tag
-#       is readable. Shares imag_power_envelope_verdict with drift-guard's --check-imag facet. MUST
-#       run BEFORE check (o) below (its restart replaces the tracked obs process, #884 ordering).
+#       ceiling; and the guard's journald tag is readable. Shares imag_power_envelope_verdict with
+#       drift-guard's --check-imag facet. GUARD-STATE-AWARE (#1188): a pl1 DRIFT to the 25 W
+#       step-down value AND a TCPU at/above the ceiling are downgraded to OK-with-note when the
+#       guard's own /run state proves a LEGITIMATE thermal step-down (STEPPED=1) -- on the #1162
+#       unit that clamp is the normal steady state, NOT foreign drift; a step-down the guard did not
+#       make still FAILs. MUST run BEFORE check (o) below (its restart replaces the tracked obs
+#       process, #884 ordering).
 #   (v) power-button + lid + sleep protection (#727): imag-nb is a PRODUCTION box (a short
 #       accidental power-button press suspended it during the 2026-07-12 live event). The running
 #       logind reports HandlePowerKey/HandleSuspendKey/HandleHibernateKey/HandleLidSwitch = ignore
@@ -146,6 +150,13 @@ set -euo pipefail
 #       intel_pstate no_turbo=0 + platform_profile, optional knobs `absent`-tolerant for hardware
 #       agnosticism, #816). Closes the hand-placed-never-provisioned gap #791 exists for; setup-imag.sh
 #       step 26 provisions it. Pure sysfs/systemd reads (side-effect free), so it runs BEFORE check (o).
+#   (z) display-path tear-free config (issue 1146): the picom vsync compositor is RUNNING + its
+#       user systemd unit is ENABLED, HDMI is the xrandr PRIMARY (the projector is the vsync anchor),
+#       the #841 iGPU freq pin holds, and the #779 tap conf is present. Runs the SHARED
+#       imag_display_path_verdict (scripts/lib/imag-display-path.sh) -- the SAME verdict drift-guard
+#       --check-imag and the E2E [0/8] preflight run. setup-imag.sh step 27 provisions picom + step
+#       16 sets HDMI primary; a re-provision that lost either (or picom that failed to come up after
+#       a reboot) must FAIL here. Pure ssh reads (side-effect free), appended at the END.
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -164,6 +175,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/imag-power-envelope.sh" # imag_power_envelope_verdict/imag_power_envelope_gather_
                                      # remote_snippet (#1040) -- SHARED with drift-guard.sh's
                                      # --check-imag power-envelope facet, never a driftable copy
+# shellcheck source=scripts/lib/imag-display-path.sh
+. "$HERE/lib/imag-display-path.sh"   # imag_display_path_verdict/imag_display_path_gather_remote_
+                                     # snippet (#780/issue 1146) -- SHARED with drift-guard.sh's
+                                     # --check-imag display-path facet + the E2E [0/8] preflight
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"      # offset_check/ptp_locked_from_pipe_json/_journal/
                                      # dantesync_offset_verdict/gm_source_ip_from_pipe_json/
@@ -245,7 +260,7 @@ imag_hostname_matches() {
 imag_static_ip_present() {
   local text="$1" ip="$2"
   [ -n "$ip" ] || return 1
-  printf '%s' " $text " | grep -qF " ${ip} " || printf '%s' " $text " | grep -qF " ${ip}/"
+  grep -qF " ${ip} " <<<" $text " || grep -qF " ${ip}/" <<<" $text "
 }
 
 # --- (b) ssh.service (not ssh.socket) --------------------------------------------------------
@@ -279,7 +294,7 @@ imag_hwe_kernel_installed() {
 # imag_cmdline_has_preempt_full CMDLINE -> 0 iff CMDLINE carries the whole-token `preempt=full`
 # flag (the #482 low-latency-kernel config).
 imag_cmdline_has_preempt_full() {
-  printf '%s' " $1 " | grep -qE '[[:space:]]preempt=full[[:space:]]'
+  grep -qE '[[:space:]]preempt=full[[:space:]]' <<<" $1 "
 }
 
 # imag_cmdline_free_of_kernel_isolation CMDLINE -> 0 iff CMDLINE carries NEITHER an `isolcpus=`
@@ -291,7 +306,7 @@ imag_cmdline_has_preempt_full() {
 # acceptance-gate item, deferred between #780/#791 since 2026-07-15 and the direct cause of the
 # #842 recurrence on the replacement notebook. A hard FAIL, never a warning.
 imag_cmdline_free_of_kernel_isolation() {
-  ! printf '%s' " $1 " | grep -qE '[[:space:]](isolcpus|nohz_full)='
+  ! grep -qE '[[:space:]](isolcpus|nohz_full)=' <<<" $1 "
 }
 
 # --- (e) display-manager -> lightdm + autologin; gdm3 absent ---------------------------------
@@ -301,8 +316,8 @@ imag_cmdline_free_of_kernel_isolation() {
 imag_autologin_conf_ok() {
   local text="$1" user="$2"
   [ -n "$user" ] || return 1
-  printf '%s\n' "$text" | grep -qxF "autologin-user=${user}" \
-    && printf '%s\n' "$text" | grep -qxF "autologin-session=openbox"
+  grep -qxF "autologin-user=${user}" <<<"$text" \
+    && grep -qxF "autologin-session=openbox" <<<"$text"
 }
 
 # imag_pkg_absent STATUS -> 0 iff STATUS shows the package is genuinely NOT installed. The
@@ -325,7 +340,7 @@ imag_failed_units_ok() {
 # contains NO unsubstituted `__WORD__`-shaped placeholder (setup-imag.sh sed's __PYBIN__/__SCN__/
 # __ISOLCPUS__ in at provisioning time -- a leftover literal means the sed step silently no-op'd).
 imag_autostart_placeholders_resolved() {
-  ! printf '%s' "$1" | grep -qE '__[A-Za-z_]+__'
+  ! grep -qE '__[A-Za-z_]+__' <<<"$1"
 }
 
 # imag_regular_file_present MODE -> 0 iff MODE (the first whitespace-token of an `ls -la` line,
@@ -345,7 +360,7 @@ imag_regular_executable_file() {
 # USER -o comm=` dump, one bare process name per line -- exact match avoids a substring false-hit,
 # e.g. "obs" must not match "obs-plugin-helper").
 imag_proc_running() {
-  printf '%s\n' "$1" | grep -qxF "$2"
+  grep -qxF "$2" <<<"$1"
 }
 
 # --- (h) OBS log: genlock tick, no version-mismatch, DistroAV + NDI loaded -------------------
@@ -354,7 +369,14 @@ imag_proc_running() {
 # EXACT same regex family as setup-imag.sh's own step-18 verify + scripts/drift-guard.sh's
 # genlock_capability_from_log -- never a second, drifting pattern.
 imag_obs_log_shows_genlock_tick() {
-  printf '%s' "$1" | grep -iqE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)'
+  # #1183: -a + LC_ALL=C -> byte-literal match, so invalid-UTF-8 bytes in the OBS log (DistroAV
+  # mojibake) can never suppress a marker that IS present in a UTF-8 locale. Here-string, NOT a
+  # `printf '%s' "$1" | grep -q` pipe: under `set -euo pipefail`, grep -q exits at the first match
+  # and SIGPIPEs the printf writer on a >64 KiB log (the marker is a startup line at the top; live
+  # logs are 173 KB-40 MB) -> rc=141 -> pipefail false-FAILs a healthy box. The here-string has no
+  # writer process (bash materializes the body to a temp file), so it is SIGPIPE-immune at any size
+  # -- the issue-1047 sanctioned form, matching the three sibling matchers below.
+  LC_ALL=C grep -aiqE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' <<<"$1"
 }
 
 # imag_obs_log_no_version_mismatch LOG_TEXT -> 0 iff LOG_TEXT contains NO "compiled with newer
@@ -362,18 +384,22 @@ imag_obs_log_shows_genlock_tick() {
 # than a stock plugin's build refuses to load it; left OBS with ONLY distroav.so, no
 # obs-websocket, no encoders).
 imag_obs_log_no_version_mismatch() {
-  ! printf '%s' "$1" | grep -qi 'compiled with newer libobs'
+  # #1183: -a + LC_ALL=C so invalid-UTF-8 bytes cannot blind this NEGATIVE check into falsely
+  # reporting "no mismatch".
+  ! LC_ALL=C grep -aqi 'compiled with newer libobs' <<<"$1"
 }
 
 # imag_obs_log_shows_distroav_loaded LOG_TEXT -> 0 iff LOG_TEXT shows the DistroAV plugin loaded
 # (same grep verify-device.sh's own log-verify convention and setup-imag.sh step 18 both use).
 imag_obs_log_shows_distroav_loaded() {
-  printf '%s' "$1" | grep -qi '\[distroav\] plugin loaded'
+  # #1183: -a + LC_ALL=C (invalid-UTF-8-safe, same audit as the other log-text matchers)
+  LC_ALL=C grep -aqi '\[distroav\] plugin loaded' <<<"$1"
 }
 
 # imag_obs_log_shows_ndi_loaded LOG_TEXT -> 0 iff LOG_TEXT shows the NDI runtime initialized.
 imag_obs_log_shows_ndi_loaded() {
-  printf '%s' "$1" | grep -qi 'NDI library initialized'
+  # #1183: -a + LC_ALL=C (invalid-UTF-8-safe, same audit as the other log-text matchers)
+  LC_ALL=C grep -aqi 'NDI library initialized' <<<"$1"
 }
 
 # --- (j) OBS base version pin + apt-mark hold (#824) ------------------------------------------
@@ -386,7 +412,7 @@ imag_obs_base_version_matches() {
 # imag_pkg_is_held HOLD_LIST_TEXT NAME -> 0 iff NAME appears as an exact line in HOLD_LIST_TEXT
 # (an `apt-mark showhold` dump).
 imag_pkg_is_held() {
-  printf '%s\n' "$1" | grep -qxF "$2"
+  grep -qxF "$2" <<<"$1"
 }
 
 # --- (k2) NVIDIA dGPU: driver + prime-select when present, correctly skipped when absent (#816) -
@@ -438,8 +464,8 @@ imag_scenes_output_ok() {
   # SUBSTRING, so an unanchored -F match would wrongly pass the main-scenes check off the MV line
   # alone even when the main "scenes: N/N" line reports a shortfall. Anchor each to its own
   # line's start.
-  printf '%s\n' "$out" | grep -qE "^scenes: ${count}/${count} OK" \
-    && printf '%s\n' "$out" | grep -qE "^MV scenes: ${count}/${count} \(multiview, low-bw\) OK"
+  grep -qE "^scenes: ${count}/${count} OK" <<<"$out" \
+    && grep -qE "^MV scenes: ${count}/${count} \(multiview, low-bw\) OK" <<<"$out"
 }
 
 # --- (q) canonical scene ORDER + NDI-source bindings (imag_scenes.py --verify-parity, #791) ---
@@ -451,8 +477,8 @@ imag_scenes_output_ok() {
 # scene ORDER) -- (n) above only ever proved the "Cam N"/"MV Cam N" COUNT, never the full 17-scene
 # set (incl. "resolume imag"/"MW resolume imag", which NO automated seeder creates) nor the order.
 imag_parity_output_ok() {
-  printf '%s\n' "$1" | grep -qxF "scene order: OK" \
-    && printf '%s\n' "$1" | grep -qxF "ndi sources: OK"
+  grep -qxF "scene order: OK" <<<"$1" \
+    && grep -qxF "ndi sources: OK" <<<"$1"
 }
 
 # --- (r) OBS stats dock persisted (DockState in global.ini, #791) -----------------------------
@@ -484,9 +510,14 @@ imag_dockstate_present() {
 # ONE core; the fixed distribution spreads 19/16/24/26/12/17 across 6 cores (max 23%).
 imag_obs_thread_concentration_ok() {
   local list="$1" total max
-  total="$(printf '%s\n' "$list" | grep -cE '^[0-9]+$')"
+  # #1183: `ps -L -o psr= -C obs` RIGHT-PADS its single column to the widest value's width, so real
+  # lines are "  6" / " 11" (verified cat -A: "  6$"), NOT bare "6". A `^[0-9]+$` grep matches ZERO
+  # padded lines -> total=0 -> false-FAIL on a healthy box. Normalise to the bare core number with
+  # `awk '{print $1}'` FIRST, applied IDENTICALLY to the total count AND the per-core max so the two
+  # can never disagree; keep the `^[0-9]+$` anchor to still reject genuine non-numeric junk.
+  total="$(printf '%s\n' "$list" | awk '{print $1}' | grep -cE '^[0-9]+$')"
   [ "$total" -gt 0 ] || return 1
-  max="$(printf '%s\n' "$list" | grep -E '^[0-9]+$' | sort -n | uniq -c \
+  max="$(printf '%s\n' "$list" | awk '{print $1}' | grep -E '^[0-9]+$' | sort -n | uniq -c \
     | awk '{print $1}' | sort -rn | head -1)"
   [ -n "$max" ] || return 1
   # fail when max/total > 60% -- integer form: max*100 > total*60
@@ -523,7 +554,7 @@ imag_obs_service_restart_cmd() {
 # imag_openbox_menu_looks_valid TEXT -> 0 iff TEXT (the ~/.config/openbox/menu.xml contents) is
 # non-empty and contains a `<menu` tag (basic XML sanity -- never pass on an empty/corrupted file).
 imag_openbox_menu_looks_valid() {
-  [ -n "$(printf '%s' "$1" | tr -d '[:space:]')" ] && printf '%s' "$1" | grep -qi '<menu'
+  [ -n "$(printf '%s' "$1" | tr -d '[:space:]')" ] && grep -qi '<menu' <<<"$1"
 }
 
 # imag_openbox_root_menu_bound RC_XML_TEXT -> 0 iff RC_XML_TEXT (the EFFECTIVE openbox rc.xml the
@@ -547,7 +578,7 @@ imag_openbox_root_menu_bound() {
   flat="$(printf '%s' "$1" | tr '\n\t' '  ' | sed 's/<!--\([^-]\|-[^-]\)*-->//g' | tr -s ' ')"
   root_block="$(printf '%s' "$flat" | grep -oP '<context\s+name=[\x22\x27]Root[\x22\x27]\s*>.*?</context>' || true)"
   [ -n "$root_block" ] || return 1
-  printf '%s' "$root_block" | grep -qP '<mousebind\s[^>]*\bbutton=[\x22\x27]Right[\x22\x27][^>]*>.*?<action\s[^>]*\bname=[\x22\x27]ShowMenu[\x22\x27][^>]*>\s*<menu>\s*root-menu\s*</menu>'
+  grep -qP '<mousebind\s[^>]*\bbutton=[\x22\x27]Right[\x22\x27][^>]*>.*?<action\s[^>]*\bname=[\x22\x27]ShowMenu[\x22\x27][^>]*>\s*<menu>\s*root-menu\s*</menu>' <<<"$root_block"
 }
 
 # imag_watchdog_installed_but_disabled SCRIPT_MODE UNIT_LIST_TEXT IS_ENABLED -> 0 iff the
@@ -562,7 +593,7 @@ imag_watchdog_installed_but_disabled() {
   local script_mode="$1" unit_list="$2" enabled
   enabled="$(printf '%s' "$3" | tr -d '[:space:]')"
   imag_regular_executable_file "$script_mode" || return 1
-  printf '%s' "$unit_list" | grep -qF "imag-obs-watchdog.service" || return 1
+  grep -qF "imag-obs-watchdog.service" <<<"$unit_list" || return 1
   [ "$enabled" = "disabled" ]
 }
 
@@ -605,8 +636,8 @@ imag_obs_service_restart_is_on_failure() {
 imag_autostart_launches_via_service_not_script() {
   local code
   code="$(printf '%s\n' "$1" | grep -vE '^[[:space:]]*#')"
-  printf '%s' "$code" | grep -qF "systemctl --user start imag-obs.service" \
-    && ! printf '%s' "$code" | grep -q "imag-obs-start.sh"
+  grep -qF "systemctl --user start imag-obs.service" <<<"$code" \
+    && ! grep -q "imag-obs-start.sh" <<<"$code"
 }
 
 # imag_core_pattern_captures_dumps CORE_PATTERN_TEXT -> 0 iff CORE_PATTERN_TEXT (the box's
@@ -631,7 +662,7 @@ imag_core_pattern_captures_dumps() {
 # hypothetical differently-named unit sharing a prefix/suffix (e.g. "imag-obs.service-old") never
 # false-matches.
 imag_obs_cgroup_shows_service_unit() {
-  printf '%s\n' "$1" | grep -qE '(^|/)imag-obs\.service($|/)'
+  grep -qE '(^|/)imag-obs\.service($|/)' <<<"$1"
 }
 
 # imag_obs_core_dumps_enabled LIMITS_LINE -> 0 iff LIMITS_LINE (a `grep -i "Max core file size"
@@ -640,7 +671,7 @@ imag_obs_cgroup_shows_service_unit() {
 # merely configured in the unit file -- the #882 root cause: ulimit -c was 0, so the 2026-07-30
 # segfault produced nothing debuggable.
 imag_obs_core_dumps_enabled() {
-  printf '%s' "$1" | grep -qE '^Max core file size[[:space:]]+unlimited[[:space:]]+unlimited'
+  grep -qE '^Max core file size[[:space:]]+unlimited[[:space:]]+unlimited' <<<"$1"
 }
 
 # imag_powerkey_protection_ok LOGINCTL MASKED -> 0 iff the running box is protected against an
@@ -654,10 +685,10 @@ imag_obs_core_dumps_enabled() {
 imag_powerkey_protection_ok() {
   local loginctl="$1" masked="$2" k t
   for k in HandlePowerKey HandleSuspendKey HandleHibernateKey HandleLidSwitch; do
-    printf '%s\n' "$loginctl" | grep -qxF "${k}=ignore" || return 1
+    grep -qxF "${k}=ignore" <<<"$loginctl" || return 1
   done
   for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
-    printf '%s\n' "$masked" | grep -qxF "${t}=masked" || return 1
+    grep -qxF "${t}=masked" <<<"$masked" || return 1
   done
   return 0
 }
@@ -727,6 +758,45 @@ imag_maxperf_state_ok() {
   case "$turbo" in ''|absent|0)           ;; *) return 1 ;; esac
   case "$prof"  in ''|absent|performance) ;; *) return 1 ;; esac
   return 0
+}
+
+# --- (u) power/thermal-envelope ACCEPTANCE reclassification (guard-state-aware, #1188) --------
+# The SHARED imag_power_envelope_verdict (scripts/lib/imag-power-envelope.sh) is deliberately
+# guard-BLIND: it reports a pl1 DRIFT whenever the live PL1 != the pinned watts. That is CORRECT for
+# drift-guard's STRICT [0/8] preflight (it must refuse a run during a clamp episode), but on the
+# #1162 unit the guard's OWN legitimate thermal step-down (PL1 -> 25 W at >=93 C) is the PERMANENT
+# steady state, so the ACCEPTANCE gate must not read it as foreign drift. These two functions encode
+# the acceptance-ONLY downgrade; the shared verdict stays untouched (drift-guard is unaffected).
+
+# imag_power_pl1_guard_reclassify OBSERVED_UW ENABLED GUARD_STATE STEPDOWN_WATTS -> echoes
+# `stepdown-ok` iff a pl1 DRIFT is FULLY explained by an active guard thermal step-down (GUARD_STATE
+# == stepped AND the live long_term uW == STEPDOWN_WATTS-in-uW AND the constraint is still enabled);
+# otherwise `drift` (foreign re-program, a wrong/disabled value, or the guard is NOT stepped / its
+# state is unreadable -> never mask a genuine drift). Reuses the shared imag_pl1_watts_to_uw for the
+# exact watt->uW comparison. Pure; always returns 0 (called inside a `$(...)` under set -euo pipefail).
+imag_power_pl1_guard_reclassify() {
+  local observed_uw="$1" enabled="$2" guard_state="$3" stepdown_watts="$4" stepdown_uw
+  stepdown_uw="$(imag_pl1_watts_to_uw "$stepdown_watts" 2>/dev/null || true)"
+  if [ "$guard_state" = "stepped" ] && [ -n "$stepdown_uw" ] \
+    && [ "$observed_uw" = "$stepdown_uw" ] && [ "$enabled" = "1" ]; then
+    printf 'stepdown-ok\n'
+  else
+    printf 'drift\n'
+  fi
+}
+
+# imag_power_tcpu_guard_verdict TCPU CEIL GUARD_STATE -> echoes one of `unreadable | ok | ok-stepdown
+# | over-ceiling`. `unreadable` = TCPU/CEIL empty or non-numeric. `ok` = TCPU below the step-down
+# ceiling. `ok-stepdown` = TCPU at/above the ceiling BUT the guard has stepped PL1 down: on the #1162
+# unit the box holds at its thermal ceiling even under the 25 W clamp, so this is the EXPECTED steady
+# state, not a new clamp episode. `over-ceiling` = at/above the ceiling with the guard NOT stepped
+# (or its state unknown) -> a live clamp episode / foreign heat (the existing FAIL). Pure; returns 0.
+imag_power_tcpu_guard_verdict() {
+  local tcpu="$1" ceil="$2" guard_state="$3"
+  case "$tcpu" in '' | *[!0-9-]*) printf 'unreadable\n'; return 0 ;; esac
+  case "$ceil" in '' | *[!0-9-]*) printf 'unreadable\n'; return 0 ;; esac
+  if [ "$tcpu" -lt "$ceil" ]; then printf 'ok\n'; return 0; fi
+  if [ "$guard_state" = "stepped" ]; then printf 'ok-stepdown\n'; else printf 'over-ceiling\n'; fi
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
@@ -1241,27 +1311,58 @@ else
   # acceptance gate and the strict gate never check DIFFERENT wattages after a deliberate re-pin.
   # Fall back to the lib/env default only when the README is unreadable.
   PE_PIN="$(imag_power_pl1_pin_from_readme_text "$(cat "$HERE/../vendor/README.md" 2>/dev/null || true)")"
-  [ -n "$PE_PIN" ] || PE_PIN="${IMAG_PL1_W:-29}"
+  [ -n "$PE_PIN" ] || PE_PIN="${IMAG_PL1_W:-45}"
+
+  # #1188: consult the guard's OWN /run state so a LEGITIMATE thermal step-down (the guard clamped
+  # PL1 to the 25 W step-down on a >=93 C excursion -- on the #1162 unit the normal steady state) is
+  # not read as a FOREIGN PL1 re-program. Read the state file over the same SSH (the guard writes it
+  # world-readable, #1188); an unreadable/absent file -> `unknown` -> we keep the strict DRIFT/FAIL
+  # (never mask). The SHARED imag_power_envelope_verdict stays guard-BLIND, so drift-guard's strict
+  # preflight is unaffected -- the downgrade below is acceptance-gate-only.
+  PE_GUARD_RAW="$(ssh_box_timeout "$IMAG_READ_TIMEOUT" "cat ${IMAG_POWER_GUARD_STATE:-$IMAG_POWER_GUARD_STATE_FILE} 2>/dev/null")" || true
+  PE_GUARD_STATE="$(imag_power_guard_stepped_from_state "$PE_GUARD_RAW")"
+  PE_PL1_UW="$(imag_power_zone_select "$PE_GATHER" || true)"
+  PE_PL1_EN="$(imag_power_pl1_enabled "$PE_GATHER" || true)"
+  # Prefer the step-down watts the guard ITSELF recorded in its state (its own authority), so a
+  # provisioning-time IMAG_PL1_STEPDOWN_W override baked into the guard unit can never diverge from
+  # verify's independent env default (#1188). Fall back to the env/lib default only for an older
+  # guard that did not record it.
+  PE_GUARD_STEPDOWN_W="$(imag_power_guard_stepdown_w_from_state "$PE_GUARD_RAW")"
+  PE_STEPDOWN_W="${PE_GUARD_STEPDOWN_W:-${IMAG_PL1_STEPDOWN_W:-25}}"
+
   while IFS='|' read -r pe_facet pe_status pe_detail; do
     [ -n "$pe_facet" ] || continue
     if [ "$pe_status" = "OK" ]; then
       ok "power envelope (${pe_facet}): ${pe_detail}"
+    elif [ "$pe_facet" = "pl1" ] && [ "$pe_status" = "DRIFT" ] \
+      && [ "$(imag_power_pl1_guard_reclassify "$PE_PL1_UW" "$PE_PL1_EN" "$PE_GUARD_STATE" "$PE_STEPDOWN_W")" = "stepdown-ok" ]; then
+      ok "power envelope (pl1): long_term=${PE_PL1_UW}uW at the ${PE_STEPDOWN_W}W step-down, guard thermal step-down active -- a legitimate #1040 clamp (guard state STEPPED), NOT foreign drift (#1188)"
     else
       fail "power envelope (${pe_facet}) ${pe_status}: ${pe_detail}"
     fi
   done <<< "$(imag_power_envelope_verdict "$PE_GATHER" "$PE_PIN")"
 
   # TCPU must be BELOW the guard's step-down ceiling -- a reading at/above it means a clamp episode
-  # is live right now (the envelope is thermally degraded, not merely mis-provisioned).
+  # is live right now (the envelope is thermally degraded, not merely mis-provisioned) -- UNLESS the
+  # guard has already stepped PL1 down (#1188): on the #1162 unit the box holds at its thermal
+  # ceiling even under the 25 W clamp, so a stepped-down at/above-ceiling reading is the EXPECTED
+  # steady state, not a new clamp episode.
   PE_TCPU="$(printf '%s\n' "$PE_GATHER" | sed -n 's/^TCPU|//p' | head -1)"
   PE_CEIL="${IMAG_TCPU_STEPDOWN_C:-93}"
-  if [ -z "$PE_TCPU" ]; then
-    fail "TCPU (x86_pkg_temp) unreadable in the envelope gather -- cannot confirm the box is below the ${PE_CEIL}C step-down ceiling (#1040)"
-  elif [ "$PE_TCPU" -lt "$PE_CEIL" ]; then
-    ok "TCPU=${PE_TCPU}C is below the ${PE_CEIL}C guard step-down ceiling (#1040)"
-  else
-    fail "TCPU=${PE_TCPU}C is AT/ABOVE the ${PE_CEIL}C step-down ceiling -- a thermal clamp episode is live (#1040)"
-  fi
+  case "$(imag_power_tcpu_guard_verdict "$PE_TCPU" "$PE_CEIL" "$PE_GUARD_STATE")" in
+    unreadable)
+      fail "TCPU (x86_pkg_temp) unreadable in the envelope gather -- cannot confirm the box is below the ${PE_CEIL}C step-down ceiling (#1040)"
+      ;;
+    ok)
+      ok "TCPU=${PE_TCPU}C is below the ${PE_CEIL}C guard step-down ceiling (#1040)"
+      ;;
+    ok-stepdown)
+      ok "TCPU=${PE_TCPU}C is at/above the ${PE_CEIL}C step-down ceiling BUT the guard has stepped PL1 down (thermal step-down active) -- the expected steady state on this unit under the ${PE_STEPDOWN_W}W clamp (#1162/#1188), not a new clamp episode"
+      ;;
+    *)
+      fail "TCPU=${PE_TCPU}C is AT/ABOVE the ${PE_CEIL}C step-down ceiling -- a thermal clamp episode is live (#1040)"
+      ;;
+  esac
 
   # The guard's journald tag must be readable -- proves its step-down/re-assert transitions are
   # retrievable for the dev1-side alert watchdog (the never-silent-degradation rule).
@@ -1498,6 +1599,25 @@ elif imag_powerkey_protection_ok "$LOGIND_KEYS" "$MASKED_TARGETS"; then
   ok "power-button/lid/suspend/hibernate keys all ignored + sleep/suspend/hibernate/hybrid-sleep targets masked (#727 -- production box can't be accidentally suspended)"
 else
   fail "#727 power-button protection NOT effective -- need HandlePowerKey/HandleSuspendKey/HandleHibernateKey/HandleLidSwitch =ignore AND the four sleep targets masked. loginctl: $(printf '%s' "$LOGIND_KEYS" | tr '\n' ' ') || masked: $(printf '%s' "$MASKED_TARGETS" | tr '\n' ' ')"
+fi
+
+# (z) display-path tear-free config (issue 1146): picom vsync compositor running + enabled, HDMI
+# the xrandr primary, iGPU freq pinned, tap conf. Reuses the SHARED imag_display_path_verdict --
+# the SAME verdict drift-guard --check-imag and the E2E [0/8] preflight run (no bespoke logic here).
+# A DRIFT (picom off, panel primary, etc.) FAILs; an UNKNOWN (SSH hiccup / unreadable) warns, never
+# a false fail. Pure ssh reads (side-effect free), so it is appended at the END.
+DP_GATHER="$(ssh_box "$(imag_display_path_gather_remote_snippet)" 2>/dev/null || true)"
+if [ -z "$DP_GATHER" ]; then
+  warn "display-path config unreadable over SSH -- cannot verify the issue-1146 tear-free config (picom/HDMI-primary)"
+else
+  while IFS='|' read -r dp_facet dp_status dp_detail; do
+    [ -n "$dp_facet" ] || continue
+    case "$dp_status" in
+      OK)      ok "display-path/${dp_facet}: ${dp_detail}" ;;
+      DRIFT)   fail "display-path/${dp_facet} DRIFT: ${dp_detail}" ;;
+      *)       warn "display-path/${dp_facet} UNKNOWN: ${dp_detail}" ;;
+    esac
+  done <<< "$(imag_display_path_verdict "$DP_GATHER")"
 fi
 
 echo ""

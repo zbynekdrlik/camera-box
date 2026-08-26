@@ -25,6 +25,11 @@ pub struct RunConfig {
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub qr_size: u32,
+    /// #1179: the mode-SELECTION refresh (milli-Hz) for the KMS presenter's `pick_mode` — 60_000
+    /// (the capture rate) by default = today's mode; overridable via `--display-mode` (e.g.
+    /// 100_000 for the 2560×1080@100 experiment). SELECTION only; the 1:1 phase-lock check stays
+    /// against the fixed 60 fps capture.
+    pub mode_refresh_mhz: u32,
     pub freeze_periods: f64,
     pub connect_timeout_secs: u32,
     /// Frames painted within this window of the run end are excluded from the
@@ -164,6 +169,10 @@ fn spawn_painter_wedge_watchdog(heartbeat: Arc<AtomicU64>, stop: Arc<AtomicBool>
 }
 
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
+    // #1186: install the graceful-shutdown handler so a signal-driven stop of the single-box
+    // loopback run also breaks the loops cleanly and lets KmsPresenter::Drop blank /dev/fb0
+    // (issue-660). Idempotent.
+    crate::shutdown::install();
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
     let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -201,6 +210,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             canvas_w: cfg.canvas_w,
             canvas_h: cfg.canvas_h,
             qr_size: cfg.qr_size,
+            mode_refresh_mhz: cfg.mode_refresh_mhz,
             // Phase-1 single-box loopback: painter + reader share THIS process's
             // monotonic clock, so latency is exact without any sync. A wall-clock
             // gen here would break that — force monotonic regardless of cfg.
@@ -217,6 +227,11 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
     let deadline = Instant::now() + cfg.duration;
     while Instant::now() < deadline {
         if painter_handle.is_finished() || reader_handle.is_finished() {
+            break;
+        }
+        // #1186: break on a graceful shutdown signal too, so the painter's presenter Drop runs
+        // the issue-660 fb0 blank on a signal-driven stop of the loopback run.
+        if crate::shutdown::is_shutdown_requested() {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -283,6 +298,12 @@ pub fn serialize_painter_log(emitted: &[(u32, i64, i64)]) -> String {
 /// camera box in Phase 2, where the QR reaches NDI via camera-box's own
 /// capture→NDI path and the taps run elsewhere (dev1).
 pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
+    // #1186: install the SIGTERM/SIGINT/SIGHUP handler so `systemctl stop cam2-painter.service`
+    // (the most common exit path since issue 892) sets the shutdown flag this loop + the painter
+    // thread poll — breaking cleanly so KmsPresenter::Drop runs the issue-660 fb0 blank, instead
+    // of SIGTERM's default disposition killing the process with the last frame frozen on the
+    // monitor. Idempotent.
+    crate::shutdown::install();
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
     let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -320,6 +341,7 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             canvas_w: cfg.canvas_w,
             canvas_h: cfg.canvas_h,
             qr_size: cfg.qr_size,
+            mode_refresh_mhz: cfg.mode_refresh_mhz,
             // Multi-node (#7): stamp gen_ts on the DanteSync wall clock when asked
             // so the dev1 endpoint tap's wall-clock recv − this gen is true
             // absolute latency. Defaults false (Phase-2 relative latency only).
@@ -352,12 +374,17 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     // cam2-painter.service (Restart=always, duration ~1 year) would otherwise either blank the
     // monitor forever (a persistent failure) or crash-loop every 2s (a transient one). An
     // EXPLICIT `--audio-marker` request keeps the original hard-fail contract (issue 936).
-    let mut audio_marker_degraded = false;
-    let audio_emitter = if cfg.audio_marker {
-        let params = crate::qpsk_marker::AudioParams::rig60();
-        match crate::probe::qpsk_emit::QpskEmitter::spawn(
+    // #1172: the SOFT (issue-984) degraded marker must SELF-RECOVER -- the shipped loop opened the
+    // PCM ONCE and, on a transient-busy failure, only LOGGED "still DEGRADED" forever (never
+    // re-attempting the open), so a marker degraded by a device momentarily held at painter start
+    // (a lipsync-test ffmpeg still releasing hw:CARD=PCH,DEV=3) stayed silent until a manual
+    // `systemctl restart cam2-painter`. This closure is the SINGLE ALSA open call site shared by
+    // the initial open AND the degraded-retry path in the poll loop below, so the device is
+    // re-opened each retry cycle and the marker recovers the moment it frees.
+    let spawn_emitter = || {
+        crate::probe::qpsk_emit::QpskEmitter::spawn(
             cfg.audio_marker_device.clone(),
-            params,
+            crate::qpsk_marker::AudioParams::rig60(),
             current_id.clone(),
             refresh_out.clone(),
             stop.clone(),
@@ -365,16 +392,26 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             cfg.wall_clock,
             cfg.audio_marker_cadence_ticks,
             cfg.marker_log.clone(),
-        ) {
+        )
+    };
+    // #1172: markers accumulated across re-spawns -- a dropped dead emitter's partial log is joined
+    // and preserved here so a mid-run recovery loses no markers; the final log write (below)
+    // serializes this accumulated set unioned with the last live emitter's log.
+    let mut accumulated_markers: crate::probe::qpsk_emit::QpskMarkerLog = Vec::new();
+    let mut recovery = crate::audio_marker_policy::AudioMarkerRecovery::healthy();
+    let mut audio_emitter = if cfg.audio_marker {
+        match spawn_emitter() {
             Ok(emitter) => Some(emitter),
             Err(e) if cfg.audio_marker_soft => {
                 tracing::error!(
                     device = %cfg.audio_marker_device,
                     error = %format!("{e:#}"),
+                    retry_secs = crate::audio_marker_policy::RECOVERY_RETRY_INTERVAL.as_secs(),
                     "#984: audio-marker device failed to open -- continuing QR-only (degraded, \
-                     silent rig, no audio); this ERROR repeats periodically while degraded"
+                     silent rig, no audio); #1172: will retry the open periodically and recover \
+                     once the device frees"
                 );
-                audio_marker_degraded = true;
+                recovery = crate::audio_marker_policy::AudioMarkerRecovery::degraded();
                 None
             }
             Err(e) => {
@@ -392,8 +429,20 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     // #984: rate-limit the degraded-marker ERROR to roughly once per marker cadence period
     // instead of once per 100ms poll tick -- loud, but not a journal flood.
     let mut last_degraded_log = Instant::now();
+    // #1172: the retry clock for re-opening a degraded marker's ALSA device -- seeded now (the
+    // initial open attempt just happened above) and reset on every subsequent open attempt, so a
+    // failed retry waits a full RECOVERY_RETRY_INTERVAL before the next one (never a hot spin on a
+    // still-busy device).
+    let mut last_open_attempt = Instant::now();
     while Instant::now() < deadline {
         if painter_handle.is_finished() {
+            break;
+        }
+        // #1186: a graceful shutdown signal (SIGTERM/SIGINT/SIGHUP) requested a stop. Break so the
+        // shared `stop` is set + the painter joined below — its KmsPresenter::Drop runs the #660
+        // blank_fbdev, leaving /dev/fb0 black instead of the last painted frame revealed on cam2's
+        // HDMI monitor by kernel fbdev emulation once the process dies.
+        if crate::shutdown::is_shutdown_requested() {
             break;
         }
         // #936: fail the WHOLE run loudly the moment the QPSK marker thread dies before this
@@ -407,14 +456,56 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
         // keep painting) instead of aborting -- an EXPLICIT (hard) request still bails as before.
         if let Some(reason) = audio_emitter.as_ref().and_then(|e| e.death_reason()) {
             if cfg.audio_marker_soft {
-                audio_marker_degraded = true;
+                // #1172: a SOFT mid-run death drops to degraded, and the retry path below re-opens
+                // a FRESH emitter once the device frees. Drop the dead emitter (preserving its
+                // partial marker log) and start the retry clock from the death so the first retry
+                // is a full interval away.
+                if let Some(dead) = audio_emitter.take() {
+                    accumulated_markers.extend(dead.join());
+                }
+                recovery.mark_degraded();
+                last_open_attempt = Instant::now();
+                tracing::error!(
+                    device = %cfg.audio_marker_device,
+                    reason = %reason,
+                    retry_secs = crate::audio_marker_policy::RECOVERY_RETRY_INTERVAL.as_secs(),
+                    "#984/#1172: audio marker died mid-run -- degraded, will retry the open \
+                     periodically and recover once the device frees"
+                );
             } else {
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 painter_handle.join().expect("painter panicked")?;
                 anyhow::bail!("{}", crate::qpsk_marker::qpsk_marker_died_message(&reason));
             }
         }
-        if audio_marker_degraded && last_degraded_log.elapsed() >= Duration::from_secs(5) {
+        // #1172: while degraded, re-open the ALSA device every RECOVERY_RETRY_INTERVAL and
+        // self-recover the moment it frees -- the recovery the shipped issue-984 loop never had.
+        if recovery.step(last_open_attempt.elapsed())
+            == crate::audio_marker_policy::MarkerRecoveryStep::AttemptReopen
+        {
+            last_open_attempt = Instant::now();
+            match spawn_emitter() {
+                Ok(emitter) => {
+                    // NOTE: a successful re-open RE-CREATES (truncates) the incremental marker-log
+                    // file (header only) inside `QpskEmitter::spawn`, so the live #420 poller sees
+                    // its row count RESET then grow again on recovery -- growth still proves
+                    // emission, and the FINAL log write below serializes the full accumulated set,
+                    // so a consumer must not assume the incremental file grows monotonically.
+                    tracing::info!(
+                        device = %cfg.audio_marker_device,
+                        "#1172: audio marker RECOVERED -- device reopened, marker emission resumed"
+                    );
+                    audio_emitter = Some(emitter);
+                    recovery.record_reopen(true);
+                }
+                Err(_) => {
+                    // Still busy -- stay degraded; the periodic #984 heartbeat below reports it and
+                    // the next interval retries again (a full interval apart, never a hot spin).
+                    recovery.record_reopen(false);
+                }
+            }
+        }
+        if recovery.is_degraded() && last_degraded_log.elapsed() >= Duration::from_secs(5) {
             tracing::error!(
                 device = %cfg.audio_marker_device,
                 "#984: audio marker still DEGRADED (no audio) -- QR-only, rig is silent"
@@ -426,17 +517,27 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     painter_handle.join().expect("painter panicked")?;
 
-    // Join the audio emitter and write its log before returning.
+    // Join the audio emitter and write its log before returning. #1172: union the markers
+    // accumulated across any re-spawns (dropped dead emitters) with the last live emitter's log, so
+    // a run that recovered from a degraded/died marker loses none of its emitted markers.
+    let has_emitter_at_end = audio_emitter.is_some();
     if let Some(emitter) = audio_emitter {
-        let marker_entries = emitter.join();
-        if let Some(path) = &cfg.marker_log {
+        accumulated_markers.extend(emitter.join());
+    }
+    if let Some(path) = &cfg.marker_log {
+        // Write the marker log when a live emitter is still running at the end (initially opened,
+        // or recovered) OR markers were accumulated from one that died -- matching the original
+        // "only when there was an emitter" behaviour while also covering the recovered-from-degraded
+        // case. A run that stayed degraded end-to-end (no emitter, no markers) writes nothing, as
+        // before.
+        if has_emitter_at_end || !accumulated_markers.is_empty() {
             let csv = crate::qpsk_marker::serialize_qpsk_marker_log(
-                &marker_entries,
+                &accumulated_markers,
                 &crate::qpsk_marker::AudioParams::rig60(),
             );
             std::fs::write(path, csv)
                 .with_context(|| format!("write marker log {}", path.display()))?;
-            tracing::info!(path = %path.display(), markers = marker_entries.len(), "qpsk marker log written");
+            tracing::info!(path = %path.display(), markers = accumulated_markers.len(), "qpsk marker log written");
         }
     }
 

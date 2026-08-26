@@ -264,6 +264,15 @@ struct Args {
     /// dev1 then runs `--merge-partials` to combine them. `<box>` is `strih`, `stream`, or `imag`.
     #[arg(long, value_name = "BOX")]
     extract_partial: Option<String>,
+    /// #1143: OBS's own record-session render stats for the imag recording, as a compact JSON object
+    /// (`{"drawn_frames","attempted_frames","lagged_frames","lagged_pct","max_render_ms"}` — exactly
+    /// what `scripts/imag_record_encoder.parse_obs_record_stats` emits). The harness captures it from
+    /// the imag OBS log stop-stats around the record window and passes it to `--extract-partial imag`;
+    /// it is carried in the partial (`record_render`) and surfaced REPORT-ONLY under
+    /// `full_chain.loss.imag` so a stale x264 encoder's observer effect is attributed to the RECORDER.
+    /// Absent ⇒ no record_render carried (unchanged behaviour). Ignored for strih/stream extracts.
+    #[arg(long)]
+    record_render_stats: Option<String>,
     /// #208: where `--extract-partial` writes the partial JSON. Default: `partial-<box>.json`.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -379,6 +388,17 @@ struct Args {
     /// downgrade the gate -- this only fixes WHO gets judged).
     #[arg(long, default_value = "")]
     offline_ack_cams: String,
+    /// #1142 — does THIS run's contract REQUIRE a verified imag leg? When set, a silently-skipped
+    /// imag leg (`imag_leg_verified=false` and not operator-offline-acked) or a failing imag
+    /// PRESENCE term (span floor / undecodable moiré floor / colour) REDs `overall_pass` (the owner
+    /// honesty mandate). DEFAULT `false` so the many in-process/unit verdict tests that build a
+    /// verdict WITHOUT an imag partial (isolated strih/stream/cam scenarios) are unaffected — only
+    /// the production full-chain merge declares the imag leg part of its contract. `recording-e2e.sh`
+    /// passes it on the ALL_CAMBOX `[8/8d]` merge (never the strih+stream-only zero-loss-restart
+    /// merge). The imag PER-FRAME CONTENT terms stay report-only regardless (issue 1130 observer
+    /// effect); this flag only governs the BLOCKING presence/verification terms.
+    #[arg(long, default_value_t = false)]
+    require_imag_leg: bool,
     /// #895: a `capture_rate_selfheal` (#663) USB-reset event detected by the harness during THIS
     /// recording window (`scripts/lib/self-heal-attribution.sh`'s mid-recording scan, wired at
     /// `recording-e2e.sh`'s `[7b/8]`), so the `frozen_leg` classifier never misreports the
@@ -548,7 +568,22 @@ const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 /// artifact class — only the silent DEFAULT moved back to strict. NEVER raise this constant
 /// again without a fresh measured incident and its own re-tighten ticket, same discipline as
 /// [`OPTICAL_UNDECODABLE_RATE_MAX`].
-const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 0;
+///
+/// **Issue 1169 RE-WIDENED this DEFAULT to 1** (owner, 2026-08-22) — the SECOND SEAM of the
+/// zero-loss singleton work (sibling of the per-segment `<=1/<=1` bar). The first full verdict of
+/// the series (859647390) failed `full_chain.zero_loss` on exactly `real_drops:1` over 314.7
+/// analyzed seconds: a single per-frame delivery SINGLETON (the issue-1167 v3 paced-trickle
+/// absorption + a FIFO stale_replay in the same event; `burn_unreadable` stays 0 — a genuine
+/// delivery singleton, not a burn-readability defect). Per the owner's 2026-07-31 strict-test
+/// revision ("jedna stratená snímka nie je problém"), the band re-widens to the LOUD `<=1`
+/// singleton: a single drop PASSES within the allowance and is reported LOUDLY (never a silent
+/// green), while `>=2` of anything still FAILS and `burn_unreadable` stays an unconditional hard
+/// fail. This is the exact `gate-allowance-restore-red-green.md` shape, inverted. **Issue 1169
+/// stays OPEN as the RE-TIGHTEN trail** — a one-constant flip back to 0 (proven dormant by
+/// `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`), landed once a
+/// zero-singleton green run holds (e.g. after the issue-1168 floor reduction and/or the cam1-card
+/// swap). NEVER widen this band further without a fresh measured incident and its own trail.
+const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 1;
 
 /// #904 — env-overridable read of the per-node `real_drops` allowance (mirrors the
 /// `CAMERA_BOX_DECODE_WORKERS` idiom in `src/probe/recording.rs`: a non-numeric or absent value
@@ -558,6 +593,52 @@ fn real_drops_allowance() -> u32 {
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
         .unwrap_or(REAL_DROPS_ALLOWANCE_DEFAULT)
+}
+
+/// **Issue 1169 THIRD SEAM (owner, 2026-08-22)** — the LOUD singleton allowance for the raw
+/// cam-leg V4L2 capture-drop counter (`full_chain.loss.cam2_*.zero_loss`, the LAST binding
+/// `all_pass &= …` red). It is the sibling of the two prior seams: the per-segment `<=1/<=1`
+/// singleton bar (`window_gate::segment_singleton_allowance_*`) and the per-node real-drops
+/// singleton (`REAL_DROPS_ALLOWANCE_DEFAULT`, the delivery-hop counter above). A `v4l2_dropped`
+/// count WITHIN this band is an UPSTREAM camera-leg buffer drop (the kernel `sequence` gap
+/// `capture.rs` tracks) that the merged issue-1167 v2–v5 paced-trickle + FIFO emit-fill absorbs by
+/// design — so a strict-zero bar on the RAW counter double-reds what the presented layer already
+/// compensated. The first full verdict of the series showed exactly `v4l2_dropped:2` over
+/// `frames_captured:35961` (0.0056%) while `full_chain.zero_loss` + `all_cambox_continuity` were
+/// already green. Per the owner's 2026-07-31 strict-test revision ("jedna stratená snímka nie je
+/// problém"), a `v4l2_dropped <= CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` count PASSES within the
+/// allowance and is reported LOUDLY (never a silent green — a `note` + `camleg_singleton_band_consumed`
+/// on the node JSON), while `> CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` still FAILS unchanged. The
+/// default of 2 is justified from the live data: healthy cam2/cam3 routinely log 0–2 capture-dropped
+/// per ~10-min run window. This is the exact `gate-allowance-restore-red-green.md` shape, inverted,
+/// THIRD instance. **Issue 1169 stays OPEN as the RE-TIGHTEN trail** — a one-constant flip back to 0
+/// (proven dormant by `re_tightening_the_camleg_v4l2_band_to_zero_restores_the_strict_bar`), landed
+/// once a zero-singleton green run holds (e.g. after the issue-1168 floor reduction and/or the
+/// cam1-card swap). NEVER widen this band further without a fresh measured incident and its own trail.
+const CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT: u32 = 2;
+
+/// #1169 — env-overridable read of the cam-leg V4L2 capture-drop allowance (mirrors the
+/// [`real_drops_allowance`] idiom above: a non-numeric or absent value silently falls back to
+/// [`CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT`], never panics).
+fn camleg_v4l2_drop_allowance() -> u32 {
+    std::env::var("CAMERA_BOX_CAMLEG_V4L2_DROP_ALLOWANCE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT)
+}
+
+/// #1169 — the PURE cam-leg V4L2 capture-drop band decision (Tier-0 unit-testable; the whole
+/// `recording-verdict` bin is probe-gated with no local compile path, so keeping this a standalone
+/// scalar fn is what lets a rustc-replica prove the boundary). Returns `(within_band,
+/// band_consumed)`:
+/// - `within_band` — `v4l2_dropped <= allowance`; drives the node's `zero_loss` and the `all_pass`
+///   fold (a within-band count PASSES `overall_pass`).
+/// - `band_consumed` — `within_band && v4l2_dropped > 0`; a NON-zero drop count that only cleared
+///   the gate because of the band (the LOUD note case, distinct from a clean strict-zero pass).
+fn camleg_capture_band(v4l2_dropped: u64, allowance: u32) -> (bool, bool) {
+    let within_band = v4l2_dropped <= allowance as u64;
+    let band_consumed = within_band && v4l2_dropped > 0;
+    (within_band, band_consumed)
 }
 
 /// #24/#312 — the node labels that occupy the "camera under test" role: whichever physical
@@ -1824,12 +1905,12 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool, allowance: u32) -> Vec<Str
         // real_drops allowance (it would have FAILED at allowance 0 — see
         // `consumed_real_drops_allowance`). Printed FIRST, before the "ZERO loss" line below, so
         // it can never be missed scrolling past — a pass that consumed slack must be visibly
-        // distinguishable from a genuine zero-loss pass (#905 tracks re-tightening the bar).
+        // distinguishable from a genuine zero-loss pass (issue 1169 is the re-tighten trail).
         if v.consumed_real_drops_allowance(allowance) {
             lines.push(format!(
-                "  [{}] ZERO loss WITHIN ALLOWANCE — {} real drop(s) consumed the #904 \
-                 per-node allowance of {allowance} (burn_unreadable stays 0; #905 tracks \
-                 re-tightening this back down).",
+                "  [{}] ZERO loss WITHIN ALLOWANCE — real-drops singleton allowance consumed: {} \
+                 — issue 1169 re-tighten trail (#904/#1169 per-node allowance of {allowance}; \
+                 burn_unreadable stays 0).",
                 c.node,
                 v.real_drops()
             ));
@@ -2885,11 +2966,11 @@ fn stream_diag_cfg(base: &VerdictConfig, stream_capture_fps: f64) -> VerdictConf
 /// locally — Tier-0 policy bans compiling `--features probe` on this box). Moved to the correct
 /// item.
 /// #1112 back-compat wrapper — preserves the original 8-arg signature so every existing (test +
-/// fused-`main`) call site is byte-for-byte unchanged. The fused path carries no per-frame content
-/// hashes (the #1088 dup-cadence block recomputes them from the LOCAL `stream_rec` there), so it
-/// delegates with `None`; only the #208 merge path (`run_merge`, which has no recording on dev1)
-/// calls [`build_and_print_verdict_with_stream_hashes`] with the vector carried in the stream
-/// partial (`RecordingPartial::content_hashes`).
+/// fused-`main`) call site is byte-for-byte unchanged. The fused path carries no per-frame
+/// near-duplicate diffs (the #1088 dup-cadence block recomputes them from the LOCAL `stream_rec`
+/// there), so it delegates with `None`; only the #208 merge path (`run_merge`, which has no
+/// recording on dev1) calls [`build_and_print_verdict_with_stream_diffs`] with the vector carried in
+/// the stream partial (`RecordingPartial::frame_prev_diffs`).
 #[allow(clippy::too_many_arguments)]
 fn build_and_print_verdict(
     args: &Args,
@@ -2901,7 +2982,7 @@ fn build_and_print_verdict(
     imag: Option<DecodedRec>,
     stream_av_sync: Option<AvMarkerInputs>,
 ) -> Result<(serde_json::Value, bool)> {
-    build_and_print_verdict_with_stream_hashes(
+    build_and_print_verdict_with_stream_diffs(
         args,
         strih,
         stream,
@@ -2912,17 +2993,18 @@ fn build_and_print_verdict(
         stream_av_sync,
         None,
         None, // issue 1118: the fused/test path never degrades an imag partial (no schema skip)
+        None, // #1143: the fused/test path carries no OBS record-render stats
     )
 }
 
-/// [`build_and_print_verdict`] + the STREAM recording's per-frame content hashes carried from the
-/// #208 merge. `stream_content_hashes` is `Some` ONLY in the merge path on an all-cambox stream
-/// extract (see `run_merge` / `RecordingPartial::content_hashes`); `None` on the fused path (there
-/// the #1088 dup-cadence block recomputes them from the local `stream_rec`) and on any run without
-/// the carried vector. Consumed ONLY by the #1088 dup-cadence block below — every other term is
-/// unaffected by this argument.
+/// [`build_and_print_verdict`] + the STREAM recording's per-frame near-duplicate MAD-to-predecessor
+/// vector carried from the #208 merge. `stream_frame_prev_diffs` is `Some` ONLY in the merge path on
+/// an all-cambox stream extract (see `run_merge` / `RecordingPartial::frame_prev_diffs`); `None` on
+/// the fused path (there the #1088 dup-cadence block recomputes it from the local `stream_rec`) and
+/// on any run without the carried vector. Consumed ONLY by the #1088 dup-cadence block below — every
+/// other term is unaffected by this argument.
 #[allow(clippy::too_many_arguments)]
-fn build_and_print_verdict_with_stream_hashes(
+fn build_and_print_verdict_with_stream_diffs(
     args: &Args,
     strih: Option<DecodedRec>,
     stream: Option<DecodedRec>,
@@ -2941,15 +3023,22 @@ fn build_and_print_verdict_with_stream_hashes(
     // on the fused path — there, `all_cambox_av_sync` decodes directly from `args.stream` +
     // `args.av_marker_log` when both are given (see the `--switch-schedule` block below).
     stream_av_sync: Option<AvMarkerInputs>,
-    // #1112 — the STREAM recording's per-frame content hashes carried from the merge (`Some` only
-    // in the #208 merge path on an all-cambox stream extract; see above). Fed to the #1088
-    // dup-cadence block so it emits in the production `VERDICT_ON_STREAM=1` merge gate.
-    stream_content_hashes: Option<Vec<u64>>,
+    // #1112/#1166 — the STREAM recording's per-frame near-duplicate MAD-to-predecessor vector
+    // carried from the merge (`Some` only in the #208 merge path on an all-cambox stream extract;
+    // see above). Fed to the #1088 dup-cadence block so it emits in the production
+    // `VERDICT_ON_STREAM=1` merge gate.
+    stream_frame_prev_diffs: Option<Vec<Option<f64>>>,
     // issue 1118 — `Some(reason)` when `run_merge` DROPPED a schema-mismatched imag partial (the
     // report-only degrade path); surfaced at `full_chain.imag_leg_skip_reason` beside
     // `imag_leg_verified` so a degraded run is mineable, never silent. `None` on every normal run
     // and on the fused/test path.
     imag_skip_reason: Option<String>,
+    // #1143 — OBS's own record-session render stats for the imag recording, carried from the imag
+    // partial's `record_render` (Some only when `run_merge` merged an imag partial the harness had
+    // extracted with `--record-render-stats`). Surfaced REPORT-ONLY under `full_chain.loss.imag`
+    // (drawn/attempted/lagged% + max in-record ms) so a stale x264 encoder's observer effect is
+    // attributed to the recorder, never to the delivery chain. `None` on every run without it.
+    imag_record_render: Option<camera_box::record_render_stats::RecordRenderStats>,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -3899,13 +3988,14 @@ fn build_and_print_verdict_with_stream_hashes(
                     "  >>> ZERO loss: all burn-id sequences CONTIGUOUS (no missing id on any node)."
                 );
             } else if all_zero {
-                // #904 — LOUD: a genuine pass, but NOT a strict zero-loss pass — never let this
-                // look identical to the clean branch above. #905 tracks re-tightening the bar.
+                // #904/#1169 — LOUD: a genuine pass, but NOT a strict zero-loss pass — never let
+                // this look identical to the clean branch above. Issue 1169 (owner, 2026-08-22)
+                // re-widened the default to the <=1 singleton band and is the re-tighten trail.
                 println!(
-                    "  >>> ZERO loss WITHIN ALLOWANCE (#904): {total_real} real drop(s) total, \
-                     within the per-node allowance of {real_drops_allowance} on: {} — 0 \
-                     BURN-UNREADABLE, everything else at the usual strict bar. #905 tracks \
-                     putting this allowance back down.",
+                    "  >>> ⚠ #1169 REAL-DROPS SINGLETON ALLOWANCE: real-drops singleton allowance \
+                     consumed: {total_real} — issue 1169 re-tighten trail. Within the per-node \
+                     allowance of {real_drops_allowance} on: {} — 0 BURN-UNREADABLE, everything \
+                     else at the usual strict bar; 2+ of anything still FAILS.",
                     allowance_consumed_nodes.join(", ")
                 );
             } else {
@@ -4196,12 +4286,36 @@ fn build_and_print_verdict_with_stream_hashes(
     // silently ignored while OVERALL printed ZERO loss).
     if let Some(stats_path) = &args.cam1_capture_stats {
         let stats = parse_cam1_capture_stats(stats_path)?;
+        let allowance = camleg_v4l2_drop_allowance();
         let capture_zero = stats.v4l2_dropped == 0;
+        // #1169 THIRD SEAM — a LOUD singleton band on the RAW cam-leg V4L2 capture-drop counter.
+        // A count WITHIN `allowance` is an UPSTREAM camera-leg buffer drop the issue-1167 emit-fill
+        // absorbs by design, so it PASSES with a loud note instead of double-redding what the
+        // presented layer already compensated; `> allowance` still FAILS unchanged.
+        let (within_band, band_consumed) = camleg_capture_band(stats.v4l2_dropped, allowance);
+        let note = band_consumed.then(|| {
+            format!(
+                "cam-leg V4L2 singleton band consumed: {}/{} — absorbed by the issue-1167 emit \
+                 fill; issue 1169 re-tighten trail",
+                stats.v4l2_dropped, allowance
+            )
+        });
         if capture_zero {
             println!(
                 "  [cam2→{camera_under_test_label}] ZERO loss — {camera_under_test_label} V4L2 \
                  capture dropped 0 frames ({} captured).",
                 stats.frames_captured
+            );
+        } else if band_consumed {
+            // Denominator is the TOTAL the device should have produced = delivered + dropped.
+            // LOUD: a PASS, but NOT a strict zero — never let it look like the clean branch above.
+            let total = stats.frames_captured.saturating_add(stats.v4l2_dropped);
+            println!(
+                "  >>> ⚠ #1169 CAM-LEG V4L2 SINGLETON BAND: [cam2→{camera_under_test_label}] \
+                 {camera_under_test_label} V4L2 capture dropped {} of {} frames ({} delivered) — \
+                 WITHIN the singleton band ({allowance}); absorbed by the issue-1167 emit fill; \
+                 issue 1169 re-tighten trail.",
+                stats.v4l2_dropped, total, stats.frames_captured
             );
         } else {
             // Denominator is the TOTAL the device should have produced = delivered + dropped
@@ -4210,19 +4324,26 @@ fn build_and_print_verdict_with_stream_hashes(
             println!(
                 "  [cam2→{camera_under_test_label}] NOT zero — {camera_under_test_label} V4L2 \
                  capture dropped {} of {} frames ({} delivered; REAL capture-card drops on the \
-                 camera leg).",
+                 camera leg — OVER the issue-1169 singleton band of {allowance}).",
                 stats.v4l2_dropped, total, stats.frames_captured
             );
         }
-        all_pass &= capture_zero;
-        report["full_chain"]["loss"][format!("cam2_{camera_under_test_label}")] = serde_json::json!({
-            "zero_loss": capture_zero,
+        all_pass &= within_band;
+        let mut node = serde_json::json!({
+            "zero_loss": within_band,
+            "capture_zero": capture_zero,
             "v4l2_dropped": stats.v4l2_dropped,
             "frames_captured": stats.frames_captured,
+            "camleg_v4l2_drop_allowance": allowance,
+            "camleg_singleton_band_consumed": band_consumed,
             "source": format!(
                 "{camera_under_test_label} V4L2 sequence-gap capture-drop (camera leg) — not a painter-tick compare"
             ),
         });
+        if let Some(note) = note {
+            node["note"] = serde_json::Value::String(note);
+        }
+        report["full_chain"]["loss"][format!("cam2_{camera_under_test_label}")] = node;
     }
 
     // #461/#463 — imag-nb (EPIC #466 Topology v2): its zero-loss proof is the cam2 OPTICAL
@@ -4260,17 +4381,36 @@ fn build_and_print_verdict_with_stream_hashes(
                 span_secs, cfg.min_secs, nv.optical_span_frames
             );
         }
-        // issue 798 (path A) — the imag leg verdict now FLOWS into the merged report and is
-        // SURFACED, but folds REPORT-ONLY first. An imag partial has never actually reached the
-        // merge on the live rig (0/76 recent runs), so there is zero green distribution to prove
-        // the term against, and folding it hard would immediately red the first run that ever
-        // produces one (the issue-887 advisory already shows a real ~7% produced-vs-presented
-        // deficit). Mirror the established report-only seam (e2e_latency_gate / burn_hold /
-        // optical_floor): the fold is a no-op while `imag_leg_gate::gates_overall_pass()` is
-        // `false`; a separate follow-up flips it blocking (and folds in the issue-887 deficit)
-        // once healthy imag runs accumulate. Do NOT hard-fold this term here.
+        // issue 798 (path A) -> #1142 STRICT flip — SPLIT the imag leg into a BLOCKING
+        // presence/verification term and a REPORT-ONLY per-frame content term. Issue 1130 comment
+        // 5347311707 proved the imag ~19.5% repeated ticks are an OBSERVER EFFECT: the E2E x264
+        // software encode starves the imag iGPU (PL1 30W clamp) past the 16.7 ms graphics budget so
+        // OBS repeats whole RENDERS — only during the record window ("churn, not loss", avg_step
+        // 1.006). Both the optical BEAT and the digital-BURN Δ0 are confounded by it, so gating the
+        // per-frame terms now would false-red every run on the recorder's own load, not the chain.
+        // - PRESENCE/VERIFICATION (BLOCKING now): the cam2 optical undecodable moiré floor (#376 —
+        //   a repeated decodable frame is still decodable, so this rate is NOT inflated by the
+        //   repeats) and the analyzed-span floor (#373). Not confounded by frame-repeat. The
+        //   `colour_fail == 0` term is included to make this composite EXACTLY `is_zero()`'s
+        //   decomposition, but it is STRUCTURALLY always-true for imag (`node_verdict_for_imag`
+        //   hardcodes `colour_fail: 0`; imag carries no sampled colour), so it can never itself red
+        //   — do NOT advertise imag colour as an active gate.
+        // - PER-FRAME CONTENT (REPORT-ONLY, pending the issue 1143 imag encoder fix): the
+        //   optical-beat freeze/stuck verdict (`optical_ok`) + the digital-burn contiguity
+        //   (`imag_burn_ok`). Surfaced but never reds a run.
+        let imag_presence_ok = nv.optical_undecodable_ok() && nv.colour_fail == 0 && span_ok;
+        let imag_content_ok = nv.optical_ok() && nv.imag_burn_ok();
+        // #1142 — the imag PRESENCE terms gate overall_pass ONLY when this run's contract REQUIRES a
+        // verified imag leg (`--require-imag-leg`, set by the production full-chain merge). An
+        // isolated/unit verdict run that happens to carry an imag partial surfaces it but does not
+        // gate on it (so the many imag-less/isolated verdict tests stay green).
+        if args.require_imag_leg {
+            all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(imag_presence_ok);
+        }
+        // The PER-FRAME CONTENT fold is report-only (a no-op) regardless of the flag.
+        all_pass &= camera_box::imag_leg_gate::content_folds_into_overall_pass(imag_content_ok);
+        // The honest FULL imag verdict (presence AND content), surfaced as `imag_leg_pass`.
         let imag_leg_ok = nv.is_zero() && span_ok;
-        all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(imag_leg_ok);
         let mut imag_json = node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs, 0);
         // #575 — note the boundary trim honestly: the exact lead/tail frame counts excluded from
         // imag's optical tick + digital burn contiguity checks before this verdict was computed.
@@ -4278,46 +4418,99 @@ fn build_and_print_verdict_with_stream_hashes(
             serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES);
         imag_json["boundary_trim_tail_frames"] =
             serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES);
-        // issue 798 — scoped report-only flag (name the TERM, not the whole object, per
-        // optical-undecodable-floor-report-only.md). `imag_leg_pass` is this run's overall imag
-        // verdict (optical tick + digital burn contiguity ANDed with span_ok); `gates_overall_pass`
-        // is `false` today, so a FAIL is surfaced here but does not touch overall_pass.
+        // issue 798 -> #1142 — scoped split flags (name the TERM, not the whole object, per
+        // optical-undecodable-floor-report-only.md). `imag_leg_pass` is this run's FULL imag verdict
+        // (optical beat + digital burn contiguity + undecodable + colour, ANDed with span_ok);
+        // `imag_presence_pass` (BLOCKING when --require-imag-leg) and `imag_content_pass`
+        // (REPORT-ONLY) are the #1142 split. `gates_overall_pass` is `true` (presence seam LIVE);
+        // `content_gates_overall_pass` is `false` (per-frame content report-only, issue 1130).
         imag_json["imag_leg_pass"] = serde_json::json!(imag_leg_ok);
+        // #1142 — scoped split: presence/verification BLOCKS, per-frame content report-only.
+        imag_json["imag_presence_pass"] = serde_json::json!(imag_presence_ok);
+        imag_json["imag_content_pass"] = serde_json::json!(imag_content_ok);
         imag_json["gates_overall_pass"] =
             serde_json::json!(camera_box::imag_leg_gate::gates_overall_pass());
+        imag_json["content_gates_overall_pass"] =
+            serde_json::json!(camera_box::imag_leg_gate::content_gates_overall_pass());
         imag_json["report_only_note"] = serde_json::json!(
-            "issue 798 path A: imag leg verdict flows + is surfaced but is REPORT-ONLY (does not \
-             gate overall_pass) until a follow-up flips imag_leg_gate::gates_overall_pass and folds \
-             in the issue-887 produced-vs-presented deficit."
+            "issue 798 path A -> #1142: the imag PRESENCE/VERIFICATION terms (analyzed-span floor \
+             #373 + cam2 undecodable moiré floor #376) now BLOCK overall_pass (only when \
+             --require-imag-leg); the \
+             PER-FRAME CONTENT terms (imag_content_pass: digital-burn contiguity + optical beat) \
+             stay REPORT-ONLY pending the issue 1143 imag encoder fix (issue 1130 x264 record-load \
+             observer effect — content_gates_overall_pass==false)."
         );
+        // #1143 — surface OBS's own record-session render stats REPORT-ONLY (never gates). A high
+        // `record_render_lagged_pct` means the RECORDER itself juddered the render (the x264
+        // observer effect, #1130) — so a stuck/copy reading on this run is attributable to the
+        // recording load, not the delivery chain. ~18.4% under x264, ~0% under the VAAPI-tex fix.
+        // `max_render_ms` (#1143 Task 4) is the render budget measured DURING the active recording.
+        if let Some(rr) = &imag_record_render {
+            imag_json["record_render_lagged_pct"] = serde_json::json!(rr.lagged_pct);
+            imag_json["record_render_lagged_frames"] = serde_json::json!(rr.lagged_frames);
+            imag_json["record_render_attempted_frames"] = serde_json::json!(rr.attempted_frames);
+            imag_json["record_render_drawn_frames"] = serde_json::json!(rr.drawn_frames);
+            imag_json["record_render_max_render_ms"] = serde_json::json!(rr.max_render_ms);
+        }
         report["full_chain"]["loss"]["imag"] = imag_json;
     }
-    // issue 798 — make a silently-skipped imag leg VISIBLE (the "ONE full test, no partials"
-    // doctrine): record whether an imag partial actually reached this merge. A green run that never
-    // merged an imag partial (the 0/76 status quo) is a HIDDEN partial; this field + the NOTE below
-    // turn the silent skip into an explicit, mineable signal. Report-only — never gates overall_pass.
+    // issue 798 -> #1142 — make a silently-skipped imag leg VISIBLE (the "ONE full test, no
+    // partials" doctrine) AND now RED it. `imag_leg_verified` records whether an imag partial
+    // actually reached this merge (0/76 status quo). A green run that never merged an imag partial
+    // is a HIDDEN partial; #1142 makes it BLOCKING (owner honesty mandate 2026-08-19) — a run that
+    // silently skipped imag, or dropped it via the issue 1118 schema-degrade (which sets
+    // imag_leg_verified=false, so a degraded run now REDs, not silently passes), reds overall_pass.
     let imag_leg_verified = imag_frames_opt.is_some();
     report["full_chain"]["imag_leg_verified"] = serde_json::json!(imag_leg_verified);
+    // #1142 — the ONE sanctioned skip is an operator-acknowledged offline imag (#1013): when imag
+    // is in the CAMBOX_OFFLINE_ACK set (--offline-ack-cams), an absent leg is EXPECTED and must not
+    // red. `verified_leg_ok(verified, offline_acked)` folds through the LIVE presence seam.
+    let imag_offline_acked =
+        camera_box::offline_ack::parse(&args.offline_ack_cams).contains_key("imag");
+    // #1142 — the verified fold gates ONLY when this run's contract REQUIRES the imag leg
+    // (`--require-imag-leg`, set by the production full-chain merge). Without it (the many
+    // isolated/unit verdict runs with no imag partial), a missing imag leg is surfaced but never
+    // reds. WITH it, a silently-skipped imag leg REDs unless imag is operator-offline-acked (#1013).
+    let imag_leg_verified_gates =
+        args.require_imag_leg && camera_box::imag_leg_gate::gates_overall_pass();
+    if args.require_imag_leg {
+        all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(
+            camera_box::imag_leg_gate::verified_leg_ok(imag_leg_verified, imag_offline_acked),
+        );
+    }
+    report["full_chain"]["imag_leg_required"] = serde_json::json!(args.require_imag_leg);
+    report["full_chain"]["imag_leg_verified_offline_acked"] = serde_json::json!(imag_offline_acked);
+    report["full_chain"]["imag_leg_verified_gates_overall_pass"] =
+        serde_json::json!(imag_leg_verified_gates);
     if !imag_leg_verified {
         println!(
             "  [imag] leg NOT verified this run — no imag partial merged (--merge-partials imag=... \
-             absent; imag StopRecord / reachability / decode failed at recording-e2e.sh [8/8c], or \
-             this was a strih/stream-only merge). A full-chain E2E that silently skips the imag leg \
-             is a hidden partial (issue 798); this NOTE + full_chain.imag_leg_verified make the skip \
-             visible. Report-only — does NOT gate overall_pass."
+             absent; imag StopRecord / reachability / decode failed at recording-e2e.sh [8/8c], a \
+             strih/stream-only merge, or the issue 1118 schema-degrade dropped it). A full-chain \
+             E2E that silently skips the imag leg is a hidden partial (issue 798). {}",
+            if imag_offline_acked {
+                "imag is operator-offline-acked (#1013) — the ONE sanctioned skip: this does NOT \
+                 red overall_pass."
+            } else {
+                "#1142: this now REDs overall_pass (imag_leg_verified is BLOCKING) unless imag is \
+                 operator-offline-acked."
+            }
         );
     }
-    // issue 1118 — when the imag partial was DROPPED because its schema mismatched this build (a
-    // stale on-imag emitter after a PARTIAL_SCHEMA_VERSION bump), record WHY beside the bare
-    // `imag_leg_verified=false`, so a degraded run is mineable rather than looking like a plain
-    // "imag never ran". Report-only: the imag leg is report-only, so dropping it never touches
-    // overall_pass — the verdict is computed from strih+stream exactly as every pre-1094 run was.
+    // issue 1118 -> #1142 — when the imag partial was DROPPED because its schema mismatched this
+    // build (a stale on-imag emitter after a PARTIAL_SCHEMA_VERSION bump), record WHY beside the
+    // bare `imag_leg_verified=false`, so a degraded run is mineable rather than looking like a plain
+    // "imag never ran". The DEGRADE is unchanged (the merge still computes the verdict from the
+    // remaining strih+stream partials instead of hard-dying) — but #1142 makes the resulting
+    // `imag_leg_verified=false` BLOCKING (unless imag is operator-offline-acked, #1013): a
+    // schema-degraded imag leg now REDs overall_pass instead of silently passing (owner mandate:
+    // "schema degrade smie ostať degrade, ale musí RED-ovať, nie ticho prejsť").
     if let Some(reason) = &imag_skip_reason {
         report["full_chain"]["imag_leg_skip_reason"] = serde_json::json!(reason);
         println!(
-            "  [imag] leg DEGRADED this run (report-only, issue 1118): {reason} \
-             Verdict computed from the remaining (strih+stream) partials; \
-             does NOT gate overall_pass."
+            "  [imag] leg DEGRADED this run (issue 1118): {reason} \
+             Verdict computed from the remaining (strih+stream) partials; #1142: the resulting \
+             imag_leg_verified=false REDs overall_pass unless imag is operator-offline-acked."
         );
     }
 
@@ -4421,13 +4614,52 @@ fn build_and_print_verdict_with_stream_hashes(
                                 );
                             }
                             if s.copies != 0 || s.gaps != 0 {
-                                println!(
-                                    "      ⚠ #889 WITHIN TOLERANCE: copies={} gaps={} fails the \
-                                     pre-889 strict rule, but stays within the per-window \
-                                     singleton tolerance ({}) and does NOT gate overall_pass \
-                                     (see issue #889 for the decision record).",
-                                    s.copies, s.gaps, seg.copies_gaps_tolerance
-                                );
+                                // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance
+                                // rescue is DISARMED, so a within-tolerance nonzero copies/gaps
+                                // window (relaxed_pass == true) now GATES overall_pass. The old
+                                // "does NOT gate" wording would be a LIE here (the exact masking
+                                // the owner removed) -- key the message off the live seam so it can
+                                // never claim "does NOT gate" for a window that actually fails.
+                                if camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass(
+                                ) {
+                                    println!(
+                                        "      ⚠ #889 WITHIN TOLERANCE: copies={} gaps={} fails the \
+                                         pre-889 strict rule, but stays within the per-window \
+                                         singleton tolerance ({}) and does NOT gate overall_pass \
+                                         (see issue #889 for the decision record).",
+                                        s.copies, s.gaps, seg.copies_gaps_tolerance
+                                    );
+                                } else if camera_box::window_gate::segment_singleton_allowance_consumed(
+                                    s.copies, s.gaps,
+                                ) {
+                                    // #1169 (owner, 2026-08-22): a <=1/<=1 SINGLETON is ABSORBED
+                                    // into overall_pass (the designed issue-1167 paced-trickle +
+                                    // FIFO stale_replay residual) -- LOUDLY (strict pass stays
+                                    // false above), never masked. >=2 of either hits the
+                                    // STRICT-ESCALATE branch below and still fails.
+                                    println!(
+                                        "      ⚠ #1169 SINGLETON ALLOWANCE: copies={} gaps={} \
+                                         (<= {}/{} each) -- ABSORBED into overall_pass as the \
+                                         designed issue-1167 paced-trickle + FIFO stale_replay \
+                                         residual; the STRICT verdict still FAILS (report-only, \
+                                         visible) and 2+ of either still fails. Re-tighten trail: \
+                                         issue 1169.",
+                                        s.copies,
+                                        s.gaps,
+                                        camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE,
+                                        camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                                    );
+                                } else {
+                                    println!(
+                                        "      ⚠ #1132 STRICT-ESCALATE: copies={} gaps={} -- the \
+                                         relaxed copies/gaps rescue is DISARMED (owner mandate) and \
+                                         this is over the issue-1169 singleton allowance; this \
+                                         window FAILS overall_pass and must be escalated, never \
+                                         masked (see issue #1132). relaxed_pass reports the old \
+                                         tolerant verdict above for observability only.",
+                                        s.copies, s.gaps
+                                    );
+                                }
                             }
                         } else {
                             // `relaxed_pass` fails too — name every real reason via the pure,
@@ -4554,13 +4786,55 @@ fn build_and_print_verdict_with_stream_hashes(
                     seg.segments.len()
                 );
                 println!(
-                    "  ⚠ #889 RE-GATE (singleton tolerance={}): {}/{} cambox window(s) exceed the \
-                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — THESE \
-                     windows DO gate overall_pass again (see issue #889 for the decision record).",
+                    "  ⚠ #889 RE-GATE (per-window tolerance={}): {}/{} cambox window(s) exceed the \
+                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — a \
+                     SUBSET of what now gates under #1132 (see the #1132 line below and issue #889 \
+                     for the decision record). NOTE: this is the <=3 relaxed tolerance, NOT the \
+                     issue-1169 <=1 SINGLETON allowance (a separate, tighter band; see its own line).",
                     seg.copies_gaps_tolerance,
                     seg.windows_over_copies_gaps_tolerance,
                     seg.segments.len()
                 );
+                // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance (`<=3`) rescue is
+                // DISARMED. #1169 (owner, 2026-08-22) then RE-INTRODUCED a strictly-tighter
+                // `<=1/<=1` SINGLETON allowance: a single copy/gap is ABSORBED (the designed
+                // issue-1167 paced-trickle + FIFO stale_replay residual) while `>=2` of either
+                // still FAILS. Split the count so both the loud absorption AND the loud escalation
+                // are visible, never masked. When either seam is re-armed/re-tightened these lines
+                // shift accordingly (the #889 tolerance line above governs when re-armed).
+                if !camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass() {
+                    let windows_over_singleton = seg
+                        .segments
+                        .iter()
+                        .filter(|s| {
+                            s.frames > 0
+                                && (s.copies != 0 || s.gaps != 0)
+                                && !camera_box::window_gate::segment_singleton_allowance_consumed(
+                                    s.copies, s.gaps,
+                                )
+                        })
+                        .count();
+                    if seg.windows_singleton_allowance_consumed > 0 {
+                        println!(
+                            "  ⚠ #1169 SINGLETON ALLOWANCE: {}/{} cambox window(s) had a <= {}/{} \
+                             copies/gaps singleton ABSORBED into overall_pass (the designed \
+                             issue-1167 paced-trickle + FIFO stale_replay residual; each carries a \
+                             per-segment note, strict pass stays false/visible). Re-tighten trail: \
+                             issue 1169.",
+                            seg.windows_singleton_allowance_consumed,
+                            seg.segments.len(),
+                            camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE,
+                            camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                        );
+                    }
+                    println!(
+                        "  ⚠ #1132 STRICT: copies/gaps rescue DISARMED — {}/{} cambox window(s) \
+                         carry copies/gaps OVER the issue-1169 singleton allowance and FAIL \
+                         overall_pass (escalate, never mask). See issue #1132 / issue #1169.",
+                        windows_over_singleton,
+                        seg.segments.len()
+                    );
+                }
                 // Issue 915 (2026-08-01 user decision) visibility requirement, mirrors #889
                 // requirement 3 — prints UNCONDITIONALLY whether or not the run-wide floor was
                 // exceeded, so silence is never mistaken for strictness. Hardcoded,
@@ -4622,20 +4896,227 @@ fn build_and_print_verdict_with_stream_hashes(
                     // Finding 5 of the issue-889 re-gate deep review — a self-describing prose
                     // gate key, mirroring `undecodable_floor_gate`'s idiom immediately above but
                     // SCOPED by name to `copies`/`gaps` specifically (issue-915 lesson: never a
-                    // blanket "gate" key on the whole object). Unlike `undecodable_floor_gate`,
-                    // this one describes a term that DOES gate again above its tolerance — the
-                    // JSON is self-describing without needing the binary's source to know that.
+                    // blanket "gate" key on the whole object). #1132 (2026-08-19): the tolerance
+                    // rescue is DISARMED, so the prose now describes the STRICT policy (any nonzero
+                    // copies/gaps gates) while it is disarmed, and reverts to the #889 tolerance
+                    // wording if the seam is re-armed -- the JSON self-describes either way.
+                    let copies_gaps_tol_gates =
+                        camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass();
                     obj.insert(
                         "copies_gaps_gate".to_string(),
-                        serde_json::json!(format!(
-                            "gates overall_pass above the per-window singleton tolerance ({}) -- \
-                             see issue #889 for the decision record",
-                            seg.copies_gaps_tolerance
-                        )),
+                        serde_json::json!(if copies_gaps_tol_gates {
+                            format!(
+                                "gates overall_pass above the per-window singleton tolerance ({}) -- \
+                                 see issue #889 for the decision record",
+                                seg.copies_gaps_tolerance
+                            )
+                        } else {
+                            "#1132: the copies/gaps tolerance rescue is DISARMED -- overall_pass \
+                             gates on ANY nonzero copies/gaps (strict copies==0 && gaps==0); the \
+                             tolerance is dormant/reported-only. See issue #1132."
+                                .to_string()
+                        }),
+                    );
+                    // #1132 (owner mandate 2026-08-19): the machine-readable companion to the prose
+                    // above, mirroring `undecodable_floor_gates_overall_pass`. `false` = the rescue
+                    // is disarmed, so overall_pass folds strict copies==0 && gaps==0; flip the seam
+                    // (`window_gate::copies_gaps_tolerance_gates_overall_pass`) to re-arm it.
+                    obj.insert(
+                        "copies_gaps_tolerance_gates_overall_pass".to_string(),
+                        serde_json::json!(copies_gaps_tol_gates),
+                    );
+                    // #1169 (owner, 2026-08-22): the SINGLETON allowance seam, self-describing in
+                    // the JSON exactly like the copies_gaps keys above -- a DISTINCT, strictly
+                    // tighter (<=1/<=1) band than the disarmed <=3 tolerance. `armed=true` = a
+                    // <=1/<=1 singleton is absorbed into overall_pass (loudly, strict stays false);
+                    // >=2 of either still fails. Re-tighten to absolute zero = flip the arm to false.
+                    let singleton_armed =
+                        camera_box::window_gate::segment_singleton_allowance_gates_overall_pass();
+                    obj.insert(
+                        "segment_singleton_allowance_gates_overall_pass".to_string(),
+                        serde_json::json!(singleton_armed),
+                    );
+                    obj.insert(
+                        "segment_singleton_copies_allowance".to_string(),
+                        serde_json::json!(
+                            camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE
+                        ),
+                    );
+                    obj.insert(
+                        "segment_singleton_gaps_allowance".to_string(),
+                        serde_json::json!(
+                            camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                        ),
+                    );
+                    obj.insert(
+                        "segment_singleton_gate".to_string(),
+                        serde_json::json!(if singleton_armed {
+                            format!(
+                                "#1169: a <= {}/{} copies/gaps SINGLETON is absorbed into \
+                                 overall_pass (the designed issue-1167 paced-trickle + FIFO \
+                                 stale_replay residual), loudly (strict pass stays false, a \
+                                 per-segment singleton_allowance_note fires, \
+                                 windows_singleton_allowance_consumed counts it); 2+ of either \
+                                 still fails. Re-tighten to absolute zero = flip \
+                                 segment_singleton_allowance_gates_overall_pass to false.",
+                                camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE,
+                                camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                            )
+                        } else {
+                            "#1169 singleton allowance DISARMED -- overall_pass folds strict \
+                             copies==0 && gaps==0."
+                                .to_string()
+                        }),
+                    );
+                    // #1132 review finding (2026-08-19): the EXACT count of windows carrying any
+                    // nonzero copies/gaps on a non-empty window -- serialized for mineability
+                    // parity. #1169 (2026-08-22): this is now a SUPERSET of the windows that GATE
+                    // overall_pass -- it also counts the <=1/<=1 SINGLETON windows now ABSORBED (see
+                    // `windows_singleton_allowance_consumed`, already serialized on the object). The
+                    // windows that actually gate = this count MINUS windows_singleton_allowance_consumed.
+                    // `windows_over_copies_gaps_tolerance` remains a SUBSET (misses within-<=3
+                    // nonzero windows), `windows_failed_report_only` a SUPERSET (adds floor-only
+                    // strict failures). Same value the #1132 STRICT stdout summary derives from.
+                    obj.insert(
+                        "windows_with_copies_or_gaps".to_string(),
+                        serde_json::json!(seg
+                            .segments
+                            .iter()
+                            .filter(|s| s.frames > 0 && (s.copies != 0 || s.gaps != 0))
+                            .count()),
                     );
                 }
                 report["all_cambox_continuity"] = seg_json;
                 all_pass &= seg.overall_pass;
+
+                // #781 — REPORT-ONLY projection-tap scanout-TEAR surface. cam2's USB grabber
+                // captures imag-nb's HDMI output, so this all-cambox sweep already records the
+                // physical projection path (imag render -> DRM scanout -> HDMI -> grabber). A
+                // captured frame whose cam2-optical dual-QR Vernier payloads span MORE than the
+                // by-design even/odd adjacency carried >= 2 paint generations = a scanout tear.
+                // Computed from the SAME per-frame payloads + window attribution the strict sweep
+                // uses (`frame_gen_ts_anchor` + `place_frame_in_window`) -- no partial schema change
+                // (the payloads are already carried) and no on-box work. Pure logic lives in
+                // `camera_box::tear_detect` (Tier-0). REPORT-ONLY: `gates_overall_pass()` is `false`.
+                // The primary-only signal was PROVEN-BLIND on the single-vertical-band dual-QR
+                // content (a horizontal scanout tear corrupts both QR halves at the same height
+                // -> undecodable, never two clean generations); issue 1196's v2 therefore folds in
+                // the bottom AUX tick pair (AUX_TICK_RUN_ID) and takes the span over the UNION, so
+                // a seam BETWEEN the bands yields a clean generation in each. The computed
+                // `viability` distinguishes "no tears" from "signal blind", and the new
+                // aux_decode_fraction / primary_dark_aux_alive_fraction fields gate the future
+                // promotion honestly. NEVER gates and can NEVER newly fail a passing verdict.
+                {
+                    // issue 1196 (v2): per frame, the PRIMARY dual-QR ids (non-reserved run_ids —
+                    // the aux run_id sits IN NODE_BURN_RUN_IDS, so this filter excludes it
+                    // automatically) plus the AUX bottom tick pair's ids, extracted BY the
+                    // reserved AUX_TICK_RUN_ID. The tear span is computed over their union, which
+                    // is what makes a seam BETWEEN the two painted bands detectable.
+                    let mut tear_by_window: Vec<Vec<(Vec<u32>, Vec<u32>)>> =
+                        vec![Vec::new(); schedule.len()];
+                    for f in stream_frames {
+                        if let Some(gen_ts) =
+                            frame_gen_ts_anchor(f, &anchor_run_ids, &all_burns, cam2_pin)
+                        {
+                            if let WindowPlacement::In(wi) =
+                                place_frame_in_window(gen_ts, schedule, args.switch_guard_ns)
+                            {
+                                let primary: Vec<u32> = f
+                                    .payloads
+                                    .iter()
+                                    .filter(|p| {
+                                        !camera_box::probe::recording::NODE_BURN_RUN_IDS
+                                            .contains(&p.run_id)
+                                    })
+                                    .map(|p| p.frame_id)
+                                    .collect();
+                                let aux: Vec<u32> = f
+                                    .payloads
+                                    .iter()
+                                    .filter(|p| {
+                                        p.run_id
+                                            == camera_box::probe::recording_latency::AUX_TICK_RUN_ID
+                                    })
+                                    .map(|p| p.frame_id)
+                                    .collect();
+                                tear_by_window[wi].push((primary, aux));
+                            }
+                        }
+                    }
+                    let tear_stats: Vec<camera_box::tear_detect::TearStats> = tear_by_window
+                        .iter()
+                        .map(|w| camera_box::tear_detect::window_tear_stats(w))
+                        .collect();
+                    let windows_json: Vec<serde_json::Value> = schedule
+                        .iter()
+                        .zip(&tear_stats)
+                        .map(|(w, stats)| {
+                            let mut v =
+                                serde_json::to_value(stats).unwrap_or(serde_json::Value::Null);
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "cambox".to_string(),
+                                    serde_json::json!(w.cambox.clone()),
+                                );
+                                obj.insert(
+                                    "tear_gate_pass".to_string(),
+                                    serde_json::json!(camera_box::tear_detect::tear_gate_pass(
+                                        stats
+                                    )),
+                                );
+                            }
+                            v
+                        })
+                        .collect();
+                    let total_tears: u32 = tear_stats.iter().map(|s| s.tear_frames).sum();
+                    let any_observed = tear_stats.iter().any(|s| {
+                        s.viability == camera_box::tear_detect::TearSignalViability::Observed
+                    });
+                    // issue 1196: run-level aux coverage (frame-weighted mean of the per-window
+                    // aux_decode_fraction) — the "did the small aux marks survive the chain?"
+                    // one-liner; 0.000 on pre-aux recordings.
+                    let tear_total_frames: u32 = tear_stats.iter().map(|s| s.total_frames).sum();
+                    let aux_coverage = if tear_total_frames > 0 {
+                        tear_stats
+                            .iter()
+                            .map(|s| s.aux_decode_fraction * s.total_frames as f64)
+                            .sum::<f64>()
+                            / tear_total_frames as f64
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "  #781 projection-tap tear surface (REPORT-ONLY): {} torn frame(s) across \
+                         {} window(s); signal viability {}; aux tick-pair coverage {:.3}",
+                        total_tears,
+                        schedule.len(),
+                        if any_observed {
+                            "OBSERVED"
+                        } else {
+                            "UNPROVEN (no union-span tear seen on this content)"
+                        },
+                        aux_coverage
+                    );
+                    report["all_cambox_continuity"]["tear"] = serde_json::json!({
+                        "gates_overall_pass": camera_box::tear_detect::gates_overall_pass(),
+                        "vernier_max_spread": camera_box::tear_detect::VERNIER_MAX_SPREAD,
+                        "tear_gate": "report-only -- the tear span is the UNION of the primary \
+                            dual-QR ids and the issue-1196 bottom aux tick pair's ids (span > \
+                            vernier_max_spread = >= 2 paint generations captured); the aux pair \
+                            gives the vertical redundancy the single-band primary content lacks \
+                            (a seam through the primary band alone reads undecodable, never two \
+                            clean generations -- see issue 781). Ships report-only with a computed \
+                            signal_viability plus aux_decode_fraction (aux chain-survival \
+                            coverage) and primary_dark_aux_alive_fraction (band-localized \
+                            corruption discriminator); flip gates_overall_pass to true only once \
+                            the signal is Observed on a known-torn run + a bound AND an \
+                            aux-coverage floor are calibrated from the mined real-frame fixture.",
+                        "windows": windows_json,
+                    });
+                    // Report-only fold (no-op while gates_overall_pass()==false): one-line LIVE flip.
+                    all_pass &= camera_box::tear_detect::run_tear_gate_pass(&tear_stats)
+                        || !camera_box::tear_detect::gates_overall_pass();
+                }
 
                 // #859 — REPORT-ONLY painter-pacing attribution. From the cam2 painter's own
                 // `tick,gen_ts_ns,flip_ts_ns` ground truth (already supplied via `--painter`),
@@ -4716,6 +5197,77 @@ fn build_and_print_verdict_with_stream_hashes(
                 // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
                 all_pass &= cadence_gate_pass || !cadence_gates_overall;
 
+                // #1142 — the NEW cadence-UNIFORMITY floor gate (owner mandate 2026-08-19): a broad
+                // companion to the paired-judder gate above. Bound the WORST (minimum) per-window
+                // `derived_uniform_fraction` (the self-consistent mode-based field, #726 fix — NOT
+                // the raw `uniform_fraction`, which false-reds a clean off-expected-step window; on
+                // the real rig the two are equal) across every cadence-bearing cambox window — a
+                // smooth 60→30 downsample reads ~1.0; the 60→30 + FIFO limit-cycle churn drops it to
+                // ~0.67-0.78 on today's rig (issue 1130). A per-window RATE (like the judder gate) so
+                // a single per-window-MIN term is honest (no run-wide second term). `None` worst = no
+                // cadence window (mass decode failure, already hard-failed by copies/gaps/undecodable)
+                // = not applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`
+                // — the 0.95 floor REDs the current sick rig BY DESIGN.
+                let worst_cadence_uniform_fraction: Option<f64> = seg
+                    .segments
+                    .iter()
+                    .filter_map(|s| {
+                        s.presentation_cadence
+                            .as_ref()
+                            .map(|pc| pc.uniform_fraction)
+                    })
+                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                // Diagnostic-only: the self-consistent (mode-derived) reading, surfaced so a future
+                // switch away from the raw field (if it ever false-reds a clean-but-jittery run) is
+                // a one-field change. NOT gated — see src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
+                let worst_cadence_derived_uniform_fraction: Option<f64> = seg
+                    .segments
+                    .iter()
+                    .filter_map(|s| {
+                        s.presentation_cadence
+                            .as_ref()
+                            .map(|pc| pc.derived_uniform_fraction)
+                    })
+                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                let uniformity_floor = camera_box::presentation_cadence::UNIFORM_FRACTION_MIN;
+                let uniformity_gate_pass =
+                    camera_box::presentation_cadence::cadence_uniformity_gate_pass(
+                        worst_cadence_derived_uniform_fraction,
+                        Some(uniformity_floor),
+                    );
+                let uniformity_gates_overall =
+                    camera_box::presentation_cadence::uniformity_gates_overall_pass();
+                report["all_cambox_continuity"]["cadence_uniformity_gate"] = serde_json::json!({
+                    "min_uniform_fraction": uniformity_floor,
+                    "worst_uniform_fraction": worst_cadence_derived_uniform_fraction,
+                    "worst_raw_uniform_fraction": worst_cadence_uniform_fraction,
+                    "pass": uniformity_gate_pass,
+                    "gates_overall_pass": uniformity_gates_overall,
+                    "note": "#1142 cadence-uniformity FLOOR (owner mandate). Worst per-window \
+                             presentation_cadence.derived_uniform_fraction (the self-consistent \
+                             mode-based field, #726 fix) across cambox windows must be >= \
+                             min_uniform_fraction (0.95); a smooth 60->30 chain reads ~1.0, the \
+                             current rig ~0.67-0.78 (issue 1130 60->30 + FIFO churn) so this REDs \
+                             the sick rig by design. worst_raw_uniform_fraction is the raw reading, \
+                             DIAGNOSTIC only (it false-reds a clean off-expected-step window; \
+                             derived does not). None = no cadence window (not applicable, passes). \
+                             LIVE via presentation_cadence::uniformity_gates_overall_pass.",
+                });
+                println!(
+ "  #1142 CADENCE-UNIFORMITY gate: worst derived_uniform_fraction={} (raw={}, floor {}, pass={}, gates_overall_pass={})",
+                    worst_cadence_derived_uniform_fraction
+                        .map(|p| format!("{p:.5}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    worst_cadence_uniform_fraction
+                        .map(|p| format!("{p:.5}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    uniformity_floor,
+                    uniformity_gate_pass,
+                    uniformity_gates_overall,
+                );
+                // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
+                all_pass &= uniformity_gate_pass || !uniformity_gates_overall;
+
                 // #1088/#1112 — REPORT-ONLY duplication-masked 50→60 dup-rate seam (the #794 hard
                 // layer). The cadence watchdog (#794) reads strih's genlock-fifo `received=` rate
                 // and is STRUCTURALLY BLIND to a grabber that upconverts a 50fps source to 60 by
@@ -4724,53 +5276,53 @@ fn build_and_print_verdict_with_stream_hashes(
                 // row-sampled content hash per recorded frame, sliced into the SAME cambox windows
                 // the sweep above uses, fed into the pure `camera_box::dup_cadence` classifier.
                 //
-                // #1112 — the hashes need the recording PIXELS, which in the production
-                // `VERDICT_ON_STREAM=1` merge are NOT on dev1. So the STREAM box computes them
-                // during `--extract-partial stream` (recording local) and CARRIES them in the
-                // partial (`stream_content_hashes`); the fused `--stream` path still has the
-                // recording here and recomputes them from `stream_rec`. Either way the SAME
-                // windowing + classifier runs — this closes the #1101 finding that the surface was
-                // structurally unreachable in the merge gate (0/81 verdicts carried it). Report-only
-                // / calibration-first: `gates_overall_pass()` is false (no calibrated bound yet —
-                // #1101 owns the LIVE flip), so the fold below is a no-op.
-                // Each skip REASON is logged HERE during source resolution (accurately — a hash
+                // #1112/#1166 — the near-duplicate signal needs the recording PIXELS, which in the
+                // production `VERDICT_ON_STREAM=1` merge are NOT on dev1. So the STREAM box computes
+                // the per-frame MAD-to-predecessor during `--extract-partial stream` (recording
+                // local) and CARRIES it in the partial (`stream_frame_prev_diffs`); the fused
+                // `--stream` path still has the recording here and recomputes it from `stream_rec`.
+                // Either way the SAME windowing + classifier runs — this closes the #1101 finding
+                // that the surface was structurally unreachable in the merge gate (0/81 verdicts
+                // carried it). Report-only / calibration-first: `gates_overall_pass()` is false (no
+                // calibrated bound yet — #1166 owns the LIVE flip), so the fold below is a no-op.
+                // Each skip REASON is logged HERE during source resolution (accurately — a diff
                 // FAILURE prints its own {e}, a genuine no-source prints the no-carry/no-recording
                 // line), so the consuming match's None arm is a no-op and never double-logs a
                 // contradictory second line (issue-1112 review). Matched by VALUE, so the carried
-                // vector is MOVED, not cloned (`stream_content_hashes` is not read again).
-                let dup_hash_source: Option<Vec<u64>> = match stream_content_hashes {
-                    // Merge path (production gate): the stream box already hashed its LOCAL recording
-                    // during extract and carried the vector — the ONLY way the pixel-derived hashes
-                    // reach the dev1 merge, which has no recording.
+                // vector is MOVED, not cloned (`stream_frame_prev_diffs` is not read again).
+                let dup_diff_source: Option<Vec<Option<f64>>> = match stream_frame_prev_diffs {
+                    // Merge path (production gate): the stream box already diffed its LOCAL recording
+                    // during extract and carried the vector — the ONLY way the pixel-derived signal
+                    // reaches the dev1 merge, which has no recording.
                     Some(carried) => Some(carried),
                     // Fused path (legacy `--stream`): the recording is on this host, recompute it
-                    // exactly as before #1112. A hash failure is NON-FATAL for a report-only surface.
+                    // exactly as before #1112. A diff failure is NON-FATAL for a report-only surface.
                     None => match stream_rec.as_deref() {
                         Some(rec_path) => {
-                            match camera_box::probe::recording::hash_recording_frames(rec_path) {
-                                Ok(h) => Some(h),
+                            match camera_box::probe::recording::frame_prev_diffs(rec_path) {
+                                Ok(d) => Some(d),
                                 Err(e) => {
                                     println!(
-                                        "  #1088 DUP-CADENCE: skipped — could not hash stream recording: {e}"
+                                        "  #1088 DUP-CADENCE: skipped — could not diff stream recording: {e}"
                                     );
                                     None
                                 }
                             }
                         }
                         // Genuine no-source: no carry from the box AND no local recording (the
-                        // routine pre-#1112 merge case). Accurate reason, unlike a hash failure.
+                        // routine pre-#1112 merge case). Accurate reason, unlike a diff failure.
                         None => {
                             println!(
-                                "  #1088 DUP-CADENCE: skipped — no stream content hashes (no carry \
-                                 from the stream box, no local recording to hash)"
+                                "  #1088 DUP-CADENCE: skipped — no stream frame diffs (no carry \
+                                 from the stream box, no local recording to diff)"
                             );
                             None
                         }
                     },
                 };
-                // The skip reason for a None dup_hash_source was already logged accurately during
+                // The skip reason for a None dup_diff_source was already logged accurately during
                 // source resolution above, so the None arm needs no body — if let, per clippy.
-                if let Some(frame_hashes) = dup_hash_source {
+                if let Some(frame_prev_mads) = dup_diff_source {
                     let (dup_windows, dup_no_anchor) = partition_frames_by_window(
                         stream_frames,
                         &anchor_run_ids,
@@ -4781,18 +5333,29 @@ fn build_and_print_verdict_with_stream_hashes(
                     );
                     let mut dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> =
                         Vec::with_capacity(dup_windows.len());
+                    // #1101 — signal-viability cross-check, built in the SAME pass (no second
+                    // iteration over dup_windows). Each window's tick-copies (STRICT-adjacent tick
+                    // repeats — a subset of the canonical `copies`, which additionally bridges an
+                    // undecodable gap) are cross-checked against the content near-duplicates over the
+                    // SAME consecutive-frame basis, so an all-zero duplicate_fraction can't be
+                    // mistaken for a promotable green. #1166 replaced the byte-exact content hash
+                    // (blind on the lossy tap) with the codec-tolerant near-duplicate MAD signal, so
+                    // this cross-check now reads Viable on a healthy run instead of Blind.
+                    let mut copy_obs: Vec<camera_box::dup_cadence::CopyObservation> =
+                        Vec::with_capacity(dup_windows.len());
                     let mut worst_raw_fraction: Option<f64> = None;
                     let mut masked_windows: usize = 0;
                     for win_frames in &dup_windows {
-                        // #1112 — slice the (carried or locally-recomputed) per-frame
-                        // hash vector into THIS window's sequence, by frame_index (the
-                        // pure Tier-0 helper — index-alignment is the one fragile part
-                        // and is unit-tested there).
+                        // #1112/#1166 — slice the (carried or locally-recomputed) per-frame
+                        // MAD-to-predecessor vector into THIS window's near-duplicate sequence, by
+                        // frame_index + recording-adjacency (the pure Tier-0 helper — index-alignment
+                        // and the window-boundary gating are the fragile parts and are unit-tested
+                        // there). The SAME `seq` feeds BOTH the classifier and the #1101 viability
+                        // cross-check below, so their near-dup positions match exactly (resolving the
+                        // #1101 review's content/duplicate sequence-mismatch).
                         let win_idxs: Vec<u64> = win_frames.iter().map(|f| f.frame_index).collect();
-                        let seq = camera_box::dup_cadence::window_content_hashes(
-                            &win_idxs,
-                            &frame_hashes,
-                        );
+                        let seq =
+                            camera_box::dup_cadence::window_prev_mads(&win_idxs, &frame_prev_mads);
                         let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
                         if let Some(ref d) = dc {
                             worst_raw_fraction = Some(
@@ -4804,6 +5367,13 @@ fn build_and_print_verdict_with_stream_hashes(
                             }
                         }
                         dcs.push(dc);
+                        // #1101 — parallel per-frame (tick, near-dup MAD) slices for THIS window: tick
+                        // from RecordingFrame::tick, the near-dup MADs from the SAME `seq` above (so
+                        // its near-dup positions are identical to the classifier's). A None tick/MAD
+                        // never forms a copy/dup (a decode gap must not manufacture a false duplicate).
+                        let win_ticks: Vec<Option<u64>> =
+                            win_frames.iter().map(|f| f.tick.map(u64::from)).collect();
+                        copy_obs.push(camera_box::dup_cadence::copy_observation(&win_ticks, &seq));
                     }
                     // The GATE keys on the DISCRIMINATED signal (worst fraction among
                     // windows classified `duplication_masked`), never the raw worst —
@@ -4812,6 +5382,18 @@ fn build_and_print_verdict_with_stream_hashes(
                     // it (issue 1088 review finding).
                     let worst_masked_fraction =
                         camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                    // #1101/#1166 — fold the per-window signal-viability cross-check (built in the loop
+                    // above) into the run-level verdict: does the content near-duplicate signal
+                    // actually OBSERVE the duplication the Vernier-tick copies prove is present? The
+                    // retired byte-exact hash missed nearly every copy on the lossy stream recording
+                    // (2/147 measured → Blind); #1166's codec-tolerant MAD-to-predecessor signal
+                    // observes ~81% of the tick-proven copies on the retained real lossy frames, so
+                    // this now reads Viable. `signal_promotable` still gates the LIVE flip on ≥2
+                    // consecutive REAL runs reading viable + a recalibrated bound (#1166).
+                    let obs_agg = camera_box::dup_cadence::aggregate_copy_observations(&copy_obs);
+                    let signal_viability = camera_box::dup_cadence::signal_viability(&obs_agg);
+                    let signal_promotable =
+                        camera_box::dup_cadence::signal_promotable(signal_viability);
                     let dup_window_json: Vec<serde_json::Value> = dcs
                         .iter()
                         .enumerate()
@@ -4837,18 +5419,33 @@ fn build_and_print_verdict_with_stream_hashes(
                         "pass": dup_gate_pass,
                         "gates_overall_pass": dup_gates_overall,
                         "frames_no_anchor": dup_no_anchor,
+                        "signal_viability": signal_viability,
+                        "signal_promotable": signal_promotable,
+                        "tick_proven_copies": obs_agg.tick_copies,
+                        "copies_observed_by_content": obs_agg.copies_observed_by_content,
+                        "content_near_dup_pairs": obs_agg.content_near_dup_pairs,
+                        "copy_observation_rate": obs_agg.copy_observation_rate,
                         "note": "#1088 duplication-masked 50->60 detector: \
-                                 per-cambox-window row-sampled content-hash dup-rate \
-                                 (the #794 hard layer the received= rate tap is blind \
-                                 to). Per-window duplication_masked flags a sustained + \
-                                 regular + window-spanning pulldown. The GATE keys on \
-                                 worst_masked_duplicate_fraction (worst raw fraction \
-                                 among MASKED windows), NOT worst_raw_duplicate_fraction \
-                                 (a freeze/glitch has a high raw fraction but is \
-                                 coverage/regularity vetoed → excluded, no \
-                                 double-jeopardy with frozen_leg). REPORT-ONLY / \
-                                 calibration-first via dup_cadence::gates_overall_pass \
-                                 (false).",
+                                 per-cambox-window codec-tolerant near-duplicate rate \
+                                 (row-sampled mean-abs-luma-diff to the recording \
+                                 predecessor <= NEAR_DUP_MAD_MAX; #1166 replaced the \
+                                 byte-exact content hash that was blind on the lossy \
+                                 .mp4). The #794 hard layer the received= rate tap is \
+                                 blind to. Per-window duplication_masked flags a \
+                                 sustained + regular + window-spanning pulldown. The \
+                                 GATE keys on worst_masked_duplicate_fraction (worst raw \
+                                 fraction among MASKED windows), NOT \
+                                 worst_raw_duplicate_fraction (a freeze/glitch has a \
+                                 high raw fraction but is coverage/regularity vetoed → \
+                                 excluded, no double-jeopardy with frozen_leg). \
+                                 REPORT-ONLY / calibration-first via \
+                                 dup_cadence::gates_overall_pass (false). #1101 \
+                                 signal_viability cross-checks the content near-duplicates \
+                                 against tick_proven_copies (repeated Vernier tick = a \
+                                 byte-duplicate frame): blind = copies present but the \
+                                 signal observed <50% of them; viable = >=50% observed \
+                                 (the #1166 fix); signal_promotable (viable on >=2 real \
+                                 runs + a recalibrated bound) is the LIVE-flip precondition.",
                     });
                     println!(
 "  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
@@ -4862,6 +5459,17 @@ fn build_and_print_verdict_with_stream_hashes(
                                 dup_bound,
                                 dup_gate_pass,
                                 dup_gates_overall,
+                            );
+                    println!(
+"  #1101 DUP-CADENCE SIGNAL: viability={:?} promotable={} (tick_proven_copies={} observed_by_content={} rate={})",
+                                signal_viability,
+                                signal_promotable,
+                                obs_agg.tick_copies,
+                                obs_agg.copies_observed_by_content,
+                                obs_agg
+                                    .copy_observation_rate
+                                    .map(|r| format!("{r:.4}"))
+                                    .unwrap_or_else(|| "n/a".to_string()),
                             );
                     // Fold: a FAIL only fails the run while the seam gates overall_pass
                     // (report-only today, so this is a no-op).
@@ -5240,22 +5848,30 @@ fn build_and_print_verdict_with_stream_hashes(
                         "optical_expected_step": imag_optical_step,
                         "burn_render_step": imag_burn_step,
                         "frames_without_anchor": imag_no_anchor,
-                        // issue 798 (path A) — this per-segment imag continuity is the SECOND imag
-                        // gating term (alongside the whole-recording node fold in
-                        // full_chain.loss.imag). Both fold REPORT-ONLY under the same seam so a
-                        // flowing imag partial never reds a run until its green distribution
-                        // accumulates. Scoped flag names the imag TERM only — the per-cambox
-                        // (stream) sweep's own `overall_pass` fold is UNTOUCHED and stays blocking.
-                        "gates_overall_pass": camera_box::imag_leg_gate::gates_overall_pass(),
-                        "report_only_note": "issue 798 path A: imag per-segment continuity is \
-                                             surfaced but REPORT-ONLY (does not gate overall_pass) \
-                                             until a follow-up flips imag_leg_gate::gates_overall_pass.",
+                        // issue 798 (path A) -> #1142 — this per-segment imag continuity is a
+                        // PER-FRAME CONTENT term (the same class as the whole-recording node's
+                        // burn/beat), so it folds through the REPORT-ONLY CONTENT seam
+                        // (content_gates_overall_pass). Issue 1130 proved the imag per-frame
+                        // repetition is an x264 record-load OBSERVER EFFECT, so this continuity is
+                        // confounded during the recording and must NOT red a run yet (pending the
+                        // issue 1143 encoder fix). Scoped flag names the imag TERM only — the
+                        // per-cambox (stream) sweep's own `overall_pass` fold is UNTOUCHED and
+                        // stays blocking.
+                        "gates_overall_pass": camera_box::imag_leg_gate::content_gates_overall_pass(),
+                        "report_only_note": "issue 798 path A -> #1142: imag per-segment continuity \
+                                             is a PER-FRAME CONTENT term, surfaced but REPORT-ONLY \
+                                             (does not gate overall_pass) pending the issue 1143 \
+                                             imag encoder fix (issue 1130 x264 record-load observer \
+                                             effect). Presence/verification is separately BLOCKING.",
                     });
-                    // issue 798 — report-only fold: a no-op while `imag_leg_gate::gates_overall_pass()`
-                    // is `false`. Mirrors the whole-recording imag node fold above; the ONE follow-up
-                    // line flips both to blocking.
-                    all_pass &=
-                        camera_box::imag_leg_gate::folds_into_overall_pass(imag_overall_pass);
+                    // issue 798 -> #1142 — REPORT-ONLY per-frame CONTENT fold: a no-op while
+                    // `imag_leg_gate::content_gates_overall_pass()` is `false`. The per-segment imag
+                    // continuity is confounded by the issue 1130 observer effect, so it stays
+                    // report-only pending the issue 1143 encoder fix. The imag PRESENCE/VERIFICATION
+                    // terms (whole-recording node) are separately BLOCKING via gates_overall_pass.
+                    all_pass &= camera_box::imag_leg_gate::content_folds_into_overall_pass(
+                        imag_overall_pass,
+                    );
                 }
 
                 // #624 deliverables 1+3 — generalize the whole-recording, cam1-ONLY cam2→camera
@@ -5447,12 +6063,12 @@ fn build_and_print_verdict_with_stream_hashes(
                 // delivery latency is measurable the SAME digital way as every other camera, no
                 // optical read required for THIS metric.
                 //
-                // #1033: `spread_gate_pass` FOLDS into `all_pass` through the
-                // `delivery_spread_gate` report-only seam (the fold line below) — but that seam
-                // ships `gates_overall_pass()==false` today, so the fold is a NO-OP and the field
-                // still never reds a run. It stays report-only until the fleet is tight-green
-                // (cam1's delivery lottery / issue-909 grabber; recent green runs ~66–81 ms
-                // spread); flipping it LIVE is a one-line follow-up. Its purpose today is still to
+                // #1033 -> #1142: `spread_gate_pass` FOLDS into `all_pass` through the
+                // `delivery_spread_gate` seam, now BLOCKING (`gates_overall_pass()==true`, owner
+                // mandate 2026-08-19) — a wide delivery spread REDs the run at the shared
+                // SPREAD_THRESHOLD_MS bound (the SOURCE side already blocked). The "green" runs it
+                // used to pass were falsely green (the phase lottery hid a real spread failure).
+                // Its purpose today is still to
                 // let a re-verification run SEE whether the applied differentiated offsets
                 // collapsed the delivery-time spread — now via the standard flip-ready seam.
                 //
@@ -5524,14 +6140,19 @@ fn build_and_print_verdict_with_stream_hashes(
                             );
                             delivery_json
                                 .insert("spread_gate_pass".to_string(), serde_json::json!(sv.pass));
-                            // #1033 — fold the delivery cross-camera spread into `overall_pass`
-                            // through the report-only seam. `folds_into_overall_pass` is a NO-OP
-                            // today (`gates_overall_pass()==false`, REPORT-ONLY — the fleet is not
-                            // tight-green: recent green runs sit at ~66–81 ms spread, cam1's
-                            // delivery lottery / issue-909 grabber class), so this preserves the
-                            // current behaviour exactly while making the fold a one-line flip away
-                            // from LIVE once cam1's lottery is killed + ~5 consecutive green runs
-                            // hold the spread ≤ ~10 ms. Mirrors the source-side sweep's own fold.
+                            // #1033 -> #1142 — fold the delivery cross-camera spread into
+                            // `overall_pass` through the seam, now BLOCKING (owner mandate
+                            // 2026-08-19): a wide spread (> SPREAD_THRESHOLD_MS) REDs the run. The
+                            // "green" runs this used to pass were FALSELY green (the phase lottery,
+                            // 3.97 vs 85 ms, hid a real delivery-spread failure); #1142 stops that.
+                            // The SOURCE-side spread already blocks at the same bound; this makes the
+                            // DELIVERY side block too. Mirrors the source-side sweep's own fold.
+                            delivery_json.insert(
+                                "gates_overall_pass".to_string(),
+                                serde_json::json!(
+                                    camera_box::delivery_spread_gate::gates_overall_pass()
+                                ),
+                            );
                             all_pass &=
                                 camera_box::delivery_spread_gate::folds_into_overall_pass(sv.pass);
                         }
@@ -6433,23 +7054,25 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     // 0/81 verdicts). Gated on box+schedule so a delivery-only / non-all-cambox extract pays
     // nothing. A hash failure is NON-FATAL: the surface is report-only, so a hiccup must never fail
     // the extract — log and carry `None` (the merge then simply skips the surface, as before).
-    // NOTE: a SEPARATE luma-only ffmpeg pass for now (`hash_recording_frames`); folding it into the
-    // existing burns/ticks decode to avoid the second pass is #1101 Part 2's optimization.
-    let content_hashes: Option<Vec<u64>> = if box_name == "stream" && args.switch_schedule.is_some()
+    // NOTE: a SEPARATE luma-only ffmpeg pass for now (`frame_prev_diffs`); folding it into the
+    // existing burns/ticks decode to avoid the second pass is a report-only follow-up optimization.
+    let frame_prev_diffs: Option<Vec<Option<f64>>> = if box_name == "stream"
+        && args.switch_schedule.is_some()
     {
-        match camera_box::probe::recording::hash_recording_frames(rec_path) {
-            Ok(h) => {
+        match camera_box::probe::recording::frame_prev_diffs(rec_path) {
+            Ok(d) => {
                 println!(
-                    "#1112 dup-cadence [stream]: row-sampled content hashes for {} frames carried in \
-                     the partial (feeds the #1088 duplication-masked 50->60 surface in the dev1 merge).",
-                    h.len()
+                    "#1112/#1166 dup-cadence [stream]: row-sampled near-duplicate MADs for {} frames \
+                     carried in the partial (feeds the #1088 duplication-masked 50->60 surface in the \
+                     dev1 merge).",
+                    d.len()
                 );
-                Some(h)
+                Some(d)
             }
             Err(e) => {
                 eprintln!(
-                    "WARNING: #1112 dup-cadence [stream]: could not hash the stream recording ({e}) \
-                     — carrying no content hashes; the report-only dup-cadence surface will be \
+                    "WARNING: #1112/#1166 dup-cadence [stream]: could not diff the stream recording \
+                     ({e}) — carrying no frame diffs; the report-only dup-cadence surface will be \
                      skipped in the merge (never fails the run)."
                 );
                 None
@@ -6458,10 +7081,30 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     } else {
         None
     };
+    // #1143 — when the harness passed --record-render-stats for the imag extract, parse OBS's own
+    // record-session render stats (captured from the imag OBS log stop-stats around the record
+    // window) and carry them in the partial. Gated on the imag box (the observer-effect source, the
+    // only box whose recording overloaded a software encoder). A parse failure ERRORS loudly: the
+    // harness only passes a value it already parsed from the log, so a shape mismatch here is a real
+    // extract/merge coupling bug, not a benign skip.
+    let record_render = if box_name == "imag" {
+        match &args.record_render_stats {
+            Some(json) => {
+                let stats: camera_box::record_render_stats::RecordRenderStats =
+                    serde_json::from_str(json)
+                        .with_context(|| format!("parse --record-render-stats JSON {json:?}"))?;
+                Some(stats)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     let partial = RecordingPartial::from_frames(box_name, rec_path, &expected_burns, frames)
         .with_colour(colour)
         .with_av_sync(av_sync)
-        .with_content_hashes(content_hashes);
+        .with_frame_prev_diffs(frame_prev_diffs)
+        .with_record_render(record_render);
     partial.save(&out)?;
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -6503,11 +7146,11 @@ fn run_merge(args: &Args) -> Result<()> {
     // (the audio marker track + the cam2 dual-QR video are co-located there only), mirroring
     // `stream_colour` above.
     let mut stream_av_sync: Option<AvMarkerInputs> = None;
-    // #1112 — the stream partial's carried per-frame content hashes (Some only when the stream box
-    // extracted on an all-cambox run). Only the STREAM recording feeds the #1088 dup-cadence
-    // surface, mirroring `stream_av_sync` above; the dev1 merge has no recording, so this carry is
-    // the ONLY way the pixel-derived hashes reach the merge verdict.
-    let mut stream_content_hashes: Option<Vec<u64>> = None;
+    // #1112/#1166 — the stream partial's carried per-frame near-duplicate MAD-to-predecessor vector
+    // (Some only when the stream box extracted on an all-cambox run). Only the STREAM recording feeds
+    // the #1088 dup-cadence surface, mirroring `stream_av_sync` above; the dev1 merge has no
+    // recording, so this carry is the ONLY way the pixel-derived signal reaches the merge verdict.
+    let mut stream_frame_prev_diffs: Option<Vec<Option<f64>>> = None;
     // Each box's partial path, so after the verdict we can point the operator at the #186 pixel
     // proofs that box wrote during `--extract-partial` and the harness pulled back beside it.
     let mut box_paths: Vec<(String, PathBuf)> = Vec::new();
@@ -6515,16 +7158,21 @@ fn run_merge(args: &Args) -> Result<()> {
     // partial), surfaced at `full_chain.imag_leg_skip_reason` so a degraded run is mineable, not
     // silent. `None` on a normal run.
     let mut imag_skip_reason: Option<String> = None;
+    // #1143 — OBS's own record-session render stats carried from the imag partial's `record_render`
+    // (Some only when the imag box was extracted with `--record-render-stats`). Surfaced report-only.
+    let mut imag_record_render: Option<camera_box::record_render_stats::RecordRenderStats> = None;
     for spec in &args.merge_partials {
         let (box_name, path) = spec
             .split_once('=')
             .with_context(|| format!("--merge-partials expects BOX=JSON, got {spec:?}"))?;
-        // issue 1118 — the imag leg is REPORT-ONLY (`imag_leg_gate::gates_overall_pass()==false`),
-        // so a schema-mismatched imag partial must DEGRADE (drop it, keep merging strih+stream),
-        // never abort the whole merge with no verdict JSON (the fatal `load(path)?` before). The
-        // decision is the PURE crate-root `partial_schema_gate` seam (Tier-0-tested): it degrades
-        // ONLY a clean schema mismatch on a report-only box; strih/stream and every non-schema
-        // failure stay fatal.
+        // issue 1118 -> #1142 — a schema-mismatched imag partial must DEGRADE (drop it, keep
+        // merging strih+stream), never abort the whole merge with no verdict JSON (the fatal
+        // `load(path)?` before). The DEGRADE is unchanged; only its CONSEQUENCE changed: the dropped
+        // partial sets `imag_leg_verified=false`, which #1142 makes BLOCKING, so the run now
+        // produces a RED verdict (honest — a stale imag emitter IS a defect) instead of silently
+        // passing. Degrading (RED verdict) still beats aborting (no verdict at all). The decision is
+        // the PURE crate-root `partial_schema_gate` seam (Tier-0-tested): it degrades ONLY a clean
+        // schema mismatch on the imag box; strih/stream and every non-schema failure stay fatal.
         // Why a MISSING / unreadable imag partial staying Fatal is safe here (not a contradiction
         // with "imag is report-only"): a genuinely-skipped imag leg never reaches this load at all
         // — recording-e2e.sh `[8/8d]` only appends `--merge-partials imag=<path>` when
@@ -6584,11 +7232,12 @@ fn run_merge(args: &Args) -> Result<()> {
             }
         }
         box_paths.push((box_name.to_string(), PathBuf::from(path)));
-        // #377/#312/#1112 — take the carried colour summary + A/V-sync inputs + content hashes
+        // #377/#312/#1112 — take the carried colour summary + A/V-sync inputs + near-duplicate diffs
         // before `frames` moves into the DecodedRec.
         let colour = partial.colour;
         let av_sync = partial.av_sync;
-        let content_hashes = partial.content_hashes;
+        let frame_prev_diffs = partial.frame_prev_diffs;
+        let record_render = partial.record_render; // #1143 — carried before `frames` moves below
         let rec = DecodedRec {
             frames: partial.frames,
             rec_path: None, // merge: the recording is on its own box, never on dev1
@@ -6602,11 +7251,12 @@ fn run_merge(args: &Args) -> Result<()> {
                 stream = Some(rec);
                 stream_colour = colour;
                 stream_av_sync = av_sync;
-                stream_content_hashes = content_hashes;
+                stream_frame_prev_diffs = frame_prev_diffs;
             }
             // #461: imag carries no burns, so there is no colour to carry either in this ticket.
             "imag" => {
                 imag = Some(rec);
+                imag_record_render = record_render; // #1143 report-only OBS record-render stats
             }
             other => anyhow::bail!(
                 "--merge-partials: unknown box {other:?} (expected `strih`, `stream`, or `imag`)"
@@ -6639,7 +7289,7 @@ fn run_merge(args: &Args) -> Result<()> {
     );
     // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
     // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
-    let (_report, all_pass) = build_and_print_verdict_with_stream_hashes(
+    let (_report, all_pass) = build_and_print_verdict_with_stream_diffs(
         args,
         strih,
         stream,
@@ -6648,8 +7298,9 @@ fn run_merge(args: &Args) -> Result<()> {
         stream_colour,
         imag,
         stream_av_sync, // #312 item 2 (PR A): carried from the stream partial's --av-marker-log extract
-        stream_content_hashes, // #1112: carried from the stream partial's all-cambox extract
+        stream_frame_prev_diffs, // #1112/#1166: carried from the stream partial's all-cambox extract
         imag_skip_reason, // issue 1118: Some when a schema-mismatched imag partial was dropped (degrade)
+        imag_record_render, // #1143: carried from the imag partial's --record-render-stats extract
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
@@ -7014,6 +7665,98 @@ mod tests {
                 frame(i as u64, &ps)
             })
             .collect()
+    }
+
+    /// #1142 — `--require-imag-leg` gates a MISSING imag leg (the honesty flip), with the offline-ack
+    /// exemption. Reuses the SAME clean cam2 scenario as `cam2_digital_burn_..._312` (contiguous
+    /// strih+stream, imag=None, overall PASS by default) so the A/B isolates the flag: without it the
+    /// missing imag leg does not red; with it a non-acked missing leg REDs; with it + an operator
+    /// offline-ack (#1013) it is the ONE sanctioned skip and passes again.
+    #[test]
+    fn require_imag_leg_flag_gates_a_missing_imag_leg_1142() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let mk = || {
+            (
+                Some(DecodedRec {
+                    frames: window_cam2(60, false, None),
+                    rec_path: None,
+                }),
+                Some(DecodedRec {
+                    frames: window_cam2(60, true, None),
+                    rec_path: None,
+                }),
+            )
+        };
+
+        // Flag OFF (default): a missing imag leg is surfaced but does NOT red the run.
+        let args_off = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let (s, st) = mk();
+        let (v_off, pass_off) =
+            build_and_print_verdict(&args_off, s, st, Cam1Source::Absent, None, None, None, None)
+                .expect("verdict");
+        assert!(
+            pass_off,
+            "#1142: without --require-imag-leg a missing imag leg does NOT red: {v_off}"
+        );
+        assert_eq!(
+            v_off["full_chain"]["imag_leg_required"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            v_off["full_chain"]["imag_leg_verified"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            v_off["full_chain"]["imag_leg_verified_gates_overall_pass"],
+            serde_json::json!(false),
+            "flag off ⇒ the verified term does not gate this run: {v_off}"
+        );
+
+        // Flag ON, imag NOT acked: the SAME clean run now REDs — a silently-skipped imag leg is a
+        // hidden partial the full-chain contract forbids (#798 honesty mandate).
+        let args_on =
+            super::Args::parse_from(["recording-verdict", "--min-secs", "1", "--require-imag-leg"]);
+        let (s, st) = mk();
+        let (v_on, pass_on) =
+            build_and_print_verdict(&args_on, s, st, Cam1Source::Absent, None, None, None, None)
+                .expect("verdict");
+        assert!(
+            !pass_on,
+            "#1142: --require-imag-leg + a missing (non-acked) imag leg must RED: {v_on}"
+        );
+        assert_eq!(
+            v_on["full_chain"]["imag_leg_required"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            v_on["full_chain"]["imag_leg_verified_gates_overall_pass"],
+            serde_json::json!(true),
+            "flag on + seam live ⇒ the verified term gates: {v_on}"
+        );
+
+        // Flag ON + imag operator-offline-acked (#1013): the ONE sanctioned skip — back to PASS.
+        let args_ack = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--require-imag-leg",
+            "--offline-ack-cams",
+            "imag:notebook-away",
+        ]);
+        let (s, st) = mk();
+        let (v_ack, pass_ack) =
+            build_and_print_verdict(&args_ack, s, st, Cam1Source::Absent, None, None, None, None)
+                .expect("verdict");
+        assert!(
+            pass_ack,
+            "#1013: an operator-offline-acked imag is the ONE sanctioned skip — no red: {v_ack}"
+        );
+        assert_eq!(
+            v_ack["full_chain"]["imag_leg_verified_offline_acked"],
+            serde_json::json!(true)
+        );
     }
 
     /// #312 — extends the #186 per-node digital-burn contiguity check to CAM2. A contiguous cam2
@@ -7915,10 +8658,12 @@ mod tests {
         //
         // #904 had briefly widened this to require 3 well-separated gaps (one past its default
         // allowance of 2) so this SAFETY test kept proving loss BEYOND that allowance. #905 item
-        // 1 reverted `REAL_DROPS_ALLOWANCE_DEFAULT` back to 0 (the allowance mechanism itself
-        // stays available via `CAMERA_BOX_REAL_DROPS_ALLOWANCE`, just dormant by default), so a
-        // SINGLE injected gap is once again enough to prove the invariant — restoring this
-        // fixture to its pre-#904 shape (the same `window(...)` helper part (a) above uses).
+        // 1 reverted `REAL_DROPS_ALLOWANCE_DEFAULT` back to 0 (a single gap sufficed then); issue
+        // 1169 (owner, 2026-08-22) RE-WIDENED the default to the <=1 SINGLETON band, so this
+        // SAFETY test now injects TWO well-separated gaps (one PAST the singleton band) to keep
+        // proving the never-mask invariant BEYOND the allowance — the same shape #904 used for
+        // its allowance of 2, re-scaled to the singleton band 1. The allowance mechanism itself
+        // stays overridable via `CAMERA_BOX_REAL_DROPS_ALLOWANCE`.
         let args_1to1 = super::Args::parse_from([
             "recording-verdict",
             "--min-secs",
@@ -7926,14 +8671,16 @@ mod tests {
             "--capture-fps",
             "60",
         ]);
+        // TWO well-separated gaps ⇒ 2 REAL DROP ids, one PAST the issue-1169 singleton band (1).
+        let safety_gaps = [5, 300];
         let (v2, pass2) = build_and_print_verdict(
             &args_1to1,
             Some(DecodedRec {
-                frames: window(N, false, Some(5)),
+                frames: window_multi_gap(N, false, &safety_gaps),
                 rec_path: None,
             }),
             Some(DecodedRec {
-                frames: window(N, true, Some(5)),
+                frames: window_multi_gap(N, true, &safety_gaps),
                 rec_path: None,
             }),
             Cam1Source::Absent,
@@ -7945,32 +8692,35 @@ mod tests {
         .expect("verdict");
         assert!(
             !pass2,
-            "#356/#905: a genuine 1:1-hop cam1 loss ⇒ overall FAIL at the restored zero-drop bar"
+            "#356/#1169: genuine 1:1-hop cam1 loss BEYOND the singleton band ⇒ overall FAIL"
         );
         assert_eq!(v2["full_chain"]["zero_loss"], serde_json::json!(false));
         assert_eq!(
             v2["full_chain"]["real_drops"],
-            serde_json::json!(1),
-            "#356/#905 SAFETY: on the 1:1 hop, a single cam1 id absent from BOTH recordings MUST \
-             stay REAL DROP — never masked: {}",
+            serde_json::json!(2),
+            "#356/#1169 SAFETY: on the 1:1 hop, cam1 ids absent from BOTH recordings MUST stay \
+             REAL DROP — 2 (one past the <=1 singleton band) are never masked: {}",
             v2["full_chain"]
         );
     }
 
-    // ---- #904/#905 — the small, explicit, LOUD real_drops allowance MECHANISM, and the
-    // #905-restored STRICT (zero) default ----
+    // ---- #904/#905/#1169 — the small, explicit, LOUD real_drops allowance MECHANISM, and the
+    // #1169-re-widened <=1 SINGLETON default (issue 905 item 1's zero bar, re-widened by 1169) ----
 
-    /// #905 item 1 — restores the ZERO real_drops bar: with the DEFAULT allowance reverted to 0
-    /// (no env override), a SINGLE genuine 1:1-hop cam1 real drop MUST fail the headline exactly
-    /// like the pre-#904 strict behavior — the ticket's whole point. This is the end-to-end
-    /// integration-level proof the restored bar actually takes effect (the narrower pure-method
-    /// proof lives in `allowance_zero_matches_pre_904_is_zero_exactly_904` below).
+    /// #1169 (owner, 2026-08-22) — SECOND SEAM: RE-WIDENS `REAL_DROPS_ALLOWANCE_DEFAULT` back to
+    /// 1 for the sanctioned per-frame delivery SINGLETON (issue-1167 v3 paced-trickle absorption
+    /// plus a FIFO stale_replay in the same event; burn_unreadable stays 0). Owner's 2026-07-31
+    /// strict-test revision: "jedna stratená snímka nie je problém." With the DEFAULT now 1 (no
+    /// env override), a SINGLE genuine 1:1-hop cam1 real drop PASSES the headline WITHIN the
+    /// allowance and is reported LOUDLY (never a silent green) — and 2 drops still FAIL, so the
+    /// band is a strict singleton, never an open door. Inverts the issue-905 zero-bar test per
+    /// `gate-allowance-restore-red-green.md`; the one-constant re-tighten back to 0 is proven
+    /// dormant by `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`.
     #[test]
-    fn single_real_drop_fails_at_the_905_restored_zero_allowance() {
+    fn single_real_drop_passes_loudly_within_the_1169_singleton_allowance() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
         const N: u32 = 600;
-        let gaps = [100]; // exactly ONE genuine 1:1-hop cam1 real drop
         let args = super::Args::parse_from([
             "recording-verdict",
             "--min-secs",
@@ -7978,14 +8728,16 @@ mod tests {
             "--capture-fps",
             "60",
         ]);
+        // exactly ONE genuine 1:1-hop cam1 real drop ⇒ the sanctioned singleton.
+        let one = [100];
         let (v, pass) = build_and_print_verdict(
             &args,
             Some(DecodedRec {
-                frames: window_multi_gap(N, false, &gaps),
+                frames: window_multi_gap(N, false, &one),
                 rec_path: None,
             }),
             Some(DecodedRec {
-                frames: window_multi_gap(N, true, &gaps),
+                frames: window_multi_gap(N, true, &one),
                 rec_path: None,
             }),
             Cam1Source::Absent,
@@ -7996,36 +8748,113 @@ mod tests {
         )
         .expect("verdict");
         assert!(
-            !pass,
-            "#905: a single real drop must FAIL at the restored zero-drop default: {v}"
+            pass,
+            "#1169: a single real drop must PASS within the re-widened singleton allowance: {v}"
         );
-        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(true));
         assert_eq!(v["full_chain"]["real_drops"], serde_json::json!(1));
         assert_eq!(
             v["full_chain"]["real_drops_allowance"],
             serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT),
-            "#905: the DEFAULT allowance (no env override) must read back as the restored 0: {}",
+            "#1169: the DEFAULT allowance (no env override) must read back as the re-widened band: {}",
             v["full_chain"]
         );
-        assert!(
-            v["full_chain"]["real_drops_allowance_consumed_nodes"]
-                .as_array()
-                .expect("real_drops_allowance_consumed_nodes must be a JSON array")
-                .is_empty(),
-            "#905: a node that FAILED never counts as having 'consumed' the allowance: {}",
+        assert_eq!(
+            super::REAL_DROPS_ALLOWANCE_DEFAULT,
+            1,
+            "#1169: the compiled DEFAULT must be the singleton band 1 (the re-tighten trail on \
+             issue 1169 flips this one constant back to 0)"
+        );
+        // LOUD, never silent: the run-level consumed signal NAMES the node that only cleared the
+        // gate on slack — a singleton pass must never look identical to a genuine zero-loss pass.
+        let consumed_nodes = v["full_chain"]["real_drops_allowance_consumed_nodes"]
+            .as_array()
+            .expect("real_drops_allowance_consumed_nodes must be a JSON array");
+        assert_eq!(
+            consumed_nodes,
+            &vec![serde_json::json!("cam1")],
+            "#1169: the singleton pass must LOUDLY name the node that consumed the allowance: {}",
             v["full_chain"]
         );
         let cam1_loss = &v["full_chain"]["loss"]["cam1"];
-        assert_eq!(cam1_loss["zero_loss"], serde_json::json!(false));
+        assert_eq!(cam1_loss["zero_loss"], serde_json::json!(true));
         assert_eq!(
             cam1_loss["consumed_real_drops_allowance"],
-            serde_json::json!(false),
-            "#905: a failed node cannot have consumed the allowance: {cam1_loss}"
+            serde_json::json!(true),
+            "#1169: the singleton node must carry the LOUD consumed flag: {cam1_loss}"
         );
+
+        // TWO drops STILL FAIL — the band is a strict <=1 singleton, never an open door.
+        let two = [100, 300];
+        let (v2, pass2) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window_multi_gap(N, false, &two),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window_multi_gap(N, true, &two),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("verdict");
+        assert!(
+            !pass2,
+            "#1169: TWO real drops must STILL FAIL — the allowance is a <=1 singleton band: {v2}"
+        );
+        assert_eq!(v2["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert_eq!(v2["full_chain"]["real_drops"], serde_json::json!(2));
     }
 
-    /// #905 — the #904 allowance MECHANISM itself is untouched by item 1's revert (only the
-    /// DEFAULT moved back to 0). An EXPLICIT nonzero allowance (e.g. a future incident
+    /// #1169 — DORMANT re-tighten proof: flipping the ONE constant back to 0 (this ticket's
+    /// re-tighten trail, closed only by a zero-singleton green run) restores the STRICT bar.
+    /// Proven at the pure-method level with an EXPLICIT allowance of 0 (what
+    /// `REAL_DROPS_ALLOWANCE_DEFAULT = 0` yields), independent of the compiled default and of
+    /// process env — so the strict path stays regression-tested while the DEFAULT is the
+    /// re-widened 1. Mirrors the issue-905 restore discipline
+    /// (`gate-allowance-restore-red-green.md`), inverted: the mechanism is dormant, never deleted.
+    #[test]
+    fn re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar() {
+        let one_drop = window_multi_gap(200, false, &[100]);
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &one_drop,
+                rec_path: None,
+                cam2_run_id: None,
+                step: 1,
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(v.real_drops(), 1);
+        // At the re-widened DEFAULT band (1) the SAME singleton passes on slack, LOUDLY ...
+        assert!(
+            v.is_zero_within_allowance(1),
+            "#1169: the singleton passes at the re-widened band: {v:?}"
+        );
+        assert!(v.consumed_real_drops_allowance(1));
+        // ... and re-tightening the ONE constant back to 0 restores the strict zero-drop bar:
+        assert!(
+            !v.is_zero_within_allowance(0),
+            "#1169: re-tightening to 0 restores the strict bar for the same singleton: {v:?}"
+        );
+        assert!(!v.consumed_real_drops_allowance(0));
+    }
+
+    /// #905/#1169 — the #904 allowance MECHANISM itself is untouched by item 1's revert AND by
+    /// issue 1169's re-widen of the DEFAULT (only the default VALUE has ever moved: 2 -> 0 -> 1).
+    /// An EXPLICIT nonzero allowance ABOVE the default (e.g. a future incident
     /// re-widening it via `CAMERA_BOX_REAL_DROPS_ALLOWANCE`) must still tolerate real drops
     /// within it, and the pass MUST still be visibly distinguishable from a genuine zero-loss
     /// pass: `real_drops_allowance` + `consumed_real_drops_allowance` on the per-node JSON, LOUD
@@ -8072,14 +8901,15 @@ mod tests {
         assert_eq!(
             json["consumed_real_drops_allowance"],
             serde_json::json!(true),
-            "#905: the per-node JSON must LOUDLY carry the consumed signal even though the \
-             DEFAULT is now strict: {json}"
+            "#905/#1169: the per-node JSON must LOUDLY carry the consumed signal at an EXPLICIT \
+             allowance above the compiled default: {json}"
         );
 
-        // At the #905-restored DEFAULT (0), the SAME two drops must FAIL.
+        // At an EXPLICIT allowance of 0 (what the #1169 re-tighten flip restores), the SAME two
+        // drops must FAIL.
         assert!(
             !v.is_zero_within_allowance(0),
-            "#905: with the default reverted to 0, the same 2 drops must FAIL: {v:?}"
+            "#905/#1169: at an explicit allowance of 0, the same 2 drops must FAIL: {v:?}"
         );
         assert!(!v.consumed_real_drops_allowance(0));
     }
@@ -8423,11 +9253,14 @@ mod tests {
     /// SINGLE stale/frozen painted-tick copy in the single all-cambox window (undecodable=0) sits
     /// WITHIN the per-window tolerance (`copies<=WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated
     /// 1 → 2 → 3 on 2026-08-06, ticket 889 comments 5198131539 / 5200533407) — it must still be
-    /// COMPUTED and printed in the verdict JSON, must still fail that window's STRICT `pass`, but
-    /// must NOT fail `all_cambox_continuity.overall_pass` (the tolerance absorbs a single copy
-    /// either way) — and
+    /// COMPUTED and printed in the verdict JSON and must still fail that window's STRICT `pass`.
+    /// (Issue 1132, 2026-08-19) made a bare copy ALSO fail `all_cambox_continuity.overall_pass` —
+    /// the `<=3` tolerance rescue is disarmed (dormant, reported-only). **SUPERSEDED by issue 1169
+    /// (owner, 2026-08-22): a `<=1/<=1` copies/gaps SINGLETON is now ABSORBED back into
+    /// `overall_pass` (the designed issue-1167 paced-trickle + FIFO stale_replay residual) —
+    /// loudly, through its OWN tighter seam, never a re-arm of the disarmed `<=3` rescue** — and
     /// `windows_failed_report_only` must still report it (strict-zero visibility is unaffected by
-    /// the re-gate). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
+    /// either seam). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
     /// implied copies never gate at all, which stopped being true once the re-gate landed; a
     /// single copy still passes because 1 <= the tolerance, not because the term is inert.
     #[test]
@@ -8532,7 +9365,19 @@ mod tests {
         assert_eq!(
             seg["overall_pass"],
             serde_json::json!(true),
-            "889: a copy alone (undecodable=0) no longer fails overall_pass: {seg}"
+            "1169: a single copy is now ABSORBED into overall_pass via the issue-1169 <=1/<=1 \
+             singleton allowance (the designed issue-1167 paced-trickle + FIFO stale_replay \
+             residual) -- loudly, through its OWN tighter seam; the issue-1132 disarmed <=3 \
+             tolerance rescue stays dormant, this is NOT a re-arm of it: {seg}"
+        );
+        assert_eq!(
+            seg["windows_singleton_allowance_consumed"],
+            serde_json::json!(1),
+            "1169: exactly the one window consumed the singleton allowance: {seg}"
+        );
+        assert!(
+            !seg["segments"][0]["singleton_allowance_note"].is_null(),
+            "1169: the absorbed copy carries a LOUD per-segment note (never silent): {seg}"
         );
         assert_eq!(
             seg["windows_failed_report_only"],
@@ -8709,9 +9554,10 @@ mod tests {
             "{at_seg}"
         );
         assert_eq!(
-            clean["all_cambox_continuity"]["overall_pass"], at_seg["overall_pass"],
-            "889 re-gate: copies AND gaps together must be a no-op on overall_pass (both at the \
-             tolerance): clean={clean}, at_tolerance={at_tolerance}"
+            at_seg["overall_pass"],
+            serde_json::json!(false),
+            "1132 strict: copies AND gaps at the (dormant) tolerance now FAIL overall_pass -- \
+             the rescue is disarmed: clean={clean}, at_tolerance={at_tolerance}"
         );
         assert_eq!(
             at_seg["windows_over_copies_gaps_tolerance"],
@@ -9463,14 +10309,16 @@ mod tests {
             serde_json::json!(false),
             "#467: a genuine gap in imag's OWN segment must still be DETECTED — imag's own verdict FAILs: {imag_seg}"
         );
-        // issue 798 (path A): the imag per-segment continuity term now folds REPORT-ONLY — its FAIL
-        // is surfaced (above) with a LOUD scoped flag, but no longer gates the OVERALL verdict until
-        // a follow-up flips imag_leg_gate::gates_overall_pass. The per-cambox (stream) sweep's own
-        // fold is UNTOUCHED and stays blocking (asserted clean below).
+        // issue 798 (path A) -> #1142: the imag per-segment continuity is a PER-FRAME CONTENT term,
+        // so it now folds through the REPORT-ONLY CONTENT seam (content_gates_overall_pass) — its
+        // FAIL is surfaced (above) with a LOUD scoped flag, but does NOT gate the OVERALL verdict
+        // (confounded by the issue 1130 observer effect, pending the issue 1143 encoder fix). The
+        // imag PRESENCE/VERIFICATION terms are separately BLOCKING. The per-cambox (stream) sweep's
+        // own fold is UNTOUCHED and stays blocking (asserted clean below).
         assert_eq!(
             imag_seg["gates_overall_pass"],
             serde_json::json!(false),
-            "#798: imag's per-segment continuity is REPORT-ONLY — it does NOT gate overall_pass: {imag_seg}"
+            "#1142: imag's per-segment continuity is a REPORT-ONLY content term — it does NOT gate overall_pass: {imag_seg}"
         );
         assert_eq!(
             v["all_cambox_continuity"]["overall_pass"],
@@ -9910,12 +10758,12 @@ mod tests {
         assert_eq!(
             lat["spread_gate_pass"],
             serde_json::json!(false),
-            "#1120: a 27ms delivery spread is over the (report-only) 24ms bound -> FAIL: {lat}"
+            "#1120: a 27ms delivery spread is over the (now BLOCKING, #1142) 24ms bound -> FAIL: {lat}"
         );
     }
 
     /// #286: ALL SIX cameras measured (including cam2), each within the spread bound of every
-    /// other's injected delivery latency -> the (report-only) spread gate PASSES — mirrors a
+    /// other's injected delivery latency -> the (blocking since #1142) spread gate PASSES — mirrors a
     /// successfully phase-synced rig where the applied differentiated genlock-latency offsets
     /// have collapsed every camera's DELIVERY latency to roughly the same value.
     #[test]
@@ -9956,7 +10804,7 @@ mod tests {
         );
     }
 
-    /// #286: a tight delivery spread (all within the spread bound) PASSES the report-only gate.
+    /// #286: a tight delivery spread (all within the spread bound) PASSES the gate (blocking since #1142).
     #[test]
     fn all_cambox_delivery_latency_tight_spread_passes_gate_286() {
         let v = build_all_cambox_delivery_latency_fixture(
@@ -9981,23 +10829,19 @@ mod tests {
         );
     }
 
-    /// #1033: the delivery cross-camera spread now FOLDS into `overall_pass` — but through the
-    /// report-only `delivery_spread_gate` seam, which ships `gates_overall_pass()==false` today
-    /// (the fleet is not tight-green: recent green runs sit at ~66–81 ms spread, cam1's delivery
-    /// lottery / issue-909 grabber class). This REPLACES the old "structurally forbidden" test:
-    /// the field is no longer forbidden from gating — it is WIRED through the standard
-    /// one-line-flippable seam and is a no-op today, so a FAILING delivery spread still does not,
-    /// by itself, red a run. Pinned BOTH directions via the pure fold: report-only today, and
-    /// would-gate the moment the seam is flipped LIVE. (The Tier-0 `tests/delivery_spread_gate.rs`
-    /// pins the seam's pure contract; this pins the same seam AT the recording-verdict wiring.)
+    /// #1033 -> #1142: the delivery cross-camera spread FOLDS into `overall_pass` through the
+    /// `delivery_spread_gate` seam, now BLOCKING (`gates_overall_pass()==true`, owner mandate
+    /// 2026-08-19). It shipped report-only under issue 1033 (the fleet was not tight-green), but the
+    /// "green" runs it passed were FALSELY green — the phase lottery (3.97 vs 85 ms) hid a real
+    /// delivery-spread failure — so #1142 flips it LIVE. Pinned BOTH directions via the pure fold at
+    /// the wiring, plus the surfaced `gates_overall_pass` JSON field. (The Tier-0
+    /// `tests/delivery_spread_gate.rs` pins the seam's pure contract; this pins it AT the wiring.)
     #[test]
-    fn all_cambox_delivery_latency_spread_folds_through_report_only_seam_1033() {
-        // The seam ships REPORT-ONLY today — a wide delivery spread must NOT red a run yet.
+    fn all_cambox_delivery_latency_spread_folds_blocking_since_1142() {
+        // #1142 — the seam is BLOCKING: a wide delivery spread now REDs a run.
         assert!(
-            !camera_box::delivery_spread_gate::gates_overall_pass(),
-            "#1033: the delivery-spread seam must ship report-only (gates_overall_pass()==false) \
-             until cam1's delivery lottery is killed + ~5 consecutive green runs hold spread ≤ \
-             ~10 ms; flipping it LIVE is a separate follow-up"
+            camera_box::delivery_spread_gate::gates_overall_pass(),
+            "#1142: the delivery-spread seam must be BLOCKING (gates_overall_pass()==true)"
         );
 
         let v = build_all_cambox_delivery_latency_fixture(
@@ -10011,27 +10855,32 @@ mod tests {
             "sanity: this fixture's 27ms spread must FAIL the 24ms bound for the point of this \
              test to hold: {lat}"
         );
-        assert!(
-            v.get("all_cambox_delivery_latency").is_some(),
-            "sanity: the field itself must still be present: {v}"
+        // #1142 — the block now surfaces the LIVE seam state so the report consumer + a miner can
+        // tell blocking from report-only.
+        assert_eq!(
+            lat["gates_overall_pass"],
+            serde_json::json!(true),
+            "#1142: the delivery block must surface the BLOCKING seam state: {lat}"
         );
 
-        // Re-pin the seam's report-only contract at the call site, on the EXACT functions the
-        // wiring above invokes (`folds_into_overall_pass`): for this fixture's failing
-        // `sv.pass == false`, the report-only seam folds to PASS today (a wide spread never reds a
-        // run). This does not, and cannot, assert on the fixture's own `overall_pass` (the minimal
-        // 2-window recording reds for unrelated reasons, e.g. the #373 duration floor — the same
-        // reason the OLD test documented) — the pure seam contract is what is verified here, with
+        // Re-pin the seam's BLOCKING contract at the call site, on the EXACT function the wiring
+        // above invokes (`folds_into_overall_pass`): for this fixture's failing `sv.pass == false`,
+        // the blocking seam now folds to FAIL (a wide spread REDs the run). This does not assert on
+        // the fixture's own `overall_pass` (the minimal 2-window recording reds for unrelated
+        // reasons too, e.g. the #373 duration floor) — the pure seam contract is verified here, with
         // `tests/delivery_spread_gate.rs` covering it Tier-0 as well.
         assert!(
-            camera_box::delivery_spread_gate::folds_into_overall_pass(false),
-            "#1033 report-only: a FAILING delivery spread must fold to pass while the seam is off"
+            !camera_box::delivery_spread_gate::folds_into_overall_pass(false),
+            "#1142 blocking: a FAILING delivery spread must fold to FAIL while the seam is LIVE"
         );
-        // …and the other direction: once the seam is flipped LIVE, that same failing spread reds
-        // the run — proving the wiring's fold is honest in both seam states.
         assert!(
-            !camera_box::delivery_spread_gate::fold(false, true),
-            "#1033 blocking: once flipped LIVE, a FAILING delivery spread must red the run"
+            camera_box::delivery_spread_gate::folds_into_overall_pass(true),
+            "a TIGHT delivery spread passes"
+        );
+        // The report-only fold direction stays pinned (a hypothetical revert): fold(_, false) passes.
+        assert!(
+            camera_box::delivery_spread_gate::fold(false, false),
+            "report-only direction: a wide spread would not red if the seam were reverted"
         );
     }
 
@@ -10386,11 +11235,14 @@ mod tests {
     /// #861 — zero-loss enforcement is completely UNAFFECTED by the A/V-offset term's own
     /// report-only-vs-blocking state (whichever it currently is): a real zero-loss defect (a
     /// cam2→SOURCE V4L2 capture-drop, `--cam1-capture-stats`) still forces `overall_pass=false`,
-    /// unconditionally. This gate (`all_pass &= capture_zero` in `recording-verdict.rs`) is
-    /// TOP-LEVEL — parsed and applied whenever `--cam1-capture-stats` is supplied, with NO
-    /// dependency on `--switch-schedule` / `--stream` / the A/V-sync plumbing at all. The A/V
-    /// inputs here are the same clean 500ms fixture used by the sibling PASS test (does not matter
-    /// either way — the point is the capture-drop alone).
+    /// unconditionally. This gate (`all_pass &= within_band` in `recording-verdict.rs`, where
+    /// `within_band = camleg_capture_band(v4l2_dropped, allowance)`) is TOP-LEVEL — parsed and
+    /// applied whenever `--cam1-capture-stats` is supplied, with NO dependency on
+    /// `--switch-schedule` / `--stream` / the A/V-sync plumbing at all. The A/V inputs here are the
+    /// same clean 500ms fixture used by the sibling PASS test (does not matter either way — the
+    /// point is the capture-drop alone). `v4l2_dropped=7` is deliberately WAY OVER the #1169
+    /// `CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` (=2) singleton band, so it stays a hard FAIL (the band
+    /// only absorbs a `<=2` singleton — see the `..._absorbs_two_drops_...` sibling below).
     #[test]
     fn zero_loss_capture_drop_still_fails_overall_pass_regardless_of_av_gate_861() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
@@ -10435,6 +11287,218 @@ mod tests {
             "#861: a real zero-loss defect (camera-leg V4L2 capture drop) must still force \
              overall_pass=false -- completely unaffected by the A/V-offset term's own \
              report-only-vs-blocking state: {v}"
+        );
+    }
+
+    /// #1169 THIRD SEAM (owner, 2026-08-22) — the cam-leg V4L2 capture-drop counter
+    /// (`full_chain.loss.cam2_*`, the last binding `all_pass &= …` red) gets the SAME loud
+    /// singleton band the two prior seams gave the presented + burn-delivery layers. A
+    /// `v4l2_dropped` count WITHIN `CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT` (=2) is an UPSTREAM
+    /// camera-leg buffer drop the issue-1167 emit-fill absorbs by design (the first full verdict
+    /// of the series showed exactly `v4l2_dropped:2` over `frames_captured:35961` = 0.0056%, while
+    /// `full_chain.zero_loss` + `all_cambox_continuity.overall_pass` were already green) — so it
+    /// must PASS `overall_pass` with `zero_loss=true` + a LOUD `note`, NEVER a silent green. This
+    /// is the exact `gate-allowance-restore-red-green.md` shape, third instance; issue 1169 stays
+    /// OPEN as the re-tighten trail (the DEFAULT flips back to 0 once a zero-singleton green run
+    /// holds).
+    ///
+    /// FIXTURE (issue 1169 CI fix): the `--cam1-capture-stats` gate is TOP-LEVEL, but an
+    /// `overall_pass=true` assertion needs EVERY other fold term green too — and the av-sync
+    /// fixture (`build_all_cambox_av_sync_fixture_with_ack`) can never deliver that with ONE
+    /// scheduled camera: its BLOCKING `all_cambox_av_sync` gate fails closed on the
+    /// absent-unacked cam3..cam7 (issue 855 / issue 861), so the old shape read
+    /// `overall_pass=false` for a reason UNRELATED to the band under test. Mirrors the
+    /// otherwise-green `single_real_drop_passes_loudly_within_the_1169_singleton_allowance`
+    /// sibling's fixture instead (clean `window` frames, no schedule, no A/V inputs) — the
+    /// injected capture-drop sidecar is the ONLY non-zero signal, so the camleg band is the
+    /// ONLY term that can flip the verdict.
+    #[test]
+    fn camleg_v4l2_singleton_band_absorbs_two_drops_into_overall_pass_1169() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        const N: u32 = 600;
+
+        let dir = std::env::temp_dir().join(format!("cb-1169-camleg-band-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stats_path = dir.join("cam1-capture-stats.txt");
+        // exactly TWO cam-leg V4L2 capture drops — the sanctioned singleton band (<=2).
+        std::fs::write(&stats_path, "v4l2_dropped=2\nframes_captured=35961\n").unwrap();
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+            "--cam1-capture-stats",
+            stats_path.to_str().unwrap(),
+        ]);
+        // Fully clean recordings (ZERO real drops, contiguous burns, span green at min-secs 1):
+        // every other fold term passes, exactly like the real_drops singleton sibling.
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window(N, false, None),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window(N, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // no imag frames in this test
+            None, // no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The band ABSORBS the 2 drops: the node reads zero_loss=true (within the band) ...
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["zero_loss"],
+            serde_json::json!(true),
+            "#1169: 2 V4L2 capture drops are WITHIN the singleton band ⇒ zero_loss stays true: {v}"
+        );
+        // ... yet it is LOUD, never a silent green: the band was CONSUMED + carries the note ...
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["camleg_singleton_band_consumed"],
+            serde_json::json!(true),
+            "#1169: a within-band NON-zero drop count must be marked as CONSUMED (loud): {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["v4l2_dropped"],
+            serde_json::json!(2),
+            "#1169: the raw v4l2_dropped count stays honestly reported: {v}"
+        );
+        let note = v["full_chain"]["loss"]["cam2_cam1"]["note"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            note.contains("cam-leg V4L2 singleton band consumed"),
+            "#1169: the consumed band must carry the loud named note: {v}"
+        );
+        // ... and the whole run PASSES (this was the LAST binding red) — both the returned
+        // all_pass fold and the emitted JSON headline agree.
+        assert!(
+            pass,
+            "issue 1169: 2 capture-leg drops within the band must NOT fail the all_pass fold: {v}"
+        );
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(true),
+            "#1169: 2 capture-leg drops within the band must NOT fail overall_pass: {v}"
+        );
+    }
+
+    /// #1169 THIRD SEAM — the PURE band decision boundary + the compiled DEFAULT. Proven at the
+    /// `camleg_capture_band` level (an explicit allowance, independent of process env) so the
+    /// boundary stays regression-tested without mutating global env state. `<= allowance` is
+    /// within-band; a within-band NON-zero count is `band_consumed` (the loud note); a strict zero
+    /// is within-band but NOT consumed.
+    #[test]
+    fn camleg_capture_band_boundary_and_default_1169() {
+        use super::{camleg_capture_band, CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT};
+        // strict zero: within band, but NOT consumed (a clean pass, no loud note).
+        assert_eq!(camleg_capture_band(0, 2), (true, false));
+        // 1 and 2 drops: within the band, CONSUMED (loud note).
+        assert_eq!(camleg_capture_band(1, 2), (true, true));
+        assert_eq!(camleg_capture_band(2, 2), (true, true));
+        // 3 drops: OVER the band ⇒ not within, not consumed ⇒ a hard fail.
+        assert_eq!(camleg_capture_band(3, 2), (false, false));
+        assert_eq!(
+            CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT, 2,
+            "#1169: the compiled DEFAULT must be the singleton band 2 (the re-tighten trail on \
+             issue 1169 flips this one constant back to 0)"
+        );
+    }
+
+    /// #1169 — DORMANT re-tighten proof: flipping the ONE constant back to 0 (this ticket's
+    /// re-tighten trail, closed only by a zero-singleton green run) restores the STRICT bar.
+    /// Proven at the pure-fn level with an EXPLICIT allowance of 0 (what
+    /// `CAMLEG_V4L2_DROP_ALLOWANCE_DEFAULT = 0` yields), independent of the compiled default and of
+    /// process env. Mirrors the `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`
+    /// sibling for the real-drops seam — the mechanism stays dormant, never deleted.
+    #[test]
+    fn re_tightening_the_camleg_v4l2_band_to_zero_restores_the_strict_bar() {
+        use super::camleg_capture_band;
+        // At the DEFAULT band (2) the 2-drop singleton passes on slack, LOUDLY (consumed) ...
+        assert_eq!(camleg_capture_band(2, 2), (true, true));
+        // ... and re-tightening the ONE constant back to 0 restores the strict zero-drop bar:
+        assert_eq!(
+            camleg_capture_band(2, 0),
+            (false, false),
+            "#1169: re-tightening to 0 restores the strict bar for the same 2-drop count"
+        );
+        // a genuine zero still passes cleanly at the strict bar (within-band, not consumed).
+        assert_eq!(camleg_capture_band(0, 0), (true, false));
+    }
+
+    /// #1169 THIRD SEAM — the OVER-band end-to-end fold: 3 cam-leg V4L2 capture drops are OVER the
+    /// `<=2` singleton band, so the node stays `zero_loss=false` and the whole run FAILS
+    /// `overall_pass` (the band never becomes an open door). Same otherwise-green clean-`window`
+    /// fixture as the `..._absorbs_two_drops_...` sibling above (issue 1169 CI fix — the old
+    /// av-sync fixture left the blocking av-sync gate red on absent-unacked cameras, so the
+    /// asserted `overall_pass=false` was overdetermined and proved nothing about the band): here
+    /// every OTHER term is green, so the over-band drop count is what fails the run.
+    #[test]
+    fn camleg_v4l2_three_drops_over_band_still_fails_overall_pass_1169() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        const N: u32 = 600;
+
+        let dir = std::env::temp_dir().join(format!("cb-1169-camleg-over-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stats_path = dir.join("cam1-capture-stats.txt");
+        // THREE cam-leg V4L2 capture drops — one past the singleton band (>2).
+        std::fs::write(&stats_path, "v4l2_dropped=3\nframes_captured=35961\n").unwrap();
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+            "--cam1-capture-stats",
+            stats_path.to_str().unwrap(),
+        ]);
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window(N, false, None),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window(N, true, None),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // no imag frames in this test
+            None, // no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !pass,
+            "issue 1169: 3 capture-leg drops (over the band) must fail the all_pass fold: {v}"
+        );
+
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["zero_loss"],
+            serde_json::json!(false),
+            "#1169: 3 V4L2 capture drops are OVER the singleton band ⇒ zero_loss stays false: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["camleg_singleton_band_consumed"],
+            serde_json::json!(false),
+            "#1169: an OVER-band count is a genuine fail, never a 'consumed' band: {v}"
+        );
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(false),
+            "#1169: 3 capture-leg drops (over the band) must FAIL overall_pass: {v}"
         );
     }
 
@@ -14573,14 +15637,18 @@ mod tests {
         )
         .expect("verdict");
 
-        // issue 798 (path A): the imag leg verdict now FLOWS and is SURFACED, but folds
-        // REPORT-ONLY. A missing imag optical tick must still be detected and reported (zero_loss
-        // false, the missing id, imag_leg_pass false, and — LOUD — the scoped report-only flag),
-        // and the run must be recorded as having verified the imag leg. The report-only FOLD
-        // semantics (a failing imag leg no longer reds overall_pass) are proven exhaustively in the
-        // Tier-0 `tests/imag_leg_gate.rs`; here `pass` is intentionally not asserted because this
-        // synthetic imag-only fixture's overall verdict also runs the unrelated #373 span gate
-        // (59 frames ~ 1s, borderline min_secs), which must not make this a flaky assertion.
+        // issue 798 (path A) -> #1142: the imag leg is now SPLIT — presence/verification BLOCKS,
+        // per-frame content is REPORT-ONLY. A missing imag optical tick is a PER-FRAME CONTENT
+        // failure (the optical-beat term), so it is still detected + surfaced (zero_loss false, the
+        // missing id, imag_leg_pass false, imag_content_pass false, content_gates_overall_pass
+        // false) but does NOT itself red overall_pass — it is confounded by the issue 1130 x264
+        // record-load observer effect (pending the issue 1143 encoder fix). The presence seam is
+        // separately BLOCKING (gates_overall_pass true). `pass` is intentionally not asserted: this
+        // synthetic imag-only fixture also runs the unrelated #373 span gate (59 frames ~ 1s,
+        // borderline min_secs), which feeds the now-BLOCKING presence term — so the overall verdict
+        // depends on span, not on this content failure, and must not be a flaky assertion here. The
+        // fold semantics (content fails report-only, presence fails blocking) are proven in the
+        // Tier-0 `tests/imag_leg_gate.rs`.
         assert_eq!(
             v["full_chain"]["loss"]["imag"]["zero_loss"],
             serde_json::json!(false)
@@ -14592,12 +15660,22 @@ mod tests {
         assert_eq!(
             v["full_chain"]["loss"]["imag"]["imag_leg_pass"],
             serde_json::json!(false),
-            "#798: the imag leg's own verdict is FAIL, surfaced here: {v}"
+            "#798: the imag leg's own FULL verdict is FAIL, surfaced here: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["imag_content_pass"],
+            serde_json::json!(false),
+            "#1142: a missing optical tick is a per-frame CONTENT failure, surfaced here: {v}"
         );
         assert_eq!(
             v["full_chain"]["loss"]["imag"]["gates_overall_pass"],
+            serde_json::json!(true),
+            "#1142: the imag PRESENCE/VERIFICATION seam is BLOCKING (gates_overall_pass true): {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["content_gates_overall_pass"],
             serde_json::json!(false),
-            "#798: the imag leg is REPORT-ONLY today — it does NOT gate overall_pass: {v}"
+            "#1142: the imag PER-FRAME CONTENT seam is REPORT-ONLY (does not gate overall_pass): {v}"
         );
         assert_eq!(
             v["full_chain"]["imag_leg_verified"],

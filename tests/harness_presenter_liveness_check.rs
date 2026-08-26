@@ -104,7 +104,13 @@ fn stub_fuser_nothing_held(bin_dir: &Path) {
 fn run_check(log: &Path, fb_device: &str, bin_dir: &Path) -> (i32, String, String) {
     let lib = lib_path();
     let script = format!(
-        r#"set -uo pipefail
+        // #1148: run the emitted snippet under `set -euo pipefail` — the SAME `set -e` the real
+        // caller (rig-mode.sh painter_launch_remote) embeds it under. Under `-uo` alone a FAIL
+        // token's non-zero `_reason=$(...)` assignment did NOT abort, so the granular FAIL-message
+        // arms tested below would pass even though production silently skipped them (a silent
+        // exit 1). With `-e`, those FAIL-message assertions genuinely guard that the `_cb_paint_
+        // signal ... || true` keeps the case reachable.
+        r#"set -euo pipefail
 . "{lib}"
 ( eval "$(painter_liveness_check_cmds "{log}" "{fb_device}")" )
 "#,

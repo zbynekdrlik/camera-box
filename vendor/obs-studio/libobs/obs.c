@@ -23,6 +23,7 @@
 #include "obs.h"
 #include "obs-internal.h"
 #include "obs-display-budget.h" /* camera-box #879: aux sender budget gate */
+#include "obs-drm-output.h"     /* camera-box #1152: DEFAULT-OFF in-OBS DRM-lease HDMI output */
 
 struct obs_core *obs = NULL;
 
@@ -1338,6 +1339,15 @@ bool obs_startup(const char *locale, const char *module_config_path, profiler_na
 	if (!success)
 		obs_shutdown();
 
+#if defined(__linux__)
+	/* camera-box #1152: DEFAULT-OFF DRM-lease HDMI output autostart. A no-op unless the config
+	 * file ~/.camera-box/drm-output.json exists with "enabled": true — so it changes no OBS
+	 * behaviour until deliberately opted in. Linux-only (obs-drm-output.c is built only via
+	 * cmake/os-linux.cmake). */
+	if (success)
+		obs_drm_output_maybe_autostart();
+#endif
+
 	return success;
 }
 
@@ -1380,6 +1390,14 @@ struct obs_cmdline_args obs_get_cmdline_args(void)
 void obs_shutdown(void)
 {
 	struct obs_module *module;
+
+#if defined(__linux__)
+	/* camera-box #1152: stop the DRM-lease output BEFORE libobs teardown so its flip thread
+	 * never outlives the log sink (crash-at-exit on the unattended imag box) and the leased
+	 * HDMI connector is returned to Xorg deterministically, not only by process death. A no-op
+	 * when the output was never started (obs_drm_output_stop checks active). */
+	obs_drm_output_stop();
+#endif
 
 	obs_wait_for_destroy_queue();
 

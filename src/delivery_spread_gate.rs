@@ -13,32 +13,31 @@
 //! a test pinning the no-fold. There was no gate seam at all — not even flip-ready. Issue 1033
 //! replaces that with THIS report-only seam (the fold now flows through it, one line from LIVE).
 //!
-//! ## Why REPORT-ONLY today — the data (issue 1033 design comment, 2026-08-17)
+//! ## Why it shipped REPORT-ONLY (issue 1033) — and why #1142 flips it BLOCKING
 //!
-//! Mining all 78 local `/tmp/recording-e2e-*/verdict-*.json`, the delivery spread is NOT in a
-//! tight-green band: the most recent GREEN (`overall_pass=true`) runs carry delivery spreads of
-//! ~66–81 ms (10+ green runs), ~2.7–3.4× over the 24 ms bound. The spread is driven ENTIRELY by
-//! cam1's
-//! bimodal delivery latency (healthy p50 ~47–64 ms → spread 3–22 ms; degraded p50 ~88–144 ms →
-//! spread 44–98 ms) while cam2/cam3 stay tight (34–57 ms). This is the same cam1-grabber
-//! (issue 909) territory that keeps [`crate::optical_floor`] / [`crate::frozen_leg`] /
-//! [`crate::av_window`] report-only. Folding LIVE at 24 ms today would red the majority of recent
-//! green runs — the exact anti-pattern `verdict-gate-seam-calibration.md` bans ("a bound that
-//! would have failed a recent green run is wrong").
+//! Issue 1033 mined all 78 local `/tmp/recording-e2e-*/verdict-*.json` and found the delivery
+//! spread NOT tight-green: recent GREEN runs carried ~66–81 ms spreads (10+ runs), ~2.7–3.4× over
+//! the 24 ms bound, driven by cam1's bimodal delivery latency (the issue-909 grabber class). So it
+//! shipped report-only under the standard gates-green-first philosophy ("a bound that would have
+//! failed a recent green run is wrong"). #1142 (owner mandate 2026-08-19) OVERRIDES that here: those
+//! "green" runs were FALSELY green — the phase lottery (a good-phase 3.97 ms vs a bad-phase 85 ms on
+//! otherwise-identical runs) was hiding a real delivery-spread failure behind a green gate, which is
+//! exactly the "z mesiac prace ze to vlastne nejde" the owner is furious about. The SOURCE-side
+//! spread already BLOCKS at the same bound; #1142 makes the DELIVERY side block too, so a bad-phase
+//! run REDs honestly. The re-tighten of the shared bound toward the 16 ms half-frame stays a
+//! separate follow-up (issue 1121), gated on the cam1 grabber SWAP.
 //!
-//! ## The report-only / restore seam
+//! ## The blocking / revert seam
 //!
 //! [`gates_overall_pass`] mirrors [`crate::imag_leg_gate::gates_overall_pass`] /
 //! [`crate::optical_floor::gates_overall_pass`] / [`crate::e2e_latency_gate::gates_overall_pass`]:
 //! a one-line-restorable toggle deciding whether the delivery-spread term folds into
-//! `overall_pass`. It is `false` (REPORT-ONLY) today. The RESTORE CONDITION (a follow-up flips it
-//! to `true`): cam1's delivery-latency lottery genuinely killed (the issue-909 grabber) AND ~5
-//! consecutive green E2E runs with delivery spread ≤ ~10 ms — the exact precondition the issue-1033
-//! validator named. The bound itself needs no new constant: it reuses
-//! [`crate::switch_latency::SPREAD_THRESHOLD_MS`] (24 ms since issue 1120; was the 16 ms
-//! half-frame of issue 624), the same bound `spread_gate_pass` is already computed against —
-//! both spreads are driven by the SAME CAM1 grabber, so they share ONE constant and re-tighten
-//! together.
+//! `overall_pass`. It is `true` (BLOCKING) since #1142. Flip back to `false` for a one-line revert
+//! to report-only ONLY if a rig change proves the bound false-reds a genuinely-clean run. The bound
+//! needs no new constant: it reuses [`crate::switch_latency::SPREAD_THRESHOLD_MS`] (24 ms since
+//! issue 1120; was the 16 ms half-frame of issue 624), the same bound `spread_gate_pass` is already
+//! computed against — both spreads are driven by the SAME CAM1 grabber, so they share ONE constant
+//! and re-tighten together (issue 1121).
 //!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
@@ -55,18 +54,19 @@ pub const DELIVERY_SPREAD_BOUND_MS: f64 = crate::switch_latency::SPREAD_THRESHOL
 
 /// Does the ALL-CAMBOX delivery cross-camera-spread term fold into `overall_pass`?
 ///
-/// `false` today (REPORT-ONLY, issue 1033): the spread flows + is surfaced but never fails a run —
-/// because the current fleet data is not tight-green (cam1's delivery lottery, ~66–81 ms spreads
-/// on recent green runs; issue-909 grabber class). The ONE line a follow-up flips to `true` to
-/// promote it to a LIVE blocking gate once cam1's lottery is killed and ~5 consecutive green runs
-/// hold delivery spread ≤ ~10 ms.
+/// `true` since #1142 (BLOCKING, owner mandate 2026-08-19): a delivery spread over
+/// [`DELIVERY_SPREAD_BOUND_MS`] (24 ms) now REDs the run. Was report-only (issue 1033) on the theory
+/// "wait for a tight-green fleet before gating" — but the owner mandate is the opposite: the "green"
+/// runs it passed were FALSELY green (the phase lottery, 3.97 vs 85 ms, hid a real delivery-spread
+/// failure behind a green gate), and the point of gating is to STOP that. The SOURCE-side spread
+/// already blocks at the same bound; #1142 makes the DELIVERY side block too. Flip back to `false`
+/// for a one-line revert to report-only ONLY if a rig change proves the bound false-reds a
+/// genuinely-clean run (then RE-TIGHTEN the shared bound per issue 1121, never just relax).
 pub fn gates_overall_pass() -> bool {
-    // issue 1033 — REPORT-ONLY today: the delivery-spread term flows + is surfaced but never reds
-    // a run. The ONE line a follow-up flips to `true` to promote it to a LIVE blocking gate, once
-    // cam1's delivery lottery is killed (issue-909 grabber) and ~5 consecutive green E2E runs hold
-    // the delivery spread ≤ ~10 ms. Shipping `true` today would red the 10+ recent green runs
-    // whose delivery spread sits at ~66–81 ms (the fleet is not tight-green yet).
-    false
+    // #1142 — BLOCKING: the delivery cross-camera-spread term folds into overall_pass at the shared
+    // SPREAD_THRESHOLD_MS bound. Was `false` (issue 1033 report-only). The owner mandate flips it
+    // LIVE so a bad-phase delivery spread REDs the run instead of hiding behind a green gate.
+    true
 }
 
 /// Pure fold: does a delivery-spread outcome (`spread_ok` = `spread_ms <= DELIVERY_SPREAD_BOUND_MS`)

@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=26
+TOTAL_STEPS=27
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -533,6 +533,14 @@ EOF
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
 systemctl restart systemd-logind
 UBUS="unix:path=/run/user/$(id -u $DESKTOP_USER)/bus"
+# #1182: is the desktop user's systemd USER MANAGER bus up? It lives at /run/user/<uid>/bus and
+# exists only once that user has a live login session (the kiosk lightdm autologin) or lingering.
+# On a from-scratch box provisioned detached, BEFORE the first kiosk boot, it does NOT exist yet,
+# so any `sudo -u "$DESKTOP_USER" ... systemctl --user ...` dies "Failed to connect to bus:
+# Connection refused". Steps 21/27 gate their `systemctl --user` half on this and DEFER to the
+# first kiosk boot when it is absent -- the direct structural analogue of step 17's dead-:0 gate
+# ([ -S /tmp/.X11-unix/X0 ] -> defer the OBS launch to the next boot).
+user_bus_alive() { [ -S "/run/user/$(id -u "$DESKTOP_USER")/bus" ]; }
 gs() { sudo -u "$DESKTOP_USER" DBUS_SESSION_BUS_ADDRESS="$UBUS" gsettings set "$@" 2>/dev/null || true; }
 gs org.gnome.desktop.session idle-delay 0
 gs org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type "'nothing'"
@@ -915,8 +923,14 @@ if [ "$INSTALLED_OBS_VERSION" != "$IMAG_OBS_BASE_VERSION" ]; then
     OBS_BASE_PLAN="$(imag_obs_base_plan "$OBS_CANDIDATE" "$IMAG_OBS_BASE_VERSION")" || exit 1
     echo "  #824: OBS base pin ${IMAG_OBS_BASE_VERSION} (PPA candidate ${OBS_CANDIDATE:-none}) -> ${OBS_BASE_PLAN}"
     if [ "$OBS_BASE_PLAN" = "apt" ]; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "obs-studio=${IMAG_OBS_BASE_VERSION}" >/dev/null \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
+            --allow-change-held-packages "obs-studio=${IMAG_OBS_BASE_VERSION}" >/dev/null \
             || fail "#824: obs-studio=${IMAG_OBS_BASE_VERSION} install failed"
+        # The hold is DELIBERATE (issue 824: no unattended PPA upgrades under the hot-swap) — the
+        # pinned install above may legitimately MOVE the held version when the #824 pin advances
+        # with the PPA candidate, so it must be allowed to change a held package; re-assert the
+        # hold right after so the box never floats.
+        apt-mark hold obs-studio >/dev/null 2>&1 || true
     else
         # the PPA moved on — fetch the pinned (superseded) binary from Launchpad's +files endpoint
         OBS_DEB_URL="$(imag_obs_base_deb_url "$IMAG_OBS_BASE_VERSION")"
@@ -1592,6 +1606,17 @@ gh api -H "Accept: application/vnd.github.raw" \
     > "$SCN" \
     || fail "could not fetch scripts/imag_scenes.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$SCN"
+# #1156: imag_scenes.py imports the imag_record_encoder sibling module (the #1143 record-encoder
+# lane). An imported sibling MUST ride the SAME on-box install list, fetched the SAME way -- or a
+# deploy pushes the importer WITHOUT the imported module and every imag-obs-start.sh seed dies on
+# ModuleNotFoundError, Restart-looping OBS (the 1737-restart / 8.5h incident this closes).
+REC_ENC="/usr/local/bin/imag_record_encoder.py"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag_record_encoder.py?ref=dev" \
+    > "$REC_ENC" \
+    || fail "could not fetch scripts/imag_record_encoder.py from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$REC_ENC"
+
 
 # #840: install the operator start/stop scripts onto the box too -- the openbox autostart below
 # now launches OBS THROUGH imag-obs-start.sh (the SAME path the operator's right-click "Spustit
@@ -1639,14 +1664,20 @@ mkdir -p "$USER_HOME/.config/openbox"
 cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'
 #!/bin/bash
 # imag-nb OBS cutting kiosk boot — WRITTEN BY setup-imag.sh (#522/#488). Do not hand-edit.
-# PANEL (DP-*/eDP-*, notebook screen) = PRIMARY = multiview + OBS UI. PROJ (HDMI-*) = PROGRAM projector.
+# issue 1146: PROJ (HDMI-*, projector) = PRIMARY = the vsync anchor for the tear-free picom present
+# (imag drives two 60Hz outputs on independent crystals; GL/scanout vsyncs only the primary CRTC, so
+# the projector MUST be primary or its clock beats against the panel -> walking tear line). PANEL
+# (DP-*/eDP-*, notebook) is a plain secondary; it still shows the OBS UI + Multiview because
+# imag_scenes.py places projectors by connector TYPE (HDMI vs panel), never by the --primary flag,
+# and OBS restores its own saved main-window geometry on the panel. This REVERSES the #522/#488
+# panel-primary doctrine (its real regression was a lost self-heal, handled by imag-obs.service now).
 sleep 1
 PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
 PROJ=$(xrandr  | awk '/ connected/ && $1 ~  /^HDMI/ {print $1; exit}')
-[ -n "$PANEL" ] && xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null || true
+[ -n "$PANEL" ] && xrandr --output "$PANEL" --mode 1920x1080 --rate 60 2>/dev/null || true
 if [ -n "$PROJ" ]; then
-  { [ -n "$PANEL" ] && xrandr --output "$PROJ" --mode 1920x1080 --rate 60 --left-of "$PANEL" 2>/dev/null; } \
-    || xrandr --output "$PROJ" --mode 1920x1080 --rate 60 2>/dev/null || true
+  { [ -n "$PANEL" ] && xrandr --output "$PROJ" --primary --mode 1920x1080 --rate 60 --left-of "$PANEL" 2>/dev/null; } \
+    || xrandr --output "$PROJ" --primary --mode 1920x1080 --rate 60 2>/dev/null || true
 fi
 xset s off -dpms s noblank 2>/dev/null || true
 # wall-fallback: resolume-imag still ako pozadie -- restart OBS nikdy neukaze ciernu stenu.
@@ -1655,9 +1686,10 @@ xset s off -dpms s noblank 2>/dev/null || true
 [ -f "$HOME/Pictures/wall-fallback.png" ] && command -v feh >/dev/null && feh --no-fehbg --bg-fill "$HOME/Pictures/wall-fallback.png" 2>/dev/null || true
 # Clear stale OBS crash sentinels BEFORE launch -- a hard/unclean reboot is EXACTLY the case OBS's
 # own "Crash or unclean shutdown detected" modal fires on, which would hang the boot headless and
-# :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 17;
-# there is no OBS CLI flag that suppresses this check -- verified against vendor/obs-studio
-# frontend/OBSApp.cpp, it is a Qt dialog gated on this sentinel file only).
+# :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 17).
+# Since #1195 the genlock build removes that modal at source (OBSApp.cpp checkForUncleanShutdown()
+# auto-selects a NORMAL launch), so this clear is now belt-&-braces for a not-yet-redeployed binary;
+# there is no OBS CLI flag that suppresses the check either way.
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 # #522: strip any saved projectors from the scene-collection JSON so OBS restores NONE on load.
 # OBS restores a scene collection's saved_projectors on launch INDEPENDENT of SaveProjectors=false
@@ -1808,15 +1840,17 @@ if [ "$OBS_LAUNCHED_THIS_RUN" -eq 1 ]; then
     LATEST_LOG="$(ls -t "$OBS_LOG_DIR"/*.txt 2>/dev/null | head -1 || true)"
     [ -n "$LATEST_LOG" ] || fail "no OBS log found in $OBS_LOG_DIR — cannot verify the genlock build"
     LOG_TEXT="$(cat "$LATEST_LOG")"
-    echo "$LOG_TEXT" | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
+    # #1184: LC_ALL=C grep -a -> byte-literal match, so invalid-UTF-8 bytes in the OBS log (DistroAV
+    # mojibake) can never suppress a marker that IS present in a UTF-8 locale (same class as #1183).
+    echo "$LOG_TEXT" | LC_ALL=C grep -aiE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' >/dev/null \
         || fail "OBS log shows NO genlock capability marker in '$LATEST_LOG' — NOT the genlock build (check the #460 hot-swap step)"
     echo "  genlock render tick ENABLED (#460 build proof)"
-    if echo "$LOG_TEXT" | grep -i '\[distroav\] plugin loaded' >/dev/null; then
+    if echo "$LOG_TEXT" | LC_ALL=C grep -ai '\[distroav\] plugin loaded' >/dev/null; then
         echo "  DistroAV plugin loaded"
     else
         echo "  WARNING: no '[distroav] plugin loaded' line yet (may log lazily on first NDI activation)"
     fi
-    if echo "$LOG_TEXT" | grep -i 'NDI library initialized' >/dev/null; then
+    if echo "$LOG_TEXT" | LC_ALL=C grep -ai 'NDI library initialized' >/dev/null; then
         echo "  NDI runtime loaded"
     else
         echo "  WARNING: no 'NDI library initialized' line yet"
@@ -1953,18 +1987,44 @@ done
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/systemd"
 
 UID_DESKTOP="$(id -u "$DESKTOP_USER")"
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-    systemctl --user daemon-reload || fail "systemctl --user daemon-reload failed"
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-    systemctl --user enable --now imag-wallpaper-refresh.timer \
-    || echo "  WARNING: could not enable imag-wallpaper-refresh.timer -- the wall-fallback screenshot will go stale"
-echo "  imag-wallpaper-refresh.timer enabled (wall-fallback screenshot refresh every 5 min; the obs-down Discord alert is a SEPARATE dev1-side watchdog, scripts/imag-obs-alert-watchdog.sh)"
-# issue 884: the autostart heredoc above now calls through this unit instead of the operator
-# script directly, so enable+start is safe here -- see the step header comment for why.
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-    systemctl --user enable --now imag-obs.service \
-    || fail "systemctl --user enable --now imag-obs.service failed"
-echo "  imag-obs.service enabled + started (OBS boot launch is now systemd-supervised, Restart=on-failure; issue 884)"
+# #1182: a from-scratch box provisioned detached has NO user bus yet (see user_bus_alive above), so
+# these `systemctl --user` calls would die "Failed to connect to bus: Connection refused" and their
+# `|| fail` would abort the whole run at step 21 (never reaching steps 22-27). Gate on the bus,
+# mirroring step 17's dead-:0 degrade -- and complete the ENABLE bus-free on the deferred path.
+if user_bus_alive; then
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user daemon-reload || fail "systemctl --user daemon-reload failed"
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user enable --now imag-wallpaper-refresh.timer \
+        || echo "  WARNING: could not enable imag-wallpaper-refresh.timer -- the wall-fallback screenshot will go stale"
+    echo "  imag-wallpaper-refresh.timer enabled (wall-fallback screenshot refresh every 5 min; the obs-down Discord alert is a SEPARATE dev1-side watchdog, scripts/imag-obs-alert-watchdog.sh)"
+    # issue 884: the autostart heredoc above now calls through this unit instead of the operator
+    # script directly, so enable+start is safe here -- see the step header comment for why.
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user enable --now imag-obs.service \
+        || fail "systemctl --user enable --now imag-obs.service failed"
+    echo "  imag-obs.service enabled + started (OBS boot launch is now systemd-supervised, Restart=on-failure; issue 884)"
+else
+    # #1182: (fresh box) no user bus this run -- the desktop user's systemd manager only comes up on
+    # the FIRST kiosk boot (lightdm autologin), exactly like step 17's dead-:0 case. DEFER the `--now`
+    # START (it needs X, which the openbox autostart provides on that boot) but complete the ENABLE
+    # right now BUS-FREE: create the units' wants-symlinks by hand -- functionally equivalent to what
+    # `systemctl --user enable` writes (an ABSOLUTE symlink rather than the relative `../<unit>` it
+    # writes, but the manager resolves it identically and is-enabled reads 'enabled' either way) and
+    # the same wants-symlink the incumbent box already carries on every boot -- so verify-imag.sh
+    # check (t) reads is-enabled=enabled after ONE reboot with no
+    # re-run. The unit FILES were written to disk above; the fresh boot's user manager reads these
+    # symlinks at startup (no daemon-reload needed then). The target dirs mirror each unit's own
+    # [Install] WantedBy (systemd/imag-obs.service = graphical-session.target, the timer = timers.target).
+    sudo -u "$DESKTOP_USER" mkdir -p \
+        "$USER_HOME/.config/systemd/user/graphical-session.target.wants" \
+        "$USER_HOME/.config/systemd/user/timers.target.wants"
+    sudo -u "$DESKTOP_USER" ln -sf "$USER_HOME/.config/systemd/user/imag-obs.service" \
+        "$USER_HOME/.config/systemd/user/graphical-session.target.wants/imag-obs.service"
+    sudo -u "$DESKTOP_USER" ln -sf "$USER_HOME/.config/systemd/user/imag-wallpaper-refresh.timer" \
+        "$USER_HOME/.config/systemd/user/timers.target.wants/imag-wallpaper-refresh.timer"
+    echo "  #1182: (fresh box) no user bus this run -- imag-obs.service + imag-wallpaper-refresh.timer daemon-reload/START deferred to first kiosk boot; both ENABLED bus-free (wants-symlinks on disk), OBS launches via the openbox autostart on the next boot"
+fi
 
 # =============================================================================
 step 22 "Power/thermal envelope (#1040): purge thermald + pin MMIO RAPL PL1 + slpc, supervised by a loud guard"
@@ -1972,7 +2032,8 @@ step 22 "Power/thermal envelope (#1040): purge thermald + pin MMIO RAPL PL1 + sl
 # The imag render regression (issues 799/880/1029/1030) was a HARDWARE power clamp: thermald's
 # DPTF policy programmed the MMIO RAPL PL1 long-term constraint to 25 W, starving the iGPU to
 # gt_act_freq 600-850 MHz while every software freq knob sat at 1400. The durable fix pins PL1 to a
-# sustainable 29 W + slpc_ignore_eff_freq=1 at boot, PURGES thermald (the actor that programmed
+# sustainable 45 W (#1162 re-baseline for the replacement i7-13620H — 29 W starved it; 29 W was the
+# original i5 unit's value) + slpc_ignore_eff_freq=1 at boot, PURGES thermald (the actor that programmed
 # 25 W -- a minimalist appliance purges a competing policy engine, same discipline the sole-
 # timesync-authority gate enforces; PROCHOT stays as the hardware backstop), and supervises the
 # envelope with a LOUD root guard that alerts dev1-side instead of silently degrading. Env knobs
@@ -2016,7 +2077,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
-Environment=IMAG_PL1_W=${IMAG_PL1_W:-29}
+Environment=IMAG_PL1_W=${IMAG_PL1_W:-45}
 ExecStart=/usr/local/bin/imag-power-envelope.sh
 RemainAfterExit=yes
 
@@ -2031,7 +2092,7 @@ After=imag-power-envelope.service
 
 [Service]
 Type=oneshot
-Environment=IMAG_PL1_W=${IMAG_PL1_W:-29}
+Environment=IMAG_PL1_W=${IMAG_PL1_W:-45}
 Environment=IMAG_PL1_STEPDOWN_W=${IMAG_PL1_STEPDOWN_W:-25}
 Environment=IMAG_TCPU_STEPDOWN_C=${IMAG_TCPU_STEPDOWN_C:-93}
 Environment=IMAG_TCPU_RESTORE_C=${IMAG_TCPU_RESTORE_C:-85}
@@ -2051,12 +2112,27 @@ AccuracySec=5s
 WantedBy=timers.target
 PE_TMR_EOF
 
+# #1162/#784 self-heal: remove any leftover hand-applied PL1 override drop-in from the live
+# re-baseline. The sustainable wattage is now source-controlled (each unit's Environment= above +
+# the shared lib default), so a lingering .service.d/override.conf hand-fix must NOT persist to MASK
+# a future source re-pin (the #784 lesson, mirroring the #842 grub.d self-heal). Idempotent: absent
+# -> no-op. Runs BEFORE daemon-reload so the base unit's Environment wins on reload.
+for _pe_dropin in \
+    /etc/systemd/system/imag-power-envelope.service.d/override.conf \
+    /etc/systemd/system/imag-power-envelope-guard.service.d/override.conf; do
+    if [ -f "$_pe_dropin" ]; then
+        echo -e "  ${YELLOW}#1162: removing leftover hand-applied PL1 drop-in ${_pe_dropin} — PL1 wattage is source-controlled now (unit Environment= + shared lib default)${NC}"
+        rm -f "$_pe_dropin"
+        rmdir "$(dirname "$_pe_dropin")" 2>/dev/null || true
+    fi
+done
+
 systemctl daemon-reload
 systemctl enable --now imag-power-envelope.service >/dev/null 2>&1 \
     || fail "could not enable imag-power-envelope.service -- the boot power envelope would not be pinned"
 systemctl enable --now imag-power-envelope-guard.timer >/dev/null 2>&1 \
     || fail "could not enable imag-power-envelope-guard.timer -- the envelope would be unsupervised"
-echo "  #1040: thermald purged, PL1=${IMAG_PL1_W:-29}W envelope pinned at boot + supervised by the ~45s guard timer"
+echo "  #1040: thermald purged, PL1=${IMAG_PL1_W:-45}W envelope pinned at boot + supervised by the ~45s guard timer"
 
 step 23 "RemoteOS MCP control-channel agent (#858): provision via the canonical zbynekdrlik/remoteos-mcp installer"
 # The linux-imag-nb MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project
@@ -2233,6 +2309,93 @@ systemctl enable --now imag-maxperf.service \
 systemctl is-active --quiet imag-maxperf.service \
     || fail "issue 756/#791: imag-maxperf.service is not active after enable --now — the boot-enforcement script did not run"
 echo "  issue 756/#791: full max-performance persistence provisioned (imag-maxperf.service active + udev rule)"
+
+# =============================================================================
+step 27 "picom vsync compositor (issue 1146): tear-free HDMI-projector present + enable"
+# =============================================================================
+# ROOT CAUSE (issue 1146): imag drives TWO 60Hz outputs (eDP panel + HDMI projector) on independent
+# crystals. GL/scanout presentation vsyncs to only ONE CRTC (the primary), so a compositor-free
+# direct scanout (the #841 doctrine) does not guarantee the PROJECTOR is the sync target -> the two
+# clocks beat -> a walking tear line on the projector, intermittently ("raz dobre, raz zle"). The
+# live fix (deployed by hand 2026-08-20, folded in here for reproducibility): a picom v10 vsync
+# compositor (glx, unredir-if-possible=false so the fullscreen Program projector stays composited,
+# zero eye-candy) ANCHORED on the projector by making HDMI the xrandr primary (step 16 above). Cost
+# is <=1 frame of projector display latency; the NDI 3ms mandate is untouched (picom composites only
+# the local projector present, never the NDI receive path). The inert 20-tearfree.conf on the live
+# box is deliberately NOT provisioned here -- Option "TearFree" is a proven-dead option on this
+# modesetting build (#841), and the picom compositor is the real mechanism.
+#
+# ENABLE-ONLY (never --now): this provisioner defers taking effect to the box's next graphical
+# session, exactly like the touchpad/maxperf steps -- verify-imag.sh check (z) is the post-reboot
+# acceptance gate that proves picom actually came up. `systemctl --user enable` creates the
+# graphical-session.target.wants/picom.service symlink that scripts/lib/imag-display-path.sh reads.
+DEBIAN_FRONTEND=noninteractive apt-get install -y picom >/dev/null \
+    || fail "issue 1146: picom install failed -- the vsync compositor is the tear-free HDMI-projector present; without it the dual-output beat returns"
+
+# picom.conf -- byte-faithful to the live box (glx vsync, keep the fullscreen projector composited,
+# zero eye-candy). QUOTED heredoc: the body is literal (no shell expansion).
+sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/picom"
+cat > "$USER_HOME/.config/picom/picom.conf" <<'PICOM_CONF_EOF'
+# camera-box #1130 tearing fix (2026-08-20): the ONLY job of this compositor is a vsynced
+# present of the OBS projectors (modesetting TearFree is not available in this xorg build).
+backend = "glx";
+vsync = true;
+# NEVER unredirect fullscreen — the fullscreen Program projector is exactly the window
+# that must stay composited/vsynced, or the tearing returns.
+unredir-if-possible = false;
+# zero eye-candy: no shadows/fading/blur — pure sync, minimal latency/CPU.
+shadow = false;
+fading = false;
+blur-background = false;
+PICOM_CONF_EOF
+
+# picom.service (user systemd unit) -- byte-faithful to the live box. QUOTED heredoc: %h stays a
+# literal systemd specifier (never shell-expanded).
+sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user"
+cat > "$USER_HOME/.config/systemd/user/picom.service" <<'PICOM_SVC_EOF'
+[Unit]
+Description=picom vsync compositor (tear-free OBS projectors, camera-box issue 1130)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/picom --config %h/.config/picom/picom.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
+PICOM_SVC_EOF
+chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/picom" "$USER_HOME/.config/systemd"
+
+PICOM_UID="$(id -u "$DESKTOP_USER")"
+# #1182: same bus-liveness gate as step 21. On a from-scratch box this daemon-reload's `|| fail`
+# was the NEXT abort point once step 21 no longer aborts; defer it (picom must stay DORMANT, so no
+# wants-symlink is ever created for it -- the belt-and-braces rm below and the unit-on-disk keep it
+# present-but-disabled at the next boot).
+if user_bus_alive; then
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user daemon-reload || fail "issue 1146: systemctl --user daemon-reload failed before enabling picom.service"
+    # issue 1146 REVERT (live-measured 2026-08-20): the unit is provisioned DORMANT — installed +
+    # configured but DISABLED. Running the compositor cost 21.57% OBS render skips on the 25W power
+    # envelope (real dropped output frames chain-wide), strictly worse than the display-only tearing
+    # it cured; the tear-free direction is the OBS projector's own vsync / single-display (issue 1146 /
+    # issue 1147). The disable is deterministic: `systemctl --user disable` plus a belt-and-braces
+    # removal of the on-disk wants symlink (the exact artifact imag-display-path.sh reads), and it
+    # never `--now`-stops anything live (enable-only convention applies to the disable direction too).
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${PICOM_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user disable picom.service 2>/dev/null || true
+else
+    # #1182: (fresh box) no user bus this run -- picom's daemon-reload/disable is deferred to first
+    # kiosk boot. Nothing else is needed: picom must stay DORMANT, so NO wants-symlink is created
+    # for it (the opposite of imag-obs.service in step 21), the unit file is already on disk, and the
+    # belt-and-braces rm below clears any stale wants-symlink -- the fresh user manager finds picom
+    # present-but-disabled at the next boot, exactly the intended dormant state.
+    echo "  #1182: (fresh box) no user bus this run -- picom daemon-reload/disable deferred to first kiosk boot; picom stays DORMANT (unit on disk, no wants-symlink created)"
+fi
+rm -f "$USER_HOME/.config/systemd/user/graphical-session.target.wants/picom.service"
+echo "  issue 1146 revert: picom provisioned DORMANT (installed+configured, unit disabled — render budget stays with OBS; HDMI stays xrandr primary via step 16)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

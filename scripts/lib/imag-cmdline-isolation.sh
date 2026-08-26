@@ -93,10 +93,10 @@ imag_cmdline_isolation_verdict() {
   local offenders=""
   # isolcpus= / nohz_full= — the #784/#842 footgun family; the current affinity-only design writes
   # NEITHER to the cmdline, so ANY occurrence of either is drift.
-  if printf '%s' " $cmdline " | grep -qE '[[:space:]]isolcpus='; then
+  if grep -qE '[[:space:]]isolcpus=' <<<" $cmdline "; then
     offenders="${offenders:+$offenders, }isolcpus=$(_ci_token_value "$cmdline" isolcpus)"
   fi
-  if printf '%s' " $cmdline " | grep -qE '[[:space:]]nohz_full='; then
+  if grep -qE '[[:space:]]nohz_full=' <<<" $cmdline "; then
     offenders="${offenders:+$offenders, }nohz_full=$(_ci_token_value "$cmdline" nohz_full)"
   fi
   # rcu_nocbs: `all` is the legitimate #482 low-latency (preempt=full) token; a SCOPED per-core list

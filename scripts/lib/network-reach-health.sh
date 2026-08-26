@@ -73,3 +73,22 @@ net_reach_alert_detail() {
   [ "$bundle_ok" = "1" ] && b="up" || b="DOWN"
   printf '%s: ping %s, OBS-WS:4455 %s, bundle-state:8899 %s\n' "$box" "$p" "$w" "$b"
 }
+
+# net_reach_box_is_report_only <box> <report_only_boxes> -> stdout: report_only=1 | report_only=0
+#   A box NAMED in the space-separated <report_only_boxes> list is REPORT-ONLY: it is probed,
+#   classified, logged and per-box state-tracked exactly like a paging box, but a report-only box
+#   NEVER fires a Discord page (nor a recovery ping) -- its verdict is log-only. This is for a
+#   TRAVELING box (resolume, #811) whose absence is the NORMAL state (powered off / away between
+#   events), so paging on its unreachability would be pure false-alarm noise. A supervisor "flips it
+#   required" by REMOVING its name from the list (leaving it only in the paging BOXES roster), at
+#   which point it pages like strih/stream with all confirm/throttle/recovery state already warm.
+#   Whole-word match on the box NAME (so "resolume" never matches "resolume-alt" unless that name is
+#   also listed). Empty list / not a member -> report_only=0 (pages normally -- the strih/stream
+#   default). Always returns 0 so it is safe to call as a bare statement under a caller's set -e.
+net_reach_box_is_report_only() {
+  local box="${1:-}" list="${2:-}" b
+  for b in $list; do
+    [ "$b" = "$box" ] && { printf 'report_only=1\n'; return 0; }
+  done
+  printf 'report_only=0\n'
+}

@@ -700,3 +700,35 @@ the supervisor, never self-fixed mid-round; (2) after any toolchain change, ever
 (worktrees included) needs `cargo clean` — mixed-rustc artifacts produce misleading errors, not
 real code failures; (3) an E2E/CI failure whose log shows a missing-rlib / mixed-artifact shape
 is re-run after confirming `rustc --version` + the rlib exists — it is not a code regression.
+
+## A report-only bash-lib probe called as a BARE statement aborts the run on a grep no-match under the CALLER's `set -euo pipefail` — and a `set -uo`-only harness is structurally blind to it (#1133)
+
+The `run_sourced` `set -e`-leak entry above is the harness INHERITING a sourced script's `-e`.
+This is the INVERSE, and it bit a fresh report-only probe: a new `scripts/lib/*.sh` "just log a
+WARN, never gate" function (`leg_health_cap1s_band_warn`) built its value with a grep pipeline —
+`caps="$(printf '%s\n' "$text" | grep -oE 'cap-1s: \[…\]' | …)"`. `grep -oE` exits 1 on ZERO
+matches; under `pipefail` the whole pipeline returns non-zero; because this is an **assignment**
+(not an `if`-condition), the CALLER's `set -euo pipefail` (here `scripts/recording-e2e.sh:51`)
+`set -e`-ABORTS the entire E2E run — before the step's own `ok:` line — on exactly the empty /
+timed-out ssh read (or a just-restarted box whose instance-scoped journal window has no matching
+line yet) the probe is meant to treat as benign. A silent phantom-fail, not a warn.
+
+Two things make this a recurring trap for ANY new sourced-lib helper that greps:
+
+1. **A report-only helper must be called as a bare statement, so it MUST return 0 on every input.**
+   Guard it: an early `[ -n "$text" ] || return 0`, AND a trailing `|| true` on any `grep`/`sed`
+   pipeline whose no-match/SIGPIPE exit would otherwise propagate (the same "grep must survive zero
+   matches under pipefail" discipline the self-heal-attribution rule states, but here it is
+   load-bearing for the WHOLE-RUN exit, not just one line). A `sed -n …p` extractor is already
+   safe (no-match = exit 0); a `grep -oE …` or a `… | head -1` (head closes the pipe → SIGPIPEs the
+   upstream) is NOT.
+
+2. **A `run_sourced`-style harness that sources with `set -uo pipefail` (NO `-e`) can never catch
+   this** — the probe always reaches its final `return 0` without `-e`, so the production abort is
+   invisible to every test. Add a SECOND helper that sources under the caller's EXACT
+   `set -euo pipefail` (`run_under_set_e` in `tests/harness_leg_health_guard_1133.rs`) and assert
+   the full per-box sequence (`extract → classify → band_warn`) reaches its `ok`/sentinel line on
+   an EMPTY read, plus that a genuinely-bad read still aborts. Verify the same locally by running
+   the lib under `bash -c 'set -euo pipefail; . lib; …'`, never only `-uo` — a `-uo`-only local
+   check reproduces the harness's blind spot. (Caught here only by a fresh-context reviewer running
+   the lib under the real `-e` context; the `-uo` runner + harness both passed while the bug was live.)

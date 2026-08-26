@@ -64,7 +64,63 @@
 # enabled. Its per-source phase-sync hold sits at the 3 ms floor; recalibrate from the first green
 # E2E run's own verdict JSON if the measured delivery spread demands it (see
 # .claude/rules/phase-sync-calibrator-testing.md).
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
+#
+# cam1 RE-RETIRED 2026-08-22 (issue 1110): its ShadowCast USB grabber is HARDWARE-DEFECTIVE beyond
+# software compensation — chronic over-rate (61.5 -> 63.1 fps captured, climbing), constant 4
+# corrupted/5s, -EPROTO; USB re-auth does NOT cure it, and the emit-side fixes (issue 1145 v3 /
+# issue 1167) mitigate but do not eliminate. The leg-health gate (issue 1133) rightly REFUSES every
+# E2E run while cam1 is in the set, and cam1 alone oscillates -2..-11 id in [4i/8align] while
+# cam2/cam3/cam4 sit within 0-2 id — the SINGLE deterministic blocker of the green E2E series. The
+# card swap is delivered to the owner (needs-answer on issue 1110); until the grabber is physically
+# swapped, cam1 is retired from the MEASURED fleet so the rest of the stack (emit fixes, pin-mover,
+# preempt=full kernel) can be proven on healthy cameras.
+#
+# HISTORY: cam1 was first retired 2026-08-19 (issue 1134, owner order #1130) and RETURNED the same
+# day (issue 1130 read the judder as an emit-gate regression in the deployed binary, not the card).
+# That return is now superseded — the grabber IS the fault, confirmed over 2026-08-21's E2E series.
+#
+# cam1 was ALSO the hard-pinned PRIMARY/source node of the E2E chain (cam2 paints -> SOURCE films
+# cam2's monitor -> strih -> stream), so its retirement is the first that had to move the SOURCE
+# role, not just drop a secondary. #1134 extended this file's retirement=membership doctrine to the
+# source role via camera_source_box() below: the source is now the FIRST strih-routable member of
+# CAMERA_ACTIVE_SET, so dropping cam1 from the default set here moves the source to cam3 with no
+# other edit. Membership-retired exactly like cam4/cam5/cam6/cam7 — cam1's IP / NDI source / strih
+# route stay fully resolvable below. cam1 is ALSO acked in rig-fleet.txt
+# (grabber-hw-defect-swap-pending-issue-1110); a box OUTSIDE the active set is never a preflight
+# target, so the stale-ack guard never fires on it (the cam4 precedent).
+# RE-ENABLE (once the grabber is swapped): add "cam1" back to CAMERA_ACTIVE_SET (and CAMERA_ALIGN_SET
+# below) AND delete cam1's rig-fleet.txt ack line — nothing else (the source role follows
+# automatically, cam1 being the first strih-routable member of a cam1-first set again).
+#
+# cam2 CAMERA-UNDER-TEST RETIRED 2026-08-24 (issue 1170, owner order): cam2's ShadowCast grabber
+# captures imag-nb's HDMI output, so cam2's leg measures the imag PROJECTION path (issue 781), not a
+# splitter camera feed — and that grabber's cure-decay collapsed from ~2h to ~7min (issue 1193
+# canary journal), so its capture leg cannot survive a 40-min run. cam2 is dropped from the active
+# set so it is no longer a MEASURED camera-under-test: no [2b/8] burn deploy, no capture-leg health
+# check, no sweep window, no verdict window, no alignment. Its PAINTER role stays UNCONDITIONAL
+# (keyed off PAINTER_IP, NOT this set): cam2 still paints the dual-QR + emits the QPSK marker, the
+# source camera still films its monitor, and its DanteSync clock is still gated (the whole run's
+# timebase). Its facts (IP / NDI source) stay fully resolvable below exactly like the other retired
+# cameras — retirement is membership-only. The hardware swap is tracked on issue 1198.
+# RE-ENABLE (once the card is swapped): add "cam2" back to CAMERA_ACTIVE_SET — every camera-under-test
+# facet (deploy, leg-health, sweep, verdict, and CAMERA_ALIGN_SET membership via camera_is_active)
+# flows back automatically, one line, no other edit (see tests/harness_cam2_camera_under_test_gating_1170.rs).
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam3}"
+
+# CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
+# aligned. It is a SUPERSET of the MEASURED set: cam4 stays here (on-air but its capture leg wedges,
+# #947, so it is excluded from CAMERA_ACTIVE_SET yet MUST still be aligned — the owner's rework
+# mandate, issue 1003, 2026-08-20; the offline-ack "outside-measured-set" covers only E2E
+# measurement, never production alignment), and cam3 (the source) is the measured base. cam2's
+# membership, by contrast, DERIVES from CAMERA_ACTIVE_SET (issue 1170): cam2 is aligned ONLY while it
+# is a measured camera. cam2's capture leg is retired until the card swap (issue 1170/1198), so it is
+# NOT aligned now — re-adding "cam2" to CAMERA_ACTIVE_SET above restores its alignment automatically
+# (one line — the whole point). cam1 is out of both sets (issue 1110, dead grabber can't go on-air).
+# The default resolves to "cam3 cam4" (cam2 out) or "cam2 cam3 cam4" (cam2 back). Override to match
+# the on-air reality if the fleet changes (e.g. a cam5 goes on-air): CAMERA_ALIGN_SET="cam2 cam3 cam4 cam5".
+# The inline case is a word-exact match on the space-padded set (same #39-injection-safe posture as
+# camera_is_active — it never evals the value); cam3/cam4 are the explicit on-air base.
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(case " $CAMERA_ACTIVE_SET " in *" cam2 "*) printf 'cam2 cam3 cam4' ;; *) printf 'cam3 cam4' ;; esac)}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.
@@ -163,19 +219,57 @@ camera_is_active() {
   esac
 }
 
+# camera_source_box -> prints (stdout) the box currently filling the SOURCE-camera role (the
+# "cam1 role": films cam2's monitor, carries the #174 render-time capture burn, is routed onto the
+# strih PROGRAM as a camera-under-test). #1134: this is the PRIMARY analogue of the
+# retirement=membership doctrine — the source is DERIVED, never hard-pinned to a name:
+#   * CAMERA_SOURCE_BOX (env) wins outright if set — the operator's explicit one-off override,
+#     same trust model as recording-e2e.sh's CAM= (a member of CAMERA_ACTIVE_SET is expected). An
+#     override that is NOT a strih-routable camera is printed as-is here (not validated in this
+#     function), and fails loud downstream at recording-e2e.sh's camera_resolve/camera_strih_route
+#     under set -e — never a silent wrong-box certification.
+#   * otherwise: the FIRST member of CAMERA_ACTIVE_SET that camera_strih_route accepts. cam2 (the
+#     fixed painter) is NOT strih-routable and is skipped automatically, so a default set of
+#     "cam2 cam3" resolves to cam3, while any legacy cam1-first set still resolves to cam1
+#     (byte-identical to the pre-#1134 hard-pin — full back-compat).
+# Fails loudly (nonzero, stderr) when NO member is strih-routable (e.g. a painter-only set) —
+# never silently certify a chain with no source. The camera_strih_route probe runs in a SUBSHELL
+# so it cannot leak CAMERA_STRIH_SCENE/CAMERA_STRIH_SOURCE into the caller (the caller re-resolves
+# those itself via its own camera_strih_route call). Reuses camera_strih_route as the single
+# authority on source-eligibility — never a second cam list (the 1:1 mapping is decided once).
+camera_source_box() {
+  if [ -n "${CAMERA_SOURCE_BOX:-}" ]; then
+    printf '%s' "$CAMERA_SOURCE_BOX"
+    return 0
+  fi
+  local cam
+  for cam in $CAMERA_ACTIVE_SET; do
+    if ( camera_strih_route "$cam" ) >/dev/null 2>&1; then
+      printf '%s' "$cam"
+      return 0
+    fi
+  done
+  echo "camera-set: no strih-routable SOURCE camera in CAMERA_ACTIVE_SET='${CAMERA_ACTIVE_SET}' (set CAMERA_SOURCE_BOX, or add a source-eligible camera to the active set)" >&2
+  return 1
+}
+
 # camera_active_secondary_set -> prints (space-separated, stdout) CAMERA_ACTIVE_SET with cam1 and
 # cam2 removed — the "other camera-under-test boxes" the ALL_CAMBOX sweep cuts into strih program
-# alongside the resolved SOURCE camera (cam1 role) and the fixed painter (cam2). This is the ONE
+# alongside the resolved SOURCE camera (the "cam1 role", #1134: DERIVED via camera_source_box, no
+# longer the literal cam1) and the fixed painter (cam2). This is the ONE
 # place recording-e2e.sh's preflight/deploy/restore/transport-sampler loops derive their
 # secondary-camera membership from — adding/removing a camera from CAMERA_ACTIVE_SET flows
 # through here automatically, never a second independently-maintained list.
 camera_active_secondary_set() {
-  local cam out=""
+  local cam src out=""
+  # #1134: exclude whichever box camera_source_box resolves as the SOURCE (the "cam1 role"), not
+  # the literal cam1 — so a cam1-first legacy set excludes cam1 exactly as before, while the
+  # cam2 cam3 default (source=cam3) correctly excludes cam3 and yields an empty secondary set.
+  src="$(camera_source_box 2>/dev/null)" || src=""
   for cam in $CAMERA_ACTIVE_SET; do
-    case "$cam" in
-      cam1|cam2) continue ;;
-      *) out="${out:+$out }$cam" ;;
-    esac
+    [ "$cam" = cam2 ] && continue
+    [ "$cam" = "$src" ] && continue
+    out="${out:+$out }$cam"
   done
   printf '%s' "$out"
 }
@@ -200,6 +294,37 @@ camera_active_sweep_pairs() {
 camera_active_ndi_sources_csv() {
   local cam out=""
   for cam in $CAMERA_ACTIVE_SET; do
+    out="${out:+$out,}NDI $cam"
+  done
+  printf '%s' "$out"
+}
+
+# camera_align_ndi_sources_csv -> prints (stdout) "NDI cam1,NDI cam2,NDI cam3,NDI cam4" -- the
+# comma-joined strih NDI-input list for CAMERA_ALIGN_SET (the on-air alignment superset, incl.
+# cam4). Used by the #1003 floor-3 per-run aligner (scripts/qr_align_pins.py --sources) so the
+# alignment set derives from CAMERA_ALIGN_SET, never a literal cam range. The 1:1 "NDI cam<N>"
+# convention matches camera_strih_route / set-ndi-mapping.py.
+camera_align_ndi_sources_csv() {
+  local cam out=""
+  for cam in $CAMERA_ALIGN_SET; do
+    out="${out:+$out,}NDI $cam"
+  done
+  printf '%s' "$out"
+}
+
+# camera_align_ndi_sources_excluding_csv <excluded> -> the align CSV with any word in EXCLUDED
+# (space-separated cam names) removed -- the offline-ack sibling of camera_align_ndi_sources_csv,
+# mirroring camera_active_ndi_sources_excluding_csv. The floor-3 aligner (#1003 review 🟡) passes
+# recording-e2e.sh's PREFLIGHT_EXCLUDED_CAMS here so an acked-OFFLINE on-air camera (a temporarily
+# wedged cam4) is NOT required to decode a painter QR -- otherwise one acked box would abort the
+# WHOLE run. cam4 is aligned when HEALTHY (it stays in CAMERA_ALIGN_SET); it is dropped only while
+# explicitly acked offline, exactly like the freeze-watch's active-set exclusion. Word-exact match.
+camera_align_ndi_sources_excluding_csv() {
+  local excluded="${1:-}" cam out=""
+  for cam in $CAMERA_ALIGN_SET; do
+    case " ${excluded} " in
+      *" ${cam} "*) continue ;;
+    esac
     out="${out:+$out,}NDI $cam"
   done
   printf '%s' "$out"
@@ -316,5 +441,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     printf 'STRIH_SCENE=%q STRIH_SOURCE=%q\n' "$CAMERA_STRIH_SCENE" "$CAMERA_STRIH_SOURCE"
   fi
   printf 'CAMERA_ACTIVE_SET=%q\n' "$CAMERA_ACTIVE_SET"
+  printf 'CAMERA_SOURCE_BOX=%q\n' "$(camera_source_box 2>/dev/null || echo '<none>')"
   printf 'CAMERA_ACTIVE_SECONDARY_SET=%q\n' "$(camera_active_secondary_set)"
 fi

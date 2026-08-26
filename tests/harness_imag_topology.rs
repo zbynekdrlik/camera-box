@@ -196,14 +196,20 @@ fn burn_targets_array_includes_imag() {
     );
 }
 
-/// The imag program-feeding NDI source used as the burn target must be a named, overridable
-/// constant (the #399-style 1:1 Phase-1 mapping: 'NDI CAM1' shows cam1 on imag).
+/// The imag program-feeding NDI source used as the burn target must be an overridable var DERIVED
+/// from the camera-under-test (issue 1204: it was hard-pinned to 'NDI CAM1' and diverged from the
+/// program route the moment CAMERA_NAME != cam1 -- cam1 offline-acked, active set = cam3 -> imag
+/// recorded zero 911003 anchors). It must now resolve via imag_source_for_camera "$CAMERA_NAME",
+/// the SAME camera-under-test resolution the program SCENE uses (imag_scene_for_camera).
 #[test]
 fn imag_prog_source_constant_is_defined() {
     let s = read("scripts/recording-e2e.sh");
     assert!(
-        s.contains("IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-NDI CAM1}\""),
-        "#462: IMAG_PROG_SOURCE must default to 'NDI CAM1' (cam1's 1:1-mapped imag input)."
+        s.contains(
+            "IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-$(imag_source_for_camera \"$CAMERA_NAME\")}\""
+        ),
+        "#1204: IMAG_PROG_SOURCE must default to $(imag_source_for_camera \"$CAMERA_NAME\") (the \
+         input backing imag's routed program scene), never a hard-pinned 'NDI CAM1'."
     );
 }
 
@@ -242,7 +248,9 @@ fn imag_scenes_pins_verified_1to1_camera_mapping_526() {
 /// initializes NVENC, so a hardcoded-NVENC seed silently produced 0-byte recordings there (live-
 /// diagnosed, see the #847 issue). `seed_profile()` now takes `has_discrete_nvidia` and derives
 /// the encoder via `select_rec_encoder()`: NVENC when a discrete NVIDIA GPU is present (byte-for-
-/// byte unchanged for the incumbent box), `obs_x264` (live-proven to work) otherwise -- NEVER qsv
+/// byte unchanged for the incumbent box); since #1143 the selection delegates to the Tier-0 pure
+/// `imag_record_encoder.choose_record_encoder` (VAAPI-texture default on the Intel bundle,
+/// x264 fallback) -- NEVER qsv
 /// (live-tested and confirmed unreliable on this hardware/build, see the #847 design comment).
 /// Pin the NEW hardware-aware contract instead of the old hardcoded one.
 #[test]
@@ -254,10 +262,9 @@ fn imag_scenes_seeds_advanced_hardware_aware_recording_profile_847() {
         r#"("AdvOut", "RecEncoder", rec_encoder)"#,
         r#"("AdvOut", "RecRescale", "false")"#,
         r#"("AdvOut", "RecFormat2", "mkv")"#,
-        "def seed_profile(obs: Obs, has_discrete_nvidia: bool) -> None:",
         "rec_encoder = select_rec_encoder(has_discrete_nvidia)",
-        "def select_rec_encoder(has_discrete_nvidia: bool) -> str:",
-        r#"return "obs_nvenc_h264_tex" if has_discrete_nvidia else "obs_x264""#,
+        "def select_rec_encoder(has_discrete_nvidia: bool, available_encoders=None) -> str:",
+        "return imag_record_encoder.choose_record_encoder(has_discrete_nvidia, available_encoders)",
     ] {
         assert!(
             s.contains(needle),

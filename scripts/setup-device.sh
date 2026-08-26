@@ -58,6 +58,12 @@ fail() {
                                   # source of truth for the by-NAME asound.conf + per-box interkom
                                   # Mic/PCM mixer-gain table (STEP 5 write + STEP 16 amixer apply)
 
+# shellcheck source=scripts/lib/dscp-nft.sh
+. "$HERE/lib/dscp-nft.sh"  # dscp_nft_ruleset_content / dscp_nft_service_unit_content (dantesync
+                           # issue 52) -- also sourced by verify-device.sh's (ae) check +
+                           # create-usb-linux.sh, single source of truth for the NTP-client DSCP
+                           # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
+
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
 GITHUB_REPO="zbynekdrlik/camera-box"
@@ -363,6 +369,10 @@ echo "  Hostname set to: $DEVICE_NAME"
 # =============================================================================
 echo ""
 echo -e "${GREEN}[2/${TOTAL_STEPS}] Configuring static IP...${NC}"
+# #1155: pin the LAN stanza to the PCI NIC by NAME (enp*), never the driver wildcard. A
+# driver-wildcard match also claims a USB CDC-NCM camera link (bkshading, issue 808) and hands
+# it this box's static IP + a duplicate default route -- which lands the dantesync PTP multicast
+# join on the camera link and makes the box PTP-deaf (cam1 live incident 2026-08-20).
 cat > /etc/netplan/01-netcfg.yaml << EOF
 network:
   version: 2
@@ -370,7 +380,7 @@ network:
   ethernets:
     all-ethernet:
       match:
-        driver: "*"
+        name: "enp*"
       addresses:
         - ${DEVICE_IP}/23
       routes:
@@ -973,9 +983,11 @@ apt-get update -qq
 # #743: psmisc (provides `fuser`) joins the same dual-bake as create-usb-linux.sh -- a fresh
 # cam2 clone (2026-07-13) had no `fuser`, false-FAILing rig-mode.sh's #464 KMS-held check AND
 # silently no-op'ing recording-e2e.sh's capture-release busy-wait.
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc 2>/dev/null || true
+# dantesync issue 52: nftables provides `nft`, needed by STEP 17c to install the NTP-client
+# DSCP OUTPUT-mangle rule (rsntp cannot setsockopt(IP_TOS) -- see scripts/lib/dscp-nft.sh).
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables 2>/dev/null || true
 systemctl enable avahi-daemon
-echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc"
+echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc, nftables"
 
 # #782: bake the per-box interkom mixer gains. This MUST run AFTER alsa-utils is installed (amixer/
 # alsactl land above), and it belongs here in STEP 16 rather than STEP 5 for that reason. Previously
@@ -1006,8 +1018,14 @@ fi
 # libegl-mesa0 are separate from libgl1-mesa-dri and were the actual missing piece behind an
 # initial "EGL not initialized" failure trying an SDL2/KMSDRM alternative (kept here anyway --
 # harmless, and useful if a future variant of this tool ever needs it).
-apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri
-echo "  Installed: ffmpeg, libsdl2-2.0-0, libegl1, libegl-mesa0, libgl1-mesa-dri (#930 lipsync-test-mode runtime)"
+# issue 1187: the lipsync-test-mode playback path moved OFF raw fbdev (ffmpeg -f fbdev, which left
+# a stale frame in /dev/fb0 memory -- issue 1176) ONTO DRM/KMS via `mpv --vo=drm`. mpv is therefore
+# the DRM/KMS lipsync playback runtime and is installed on the SAME fail-loud line as the #930
+# packages (it Depends on the ffmpeg libav* codecs already present, so --no-install-recommends still
+# decodes the H.264 test asset). ffmpeg/EGL stay installed -- harmless, and ffmpeg's libav* are
+# mpv's own decode dependency anyway.
+apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri mpv
+echo "  Installed: ffmpeg, libsdl2-2.0-0, libegl1, libegl-mesa0, libgl1-mesa-dri, mpv (#930/#1187 lipsync-test-mode runtime)"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)
 cat > /etc/rc.local << 'RCEOF'
@@ -1228,6 +1246,31 @@ REMOTEOS_MCP_ENABLED_STATE="$(systemctl is-enabled remoteos-mcp 2>/dev/null || t
 [ "$REMOTEOS_MCP_ENABLED_STATE" = "enabled" ] \
     || fail "remoteos-mcp.service is not enabled (is-enabled='${REMOTEOS_MCP_ENABLED_STATE:-<none>}') after install -- the linux-camN MCP surface would be dead on next boot (#1066)"
 echo "  #1066: remoteos-mcp agent installed + enabled (linux-camN MCP surface :8092; proven live post-reboot by verify-device.sh (ab))"
+
+# =============================================================================
+# STEP 17c: DSCP-mark outgoing NTP client packets (dantesync issue 52)
+# =============================================================================
+echo ""
+echo -e "${GREEN}[17c] Installing NTP-client DSCP nftables rule (dantesync issue 52)...${NC}"
+# dantesync's Linux NTP client (rsntp) creates its UDP socket internally, so it cannot
+# setsockopt(IP_TOS) to DSCP-mark its own NTP REQUESTS -- only the master's REPLIES are EF-marked
+# (dantesync src/dscp.rs). The venue MikroTik CRS switches honour DSCP in hardware (TRUST-L3), so
+# marking the request direction to the SAME class removes the queue-delay bias at the source. This
+# is the camera-box provisioning half of dantesync issue 52. Smallest robust mechanism (see
+# scripts/lib/dscp-nft.sh): a DEDICATED `table ip dantesync_dscp` (never `flush ruleset`, so it
+# coexists with any future firewall and is idempotently replaceable) applied by a tiny systemd
+# oneshot at boot -- NOT the distro nftables.service (the boxes ship none). `nft` is installed in
+# STEP 16. Enable-only (no live start), per this script's convention (.claude/rules/provisioning-
+# scripts.md) -- effective on the next reboot; verify-device.sh's (ae) check proves it live.
+command -v nft >/dev/null 2>&1 \
+    || fail "nft (nftables) is not installed -- STEP 16 must install it before the NTP-client DSCP rule can be provisioned (dantesync issue 52)"
+mkdir -p "$(dirname "$DSCP_NFT_RULESET_PATH")" "$(dirname "$DSCP_NFT_SERVICE_PATH")"
+dscp_nft_ruleset_content > "$DSCP_NFT_RULESET_PATH"
+dscp_nft_service_unit_content > "$DSCP_NFT_SERVICE_PATH"
+systemctl daemon-reload
+systemctl enable "$DSCP_NFT_SERVICE_NAME"   # fail-loud (set -e) like the sibling avahi enable -- a freshly-written+reloaded unit must enable cleanly (review 5B2)
+echo "  Installed: $DSCP_NFT_RULESET_PATH (udp dport 123 -> dscp ${DSCP_NFT_CLASS}) + ${DSCP_NFT_SERVICE_NAME}.service (enabled; applies at next boot)"
+
 
 # =============================================================================
 # STEP 18: Configure read-only root filesystem

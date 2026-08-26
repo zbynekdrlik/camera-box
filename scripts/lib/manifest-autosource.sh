@@ -55,7 +55,7 @@ REMOTE
 # stray login banner). Never a partial/false CSV -- a line missing its sha is skipped.
 imag_so_bytes_csv() {
   local out="$1" path sha _rest csv=""
-  printf '%s\n' "$out" | grep -qi 'TOOL_MISSING' && return 0
+  grep -qi 'TOOL_MISSING' <<<"$out" && return 0
   while IFS=' ' read -r path sha _rest; do
     [ -z "$path" ] || [ -z "$sha" ] && continue
     case "$path" in

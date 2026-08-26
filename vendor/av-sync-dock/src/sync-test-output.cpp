@@ -248,6 +248,15 @@ struct sync_test_output
 	bool cb_lock_state = false;  // last-known cluster lock state (mirrors CbLockAuditTracker's own)
 	uint64_t cb_diag_last_log_ns = 0;
 
+	/* #1177: watches whether the measurement INPUT is still advancing (video_decoded + crc_ok). When
+	 * the marker/QR input disappears (EVENT mode) every existing unlock path is dead (all are
+	 * decoded-marker-driven), so cb_lock_state would hold `yes` and the dock would show the last
+	 * offset forever. Evaluated once per diag tick (below) -- the audio thread keeps ticking in EVENT
+	 * mode -- and drives the sync_stale_changed signal + the diag line's state=LIVE/STALE token.
+	 * Pure/tested in av_sync_dock.rs, mirrored in camera-box-audio.hpp. Touched only on the audio
+	 * thread (same thread that owns the diag block). */
+	camerabox::CbDockInputStaleness cb_input_staleness;
+
 	/* #926 fix-up (review finding 9/16): latches so each condition logs ONCE (and again after it
 	 * clears and re-occurs) instead of spamming a blog() line per trusted marker while the
 	 * condition persists. Touched only on the audio thread. */
@@ -282,6 +291,11 @@ static void *st_create(obs_data_t *, obs_output_t *output)
 		 * so the dock UI can show a plain "locked, aligning" / "no test signal, holding" status
 		 * without polling. Deliberately NOT fired on every Updated (no coarse state change). */
 		"void lock_state_changed(bool locked)",
+		/* #1177: fired on the boundary crossing when the measurement INPUT (marker/QR decode) stops
+		 * advancing (EVENT mode) or resumes -- distinct from lock_state_changed, which is driven by a
+		 * DECODED marker and so can never fire when the input is exactly what went away. Lets the dock
+		 * show an explicit STALE/NO-SIGNAL state instead of holding the last offset as if live. */
+		"void sync_stale_changed(bool stale)",
 		NULL,
 	};
 	signal_handler_add_array(obs_output_get_signal_handler(output), signals);
@@ -684,6 +698,19 @@ static void signal_lock_state_changed(obs_output_t *ctx, bool locked)
 
 	calldata_set_bool(&cd, "locked", locked);
 	signal_handler_signal(sh, "lock_state_changed", &cd);
+}
+
+/* #1177: fired on the boundary crossing when the measurement input goes STALE (no marker/QR decode
+ * advance for CB_DOCK_INPUT_STALE_NS) or recovers -- see the signal's own registration comment. */
+static void signal_stale_changed(obs_output_t *ctx, bool stale)
+{
+	uint8_t stack[64];
+	struct calldata cd;
+	calldata_init_fixed(&cd, stack, sizeof(stack));
+	auto *sh = obs_output_get_signal_handler(ctx);
+
+	calldata_set_bool(&cd, "stale", stale);
+	signal_handler_signal(sh, "sync_stale_changed", &cd);
 }
 
 static void sync_index_found(struct sync_test_output *st, int index, uint64_t ts, bool is_video, uint32_t index_max)
@@ -1499,17 +1526,38 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		const uint64_t vseen = st->cb_video_frames_seen.load(std::memory_order_relaxed);
 		const uint64_t vdec = st->cb_video_frames_decoded.load(std::memory_order_relaxed);
 		const double vpct = vseen > 0 ? 100.0 * (double)vdec / (double)vseen : 0.0;
+
+		/* #1177: evaluate measurement-input staleness at this SAME ~10s cadence -- the audio thread
+		 * keeps ticking in EVENT mode even though the marker/QR decode counters (video_decoded +
+		 * crc_ok) do not. On the boundary crossing, fire a one-shot log line + the sync_stale_changed
+		 * signal so the dock stops presenting the last locked offset as if it were live. */
+		const camerabox::CbDockStaleTransition strans = st->cb_input_staleness.observe(
+			vdec, st->cb_audio_dec->stats.crc_ok, frames->timestamp,
+			camerabox::CB_DOCK_INPUT_STALE_NS);
+		const bool input_stale = st->cb_input_staleness.is_stale();
+		if (strans == camerabox::CbDockStaleTransition::EnteredStale) {
+			blog(LOG_WARNING,
+			     "av-sync-dock: measurement input LOST -> STALE (no marker/QR decode advance for "
+			     ">=%llus -- EVENT mode? cam2 QPSK/QR off) -- display frozen on last offset, no longer live",
+			     (unsigned long long)(camerabox::CB_DOCK_INPUT_STALE_NS / 1000000000ull));
+			signal_stale_changed(st->context, true);
+		} else if (strans == camerabox::CbDockStaleTransition::RecoveredLive) {
+			blog(LOG_INFO,
+			     "av-sync-dock: measurement input RESTORED -> LIVE (marker/QR decode resumed)");
+			signal_stale_changed(st->context, false);
+		}
+
 		blog(LOG_INFO,
 		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
 		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
-		     "ring_hit=%llu ring_miss=%llu locked=%s",
+		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s",
 		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
 		     (unsigned long long)st->cb_audio_pushed,
 		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
 		     (unsigned long long)st->cb_audio_dec->stats.crc_ok,
 		     (unsigned long long)st->cb_audio_dec->stats.crc_fail,
 		     (unsigned long long)st->cb_ring_hits, (unsigned long long)st->cb_ring_misses,
-		     st->cb_lock_state ? "yes" : "no");
+		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE");
 	}
 }
 

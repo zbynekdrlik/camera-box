@@ -1,0 +1,36 @@
+# bkshading service config (issue 808, M1). The camera list is NOT tied to camboxes:
+# each camera is a record with an id, a transport, and its relay address. `ndi_preview`
+# is optional — a handheld with no video feed omits it and gets a params-only block.
+
+# Web panel bind address (the operator opens http://strih.lan:8770/).
+bind = "0.0.0.0:8770"
+
+# Live-preview tuning (M2, issue 808). Optional — every field defaults sensibly. Each camera
+# with an `ndi_preview` name gets a low-bandwidth NDI receiver decimated to `fps` and served
+# as JPEG at /api/cameras/<id>/preview.jpg. A preview is a colour/exposure reference, not a
+# graded master, so a few fps at modest quality is plenty.
+[preview]
+fps = 3.0                  # target preview frame rate (2-5 is plenty for shading)
+jpeg_quality = 55          # 0-100; lower = smaller frames
+capture_timeout_ms = 1000  # how long one NDI capture blocks before looping
+reconnect_backoff_ms = 2000  # wait before rebuilding a source that dropped
+
+# cam1: camera USB -> cambox cam1, controlled by bkshading-relay on cam1.
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "cam1.lan:8771"
+ndi_preview = "CAM1 (usb)"    # NDI source name (preview is an M1 placeholder; real feed = M2)
+grab_fps = 60                 # box grabs this cam at 60 fps (issue 809) — the panel warns if
+                              # the camera's project fps drifts off 60, and offers an explicit
+                              # "align to grab" button (never an automatic write). Omit for a
+                              # camera whose grab rate you don't want compared.
+
+# A handheld on a mini SBC (Pi Zero 2 W) — same relay component, no video feed.
+[[camera]]
+id = "handheld-1"
+label = "Handheld 1"
+transport = "sbc-relay"
+address = "10.77.9.60:8771"
+# no ndi_preview -> params-only block

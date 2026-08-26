@@ -258,3 +258,22 @@ fn imag_leg_marker_call_passes_the_acked_reason() {
         "the marker call must forward the acked reason as its 3rd arg: {line}"
     );
 }
+
+/// #1164: the [0/8] version-integrity gate is an imag hard-abort site the issue-1013 inventory had
+/// missed — after the issue-1100 ENFORCED flip an acked-absent imag (empty SHA + no .so bytes) makes
+/// the gate UNKNOWN-refuse the whole E2E. When imag is acked offline, recording-e2e.sh must (1)
+/// invoke version-integrity-gate.sh with `--imag-acked-offline "$IMAG_OFFLINE_ACK_REASON"` so the
+/// gate skips the imag facets instead of refusing, and (2) guard the imag genlock-SHA ssh read so no
+/// ssh is attempted to the acked-absent box.
+#[test]
+fn version_integrity_gate_is_imag_ack_guarded_1164() {
+    let s = e2e();
+    assert!(
+        s.contains("--imag-acked-offline \"$IMAG_OFFLINE_ACK_REASON\""),
+        "#1164: recording-e2e.sh must invoke version-integrity-gate.sh with \
+         --imag-acked-offline \"$IMAG_OFFLINE_ACK_REASON\" when imag is acked offline"
+    );
+    // The imag genlock-SHA ssh read (unique anchor) must be guarded by the gate flag so an
+    // acked-absent imag is never sshed (would waste an 8s timeout every run).
+    guarded_before(&s, "cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt");
+}

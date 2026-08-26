@@ -53,6 +53,13 @@ NETCFG_SSH_TIMEOUT="${NETCFG_SSH_TIMEOUT:-8}"
 # reads WINDOW seconds apart; a rate above THRESHOLD drops/s pages (the microburst-tail-drop signature).
 NETCFG_DROP_WINDOW="${NETCFG_DROP_WINDOW:-6}"
 NETCFG_DROP_THRESHOLD="${NETCFG_DROP_THRESHOLD:-1}"
+# Designated drop-sampler ALWAYS-probe set (#1110): "node|port" tokens (space-separated) that get the
+# live two-read rate probe on EVERY --check regardless of cumulative-counter growth -- so a starvation
+# episode on a suspect uplink always yields a fresh drop DELTA (the growth-gate below would otherwise
+# never sample a HEALTHY port whose dq1 is flat at 0). Default = the strih PC's direct-DAC uplink
+# (foh2_video egress port sfp-sfpplus2, per issue 1110 live-verified 2026-08-25). Set empty to restore
+# the pre-#1110 growth-gated-only behaviour.
+NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh2_video|sfp-sfpplus2}"
 
 log() { printf '%s [netcfg-audit] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
@@ -67,7 +74,7 @@ fi
 # post-auth hang) -- same wrap as asio-starve/bundle-state/optical-chain-alert-watchdog.sh.
 _nc_ssh() {
   local ip="$1" cmd="$2"
-  timeout "$NETCFG_SSH_TIMEOUT" sshpass -p "$NETCFG_SWITCH_PW" ssh \
+  timeout "$NETCFG_SSH_TIMEOUT" sshpass -p "$NETCFG_SWITCH_PW" ssh -n \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout="$NETCFG_SSH_TIMEOUT" -o PreferredAuthentications=password \
     "admin@$ip" "$cmd" 2>/dev/null
@@ -280,15 +287,36 @@ case "$MODE" in
       node="${key%%.port.*}"; rest="${key#*.port.}"; port="${rest%%.*}"
       bdq1="$(printf '%s\n' "$base" | sed -n "s/^$(_nc_bre "$key")=//p" | head -1)"
       printf '%s' "$bdq1" | grep -Eq '^[0-9]+$' || bdq1=0
-      [ "$dq1" -gt "$bdq1" ] || continue   # only actively-growing ports are worth the live rate probe
+      # A DESIGNATED probe port (#1110, the strih-uplink drop-sampler) is ALWAYS live-sampled --
+      # bypass the growth-gate so the audit carries a fresh drop DELTA from the suspect uplink EVERY
+      # run, even when it is healthy (dq1 flat at 0). Non-designated ports keep the growth-gate that
+      # bounds probe cost (a port that dropped once long ago and is now quiet is skipped).
+      designated=0
+      netcfg_port_is_designated "$node" "$port" "$NETCFG_DROP_PROBE_PORTS" && designated=1
+      if [ "$designated" != 1 ]; then
+        [ "$dq1" -gt "$bdq1" ] || continue   # only actively-growing ports are worth the live rate probe
+      fi
       ip="$(_nc_live_field "$live" "${node}.ip")"
       [ -n "$ip" ] || continue
       dv="$(_nc_drop_rate_verdict "$ip" "$port")"
       statuses+=("$dv")
+      # A designated port bypasses the growth-gate, so its dq1 may be FLAT vs baseline while the live
+      # two-read window still catches a burst -- cite the live window (not a "$bdq1->$dq1 since
+      # baseline" delta that would misleadingly read "0->0"). Growth-gated ports keep the delta text
+      # (their growth-gate guaranteed dq1 > bdq1).
       case "$dv" in
-        DROPPING) report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s (dq1 $bdq1->$dq1 since baseline) -- microburst tail-drop; check shared-buffers / uplink step-down") ;;
+        DROPPING) if [ "$designated" = 1 ]; then
+                    report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s over the live ${NETCFG_DROP_WINDOW}s window (designated drop-sampler; cumulative dq1=$dq1) -- microburst tail-drop; check shared-buffers / uplink step-down")
+                  else
+                    report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s (dq1 $bdq1->$dq1 since baseline) -- microburst tail-drop; check shared-buffers / uplink step-down")
+                  fi ;;
         RESET)    report+=("  [report-only RESET] $node $port: drop counters went backwards (switch rebooted since read)") ;;
-        UNKNOWN)  report+=("  [report-only UNKNOWN] $node $port: drop-rate probe unreadable (dq1 grew $bdq1->$dq1 but a live re-read failed)") ;;
+        UNKNOWN)  if [ "$designated" = 1 ]; then
+                    report+=("  [report-only UNKNOWN] $node $port: designated drop-sampler live re-read failed (cumulative dq1=$dq1)")
+                  else
+                    report+=("  [report-only UNKNOWN] $node $port: drop-rate probe unreadable (dq1 grew $bdq1->$dq1 but a live re-read failed)")
+                  fi ;;
+        OK)       [ "$designated" = 1 ] && report+=("  [report-only sampled] $node $port: designated drop-sampler probe clean (rate <=${NETCFG_DROP_THRESHOLD}/s over ${NETCFG_DROP_WINDOW}s) -- strih uplink #1110") ;;
       esac
     done <<< "$live"
 

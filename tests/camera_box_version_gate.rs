@@ -1,17 +1,22 @@
-//! Behavioral guard for `scripts/camera-box-version-gate.sh` — the cross-box camera-box BINARY
-//! version-parity precondition gate (#875). The user's requirement: a fleet whose cam boxes run
-//! DIFFERENT camera-box builds (live 2026-07-29 cam4 was three builds behind cam1/2/3 and was the
-//! only box missing the publish-30p fix) must never be discoverable only by eye or by post-mortem —
-//! the gate must REFUSE (fail-closed) the moment ANY active box's camera-box version disagrees with
-//! the others.
+//! Behavioral guard for `scripts/camera-box-version-gate.sh` — the camera-box BINARY version gate.
+//! The user's requirement: a fleet whose cam boxes run a camera-box build OTHER than main's release
+//! (a single box behind — live 2026-07-29 cam4 three builds behind — OR the WHOLE fleet uniformly
+//! stale — live: dev.462 for a week while main carried the #1111 fix) must never be discoverable only
+//! by eye or by post-mortem; the gate must REFUSE (fail-closed).
 //!
-//! This is a DELIBERATE follow-up split from `dantesync-version-gate.sh` (#862) because the two
-//! signals need DIFFERENT comparison models: dantesync uses a FIXED PIN (upgrades rarely), while the
-//! camera-box binary is deployed continuously (`1.7.0-dev.NNN` grows on almost every PR) and so has
-//! no canonical value to pin against — the only checkable invariant is RELATIVE cross-box parity
-//! (every active box agrees with every other), the same model `drift-guard.sh`'s genlock_build_sha
-//! parity engine uses. These tests pin the gate's PURE functions (version extraction, the modal
-//! reference, the per-box verdict, the fleet-wide roll-up + table print) and its end-to-end exit-code
+//! TWO comparison layers (issue 1136 added the pin on top of the original #875 parity):
+//!   * PIN-to-origin/main (DEFAULT) — every active box must run the version in origin/main's
+//!     Cargo.toml. This catches a UNIFORMLY-stale fleet, which parity alone misses. The pin is a
+//!     MOVING reference (read from origin/main, advanced automatically by the push-to-main
+//!     auto-deploy), not the spurious-fail-prone FIXED pin the #875 header once rejected. Fail
+//!     CLOSED when the pin itself is unreadable.
+//!   * RELATIVE cross-box parity (SUPPLEMENT, `--no-main-pin`) — the legacy #875 model: every active
+//!     box agrees with every other (no fixed value), `drift-guard.sh`'s genlock_build_sha shape. The
+//!     dormant path for a deliberate pre-merge / operator soak where the fleet is knowingly not yet
+//!     on main.
+//!
+//! These tests pin the gate's PURE functions (version extraction, the modal reference, the per-box
+//! parity AND pin verdicts, the fleet-wide roll-ups + table prints) and its end-to-end exit-code
 //! contract over fixture files (the path that needs no live rig).
 
 use std::path::PathBuf;
@@ -279,6 +284,9 @@ fn cli_fleet_that_disagrees_refuses_with_a_table() {
         &[
             "--fleet-file",
             "/dev/null",
+            // #1136: the pin-to-main layer is now ON by default; this test exercises the parity
+            // SUPPLEMENT in isolation, so it runs with --no-main-pin (the legacy #875 behaviour).
+            "--no-main-pin",
             "--linux",
             "cam1=root@x cam2=root@y cam3=root@z",
         ],
@@ -314,6 +322,9 @@ fn cli_fleet_that_agrees_passes() {
         &[
             "--fleet-file",
             "/dev/null",
+            // #1136: the pin-to-main layer is now ON by default; this test exercises the parity
+            // SUPPLEMENT in isolation, so it runs with --no-main-pin (the legacy #875 behaviour).
+            "--no-main-pin",
             "--linux",
             "cam1=root@x cam2=root@y cam3=root@z",
         ],
@@ -348,4 +359,480 @@ fn cli_refuses_when_no_node_is_given() {
         "zero nodes must be a usage error, never a silent pass"
     );
     assert!(stderr.to_lowercase().contains("no node"));
+}
+
+// ---------------------------------------------------------------------------
+// #1136 — PIN-to-main layer. Relative parity alone lets a UNIFORMLY-STALE fleet
+// pass (every box agrees on an OLD build, live: dev.462 fleet for a week while
+// main carried the #1111 fix). With the origin/main Cargo.toml pin available, a
+// uniformly-stale fleet MUST be REFUSED — the owner's exact requirement. The pin
+// is injected via the CAMERA_BOX_VERSION_GATE_MAIN_PIN fixture seam (production
+// reads it from `git show origin/main:Cargo.toml`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_uniformly_stale_fleet_is_refused_against_the_main_pin_1136() {
+    // Every active box AGREES on an OLD version -> parity-only PASSES. The main
+    // pin is NEWER -> the pin layer must REFUSE (exit 20), naming the pin.
+    let stale_a = write_version_fixture("stale1136-a", "camera-box 1.7.0-dev.100\n");
+    let stale_b = write_version_fixture("stale1136-b", "camera-box 1.7.0-dev.100\n");
+    let stale_c = write_version_fixture("stale1136-c", "camera-box 1.7.0-dev.100\n");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--fleet-file",
+            "/dev/null",
+            "--linux",
+            "cam1=x cam2=x cam3=x",
+        ],
+        &[
+            // Explicit empty ack (mirrors the sibling cli_* tests) so a polluted ambient
+            // CAMBOX_OFFLINE_ACK can never mask a box as excluded in this refusal test.
+            ("CAMBOX_OFFLINE_ACK", ""),
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.487"),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &stale_a.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &stale_b.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM3",
+                &stale_c.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a uniformly-stale fleet must be REFUSED against the main pin (20), never a silent PASS.\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.to_uppercase().contains("PIN"),
+        "the refusal table must name the pin model.\nstdout={stdout}"
+    );
+    assert!(
+        stdout.contains("1.7.0-dev.487"),
+        "the refusal must show the expected main pin 1.7.0-dev.487.\nstdout={stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1136 PURE pin functions — camera_box_version_from_cargo_toml (Cargo.toml
+// parse), camera_box_pin_verdict (per-box vs the pin), camera_box_fleet_report_pinned
+// (fleet roll-up vs the pin). Mirror the parity pure-function tests above.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cargo_toml_version_extracts_package_version_ignoring_deps() {
+    let out = run_sourced(
+        r#"camera_box_version_from_cargo_toml "$(printf '[package]\nname = "camera-box"\nversion = "1.7.0-dev.487"\n\n[dependencies]\nserde = { version = "1.0.200" }\n')""#,
+        &[],
+    );
+    assert_eq!(out.trim(), "1.7.0-dev.487");
+}
+
+#[test]
+fn cargo_toml_version_empty_when_no_package_version() {
+    let out = run_sourced(
+        r#"camera_box_version_from_cargo_toml "$(printf '[dependencies]\nserde = { version = "1.0" }\n')""#,
+        &[],
+    );
+    assert_eq!(out.trim(), "");
+}
+
+#[test]
+fn pin_verdict_ok_when_version_matches_the_main_pin() {
+    let out = run_sourced(
+        r#"camera_box_pin_verdict cam1 "1.7.0-dev.487" "1.7.0-dev.487"; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.contains("cam1") && out.contains("OK"));
+    assert!(out.contains("RC=0"));
+}
+
+#[test]
+fn pin_verdict_drift_when_version_differs_from_the_main_pin() {
+    let out = run_sourced(
+        r#"camera_box_pin_verdict cam1 "1.7.0-dev.100" "1.7.0-dev.487" 2>&1; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.contains("cam1") && out.contains("PIN-DRIFT") && out.contains("1.7.0-dev.487"));
+    assert!(out.contains("RC=20"));
+}
+
+#[test]
+fn pin_verdict_unknown_when_version_unread() {
+    let out = run_sourced(
+        r#"camera_box_pin_verdict cam3 "" "1.7.0-dev.487"; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.contains("cam3") && out.to_uppercase().contains("UNKNOWN"));
+    assert!(out.contains("RC=11"));
+}
+
+#[test]
+fn pinned_fleet_report_uniformly_stale_fails_proving_pin_not_parity() {
+    // The PARITY report PASSES this exact fleet (fleet_report_uniformly_newer_fleet_still_passes_...);
+    // the PIN report must FAIL it — the whole point of #1136.
+    let out = run_sourced(
+        r#"camera_box_fleet_report_pinned "1.7.0-dev.487" "cam1=1.7.0-dev.100" "cam2=1.7.0-dev.100" "cam3=1.7.0-dev.100" 2>&1; echo "RC=$?""#,
+        &[],
+    );
+    assert!(
+        out.contains("GATE FAILED"),
+        "uniformly-stale fleet must FAIL the pin: {out:?}"
+    );
+    assert!(out.contains("RC=20"));
+}
+
+#[test]
+fn pinned_fleet_report_all_on_pin_passes() {
+    let out = run_sourced(
+        r#"camera_box_fleet_report_pinned "1.7.0-dev.487" "cam1=1.7.0-dev.487" "cam2=1.7.0-dev.487"; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.contains("GATE PASS"));
+    assert!(out.contains("RC=0"));
+}
+
+#[test]
+fn pinned_fleet_report_unread_box_is_unknown_not_a_silent_pass() {
+    let out = run_sourced(
+        r#"camera_box_fleet_report_pinned "1.7.0-dev.487" "cam1=1.7.0-dev.487" "cam3=" 2>&1; echo "RC=$?""#,
+        &[],
+    );
+    assert!(out.to_uppercase().contains("UNKNOWN"));
+    assert!(out.contains("RC=11"));
+}
+
+#[test]
+fn pinned_fleet_report_acked_offline_box_is_excluded_not_judged() {
+    // cam3 is OFF the pin but acked offline -> EXCLUDED, must NOT fail the pin gate.
+    let out = run_sourced(
+        r#"camera_box_fleet_report_pinned "1.7.0-dev.487" "cam1=1.7.0-dev.487" "cam3=1.7.0-dev.100"; echo "RC=$?""#,
+        &[("CAMBOX_OFFLINE_ACK", "cam3:powered-off")],
+    );
+    assert!(
+        out.contains("EXCLUDED"),
+        "acked box must be excluded: {out:?}"
+    );
+    assert!(
+        out.contains("RC=0"),
+        "acked-offline off-pin box must not fail: {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1138 — frame-probe (cam2 painter) sha-pin, REPORT-ONLY + DORMANT-unless-supplied.
+// /usr/local/bin/frame-probe had no --version, no gate reading it, and no auto-deploy, so a stale
+// painter's staleness was detected by nothing (the early-gate-pin-doctrine "frame-probe UNPINNABLE"
+// row). This folds a report-only sha-pin into camera-box-version-gate.sh (same cam boxes, same ssh):
+// each active box's DEPLOYED frame-probe sha256 vs the current CI build's sha (#1118 pattern). It
+// NEVER flips the gate exit, and is DORMANT (no output, no behaviour change) unless an expected sha
+// is supplied — so it becomes noise-free live only when the supervisor enables it with the deploy.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frame_probe_pin_verdict_ok_alarm_unknown() {
+    let ok = run_sourced(
+        r#"o="$(frame_probe_pin_verdict cam2 "d47e43f8" "d47e43f8")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        ok.contains("RC=0") && ok.contains("OK"),
+        "matching painter -> OK: {ok}"
+    );
+    let alarm = run_sourced(
+        r#"o="$(frame_probe_pin_verdict cam2 "d47e43f8" "beef1234")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        alarm.contains("RC=30") && alarm.contains("ALARM"),
+        "lagging painter -> ALARM(30): {alarm}"
+    );
+    assert!(
+        alarm.contains("beef1234"),
+        "must name the expected current-build sha: {alarm}"
+    );
+    let dep_empty = run_sourced(
+        r#"o="$(frame_probe_pin_verdict cam2 "" "beef")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        dep_empty.contains("RC=31") && dep_empty.contains("UNKNOWN"),
+        "unread deployed -> UNKNOWN(31): {dep_empty}"
+    );
+    let exp_empty = run_sourced(
+        r#"o="$(frame_probe_pin_verdict cam2 "d47e" "")"; rc=$?; printf '%s\n' "$o"; echo "RC=$rc""#,
+        &[],
+    );
+    assert!(
+        exp_empty.contains("RC=31") && exp_empty.contains("UNKNOWN"),
+        "unresolved expected -> UNKNOWN(31): {exp_empty}"
+    );
+}
+
+#[test]
+fn frame_probe_section_is_dormant_when_no_expected_sha_supplied() {
+    // No --frame-probe-expected-sha => the section prints NOTHING and the gate behaves exactly as
+    // before (a clean pinned box passes with no frame-probe output). This is the no-regression
+    // guarantee for the existing gate.
+    let v = write_version_fixture("fp_dormant", "camera-box 1.7.0-dev.497\n");
+    let (code, out, _err) = run_gate_env(
+        &["--linux", "cam2=root@10.77.9.62"],
+        &[
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.497"),
+            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM2", v.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 0, "clean pinned box must pass: {out}");
+    assert!(out.contains("GATE PASS"), "{out}");
+    assert!(
+        !out.contains("frame-probe"),
+        "the frame-probe section must be DORMANT (silent) when no expected sha is supplied: {out}"
+    );
+}
+
+#[test]
+fn frame_probe_pin_alarm_is_report_only_does_not_block_a_clean_gate() {
+    // Expected sha supplied + deployed differs => ALARM report-only; the gate STILL passes (exit 0).
+    let v = write_version_fixture("fp_report_only", "camera-box 1.7.0-dev.497\n");
+    let (code, out, err) = run_gate_env(
+        &[
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "beefface00000000",
+        ],
+        &[
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.497"),
+            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM2", v.to_str().unwrap()),
+            ("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a lagging frame-probe must be report-only (gate still passes). out={out} err={err}"
+    );
+    assert!(out.contains("GATE PASS"), "{out}");
+    assert!(
+        out.contains("frame-probe (cam2 painter) sha-pin") && out.contains("ALARM"),
+        "the frame-probe section must SCREAM the drift: {out}"
+    );
+    assert!(
+        err.contains("FRAME-PROBE PIN ALARM"),
+        "a loud stderr banner must fire: {err}"
+    );
+}
+
+#[test]
+fn frame_probe_pin_ok_when_deployed_matches_current_build() {
+    let v = write_version_fixture("fp_ok", "camera-box 1.7.0-dev.497\n");
+    let (code, out, _err) = run_gate_env(
+        &[
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "d47e43f896917dca",
+        ],
+        &[
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.497"),
+            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM2", v.to_str().unwrap()),
+            ("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca"),
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("frame-probe") && out.contains("OK"),
+        "matching painter must report OK: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1136 addendum: --candidate-pin — the pre-merge bootstrap escape that does
+// NOT reopen the uniformly-stale hole. The pull_request E2E deploys THIS run's
+// merge-candidate build to the fleet to measure it; the gate accepts a fleet
+// uniformly on that candidate (or uniformly on main) and refuses everything
+// else exactly as before.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_candidate_pin_accepts_a_fleet_uniformly_on_the_candidate_build_1136() {
+    let a = write_version_fixture("cand1136-a", "camera-box 1.7.0-dev.496\n");
+    let b = write_version_fixture("cand1136-b", "camera-box 1.7.0-dev.496\n");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--fleet-file",
+            "/dev/null",
+            "--candidate-pin",
+            "1.7.0-dev.496",
+            "--linux",
+            "cam1=x cam2=x",
+        ],
+        &[
+            ("CAMBOX_OFFLINE_ACK", ""),
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.481"),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &a.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &b.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a fleet uniformly on the candidate build must PASS when --candidate-pin names it.\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("candidate"),
+        "the PASS must say it accepted the CANDIDATE build (never a silent main-pin pass).\nstdout={stdout}"
+    );
+}
+
+#[test]
+fn cli_candidate_pin_still_refuses_a_uniformly_stale_fleet_1136() {
+    let a = write_version_fixture("candstale1136-a", "camera-box 1.7.0-dev.100\n");
+    let b = write_version_fixture("candstale1136-b", "camera-box 1.7.0-dev.100\n");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--fleet-file",
+            "/dev/null",
+            "--candidate-pin",
+            "1.7.0-dev.496",
+            "--linux",
+            "cam1=x cam2=x",
+        ],
+        &[
+            ("CAMBOX_OFFLINE_ACK", ""),
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.481"),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &a.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &b.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a uniformly-stale fleet (neither main nor candidate) must STAY refused (20) — \
+         --candidate-pin must not reopen the issue-1136 hole.\nstdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn cli_candidate_pin_refuses_a_mixed_main_and_candidate_fleet_1136() {
+    let a = write_version_fixture("candmix1136-a", "camera-box 1.7.0-dev.481\n");
+    let b = write_version_fixture("candmix1136-b", "camera-box 1.7.0-dev.496\n");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--fleet-file",
+            "/dev/null",
+            "--candidate-pin",
+            "1.7.0-dev.496",
+            "--linux",
+            "cam1=x cam2=x",
+        ],
+        &[
+            ("CAMBOX_OFFLINE_ACK", ""),
+            ("CAMERA_BOX_VERSION_GATE_MAIN_PIN", "1.7.0-dev.481"),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &a.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &b.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a MIXED fleet (some on main, some on the candidate) must be refused (20) — \
+         uniformity stays mandatory under --candidate-pin.\nstdout={stdout}\nstderr={stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1138 (residual) — `--frame-probe-only` mode. The merged frame_probe_pin_report is DORMANT
+// because the [0/8] gate call cannot supply an expected bin (the local CI frame-probe is BUILT at
+// [1/8], AFTER [0/8]). This mode lets recording-e2e engage the report from [1/8] — where the
+// current-build frame-probe exists — WITHOUT re-running the camera-box parity read (no second
+// version-parity table). It is ALWAYS report-only (exit 0), cam2-scoped by its caller.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frame_probe_only_mode_reports_ok_and_skips_the_parity_read() {
+    // --frame-probe-only + a matching expected sha: prints the frame-probe OK row, exits 0, and
+    // does NOT run the camera-box parity read (no "GATE PASS", no per-box camera-box version table)
+    // — proving the mode is distinct from the full gate and needs no camera-box version fixture.
+    let (code, out, _err) = run_gate_env(
+        &[
+            "--frame-probe-only",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "d47e43f896917dca",
+        ],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(
+        code, 0,
+        "frame-probe-only must always exit 0 (report-only): {out}"
+    );
+    assert!(
+        out.contains("frame-probe (cam2 painter) sha-pin") && out.contains("OK"),
+        "the frame-probe report must run + report OK on a match: {out}"
+    );
+    assert!(
+        !out.contains("GATE PASS"),
+        "frame-probe-only must NOT run the camera-box parity layer: {out}"
+    );
+}
+
+#[test]
+fn frame_probe_only_mode_alarm_is_report_only() {
+    // A lagging painter under --frame-probe-only: ALARM + stderr banner, but STILL exit 0.
+    let (code, out, err) = run_gate_env(
+        &[
+            "--frame-probe-only",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "beefface00000000",
+        ],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(
+        code, 0,
+        "frame-probe-only ALARM must be report-only (exit 0): out={out} err={err}"
+    );
+    assert!(
+        out.contains("ALARM"),
+        "the drift must be screamed in the report: {out}"
+    );
+    assert!(
+        err.contains("FRAME-PROBE PIN ALARM"),
+        "a loud stderr banner must fire: {err}"
+    );
+}
+
+#[test]
+fn frame_probe_only_mode_is_dormant_without_an_expected_sha() {
+    // No expected sha => the report prints nothing (dormant), and the mode still exits 0.
+    let (code, out, _err) = run_gate_env(
+        &["--frame-probe-only", "--linux", "cam2=root@10.77.9.62"],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("frame-probe (cam2 painter) sha-pin"),
+        "with no expected sha the report must stay dormant (silent): {out}"
+    );
 }

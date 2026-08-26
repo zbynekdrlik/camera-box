@@ -65,10 +65,9 @@ static double sym_wave(uint32_t sym, double phase)
 	}
 	return 0.0;
 }
-static std::vector<float> marker_signal(uint8_t index)
+static std::vector<float> marker_signal_from_word(uint32_t word)
 {
 	const uint32_t sr = CB_AUDIO_SAMPLE_RATE, f = CB_AUDIO_CARRIER_HZ, c = CB_AUDIO_C;
-	uint32_t word = enc_payload_word(index);
 	uint32_t sym[10];
 	for (uint32_t i = 0; i < 10; i++)
 		sym[i] = (word >> (20 - 2 - 2 * i)) & 0x3u;
@@ -92,6 +91,11 @@ static std::vector<float> marker_signal(uint8_t index)
 		out.push_back((float)v);
 	}
 	return out;
+}
+
+static std::vector<float> marker_signal(uint8_t index)
+{
+	return marker_signal_from_word(enc_payload_word(index));
 }
 
 int main()
@@ -178,6 +182,26 @@ int main()
 		CHECK(r.second.preamble_screens_passed > 0, "corrupted marker: still screened");
 		CHECK(r.second.crc_ok == 0, "corrupted marker: never crc_ok");
 		CHECK(r.second.crc_fail > 0, "corrupted marker: counted as crc_fail");
+	}
+	{
+		/* #1153: a CRC-valid "poison" word with a NONZERO zero-nibble (bits[15:12]) must be
+		 * rejected — mirrors qpsk_marker::decode_rejects_crc_valid_word_with_nonzero_zero_nibble.
+		 * Of the 4096 words that pass preamble+CRC only 256 are valid; the other 3840 (this class)
+		 * are the false-decode flood the zero-nibble gate removes. */
+		const uint32_t poison = 0xF1002u; // preamble=0xF, zero-nibble=0x1, CRC-4 valid
+		CHECK(((poison >> 16) & 0xF) == CB_PREAMBLE_NIBBLE, "poison: valid preamble nibble");
+		CHECK(cb_crc4_check(poison, CB_N_PAYLOAD_BITS) == 0, "poison: passes CRC-4 (the trap)");
+		CHECK(((poison >> 12) & 0xF) != 0, "poison: nonzero zero-nibble");
+		std::vector<float> buf(48000 / 2, 0.0f);
+		std::vector<float> sig = marker_signal_from_word(poison);
+		size_t start = 48000 / 10;
+		for (size_t j = 0; j < sig.size(); j++)
+			buf[start + j] = sig[j];
+		std::pair<std::vector<std::pair<double, uint8_t>>, CbDecodeStats> r =
+			cb_decode_markers_with_stats(buf, 48000, 442, 1, 0.4);
+		CHECK(r.first.empty(), "poison word must not decode as a marker");
+		CHECK(r.second.crc_ok == 0, "poison word: crc_ok == 0");
+		CHECK(r.second.crc_fail > 0, "poison word: screened+attempted, then rejected");
 	}
 
 	/* 3. Streaming dedup: two markers fed in small chunks, each reported exactly once with the right
@@ -323,6 +347,55 @@ int main()
 		c2 = CbQrResizeCache();
 		CHECK(cb_qr_resize_needed(c2, 760, 307),
 		      "resize cache: a reset must force a fresh resize, even at the SAME size as before");
+	}
+
+	/* 9. #1177: CbDockInputStaleness mirrors av_sync_dock::DockInputStaleness -- the dock's
+	 * measurement-input STALE/NO-SIGNAL classifier. In EVENT mode the marker/QR decode counters
+	 * stop advancing; after CB_DOCK_INPUT_STALE_NS with no advance the display must flip STALE. */
+	{
+		const uint64_t TH = CB_DOCK_INPUT_STALE_NS; // 30 s
+		const uint64_t S = 1000000000ull;           // 1 s in ns
+
+		// first observe seeds the baseline, never stale
+		CbDockInputStaleness s0;
+		CHECK(s0.observe(0, 0, 0, TH) == CbDockStaleTransition::None, "stale: first observe seeds baseline");
+		CHECK(!s0.is_stale(), "stale: first observe not stale");
+
+		// goes stale after the threshold of no advance, one-shot
+		CbDockInputStaleness s;
+		s.observe(5, 3, S, TH);
+		CHECK(s.observe(5, 3, S + 20 * S, TH) == CbDockStaleTransition::None, "stale: 20s < 30s not yet stale");
+		CHECK(!s.is_stale(), "stale: still live at 20s");
+		CHECK(s.observe(5, 3, S + 30 * S, TH) == CbDockStaleTransition::EnteredStale, "stale: 30s no advance -> EnteredStale");
+		CHECK(s.is_stale(), "stale: is_stale after threshold");
+		CHECK(s.observe(5, 3, S + 40 * S, TH) == CbDockStaleTransition::None, "stale: already stale -> no repeated EnteredStale");
+
+		// recovers on a crc_ok advance
+		CbDockInputStaleness r;
+		r.observe(5, 3, 0, TH);
+		CHECK(r.observe(5, 3, 30 * S, TH) == CbDockStaleTransition::EnteredStale, "stale: r entered stale");
+		CHECK(r.observe(5, 4, 31 * S, TH) == CbDockStaleTransition::RecoveredLive, "stale: crc_ok advance -> RecoveredLive");
+		CHECK(!r.is_stale(), "stale: r recovered");
+
+		// recovers on a video_decoded advance
+		CbDockInputStaleness r2;
+		r2.observe(5, 3, 0, TH);
+		CHECK(r2.observe(5, 3, 30 * S, TH) == CbDockStaleTransition::EnteredStale, "stale: r2 entered stale");
+		CHECK(r2.observe(6, 3, 31 * S, TH) == CbDockStaleTransition::RecoveredLive, "stale: video_decoded advance -> RecoveredLive");
+		CHECK(!r2.is_stale(), "stale: r2 recovered");
+
+		// a continuously-advancing live signal never goes stale
+		CbDockInputStaleness live;
+		uint64_t vdec = 0, crc = 0;
+		bool ever_stale = false;
+		for (uint64_t i = 0; i < 100; i++) {
+			vdec++;
+			crc++;
+			live.observe(vdec, crc, i * 10 * S, TH);
+			if (live.is_stale())
+				ever_stale = true;
+		}
+		CHECK(!ever_stale, "stale: continuously-advancing signal never goes stale");
 	}
 
 	if (g_failures == 0) {

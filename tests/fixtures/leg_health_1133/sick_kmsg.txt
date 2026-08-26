@@ -1,0 +1,9 @@
+Aug 20 11:06:03 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.
+Aug 20 11:07:06 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.
+Aug 20 11:08:09 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.
+Aug 20 11:09:12 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.
+Aug 20 11:10:15 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.
+Aug 20 11:11:18 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.
+Aug 20 11:12:21 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.
+Aug 20 11:13:24 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.
+Aug 20 11:14:27 CAM1 kernel: uvcvideo 2-1:1.1: Non-zero status (-71) in video buffer completion handler.

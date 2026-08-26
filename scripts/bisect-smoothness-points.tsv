@@ -1,0 +1,15 @@
+# scripts/bisect-smoothness-points.tsv — candidate bisect points for #1150 (visible-smoothness bisect).
+# Columns (TAB-separated): LABEL   RUN_ID(ci.yml camera-box-linux-amd64)   VERSION   NOTE
+# Verified 2026-08-20: every run's artifact is expired=false (retention ~2026-11); ancestry-checked
+# monotonic ladder (each emit change flips exactly one of #889/#1111/#1131/#1145 no->YES).
+# Ordered oldest->newest; the supervisor may binary-search via --point instead of linear order.
+# The driver deploys each point to CAM1+CAM2 ONLY; CAM3 stays on the current build as CONTROL.
+P0-oldgood	30718244338	1.7.0-dev.410	pre-emit-lane baseline (~Aug 1) — owner visually-good ~2-3wk window; none of 889/1111/1131/1145
+P1-pre889	31014587925	1.7.0-dev.431	last build before #889 dupe-preferring decimation
+P2-post889	31036919641	1.7.0-dev.432	#889 capture-rate lane in (dupe-preferring victim selection wired into capture loop)
+P3-bad462	31897259559	1.7.0-dev.462	owner-named BAD-week build (Aug15) — emit-gate over-60 resync bug (later fixed by #1111)
+P4-pre1111	32140701974	1.7.0-dev.476	last build before the #1111 emit-gate fix (still has the resync bug)
+P5-post1111	32208214341	1.7.0-dev.481	#1111 fix — owner measured big improvement (imag underruns 364->10)
+P6-post1131	32238764427	1.7.0-dev.486	#1131 queue-aware resync (2nd protection layer)
+P7-post1145	32346186624	1.7.0-dev.503	#1145 stale-boundary retirement (owner: no visible change from this)
+P8-cur507	32359309599	1.7.0-dev.507	current HEAD build — deploy to cam1+cam2 to confirm the symptom reproduces at HEAD (bisect BAD anchor)

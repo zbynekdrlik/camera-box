@@ -4,10 +4,12 @@ paths:
   - "scripts/lib/cam2-painter-handoff.sh"
   - "scripts/lib/cam2-painter-restore-verify.sh"
   - "scripts/lib/cam2-painter-restore-retry.sh"
+  - "scripts/lib/cam2-painter-restore-recheck.sh"
   - "scripts/lib/cam2-painter-deadman.sh"
   - "systemd/cam2-painter.service"
   - "tests/harness_cam2_painter_steady_state_handoff.rs"
   - "tests/harness_cam2_painter_coordination.rs"
+  - "tests/harness_cam2_painter_restore_recheck_1126.rs"
 ---
 
 # cam2 painter lifecycle — WHO paints /dev/fb0 (+ emits the QPSK marker) in each state (#1008/#937)
@@ -86,3 +88,55 @@ combination unifies worst-case recovery to ~5 min on BOTH the clean-cleanup and 
   `systemctl start $service` over ssh + re-probe before the existing `exit 1` fail-closed backstop.
   No retry loop — the periodic on-box dead-man is the net; this is one fast recovery so a
   previous run's leftover-dead painter does not waste the whole gate run.
+
+## cleanup() final restore re-check — a PRUNE decision may fire only on a POSITIVE paint signal (#1126)
+
+`scripts/lib/cam2-painter-restore-recheck.sh` (`cam2_painter_restore_final_recheck`) runs in
+cleanup() BETWEEN `cambox_parallel_wait_and_report` and `cambox_parallel_surface_painter_failure`.
+The cam2/painter restore does a lot of serial work inside ONE `CLEANUP_SSH_TIMEOUT`(=30s) ssh; on a
+slow restart `timeout` SIGKILLs it a hair (~50ms live, run 1104689227) BEFORE cam2-painter.service
+reports active — the restore SUCCEEDED, only the verify window lost the race — and since the #715
+retry never prunes a painter, a false `::error::` reds a GREEN-verdict run. The re-check is ONE
+separate short bounded ssh (its own `CAM2_PAINTER_RECHECK_TIMEOUT`=25s < 30s, so it never widens the
+tight parallel-restore budget / cancellation grace) that prunes cam2/painter from
+`CAMBOX_PARALLEL_FAILED_LABELS` (+ lockstep `_FAILED_IPS`) only when genuinely painting NOW.
+
+**Gotcha — a check whose exit code drives a PRUNE must NOT reuse the WARN-only "unit not installed →
+no-op" convention.** `cam2_painter_restore_verify_cmds` treats "unit not installed" as a harmless
+`[#863] nothing to verify` (it changes no gating decision). But `cam2_painter_genuine_paint_check_cmd`'s
+exit code REMOVES a recorded restore failure + suppresses the #860 `::error::`, so it must EXIT 1
+(not 0) on not-installed / a `list-unit-files` hiccup: a prune may fire ONLY on a POSITIVE paint
+signal (KMS device held + `vblank-locked`, OR `/dev/fb0` held), never on absence-of-painter — that
+absence IS the #863 black-monitor case a prune must never mask. Same discipline for any future
+prune/gating reuse of a WARN-only signal.
+
+**Consolidated (#1148):** the presenter-aware paint SIGNAL itself — the KMS-line parse + `fuser`
+device-held check + `vblank-locked` confirmation + `/dev/fb0` fallback — is now the SINGLE
+`_cb_paint_signal` (emitted by `cam2_paint_signal_remote_fn` in `scripts/lib/cam2-paint-signal.sh`).
+The five builders (`cam2_painter_restore_verify_cmds` / `cam2_painter_steady_state_handoff_cmds` /
+`painter_liveness_check_cmds` / `mv_reverify_painter_up_cmds` / `cam2_painter_genuine_paint_check_cmd`)
+each lazy-source it and pipe their own log source into it; they keep only their own poll counts +
+exit semantics (WARN-only / FAIL-LOUD / exit-0-1 prune / PAINTER_UP / the file-reading granular
+messages). A future correction to the signal (an OBS presenter-log rename, a new presenter backend)
+now lands in ONE place — `tests/harness_cam2_paint_signal_1148.rs` is where it is tested — instead
+of risking five divergent copies that false-pass a black monitor. (`scripts/verify-device.sh` keeps
+its own REDUCED dev1-side variant — journal-only, no `fuser`/fb0 because it runs the check from
+dev1, not on the box — deliberately out of scope.)
+
+**Extending it (the non-obvious mechanics, so you don't re-derive them):**
+- `_cb_paint_signal` is a REMOTE bash FUNCTION (not a dev1-side one) because the predicate must run
+  `fuser` ON the cam box. The shared thing is therefore emitted TEXT, and each site emits it by
+  calling `cam2_paint_signal_remote_fn` **OUTSIDE its own `cat <<…` heredoc** (in the builder
+  function body, before the heredoc). That is what makes it embed identically into a single-quoted
+  heredoc (`<<'VERIFY'`, `<<'PAINTCHK'` — which cannot do `$(…)`) AND a `\$`-escaped one
+  (`<<HANDOFF`, `<<CMDS`, `<<PCHECK`). Never try to `$(cam2_paint_signal_remote_fn)` inside a site's
+  own heredoc.
+- It uses `return`, never `exit` — safe both inside a `set -e` remote (handoff) and inside
+  cleanup()'s WARN-only EXIT trap (a bare `exit` there aborts the whole trap).
+- It echoes a REASON TOKEN (`KMS_OK <dev>` / `KMS_NODRM <dev>` / `KMS_NOVBLANK <dev>` / `FBDEV_OK` /
+  `FBDEV_DEAD`) so a site that needs granular operator messages (presenter-liveness) maps the token,
+  while the four boolean sites just `_cb_paint_signal >/dev/null`.
+- If you change the signal STRINGS, an anchor test that used to read a lib SOURCE for the literal
+  (`fs::read_to_string(lib).contains("presenter: using DRM/KMS page-flip")`) must instead assert the
+  EMITTED builder output (run the builder, assert its stdout) — the literal now lives only in the
+  shared lib, so a source-read of the individual site is 1→0 (the #1148 recheck-anchor migration).

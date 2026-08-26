@@ -132,6 +132,20 @@ pub const BURN_RUN_ID_CAM6: u32 = 911011;
 /// [`BURN_RUN_ID_CAM4`]'s doc — same role, same mutual exclusivity, fresh id outside every id
 /// already in use (911001..911004/911007..911011).
 pub const BURN_RUN_ID_CAM7: u32 = 911012;
+/// issue 1196 — the aux Vernier tick pair's reserved run_id. UNLIKE every `BURN_RUN_ID_*` above,
+/// this is NOT a digital burn: it is PAINTED optical content — two small QRs the cam2 painter
+/// blits into the bottom burn-free gaps (`crate::aux_tick` geometry; left = latest EVEN tick,
+/// right = latest ODD tick, `gen_ts_ns = 0`), giving the projection-tap tear detector the
+/// vertical tick redundancy the primary single-band dual-QR lacks. It joins
+/// [`crate::probe::recording::NODE_BURN_RUN_IDS`] (the tick-EXCLUSION list) because its
+/// `frame_id`s must never feed `RecordingFrame::tick` / cadence / copies / latency: on a healthy
+/// frame they merely duplicate the primary pair, but on a TORN frame — or when the primary band
+/// is corrupted while the aux marks still decode — they carry a DIFFERENT generation, which would
+/// silently shift the undecodable/continuity metrics the strict gates are calibrated on. The
+/// ONLY consumer that reads these ids is the report-only tear surface (`crate::tear_detect` v2),
+/// which extracts them BY this run_id explicitly. Reserved fresh, outside every id already in
+/// use (911001..911004/911007..911012; 911005/911006/911099 are test-fixture-only synthetics).
+pub const AUX_TICK_RUN_ID: u32 = 911013;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions
 /// (jitter + drift) on top of the reused [`LatencyStats`] percentiles.

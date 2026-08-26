@@ -1,8 +1,17 @@
-//! issue 930 — `scripts/lipsync-test-mode.sh`'s pure remote-command builders (kill the TEST-mode
-//! painter by pidfile, launch the lipsync ffmpeg playback, kill it again), sourced and called
-//! directly. NEVER touches cam2 or the network — mirrors rig-mode.sh's own
-//! painter_launch_remote/painter_stop_remote convention and the harness style already
-//! established for it (`tests/harness_cam2_painter_provisioning_863.rs`).
+//! issue 930 + issue 1187 — `scripts/lipsync-test-mode.sh`'s pure remote-command builders, sourced
+//! and called directly. NEVER touches cam2 or the network — mirrors rig-mode.sh's own
+//! painter_launch_remote/painter_stop_remote convention and the harness style already established
+//! for it (`tests/harness_cam2_painter_provisioning_863.rs`).
+//!
+//! issue 1187 (root fix of issue 1176 prong 3): the playback transport moved OFF raw `/dev/fb0`
+//! (legacy fbdev, which leaves a stale frame in fb0 memory after ffmpeg is killed) ONTO DRM/KMS via
+//! `mpv --vo=drm` — mpv page-flips its OWN buffers at vblank, never touches fb0, and cleanly
+//! restores the CRTC on exit. The A/V lead moved from a two-demux ffmpeg `-itsoffset` hack to mpv's
+//! native `--audio-delay`; the old fbdev-specific pacing guard (whose whole reason to exist was
+//! "/dev/fb0 has no clock of its own") is replaced by a lightweight mpv decode + presence PREFLIGHT
+//! that touches neither fb0 nor the CRTC; and the stop path now blanks fb0 belt-and-braces (the
+//! #660 mechanism) so the kernel fbdev emulation can never reveal a stale frame after mpv releases
+//! the DRM master.
 
 use std::fs;
 use std::path::PathBuf;
@@ -79,508 +88,393 @@ fn stop_painter_cmds_kills_by_pidfile_never_pkill_by_name() {
     );
 }
 
-/// The playback command must feed ONE ffmpeg process both `/dev/fb0` (video, bgra pixel format
-/// matching src/probe/fb.rs's own painter convention) AND the ALSA marker device (audio, -ac 2 --
-/// the live sanity test found the device refuses mono) from a SINGLE demux/decode timeline (one
-/// `-i`, two `-map`s) -- never two separate processes that could drift out of sync with each
-/// other.
+// --------------------------------------------------------------------------------------------- //
+// issue 1187 — the DRM/KMS playback transport (mpv --vo=drm), replacing the raw fbdev ffmpeg path.
+// --------------------------------------------------------------------------------------------- //
+
+/// The playback command must feed ONE `mpv` process both the DRM/KMS video sink (`--vo=drm`) AND
+/// the SAME ALSA device (`--audio-device=alsa/...`, forced stereo -- the live sanity test found the
+/// device refuses mono) from a SINGLE process -- never two processes that could drift, and never a
+/// raw `/dev/fb0` write.
 #[test]
-fn playback_cmds_feeds_one_ffmpeg_process_both_sinks() {
+fn playback_cmds_feeds_one_mpv_process_both_sinks_1187() {
     let cmds = run_sourced(
-        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
     );
-    // "nohup ffmpeg" only appears on the ACTUAL invocation line (the failure-message text below
-    // also mentions the word "ffmpeg" in prose, so counting bare "ffmpeg" substrings would be
-    // wrong -- anchor on the real command form instead).
-    let ffmpeg_invocations = cmds.matches("nohup ffmpeg").count();
+    // "nohup mpv" only appears on the ACTUAL invocation line (the failure-message prose also
+    // mentions the word "mpv", so counting bare "mpv" substrings would be wrong).
+    let mpv_invocations = cmds.matches("nohup mpv").count();
     assert_eq!(
-        ffmpeg_invocations, 1,
-        "930: exactly ONE ffmpeg invocation (single demux/decode timeline), not two \
-         processes that could drift apart: {cmds}"
-    );
-    assert!(cmds.contains("-map 0:v"));
-    assert!(cmds.contains("-map 0:a"));
-    assert!(cmds.contains("-pix_fmt bgra"));
-    assert!(cmds.contains("-f fbdev"));
-    assert!(cmds.contains("/dev/fb0"));
-    assert!(cmds.contains("-f alsa"));
-    assert!(cmds.contains("hw:CARD=PCH,DEV=3"));
-    assert!(
-        cmds.contains("-ac 2"),
-        "930: -ac 2 needed -- the live sanity test found the ALSA device refuses mono: {cmds}"
+        mpv_invocations, 1,
+        "1187: exactly ONE mpv invocation (single process feeding both sinks), never two that \
+         could drift apart: {cmds}"
     );
     assert!(
-        cmds.contains("-stream_loop -1"),
-        "930: must loop -- the ~60s asset must cover an arbitrary-length recording window: {cmds}"
+        cmds.contains("--vo=drm"),
+        "1187: video must go to DRM/KMS (--vo=drm), never raw fbdev: {cmds}"
+    );
+    assert!(
+        cmds.contains("--audio-device=alsa/hw:CARD=PCH,DEV=3"),
+        "1187: audio must go to the SAME ALSA device via mpv's alsa/ device syntax: {cmds}"
+    );
+    assert!(
+        cmds.contains("--audio-channels=stereo"),
+        "1187: force stereo -- the live sanity test found the ALSA device refuses mono: {cmds}"
+    );
+    assert!(
+        cmds.contains("--loop-file=inf"),
+        "1187: must loop -- the ~60s asset must cover an arbitrary-length recording window: {cmds}"
     );
     assert!(cmds.contains("/run/rig-lipsync-playback.pid"));
 }
 
-/// The playback command must FAIL LOUD (not silently proceed) if ffmpeg dies immediately after
-/// launch -- mirrors rig-mode.sh's own painter-liveness verification convention (never claim a
-/// launch succeeded without checking the process is actually alive).
+/// The transport change's WHOLE POINT: playback must NEVER write raw `/dev/fb0` again (no `-f
+/// fbdev`, no fbdev sink of any kind). This is the structural fix for issue 1176's stale-frame leak.
 #[test]
-fn playback_cmds_fails_loud_if_ffmpeg_dies_immediately() {
+fn playback_cmds_never_writes_raw_fb0_1187() {
+    let with_lead = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 408",
+    );
+    let zero_lead = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 0",
+    );
+    for (label, cmds) in [("lead=408", &with_lead), ("lead=0", &zero_lead)] {
+        assert!(
+            !cmds.contains("fbdev"),
+            "1187 ({label}): playback must never use the fbdev sink again: {cmds}"
+        );
+        assert!(
+            !cmds.contains("-f fbdev") && !cmds.contains("/dev/fb0"),
+            "1187 ({label}): playback must never write raw /dev/fb0: {cmds}"
+        );
+    }
+}
+
+/// The playback command must FAIL LOUD (not silently proceed) if mpv dies immediately after launch
+/// -- mirrors rig-mode.sh's own painter-liveness verification convention (never claim a launch
+/// succeeded without checking the process is actually alive).
+#[test]
+fn playback_cmds_fails_loud_if_mpv_dies_immediately_1187() {
     let cmds = run_sourced(
-        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
     );
     assert!(
         cmds.contains("kill -0") && cmds.contains("FAIL"),
-        "930: must verify the launched pid is actually alive and FAIL loud if not: {cmds}"
+        "1187: must verify the launched pid is actually alive and FAIL loud if not: {cmds}"
     );
 }
 
-/// End-to-end pacing-guard fakes (930 finding 9) -- a fake `ffprobe` reports a fixed duration and
-/// a fake `ffmpeg` sleeps a controlled number of seconds for the ONE-SHOT preflight pass. Kept as
-/// its OWN `lipsync_pacing_guard_cmd` function (never folded into `lipsync_playback_cmds`) so
-/// this never touches the persistent launch's `/run/*.pid`/`/run/*.log` paths, which need a real
-/// root/remote session and would otherwise fail with a permission error under a non-root test
-/// runner (incl. CI's `ubuntu-latest`). Proves the guard's pass/fail behavior for real, not just
-/// via a text-pattern check on the source.
-fn run_pacing_guard(duration_secs: u32, sleep_secs: u32) -> std::process::Output {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let bin = tmp.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(
-        bin.join("ffprobe"),
-        format!("#!/usr/bin/env bash\necho {duration_secs}\n"),
-    )
-    .unwrap();
-    fs::write(
-        bin.join("ffmpeg"),
-        // Emits ONE showinfo-style line before sleeping -- a real ffmpeg with -vf showinfo
-        // always prints at least the first frame's line once it starts producing output, so a
-        // fake that emits ZERO frames on a clean exit is unrealistic and (930 review finding)
-        // would spuriously trip the "showinfo produced nothing" check added below. A single
-        // frame is not enough to form any delta (needs a PAIR), so this keeps these two tests
-        // exercising ONLY the elapsed-vs-duration budget check, exactly as before.
-        "#!/usr/bin/env bash\necho '[Parsed_showinfo_0 @ 0x0] n:   0 pts:     0 pts_time:0.000000' >&2\nsleep \"${FAKE_FFMPEG_SLEEP:-0}\"\n",
-    )
-    .unwrap();
-    for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-    }
-    let path_env = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    Command::new("bash")
-        .arg("-c")
-        .arg(
-            ". \"$1\"; eval \"$(lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3)\"",
-        )
-        .arg("bash")
-        .arg(script())
-        .env("PATH", path_env)
-        .env("FAKE_FFMPEG_SLEEP", sleep_secs.to_string())
-        .output()
-        .expect("spawn bash")
-}
-
-/// A genuinely EMPTY fake `ffmpeg` -- exits 0, prints NOTHING to stderr at all. Dedicated to
-/// proving the "showinfo produced zero parseable frames" guard (930 review finding): a real
-/// ffmpeg always prints at least one showinfo line if it ran and processed any frames, so zero
-/// lines on a clean exit means the instrumentation itself broke (e.g. ffmpeg's log format
-/// changed) -- NOT a verified pacing pass, and must not be silently reported as one.
-fn run_pacing_guard_zero_frames(duration_secs: u32, sleep_secs: u32) -> std::process::Output {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let bin = tmp.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(
-        bin.join("ffprobe"),
-        format!("#!/usr/bin/env bash\necho {duration_secs}\n"),
-    )
-    .unwrap();
-    fs::write(
-        bin.join("ffmpeg"),
-        "#!/usr/bin/env bash\nsleep \"${FAKE_FFMPEG_SLEEP:-0}\"\n",
-    )
-    .unwrap();
-    for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-    }
-    let path_env = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    Command::new("bash")
-        .arg("-c")
-        .arg(
-            ". \"$1\"; eval \"$(lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3)\"",
-        )
-        .arg("bash")
-        .arg(script())
-        .env("PATH", path_env)
-        .env("FAKE_FFMPEG_SLEEP", sleep_secs.to_string())
-        .output()
-        .expect("spawn bash")
-}
-
+/// LIPSYNC_AUDIO_LEAD_MS=0 (the knob's off position) must produce a NO-SHIFT audio-delay and still
+/// exactly ONE mpv process reading the asset ONCE -- the knob must be a true no-op at zero. Also
+/// true when the arg is omitted entirely (back-compat with every pre-1187 call site/test).
 #[test]
-fn pacing_guard_fails_loud_when_showinfo_produces_zero_frames_930() {
-    // Same duration/sleep as pacing_guard_passes_within_budget_930 below -- the elapsed check
-    // alone is satisfied, but zero showinfo lines were ever observed, so the guard must refuse
-    // to certify a pacing pass it never actually verified.
-    let out = run_pacing_guard_zero_frames(2, 2);
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        !out.status.success(),
-        "930: zero showinfo frames on a clean exit must FAIL -- the cadence was never actually \
-         verified, so this must not read as a pass: {stderr}"
+fn playback_cmds_zero_lead_is_a_no_op_shift_1187() {
+    let without_lead_arg = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    let with_zero_lead = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 0",
+    );
+    assert_eq!(
+        without_lead_arg, with_zero_lead,
+        "1187: LIPSYNC_AUDIO_LEAD_MS=0 (or the arg omitted) must be byte-identical: \
+         without={without_lead_arg} with_zero={with_zero_lead}"
+    );
+    assert_eq!(
+        without_lead_arg.matches("nohup mpv").count(),
+        1,
+        "1187: the zero-lead path keeps exactly ONE mpv process: {without_lead_arg}"
     );
     assert!(
-        stderr.contains("FAIL") && stderr.contains("showinfo") && stderr.contains("ZERO"),
-        "930: failure message must say showinfo produced zero frames, not just report a \
-         (meaningless) cadence/elapsed verdict: {stderr}"
-    );
-}
-
-/// A fake `ffprobe` that FAILS (nonzero exit, a message on stderr, nothing usable on stdout) --
-/// proves ffprobe failures (930 review finding) surface as a clean FAIL message quoting ffprobe's
-/// own stderr, not an uncaught Python traceback with no context about which command failed.
-#[test]
-fn pacing_guard_fails_loud_with_a_clean_message_when_ffprobe_itself_fails_930() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let bin = tmp.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(
-        bin.join("ffprobe"),
-        "#!/usr/bin/env bash\necho 'moov atom not found' >&2\nexit 1\n",
-    )
-    .unwrap();
-    fs::write(bin.join("ffmpeg"), "#!/usr/bin/env bash\nsleep 0\n").unwrap();
-    for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-    }
-    let path_env = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    let out = Command::new("bash")
-        .arg("-c")
-        .arg(
-            ". \"$1\"; eval \"$(lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3)\"",
-        )
-        .arg("bash")
-        .arg(script())
-        .env("PATH", path_env)
-        .output()
-        .expect("spawn bash");
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        !out.status.success(),
-        "930: a failing ffprobe must fail the guard: {stderr}"
-    );
-    assert!(
-        stderr.contains("FAIL") && stderr.contains("ffprobe"),
-        "930: must be a clean FAIL message naming ffprobe as the cause, not an uncaught \
-         Python traceback with no context: {stderr}"
-    );
-    assert!(
-        stderr.contains("moov atom not found"),
-        "930: must surface ffprobe's OWN stderr so the real cause is visible: {stderr}"
-    );
-    assert!(
-        !stderr.contains("Traceback"),
-        "930: must not leak a raw Python traceback to the operator: {stderr}"
+        without_lead_arg.contains("--audio-delay=0.000"),
+        "1187: zero lead must map to a no-op --audio-delay=0.000: {without_lead_arg}"
     );
 }
 
+/// LIPSYNC_AUDIO_LEAD_MS > 0 must compensate via mpv's native `--audio-delay` -- a NEGATIVE value,
+/// because mpv semantics are "positive delays audio, negative delays VIDEO", and the calibrated
+/// compensation delays the VIDEO relative to audio (the exact equivalent of the old ffmpeg positive
+/// `-itsoffset` on the video input). Still exactly ONE mpv process reading the asset ONCE (no
+/// second demux -- mpv applies the offset internally).
 #[test]
-fn pacing_guard_passes_within_budget_930() {
-    let out = run_pacing_guard(2, 2);
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(out.status.success(), "930: expected pass: {stderr}");
-    // The pass-path "ok: ..." line is a plain `echo` (stdout) -- only the FAIL path is `>&2`'d.
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("pacing check passed"),
-        "930: stdout: {stdout} / stderr: {stderr}"
-    );
-}
-
-#[test]
-fn pacing_guard_fails_loud_when_elapsed_exceeds_budget_930() {
-    let out = run_pacing_guard(2, 5);
-    assert!(
-        !out.status.success(),
-        "930: must fail loud when elapsed (~5s) vs duration (2s) exceeds the ~1.01s budget"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("FAIL") && stderr.contains("pacing"),
-        "930: must fail loud with elapsed + duration in the message: {stderr}"
-    );
-}
-
-/// 930 follow-up (pacing hypothesis, confirmed by direct measurement): without `-re` (real-time
-/// input read rate), `/dev/fb0` has no clock of its own and ALSA backpressure alone does NOT pace
-/// the video -- frames were measured arriving in 4-5-frame bursts ~4ms apart separated by ~80ms
-/// stalls. `-re` fixes this (measured: p50=16.663ms std=1.7ms, zero stalls, drift <1ms/40s) and
-/// must be present in BOTH ffmpeg invocations that actually play the asset.
-#[test]
-fn pacing_guard_cmd_includes_dash_re_for_realtime_pacing_930() {
-    let cmds = run_sourced("lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3");
-    assert!(
-        cmds.contains("-re"),
-        "930: the pacing guard's ffmpeg invocation must read the input in REAL TIME (-re) -- \
-         without it, /dev/fb0's lack of its own clock means ALSA backpressure alone does not \
-         pace the video (measured: 4-5-frame bursts ~4ms apart, ~80ms stalls): {cmds}"
-    );
-}
-
-#[test]
-fn playback_cmds_includes_dash_re_for_realtime_pacing_930() {
+fn playback_cmds_applies_audio_lead_via_mpv_audio_delay_1187() {
     let cmds = run_sourced(
-        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 408",
+    );
+    assert_eq!(
+        cmds.matches("nohup mpv").count(),
+        1,
+        "1187 audio-lead: still ONE mpv process (mpv applies the offset internally, no second \
+         demux/process): {cmds}"
+    );
+    assert_eq!(
+        cmds.matches("-i '/run/lipsync-test.mp4'").count(),
+        0,
+        "1187: mpv takes the media as a positional arg, not ffmpeg's `-i` (no second demux): {cmds}"
     );
     assert!(
-        cmds.contains("-re"),
-        "930: the PERSISTENT playback ffmpeg invocation must also read in real time (-re) -- \
-         same pacing bug as the guard, and this is what actually plays during a recording: {cmds}"
+        cmds.contains("--audio-delay=-0.408"),
+        "1187: LIPSYNC_AUDIO_LEAD_MS=408 must become a NEGATIVE --audio-delay=-0.408 (mpv: \
+         negative delays video, the equivalent of the old ffmpeg video +itsoffset): {cmds}"
+    );
+    assert!(
+        cmds.contains("audio_lead_ms=408"),
+        "1187: the success message must report the applied lead for operator visibility: {cmds}"
     );
 }
 
-/// 930 follow-up: the OLD guard only checked TOTAL elapsed wall-clock vs `ffprobe`'s reported
-/// duration -- and that total is governed by the AUDIO drain, so it passed even while the video
-/// was catastrophically unpaced (see the two tests above). The guard must ALSO instrument the
-/// same foreground pass with `-vf showinfo` and assert per-frame cadence, so a pacing regression
-/// can never again hide behind a total-elapsed-only budget. Static-text pin on the thresholds
-/// (the functional proof is in `pacing_guard_catches_bursty_cadence_...` below).
+/// A fractional-ms lead (not a round hundreds value) must still convert cleanly to a negative
+/// seconds delay -- proves the ms->s conversion isn't hardcoded/special-cased for 408 alone.
 #[test]
-fn pacing_guard_cmd_asserts_per_frame_cadence_930() {
-    let cmds = run_sourced("lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3");
-    assert!(
-        cmds.contains("showinfo"),
-        "930: the guard must instrument the SAME foreground pass with -vf showinfo to observe \
-         per-frame delivery timing: {cmds}"
+fn playback_cmds_converts_an_arbitrary_lead_ms_to_a_negative_delay_1187() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 125",
     );
     assert!(
-        cmds.contains("33.0"),
-        "930: stall threshold (deltas >33ms) must be visible in the guard's own text: {cmds}"
-    );
-    assert!(
-        cmds.contains("4.0"),
-        "930: burst threshold (deltas <4ms) must be visible in the guard's own text: {cmds}"
-    );
-    assert!(
-        cmds.contains("5.0"),
-        "930: p95-deviation-from-nominal threshold (5ms) must be visible in the guard's own \
-         text: {cmds}"
-    );
-    assert!(
-        cmds.contains("0.02"),
-        "930: burst-fraction threshold (2% of deltas) must be visible in the guard's own text: \
-         {cmds}"
-    );
-    assert!(
-        cmds.contains("LIPSYNC_PACING_STARTUP_SKIP_S"),
-        "930: the one-time startup step must be excludable via an env override, default 2s: \
-         {cmds}"
+        cmds.contains("--audio-delay=-0.125"),
+        "1187: 125ms must become --audio-delay=-0.125: {cmds}"
     );
 }
 
-/// Fakes for the CADENCE assertion (930 follow-up: per-frame pacing, not just total elapsed) --
-/// a fake `ffprobe` answers BOTH the pre-existing duration query and the (new) fps query, and a
-/// fake `ffmpeg` (itself a tiny python3 script, for precise controllable timing) prints
-/// synthetic showinfo-style frame lines to stderr on a controlled real-time cadence.
-/// `pattern="bursty"` reproduces the EXACT shape measured live on cam2 without `-re` (930
-/// comment): frame bursts a few ms apart separated by ~100ms stalls, with a TOTAL elapsed time
-/// that still lands well within the pre-existing elapsed-vs-duration budget -- proving the OLD
-/// check alone would have PASSED this broken pattern, and only the NEW cadence assertion catches
-/// it.
-fn run_pacing_guard_cadence(pattern: &str, startup_skip_s: &str) -> std::process::Output {
+/// An empty DRM_DEVICE arg lets mpv auto-select the connected KMS card (#854: `/dev/dri/cardN`
+/// numbering is not a stable ABI, so auto is the safe default). A non-empty value pins it via
+/// `--drm-device`.
+#[test]
+fn playback_cmds_pins_drm_device_only_when_set_1187() {
+    let auto = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        !auto.contains("--drm-device"),
+        "1187: empty DRM_DEVICE must let mpv auto-select the KMS card (no --drm-device): {auto}"
+    );
+    let pinned = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 /dev/dri/card1 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        pinned.contains("--drm-device=/dev/dri/card1"),
+        "1187: a set DRM_DEVICE must pin mpv's KMS card via --drm-device: {pinned}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------- //
+// issue 1191 — the playback speech must be peak-normalized (+N dB, default 9) into the mic-chain
+// AGC operating point. The asset speech (peak -9.8 dBFS) is ~25dB under the AGC operating point set
+// by the loud QPSK marker (~0 dBFS), so un-boosted speech captures ~-50 dBFS and SyncNet reads
+// conf ~1 on EVERY chunk (unmeasurable). A `--af=volume` filter with the LIPSYNC_PLAYBACK_GAIN_DB
+// env seam (default 9) fixes it (live-verified: envelope corr 0.976, SyncNet conf 6.4 at +9dB).
+// --------------------------------------------------------------------------------------------- //
+
+/// The single mpv playback invocation must carry a peak-normalizing gain filter
+/// `--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB` -- the env seam is expanded on the REMOTE (cam2)
+/// side so the default (9) is baked self-documenting into the generated command and the supervisor
+/// can re-tune the gain via the paired cross-check campaign WITHOUT a code change (same seam
+/// philosophy as LIPSYNC_AUDIO_LEAD_MS). Orthogonal to `--audio-delay`: present whether a lead is
+/// applied or not, and always on the SAME single mpv process (never a second one).
+#[test]
+fn playback_cmds_carries_playback_gain_af_seam_1191() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        cmds.contains("--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB"),
+        "1191: the mpv playback line must peak-normalize speech via --af=volume with the \
+         LIPSYNC_PLAYBACK_GAIN_DB env seam (default 9, remote-side expansion) -- else un-boosted \
+         asset speech stays ~25dB under the marker-set AGC operating point (SyncNet unmeasurable): \
+         {cmds}"
+    );
+    assert_eq!(
+        cmds.matches("nohup mpv").count(),
+        1,
+        "1191: the gain filter must be an arg on the single mpv process, never a second process: \
+         {cmds}"
+    );
+    // The gain seam is orthogonal to the A/V lead -- it must be present with a lead applied too.
+    let with_lead = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 408",
+    );
+    assert!(
+        with_lead.contains("--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB"),
+        "1191: the gain seam must be present regardless of the audio-lead value: {with_lead}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------- //
+// issue 1187 — the mpv decode + presence PREFLIGHT (replaces the fbdev-specific pacing guard).
+// --------------------------------------------------------------------------------------------- //
+
+/// The preflight must probe decode via mpv NULL sinks only -- it must touch NEITHER `/dev/fb0` NOR
+/// the DRM/KMS CRTC (no `--vo=drm`, no fbdev), so running it before the painter is even restored
+/// can never leave a stale frame or fight the display. The old fbdev-cadence apparatus is gone: mpv
+/// paces off vblank natively, so there is no fbdev-no-clock bug left to measure.
+#[test]
+fn preflight_cmd_uses_null_sinks_never_touches_fb0_or_drm_1187() {
+    let cmds = run_sourced("lipsync_preflight_cmd /run/lipsync-test.mp4");
+    assert!(
+        cmds.contains("--vo=null") && cmds.contains("--ao=null"),
+        "1187: the preflight must decode to NULL sinks only: {cmds}"
+    );
+    assert!(
+        !cmds.contains("fbdev") && !cmds.contains("/dev/fb0"),
+        "1187: the preflight must never write raw /dev/fb0: {cmds}"
+    );
+    assert!(
+        !cmds.contains("--vo=drm"),
+        "1187: the preflight must not take the DRM/KMS CRTC (that is playback's job): {cmds}"
+    );
+    assert!(
+        cmds.contains("command -v mpv"),
+        "1187: the preflight must check mpv is installed and FAIL loud if not: {cmds}"
+    );
+}
+
+/// Functional proof: a fake `mpv` on PATH that exits 0 makes the preflight PASS (decode probe
+/// succeeded, mpv present).
+#[test]
+fn preflight_passes_when_mpv_present_and_decodes_1187() {
+    let out = run_preflight_with_fake_mpv(Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "1187: a present, decoding mpv must PASS: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("preflight passed"),
+        "1187: the pass message must say the preflight passed: {stdout}"
+    );
+}
+
+/// Functional proof: with NO mpv on PATH the preflight FAILS loud with a message naming mpv and
+/// pointing at provisioning (never a silent proceed into a playback launch that would then fail).
+#[test]
+fn preflight_fails_loud_when_mpv_missing_1187() {
+    let out = run_preflight_with_fake_mpv(None);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "1187: a missing mpv must FAIL the preflight loud: {stderr}"
+    );
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("mpv"),
+        "1187: the failure message must name mpv as the missing dependency: {stderr}"
+    );
+}
+
+/// Functional proof: a fake `mpv` that exits nonzero (asset undecodable / mpv broken) FAILS the
+/// preflight loud -- never a silent proceed.
+#[test]
+fn preflight_fails_loud_when_mpv_cannot_decode_1187() {
+    let out = run_preflight_with_fake_mpv(Some(3));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "1187: an mpv that cannot decode must FAIL the preflight loud: {stderr}"
+    );
+    assert!(
+        stderr.contains("FAIL"),
+        "1187: the decode-failure message must be a clean FAIL: {stderr}"
+    );
+}
+
+/// Runs `lipsync_preflight_cmd` with a controlled mpv binary via the `LIPSYNC_MPV_BIN` env seam
+/// (never PATH-shadowing -- a real mpv on the test box/CI must not perturb the verdict).
+/// `mpv_exit == Some(code)` points `LIPSYNC_MPV_BIN` at an ABSOLUTE-path fake `mpv` exiting with
+/// that code; `None` points it at a bogus name that does not exist (missing-dependency case), so
+/// `command -v "$LIPSYNC_MPV_BIN"` fails deterministically regardless of what is installed.
+fn run_preflight_with_fake_mpv(mpv_exit: Option<i32>) -> std::process::Output {
     let tmp = tempfile::tempdir().expect("tmpdir");
-    let bin = tmp.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(
-        bin.join("ffprobe"),
-        "#!/usr/bin/env bash\ncase \"$*\" in\n  *r_frame_rate*) echo \"60/1\" ;;\n  *) echo \"0.333333\" ;;\nesac\n",
-    )
-    .unwrap();
-    fs::write(
-        bin.join("ffmpeg"),
-        r#"#!/usr/bin/env python3
-import os
-import sys
-import time
-
-pattern = os.environ.get("FAKE_FFMPEG_PATTERN", "steady")
-n = 20
-
-
-def emit(i):
-    sys.stderr.write(
-        "[Parsed_showinfo_0 @ 0x0] n:{:4} pts:{:6} pts_time:{:.6f}\n".format(i, i, i / 60.0)
-    )
-    sys.stderr.flush()
-
-
-if pattern == "bursty":
-    i = 0
-    while i < n:
-        for _ in range(4):
-            if i >= n:
-                break
-            time.sleep(0.001)
-            emit(i)
-            i += 1
-        time.sleep(0.1)
-elif pattern == "crash":
-    # Emits a FULL, cleanly-paced run (same cadence as "steady") so elapsed/cadence alone would
-    # look perfectly fine -- then exits nonzero AFTER all frames, simulating e.g. a late
-    # fbdev/alsa write failure. This is the genuine false-pass scenario: without a returncode
-    # check, a crash-after-good-data run would be silently reported as a PASS.
-    for i in range(n):
-        time.sleep(1.0 / 60.0)
-        emit(i)
-    sys.exit(3)
-else:
-    for i in range(n):
-        time.sleep(1.0 / 60.0)
-        emit(i)
-
-sys.exit(0)
-"#,
-    )
-    .unwrap();
-    for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    let mpv_bin = match mpv_exit {
+        Some(code) => {
+            let fake = tmp.path().join("fake-mpv");
+            fs::write(&fake, format!("#!/usr/bin/env bash\nexit {code}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            fake.display().to_string()
         }
-    }
-    let path_env = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        None => "mpv-definitely-not-installed-xyzzy".to_string(),
+    };
     Command::new("bash")
         .arg("-c")
-        .arg(
-            ". \"$1\"; eval \"$(lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3)\"",
-        )
+        .arg(". \"$1\"; eval \"$(lipsync_preflight_cmd /tmp/media.mp4)\"")
         .arg("bash")
         .arg(script())
-        .env("PATH", path_env)
-        .env("FAKE_FFMPEG_PATTERN", pattern)
-        .env("LIPSYNC_PACING_STARTUP_SKIP_S", startup_skip_s)
+        .env("LIPSYNC_MPV_BIN", mpv_bin)
         .output()
         .expect("spawn bash")
 }
 
+/// `cmd_start` must run the mpv preflight on the uploaded remote path via its OWN dedicated
+/// `lipsync_preflight_cmd` call, BEFORE the persistent playback launch -- a static-text pin
+/// alongside the functional proofs above.
 #[test]
-fn pacing_guard_catches_bursty_cadence_when_elapsed_check_alone_would_pass_930() {
-    let out = run_pacing_guard_cadence("bursty", "0");
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        !out.status.success(),
-        "930: a bursty pacing pattern (frame bursts a few ms apart, ~100ms stalls) must FAIL the \
-         cadence assertion even though its total elapsed time stays well within the old \
-         elapsed-vs-duration budget -- this is exactly the gap the old guard could not see: \
-         {stderr}"
-    );
-    assert!(
-        stderr.contains("FAIL") && stderr.contains("cadence"),
-        "930: must fail loud with cadence evidence in the message: {stderr}"
-    );
-    assert!(
-        stderr.contains("stalls"),
-        "930: failure message must show the stall count that tripped it: {stderr}"
-    );
-}
-
-#[test]
-fn pacing_guard_excludes_startup_window_from_cadence_assertion_930() {
-    // A skip window larger than the whole (synthetic, sub-second) clip means EVERY frame falls
-    // inside the excluded startup window -- zero deltas are asserted, so the guard falls back to
-    // the elapsed-vs-duration check alone and PASSES even for the same bursty fake that fails
-    // pacing_guard_catches_bursty_cadence_when_elapsed_check_alone_would_pass_930 above. Proves
-    // the startup-skip config (LIPSYNC_PACING_STARTUP_SKIP_S, default 2s in production) actually
-    // excludes what it claims to exclude.
-    let out = run_pacing_guard_cadence("bursty", "999");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "930: a startup skip window covering the whole clip must exclude all deltas from the \
-         cadence assertion, leaving only the (passing) elapsed check: {stderr}"
-    );
-}
-
-/// Independent code review finding: every other cadence test exercises the FAILING path (bursty)
-/// or a vacuous n==0 path (the skip-window test above) -- nothing ever proved the cadence math
-/// (p95 computation, the nominal-interval comparison, the threshold constants) actually reports a
-/// PASS with real n>0 delta data. A sign flip or a wrong operator in that arithmetic would go
-/// completely undetected by the rest of this file. Uses the "steady" fake pattern (real 1/60s
-/// python time.sleep() per frame, no ffmpeg/device overhead involved -- unlike the real-hardware
-/// pacing measurement in the design comment on issue 930, this is a lightweight, short (~330ms
-/// total) synthetic timing loop, chosen for a low flake footprint).
-#[test]
-fn pacing_guard_passes_steady_cadence_with_real_delta_data_930() {
-    let out = run_pacing_guard_cadence("steady", "0");
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        out.status.success(),
-        "930: a cleanly-paced steady stream must PASS the cadence assertion: stdout={stdout} \
-         stderr={stderr}"
-    );
-    assert!(
-        stdout.contains("pacing check passed") && stdout.contains("deltas="),
-        "930: the pass message must show real cadence data was computed (deltas=N, N>0), not \
-         just the elapsed-only budget: {stdout}"
-    );
-    assert!(
-        !stdout.contains("deltas=0"),
-        "930: this test's whole point is a NON-vacuous cadence verdict -- deltas=0 would mean \
-         no real delta data backed this PASS: {stdout}"
-    );
-}
-
-/// Self-review finding (before merge): the probe read `proc.stderr` for showinfo lines and
-/// computed a pass/fail verdict from whatever partial frame data it collected, WITHOUT ever
-/// checking ffmpeg's own exit code -- a genuine crash (e.g. `/dev/fb0` open failure) could leave
-/// a coincidentally-plausible partial dataset and report a false PASS instead of the real
-/// failure. The probe must check `proc.returncode` and fail loud on a nonzero exit, independent
-/// of whatever cadence/elapsed numbers happened to be observed before the crash.
-#[test]
-fn pacing_guard_fails_loud_when_ffmpeg_itself_exits_nonzero_930() {
-    let out = run_pacing_guard_cadence("crash", "0");
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        !out.status.success(),
-        "930: ffmpeg exiting nonzero must fail the guard regardless of any partial frame data \
-         collected before the crash: {stderr}"
-    );
-    assert!(
-        stderr.contains("FAIL") && stderr.contains("ffmpeg exited"),
-        "930: failure message must say the ffmpeg process itself failed, not just report a \
-         cadence/elapsed verdict over incomplete data: {stderr}"
-    );
-}
-
-/// `cmd_start` must run the pacing guard on the uploaded remote path via its OWN dedicated
-/// `lipsync_pacing_guard_cmd` call, before the persistent playback launch -- a static-text pin
-/// alongside the end-to-end behavior proofs above.
-#[test]
-fn start_runs_the_pacing_guard_before_the_persistent_playback_930() {
+fn start_runs_the_preflight_before_the_persistent_playback_1187() {
     let s = read("scripts/lipsync-test-mode.sh");
     let guard_call_at = s
-        .find("cam_ssh \"$(lipsync_pacing_guard_cmd")
-        .expect("930: cmd_start must call lipsync_pacing_guard_cmd");
+        .find("cam_ssh \"$(lipsync_preflight_cmd")
+        .expect("1187: cmd_start must call lipsync_preflight_cmd");
     let playback_call_at = s
         .find("cam_ssh \"$(lipsync_playback_cmds")
         .expect("lipsync_playback_cmds call present");
     assert!(
         guard_call_at < playback_call_at,
-        "930: the pacing guard must run BEFORE the persistent playback launch"
+        "1187: the mpv preflight must run BEFORE the persistent playback launch"
     );
 }
 
-/// The stop-playback command must key on the SAME pidfile the start command wrote.
+// --------------------------------------------------------------------------------------------- //
+// issue 1187 — the stop path blanks fb0 belt-and-braces (the #660 mechanism).
+// --------------------------------------------------------------------------------------------- //
+
+/// The stop-playback command must key on the SAME pidfile the start command wrote, AND blank fb0
+/// belt-and-braces after the kill: after mpv exits and releases the DRM master, the kernel fbdev
+/// emulation can re-take scanout from /dev/fb0 memory -- zeroing it (the #660 `dd` mechanism)
+/// guarantees a black screen, never a stale frame, before rig-mode.sh restores the painter.
+#[test]
+fn stop_playback_cmds_kills_by_pidfile_and_blanks_fb0_1187() {
+    let cmds = run_sourced("lipsync_stop_playback_cmds /run/rig-lipsync-playback.pid /dev/fb0");
+    assert!(cmds.contains("/run/rig-lipsync-playback.pid"));
+    assert!(cmds.contains("kill"));
+    assert!(
+        cmds.contains("dd if=/dev/zero of=") && cmds.contains("/dev/fb0"),
+        "1187: stop must blank fb0 belt-and-braces (the #660 dd mechanism) after killing mpv: \
+         {cmds}"
+    );
+    assert!(
+        cmds.contains("bs=1M count=8"),
+        "1187: the fb0 blank must reuse the canonical #660 size (8 MiB, one 1080p XRGB frame): \
+         {cmds}"
+    );
+}
+
+/// The fb0-blank must REUSE the canonical #660 builder (`rig_test_ledger_clean_paint_fallback_cmds`
+/// from scripts/lib/rig-test-ledger.sh), not a hand-rolled second copy -- ONE source of truth for
+/// the blank mechanism. Proven by sourcing the lib's builder directly and confirming the stop cmd
+/// contains its exact output for the same fb device.
+#[test]
+fn stop_playback_fb0_blank_reuses_the_canonical_660_builder_1187() {
+    let stop = run_sourced("lipsync_stop_playback_cmds /run/rig-lipsync-playback.pid /dev/fb0");
+    let canonical = run_sourced("rig_test_ledger_clean_paint_fallback_cmds /dev/fb0");
+    let canonical_trimmed = canonical.trim();
+    assert!(
+        !canonical_trimmed.is_empty(),
+        "1187: the canonical #660 builder must be sourced + callable from lipsync-test-mode.sh"
+    );
+    assert!(
+        stop.contains(canonical_trimmed),
+        "1187: stop must embed the canonical #660 blank builder's output verbatim (one source of \
+         truth): stop={stop} canonical={canonical_trimmed}"
+    );
+}
+
+/// The stop-playback command must key on the SAME pidfile the start command wrote (kept from the
+/// original #930 contract).
 #[test]
 fn stop_playback_cmds_kills_by_the_same_pidfile() {
-    let cmds = run_sourced("lipsync_stop_playback_cmds /run/rig-lipsync-playback.pid");
+    let cmds = run_sourced("lipsync_stop_playback_cmds /run/rig-lipsync-playback.pid /dev/fb0");
     assert!(cmds.contains("/run/rig-lipsync-playback.pid"));
     assert!(cmds.contains("kill"));
 }
@@ -612,8 +506,10 @@ fn start_sets_an_err_trap_that_restores_test_mode_930() {
          (cam_ssh), not just a bare command: {s}"
     );
     assert!(
-        s.contains(r#"trap 'bash "$HERE/rig-mode.sh" test' ERR"#),
-        "930: cmd_start must set an ERR trap that restores TEST mode via rig-mode.sh: {s}"
+        s.contains(r#"trap 'lipsync_playback_cleanup; bash "$HERE/rig-mode.sh" test' ERR"#),
+        "930/1194: cmd_start must set an ERR trap that cleans up the mpv playback FIRST, then \
+         restores TEST mode via rig-mode.sh (a restore that races a surviving mpv for DRM+ALSA is \
+         the #1194 hybrid state): {s}"
     );
     assert!(
         s.contains("trap - ERR"),
@@ -658,119 +554,19 @@ fn start_with_a_missing_media_file_fails_loud_before_touching_the_network() {
 }
 
 // --------------------------------------------------------------------------------------------- //
-// 930 follow-up (issuecomment-5179960868): the paired cross-check measured a CONSTANT rig-added
-// SyncNet offset of -334ms on this exact playback (video leads audio -- the ALSA output pipeline
-// on hw:CARD=PCH,DEV=3 delays audible audio by roughly that much, same class as the documented
-// 124ms QPSK ring bias). LIPSYNC_AUDIO_LEAD_MS cancels it by delaying the VIDEO demux (via
-// -itsoffset on a SECOND -i of the same asset) relative to the audio demux -- the ticket's own
-// stated equivalent of "advancing audio" (only the RELATIVE offset between the two streams
-// matters for lipsync perception). Still exactly ONE ffmpeg PROCESS (one PID, unchanged
-// pidfile/kill lifecycle) -- two demuxes INSIDE it, never two competing processes.
+// issue 930 (carried into 1187/1191) — LIPSYNC_AUDIO_LEAD_MS is a static-ms A/V-lead knob. issue 930
+// derived the ffmpeg/ALSA output pipeline depth D at ~408ms and used it as the DEFAULT; issue 1187
+// moved the transport (ffmpeg -itsoffset -> mpv --audio-delay). issue 1191 changes the DEFAULT to 0:
+// under mpv the measured offset at lead=0 is +40ms ≈ ±1 frame of zero, so 408 was a stale
+// ffmpeg-era constant. The knob (env var, validation) is otherwise unchanged and 408 stays available
+// via the env seam so the supervisor can re-tune without a code change.
 // --------------------------------------------------------------------------------------------- //
 
-/// LIPSYNC_AUDIO_LEAD_MS=0 (the knob's off position) must be BYTE-IDENTICAL to today's
-/// single-demux command -- the knob must be a true no-op at zero, so this iteration cannot
-/// regress any rig behavior that hasn't opted into it. Also true when the arg is omitted
-/// entirely (back-compat with every pre-930-iteration call site/test).
+/// `LIPSYNC_AUDIO_LEAD_MS` must default to 0 -- issue 1191: the mpv-era (issue 1187) measured offset
+/// at lead=0 is +40ms ≈ ±1 frame of zero, so 0 is the correct default. 408 was the stale ffmpeg-era
+/// ALSA-pipeline-depth constant (issue 930); it stays available via the env seam for re-calibration.
 #[test]
-fn playback_cmds_zero_lead_is_byte_identical_to_original_930() {
-    let without_lead_arg = run_sourced(
-        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
-    );
-    let with_zero_lead = run_sourced(
-        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 0",
-    );
-    assert_eq!(
-        without_lead_arg, with_zero_lead,
-        "930: LIPSYNC_AUDIO_LEAD_MS=0 (or the arg omitted) must be byte-identical to today's \
-         single-demux command: without_lead_arg={without_lead_arg} with_zero_lead={with_zero_lead}"
-    );
-    assert_eq!(
-        without_lead_arg.matches("nohup ffmpeg").count(),
-        1,
-        "930: the zero-lead path keeps exactly ONE ffmpeg process: {without_lead_arg}"
-    );
-    assert_eq!(
-        without_lead_arg
-            .matches("-i '/root/lipsync-test.mp4'")
-            .count(),
-        1,
-        "930: zero-lead path = exactly ONE demux of the asset (today's shape): {without_lead_arg}"
-    );
-}
-
-/// LIPSYNC_AUDIO_LEAD_MS > 0 must compensate by delaying VIDEO (a second demux of the SAME asset,
-/// carrying a positive -itsoffset -- ffmpeg semantics: positive itsoffset DELAYS that input's
-/// streams) relative to audio (the first, undelayed demux) -- still inside the SAME single
-/// ffmpeg process/PID.
-#[test]
-fn playback_cmds_applies_audio_lead_via_video_itsoffset_930() {
-    let cmds = run_sourced(
-        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 408",
-    );
-    assert_eq!(
-        cmds.matches("nohup ffmpeg").count(),
-        1,
-        "930 audio-lead: still ONE ffmpeg process (two demuxes inside it), never two competing \
-         processes -- the stop path assumes a single pidfile/PID: {cmds}"
-    );
-    assert_eq!(
-        cmds.matches("-i '/root/lipsync-test.mp4'").count(),
-        2,
-        "930 audio-lead: video needs its OWN demux of the same file to carry the -itsoffset \
-         delay independently of audio's (undelayed) demux: {cmds}"
-    );
-    assert!(
-        cmds.contains("-itsoffset 0.408"),
-        "930: LIPSYNC_AUDIO_LEAD_MS=408 must become a 0.408s -itsoffset on the delayed (video) \
-         input: {cmds}"
-    );
-    assert!(
-        cmds.contains("-map 1:v"),
-        "930: video must come from the SECOND (itsoffset-delayed) input: {cmds}"
-    );
-    assert!(
-        cmds.contains("-map 0:a"),
-        "930: audio must come from the FIRST (undelayed) input -- effectively advanced relative \
-         to the now-delayed video: {cmds}"
-    );
-    assert_eq!(
-        cmds.matches("-stream_loop -1").count(),
-        2,
-        "930: BOTH demuxes must loop independently -- the asset is short (~60s): {cmds}"
-    );
-    assert_eq!(
-        cmds.matches("-re -stream_loop -1 -i").count(),
-        2,
-        "930: BOTH demuxes need real-time pacing (the pre-existing #930 pacing-guard finding), \
-         not just one: {cmds}"
-    );
-    assert!(
-        cmds.contains("audio_lead_ms=408"),
-        "930: the success message must report the applied lead for operator visibility: {cmds}"
-    );
-}
-
-/// A fractional-ms lead (not a round hundreds value) must still convert cleanly to seconds --
-/// proves the ms->s conversion isn't hardcoded/special-cased for 408 alone.
-#[test]
-fn playback_cmds_converts_an_arbitrary_lead_ms_to_seconds_930() {
-    let cmds = run_sourced(
-        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 125",
-    );
-    assert!(
-        cmds.contains("-itsoffset 0.125"),
-        "930: 125ms must become 0.125s: {cmds}"
-    );
-}
-
-/// `LIPSYNC_AUDIO_LEAD_MS` must default to 408 -- the corrected harness ALSA-pipeline-depth
-/// constant, derived via R = C + L - D from two independent paired QR/QPSK-vs-SyncNet cross-checks
-/// (issuecomment-5190993635, issuecomment-5191187944), stable to ~3ms across two days/knobs. The
-/// earlier 330 default was seeded from a run whose QR/QPSK leg never completed, silently folding a
-/// nonzero chain offset into what was assumed to be a pure harness constant.
-#[test]
-fn lipsync_audio_lead_ms_env_defaults_to_408_930() {
+fn lipsync_audio_lead_ms_env_defaults_to_0_1191() {
     let out = Command::new("bash")
         .arg("-c")
         .arg(". \"$1\"; echo \"$LIPSYNC_AUDIO_LEAD_MS\"")
@@ -786,23 +582,24 @@ fn lipsync_audio_lead_ms_env_defaults_to_408_930() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout.trim(),
-        "408",
-        "930: default audio-lead compensation must be 408ms (corrected harness ALSA-pipeline-depth \
-         constant, see issuecomment-5190993635/issuecomment-5191187944): {stdout}"
+        "0",
+        "1191: default audio-lead compensation must be 0ms (the mpv-era measured offset at lead=0 \
+         is +40ms ≈ ±1 frame of zero; 408 was the stale ffmpeg-era constant): {stdout}"
     );
 }
 
 /// `cmd_start` must pass `$LIPSYNC_AUDIO_LEAD_MS` through to `lipsync_playback_cmds` as its 5th
-/// arg -- a static-text pin alongside the functional proofs above.
+/// arg, with `$LIPSYNC_DRM_DEVICE` as the 2nd (video-sink) arg -- a static-text pin alongside the
+/// functional proofs above.
 #[test]
-fn start_passes_audio_lead_ms_to_playback_cmds_930() {
+fn start_passes_drm_device_and_audio_lead_ms_to_playback_cmds_1187() {
     let s = read("scripts/lipsync-test-mode.sh");
     assert!(
         s.contains(
-            "cam_ssh \"$(lipsync_playback_cmds \"$remote_media\" \"$LIPSYNC_FB_DEVICE\" \"$LIPSYNC_AUDIO_DEVICE\" \"$LIPSYNC_PLAYBACK_PIDFILE\" \"$LIPSYNC_AUDIO_LEAD_MS\")\""
+            "cam_ssh \"$(lipsync_playback_cmds \"$remote_media\" \"$LIPSYNC_DRM_DEVICE\" \"$LIPSYNC_AUDIO_DEVICE\" \"$LIPSYNC_PLAYBACK_PIDFILE\" \"$LIPSYNC_AUDIO_LEAD_MS\")\""
         ),
-        "930: cmd_start must pass LIPSYNC_AUDIO_LEAD_MS through to lipsync_playback_cmds as its \
-         5th arg: {s}"
+        "1187: cmd_start must pass LIPSYNC_DRM_DEVICE (2nd) + LIPSYNC_AUDIO_LEAD_MS (5th) through \
+         to lipsync_playback_cmds: {s}"
     );
 }
 
@@ -828,8 +625,7 @@ fn start_fails_loud_on_a_non_integer_audio_lead_ms_930() {
 }
 
 /// A negative `LIPSYNC_AUDIO_LEAD_MS` must also fail loud -- the knob's defined semantics are
-/// "0 = off, positive = delay video by that many ms"; a negative value has no defined meaning for
-/// the chosen -itsoffset mechanism.
+/// "0 = off, positive = advance audio by that many ms"; a negative value has no defined meaning.
 #[test]
 fn start_fails_loud_on_a_negative_audio_lead_ms_930() {
     let out = Command::new("bash")
@@ -846,5 +642,249 @@ fn start_fails_loud_on_a_negative_audio_lead_ms_930() {
     assert!(
         stderr.contains("LIPSYNC_AUDIO_LEAD_MS"),
         "930: failure message must name the bad env var: {stderr}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------- //
+// issue 1190 — the steady-state painter runs under cam2-painter.service (Restart=always, issue 1008
+// model), so a pidfile-ONLY kill lets systemd respawn it ~100ms later; the respawn re-takes the DRM
+// master and `mpv --vo=drm` (started ~10s later, issue 1187) then cannot acquire the CRTC and dies
+// instantly. The painter-stop builder must STOP THE UNIT first (systemd will not respawn a stopped
+// unit) and FAIL LOUD if it stays active; and mpv (run --no-terminal, which swallows its stderr)
+// must write a native --log-file so the death is diagnosable from the box.
+// --------------------------------------------------------------------------------------------- //
+
+/// The painter-stop builder must STOP the `cam2-painter` unit BEFORE the pidfile kill -- otherwise
+/// systemd (`Restart=always`) respawns the painter between the kill and the mpv launch and re-takes
+/// the DRM master. The pidfile kill stays AFTER it as a belt for the transient, unit-less
+/// verification-only nohup painter (cam2-painter-lifecycle rule).
+#[test]
+fn stop_painter_cmds_stops_the_cam2_painter_unit_before_the_pidfile_kill_1190() {
+    let cmds = run_sourced("lipsync_stop_painter_cmds /run/rig-painter.pid");
+    let unit_stop_at = cmds
+        .find("systemctl stop cam2-painter")
+        .expect("1190: must stop the cam2-painter unit so systemd cannot respawn the painter");
+    let pidfile_term_at = cmds
+        .find("kill \"$PID\"")
+        .expect("the pidfile TERM kill must still be present (belt for the transient painter)");
+    assert!(
+        unit_stop_at < pidfile_term_at,
+        "1190: the unit stop must come BEFORE the pidfile kill (else systemd respawns the painter \
+         between the two and re-takes the DRM master): {cmds}"
+    );
+}
+
+/// After stopping the unit + pidfile-killing any transient painter, the builder must FAIL LOUD if
+/// `cam2-painter` is somehow still active -- a live unit would respawn the painter and re-take the
+/// DRM master, making the upcoming mpv playback impossible. Mirrors the existing "survived TERM+KILL"
+/// fail-loud in the same builder (refuse playback, never proceed under a live painter).
+#[test]
+fn stop_painter_cmds_fails_loud_if_the_cam2_painter_unit_is_still_active_1190() {
+    let cmds = run_sourced("lipsync_stop_painter_cmds /run/rig-painter.pid");
+    let is_active_at = cmds
+        .find("systemctl is-active")
+        .expect("1190: must verify cam2-painter is no longer active after the stop");
+    assert!(
+        cmds[is_active_at..].contains("cam2-painter"),
+        "1190: the is-active guard must check the cam2-painter unit: {cmds}"
+    );
+    let after = &cmds[is_active_at..];
+    assert!(
+        after.contains("FAIL") && after.contains("exit 1"),
+        "1190: a still-active unit after the stop must FAIL loud and refuse playback (exit 1): \
+         {cmds}"
+    );
+}
+
+/// The playback builder must add mpv's NATIVE `--log-file` -- mpv runs with `--no-terminal` (which
+/// swallows its stderr), so without a log-file `/run/rig-lipsync-playback.log` is empty and a fatal
+/// error (e.g. DRM master unavailable) is undiagnosable from the box. `--no-terminal` STAYS; the
+/// log-file is the visibility fix, not dropping it.
+#[test]
+fn playback_cmds_writes_an_mpv_native_log_file_1190() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /run/lipsync-test.mp4 '' hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        cmds.contains("--log-file=/run/rig-lipsync-playback.mpv.log"),
+        "1190: mpv --no-terminal swallows its stderr, so an mpv-native --log-file is needed to make \
+         a fatal error (e.g. DRM master unavailable) diagnosable from the box: {cmds}"
+    );
+    assert!(
+        cmds.contains("--no-terminal"),
+        "1190: --no-terminal must stay -- the --log-file is the visibility fix, not dropping \
+         --no-terminal: {cmds}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------- //
+// issue 1192 -- speech-arrival VERIFY (envelope correlation vs the local asset) + mpv retry. After
+// the mpv playback starts, cmd_start PROVES the asset speech actually reached the mbc mic chain (a
+// short probe recording on stream OBS, pulled + envelope-correlated against the local asset via
+// scripts/lipsync_envelope_corr.py), and recycles the playback (a fresh audio-stream-start) on a
+// low correlation, up to LIPSYNC_ARRIVAL_RETRIES, failing loud with the attempt matrix on
+// exhaustion. Volumedetect is NOT the criterion (issue 1174: the mic-chain AGC pumps ambient to the
+// ceiling even with dead speech, so a level check false-passes -- the content signal is the
+// envelope correlation). The whole block stays INSIDE the ERR-trap window so a genuine infra
+// failure AND the exhaustion path both restore TEST mode via the existing trap.
+// --------------------------------------------------------------------------------------------- //
+
+/// The three arrival-verify env seams must default exactly to the ticket's values:
+/// LIPSYNC_ARRIVAL_CORR_MIN=0.6, LIPSYNC_ARRIVAL_RETRIES=4, LIPSYNC_ARRIVAL_PROBE_S=15.
+#[test]
+fn lipsync_arrival_env_seams_default_to_ticket_values_1192() {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$1\"; echo \"$LIPSYNC_ARRIVAL_CORR_MIN|$LIPSYNC_ARRIVAL_RETRIES|$LIPSYNC_ARRIVAL_PROBE_S\"")
+        .arg("bash")
+        .arg(script())
+        .output()
+        .expect("spawn bash");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "0.6|4|15",
+        "1192: arrival-verify seams must default to CORR_MIN=0.6, RETRIES=4, PROBE_S=15: {stdout}"
+    );
+}
+
+/// The pure `lipsync_arrival_corr_meets DB MIN` helper decides pass/fail float-safely: a corr at or
+/// above the threshold passes (>=, boundary inclusive), below fails. Mirrors
+/// audio_preflight_is_silent's own strict-boundary convention (there the boundary is audible; here
+/// the boundary meets the threshold).
+#[test]
+fn lipsync_arrival_corr_meets_threshold_helper_1192() {
+    assert_eq!(
+        run_sourced("lipsync_arrival_corr_meets 0.7 0.6").trim(),
+        "true",
+        "1192: corr above threshold must meet it"
+    );
+    assert_eq!(
+        run_sourced("lipsync_arrival_corr_meets 0.35 0.6").trim(),
+        "false",
+        "1192: corr below threshold must NOT meet it (the dead-speech case)"
+    );
+    assert_eq!(
+        run_sourced("lipsync_arrival_corr_meets 0.6 0.6").trim(),
+        "true",
+        "1192: corr exactly at the threshold meets it (>=, boundary inclusive)"
+    );
+    assert_eq!(
+        run_sourced("lipsync_arrival_corr_meets 0.976 0.6").trim(),
+        "true",
+        "1192: the live-verified arrival value (0.976) must pass"
+    );
+}
+
+/// The arrival verify must run AFTER the persistent mpv playback launch and BEFORE the final
+/// `ACTIVE ... record now` message -- it can only test a running playback, and it must gate the
+/// ACTIVE claim (no silent "ACTIVE" while speech is dead). It must ALSO sit BEFORE the `trap - ERR`
+/// clear, so it stays inside the ERR-trap window (the exhaustion path restores TEST mode via it).
+#[test]
+fn start_verifies_speech_arrival_after_playback_before_active_1192() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    let playback_at = s
+        .find("cam_ssh \"$(lipsync_playback_cmds")
+        .expect("initial playback launch present");
+    let arrival_at = s
+        .find("lipsync_envelope_corr.py")
+        .expect("1192: cmd_start must correlate the probe via lipsync_envelope_corr.py");
+    let active_at = s
+        .find("RESULT: lipsync-test mode ACTIVE")
+        .expect("ACTIVE message present");
+    let clear_at = s.find("trap - ERR").expect("trap clear present");
+    assert!(
+        playback_at < arrival_at,
+        "1192: arrival verify must run AFTER the mpv playback launch (it tests a running playback)"
+    );
+    assert!(
+        arrival_at < active_at,
+        "1192: arrival verify must gate the ACTIVE claim -- run BEFORE the 'record now' message"
+    );
+    assert!(
+        arrival_at < clear_at,
+        "1192: arrival verify must sit INSIDE the ERR-trap window (before `trap - ERR`), so the \
+         exhaustion path restores TEST mode via the existing trap"
+    );
+}
+
+/// The arrival probe must record on the STREAM OBS box (obs_phase2.py record start/stop), pull the
+/// recording (win_ssh_download), and correlate it against the LOCAL asset via
+/// lipsync_envelope_corr.py with --probe/--asset and the mbc audio track (--audio-map 0:a:0).
+#[test]
+fn start_arrival_probes_stream_and_correlates_via_helper_1192() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    assert!(
+        s.contains("obs_phase2.py\" record --host \"$STREAM\" --action start"),
+        "1192: the arrival probe must StartRecord on stream OBS"
+    );
+    assert!(
+        s.contains("obs_phase2.py\" record --host \"$STREAM\" --action stop"),
+        "1192: the arrival probe must StopRecord on stream OBS"
+    );
+    assert!(
+        s.contains("win_ssh_download"),
+        "1192: the arrival probe recording must be PULLED to dev1 via win_ssh_download"
+    );
+    assert!(
+        s.contains("lipsync_envelope_corr.py") && s.contains("--probe") && s.contains("--asset"),
+        "1192: the pulled probe must be envelope-correlated against the local asset"
+    );
+    assert!(
+        s.contains("--audio-map 0:a:0"),
+        "1192: the correlation must read the mbc audio track (0:a:0), matching the av-sync convention"
+    );
+}
+
+/// The retry loop must be BOUNDED by LIPSYNC_ARRIVAL_RETRIES (never an unbounded `while true`), and
+/// a low correlation must RECYCLE the mpv playback (a fresh audio-stream-start): stop the playback
+/// then relaunch it via the SAME lipsync_playback_cmds builder. So the playback launch appears at
+/// least twice in the script (the initial launch + the retry relaunch).
+#[test]
+fn start_arrival_retry_is_bounded_and_recycles_mpv_1192() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    assert!(
+        s.contains("seq 1 \"$LIPSYNC_ARRIVAL_RETRIES\""),
+        "1192: the arrival retry loop must be bounded by LIPSYNC_ARRIVAL_RETRIES"
+    );
+    assert!(
+        !s.contains("while true") && !s.contains("while :"),
+        "1192: the arrival retry loop must never be unbounded"
+    );
+    assert!(
+        s.matches("cam_ssh \"$(lipsync_playback_cmds").count() >= 2,
+        "1192: a low-corr retry must recycle mpv -- the playback launch must appear at least twice \
+         (initial + retry relaunch), reusing the same builder"
+    );
+    assert!(
+        s.contains("cam_ssh \"$(lipsync_stop_playback_cmds"),
+        "1192: recycling mpv must first stop the running playback before relaunching it"
+    );
+}
+
+/// On exhaustion (all retries below threshold) the arrival verify must FAIL LOUD with the attempt
+/// matrix -- never a silent ACTIVE -- and the failure must sit inside the ERR-trap window so TEST
+/// mode is restored via the ERR trap (`lipsync_playback_cleanup; bash rig-mode.sh test` -- issue
+/// 1194 made the trap kill the playback before restoring).
+#[test]
+fn start_arrival_exhaustion_fails_loud_with_matrix_inside_err_trap_1192() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    let fail_at = s
+        .find("asset speech never reached mbc after")
+        .expect("1192: exhaustion must fail loud naming the arrival failure");
+    assert!(
+        s.contains("Attempt matrix:"),
+        "1192: exhaustion must print the per-attempt correlation matrix"
+    );
+    let clear_at = s.find("trap - ERR").expect("trap clear present");
+    assert!(
+        fail_at < clear_at,
+        "1192: the exhaustion fail-loud must be INSIDE the ERR-trap window (before `trap - ERR`), \
+         so the trap restores TEST mode on exhaustion"
     );
 }

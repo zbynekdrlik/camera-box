@@ -152,3 +152,141 @@ Both keep the risk surface to the FEW lines that genuinely change, which is the 
 with no local type check. Verify with `cargo fmt --all --check` (parses the probe files) + a hand
 type-audit of the new arg types and EVERY call site's arity (`grep -n 'build_and_print_verdict'` — a
 stray 8-arg call to the 9-arg fn is a CI-only red).
+
+## 11. Flipping a report-only seam BLOCKING, or adding a new blocking gate (#1142 lessons)
+
+Three hard-won patterns from flipping three seams blocking at once (imag leg + cadence uniformity +
+delivery spread):
+
+### RED→GREEN for a PURE crate-root gate module under #557 — `rustc --test` scratch, NEVER cargo
+`#557` (2026-08-18) BANS every compiling cargo shape locally — including `cargo test --no-run`, so
+the "compile with --no-run then run the binary directly" pattern in CLAUDE.md's Local Build Policy is
+STALE. A pure crate-root gate module (`presentation_cadence.rs`, `imag_leg_gate.rs`,
+`delivery_spread_gate.rs`, `partial_schema_gate.rs`) is self-contained enough to compile STANDALONE:
+```bash
+# strip a `serde::Serialize` derive the module carries (serde isn't linkable standalone; the gate
+# tests never serialize), then compile+run as a --test binary:
+sed 's/, serde::Serialize)]/)]/' src/presentation_cadence.rs > /tmp/pc.rs
+rustc --edition 2021 --test /tmp/pc.rs -o /tmp/pc_t && /tmp/pc_t
+```
+For a module with a `crate::` cross-ref (e.g. `delivery_spread_gate` re-exports
+`crate::switch_latency::SPREAD_THRESHOLD_MS`), stub the referenced const in a tiny scratch that
+inlines just the pure fns + the tests. This gives a GENUINE observable RED (seam still false) →
+GREEN (flip) locally, which the probe-gated `recording-verdict.rs` consumer can never (CI-first).
+`cargo fmt --all --check` is still the syntax proof for the probe-gated wiring (it parses cfg-gated
+files); a python replication over `/tmp/recording-e2e-*/verdict-*.json` proves the FOLD flip's real
+effect end-to-end (model each flipped term's pass + whether it now folds; include a synthetic clean
+verdict to prove the gates are not UNCONDITIONALLY red).
+
+### A NEW blocking fold breaks every unit test that builds a verdict WITHOUT that node — scope it with a `--require-<x>` flag
+The imag_leg_verified honesty flip (a missing imag leg REDs) was UNCONDITIONAL at first and reded
+~10 in-process/subprocess verdict tests that build a verdict with `imag: None` (isolated
+strih/stream/cam scenarios) + `merge_gate_exit_code` subprocess controls. Fix: a CLI flag
+(`--require-imag-leg`, `#[arg(long, default_value_t = false)]`) that gates the fold; the PRODUCTION
+path sets it (`recording-e2e.sh` ALL_CAMBOX `[8/8d]` merge, appended via the #675 `MERGE_ARGS+=(...)`
+pattern — NOT the strih+stream-only zero-loss-restart merge), every unit test defaults off. Verify
+the recording-e2e.sh edit anchor-safe: `bash -n` + `shellcheck` + the OLD-vs-NEW literal
+occurrence-count sweep (`camera-active-set.md`'s Tier-0 net). Pin the flag's A/B with a probe-gated
+test reusing a KNOWN-clean imag-None fixture (`window_cam2`): off=pass, on=red, on+offline-ack=pass.
+
+### Gate cadence uniformity on `derived_uniform_fraction`, NOT raw `uniform_fraction`
+The raw `uniform_fraction` (fraction of deltas == the caller's `expected_step`) FALSE-REDS a clean
+window whose per-frame step MODE differs from `expected_step` — several synthetic switch-schedule
+fixtures advance the tick +1 under `--switch-expected-step 2`, so raw reads 0.0 on a perfectly clean
+window (`derived_uniform_fraction`, the #726 mode-based field, reads 1.0). On the REAL rig the two are
+EQUAL (mode IS 2; verified across every mined verdict, worst 0.67–0.78 on both), so gating on
+`derived` REDs the sick rig IDENTICALLY without the synthetic false-red. General rule: when a cadence
+metric offers a caller-`expected_step` field AND a data-mode-`derived` field, gate on the derived
+one and surface the raw as diagnostic.
+
+### Owner-mandated RED-on-current-rig OVERRIDES gates-green-first (§3)
+The standard "a bound that would fail a recent green run is wrong" is REVERSED when the owner
+declares the green runs FALSELY green (hiding visual degradation). #1142's cadence-uniformity 0.95
+floor is RED on today's 0.67–0.78 rig BY DESIGN. Document the deviation loudly in the seam doc + the
+ticket; recalibrate from the first genuinely-clean post-fix run as a named TODO.
+## 12. A content/pixel metric needs a VIABILITY cross-check before any threshold calibration (#1101)
+
+§7's reachability trap (does the term EMIT?) is only the first gate. The SECOND, learned calibrating
+the #1088 dup-cadence surface (#1101): a content/pixel metric can emit real per-window data that is
+STRUCTURALLY DEGENERATE — an all-zero distribution that means "signal blind", not "rig clean". The
+#1088 surface hashes the STREAM box's LOSSY `.mp4` recording with a BYTE-EXACT row-sampled FNV-1a;
+byte-exact frame identity does not survive lossy encode+decode, so the content hash observes almost
+none of the duplication that is genuinely present. Mined across 18 production verdicts + their
+`stream-partial-*.json`: **147 tick-proven copies (a repeated Vernier `tick` = a byte-duplicate
+camera frame, exactly what `copies` counts) produced only 2 content-hash duplicates ≈ 1.4%.**
+
+Lessons for the NEXT content/pixel gate:
+
+- **Calibrating a LIVE threshold on an all-zero green distribution is NOT automatically safe.** For a
+  count/rate metric, `green_max == 0` looks like the tightest possible ceiling — but if the signal is
+  blind (can never produce a positive value even under the real defect), a LIVE gate is a permanent
+  FALSE-GREEN: it passes the exact pathology it was written to catch. A gate that can never fire is
+  worse than no gate. This is the OPPOSITE failure mode from §2's "green sits at 0.655, no threshold
+  exists" — here green sits at exactly 0.0 for the wrong reason.
+
+- **Cross-check the metric against an INDEPENDENT ground-truth signal that the SAME recording already
+  carries.** For dup-cadence that is the Vernier tick: a repeated tick is a byte-duplicate camera
+  frame (`copies`), so the content-hash SHOULD register a duplicate on those exact frames. It doesn't
+  → the signal is blind. The self-diagnosis is a pure crate-root classifier
+  (`dup_cadence::copy_observation` / `signal_viability` / `signal_promotable`, #1101): per window,
+  cross-check content-hash duplicates against tick-copies over the SAME frames; `Blind` when ≥
+  `MIN_TICK_COPIES_FOR_VIABILITY` copies occurred but the hash observed < `COPY_OBSERVATION_RATE_MIN`
+  of them. Emit `signal_viability`/`signal_promotable` in the report-only node so an all-zero
+  `duplicate_fraction` can never be mistaken for a promotable green.
+
+- **Make promotion-readiness a COMPUTED, machine-checked property, not a guess.** The LIVE-flip
+  precondition is `signal_promotable(signal_viability(..)) == true` on real runs — the seam's
+  `gates_overall_pass()` flip is gated on that, not merely on a calibrated bound. On the current lossy
+  tap it reads `blind`, so the flip stays blocked; the signal FIX (a codec-tolerant near-duplicate
+  hash, or re-tapping a lossless stage — the strih partial carries no content_hashes today) is a
+  cross-cutting follow-up gated on a real 50→60-pulldown run to validate.
+
+- **A hardware SEGREGATION step (per the dispatch/`window-gate-tolerance-walkdown.md`) is MOOT when
+  the signal is dead.** cam1's known ~61.5fps grabber wobble (issue 1145) could in principle inflate a
+  dup-cadence reading, but with the signal blind, cam1's windows read 0.0 like every other — there is
+  nothing to segregate. Confirm a signal is VIABLE before spending effort segregating known-faulty
+  boxes out of its distribution.
+
+## 13. FIXING a blind content/pixel signal — codec-tolerant near-duplicate, validated on retained real pixels (#1166)
+
+§12 diagnosed the #1088 dup-cadence content hash as `Blind` on the lossy stream tap. #1166 FIXED it —
+the reusable playbook for turning a blind pixel signal Viable:
+
+- **A byte-exact per-frame HASH can never survive a lossy encode; a codec-tolerant NEAR-duplicate
+  measure can.** Replace the exact-equality test with a per-pair row-sampled mean-abs-luma-DIFFERENCE
+  (MAD) to the recording predecessor, thresholded (`NEAR_DUP_MAD_MAX`). A byte-duplicate source frame
+  survives the lossy round-trip as a LOW-MAD pair (only global quantization noise); genuine motion is
+  far higher. `frame_content_hash`->`frame_row_sampled_mad`; the classifier consumes an
+  `Option<f64>` per-window sequence and `is_near_duplicate(mad)` instead of `hash[i]==hash[i-1]`.
+
+- **DOWNSCALING DESTROYS the separation — sample FULL-WIDTH rows, never a thumbnail.** Measured on the
+  retained diagnostic PNGs: 8×8/16×16 thumbnail MAD ranges OVERLAP copy-vs-motion (averaging washes
+  out the localised motion that distinguishes a real frame from a duplicate), while FULL-resolution
+  MAD separates cleanly. Full-width row-sampling (~64 of 1080 rows) keeps each sampled row at full
+  horizontal resolution → it preserves the full-res separation at ~6% of the pixel cost. Consequence:
+  the MAD is a PAIRWISE quantity that MUST be computed on the box between consecutive full-res decoded
+  frames (`probe::recording::frame_prev_diffs`) and carried per frame — it cannot be reconstructed in
+  the merge from a compact per-frame thumbnail.
+
+- **The retained diagnostic frame PNGs (`<partial>-pixels/frame-*.png`) ARE a real-lossy validation
+  corpus — use them.** They are dumped around copy/gap events, so adjacent pairs include genuine
+  tick-proven copies AND genuine motion, on the ACTUAL lossy recording. Correlate each adjacent PNG
+  pair's `frame_index` with the partial's per-frame `tick` (a strict-adjacent tick repeat = a
+  tick-proven copy) and compute the candidate metric on the real pixels. #1166: 32 copy pairs vs 381
+  motion pairs across 12 runs → MAD ≤ 10.0 observes 81% of copies at 0% motion false-positive, where
+  the byte-exact hash observed 0/32. This is a genuine local RED→GREEN of the SIGNAL, not just the
+  detector mechanics — embed the measured copy/motion MAD scalars as a locked crate-root fixture test.
+
+- **The signal fix does NOT unblock the LIVE flip — the promotion gate is still DATA-gated.** The
+  PNG-dump corpus is BIASED (frames near events), and the existing partials carry the OLD byte-exact
+  hashes, so the full per-run `signal_viability` distribution + `DUP_RATE_PULLDOWN_MIN` recalibration
+  cannot be produced from retained data — they need a FRESH green run emitting the new signal. Ship
+  the fixed signal REPORT-ONLY (`gates_overall_pass()` stays `false`); the LIVE flip stays gated on
+  `signal_promotable == true` on ≥2 consecutive real runs + a recalibrated bound. State this
+  precisely; keep the ticket OPEN carrying the promote step (window-gate-tolerance-walkdown.md §5).
+
+- **A near-duplicate signal (unlike byte-exact) CAN fire on a genuinely-static-but-distinct scene**
+  (every consecutive pair low-MAD → high rate, regular, window-spanning → the classifier would
+  mis-flag it a pulldown). Harmless while report-only, but the full-run recalibration must judge
+  whether an UPPER rate bound is needed to separate a ~16.7% pulldown from ~100% static (frozen_leg's
+  domain). Not a concern on the animated Vernier/burn test pattern, but note it for the calibration.

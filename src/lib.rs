@@ -56,6 +56,11 @@ pub mod vban;
 // `probe::presenter::PresenterKind` reference keeps compiling unchanged.
 pub mod presenter_kind;
 
+// #1179 — explicit painter display-mode override (the 2560x1080@100 experiment): pure `WxH@RR`
+// parsing + proportional dual-QR geometry scaling + canvas resolution. No probe deps, so it
+// unit-tests Tier-0; the probe-gated painter/presenter/kms glue threads the resolved values.
+pub mod painter_mode;
+
 // #297 — NDI sender re-announce trigger (pure decision + network signature). Cross-platform
 // (no v4l/libc) so it unit-tests Tier-0; the Linux-only IO (interface read + sender re-create)
 // lives in `ndi`.
@@ -118,6 +123,13 @@ pub mod recording_span_gate;
 // testable outside the probe feature. No probe deps; the probe-gated `bin/recording-verdict`
 // extracts `RecordingFrame::tick` for imag's recording and feeds it here.
 pub mod imag_tick_gate;
+
+// #1143 — OBS record-session render accounting (report-only). The imag E2E recording must not
+// perturb the measurement: recording with SOFTWARE x264 overloaded the render thread → ~18.4%
+// lagged → ~19.5% repeated recorded frames (observer effect). The fix moves the record encoder to
+// the Intel iGPU HW ffmpeg_vaapi_tex; this crate-root (Tier-0-testable) struct carries OBS's own
+// stop-stats lagged% through the imag partial so a stale encoder is surfaced + attributed.
+pub mod record_render_stats;
 
 // #575 — recording START/STOP boundary artifact trim (pure kernel). A recording's genlock-fifo
 // pre-roll flush (start) and mux-finalization tail-drain (stop) can inject non-real-time gaps
@@ -284,6 +296,32 @@ pub mod capture_rate_health;
 // the #656 WARN fires.
 pub mod capture_rate_selfheal;
 
+// #1128 — fast-capture grabber STUCK detector (ShadowCast ~62.5 fps + persistent corrupted). The
+// discriminator the existing capture_rate_selfheal lacks: over-rate AND persistent corrupted, both
+// sustained, so a benign over-rate wobble (0 corrupted, absorbed by the decimation gate — #909) is
+// never declared stuck. Pure decision + report-line formatting, no probe deps — Tier-0 tested; the
+// dev1 alert watchdog greps the `#1128 grabber STUCK` marker this module's message emits.
+pub mod grabber_stuck;
+
+// #1193 — cam2 ShadowCast SUSTAINED-OVER-RATE detector: the 3rd self-heal trigger. Keys on the
+// COMBINED signature over-rate (cap-1s buckets) AND dupe-victim shed churn, both sustained — the
+// churn band is the discriminator (a benign over-rate wobble sheds 0, absorbed by the decimation
+// gate) exactly as #1128's corrupted band is. Pure decision + report-line formatting (the cooldown
+// predicate moved to capture_rate_selfheal in #1201), no probe deps — Tier-0 tested; funnels into
+// the shared capture_rate_selfheal USB-reset path (gated off by
+// CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL) via a new SelfHealMessages const.
+pub mod capture_overrate;
+
+// #1200 — cam3 ShadowCast LATCH-HALVING detector: the 4th self-heal trigger. Keys on the
+// capture-side byte-identical dupe FRACTION (reusing the #889 content_hash): healthy 30fps-into-60fps
+// is ~0.5 (each unique 2x), latch-halved is ~0.75 (each unique 4x, 15 unique/s in 60fps) — bands
+// non-overlapping with a dead-zone, the discriminator role #1128's corrupted band / #1193's shed
+// churn play. Blind spot the other three miss: correct 60fps pace, 0 over-rate, 0 corrupted. Pure
+// decision + report-line formatting (the cooldown predicate moved to capture_rate_selfheal in
+// #1201), no probe deps — Tier-0 tested; funnels into the shared capture_rate_selfheal USB-reset
+// path (gated off by CAMERA_BOX_GRABBER_HALVING_SELFHEAL).
+pub mod capture_latch_halving;
+
 // #625 — order-independent REAL-DROP ("gap") detection for the all-cambox painted-tick window
 // continuity check: the stream recording is documented (`#133`/`#196`/`#216`) to occasionally
 // deliver frames "softened"/out of order (a one-frame-late 60->30 straddle); a RECORDED-order
@@ -316,6 +354,14 @@ pub mod genlock_backlog;
 // probe-gated `probe::fb::blank_fbdev` (the actual ioctl + write) uses this geometry decision.
 pub mod fb_blank;
 
+// #1186 — graceful in-process shutdown for the frame-probe painter: an async-signal-safe
+// SIGTERM/SIGINT/SIGHUP handler sets a flag the painter loops poll, so a `systemctl stop
+// cam2-painter.service` runs the SAME issue-660 `blank_fbdev` teardown a clean self-exit does
+// (SIGTERM's default disposition skips `KmsPresenter::Drop`, leaving a stale frame on /dev/fb0).
+// The PURE half (flag + `painter_should_continue`) is std-only and Tier-0-tested; the `install()`
+// sigaction glue is cfg(target_os="linux") on the existing `libc` dep, compiled by CI.
+pub mod shutdown;
+
 // #707 — NDI blocking-send STALL diagnostic (pure decision). Given how long a SINGLE blocking
 // `NDIlib_send_send_video_v2` call took and the sender's configured frame interval, decides
 // whether THIS call stalled — the missing direct evidence the #656/#663/#665/#666/#707
@@ -347,7 +393,8 @@ pub mod presentation_cadence;
 // padding a 50fps source up to 60 — the #794 hard layer the receiver-side `received=` rate tap is
 // structurally blind to) versus the isolated free-running beat / over-rate baselines. No probe
 // deps, so it unit-tests Tier-0; the probe-gated `bin/recording-verdict.rs` computes the per-frame
-// hash from the offline recording and reports the result REPORT-ONLY (pending calibration).
+// codec-tolerant MAD-to-predecessor near-duplicate signal (#1166) from the offline recording and
+// reports the result REPORT-ONLY (pending calibration).
 pub mod dup_cadence;
 
 // #707 EVENT-FORENSICS — per-event residual copy/gap detection (pure decision). Given the same
@@ -396,6 +443,12 @@ pub mod burn_hold;
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
 // a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 mirrors.
 pub mod recordings_retention;
+// #789 (residual B / criterion 5) — standalone retention decision for the deploy/backup DIRECTORIES
+// the fleet deploy leaves behind (dated `<stamp>-789` box-backups + per-sha stage dirs); keep newest
+// -N per kind UNION younger-than-D-days, delete ONLY the deploy's OWN naming allowlist (never a
+// generic sweep — `previous/`/operator dirs stay protected). Canonical spec that
+// scripts/obs-backup-retention.{ps1,sh} mirror.
+pub mod obs_backup_retention;
 // #768 — REPORT-ONLY cold-cut onset seam: the first ~1s after a program switch to a cambox hidden
 // >= 60s (the transition the segmenter's guard discards, so nothing measured it — the blind spot
 // that let issue 767 through). Pure crate-root logic (Tier-0), consumed thinly by recording-verdict.
@@ -407,6 +460,20 @@ pub mod e2e_latency_gate;
 // thinly by recording-verdict.
 pub mod imag_leg_gate;
 pub mod optical_floor;
+// issue 781 — REPORT-ONLY projection-tap scanout-TEAR detector: pure crate-root classifier (Tier-0)
+// over the cam2-optical dual-QR Vernier span per captured frame, consumed thinly by
+// recording-verdict's all-cambox sweep. `gates_overall_pass()` is `false` (the payload-level signal
+// is proven-blind on the current single-vertical-band content) with a computed `TearSignalViability`;
+// one-line-flippable to LIVE once the signal is Observed on a known-torn run + a bound is calibrated.
+pub mod tear_detect;
+// issue 1196 — the aux Vernier tick pair's PURE geometry (bottom burn-gap placement + the Tier-0
+// no-overlap proofs vs the primary dual-QR / colour column / motion sweep / downstream burn
+// overlays). The probe-gated painter (src/probe/qr.rs::blit_aux_tick_bgra) only calls
+// `aux_tick_rects` to blit — the colour_scale/motion_sweep seam pattern.
+pub mod aux_tick;
+// #1141 — head-end OPTICAL blur/shutter preflight: pure crate-root classifier (Tier-0) over
+// the running service's `rough=` capture telemetry, consumed by scripts/lib/optical-preflight.sh.
+pub mod optical_preflight;
 // issue 1118 — REPORT-ONLY leg schema-degrade seam: a schema-mismatched imag partial DEGRADES
 // (drop the leg, verdict from strih+stream) instead of the fatal `load(path)?` killing the
 // whole merge. Pure crate-root decision (Tier-0), consumed thinly by recording-verdict::run_merge.

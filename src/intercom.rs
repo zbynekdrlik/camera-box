@@ -398,19 +398,25 @@ fn run_receiver(
                 let audio_data = &packet_buf[VBAN_HEADER_SIZE..len];
                 let samples: Vec<i16> = match header.codec {
                     c if c == VbanCodec::Pcm16 as u8 => audio_data
-                        .chunks_exact(2)
-                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|chunk| i16::from_le_bytes(*chunk))
                         .collect(),
                     c if c == VbanCodec::Float32 as u8 => audio_data
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|chunk| {
-                            let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                            let f = f32::from_le_bytes(*chunk);
                             (f * 32767.0).clamp(-32768.0, 32767.0) as i16
                         })
                         .collect(),
                     _ => audio_data
-                        .chunks_exact(2)
-                        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|chunk| i16::from_le_bytes(*chunk))
                         .collect(),
                 };
 

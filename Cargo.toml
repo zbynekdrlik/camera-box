@@ -1,11 +1,32 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.481"
+version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/camera-box"
+
+# --- bkshading M1 workspace (issue 808) -------------------------------------
+# The camera-box appliance stays the workspace ROOT package (its build path is
+# UNCHANGED: every existing CI job runs cargo at the root WITHOUT --workspace, so
+# it still compiles/tests only this root package). The bkshading shading-control
+# service + cambox relay live as SEPARATE members with their own (heavier) deps,
+# so they never touch the appliance's minimal dep tree or its probe feature gating.
+# resolver = "2" pins the SAME feature resolution the root edition-2021 package
+# already used standalone. A dedicated `bkshading` CI job builds/tests the members
+# (see .github/workflows/ci.yml); `cargo fmt --all` already covers them.
+[workspace]
+members = ["bkshading/proto", "bkshading/relay", "bkshading/service"]
+resolver = "2"
+
+# Single source of truth for the version across the appliance + the three bkshading
+# crates (issue 1154). The appliance [package] and every member inherit it via
+# `version.workspace = true`, so ONE bump here propagates to all four CARGO_PKG_VERSION
+# values. The `^version = "X"` readers (camera-box-version-gate.sh, recording-e2e.sh,
+# rig-status.py) still match: this stays the only column-0 `version = "X"` line.
+[workspace.package]
+version = "1.7.0-dev.555"
 
 [lib]
 name = "camera_box"

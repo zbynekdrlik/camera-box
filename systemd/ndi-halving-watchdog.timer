@@ -1,0 +1,21 @@
+[Unit]
+# Fires the #1203 NDI per-connection rate-halving auto-heal every 5 min (dev1-side), matching the
+# network-reach / frozen-input / cadence / asio-starve alert cadence so the fleet's dev1 alert timers
+# stay in lockstep. The recv-timing #797 `n=` counter is PER-INTERVAL (reset-on-read), so the rate is
+# measured WITHIN a single pass from the last two audit lines' OWN timestamps (never a wall-clock
+# divisor). A sustained halving pages within ~10 min of onset (2-pass confirm); when the cure arm is
+# armed it reattaches once per cooldown (~10 min), then pages if the connection stays halved
+# (no reattach-spam); a one-shot recovery ping fires on clear.
+Description=Run the camera-box NDI rate-halving auto-heal every 5 min (#1203)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+# Offset from the sibling dev1 alert timers (network-reach 3min / cadence 4min / asio-starve 4min) so
+# they never all fire the same instant.
+OnBootSec=6min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

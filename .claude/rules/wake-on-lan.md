@@ -24,6 +24,16 @@ wakes a slept/off broadcast OBS box. See `docs/wake-on-lan.md` for the operator 
   + limited (`255.255.255.255`) broadcast on UDP 9 AND 7 (the 2026-08-13 delivery shape). dev1 is on
   the same `10.77.9.0/24` as the rig, so the subnet broadcast reaches at L2; from off-segment, run it
   from a cam box instead (routed directed-broadcasts are commonly dropped).
+- `scripts/wake-box.sh --wait[=SECS]` (#1053, 2026-08-20) — the automated "verify availability after
+  wake": after the send it polls the target for reachability (exit 0 UP / 4 STILL-DOWN / 2 misuse /
+  3 send-error), so recovery is ONE command composable with issue 1001 (detect-down → wake →
+  confirm-up). The poll HOST is resolved by the pure `wol_verify_host` in `wol.sh` (box → table ip;
+  `--wait-host` override; raw-MAC/unknown → fail-loud, so a verify never polls the wrong/no host).
+  Two seams make the I/O deterministically testable with NO real network: the reachability probe is
+  `${WOL_PING_CMD:-ping -c1 -W1}` (a test passes `true`/`false` for a fixed UP/DOWN verdict) and the
+  poll interval `${WOL_WAIT_INTERVAL:-3}`s (validated positive-int); a test also puts a stub `python3`
+  (drains stdin, exit 0) on PATH so the send broadcasts NOTHING. Reuse that stub-python3 + injectable-
+  probe pattern for ANY future wake-box.sh I/O test (`tests/harness_wol_verify_1053.rs`).
 - `scripts/enable-nic-wol.ps1` — Windows NIC enable+VERIFY. Session-agnostic NIC/registry op (NOT
   desktop-dependent), so run it over `scripts/lib/win-ssh-exec.sh` `win_ssh_run` (PowerShell
   `-EncodedCommand`) OR the win-* MCP Shell — per `.claude/rules/win-ssh-vs-mcp.md` this is Context-B

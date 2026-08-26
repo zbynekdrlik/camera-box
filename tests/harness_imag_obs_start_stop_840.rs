@@ -289,3 +289,40 @@ fn imag_obs_stop_exec_stop_mode_skips_the_systemctl_delegation_882() {
          passes so it never re-delegates to systemctl (which is already stopping it)"
     );
 }
+
+// ================================================================================================
+// #1156 — an IMPORT PREFLIGHT before the OBS launch. imag-obs-start.sh's ExecStart launches OBS
+// and only AFTER that seeds via `python3 imag_scenes.py --bootstrap`, so a missing imported sibling
+// (the #1143 imag_record_encoder setup-imag.sh forgot to install) killed a HEALTHY OBS 1737× in an
+// 8.5h Restart-loop. Preflighting the seed's import chain BEFORE launching OBS fails the unit
+// cleanly on a broken import instead of flapping OBS up/down on the live IMAG projection.
+// ================================================================================================
+
+/// A `python3 -c "... import imag_scenes"` preflight must run BEFORE the `obs ... &` launch, add
+/// /usr/local/bin to sys.path (the REAL on-box install location), and on failure echo a NAMED FAIL
+/// line + exit 1 — so a missing sibling fails the unit without ever launching (then looping) OBS.
+#[test]
+fn imag_obs_start_import_preflights_before_launching_obs_1156() {
+    let body = read(START);
+    let preflight = body
+        .find("import imag_scenes")
+        .expect("{START} must run a `python3 -c ... import imag_scenes` preflight (#1156)");
+    let launch = body
+        .find("obs --disable-shutdown-check &")
+        .expect("{START} must still launch obs (#840)");
+    assert!(
+        preflight < launch,
+        "{START}: the import preflight must run BEFORE the obs launch (#1156) — otherwise a broken \
+         import still launches OBS and then seed-fails, Restart-looping a healthy OBS 1700×"
+    );
+    assert!(
+        body.contains("import sys") && body.contains("/usr/local/bin"),
+        "{START}: the preflight must insert /usr/local/bin into sys.path so it validates the REAL \
+         on-box install location's import chain (#1156)"
+    );
+    assert!(
+        body.contains("FAIL: imag_scenes import preflight"),
+        "{START}: a failed preflight must echo a NAMED FAIL line so the unit's log names the cause \
+         (#1156)"
+    );
+}

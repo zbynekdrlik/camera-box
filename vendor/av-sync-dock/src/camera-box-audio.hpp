@@ -189,7 +189,10 @@ cb_decode_markers_with_stats(const std::vector<float> &samples, uint32_t sample_
 				uint32_t sym = (uint32_t)(im > 0.0 ? 2 : 0) | (uint32_t)(re > 0.0 ? 1 : 0);
 				word |= sym << (CB_N_PAYLOAD_BITS - 2 - 2 * k);
 			}
-			if (((word >> 16) & 0xF) == CB_PREAMBLE_NIBBLE && cb_crc4_check(word, CB_N_PAYLOAD_BITS) == 0) {
+			// #1153: mirror qpsk_marker's zero-nibble gate — the emitter always sends bits[15:12]==0;
+			// checking it reclaims 4 bits of redundancy and cuts the false-decode flood ~16x.
+			if (((word >> 16) & 0xF) == CB_PREAMBLE_NIBBLE && ((word >> 12) & 0xF) == 0 &&
+			    cb_crc4_check(word, CB_N_PAYLOAD_BITS) == 0) {
 				stats.crc_ok++;
 				out.push_back(std::make_pair((double)base / ar, (uint8_t)((word >> 4) & 0xFF)));
 				i = base + sig_len; // markers are far apart; skip past this one
@@ -832,5 +835,87 @@ inline CbDockLockSuggestion cb_dock_lock_suggested_target(double offset_ms, doub
 	s.target_ms = (int32_t)clamped;
 	return s;
 }
+
+/* #1177 -- how long (ns) the dock's measurement INPUT (audio marker decode + video QR) may stop
+ * advancing before the display degrades to STALE / NO-SIGNAL. 30 s: long enough that a brief decode
+ * gap on a live signal never flips the display, short enough that an operator walking up during
+ * EVENT mode reads STALE rather than a frozen "live" offset. Byte-for-byte mirror of
+ * src/av_sync_dock.rs::DOCK_INPUT_STALE_NS. */
+constexpr uint64_t CB_DOCK_INPUT_STALE_NS = 30ull * 1000000000ull;
+
+/* The state transition a CbDockInputStaleness::observe() call reports, so the caller fires a
+ * one-shot log line + UI signal exactly on the boundary crossing (never per tick). Mirror of
+ * src/av_sync_dock.rs::DockStaleTransition. */
+enum class CbDockStaleTransition {
+	None,          // no state change this observe (still live, or still stale)
+	EnteredStale,  // fresh -> stale: measurement input just went away
+	RecoveredLive, // stale -> fresh: measurement input just resumed
+};
+
+/* #1177 -- tracks whether the dock's measurement INPUT is still advancing, so the display can show
+ * an explicit STALE / NO-SIGNAL state instead of holding the last locked offset forever.
+ *
+ * The dock's lock state + displayed offset are updated ONLY when a decoded audio marker is
+ * ring-paired with a video QR (sync-test-output.cpp::st_raw_audio_camera_box). When the rig enters
+ * EVENT mode the cam2 QPSK marker + dual-QR stop entirely, so no new marker is decoded, no
+ * CbLockAuditTracker Unlocked ever fires, and the last locked offset (and `locked=yes`) is held
+ * indefinitely -- an operator reads a frozen number as a live measurement. This watches the two
+ * decode counters the #690 diag heartbeat already carries -- video_decoded + crc_ok -- and reports
+ * STALE when NEITHER has advanced for threshold_ns. Fed once per diag tick with the current
+ * cumulative counters + the audio-thread clock. Display-layer only; never touches the demod, the
+ * cluster, or the gate. Byte-for-byte mirror of src/av_sync_dock.rs::DockInputStaleness, tested by
+ * tests/av_sync_dock_cpp_mirror_gate.rs's self-test. */
+class CbDockInputStaleness {
+public:
+	CbDockInputStaleness()
+		: initialized_(false), stale_(false), last_video_decoded_(0), last_crc_ok_(0),
+		  last_advance_ns_(0)
+	{
+	}
+
+	bool is_stale() const { return stale_; }
+
+	// The FIRST call only seeds the baseline (never stale, no transition): a freshly-started dock
+	// has no advance history yet, so it must not flip stale before the first real signal can arrive.
+	CbDockStaleTransition observe(uint64_t video_decoded, uint64_t crc_ok, uint64_t now_ns,
+	                              uint64_t threshold_ns)
+	{
+		if (!initialized_) {
+			initialized_ = true;
+			last_video_decoded_ = video_decoded;
+			last_crc_ok_ = crc_ok;
+			last_advance_ns_ = now_ns;
+			stale_ = false;
+			return CbDockStaleTransition::None;
+		}
+
+		bool advanced = video_decoded > last_video_decoded_ || crc_ok > last_crc_ok_;
+		last_video_decoded_ = video_decoded;
+		last_crc_ok_ = crc_ok;
+
+		if (advanced) {
+			last_advance_ns_ = now_ns;
+			if (stale_) {
+				stale_ = false;
+				return CbDockStaleTransition::RecoveredLive;
+			}
+			return CbDockStaleTransition::None;
+		}
+
+		uint64_t elapsed = now_ns >= last_advance_ns_ ? now_ns - last_advance_ns_ : 0;
+		if (!stale_ && elapsed >= threshold_ns) {
+			stale_ = true;
+			return CbDockStaleTransition::EnteredStale;
+		}
+		return CbDockStaleTransition::None;
+	}
+
+private:
+	bool initialized_;
+	bool stale_;
+	uint64_t last_video_decoded_;
+	uint64_t last_crc_ok_;
+	uint64_t last_advance_ns_;
+};
 
 } // namespace camerabox

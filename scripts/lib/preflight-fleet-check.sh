@@ -81,7 +81,7 @@ preflight_fleet_check_verdict() {
   # #828) is "not reported" and skipped, so nothing false-fails. Empty-list != absent for a string
   # field, so presence is detected with `grep -q`, never by the value alone. When nodes DO exist
   # but the service is down for some OTHER reason, this stays silent -> honest generic message.
-  if printf '%s' "$line" | grep -q 'VIDEO_NODES=' ; then
+  if grep -q 'VIDEO_NODES=' <<<"$line" ; then
     video_nodes="$(printf '%s' "$line" | grep -oP 'VIDEO_NODES=\K\S*' || true)"
     if [ -z "${video_nodes:-}" ]; then
       echo "no capture card present — fit/check the grabber (#828)"

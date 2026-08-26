@@ -1777,3 +1777,177 @@ fn verify_device_wires_per_box_gain_table() {
         "cam1-4 = Mic 75/PCM 79, cam5-7 = Mic 80/PCM 94 (owner's per-box table)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (ad) provisioning netplan interface pin -- no USB-camera-link IP theft (#1155)
+// ---------------------------------------------------------------------------------------------
+
+/// Single-quote an arbitrary string for a bash argument (handles embedded single quotes), so a
+/// multi-line netplan / `ip -br addr` fixture passes through `run_sourced`'s bash `-c` intact.
+fn netplan_sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// A wildcard netplan -- the #1155 regression signature. `match: driver: "*"` claims a USB
+/// CDC-NCM camera link and hands it the box IP + a duplicate default route.
+const NETPLAN_WILDCARD: &str = "network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    all-ethernet:
+      match:
+        driver: \"*\"
+      addresses:
+        - 10.77.9.61/23
+      routes:
+        - to: default
+          via: 10.77.8.1
+";
+
+/// The pinned netplan -- `match: name: \"enp*\"` matches only the PCI NIC, so a USB camera link
+/// (enx*/cdc_ncm) stays unmanaged by the LAN stanza.
+const NETPLAN_PINNED: &str = "network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    all-ethernet:
+      match:
+        name: \"enp*\"
+      addresses:
+        - 10.77.9.61/23
+      routes:
+        - to: default
+          via: 10.77.8.1
+";
+
+fn wildcard_count(text: &str) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "netplan_driver_wildcard_count {}",
+        netplan_sq(text)
+    ));
+    assert_eq!(
+        code, 0,
+        "netplan_driver_wildcard_count must exit 0 (pipefail-safe). stderr: {err}"
+    );
+    out.trim().to_string()
+}
+
+fn dup_ip_count(ipbrief: &str, boxip: &str) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "interfaces_sharing_ip {} {}",
+        netplan_sq(ipbrief),
+        netplan_sq(boxip)
+    ));
+    assert_eq!(
+        code, 0,
+        "interfaces_sharing_ip must exit 0 (pipefail-safe). stderr: {err}"
+    );
+    out.trim().to_string()
+}
+
+/// The wildcard detector flags ONLY a `driver: "*"` LAN stanza (quoted, single-quoted or bare),
+/// and returns "0" for the correctly pinned `name: "enp*"` stanza -- so the (ad) check FAILs the
+/// old wildcard config and PASSes the fix.
+#[test]
+fn netplan_driver_wildcard_count_flags_the_1155_regression_only() {
+    assert_eq!(
+        wildcard_count(NETPLAN_WILDCARD),
+        "1",
+        "a `driver: \"*\"` LAN stanza is the #1155 regression signature"
+    );
+    assert_eq!(
+        wildcard_count(NETPLAN_PINNED),
+        "0",
+        "a `name: \"enp*\"` pinned stanza must NOT count as the wildcard regression"
+    );
+    assert_eq!(
+        wildcard_count("      match:\n        driver: '*'\n"),
+        "1",
+        "single-quoted `driver: '*'` is the same regression"
+    );
+    assert_eq!(
+        wildcard_count("      match:\n        driver: *\n"),
+        "1",
+        "unquoted `driver: *` is the same regression"
+    );
+    assert_eq!(
+        wildcard_count(""),
+        "0",
+        "empty input (unreachable box) -> 0, never an error"
+    );
+}
+
+/// The duplicate-IP detector counts DISTINCT interfaces carrying the box IP, is CIDR-anchored
+/// (so .61 never substring-matches .610), and returns 2 when a USB camera link has stolen the box
+/// IP alongside the real NIC -- the live #1155 signature.
+#[test]
+fn interfaces_sharing_ip_counts_distinct_links_and_is_cidr_anchored() {
+    let one = "lo               UNKNOWN        127.0.0.1/8 ::1/128\n\
+               enp3s0           UP             10.77.9.61/23 fe80::1/64\n";
+    let two = "lo               UNKNOWN        127.0.0.1/8 ::1/128\n\
+               enp3s0           UP             10.77.9.61/23 fe80::1/64\n\
+               enx02743ba02a02  UP             10.77.9.61/23 fe80::2/64\n";
+    let none = "lo               UNKNOWN        127.0.0.1/8 ::1/128\n\
+                enp3s0           UP             10.77.9.99/23 fe80::1/64\n";
+    let longer = "lo               UNKNOWN        127.0.0.1/8\n\
+                  enp3s0           UP             10.77.9.610/23\n";
+    assert_eq!(
+        dup_ip_count(one, "10.77.9.61"),
+        "1",
+        "healthy: box IP on one link"
+    );
+    assert_eq!(
+        dup_ip_count(two, "10.77.9.61"),
+        "2",
+        "#1155 trap: box IP on the NIC AND a USB camera link"
+    );
+    assert_eq!(dup_ip_count(none, "10.77.9.61"), "0", "box IP absent -> 0");
+    assert_eq!(
+        dup_ip_count(longer, "10.77.9.61"),
+        "0",
+        "CIDR-anchored: .61 must not substring-match .610"
+    );
+    assert_eq!(
+        dup_ip_count("", "10.77.9.61"),
+        "0",
+        "empty input (unreachable) -> 0, never an error"
+    );
+}
+
+/// issue 1187 — verify-device.sh must ALSO acceptance-check that mpv is present + runnable (the
+/// DRM/KMS lipsync playback runtime that replaced the legacy raw-fbdev ffmpeg write), mirroring the
+/// (x) ffmpeg check. It must be inserted BEFORE the (q) block so (q) stays the intentionally-LAST
+/// check, and it must FAIL loud (never merely warn) when mpv is missing.
+#[test]
+fn verify_device_checks_mpv_present_before_q_1187() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let live_flow = &body[guard_pos..];
+    let mpv_at = live_flow
+        .find("# (x2) mpv installed")
+        .expect("(x2) mpv acceptance-check block must be present in the live flow");
+    let q_at = live_flow
+        .rfind("# (q) .bak cruft drift")
+        .expect("(q) implementation block");
+    assert!(
+        mpv_at < q_at,
+        "the mpv (x2) check must precede the (q) block so (q) stays last (mpv={mpv_at} q={q_at})"
+    );
+    // Scope the slice to the (x2) block ALONE -- it is inserted between (x) ffmpeg and (y), so it
+    // ends at the (y) block that immediately follows it.
+    let mpv_end = live_flow[mpv_at..]
+        .find("\n# (y) ")
+        .map(|i| mpv_at + i)
+        .expect("(y) block start (the check immediately after the (x2) mpv check)");
+    let mpv_block = &live_flow[mpv_at..mpv_end];
+    assert!(
+        mpv_block.contains("mpv --version"),
+        "(x2) must actually probe mpv via `mpv --version`: {mpv_block}"
+    );
+    assert!(
+        mpv_block.contains("fail "),
+        "(x2) must FAIL loud (never merely warn) when mpv is missing/unrunnable: {mpv_block}"
+    );
+}

@@ -37,11 +37,11 @@ class FakeWS:
 # ---------------------------------------------------------------------------
 
 class TestActiveCameraNames:
-    def test_default_is_cam1_cam2_cam3(self, monkeypatch):
-        # #939 (2026-08-13): cam3 re-activated (Cam Link 4K fitted); default mirrors
-        # camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3".
+    def test_default_is_cam3(self, monkeypatch):
+        # issue 1170 (2026-08-24): cam2's camera-under-test role retired (grabber cure-decay);
+        # default mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam3" (cam2 stays the painter only).
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert psafc.active_camera_names() == ["cam1", "cam2", "cam3"]
+        assert psafc.active_camera_names() == ["cam3"]
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam5")

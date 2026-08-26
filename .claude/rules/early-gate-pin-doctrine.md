@@ -1,0 +1,122 @@
+---
+paths:
+  - "scripts/camera-box-version-gate.sh"
+  - "scripts/dantesync-version-gate.sh"
+  - "scripts/version-integrity-gate.sh"
+  - "scripts/recording-e2e.sh"
+  - "tests/camera_box_version_gate.rs"
+  - "tests/dantesync_version_gate.rs"
+  - "tests/version_integrity_gate.rs"
+---
+
+# Early-gate PIN doctrine — an early gate PINS to the expected release, fail-closed on UNKNOWN; peer parity is a SUPPLEMENT, never a substitute (#1136)
+
+**Owner's standing rule (2026-08-19, repeated across OBS, dantesync, camera-box):** *"early gates
+musia odmietnut vobec bezat ak je nieco v random neaktualnej verzii"* — an early E2E precondition
+gate must REFUSE to run at all if any component is on a random / stale version. This has now bitten
+the SAME way three times (OBS stack, dantesync daemon, camera-box binary), so it is a CLASS rule,
+not a one-off fix.
+
+## The doctrine (apply to EVERY early version/preflight gate)
+
+1. **PIN to the expected release — the primary check.** Every node/box/component the gate covers
+   must match a KNOWN-GOOD expected value (a fixed pin, or a moving pin read from a source of
+   truth). This is what catches a UNIFORMLY-stale fleet, where every box AGREES on an old version.
+2. **Peer parity is a SUPPLEMENT, never a substitute.** "Every box agrees with every other" (a
+   relative cross-box compare with no external reference) is a good *diagnostic* (it localizes a
+   single-box drift), but on its own it PASSES a fleet that is uniformly stale — the exact hole the
+   owner keeps hitting. Parity may sit *alongside* a pin, or be the dormant `--no-main-pin`
+   fallback, but it must never be the ONLY check.
+3. **Fail CLOSED on UNKNOWN.** An unread node, an unreadable pin, a missing state file → the gate
+   REFUSES (a distinct non-clean exit), never a silent pass. "I couldn't check" is a failure, not
+   an OK.
+4. **The pin must not LAG the newest release — an orphan release is a SCREAMING finding (owner,
+   2026-08-19).** Pin-not-latest is right for DETERMINISM (a gate compares against a known value,
+   with canary discipline for upgrades) — but a pin that sits BEHIND the newest published version of
+   its component is the SAME disease inverted: *"naco vydavas novu upravenu ked ju potom nenasadis…
+   cely rig ma byt jednotny a najnovsi"*. So **advancing the pin + deploying the fleet is a MANDATORY
+   FINAL STEP of every release**, not an optional follow-up. A component that is PUBLISHED (a new gh
+   release / a merged main / a new vendored HEAD) but not yet DEPLOYED+PINNED is an *orphan release*
+   — and an orphan release must be a LOUD finding (alarm or gate), never a silent state that a
+   maintainer discovers by eye weeks later. Live example (2026-08-19): the dantesync DAEMON was
+   upgraded fleet-wide to v1.8.46, but `dantesync-tray.exe` on strih+stream sat at Aug 12 — in NO
+   gate at all — until the supervisor deployed it minutes later. The tray was an orphan with nothing
+   screaming about it.
+
+## The two comparison models — and how to pin a CONTINUOUSLY-deployed component
+
+`.claude/rules/dantesync-version-reading.md` documents the pin-vs-parity split; the #1136 refinement
+is that a "continuously-deployed, no canonical value" component is NOT an excuse to drop the pin:
+
+- **Fixed pin** — for a component that upgrades RARELY + DELIBERATELY (a maintainer bumps the pin as
+  part of the upgrade): `dantesync-version-gate.sh`'s `DANTESYNC_VERSION_PIN`,
+  `verify-device.sh`'s `NDI_VERSION_PIN`.
+- **Moving pin** — for a component deployed on almost every PR (`camera-box` `1.7.0-dev.NNN`): pin to
+  a SOURCE OF TRUTH that advances automatically WITH the deploy, so pin and deployed reality move
+  together and there is no stale-pin spurious-fail window. `camera-box-version-gate.sh` (#1136) reads
+  the pin from `git show origin/main:Cargo.toml`, and the push-to-main auto-deploy (ci.yml
+  `deploy-fleet`) pushes that same binary to the fleet — so a merge advances both at once. This is
+  what dissolves the old #875-header objection ("a dev build has no stable value to pin against"):
+  it has one — origin/main — the moment a deploy keeps the fleet on it.
+- **Relative parity, no pin** — ONLY legitimate when the value is genuinely unique-per-build with no
+  external truth AND a pin is impossible (`drift-guard.sh`'s `genlock_build_sha`). Even then, prefer
+  pinning the deployed SHA to the newest main commit that produced it (see #1137) over bare parity.
+
+## Detecting an orphan release — pinned/deployed vs NEWEST published (per component)
+
+Where feasible, a gate (or a sibling watchdog) compares what is PINNED/DEPLOYED against the NEWEST
+PUBLISHED version of the component and reports lag LOUDLY. Whether that lag HARD-GATES or ALARM-
+REPORTS is a per-component call — justify it:
+
+- **camera-box (this gate) — the REFERENCE case, orphan-PROOF by construction.** The pin IS the
+  newest source of truth (`origin/main` Cargo.toml), and the push-to-main auto-deploy (ci.yml
+  `deploy-fleet`) deploys that same version. So the pin can never lag main, and any deploy gap (main
+  advanced, a box not yet on it) makes fleet != pin → the E2E pin gate SCREAMS (exit 20). A
+  camera-box orphan release is therefore structurally impossible AND self-alarming — no extra lag
+  check is needed. This is the shape every other component should reach.
+- **dantesync (fixed pin) — CAN lag; add a lag ALARM.** `DANTESYNC_VERSION_PIN` is a hand-bumped
+  value, so it can sit behind the newest dantesync gh release (the exact orphan the owner named).
+  A `gh release view` compare of the pin against the newest dantesync release should alarm on lag.
+  ALARM-report (not hard-gate) is the right severity here: the daemon upgrade is a deliberate canary
+  rollout, so a lag is "a release is waiting to be rolled", not "the rig is broken now" — but it must
+  be LOUD, and the roll must actually happen (mandatory final step, doctrine 4). This is filed work.
+- **genlock vendored bundle — DEPLOYED lags newest vendored HEAD.** The newest "release" is the
+  newest main commit touching `vendor/**`; comparing the deployed `genlock_build_sha` against it is
+  exactly #1137. Report→fail with a loud "pending vendor commits" escalation (the coordinated-restart
+  deploy means a hard block on every E2E is too blunt — justify in #1137).
+
+## Live audit of every early gate (2026-08-19, #1136 + owner's 2026-08-19 orphan-release widening)
+
+| Component / gate | Model | Pin? | Orphan-guarded (pin vs newest)? | Status |
+|---|---|---|---|---|
+| `dantesync` DAEMON — `dantesync-version-gate.sh` (#862) | every node vs `DANTESYNC_VERSION_PIN`; uniform-stale FAILS; UNKNOWN→refuse | **PIN ✓** (fixed — can lag) | **✓ lag ALARM (report-only, #1139)** | **FIXED #1139**: `dantesync_pin_lag_verdict` SCREAMS (report-only) when the pin lags the newest gh release |
+| `dantesync-tray.exe` (strih+stream) | **sha256 vs the v{PIN} release asset (report-only alarm, #1139)** — GUI app has no console `--version` (verified live), so pin by bytes not version | **PIN ✓ (sha, #1139)** | ✓ (via the daemon lag alarm — same release tag) | **FIXED #1139 (detection)**: `dantesync_tray_verdict` SCREAMS when the deployed tray != the pinned release asset; folding the tray into the fleet-upgrade roll (so it advances with the daemon) is the remaining orphan-PROOF step |
+| `version-integrity-gate.sh` (#123) OBS/genlock bundle | LIVE Windows/imag OBS stack vs vendor/README.md + bundle manifest SHAs; **+ vendor-pin vs main's newest `vendor/**` commit (report-only alarm, #1137)** | **PIN ✓ (report-only vendor pin, #1137)** | **✓ vendor-pin ALARM (#1137)** | **FIXED #1137**: `genlock_vendor_pin_verdict` SCREAMS (report-only — coordinated-restart deploy makes a hard block too blunt) + names the pending vendor commits |
+| `camera-box-version-gate.sh` (#875) | was relative parity only | **PARITY→PIN ✓ (#1136)** | **✓ orphan-PROOF** — pin = origin/main = newest; auto-deploy closes the gap; any lag → gate screams | fixed here |
+| `frame-probe` (cam2 painter binary) | **sha256 vs the current CI build (report-only, DORMANT until enabled, #1138)** — folded into `camera-box-version-gate.sh` | **PIN ✓ (sha, #1138)** | n/a (report-only; enabled with the auto-deploy) | **FIXED #1138 (detection)**: `frame_probe_pin_verdict` SCREAMS when the deployed painter != the current CI build; DORMANT unless `--frame-probe-expected-sha`/`-bin` is supplied. Enabling it (wire the expected bin at [1/8]) + a frame-probe fleet auto-deploy — so pin+deploy move together (orphan-PROOF) — is the remaining step, deploy-owned |
+| `recording-verdict-on-imag` sha gate (#1118) | sha256 vs probe-tools artifact | **PIN ✓** | ✓ (sha of the current CI artifact) | clean (refreshed 2026-08-19) |
+| `clock-offset-painter-gate.sh` (#326), DanteSync NTP/PTP (#7) | live offset/lock behaviour | n/a | n/a | not version gates |
+
+Every ACTUAL version gate now either pins-and-is-orphan-guarded or has a filed hole ticket. New
+early gates get BOTH from day one — do NOT ship a parity-only / deployed-state-only version gate, and
+do NOT ship a pin with no alarm when it lags the newest published release. camera-box is the shape to
+copy: pin = the newest source of truth + an auto-deploy that closes the gap, so the pin can never
+orphan and any deploy gap self-alarms.
+
+## When you add or touch an early gate — the checklist
+
+- Does it PIN to an expected release (fixed or moving), or only compare peers / the deployed state?
+  If the latter, it is a #1136-class hole — add the pin.
+- Does it fail CLOSED when the value (or the pin itself) is unreadable? An unreadable pin must
+  REFUSE, never silently fall through.
+- Is the pin a MOVING source of truth that advances with the deploy (so it never spuriously fails a
+  correctly-deployed fleet)? For camera-box that is origin/main + the auto-deploy; for a vendored
+  bundle it is the newest main commit touching its source tree (#1137).
+- Provide a documented ESCAPE (`--no-main-pin` on camera-box-version-gate.sh) ONLY for a deliberate
+  pre-merge / operator soak where the target is knowingly not-yet-release — and name who uses it. The
+  automatic push-triggered E2E gate NEVER sets the escape, so it always enforces the pin.
+- Can the pin LAG the newest published release (an orphan)? If the pin is hand-bumped (a fixed pin),
+  add a lag alarm (compare the pin against the newest gh release / main / vendored HEAD) and make
+  advancing the pin + deploying the fleet the MANDATORY final step of the release — never a silent
+  "published but not deployed" state. If the pin is a MOVING reference (= the newest source of truth)
+  with an auto-deploy, the orphan is structurally impossible and self-alarming (the camera-box shape).

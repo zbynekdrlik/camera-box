@@ -64,6 +64,7 @@ fn lib_defines_the_pure_functions() {
         "net_reach_any_reachable",
         "net_reach_recovery_decision",
         "net_reach_alert_detail",
+        "net_reach_box_is_report_only",
     ] {
         let out = stdout_of(&format!("type {f} >/dev/null 2>&1 && echo DEFINED"));
         assert_eq!(out, "DEFINED", "{f} is not defined by the lib");
@@ -183,4 +184,53 @@ fn alert_detail_distinguishes_up_from_down_signals() {
         "ws should read up: {d}"
     );
     assert!(d.contains("8899 DOWN"), "bundle should read DOWN: {d}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// net_reach_box_is_report_only <box> <report_only_boxes> -> report_only=1 | report_only=0  (#811)
+//   A box NAMED in the space-separated list is REPORT-ONLY: probed + logged + state-tracked like any
+//   other, but it NEVER pages (nor recovery-pings) — for a TRAVELING box (resolume) whose absence is
+//   the NORMAL state. Whole-word match on the box name; empty list / non-member -> report_only=0.
+// ---------------------------------------------------------------------------------------------
+fn report_only(boxname: &str, list: &str) -> String {
+    stdout_of(&format!("net_reach_box_is_report_only {boxname} '{list}'"))
+}
+
+#[test]
+fn report_only_true_for_a_listed_box() {
+    assert_eq!(report_only("resolume", "resolume"), "report_only=1");
+    assert_eq!(
+        report_only("resolume", "strih stream resolume"),
+        "report_only=1"
+    );
+    assert_eq!(
+        report_only("stream", "strih stream resolume"),
+        "report_only=1"
+    );
+}
+
+#[test]
+fn report_only_false_for_an_unlisted_box() {
+    // The strih/stream default (empty report-only list means they page normally).
+    assert_eq!(report_only("strih", "resolume"), "report_only=0");
+    assert_eq!(report_only("stream", "resolume"), "report_only=0");
+}
+
+#[test]
+fn report_only_false_for_empty_list() {
+    assert_eq!(report_only("resolume", ""), "report_only=0");
+    assert_eq!(report_only("strih", ""), "report_only=0");
+}
+
+#[test]
+fn report_only_is_whole_word_not_substring() {
+    // "resolume" must not match the different NIC row name "resolume-alt", and a name prefix must
+    // not match either — otherwise a paging box could be silently muted by a look-alike list entry.
+    assert_eq!(report_only("resolume-alt", "resolume"), "report_only=0");
+    assert_eq!(report_only("resolume", "resolume-alt"), "report_only=0");
+    assert_eq!(report_only("resol", "resolume"), "report_only=0");
+    assert_eq!(
+        report_only("resolume", "resolume-alt resolume"),
+        "report_only=1"
+    );
 }

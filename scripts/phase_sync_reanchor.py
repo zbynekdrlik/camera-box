@@ -36,7 +36,7 @@ rig would re-introduce the very landmine this step removes.
 
 Usage:
   python3 scripts/phase_sync_reanchor.py --host 10.77.9.202 [--password PW]
-      --active-set "cam1 cam2 cam3" [--persisted-json <path>] [--out-json <path>]
+      --active-set "cam2 cam3" [--persisted-json <path>] [--out-json <path>]
       [--gate-bin <phase-sync-gate>] [--apply]
 
 Without --apply this is a DRY RUN (prints the plan, changes nothing on the OBS box).
@@ -192,8 +192,8 @@ def plan_reanchor(desired: dict, current: dict) -> tuple:
 def _active_sources(explicit: "str | None") -> list:
     """Split the active-set string into "NDI camN" source names (the strih source naming the pins
     live under). Mirrors phase_sync_active_floor_check's --active-set convention: a caller passes
-    "cam1 cam2 cam3" (space/comma separated); we map each to its "NDI camN" source."""
-    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")
+    "cam3" (issue 1170: cam2's camera-under-test role retired [grabber cure-decay]) (space/comma separated); we map each to its "NDI camN" source."""
+    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam3")
     cams = [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
     return [f"NDI {c}" for c in cams]
 

@@ -1,0 +1,198 @@
+---
+paths:
+  - "scripts/lipsync-test-mode.sh"
+  - "tests/harness_lipsync_test_mode.rs"
+---
+
+# lipsync-test-mode.sh — DRM/KMS playback (mpv), NOT raw fbdev (#1187)
+
+cam2's lipsync TEST-mode PLAYBACK runs through **`mpv --vo=drm`**, never a raw `/dev/fb0` write.
+`mpv` takes the DRM master, page-flips its own buffers at vblank (never touches fb0) and cleanly
+restores the CRTC on exit — this is the STRUCTURAL fix for the #1176 stale-frame leak (a killed
+`ffmpeg -f fbdev` left its last frame resident in fb0 memory, revealed on cam2's HDMI once the DRM
+master was released). Do NOT reintroduce an `-f fbdev` sink for playback.
+
+## Peak-normalize the PLAYBACK SPEECH — `LIPSYNC_PLAYBACK_GAIN_DB` (#1191), else SyncNet is unmeasurable
+
+The lipsync asset's SPEECH is quiet (peak -9.8 dBFS, mean -27.8 dBFS) while the QPSK marker is bursty
+~0 dBFS. The mic chain that captures the room (`mbc`, hand1/Dante) runs AGC whose OPERATING POINT is
+set by the LOUDEST thing present — the marker. The loud marker holds AGC gain DOWN, so the ~25 dB
+quieter asset speech captures at ~-50 dBFS — below SyncNet's measurable floor. Result: SyncNet reads
+conf ~1 on EVERY chunk (issue 1174 round 2: 16/16 UNMEASURABLE), and no offset sweep fixes it because
+the speech simply is not measurably present. The AGC target ceiling is the universal `max -5.3 dB`
+seen across all recordings; the marker keeps the working level pinned to it, and un-boosted speech
+sits far under it. (Round-1's ~26.8-min "audio wake-up" was a slow AGC ramp, not a fix — never rely on
+it.)
+
+The fix: `mpv --af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB` applies a FIXED +N dB gain (default 9) —
+NOT a dynamic peak-normalizer; +9 dB is CALIBRATED to bring THIS asset's -9.8 dBFS peak to ~-1 dBFS,
+into the AGC operating point, so it is measurable IMMEDIATELY (live-verified: envelope corr 0.976,
+SyncNet conf 6.4, offset +40 ms at lead=0). Swap the asset and the gain must be re-derived.
+`LIPSYNC_PLAYBACK_GAIN_DB` defaults to 9 and is a CALIBRATION seam. It is expanded on the REMOTE (cam2) side — the heredoc emits the literal
+`--af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB`, so the default (9) is baked self-documenting into the
+generated mpv command AND a supervisor can re-tune the gain via the paired cross-check campaign
+without a code change. It is ORTHOGONAL to `LIPSYNC_AUDIO_LEAD_MS`: gain fixes the LEVEL (measurability),
+the lead fixes the A/V OFFSET. Do NOT try to fix the level by touching the production mic-chain AGC —
+that is a live prod path, not this test-mode script's to tune (rig-only-qpsk-marker / minimal-fix).
+
+## The gain is NECESSARY but NOT SUFFICIENT — `cmd_start` VERIFIES speech actually arrived (#1192)
+
+`LIPSYNC_PLAYBACK_GAIN_DB` (#1191) gets the speech LEVEL into the AGC operating point, but the
+HDMI→mic audio SINK LOCK is a SEPARATE, flaky factor: it latches or not **per audio-stream-start**,
+and can unlatch spontaneously mid-run (issue 1174 attempt matrix — round 3 with the merged +9 dB
+script still measured envelope corr 0.23–0.35, speech never arrived). The host side is ALWAYS healthy
+in the dead state (PCM RUNNING, hw_params OK, ELD valid, mode matched), so the lock is UNREADABLE from
+cam2 — the only reliable signal is a CONTENT check on what actually reached the mic. So after the mpv
+playback starts, `cmd_start` runs a speech-arrival VERIFY (issue 1192) before it claims ACTIVE:
+
+- **Probe:** a short throwaway recording on **stream OBS** (`obs_phase2.py record --host "$STREAM"
+  --action start/stop`, ~`LIPSYNC_ARRIVAL_PROBE_S`=15 s), pulled to dev1 via `win_ssh_download`
+  (win-ssh-exec.sh), reusing the audio-presence-preflight record→stop→moov-finalize-retry→delete
+  skeleton (`audio_preflight_delete_ps` cleanup). This needs the stream box (STREAM/STREAM_USER/
+  STREAM_PW, env-overridable, targets.md) — a cam2-only test with no stream OBS sets
+  `LIPSYNC_ARRIVAL_ENABLE=0` to skip it (default 1: the needed check is ON, never a forgettable toggle).
+- **Criterion — envelope correlation, NOT volumedetect.** `scripts/lipsync_envelope_corr.py` decodes
+  the pulled probe's mbc track (`--audio-map 0:a:0`) and the LOCAL asset to 8 kHz mono, takes a 20 ms
+  rectified envelope, and reports the **mean-subtracted normalized (Pearson) correlation maximized
+  over every asset-loop offset** (mpv `--loop-file=inf` → the probe lands at an arbitrary loop phase;
+  the correlation is scale+offset invariant, so the mic-chain AGC's amplification doesn't fool it).
+  A corr `>= LIPSYNC_ARRIVAL_CORR_MIN` (default 0.6) = speech arrived. **Volumedetect is explicitly
+  NOT the criterion:** the AGC pumps ambient up to the universal ~−5.3 dBFS ceiling even with dead
+  speech, so a level gate false-passes (this is exactly why the #901 arrival check false-passed).
+  Live values: ~0.22–0.35 dead vs 0.976 arrived — 0.6 separates them cleanly.
+- **Retry:** a low corr recycles the mpv playback (a fresh audio-stream-start = a new shot at the
+  flaky lock — `lipsync_stop_playback_cmds` then `lipsync_playback_cmds`), up to
+  `LIPSYNC_ARRIVAL_RETRIES` (default 4). Each attempt is logged with its corr.
+- **Exhaustion:** after N failed attempts, FAIL LOUD with the per-attempt matrix — never a silent
+  ACTIVE. The whole block stays INSIDE the ERR-trap window (`trap - ERR` is cleared only after a
+  successful verify), so BOTH a genuine infra failure AND the exhaustion path fire the existing
+  `trap 'bash rig-mode.sh test' ERR` and restore TEST mode.
+- **Pure/testable split (Tier-0):** the correlation math is pure stdlib functions
+  (`rectified_envelope`/`pearson`/`best_loop_correlation`), offline-tested with synthetic
+  sine-envelope fixtures in `tests/python/test_lipsync_envelope_corr.py` (no ffmpeg/numpy/network);
+  the bash side is static-anchor + `lipsync_arrival_corr_meets` (run_sourced) tested in
+  `tests/harness_lipsync_test_mode.rs`. Live probe/pull/correlate on the real rig is a supervisor step.
+- **The orchestration LOOP has a HERMETIC functional test** (`tests/harness_lipsync_arrival_verify_1192.rs`)
+  — static anchors alone are blind to a `set -e` abort (`ci-testing-gotchas.md` #1133). The reusable
+  pattern for testing a ssh/WS-touching `cmd_start`-style script offline: copy the REAL script + its
+  sourced libs into a tempdir, drop FAKE siblings next to it (`obs_phase2.py`, `lipsync_envelope_corr.py`,
+  `rig-mode.sh`) and a **fake `sshpass` on `PATH`** (one file neutralizes cam2 `cam_ssh` + `win_ssh_download`
+  + `win_ssh_run` at once — for `scp` it `touch`es the last arg, for `ssh` it just exits 0), then run
+  `bash <copy> start <dummy-asset>` with `LIPSYNC_ARRIVAL_PROBE_S=0`/`_READ_RETRY_SLEEP=0` and a scripted
+  `CORR_SEQ`, asserting the four outcomes (pass / recycle-then-pass / exhaustion-fail-loud+ERR-trap-restore
+  / infra-fail+restore) under the script's own `set -euo pipefail`. Prototype the fakes in a local bash
+  replica first (Tier-0 forbids running the Rust test locally; `cargo fmt --all --check` still parses it).
+
+## The `--audio-delay` SIGN is the easy thing to get wrong (silent lipsync break) — default is 0 (#1191)
+
+`LIPSYNC_AUDIO_LEAD_MS` compensates any residual ALSA output-pipeline depth on `hw:CARD=PCH,DEV=3` by
+DELAYING THE VIDEO relative to audio (the old ffmpeg code did this with a positive `-itsoffset` on
+the video demux). mpv's `--audio-delay` semantics: **positive delays audio, NEGATIVE delays video.**
+So the mapping is `--audio-delay = -(lead_ms/1000)` (e.g. `408` → `--audio-delay=-0.408`; `0` is
+special-cased to `0.000` to avoid `-0.000`). Flipping the sign does not cancel the offset — it
+DOUBLES it. The knob is validated non-negative upstream (`case` guard), so the value is always ≤ 0.
+
+**The DEFAULT is 0 (#1191), NOT 408.** The 408 ms value was derived (issue 930) and defaulted on the
+ffmpeg/`-itsoffset`/ALSA path. Under mpv (#1187) the measured offset at lead=0 is +40 ms (≈ ±1 frame
+of zero), so 408 was a stale ffmpeg-era constant that injected a false ~0.4 s shift — the default is
+now 0. 408 stays available via the env seam for re-derivation on mpv's ALSA buffering; the knob exists
+precisely so the supervisor re-tunes via the paired cross-check campaign
+(`scripts/lipsync-cross-check.sh`) WITHOUT a code change — never hardcode a new value blind.
+
+## mpv command shape (one process, one pidfile — unchanged lifecycle)
+
+`nohup mpv --no-config --no-terminal --vo=drm [--drm-device=<dev>] --loop-file=inf
+--audio-device=alsa/<AUDIO> --audio-channels=stereo --af=volume=${LIPSYNC_PLAYBACK_GAIN_DB:-9}dB
+--audio-delay=<sec> '<media>'` — one process feeds BOTH sinks (video DRM, audio ALSA), tracked by ONE
+pidfile with a fail-loud `kill -0` liveness check. `--audio-channels=stereo` mirrors the old `-ac 2`
+(the device refuses mono). `--af=volume=<gain>dB` applies the fixed calibrated speech gain (#1191, see above);
+`${LIPSYNC_PLAYBACK_GAIN_DB:-9}` is deliberately LEFT LITERAL in the generated command (remote-side
+shell expansion) so the default 9 is self-documenting and overridable, unlike the LOCALLY-resolved
+`--audio-delay=<sec>`.
+`LIPSYNC_DRM_DEVICE` empty = mpv auto-selects the connected KMS card (#854: `/dev/dri/cardN` is not a
+stable ABI, so auto is the safe default); a non-empty value pins `--drm-device`.
+
+## Stop path blanks fb0 belt-and-braces — REUSE the canonical #660 builder
+
+`lipsync_stop_playback_cmds` blanks fb0 after the kill by embedding
+`$(rig_test_ledger_clean_paint_fallback_cmds "$fb")` (sourced from `scripts/lib/rig-test-ledger.sh`,
+a pure lib that deliberately never sets `set -euo pipefail`). ONE source of truth for the blank —
+never hand-roll a second `dd if=/dev/zero of=/dev/fb0 ...`. Why still needed after moving off fbdev:
+after ANY DRM master release the kernel fbdev emulation re-takes scanout from fb0 memory, so the
+legacy surface must still be neutralized (relates to the open #1173 deadman half).
+
+## Testing preflight / mpv-presence deterministically — the `LIPSYNC_MPV_BIN` seam
+
+The preflight does `command -v "$LIPSYNC_MPV_BIN"` (default `mpv`) + an
+`mpv --vo=null --ao=null --frames=120` decode probe (touches neither fb0 nor the CRTC). To test the
+three branches without PATH-shadowing (a real mpv on dev1/CI would perturb it): set `LIPSYNC_MPV_BIN`
+to an absolute-path fake `exit 0` (present+decodes → PASS), `exit 3` (decode-fail → FAIL loud), or a
+bogus name that does not exist (missing → FAIL loud). This is the same env-seam-not-PATH pattern the
+repo uses elsewhere for a `command -v X` check.
+
+## Provisioning + Tier-0
+
+mpv is installed in `setup-device.sh` STEP 16 (same fail-loud apt line as ffmpeg; mpv Depends on the
+ffmpeg libav* codecs, so `--no-install-recommends mpv` still decodes H.264) and acceptance-checked by
+`verify-device.sh`'s `(x2)` check (inserted BEFORE `(q)`, mirroring the `(x)` ffmpeg check). Tier-0:
+no local cargo — verify the pure `*_cmds`/`lipsync_preflight_cmd` builders by sourcing the script and
+calling them directly (their generated remote-bash text is asserted byte-for-byte by the harness),
+plus `bash -n` / `shellcheck` / `rustfmt --edition 2021 --check`. Live mpv/DRM playback on cam2 is a
+supervisor rig step (the cam2 painter is untouched by code+tests work).
+
+## STOP THE UNIT before the pidfile kill — a pidfile-only kill loses to `Restart=always` (#1190)
+
+`start` frees cam2's display for mpv by stopping the TEST-mode painter. The steady-state painter runs
+under `cam2-painter.service` with `Restart=always` (cam2-painter-lifecycle), so a pidfile-ONLY kill
+lets systemd respawn it ~100 ms later; the respawn re-takes the DRM master and `mpv --vo=drm` (started
+~10 s later, after scp+preflight) cannot acquire the CRTC and dies instantly. So `lipsync_stop_painter_cmds`
+must `systemctl stop cam2-painter` BEFORE the pidfile kill, then FAIL LOUD (`exit 1`, refuse playback)
+if `systemctl is-active cam2-painter` is still `active`. Key fact: a COMMANDED `systemctl stop` does
+NOT trip `Restart=always` (Restart fires only on an UNEXPECTED exit), so the unit stays down for the
+whole playback window. The pidfile TERM→KILL escalation STAYS after the unit stop, as a belt for the
+transient, unit-less verification-only nohup painter (issue 930/1008 lifecycle — it has no unit). This
+was fbdev-era-latent: while playback wrote raw `/dev/fb0` (issue 1032, pre-1187), a respawned painter
+did not need the DRM master, so the collision was harmless; the #1187 move to `mpv --vo=drm` made it
+fatal. Do NOT `systemctl disable` here (that is EVENT-mode semantics) — only a `stop` is needed. The
+restore is ALREADY handled: `cmd_stop` → `rig-mode.sh test` → `cam2_painter_steady_state_handoff_cmds`
+runs `enable --now cam2-painter.service` (re-STARTS the unit) — never duplicate that.
+
+Diagnosing an instant death: mpv runs `--no-terminal`, which swallows its own log/error output, so the
+plain `> /run/rig-lipsync-playback.log 2>&1` redirect came back EMPTY on the live DRM-master collision.
+Add mpv's NATIVE `--log-file=/run/rig-lipsync-playback.mpv.log` (writes regardless of `--no-terminal`,
+which stays) and `cat` it in the die-immediately FAIL branch so the fatal error is visible from the box.
+
+## KILL THE PLAYBACK before the rig-mode TEST restore — the trap-ordering contract (#1194)
+
+The #1190 rule above is the START-side ordering (stop the painter unit before the mpv launch). #1194
+is the mirror-image ordering on the STOP / FAIL side: the mpv playback must be killed BEFORE
+`rig-mode.sh test` restores TEST mode, or the restored painter races the still-running mpv `--vo=drm`
+for the DRM master and the ALSA device — leaving cam2 in a HYBRID state (the painter dies on
+`snd_pcm_open ... Device or resource busy (16)` + a `/dev/dri/card` → fbdev fallback, while mpv keeps
+running: neither lipsync nor TEST). This bit a live incident (2026-08-24): the issue-1192 arrival
+VERIFY honestly exhausted its retries, the `cmd_start` ERR trap fired `bash rig-mode.sh test` — and the
+trap had NO mpv-kill, so the restore landed on a live mpv.
+
+**The contract, enforced by `tests/harness_lipsync_trap_cleanup_1194.rs`:**
+
+- **ONE idempotent `lipsync_playback_cleanup` helper is the single source of truth for the teardown** —
+  it `cam_ssh`s `lipsync_stop_playback_cmds` (kill mpv by pidfile + the #660 fb0 blank) then `cam_ssh`s
+  the `/run` asset removal, BOTH `|| true`. Best-effort by design: it is safe to call when NOTHING is
+  running (a fresh box, an abort before the playback even started — the pidfile read is
+  `2>/dev/null || true`, the kill is `kill -0`-guarded), and it can NEVER itself fail/abort. That
+  never-fail property is load-bearing for the ERR-trap caller: a non-zero command inside the trap
+  would re-enter `set -e`.
+- **Both `cmd_stop` AND the `cmd_start` ERR trap call the SAME helper — no re-inlined copy.** `cmd_stop`
+  already had the correct order (stop → rm → restore) but inline; #1194 extracts it so the trap path
+  gets the identical teardown. The trap is `trap 'lipsync_playback_cleanup; bash "$HERE/rig-mode.sh"
+  test' ERR` — cleanup FIRST, restore SECOND. This covers BOTH the retries-exhausted fail path and any
+  genuine infra failure inside the ERR-trap window (they both reach the trap).
+- **Tier-0 (no local cargo):** the static anchors (helper exists, both sites call it, trap order) plus
+  a HERMETIC functional replica prove it — a fake `sshpass` on PATH emits an ordering sentinel when the
+  ssh it stands in for carries the mpv-kill payload (the #660 `dd if=/dev/zero` fb0-blank signature no
+  other `cmd_start` cam_ssh carries), a fake `rig-mode.sh` emits a restore sentinel, and the test
+  asserts kill-before-restore on the exhaustion path, the infra-fail path, and `stop`. The replica runs
+  the REAL script under its own `set -euo pipefail`+errtrace (a static-anchor-only test is blind to a
+  `set -e`/ordering regression, per `ci-testing-gotchas.md` #1133). Prototype it as a bash replica
+  first; `cargo fmt --all --check` still parses the Rust test. Live cam2 playback stays a supervisor
+  rig step.

@@ -19,10 +19,14 @@ grabber SWAP, per `window-gate-tolerance-walkdown.md`).
   ~L5378). This is the BLOCKING gate #1120 fixed.
 - **DELIVERY-side** (`all_cambox_delivery_latency`) — `src/delivery_spread_gate.rs` re-exports the
   same constant as `DELIVERY_SPREAD_BOUND_MS = crate::switch_latency::SPREAD_THRESHOLD_MS` (by
-  design: "no second, drifting constant"). Its fold is REPORT-ONLY (`gates_overall_pass()==false`,
-  issue 1033) and delivery spreads run 58–79ms (far over any 16–24 bound), so raising the shared
-  constant changes NO delivery blocking behaviour and flips no delivery green run — but its DOC
-  comments still name the bound and must move in lock-step.
+  design: "no second, drifting constant"). Its fold was REPORT-ONLY (issue 1033) but **#1142 flipped
+  it BLOCKING** (`gates_overall_pass()==true`, owner mandate 2026-08-19 — the phase lottery, a
+  good-phase 3.97ms vs a bad-phase 85ms, was hiding a real delivery-spread failure behind a green
+  gate). So BOTH the source AND the delivery spread now gate at the SAME `SPREAD_THRESHOLD_MS` bound.
+  Raising the shared constant now moves BOTH blocking behaviours (a delivery spread in the old..new
+  band that was failing flips to pass) — its DOC comments name the bound and must move in lock-step.
+  The delivery block now also surfaces `gates_overall_pass` so `e2e_discord_report.py`'s classifier
+  auto-follows the seam (delivery moved from `_report_only_tripped` to `_blocking_failures`, #1142).
 
 Both spreads are driven by the SAME CAM1 grabber, so keeping ONE constant is correct — do NOT
 decouple into two constants (that reintroduces the drift the design forbids).

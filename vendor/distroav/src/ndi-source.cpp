@@ -173,6 +173,14 @@ static inline uint64_t ndi_recv_create_retry_backoff_ns(unsigned consecutive_fai
 static const uint32_t NDI_FRESH_FIND_WAIT_MS = 500;
 static const unsigned NDI_FRESH_FIND_MAX_WAITS = 4;
 
+/* camera-box #1180: bounded fresh-finder budget for the post-connect BY-URL identity verify. Shorter
+ * than the reset-block resolution (NDI_FRESH_FIND_MAX_WAITS) because the correct sender for our name
+ * is expected to be advertising already -- SOMETHING at our URL just delivered frames -- so this only
+ * needs to catch the settled sender set, not wait out a genuine mid-restart. Bounds the brief
+ * ONE-SHOT stall right after a reconnect; the verify runs once per bind (see below), never in steady
+ * state, so it never stalls the live frame loop on a healthy connection. */
+static const unsigned NDI_IDENTITY_VERIFY_MAX_WAITS = 2;
+
 /* camera-box #1096: pick the CURRENT network address for a source name from a FRESH finder's
  * discovered list, so the receiver can connect BY-ADDRESS and BYPASS the poisoned long-lived
  * in-process NDI finder. The wedge: a restarted cambox sender rotates its NDI port; recv_create_v3
@@ -201,6 +209,28 @@ static inline const char *ndi_find_url_for_source_name(const char *requested_nam
 		}
 	}
 	return NULL; /* not discovered (yet) -> fall back to name */
+}
+
+/* camera-box #1180: after a BY-URL-connected receiver starts delivering frames, decide whether the
+ * configured source name still maps to the URL the receiver is bound to. A BY-URL connect (the
+ * #1096 fresh-finder path) never verifies the sender's NAME -- after a sender OBS restart the NDI
+ * output ports can RESHUFFLE, so a DIFFERENT sender can inherit the URL we cached and frames flow
+ * from the WRONG camera under our configured label with nothing re-checking (the 2026-08-23 P0:
+ * every "2ME PGM" receiver showed the Grading/cam3 feed). `connected_url` is the URL the receiver is
+ * bound to (owned_source_url from the #1096 connect); `resolved_url_for_name` is what a FRESH finder
+ * currently resolves for the SAME configured name (via ndi_find_url_for_source_name). Returns true
+ * ONLY on a CONFIRMED mismatch -- both known AND different -> force a fresh BY-NAME reset. Returns
+ * false when we were not BY-URL (nothing to verify -- never fires for a BY-NAME bind) or the name is
+ * not currently discoverable (INCONCLUSIVE -- never tear down a working feed on a can't-confirm).
+ * PURE (only the two const char*) so it lift-compiles + truth-table-tests offline -- CI is otherwise
+ * the first compiler for this file (tests/distroav_by_url_identity_verify_1180.rs). */
+static inline bool ndi_by_url_identity_mismatch(const char *connected_url, const char *resolved_url_for_name)
+{
+	if (!connected_url || !connected_url[0])
+		return false; /* not a BY-URL bind -> nothing to verify (a BY-NAME bind never enters here) */
+	if (!resolved_url_for_name || !resolved_url_for_name[0])
+		return false; /* name not currently discoverable -> INCONCLUSIVE, keep the feed */
+	return strcmp(connected_url, resolved_url_for_name) != 0; /* both known + differ -> MISMATCH */
 }
 
 /* camera-box #257: per-source MEASUREMENT-BURN setter, runtime-resolved by name — same
@@ -759,6 +789,22 @@ void *ndi_source_thread(void *data)
 	 * receiver cannot self-rebind. Used to force a FRESH-finder reset after a stale window. */
 	uint64_t no_conn_since_ns = 0;
 
+	/* camera-box #1180: post-connect BY-URL identity-verify state machine (all thread-local, mirroring
+	 * the #767/#1096 thread-locals above). connected_by_url is armed ONLY when the current receiver was
+	 * created via the #1096 BY-URL path -- the only bind that needs an identity re-check; a BY-NAME bind
+	 * leaves it false so the verify path never runs and upstream behaviour is byte-identical.
+	 * identity_verify_pending fires the ONE-SHOT verify after the first frames of a BY-URL bind; it is
+	 * re-armed on EVERY reset (every BY-URL reconnect routes through a reset -- #767 stale rebind, the
+	 * #1096 no_conn==0 rebind, or a config change), so the verify is EVENT-DRIVEN per reconnect (the
+	 * reshuffle window) with NO steady-state finder poll stalling the live frame loop (review #1180 🟡).
+	 * frames_seen_since_reset gates it on frames ACTUALLY flowing (the issue's "starts delivering
+	 * frames" trigger); force_by_name_next_reset makes the NEXT reset skip the fresh-finder BY-URL path
+	 * and connect BY-NAME -- the corrective action on a confirmed identity mismatch. */
+	bool connected_by_url_1180 = false;
+	bool identity_verify_pending_1180 = false;
+	bool frames_seen_since_reset_1180 = false;
+	bool force_by_name_next_reset_1180 = false;
+
 	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
 	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
 	 * dominated by obs_source_output_video) per VIDEO frame; logs a 5s summary per
@@ -895,7 +941,14 @@ void *ndi_source_thread(void *data)
 			// config_mutex (dropped above), matching the 'no blocking NDI call under the lock' rule.
 			//
 			bool url_resolved_1096 = false;
-			if (owned_source_name && owned_source_name[0]) {
+			// camera-box #1180: a confirmed BY-URL identity mismatch forces THIS one reset to connect
+			// BY-NAME (skip the #1096 fresh-finder BY-URL resolution), abandoning the wrong-sender URL
+			// and letting NDI's own name resolution re-point at whatever now advertises our name (the
+			// same recovery reopening Studio Monitor did live). Consumed here so only this single reset
+			// is forced; the next reset resumes the normal #1096 BY-URL path.
+			bool force_by_name_1180 = force_by_name_next_reset_1180;
+			force_by_name_next_reset_1180 = false;
+			if (!force_by_name_1180 && owned_source_name && owned_source_name[0]) {
 				NDIlib_find_create_t fresh_find_desc = {0};
 				fresh_find_desc.show_local_sources = true;
 				fresh_find_desc.p_groups = nullptr;
@@ -931,12 +984,18 @@ void *ndi_source_thread(void *data)
 					"'%s' ndi_source_thread: reset_ndi_receiver: #1096 connect BY-URL '%s' (fresh finder; bypassing poisoned name resolver)",
 					obs_source_name, owned_source_url);
 			} else {
-				// Fresh finder resolved no URL -> name-based connect (upstream behavior).
+				// Name-based connect. Two reasons: the fresh finder resolved no URL (the #1096
+				// upstream fallback), OR #1180 forced BY-NAME after a confirmed identity mismatch.
 				recv_desc.source_to_connect_to.p_ndi_name = owned_source_name;
 				recv_desc.source_to_connect_to.p_url_address = nullptr;
-				obs_log(LOG_INFO,
-					"'%s' ndi_source_thread: reset_ndi_receiver: #1096 connect BY-NAME '%s' (fresh finder resolved no URL; no worse than upstream)",
-					obs_source_name, owned_source_name);
+				if (force_by_name_1180)
+					obs_log(LOG_WARNING,
+						"'%s' ndi_source_thread: reset_ndi_receiver: #1180 connect BY-NAME '%s' (forced after a BY-URL identity mismatch; abandoning the wrong-sender URL)",
+						obs_source_name, owned_source_name);
+				else
+					obs_log(LOG_INFO,
+						"'%s' ndi_source_thread: reset_ndi_receiver: #1096 connect BY-NAME '%s' (fresh finder resolved no URL; no worse than upstream)",
+						obs_source_name, owned_source_name);
 			}
 
 			obs_log(LOG_DEBUG,
@@ -980,6 +1039,11 @@ void *ndi_source_thread(void *data)
 					std::this_thread::sleep_for(std::chrono::milliseconds(100));
 					retry_waited_ns += 100ULL * 1000ULL * 1000ULL;
 				}
+				// camera-box #1180: a forced-BY-NAME reset whose recv_create failed must STAY BY-NAME on
+				// the retry (else the #1080 re-entry, with force_by_name_1180 already consumed, would
+				// reconnect BY-URL to the wrong-sender URL again).
+				if (force_by_name_1180)
+					force_by_name_next_reset_1180 = true;
 				pthread_mutex_lock(&s->config_mutex);
 				s->config.reset_ndi_receiver = true;
 				pthread_mutex_unlock(&s->config_mutex);
@@ -987,6 +1051,15 @@ void *ndi_source_thread(void *data)
 			}
 			// camera-box #1080: a successful create clears the retry backoff.
 			recv_create_fail_count = 0;
+
+			// camera-box #1180: arm the post-connect identity verify IFF this receiver connected
+			// BY-URL (url_resolved_1096). A BY-NAME bind leaves connected_by_url false, so the verify
+			// path below never runs for it -- upstream/default behaviour stays byte-identical. Reset
+			// the per-bind gates so the one-shot fires on THIS bind's first frames (re-armed on every
+			// reset, so it re-fires on every BY-URL reconnect -- the reshuffle window).
+			connected_by_url_1180 = url_resolved_1096;
+			identity_verify_pending_1180 = url_resolved_1096;
+			frames_seen_since_reset_1180 = false;
 
 			if (snap_hw_accel_enabled) {
 				//
@@ -1069,6 +1142,9 @@ void *ndi_source_thread(void *data)
 						std::this_thread::sleep_for(std::chrono::milliseconds(100));
 						fs_retry_waited_ns += 100ULL * 1000ULL * 1000ULL;
 					}
+					// camera-box #1180: preserve a forced-BY-NAME intent across a framesync-create retry too.
+					if (force_by_name_1180)
+						force_by_name_next_reset_1180 = true;
 					pthread_mutex_lock(&s->config_mutex);
 					s->config.reset_ndi_receiver = true;
 					pthread_mutex_unlock(&s->config_mutex);
@@ -1182,6 +1258,72 @@ void *ndi_source_thread(void *data)
 		}
 
 		//
+		// camera-box #1180: post-connect BY-URL identity verify. BEGIN
+		//
+		// A BY-URL bind (#1096) never verifies the connected sender's NAME, so after a sender OBS
+		// restart reshuffles the NDI output ports a DIFFERENT sender can inherit our cached URL and
+		// deliver frames from the WRONG camera under the configured label -- and once frames flow the
+		// #767 stale watchdog (silence-based) never fires, so nothing re-checks. Here, once a BY-URL
+		// bind has actually started delivering frames, re-resolve our configured name through a FRESH
+		// finder and confirm it still maps to the URL we are bound to; on a confirmed mismatch force a
+		// fresh BY-NAME reset. One-shot at first-frames (the required minimum) + a low-rate periodic
+		// re-verify (belt-and-braces). Scoped to genlocked sources (mirrors #767/#1096); a
+		// BY-NAME-connected receiver never enters here (connected_by_url_1180 stays false), so its
+		// behaviour is byte-identical. The fresh finder blocks a bounded window and NEVER holds
+		// config_mutex, matching the 'no blocking NDI call under the lock' rule.
+		if (connected_by_url_1180 && frames_seen_since_reset_1180 &&
+		    genlock_source_is_active(s->obs_source)) {
+			if (identity_verify_pending_1180) {
+				// ONE-SHOT: clear the flag first so this runs exactly once per bind and never
+				// re-fires until the NEXT reset re-arms it (every BY-URL reconnect routes through
+				// a reset). No steady-state finder poll, so the blocking finder below never stalls
+				// a healthy frame loop (review #1180).
+				identity_verify_pending_1180 = false;
+				char *verify_url_1180 = nullptr;
+				NDIlib_find_create_t verify_find_desc = {0};
+				verify_find_desc.show_local_sources = true;
+				verify_find_desc.p_groups = nullptr;
+				NDIlib_find_instance_t verify_finder = ndiLib->find_create_v2(&verify_find_desc);
+				if (verify_finder) {
+					for (unsigned w = 0; w < NDI_IDENTITY_VERIFY_MAX_WAITS && s->running; ++w) {
+						ndiLib->find_wait_for_sources(verify_finder, NDI_FRESH_FIND_WAIT_MS);
+						uint32_t n_v = 0;
+						const NDIlib_source_t *v_sources =
+							ndiLib->find_get_current_sources(verify_finder, &n_v);
+						const char *v_url =
+							ndi_find_url_for_source_name(owned_source_name, v_sources, n_v);
+						if (v_url && v_url[0]) {
+							bfree(verify_url_1180);
+							verify_url_1180 = bstrdup(v_url);
+							break;
+						}
+					}
+					ndiLib->find_destroy(verify_finder);
+				}
+				bool mismatch_1180 = ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180);
+				if (mismatch_1180) {
+					obs_log(LOG_WARNING,
+						"genlock: #1180 BY-URL identity MISMATCH '%s' -- configured name now maps to '%s' but the receiver is bound to '%s'; forcing a fresh BY-NAME reset (sender NDI port reshuffle after an OBS restart?)",
+						obs_source_name, verify_url_1180 ? verify_url_1180 : "",
+						owned_source_url ? owned_source_url : "");
+					bfree(verify_url_1180);
+					// Force the next reset to connect BY-NAME (abandon the wrong-sender URL), give
+					// the fresh connection a full #767 stale window, and re-arm the reset.
+					force_by_name_next_reset_1180 = true;
+					was_disconnected = true;
+					pthread_mutex_lock(&s->config_mutex);
+					s->config.reset_ndi_receiver = true;
+					pthread_mutex_unlock(&s->config_mutex);
+					continue;
+				}
+				bfree(verify_url_1180);
+			}
+		}
+		//
+		// camera-box #1180: post-connect BY-URL identity verify. END
+		//
+
+		//
 		// Change PTZ: Realtime updated from Source settings UI
 		//
 		if (s->config.ptz.enabled) {
@@ -1283,6 +1425,7 @@ void *ndi_source_thread(void *data)
 				timestamp_video = video_frame.timestamp;
 				// obs_log(LOG_DEBUG, "%s: New Video Frame (Framesync ON): ts=%d tc=%d", obs_source_name, video_frame.timestamp, video_frame.timecode);
 				ndi_source_thread_process_video2(s, &video_frame, s->obs_source, &obs_video_frame);
+				frames_seen_since_reset_1180 = true; // camera-box #1180: a frame delivered -> arm the identity verify
 			}
 			ndiLib->framesync_free_video(ndi_frame_sync, &video_frame);
 
@@ -1315,6 +1458,7 @@ void *ndi_source_thread(void *data)
 				//
 				// obs_log(LOG_DEBUG, "%s: New Video Frame (Framesync OFF): ts=%d tc=%d", obs_source_name, video_frame.timestamp, video_frame.timecode);
 				ndi_source_thread_process_video2(s, &video_frame, s->obs_source, &obs_video_frame);
+				frames_seen_since_reset_1180 = true; // camera-box #1180: a frame delivered -> arm the identity verify
 
 				ndiLib->recv_free_video_v2(ndi_receiver, &video_frame);
 				{

@@ -3757,3 +3757,72 @@ fn client_chase_stability_us_fails_closed_on_malformed_stability_or_margin_1123(
         );
     }
 }
+
+// --- #1129: client STABILITY step envelope for a WINDOWS client read from /status --------------
+//
+// A Windows client has no journald, so the #1123 journal-derived step envelope never applies to it
+// (grade_http_node reads a journal only for kind="linux"). dantesync exposes the client's OWN
+// currently-active adaptive step threshold in /status as "ntp_step_threshold_us" (the SAME quantity
+// the journal logs as "threshold:NNNus"). client_max_step_threshold_us_from_status_lines is the
+// win-http sibling of client_max_step_threshold_us_from_journal: it takes the multi-line HTTP
+// payloads gathered over the sampling window (one JSON per line) and returns the LARGEST numeric
+// ntp_step_threshold_us, so the spread widening references the window-wide envelope exactly as the
+// journal path does. null / absent field -> "" (-> the caller's 700us fallback, always admitted).
+
+/// Three sampled status payloads whose ntp_step_threshold_us are 2640, 6860, 775 -- the window MAX
+/// is 6860, mirroring the #1123 journal straddle shape but read from /status instead.
+const DS_STATUS_LINES_1129: &str = "\
+{\"updated_ts\":100,\"ntp_offset_us\":1869,\"ntp_deadband_us\":null,\"ntp_step_threshold_us\":2640}\n\
+{\"updated_ts\":105,\"ntp_offset_us\":1848,\"ntp_deadband_us\":null,\"ntp_step_threshold_us\":6860}\n\
+{\"updated_ts\":110,\"ntp_offset_us\":2938,\"ntp_deadband_us\":null,\"ntp_step_threshold_us\":775}\n";
+
+#[test]
+fn client_max_step_threshold_us_from_status_lines_picks_the_window_max_1129() {
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_status_lines \"$L\"",
+        &[("L", DS_STATUS_LINES_1129)],
+    );
+    assert_eq!(
+        out.trim(),
+        "6860",
+        "must pick the MAX ntp_step_threshold_us over the sampled window: {out:?}"
+    );
+}
+
+#[test]
+fn client_max_step_threshold_us_from_status_lines_ignores_null_and_absent_1129() {
+    // A client payload legitimately reports ntp_step_threshold_us:null on a box not yet serving it,
+    // and a pre-#1129 payload omits the field entirely -> both yield NO value (never a guess).
+    let null_lines = "{\"updated_ts\":1,\"ntp_step_threshold_us\":null}\n\
+                      {\"updated_ts\":2,\"ntp_step_threshold_us\":null}\n";
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_status_lines \"$L\"",
+        &[("L", null_lines)],
+    );
+    assert_eq!(out.trim(), "", "all-null -> empty, never a guess: {out:?}");
+
+    let absent_lines =
+        "{\"updated_ts\":1,\"ntp_offset_us\":0}\n{\"updated_ts\":2,\"ntp_offset_us\":5}\n";
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_status_lines \"$L\"",
+        &[("L", absent_lines)],
+    );
+    assert_eq!(out.trim(), "", "absent field -> empty: {out:?}");
+
+    let out = run_sourced("client_max_step_threshold_us_from_status_lines \"\"", &[]);
+    assert_eq!(out.trim(), "", "empty input -> empty");
+}
+
+#[test]
+fn client_max_step_threshold_us_from_status_lines_takes_the_max_even_when_one_line_is_null_1129() {
+    // Mixed: one payload still has null (mid-window), the others carry values -> the MAX of the
+    // numeric ones, unaffected by the null line.
+    let mixed = "{\"updated_ts\":1,\"ntp_step_threshold_us\":null}\n\
+                 {\"updated_ts\":2,\"ntp_step_threshold_us\":3400}\n\
+                 {\"updated_ts\":3,\"ntp_step_threshold_us\":3200}\n";
+    let out = run_sourced(
+        "client_max_step_threshold_us_from_status_lines \"$L\"",
+        &[("L", mixed)],
+    );
+    assert_eq!(out.trim(), "3400", "max over the numeric lines: {out:?}");
+}

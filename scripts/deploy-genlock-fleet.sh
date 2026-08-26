@@ -126,6 +126,23 @@ fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "
 fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; *) return 2 ;; esac; }
 fleet_box_has_ahk() { case "${1:-}" in strih) echo "1" ;; *) echo "0" ;; esac; }
 
+# fleet_box_keepalive_tasks BOX -> the OBS keep-alive SCHEDULED-TASK names the deploy must disable so
+# NONE of them respawns obs64 while the bytes are being copied (#1140). Per-box + CURATED, never all
+# of a box's ~nine scheduled tasks: the stream box runs the #812 avsync-keepalive (~10 min) AND the
+# #411 obs-self-heal (~2 min) -- avsync-keepalive is the named minimum, but the actual obs64 respawner
+# is obs-self-heal (avsync-keepalive only relaunches the two avsync monitor scripts), so both must be
+# named. strih's keep-alive is the AHK watcher (handled by the has_ahk stop/restart path), so it
+# lists none. The emitted program disables+restores ONLY a task that is PRESENT and ENABLED, so a
+# name absent (or deliberately disabled) on the box is a harmless skip -- adding another box's
+# keep-alive here later is a one-line change, not a hardcoded pile inline at the call site.
+# Task names MUST be whitespace-free: the emitter word-splits this space-separated list.
+fleet_box_keepalive_tasks() {
+  case "${1:-}" in
+    stream) echo 'avsync-keepalive camera-box-obs-self-heal-stream' ;;
+    *)      echo '' ;;
+  esac
+}
+
 # build_windows_deploy_program BOX MODE STAGE OBS_DIR HAS_AHK BACKUP_ROOT KEEP GSHA DSHA
 #   Emit the PowerShell program the agent pastes into the box's win-* MCP Shell. It stops the AHK
 #   watchdog (strih only) + obs64, clears crash sentinels, backs up the components it overwrites,
@@ -173,6 +190,87 @@ PSAHKR
   else
     ahk_stop='# (1) AutoHotkey64 watchdog: no-op (this box runs no AHK auto-respawn watcher).'
     ahk_restart='# (8) AutoHotkey64 restart: no-op (no AHK watcher on this box).'
+  fi
+
+  # #1140: the STREAM box (and any box the per-box fleet_box_keepalive_tasks lists) runs Task-Scheduler
+  # keep-alive job(s) that respawn obs64 within their cadence -- if one fires during the byte copy it
+  # re-locks the OBS bin directory (robocopy ERROR 32 sharing violation -> exit 4, the 2026-08-19
+  # incident). Mirror the strih AHK stop->verified-restart contract for scheduled tasks: DISABLE the
+  # box's keep-alive tasks before stopping obs64 (step 1b), RE-ENABLE + verify exactly the ones we
+  # disabled at the end (step 8b). Runtime state (which tasks we actually disabled) lives in the
+  # PowerShell $disabledKeepAlive array, exactly as AHK's own restart tracks $ahkRelaunchVerified.
+  local keepalive_disable keepalive_restore
+  local ka_tasks; ka_tasks="$(fleet_box_keepalive_tasks "$box")"
+  if [ -n "$ka_tasks" ]; then
+    local -a ka_arr=(); IFS=' ' read -r -a ka_arr <<< "$ka_tasks"
+    local ps_arr="" t t_ps
+    for t in "${ka_arr[@]}"; do
+      t_ps="${t//\'/\'\'}"   # double any single quote for the PowerShell single-quoted literal
+      if [ -z "$ps_arr" ]; then ps_arr="'${t_ps}'"; else ps_arr="${ps_arr}, '${t_ps}'"; fi
+    done
+    # HEAD heredoc is UNQUOTED (interpolates ${ps_arr} + \$keepAliveTasks); BODY heredoc is QUOTED
+    # (all literal PowerShell, no escaping) -- so only the one array line needs interpolation.
+    keepalive_disable="$(cat <<PSKAD_HEAD
+# (1b) #1140 -- disable the OBS keep-alive scheduled tasks so NONE of them respawns obs64 mid-copy.
+#      This box runs Task-Scheduler keep-alive job(s) that relaunch obs64 within their cadence of the
+#      window vanishing (the #411 obs-self-heal, ~2 min, is the real respawner; the #812
+#      avsync-keepalive is the named minimum) -- exactly what re-locked the OBS bin directory during
+#      the byte copy on 2026-08-19 (ERROR 32 sharing violation, deploy exit 4). Step (8b) RE-ENABLES +
+#      verifies them at the end, mirroring the strih AHK stop->verified-restart contract. Only a task
+#      that is PRESENT AND ENABLED now is disabled+restored, so a deliberately-disabled task
+#      (obs-self-heal ships DISABLED) is left exactly as-is.
+\$keepAliveTasks    = @(${ps_arr})
+PSKAD_HEAD
+)
+$(cat <<'PSKAD_BODY'
+$disabledKeepAlive = @()
+foreach ($t in $keepAliveTasks) {
+  $eapSave = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  $q = schtasks /Query /TN $t /FO LIST /V 2>$null
+  $ErrorActionPreference = $eapSave
+  if ($LASTEXITCODE -ne 0) { Write-Host "#1140: keep-alive task '$t' not present -- skipping."; continue }
+  $stateLine = ($q | Where-Object { $_ -match 'Scheduled Task State:' } | Select-Object -First 1)
+  # FAIL LOUD (never fail-OPEN) if the task is present but its state is unreadable -- silently
+  # treating it as "already disabled" would leave a live keep-alive to respawn obs64 mid-copy, the
+  # exact #1140 incident with no warning. This surfaces the English-locale assumption instead of
+  # hiding it (consistent with the disable/restore fail-closed exits below).
+  if (-not $stateLine) { Write-Error "#1140 FAIL: could not read the Scheduled Task State for '$t' (present but no state line -- unexpected schtasks output/locale); refusing to proceed unprotected. Already-disabled keep-alive task(s) needing manual re-enable: $($disabledKeepAlive -join ', ') (schtasks /Change /TN <name> /ENABLE)."; exit 10 }
+  if ($stateLine -notmatch 'Enabled') { Write-Host "#1140: keep-alive task '$t' already disabled -- leaving as-is."; continue }
+  schtasks /Change /TN $t /DISABLE | Out-Null
+  if ($LASTEXITCODE -ne 0) { Write-Error "#1140 FAIL: could not disable keep-alive task '$t' before the copy -- it could respawn obs64 and corrupt the deploy; aborting. Already-disabled keep-alive task(s) needing manual re-enable: $($disabledKeepAlive -join ', ') (schtasks /Change /TN <name> /ENABLE)."; exit 10 }
+  schtasks /End /TN $t 2>$null | Out-Null   # terminate any in-flight instance too (parity with the AHK Stop-Process), best-effort
+  $disabledKeepAlive += $t
+  Write-Host "#1140: disabled keep-alive task '$t' for the deploy."
+}
+PSKAD_BODY
+)"
+    keepalive_restore=$(cat <<'PSKAR'
+# (8b) #1140 -- re-enable the OBS keep-alive scheduled tasks we disabled in step (1b), VERIFIED
+#      (mirrors the strih AHK verified-restart). Once the STEP-2 launch relaunches obs64 the
+#      keep-alive resumes its normal watch. Fail loud if any we disabled does not come back enabled --
+#      the box would be left with NO keep-alive for that monitor.
+$keepAliveRestoreFailed = @()
+foreach ($t in $disabledKeepAlive) {
+  schtasks /Change /TN $t /ENABLE | Out-Null
+  $eapSave2 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  $q2 = schtasks /Query /TN $t /FO LIST /V 2>$null
+  $ErrorActionPreference = $eapSave2
+  $stateLine2 = ($q2 | Where-Object { $_ -match 'Scheduled Task State:' } | Select-Object -First 1)
+  if ($LASTEXITCODE -eq 0 -and $stateLine2 -match 'Enabled') {
+    Write-Host "#1140: keep-alive task '$t' re-enabled and verified."
+  } else {
+    $keepAliveRestoreFailed += $t
+  }
+}
+if ($keepAliveRestoreFailed.Count -gt 0) {
+  Write-Error "#1140 FAIL: keep-alive task(s) did not re-enable after the deploy: $($keepAliveRestoreFailed -join ', ') -- re-enable by hand (schtasks /Change /TN <name> /ENABLE); the box has NO keep-alive for them until then."
+  exit 10
+}
+PSKAR
+)
+  else
+    keepalive_disable='# (1b) OBS keep-alive scheduled tasks: no-op (this box runs no OBS keep-alive scheduled task; any keep-alive is the AHK watcher handled in step 1).'
+    keepalive_restore='# (8b) OBS keep-alive scheduled tasks: no-op (none disabled on this box).'
   fi
 
   local copy_block
@@ -265,6 +363,8 @@ if (-not (Test-Path \$obsDir)) { Write-Error "OBS install \$obsDir not found"; e
 
 ${ahk_stop}
 
+${keepalive_disable}
+
 # (2) Stop obs64 (+ obs-browser-page) and clear crash sentinels so the swap's files are unlocked and
 #     OBS does not pop the Crash-Detected modal on relaunch. obs.dll's handle can outlive a short
 #     sleep, so wait a bit.
@@ -320,6 +420,8 @@ foreach (\$s in \$stale) {
 }
 
 ${ahk_restart}
+
+${keepalive_restore}
 
 Write-Host "#789 FLEET DEPLOY OK: ${box} swapped to ${gsha_ps} (marker written, obs.dll byte-verified). Relaunch OBS via launch-obs-genlock.sh --box ${box} --force (plan STEP 2)."
 exit 0

@@ -35,6 +35,18 @@ if pgrep -x obs >/dev/null; then
     exit 0
 fi
 
+# #1156: preflight the seed's Python import chain BEFORE launching OBS. This script launches OBS and
+# only AFTERWARD runs `python3 imag_scenes.py --bootstrap`; if a sibling module the seed imports is
+# missing on the box (e.g. imag_record_encoder, when setup-imag.sh's install list drifted), the seed
+# dies on ModuleNotFoundError AFTER OBS is already up -> set -e aborts this script -> Restart=on-failure
+# relaunches -> a HEALTHY OBS flaps on the live projection 1700x (the incident this guards). Failing
+# HERE, before any launch, fails the unit cleanly and never touches a running OBS. Loading imag_scenes
+# from the REAL on-box install dir transitively validates imag_record_encoder + the websocket dep too.
+if ! python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import imag_scenes"; then
+    echo "FAIL: imag_scenes import preflight failed -- a seed dependency is missing on the box (e.g. the imag_record_encoder sibling module, or python3-websocket). Refusing to launch OBS (a broken seed would Restart-loop it). Fix: re-run setup-imag.sh to reinstall /usr/local/bin/imag_*.py."
+    exit 1
+fi
+
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 # #840/#841: the CPU pin is env-overridable so the boot-time openbox autostart -- which DOES know
 # this box's own DERIVED isolated-CPU set (#816) -- can pass it through via IMAG_ISOLATED_CPUS.

@@ -333,6 +333,23 @@ _GENLOCK_LATENCY_ADVISORY_KEY = _GENLOCK_SRC_LATENCY_KEY
 # Render-Delay filter kind (OBS filter id "gpu_delay" — gpu-delay.c).
 _GPU_DELAY_KIND = "gpu_delay"
 
+# #1003: the measurement-window equalization snapshot key. Entry per host (strih):
+# {"pins": {<source>: <prod pin ms>, ...}} — the PRODUCTION per-camera pins captured before the
+# equalized-deep test pins were applied, restored by teardown. Kept SEPARATE from the stream
+# hold's _TEST_LATENCY_STATE_KEY so the two restore paths never collide.
+_MEASUREMENT_EQ_STATE_KEY = "measurement_eq_strih_pins"
+
+
+def _measurement_pins_module():
+    """Lazy import of the PURE #1003 resolver (scripts/e2e_measurement_pins.py). Lazy + its own
+    sys.path insert so the module-level import graph stays unchanged (the #358 latency-delivery
+    test loads obs_phase2 via importlib without scripts/ on sys.path)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import e2e_measurement_pins  # noqa: E402
+    return e2e_measurement_pins
+
 
 def _latency_delivery_ok(set_ms: int, delivered_ms: int, tolerance_ms: int = 100) -> bool:
     """#358 PURE decision: did the genlock FIFO actually HOLD the configured latency?
@@ -419,7 +436,8 @@ def resolve_test_latency_ms(
     return fallback_ms
 
 
-def _snapshot_and_set_test_latency(ws, host, source_name, requested_test_latency_ms, state):
+def _snapshot_and_set_test_latency(ws, host, source_name, requested_test_latency_ms, state,
+                                   production_ref_ms=None, leftover_slack_ms=40):
     """#358/#691: snapshot the per-source genlock latency + gpu_delay filter states on
     `source_name` ('NDI 2ME PGM'), set the (possibly auto-derived, see
     `resolve_test_latency_ms`) test latency, and disable any gpu_delay filters so they
@@ -451,6 +469,42 @@ def _snapshot_and_set_test_latency(ws, host, source_name, requested_test_latency
     # #691: resolve the EFFECTIVE test latency from the box's OWN current value when the
     # caller did not explicitly request one.
     test_latency_ms = resolve_test_latency_ms(requested_test_latency_ms, prod_latency)
+
+    # #1003: baseline-anchored leftover detection (the biggest trap the 2026-08-19 revert hit).
+    # When the caller supplies the known PRODUCTION reference (profile mode), the live value read
+    # above may itself be a leftover test value a PRIOR crashed run left behind — and #691's
+    # keep-current-when->=500 heuristic would happily adopt (e.g.) a leftover 789 as "production".
+    # If the live value equals the test value we're about to set, OR deviates from the production
+    # reference beyond slack, restore the production reference FIRST (loud) and snapshot THAT, so a
+    # stuck-production state can never be perpetuated.
+    if production_ref_ms is not None:
+        mp = _measurement_pins_module()
+        decision = mp.classify_leftover(
+            prod_latency, production_ref_ms, test_latency_ms, leftover_slack_ms)
+        if decision == "leftover-test":
+            sys.stderr.write(
+                f"[obs] {host}: #1003 leftover test state on '{source_name}' "
+                f"(live genlock_latency_ms_src={prod_latency}, production ref={production_ref_ms}) "
+                f"— restoring the production reference before snapshot\n")
+            _rpc(ws, "SetInputSettings", {
+                "inputName": source_name,
+                "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: production_ref_ms},
+                "overlay": True,
+            }, ignore_err=True)
+            prod_latency = production_ref_ms
+        elif decision == "stale":
+            # The live hold is beyond slack of the profile's production reference AND is not the
+            # test value: the profile disagrees with the live rig (a stale profile, or a legitimate
+            # operator re-tune). NEVER auto-write a checked-in constant over it (the 2026-08-19
+            # revert incident — the stream hold is operator-retunable). FAIL LOUD; re-derive the
+            # profile against the current production hold, or fix the rig, before a measurement run.
+            raise SystemExit(
+                f"[obs] {host}: #1003 measurement-eq profile is STALE vs the live rig — "
+                f"'{source_name}' genlock_latency_ms_src={prod_latency} is beyond "
+                f"{leftover_slack_ms}ms of the profile's production reference "
+                f"{production_ref_ms} (and is not the test value {test_latency_ms}). Re-derive the "
+                f"measurement-eq profile against the current production hold, or restore the rig, "
+                f"before running a measurement-eq E2E.")
 
     # Read current gpu_delay filters.
     filter_list = _rpc(ws, "GetSourceFilterList", {"sourceName": source_name},
@@ -583,6 +637,218 @@ def _restore_test_latency(ws, host, state, calibrated_latency_ms=None):
 
     host_state.pop(_TEST_LATENCY_STATE_KEY, None)
     _save_state(state)
+
+
+def _set_pin_verified(ws, source, new_ms, rollback_ms):
+    """#1003: SET genlock_latency_ms_src=new_ms on `source`, verify via read-back (#358 pattern),
+    and on a read-back mismatch ROLL BACK to `rollback_ms` and FAIL LOUD (SystemExit) so the
+    source is never left half-set. Returns the verified value on success."""
+    _rpc(ws, "SetInputSettings", {
+        "inputName": source,
+        "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: new_ms},
+        "overlay": True,
+    })
+    back = _rpc(ws, "GetInputSettings", {"inputName": source}).get("inputSettings", {})
+    actual = back.get(_GENLOCK_SRC_LATENCY_KEY)
+    if actual == new_ms:
+        return actual
+    sys.stderr.write(
+        f"[obs] #1003 read-back mismatch on '{source}': set {new_ms}, got {actual!r} — "
+        f"rolling back to {rollback_ms}\n")
+    _rpc(ws, "SetInputSettings", {
+        "inputName": source,
+        "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: rollback_ms},
+        "overlay": True,
+    }, ignore_err=True)
+    raise SystemExit(
+        f"[obs] #1003 FAILED to apply genlock_latency_ms_src={new_ms} on '{source}' "
+        f"(read-back={actual!r}); rolled back to {rollback_ms} — source never left half-set")
+
+
+def apply_measurement_pins(a):
+    """#1003 apply-measurement-pins: apply the delivery-equalized-deep per-camera STRIH test pins
+    from the measurement-eq profile for the measurement window, snapshotting the PRODUCTION pins
+    so teardown restores them. Mutually exclusive with the [4h/8pre] #900 re-anchor (both write
+    strih pins) — the harness gates it on MEASUREMENT_EQ and forces the re-anchor off.
+
+    Per source: baseline-anchored leftover detection (classify_leftover against the profile's own
+    production reference) — if the live pin is a leftover test value a prior crashed run left, the
+    production reference is restored FIRST and snapshotted (never the leftover), killing the
+    stuck-production incident class the revert hit. Then the equalized-deep pin is set + read-back
+    verified (rollback + fail-loud on mismatch). The snapshot rides the SAME state file + teardown
+    path as the stream hold (a NEW host key), so cleanup()'s `teardown --host STRIH` restores it."""
+    mp = _measurement_pins_module()
+    profile = mp.load_profile(a.profile)
+    problems = mp.coherence_check(profile)
+    if problems:
+        raise SystemExit(
+            "[obs] #1003 measurement-eq profile INCOHERENT — refusing to apply:\n  "
+            + "\n  ".join(problems))
+    plan = mp.resolve_plan(profile)
+    pins = plan["strih_pins"]
+    prod_pins = plan["production"]["strih_pins"]
+    slack = float(profile.get("leftover_slack_ms", 40))
+
+    state = _load_state()
+    host_state = state.setdefault(a.host, {})
+    ws = _conn(a.host, a.password)
+    snapshot = {}
+    try:
+        # First pass: classify every source and FAIL LOUD on any 'stale' BEFORE touching the rig,
+        # so a profile that disagrees with the live pins never triggers a partial apply / a silent
+        # overwrite of a legitimately-retuned live value (the 2026-08-19 revert incident class).
+        classified = {}
+        stale = []
+        for source, test_pin in pins.items():
+            live = read_current_pin(ws, source)
+            decision = mp.classify_leftover(live, prod_pins[source], test_pin, slack)
+            classified[source] = (live, decision)
+            if decision == "stale":
+                stale.append(
+                    f"'{source}': live={live} is beyond {slack:g}ms of the production reference "
+                    f"{prod_pins[source]} (and is not the test value {test_pin})")
+        if stale:
+            raise SystemExit(
+                f"[obs] {a.host}: #1003 measurement-eq profile is STALE vs the live rig — "
+                f"re-derive the profile against the current production pins, or restore the rig, "
+                f"before a measurement-eq E2E:\n  " + "\n  ".join(stale))
+        # Second pass: snapshot the PRODUCTION value (restoring a leftover test value first).
+        for source, test_pin in pins.items():
+            prod_ref = prod_pins[source]
+            live, decision = classified[source]
+            if decision == "leftover-test":
+                sys.stderr.write(
+                    f"[obs] {a.host}: #1003 leftover test state on '{source}' "
+                    f"(live={live}, production ref={prod_ref}) — restoring production before "
+                    f"snapshot\n")
+                _rpc(ws, "SetInputSettings", {
+                    "inputName": source,
+                    "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: prod_ref},
+                    "overlay": True,
+                }, ignore_err=True)
+                snap = prod_ref
+            elif decision == "unknown":
+                sys.stderr.write(
+                    f"[obs] {a.host}: #1003 could NOT read live pin on '{source}' — snapshotting "
+                    f"the production reference {prod_ref} defensively (never adopting an unknown "
+                    f"as production)\n")
+                snap = prod_ref
+            else:
+                snap = int(live)
+            snapshot[source] = snap
+        # Save the PRODUCTION snapshot BEFORE applying the test pins (crash-safe, #183 pattern).
+        host_state[_MEASUREMENT_EQ_STATE_KEY] = {"pins": snapshot}
+        _save_state(state)
+        for source, test_pin in pins.items():
+            _set_pin_verified(ws, source, test_pin, snapshot[source])
+            sys.stderr.write(
+                f"[obs] {a.host}: #1003 applied '{source}' genlock_latency_ms_src "
+                f"{snapshot[source]} -> {test_pin} (measurement-eq; restored on teardown)\n")
+    finally:
+        ws.close()
+    print(json.dumps({"applied": pins, "snapshot": snapshot,
+                      "stream_hold_ms": plan["stream_hold_ms"],
+                      "av_expected_ms": plan["av_expected_ms"]}, sort_keys=True))
+
+
+def read_current_pin(ws, source):
+    """Read the CURRENT genlock_latency_ms_src on `source`, or None when it cannot be read (a WS
+    error / missing input). None (not a fabricated default) so classify_leftover can treat an
+    unreadable pin as 'unknown' rather than a genuine production value."""
+    settings = _rpc(ws, "GetInputSettings", {"inputName": source},
+                    ignore_err=True).get("inputSettings", {})
+    val = settings.get(_GENLOCK_SRC_LATENCY_KEY)
+    return int(val) if val is not None else None
+
+
+def _restore_measurement_pins(ws, host, state):
+    """#1003: restore the PRODUCTION strih per-camera pins snapshotted by apply_measurement_pins,
+    verify each read-back (LOUD warn on mismatch), and clear the state entry ONLY when every
+    read-back matched. No-op when nothing was snapshotted. Called from teardown() on the STRIH host
+    — rides the existing cleanup path.
+
+    #1003 review: the snapshot is the ONE durable artifact that lets a second cleanup() invocation
+    or the next run retry the restore. Clearing it after a transient-WS-failure mismatch would
+    convert a retryable state into a manual repair (the #134 "gate on the artifact, not the intent"
+    lesson). So on ANY mismatch the state entry is KEPT — the next apply_measurement_pins overwrites
+    it safely after its own leftover-anchored re-snapshot."""
+    host_state = state.get(host, {})
+    saved = host_state.get(_MEASUREMENT_EQ_STATE_KEY)
+    if not saved:
+        return
+    all_ok = True
+    for source, prod_pin in saved.get("pins", {}).items():
+        _rpc(ws, "SetInputSettings", {
+            "inputName": source,
+            "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: prod_pin},
+            "overlay": True,
+        }, ignore_err=True)
+        back = _rpc(ws, "GetInputSettings", {"inputName": source},
+                    ignore_err=True).get("inputSettings", {})
+        actual = back.get(_GENLOCK_SRC_LATENCY_KEY)
+        if actual != prod_pin:
+            all_ok = False
+            sys.stderr.write(
+                f"[obs] {host}: #1003 WARN mismatch after restore — '{source}' "
+                f"genlock_latency_ms_src read-back={actual!r} expected={prod_pin}; production "
+                f"pins may be off! Snapshot KEPT for retry. Manual check required.\n")
+        else:
+            sys.stderr.write(
+                f"[obs] {host}: #1003 RESTORED '{source}' genlock_latency_ms_src -> {prod_pin}\n")
+    if all_ok:
+        host_state.pop(_MEASUREMENT_EQ_STATE_KEY, None)
+        _save_state(state)
+
+
+def measurement_pins_mismatches(role, plan, live):
+    """#1003 PURE: given a role ('strih' | 'stream'), the resolved profile `plan`, and the live
+    values read over WS (`live`: for strih a {source: pin_or_None} dict; for stream a single
+    hold_or_None), return a list of human-readable mismatch strings (empty == all in force). Pure
+    so the read-back verify decision is Tier-0 testable without a WS."""
+    problems = []
+    if role == "strih":
+        for source, want in plan["strih_pins"].items():
+            got = live.get(source)
+            if got != want:
+                problems.append(f"strih '{source}': live={got!r} != profile {want}")
+    elif role == "stream":
+        want = plan["stream_hold_ms"]
+        if live != want:
+            problems.append(f"stream '{plan['stream_source']}': live={live!r} != profile {want}")
+    else:
+        problems.append(f"unknown role {role!r}")
+    return problems
+
+
+def verify_measurement_pins(a):
+    """#1003 verify-measurement-pins: the pre-record read-back verify that REPLACES the #893
+    active-floor gate in profile mode (the deep equalized pins deliberately violate the min==floor
+    invariant #893 checks, so #893 is wrong for a profile run; this verifies the intended profile
+    values are ACTUALLY in force instead). --role strih reads every strih source's live pin;
+    --role stream reads the stream hold. Exit 0 = all in force, 1 = a mismatch (a surviving writer,
+    a failed apply, or wrong input names -> the measurement would run on the wrong config; fail
+    BEFORE StartRecord). The harness wires it PRE-record ([4h/8eq]) AND, since #1124, re-calls it
+    POST-record (report-only, in the [7/8] `set +e` region via
+    measurement_eq_post_record_stomp_recheck) as a stomp re-check while the pins are still in force,
+    so a mid-run writer that stomped them surfaces loudly instead of as an opaque A/V-gate result."""
+    mp = _measurement_pins_module()
+    profile = mp.load_profile(a.profile)
+    plan = mp.resolve_plan(profile)
+    ws = _conn(a.host, a.password)
+    try:
+        if a.role == "strih":
+            live = {src: read_current_pin(ws, src) for src in plan["strih_pins"]}
+        else:
+            live = read_current_pin(ws, plan["stream_source"])
+    finally:
+        ws.close()
+    problems = measurement_pins_mismatches(a.role, plan, live)
+    if problems:
+        sys.stderr.write(
+            f"[obs] {a.host}: #1003 measurement-eq {a.role} pins NOT in force:\n  "
+            + "\n  ".join(problems) + "\n")
+        raise SystemExit(1)
+    sys.stderr.write(f"[obs] {a.host}: #1003 measurement-eq {a.role} pins verified in force\n")
 
 
 def _diverging_locked_keys(certified, probe, keys=_LOCKED_BASELINE_KEYS):
@@ -990,6 +1256,42 @@ def _ndi_source_list(ws, inp):
         "inputName": inp, "propertyName": "ndi_source_name",
     }, ignore_err=True).get("propertyItems", [])
     return [it.get("itemValue") for it in items if it.get("itemValue")]
+
+
+# camera-box #1158: shared "re-enforce an NDI input's source name, safely" primitive. The SINGLE
+# home for the empty/drifted-name recovery POLICY so the two callers -- strih_mv_scenes.reattach()'s
+# vanished-branch and set-ndi-mapping.py's --heal mode -- can never disagree on it (the way the #399
+# enforce and the #1114 reattach leave-empty once did). WHY it exists: an EMPTY ndi_source_name STOPS
+# the DistroAV receiver thread ("No NDI Source selected; Requesting Source Thread Stop"), so the
+# in-loop #767/#1096 auto-rebind watchdogs can NEVER fire for it -> a permanent wedge until a name is
+# re-applied. So re-apply the DESIRED (baseline) name -- but ONLY when it is discoverable in the
+# DistroAV finder list, because SetInputSettings of a name absent from the editable-combo list
+# MANGLES it (#795). Verify via read-back so a mangle is a LOUD detected result, never silent
+# corruption. When the desired sender is offline, do NOT set (avoids the proven mangle) and report
+# OFFLINE so the caller screams / fails loud -- an offline baseline is a real rig degradation, never
+# a silent retry.
+REENFORCE_HEALED = "healed"                # set + read-back-verified to `desired`
+REENFORCE_OFFLINE = "offline"             # `desired` not in the finder list -> not set (input left as-is)
+REENFORCE_VERIFY_FAILED = "verify_failed"  # set, but read-back != desired (a #795 mangle / RPC failure)
+
+
+def reenforce_ndi_name(ws, input_name, desired_name):
+    """#1158: re-apply `desired_name` to `input_name`'s ndi_source_name, discoverability-gated and
+    read-back-verified. Returns REENFORCE_HEALED / REENFORCE_OFFLINE / REENFORCE_VERIFY_FAILED.
+    NEVER raises on an OBS request error (this is a best-effort recovery path); a read that cannot
+    confirm the applied name surfaces as REENFORCE_VERIFY_FAILED (not a silent success)."""
+    if not desired_name:
+        return REENFORCE_OFFLINE  # an empty desired is not a re-enforce target
+    if desired_name not in _ndi_source_list(ws, input_name):
+        return REENFORCE_OFFLINE  # sender offline / not in the finder -> never set (would mangle, #795)
+    _rpc(ws, "SetInputSettings",
+         {"inputName": input_name,
+          "inputSettings": {"ndi_source_name": desired_name},
+          "overlay": True},
+         ignore_err=True)
+    back = (_rpc(ws, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
+            .get("inputSettings", {}) or {}).get("ndi_source_name", "")
+    return REENFORCE_HEALED if back == desired_name else REENFORCE_VERIFY_FAILED
 
 
 def _match_full(vals, bare):
@@ -1427,6 +1729,10 @@ def prod_scene(a):
             getattr(a, "test_latency_source", ""),
             getattr(a, "test_latency_ms", None),
             state,
+            # #1003: in profile mode the harness passes the production hold reference so the
+            # snapshot is baseline-anchored (a leftover test hold is never adopted as production).
+            production_ref_ms=getattr(a, "test_latency_prod_ref", None),
+            leftover_slack_ms=getattr(a, "test_latency_slack", 40),
         )
 
         # #163/#111 FAIL-FAST non-black self-check, POLLED (shared helper): a black program records
@@ -1472,6 +1778,11 @@ def teardown(a):
         _restore_test_latency(
             ws, a.host, state, getattr(a, "calibrated_latency_ms", None)
         )
+        # #1003: restore the PRODUCTION strih per-camera pins snapshotted by
+        # apply-measurement-pins for the measurement window (no-op unless a profile-mode run
+        # applied them on THIS host). Rides the same cleanup path so production pins are always
+        # restored, even on an early-abort teardown.
+        _restore_measurement_pins(ws, a.host, state)
         # #183: restore the prod input's genlock_preload that prod-scene forced to the test
         # value, BEFORE anything else, so prod audio-sync is back to its production depth even
         # if a later step warns. No-op when nothing was forced.
@@ -2426,11 +2737,23 @@ def main():
         "stream-status", "latency-check", "open-projectors", "open-multiview",
         "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
-        "republish-black-check", "idle-receiver",
+        "republish-black-check", "idle-receiver", "apply-measurement-pins",
+        "verify-measurement-pins",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
+        if name == "apply-measurement-pins":
+            # #1003: apply the delivery-equalized-deep per-camera STRIH test pins from the
+            # measurement-eq profile for the measurement window (snapshot-set; restored by
+            # `teardown --host STRIH`). Mutually exclusive with the [4h/8pre] #900 re-anchor.
+            p.add_argument("--profile", required=True)
+        if name == "verify-measurement-pins":
+            # #1003: pre-record read-back verify (the #893 replacement in profile mode) + a
+            # post-record stomp re-check. --role strih verifies the per-camera pins on STRIH;
+            # --role stream verifies the hold on STREAM. Exit 1 on any mismatch.
+            p.add_argument("--profile", required=True)
+            p.add_argument("--role", required=True, choices=("strih", "stream"))
         if name == "open-multiview":
             # #1098: single-monitor box (strih) — the fullscreen Multiview projector's monitorIndex
             # is DERIVED from GetMonitorList (#840) by default; -999 is the "derive" sentinel, an
@@ -2510,6 +2833,12 @@ def main():
                 type=int,
                 default=_int_env_or_none("GENLOCK_TEST_LATENCY_MS"),
             )
+            # #1003: in measurement-eq profile mode the harness passes the PRODUCTION hold
+            # reference (971) so the snapshot is baseline-anchored — a leftover test hold a prior
+            # crashed run left is never adopted as production (the 2026-08-19 revert incident).
+            # Omitted (None) ⇒ today's exact #691 behavior (snapshot whatever is live).
+            p.add_argument("--test-latency-prod-ref", type=int, default=None)
+            p.add_argument("--test-latency-slack", type=int, default=40)
         if name == "teardown":
             # #691 belt-and-braces (OPTIONAL): the known-good calibrated prod value from
             # av-sync-last.json on the OBS box's own ProgramData, gathered by the
@@ -2562,7 +2891,9 @@ def main():
      "assert-program-nonblack": assert_program_nonblack,
      "mbc-input-check": mbc_input_check,
      "republish-black-check": republish_black_check,
-     "idle-receiver": idle_receiver}[a.cmd](a)
+     "idle-receiver": idle_receiver,
+     "apply-measurement-pins": apply_measurement_pins,
+     "verify-measurement-pins": verify_measurement_pins}[a.cmd](a)
 
 
 if __name__ == "__main__":

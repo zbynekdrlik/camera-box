@@ -59,7 +59,7 @@ fi
 # --- Check 3: the recommender emits a canonical listener URL ------------------------------------
 echo "[3] recommender emits a canonical listener URL"
 rec="$(python3 "${SRT_TAP}" --recommend "${PORT}")"
-if printf '%s' "${rec}" | grep -q 'mode=listener' && printf '%s' "${rec}" | grep -q ":${PORT}"; then
+if grep -q 'mode=listener' <<<"${rec}" && grep -q ":${PORT}" <<<"${rec}"; then
   pass "recommended: ${rec}"
 else
   fail "recommendation not a listener URL for port ${PORT}: ${rec}"

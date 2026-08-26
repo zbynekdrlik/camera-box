@@ -21,6 +21,9 @@
 #   scripts/deploy-fleet.sh                       # deploy latest successful main ci.yml artifact to cam1-6
 #   scripts/deploy-fleet.sh --run <run-id>        # pin a specific GitHub Actions run id
 #   scripts/deploy-fleet.sh --binary ./dist/camera-box   # deploy an already-downloaded CI binary
+#   scripts/deploy-fleet.sh --frame-probe ./dist-probe/frame-probe   # ALSO deploy the cam2-painter
+#                                                 # (frame-probe) binary to cam2 with #1138 #892
+#                                                 # enable-state-preserving lifecycle (opt-in)
 #   CAMERA_SET="cam2" scripts/deploy-fleet.sh     # restrict to a subset (default: $CAMERA_ACTIVE_SET, camera-set.sh; today cam1-4, #827)
 #
 # Env:
@@ -42,6 +45,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/cli-log.sh"   # log()/info()/warn()/err() (#559, shared with upgrade-fleet-ndi.sh + verify-fleet.sh)
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"   # invocation-id-scoped journalctl builder (#694, shared with upgrade-fleet-ndi.sh + verify-device.sh)
+# shellcheck source=scripts/lib/frame-probe-deploy.sh
+. "$HERE/lib/frame-probe-deploy.sh"   # frame_probe_restore_enable_decision() — the #1138 #892 enable-state-preserving painter deploy decision
 
 SSH_PASS="${SSH_PASS:-newlevel}"
 REPO="${REPO:-zbynekdrlik/camera-box}"
@@ -51,12 +56,17 @@ SET="${CAMERA_SET:-$CAMERA_ACTIVE_SET}"
 
 RUN_ID=""
 BINARY=""
+# #1138: the cam2-painter (frame-probe) binary to also deploy to the painter box. Opt-in: a bare
+# deploy-fleet.sh run (no --frame-probe) is unchanged; the post-merge ci.yml deploy job downloads
+# the probe-tools-linux-amd64 artifact and passes its frame-probe here.
+FRAME_PROBE_BIN=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --run)    RUN_ID="${2:?--run needs a run id}"; shift 2 ;;
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    --frame-probe) FRAME_PROBE_BIN="${2:?--frame-probe needs a path}"; shift 2 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) echo "deploy-fleet: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
@@ -65,6 +75,85 @@ command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get instal
 
 ssh_box()  { sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
 scp_box()  { sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
+
+# --- #1138: deploy the cam2-painter (frame-probe) binary to cam2, with the #892 lifecycle --------
+# frame-probe is installed ONLY on the painter box (setup-device.sh STEP 3b, cam2_is_painter_box),
+# so this is a cam2-only step, mirroring the camera-box loop's shape (stop → remount,rw → scp →
+# byte-verify → restore → remount,ro). The KEY difference from camera-box: the restart is
+# ENABLE-STATE-PRESERVING (frame_probe_restore_enable_decision, .claude/rules/cam2-painter-
+# lifecycle.md #892) — re-arm cam2-painter.service (`enable --now`) ONLY if it was persistently
+# enabled (devel/TEST mode); if it was disabled (EVENT mode — the operator deliberately dropped the
+# QR so it can't return onto a live broadcast) swap the binary but LEAVE the unit dark (the next
+# `rig-mode.sh test` re-arms it). Any genuine deploy failure is recorded in FAILED[] like a cam box.
+deploy_frame_probe_to_painter() {
+  local painter="cam2"   # the ONE fixed painter box (mirrors setup-device.sh's cam2_is_painter_box)
+  case " $SET " in
+    *" $painter "*) : ;;
+    *) info "[frame-probe] $painter not in set [$SET] — skipping cam2-painter deploy"; return 0 ;;
+  esac
+  [ -f "$FRAME_PROBE_BIN" ] || { err "[frame-probe] binary '$FRAME_PROBE_BIN' not found"; FAILED+=("$painter-painter(no-binary)"); return 0; }
+  chmod +x "$FRAME_PROBE_BIN" 2>/dev/null || true
+  if ! camera_resolve "$painter"; then
+    FAILED+=("$painter-painter(invalid)"); return 0
+  fi
+  local ip="$CAMERA_IP"
+  echo "================================================================"
+  echo ">> [$painter] cam2-painter (frame-probe) — $ip"
+  echo "================================================================"
+
+  # #892: read the unit's prior enabled-state and decide the restore action BEFORE touching it.
+  local was_enabled restore_action
+  was_enabled="$(ssh_box "$ip" "systemctl is-enabled cam2-painter.service 2>/dev/null" || true)"
+  restore_action="$(frame_probe_restore_enable_decision "$was_enabled")"
+  info "[$painter] cam2-painter.service is-enabled='${was_enabled:-<none>}' -> restore: $restore_action"
+
+  # stop the painter (best-effort — it may be inactive / not-installed) + remount rw for the swap.
+  if ! ssh_box "$ip" "mount -o remount,rw / && (systemctl stop cam2-painter.service 2>/dev/null || true)"; then
+    err "[$painter] remount-rw / painter stop failed"; FAILED+=("$painter-painter(stop-failed)"); return 0
+  fi
+  if ! scp_box "$ip" "$FRAME_PROBE_BIN" "/usr/local/bin/frame-probe"; then
+    err "[$painter] frame-probe scp failed"; FAILED+=("$painter-painter(scp-failed)")
+    # best-effort restore of the unit + read-only root even on a failed swap.
+    [ "$restore_action" = "enable-now" ] && ssh_box "$ip" "systemctl enable --now cam2-painter.service 2>/dev/null || true" || true
+    ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+    return 0
+  fi
+  ssh_box "$ip" "chmod +x /usr/local/bin/frame-probe 2>/dev/null || true" || true
+
+  # Byte-verify (deploy-from-clean-tree.md Layer 3 — a partial scp / stale same-name binary would
+  # pass a mere presence check but fail this).
+  local local_sha remote_sha
+  local_sha="$(sha256sum "$FRAME_PROBE_BIN" | awk '{print $1}')"
+  remote_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/frame-probe 2>/dev/null | awk '{print \$1}'" || echo "")"
+  if [ "$local_sha" != "$remote_sha" ]; then
+    err "[$painter] frame-probe byte-verify FAILED: local $local_sha != remote ${remote_sha:-<none>}"
+    FAILED+=("$painter-painter(sha-mismatch)")
+  else
+    info "[$painter] frame-probe byte-verify OK (sha256 ${local_sha:0:12})"
+  fi
+
+  # #892 restore: re-arm ONLY a persistently-enabled unit; leave a disabled (event-mode) unit dark.
+  if [ "$restore_action" = "enable-now" ]; then
+    if ! ssh_box "$ip" "systemctl enable --now cam2-painter.service && (mount -o remount,ro / 2>/dev/null; true)"; then
+      err "[$painter] cam2-painter.service enable --now failed"; FAILED+=("$painter-painter(restart-failed)")
+      # #1138 (review): the && short-circuits the remount-ro when enable --now fails, leaving root
+      # rw. Re-assert read-only root unconditionally before returning (best-effort).
+      ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+      return 0
+    fi
+    local active
+    active="$(ssh_box "$ip" "systemctl is-active cam2-painter.service 2>/dev/null" || echo inactive)"
+    if [ "$active" = "active" ]; then
+      log "[$painter] cam2-painter.service re-armed + active on the new frame-probe"
+    else
+      err "[$painter] cam2-painter.service not active after enable --now (is-active='$active')"; FAILED+=("$painter-painter(not-active)")
+    fi
+  else
+    ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+    log "[$painter] frame-probe swapped; cam2-painter.service left in its prior state ('${was_enabled:-<none>}') — not re-armed (#892: an event-mode/dark painter must not return onto a live broadcast)"
+  fi
+  echo ""
+}
 
 # Clean up a downloaded-artifact temp dir on exit (no-op when --binary was used).
 DIST=""
@@ -134,7 +223,11 @@ for cam in $SET; do
     continue
   fi
   if ! ssh_box "$ip" "systemctl start camera-box && (mount -o remount,ro / 2>/dev/null; true)"; then
-    err "[$cam] start failed"; FAILED+=("$cam(start-failed)"); continue
+    err "[$cam] start failed"; FAILED+=("$cam(start-failed)")
+    # #1138 (review): the && short-circuits the remount-ro on a failed start, leaving root rw —
+    # re-assert read-only root unconditionally before moving to the next box (best-effort).
+    ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+    continue
   fi
 
   # Byte-verify: the deployed binary must hash-match the artifact we shipped (deploy-from-clean-tree.md
@@ -193,6 +286,11 @@ for cam in $SET; do
   fi
   echo ""
 done
+
+# --- #1138: ALSO deploy the cam2-painter (frame-probe) binary when --frame-probe was given -------
+if [ -n "$FRAME_PROBE_BIN" ]; then
+  deploy_frame_probe_to_painter
+fi
 
 # --- Summary ------------------------------------------------------------------------------
 echo "================================================================"

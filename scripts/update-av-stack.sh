@@ -50,7 +50,7 @@ parse_manifest() {
       '|'*) : ;;          # candidate table row
       *) continue ;;
     esac
-    printf '%s' "$line" | grep -q 'subtree' || continue
+    grep -q 'subtree' <<<"$line" || continue
     f_dir="$(printf '%s' "$line"  | awk -F'|' '{print $2}')"
     f_url="$(printf '%s' "$line"  | awk -F'|' '{print $3}')"
     f_ver="$(printf '%s' "$line"  | awk -F'|' '{print $4}')"

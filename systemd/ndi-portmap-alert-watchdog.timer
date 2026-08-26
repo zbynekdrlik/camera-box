@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1181 NDI sender port-map change check every 5 min (dev1-side). A reshuffled port is an
+# ACTIVE on-air fault -- a stock receiver shows the WRONG source RIGHT NOW -- so this is prompter than
+# netcfg's hourly config-drift poll, while the watchdog's 2-pass confirm still swallows a transient
+# OBS-reload read (during a reload the map is briefly empty -> the audit returns a gather error, never
+# CHANGED). A confirmed change pages within ~10 min.
+Description=Run the camera-box NDI sender port-map change check every 5 min (#1181)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

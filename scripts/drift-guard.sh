@@ -73,6 +73,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # cmdline-isolation facet below (check #11) runs the pure verdict instead of a driftable inline copy.
 # shellcheck source=scripts/lib/imag-cmdline-isolation.sh
 . "$HERE/lib/imag-cmdline-isolation.sh"
+# scripts/lib/obs-projector-vsync.sh is sourced ONLY for its pure functions
+# (projector_vsync_verdict + projector_vsync_armed_from_log, #1151) — same extraction discipline as
+# imag-display-path.sh / imag-cmdline-isolation.sh, SHARED with the E2E [0/8] preflight so the
+# --check-imag projector-vsync facet below runs the IDENTICAL verdict against ONE marker string.
+# shellcheck source=scripts/lib/obs-projector-vsync.sh
+. "$HERE/lib/obs-projector-vsync.sh"
 
 DEFAULT_README="vendor/README.md"
 
@@ -134,19 +140,19 @@ pinned_setting() {
 # obs_version_from_log TEXT -> "32.2.0"  (OBS log header line "OBS 32.2.0 (64-bit, windows)").
 obs_version_from_log() {
   printf '%s\n' "$1" \
-    | sed -n 's/.*OBS \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1
+    | sed -n 's/.*OBS \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1 || true
 }
 
 # distroav_version_from_log TEXT -> "6.2.1"  ("you can haz DistroAV (Version 6.2.1)").
 distroav_version_from_log() {
   printf '%s\n' "$1" \
-    | sed -n 's/.*DistroAV (Version \([0-9][0-9.]*\)).*/\1/p' | head -1
+    | sed -n 's/.*DistroAV (Version \([0-9][0-9.]*\)).*/\1/p' | head -1 || true
 }
 
 # ndi_runtime_from_log TEXT -> "6.3.2.0"  ("[distroav] NDI Library Version detected: 6.3.2.0").
 ndi_runtime_from_log() {
   printf '%s\n' "$1" \
-    | sed -n 's/.*NDI Library Version detected: \([0-9][0-9.]*\).*/\1/p' | head -1
+    | sed -n 's/.*NDI Library Version detected: \([0-9][0-9.]*\).*/\1/p' | head -1 || true
 }
 
 # genlock_from_log TEXT -> "1" if the running OBS reports the wall-clock genlock master gate
@@ -161,8 +167,10 @@ genlock_from_log() {
   # and leave printf writing into a closed pipe -> SIGPIPE -> pipefail flips the if-condition false
   # and the function wrongly returns UNKNOWN on a large real log. `grep | head -1` reads the input
   # through instead. `|| true` keeps a no-match from tripping the caller's set -e.
+  # #1184: LC_ALL=C grep -a -> byte-literal, so invalid-UTF-8 bytes (DistroAV mojibake) in the OBS
+  # log cannot suppress a marker that IS present when this greps locally in a UTF-8 locale.
   line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock:.*render tick (ENABLED|DISABLED)' | head -1 || true)"
+    | LC_ALL=C grep -aiE 'genlock:.*render tick (ENABLED|DISABLED)' | head -1 || true)"
   case "$line" in
     *ENABLED*) echo 1 ;;
     *DISABLED*) echo 0 ;;
@@ -180,7 +188,7 @@ fps_from_log() {
       sub(/[^0-9].*/,    "", line)    # keep the leading integer ("30/1" -> "30")
       print line
       exit
-    }'
+    }' || true
 }
 
 # buildspec_version FILE -> top-level "version" of a DistroAV buildspec.json (vendored source).
@@ -193,7 +201,7 @@ buildspec_version() {
     # Fallback: the top-level key sits at the document's minimum indent (4 spaces); nested
     # dependency "version" keys are deeper, so the 4-space anchor selects the canonical one.
     grep -E '^    "version":' "$f" | head -1 \
-      | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p'
+      | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' || true
   fi
 }
 
@@ -330,8 +338,10 @@ drift_check_all_files() {
 # sibling *_from_log parsers — see genlock_from_log's note).
 genlock_capability_from_log() {
   local text="$1" line
+  # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183); this reads
+  # remote OBS-log text but greps LOCALLY (dev1's UTF-8 locale), so it needs the byte-literal match.
   line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' \
+    | LC_ALL=C grep -aiE 'genlock:.*(render tick ENABLED|timestamp-aligned release|sub-frame jitter reserve|latency = [0-9]+ ms)' \
     | head -1 || true)"
   # Echo "1" when a build-unique marker is present; otherwise echo NOTHING (the absent signal).
   # `return 0` so the absent case is a clean exit (empty output, not a non-zero status) — the sibling
@@ -386,9 +396,12 @@ genlock_src_latency_for() {
 # genlock_capability_from_log already covers as one of its alternation branches). Drain-safe
 # (grep|sed|head, never grep -q) matching the sibling *_from_log parsers.
 genlock_latency_ms_from_log() {
+  # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183). The `sed`
+  # ALSO needs LC_ALL=C: grep -a passes the raw invalid bytes through, and sed in a UTF-8 locale
+  # chokes on them and fails the extraction (returns the whole mangled line instead of the digits).
   printf '%s\n' "$1" \
-    | grep -iE 'genlock:.*latency = [0-9]+ ms' \
-    | sed -n 's/.*latency = \([0-9][0-9]*\) ms.*/\1/p' | head -1 || true
+    | LC_ALL=C grep -aiE 'genlock:.*latency = [0-9]+ ms' \
+    | LC_ALL=C sed -n 's/.*latency = \([0-9][0-9]*\) ms.*/\1/p' | head -1 || true
 }
 
 # genlock_rt_pin_from_log TEXT -> "ok" if imag-nb's OBS log shows the genlock render-tick thread
@@ -407,15 +420,16 @@ genlock_latency_ms_from_log() {
 # false non-match when the upstream `printf` is SIGPIPE'd after grep's early exit).
 genlock_rt_pin_from_log() {
   local text="$1" ok_line failed_line
+  # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183).
   ok_line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
+    | LC_ALL=C grep -aiE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
     | head -1 || true)"
   if [ -n "$ok_line" ]; then
     printf 'ok\n'
     return 0
   fi
   failed_line="$(printf '%s\n' "$text" \
-    | grep -iE 'genlock: could NOT set render-tick thread SCHED_FIFO' \
+    | LC_ALL=C grep -aiE 'genlock: could NOT set render-tick thread SCHED_FIFO' \
     | head -1 || true)"
   [ -n "$failed_line" ] && printf 'failed\n'
   return 0
@@ -966,15 +980,23 @@ check_imag_report() {
     done <<< "$(imag_power_envelope_verdict "$obs_power_envelope" "$exp_power_pl1_w")"
   fi
 
-  # 10. display-path config (#780) — picom OFF, its autostart masked/absent, the #841 iGPU
-  # max-freq pin (imag-igpu-maxperf.service enabled+active + gt_min_freq pinned to gt_RP0 — the
-  # Intel GPUPowerMizerMode=1 counterpart), and the #779 touchpad tap conf. Runs the SHARED
-  # imag_display_path_verdict (scripts/lib/imag-display-path.sh) over the gathered block, mapping
-  # each per-facet OK/DRIFT/UNKNOWN into this function's own report rows + exit-code contract.
-  # Two-tier, same as every check above: an EMPTY gathered block (SSH hiccup / not read) is UNKNOWN
-  # per facet, never a false DRIFT; a MISSING pgrep on the box is UNKNOWN by name (#833), never a
-  # false "picom not running = OK". NVIDIA-era ForceFullCompositionPipeline is intentionally absent
-  # (obsolete-by-hardware: the box is Intel-only, no FFCP — #816/#841; see the #780 design comment).
+  # 10. display-path config (#780 / issue 1146 REVERT) — picom NOT running + picom.service NOT
+  # enabled (the compositor tear fix cost 21.57% OBS render skips on the 25W envelope, live
+  # 2026-08-20 — the #841 "picom off" doctrine stands; the package/config/unit stay installed
+  # dormant), HDMI the xrandr PRIMARY, the #841 iGPU max-freq pin (imag-igpu-maxperf.service
+  # enabled+active + gt_min_freq pinned to gt_RP0 — the Intel GPUPowerMizerMode=1 counterpart),
+  # and the #779 touchpad tap conf. See scripts/lib/imag-display-path.sh's doctrine header for the
+  # full reversal→revert history (the dual-output beat physics stays valid; only the compositor
+  # CURE is rejected for its render cost — the tear-free direction is the OBS projector's own
+  # vsync / single-display, issue 1146 / issue 1147). Runs the SHARED
+  # imag_display_path_verdict (scripts/lib/imag-display-path.sh) over the gathered block, mapping each
+  # per-facet OK/DRIFT/UNKNOWN into this function's own report rows + exit-code contract — the loop is
+  # generic, so new facets flow through with no edit here. Two-tier, same as every check above: an
+  # EMPTY gathered block (SSH hiccup / not read) is UNKNOWN per facet, never a false DRIFT; a MISSING
+  # pgrep/xrandr on the box is UNKNOWN by name (#833), never a false verdict. NVIDIA-era
+  # ForceFullCompositionPipeline is obsolete-by-hardware (the box is Intel-only, no FFCP — #816/#841;
+  # the inert 20-tearfree.conf is deliberately NOT provisioned; the picom vsync compositor is the
+  # real mechanism now — see the issue 1146 design comment).
   if [ -z "$obs_display_path" ]; then
     printf '  %-22s UNKNOWN  (display-path state not read on imag-nb)\n' "display_path"
     unknown=$((unknown + 1))
@@ -1014,6 +1036,24 @@ check_imag_report() {
     done <<< "$(imag_cmdline_isolation_verdict "$obs_cmdline")"
   fi
 
+  # 12. projector present-vsync ARMED marker (#1151, REPORT-ONLY — issue-1107 fullscreen-Program EGL
+  # present-vsync + issue-1146 observability marker). Runs the SHARED projector_vsync_verdict
+  # (scripts/lib/obs-projector-vsync.sh) over the SAME already-gathered $obs_log_text — no extra SSH.
+  # REPORT-ONLY: this facet touches NEITHER $drift NOR $unknown, so it never changes the 20/11/0 exit
+  # contract. A missing marker is a healthy ordering-dependent state (the Program projector was not
+  # (re)opened since OBS start — the marker is one-shot-on-change at projector open), NOT a config
+  # drift; and per issue 781 the marker only proves the tear-free present MECHANISM is engaged, never
+  # that scanout tearing is gone (objective proof needs the physical HDMI tap, ops-wait hardware).
+  # #833: an unreadable/empty log surfaces UNKNOWN via the verdict, never a false OK.
+  local pv_facet pv_status pv_detail
+  while IFS='|' read -r pv_facet pv_status pv_detail; do
+    [ -n "$pv_facet" ] || continue
+    case "$pv_status" in
+      OK) printf '  %-22s OK       (%s)\n' "$pv_facet" "$pv_detail" ;;
+      *)  printf '  %-22s UNKNOWN  (%s)\n' "$pv_facet" "$pv_detail" ;;
+    esac
+  done <<< "$(projector_vsync_verdict "$obs_log_text")"
+
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
   return 0
@@ -1048,9 +1088,10 @@ imag_genlock_range_log() {
 # above). Paths are the ones `scripts/setup-imag.sh` installs to (DESKTOP_USER=newlevel):
 #   - /opt/obs-genlock/GENLOCK_BUILD_SHA.txt   (genlock build identity marker)
 #   - /usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so   (the Linux plugin binary)
-#   - ~/.config/obs-studio/logs/*.log   (OBS log — the MOST RECENT file, same libobs log lines
-#     fps_from_log / genlock_capability_from_log / genlock_latency_ms_from_log already parse on
-#     Windows, since the log format is platform-independent libobs text)
+#   - ~/.config/obs-studio/logs/*.txt   (OBS log — the MOST RECENT file; OBS names logs `.txt`, #1151,
+#     same libobs log lines fps_from_log / genlock_capability_from_log / genlock_latency_ms_from_log /
+#     projector_vsync_verdict already parse on Windows, since the log format is platform-independent
+#     libobs text)
 #   - `journalctl -u dantesync` (#489, spun out of #479) — the SAME PTP LOCK/NANO or NTP-offset
 #     markers scripts/setup-imag.sh's own provisioning-time restart check keys on (setup-imag.sh:230)
 #   - `dpkg -s` + `systemctl is-active`/`is-enabled` for systemd-timesyncd/chrony/ntp/ntpsec/
@@ -1144,9 +1185,15 @@ gather_and_check_imag() {
   else
     plugin_present=0
   fi
-  # Most-recently-modified OBS log file (OBS names logs by timestamp, no "latest" symlink).
+  # Most-recently-modified OBS log file. #1151: OBS names its logs `YYYY-MM-DD HH-MM-SS.txt` (NOT
+  # .log) — confirmed live on imag-nb, and the SAME `*.txt` glob every other imag OBS-log reader uses
+  # (verify-imag.sh, imag_scenes.py, imag-jitter-monitor.sh, rig-health-audit.py, mv-fps-*). The
+  # earlier `*.log` glob matched NOTHING on imag, so every OBS-log facet below (genlock_capability /
+  # output_fps / genlock_latency / rt_pin / projector_vsync) read EMPTY -> chronic UNKNOWN. Fixing
+  # it makes those facets actually read the log; SAFE because rig-mode's only --check-imag HARD-BLOCK
+  # (issue 789) is genlock_build-scoped (the GENLOCK_BUILD_SHA.txt SSH compare), never these facets.
   obs_log="$("${ssh_cmd[@]}" \
-    'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.log 2>/dev/null | head -1); [ -n "$f" ] && cat "$f"' \
+    'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.txt 2>/dev/null | head -1); [ -n "$f" ] && cat "$f"' \
     2>/dev/null || true)"
   obs_fps="$(fps_from_log "$obs_log")"
   obs_latency="$(genlock_latency_ms_from_log "$obs_log")"
@@ -1366,7 +1413,7 @@ drift_check_source_latency() {
           # there is no single correct constant (it changes with every A/V-sync re-calibration).
           local rng rmin rmax
           rng="${exp_lat#range:}"; rmin="${rng%-*}"; rmax="${rng#*-}"
-          if printf '%s' "$obs_lat" | grep -qE '^[0-9]+$' \
+          if grep -qE '^[0-9]+$' <<<"$obs_lat" \
              && [ "$obs_lat" -ge "$rmin" ] && [ "$obs_lat" -le "$rmax" ]; then
             printf '  source %-20s OK       (latency_ms=%s, within calibration-tracked range %s-%s)\n' \
               "$exp_name" "$obs_lat" "$rmin" "$rmax"
@@ -1580,7 +1627,7 @@ drift_check_burn_env() {
 validate_semver() {
   local name="$1" val="$2"
   if [ -z "$val" ]; then echo "  MISSING   $name" >&2; return 1; fi
-  if printf '%s' "$val" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  if grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$val"; then
     echo "  ok        $name = $val"; return 0
   fi
   echo "  MALFORMED $name = '$val' (want X.Y.Z)" >&2; return 1
@@ -1650,7 +1697,7 @@ Usage:
   obs-studio vendor/distroav`; a non-empty range = the box is BEHIND merged genlock commits =
   STALE = DRIFT, the #530 45fps recurrence guard — no static README pin any more), a SHA256 of
   `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` (the Linux plugin binary), the OBS log
-  (`~/.config/obs-studio/logs/*.log`, most recent file) for the genlock capability marker + the fps +
+  (`~/.config/obs-studio/logs/*.txt`, most recent file — OBS names logs `.txt`, #1151) for the genlock capability marker + the fps +
   latency pins + the #484 render-tick SCHED_FIFO pin outcome (#572 — DRIFT if the log shows the
   WARN-and-continue SCHED_OTHER fallback, i.e. a missing rtprio ulimit grant), and
   `journalctl -u dantesync` (#489) for the DanteSync PTP/NTP clock-lock pin.

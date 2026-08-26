@@ -44,8 +44,8 @@ fn watchdog_region(body: &str) -> String {
 fn setup_imag_provisions_watchdog_step_24_764() {
     let body = body();
     assert!(
-        body.contains("TOTAL_STEPS=26"),
-        "{SETUP}: TOTAL_STEPS must be 26 (step 24 imag-obs-watchdog #764 + step 25 touchpad usability #779 + step 26 imag-maxperf #791) — the watchdog step must still be counted"
+        body.contains("TOTAL_STEPS=27"),
+        "{SETUP}: TOTAL_STEPS must be 27 (step 24 imag-obs-watchdog #764 + step 25 touchpad usability #779 + step 26 imag-maxperf #791 + step 27 picom vsync compositor issue 1146) — the watchdog step must still be counted"
     );
     assert!(
         body.contains("step 24 \""),

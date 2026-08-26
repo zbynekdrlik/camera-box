@@ -78,7 +78,7 @@ comes back short). See `scripts/verify-imag.sh`'s own header comment for the ful
   `\EFI\BOOT\BOOTX64.EFI` fallback, `systemd-networkd-wait-online` masked, `ssh.service` (not
   `ssh.socket`, which is what noble enables by default), UUID-based fstab, blank machine-id.
 
-## The five things a FRESH box exposes that the incumbent never did (live, .187, 2026-07-27)
+## The six things a FRESH box exposes that the incumbent never did (live, .187, 2026-07-27)
 
 The incumbent box (.182) hides these because it accumulated state over months. Every one of them
 aborted provisioning on the replacement notebook, and every one is now fixed + regression-tested.
@@ -110,6 +110,25 @@ When a NEXT swap fails, check this list before theorising:
   `launchpad.net/~obsproject/+archive/ubuntu/obs-studio/+files/` (live: pool 404, +files 200).
   `apt-mark hold obs-studio` keeps it there. The durable answer is bumping the vendored genlock
   build to the current OBS release (#825).
+- **`systemctl --user` needs a user bus the fresh box does not have yet (#1182).** Steps 21/27 run
+  `sudo -u "$DESKTOP_USER" … systemctl --user daemon-reload`/`enable --now …`/`disable …`, which
+  need the desktop user's systemd USER MANAGER bus (`/run/user/<uid>/bus`). That socket exists only
+  once the user has a live login session (the kiosk lightdm autologin) or lingering — on a
+  from-scratch box provisioned detached BEFORE the first kiosk boot it does not exist, so those
+  calls die `Failed to connect to bus: Connection refused` and their `|| fail` aborted the whole run
+  at step 21 (never reaching steps 22-27; live 2026-08-23, `/tmp/setup-1162.attempt2.log`). This is
+  the SAME missing-session class steps 17/18 already degrade on (`[ -S /tmp/.X11-unix/X0 ]`). The
+  fix mirrors that degrade: a `user_bus_alive()` guard (`[ -S "/run/user/$(id -u "$DESKTOP_USER")/bus" ]`,
+  defined next to `UBUS`) gates each step's `systemctl --user` half. On the no-bus path step 21
+  DEFERS the `--now` START (it needs X, which the openbox autostart provides on the first kiosk boot)
+  but completes the ENABLE BUS-FREE — it creates the units' `*.target.wants` symlinks by hand
+  (`ln -sf`, functionally equivalent to what `systemctl --user enable` writes — an ABSOLUTE symlink
+  rather than the relative `../<unit>` it writes, but is-enabled reads 'enabled' either way — the same
+  wants-symlink the incumbent already carries), so `verify-imag.sh` check (t) reads is-enabled=enabled after ONE reboot
+  with no re-run; step 27 just defers picom's daemon-reload/disable (picom must stay DORMANT, so NO
+  wants-symlink is created for it). The naive `loginctl enable-linger` fix alone is NOT enough — it
+  brings the bus up mid-run, and a bare `enable --now imag-obs.service` would then start OBS with no
+  `:0` (step 15 tore it down) and fight `Restart=on-failure`; deferring the START avoids that.
 
 A healthy fresh box, post-reboot: `uname -r` on the HWE line, `/proc/cmdline` carrying
 `preempt=full` and **NO** `isolcpus=`/`nohz_full=` token (#842 — see the CPU-affinity section
@@ -347,6 +366,31 @@ check function that parses another script's printed text: paste the REAL current
 producer script live, or read its exact `print(...)` f-string) against the checker function
 directly (`. verify-imag.sh; imag_foo_output_ok "<pasted real text>" ...`) before trusting it —
 never assume an old regex still matches after the producer's print format changed.
+
+## OBS-log grep misses are locale + input-source + byte-position sensitive — `LC_ALL=C grep -a` via a here-string (#1183/#1184)
+
+An OBS-log matcher (`verify-imag.sh` (h), `setup-imag.sh` step-18, `drift-guard.sh`'s
+`genlock_*_from_log` family) that greps for an ASCII marker can MISS a marker that IS present, for
+two compounding reasons — fix BOTH:
+
+- **Locale + input source:** OBS/DistroAV logs carry raw invalid-UTF-8 bytes (mojibake). GNU grep
+  in a UTF-8 locale (dev1, imag) then fails to match an ASCII pattern on a line that contains an
+  invalid byte sequence — even a byte at the LINE START or END, not just inside the matched span
+  (confirmed #1184: a line-start `\xe2\x82` suppressed the fixed-literal rt-pin match too). A
+  remote grep run over ssh in the box's C locale never sees this, which is why drift-guard's
+  ssh-SIDE greps pass while its LOCAL `genlock_*_from_log` (grepping remote-fetched text on dev1)
+  missed. **Fix: `LC_ALL=C grep -a`** (byte-literal, single-byte locale). A `sed`/`awk` DOWNSTREAM
+  of the grep needs `LC_ALL=C` too — grep -a passes the raw bytes through and the next stage chokes
+  on them in a UTF-8 locale (the #1184 latency extractor returned a mangled line until its `sed`
+  also got `LC_ALL=C`).
+- **Byte position / SIGPIPE (the #1047 residual, same story):** a matcher fed `printf … | grep -q`
+  SIGPIPEs the writer when grep -q exits early on a match in a >64 KiB log (live OBS logs are
+  173 KB–40 MB; markers are startup lines at the TOP) → rc=141 → pipefail false-FAILs a healthy
+  box. **Fix: a here-string (`grep -a … <<<"$1"`)** — no writer process, SIGPIPE-immune at any
+  size. The SAME here-string remedy the #1047 `imag_pick_ndi_peer` section above documents.
+
+Test both deterministically with a >64 KiB body carrying the marker at the TOP + invalid bytes on
+the marker lines (see `tests/verify_imag_pure_functions.rs` + `tests/drift_guard.rs`).
 
 ## `wmctrl -c` substring-closes the MAIN OBS window safely — Projector titles never collide (#840)
 

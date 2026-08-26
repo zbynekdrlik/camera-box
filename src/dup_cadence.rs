@@ -1,4 +1,4 @@
-//! #1088 — duplication-masked 50→60 source-cadence detector (per-frame content-hash dup-rate).
+//! #1088 — duplication-masked 50→60 source-cadence detector (per-frame near-duplicate cadence).
 //!
 //! The #794 hard layer. `src/cadence-health` (#794) reads strih's genlock-fifo `received=`
 //! counter and pages when a camera's DELIVERED rate sits away from 60 fps. That covers a camera
@@ -6,33 +6,49 @@
 //! It is STRUCTURALLY BLIND to the case where a grabber upconverts a 50 fps source to 60 by frame
 //! DUPLICATION (5:6 pulldown): the grabber delivers a padded genuine 60 NDI frames/s, so
 //! `received=` reads a clean 60 and the receiver-side rate tap sees nothing — even though 1 in
-//! every 6 delivered frames is an exact content-duplicate of the one before it and the motion
-//! judders at the real 50 fps.
+//! every 6 delivered frames is a content-duplicate of the one before it and the motion judders at
+//! the real 50 fps.
 //!
-//! The ONLY signal that survives the duplication is per-frame CONTENT identity. This module is the
-//! PURE (Tier-0, default-features) classifier for that signal: given a sequence of per-frame
-//! content HASHES in recorded (delivery) order, it counts exact consecutive duplicates and
-//! decides whether the pattern is the sustained, REGULARLY-SPACED, window-SPANNING duplication of
-//! a pulldown (a real cadence defect) as opposed to the isolated, irregular, or LOCALIZED
-//! content-duplication that healthy hardware (or an unrelated freeze) already produces.
+//! ## #1166 — the signal is a CODEC-TOLERANT near-duplicate, NOT a byte-exact hash
+//!
+//! The ONLY signal that survives the duplication is per-frame CONTENT identity — but the #1088/#1112
+//! first cut hashed each recorded frame with a BYTE-EXACT row-sampled FNV-1a, computed on the STREAM
+//! box's LOSSY `.mp4`. Byte-exact frame identity does NOT survive lossy H.264 encode+decode
+//! (inter-prediction residuals + quantization make every decoded frame byte-UNIQUE), so a genuine
+//! duplicate camera frame is not byte-identical after the recording round-trips. #1101 measured this
+//! live: across 18 production verdicts + their stream partials, 147 tick-proven copies produced only
+//! 2 byte-exact content-hash duplicates (≈1.4%) — the byte-exact signal was structurally BLIND, and
+//! `signal_viability` correctly read `Blind` (a LIVE gate on it would be a permanent false-green).
+//!
+//! #1166 FIXES the signal: the duplicate test is now a codec-tolerant NEAR-duplicate — a per-frame
+//! row-sampled mean-abs-luma-DIFFERENCE (MAD) to the recording predecessor, thresholded at
+//! [`NEAR_DUP_MAD_MAX`]. A byte-duplicate source frame survives the lossy encode as a LOW-MAD pair
+//! (only global quantization noise between the two), while genuine motion moves image content and
+//! produces a far higher MAD. Validated on the retained REAL lossy diagnostic frame PNGs (32
+//! tick-proven copy pairs across 16 runs vs 381 genuine-motion pairs): at `MAD <= 10.0` the signal
+//! observes 26/32 = 81% of the tick-proven copies with 0/381 = 0.0% false positives on genuine
+//! motion — where the byte-exact hash observed 0/32. DOWNSCALED thumbnails destroy the separation
+//! (averaging washes out localised motion); full-WIDTH row-sampled MAD preserves the full-resolution
+//! separation at a fraction of the cost, so the MAD is computed on the box between consecutive
+//! full-resolution decoded frames (see `probe::recording::frame_prev_diffs`) and carried per frame.
 //!
 //! ## Mirrors the crate-root verdict-gate seam pattern
 //!
 //! Like `presentation_cadence.rs` / `optical_floor.rs`, the WHOLE `probe` module is
 //! `#[cfg(feature = "probe")]` (CI-only, never compiled/tested locally per CLAUDE.md's Local Build
 //! Policy), so the PURE decision logic lives here at the crate root where it unit-tests on DEFAULT
-//! features. The probe-gated glue (`bin/recording-verdict.rs`) computes the per-frame content hash
-//! from the offline recording's decoded luma frames — reusing the proven row-sampled FNV-1a
-//! approach of `dupe_decimation::dupe_content_hash` (#889) — slices the hash sequence per cambox
-//! window, calls [`measure_dup_cadence`], and surfaces the result REPORT-ONLY.
+//! features. The probe-gated glue (`bin/recording-verdict.rs`) computes the per-frame MAD-to-prev
+//! from the offline recording's decoded luma frames, carries the per-frame vector in the partial,
+//! slices it per cambox window ([`window_prev_mads`]), calls [`measure_dup_cadence`], and surfaces
+//! the result REPORT-ONLY.
 //!
-//! ## Why the hashing runs OFFLINE (the design fork resolved)
+//! ## Why the diffing runs OFFLINE (the design fork resolved)
 //!
-//! The receiver-side rate tap is blind; hashing every frame on the LIVE strih/stream box would
-//! perturb a broadcast render, and hashing on the cam-box side is a rig write out of scope for the
+//! The receiver-side rate tap is blind; diffing every frame on the LIVE strih/stream box would
+//! perturb a broadcast render, and diffing on the cam-box side is a rig write out of scope for the
 //! dev1-side read-only #794 family. The offline `recording-verdict` worker path already decodes
-//! every recorded frame, so the hash is computed there — on the worker, once per verdict — which
-//! is neither a rig write nor a live-box perturbation.
+//! every recorded frame, so the MAD is computed there — on the worker, once per verdict — which is
+//! neither a rig write nor a live-box perturbation.
 //!
 //! ## Distinguishing a pulldown from the non-pulldown patterns
 //!
@@ -41,8 +57,8 @@
 //!   over-rate grabber's isolated dupes (`dupe_decimation.rs` #889: a ~64 fps grabber repeats its
 //!   buffer ~1-in-15 ≈ 6.7%, ISOLATED pairs, already SHED by the cam-box decimation gate) — both
 //!   sit BELOW the pulldown RATE and are rejected by [`DUP_RATE_PULLDOWN_MIN`];
-//! - a genuine content FREEZE / stall — a run of identical frames CONCENTRATED in one part of the
-//!   window (frozen_leg's job, #895) — which can carry a high local rate but does NOT span the
+//! - a genuine content FREEZE / stall — a run of near-identical frames CONCENTRATED in one part of
+//!   the window (frozen_leg's job, #895) — which can carry a high local rate but does NOT span the
 //!   window, and is rejected by [`DUP_COVERAGE_MIN`];
 //! - an irregular decode-glitch burst — high rate but UNEVENLY spaced — rejected by
 //!   [`DUP_GAP_CV_MAX`].
@@ -53,21 +69,23 @@
 //!
 //! ## Report-only (calibration-first)
 //!
-//! [`gates_overall_pass`] is `false`: the metric ships REPORT-ONLY. The constants are PRINCIPLED
-//! first-cuts (above the two measured baselines, below the pulldown), not yet calibrated against a
-//! real 50→60-grabber run (no such rig data exists) nor against the healthy-run offline
-//! content-dup distribution (which needs this very surface to run first). The first real runs
-//! calibrate them before any thought of gating — the same discipline as #1036 / #915.
+//! [`gates_overall_pass`] is `false`: the metric ships REPORT-ONLY. The #1166 near-duplicate signal
+//! is validated (Viable) on a BIASED sample of retained diagnostic PNGs, not on a full green run,
+//! and [`DUP_RATE_PULLDOWN_MIN`] is still a PRINCIPLED first-cut (above the two measured baselines,
+//! below the pulldown) — not yet calibrated against a real 50→60-grabber run nor against the
+//! healthy full-run near-duplicate distribution. The LIVE-flip precondition is therefore
+//! [`signal_promotable`]([`signal_viability`]) == `true` on ≥2 consecutive real runs AND a
+//! recalibrated bound — the same discipline as #1036 / #915.
 
 /// Target canvas rate the source is padded UP to. A duplication-masked source runs at
 /// `TARGET_FPS * (1 - duplicate_fraction)`; for a 5:6 pulldown that is `60 * (1 - 1/6) = 50`.
 pub const TARGET_FPS: f64 = 60.0;
 
-/// The rate floor above which a sustained content-duplicate fraction is treated as a candidate
+/// The rate floor above which a sustained near-duplicate fraction is treated as a candidate
 /// pulldown. `0.10` sits above BOTH known baselines — the `#674` free-running beat (~0.043 on a
 /// ShadowCast) and the `#889` over-rate grabber's isolated dupes (~0.067) — and comfortably below
-/// the 5:6 pulldown's ≈0.167. A first-cut PRINCIPLED bound (report-only), to be tightened once the
-/// healthy offline content-dup distribution is measured from real verdict runs.
+/// the 5:6 pulldown's ≈0.167. A first-cut PRINCIPLED bound (report-only), to be recalibrated once
+/// the healthy full-run near-duplicate distribution is measured from real verdict runs (#1166).
 pub const DUP_RATE_PULLDOWN_MIN: f64 = 0.10;
 
 /// The maximum coefficient of variation (population stddev / mean) of the inter-duplicate spacing
@@ -89,58 +107,93 @@ pub const DUP_COVERAGE_MIN: f64 = 0.5;
 /// ~60-frame window); [`measure_dup_cadence`] returns `None` under it, never a spurious verdict.
 pub const MIN_SAMPLE_FRAMES: usize = 24;
 
-/// How many rows of each frame [`frame_content_hash`] samples — a FEW rows spread evenly across the
-/// height, not the whole frame. Mirrors `dupe_decimation::dupe_content_hash`'s (#889) row-sampling
-/// cost discipline: a real grabber duplicate reproduces the frame byte-for-byte (sampled rows
-/// included), and real content (sensor noise + motion) differs even within a small sampled subset,
-/// so byte-exact equality over these rows alone is a reliable "same vs different" test at a
-/// fraction of a full-frame hash's cost over a 54k-frame recording.
-pub const CONTENT_HASH_SAMPLE_ROWS: usize = 8;
+/// #1166 — the near-duplicate threshold on the per-pair row-sampled mean-abs-luma-difference (MAD):
+/// a consecutive frame pair whose [`frame_row_sampled_mad`] is `<= NEAR_DUP_MAD_MAX` is a
+/// CONTENT NEAR-DUPLICATE (a byte-duplicate source frame survives the lossy encode as a low-MAD
+/// pair — only global quantization noise between the two). Calibrated from the retained real lossy
+/// diagnostic frame PNGs: 32 tick-proven copy pairs cluster at MAD [1.37, 20.34] (median ~7.4)
+/// while 381 genuine-motion pairs sit at [10.79, 36.25] (median ~27); `10.0` observes 26/32 = 81%
+/// of the tick-proven copies with 0/381 = 0.0% motion false-positives — the tight-green,
+/// zero-false-positive point below the genuine-motion floor. A FIRST-CUT bound (report-only) on a
+/// BIASED PNG-dump sample; the full-run recalibration + the LIVE flip are gated on `signal_promotable`
+/// over real runs (#1166).
+pub const NEAR_DUP_MAD_MAX: f64 = 10.0;
 
-/// Row-sampled FNV-1a content fingerprint of a tightly-packed gray8 frame — the ENCODER half of
-/// this metric, kept beside the classifier so the whole thing is self-contained and Tier-0
-/// testable. `bytes` is `width * height` (gray8, tightly packed as ffmpeg's `-pix_fmt gray`
-/// emits). Mirrors the proven approach of `dupe_decimation::dupe_content_hash` (#889): a fast,
-/// deterministic fold for "same vs different" on real content, NOT a cryptographic hash —
-/// collision RESISTANCE is irrelevant here (never adversarial), only exact-duplicate
-/// discrimination. Two byte-identical frames hash equal; a degenerate (zero width/height) frame
-/// hashes to a stable sentinel `0`. A local FNV-1a (no crate dependency) rather than a `std` hasher
-/// so the value is stable across toolchain versions, the same reason #889 rolled its own.
-pub fn frame_content_hash(bytes: &[u8], width: usize, height: usize) -> u64 {
+/// How many rows of each frame [`frame_row_sampled_mad`] samples — a set of full-WIDTH rows spread
+/// evenly across the height, NOT a downscale. Downscaling AVERAGES away the fine spatial detail that
+/// distinguishes localised genuine motion from a duplicate's global quantization noise (measured:
+/// 8×8/16×16 thumbnail MAD ranges OVERLAP copy-vs-motion, destroying the separation); full-width
+/// row-sampling keeps each sampled row at full horizontal resolution, so it preserves the
+/// full-resolution copy/motion separation at ~6% of the pixel cost over a 54k-frame recording.
+pub const MAD_SAMPLE_ROWS: usize = 64;
+
+/// Row-sampled mean-abs-luma-DIFFERENCE between two tightly-packed gray8 frames — the ENCODER half
+/// of this metric (#1166), kept beside the classifier so the whole thing is self-contained and
+/// Tier-0 testable. `prev`/`cur` are each `width * height` (gray8, tightly packed as ffmpeg's
+/// `-pix_fmt gray` emits). Samples a set of full-WIDTH rows spread evenly across the height
+/// ([`MAD_SAMPLE_ROWS`]) and returns the mean absolute per-pixel luma difference over them. Two
+/// byte-identical frames → `0.0` (correctly a near-duplicate — that IS the signal). The two
+/// no-comparable-data degenerate cases also return `0.0`: a zero width/height frame, or one where no
+/// sampled row is fully present in both buffers. Neither can arise in production — the producer
+/// (`probe::recording::frame_prev_diffs`) only ever passes two FULL `width*height` buffers of a
+/// non-zero-dimension recording: `read_frames` reads by `read_exact`, so a truncated tail is dropped
+/// (`UnexpectedEof`), never delivered as a short frame. (Were a short/degenerate frame ever passed
+/// for a recording-adjacent in-range position, its `0.0` WOULD count as a near-duplicate — this is a
+/// no-op guard against a caller that does not exist, not a case the window's None-gating catches.)
+/// Computed on the box between consecutive decoded frames; carried per frame and thresholded in the
+/// merge.
+pub fn frame_row_sampled_mad(prev: &[u8], cur: &[u8], width: usize, height: usize) -> f64 {
     if width == 0 || height == 0 {
-        return 0;
+        return 0.0;
     }
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a 64-bit offset basis
-    let step = (height / CONTENT_HASH_SAMPLE_ROWS).max(1);
+    // A set of full-WIDTH rows spread evenly across the height (NOT a downscale — see
+    // MAD_SAMPLE_ROWS): mirrors the row-selection of the retired `frame_content_hash` (step =
+    // height/rows, y = 0, step, 2*step, …).
+    let step = (height / MAD_SAMPLE_ROWS).max(1);
+    let mut sum: u64 = 0;
+    let mut count: u64 = 0;
     let mut y = 0usize;
     while y < height {
         let row_start = y * width;
         let row_end = row_start + width;
-        if row_end <= bytes.len() {
-            for &b in &bytes[row_start..row_end] {
-                hash ^= u64::from(b);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3); // FNV-1a prime
+        // Only sample a row fully present in BOTH buffers (a truncated trailing/short frame skips
+        // that row rather than panicking or comparing past the end).
+        if row_end <= prev.len() && row_end <= cur.len() {
+            for x in row_start..row_end {
+                sum += u64::from((i32::from(prev[x]) - i32::from(cur[x])).unsigned_abs());
+                count += 1;
             }
         }
         y += step;
     }
-    hash
+    if count == 0 {
+        0.0
+    } else {
+        sum as f64 / count as f64
+    }
+}
+
+/// #1166 — whether a per-pair row-sampled [`frame_row_sampled_mad`] counts as a content
+/// NEAR-DUPLICATE (`mad <= NEAR_DUP_MAD_MAX`). A precondition helper the classifier + the
+/// viability cross-check share, so both apply the SAME threshold to the SAME per-window sequence.
+pub fn is_near_duplicate(mad: f64) -> bool {
+    mad <= NEAR_DUP_MAD_MAX
 }
 
 /// Per-window duplication-masked-cadence classification, built from a sequence of per-frame
-/// content HASHES in recorded (delivery) order.
+/// near-duplicate signals (MAD-to-window-predecessor) in recorded (delivery) order.
 // #1088: carries `f64` fractions (no `Eq` impl — NaN) + a `Vec`, so this derives `PartialEq`/
 // `Debug`/`Clone`/`Serialize` only, never `Copy`/`Eq`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DupCadence {
-    /// Number of per-frame hashes evaluated (`hashes.len()`).
+    /// Number of per-frame samples evaluated (the window's frame count).
     pub sample_frames: usize,
     /// Consecutive-frame pairs compared (`sample_frames - 1`).
     pub compared_pairs: usize,
-    /// Pairs whose two frames hashed byte-identical — an exact content duplicate of the prior
-    /// delivered frame.
-    pub exact_duplicates: usize,
-    /// `exact_duplicates / compared_pairs`. ≈0.167 for a 5:6 pulldown, ~0.043 for the `#674` beat.
+    /// #1166 — pairs whose MAD-to-predecessor was `<= NEAR_DUP_MAD_MAX` (a codec-tolerant content
+    /// near-duplicate of the prior delivered frame). Renamed from the byte-exact `exact_duplicates`.
+    pub near_duplicates: usize,
+    /// `near_duplicates / compared_pairs`. ≈0.167 for a 5:6 pulldown, ~0.043 for the `#674` beat.
     pub duplicate_fraction: f64,
     /// Spacing (index delta) between each pair of CONSECUTIVE duplicate positions — the raw signal
     /// the regularity check consumes. A clean 5:6 pulldown is all `6`s.
@@ -161,33 +214,38 @@ pub struct DupCadence {
     pub inferred_source_fps: f64,
     /// The classification: a SUSTAINED (`duplicate_fraction >= DUP_RATE_PULLDOWN_MIN`),
     /// REGULARLY-SPACED (`gap_cv <= DUP_GAP_CV_MAX`) AND window-SPANNING (`coverage >=
-    /// DUP_COVERAGE_MIN`) content-duplication pattern, with at least two duplicates to characterize
-    /// — the duplication-masked non-60 cadence this module exists to catch. `false` for the healthy
-    /// baselines (below the rate floor), a localized freeze (below coverage), and an irregular
-    /// burst (over the cv bound).
+    /// DUP_COVERAGE_MIN`) content near-duplication pattern, with at least two duplicates to
+    /// characterize — the duplication-masked non-60 cadence this module exists to catch. `false` for
+    /// the healthy baselines (below the rate floor), a localized freeze (below coverage), and an
+    /// irregular burst (over the cv bound).
     pub duplication_masked: bool,
 }
 
-/// Classify the duplication-masked cadence of `hashes` (per-frame content hashes in recorded
-/// order).
+/// Classify the duplication-masked cadence of `prev_mads` — the per-window sequence of per-frame
+/// near-duplicate signals in recorded order. Position `i` is `Some(mad)` when frame `i` is
+/// recording-adjacent to its window-predecessor (`i-1`) and its MAD is known, else `None` (position
+/// 0, a decode gap, or a non-adjacent window boundary — none of which can be a duplicate). Built by
+/// [`window_prev_mads`] from the carried per-frame MAD vector.
 ///
-/// Returns `None` when there is not enough data to say anything (`hashes.len() <
+/// Returns `None` when there is not enough data to say anything (`prev_mads.len() <
 /// MIN_SAMPLE_FRAMES`). A caller treats `None` as "not applicable to this window", never a
 /// failure — exactly like [`crate::presentation_cadence::measure_cadence_evenness`]'s `None`
 /// contract.
-pub fn measure_dup_cadence(hashes: &[u64]) -> Option<DupCadence> {
-    let sample_frames = hashes.len();
+pub fn measure_dup_cadence(prev_mads: &[Option<f64>]) -> Option<DupCadence> {
+    let sample_frames = prev_mads.len();
     if sample_frames < MIN_SAMPLE_FRAMES {
         return None;
     }
     let compared_pairs = sample_frames - 1;
 
-    // Positions (index `i` in `1..n`) where frame `i` is byte-identical to its predecessor.
+    // Positions (index `i` in `1..n`) where frame `i` is a content near-duplicate of its
+    // window-predecessor (`Some` MAD at or below the near-dup threshold). A `None` (gap / first
+    // frame / non-adjacent boundary) is never a duplicate.
     let dup_positions: Vec<usize> = (1..sample_frames)
-        .filter(|&i| hashes[i] == hashes[i - 1])
+        .filter(|&i| prev_mads[i].is_some_and(is_near_duplicate))
         .collect();
-    let exact_duplicates = dup_positions.len();
-    let duplicate_fraction = exact_duplicates as f64 / compared_pairs as f64;
+    let near_duplicates = dup_positions.len();
+    let duplicate_fraction = near_duplicates as f64 / compared_pairs as f64;
 
     // Inter-duplicate spacing (regularity) — needs at least two duplicates to have any gap.
     let duplicate_gaps: Vec<usize> = dup_positions.windows(2).map(|w| w[1] - w[0]).collect();
@@ -225,7 +283,7 @@ pub fn measure_dup_cadence(hashes: &[u64]) -> Option<DupCadence> {
 
     let regular = gap_cv.is_some_and(|cv| cv <= DUP_GAP_CV_MAX);
     let spans_window = coverage >= DUP_COVERAGE_MIN;
-    let duplication_masked = exact_duplicates >= 2
+    let duplication_masked = near_duplicates >= 2
         && duplicate_fraction >= DUP_RATE_PULLDOWN_MIN
         && regular
         && spans_window;
@@ -233,7 +291,7 @@ pub fn measure_dup_cadence(hashes: &[u64]) -> Option<DupCadence> {
     Some(DupCadence {
         sample_frames,
         compared_pairs,
-        exact_duplicates,
+        near_duplicates,
         duplicate_fraction,
         duplicate_gaps,
         gap_mean,
@@ -286,36 +344,221 @@ pub fn dup_cadence_gate_pass(
 
 /// #1088 report-only / restore seam — mirrors [`crate::optical_floor::gates_overall_pass`] /
 /// [`crate::presentation_cadence::gates_overall_pass`]. Whether [`dup_cadence_gate_pass`]'s result
-/// folds into the fused verdict's `overall_pass`. `false` today: the metric ships REPORT-ONLY (the
-/// bound is an uncalibrated first-cut and the offline content-dup distribution is not yet measured
-/// on real runs). Flip to `true` for a one-line promotion once calibrated against real runs.
+/// folds into the fused verdict's `overall_pass`. `false` today: the metric ships REPORT-ONLY.
+///
+/// **#1166 signal fix — the flip is still NOT merely a threshold change.** #1101 proved the OLD
+/// byte-exact tap was [`SignalViability::Blind`] (observed 2 of 147 tick-proven copies). #1166
+/// replaces it with the codec-tolerant near-duplicate MAD signal (validated on the retained real
+/// lossy PNGs: 81% of tick-proven copies observed, 0% motion false-positives), which turns the
+/// viability cross-check toward `Viable`. But the flip stays blocked because (1) that validation is
+/// on a BIASED PNG-dump sample, not a full green run; (2) [`DUP_RATE_PULLDOWN_MIN`] is still a
+/// principled first-cut, not calibrated against the new signal's healthy full-run distribution; and
+/// (3) the precondition is [`signal_promotable`]([`signal_viability`]) == `true` on ≥2 consecutive
+/// REAL runs emitting the new signal (the existing partials carry the old byte-exact hashes, so they
+/// cannot supply it). Until a fresh green run shows all three, this stays `false`.
 pub fn gates_overall_pass() -> bool {
     false
 }
 
-/// #1112 — slice a carried per-frame content-hash vector into ONE cambox window's hash sequence,
-/// in the window's own frame order, ready for [`measure_dup_cadence`].
+// ── #1101 (signal fix #1166): signal-viability self-diagnosis ────────────────────────────────────
+//
+// The #1088 surface reports a per-window `duplicate_fraction`, but an all-zero distribution is
+// AMBIGUOUS: it means either "healthy rig, no pulldown" (promotable) OR "the content signal is
+// blind, sees nothing" (a false-green if gated). These fns DISAMBIGUATE the two by cross-checking
+// the content near-duplicate signal against Vernier-tick copies over the SAME consecutive-frame
+// basis: a STRICT-ADJACENT tick repeat (frame `i` and `i-1` BOTH decoded and equal-ticked) is a
+// tick-proven byte-duplicate camera frame. This is a SUBSET of the canonical `copies` metric
+// (`probe::recording_segments`), which additionally bridges an undecodable gap between two equal
+// ticks (its `prev_recorded` skips `None`), so `tick_copies` here is `<=` canonical `copies`; the
+// strict definition is the right one for a consecutive-pair cross-check against the near-duplicate
+// signal (both sides on the same adjacency basis), and it is conservative (an undercount only ever
+// yields MORE `Indeterminate`, never a false `Viable`). A signal that observes ~none of the
+// tick-proven copies is structurally blind and MUST NOT be promoted to a LIVE gate. (#1101 measured
+// 2 of 147 observed on the BYTE-EXACT lossy tap; #1166 measured 26 of 32 = 81% observed with the
+// near-duplicate MAD signal on the retained real lossy frame PNGs.)
+
+/// Minimum tick-proven copies in a run before "zero content near-duplicates" is CONCLUSIVE evidence
+/// the content signal is blind (below it → [`SignalViability::Indeterminate`], not a false
+/// [`SignalViability::Blind`]).
+pub const MIN_TICK_COPIES_FOR_VIABILITY: usize = 3;
+
+/// Minimum fraction of tick-proven copies the content signal must ALSO observe for it to be
+/// [`SignalViability::Viable`] (able to see frame duplication at all). A precondition on gate-ability,
+/// NOT a threshold on the defect.
+pub const COPY_OBSERVATION_RATE_MIN: f64 = 0.5;
+
+/// How well the per-frame content near-duplicate signal TRACKS the ground-truth duplication the
+/// Vernier-tick decoder proves is present. Built from parallel per-window (tick, near-dup MAD)
+/// sequences.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CopyObservation {
+    /// Consecutive-frame pairs whose Vernier tick REPEATED — a tick-proven byte-duplicate camera
+    /// frame (the ground truth the content signal should also see). Counted ONLY over pairs the
+    /// content signal COULD observe, i.e. RECORDING-ADJACENT ones (`prev_mads[i].is_some()` — the
+    /// exact adjacency `window_prev_mads` gates the MAD on), so this is the honest DENOMINATOR for
+    /// the observation rate: a tick-copy across a within-window attribution gap (which the MAD side
+    /// can never see) does not inflate it. Only `Some`-tick pairs count.
+    pub tick_copies: usize,
+    /// Of those tick-copy pairs, how many ALSO registered a content NEAR-duplicate (MAD ≤
+    /// [`NEAR_DUP_MAD_MAX`]) — copies the content signal actually observed.
+    pub copies_observed_by_content: usize,
+    /// Total consecutive-frame pairs that registered a content near-duplicate (incl. any not aligned
+    /// to a tick-copy) — informational; the raw firing count of the content signal. NOTE: computed
+    /// over the SAME None-padded, position-aligned per-window sequence ([`window_prev_mads`]) that
+    /// [`measure_dup_cadence`]'s `duplicate_fraction` consumes — the #1101 review's content/duplicate
+    /// sequence-mismatch is resolved by feeding BOTH from that one sequence. Both are report-only.
+    pub content_near_dup_pairs: usize,
+    /// `copies_observed_by_content / tick_copies` — the observation RATE. `None` when there were no
+    /// tick-copies (nothing to observe → not a judgement of the signal).
+    pub copy_observation_rate: Option<f64>,
+}
+
+/// Build a [`CopyObservation`] from ONE window's parallel per-frame `ticks` and near-duplicate
+/// `prev_mads` (index `i` is the same recorded frame in both; a `None` on either side never forms a
+/// duplicate). The caller builds both aligned from the same window frames (`prev_mads` via
+/// [`window_prev_mads`], so its near-dup positions match `measure_dup_cadence`'s exactly).
+///
+/// A tick-copy is counted ONLY where `prev_mads[i].is_some()` — i.e. the pair is RECORDING-ADJACENT
+/// (the exact gate `window_prev_mads` applies: `Some` at position `i` iff frames `i-1`,`i` are
+/// consecutive in the recording and in range). This puts BOTH sides of the cross-check on the SAME
+/// pair basis, so `copy_observation_rate` measures "of the copies the content signal COULD observe,
+/// how many did it" — a tick-copy across a within-window attribution gap (which the MAD side can
+/// never see, its `prev_mads` there being `None`) is excluded from BOTH numerator and denominator,
+/// never depressing the rate below what the signal can actually achieve.
+pub fn copy_observation(ticks: &[Option<u64>], prev_mads: &[Option<f64>]) -> CopyObservation {
+    let n = ticks.len().min(prev_mads.len());
+    let mut tick_copies = 0usize;
+    let mut copies_observed_by_content = 0usize;
+    let mut content_near_dup_pairs = 0usize;
+    for i in 1..n {
+        // Only pairs the content signal could observe (recording-adjacent, in-range) are eligible
+        // as tick-copies — `prev_mads[i].is_some()` is exactly that gate (see the fn doc).
+        let recording_adjacent = prev_mads[i].is_some();
+        let tick_copy = recording_adjacent && ticks[i].is_some() && ticks[i] == ticks[i - 1];
+        let near_dup = prev_mads[i].is_some_and(is_near_duplicate);
+        if tick_copy {
+            tick_copies += 1;
+        }
+        if near_dup {
+            content_near_dup_pairs += 1;
+        }
+        if tick_copy && near_dup {
+            copies_observed_by_content += 1;
+        }
+    }
+    let copy_observation_rate = if tick_copies > 0 {
+        Some(copies_observed_by_content as f64 / tick_copies as f64)
+    } else {
+        None
+    };
+    CopyObservation {
+        tick_copies,
+        copies_observed_by_content,
+        content_near_dup_pairs,
+        copy_observation_rate,
+    }
+}
+
+/// Fold per-window [`CopyObservation`]s into one run-level observation (sum the counts, recompute
+/// the rate).
+pub fn aggregate_copy_observations(observations: &[CopyObservation]) -> CopyObservation {
+    let mut tick_copies = 0usize;
+    let mut copies_observed_by_content = 0usize;
+    let mut content_near_dup_pairs = 0usize;
+    for o in observations {
+        tick_copies += o.tick_copies;
+        copies_observed_by_content += o.copies_observed_by_content;
+        content_near_dup_pairs += o.content_near_dup_pairs;
+    }
+    let copy_observation_rate = if tick_copies > 0 {
+        Some(copies_observed_by_content as f64 / tick_copies as f64)
+    } else {
+        None
+    };
+    CopyObservation {
+        tick_copies,
+        copies_observed_by_content,
+        content_near_dup_pairs,
+        copy_observation_rate,
+    }
+}
+
+/// Whether the content near-duplicate signal can be trusted to OBSERVE frame duplication — the
+/// #1101 promotion-readiness precondition (#1166 signal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalViability {
+    /// The content signal observed at least [`COPY_OBSERVATION_RATE_MIN`] of the tick-proven copies —
+    /// it demonstrably tracks duplication (NECESSARY, not sufficient, for a LIVE flip).
+    Viable,
+    /// At least [`MIN_TICK_COPIES_FOR_VIABILITY`] tick-proven copies occurred but the content signal
+    /// observed fewer than [`COPY_OBSERVATION_RATE_MIN`] of them — structurally blind. NOT
+    /// promotable: a LIVE gate would be a false-green.
+    Blind,
+    /// Fewer than [`MIN_TICK_COPIES_FOR_VIABILITY`] tick-proven copies — too little ground-truth
+    /// duplication to judge. Not proven blind, not proven viable.
+    Indeterminate,
+}
+
+/// Classify a run's aggregate [`CopyObservation`] into a [`SignalViability`].
+pub fn signal_viability(observation: &CopyObservation) -> SignalViability {
+    if observation.tick_copies < MIN_TICK_COPIES_FOR_VIABILITY {
+        SignalViability::Indeterminate
+    } else if observation
+        .copy_observation_rate
+        .is_some_and(|r| r >= COPY_OBSERVATION_RATE_MIN)
+    {
+        SignalViability::Viable
+    } else {
+        SignalViability::Blind
+    }
+}
+
+/// Whether the surface is eligible for a LIVE-gate promotion AT ALL — true ONLY when the signal is
+/// [`SignalViability::Viable`]. The precondition [`gates_overall_pass`] must satisfy on real runs
+/// before its one-line flip. On the OLD byte-exact tap it was `false` (#1101); #1166's
+/// near-duplicate signal turns it toward `true`, but the flip still needs ≥2 consecutive real runs
+/// reading `viable` plus a recalibrated bound.
+pub fn signal_promotable(viability: SignalViability) -> bool {
+    matches!(viability, SignalViability::Viable)
+}
+
+/// #1112 (signal #1166) — slice a carried per-frame MAD-to-predecessor vector into ONE cambox
+/// window's near-duplicate sequence, in the window's own frame order, ready for
+/// [`measure_dup_cadence`] AND [`copy_observation`] (the SAME sequence feeds both, resolving the
+/// #1101 content/duplicate sequence-mismatch).
 ///
 /// `frame_indices` are the `RecordingFrame::frame_index` values of the frames the merge attributed
-/// to this window (`partition_frames_by_window`), IN window order. `frame_hashes` is the full
-/// per-recording content-hash vector the stream box computed during `--extract-partial stream` and
-/// CARRIED in the partial (`RecordingPartial::content_hashes`), 0-based by `frame_index` — the same
-/// index contract `probe::recording::hash_recording_frames` and the parallel decode both hold
-/// (frame `i` ⇒ `frame_hashes[i]`). (Plain reference, not an intra-doc link: that item is behind
-/// `#[cfg(feature = "probe")]`, unresolvable from this default-feature module — same as the
-/// `dupe_decimation::dupe_content_hash` references above.)
+/// to this window (`partition_frames_by_window`), IN window order (ascending). `frame_prev_mads` is
+/// the full per-recording vector the stream box computed during `--extract-partial stream` and
+/// CARRIED in the partial (`RecordingPartial::frame_prev_diffs`): index `i` is `Some(MAD(frame i,
+/// frame i-1))` and index 0 is `None` (no predecessor) — the same 0-based-by-`frame_index` contract
+/// `probe::recording::frame_prev_diffs` holds. (Plain reference, not an intra-doc link: that item is
+/// behind `#[cfg(feature = "probe")]`, unresolvable from this default-feature module.)
 ///
-/// This is the ONE genuinely new pure step of the #1112 emit-wiring — the on-box `hash_recording_frames`
-/// / on-dev1 `partition_frames_by_window` sides are unchanged; this replaces the old inline
-/// `win.iter().filter_map(|f| frame_hashes.get(f.frame_index as usize).copied())` in the merge so it
-/// can be Tier-0 tested (no probe compile path exists for the merge consumer). A frame index at or
-/// beyond `frame_hashes.len()` is SKIPPED, not defaulted — a hash gap must not manufacture a false
-/// "duplicate" (two skipped frames would otherwise look identical); the resulting shorter sequence is
-/// exactly what `measure_dup_cadence`'s own `MIN_SAMPLE_FRAMES` / fraction math already handles.
-pub fn window_content_hashes(frame_indices: &[u64], frame_hashes: &[u64]) -> Vec<u64> {
+/// The output is POSITION-ALIGNED to `frame_indices` (`out.len() == frame_indices.len()`): position
+/// `j` is `Some(mad)` ONLY when frame `j` is RECORDING-ADJACENT to its window-predecessor
+/// (`frame_indices[j] == frame_indices[j-1] + 1`, so the carried `MAD(frame j, frame j-1)` genuinely
+/// measures the window pair) AND that carried MAD is `Some`. Position 0, a decode gap, a
+/// non-adjacent window boundary, or an out-of-range index all yield `None` — a near-duplicate can
+/// never be manufactured across a gap or a window seam (two skipped frames must not look identical).
+pub fn window_prev_mads(
+    frame_indices: &[u64],
+    frame_prev_mads: &[Option<f64>],
+) -> Vec<Option<f64>> {
     frame_indices
         .iter()
-        .filter_map(|&idx| frame_hashes.get(idx as usize).copied())
+        .enumerate()
+        .map(|(j, &fi)| {
+            if j == 0 {
+                return None;
+            }
+            let adjacent = fi == frame_indices[j - 1] + 1;
+            if !adjacent {
+                return None;
+            }
+            frame_prev_mads.get(fi as usize).copied().flatten()
+        })
         .collect()
 }
 
@@ -323,85 +566,129 @@ pub fn window_content_hashes(frame_indices: &[u64], frame_hashes: &[u64]) -> Vec
 mod tests {
     use super::*;
 
-    /// Build a hash sequence of `n` frames with a duplicate inserted every `period` frames
-    /// (a clean M:(M+1) pulldown when `period == M+1`), all other frames unique. Frame i's hash
-    /// is a fresh unique value unless it duplicates its predecessor.
-    fn pulldown_hashes(n: usize, period: usize) -> Vec<u64> {
-        let mut out: Vec<u64> = Vec::with_capacity(n);
-        let mut next: u64 = 1;
-        for i in 0..n {
-            if i > 0 && period > 0 && i % period == 0 {
-                // duplicate the previous frame's content
-                let prev = *out.last().unwrap();
-                out.push(prev);
-            } else {
-                out.push(next);
-                next += 1;
-            }
-        }
-        out
+    // ---- helpers -----------------------------------------------------------------------
+
+    /// A per-window near-duplicate sequence of `n` frames with a duplicate inserted every `period`
+    /// frames (a clean M:(M+1) pulldown when `period == M+1`): the duplicate positions carry a LOW
+    /// MAD (near-duplicate), every other position a HIGH MAD (genuine motion). Position 0 is `None`
+    /// (no predecessor).
+    fn pulldown_mads(n: usize, period: usize) -> Vec<Option<f64>> {
+        (0..n)
+            .map(|i| {
+                if i == 0 {
+                    None
+                } else if period > 0 && i % period == 0 {
+                    Some(2.0) // a byte-duplicate survives lossy encode as a low-MAD pair
+                } else {
+                    Some(25.0) // genuine motion
+                }
+            })
+            .collect()
     }
 
-    /// All-unique frames (no duplicates at all) — a smooth true-60 source.
-    fn smooth_hashes(n: usize) -> Vec<u64> {
-        (0..n as u64).collect()
+    /// All-motion frames (no near-duplicates at all) — a smooth true-60 source.
+    fn smooth_mads(n: usize) -> Vec<Option<f64>> {
+        (0..n)
+            .map(|i| if i == 0 { None } else { Some(25.0) })
+            .collect()
     }
 
-    /// `n` unique frames, then force each index in `dup_at` to duplicate its predecessor. Lets a
+    /// `n` motion frames, then force each index in `dup_at` to a low (near-duplicate) MAD. Lets a
     /// test place duplicates at arbitrary positions (for the irregular-spacing / freeze cases).
-    fn hashes_with_dups_at(n: usize, dup_at: &[usize]) -> Vec<u64> {
-        let mut h: Vec<u64> = (0..n as u64).map(|x| x + 1).collect();
+    fn mads_with_dups_at(n: usize, dup_at: &[usize]) -> Vec<Option<f64>> {
+        let mut m: Vec<Option<f64>> = (0..n)
+            .map(|i| if i == 0 { None } else { Some(25.0) })
+            .collect();
         for &i in dup_at {
             assert!(i >= 1 && i < n, "dup index in range");
-            h[i] = h[i - 1];
+            m[i] = Some(2.0);
         }
-        h
+        m
     }
 
-    // ---- frame_content_hash (the encoder half) -----------------------------------------
+    // ---- frame_row_sampled_mad (the encoder half) --------------------------------------
 
     #[test]
-    fn identical_frames_hash_equal() {
-        // A grabber duplicate is byte-for-byte identical → its hash must match its predecessor's,
-        // which is exactly what makes it counted as a duplicate downstream.
+    fn identical_frames_have_zero_mad() {
+        // A grabber duplicate is byte-for-byte identical → MAD 0.0, which makes it a near-duplicate
+        // downstream regardless of threshold.
         let w = 64;
-        let h = 32;
+        let h = 128;
         let a: Vec<u8> = (0..(w * h)).map(|i| (i % 251) as u8).collect();
         let b = a.clone();
         assert_eq!(
-            frame_content_hash(&a, w, h),
-            frame_content_hash(&b, w, h),
-            "byte-identical frames must hash equal"
+            frame_row_sampled_mad(&a, &b, w, h),
+            0.0,
+            "byte-identical frames must have MAD 0"
         );
     }
 
     #[test]
-    fn a_difference_in_a_sampled_row_changes_the_hash() {
+    fn a_difference_in_a_sampled_row_raises_the_mad() {
         // Real content (sensor noise + motion) differs frame-to-frame; a change in a SAMPLED row
-        // must move the hash so a genuinely-different frame is not miscounted as a duplicate.
+        // must raise the MAD so a genuinely-different frame is not miscounted as a near-duplicate.
         let w = 64;
-        let h = 32;
+        let h = 128;
         let a: Vec<u8> = vec![7u8; w * h];
         let mut b = a.clone();
-        b[0] = 8; // row 0 is always sampled (y starts at 0)
-        assert_ne!(
-            frame_content_hash(&a, w, h),
-            frame_content_hash(&b, w, h),
-            "a sampled-row difference must change the hash"
+        // saturate every pixel of row 0 (always sampled — y starts at 0) to force a big MAD.
+        for v in b.iter_mut().take(w) {
+            *v = 250;
+        }
+        assert!(
+            frame_row_sampled_mad(&a, &b, w, h) > 0.0,
+            "a sampled-row difference must raise the MAD above 0"
         );
     }
 
     #[test]
-    fn degenerate_dimensions_hash_to_a_stable_sentinel() {
-        assert_eq!(frame_content_hash(&[1, 2, 3], 0, 32), 0);
-        assert_eq!(frame_content_hash(&[1, 2, 3], 64, 0), 0);
+    fn a_big_uniform_shift_yields_a_mad_near_the_shift() {
+        // A uniform +40 luma shift on every pixel → MAD ≈ 40 across all sampled rows.
+        let w = 32;
+        let h = 128;
+        let a: Vec<u8> = vec![100u8; w * h];
+        let b: Vec<u8> = vec![140u8; w * h];
+        let mad = frame_row_sampled_mad(&a, &b, w, h);
+        assert!(
+            (mad - 40.0).abs() < 1e-9,
+            "uniform +40 shift → MAD 40, got {mad}"
+        );
+    }
+
+    #[test]
+    fn degenerate_dimensions_have_zero_mad() {
+        assert_eq!(frame_row_sampled_mad(&[1, 2, 3], &[4, 5, 6], 0, 32), 0.0);
+        assert_eq!(frame_row_sampled_mad(&[1, 2, 3], &[4, 5, 6], 64, 0), 0.0);
     }
 
     #[test]
     fn a_short_buffer_never_panics() {
-        // A truncated buffer (fewer bytes than width*height) must be handled, not panic — the
-        // row-bounds guard skips rows that would read past the end.
-        let _ = frame_content_hash(&[1, 2, 3, 4], 64, 32);
+        // Truncated buffers (fewer bytes than width*height) must be handled, not panic — the
+        // row-bounds guard skips rows that would read past the end of EITHER buffer.
+        let _ = frame_row_sampled_mad(&[1, 2, 3, 4], &[5, 6], 64, 32);
+    }
+
+    // ---- is_near_duplicate -------------------------------------------------------------
+
+    #[test]
+    fn is_near_duplicate_at_below_and_above_the_threshold() {
+        assert!(is_near_duplicate(0.0), "identical → near-duplicate");
+        assert!(
+            is_near_duplicate(NEAR_DUP_MAD_MAX),
+            "exactly at the bound is a near-duplicate (inclusive)"
+        );
+        assert!(
+            is_near_duplicate(NEAR_DUP_MAD_MAX - 0.01),
+            "just below the bound is a near-duplicate"
+        );
+        assert!(
+            !is_near_duplicate(NEAR_DUP_MAD_MAX + 0.01),
+            "just above the bound is NOT a near-duplicate"
+        );
+        assert!(
+            !is_near_duplicate(25.0),
+            "genuine motion is not a near-duplicate"
+        );
     }
 
     // ---- degenerate inputs -------------------------------------------------------------
@@ -409,15 +696,14 @@ mod tests {
     #[test]
     fn too_few_frames_returns_none() {
         assert_eq!(measure_dup_cadence(&[]), None);
-        assert_eq!(measure_dup_cadence(&[1, 2, 3]), None);
-        // exactly one under the floor is still None
-        let just_under = smooth_hashes(MIN_SAMPLE_FRAMES - 1);
+        assert_eq!(measure_dup_cadence(&[None, Some(2.0), Some(2.0)]), None);
+        let just_under = smooth_mads(MIN_SAMPLE_FRAMES - 1);
         assert_eq!(measure_dup_cadence(&just_under), None);
     }
 
     #[test]
     fn at_the_sample_floor_produces_a_reading() {
-        let at_floor = smooth_hashes(MIN_SAMPLE_FRAMES);
+        let at_floor = smooth_mads(MIN_SAMPLE_FRAMES);
         assert!(measure_dup_cadence(&at_floor).is_some());
     }
 
@@ -425,10 +711,10 @@ mod tests {
 
     #[test]
     fn smooth_true_60_source_has_zero_duplicates_and_is_not_masked() {
-        let v = measure_dup_cadence(&smooth_hashes(60)).expect("60 frames is plenty");
+        let v = measure_dup_cadence(&smooth_mads(60)).expect("60 frames is plenty");
         assert_eq!(v.sample_frames, 60);
         assert_eq!(v.compared_pairs, 59);
-        assert_eq!(v.exact_duplicates, 0);
+        assert_eq!(v.near_duplicates, 0);
         assert_eq!(v.duplicate_fraction, 0.0);
         assert!(v.duplicate_gaps.is_empty());
         assert_eq!(v.gap_mean, None);
@@ -445,10 +731,10 @@ mod tests {
     fn five_to_six_pulldown_is_detected_as_duplication_masked() {
         // 5:6 pulldown → a duplicate every 6th frame → ~1/6 ≈ 0.167 duplicate fraction, all gaps
         // exactly 6 (perfectly regular), spread across the whole window → the masked signature.
-        let v = measure_dup_cadence(&pulldown_hashes(120, 6)).expect("120 frames is plenty");
+        let v = measure_dup_cadence(&pulldown_mads(120, 6)).expect("120 frames is plenty");
         // duplicates land at indices 6,12,...,114 → 19 duplicates over 119 pairs.
         assert_eq!(
-            v.exact_duplicates, 19,
+            v.near_duplicates, 19,
             "one dup every 6 frames over 120: {v:?}"
         );
         assert!(
@@ -459,326 +745,371 @@ mod tests {
             v.duplicate_fraction > DUP_RATE_PULLDOWN_MIN,
             "the pulldown fraction must clear the rate floor: {v:?}"
         );
-        // every gap between consecutive duplicate positions is exactly 6 → cv 0.
-        assert!(
-            v.duplicate_gaps.iter().all(|&g| g == 6),
-            "clean pulldown gaps are all 6: {v:?}"
-        );
         assert_eq!(
             v.gap_cv,
             Some(0.0),
-            "perfectly regular spacing → cv 0: {v:?}"
+            "a clean pulldown is perfectly regular: {v:?}"
         );
+        assert!(v.coverage >= DUP_COVERAGE_MIN, "spans the window: {v:?}");
+        assert!(v.duplication_masked, "a 5:6 pulldown IS masked: {v:?}");
         assert!(
-            v.coverage >= DUP_COVERAGE_MIN,
-            "the pulldown spans the window: {v:?}"
-        );
-        assert!(
-            (v.inferred_source_fps - 60.0 * (1.0 - 19.0 / 119.0)).abs() < 1e-6,
+            (v.inferred_source_fps - 60.0 * (1.0 - 19.0 / 119.0)).abs() < 1e-9,
             "inferred source fps ≈ 50: {v:?}"
         );
-        assert!(
-            v.inferred_source_fps > 49.0 && v.inferred_source_fps < 51.0,
-            "5:6 pulldown implies ~50 fps source: {v:?}"
-        );
-        assert!(
-            v.duplication_masked,
-            "a regular window-wide 5:6 pulldown MUST classify as duplication-masked: {v:?}"
-        );
     }
 
     #[test]
-    fn free_running_beat_baseline_below_the_floor_is_not_masked() {
-        // #674 ~4.3% baseline: a duplicate roughly every ~23 frames (1/23 ≈ 0.043) — a real
-        // free-running-clock beat, NOT a pulldown. Even though the synthetic spacing here is
-        // regular and window-wide, the RATE alone sits below the floor, so it must NOT be flagged.
-        let v = measure_dup_cadence(&pulldown_hashes(240, 23)).expect("plenty");
+    fn a_localized_freeze_is_not_masked_coverage_veto() {
+        // A run of near-duplicates CONCENTRATED in one slice (positions 5..20) — high local rate,
+        // regular local spacing, but does NOT span the window → coverage veto (frozen_leg's job).
+        let dup_at: Vec<usize> = (5..20).collect();
+        let v = measure_dup_cadence(&mads_with_dups_at(120, &dup_at)).expect("plenty");
+        assert!(v.near_duplicates >= 2, "has duplicates: {v:?}");
         assert!(
-            v.duplicate_fraction < DUP_RATE_PULLDOWN_MIN,
-            "the ~4.3% beat fraction sits below the rate floor: {v:?}"
-        );
-        assert!(
-            !v.duplication_masked,
-            "the free-running beat baseline must NOT be masked (below the rate floor): {v:?}"
-        );
-    }
-
-    #[test]
-    fn over_rate_isolated_dupes_889_below_the_floor_is_not_masked() {
-        // #889 over-rate grabber: ~6.7% isolated dupes (~1 in 15). Still below the 10% floor.
-        let v = measure_dup_cadence(&pulldown_hashes(300, 15)).expect("plenty");
-        assert!(
-            v.duplicate_fraction < DUP_RATE_PULLDOWN_MIN,
-            "the #889 over-rate ~6.7% fraction sits below the rate floor: {v:?}"
-        );
-        assert!(
-            !v.duplication_masked,
-            "the #889 over-rate isolated dupes must NOT be masked: {v:?}"
-        );
-    }
-
-    #[test]
-    fn localized_freeze_run_above_the_floor_is_not_masked_by_coverage() {
-        // A genuine FREEZE: a RUN of ~12 consecutive identical frames concentrated in one region
-        // of a 60-frame window. Local rate clears the floor and the (all-1) inter-dup gaps are
-        // perfectly regular, but the dupes cover only a SLICE of the window — a freeze (frozen_leg's
-        // domain, #895), not a pulldown. The COVERAGE bound must veto it.
-        let dup_at: Vec<usize> = (25..=36).collect(); // 12 consecutive dups
-        let v = measure_dup_cadence(&hashes_with_dups_at(60, &dup_at)).expect("60 frames");
-        assert!(
-            v.duplicate_fraction > DUP_RATE_PULLDOWN_MIN,
-            "the freeze run clears the rate floor: {v:?}"
-        );
-        assert_eq!(
-            v.gap_cv,
-            Some(0.0),
-            "a consecutive run has perfectly regular (all-1) inter-dup gaps: {v:?}"
+            v.duplicate_fraction >= DUP_RATE_PULLDOWN_MIN,
+            "high local rate: {v:?}"
         );
         assert!(
             v.coverage < DUP_COVERAGE_MIN,
-            "a localized freeze covers only a slice of the window: {v:?}"
+            "localized, does not span: {v:?}"
         );
         assert!(
             !v.duplication_masked,
-            "a localized freeze must NOT be classified a pulldown (coverage veto): {v:?}"
+            "a localized freeze is NOT masked: {v:?}"
         );
     }
 
     #[test]
-    fn irregular_burst_across_window_is_not_masked_by_the_regularity_gate() {
-        // High-rate dupes that DO span the window but are UNEVENLY spaced — a decode-glitch burst,
-        // not a steady pulldown. Coverage passes; the spacing regularity (cv) bound must veto it.
-        let dup_at = [6usize, 12, 30, 31, 40, 55, 56]; // spans 6..56, but gaps 6,18,1,9,15,1 vary
-        let v = measure_dup_cadence(&hashes_with_dups_at(60, &dup_at)).expect("60 frames");
-        assert!(
-            v.duplicate_fraction >= DUP_RATE_PULLDOWN_MIN,
-            "the burst clears the rate floor: {v:?}"
-        );
-        assert!(
-            v.coverage >= DUP_COVERAGE_MIN,
-            "the burst spans the window (coverage would pass): {v:?}"
-        );
+    fn an_irregular_burst_is_not_masked_cv_veto() {
+        // Duplicates spread across the window but UNEVENLY spaced (gaps 3,30,3,30,...) → high cv →
+        // rejected as an irregular glitch burst, not a regular pulldown.
+        let dup_at = [3usize, 6, 40, 43, 80, 83, 116];
+        let v = measure_dup_cadence(&mads_with_dups_at(120, &dup_at)).expect("plenty");
+        assert!(v.near_duplicates >= 2, "has duplicates: {v:?}");
+        assert!(v.coverage >= DUP_COVERAGE_MIN, "spans the window: {v:?}");
         assert!(
             v.gap_cv.is_some_and(|cv| cv > DUP_GAP_CV_MAX),
-            "unevenly-spaced dupes have a high cv: {v:?}"
+            "irregular spacing exceeds the cv bound: {v:?}"
         );
         assert!(
             !v.duplication_masked,
-            "an irregular high-rate burst must NOT be classified a pulldown (cv veto): {v:?}"
+            "an irregular burst is NOT masked: {v:?}"
         );
     }
 
     #[test]
-    fn single_isolated_duplicate_is_not_masked() {
-        // Exactly one duplicate in a long clean run: below the rate floor AND there is no gap to
-        // measure regularity from (fewer than two dups → gap_cv None, coverage 0).
-        let v = measure_dup_cadence(&hashes_with_dups_at(60, &[30])).expect("60 frames");
-        assert_eq!(v.exact_duplicates, 1);
-        assert_eq!(v.gap_cv, None, "one dup has no inter-dup gap: {v:?}");
-        assert_eq!(v.coverage, 0.0, "one dup spans nothing: {v:?}");
-        assert!(
-            !v.duplication_masked,
-            "a single dup is never a pulldown: {v:?}"
-        );
+    fn none_positions_and_gaps_never_form_a_duplicate() {
+        // A None (decode gap / non-adjacent window boundary) between two would-be duplicates must
+        // not be counted as a near-duplicate — only a Some MAD at/under the threshold is.
+        let mut m = smooth_mads(60);
+        m[10] = None; // a gap
+        m[11] = None;
+        let v = measure_dup_cadence(&m).expect("plenty");
+        assert_eq!(v.near_duplicates, 0, "None never forms a duplicate: {v:?}");
+        assert!(!v.duplication_masked, "{v:?}");
     }
 
-    #[test]
-    fn a_faster_pulldown_ratio_is_also_detected_and_infers_a_lower_fps() {
-        // A more aggressive pulldown (dup every 4th frame ≈ 25% → a 3:4 pulldown, ~45 fps source):
-        // still regular, window-wide, well over the floor → masked, with a lower inferred fps.
-        let v = measure_dup_cadence(&pulldown_hashes(120, 4)).expect("plenty");
-        assert!(
-            v.duplicate_fraction > 0.2,
-            "aggressive pulldown rate: {v:?}"
-        );
-        assert!(
-            v.duplication_masked,
-            "a regular 3:4 pulldown is masked: {v:?}"
-        );
-        assert!(
-            v.inferred_source_fps < 50.0,
-            "a faster dup rate infers a lower source fps: {v:?}"
-        );
-    }
-
-    // ---- worst_masked_duplicate_fraction (the gate feeds on the DISCRIMINATED signal) ---
+    // ---- copy_observation (the #1101 viability cross-check on the #1166 signal) ----------
 
     #[test]
-    fn worst_masked_fraction_ignores_a_higher_raw_fraction_from_an_unmasked_window() {
-        // A masked pulldown window sits BELOW a NON-masked freeze window in raw duplicate_fraction.
-        // The gate must key on the pulldown (the real defect), never the freeze's higher raw rate —
-        // otherwise it double-jeopardies frozen_leg. This is the whole point of the discrimination.
-        let pulldown = measure_dup_cadence(&pulldown_hashes(120, 6)).expect("plenty");
-        assert!(
-            pulldown.duplication_masked,
-            "pulldown is masked: {pulldown:?}"
-        );
-        let freeze_at: Vec<usize> = (25..=44).collect(); // 20 consecutive dups → localized freeze
-        let freeze = measure_dup_cadence(&hashes_with_dups_at(60, &freeze_at)).expect("60 frames");
-        assert!(
-            !freeze.duplication_masked,
-            "freeze is NOT masked: {freeze:?}"
-        );
-        assert!(
-            freeze.duplicate_fraction > pulldown.duplicate_fraction,
-            "the freeze has a HIGHER raw fraction than the pulldown: {} vs {}",
-            freeze.duplicate_fraction,
-            pulldown.duplicate_fraction
-        );
-        let clean = measure_dup_cadence(&smooth_hashes(60)).expect("60 frames");
-        let cadences = vec![Some(clean), Some(freeze), Some(pulldown.clone())];
+    fn a_tick_copy_with_a_near_duplicate_is_observed() {
+        // The FIXED-signal case: a tick-copy pair whose content MAD is low → observed.
+        let ticks = [Some(1u64), Some(1), Some(2)]; // frame 1 repeats frame 0's tick
+        let mads = [None, Some(3.0), Some(25.0)]; // frame 1 is a content near-duplicate
+        let o = copy_observation(&ticks, &mads);
+        assert_eq!(o.tick_copies, 1);
         assert_eq!(
-            worst_masked_duplicate_fraction(&cadences),
-            Some(pulldown.duplicate_fraction),
-            "the worst MASKED fraction is the pulldown's, NOT the freeze's higher raw fraction"
+            o.copies_observed_by_content, 1,
+            "the near-dup observed the tick-copy"
+        );
+        assert_eq!(o.content_near_dup_pairs, 1);
+        assert_eq!(o.copy_observation_rate, Some(1.0));
+    }
+
+    #[test]
+    fn a_tick_copy_with_a_high_mad_is_blind_not_observed() {
+        // The BLIND-signal case (what the byte-exact tap did to nearly every copy): a tick-copy
+        // whose content MAD is HIGH (lossy encode destroyed the identity) → not observed.
+        let ticks = [Some(1u64), Some(1), Some(2)];
+        let mads = [None, Some(25.0), Some(25.0)]; // high MAD on the tick-copy pair
+        let o = copy_observation(&ticks, &mads);
+        assert_eq!(o.tick_copies, 1);
+        assert_eq!(
+            o.copies_observed_by_content, 0,
+            "a high MAD does not observe the copy"
+        );
+        assert_eq!(o.copy_observation_rate, Some(0.0));
+    }
+
+    #[test]
+    fn none_tick_or_none_mad_never_counts_as_a_copy() {
+        let ticks = [Some(1u64), None, Some(1)];
+        let mads = [None, Some(2.0), Some(2.0)];
+        let o = copy_observation(&ticks, &mads);
+        assert_eq!(o.tick_copies, 0, "a None tick is never a tick-copy");
+        // position 2: tick 1 vs None → not a tick-copy; content near-dup still counted raw.
+        assert_eq!(o.content_near_dup_pairs, 2);
+        assert_eq!(o.copy_observation_rate, None, "no tick-copies → no rate");
+    }
+
+    #[test]
+    fn a_tick_copy_across_a_non_adjacent_boundary_is_not_counted() {
+        // #1166 review — the tick-copy basis must match the MAD's recording-adjacency basis: a
+        // repeated tick at a window position the MAD side gated to None (a non-adjacent boundary /
+        // gap) is NOT observable by the content signal, so it must not count as a tick-copy and
+        // depress the observation rate. `window_prev_mads` yields None at such a position.
+        let ticks = [Some(5u64), Some(5)]; // same tick both frames
+        let mads = [None, None]; // position 1 gated to None (non-adjacent / gap)
+        let o = copy_observation(&ticks, &mads);
+        assert_eq!(
+            o.tick_copies, 0,
+            "a tick-copy at a non-recording-adjacent position (MAD None) is not counted"
+        );
+        assert_eq!(o.copy_observation_rate, None);
+
+        // Contrast: the SAME repeated tick at a recording-adjacent position (MAD Some, even if the
+        // MAD itself is high = blind) DOES count as a tick-copy — the denominator the signal is
+        // judged against.
+        let ticks2 = [Some(5u64), Some(5)];
+        let mads2 = [None, Some(25.0)]; // adjacent, but high MAD → blind
+        let o2 = copy_observation(&ticks2, &mads2);
+        assert_eq!(
+            o2.tick_copies, 1,
+            "an adjacent tick-copy counts even when the MAD is blind"
+        );
+        assert_eq!(o2.copies_observed_by_content, 0);
+        assert_eq!(o2.copy_observation_rate, Some(0.0));
+    }
+
+    #[test]
+    fn aggregate_sums_counts_and_recomputes_the_rate() {
+        let a = CopyObservation {
+            tick_copies: 4,
+            copies_observed_by_content: 3,
+            content_near_dup_pairs: 5,
+            copy_observation_rate: Some(0.75),
+        };
+        let b = CopyObservation {
+            tick_copies: 6,
+            copies_observed_by_content: 5,
+            content_near_dup_pairs: 7,
+            copy_observation_rate: Some(0.833),
+        };
+        let agg = aggregate_copy_observations(&[a, b]);
+        assert_eq!(agg.tick_copies, 10);
+        assert_eq!(agg.copies_observed_by_content, 8);
+        assert_eq!(agg.content_near_dup_pairs, 12);
+        // recomputed, NOT averaged: 8/10 = 0.8
+        assert_eq!(agg.copy_observation_rate, Some(0.8));
+    }
+
+    #[test]
+    fn aggregate_of_empty_has_no_rate() {
+        let agg = aggregate_copy_observations(&[]);
+        assert_eq!(agg.tick_copies, 0);
+        assert_eq!(agg.copy_observation_rate, None);
+    }
+
+    // ---- signal_viability / signal_promotable ------------------------------------------
+
+    #[test]
+    fn viability_boundaries() {
+        // Too few tick-copies → Indeterminate (not proven blind).
+        let indet = CopyObservation {
+            tick_copies: MIN_TICK_COPIES_FOR_VIABILITY - 1,
+            copies_observed_by_content: 0,
+            content_near_dup_pairs: 0,
+            copy_observation_rate: None,
+        };
+        assert_eq!(signal_viability(&indet), SignalViability::Indeterminate);
+        assert!(!signal_promotable(signal_viability(&indet)));
+
+        // Enough tick-copies but low observation → Blind (the old byte-exact tap).
+        let blind = CopyObservation {
+            tick_copies: 147,
+            copies_observed_by_content: 2,
+            content_near_dup_pairs: 2,
+            copy_observation_rate: Some(2.0 / 147.0),
+        };
+        assert_eq!(signal_viability(&blind), SignalViability::Blind);
+        assert!(!signal_promotable(signal_viability(&blind)));
+
+        // Enough tick-copies AND observation ≥ floor → Viable (the #1166 fixed signal).
+        let viable = CopyObservation {
+            tick_copies: 32,
+            copies_observed_by_content: 26,
+            content_near_dup_pairs: 26,
+            copy_observation_rate: Some(26.0 / 32.0),
+        };
+        assert_eq!(signal_viability(&viable), SignalViability::Viable);
+        assert!(signal_promotable(signal_viability(&viable)));
+
+        // Exactly at the floor is Viable (inclusive).
+        let at_floor = CopyObservation {
+            tick_copies: 10,
+            copies_observed_by_content: 5,
+            content_near_dup_pairs: 5,
+            copy_observation_rate: Some(0.5),
+        };
+        assert_eq!(signal_viability(&at_floor), SignalViability::Viable);
+    }
+
+    // ---- window_prev_mads (#1112/#1166 — the carry→slice glue) --------------------------
+
+    #[test]
+    fn window_prev_mads_gates_on_recording_adjacency() {
+        // frame_prev_mads is 0-based by frame_index; index 0 is None (no predecessor).
+        let prev = vec![None, Some(2.0), Some(25.0), Some(3.0), Some(25.0)];
+        // A contiguous window [1,2,3,4]: position 0 → None; positions 1..3 → the carried MADs
+        // (each recording-adjacent to its predecessor).
+        let out = window_prev_mads(&[1, 2, 3, 4], &prev);
+        assert_eq!(out, vec![None, Some(25.0), Some(3.0), Some(25.0)]);
+    }
+
+    #[test]
+    fn window_prev_mads_none_across_a_non_adjacent_boundary() {
+        // A window whose first two frames are NOT recording-adjacent (2 then 5): the carried MAD at
+        // index 5 measures MAD(frame5, frame4), NOT the window pair, so it must be dropped to None.
+        let prev = vec![None, Some(2.0), Some(2.0), Some(2.0), Some(2.0), Some(2.0)];
+        let out = window_prev_mads(&[2, 5], &prev);
+        assert_eq!(
+            out,
+            vec![None, None],
+            "non-adjacent boundary → None, never a false dup"
         );
     }
+
+    #[test]
+    fn window_prev_mads_out_of_range_index_is_none() {
+        let prev = vec![None, Some(2.0)];
+        // frame_index 9 is past the vector → None (a hash/MAD gap must not manufacture a duplicate).
+        let out = window_prev_mads(&[8, 9], &prev);
+        assert_eq!(out, vec![None, None]);
+    }
+
+    // ---- worst_masked_duplicate_fraction / dup_cadence_gate_pass ------------------------
 
     #[test]
     fn worst_masked_fraction_is_none_when_no_window_is_masked() {
-        // No masked window (clean + a non-masked freeze + a None) ⇒ None ⇒ the gate passes.
-        let clean = measure_dup_cadence(&smooth_hashes(60)).expect("60 frames");
-        let freeze_at: Vec<usize> = (25..=44).collect();
-        let freeze = measure_dup_cadence(&hashes_with_dups_at(60, &freeze_at)).expect("60 frames");
-        let cadences = vec![Some(clean), Some(freeze), None];
-        assert_eq!(worst_masked_duplicate_fraction(&cadences), None);
-        assert!(
-            dup_cadence_gate_pass(worst_masked_duplicate_fraction(&cadences), Some(0.10)),
-            "no masked window ⇒ not applicable ⇒ passes"
+        let smooth = measure_dup_cadence(&smooth_mads(60));
+        assert_eq!(worst_masked_duplicate_fraction(&[smooth]), None);
+    }
+
+    #[test]
+    fn worst_masked_fraction_ignores_a_higher_raw_fraction_from_an_unmasked_window() {
+        // A localized freeze has a HIGH raw fraction but is NOT masked (coverage veto) → excluded.
+        let freeze_dup_at: Vec<usize> = (5..25).collect();
+        let freeze = measure_dup_cadence(&mads_with_dups_at(120, &freeze_dup_at));
+        let pulldown = measure_dup_cadence(&pulldown_mads(120, 6));
+        let pf = pulldown.as_ref().unwrap().duplicate_fraction;
+        let worst = worst_masked_duplicate_fraction(&[freeze, pulldown]);
+        assert_eq!(
+            worst,
+            Some(pf),
+            "only the masked pulldown's fraction counts"
         );
     }
 
     #[test]
     fn worst_masked_fraction_takes_the_max_across_multiple_masked_windows() {
-        let slow = measure_dup_cadence(&pulldown_hashes(120, 6)).expect("plenty"); // ~16.7%
-        let faster = measure_dup_cadence(&pulldown_hashes(120, 4)).expect("plenty"); // ~25%
-        assert!(slow.duplication_masked && faster.duplication_masked);
-        assert!(faster.duplicate_fraction > slow.duplicate_fraction);
-        assert_eq!(
-            worst_masked_duplicate_fraction(&[Some(slow), Some(faster.clone())]),
-            Some(faster.duplicate_fraction),
-            "the worst is the max across masked windows"
-        );
-    }
-
-    // ---- the report-only gate seam (both directions) -----------------------------------
-
-    #[test]
-    fn default_constants_are_the_documented_first_cut_values() {
-        // These are PRINCIPLED, UNCALIBRATED first cuts (see the module + const docs) — this test
-        // only pins the documented values so a change is deliberate, it does NOT claim they are
-        // calibrated against real runs.
-        assert_eq!(DUP_RATE_PULLDOWN_MIN, 0.10);
-        assert_eq!(DUP_GAP_CV_MAX, 0.35);
-        assert_eq!(DUP_COVERAGE_MIN, 0.5);
-        assert_eq!(TARGET_FPS, 60.0);
-    }
-
-    #[test]
-    fn gate_is_report_only_today() {
-        assert!(
-            !gates_overall_pass(),
-            "#1088 ships REPORT-ONLY until calibrated against real runs"
-        );
-    }
-
-    #[test]
-    fn none_bound_is_report_only_always_passes() {
-        assert!(dup_cadence_gate_pass(Some(0.9), None));
-        assert!(dup_cadence_gate_pass(None, None));
-    }
-
-    #[test]
-    fn no_window_reading_is_not_applicable_pass() {
-        assert!(dup_cadence_gate_pass(None, Some(DUP_RATE_PULLDOWN_MIN)));
+        let a = measure_dup_cadence(&pulldown_mads(120, 6)); // ~0.167
+        let b = measure_dup_cadence(&pulldown_mads(120, 5)); // ~0.20 (denser dups)
+        let fa = a.as_ref().unwrap().duplicate_fraction;
+        let fb = b.as_ref().unwrap().duplicate_fraction;
+        let worst = worst_masked_duplicate_fraction(&[a, b]).unwrap();
+        assert!((worst - fa.max(fb)).abs() < 1e-9);
     }
 
     #[test]
     fn worst_below_bound_passes_over_bound_fails() {
-        assert!(dup_cadence_gate_pass(
-            Some(0.05),
-            Some(DUP_RATE_PULLDOWN_MIN)
-        ));
+        assert!(
+            dup_cadence_gate_pass(None, Some(0.10)),
+            "no masked window → pass"
+        );
+        assert!(
+            dup_cadence_gate_pass(Some(0.09), Some(0.10)),
+            "below bound → pass"
+        );
         assert!(
             dup_cadence_gate_pass(Some(0.10), Some(0.10)),
-            "exactly at the bound passes (strict >)"
+            "at bound → pass"
         );
-        assert!(!dup_cadence_gate_pass(
-            Some(0.1667),
-            Some(DUP_RATE_PULLDOWN_MIN)
-        ));
-    }
-
-    #[test]
-    fn pulldown_fraction_end_to_end_fails_the_bound() {
-        // Wire the real measured pulldown fraction into the gate: it must FAIL the rate bound.
-        let v = measure_dup_cadence(&pulldown_hashes(120, 6)).expect("plenty");
         assert!(
-            !dup_cadence_gate_pass(Some(v.duplicate_fraction), Some(DUP_RATE_PULLDOWN_MIN)),
-            "the pulldown fraction ({}) must fail the bound",
-            v.duplicate_fraction
+            !dup_cadence_gate_pass(Some(0.11), Some(0.10)),
+            "over bound → fail"
+        );
+        assert!(
+            dup_cadence_gate_pass(Some(0.99), None),
+            "no bound (report-only) → pass"
         );
     }
 
-    // ---- window_content_hashes (#1112 — the carry→slice glue) --------------------------
+    #[test]
+    fn gates_overall_pass_is_report_only() {
+        assert!(
+            !gates_overall_pass(),
+            "the dup-cadence surface ships REPORT-ONLY until the #1166 promotion gate is met"
+        );
+    }
+
+    // ---- #1166 REAL-DATA fixture: the fix turns the viability from Blind to Viable ------
+
+    /// The MEASURED row-sampled MAD (rows=64) between every retained adjacent diagnostic-frame PNG
+    /// pair across the 22 runs that retained pixels, split by whether the Vernier tick proved a copy
+    /// (the 32 COPY pairs come from 16 of those runs; the 381 MOTION pairs from all 22).
+    /// COPY = a tick-proven byte-duplicate camera frame (the ground truth); MOTION = genuine motion.
+    /// (The byte-exact FNV-1a observed 0 of these 32 copies — structurally blind, #1101.)
+    const REAL_COPY_MADS: &[f64] = &[
+        1.37, 2.0, 2.34, 3.83, 3.92, 3.93, 4.12, 4.71, 4.81, 5.21, 5.33, 5.36, 6.03, 6.3, 7.04,
+        7.16, 7.35, 7.4, 7.52, 7.69, 7.69, 7.86, 8.46, 8.8, 9.43, 9.58, 10.62, 11.39, 17.3, 17.93,
+        19.03, 20.34,
+    ];
+    /// The genuine-motion floor: a representative LOW sample of the 381 real motion MADs, near the
+    /// copy cluster (the ones that would false-positive at too high a threshold) and LED BY the true
+    /// minimum. Every value listed is a real measured motion MAD; the full motion set's min is 10.79
+    /// and every one of the 381 motion pairs is ABOVE NEAR_DUP_MAD_MAX (so 0 motion false-positives).
+    const REAL_MOTION_MADS_LOW: &[f64] = &[
+        10.79, 12.23, 12.7, 12.75, 13.8, 13.84, 13.89, 13.97, 14.33, 14.51, 14.62, 15.5, 16.24,
+        17.08, 18.38, 19.1, 20.0, 21.04, 22.07, 25.01,
+    ];
 
     #[test]
-    fn window_content_hashes_picks_by_frame_index_not_position() {
-        // The full per-recording hash vector (0-based by frame_index).
-        let all: Vec<u64> = vec![100, 101, 102, 103, 104, 105, 106];
-        // A window whose attributed frames are NON-contiguous, out of the natural 0..n order —
-        // exactly what partition_frames_by_window produces when a cambox owns scattered frames.
-        let idxs: Vec<u64> = vec![2, 5, 3];
+    fn real_lossy_copy_mads_make_the_signal_viable() {
+        // Feed the MEASURED real copy MADs as tick-copy pairs and the motion MADs as motion pairs,
+        // and assert the #1166 near-duplicate signal (a) observes >= COPY_OBSERVATION_RATE_MIN of
+        // the tick-proven copies (→ Viable) and (b) fires on 0 of the genuine-motion pairs.
+        let observed = REAL_COPY_MADS
+            .iter()
+            .filter(|&&m| is_near_duplicate(m))
+            .count();
+        let rate = observed as f64 / REAL_COPY_MADS.len() as f64;
+        assert!(
+            rate >= COPY_OBSERVATION_RATE_MIN,
+            "the near-duplicate signal must observe >= {COPY_OBSERVATION_RATE_MIN} of real copies, \
+             got {observed}/{} = {rate:.3}",
+            REAL_COPY_MADS.len()
+        );
+        let motion_fp = REAL_MOTION_MADS_LOW
+            .iter()
+            .filter(|&&m| is_near_duplicate(m))
+            .count();
         assert_eq!(
-            window_content_hashes(&idxs, &all),
-            vec![102, 105, 103],
-            "each window frame's hash is looked up by its frame_index, in window order"
+            motion_fp, 0,
+            "the near-duplicate signal must NOT fire on any genuine-motion pair (real data)"
         );
-    }
 
-    #[test]
-    fn window_content_hashes_contiguous_matches_direct_slice() {
-        let all: Vec<u64> = (0..50).map(|x| x as u64 * 7 + 1).collect();
-        let idxs: Vec<u64> = (10..20).collect();
-        let got = window_content_hashes(&idxs, &all);
+        // And the full viability classification reads Viable on the real aggregate.
+        let obs = CopyObservation {
+            tick_copies: REAL_COPY_MADS.len(),
+            copies_observed_by_content: observed,
+            content_near_dup_pairs: observed,
+            copy_observation_rate: Some(rate),
+        };
         assert_eq!(
-            got,
-            all[10..20].to_vec(),
-            "contiguous window == the raw slice"
+            signal_viability(&obs),
+            SignalViability::Viable,
+            "on the real lossy copy MADs the #1166 signal is Viable (the fix)"
         );
-    }
-
-    #[test]
-    fn window_content_hashes_skips_out_of_range_index() {
-        // A frame_index past the end of the carried hash vector (a hash gap) must be DROPPED, not
-        // defaulted — two dropped-then-defaulted frames would read as a false duplicate downstream.
-        let all: Vec<u64> = vec![10, 11, 12];
-        let idxs: Vec<u64> = vec![0, 9, 2, 100];
-        assert_eq!(
-            window_content_hashes(&idxs, &all),
-            vec![10, 12],
-            "indices 9 and 100 are out of range and skipped; only 0 and 2 survive, in order"
-        );
-    }
-
-    #[test]
-    fn window_content_hashes_empty_inputs_are_empty() {
-        assert!(window_content_hashes(&[], &[1, 2, 3]).is_empty());
-        assert!(window_content_hashes(&[0, 1, 2], &[]).is_empty());
-    }
-
-    #[test]
-    fn window_content_hashes_feeds_measure_dup_cadence_unchanged() {
-        // End-to-end: a carried pulldown hash vector, sliced 1:1 (window == whole recording),
-        // yields the SAME DupCadence as feeding the raw vector — the slice is a faithful pass-through.
-        let all = pulldown_hashes(120, 6);
-        let idxs: Vec<u64> = (0..all.len() as u64).collect();
-        let sliced = window_content_hashes(&idxs, &all);
-        assert_eq!(sliced, all, "1:1 window reproduces the input exactly");
-        assert_eq!(
-            measure_dup_cadence(&sliced),
-            measure_dup_cadence(&all),
-            "the classifier sees an identical sequence through the slice"
-        );
+        assert!(signal_promotable(signal_viability(&obs)));
     }
 }
