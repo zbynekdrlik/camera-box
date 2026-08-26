@@ -21,29 +21,16 @@ import pathlib
 import sys
 import types
 
-import pytest
-
 _SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import av_sync_measure  # noqa: E402
 
-
-@pytest.fixture(autouse=True)
-def _clear_module_state():
-    """The raw-webhook per-kind throttle (and the outer-loop guard cache) are module-level state;
-    clear both around every test so tests never contaminate each other or the sibling
-    test_av_sync_outer_loop_apply.py (which shares the same imported module in one pytest process).
-    Defensive `hasattr` so the RED run (before `_WEBHOOK_LAST_SENT` exists) fails on the test bodies'
-    own assertions, not here."""
-    for name in ("_WEBHOOK_LAST_SENT", "_OUTER_LOOP_GUARDS"):
-        if hasattr(av_sync_measure, name):
-            getattr(av_sync_measure, name).clear()
-    yield
-    for name in ("_WEBHOOK_LAST_SENT", "_OUTER_LOOP_GUARDS"):
-        if hasattr(av_sync_measure, name):
-            getattr(av_sync_measure, name).clear()
+# NOTE: av_sync_measure's module-level `_WEBHOOK_LAST_SENT` throttle (and `_OUTER_LOOP_GUARDS`) are
+# reset around EVERY test by the autouse fixture in tests/python/conftest.py — so these tests and the
+# sibling test_av_sync_outer_loop_apply.py (both write that shared module state in one pytest process)
+# never contaminate each other or flake order-dependently.
 
 
 def _args(webhook=None):
@@ -91,6 +78,19 @@ class TestDefaultRoutesThroughAiruleset:
         monkeypatch.setattr(av_sync_measure.subprocess, "run", _boom)
         # must not raise — a missing/failing airuleset never aborts a measurement
         av_sync_measure.deliver_alert(_args(webhook=None), "verdict", "🎯 X")
+
+    def test_airuleset_nonzero_exit_is_surfaced_as_a_warn(self, monkeypatch, capsys):
+        # A non-zero airuleset exit is NOT an exception, so without an explicit returncode check it
+        # would be silently swallowed — e.g. the Windows stream-box watchdog (no webhook file)
+        # invokes an airuleset path that does not exist there. It must surface a WARN (machine
+        # channel, never a ping), matching notify_discord's own WARN-on-failure pattern.
+        monkeypatch.setattr(
+            av_sync_measure.subprocess, "run",
+            lambda cmd, **kw: types.SimpleNamespace(returncode=2, stdout="", stderr="no such file"),
+        )
+        av_sync_measure.deliver_alert(_args(webhook=None), "verdict", "🎯 X")
+        out = capsys.readouterr().out
+        assert "WARN" in out and "rc=2" in out, out
 
 
 # ---------------------------------------------------------------------------

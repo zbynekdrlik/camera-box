@@ -338,10 +338,17 @@ def notify_airuleset(text: str, dedup_key: str) -> None:
     OSError guard). Written as a literal `subprocess.run([...])` so the #1206 dedup-key sweep
     (tests/python/test_notify_dedup_key_sweep_1206.py) auto-discovers + enforces this call too."""
     try:
-        subprocess.run([sys.executable, AIRULESET_NOTIFY, "notify", "--body", text,
-                        "--dedup-key", dedup_key], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, AIRULESET_NOTIFY, "notify", "--body", text,
+                            "--dedup-key", dedup_key], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"WARN: airuleset notify failed: {exc}")
+        return
+    if r.returncode != 0:
+        # A non-zero exit (missing/misconfigured airuleset — e.g. the Windows stream-box watchdog
+        # with no webhook file invokes a path that doesn't exist there) is NOT an exception, so it
+        # would be silently swallowed without this — surface it (machine channel, never a ping),
+        # matching notify_discord's own WARN-on-failure pattern.
+        print(f"WARN: airuleset notify rc={r.returncode}: {(r.stderr or '').strip()[:200]}")
 
 
 def deliver_alert(args, kind: str, text: str) -> None:
