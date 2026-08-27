@@ -422,21 +422,36 @@ pub fn setup_irq_affinity() {
     let is_rt = read_kernel_is_preempt_rt();
     let target = select_irq_target_cores(is_rt, core, &online);
     let mask = smp_affinity_mask_hex(&target);
-    // issue 1198: state the whole core split plainly at startup so a live box shows
-    // which core carries the capture IRQ and which cores the painter/display got —
-    // this is the line a future session reads to confirm the fix is applied.
+    // issue 1198: state the INTENDED core split at startup so a live box shows which
+    // core we are about to give the capture IRQ and which cores the painter/display
+    // got. This is INTENT, not proof — a managed MSI IRQ rejects the smp_affinity
+    // write below and stays on the cmdline irqaffinity=0-2 default (shared with the
+    // painter — the exact 1198 failure mode), so the actual outcome is reported AFTER
+    // the write loop, and the real confirmation is the supervisor's live
+    // smp_affinity_list read.
     let reserved = if is_rt {
         None
     } else {
         select_irq_reserved_core(core, &online)
     };
+    // The logged split matches the routed target by construction (both derive from
+    // the same pure selectors on the same inputs); guard against a future edit to
+    // select_irq_target_cores' non-RT branch silently desynchronising the two.
+    debug_assert!(
+        reserved.map_or(true, |r| target == [r]),
+        "#1198 logged reserved core {reserved:?} must match routed IRQ target {target:?}"
+    );
     let painter = select_painter_cores(Some(core), reserved, &online);
     tracing::info!(
-        "#1198 core split: capture={core}, capture-IRQ={target:?}, painter/display={painter:?} (online={online:?}, preempt_rt={is_rt})"
+        "#1198 INTENDED core split: capture={core}, capture-IRQ={target:?}, painter/display={painter:?} (online={online:?}, preempt_rt={is_rt})"
     );
     tracing::info!(
         "#289/899 IRQ affinity: kernel preempt_rt={is_rt}; routing capture IRQs {irqs:?} to cores {target:?} (capture core={core}, smp_affinity={mask})"
     );
+    let total = irqs.len();
+    let mut applied = 0usize;
+    let mut unchanged = 0usize;
+    let mut failed = 0usize;
     for irq in irqs {
         let path = format!("/proc/irq/{irq}/smp_affinity");
         let prev = std::fs::read_to_string(&path).unwrap_or_default();
@@ -446,19 +461,37 @@ pub fn setup_irq_affinity() {
         // not the raw strings — to keep the idempotency fast-path + log honest.
         if normalize_affinity_mask(&prev) == normalize_affinity_mask(&mask) {
             tracing::info!("#289 IRQ {irq}: smp_affinity already {mask} — unchanged");
+            unchanged += 1;
             continue;
         }
         match std::fs::write(&path, format!("{mask}\n")) {
             Ok(()) => {
+                applied += 1;
                 tracing::info!("#289/899 IRQ {irq}: smp_affinity {prev} -> {mask} (target cores {target:?}, rt={is_rt}, capture core {core})")
             }
             // Managed (kernel-affinity) MSI IRQs reject smp_affinity writes (EIO) — non-fatal:
             // the cmdline irqaffinity=0-2 path that covers those ships via setup-device.sh STEP 10
             // (#303, on the #295 safe-grub path); it takes effect after the box reboots onto it.
-            Err(e) => tracing::warn!(
-                "#289 IRQ {irq}: could not set smp_affinity to {mask} ({e}) — likely a managed IRQ (needs cmdline irqaffinity=0-2, #303)"
-            ),
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    "#289 IRQ {irq}: could not set smp_affinity to {mask} ({e}) — likely a managed IRQ (needs cmdline irqaffinity=0-2, #303)"
+                )
+            }
         }
+    }
+    // issue 1198: report whether the intended split was ACTUALLY programmed. A
+    // managed-MSI rejection leaves the IRQ on the cmdline default, SHARED with the
+    // painter — so a green "applied" line, not the intent line above, is the honest
+    // in-journal signal; the supervisor's live smp_affinity_list read is the ground truth.
+    if failed == 0 {
+        tracing::info!(
+            "#1198 core split APPLIED: capture-IRQ on cores {target:?} ({applied} written, {unchanged} already correct of {total}); painter/display on {painter:?}, capture on {core}"
+        );
+    } else {
+        tracing::warn!(
+            "#1198 core split NOT fully applied: {failed}/{total} capture IRQ(s) rejected the smp_affinity write (managed MSI → still on the cmdline irqaffinity default, SHARED with the painter — the 1198 failure mode); {applied} written, {unchanged} already correct. Needs the cmdline irqaffinity path (#303)."
+        );
     }
 }
 
@@ -805,7 +838,12 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     fn irq_and_painter_disjoint_across_rungs_and_never_empty() {
         // issue 1198: across the degradation rungs the painter and IRQ are never empty,
         // and whenever a core is reserved the two sets are disjoint.
-        for online in [vec![0usize, 1, 2, 3], vec![0, 1, 2], vec![0, 1, 2, 3, 4, 5]] {
+        for online in [
+            vec![0usize, 1, 2, 3],
+            vec![0, 1, 2],
+            vec![0, 1], // 2-core rung: reserved=None, IRQ+painter share [0], both non-empty
+            vec![0, 1, 2, 3, 4, 5],
+        ] {
             let capture = *online.iter().max().unwrap();
             let reserved = select_irq_reserved_core(capture, &online);
             let irq = select_irq_target_cores(false, capture, &online);
