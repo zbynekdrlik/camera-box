@@ -170,6 +170,17 @@ the reshuffle reproduces only live) — the offline gate proves the DECISION log
 is confirmed by the supervisor's post-deploy rig verification. NOT in scope for #1180: the NIC
 hardware root cause (separate owned lane) and Studio Monitor on the TVs (stock NewTek code).
 
+**The C++ verify above is the IDENTITY (wrong-source) half ONLY — the LIVENESS half lives in the
+python receiver-policy layer.** This name→URL check catches "wrong camera, frames flowing"; it does
+NOT prove frames are flowing at all. The 2026-08-27 strih NIC-swap aftermath showed the other
+failure: a receiver holding a FROZEN frame with the CORRECT name (a `break`-wedged thread, above) —
+`recv-timing #797` never listed it, but `ndi_source_name` was right, so every name-only verify
+(`--heal`, `reenforce_ndi_name` read-back) reported a false success and only an OBS restart cured
+it. That LIVENESS term — a WS screenshot-diff (`obs_phase2.sample_receiver_liveness` /
+`classify_receiver_liveness`, exposed as `set-ndi-mapping.py --verify-live`, exit 1 on FROZEN →
+escalate to an OBS restart) — is documented in `.claude/rules/ndi-name-recovery.md`'s "#1180
+LIVENESS term" section, not here (it is a receiver-policy/WS concern, not a vendored-receiver one).
+
 ### #1181 — SENDER-side port-map stability: operator doctrine + a dev1 baseline watchdog (stock-receiver protection)
 
 **Operator doctrine — adding/removing a dedicated NDI output mid-session reshuffles the NEXT
