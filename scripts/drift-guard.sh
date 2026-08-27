@@ -1001,6 +1001,10 @@ check_imag_report() {
   # = OK, ENABLED demands the current OBS log's `program scanout LIVE` proof else DRIFT), and
   # hdmi_primary is lease-aware (DRM output ENABLED ⇒ HDMI is leased OUT of the X layout by design,
   # so a panel primary is then OK, never the issue-1146 DRIFT) — both flow through this same loop.
+  # Since issue 1146 (mirror drift, 2026-08-27) the verdict also carries the layout facet: the eDP
+  # panel + HDMI projector must run EXTENDED (distinct xrandr origins), never MIRROR (both at +0+0 =
+  # two unsynchronized 60Hz CRTCs -> the projector tears) — this is the facet that catches a mirror
+  # while hdmi_primary stays OK; it flows through this same generic loop with no edit here.
   if [ -z "$obs_display_path" ]; then
     printf '  %-22s UNKNOWN  (display-path state not read on imag-nb)\n' "display_path"
     unknown=$((unknown + 1))
