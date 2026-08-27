@@ -1657,13 +1657,12 @@ fn resolve_cambox_sweep_default(active_set_override: Option<&str>) -> String {
 }
 
 #[test]
-fn recording_e2e_default_sweep_covers_only_cam3_now_cam2_camera_under_test_retired_1170() {
+fn recording_e2e_default_sweep_covers_cam1_cam2_cam3_now_both_restored_1198() {
     // #898 retired cam3; #939 (2026-08-13) re-activated it (Cam Link 4K fitted). issue 947
     // (2026-08-02): cam4 stays out (its grabber wedges the capture leg within minutes of every
-    // start). #1110 (2026-08-22): cam1 RE-RETIRED (ShadowCast grabber hw defect). issue 1170
-    // (2026-08-24): cam2's camera-under-test role RETIRED (grabber cure-decay to ~7min, issue 1193)
-    // -- cam2 stays the fixed PAINTER but is no longer swept as a measured camera, so the default
-    // sweep covers exactly cam3.
+    // start). issue 1198 (2026-08-27, owner ruling): cam1 (#1110) and cam2 (#1170) are RESTORED
+    // -- both "hardware-defective" diagnoses were built from EPISODES, and a live journal check
+    // confirmed both cards are healthy today -- so the default sweep covers cam1/cam2/cam3.
     let s = read("scripts/recording-e2e.sh");
     assert!(
         s.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}\""),
@@ -1672,24 +1671,17 @@ fn recording_e2e_default_sweep_covers_only_cam3_now_cam2_camera_under_test_retir
     );
 
     let resolved = resolve_cambox_sweep_default(None);
-    assert!(
-        resolved.contains("Cam 3:CAM3"),
-        "issue 939: cam3 re-activated 2026-08-13 — the default sweep must cover CAM3 via \
-         'Cam 3:CAM3': {resolved}"
-    );
-    for retired in [
-        "Cam 1:CAM1",
-        "Cam 2:CAM2",
-        "Cam 4:CAM4",
-        "Cam 5:CAM5",
-        "Cam 6:CAM6",
-        "Cam 7:CAM7",
-    ] {
+    for expect in ["Cam 1:CAM1", "Cam 2:CAM2", "Cam 3:CAM3"] {
+        assert!(
+            resolved.contains(expect),
+            "issue 1198: the default sweep must cover {expect} (both cards restored healthy \
+             2026-08-27): {resolved}"
+        );
+    }
+    for retired in ["Cam 4:CAM4", "Cam 5:CAM5", "Cam 6:CAM6", "Cam 7:CAM7"] {
         assert!(
             !resolved.contains(retired),
-            "issue 1170/#1110/#827/issue 947: the default sweep must NOT reference the retired \
-             {retired} — that box is not a measured camera today (cam2 camera-under-test retired \
-             2026-08-24 grabber cure-decay; cam1 re-retired grabber hw defect): {resolved}"
+            "#827/issue 947: the default sweep must NOT reference the retired {retired}: {resolved}"
         );
     }
 }

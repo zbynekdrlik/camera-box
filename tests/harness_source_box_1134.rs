@@ -52,25 +52,24 @@ if out="$(camera_source_box 2>/dev/null)"; then printf 'OK\t%s' "$out"; else pri
 }
 
 #[test]
-fn camera_source_box_defaults_to_cam3_now_that_cam1_is_retired() {
-    // #1110 RE-RETIREMENT (2026-08-22): cam1's ShadowCast grabber is hardware-defective beyond
-    // software compensation (chronic over-rate 61.5->63.1 fps captured, constant corruption,
-    // USB re-auth does not cure) -- retired AGAIN from the measured E2E fleet (the issue-1130
-    // return of 2026-08-19 is now history). issue 1170 (2026-08-24) then dropped cam2's
-    // camera-under-test role too (grabber cure-decay), so the default active set is now "cam3": the
-    // source role is the FIRST strih-routable member = cam3 (cam2 is the painter and
-    // camera_strih_route rejects it, so it is skipped even when re-added). cam1/cam2 are out of the
-    // measured set, so neither can be selected as source. The derivation (not a literal) is the
-    // point -- re-adding cam1/cam2 once their cards are swapped just changes the set.
+fn camera_source_box_defaults_to_cam1_now_that_cam1_and_cam2_are_restored_1198() {
+    // issue 1198 (2026-08-27, owner ruling): both cam1's #1110 "hardware-defective" diagnosis and
+    // cam2's #1170 "camera-under-test retired" diagnosis were built from EPISODES, not a permanent
+    // card state -- the owner refused the physical card swap outright and a live journal check
+    // confirmed both cards are healthy today. The default active set is back to "cam1 cam2 cam3":
+    // the source role is the FIRST strih-routable member = cam1 (cam2 is the painter and
+    // camera_strih_route rejects it, so it is skipped) -- byte-identical to the pre-#1110
+    // behaviour. The derivation (not a literal) is the point -- re-retiring either camera again
+    // (if a fresh episode reproduces) just changes the set.
     let (ok, got) = source_box(None, None);
     assert!(
         ok,
         "#1134: camera_source_box must resolve a source for the default active set"
     );
     assert_eq!(
-        got, "cam3",
-        "issue 1170: the default source box must be cam3 (the sole strih-routable member of the \
-         default CAMERA_ACTIVE_SET='cam3'; cam1 + cam2-camera-under-test retired)"
+        got, "cam1",
+        "issue 1198: the default source box must be cam1 again (the first strih-routable member \
+         of the restored default CAMERA_ACTIVE_SET='cam1 cam2 cam3')"
     );
 }
 
@@ -214,49 +213,50 @@ fn recording_e2e_fleet_preflight_labels_the_source_with_camera_name() {
     );
 }
 
-// --- retirement: default set drops cam1, rig-fleet.txt acks it (cam4 precedent) -----------------
+// --- restoration (issue 1198, 2026-08-27): default set regains cam1+cam2, rig-fleet.txt's cam1
+// ack is REMOVED (owner ruling: both cards are healthy, the swap is off the table) ---------------
 
 #[test]
-fn camera_active_set_default_drops_cam1() {
+fn camera_active_set_default_restores_cam1_and_cam2_1198() {
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam3}\""),
-        "#1110/issue 1170: cam1 RE-RETIRED 2026-08-22 (grabber hw defect) AND cam2's \
-         camera-under-test role retired 2026-08-24 (grabber cure-decay) — the camera-set.sh \
-         default must drop both; the sole measured camera is cam3 (source). cam2 stays the painter."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}\""),
+        "issue 1198 (2026-08-27, owner ruling): the camera-set.sh default must be exactly \
+         \"cam1 cam2 cam3\" -- both cards confirmed healthy on a live journal check, owner \
+         refused the physical swap."
     );
 }
 
 #[test]
-fn rig_fleet_acks_cam1_offline_with_the_hw_fault_reason() {
+fn rig_fleet_no_longer_acks_cam1_1198() {
+    // The #1110 offline ack is the FIRST knob of the reversible-retirement procedure (the second
+    // being CAMERA_ACTIVE_SET membership above) -- issue 1198 removes it now that cam1 is back in
+    // the active set (a healthy, in-set box acked here would trip the stale-ack guard, #758/#827).
     let s = read("rig-fleet.txt");
     assert!(
-        s.contains("cam1:grabber-hw-defect-swap-pending-issue-1110"),
-        "#1110: rig-fleet.txt must ack cam1 offline with the grabber hardware-defect reason \
-         (cam4 precedent: a box OUTSIDE the active set is acked but never a preflight target, so \
-         the stale-ack guard never fires on it)."
+        !s.contains("cam1:grabber-hw-defect-swap-pending-issue-1110"),
+        "issue 1198: rig-fleet.txt must NOT ack cam1 any more -- it is back in CAMERA_ACTIVE_SET \
+         and a healthy in-set box would trip the stale-ack guard if still acked."
     );
 }
 
 #[test]
-fn return_procedure_is_membership_plus_ack_only() {
-    // The documented re-enable procedure (ticket item, RE-ENABLE): cam1 back == add it to
-    // CAMERA_ACTIVE_SET AND delete its rig-fleet.txt ack line — nothing else. Prove the two
-    // knobs are the ONLY cam1-specific state: cam1 is absent from the default active set AND
-    // present in rig-fleet.
+fn restoration_procedure_reverses_the_original_retirement_membership_plus_ack_1198() {
+    // The documented RE-ENABLE procedure this doctrine always promised (camera-active-set.md):
+    // cam1 back == add it to CAMERA_ACTIVE_SET AND delete its rig-fleet.txt ack line — nothing
+    // else. Prove the round trip actually completed: cam1 is present in the default active set
+    // AND its rig-fleet.txt ack line is gone, while its facts (case arm) stay fully resolvable.
     let cs = read("scripts/camera-set.sh");
     let rf = read("rig-fleet.txt");
-    // cam1 out of the default set (its case arm / facts stay — resolvable, membership-retired).
     assert!(
-        cs.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam3}\"")
+        cs.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}\"")
             && cs.contains("cam1) CAMERA_IP=10.77.9.61"),
-        "#1110: cam1 must be membership-retired (out of the default set) yet still fully \
-         resolvable (its case arm intact) — the reversible-retirement doctrine."
+        "issue 1198: cam1 must be back in the default active set AND still fully resolvable \
+         (its case arm intact) — the reversible-retirement doctrine completing its round trip."
     );
-    // cam1 ack present (the second knob).
     assert!(
-        rf.contains("cam1:grabber-hw-defect-swap-pending-issue-1110"),
-        "#1110: cam1's ack line is the second (and last) knob of the retirement procedure."
+        !rf.contains("cam1:grabber-hw-defect-swap-pending-issue-1110"),
+        "issue 1198: cam1's ack line must be gone -- the second (and last) knob of the reversal."
     );
 }
 
@@ -268,13 +268,14 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
     // mirror the SAME literal, or a future retirement that edits camera-set.sh but misses one
     // silently re-selects a retired camera in a standalone run (the camera-active-set drift risk).
     // set-ndi-mapping.py is ALSO locked against camera-set.sh by harness_rig_ndi_mapping.rs; this
-    // extends the lock to the other four mirrors so none can silently diverge.
+    // extends the lock to the other four mirrors so none can silently diverge. issue 1198
+    // (2026-08-27): the shared literal reverts to "cam1 cam2 cam3" (both cards restored healthy).
     let sh = read("scripts/camera-set.sh");
     assert!(
-        sh.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam3}\""),
-        "camera-set.sh must default CAMERA_ACTIVE_SET to \"cam3\""
+        sh.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}\""),
+        "camera-set.sh must default CAMERA_ACTIVE_SET to \"cam1 cam2 cam3\""
     );
-    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam3")"#;
+    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")"#;
     for py in [
         "scripts/set-ndi-mapping.py",
         "scripts/phase_sync_calibrate.py",
@@ -284,9 +285,9 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
     ] {
         assert!(
             read(py).contains(fallback),
-            "#1134/issue 1170: {py} must mirror camera-set.sh's CAMERA_ACTIVE_SET default via the \
-             identical env-fallback os.environ.get(\"CAMERA_ACTIVE_SET\", \"cam3\") -- a diverged \
-             fallback silently re-selects a retired camera in a standalone run"
+            "#1134/issue 1198: {py} must mirror camera-set.sh's CAMERA_ACTIVE_SET default via the \
+             identical env-fallback os.environ.get(\"CAMERA_ACTIVE_SET\", \"cam1 cam2 cam3\") -- a \
+             diverged fallback silently re-selects a retired camera in a standalone run"
         );
     }
 }
