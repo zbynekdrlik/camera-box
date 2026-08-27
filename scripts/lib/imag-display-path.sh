@@ -203,7 +203,7 @@ imag_display_path_verdict() {
     elif [ "$_ntotal" = "$_ndistinct" ]; then
       printf 'layout|OK|extended — %s active outputs at distinct origins (%s); each CRTC has its own position so present-vsync anchors per output (issue 1146)\n' "$_ntotal" "$_origins"
     else
-      printf 'layout|DRIFT|MIRROR — %s active outputs but only %s distinct origin(s), both at +0+0 -> two unsynchronized 60Hz CRTCs -> projector tears; set the extended layout (issue 1146)\n' "$_ntotal" "$_ndistinct"
+      printf 'layout|DRIFT|MIRROR — %s active outputs share an origin (only %s distinct: %s) -> two unsynchronized 60Hz CRTCs at one position -> projector tears; set the extended layout (issue 1146)\n' "$_ntotal" "$_ndistinct" "$_origins"
     fi
   fi
 
