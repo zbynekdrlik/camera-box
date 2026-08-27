@@ -369,10 +369,14 @@ def verify_live_mapping(op, ws, want, sampler, log_err):
         if state == op.LIVENESS_LIVE:
             live += 1
         elif state == op.LIVENESS_FROZEN:
-            log_err(f"#1180 liveness: '{inp}' FROZEN -- receiver is delivering no new frames "
-                    f"({reason}); ndi_source_name may be correct all along, but the receiver thread "
-                    f"is wedged (issue 1158 class) -- an OBS RESTART is the only cure (a name re-set "
-                    f"/ --heal cannot revive it)")
+            log_err(f"#1180 liveness: '{inp}' FROZEN -- no new frames are being presented "
+                    f"({reason}); ndi_source_name may be correct all along. Two causes produce the "
+                    f"SAME byte-identical signal: (a) a WEDGED receiver thread (issue 1158 class) -- "
+                    f"an OBS RESTART is the cure, a name re-set / --heal cannot revive it; (b) an "
+                    f"upstream SENDER outage (dead camera / cambox down / paused) -- an OBS restart "
+                    f"will NOT help. Confirm which via `recv-timing #797` (a frozen SENDER keeps "
+                    f"advancing received=; a wedged RECEIVER freezes it) or a sibling box before "
+                    f"restarting OBS")
             frozen += 1
         else:  # LIVENESS_INCONCLUSIVE
             log_err(f"#1180 liveness: '{inp}' INCONCLUSIVE ({reason}) -- left as-is, never torn "
@@ -399,10 +403,13 @@ def _run_verify_live_mode(args, want):
     the active inputs. Exits per _verify_live_exit_code (0 all live / 1 >=1 FROZEN / 2 WS error / 3
     could-not-confirm). Kept out of main()'s normal enforce path, mirroring _run_heal_mode /
     _run_heal_wait_mode, so rig-activation behaviour is unchanged."""
-    import obs_phase2 as op  # lazy: the pure helpers above stay importable without websocket/obs_phase2
+    # Empty active set: nothing to verify -> exit 0 BEFORE importing obs_phase2, which imports
+    # websocket EAGERLY (sys.exit on a websocket-less host); the contract is 0 for an empty set,
+    # not a missing-dep failure, and no socket is opened here regardless.
     if not want:
         print("#1180 verify-live: no active inputs to verify (empty active set)")
         sys.exit(0)
+    import obs_phase2 as op  # lazy: the pure helpers above stay importable without websocket/obs_phase2
     try:
         ws = op._conn(args.host, args.password)
     except Exception as e:

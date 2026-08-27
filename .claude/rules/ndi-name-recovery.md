@@ -129,9 +129,13 @@ receiver-policy layer.)
   signal the owner used to confirm the cure ("2 WS screenshoty 2 s od seba potvrdili CHANGING").
 - **`set-ndi-mapping.py --verify-live`** runs it over the ACTIVE inputs REGARDLESS of name drift
   (the whole point — the frozen cam1 had a correct name), via `verify_live_mapping` (DI:
-  op/ws/sampler/log) + `_verify_live_exit_code`: **0** all live, **1** ≥1 FROZEN (a
-  name-correct-but-wedged receiver → escalate to an OBS restart, loud `#1180 liveness` line), **2**
-  WS error, **3** could-not-confirm. It DETECTS + reports — it never restarts OBS itself; the
+  op/ws/sampler/log) + `_verify_live_exit_code`: **0** all live, **1** ≥1 FROZEN, **2** WS connect
+  error, **3** could-not-confirm. A FROZEN verdict (loud `#1180 liveness` line) means "no new frames
+  presented" — which the SAME byte-identical screenshot cannot tell apart into (a) a WEDGED receiver
+  thread (issue 1158, an OBS restart cures) vs (b) an upstream SENDER outage (dead camera/cambox, an
+  OBS restart does NOT help); the log names both and points at `recv-timing #797` / a sibling box to
+  disambiguate before bouncing OBS (a frozen SENDER keeps advancing `received=`; a wedged RECEIVER
+  freezes it — `mv-reverify-escalate.md`). It DETECTS + reports — it never restarts OBS itself; the
   escalation-to-restart machinery is `mv-reverify-escalate.sh`'s existing job (kill+sentinel over
   ssh + AHK respawn, never an ssh GUI launch — `win-ssh-vs-mcp.md`). REJECTED as the liveness signal:
   the authoritative `recv-timing #797 n=` OBS-log tap (needs an ssh log read + `LC_ALL=C grep -a`

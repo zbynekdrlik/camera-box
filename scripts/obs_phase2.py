@@ -1355,11 +1355,14 @@ def sample_receiver_liveness(ws, input_name, samples=None, interval_s=None,
                              width=320, height=180, sleep=time.sleep):
     """#1180 IMPURE: take `samples` GetSourceScreenshot reads of `input_name` spaced by `interval_s`
     (both default to the RECEIVER_LIVENESS_* module constants) and return
-    classify_receiver_liveness over their imageData. Best-effort: a failed/empty screenshot
-    contributes a None sample and NEVER raises (this is a recovery-adjacent probe, mirroring
-    reenforce_ndi_name's ignore_err discipline); a window that cannot produce >=2 usable samples
-    classifies INCONCLUSIVE. `sleep` is injectable so the poll cadence is Tier-0-testable with no
-    real wait."""
+    classify_receiver_liveness over their imageData. Best-effort at the SCREENSHOT level: a
+    failed/empty screenshot (an OBS request error suppressed by ignore_err, or a missing imageData)
+    contributes a None sample rather than raising, mirroring reenforce_ndi_name's ignore_err
+    discipline; a window that cannot produce >=2 usable samples classifies INCONCLUSIVE. A
+    TRANSPORT-level failure still propagates -- ignore_err does NOT suppress _rpc's own TimeoutError
+    on a hung request, nor a dead-socket send/recv -- so a caller must not assume this never raises;
+    the CLI (_run_verify_live_mode) catches those and maps them to exit 2. `sleep` is injectable so
+    the poll cadence is Tier-0-testable with no real wait."""
     n = RECEIVER_LIVENESS_SAMPLES if samples is None else samples
     iv = RECEIVER_LIVENESS_POLL_S if interval_s is None else interval_s
     shots = []
