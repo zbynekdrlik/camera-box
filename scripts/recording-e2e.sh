@@ -942,12 +942,15 @@ fi
 # explicitly excluded via the SAME CAMBOX_OFFLINE_ACK/rig-fleet.txt mechanism the fleet preflight and
 # the version-parity gate above already use, never a silent skip.
 echo "[0/8] camera-box version-parity gate — every active cam box must run the SAME camera-box build (issue 875)"
-# issue 1170: cam2's camera-box BINARY is version-gated ONLY while cam2 is a MEASURED camera. As a
-# painter-only box it is NOT redeployed for the run (it stays on the fleet-deployed build, not this
-# run's candidate), so grading it here refuses every run on a spurious version mismatch (live: a
-# candidate dev build vs cam2's deployed build). Its PAINTER-role clock IS still gated (the
-# dantesync clock version gate above keeps cam2 — that pins the run's timebase). Re-adding "cam2" to
-# CAMERA_ACTIVE_SET restores this grading, one line. Same set-membership gate as the [2b/8] deploy.
+# issue 1170 (derivation generalized to cam1 by issue 1198): cam2's camera-box BINARY is
+# version-gated ONLY while cam2 is a MEASURED camera — gated on the SAME set-membership check the
+# [2b/8] deploy uses, currently TRUE (cam2 is in the default CAMERA_ACTIVE_SET as of issue 1198).
+# WHEN cam2 sits outside the active set it is painter-only and NOT redeployed for the run (it stays
+# on the fleet-deployed build, not this run's candidate) — grading it unconditionally would refuse
+# every run on a spurious version mismatch against that stale build. Its PAINTER-role clock is
+# gated UNCONDITIONALLY either way (the dantesync clock version gate above keeps cam2 regardless —
+# that pins the run's timebase). Dropping "cam2" from CAMERA_ACTIVE_SET drops this grading too, one
+# line, no other edit needed.
 CAMBOX_VERSION_LINUX="$CAMERA_NAME=root@$CAM1_IP"
 if camera_is_active cam2; then
   CAMBOX_VERSION_LINUX="$CAMBOX_VERSION_LINUX cam2=root@$PAINTER_IP"
@@ -1401,12 +1404,14 @@ for _lht in $LEG_HEALTH_TARGETS; do
     echo "    skip: $_lhbox — operator-acknowledged offline, leg-health not checked"
     continue
   fi
-  # issue 1170: cam2's CAPTURE leg is excluded from measurement until the card swap — its grabber
-  # cure-decay collapsed (issue 1193/1198). cam2 stays a PAINTER (its reachability + DanteSync clock
-  # are still gated above), but its sick capture leg must NEVER abort the run, so skip its leg-health
-  # check whenever cam2 is not a measured camera. cam2 is only a leg-health target because it is a
-  # hardcoded painter reachability entry that flows into the healthy-node list; the check returns
-  # automatically once "cam2" is re-added to CAMERA_ACTIVE_SET (camera-set.sh).
+  # issue 1170: cam2's CAPTURE leg is checked ONLY while cam2 is a MEASURED camera (gated on
+  # `camera_is_active cam2`, currently TRUE — cam2 is back in the default CAMERA_ACTIVE_SET as of
+  # issue 1198; the owner ruled the grabber "hardware-defective" diagnosis wrong and refused the
+  # card swap the ticket originally tracked). cam2 stays a PAINTER (its reachability + DanteSync
+  # clock are ALWAYS gated above, regardless of this leg's status). Should a REAL capture-leg
+  # regression reproduce on cam2 in the future, dropping it from CAMERA_ACTIVE_SET again skips this
+  # check automatically (never a hardcoded literal here) — cam2 is only a leg-health target because
+  # it is a hardcoded painter reachability entry that flows into the healthy-node list.
   if [ "$_lhbox" = cam2 ] && ! camera_is_active cam2; then
     echo "    skip: cam2 — capture leg excluded from measurement (issue 1170, not in CAMERA_ACTIVE_SET); painter clock/reachability still gated"
     continue
@@ -2319,12 +2324,14 @@ mv_reverify_or_escalate "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 # Re-enabling a retired camera (e.g. cam5) is adding it to CAMERA_ACTIVE_SET there; this loop
 # picks it up automatically, no change needed here.
 # issue 1170: cam2 is deployed as a camera-under-test node ONLY while it is a MEASURED camera
-# (cam2 in CAMERA_ACTIVE_SET). Its ShadowCast capture leg is retired until the card swap (issue
-# 1198), so with the default active set it is NOT seeded here — its PAINTER role (the painter step
-# below, keyed off PAINTER_IP) is UNAFFECTED. Re-adding "cam2" to CAMERA_ACTIVE_SET (camera-set.sh)
-# restores this deploy automatically, one line. The list starts EMPTY and is conditionally seeded so
-# a plain default run genuinely excludes cam2 (before this the cam2 seed was unconditional, keyed off
-# PAINTER_IP, so plain set-removal did not exclude it).
+# (cam2 in CAMERA_ACTIVE_SET) — gated on the exact same `camera_is_active cam2` check just below,
+# currently TRUE (cam2 is back in the default active set as of issue 1198: the owner ruled the
+# ShadowCast "hardware-defective" diagnosis wrong and refused the card swap this section used to
+# describe). Its PAINTER role (the painter step below, keyed off PAINTER_IP) is UNAFFECTED either
+# way. Dropping "cam2" from CAMERA_ACTIVE_SET (camera-set.sh) again would drop this deploy too, one
+# line, no other edit needed. The list starts EMPTY and is conditionally seeded so a run whose
+# active set excludes cam2 genuinely excludes it here too (before this the cam2 seed was
+# unconditional, keyed off PAINTER_IP, so plain set-removal did not exclude it).
 CAMBOX_SECONDARY_DEPLOY=()
 if camera_is_active cam2; then
   CAMBOX_SECONDARY_DEPLOY+=("cam2=$PAINTER_IP=$BURN_CAM2_RUN_ID")

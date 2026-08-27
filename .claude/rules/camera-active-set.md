@@ -14,15 +14,19 @@ paths:
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and MEASURED TODAY (default `cam3` — cam1 retired #1134/#1110; cam2's CAMERA-UNDER-TEST role
-retired issue 1170 2026-08-24 because its ShadowCast grabber's cure-decay collapsed to ~7 min
-(issue 1193) — cam2 stays the fixed PAINTER but is no longer a measured camera, re-enable = add
-"cam2" back after the issue-1198 card swap; cam1/cam2/cam4/cam5/cam6/cam7 retired-from-measured but
-fully resolvable — see the header comment in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the
-on-air alignment superset) is PARTIALLY DERIVED since issue 1170: its default resolves `cam3 cam4`
-(cam3 source + cam4 on-air-not-measured, both explicit) and includes cam2 ONLY when cam2 is in
-`CAMERA_ACTIVE_SET` (an inline word-exact `case`), so re-adding cam2 to the active set restores its
-alignment one-line. **Every place that needs "the list of
+installed and MEASURED TODAY (default `cam1 cam2 cam3`, restored issue 1198 2026-08-27 — the
+owner ruled the two prior "hardware-defective" diagnoses behind cam1's retirement (#1134/#1110)
+and cam2's CAMERA-UNDER-TEST retirement (issue 1170 2026-08-24, its ShadowCast grabber's cure-decay
+collapsed to ~7 min, issue 1193) were both built from EPISODES, not a permanent card state, and
+refused the physical card swap outright ("tie dve karty su vpohode nebudem ich menit za ine lebo su
+uplne funkcne") — a live read-only journal check on all four cam boxes confirmed both cards healthy
+today; cam4/cam5/cam6/cam7 stay retired-from-measured but fully resolvable — see the header comment
+in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the on-air alignment superset) is now FULLY
+DERIVED for cam1 AND cam2 (issue 1170 built this derivation for cam2 alone; issue 1198 generalized
+it to cam1 too): its default resolves `cam1 cam2 cam3 cam4` (cam3+cam4 the explicit always-on-air
+base; cam1 and cam2 each included via their own inline word-exact `case` against
+`CAMERA_ACTIVE_SET`), so dropping either camera from the active set drops it from the align set
+too, automatically, one line. **Every place that needs "the list of
 cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
 literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
 fps, strih scene/route) stay fully resolvable forever (`camera_resolve`/`camera_strih_route` never
