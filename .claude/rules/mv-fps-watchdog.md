@@ -126,3 +126,25 @@ hint in these scripts without the literal `cargo build --release` (e.g. "built +
 smoke-test the watchdog against the live rig, the gate bin from `cargo test --no-run` lands at
 `target/debug/mv-fps-gate` — point `MV_FPS_GATE_BIN` at it and run `--dry-run` (a compiled binary is not
 a build; the block was only ever the comment).
+
+## Verifying `src/mv_audit.rs` locally: it is NO LONGER pure-std — append a `render_budget` stub before `rustc --test` (#1212)
+
+The `vendored-libobs-change-safety.md` recipe calls `src/mv_audit.rs` a pure-std module you can run
+via `rustc --test --edition 2021 src/mv_audit.rs`. That is now STALE: one unit test
+(`floor_tracks_the_effective_target_not_canvas_over_two`) does `use crate::render_budget::effective_render_divisor;`,
+so a bare `rustc --test src/mv_audit.rs` fails (`crate::render_budget` does not exist as its own
+crate). To get the local RED→GREEN (Tier-0 #557 blocks every compiling cargo shape, `--no-run`
+included), APPEND a tiny `render_budget` stub AFTER the module and compile the concatenation:
+
+```bash
+# stub.rs:  pub mod render_budget { pub fn effective_render_divisor(configured_divisor: u32,
+#             frame_interval_ns: u64) -> u32 { /* copied verbatim from src/render_budget.rs */ } }
+cat src/mv_audit.rs stub.rs > /tmp/mv_standalone.rs    # APPEND, never prepend:
+rustc --test --edition 2021 /tmp/mv_standalone.rs -o /tmp/mvtest && /tmp/mvtest
+```
+
+APPEND (module first, stub last), never prepend — the module's `//!` inner doc comments must stay at
+the top of the crate or `rustc` errors `expected outer doc comment`. Copy `effective_render_divisor`
+verbatim from `src/render_budget.rs` (it maps interval→divisor: 33.3ms→1, 16.7ms→2). The C
+`obs_multiview_floor_fps()` half still lift-compiles standalone with `gcc -Wformat=2 -Wconversion`
+exactly as the vendored-libobs rule describes (it takes only `target_fps` since #1212).
