@@ -57,6 +57,14 @@ def test_rig_busy_check_subcommand_parses_and_dispatches(monkeypatch):
 def test_rig_busy_check_subcommand_defaults_host_and_password(monkeypatch):
     # Omitting the flags must still parse — defaults come from STRIH_HOST/STREAM_HOST/OBS_PASSWORD
     # env vars (or the hardcoded rig IPs), never a required-argument failure.
+    #
+    # The env vars are CLEARED first so this pins the hardcoded fallbacks rather than whatever the
+    # runner happens to export. Supervisor boxes load OBS_PASSWORD from
+    # ~/.config/environment.d/, so without this the assertion below failed there — and pytest
+    # printed the real WebSocket password into the failure diff. CI has no such env, so the leak
+    # only ever fired on a developer box, which is exactly where it is least likely to be noticed.
+    for _var in ("STRIH_HOST", "STREAM_HOST", "OBS_PASSWORD"):
+        monkeypatch.delenv(_var, raising=False)
     captured = {}
 
     def fake_rig_busy_check(a):
