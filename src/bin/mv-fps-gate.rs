@@ -1,9 +1,10 @@
 //! #771 — mv-fps-gate CLI (default features, no probe deps).
 //!
 //! Reads an OBS log (the newest `%APPDATA%\obs-studio\logs\*.txt` on strih/stream, or the
-//! `~/.config/obs-studio/logs/*.txt` on imag), takes each Multiview projector's LATEST
-//! `multiview-audit:` sample, and alarms if any projector's measured render cadence fell below
-//! its own printed floor (`target − tolerance`, #771/#776). This is the E2E-preflight / drift-guard
+//! `~/.config/obs-studio/logs/*.txt` on imag), takes each Multiview projector's MEDIAN
+//! `rendered_fps` over its most recent window (`MV_GATE_MEDIAN_WINDOW` samples, #1212), and alarms
+//! if any projector's median render cadence fell below its own printed floor
+//! (`target − tolerance`, #771/#776). This is the E2E-preflight / drift-guard
 //! consumer of the audit line the vendored libobs `render_display()` emits — so the user's
 //! binding "multiview fps must be measured AND guarded against a drop" requirement has a machine
 //! check, not just a log a human might read.
@@ -55,21 +56,40 @@ fn main() {
             );
             std::process::exit(2);
         }
-        GateOutcome::Clean(samples) => {
-            for s in &samples {
+        GateOutcome::Clean(gates) => {
+            for g in &gates {
+                let s = &g.latest;
                 println!(
-                    "PASS monitor={} divisor={} rendered_fps={:.1} (floor {:.1}, target {:.0}, {}x{})",
-                    s.monitor, s.divisor, s.rendered_fps, s.floor_fps, s.target_fps, s.cx, s.cy
+                    "PASS monitor={} divisor={} median_fps={:.1} over {} sample(s) \
+                     (floor {:.1}, target {:.0}, {}x{}, latest rendered_fps {:.1})",
+                    s.monitor,
+                    s.divisor,
+                    g.median_fps,
+                    g.window_len,
+                    s.floor_fps,
+                    s.target_fps,
+                    s.cx,
+                    s.cy,
+                    s.rendered_fps
                 );
             }
             std::process::exit(0);
         }
         GateOutcome::Breach(breaches) => {
-            for s in &breaches {
+            for g in &breaches {
+                let s = &g.latest;
                 println!(
-                    "FAIL monitor={} divisor={} rendered_fps={:.1} < floor={:.1} (target {:.0}, {}x{}) \
-                     — multiview render collapsed",
-                    s.monitor, s.divisor, s.rendered_fps, s.floor_fps, s.target_fps, s.cx, s.cy
+                    "FAIL monitor={} divisor={} median_fps={:.1} < floor={:.1} over {} sample(s) \
+                     (target {:.0}, {}x{}, latest rendered_fps {:.1}) — multiview render collapsed",
+                    s.monitor,
+                    s.divisor,
+                    g.median_fps,
+                    s.floor_fps,
+                    g.window_len,
+                    s.target_fps,
+                    s.cx,
+                    s.cy,
+                    s.rendered_fps
                 );
             }
             std::process::exit(1);

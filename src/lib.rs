@@ -243,9 +243,10 @@ pub mod resolume_playback;
 
 // #771 — MV fps observability: parse the vendored libobs `multiview-audit:` log line (the
 // per-projector real render cadence emitted every ~5s by render_display()) + apply the
-// target − tol alarm floor (target = canvas/effective_divisor), area-aware since #1110 (a
-// render area above the calibrated 1080p class gets a report-only sentinel 0.0 floor);
-// byte-identical to obs_multiview_floor_fps() in obs-display-budget.h (#776/#1110).
+// target − tol alarm floor (target = canvas/effective_divisor; byte-identical to
+// obs_multiview_floor_fps() in obs-display-budget.h, #776). #1212: the floor is
+// area-independent (the issue-1110 4K report-only sentinel is retired) and gate_log judges the
+// MEDIAN of each projector's recent window, not one bursty sample.
 // Pure Tier-0 (no probe/OBS/rig); the E2E-preflight / drift-guard consumer is the thin
 // `src/bin/mv-fps-gate.rs`. The receive-side NDI cadence is separate (jitter_audit above).
 pub mod mv_audit;

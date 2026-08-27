@@ -163,32 +163,18 @@ static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor,
 #define MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS 2.0	     /* fps jitter band below the target floor */
 
 /*
- * camera-box #1110 — the largest multiview render AREA (px) for which an fps alarm floor is
- * CALIBRATED: exactly 1080p (1920*1080 = 2073600). It is the only area class with a proven-healthy
- * floor (imag live: ~30fps over floor 28). A LARGER multiview (strih's 4K, 3840*2160 = 8294400 px)
- * is throttled by the #278/#776 budget gate to protect the 60/30fps program and cannot sustain the
- * same fps, so its floor is a non-gating report-only sentinel (0.0) pending calibration -- an
- * fps-only floor would false-alarm forever (strih healthy ~16-19fps < 28). Tier-0 authority:
- * src/mv_audit.rs::MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX (byte-identical).
- */
-#define MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX 2073600ULL /* 1920*1080 -- the only calibrated class */
-
-/*
- * The MV-fps alarm floor for a projector's TARGET rate AND render AREA (#1110): target_fps −
- * tolerance (#776), BUT only for a render area at or below the one CALIBRATED class (1080p,
- * MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX). Above it the floor is a non-gating report-only sentinel
- * 0.0. A throttleable projector rendering below the calibrated floor over a window has collapsed
- * (freeze / budget starvation) and must alarm. Pure + dependency-free so the C log line, the E2E
- * gate, and drift-guard all apply the SAME threshold. Clamped to >= 0 (a degenerate target_fps
- * never yields a negative floor).
+ * The MV-fps alarm floor for a projector's TARGET rate: target_fps − tolerance (#776). A
+ * throttleable projector rendering below this over a window has collapsed (freeze / budget
+ * starvation) and must alarm. Pure + dependency-free so the C log line, the E2E gate, and
+ * drift-guard all apply the SAME threshold. Clamped to >= 0 (a degenerate target_fps never
+ * yields a negative floor).
  *
- * #1110: a 4K multiview (3840x2160) is budget-throttled (#278/#776) and cannot hold the 1080p fps,
- * so an fps-only floor false-alarms forever (strih healthy ~16-19fps < 28) and makes the mv-fps
- * watchdog signal worthless on that box. So the floor is piecewise on area: today's floor at/below
- * 1080p (no behaviour change -- imag live 29.8-30.0 over 28), a report-only sentinel above it so the
- * rendered_fps stays measured + logged but is not gated, until a real large-area floor is calibrated
- * from >=N samples (only ONE 4K data point exists, so no 4K number is invented). The
- * calibrate-then-flip of the large-area floor is tracked in issue 1212.
+ * #1212: the floor is AREA-INDEPENDENT -- the same target - tol at every render area, including
+ * strih's 4K (3840x2160) multiview. The issue-1110 report-only sentinel above 1080p was RETIRED
+ * once the full log history showed strih's 4K MV median rendered_fps is 29.8-30.0 in every window
+ * (max 30.0) -- floor 28 IS achievable at 4K. The bursty single-sample noise that motivated the
+ * sentinel is handled where it belongs, in the gate (src/mv_audit.rs::gate_log judges the median
+ * of the recent window, not one sample), not by un-gating a whole area class.
  *
  * target_fps = canvas_fps / effective_divisor -- the ~30fps-cell rate the projector actually
  * renders at (both broadcast boxes: strih 30fps canvas / divisor 1, imag 60fps canvas / divisor 2,
@@ -200,11 +186,8 @@ static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor,
  *
  * Tier-0 authority: src/mv_audit.rs::mv_floor_fps (byte-identical results).
  */
-static inline double obs_multiview_floor_fps(double target_fps, uint32_t cx, uint32_t cy)
+static inline double obs_multiview_floor_fps(double target_fps)
 {
-	/* #1110: above the one calibrated area class -> a report-only sentinel, never a false alarm. */
-	if ((uint64_t)cx * (uint64_t)cy > MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX)
-		return 0.0;
 	double floor_fps = target_fps - MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS;
 	return floor_fps < 0.0 ? 0.0 : floor_fps;
 }
