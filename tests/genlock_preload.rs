@@ -2612,23 +2612,16 @@ mod vendored_source {
 
         let bud = squish(&vendor_file(OBS_DISPLAY_BUDGET));
         assert!(
-            bud.contains(
-                "static inline double obs_multiview_floor_fps(double target_fps, uint32_t cx, uint32_t cy)"
-            ),
-            "{OBS_DISPLAY_BUDGET}: #771/#776/#1110 — the pure area-aware floor helper is gone (or lost \
-             its cx/cy params); the C log line and the Rust gate (src/mv_audit.rs) would diverge."
+            bud.contains("static inline double obs_multiview_floor_fps(double target_fps)"),
+            "{OBS_DISPLAY_BUDGET}: #771/#776/#1212 — the pure target floor helper is gone (or grew \
+             params back); the C log line and the Rust gate (src/mv_audit.rs) would diverge. #1212 \
+             retired the issue-1110 area sentinel, so the helper takes only target_fps."
         );
         assert!(
-            bud.contains("#define MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX 2073600ULL"),
-            "{OBS_DISPLAY_BUDGET}: #1110 — the calibrated-area constant (1920*1080) is gone; the \
-             floor would no longer be area-aware and a 4K MV would false-alarm forever."
-        );
-        assert!(
-            bud.contains(
-                "if ((uint64_t)cx * (uint64_t)cy > MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX)"
-            ),
-            "{OBS_DISPLAY_BUDGET}: #1110 — the above-baseline report-only sentinel branch is gone; a \
-             budget-throttled 4K multiview would be gated against an impossible 1080p floor."
+            !bud.contains("MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX"),
+            "{OBS_DISPLAY_BUDGET}: #1212 — the issue-1110 area sentinel constant is back; the floor \
+             must be area-independent (a 4K MV holds median 30fps, floor 28), so the constant and its \
+             report-only branch must be gone."
         );
         assert!(
             bud.contains("#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL"),

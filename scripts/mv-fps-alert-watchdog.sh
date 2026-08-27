@@ -11,8 +11,9 @@
 # an E2E-preflight / drift-guard consumer. But NOTHING read it LIVE, so a MV render collapse
 # (measured live 2026-08-17: imag monitor-3 to ~12fps for 5 min, strih 4K MV to 9-11fps under an
 # app stealing GPU/CPU) went unalarmed unless someone ran `mv-fps-gate` by hand. This dev1-side
-# systemd --user timer reads each OBS box's newest log, runs `mv-fps-gate` over the latest
-# `multiview-audit:` samples, and pages Discord on a sustained below-floor collapse -- imag + strih.
+# systemd --user timer reads each OBS box's newest log, runs `mv-fps-gate` (each projector's
+# recent-window MEDIAN `multiview-audit:` cadence, #1212), and pages Discord on a sustained
+# below-floor collapse -- imag + strih.
 #
 # TAP: the newest `~/.config/obs-studio/logs/*.txt` (imag) / `%APPDATA%\obs-studio\logs\*.txt`
 # (strih) OBS log, read via one flat `ssh` (linux `tail` / windows `powershell gc -Tail`). Reading

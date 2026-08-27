@@ -65,18 +65,12 @@ fn render_display_counts_real_renders_and_windows_at_5s() {
 fn budget_header_carries_the_pure_floor_and_window_constants() {
     let hdr = read(OBS_BUDGET);
     assert!(
-        hdr.contains(
-            "static inline double obs_multiview_floor_fps(double target_fps, uint32_t cx, uint32_t cy)"
-        ),
-        "{OBS_BUDGET}: #771/#776/#1110 area-aware floor helper gone (or lost its cx/cy params) — the C log line and the Rust gate would diverge."
+        hdr.contains("static inline double obs_multiview_floor_fps(double target_fps)"),
+        "{OBS_BUDGET}: #771/#776/#1212 pure target floor helper gone (or grew params back) — the C log line and the Rust gate would diverge. #1212 retired the issue-1110 area sentinel, so the helper takes only target_fps."
     );
     assert!(
-        hdr.contains("#define MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX 2073600ULL"),
-        "{OBS_BUDGET}: #1110 calibrated-area constant (1920*1080) gone — the floor would no longer be area-aware and a 4K MV would false-alarm forever."
-    );
-    assert!(
-        hdr.contains("if ((uint64_t)cx * (uint64_t)cy > MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX)"),
-        "{OBS_BUDGET}: #1110 above-baseline report-only sentinel branch gone — a budget-throttled 4K MV would be gated against an impossible 1080p floor."
+        !hdr.contains("MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX"),
+        "{OBS_BUDGET}: #1212 issue-1110 area sentinel constant is back — the floor must be area-independent (a 4K MV holds median 30fps, floor 28), so the constant and its report-only branch must be gone."
     );
     assert!(
         hdr.contains("#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL"),
@@ -89,13 +83,23 @@ fn budget_header_carries_the_pure_floor_and_window_constants() {
 }
 
 #[test]
-fn render_display_passes_the_render_area_to_the_floor_1110() {
-    // #1110: the emit site must feed display->cx/display->cy into the area-aware floor, or the
-    // printed floor stays area-blind (a 4K MV would carry an impossible 1080p floor).
+fn render_display_floor_call_is_area_independent_1212() {
+    // #1212: the emit site feeds ONLY target_fps into the area-independent floor (the issue-1110
+    // render-area sentinel is retired). The cx=/cy= fields stay on the printed audit line for
+    // observability, but they no longer enter the floor computation.
     let src = read(OBS_DISPLAY);
     assert!(
-        src.contains("obs_multiview_floor_fps(target_fps, display->cx, display->cy)"),
-        "{OBS_DISPLAY}: #1110 emit site no longer passes the render area (display->cx/cy) to the floor — the printed floor would be area-blind."
+        src.contains("obs_multiview_floor_fps(target_fps)"),
+        "{OBS_DISPLAY}: #1212 emit site floor call must take only target_fps (the area sentinel is retired)."
+    );
+    assert!(
+        !src.contains("obs_multiview_floor_fps(target_fps, display->cx, display->cy)"),
+        "{OBS_DISPLAY}: #1212 the issue-1110 area-aware floor call (passing display->cx/cy) is back — the floor must be area-independent."
+    );
+    // The audit line itself must still carry the render area for observability.
+    assert!(
+        src.contains("cx=%u cy=%u"),
+        "{OBS_DISPLAY}: #771/#1212 the multiview-audit line no longer prints cx=/cy= — the render area is still useful observability."
     );
 }
 

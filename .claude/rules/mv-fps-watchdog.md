@@ -16,19 +16,28 @@ The Multiview render-cadence stack has THREE layers, don't conflate them:
 
 1. **EMIT (#771):** vendored libobs `render_display()` prints `multiview-audit: monitor=N divisor=D
    rendered_fps=X target=Z floor=F cx=.. cy=..` ~every 5 s per throttleable MV projector.
-   `floor = obs_multiview_floor_fps(target, cx, cy)` = `target − MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS`
-   for a render AREA (`cx*cy`) at/below the one calibrated class (1080p,
-   `MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX`), else a non-gating report-only sentinel `0.0` (#1110 —
-   strih's 4K MV is budget-throttled and can't hold 30fps, so an fps-only floor false-alarmed
-   forever; calibrating a real large-area floor + flipping it back to gating is tracked in issue
-   1212). target = `canvas/effective_divisor`, the ~30fps-cell rate the projector actually
-   renders at (#776). In `obs-display-budget.h`, byte-mirrored in `src/mv_audit.rs::mv_floor_fps`.
-   Changing the floor is a VENDORED-C change (CI-first-compile + lock-step anchors, per
-   `vendored-libobs-change-safety.md`).
-2. **PARSE/GATE (#771):** `src/mv_audit.rs` (Tier-0, default features) parses the line + `gate_log`;
-   `src/bin/mv-fps-gate.rs` reads a log on stdin/arg → exit `0`=all-above-floor / `1`=below-floor /
-   `2`=no-samples. This is the E2E-preflight / drift-guard / watchdog decision engine — REUSE it,
-   never re-implement the fps-vs-floor decision.
+   `floor = obs_multiview_floor_fps(target)` = `target − MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS`,
+   clamped ≥0, at EVERY render area. target = `canvas/effective_divisor`, the ~30fps-cell rate the
+   projector actually renders at (#776). In `obs-display-budget.h`, byte-mirrored in
+   `src/mv_audit.rs::mv_floor_fps`. **#1212 retired the issue-1110 render-area report-only sentinel:**
+   the floor is now AREA-INDEPENDENT (strih's 4K MV holds median 30fps — mined 29.8–30.0 in every
+   window — so floor 28 is achievable at 4K; the issue-1110 premise that 4K "can't hold 30fps" came
+   from a single collapsed-state observation window). The bursty single-sample noise the sentinel
+   papered over now lives in the GATE (layer 2, median window), not in an un-gated area class. The
+   `cx=`/`cy=` fields stay on the printed line for observability. Changing the floor is a VENDORED-C
+   change (CI-first-compile + lock-step anchors, per `vendored-libobs-change-safety.md`).
+2. **PARSE/GATE (#771; median #1212):** `src/mv_audit.rs` (Tier-0, default features) parses the line
+   + `gate_log`; `src/bin/mv-fps-gate.rs` reads a log on stdin/arg → exit `0`=all-above-floor /
+   `1`=below-floor / `2`=no-samples. **#1212: `gate_log` judges the MEDIAN `rendered_fps` over each
+   projector's most recent `MV_GATE_MEDIAN_WINDOW` (=12, ~60 s) samples, not one latest sample** — a
+   multiview render is bursty (individual samples dip into the teens inside a median-30 window), so a
+   single-sample decision false-alarmed. The median tolerates the bursts and still catches a
+   SUSTAINED collapse (a lone recovered latest sample no longer hides one). Trade-off (by design): a
+   genuinely fast freeze takes ~N/2 samples (~30 s) to drop the median below floor — acceptable
+   because the fast-freeze class is the render-liveness watchdog's job (issue 391,
+   `obs-liveness-render-signal.md`) and this gate runs behind a 2-pass confirm at ~5-min cadence.
+   This is the E2E-preflight / drift-guard / watchdog decision engine — REUSE it, never re-implement
+   the fps-vs-floor decision.
 3. **LIVE ALARM (#1083):** `scripts/mv-fps-alert-watchdog.sh` (dev1-side systemd `--user` timer) +
    pure seam `scripts/lib/mv-fps-health.sh`. Reads each OBS box's newest log over ssh, runs
    `mv-fps-gate`, pages Discord on a SUSTAINED below-floor collapse. Ships DISABLED (supervisor
@@ -117,3 +126,25 @@ hint in these scripts without the literal `cargo build --release` (e.g. "built +
 smoke-test the watchdog against the live rig, the gate bin from `cargo test --no-run` lands at
 `target/debug/mv-fps-gate` — point `MV_FPS_GATE_BIN` at it and run `--dry-run` (a compiled binary is not
 a build; the block was only ever the comment).
+
+## Verifying `src/mv_audit.rs` locally: it is NO LONGER pure-std — append a `render_budget` stub before `rustc --test` (#1212)
+
+The `vendored-libobs-change-safety.md` recipe calls `src/mv_audit.rs` a pure-std module you can run
+via `rustc --test --edition 2021 src/mv_audit.rs`. That is now STALE: one unit test
+(`floor_tracks_the_effective_target_not_canvas_over_two`) does `use crate::render_budget::effective_render_divisor;`,
+so a bare `rustc --test src/mv_audit.rs` fails (`crate::render_budget` does not exist as its own
+crate). To get the local RED→GREEN (Tier-0 #557 blocks every compiling cargo shape, `--no-run`
+included), APPEND a tiny `render_budget` stub AFTER the module and compile the concatenation:
+
+```bash
+# stub.rs:  pub mod render_budget { pub fn effective_render_divisor(configured_divisor: u32,
+#             frame_interval_ns: u64) -> u32 { /* copied verbatim from src/render_budget.rs */ } }
+cat src/mv_audit.rs stub.rs > /tmp/mv_standalone.rs    # APPEND, never prepend:
+rustc --test --edition 2021 /tmp/mv_standalone.rs -o /tmp/mvtest && /tmp/mvtest
+```
+
+APPEND (module first, stub last), never prepend — the module's `//!` inner doc comments must stay at
+the top of the crate or `rustc` errors `expected outer doc comment`. Copy `effective_render_divisor`
+verbatim from `src/render_budget.rs` (it maps interval→divisor: 33.3ms→1, 16.7ms→2). The C
+`obs_multiview_floor_fps()` half still lift-compiles standalone with `gcc -Wformat=2 -Wconversion`
+exactly as the vendored-libobs rule describes (it takes only `target_fps` since #1212).
