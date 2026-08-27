@@ -653,4 +653,22 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
         // in the online list; the remaining general cores are used.
         assert_eq!(select_irq_target_cores(false, 2, &[0, 1, 2]), vec![0, 1]);
     }
+
+    // --- issue 1198: the capture IRQ must not share a core with the painter -------
+
+    #[test]
+    fn irq_and_painter_cores_are_disjoint_on_the_fleet_1198() {
+        // issue 1198 [red]: on the stock non-RT cam-box (capture=3, online=[0,1,2,3])
+        // the capture-IRQ set and the painter set must NOT share a core, or the 1080p
+        // #528 HDMI preview scaling on the painter cores delays the non-preemptible
+        // xhci hardirq and starves URB delivery (58 fps captured vs 60 emitted).
+        // Before the fix both are [0,1,2] and this fails.
+        let online = [0usize, 1, 2, 3];
+        let irq = select_irq_target_cores(false, 3, &online);
+        let painter = select_painter_cores(Some(3), &online);
+        assert!(
+            irq.iter().all(|c| !painter.contains(c)),
+            "capture IRQ {irq:?} and painter {painter:?} must be disjoint (issue 1198)"
+        );
+    }
 }
