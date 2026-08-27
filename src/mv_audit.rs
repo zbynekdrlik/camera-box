@@ -413,4 +413,46 @@ multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=19
             other => panic!("expected Breach, got {other:?}"),
         }
     }
+
+    // #1212 helpers: build a monitor's worth of `multiview-audit:` lines from a list of
+    // rendered_fps values (all 4K, floor 28, in log order — latest last).
+    #[cfg(test)]
+    fn log_4k_monitor1(rendered: &[f64]) -> String {
+        let mut s = String::new();
+        for r in rendered {
+            s.push_str(&format!(
+                "multiview-audit: monitor=1 divisor=1 rendered_fps={r:.1} target=30 floor=28.0 cx=3840 cy=2160\n"
+            ));
+        }
+        s
+    }
+
+    #[test]
+    fn gate_does_not_false_alarm_on_a_single_bursty_dip_1212() {
+        // A 4K multiview whose window MEDIAN is a healthy 30.0 but whose LATEST sample dipped to
+        // 14.9 (the bursty-4K reality: individual samples dip into the teens inside a median-30
+        // window). The single-latest-sample gate false-alarms; the windowed-median gate must stay
+        // CLEAN. RED against the pre-#1212 single-sample gate_log (latest 14.9 < floor 28 → Breach).
+        let mut fps = vec![30.0; 11];
+        fps.push(14.9); // the latest sample dipped
+        assert!(
+            matches!(gate_log(&log_4k_monitor1(&fps)), GateOutcome::Clean(_)),
+            "a single bursty dip must not breach a median-30 window (#1212)"
+        );
+    }
+
+    #[test]
+    fn gate_catches_a_sustained_collapse_even_when_the_latest_sample_recovered_1212() {
+        // The window is a sustained collapse (11 samples at 15.0) with only the LATEST sample
+        // recovered to 30.0. The single-latest-sample gate MISSES this (latest 30.0 ≥ floor 28 →
+        // Clean); the windowed-median gate must BREACH (median 15.0 < 28). RED against the
+        // pre-#1212 gate_log in the OPPOSITE direction — the median catches a real collapse a lone
+        // recovered sample would hide.
+        let mut fps = vec![15.0; 11];
+        fps.push(30.0); // latest sample bounced back
+        assert!(
+            matches!(gate_log(&log_4k_monitor1(&fps)), GateOutcome::Breach(_)),
+            "a sustained below-floor window must breach even if the latest sample recovered (#1212)"
+        );
+    }
 }
