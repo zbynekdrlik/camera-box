@@ -325,8 +325,12 @@ void render_display(struct obs_display *display)
 					(effective_divisor != 0) ? canvas_fps / (double)effective_divisor : canvas_fps;
 				/* #776: floor tracks the effective TARGET (canvas/effective_divisor), not
 				 * canvas/2 -- a 30fps-canvas box renders MV at divisor 1 = 30fps, so a
-				 * canvas/2 floor (13) would be half the real target. */
-				const double floor_fps = obs_multiview_floor_fps(target_fps);
+				 * canvas/2 floor (13) would be half the real target.
+				 * #1110: also pass the render AREA (display->cx/cy) -- above the one
+				 * calibrated 1080p class (e.g. strih's 4K MV) the floor is a report-only
+				 * sentinel (0.0), so a budget-throttled 4K MV never false-alarms. */
+				const double floor_fps =
+					obs_multiview_floor_fps(target_fps, display->cx, display->cy);
 				blog(LOG_INFO,
 				     "multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u",
 				     display->render_audit_id, effective_divisor, rendered_fps, target_fps, floor_fps,

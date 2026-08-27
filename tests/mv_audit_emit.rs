@@ -65,8 +65,18 @@ fn render_display_counts_real_renders_and_windows_at_5s() {
 fn budget_header_carries_the_pure_floor_and_window_constants() {
     let hdr = read(OBS_BUDGET);
     assert!(
-        hdr.contains("static inline double obs_multiview_floor_fps(double target_fps)"),
-        "{OBS_BUDGET}: #771/#776 pure target floor helper gone — the C log line and the Rust gate would diverge."
+        hdr.contains(
+            "static inline double obs_multiview_floor_fps(double target_fps, uint32_t cx, uint32_t cy)"
+        ),
+        "{OBS_BUDGET}: #771/#776/#1110 area-aware floor helper gone (or lost its cx/cy params) — the C log line and the Rust gate would diverge."
+    );
+    assert!(
+        hdr.contains("#define MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX 2073600ULL"),
+        "{OBS_BUDGET}: #1110 calibrated-area constant (1920*1080) gone — the floor would no longer be area-aware and a 4K MV would false-alarm forever."
+    );
+    assert!(
+        hdr.contains("if ((uint64_t)cx * (uint64_t)cy > MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX)"),
+        "{OBS_BUDGET}: #1110 above-baseline report-only sentinel branch gone — a budget-throttled 4K MV would be gated against an impossible 1080p floor."
     );
     assert!(
         hdr.contains("#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL"),
@@ -75,6 +85,17 @@ fn budget_header_carries_the_pure_floor_and_window_constants() {
     assert!(
         hdr.contains("#define MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS 2.0"),
         "{OBS_BUDGET}: #771 floor tolerance constant gone."
+    );
+}
+
+#[test]
+fn render_display_passes_the_render_area_to_the_floor_1110() {
+    // #1110: the emit site must feed display->cx/display->cy into the area-aware floor, or the
+    // printed floor stays area-blind (a 4K MV would carry an impossible 1080p floor).
+    let src = read(OBS_DISPLAY);
+    assert!(
+        src.contains("obs_multiview_floor_fps(target_fps, display->cx, display->cy)"),
+        "{OBS_DISPLAY}: #1110 emit site no longer passes the render area (display->cx/cy) to the floor — the printed floor would be area-blind."
     );
 }
 
