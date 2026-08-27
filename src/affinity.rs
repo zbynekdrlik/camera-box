@@ -10,14 +10,28 @@
 //! This module derives the isolated core ROBUSTLY (from `/sys`, not a hardcoded
 //! `3`) and pins:
 //! - the CAPTURE + EMIT hot thread ONTO the isolated core (alone, immune to box load),
-//! - the painter / `--display` render / intercom threads OFF the isolated core (onto 0-2),
-//!   so generation can never steal from capture,
-//! - the USB capture-controller IRQ onto the isolated core too (`smp_affinity`),
-//!   so URB delivery isn't preempted by the loaded general cores.
+//! - the USB capture-controller IRQ, on a stock (non-PREEMPT_RT) kernel, onto its OWN
+//!   dedicated general core — the highest non-capture core (`smp_affinity`) — so the
+//!   non-preemptible xhci hardirq that delivers URBs never shares a core with the
+//!   painter/display load (issue 1198). On a PREEMPT_RT kernel the handler is threaded
+//!   and sub-grab priority, so it is co-located on the isolated capture core instead
+//!   (#289 intent, issue 899 defect 3),
+//! - the painter / `--display` render / intercom threads OFF BOTH the capture core AND
+//!   the dedicated capture-IRQ core, onto the remaining general cores, so neither the
+//!   grab nor URB delivery can be stolen by generation.
+//!
+//! Why the dedicated IRQ core (issue 1198): before it, the non-RT capture IRQ set and
+//! the painter set were the SAME general cores (e.g. both `[0,1,2]` on the 4-core cam
+//! boxes). Isolating the capture CONSUMER thread on core 3 did nothing for URB
+//! DELIVERY — the cam1 #528 HDMI-preview 1080p scale on `[0,1,2]` delayed the xhci
+//! hardirq/softirq, the URB completed late, and the frame was dropped (58 fps captured
+//! vs 60 emitted, gone entirely with the preview off). Giving the IRQ its own quiet
+//! core the painter never touches removes that contention.
 //!
 //! The pure SELECTION + PARSING logic ([`parse_cpulist`], [`select_capture_core`],
-//! [`select_painter_cores`], [`parse_capture_irqs`], [`smp_affinity_mask_hex`]) is
-//! unit-tested; the syscall/`/proc`/`/sys` IO around it is thin glue.
+//! [`select_painter_cores`], [`select_irq_reserved_core`], [`select_irq_target_cores`],
+//! [`parse_capture_irqs`], [`smp_affinity_mask_hex`]) is unit-tested; the
+//! syscall/`/proc`/`/sys` IO around it is thin glue.
 
 /// Ops escape-hatch env var: force the capture core to an explicit index. UNSET
 /// (the default) ⇒ auto-derive from `/sys` (the `isolcpus`-reserved core). Only
@@ -86,19 +100,51 @@ pub fn select_capture_core(
 }
 
 /// Pick the cores the painter / `--display` / intercom threads should run on:
-/// every online core EXCEPT the capture core, so generation/render/audio can
-/// never steal from the isolated capture core. If excluding the capture core
-/// would leave nothing (single-core box), fall back to all online cores.
-pub fn select_painter_cores(capture_core: Option<usize>, online: &[usize]) -> Vec<usize> {
-    let cores: Vec<usize> = match capture_core {
-        Some(cc) => online.iter().copied().filter(|&c| c != cc).collect(),
-        None => online.to_vec(),
-    };
+/// every online core EXCEPT the capture core AND the dedicated capture-IRQ core
+/// (`reserved_irq_core`, issue 1198), so generation/render/audio can never steal
+/// from either the isolated grab or URB delivery. `reserved_irq_core` is `None`
+/// on a PREEMPT_RT kernel (the IRQ is co-located on the capture core, so no
+/// general core is reserved) and on any box too small to reserve one — in those
+/// cases only the capture core is excluded. If excluding leaves nothing (a
+/// single-core box), fall back to all online cores; the painter is never stranded
+/// on an empty set.
+pub fn select_painter_cores(
+    capture_core: Option<usize>,
+    reserved_irq_core: Option<usize>,
+    online: &[usize],
+) -> Vec<usize> {
+    let cores: Vec<usize> = online
+        .iter()
+        .copied()
+        .filter(|&c| Some(c) != capture_core && Some(c) != reserved_irq_core)
+        .collect();
     if cores.is_empty() {
         online.to_vec()
     } else {
         cores
     }
+}
+
+/// Pick the ONE general core to DEDICATE to the USB capture IRQ on a non-RT
+/// kernel (issue 1198), so URB delivery never shares a core with the painter /
+/// display / intercom threads.
+///
+/// Returns the highest online NON-capture core, but ONLY when doing so still
+/// leaves the painter at least one core to run on — i.e. there are at least TWO
+/// general (non-capture) cores. With fewer than that (a 2-core box where
+/// reserving one would strand the painter, or a 1-core box) it returns `None`,
+/// and the caller keeps today's shared-general-core behaviour rather than ever
+/// stranding the painter on an empty mask.
+pub fn select_irq_reserved_core(capture_core: usize, online: &[usize]) -> Option<usize> {
+    let general: Vec<usize> = online
+        .iter()
+        .copied()
+        .filter(|&c| c != capture_core)
+        .collect();
+    if general.len() < 2 {
+        return None;
+    }
+    general.into_iter().max()
 }
 
 /// Parse `/proc/interrupts` and return the IRQ numbers whose description matches
@@ -181,11 +227,14 @@ pub fn kernel_is_preempt_rt(proc_version: &str, sys_realtime: Option<&str>) -> b
 /// - **PREEMPT_RT kernel** → route ONTO the isolated capture core (`[capture_core]`):
 ///   the handler is a schedulable thread whose priority sits below the grab, so
 ///   co-locating URB delivery next to its consumer is the design intent (#289).
-/// - **non-RT kernel** → route OFF the capture core, onto the general cores
-///   (`online` minus `capture_core`): the handler is a non-preemptible hardirq
-///   that would otherwise steal cycles from even the prio-90 FIFO grab. Falls
-///   back to `[capture_core]` only when there is no OTHER online core (a
-///   single-core box), so the IRQ is never stranded on an empty mask.
+/// - **non-RT kernel** → route onto ONE dedicated general core
+///   ([`select_irq_reserved_core`], the highest non-capture core), so the
+///   non-preemptible hardirq neither steals from the prio-90 FIFO grab NOR shares
+///   a core with the painter/display load that would delay URB delivery (issue
+///   1198). On a box too small to reserve one without stranding the painter, it
+///   falls back to today's behaviour — all general cores (`online` minus
+///   `capture_core`), or `[capture_core]` when there is no OTHER online core (a
+///   single-core box) — so the IRQ is never stranded on an empty mask.
 pub fn select_irq_target_cores(
     is_preempt_rt: bool,
     capture_core: usize,
@@ -195,10 +244,14 @@ pub fn select_irq_target_cores(
         // RT: threaded handler below the grab's priority → co-locate on the core.
         return vec![capture_core];
     }
-    // non-RT: route onto every online core EXCEPT the capture core, so the
-    // non-preemptible handler runs on the general cores. If that leaves nothing
-    // (single-core box where the only core IS the capture core), fall back to
-    // the capture core rather than an empty mask.
+    // non-RT (issue 1198): dedicate ONE general core to the capture IRQ so the
+    // non-preemptible xhci handler never shares a core with the painter/display
+    // threads (which starved URB delivery on cam1's #528 preview box).
+    if let Some(reserved) = select_irq_reserved_core(capture_core, online) {
+        return vec![reserved];
+    }
+    // Too small to reserve one without stranding the painter → keep today's
+    // behaviour: every general core, or the capture core if there is no other.
     let general: Vec<usize> = online
         .iter()
         .copied()
@@ -307,10 +360,18 @@ pub fn pin_off_capture_core(label: &str) {
     let online = read_online_cores();
     let isolated = read_isolated_cores();
     let capture = select_capture_core(env_capture_core(), &isolated, &online);
-    let cores = select_painter_cores(capture, &online);
+    // issue 1198: on a non-RT kernel the capture IRQ gets its own dedicated general
+    // core; keep the painter OFF that core too. On a PREEMPT_RT kernel the IRQ is
+    // co-located on the capture core (no general core reserved), so pass None and
+    // the painter keeps all general cores.
+    let reserved = match capture {
+        Some(cc) if !read_kernel_is_preempt_rt() => select_irq_reserved_core(cc, &online),
+        _ => None,
+    };
+    let cores = select_painter_cores(capture, reserved, &online);
     if pin_current_thread(&cores) {
         tracing::info!(
-            "#289 {label} thread pinned OFF the capture core to {cores:?} (capture core={capture:?})"
+            "#289/1198 {label} thread pinned OFF the capture core to {cores:?} (capture core={capture:?}, reserved capture-IRQ core={reserved:?})"
         );
     } else {
         tracing::warn!("#289 {label} thread: could not pin to non-capture cores {cores:?}");
@@ -361,6 +422,18 @@ pub fn setup_irq_affinity() {
     let is_rt = read_kernel_is_preempt_rt();
     let target = select_irq_target_cores(is_rt, core, &online);
     let mask = smp_affinity_mask_hex(&target);
+    // issue 1198: state the whole core split plainly at startup so a live box shows
+    // which core carries the capture IRQ and which cores the painter/display got —
+    // this is the line a future session reads to confirm the fix is applied.
+    let reserved = if is_rt {
+        None
+    } else {
+        select_irq_reserved_core(core, &online)
+    };
+    let painter = select_painter_cores(Some(core), reserved, &online);
+    tracing::info!(
+        "#1198 core split: capture={core}, capture-IRQ={target:?}, painter/display={painter:?} (online={online:?}, preempt_rt={is_rt})"
+    );
     tracing::info!(
         "#289/899 IRQ affinity: kernel preempt_rt={is_rt}; routing capture IRQs {irqs:?} to cores {target:?} (capture core={core}, smp_affinity={mask})"
     );
@@ -467,25 +540,45 @@ mod tests {
 
     #[test]
     fn painter_cores_exclude_capture_core() {
-        assert_eq!(select_painter_cores(Some(3), &[0, 1, 2, 3]), vec![0, 1, 2]);
+        // issue 1198: signature gained `reserved_irq_core`. With None reserved (the
+        // PREEMPT_RT path, where the IRQ sits on the capture core) the painter still
+        // gets every general core, exactly as before this ticket.
+        assert_eq!(
+            select_painter_cores(Some(3), None, &[0, 1, 2, 3]),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn painter_cores_exclude_capture_and_reserved_irq_core() {
+        // issue 1198: the non-RT fleet case — painter excludes BOTH the capture core
+        // (3) and the dedicated capture-IRQ core (2), leaving [0,1].
+        assert_eq!(
+            select_painter_cores(Some(3), Some(2), &[0, 1, 2, 3]),
+            vec![0, 1]
+        );
     }
 
     #[test]
     fn painter_cores_all_online_when_no_capture_core() {
-        assert_eq!(select_painter_cores(None, &[0, 1, 2, 3]), vec![0, 1, 2, 3]);
+        assert_eq!(
+            select_painter_cores(None, None, &[0, 1, 2, 3]),
+            vec![0, 1, 2, 3]
+        );
     }
 
     #[test]
     fn painter_cores_fall_back_when_only_capture_core() {
         // Single-core box: can't separate, so the painter shares it.
-        assert_eq!(select_painter_cores(Some(0), &[0]), vec![0]);
+        assert_eq!(select_painter_cores(Some(0), None, &[0]), vec![0]);
     }
 
     #[test]
     fn painter_cores_keep_higher_cores() {
+        // issue 1198: with reserved=5 excluded too (capture=3), painter keeps the rest.
         assert_eq!(
-            select_painter_cores(Some(3), &[0, 1, 2, 3, 4, 5]),
-            vec![0, 1, 2, 4, 5]
+            select_painter_cores(Some(3), Some(5), &[0, 1, 2, 3, 4, 5]),
+            vec![0, 1, 2, 4]
         );
     }
 
@@ -632,12 +725,11 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
 
     #[test]
     fn irq_target_on_non_rt_kernel_moves_off_the_grab_core() {
-        // issue 899 defect 3: on a stock kernel the non-preemptible xhci handler
-        // must run OFF the grab core (onto the general cores 0-2), not on it.
-        assert_eq!(
-            select_irq_target_cores(false, 3, &[0, 1, 2, 3]),
-            vec![0, 1, 2]
-        );
+        // issue 899 defect 3: on a stock kernel the non-preemptible xhci handler must
+        // run OFF the grab core. issue 1198 TIGHTENS this: it now goes onto ONE
+        // dedicated general core (the highest non-capture core, 2) instead of all of
+        // [0,1,2], so it no longer shares a core with the painter/display load.
+        assert_eq!(select_irq_target_cores(false, 3, &[0, 1, 2, 3]), vec![2]);
     }
 
     #[test]
@@ -648,27 +740,84 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     }
 
     #[test]
-    fn irq_target_non_rt_ignores_the_capture_core_in_the_online_list() {
-        // The capture core is excluded from the non-RT target even if it appears
-        // in the online list; the remaining general cores are used.
-        assert_eq!(select_irq_target_cores(false, 2, &[0, 1, 2]), vec![0, 1]);
+    fn irq_target_non_rt_three_core_reserves_one() {
+        // issue 1198: the 3-core rung — capture=2, general=[0,1]; reserve the highest
+        // general core (1) for the IRQ, leaving [0] for the painter. Before 1198 this
+        // returned [0,1] (all general).
+        assert_eq!(select_irq_target_cores(false, 2, &[0, 1, 2]), vec![1]);
+    }
+
+    #[test]
+    fn irq_target_non_rt_two_core_keeps_todays_general() {
+        // issue 1198: the 2-core rung — capture=1, general=[0]; reserving the only
+        // general core would strand the painter, so keep today's behaviour ([0]).
+        assert_eq!(select_irq_target_cores(false, 1, &[0, 1]), vec![0]);
+    }
+
+    // --- issue 1198: dedicated capture-IRQ core (reserved-core selector) ----------
+
+    #[test]
+    fn reserved_core_is_highest_general_on_four_core_box() {
+        // capture=3, general=[0,1,2] → reserve the highest general core, 2.
+        assert_eq!(select_irq_reserved_core(3, &[0, 1, 2, 3]), Some(2));
+    }
+
+    #[test]
+    fn reserved_core_on_three_core_box_still_reserves_one() {
+        // capture=2, general=[0,1] → reserve 1, painter left with [0].
+        assert_eq!(select_irq_reserved_core(2, &[0, 1, 2]), Some(1));
+    }
+
+    #[test]
+    fn reserved_core_none_on_two_core_box() {
+        // capture=1, general=[0] → reserving would strand the painter → None.
+        assert_eq!(select_irq_reserved_core(1, &[0, 1]), None);
+    }
+
+    #[test]
+    fn reserved_core_none_on_single_core_box() {
+        // capture=0, general=[] → nothing to reserve → None.
+        assert_eq!(select_irq_reserved_core(0, &[0]), None);
     }
 
     // --- issue 1198: the capture IRQ must not share a core with the painter -------
 
     #[test]
     fn irq_and_painter_cores_are_disjoint_on_the_fleet_1198() {
-        // issue 1198 [red]: on the stock non-RT cam-box (capture=3, online=[0,1,2,3])
+        // issue 1198 [green]: on the stock non-RT cam-box (capture=3, online=[0,1,2,3])
         // the capture-IRQ set and the painter set must NOT share a core, or the 1080p
         // #528 HDMI preview scaling on the painter cores delays the non-preemptible
         // xhci hardirq and starves URB delivery (58 fps captured vs 60 emitted).
-        // Before the fix both are [0,1,2] and this fails.
+        // Migrated from the RED commit to the new `reserved_irq_core` painter
+        // signature; the disjointness assertion is unchanged.
         let online = [0usize, 1, 2, 3];
-        let irq = select_irq_target_cores(false, 3, &online);
-        let painter = select_painter_cores(Some(3), &online);
+        let capture = 3usize;
+        let reserved = select_irq_reserved_core(capture, &online);
+        let irq = select_irq_target_cores(false, capture, &online);
+        let painter = select_painter_cores(Some(capture), reserved, &online);
         assert!(
             irq.iter().all(|c| !painter.contains(c)),
             "capture IRQ {irq:?} and painter {painter:?} must be disjoint (issue 1198)"
         );
+    }
+
+    #[test]
+    fn irq_and_painter_disjoint_across_rungs_and_never_empty() {
+        // issue 1198: across the degradation rungs the painter and IRQ are never empty,
+        // and whenever a core is reserved the two sets are disjoint.
+        for online in [vec![0usize, 1, 2, 3], vec![0, 1, 2], vec![0, 1, 2, 3, 4, 5]] {
+            let capture = *online.iter().max().unwrap();
+            let reserved = select_irq_reserved_core(capture, &online);
+            let irq = select_irq_target_cores(false, capture, &online);
+            let painter = select_painter_cores(Some(capture), reserved, &online);
+            assert!(!irq.is_empty(), "irq never empty for {online:?}");
+            assert!(!painter.is_empty(), "painter never empty for {online:?}");
+            if reserved.is_some() {
+                assert!(
+                    irq.iter().all(|c| !painter.contains(c)),
+                    "irq {irq:?} / painter {painter:?} overlap for {online:?}"
+                );
+            }
+        }
     }
 }
