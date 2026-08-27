@@ -27,22 +27,44 @@
 /// `obs-display-budget.h`.
 pub const MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS: f64 = 2.0;
 
+/// #1110: the largest multiview render AREA (px) for which an fps alarm floor is CALIBRATED —
+/// exactly 1080p (1920×1080 = 2_073_600). It is the only area class with a proven-healthy floor
+/// (imag live: ~30fps over floor 28). A LARGER multiview (strih's 4K, 3840×2160 = 8_294_400 px)
+/// is throttled by the #278/#776 budget gate to protect the 60/30fps program and cannot sustain
+/// the same fps, so its floor is a non-gating report-only sentinel (0.0) pending calibration — an
+/// fps-only floor would false-alarm forever (strih healthy ~16–19fps < 28). Byte-identical to
+/// `MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX` in `obs-display-budget.h`.
+pub const MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX: u64 = 1920 * 1080;
+
 /// The literal log-line marker. Mutually non-substring with every `genlock-*` audit marker, so
 /// all parser families can run over one log independently.
 pub const MARKER: &str = "multiview-audit:";
 
-/// The MV-fps alarm floor for a projector's TARGET rate: `target_fps − tolerance`, clamped to
-/// `>= 0`. `target_fps = canvas_fps / effective_divisor` — the ~30fps-cell rate the projector
-/// actually renders at (both broadcast boxes: strih 30fps canvas / divisor 1, imag 60fps canvas
-/// / divisor 2, both → target 30 → floor 28). Byte-identical to the C `obs_multiview_floor_fps()`
-/// — the emitter prints this (feeding it the same `target_fps` it computed) and the gate reads it
-/// back off the line, so they can never diverge.
+/// The MV-fps alarm floor for a projector's TARGET rate AND render AREA (#1110): `target_fps −
+/// tolerance`, clamped to `>= 0`, BUT only for a render area at or below the one CALIBRATED class
+/// (1080p, `MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX`). Above it the floor is a non-gating
+/// report-only sentinel `0.0`. `target_fps = canvas_fps / effective_divisor` — the ~30fps-cell rate
+/// the projector actually renders at. Byte-identical to the C `obs_multiview_floor_fps()` — the
+/// emitter prints this (feeding it the same `target_fps` + `cx`/`cy` it computed) and the gate
+/// reads it back off the line, so they can never diverge.
 ///
-/// #776: the floor tracks the TARGET, not `canvas/2`. The pre-#776 `canvas/2` model assumed every
-/// throttleable projector used divisor 2 (MV = canvas/2); once #879 derives the divisor from the
-/// canvas rate, a 30fps-canvas box renders MV at divisor 1 = 30fps, so `canvas/2` (= 13) is half
-/// the real target and a genuine collapse to ~14–27fps would slip under it unalarmed.
-pub fn mv_floor_fps(target_fps: f64) -> f64 {
+/// #1110: a 4K multiview (3840×2160) is budget-throttled (#278/#776) and cannot hold the 1080p
+/// fps, so an fps-only floor false-alarms forever (strih healthy ~16–19fps < 28) and makes the
+/// mv-fps watchdog signal worthless on that box. So the floor is piecewise on area: today's floor
+/// at/below 1080p (no behaviour change — imag live 29.8–30.0 over 28), a report-only sentinel above
+/// it so `rendered_fps` stays measured + logged but is not gated, until a real large-area floor is
+/// calibrated from ≥N samples. Only ONE 4K data point exists, so no 4K number is invented.
+///
+/// #776 (unchanged for the calibrated class): the floor tracks the TARGET, not `canvas/2`. The
+/// pre-#776 `canvas/2` model assumed every throttleable projector used divisor 2 (MV = canvas/2);
+/// once #879 derives the divisor from the canvas rate, a 30fps-canvas box renders MV at divisor
+/// 1 = 30fps, so `canvas/2` (= 13) is half the real target and a genuine collapse to ~14–27fps
+/// would slip under it unalarmed.
+pub fn mv_floor_fps(target_fps: f64, cx: u32, cy: u32) -> f64 {
+    // #1110: above the one calibrated area class -> a report-only sentinel, never a false alarm.
+    if (cx as u64) * (cy as u64) > MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX {
+        return 0.0;
+    }
     let floor = target_fps - MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS;
     if floor < 0.0 {
         0.0
@@ -246,14 +268,16 @@ mod tests {
         assert_eq!(imag_target, 30.0);
 
         // Both boxes now floor at target - tolerance = 28 (the already-proven-healthy imag
-        // floor; strih was wrongly 13 while its MV renders 30fps).
-        assert_eq!(mv_floor_fps(strih_target), 28.0);
-        assert_eq!(mv_floor_fps(imag_target), 28.0);
+        // floor; strih was wrongly 13 while its MV renders 30fps). This asserts the #776
+        // TARGET-tracking within the CALIBRATED 1080p area class (area-awareness is tested
+        // separately in floor_is_area_aware_report_only_above_the_calibrated_class_1110).
+        assert_eq!(mv_floor_fps(strih_target, 1920, 1080), 28.0);
+        assert_eq!(mv_floor_fps(imag_target, 1920, 1080), 28.0);
 
-        // Degenerate: never a negative floor.
-        assert_eq!(mv_floor_fps(2.0), 0.0); // 2 - 2 = 0 exactly
-        assert_eq!(mv_floor_fps(1.0), 0.0); // clamped
-        assert_eq!(mv_floor_fps(0.0), 0.0);
+        // Degenerate: never a negative floor (at the calibrated 1080p area).
+        assert_eq!(mv_floor_fps(2.0, 1920, 1080), 0.0); // 2 - 2 = 0 exactly
+        assert_eq!(mv_floor_fps(1.0, 1920, 1080), 0.0); // clamped
+        assert_eq!(mv_floor_fps(0.0, 1920, 1080), 0.0);
     }
 
     #[test]
@@ -319,11 +343,11 @@ mod tests {
         assert_eq!(s.cx, 1920);
         assert_eq!(s.cy, 1080);
         // canvas reconstructed from target*divisor; the printed floor matches mv_floor_fps applied
-        // to the TARGET (post-#776 the floor tracks target, not canvas -- here canvas==target==30
-        // because divisor==1, but for a divisor=2 imag line canvas=60/target=30 and only target
-        // yields the correct floor).
+        // to the TARGET + this line's AREA (post-#776 the floor tracks target, not canvas -- here
+        // canvas==target==30 because divisor==1; #1110: this 1920x1080 line is the calibrated area
+        // class, so the floor is the ordinary target - tol = 28, byte-identical to the printed one).
         assert!((s.canvas_fps() - 30.0).abs() < 1e-9);
-        assert!((mv_floor_fps(s.target_fps) - s.floor_fps).abs() < 1e-9);
+        assert!((mv_floor_fps(s.target_fps, s.cx, s.cy) - s.floor_fps).abs() < 1e-9);
     }
 
     #[test]
