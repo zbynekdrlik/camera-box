@@ -2,6 +2,39 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-08-27 — #1212 (retire the issue-1110 large-area MV-fps sentinel + median-window gate) — worktree worktree-agent-a8e1b09897821d8d9, base 78b03412f (the issue-1110 merge)
+
+- **Reverses a change merged ~20 min earlier (issue 1110, `78b03412f`).** Issue 1110 made
+  `mv_floor_fps()` return report-only `0.0` above 1080p on the premise "4K can't hold floor 28".
+  Supervisor-mined evidence (6 newest strih OBS logs, 11496+ `multiview-audit:` samples): median
+  `rendered_fps` is 29.8–30.0 in EVERY 4K window, max 30.0 — floor 28 IS achievable at 4K. The 1110
+  premise came from a single ~20-min window taken while strih was collapsed. The real false-alarm
+  source is the SINGLE-LATEST-SAMPLE gate over a bursty 4K signal (samples dip to 14.9–19.8 inside
+  median-30 windows), not the floor value.
+- **Fix:** (1) `obs_multiview_floor_fps()`/`mv_floor_fps` go back to area-independent `target − tol`
+  — `cx`/`cy` params, `MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX`, and the piecewise branch removed from
+  BOTH C and the Rust mirror; emit site back to `obs_multiview_floor_fps(target_fps)` (cx=/cy= stay
+  on the printed line). (2) `gate_log` judges the MEDIAN of each monitor's most recent
+  `MV_GATE_MEDIAN_WINDOW`=12 (~60 s) samples, not one sample. `GateOutcome` now carries
+  `MvMonitorGate { latest, median_fps, window_len }` (latest = reported values for display; median =
+  decision value) so the gate's FAIL line is honest. Trade-off stated: a fast freeze takes ~30 s to
+  drop the median below floor — acceptable, the fast-freeze class is the render-liveness watchdog
+  (issue 391); this gate has a 2-pass confirm at ~5-min cadence.
+- **Lock-step anchors reverted in step:** obs-display-budget.h + obs-display.c (C), both
+  `windows-genlock*.yml` pwsh steps, `tests/genlock_preload.rs`, `tests/mv_audit_emit.rs`; plus
+  `src/lib.rs` mod comment, `mv-fps-watchdog.md`. No stale sentinel anchor survives (whole-repo grep
+  clean); each new anchor unique.
+- **TDD/verify (Tier-0, cargo does NOT run/compile here #557):** RED→GREEN on `src/mv_audit.rs`'s
+  median tests via standalone `rustc --test` (a local `effective_render_divisor` stub for the one
+  test that imports it) — 2 failed pre-fix, all GREEN post-fix; C helper lift-compiled with
+  `gcc -Wformat=2 -Wconversion`; `cargo fmt --all --check` clean; whole-repo sentinel grep clean;
+  pwsh anchors verified offline against the real `re.sub(r'\s+',' ')`-squished file. The vendored C
+  and the `mv-fps-gate` bin + `harness_mv_fps_gate.rs` compile FIRST on CI (no local path).
+- **Design decisions I own:** removed `cx`/`cy` (unused params would trip clippy `-D warnings`);
+  carried the median in `GateOutcome` (satisfies "carry reported values for display" via `.latest`
+  while making the FAIL line honest — zero-risk to the exit-code contract). Worktree mode: supervisor
+  integrates; no PR/deploy/card by this worker. Ticket foreign-authored → supervisor closes on merge.
+
 ## 2026-08-17 — #1029 (imag HDMI burn-square forward JUMP: durable program-render observability) — worktree worktree-1029-burnjump, base f1384fe1e
 
 - **Validation (live, read-only imag 10.77.9.182):** genlock FIFO CLEAN at rest — `NDI CAM1..4` @3ms `holds=0`, `dropped_due`/`relocks`/`underruns` FROZEN over 5s windows, `backward_steps=0`, `converge_sheds=0`, `locked=1`. So the jump is NOT a FIFO defect at rest. Log carries `genlock-fifo audit` (32412×) + `multiview-audit:` (8109×) but ZERO renderSkipped/lagged lines — the render-path signal is not durably logged (only transient WS GetStats, whose `activeFps` lies during a stall, #935). Ticket still valid.
