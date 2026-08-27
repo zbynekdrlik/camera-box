@@ -128,6 +128,12 @@
 #       active. dantesync's rsntp Linux client cannot setsockopt(IP_TOS) on its own request socket,
 #       so this provisioning rule is the ONLY thing marking the request direction; a box missing
 #       nftables, the rule, or the oneshot FAILs (never a silent pass).
+#   (af) v4l2-ctl (v4l-utils) is installed AND runnable (`v4l2-ctl --version`) -- issue 1213: the
+#       tool is already in setup-device.sh STEP 16's apt-get line, but that line is guarded by
+#       `2>/dev/null || true`, which silently swallows a per-box apt failure. cam3/cam4 were found
+#       live missing it despite the script listing it -- exactly the diagnostic tool that proved
+#       cam1's grabber innocent (issue 1198). Checked fleet-wide like (x)/(x2), never cam2-only.
+#       FAILs loud, naming the missing package (v4l-utils) by name, never a silent measured zero.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -717,6 +723,9 @@ Checks:
       `table ip dantesync_dscp` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
       DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
       setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
+  (af) v4l2-ctl (v4l-utils) installed and runnable (`v4l2-ctl --version`) -- already listed in
+      setup-device.sh STEP 16's apt-get line, but that line silently swallows a per-box apt
+      failure; cam3/cam4 were found live missing it despite the script listing it (issue 1213)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1415,6 +1424,28 @@ elif [ "$DSCP_VERDICT" != "ok" ]; then
   fail "NTP-client DSCP marking not provisioned: $(printf '%s' "$DSCP_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "NTP-client DSCP marking live: dantesync_dscp nftables rule present + dantesync-dscp.service enabled+active (dantesync issue 52)"
+fi
+
+# (af) v4l2-ctl installed AND runnable (v4l-utils runtime dependency, issue 1213) ------------------
+# setup-device.sh's STEP 16 apt-get line ALREADY lists v4l-utils, but that whole install line is
+# guarded by `2>/dev/null || true`, which silently swallows a per-box apt failure -- cam3/cam4 were
+# found live missing v4l2-ctl despite the script listing the package. v4l2-ctl is the exact tool
+# that diagnosed cam1's grabber (issue 1198, issuecomment-5445719243: stop camera-box, read the
+# device directly with v4l2-ctl --stream-mmap, compare) -- without it on the healthy control boxes,
+# a card-vs-cable verdict cannot be run at all. Confirm it is actually present AND runnable, not
+# just that the apt-get step didn't error -- the same "trust but verify" gate as the (x)/(x2)
+# ffmpeg/mpv checks above. Fails loud NAMING the missing package (v4l-utils), never a silent
+# measured zero (.claude/rules/imag-ssh-remote-tool-preflight.md's discipline, applied here to the
+# provisioning-time acceptance gate). Inserted BEFORE (q) -- see
+# .claude/rules/provisioning-scripts.md: (q) must remain the intentionally-LAST check.
+afrc=0
+V4L2CTL_VERSION_LINE="$(ssh_box "v4l2-ctl --version 2>/dev/null | head -1")" || afrc=$?
+if [ "$afrc" -eq 0 ] && [ -n "$V4L2CTL_VERSION_LINE" ]; then
+  ok "v4l2-ctl present and runnable ($V4L2CTL_VERSION_LINE) -- v4l-utils runtime dependency (issue 1213)"
+else
+  fail "v4l2-ctl not found/runnable on PATH (ssh rc=$afrc) -- v4l-utils is missing even though \
+setup-device.sh's STEP 16 apt-get line lists it (a silently-swallowed apt failure, issue 1213); \
+reprovision the box or run: apt-get install -y v4l-utils"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
