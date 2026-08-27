@@ -257,6 +257,40 @@ mod tests {
     }
 
     #[test]
+    fn floor_is_area_aware_report_only_above_the_calibrated_class_1110() {
+        // #1110: the alarm floor must account for the multiview's render AREA, not target fps
+        // alone. A 4K multiview (3840x2160 = 8_294_400 px) cannot sustain the same fps as a 1080p
+        // one (1920x1080 = 2_073_600 px) under the #278/#776 budget gate that throttles the MV to
+        // protect the 60/30fps program -- strih's healthy 4K MV renders ~16-19fps (program healthy)
+        // and would sit PERMANENTLY below an fps-only floor of 28, making the mv-fps watchdog signal
+        // worthless on that box. So the floor is piecewise on area:
+        //   - at or below the ONE calibrated area class (1080p) -> today's floor EXACTLY (28);
+        //   - above it -> a report-only sentinel (0.0), so the un-calibrated large-area MV stops
+        //     false-alarming while its rendered_fps stays measured + logged. No 4K number is
+        //     invented (exactly one 4K data point exists -- see the #1110 design comment).
+
+        // The baseline area constant names the only calibrated class (1920x1080).
+        assert_eq!(MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX, 1920 * 1080);
+
+        // 1080p (imag live: cx=1920 cy=1080) -> today's floor, byte-identical (no behaviour change).
+        assert_eq!(mv_floor_fps(30.0, 1920, 1080), 28.0);
+        // A smaller multiview (720p) is within the calibrated class -> today's floor unchanged.
+        assert_eq!(mv_floor_fps(30.0, 1280, 720), 28.0);
+        // EXACTLY the baseline area (1920*1080) -> still calibrated (the boundary is inclusive).
+        assert_eq!(mv_floor_fps(30.0, 1920, 1080), 28.0);
+
+        // 4K (strih live: cx=3840 cy=2160) -> report-only sentinel, never false-alarms.
+        assert_eq!(mv_floor_fps(30.0, 3840, 2160), 0.0);
+        // ONE pixel of area above the baseline -> sentinel (the boundary is strict `>`).
+        assert_eq!(mv_floor_fps(30.0, 1921, 1080), 0.0);
+
+        // A collapsed rendered_fps against a calibrated 1080p floor still alarms (classify below).
+        assert!(!classify(9.0, mv_floor_fps(30.0, 1920, 1080)).is_pass());
+        // The same collapse against a 4K sentinel floor is report-only (passes -- no false alarm).
+        assert!(classify(9.0, mv_floor_fps(30.0, 3840, 2160)).is_pass());
+    }
+
+    #[test]
     fn measured_fps_is_renders_over_window_seconds() {
         assert!((measured_fps(150, 5_000_000_000) - 30.0).abs() < 1e-9);
         assert!((measured_fps(90, 3_000_000_000) - 30.0).abs() < 1e-9);
