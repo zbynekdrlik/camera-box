@@ -187,7 +187,8 @@ static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor,
  * watchdog signal worthless on that box. So the floor is piecewise on area: today's floor at/below
  * 1080p (no behaviour change -- imag live 29.8-30.0 over 28), a report-only sentinel above it so the
  * rendered_fps stays measured + logged but is not gated, until a real large-area floor is calibrated
- * from >=N samples (only ONE 4K data point exists, so no 4K number is invented).
+ * from >=N samples (only ONE 4K data point exists, so no 4K number is invented). The
+ * calibrate-then-flip of the large-area floor is tracked in issue 1212.
  *
  * target_fps = canvas_fps / effective_divisor -- the ~30fps-cell rate the projector actually
  * renders at (both broadcast boxes: strih 30fps canvas / divisor 1, imag 60fps canvas / divisor 2,

@@ -20,7 +20,8 @@ The Multiview render-cadence stack has THREE layers, don't conflate them:
    for a render AREA (`cx*cy`) at/below the one calibrated class (1080p,
    `MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX`), else a non-gating report-only sentinel `0.0` (#1110 —
    strih's 4K MV is budget-throttled and can't hold 30fps, so an fps-only floor false-alarmed
-   forever). target = `canvas/effective_divisor`, the ~30fps-cell rate the projector actually
+   forever; calibrating a real large-area floor + flipping it back to gating is tracked in issue
+   1212). target = `canvas/effective_divisor`, the ~30fps-cell rate the projector actually
    renders at (#776). In `obs-display-budget.h`, byte-mirrored in `src/mv_audit.rs::mv_floor_fps`.
    Changing the floor is a VENDORED-C change (CI-first-compile + lock-step anchors, per
    `vendored-libobs-change-safety.md`).
