@@ -112,6 +112,11 @@ qr_align_run() {
 
   local -a args=(--host "$host" --password "$password" --sources "$sources" --execute)
   [ -n "$jitter_json" ] && args+=(--jitter-json "$jitter_json")
+  # #1209: persist any UNDECODABLE align screenshot's PNG into the run dir, so a reproducible
+  # [4i/8align] abort (e.g. cam3 mostly undecodable) can be root-caused from the actual pixels.
+  # OUTDIR is recording-e2e's run dir; absent for a standalone/manual call, where persistence is
+  # simply off (qr_align_pins.py treats a missing --screenshot-dir as disabled = byte-identical gate).
+  [ -n "${OUTDIR:-}" ] && args+=(--screenshot-dir "$OUTDIR")
   # #1160: the measure phase is dynamic (measure-to-a-stable-tail), so QR_ALIGN_ROUNDS is now the
   # hard round CAP, and QR_ALIGN_BUDGET_S the wall-clock bound.
   [ -n "${QR_ALIGN_ROUNDS:-}" ]         && args+=(--max-measure-rounds "$QR_ALIGN_ROUNDS")
