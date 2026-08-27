@@ -24,6 +24,19 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   stock/lowlatency (non-RT) kernel, and only co-locates it on the grab core on a real PREEMPT_RT
   kernel. RT-conditional + forward-compatible: it flips automatically once the fleet is on an RT
   kernel (STEP 2). Verified live (all cam boxes, 2026-08-20): xhci IRQ 125 `smp_affinity_list=0-2`.
+  - **issue 1198 refinement:** the non-RT capture IRQ no longer goes onto ALL general cores; it is
+    dedicated to ONE reserved general core — the highest online non-capture core
+    (`select_irq_reserved_core`) — and `select_painter_cores(capture_core, reserved_irq_core, online)`
+    excludes BOTH the capture core AND that reserved IRQ core. So on the 4-core cam boxes the split is
+    capture=3 / capture-IRQ=2 / painter=[0,1] instead of the old capture=3 / IRQ+painter both [0,1,2].
+    WHY: before it, the non-preemptible xhci hardirq shared cores with the painter/display threads, and
+    cam1's #528 HDMI-preview 1080p scale on those shared cores delayed URB delivery → dropped frames
+    (58 fps captured vs 60 emitted; 0 drops with the preview off — single-variable proof). Degradation
+    rungs keep the old behaviour when a box is too small to reserve a core without stranding the
+    painter (2-core → shared; 1-core → capture core), and the RT path (`[capture_core]`) is unchanged.
+    `setup_irq_affinity()` logs a `#1198 core split: capture=… capture-IRQ=… painter/display=…` INFO
+    line at startup. **Live confirmation on the rig is a supervisor deploy step AFTER integration** —
+    the `smp_affinity_list=0-2` above becomes a single core (2) once the fixed binary is deployed.
 - **`verify-device.sh` check `(ac)`** — WARN-only, surfaces the PREEMPT_RT status + whether the
   capture IRQ is off the grab core. Deliberately never red-fails the current non-RT fleet. NOTE:
   after STEP 1 (lowlatency/preempt=full) this check STILL WARNs "not PREEMPT_RT" — that is EXPECTED
