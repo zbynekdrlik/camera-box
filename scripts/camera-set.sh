@@ -105,22 +105,45 @@
 # RE-ENABLE (once the card is swapped): add "cam2" back to CAMERA_ACTIVE_SET — every camera-under-test
 # facet (deploy, leg-health, sweep, verdict, and CAMERA_ALIGN_SET membership via camera_is_active)
 # flows back automatically, one line, no other edit (see tests/harness_cam2_camera_under_test_gating_1170.rs).
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam3}"
+#
+# cam1 + cam2 RESTORED 2026-08-27 (issue 1198, owner ruling — SUPERSEDES both retirement
+# diagnoses above): the owner refused the physical card swap outright — verbatim "tie dve karty su
+# vpohode nebudem ich menit za ine lebo su uplne funkcne" ("those two cards are fine, I will not
+# replace them, they are fully functional") — and a live read-only journal check on ALL FOUR cam
+# boxes (2026-08-27 14:59 UTC, production running) confirmed it:
+#   cam1  60.0 fps emitted / 61.4 fps captured (4 capture-dropped/5s, 1 corrupted)  colour
+#   cam2  60.2 fps emitted / 60.0 fps captured (0 capture-dropped/5s, 1 corrupted)  colour
+#   cam3  60.0 fps emitted / 60.0 fps captured (2 capture-dropped/5s, 0 corrupted)  colour
+#   cam4  60.0 fps emitted / 60.0 fps captured (0 capture-dropped/5s, 4 corrupted)  colour
+# with NO STUCK / self-heal / LATCH marker on any box in the ~400 preceding journal lines. Both
+# "hardware-defective" diagnoses above were built from EPISODES (cam1's issue 1110 chronic
+# over-rate window, cam2's issue 1193 cure-decay collapse to ~7min), never a permanent card
+# state — today's steady health falsifies "systematically dying model, 2 of 2" outright.
+#
+# The historical episodes (issue 1110 cam1 ingest churn, issue 1193 cam2 over-rate self-heal,
+# issue 1200 cam3 latch-halving) stay REAL and are not explained away — their root cause is now
+# tracked as OUTSIDE the capture card itself (USB port/hub, cable, power, the HDMI splitter port,
+# kernel/uvcvideo, or thermal), never the model of card. That investigation continues on issue
+# 1198 from a full green E2E run's own verdict + live journals, not from a further edit here.
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
 
 # CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
 # aligned. It is a SUPERSET of the MEASURED set: cam4 stays here (on-air but its capture leg wedges,
 # #947, so it is excluded from CAMERA_ACTIVE_SET yet MUST still be aligned — the owner's rework
 # mandate, issue 1003, 2026-08-20; the offline-ack "outside-measured-set" covers only E2E
-# measurement, never production alignment), and cam3 (the source) is the measured base. cam2's
-# membership, by contrast, DERIVES from CAMERA_ACTIVE_SET (issue 1170): cam2 is aligned ONLY while it
-# is a measured camera. cam2's capture leg is retired until the card swap (issue 1170/1198), so it is
-# NOT aligned now — re-adding "cam2" to CAMERA_ACTIVE_SET above restores its alignment automatically
-# (one line — the whole point). cam1 is out of both sets (issue 1110, dead grabber can't go on-air).
-# The default resolves to "cam3 cam4" (cam2 out) or "cam2 cam3 cam4" (cam2 back). Override to match
-# the on-air reality if the fleet changes (e.g. a cam5 goes on-air): CAMERA_ALIGN_SET="cam2 cam3 cam4 cam5".
-# The inline case is a word-exact match on the space-padded set (same #39-injection-safe posture as
-# camera_is_active — it never evals the value); cam3/cam4 are the explicit on-air base.
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(case " $CAMERA_ACTIVE_SET " in *" cam2 "*) printf 'cam2 cam3 cam4' ;; *) printf 'cam3 cam4' ;; esac)}"
+# measurement, never production alignment), and cam3 is always included as the explicit on-air
+# base. cam1's AND cam2's membership DERIVE from CAMERA_ACTIVE_SET (issue 1170 introduced this for
+# cam2; issue 1198, 2026-08-27, generalizes it to cam1 too — both are aligned ONLY while each is a
+# measured camera). With today's default (cam1 cam2 cam3 all active, issue 1198 restoration) the
+# resolved set is "cam1 cam2 cam3 cam4" — all FOUR on-air cameras, matching the owner's own live
+# observation (2026-08-27: "v strih nie sú medzi sebou zosynchronizované kamery") that only cam3+
+# cam4 were being aligned while cam1/cam2 sat outside both sets. Dropping either cam1 or cam2 from
+# CAMERA_ACTIVE_SET again drops it from this set too, automatically (one line — the whole point).
+# Override to match the on-air reality if the fleet changes (e.g. a cam5 goes on-air):
+# CAMERA_ALIGN_SET="cam1 cam2 cam3 cam4 cam5".
+# The inline case matches are word-exact on the space-padded set (same #39-injection-safe posture
+# as camera_is_active — it never evals the value); cam3/cam4 are the explicit always-on-air base.
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam2 "*) _align_out="cam2 $_align_out" ;; esac; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; printf '%s' "$_align_out")}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

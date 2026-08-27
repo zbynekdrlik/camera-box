@@ -100,24 +100,29 @@ fn qr_align_step_is_gated_and_skips_under_measurement_eq() {
 }
 
 #[test]
-fn align_set_is_a_superset_including_cam4_and_cam2_derives_from_active_1170() {
+fn align_set_is_a_superset_including_cam4_and_cam1_cam2_derive_from_active_1198() {
     // The owner mandate: cam4 is on-air, so it MUST be aligned even though it is excluded from the
     // measurable E2E sweep (CAMERA_ACTIVE_SET). CAMERA_ALIGN_SET stays a superset of the measured
-    // set. issue 1170 (2026-08-24): cam2's align membership now DERIVES from CAMERA_ACTIVE_SET —
-    // aligned only while it is a measured camera. Default (cam2 out): "cam3 cam4"; re-adding cam2 to
-    // CAMERA_ACTIVE_SET restores it in the align set automatically (one-line reversal).
+    // set. issue 1170 (2026-08-24) introduced cam2's align membership DERIVING from
+    // CAMERA_ACTIVE_SET; issue 1198 (2026-08-27, owner ruling: both cards restored healthy)
+    // generalizes the same derivation to cam1. Today's default (cam1 cam2 cam3 all active)
+    // resolves to "cam1 cam2 cam3 cam4" -- all FOUR on-air cameras aligned, matching the owner's
+    // own live observation that only cam3+cam4 were being aligned while cam1/cam2 sat outside.
     let default_align = resolved_align_set(None);
     assert!(
         align_has_word(&default_align, "cam3") && align_has_word(&default_align, "cam4"),
         "#1003: the default align set must include cam3 (source) + cam4 (on-air, #947): got [{default_align}]"
     );
     assert!(
-        !align_has_word(&default_align, "cam2"),
-        "issue 1170: cam2 must be OUT of the default align set (capture leg retired): got [{default_align}]"
+        align_has_word(&default_align, "cam1") && align_has_word(&default_align, "cam2"),
+        "issue 1198: cam1 + cam2 must be back IN the default align set (both cards restored \
+         healthy 2026-08-27): got [{default_align}]"
     );
+    let without_either = resolved_align_set(Some("cam3"));
     assert!(
-        !align_has_word(&default_align, "cam1"),
-        "#1110: cam1 (dead grabber, can't go on-air) must be out of the align set: got [{default_align}]"
+        !align_has_word(&without_either, "cam1") && !align_has_word(&without_either, "cam2"),
+        "issue 1198 reversal check: shrinking CAMERA_ACTIVE_SET back to cam3-alone must drop \
+         cam1/cam2 from the align set again (derived, not hardcoded): got [{without_either}]"
     );
     let with_cam2 = resolved_align_set(Some("cam2 cam3"));
     assert!(

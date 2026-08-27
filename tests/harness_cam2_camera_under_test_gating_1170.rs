@@ -76,48 +76,73 @@ fn has_word(set: &str, word: &str) -> bool {
 }
 
 #[test]
-fn default_active_set_excludes_cam2_keeps_cam3() {
+fn default_active_set_includes_cam2_and_cam1_keeps_cam3_1198() {
+    // issue 1198 (2026-08-27, owner ruling): the "capture leg retired until the card swap"
+    // premise this test used to pin is GONE -- the owner refused the physical swap outright and
+    // a live journal check confirmed cam2's card is healthy today, so cam2 (and cam1) are back in
+    // the default CAMERA_ACTIVE_SET.
     let (active, _, _) = resolved(None);
     assert!(
-        !has_word(&active, "cam2"),
-        "issue 1170: cam2 must be dropped from the default CAMERA_ACTIVE_SET (capture leg retired \
-         until the card swap). Got ACTIVE=[{active}]"
+        has_word(&active, "cam2"),
+        "issue 1198: cam2 must be back in the default CAMERA_ACTIVE_SET (card confirmed healthy \
+         2026-08-27, owner refused the swap). Got ACTIVE=[{active}]"
     );
     assert!(
         has_word(&active, "cam3"),
-        "issue 1170: cam3 (the source) must remain the default measured camera. Got ACTIVE=[{active}]"
+        "cam3 must remain a default measured camera. Got ACTIVE=[{active}]"
     );
 }
 
 #[test]
-fn default_sweep_excludes_cam2_keeps_cam3() {
+fn default_sweep_includes_cam2_keeps_cam3_1198() {
     let (_, _, sweep) = resolved(None);
     assert!(
-        !sweep.contains("Cam 2:CAM2"),
-        "issue 1170: the default CAMBOX_SWEEP (camera_active_sweep_pairs) must NOT cut cam2 into \
-         strih program — it is no longer a measured camera-under-test. Got SWEEP=[{sweep}]"
+        sweep.contains("Cam 2:CAM2"),
+        "issue 1198: the default CAMBOX_SWEEP (camera_active_sweep_pairs) must cut cam2 into \
+         strih program again — it is a measured camera-under-test once more. Got SWEEP=[{sweep}]"
     );
     assert!(
         sweep.contains("Cam 3:CAM3"),
-        "issue 1170: the default sweep must still cover cam3. Got SWEEP=[{sweep}]"
+        "the default sweep must still cover cam3. Got SWEEP=[{sweep}]"
     );
 }
 
 #[test]
-fn default_align_set_excludes_cam2_keeps_cam3_and_cam4() {
+fn default_align_set_includes_cam1_and_cam2_keeps_cam3_and_cam4_1198() {
     // CAMERA_ALIGN_SET stays a superset of the MEASURED set (cam4 is on-air but its capture leg
-    // wedges, #947, so it is aligned yet unmeasured). cam2's membership now DERIVES from
-    // CAMERA_ACTIVE_SET (issue 1170) — dropped by default, restored on re-add.
+    // wedges, #947, so it is aligned yet unmeasured). cam1's AND cam2's membership DERIVE from
+    // CAMERA_ACTIVE_SET (issue 1170 introduced this for cam2; issue 1198 generalizes it to cam1
+    // too) — both back in by default now that the cards are restored healthy.
     let (_, align, _) = resolved(None);
     assert!(
-        !has_word(&align, "cam2"),
-        "issue 1170: cam2 must be dropped from the default CAMERA_ALIGN_SET (its capture leg is \
-         retired, so it is not aligned). Got ALIGN=[{align}]"
+        has_word(&align, "cam1") && has_word(&align, "cam2"),
+        "issue 1198: cam1 + cam2 must be back in the default CAMERA_ALIGN_SET (both cards \
+         restored healthy 2026-08-27). Got ALIGN=[{align}]"
     );
     assert!(
         has_word(&align, "cam3") && has_word(&align, "cam4"),
-        "issue 1170: cam3 (source) + cam4 (on-air, #947) stay in the on-air align superset. \
+        "cam3 (source) + cam4 (on-air, #947) stay in the on-air align superset. Got ALIGN=[{align}]"
+    );
+}
+
+#[test]
+fn dropping_cam2_from_active_via_override_excludes_it_from_sweep_and_align_again() {
+    // The DERIVED-membership property issue 1170 introduced still holds even though cam2 ships
+    // in the default again (issue 1198): overriding CAMERA_ACTIVE_SET back down to a set without
+    // cam2 must drop it from the sweep and align set too — never a hardcoded inclusion.
+    let (active, align, sweep) = resolved(Some("cam3"));
+    assert!(
+        !has_word(&active, "cam2"),
+        "the override must take: ACTIVE=[{active}]"
+    );
+    assert!(
+        !has_word(&align, "cam2"),
+        "cam2's align membership must still be DERIVED from CAMERA_ACTIVE_SET, not hardcoded. \
          Got ALIGN=[{align}]"
+    );
+    assert!(
+        !sweep.contains("Cam 2:CAM2"),
+        "cam2's sweep membership must still be DERIVED from CAMERA_ACTIVE_SET. Got SWEEP=[{sweep}]"
     );
 }
 
