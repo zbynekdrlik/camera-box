@@ -12,8 +12,8 @@
 //! Input: a log file path as the first argument, or the log text on stdin if no argument.
 //!
 //! **Exit codes:**
-//! - `0` — every projector's latest sample is at or above its floor → prints `PASS monitor=N ...`
-//! - `1` — one or more projectors below floor → prints `FAIL monitor=N rendered_fps=X < floor=F`
+//! - `0` — every projector's window-median cadence is at or above its floor → prints `PASS monitor=N median_fps=X ...`
+//! - `1` — one or more projectors' window-median below floor → prints `FAIL monitor=N median_fps=X < floor=F ...`
 //! - `2` — no `multiview-audit:` line found / read error → prints `ERROR: ...` to stderr
 //!
 //! The RENDER-cadence floor here is distinct from the receive-side `genlock-fifo audit` counters

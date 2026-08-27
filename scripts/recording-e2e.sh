@@ -304,7 +304,7 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # shellcheck source=scripts/lib/render-health-warmup.sh
 . "$HERE/lib/render-health-warmup.sh"
 # issue 1091 (issue 771 point 3): synchronous MV-fps floor preflight — read each OBS box's newest
-# log's latest `multiview-audit:` sample and fail loud (only on a CONFIRMED sustained collapse) before
+# log's recent `multiview-audit:` window median and fail loud (only on a CONFIRMED sustained collapse) before
 # the run, so the gate never wastes a ~40-min recording on a box whose Multiview render already
 # collapsed. Consumes the same mv-fps-gate binary + mv_audit::gate_log the issue-1083 live watchdog
 # uses; the #675 sourced-lib pattern (source + ONE call line below, no anchored line edited).

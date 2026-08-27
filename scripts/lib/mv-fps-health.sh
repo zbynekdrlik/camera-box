@@ -15,7 +15,8 @@
 # an E2E-preflight / drift-guard consumer. But NOTHING read it LIVE, so a MV render collapse
 # (measured live: imag monitor-3 to ~12fps for 5 min, strih 4K MV to 9-11fps under contention) went
 # unalarmed unless someone ran `mv-fps-gate` by hand. The dev1-side watchdog reads each box's newest
-# OBS log, runs `mv-fps-gate` over the latest samples, and pages on a sustained below-floor collapse.
+# OBS log, runs `mv-fps-gate` (each projector's recent-window MEDIAN cadence, #1212), and pages on a
+# sustained below-floor collapse.
 # This lib turns the gate's exit code (+ a per-box OBS-log identity) into the watchdog's decisions,
 # so they are correct regardless of any live rig. The confirm-counter + alert throttle stay the SAME
 # shared obs_watchdog_confirm / obs_watchdog_alert_throttle (scripts/lib/obs-watchdog-decision.sh)
@@ -25,8 +26,8 @@
 
 # mv_fps_verdict <gate_exit> -> stdout: PASS | BELOW | UNKNOWN
 #   Maps the `mv-fps-gate` bin's exit code to the watchdog's verdict:
-#     0     -> PASS    (every projector's latest sample is at or above its floor)
-#     1     -> BELOW   (>=1 projector's latest sample fell below its own printed floor -> collapse)
+#     0     -> PASS    (every projector's recent-window median cadence is at or above its floor, #1212)
+#     1     -> BELOW   (>=1 projector's recent-window median fell below its own printed floor -> collapse)
 #     other -> UNKNOWN (2 = no `multiview-audit:` line / read error, or an empty / non-numeric code)
 #   UNKNOWN is fail-safe: a box whose OBS log could not be read, or that emits no audit line (OBS
 #   down / a pre-#771 build / the ssh read failed), NEVER pages here -- the reachability (#1001) and

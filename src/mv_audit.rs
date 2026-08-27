@@ -467,7 +467,6 @@ multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=19
 
     // #1212 helpers: build a monitor's worth of `multiview-audit:` lines from a list of
     // rendered_fps values (all 4K, floor 28, in log order — latest last).
-    #[cfg(test)]
     fn log_4k_monitor1(rendered: &[f64]) -> String {
         let mut s = String::new();
         for r in rendered {
@@ -554,7 +553,6 @@ multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=19
     }
 
     // #1212 helper: MvAuditSample list from rendered_fps values (4K, floor 28) for the pure median.
-    #[cfg(test)]
     fn mk_samples(rendered: &[f64]) -> Vec<MvAuditSample> {
         rendered
             .iter()
