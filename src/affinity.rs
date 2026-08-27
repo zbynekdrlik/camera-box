@@ -438,7 +438,7 @@ pub fn setup_irq_affinity() {
     // the same pure selectors on the same inputs); guard against a future edit to
     // select_irq_target_cores' non-RT branch silently desynchronising the two.
     debug_assert!(
-        reserved.map_or(true, |r| target == [r]),
+        reserved.is_none_or(|r| target == [r]),
         "#1198 logged reserved core {reserved:?} must match routed IRQ target {target:?}"
     );
     let painter = select_painter_cores(Some(core), reserved, &online);
