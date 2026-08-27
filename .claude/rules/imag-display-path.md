@@ -22,13 +22,14 @@ the NVIDIA-era display-tuning knobs the older tickets/comments reference **do no
 | picom **ON with vsync** (issue 1146, REVERSES #841) | applies (GPU-independent). imag drives TWO 60Hz outputs (eDP panel + HDMI projector) on independent crystals; GL/scanout vsyncs only the PRIMARY CRTC, so a compositor-free direct scanout does not guarantee the projector is the sync target → the two clocks BEAT → a walking tear line. The fix: a picom v10 glx `vsync=true` compositor (`unredir-if-possible=false` so the fullscreen Program projector stays composited) ANCHORED on the projector by making HDMI the xrandr primary. picom OFF is now the DRIFT. |
 | HDMI = xrandr **primary** (issue 1146) | applies (GPU-independent). The projector must be the primary output so picom/GL vsync anchors on it. A non-HDMI primary (the panel) is a DRIFT (the panel becomes the anchor → the projector tears). REVERSES the #522/#488 panel-primary autostart doctrine (whose real regression was a lost self-heal, now handled by imag-obs.service); projector placement is by connector type (imag_scenes.py), NOT the `--primary` flag, so the flip is safe. |
 | touchpad tap conf (#779) | applies (GPU-independent). |
+| EXTENDED layout, not MIRROR (issue 1146, 2026-08-27) | applies (GPU-independent). The eDP panel + HDMI projector must run at DISTINCT xrandr origins (extended); a MIRROR (both outputs at the SAME origin, e.g. `+0+0`) is two independent 60Hz CRTCs at one position, so present-vsync (#1107) locks to only ONE and the other free-runs → a walking tear line. This is the facet that CATCHES a mirror while `hdmi_primary` stays OK (in a mirror HDMI genuinely IS primary — the gate stayed green for days). The committed `~/.config/openbox/autostart` sets the extended layout at boot; a mirror is a LIVE DRIFT from that intent. Position-agnostic (origins must be distinct, never a hardcoded position). Facet `layout`; DRIFT names the beat. |
 
 ## The drift facet (guard the live state, `drift-guard --check-imag` + the E2E `[0/8]` preflight)
 
 `scripts/lib/imag-display-path.sh` is the SHARED gather + verdict core (same discipline as
 `imag-power-envelope.sh` #1040 / `timesync-authority.sh` #596): `imag_display_path_verdict GATHER`
 emits `<facet>|<STATUS>|<detail>` lines (facets `picom_process`, `picom_service`, `hdmi_primary`,
-`igpu_maxperf`, `tap_conf`, `drm_output`; OK/DRIFT/UNKNOWN — the picom polarity is INVERTED vs the
+`layout`, `igpu_maxperf`, `tap_conf`, `drm_output`; OK/DRIFT/UNKNOWN — the picom polarity is INVERTED vs the
 original #780/#841 "picom off" facet, see the lib's compositor-doctrine-reversal header for issue
 1146; `drm_output` is the issue-1152 M4 facet: the DEFAULT-OFF `~/.camera-box/drm-output.json`
 dormant = OK, ENABLED demands the current OBS log's `program scanout LIVE` proof else DRIFT, and

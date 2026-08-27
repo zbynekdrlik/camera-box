@@ -160,8 +160,11 @@ set -euo pipefail
 #       the #841 picom-off doctrine stands, the package/unit stay installed dormant), HDMI the
 #       xrandr PRIMARY (the projector is the vsync anchor -- UNLESS the issue-1152 DRM output is
 #       ENABLED, when HDMI is leased OUT of X by design and the panel primary is correct), the
-#       #841 iGPU freq pin, the #779 tap conf, and the issue-1152 drm_output facet (dormant
-#       config = OK; enabled demands the OBS log's `program scanout LIVE` proof). Runs the SHARED
+#       issue-1146 EXTENDED-layout facet (the eDP panel + HDMI projector at DISTINCT xrandr origins,
+#       never MIRROR -- two 60Hz CRTCs at +0+0 tear the projector; this is what catches a mirror
+#       while hdmi_primary stays OK), the #841 iGPU freq pin, the #779 tap conf, and the issue-1152
+#       drm_output facet (dormant config = OK; enabled demands the OBS log's `program scanout LIVE`
+#       proof). Runs the SHARED
 #       imag_display_path_verdict (scripts/lib/imag-display-path.sh) -- the SAME verdict
 #       drift-guard --check-imag and the E2E [0/8] preflight run. A re-provision that drifts any
 #       facet must FAIL here. Pure ssh reads (side-effect free), appended at the END.

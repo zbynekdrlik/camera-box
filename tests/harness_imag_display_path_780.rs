@@ -90,7 +90,7 @@ fn verdict_emits_one_row_per_facet_780() {
     // HDMI the xrandr primary, maxperf pinned+up, tap on, and (issue 1152 M4) the DRM-lease
     // output dormant (config absent -- the fleet DEFAULT-OFF state).
     let g = "PICOM_PGREP|ok\nPICOM_PROC|\nPICOM_SERVICE|disabled\n\
-             XRANDR|ok\nPRIMARY_OUTPUT|HDMI-1\n\
+             XRANDR|ok\nPRIMARY_OUTPUT|HDMI-1\nMONITOR_ORIGINS|+0+0 +1920+0\n\
              MAXPERF_APPLICABLE|1\nMAXPERF_MIN|1400\nMAXPERF_RP0|1400\n\
              MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\n\
              TAPCONF|present\nTAPCONF_TAPPING|on\n\
@@ -100,6 +100,7 @@ fn verdict_emits_one_row_per_facet_780() {
         "picom_process",
         "picom_service",
         "hdmi_primary",
+        "layout",
         "igpu_maxperf",
         "tap_conf",
         "drm_output",
@@ -250,7 +251,10 @@ fn layout_unknown_when_xrandr_missing_never_a_false_verdict_1146() {
     // #833 discipline: a missing xrandr must be UNKNOWN by name, never a false OK/DRIFT.
     let lines = verdict("XRANDR|missing");
     let l = facet_line(&lines, "layout");
-    assert!(l.contains("|UNKNOWN|"), "missing xrandr must be UNKNOWN: {l}");
+    assert!(
+        l.contains("|UNKNOWN|"),
+        "missing xrandr must be UNKNOWN: {l}"
+    );
     assert!(l.to_lowercase().contains("xrandr"), "must name xrandr: {l}");
 }
 
@@ -384,6 +388,11 @@ fn gather_remote_snippet_is_nonempty_and_names_the_sources_780() {
     assert!(
         out.contains("xrandr") && out.contains("XRANDR") && out.contains("PRIMARY_OUTPUT"),
         "snippet must probe xrandr and gather the primary output (issue 1146): {out}"
+    );
+    // issue 1146 (MIRROR facet): the snippet must gather the per-output origins for the layout facet.
+    assert!(
+        out.contains("MONITOR_ORIGINS"),
+        "snippet must gather the monitor origins for the layout facet (issue 1146): {out}"
     );
 }
 

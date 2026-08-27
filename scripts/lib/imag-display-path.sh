@@ -49,6 +49,17 @@
 #                                      autostart doctrine — see setup-imag.sh step 16 + the issue
 #                                      1146 design comment; projector placement is by connector type
 #                                      (imag_scenes.py), NOT by the primary flag, so the flip is safe.
+#   * layout: EXTENDED not MIRROR    -> OK: the eDP panel + HDMI projector run at DISTINCT xrandr
+#     (issue 1146)                      origins. MIRROR (both outputs at the SAME origin, e.g. +0+0)
+#                                      is two independent 60Hz CRTCs at one position: present-vsync
+#                                      locks to only ONE, the other free-runs -> a walking tear line
+#                                      -> DRIFT. This is the facet that CATCHES the real 2026-08-27
+#                                      drift: while the box ran mirrored, hdmi_primary stayed OK
+#                                      (HDMI genuinely WAS primary in the mirror), so the gate stayed
+#                                      green for days while the projector tore. Position-agnostic
+#                                      (origins must be DISTINCT, never a hardcoded position). The
+#                                      committed `~/.config/openbox/autostart` sets the extended
+#                                      layout at boot; a mirror is a LIVE DRIFT from that intent.
 #   * GPUPowerMizerMode=1 (NVIDIA)  -> the genuine Intel counterpart is `imag-igpu-maxperf.service`
 #                                      (#841): it pins the iGPU `gt_min_freq` FLOOR to the hardware's
 #                                      own `gt_RP0` ceiling so the GPU never idles down and ramp-
@@ -100,8 +111,8 @@ _dp_has() {
 }
 
 # imag_display_path_verdict GATHER -> echoes one `<facet>|<STATUS>|<detail>` line per facet
-# (facets: picom_process, picom_service, hdmi_primary, igpu_maxperf, tap_conf, drm_output; STATUS in
-# OK / DRIFT / UNKNOWN). Both callers iterate the lines and map each to their own report style +
+# (facets: picom_process, picom_service, hdmi_primary, layout, igpu_maxperf, tap_conf, drm_output;
+# STATUS in OK / DRIFT / UNKNOWN). Both callers iterate the lines and map each to their own report style +
 # exit-code contract. An EMPTY gather (SSH hiccup), an unread facet, or a missing tool is UNKNOWN —
 # never a false OK/DRIFT.
 imag_display_path_verdict() {
@@ -163,6 +174,37 @@ imag_display_path_verdict() {
       HDMI*) printf 'hdmi_primary|OK|%s is the xrandr primary — the projector is the vsync anchor (issue 1146)\n' "$_prim" ;;
       *)     printf 'hdmi_primary|DRIFT|primary is %s not HDMI — the panel is the vsync anchor, so the HDMI projector shows the dual-output tearing beat (issue 1146)\n' "$_prim" ;;
     esac
+  fi
+
+  # --- layout (issue 1146): the eDP panel + HDMI projector must run EXTENDED (each active output at
+  #     a DISTINCT xrandr origin), never MIRROR (two outputs at the SAME origin, e.g. both +0+0). A
+  #     mirror is two independent 60 Hz CRTCs at one position: the EGL swapInterval(1) / #1107
+  #     present-vsync can lock to only ONE of them, the other scans out free-running -> a walking
+  #     tear line on the projector (the exact beat the ticket describes). hdmi_primary alone stayed
+  #     OK through the whole mirror drift (HDMI genuinely WAS the primary in a mirror), so THIS facet
+  #     is what actually catches it. Position-agnostic: the extended origins legitimately vary by
+  #     which output is primary/left, so the invariant is simply "origins must be DISTINCT". Two-tier
+  #     (#833): xrandr missing / not gathered / origins not gathered / fewer than 2 active outputs /
+  #     unreadable -> UNKNOWN, never a false DRIFT. The `|| true` on the count pipelines keeps a
+  #     `grep -c` zero-match (exit 1) from aborting the caller under `set -euo pipefail` (#1133).
+  if ! _dp_has "$g" XRANDR; then
+    printf 'layout|UNKNOWN|display-layout state not gathered\n'
+  elif [ "$(_dp_field "$g" XRANDR)" = "missing" ]; then
+    printf 'layout|UNKNOWN|xrandr missing on the box — cannot read the monitor layout; never read as a verdict (#833)\n'
+  elif ! _dp_has "$g" MONITOR_ORIGINS; then
+    printf 'layout|UNKNOWN|monitor origins not gathered (truncated gather) — not a proven drift\n'
+  else
+    local _origins _ntotal _ndistinct
+    _origins="$(_dp_field "$g" MONITOR_ORIGINS)"
+    _ntotal="$(printf '%s\n' $_origins | grep -c . || true)"
+    _ndistinct="$(printf '%s\n' $_origins | sort -u | grep -c . || true)"
+    if [ "${_ntotal:-0}" -lt 2 ]; then
+      printf 'layout|UNKNOWN|only %s active output origin(s) read (X unreachable over ssh, or a single-monitor box) — not a proven drift (issue 1146)\n' "${_ntotal:-0}"
+    elif [ "$_ntotal" = "$_ndistinct" ]; then
+      printf 'layout|OK|extended — %s active outputs at distinct origins (%s); each CRTC has its own position so present-vsync anchors per output (issue 1146)\n' "$_ntotal" "$_origins"
+    else
+      printf 'layout|DRIFT|MIRROR — %s active outputs but only %s distinct origin(s), both at +0+0 -> two unsynchronized 60Hz CRTCs -> projector tears; set the extended layout (issue 1146)\n' "$_ntotal" "$_ndistinct"
+    fi
   fi
 
   # --- igpu_maxperf: the #841 Intel counterpart to GPUPowerMizerMode=1. OK iff the service is
@@ -275,7 +317,15 @@ fi
 # anchors on it. xrandr presence probed (#833); DISPLAY=:0 reads the running session's layout. ---
 if command -v xrandr >/dev/null 2>&1; then
   printf 'XRANDR|ok\n'
-  printf 'PRIMARY_OUTPUT|%s\n' "$(DISPLAY=:0 xrandr --query 2>/dev/null | awk '/ connected primary/{print $1; exit}')"
+  # ONE xrandr read feeds BOTH the primary-output facet AND the issue-1146 layout facet (no extra
+  # SSH round-trip). Captured to a var so the two awk passes below never re-invoke xrandr.
+  _dp_xq="$(DISPLAY=:0 xrandr --query 2>/dev/null || true)"
+  printf 'PRIMARY_OUTPUT|%s\n' "$(printf '%s\n' "$_dp_xq" | awk '/ connected primary/{print $1; exit}')"
+  # issue 1146 (MIRROR facet): the +X+Y origin of every ACTIVE connected output. A connected-but-
+  # DISABLED output has no `WIDTHxHEIGHT+X+Y` geometry token and is skipped. Two active outputs
+  # sharing one origin (both +0+0) = MIRROR = two unsynchronized 60Hz CRTCs -> the projector tears
+  # (the layout verdict below reads this: all-distinct = extended = OK, a duplicate = mirror = DRIFT).
+  printf 'MONITOR_ORIGINS|%s\n' "$(printf '%s\n' "$_dp_xq" | awk '/ connected/ && match($0, /[0-9]+x[0-9]+[-+][0-9]+[-+][0-9]+/){g=substr($0,RSTART,RLENGTH); sub(/^[0-9]+x[0-9]+/,"",g); printf "%s ", g}')"
 else
   printf 'XRANDR|missing\n'
 fi
@@ -384,6 +434,6 @@ imag_display_path_preflight_assert() {
   if [ -n "$unknowns" ]; then
     printf 'WARN: imag display-path facets UNKNOWN on %s (not read; not a proven drift): %s\n' "$host" "$unknowns" >&2
   fi
-  printf 'imag display-path preflight OK on %s (picom off, HDMI primary / drm-output coherent, iGPU pinned, tap conf)\n' "$host"
+  printf 'imag display-path preflight OK on %s (picom off, HDMI primary / drm-output coherent, extended layout, iGPU pinned, tap conf)\n' "$host"
   return 0
 }
