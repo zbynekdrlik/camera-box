@@ -669,13 +669,18 @@ class TestCLI:
 class TestActiveNdiSources:
     def test_default_is_cam1_cam2_cam3(self, monkeypatch):
         # issue 1198 (2026-08-27, owner ruling): cam1 + cam2 RESTORED -- both cards confirmed
-        # healthy on a live journal check, owner refused the physical swap; default mirrors
-        # camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3".
+        # healthy on a live journal check, owner refused the physical swap. issue 1216
+        # (2026-08-28): bigger splitter fitted, cam5/cam6/cam7 back too; default mirrors
+        # camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3 cam5 cam6 cam7" (cam4 alone stays
+        # out, #947).
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         assert phase_sync_calibrate.active_ndi_sources() == {
             "NDI cam1",
             "NDI cam2",
             "NDI cam3",
+            "NDI cam5",
+            "NDI cam6",
+            "NDI cam7",
         }
 
     def test_env_override_narrows_and_widens(self, monkeypatch):

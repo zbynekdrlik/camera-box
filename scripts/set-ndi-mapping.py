@@ -99,8 +99,9 @@ DEFAULT_MAP = FULL_MAP
 # #827: the ACTIVE camera set default -- mirrors scripts/camera-set.sh's CAMERA_ACTIVE_SET
 # exactly (this module is invoked as a standalone subprocess, so it reads the SAME env var rather
 # than re-declaring its own separate default; when unset, falls back to the identical literal
-# camera-set.sh itself defaults to, so the two can never silently disagree).
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")
+# camera-set.sh itself defaults to, so the two can never silently disagree). issue 1216
+# (2026-08-28): bigger splitter fitted, cam5/cam6/cam7 back in -- cam4 alone stays out (#947).
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam5 cam6 cam7")
 
 
 def _camera_name_of(ndi_input):
