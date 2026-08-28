@@ -65,7 +65,7 @@ def active_camera_numbers() -> tuple:
     upward). Read FRESH on every call (never cached at import time) so a caller/test can
     override the env var per-invocation.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam5 cam6 cam7")
     out = []
     for tok in raw.replace(",", " ").split():
         tok = tok.strip()

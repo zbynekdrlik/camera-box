@@ -14,14 +14,15 @@
 #   cam7 -> 10.77.9.67 / "CAM7 (usb)"   (#753 — real box built + provisioned 2026-07-14,
 #                                        fleet growing 6->7, Elgato 4K S grabber)
 #
-# #827 (2026-07-27) — cam5/cam6/cam7 RETIRED from the ACTIVE fleet: their USB grabber cards
-# were returned to their owner and those boxes are powered off. Per BINDING owner directive
-# (2026-07-27, posted on #827): the retirement MUST be trivially REVERSIBLE — "dufam ze to
+# #827 (2026-07-27) — cam5/cam6/cam7 were RETIRED from the ACTIVE fleet: their USB grabber cards
+# were returned to their owner and those boxes were powered off. Per BINDING owner directive
+# (2026-07-27, posted on #827): the retirement had to be trivially REVERSIBLE — "dufam ze to
 # odobratie cam5 az cam7 urobis tak aby ked zasa budu k dispozicii si to vedel znova lahko
 # povolit" (when those boxes come back, re-enabling them must be a one-line change, never
 # archaeology through a deleted diff). So EVERY per-camera fact for cam5/cam6/cam7 (IP, NDI
-# source name, genlock fps, strih scene/NDI-input route) stays intact below, fully resolvable —
-# retirement is expressed ONLY as membership in `CAMERA_ACTIVE_SET`, never as a deleted case arm.
+# source name, genlock fps, strih scene/NDI-input route) stayed intact below, fully resolvable —
+# retirement was expressed ONLY as membership in `CAMERA_ACTIVE_SET`, never as a deleted case arm.
+# This history is HISTORICAL now — see issue 1216 below, which is exactly that promised reversal.
 #
 # #898 (2026-07-31) — cam3 ALSO RETIRED from the ACTIVE fleet, same mechanism: its USB grabber
 # card was physically DESTROYED (a 12V USB-C brick put 12V on VBUS during the #728/#688 power
@@ -38,8 +39,9 @@
 # enumeration of "which cams exist right now".
 #
 # **RE-ENABLE PROCEDURE (the whole point of this design):** a retired camera (e.g. cam3, once a
-# replacement grabber card is fitted, or cam5) coming back online is re-activated by adding its
-# name back to CAMERA_ACTIVE_SET below (or overriding the env var for a one-off run:
+# replacement grabber card is fitted, or cam4 once its capture-leg wedge is resolved) coming back
+# online is re-activated by adding its name back to CAMERA_ACTIVE_SET below (or overriding the
+# env var for a one-off run:
 # `CAMERA_ACTIVE_SET="cam1 cam2 cam3 cam4" ...`). Nothing else needs to change —
 # camera_resolve/camera_strih_route already know it fully, and every consumer that derives from
 # CAMERA_ACTIVE_SET (or camera_active_secondary_set below) picks it up automatically on its next
@@ -125,7 +127,23 @@
 # tracked as OUTSIDE the capture card itself (USB port/hub, cable, power, the HDMI splitter port,
 # kernel/uvcvideo, or thermal), never the model of card. That investigation continues on issue
 # 1198 from a full green E2E run's own verdict + live journals, not from a further edit here.
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
+#
+# cam5 + cam6 + cam7 RESTORED 2026-08-28 (issue 1216, owner request — "pridal som ti cam 5 6 7 uz
+# mame vacsi spliter cize ich updatni a zarad ich do developmentu"): a bigger splitter is fitted
+# and cam5/cam6/cam7 are physically wired back in, exactly the reversal the #827 retirement
+# above always promised. Supervisor-verified live (2026-08-28 ~11:00 CEST) BEFORE this membership
+# flip: all three boxes updated dev.362 -> dev.569, dantesync 1.8.20 -> 1.8.52 with
+# phase_slew_enabled:true (systemd-timesyncd masked), capture steady 59.9-60.1 fps on all three
+# (cam5 grayscale -- a SEPARATE ticket, unrelated to membership), strih OBS carries `NDI
+# cam5/cam6/cam7` inputs + `Cam 5/6/7` scenes already (live GetInputList/GetSceneList read), and
+# cam7's burn-id integration (911012) was already complete from its original #753 build-out. So
+# the ONLY missing piece was exactly this membership line -- nothing else needed to change,
+# proving the #827 design held. cam4 alone stays out (issue 947, its own unrelated capture-leg
+# wedge) -- see tests/harness_camera_set.rs's
+# `camera_active_set_default_is_exactly_cam1_cam2_cam3_cam5_cam6_cam7_1216` and
+# tests/harness_qr_align_step_1003.rs's `align_set_extends_to_cam5_cam6_cam7_when_active_1216`
+# for the round-trip proof.
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam5 cam6 cam7}"
 
 # CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
 # aligned. It is a SUPERSET of the MEASURED set: cam4 stays here (on-air but its capture leg wedges,
@@ -134,16 +152,16 @@ CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
 # measurement, never production alignment), and cam3 is always included as the explicit on-air
 # base. cam1's AND cam2's membership DERIVE from CAMERA_ACTIVE_SET (issue 1170 introduced this for
 # cam2; issue 1198, 2026-08-27, generalizes it to cam1 too — both are aligned ONLY while each is a
-# measured camera). With today's default (cam1 cam2 cam3 all active, issue 1198 restoration) the
-# resolved set is "cam1 cam2 cam3 cam4" — all FOUR on-air cameras, matching the owner's own live
-# observation (2026-08-27: "v strih nie sú medzi sebou zosynchronizované kamery") that only cam3+
-# cam4 were being aligned while cam1/cam2 sat outside both sets. Dropping either cam1 or cam2 from
-# CAMERA_ACTIVE_SET again drops it from this set too, automatically (one line — the whole point).
-# Override to match the on-air reality if the fleet changes (e.g. a cam5 goes on-air):
-# CAMERA_ALIGN_SET="cam1 cam2 cam3 cam4 cam5".
+# measured camera). issue 1216 (2026-08-28) extends the SAME derivation to cam5/cam6/cam7 — a
+# trailing loop over the three names, each appended only when it is a word in CAMERA_ACTIVE_SET,
+# so the resolved order stays cam1..cam7. With today's default (cam1/cam2/cam3/cam5/cam6/cam7
+# active, cam4 alone excluded) the resolved set is "cam1 cam2 cam3 cam4 cam5 cam6 cam7" — every
+# on-air camera. Dropping any of cam1/cam2/cam5/cam6/cam7 from CAMERA_ACTIVE_SET again drops it
+# from this set too, automatically (one line — the whole point). Override to match the on-air
+# reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam2 cam3 cam4 cam5".
 # The inline case matches are word-exact on the space-padded set (same #39-injection-safe posture
 # as camera_is_active — it never evals the value); cam3/cam4 are the explicit always-on-air base.
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam2 "*) _align_out="cam2 $_align_out" ;; esac; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; printf '%s' "$_align_out")}"
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam2 "*) _align_out="cam2 $_align_out" ;; esac; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam5 cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.
