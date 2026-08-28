@@ -1,5 +1,7 @@
-"""Issue 1152 M4 follow-up -- obs_phase2.py's open_projectors (the #758/#840 preflight GATE used
-by recording-e2e.sh [0/8] and verify-imag.sh) must tolerate the DRM-lease mode.
+"""Issue 1152 M4 follow-up -- obs_phase2.py's open_projectors (the #758/#840 preflight GATE
+called by recording-e2e.sh [0/8] -- NOT by verify-imag.sh, which has its own SEPARATE wmctrl-
+based projector-count check (o) that is NOT touched by this fix, see the Review finding below)
+must tolerate the DRM-lease mode.
 
 With ~/.camera-box/drm-output.json ENABLED the vendored OBS leases the HDMI connector OUT of the
 X layout and page-flips the Program onto it directly -- so GetMonitorList reports NO HDMI
@@ -164,7 +166,7 @@ def test_lease_enabled_but_hdmi_still_present_raises_loud(monkeypatch):
     # silently treated as "healthy lease" -- that is exactly the class of defect (something can
     # still land on HDMI) this ticket exists to prevent.
     calls = _patch(monkeypatch, mod, monitors=_MONITORS_REPLACEMENT_NOTEBOOK,
-                    lease_connector="HDMI-1")
+                   lease_connector="HDMI-1")
     with pytest.raises(RuntimeError, match="(?i)lease"):
         mod.open_projectors(_args(host="10.77.9.187", password=""))
     # Multiview must still have been opened (the panel is fine) before the inconsistency is caught.

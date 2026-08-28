@@ -225,11 +225,19 @@ contract, still DEFAULT-OFF):
    list. It ALSO raises loud if the lease is enabled but `GetMonitorList` still reports an HDMI
    monitor (the connector never actually left X — the wrapper's `xrandr --off` step failed or the
    config is stale) — a genuinely inconsistent state the gate must never silently pass. **STILL
-   OPEN:** `recording-e2e.sh`'s own `#756` projector-COUNT check (immediately after `open-projectors`
-   in the SAME `[0/8]` sequence) still hard-requires exactly 1 X "Projector - Program" window via
-   `wmctrl` — in lease mode that count is genuinely 0 (Program is DRM scanout, not an X window), so
-   `[0/8]` still fails end-to-end with the config enabled until that count check is ALSO taught the
-   lease-mode expectation. Until then, run data-collection E2E with the config dormant.
+   OPEN — TWO separate lease-blind gates, neither touched by this follow-up:** (a)
+   `recording-e2e.sh`'s own `#756` projector-COUNT check (immediately after `open-projectors` in
+   the SAME `[0/8]` sequence) still hard-requires exactly 1 X "Projector - Program" window via
+   `wmctrl` — in lease mode that count is genuinely 0 (Program is DRM scanout, not an X window);
+   (b) `scripts/verify-imag.sh` check **(o)** (`imag_projector_counts_ok`, ~line 1506/1528) is a
+   THIRD, independent lease-blind gate — it ALSO hard-requires exactly 1 X Program window via its
+   own `wmctrl`-based count, and is NOT called through `open_projectors` at all (verify-imag.sh
+   does not invoke `obs_phase2.py open-projectors` — a pre-existing docstring claim to the
+   contrary in `open_projectors` was corrected by this follow-up). Both `[0/8]` and `verify-imag.sh`
+   still fail end-to-end with the config enabled until (a) and (b) are ALSO taught the lease-mode
+   expectation — the M4 runbook's own step 1 already documents the resulting workaround (run
+   verify-imag.sh BEFORE the flip, since check (o) expects the dormant 1+1 state). Until (a)/(b)
+   land, run data-collection E2E with the config dormant.
 
 ### Rollback (ORDER MATTERS — X must get the connector back BEFORE the dormant wrapper runs)
 

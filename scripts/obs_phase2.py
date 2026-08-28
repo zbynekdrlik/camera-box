@@ -2511,12 +2511,15 @@ def open_projectors(a):
     eDP-1/HDMI-1 instead of DP-0/HDMI-0, and a box that ever enumerates HDMI as index 0 would have
     silently sent Program to the panel and Multiview to the projector. Mirrors
     imag_scenes.py::projector()'s existing, already-correct selection rule (#522/#488) — the two
-    scripts have no shared module today (a separate #791-class scaffolding gap, out of THIS
-    ticket's scope), so the small selection logic is duplicated here rather than imported. Unlike
-    imag_scenes.py::projector() (an operator-convenience script that only WARNs on a missing
-    panel), this function is a preflight/verify GATE (recording-e2e.sh's `[0/8]`,
-    verify-imag.sh) — it FAILS LOUD (raises) when EITHER expected connector is absent, never
-    silently continues.
+    scripts had no shared module for THIS selection logic when #840 landed (a separate
+    #791-class scaffolding gap), so it stays duplicated here rather than imported; issue 1152 M4
+    follow-up DOES now share a module for the lease-config classifier specifically (see
+    _drm_lease_connector_for_host below), a narrower, later fix, not a retroactive #791 close.
+    Unlike imag_scenes.py::projector() (an operator-convenience script that only WARNs on a
+    missing panel), this function is a preflight/verify GATE called by recording-e2e.sh's
+    `[0/8]` — NOT by verify-imag.sh, which has its OWN separate wmctrl-based projector-COUNT
+    check (check (o) in scripts/verify-imag.sh) rather than calling this action — it FAILS LOUD
+    (raises) when EITHER expected connector is absent, never silently continues.
 
     #882: a failure to even establish the WebSocket session (OBS process not accepting the
     handshake, wrong password, connection dropped mid-negotiation) is caught HERE and re-raised
