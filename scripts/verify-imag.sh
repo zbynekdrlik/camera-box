@@ -548,6 +548,33 @@ imag_projector_counts_ok() {
   [ "$1" = "1" ] && [ "$2" = "1" ]
 }
 
+# imag_projector_counts_ok_lease MV_COUNT PGM_COUNT -> 0 iff MV="1" AND PGM="0" (issue 1152 M4
+# lease-tolerance slice): the DRM-lease mode count contract. Program is drawn by the vendored OBS
+# DRM output directly onto the leased CRTC (.claude/rules/obs-drm-output.md), never an X window,
+# so the healthy lease state is exactly 1 Multiview + ZERO X Program windows -- a Program window
+# STILL present here is a genuinely inconsistent state (the connector never actually left the X
+# layout, or a stray reappeared), never tolerated as "extra is fine". Same strict string-equality
+# contract as imag_projector_counts_ok (never numeric -eq, which throws on a non-numeric read
+# instead of failing closed).
+imag_projector_counts_ok_lease() {
+  [ "$1" = "1" ] && [ "$2" = "0" ]
+}
+
+# imag_projector_counts_ok_for_mode CONNECTOR MV_COUNT PGM_COUNT -> 0 iff the counts match the
+# EXPECTED shape for the box's CURRENT drm-output lease state (issue 1152 M4 lease-tolerance
+# slice): CONNECTOR empty (dormant) reuses imag_projector_counts_ok's exact 1+1 contract,
+# UNCHANGED; CONNECTOR non-empty (lease ENABLED) reuses imag_projector_counts_ok_lease's exact
+# 1+0 contract. ONE place decides which shape applies to a given read, reused by check (o)'s both
+# before/after-restart counts.
+imag_projector_counts_ok_for_mode() {
+  local connector="${1:-}" mv="${2:-}" pgm="${3:-}"
+  if [ -n "$connector" ]; then
+    imag_projector_counts_ok_lease "$mv" "$pgm"
+  else
+    imag_projector_counts_ok "$mv" "$pgm"
+  fi
+}
+
 # imag_obs_service_restart_cmd -> prints the REMOTE command check (o) runs to restart OBS (#890).
 # It restarts through imag-obs.service, NEVER a direct imag-obs-start.sh call: since #882 that
 # wrapper ends in `wait "$OBS_PID"` (correct for the Type=simple unit -- systemd needs obs to be
@@ -1494,6 +1521,21 @@ fi
 # inside the unit's cgroup. `systemctl --user restart` returns as soon as the unit re-forks obs, so
 # the projectors reappear only afterward (obs launch + WS + seed + projector-open, ~90s budget); a
 # BOUNDED poll waits for the 1+1 to come back and FAILs loud on expiry, never an unbounded wait.
+# issue 1152 M4 lease-tolerance slice: in DRM-lease mode the Program is drawn by the vendored
+# OBS DRM output directly onto the leased CRTC (.claude/rules/obs-drm-output.md), never an X
+# window -- so this check's expected Program window count is 0, not 1, while Multiview stays
+# required at exactly 1 either way. Consult the box's OWN lease config ONCE, via the SAME shared
+# classifier obs_phase2.py::_drm_lease_connector_for_host / imag-obs-start.sh already use
+# (imag_scenes.drm_output_lease_connector / _drm_output_config_text -- the ONE decision grammar),
+# rather than a second, divergent config reader. The config is static across a real OBS restart,
+# so ONE read here covers both the before- and after-restart counts below.
+LEASE_CONNECTOR="$(python3 -c "
+import sys
+sys.path.insert(0, '$HERE')
+import imag_scenes
+print(imag_scenes.drm_output_lease_connector(imag_scenes._drm_output_config_text('$IMAG_IP')))
+" 2>/dev/null || true)"
+
 rc=0
 WMCTRL_PATH="$(ssh_box "command -v wmctrl 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$WMCTRL_PATH" ]; then
@@ -1503,10 +1545,18 @@ else
   # read) -- symmetric with the post-restart poll below, so check (o) can genuinely NEVER hang.
   MV_COUNT="$(ssh_box_timeout "$SSH_TIMEOUT" "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true" 2>/dev/null || echo 0)"
   PGM_COUNT="$(ssh_box_timeout "$SSH_TIMEOUT" "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true" 2>/dev/null || echo 0)"
-  if imag_projector_counts_ok "${MV_COUNT:-0}" "${PGM_COUNT:-0}"; then
-    ok "exactly 1 Multiview + 1 Program projector window BEFORE restart (measured from the box's OWN current state, never opened by this gate, #840)"
+  if imag_projector_counts_ok_for_mode "$LEASE_CONNECTOR" "${MV_COUNT:-0}" "${PGM_COUNT:-0}"; then
+    if [ -n "$LEASE_CONNECTOR" ]; then
+      ok "drm-output lease ENABLED for '${LEASE_CONNECTOR}' -- exactly 1 Multiview projector, 0 X Program windows BEFORE restart (Program is on the DRM-leased scanout, issue 1152; measured from the box's OWN current state, never opened by this gate)"
+    else
+      ok "exactly 1 Multiview + 1 Program projector window BEFORE restart (measured from the box's OWN current state, never opened by this gate, #840)"
+    fi
   else
-    fail "projector count is Multiview=${MV_COUNT:-0} Program=${PGM_COUNT:-0}, expected exactly 1+1 -- the box's OWN startup path did not establish them (#756/#840)"
+    if [ -n "$LEASE_CONNECTOR" ]; then
+      fail "drm-output lease ENABLED for '${LEASE_CONNECTOR}' but projector count is Multiview=${MV_COUNT:-0} Program=${PGM_COUNT:-0}, expected exactly 1 Multiview + 0 Program -- an X Program window here means the connector never actually left the X layout, or a stray reappeared (issue 1152)"
+    else
+      fail "projector count is Multiview=${MV_COUNT:-0} Program=${PGM_COUNT:-0}, expected exactly 1+1 -- the box's OWN startup path did not establish them (#756/#840)"
+    fi
   fi
 
   rc=0
@@ -1525,7 +1575,7 @@ else
     while :; do
       MV_COUNT2="$(ssh_box_timeout "$SSH_TIMEOUT" "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true" 2>/dev/null || echo 0)"
       PGM_COUNT2="$(ssh_box_timeout "$SSH_TIMEOUT" "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true" 2>/dev/null || echo 0)"
-      if imag_projector_counts_ok "${MV_COUNT2:-0}" "${PGM_COUNT2:-0}"; then
+      if imag_projector_counts_ok_for_mode "$LEASE_CONNECTOR" "${MV_COUNT2:-0}" "${PGM_COUNT2:-0}"; then
         persist_ok=1
         break
       fi
@@ -1535,9 +1585,17 @@ else
       sleep 5
     done
     if [ "$persist_ok" -eq 1 ]; then
-      ok "projectors PERSIST across a real OBS restart: exactly 1 Multiview + 1 Program after 'systemctl --user restart imag-obs.service' (#840/#890)"
+      if [ -n "$LEASE_CONNECTOR" ]; then
+        ok "projectors PERSIST across a real OBS restart: drm-output lease ENABLED for '${LEASE_CONNECTOR}' -- exactly 1 Multiview projector, 0 X Program windows after 'systemctl --user restart imag-obs.service' (issue 1152)"
+      else
+        ok "projectors PERSIST across a real OBS restart: exactly 1 Multiview + 1 Program after 'systemctl --user restart imag-obs.service' (#840/#890)"
+      fi
     else
-      fail "projectors did NOT persist across a real OBS restart within ${IMAG_OBS_PROJECTOR_POLL_S}s -- Multiview=${MV_COUNT2:-0} Program=${PGM_COUNT2:-0} after 'systemctl --user restart imag-obs.service' (#840/#890)"
+      if [ -n "$LEASE_CONNECTOR" ]; then
+        fail "projectors did NOT persist across a real OBS restart within ${IMAG_OBS_PROJECTOR_POLL_S}s -- drm-output lease ENABLED for '${LEASE_CONNECTOR}' but Multiview=${MV_COUNT2:-0} Program=${PGM_COUNT2:-0}, expected exactly 1 Multiview + 0 Program after 'systemctl --user restart imag-obs.service' (issue 1152)"
+      else
+        fail "projectors did NOT persist across a real OBS restart within ${IMAG_OBS_PROJECTOR_POLL_S}s -- Multiview=${MV_COUNT2:-0} Program=${PGM_COUNT2:-0} after 'systemctl --user restart imag-obs.service' (#840/#890)"
+      fi
     fi
   fi
 fi
