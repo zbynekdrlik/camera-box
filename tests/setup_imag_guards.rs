@@ -1011,6 +1011,57 @@ fn setup_imag_dantesync_has_gh_release_and_cambox_fallback() {
     }
 }
 
+/// #1215: imag-nb shipped with NO /etc/dantesync/config.json at all (a hand-placed fix, never
+/// provisioned by this script), so it ran on dantesync's built-in default (phase_slew.enabled=
+/// false) and corrected phase error by STEPPING (16x/hour of 6-7ms, a visible ~4-minute hitch on
+/// the projected output) instead of SLEWING like the cam1-4 fleet. Step 3 must install the SAME
+/// JSON the cam boxes carry so a future reprovision cannot silently revert to stepping.
+#[test]
+fn setup_imag_installs_dantesync_phase_slew_config_1215() {
+    let body = read(SETUP);
+    for needle in [
+        "/etc/dantesync/config.json",
+        "\"phase_slew\"",
+        "\"enabled\": true",
+        "gm_allowlist",
+        "\"http_status\"",
+        "RIG_GRANDMASTER_IP",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} step 3 must install /etc/dantesync/config.json carrying `{needle}` (#1215) \
+             — the same phase_slew canary config the cam1-4 fleet carries, or a reprovisioned \
+             imag-nb silently reverts to stepping the clock"
+        );
+    }
+    // mode 644 (matching the ticket's spec: "mode 644, root-owned" — the whole script already
+    // requires EUID 0, so a root-run chmod 644 write is root-owned for free).
+    assert!(
+        body.contains("chmod 644 /etc/dantesync/config.json"),
+        "{SETUP}: the dantesync config file must be installed mode 644 (#1215)"
+    );
+}
+
+/// The config write must land BEFORE `systemctl restart dantesync` — the SAME restart that
+/// already proves PTP re-lock (the #491 restart-anchored check just above it) must be the one
+/// that also picks up phase_slew on a fresh provision, not a second restart.
+#[test]
+fn setup_imag_installs_dantesync_config_before_the_restart_1215() {
+    let body = read(SETUP);
+    let config_pos = body
+        .find("/etc/dantesync/config.json")
+        .expect("the config write must exist (see setup_imag_installs_dantesync_phase_slew_config_1215)");
+    let restart_pos = body
+        .find("systemctl restart dantesync")
+        .expect("{SETUP} must still restart dantesync (#491)");
+    assert!(
+        config_pos < restart_pos,
+        "{SETUP}: /etc/dantesync/config.json must be written BEFORE `systemctl restart \
+         dantesync` (#1215) so the restart that proves PTP re-lock also loads phase_slew on a \
+         first provision — config_pos={config_pos} restart_pos={restart_pos}"
+    );
+}
+
 // ============================================================================================
 // #485 — imag-nb desktop de-jitter: mask GNOME/Ubuntu background jitter sources on the
 // single-app OBS kiosk + OBS-native ProcessPriority=High. All reversible, security updates stay

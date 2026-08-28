@@ -708,6 +708,85 @@ fn gm_check_composes_correctly_when_reused_from_clock_offset_guard_sh() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// (l) dantesync phase_slew ENABLED (#1215) -- imag-nb shipped with no /etc/dantesync/config.json
+// at all and stepped the clock (16x/hour, ~4-min hitch) instead of slewing it; the config gap is
+// closed in setup-imag.sh, and this check makes a future regression to no-config fail loud rather
+// than shipping the same silent hitch again.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn phase_slew_check_composes_correctly_when_reused_from_clock_offset_guard_sh_1215() {
+    let json = "{\"phase_slew_enabled\":false,\"mode\":\"PROD\",\"ntp_offset_us\":2924}";
+    let (code, out, err) = run_sourced(&format!(
+        r#"
+        JSON='{json}'
+        PS="$(phase_slew_enabled_from_pipe_json "$JSON")"
+        echo "$PS"
+        set +e
+        phase_slew_check imag "$PS"
+        echo "rc=$?"
+        "#
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("false") && out.contains("PHASE-SLEW DISABLED") && out.contains("rc=2"),
+        "imag-nb's pre-#1215 disabled state must be caught when composed inside verify-imag.sh: {out:?}"
+    );
+}
+
+#[test]
+fn verify_imag_wires_phase_slew_check_into_the_live_flow_1215() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains("phase_slew_check imag"),
+        "verify-imag.sh must CALL phase_slew_check on the imag-nb dantesync status (#1215) -- a \
+         pure function that is only ever defined (in clock-offset-guard.sh) and never invoked \
+         here provides zero acceptance coverage for the phase_slew provisioning gap"
+    );
+    assert!(
+        body.contains("phase_slew_enabled_from_pipe_json"),
+        "verify-imag.sh must parse phase_slew_enabled out of the SAME $DS_HTTP_STATUS blob check \
+         (l) already fetches for ptp_locked/offset/gm_source_ip (#1215)"
+    );
+}
+
+#[test]
+fn clock_offset_guard_defines_phase_slew_enabled_from_pipe_json_and_phase_slew_check_1215() {
+    let guard_path = manifest_dir().join("scripts/clock-offset-guard.sh");
+    let body = std::fs::read_to_string(&guard_path).unwrap();
+    for needle in ["phase_slew_enabled_from_pipe_json() {", "phase_slew_check() {"] {
+        assert!(
+            body.contains(needle),
+            "scripts/clock-offset-guard.sh must define {needle} (#1215), following the EXACT \
+             shape of gm_source_ip_from_pipe_json()/gm_check() in the same file"
+        );
+    }
+}
+
+#[test]
+fn verify_imag_fails_loud_on_phase_slew_when_the_journal_fallback_path_cannot_read_it_1215() {
+    // check (l)'s journal-fallback branch (HTTP status unreachable) has NO phase_slew_enabled
+    // field to read (journald carries no such field, same as gm_source_ip per #834) -- it must
+    // FAIL LOUD naming phase_slew, never silently skip the check (imag-ssh-remote-tool-preflight
+    // discipline: an unreadable signal is a hard FAIL, never a silent pass).
+    let body = std::fs::read_to_string(script()).unwrap();
+    let l_start = body
+        .find("# (l) dantesync PTP LOCKED")
+        .expect("check (l) marker must exist");
+    let m_start = body[l_start..]
+        .find("# (m) dantesync is the SOLE")
+        .map(|off| l_start + off)
+        .expect("check (m) marker must exist, bounding the (l) block");
+    let l_region = &body[l_start..m_start];
+    assert!(
+        l_region.to_lowercase().contains("phase_slew") && l_region.contains("fail \""),
+        "check (l)'s journal-fallback branch must fail loud naming phase_slew when :8898/status \
+         is unreachable (#1215), mirroring the existing grandmaster-unreadable fail in the same \
+         branch: {l_region}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // (n) scenes present + Multiview populated (imag_scenes.py, bare)
 // ---------------------------------------------------------------------------------------------
 
