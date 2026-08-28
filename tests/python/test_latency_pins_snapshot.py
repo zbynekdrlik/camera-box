@@ -100,18 +100,21 @@ class TestReadPin:
 class TestActiveCameraNumbers:
     def test_default_is_cam1_cam2_cam3(self, monkeypatch):
         # issue 1198 (2026-08-27, owner ruling): cam1 + cam2 RESTORED -- both cards confirmed
-        # healthy on a live journal check, the owner refused the physical swap outright; default
-        # mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3".
+        # healthy on a live journal check, the owner refused the physical swap outright. issue
+        # 1216 (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are back too; default
+        # mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3 cam5 cam6 cam7" (cam4 alone
+        # stays out, #947).
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert lps.active_camera_numbers() == (1, 2, 3)
+        assert lps.active_camera_numbers() == (1, 2, 3, 5, 6, 7)
 
     def test_env_override_narrows_the_set(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
         assert lps.active_camera_numbers() == (1, 3)
 
     def test_env_override_widens_to_a_retired_camera(self, monkeypatch):
-        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5")
-        assert lps.active_camera_numbers() == (1, 2, 3, 4, 5)
+        # cam4 is the one camera issue 1216 leaves out (#947) -- the genuine "retired" widen proof.
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+        assert lps.active_camera_numbers() == (1, 2, 3, 4)
 
     def test_comma_separated_override_is_also_accepted(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1,cam2")
@@ -125,9 +128,10 @@ class TestActiveCameraNumbers:
 
 class TestSnapshotBoxPins:
     def test_reads_main_and_mv_for_each_camera_in_the_default_active_set(self, monkeypatch):
-        # issue 1198 (2026-08-27, owner ruling): cam1 + cam2 RESTORED -> default active set is
-        # cam1/cam2/cam3, never the old literal cam1..7 sweep. A still-retired camera
-        # (cam4/cam5/cam6/cam7) must not even be attempted.
+        # issue 1198 (2026-08-27, owner ruling): cam1 + cam2 RESTORED. issue 1216 (2026-08-28): a
+        # bigger splitter is fitted and cam5/cam6/cam7 are back too -> default active set is
+        # cam1/cam2/cam3/cam5/cam6/cam7, never the old literal cam1..7 sweep. The one still-retired
+        # camera (cam4, #947) must not even be attempted.
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
 
@@ -138,11 +142,15 @@ class TestSnapshotBoxPins:
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
         result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
-        assert len(result) == 3
-        assert set(result.keys()) == {"cam1", "cam2", "cam3"}
+        assert len(result) == 6
+        assert set(result.keys()) == {"cam1", "cam2", "cam3", "cam5", "cam6", "cam7"}
         assert result["cam1"] == {"main_ms": 1, "mv_ms": 101}
         assert result["cam2"] == {"main_ms": 2, "mv_ms": 102}
         assert result["cam3"] == {"main_ms": 3, "mv_ms": 103}
+        assert result["cam5"] == {"main_ms": 5, "mv_ms": 105}
+        assert result["cam6"] == {"main_ms": 6, "mv_ms": 106}
+        assert result["cam7"] == {"main_ms": 7, "mv_ms": 107}
+        assert "cam4" not in result
 
     def test_camera_active_set_env_override_narrows_the_sweep(self, monkeypatch):
         # #893: CAMERA_ACTIVE_SET is the ONE source of truth for which cameras get swept --
@@ -161,9 +169,10 @@ class TestSnapshotBoxPins:
         assert set(result.keys()) == {"cam1", "cam3"}
 
     def test_camera_active_set_env_override_widens_the_sweep_to_a_retired_camera(self, monkeypatch):
-        # #827-style reversibility: re-adding a retired camera to CAMERA_ACTIVE_SET must make it
-        # swept again with zero code changes -- mirrors camera-set.sh's own re-enable procedure.
-        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5")
+        # #827-style reversibility: re-adding a retired camera (cam4, the one camera issue 1216
+        # leaves out) to CAMERA_ACTIVE_SET must make it swept again with zero code changes --
+        # mirrors camera-set.sh's own re-enable procedure.
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
         monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
 
         def fake_read_pin(ws, name):
@@ -172,8 +181,8 @@ class TestSnapshotBoxPins:
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
         result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
-        assert "cam5" in result
-        assert "cam6" not in result
+        assert "cam4" in result
+        assert "cam5" not in result
 
     def test_connect_failure_returns_empty_never_a_half_filled_table(self, monkeypatch):
         def raising_conn(host, password):

@@ -10,9 +10,11 @@ zero-loss coverage even though its earlier exclusion reason (#301, cam3 SSH down
 — exactly the kind of hand-written-literal drift this test exists to catch.
 
 #827 (2026-07-27, binding owner directive): BOTH sources of truth now DERIVE from the SAME
-CAMERA_ACTIVE_SET (scripts/camera-set.sh) instead of a hardcoded literal, so cam5/cam6/cam7 are
-excluded today (retired -- grabber cards returned, boxes powered off) but flow back into BOTH the
-mapping AND the sweep the moment CAMERA_ACTIVE_SET is widened, with zero code changes. Because
+CAMERA_ACTIVE_SET (scripts/camera-set.sh) instead of a hardcoded literal, so a retirement is
+membership-only and flows back into BOTH the mapping AND the sweep the moment CAMERA_ACTIVE_SET is
+widened, with zero code changes -- issue 1216 (2026-08-28) is the actual proof: cam5/cam6/cam7,
+retired in #827 (grabber cards returned, boxes powered off), are back in the default active set
+now that a bigger splitter is fitted and the boxes are physically wired back in. Because
 recording-e2e.sh's own CAMBOX_SWEEP default is now a bash command-substitution expression (not
 static text), this test RESOLVES it for real by sourcing camera-set.sh and letting bash evaluate
 it -- never regex-scraping a literal that no longer exists.
@@ -134,34 +136,38 @@ def test_cambox_sweep_default_covers_every_camera_in_the_canonical_active_mappin
 
 
 def test_default_active_set_is_exactly_cam1_cam2_cam3_1198():
-    """#827: cam5/cam6/cam7 retired. #947: cam4 retired. #939 (2026-08-13): cam3 re-activated.
-    issue 1198 (2026-08-27, owner ruling): cam1 (#1110 "hardware-defective") and cam2 (#1170
-    "camera-under-test retired") are RESTORED -- both diagnoses were built from EPISODES, not a
-    permanent card state, and a live journal check on all four cam boxes confirmed both cards are
-    healthy today; the owner refused the physical swap outright. Today's declared active
-    (measured) fleet is exactly cam1/cam2/cam3."""
+    """#827: cam5/cam6/cam7 were retired. #947: cam4 retired. #939 (2026-08-13): cam3
+    re-activated. issue 1198 (2026-08-27, owner ruling): cam1 (#1110 "hardware-defective") and
+    cam2 (#1170 "camera-under-test retired") are RESTORED -- both diagnoses were built from
+    EPISODES, not a permanent card state, and a live journal check on all four cam boxes confirmed
+    both cards are healthy today; the owner refused the physical swap outright. issue 1216
+    (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are physically back in too --
+    today's declared active (measured) fleet is exactly cam1/cam2/cam3/cam5/cam6/cam7; cam4 alone
+    stays out (#947, unrelated capture-leg wedge)."""
     canonical = _scene_to_camera_from_active_map()
-    assert set(canonical.values()) == {"CAM1", "CAM2", "CAM3"}, canonical
-    for retired in ("CAM4", "CAM5", "CAM6", "CAM7"):
-        assert retired not in canonical.values(), (
-            f"{retired} is retired from CAMERA_ACTIVE_SET -- it must not appear in the "
-            f"default resolved map: {canonical}"
-        )
+    assert set(canonical.values()) == {"CAM1", "CAM2", "CAM3", "CAM5", "CAM6", "CAM7"}, canonical
+    assert "CAM4" not in canonical.values(), (
+        f"CAM4 is retired from CAMERA_ACTIVE_SET (#947) -- it must not appear in the "
+        f"default resolved map: {canonical}"
+    )
 
 
 def test_reactivating_a_retired_camera_flows_through_both_sources_of_truth():
-    """#827 REVERSIBILITY PROOF: widening CAMERA_ACTIVE_SET to include a retired camera (cam5)
-    must make BOTH set-ndi-mapping.py's active_map() AND recording-e2e.sh's resolved CAMBOX_SWEEP
-    default cover it -- with ZERO code changes beyond the env var. A comment claiming the reversal
-    works is not proof; this end-to-end resolution is."""
-    active = "cam1 cam2 cam3 cam4 cam5"
+    """#827 REVERSIBILITY PROOF: widening CAMERA_ACTIVE_SET to include a retired camera (cam4,
+    the one camera issue 1216 leaves out) must make BOTH set-ndi-mapping.py's active_map() AND
+    recording-e2e.sh's resolved CAMBOX_SWEEP default cover it -- with ZERO code changes beyond the
+    env var. A comment claiming the reversal works is not proof; this end-to-end resolution is."""
+    active = "cam1 cam2 cam3 cam4 cam5 cam6 cam7"
     canonical = _scene_to_camera_from_active_map(active)
-    assert "Cam 5" in canonical and canonical["Cam 5"] == "CAM5", canonical
+    assert "Cam 4" in canonical and canonical["Cam 4"] == "CAM4", canonical
 
     sweep_default = _resolve_cambox_sweep_default(active)
     swept = dict(switch_schedule.parse_sweep(sweep_default))
-    assert swept.get("Cam 5") == "CAM5", (
-        f"#827: CAMBOX_SWEEP's resolved default must cover 'Cam 5:CAM5' once cam5 is added back "
-        f"to CAMERA_ACTIVE_SET: {sweep_default!r}"
+    assert swept.get("Cam 4") == "CAM4", (
+        f"#827/#1216: CAMBOX_SWEEP's resolved default must cover 'Cam 4:CAM4' once cam4 is added "
+        f"back to CAMERA_ACTIVE_SET: {sweep_default!r}"
     )
-    assert "Cam 6" not in swept and "Cam 7" not in swept, swept
+    # And dropping it back out un-reactivates it, just as easily.
+    shrunk = _resolve_cambox_sweep_default("cam1 cam2 cam3 cam5 cam6 cam7")
+    swept_shrunk = dict(switch_schedule.parse_sweep(shrunk))
+    assert "Cam 4" not in swept_shrunk, swept_shrunk

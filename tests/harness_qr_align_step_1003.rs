@@ -137,6 +137,38 @@ fn align_set_is_a_superset_including_cam4_and_cam1_cam2_derive_from_active_1198(
 }
 
 #[test]
+fn align_set_extends_to_cam5_cam6_cam7_when_active_1216() {
+    // issue 1216 (2026-08-28): the bigger splitter puts cam5/cam6/cam7 back in the default
+    // CAMERA_ACTIVE_SET -- CAMERA_ALIGN_SET's derivation must widen with it (the same one-line
+    // reversal the #1198 cam1/cam2 derivation already proved), appended after the cam1..cam4
+    // base so the resolved set still reads naturally cam1..cam7.
+    let default_align = resolved_align_set(None);
+    for cam in ["cam5", "cam6", "cam7"] {
+        assert!(
+            align_has_word(&default_align, cam),
+            "issue 1216: {cam} must be in the default CAMERA_ALIGN_SET (bigger splitter fitted): \
+             got [{default_align}]"
+        );
+    }
+    // Shrinking CAMERA_ACTIVE_SET back to a set without them must drop them from the align set
+    // too, derived not hardcoded.
+    let without_them = resolved_align_set(Some("cam1 cam2 cam3"));
+    for cam in ["cam5", "cam6", "cam7"] {
+        assert!(
+            !align_has_word(&without_them, cam),
+            "issue 1216 reversal check: shrinking CAMERA_ACTIVE_SET must drop {cam} from the \
+             align set again: got [{without_them}]"
+        );
+    }
+    // cam4 stays the on-air-but-unmeasured base regardless (issue 1003) -- unaffected by the
+    // cam5/cam6/cam7 widening.
+    assert!(
+        align_has_word(&default_align, "cam4"),
+        "cam4 must remain in the align set (on-air, #947): got [{default_align}]"
+    );
+}
+
+#[test]
 fn qr_align_lib_and_tool_exist() {
     for p in ["scripts/lib/qr-align.sh", "scripts/qr_align_pins.py"] {
         let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), p);

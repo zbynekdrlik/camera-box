@@ -127,17 +127,17 @@ assert m.duplicates({"NDI cam1": "CAM4 (usb)", "NDI cam2": "CAM4 (usb)"}), "must
 
 #[test]
 fn active_map_defaults_to_exactly_the_active_camera_1198() {
-    // #827/issue 947/issue 939/#1110/issue 1170/issue 1198: with no override, active_map() (and
-    // therefore parse_map_args(None), the no-`--map` path main() takes) must resolve to exactly
-    // cam1/cam2/cam3 -- the DEFAULT_ACTIVE_SET fallback (cam4 retired 2026-08-02, issue 947; cam1
-    // + cam2 RESTORED 2026-08-27, issue 1198, owner ruling: both cards confirmed healthy on a
-    // live journal check, the swap is off the table).
+    // #827/issue 947/issue 939/#1110/issue 1170/issue 1198/issue 1216: with no override,
+    // active_map() (and therefore parse_map_args(None), the no-`--map` path main() takes) must
+    // resolve to exactly cam1/cam2/cam3/cam5/cam6/cam7 -- the DEFAULT_ACTIVE_SET fallback (cam4
+    // retired 2026-08-02, issue 947, the ONE camera still out; cam1 + cam2 RESTORED 2026-08-27,
+    // issue 1198; cam5/cam6/cam7 RESTORED 2026-08-28, issue 1216, bigger splitter fitted).
     let (stdout, stderr) = run_py_check(
         r#"import os
 os.environ.pop("CAMERA_ACTIVE_SET", None)
 want = m.active_map()
 senders = sorted(s.split(" ", 1)[0] for _, s in want)
-assert senders == ["CAM1", "CAM2", "CAM3"], senders
+assert senders == ["CAM1", "CAM2", "CAM3", "CAM5", "CAM6", "CAM7"], senders
 assert m.parse_map_args(None) == want, "no --map -> active_map()"
 "#,
     );
@@ -167,19 +167,21 @@ assert m.parse_map_args(override, "cam1 cam2") == [("NDI cam5", "CAM5 (usb)")], 
 /// the actual proof the reversal works, not a comment claiming it does.
 #[test]
 fn active_map_reactivates_a_retired_camera_when_the_active_set_widens() {
+    // cam4 (the one camera issue 1216 leaves out, #947) is the proof camera here now that
+    // cam5/cam6/cam7 are default-active again.
     let (stdout, stderr) = run_py_check(
-        r#"want = m.active_map("cam1 cam2 cam3 cam4 cam5")
-assert ("NDI cam5", "CAM5 (usb)") in want, want
+        r#"want = m.active_map("cam1 cam2 cam3 cam4 cam5 cam6 cam7")
+assert ("NDI cam4", "CAM4 (usb)") in want, want
 senders = sorted(s.split(" ", 1)[0] for _, s in want)
-assert senders == ["CAM1", "CAM2", "CAM3", "CAM4", "CAM5"], senders
+assert senders == ["CAM1", "CAM2", "CAM3", "CAM4", "CAM5", "CAM6", "CAM7"], senders
 # And shrinking it back out un-reactivates it, just as easily.
-want_shrunk = m.active_map("cam1 cam2 cam3")
-assert ("NDI cam5", "CAM5 (usb)") not in want_shrunk, want_shrunk
+want_shrunk = m.active_map("cam1 cam2 cam3 cam5 cam6 cam7")
+assert ("NDI cam4", "CAM4 (usb)") not in want_shrunk, want_shrunk
 "#,
     );
     assert!(
         stdout.contains("OK"),
-        "#827 reactivation-proof checks failed:\nstdout:{stdout}\nstderr:{stderr}"
+        "#827/#1216 reactivation-proof checks failed:\nstdout:{stdout}\nstderr:{stderr}"
     );
 }
 
@@ -191,12 +193,12 @@ fn default_active_set_env_var_matches_camera_set_sh_exactly() {
     let py = read("scripts/set-ndi-mapping.py");
     let sh = read("scripts/camera-set.sh");
     assert!(
-        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")"#),
-        "issue 1198: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
-         fallback camera-set.sh itself defaults to (cam1 + cam2 restored 2026-08-27)"
+        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam5 cam6 cam7")"#),
+        "issue 1216: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
+         fallback camera-set.sh itself defaults to (cam5/cam6/cam7 restored 2026-08-28)"
     );
     assert!(
-        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}""#),
-        "issue 1198: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
+        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam5 cam6 cam7}""#),
+        "issue 1216: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
     );
 }
