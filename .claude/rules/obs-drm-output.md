@@ -7,6 +7,8 @@ paths:
   - "tests/drm_output_program_1152.rs"
   - "tests/drm_lease_tolerance_1152.rs"
   - "scripts/imag-obs-start.sh"
+  - "scripts/obs_phase2.py"
+  - "tests/python/test_obs_phase2_open_projectors_lease_1152.py"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -215,10 +217,27 @@ contract, still DEFAULT-OFF):
    to the LIVE-marker proof. NB: the facet grades the NEWEST OBS session's LOG — `drm_output|OK`
    does not by itself prove OBS is alive right now (liveness is the sibling gates' job), and a
    read racing a fresh OBS start reads DRIFT until `program scanout LIVE` lands.
-5. Known boundary (deliberately NOT M4): the E2E `[0/8]`'s own X-projector count checks and
-   `obs_phase2` projector openers still expect the dormant 1+1 X-window state — teaching the E2E
-   harness the enabled-state expectations (Multiview-only X-side, Program on the scanout) is part
-   of the PERMANENT-flip milestone, so until then run data-collection E2E with the config dormant.
+5. **Known boundary — PARTIALLY CLOSED (M4 follow-up, issue 1152):** `obs_phase2.py::open_projectors`
+   (the `[0/8]` preflight gate) is NOW lease-aware — it reuses `imag_scenes.drm_output_lease_connector`
+   / `_drm_output_config_text` (lazy `_imag_scenes_module()` import, same pattern as
+   `_measurement_pins_module()`) and, when the lease is enabled, opens ONLY Multiview and returns —
+   never raising "no HDMI projector monitor detected" for the expected/healthy panel-only monitor
+   list. It ALSO raises loud if the lease is enabled but `GetMonitorList` still reports an HDMI
+   monitor (the connector never actually left X — the wrapper's `xrandr --off` step failed or the
+   config is stale) — a genuinely inconsistent state the gate must never silently pass. **STILL
+   OPEN — TWO separate lease-blind gates, neither touched by this follow-up:** (a)
+   `recording-e2e.sh`'s own `#756` projector-COUNT check (immediately after `open-projectors` in
+   the SAME `[0/8]` sequence) still hard-requires exactly 1 X "Projector - Program" window via
+   `wmctrl` — in lease mode that count is genuinely 0 (Program is DRM scanout, not an X window);
+   (b) `scripts/verify-imag.sh` check **(o)** (`imag_projector_counts_ok`, ~line 1506/1528) is a
+   THIRD, independent lease-blind gate — it ALSO hard-requires exactly 1 X Program window via its
+   own `wmctrl`-based count, and is NOT called through `open_projectors` at all (verify-imag.sh
+   does not invoke `obs_phase2.py open-projectors` — a pre-existing docstring claim to the
+   contrary in `open_projectors` was corrected by this follow-up). Both `[0/8]` and `verify-imag.sh`
+   still fail end-to-end with the config enabled until (a) and (b) are ALSO taught the lease-mode
+   expectation — the M4 runbook's own step 1 already documents the resulting workaround (run
+   verify-imag.sh BEFORE the flip, since check (o) expects the dormant 1+1 state). Until (a)/(b)
+   land, run data-collection E2E with the config dormant.
 
 ### Rollback (ORDER MATTERS — X must get the connector back BEFORE the dormant wrapper runs)
 
@@ -239,3 +258,20 @@ and exactly why the restore must come first.
 - The flip loop uses `os_atomic_{set,load}_bool(&running)`; its poll wait breaks on
   `POLLERR/HUP/NVAL` and a failing `drmHandleEvent` (no CPU spin on lease revoke / X restart) and
   emits a wedge WARNING after ~5 s of overdue completions.
+
+## GOTCHA (M4 follow-up, issue 1152 review) — a NEW `_conn`/host-consulting helper on `open_projectors` needs its OWN stub in EVERY pre-existing test file's `_patch`/mock helper, or the tests silently degrade to live I/O
+
+`tests/python/test_obs_phase2_open_projectors_lease_1152.py` added `_drm_lease_connector_for_host`
+(consults the box's real `~/.camera-box/drm-output.json`, over ssh for a `--host <ip>` call) to
+`obs_phase2.py::open_projectors`. The PRE-EXISTING `tests/python/test_obs_phase2_open_projectors_758.py`'s
+own `_patch` helper stubbed `_rpc`/`_conn` but had NO reason to know about the new call — so its
+tests kept passing, but silently started performing a REAL live ssh dial into the new code path
+on every run (measured ~3s/test; `10.77.9.187` happened to be dormant at review time, so the
+tests passed by luck — the SAME tests pointed at the real imag-nb `.182`, which resolved
+`ENABLED`, would have failed outright). Nothing in the test output flagged this — a slow-but-green
+test suite is the only tell. **Whenever `open_projectors` (or any function a `_patch`-style mock
+helper wraps) gains a NEW call that consults live host/rig state, grep every OTHER test file in
+`tests/python/` that mocks the SAME function for its own `_patch`/mock helper and add the SAME
+stub there too** — a shared decision function reused by multiple test files each maintaining
+their OWN mock helper is exactly this trap: adding a call inside the function under test is
+invisible to a mock helper written before that call existed.
