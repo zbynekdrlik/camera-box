@@ -1372,15 +1372,20 @@ echo "    ok: no sustained capture-rate defect in $CAMERA_NAME's recent journal"
 # DEFECTIVE WARN, which never fires for the #1130/#1110-class defect (cam1 delivered 61-63fps —
 # inside the ShadowCast 2 tolerance — while it stalled/skipped/EPROTO'd for HOURS, and the #656
 # preflight still said "ok"). This step reads the OTHER, orthogonal degradation signals the box
-# genuinely emits (#707 V4L2 DEQUEUE STALL + emit-gate SKIPPED aggregates in the last 5 min, and
-# kernel uvcvideo -EPROTO in the last hour) and ABORTS the run naming the box + signal, so a sick
-# capture leg is a named escalation (fix the hardware, or drop the box from CAMERA_ACTIVE_SET /
-# CAMBOX_OFFLINE_ACK) rather than a 30-minute run measured on a broken tool. cap-1s over-rate is
-# read too but is REPORT-ONLY (the chronic ShadowCast over-rate is absorbed by the genlock
-# decimation, issue #909 — hard-failing it would recreate that mistake). All logic lives in the
-# sourced scripts/lib/leg-health-guard.sh (thresholds calibrated from the #1130/#1110 incident +
-# a live cam1 read; the classifier + patterns are unit-tested in tests/harness_leg_health_guard_1133.rs).
-echo "[0/8] leg-health preflight — every active capture leg must be free of USB EPROTO / DQBUF stalls / emit-gate skips (#1133)"
+# genuinely emits and ABORTS the run naming the box + signal, so a sick capture leg is a named
+# escalation (drop the box from CAMERA_ACTIVE_SET / CAMBOX_OFFLINE_ACK, or fix the leg) rather than
+# a 30-minute run measured on a broken tool. The HARD signals are: sustained CAPTURE FRAME LOSS
+# (sent-vs-captured from the `Streaming:` lines, calibrated 1.25% gate with a sustain guard — the
+# #1133 replacement for the DEQUEUE STALL gate), emit-gate SKIPPED aggregates (last 5 min), and
+# kernel uvcvideo -EPROTO (last hour). REPORT-ONLY (never abort): the #707 DEQUEUE STALL COUNT
+# (issue 1198 proved it ANTI-correlated with real frame loss — VIDIOC_DQBUF is a blocking wait, so
+# a well-protected fast thread reports MORE stalls than a lossy one; its old "replace cable/port/
+# grabber" wording was a misattribution) and the cap-1s over-rate (chronic ShadowCast over-rate is
+# absorbed by the genlock decimation, issue #909 — hard-failing it would recreate that mistake).
+# All logic lives in the sourced scripts/lib/leg-health-guard.sh (frame-loss threshold calibrated
+# from the supervisor's 2026-08-20 live-fleet read; the classifiers + patterns are unit-tested in
+# tests/harness_leg_health_guard_1133.rs).
+echo "[0/8] leg-health preflight — every active capture leg must be free of sustained frame loss / emit-gate skips / USB EPROTO (DQBUF stall count is now report-only, issue 1198) (#1133)"
 # Always check the SOURCE camera (its feed drives the whole verdict); under ALL_CAMBOX also check
 # the reachable+healthy+non-acked secondaries the fleet preflight already vetted
 # (PREFLIGHT_DANTESYNC_LINUX = "box=ip" pairs, so an acked/unreachable box is already absent).
@@ -1431,13 +1436,27 @@ for _lht in $LEG_HEALTH_TARGETS; do
   _lhstall="$(leg_health_extract STALL "$_lhout")"
   _lhskip="$(leg_health_extract SKIP "$_lhout")"
   _lheproto="$(leg_health_extract EPROTO "$_lhout")"
-  if ! _lhmsg="$(leg_health_classify "$_lhbox" "$_lhstall" "$_lhskip" "$_lheproto")"; then
+  _lhstreaming="$(leg_health_extract_streaming "$_lhout")"
+  # HARD signal A (count-based): emit-gate SKIP aggregates + kernel uvcvideo -EPROTO. #1133 DROPPED
+  # the DEQUEUE STALL count from this classify — it gated on a quantity ANTI-correlated with real
+  # frame loss (issue 1198: the arm losing 4.5x FEWER frames reported MORE stalls).
+  if ! _lhmsg="$(leg_health_classify "$_lhbox" "$_lhskip" "$_lheproto")"; then
+    echo "ERROR: $_lhmsg" >&2
+    exit 1
+  fi
+  # HARD signal B (#1133): sustained CAPTURE FRAME LOSS (sent-vs-captured from the `Streaming:`
+  # lines) — the quantity the DEQUEUE STALL count only correlated with backwards. Calibrated 1.25%
+  # gate with a sustain guard (leg_health_frame_loss_*); over-rate is benign (issue #909).
+  if ! _lhmsg="$(leg_health_frame_loss_classify "$_lhbox" "$_lhstreaming")"; then
     echo "ERROR: $_lhmsg" >&2
     exit 1
   fi
   # Report-only: surface a sustained cap-1s over-rate for diagnostics (never aborts, issue #909).
   leg_health_cap1s_band_warn "$_lhbox" "$(leg_health_extract_cap1s "$_lhout")"
-  echo "    ok: $_lhbox capture leg healthy (stall=$_lhstall skip=$_lhskip eproto=$_lheproto in-window)"
+  # Report-only (#1133): the DEQUEUE STALL count is now diagnostics-only (anti-correlated with real
+  # frame loss, issue 1198 — never aborts).
+  leg_health_dequeue_stall_report "$_lhbox" "$_lhstall"
+  echo "    ok: $_lhbox capture leg healthy (loss-ok skip=$_lhskip eproto=$_lheproto, stall=$_lhstall report-only in-window)"
 done
 # #1141: head-end OPTICAL blur/shutter fail-fast. The capture-RATE gate above (#656) proves the
 # source camera captures at the right RATE, but is BLIND to a camera capturing at that rate yet

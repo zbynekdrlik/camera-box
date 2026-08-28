@@ -176,18 +176,16 @@ fn fixture_counts_match_expected() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn classify_sick_leg_aborts_and_names_box_and_every_signal() {
-    // sick fixture counts (12 stall, 10 skip, 9 eproto) — all over threshold (8,8,6).
-    let (out, ok) = run_sourced_status("leg_health_classify cam1 12 10 9");
+fn classify_sick_leg_aborts_and_names_box_and_every_count_signal() {
+    // #1133: leg_health_classify is now 3-arg (box skip eproto) — the DEQUEUE STALL count was
+    // dropped (it gated on a quantity anti-correlated with real health, issue 1198). sick
+    // count-based signals (10 skip, 9 eproto) — both over threshold (8, 6).
+    let (out, ok) = run_sourced_status("leg_health_classify cam1 10 9");
     assert!(
         !ok,
-        "a sick leg MUST fail (return non-zero), not report ok — this is the #1133 bug"
+        "a leg over the emit-skip / EPROTO thresholds MUST fail (return non-zero), not report ok"
     );
     assert!(out.contains("cam1"), "message must name the box: {out:?}");
-    assert!(
-        out.contains("DEQUEUE STALL"),
-        "must name the stall signal: {out:?}"
-    );
     assert!(
         out.contains("SKIPPED"),
         "must name the emit-skip signal: {out:?}"
@@ -197,7 +195,11 @@ fn classify_sick_leg_aborts_and_names_box_and_every_signal() {
         "must name the EPROTO signal: {out:?}"
     );
     assert!(
-        out.contains("12") && out.contains("10") && out.contains("9"),
+        !out.contains("DEQUEUE"),
+        "#1133: the DEQUEUE STALL count is NO LONGER a classify signal: {out:?}"
+    );
+    assert!(
+        out.contains("10") && out.contains("9"),
         "must carry the real counts: {out:?}"
     );
     assert!(
@@ -215,8 +217,9 @@ fn classify_sick_leg_aborts_and_names_box_and_every_signal() {
 
 #[test]
 fn classify_residual_and_healthy_legs_pass() {
-    // post-.481 residual (2 stall, 1 skip, 0 eproto) — genuinely below thresholds -> ok.
-    let (out, ok) = run_sourced_status("leg_health_classify cam1 2 1 0");
+    // post-.481 residual (1 skip, 0 eproto) — genuinely below thresholds -> ok. (A high STALL count
+    // no longer even enters classify — it is not an argument here, #1133.)
+    let (out, ok) = run_sourced_status("leg_health_classify cam1 1 0");
     assert!(
         ok,
         "the post-.481 residual leg must PASS (below thresholds), not false-fail: {out:?}"
@@ -226,42 +229,36 @@ fn classify_residual_and_healthy_legs_pass() {
         "a healthy leg prints nothing: {out:?}"
     );
     // stone-cold healthy.
-    let (_o2, ok2) = run_sourced_status("leg_health_classify cam3 0 0 0");
-    assert!(ok2, "a 0/0/0 leg must pass");
+    let (_o2, ok2) = run_sourced_status("leg_health_classify cam3 0 0");
+    assert!(ok2, "a 0/0 leg must pass");
 }
 
 #[test]
 fn classify_each_signal_fails_alone_at_its_threshold_and_passes_just_below() {
     // exactly-at-threshold fails; one-below passes — proves the boundary + per-signal isolation.
-    // STALL threshold 8:
-    assert!(
-        !run_sourced_status("leg_health_classify cam1 8 0 0").1,
-        "stall==8 must fail"
-    );
-    let (o, ok) = run_sourced_status("leg_health_classify cam1 7 0 0");
-    assert!(ok, "stall==7 must pass");
-    assert!(o.trim().is_empty());
+    // #1133: classify is now 3-arg (box skip eproto); the STALL count is gone.
     // SKIP threshold 8:
-    let (o, bad) = run_sourced_status("leg_health_classify cam1 0 8 0");
+    let (o, bad) = run_sourced_status("leg_health_classify cam1 8 0");
     assert!(!bad, "skip==8 must fail");
     assert!(
         o.contains("SKIPPED") && !o.contains("DEQUEUE"),
         "skip-only fail must name ONLY the skip signal: {o:?}"
     );
-    assert!(
-        run_sourced_status("leg_health_classify cam1 0 7 0").1,
-        "skip==7 must pass"
-    );
+    let (o, ok) = run_sourced_status("leg_health_classify cam1 7 0");
+    assert!(ok, "skip==7 must pass");
+    assert!(o.trim().is_empty());
     // EPROTO threshold 6 (recalibrated 2026-08-20: the chronic ShadowCast-model baseline is
     // 0.66-1.05/hr arriving in 2-3-event clumps — 3-in-an-hour is routine on a functionally
     // healthy leg; the real sick burst was ~6+/hr WITH stalls. Original 3 chronically
     // false-aborted two live MEQ runs back-to-back.):
+    let (o, bad) = run_sourced_status("leg_health_classify cam1 0 6");
+    assert!(!bad, "eproto==6 must fail");
     assert!(
-        !run_sourced_status("leg_health_classify cam1 0 0 6").1,
-        "eproto==6 must fail"
+        o.contains("Non-zero status") && !o.contains("SKIPPED"),
+        "eproto-only fail must name ONLY the EPROTO signal: {o:?}"
     );
     assert!(
-        run_sourced_status("leg_health_classify cam1 0 0 5").1,
+        run_sourced_status("leg_health_classify cam1 0 5").1,
         "eproto==5 must pass (chronic ShadowCast clump baseline tolerated)"
     );
 }
@@ -270,12 +267,266 @@ fn classify_each_signal_fails_alone_at_its_threshold_and_passes_just_below() {
 fn classify_treats_empty_or_garbled_counts_as_zero_never_a_phantom_fail() {
     // a failed ssh read (empty / non-numeric capture) must NOT manufacture a leg-health defect.
     assert!(
-        run_sourced_status("leg_health_classify cam1 '' '' ''").1,
+        run_sourced_status("leg_health_classify cam1 '' ''").1,
         "empty counts -> ok"
     );
     assert!(
-        run_sourced_status("leg_health_classify cam1 x y z").1,
+        run_sourced_status("leg_health_classify cam1 y z").1,
         "garbled counts -> ok"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 3b. #1133 HARD frame-loss gate — the capture-health signal that REPLACES the DEQUEUE STALL gate.
+//     This is the ticket's core: gate on captured frame LOSS (sent-vs-captured from the
+//     `Streaming:` lines), calibrated so the four healthy boxes PASS and both historical defective
+//     reads FAIL, with a sustain guard so a single bad window never fails a run.
+// ---------------------------------------------------------------------------------------------
+
+/// Build STREAMING_TEXT of `n` real-shape `Streaming:` lines, each `sent`/`captured` as given.
+fn streaming_lines(windows: &[(u32, u32)]) -> String {
+    let mut s = String::new();
+    for (sent, cap) in windows {
+        let drop = sent.saturating_sub(*cap);
+        s.push_str(&format!(
+            "Aug 20 12:05:00 CAM1 camera-box[74588]: INFO camera_box: Streaming: 60.0 fps emitted / 59.0 fps captured ({sent} sent, {cap} captured, {drop} capture-dropped, 0 corrupted)\n"
+        ));
+    }
+    s
+}
+
+#[test]
+fn frame_loss_stats_parses_sent_captured_and_counts_bad_windows() {
+    // 3 windows: 300/299 (0.33%, not bad), 300/292 (2.67%, bad), 300/315 (over-rate -> 0 loss).
+    let text = streaming_lines(&[(300, 299), (300, 292), (300, 315)]);
+    let out = run_ok(&format!(
+        "leg_health_frame_loss_stats \"$(cat <<'EOF'\n{text}EOF\n)\""
+    ));
+    // stats = "N SENT LOST BAD": N=3, SENT=900, LOST=1+8+0=9, BAD=1 (only the 2.67% window).
+    assert_eq!(out.trim(), "3 900 9 1", "frame-loss stats parse: {out:?}");
+}
+
+#[test]
+fn frame_loss_calibration_healthy_boxes_pass_defective_reads_fail() {
+    // The ticket's calibration. is_unhealthy N SENT LOST BAD EXITS 0 (shell-true) iff UNHEALTHY,
+    // so run_sourced_status(...).1 (== process success == exit 0) is TRUE exactly when unhealthy.
+    let unhealthy =
+        |args: &str| run_sourced_status(&format!("leg_health_frame_loss_is_unhealthy {args}")).1;
+    // Four healthy boxes (aggregate 0.000-0.277%, no sustained bad windows) -> PASS.
+    assert!(!unhealthy("12 3605 10 0"), "cam1 healthy 0.277% must pass");
+    assert!(!unhealthy("12 3605 8 0"), "cam2 healthy 0.222% must pass");
+    assert!(!unhealthy("12 3607 1 0"), "cam3 healthy 0.028% must pass");
+    assert!(!unhealthy("12 3607 0 0"), "cam4 healthy 0.000% must pass");
+    // Both HISTORICAL DEFECTIVE reads (2.53% and 7.60%, sustained across every window) -> FAIL.
+    // 58.48/60 over 3600 sent ≈ 91 lost = 2.53%; 55.44/60 ≈ 274 lost = 7.60%.
+    assert!(unhealthy("12 3600 91 12"), "defective 2.53% must FAIL");
+    assert!(unhealthy("12 3600 274 12"), "defective 7.60% must FAIL");
+}
+
+#[test]
+fn frame_loss_single_bad_window_passes_sustain_guard() {
+    // 12 windows, one catastrophic (50% loss) window, the rest clean. Aggregate is over threshold
+    // (150/3600 = 4.17%) BUT only 1 window is individually elevated (< min_bad_windows=3) -> PASS.
+    // This is the mandated "a single bad window must not fail a run". HEALTHY -> is_unhealthy
+    // exits 1 (shell-false) -> .1 (success) is false; PASS means NOT unhealthy.
+    assert!(
+        !run_sourced_status("leg_health_frame_loss_is_unhealthy 12 3600 150 1").1,
+        "single-bad-window (bad=1 < 3) must PASS despite a high aggregate"
+    );
+}
+
+#[test]
+fn frame_loss_insufficient_windows_and_over_rate_pass() {
+    // fewer than min_windows (5) -> insufficient data -> PASS (never judge a just-restarted box).
+    // HEALTHY -> is_unhealthy exits 1 -> .1 (success) false; PASS means NOT unhealthy.
+    assert!(
+        !run_sourced_status("leg_health_frame_loss_is_unhealthy 4 1200 200 4").1,
+        "n<min_windows must PASS (insufficient data)"
+    );
+    // over-rate (captured>sent) contributes 0 loss -> PASS (issue #909, benign).
+    let text = streaming_lines(&[
+        (300, 315),
+        (300, 316),
+        (300, 314),
+        (300, 315),
+        (300, 315),
+        (300, 316),
+    ]);
+    let (o, ok) = run_sourced_status(&format!(
+        "leg_health_frame_loss_classify cam1 \"$(cat <<'EOF'\n{text}EOF\n)\""
+    ));
+    assert!(ok, "over-rate must PASS: {o:?}");
+    assert!(o.trim().is_empty());
+}
+
+#[test]
+fn frame_loss_classify_message_names_loss_not_a_hardware_fault() {
+    // A defective read (every window 300/292 = 2.67%) must abort with a message that NAMES FRAME
+    // LOSS and does NOT assert a cable/port/grabber fault (issue 1198 disproved that attribution).
+    let text = streaming_lines(&[(300, 292); 12]);
+    let (out, ok) = run_sourced_status(&format!(
+        "leg_health_frame_loss_classify cam1 \"$(cat <<'EOF'\n{text}EOF\n)\""
+    ));
+    assert!(!ok, "defective frame loss must abort: {out:?}");
+    assert!(out.contains("cam1"), "must name the box: {out:?}");
+    assert!(
+        out.to_lowercase().contains("stratené snímky") || out.to_lowercase().contains("snímk"),
+        "must name FRAME LOSS: {out:?}"
+    );
+    assert!(
+        out.contains("CAMERA_ACTIVE_SET"),
+        "must give the escalation path: {out:?}"
+    );
+    assert!(out.contains("#1133"), "must cite the ticket: {out:?}");
+    // Must NOT assert the hardware misattribution the old DEQUEUE STALL message did — the phrase
+    // "NIE nutne kábel/port/grabber" explicitly disavows it; the message must never READ as an
+    // unqualified "replace the cable/port/grabber" instruction.
+    assert!(
+        out.contains("NIE nutne") || !out.to_lowercase().contains("oprav hardvér"),
+        "must NOT assert a cable/port/grabber fault for frame loss: {out:?}"
+    );
+    assert!(
+        out.contains("1198"),
+        "must cite the disproof evidence (issue 1198): {out:?}"
+    );
+    assert_eq!(
+        out.trim().lines().count(),
+        1,
+        "must be a single line: {out:?}"
+    );
+}
+
+#[test]
+fn frame_loss_empty_read_is_healthy_never_a_phantom_fail() {
+    // an empty / no-parse Streaming read must classify HEALTHY (a failed ssh read never fails).
+    assert!(
+        run_sourced_status("leg_health_frame_loss_classify cam1 ''").1,
+        "empty streaming read -> ok"
+    );
+    assert!(
+        run_sourced_status("leg_health_frame_loss_classify cam1 'not a streaming line'").1,
+        "garbage streaming read -> ok"
+    );
+}
+
+#[test]
+fn frame_loss_classify_aborts_the_run_under_set_e() {
+    // The exact production shape: a defective streaming read fails the run under `set -euo pipefail`
+    // (the caller invokes it as an `if !` condition, so a non-zero return aborts intentionally).
+    let text = streaming_lines(&[(300, 292); 12]);
+    let (out, ok) = run_under_set_e(&format!(
+        "T=\"$(cat <<'EOF'\n{text}EOF\n)\"; if ! M=$(leg_health_frame_loss_classify cam1 \"$T\"); then echo \"ABORT_OK\"; exit 1; fi; echo WRONGLY_PASSED"
+    ));
+    assert!(!ok, "a defective frame-loss read must fail the run");
+    assert!(
+        out.contains("ABORT_OK") && !out.contains("WRONGLY_PASSED"),
+        "must abort on the defective read: {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 3c. DEQUEUE STALL — now REPORT-ONLY. It must never abort, and it must cite the anti-correlation.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn dequeue_stall_report_is_report_only_over_threshold_and_silent_below() {
+    // at/over the report threshold (8) -> a report-only WARN line, exit 0 (never aborts).
+    let (out, ok) = run_sourced_status("leg_health_dequeue_stall_report cam1 12");
+    assert!(
+        ok,
+        "the stall report is report-only — it must never change the exit code: {out:?}"
+    );
+    assert!(
+        out.contains("WARNING #1133"),
+        "over-threshold stall must warn: {out:?}"
+    );
+    assert!(
+        out.contains("REPORT-ONLY") || out.contains("NEabortuje"),
+        "the warn must state it does not abort: {out:?}"
+    );
+    assert!(
+        out.contains("1198"),
+        "must cite the anti-correlation evidence (issue 1198): {out:?}"
+    );
+    // below the threshold -> silent.
+    let (out2, ok2) = run_sourced_status("leg_health_dequeue_stall_report cam1 7");
+    assert!(
+        ok2 && out2.trim().is_empty(),
+        "stall<8 must be silent: {out2:?}"
+    );
+}
+
+#[test]
+fn dequeue_stall_report_never_aborts_the_run_under_set_e() {
+    // called as a BARE statement under `set -euo pipefail` (like leg_health_cap1s_band_warn), it
+    // must always return 0 — a non-zero return would set-e-kill the whole E2E run.
+    let (out, ok) = run_under_set_e(
+        "leg_health_dequeue_stall_report cam1 12 >/dev/null; echo REACHED_AFTER_STALL_REPORT",
+    );
+    assert!(ok, "bare stall-report under set -e must not abort: {out:?}");
+    assert!(
+        out.contains("REACHED_AFTER_STALL_REPORT"),
+        "the run must continue past the stall report: {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 3d. Streaming read command + extract + pattern (the read path feeding the frame-loss gate).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn streaming_grep_pattern_matches_genlock_form_only() {
+    let pat = run_ok("leg_health_streaming_grep_pattern");
+    assert_eq!(pat.trim(), "Streaming:.*[0-9]+ sent, [0-9]+ captured");
+    // matches the genlock-box `(<n> sent, <m> captured, ...)` form:
+    let genlock = "INFO camera_box: Streaming: 60.0 fps emitted / 59.2 fps captured (3607 sent, 3560 captured, 47 capture-dropped, 0 corrupted)";
+    assert!(
+        run_sourced_status(&format!(
+            "printf '%s\\n' '{genlock}' | grep -E \"$(leg_health_streaming_grep_pattern)\" >/dev/null"
+        ))
+        .1,
+        "must match the genlock Streaming form"
+    );
+    // does NOT match the non-genlock `Streaming: <c> fps (<f> frames, ...)` form (no ` sent, `):
+    let nongenlock =
+        "INFO camera_box: Streaming: 59.9 fps (3595 frames, 2 capture-dropped, 0 corrupted)";
+    assert!(
+        !run_sourced_status(&format!(
+            "printf '%s\\n' '{nongenlock}' | grep -E \"$(leg_health_streaming_grep_pattern)\" >/dev/null"
+        ))
+        .1,
+        "must NOT match the non-genlock Streaming form"
+    );
+}
+
+#[test]
+fn streaming_read_cmd_is_invocation_scoped_and_windowed() {
+    let out = run_ok("leg_health_streaming_read_cmd INV9 1000 2000");
+    assert!(
+        out.contains("_SYSTEMD_INVOCATION_ID=INV9"),
+        "must scope to the instance (#693): {out}"
+    );
+    assert!(
+        out.contains("--since=@1000") && out.contains("--until=@2000"),
+        "must window: {out}"
+    );
+    assert!(
+        out.contains("Streaming:") && out.contains("tail -80"),
+        "must grep the Streaming lines and cap the read: {out}"
+    );
+}
+
+#[test]
+fn extract_streaming_pulls_only_the_streaming_block() {
+    let out = run_ok(
+        "OUT=$(printf '%b' 'LEGHEALTH_STALL=1\\nLEGHEALTH_CAP1S_BEGIN\\ncap line\\nLEGHEALTH_CAP1S_END\\nLEGHEALTH_STREAMING_BEGIN\\nStreaming: (300 sent, 293 captured, 7 capture-dropped, 0 corrupted)\\nLEGHEALTH_STREAMING_END'); \
+         leg_health_extract_streaming \"$OUT\"",
+    );
+    assert!(
+        out.contains("300 sent, 293 captured")
+            && !out.contains("cap line")
+            && !out.contains("LEGHEALTH_"),
+        "must extract only the streaming lines: {out:?}"
     );
 }
 
@@ -436,11 +687,16 @@ fn cap1s_band_warn_never_aborts_the_run_under_set_e_on_an_empty_or_nomatch_read(
 /// runs per box.
 #[test]
 fn empty_ssh_read_flows_through_the_whole_wiring_to_ok_under_set_e() {
+    // #1133 wiring: extract counts + streaming -> classify(skip,eproto) HARD -> frame_loss HARD ->
+    // cap1s report-only -> stall report-only -> ok line. On an empty read everything is healthy.
     let (out, ok) = run_under_set_e(
         "OUT=''; \
          S=$(leg_health_extract STALL \"$OUT\"); K=$(leg_health_extract SKIP \"$OUT\"); E=$(leg_health_extract EPROTO \"$OUT\"); \
-         if ! M=$(leg_health_classify cam1 \"$S\" \"$K\" \"$E\"); then echo \"ABORT:$M\"; exit 1; fi; \
+         STR=$(leg_health_extract_streaming \"$OUT\"); \
+         if ! M=$(leg_health_classify cam1 \"$K\" \"$E\"); then echo \"ABORT:$M\"; exit 1; fi; \
+         if ! M=$(leg_health_frame_loss_classify cam1 \"$STR\"); then echo \"ABORT:$M\"; exit 1; fi; \
          leg_health_cap1s_band_warn cam1 \"$(leg_health_extract_cap1s \"$OUT\")\"; \
+         leg_health_dequeue_stall_report cam1 \"$S\"; \
          echo \"OK_LINE stall=$S skip=$K eproto=$E\"",
     );
     assert!(ok, "an empty ssh read must not fail the run: {out:?}");
@@ -455,20 +711,44 @@ fn empty_ssh_read_flows_through_the_whole_wiring_to_ok_under_set_e() {
 }
 
 /// And the same sequence on a SICK read still ABORTS under `set -euo pipefail` (the fix must not
-/// have neutered the real gate).
+/// have neutered the real gate). Two independent sick shapes: a count-based one (emit-skip/EPROTO
+/// over threshold) and a frame-loss one (sustained sent-vs-captured loss).
 #[test]
 fn sick_read_still_aborts_under_set_e() {
+    // (a) count-based sick read: skip=10 (>=8), eproto=9 (>=6) — classify aborts. A high STALL
+    // count is present too, but it no longer participates (#1133).
     let sick = "LEGHEALTH_STALL=12\\nLEGHEALTH_SKIP=10\\nLEGHEALTH_EPROTO=9\\nLEGHEALTH_CAP1S_BEGIN\\nx cap-1s: [62, 63]\\nLEGHEALTH_CAP1S_END";
     let (out, ok) = run_under_set_e(&format!(
         "OUT=$(printf '%b' '{sick}'); \
-         S=$(leg_health_extract STALL \"$OUT\"); K=$(leg_health_extract SKIP \"$OUT\"); E=$(leg_health_extract EPROTO \"$OUT\"); \
-         if ! M=$(leg_health_classify cam1 \"$S\" \"$K\" \"$E\"); then echo \"ABORT_OK\"; exit 1; fi; \
+         K=$(leg_health_extract SKIP \"$OUT\"); E=$(leg_health_extract EPROTO \"$OUT\"); \
+         if ! M=$(leg_health_classify cam1 \"$K\" \"$E\"); then echo \"ABORT_OK\"; exit 1; fi; \
          echo \"WRONGLY_PASSED\""
     ));
-    assert!(!ok, "a sick read must still fail the run");
+    assert!(!ok, "a count-based sick read must still fail the run");
     assert!(
         out.contains("ABORT_OK") && !out.contains("WRONGLY_PASSED"),
-        "must abort on the sick read: {out:?}"
+        "must abort on the count-based sick read: {out:?}"
+    );
+
+    // (b) a STALL-ONLY read (high stall, zero skip/eproto/loss) must NOT abort — the whole #1133
+    // point: the DEQUEUE STALL count no longer gates. It should reach the ok line.
+    let stall_only = "LEGHEALTH_STALL=24\\nLEGHEALTH_SKIP=0\\nLEGHEALTH_EPROTO=0\\nLEGHEALTH_STREAMING_BEGIN\\nLEGHEALTH_STREAMING_END";
+    let (out2, ok2) = run_under_set_e(&format!(
+        "OUT=$(printf '%b' '{stall_only}'); \
+         S=$(leg_health_extract STALL \"$OUT\"); K=$(leg_health_extract SKIP \"$OUT\"); E=$(leg_health_extract EPROTO \"$OUT\"); \
+         STR=$(leg_health_extract_streaming \"$OUT\"); \
+         if ! leg_health_classify cam1 \"$K\" \"$E\"; then echo \"WRONG_ABORT_CLASSIFY\"; exit 1; fi; \
+         if ! leg_health_frame_loss_classify cam1 \"$STR\"; then echo \"WRONG_ABORT_LOSS\"; exit 1; fi; \
+         leg_health_dequeue_stall_report cam1 \"$S\" >/dev/null; \
+         echo \"STALL_ONLY_OK\""
+    ));
+    assert!(
+        ok2,
+        "a STALL-ONLY read must NOT abort (the #1133 fix): {out2:?}"
+    );
+    assert!(
+        out2.contains("STALL_ONLY_OK") && !out2.contains("WRONG_ABORT"),
+        "high stall alone must reach the ok line: {out2:?}"
     );
 }
 
@@ -495,6 +775,14 @@ fn read_all_cmd_embeds_every_signal_read_in_one_script() {
     assert!(
         out.contains("LEGHEALTH_CAP1S_BEGIN") && out.contains("LEGHEALTH_CAP1S_END"),
         "must delimit the cap-1s block: {out}"
+    );
+    assert!(
+        out.contains("LEGHEALTH_STREAMING_BEGIN") && out.contains("LEGHEALTH_STREAMING_END"),
+        "must delimit the #1133 frame-loss Streaming block: {out}"
+    );
+    assert!(
+        out.contains("Streaming:"),
+        "must read the Streaming lines for the frame-loss gate: {out}"
     );
     // journal reads scope to the instance + 5-min window; the kernel read uses the 1-hr window.
     assert!(
@@ -566,7 +854,18 @@ fn recording_e2e_sources_the_lib_and_wires_the_preflight() {
     );
     assert!(
         s.contains("leg_health_classify"),
-        "must call the decision fn"
+        "must call the count-based decision fn (skip/eproto)"
+    );
+    // #1133: the NEW HARD gate — frame loss — must be wired, or a future edit could silently
+    // revert the ticket's core gate while every other test still passes (the set-e tests exercise
+    // the function, not the caller). Pin both the frame-loss classify AND the stall report-only.
+    assert!(
+        s.contains("leg_health_frame_loss_classify"),
+        "must call the #1133 HARD frame-loss gate"
+    );
+    assert!(
+        s.contains("leg_health_dequeue_stall_report"),
+        "must call the #1133 report-only DEQUEUE STALL diagnostic"
     );
     // must respect offline-ack (a box acked-offline is not checked) — reuses cambox_offline_ack.
     assert!(
