@@ -114,20 +114,34 @@ fn align_set_is_a_superset_including_cam4_and_cam1_cam2_derive_from_active_1198(
         "#1003: the default align set must include cam3 (source) + cam4 (on-air, #947): got [{default_align}]"
     );
     assert!(
-        align_has_word(&default_align, "cam1") && align_has_word(&default_align, "cam2"),
-        "issue 1198: cam1 + cam2 must be back IN the default align set (both cards restored \
-         healthy 2026-08-27): got [{default_align}]"
+        align_has_word(&default_align, "cam1"),
+        "issue 1198: cam1 must be IN the default align set (card restored healthy 2026-08-27): \
+         got [{default_align}]"
+    );
+    // issue 1216/1152 rig-model correction (2026-08-28, run 33166543288 [4i/8align] evidence):
+    // cam2 is the PROJECTION PROBE -- its grabber captures imag-nb's HDMI OUTPUT, so its view of
+    // the painter QR arrives through painter -> cam1 camera -> strih -> imag -> HDMI -> grabber,
+    // structurally 7-9 painter ids (~120-150 ms) behind the direct splitter family. The floor-3
+    // MUTUAL align cannot equalize it by design, and its bimodal decode (4/17, twice-rescaled
+    // optical image) flips the measured spread 2-3 <-> 6-9 ids, failing the stability criterion.
+    // cam2 therefore NEVER derives into the align set, even while in CAMERA_ACTIVE_SET (its E2E
+    // leg + probe role are untouched).
+    assert!(
+        !align_has_word(&default_align, "cam2"),
+        "issue 1216: cam2 (projection probe) must NOT be in the default align set -- its view is \
+         structurally ~8 painter frames behind the splitter family: got [{default_align}]"
     );
     let without_either = resolved_align_set(Some("cam3"));
     assert!(
         !align_has_word(&without_either, "cam1") && !align_has_word(&without_either, "cam2"),
         "issue 1198 reversal check: shrinking CAMERA_ACTIVE_SET back to cam3-alone must drop \
-         cam1/cam2 from the align set again (derived, not hardcoded): got [{without_either}]"
+         cam1 from the align set again (derived, not hardcoded): got [{without_either}]"
     );
     let with_cam2 = resolved_align_set(Some("cam2 cam3"));
     assert!(
-        align_has_word(&with_cam2, "cam2"),
-        "issue 1170 reversal: cam2 back in CAMERA_ACTIVE_SET must flow into the align set: got [{with_cam2}]"
+        !align_has_word(&with_cam2, "cam2"),
+        "issue 1216: cam2 in CAMERA_ACTIVE_SET must STILL not flow into the align set (probe \
+         path, not an alignable view): got [{with_cam2}]"
     );
     let cs = read("scripts/camera-set.sh");
     assert!(
