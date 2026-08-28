@@ -102,12 +102,11 @@ fn qr_align_step_is_gated_and_skips_under_measurement_eq() {
 #[test]
 fn align_set_is_a_superset_including_cam4_and_cam1_cam2_derive_from_active_1198() {
     // The owner mandate: cam4 is on-air, so it MUST be aligned even though it is excluded from the
-    // measurable E2E sweep (CAMERA_ACTIVE_SET). CAMERA_ALIGN_SET stays a superset of the measured
-    // set. issue 1170 (2026-08-24) introduced cam2's align membership DERIVING from
-    // CAMERA_ACTIVE_SET; issue 1198 (2026-08-27, owner ruling: both cards restored healthy)
-    // generalizes the same derivation to cam1. Today's default (cam1 cam2 cam3 all active)
-    // resolves to "cam1 cam2 cam3 cam4" -- all FOUR on-air cameras aligned, matching the owner's
-    // own live observation that only cam3+cam4 were being aligned while cam1/cam2 sat outside.
+    // measurable E2E sweep (CAMERA_ACTIVE_SET). issue 1170 (2026-08-24) introduced cam2's align
+    // membership DERIVING from CAMERA_ACTIVE_SET; issue 1198 (2026-08-27) generalized the
+    // derivation to cam1. issue 1216 (2026-08-28) then removed cam2 from the derivation OUTRIGHT
+    // (projection probe -- see the block comment below), so the align set is a superset of the
+    // ALIGNABLE on-air cameras, deliberately excluding the probe.
     let default_align = resolved_align_set(None);
     assert!(
         align_has_word(&default_align, "cam3") && align_has_word(&default_align, "cam4"),

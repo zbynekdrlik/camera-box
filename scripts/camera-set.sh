@@ -168,22 +168,31 @@ CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam6 cam7}"
 # #947, so it is excluded from CAMERA_ACTIVE_SET yet MUST still be aligned — the owner's rework
 # mandate, issue 1003, 2026-08-20; the offline-ack "outside-measured-set" covers only E2E
 # measurement, never production alignment), and cam3 is always included as the explicit on-air
-# base. cam1's AND cam2's membership DERIVE from CAMERA_ACTIVE_SET (issue 1170 introduced this for
-# cam2; issue 1198, 2026-08-27, generalizes it to cam1 too — both are aligned ONLY while each is a
-# measured camera). issue 1216 (2026-08-28) extended the SAME derivation to cam5/cam6/cam7 — a
+# base. cam1's membership DERIVES from CAMERA_ACTIVE_SET (issue 1170 introduced the derivation for
+# cam2; issue 1198, 2026-08-27, generalized it to cam1; issue 1216, 2026-08-28, then removed cam2
+# from the derivation OUTRIGHT — see the probe-path comment right above the derivation line).
+# issue 1216 (2026-08-28) extended the SAME derivation to cam5/cam6/cam7 — a
 # trailing loop, each appended only when it is a word in CAMERA_ACTIVE_SET, so the resolved order
 # stays cam1..cam7. issue 1217 (same day) DROPS cam5 out of that trailing loop again: its leg is a
 # DEAD_PORT (delivers no real content, see the CAMERA_ACTIVE_SET header comment above), so aligning
 # it has no benefit and would only feed noise into the floor-3 aligner's spread calculation — unlike
-# cam1/cam2, cam5's align membership does NOT derive from CAMERA_ACTIVE_SET any more; even
+# cam1, cam5's align membership does NOT derive from CAMERA_ACTIVE_SET any more; even
 # re-adding "cam5" to CAMERA_ACTIVE_SET alone would not re-align it (the RE-ENABLE procedure above
 # explicitly adds it back to BOTH). cam6/cam7 stay in the loop untouched. With today's default
 # (cam1/cam2/cam3/cam6/cam7 active, cam4 excluded on-air, cam5 excluded entirely) the resolved set
-# is "cam1 cam2 cam3 cam4 cam6 cam7" — every on-air camera except the dead cam5 leg. Override to
-# match the on-air reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam2 cam3 cam4 cam5".
+# is "cam1 cam3 cam4 cam6 cam7" — every alignable on-air camera (cam5 = dead leg, cam2 = the
+# projection probe whose view is structurally behind the splitter family). Override to
+# match the on-air reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam3 cam4".
 # The inline case matches are word-exact on the space-padded set (same #39-injection-safe posture
 # as camera_is_active — it never evals the value); cam3/cam4 are the explicit always-on-air base.
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam2 "*) _align_out="cam2 $_align_out" ;; esac; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
+# cam2 NEVER derives into the align set (issue 1216/1152 rig-model correction, 2026-08-28):
+# cam2 is the PROJECTION PROBE -- its grabber captures imag-nb's HDMI output, so its view of the
+# painter QR arrives through painter -> cam1 camera -> strih -> imag -> HDMI -> grabber,
+# structurally ~8 painter ids (~130 ms) behind the direct splitter family. The floor-3 MUTUAL
+# align cannot equalize it by design, and its bimodal decode (twice-rescaled optical image)
+# flips the measured spread, failing the stability criterion (run 33166543288 [4i/8align]).
+# Its CAMERA_ACTIVE_SET membership (E2E leg, burn 911009, probe role) is untouched.
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

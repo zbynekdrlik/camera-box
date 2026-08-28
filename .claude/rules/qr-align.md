@@ -59,8 +59,15 @@ model (90/160/184) was owner-REJECTED and REVERTED — never re-derive absolute 
 - **The `[4h/8]` #893 active-floor gate is MUTUALLY EXCLUSIVE with `[4i/8align]`** (`QR_ALIGN != 1`
   in the #893 condition). Both enforce "slowest camera at 3 ms"; if floor-3 floors cam4, no
   ACTIVE-set camera is at 3 and the NEXT run's #893 would abort. `[4i/8align]` owns the floor when on.
-- **`CAMERA_ALIGN_SET` is a deliberate SUPERSET of `CAMERA_ACTIVE_SET`** (on-air alignment incl.
-  cam4, which the measurable E2E sweep excludes) — but the aligner drops acked-OFFLINE boxes via
+- **`CAMERA_ALIGN_SET` is a deliberate SUPERSET of the ALIGNABLE part of `CAMERA_ACTIVE_SET`**
+  (on-air alignment incl. cam4, which the measurable E2E sweep excludes) — with ONE named
+  exclusion: **cam2 (the projection probe) NEVER derives into the align set** (issue 1216,
+  2026-08-28). cam2's grabber captures imag-nb's HDMI output, so its painter-QR view arrives
+  through painter → cam1 camera → strih → imag → HDMI → grabber — structurally ~8 painter ids
+  (~130 ms) behind the direct splitter family; the floor-3 MUTUAL align cannot equalize it by
+  design, and its bimodal decode (twice-rescaled optical image, 4/17 rounds) flips the measured
+  spread 2-3 ↔ 6-9 ids so the stability criterion fails (run 33166543288's 'unstable' abort).
+  The aligner also drops acked-OFFLINE boxes via
   `camera_align_ndi_sources_excluding_csv "$PREFLIGHT_EXCLUDED_CAMS"`, so a wedged/acked cam4 cannot
   abort the whole run. Never a literal cam range (`camera-active-set.md`).
 - **DOMAINS the aligner never crosses**: strih per-source pins ONLY. The stream `NDI 2ME PGM` hold
