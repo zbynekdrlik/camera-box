@@ -258,3 +258,20 @@ and exactly why the restore must come first.
 - The flip loop uses `os_atomic_{set,load}_bool(&running)`; its poll wait breaks on
   `POLLERR/HUP/NVAL` and a failing `drmHandleEvent` (no CPU spin on lease revoke / X restart) and
   emits a wedge WARNING after ~5 s of overdue completions.
+
+## GOTCHA (M4 follow-up, issue 1152 review) — a NEW `_conn`/host-consulting helper on `open_projectors` needs its OWN stub in EVERY pre-existing test file's `_patch`/mock helper, or the tests silently degrade to live I/O
+
+`tests/python/test_obs_phase2_open_projectors_lease_1152.py` added `_drm_lease_connector_for_host`
+(consults the box's real `~/.camera-box/drm-output.json`, over ssh for a `--host <ip>` call) to
+`obs_phase2.py::open_projectors`. The PRE-EXISTING `tests/python/test_obs_phase2_open_projectors_758.py`'s
+own `_patch` helper stubbed `_rpc`/`_conn` but had NO reason to know about the new call — so its
+tests kept passing, but silently started performing a REAL live ssh dial into the new code path
+on every run (measured ~3s/test; `10.77.9.187` happened to be dormant at review time, so the
+tests passed by luck — the SAME tests pointed at the real imag-nb `.182`, which resolved
+`ENABLED`, would have failed outright). Nothing in the test output flagged this — a slow-but-green
+test suite is the only tell. **Whenever `open_projectors` (or any function a `_patch`-style mock
+helper wraps) gains a NEW call that consults live host/rig state, grep every OTHER test file in
+`tests/python/` that mocks the SAME function for its own `_patch`/mock helper and add the SAME
+stub there too** — a shared decision function reused by multiple test files each maintaining
+their OWN mock helper is exactly this trap: adding a call inside the function under test is
+invisible to a mock helper written before that call existed.
