@@ -145,6 +145,28 @@ captured `rc`. The pure verdict functions (`dantesync_offset_verdict`, `_fresh_o
 a word and `return 0`, so `$(…)` captures of THEM need no guard — only the rc-signalling `*_check`
 wrappers do.
 
+## phase_slew ENABLED check + the cam-box provisioning gap it exposed (#1215)
+
+`phase_slew_enabled_from_pipe_json`/`phase_slew_check` were added to `clock-offset-guard.sh`
+mirroring `gm_source_ip_from_pipe_json`/`gm_check` byte-for-byte: read a boolean field off the
+SAME `:8898/status` blob `grade_http_node`/`verify-imag.sh` check (l) already fetch, map to
+0 ENABLED / 2 DISABLED / 3 UNKNOWN. When adding a new field-read off an already-fetched status
+blob (this is the third one now, after `is_locked`/`ntp_offset_us` and `gm_source_ip`), copy the
+EXISTING sibling pair's shape rather than inventing a new one — same `|| true` no-match survival,
+same `case`-based check function, same "unreadable is never OK" contract.
+
+**Finding while investigating this ticket's scope: `scripts/setup-device.sh` (the cam1-4
+provisioning script) does NOT write `/etc/dantesync/config.json` at all** —
+`grep -rn "phase_slew\|/etc/dantesync" scripts/setup-device.sh` returns nothing. The cam-box
+fleet's `phase_slew.enabled=true`/`gm_allowlist` config came from an out-of-band hand/canary
+rollout (dantesync issue 97), never from this repo's own provisioning. So there is currently
+**zero shared code** between imag-nb's config write (`setup-imag.sh` step 3, #1215) and the cam
+boxes for this specific file — a future ticket that wants `setup-device.sh` to provision the same
+config (closing the identical gap on the cam-box side) starts from scratch, reusing only the JSON
+body shape and the `RIG_GRANDMASTER_IP` env-override name (already shared with `verify-imag.sh`/
+`dantesync-gate.sh`) — don't assume a shared helper already exists just because the JSON is
+identical on paper.
+
 ## Grandmaster IDENTITY check is REPORT-FIRST and HTTP-path only (#834)
 `grade_http_node` now parses `gm_source_ip` from the freshest `/status` payload and calls
 `gm_check` (clock-offset-guard.sh) against `GATE_GRANDMASTER_IP` (`RIG_GRANDMASTER_IP`, default
