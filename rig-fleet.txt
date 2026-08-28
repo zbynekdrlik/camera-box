@@ -53,7 +53,9 @@
 # Without the remaining acks the re-armed A/V-offset gate (issue 861) fails closed forever on
 # their UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design
 # (#855).
+# cam5/cam6/cam7: REACTIVATED 2026-08-28 (issue 1216) -- physically rewired on the bigger HDMI
+#   splitter, redeployed (camera-box + dantesync 1.8.52 + phase_slew), back in CAMERA_ACTIVE_SET.
+#   Their powered-off-2026-07-27 ack lines are REMOVED per this file's own contract ("remove the
+#   line the moment the box is back in the fleet") -- a lingering ack EXCLUDED them from the
+#   version-parity/dantesync gates and the parity auto-align deploy scope (E2E run 33162371597).
 cam4:on-air-but-outside-measured-set-2026-08-07
-cam5:powered-off-2026-07-27
-cam6:powered-off-2026-07-27
-cam7:powered-off-2026-07-27
