@@ -56,7 +56,8 @@ fn camera_source_box_defaults_to_cam1_now_that_cam1_and_cam2_are_restored_1198()
     // issue 1198 (2026-08-27, owner ruling): both cam1's #1110 "hardware-defective" diagnosis and
     // cam2's #1170 "camera-under-test retired" diagnosis were built from EPISODES, not a permanent
     // card state -- the owner refused the physical card swap outright and a live journal check
-    // confirmed both cards are healthy today. The default active set is back to "cam1 cam2 cam3":
+    // confirmed both cards are healthy today. The default active set is back to
+    // "cam1 cam2 cam3 cam5 cam6 cam7" (issue 1216, 2026-08-28: cam5/cam6/cam7 also restored):
     // the source role is the FIRST strih-routable member = cam1 (cam2 is the painter and
     // camera_strih_route rejects it, so it is skipped) -- byte-identical to the pre-#1110
     // behaviour. The derivation (not a literal) is the point -- re-retiring either camera again

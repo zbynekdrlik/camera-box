@@ -53,10 +53,11 @@ GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 
 def active_camera_numbers() -> tuple:
     """#893 -- the camera numbers to sweep, derived from CAMERA_ACTIVE_SET (env var, default
-    "cam1 cam2 cam3" -- issue 1198 (2026-08-27): cam1 + cam2 RESTORED, both healthy on a live
-    journal check, owner refused the physical card swap -- same read convention
-    set-ndi-mapping.py's DEFAULT_ACTIVE_SET already uses), NEVER a literal N=1..7 range
-    (.claude/rules/camera-active-set.md).
+    "cam1 cam2 cam3 cam5 cam6 cam7" -- issue 1198 (2026-08-27): cam1 + cam2 RESTORED, both
+    healthy on a live journal check, owner refused the physical card swap; issue 1216
+    (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter fitted, cam4 alone stays out
+    (#947) -- same read convention set-ndi-mapping.py's DEFAULT_ACTIVE_SET already uses), NEVER
+    a literal N=1..7 range (.claude/rules/camera-active-set.md).
 
     This used to be a hardcoded `CAMERAS = (1, 2, 3, 4, 5, 6, 7)` tuple -- the exact bug shape
     that let this script sweep+report RETIRED cameras' pins (cam5/6/7) as if they meant
