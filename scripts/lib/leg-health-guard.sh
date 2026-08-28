@@ -143,7 +143,11 @@ leg_health_stall_report_threshold() { echo 8; }
 #       — this is the direct calibration comparison;
 #   (c) at least _min_bad_windows individual windows are themselves over that per-window loss line —
 #       the SUSTAIN guard, so a single catastrophic window (which inflates the aggregate) does NOT
-#       fail the run.
+#       fail the run. ACCEPTED RESIDUAL: a leg losing frames in short bursts of <= 2 bad windows per
+#       5-min read (with clean windows between) passes regardless of aggregate — deliberate (the
+#       mandate is "a single bad window must not fail a run"). Both historical defective reads were
+#       SUSTAINED (every window elevated), so no known defect shape escapes; a future burst-shaped
+#       defect would need its own signal, not a loosening of this guard.
 # CALIBRATION (supervisor-measured live fleet 2026-08-20, 12 windows/box; bands do NOT overlap):
 #   healthy: cam1 10/3605=0.277%, cam2 8/3605=0.222%, cam3 1/3607=0.028%, cam4 0/3607=0.000%.
 #   historically DEFECTIVE cam1: 58.48/60=2.53% and 55.44/60=7.60%.

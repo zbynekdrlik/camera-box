@@ -308,9 +308,10 @@ fn frame_loss_stats_parses_sent_captured_and_counts_bad_windows() {
 
 #[test]
 fn frame_loss_calibration_healthy_boxes_pass_defective_reads_fail() {
-    // The ticket's calibration. is_unhealthy N SENT LOST BAD returns 0 (fail) iff unhealthy.
+    // The ticket's calibration. is_unhealthy N SENT LOST BAD EXITS 0 (shell-true) iff UNHEALTHY,
+    // so run_sourced_status(...).1 (== process success == exit 0) is TRUE exactly when unhealthy.
     let unhealthy =
-        |args: &str| !run_sourced_status(&format!("leg_health_frame_loss_is_unhealthy {args}")).1;
+        |args: &str| run_sourced_status(&format!("leg_health_frame_loss_is_unhealthy {args}")).1;
     // Four healthy boxes (aggregate 0.000-0.277%, no sustained bad windows) -> PASS.
     assert!(!unhealthy("12 3605 10 0"), "cam1 healthy 0.277% must pass");
     assert!(!unhealthy("12 3605 8 0"), "cam2 healthy 0.222% must pass");
@@ -326,9 +327,10 @@ fn frame_loss_calibration_healthy_boxes_pass_defective_reads_fail() {
 fn frame_loss_single_bad_window_passes_sustain_guard() {
     // 12 windows, one catastrophic (50% loss) window, the rest clean. Aggregate is over threshold
     // (150/3600 = 4.17%) BUT only 1 window is individually elevated (< min_bad_windows=3) -> PASS.
-    // This is the mandated "a single bad window must not fail a run".
+    // This is the mandated "a single bad window must not fail a run". HEALTHY -> is_unhealthy
+    // exits 1 (shell-false) -> .1 (success) is false; PASS means NOT unhealthy.
     assert!(
-        run_sourced_status("leg_health_frame_loss_is_unhealthy 12 3600 150 1").1,
+        !run_sourced_status("leg_health_frame_loss_is_unhealthy 12 3600 150 1").1,
         "single-bad-window (bad=1 < 3) must PASS despite a high aggregate"
     );
 }
@@ -336,8 +338,9 @@ fn frame_loss_single_bad_window_passes_sustain_guard() {
 #[test]
 fn frame_loss_insufficient_windows_and_over_rate_pass() {
     // fewer than min_windows (5) -> insufficient data -> PASS (never judge a just-restarted box).
+    // HEALTHY -> is_unhealthy exits 1 -> .1 (success) false; PASS means NOT unhealthy.
     assert!(
-        run_sourced_status("leg_health_frame_loss_is_unhealthy 4 1200 200 4").1,
+        !run_sourced_status("leg_health_frame_loss_is_unhealthy 4 1200 200 4").1,
         "n<min_windows must PASS (insufficient data)"
     );
     // over-rate (captured>sent) contributes 0 loss -> PASS (issue #909, benign).
@@ -851,7 +854,18 @@ fn recording_e2e_sources_the_lib_and_wires_the_preflight() {
     );
     assert!(
         s.contains("leg_health_classify"),
-        "must call the decision fn"
+        "must call the count-based decision fn (skip/eproto)"
+    );
+    // #1133: the NEW HARD gate — frame loss — must be wired, or a future edit could silently
+    // revert the ticket's core gate while every other test still passes (the set-e tests exercise
+    // the function, not the caller). Pin both the frame-loss classify AND the stall report-only.
+    assert!(
+        s.contains("leg_health_frame_loss_classify"),
+        "must call the #1133 HARD frame-loss gate"
+    );
+    assert!(
+        s.contains("leg_health_dequeue_stall_report"),
+        "must call the #1133 report-only DEQUEUE STALL diagnostic"
     );
     // must respect offline-ack (a box acked-offline is not checked) — reuses cambox_offline_ack.
     assert!(
