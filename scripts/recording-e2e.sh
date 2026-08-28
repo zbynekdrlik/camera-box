@@ -1309,12 +1309,37 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     "${IMAG_USER:-newlevel}@$IMAG_IP" \
     "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true" \
     2>/dev/null || true)"
-  if [ "${_mv_count:-0}" -eq 1 ] 2>/dev/null && [ "${_pgm_count:-0}" -eq 1 ] 2>/dev/null; then
-    echo "    ok: imag-nb shows exactly 1 Multiview + 1 Program projector"
-  else
-    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}) projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1+1 — stray projector windows are accumulating (check BasicWindow.CloseExistingProjectors=true in ~/.config/obs-studio/{global,user}.ini on imag-nb, or close the extras: DISPLAY=:0 wmctrl -l | grep Projector)." >&2
-    exit 1
-  fi
+  # issue 1152 M4 lease-tolerance slice: in DRM-lease mode the Program is drawn by the vendored
+  # OBS DRM output directly onto the leased CRTC (.claude/rules/obs-drm-output.md), never an X
+  # window -- so the expected Program window count is 0, not 1, while Multiview stays required
+  # at exactly 1 either way. Consult the box's OWN lease config via imag_scenes' shared
+  # classifier (the SAME grammar open_projectors/imag-obs-start.sh already use, per the M4
+  # follow-up rule doc) rather than a second, divergent config reader.
+  _lease_connector="$(python3 -c "
+import sys
+sys.path.insert(0, '$HERE')
+import imag_scenes
+print(imag_scenes.drm_output_lease_connector(imag_scenes._drm_output_config_text('$IMAG_IP')))
+" 2>/dev/null || true)"
+  # shellcheck source=lib/imag-projector-lease-count.sh
+  . "$HERE/lib/imag-projector-lease-count.sh"
+  _lease_verdict="$(imag_projector_lease_count_verdict "$_lease_connector" "${_mv_count:-}" "${_pgm_count:-}")"
+  case "$_lease_verdict" in
+    ok-lease)
+      echo "    ok: imag-nb drm-output lease ENABLED for '${_lease_connector}' -- exactly 1 Multiview projector, 0 X Program windows (Program is on the DRM-leased scanout, issue 1152)"
+      ;;
+    ok-dormant)
+      echo "    ok: imag-nb shows exactly 1 Multiview + 1 Program projector"
+      ;;
+    fail-lease)
+      echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}) drm-output lease ENABLED for '${_lease_connector}' but projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1 Multiview + 0 Program (issue 1152 -- the Program is DRM scanout; an X Program window here means the connector never actually left the X layout, or a stray reappeared)." >&2
+      exit 1
+      ;;
+    *)
+      echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}) projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1+1 — stray projector windows are accumulating (check BasicWindow.CloseExistingProjectors=true in ~/.config/obs-studio/{global,user}.ini on imag-nb, or close the extras: DISPLAY=:0 wmctrl -l | grep Projector)." >&2
+      exit 1
+      ;;
+  esac
 
   # imag Studio Mode must be ON — INVERTED from the former #758 force-OFF step (user hard rule,
   # 2026-07-15: without Studio Mode the multiview's Preview cell is DEAD, so Studio is "MUST BE"
