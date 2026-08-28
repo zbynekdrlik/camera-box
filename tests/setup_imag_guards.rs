@@ -1048,9 +1048,9 @@ fn setup_imag_installs_dantesync_phase_slew_config_1215() {
 #[test]
 fn setup_imag_installs_dantesync_config_before_the_restart_1215() {
     let body = read(SETUP);
-    let config_pos = body
-        .find("/etc/dantesync/config.json")
-        .expect("the config write must exist (see setup_imag_installs_dantesync_phase_slew_config_1215)");
+    let config_pos = body.find("/etc/dantesync/config.json").expect(
+        "the config write must exist (see setup_imag_installs_dantesync_phase_slew_config_1215)",
+    );
     let restart_pos = body
         .find("systemctl restart dantesync")
         .expect("{SETUP} must still restart dantesync (#491)");

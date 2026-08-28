@@ -754,7 +754,10 @@ fn verify_imag_wires_phase_slew_check_into_the_live_flow_1215() {
 fn clock_offset_guard_defines_phase_slew_enabled_from_pipe_json_and_phase_slew_check_1215() {
     let guard_path = manifest_dir().join("scripts/clock-offset-guard.sh");
     let body = std::fs::read_to_string(&guard_path).unwrap();
-    for needle in ["phase_slew_enabled_from_pipe_json() {", "phase_slew_check() {"] {
+    for needle in [
+        "phase_slew_enabled_from_pipe_json() {",
+        "phase_slew_check() {",
+    ] {
         assert!(
             body.contains(needle),
             "scripts/clock-offset-guard.sh must define {needle} (#1215), following the EXACT \

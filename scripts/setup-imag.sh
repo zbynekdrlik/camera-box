@@ -427,6 +427,42 @@ if [ ! -x /usr/local/bin/dantesync ]; then
 fi
 [ -x /usr/local/bin/dantesync ] || fail "dantesync binary missing after install attempt"
 
+# #1215: install the phase_slew canary config (dantesync issue 97) so dantesync SLEWS phase
+# error smoothly instead of STEPPING it in discrete jumps on a from-scratch provision. imag-nb was
+# the ONE box on the rig that never received this -- it had no /etc/dantesync/ directory at all
+# and stepped 16x/hour of 6-7ms each, a visible hitch on the projected output every ~4 minutes.
+# The cam1-4 fleet got its copy through an out-of-band canary rollout, never this script -- this
+# is written BEFORE the systemd unit/restart below so the same restart that proves PTP re-lock
+# also picks up phase_slew on a first provision. RIG_GRANDMASTER_IP mirrors the SAME override
+# verify-imag.sh already uses (#834) so one env var controls the grandmaster everywhere.
+RIG_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
+install -d -m 755 /etc/dantesync
+cat > /etc/dantesync/config.json <<DANTECFGEOF
+{
+  "_ntp_server_examples": "sk.pool.ntp.org, europe.pool.ntp.org, time.google.com, time.cloudflare.com",
+  "http_status": {
+    "enabled": true,
+    "port": 8898
+  },
+  "ntp_server_mode": {
+    "enabled": false,
+    "max_step_us": 100000,
+    "port": 123,
+    "stratum": 3
+  },
+  "system": {
+    "gm_allowlist": [
+      "${RIG_GRANDMASTER_IP}"
+    ],
+    "phase_slew": {
+      "enabled": true
+    }
+  }
+}
+DANTECFGEOF
+chmod 644 /etc/dantesync/config.json
+echo "  #1215: /etc/dantesync/config.json installed (phase_slew.enabled=true, gm_allowlist=${RIG_GRANDMASTER_IP}) -- reprovision-durable"
+
 cat > /etc/systemd/system/dantesync.service <<EOF
 [Unit]
 Description=Dante Time Sync (PTP/NTP Synchronization)

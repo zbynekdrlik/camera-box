@@ -670,6 +670,42 @@ gm_check() {
   return 2
 }
 
+# --- PHASE_SLEW config state (#1215) ----------------------------------------------------------
+#
+# dantesync corrects UTC phase error either by SLEWING it smoothly (a per-box canary opt-in,
+# system.phase_slew.enabled=true in /etc/dantesync/config.json -- dantesync issue 97) or, absent
+# that config, by STEPPING it in discrete jumps once the accumulated phase error crosses an
+# adaptive threshold. imag-nb shipped with NO /etc/dantesync/ directory at all and stepped
+# 16x/hour of 6-7ms each (#1215) -- a fifth of a frame at 30fps, a visible hitch on the projected
+# output every ~4 minutes. The SAME :8898/status blob offset_us_from_pipe_json/ptp_locked_from_
+# pipe_json/gm_source_ip_from_pipe_json already read also reports which mode is active.
+
+# phase_slew_enabled_from_pipe_json TEXT -> "true"/"false" (the JSON `"phase_slew_enabled"`
+# boolean field value in TEXT), "" if the field is absent/unparseable. `|| true` survives a
+# no-match under set -e/pipefail (same convention as every other *_from_pipe_json parser here).
+phase_slew_enabled_from_pipe_json() {
+  printf '%s' "$1" | grep -oE '"phase_slew_enabled"[[:space:]]*:[[:space:]]*(true|false)' \
+    | sed -n 's/.*:[[:space:]]*\(true\|false\).*/\1/p' | tail -1 || true
+}
+
+# phase_slew_check LABEL STATE -> prints a status line; returns 0 ENABLED / 2 DISABLED /
+# 3 UNKNOWN. An unreadable state is NEVER treated as enabled (test-strictness: an unread field
+# must never look correct) -- DISABLED and UNKNOWN both mean the box will STEP, not slew.
+phase_slew_check() {
+  local label="$1" state="$2"
+  case "$state" in
+    true)
+      printf '  %-14s PHASE-SLEW ENABLED  (dantesync slews phase error, never steps -- #1215)\n' "$label"
+      return 0 ;;
+    false)
+      printf '  %-14s PHASE-SLEW DISABLED (dantesync will STEP the clock in discrete jumps -- #1215)\n' "$label"
+      return 2 ;;
+    *)
+      printf '  %-14s PHASE-SLEW UNKNOWN  (phase_slew_enabled unread -- status incomplete)\n' "$label"
+      return 3 ;;
+  esac
+}
+
 # offset_check LABEL OFFSET_US BOUND_US -> prints a status line; returns 0 OK / 2 DRIFT /
 # 3 UNKNOWN. OK iff |OFFSET_US| <= BOUND_US (NUMERIC compare). An empty OFFSET_US is UNKNOWN,
 # never OK — an offset we could not read must never look in-bound (test-strictness: no silent
