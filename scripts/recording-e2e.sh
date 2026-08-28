@@ -788,7 +788,7 @@ fetch_box_state() {
     *)         _bs_user="$STRIH_USER";  _bs_pw="$STRIH_PW" ;;
   esac
   [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
-  if curl -fsS --max-time 10 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
+  if curl -fsS --max-time 30 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
     echo "    fetched version-integrity state from ${host}:${WIN_BUNDLE_STATE_PORT} -> $dest"
   else
     # #817: :8899 is not answering — self-heal (schtasks /run over ssh) + a bounded re-fetch, then an
@@ -809,7 +809,7 @@ fetch_box_state "$STREAM" "$VERSION_STREAM_STATE" || true
 RECORDINGS_BUDGET_GB="${RECORDINGS_BUDGET_GB:-50}"
 check_recordings_budget() {
   local label="$1" host="$2" stats total_gb
-  stats=$(curl -fsS --max-time 10 "http://${host}:${WIN_BUNDLE_STATE_PORT}/record-dir-stats.json" 2>/dev/null) || {
+  stats=$(curl -fsS --max-time 30 "http://${host}:${WIN_BUNDLE_STATE_PORT}/record-dir-stats.json" 2>/dev/null) || {
     echo "    NOTE: could not fetch $label recordings-dir stats (bundle-state-server unreachable) — skipping disk-budget check" >&2
     return 0
   }
