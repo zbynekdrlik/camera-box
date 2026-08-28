@@ -7,6 +7,8 @@ paths:
   - "tests/drm_output_program_1152.rs"
   - "tests/drm_lease_tolerance_1152.rs"
   - "scripts/imag-obs-start.sh"
+  - "scripts/obs_phase2.py"
+  - "tests/python/test_obs_phase2_open_projectors_lease_1152.py"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -215,10 +217,19 @@ contract, still DEFAULT-OFF):
    to the LIVE-marker proof. NB: the facet grades the NEWEST OBS session's LOG — `drm_output|OK`
    does not by itself prove OBS is alive right now (liveness is the sibling gates' job), and a
    read racing a fresh OBS start reads DRIFT until `program scanout LIVE` lands.
-5. Known boundary (deliberately NOT M4): the E2E `[0/8]`'s own X-projector count checks and
-   `obs_phase2` projector openers still expect the dormant 1+1 X-window state — teaching the E2E
-   harness the enabled-state expectations (Multiview-only X-side, Program on the scanout) is part
-   of the PERMANENT-flip milestone, so until then run data-collection E2E with the config dormant.
+5. **Known boundary — PARTIALLY CLOSED (M4 follow-up, issue 1152):** `obs_phase2.py::open_projectors`
+   (the `[0/8]` preflight gate) is NOW lease-aware — it reuses `imag_scenes.drm_output_lease_connector`
+   / `_drm_output_config_text` (lazy `_imag_scenes_module()` import, same pattern as
+   `_measurement_pins_module()`) and, when the lease is enabled, opens ONLY Multiview and returns —
+   never raising "no HDMI projector monitor detected" for the expected/healthy panel-only monitor
+   list. It ALSO raises loud if the lease is enabled but `GetMonitorList` still reports an HDMI
+   monitor (the connector never actually left X — the wrapper's `xrandr --off` step failed or the
+   config is stale) — a genuinely inconsistent state the gate must never silently pass. **STILL
+   OPEN:** `recording-e2e.sh`'s own `#756` projector-COUNT check (immediately after `open-projectors`
+   in the SAME `[0/8]` sequence) still hard-requires exactly 1 X "Projector - Program" window via
+   `wmctrl` — in lease mode that count is genuinely 0 (Program is DRM scanout, not an X window), so
+   `[0/8]` still fails end-to-end with the config enabled until that count check is ALSO taught the
+   lease-mode expectation. Until then, run data-collection E2E with the config dormant.
 
 ### Rollback (ORDER MATTERS — X must get the connector back BEFORE the dormant wrapper runs)
 
