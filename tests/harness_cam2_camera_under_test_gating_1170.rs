@@ -108,16 +108,23 @@ fn default_sweep_includes_cam2_keeps_cam3_1198() {
 }
 
 #[test]
-fn default_align_set_includes_cam1_and_cam2_keeps_cam3_and_cam4_1198() {
-    // CAMERA_ALIGN_SET stays a superset of the MEASURED set (cam4 is on-air but its capture leg
-    // wedges, #947, so it is aligned yet unmeasured). cam1's AND cam2's membership DERIVE from
-    // CAMERA_ACTIVE_SET (issue 1170 introduced this for cam2; issue 1198 generalizes it to cam1
-    // too) — both back in by default now that the cards are restored healthy.
+fn default_align_set_includes_cam1_but_never_cam2_keeps_cam3_and_cam4_1198() {
+    // cam1's membership DERIVES from CAMERA_ACTIVE_SET (issue 1170 introduced the derivation for
+    // cam2, issue 1198 generalized it to cam1). issue 1216 (2026-08-28, run 33166543288
+    // [4i/8align] evidence) then removed cam2 from the align derivation OUTRIGHT: cam2 is the
+    // PROJECTION PROBE (its grabber captures imag-nb's HDMI output), so its painter-QR view is
+    // structurally ~8 ids behind the splitter family and the floor-3 mutual align cannot
+    // equalize it -- its sweep/active membership is untouched (see the sweep tests around this).
     let (_, align, _) = resolved(None);
     assert!(
-        has_word(&align, "cam1") && has_word(&align, "cam2"),
-        "issue 1198: cam1 + cam2 must be back in the default CAMERA_ALIGN_SET (both cards \
-         restored healthy 2026-08-27). Got ALIGN=[{align}]"
+        has_word(&align, "cam1"),
+        "issue 1198: cam1 must be in the default CAMERA_ALIGN_SET (card restored healthy \
+         2026-08-27). Got ALIGN=[{align}]"
+    );
+    assert!(
+        !has_word(&align, "cam2"),
+        "issue 1216: cam2 (projection probe) must NOT be in the default CAMERA_ALIGN_SET. \
+         Got ALIGN=[{align}]"
     );
     assert!(
         has_word(&align, "cam3") && has_word(&align, "cam4"),
@@ -156,9 +163,9 @@ fn readding_cam2_to_active_restores_its_align_and_sweep_membership_one_line() {
         "the override must take: ACTIVE=[{active}]"
     );
     assert!(
-        has_word(&align, "cam2"),
-        "issue 1170 reversal: cam2 back in CAMERA_ACTIVE_SET must flow into CAMERA_ALIGN_SET \
-         automatically (derived membership). Got ALIGN=[{align}]"
+        !has_word(&align, "cam2"),
+        "issue 1216: cam2 in CAMERA_ACTIVE_SET must STILL not flow into CAMERA_ALIGN_SET (the \
+         projection probe is never an alignable view). Got ALIGN=[{align}]"
     );
     assert!(
         sweep.contains("Cam 2:CAM2"),
