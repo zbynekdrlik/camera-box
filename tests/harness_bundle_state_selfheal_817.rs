@@ -225,6 +225,33 @@ fn selfheal_reports_honest_down_and_fails_when_still_down_817() {
 // recording-e2e.sh's version-integrity gate wires the self-heal in and no longer prints the
 // misleading note.
 #[test]
+fn fetch_budget_covers_the_measured_gather_cost_1218() {
+    // 2026-08-28 live refusal pair: BOTH :8899 fetch sites used `--max-time 10` while a HEALTHY
+    // strih server answered /bundle-state.json in a measured 11.6-13.6 s (each GET spawns ~5
+    // cold `powershell -NoProfile` subprocesses + DLL sha256 hashing -- a structural cost that
+    // always sat near the old 10 s cap). Every curl burned its full budget, the self-heal
+    // restart then KILLED the healthy-but-slow server, and the version-integrity gate refused
+    // two runs in a row with a false "bundle-state-server DOWN". The fetch budget must exceed
+    // the measured gather cost with margin (>= 2x worst measured): 30 s at both sites.
+    for rel in [
+        "scripts/lib/bundle-state-selfheal.sh",
+        "scripts/recording-e2e.sh",
+    ] {
+        let s = read(rel);
+        assert!(
+            s.contains("--max-time 30"),
+            "{rel}: the /bundle-state.json curl budget must be 30 s (measured healthy gather \
+             11.6-13.6 s; 10 s misclassified a healthy-slow server as DOWN)"
+        );
+        assert!(
+            !s.contains("--max-time 10"),
+            "{rel}: no :8899 fetch may keep the under-budgeted 10 s cap that misread a \
+             healthy-slow gather as DOWN"
+        );
+    }
+}
+
+#[test]
 fn recording_e2e_wires_selfheal_and_drops_the_misleading_note_817() {
     let s = read("scripts/recording-e2e.sh");
     assert!(
