@@ -317,6 +317,21 @@ fn frame_loss_calibration_healthy_boxes_pass_defective_reads_fail() {
     assert!(!unhealthy("12 3605 8 0"), "cam2 healthy 0.222% must pass");
     assert!(!unhealthy("12 3607 1 0"), "cam3 healthy 0.028% must pass");
     assert!(!unhealthy("12 3607 0 0"), "cam4 healthy 0.000% must pass");
+    // The HEALTHY-UNDER-PREFLIGHT-CHURN regime (2026-08-28, E2E run 33172865091 [0/8] abort +
+    // the issue-1198 paired test): a HEALTHY cam1 loses ~1.26-1.30% while the harness's OWN
+    // preflight fires ~5 min of ssh logins at it (the exact issue-1198 ssh-burst mechanism);
+    // steady-state loss on the same box is 0. The original 1.25% line was calibrated WITHOUT
+    // this regime and false-failed the run on self-inflicted load; the recalibrated 1.90% line
+    // sits ~1.5x above the worst measured healthy-churn read and still 0.75x BELOW the mildest
+    // defective read (2.53%) -- the bands stay non-overlapping.
+    assert!(
+        !unhealthy("60 18029 228 8"),
+        "healthy cam1 under the preflight's own ssh churn (1.26%, run 33172865091) must pass"
+    );
+    assert!(
+        !unhealthy("12 3607 47 3"),
+        "healthy cam1 under the issue-1198 paired-test ssh burst (1.30%) must pass"
+    );
     // Both HISTORICAL DEFECTIVE reads (2.53% and 7.60%, sustained across every window) -> FAIL.
     // 58.48/60 over 3600 sent ≈ 91 lost = 2.53%; 55.44/60 ≈ 274 lost = 7.60%.
     assert!(unhealthy("12 3600 91 12"), "defective 2.53% must FAIL");
