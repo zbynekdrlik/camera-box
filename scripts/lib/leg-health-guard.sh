@@ -151,11 +151,17 @@ leg_health_stall_report_threshold() { echo 8; }
 # CALIBRATION (supervisor-measured live fleet 2026-08-20, 12 windows/box; bands do NOT overlap):
 #   healthy: cam1 10/3605=0.277%, cam2 8/3605=0.222%, cam3 1/3607=0.028%, cam4 0/3607=0.000%.
 #   historically DEFECTIVE cam1: 58.48/60=2.53% and 55.44/60=7.60%.
-# 1.25% sits in the non-overlapping gap: 4.5x headroom above the worst healthy read (0.277%), 2.0x
+# 1.90% sits in the non-overlapping gap -- recalibrated 2026-08-28 (was 1.25%): the original
+# calibration did not include the HEALTHY-UNDER-PREFLIGHT-CHURN regime, where the harness's own
+# [0/8] preflight fires ~5 min of ssh logins at the box and a HEALTHY cam1 measurably loses
+# 1.26-1.30% (E2E run 33172865091 read 228/18029 = 1.26% over 8/60 windows, zero loss in steady
+# state minutes later; the issue-1198 paired test measured 1.30% under 8 ssh logins). 1.90% is
+# ~1.5x above the worst measured healthy-churn read and 0.75x BELOW the mildest defective read
+# (2.53%) -- the healthy and defective bands stay non-overlapping. Previous rationale: 4.5x
 # margin below the least-bad defective read (2.53%). It PASSES all four healthy boxes and FAILS both
 # historical defective reads. (Not a gate relaxation: the metric is swapped from one ANTI-correlated
 # with health to the one that measures it, and the new threshold still fails both defective reads.)
-leg_health_frame_loss_fail_pct_x100() { echo 125; } # 1.25%, in 0.01% units
+leg_health_frame_loss_fail_pct_x100() { echo 190; } # 1.90%, in 0.01% units (recalibrated 2026-08-28, see header)
 leg_health_frame_loss_min_windows() { echo 5; }
 leg_health_frame_loss_min_bad_windows() { echo 3; }
 

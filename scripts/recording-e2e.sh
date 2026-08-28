@@ -1400,7 +1400,7 @@ echo "    ok: no sustained capture-rate defect in $CAMERA_NAME's recent journal"
 # genuinely emits and ABORTS the run naming the box + signal, so a sick capture leg is a named
 # escalation (drop the box from CAMERA_ACTIVE_SET / CAMBOX_OFFLINE_ACK, or fix the leg) rather than
 # a 30-minute run measured on a broken tool. The HARD signals are: sustained CAPTURE FRAME LOSS
-# (sent-vs-captured from the `Streaming:` lines, calibrated 1.25% gate with a sustain guard — the
+# (sent-vs-captured from the `Streaming:` lines, calibrated 1.90% gate with a sustain guard — the
 # #1133 replacement for the DEQUEUE STALL gate), emit-gate SKIPPED aggregates (last 5 min), and
 # kernel uvcvideo -EPROTO (last hour). REPORT-ONLY (never abort): the #707 DEQUEUE STALL COUNT
 # (issue 1198 proved it ANTI-correlated with real frame loss — VIDIOC_DQBUF is a blocking wait, so
@@ -1470,7 +1470,7 @@ for _lht in $LEG_HEALTH_TARGETS; do
     exit 1
   fi
   # HARD signal B (#1133): sustained CAPTURE FRAME LOSS (sent-vs-captured from the `Streaming:`
-  # lines) — the quantity the DEQUEUE STALL count only correlated with backwards. Calibrated 1.25%
+  # lines) — the quantity the DEQUEUE STALL count only correlated with backwards. Calibrated 1.90%
   # gate with a sustain guard (leg_health_frame_loss_*); over-rate is benign (issue #909).
   if ! _lhmsg="$(leg_health_frame_loss_classify "$_lhbox" "$_lhstreaming")"; then
     echo "ERROR: $_lhmsg" >&2
