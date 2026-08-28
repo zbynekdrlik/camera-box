@@ -362,6 +362,31 @@ def _measurement_pins_module():
     return e2e_measurement_pins
 
 
+def _imag_scenes_module():
+    """issue 1152 M4 follow-up: lazy import of scripts/imag_scenes.py -- SAME lazy + own
+    sys.path insert pattern as _measurement_pins_module() above, so obs_phase2's module-level
+    import graph stays unchanged (tests load obs_phase2 via importlib without scripts/ on
+    sys.path, #358)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import imag_scenes  # noqa: E402
+    return imag_scenes
+
+
+def _drm_lease_connector_for_host(host):
+    """issue 1152 M4 follow-up: the connector name IFF the box's ~/.camera-box/drm-output.json
+    arms the in-OBS DRM-lease HDMI output, else "". Reuses imag_scenes' OWN classifier pair
+    (drm_output_lease_connector / _drm_output_config_text) -- the ONE decision grammar every
+    other lease-aware caller (imag-obs-start.sh's wrapper, imag_scenes.py::projector()) already
+    consults (.claude/rules/obs-drm-output.md), rather than a second, divergent config reader.
+    Any read failure resolves to "" (dormant) -- _drm_output_config_text's own contract never
+    raises, so this preflight step degrades to the pre-#1152 dormant-state assumptions on a
+    transient ssh/read hiccup rather than crashing the gate."""
+    imag_scenes = _imag_scenes_module()
+    return imag_scenes.drm_output_lease_connector(imag_scenes._drm_output_config_text(host))
+
+
 def _latency_delivery_ok(set_ms: int, delivered_ms: int, tolerance_ms: int = 100) -> bool:
     """#358 PURE decision: did the genlock FIFO actually HOLD the configured latency?
 
@@ -2503,7 +2528,19 @@ def open_projectors(a):
     all" — recording-e2e.sh's own preflight now probes process/port liveness separately
     (scripts/lib/imag-obs-reachability.sh) BEFORE calling this, so by the time this raises, the
     remaining real causes are exactly: handshake/auth (this branch) or no matching monitor
-    (below)."""
+    (below).
+
+    issue 1152 M4 follow-up: with the in-OBS DRM-lease HDMI output ENABLED
+    (~/.camera-box/drm-output.json) the connector is leased OUT of the X layout by design --
+    GetMonitorList then genuinely reports no HDMI monitor, and none is wanted (the Program is
+    drawn by the DRM scanout, not an X window). Before opening the Program projector, this
+    function consults the box's OWN lease config (_drm_lease_connector_for_host -- the SAME
+    classifier imag_scenes.py::projector() already uses, per .claude/rules/obs-drm-output.md).
+    Lease enabled + no HDMI monitor -- open ONLY Multiview and return (the healthy lease state).
+    Lease enabled + an HDMI monitor STILL reported -- raise loud: the connector never actually
+    left the X layout (the wrapper's xrandr --off step failed, or a stale config), which is a
+    genuinely inconsistent state this preflight GATE must never silently pass. Lease dormant --
+    byte-identical to the pre-#1152 behaviour below, unconditionally."""
     try:
         ws = _conn(a.host, a.password)
     except Exception as e:
@@ -2526,6 +2563,26 @@ def open_projectors(a):
         })
         print(f"opened/confirmed Multiview projector on monitorIndex {panel[0]['monitorIndex']} "
               f"({panel[0].get('monitorName')}) [panel]")
+
+        # issue 1152 M4 follow-up: DRM-lease mode -- the Program is drawn by the vendored OBS
+        # DRM scanout directly on the leased connector, never an X window, so no HDMI X monitor
+        # is expected OR wanted. See the docstring above for the full contract.
+        lease_connector = _drm_lease_connector_for_host(a.host)
+        if lease_connector:
+            if hdmi:
+                raise RuntimeError(
+                    f"drm-output.json enables the DRM lease on '{lease_connector}' but "
+                    f"GetMonitorList still reports an HDMI X monitor "
+                    f"({[m.get('monitorName') for m in hdmi]}) -- the connector was never "
+                    "actually taken out of the X layout (the wrapper's xrandr --off step "
+                    "failed or never ran, or the config is stale) -- this is NOT the healthy "
+                    "lease state and NOT the dormant 1+1 state either -- fix the box before "
+                    "continuing"
+                )
+            print(f"drm-output lease ENABLED for connector '{lease_connector}' -- Program is "
+                  "served by the DRM-leased HDMI scanout, not an X projector window -- "
+                  "skipping the X Program projector open (opened/confirmed Multiview only)")
+            return
 
         if not hdmi:
             raise RuntimeError(
