@@ -101,7 +101,10 @@ DEFAULT_MAP = FULL_MAP
 # than re-declaring its own separate default; when unset, falls back to the identical literal
 # camera-set.sh itself defaults to, so the two can never silently disagree). issue 1216
 # (2026-08-28): bigger splitter fitted, cam5/cam6/cam7 back in -- cam4 alone stays out (#947).
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam5 cam6 cam7")
+# issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter (flat static
+# frame, siblings cam6/cam7 read colour) fails the [1/8] frozen-camera-gate for the whole
+# fleet; cam6/cam7 stay in. Temporary + membership-only, exactly like every prior retirement.
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam6 cam7")
 
 
 def _camera_name_of(ndi_input):

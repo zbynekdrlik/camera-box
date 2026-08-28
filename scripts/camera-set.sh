@@ -143,7 +143,25 @@
 # `camera_active_set_default_is_exactly_cam1_cam2_cam3_cam5_cam6_cam7_1216` and
 # tests/harness_qr_align_step_1003.rs's `align_set_extends_to_cam5_cam6_cam7_when_active_1216`
 # for the round-trip proof.
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam5 cam6 cam7}"
+#
+# cam5 OUT AGAIN 2026-08-28 (issue 1217, same day as its own #1216 restoration) — a DEAD_PORT
+# leg, not a card fault: post-deploy, cam5's capture chroma reads a flat static frame
+# (`rough=0.1`, healthy baseline 7.1-8.0) while cam6/cam7 on the SAME new splitter read colour
+# (`rough=8.7-9.5`/`8.8`) in the same minute — the exact proven-good-sibling DEAD_PORT signature
+# from `.claude/rules/splitter-port-health-watchdog.md`. Live E2E run 33163294977's [1/8]
+# frozen-camera-gate FAILED on NDI cam5 (identical pixel hash across both 3.5s samples) while
+# every other camera changed, so leaving it active blocks the WHOLE fleet's E2E gate on one dead
+# leg. The box itself is healthy (60.0 fps captured, card registers clean) and reachable, so a
+# rig-fleet.txt ack alone would trip the stale-ack guard (`healthy + acked -> stale`) — the
+# correct shape is the cam4 precedent again: membership-only removal from BOTH
+# CAMERA_ACTIVE_SET and the CAMERA_ALIGN_SET derivation below (cam6/cam7 stay in both), plus an
+# ack line documenting "healthy box, outside the measured set" (rig-fleet.txt). cam5's facts
+# (IP, NDI source, genlock fps, strih route) stay fully resolvable below — retirement is
+# membership-only, exactly like every camera before it.
+# RE-ENABLE (once the splitter cable/port is fixed): verify `capture chroma` on cam5 reads
+# `-> colour` (rough >= ~7), then add "cam5" back to CAMERA_ACTIVE_SET (and the
+# CAMERA_ALIGN_SET loop below) AND delete cam5's rig-fleet.txt ack line — nothing else.
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam6 cam7}"
 
 # CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
 # aligned. It is a SUPERSET of the MEASURED set: cam4 stays here (on-air but its capture leg wedges,
@@ -152,16 +170,20 @@ CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam5 cam6 cam7}"
 # measurement, never production alignment), and cam3 is always included as the explicit on-air
 # base. cam1's AND cam2's membership DERIVE from CAMERA_ACTIVE_SET (issue 1170 introduced this for
 # cam2; issue 1198, 2026-08-27, generalizes it to cam1 too — both are aligned ONLY while each is a
-# measured camera). issue 1216 (2026-08-28) extends the SAME derivation to cam5/cam6/cam7 — a
-# trailing loop over the three names, each appended only when it is a word in CAMERA_ACTIVE_SET,
-# so the resolved order stays cam1..cam7. With today's default (cam1/cam2/cam3/cam5/cam6/cam7
-# active, cam4 alone excluded) the resolved set is "cam1 cam2 cam3 cam4 cam5 cam6 cam7" — every
-# on-air camera. Dropping any of cam1/cam2/cam5/cam6/cam7 from CAMERA_ACTIVE_SET again drops it
-# from this set too, automatically (one line — the whole point). Override to match the on-air
-# reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam2 cam3 cam4 cam5".
+# measured camera). issue 1216 (2026-08-28) extended the SAME derivation to cam5/cam6/cam7 — a
+# trailing loop, each appended only when it is a word in CAMERA_ACTIVE_SET, so the resolved order
+# stays cam1..cam7. issue 1217 (same day) DROPS cam5 out of that trailing loop again: its leg is a
+# DEAD_PORT (delivers no real content, see the CAMERA_ACTIVE_SET header comment above), so aligning
+# it has no benefit and would only feed noise into the floor-3 aligner's spread calculation — unlike
+# cam1/cam2, cam5's align membership does NOT derive from CAMERA_ACTIVE_SET any more; even
+# re-adding "cam5" to CAMERA_ACTIVE_SET alone would not re-align it (the RE-ENABLE procedure above
+# explicitly adds it back to BOTH). cam6/cam7 stay in the loop untouched. With today's default
+# (cam1/cam2/cam3/cam6/cam7 active, cam4 excluded on-air, cam5 excluded entirely) the resolved set
+# is "cam1 cam2 cam3 cam4 cam6 cam7" — every on-air camera except the dead cam5 leg. Override to
+# match the on-air reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam2 cam3 cam4 cam5".
 # The inline case matches are word-exact on the space-padded set (same #39-injection-safe posture
 # as camera_is_active — it never evals the value); cam3/cam4 are the explicit always-on-air base.
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam2 "*) _align_out="cam2 $_align_out" ;; esac; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam5 cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam2 "*) _align_out="cam2 $_align_out" ;; esac; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

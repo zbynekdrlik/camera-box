@@ -1660,11 +1660,12 @@ fn resolve_cambox_sweep_default(active_set_override: Option<&str>) -> String {
 fn recording_e2e_default_sweep_covers_cam1_cam2_cam3_now_both_restored_1198() {
     // #898 retired cam3; #939 (2026-08-13) re-activated it (Cam Link 4K fitted). issue 947
     // (2026-08-02): cam4 stays out (its grabber wedges the capture leg within minutes of every
-    // start) -- the ONE camera issue 1216 leaves out. issue 1198 (2026-08-27, owner ruling): cam1
+    // start). issue 1198 (2026-08-27, owner ruling): cam1
     // (#1110) and cam2 (#1170) are RESTORED -- both "hardware-defective" diagnoses were built
     // from EPISODES, and a live journal check confirmed both cards are healthy today. issue 1216
-    // (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are back too -- so the default
-    // sweep covers cam1/cam2/cam3/cam5/cam6/cam7.
+    // (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are back too. issue 1217
+    // (same day): cam5 drops back out (its splitter leg is a DEAD_PORT, flat static frame) -- so
+    // the default sweep covers cam1/cam2/cam3/cam6/cam7.
     let s = read("scripts/recording-e2e.sh");
     assert!(
         s.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}\""),
@@ -1677,19 +1678,22 @@ fn recording_e2e_default_sweep_covers_cam1_cam2_cam3_now_both_restored_1198() {
         "Cam 1:CAM1",
         "Cam 2:CAM2",
         "Cam 3:CAM3",
-        "Cam 5:CAM5",
         "Cam 6:CAM6",
         "Cam 7:CAM7",
     ] {
         assert!(
             resolved.contains(expect),
-            "issue 1216: the default sweep must cover {expect} (bigger splitter fitted, all \
-             cards healthy): {resolved}"
+            "issue 1217: the default sweep must cover {expect}: {resolved}"
         );
     }
     assert!(
         !resolved.contains("Cam 4:CAM4"),
         "#827/issue 947: the default sweep must NOT reference the retired Cam 4:CAM4: {resolved}"
+    );
+    assert!(
+        !resolved.contains("Cam 5:CAM5"),
+        "issue 1217: the default sweep must NOT reference the DEAD_PORT-retired Cam 5:CAM5: \
+         {resolved}"
     );
 }
 

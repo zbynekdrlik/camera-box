@@ -14,22 +14,29 @@ paths:
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and MEASURED TODAY (default `cam1 cam2 cam3 cam5 cam6 cam7`, cam1+cam2 restored issue
+installed and MEASURED TODAY (default `cam1 cam2 cam3 cam6 cam7`, cam1+cam2 restored issue
 1198 2026-08-27 — the owner ruled the two prior "hardware-defective" diagnoses behind cam1's
 retirement (#1134/#1110) and cam2's CAMERA-UNDER-TEST retirement (issue 1170 2026-08-24, its
 ShadowCast grabber's cure-decay collapsed to ~7 min, issue 1193) were both built from EPISODES,
 not a permanent card state, and refused the physical card swap outright ("tie dve karty su
 vpohode nebudem ich menit za ine lebo su uplne funkcne") — a live read-only journal check on all
 four cam boxes confirmed both cards healthy today; cam5+cam6+cam7 restored issue 1216 2026-08-28 —
-a bigger splitter fitted, physically wired back in, boxes updated + verified healthy; cam4 ALONE
-stays retired-from-measured (issue 947, its own unrelated capture-leg wedge) but fully resolvable
-— see the header comment in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the on-air
-alignment superset) is now FULLY DERIVED for cam1, cam2, cam5, cam6, AND cam7 (issue 1170 built
-this derivation for cam2 alone; issue 1198 generalized it to cam1; issue 1216 extended the same
-pattern to cam5/cam6/cam7): its default resolves `cam1 cam2 cam3 cam4 cam5 cam6 cam7` (cam3+cam4
-the explicit always-on-air base; the other five each included via their own inline word-exact
-`case`/loop against `CAMERA_ACTIVE_SET`), so dropping any of them from the active set drops it
-from the align set too, automatically, one line. **Every place that needs "the list of
+a bigger splitter fitted, physically wired back in, boxes updated + verified healthy; cam5 OUT
+AGAIN the SAME day (issue 1217) — its leg on the new splitter is a DEAD_PORT (flat static frame,
+proven-good cam6/cam7 siblings on the same splitter read colour), fails the [1/8]
+frozen-camera-gate for the whole fleet, temporary + membership-only exactly like every prior
+retirement; cam4 ALONE stays retired-from-measured for its own unrelated reason (issue 947,
+capture-leg wedge) but fully resolvable — see the header comment in `camera-set.sh`). The
+parallel `CAMERA_ALIGN_SET` (the on-air alignment superset) is FULLY DERIVED for cam1, cam2,
+cam6, AND cam7 (issue 1170 built this derivation for cam2 alone; issue 1198 generalized it to
+cam1; issue 1216 extended the same pattern to cam5/cam6/cam7; issue 1217 REMOVED cam5 from that
+trailing loop again — unlike cam1/cam2/cam6/cam7, cam5's align membership no longer derives from
+`CAMERA_ACTIVE_SET` at all, since aligning a dead leg has no benefit): its default resolves
+`cam1 cam2 cam3 cam4 cam6 cam7` (cam3+cam4 the explicit always-on-air base; cam1/cam2/cam6/cam7
+each included via their own inline word-exact `case`/loop against `CAMERA_ACTIVE_SET`), so
+dropping any of cam1/cam2/cam6/cam7 from the active set drops it from the align set too,
+automatically, one line — cam5 must be re-added to BOTH explicitly (see `camera-set.sh`'s own
+RE-ENABLE note). **Every place that needs "the list of
 cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
 literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
 fps, strih scene/route) stay fully resolvable forever (`camera_resolve`/`camera_strih_route` never

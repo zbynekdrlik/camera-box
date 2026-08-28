@@ -137,31 +137,46 @@ fn align_set_is_a_superset_including_cam4_and_cam1_cam2_derive_from_active_1198(
 }
 
 #[test]
-fn align_set_extends_to_cam5_cam6_cam7_when_active_1216() {
+fn align_set_extends_to_cam6_cam7_but_not_cam5_when_active_1217() {
     // issue 1216 (2026-08-28): the bigger splitter puts cam5/cam6/cam7 back in the default
-    // CAMERA_ACTIVE_SET -- CAMERA_ALIGN_SET's derivation must widen with it (the same one-line
-    // reversal the #1198 cam1/cam2 derivation already proved), appended after the cam1..cam4
-    // base so the resolved set still reads naturally cam1..cam7.
+    // CAMERA_ACTIVE_SET -- CAMERA_ALIGN_SET's derivation widened with it, appended after the
+    // cam1..cam4 base. issue 1217 (same day): cam5's leg turns out to be a DEAD_PORT (flat
+    // static frame) -- it is dropped from CAMERA_ACTIVE_SET again, AND from the ALIGN_SET
+    // derivation loop itself (unlike cam1/cam2/cam6/cam7, whose align membership derives from
+    // CAMERA_ACTIVE_SET, cam5's does not -- aligning a dead signal has no benefit).
     let default_align = resolved_align_set(None);
-    for cam in ["cam5", "cam6", "cam7"] {
+    for cam in ["cam6", "cam7"] {
         assert!(
             align_has_word(&default_align, cam),
             "issue 1216: {cam} must be in the default CAMERA_ALIGN_SET (bigger splitter fitted): \
              got [{default_align}]"
         );
     }
-    // Shrinking CAMERA_ACTIVE_SET back to a set without them must drop them from the align set
-    // too, derived not hardcoded.
+    assert!(
+        !align_has_word(&default_align, "cam5"),
+        "issue 1217: cam5 must NOT be in the default CAMERA_ALIGN_SET -- its splitter leg is a \
+         DEAD_PORT, aligning it has no benefit: got [{default_align}]"
+    );
+    // Shrinking CAMERA_ACTIVE_SET back to a set without them must drop cam6/cam7 from the align
+    // set too, derived not hardcoded.
     let without_them = resolved_align_set(Some("cam1 cam2 cam3"));
-    for cam in ["cam5", "cam6", "cam7"] {
+    for cam in ["cam6", "cam7"] {
         assert!(
             !align_has_word(&without_them, cam),
             "issue 1216 reversal check: shrinking CAMERA_ACTIVE_SET must drop {cam} from the \
              align set again: got [{without_them}]"
         );
     }
-    // cam4 stays the on-air-but-unmeasured base regardless (issue 1003) -- unaffected by the
-    // cam5/cam6/cam7 widening.
+    // Re-adding cam5 to CAMERA_ACTIVE_SET alone must NOT bring it back into the align set --
+    // issue 1217 deliberately un-derives it; the RE-ENABLE procedure adds it to BOTH explicitly.
+    let with_cam5_reactivated = resolved_align_set(Some("cam1 cam2 cam3 cam4 cam5 cam6 cam7"));
+    assert!(
+        !align_has_word(&with_cam5_reactivated, "cam5"),
+        "issue 1217: re-adding cam5 to CAMERA_ACTIVE_SET alone must not re-align it (the align \
+         loop no longer checks for it at all): got [{with_cam5_reactivated}]"
+    );
+    // cam4 stays the on-air-but-unmeasured base regardless (issue 1003) -- unaffected by any of
+    // the cam5/cam6/cam7 changes.
     assert!(
         align_has_word(&default_align, "cam4"),
         "cam4 must remain in the align set (on-air, #947): got [{default_align}]"

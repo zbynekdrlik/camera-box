@@ -201,7 +201,7 @@ fn camera_set_reject_message_still_lists_all_seven_cameras() {
 }
 
 #[test]
-fn camera_active_set_default_is_exactly_cam1_cam2_cam3_cam5_cam6_cam7_1216() {
+fn camera_active_set_default_is_exactly_cam1_cam2_cam3_cam6_cam7_1217() {
     // CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed + MEASURED TODAY.
     // issue 1198 (2026-08-27, owner ruling): cam1's issue-1110 "grabber hw defect" diagnosis and
     // cam2's issue-1170 "camera-under-test retired" (grabber cure-decay) were both built from
@@ -210,14 +210,17 @@ fn camera_active_set_default_is_exactly_cam1_cam2_cam3_cam5_cam6_cam7_1216() {
     // read-only journal check on all four cam boxes (2026-08-27) confirmed both cards are healthy
     // today. issue 1216 (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are physically
     // back in -- boxes updated + dantesync healthy + capture steady, strih OBS inputs/scenes
-    // already present, so the #827 retirement's ONLY missing piece was membership. cam4 alone
-    // stays out (issue 947 capture-leg wedge, unrelated). Membership-retired: every retired cam's
-    // facts stay resolvable below. RE-RETIRE any of these again ONLY if a fresh episode reproduces.
+    // already present, so the #827 retirement's ONLY missing piece was membership. issue 1217
+    // (same day): cam5 is OUT again -- a DEAD_PORT leg on the new splitter (flat static frame,
+    // proven-good cam6/cam7 siblings), failing the [1/8] frozen-camera-gate for the whole fleet;
+    // cam6/cam7 stay. cam4 alone stays out for its own unrelated reason (issue 947 capture-leg
+    // wedge). Membership-retired: every retired cam's facts stay resolvable below. RE-RETIRE any
+    // of these again ONLY if a fresh episode reproduces; RE-ENABLE cam5 once its leg reads colour.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam5 cam6 cam7}\""),
-        "issue 1216: CAMERA_ACTIVE_SET default must be exactly \"cam1 cam2 cam3 cam5 cam6 cam7\" \
-         -- bigger splitter fitted, cam5/cam6/cam7 back in, cam4 alone stays out (#947)."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam6 cam7}\""),
+        "issue 1217: CAMERA_ACTIVE_SET default must be exactly \"cam1 cam2 cam3 cam6 cam7\" \
+         -- cam5's splitter leg is a DEAD_PORT, cam6/cam7 stay in, cam4 alone stays out (#947)."
     );
 }
 
@@ -294,18 +297,18 @@ camera_active_secondary_set
 }
 
 #[test]
-fn camera_active_secondary_set_is_cam3_cam5_cam6_cam7_for_the_default_source_plus_painter_1216() {
+fn camera_active_secondary_set_is_cam3_cam6_cam7_for_the_default_source_plus_painter_1217() {
     // issue 1198 (2026-08-27): cam1 is the DERIVED source (camera_source_box, the first
     // strih-routable member, back-compat with the pre-#1110 default), cam2 stays only the
     // painter. issue 1216 (2026-08-28): the default active set widened to include cam5/cam6/cam7
-    // too, so the secondary set (everything else) is now cam3 + cam5 + cam6 + cam7. The secondary
-    // set excludes the DERIVED source (cam1) + cam2 unconditionally, never falling back to a
-    // literal.
+    // too. issue 1217 (same day): cam5 dropped back out (DEAD_PORT splitter leg), so the
+    // secondary set (everything else) is now cam3 + cam6 + cam7. The secondary set excludes the
+    // DERIVED source (cam1) + cam2 unconditionally, never falling back to a literal.
     assert_eq!(
         active_secondary_set(None),
-        "cam3 cam5 cam6 cam7",
-        "issue 1216: with source=cam1 (derived) and cam2=painter, the default active set's \
-         secondary cameras are cam3/cam5/cam6/cam7"
+        "cam3 cam6 cam7",
+        "issue 1217: with source=cam1 (derived) and cam2=painter, the default active set's \
+         secondary cameras are cam3/cam6/cam7"
     );
 }
 
@@ -365,9 +368,9 @@ fn camera_is_active_matches_whole_words_only() {
         "cam2 must be active by default again (issue 1198, 2026-08-27: restored)"
     );
     assert!(
-        is_active("cam5", None),
-        "cam5 must be active by default again (issue 1216, 2026-08-28: bigger splitter fitted, \
-         boxes updated + verified)"
+        !is_active("cam5", None),
+        "cam5 must NOT be active by default (issue 1217, 2026-08-28: its splitter leg is a \
+         DEAD_PORT -- membership-retired the same day it was restored by issue 1216)"
     );
     assert!(
         is_active("cam6", None),
@@ -380,11 +383,16 @@ fn camera_is_active_matches_whole_words_only() {
     assert!(
         !is_active("cam4", None),
         "cam4 must NOT be active by default (issue 947, capture-leg wedge, unrelated to the \
-         splitter -- the only camera issue 1216 leaves out)"
+         splitter)"
     );
     assert!(
         is_active("cam4", Some("cam1 cam2 cam3 cam4 cam5 cam6 cam7")),
         "cam4 must become active once added to CAMERA_ACTIVE_SET"
+    );
+    assert!(
+        is_active("cam5", Some("cam1 cam2 cam3 cam4 cam5 cam6 cam7")),
+        "issue 1217 reversibility proof: cam5 must become active again once explicitly re-added \
+         to CAMERA_ACTIVE_SET (the RE-ENABLE procedure once its leg is fixed)"
     );
     assert!(
         !is_active("cam1", Some("cam10 cam2")),
@@ -538,14 +546,15 @@ camera_active_excluding "$EXCLUDED"
 #[test]
 fn camera_active_excluding_never_includes_a_retired_camera_even_with_empty_exclusion() {
     // #827/#898 follow-up, #939 update, issue 1198 (2026-08-27): cam1/cam2/cam3 are in the
-    // default set. issue 1216 (2026-08-28): cam5/cam6/cam7 are ALSO back in (bigger splitter);
-    // cam4 alone stays out (issue 947, unrelated capture-leg wedge) -- the derived list must
-    // reflect exactly that, regardless of what (if anything) is passed as excluded.
+    // default set. issue 1216 (2026-08-28): cam5/cam6/cam7 are ALSO back in (bigger splitter).
+    // issue 1217 (same day): cam5 drops back out (DEAD_PORT splitter leg); cam4 alone stays out
+    // (issue 947, unrelated capture-leg wedge) -- the derived list must reflect exactly that,
+    // regardless of what (if anything) is passed as excluded.
     assert_eq!(
         active_excluding(None, ""),
-        "cam1 cam2 cam3 cam5 cam6 cam7",
-        "issue 1216: camera_active_excluding with no exclusion must return exactly the active \
-         set (cam1/cam2/cam3/cam5/cam6/cam7 restored; cam4 alone out, #947)"
+        "cam1 cam2 cam3 cam6 cam7",
+        "issue 1217: camera_active_excluding with no exclusion must return exactly the active \
+         set (cam1/cam2/cam3/cam6/cam7; cam4 out #947, cam5 out #1217)"
     );
 }
 
@@ -606,18 +615,24 @@ fn camera_active_ndi_sources_excluding_csv_never_includes_a_retired_camera() {
     // (2026-08-02): cam4 is exactly the case this property protects, because its strih input
     // "NDI cam4" is still present and still sampled by the [1/8] frozen-camera preflight if the
     // derivation leaks it. issue 1198 (2026-08-27): cam1 + cam2 are RESTORED. issue 1216
-    // (2026-08-28): cam5/cam6/cam7 are ALSO RESTORED (bigger splitter) -- only cam4 stays excluded.
+    // (2026-08-28): cam5/cam6/cam7 are ALSO RESTORED (bigger splitter). issue 1217 (same day):
+    // cam5 drops back out (DEAD_PORT splitter leg) -- cam4 and cam5 both stay excluded.
     let csv = active_ndi_sources_excluding_csv(None, "");
     assert_eq!(
-        csv, "NDI cam1,NDI cam2,NDI cam3,NDI cam5,NDI cam6,NDI cam7",
-        "issue 1216: the derived NDI source CSV carries exactly the restored active set \
-         (cam1/cam2/cam3/cam5/cam6/cam7); the one retired camera (cam4) must never appear \
-         regardless of whether its strih OBS input still exists"
+        csv, "NDI cam1,NDI cam2,NDI cam3,NDI cam6,NDI cam7",
+        "issue 1217: the derived NDI source CSV carries exactly the current active set \
+         (cam1/cam2/cam3/cam6/cam7); the two retired cameras (cam4, cam5) must never appear \
+         regardless of whether their strih OBS inputs still exist"
     );
     assert!(
         !csv.contains("NDI cam4"),
-        "NDI cam4 must not appear in the derived source list -- it is the one camera still \
-         retired from CAMERA_ACTIVE_SET (issue 947)"
+        "NDI cam4 must not appear in the derived source list -- it is retired from \
+         CAMERA_ACTIVE_SET (issue 947)"
+    );
+    assert!(
+        !csv.contains("NDI cam5"),
+        "NDI cam5 must not appear in the derived source list -- its splitter leg is a \
+         DEAD_PORT, membership-retired (issue 1217)"
     );
 }
 

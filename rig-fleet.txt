@@ -58,4 +58,18 @@
 #   Their powered-off-2026-07-27 ack lines are REMOVED per this file's own contract ("remove the
 #   line the moment the box is back in the fleet") -- a lingering ack EXCLUDED them from the
 #   version-parity/dantesync gates and the parity auto-align deploy scope (E2E run 33162371597).
+# cam5: OUT AGAIN, same day (issue 1217) -- a DEAD_PORT leg on the new splitter, not a card
+#   fault. Post-deploy `capture chroma` reads a flat static frame (rough=0.1, healthy baseline
+#   7.1-8.0) while siblings cam6/cam7 on the SAME splitter read colour (rough=8.7-9.5/8.8) in the
+#   same minute -- the proven-good-sibling DEAD_PORT signature
+#   (.claude/rules/splitter-port-health-watchdog.md). Live E2E run 33163294977's [1/8]
+#   frozen-camera-gate FAILED on NDI cam5 (identical pixel hash across both 3.5s samples) while
+#   every other camera changed. The box is healthy + reachable (60.0 fps captured, card
+#   registers clean), so acking it WITHOUT dropping it from CAMERA_ACTIVE_SET would trip the
+#   stale-ack guard (`healthy + acked -> stale`) -- this ack line is the cam4-precedent
+#   "outside-measured-set" shape, applied only because cam5 is ALSO out of CAMERA_ACTIVE_SET
+#   (scripts/camera-set.sh) as of this same commit. RE-ENABLE: verify `capture chroma` reads
+#   `-> colour` after the splitter cable/port is fixed, then add "cam5" back to
+#   CAMERA_ACTIVE_SET (and the CAMERA_ALIGN_SET loop) AND delete this ack line -- nothing else.
 cam4:on-air-but-outside-measured-set-2026-08-07
+cam5:healthy-box-dead-splitter-leg-2026-08-28
