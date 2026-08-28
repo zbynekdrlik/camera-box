@@ -141,14 +141,20 @@ def test_default_active_set_is_exactly_cam1_cam2_cam3_1198():
     cam2 (#1170 "camera-under-test retired") are RESTORED -- both diagnoses were built from
     EPISODES, not a permanent card state, and a live journal check on all four cam boxes confirmed
     both cards are healthy today; the owner refused the physical swap outright. issue 1216
-    (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are physically back in too --
-    today's declared active (measured) fleet is exactly cam1/cam2/cam3/cam5/cam6/cam7; cam4 alone
-    stays out (#947, unrelated capture-leg wedge)."""
+    (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are physically back in too.
+    issue 1217 (same day): cam5 drops back out again -- a DEAD_PORT leg on the new splitter
+    (flat static frame, siblings cam6/cam7 read colour) -- today's declared active (measured)
+    fleet is exactly cam1/cam2/cam3/cam6/cam7; cam4 and cam5 both stay out (#947 capture-leg
+    wedge, #1217 dead splitter leg -- unrelated to each other)."""
     canonical = _scene_to_camera_from_active_map()
-    assert set(canonical.values()) == {"CAM1", "CAM2", "CAM3", "CAM5", "CAM6", "CAM7"}, canonical
+    assert set(canonical.values()) == {"CAM1", "CAM2", "CAM3", "CAM6", "CAM7"}, canonical
     assert "CAM4" not in canonical.values(), (
         f"CAM4 is retired from CAMERA_ACTIVE_SET (#947) -- it must not appear in the "
         f"default resolved map: {canonical}"
+    )
+    assert "CAM5" not in canonical.values(), (
+        f"CAM5 is retired from CAMERA_ACTIVE_SET (#1217, DEAD_PORT splitter leg) -- it must not "
+        f"appear in the default resolved map: {canonical}"
     )
 
 

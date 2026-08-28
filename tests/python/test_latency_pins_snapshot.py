@@ -101,11 +101,12 @@ class TestActiveCameraNumbers:
     def test_default_is_cam1_cam2_cam3(self, monkeypatch):
         # issue 1198 (2026-08-27, owner ruling): cam1 + cam2 RESTORED -- both cards confirmed
         # healthy on a live journal check, the owner refused the physical swap outright. issue
-        # 1216 (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are back too; default
-        # mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3 cam5 cam6 cam7" (cam4 alone
+        # 1216 (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are back too. issue
+        # 1217 (same day): cam5 dropped back out (DEAD_PORT splitter leg) -- default
+        # mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2 cam3 cam6 cam7" (cam4 alone
         # stays out, #947).
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert lps.active_camera_numbers() == (1, 2, 3, 5, 6, 7)
+        assert lps.active_camera_numbers() == (1, 2, 3, 6, 7)
 
     def test_env_override_narrows_the_set(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
@@ -129,9 +130,10 @@ class TestActiveCameraNumbers:
 class TestSnapshotBoxPins:
     def test_reads_main_and_mv_for_each_camera_in_the_default_active_set(self, monkeypatch):
         # issue 1198 (2026-08-27, owner ruling): cam1 + cam2 RESTORED. issue 1216 (2026-08-28): a
-        # bigger splitter is fitted and cam5/cam6/cam7 are back too -> default active set is
-        # cam1/cam2/cam3/cam5/cam6/cam7, never the old literal cam1..7 sweep. The one still-retired
-        # camera (cam4, #947) must not even be attempted.
+        # bigger splitter is fitted and cam5/cam6/cam7 are back too. issue 1217 (same day): cam5
+        # drops back out (DEAD_PORT splitter leg) -> default active set is
+        # cam1/cam2/cam3/cam6/cam7, never the old literal cam1..7 sweep. The two still-retired
+        # cameras (cam4 #947, cam5 #1217) must not even be attempted.
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
 
@@ -142,15 +144,15 @@ class TestSnapshotBoxPins:
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
         result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
-        assert len(result) == 6
-        assert set(result.keys()) == {"cam1", "cam2", "cam3", "cam5", "cam6", "cam7"}
+        assert len(result) == 5
+        assert set(result.keys()) == {"cam1", "cam2", "cam3", "cam6", "cam7"}
         assert result["cam1"] == {"main_ms": 1, "mv_ms": 101}
         assert result["cam2"] == {"main_ms": 2, "mv_ms": 102}
         assert result["cam3"] == {"main_ms": 3, "mv_ms": 103}
-        assert result["cam5"] == {"main_ms": 5, "mv_ms": 105}
         assert result["cam6"] == {"main_ms": 6, "mv_ms": 106}
         assert result["cam7"] == {"main_ms": 7, "mv_ms": 107}
         assert "cam4" not in result
+        assert "cam5" not in result
 
     def test_camera_active_set_env_override_narrows_the_sweep(self, monkeypatch):
         # #893: CAMERA_ACTIVE_SET is the ONE source of truth for which cameras get swept --
