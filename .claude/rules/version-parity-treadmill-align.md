@@ -1,9 +1,11 @@
 ---
 paths:
   - "scripts/lib/camera-box-parity-align.sh"
+  - "scripts/lib/frame-probe-parity-align.sh"
   - "scripts/camera-box-version-gate.sh"
   - "scripts/deploy-fleet.sh"
   - "tests/harness_camera_box_parity_align_1202.rs"
+  - "tests/frame_probe_parity_align_1138.rs"
 ---
 
 # camera-box version-parity treadmill + the pre-[0/8] auto-align (issue 1202)
@@ -46,8 +48,50 @@ artifact EXISTS at `[0/8]` (ci.yml built it on the dev push) and is the correct 
 binary (not the probe-featured one). **Always version-GUARD it: if the newest published build !=
 the candidate (its own ci.yml not done yet), do NOT deploy** — never ship a stale build to "align";
 the gate refuses and self-heals once ci.yml publishes the candidate. The same `[0/8]`-before-`[1/8]`
-ordering fact is already documented for the sibling frame-probe report (recording-e2e.sh's
-`#1138 frame-probe` comment: "that gate runs BEFORE this build").
+ordering fact is why the sibling frame-probe align (below) ALSO fetches the CLEAN CI artifact via
+`gh run download` at `[0/8]`, never `$PROBE_BIN_DIR` (which is built at `[1/8]`).
+
+## The frame-probe (cam2 painter) SIBLING align (issue 1138)
+
+`scripts/lib/frame-probe-parity-align.sh` is the frame-probe twin of this camera-box align, same
+shape and same `[0/8]` placement, for a DIFFERENT binary: cam2's steady-state painter
+(`/usr/local/bin/frame-probe`, run by `cam2-painter.service`). WHY it was needed: frame-probe is
+auto-deployed ONLY at dev→main merge (ci.yml `deploy-fleet` is main-only), so between merges the
+deployed painter silently LAGGED the current build (the live 2026-08-29 incident — an uncompensated
+QPSK A/V marker + a dark issue-1196 aux tick until a MANUAL redeploy). `frame_probe_parity_align_before_gate`
+deploys the candidate painter to cam2 every E2E run so pin+deploy advance together (orphan-PROOF).
+
+Key differences from the camera-box align (do NOT copy them across blindly):
+
+- **Source of truth = the clean `probe-tools-linux-amd64` CI artifact** (fetched via `gh run download`,
+  the frame-probe binary inside it), NOT the dev1 local `$PROBE_BIN_DIR` build. full-path-e2e.yml
+  does NOT set `USE_PREBUILT_PROBE_DIR`, so `[1/8]` builds frame-probe LOCALLY on dev1 — a
+  byte-different sha for the same source. Pinning against the CI artifact makes the sha compare
+  EXACT (both sides = the artifact bytes) and matches what ci.yml deploy-fleet actually ships.
+- **Version-guard has no `--version` on frame-probe** — guard via the co-located `camera-box-probe
+  --version` in the SAME probe-tools artifact == the Cargo.toml candidate; an UNRESOLVABLE candidate
+  ("") REFUSES (never align blindly — the align decision keys on the SHA, so unlike camera-box an
+  empty candidate would otherwise disable the guard entirely).
+- **Deploy path = a NEW `deploy-fleet.sh` frame-probe-ONLY mode** (`--frame-probe` WITHOUT
+  `--binary`/`--run`): deploys ONLY the cam2 painter (the issue-892 enable-state-preserving
+  lifecycle, `frame_probe_restore_enable_decision`), NEVER a camera-box fleet deploy. It FAILS LOUD
+  if cam2 is not in `CAMERA_SET` (its only job is that deploy — a skip must not report false success).
+- **cam2-only + unconditional** (cam2 is the painter regardless of active-set membership); honours
+  `CAMBOX_OFFLINE_ACK`; exports `FRAME_PROBE_ALIGN_CI_BIN` so recording-e2e's `[1/8]` report-only
+  pin verifies the just-deployed painter against the SAME artifact bytes.
+- **The gh-downloaded artifact dir is age-swept at the orchestrator's entry** (the mktemp runs in a
+  `$(...)` subshell, so its path can't be reclaimed by the caller — a >2h age-bounded sweep of
+  `frame-probe-align-ci.*` bounds the /tmp leak without racing a concurrent run).
+- **Still REPORT-ONLY** (the pin never exits non-zero): the exit-code hard-gate flip is the
+  supervisor's #758 two-step follow-up, only after the auto-align is rig-proven — unlike camera-box
+  (whose gate hard-refuses), there is NO hard gate behind this pin yet, so that follow-up must be
+  tracked or the "orphan SCREAMS" becomes a new dormant log line.
+
+Same Tier-0 seams idea as camera-box (`.claude/rules/*` + `tests/frame_probe_parity_align_1138.rs`):
+`FRAME_PROBE_ALIGN_ARTIFACT_DIR` (pre-fetched dir, skip gh), `FRAME_PROBE_ALIGN_SKIP_VERSION_GUARD`,
+`FRAME_PROBE_GATE_SHA_<NAME>` (deployed-sha read seam, shared with the gate's own report),
+`FRAME_PROBE_ALIGN_DEPLOY_CMD`/`_DEPLOY_FLEET` (deploy override), `FRAME_PROBE_ALIGN_CANDIDATE`/
+`_CARGO_TOML` (candidate version).
 
 ## Acked-offline boxes: exclude from the DEPLOY scope, not just the decision
 

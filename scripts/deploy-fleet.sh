@@ -172,6 +172,14 @@ trap cleanup EXIT
 # frame-probe tail below).
 if [ -n "$FRAME_PROBE_BIN" ] && [ -z "$BINARY" ] && [ -z "$RUN_ID" ]; then
   [ -f "$FRAME_PROBE_BIN" ] || { err "--frame-probe '$FRAME_PROBE_BIN' not found"; exit 1; }
+  # #1138 (review): the ONLY job of this mode is the cam2 painter deploy, so a run where cam2 is not
+  # in $SET (a manual CAMERA_SET without cam2, or a painter-only active-set future) must FAIL LOUD,
+  # never print the success banner over a silent skip. deploy_frame_probe_to_painter itself only
+  # WARNs+returns on that case (correct for the tail-deploy, where camera-box is the main job).
+  case " $SET " in
+    *" cam2 "*) : ;;
+    *) err "frame-probe-only: cam2 (the painter) not in CAMERA_SET [$SET] — nothing to deploy"; exit 1 ;;
+  esac
   declare -a FAILED=()
   deploy_frame_probe_to_painter
   echo "================================================================"

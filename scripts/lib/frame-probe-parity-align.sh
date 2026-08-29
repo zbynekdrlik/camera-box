@@ -47,6 +47,12 @@ _FPPA_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   ALIGN        every active box read AND != candidate-> deploy the candidate
 # UNKNOWN takes precedence (an unread box is never safely aligned). frame-probe is cam2-only in
 # practice, so ENTRY is a single cam2 pair -- the list shape mirrors cambox_align_action for reuse.
+# DIVERGENCE from cambox_align_action (harmless for the cam2-only list, documented for a future
+# multi-box caller): a MIXED list (one box on-candidate, another stale) here returns ALIGN and the
+# orchestrator re-pushes to ALL active names (the on-candidate box gets a byte-identical re-push),
+# whereas cambox_align_action returns MIXED and REFUSES. For frame-probe there is no split-brain to
+# investigate (a stale sibling painter simply wants the candidate too), so ALIGN-all is correct; a
+# genuine multi-box caller that must not re-push a matching box should deploy only the mismatches.
 frame_probe_align_action() {
   local candidate="$1"
   shift
@@ -132,11 +138,18 @@ frame_probe_align_read_sha() {
   local name="$1" target="${2:-}" var out
   var="FRAME_PROBE_GATE_SHA_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
   if [ -n "${!var:-}" ]; then
-    printf '%s' "${!var}" | tr '[:upper:]' '[:lower:]'
+    # review 1138: validate the seam value through the SAME 64-hex filter as the SSH path, so a
+    # malformed override reads as UNKNOWN (empty) rather than a spurious sha (align + gate symmetry).
+    printf '%s' "${!var}" | grep -oiE '^[0-9a-f]{64}$' | head -1 | tr '[:upper:]' '[:lower:]' || true
     return 0
   fi
   [ -n "$target" ] || { printf ''; return 0; }
-  out="$(sshpass -p "${CAM_PW:-${CAMERA_BOX_VERSION_GATE_SSH_PASS:-newlevel}}" ssh \
+  # review 1138: use the SAME ssh password env as the gate's read_frame_probe_sha
+  # (CAMERA_BOX_VERSION_GATE_SSH_PASS) -- the extra CAM_PW fallback the first cut carried would let
+  # the align READ under a non-default CAM_PW while the [1/8] pin (gate) reads "" -> a spurious
+  # UNVERIFIED alarm every run. The DEPLOY path (frame_probe_align_deploy) keeps CAM_PW: it drives
+  # deploy-fleet.sh, whose own convention is SSH_PASS=${CAM_PW:-newlevel}.
+  out="$(sshpass -p "${CAMERA_BOX_VERSION_GATE_SSH_PASS:-newlevel}" ssh \
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${CAMERA_BOX_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" 'sha256sum /usr/local/bin/frame-probe 2>/dev/null' 2>/dev/null || true)"
@@ -148,12 +161,17 @@ frame_probe_align_read_sha() {
 # the newest successful ci.yml run on the candidate branch and VERSION-GUARDS it: the artifact's
 # co-located camera-box-probe --version MUST equal the Cargo.toml candidate -- else the candidate's
 # own ci.yml has not published yet, so we do NOT align a stale build (self-heals once it completes),
-# exactly like cambox_align_deploy's guard. Sets _FPPA_DIST (a mktemp dir) for the caller; the caller
-# EXPORTS the returned path for the [1/8] pin and lets the OS/run cleanup reclaim the dir.
+# exactly like cambox_align_deploy's guard. The gh-download path creates a mktemp dir with the
+# FRAME_PROBE_ALIGN_DIST_PREFIX name so the [1/8] pin can still read the returned frame-probe path
+# for the rest of the run; this function runs inside `$(...)` (command substitution), so its
+# `_FPPA_DIST` assignment does NOT escape to the caller -- the dir is therefore reclaimed by the
+# AGE-BOUNDED sweep at the orchestrator's entry (frame_probe_parity_align_before_gate), not by the
+# caller. The caller-supplied FRAME_PROBE_ALIGN_ARTIFACT_DIR (tests) is NEVER swept (different name).
 #
 # Seams: FRAME_PROBE_ALIGN_ARTIFACT_DIR (a pre-fetched probe-tools dir -> skip gh, still guarded);
 # FRAME_PROBE_ALIGN_REPO / FRAME_PROBE_ALIGN_CI_BRANCH (artifact source, default zbynekdrlik/camera-box
 # / dev); FRAME_PROBE_ALIGN_SKIP_VERSION_GUARD=1 (tests with a fixture bin that has no --version).
+FRAME_PROBE_ALIGN_DIST_PREFIX="${TMPDIR:-/tmp}/frame-probe-align-ci"
 _FPPA_DIST=""
 frame_probe_align_resolve_ci_bin() {
   local candidate dir="" fp cbp ver
@@ -175,7 +193,7 @@ frame_probe_align_resolve_ci_bin() {
       printf ''
       return 0
     fi
-    _FPPA_DIST="$(mktemp -d)"
+    _FPPA_DIST="$(mktemp -d "${FRAME_PROBE_ALIGN_DIST_PREFIX}.XXXXXX")"
     dir="$_FPPA_DIST"
     if ! gh run download "$run_id" --repo "$repo" -n probe-tools-linux-amd64 --dir "$dir" >/dev/null 2>&1; then
       echo "[0/8] frame-probe parity auto-align (#1138): could not download probe-tools-linux-amd64 from ci.yml run $run_id; the report-only pin below decides." >&2
@@ -200,8 +218,12 @@ frame_probe_align_resolve_ci_bin() {
       return 0
     fi
     ver="$(frame_probe_align_binary_version "$cbp")"
-    if [ "$ver" != "$candidate" ]; then
-      echo "[0/8] frame-probe parity auto-align (#1138): newest ci.yml probe build is ${ver:-<unreadable>}, not the candidate ${candidate} -- NOT deploying a stale painter (the candidate's own ci.yml build is not published yet; self-heals once it completes)." >&2
+    # review 1138: an UNRESOLVABLE candidate version ("") must REFUSE, not pass vacuously ("" == "").
+    # The align DECISION keys on the sha, so unlike the 1202 sibling (whose deploy is unreachable
+    # once the version is NOCANDIDATE) an empty candidate here would otherwise disable the guard
+    # entirely and deploy an artifact whose version was never verified -- "never align blindly".
+    if [ -z "$candidate" ] || [ "$ver" != "$candidate" ]; then
+      echo "[0/8] frame-probe parity auto-align (#1138): candidate version=${candidate:-<unresolved>}, newest ci.yml probe build=${ver:-<unreadable>} -- NOT deploying (candidate unresolved, or its own ci.yml build not published yet; self-heals once it completes)." >&2
       printf ''
       return 0
     fi
@@ -242,6 +264,15 @@ frame_probe_parity_align_before_gate() {
     echo "[0/8] frame-probe parity auto-align (#1138): SKIPPED -- --no-main-pin operator soak (never realign over a deliberately-deployed painter)."
     return 0
   fi
+  # review 1138: bound the /tmp leak of the gh-downloaded probe-tools artifact. resolve_ci_bin runs
+  # in `$(...)`, so its mktemp dir can't be reclaimed by this caller; instead sweep AGE-STALE
+  # (>2h, well past any single E2E run) prior dirs here at entry -- the current run's dir survives
+  # through the [1/8] pin and is reclaimed by the NEXT run's sweep. Age-bounded (not "all") so a
+  # concurrent run's fresh dir is never removed mid-flight. Best-effort; a caller-supplied
+  # FRAME_PROBE_ALIGN_ARTIFACT_DIR is a different name and is never matched/swept.
+  find "$(dirname "$FRAME_PROBE_ALIGN_DIST_PREFIX")" -maxdepth 1 -type d \
+    -name "$(basename "$FRAME_PROBE_ALIGN_DIST_PREFIX").*" -mmin +120 \
+    -exec rm -rf {} + 2>/dev/null || true
   local ci_bin candidate_sha
   ci_bin="$(frame_probe_align_resolve_ci_bin)"
   if [ -z "$ci_bin" ]; then
