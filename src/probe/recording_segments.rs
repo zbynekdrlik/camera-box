@@ -1243,7 +1243,7 @@ mod tests {
         // missing) exceeds the re-armed <=3 tolerance ceiling -- overall_pass still FAILS. Bumped
         // from two (which #1220 now absorbs -- 2 <= 3) to four so this stays a genuine over-ceiling
         // proof.
-        let frames_two_drops = vec![
+        let frames_four_drops = vec![
             SegmentFrame {
                 frame_index: 0,
                 gen_ts_ns: 100,
@@ -1280,7 +1280,7 @@ mod tests {
                 tick: Some(109),
             }, // 108 dropped
         ];
-        let v2 = segment_continuity(&frames_two_drops, &schedule, 0, 1);
+        let v2 = segment_continuity(&frames_four_drops, &schedule, 0, 1);
         assert_eq!(
             v2.segments[0].gaps, 4,
             "all four real drops behind the freeze are counted, never masked: {:?}",

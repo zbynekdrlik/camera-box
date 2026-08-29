@@ -102,10 +102,11 @@
 //!
 //! Two back-to-back full-cycle E2E runs the same day (1989954227, 797081170) both PASSED the
 //! `all_cambox_av_sync` gate — the first two consecutive green A/V runs in this project's history
-//! — while `all_cambox_continuity` stayed red on the SECOND run purely because four windows
-//! (CAM2 copies=2/gaps=2, CAM3 copies=1/gaps=0, CAM6 copies=2/gaps=1, CAM7 copies=2/gaps=3) sat
-//! OVER the currently-live #1169 `<=1/<=1` singleton band while sitting comfortably WITHIN the
-//! already-calibrated `<=3` [`WINDOW_COPIES_GAPS_TOLERANCE`] channel
+//! — while `all_cambox_continuity` stayed red on the SECOND run purely because THREE windows
+//! (CAM2 copies=2/gaps=2, CAM6 copies=2/gaps=1, CAM7 copies=2/gaps=3) sat OVER the currently-live
+//! #1169 `<=1/<=1` singleton band (a FOURTH, CAM3 copies=1/gaps=0, was already WITHIN that band
+//! and absorbed as the run's one consumed singleton) — every one of the four sat comfortably
+//! WITHIN the already-calibrated `<=3` [`WINDOW_COPIES_GAPS_TOLERANCE`] channel
 //! (`windows_over_copies_gaps_tolerance: 0` on that run). Per the owner's standing 2026-07-31
 //! strict-test revision ("jemne uvoľniť gate na zelenú + tickety na pritvrdenie, potom ticket po
 //! tickete; jedna stratená snímka nie je problém"), [`copies_gaps_tolerance_gates_overall_pass`]
@@ -237,9 +238,10 @@ pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 3;
 /// **#1220 (owner mandate, 2026-08-29) RE-ARMED this to `true` — an explicit OVERRIDE of the
 /// restore-path preconditions immediately above, not proof they were met.** Two same-day
 /// full-cycle runs (1989954227, 797081170) both passed `all_cambox_av_sync` for the first time in
-/// this project's history; the SECOND run's `all_cambox_continuity` failed purely because four
-/// windows sat over the tighter #1169 `<=1/<=1` singleton band while sitting fully within this
-/// ALREADY-CALIBRATED `<=3` channel (`windows_over_copies_gaps_tolerance: 0` on that run). Per the
+/// this project's history; the SECOND run's `all_cambox_continuity` failed purely because THREE
+/// windows sat over the tighter #1169 `<=1/<=1` singleton band (a FOURTH sat WITHIN that band,
+/// already absorbed) while all four sat fully within this ALREADY-CALIBRATED `<=3` channel
+/// (`windows_over_copies_gaps_tolerance: 0` on that run). Per the
 /// owner's standing 2026-07-31 revision ("jemne uvoľniť gate na zelenú + tickety na pritvrdenie,
 /// potom ticket po tickete"), the calibrated channel is re-armed as the sole fold-governing term
 /// while the walk-down continues ticket-by-ticket (tracked on #1220, not closed by it) — see the

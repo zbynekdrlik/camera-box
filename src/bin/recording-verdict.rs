@@ -4635,7 +4635,7 @@ fn build_and_print_verdict_with_stream_diffs(
                                     println!(
                                         "      ⚠ #889 WITHIN TOLERANCE: copies={} gaps={} fails the \
                                          pre-889 strict rule, but stays within the per-window \
-                                         singleton tolerance ({}) and does NOT gate overall_pass \
+                                         copies/gaps tolerance ({}) and does NOT gate overall_pass \
                                          (see issue #889 for the decision record).",
                                         s.copies, s.gaps, seg.copies_gaps_tolerance
                                     );
@@ -4706,7 +4706,7 @@ fn build_and_print_verdict_with_stream_diffs(
                                     camera_box::window_gate::RelaxedFailureReason::OverCopiesGapsTolerance => {
                                         println!(
                                             "      ⚠ #889 RE-GATE FAIL: copies={} gaps={} \
-                                             exceeds the per-window singleton tolerance ({}) — \
+                                             exceeds the per-window copies/gaps tolerance ({}) — \
                                              this window FAILS overall_pass (see issue #889 for \
                                              the decision record).",
                                             s.copies, s.gaps, seg.copies_gaps_tolerance
@@ -4795,15 +4795,31 @@ fn build_and_print_verdict_with_stream_diffs(
                     seg.windows_failed_report_only,
                     seg.segments.len()
                 );
+                // #1220 (owner mandate, 2026-08-29) review finding: this line used to
+                // unconditionally claim "a SUBSET of what now gates under #1132 (see the #1132
+                // line below)" -- but that #1132 line only prints while the tolerance rescue is
+                // DISARMED (see the `if !copies_gaps_tolerance_gates_overall_pass()` guard below).
+                // While it is ARMED (today, per #1220), no such line follows, and this count is no
+                // longer a subset -- it IS the exact set of windows gating on copies/gaps (modulo
+                // the independent frame_count==0 case). Key the relationship prose off the live
+                // seam so it can never point at a line that never printed.
+                let copies_gaps_relationship =
+                    if camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass() {
+                        "the EXACT set of windows that gate overall_pass on copies/gaps today (the \
+                     tolerance rescue is ARMED -- issue #1220)"
+                    } else {
+                        "a SUBSET of what now gates under #1132 (see the #1132 line below and issue \
+                     #889 for the decision record)"
+                    };
                 println!(
                     "  ⚠ #889 RE-GATE (per-window tolerance={}): {}/{} cambox window(s) exceed the \
-                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — a \
-                     SUBSET of what now gates under #1132 (see the #1132 line below and issue #889 \
-                     for the decision record). NOTE: this is the <=3 relaxed tolerance, NOT the \
+                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — {}. \
+                     NOTE: this is the <=3 relaxed tolerance, NOT the \
                      issue-1169 <=1 SINGLETON allowance (a separate, tighter band; see its own line).",
                     seg.copies_gaps_tolerance,
                     seg.windows_over_copies_gaps_tolerance,
-                    seg.segments.len()
+                    seg.segments.len(),
+                    copies_gaps_relationship
                 );
                 // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance (`<=3`) rescue is
                 // DISARMED. #1169 (owner, 2026-08-22) then RE-INTRODUCED a strictly-tighter
@@ -4916,7 +4932,7 @@ fn build_and_print_verdict_with_stream_diffs(
                         "copies_gaps_gate".to_string(),
                         serde_json::json!(if copies_gaps_tol_gates {
                             format!(
-                                "gates overall_pass above the per-window singleton tolerance ({}) -- \
+                                "gates overall_pass above the per-window copies/gaps tolerance ({}) -- \
                                  see issue #889 for the decision record",
                                 seg.copies_gaps_tolerance
                             )
@@ -4937,9 +4953,13 @@ fn build_and_print_verdict_with_stream_diffs(
                     );
                     // #1169 (owner, 2026-08-22): the SINGLETON allowance seam, self-describing in
                     // the JSON exactly like the copies_gaps keys above -- a DISTINCT, strictly
-                    // tighter (<=1/<=1) band than the disarmed <=3 tolerance. `armed=true` = a
-                    // <=1/<=1 singleton is absorbed into overall_pass (loudly, strict stays false);
-                    // >=2 of either still fails. Re-tighten to absolute zero = flip the arm to false.
+                    // tighter (<=1/<=1) band than the (originally disarmed) <=3 tolerance.
+                    // `armed=true` alone does NOT mean this band is actually absorbing anything --
+                    // #1220 (owner mandate, 2026-08-29) review finding: this flag stays `true`
+                    // (untouched) even while `copies_gaps_tol_gates` (above) is ALSO `true`, in
+                    // which case `decide()`'s `if`/`else if` precedence makes the singleton band
+                    // DORMANT (the wider tolerance channel absorbs first). The prose below checks
+                    // BOTH flags so it never claims an absorption that cannot actually happen.
                     let singleton_armed =
                         camera_box::window_gate::segment_singleton_allowance_gates_overall_pass();
                     obj.insert(
@@ -4960,7 +4980,20 @@ fn build_and_print_verdict_with_stream_diffs(
                     );
                     obj.insert(
                         "segment_singleton_gate".to_string(),
-                        serde_json::json!(if singleton_armed {
+                        serde_json::json!(if singleton_armed && copies_gaps_tol_gates {
+                            format!(
+                                "#1169: the <= {}/{} copies/gaps SINGLETON band is armed but \
+                                 currently DORMANT -- superseded by the wider issue-1220 <=3 \
+                                 copies/gaps tolerance channel (also armed), which governs \
+                                 overall_pass instead via decide()'s if/else-if precedence; \
+                                 segment_singleton_allowance_consumed/singleton_allowance_note \
+                                 never fire while that wider channel stays armed. Kept wired as \
+                                 the graduated fallback for a future walk-down step. Issue 1169's \
+                                 own re-tighten trail (this flag to false) is independent.",
+                                camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE,
+                                camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                            )
+                        } else if singleton_armed {
                             format!(
                                 "#1169: a <= {}/{} copies/gaps SINGLETON is absorbed into \
                                  overall_pass (the designed issue-1167 paced-trickle + FIFO \
