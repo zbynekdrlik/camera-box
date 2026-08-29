@@ -2255,7 +2255,9 @@ def switch(a):
             a.program_scene,
             "#312 switch",
             "The cambox feeding it is not delivering frames; aborting the sweep so a black segment "
-            "never wastes the run.",
+            "never wastes the run. (#1223: a dark screen here can ALSO mean the cam2 painter/monitor "
+            "itself already went dark/expired -- check /tmp/painter.log on the painter box before "
+            "assuming the cambox is the culprit.)",
         )
     finally:
         ws.close()

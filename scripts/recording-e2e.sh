@@ -486,13 +486,23 @@ CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=$(( (DURATION + 59) / 60 + CAMERA_BOX_DEADMAN_
 # the recording ended and the last ~1.5 verdict windows went dark (windows 8-9 all-undecodable).
 # Size the slack to cover the WORST-CASE pre-record budget that still records: the frozen-camera
 # gate can burn up to its full attempts-times-retry-sleep (~4x45s) before it passes, plus routing/
-# burn/scene-warm plus record start+stop ~40s. 240s covers that with cushion. Used LOCK-STEP by
-# BOTH the painter --duration-secs AND the PAINTER_EXIT_DEADLINE self-exit wait (a drift makes the
-# wait give up before self-exit, pulling a stale CSV). The painter-CSV freshness gate has NO upper
-# span bound (it fails only on span < DURATION/2), so a larger margin is safe.
+# burn/scene-warm plus record start+stop ~40s. Used LOCK-STEP by BOTH the painter --duration-secs
+# AND the PAINTER_EXIT_DEADLINE self-exit wait (a drift makes the wait give up before self-exit,
+# pulling a stale CSV). The painter-CSV freshness gate has NO upper span bound (it fails only on
+# span < DURATION/2), so a larger margin is safe.
+# #1223: 240s stopped being enough margin -- two of three overnight E2E aborts (2026-08-29/30)
+# were the painter expiring BEFORE the recording even started, because today's worst-case
+# pre-record budget grew past it: the frozen-camera gate above, PLUS a new settle-wait between the
+# align pins and the record step (its own budget, up to its own multi-minute ceiling), PLUS the
+# render/multiview gates and the align/heal/routing steps that already ran before it, together
+# exceeded 9 minutes on a degraded attempt. Every future gate added to the pre-record path only
+# grows this budget further, so the slack is sized with generous headroom rather than tight to a
+# single measured worst case. A companion fix sends the painter a graceful shutdown right after
+# the recording is stopped (see the #359 comment below) so this larger slack never actually
+# lengthens a normal run's tail -- only a genuinely slow/degraded pre-record phase consumes it.
 # (Comment deliberately avoids the bracketed phase labels + FROZEN_CAM_* identifiers other
 # tests string-anchor on -- the recording-e2e.sh static-anchor GOTCHA, project CLAUDE.md.)
-PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-240}"
+PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1200}"
 QR_SIZE="${QR_SIZE:-700}"
 # Topology v2 (#459, EPIC #466, SUPERSEDES the #11 60fps-end-to-end framing below): the 60fps
 # low-latency IMAG role moved OFF strih onto the new imag-nb box (10.77.9.182, #458/#463); strih
@@ -4354,13 +4364,25 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "    ok: secondary-camera capture-rate sweep complete (#994, report-only) — any WARNING #994 / WARNING #992 lines above are informational and did not fail this gate"
 fi
 
-# #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
-# --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here
-# fired at ~DURATION, BEFORE the painter's DURATION+PAINTER_PRE_RECORD_SLACK_SECS self-exit, so it never wrote a fresh CSV and
-# a STALE leftover got pulled → a fake catastrophic FAIL (run 354002). WAIT for the painter to
-# self-exit: poll until its PROCESS is gone AND a non-empty /tmp/painter.csv freshly written THIS
-# run exists (remote mtime >= run start), bounded by its --duration-secs deadline + grace. A
-# backstop kill only fires if it overran, so the painter can never be left holding /dev/fb0.
+# #359: an UNCONDITIONAL early kill is still wrong -- frame-probe writes the ground-truth CSV
+# ONLY on a clean self-exit or a graceful shutdown (src/probe/run.rs); the old unconditional
+# `pkill -x frame-probe` here fired at ~DURATION, BEFORE the painter's own
+# DURATION+PAINTER_PRE_RECORD_SLACK_SECS self-exit deadline, so it never wrote a fresh CSV and a
+# STALE leftover got pulled → a fake catastrophic FAIL (run 354002). That history is why this
+# stayed a pure WAIT for a long time. #1223 revises it: since issue 1186, frame-probe installs a
+# SIGTERM handler that runs the SAME teardown as a clean self-exit (writes the CSV + marker log,
+# blanks fb0) -- live-proven by a systemd stop of the permanent painter unit producing the
+# identical teardown sequence. So a GRACEFUL term sent AFTER the recording has already stopped is
+# safe and deliberate (never an early/mid-recording kill, which would still be wrong): it makes
+# the wait below succeed within seconds regardless of how large the pre-record slack above is,
+# instead of the wait idling out that whole slack on every normal run.
+sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+  "pkill -TERM -x frame-probe 2>/dev/null; true"
+# WAIT for the painter to self-exit (whether from the graceful term just sent, or its own
+# --duration-secs deadline): poll until its PROCESS is gone AND a non-empty /tmp/painter.csv
+# freshly written THIS run exists (remote mtime >= run start), bounded by its --duration-secs
+# deadline + grace. A backstop kill only fires if it overran, so the painter can never be left
+# holding /dev/fb0.
 PAINTER_EXIT_DEADLINE=$(( PAINTER_LAUNCH_EPOCH + DURATION + PAINTER_PRE_RECORD_SLACK_SECS ))
 PAINTER_WAIT_UNTIL=$(( PAINTER_EXIT_DEADLINE + 45 ))   # 45s grace past the painter self-exit
 echo "    #359 waiting for the cam2 painter to self-exit + write a fresh CSV (until $(date -d "@$PAINTER_WAIT_UNTIL" '+%H:%M:%S' 2>/dev/null || echo "$PAINTER_WAIT_UNTIL"))"
