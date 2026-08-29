@@ -97,6 +97,49 @@
 //! post-fix sample. The 2 -> 1 -> 0 walk stays gated on the issue-859 root cause + N>=2
 //! consecutive greens at each step, tracked on issue 1031.
 //!
+//! ## 2026-08-29 RE-ARM (#1220, owner-mandated soft-release) — the `<=3` tolerance channel folds
+//! into `overall_pass` again, superseding the #1169 `<=1/<=1` singleton (kept wired, now dormant)
+//!
+//! Two back-to-back full-cycle E2E runs the same day (1989954227, 797081170) both PASSED the
+//! `all_cambox_av_sync` gate — the first two consecutive green A/V runs in this project's history
+//! — while `all_cambox_continuity` stayed red on the SECOND run purely because four windows
+//! (CAM2 copies=2/gaps=2, CAM3 copies=1/gaps=0, CAM6 copies=2/gaps=1, CAM7 copies=2/gaps=3) sat
+//! OVER the currently-live #1169 `<=1/<=1` singleton band while sitting comfortably WITHIN the
+//! already-calibrated `<=3` [`WINDOW_COPIES_GAPS_TOLERANCE`] channel
+//! (`windows_over_copies_gaps_tolerance: 0` on that run). Per the owner's standing 2026-07-31
+//! strict-test revision ("jemne uvoľniť gate na zelenú + tickety na pritvrdenie, potom ticket po
+//! tickete; jedna stratená snímka nie je problém"), [`copies_gaps_tolerance_gates_overall_pass`]
+//! is RE-ARMED (`true`) — this is a deliberate OVERRIDE of that same function's originally-stated
+//! restore preconditions (the CAM1 sick leg physically fixed/excluded, AND the #1031 walk-down
+//! resumed) — the owner's blanket soft-release-to-green directive supersedes those preconditions
+//! for THIS ticket exactly the way `verdict-gate-seam-calibration.md` §11 documents an
+//! owner-mandated override of the ordinary gates-green-first discipline, just in the RELAXING
+//! direction instead of the tightening one. `[WINDOW_COPIES_GAPS_TOLERANCE]` is now what actually
+//! GATES `overall_pass` again, not merely what `relaxed_pass` reports — `overall_pass_term` now
+//! equals `relaxed_pass` exactly (the pre-#1132 fold), and `pass`/`strict_pass`/
+//! `windows_failed_report_only` stay byte-for-byte unchanged and fully visible (the strict counts
+//! stay reported, per the ticket).
+//!
+//! **The #1169 `<=1/<=1` singleton mechanism is left WIRED, not deleted, and its own arm flag
+//! ([`segment_singleton_allowance_gates_overall_pass`]) is UNTOUCHED (still hardcoded `true`) —**
+//! it is now DORMANT purely by `if`/`else if` PRECEDENCE inside [`decide`], not by its own flag
+//! being flipped. This is a deliberate GRADUATED-FALLBACK property, not an oversight: if a future
+//! walk-down step ever disarms [`copies_gaps_tolerance_gates_overall_pass`] again (the residual
+//! shrinks further), the run does not fall straight to absolute-zero — it automatically resumes
+//! the already-calibrated `<=1/<=1` band first, one graduated step at a time, exactly mirroring
+//! this codebase's own `gate-allowance-restore-red-green.md` "leave the mechanism dormant, never
+//! delete it" doctrine, applied here to a seam superseded by PRECEDENCE for the first time rather
+//! than by its own flag. Ticket #1169's own independent re-tighten trail (for the singleton band
+//! itself) is unaffected and stays open on its own ticket.
+//!
+//! **The walk-down commitment does not move — it stays open on #1220.** Run 1989954227 (the
+//! EARLIER of the two same-day runs) still genuinely exceeds even the `<=3` ceiling on three
+//! windows (two CAM2 windows at copies=10/gaps=9 and copies=19/gaps=18, one CAM7 window at
+//! copies=4/gaps=5 — `windows_over_copies_gaps_tolerance: 3`) — a real, still-open defect on the
+//! chronic over-rate lane, correctly still RED after this re-arm, not papered over by it. When
+//! that lane's burden shrinks further, the tolerance walks back down exactly as #889/#1031/#1121
+//! already did for this same constant — tracked on #1220, not silently dropped.
+//!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
 //! Same reasoning as `optical_floor.rs` / `av_window.rs`'s `#861` relaxation: the whole `probe`
@@ -164,6 +207,12 @@
 /// rode multi-cam bursts that fail at any tolerance. 3 is the ORIGINAL ship value of this gate
 /// and the tightest value the degraded-hardware sample supports; the 3 -> 2 -> 1 -> 0 walk-down
 /// resumes on issue 1031 after the cam1 card swap + consecutive greens.
+///
+/// **#1220 (2026-08-29): this constant is LIVE again — it directly gates `overall_pass`, not just
+/// `relaxed_pass`.** [`copies_gaps_tolerance_gates_overall_pass`] was re-armed (owner-mandated
+/// soft-release, see the module doc's "2026-08-29 RE-ARM" section for the full evidence and
+/// decision record); the value itself is unchanged at 3, still the tightest the current
+/// over-rate-lane sample supports.
 pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 3;
 
 /// #1132 (owner mandate 2026-08-19): whether the per-window copies/gaps TOLERANCE
@@ -180,12 +229,25 @@ pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 3;
 /// it — #1132 touches ONLY copies/gaps; the optical undecodable floor stays report-only on its own
 /// separate seam (issue 915/905), never re-gated by this change.
 ///
-/// **Restore path:** flip this ONE function back to `true` once the sick leg is physically
-/// fixed/excluded (issue 1110/1134) AND the walk-down (issue 1031) resumes to its data-supported
-/// value; then `overall_pass_term == relaxed_pass` again and the tolerance folds exactly as it did
-/// pre-#1132.
+/// **Restore path (as originally stated):** flip this ONE function back to `true` once the sick
+/// leg is physically fixed/excluded (issue 1110/1134) AND the walk-down (issue 1031) resumes to
+/// its data-supported value; then `overall_pass_term == relaxed_pass` again and the tolerance
+/// folds exactly as it did pre-#1132.
+///
+/// **#1220 (owner mandate, 2026-08-29) RE-ARMED this to `true` — an explicit OVERRIDE of the
+/// restore-path preconditions immediately above, not proof they were met.** Two same-day
+/// full-cycle runs (1989954227, 797081170) both passed `all_cambox_av_sync` for the first time in
+/// this project's history; the SECOND run's `all_cambox_continuity` failed purely because four
+/// windows sat over the tighter #1169 `<=1/<=1` singleton band while sitting fully within this
+/// ALREADY-CALIBRATED `<=3` channel (`windows_over_copies_gaps_tolerance: 0` on that run). Per the
+/// owner's standing 2026-07-31 revision ("jemne uvoľniť gate na zelenú + tickety na pritvrdenie,
+/// potom ticket po tickete"), the calibrated channel is re-armed as the sole fold-governing term
+/// while the walk-down continues ticket-by-ticket (tracked on #1220, not closed by it) — see the
+/// module doc's "2026-08-29 RE-ARM" section for the full evidence and the graduated-fallback
+/// property this leaves in place for [`segment_singleton_allowance_gates_overall_pass`] (untouched,
+/// still `true`, now reachable only if this seam is disarmed again in a future walk-down step).
 pub fn copies_gaps_tolerance_gates_overall_pass() -> bool {
-    false
+    true
 }
 
 /// #1169 (owner, 2026-08-22): the per-segment SINGLETON allowance applied to `copies`/`gaps` when
@@ -203,6 +265,16 @@ pub fn copies_gaps_tolerance_gates_overall_pass() -> bool {
 /// false (visible), a per-segment note fires ([`segment_singleton_note`]), and the run-level count
 /// is serialized -- addressing #1132's masking concern while honoring the owner's 2026-07-31
 /// "jedna stratená snímka nie je problém" soft-release doctrine.
+///
+/// **#1220 (2026-08-29) SUPERSEDES the "never re-arm" line above by explicit, ticket-tracked owner
+/// mandate** -- `copies_gaps_tolerance_gates_overall_pass()` IS re-armed (see its own doc for the
+/// full decision record), which makes this whole seam DORMANT via `if`/`else if` PRECEDENCE inside
+/// [`decide`] (this function's own return value is untouched, still `true`). This is not the
+/// ad-hoc shortcut the "never re-arm" warning guarded against -- it is a separate, documented,
+/// owner-mandated ticket (#1220) re-arming the WIDER already-calibrated channel outright, not a
+/// silent workaround reaching for the `<=3` band to fake a tighter absorption. Kept fully wired
+/// (never deleted) as the graduated FALLBACK if a future walk-down step disarms #1220's seam again
+/// -- see the module doc's "2026-08-29 RE-ARM" section.
 pub const SEGMENT_SINGLETON_COPIES_ALLOWANCE: u32 = 1;
 /// See [`SEGMENT_SINGLETON_COPIES_ALLOWANCE`].
 pub const SEGMENT_SINGLETON_GAPS_ALLOWANCE: u32 = 1;
@@ -214,7 +286,13 @@ pub const SEGMENT_SINGLETON_GAPS_ALLOWANCE: u32 = 1;
 /// strict `copies == 0 && gaps == 0` again. Gated on the issue-1168 floor reduction and/or the
 /// cam1 card swap landing + N consecutive zero-singleton green runs -- issue 1169 owns that step
 /// and stays OPEN as the re-tighten trail. Mirrors `copies_gaps_tolerance_gates_overall_pass`'s
-/// shape and is INDEPENDENT of it (the disarmed `<=3` rescue stays disarmed).
+/// shape and is INDEPENDENT of it (originally: "the disarmed `<=3` rescue stays disarmed" --
+/// **#1220 (2026-08-29) changed that half:** the `<=3` rescue is RE-ARMED, so this function's
+/// return value (still `true`, untouched by #1220) is now DORMANT by `if`/`else if` PRECEDENCE
+/// inside [`decide`] rather than by its own flag -- it stays wired as the graduated FALLBACK a
+/// future walk-down step re-engages automatically if [`copies_gaps_tolerance_gates_overall_pass`]
+/// is ever disarmed again. Issue 1169's own re-tighten trail (this flag to `false`) is unaffected
+/// and independent of #1220's seam.
 pub fn segment_singleton_allowance_gates_overall_pass() -> bool {
     true
 }
@@ -262,26 +340,48 @@ pub struct WindowGateDecision {
     /// no longer fully report-only, they are tolerated up to the calibrated per-window threshold
     /// and gate again above it.
     ///
-    /// **#1132 (owner mandate 2026-08-19): this field is now REPORTED-ONLY for observability — it
-    /// no longer folds into `overall_pass`.** The run fold uses [`Self::overall_pass_term`]
-    /// instead. Kept computed (with the tolerance) so the JSON shows what the relaxed verdict
-    /// WOULD say — a `relaxed_pass == true` window whose `overall_pass_term == false` is the
+    /// **#1132 (owner mandate 2026-08-19): this field was made REPORTED-ONLY for observability —
+    /// it stopped folding into `overall_pass`, the run fold used [`Self::overall_pass_term`]
+    /// instead.** Kept computed (with the tolerance) so the JSON shows what the relaxed verdict
+    /// WOULD say — a `relaxed_pass == true` window whose `overall_pass_term == false` is a
     /// disarmed rescue visibly doing nothing, never a hidden mask.
+    ///
+    /// **#1220 (owner mandate, 2026-08-29): [`copies_gaps_tolerance_gates_overall_pass`] is
+    /// RE-ARMED, so this field now EQUALS [`Self::overall_pass_term`] again** (see that field's
+    /// own doc and `copies_gaps_tolerance_gates_overall_pass`'s doc for the full decision record).
+    /// Kept as a SEPARATE field regardless — a future walk-down step may disarm the seam again, at
+    /// which point this field resumes showing what the tolerance channel WOULD say even while a
+    /// stricter fold governs `overall_pass_term`, exactly the observability role it has always had.
     pub relaxed_pass: bool,
     /// #1132 (owner mandate 2026-08-19): the verdict ACTUALLY folded into the run-level
-    /// `overall_pass` (`crate::probe::recording_segments::segment_continuity`). STRICTER than
-    /// [`Self::relaxed_pass`] on copies/gaps — the copies/gaps tolerance no longer rescues it
-    /// (`copies_gaps_tolerance_gates_overall_pass() == false`), so a single copy or gap fails.
-    /// The optical undecodable floor stays report-only here EXACTLY as in `relaxed_pass` (the SAME
-    /// `crate::optical_floor::gates_overall_pass()` term — #1132 does NOT touch the floor). When
-    /// `copies_gaps_tolerance_gates_overall_pass()` is flipped back on, this equals `relaxed_pass`.
+    /// `overall_pass` (`crate::probe::recording_segments::segment_continuity`). Originally made
+    /// STRICTER than [`Self::relaxed_pass`] on copies/gaps — the copies/gaps tolerance no longer
+    /// rescued it (`copies_gaps_tolerance_gates_overall_pass() == false`), so a single copy or gap
+    /// failed. The optical undecodable floor stays report-only here EXACTLY as in `relaxed_pass`
+    /// (the SAME `crate::optical_floor::gates_overall_pass()` term — #1132 does NOT touch the
+    /// floor). Per this field's own original doc: "When `copies_gaps_tolerance_gates_overall_pass()`
+    /// is flipped back on, this equals `relaxed_pass`."
+    ///
+    /// **#1220 (owner mandate, 2026-08-29): exactly that flip happened** — see
+    /// `copies_gaps_tolerance_gates_overall_pass`'s own doc for the full decision record. This
+    /// field now equals [`Self::relaxed_pass`] on every input (the copies/gaps term is
+    /// `within_tolerance` again, restoring the pre-#1132 fold); the #1169 `<=1/<=1` singleton band
+    /// stays wired as a graduated fallback (see [`Self::singleton_allowance_consumed`]'s own doc)
+    /// but is currently unreachable via `decide()`'s `if`/`else if` precedence.
     pub overall_pass_term: bool,
     /// #1169: `true` iff this window's nonzero `copies`/`gaps` were ABSORBED into
     /// [`Self::overall_pass_term`] ONLY by the `<=1/<=1` singleton allowance
     /// ([`segment_singleton_allowance_consumed`]). Records the absorption loudly (never a silent
     /// mask): a `singleton_allowance_consumed == true` window has `strict_pass == false` and a
     /// per-segment note. `false` on a clean window, an over-band (still-failing) window, and a
-    /// window rescued by the (dormant) `<=3` tolerance.
+    /// window rescued by the (originally dormant) `<=3` tolerance.
+    ///
+    /// **#1220 (owner mandate, 2026-08-29): ALWAYS `false` now** — `segment_singleton_allowance_
+    /// consumed` itself requires `!copies_gaps_tolerance_gates_overall_pass()`, which is `true`
+    /// (armed) as of #1220, so this field can never fire while the re-armed tolerance channel
+    /// governs `overall_pass_term`. The field, the const band, and `segment_singleton_note` all
+    /// stay wired (never deleted) as the graduated fallback — see the module doc's "2026-08-29
+    /// RE-ARM" section.
     pub singleton_allowance_consumed: bool,
 }
 
@@ -333,6 +433,15 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     // SEPARATE, strictly-tighter seam -- never a re-arm of the disarmed `<=3` band (that is the
     // CAM1-class mask #1132 removed). Re-tighten to absolute zero = flip
     // `segment_singleton_allowance_gates_overall_pass()` to `false`.
+    //
+    // #1220 (owner mandate, 2026-08-29): `copies_gaps_tolerance_gates_overall_pass()` is RE-ARMED
+    // (see its own doc for the full decision record) -- the FIRST arm below is now taken, so
+    // `copies_gaps_ok == within_tolerance` and this term equals `relaxed_pass` exactly, restoring
+    // the pre-#1132 fold. The `else if` singleton arm stays wired as an automatic graduated
+    // FALLBACK: if a future walk-down step disarms the tolerance channel again, the (still-armed,
+    // untouched-by-#1220) `<=1/<=1` singleton band takes back over automatically -- one step down,
+    // never straight to the final `else` strict-zero floor. That `else` arm is reachable only if
+    // BOTH seams are disarmed (neither is, today).
     let copies_gaps_ok = if copies_gaps_tolerance_gates_overall_pass() {
         within_tolerance
     } else if segment_singleton_allowance_gates_overall_pass() {
