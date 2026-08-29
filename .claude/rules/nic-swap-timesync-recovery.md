@@ -102,3 +102,26 @@ not merely that the input exists and renders something.
 The manual restart is a rig step for the SUPERVISOR, never a worker. The durable fix belongs in
 the dantesync repo: on `ERROR_DEVICE_REMOVED`, re-run the `gm_allowlist`-based interface selection
 instead of spamming forever. Tracked from camera-box issue 1130's own thread.
+
+## 2026-08-29 rozšírenie — X520 éra: interrupt moderation zabíja PTP timestampy; adapter reset zabíja pcap handle; tray+service dvojité servo
+
+Po výmene za Intel X520-DA2 (27.8., jediný driver = 2019 ixgbn 4.1.197) sa strih PTP lock rozpadol
+(LOCK↔PROD flap, drift spiky ±100–400 us/s, duty-cycle 52 %). Reťaz nálezov, každý falzifikovaný živo:
+
+1. **Interrupt Moderation = Enabled (ITR Adaptive) na X520 = burst koalescing = Npcap HostHighPrec
+   timestampy PTP správ dostávajú stovky-us jitter** → dantesync drift merania špičkujú → lock flap.
+   FIX: `Set-NetAdapterAdvancedProperty '*InterruptModeration' 0` (+ `*ReceiveBuffers` 512→2048).
+   Po zmene spiky klesli z ~2–4/min na 0.
+2. **KAŽDÁ zmena adapter property = adapter reset = mŕtvy pcap handle služby** (PTP vzorky STOJA,
+   status zamrzne v poslednom mode, NTP stepy pokračujú) → po zmene VŽDY reálny reštart DanteSync —
+   a over NOVÝ PID (`Get-Process dantesync | Select StartTime`): prvý `sc stop` na strihu ticho visel
+   a služba bežala ďalej so starým handle.
+3. **Adapter reset TIEŽ zmrazí všetky strih NDI receivery** (známa trieda vyššie — jeden zmrznutý
+   frame; lieči len OBS reštart cez AHK kill+sentinel-clear respawn) A degraduje per-connection NDI
+   rýchlosť (~51 fps arrival, stovky underrunov/2 min — lieči `obs_phase2 idle-receiver` cyklus).
+4. **dantesync-tray.exe je AUTOSTART súčasť boxu a beží PARALELNE so službou** — dve frekvenčné
+   servá na jednom clocku. Pri zdravom stave koexistujú (stream LOCK drží), ale pri debugovaní
+   flapu tray VŽDY zabi, nech je autorita jedna; po boote sa vráti sám.
+5. Diagnostický rozlišovač: REJECTED spiky sú filtrované a NEZHADZUJÚ lock (245/h koexistovalo so
+   zdravým LOCK); lock zhadzuje wander PRIJATÝCH vzoriek (UNLOCKED Drift ±5–18 us/s riadky).
+   Histogram `Spike`/`UNLOCKED` po hodinách z dantesync.log(+.old) datuje začiatok presne.
