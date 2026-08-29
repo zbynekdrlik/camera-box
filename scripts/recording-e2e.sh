@@ -663,7 +663,14 @@ echo "    bkshading-relay pause (cam2/painter, $PAINTER_IP): was-active=$BKSH_PA
 # stays structurally untrappable by ANY mechanism, same accepted residual risk this file already
 # carries for other pre-trap state, e.g. the #878 startup self-heal comment above -- the NEXT
 # run's own preflight is where that class of loss is caught, not this one.)
-trap '
+# ANCHOR NOTE: this temporary handler is deliberately INDENTED one space -- ten-plus
+# static-anchor tests (harness_cam2_painter_coordination.rs and siblings) slice the cleanup body
+# via a newline-plus-column-0 keyword search, i.e. an UNINDENTED first word here is this file's
+# reserved marker for the REAL install of the cleanup handler far below. The leading space keeps
+# this TEMPORARY handler out of that namespace (plain valid bash) so those extractions still land
+# on the real install. Do NOT de-indent it. (Wording here also deliberately avoids the literal
+# keyword-plus-function-name adjacency other tests anchor on -- the CLAUDE.md anchor gotcha.)
+ trap '
   bkshading_e2e_pause_restore "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW" "${BKSH_PAUSE_CAM1_WAS_ACTIVE:-0}"
   bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
 ' EXIT HUP INT TERM
