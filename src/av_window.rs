@@ -136,6 +136,28 @@ pub fn pool_camera_av_sync(
 /// a tracked interim, never a silent weakening.
 pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 90.0;
 
+/// #1178 — the fixed video-leg rig offset (ms): the calibrated DEFAULT `expected_ms` the per-camera
+/// A/V gate centres on, so the uniform rig constant no longer eats the whole ±90ms budget.
+///
+/// The measurement chain carries a fixed VIDEO-leg latency the audio path (QPSK marker → Dante →
+/// mbc) does not: cam2 monitor input lag, the BMPCC sensor→HDMI delay, and the USB capture grabber.
+/// The dock being "dialed to 0" nulls the SOURCE A/V, not this measurement-chain leg, so a correctly
+/// aligned rig still MEASURES `av_offset_ms ≈ this constant`, not 0. Gating the raw measured offset
+/// against 0 therefore fails every camera whose leg lands past ±90 (the #1178 body's exact claim).
+///
+/// This is a NAMED, surfaced calibration (`rig_video_leg_offset_ms` in the verdict JSON + the gate
+/// log line), never a silent shift. It is the DEFAULT of `--av-expected-ms`; a mode that PHYSICALLY
+/// compensates the leg (MEASUREMENT_EQ / issue 1003, whose stream-hold rebalance lands the measured
+/// offset at ~0) passes its own explicit `--av-expected-ms 0`, which cleanly REPLACES this default —
+/// so the leg is subtracted by default yet never DOUBLE-counted where it is already physically gone.
+///
+/// ## Calibration — re-derive when the physical video chain changes (grabber / monitor / camera
+/// swap, e.g. the issue-1198 capture-card swap):
+/// take the MEDIAN of the judged per-camera `av_offset_ms` from a full-fleet E2E gate run
+/// (`--av-expected-ms 0`, no physical compensation). Median (not mean) for robustness to a single
+/// per-camera outlier; sub-ms precision is noise (per-camera MAD 5–8ms, cross-camera spread ~18ms).
+pub const RIG_VIDEO_LEG_OFFSET_MS: f64 = 0.0; // #1178 [red] baseline — [green] sets the calibrated value
+
 /// PASS iff `sync` is [`AvSyncVerdict::Measured`] AND its offset is within
 /// [`AV_OFFSET_GATE_TOLERANCE_MS`] of `expected_ms`. [`AvSyncVerdict::Unknown`] — whether from
 /// zero contributing windows (the camera never appeared in this sweep) or thin/scattered data
@@ -200,6 +222,53 @@ pub fn effective_offset_ms(sync: &CameraAvSync, derived: Option<&DerivedAvSync>)
     match sync.verdict {
         AvSyncVerdict::Measured => sync.av_offset_ms,
         AvSyncVerdict::Unknown => derived.map(|d| d.derived_offset_ms),
+    }
+}
+
+/// #1178 report-only — a camera's RESIDUAL A/V offset: its measured/effective offset with the
+/// expected (calibrated video-leg) removed. ~0 for a correctly aligned camera once the fixed rig
+/// leg is subtracted — the honest per-camera number a dock/report reads. Pure signed convention:
+/// `measured − expected` (the SAME signed delta [`av_offset_gate_pass`] takes the magnitude of).
+pub fn residual_offset_ms(measured_offset_ms: f64, expected_ms: f64) -> f64 {
+    measured_offset_ms - expected_ms
+}
+
+/// #1178 report-only cross-camera residual summary — the diagnostic channel that surfaces whatever
+/// cross-run / cross-camera instability REMAINS after the fixed video-leg is removed (the issue
+/// 952 / issue 1004 residual finding) WITHOUT ever masking a global drift: the BLOCKING gate uses
+/// the FIXED [`RIG_VIDEO_LEG_OFFSET_MS`], never this per-run median, so a whole-fleet shift still
+/// moves every residual and is caught at the gate boundary. `None` when no camera produced a
+/// residual (nothing to summarize) — never a fabricated 0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResidualSummary {
+    pub median_ms: Option<f64>,
+    pub spread_ms: Option<f64>,
+    pub count: usize,
+}
+
+/// PURE (Tier-0): median + full spread (max − min) of the per-camera residuals. Report-only —
+/// never feeds [`av_offset_gate_pass`].
+pub fn residual_summary(residuals_ms: &[f64]) -> ResidualSummary {
+    if residuals_ms.is_empty() {
+        return ResidualSummary {
+            median_ms: None,
+            spread_ms: None,
+            count: 0,
+        };
+    }
+    let mut v: Vec<f64> = residuals_ms.to_vec();
+    v.sort_by(|a, b| a.total_cmp(b));
+    let n = v.len();
+    let median = if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    };
+    let spread = v[n - 1] - v[0];
+    ResidualSummary {
+        median_ms: Some(median),
+        spread_ms: Some(spread),
+        count: n,
     }
 }
 
@@ -836,5 +905,105 @@ mod tests {
         // No measurement AND no derivation (cam2 itself Unknown, or no delivery sample) ⇒ a true
         // null — never fabricated. This is the ONLY case a consumer sees no number.
         assert_eq!(effective_offset_ms(&unknown(), None), None);
+    }
+
+    // -----------------------------------------------------------------
+    // #1178 — fixed video-leg calibration + report-only residual channel
+    // -----------------------------------------------------------------
+
+    /// The fresh full-fleet cluster from verdict 845554984 (run 33176192564, 2026-08-29): every
+    /// judged camera's measured A/V offset. cam1/cam2/cam6 fall 2-5ms OUTSIDE ±90 of 0 (the
+    /// pre-#1178 default) and BLOCK the run; all five land well inside ±90 of the calibrated leg.
+    const FRESH_CLUSTER_845554984: [f64; 5] =
+        [-95.166_666, -91.979_166, -76.75, -93.916_666, -88.625];
+
+    #[test]
+    fn fresh_cluster_845554984_needs_the_video_leg_calibration_to_pass_1178() {
+        // RED baseline: against the raw expected_ms=0 (the pre-#1178 default) the negative cluster
+        // fails for exactly the three cameras past ±90 (cam1/cam2/cam6).
+        let fails_at_zero: Vec<f64> = FRESH_CLUSTER_845554984
+            .iter()
+            .copied()
+            .filter(|&off| !av_offset_gate_pass(&measured(off), 0.0))
+            .collect();
+        assert_eq!(
+            fails_at_zero.len(),
+            3,
+            "pre-#1178: exactly cam1/cam2/cam6 (< -90) must fail vs expected_ms=0, got {fails_at_zero:?}"
+        );
+        // GREEN: against the calibrated video-leg default, EVERY judged camera passes with margin.
+        for &off in FRESH_CLUSTER_845554984.iter() {
+            assert!(
+                av_offset_gate_pass(&measured(off), RIG_VIDEO_LEG_OFFSET_MS),
+                "camera at {off}ms must pass vs calibrated RIG_VIDEO_LEG_OFFSET_MS={RIG_VIDEO_LEG_OFFSET_MS}"
+            );
+        }
+    }
+
+    #[test]
+    fn video_leg_calibration_is_the_negative_cluster_median_not_zero_1178() {
+        // The constant must be a real negative calibration, not the old 0.0 — pinned to the
+        // verdict-845554984 5-camera median (−92.0, robust to the cam3 outlier).
+        assert!(
+            RIG_VIDEO_LEG_OFFSET_MS < -1.0,
+            "RIG_VIDEO_LEG_OFFSET_MS must be a real negative video-leg calibration, got {RIG_VIDEO_LEG_OFFSET_MS}"
+        );
+        assert!(
+            (RIG_VIDEO_LEG_OFFSET_MS - (-92.0)).abs() < 1e-9,
+            "calibration pinned to the verdict-845554984 cluster median −92.0; a rig video-chain              change (grabber/monitor/camera swap) is the only reason to re-derive it"
+        );
+    }
+
+    #[test]
+    fn calibration_still_catches_a_global_drift_never_masks_it_1178() {
+        // A whole-fleet drift PAST the tolerance around the calibrated leg still FAILS — the fixed
+        // constant (not a per-run median) is what preserves global-drift detection.
+        let drifted = RIG_VIDEO_LEG_OFFSET_MS - (AV_OFFSET_GATE_TOLERANCE_MS + 10.0);
+        assert!(
+            !av_offset_gate_pass(&measured(drifted), RIG_VIDEO_LEG_OFFSET_MS),
+            "an offset {drifted}ms (leg − (tol+10)) must still FAIL — calibration must not widen/mask the gate"
+        );
+        // ...and a camera exactly at the leg is a perfect residual-0 PASS.
+        assert!(av_offset_gate_pass(
+            &measured(RIG_VIDEO_LEG_OFFSET_MS),
+            RIG_VIDEO_LEG_OFFSET_MS
+        ));
+    }
+
+    #[test]
+    fn residual_offset_is_measured_minus_expected_1178() {
+        assert!((residual_offset_ms(-92.0, RIG_VIDEO_LEG_OFFSET_MS) - 0.0).abs() < 1e-9);
+        assert!((residual_offset_ms(-76.75, -92.0) - 15.25).abs() < 1e-9);
+        assert!((residual_offset_ms(0.0, 0.0) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn residual_summary_reports_median_and_spread_report_only_1178() {
+        assert_eq!(
+            residual_summary(&[]),
+            ResidualSummary {
+                median_ms: None,
+                spread_ms: None,
+                count: 0
+            }
+        );
+        // the fresh cluster's residuals after subtracting the calibrated leg
+        let residuals: Vec<f64> = FRESH_CLUSTER_845554984
+            .iter()
+            .map(|&off| residual_offset_ms(off, RIG_VIDEO_LEG_OFFSET_MS))
+            .collect();
+        let s = residual_summary(&residuals);
+        assert_eq!(s.count, 5);
+        // median residual ~0 (cam2), spread ~18.4ms (cam3 − cam1)
+        assert!(
+            s.median_ms.unwrap().abs() < 1.0,
+            "median residual ~0, got {:?}",
+            s.median_ms
+        );
+        assert!(
+            (s.spread_ms.unwrap() - 18.4).abs() < 0.5,
+            "spread ~18.4ms, got {:?}",
+            s.spread_ms
+        );
     }
 }
