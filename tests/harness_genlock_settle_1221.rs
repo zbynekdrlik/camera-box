@@ -258,6 +258,125 @@ fn runner_skips_gracefully_with_no_watched_inputs() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// issue 1221 review fixes (Fable adversarial pass) — reader exec, env sanitize, bounds, stale streak
+// ---------------------------------------------------------------------------------------------
+
+/// 🔴-1: the DEFAULT reader must chain `timeout bash -c '. win-ssh-exec.sh; win_ssh_run …'` —
+/// `timeout win_ssh_run` directly can never work (`timeout` execvp()s a real binary, not a shell
+/// function). Prove the whole default chain end-to-end with a PATH-stubbed `sshpass` (the leaf
+/// win_ssh_run calls); RED on the old `timeout <fn>` form (empty output), GREEN on the fix.
+#[test]
+fn default_reader_chains_through_bash_c_resource_not_timeout_of_a_function() {
+    let stub = std::env::temp_dir().join(format!(
+        "genlock-settle-sshpass-stub-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&stub).unwrap();
+    let sshpass = stub.join("sshpass");
+    std::fs::write(
+        &sshpass,
+        "#!/usr/bin/env bash\nprintf \"genlock-fifo audit 'NDI cam1': relocks=0 underruns=0 dropped_due=0 late_holds=0\\n\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sshpass, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let harness =
+        "set -uo pipefail\n. \"$LIB\"\nunset GENLOCK_SETTLE_READER_CMD 2>/dev/null || true\n\
+        _genlock_settle_read_snapshot u p h";
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("LIB", lib())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .current_dir(manifest_dir())
+        .output()
+        .expect("run reader harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let _ = std::fs::remove_dir_all(&stub);
+    assert!(
+        stdout.contains("genlock-fifo audit"),
+        "the default reader must chain timeout->bash -c->win_ssh_run->sshpass and return the tail, got: {stdout:?}"
+    );
+}
+
+/// 🔴-1 static guard: the lib source carries the re-source form and NOT the broken direct form.
+#[test]
+fn lib_source_uses_the_resource_reader_form() {
+    let src = std::fs::read_to_string(lib()).unwrap();
+    assert!(
+        src.contains(r#"win_ssh_run "$2" "$3" "$4" "$5""#),
+        "the reader must re-source win-ssh-exec.sh inside bash -c and call win_ssh_run with positional args"
+    );
+    assert!(
+        !src.contains(r#"SSH_TIMEOUT:-20}" win_ssh_run"#),
+        "the reader must NOT `timeout … win_ssh_run` a shell function directly (rc 127)"
+    );
+}
+
+/// 🔴-2 / 🟡-1: malformed numeric env (n/budget/poll) must be SANITIZED — never a `printf`/`[ ]`
+/// abort of the whole run under set -euo pipefail, and never an infinite loop.
+#[test]
+fn malformed_numeric_args_are_sanitized_never_abort() {
+    let setup = "export GENLOCK_SETTLE_READER_CMD='printf \"genlock-fifo audit '\\''NDI cam1'\\'': relocks=$RANDOM underruns=0 dropped_due=0 late_holds=0\\n\"'\n\
+        export GENLOCK_SETTLE_NOW_CMD='echo 0' GENLOCK_SETTLE_MAX_PASSES=8";
+    let (_rc, out) = run_runner(setup, "genlock_settle_wait u p h 'NDI cam1' xyz bogus oops");
+    assert!(
+        out.contains("WARNING") && out.contains("fail-open"),
+        "malformed n/budget/poll must sanitize and fail-open (not abort), got: {out}"
+    );
+}
+
+/// 🟡-2: a wedged clock (never advances) must still be bounded at ~budget by the pass*poll
+/// estimate, NOT run to the 1000 pass ceiling.
+#[test]
+fn wedged_clock_is_bounded_by_the_pass_poll_estimate() {
+    let setup = "export GENLOCK_SETTLE_READER_CMD='printf \"genlock-fifo audit '\\''NDI cam1'\\'': relocks=$RANDOM underruns=0 dropped_due=0 late_holds=0\\n\"'\n\
+        export GENLOCK_SETTLE_NOW_CMD='echo 0'";
+    // budget 5, poll 1 -> est = pass*1 reaches 5 at pass 5, long before the 1000 ceiling
+    let (_rc, out) = run_runner(setup, "genlock_settle_wait u p h 'NDI cam1' 2 5 1");
+    let polls: u32 = out
+        .split("after ")
+        .nth(1)
+        .and_then(|s| s.split(" poll").next())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(9999);
+    assert!(
+        polls <= 10,
+        "a wedged clock must be bounded near budget by the pass*poll estimate (<=10 polls), got {polls}: {out}"
+    );
+}
+
+/// 🔵-1: a source that goes quiet then VANISHES from the log must NOT count as settled — its stale
+/// streak is reset, so the run waits (or budgets/ceilings out) rather than SETTLING on stale data.
+#[test]
+fn a_vanished_source_does_not_settle_on_a_stale_streak() {
+    // s0 seed, s1 quiet (streak would build), s2 EMPTY (vanished) -> reset; ceiling 3 -> WARN not SETTLED
+    let setup = r#"
+W="$(mktemp -d)"; echo 0 > "$W/idx"; echo 0 > "$W/clk"
+printf "genlock-fifo audit 'NDI cam1': relocks=5 underruns=0 dropped_due=0 late_holds=0\n" > "$W/s0"
+cp "$W/s0" "$W/s1"; : > "$W/s2"; cp "$W/s0" "$W/s3"; cp "$W/s0" "$W/s4"
+export GENLOCK_SETTLE_READER_CMD='i=$(cat "'"$W"'/idx"); f="'"$W"'/s$i"; [ -f "$f" ] || f="'"$W"'/s4"; echo $((i+1)) > "'"$W"'/idx"; cat "$f"'
+export GENLOCK_SETTLE_NOW_CMD='c=$(cat "'"$W"'/clk"); echo $((c+1)) > "'"$W"'/clk"; echo "$c"'
+export GENLOCK_SETTLE_MAX_PASSES=3
+"#;
+    let (_rc, out) = run_runner(setup, "genlock_settle_wait u p h 'NDI cam1' 2 100000 0");
+    assert!(
+        out.contains("WARNING"),
+        "a source that vanishes after building a streak must NOT settle on the stale streak, got: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // scripts/recording-e2e.sh wiring guards — the settle MUST sit between [4i/8align] and StartRecord
 // ---------------------------------------------------------------------------------------------
 #[test]

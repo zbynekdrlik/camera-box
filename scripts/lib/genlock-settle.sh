@@ -134,10 +134,16 @@ _genlock_settle_now() {
 # _genlock_settle_read_snapshot <user> <pw> <host> -> stdout: the newest strih OBS log tail (the
 #   text genlock_settle_latest_counters parses). Overridable via GENLOCK_SETTLE_READER_CMD (a shell
 #   command whose stdout is one snapshot) so a Tier-0 replica can feed a scripted snapshot sequence
-#   with zero ssh. Default: one flat ssh + a single (non-nested) PowerShell Get-Content tail via
-#   win_ssh_run (-EncodedCommand handles the quoting) -- the SAME read the [4g/8] calibration block
-#   and cadence-alert-watchdog.sh already use. Best-effort: any read failure yields an empty
-#   snapshot (that pass simply measures nothing -> the budget still bounds the wait, fail-open).
+#   with zero ssh. Default: one flat ssh + a single (non-nested) PowerShell Get-Content tail of the
+#   newest OBS log, via win_ssh_run (-EncodedCommand handles the quoting) -- the SAME read the
+#   [4g/8] calibration block does (recording-e2e.sh:~3630, which calls win_ssh_run BARE).
+#   CRITICAL: `timeout` execvp()s its command directly and CANNOT invoke a shell FUNCTION like
+#   win_ssh_run (`timeout: failed to run command 'win_ssh_run'`, rc 127) -- so to bound the read we
+#   must re-source win-ssh-exec.sh inside a `timeout bash -c '...'` (bash IS a real binary), exactly
+#   the sibling pattern at recording-e2e.sh:755 / :2853. Sourcing genlock-settle.sh alone does NOT
+#   put win_ssh_run in the timeout'd subshell, hence the explicit re-source of its own sibling lib
+#   (both live in scripts/lib/). Best-effort: any read failure yields an empty snapshot (that pass
+#   simply measures nothing -> the budget still bounds the wait, fail-open).
 _genlock_settle_read_snapshot() {
   local user="${1:-}" pw="${2:-}" host="${3:-}"
   if [ -n "${GENLOCK_SETTLE_READER_CMD:-}" ]; then
@@ -148,7 +154,12 @@ _genlock_settle_read_snapshot() {
   local tail_n="${GENLOCK_SETTLE_OBS_LOG_TAIL:-400}"
   local ps
   ps='Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1) -Tail '"$tail_n"
-  timeout "${GENLOCK_SETTLE_SSH_TIMEOUT:-20}" win_ssh_run "$user" "$pw" "$host" "$ps" 2>/dev/null || true
+  local libdir
+  libdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || libdir=""
+  # timeout bash -c re-sources win-ssh-exec.sh (a sibling in scripts/lib/) so win_ssh_run is a real
+  # command inside the bounded subshell -- `timeout win_ssh_run` directly would fail rc 127 (below).
+  timeout "${GENLOCK_SETTLE_SSH_TIMEOUT:-20}" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+    "$libdir/win-ssh-exec.sh" "$user" "$pw" "$host" "$ps" 2>/dev/null || true
 }
 
 # genlock_settle_wait <user> <pw> <host> <watched_csv> [n_required] [budget_s] [poll_s]
@@ -163,16 +174,26 @@ genlock_settle_wait() {
   local user="${1:-}" pw="${2:-}" host="${3:-}" watched_csv="${4:-}"
   local n="${5:-2}" budget="${6:-180}" poll="${7:-7}"
 
-  local -a watched=()
+  # SANITIZE every numeric input to a valid non-negative integer (#1133 class: n/budget/poll flow
+  # into `printf '%d'` and `[ -lt ]`/`[ -ge ]` -- a malformed env value like
+  # E2E_GENLOCK_SETTLE_QUIET_PASSES=xyz would make printf fail (rc 1) and, since the runner is called
+  # as a BARE statement under the caller's `set -euo pipefail`, ABORT the whole E2E run; a garbage
+  # budget/poll likewise. The same guard _genlock_settle_now already applies to the clock -- applied
+  # here consistently so EVERY termination-bound input is always a real integer).
+  case "$n" in '' | *[!0-9]*) n=2 ;; esac
+  case "$budget" in '' | *[!0-9]*) budget=180 ;; esac
+  case "$poll" in '' | *[!0-9]*) poll=7 ;; esac
+
+  # Glob-safe comma split: `read -ra` never globs (an unquoted `for raw in $csv` would be
+  # glob-subject on a `*`-bearing input name).
+  local -a raw_watched=() watched=()
+  IFS=',' read -ra raw_watched <<<"$watched_csv" || true
   local raw
-  local oldifs="$IFS"
-  IFS=','
-  for raw in $watched_csv; do
+  for raw in "${raw_watched[@]}"; do
     raw="${raw#"${raw%%[![:space:]]*}"}"  # ltrim
     raw="${raw%"${raw##*[![:space:]]}"}"  # rtrim
     [ -n "$raw" ] && watched+=("$raw")
   done
-  IFS="$oldifs"
 
   if [ "${#watched[@]}" -eq 0 ]; then
     printf '[settle] genlock settle-wait: no aligned inputs to watch -- skipping\n'
@@ -183,11 +204,12 @@ genlock_settle_wait() {
   local i
   for i in "${!watched[@]}"; do prev[i]=""; streak[i]=0; seen[i]=0; done
 
-  # Two INDEPENDENT termination bounds so the loop can never hang: (1) the wall budget below
-  # (primary), and (2) a hard pass ceiling (secondary) that terminates even if the clock seam ever
-  # fails to advance (a broken GENLOCK_SETTLE_NOW_CMD, or date +%s wedged). The ceiling is far above
-  # any real budget/poll pass count (~26 at 180s/7s), so it only ever fires on a pathological clock.
+  # THREE INDEPENDENT termination bounds so the loop can never hang AND a wedged clock stays close
+  # to the budget: (1) the real wall budget (primary); (2) a pass*poll ESTIMATED elapsed (so a
+  # wedged clock -- date +%s stuck, elapsed always 0 -- is still bounded at ~budget instead of
+  # ceiling*poll); (3) a hard pass ceiling (the ultimate backstop, immune to any clock or poll=0).
   local max_passes="${GENLOCK_SETTLE_MAX_PASSES:-1000}"
+  case "$max_passes" in '' | *[!0-9]*) max_passes=1000 ;; esac
   local start; start="$(_genlock_settle_now)"
   local pass=0
   while :; do
@@ -199,13 +221,21 @@ genlock_settle_wait() {
       local src="${watched[i]}"
       local curr4
       curr4="$(genlock_settle_latest_counters "$snapshot" "$src")"
-      if [ -n "$curr4" ]; then seen[i]=1; fi
-      if [ -n "${prev[i]}" ] && [ -n "$curr4" ]; then
-        local v
-        v="$(genlock_settle_pass_verdict "${prev[i]}" "$curr4")"
-        if [ "$v" = "quiet" ]; then streak[i]=$((streak[i] + 1)); else streak[i]=0; fi
+      if [ -n "$curr4" ]; then
+        seen[i]=1
+        if [ -n "${prev[i]}" ]; then
+          local v
+          v="$(genlock_settle_pass_verdict "${prev[i]}" "$curr4")"
+          if [ "$v" = "quiet" ]; then streak[i]=$((streak[i] + 1)); else streak[i]=0; fi
+        fi
+        prev[i]="$curr4"
+      elif [ "${seen[i]}" = "1" ]; then
+        # A previously-seen source that produced NO audit line this pass (input removed, or the tail
+        # scrolled past its last tick) is no longer continuously quiet -- reset its streak so a stale
+        # streak can never count as settled (#1221 review 🔵-1). It stays in seen_streaks (its stale
+        # streak reset to 0) so the run waits for it to reappear and re-settle, or hits the budget.
+        streak[i]=0
       fi
-      if [ -n "$curr4" ]; then prev[i]="$curr4"; fi
       if [ "${seen[i]}" = "1" ]; then seen_streaks+=("${streak[i]}"); fi
     done
 
@@ -217,10 +247,11 @@ genlock_settle_wait() {
       return 0
     fi
 
-    local now elapsed
+    local now elapsed est
     now="$(_genlock_settle_now)"
     elapsed=$((now - start))
-    if [ "$elapsed" -ge "$budget" ] || [ "$pass" -ge "$max_passes" ]; then
+    est=$((pass * poll))   # estimated elapsed -- bounds a wedged clock at ~budget, not ceiling*poll
+    if [ "$elapsed" -ge "$budget" ] || [ "$est" -ge "$budget" ] || [ "$pass" -ge "$max_passes" ]; then
       printf 'WARNING: [settle] genlock FIFO did NOT reach %d quiet pass(es) for every aligned input within %ds budget after %d poll(s) -- proceeding anyway (fail-open, report-only; downstream gates judge the recording)\n' \
         "$n" "$budget" "$pass"
       return 0
