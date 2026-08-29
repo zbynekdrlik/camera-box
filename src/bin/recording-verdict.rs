@@ -370,12 +370,18 @@ struct Args {
     /// parse as a bare `-N` value (clap 4 otherwise reads a leading `-` as a new flag).
     #[arg(long, allow_negative_numbers = true)]
     syncnet_offset_ms: Option<f64>,
-    /// #624 deliverable 4 / #312 item 2 PR B: the expected/dialed A/V offset (ms) — the
-    /// operator's live #398 dock reading (nominally ~0, since the dock is dialed to align video
-    /// and audio). The per-camera A/V-offset gate measures each camera's DEVIATION from this
-    /// value, never from a hardcoded 0 — so a rig intentionally dialed to a nonzero offset still
-    /// gates correctly. Default 0.0 (the "operator dials to ~0 in practice" default case).
-    #[arg(long, default_value_t = 0.0)]
+    /// #624 deliverable 4 / #312 item 2 PR B: the expected MEASURED A/V offset (ms) the per-camera
+    /// gate centres on — each camera's `av_offset_ms` must land within ±AV_OFFSET_GATE_TOLERANCE_MS
+    /// of this value.
+    ///
+    /// #1178: the DEFAULT is the calibrated fixed rig video-leg
+    /// (`av_window::RIG_VIDEO_LEG_OFFSET_MS`), NOT 0 — a correctly aligned rig still MEASURES the
+    /// video-leg (monitor lag + sensor→HDMI + grabber), so the pre-#1178 default of 0 wrongly failed
+    /// the whole negative cluster. A mode that PHYSICALLY compensates the leg (MEASUREMENT_EQ / issue
+    /// 1003, whose stream-hold rebalance lands the measured offset at ~0) passes its own explicit
+    /// `--av-expected-ms 0`, which cleanly REPLACES the calibrated default so the leg is never
+    /// double-counted; an operator dialing a nonzero source offset overrides it the same way.
+    #[arg(long, default_value_t = camera_box::av_window::RIG_VIDEO_LEG_OFFSET_MS)]
     av_expected_ms: f64,
     /// #855: operator-acknowledged offline boxes, threaded from the shell-side
     /// `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt` ack (`scripts/lib/cambox-offline-ack.sh`) across
@@ -6229,6 +6235,9 @@ fn build_and_print_verdict_with_stream_diffs(
                     // verdict to pass — folded into `all_pass` below, alongside
                     // all_cambox_continuity + all_cambox_latency.
                     let mut av_all_pass = true;
+                    // #1178: per-camera residuals (measured/effective − expected calibrated
+                    // video-leg) collected for the report-only cross-camera residual summary.
+                    let mut av_residuals: Vec<f64> = Vec::new();
                     // #855/#861 fail-closed floor: how many cameras were actually JUDGED (not
                     // ack-excluded). An ack list covering EVERY camera would otherwise leave the
                     // AND-fold vacuously true — the one lever that could silently disable the
@@ -6422,6 +6431,16 @@ fn build_and_print_verdict_with_stream_diffs(
                             "effective_offset_ms":
                                 av_window::effective_offset_ms(cam_sync, derived.as_ref()),
                         });
+                        // #1178 report-only: this camera's RESIDUAL A/V offset — its
+                        // measured/effective offset with the expected calibrated video-leg removed
+                        // (~0 for an aligned camera). Collected for the cross-camera summary below.
+                        if let Some(eff) =
+                            av_window::effective_offset_ms(cam_sync, derived.as_ref())
+                        {
+                            let residual = av_window::residual_offset_ms(eff, args.av_expected_ms);
+                            cam_json["residual_offset_ms"] = serde_json::json!(residual);
+                            av_residuals.push(residual);
+                        }
                         if let Some(d) = &derived {
                             // #714: a DERIVED estimate is reported under its OWN fields, never
                             // written into `av_offset_ms`/`mad_ms` (which stay null — those are
@@ -6464,6 +6483,10 @@ fn build_and_print_verdict_with_stream_diffs(
                     // per-source ASRC landed. That precondition is now met, so this term folds
                     // into `all_pass` again, mirroring the issue-914/915 `gates_overall_pass()`
                     // seam exactly (applied in reverse: re-blocking, not relaxing).
+                    // #1178: whether expected_ms is the calibrated fixed video-leg default or an
+                    // explicit override (MEASUREMENT_EQ / issue 1003, or an operator-dialed value).
+                    let av_expected_is_calibrated_default =
+                        (args.av_expected_ms - av_window::RIG_VIDEO_LEG_OFFSET_MS).abs() < 1e-9;
                     let av_gate_blocking = av_window::gates_overall_pass();
                     println!(
                         "  >>> #624 deliverable 4 A/V-offset gate: expected={:.1}ms tolerance=±{:.1}ms → {} \
@@ -6477,6 +6500,16 @@ fn build_and_print_verdict_with_stream_diffs(
                             "report-only — does NOT gate overall_pass, pending ASRC, see #861"
                         }
                     );
+                    println!(
+                        "  >>> #1178 rig_video_leg_offset_ms={:.1}ms (calibrated fixed video-leg: monitor lag + sensor→HDMI + grabber); expected_ms={:.1}ms {}",
+                        av_window::RIG_VIDEO_LEG_OFFSET_MS,
+                        args.av_expected_ms,
+                        if av_expected_is_calibrated_default {
+                            "= calibrated video-leg default (subtracted before the ±tolerance band)"
+                        } else {
+                            "= explicit override (physical compensation / operator-dialed; calibration replaced)"
+                        }
+                    );
                     av_json.insert(
                         "expected_ms".to_string(),
                         serde_json::json!(args.av_expected_ms),
@@ -6484,6 +6517,37 @@ fn build_and_print_verdict_with_stream_diffs(
                     av_json.insert(
                         "gate_tolerance_ms".to_string(),
                         serde_json::json!(av_window::AV_OFFSET_GATE_TOLERANCE_MS),
+                    );
+                    // #1178: the NAMED, surfaced fixed video-leg calibration (never a silent
+                    // shift) + whether the current expected_ms is that calibrated default or an
+                    // explicit override (e.g. MEASUREMENT_EQ / issue 1003, or an operator-dialed
+                    // value).
+                    av_json.insert(
+                        "rig_video_leg_offset_ms".to_string(),
+                        serde_json::json!(av_window::RIG_VIDEO_LEG_OFFSET_MS),
+                    );
+                    av_json.insert(
+                        "expected_ms_is_calibrated_default".to_string(),
+                        serde_json::json!(av_expected_is_calibrated_default),
+                    );
+                    // #1178 report-only: cross-camera residual (measured − expected) median +
+                    // spread — surfaces whatever cross-run instability REMAINS after the fixed
+                    // video-leg is removed (issue 952 / issue 1004) WITHOUT masking a global drift
+                    // (the BLOCKING gate uses the fixed constant, never this per-run median).
+                    let av_residual_summary = av_window::residual_summary(&av_residuals);
+                    av_json.insert(
+                        "residual_median_ms".to_string(),
+                        match av_residual_summary.median_ms {
+                            Some(m) => serde_json::json!(m),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                    av_json.insert(
+                        "residual_spread_ms".to_string(),
+                        match av_residual_summary.spread_ms {
+                            Some(s) => serde_json::json!(s),
+                            None => serde_json::Value::Null,
+                        },
                     );
                     av_json.insert("gate_pass".to_string(), serde_json::json!(av_all_pass));
                     // #861: unambiguous machine-readable flag alongside `gate_pass` — whether this

@@ -156,7 +156,12 @@ pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 90.0;
 /// take the MEDIAN of the judged per-camera `av_offset_ms` from a full-fleet E2E gate run
 /// (`--av-expected-ms 0`, no physical compensation). Median (not mean) for robustness to a single
 /// per-camera outlier; sub-ms precision is noise (per-camera MAD 5–8ms, cross-camera spread ~18ms).
-pub const RIG_VIDEO_LEG_OFFSET_MS: f64 = 0.0; // #1178 [red] baseline — [green] sets the calibrated value
+///
+/// Current value −92.0: verdict 845554984 (run 33176192564, 2026-08-29) judged offsets cam1
+/// −95.17, cam2 −91.98, cam3 −76.75, cam6 −93.92, cam7 −88.63 → median −91.98 → −92.0 (mean −89.3
+/// is within noise; cam3 −76.75 is the mild outlier the median rejects). After subtraction the
+/// residual median is +0.0ms, spread 18.4ms — every camera well inside ±90.
+pub const RIG_VIDEO_LEG_OFFSET_MS: f64 = -92.0;
 
 /// PASS iff `sync` is [`AvSyncVerdict::Measured`] AND its offset is within
 /// [`AV_OFFSET_GATE_TOLERANCE_MS`] of `expected_ms`. [`AvSyncVerdict::Unknown`] — whether from
@@ -950,7 +955,7 @@ mod tests {
         );
         assert!(
             (RIG_VIDEO_LEG_OFFSET_MS - (-92.0)).abs() < 1e-9,
-            "calibration pinned to the verdict-845554984 cluster median −92.0; a rig video-chain              change (grabber/monitor/camera swap) is the only reason to re-derive it"
+            "calibration pinned to the verdict-845554984 cluster median −92.0; a rig video-chain change (grabber/monitor/camera swap) is the only reason to re-derive it"
         );
     }
 
