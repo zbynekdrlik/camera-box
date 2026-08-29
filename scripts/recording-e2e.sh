@@ -652,6 +652,21 @@ BKSH_PAUSE_CAM1_WAS_ACTIVE="$(bkshading_e2e_pause_stop "$CAMERA_NAME" "$CAM1_IP"
 echo "    bkshading-relay pause ($CAMERA_NAME, $CAM1_IP): was-active=$BKSH_PAUSE_CAM1_WAS_ACTIVE, now stopped for the run"
 BKSH_PAUSE_PAINTER_WAS_ACTIVE="$(bkshading_e2e_pause_stop cam2 "$PAINTER_IP" "$CAM_PW")"
 echo "    bkshading-relay pause (cam2/painter, $PAINTER_IP): was-active=$BKSH_PAUSE_PAINTER_WAS_ACTIVE, now stopped for the run"
+# review finding (issue 808): cleanup()'s own EXIT trap does not install until far below (the
+# ONLY other `trap ... EXIT` statement in this file) -- the many ordinary `exit 1` sites in the
+# `[0/8]` preflight gates between here and there (reachability, optical-injection-leg, DanteSync,
+# version/parity, clock-offset, leg-health, and more) would otherwise leave the relay stopped
+# with NO restore for the rest of THIS run. Installing a SECOND `trap ... EXIT` completely
+# REPLACES the handler for that signal (standard bash semantics) -- so this TEMPORARY trap is
+# automatically superseded the instant cleanup()'s own real `trap ... EXIT HUP INT TERM` installs
+# later, and covers every ordinary exit in between until then. (A genuine SIGKILL of the whole harness
+# stays structurally untrappable by ANY mechanism, same accepted residual risk this file already
+# carries for other pre-trap state, e.g. the #878 startup self-heal comment above -- the NEXT
+# run's own preflight is where that class of loss is caught, not this one.)
+trap '
+  bkshading_e2e_pause_restore "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW" "${BKSH_PAUSE_CAM1_WAS_ACTIVE:-0}"
+  bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
+' EXIT HUP INT TERM
 
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
 for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
