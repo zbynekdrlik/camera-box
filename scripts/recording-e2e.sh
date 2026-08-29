@@ -625,6 +625,16 @@ echo "   [ ] EXPOSURE: FIXED / manual gain (no auto-exposure drift)"
 echo " A 1/60 shutter caused the #216 ~175s optical-read gap. Fix the camera, THEN run."
 echo "=================================================================================="
 
+# issue 808 (bkshading epic): automated report-only check of the checklist above, via the
+# bkshading-relay running on the SOURCE cambox (USB-PTP/gphoto2 -> the camera BODY, see
+# .claude/rules/bkshading.md). REPORT-ONLY by design (owner M3 decision on issue 808) -- an
+# unreachable relay or an absent camera (the shading camera is ONE portable unit, cabled to
+# only one box at a time) is a quiet skip, never an abort; a genuinely slow shutter is a loud
+# WARNING, never a hard gate. Never fails the run (bkshading_preflight_report always returns 0).
+# shellcheck source=scripts/lib/bkshading-preflight.sh
+. "$HERE/lib/bkshading-preflight.sh"
+bkshading_preflight_report "$CAMERA_NAME" "$CAM1_IP"
+
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
 for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"
