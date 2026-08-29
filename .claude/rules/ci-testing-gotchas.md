@@ -732,3 +732,34 @@ Two things make this a recurring trap for ANY new sourced-lib helper that greps:
    the lib under `bash -c 'set -euo pipefail; . lib; …'`, never only `-uo` — a `-uo`-only local
    check reproduces the harness's blind spot. (Caught here only by a fresh-context reviewer running
    the lib under the real `-e` context; the `-uo` runner + harness both passed while the bug was live.)
+
+## A NEW real state mutation added BEFORE `cleanup()`'s own EXIT trap installs needs its OWN temporary trap (issue 808, 🔴 review finding)
+
+`scripts/recording-e2e.sh`'s `trap cleanup EXIT HUP INT TERM` doesn't install until far down the
+file (behind ~1400 lines of `[0/8]` preflight, all of it before `cleanup()` is even armed). That
+region has ~30 ordinary `exit 1` sites (reachability, DanteSync, version/parity, clock-offset,
+leg-health, and more — common expected failure modes, not edge cases). Adding a NEW step in that
+region that performs a REAL, must-be-undone state mutation (issue 808: `systemctl stop
+bkshading-relay` on two boxes) silently breaks the restore promise the moment ANY of those 30+
+sites fires — every prior pre-trap-declared variable in this file (`IMAG_PREV_SCENE`,
+`AV_SYNC_APPLY_OFFSET_MS`, `STRIH_PROG_SOURCE`/`STREAM_PROG_SOURCE`) only ever gets its actual
+MUTATION performed AFTER the trap installs; issue 808's pause was the first to mutate real
+external state (not just declare a variable) before line ~2100, and a fresh-context reviewer
+caught the gap a self-review missed.
+
+**Fix pattern, reusable for any future pre-trap mutation:** install a TEMPORARY, single-quoted
+`trap '...' EXIT HUP INT TERM` immediately after the mutating step, whose body undoes exactly
+that mutation. A later `trap ... EXIT` on the SAME signal set completely REPLACES the earlier
+handler (standard bash semantics) — so this temporary trap is automatically superseded the
+instant `cleanup()`'s own real trap installs further down, and it needs no explicit teardown.
+Pin the ordering with a static-anchor test (`s.find("bkshading_e2e_pause_stop ") < s.find("trap
+'\n") < s.find("' EXIT HUP INT TERM") < s.find("trap cleanup EXIT HUP INT TERM")` — see
+`tests/harness_bkshading_e2e_pause_808.rs`'s two ordering tests for the worked pattern), not just
+a functional test of the mutation/restore pair in isolation.
+
+**What this does NOT fix, and doesn't need to:** a genuine SIGKILL of the whole harness stays
+structurally untrappable by ANY mechanism (the file's own `#878`-area comment already documents
+this as an accepted risk for other pre-trap state, e.g. `camera-box.service` itself) — recovery
+from THAT class of loss is the existing NEXT-RUN startup-self-heal pattern, not something an
+in-run trap can ever cover. Don't over-scope a pre-trap-mutation fix into also solving SIGKILL
+recovery; that is separate, pre-existing, accepted scope.
