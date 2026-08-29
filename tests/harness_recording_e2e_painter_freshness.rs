@@ -155,6 +155,67 @@ fn painter_duration_slack_covers_prerecord_warmup_and_is_lockstep() {
     );
 }
 
+/// #1223 — two of three overnight E2E aborts (2026-08-29/30) were the painter's pre-record slack
+/// (240s, #747 sizing) being too short for today's worst-case pre-record budget: the
+/// frozen-camera gate (~180s worst case) + the issue-1221 settle-wait (up to a 180s budget) +
+/// render/MV gates + align/heal steps can together exceed 9 minutes on a degraded attempt, so the
+/// painter self-exits (blanking /dev/fb0, issue 660) BEFORE StartRecord even runs. The later
+/// switch-sweep self-check then reads the dark monitor as "cambox not delivering" (a mis-attributed
+/// abort — live evidence: runs 1089165656 and 1136341935 on issue 1223). 240s is no longer enough
+/// margin; 600s is the floor this test locks so the default cannot silently regress back down.
+#[test]
+fn painter_pre_record_slack_covers_2026_08_worst_case_1223() {
+    let s = read();
+    let def = s
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with("PAINTER_PRE_RECORD_SLACK_SECS="))
+        .expect("#1223: PAINTER_PRE_RECORD_SLACK_SECS default definition must still exist");
+    let n: u32 = def
+        .split(":-")
+        .nth(1)
+        .and_then(|rest| {
+            rest.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse()
+                .ok()
+        })
+        .expect("#1223: PAINTER_PRE_RECORD_SLACK_SECS must have a numeric default (${…:-NNN})");
+    assert!(
+        n >= 600,
+        "#1223: the painter pre-record slack (got {n}s) must cover today's worst-case pre-record          budget (frozen-cam gate ~180s + issue-1221 settle-wait up to 180s + render/MV/align/heal)          — 240s was live-exceeded twice overnight 2026-08-29/30, expiring the painter before          StartRecord and darkening the monitor mid-run"
+    );
+}
+
+/// #1223 fix 2: after the [7/8] StopRecord phase, the harness must send the painter a GRACEFUL
+/// `pkill -TERM -x frame-probe` before the existing #359 self-exit wait loop. Since issue 1186,
+/// frame-probe's SIGTERM handler runs the same teardown as its clean self-exit (writes the
+/// ground-truth CSV + marker log, blanks fb0) — live-proven by a systemd `stop` of the permanent
+/// painter unit producing the identical teardown sequence. This makes the #359 wait loop's own
+/// condition (process gone + fresh CSV) true within seconds regardless of how large the slack in
+/// the test above is, so raising that slack never actually lengthens a normal run's tail.
+#[test]
+fn painter_gets_graceful_term_after_stoprecord_before_exit_wait_1223() {
+    let s = read();
+    let stop_record = s
+        .find("echo \"[7/8] StopRecord")
+        .expect("#1223: the [7/8] StopRecord phase banner must still exist");
+    let deadline = s
+        .find("PAINTER_EXIT_DEADLINE=")
+        .expect("#1223: PAINTER_EXIT_DEADLINE must still exist");
+    assert!(
+        stop_record < deadline,
+        "#1223: PAINTER_EXIT_DEADLINE must come AFTER the [7/8] StopRecord phase"
+    );
+    let region = &s[stop_record..deadline];
+    assert!(
+        region.contains("pkill -TERM -x frame-probe"),
+        "#1223: a graceful `pkill -TERM -x frame-probe` must run on the painter box between the \
+         [7/8] StopRecord phase and PAINTER_EXIT_DEADLINE, so frame-probe's issue-1186 SIGTERM \
+         teardown (CSV + markers, live-proven) fires the #359 wait loop's condition within \
+         seconds instead of waiting out the enlarged pre-record slack"
+    );
+}
+
 /// Characterization: the edited script must still pass `bash -n` (no syntax break).
 #[test]
 fn recording_e2e_passes_bash_syntax_check() {
