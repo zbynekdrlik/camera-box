@@ -6412,6 +6412,10 @@ fn build_and_print_verdict_with_stream_diffs(
                             (AvSyncVerdict::Unknown, Some(_)) => "derived",
                             (AvSyncVerdict::Unknown, None) => "unknown",
                         };
+                        // #1178 (review finding): compute the effective offset ONCE so the JSON
+                        // `effective_offset_ms` and the residual below can never diverge.
+                        let cam_effective_offset =
+                            av_window::effective_offset_ms(cam_sync, derived.as_ref());
                         let mut cam_json = serde_json::json!({
                             "node": camera,
                             "windowing": if whole_recording { "whole_recording" } else { "per_window" },
@@ -6428,15 +6432,12 @@ fn build_and_print_verdict_with_stream_diffs(
                             // never a bare `av_offset_ms=null` for a camera we DO have a number for
                             // (the "silent cam2-only" the #714 one-full-test mandate forbids). The
                             // `verdict` label above still says which kind of value this is.
-                            "effective_offset_ms":
-                                av_window::effective_offset_ms(cam_sync, derived.as_ref()),
+                            "effective_offset_ms": cam_effective_offset,
                         });
                         // #1178 report-only: this camera's RESIDUAL A/V offset — its
                         // measured/effective offset with the expected calibrated video-leg removed
                         // (~0 for an aligned camera). Collected for the cross-camera summary below.
-                        if let Some(eff) =
-                            av_window::effective_offset_ms(cam_sync, derived.as_ref())
-                        {
+                        if let Some(eff) = cam_effective_offset {
                             let residual = av_window::residual_offset_ms(eff, args.av_expected_ms);
                             cam_json["residual_offset_ms"] = serde_json::json!(residual);
                             av_residuals.push(residual);
@@ -6537,17 +6538,11 @@ fn build_and_print_verdict_with_stream_diffs(
                     let av_residual_summary = av_window::residual_summary(&av_residuals);
                     av_json.insert(
                         "residual_median_ms".to_string(),
-                        match av_residual_summary.median_ms {
-                            Some(m) => serde_json::json!(m),
-                            None => serde_json::Value::Null,
-                        },
+                        serde_json::json!(av_residual_summary.median_ms),
                     );
                     av_json.insert(
                         "residual_spread_ms".to_string(),
-                        match av_residual_summary.spread_ms {
-                            Some(s) => serde_json::json!(s),
-                            None => serde_json::Value::Null,
-                        },
+                        serde_json::json!(av_residual_summary.spread_ms),
                     );
                     av_json.insert("gate_pass".to_string(), serde_json::json!(av_all_pass));
                     // #861: unambiguous machine-readable flag alongside `gate_pass` — whether this

@@ -175,7 +175,7 @@ fn run_merge_subprocess(
 }
 
 /// #861 (2026-08-06, re-armed after ASRC #803 proved stable) — a REAL, cleanly-measured av-offset
-/// (500ms) far outside the default `--av-expected-ms 0` gate tolerance MUST make the
+/// (500ms) far outside the test's explicit `--av-expected-ms 0` gate tolerance MUST make the
 /// `--merge-partials` PROCESS exit non-zero again: the AV-offset gate (#641/#624 deliverable 4)
 /// is BLOCKING again, so a failing measurement here forces the merge's overall verdict to fail —
 /// proven through the REAL subprocess. This INVERTS

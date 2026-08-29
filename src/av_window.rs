@@ -1010,5 +1010,18 @@ mod tests {
             "spread ~18.4ms, got {:?}",
             s.spread_ms
         );
+        // even n: median is the average of the two middle values (sorted [-4, 2, 8, 10])
+        let even = residual_summary(&[10.0, -4.0, 2.0, 8.0]);
+        assert_eq!(even.count, 4);
+        assert!(
+            (even.median_ms.unwrap() - 5.0).abs() < 1e-9,
+            "even-n median = (2+8)/2 = 5, got {:?}",
+            even.median_ms
+        );
+        assert!(
+            (even.spread_ms.unwrap() - 14.0).abs() < 1e-9,
+            "even-n spread = 10-(-4) = 14, got {:?}",
+            even.spread_ms
+        );
     }
 }

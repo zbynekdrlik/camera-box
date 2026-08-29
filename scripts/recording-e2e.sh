@@ -4417,12 +4417,14 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
   VERDICT_ARGS+=(--av-marker-log "$MARKER_CSV")
   echo "    #312 item 2: --av-marker-log $MARKER_CSV (fused all_cambox_av_sync)"
 fi
-# #624 deliverable 4 / #312 item 2 PR B: the +/-20ms per-camera A/V-offset gate measures each
-# camera's DEVIATION from AV_EXPECTED_MS (default 0 -- the operator's live #398 dock dialed to
-# ~0 in practice), not from a hardcoded 0. Override when the dock is intentionally dialed to a
-# nonzero value. Always passed (matches the CLI's own default) so the gate is explicit in the
-# printed command, not silently implicit.
-AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
+# #624 deliverable 4 / #312 item 2 PR B: the per-camera A/V-offset gate measures each camera's
+# DEVIATION from AV_EXPECTED_MS -- the EXPECTED MEASURED offset. #1178: the default is the
+# calibrated fixed rig video-leg (-92: monitor lag + sensor->HDMI + grabber), NOT 0 -- a correctly
+# aligned rig still MEASURES the video-leg, so gating against 0 failed cam1/cam2/cam6. This value
+# MIRRORS recording-verdict's av_window::RIG_VIDEO_LEG_OFFSET_MS (the source of truth; drift-guarded
+# by tests/harness_av_expected_calibration_parity_1178.rs). Override for an operator-dialed value.
+# Always passed so the gate is explicit in the printed command, not silently implicit.
+AV_EXPECTED_MS="${AV_EXPECTED_MS:--92}"
 # #1003: in measurement-eq mode the A/V gate must expect the value the pin+hold DESIGN implies
 # (the profile's coherent av_expected — derived so the equalized-deep pins + rebalanced hold land
 # the common A/V level there), NOT a blindly-inherited 0. With the shipped profile this IS 0, but

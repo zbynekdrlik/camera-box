@@ -205,7 +205,7 @@ fn full_path_e2e_yml_duration_defaults_to_300_for_pr_triggered_runs() {
 // every PR must pass the fused 6-camera zero-loss + delivery-latency-spread + A/V-offset gate
 // (fail-closed) to merge. recording-e2e.sh's ALL_CAMBOX=1 path self-wires everything else it
 // needs (switch schedule, cam2's continuous QPSK audio marker via its own AV_SYNC_MARKER_DEVICE/
-// CADENCE defaults, AV_EXPECTED_MS defaulting to 0) — the workflow only needs to set the ONE
+// CADENCE defaults, AV_EXPECTED_MS defaulting to the #1178 calibrated rig video-leg) — the workflow only needs to set the ONE
 // flag. Scoped to `pull_request` only (via the ternary) so a manual `workflow_dispatch` operator
 // soak keeps its existing single-camera behavior unless a future ticket adds an explicit input.
 // ---------------------------------------------------------------------------------------------
