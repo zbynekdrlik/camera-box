@@ -117,13 +117,31 @@ fn pass_verdict_classifies_the_relock_deltas() {
     assert_eq!(verdict("1 1 2 0", "1 1 2 0"), "quiet");
     assert_eq!(verdict("1 1 2 0", "2 1 2 0"), "noisy"); // relock advanced
     assert_eq!(verdict("1 1 2 0", "1 2 2 0"), "noisy"); // underrun advanced
-    assert_eq!(verdict("1 1 2 0", "1 1 3 0"), "noisy"); // dropped_due advanced
     assert_eq!(verdict("1 1 2 0", "1 1 2 1"), "noisy"); // late_hold advanced
     assert_eq!(verdict("5 5 5 5", "0 0 0 0"), "reset"); // counter reset (OBS restart)
     assert_eq!(verdict("", "1 1 2 0"), "unmeasurable"); // first observation
     assert_eq!(verdict("1 1 2", "1 1 2 0"), "unmeasurable"); // short prev
     assert_eq!(verdict("1 1 2 0 9", "1 1 2 0"), "unmeasurable"); // 5-field prev
     assert_eq!(verdict("1 1 x 0", "1 1 2 0"), "unmeasurable"); // non-integer
+}
+
+// issue 1221 follow-up: on every strih camera input the genlock FIFO decimates a 60fps source
+// down to a 30fps canvas, so `dropped_due` STRUCTURALLY advances on every audit tick -- it is not
+// a disturbance signal there. This test was SPEC-WRONG before this fix (it asserted a
+// dropped_due-only advance was "noisy", which made the quiet criterion permanently unsatisfiable on
+// every strih input -- the live run gh 33273743416 burned the full 180s budget every time). Fixed:
+// dropped_due advancing ALONE is `quiet` (structural decimation, ignored by the criterion);
+// relocks/underruns/late_holds each STILL make a pass `noisy` on their own (the real transient
+// signature); a BACKWARD dropped_due still means `reset` (an OBS restart also zeroes the decimation
+// counter, so reset detection keeps watching all four counters).
+#[test]
+fn pass_verdict_ignores_dropped_due_for_the_quiet_decision() {
+    assert_eq!(verdict("1 1 2 0", "1 1 3 0"), "quiet"); // dropped_due-only advance -- structural, ignored
+    assert_eq!(verdict("1 1 2 0", "1 1 99 0"), "quiet"); // a large dropped_due jump is still ignored
+    assert_eq!(verdict("1 1 2 0", "2 1 2 0"), "noisy"); // relocks-only advance still noisy
+    assert_eq!(verdict("1 1 2 0", "1 2 2 0"), "noisy"); // underruns-only advance still noisy
+    assert_eq!(verdict("1 1 2 0", "1 1 2 1"), "noisy"); // late_holds-only advance still noisy
+    assert_eq!(verdict("1 1 5 0", "1 1 2 0"), "reset"); // backward dropped_due alone still resets
 }
 
 // ---------------------------------------------------------------------------------------------
