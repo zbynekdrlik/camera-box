@@ -3786,6 +3786,31 @@ else
   echo "[4i/8align] #1003 floor-3 camera alignment — SKIPPED (QR_ALIGN=$QR_ALIGN, ALL_CAMBOX=${ALL_CAMBOX:-0}, measurement_eq opt-in profile owns strih pins when on)"
 fi
 
+# [4j/8settle] issue 1221 — measured genlock-FIFO settle-wait between the [4i/8align] pin writes and
+# the record step below. Each per-source latency pin write in [4i/8align] re-parameterises that
+# input's genlock FIFO -> a relock/drain/regain era (the genlock-fifo-limit-cycle class); recording
+# immediately after measured that transient, not steady-state (verdict 950927573: per-window
+# derived_uniform_fraction 0.644 -> 0.967 monotone convergence, strict-contiguity faults
+# concentrated in the head windows, tail already >= the issue-1142 floor). This step POLLS strih's
+# genlock-fifo audit relock/underrun/dropped_due/late_hold DELTAS and proceeds once every aligned
+# input SEEN in the log has gone quiet for N consecutive passes -- a WAIT ON A MEASURED signal, not
+# a blind sleep (no-timeout-band-aids). BOUNDED by a budget and FAIL-OPEN with a loud WARN: it never
+# aborts the run and never waits unbounded (downstream gates judge the recording). Runs on the
+# ALL_CAMBOX path (same path [4i/8align] + the sweep run on); E2E_GENLOCK_SETTLE=0 disables it.
+# Placed BEFORE the freeze-watch arm below so the watcher never logs the pre-record relock era. New
+# lines only, via the sourced-helper pattern (issue 675) -- no existing anchor line is edited.
+E2E_GENLOCK_SETTLE="${E2E_GENLOCK_SETTLE:-1}"
+if [ "$E2E_GENLOCK_SETTLE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  # shellcheck source=scripts/lib/genlock-settle.sh
+  . "$HERE/lib/genlock-settle.sh"
+  GENLOCK_SETTLE_WATCHED="$(camera_align_ndi_sources_excluding_csv "${PREFLIGHT_EXCLUDED_CAMS:-}")"
+  echo "[4j/8settle] issue 1221 waiting for genlock FIFO to settle after the align pin writes (inputs: ${GENLOCK_SETTLE_WATCHED:-<none>}, budget ${E2E_GENLOCK_SETTLE_BUDGET_S:-180}s)"
+  genlock_settle_wait "$STRIH_USER" "$STRIH_PW" "$STRIH" "$GENLOCK_SETTLE_WATCHED" \
+    "${E2E_GENLOCK_SETTLE_QUIET_PASSES:-2}" "${E2E_GENLOCK_SETTLE_BUDGET_S:-180}" "${E2E_GENLOCK_SETTLE_POLL_S:-7}"
+else
+  echo "[4j/8settle] issue 1221 genlock-FIFO settle-wait — SKIPPED (E2E_GENLOCK_SETTLE=$E2E_GENLOCK_SETTLE, ALL_CAMBOX=${ALL_CAMBOX:-0})"
+fi
+
 # #758 item 3 — arm the in-run freeze watch for the WHOLE recording window (StartRecord through
 # StopRecord), right before StartRecord. ALL_CAMBOX only (mirrors the [0/8]/[1/8] preflight + [2/8]/[2b/8] reverify's
 # own gating) — excludes any acked-offline camera.
