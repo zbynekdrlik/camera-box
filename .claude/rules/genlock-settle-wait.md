@@ -16,10 +16,21 @@ using the FIFO's OWN signal.
 ## The signal + the #797-immune decision
 
 - The `genlock-fifo audit '<src>':` line (`src/jitter_audit.rs`) appends ~every 5.017 s per source
-  with cumulative `relocks` / `underruns` / `dropped_due` / `late_holds` counters. "Quiet for this
-  pass" = all four **DELTAS are zero** between two consecutive snapshots of that source's LATEST
-  line. `settle` proceeds once every input SEEN in the log has been quiet for N consecutive passes
-  (default 2).
+  with cumulative `relocks` / `underruns` / `dropped_due` / `late_holds` counters. All FOUR are
+  parsed every pass, but "quiet for this pass" watches only THREE of them — `relocks`, `underruns`,
+  `late_holds` — whose **DELTAS must be zero** between two consecutive snapshots of that source's
+  LATEST line. `settle` proceeds once every input SEEN in the log has been quiet for N consecutive
+  passes (default 2).
+- **`dropped_due` is DELIBERATELY EXCLUDED from the quiet criterion (issue 1221 follow-up, gh run
+  33273743416).** On a strih camera input the genlock FIFO decimates a 60fps source down to a
+  30fps canvas, so `dropped_due` STRUCTURALLY advances on essentially every audit tick — it is the
+  FIFO doing its designed job, not a disturbance signal. Counting it made the quiet criterion
+  permanently unsatisfiable on every strih input: the first live run burned the full 180s budget
+  and fail-open WARNed every time (a healthy 'NDI cam1' audit showed received +302/tick, consumed
+  +151/tick, dropped_due +150/tick per pass, while relocks/underruns/late_holds stayed static).
+  `dropped_due` is STILL parsed and STILL watched for `reset` (any of the four counters going
+  backward — including dropped_due — still means an OBS restart / input recreation, since a
+  restart also zeroes the decimation counter); it is excluded ONLY from the quiet/noisy split.
 - **No rate, no division anywhere in the quiet decision** — it compares raw cumulative counter
   VALUES (delta == 0?), so the `#797` phantom-rate trap (a single-tick window ÷ wall-clock reads
   ~50 at a true 60) structurally cannot apply. This is the OPPOSITE approach to

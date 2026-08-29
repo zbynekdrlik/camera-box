@@ -27,9 +27,15 @@
 # tests/harness_genlock_settle_1221.rs run_sourced harness).
 #
 # THE LOAD-BEARING DECISION -- the issue-797 phantom-rate avoidance: the quiet verdict compares
-# each counter's raw cumulative value between two consecutive audit snapshots (delta == 0 ?), so it
-# NEVER divides by a wall-clock / poll interval. There is no rate here at all, only a value-to-value
-# delta, so the single-tick-window phantom-50 trap that bit cadence-health cannot apply.
+# each WATCHED counter's raw cumulative value between two consecutive audit snapshots (delta == 0 ?),
+# so it NEVER divides by a wall-clock / poll interval. There is no rate here at all, only a
+# value-to-value delta, so the single-tick-window phantom-50 trap that bit cadence-health cannot
+# apply. NOTE (issue 1221 follow-up): all FOUR counters (relocks/underruns/dropped_due/late_holds)
+# are parsed and all four are watched for `reset` (a backward counter always means an OBS restart),
+# but `dropped_due` is EXCLUDED from the quiet/noisy split -- on a strih camera input the FIFO
+# decimates a 60fps source to a 30fps canvas, so dropped_due STRUCTURALLY advances every tick and is
+# not a disturbance signal. Only relocks/underruns/late_holds gate quiet -- see
+# genlock_settle_pass_verdict's own doc comment for the full detail.
 #
 # Source-only: pure functions, no side effects at source time. The runner reuses win_ssh_run
 # (scripts/lib/win-ssh-exec.sh, sourced by the caller) for the default OBS-log tail read.
@@ -67,15 +73,26 @@ genlock_settle_latest_counters() {
 
 # genlock_settle_pass_verdict <prev4> <curr4> -> stdout: quiet | noisy | reset | unmeasurable.
 #   Each arg is a 4-field `<relocks> <underruns> <dropped_due> <late_holds>` string (the output of
-#   genlock_settle_latest_counters).
+#   genlock_settle_latest_counters). All four fields are parsed and all four are watched for
+#   `reset`, but `dropped_due` is EXCLUDED from the quiet/noisy split (issue 1221 follow-up, verdict
+#   from gh run 33273743416): on a strih camera input the genlock FIFO decimates a 60fps source down
+#   to a 30fps canvas, so dropped_due STRUCTURALLY advances on every audit tick -- it is not a
+#   disturbance signal there, and counting it made the quiet criterion permanently unsatisfiable on
+#   every strih input (the settle-wait burned its full budget on every run). The real
+#   relock/drain/regain transient this settle-wait exists to detect shows up in relocks/underruns/
+#   late_holds, never in dropped_due alone.
 #     unmeasurable -- either side empty / not exactly four non-negative integers (a first
 #                     observation, or a source that vanished from the log this pass). Reseed
 #                     upstream; never counts toward a quiet streak.
-#     reset        -- any current counter is BELOW the previous one (the cumulative counter went
-#                     backward => OBS restarted / the input was recreated). Reseed, streak resets.
-#     quiet        -- all four deltas are exactly zero across this pass (no relock disturbance in
-#                     this ~5s window).
-#     noisy        -- at least one of relocks/underruns/dropped_due/late_holds advanced.
+#     reset        -- any current counter (INCLUDING dropped_due) is BELOW the previous one (the
+#                     cumulative counter went backward => OBS restarted / the input was recreated;
+#                     a restart also zeroes the decimation counter, so reset detection keeps
+#                     watching all four). Reseed, streak resets.
+#     quiet        -- relocks/underruns/late_holds deltas are all exactly zero across this pass (no
+#                     relock disturbance in this ~5s window); a dropped_due advance alone does NOT
+#                     prevent quiet -- it is structural decimation, not disturbance.
+#     noisy        -- at least one of relocks/underruns/late_holds advanced. dropped_due advancing
+#                     alone is NOT noisy.
 genlock_settle_pass_verdict() {
   local prev="${1:-}" curr="${2:-}"
   local pr pu pd pl cr cu cd cl extra_p extra_c
@@ -90,7 +107,10 @@ genlock_settle_pass_verdict() {
   if [ "$cr" -lt "$pr" ] || [ "$cu" -lt "$pu" ] || [ "$cd" -lt "$pd" ] || [ "$cl" -lt "$pl" ]; then
     printf 'reset\n'; return 0
   fi
-  if [ "$cr" -eq "$pr" ] && [ "$cu" -eq "$pu" ] && [ "$cd" -eq "$pd" ] && [ "$cl" -eq "$pl" ]; then
+  # dropped_due is DELIBERATELY excluded here -- see the function's doc comment above (issue 1221
+  # follow-up): it is a structural 60fps-to-30fps decimation counter on strih inputs, not a
+  # disturbance signal, so it is parsed + watched for `reset` above but never gates `quiet`.
+  if [ "$cr" -eq "$pr" ] && [ "$cu" -eq "$pu" ] && [ "$cl" -eq "$pl" ]; then
     printf 'quiet\n'; return 0
   fi
   printf 'noisy\n'
