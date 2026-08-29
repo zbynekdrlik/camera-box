@@ -163,6 +163,26 @@ DIST=""
 cleanup() { [ -n "$DIST" ] && rm -rf "$DIST"; :; }
 trap cleanup EXIT
 
+# --- #1138 frame-probe-ONLY mode ----------------------------------------------------------
+# --frame-probe WITHOUT --binary/--run deploys ONLY the cam2 painter (the auto-align path in
+# scripts/lib/frame-probe-parity-align.sh), NEVER a camera-box fleet deploy. The align must swap
+# just /usr/local/bin/frame-probe on cam2 -- re-deploying camera-box to the whole fleet would be a
+# scope violation (and would collide with the camera-box parity align that already handles it). A
+# bare / --binary / --run invocation is UNCHANGED (camera-box fleet deploy + the optional
+# frame-probe tail below).
+if [ -n "$FRAME_PROBE_BIN" ] && [ -z "$BINARY" ] && [ -z "$RUN_ID" ]; then
+  [ -f "$FRAME_PROBE_BIN" ] || { err "--frame-probe '$FRAME_PROBE_BIN' not found"; exit 1; }
+  declare -a FAILED=()
+  deploy_frame_probe_to_painter
+  echo "================================================================"
+  if [ "${#FAILED[@]}" -eq 0 ]; then
+    log "FRAME-PROBE DEPLOYED: cam2 painter aligned to the requested build"
+    exit 0
+  fi
+  err "FRAME-PROBE DEPLOY FAILED — issues: ${FAILED[*]}"
+  exit 1
+fi
+
 # --- 1. Obtain the pinned CI binary -------------------------------------------------------
 if [ -n "$BINARY" ]; then
   [ -f "$BINARY" ] || { err "--binary '$BINARY' not found"; exit 1; }

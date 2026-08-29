@@ -265,6 +265,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # treadmill). Mixed/unread fleets are NEVER auto-deployed — the gate keeps deciding those.
 # shellcheck source=scripts/lib/camera-box-parity-align.sh
 . "$HERE/lib/camera-box-parity-align.sh"
+# shellcheck source=scripts/lib/frame-probe-parity-align.sh
+. "$HERE/lib/frame-probe-parity-align.sh"   # #1138: pre-gate auto-align of cam2's steady-state painter to the candidate
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -1016,6 +1018,18 @@ cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
   --linux "$CAMBOX_VERSION_LINUX" \
   --candidate-pin "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$HERE/../Cargo.toml" | head -1)"
+
+# issue 1138: pre-gate auto-align of the cam2 STEADY-STATE painter (/usr/local/bin/frame-probe,
+# cam2-painter.service) to THIS run's candidate build — the frame-probe sibling of the camera-box
+# parity align above. Between dev->main merges the painter is auto-deployed by NOTHING (ci.yml
+# deploy-fleet is main-only), so it silently LAGS the current build (the 2026-08-29 incident: an
+# uncompensated QPSK marker + a dark aux tick until a manual redeploy). This deploys the candidate
+# frame-probe (the clean probe-tools CI artifact) to cam2 when stale, so pin+deploy advance together
+# (orphan-PROOF), and exports FRAME_PROBE_ALIGN_CI_BIN so the [1/8] pin below verifies against the
+# SAME artifact bytes. Best-effort (ALWAYS returns 0); the report-only [1/8] pin is the loud signal.
+# cam2-only (frame-probe lives only on the painter box) and unconditional (cam2 is the painter
+# regardless of active-set membership); honours CAMBOX_OFFLINE_ACK + the --no-main-pin soak escape.
+frame_probe_parity_align_before_gate "cam2=root@$PAINTER_IP"
 
 # dev1<->painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326, #312 Phase-2 robustness). The
 # all-cambox sweep ([6/8] below) stamps each program-switch WINDOW boundary on dev1's
@@ -2180,18 +2194,21 @@ else
   cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report --bin phase-sync-active-floor-gate  # airuleset:build-ok
 fi
 
-# [1/8] frame-probe (cam2 painter) sha-pin report (#1138) — engage the merged report-only alarm now
-# that the current-build frame-probe exists on $PROBE_BIN_DIR (built/fetched in the [1/8] step just
-# above). It could NOT be wired into the [0/8] camera-box parity gate: that gate runs BEFORE this
-# build, so $PROBE_BIN_DIR/frame-probe does not exist yet there and the report would stay silently
-# dormant. The report-only mode runs ONLY the report (no second camera-box parity table) and ALWAYS
-# exits 0; the `|| true` is belt-and-suspenders — a lagging painter SCREAMS but never fails this run.
-# cam2-scoped: frame-probe is installed ONLY on the painter box (setup-device.sh STEP 3b,
-# cam2_is_painter_box), so a fleet-wide read would UNKNOWN-spam every non-painter box.
-echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs this run's CI build (#1138, report-only)"
+# [1/8] frame-probe (cam2 painter) sha-pin report (#1138) — the loud PIN that CONFIRMS the [0/8]
+# frame-probe auto-align above. Expected = FRAME_PROBE_ALIGN_CI_BIN (the clean probe-tools CI
+# artifact the [0/8] align fetched + deployed to cam2 — the TRUE deploy source of truth), falling
+# back to $PROBE_BIN_DIR/frame-probe when the align was skipped (--no-main-pin soak) or could not
+# fetch (gh unavailable). Pinning against the CI artifact rather than the dev1 LOCAL build makes the
+# sha compare exact (both sides = the same artifact bytes, so no build-reproducibility dependency).
+# The report-only mode runs ONLY the report (no second camera-box parity table) and ALWAYS exits 0;
+# the `|| true` is belt-and-suspenders — a residually-lagging painter (align could not complete)
+# SCREAMS + names the fix but never fails this run (the hard-gate flip is the supervisor's #758
+# two-step follow-up once the auto-align is rig-proven). cam2-scoped: frame-probe is installed ONLY
+# on the painter box (setup-device.sh STEP 3b, cam2_is_painter_box).
+echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs the candidate CI build (#1138, report-only, confirms the [0/8] align)"
 "$HERE/camera-box-version-gate.sh" \
   --frame-probe-only \
-  --frame-probe-expected-bin "$PROBE_BIN_DIR/frame-probe" \
+  --frame-probe-expected-bin "${FRAME_PROBE_ALIGN_CI_BIN:-$PROBE_BIN_DIR/frame-probe}" \
   --linux "cam2=root@$PAINTER_IP" || true
 
 # #758 item 1 (continued) — per-camera NDI liveness. Needs frozen-camera-gate (just
