@@ -39,6 +39,42 @@ upstream residual is genuinely bounded again and the sick leg is fixed/excluded 
 `overall_pass_term == relaxed_pass` and the walked const governs the blocking fold again. #1132's
 disarm, #1031's walk-down, and #1169's singleton allowance are orthogonal.
 
+## #1220 (owner mandate, 2026-08-29) — seam 2 RE-ARMED by OVERRIDE, not by meeting the precondition above
+
+The paragraph above stated seam 2's restore precondition as "the sick leg is fixed/excluded"
+(#1110/#1134). **That precondition was NOT met when seam 2 was re-armed** — #1220 is the owner's
+2026-07-31 standing soft-release directive ("jemne uvoľniť gate na zelenú + tickety na pritvrdenie,
+potom ticket po tickete") applied directly to this seam: two same-day full-cycle runs (1989954227,
+797081170) both passed `all_cambox_av_sync` for the first time, and `all_cambox_continuity` failed
+purely on windows sitting within the ALREADY-CALIBRATED `<=3` channel but over the tighter #1169
+`<=1/<=1` band. The owner directive overrides the stated precondition outright, rather than being
+evidence the precondition was satisfied — do not read `copies_gaps_tolerance_gates_overall_pass()
+== true` as proof the CAM1 leg is fixed; check #1110/#1134's own status separately if that matters.
+`WINDOW_COPIES_GAPS_TOLERANCE` is now LIVE again (gates `overall_pass`, not just `relaxed_pass`) and
+the walk-down commitment stays open on #1220 (not #1031) going forward.
+
+**Reusable shape for a FUTURE seam like this one — "precedence supersession", distinct from every
+flag-flip pattern in `gate-allowance-restore-red-green.md`:** re-arming `copies_gaps_tolerance_
+gates_overall_pass()` needed ZERO change to seam 4's own flag (`segment_singleton_allowance_gates_
+overall_pass()`, still hardcoded `true`) — `decide()`'s existing `if`/`else if` chain already made
+seam 2 take precedence the moment it returned `true`, and seam 4 became an automatic GRADUATED
+FALLBACK (if a future step disarms seam 2 again, seam 4 resumes governing on its own, with no code
+change needed there either). When a NEW seam is layered on top of an existing tighter one via an
+`if`/`else if` chain (rather than a flat boolean OR), re-arming the OUTER (wider) seam is a
+ONE-FUNCTION flip that transparently supersedes the inner one — verify this by testing the inner
+seam's pure helper fns DIRECTLY (not just through the combined decision fn) to prove they read as
+permanently dormant, the way `src/window_gate.rs`'s `singleton_helper_fns_are_dormant_while_the_
+1220_tolerance_channel_is_armed` test does.
+
+**Even a "doc/test-only, self-adjusting, zero production logic change" claim still needs the review
+step.** The #1220 gated adversarial review caught 3 factual-accuracy findings — none in old code,
+all in freshly-written prose describing the SAME live-run evidence the worker itself had just
+gathered: miscounting which of four live-run windows were genuinely OVER a band vs already ABSORBED
+by it, an unconditional print line whose neighboring guard had gone stale, and a JSON branch that
+checked only ONE of the two now-relevant flags. Hand-written narrative citing specific live numbers
+is exactly the kind of claim a second pass catches that `cargo fmt --all --check` (a pure syntax
+check) never can.
+
 ## #1169 (owner, 2026-08-22) — the `<=1/<=1` SINGLETON allowance (seam 4) + its re-tighten to zero
 
 Soft-release to green with a re-tighten trail, exactly the owner's 2026-07-31 doctrine ("jednu
