@@ -9318,14 +9318,17 @@ mod tests {
     /// 1 → 2 → 3 on 2026-08-06, ticket 889 comments 5198131539 / 5200533407) — it must still be
     /// COMPUTED and printed in the verdict JSON and must still fail that window's STRICT `pass`.
     /// (Issue 1132, 2026-08-19) made a bare copy ALSO fail `all_cambox_continuity.overall_pass` —
-    /// the `<=3` tolerance rescue is disarmed (dormant, reported-only). **SUPERSEDED by issue 1169
-    /// (owner, 2026-08-22): a `<=1/<=1` copies/gaps SINGLETON is now ABSORBED back into
-    /// `overall_pass` (the designed issue-1167 paced-trickle + FIFO stale_replay residual) —
-    /// loudly, through its OWN tighter seam, never a re-arm of the disarmed `<=3` rescue** — and
-    /// `windows_failed_report_only` must still report it (strict-zero visibility is unaffected by
-    /// either seam). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
-    /// implied copies never gate at all, which stopped being true once the re-gate landed; a
-    /// single copy still passes because 1 <= the tolerance, not because the term is inert.
+    /// the `<=3` tolerance rescue was disarmed. Issue 1169 (owner, 2026-08-22) then absorbed a
+    /// `<=1/<=1` SINGLETON back in through its OWN tighter seam, never a re-arm of the `<=3`
+    /// rescue. **SUPERSEDED by issue 1220 (owner mandate, 2026-08-29): the `<=3` tolerance channel
+    /// IS re-armed** (see `camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass` for
+    /// the full decision record) — a single copy is absorbed through THAT channel now, and the
+    /// issue-1169 singleton band is dormant (superseded by `decide()`'s `if`/`else if`
+    /// precedence, never deleted). `windows_failed_report_only` must still report it
+    /// (strict-zero visibility is unaffected by any of the three seams). Renamed from
+    /// `..._copy_alone_is_report_only_end_to_end_889` — the old name implied copies never gate at
+    /// all, which stopped being true once the re-gate landed; a single copy still passes because
+    /// 1 <= the tolerance, not because the term is inert.
     #[test]
     fn all_cambox_continuity_single_copy_within_tolerance_passes_overall_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
@@ -9428,19 +9431,18 @@ mod tests {
         assert_eq!(
             seg["overall_pass"],
             serde_json::json!(true),
-            "1169: a single copy is now ABSORBED into overall_pass via the issue-1169 <=1/<=1 \
-             singleton allowance (the designed issue-1167 paced-trickle + FIFO stale_replay \
-             residual) -- loudly, through its OWN tighter seam; the issue-1132 disarmed <=3 \
-             tolerance rescue stays dormant, this is NOT a re-arm of it: {seg}"
+            "1220: a single copy is now ABSORBED into overall_pass via the RE-ARMED issue-1220 \
+             <=3 tolerance channel (owner mandate, 2026-08-29) -- the issue-1169 <=1/<=1 \
+             singleton band is dormant (superseded by precedence), not what did the absorbing: {seg}"
         );
         assert_eq!(
             seg["windows_singleton_allowance_consumed"],
-            serde_json::json!(1),
-            "1169: exactly the one window consumed the singleton allowance: {seg}"
+            serde_json::json!(0),
+            "1220: the singleton mechanism never fires while the tolerance channel is armed: {seg}"
         );
         assert!(
-            !seg["segments"][0]["singleton_allowance_note"].is_null(),
-            "1169: the absorbed copy carries a LOUD per-segment note (never silent): {seg}"
+            seg["segments"][0]["singleton_allowance_note"].is_null(),
+            "1220: no singleton note -- the tolerance channel absorbed this, not the singleton: {seg}"
         );
         assert_eq!(
             seg["windows_failed_report_only"],
@@ -9474,6 +9476,11 @@ mod tests {
     /// an accurate description once the tolerance moved past 1; the fixtures below build AT the
     /// tolerance and tolerance+1 through the const instead of hardcoded literals, so this test
     /// tracks whatever the tolerance is calibrated to across every recalibration.
+    ///
+    /// **This invariant was briefly NOT what governed `overall_pass` between #1132 (2026-08-19,
+    /// disarmed the tolerance rescue for the blocking verdict) and #1220 (owner mandate,
+    /// 2026-08-29, re-armed it)** — fixture (a) below tracked that disarmed reality in between.
+    /// #1220 restores this doc's original framing exactly.
     #[test]
     fn copies_gaps_tolerance_boundary_gates_overall_pass_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
@@ -9618,9 +9625,10 @@ mod tests {
         );
         assert_eq!(
             at_seg["overall_pass"],
-            serde_json::json!(false),
-            "1132 strict: copies AND gaps at the (dormant) tolerance now FAIL overall_pass -- \
-             the rescue is disarmed: clean={clean}, at_tolerance={at_tolerance}"
+            serde_json::json!(true),
+            "1220: copies AND gaps AT the re-armed tolerance must NOT swing overall_pass -- the \
+             tolerance channel is armed again (owner mandate, 2026-08-29): \
+             clean={clean}, at_tolerance={at_tolerance}"
         );
         assert_eq!(
             at_seg["windows_over_copies_gaps_tolerance"],
