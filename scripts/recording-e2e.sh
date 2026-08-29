@@ -635,6 +635,24 @@ echo "==========================================================================
 . "$HERE/lib/bkshading-preflight.sh"
 bkshading_preflight_report "$CAMERA_NAME" "$CAM1_IP"
 
+# issue 808 (bkshading epic): PAUSE bkshading-relay on the two MEASUREMENT-CRITICAL camboxes
+# (the SOURCE camera + cam2/painter) for the duration of THIS run -- causally proven to degrade
+# capture/emit on both (cam1 Cam Link 58.6 vs 60.0 fps stop/start isolation; cam2 dual-QR window
+# quality correlation, a 3-core box already running camera-box RT + the painter). Declared BEFORE
+# cleanup()'s own EXIT trap (`trap ... EXIT HUP INT TERM`) installs further below (recording-e2e-cleanup-composition.md's own
+# convention) so a cleanup() fired by an EARLY abort still reads the safe pre-trap default (0 =
+# do not restore) instead of an uninitialized variable. Records each box's PRIOR active state so
+# cleanup() only re-starts the relay where THIS run actually found it running -- never on a box
+# the operator deliberately silenced (the current interim manual mitigation on cam1/cam2).
+BKSH_PAUSE_CAM1_WAS_ACTIVE=0
+BKSH_PAUSE_PAINTER_WAS_ACTIVE=0
+# shellcheck source=scripts/lib/bkshading-e2e-pause.sh
+. "$HERE/lib/bkshading-e2e-pause.sh"
+BKSH_PAUSE_CAM1_WAS_ACTIVE="$(bkshading_e2e_pause_stop "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW")"
+echo "    bkshading-relay pause ($CAMERA_NAME, $CAM1_IP): was-active=$BKSH_PAUSE_CAM1_WAS_ACTIVE, now stopped for the run"
+BKSH_PAUSE_PAINTER_WAS_ACTIVE="$(bkshading_e2e_pause_stop cam2 "$PAINTER_IP" "$CAM_PW")"
+echo "    bkshading-relay pause (cam2/painter, $PAINTER_IP): was-active=$BKSH_PAUSE_PAINTER_WAS_ACTIVE, now stopped for the run"
+
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
 for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"
@@ -1950,6 +1968,13 @@ fi"
   fi
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" \
     "$(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP FINAL")" || true
+  # issue 808: RESTORE bkshading-relay on the two boxes the [0/8] pause step above stopped, but
+  # ONLY where it found the relay genuinely ACTIVE beforehand -- never re-activates a relay the
+  # operator deliberately silenced. Best-effort (never blocks the trap, #328/#649/#712/#713) and
+  # placed LAST so this non-safety-critical restore never delays the device-restore phase above.
+  echo "[cleanup] #808 bkshading-relay restore (was-active: $CAMERA_NAME=$BKSH_PAUSE_CAM1_WAS_ACTIVE, cam2=$BKSH_PAUSE_PAINTER_WAS_ACTIVE)"
+  bkshading_e2e_pause_restore "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW" "${BKSH_PAUSE_CAM1_WAS_ACTIVE:-0}"
+  bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
 }
 # #657: a plain foreground `sleep N` defers ALL signal handling — trapped OR default — until
 # that `wait4()` syscall returns on its own, i.e. until the sleep completes naturally. This is
