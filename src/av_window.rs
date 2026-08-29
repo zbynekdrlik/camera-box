@@ -163,6 +163,14 @@ pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 90.0;
 /// residual median is +0.0ms, spread 18.4ms — every camera well inside ±90.
 pub const RIG_VIDEO_LEG_OFFSET_MS: f64 = -92.0;
 
+// Compile-time pins (the capture_rate_health.rs `const _` idiom — a runtime assert on a const
+// value trips clippy::assertions_on_constants): the calibration must stay a REAL negative
+// video-leg (never the old 0.0), and it stays pinned to the verdict-845554984 5-camera cluster
+// median −92.0 — a rig video-chain change (grabber/monitor/camera swap) is the only reason to
+// re-derive it.
+const _: () = assert!(RIG_VIDEO_LEG_OFFSET_MS < -1.0);
+const _: () = assert!(RIG_VIDEO_LEG_OFFSET_MS == -92.0);
+
 /// PASS iff `sync` is [`AvSyncVerdict::Measured`] AND its offset is within
 /// [`AV_OFFSET_GATE_TOLERANCE_MS`] of `expected_ms`. [`AvSyncVerdict::Unknown`] — whether from
 /// zero contributing windows (the camera never appeared in this sweep) or thin/scattered data
@@ -945,19 +953,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn video_leg_calibration_is_the_negative_cluster_median_not_zero_1178() {
-        // The constant must be a real negative calibration, not the old 0.0 — pinned to the
-        // verdict-845554984 5-camera median (−92.0, robust to the cam3 outlier).
-        assert!(
-            RIG_VIDEO_LEG_OFFSET_MS < -1.0,
-            "RIG_VIDEO_LEG_OFFSET_MS must be a real negative video-leg calibration, got {RIG_VIDEO_LEG_OFFSET_MS}"
-        );
-        assert!(
-            (RIG_VIDEO_LEG_OFFSET_MS - (-92.0)).abs() < 1e-9,
-            "calibration pinned to the verdict-845554984 cluster median −92.0; a rig video-chain change (grabber/monitor/camera swap) is the only reason to re-derive it"
-        );
-    }
+    // The negative-calibration + exact-value pins for RIG_VIDEO_LEG_OFFSET_MS moved to
+    // compile-time `const _: () = assert!(...)` items beside the const itself (a runtime
+    // assert on a const value trips clippy::assertions_on_constants).
 
     #[test]
     fn calibration_still_catches_a_global_drift_never_masks_it_1178() {
