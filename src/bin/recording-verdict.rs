@@ -381,7 +381,7 @@ struct Args {
     /// 1003, whose stream-hold rebalance lands the measured offset at ~0) passes its own explicit
     /// `--av-expected-ms 0`, which cleanly REPLACES the calibrated default so the leg is never
     /// double-counted; an operator dialing a nonzero source offset overrides it the same way.
-    #[arg(long, default_value_t = camera_box::av_window::RIG_VIDEO_LEG_OFFSET_MS)]
+    #[arg(long, allow_negative_numbers = true, default_value_t = camera_box::av_window::RIG_VIDEO_LEG_OFFSET_MS)]
     av_expected_ms: f64,
     /// #855: operator-acknowledged offline boxes, threaded from the shell-side
     /// `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt` ack (`scripts/lib/cambox-offline-ack.sh`) across
