@@ -13,9 +13,14 @@
 //! late_holds counters -- so the settle WAITS ON A MEASURED signal, it is NOT a blind sleep.
 //!
 //! THE LOAD-BEARING DECISION -- the issue-797 phantom-rate avoidance: the quiet verdict compares
-//! each counter's raw cumulative value between two consecutive snapshots (delta == 0 ?); there is no
-//! rate and no wall-clock / poll-interval divisor at all, so the single-tick phantom-50 trap cannot
-//! apply.
+//! each WATCHED counter's raw cumulative value between two consecutive snapshots (delta == 0 ?);
+//! there is no rate and no wall-clock / poll-interval divisor at all, so the single-tick phantom-50
+//! trap cannot apply.
+//!
+//! FOLLOW-UP (this file's own fix below): all four counters are parsed, and all four are watched
+//! for `reset`, but `dropped_due` is EXCLUDED from the quiet/noisy split -- on a strih camera input
+//! the FIFO decimates a 60fps source to a 30fps canvas, so dropped_due STRUCTURALLY advances on
+//! every audit tick and is not a disturbance signal. Only relocks/underruns/late_holds gate quiet.
 //!
 //! Same convention as `tests/harness_cadence_health_794.rs`: source the REAL lib (source-only, no
 //! side effects) and exercise the pure functions + the injectable-seam runner directly. RED before
