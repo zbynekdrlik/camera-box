@@ -156,20 +156,28 @@ pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 90.0;
 /// take the MEDIAN of the judged per-camera `av_offset_ms` from a full-fleet E2E gate run
 /// (`--av-expected-ms 0`, no physical compensation). Median (not mean) for robustness to a single
 /// per-camera outlier; sub-ms precision is noise (per-camera MAD 5–8ms, cross-camera spread ~18ms).
+/// A non-zero value is legitimate ONLY after such a rig-verified physical video-chain change, cited
+/// with fresh full-fleet verdict evidence — never re-derived from a stale/suspect measurement run.
 ///
-/// Current value −92.0: verdict 845554984 (run 33176192564, 2026-08-29) judged offsets cam1
-/// −95.17, cam2 −91.98, cam3 −76.75, cam6 −93.92, cam7 −88.63 → median −91.98 → −92.0 (mean −89.3
-/// is within noise; cam3 −76.75 is the mild outlier the median rejects). After subtraction the
-/// residual median is +0.0ms, spread 18.4ms — every camera well inside ±90.
-pub const RIG_VIDEO_LEG_OFFSET_MS: f64 = -92.0;
+/// ## RE-DERIVATION 2026-08-29 (issue 1178) — the −92.0 calibration was STALE, not a real leg.
+/// Verdict 845554984 (run 33176192564) judged offsets cam1 −95.17, cam2 −91.98, cam3 −76.75, cam6
+/// −93.92, cam7 −88.63 → median −92.0, which this constant was briefly calibrated to. That cluster
+/// turned out to be a STALE-PAINTER artifact (the issue-1138 class): the cam2 frame-probe painter
+/// emitting the QPSK marker was an un-pinned, arbitrarily-old build that did not compensate the
+/// marker's own emit delay. The very next full-fleet run AFTER the issue-1138 painter redeploy
+/// (sha f42c66917455) — verdict 576990285 — measured cam1 +2.5, cam2 +7.9, cam3 +24.9, cam6 +9.7,
+/// cam7 +6.7ms: the −92 residual channel correctly flagged this as a +99.9ms median / 22.4ms
+/// spread global shift (proving the report-only residual channel earns its keep — see
+/// [`residual_summary`]). With the marker delay now compensated AT SOURCE there is no fixed
+/// video-leg left to subtract, so the constant returns to 0.0.
+pub const RIG_VIDEO_LEG_OFFSET_MS: f64 = 0.0;
 
-// Compile-time pins (the capture_rate_health.rs `const _` idiom — a runtime assert on a const
-// value trips clippy::assertions_on_constants): the calibration must stay a REAL negative
-// video-leg (never the old 0.0), and it stays pinned to the verdict-845554984 5-camera cluster
-// median −92.0 — a rig video-chain change (grabber/monitor/camera swap) is the only reason to
-// re-derive it.
-const _: () = assert!(RIG_VIDEO_LEG_OFFSET_MS < -1.0);
-const _: () = assert!(RIG_VIDEO_LEG_OFFSET_MS == -92.0);
+// Compile-time pin (the capture_rate_health.rs `const _` idiom — a runtime assert on a const
+// value trips clippy::assertions_on_constants): the marker delay is compensated at source (issue
+// 1138 painter fix), so no fixed video-leg constant is needed — pinned to 0.0. A rig video-chain
+// change (grabber/monitor/camera swap) is the only reason to re-derive a non-zero value, and it
+// must cite fresh full-fleet verdict evidence, never a stale-painter cluster like 845554984.
+const _: () = assert!(RIG_VIDEO_LEG_OFFSET_MS == 0.0);
 
 /// PASS iff `sync` is [`AvSyncVerdict::Measured`] AND its offset is within
 /// [`AV_OFFSET_GATE_TOLERANCE_MS`] of `expected_ms`. [`AvSyncVerdict::Unknown`] — whether from
@@ -924,38 +932,49 @@ mod tests {
     // #1178 — fixed video-leg calibration + report-only residual channel
     // -----------------------------------------------------------------
 
-    /// The fresh full-fleet cluster from verdict 845554984 (run 33176192564, 2026-08-29): every
-    /// judged camera's measured A/V offset. cam1/cam2/cam6 fall 2-5ms OUTSIDE ±90 of 0 (the
-    /// pre-#1178 default) and BLOCK the run; all five land well inside ±90 of the calibrated leg.
-    const FRESH_CLUSTER_845554984: [f64; 5] =
+    /// The STALE-PAINTER cluster from verdict 845554984 (run 33176192564, 2026-08-29): every
+    /// judged camera's measured A/V offset with an un-pinned, uncompensated cam2 frame-probe
+    /// painter (the issue-1138 class). Kept ONLY as a negative fixture: the recalibrated
+    /// RIG_VIDEO_LEG_OFFSET_MS=0.0 must REJECT it (three cameras fall outside ±90) — a stale
+    /// measurement run must never be silently re-accepted as calibration data.
+    const STALE_PAINTER_CLUSTER_845554984: [f64; 5] =
         [-95.166_666, -91.979_166, -76.75, -93.916_666, -88.625];
 
+    /// The fresh full-fleet cluster from verdict 576990285 — the first complete run AFTER the
+    /// issue-1138 painter redeploy (sha f42c66917455, 2026-08-29): every judged camera's measured
+    /// A/V offset, now delay-compensated at source. All five land comfortably inside ±90 of the
+    /// recalibrated RIG_VIDEO_LEG_OFFSET_MS = 0.0 — no leg subtraction is needed any more.
+    const FRESH_CLUSTER_576990285: [f64; 5] = [2.5, 7.9, 24.9, 9.7, 6.7];
+
     #[test]
-    fn fresh_cluster_845554984_needs_the_video_leg_calibration_to_pass_1178() {
-        // RED baseline: against the raw expected_ms=0 (the pre-#1178 default) the negative cluster
-        // fails for exactly the three cameras past ±90 (cam1/cam2/cam6).
-        let fails_at_zero: Vec<f64> = FRESH_CLUSTER_845554984
-            .iter()
-            .copied()
-            .filter(|&off| !av_offset_gate_pass(&measured(off), 0.0))
-            .collect();
-        assert_eq!(
-            fails_at_zero.len(),
-            3,
-            "pre-#1178: exactly cam1/cam2/cam6 (< -90) must fail vs expected_ms=0, got {fails_at_zero:?}"
-        );
-        // GREEN: against the calibrated video-leg default, EVERY judged camera passes with margin.
-        for &off in FRESH_CLUSTER_845554984.iter() {
+    fn fresh_cluster_576990285_passes_the_recalibrated_zero_video_leg_1178() {
+        // GREEN: the painter-fix cluster passes the gate against the recalibrated (0.0) leg with
+        // large margin — the video leg is now compensated at the source, not by a calibration
+        // constant.
+        for &off in FRESH_CLUSTER_576990285.iter() {
             assert!(
                 av_offset_gate_pass(&measured(off), RIG_VIDEO_LEG_OFFSET_MS),
-                "camera at {off}ms must pass vs calibrated RIG_VIDEO_LEG_OFFSET_MS={RIG_VIDEO_LEG_OFFSET_MS}"
+                "camera at {off}ms must pass vs recalibrated RIG_VIDEO_LEG_OFFSET_MS={RIG_VIDEO_LEG_OFFSET_MS}"
             );
         }
+        // REJECTED: the stale-painter cluster (issue 1138 class artifact) must NOT pass any more —
+        // exactly cam1/cam2/cam6 (< -90 from the recalibrated 0.0 leg) fail, documenting that the
+        // stale-painter world is rejected, never silently re-derived into a calibration constant.
+        let fails_now: Vec<f64> = STALE_PAINTER_CLUSTER_845554984
+            .iter()
+            .copied()
+            .filter(|&off| !av_offset_gate_pass(&measured(off), RIG_VIDEO_LEG_OFFSET_MS))
+            .collect();
+        assert_eq!(
+            fails_now.len(),
+            3,
+            "stale-painter cluster: exactly cam1/cam2/cam6 (< -90 from the recalibrated 0.0 leg) must fail, got {fails_now:?}"
+        );
     }
 
-    // The negative-calibration + exact-value pins for RIG_VIDEO_LEG_OFFSET_MS moved to
-    // compile-time `const _: () = assert!(...)` items beside the const itself (a runtime
-    // assert on a const value trips clippy::assertions_on_constants).
+    // The exact-value pin for RIG_VIDEO_LEG_OFFSET_MS moved to a compile-time
+    // `const _: () = assert!(...)` item beside the const itself (a runtime assert on a const
+    // value trips clippy::assertions_on_constants).
 
     #[test]
     fn calibration_still_catches_a_global_drift_never_masks_it_1178() {
@@ -975,7 +994,12 @@ mod tests {
 
     #[test]
     fn residual_offset_is_measured_minus_expected_1178() {
-        assert!((residual_offset_ms(-92.0, RIG_VIDEO_LEG_OFFSET_MS) - 0.0).abs() < 1e-9);
+        // A camera measured exactly at the calibrated leg has residual 0 — symbolic, so this
+        // stays true across any future re-derivation of RIG_VIDEO_LEG_OFFSET_MS.
+        assert!(
+            (residual_offset_ms(RIG_VIDEO_LEG_OFFSET_MS, RIG_VIDEO_LEG_OFFSET_MS) - 0.0).abs()
+                < 1e-9
+        );
         assert!((residual_offset_ms(-76.75, -92.0) - 15.25).abs() < 1e-9);
         assert!((residual_offset_ms(0.0, 0.0) - 0.0).abs() < 1e-9);
     }
@@ -990,22 +1014,25 @@ mod tests {
                 count: 0
             }
         );
-        // the fresh cluster's residuals after subtracting the calibrated leg
-        let residuals: Vec<f64> = FRESH_CLUSTER_845554984
+        // the fresh cluster's residuals against the recalibrated (0.0) leg — this is the exact
+        // shift the residual channel is meant to catch: it correctly flagged the painter-fix jump
+        // as a +99.9ms median / 22.4ms spread global shift relative to the (then-current) −92
+        // constant; against the recalibrated 0.0 leg the residuals are just the raw measurements.
+        let residuals: Vec<f64> = FRESH_CLUSTER_576990285
             .iter()
             .map(|&off| residual_offset_ms(off, RIG_VIDEO_LEG_OFFSET_MS))
             .collect();
         let s = residual_summary(&residuals);
         assert_eq!(s.count, 5);
-        // median residual ~0 (cam2), spread ~18.4ms (cam3 − cam1)
+        // median residual ~7.9ms (cam2), spread ~22.4ms (cam3 − cam1)
         assert!(
-            s.median_ms.unwrap().abs() < 1.0,
-            "median residual ~0, got {:?}",
+            (s.median_ms.unwrap() - 7.9).abs() < 1.0,
+            "median residual ~7.9, got {:?}",
             s.median_ms
         );
         assert!(
-            (s.spread_ms.unwrap() - 18.4).abs() < 0.5,
-            "spread ~18.4ms, got {:?}",
+            (s.spread_ms.unwrap() - 22.4).abs() < 0.5,
+            "spread ~22.4ms, got {:?}",
             s.spread_ms
         );
         // even n: median is the average of the two middle values (sorted [-4, 2, 8, 10])

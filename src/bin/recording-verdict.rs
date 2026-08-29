@@ -375,12 +375,16 @@ struct Args {
     /// of this value.
     ///
     /// #1178: the DEFAULT is the calibrated fixed rig video-leg
-    /// (`av_window::RIG_VIDEO_LEG_OFFSET_MS`), NOT 0 — a correctly aligned rig still MEASURES the
-    /// video-leg (monitor lag + sensor→HDMI + grabber), so the pre-#1178 default of 0 wrongly failed
-    /// the whole negative cluster. A mode that PHYSICALLY compensates the leg (MEASUREMENT_EQ / issue
-    /// 1003, whose stream-hold rebalance lands the measured offset at ~0) passes its own explicit
-    /// `--av-expected-ms 0`, which cleanly REPLACES the calibrated default so the leg is never
-    /// double-counted; an operator dialing a nonzero source offset overrides it the same way.
+    /// (`av_window::RIG_VIDEO_LEG_OFFSET_MS`) — RE-DERIVED 2026-08-29 to 0.0: the −92 calibration
+    /// briefly derived from verdict 845554984 turned out to be a stale-painter artifact (issue 1138
+    /// class, an un-pinned cam2 frame-probe painter emitting the QPSK marker without its own
+    /// emit-delay compensation); with the marker delay now compensated AT SOURCE a correctly
+    /// aligned rig MEASURES ~0, so this default is 0 again. A mode that PHYSICALLY compensates a
+    /// leg (MEASUREMENT_EQ / issue 1003, whose stream-hold rebalance lands the measured offset at
+    /// ~0) passes its own explicit `--av-expected-ms 0`, which is numerically the same today but
+    /// stays an explicit override so a future non-zero recalibration (a rig-verified video-chain
+    /// change) never silently double-counts; an operator dialing a nonzero source offset overrides
+    /// it the same way.
     #[arg(long, allow_negative_numbers = true, default_value_t = camera_box::av_window::RIG_VIDEO_LEG_OFFSET_MS)]
     av_expected_ms: f64,
     /// #855: operator-acknowledged offline boxes, threaded from the shell-side

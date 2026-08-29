@@ -4428,13 +4428,16 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
   echo "    #312 item 2: --av-marker-log $MARKER_CSV (fused all_cambox_av_sync)"
 fi
 # #624 deliverable 4 / #312 item 2 PR B: the per-camera A/V-offset gate measures each camera's
-# DEVIATION from AV_EXPECTED_MS -- the EXPECTED MEASURED offset. #1178: the default is the
-# calibrated fixed rig video-leg (-92: monitor lag + sensor->HDMI + grabber), NOT 0 -- a correctly
-# aligned rig still MEASURES the video-leg, so gating against 0 failed cam1/cam2/cam6. This value
-# MIRRORS recording-verdict's av_window::RIG_VIDEO_LEG_OFFSET_MS (the source of truth; drift-guarded
-# by tests/harness_av_expected_calibration_parity_1178.rs). Override for an operator-dialed value.
+# DEVIATION from AV_EXPECTED_MS -- the EXPECTED MEASURED offset. #1178 RE-DERIVATION (2026-08-29):
+# the -92 default was a STALE-PAINTER artifact (issue 1138 class -- an un-pinned cam2 frame-probe
+# painter emitted the QPSK marker without its own emit-delay compensation). With the marker delay
+# now compensated AT SOURCE (issue-1138 painter redeploy sha f42c66917455), a correctly aligned rig
+# MEASURES ~0 again, so the default returns to 0. This value MIRRORS recording-verdict's
+# av_window::RIG_VIDEO_LEG_OFFSET_MS (the source of truth; drift-guarded by
+# tests/harness_av_expected_calibration_parity_1178.rs). Override for an operator-dialed value, or
+# after a rig-verified physical video-chain change re-derives a genuine non-zero leg.
 # Always passed so the gate is explicit in the printed command, not silently implicit.
-AV_EXPECTED_MS="${AV_EXPECTED_MS:--92}"
+AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
 # #1003: in measurement-eq mode the A/V gate must expect the value the pin+hold DESIGN implies
 # (the profile's coherent av_expected — derived so the equalized-deep pins + rebalanced hold land
 # the common A/V level there), NOT a blindly-inherited 0. With the shipped profile this IS 0, but

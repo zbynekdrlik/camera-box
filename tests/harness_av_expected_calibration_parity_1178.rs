@@ -54,9 +54,15 @@ fn harness_av_expected_default_mirrors_the_rust_calibration_1178() {
          av_window::RIG_VIDEO_LEG_OFFSET_MS ({rust}); a drift gates the fleet at the wrong centre — \
          re-derive BOTH from the same E2E cluster median when the rig video chain changes"
     );
-    // the calibration must be a real negative video-leg, never an accidental 0
+    // #1178 RE-DERIVATION (2026-08-29): the −92 calibration was a stale-painter artifact (issue
+    // 1138 class); with the marker delay now compensated AT SOURCE, the calibrated video-leg is
+    // 0.0. A future non-zero value is legitimate ONLY after a rig-verified physical video-chain
+    // change (grabber/monitor/camera swap) with fresh full-fleet verdict evidence — never a
+    // silent re-drift back to a stale number.
     assert!(
-        rust < -1.0,
-        "the calibration must be a real negative video-leg (monitor lag + sensor->HDMI + grabber), got {rust}"
+        (rust - 0.0).abs() < 1e-9,
+        "the recalibrated video-leg must be 0.0 (marker delay compensated at source, issue 1138); \
+         got {rust} — re-derive with fresh full-fleet verdict evidence if the physical video chain \
+         genuinely changed"
     );
 }
