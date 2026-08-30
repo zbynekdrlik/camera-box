@@ -139,3 +139,31 @@ def test_gather_bundle_state_omits_audio_ts_lag_when_no_telemetry(monkeypatch, t
     state = _gather_with_log(monkeypatch, tmp_path, "OBS 32.1.2 (64-bit, windows)\n")
     assert "audio_ts_lag_ms" not in state
     assert "audio_ts_lag_src" not in state
+
+
+# #1231 — the FRESHNESS facet `audio_ts_lag_age_s` (in-log age of the freshest #800 line behind the
+# log's newest line) must FLOW through the server's gather from the SAME bounded log_text, so the
+# dev1 watchdog can surface a stale-while-log-advancing telemetry stall distinctly.
+def test_gather_bundle_state_exposes_audio_age_facet(monkeypatch, tmp_path):
+    log = (
+        "OBS 32.1.2 (64-bit, windows)\n"
+        "10:44:06.003: audio-telemetry #800 'mbc': ts_lag_ms=1672741 buffered_ms=0 pending=0 timing_adjust_ms=-5\n"
+        "10:44:06.004: audio-telemetry #800 'post video': ts_lag_ms=1671003 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+    )
+    state = _gather_with_log(monkeypatch, tmp_path, log)
+    # freshest #800 IS the newest log line -> age "0" (telemetry alive); the lag still flows too.
+    assert state["audio_ts_lag_age_s"] == "0"
+    assert state["audio_ts_lag_ms"] == "1672741"
+
+
+def test_gather_stale_telemetry_flows_age_and_omits_lag(monkeypatch, tmp_path):
+    # (#1231 b) telemetry stopped ~10 min ago while the log kept advancing (a non-#800 line): the age
+    # facet flows large and the lag facet is omitted (no FRESH positive reading) -> dev1 -> STALE.
+    log = (
+        "OBS 32.1.2 (64-bit, windows)\n"
+        "10:00:00.000: audio-telemetry #800 'mbc': ts_lag_ms=120 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+        "10:10:00.000: [obs] render tick — the log is alive, telemetry is not\n"
+    )
+    state = _gather_with_log(monkeypatch, tmp_path, log)
+    assert state["audio_ts_lag_age_s"] == "600"
+    assert "audio_ts_lag_ms" not in state
