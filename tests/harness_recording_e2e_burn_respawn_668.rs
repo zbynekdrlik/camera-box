@@ -188,3 +188,46 @@ fn cleanup_stops_the_transient_burn_units_before_the_pkill_668() {
          Block:\n{painter_region}"
     );
 }
+
+/// HEADLINE (issue 1198): both burn-transient systemd-run launch sites must arm the issue-1193
+/// over-rate self-heal env — a burn session that opens the ShadowCast grabber in its sustained
+/// over-rate mode (~61.3 fps) must self-heal exactly like production, instead of degrading the
+/// whole run's cadence windows for lack of the env (three failed runs before this fix, 2026-08-30).
+#[test]
+fn both_burn_deploy_sites_arm_grabber_overrate_selfheal_1198() {
+    let s = read("scripts/recording-e2e.sh");
+
+    // [2/8] cam1 burn-binary deploy block — same slice as the #668 sibling test above.
+    let deploy_start = s
+        .find("CAM1_BURN_BIN=\"/tmp/camera-box-burn-${RUN_ID}\"")
+        .expect("issue 1198: expected the [2/8] cam1 burn-binary deploy block");
+    let deploy_end = s[deploy_start..]
+        .find("sleep 4")
+        .map(|i| deploy_start + i)
+        .expect("issue 1198: expected the deploy block to end at its post-launch `sleep 4`");
+    let cam1_block = &s[deploy_start..deploy_end];
+    assert!(
+        cam1_block.contains("--setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1"),
+        "issue 1198: the [2/8] cam1 burn deploy's systemd-run invocation must set \
+         --setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 — without it a burn session that opens \
+         the grabber in its sustained over-rate mode never self-heals and stays degraded for the \
+         rest of the run (unlike production, which arms this via its own canary drop-in). \
+         Block:\n{cam1_block}"
+    );
+
+    // [2b/8] ALL_CAMBOX loop burn deploy block.
+    let loop_start = s
+        .find("for _cn_ip_burn in")
+        .expect("issue 1198: recording-e2e.sh must define the [2b/8] ALL_CAMBOX deploy loop");
+    let loop_end = s[loop_start..]
+        .find("\n  done\n")
+        .map(|i| loop_start + i)
+        .expect("issue 1198: the [2b/8] loop must be closed by its own `done`");
+    let loop_body = &s[loop_start..loop_end];
+    assert!(
+        loop_body.contains("--setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1"),
+        "issue 1198: the [2b/8] ALL_CAMBOX loop's systemd-run invocation must ALSO set \
+         --setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 for every camera-under-test box, not \
+         just cam1 — every leg is equally exposed to the over-rate mode. Loop body:\n{loop_body}"
+    );
+}
