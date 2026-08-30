@@ -572,7 +572,11 @@ static void force_genlock_certified_settings(obs_data_t *settings)
  * name so a discovered source is never duplicated. */
 static void genlock_ensure_saved_source_listed(obs_property_t *source_list, ndi_source_t *s)
 {
-	if (!s || !s->obs_source)
+	/* camera-box #1224: defensively guard a NULL source_list too (not just !s). The libobs list
+	 * ops this function calls are already NULL-p-safe, so this is explicit belt-and-braces — NOT
+	 * the crash fix; the genuinely-closed deref is the detached finder callback's s->obs_source
+	 * (see below). */
+	if (!source_list || !s || !s->obs_source)
 		return;
 	obs_data_t *settings = obs_source_get_settings(s->obs_source);
 	if (!settings)
@@ -609,6 +613,18 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	 * GENLOCK_WHITELIST_PROPS. */
 	obs_properties_t *props = obs_properties_create();
 
+	/* camera-box #1224: belt-and-braces NULL guard — NOT the crash fix, and unreachable on stock
+	 * libobs (obs_properties_create's bmalloc bcrash()es on OOM, never returns NULL; and every
+	 * obs_properties_add_* early-returns on !props BEFORE new_prop). The c0000005 in
+	 * obs.dll!new_prop is a non-NULL corruption/UAF no NULL guard can catch; the closed sub-class
+	 * is the detached finder callback's s->obs_source deref (below). Kept as cheap, honest defense
+	 * against a future/other libobs whose create could return NULL. */
+	if (!props) {
+		obs_log(LOG_WARNING,
+			"[distroav] ndi_source_getproperties: obs_properties_create returned NULL (OOM?); returning no properties");
+		return nullptr;
+	}
+
 	/* (1) PROP_SOURCE — the NDI source selection. camera-box #795: LIST-only (non-editable) so free
 	 * text can NEVER replace the configured source name. An editable combo was the 2026-07-17
 	 * live-event black-screen trap: with the NDI finder EMPTY on a sick network, an operator's
@@ -621,6 +637,19 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	NDIFinder finder;
 	// Create a callback that is called when the NDI source list is complete
 	auto finder_callback = [source_list, s](void *ndi_names) {
+		/* camera-box #1224: THIS is the crash-closing guard. The callback runs on a DETACHED finder
+		 * thread (ndi-finder.cpp fires it 5+ s after ndi_source_getproperties returned), so the
+		 * captured source_list/s may be NULL/stale. libobs calls get_properties(data=NULL) for
+		 * type-level property builds, so s==NULL is a real live case: pre-fix the callback then ran
+		 * obs_source_update_properties(s->obs_source) = NULL deref on the finder thread (distroav.dll,
+		 * matching the dump's nearest-export frames). Guard before ANY deref. RESIDUAL: a freed-but-
+		 * non-NULL s/source_list UAF is NOT caught here (accepted — one occurrence, no locking per the
+		 * config_mutex/pthread_join deadlock note in ndi_source_update). */
+		if (!source_list || !s || !s->obs_source) {
+			obs_log(LOG_WARNING,
+				"[distroav] ndi finder callback: NULL/stale source_list or source; skipping refresh");
+			return;
+		}
 		auto ndi_sources = (std::vector<std::string> *)ndi_names;
 		for (auto &source : *ndi_sources) {
 			obs_property_list_add_string(source_list, source.c_str(), source.c_str());
