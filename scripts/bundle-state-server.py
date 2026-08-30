@@ -548,14 +548,15 @@ def gather_bundle_state(
             bsg.output_fps_from_log(log_text),
             bsg.genlock_wall_clock_from_log(log_text),
             bsg.genlock_capability_from_log(log_text),
-            # #1226 — MAX per-source audio-timeline lag (max_lag_str, src) from the SAME bounded
-            # log_text (no second read); the dev1 audio-lag watchdog reads this facet.
-            bsg.audio_ts_lag_ms_from_log(log_text),
+            # #1226/#1231 — MAX per-source audio-timeline lag + freshness age
+            # (max_fresh_lag_str, src, age_s) from the SAME bounded log_text (no second read); the
+            # dev1 audio-lag watchdog reads these facets.
+            bsg.audio_telemetry_from_log(log_text),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
      audio_ts_lag) = _timed(timings, "obs_log_parse", _parse_log_facets)
-    audio_ts_lag_ms_val, audio_ts_lag_src_val = audio_ts_lag
+    audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
 
     def _gather_ndi():
         try:
@@ -634,6 +635,9 @@ def gather_bundle_state(
         # #1226 — the audio-timeline-lag facet (omit-when-empty; absent == UNKNOWN downstream).
         audio_ts_lag_ms=audio_ts_lag_ms_val,
         audio_ts_lag_src=audio_ts_lag_src_val,
+        # #1231 — the freshness age of that facet (in-log seconds behind the log head); a large value
+        # -> the dev1 decision surfaces STALE (telemetry stopped while the log advanced).
+        audio_ts_lag_age_s=audio_ts_lag_age_s_val,
     )
 
     timings["total"] = time.perf_counter() - t_total0

@@ -19,6 +19,11 @@ Verdicts (classify):
               #1001 (network-reach) territory, never this watchdog's -- so paging requires a
               successfully fetched POSITIVE lag reading, and a dev1-side outage can only produce
               SKIP (never a false audio page).
+  STALE    -- (#1231) box fetched OK, telemetry PRESENT but the freshest #800 line sits > a few emit
+              periods behind the OBS log's newest line (audio_ts_lag_age_s > stale_threshold_s): the
+              audio tick stopped WHILE the log kept advancing. Surfaced DISTINCTLY (machine-channel
+              log, NO phone page -- absence is never paged; a fully-down box is #732/#1001), so it is
+              never a false HEALTHY and never a LAGGING page off a stale reading.
   UNKNOWN  -- box fetched OK but the audio_ts_lag_ms facet is absent (audio telemetry not present:
               a stock OBS, or no #800 line in the tail yet). No reading -> no page.
   HEALTHY  -- lag <= threshold_ms.
@@ -29,20 +34,29 @@ import json
 import sys
 
 DEFAULT_THRESHOLD_MS = 5000
+# #1231 — telemetry older than this many seconds behind the OBS log head is STALE. ~3x the 60 s #800
+# emit period, matching bundle_state_gather.AUDIO_TS_LAG_STALE_AFTER_S (the box's per-source filter),
+# so a box that ships an empty lag (all sources stale) also ships an age over this threshold.
+DEFAULT_STALE_THRESHOLD_S = 180
 
 
-def extract_audio_lag(bundle_json_text):
-    """Parse a /bundle-state.json body -> `(lag_ms_int_or_None, src_or_None)`.
-
-    Returns `(None, None)` for: empty/None input, non-JSON, a non-object top level, a missing or
-    empty `audio_ts_lag_ms`, or a value that is not an integer string (UNKNOWN — never a fabricated
-    reading, matching the gather's omit-when-empty / never-a-fake-0 contract)."""
+def _loads_obj(bundle_json_text):
+    """A /bundle-state.json body -> its dict, or None (empty/None input, non-JSON, or a non-object
+    top level). #1231: the ONE json parse — `extract_audio_lag`/`extract_audio_age`/`analyze`/`_main`
+    all route through it so a single pass never parses the body more than once."""
     if not bundle_json_text:
-        return (None, None)
+        return None
     try:
         obj = json.loads(bundle_json_text)
     except (ValueError, TypeError):
-        return (None, None)
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _lag_from_obj(obj):
+    """`(lag_ms_int_or_None, src_or_None)` from an already-parsed bundle dict (or None). `(None,
+    None)` for a missing/empty `audio_ts_lag_ms` or a non-integer value (UNKNOWN — never a fabricated
+    reading, matching the gather's omit-when-empty / never-a-fake-0 contract)."""
     if not isinstance(obj, dict):
         return (None, None)
     raw = obj.get("audio_ts_lag_ms")
@@ -57,19 +71,54 @@ def extract_audio_lag(bundle_json_text):
     return (lag, src)
 
 
-def classify(lag_ms, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS):
+def _age_from_obj(obj):
+    """#1231 — the `audio_ts_lag_age_s` facet as an int (seconds) from an already-parsed bundle dict
+    (or None). None for a missing/empty/non-integer value (UNKNOWN — never a fabricated age). A "0"
+    is a real value (fresh telemetry present), NOT None."""
+    if not isinstance(obj, dict):
+        return None
+    raw = obj.get("audio_ts_lag_age_s")
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    try:
+        return int(str(raw).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def extract_audio_lag(bundle_json_text):
+    """Parse a /bundle-state.json body -> `(lag_ms_int_or_None, src_or_None)` (see `_lag_from_obj`)."""
+    return _lag_from_obj(_loads_obj(bundle_json_text))
+
+
+def extract_audio_age(bundle_json_text):
+    """#1231 — parse a /bundle-state.json body -> the audio_ts_lag_age_s facet as an int (seconds),
+    or None (see `_age_from_obj`)."""
+    return _age_from_obj(_loads_obj(bundle_json_text))
+
+
+def classify(lag_ms, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS,
+             age_s=None, stale_threshold_s=DEFAULT_STALE_THRESHOLD_S):
     """One box's verdict. `box_reachable` is 1 iff the JSON was fetched this pass.
 
-      box_reachable != 1 -> SKIP     (defer to #732/#1001; never our page)
-      lag_ms is None     -> UNKNOWN  (facet absent; no reading to judge)
-      lag_ms < 0         -> UNKNOWN  (a -1 == no audio timeline yet; the gather already excludes
-                                      negatives, but treat one defensively as UNKNOWN — not HEALTHY,
-                                      whose confirm-reset would be the wrong failure direction)
-      lag_ms > threshold -> LAGGING
-      otherwise          -> HEALTHY
+      box_reachable != 1        -> SKIP     (defer to #732/#1001; never our page)
+      age_s > stale_threshold_s -> STALE    (#1231: telemetry present but stopped while the log
+                                             advanced; decided BEFORE the lag checks so a stale
+                                             reading is never a false LAGGING page. age_s None — an
+                                             old box with no freshness facet — skips this branch,
+                                             so the pre-#1231 lag decision is preserved exactly)
+      lag_ms is None            -> UNKNOWN  (facet absent; no reading to judge)
+      lag_ms < 0                -> UNKNOWN  (a -1 == no audio timeline yet; the gather already
+                                             excludes negatives, but treat one defensively as
+                                             UNKNOWN — not HEALTHY, whose confirm-reset would be the
+                                             wrong failure direction)
+      lag_ms > threshold        -> LAGGING
+      otherwise                 -> HEALTHY
     """
     if box_reachable != 1:
         return "SKIP"
+    if age_s is not None and age_s > stale_threshold_s:
+        return "STALE"
     if lag_ms is None:
         return "UNKNOWN"
     if lag_ms < 0:
@@ -79,13 +128,19 @@ def classify(lag_ms, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS):
     return "HEALTHY"
 
 
-def analyze(bundle_json_text, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS):
+def analyze(bundle_json_text, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS,
+            stale_threshold_s=DEFAULT_STALE_THRESHOLD_S):
     """Fetch-result -> `{"verdict", "lag_ms", "src"}`. When the box was not reachable, returns SKIP
-    WITHOUT parsing the (empty) body, mirroring the caller's no-double-page guard."""
+    WITHOUT parsing the (empty) body, mirroring the caller's no-double-page guard. The #1231
+    freshness age drives the STALE verdict internally but is NOT added to the returned dict (the
+    shell reads it from the separate CLI `age_s=` line)."""
     if box_reachable != 1:
         return {"verdict": "SKIP", "lag_ms": None, "src": None}
-    lag, src = extract_audio_lag(bundle_json_text)
-    return {"verdict": classify(lag, box_reachable, threshold_ms), "lag_ms": lag, "src": src}
+    obj = _loads_obj(bundle_json_text)   # #1231 — parse ONCE, share across lag + age
+    lag, src = _lag_from_obj(obj)
+    age_s = _age_from_obj(obj)
+    verdict = classify(lag, box_reachable, threshold_ms, age_s, stale_threshold_s)
+    return {"verdict": verdict, "lag_ms": lag, "src": src}
 
 
 def _fmt(v):
@@ -96,9 +151,11 @@ def _main(argv):
     ap = argparse.ArgumentParser(description="pure audio-lag watchdog decisions (#1226)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    a = sub.add_parser("analyze", help="read /bundle-state.json on stdin -> verdict + lag_ms + src")
+    a = sub.add_parser("analyze",
+                       help="read /bundle-state.json on stdin -> verdict + lag_ms + src + age_s")
     a.add_argument("--box-reachable", type=int, required=True)
     a.add_argument("--threshold-ms", type=int, default=DEFAULT_THRESHOLD_MS)
+    a.add_argument("--stale-threshold-s", type=int, default=DEFAULT_STALE_THRESHOLD_S)
 
     ns = ap.parse_args(argv)
 
@@ -107,9 +164,17 @@ def _main(argv):
         # (the ndi_halving #1203 hotfix precedent: a strict read that raised was swallowed by the
         # caller's 2>/dev/null and read as SKIP forever). box_reachable=0 needs no stdin.
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        res = analyze(text, ns.box_reachable, ns.threshold_ms)
-        for k in ("verdict", "lag_ms", "src"):
-            print(f"{k}={_fmt(res[k])}")
+        # #1231 — parse ONCE (single pass); derive verdict/lag/src + the age line from the same obj.
+        obj = _loads_obj(text) if ns.box_reachable == 1 else None
+        lag, src = _lag_from_obj(obj)
+        age_s = _age_from_obj(obj)
+        verdict = "SKIP" if ns.box_reachable != 1 else classify(
+            lag, ns.box_reachable, ns.threshold_ms, age_s, ns.stale_threshold_s)
+        for k, v in (("verdict", verdict), ("lag_ms", lag), ("src", src)):
+            print(f"{k}={_fmt(v)}")
+        # The freshness age is an ADDITIONAL line (not in the analyze dict) so the existing
+        # verdict/lag_ms/src CLI contract is unchanged; the shell logs it and it corroborates STALE.
+        print(f"age_s={_fmt(age_s)}")
         return 0
 
     return 2

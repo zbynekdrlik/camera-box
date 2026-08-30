@@ -46,15 +46,55 @@ pattern, pytest Tier-0); orchestrator `scripts/audio-lag-alert-watchdog.sh` curl
 `:8899/bundle-state.json` and reuses `scripts/lib/obs-watchdog-decision.sh`
 (`obs_watchdog_confirm` 2-pass + `obs_watchdog_alert_throttle` ~1h) VERBATIM.
 
+## Freshness / recency dimension (#1231)
+
+The #1226 facet took the LAST reading PER source with NO age bound, leaving two adjacent gaps: (a) a
+source removed/renamed while LAGGING kept its stale-high last line winning the MAX until the log
+rotated (a false page for a gone condition), and (b) a telemetry tick that STOPPED while the OBS log
+kept advancing read as healthy (no freshness signal). Both are closed by a purely **in-log relative
+recency** — the `ndi_halving_decision.ts_to_seconds` + midnight-wrap precedent, MIRRORED locally in
+`bundle_state_gather` (never imported — the gather runs on the box, that decision module is dev1-only):
+
+- `bundle_state_gather.audio_telemetry_from_log(text)` → `(max_FRESH_lag_str, src, age_s_str)` in ONE
+  pass over the SAME bounded tail. It ages each source's newest `#800` line against `log_newest_ts` —
+  **the LAST parseable line in FILE ORDER, NEVER `max(seconds-of-day)`.** The OBS log is append-only,
+  so file order IS time order; a max-of-seconds anchor picks a PRE-midnight line across a day boundary
+  and reads a genuinely stale source as fresh (the review W1 🔴). `_recency_gap_s`'s single `+86400`
+  wrap correction then makes the gap the TRUE elapsed time (mod 24h). No wall clock is injected, so it
+  never mis-compares a date-less OBS timestamp against a foreign clock and stays a pure fixture-testable
+  parser. `audio_ts_lag_ms_from_log` is now a 2-tuple wrapper over it.
+- **(a)** A source silent `> AUDIO_TS_LAG_STALE_AFTER_S` (180 s ≈ 3× the 60 s emit period) behind the
+  log head is EXCLUDED from the max → the removed lagging source no longer drives the reading, even
+  when it went silent hours ago or across midnight.
+- **(b)** `audio_ts_lag_age_s` = the in-log age (whole seconds) of the freshest `#800` line behind the
+  log head — `_recency_gap_s` is in `[0,86400)` by construction, so there is **no upper clamp**: a >1h
+  stall is a REAL fault reported honestly, never snapped to `"0"` (removing that snap-to-fresh clamp
+  was the review W1 🔴 fix — it had caused fake-HEALTHY). `"0"` only when neither timestamp parses
+  (a pathological prefix-less log). Present (`"0"` when fresh) whenever ANY `#800` line exists, `""`
+  only when telemetry is fully absent. A large value → the dev1 `STALE` verdict.
+
 ## Classification + the NEVER-false-page invariant
 
-`SKIP` (fetch failed — box/`:8899` down, defer to #732/#1001) · `UNKNOWN` (fetched but facet absent
-— no `#800` line in the tail yet) · `HEALTHY` (lag ≤ `AUDIO_LAG_THRESHOLD_MS`, default 5000) ·
-`LAGGING` (> threshold → page after 2-pass confirm). **The only page condition is a
-successfully-fetched POSITIVE lag reading**, so a dev1-side path outage makes every fetch fail →
+`SKIP` (fetch failed — box/`:8899` down, defer to #732/#1001) · `STALE` (#1231: fetched, telemetry
+PRESENT but `audio_ts_lag_age_s` > `AUDIO_LAG_STALE_THRESHOLD_S`, default 180 — the audio tick stopped
+while the log advanced; surfaced DISTINCTLY on the machine channel, **never a phone page**) · `UNKNOWN`
+(fetched but facet absent — no `#800` line in the tail yet) · `HEALTHY` (lag ≤ `AUDIO_LAG_THRESHOLD_MS`,
+default 5000) · `LAGGING` (> threshold → page after 2-pass confirm). **The only page condition is a
+successfully-fetched POSITIVE FRESH lag reading**, so a dev1-side path outage makes every fetch fail →
 SKIP → no page — which is why this watchdog needs **no** reference-anchor/outage guard (bundle-state
-#732 needs one because it restarts + pages on DOWN). SKIP/UNKNOWN HOLD the confirm counter (an
-unmeasured pass neither advances nor resets it); HEALTHY resets it.
+#732 needs one because it restarts + pages on DOWN). `STALE` is decided BEFORE the lag checks (a stale
+reading is never a false `LAGGING` page) and, like SKIP/UNKNOWN, HOLDS the confirm counter (an
+unmeasured pass neither advances nor resets it) and fires no false HEALTHY recovery; HEALTHY resets it.
+**Absence/staleness is never paged** — a box/`:8899`-down box is #732/#1001 territory.
+
+**Residual (in-log recency is blind to a fully-STOPPED log):** the freshness signal detects telemetry
+that stopped WHILE the log advanced (the ticket's scope). If OBS itself DIES while lagging (box +
+`:8899` still up, so the log stops advancing entirely), the last `#800` reading persists with age ≈ 0
+→ it reads as fresh, and a LAGGING reading could re-fire. That OBS-dead-box-alive class is
+**obs-liveness (#391)** territory — NOT #732/#1001 (which watch box/`:8899` reachability) — and #391
+already DETECTS a dead OBS, so no fault is missed (at most a duplicate alert). A server-layer
+log-mtime supplement (same box clock, no foreign-clock comparison) would close the duplicate cleanly
+later; it is deliberately out of this ticket's "while the log kept advancing" scope.
 
 ## #1206 notify discipline + ships DISABLED
 
@@ -66,8 +106,10 @@ Units are committed but NOT enabled — install/verify/enable per
 
 ## Tier-0 verify (no cargo)
 
-`python3 -m pytest tests/python/test_audio_lag_*.py` (parser + decision + CLI contract) +
-`test_bundle_state_server_log.py` (the wiring flows the facet through gather); `bash -n` +
-`shellcheck -S warning` on the watchdog; a stubbed-`curl` `--dry-run` driver proves seed → 2-pass
-confirm → alert → throttle → recovery → SKIP → UNKNOWN. CI runs nothing new for this (pure
-python/bash).
+`python3 -m pytest tests/python/test_audio_lag_*.py` (the #1226 facet/decision/CLI + the #1231
+`test_audio_lag_gather_1231.py`/`test_audio_lag_decision_1231.py` freshness/STALE tests) +
+`test_bundle_state_server_log.py` (the wiring flows BOTH `audio_ts_lag_ms` and `audio_ts_lag_age_s`
+through gather); `bash -n` + `shellcheck -S warning` on the watchdog. The shell verdict dispatch
+(LAGGING/STALE/UNKNOWN/HEALTHY) is proven by a MANUAL stubbed-`curl` `--dry-run` recipe (a fake
+`curl` on `$PATH` echoing a fixture body per case) — same manual convention as #1226 (no committed
+driver; the STALE branch is a 6-line early return). CI runs nothing new for this (pure python/bash).
