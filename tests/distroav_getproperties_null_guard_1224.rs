@@ -20,9 +20,11 @@
 //! Why this test is std-only + runs offline: camera-box's `# airuleset:build-ok` bypass is disabled
 //! and the vendored C++ compiles only on CI, so per `.claude/rules/vendored-libobs-change-safety.md`
 //! (#1026 recipe) this file source-ANCHORS the guard tokens with a `fs::read_to_string` check
-//! runnable via `rustc --test --edition 2021` — revert protection against a future `git subtree
-//! pull` and the local RED→GREEN. The true behavioral repro (a live NULL/UAF under a render stall)
-//! is NOT locally reproducible (vendored code compiles on CI, crash reproduces only on the live rig).
+//! runnable via `CARGO_MANIFEST_DIR=$PWD rustc --test --edition 2021 tests/<file>.rs` (the env var
+//! is REQUIRED — `env!("CARGO_MANIFEST_DIR")` is compile-time and undefined outside cargo; `cargo
+//! test` on CI sets it automatically) — revert protection against a future `git subtree pull` and
+//! the local RED→GREEN. The true behavioral repro (a live NULL/UAF under a render stall) is NOT
+//! locally reproducible (vendored code compiles on CI, crash reproduces only on the live rig).
 
 use std::fs;
 use std::path::PathBuf;
