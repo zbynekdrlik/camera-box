@@ -91,6 +91,41 @@ apply this to ANY future cache added here:**
   process later gets the same PID) can serve an identity resolved long before the failure, under a
   key that has since changed meaning.
 
+## Native tool over PowerShell one-liner — `obs_process_list()` / `_parse_tasklist_obs_process_names()`
+
+`obs_process_list()` (feeds `bsg.obs_process_count_from_listing`) was a PowerShell `Get-Process
+-Name 'obs*'` round-trip that regularly TIMED OUT at its own 15s ceiling under sustained OBS render
+load — the exact interpreter-cold-start tax the port4455 netstat swap above already diagnosed on
+this same box. Replaced with a native `tasklist /FO CSV /NH` subprocess, parsed by a PURE
+`_parse_tasklist_obs_process_names()` that reproduces the OLD PowerShell output's exact contract
+(newline-joined bare process names, `.exe` stripped) so `bsg.obs_process_count_from_listing` needed
+ZERO changes downstream.
+
+**Keep the "is this an OBS-shaped name" pattern in exactly ONE place: `bsg.OBS_PROCESS_NAME_RE`.**
+A #1222c review caught this file's own tasklist parser carrying a private duplicate of the same
+`obs<digits>` regex `bsg.obs_process_count_from_listing` already used — harmless today (filtering
+twice with the identical pattern is a no-op) but a drift risk on a future rename. Any new facet
+that needs this same "is this an OBS process name" check must import and reuse the shared constant,
+never re-derive its own copy.
+
+## File-stat-keyed process-lifetime cache — `resolve_shortcut()` / `ndi_runtime_version()`
+
+Both facets resolve a value that is effectively STATIC between box changes — a Start-Menu `.lnk`'s
+target only changes when an operator re-points it; an NDI runtime DLL's version only changes when
+an SDK upgrade replaces the file itself — yet both were paying a full COM/PowerShell round-trip
+(6.6s / 8.3s measured under OBS render load) on EVERY single request. Fixed with a process-lifetime
+cache keyed by the TARGET FILE's own `(mtime_ns, size)` (a plain `os.stat()`, microseconds): a
+changed stat re-resolves and re-caches; a file that cannot even be `stat()`'d skips BOTH the
+cache-read check and the cache-write, so it keeps retrying every request rather than freezing on a
+guessed value. Same never-cache-empty/never-cache-failure discipline as the PID-keyed cache above.
+
+**When to reach for THIS pattern vs. the PID-keyed pattern above:** file-stat caching fits a facet
+whose expensive resolve reads a FILE whose own mtime/size is a trustworthy freshness signal (a
+shortcut, a DLL, a config file). The PID-keyed pattern fits a facet whose expensive resolve is tied
+to a PROCESS identity that can be cheaply re-checked (a listening port's owning PID). Don't force
+one shape onto the other's problem — e.g. don't file-stat-cache something with no backing file, and
+don't PID-key something that has no owning process at all.
+
 ## Opt-in per-facet timing — `BUNDLE_STATE_TIMING=1`
 
 `gather_bundle_state()`'s `_timed()` wrapper logs one `"gather timing: key=Xs ..."` line per
