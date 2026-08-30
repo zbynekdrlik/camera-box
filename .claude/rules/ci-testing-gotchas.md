@@ -763,3 +763,39 @@ this as an accepted risk for other pre-trap state, e.g. `camera-box.service` its
 from THAT class of loss is the existing NEXT-RUN startup-self-heal pattern, not something an
 in-run trap can ever cover. Don't over-scope a pre-trap-mutation fix into also solving SIGKILL
 recovery; that is separate, pre-existing, accepted scope.
+
+## Generating a `.rs` test file's contents via a Python script: a plain `'\t'`/`'\n'` inside a Python (non-raw) triple-quoted string silently becomes a REAL tab/newline BYTE in the written Rust source (#1216 completion)
+
+Since Tier-0 blocks all local cargo compilation, editing a large `tests/*.rs` file in this repo
+often goes through a small `python3 <script>.py` that does a string `.replace()` on the file's
+text (the pattern this whole CLAUDE.md/rules-file family already recommends for surgical,
+`old.count(...) == 1`-verified edits). When the NEW Rust text you're inserting itself contains a
+Rust string literal meant to hold `\t`/`\n` (e.g. a `printf 'ACTIVE\t%s\n'` line inside an `r#"..."#`
+raw-string bash harness, or a `line.split_once('\t')` char literal), writing that text as a
+PLAIN Python string (`"printf 'ACTIVE\t%s\n' ..."` or a non-`r`-prefixed triple-quoted block) has
+Python itself interpret `\t`/`\n` as escape sequences and write the ACTUAL tab/newline BYTE into
+the `.rs` file — not the two-character sequence `\` + `t` the Rust source is supposed to contain.
+
+Two different failure shapes result, and only ONE of them is caught by `cargo fmt --all --check`:
+
+1. **Inside a Rust CHAR LITERAL** (`'\t'`) — a real tab byte breaks Rust syntax outright
+   (`character constant must be escaped: \`\t\``), so `cargo fmt --all --check` (the Tier-0-legal
+   syntax-check net this repo relies on when `cargo build`/`test` are blocked) DOES catch it —
+   but only because char literals are strict; this is the lucky case.
+2. **Inside an `r#"..."#` RAW STRING** (e.g. a bash heredoc's own `printf 'FOO\t%s\n' "$VAR"`
+   line) — a raw string accepts ANY byte including a literal tab/newline, so `cargo fmt` reports
+   NOTHING wrong; the file "compiles clean" while silently embedding the wrong shell text (a
+   multi-line single-quoted bash string with an embedded raw newline instead of the intended
+   `\n` escape sequence functions similarly in bash today, since printf still copies a literal
+   newline through unchanged — but it is fragile, differs from every sibling helper's own style
+   in the same file, and the NEXT accidental Python-side round-trip through this same bug could
+   land the raw byte somewhere printf-semantics do NOT tolerate it).
+
+**Fix: when a Python `.replace()` script's `new` string must contain a LITERAL `\t`/`\n` destined
+for the Rust source (not an actual tab/newline you want Python itself to act on), write it as a
+Python RAW string** (`r"printf 'ACTIVE\t%s\n' ..."` or `r'''...'''`) so Python passes the two
+characters `\` + `t` straight through unmodified. **Verify after writing, every time:** `cat -A
+<file> | grep -n '\^I'` (shows a literal tab as `^I` under `cat -A`) must return NOTHING for any
+line that is supposed to hold a Rust/bash `\t` escape sequence — a hit means the Python script
+wrote a raw byte instead of the two-char escape, exactly this bug. `cargo fmt --all --check`
+alone is NOT sufficient proof the generated Rust text is correct; it only catches shape 1 above.
