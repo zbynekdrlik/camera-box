@@ -719,3 +719,67 @@ fn camera_strih_route_rejects_cam2_and_unknown_cameras() {
         );
     }
 }
+
+/// Combined round-trip: source `camera-set.sh` ONCE with no override and read back
+/// CAMERA_ACTIVE_SET, CAMERA_ALIGN_SET, camera_active_secondary_set(), and camera_source_box()
+/// all TOGETHER, in the same shell invocation -- unlike every test above (each of which sources
+/// the script independently, once per derivation), this proves the four derived facts are
+/// MUTUALLY consistent with each other for the real default, not just individually correct in
+/// isolation. Added per the CYCLE-step-6 review's coverage-fragmentation suggestion for the
+/// issue 1216 completion (2026-08-30, full seven-camera fleet).
+#[test]
+fn all_four_derived_facts_are_mutually_consistent_for_the_default_active_set_1216() {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+printf 'ACTIVE\t%s\n' "$CAMERA_ACTIVE_SET"
+printf 'ALIGN\t%s\n' "$CAMERA_ALIGN_SET"
+printf 'SECONDARY\t%s\n' "$(camera_active_secondary_set)"
+printf 'SOURCE\t%s\n' "$(camera_source_box)"
+"#;
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", &script)
+        .env_remove("CAMERA_ACTIVE_SET")
+        .env_remove("CAMERA_ALIGN_SET")
+        .output()
+        .expect("failed to run combined round-trip harness");
+    assert!(
+        out.status.success(),
+        "combined round-trip harness must exit 0: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut got = std::collections::HashMap::new();
+    for line in stdout.lines() {
+        if let Some((k, v)) = line.split_once('\t') {
+            got.insert(k.to_string(), v.to_string());
+        }
+    }
+    assert_eq!(
+        got.get("ACTIVE").map(String::as_str),
+        Some("cam1 cam2 cam3 cam4 cam5 cam6 cam7"),
+        "issue 1216 completion: CAMERA_ACTIVE_SET must be the full seven-camera fleet: {got:?}"
+    );
+    assert_eq!(
+        got.get("ALIGN").map(String::as_str),
+        Some("cam1 cam3 cam4 cam5 cam6 cam7"),
+        "issue 1216 completion: CAMERA_ALIGN_SET must include cam1 (derived) + cam3/cam4 \
+         (always-on-air base) + cam5/cam6/cam7 (derived), excluding only cam2 the projection \
+         probe: {got:?}"
+    );
+    assert_eq!(
+        got.get("SECONDARY").map(String::as_str),
+        Some("cam3 cam4 cam5 cam6 cam7"),
+        "issue 1216 completion: camera_active_secondary_set (active minus the derived source \
+         cam1 minus painter cam2) must be cam3/cam4/cam5/cam6/cam7: {got:?}"
+    );
+    assert_eq!(
+        got.get("SOURCE").map(String::as_str),
+        Some("cam1"),
+        "camera_source_box must still resolve cam1 (first strih-routable member) for the \
+         default active set: {got:?}"
+    );
+}

@@ -236,9 +236,10 @@ def active_ndi_sources() -> set:
     CAMERA_ACTIVE_SET (env var, default "cam1 cam2 cam3 cam4 cam5 cam6 cam7" -- issue 1198
     (2026-08-27): cam1 + cam2 RESTORED, both healthy on a live journal check, owner refused the
     physical card swap; issue 1216 (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter
-    fitted, cam4 alone stays out (#947); issue 1217 (same day): cam5 OUT again -- a DEAD_PORT
-    leg on the new splitter (flat static frame, siblings cam6/cam7 read colour), cam6/cam7
-    stay -- same
+    fitted; issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter (flat
+    static frame, siblings cam6/cam7 read colour); issue 1216 completion (2026-08-30, owner
+    directive "kamery od 1-7 bezia" after a physical cable reseat): cam4 (#947) and cam5
+    (DEAD_PORT) BOTH rejoin -- the full seven-camera fleet -- same
     read convention set-ndi-mapping.py's
     DEFAULT_ACTIVE_SET already uses). Mirrors
     scripts/camera-set.sh's camera_active_ndi_sources_excluding_csv naming convention

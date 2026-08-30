@@ -100,10 +100,11 @@ DEFAULT_MAP = FULL_MAP
 # exactly (this module is invoked as a standalone subprocess, so it reads the SAME env var rather
 # than re-declaring its own separate default; when unset, falls back to the identical literal
 # camera-set.sh itself defaults to, so the two can never silently disagree). issue 1216
-# (2026-08-28): bigger splitter fitted, cam5/cam6/cam7 back in -- cam4 alone stays out (#947).
-# issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter (flat static
-# frame, siblings cam6/cam7 read colour) fails the [1/8] frozen-camera-gate for the whole
-# fleet; cam6/cam7 stay in. Temporary + membership-only, exactly like every prior retirement.
+# (2026-08-28): bigger splitter fitted, cam5/cam6/cam7 back in. issue 1217 (same day): cam5 OUT
+# again -- a DEAD_PORT leg on the new splitter (flat static frame, siblings cam6/cam7 read
+# colour). issue 1216 completion (2026-08-30, owner directive "kamery od 1-7 bezia" after a
+# physical cable reseat): cam4 (#947) and cam5 (DEAD_PORT) BOTH rejoin -- the full
+# seven-camera fleet is active, for the first time simultaneously.
 DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
 
 

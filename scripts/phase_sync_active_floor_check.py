@@ -37,10 +37,12 @@ def active_camera_names(explicit: "str | None" = None) -> list:
     """#893 -- the active camera names, split from `explicit` if given, else CAMERA_ACTIVE_SET
     (env var, default "cam1 cam2 cam3 cam4 cam5 cam6 cam7" -- issue 1198 (2026-08-27): cam1 + cam2
     RESTORED, both healthy on a live journal check, owner refused the physical card swap; issue
-    1216 (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter fitted; cam4 alone stays
-    out, #947; issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter
-    (flat static frame, siblings cam6/cam7 read colour), cam6/cam7 stay) -- NEVER a literal
-    range (.claude/rules/camera-active-set.md). Read fresh on every call.
+    1216 (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter fitted; issue 1217 (same
+    day): cam5 OUT again -- a DEAD_PORT leg on the new splitter (flat static frame, siblings
+    cam6/cam7 read colour); issue 1216 completion (2026-08-30, owner directive "kamery od 1-7
+    bezia" after a physical cable reseat): cam4 (#947) and cam5 (DEAD_PORT) BOTH rejoin -- the
+    full seven-camera fleet) -- NEVER a literal range (.claude/rules/camera-active-set.md). Read
+    fresh on every call.
 
     `explicit` mirrors set-ndi-mapping.py's `--active` flag: the caller (recording-e2e.sh)
     passes `--active-set "$CAMERA_ACTIVE_SET"` explicitly on the command line rather than
