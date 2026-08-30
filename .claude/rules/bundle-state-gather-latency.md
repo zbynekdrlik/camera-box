@@ -51,8 +51,30 @@ request (live strih evidence) — ~15s of the ~18.7s fresh-log baseline. Fixed w
 cache (`_port4455_cache`, guarded by `_PORT4455_CACHE_LOCK = threading.Lock()` — needed because
 `ThreadingHTTPServer` dispatches each request on its own thread, mirroring the existing `_State`
 class's own lock-guarded pattern in this file) keyed by the CURRENT owning PID, read via a new
-CHEAP `_port4455_owning_pid()` probe (`Get-NetTCPConnection` only, no WMI). The expensive full
-resolution only re-runs when the observed PID changes.
+CHEAP `_port4455_owning_pid()` probe. The expensive full resolution only re-runs when the observed
+PID changes.
+
+**The cheap probe's own implementation matters — even a "cheap" query can be dominated by
+INTERPRETER startup, not the query itself.** The probe was FIRST implemented as its own PowerShell
+one-liner (`Get-NetTCPConnection`) — live post-deploy timing showed that command alone costing
+~4.1s on strih, PLUS PowerShell's own interpreter cold-start (~5-10s under load), so the "cheap"
+probe still cost ~10-15s per request there and the cache above never got a chance to help (a
+lighter-loaded sibling box, stream, dropped to 1.3-1.8s with the SAME code). Replaced with
+`netstat -ano` (a native C tool, no interpreter startup cost at all) parsed by a new PURE
+`_parse_netstat_listening_pid(text, port)` — same signature, same "" contract, so
+`port4455_owner()`'s cache logic never needed to know which probe implementation feeds it. **Lesson
+for any future "cheap probe": prefer a native tool over a scripting-language one-liner when the
+query itself is genuinely trivial — the interpreter startup can dominate the whole cost.**
+
+**Never restrict a diagnostic subprocess's address-family/protocol filter unless you have proven
+every real caller only ever binds that one family.** `netstat -p tcp` and `-p tcpv6` are DISTINCT
+filters on Windows — `-p tcp` silently returns IPv4 rows ONLY, even though both families display
+literally "TCP" in the Proto column when unfiltered. Passing it here would have made the probe
+permanently blind to a listener bound on IPv6 (a silent regression to `""` forever — port4455_owner()
+short-circuits straight to `("", "")` without even trying the WMI fallback — not merely a
+performance cost). Caught by a gated review pass, not by inspection. Fix: pass NO `-p` filter and
+let the PURE PARSER's own proto/state check do the real filtering (it already handles both address
+families and skips UDP rows correctly).
 
 **This pattern generalizes to any future per-request external-call facet in this server that is
 expensive but rarely changes:** probe a cheap, fast-changing KEY every request; only pay for the
