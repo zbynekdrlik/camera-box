@@ -164,40 +164,125 @@ def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_B
 # match. ts_lag_ms may be negative (-1 == audio_ts==0, i.e. no audio timeline yet).
 _AUDIO_TS_LAG_RE = re.compile(r"audio-telemetry #800 '([^']*)': ts_lag_ms=(-?\d+)")
 
+# #1231 — freshness/recency for the audio-lag facet (follow-up to the #1226 review finding W1). The
+# #1226 facet took the LAST reading PER source with NO age bound, so a source removed/renamed while
+# LAGGING kept its stale-high line winning the MAX until the log rotated (concern a), and a telemetry
+# tick that STOPPED while the OBS log kept advancing read as healthy (concern b). We add a purely
+# IN-LOG relative recency (the ndi_halving_decision.ts_to_seconds + midnight-wrap precedent, MIRRORED
+# here so the box's gather never imports a dev1-only decision module): each source's newest #800 line
+# is aged against the newest parseable timestamp of ANY line in the tail (the log's current write
+# head). No wall clock is injected, so this stays a pure fixture-testable parser and never
+# mis-compares a date-less OBS timestamp against a foreign clock (issue 1231 design Prístup 1).
+AUDIO_TS_LAG_STALE_AFTER_S = 180  # ~3x the 60 s emit period: a source silent this long is stale.
+# A gap larger than this is implausible for a ~5 MB tail and is almost always a midnight-wrap artifact
+# (seconds-of-day is date-less), so it is treated as NOT stale / age 0 — the ndi_halving conservative
+# direction (never a FALSE stale/huge-age), matching that module's own `<= 3600` recency guard. The
+# audio-tick-stall class we care about (the 2026-08-30 incident peaked at 27,9 min) is well under it.
+_AUDIO_TS_LAG_IMPLAUSIBLE_GAP_S = 3600.0
 
-def audio_ts_lag_ms_from_log(text):
-    """#1226 — the MAX audio-timeline lag (ms behind the OS clock) across audio sources, from the
-    NEWEST `audio-telemetry #800 '<src>': ts_lag_ms=N` line PER SOURCE. Returns
-    `(max_lag_ms_str, src_name)`, or `("", "")` when no such reading exists (UNKNOWN — the caller
-    omits both keys, never a fake 0).
+_LOG_LINE_TS_RE = re.compile(r"^\s*(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?")
+
+
+def _log_line_seconds(line):
+    """The leading OBS-log `HH:MM:SS[.mmm]` prefix of *line* -> seconds-of-day float, or None when
+    the line does not begin with a real clock time (a continuation/blank line -> no timestamp, never
+    a guessed one). Mirror of ndi_halving_decision.ts_to_seconds, kept LOCAL so bundle_state_gather
+    (which runs on the box) never imports a dev1-only decision module (issue 1231)."""
+    m = _LOG_LINE_TS_RE.match(line)
+    if not m:
+        return None
+    h, mm, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if h > 23 or mm > 59 or s >= 60:
+        return None
+    frac = float("0." + m.group(4)) if m.group(4) else 0.0
+    return h * 3600 + mm * 60 + s + frac
+
+
+def _recency_gap_s(newest_ref, ts):
+    """Seconds *ts* sits behind *newest_ref* (both seconds-of-day), midnight-wrap-corrected, or None
+    when either is missing. A negative raw gap means the tail straddled midnight (date-less log), so
+    +86400; an implausibly large result (a wrap artifact) is left for the caller to guard against."""
+    if newest_ref is None or ts is None:
+        return None
+    gap = newest_ref - ts
+    if gap < 0:
+        gap += 86400.0
+    return gap
+
+
+def audio_telemetry_from_log(text, stale_after_s=AUDIO_TS_LAG_STALE_AFTER_S):
+    """#1231 — the audio-timeline facet WITH a freshness dimension. Returns
+    `(max_fresh_lag_ms_str, src, age_s_str)`:
+
+    * `max_fresh_lag_ms_str`/`src` — the MAX per-source lag exactly as #1226, but EXCLUDING any
+      source whose newest #800 line sits more than `stale_after_s` behind the tail's newest line of
+      ANY kind (concern a: a removed/renamed lagging source no longer drives the reading). `("","")`
+      when no FRESH positive reading remains. `ts_lag_ms=-1` (no audio timeline yet) is still
+      excluded; the tie-break stays deterministic (alphabetically-first source) so the value never
+      flaps the watchdog dedup key.
+
+    * `age_s_str` — the whole-second in-log age of the freshest #800 line behind the tail's newest
+      line of any kind (concern b: telemetry that stopped while the log advanced). `""` ONLY when
+      there is NO #800 line at all (absent -> UNKNOWN downstream, never a fabricated age). A fresh
+      box reports `"0"`; a stalled tick reports a large value -> the dev1 decision surfaces STALE.
 
     Why this facet (the 2026-08-30 incident, #1226): stream OBS's audio pipeline fell ~24 s/min
     behind realtime under stream load; every audio source lagging EQUALLY = a global audio-tick/mix
     pipeline behind realtime (mbc peaked at 1 672 741 ms / 27,9 min), which desynced the YouTube
     stream's A/V for a whole service. This line SCREAMED it the whole hour but nothing read it.
 
-    Reads only the TAIL window (the newest slice) of the #1222 bounded head+separator+tail read, so
-    the facet reflects the CURRENT state — a stale HIGH value that survives only in the head slice
-    (an old, recovered episode from the startup region) is never reported. A small whole-file log
-    (no separator) is scanned entirely, so its last-per-source is still the newest.
-
-    A `ts_lag_ms=-1` (source present but no audio timeline yet, audio_ts==0) is NOT a lag and is
-    excluded from the max; a source whose newest reading is -1 does not contribute. On an equal
-    max across sources the reported source is deterministic (alphabetically first) so the value is
-    stable across requests and never flaps the watchdog's dedup key."""
+    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read (a stale HIGH value that
+    survives only in the head is never reported; a small whole-file log is scanned entirely), in ONE
+    pass (no second log read)."""
     t = text or ""
     if LOG_BOUNDED_READ_SEPARATOR in t:
         t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    last_per_source = {}
-    for m in _AUDIO_TS_LAG_RE.finditer(t):
-        last_per_source[m.group(1)] = int(m.group(2))
-    candidates = [(v, name) for name, v in last_per_source.items() if v >= 0]
+    last_per_source = {}   # name -> (ts_or_None, lag_int) : the NEWEST #800 line per source
+    log_newest_ts = None   # newest parseable timestamp of ANY line (the log's current write head)
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None and (log_newest_ts is None or ts > log_newest_ts):
+            log_newest_ts = ts
+        m = _AUDIO_TS_LAG_RE.search(line)
+        if m:
+            last_per_source[m.group(1)] = (ts, int(m.group(2)))
+    if not last_per_source:
+        return ("", "", "")   # no #800 line at all -> absent (UNKNOWN downstream)
+
+    # (concern b) age of the freshest #800 line behind the log head.
+    src_ts = [ts for (ts, _lag) in last_per_source.values() if ts is not None]
+    newest_800_ts = max(src_ts) if src_ts else None
+    gap = _recency_gap_s(log_newest_ts, newest_800_ts)
+    if gap is None or gap >= _AUDIO_TS_LAG_IMPLAUSIBLE_GAP_S:
+        age_s = "0"           # unmeasurable / wrap artifact -> conservative fresh, never a false huge age
+    else:
+        age_s = str(round(gap))
+
+    # (concern a) per-source staleness filter for the MAX.
+    candidates = []
+    for name, (ts, lag) in last_per_source.items():
+        if lag < 0:
+            continue           # -1 == no audio timeline yet, never a lag
+        g = _recency_gap_s(log_newest_ts, ts)
+        if g is not None and stale_after_s < g < _AUDIO_TS_LAG_IMPLAUSIBLE_GAP_S:
+            continue           # this source went silent while the log advanced -> stale, drop it
+        candidates.append((lag, name))
     if not candidates:
-        return ("", "")
+        return ("", "", age_s)   # no FRESH positive reading; the age carries the staleness signal
     # max lag; deterministic tie-break by source name (asc) so the reported src is stable.
     candidates.sort(key=lambda kv: (-kv[0], kv[1]))
     maxv, maxname = candidates[0]
-    return (str(maxv), maxname)
+    return (str(maxv), maxname, age_s)
+
+
+def audio_ts_lag_ms_from_log(text):
+    """#1226 — the MAX per-source audio-timeline lag `(max_lag_ms_str, src)`, `("", "")` when none.
+    A thin wrapper over `audio_telemetry_from_log` (#1231) that drops the freshness age. Behaviour is
+    unchanged EXCEPT that a source gone stale in the tail (silent > a few emit periods while the log
+    advanced) is now excluded from the max (concern a). See `audio_telemetry_from_log` for the full
+    contract."""
+    lag, src, _age = audio_telemetry_from_log(text)
+    return (lag, src)
 
 
 def distroav_dll_paths(scan_roots):
@@ -462,6 +547,7 @@ def build_bundle_state(
     shortcut_workdir="",
     audio_ts_lag_ms="",
     audio_ts_lag_src="",
+    audio_ts_lag_age_s="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -496,6 +582,12 @@ def build_bundle_state(
     `audio_ts_lag_ms_from_log`). Same omit-when-empty rule; the dev1 audio-lag alert watchdog
     (#1226) reads it to page when a box's audio pipeline falls sustained behind realtime.
 
+    #1231: `audio_ts_lag_age_s` = the in-log freshness age (seconds the freshest #800 line sits
+    behind the log's newest line of any kind, from `audio_telemetry_from_log`). Present ("0" when
+    fresh) whenever ANY #800 line exists, "" only when telemetry is absent; a large value lets the
+    dev1 decision surface a STALE (telemetry-stopped-while-log-advancing) state distinctly. The
+    #1226 `audio_ts_lag_ms` now also EXCLUDES sources gone stale in the tail (concern a).
+
     Note: `dantesync_version` was added here for #862, then REVERTED in its own follow-up fix —
     the deployed strih/stream servers never picked up the new key (half-wired), and the gate now
     reads every node's dantesync version uniformly via `dantesync --version` over SSH instead
@@ -525,5 +617,9 @@ def build_bundle_state(
         # omit-when-empty rule (absent facet == UNKNOWN downstream, never a fake 0).
         "audio_ts_lag_ms": audio_ts_lag_ms,
         "audio_ts_lag_src": audio_ts_lag_src,
+        # #1231 — the freshness age (in-log seconds the freshest #800 line sits behind the log head);
+        # present ("0" when fresh) whenever ANY #800 line exists, "" only when telemetry is absent.
+        # A large value -> the dev1 decision surfaces a STALE (stopped-while-log-advancing) state.
+        "audio_ts_lag_age_s": audio_ts_lag_age_s,
     }
     return {k: v for k, v in values.items() if v}

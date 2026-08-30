@@ -88,6 +88,7 @@ systemctl --user disable --now audio-lag-alert-watchdog.timer
 | Var | Default | Meaning |
 |---|---|---|
 | `AUDIO_LAG_THRESHOLD_MS` | `5000` | audio-timeline lag (ms) above which a box is LAGGING |
+| `AUDIO_LAG_STALE_THRESHOLD_S` | `180` | #1231: telemetry age (s) behind the OBS log head above which it is STALE (surfaced distinctly, never paged) |
 | `AUDIO_LAG_CONFIRM_THRESHOLD` | `2` | consecutive LAGGING readings before paging |
 | `AUDIO_LAG_ALERT_THROTTLE_PASSES` | `12` | passes between repeat alerts (≈1h at the 5-min cadence) |
 | `AUDIO_LAG_BOXES` | `strih\|10.77.9.202 stream\|10.77.9.204` | `name\|ip` pairs to watch |

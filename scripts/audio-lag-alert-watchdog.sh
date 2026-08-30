@@ -17,6 +17,12 @@
 # `:8899/bundle-state.json`, and pages when a box's audio timeline sits sustained > threshold behind
 # realtime (confirmed across 2 passes).
 #
+# #1231 (freshness follow-up to the #1226 review W1): the gather now also ships `audio_ts_lag_age_s`
+# (the in-log age of the freshest #800 line behind the OBS log head) and EXCLUDES sources gone stale
+# in the tail from the max lag. This watchdog adds a STALE verdict (age > AUDIO_LAG_STALE_THRESHOLD_S)
+# for telemetry that STOPPED while the log kept advancing -- surfaced distinctly here (machine
+# channel), NEVER a phone page (absence is never paged; a fully-down box is #732/#1001).
+#
 # DETECTION ONLY (alert-only) -- there is deliberately NO auto-action. The observed cure was a PC
 # reboot of a live prod box (a genuinely destructive owner-call per no-destructive-remote); the
 # preventive pre-service reboot is an OWNER decision on the ticket, not automation. Recovery is
@@ -47,7 +53,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -65,6 +71,12 @@ CURL_TIMEOUT="${AUDIO_LAG_CURL_TIMEOUT:-10}"          # :8899 HTTP fetch (s); se
 # ~107-132 ms; a genuine desync grows into the thousands-to-millions. 5000 ms is a wide margin above
 # any healthy jitter and well below the point a viewer notices, so it catches the growth EARLY.
 THRESHOLD_MS="${AUDIO_LAG_THRESHOLD_MS:-5000}"
+
+# #1231 — staleness bound (s): telemetry whose freshest #800 line sits more than this behind the OBS
+# log's newest line has STOPPED while the log kept advancing -> STALE (surfaced distinctly, NEVER a
+# phone page — absence is #732/#1001 territory). ~3x the 60 s #800 emit period; matches the box-side
+# bundle_state_gather.AUDIO_TS_LAG_STALE_AFTER_S per-source filter.
+STALE_THRESHOLD_S="${AUDIO_LAG_STALE_THRESHOLD_S:-180}"
 
 # 2-pass confirm before paging (matches the sibling watchdogs): a single blipped reading must never
 # fire. A genuine desync grows monotonically and stays lagging across the 5-min cadence.
@@ -144,7 +156,7 @@ lag_minutes() {
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip>
 handle_box() {
-  local box="$1" ip="$2" body reachable verdict lag src analyze_out
+  local box="$1" ip="$2" body reachable verdict lag src age analyze_out
 
   if body="$(fetch_bundle_json "$ip")"; then
     reachable=1
@@ -153,15 +165,25 @@ handle_box() {
     body=""
   fi
 
-  analyze_out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --threshold-ms "$THRESHOLD_MS" 2>/dev/null)"
+  analyze_out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --threshold-ms "$THRESHOLD_MS" --stale-threshold-s "$STALE_THRESHOLD_S" 2>/dev/null)"
   verdict="$(printf '%s\n' "$analyze_out" | sed -n 's/^verdict=//p')"
   lag="$(printf '%s\n' "$analyze_out" | sed -n 's/^lag_ms=//p')"
   src="$(printf '%s\n' "$analyze_out" | sed -n 's/^src=//p')"
-  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} lag_ms=${lag:-} src=${src:-} (threshold=${THRESHOLD_MS}ms)"
+  age="$(printf '%s\n' "$analyze_out" | sed -n 's/^age_s=//p')"
+  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} lag_ms=${lag:-} src=${src:-} age_s=${age:-} (threshold=${THRESHOLD_MS}ms, stale=${STALE_THRESHOLD_S}s)"
 
   case "$verdict" in
     SKIP)
       log "$box :$BUNDLE_PORT not fetchable this pass -- box/:$BUNDLE_PORT-down is #732/#1001 territory; holding audio-lag state, no page"
+      return 0
+      ;;
+    STALE)
+      # #1231 — telemetry PRESENT but the freshest #800 line is > STALE_THRESHOLD_S behind the OBS
+      # log head: the audio tick stopped while the log kept advancing. Surfaced distinctly (this
+      # machine-channel line), NEVER a phone page (absence is never paged; a fully-down box is
+      # #732/#1001). Holds state like UNKNOWN -- an unmeasured pass neither advances nor resets the
+      # confirm counter, and never fires a false HEALTHY recovery ping.
+      log "$box telemetry STALE: freshest #800 line ~${age:-?}s behind the OBS log head (> ${STALE_THRESHOLD_S}s) -- audio tick stopped while the log advances; surfaced distinctly, holding state, no page (#1231)"
       return 0
       ;;
     UNKNOWN)
@@ -265,7 +287,7 @@ require_tools() {
 }
 
 main() {
-  log "pass start (dry_run=$DRY_RUN, threshold=${THRESHOLD_MS}ms, boxes='$BOXES')"
+  log "pass start (dry_run=$DRY_RUN, threshold=${THRESHOLD_MS}ms, stale=${STALE_THRESHOLD_S}s, boxes='$BOXES')"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
   local pair box ip
