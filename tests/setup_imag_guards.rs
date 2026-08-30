@@ -3678,11 +3678,12 @@ fn setup_imag_installs_imag_record_encoder_sibling_1156() {
     );
 }
 
-/// issue 1218: imag_scenes.py LAZILY imports the obs_phase2 sibling inside enforce_ndi_active_policy
-/// (the active-set NDI idle policy's ONE enforcement point, using the shared issue-795-safe
-/// reenforce_ndi_name). It must ride the SAME on-box deploy list as its importer -- otherwise the
-/// on-box --bootstrap enforce silently degrades to an ungated direct set. The import is lazy and
-/// degrades gracefully, so a stale box never crash-loops OBS, but a fresh provision installs it.
+/// issue 1218/1230: imag_scenes.py LAZILY imports the obs_phase2 sibling inside enforce_ndi_names
+/// (the ONE imag NDI-name heal point since issue 1230 removed the idle policy, still using the
+/// shared issue-795-safe reenforce_ndi_name #1158 healing). It must ride the SAME on-box deploy list
+/// as its importer -- otherwise the on-box --bootstrap heal silently degrades to an ungated direct
+/// set. The import is lazy and degrades gracefully, so a stale box never crash-loops OBS, but a
+/// fresh provision installs it.
 #[test]
 fn setup_imag_installs_obs_phase2_sibling_1218() {
     let body = read(SETUP);
