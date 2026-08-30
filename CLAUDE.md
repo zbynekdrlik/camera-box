@@ -108,6 +108,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - imag display-path drift facets (the box is Intel-iGPU-only — NVIDIA-era knobs obsolete; picom-off/igpu-maxperf/tap-conf as OK/DRIFT/UNKNOWN facets in the shared `imag-display-path.sh` lib, consumed by drift-guard `--check-imag` #10 AND the E2E `[0/8]` preflight; PICOM_PGREP inline-marker vs the shared require-tool helper, #780) → `.claude/rules/imag-display-path.md` (auto-loads on its `paths:`)
 - strih/stream network-UNREACHABLE alert (dev1-side watchdog that probes the two OBS boxes FROM dev1 — never ssh IN — with a multi-signal ping OR :4455 OR :8899 check; REACHABLE iff ANY; 2-pass confirm + shared obs_watchdog throttle; per-box state; reference-anchor guard against a dev1-side path outage; recovery ping; closes the 50-min silent-strih-outage gap, #1001) → `.claude/rules/network-reach-watchdog.md` (auto-loads on its `paths:`)
 - strih/stream :8899 BundleStateServer health-check + AUTO-RESTART (dev1-side watchdog: curl :8899/bundle-state.json FROM dev1 — not MCP Invoke-WebRequest which hangs; box-up=ping|:4455 EXCLUDES :8899; auto-restarts the task via session-agnostic `schtasks /run` over ssh — never `/it`; the auto-restart-vs-alert-only discriminator vs obs-liveness; require_tools fail-loud; defers a fully-dead box to #1001; ships DISABLED, #732) → `.claude/rules/bundle-state-watchdog.md` (auto-loads on its `paths:`)
+- bundle-state SERVER internals — gather latency + caching (bounded head+tail log read vs session-length growth, the port4455 PID-keyed cache pattern + its never-cache-empty/always-clear-on-failure discipline, opt-in BUNDLE_STATE_TIMING instrumentation, #1222) → `.claude/rules/bundle-state-gather-latency.md` (auto-loads on its `paths:`)
 - non-60 source-cadence alert (dev1-side watchdog: strih `genlock-fifo audit received=` DELTA ÷ the audit lines' OWN timestamps — the #797 phantom-50.1 avoidance, NEVER a wall-clock divisor; the `@fps` decoration is the useless CANVAS fps, not per-source; watch STRIH cameras @60±3, a frozen source is UNKNOWN not "wrong 0 fps" (defers to #1052); reuse obs_watchdog confirm/throttle + #1001 no-double-page + require_tools fail-loud; the duplication-masked 50→60 hard layer is a follow-up; ships DISABLED, #794) → `.claude/rules/cadence-watchdog.md` (auto-loads on its `paths:`)
 - Re-pinning a probe-gated `ReleaseCadence` mirror against OBSERVED output (the authority-importing default-feature replica — Rust analogue of the vendored-C lift-and-compile; the phase-anchored-selection==newest-due-when-anchor-unset finding; fmt-check parses probe code; demonstrative set-anchor tests, #1037) → `.claude/rules/probe-mirror-replica-testing.md` (auto-loads on its `paths:`)
 - Cam2 optical-injection-leg health (dead-painter/optical-black detection, alert, fail-fast: the dev1 alert-watchdog framework reuse, the pidfile-OR-service TEST/EVENT discriminator, reusing #901 assert-program-nonblack, the never-false-abort [0/8] preflight, the #712 CAMBOX_PARALLEL_FAILED_LABELS ::error:: surface, #860) → `.claude/rules/optical-chain-health-watchdog.md` (auto-loads on its `paths:`)
@@ -596,6 +597,28 @@ until the DESIGN marker exists. Three things bite on THIS repo specifically:
   word (`still valid`/`stále plat`/`already fixed`/`current code`/…). A comment that only says
   "re-validation" / "Re-derived the current state" matches the evidence tier but NOT the action tier →
   `missing: validation action` → no marker. Add an explicit "I verified … and confirmed …".
+
+## GOTCHA — `block-tier0-local-build.sh` false-blocks a heredoc write whose PROSE happens to say a build-tool word at the start of a line
+
+The Tier-0 local-build guard scans the WHOLE command text (after a naive quote-strip) for any
+segment whose first token is the build-tool binary name — and it treats a bare newline INSIDE a
+`<<'EOF' ... EOF` heredoc BODY as a segment boundary, exactly like a real shell would between two
+commands. So an ordinary English sentence in a commit message written via a heredoc — e.g. "...no
+[TOOL] compile involved" — line-wrapped so the tool name starts the SECOND physical line, gets
+read as its own "command" whose first word is that tool name, and the whole call is blocked as a
+fake local build, even though nothing cargo-shaped is actually being invoked. Confirmed
+reproducible with a minimal apostrophe-free heredoc (no camera-box specifics beyond running in
+this repo for Tier-0 to apply). Filed as **zbynekdrlik/airuleset#750** (out of this repo's scope
+and this worker's write authority to fix — it lives in the shared hook, not here).
+
+**Mitigation for THIS repo's commit messages (until #750 lands upstream):** never describe a local
+build/test/check/clippy tool invocation as English prose inside a commit-message heredoc — paraphrase
+it ("the formatting check", "the local test suite") instead of naming the tool + a verb like
+build/test/check/clippy/bench/run/doc together, especially across a line wrap. If a call gets
+blocked with the Tier-0 "BLOCKED: local cargo COMPILATION" message and the actual command has no
+real cargo invocation in it, suspect this — write the file via the `Write` tool instead of a Bash
+heredoc (Write is not a Bash PreToolUse hook target, so this specific hook never sees it), or
+reword the prose and retry.
 
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 
