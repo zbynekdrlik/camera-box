@@ -162,3 +162,48 @@ def test_build_bundle_state_includes_age_when_present():
 def test_build_bundle_state_omits_age_when_empty():
     state = bsg.build_bundle_state(obs_version="32.1.2")
     assert "audio_ts_lag_age_s" not in state
+
+
+# ---------------------------------------------------------------- review 🔴: >1h stale + midnight
+# The freshness must hold for a stale span > 1h and across midnight — the two regimes the rig enters
+# (a quiet log where an old line survives in the 5 MB tail; every midnight). The log is APPEND-ONLY,
+# so file order IS time order: the log head is the LAST parseable line, never max-seconds-of-day.
+def test_a_source_stale_2h_still_excluded():
+    # 'gone' removed ~2h ago while lagging huge; 'live' fresh; the log advanced. gone must NOT
+    # re-enter the max as a "wrap artifact" — that is the exact false page (a) exists to close.
+    log = (
+        "07:00:00.000: audio-telemetry #800 'gone': ts_lag_ms=999999 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+        "08:59:00.000: [obs] unrelated line, log advancing\n"
+        "09:00:00.000: audio-telemetry #800 'live': ts_lag_ms=300 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+    )
+    assert bsg.audio_telemetry_from_log(log) == ("300", "live", "0")
+
+
+def test_b_all_stopped_2h_is_stale_not_fake_healthy():
+    # All telemetry stopped ~2h ago at a HEALTHY reading; the log kept advancing. This must be STALE
+    # (lag empty, large age), NEVER a fake-HEALTHY "120" — the hard-banned outcome.
+    log = (
+        "07:00:00.000: audio-telemetry #800 'mbc': ts_lag_ms=120 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+        "09:00:00.000: [obs] render tick — the log is alive, telemetry is not\n"
+    )
+    assert bsg.audio_telemetry_from_log(log) == ("", "", "7200")
+
+
+def test_b_all_stopped_2h_at_huge_lag_is_stale_not_a_page():
+    # Stopped ~2h ago at a HUGE lag: must be STALE (lag empty), never a LAGGING page off dead data.
+    log = (
+        "07:00:00.000: audio-telemetry #800 'mbc': ts_lag_ms=1672741 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+        "09:00:00.000: [obs] render tick — log alive, telemetry dead\n"
+    )
+    assert bsg.audio_telemetry_from_log(log) == ("", "", "7200")
+
+
+def test_stale_across_midnight_is_detected_not_masked():
+    # Last #800 at 23:57, log head at 00:30 (past midnight) = genuinely 33 min stale. File-order
+    # anchoring + the +86400 wrap correction yield the TRUE gap (1980 s) -> STALE, never a
+    # false-fresh "179" from a max-seconds-of-day anchor picking the pre-midnight line.
+    log = (
+        "23:57:00.000: audio-telemetry #800 'mbc': ts_lag_ms=999999 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+        "00:30:00.000: [obs] render tick, log advancing past midnight\n"
+    )
+    assert bsg.audio_telemetry_from_log(log) == ("", "", "1980")
