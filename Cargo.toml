@@ -26,7 +26,7 @@ resolver = "2"
 # values. The `^version = "X"` readers (camera-box-version-gate.sh, recording-e2e.sh,
 # rig-status.py) still match: this stays the only column-0 `version = "X"` line.
 [workspace.package]
-version = "1.7.0-dev.581"
+version = "1.7.0-dev.582"
 
 [lib]
 name = "camera_box"

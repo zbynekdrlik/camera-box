@@ -2280,7 +2280,8 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     imag_leg_skip_note "[1/8] imag render-health + MV-divisor capability" "$IMAG_OFFLINE_ACK_REASON"
   else
-  # issue 1218: idle imag's INACTIVE-camera NDI receivers (each decodes 1080p60 for nothing and
+  # issue 1218 (runs inside the IMAG_OFFLINE_ACKED else-branch above, so an acked-offline imag
+  # skips it): idle imag's INACTIVE-camera NDI receivers (each decodes 1080p60 for nothing and
   # thermal-throttles the box — the ~65s render-18ms episodes that false-fail this very preflight)
   # + refresh the box's ~/.config/camera-box/imag-active-cams state file, BEFORE the render-health
   # windows below. Best-effort (the helper never aborts the run; the box's own boot seed is the
