@@ -1652,6 +1652,18 @@ gh api -H "Accept: application/vnd.github.raw" \
     > "$REC_ENC" \
     || fail "could not fetch scripts/imag_record_encoder.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$REC_ENC"
+# issue 1218: imag_scenes.py LAZILY imports the obs_phase2 sibling (the shared, issue-795-safe
+# reenforce_ndi_name policy) inside enforce_ndi_active_policy -- the active-set NDI idle policy's ONE
+# enforcement point. Ride it on the SAME on-box deploy list (same gh-api fetch + chmod, the #1156
+# sibling-install discipline) so the on-box --bootstrap enforce gets the discoverability-gated heal.
+# The import is LAZY + degrades to a direct set if this file is ever absent, so a stale box never
+# crash-loops OBS -- but a fresh provision installs it for the gated path.
+OBS_PHASE2="/usr/local/bin/obs_phase2.py"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/obs_phase2.py?ref=dev" \
+    > "$OBS_PHASE2" \
+    || fail "could not fetch scripts/obs_phase2.py from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$OBS_PHASE2"
 
 
 # #840: install the operator start/stop scripts onto the box too -- the openbox autostart below

@@ -3677,3 +3677,31 @@ fn setup_imag_installs_imag_record_encoder_sibling_1156() {
          so the importer + its sibling never drift on a deploy (#1156)"
     );
 }
+
+/// issue 1218: imag_scenes.py LAZILY imports the obs_phase2 sibling inside enforce_ndi_active_policy
+/// (the active-set NDI idle policy's ONE enforcement point, using the shared issue-795-safe
+/// reenforce_ndi_name). It must ride the SAME on-box deploy list as its importer -- otherwise the
+/// on-box --bootstrap enforce silently degrades to an ungated direct set. The import is lazy and
+/// degrades gracefully, so a stale box never crash-loops OBS, but a fresh provision installs it.
+#[test]
+fn setup_imag_installs_obs_phase2_sibling_1218() {
+    let body = read(SETUP);
+    // Guard against this test going vacuous if the lazy import is ever removed from imag_scenes.py.
+    let scenes = read(SCENES);
+    assert!(
+        scenes.contains("import obs_phase2"),
+        "{SCENES} must still (lazily) import obs_phase2 for this deploy guard to be meaningful (issue 1218)"
+    );
+    assert!(
+        body.contains(r#"OBS_PHASE2="/usr/local/bin/obs_phase2.py""#),
+        "{SETUP} must resolve a fixed on-box install path for the obs_phase2.py sibling (issue 1218)"
+    );
+    assert!(
+        body.contains("scripts/obs_phase2.py?ref=dev") && body.contains("gh api"),
+        "{SETUP} must fetch scripts/obs_phase2.py from the genlock repo via gh api (issue 1218)"
+    );
+    assert!(
+        body.contains(r#"chmod 755 "$OBS_PHASE2""#),
+        "{SETUP} must chmod 755 the installed obs_phase2.py sibling (issue 1218)"
+    );
+}
