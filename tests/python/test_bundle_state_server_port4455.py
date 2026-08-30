@@ -228,3 +228,67 @@ def test_port4455_owning_pid_probe_empty_on_subprocess_error(monkeypatch):
 
     monkeypatch.setattr(bss.subprocess, "run", boom)
     assert bss._port4455_owning_pid() == ""
+
+
+# ---------------------------------------------------------------------------------------------
+# #1222 fable review findings -- two cache-lifecycle holes on degenerate paths that contradicted
+# the docstring's own "never serves a stale identity / clears the cache" promise.
+# ---------------------------------------------------------------------------------------------
+
+def test_port4455_owner_does_not_cache_an_empty_path_result(monkeypatch):
+    # A full resolve that SUCCEEDS (exit 0) with EMPTY stdout (the #1067 access-denied shape, or
+    # a transient CIM flake) must not be cached -- every later request must keep retrying instead
+    # of serving ("", "") for the rest of the OBS session with no chance of recovery.
+    _reset_port4455_cache()
+    full_calls = []
+
+    def fake_run(cmd, **_kw):
+        if _is_pid_probe(cmd):
+            return types.SimpleNamespace(stdout="4321\n")
+        full_calls.append(cmd)
+        return types.SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    first = bss.port4455_owner()
+    second = bss.port4455_owner()
+    assert first == ("", "")
+    assert second == ("", "")
+    assert len(full_calls) == 2, (
+        "an empty successful resolution must NOT be cached -- every request must keep retrying"
+    )
+
+
+def test_port4455_owner_clears_cache_when_full_resolve_raises(monkeypatch):
+    # A failed full resolve must clear the cache, so a LATER pid reuse (Windows recycles PIDs)
+    # cannot serve a stale identity resolved before the failure.
+    _reset_port4455_cache()
+    state = {"pid": "4321", "mode": "ok", "path": PINNED_EXE, "version": "32.1.2"}
+
+    def fake_run(cmd, **_kw):
+        if _is_pid_probe(cmd):
+            return types.SimpleNamespace(stdout=state["pid"] + "\n")
+        if state["mode"] == "boom":
+            raise bss.subprocess.SubprocessError("powershell blew up")
+        return types.SimpleNamespace(stdout=f"{state['path']}\n{state['version']}\n")
+
+    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    first = bss.port4455_owner()
+    assert first == (PINNED_EXE, "32.1.2")
+
+    # A different process (pid 9999) takes the port and its full resolve fails.
+    state["pid"] = "9999"
+    state["mode"] = "boom"
+    second = bss.port4455_owner()
+    assert second == ("", "")
+
+    # PID 4321 is REUSED by a totally different process (a real Windows possibility). The cache
+    # must NOT still say "pid 4321 -> the earlier PINNED_EXE/32.1.2" from before the failure.
+    state["pid"] = "4321"
+    state["mode"] = "ok"
+    state["path"] = r"C:\Program Files\obs-studio\bin\64bit\obs64_DIFFERENT.exe"
+    state["version"] = "34.0.0"
+    third = bss.port4455_owner()
+    assert third == (state["path"], state["version"]), (
+        "a failed resolve must clear the cache so a later PID reuse re-resolves instead of "
+        "serving a stale cached identity from before the failure"
+    )
