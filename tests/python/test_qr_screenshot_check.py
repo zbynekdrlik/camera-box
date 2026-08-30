@@ -94,3 +94,63 @@ def test_extract_png_bytes_from_data_url():
 def test_extract_png_bytes_returns_none_on_empty_input():
     assert qsc.extract_png_bytes("") is None
     assert qsc.extract_png_bytes(None) is None
+
+
+# ---------------------------------------------------------------------------
+# #1225 -- screenshot_qr_findings must NEVER write a bare `None` for an unreadable scene: a
+# `None` per-scene value crashed event_assert.pixel_proof_ok's `len(v)` call live on 2026-08-30.
+# An explicit `{"error": ...}` record is unambiguous on its own, in addition to event_assert.py
+# now being None-tolerant too.
+# ---------------------------------------------------------------------------
+
+
+class _FakeWS:
+    def close(self):
+        pass
+
+
+def test_screenshot_qr_findings_never_writes_a_bare_none_on_missing_screenshot_data(monkeypatch):
+    import obs_phase2
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password: _FakeWS())
+    monkeypatch.setattr(obs_phase2, "_rpc", lambda ws, rtype, rdata=None, **kw: {})  # no imageData
+
+    findings = qsc.screenshot_qr_findings("10.0.0.1", "pw", ["Cam 1"])
+    assert findings["Cam 1"] is not None
+    assert isinstance(findings["Cam 1"], dict)
+    assert "error" in findings["Cam 1"]
+
+
+def test_screenshot_qr_findings_never_writes_a_bare_none_on_rpc_exception(monkeypatch):
+    import obs_phase2
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password: _FakeWS())
+
+    def raising_rpc(ws, rtype, rdata=None, **kw):
+        raise RuntimeError("transport closed")
+
+    monkeypatch.setattr(obs_phase2, "_rpc", raising_rpc)
+
+    findings = qsc.screenshot_qr_findings("10.0.0.1", "pw", ["Cam 2"])
+    assert findings["Cam 2"] is not None
+    assert isinstance(findings["Cam 2"], dict)
+    assert findings["Cam 2"]["error"] == "transport closed"
+
+
+def test_screenshot_qr_findings_still_returns_a_clean_list_when_the_screenshot_decodes(
+    monkeypatch,
+):
+    import base64
+
+    import obs_phase2
+
+    raw = _blank_png_bytes()
+    b64 = base64.b64encode(raw).decode("ascii")
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password: _FakeWS())
+    monkeypatch.setattr(
+        obs_phase2, "_rpc", lambda ws, rtype, rdata=None, **kw: {"imageData": b64}
+    )
+
+    findings = qsc.screenshot_qr_findings("10.0.0.1", "pw", ["Cam 3"])
+    assert findings["Cam 3"] == []  # a real decode attempt, not an error record
