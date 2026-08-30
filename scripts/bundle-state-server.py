@@ -96,7 +96,8 @@ DEFAULT_AHK_PATH = r"D:\_APPS\NL_STARTUP.ahk"
 # #1222 — port4455_owner()'s PID-keyed cache (see that function's own doc comment). Guarded by a
 # lock because ThreadingHTTPServer dispatches each request on its own thread — same pattern as
 # the _State class below for the record-directory cache.
-PORT4455_PID_PROBE_TIMEOUT_S = 5  # cheap, WMI-free — should never need long
+PORT4455_PID_PROBE_TIMEOUT_S = 5  # #1222b: netstat, no interpreter cold-start —
+                                   # should never need anywhere near this long
 PORT4455_FULL_RESOLVE_TIMEOUT_S = 15  # unchanged; now rare (only on an actual PID change)
 _PORT4455_CACHE_LOCK = threading.Lock()
 _port4455_cache = {"pid": None, "path": "", "version": ""}
@@ -157,26 +158,60 @@ def ndi_runtime_version(dll_path):
         return ""
 
 
+def _parse_netstat_listening_pid(text, port=4455):
+    """#1222b — parse `netstat -ano -p tcp` output *text* and return the PID (as a string) of the
+    FIRST row whose local address ends with `:<port>` and whose state is LISTENING. "" if no such
+    row exists, or *text* is empty/malformed (never a guessed value — same never-a-false-clean
+    discipline as every other facet in this file).
+
+    Defensive parsing (PURE — no subprocess, no live box needed, testable with a canned fixture):
+    every genuine TCP row has exactly 5 whitespace-separated columns (Proto, Local Address,
+    Foreign Address, State, PID); the "Active Connections" banner and the column-header row are
+    naturally skipped because neither has "TCP" as its first column, and a UDP row (even though
+    the caller already requests `-p tcp`) is skipped defensively too. The `:<port>` check is an
+    exact suffix match on the LOCAL address column only — a `:4455` mention in the FOREIGN address
+    column of an unrelated ESTABLISHED connection, or a longer port like `:44551`, can never match."""
+    suffix = f":{port}"
+    for line in (text or "").splitlines():
+        cols = line.split()
+        if len(cols) != 5:
+            continue
+        proto, local_addr, _foreign_addr, state, pid = cols
+        if proto.upper() != "TCP":
+            continue
+        if state.upper() != "LISTENING":
+            continue
+        if not local_addr.endswith(suffix):
+            continue
+        return pid
+    return ""
+
+
 def _port4455_owning_pid():
-    """#1222 — a CHEAP PowerShell round-trip that reads ONLY the PID of whatever process is
+    """#1222 / #1222b — a CHEAP round-trip that reads ONLY the PID of whatever process is
     LISTENING on TCP :4455 right now — no WMI/CIM query, no VersionInfo read. Live strih evidence
     showed the FULL port4455_owner() resolution below (which folds this same listener lookup
     together with a Get-CimInstance Win32_Process query) regularly hitting its 15s subprocess
     timeout on EVERY /bundle-state.json request; this cheap probe lets port4455_owner() skip that
     expensive WMI round-trip entirely whenever the owning PID has not changed since last time.
+
+    #1222b: this probe was FIRST implemented as its own PowerShell one-liner
+    (`Get-NetTCPConnection`), but a live post-deploy timing on strih showed that command alone
+    costing ~4.1s plus PowerShell's own interpreter cold-start (~5-10s under load) — the "cheap"
+    probe still cost ~10-15s per request there, defeating its own purpose (the cache in
+    port4455_owner() never got a chance to help). Replaced with `netstat -ano -p tcp` — a native
+    Windows tool with no interpreter startup cost — parsed by the PURE `_parse_netstat_listening_pid`
+    above. Same signature, same "" on-failure/no-listener contract, so port4455_owner()'s cache
+    logic (unchanged by this swap) never needed to know which probe implementation feeds it.
+
     Returns the numeric PID as a string, or "" if there is no listener / the probe itself fails
     (never a guessed value — the caller then must not trust any cached identity either)."""
     try:
         out = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "(Get-NetTCPConnection -LocalPort 4455 -State Listen "
-                "-ErrorAction SilentlyContinue | Select-Object -First 1 "
-                "-ExpandProperty OwningProcess)",
-            ],
+            ["netstat", "-ano", "-p", "tcp"],
             capture_output=True, text=True, timeout=PORT4455_PID_PROBE_TIMEOUT_S, check=True,
         )
-        return out.stdout.strip()
+        return _parse_netstat_listening_pid(out.stdout, port=4455)
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not read the :4455 listener PID: {e}")
         return ""
