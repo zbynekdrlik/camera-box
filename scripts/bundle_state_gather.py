@@ -93,6 +93,62 @@ def genlock_capability_from_log(text):
     return "\n".join(matches)
 
 
+# #1222 — the strih bundle-state gather's latency grew LINEARLY with the live OBS log size: a
+# ~13h session (75 MB log) made every *_from_log parser above re-scan the WHOLE file on EVERY
+# /bundle-state.json request (~0.25 s/MB measured, +19 s at 75 MB), pushing gather past
+# recording-e2e.sh's `curl --max-time 30` and refusing the [0/8] version-integrity gate. Every
+# fact these parsers need lives at the EDGES of the log, never the middle: the startup banner
+# (obs_version / distroav_version / the first "video settings reset:" fps line / the FIRST
+# genlock capability markers) is written once at process start, and the "current state" a caller
+# might care about (the newest genlock capability marker) is always in the most recent lines. So
+# bound the read to a HEAD slice (startup banner) + a TAIL slice (newest state), independent of
+# how large the file has grown.
+LOG_HEAD_BYTES = 2 * 1024 * 1024  # ~2 MB — a wide margin over the startup banner (#1222 measured
+                                   # it sitting in the first few KB of a real log in practice).
+LOG_TAIL_BYTES = 5 * 1024 * 1024  # ~5 MB — the newest state a caller might need (e.g. the latest
+                                   # genlock capability marker).
+# A separator that can never fake a real log line: no digits (so it can never satisfy a
+# `\d+\.\d+\.\d+` / `fps:\s+\d+/` style pattern above), no colon-prefixed keyword any parser
+# scans for ("OBS ", "DistroAV (Version", "video settings reset:", "genlock:"), and newline-padded
+# on both sides so a byte-cut mid-line on either side of the join can never merge into something a
+# parser could mistake for a real one.
+LOG_BOUNDED_READ_SEPARATOR = (
+    "\n\n===== #1222 bounded log read: middle omitted (head+tail only) =====\n\n"
+)
+
+
+def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_BYTES):
+    """#1222 — the raw text of *path*, bounded to at most `head_bytes + tail_bytes +
+    len(LOG_BOUNDED_READ_SEPARATOR)` characters, regardless of the file's actual size. A file no
+    larger than `head_bytes + tail_bytes` is returned WHOLE, byte-for-byte (no separator, no
+    truncation) — the common case for a freshly-started OBS session and for every existing test
+    fixture in this suite. A larger file returns its first `head_bytes` bytes joined to its last
+    `tail_bytes` bytes via LOG_BOUNDED_READ_SEPARATOR (see that constant's own doc comment for why
+    it can never be mistaken for a real log line by any parser above). Decoded exactly like the
+    original whole-file read this replaces (`errors="replace"` — a byte-boundary cut mid
+    multi-byte UTF-8 character degrades to a harmless U+FFFD, never a crash).
+
+    "" if *path* is missing/unreadable — the same UNKNOWN-downstream contract as the whole-file
+    read this replaces (callers already treat an empty log text as every derived facet coming
+    back empty)."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size <= head_bytes + tail_bytes:
+                return f.read().decode("utf-8", errors="replace")
+            head = f.read(head_bytes)
+            f.seek(size - tail_bytes)
+            tail = f.read(tail_bytes)
+    except OSError as e:
+        print(f"WARNING: read_bounded_log_text: could not read {path!r}: {e}", file=sys.stderr)
+        return ""
+    return (
+        head.decode("utf-8", errors="replace")
+        + LOG_BOUNDED_READ_SEPARATOR
+        + tail.decode("utf-8", errors="replace")
+    )
+
+
 def distroav_dll_paths(scan_roots):
     """Every `distroav.dll` found (case-insensitive) under *scan_roots* (each walked recursively),
     comma-joined, in the order given. "" if none found anywhere (UNKNOWN — never a false clean;

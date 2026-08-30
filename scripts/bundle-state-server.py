@@ -93,6 +93,14 @@ DEFAULT_STARTUP_SHORTCUT = r"C:\ProgramData\Microsoft\Windows\Start Menu\Program
 # does not apply here" rather than a failure (see version-integrity-gate.sh's startup_chain scope).
 DEFAULT_AHK_PATH = r"D:\_APPS\NL_STARTUP.ahk"
 
+# #1222 — port4455_owner()'s PID-keyed cache (see that function's own doc comment). Guarded by a
+# lock because ThreadingHTTPServer dispatches each request on its own thread — same pattern as
+# the _State class below for the record-directory cache.
+PORT4455_PID_PROBE_TIMEOUT_S = 5  # cheap, WMI-free — should never need long
+PORT4455_FULL_RESOLVE_TIMEOUT_S = 15  # unchanged; now rare (only on an actual PID change)
+_PORT4455_CACHE_LOCK = threading.Lock()
+_port4455_cache = {"pid": None, "path": "", "version": ""}
+
 
 def log(msg):
     # A hidden Scheduled-Task context can hand this process a DEAD stdout pipe (the #650 supervisor's
@@ -108,17 +116,21 @@ def log(msg):
         pass
 
 
-def newest_obs_log_text(log_dir):
-    """The raw text of the newest *.txt OBS log in *log_dir* ("" if none/unreadable — the callers
-    already treat an unreadable log as every derived key coming back empty/UNKNOWN)."""
+def newest_obs_log_text(log_dir, head_bytes=bsg.LOG_HEAD_BYTES, tail_bytes=bsg.LOG_TAIL_BYTES):
+    """The raw text of the newest *.txt OBS log in *log_dir*, BOUNDED to at most
+    `head_bytes + tail_bytes` (#1222 — a growing multi-hour OBS session's log made every
+    *_from_log parser re-scan the WHOLE file on every request, ~0.25 s/MB measured, pushing
+    gather latency past recording-e2e.sh's `curl --max-time 30` and failing the [0/8]
+    version-integrity gate). "" if none/unreadable — the callers already treat an unreadable log
+    as every derived key coming back empty/UNKNOWN. See bsg.read_bounded_log_text for the actual
+    bounded-read implementation (shared, PURE, testable without a live box)."""
     try:
         candidates = glob.glob(os.path.join(log_dir, "*.txt"))
         if not candidates:
             log(f"WARNING: no OBS log files found under {log_dir}")
             return ""
         newest = max(candidates, key=os.path.getmtime)
-        with open(newest, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
+        return bsg.read_bounded_log_text(newest, head_bytes, tail_bytes)
     except OSError as e:
         log(f"WARNING: could not read OBS log dir {log_dir}: {e}")
         return ""
@@ -145,6 +157,31 @@ def ndi_runtime_version(dll_path):
         return ""
 
 
+def _port4455_owning_pid():
+    """#1222 — a CHEAP PowerShell round-trip that reads ONLY the PID of whatever process is
+    LISTENING on TCP :4455 right now — no WMI/CIM query, no VersionInfo read. Live strih evidence
+    showed the FULL port4455_owner() resolution below (which folds this same listener lookup
+    together with a Get-CimInstance Win32_Process query) regularly hitting its 15s subprocess
+    timeout on EVERY /bundle-state.json request; this cheap probe lets port4455_owner() skip that
+    expensive WMI round-trip entirely whenever the owning PID has not changed since last time.
+    Returns the numeric PID as a string, or "" if there is no listener / the probe itself fails
+    (never a guessed value — the caller then must not trust any cached identity either)."""
+    try:
+        out = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "(Get-NetTCPConnection -LocalPort 4455 -State Listen "
+                "-ErrorAction SilentlyContinue | Select-Object -First 1 "
+                "-ExpandProperty OwningProcess)",
+            ],
+            capture_output=True, text=True, timeout=PORT4455_PID_PROBE_TIMEOUT_S, check=True,
+        )
+        return out.stdout.strip()
+    except (subprocess.SubprocessError, OSError) as e:
+        log(f"WARNING: could not read the :4455 listener PID: {e}")
+        return ""
+
+
 def port4455_owner():
     """#826 — the exe PATH (never just a process name) + FileVersion of whatever process is
     LISTENING on TCP :4455 right now. Returns (path, version), each "" on any failure/absence (no
@@ -162,7 +199,31 @@ def port4455_owner():
     (Get-Item .VersionInfo.FileVersion) only needs read access to the on-disk exe, so it works once
     the path resolves (which is why the version was ALSO missing before — downstream of the null
     path, not a separate failure). Get-Process.Path is kept as a fallback for any box where CIM is
-    unavailable."""
+    unavailable.
+
+    #1222 — CACHED, keyed by the CURRENT owning PID (read via the cheap `_port4455_owning_pid()`
+    probe above, no WMI). Live strih evidence: this function's single PowerShell round-trip
+    (Get-NetTCPConnection + Get-CimInstance Win32_Process + Get-Item VersionInfo) was regularly
+    hitting its 15s subprocess timeout on EVERY /bundle-state.json request — ~15s of the
+    ~18.7s fresh-log gather baseline (issue-1222 comment). Since a PID never changes identity
+    mid-life on Windows, an UNCHANGED pid means the same process is still there and the
+    already-resolved (path, version) is not a guess — it is re-served instead of re-resolved. Only
+    a CHANGED pid (a genuine OBS restart, or a different process taking the port — rare, not a
+    per-request event) pays for the expensive WMI resolution again. An unresolvable current PID
+    (no listener, or even the cheap probe failing) CLEARS the cache and returns ("", "") — never
+    serves a stale identity for a port nothing currently proves to still be owned by that process."""
+    pid = _port4455_owning_pid()
+    if not pid:
+        with _PORT4455_CACHE_LOCK:
+            _port4455_cache["pid"] = None
+            _port4455_cache["path"] = ""
+            _port4455_cache["version"] = ""
+        return "", ""
+
+    with _PORT4455_CACHE_LOCK:
+        if _port4455_cache["pid"] == pid:
+            return _port4455_cache["path"], _port4455_cache["version"]
+
     try:
         out = subprocess.run(
             [
@@ -180,15 +241,20 @@ def port4455_owner():
                 'if ($path) { $path; '
                 '(Get-Item -LiteralPath $path -ErrorAction SilentlyContinue).VersionInfo.FileVersion } }',
             ],
-            capture_output=True, text=True, timeout=15, check=True,
+            capture_output=True, text=True, timeout=PORT4455_FULL_RESOLVE_TIMEOUT_S, check=True,
         )
         lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
         path = lines[0].strip() if len(lines) >= 1 else ""
         version = lines[1].strip() if len(lines) >= 2 else ""
-        return path, version
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not read the :4455 port owner: {e}")
         return "", ""
+
+    with _PORT4455_CACHE_LOCK:
+        _port4455_cache["pid"] = pid
+        _port4455_cache["path"] = path
+        _port4455_cache["version"] = version
+    return path, version
 
 
 def obs_process_list():
@@ -277,6 +343,17 @@ def gather_record_directory(host, password):
         ws.close()
 
 
+def _timed(timings, key, fn, *args, **kwargs):
+    """#1222 — run fn(*args, **kwargs), recording its wall-clock duration under *key* in the
+    *timings* dict (the opt-in BUNDLE_STATE_TIMING=1 per-facet breakdown — see
+    gather_bundle_state's own doc comment). Never swallows an exception; only measures."""
+    t0 = time.perf_counter()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        timings[key] = time.perf_counter() - t0
+
+
 def gather_bundle_state(
     obs_host, password, obs_log_dir, ndi_runtime_dll, distroav_scan_roots,
     genlock_build_sha_file=DEFAULT_GENLOCK_BUILD_SHA_FILE,
@@ -288,19 +365,48 @@ def gather_bundle_state(
     """Build the fresh bundle-state dict for THIS request — every gather is attempted
     independently so one failing facet (e.g. OBS-WS momentarily unreachable) does not blank out
     the log-derived facets that still read fine; each key that could not be read is simply
-    omitted (UNKNOWN downstream), never guessed."""
-    log_text = newest_obs_log_text(obs_log_dir)
-    ndi_inputs = {}
-    try:
-        ndi_inputs = gather_ndi_inputs(obs_host, password)
-    except Exception as e:  # noqa: BLE001 - any WS/RPC failure must not crash the whole response
-        log(f"WARNING: could not gather NDI input latency over obs-websocket: {e}")
+    omitted (UNKNOWN downstream), never guessed.
+
+    #1222: every facet gather is timed into a per-request breakdown, logged as ONE line
+    ("gather timing: key=Xs ...") when BUNDLE_STATE_TIMING=1 is set in the environment — opt-in
+    so the normal request path pays only a cheap perf_counter() call per facet. This gives the
+    NEXT session real per-facet data to attack the remaining ~18.7s cold-log baseline (measured
+    2026-08-29 AFTER a fresh-log restart, so it is NOT the log-size problem this ticket's bounded
+    read already fixes) instead of guessing which facet is slow."""
+    timings = {}
+    t_total0 = time.perf_counter()
+
+    log_text = _timed(timings, "obs_log_read", newest_obs_log_text, obs_log_dir)
+
+    def _parse_log_facets():
+        return (
+            bsg.obs_version_from_log(log_text),
+            bsg.distroav_version_from_log(log_text),
+            bsg.output_fps_from_log(log_text),
+            bsg.genlock_wall_clock_from_log(log_text),
+            bsg.genlock_capability_from_log(log_text),
+        )
+
+    (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability) = _timed(
+        timings, "obs_log_parse", _parse_log_facets
+    )
+
+    def _gather_ndi():
+        try:
+            return gather_ndi_inputs(obs_host, password)
+        except Exception as e:  # noqa: BLE001 - any WS/RPC failure must not crash the whole response
+            log(f"WARNING: could not gather NDI input latency over obs-websocket: {e}")
+            return {}
+
+    ndi_inputs = _timed(timings, "ndi_inputs", _gather_ndi)
 
     # #826 — the strih OBS-identity machine-check facet (each gather independent, same
     # never-let-one-failure-blank-the-rest discipline as every other facet here).
-    port_owner_path, port_owner_version = port4455_owner()
-    ahk_text = read_ahk_text(ahk_path)
-    shortcut_target, shortcut_workdir = resolve_shortcut(startup_shortcut)
+    port_owner_path, port_owner_version = _timed(timings, "port4455_owner", port4455_owner)
+    ahk_text = _timed(timings, "ahk_text", read_ahk_text, ahk_path)
+    shortcut_target, shortcut_workdir = _timed(
+        timings, "shortcut", resolve_shortcut, startup_shortcut
+    )
 
     # #770 — the DEPLOYED plugin/core byte identity the [0/8] version-integrity gate compares
     # against the #120 BUNDLE_MANIFEST. distroav.dll: hash the FIRST located copy (scan order:
@@ -313,34 +419,59 @@ def gather_bundle_state(
     # hashing it here is exactly the byte the version-integrity gate compares by basename.
     # Each hash degrades to "" (UNKNOWN downstream, never a guessed/zero SHA) when the file is
     # missing/unreadable — the opt-in landing (#756-shape): a box with no genlock DLL is skipped.
-    distroav_paths_csv = bsg.distroav_dll_paths(distroav_scan_roots)
+    distroav_paths_csv = _timed(
+        timings, "distroav_dll_paths", bsg.distroav_dll_paths, distroav_scan_roots
+    )
     first_distroav = distroav_paths_csv.split(",")[0] if distroav_paths_csv else ""
 
-    return bsg.build_bundle_state(
-        obs_version=bsg.obs_version_from_log(log_text),
-        distroav_version=bsg.distroav_version_from_log(log_text),
-        ndi_runtime=ndi_runtime_version(ndi_runtime_dll),
-        output_fps=bsg.output_fps_from_log(log_text),
-        genlock_wall_clock=bsg.genlock_wall_clock_from_log(log_text),
+    obs_installs_val = _timed(
+        timings, "obs_installs", bsg.obs_installs_under, obs_install_scan_roots
+    )
+    obs_dll_sha256_val = _timed(timings, "obs_dll_sha256", bsg.component_sha256, obs_dll_path)
+    distroav_dll_sha256_val = _timed(
+        timings, "distroav_dll_sha256", bsg.component_sha256, first_distroav
+    )
+    genlock_build_sha_val = _timed(
+        timings, "genlock_build_sha", bsg.genlock_build_sha_from_file, genlock_build_sha_file
+    )
+    ndi_runtime_val = _timed(timings, "ndi_runtime", ndi_runtime_version, ndi_runtime_dll)
+    obs_process_count_val = _timed(
+        timings,
+        "obs_process_count",
+        lambda: bsg.obs_process_count_from_listing(obs_process_list()),
+    )
+
+    result = bsg.build_bundle_state(
+        obs_version=obs_version,
+        distroav_version=distroav_version,
+        ndi_runtime=ndi_runtime_val,
+        output_fps=output_fps,
+        genlock_wall_clock=genlock_wall_clock,
         ndi_input_latency=bsg.ndi_input_latency_csv(ndi_inputs),
         distroav_dll_paths=distroav_paths_csv,
-        genlock_capability=bsg.genlock_capability_from_log(log_text),
+        genlock_capability=genlock_capability,
         # #770 — deployed core/plugin byte sha256 (the truth the marker only POINTS at).
-        obs_dll_sha256=bsg.component_sha256(obs_dll_path),
-        distroav_dll_sha256=bsg.component_sha256(first_distroav),
+        obs_dll_sha256=obs_dll_sha256_val,
+        distroav_dll_sha256=distroav_dll_sha256_val,
         # #756 — the deployed genlock build SHA for the cross-box parity gate.
-        genlock_build_sha=bsg.genlock_build_sha_from_file(genlock_build_sha_file),
+        genlock_build_sha=genlock_build_sha_val,
         # #826 — the strih OBS-identity machine-check facet.
-        obs_installs=bsg.obs_installs_under(obs_install_scan_roots),
+        obs_installs=obs_installs_val,
         port4455_owner_path=port_owner_path,
         port4455_owner_version=port_owner_version,
-        obs_process_count=bsg.obs_process_count_from_listing(obs_process_list()),
+        obs_process_count=obs_process_count_val,
         ahk_app1_shortcut_path=bsg.ahk_app1_shortcut_path(ahk_text),
         ahk_app1_run=bsg.ahk_app1_run(ahk_text),
         ahk_dead_config_present=bsg.ahk_dead_config_present(ahk_text),
         shortcut_target_path=shortcut_target,
         shortcut_workdir=shortcut_workdir,
     )
+
+    timings["total"] = time.perf_counter() - t_total0
+    if os.environ.get("BUNDLE_STATE_TIMING") == "1":
+        breakdown = " ".join(f"{k}={v:.3f}s" for k, v in timings.items())
+        log(f"gather timing: {breakdown}")
+    return result
 
 
 class _State:
