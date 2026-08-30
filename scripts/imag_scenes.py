@@ -132,7 +132,10 @@ CANONICAL_NDI_SOURCES = {
 # No knowledge at all (no flag, no file) -> baseline-heal (the pre-1218 behavior), except a
 # DELIBERATE idle is preserved via the #1158 discriminator below.
 
-ACTIVE_CAMS_STATE_FILE = os.path.expanduser("~/.config/camera-box/imag-active-cams")
+# The on-box state file the --bootstrap self-heal reads / a dev1 --active-cams pass writes.
+# IMAG_ACTIVE_CAMS_STATE_FILE overrides the default path (a Tier-0 test seam; unset = production).
+ACTIVE_CAMS_STATE_FILE = (os.environ.get("IMAG_ACTIVE_CAMS_STATE_FILE")
+                          or os.path.expanduser("~/.config/camera-box/imag-active-cams"))
 
 
 def parse_active_cams(text):
@@ -284,16 +287,21 @@ def enforce_ndi_active_policy(obs, active_cams):
     """issue 1218: the ONE policy point for imag NDI-name enforcement -- every vector flows through
     it (the on-box --bootstrap seed and the dev1 --enforce-ndi-policy reenforce pass). For each
     camera n in CAMS, ndi_policy_action decides and this applies it:
-      - "reenforce": (re)apply the baseline name. Discoverability-gated + read-back-verified via the
-        SHARED obs_phase2.reenforce_ndi_name (#795-safe -- never sets a name absent from the finder).
-        When obs_phase2 is unavailable (older box) OR the connection exposes no raw `ws` (a unit-test
-        fake), it degrades to a direct overlay SetInputSettings of the baseline name + genlock on
-        (the pre-1218 unconditional-arm behavior for an active cam).
+      - "reenforce": (re)apply the ACTIVE payload (baseline name + genlock_fifo True). On the gated
+        path the NAME goes through the SHARED obs_phase2.reenforce_ndi_name (#795-safe -- never sets a
+        name absent from the finder) AND, only when it HEALED, genlock_fifo True is restored too:
+        reenforce_ndi_name writes ONLY ndi_source_name, so a camera reactivated inactive->active
+        (its scene collection persisted genlock_fifo False from the idle) would otherwise decode
+        again but BYPASS the genlock FIFO silently -- so the fifo restore is mandatory (#1218 review
+        RED). When obs_phase2 is unavailable (older box) OR the connection exposes no raw `ws` (a
+        unit-test fake), it degrades to a direct overlay SetInputSettings of the whole active payload.
       - "idle": apply the idle payload ("" + genlock_fifo off, overlay:True) and read-back verify the
-        name is now "" -- a #1158 deliberate idle, never a silent failure to idle.
+        name is now "" -- a #1158 deliberate idle. A failed read-back is UNVERIFIED, never a silent
+        idle:ok (#1218 review).
       - "leave": preserve a deliberate idle (no set knowledge).
-    Returns {n: status} for the caller's log. Best-effort per camera (ignore_err); never raises on an
-    OBS request error."""
+    Both writes are built from desired_ndi_state so the real payloads are exactly what its byte-parity
+    test guards (#1218 review). Returns {n: status} for the caller's log. Best-effort per camera
+    (ignore_err); never raises on an OBS request error."""
     op = _obs_phase2_module()
     ws = getattr(obs, "ws", None)
     gated = op is not None and ws is not None
@@ -310,25 +318,39 @@ def enforce_ndi_active_policy(obs, active_cams):
             result[n] = "idle-preserved"
             continue
         if action == "reenforce":
+            # the ACTIVE payload, via desired_ndi_state (n in {n} -> active) so the real write is the
+            # parity-tested payload, not a divergent inline copy (#1218 review).
+            active_payload = desired_ndi_state(n, {n})
             if gated:
-                result[n] = "active:%s" % op.reenforce_ndi_name(ws, inp, name)
+                status = op.reenforce_ndi_name(ws, inp, active_payload["ndi_source_name"])
+                if status == op.REENFORCE_HEALED:
+                    # reenforce_ndi_name set ONLY the name; restore genlock_fifo True so a reactivated
+                    # camera genlocks again instead of silently bypassing the FIFO (#1218 review RED).
+                    obs.req("SetInputSettings", {
+                        "inputName": inp,
+                        "inputSettings": {"genlock_fifo": active_payload["genlock_fifo"]},
+                        "overlay": True,
+                    }, ignore_err=True)
+                result[n] = "active:%s" % status
             else:
                 obs.req("SetInputSettings", {
-                    "inputName": inp,
-                    "inputSettings": {"ndi_source_name": name, "genlock_fifo": True},
-                    "overlay": True,
+                    "inputName": inp, "inputSettings": active_payload, "overlay": True,
                 }, ignore_err=True)
                 result[n] = "active:set(ungated)"
             continue
-        # action == "idle": tear the receiver down cold, then verify the name is really ""
+        # action == "idle": tear the receiver down cold (idle payload via desired_ndi_state, n not in
+        # the empty set -> idle), then read-back verify the name is really "".
         obs.req("SetInputSettings", {
-            "inputName": inp,
-            "inputSettings": {"ndi_source_name": "", "genlock_fifo": False},
-            "overlay": True,
+            "inputName": inp, "inputSettings": desired_ndi_state(n, set()), "overlay": True,
         }, ignore_err=True)
         back = (obs.req("GetInputSettings", {"inputName": inp}, ignore_err=True)
-                .get("inputSettings", {}) or {}).get("ndi_source_name", "")
-        result[n] = "idle:ok" if back == "" else "idle:VERIFY_FAILED(%r)" % back
+                .get("inputSettings", {}) or {}).get("ndi_source_name", None)
+        if back is None:
+            result[n] = "idle:UNVERIFIED(read failed)"
+        elif back == "":
+            result[n] = "idle:ok"
+        else:
+            result[n] = "idle:VERIFY_FAILED(%r)" % back
     return result
 
 
@@ -1054,8 +1076,12 @@ def verify_parity(obs: Obs, active_cams=None) -> None:
         actual_ndi[name] = settings.get("inputSettings", {}).get("ndi_source_name")
     ndi_problems = ndi_source_mismatches(actual_ndi, active_cams=active_cams)
     idled = active_set_idle_report(actual_ndi, active_cams)
-    print("ndi sources: " + ("; ".join(ndi_problems) if ndi_problems else "OK")
-          + (f" | idle(active-set): {idled}" if idled else ""))
+    # #1218: keep "ndi sources: OK" its OWN whole line (verify-imag.sh's imag_parity_output_ok
+    # matches it with grep -qxF), and report the deliberately-idled inactive cameras on a SEPARATE
+    # line so the active-set idle state is visible without breaking the whole-line parity check.
+    print("ndi sources: " + ("; ".join(ndi_problems) if ndi_problems else "OK"))
+    if idled:
+        print("ndi idle (active-set): " + ", ".join(idled))
 
     if order_problem or ndi_problems:
         sys.exit(1)
@@ -1384,10 +1410,20 @@ def main() -> None:
         # #1143: ensure_rec_encoder stops/starts OBS itself, so it must NOT reuse a pre-opened WS.
         ensure_rec_encoder(args.host, args.port, args.password)
         return
-    # #1218: a dev1 pass carrying an explicit --active-cams writes the one-line state file to the box
-    # (or locally) so the next on-box --bootstrap self-heal reads a fresh copy. Only the WRITE modes
-    # (seed / --enforce-ndi-policy) — never the read-only --verify-parity / --projector.
-    if args.active_cams and args.active_cams.strip() and not (args.verify_parity or args.projector):
+    # #1218: an EXPLICIT --active-cams that parses to nothing (a mis-quoted var, junk) would silently
+    # baseline-heal (re-arm ALL receivers — the exact thermal regression) AND write junk to the box's
+    # state file. Fail LOUD and skip the write instead (#1218 review); the read-only modes still run.
+    explicit_bad = bool(args.active_cams) and args.active_cams.strip() != "" and active_cams is None
+    if explicit_bad:
+        print("WARN #1218: --active-cams %r parsed to NO camera numbers (expected e.g. "
+              "\"cam1 cam2 cam6\") — NOT writing the state file; falling back to baseline-heal"
+              % args.active_cams, file=sys.stderr)
+    # #1218: a dev1 pass carrying a VALID explicit --active-cams writes the one-line state file to the
+    # box (or locally) so the next on-box --bootstrap self-heal reads a fresh copy. Only the WRITE
+    # modes (seed / --enforce-ndi-policy) — never the read-only --verify-parity / --projector, and
+    # never when the flag was unparseable.
+    if (args.active_cams and args.active_cams.strip() and not explicit_bad
+            and not (args.verify_parity or args.projector)):
         _write_active_cams_state(args.host, args.active_cams)
     obs = Obs(args.host, args.port, args.password)
     if args.enforce_ndi_policy:

@@ -265,20 +265,29 @@ def test_enforce_no_set_knowledge_preserves_deliberate_idle_heals_wedge():
     assert result[5] == "active:set(ungated)"
 
 
+class FakeOp:
+    """Stand-in for the obs_phase2 module: records reenforce_ndi_name calls, returns a configurable
+    status, and carries the REENFORCE_* constants enforce_ndi_active_policy branches on."""
+
+    REENFORCE_HEALED = "healed"
+    REENFORCE_OFFLINE = "offline"
+    REENFORCE_VERIFY_FAILED = "verify_failed"
+
+    def __init__(self, status="healed"):
+        self.calls = []
+        self.status = status
+
+    def reenforce_ndi_name(self, ws, inp, name):
+        self.calls.append((ws, inp, name))
+        return self.status
+
+
 def test_enforce_gated_uses_reenforce_ndi_name(monkeypatch):
     """With `.ws` present AND obs_phase2 importable, active cams flow through the shared
-    obs_phase2.reenforce_ndi_name (#795-safe, discoverability-gated); inactive cams still idle."""
+    obs_phase2.reenforce_ndi_name (#795-safe, discoverability-gated) for the NAME; inactive cams
+    still idle."""
     m = _mod()
-
-    class FakeOp:
-        def __init__(self):
-            self.calls = []
-
-        def reenforce_ndi_name(self, ws, inp, name):
-            self.calls.append((ws, inp, name))
-            return "healed"
-
-    fake_op = FakeOp()
+    fake_op = FakeOp(status="healed")
     monkeypatch.setattr(m, "_obs_phase2_module", lambda: fake_op)
     ws_sentinel = object()
     obs = FakeObs(ws=ws_sentinel)
@@ -286,14 +295,46 @@ def test_enforce_gated_uses_reenforce_ndi_name(monkeypatch):
     # active cams -> reenforce path, called with the raw ws + baseline name
     assert result[1] == "active:healed"
     assert (ws_sentinel, "NDI CAM1", "CAM1 (usb)") in fake_op.calls
-    # no direct active SetInputSettings when gated (reenforce owns it)
-    active_sets = [p for r, p in obs.calls
-                   if r == "SetInputSettings" and p["inputSettings"].get("ndi_source_name", None) not in ("", None)]
-    assert active_sets == []
+    # reenforce_ndi_name owns the NAME — no ndi_source_name SetInputSettings for active cams
+    active_name_sets = [p for r, p in obs.calls
+                        if r == "SetInputSettings" and "ndi_source_name" in p["inputSettings"]
+                        and p["inputSettings"]["ndi_source_name"] not in ("",)]
+    assert active_name_sets == []
     # inactive cams still idled through the direct payload
     for n in INACTIVE:
         assert obs.settings[f"NDI CAM{n}"]["ndi_source_name"] == ""
         assert result[n] == "idle:ok"
+
+
+def test_enforce_gated_reactivation_restores_genlock_fifo():
+    """#1218 review RED: obs_phase2.reenforce_ndi_name writes ONLY ndi_source_name. A camera moved
+    inactive->active carries a persisted genlock_fifo:False (from its idle), so the gated path MUST
+    also restore genlock_fifo:True (once the name HEALED) or the receiver decodes again but silently
+    bypasses the genlock FIFO."""
+    m = _mod()
+    # each _mod() call loads a FRESH module by importlib, so a direct setattr never leaks across tests
+    fake_op = FakeOp(status="healed")
+    m._obs_phase2_module = lambda: fake_op
+    # cam1 reactivated: persisted idle state (name cleared, genlock_fifo False)
+    obs = FakeObs(initial={"NDI CAM1": {"ndi_source_name": "", "genlock_fifo": False}}, ws=object())
+    result = m.enforce_ndi_active_policy(obs, {1})
+    assert result[1] == "active:healed"
+    # genlock_fifo restored to True even though reenforce_ndi_name only touched the name
+    assert obs.settings["NDI CAM1"]["genlock_fifo"] is True, (
+        "a reactivated camera must genlock again — genlock_fifo True must be restored on the gated path")
+
+
+def test_enforce_gated_offline_does_not_touch_genlock_fifo():
+    """When the name is OFFLINE (not in the finder) reenforce does not set it — and we must NOT set
+    genlock_fifo:True either (that would run the consume path against an empty '' input, #70)."""
+    m = _mod()
+    fake_op = FakeOp(status="offline")
+    m._obs_phase2_module = lambda: fake_op
+    obs = FakeObs(initial={"NDI CAM1": {"ndi_source_name": "", "genlock_fifo": False}}, ws=object())
+    result = m.enforce_ndi_active_policy(obs, {1})
+    assert result[1] == "active:offline"
+    assert obs.settings["NDI CAM1"]["genlock_fifo"] is False, (
+        "an OFFLINE (unhealed) name must not get genlock_fifo True — no empty-queue consume path (#70)")
 
 
 def test_enforce_idle_verify_failure_is_reported():
@@ -314,6 +355,36 @@ def test_enforce_idle_verify_failure_is_reported():
     obs = StubbornObs()
     result = m.enforce_ndi_active_policy(obs, ACTIVE)
     assert "VERIFY_FAILED" in result[4]
+
+
+def test_enforce_idle_readback_failure_is_unverified_not_ok():
+    """#1218 review: a FAILED idle read-back (GetInputSettings suppressed by ignore_err -> {}) must
+    be UNVERIFIED, never a silent idle:ok — the docstring promises 'never a silent failure to idle'."""
+    m = _mod()
+
+    class BlindReadObs(FakeObs):
+        def req(self, rtype, payload=None, ignore_err=False):
+            p = payload or {}
+            if rtype == "GetInputSettings" and p["inputName"] in ("NDI CAM4", "NDI CAM5"):
+                return {}  # read-back failed / returned nothing
+            return super().req(rtype, payload, ignore_err)
+
+    obs = BlindReadObs()
+    result = m.enforce_ndi_active_policy(obs, ACTIVE)
+    assert "UNVERIFIED" in result[4] and "UNVERIFIED" in result[5], result
+
+
+def test_enforce_routes_payloads_through_desired_ndi_state():
+    """#1218 review (yellow): the REAL writes must be the parity-tested desired_ndi_state payloads,
+    not a divergent inline copy. The ungated active write and the idle write must equal
+    desired_ndi_state's active/idle payloads exactly."""
+    m = _mod()
+    obs = FakeObs()  # ungated (no ws)
+    m.enforce_ndi_active_policy(obs, ACTIVE)
+    for n in ACTIVE:
+        assert obs.settings[f"NDI CAM{n}"] == m.desired_ndi_state(n, ACTIVE)
+    for n in INACTIVE:
+        assert obs.settings[f"NDI CAM{n}"] == m.desired_ndi_state(n, ACTIVE)
 
 
 # --------------------------------------------------------------------------- verify_parity end-to-end
@@ -354,6 +425,19 @@ def test_verify_parity_passes_on_active_set_idled_box():
     assert obs.mutations == [], "verify_parity must stay read-only"
 
 
+def test_verify_parity_keeps_ndi_sources_ok_a_standalone_whole_line(capsys):
+    """verify-imag.sh's imag_parity_output_ok matches `ndi sources: OK` with grep -qxF (WHOLE line),
+    so the active-set idle report MUST be a SEPARATE line, never an inline suffix on it."""
+    m = _mod()
+    bindings = _actual_from_active(ACTIVE)  # cam4/cam5 idled
+    obs = ParityObs(bindings, _canonical_order())
+    m.verify_parity(obs, active_cams=ACTIVE)
+    lines = capsys.readouterr().out.splitlines()
+    assert "ndi sources: OK" in lines, "the whole-line 'ndi sources: OK' must survive for grep -qxF"
+    assert "scene order: OK" in lines
+    assert any(ln.startswith("ndi idle (active-set): ") for ln in lines)
+
+
 def test_verify_parity_fails_when_inactive_still_bound():
     m = _mod()
     bindings = _actual_from_active(ACTIVE)
@@ -365,3 +449,39 @@ def test_verify_parity_fails_when_inactive_still_bound():
     except SystemExit as e:
         raised = e.code not in (0, None)
     assert raised, "verify_parity must fail when an inactive camera is still bound (still decoding)"
+
+
+# --------------------------------------------------------------------------- main() state-file guard
+
+
+def _run_script(args, state_file):
+    # Redirect ONLY the state-file path via the IMAG_ACTIVE_CAMS_STATE_FILE seam — NEVER override
+    # HOME, which would move Python's user-site (~/.local) and break `import websocket` in the child.
+    import os as _os
+    import subprocess as _sp
+    env = dict(_os.environ)
+    env["IMAG_ACTIVE_CAMS_STATE_FILE"] = str(state_file)
+    return _sp.run(
+        [sys.executable, str(REPO / "scripts" / "imag_scenes.py")] + args,
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+
+
+def test_main_unparseable_active_cams_warns_and_skips_state_write(tmp_path):
+    """#1218 review (blue): an EXPLICIT --active-cams that parses to no cam numbers must WARN and NOT
+    write junk to the box's state file (which the next --bootstrap would read). It still baseline-heals
+    (safe), but silently writing junk is the failure. (The run then exits non-zero at the unreachable
+    OBS connect — expected; we assert only the WARN + the absent state file.)"""
+    sf = tmp_path / "imag-active-cams"
+    r = _run_script(["--host", "127.0.0.1", "--active-cams", "notacam", "--enforce-ndi-policy"], sf)
+    assert "WARN #1218" in r.stderr, r.stderr
+    assert not sf.exists(), "junk --active-cams must NOT be written to the state file"
+
+
+def test_main_valid_active_cams_writes_state_file_locally(tmp_path):
+    """A VALID explicit --active-cams on the local host writes the one-line state file (before the WS
+    connect), so the next on-box --bootstrap reads a fresh copy."""
+    sf = tmp_path / "imag-active-cams"
+    r = _run_script(["--host", "127.0.0.1", "--active-cams", "cam1 cam2", "--enforce-ndi-policy"], sf)
+    assert sf.exists(), r.stderr
+    assert sf.read_text() == "cam1 cam2\n"

@@ -1664,6 +1664,18 @@ gh api -H "Accept: application/vnd.github.raw" \
     > "$OBS_PHASE2" \
     || fail "could not fetch scripts/obs_phase2.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$OBS_PHASE2"
+# issue 1218: seed the active-cams state file at provision time so the box's VERY FIRST --bootstrap
+# idles inactive cameras instead of baseline-healing all of them (all-decode = the thermal state
+# this ticket fixes) until the first dev1 pass writes it. OPT-IN via IMAG_ACTIVE_CAMS so this
+# standalone provisioner never has to duplicate CAMERA_ACTIVE_SET (its single source of truth stays
+# scripts/camera-set.sh): pass `IMAG_ACTIVE_CAMS="$CAMERA_ACTIVE_SET" sudo -E ./setup-imag.sh` to
+# seed it now; omitted, the first verify-imag.sh pass writes it (short provisioning-only window).
+if [ -n "${IMAG_ACTIVE_CAMS:-}" ]; then
+    install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$USER_HOME/.config/camera-box"
+    printf '%s\n' "$IMAG_ACTIVE_CAMS" > "$USER_HOME/.config/camera-box/imag-active-cams"
+    chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/camera-box/imag-active-cams"
+    echo "issue 1218: seeded ~/.config/camera-box/imag-active-cams = '$IMAG_ACTIVE_CAMS'"
+fi
 
 
 # #840: install the operator start/stop scripts onto the box too -- the openbox autostart below
