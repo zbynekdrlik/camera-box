@@ -585,7 +585,10 @@ def test_read_bounded_log_text_large_file_is_bounded_and_excludes_the_middle(tmp
     p = tmp_path / "big.txt"
     p.write_text(full_text, encoding="utf-8")
 
-    bounded = bsg.read_bounded_log_text(str(p), head_bytes=500, tail_bytes=500)
+    # head/tail bounds smaller than one middle-sentinel line (245 bytes) but big enough to
+    # fully capture the head/tail marker lines, so a full middle-sentinel line cannot land
+    # inside either slice by coincidence.
+    bounded = bsg.read_bounded_log_text(str(p), head_bytes=30, tail_bytes=30)
 
     assert len(bounded) < len(full_text)
     assert head_marker in bounded

@@ -66,11 +66,6 @@ def _is_pid_probe(cmd):
     return "OwningProcess" in ps and "Win32_Process" not in ps
 
 
-def _is_full_resolution(cmd):
-    ps = " ".join(cmd)
-    return "Win32_Process" in ps and "ExecutablePath" in ps
-
-
 def test_port4455_owner_resolves_path_via_wmi_executablepath(monkeypatch):
     # THE #1067 fix: the PowerShell round-trip must resolve the owner's exe path via the
     # elevation-independent WMI/CIM Win32_Process.ExecutablePath, not (only) the access-denied
