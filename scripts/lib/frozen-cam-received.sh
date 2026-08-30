@@ -143,7 +143,14 @@ _frozen_cam_received_read_tail() {
   if [ -n "${FROZEN_CAM_RECEIVED_CMD:-}" ]; then
     $FROZEN_CAM_RECEIVED_CMD "$ip" 2>/dev/null || true
   else
-    mv_reverify_probe_raw "$ip" "frozen-cam-gate" 2>/dev/null || true
+    # #1233 review 🔵: read a LARGER tail than mv-reverify's 400-line default so a stopped-thread
+    # input whose stale audit lines are scrolling under deploy-wave reconnect spam still has its
+    # newest `received=` line present in BOTH reads (else it reads UNKNOWN -> INCONCLUSIVE ->
+    # WARN_PASS instead of the FROZEN -> abort it deserves). The env override is set INSIDE a
+    # subshell so it can never leak into a later mv-reverify call in the same run; an operator's
+    # explicit MV_REVERIFY_RECEIVED_TAIL still wins over the FROZEN_CAM_RECEIVED_TAIL default.
+    ( MV_REVERIFY_RECEIVED_TAIL="${MV_REVERIFY_RECEIVED_TAIL:-${FROZEN_CAM_RECEIVED_TAIL:-800}}" \
+        mv_reverify_probe_raw "$ip" "frozen-cam-gate" 2>/dev/null ) || true
   fi
 }
 

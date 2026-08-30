@@ -185,7 +185,8 @@ fn should_abort_pass_when_any_attempt_proved_alive() {
 
 #[test]
 fn should_abort_aborts_only_on_a_proven_freeze() {
-    // #365 preserved: a genuinely stuck camera stays FROZEN every attempt -> abort.
+    // #365 preserved: the caller feeds the PROVEN-freeze verdict (frozen_proven) when any attempt
+    // proved one, so a FROZEN:* verdict with frozen_ok=0 aborts.
     assert_eq!(should_abort("0", "FROZEN:NDI cam3"), "ABORT");
 }
 
@@ -214,6 +215,13 @@ fn recording_e2e_sources_and_calls_the_received_gate() {
     assert!(
         s.contains("frozen_cam_gate_should_abort"),
         "#1233: [4c/8] must decide abort via frozen_cam_gate_should_abort (received= only)"
+    );
+    // #1233 review 🟡: the abort must key on the PROVEN-freeze verdict (tracked across attempts),
+    // not the final read alone — so a last-attempt glitch can't erase an earlier proven freeze.
+    assert!(
+        s.contains("frozen_proven") && s.contains("${frozen_proven:-$frozen_recv_verdict}"),
+        "#1233: [4c/8] must track frozen_proven and feed ${{frozen_proven:-$frozen_recv_verdict}} to \
+         should_abort, so a proven freeze aborts even if the final attempt's read glitches"
     );
 }
 
@@ -244,4 +252,68 @@ fn recording_e2e_keeps_the_bounded_retry_and_exclude_anchors() {
         s.contains("FROZEN_CAM_EXCLUDE_SENDER"),
         "#1233: the derived source list must still exclude the painter box's own NDI sender"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1233 review 🔵: the I/O wrapper + set -euo pipefail safety, and the single-empty-raw asymmetry.
+// ---------------------------------------------------------------------------------------------
+
+/// raw0 empty but raw1 present (a healthy second read) is NOT a whole-read failure: the source is
+/// UNKNOWN (prev unreadable) -> INCONCLUSIVE, never READ_FAIL and never a false FROZEN. Only BOTH
+/// samples empty is READ_FAIL.
+#[test]
+fn classify_single_empty_raw_is_inconclusive_not_read_fail() {
+    assert_eq!(
+        classify("NDI cam1", "''", R1_ALIVE),
+        "INCONCLUSIVE:NDI cam1"
+    );
+    // symmetric: raw0 present, raw1 empty -> curr unreadable -> UNKNOWN -> INCONCLUSIVE.
+    assert_eq!(classify("NDI cam1", R0, "''"), "INCONCLUSIVE:NDI cam1");
+}
+
+/// The I/O wrapper (frozen_cam_received_read_and_verdict + _frozen_cam_received_read_tail via the
+/// FROZEN_CAM_RECEIVED_CMD / FROZEN_CAM_RECEIVED_GAP_S seams) must run cleanly under FULL
+/// `set -euo pipefail` (the caller invokes it inside a `$(...)` assignment in recording-e2e.sh's
+/// strict-mode body) — a stateful fake reader whose received= advances between the two reads yields
+/// ALIVE with exit 0, pinning the #1133-class set-e safety nothing else covers.
+#[test]
+fn wrapper_advancing_reader_is_alive_under_strict_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = dir.path().join("reader.sh");
+    let cnt = dir.path().join("cnt");
+    // 1st call -> received=100, every later call -> received=181 (advanced) -> ALIVE.
+    fs::write(
+        &stub,
+        "#!/usr/bin/env bash\n\
+         n=0; [ -f \"$STUB_CNT\" ] && n=\"$(cat \"$STUB_CNT\")\"\n\
+         n=$((n + 1)); echo \"$n\" > \"$STUB_CNT\"\n\
+         if [ \"$n\" -eq 1 ]; then printf \"genlock-fifo audit 'NDI cam1': received=100 dropped=0\\n\"\n\
+         else printf \"genlock-fifo audit 'NDI cam1': received=181 dropped=0\\n\"; fi\n",
+    )
+    .unwrap();
+    let mut perm = fs::metadata(&stub).unwrap().permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(&stub, perm).unwrap();
+
+    // FULL strict mode (set -euo pipefail, no `set +e`) — exactly the caller's context.
+    let harness = "set -euo pipefail\n. \"$LIB\"\n\
+         frozen_cam_received_read_and_verdict 10.0.0.1 'NDI cam1' 2>/dev/null";
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("LIB", lib())
+        .env("STUB_CNT", &cnt)
+        .env("FROZEN_CAM_RECEIVED_CMD", &stub)
+        .env("FROZEN_CAM_RECEIVED_GAP_S", "0")
+        .current_dir(manifest_dir())
+        .output()
+        .expect("failed to run strict-mode harness");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "wrapper must exit 0 under set -euo pipefail; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ALIVE");
 }

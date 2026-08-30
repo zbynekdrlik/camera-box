@@ -3022,20 +3022,35 @@ _FROZEN_CAM_SOURCES_EFFECTIVE="${FROZEN_CAM_SOURCES:-$(camera_active_ndi_sources
 # only — it warms each input onto PREVIEW (#747 side-effect, preserved) and its FROZEN/PASS verdict
 # is logged, but it NEVER aborts (a static-but-live receiver frame reads FROZEN). Bounded by a
 # timeout so its per-source warm-up cannot dominate the pre-record budget (#747/#1223 painter slack).
+# #1233 review 🟡: the per-source PREVIEW warm-up (3s) + 8×1s samples + screenshots across the ~7
+# active sources is ≥ ~80-100s on a loaded 4K strih, so a 90s bound routinely mislabelled a genuine
+# TIMEOUT as FROZEN (polluting the pixel-vs-received disagreement evidence this report exists to
+# collect) and truncated the #747 warm-up for tail-of-list sources. Capture the rc, label 124 as a
+# distinct TIMEOUT, and default the bound to 180s (report-only, well under the #1223 painter slack).
 frozen_pixel_verdict=PASS
-timeout "${FROZEN_CAM_PIXEL_REPORT_TIMEOUT_S:-90}" python3 "$HERE/frozen-camera-gate.py" \
+frozen_pixel_rc=0
+timeout "${FROZEN_CAM_PIXEL_REPORT_TIMEOUT_S:-180}" python3 "$HERE/frozen-camera-gate.py" \
     --host "$STRIH" \
     --threshold   "${FROZEN_CAM_THRESHOLD:-3}" \
     --samples     "${FROZEN_CAM_SAMPLES:-8}" \
     --sources     "$_FROZEN_CAM_SOURCES_EFFECTIVE" \
-    --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}" >/dev/null 2>&1 || frozen_pixel_verdict=FROZEN
+    --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}" >/dev/null 2>&1 || frozen_pixel_rc=$?
+if   [ "$frozen_pixel_rc" -eq 0 ];   then frozen_pixel_verdict=PASS
+elif [ "$frozen_pixel_rc" -eq 124 ]; then frozen_pixel_verdict=TIMEOUT
+else                                      frozen_pixel_verdict=FROZEN
+fi
 echo "    [frozen-camera-gate] #1233 pixel-hash REPORT-ONLY: ${frozen_pixel_verdict} (content-dependent screenshot check — NOT the abort signal)"
 
 # #1233 ABORT SIGNAL: received= delta per input, BOUNDED RETRY (FROZEN_CAM_ATTEMPTS) still covers the
 # post-[3/8] / deploy-wave reconnect — a source whose sender is briefly down reads FROZEN/INCONCLUSIVE,
-# settles (+#1158 self-heal), then advances; a GENUINELY stuck camera stays FROZEN every attempt.
+# settles (+#1158 self-heal), then RECOVERS to ALIVE (breaks out, PASS). A GENUINELY stuck camera
+# never reaches ALIVE. #1233 review 🟡: the abort keys on whether ANY attempt PROVED a freeze
+# (frozen_proven) — NOT the final attempt alone — so a transient glitch (a timed-out ssh read →
+# READ_FAIL/INCONCLUSIVE) on the last attempt can never ERASE a freeze already proven across earlier
+# attempts. An all-INCONCLUSIVE run (never once proven FROZEN, never ALIVE) still WARN_PASSes.
 frozen_ok=0
 frozen_recv_verdict=""
+frozen_proven=""
 for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
   frozen_recv_verdict="$(frozen_cam_received_read_and_verdict "$STRIH" "$_FROZEN_CAM_SOURCES_EFFECTIVE")"
   case "$frozen_recv_verdict" in
@@ -3045,6 +3060,7 @@ for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
       break
       ;;
     FROZEN:*)
+      frozen_proven="$frozen_recv_verdict"
       echo "    [frozen-camera-gate] received= not advancing on ${frozen_recv_verdict#FROZEN:} (counter stuck — a leg is not delivering)"
       ;;
     *)
@@ -3060,7 +3076,10 @@ for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
   fi
 done
 if [ "$frozen_ok" -ne 1 ]; then
-  case "$(frozen_cam_gate_should_abort "$frozen_ok" "$frozen_recv_verdict")" in
+  # #1233 review 🟡: decide on the PROVEN-freeze verdict if any attempt proved one, else the final
+  # attempt's verdict — so a proven freeze aborts even when the last read glitched, while an
+  # all-INCONCLUSIVE/READ_FAIL run (nothing ever proven) WARN_PASSes.
+  case "$(frozen_cam_gate_should_abort "$frozen_ok" "${frozen_proven:-$frozen_recv_verdict}")" in
     ABORT)
       echo "    [frozen-camera-gate] received= FROZEN on every one of ${FROZEN_CAM_ATTEMPTS} attempts — a camera is GENUINELY stuck; aborting (#365/#1233)"
       exit 1
