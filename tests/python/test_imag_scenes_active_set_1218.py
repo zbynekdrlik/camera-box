@@ -17,8 +17,12 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
-# The full fleet slot count imag seeds; the active set retires cam4 + cam5 (issue 1216 header of
-# scripts/camera-set.sh: CAMERA_ACTIVE_SET="cam1 cam2 cam3 cam6 cam7").
+# The full fleet slot count imag seeds. ACTIVE/INACTIVE below are ILLUSTRATIVE fixtures for the
+# general active/inactive idle-policy mechanism this file tests -- they are NOT tied to today's
+# real CAMERA_ACTIVE_SET default (which, as of issue 1216's 2026-08-30 completion, is the full
+# seven-camera fleet with nothing inactive). The mechanism must work for ANY active/inactive
+# split, so keeping cam4+cam5 as the illustrative "some inactive" example here stays valid
+# regardless of the live default in scripts/camera-set.sh.
 ACTIVE = {1, 2, 3, 6, 7}
 INACTIVE = {4, 5}
 

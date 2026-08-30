@@ -150,43 +150,43 @@ fn align_set_is_a_superset_including_cam4_and_cam1_cam2_derive_from_active_1198(
 }
 
 #[test]
-fn align_set_extends_to_cam6_cam7_but_not_cam5_when_active_1217() {
+fn align_set_extends_to_cam5_cam6_cam7_when_active_1216_completion() {
     // issue 1216 (2026-08-28): the bigger splitter puts cam5/cam6/cam7 back in the default
     // CAMERA_ACTIVE_SET -- CAMERA_ALIGN_SET's derivation widened with it, appended after the
     // cam1..cam4 base. issue 1217 (same day): cam5's leg turns out to be a DEAD_PORT (flat
     // static frame) -- it is dropped from CAMERA_ACTIVE_SET again, AND from the ALIGN_SET
-    // derivation loop itself (unlike cam1/cam2/cam6/cam7, whose align membership derives from
-    // CAMERA_ACTIVE_SET, cam5's does not -- aligning a dead signal has no benefit).
+    // derivation loop itself. issue 1216 completion (2026-08-30, owner directive "kamery od 1-7
+    // bezia" after a physical cable reseat): cam5's leg now reads colour again (rough=7.8,
+    // clearing the ~7 healthy-baseline bar) -- it REJOINS CAMERA_ACTIVE_SET *and* the
+    // CAMERA_ALIGN_SET trailing loop, exactly the RE-ENABLE procedure its own retirement comment
+    // always promised. cam1/cam5/cam6/cam7 now ALL derive their align membership from
+    // CAMERA_ACTIVE_SET -- none is hardcoded true.
     let default_align = resolved_align_set(None);
-    for cam in ["cam6", "cam7"] {
+    for cam in ["cam5", "cam6", "cam7"] {
         assert!(
             align_has_word(&default_align, cam),
-            "issue 1216: {cam} must be in the default CAMERA_ALIGN_SET (bigger splitter fitted): \
+            "issue 1216 completion: {cam} must be in the default CAMERA_ALIGN_SET: \
              got [{default_align}]"
         );
     }
-    assert!(
-        !align_has_word(&default_align, "cam5"),
-        "issue 1217: cam5 must NOT be in the default CAMERA_ALIGN_SET -- its splitter leg is a \
-         DEAD_PORT, aligning it has no benefit: got [{default_align}]"
-    );
-    // Shrinking CAMERA_ACTIVE_SET back to a set without them must drop cam6/cam7 from the align
-    // set too, derived not hardcoded.
+    // Shrinking CAMERA_ACTIVE_SET back to a set without them must drop cam5/cam6/cam7 from the
+    // align set too, derived not hardcoded.
     let without_them = resolved_align_set(Some("cam1 cam2 cam3"));
-    for cam in ["cam6", "cam7"] {
+    for cam in ["cam5", "cam6", "cam7"] {
         assert!(
             !align_has_word(&without_them, cam),
             "issue 1216 reversal check: shrinking CAMERA_ACTIVE_SET must drop {cam} from the \
              align set again: got [{without_them}]"
         );
     }
-    // Re-adding cam5 to CAMERA_ACTIVE_SET alone must NOT bring it back into the align set --
-    // issue 1217 deliberately un-derives it; the RE-ENABLE procedure adds it to BOTH explicitly.
+    // Re-adding cam5 to CAMERA_ACTIVE_SET alone (a shrunk-then-regrown override) DOES bring it
+    // back into the align set now -- issue 1216 completion re-derives it, unlike the temporary
+    // issue-1217 un-derive this test used to pin.
     let with_cam5_reactivated = resolved_align_set(Some("cam1 cam2 cam3 cam4 cam5 cam6 cam7"));
     assert!(
-        !align_has_word(&with_cam5_reactivated, "cam5"),
-        "issue 1217: re-adding cam5 to CAMERA_ACTIVE_SET alone must not re-align it (the align \
-         loop no longer checks for it at all): got [{with_cam5_reactivated}]"
+        align_has_word(&with_cam5_reactivated, "cam5"),
+        "issue 1216 completion: re-adding cam5 to CAMERA_ACTIVE_SET must re-align it (the align \
+         loop derives cam5's membership again): got [{with_cam5_reactivated}]"
     );
     // cam4 stays the on-air-but-unmeasured base regardless (issue 1003) -- unaffected by any of
     // the cam5/cam6/cam7 changes.

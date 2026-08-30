@@ -57,8 +57,10 @@ fn camera_source_box_defaults_to_cam1_now_that_cam1_and_cam2_are_restored_1198()
     // cam2's #1170 "camera-under-test retired" diagnosis were built from EPISODES, not a permanent
     // card state -- the owner refused the physical card swap outright and a live journal check
     // confirmed both cards are healthy today. The default active set is back to
-    // "cam1 cam2 cam3 cam6 cam7" (issue 1216, 2026-08-28: cam5/cam6/cam7 also restored; issue
-    // 1217, same day: cam5 dropped out again -- a DEAD_PORT splitter leg):
+    // "cam1 cam2 cam3 cam4 cam5 cam6 cam7" -- the FULL seven-camera fleet, as of issue 1216's
+    // completion (2026-08-30, owner directive "kamery od 1-7 bezia" after a physical cable
+    // reseat; cam5 briefly dropped out again same-day as its 2026-08-28 restoration on issue
+    // 1217, a DEAD_PORT splitter leg, before rejoining once its leg read colour again):
     // the source role is the FIRST strih-routable member = cam1 (cam2 is the painter and
     // camera_strih_route rejects it, so it is skipped) -- byte-identical to the pre-#1110
     // behaviour. The derivation (not a literal) is the point -- re-retiring either camera again
@@ -71,7 +73,7 @@ fn camera_source_box_defaults_to_cam1_now_that_cam1_and_cam2_are_restored_1198()
     assert_eq!(
         got, "cam1",
         "issue 1198: the default source box must be cam1 again (the first strih-routable member \
-         of the current default CAMERA_ACTIVE_SET='cam1 cam2 cam3 cam6 cam7', issue 1216/1217)"
+         of the current default CAMERA_ACTIVE_SET='cam1 cam2 cam3 cam4 cam5 cam6 cam7', issue 1216)"
     );
 }
 
@@ -222,11 +224,14 @@ fn recording_e2e_fleet_preflight_labels_the_source_with_camera_name() {
 fn camera_active_set_default_restores_cam1_and_cam2_1198() {
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam6 cam7}\""),
+        s.contains(
+            "CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""
+        ),
         "issue 1198 (2026-08-27, owner ruling): the camera-set.sh default must include \
          \"cam1 cam2 cam3\" -- both cards confirmed healthy on a live journal check, owner \
          refused the physical swap. issue 1216 (2026-08-28): cam6/cam7 are also back in \
-         (cam5 dropped back out the same day, issue 1217 -- a DEAD_PORT splitter leg)."
+         (cam5 briefly dropped back out the same day, issue 1217, then rejoined with cam4 on \
+         issue 1216's 2026-08-30 completion -- the full seven-camera fleet)."
     );
 }
 
@@ -252,8 +257,9 @@ fn restoration_procedure_reverses_the_original_retirement_membership_plus_ack_11
     let cs = read("scripts/camera-set.sh");
     let rf = read("rig-fleet.txt");
     assert!(
-        cs.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam6 cam7}\"")
-            && cs.contains("cam1) CAMERA_IP=10.77.9.61"),
+        cs.contains(
+            "CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""
+        ) && cs.contains("cam1) CAMERA_IP=10.77.9.61"),
         "issue 1198: cam1 must be back in the default active set AND still fully resolvable \
          (its case arm intact) — the reversible-retirement doctrine completing its round trip."
     );
@@ -273,14 +279,18 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
     // set-ndi-mapping.py is ALSO locked against camera-set.sh by harness_rig_ndi_mapping.rs; this
     // extends the lock to the other four mirrors so none can silently diverge. issue 1198
     // (2026-08-27): cam1+cam2 restored. issue 1216 (2026-08-28): cam5/cam6/cam7 also restored;
-    // issue 1217 (same day): cam5 dropped back out (DEAD_PORT splitter leg) -- the shared
-    // literal is "cam1 cam2 cam3 cam6 cam7" (cam4 alone stays out for its own reason, #947).
+    // issue 1217 (same day): cam5 dropped back out (DEAD_PORT splitter leg). issue 1216
+    // completion (2026-08-30, owner directive "kamery od 1-7 bezia"): cam4 (#947) and cam5
+    // (DEAD_PORT) both rejoin -- the shared literal is now the full
+    // "cam1 cam2 cam3 cam4 cam5 cam6 cam7", no camera retired today.
     let sh = read("scripts/camera-set.sh");
     assert!(
-        sh.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam6 cam7}\""),
-        "camera-set.sh must default CAMERA_ACTIVE_SET to \"cam1 cam2 cam3 cam6 cam7\""
+        sh.contains(
+            "CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""
+        ),
+        "camera-set.sh must default CAMERA_ACTIVE_SET to \"cam1 cam2 cam3 cam4 cam5 cam6 cam7\""
     );
-    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam6 cam7")"#;
+    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")"#;
     for py in [
         "scripts/set-ndi-mapping.py",
         "scripts/phase_sync_calibrate.py",
@@ -292,7 +302,7 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
             read(py).contains(fallback),
             "#1134/issue 1198/#1216/#1217: {py} must mirror camera-set.sh's CAMERA_ACTIVE_SET \
              default via the identical env-fallback os.environ.get(\"CAMERA_ACTIVE_SET\", \
-             \"cam1 cam2 cam3 cam6 cam7\") -- a diverged fallback silently re-selects a \
+             \"cam1 cam2 cam3 cam4 cam5 cam6 cam7\") -- a diverged fallback silently re-selects a \
              retired camera in a standalone run"
         );
     }
