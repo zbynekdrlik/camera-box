@@ -69,6 +69,14 @@ def test_classify_at_or_below_threshold_is_healthy():
     assert ald.classify(0, box_reachable=1, threshold_ms=5000) == "HEALTHY"
 
 
+def test_classify_negative_lag_is_unknown_not_healthy():
+    # #1226 review S3: the gather already excludes -1 (no audio timeline), but defend here too —
+    # a negative reading must be UNKNOWN, NOT HEALTHY (a HEALTHY would wrongly RESET the watchdog's
+    # confirm counter — the wrong failure direction).
+    assert ald.classify(-1, box_reachable=1, threshold_ms=5000) == "UNKNOWN"
+    assert ald.classify(-999, box_reachable=1, threshold_ms=5000) == "UNKNOWN"
+
+
 # ------------------------------------------------------------------ analyze
 def test_analyze_lagging_composes_verdict_and_values():
     body = json.dumps({"audio_ts_lag_ms": "1672741", "audio_ts_lag_src": "mbc"})

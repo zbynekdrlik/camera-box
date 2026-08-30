@@ -62,12 +62,17 @@ def classify(lag_ms, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS):
 
       box_reachable != 1 -> SKIP     (defer to #732/#1001; never our page)
       lag_ms is None     -> UNKNOWN  (facet absent; no reading to judge)
+      lag_ms < 0         -> UNKNOWN  (a -1 == no audio timeline yet; the gather already excludes
+                                      negatives, but treat one defensively as UNKNOWN — not HEALTHY,
+                                      whose confirm-reset would be the wrong failure direction)
       lag_ms > threshold -> LAGGING
       otherwise          -> HEALTHY
     """
     if box_reachable != 1:
         return "SKIP"
     if lag_ms is None:
+        return "UNKNOWN"
+    if lag_ms < 0:
         return "UNKNOWN"
     if lag_ms > threshold_ms:
         return "LAGGING"

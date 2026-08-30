@@ -47,7 +47,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -92,7 +92,9 @@ fetch_bundle_json() {
   local ip="$1" body
   body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
     || return 1
-  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace/BOM
+  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace (a python-json body carries no
+                                            # BOM; a hypothetical BOM'd body fails the {* case -> SKIP,
+                                            # the safe direction — never a false page)
   case "$body" in
     \{*) printf '%s' "$body"; return 0 ;;
     *) return 1 ;;
@@ -239,17 +241,24 @@ net_reach_recovery_decision_local() {
   [ "${1:-0}" = "1" ] && printf '1' || printf '0'
 }
 
-# require_tools -> exit non-zero (loud) if a REQUIRED external tool is missing. A missing `curl`
-# would make every fetch fail -> every box SKIP -> silent forever (a real desync goes unpaged),
-# which is exactly the "a missing tool must fail LOUD by name, never read as a measured zero" class
-# .claude/rules/imag-ssh-remote-tool-preflight.md (#833) exists to prevent.
+# require_tools -> exit non-zero (loud) if a REQUIRED external tool OR the decision module is
+# missing. A missing `curl` would make every fetch fail -> every box SKIP; a missing/unreadable
+# $DECIDE would make `analyze` emit nothing -> every box "unexpected verdict, holding" -> both are
+# SILENT FOREVER (a real desync goes unpaged), exactly the "a missing dependency must fail LOUD by
+# name, never read as a measured zero" class .claude/rules/imag-ssh-remote-tool-preflight.md (#833)
+# exists to prevent. `timeout` is NOT required: curl bounds itself with --max-time and the local
+# python decision reads already-fetched stdin (it cannot hang on the network).
 require_tools() {
   local missing=() t
-  for t in curl python3 timeout; do
+  for t in curl python3; do
     command -v "$t" >/dev/null 2>&1 || missing+=("$t")
   done
   if [ "${#missing[@]}" -gt 0 ]; then
     log "FATAL: required tool(s) not found on dev1: ${missing[*]} -- refusing to run (a missing curl/python3 would silently SKIP every box and never page a real audio desync)"
+    return 1
+  fi
+  if [ ! -r "$DECIDE" ]; then
+    log "FATAL: decision module not readable: $DECIDE -- refusing to run (analyze would emit nothing -> every box 'holding' forever, a real desync unpaged; fix AUDIO_LAG_DECIDE)"
     return 1
   fi
   return 0

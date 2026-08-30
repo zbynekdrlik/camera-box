@@ -121,6 +121,20 @@ def test_deterministic_tie_break_on_equal_max():
     assert src == "alpha"
 
 
+def test_crlf_line_endings_parse_correctly():
+    # #1226 review W2 + bundle-state-gather-latency.md: a Windows OBS log is CRLF; the bounded read
+    # is binary + tolerant-decoded and does NOT translate \r\n -> \n, so a NEW parser must be proven
+    # against a CRLF fixture, not just \n. The `\r` sits after the digits (outside the match), so the
+    # value parses identically.
+    log = (
+        "10:44:06.002: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=1670120 buffered_ms=0 pending=0 timing_adjust_ms=-5\r\n"
+        "10:44:06.003: audio-telemetry #800 'mbc': ts_lag_ms=1672741 buffered_ms=0 pending=0 timing_adjust_ms=-5\r\n"
+    )
+    lag, src = bsg.audio_ts_lag_ms_from_log(log)
+    assert lag == "1672741"
+    assert src == "mbc"
+
+
 def test_build_bundle_state_includes_audio_lag_when_present():
     state = bsg.build_bundle_state(audio_ts_lag_ms="1672741", audio_ts_lag_src="mbc")
     assert state["audio_ts_lag_ms"] == "1672741"
