@@ -330,6 +330,36 @@ def test_port4455_owning_pid_probe_uses_netstat_not_powershell(monkeypatch):
     assert "powershell" not in cmd, f"the cheap probe must never spawn PowerShell: {cmd}"
 
 
+def test_port4455_owning_pid_probe_does_not_filter_out_ipv6(monkeypatch):
+    # Fable review finding (2026-08-30): Windows `netstat -p tcp` and `-p tcpv6` are DISTINCT
+    # family filters -- `-p tcp` silently returns IPv4 rows ONLY, even though both address
+    # families display literally "TCP" in the Proto column when unfiltered. Passing `-p tcp`
+    # would make the probe permanently blind to a :4455 listener bound on IPv6 (a genuine
+    # regression to "" forever, not just a performance issue) -- the parser's own proto/state
+    # check already does the real filtering correctly for BOTH families, so the invocation must
+    # not narrow the family itself.
+    captured = {}
+
+    def fake_run(cmd, **_kw):
+        captured["cmd"] = cmd
+        return types.SimpleNamespace(stdout=_netstat_line("9648"))
+
+    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    bss._port4455_owning_pid()
+    cmd = captured["cmd"]
+    assert cmd == ["netstat", "-ano"], (
+        f"must not restrict the address family via a -p tcp filter, which would silently drop "
+        f"an IPv6 listener: {cmd}"
+    )
+
+
+def test_parse_netstat_listening_pid_finds_an_ipv6_listener():
+    # The parser itself already handles IPv6 correctly (bracket notation still ends with the
+    # plain ":<port>" suffix) -- this locks that the INVOCATION change above does not regress it.
+    text = "  TCP    [::]:4455              [::]:0                 LISTENING       9648\n"
+    assert bss._parse_netstat_listening_pid(text, port=4455) == "9648"
+
+
 NETSTAT_SAMPLE = """
 Active Connections
 
