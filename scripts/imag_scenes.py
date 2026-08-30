@@ -45,6 +45,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -111,6 +112,224 @@ CANONICAL_NDI_SOURCES = {
     "NDI resolume imag": "RESOLUME-SNV (Arena - To imag obs)",
     "imag overlay": "RESOLUME-SNV (Arena - imag overlay)",
 }
+
+
+# ---------------------------------------------------------------------------
+# issue 1218: active-set-aware NDI idle policy.
+#
+# ROOT CAUSE (measured live, dizajn-komentár): imag-nb thermal-throttles because it decodes camera
+# NDI feeds OUTSIDE the active set for nothing -- an inactive camera's `NDI CAM{n}` receiver runs a
+# full 1080p60 decode even though CAMERA_ACTIVE_SET retired it. seed() armed the baseline name for
+# ALL of CAMS unconditionally, so an idled state never survived (OBS restart / --bootstrap / any
+# reseed re-armed it). The fix: an active-set-aware policy so an INACTIVE camera's receiver is idled
+# (ndi_source_name "" + genlock_fifo off -> DistroAV tears the receiver down, no decode) while an
+# ACTIVE camera keeps its baseline name -- routed through ONE policy point every enforcement vector
+# uses. overlay:True on every write preserves the per-source genlock_latency_ms_src 3ms pin.
+#
+# The active set reaches this module two ways: an explicit --active-cams flag (a dev1 caller sourcing
+# scripts/camera-set.sh -- that pass ALSO writes a fresh copy of the one-line state file to the box),
+# or, on the on-box --bootstrap self-heal, the provisioned state file (self-correcting staleness).
+# No knowledge at all (no flag, no file) -> baseline-heal (the pre-1218 behavior), except a
+# DELIBERATE idle is preserved via the #1158 discriminator below.
+
+ACTIVE_CAMS_STATE_FILE = os.path.expanduser("~/.config/camera-box/imag-active-cams")
+
+
+def parse_active_cams(text):
+    """Pure (Tier-0): parse a CAMERA_ACTIVE_SET string ("cam1 cam2 cam6") into a set of camera
+    NUMBERS ({1, 2, 6}). Whitespace/comma separated, case-insensitive; malformed tokens ignored.
+    Returns None for None or a blank string with no valid token == "no set knowledge" (the caller
+    then falls back to baseline-heal, the pre-1218 behavior)."""
+    if text is None:
+        return None
+    nums = set()
+    for tok in re.split(r"[\s,]+", text.strip()):
+        m = re.fullmatch(r"cam(\d+)", tok.strip(), re.IGNORECASE)
+        if m:
+            nums.add(int(m.group(1)))
+    return nums if nums else None
+
+
+def format_active_cams(active_cams):
+    """Pure: render an active-cams set back to the canonical "cam1 cam2 cam6" one-line form (sorted).
+    None/empty -> ""."""
+    if not active_cams:
+        return ""
+    return " ".join("cam%d" % n for n in sorted(active_cams))
+
+
+def desired_ndi_state(n, active_cams):
+    """Pure (Tier-0, no WS): the SetInputSettings inputSettings payload (always applied with
+    overlay:True) for the imag `NDI CAM{n}` input under the active-set policy.
+      - n in active_cams  -> {"ndi_source_name": "CAM{n} (usb)", "genlock_fifo": True}
+      - n not in active   -> {"ndi_source_name": "", "genlock_fifo": False}  (idle receiver)
+    Byte-for-byte the obs_phase2._idle_restore_settings(name) / ("") payload (parity-tested), so ONLY
+    those two keys change and the per-source genlock_latency_ms_src 3ms pin (overlay:True) is
+    preserved. active_cams MUST be a concrete set of ints (never None); the no-knowledge case is
+    handled by ndi_policy_action, not here."""
+    if n in active_cams:
+        return {"ndi_source_name": "CAM%d (usb)" % n, "genlock_fifo": True}
+    return {"ndi_source_name": "", "genlock_fifo": False}
+
+
+def is_deliberate_idle(settings):
+    """#1158 discriminator (pure): True iff `settings` (an input's inputSettings dict) is a
+    DELIBERATE idle -- ndi_source_name == "" AND genlock_fifo is explicitly False. An accidental
+    wedge (a mid-run reattach clear / a drifted saved scene that emptied the name) leaves genlock_fifo
+    TRUE (or absent), so it reads False here -> a --bootstrap with NO set knowledge heals it to
+    baseline, while a deliberate active-set idle is preserved. With set knowledge the set decides."""
+    return settings.get("ndi_source_name", "") == "" and settings.get("genlock_fifo") is False
+
+
+def ndi_policy_action(n, active_cams, current_settings=None):
+    """Pure (Tier-0): the per-camera enforcement decision. Returns one of:
+      ("reenforce", "CAM{n} (usb)")  -> (re)apply the baseline name + genlock on
+      ("idle", "")                   -> apply the idle payload ("" + genlock off), read-back verify ""
+      ("leave", None)                -> do nothing (preserve a deliberate idle when the set is unknown)
+    active_cams: a set of active camera numbers, or None (no set knowledge). current_settings is
+    consulted ONLY in the None branch (the #1158 wedge discriminator)."""
+    name = "CAM%d (usb)" % n
+    if active_cams is not None:
+        return ("reenforce", name) if n in active_cams else ("idle", "")
+    # no set knowledge -> heal a wedge to baseline, preserve a deliberate idle (#1158)
+    if is_deliberate_idle(current_settings or {}):
+        return ("leave", None)
+    return ("reenforce", name)
+
+
+def read_active_cams_state_file(path=None):
+    """Read the one-line provisioned active-cams state file (default ACTIVE_CAMS_STATE_FILE, written
+    by every dev1 --active-cams pass). Returns its stripped content, or None when the file is missing
+    / empty / unreadable (self-correcting staleness: no file -> None -> baseline-heal)."""
+    p = ACTIVE_CAMS_STATE_FILE if path is None else path
+    try:
+        with open(p) as fh:
+            content = fh.read().strip()
+        return content or None
+    except OSError:
+        return None
+
+
+def resolve_active_cams(cli_value, state_path=None):
+    """Resolve the active-cams set for this run, in priority order:
+      1. the explicit --active-cams CLI value (a dev1 caller sourcing camera-set.sh),
+      2. else the on-box state file (the --bootstrap self-heal reads its fresh copy),
+      3. else None (no set knowledge -> baseline-heal; the pre-1218 behavior preserved).
+    Returns a set of camera numbers, or None."""
+    if cli_value is not None and cli_value.strip():
+        return parse_active_cams(cli_value)
+    return parse_active_cams(read_active_cams_state_file(state_path))
+
+
+def write_active_cams_state_local(cli_value, path=None):
+    """Write the one-line state file on THIS machine (the local-host case / provisioning). Overwrites
+    idempotently; creates the parent dir. Raises OSError on a real write failure (caller warns)."""
+    p = ACTIVE_CAMS_STATE_FILE if path is None else path
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as fh:
+        fh.write((cli_value or "").strip() + "\n")
+
+
+def write_active_cams_state_remote(host, cli_value):
+    """Push the one-line active-cams state file to a REMOTE box over ssh (the dev1 pass), so the box's
+    next --bootstrap self-heal reads a fresh copy. Best-effort: a write failure only means the box
+    keeps its previous state file (self-correcting on the next pass); it never aborts the seed."""
+    line = (cli_value or "").strip()
+    remote = ("mkdir -p ~/.config/camera-box && printf '%%s\\n' %s "
+              "> ~/.config/camera-box/imag-active-cams") % shlex.quote(line)
+    try:
+        r = subprocess.run(_ssh_base(host) + [remote], capture_output=True, text=True,
+                           timeout=15, check=False)
+        if r.returncode != 0:
+            print("WARN #1218: could not write imag-active-cams state to %s (rc=%d): %s"
+                  % (host, r.returncode, r.stderr.strip()))
+        else:
+            print("#1218: wrote active-cams state '%s' to %s:~/.config/camera-box/imag-active-cams"
+                  % (line, host))
+    except Exception as e:  # noqa: BLE001 -- ssh transport failure is best-effort here
+        print("WARN #1218: remote active-cams state write to %s failed: %s" % (host, e))
+
+
+def _write_active_cams_state(host, cli_value):
+    """Route the state-file write: local file on the box's own host, ssh push otherwise."""
+    if _is_local_host(host):
+        try:
+            write_active_cams_state_local(cli_value)
+            print("#1218: wrote active-cams state '%s' to %s"
+                  % ((cli_value or "").strip(), ACTIVE_CAMS_STATE_FILE))
+        except OSError as e:
+            print("WARN #1218: local active-cams state write failed: %s" % e)
+    else:
+        write_active_cams_state_remote(host, cli_value)
+
+
+def _obs_phase2_module():
+    """Lazy import of the sibling obs_phase2.py (the SHARED #795-safe reenforce_ndi_name policy).
+    Returns the module, or None when it is not importable on this host: the imag box installs
+    imag_scenes.py (+ imag_record_encoder.py) and, since issue 1218, obs_phase2.py -- but an
+    older box may not carry it yet, so the on-box --bootstrap enforce must DEGRADE to a direct set
+    rather than crash the boot seed (the #1156 import-dependency class). Never imported at module
+    load (imag-obs-start.sh's launch preflight only imports imag_scenes)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import obs_phase2  # noqa: E402
+        return obs_phase2
+    except Exception as e:  # noqa: BLE001 -- absence is expected on an older box; degrade, never crash
+        print("#1218: obs_phase2 not importable (%s) -- active-name enforce uses a direct set "
+              "(idle policy still applies; the discoverability gate is unavailable on this host)" % e)
+        return None
+
+
+def enforce_ndi_active_policy(obs, active_cams):
+    """issue 1218: the ONE policy point for imag NDI-name enforcement -- every vector flows through
+    it (the on-box --bootstrap seed and the dev1 --enforce-ndi-policy reenforce pass). For each
+    camera n in CAMS, ndi_policy_action decides and this applies it:
+      - "reenforce": (re)apply the baseline name. Discoverability-gated + read-back-verified via the
+        SHARED obs_phase2.reenforce_ndi_name (#795-safe -- never sets a name absent from the finder).
+        When obs_phase2 is unavailable (older box) OR the connection exposes no raw `ws` (a unit-test
+        fake), it degrades to a direct overlay SetInputSettings of the baseline name + genlock on
+        (the pre-1218 unconditional-arm behavior for an active cam).
+      - "idle": apply the idle payload ("" + genlock_fifo off, overlay:True) and read-back verify the
+        name is now "" -- a #1158 deliberate idle, never a silent failure to idle.
+      - "leave": preserve a deliberate idle (no set knowledge).
+    Returns {n: status} for the caller's log. Best-effort per camera (ignore_err); never raises on an
+    OBS request error."""
+    op = _obs_phase2_module()
+    ws = getattr(obs, "ws", None)
+    gated = op is not None and ws is not None
+    need_current = active_cams is None
+    result = {}
+    for n in CAMS:
+        inp = "NDI CAM%d" % n
+        current = {}
+        if need_current:
+            current = (obs.req("GetInputSettings", {"inputName": inp}, ignore_err=True)
+                       .get("inputSettings", {}) or {})
+        action, name = ndi_policy_action(n, active_cams, current)
+        if action == "leave":
+            result[n] = "idle-preserved"
+            continue
+        if action == "reenforce":
+            if gated:
+                result[n] = "active:%s" % op.reenforce_ndi_name(ws, inp, name)
+            else:
+                obs.req("SetInputSettings", {
+                    "inputName": inp,
+                    "inputSettings": {"ndi_source_name": name, "genlock_fifo": True},
+                    "overlay": True,
+                }, ignore_err=True)
+                result[n] = "active:set(ungated)"
+            continue
+        # action == "idle": tear the receiver down cold, then verify the name is really ""
+        obs.req("SetInputSettings", {
+            "inputName": inp,
+            "inputSettings": {"ndi_source_name": "", "genlock_fifo": False},
+            "overlay": True,
+        }, ignore_err=True)
+        back = (obs.req("GetInputSettings", {"inputName": inp}, ignore_err=True)
+                .get("inputSettings", {}) or {}).get("ndi_source_name", "")
+        result[n] = "idle:ok" if back == "" else "idle:VERIFY_FAILED(%r)" % back
+    return result
 
 
 class Obs:
@@ -282,7 +501,7 @@ def seed_profile(obs: Obs, has_discrete_nvidia: bool) -> None:
     print(f"profile: {prof} (Mode={mode}, rec={rec_encoder} native-1080p mkv)")
 
 
-def seed(obs: Obs) -> None:
+def seed(obs: Obs, active_cams=None) -> None:
     obs.req("SetVideoSettings", {
         "baseWidth": CANVAS_W, "baseHeight": CANVAS_H,
         "outputWidth": CANVAS_W, "outputHeight": CANVAS_H,
@@ -306,10 +525,16 @@ def seed(obs: Obs) -> None:
         # #785: source-binding/mute "self-healing" runs ONLY on --bootstrap (boot/recovery
         # path) or on a just-created input — a plain reseed must NEVER overwrite whatever
         # the OPERATOR set on an existing input (the "skripty mi kazia nastavenia" class).
+        # #1218: the ndi_source_name / genlock_fifo enforcement moved OUT of this loop to the
+        # ONE active-set-aware policy point (enforce_ndi_active_policy, called after the loop on
+        # --bootstrap) — so an inactive camera is idled instead of unconditionally re-armed. Here
+        # we re-arm only the active-set-INDEPENDENT settings: DistroAV low-latency mode + mute
+        # (overlay:True merges, leaving the name for the policy to own).
         if BOOTSTRAP or not item_existed:
             obs.req("SetInputSettings", {
                 "inputName": inp,
-                "inputSettings": {"ndi_source_name": ndi_name, "latency": 1},
+                "inputSettings": {"latency": 1},
+                "overlay": True,
             }, ignore_err=True)
             obs.req("SetInputMute", {"inputName": inp, "inputMuted": True}, ignore_err=True)
         item = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
@@ -324,6 +549,19 @@ def seed(obs: Obs) -> None:
                     "positionX": 0, "positionY": 0,
                 },
             }, ignore_err=True)
+
+    # #1218: active-set-aware NDI-name enforcement — the ONE policy point. On --bootstrap (autostart
+    # + watchdog reseed) idle every INACTIVE camera's receiver (ndi_source_name "" + genlock_fifo off
+    # so imag stops decoding it — the thermal-throttle root cause), (re)enforce every ACTIVE camera's
+    # baseline name (discoverability-gated when obs_phase2 is available), and preserve a deliberate
+    # idle when the active set is unknown (#1158 wedge discriminator). A bare (non-bootstrap) reseed
+    # never enforces here (the #785 operator-wins discipline); the dev1 --enforce-ndi-policy mode is
+    # the immediate reenforce path.
+    if BOOTSTRAP:
+        statuses = enforce_ndi_active_policy(obs, active_cams)
+        print("ndi policy (active=%s): %s"
+              % (format_active_cams(active_cams) or "unknown(baseline-heal)",
+                 ", ".join("CAM%d=%s" % (n, s) for n, s in sorted(statuses.items()))))
 
     # #501→SAME-SOURCE pivot (2026-07-15, user-driven): the "MV Cam N" cells now nest the SAME
     # full-bw "NDI CAMx" main inputs the program uses — identical frames, identical genlock
@@ -749,21 +987,47 @@ def scene_order_mismatch(actual_order: list, expected_order: list = None) -> str
     return f"wrong ORDER -- got {actual_order}, want {expected}"
 
 
-def ndi_source_mismatches(actual: dict, expected: dict = None) -> list:
+def ndi_source_mismatches(actual: dict, expected: dict = None, active_cams=None) -> list:
     """actual/expected are {inputName: ndi_source_name}. Returns a list of human-readable problem
     strings (empty list = every expected binding present and correct). expected defaults to
-    CANONICAL_NDI_SOURCES."""
+    CANONICAL_NDI_SOURCES.
+
+    #1218: when active_cams is given, an INACTIVE camera's `NDI CAM{n}` receiver is idled, so its
+    EXPECTED binding is "" (not the baseline name) — a correctly-idled inactive camera is NOT a
+    problem, while an inactive camera still bound to a name IS flagged (NOT IDLE). active_cams=None
+    keeps the pre-1218 behavior (baseline expected for every camera)."""
     exp = CANONICAL_NDI_SOURCES if expected is None else expected
     problems = []
     for name, want in exp.items():
+        if active_cams is not None:
+            m = re.fullmatch(r"NDI CAM(\d+)", name)
+            if m is not None and int(m.group(1)) not in active_cams:
+                want = ""  # inactive camera: idled receiver -> expected binding is ""
         if name not in actual:
             problems.append(f"MISSING {name!r}")
         elif actual[name] != want:
-            problems.append(f"MISMATCH {name!r} -> got {actual[name]!r} want {want!r}")
+            if want == "":
+                problems.append(f"NOT IDLE {name!r} -> got {actual[name]!r} want '' (active-set idle)")
+            else:
+                problems.append(f"MISMATCH {name!r} -> got {actual[name]!r} want {want!r}")
     return problems
 
 
-def verify_parity(obs: Obs) -> None:
+def active_set_idle_report(actual: dict, active_cams) -> list:
+    """Pure: the `NDI CAM{n}` inputs CORRECTLY idled under the active set (n inactive AND the input's
+    ndi_source_name is currently "") — for verify_parity's `idle(active-set)` print line. Empty when
+    active_cams is None (no set knowledge)."""
+    if active_cams is None:
+        return []
+    out = []
+    for name in CANONICAL_NDI_SOURCES:
+        m = re.fullmatch(r"NDI CAM(\d+)", name)
+        if m is not None and int(m.group(1)) not in active_cams and actual.get(name) == "":
+            out.append(name)
+    return out
+
+
+def verify_parity(obs: Obs, active_cams=None) -> None:
     """#791: prove OPERATOR parity, not just system parity -- the FULL canonical 17-scene ORDER
     (not just "Cam N"/"MV Cam N" presence, which seed()'s own report already covers) and the 10
     canonical NDI-source bindings (7 fleet cams + the 3 Resolume/overlay inputs no automated
@@ -788,8 +1052,10 @@ def verify_parity(obs: Obs) -> None:
         name = inp["inputName"]
         settings = obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
         actual_ndi[name] = settings.get("inputSettings", {}).get("ndi_source_name")
-    ndi_problems = ndi_source_mismatches(actual_ndi)
-    print("ndi sources: " + ("; ".join(ndi_problems) if ndi_problems else "OK"))
+    ndi_problems = ndi_source_mismatches(actual_ndi, active_cams=active_cams)
+    idled = active_set_idle_report(actual_ndi, active_cams)
+    print("ndi sources: " + ("; ".join(ndi_problems) if ndi_problems else "OK")
+          + (f" | idle(active-set): {idled}" if idled else ""))
 
     if order_problem or ndi_problems:
         sys.exit(1)
@@ -1101,21 +1367,45 @@ def main() -> None:
                          "LIVE — applies WS RecEncoder + recordEncoder.json + a USER-unit restart "
                          "ONLY when the disk config is not already the live target. Manages its own "
                          "OBS restart, so it is dispatched BEFORE the WS connection below.")
+    ap.add_argument("--active-cams", default=None,
+                    help="#1218: the active camera set (e.g. \"cam1 cam2 cam6\", from "
+                         "CAMERA_ACTIVE_SET). Inactive cameras' NDI receivers are idled so imag stops "
+                         "decoding them (the thermal-throttle root cause). A dev1 seed/enforce pass "
+                         "ALSO writes it to the box's ~/.config/camera-box/imag-active-cams so the "
+                         "next on-box --bootstrap reads a fresh copy. Omitted -> the on-box state "
+                         "file, else baseline-heal (the pre-1218 behavior).")
+    ap.add_argument("--enforce-ndi-policy", action="store_true",
+                    help="#1218: apply the active-set NDI idle policy once over WS (the E2E/dev1 "
+                         "reenforce pass) WITHOUT a full scene seed, then exit.")
     args = ap.parse_args()
+    # #1218: resolve the active set (flag -> on-box state file -> None) for every mode below.
+    active_cams = resolve_active_cams(args.active_cams)
     if args.ensure_rec_encoder:
         # #1143: ensure_rec_encoder stops/starts OBS itself, so it must NOT reuse a pre-opened WS.
         ensure_rec_encoder(args.host, args.port, args.password)
         return
+    # #1218: a dev1 pass carrying an explicit --active-cams writes the one-line state file to the box
+    # (or locally) so the next on-box --bootstrap self-heal reads a fresh copy. Only the WRITE modes
+    # (seed / --enforce-ndi-policy) — never the read-only --verify-parity / --projector.
+    if args.active_cams and args.active_cams.strip() and not (args.verify_parity or args.projector):
+        _write_active_cams_state(args.host, args.active_cams)
     obs = Obs(args.host, args.port, args.password)
+    if args.enforce_ndi_policy:
+        # #1218: the dev1 reenforce pass — apply the active-set idle policy immediately, no reseed.
+        statuses = enforce_ndi_active_policy(obs, active_cams)
+        print("ndi policy (active=%s): %s"
+              % (format_active_cams(active_cams) or "unknown(baseline-heal)",
+                 ", ".join("CAM%d=%s" % (n, s) for n, s in sorted(statuses.items()))))
+        return
     if args.projector:
         projector(obs, args.host)
     elif args.verify_parity:
-        verify_parity(obs)
+        verify_parity(obs, active_cams)
     else:
         # #847: detect once per run -- never guessed, see detect_has_discrete_nvidia above.
         has_dgpu = detect_has_discrete_nvidia(args.host)
         seed_profile(obs, has_dgpu)  # #502/#847: Advanced profile BEFORE the video/scene seed
-        seed(obs)
+        seed(obs, active_cams)
         if BOOTSTRAP:
             # #866: fresh OBS instance -- force measurement burns OFF so a saved genlock_burn=true
             # can never survive a restart onto the live IMAG projection. Bootstrap-only (like the
