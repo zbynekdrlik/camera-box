@@ -167,10 +167,14 @@ def _parse_netstat_listening_pid(text, port=4455):
     Defensive parsing (PURE — no subprocess, no live box needed, testable with a canned fixture):
     every genuine TCP row has exactly 5 whitespace-separated columns (Proto, Local Address,
     Foreign Address, State, PID); the "Active Connections" banner and the column-header row are
-    naturally skipped because neither has "TCP" as its first column, and a UDP row (even though
-    the caller already requests `-p tcp`) is skipped defensively too. The `:<port>` check is an
-    exact suffix match on the LOCAL address column only — a `:4455` mention in the FOREIGN address
-    column of an unrelated ESTABLISHED connection, or a longer port like `:44551`, can never match."""
+    naturally skipped because they do not have exactly 5 columns (7 tokens for the header row,
+    fewer for the banner), and a UDP row (which itself has only 4 columns — no State — since the
+    caller intentionally passes NO `-p` filter, see `_port4455_owning_pid`'s own doc comment on
+    why) is also skipped defensively by both the column-count check and the explicit proto check.
+    The `:<port>` check is an exact suffix match on the LOCAL address column only — a `:4455`
+    mention in the FOREIGN address column of an unrelated ESTABLISHED connection, or a longer port
+    like `:44551`, can never match. Works unchanged for an IPv6 row (`[::]:4455` still ends with
+    the plain `:4455` suffix)."""
     suffix = f":{port}"
     for line in (text or "").splitlines():
         cols = line.split()
@@ -207,8 +211,15 @@ def _port4455_owning_pid():
     Returns the numeric PID as a string, or "" if there is no listener / the probe itself fails
     (never a guessed value — the caller then must not trust any cached identity either)."""
     try:
+        # #1222b review finding: Windows `-p tcp` and `-p tcpv6` are DISTINCT address-family
+        # filters -- `-p tcp` silently returns IPv4 rows ONLY, even though both families display
+        # literally "TCP" in the Proto column when unfiltered. Passing it here would make this
+        # probe permanently blind to a :4455 listener bound on IPv6 (a silent regression to ""
+        # forever, not just a performance issue) -- so no `-p` filter is passed at all; the pure
+        # parser's own proto/state check already does the real filtering correctly for BOTH
+        # families (and skips UDP rows, which have only 4 columns with no filter applied).
         out = subprocess.run(
-            ["netstat", "-ano", "-p", "tcp"],
+            ["netstat", "-ano"],
             capture_output=True, text=True, timeout=PORT4455_PID_PROBE_TIMEOUT_S, check=True,
         )
         return _parse_netstat_listening_pid(out.stdout, port=4455)
