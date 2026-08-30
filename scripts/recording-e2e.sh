@@ -2316,6 +2316,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
       _rhw_rc="${PIPESTATUS[0]}"
     fi
     _rhw_elapsed_s=$(( $(date +%s) - _rhw_start_s ))
+    # #1232 review finding (🟡): capture the PRE-call phase state so the FAIL branch below can
+    # tell apart its two distinct causes (a strict-phase regression vs a warm-up that never
+    # settled) -- render_health_phase_outcome overwrites _rhw_first_pass_seen on the next line.
+    _rhw_pre_seen="$_rhw_first_pass_seen"
     _rhw_phase="$(render_health_phase_outcome "$_rhw_rc" "$_rhw_first_pass_seen" "$_rhw_elapsed_s" "$RENDER_HEALTH_SETTLE_BUDGET_S")"
     _rhw_outcome="$(printf '%s\n' "$_rhw_phase" | sed -n 's/^outcome=//p')"
     _rhw_first_pass_seen="$(printf '%s\n' "$_rhw_phase" | sed -n 's/^first_pass_seen=//p')"
@@ -2326,6 +2330,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
           _rhw_strict_passed=$((_rhw_strict_passed + 1))
         fi
         if [ "$_rhw_strict_passed" -ge "$RENDER_HEALTH_WINDOWS" ]; then
+          echo "[preflight] imag render-health settled after ${_rhw} total window(s) (${_rhw_strict_passed}/${RENDER_HEALTH_WINDOWS} strict passes, #882/#1232)."
           break
         fi
         ;;
@@ -2333,7 +2338,18 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
         echo "WARN: [preflight] imag render-health window ${_rhw} FAILED but is still inside the settle-adaptive WARM-UP phase (post-restart NDI-lock/shader settle, elapsed ${_rhw_elapsed_s}s of ${RENDER_HEALTH_SETTLE_BUDGET_S}s budget — #882/#1232) — tolerated, continuing until the first PASS." >&2
         ;;
       *)
-        echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (window ${_rhw}, NOT the warm-up window — #882) — skontroluj divisor/projektory/zataz." >&2
+        # #1232 review finding (🟡): the two FAIL causes get a DIFFERENT diagnostic context --
+        # _rhw_pre_seen=1 means a strict window regressed after warm-up already ended cleanly;
+        # _rhw_pre_seen=0 means the box never achieved a single PASS before the settle budget ran
+        # out. The operator-facing FAIL wording below stays a SINGLE occurrence in this file
+        # (tests/harness_render_health_divisor_758.rs anchors it verbatim) -- only the
+        # parenthetical context differs at runtime, never the fixed prefix/suffix text.
+        if [ "$_rhw_pre_seen" = "1" ]; then
+          _rhw_fail_context="window ${_rhw}, strict-phase regression after ${_rhw_strict_passed} clean strict window(s)"
+        else
+          _rhw_fail_context="window ${_rhw}, box NEVER settled within the ${RENDER_HEALTH_SETTLE_BUDGET_S}s warm-up budget (elapsed ${_rhw_elapsed_s}s)"
+        fi
+        echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (${_rhw_fail_context} — #882/#1232) — skontroluj divisor/projektory/zataz." >&2
         exit 1
         ;;
     esac

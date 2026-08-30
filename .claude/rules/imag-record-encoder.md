@@ -46,7 +46,9 @@ ensure_rec_encoder`, live-validated x264→VAAPI→verify):
 
 Apply ONLY when needed (`record_encoder_apply_plan`): a make-it-live restart every run is too
 invasive; a one-time self-healing restart on config drift is a no-op on the steady state, and its
-NDI/shader settle is absorbed by the [1/8] render-health window-1 #882 warm-up.
+NDI/shader settle is absorbed by the [1/8] render-health settle-adaptive warm-up PHASE (issue
+882/1232 — no longer pinned to window 1 alone; it can span however many leading windows the
+restart actually needs, bounded by a wall-clock settle budget).
 
 ## Three sharp gotchas reading/verifying the encoder state on the box
 
