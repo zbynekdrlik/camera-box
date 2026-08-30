@@ -2396,6 +2396,12 @@ echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #17
 # PERMANENTLY at 1/FAILURE -- even after the device becomes free again. Unlimited retry means the
 # burn unit's next scheduled attempt (every RestartSec=3) reclaims the device instead of dying
 # forever, once the #894 udev fix stops production from re-stealing it.
+# issue 1198: this burn-transient unit must also carry the issue-1193 over-rate self-heal
+# env, mirroring cam2's production overrate-selfheal-canary drop-in -- a burn session that
+# opens the ShadowCast grabber in its sustained over-rate mode (roughly 61.3 fps) must
+# self-heal (USB reset + exit 77 + this unit's own on-failure restart policy) exactly like
+# production does, instead of degrading every cadence window for the rest of the run
+# (three burn runs on 2026-08-30 stayed degraded the whole session for lack of this env).
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 CAM1_BURN_UNIT="camera-box-burn-${RUN_ID}"
 # #749: sweep stale binaries BEFORE the scp below -- a full /tmp (a prior run's own cleanup()
@@ -2417,7 +2423,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
      --property=Restart=on-failure --property=RestartSec=3 --property=StartLimitIntervalSec=0 \
      --property=StandardOutput=append:/tmp/cbox-burn.log --property=StandardError=append:/tmp/cbox-burn.log \
      \$CPU_AFFINITY_BURN_PROPERTY \
-     --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
+     --setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
      --setenv=CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      $CAM1_BURN_BIN"
 sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
@@ -2498,7 +2504,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
          --property=Restart=on-failure --property=RestartSec=3 --property=StartLimitIntervalSec=0 \
          --property=StandardOutput=append:/tmp/cbox-burn-${_cn}.log --property=StandardError=append:/tmp/cbox-burn-${_cn}.log \
          \$CPU_AFFINITY_BURN_PROPERTY \
-         ${_cnodisplay_setenv}--setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$_cburn \
+         ${_cnodisplay_setenv}--setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$_cburn \
          --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
          $_cbin"
   done
