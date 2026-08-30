@@ -48,3 +48,59 @@ def test_log_writes_normally_to_a_live_stdout(capsys):
     bss.log("normal line")
     out = capsys.readouterr().out
     assert "normal line" in out
+
+
+# ---------------------------------------------------------------------------------------------
+# #1222 — newest_obs_log_text must delegate to the bounded head+tail reader, and
+# gather_bundle_state must expose an opt-in per-facet timing breakdown (BUNDLE_STATE_TIMING=1)
+# so the NEXT session has real data to attack the remaining ~18s cold-log baseline.
+# ---------------------------------------------------------------------------------------------
+
+def test_newest_obs_log_text_bounds_a_large_log(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    filler = ("X" * 100) + "\n"
+    text = "OBS 32.1.2\n" + (filler * 20000) + "TAIL_MARKER\n"  # > 1 MB
+    (log_dir / "2026-08-30 00-00-00.txt").write_text(text, encoding="utf-8")
+
+    bounded = bss.newest_obs_log_text(str(log_dir), head_bytes=200, tail_bytes=200)
+    assert len(bounded) < len(text)
+    assert "OBS 32.1.2" in bounded
+    assert "TAIL_MARKER" in bounded
+
+
+def test_newest_obs_log_text_small_log_returned_whole(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "small.txt").write_text("OBS 32.1.2\n", encoding="utf-8")
+    assert bss.newest_obs_log_text(str(log_dir)) == "OBS 32.1.2\n"
+
+
+def _gather_bundle_state_with_all_externals_stubbed(monkeypatch, tmp_path):
+    monkeypatch.setattr(bss, "gather_ndi_inputs", lambda host, password: {})
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "obs.txt").write_text("OBS 32.1.2\n", encoding="utf-8")
+    return bss.gather_bundle_state(
+        "127.0.0.1", "", str(log_dir), str(tmp_path / "missing-ndi.dll"), [],
+        genlock_build_sha_file=str(tmp_path / "missing-sha.txt"),
+        obs_install_scan_roots=(),
+        startup_shortcut=str(tmp_path / "missing.lnk"),
+        ahk_path=str(tmp_path / "missing.ahk"),
+        obs_dll_path=str(tmp_path / "missing-obs.dll"),
+    )
+
+
+def test_gather_bundle_state_emits_timing_line_when_enabled(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BUNDLE_STATE_TIMING", "1")
+    _gather_bundle_state_with_all_externals_stubbed(monkeypatch, tmp_path)
+    out = capsys.readouterr().out
+    assert "gather timing:" in out
+    assert "total=" in out
+
+
+def test_gather_bundle_state_silent_when_timing_disabled(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("BUNDLE_STATE_TIMING", raising=False)
+    _gather_bundle_state_with_all_externals_stubbed(monkeypatch, tmp_path)
+    out = capsys.readouterr().out
+    assert "gather timing:" not in out

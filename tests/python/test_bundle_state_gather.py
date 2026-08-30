@@ -532,3 +532,100 @@ def test_build_bundle_state_omits_empty_byte_shas():
     state = bsg.build_bundle_state(obs_version="32.1.2")
     assert "obs_dll_sha256" not in state
     assert "distroav_dll_sha256" not in state
+
+
+# ---------------------------------------------------------------------------------------------
+# #1222 — bounded head+tail log read: gather latency must stay O(head+tail), never O(session
+# length). Live incident: a ~13h OBS session (75 MB log) made every *_from_log parser above
+# re-scan the WHOLE file on every request (~0.25 s/MB measured), pushing a /bundle-state.json
+# fetch past recording-e2e.sh's `curl --max-time 30` and failing the [0/8] version-integrity gate.
+# ---------------------------------------------------------------------------------------------
+
+def test_log_head_and_tail_byte_constants_are_positive_and_bounded():
+    # Sanity on the tuning constants (#1222 measured: the startup banner sits in the first few KB
+    # of a real OBS log; 2 MB head / 5 MB tail is a wide, cheap margin against a 75 MB session).
+    assert bsg.LOG_HEAD_BYTES > 0
+    assert bsg.LOG_TAIL_BYTES > 0
+    assert bsg.LOG_HEAD_BYTES + bsg.LOG_TAIL_BYTES < 20 * 1024 * 1024
+
+
+def test_bounded_read_separator_matches_no_known_facet_pattern():
+    # The separator spliced between the head and tail slices must never itself satisfy any of the
+    # five *_from_log parsers above — otherwise a truncated log could fabricate a fact that was
+    # never really in the log.
+    sep = bsg.LOG_BOUNDED_READ_SEPARATOR
+    assert bsg.obs_version_from_log(sep) == ""
+    assert bsg.distroav_version_from_log(sep) == ""
+    assert bsg.output_fps_from_log(sep) == ""
+    assert bsg.genlock_wall_clock_from_log(sep) == ""
+    assert bsg.genlock_capability_from_log(sep) == ""
+
+
+def test_read_bounded_log_text_missing_file_is_empty(tmp_path):
+    assert bsg.read_bounded_log_text(str(tmp_path / "nope.txt")) == ""
+
+
+def test_read_bounded_log_text_small_file_returned_whole_unmodified(tmp_path):
+    p = tmp_path / "small.txt"
+    p.write_text(SAMPLE_LOG, encoding="utf-8")
+    # Well under the (tiny, test-supplied) bound -> returned verbatim, no separator inserted.
+    assert bsg.read_bounded_log_text(str(p), head_bytes=1000, tail_bytes=1000) == SAMPLE_LOG
+
+
+def test_read_bounded_log_text_large_file_is_bounded_and_excludes_the_middle(tmp_path):
+    head_marker = "HEAD_MARKER_ONLY_AT_START"
+    middle_sentinel = "MIDDLE_FILLER_LINE_THAT_MUST_NEVER_SURVIVE_" + ("x" * 200)
+    tail_marker = "TAIL_MARKER_ONLY_AT_END"
+    # >1 MB synthetic fixture, built programmatically (drift-guard-log-parsers SIGPIPE-test
+    # pattern) -- never committed as a fixture file.
+    lines = [head_marker] + [middle_sentinel] * 5000 + [tail_marker]
+    full_text = "\n".join(lines) + "\n"
+    assert len(full_text) > 1_000_000  # sanity: genuinely larger than the test bound below
+
+    p = tmp_path / "big.txt"
+    p.write_text(full_text, encoding="utf-8")
+
+    bounded = bsg.read_bounded_log_text(str(p), head_bytes=500, tail_bytes=500)
+
+    assert len(bounded) < len(full_text)
+    assert head_marker in bounded
+    assert tail_marker in bounded
+    assert middle_sentinel not in bounded
+    assert bsg.LOG_BOUNDED_READ_SEPARATOR in bounded
+    assert (
+        bounded.index(head_marker)
+        < bounded.index(bsg.LOG_BOUNDED_READ_SEPARATOR)
+        < bounded.index(tail_marker)
+    )
+
+
+def test_read_bounded_log_text_default_constants_bound_a_multi_mb_log():
+    # Uses the REAL production constants end-to-end (no scaled-down test bound) against a
+    # synthetic log deliberately larger than LOG_HEAD_BYTES + LOG_TAIL_BYTES, generated
+    # programmatically (never committed as a fixture file) -- the startup-banner facets (head)
+    # AND the newest-state facet (tail) must both still parse correctly out of the bounded read.
+    import tempfile
+
+    filler_line = "15:00:00.000: genlock-fifo audit received=1 sent=1 gaps=0\n"
+    total_target = bsg.LOG_HEAD_BYTES + bsg.LOG_TAIL_BYTES + (1024 * 1024)
+    repeats = total_target // len(filler_line) + 1
+    tail_capability_line = "23:59:59.000: genlock: timestamp-aligned release engaged\n"
+    text = SAMPLE_LOG + (filler_line * repeats) + tail_capability_line
+    assert len(text) > bsg.LOG_HEAD_BYTES + bsg.LOG_TAIL_BYTES
+
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "huge.txt"
+        p.write_text(text, encoding="utf-8")
+
+        bounded = bsg.read_bounded_log_text(str(p))  # default head_bytes/tail_bytes
+
+        assert len(bounded) == (
+            bsg.LOG_HEAD_BYTES + len(bsg.LOG_BOUNDED_READ_SEPARATOR) + bsg.LOG_TAIL_BYTES
+        )
+        # startup-banner facets (head) still parse:
+        assert bsg.obs_version_from_log(bounded) == "32.1.2"
+        assert bsg.distroav_version_from_log(bounded) == "6.2.1"
+        assert bsg.output_fps_from_log(bounded) == "30"
+        assert bsg.genlock_wall_clock_from_log(bounded) == "1"
+        # newest-state facet (tail) still parses:
+        assert "timestamp-aligned release" in bsg.genlock_capability_from_log(bounded)
