@@ -66,7 +66,9 @@ fn getproperties_null_guards_present_1224() {
 
     // Regression: the #795 call site anchored by BOTH windows-genlock*.yml must stay intact at
     // both sites (my guards go into the function body + the lambda head, never the call text).
-    let call_count = src.matches("genlock_ensure_saved_source_listed(source_list, s)").count();
+    let call_count = src
+        .matches("genlock_ensure_saved_source_listed(source_list, s)")
+        .count();
     assert_eq!(
         call_count, 2,
         "the #795 genlock_ensure_saved_source_listed(source_list, s) call site (windows-genlock*.yml \
