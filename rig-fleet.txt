@@ -71,5 +71,17 @@
 #   (scripts/camera-set.sh) as of this same commit. RE-ENABLE: verify `capture chroma` reads
 #   `-> colour` after the splitter cable/port is fixed, then add "cam5" back to
 #   CAMERA_ACTIVE_SET (and the CAMERA_ALIGN_SET loop) AND delete this ack line -- nothing else.
-cam4:on-air-but-outside-measured-set-2026-08-07
-cam5:healthy-box-dead-splitter-leg-2026-08-28
+# cam4 + cam5: RESTORED 2026-08-30 (issue 1216 completion, owner directive verbatim: "kamery od
+#   1-7 bezia" -- cameras 1 through 7 are running). The owner physically reseated cables on the
+#   rig; a live check (2026-08-30 ~12:30 CEST) confirms both re-entry conditions are met:
+#     cam4: svc active, 60.0 fps captured, capture chroma "u_dev=6.4 v_dev=7.5 rough=2.9 ->
+#           colour" -- the box captures a real colour image steadily; the #947 capture-leg wedge
+#           symptom (uvcvideo -71 bursts) is a separate concern that would need its own fresh
+#           episode to justify re-retiring.
+#     cam5: svc active, capture chroma "u_dev=5.8 v_dev=7.8 rough=7.8 -> colour" -- clears the
+#           ~7 healthy-baseline bar (the DEAD_PORT signature that retired it on issue 1217 was
+#           rough=0.1, a flat static frame; 7.8 is squarely in the 7.1-8.0 healthy range).
+#   Both ack lines above are REMOVED per this file's own contract ("remove the line the moment
+#   the box is back in the fleet") -- a lingering ack on a healthy, in-set box trips the
+#   stale-ack guard (`healthy + acked -> stale`, #758/#827). This is, for the first time, the
+#   FULL seven-camera fleet: cam1/cam2/cam3/cam4/cam5/cam6/cam7 all active, zero acks outstanding.

@@ -161,28 +161,52 @@
 # RE-ENABLE (once the splitter cable/port is fixed): verify `capture chroma` on cam5 reads
 # `-> colour` (rough >= ~7), then add "cam5" back to CAMERA_ACTIVE_SET (and the
 # CAMERA_ALIGN_SET loop below) AND delete cam5's rig-fleet.txt ack line — nothing else.
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam6 cam7}"
+# cam4 + cam5 RESTORED 2026-08-30 (issue 1216 completion, owner directive verbatim: "kamery od
+# 1-7 bezia" -- cameras 1 through 7 are running): the owner physically reseated cables on the
+# rig, and a live check (2026-08-30 ~12:30 CEST) confirms BOTH re-entry conditions this umbrella
+# ticket was waiting on are now met:
+#   cam4: svc active, 60.0 fps captured, capture chroma "u_dev=6.4 v_dev=7.5 rough=2.9 -> colour"
+#         -- its own #947 capture-leg wedge (uvcvideo -71 bursts within minutes of every start)
+#         is a SEPARATE symptom from the frame content itself; the box now captures a real colour
+#         image steadily, so the membership-only exclusion is no longer warranted. If the #947
+#         wedge symptom reproduces again, that is tracked as its own fresh episode, not a reason
+#         to keep this membership exclusion standing on stale evidence.
+#   cam5: svc active, capture chroma "u_dev=5.8 v_dev=7.8 rough=7.8 -> colour" -- clears the
+#         ~7 healthy-baseline bar from `.claude/rules/splitter-port-health-watchdog.md` (the
+#         DEAD_PORT signature that retired it on issue 1217 was rough=0.1, a flat static frame;
+#         7.8 is squarely in the same 7.1-8.0 range cam6/cam7 read healthy at).
+# cam2 was ALSO rebooted and confirmed healthy after the same cable reseat (already active, no
+# membership change needed for it). Per the RE-ENABLE procedures both cameras' own retirement
+# comments above promised: add both names back to CAMERA_ACTIVE_SET, add cam5 back to the
+# CAMERA_ALIGN_SET derivation loop below (cam4's align membership was already unconditional --
+# see the `_align_out="cam3 cam4"` base below, untouched by this change), and delete both
+# `rig-fleet.txt` ack lines (`cam4:on-air-but-outside-measured-set-2026-08-07` and
+# `cam5:healthy-box-dead-splitter-leg-2026-08-28`) -- nothing else. This is, for the first time,
+# the FULL seven-camera fleet active simultaneously.
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 
 # CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
-# aligned. It is a SUPERSET of the MEASURED set: cam4 stays here (on-air but its capture leg wedges,
-# #947, so it is excluded from CAMERA_ACTIVE_SET yet MUST still be aligned — the owner's rework
-# mandate, issue 1003, 2026-08-20; the offline-ack "outside-measured-set" covers only E2E
-# measurement, never production alignment), and cam3 is always included as the explicit on-air
-# base. cam1's membership DERIVES from CAMERA_ACTIVE_SET (issue 1170 introduced the derivation for
-# cam2; issue 1198, 2026-08-27, generalized it to cam1; issue 1216, 2026-08-28, then removed cam2
-# from the derivation OUTRIGHT — see the probe-path comment right above the derivation line).
-# issue 1216 (2026-08-28) extended the SAME derivation to cam5/cam6/cam7 — a
-# trailing loop, each appended only when it is a word in CAMERA_ACTIVE_SET, so the resolved order
-# stays cam1..cam7. issue 1217 (same day) DROPS cam5 out of that trailing loop again: its leg is a
-# DEAD_PORT (delivers no real content, see the CAMERA_ACTIVE_SET header comment above), so aligning
-# it has no benefit and would only feed noise into the floor-3 aligner's spread calculation — unlike
-# cam1, cam5's align membership does NOT derive from CAMERA_ACTIVE_SET any more; even
-# re-adding "cam5" to CAMERA_ACTIVE_SET alone would not re-align it (the RE-ENABLE procedure above
-# explicitly adds it back to BOTH). cam6/cam7 stay in the loop untouched. With today's default
-# (cam1/cam2/cam3/cam6/cam7 active, cam4 excluded on-air, cam5 excluded entirely) the resolved set
-# is "cam1 cam3 cam4 cam6 cam7" — every alignable on-air camera (cam5 = dead leg, cam2 = the
-# projection probe whose view is structurally behind the splitter family). Override to
-# match the on-air reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam3 cam4".
+# aligned. It is a SUPERSET of the MEASURED set: cam4 stays here UNCONDITIONALLY (the explicit
+# `_align_out="cam3 cam4"` base below, untouched regardless of cam4's own CAMERA_ACTIVE_SET
+# membership — the owner's rework mandate, issue 1003, 2026-08-20; the offline-ack
+# "outside-measured-set" covers only E2E measurement, never production alignment), and cam3 is
+# always included as the explicit on-air base. cam1's membership DERIVES from CAMERA_ACTIVE_SET
+# (issue 1170 introduced the derivation for cam2; issue 1198, 2026-08-27, generalized it to cam1;
+# issue 1216, 2026-08-28, then removed cam2 from the derivation OUTRIGHT — see the probe-path
+# comment right above the derivation line). issue 1216 (2026-08-28) extended the SAME derivation
+# to cam5/cam6/cam7 — a trailing loop, each appended only when it is a word in
+# CAMERA_ACTIVE_SET, so the resolved order stays cam1..cam7. issue 1217 (same day) DROPPED cam5
+# out of that trailing loop (its leg was a DEAD_PORT at the time, delivering no real content) —
+# and cam4+cam5 RESTORED 2026-08-30 (issue 1216 completion) puts cam5 BACK into the trailing loop:
+# its leg now reads colour (see the CAMERA_ACTIVE_SET header comment above), so aligning it is
+# worthwhile again, exactly the RE-ENABLE procedure cam5's own retirement comment always promised
+# ("add cam5 back to CAMERA_ACTIVE_SET AND the CAMERA_ALIGN_SET loop below"). cam1/cam5/cam6/cam7
+# ALL derive from CAMERA_ACTIVE_SET now — none is hardcoded true; shrinking the active set drops
+# each of them from the align set again, one line, no other edit. With today's default (the full
+# seven-camera fleet active) the resolved set is "cam1 cam3 cam4 cam5 cam6 cam7" — every
+# alignable on-air camera (cam2 = the projection probe whose view is structurally behind the
+# splitter family, deliberately excluded below regardless of its own active-set membership).
+# Override to match the on-air reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam3 cam4".
 # The inline case matches are word-exact on the space-padded set (same #39-injection-safe posture
 # as camera_is_active — it never evals the value); cam3/cam4 are the explicit always-on-air base.
 # cam2 NEVER derives into the align set (issue 1216/1152 rig-model correction, 2026-08-28):
@@ -192,7 +216,7 @@ CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam6 cam7}"
 # align cannot equalize it by design, and its bimodal decode (twice-rescaled optical image)
 # flips the measured spread, failing the stability criterion (run 33166543288 [4i/8align]).
 # Its CAMERA_ACTIVE_SET membership (E2E leg, burn 911009, probe role) is untouched.
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam5 cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

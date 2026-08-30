@@ -53,7 +53,7 @@ GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 
 def active_camera_numbers() -> tuple:
     """#893 -- the camera numbers to sweep, derived from CAMERA_ACTIVE_SET (env var, default
-    "cam1 cam2 cam3 cam6 cam7" -- issue 1198 (2026-08-27): cam1 + cam2 RESTORED, both
+    "cam1 cam2 cam3 cam4 cam5 cam6 cam7" -- issue 1198 (2026-08-27): cam1 + cam2 RESTORED, both
     healthy on a live journal check, owner refused the physical card swap; issue 1216
     (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter fitted, cam4 alone stays out
     (#947); issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter
@@ -68,7 +68,7 @@ def active_camera_numbers() -> tuple:
     upward). Read FRESH on every call (never cached at import time) so a caller/test can
     override the env var per-invocation.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam6 cam7")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
     out = []
     for tok in raw.replace(",", " ").split():
         tok = tok.strip()

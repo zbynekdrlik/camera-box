@@ -35,7 +35,7 @@ from latency_pins_snapshot import read_pin  # reuse the proven honest-None read 
 
 def active_camera_names(explicit: "str | None" = None) -> list:
     """#893 -- the active camera names, split from `explicit` if given, else CAMERA_ACTIVE_SET
-    (env var, default "cam1 cam2 cam3 cam6 cam7" -- issue 1198 (2026-08-27): cam1 + cam2
+    (env var, default "cam1 cam2 cam3 cam4 cam5 cam6 cam7" -- issue 1198 (2026-08-27): cam1 + cam2
     RESTORED, both healthy on a live journal check, owner refused the physical card swap; issue
     1216 (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter fitted; cam4 alone stays
     out, #947; issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter
@@ -47,7 +47,7 @@ def active_camera_names(explicit: "str | None" = None) -> list:
     relying on the shell variable happening to be an EXPORTED env var reaching this Python
     subprocess -- the same safer convention that script's own CLI already established.
     """
-    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam6 cam7")
+    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
     return [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
 
 

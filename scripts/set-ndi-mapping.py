@@ -104,7 +104,7 @@ DEFAULT_MAP = FULL_MAP
 # issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter (flat static
 # frame, siblings cam6/cam7 read colour) fails the [1/8] frozen-camera-gate for the whole
 # fleet; cam6/cam7 stay in. Temporary + membership-only, exactly like every prior retirement.
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam6 cam7")
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
 
 
 def _camera_name_of(ndi_input):
