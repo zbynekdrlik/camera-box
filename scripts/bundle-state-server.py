@@ -43,9 +43,12 @@ that env var is set on-box).
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
+import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -137,13 +140,40 @@ def newest_obs_log_text(log_dir, head_bytes=bsg.LOG_HEAD_BYTES, tail_bytes=bsg.L
         return ""
 
 
+# #1222c — ndi_runtime_version()'s process-lifetime cache, keyed by the runtime DLL's own
+# (mtime_ns, size). The NDI runtime version is static per install and only changes when the DLL
+# itself is replaced (an NDI SDK upgrade) — live evidence: ~8.3s under OBS render load to read
+# what is otherwise a static value on every single request.
+_NDI_RUNTIME_CACHE_LOCK = threading.Lock()
+_ndi_runtime_cache = {"path": None, "stat_key": None, "version": ""}
+
+
 def ndi_runtime_version(dll_path):
     """Get-Item's VersionInfo.FileVersion, shelled to PowerShell (there is no stdlib way to read a
     Windows PE VERSIONINFO resource) — the exact one-liner drift-guard.md step 1 documents. ""
-    on any failure (missing file, powershell error) — never a guessed value."""
+    on any failure (missing file, powershell error) — never a guessed value.
+
+    #1222c: CACHED, keyed by *dll_path*'s own `(mtime_ns, size)` (see `_ndi_runtime_cache` above).
+    A changed stat (an NDI SDK upgrade replacing the DLL) re-resolves and re-caches; a missing DLL
+    is never cached (the existing `os.path.isfile` guard already short-circuits before any
+    subprocess call at all). Same "never cache a failed or empty resolve" discipline as the #1222
+    port4455 cache — a transient PowerShell hiccup must keep retrying, never freeze this facet
+    blind for the rest of the process lifetime."""
     if not os.path.isfile(dll_path):
         log(f"WARNING: NDI runtime DLL not found at {dll_path}")
         return ""
+
+    try:
+        st = os.stat(dll_path)
+        stat_key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stat_key = None
+
+    if stat_key is not None:
+        with _NDI_RUNTIME_CACHE_LOCK:
+            if _ndi_runtime_cache["path"] == dll_path and _ndi_runtime_cache["stat_key"] == stat_key:
+                return _ndi_runtime_cache["version"]
+
     try:
         out = subprocess.run(
             [
@@ -152,10 +182,17 @@ def ndi_runtime_version(dll_path):
             ],
             capture_output=True, text=True, timeout=15, check=True,
         )
-        return out.stdout.strip()
+        version = out.stdout.strip()
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not read NDI runtime version: {e}")
         return ""
+
+    if version and stat_key is not None:
+        with _NDI_RUNTIME_CACHE_LOCK:
+            _ndi_runtime_cache["path"] = dll_path
+            _ndi_runtime_cache["stat_key"] = stat_key
+            _ndi_runtime_cache["version"] = version
+    return version
 
 
 def _parse_netstat_listening_pid(text, port=4455):
@@ -315,20 +352,55 @@ def port4455_owner():
     return path, version
 
 
+_OBS_PROCESS_NAME_RE = re.compile(r"(?i)^obs\d*$")
+
+
+def _parse_tasklist_obs_process_names(text):
+    """#1222c — parse `tasklist /FO CSV /NH` output *text* and return a newline-joined list of
+    every OBS-shaped process NAME (matches `obs<digits>` case-insensitively, `.exe` suffix
+    stripped) — the EXACT same shape `Get-Process -Name 'obs*' | Select-Object -ExpandProperty
+    Name` used to produce, so `bsg.obs_process_count_from_listing` (UNCHANGED by this ticket)
+    keeps working on it verbatim. Each CSV row is `"Image Name","PID","Session Name","Session#",
+    "Mem Usage"` (tasklist's own quoted-CSV format); `/NH` already suppresses the header row, but
+    this parser tolerates one anyway (it simply never matches the obs<digits> pattern).
+
+    "" if *text* is empty/malformed (never a guessed/zero count downstream — the same
+    never-a-false-clean discipline every other facet in this file follows)."""
+    if not (text or "").strip():
+        return ""
+    names = []
+    try:
+        for row in csv.reader(io.StringIO(text)):
+            if not row:
+                continue
+            image_name = row[0]
+            base = image_name[:-4] if image_name.lower().endswith(".exe") else image_name
+            if _OBS_PROCESS_NAME_RE.match(base):
+                names.append(base)
+    except csv.Error as e:
+        log(f"WARNING: could not parse tasklist CSV output: {e}")
+        return ""
+    return "\n".join(names)
+
+
 def obs_process_list():
-    """#826 — every running process NAME matching an OBS-shaped filter (Get-Process -Name obs*),
-    newline-joined — feeds bsg.obs_process_count_from_listing. "" on any failure (never a guessed
-    count; the gate then reads this box's process count as UNKNOWN, not "zero confirmed")."""
+    """#826 / #1222c — every running process NAME matching an OBS-shaped filter, newline-joined —
+    feeds bsg.obs_process_count_from_listing. "" on any failure (never a guessed count; the gate
+    then reads this box's process count as UNKNOWN, not "zero confirmed").
+
+    #1222c: was a PowerShell `Get-Process -Name 'obs*'` round-trip. Live per-facet timing on strih
+    showed this regularly TIMING OUT at its own 15s subprocess ceiling under sustained OBS render
+    load ("WARNING: could not list OBS-class processes: ... timed out after 15 seconds"), the same
+    PowerShell-interpreter-cold-start tax the #1222b port4455 fix already replaced with netstat.
+    Replaced here with a native `tasklist /FO CSV /NH` subprocess (no interpreter startup cost at
+    all), parsed by the PURE `_parse_tasklist_obs_process_names` above — same "" on-failure
+    contract, so `bsg.obs_process_count_from_listing` needed zero changes."""
     try:
         out = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "Get-Process -Name 'obs*' -ErrorAction SilentlyContinue "
-                "| Select-Object -ExpandProperty Name",
-            ],
+            ["tasklist", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=15, check=True,
         )
-        return out.stdout
+        return _parse_tasklist_obs_process_names(out.stdout)
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not list OBS-class processes: {e}")
         return ""
@@ -346,11 +418,39 @@ def read_ahk_text(ahk_path):
         return ""
 
 
+# #1222c — resolve_shortcut()'s process-lifetime cache, keyed by the target .lnk file's own
+# (mtime_ns, size). A Start-Menu shortcut is static until an operator re-points it, so paying for
+# a fresh COM/PowerShell round-trip on EVERY request (live evidence: ~6.6s under OBS render load)
+# is wasted once the file has not changed. Guarded by a lock for the same ThreadingHTTPServer
+# per-request-thread reason as every other cache in this file.
+_SHORTCUT_CACHE_LOCK = threading.Lock()
+_shortcut_cache = {"path": None, "stat_key": None, "target": "", "workdir": ""}
+
+
 def resolve_shortcut(lnk_path):
     """#826 — a Windows .lnk shortcut's own TargetPath + WorkingDirectory, via the same
     WScript.Shell COM technique scripts/launch-obs-genlock.sh already uses to launch OBS through
     its Start-Menu shortcut. Returns (target, workdir), each "" on any failure (missing shortcut,
-    powershell error) — never a guessed value."""
+    powershell error) — never a guessed value.
+
+    #1222c: CACHED, keyed by *lnk_path*'s own `(mtime_ns, size)` (see `_shortcut_cache` above). A
+    changed stat (the operator re-points the shortcut, or replaces the target file) re-resolves
+    and re-caches; a file that cannot be stat'd (missing, unreadable) is never cached at all, so it
+    keeps retrying every request rather than freezing on a stale/empty result. Same "never cache a
+    failed or empty resolve" discipline as the #1222 port4455 cache — a transient PowerShell hiccup
+    must keep retrying next request, not freeze this facet blind for the rest of the process
+    lifetime."""
+    try:
+        st = os.stat(lnk_path)
+        stat_key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stat_key = None
+
+    if stat_key is not None:
+        with _SHORTCUT_CACHE_LOCK:
+            if _shortcut_cache["path"] == lnk_path and _shortcut_cache["stat_key"] == stat_key:
+                return _shortcut_cache["target"], _shortcut_cache["workdir"]
+
     try:
         out = subprocess.run(
             [
@@ -363,10 +463,17 @@ def resolve_shortcut(lnk_path):
         lines = out.stdout.splitlines()
         target = lines[0].strip() if len(lines) >= 1 else ""
         workdir = lines[1].strip() if len(lines) >= 2 else ""
-        return target, workdir
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not resolve shortcut {lnk_path!r}: {e}")
         return "", ""
+
+    if target and stat_key is not None:
+        with _SHORTCUT_CACHE_LOCK:
+            _shortcut_cache["path"] = lnk_path
+            _shortcut_cache["stat_key"] = stat_key
+            _shortcut_cache["target"] = target
+            _shortcut_cache["workdir"] = workdir
+    return target, workdir
 
 
 def gather_ndi_inputs(host, password):
