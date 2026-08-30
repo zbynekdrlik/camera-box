@@ -135,7 +135,7 @@ def test_cambox_sweep_default_covers_every_camera_in_the_canonical_active_mappin
     )
 
 
-def test_default_active_set_is_exactly_cam1_cam2_cam3_1198():
+def test_default_active_set_is_exactly_the_full_seven_camera_fleet_1216():
     """#827: cam5/cam6/cam7 were retired. #947: cam4 retired. #939 (2026-08-13): cam3
     re-activated. issue 1198 (2026-08-27, owner ruling): cam1 (#1110 "hardware-defective") and
     cam2 (#1170 "camera-under-test retired") are RESTORED -- both diagnoses were built from
@@ -143,26 +143,31 @@ def test_default_active_set_is_exactly_cam1_cam2_cam3_1198():
     both cards are healthy today; the owner refused the physical swap outright. issue 1216
     (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are physically back in too.
     issue 1217 (same day): cam5 drops back out again -- a DEAD_PORT leg on the new splitter
-    (flat static frame, siblings cam6/cam7 read colour) -- today's declared active (measured)
-    fleet is exactly cam1/cam2/cam3/cam6/cam7; cam4 and cam5 both stay out (#947 capture-leg
-    wedge, #1217 dead splitter leg -- unrelated to each other)."""
+    (flat static frame, siblings cam6/cam7 read colour). issue 1216 completion (2026-08-30,
+    owner directive "kamery od 1-7 bezia" -- cameras 1 through 7 are running, after a physical
+    cable reseat): a live check confirms cam4's capture chroma reads colour again (rough=2.9)
+    and cam5's clears the ~7 healthy-baseline bar (rough=7.8, vs the DEAD_PORT rough=0.1 that
+    retired it) -- BOTH rejoin CAMERA_ACTIVE_SET, so today's declared active (measured) fleet is
+    the FULL seven cameras, for the first time simultaneously."""
     canonical = _scene_to_camera_from_active_map()
-    assert set(canonical.values()) == {"CAM1", "CAM2", "CAM3", "CAM6", "CAM7"}, canonical
-    assert "CAM4" not in canonical.values(), (
-        f"CAM4 is retired from CAMERA_ACTIVE_SET (#947) -- it must not appear in the "
-        f"default resolved map: {canonical}"
-    )
-    assert "CAM5" not in canonical.values(), (
-        f"CAM5 is retired from CAMERA_ACTIVE_SET (#1217, DEAD_PORT splitter leg) -- it must not "
-        f"appear in the default resolved map: {canonical}"
-    )
+    assert set(canonical.values()) == {
+        "CAM1",
+        "CAM2",
+        "CAM3",
+        "CAM4",
+        "CAM5",
+        "CAM6",
+        "CAM7",
+    }, canonical
 
 
 def test_reactivating_a_retired_camera_flows_through_both_sources_of_truth():
-    """#827 REVERSIBILITY PROOF: widening CAMERA_ACTIVE_SET to include a retired camera (cam4,
-    the one camera issue 1216 leaves out) must make BOTH set-ndi-mapping.py's active_map() AND
-    recording-e2e.sh's resolved CAMBOX_SWEEP default cover it -- with ZERO code changes beyond the
-    env var. A comment claiming the reversal works is not proof; this end-to-end resolution is."""
+    """#827 REVERSIBILITY PROOF: widening CAMERA_ACTIVE_SET to include a camera (cam4, whose own
+    #947/issue-1216-completion history proves it is genuinely retirable/restorable) must make
+    BOTH set-ndi-mapping.py's active_map() AND recording-e2e.sh's resolved CAMBOX_SWEEP default
+    cover it -- with ZERO code changes beyond the env var. A comment claiming the reversal works
+    is not proof; this end-to-end resolution is. (As of issue 1216's completion, 2026-08-30, this
+    override is already the DEFAULT too -- the mechanism check stays valid regardless.)"""
     active = "cam1 cam2 cam3 cam4 cam5 cam6 cam7"
     canonical = _scene_to_camera_from_active_map(active)
     assert "Cam 4" in canonical and canonical["Cam 4"] == "CAM4", canonical

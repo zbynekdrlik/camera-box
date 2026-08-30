@@ -41,10 +41,20 @@ class TestActiveCameraNames:
         # issue 1198 (2026-08-27, owner ruling): cam1 + cam2 RESTORED -- both cards confirmed
         # healthy on a live journal check, owner refused the physical swap. issue 1216
         # (2026-08-28): bigger splitter fitted, cam5/cam6/cam7 back too; issue 1217 (same day):
-        # cam5 dropped back out (DEAD_PORT splitter leg) -- default mirrors camera-set.sh's
-        # CAMERA_ACTIVE_SET = "cam1 cam2 cam3 cam6 cam7" (cam4 alone stays out, #947).
+        # cam5 dropped back out (DEAD_PORT splitter leg). issue 1216 completion (2026-08-30,
+        # owner directive "kamery od 1-7 bezia" after a physical cable reseat): cam4 (#947) and
+        # cam5 (DEAD_PORT) both rejoin -- default mirrors camera-set.sh's CAMERA_ACTIVE_SET =
+        # "cam1 cam2 cam3 cam4 cam5 cam6 cam7", the full seven-camera fleet.
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert psafc.active_camera_names() == ["cam1", "cam2", "cam3", "cam6", "cam7"]
+        assert psafc.active_camera_names() == [
+            "cam1",
+            "cam2",
+            "cam3",
+            "cam4",
+            "cam5",
+            "cam6",
+            "cam7",
+        ]
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam5")

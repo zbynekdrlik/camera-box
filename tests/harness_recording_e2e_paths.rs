@@ -1657,15 +1657,17 @@ fn resolve_cambox_sweep_default(active_set_override: Option<&str>) -> String {
 }
 
 #[test]
-fn recording_e2e_default_sweep_covers_cam1_cam2_cam3_now_both_restored_1198() {
+fn recording_e2e_default_sweep_covers_the_full_seven_camera_fleet_1216() {
     // #898 retired cam3; #939 (2026-08-13) re-activated it (Cam Link 4K fitted). issue 947
-    // (2026-08-02): cam4 stays out (its grabber wedges the capture leg within minutes of every
+    // (2026-08-02): cam4 dropped out (its grabber wedges the capture leg within minutes of every
     // start). issue 1198 (2026-08-27, owner ruling): cam1
     // (#1110) and cam2 (#1170) are RESTORED -- both "hardware-defective" diagnoses were built
     // from EPISODES, and a live journal check confirmed both cards are healthy today. issue 1216
     // (2026-08-28): a bigger splitter is fitted and cam5/cam6/cam7 are back too. issue 1217
-    // (same day): cam5 drops back out (its splitter leg is a DEAD_PORT, flat static frame) -- so
-    // the default sweep covers cam1/cam2/cam3/cam6/cam7.
+    // (same day): cam5 drops back out (its splitter leg is a DEAD_PORT, flat static frame).
+    // issue 1216 completion (2026-08-30, owner directive "kamery od 1-7 bezia" after a physical
+    // cable reseat): cam4's capture chroma reads colour again and cam5's clears the healthy
+    // baseline -- both rejoin, so the default sweep now covers the FULL seven-camera fleet.
     let s = read("scripts/recording-e2e.sh");
     assert!(
         s.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}\""),
@@ -1678,28 +1680,31 @@ fn recording_e2e_default_sweep_covers_cam1_cam2_cam3_now_both_restored_1198() {
         "Cam 1:CAM1",
         "Cam 2:CAM2",
         "Cam 3:CAM3",
+        "Cam 4:CAM4",
+        "Cam 5:CAM5",
         "Cam 6:CAM6",
         "Cam 7:CAM7",
     ] {
         assert!(
             resolved.contains(expect),
-            "issue 1217: the default sweep must cover {expect}: {resolved}"
+            "issue 1216 completion: the default sweep must cover {expect}: {resolved}"
         );
     }
+    // Reversibility, shrink direction -- the derivation still correctly excludes whatever an
+    // explicit override drops, never hardcoding cam4/cam5 present.
+    let shrunk = resolve_cambox_sweep_default(Some("cam1 cam2 cam3 cam6 cam7"));
     assert!(
-        !resolved.contains("Cam 4:CAM4"),
-        "#827/issue 947: the default sweep must NOT reference the retired Cam 4:CAM4: {resolved}"
-    );
-    assert!(
-        !resolved.contains("Cam 5:CAM5"),
-        "issue 1217: the default sweep must NOT reference the DEAD_PORT-retired Cam 5:CAM5: \
-         {resolved}"
+        !shrunk.contains("Cam 4:CAM4") && !shrunk.contains("Cam 5:CAM5"),
+        "shrinking CAMERA_ACTIVE_SET to exclude cam4/cam5 must drop them from the resolved \
+         sweep too: {shrunk}"
     );
 }
 
-/// #827 REVERSIBILITY PROOF: overriding CAMERA_ACTIVE_SET to bring a retired camera (cam4, the
-/// one camera issue 1216 leaves out) back makes CAMBOX_SWEEP's resolved default cover it too —
-/// zero code changes beyond the env var.
+/// #827 REVERSIBILITY PROOF: overriding CAMERA_ACTIVE_SET to bring a camera (cam4, whose own
+/// #947/issue-1216-completion history proves it is genuinely retirable/restorable) back makes
+/// CAMBOX_SWEEP's resolved default cover it too — zero code changes beyond the env var. (As of
+/// issue 1216's completion, 2026-08-30, this override is already the DEFAULT too -- the
+/// mechanism check stays valid regardless.)
 #[test]
 fn recording_e2e_cambox_sweep_default_reactivates_a_retired_camera_via_active_set() {
     let resolved = resolve_cambox_sweep_default(Some("cam1 cam2 cam3 cam4 cam5 cam6 cam7"));
