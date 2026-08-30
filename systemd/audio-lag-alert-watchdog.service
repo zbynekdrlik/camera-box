@@ -1,0 +1,18 @@
+[Unit]
+# stream/strih OBS audio-timeline-lag alert (#1226), DEV1-SIDE. ONE fetch -> decide -> alert pass.
+# Reads the `audio_ts_lag_ms` facet bundle_state_gather (#1226) exposes on :8899/bundle-state.json
+# and pages when a box's audio pipeline sits sustained behind realtime (the 2026-08-30 incident:
+# stream OBS audio fell ~24 s/min behind, YouTube A/V desynced a whole service, and the
+# `audio-telemetry #800` log line that screamed it went unread). DETECTION ONLY — no auto-action
+# (the cure is a live-box reboot, an owner call). SAME dev1 topology as
+# network-reach-alert-watchdog.service (#1001) / bundle-state-alert-watchdog.service (#732).
+Description=camera-box stream/strih OBS audio-lag alert (#1226) — one fetch/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/audio-lag-alert-watchdog.sh
+# Per pass: 2 boxes × one :8899 curl (AUDIO_LAG_CURL_TIMEOUT, default 10 s each) + a local python
+# decision. Generous ceiling so a slow event-day link never hangs the timer.
+TimeoutStartSec=60

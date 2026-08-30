@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1226 stream/strih OBS audio-lag health-check every 5 min (dev1-side), matching the
+# network-reach / bundle-state / obs-liveness / cadence alert-timer cadence so the fleet's dev1 alert
+# timers stay in lockstep. An audio pipeline drifting behind realtime (the 2026-08-30 YouTube A/V
+# desync) is caught within ~10 min of crossing the threshold (2-pass confirm) and paged — no more
+# waiting until a viewer hears it.
+Description=Run the camera-box stream/strih OBS audio-lag health-check every 5 min (#1226)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
