@@ -3010,28 +3010,84 @@ fi
 # healable, and under this script's `set -euo pipefail` a bare non-zero would abort the whole run
 # (the #1133 report-only-probe class); an `if` suppresses `set -e` inside it.
 . "$HERE/lib/ndi-name-selfheal.sh"
+# #1233: content-INDEPENDENT leg liveness — the abort signal is now strih's `genlock-fifo audit
+# received=` counter DELTA per input (the #797/#1052 tap), NOT the old pixel-hash of preview
+# screenshots (which false-aborted during the [2b/8] deploy wave: a re-attaching receiver holds the
+# last frame → identical hashes even on a live leg). The lib reuses mv_reverify_probe_raw /
+# mv_reverify_extract_received (mv-reverify-escalate.sh, already sourced above) + frozen_input_classify.
+. "$HERE/lib/frozen-cam-received.sh"
+_FROZEN_CAM_SOURCES_EFFECTIVE="${FROZEN_CAM_SOURCES:-$(camera_active_ndi_sources_csv)}"
+
+# #1233 REPORT-ONLY: run the OLD pixel-hash gate (frozen-camera-gate.py) ONCE as a diagnostic line
+# only — it warms each input onto PREVIEW (#747 side-effect, preserved) and its FROZEN/PASS verdict
+# is logged, but it NEVER aborts (a static-but-live receiver frame reads FROZEN). Bounded by a
+# timeout so its per-source warm-up cannot dominate the pre-record budget (#747/#1223 painter slack).
+# #1233 review 🟡: the per-source PREVIEW warm-up (3s) + 8×1s samples + screenshots across the ~7
+# active sources is ≥ ~80-100s on a loaded 4K strih, so a 90s bound routinely mislabelled a genuine
+# TIMEOUT as FROZEN (polluting the pixel-vs-received disagreement evidence this report exists to
+# collect) and truncated the #747 warm-up for tail-of-list sources. Capture the rc, label 124 as a
+# distinct TIMEOUT, and default the bound to 180s (report-only, well under the #1223 painter slack).
+frozen_pixel_verdict=PASS
+frozen_pixel_rc=0
+timeout "${FROZEN_CAM_PIXEL_REPORT_TIMEOUT_S:-180}" python3 "$HERE/frozen-camera-gate.py" \
+    --host "$STRIH" \
+    --threshold   "${FROZEN_CAM_THRESHOLD:-3}" \
+    --samples     "${FROZEN_CAM_SAMPLES:-8}" \
+    --sources     "$_FROZEN_CAM_SOURCES_EFFECTIVE" \
+    --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}" >/dev/null 2>&1 || frozen_pixel_rc=$?
+if   [ "$frozen_pixel_rc" -eq 0 ];   then frozen_pixel_verdict=PASS
+elif [ "$frozen_pixel_rc" -eq 124 ]; then frozen_pixel_verdict=TIMEOUT
+else                                      frozen_pixel_verdict=FROZEN
+fi
+echo "    [frozen-camera-gate] #1233 pixel-hash REPORT-ONLY: ${frozen_pixel_verdict} (content-dependent screenshot check — NOT the abort signal)"
+
+# #1233 ABORT SIGNAL: received= delta per input, BOUNDED RETRY (FROZEN_CAM_ATTEMPTS) still covers the
+# post-[3/8] / deploy-wave reconnect — a source whose sender is briefly down reads FROZEN/INCONCLUSIVE,
+# settles (+#1158 self-heal), then RECOVERS to ALIVE (breaks out, PASS). A GENUINELY stuck camera
+# never reaches ALIVE. #1233 review 🟡: the abort keys on whether ANY attempt PROVED a freeze
+# (frozen_proven) — NOT the final attempt alone — so a transient glitch (a timed-out ssh read →
+# READ_FAIL/INCONCLUSIVE) on the last attempt can never ERASE a freeze already proven across earlier
+# attempts. An all-INCONCLUSIVE run (never once proven FROZEN, never ALIVE) still WARN_PASSes.
 frozen_ok=0
+frozen_recv_verdict=""
+frozen_proven=""
 for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
-  if python3 "$HERE/frozen-camera-gate.py" \
-      --host "$STRIH" \
-      --threshold   "${FROZEN_CAM_THRESHOLD:-3}" \
-      --samples     "${FROZEN_CAM_SAMPLES:-8}" \
-      --sources     "${FROZEN_CAM_SOURCES:-$(camera_active_ndi_sources_csv)}" \
-      --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}"; then
-    frozen_ok=1
-    break
-  fi
+  frozen_recv_verdict="$(frozen_cam_received_read_and_verdict "$STRIH" "$_FROZEN_CAM_SOURCES_EFFECTIVE")"
+  case "$frozen_recv_verdict" in
+    ALIVE)
+      echo "    [frozen-camera-gate] received= ALIVE — every checked strih input advanced across the window (#1233)"
+      frozen_ok=1
+      break
+      ;;
+    FROZEN:*)
+      frozen_proven="$frozen_recv_verdict"
+      echo "    [frozen-camera-gate] received= not advancing on ${frozen_recv_verdict#FROZEN:} (counter stuck — a leg is not delivering)"
+      ;;
+    *)
+      echo "    [frozen-camera-gate] received= ${frozen_recv_verdict} — could not PROVE liveness this attempt (no audit line / unreadable log; not a proven freeze)"
+      ;;
+  esac
   if [ "$frozen_attempt" -lt "$FROZEN_CAM_ATTEMPTS" ]; then
     if ndi_name_selfheal_run "$STRIH" "$CAMERA_ACTIVE_SET" "$HERE"; then
       echo "    [frozen-camera-gate] #1158 auto-revive re-enforced an emptied/drifted NDI mapping — re-sampling after the settle"
     fi
-    echo "    [frozen-camera-gate] attempt ${frozen_attempt}/${FROZEN_CAM_ATTEMPTS} FROZEN — settling ${FROZEN_CAM_RETRY_SLEEP}s for the post-[3/8] NDI reconnect, then re-sampling"
+    echo "    [frozen-camera-gate] attempt ${frozen_attempt}/${FROZEN_CAM_ATTEMPTS} not ALIVE — settling ${FROZEN_CAM_RETRY_SLEEP}s for the post-[3/8] NDI reconnect, then re-sampling"
     sleep "$FROZEN_CAM_RETRY_SLEEP"
   fi
 done
 if [ "$frozen_ok" -ne 1 ]; then
-  echo "    [frozen-camera-gate] FROZEN on every one of ${FROZEN_CAM_ATTEMPTS} attempts — a camera is GENUINELY stuck; aborting (#365)"
-  exit 1
+  # #1233 review 🟡: decide on the PROVEN-freeze verdict if any attempt proved one, else the final
+  # attempt's verdict — so a proven freeze aborts even when the last read glitched, while an
+  # all-INCONCLUSIVE/READ_FAIL run (nothing ever proven) WARN_PASSes.
+  case "$(frozen_cam_gate_should_abort "$frozen_ok" "${frozen_proven:-$frozen_recv_verdict}")" in
+    ABORT)
+      echo "    [frozen-camera-gate] received= FROZEN on every one of ${FROZEN_CAM_ATTEMPTS} attempts — a camera is GENUINELY stuck; aborting (#365/#1233)"
+      exit 1
+      ;;
+    *)
+      echo "    [frozen-camera-gate] WARN (#1233): could NOT prove leg liveness via received= after ${FROZEN_CAM_ATTEMPTS} attempts (verdict='${frozen_recv_verdict:-none}') — NOT a proven freeze, so NOT aborting (the leg is re-proven downstream by the QR sweep). Investigate the strih OBS-log tap if this recurs." >&2
+      ;;
+  esac
 fi
 
 echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors must not already be rendering below floor (target − tolerance) before we commit a ~40-min run; an unreadable box / a box not yet on the #771 genlock build is report-only, only a CONFIRMED sustained collapse aborts (never false-abort a CI gate)"
