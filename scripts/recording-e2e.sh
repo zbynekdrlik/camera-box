@@ -105,6 +105,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # SOURCE camera to imag's own "Cam N" scene name (the SAME 1:1 pattern imag_scenes.py seeds).
 # shellcheck source=scripts/lib/imag-scene-route.sh
 . "$HERE/lib/imag-scene-route.sh"
+# issue 1218: the imag active-set NDI idle enforce pass (sourced lib, the #675 prevention pattern —
+# the logic lives here, not in an anchored line of this script). Idles inactive cameras' imag NDI
+# receivers so the box stops decoding them and thermal-throttling mid-run.
+# shellcheck source=scripts/lib/imag-active-cams-state.sh
+. "$HERE/lib/imag-active-cams-state.sh"
 # issue 1204: the fail-closed cross-check that imag's burn target IS the input imag renders in
 # program -- used at [4a/8] after the scene route, so a burn can never land on a non-program input
 # (the run 32908274448 failure). (Function names are deliberately NOT spelled here so the [4a/8]
@@ -2275,6 +2280,13 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     imag_leg_skip_note "[1/8] imag render-health + MV-divisor capability" "$IMAG_OFFLINE_ACK_REASON"
   else
+  # issue 1218: idle imag's INACTIVE-camera NDI receivers (each decodes 1080p60 for nothing and
+  # thermal-throttles the box — the ~65s render-18ms episodes that false-fail this very preflight)
+  # + refresh the box's ~/.config/camera-box/imag-active-cams state file, BEFORE the render-health
+  # windows below. Best-effort (the helper never aborts the run; the box's own boot seed is the
+  # durable enforcement, this is the immediate belt-and-suspenders).
+  imag_enforce_ndi_active_policy "$IMAG_IP" "$CAMERA_ACTIVE_SET" "$HERE" \
+    | sed 's/^/    [imag active-set idle] /' || true
   # #1143: make VAAPI-tex the LIVE record encoder BEFORE the render-health windows (software x264
   # overloads the render thread → the #1130 observer effect). The make-it-live OBS restart fires
   # only when the disk config drifted from the target (a no-op on the steady state); its settle is
