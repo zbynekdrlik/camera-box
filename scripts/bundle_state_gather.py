@@ -112,8 +112,10 @@ LOG_TAIL_BYTES = 5 * 1024 * 1024  # ~5 MB — the newest state a caller might ne
 # scans for ("OBS ", "DistroAV (Version", "video settings reset:", "genlock:"), and newline-padded
 # on both sides so a byte-cut mid-line on either side of the join can never merge into something a
 # parser could mistake for a real one.
+# #1222 review: verified digit-free by construction (a future unanchored `\d+`-style parser
+# would violate the claim above otherwise) -- keep it that way if this text ever changes.
 LOG_BOUNDED_READ_SEPARATOR = (
-    "\n\n===== #1222 bounded log read: middle omitted (head+tail only) =====\n\n"
+    "\n\n===== bounded log read: middle omitted (head+tail only) =====\n\n"
 )
 
 
@@ -124,9 +126,13 @@ def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_B
     truncation) — the common case for a freshly-started OBS session and for every existing test
     fixture in this suite. A larger file returns its first `head_bytes` bytes joined to its last
     `tail_bytes` bytes via LOG_BOUNDED_READ_SEPARATOR (see that constant's own doc comment for why
-    it can never be mistaken for a real log line by any parser above). Decoded exactly like the
-    original whole-file read this replaces (`errors="replace"` — a byte-boundary cut mid
-    multi-byte UTF-8 character degrades to a harmless U+FFFD, never a crash).
+    it can never be mistaken for a real log line by any parser above). Read in BINARY mode and
+    decoded with `errors="replace"` — a byte-boundary cut mid multi-byte UTF-8 character degrades
+    to a harmless U+FFFD, never a crash. Unlike the original whole-file text-mode read this
+    replaces, a Windows CRLF line ending is NOT translated to a bare `\n` here; every parser above
+    is CRLF-tolerant (`splitlines()` strips a trailing `\r`, and no regex here crosses a line
+    boundary), so this has no observed behavioral effect, but it is a real difference worth
+    knowing if a future parser is added.
 
     "" if *path* is missing/unreadable — the same UNKNOWN-downstream contract as the whole-file
     read this replaces (callers already treat an empty log text as every derived facet coming

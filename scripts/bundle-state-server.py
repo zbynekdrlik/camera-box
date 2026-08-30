@@ -248,12 +248,24 @@ def port4455_owner():
         version = lines[1].strip() if len(lines) >= 2 else ""
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not read the :4455 port owner: {e}")
+        # #1222 review: a failed resolve must CLEAR the cache, not leave a previous entry
+        # standing -- a later PID reuse (Windows recycles PIDs) must never serve an identity
+        # resolved before this failure under a pid that may since belong to a different process.
+        with _PORT4455_CACHE_LOCK:
+            _port4455_cache["pid"] = None
+            _port4455_cache["path"] = ""
+            _port4455_cache["version"] = ""
         return "", ""
 
-    with _PORT4455_CACHE_LOCK:
-        _port4455_cache["pid"] = pid
-        _port4455_cache["path"] = path
-        _port4455_cache["version"] = version
+    if path:
+        # #1222 review: only cache a NON-EMPTY path. A resolve that succeeds (exit 0) but returns
+        # nothing (the #1067 access-denied shape, or a transient CIM flake) must NOT be cached --
+        # caching it would serve ("", "") for the rest of the OBS session with no chance to
+        # recover, whereas the pre-fix uncached code retried on every single request.
+        with _PORT4455_CACHE_LOCK:
+            _port4455_cache["pid"] = pid
+            _port4455_cache["path"] = path
+            _port4455_cache["version"] = version
     return path, version
 
 

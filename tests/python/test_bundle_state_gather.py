@@ -632,3 +632,20 @@ def test_read_bounded_log_text_default_constants_bound_a_multi_mb_log():
         assert bsg.genlock_wall_clock_from_log(bounded) == "1"
         # newest-state facet (tail) still parses:
         assert "timestamp-aligned release" in bsg.genlock_capability_from_log(bounded)
+
+
+def test_read_bounded_log_text_crlf_log_still_parses(tmp_path):
+    # #1222 review: a real Windows OBS log uses CRLF line endings. The bounded reader is a
+    # BINARY read (unlike the whole-file text-mode read it replaces), so CRLF is NOT translated
+    # to a bare \n -- confirm every parser still works correctly on the untranslated CRLF text.
+    crlf_log = SAMPLE_LOG.replace("\n", "\r\n")
+    p = tmp_path / "crlf.txt"
+    p.write_bytes(crlf_log.encode("utf-8"))
+
+    # small file -> returned whole, still CRLF, still parses correctly
+    whole = bsg.read_bounded_log_text(str(p), head_bytes=1000, tail_bytes=1000)
+    assert "\r\n" in whole
+    assert bsg.obs_version_from_log(whole) == "32.1.2"
+    assert bsg.distroav_version_from_log(whole) == "6.2.1"
+    assert bsg.output_fps_from_log(whole) == "30"
+    assert bsg.genlock_wall_clock_from_log(whole) == "1"
