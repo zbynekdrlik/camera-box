@@ -110,9 +110,6 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # recording-e2e.sh already uses for its imag scene).
 # shellcheck source=scripts/lib/imag-scene-route.sh
 . "$RIG_MODE_DIR/lib/imag-scene-route.sh"
-# issue 1218: the imag active-set NDI idle enforce pass (sourced lib, the #675 prevention pattern).
-# shellcheck source=scripts/lib/imag-active-cams-state.sh
-. "$RIG_MODE_DIR/lib/imag-active-cams-state.sh"
 # shellcheck source=scripts/lib/rig-test-dropin.sh
 . "$RIG_MODE_DIR/lib/rig-test-dropin.sh"
 # #420/#421: SINGLE SOURCE OF TRUTH for the QPSK audio-marker AUDIBLE self-check (ALSA CARD/DEV
@@ -952,11 +949,8 @@ set_imag_test_program() {
     echo "[obs imag ${IMAG_IP}] SKIP #462 route PROGRAM: imag acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) a nedosiahnutelny -- routing sa preskakuje"
     return 0
   fi
-  # issue 1218: TEST mode idles imag's INACTIVE-camera NDI receivers (each decodes 1080p60 for
-  # nothing and thermal-throttles the box) + refreshes its active-cams state file. Best-effort
-  # (never aborts do_test; the box's own boot seed is the durable enforcement).
-  imag_enforce_ndi_active_policy "$IMAG_IP" "$CAMERA_ACTIVE_SET" "$here" \
-    | sed 's/^/    [imag active-set idle] /' || true
+  # issue 1230: the #1218 imag active-set NDI idle enforce pass was REMOVED here (owner ruling
+  # 2026-08-30: no idle policy). imag keeps all seven cameras named + alive via the on-box boot seed.
   echo "[obs imag ${IMAG_IP}] #462 route PROGRAM to '${IMAG_PROG_SCENE}' (shows ${RIG_SOURCE_BOX} via '${IMAG_PROG_SOURCE}')"
   python3 "$here/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" \
     --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [imag program] /' || rc=$?

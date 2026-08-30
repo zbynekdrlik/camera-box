@@ -1652,10 +1652,11 @@ gh api -H "Accept: application/vnd.github.raw" \
     > "$REC_ENC" \
     || fail "could not fetch scripts/imag_record_encoder.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$REC_ENC"
-# issue 1218: imag_scenes.py LAZILY imports the obs_phase2 sibling (the shared, issue-795-safe
-# reenforce_ndi_name policy) inside enforce_ndi_active_policy -- the active-set NDI idle policy's ONE
-# enforcement point. Ride it on the SAME on-box deploy list (same gh-api fetch + chmod, the #1156
-# sibling-install discipline) so the on-box --bootstrap enforce gets the discoverability-gated heal.
+# issue 1218/1230: imag_scenes.py LAZILY imports the obs_phase2 sibling (the shared, issue-795-safe
+# reenforce_ndi_name policy) inside enforce_ndi_names -- the ONE imag NDI-name heal point (issue 1230
+# removed the idle policy; the #1158 name-healing stays). Ride it on the SAME on-box deploy list (same
+# gh-api fetch + chmod, the #1156 sibling-install discipline) so the on-box --bootstrap heal gets the
+# discoverability-gated name recovery.
 # The import is LAZY + degrades to a direct set if this file is ever absent, so a stale box never
 # crash-loops OBS -- but a fresh provision installs it for the gated path.
 OBS_PHASE2="/usr/local/bin/obs_phase2.py"
@@ -1664,18 +1665,10 @@ gh api -H "Accept: application/vnd.github.raw" \
     > "$OBS_PHASE2" \
     || fail "could not fetch scripts/obs_phase2.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$OBS_PHASE2"
-# issue 1218: seed the active-cams state file at provision time so the box's VERY FIRST --bootstrap
-# idles inactive cameras instead of baseline-healing all of them (all-decode = the thermal state
-# this ticket fixes) until the first dev1 pass writes it. OPT-IN via IMAG_ACTIVE_CAMS so this
-# standalone provisioner never has to duplicate CAMERA_ACTIVE_SET (its single source of truth stays
-# scripts/camera-set.sh): pass `IMAG_ACTIVE_CAMS="$CAMERA_ACTIVE_SET" sudo -E ./setup-imag.sh` to
-# seed it now; omitted, the first verify-imag.sh pass writes it (short provisioning-only window).
-if [ -n "${IMAG_ACTIVE_CAMS:-}" ]; then
-    install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$USER_HOME/.config/camera-box"
-    printf '%s\n' "$IMAG_ACTIVE_CAMS" > "$USER_HOME/.config/camera-box/imag-active-cams"
-    chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/camera-box/imag-active-cams"
-    echo "issue 1218: seeded ~/.config/camera-box/imag-active-cams = '$IMAG_ACTIVE_CAMS'"
-fi
+# issue 1230: the #1218 active-cams state file (~/.config/camera-box/imag-active-cams) was REMOVED
+# (owner ruling 2026-08-30: no idle policy). imag keeps all seven cameras named + alive, so there is
+# no active set to persist. The obs_phase2 sibling install above STAYS — the #1158 name-healing in
+# imag_scenes.enforce_ndi_names still uses the shared #795-safe obs_phase2.reenforce_ndi_name.
 
 
 # #840: install the operator start/stop scripts onto the box too -- the openbox autostart below
