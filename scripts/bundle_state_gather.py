@@ -155,6 +155,51 @@ def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_B
     )
 
 
+# #1226 — the audio-timeline-lag telemetry line vendored OBS emits every 60 s per audio source
+# (vendor/obs-studio/libobs/obs-audio.c:698): `audio-telemetry #800 '<src>': ts_lag_ms=<int64> ...`.
+# The name is captured up to the next `'` (a rig source name — "ASIO Input Capture", "mbc",
+# "post video", "test-audio" — never contains an apostrophe; a hypothetical apostrophe-carrying name
+# simply fails to match and is skipped, never a fabricated reading). The trailing `: ts_lag_ms=`
+# anchor makes the summary line `audio-telemetry #800: total_buffering=...` (no quoted name) never
+# match. ts_lag_ms may be negative (-1 == audio_ts==0, i.e. no audio timeline yet).
+_AUDIO_TS_LAG_RE = re.compile(r"audio-telemetry #800 '([^']*)': ts_lag_ms=(-?\d+)")
+
+
+def audio_ts_lag_ms_from_log(text):
+    """#1226 — the MAX audio-timeline lag (ms behind the OS clock) across audio sources, from the
+    NEWEST `audio-telemetry #800 '<src>': ts_lag_ms=N` line PER SOURCE. Returns
+    `(max_lag_ms_str, src_name)`, or `("", "")` when no such reading exists (UNKNOWN — the caller
+    omits both keys, never a fake 0).
+
+    Why this facet (the 2026-08-30 incident, #1226): stream OBS's audio pipeline fell ~24 s/min
+    behind realtime under stream load; every audio source lagging EQUALLY = a global audio-tick/mix
+    pipeline behind realtime (mbc peaked at 1 672 741 ms / 27,9 min), which desynced the YouTube
+    stream's A/V for a whole service. This line SCREAMED it the whole hour but nothing read it.
+
+    Reads only the TAIL window (the newest slice) of the #1222 bounded head+separator+tail read, so
+    the facet reflects the CURRENT state — a stale HIGH value that survives only in the head slice
+    (an old, recovered episode from the startup region) is never reported. A small whole-file log
+    (no separator) is scanned entirely, so its last-per-source is still the newest.
+
+    A `ts_lag_ms=-1` (source present but no audio timeline yet, audio_ts==0) is NOT a lag and is
+    excluded from the max; a source whose newest reading is -1 does not contribute. On an equal
+    max across sources the reported source is deterministic (alphabetically first) so the value is
+    stable across requests and never flaps the watchdog's dedup key."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    last_per_source = {}
+    for m in _AUDIO_TS_LAG_RE.finditer(t):
+        last_per_source[m.group(1)] = int(m.group(2))
+    candidates = [(v, name) for name, v in last_per_source.items() if v >= 0]
+    if not candidates:
+        return ("", "")
+    # max lag; deterministic tie-break by source name (asc) so the reported src is stable.
+    candidates.sort(key=lambda kv: (-kv[0], kv[1]))
+    maxv, maxname = candidates[0]
+    return (str(maxv), maxname)
+
+
 def distroav_dll_paths(scan_roots):
     """Every `distroav.dll` found (case-insensitive) under *scan_roots* (each walked recursively),
     comma-joined, in the order given. "" if none found anywhere (UNKNOWN — never a false clean;
@@ -415,6 +460,8 @@ def build_bundle_state(
     ahk_dead_config_present="",
     shortcut_target_path="",
     shortcut_workdir="",
+    audio_ts_lag_ms="",
+    audio_ts_lag_src="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -444,6 +491,11 @@ def build_bundle_state(
     omit-when-empty rule; `version-integrity-gate.sh` treats the whole group as opt-in per box
     (skipped entirely until a box's bundle-state-server reports at least one of them).
 
+    #1226: `audio_ts_lag_ms`/`audio_ts_lag_src` = the MAX per-source audio-timeline lag (ms behind
+    the OS clock) parsed from the newest `audio-telemetry #800` line per source (see
+    `audio_ts_lag_ms_from_log`). Same omit-when-empty rule; the dev1 audio-lag alert watchdog
+    (#1226) reads it to page when a box's audio pipeline falls sustained behind realtime.
+
     Note: `dantesync_version` was added here for #862, then REVERTED in its own follow-up fix —
     the deployed strih/stream servers never picked up the new key (half-wired), and the gate now
     reads every node's dantesync version uniformly via `dantesync --version` over SSH instead
@@ -469,5 +521,9 @@ def build_bundle_state(
         "shortcut_target_path": shortcut_target_path,
         "shortcut_workdir": shortcut_workdir,
         "genlock_build_sha": genlock_build_sha,
+        # #1226 — the audio-timeline-lag facet the dev1 audio-lag watchdog reads; same
+        # omit-when-empty rule (absent facet == UNKNOWN downstream, never a fake 0).
+        "audio_ts_lag_ms": audio_ts_lag_ms,
+        "audio_ts_lag_src": audio_ts_lag_src,
     }
     return {k: v for k, v in values.items() if v}

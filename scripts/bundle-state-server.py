@@ -548,11 +548,14 @@ def gather_bundle_state(
             bsg.output_fps_from_log(log_text),
             bsg.genlock_wall_clock_from_log(log_text),
             bsg.genlock_capability_from_log(log_text),
+            # #1226 — MAX per-source audio-timeline lag (max_lag_str, src) from the SAME bounded
+            # log_text (no second read); the dev1 audio-lag watchdog reads this facet.
+            bsg.audio_ts_lag_ms_from_log(log_text),
         )
 
-    (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability) = _timed(
-        timings, "obs_log_parse", _parse_log_facets
-    )
+    (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
+     audio_ts_lag) = _timed(timings, "obs_log_parse", _parse_log_facets)
+    audio_ts_lag_ms_val, audio_ts_lag_src_val = audio_ts_lag
 
     def _gather_ndi():
         try:
@@ -628,6 +631,9 @@ def gather_bundle_state(
         ahk_dead_config_present=bsg.ahk_dead_config_present(ahk_text),
         shortcut_target_path=shortcut_target,
         shortcut_workdir=shortcut_workdir,
+        # #1226 — the audio-timeline-lag facet (omit-when-empty; absent == UNKNOWN downstream).
+        audio_ts_lag_ms=audio_ts_lag_ms_val,
+        audio_ts_lag_src=audio_ts_lag_src_val,
     )
 
     timings["total"] = time.perf_counter() - t_total0

@@ -104,3 +104,38 @@ def test_gather_bundle_state_silent_when_timing_disabled(monkeypatch, tmp_path, 
     _gather_bundle_state_with_all_externals_stubbed(monkeypatch, tmp_path)
     out = capsys.readouterr().out
     assert "gather timing:" not in out
+
+
+# #1226 — the audio-timeline-lag facet must FLOW through the server's gather (not just the pure
+# parser): a lagging `audio-telemetry #800` line in the OBS log must appear as
+# audio_ts_lag_ms/audio_ts_lag_src in the served bundle-state dict.
+def _gather_with_log(monkeypatch, tmp_path, log_text):
+    monkeypatch.setattr(bss, "gather_ndi_inputs", lambda host, password: {})
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "obs.txt").write_text(log_text, encoding="utf-8")
+    return bss.gather_bundle_state(
+        "127.0.0.1", "", str(log_dir), str(tmp_path / "missing-ndi.dll"), [],
+        genlock_build_sha_file=str(tmp_path / "missing-sha.txt"),
+        obs_install_scan_roots=(),
+        startup_shortcut=str(tmp_path / "missing.lnk"),
+        ahk_path=str(tmp_path / "missing.ahk"),
+        obs_dll_path=str(tmp_path / "missing-obs.dll"),
+    )
+
+
+def test_gather_bundle_state_exposes_audio_ts_lag_facet(monkeypatch, tmp_path):
+    log = (
+        "OBS 32.1.2 (64-bit, windows)\n"
+        "10:44:06.003: audio-telemetry #800 'mbc': ts_lag_ms=1672741 buffered_ms=0 pending=0 timing_adjust_ms=-5\n"
+        "10:44:06.004: audio-telemetry #800 'post video': ts_lag_ms=1671003 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+    )
+    state = _gather_with_log(monkeypatch, tmp_path, log)
+    assert state["audio_ts_lag_ms"] == "1672741"
+    assert state["audio_ts_lag_src"] == "mbc"
+
+
+def test_gather_bundle_state_omits_audio_ts_lag_when_no_telemetry(monkeypatch, tmp_path):
+    state = _gather_with_log(monkeypatch, tmp_path, "OBS 32.1.2 (64-bit, windows)\n")
+    assert "audio_ts_lag_ms" not in state
+    assert "audio_ts_lag_src" not in state
