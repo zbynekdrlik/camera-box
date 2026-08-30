@@ -56,16 +56,22 @@ recency** — the `ndi_halving_decision.ts_to_seconds` + midnight-wrap precedent
 `bundle_state_gather` (never imported — the gather runs on the box, that decision module is dev1-only):
 
 - `bundle_state_gather.audio_telemetry_from_log(text)` → `(max_FRESH_lag_str, src, age_s_str)` in ONE
-  pass over the SAME bounded tail. It ages each source's newest `#800` line against `log_newest_ts` =
-  the newest parseable `HH:MM:SS` of ANY line in the tail (the log's write head). No wall clock is
-  injected, so it never mis-compares a date-less OBS timestamp against a foreign clock and stays a
-  pure fixture-testable parser. `audio_ts_lag_ms_from_log` is now a 2-tuple wrapper over it.
+  pass over the SAME bounded tail. It ages each source's newest `#800` line against `log_newest_ts` —
+  **the LAST parseable line in FILE ORDER, NEVER `max(seconds-of-day)`.** The OBS log is append-only,
+  so file order IS time order; a max-of-seconds anchor picks a PRE-midnight line across a day boundary
+  and reads a genuinely stale source as fresh (the review W1 🔴). `_recency_gap_s`'s single `+86400`
+  wrap correction then makes the gap the TRUE elapsed time (mod 24h). No wall clock is injected, so it
+  never mis-compares a date-less OBS timestamp against a foreign clock and stays a pure fixture-testable
+  parser. `audio_ts_lag_ms_from_log` is now a 2-tuple wrapper over it.
 - **(a)** A source silent `> AUDIO_TS_LAG_STALE_AFTER_S` (180 s ≈ 3× the 60 s emit period) behind the
-  log head is EXCLUDED from the max → the removed lagging source no longer drives the reading.
-- **(b)** `audio_ts_lag_age_s` = the in-log age of the freshest `#800` line behind the log head
-  (whole seconds, midnight-wrap + implausible-gap guarded → a `≥ 3600 s` wrap artifact reports `0`,
-  the conservative never-a-false-stale direction). Present (`"0"` when fresh) whenever ANY `#800`
-  line exists, `""` only when telemetry is fully absent. A large value → the dev1 `STALE` verdict.
+  log head is EXCLUDED from the max → the removed lagging source no longer drives the reading, even
+  when it went silent hours ago or across midnight.
+- **(b)** `audio_ts_lag_age_s` = the in-log age (whole seconds) of the freshest `#800` line behind the
+  log head — `_recency_gap_s` is in `[0,86400)` by construction, so there is **no upper clamp**: a >1h
+  stall is a REAL fault reported honestly, never snapped to `"0"` (removing that snap-to-fresh clamp
+  was the review W1 🔴 fix — it had caused fake-HEALTHY). `"0"` only when neither timestamp parses
+  (a pathological prefix-less log). Present (`"0"` when fresh) whenever ANY `#800` line exists, `""`
+  only when telemetry is fully absent. A large value → the dev1 `STALE` verdict.
 
 ## Classification + the NEVER-false-page invariant
 
