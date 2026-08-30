@@ -40,18 +40,23 @@ DEFAULT_THRESHOLD_MS = 5000
 DEFAULT_STALE_THRESHOLD_S = 180
 
 
-def extract_audio_lag(bundle_json_text):
-    """Parse a /bundle-state.json body -> `(lag_ms_int_or_None, src_or_None)`.
-
-    Returns `(None, None)` for: empty/None input, non-JSON, a non-object top level, a missing or
-    empty `audio_ts_lag_ms`, or a value that is not an integer string (UNKNOWN — never a fabricated
-    reading, matching the gather's omit-when-empty / never-a-fake-0 contract)."""
+def _loads_obj(bundle_json_text):
+    """A /bundle-state.json body -> its dict, or None (empty/None input, non-JSON, or a non-object
+    top level). #1231: the ONE json parse — `extract_audio_lag`/`extract_audio_age`/`analyze`/`_main`
+    all route through it so a single pass never parses the body more than once."""
     if not bundle_json_text:
-        return (None, None)
+        return None
     try:
         obj = json.loads(bundle_json_text)
     except (ValueError, TypeError):
-        return (None, None)
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _lag_from_obj(obj):
+    """`(lag_ms_int_or_None, src_or_None)` from an already-parsed bundle dict (or None). `(None,
+    None)` for a missing/empty `audio_ts_lag_ms` or a non-integer value (UNKNOWN — never a fabricated
+    reading, matching the gather's omit-when-empty / never-a-fake-0 contract)."""
     if not isinstance(obj, dict):
         return (None, None)
     raw = obj.get("audio_ts_lag_ms")
@@ -66,17 +71,10 @@ def extract_audio_lag(bundle_json_text):
     return (lag, src)
 
 
-def extract_audio_age(bundle_json_text):
-    """#1231 — parse a /bundle-state.json body -> the audio_ts_lag_age_s facet as an int (seconds),
-    or None. None for: empty/None input, non-JSON, a non-object top level, a missing/empty
-    audio_ts_lag_age_s, or a non-integer value (UNKNOWN — never a fabricated age, matching the
-    gather's omit-when-empty contract). A "0" is a real value (fresh telemetry present), NOT None."""
-    if not bundle_json_text:
-        return None
-    try:
-        obj = json.loads(bundle_json_text)
-    except (ValueError, TypeError):
-        return None
+def _age_from_obj(obj):
+    """#1231 — the `audio_ts_lag_age_s` facet as an int (seconds) from an already-parsed bundle dict
+    (or None). None for a missing/empty/non-integer value (UNKNOWN — never a fabricated age). A "0"
+    is a real value (fresh telemetry present), NOT None."""
     if not isinstance(obj, dict):
         return None
     raw = obj.get("audio_ts_lag_age_s")
@@ -86,6 +84,17 @@ def extract_audio_age(bundle_json_text):
         return int(str(raw).strip())
     except (ValueError, TypeError):
         return None
+
+
+def extract_audio_lag(bundle_json_text):
+    """Parse a /bundle-state.json body -> `(lag_ms_int_or_None, src_or_None)` (see `_lag_from_obj`)."""
+    return _lag_from_obj(_loads_obj(bundle_json_text))
+
+
+def extract_audio_age(bundle_json_text):
+    """#1231 — parse a /bundle-state.json body -> the audio_ts_lag_age_s facet as an int (seconds),
+    or None (see `_age_from_obj`)."""
+    return _age_from_obj(_loads_obj(bundle_json_text))
 
 
 def classify(lag_ms, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS,
@@ -127,8 +136,9 @@ def analyze(bundle_json_text, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS,
     shell reads it from the separate CLI `age_s=` line)."""
     if box_reachable != 1:
         return {"verdict": "SKIP", "lag_ms": None, "src": None}
-    lag, src = extract_audio_lag(bundle_json_text)
-    age_s = extract_audio_age(bundle_json_text)
+    obj = _loads_obj(bundle_json_text)   # #1231 — parse ONCE, share across lag + age
+    lag, src = _lag_from_obj(obj)
+    age_s = _age_from_obj(obj)
     verdict = classify(lag, box_reachable, threshold_ms, age_s, stale_threshold_s)
     return {"verdict": verdict, "lag_ms": lag, "src": src}
 
@@ -154,12 +164,16 @@ def _main(argv):
         # (the ndi_halving #1203 hotfix precedent: a strict read that raised was swallowed by the
         # caller's 2>/dev/null and read as SKIP forever). box_reachable=0 needs no stdin.
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        res = analyze(text, ns.box_reachable, ns.threshold_ms, ns.stale_threshold_s)
-        for k in ("verdict", "lag_ms", "src"):
-            print(f"{k}={_fmt(res[k])}")
-        # #1231 — the freshness age is an ADDITIONAL line (not in the analyze dict) so the existing
+        # #1231 — parse ONCE (single pass); derive verdict/lag/src + the age line from the same obj.
+        obj = _loads_obj(text) if ns.box_reachable == 1 else None
+        lag, src = _lag_from_obj(obj)
+        age_s = _age_from_obj(obj)
+        verdict = "SKIP" if ns.box_reachable != 1 else classify(
+            lag, ns.box_reachable, ns.threshold_ms, age_s, ns.stale_threshold_s)
+        for k, v in (("verdict", verdict), ("lag_ms", lag), ("src", src)):
+            print(f"{k}={_fmt(v)}")
+        # The freshness age is an ADDITIONAL line (not in the analyze dict) so the existing
         # verdict/lag_ms/src CLI contract is unchanged; the shell logs it and it corroborates STALE.
-        age_s = None if ns.box_reachable != 1 else extract_audio_age(text)
         print(f"age_s={_fmt(age_s)}")
         return 0
 

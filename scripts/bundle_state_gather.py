@@ -174,11 +174,6 @@ _AUDIO_TS_LAG_RE = re.compile(r"audio-telemetry #800 '([^']*)': ts_lag_ms=(-?\d+
 # head). No wall clock is injected, so this stays a pure fixture-testable parser and never
 # mis-compares a date-less OBS timestamp against a foreign clock (issue 1231 design Prístup 1).
 AUDIO_TS_LAG_STALE_AFTER_S = 180  # ~3x the 60 s emit period: a source silent this long is stale.
-# A gap larger than this is implausible for a ~5 MB tail and is almost always a midnight-wrap artifact
-# (seconds-of-day is date-less), so it is treated as NOT stale / age 0 — the ndi_halving conservative
-# direction (never a FALSE stale/huge-age), matching that module's own `<= 3600` recency guard. The
-# audio-tick-stall class we care about (the 2026-08-30 incident peaked at 27,9 min) is well under it.
-_AUDIO_TS_LAG_IMPLAUSIBLE_GAP_S = 3600.0
 
 _LOG_LINE_TS_RE = re.compile(r"^\s*(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?")
 
@@ -238,33 +233,41 @@ def audio_telemetry_from_log(text, stale_after_s=AUDIO_TS_LAG_STALE_AFTER_S):
     if LOG_BOUNDED_READ_SEPARATOR in t:
         t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
     last_per_source = {}   # name -> (ts_or_None, lag_int) : the NEWEST #800 line per source
-    log_newest_ts = None   # newest parseable timestamp of ANY line (the log's current write head)
+    # The OBS log is APPEND-ONLY, so FILE ORDER IS TIME ORDER: the log's current write head is the
+    # LAST parseable line, and the freshest telemetry is the LAST #800 line — NOT the max
+    # seconds-of-day (which, across midnight, anchors to a pre-midnight line and reads a genuinely
+    # stale source as fresh; issue 1231 review W1). Overwriting as we iterate takes the file-order
+    # last; `_recency_gap_s` then corrects a single midnight wrap, so the gap is the TRUE elapsed
+    # time (mod 24h) — a real multi-minute/hour stall is reported honestly, never snapped to fresh.
+    log_newest_ts = None   # ts of the LAST parseable line in file order (the log write head)
+    last_800_ts = None     # ts of the LAST #800 line in file order (the freshest telemetry line)
     for line in t.splitlines():
         ts = _log_line_seconds(line)
-        if ts is not None and (log_newest_ts is None or ts > log_newest_ts):
+        if ts is not None:
             log_newest_ts = ts
         m = _AUDIO_TS_LAG_RE.search(line)
         if m:
             last_per_source[m.group(1)] = (ts, int(m.group(2)))
+            if ts is not None:
+                last_800_ts = ts
     if not last_per_source:
         return ("", "", "")   # no #800 line at all -> absent (UNKNOWN downstream)
 
-    # (concern b) age of the freshest #800 line behind the log head.
-    src_ts = [ts for (ts, _lag) in last_per_source.values() if ts is not None]
-    newest_800_ts = max(src_ts) if src_ts else None
-    gap = _recency_gap_s(log_newest_ts, newest_800_ts)
-    if gap is None or gap >= _AUDIO_TS_LAG_IMPLAUSIBLE_GAP_S:
-        age_s = "0"           # unmeasurable / wrap artifact -> conservative fresh, never a false huge age
-    else:
-        age_s = str(round(gap))
+    # (concern b) age of the freshest #800 line behind the log head. `_recency_gap_s` is in [0,86400)
+    # by construction (a single +86400 wrap correction), so no upper clamp is needed or wanted — a
+    # >1h stall is a REAL fault to surface, never a "wrap artifact" to hide. "0" only when neither
+    # timestamp is parseable (a pathological prefix-less log), the conservative unmeasurable case.
+    gap = _recency_gap_s(log_newest_ts, last_800_ts)
+    age_s = "0" if gap is None else str(round(gap))
 
-    # (concern a) per-source staleness filter for the MAX.
+    # (concern a) per-source staleness filter for the MAX: drop any source whose newest #800 line is
+    # more than stale_after_s behind the log head.
     candidates = []
     for name, (ts, lag) in last_per_source.items():
         if lag < 0:
             continue           # -1 == no audio timeline yet, never a lag
         g = _recency_gap_s(log_newest_ts, ts)
-        if g is not None and stale_after_s < g < _AUDIO_TS_LAG_IMPLAUSIBLE_GAP_S:
+        if g is not None and g > stale_after_s:
             continue           # this source went silent while the log advanced -> stale, drop it
         candidates.append((lag, name))
     if not candidates:
