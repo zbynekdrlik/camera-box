@@ -212,8 +212,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                      # ndi_symlink_chain_ok/ndi_symlink_version/ndi_version_matches
 # shellcheck source=scripts/imag-host.sh
 . "$HERE/imag-host.sh"               # imag_host_resolve() -- the #832 single source of truth
-# shellcheck source=scripts/camera-set.sh
-. "$HERE/camera-set.sh"              # issue 1218: CAMERA_ACTIVE_SET for the active-set NDI idle policy
 
 # #816: sourcing setup-imag.sh (above) unconditionally runs its own top-level env-var defaults
 # (STATIC_IP/PREFIX/NDI_PEER_CANDIDATES/IMAG_OBS_BASE_VERSION/...) and its `fail()`/`step()`
@@ -1263,7 +1261,7 @@ fi
 # imag_scenes.py itself is, never re-hardcoded independently here.
 IMAG_SCENE_CAM_COUNT="${IMAG_SCENE_CAM_COUNT:-7}"
 rc=0
-SCENES_OUT="$(IMAG_SCENE_CAM_COUNT="$IMAG_SCENE_CAM_COUNT" python3 "$HERE/imag_scenes.py" --host "$IMAG_IP" --active-cams "$CAMERA_ACTIVE_SET" 2>&1)" || rc=$?
+SCENES_OUT="$(IMAG_SCENE_CAM_COUNT="$IMAG_SCENE_CAM_COUNT" python3 "$HERE/imag_scenes.py" --host "$IMAG_IP" 2>&1)" || rc=$?
 if imag_scenes_output_ok "$SCENES_OUT" "$IMAG_SCENE_CAM_COUNT"; then
   ok "scenes: Cam 1-${IMAG_SCENE_CAM_COUNT} + MV Cam 1-${IMAG_SCENE_CAM_COUNT} all present"
 else
@@ -1272,7 +1270,7 @@ fi
 
 # (q) OPERATOR parity: full canonical scene ORDER + NDI-source bindings (#791) -------------------
 rc=0
-PARITY_OUT="$(IMAG_SCENE_CAM_COUNT="$IMAG_SCENE_CAM_COUNT" python3 "$HERE/imag_scenes.py" --host "$IMAG_IP" --verify-parity --active-cams "$CAMERA_ACTIVE_SET" 2>&1)" || rc=$?
+PARITY_OUT="$(IMAG_SCENE_CAM_COUNT="$IMAG_SCENE_CAM_COUNT" python3 "$HERE/imag_scenes.py" --host "$IMAG_IP" --verify-parity 2>&1)" || rc=$?
 if imag_parity_output_ok "$PARITY_OUT"; then
   ok "operator parity: canonical scene order + NDI-source bindings all match (#791)"
 else
