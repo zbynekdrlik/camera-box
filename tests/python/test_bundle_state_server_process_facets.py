@@ -193,7 +193,13 @@ def test_resolve_shortcut_does_not_cache_an_empty_result(tmp_path, monkeypatch):
     assert len(calls) == 2, "an empty resolve must NOT be cached -- every request must keep retrying"
 
 
-def test_resolve_shortcut_missing_file_is_empty_and_uncached(tmp_path, monkeypatch):
+def test_resolve_shortcut_unstattable_path_is_never_cached(tmp_path, monkeypatch):
+    # #1222c review: renamed from the misleading "..._is_empty_and_uncached" -- resolve_shortcut()
+    # has no os.path.isfile early-return (unlike ndi_runtime_version()), so a missing .lnk still
+    # shells out to PowerShell every time; this test proves the "never cached when unstattable"
+    # half specifically (a VALID-looking mocked result on both calls, asserting BOTH calls
+    # happened -- i.e. the stat_key=None path correctly bypasses both the cache-read and the
+    # cache-write), not that resolve_shortcut() itself returns an empty result for a missing file.
     _reset_shortcut_cache()
     missing = tmp_path / "nope.lnk"
     calls = []

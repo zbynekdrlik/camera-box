@@ -48,7 +48,6 @@ import glob
 import io
 import json
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -352,17 +351,16 @@ def port4455_owner():
     return path, version
 
 
-_OBS_PROCESS_NAME_RE = re.compile(r"(?i)^obs\d*$")
-
-
 def _parse_tasklist_obs_process_names(text):
     """#1222c — parse `tasklist /FO CSV /NH` output *text* and return a newline-joined list of
-    every OBS-shaped process NAME (matches `obs<digits>` case-insensitively, `.exe` suffix
-    stripped) — the EXACT same shape `Get-Process -Name 'obs*' | Select-Object -ExpandProperty
-    Name` used to produce, so `bsg.obs_process_count_from_listing` (UNCHANGED by this ticket)
-    keeps working on it verbatim. Each CSV row is `"Image Name","PID","Session Name","Session#",
-    "Mem Usage"` (tasklist's own quoted-CSV format); `/NH` already suppresses the header row, but
-    this parser tolerates one anyway (it simply never matches the obs<digits> pattern).
+    every OBS-shaped process NAME (matches `obs<digits>` case-insensitively via the shared
+    `bsg.OBS_PROCESS_NAME_RE` — #1222c review: this used to carry its own duplicate copy of that
+    regex, a DRY violation the shared constant now closes; `.exe` suffix stripped) — the EXACT
+    same shape `Get-Process -Name 'obs*' | Select-Object -ExpandProperty Name` used to produce, so
+    `bsg.obs_process_count_from_listing` (UNCHANGED by this ticket) keeps working on it verbatim.
+    Each CSV row is `"Image Name","PID","Session Name","Session#","Mem Usage"` (tasklist's own
+    quoted-CSV format); `/NH` already suppresses the header row, but this parser tolerates one
+    anyway (it simply never matches the obs<digits> pattern).
 
     "" if *text* is empty/malformed (never a guessed/zero count downstream — the same
     never-a-false-clean discipline every other facet in this file follows)."""
@@ -375,7 +373,7 @@ def _parse_tasklist_obs_process_names(text):
                 continue
             image_name = row[0]
             base = image_name[:-4] if image_name.lower().endswith(".exe") else image_name
-            if _OBS_PROCESS_NAME_RE.match(base):
+            if bsg.OBS_PROCESS_NAME_RE.match(base):
                 names.append(base)
     except csv.Error as e:
         log(f"WARNING: could not parse tasklist CSV output: {e}")

@@ -224,10 +224,19 @@ def obs_installs_under(scan_roots):
     return ",".join(sorted(found, key=str.lower))
 
 
+# #826 / #1222c — the ONE canonical "is this an OBS-shaped process name" pattern (obs64, obs32,
+# bare obs — case-insensitive), shared between obs_process_count_from_listing below and
+# bundle-state-server.py's _parse_tasklist_obs_process_names (a #1222c review finding: the two
+# used to carry independent copies of the identical regex, a DRY violation that could silently
+# drift apart on a future rename).
+OBS_PROCESS_NAME_RE = re.compile(r"(?i)^obs\d*$")
+
+
 def obs_process_count_from_listing(text):
     """#826 — count of currently-running OBS-class processes, from a plain newline-separated list
     of process NAMES (no `.exe` suffix — the shape `Get-Process | Select-Object -ExpandProperty
-    Name` produces on Windows). Matches `obs<digits>` case-insensitively (obs64, obs32, bare obs).
+    Name` produces on Windows). Matches `obs<digits>` case-insensitively (obs64, obs32, bare obs)
+    via the shared OBS_PROCESS_NAME_RE above.
 
     "" (never "0") when *text* itself is empty/unread — an unreachable box must read UNKNOWN, not
     a false "zero processes confirmed running" (the same never-a-false-clean discipline every
@@ -236,7 +245,7 @@ def obs_process_count_from_listing(text):
         return ""
     count = 0
     for line in text.splitlines():
-        if re.match(r"(?i)^obs\d*$", line.strip()):
+        if OBS_PROCESS_NAME_RE.match(line.strip()):
             count += 1
     return str(count)
 
