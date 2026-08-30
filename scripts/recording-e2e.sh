@@ -300,8 +300,10 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # not at decode time.
 # shellcheck source=scripts/lib/live-freeze-watch.sh
 . "$HERE/lib/live-freeze-watch.sh"
-# #882: restart-and-settle for the [1/8] imag render-health sweep -- window 1 (right after a
-# fresh OBS start) can measure a real, transient warm-up dip that is not a regression; the pure
+# #882/#1232: restart-and-settle for the [1/8] imag render-health sweep -- the leading windows
+# (right after a fresh OBS start) can measure a real, transient warm-up dip that is not a
+# regression; a settle-adaptive PHASE (bounded by a wall budget) absorbs however many leading
+# windows it actually takes, then the same strict windows as before must all pass. The pure
 # decision lives here so classify() itself (src/render_budget.rs) stays untouched/strict.
 # shellcheck source=scripts/lib/render-health-warmup.sh
 . "$HERE/lib/render-health-warmup.sh"
@@ -2281,34 +2283,73 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # #1143: make VAAPI-tex the LIVE record encoder BEFORE the render-health windows (software x264
   # overloads the render thread → the #1130 observer effect). The make-it-live OBS restart fires
   # only when the disk config drifted from the target (a no-op on the steady state); its settle is
-  # absorbed by window 1's #882 warm-up. Best-effort — a nonzero return WARNs, never aborts.
+  # absorbed by the #882/#1232 settle-adaptive warm-up phase below. Best-effort — a nonzero return
+  # WARNs, never aborts.
   if ! python3 "$HERE/imag_scenes.py" --ensure-rec-encoder --host "$IMAG_IP"; then
     echo "    WARNING: #1143 imag ensure-rec-encoder nonzero (best-effort) — continuing; the render-health preflight below still catches a down OBS, record_render_lagged_pct a stale encoder" >&2
   fi
   echo "[1/8] imag render-health preflight — PROGRAM must hold its 60fps budget with MV open, sustained (#758)"
-  RENDER_HEALTH_WINDOWS="${RENDER_HEALTH_WINDOWS:-5}"
+  # #1232: RENDER_HEALTH_WINDOWS is now the number of STRICT windows required to FOLLOW the
+  # settle-adaptive warm-up phase (was: the fixed TOTAL window count, of which window 1 alone was
+  # the non-counting warm-up) -- so the default drops from 5 (1 warm-up + 4 strict) to 4 (the same
+  # 4 strict windows, now following a phase that can absorb more than one leading failure).
+  RENDER_HEALTH_WINDOWS="${RENDER_HEALTH_WINDOWS:-4}"
   RENDER_HEALTH_WINDOW_S="${RENDER_HEALTH_WINDOW_S:-6}"
-  for _rhw in $(seq 1 "$RENDER_HEALTH_WINDOWS"); do
-    # #882: capture the REAL python exit code via PIPESTATUS (not the pipeline's own `sed`-decided
-    # status) inside an `if`, which is exempt from `set -e` regardless of AND/OR position -- so a
-    # failing window 1 never aborts the script before render_health_window_outcome gets to decide.
+  RENDER_HEALTH_SETTLE_BUDGET_S="${RENDER_HEALTH_SETTLE_BUDGET_S:-60}"
+  _rhw=0
+  _rhw_first_pass_seen=0
+  _rhw_strict_passed=0
+  _rhw_start_s="$(date +%s)"
+  while :; do
+    _rhw=$((_rhw + 1))
+    # #882/#1232: capture the REAL python exit code via PIPESTATUS (not the pipeline's own
+    # `sed`-decided status) inside an `if`, which is exempt from `set -e` regardless of AND/OR
+    # position -- so a failing warm-up window never aborts the script before
+    # render_health_phase_outcome gets to decide.
     if OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
         python3 "$HERE/render-budget-gate.py" \
         --box "imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}" \
         --window-s "$RENDER_HEALTH_WINDOW_S" --verdict-bin "$PROBE_BIN_DIR/render-budget-gate" \
-        2>&1 | sed "s/^/    [imag render-health w${_rhw}\/${RENDER_HEALTH_WINDOWS}] /"; then
+        2>&1 | sed "s/^/    [imag render-health w${_rhw}] /"; then
       _rhw_rc=0
     else
       _rhw_rc="${PIPESTATUS[0]}"
     fi
-    _rhw_outcome="$(render_health_window_outcome "$_rhw" "$_rhw_rc" | sed -n 's/^outcome=//p')"
+    _rhw_elapsed_s=$(( $(date +%s) - _rhw_start_s ))
+    # #1232 review finding (🟡): capture the PRE-call phase state so the FAIL branch below can
+    # tell apart its two distinct causes (a strict-phase regression vs a warm-up that never
+    # settled) -- render_health_phase_outcome overwrites _rhw_first_pass_seen on the next line.
+    _rhw_pre_seen="$_rhw_first_pass_seen"
+    _rhw_phase="$(render_health_phase_outcome "$_rhw_rc" "$_rhw_first_pass_seen" "$_rhw_elapsed_s" "$RENDER_HEALTH_SETTLE_BUDGET_S")"
+    _rhw_outcome="$(printf '%s\n' "$_rhw_phase" | sed -n 's/^outcome=//p')"
+    _rhw_first_pass_seen="$(printf '%s\n' "$_rhw_phase" | sed -n 's/^first_pass_seen=//p')"
+    _rhw_counts_as_strict="$(printf '%s\n' "$_rhw_phase" | sed -n 's/^counts_as_strict=//p')"
     case "$_rhw_outcome" in
-      PASS) : ;;
+      PASS)
+        if [ "$_rhw_counts_as_strict" = "1" ]; then
+          _rhw_strict_passed=$((_rhw_strict_passed + 1))
+        fi
+        if [ "$_rhw_strict_passed" -ge "$RENDER_HEALTH_WINDOWS" ]; then
+          echo "[preflight] imag render-health settled after ${_rhw} total window(s) (${_rhw_strict_passed}/${RENDER_HEALTH_WINDOWS} strict passes, #882/#1232)."
+          break
+        fi
+        ;;
       WARMUP)
-        echo "WARN: [preflight] imag render-health window ${_rhw}/${RENDER_HEALTH_WINDOWS} FAILED but is the non-counting WARM-UP window (post-restart NDI-lock/shader settle, #882) — tolerated, continuing to the remaining (strict) windows." >&2
+        echo "WARN: [preflight] imag render-health window ${_rhw} FAILED but is still inside the settle-adaptive WARM-UP phase (post-restart NDI-lock/shader settle, elapsed ${_rhw_elapsed_s}s of ${RENDER_HEALTH_SETTLE_BUDGET_S}s budget — #882/#1232) — tolerated, continuing until the first PASS." >&2
         ;;
       *)
-        echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (window ${_rhw}/${RENDER_HEALTH_WINDOWS}, NOT the warm-up window — #882) — skontroluj divisor/projektory/zataz." >&2
+        # #1232 review finding (🟡): the two FAIL causes get a DIFFERENT diagnostic context --
+        # _rhw_pre_seen=1 means a strict window regressed after warm-up already ended cleanly;
+        # _rhw_pre_seen=0 means the box never achieved a single PASS before the settle budget ran
+        # out. The operator-facing FAIL wording below stays a SINGLE occurrence in this file
+        # (tests/harness_render_health_divisor_758.rs anchors it verbatim) -- only the
+        # parenthetical context differs at runtime, never the fixed prefix/suffix text.
+        if [ "$_rhw_pre_seen" = "1" ]; then
+          _rhw_fail_context="window ${_rhw}, strict-phase regression after ${_rhw_strict_passed} clean strict window(s)"
+        else
+          _rhw_fail_context="window ${_rhw}, box NEVER settled within the ${RENDER_HEALTH_SETTLE_BUDGET_S}s warm-up budget (elapsed ${_rhw_elapsed_s}s)"
+        fi
+        echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (${_rhw_fail_context} — #882/#1232) — skontroluj divisor/projektory/zataz." >&2
         exit 1
         ;;
     esac
