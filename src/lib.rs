@@ -487,6 +487,13 @@ pub mod partial_schema_gate;
 // switch_latency SPREAD_THRESHOLD_MS bound (24 ms since issue 1120; no new constant).
 pub mod delivery_spread_gate;
 
+// issue 1247 — per-camera "own digital burn absent" REPORT-ONLY seam: under the ALL-CAMBOX sweep a
+// SINGLE scheduled cam whose OWN digital burn is entirely absent (its leg served by production, no
+// burn — the issue-1246 deadman symptom) slipped past the #133 all-absent WARN. Pure crate-root
+// decision (Tier-0, serde-free), consumed thinly by recording-verdict; `gates_overall_pass()` is
+// `false` (redundant with the LIVE [7b/8] run-integrity check), one-line-flippable to blocking.
+pub mod own_burn_absent;
+
 // #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become
 // REPORT-ONLY (still computed, still printed, no longer fail the window/run). No probe deps, so
 // it unit-tests Tier-0; `probe::recording_segments::window_segment` calls this and wires the
