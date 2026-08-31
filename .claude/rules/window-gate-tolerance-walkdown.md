@@ -177,5 +177,20 @@ PASS-asserting fixture carrying a count that would flip at the new value.
 ## 5. The walk-down stays on ITS ticket
 If the step does not reach 0, the ticket stays OPEN and carries the remaining steps; the PR must NOT
 close it. Gate the next step on the concrete evidence the running gate produces (N>=2 consecutive
-green post-fix runs at the lower value). `window_gate.rs` is crate-root (default features, locally
-testable with `# airuleset:build-ok`); `recording_segments.rs` is probe-gated (CI-only compile).
+green post-fix runs at the lower value). `window_gate.rs` is crate-root (default features) —
+**note (#557, 2026-08-18): the `# airuleset:build-ok` local-compile bypass this section used to cite
+is now DISABLED repo-wide** (see the project CLAUDE.md's Local Build Policy) — verify a
+`window_gate.rs` change locally via `cargo fmt --all --check` + hand-derivation only, exactly like
+`recording_segments.rs` (probe-gated, CI-only compile either way).
+
+## Third walk step (issue 1243, 2026-08-31): `WINDOW_COPIES_GAPS_TOLERANCE` 3 -> 5
+Same doctrine, a DIFFERENT seam than the two `UNIFORM_FRACTION_MIN` steps documented above (that
+constant lives in `src/presentation_cadence.rs`; this one lives in `src/window_gate.rs` — see this
+file's own header for the full ownership split). Three complete post-fix 7-cam verdicts
+(1629895310, 1230380558, 1142514714) gave per-run worst `max(copies,gaps)` of `{1, 1, 4}` — run
+1142514714's seg3 CAM4 measured 4 separate single-frame duplicates over ~14s, the run's sole
+blocking-gate failure. Stepped to 5 (one event of margin above the observed ceiling, not the bare
+ceiling itself — the n=3 variance already showed the same "flaky at its own ceiling" pattern every
+earlier step on this const hit). Full evidence: `src/window_gate.rs`'s own "2026-08-31
+RE-CALIBRATION" module-doc section + the design-addendum comment on issue 1243. Walk-back trail
+stays on issue 1242, unchanged.
