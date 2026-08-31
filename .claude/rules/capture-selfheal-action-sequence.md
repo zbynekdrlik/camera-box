@@ -8,8 +8,34 @@ paths:
 
 # In-process USB self-heal action sequence — ONE helper, wording is watchdog-anchored (#1149)
 
+## #1248 futility back-off — `HoldOff` (the loop can no longer run forever)
+
+`decide_selfheal` delegates to `decide_selfheal_with_hold(..., hold_off_heals)` (production passes
+`DEFAULT_HOLD_OFF_HEALS = 5`). Once the recurrence-window heal count reaches the hold threshold
+(floored STRICTLY above `DEFAULT_CRITICAL_ESCALATION_HEALS`, so the "investigate" CRITICAL always
+fires and gets ≥1 reset first), the decision is the new `SelfHealDecision::HoldOff { futile_resets }`
+instead of yet another `Heal`: **no USB reset, no process exit** — `attempt_self_heal` logs the loud
+`CRITICAL #1248 self-heal HOLD-OFF` marker (`hold_off_message`, its tag from `SelfHealMessages`) and
+returns `None`. On a hold the returned state ADVANCES `last_heal_epoch_s` (so the existing
+throttle/floor re-engages and the alert is re-logged at most once per period, never every window) and
+CAPS `recurrence_heal_count` at the threshold; it re-arms to `Heal` only via the existing
+elapsed-past-recurrence-window branch — i.e. after a genuine healthy gap. All four triggers inherit
+it (it lives in the shared decision). **The streak is SHARED across all four triggers (one physical
+device, one `STATE_PATH`): a futility streak built by ONE trigger returns `HoldOff` to the OTHERS
+too, so once (e.g.) the #1193 over-rate trigger has held off, the #1128 grabber-STUCK trigger's USB
+re-auth cure is ALSO suspended for that device until a > recurrence-window healthy gap.** This is
+deliberate (the resets all hit the same device, so a device that will not stay fixed should stop
+being reset regardless of which detector noticed) and low-exposure today (STUCK ships env-gated OFF;
+over-rate is a cam2-only canary) — but a future "STUCK not healing" investigation should know the
+hold may have been raised by a sibling trigger, not by STUCK's own count. WHY (issue 1248): cam2's ShadowCast 2 over-rate re-drifts
+~10–30 min after every #1193 reset so the reset never holds and fired every ~30 min forever (each =
+a ~25 s NDI outage) — worse than the over-rate, which the genlock decimation gate already absorbs.
+The `#1248 self-heal HOLD-OFF` marker shares NO substring with the byte-anchored reset greps
+(`#663 self-heal: USB reset attempt`), so a hold is never mis-counted as a reset; a dedicated dev1
+relay watchdog for the marker is a FOLLOW-UP (same deferral as the #1193/#1200 watchdogs).
+
 ## Single source of truth
-The in-process USB-reset action sequence — `load_state → decide_selfheal → match {Healthy/Throttled/Heal} → save_state → perform_usb_reset → pending exit code` — is ONE crate-root helper:
+The in-process USB-reset action sequence — `load_state → decide_selfheal → match {Healthy/Throttled/Heal/HoldOff} → save_state → perform_usb_reset → pending exit code` — is ONE crate-root helper:
 
 ```
 capture_rate_selfheal::attempt_self_heal(device_path, model, now_epoch_s, state_path, msgs, reset) -> Option<i32>
