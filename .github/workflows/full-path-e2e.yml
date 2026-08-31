@@ -304,6 +304,16 @@ jobs:
           # root-cause stay open on the ticket.
           PREFLIGHT_MV_REVERIFY_ATTEMPTS: "5"
           PREFLIGHT_MV_REVERIFY_SETTLE_S: "8"
+          # issue 1245: scripts/lib/frame-probe-parity-align.sh's [0/8] pre-gate auto-align
+          # resolves the candidate probe-tools artifact BY THIS RUN'S CANDIDATE COMMIT (never
+          # "newest ci.yml run on branch dev", which repeatedly returned ANCIENT runs inside this
+          # self-hosted runner job). On a `pull_request` event the auto-set GITHUB_SHA is the
+          # SYNTHETIC MERGE COMMIT, not the head -- ci.yml only ever runs+publishes for the REAL
+          # head commit, so a raw GITHUB_SHA here would be a PERMANENT false-refuse. Explicitly
+          # wire the true head sha, the SAME #703 pattern the "Fetch the matching Windows
+          # recording-verdict.exe" step above already uses. push/workflow_dispatch runs never see
+          # this event, so github.sha is already correct there and this only takes effect on PRs.
+          FRAME_PROBE_ALIGN_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         # #832: this workflow never hardcodes an imag-nb address itself — recording-e2e.sh
         # resolves the ACTIVE imag host from scripts/imag-host.sh (the ONE declared source of
         # truth, reversible between the incumbent 10.77.9.182 and the replacement 10.77.9.187).
