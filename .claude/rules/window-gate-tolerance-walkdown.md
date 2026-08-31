@@ -68,6 +68,14 @@ worst derived 0.9397 was the sole blocking red). The paired RESTORE ticket #1242
 strict `copies==0` by DISARMING seam 2 (`copies_gaps_tolerance_gates_overall_pass() -> false`), never
 by "changing the fold" — the fold already reads relaxed via the seam.
 
+**Second walk step (still #1243, 2026-08-31): 0.93 → 0.90.** A SECOND complete 7-cam verdict (run
+1230380558) landed with worst derived_uniform_fraction 0.9221 — below 0.93, RED-ing an otherwise
+steady run. Same mechanism, same data-first walk-down doctrine: two-run combined observed steady-rig
+range is 0.9221–0.9953, so `UNIFORM_FRACTION_MIN` moved to 0.90 (margin under both runs' minimums,
+still far above the sick-rig band 0.67–0.78). A future worker reading THIS rule after a third data
+point lands should re-derive the tightest supportable value the same way, not assume 0.90 is final —
+#1242 is still the ticket that root-causes the residual churn and eventually restores 0.95.
+
 **Reusable shape for a FUTURE seam like this one — "precedence supersession", distinct from every
 flag-flip pattern in `gate-allowance-restore-red-green.md`:** re-arming `copies_gaps_tolerance_
 gates_overall_pass()` needed ZERO change to seam 4's own flag (`segment_singleton_allowance_gates_
