@@ -732,8 +732,8 @@ Checks:
   (af) v4l2-ctl (v4l-utils) installed and runnable (`v4l2-ctl --version`) -- already listed in
       setup-device.sh STEP 16's apt-get line, but that line silently swallows a per-box apt
       failure; cam3/cam4 were found live missing it despite the script listing it (issue 1213)
-  (ag) ethtool installed (`command -v ethtool`) -- also in setup-device.sh STEP 16's apt-get line,
-      and its OWN EEE/flow-control tuning calls are ALSO `|| true`-guarded, so a missing ethtool
+  (ag) ethtool installed (command -v ethtool) -- also in setup-device.sh STEP 16's apt-get line,
+      and its OWN EEE/flow-control tuning calls are ALSO "|| true"-guarded, so a missing ethtool
       silently no-ops NIC tuning fleet-wide; cam3 ran for years without it (issue 1240)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
