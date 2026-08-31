@@ -123,6 +123,34 @@ cambox_align_candidate_version() {
     | sed -E 's/^version = "([^"]+)"$/\1/' || true
 }
 
+# cambox_align_candidate_sha -> THIS run's candidate commit SHA -- used to scope the ci.yml
+# artifact resolution to the CANDIDATE'S OWN commit (issue 1244). WHY: "newest successful ci.yml
+# run on branch dev" (the resolution this replaces) was PROVEN non-deterministic *inside the E2E
+# job's own runner environment* (self-hosted runner, GITHUB_TOKEN) -- live runs 33400360170 and
+# 33425283884 both resolved a PREHISTORIC build (dev.428/dev.439) while the real newest build
+# (dev.591/dev.594) was already published; the identical query from an interactive shell (a
+# different token) resolved correctly, so the anomaly is runner-environment/token-scoped, not a
+# logic bug in the query shape. Resolving BY COMMIT sidesteps it entirely: a commit has at most
+# ONE successful ci.yml run, or none (not yet published), so "which run is newest" is no longer a
+# question that can go wrong.
+#
+# Override for tests via CAMBOX_ALIGN_CANDIDATE_SHA. Falls back to $GITHUB_SHA (set by every
+# GitHub Actions job -- recording-e2e.sh runs as a plain workflow `run:` step and inherits it with
+# no explicit wiring), then to `git rev-parse HEAD` in this lib's own checkout (the harness always
+# runs from a real clone). "" if unresolvable (the caller then refuses cleanly; never a silent
+# wrong sha).
+cambox_align_candidate_sha() {
+  if [ -n "${CAMBOX_ALIGN_CANDIDATE_SHA:-}" ]; then
+    printf '%s' "$CAMBOX_ALIGN_CANDIDATE_SHA"
+    return 0
+  fi
+  if [ -n "${GITHUB_SHA:-}" ]; then
+    printf '%s' "$GITHUB_SHA"
+    return 0
+  fi
+  git -C "$_CBPA_HERE" rev-parse HEAD 2>/dev/null || printf ''
+}
+
 # --- impure read + deploy (not unit-tested for their SSH/deploy side; the orchestrator IS exercised
 # end-to-end via the CAMERA_BOX_VERSION_GATE_VERSION_<NAME> read seam + CAMBOX_ALIGN_DEPLOY_CMD) ---
 
@@ -160,21 +188,28 @@ cambox_align_binary_version() {
 # stop->rw->scp->byte-verify->start->version-verify->genlock-emit cycle; it REFUSES on any mismatch).
 # Returns deploy-fleet's exit (0 = deployed + verified).
 #
-# BINARY SOURCE (issue 1202 review fix): the CLEAN `camera-box-linux-amd64` CI artifact for the
-# candidate, downloaded from the newest successful ci.yml run on the candidate branch. This binary
-# EXISTS at [0/8] (ci.yml built it on the dev push that produced the candidate), whereas the
-# harness's own $PROBE_BIN_DIR/camera-box is not built until [1/8] -- AFTER this align -- so sourcing
-# it here would deploy a STALE (previous-candidate) build or none (the original review 🔴). Deploying
-# the CLEAN artifact is also the architecturally-correct production binary (not the probe-featured
-# one). A hard version GUARD: if the newest published build != the candidate (the candidate's own
-# ci.yml is not done yet), NOT deployed -- never ship a stale build to "align" (the gate then refuses;
-# it self-heals once ci.yml publishes the candidate). Best-effort: any resolve/download/gh failure ->
-# return non-zero, the gate below decides.
+# BINARY SOURCE (issue 1202 review fix, resolution made commit-scoped by issue 1244): the CLEAN
+# `camera-box-linux-amd64` CI artifact for the candidate, downloaded from the ONE successful ci.yml
+# run for the candidate's OWN commit sha (cambox_align_candidate_sha) -- never "newest on branch",
+# which resolved a PREHISTORIC run inside the E2E job's own runner environment (see
+# cambox_align_candidate_sha's header for the full incident). This binary EXISTS at [0/8] (ci.yml
+# built it on the dev push that produced the candidate), whereas the harness's own
+# $PROBE_BIN_DIR/camera-box is not built until [1/8] -- AFTER this align -- so sourcing it here
+# would deploy a STALE (previous-candidate) build or none (the original review 🔴). Deploying the
+# CLEAN artifact is also the architecturally-correct production binary (not the probe-featured
+# one). A hard version GUARD stays: if the resolved build != the candidate, NOT deployed -- never
+# ship a stale build to "align" (the gate then refuses; it self-heals once ci.yml publishes the
+# candidate). Best-effort: any resolve/download/gh failure -> return non-zero, the gate below
+# decides. NO fallback to a branch-based query when --commit finds nothing (issue 1244 is
+# explicit: that would silently reopen the exact non-determinism this fix removes) -- "no run for
+# this commit" means "candidate's own ci.yml not published yet", the existing refuse/self-heal
+# path, unchanged.
 #
 # Test seams: CAMBOX_ALIGN_DEPLOY_CMD (full override; run instead of the real deploy, with CAMERA_SET
 # / CAMBOX_ALIGN_CANDIDATE exported); CAMBOX_ALIGN_CANDIDATE_BIN (a pre-fetched binary path, skips the
 # gh download); CAMBOX_ALIGN_DEPLOY_FLEET (deploy-fleet.sh path; default the real sibling script);
-# CAMBOX_ALIGN_REPO / CAMBOX_ALIGN_CI_BRANCH (artifact source, default zbynekdrlik/camera-box / dev).
+# CAMBOX_ALIGN_REPO (artifact source repo, default zbynekdrlik/camera-box); CAMBOX_ALIGN_CANDIDATE_SHA
+# (candidate commit sha override -- see cambox_align_candidate_sha).
 cambox_align_deploy() {
   local candidate="$1" names="$2"
   if [ -n "${CAMBOX_ALIGN_DEPLOY_CMD:-}" ]; then
@@ -189,11 +224,16 @@ cambox_align_deploy() {
       return 1
     }
     local repo="${CAMBOX_ALIGN_REPO:-${REPO:-zbynekdrlik/camera-box}}"
-    local branch="${CAMBOX_ALIGN_CI_BRANCH:-dev}"
+    local sha
+    sha="$(cambox_align_candidate_sha)"
+    if [ -z "$sha" ]; then
+      echo "[0/8] camera-box parity auto-align (#1244): candidate commit sha unresolvable (no CAMBOX_ALIGN_CANDIDATE_SHA/GITHUB_SHA, and 'git rev-parse HEAD' failed) -- cannot source the candidate camera-box-linux-amd64 by commit; the gate below decides." >&2
+      return 1
+    fi
     local run_id
-    run_id="$(gh run list --repo "$repo" --branch "$branch" --workflow ci.yml --status success --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+    run_id="$(gh run list --repo "$repo" --commit "$sha" --workflow ci.yml --status success --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
     if [ -z "$run_id" ]; then
-      echo "[0/8] camera-box parity auto-align (#1202): no successful ci.yml run on '$branch' to source the candidate camera-box-linux-amd64; the gate below decides." >&2
+      echo "[0/8] camera-box parity auto-align (#1244): the candidate's own ci.yml build for commit ${sha} is not published yet (no successful ci.yml run for that commit) -- the gate below decides." >&2
       return 1
     fi
     dist="$(mktemp -d)"
@@ -213,7 +253,7 @@ cambox_align_deploy() {
   local ver
   ver="$(cambox_align_binary_version "$bin")"
   if [ "$ver" != "$candidate" ]; then
-    echo "[0/8] camera-box parity auto-align (#1202): newest ci.yml build is ${ver:-<unreadable>}, not the candidate ${candidate} -- NOT deploying a stale build (the candidate's own ci.yml build is not published yet; the gate refuses and self-heals once it completes)." >&2
+    echo "[0/8] camera-box parity auto-align (#1244): the commit-resolved ci.yml build reports version ${ver:-<unreadable>}, not the candidate ${candidate} -- NOT deploying a stale/mismatched build (belt-and-braces guard; the gate refuses and self-heals once the candidate's own ci.yml build is confirmed)." >&2
     [ -n "$dist" ] && rm -rf "$dist"
     return 1
   fi

@@ -51,6 +51,32 @@ the gate refuses and self-heals once ci.yml publishes the candidate. The same `[
 ordering fact is why the sibling frame-probe align (below) ALSO fetches the CLEAN CI artifact via
 `gh run download` at `[0/8]`, never `$PROBE_BIN_DIR` (which is built at `[1/8]`).
 
+## Artifact resolution is COMMIT-SCOPED, never "newest on branch" (issue 1244)
+
+`cambox_align_deploy()`'s ci.yml-artifact resolution used to be "newest successful ci.yml run on
+branch dev" (`gh run list --branch dev --workflow ci.yml --status success --limit 1`) — that query
+was PROVEN non-deterministic **inside the E2E job's own runner environment** (self-hosted runner,
+GITHUB_TOKEN): live runs 33400360170 (14:13) and 33425283884 att.2 (18:44) both resolved a
+PREHISTORIC build (dev.428/dev.439) while the real newest build (dev.591/dev.594) was already
+published — an identical manual query from an interactive shell (a different token) resolved
+correctly, so the anomaly is runner-environment/token-scoped, not a logic bug in the query shape.
+Each false-refuse burns a whole E2E cycle (2 wasted cycles on 2026-08-31).
+
+**Fix: resolve by the candidate's OWN commit sha** (`gh run list --commit "$sha" ...`, via the new
+`cambox_align_candidate_sha` — override `CAMBOX_ALIGN_CANDIDATE_SHA`, in-harness default `$GITHUB_SHA`
+[set by every GitHub Actions job with no explicit wiring needed], final fallback `git rev-parse HEAD`
+in the lib's own checkout). A commit has at most ONE successful ci.yml run, or none — "which run is
+newest" stops being a question that can go wrong. **NO fallback to the old branch-based query when
+`--commit` finds nothing** — that would silently reopen the exact non-determinism the fix removes;
+"no run for this commit" stays the existing refuse/self-heal path (candidate's own ci.yml not
+published yet). The now-unused `CAMBOX_ALIGN_CI_BRANCH` seam was removed (confirmed unconsumed
+elsewhere via `grep -rn CAMBOX_ALIGN_CI_BRANCH tests/ scripts/`).
+
+**The sibling `scripts/lib/frame-probe-parity-align.sh` (issue 1138, below) still has the OLD
+branch-based `gh run list --branch "$branch"` resolution — same bug shape, NOT fixed by #1244**
+(out of that issue's named scope: it names only `camera-box-parity-align.sh`). Filed as its own
+follow-up issue; do not assume the frame-probe align is commit-scoped until that lands.
+
 ## The frame-probe (cam2 painter) SIBLING align (issue 1138)
 
 `scripts/lib/frame-probe-parity-align.sh` is the frame-probe twin of this camera-box align, same
