@@ -92,6 +92,173 @@ fn frame_probe_align_action_grades_deployed_vs_candidate_sha() {
 }
 
 // ---------------------------------------------------------------------------
+// (1b) frame_probe_align_candidate_sha — issue 1245: the artifact-resolution commit-scoping fix
+// (the frame-probe sibling of issue 1244's camera-box-parity-align.sh fix). Resolution order:
+// explicit FRAME_PROBE_ALIGN_CANDIDATE_SHA seam -> GITHUB_SHA -> `git rev-parse HEAD`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frame_probe_align_candidate_sha_resolution_order() {
+    // 1. the explicit seam wins over everything else (even when GITHUB_SHA is ALSO set — the
+    //    workflow-wired #703-pattern seam is the deliberate override for the pull_request
+    //    synthetic-merge-commit trap below, so it must never be shadowed by GITHUB_SHA).
+    let out = run_lib(
+        r#"export FRAME_PROBE_ALIGN_CANDIDATE_SHA="deadbeefcafe0001"
+export GITHUB_SHA="should-never-be-used"
+frame_probe_align_candidate_sha; echo"#,
+    );
+    assert_eq!(
+        out.trim(),
+        "deadbeefcafe0001",
+        "the explicit FRAME_PROBE_ALIGN_CANDIDATE_SHA seam must win over GITHUB_SHA; got {out:?}"
+    );
+
+    // 2. GITHUB_SHA fallback when the explicit seam is unset (correct on push/workflow_dispatch —
+    //    only pull_request needs the explicit override, see the CRITICAL note on the function).
+    let out = run_lib(
+        r#"unset FRAME_PROBE_ALIGN_CANDIDATE_SHA || true
+export GITHUB_SHA="feedfacecafe0002"
+frame_probe_align_candidate_sha; echo"#,
+    );
+    assert_eq!(
+        out.trim(),
+        "feedfacecafe0002",
+        "GITHUB_SHA must be used when the explicit seam is unset; got {out:?}"
+    );
+
+    // 3. with NEITHER set (a local/non-CI run), the fallback must be a REAL `git rev-parse HEAD` —
+    //    not empty, not a literal placeholder — proving it actually shells out to git rather than
+    //    silently returning "". Anchored via $_FPPA_HERE so it is independent of the caller's cwd.
+    let out = run_lib(
+        r#"unset FRAME_PROBE_ALIGN_CANDIDATE_SHA || true
+unset GITHUB_SHA || true
+frame_probe_align_candidate_sha; echo"#,
+    );
+    let sha = out.trim();
+    assert!(
+        sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "with neither seam set, the fallback must be a real 40-hex `git rev-parse HEAD` sha; got {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (1c) frame_probe_align_resolve_ci_bin — issue 1245: the gh artifact lookup must be resolved BY
+// CANDIDATE COMMIT, never "newest successful ci.yml run on branch dev" (which repeatedly returned
+// ANCIENT runs inside the E2E runner job — the exact #1244 finding, mirrored here). Functional
+// proof via a PATH-stubbed `gh` that logs its full argv and refuses (simulating "no run yet"),
+// so the emitted invocation shape is asserted directly rather than inferred.
+// ---------------------------------------------------------------------------
+
+/// Source the lib with a PATH-stubbed `gh` that logs its argv to a file and exits 1 (no run found
+/// -- resolve_ci_bin must still return 0/"" per its BEST-EFFORT contract). Returns the logged argv.
+fn resolve_ci_bin_gh_argv(env_lines: &str) -> String {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let gh_log = tmp.path().join("gh-argv.log");
+    let gh_path = bin.join("gh");
+    fs::write(
+        &gh_path,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"{log}\"\nexit 1\n",
+            log = gh_log.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = fs::metadata(&gh_path).unwrap().permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(&gh_path, perm).unwrap();
+
+    let lib = manifest_dir().join("scripts/lib/frame-probe-parity-align.sh");
+    assert!(lib.exists(), "{} not found", lib.display());
+    let harness = format!(
+        "set -euo pipefail\n. \"$LIB\"\n{env_lines}\nframe_probe_align_resolve_ci_bin; echo DONE\n"
+    );
+    let path_env = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("LIB", &lib)
+        .env("PATH", &path_env)
+        .output()
+        .expect("run bash harness");
+    assert!(
+        out.status.success(),
+        "resolve_ci_bin must return 0 even when gh refuses (best-effort contract).\nstdout={:?}\nstderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fs::read_to_string(&gh_log).unwrap_or_default()
+}
+
+#[test]
+fn resolve_ci_bin_resolves_by_candidate_commit_via_the_explicit_seam() {
+    let argv = resolve_ci_bin_gh_argv(
+        r#"unset GITHUB_SHA || true
+export FRAME_PROBE_ALIGN_CANDIDATE_SHA="cafebabecafebabecafebabecafebabecafebabe""#,
+    );
+    assert!(
+        argv.contains("run list"),
+        "gh run list must be invoked; argv={argv:?}"
+    );
+    assert!(
+        argv.contains("--commit cafebabecafebabecafebabecafebabecafebabe"),
+        "the artifact must be resolved BY THE CANDIDATE COMMIT (issue 1245); argv={argv:?}"
+    );
+    assert!(
+        !argv.contains("--branch"),
+        "the 'newest ci.yml run on branch dev' non-determinism (issue 1245) must be GONE; argv={argv:?}"
+    );
+}
+
+#[test]
+fn resolve_ci_bin_resolves_by_candidate_commit_via_github_sha_fallback() {
+    let argv = resolve_ci_bin_gh_argv(
+        r#"unset FRAME_PROBE_ALIGN_CANDIDATE_SHA || true
+export GITHUB_SHA="beadedbeadedbeadedbeadedbeadedbeadedbead""#,
+    );
+    assert!(
+        argv.contains("--commit beadedbeadedbeadedbeadedbeadedbeadedbead"),
+        "the GITHUB_SHA fallback must also resolve BY COMMIT; argv={argv:?}"
+    );
+    assert!(!argv.contains("--branch"), "argv={argv:?}");
+}
+
+#[test]
+fn resolve_ci_bin_resolves_by_candidate_commit_via_git_rev_parse_fallback() {
+    let argv = resolve_ci_bin_gh_argv(
+        r#"unset FRAME_PROBE_ALIGN_CANDIDATE_SHA || true
+unset GITHUB_SHA || true"#,
+    );
+    // Neither seam set -> `git rev-parse HEAD` -> a real 40-hex sha embedded in the argv, never
+    // empty (an empty candidate would print "no candidate commit sha resolvable" and skip gh
+    // entirely -- this repo's own git history always resolves, so gh IS reached here).
+    assert!(
+        argv.contains("run list"),
+        "gh run list must still be invoked; argv={argv:?}"
+    );
+    assert!(!argv.contains("--branch"), "argv={argv:?}");
+    let commit_pos = argv
+        .find("--commit ")
+        .unwrap_or_else(|| panic!("no --commit in argv={argv:?}"));
+    let after = &argv[commit_pos + "--commit ".len()..];
+    let sha: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    assert_eq!(
+        sha.len(),
+        40,
+        "the git rev-parse HEAD fallback must feed a real 40-hex sha into --commit; argv={argv:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (2) orchestrator — frame_probe_parity_align_before_gate
 // ---------------------------------------------------------------------------
 
