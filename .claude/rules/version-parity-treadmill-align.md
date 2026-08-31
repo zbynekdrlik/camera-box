@@ -152,3 +152,30 @@ decision matrix + the orchestrator + the real deploy path via the seams — `CAM
 gate's own `CAMERA_BOX_VERSION_GATE_VERSION_<NAME>` read seam (a file of raw `--version` output). A
 green bash-level RED→GREEN predicts the `tests/harness_camera_box_parity_align_1202.rs` pass at CI;
 `cargo fmt --all --check` is the only local Rust parse check (CI is the first type-check).
+
+## Artifact resolution is COMMIT-SCOPED, never "newest ci.yml run on a branch" (issue 1245)
+
+`frame_probe_align_resolve_ci_bin` (frame-probe-parity-align.sh) used to resolve the candidate
+`probe-tools-linux-amd64` artifact via "newest successful `ci.yml` run on branch `dev`" — the
+IDENTICAL pattern issue 1244 found broken in `cambox_align_deploy` (camera-box-parity-align.sh):
+inside the self-hosted E2E runner job that resolution repeatedly returned ANCIENT runs even while
+the candidate's own `ci.yml` was already `success` (the runner's own environment/token, not a
+reproducible general `gh` bug — a plain interactive shell resolved the correct newest run). The
+fix, mirrored per-file (frame-probe here, camera-box on its own ticket): resolve **by the run's
+own candidate COMMIT** via `frame_probe_align_candidate_sha` (`gh run list --commit "$sha"`,
+never `--branch`) — deterministic regardless of the anomaly, since "no run for this exact commit
+yet" IS "the candidate genuinely not published yet" (self-heals once ci.yml completes).
+
+**Resolution order (`frame_probe_align_candidate_sha`): `FRAME_PROBE_ALIGN_CANDIDATE_SHA` (explicit
+seam) → `GITHUB_SHA` (Actions' auto-set var) → `git rev-parse HEAD` (local/non-CI, anchored via
+`$_FPPA_HERE` so it's cwd-independent).** The explicit seam exists because of a critical trap: on a
+`pull_request` event, `GITHUB_SHA` is the SYNTHETIC MERGE COMMIT the runner builds to test the
+merge, NOT the PR's head commit — but `ci.yml` only ever runs (`push: [dev, main]`) and publishes
+for the REAL head commit, so a bare `GITHUB_SHA` on `pull_request` is a PERMANENT false-refuse, not
+merely stale-until-retry. `full-path-e2e.yml` (the only `pull_request`-event caller of this lib)
+wires `FRAME_PROBE_ALIGN_CANDIDATE_SHA: github.event.pull_request.head.sha` on that event — the
+SAME #703 pattern its "Fetch the matching Windows recording-verdict.exe" step already uses;
+push/workflow_dispatch runs resolve the seam's ternary to plain `github.sha` there instead (the
+workflow always SETS the seam — never literally unset — but that resolves to the same value
+`GITHUB_SHA` would, since both are the real head on those events).
+`FRAME_PROBE_ALIGN_CI_BRANCH` (the old branch-selection seam) is REMOVED — nothing else consumed it.

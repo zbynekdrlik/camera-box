@@ -126,6 +126,46 @@ frame_probe_align_sha_of() {
   sha256sum "$bin" 2>/dev/null | awk '{print $1}' | tr '[:upper:]' '[:lower:]' || true
 }
 
+# frame_probe_align_candidate_sha -> THIS run's candidate COMMIT SHA, used to resolve the CI
+# artifact BY CANDIDATE COMMIT (issue 1245 -- the frame-probe sibling of issue 1244's
+# camera-box-parity-align.sh fix). Resolution order:
+#   1. FRAME_PROBE_ALIGN_CANDIDATE_SHA (explicit seam -- see the CRITICAL note below)
+#   2. GITHUB_SHA (Actions' own auto-set var -- correct on push/workflow_dispatch, WRONG on
+#      pull_request, see below)
+#   3. `git rev-parse HEAD` (local/non-CI runs), anchored via $_FPPA_HERE so it is independent of
+#      the caller's cwd
+# "" if none resolve.
+#
+# WHY commit-scoped, not "newest ci.yml run on branch dev" (the prior behaviour): inside the E2E
+# runner job that resolution REPEATEDLY returned ANCIENT runs (the identical issue 1244 finding
+# for camera-box-parity-align.sh, mirrored here) -- a stale build gets "aligned" as if it were the
+# candidate, or the align refuses a run whose candidate artifact is actually already published.
+# Resolving by the run's own candidate commit is deterministic regardless of that anomaly: no run
+# for the exact commit yet = candidate genuinely not published yet (self-heals once ci.yml
+# completes), never a wrong-but-plausible-looking match.
+#
+# CRITICAL. On a `pull_request` GitHub Actions event, GITHUB_SHA is the SYNTHETIC MERGE COMMIT the
+# runner builds to test the merge, NOT the PR's head commit -- but ci.yml only ever runs (and only
+# ever publishes an artifact) for the REAL head commit (`push: [dev, main]`), so a raw GITHUB_SHA
+# on pull_request can NEVER match a ci.yml run -- a PERMANENT false-refuse, not merely
+# stale-until-retry. full-path-e2e.yml (whose recording-e2e.sh call is the ONLY pull_request-event
+# caller of this lib) therefore sets the explicit FRAME_PROBE_ALIGN_CANDIDATE_SHA seam to
+# `github.event.pull_request.head.sha` for a pull_request run -- the SAME #703 pattern its own
+# "Fetch the matching Windows recording-verdict.exe" step already uses. push/workflow_dispatch
+# events (see full-path-e2e.yml's own ternary) resolve the seam to plain `github.sha` there anyway
+# -- functionally identical to falling through to GITHUB_SHA, since both are the real head there.
+frame_probe_align_candidate_sha() {
+  if [ -n "${FRAME_PROBE_ALIGN_CANDIDATE_SHA:-}" ]; then
+    printf '%s' "$FRAME_PROBE_ALIGN_CANDIDATE_SHA"
+    return 0
+  fi
+  if [ -n "${GITHUB_SHA:-}" ]; then
+    printf '%s' "$GITHUB_SHA"
+    return 0
+  fi
+  git -C "$_FPPA_HERE/../.." rev-parse HEAD 2>/dev/null || printf ''
+}
+
 # --- impure read + deploy (seam-overridable; exercised end-to-end via the seams) --------------
 
 # frame_probe_align_read_sha NAME TARGET -> the box's /usr/local/bin/frame-probe sha256 (lowercase
@@ -158,19 +198,23 @@ frame_probe_align_read_sha() {
 
 # frame_probe_align_resolve_ci_bin -> print the PATH to a VERSION-GUARDED clean CI frame-probe (the
 # candidate build), or "" (dormant NOCANDIDATE downstream). Downloads probe-tools-linux-amd64 from
-# the newest successful ci.yml run on the candidate branch and VERSION-GUARDS it: the artifact's
-# co-located camera-box-probe --version MUST equal the Cargo.toml candidate -- else the candidate's
-# own ci.yml has not published yet, so we do NOT align a stale build (self-heals once it completes),
-# exactly like cambox_align_deploy's guard. The gh-download path creates a mktemp dir with the
-# FRAME_PROBE_ALIGN_DIST_PREFIX name so the [1/8] pin can still read the returned frame-probe path
-# for the rest of the run; this function runs inside `$(...)` (command substitution), so its
-# `_FPPA_DIST` assignment does NOT escape to the caller -- the dir is therefore reclaimed by the
-# AGE-BOUNDED sweep at the orchestrator's entry (frame_probe_parity_align_before_gate), not by the
-# caller. The caller-supplied FRAME_PROBE_ALIGN_ARTIFACT_DIR (tests) is NEVER swept (different name).
+# the successful ci.yml run for THIS run's candidate COMMIT (issue 1245 -- resolved BY COMMIT via
+# frame_probe_align_candidate_sha, NEVER "newest successful run on a branch", see that function's
+# own header for why) and VERSION-GUARDS it: the artifact's co-located camera-box-probe --version
+# MUST equal the Cargo.toml candidate -- else the candidate's own ci.yml has not published yet, so
+# we do NOT align a stale build (self-heals once it completes), exactly like cambox_align_deploy's
+# guard. The gh-download path creates a mktemp dir with the FRAME_PROBE_ALIGN_DIST_PREFIX name so
+# the [1/8] pin can still read the returned frame-probe path for the rest of the run; this function
+# runs inside `$(...)` (command substitution), so its `_FPPA_DIST` assignment does NOT escape to
+# the caller -- the dir is therefore reclaimed by the AGE-BOUNDED sweep at the orchestrator's entry
+# (frame_probe_parity_align_before_gate), not by the caller. The caller-supplied
+# FRAME_PROBE_ALIGN_ARTIFACT_DIR (tests) is NEVER swept (different name).
 #
 # Seams: FRAME_PROBE_ALIGN_ARTIFACT_DIR (a pre-fetched probe-tools dir -> skip gh, still guarded);
-# FRAME_PROBE_ALIGN_REPO / FRAME_PROBE_ALIGN_CI_BRANCH (artifact source, default zbynekdrlik/camera-box
-# / dev); FRAME_PROBE_ALIGN_SKIP_VERSION_GUARD=1 (tests with a fixture bin that has no --version).
+# FRAME_PROBE_ALIGN_REPO (artifact source repo, default zbynekdrlik/camera-box);
+# FRAME_PROBE_ALIGN_CANDIDATE_SHA (the commit to resolve against -- see
+# frame_probe_align_candidate_sha's own header for the full resolution order);
+# FRAME_PROBE_ALIGN_SKIP_VERSION_GUARD=1 (tests with a fixture bin that has no --version).
 FRAME_PROBE_ALIGN_DIST_PREFIX="${TMPDIR:-/tmp}/frame-probe-align-ci"
 _FPPA_DIST=""
 frame_probe_align_resolve_ci_bin() {
@@ -185,11 +229,17 @@ frame_probe_align_resolve_ci_bin() {
       return 0
     }
     local repo="${FRAME_PROBE_ALIGN_REPO:-${REPO:-zbynekdrlik/camera-box}}"
-    local branch="${FRAME_PROBE_ALIGN_CI_BRANCH:-dev}"
+    local sha
+    sha="$(frame_probe_align_candidate_sha)"
+    if [ -z "$sha" ]; then
+      echo "[0/8] frame-probe parity auto-align (#1138): no candidate commit sha resolvable (FRAME_PROBE_ALIGN_CANDIDATE_SHA / GITHUB_SHA / git rev-parse HEAD all empty) -- cannot source probe-tools-linux-amd64; the report-only pin below decides." >&2
+      printf ''
+      return 0
+    fi
     local run_id
-    run_id="$(gh run list --repo "$repo" --branch "$branch" --workflow ci.yml --status success --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+    run_id="$(gh run list --repo "$repo" --commit "$sha" --workflow ci.yml --status success --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
     if [ -z "$run_id" ]; then
-      echo "[0/8] frame-probe parity auto-align (#1138): no successful ci.yml run on '$branch' to source probe-tools-linux-amd64; the report-only pin below decides." >&2
+      echo "[0/8] frame-probe parity auto-align (#1138): no successful ci.yml run for commit ${sha:0:12} to source probe-tools-linux-amd64 (self-heals once ci.yml publishes it, issue 1245); the report-only pin below decides." >&2
       printf ''
       return 0
     fi

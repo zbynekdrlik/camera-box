@@ -322,6 +322,15 @@ wrong PR with no review of it.
   worktree's `target/` immediately and `git worktree remove` + branch-delete once the round PR
   merges. Expect trivially-resolvable append-append conflicts in `docs/autopilot-log.md` (keep
   both entries) and identical version-bump commits across workers (merge clean).
+  **A worktree branch that survived from an EARLIER round and gets re-dispatched fresh for a NEW
+  ticket can be MANY commits behind current `origin/dev`** (confirmed live, issue 1245, 2026-08-31:
+  a worktree still sitting at `1.7.0-dev.561` while `origin/dev` was at `.594`, a 33-commit gap —
+  the file the dispatched issue named, `scripts/lib/frame-probe-parity-align.sh`, genuinely did NOT
+  EXIST on that stale branch, even though the issue was fully valid and the file existed on current
+  `dev`). Before concluding a dispatched ticket references a nonexistent file/pattern (an
+  "obsolete ticket" verdict per `verify-issue-still-valid.md`), first confirm `git log HEAD --not
+  origin/dev --oneline` is EMPTY (no unique commits of your own yet) and, if so, `git merge --ff-only
+  origin/dev` — a missing file on a stale worktree branch is NOT evidence the ticket is invalid.
 - **A red "CI" run on the OTHER worker's push can be YOUR OWN not-yet-fixed RED commit riding
   along, not a real regression in their code.** Confirmed live (2026-07-30, #854/#881 vs #878):
   worker A committed a TDD RED commit (failing-on-purpose, per `regression-test-first.md`) while
