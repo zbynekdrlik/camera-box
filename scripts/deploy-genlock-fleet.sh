@@ -526,20 +526,34 @@ if [ -d "\$BUNDLE/share/obs" ]; then
 fi
 ldconfig
 
-# (3b) fail-closed post-install perms assert (issue 1236): \$LIBDIR MUST be root:root 0755 and every
-#      just-installed lib file world-readable, else a runtime uid cannot open libobs.so.30 -- refuse
-#      the restart (the SONAME/manifest fail-loud spirit; scope the scan to the just-installed set).
+# (3b) fail-closed post-install perms assert (issue 1236): \$LIBDIR itself MUST be root:root 0755,
+#      and EVERY just-installed path (the libs AND the share/obs data) MUST be root:root with dirs
+#      world-traversable (o+rx) / files world-readable (o+r) -- else a runtime uid cannot open
+#      libobs.so.30 or read OBS data. Refuse the restart (the SONAME/manifest fail-loud spirit; scoped
+#      to the just-installed set so it also catches a chown/chmod the normalize step swallowed with
+#      2>/dev/null || true).
 _libdir_owner="\$(stat -c '%U:%G' "\$LIBDIR" 2>/dev/null || echo '?')"
 _libdir_mode="\$(stat -c '%a' "\$LIBDIR" 2>/dev/null || echo '?')"
 [ "\$_libdir_owner" = "root:root" ] || { echo "#789 IMAG FAIL: post-install perms assert: \$LIBDIR owner \$_libdir_owner, want root:root (issue 1236)" >&2; exit 4; }
 [ "\$_libdir_mode" = "755" ] || { echo "#789 IMAG FAIL: post-install perms assert: \$LIBDIR mode \$_libdir_mode, want 755 (issue 1236)" >&2; exit 4; }
 _perms_bad=0
-while IFS= read -r -d '' rel; do
-  f="\$LIBDIR/\$rel"
-  [ -f "\$f" ] || continue
-  [ -n "\$(find "\$f" -perm -o+r -print 2>/dev/null)" ] || { echo "#789 IMAG FAIL: post-install perms assert: \$f is not world-readable (issue 1236)" >&2; _perms_bad=1; }
-done < <(cd "\$BUNDLE/lib/x86_64-linux-gnu" && find . -type f -printf '%P\0')
-[ "\$_perms_bad" = 0 ] || { echo "#789 IMAG FAIL: just-installed libs not world-readable -- refuse the restart (issue 1236)" >&2; exit 4; }
+assert_installed_perms() {  # SRC_ROOT  DST_ROOT -- walk the source tree, assert each dest path
+  local src="\$1" dst_root="\$2" rel dst own
+  while IFS= read -r -d '' rel; do
+    dst="\$dst_root/\$rel"
+    [ -e "\$dst" ] || continue
+    own="\$(stat -c '%U:%G' "\$dst" 2>/dev/null || echo '?')"
+    [ "\$own" = "root:root" ] || { echo "#789 IMAG FAIL: post-install perms assert: \$dst owner \$own, want root:root (issue 1236)" >&2; _perms_bad=1; }
+    if [ -d "\$dst" ]; then
+      [ -n "\$(find "\$dst" -maxdepth 0 -perm -o+rx -print 2>/dev/null)" ] || { echo "#789 IMAG FAIL: post-install perms assert: dir \$dst not world-traversable (issue 1236)" >&2; _perms_bad=1; }
+    else
+      [ -n "\$(find "\$dst" -maxdepth 0 -perm -o+r -print 2>/dev/null)" ] || { echo "#789 IMAG FAIL: post-install perms assert: \$dst is not world-readable (issue 1236)" >&2; _perms_bad=1; }
+    fi
+  done < <(cd "\$src" && find . -mindepth 1 -printf '%P\0')
+}
+assert_installed_perms "\$BUNDLE/lib/x86_64-linux-gnu" "\$LIBDIR"
+if [ -d "\$BUNDLE/share/obs" ]; then assert_installed_perms "\$BUNDLE/share/obs" /usr/share/obs; fi
+[ "\$_perms_bad" = 0 ] || { echo "#789 IMAG FAIL: just-installed payload perms assert failed -- refuse the restart (issue 1236)" >&2; exit 4; }
 
 # (4) ABI guards -- refuse a mismatched SONAME (libobs AND the SEPARATE libobs-opengl, #756) or a
 #     stock/wrong frontend. No grep -q on a piped external cmd under pipefail (the setup-imag.sh

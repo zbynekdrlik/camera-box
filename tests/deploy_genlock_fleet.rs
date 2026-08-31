@@ -712,7 +712,7 @@ fn imag_program_normalizes_installed_perms_after_cp_a_1236() {
     // normalize the just-installed set: files a+rX (world-readable), scoped by walking the bundle
     // source tree -- never a whole-libdir sweep.
     assert!(
-        p.contains("chmod a+rX") && p.contains("find . -mindepth 1 -printf '%P\\0'"),
+        p.contains("chmod a+rX \"$dst\"") && p.contains("find . -mindepth 1 -printf '%P\\0'"),
         "must set files a+rX over the just-installed set, scoped to the bundle tree (issue 1236):\n{p}"
     );
     // the sibling share/obs install (same cp -a src/. shape) is normalized too
@@ -745,6 +745,17 @@ fn imag_program_fail_closed_perms_assert_1236() {
     assert!(
         p.contains("-perm -o+r"),
         "must scan the just-installed set for world-unreadable files (issue 1236):\n{p}"
+    );
+    // the assert covers the WHOLE just-installed set: dirs world-traversable (o+rx) + ownership,
+    // over BOTH the lib tree and the share/obs data subtree -- not just $LIBDIR + top-level file o+r.
+    assert!(
+        p.contains("-perm -o+rx"),
+        "must assert installed dirs are world-traversable (issue 1236):\n{p}"
+    );
+    assert!(
+        p.contains("assert_installed_perms \"$BUNDLE/lib/x86_64-linux-gnu\" \"$LIBDIR\"")
+            && p.contains("assert_installed_perms \"$BUNDLE/share/obs\" /usr/share/obs"),
+        "must run the fail-closed perms assert over BOTH the lib tree and the share/obs subtree (issue 1236):\n{p}"
     );
     // refuse the restart on any violation
     assert!(
