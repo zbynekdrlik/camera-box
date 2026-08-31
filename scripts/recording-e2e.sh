@@ -4538,8 +4538,10 @@ fi
 # when the painter itself started painting. A long-but-legitimate pre-[3/8] phase (cold [1/8] build
 # after a version bump, a longer #1233 frozen-gate settle with more cameras) can push the painter
 # launch well past the harness's own start, and the old RUN_START_EPOCH-anchored comparison
-# false-FATALed a genuinely fresh CSV on exactly that shape (run 33392043681: painter launched
-# 1005s after harness start, span 845s fully covering the actual recording window). set +e is
+# false-FATALed a genuinely fresh CSV on exactly that shape (run 33392043681, against the CI
+# workflow's DURATION=300 default — full-path-e2e.yml: painter launched 1005s after harness start,
+# span 845s fully covering the actual recording window, so the old bound of dur+600=900s
+# false-rejected an offset of 1005s). set +e is
 # active here, so the gate exits non-zero EXPLICITLY (the EXIT trap still restores the rig). The
 # verdict logic lives in the pure, unit-tested painter_csv_freshness() (lib sourced above).
 read -r PAINTER_VERDICT PAINTER_SPAN PAINTER_OFFSET <<EOF
