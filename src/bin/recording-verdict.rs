@@ -3521,6 +3521,67 @@ fn build_and_print_verdict_with_stream_diffs(
                 report["full_chain"]["cam1_unmeasured"] = serde_json::json!(true);
             }
 
+            // issue 1247 — per-cam "own digital burn absent" REPORT-ONLY gate. The #133 WARN above
+            // fires only when EVERY camera-under-test burn is absent (OR-logic); under the
+            // ALL-CAMBOX sweep a SINGLE scheduled cam whose OWN digital burn is entirely absent
+            // (`burn_ids_present.<cam> == 0`) — its leg live but served by production camera-box,
+            // which emits no burn (the issue-1246 cam2-painter-deadman symptom) — slipped through,
+            // and the per-segment optical-tick verdict can read that cam as a clean pass. Key off
+            // the switch-schedule DEPLOYED set (NOT `expected_burns`, which lists all cams
+            // regardless of deployment) so a single absent scheduled-cam burn is surfaced in the
+            // durable artifact. REPORT-ONLY (does not change PASS/FAIL) — the LIVE `[7b/8]`
+            // run-integrity check already fails such a run; a one-line seam flip makes it blocking.
+            if let Some(schedule) = switch_schedule.as_ref() {
+                let scheduled_cams: Vec<String> =
+                    schedule.iter().map(|w| w.cambox.clone()).collect();
+                let own_burn_counts: [(&str, usize); 7] = [
+                    ("cam1", cam1_ids.len()),
+                    ("cam2", cam2_ids.len()),
+                    ("cam3", cam3_ids.len()),
+                    ("cam4", cam4_ids.len()),
+                    ("cam5", cam5_ids.len()),
+                    ("cam6", cam6_ids.len()),
+                    ("cam7", cam7_ids.len()),
+                ];
+                let own_burn =
+                    camera_box::own_burn_absent::evaluate(&scheduled_cams, &own_burn_counts);
+                let own_burn_gate_pass = own_burn.pass();
+                let own_burn_gates_overall = camera_box::own_burn_absent::gates_overall_pass();
+                let mut own_burn_per_cam = serde_json::Map::new();
+                for (cam, absent) in &own_burn.per_cam_absent {
+                    own_burn_per_cam.insert(cam.clone(), serde_json::Value::Bool(*absent));
+                }
+                report["full_chain"]["own_burn_absent_gate"] = serde_json::json!({
+                    "scheduled_cams": own_burn.scheduled_cams,
+                    "absent_cams": own_burn.absent_cams,
+                    "per_cam": serde_json::Value::Object(own_burn_per_cam),
+                    "pass": own_burn_gate_pass,
+                    "gates_overall_pass": own_burn_gates_overall,
+                    "note": "issue 1247: a SCHEDULED cam (in the --switch-schedule deployed set) \
+                             whose OWN digital burn (full_chain.burn_ids_present.<cam>) was \
+                             ENTIRELY ABSENT from the recording — its leg was live but served by \
+                             the wrong emitter (production camera-box, no digital burn; the \
+                             issue-1246 cam2-painter-deadman symptom), so the per-segment \
+                             optical-tick verdict can overstate it as a clean pass. REPORT-ONLY \
+                             (own_burn_absent::gates_overall_pass); the LIVE [7b/8] burn-unit \
+                             run-integrity check already fails such a run. PASS/FAIL unchanged.",
+                });
+                if !own_burn_gate_pass {
+                    eprintln!(
+                        "WARNING: scheduled cam(s) with their OWN digital burn ENTIRELY ABSENT \
+                         from the recording: {} — leg live but served by the wrong emitter \
+                         (production, no burn; issue-1246 deadman symptom). The per-segment \
+                         optical-tick verdict can overstate these as a clean pass. REPORT-ONLY \
+                         (does not change PASS/FAIL); [7b/8] run-integrity already fails such a run.",
+                        own_burn.absent_cams.join(", ")
+                    );
+                }
+                // Fold: report-only today — `gates_overall_pass()` is false, so `!own_burn_gates_
+                // overall` is true and this never fails the run. Flip the seam to `true` (one line)
+                // to make an absent scheduled-cam own burn FAIL overall_pass.
+                all_pass &= own_burn_gate_pass || !own_burn_gates_overall;
+            }
+
             // ===========================================================================
             // #186 — the ONE trustworthy, binary LOSS verdict (REPLACES the muddled
             // dropped/phantom/gap/painter-beat metrics). For EACH node, is its DIGITAL

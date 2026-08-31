@@ -71,13 +71,39 @@ impl OwnBurnPresence {
 /// match those keys. ONLY scheduled cams that HAVE a matching burn-count entry are assessed — an
 /// unknown/unmeasured cambox proves nothing about its own burn, so it is excluded (never a false
 /// warning). The scheduled set is de-duplicated (the sweep cycles a cam across several windows).
-pub fn evaluate(_scheduled_camboxes: &[String], _burn_counts: &[(&str, usize)]) -> OwnBurnPresence {
-    // #1247 RED stub — the real decision lands in the GREEN commit. Returns an empty result so the
-    // "should-flag" tests fail (RED) while the "clean / empty schedule" tests already hold.
+pub fn evaluate(scheduled_camboxes: &[String], burn_counts: &[(&str, usize)]) -> OwnBurnPresence {
+    // Distinct, canonical-lowercase scheduled set (the sweep cycles a cam across many windows).
+    let mut scheduled: Vec<String> = Vec::new();
+    for c in scheduled_camboxes {
+        let lc = c.to_ascii_lowercase();
+        if !scheduled.contains(&lc) {
+            scheduled.push(lc);
+        }
+    }
+    scheduled.sort();
+
+    let mut scheduled_cams: Vec<String> = Vec::new();
+    let mut per_cam_absent: Vec<(String, bool)> = Vec::new();
+    let mut absent_cams: Vec<String> = Vec::new();
+    for cam in &scheduled {
+        // Only assess a scheduled cam that HAS a matching burn-count entry (case-insensitive) — an
+        // unknown/unmeasured cambox (e.g. "imag") proves nothing about its own burn.
+        if let Some(&(_, count)) = burn_counts
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(cam))
+        {
+            scheduled_cams.push(cam.clone());
+            let absent = count == 0;
+            per_cam_absent.push((cam.clone(), absent));
+            if absent {
+                absent_cams.push(cam.clone());
+            }
+        }
+    }
     OwnBurnPresence {
-        scheduled_cams: Vec::new(),
-        per_cam_absent: Vec::new(),
-        absent_cams: Vec::new(),
+        scheduled_cams,
+        per_cam_absent,
+        absent_cams,
     }
 }
 
@@ -125,7 +151,10 @@ mod tests {
             vec!["cam2".to_string()],
             "cam2 is scheduled yet its own burn count is 0 — it MUST be flagged"
         );
-        assert!(!p.pass(), "an absent scheduled-cam own burn must fail the (report-only) gate");
+        assert!(
+            !p.pass(),
+            "an absent scheduled-cam own burn must fail the (report-only) gate"
+        );
         assert!(
             p.per_cam_absent.iter().any(|(c, a)| c == "cam2" && *a),
             "per-cam map must carry cam2=true"
@@ -183,7 +212,10 @@ mod tests {
         let scheduled = vec!["CAM2".to_string(), "CAM1".to_string(), "CAM2".to_string()];
         let counts = vec![("cam1", 5usize), ("cam2", 0usize)];
         let p = evaluate(&scheduled, &counts);
-        assert_eq!(p.scheduled_cams, vec!["cam1".to_string(), "cam2".to_string()]);
+        assert_eq!(
+            p.scheduled_cams,
+            vec!["cam1".to_string(), "cam2".to_string()]
+        );
         assert_eq!(p.absent_cams, vec!["cam2".to_string()]);
         assert_eq!(
             p.per_cam_absent.iter().filter(|(c, _)| c == "cam2").count(),
