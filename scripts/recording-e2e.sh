@@ -4533,11 +4533,17 @@ fi
 # against stale ground truth (a stale /tmp/painter.csv produced a fake 14.9h-offset catastrophic
 # FAIL on run 354002). The CSV (header `tick,gen_ts_ns,flip_ts_ns`; gen_ts_ns = CLOCK_REALTIME
 # epoch ns) must be present+non-empty, span ≈ DURATION (not a tiny ~40s stale file), and its
-# gen_ts_ns must overlap THIS run's wall clock (not hours off from RUN_START_EPOCH). set +e is
+# gen_ts_ns must overlap the painter's OWN launch moment (issue 1241: anchored to
+# PAINTER_LAUNCH_EPOCH, falling back to RUN_START_EPOCH if that was never set) — not hours off from
+# when the painter itself started painting. A long-but-legitimate pre-[3/8] phase (cold [1/8] build
+# after a version bump, a longer #1233 frozen-gate settle with more cameras) can push the painter
+# launch well past the harness's own start, and the old RUN_START_EPOCH-anchored comparison
+# false-FATALed a genuinely fresh CSV on exactly that shape (run 33392043681: painter launched
+# 1005s after harness start, span 845s fully covering the actual recording window). set +e is
 # active here, so the gate exits non-zero EXPLICITLY (the EXIT trap still restores the rig). The
 # verdict logic lives in the pure, unit-tested painter_csv_freshness() (lib sourced above).
 read -r PAINTER_VERDICT PAINTER_SPAN PAINTER_OFFSET <<EOF
-$(painter_csv_freshness "$PAINTER_CSV" "$RUN_START_EPOCH" "$DURATION")
+$(painter_csv_freshness "$PAINTER_CSV" "${PAINTER_LAUNCH_EPOCH:-$RUN_START_EPOCH}" "$DURATION")
 EOF
 if [ "$PAINTER_VERDICT" != "OK" ]; then
   echo "FATAL #359: painter ground-truth CSV not fresh ($PAINTER_VERDICT): span=${PAINTER_SPAN}s" >&2
