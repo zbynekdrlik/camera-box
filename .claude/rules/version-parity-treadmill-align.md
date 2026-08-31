@@ -51,6 +51,47 @@ the gate refuses and self-heals once ci.yml publishes the candidate. The same `[
 ordering fact is why the sibling frame-probe align (below) ALSO fetches the CLEAN CI artifact via
 `gh run download` at `[0/8]`, never `$PROBE_BIN_DIR` (which is built at `[1/8]`).
 
+## Artifact resolution is COMMIT-SCOPED, never "newest on branch" (issue 1244)
+
+`cambox_align_deploy()`'s ci.yml-artifact resolution used to be "newest successful ci.yml run on
+branch dev" (`gh run list --branch dev --workflow ci.yml --status success --limit 1`) — that query
+was PROVEN non-deterministic **inside the E2E job's own runner environment** (self-hosted runner,
+GITHUB_TOKEN): live runs 33400360170 (14:13) and 33425283884 att.2 (18:44) both resolved a
+PREHISTORIC build (dev.428/dev.439) while the real newest build (dev.591/dev.594) was already
+published — an identical manual query from an interactive shell (a different token) resolved
+correctly, so the anomaly is runner-environment/token-scoped, not a logic bug in the query shape.
+Each false-refuse burns a whole E2E cycle (2 wasted cycles on 2026-08-31).
+
+**Fix: resolve by the candidate's OWN commit sha** (`gh run list --commit "$sha" ...`, via the new
+`cambox_align_candidate_sha` — override `CAMBOX_ALIGN_CANDIDATE_SHA`, fallback `$GITHUB_SHA`, final
+fallback `git rev-parse HEAD` in the lib's own checkout). Every successful ci.yml run for a given
+commit builds the same source, so "which run is newest" stops being a question whose answer can
+differ in substance. **NO fallback to the old branch-based query when `--commit` finds nothing** —
+that would silently reopen the exact non-determinism the fix removes; "no run for this commit"
+stays the existing refuse/self-heal path (candidate's own ci.yml not published yet). The now-unused
+`CAMBOX_ALIGN_CI_BRANCH` seam was removed (confirmed unconsumed elsewhere via
+`grep -rn CAMBOX_ALIGN_CI_BRANCH tests/ scripts/`).
+
+**⚠️ The `$GITHUB_SHA` fallback is WRONG on a `pull_request`-triggered workflow — it resolves the
+SYNTHETIC merge commit (`refs/pull/N/merge`), never the PR's head commit** (a review catch on
+#1244 itself — the "no explicit wiring needed" claim in the original fix was false). ci.yml
+(push:[dev,main] only) never builds a run for that merge sha, so an un-wired `pull_request` caller
+gets a 100% (not merely intermittent) false-refuse — strictly worse than the bug being fixed. The
+FIX for the fix: `full-path-e2e.yml`'s "Recording-based 4-node..." step's own `env:` block
+EXPLICITLY sets `CAMBOX_ALIGN_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' &&
+github.event.pull_request.head.sha || github.sha }}` — the same `github.event.pull_request.head.sha`
+the sibling `#703` fetch step in that workflow already uses for the identical reason. **Any NEW
+caller of `cambox_align_deploy`/`cambox_parity_align_before_gate` on a `pull_request`-triggered
+workflow MUST wire `CAMBOX_ALIGN_CANDIDATE_SHA` explicitly the same way — never rely on the bare
+`$GITHUB_SHA` fallback there.**
+
+**The sibling `scripts/lib/frame-probe-parity-align.sh` (issue 1138, below) still has the OLD
+branch-based `gh run list --branch "$branch"` resolution — same bug shape, NOT fixed by #1244**
+(out of that issue's named scope: it names only `camera-box-parity-align.sh`). Filed as **#1245**
+(`frame-probe-parity-align.sh: same 'newest ci.yml on branch' non-determinism as #1244`); do not
+assume the frame-probe align is commit-scoped until that lands, and mirror the `pull_request`
+merge-sha trap above into its fix too.
+
 ## The frame-probe (cam2 painter) SIBLING align (issue 1138)
 
 `scripts/lib/frame-probe-parity-align.sh` is the frame-probe twin of this camera-box align, same
