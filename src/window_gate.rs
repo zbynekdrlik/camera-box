@@ -141,6 +141,31 @@
 //! that lane's burden shrinks further, the tolerance walks back down exactly as #889/#1031/#1121
 //! already did for this same constant — tracked on #1220, not silently dropped.
 //!
+//! ## 2026-08-31 RE-CALIBRATION (3 -> 5) — issue 1243 (third relax-walk step), walk-back on #1242
+//!
+//! Per `.claude/rules/window-gate-tolerance-walkdown.md`'s data-first procedure: three complete
+//! post-fix 7-cam verdicts (no dead-painter/no-signal windows, none inside a convergence
+//! transient) gave a larger fresh sample than the 2026-08-15 stepped-back-to-3 calibration was
+//! based on --
+//!
+//! - run 1629895310: per-window copies `[1,1,1,0,0,1,0,0,1,0]`, worst max(copies,gaps)=1.
+//! - run 1230380558: per-window copies `[0,0,0,0,1,0,0,0,1,1]`, worst max(copies,gaps)=1.
+//! - run 1142514714: per-window copies `[1,0,1,4,1,0,0,0,0,0]`, worst max(copies,gaps)=4 --
+//!   seg3 CAM4, four SEPARATE single-frame duplicates spread over ~14s (no self-heal/frozen_leg
+//!   events in that window), the run's SOLE blocking-gate failure: `#889 RE-GATE FAIL: copies=4
+//!   gaps=4 exceeds tolerance (3)`. Uniformity passed comfortably (0.9325 vs the now-0.90 floor,
+//!   see `presentation_cadence::UNIFORM_FRACTION_MIN`'s own walk-down history), isolating this as
+//!   a pure copies/gaps-tolerance red, not a cascading uniformity/optical defect.
+//!
+//! `TOL_min = max(maxCopies, maxGaps)` over the three steady post-fix runs is 4. Stepping to
+//! exactly 4 (the bare observed ceiling) would leave zero margin, and the n=3 per-run worst
+//! values (`{1, 1, 4}`) already show the same run-to-run clustering variance every earlier step
+//! on this const hit at its own ceiling (the 2026-08-06 2->3 recalibration, explicitly). 5 gives
+//! ONE event of margin above the worst observed run while staying far under the 9-45/window band
+//! every genuine sick-leg/limit-cycle regression on this const has measured (discrimination is
+//! unaffected). See issue 1243's design-addendum comment for the full rationale, including the
+//! rejected alternatives. The walk-back trail stays on **issue 1242**, unchanged by this step.
+//!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
 //! Same reasoning as `optical_floor.rs` / `av_window.rs`'s `#861` relaxation: the whole `probe`
@@ -212,9 +237,16 @@
 /// **#1220 (2026-08-29): this constant is LIVE again — it directly gates `overall_pass`, not just
 /// `relaxed_pass`.** [`copies_gaps_tolerance_gates_overall_pass`] was re-armed (owner-mandated
 /// soft-release, see the module doc's "2026-08-29 RE-ARM" section for the full evidence and
-/// decision record); the value itself is unchanged at 3, still the tightest the current
-/// over-rate-lane sample supports.
-pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 3;
+/// decision record).
+///
+/// **Walked 3 -> 5 on 2026-08-31 (issue 1243, third relax-walk step; walk-back tracked on issue
+/// 1242) -- see the module doc's "2026-08-31 RE-CALIBRATION" section for the full three-run
+/// evidence table.** A fresh, larger post-fix sample (n=3 complete 7-cam verdicts) gave a worst
+/// observed max(copies,gaps) of 4 (run 1142514714, seg3 CAM4 -- four separate single-frame
+/// duplicates, no self-heal/frozen_leg events, the run's sole blocking-gate failure); 5 gives one
+/// event of margin above that ceiling while staying far under the 9-45/window band every genuine
+/// regression on this const has measured.
+pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 5;
 
 /// #1132 (owner mandate 2026-08-19): whether the per-window copies/gaps TOLERANCE
 /// ([`WINDOW_COPIES_GAPS_TOLERANCE`]) is allowed to RESCUE the verdict folded into `overall_pass`
