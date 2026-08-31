@@ -744,8 +744,11 @@ def measure_tail_status(rounds_ticks, sources, *, stable_tail_rounds, stable_tol
 def decode_qr_texts(png_bytes):
     """Every QR text in a PNG's bytes. cv2.detectAndDecodeMulti first; if it yields NO painter-shaped
     payload, retry on a 2x-upscaled, autocontrast-stretched, threshold-swept copy (110/130/150) --
-    raw 1920px screenshots are sometimes missed by cv2's multi-detector. Returns a de-duplicated
-    list of decoded strings (possibly empty). Errors are logged, never silently swallowed."""
+    raw 1920px screenshots are sometimes missed by cv2's multi-detector. If STILL nothing
+    painter-shaped decoded (#1239: monitor-filmed moire/screen-door aliasing breaks the sharpening
+    ladder above), fall through a moire-AVERAGING ladder instead: half-res+Otsu, medianBlur(5)+Otsu,
+    third-res+Otsu, then an L/R-crop+medianBlur+2x+Otsu last resort. Returns a de-duplicated list of
+    decoded strings (possibly empty). Errors are logged, never silently swallowed."""
     import cv2
     import numpy as np
 
@@ -782,6 +785,56 @@ def decode_qr_texts(png_bytes):
             _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
             if has_painter_payload(found_texts):
                 break
+
+    # #1239: monitor-filmed moire/screen-door aliasing (photographing an LCD off-axis through the
+    # cam2 optical loop) breaks cv2's binarizer on the big optical painter QR even after the
+    # sharpening ladder above -- measured 0/29 recovered on a real undecodable-round fixture set
+    # (tests/fixtures/qr-align-moire-1239/). Sharpening amplifies the interference; these four
+    # passes AVERAGE it away instead, in order of measured effectiveness. Each only runs while
+    # nothing painter-shaped has decoded yet, so the common (already-decodable) case pays none of
+    # this extra cv2 work.
+    if not has_painter_payload(found_texts):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # 1) half-res downscale + Otsu -- the single biggest win (20/29 fixture first-hits).
+        # INTER_AREA is an area-averaging resize mode: it suppresses the moire period instead of
+        # re-sharpening the alias the way INTER_CUBIC/LINEAR would.
+        half = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+        _bw = cv2.threshold(half, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
+
+    if not has_painter_payload(found_texts):
+        # 2) medianBlur(5) + Otsu -- a nonlinear low-pass at full resolution recovers a few more
+        # (7/29) that the downscale alone missed.
+        blurred = cv2.medianBlur(gray, 5)
+        _bw = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
+
+    if not has_painter_payload(found_texts):
+        # 3) third-res downscale + Otsu -- a coarser averaging step for the rare frame the two
+        # passes above still miss (1/29).
+        third = cv2.resize(gray, None, fx=1.0 / 3.0, fy=1.0 / 3.0, interpolation=cv2.INTER_AREA)
+        _bw = cv2.threshold(third, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
+
+    if not has_painter_payload(found_texts):
+        # 4) L/R half-crop + medianBlur(5) + 2x upscale + Otsu -- last resort for a QR that only
+        # partially survives the interference. Upper 72% keeps the code above any lower-third
+        # caption/burn-in; the two halves (0-42% / 55-100% width) are tried separately since the
+        # multiview layout places two painter tiles side by side and one quadrant sometimes reads
+        # cleaner alone than the full-width crop would.
+        h, w = gray.shape[:2]
+        top = int(h * 0.72)
+        for lo_frac, hi_frac in ((0.0, 0.42), (0.55, 1.0)):
+            x0, x1 = int(w * lo_frac), int(w * hi_frac)
+            crop = gray[0:top, x0:x1]
+            crop_blur = cv2.medianBlur(crop, 5)
+            crop_up = cv2.resize(crop_blur, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            _bw = cv2.threshold(crop_up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
+            if has_painter_payload(found_texts):
+                break
+
     return list(found_texts)
 
 
