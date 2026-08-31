@@ -103,6 +103,26 @@ pub struct CadenceEvenness {
     /// this field fixes.
     pub derived_uniform_steps: usize,
     pub derived_uniform_fraction: f64,
+    /// #1250 BEAT-AWARE correction — the GATED reading since this ticket. Same self-consistent count
+    /// as `derived_uniform_steps` PLUS every BALANCED complementary step pair a sampling-phase beat
+    /// produces around the on-cadence step: a painted tick captured one refresh EARLY (a step BELOW
+    /// `derived_expected_step`) and its matching one-refresh-LATE compensation (the mirror step
+    /// ABOVE), which together net to exactly `derived_expected_step` per frame with ZERO lost or
+    /// duplicated content (the doctrinal dual-QR Vernier "1<->3 = 49/49 -> beat artifact, nets to
+    /// zero"). Collapsed COUNT-wise, NOT by strict adjacency: for each complementary value pair
+    /// `(vlo, vhi)` with `0 < vlo < derived_expected_step < vhi` and `vlo + vhi == 2 *
+    /// derived_expected_step`, `min(count(vlo), count(vhi))` balanced pairs count as uniform. An
+    /// UNBALANCED remainder (a genuine drift), a step 0 (a duplicate) and any gap (>= the catch-up)
+    /// stay non-uniform, so real cadence faults remain visible (copies/gaps are gated on their own
+    /// channel). Centered on `derived_expected_step` — the SAME step `derived_uniform_steps` uses
+    /// (self-consistent), and == the caller's `expected_step` on the real rig (delta mode is 2), so
+    /// it matches the issue's `2 * expected_step` there while never false-collapsing an off-step-mode
+    /// clean window. Never below `derived_uniform_steps` (collapsing only ADDS).
+    pub beat_corrected_uniform_steps: usize,
+    /// `beat_corrected_uniform_steps` as a fraction of `sample_deltas` — the field the #1142 cadence
+    /// uniformity FLOOR gates on since #1250. `derived_uniform_fraction` / `uniform_fraction` are
+    /// kept as diagnostics.
+    pub beat_corrected_uniform_fraction: f64,
 }
 
 /// Classify the presentation cadence of `ticks` (painted-tick values in RECORDED order).
@@ -162,6 +182,11 @@ pub fn measure_cadence_evenness(ticks: &[u32], expected_step: i64) -> Option<Cad
         .unwrap_or(expected_step);
     let derived_uniform = histogram.get(&derived_expected_step).copied().unwrap_or(0);
 
+    // #1250 STUB (RED): the beat-aware correction is not implemented yet — initialise the new
+    // reading to the derived reading so the fields exist and the tests compile. The GREEN commit
+    // replaces this with the count-based balanced-complementary-pair collapse.
+    let beat_corrected_uniform = derived_uniform;
+
     let nf = n as f64;
     Some(CadenceEvenness {
         expected_step,
@@ -179,6 +204,8 @@ pub fn measure_cadence_evenness(ticks: &[u32], expected_step: i64) -> Option<Cad
         derived_expected_step,
         derived_uniform_steps: derived_uniform,
         derived_uniform_fraction: derived_uniform as f64 / nf,
+        beat_corrected_uniform_steps: beat_corrected_uniform,
+        beat_corrected_uniform_fraction: beat_corrected_uniform as f64 / nf,
     })
 }
 
@@ -867,5 +894,183 @@ mod tests {
             uniformity_gates_overall_pass(),
             "#1142: the cadence-uniformity floor must gate overall_pass (LIVE)"
         );
+    }
+
+    // ---- #1250 — BEAT-AWARE uniformity (count-based balanced complementary collapse) ----------
+    //
+    // A sampling-phase beat between the free-running USB grabber capture clock and the painter 60Hz
+    // boundary emits BALANCED complementary step pairs around the on-cadence step: a delta 1 (a tick
+    // captured one refresh EARLY) and a delta 3 (its one-refresh-LATE compensation), at derived step
+    // 2 — netting to exactly `derived_expected_step` per frame with ZERO lost or duplicated content.
+    // The beat-corrected reading collapses `min(count(vlo), count(vhi))` such pairs into uniform
+    // steps (COUNT-wise, not by strict adjacency — real ordered data has the 1s and 3s mostly, but
+    // not all, immediately adjacent; only a count collapse meets the ticket's own data-check).
+    // Calibrated against real verdict data (run 1326320314): CAM3 seg2's balanced histogram
+    // {0:4, 1:180, 2:479, 3:180, 4:3} lifts from derived 0.5662 to beat-corrected 0.9917.
+
+    fn ticks_from_deltas(deltas: &[i64]) -> Vec<u32> {
+        // arbitrary non-zero base; every fixture delta here is >= 0, so ticks stay monotonic and in
+        // u32 range (a painted tick is a free-running counter; only RELATIVE spacing matters).
+        let mut t: i64 = 1_000_000;
+        let mut ticks = vec![t as u32];
+        for &d in deltas {
+            t += d;
+            ticks.push(t as u32);
+        }
+        ticks
+    }
+
+    #[test]
+    fn beat_corrected_collapses_balanced_complementary_pairs_countwise_1250() {
+        // 1s and 3s among 2s, deliberately NOT all strictly adjacent (a 1 and a 3 separated by a 2
+        // still collapse count-wise) — the exact real-data shape a strict-adjacency reading misses.
+        let deltas: Vec<i64> = vec![
+            2, 1, 2, 3, 2, 2, 3, 2, 1, 2, 2, 3, 2, 1, 2, 2, 1, 3, 2, 3, 1, 2, 2, 2,
+        ];
+        let v = measure_cadence_evenness(&ticks_from_deltas(&deltas), 2).expect("enough samples");
+        let c = |x: i64| v.delta_histogram.get(&x).copied().unwrap_or(0);
+        assert_eq!(
+            v.derived_expected_step, 2,
+            "mode of positive deltas is 2: {v:?}"
+        );
+        assert_eq!(c(1), 5);
+        assert_eq!(c(3), 5);
+        assert_eq!(
+            v.beat_corrected_uniform_steps,
+            v.derived_uniform_steps + 2 * c(1).min(c(3)),
+            "beat-corrected = derived-uniform + 2*min(count(1),count(3)): {v:?}"
+        );
+        assert!(
+            v.beat_corrected_uniform_fraction > v.derived_uniform_fraction,
+            "the beat correction must lift the fraction above the raw derived reading: {v:?}"
+        );
+    }
+
+    #[test]
+    fn beat_corrected_leaves_unbalanced_drift_dups_and_gaps_non_uniform_1250() {
+        // count(1)=4 != count(3)=2 (an UNBALANCED drift remainder), plus a 0 (dup) and two 4s (gap).
+        // Only min(4,2)=2 pairs collapse; the extra two 1s, the 0 and the two 4s STAY non-uniform.
+        let deltas: Vec<i64> = vec![2, 1, 2, 3, 2, 1, 2, 3, 2, 1, 2, 0, 2, 1, 4, 2, 4, 2, 2];
+        let v = measure_cadence_evenness(&ticks_from_deltas(&deltas), 2).expect("enough samples");
+        let c = |x: i64| v.delta_histogram.get(&x).copied().unwrap_or(0);
+        assert_eq!(v.derived_expected_step, 2);
+        assert_eq!(c(1), 4);
+        assert_eq!(c(3), 2);
+        assert_eq!(c(0), 1);
+        assert_eq!(c(4), 2);
+        assert_eq!(
+            v.beat_corrected_uniform_steps,
+            v.derived_uniform_steps + 2 * c(1).min(c(3)),
+            "only the BALANCED min(4,2)=2 pairs collapse: {v:?}"
+        );
+        // The non-uniform residue is exactly: the two dropped 1s (drift) + the dup + the two gaps.
+        let non_uniform = v.sample_deltas - v.beat_corrected_uniform_steps;
+        assert_eq!(
+            non_uniform,
+            (c(1) - c(3)) + c(0) + c(4),
+            "unbalanced remainder + dup + gaps stay non-uniform: {v:?}"
+        );
+        assert!(v.beat_corrected_uniform_fraction < 1.0);
+    }
+
+    #[test]
+    fn real_cam3_seg2_histogram_beat_corrected_matches_0_9917_1250() {
+        // The EXACT balanced histogram of the failing run 1326320314 CAM3 seg2:
+        // {0:4, 1:180, 2:479, 3:180, 4:3} (846 deltas). Count-based collapse is order-independent,
+        // so any ordering with these counts reproduces the number the issue's data-check predicts.
+        let mut deltas: Vec<i64> = vec![2; 479];
+        for _ in 0..180 {
+            deltas.push(1);
+            deltas.push(3);
+        }
+        for _ in 0..4 {
+            deltas.push(0);
+        }
+        for _ in 0..3 {
+            deltas.push(4);
+        }
+        assert_eq!(deltas.len(), 846);
+        let v = measure_cadence_evenness(&ticks_from_deltas(&deltas), 2).expect("plenty");
+        assert_eq!(v.sample_deltas, 846);
+        assert_eq!(v.derived_expected_step, 2);
+        assert!(
+            (v.derived_uniform_fraction - 479.0 / 846.0).abs() < 1e-9,
+            "raw derived reading reproduces the RED verdict value 0.5662: {}",
+            v.derived_uniform_fraction
+        );
+        // (479 + 2*180) / 846 = 839/846 = 0.99173..., exactly the issue's (479+360)/846 data-check.
+        assert_eq!(v.beat_corrected_uniform_steps, 479 + 360);
+        assert!(
+            (v.beat_corrected_uniform_fraction - 839.0 / 846.0).abs() < 1e-9,
+            "beat-corrected must lift the RED 0.5662 window to ~0.9917: {}",
+            v.beat_corrected_uniform_fraction
+        );
+        // And the beat-corrected window now PASSES the floor the derived reading FAILED.
+        assert!(!cadence_uniformity_gate_pass(
+            Some(v.derived_uniform_fraction),
+            Some(UNIFORM_FRACTION_MIN)
+        ));
+        assert!(cadence_uniformity_gate_pass(
+            Some(v.beat_corrected_uniform_fraction),
+            Some(UNIFORM_FRACTION_MIN)
+        ));
+    }
+
+    #[test]
+    fn fifteen_fps_judder_beat_corrected_still_fails_the_floor_1250() {
+        // SAFETY: the 15fps-judder pathology (held frame + double jump) must stay RED even under the
+        // beat correction — its positive deltas are all 4 (derived step 4), so no positive
+        // complementary pair exists (0 is a dup, excluded) and NOTHING collapses.
+        let mut ticks = Vec::new();
+        for k in 0..15u32 {
+            let t = k * 4;
+            ticks.push(t);
+            ticks.push(t);
+        }
+        let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
+        assert_eq!(
+            v.derived_expected_step, 4,
+            "judder's only positive delta is 4: {v:?}"
+        );
+        assert_eq!(
+            v.beat_corrected_uniform_steps, v.derived_uniform_steps,
+            "no complementary collapse is possible for the judder pattern: {v:?}"
+        );
+        assert!(
+            v.beat_corrected_uniform_fraction < UNIFORM_FRACTION_MIN,
+            "judder beat_corrected {} must stay below the floor",
+            v.beat_corrected_uniform_fraction
+        );
+        assert!(!cadence_uniformity_gate_pass(
+            Some(v.beat_corrected_uniform_fraction),
+            Some(UNIFORM_FRACTION_MIN)
+        ));
+    }
+
+    #[test]
+    fn smooth_window_beat_corrected_is_one_1250() {
+        // A perfectly smooth 60-in-30 downsample: no non-center deltas to pair, so beat-corrected
+        // equals the derived 1.0.
+        let ticks: Vec<u32> = (0..60).step_by(2).collect();
+        let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
+        assert_eq!(v.beat_corrected_uniform_fraction, 1.0);
+        assert_eq!(v.beat_corrected_uniform_steps, v.derived_uniform_steps);
+    }
+
+    #[test]
+    fn beat_corrected_is_never_below_derived_1250() {
+        // Invariant: collapsing only ADDS to the uniform count, so the beat-corrected reading is
+        // always >= the derived reading, across every reference pattern.
+        let smooth: Vec<u32> = (0..60).step_by(2).collect();
+        let beat = ticks_from_deltas(&[2, 1, 3, 2, 3, 1, 2, 1, 2, 3]);
+        let jitter = real_rig_jitter_pattern(10);
+        for ticks in [smooth, beat, jitter] {
+            let v = measure_cadence_evenness(&ticks, 2).expect("enough");
+            assert!(
+                v.beat_corrected_uniform_steps >= v.derived_uniform_steps,
+                "beat-corrected must never drop below derived: {v:?}"
+            );
+            assert!(v.beat_corrected_uniform_fraction >= v.derived_uniform_fraction - 1e-12);
+        }
     }
 }
