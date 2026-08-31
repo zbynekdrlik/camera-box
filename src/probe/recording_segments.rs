@@ -1116,7 +1116,7 @@ mod tests {
         // #1220 (owner mandate, 2026-08-29) re-arms the WIDER already-calibrated <=3 tolerance
         // channel, which now absorbs this exact shape instead -- the singleton mechanism is
         // dormant (superseded by precedence), so its note/count read as if never consumed. strict
-        // `pass` still stays false/visible; the tolerance ceiling (4+) still fails, unchanged.
+        // `pass` still stays false/visible; over the tolerance ceiling still fails, unchanged.
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 4, 1, 100);
         frames.extend([
@@ -1187,7 +1187,7 @@ mod tests {
         // Issue 1220 (owner mandate, 2026-08-29) re-arms the calibrated <=3 tolerance channel:
         // the ONE counted drop is ABSORBED into `overall_pass` through it (the #1169 <=1/<=1
         // singleton band is dormant, superseded by precedence); strict `pass` stays false/visible.
-        // The companion below (four drops, over the <=3 ceiling) still fails.
+        // The companion below (six drops, over the walked-up <=5 ceiling) still fails.
         let schedule = vec![win("cam1", 0, 10_000)];
         let frames = vec![
             SegmentFrame {
@@ -1246,11 +1246,12 @@ mod tests {
             "issue 1220: the single counted drop is ABSORBED into overall_pass via the re-armed \
              tolerance channel -- counted, never masked: {v:?}"
         );
-        // Companion: the SAME freeze-hiding shape with FOUR real drops (102, 104, 106 AND 108
-        // missing) exceeds the re-armed <=3 tolerance ceiling -- overall_pass still FAILS. Bumped
-        // from two (which #1220 now absorbs -- 2 <= 3) to four so this stays a genuine over-ceiling
-        // proof.
-        let frames_four_drops = vec![
+        // Companion: the SAME freeze-hiding shape with SIX real drops (102, 104, 106, 108, 110
+        // AND 112 missing) exceeds the walked-up (#1243, 2026-08-31) <=5 tolerance ceiling --
+        // overall_pass still FAILS. Bumped from two (#1220 absorbs -- 2 <= 5) through four
+        // (#1220-era, over the then-<=3 ceiling) to six so this stays a genuine over-ceiling
+        // proof at the current tolerance.
+        let frames_six_drops = vec![
             SegmentFrame {
                 frame_index: 0,
                 gen_ts_ns: 100,
@@ -1286,16 +1287,26 @@ mod tests {
                 gen_ts_ns: 700,
                 tick: Some(109),
             }, // 108 dropped
+            SegmentFrame {
+                frame_index: 7,
+                gen_ts_ns: 800,
+                tick: Some(111),
+            }, // 110 dropped
+            SegmentFrame {
+                frame_index: 8,
+                gen_ts_ns: 900,
+                tick: Some(113),
+            }, // 112 dropped
         ];
-        let v2 = segment_continuity(&frames_four_drops, &schedule, 0, 1);
+        let v2 = segment_continuity(&frames_six_drops, &schedule, 0, 1);
         assert_eq!(
-            v2.segments[0].gaps, 4,
-            "all four real drops behind the freeze are counted, never masked: {:?}",
+            v2.segments[0].gaps, 6,
+            "all six real drops behind the freeze are counted, never masked: {:?}",
             v2.segments[0]
         );
         assert!(
             !v2.overall_pass,
-            "issue 1220: four counted drops exceed the re-armed <=3 tolerance ceiling -- never \
+            "issue 1243: six counted drops exceed the walked-up <=5 tolerance ceiling -- never \
              absorbed: {v2:?}"
         );
     }
@@ -1359,7 +1370,7 @@ mod tests {
         // Issue 1220 (owner mandate, 2026-08-29): the re-armed <=3 tolerance channel now ABSORBS
         // this single COUNTED gap into `overall_pass` -- the #1169 <=1/<=1 singleton band is
         // dormant (superseded by precedence), so its note/count read as never consumed; strict
-        // `pass` stays false/visible. The gap is counted, never masked; four missing ticks (the
+        // `pass` stays false/visible. The gap is counted, never masked; six missing ticks (the
         // sibling test below) still fail past the tolerance ceiling.
         let schedule = vec![win("cam1", 0, 10_000)];
         let frames = vec![
@@ -1419,14 +1430,15 @@ mod tests {
     }
 
     #[test]
-    fn benign_delivery_reorder_four_missing_ticks_still_fail_625() {
-        // Renamed from `..._two_missing_ticks_still_fail_625`: TWO missing ticks (1004, 1010) sat
-        // JUST past the #1169 <=1 singleton band; #1220's wider <=3 tolerance now absorbs two, so
-        // this fixture is bumped to FOUR genuinely-missing ticks (1004, 1010, 1014, 1018) to keep
-        // proving the never-mask guarantee ABOVE the re-armed ceiling: present distinct ticks
-        // {1000,1002,1006,1008,1012,1016,1020} span the step-2 range 1000..1020 (11 expected
-        // values), so exactly 4 are missing. Four counted gaps exceed the <=3 tolerance, so the
-        // segment AND overall_pass both still FAIL.
+    fn benign_delivery_reorder_six_missing_ticks_still_fail_625() {
+        // Renamed from `..._four_missing_ticks_still_fail_625` (itself renamed from
+        // `..._two_missing_ticks_still_fail_625`): #1220's <=3 tolerance absorbed two, so the
+        // fixture was bumped to four; #1243 (2026-08-31) walked the tolerance 3 -> 5, so four is
+        // no longer over the ceiling -- bumped again to SIX genuinely-missing ticks (1004, 1010,
+        // 1014, 1018, 1022, 1026) to keep proving the never-mask guarantee ABOVE the walked-up
+        // ceiling: present distinct ticks {1000,1002,1006,1008,1012,1016,1020,1024,1028} span the
+        // step-2 range 1000..1028 (15 expected values), so exactly 6 are missing. Six counted
+        // gaps exceed the <=5 tolerance, so the segment AND overall_pass both still FAIL.
         let schedule = vec![win("cam1", 0, 10_000)];
         let frames = vec![
             SegmentFrame {
@@ -1464,20 +1476,30 @@ mod tests {
                 gen_ts_ns: 700,
                 tick: Some(1020),
             },
+            SegmentFrame {
+                frame_index: 7,
+                gen_ts_ns: 800,
+                tick: Some(1024),
+            },
+            SegmentFrame {
+                frame_index: 8,
+                gen_ts_ns: 900,
+                tick: Some(1028),
+            },
         ];
         let v = segment_continuity(&frames, &schedule, 0, 2);
         assert_eq!(
-            v.segments[0].gaps, 4,
-            "all four genuinely-missing ticks are counted, reorder or not: {:?}",
+            v.segments[0].gaps, 6,
+            "all six genuinely-missing ticks are counted, reorder or not: {:?}",
             v.segments[0]
         );
         assert!(
             !v.segments[0].pass,
-            "four missing ticks must still fail STRICT: {v:?}"
+            "six missing ticks must still fail STRICT: {v:?}"
         );
         assert!(
             !v.overall_pass,
-            "issue 1220: four counted gaps exceed the re-armed <=3 tolerance -- never absorbed: {v:?}"
+            "issue 1243: six counted gaps exceed the walked-up <=5 tolerance -- never absorbed: {v:?}"
         );
     }
 
@@ -2214,22 +2236,22 @@ mod tests {
                 frame_index: 101,
                 gen_ts_ns: 1200,
                 tick: Some(500),
-            }, // cam2 copy #1 -- AT the tolerance
+            }, // cam2 copy #1 -- under the tolerance
             SegmentFrame {
                 frame_index: 102,
                 gen_ts_ns: 1300,
                 tick: Some(500),
-            }, // cam2 copy #2 -- AT the tolerance
+            }, // cam2 copy #2 -- under the tolerance
             SegmentFrame {
                 frame_index: 103,
                 gen_ts_ns: 1400,
                 tick: Some(500),
-            }, // cam2 copy #3 -- AT the tolerance
+            }, // cam2 copy #3 -- under the tolerance
             SegmentFrame {
                 frame_index: 104,
                 gen_ts_ns: 1500,
                 tick: Some(500),
-            }, // cam2 copy #4 -- AT the tolerance
+            }, // cam2 copy #4 -- under the tolerance
             SegmentFrame {
                 frame_index: 105,
                 gen_ts_ns: 1600,
@@ -2338,7 +2360,7 @@ mod tests {
         );
         assert_eq!(
             v.windows_over_copies_gaps_tolerance, 0,
-            "the window is WITHIN the reported <=3 tolerance (count stays 0): {v:?}"
+            "the window is WITHIN the reported tolerance (count stays 0): {v:?}"
         );
         assert_eq!(
             v.windows_failed_report_only, 1,
@@ -2381,7 +2403,7 @@ mod tests {
         assert_eq!(v.segments[1].copies, 2, "{:?}", v.segments[1]);
         assert!(
             v.overall_pass,
-            "#1220: 2 copies sit within the re-armed <=3 tolerance -- must now PASS overall_pass: {v:?}"
+            "#1220: 2 copies sit within the re-armed tolerance -- must now PASS overall_pass: {v:?}"
         );
         assert!(
             v.segments[1].singleton_allowance_note.is_none(),

@@ -941,11 +941,14 @@ mod tests {
     }
 
     #[test]
-    fn four_copies_or_gaps_still_fail_over_the_reactivated_tolerance_1220() {
-        // The upper edge #1220 does NOT touch: `WINDOW_COPIES_GAPS_TOLERANCE + 1` (6 today,
-        // walked 3 -> 5 on issue 1243) must still FAIL -- this is what keeps the re-arm a real,
-        // still-discriminating gate rather than an open door. Mirrors run 1989954227's still-red
-        // CAM2 windows (copies=10/gaps=9, copies=19/gaps=18), still well over the walked-up value.
+    fn tolerance_plus_one_copies_or_gaps_still_fail_over_the_reactivated_tolerance_1220() {
+        // Renamed from `four_copies_or_gaps_still_fail_over_the_reactivated_tolerance_1220` --
+        // the fixture value tracks the const (`+1`), so the old "four" name went stale as soon as
+        // the const walked past 3 (it's 6 today, walked 3 -> 5 on issue 1243). The upper edge
+        // #1220 does NOT touch: `WINDOW_COPIES_GAPS_TOLERANCE + 1` must still FAIL -- this is what
+        // keeps the re-arm a real, still-discriminating gate rather than an open door. Mirrors run
+        // 1989954227's still-red CAM2 windows (copies=10/gaps=9, copies=19/gaps=18), still well
+        // over the walked-up value.
         for &(c, g) in &[
             (WINDOW_COPIES_GAPS_TOLERANCE + 1, 0u32),
             (0, WINDOW_COPIES_GAPS_TOLERANCE + 1),
@@ -953,7 +956,9 @@ mod tests {
             let d = decide(847, 0, c, g);
             assert!(
                 !d.overall_pass_term,
-                "#1220: copies={c} gaps={g} exceeds the re-armed <=3 tolerance -- must still fail: {d:?}"
+                "#1220: copies={c} gaps={g} exceeds the re-armed tolerance ({}) -- must still \
+                 fail: {d:?}",
+                WINDOW_COPIES_GAPS_TOLERANCE
             );
         }
     }

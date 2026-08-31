@@ -4814,7 +4814,8 @@ fn build_and_print_verdict_with_stream_diffs(
                 println!(
                     "  ⚠ #889 RE-GATE (per-window tolerance={}): {}/{} cambox window(s) exceed the \
                      per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — {}. \
-                     NOTE: this is the <=3 relaxed tolerance, NOT the \
+                     NOTE: this is the relaxed tolerance printed above (walked over time, see \
+                     issue 1243), NOT the \
                      issue-1169 <=1 SINGLETON allowance (a separate, tighter band; see its own line).",
                     seg.copies_gaps_tolerance,
                     seg.windows_over_copies_gaps_tolerance,
@@ -4983,8 +4984,9 @@ fn build_and_print_verdict_with_stream_diffs(
                         serde_json::json!(if singleton_armed && copies_gaps_tol_gates {
                             format!(
                                 "#1169: the <= {}/{} copies/gaps SINGLETON band is armed but \
-                                 currently DORMANT -- superseded by the wider issue-1220 <=3 \
-                                 copies/gaps tolerance channel (also armed), which governs \
+                                 currently DORMANT -- superseded by the wider issue-1220 \
+                                 copies/gaps tolerance channel (see copies_gaps_tolerance above; \
+                                 also armed), which governs \
                                  overall_pass instead via decide()'s if/else-if precedence; \
                                  segment_singleton_allowance_consumed/singleton_allowance_note \
                                  never fire while that wider channel stays armed. Kept wired as \
@@ -9476,7 +9478,7 @@ mod tests {
             seg["overall_pass"],
             serde_json::json!(true),
             "1220: a single copy is now ABSORBED into overall_pass via the RE-ARMED issue-1220 \
-             <=3 tolerance channel (owner mandate, 2026-08-29) -- the issue-1169 <=1/<=1 \
+             tolerance channel (owner mandate, 2026-08-29) -- the issue-1169 <=1/<=1 \
              singleton band is dormant (superseded by precedence), not what did the absorbing: {seg}"
         );
         assert_eq!(
