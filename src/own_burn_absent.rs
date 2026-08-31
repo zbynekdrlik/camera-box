@@ -44,7 +44,7 @@ pub struct OwnBurnPresence {
     /// The scheduled camboxes actually ASSESSED (scheduled ∩ known burn-count keys), canonical
     /// lowercase, sorted, deduped. A scheduled cambox with no matching burn-count key (e.g.
     /// `"imag"`, measured by its own leg gate) is OUT of this gate's scope and excluded.
-    pub scheduled_cams: Vec<String>,
+    pub assessed_cams: Vec<String>,
     /// Per assessed cambox: was its OWN digital burn entirely absent (count == 0)? `(cam, absent)`,
     /// sorted by cam. This is the source of the per-camera `own_burn_absent` map in the verdict.
     pub per_cam_absent: Vec<(String, bool)>,
@@ -82,7 +82,7 @@ pub fn evaluate(scheduled_camboxes: &[String], burn_counts: &[(&str, usize)]) ->
     }
     scheduled.sort();
 
-    let mut scheduled_cams: Vec<String> = Vec::new();
+    let mut assessed_cams: Vec<String> = Vec::new();
     let mut per_cam_absent: Vec<(String, bool)> = Vec::new();
     let mut absent_cams: Vec<String> = Vec::new();
     for cam in &scheduled {
@@ -92,7 +92,7 @@ pub fn evaluate(scheduled_camboxes: &[String], burn_counts: &[(&str, usize)]) ->
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(cam))
         {
-            scheduled_cams.push(cam.clone());
+            assessed_cams.push(cam.clone());
             let absent = count == 0;
             per_cam_absent.push((cam.clone(), absent));
             if absent {
@@ -101,7 +101,7 @@ pub fn evaluate(scheduled_camboxes: &[String], burn_counts: &[(&str, usize)]) ->
         }
     }
     OwnBurnPresence {
-        scheduled_cams,
+        assessed_cams,
         per_cam_absent,
         absent_cams,
     }
@@ -179,7 +179,7 @@ mod tests {
         // No switch-schedule (single-camera mode) ⇒ nothing scheduled ⇒ nothing to warn about
         // (the #133 all-absent WARN covers that mode).
         let p = evaluate(&[], &repro_counts());
-        assert!(p.scheduled_cams.is_empty());
+        assert!(p.assessed_cams.is_empty());
         assert!(p.absent_cams.is_empty());
         assert!(p.pass());
     }
@@ -191,7 +191,7 @@ mod tests {
         let counts = vec![("cam2", 0usize)];
         let p = evaluate(&scheduled, &counts);
         assert_eq!(p.absent_cams, vec!["cam2".to_string()]);
-        assert_eq!(p.scheduled_cams, vec!["cam2".to_string()]);
+        assert_eq!(p.assessed_cams, vec!["cam2".to_string()]);
     }
 
     #[test]
@@ -201,9 +201,9 @@ mod tests {
         let scheduled = vec!["imag".to_string(), "CAM2".to_string()];
         let counts = vec![("cam2", 0usize)];
         let p = evaluate(&scheduled, &counts);
-        assert_eq!(p.scheduled_cams, vec!["cam2".to_string()]);
+        assert_eq!(p.assessed_cams, vec!["cam2".to_string()]);
         assert_eq!(p.absent_cams, vec!["cam2".to_string()]);
-        assert!(!p.scheduled_cams.contains(&"imag".to_string()));
+        assert!(!p.assessed_cams.contains(&"imag".to_string()));
     }
 
     #[test]
@@ -213,7 +213,7 @@ mod tests {
         let counts = vec![("cam1", 5usize), ("cam2", 0usize)];
         let p = evaluate(&scheduled, &counts);
         assert_eq!(
-            p.scheduled_cams,
+            p.assessed_cams,
             vec!["cam1".to_string(), "cam2".to_string()]
         );
         assert_eq!(p.absent_cams, vec!["cam2".to_string()]);

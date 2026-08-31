@@ -22,7 +22,7 @@ def _verdict_own_burn_absent_tripped_report_only():
         "full_chain": {
             "zero_loss": True,
             "own_burn_absent_gate": {
-                "scheduled_cams": ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"],
+                "assessed_cams": ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"],
                 "absent_cams": ["cam2"],
                 "per_cam": {"cam1": False, "cam2": True, "cam3": False},
                 "pass": False,
@@ -58,7 +58,7 @@ def test_clean_gate_is_not_listed():
         "full_chain": {
             "zero_loss": True,
             "own_burn_absent_gate": {
-                "scheduled_cams": ["cam1", "cam2"],
+                "assessed_cams": ["cam1", "cam2"],
                 "absent_cams": [],
                 "per_cam": {"cam1": False, "cam2": False},
                 "pass": True,
@@ -80,7 +80,7 @@ def test_future_live_flip_routes_to_blocking_not_report_only():
         "full_chain": {
             "zero_loss": True,
             "own_burn_absent_gate": {
-                "scheduled_cams": ["cam1", "cam2"],
+                "assessed_cams": ["cam1", "cam2"],
                 "absent_cams": ["cam2"],
                 "per_cam": {"cam1": False, "cam2": True},
                 "pass": False,

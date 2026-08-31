@@ -3552,7 +3552,7 @@ fn build_and_print_verdict_with_stream_diffs(
                     own_burn_per_cam.insert(cam.clone(), serde_json::Value::Bool(*absent));
                 }
                 report["full_chain"]["own_burn_absent_gate"] = serde_json::json!({
-                    "scheduled_cams": own_burn.scheduled_cams,
+                    "assessed_cams": own_burn.assessed_cams,
                     "absent_cams": own_burn.absent_cams,
                     "per_cam": serde_json::Value::Object(own_burn_per_cam),
                     "pass": own_burn_gate_pass,
@@ -3564,7 +3564,10 @@ fn build_and_print_verdict_with_stream_diffs(
                              issue-1246 cam2-painter-deadman symptom), so the per-segment \
                              optical-tick verdict can overstate it as a clean pass. REPORT-ONLY \
                              (own_burn_absent::gates_overall_pass); the LIVE [7b/8] burn-unit \
-                             run-integrity check already fails such a run. PASS/FAIL unchanged.",
+                             run-integrity check already fails such a run. PASS/FAIL unchanged. \
+                             assessed_cams = the scheduled cams carrying a burn-count key (a \
+                             scheduled cam without one, e.g. imag, is excluded from assessment — \
+                             never a false warning).",
                 });
                 if !own_burn_gate_pass {
                     eprintln!(
