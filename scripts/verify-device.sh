@@ -134,6 +134,12 @@
 #       live missing it despite the script listing it -- exactly the diagnostic tool that proved
 #       cam1's grabber innocent (issue 1198). Checked fleet-wide like (x)/(x2), never cam2-only.
 #       FAILs loud, naming the missing package (v4l-utils) by name, never a silent measured zero.
+#   (ag) ethtool is installed (`command -v ethtool`) -- issue 1240: also in setup-device.sh STEP
+#       16's `|| true`-guarded apt-get line, and setup-device.sh's OWN EEE/flow-control tuning
+#       calls (`ethtool --set-eee` / `ethtool -A`, STEP 2) are EACH individually `|| true`-guarded
+#       too -- cam3 ran for years with NO ethtool at all and the NIC tuning silently never ran.
+#       Checked fleet-wide like (x)/(x2)/(af), never cam2-only. FAILs loud, naming the missing
+#       package (ethtool) by name, never a silent measured zero.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -726,6 +732,9 @@ Checks:
   (af) v4l2-ctl (v4l-utils) installed and runnable (`v4l2-ctl --version`) -- already listed in
       setup-device.sh STEP 16's apt-get line, but that line silently swallows a per-box apt
       failure; cam3/cam4 were found live missing it despite the script listing it (issue 1213)
+  (ag) ethtool installed (`command -v ethtool`) -- also in setup-device.sh STEP 16's apt-get line,
+      and its OWN EEE/flow-control tuning calls are ALSO `|| true`-guarded, so a missing ethtool
+      silently no-ops NIC tuning fleet-wide; cam3 ran for years without it (issue 1240)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1446,6 +1455,29 @@ else
   fail "v4l2-ctl not found/runnable on PATH (ssh rc=$afrc) -- v4l-utils is missing even though \
 setup-device.sh's STEP 16 apt-get line lists it (a silently-swallowed apt failure, issue 1213); \
 reprovision the box or run: apt-get install -y v4l-utils"
+fi
+
+# (ag) ethtool installed (NIC tuning runtime dependency, issue 1240) --------------------------------
+# setup-device.sh's STEP 16 apt-get line ALREADY lists ethtool, but that whole install line is
+# guarded by `2>/dev/null || true` -- the SAME silently-swallowed-apt-failure class as (af) v4l2-ctl
+# (issue 1213). Worse here: setup-device.sh's OWN EEE/flow-control tuning calls (`ethtool --set-eee`
+# / `ethtool -A`, STEP 2) are EACH individually `2>/dev/null || true`-guarded too, so a box missing
+# ethtool silently ran with NO NIC tuning applied at all, with zero error anywhere -- cam3 was found
+# live missing it entirely, having run for years this way. `command -v` alone proves the binary is
+# present and on PATH, the same minimal probe (t) fuser already uses above. Fails loud NAMING the
+# missing package (ethtool), never a silent measured zero
+# (.claude/rules/imag-ssh-remote-tool-preflight.md's discipline, applied here to the
+# provisioning-time acceptance gate). Inserted BEFORE (q) -- see
+# .claude/rules/provisioning-scripts.md: (q) must remain the intentionally-LAST check.
+agrc=0
+ETHTOOL_PATH="$(ssh_box "command -v ethtool 2>/dev/null")" || agrc=$?
+if [ "$agrc" -eq 0 ] && [ -n "$ETHTOOL_PATH" ]; then
+  ok "ethtool present ($ETHTOOL_PATH) -- NIC tuning runtime dependency (issue 1240)"
+else
+  fail "ethtool not found on PATH (ssh rc=$agrc) -- ethtool is missing even though \
+setup-device.sh's STEP 16 apt-get line lists it (a silently-swallowed apt failure, issue 1240); \
+setup-device.sh's own EEE/flow-control tuning is ALSO guarded by || true, so NIC tuning has been \
+silently skipped on this box; reprovision the box or run: apt-get install -y ethtool"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
