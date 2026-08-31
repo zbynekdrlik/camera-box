@@ -53,6 +53,21 @@ evidence the precondition was satisfied — do not read `copies_gaps_tolerance_g
 `WINDOW_COPIES_GAPS_TOLERANCE` is now LIVE again (gates `overall_pass`, not just `relaxed_pass`) and
 the walk-down commitment stays open on #1220 (not #1031) going forward.
 
+**#1243 (relax-to-green) + #1242 (walk-back) — VERIFY the fold state BEFORE a "relax/restore the
+strict per-segment fold" ticket; its premise is easily stale.** Because #1220 re-armed seam 2,
+`segment_continuity()` ALREADY folds `overall_pass_term == relaxed_pass` (NOT strict `pass`). So a
+ticket that says "switch the cambox per-segment blocking fold from strict → relaxed" (#1243 change 1)
+can describe a state that already holds — grep `copies_gaps_tolerance_gates_overall_pass()` (== true
+today) and read the run's `all_cambox_continuity.overall_pass` in the verdict JSON (true when every
+window is within the `<=3` tolerance; segments show `pass=false` report-only via
+`windows_failed_report_only` while `relaxed_pass=true`) BEFORE assuming the fold is strict. In #1243
+the fold was already relaxed, so change 1 was a comment-only walk-back annotation and the only real
+RED→GREEN was a SEPARATE gate — the #1142 uniformity floor (`presentation_cadence::UNIFORM_FRACTION_MIN`,
+a crate-root Tier-0 const, NOT this rule's window_gate seams) walked 0.95 → 0.93 (run 1629895310
+worst derived 0.9397 was the sole blocking red). The paired RESTORE ticket #1242 therefore restores
+strict `copies==0` by DISARMING seam 2 (`copies_gaps_tolerance_gates_overall_pass() -> false`), never
+by "changing the fold" — the fold already reads relaxed via the seam.
+
 **Reusable shape for a FUTURE seam like this one — "precedence supersession", distinct from every
 flag-flip pattern in `gate-allowance-restore-red-green.md`:** re-arming `copies_gaps_tolerance_
 gates_overall_pass()` needed ZERO change to seam 4's own flag (`segment_singleton_allowance_gates_
