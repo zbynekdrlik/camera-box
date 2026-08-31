@@ -134,5 +134,7 @@ for the REAL head commit, so a bare `GITHUB_SHA` on `pull_request` is a PERMANEN
 merely stale-until-retry. `full-path-e2e.yml` (the only `pull_request`-event caller of this lib)
 wires `FRAME_PROBE_ALIGN_CANDIDATE_SHA: github.event.pull_request.head.sha` on that event — the
 SAME #703 pattern its "Fetch the matching Windows recording-verdict.exe" step already uses;
-push/workflow_dispatch runs leave the seam unset and correctly fall through to plain `GITHUB_SHA`.
+push/workflow_dispatch runs resolve the seam's ternary to plain `github.sha` there instead (the
+workflow always SETS the seam — never literally unset — but that resolves to the same value
+`GITHUB_SHA` would, since both are the real head on those events).
 `FRAME_PROBE_ALIGN_CI_BRANCH` (the old branch-selection seam) is REMOVED — nothing else consumed it.

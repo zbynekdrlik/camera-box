@@ -152,7 +152,8 @@ frame_probe_align_sha_of() {
 # caller of this lib) therefore sets the explicit FRAME_PROBE_ALIGN_CANDIDATE_SHA seam to
 # `github.event.pull_request.head.sha` for a pull_request run -- the SAME #703 pattern its own
 # "Fetch the matching Windows recording-verdict.exe" step already uses. push/workflow_dispatch
-# events leave the seam unset and fall through to plain GITHUB_SHA, which IS the real head there.
+# events (see full-path-e2e.yml's own ternary) resolve the seam to plain `github.sha` there anyway
+# -- functionally identical to falling through to GITHUB_SHA, since both are the real head there.
 frame_probe_align_candidate_sha() {
   if [ -n "${FRAME_PROBE_ALIGN_CANDIDATE_SHA:-}" ]; then
     printf '%s' "$FRAME_PROBE_ALIGN_CANDIDATE_SHA"
