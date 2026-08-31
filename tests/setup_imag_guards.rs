@@ -1215,7 +1215,7 @@ fn setup_imag_scopes_eee_flowcontrol_to_ndi_nic_not_every_interface() {
     let body = read(SETUP);
     for needle in [
         "ethtool --set-eee \"$NIC\" eee off",
-        "ethtool -A \"$NIC\" rx off tx off",
+        "ethtool -A \"$NIC\" rx on tx on",
         "if [ \"\\$IFACE\" = \"${NIC}\" ]; then",
     ] {
         assert!(
@@ -1241,7 +1241,7 @@ fn setup_imag_reapplies_eee_off_in_rc_local_for_boot_persistence() {
     let body = read(SETUP);
     assert!(
         body.contains("ethtool --set-eee ${NIC} eee off")
-            && body.contains("ethtool -A ${NIC} rx off tx off"),
+            && body.contains("ethtool -A ${NIC} rx on tx on"),
         "{SETUP}: rc.local (re-run on every boot) must also carry the EEE/flow-control-off calls \
          for the resolved NIC — a networkd-dispatcher hook alone is not guaranteed to re-fire on \
          every boot"

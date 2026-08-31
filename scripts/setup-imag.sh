@@ -388,16 +388,16 @@ sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
 mkdir -p /etc/networkd-dispatcher/routable.d
 cat > /etc/networkd-dispatcher/routable.d/optimize-nic <<NICEOF
 #!/bin/bash
-# Disable EEE (Green Ethernet) and flow control for low latency — scoped to imag's NDI NIC only.
+# Disable EEE (Green Ethernet); advertise flow control for low latency (issue 1234) — scoped to imag's NDI NIC only.
 if [ "\$IFACE" = "${NIC}" ]; then
     ethtool --set-eee "${NIC}" eee off 2>/dev/null || true
-    ethtool -A "${NIC}" rx off tx off 2>/dev/null || true
+    ethtool -A "${NIC}" rx on tx on 2>/dev/null || true
 fi
 NICEOF
 chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
 ethtool --set-eee "$NIC" eee off 2>/dev/null || true
-ethtool -A "$NIC" rx off tx off 2>/dev/null || true
-echo "  sysctl: buffers+BBR+nodelay+IPv6-off applied; EEE/flow-control off on $NIC"
+ethtool -A "$NIC" rx on tx on 2>/dev/null || true
+echo "  sysctl: buffers+BBR+nodelay+IPv6-off applied; EEE off, flow-control advertised on $NIC"
 
 # =============================================================================
 step 3 "DanteSync (#479): pin imag's system clock to the cluster master (genlock needs it)"
@@ -531,10 +531,11 @@ cat > /etc/rc.local <<EOF
 for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "\$g"; done
 for u in /sys/bus/usb/devices/*/power/control; do echo on > "\$u" 2>/dev/null; done
 for n in /sys/class/net/*/device/power/control; do echo on > "\$n" 2>/dev/null; done
-# #486: EEE/flow-control off on the rig NDI NIC — reapplied every boot (belt-and-suspenders
-# alongside step 2's networkd-dispatcher hook; some USB-ethernet chipsets reset EEE state).
+# #486/#1234: EEE off, flow-control advertised on the rig NDI NIC — reapplied every boot
+# (belt-and-suspenders alongside step 2's networkd-dispatcher hook; some USB-ethernet
+# chipsets reset EEE/pause state on power cycle).
 ethtool --set-eee ${NIC} eee off 2>/dev/null || true
-ethtool -A ${NIC} rx off tx off 2>/dev/null || true
+ethtool -A ${NIC} rx on tx on 2>/dev/null || true
 exit 0
 EOF
 chmod +x /etc/rc.local
