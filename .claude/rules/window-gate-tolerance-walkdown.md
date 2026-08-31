@@ -174,6 +174,22 @@ stale "tolerance+1" comments. `recording-verdict.rs` reads the const dynamically
 Before pushing, grep `\.(copies|gaps),\s*[0-9]` and `decide(` literals across `src/`+`tests/` for any
 PASS-asserting fixture carrying a count that would flip at the new value.
 
+**Correction, issue 1243 (2026-08-31): the "PASS-asserting" framing above is INCOMPLETE — a walk
+UP (widening the tolerance) breaks a THIRD, easy-to-miss site the same way: a FAIL-asserting
+over-tolerance fixture pinned at the OLD `tolerance+1` (the minimal over value at the time it was
+written) silently flips to PASS once the const walks past it, unless it too is bumped to the NEW
+`tolerance+1`.** The initial recalibration sweep on this walk grepped for the literal OLD const
+value (`= 3`) and for test NAMES mentioning "tolerance" — that missed TWO such fixtures
+(`non_adjacent_freeze_hiding_a_real_drop_still_fails_strict`'s companion, and
+`benign_delivery_reorder_*_missing_ticks_still_fail_625`) because neither fixture's own test name
+references the tolerance at all; they exist to prove an UNRELATED property (a hidden freeze, a
+benign delivery reorder) and only INCIDENTALLY sat at the old over-tolerance boundary as a
+"this still fails, not silently absorbed" companion assertion. A gated-Fable review pass caught
+both — the sweep for a future step on THIS const must grep the actual FIXTURE VALUES
+(`\.gaps, N`/`\.copies, N`/`decide(.*, N,`/`decide(.*, N)` for every literal `N` in
+`[old_tolerance+1 .. new_tolerance]`), never rely on the test's own name or its stated purpose to
+find every site that needs recalibrating.
+
 ## 5. The walk-down stays on ITS ticket
 If the step does not reach 0, the ticket stays OPEN and carries the remaining steps; the PR must NOT
 close it. Gate the next step on the concrete evidence the running gate produces (N>=2 consecutive
