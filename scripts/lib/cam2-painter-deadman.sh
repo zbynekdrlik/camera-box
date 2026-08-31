@@ -65,6 +65,18 @@ CAM2_PAINTER_DEADMAN_UNIT="${CAM2_PAINTER_DEADMAN_UNIT:-cam2-painter-deadman}"
 # recovery to the #772 camera-box-deadman (armed at the same sites) clearing the stray burn first --
 # ~15 min later than the old frame-probe-self-exit path, but a corrupted live verdict is far worse,
 # and cam2-painter cannot coexist with a burn anyway (both conflict on the device via camera-box).
+# The systemd-run arm sets --description=cam2-painter-deadman AND the burn check uses a unit-NAME
+# pattern arg ("camera-box-burn-*"), never a DESCRIPTION-column grep -- otherwise the check would
+# self-match THIS deadman's own transient unit (systemd-run without --description sets the unit
+# Description to the command line, which contains "camera-box-burn"), permanently disarming it
+# (#1246 review, empirically reproduced -- the exact #772 pattern-argument idiom avoids it).
+# RESIDUAL (#1246, fail-loud not silent): the two guards cover the burn->frame-probe gap (a burn
+# owns the device) but NOT the brief stop->burn-start gap (deployed painter stopped, burn not yet
+# started). Each stop site re-arms a fresh CAM2_PAINTER_DEADMAN_MINUTES delay, so that gap is
+# normally clear of a fire; only a cam2 prep taking longer than the window between the painter stop
+# and the burn start would let a fire seize /dev/video before the burn exists -- and that fails
+# LOUD (the later burn start fails / the [7b/8] run-integrity check catches it), never a silently
+# corrupted verdict.
 CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-5}"
 
 # cam2_painter_deadman_arm_cmds -> REMOTE bash (embed via `$(cam2_painter_deadman_arm_cmds)`
@@ -84,8 +96,8 @@ cam2_painter_deadman_arm_cmds() {
 if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
   systemctl stop ${CAM2_PAINTER_DEADMAN_UNIT}.timer 2>/dev/null || true
   systemctl reset-failed ${CAM2_PAINTER_DEADMAN_UNIT}.service 2>/dev/null || true
-  systemd-run --quiet --on-active=${CAM2_PAINTER_DEADMAN_MINUTES}min --on-unit-active=${CAM2_PAINTER_DEADMAN_MINUTES}min --unit=${CAM2_PAINTER_DEADMAN_UNIT} \\
-    /bin/bash -c 'pgrep -x frame-probe >/dev/null && exit 0; pgrep -x camera-box-burn >/dev/null && exit 0; systemctl list-units --state=active,activating --plain --no-legend --type=service 2>/dev/null | grep -q camera-box-burn && exit 0; systemctl start cam2-painter' 2>/dev/null \\
+  systemd-run --quiet --description=cam2-painter-deadman --on-active=${CAM2_PAINTER_DEADMAN_MINUTES}min --on-unit-active=${CAM2_PAINTER_DEADMAN_MINUTES}min --unit=${CAM2_PAINTER_DEADMAN_UNIT} \\
+    /bin/bash -c 'pgrep -x frame-probe >/dev/null && exit 0; pgrep -x camera-box-burn >/dev/null && exit 0; systemctl list-units --state=active,activating --plain --no-legend --type=service "camera-box-burn-*" 2>/dev/null | grep -q . && exit 0; systemctl start cam2-painter' 2>/dev/null \\
     && echo "[#872/#1072] cam2-painter dead-man armed (periodic, every ${CAM2_PAINTER_DEADMAN_MINUTES}min) -- a killed run self-heals on this box within ~${CAM2_PAINTER_DEADMAN_MINUTES}min" \\
     || echo "WARNING #872: could not arm the cam2-painter dead-man -- a killed run WILL leave the monitor dark" >&2
 fi;

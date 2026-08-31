@@ -90,11 +90,13 @@ fn action_guards_on_a_live_burn_before_starting_the_painter_1246() {
 fn burn_guard_uses_the_exact_15char_comm_not_bare_camera_box_1246() {
     // Must never match the 10-char PRODUCTION `camera-box` comm/unit — only the 15-char burn.
     let action = action_body(&read_lib());
-    if let Some(pos) = action.find("pgrep -x camera-box-burn") {
-        // If a pgrep is used, it must be the exact-comm form (-x camera-box-burn), mirroring
-        // free-capture-device.sh's own `pkill -9 -x camera-box-burn`.
-        assert!(pos < action.len(), "unreachable");
-    }
+    // The burn PROCESS guard must use the exact 15-char comm form (`-x camera-box-burn`),
+    // mirroring free-capture-device.sh's own `pkill -9 -x camera-box-burn` — never a bare
+    // `pgrep camera-box` that could match the 10-char production comm.
+    assert!(
+        action.contains("pgrep -x camera-box-burn"),
+        "#1246: the burn process guard must be the exact-comm `pgrep -x camera-box-burn`. Action:\n{action}"
+    );
     // Never a bare `pgrep -x camera-box` (would match production and disarm the deadman forever).
     assert!(
         !action.contains("pgrep -x camera-box\n")
@@ -135,11 +137,18 @@ cat > "$FAKE/systemctl" <<FAKESC
 echo "systemctl \$*" >> "$LOG"
 case "\$1 \$2" in
   "list-units --state=active,activating")
-    if [ "\$BURN_UNIT" = 1 ]; then
-      echo "camera-box-burn-cam2-99.service loaded active running burn"
-    else
-      echo "camera-box.service loaded active running production"
-    fi ;;
+    # Model real systemd: columns are NAME LOAD ACTIVE SUB DESCRIPTION. A trailing unit-NAME
+    # glob (camera-box-burn-*) filters by NAME only, NEVER the DESCRIPTION column. The deadman's
+    # OWN transient unit is active while its action runs and (with no --description) its
+    # description IS the command line, which contains "camera-box-burn" -- so a description-column
+    # grep self-matches it (the #1246 red). The name-pattern form the fix uses cannot.
+    pat=""
+    for a in "\$@"; do case "\$a" in camera-box-burn-*) pat="\$a" ;; esac; done
+    emit() { if [ -z "\$pat" ]; then echo "\$1 loaded active running \$2"; else case "\$1" in \$pat) echo "\$1 loaded active running \$2" ;; esac; fi; }
+    emit "camera-box.service" "Camera Box - USB Video Capture to NDI"
+    emit "cam2-painter-deadman.service" "/bin/bash -c pgrep -x camera-box-burn grep camera-box-burn"
+    [ "\$BURN_UNIT" = 1 ] && emit "camera-box-burn-cam2-99.service" "/tmp/camera-box-burn-cam2-99"
+    ;;
 esac
 exit 0
 FAKESC
