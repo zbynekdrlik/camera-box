@@ -473,6 +473,14 @@ pub fn segment_continuity(
         // `overall_pass_term` now EQUALS `relaxed_pass` exactly (see
         // `crate::window_gate::copies_gaps_tolerance_gates_overall_pass` for the full decision
         // record). The #1169 `<=1/<=1` singleton band stays wired as a graduated fallback.
+        //
+        // #1243 (walk-back: issue 1242): this IS the cambox per-segment blocking headline fold, and
+        // it folds the RELAXED verdict (`overall_pass_term`, == `relaxed_pass` while #1220's
+        // tolerance seam is armed) — NEVER the strict `pass`. The strict `pass`, copies, gaps and
+        // residual_events stay COMPUTED and reported (dormant: `windows_failed_report_only` and each
+        // `CamboxSegment`), per `.claude/rules/gate-allowance-restore-red-green.md`. Run 1629895310
+        // (5/10 windows with 1 copy, all relaxed_pass=true) rides this to green. issue 1242
+        // root-causes the ~0.06% residual FIFO churn and RESTORES the strict copies==0 fold.
         overall_pass &=
             crate::window_gate::decide(seg.frames, seg.undecodable, seg.copies, seg.gaps)
                 .overall_pass_term;

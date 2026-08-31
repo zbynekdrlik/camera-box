@@ -5030,6 +5030,13 @@ fn build_and_print_verdict_with_stream_diffs(
                     );
                 }
                 report["all_cambox_continuity"] = seg_json;
+                // #1243 (walk-back: issue 1242): the cambox per-segment blocking headline fold.
+                // `seg.overall_pass` already folds the RELAXED per-window verdict
+                // (`overall_pass_term` == `relaxed_pass` while #1220's tolerance seam is armed —
+                // see `recording_segments::segment_continuity`), NOT the strict `pass`
+                // (which stays computed + reported in `windows_failed_report_only` + each segment).
+                // issue 1242 restores the strict copies==0 fold once the residual FIFO churn is
+                // root-caused.
                 all_pass &= seg.overall_pass;
 
                 // #781 — REPORT-ONLY projection-tap scanout-TEAR surface. cam2's USB grabber
