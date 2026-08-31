@@ -799,3 +799,38 @@ characters `\` + `t` straight through unmodified. **Verify after writing, every 
 line that is supposed to hold a Rust/bash `\t` escape sequence — a hit means the Python script
 wrote a raw byte instead of the two-char escape, exactly this bug. `cargo fmt --all --check`
 alone is NOT sufficient proof the generated Rust text is correct; it only catches shape 1 above.
+
+## `$GITHUB_SHA` on a `pull_request`-triggered job is the SYNTHETIC merge commit, never the PR's head — any commit-scoped `gh run list --commit` resolution wired into a `pull_request` workflow needs `github.event.pull_request.head.sha` instead (issue 1244 review catch)
+
+Any script that resolves a CI artifact "for THIS run's own commit" via `gh run list --commit
+"$GITHUB_SHA" ...` is silently WRONG the moment it runs inside a `pull_request`-triggered job
+(this repo's `full-path-e2e.yml` is exactly that: `on.pull_request: branches: [main]`). GitHub
+Actions sets `$GITHUB_SHA` on a `pull_request` event to the **synthetic merge commit**
+(`refs/pull/N/merge`), not the PR's real head commit — and a workflow that (like `ci.yml`) triggers
+only on `push: [dev, main]` NEVER produces a run whose `headSha` is that merge sha. So a bare
+`$GITHUB_SHA` fallback in a commit-scoped resolution doesn't just occasionally miss — it resolves
+NOTHING, ever, on every automatic `pull_request` run, turning what might have been an intermittent
+gap into a 100% permanent one.
+
+**Confirmed live (issue 1244, 2026-08-31):** a fresh commit-scoped fix to
+`scripts/lib/camera-box-parity-align.sh`'s `cambox_align_deploy()` (replacing a "newest on branch"
+`gh run list --branch dev` resolution — itself proven non-deterministic inside the E2E job's own
+runner environment) added a `$GITHUB_SHA` fallback with the comment "set by every GitHub Actions
+job … recording-e2e.sh … inherits it with no explicit wiring". A fresh-context adversarial review
+caught this before merge: `gh run view` on the two incident runs showed `event: pull_request`;
+`gh run list --commit <merge_sha>` on the then-open PR #1211 returned EMPTY (`gh run list --commit
+<head_sha>` found the run). The existing `#703` step in the SAME `full-path-e2e.yml` ALREADY solves
+this exact problem — `SHA="${{ github.event.pull_request.head.sha }}"` in its own shell env, wired
+explicitly in the calling step's `env:` block, precisely because the same anomaly bites there too.
+
+**Fix + the rule going forward:** any NEW (or edited) commit-scoped `gh run list --commit`
+resolution that a `pull_request`-triggered workflow step invokes MUST have its candidate sha wired
+EXPLICITLY from that step's own `env:` block — `SOME_VAR: ${{ github.event_name == 'pull_request'
+&& github.event.pull_request.head.sha || github.sha }}` (the `|| github.sha` arm keeps a
+`workflow_dispatch`/`push` trigger correct, where `$GITHUB_SHA` already IS the real candidate) —
+never rely on a bare `$GITHUB_SHA`-reading fallback inside the sourced script/lib itself to cover
+the `pull_request` case. Pin the wiring with a static-anchor test reading the workflow YAML text
+(the existing `tests/harness_full_path_e2e_workflow.rs` `step_block` pattern — slice between the
+step's `name:` and its `run:` line, assert the new env var name AND
+`github.event.pull_request.head.sha` both appear inside that slice) so a future edit that drops the
+wiring fails loudly instead of silently reintroducing the 100%-refuse trap.
