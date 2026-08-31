@@ -94,8 +94,26 @@ device(s) the deadman's start would seize — not just the one the deadman itsel
 deadman now ALSO no-ops when a live capture burn owns `/dev/video`:
 `pgrep -x camera-box-burn` (the exact 15-char comm `camera-box-free-capture-device.sh` itself
 keys on via `pkill -9 -x camera-box-burn`) OR an active/activating `camera-box-burn-*` systemd unit
-(`systemctl list-units --state=active,activating ... | grep -q camera-box-burn` — blip-robust
-against the burn's `Restart=on-failure` auto-restart). The `frame-probe` guard stays (fb0 owner).
+— blip-robust against the burn's `Restart=on-failure` auto-restart. The `frame-probe` guard stays
+(fb0 owner).
+
+**The unit check MUST use a unit-NAME pattern argument, never a DESCRIPTION-column grep (#1246
+review 🔴, empirically reproduced).** The first cut wrote
+`systemctl list-units --state=active,activating --plain --no-legend --type=service | grep -q camera-box-burn`
+and it SELF-MATCHED: `systemd-run` with no `--description=` sets the transient unit's Description to
+its own command line, `list-units --plain --no-legend` prints the DESCRIPTION column (unellipsized
+when piped), and while the action runs `cam2-painter-deadman.service` is itself in the
+active/activating set with a description containing `camera-box-burn` (from the `pgrep`/`grep`
+tokens) — so the guard matched its OWN unit on every fire, `exit 0` before the start, permanently
+disarming the deadman (the exact #872 dark-monitor failure, made permanent). The fix is the SAME
+idiom the #772 `camera-box-deadman.sh` already uses: a unit-NAME **pattern argument**, which matches
+NAMES only, never descriptions —
+`systemctl list-units --state=active,activating --plain --no-legend --type=service "camera-box-burn-*" 2>/dev/null | grep -q .`
+(double quotes are legal inside the single-quoted `/bin/bash -c '...'` action) — plus
+`--description=cam2-painter-deadman` on the `systemd-run` arm as belt-and-braces. General lesson for
+ANY on-box guard that greps `systemctl list-units`: filter by the unit-NAME glob argument, never
+grep the free-text description column, or the guard's own transient unit (and its command line) can
+satisfy it.
 
 - **The #281 rig-active heartbeat is NOT usable here.** It is written on DEV1
   (`$XDG_RUNTIME_DIR/camera-box-rig-active`, `scripts/lib/rig-heartbeat.sh`) and read by the dev1
