@@ -806,3 +806,50 @@ fn setup_device_installs_mpv_for_lipsync_drm_playback_1187() {
         &body[echo_idx..echo_end]
     );
 }
+
+// ============================================================================================
+// issue 1234 -- cam5/6/7 sit behind an unmanaged QNAP 2.5G switch that aggregates all three
+// onto one uplink. The `optimize-nic` networkd-dispatcher hook (STEP 14) blanket-disables
+// ethernet flow control (`ethtool -A "$IFACE" rx off tx off`) on EVERY interface, so the QNAP
+// has no way to backpressure the cameras and line-rate NDI bursts overflow its egress queue
+// (silent drop, no counter) -- measured live (iperf3 UDP loss 8-14x worse with pause off,
+// qr-align spread 163-219 ids with pause off vs 0-2 with pause on). Fix: ADVERTISE flow control
+// (`rx on tx on`) instead of forcing it off -- the actual negotiated result is decided by the
+// link partner, so a direct CRS310 link (which advertises pause off) still negotiates OFF; only
+// the cam5/6/7 links behind the unmanaged aggregator actually change behavior.
+// ============================================================================================
+
+/// RED before the fix: `setup-device.sh`'s `optimize-nic` hook must advertise flow control ON
+/// at BOTH call sites (the networkd-dispatcher hook body + the immediate current-interface
+/// apply loop), and must NOT contain the old disable-it-everywhere literal anywhere.
+#[test]
+fn setup_device_advertises_flow_control_on_not_off_1234() {
+    let body = read_script();
+    let on_count = body.matches(r#"ethtool -A "$IFACE" rx on tx on"#).count();
+    assert_eq!(
+        on_count, 2,
+        "1234: expected exactly 2 `ethtool -A \"$IFACE\" rx on tx on` call sites (the \
+         networkd-dispatcher hook body + the immediate current-interface apply loop), found {on_count}"
+    );
+    assert!(
+        !body.contains(r#"ethtool -A "$IFACE" rx off tx off"#),
+        "1234: setup-device.sh must NOT disable flow control any more -- disabling it prevents \
+         the unmanaged QNAP aggregator behind cam5/6/7 from backpressuring the cameras, which \
+         overflows its egress buffer under 3x line-rate NDI load and destabilizes qr-align"
+    );
+    // The EEE-off lines are UNCHANGED by this ticket -- only flow control flips.
+    let eee_count = body.matches(r#"eee off"#).count();
+    assert!(
+        eee_count >= 2,
+        "1234: the EEE-off lines must stay untouched (still >= 2 `eee off` occurrences), found {eee_count}"
+    );
+    assert!(
+        body.contains("echo \"  Flow control: advertised\""),
+        "1234: the STEP 14 summary echo must say the flow-control line was flipped to advertised, \
+         not left claiming 'disabled'"
+    );
+    assert!(
+        !body.contains("echo \"  Flow control: disabled\""),
+        "1234: the stale 'Flow control: disabled' summary echo must be gone"
+    );
+}

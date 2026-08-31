@@ -3706,3 +3706,36 @@ fn setup_imag_installs_obs_phase2_sibling_1218() {
         "{SETUP} must chmod 755 the installed obs_phase2.py sibling (issue 1218)"
     );
 }
+
+// ============================================================================================
+// issue 1234 -- imag's own optimize-nic pattern (mirrors setup-device.sh STEP 14, #486 scoped
+// to the ONE resolved NDI NIC) carries the SAME flow-control-disabled defect: cam5/6/7's link
+// through the unmanaged QNAP 2.5G aggregator needs pause ADVERTISED so the switch can
+// backpressure line-rate NDI bursts instead of silently dropping them (root cause + measured
+// iperf3/qr-align evidence on the ticket). setup-imag.sh disables flow control at THREE call
+// sites (the networkd-dispatcher hook body, the immediate one-time apply, and the rc.local
+// boot-persistence reapply) -- all three must flip.
+// ============================================================================================
+
+/// RED before the fix: every one of setup-imag.sh's three flow-control call sites must now
+/// advertise pause ON, and none of the old disable-it literals may remain.
+#[test]
+fn setup_imag_advertises_flow_control_on_not_off_1234() {
+    let body = read(SETUP);
+    for needle in [
+        "ethtool -A \"${NIC}\" rx on tx on",
+        "ethtool -A \"$NIC\" rx on tx on",
+        "ethtool -A ${NIC} rx on tx on",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must advertise flow control at `{needle}` (issue 1234) -- disabling it \
+             prevents the unmanaged QNAP aggregator behind cam5/6/7 from backpressuring the \
+             cameras, overflowing its egress buffer under 3x line-rate NDI load"
+        );
+    }
+    assert!(
+        !body.contains("rx off tx off"),
+        "{SETUP} must not disable flow control anywhere any more (issue 1234)"
+    );
+}
