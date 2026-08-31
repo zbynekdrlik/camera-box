@@ -1505,4 +1505,199 @@ mod tests {
         assert_eq!(code, Some(SELF_HEAL_RESET_FAILED_EXIT_CODE));
         std::fs::remove_dir_all(sp.parent().unwrap()).ok();
     }
+
+    // ---- #1248 futility back-off (HoldOff) ----------------------------------
+    // A USB re-enumeration self-heal that never HOLDS (cam2 ShadowCast 2's
+    // intermittent ~61.1fps over-rate re-drifts ~10-30min after every reset)
+    // must STOP resetting once the recurrence-window heal count reaches the
+    // hold threshold, instead of resetting forever (each reset is a ~25s NDI
+    // outage). All four triggers inherit this via the shared decision layer.
+
+    #[test]
+    fn decide_selfheal_holds_off_once_the_futility_threshold_is_reached_1248() {
+        // Recurrence count already at DEFAULT_HOLD_OFF_HEALS-1; the next
+        // confirmed-deviant window past the throttle is heal #DEFAULT_HOLD_OFF_HEALS
+        // = the hold threshold -> HoldOff, NO reset.
+        let prev = SelfHealState {
+            last_heal_epoch_s: Some(T0),
+            recurrence_heal_count: DEFAULT_HOLD_OFF_HEALS - 1,
+        };
+        let now = T0 + DEFAULT_MIN_HEAL_INTERVAL_S + 10;
+        let (decision, next) = decide_selfheal(
+            prev,
+            true,
+            now,
+            DEFAULT_MIN_HEAL_INTERVAL_S,
+            DEFAULT_RECURRENCE_WINDOW_S,
+            DEFAULT_CRITICAL_ESCALATION_HEALS,
+        );
+        assert_eq!(
+            decision,
+            SelfHealDecision::HoldOff {
+                futile_resets: DEFAULT_HOLD_OFF_HEALS - 1
+            }
+        );
+        // Hold advances last_heal (re-engages the throttle/floor so the alert is
+        // rate-limited without a new timer) and caps the count at the threshold.
+        assert_eq!(next.recurrence_heal_count, DEFAULT_HOLD_OFF_HEALS);
+        assert_eq!(next.last_heal_epoch_s, Some(now));
+    }
+
+    #[test]
+    fn repeated_holds_cap_the_count_and_advance_the_clock_1248() {
+        let held = SelfHealState {
+            last_heal_epoch_s: Some(T0),
+            recurrence_heal_count: DEFAULT_HOLD_OFF_HEALS,
+        };
+        let now = T0 + DEFAULT_MIN_HEAL_INTERVAL_S + 5;
+        let (decision, next) = decide_selfheal(
+            held,
+            true,
+            now,
+            DEFAULT_MIN_HEAL_INTERVAL_S,
+            DEFAULT_RECURRENCE_WINDOW_S,
+            DEFAULT_CRITICAL_ESCALATION_HEALS,
+        );
+        assert_eq!(
+            decision,
+            SelfHealDecision::HoldOff {
+                futile_resets: DEFAULT_HOLD_OFF_HEALS - 1
+            }
+        );
+        assert_eq!(
+            next.recurrence_heal_count, DEFAULT_HOLD_OFF_HEALS,
+            "count stays capped at the hold threshold, never growing unboundedly"
+        );
+        assert_eq!(
+            next.last_heal_epoch_s,
+            Some(now),
+            "hold advances last_heal so the throttle/floor re-engages between holds"
+        );
+    }
+
+    #[test]
+    fn hold_re_arms_after_a_long_healthy_gap_1248() {
+        // A genuine healthy gap longer than the recurrence window is a FRESH
+        // occurrence -> the count resets to 1 and a heal is allowed again.
+        let held = SelfHealState {
+            last_heal_epoch_s: Some(T0),
+            recurrence_heal_count: DEFAULT_HOLD_OFF_HEALS,
+        };
+        let (decision, next) = decide_selfheal(
+            held,
+            true,
+            T0 + DEFAULT_RECURRENCE_WINDOW_S + 1,
+            DEFAULT_MIN_HEAL_INTERVAL_S,
+            DEFAULT_RECURRENCE_WINDOW_S,
+            DEFAULT_CRITICAL_ESCALATION_HEALS,
+        );
+        assert_eq!(
+            decision,
+            SelfHealDecision::Heal {
+                attempt_number: 1,
+                escalate_critical: false,
+            },
+            "a hold must re-arm to a heal after a > recurrence-window healthy gap"
+        );
+        assert_eq!(next.recurrence_heal_count, 1);
+    }
+
+    #[test]
+    fn hold_threshold_is_forced_strictly_above_escalation_1248() {
+        // Even asking for a hold BELOW the escalation threshold cannot suppress
+        // the escalation: hold = max(requested, crit+1). With crit=3, hold=4, so
+        // heal #3 still ESCALATES (a reset) and hold only starts at #4.
+        let at3 = SelfHealState {
+            last_heal_epoch_s: Some(T0),
+            recurrence_heal_count: 2,
+        };
+        let (d3, _) = decide_selfheal_with_hold(
+            at3,
+            true,
+            T0 + DEFAULT_MIN_HEAL_INTERVAL_S + 100,
+            DEFAULT_MIN_HEAL_INTERVAL_S,
+            DEFAULT_RECURRENCE_WINDOW_S,
+            3,
+            2,
+        );
+        assert_eq!(
+            d3,
+            SelfHealDecision::Heal {
+                attempt_number: 3,
+                escalate_critical: true,
+            }
+        );
+        let at4 = SelfHealState {
+            last_heal_epoch_s: Some(T0),
+            recurrence_heal_count: 3,
+        };
+        let (d4, _) = decide_selfheal_with_hold(
+            at4,
+            true,
+            T0 + DEFAULT_MIN_HEAL_INTERVAL_S + 100,
+            DEFAULT_MIN_HEAL_INTERVAL_S,
+            DEFAULT_RECURRENCE_WINDOW_S,
+            3,
+            2,
+        );
+        assert_eq!(d4, SelfHealDecision::HoldOff { futile_resets: 3 });
+    }
+
+    #[test]
+    fn hold_off_message_carries_the_1248_marker_and_avoids_the_reset_grep_anchor() {
+        let m = hold_off_message(
+            &OVER_RATE_SELF_HEAL_MESSAGES,
+            DEFAULT_HOLD_OFF_HEALS - 1,
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+        );
+        assert!(m.contains("#1248 self-heal HOLD-OFF"), "{m}");
+        assert!(m.contains("SUSPENDED"), "{m}");
+        // Must NOT collide with self_heal_reset_grep_pattern /
+        // capture_rate_defect_grep_pattern_hard (the byte-anchored reset greps),
+        // or a dev1 watchdog would mis-count a hold as a reset.
+        assert!(!m.contains("USB reset attempt"), "{m}");
+        assert!(!m.contains("#663 self-heal: USB reset attempt"), "{m}");
+    }
+
+    #[test]
+    fn attempt_self_heal_hold_off_returns_none_and_never_resets_1248() {
+        let sp = selfheal_temp_state_path("holdoff");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        // Seed the shared state at hold-1 heals, last heal well past the 600s
+        // throttle so decide computes heal #DEFAULT_HOLD_OFF_HEALS = the hold
+        // threshold.
+        save_state(
+            &sp,
+            &SelfHealState {
+                last_heal_epoch_s: Some(2_000_000),
+                recurrence_heal_count: DEFAULT_HOLD_OFF_HEALS - 1,
+            },
+        )
+        .expect("seed state");
+        let now = 2_000_000 + DEFAULT_MIN_HEAL_INTERVAL_S + 10;
+        let mut reset_calls = 0u32;
+        let code = attempt_self_heal(
+            "/dev/video0",
+            GrabberModel::ShadowCast2,
+            now,
+            &sp,
+            &OVER_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None, "a HoldOff decision must not exit the process");
+        assert_eq!(
+            reset_calls, 0,
+            "a HoldOff decision must never fire a USB reset"
+        );
+        // The advanced state was persisted (count capped, last_heal advanced) so
+        // the floor re-engages and the next hold is rate-limited.
+        let saved = load_state(&sp);
+        assert_eq!(saved.recurrence_heal_count, DEFAULT_HOLD_OFF_HEALS);
+        assert_eq!(saved.last_heal_epoch_s, Some(now));
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
 }
