@@ -9867,10 +9867,10 @@ mod tests {
     /// CLASSIFIERS themselves are report-only annotations layered on TOP of the underlying
     /// per-window `copies`/`gaps`/`undecodable` data -- their own `gates_overall_pass` JSON
     /// fields must read `false`, always. **2026-08-05 RE-GATE (ticket 889 comment 5196190653):**
-    /// this fixture's "genuinely HARD-FROZEN" window is built from `copies=5` (density-based,
+    /// this fixture's "genuinely HARD-FROZEN" window is built from `copies=10` (density-based,
     /// see the `frozen` block below) -- FAR over the per-window tolerance (recalibrated 1 → 2 → 3
-    /// on 2026-08-06, ticket 889 comments 5198131539 / 5200533407:
-    /// `crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
+    /// on 2026-08-06, ticket 889 comments 5198131539 / 5200533407, walked 3 -> 5 on 2026-08-31
+    /// issue 1243: `crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
     /// correctly fails `overall_pass` again via the re-gate, independent of whatever
     /// `frozen_leg`/`self_heal_reset` report. Renamed from `..._no_longer_gate_the_overall_
     /// verdict_914` -- that claim is no longer true for a window this badly frozen; the
@@ -9944,14 +9944,22 @@ mod tests {
                 });
             }
             if frozen {
-                // 5 consecutive duplicates of index 9's tick (1018), inserted right after index
-                // 9 -- `copies=5` against `frames=25` -> density 0.20, ABOVE
-                // `frozen_leg::FROZEN_DENSITY_THRESHOLD` (0.10) -> genuinely HARD-FROZEN (not
-                // merely stale_replay, whose isolated-copy allowance is also 5 -- this proves
-                // DENSITY, not just count, is what trips it here). The real present-tick
-                // sequence around the duplicates stays perfectly contiguous (step 2), isolating
-                // this fixture's ONLY defect to the copies/frozen classification.
-                for k in 0..5u64 {
+                // 10 consecutive duplicates of index 9's tick (1018), inserted right after index
+                // 9 -- `copies=10` against `frames=30` -> density ~0.333, ABOVE
+                // `frozen_leg::FROZEN_DENSITY_THRESHOLD` (0.10) -> genuinely HARD-FROZEN. Walked
+                // up from the original 5 on 2026-08-31 (issue 1243): now that
+                // `window_gate::WINDOW_COPIES_GAPS_TOLERANCE` also sits at 5, a copies value that
+                // stays at/under `frozen_leg::STALE_REPLAY_MAX_ISOLATED` (also 5) can no longer
+                // ALSO exceed the walked-up window_gate tolerance -- those two constraints now
+                // conflict at the shared boundary, so this fixture no longer isolates "density
+                // alone trips it" from "count alone would too" (both trip independently at
+                // copies=10; see `frozen_leg::isolated_allowance_boundary_is_stale_replay_not_
+                // frozen` for the count-only boundary kept isolated in its own module). What this
+                // test still needs -- genuinely HARD-FROZEN AND genuinely over the continuity
+                // tolerance -- both hold. The real present-tick sequence around the duplicates
+                // stays perfectly contiguous (step 2), isolating this fixture's ONLY defect to
+                // the copies/frozen classification.
+                for k in 0..10u64 {
                     let dup_gen_ts = base + 9 * (ONE_S / 10) + (k as i64 + 1) * (ONE_S / 1000);
                     stream_frames.insert(
                         10 + k as usize,
@@ -10057,10 +10065,10 @@ mod tests {
             serde_json::json!(false),
             "914: same for self_heal_reset: {with_events}"
         );
-        // 889 re-gate: the fixture's own copies=5 (against frames=25, density 0.20 -- the exact
-        // shape the frozen_leg classifier needs to prove DENSITY, not just count) is FAR over the
-        // tolerance (recalibrated 1 → 2 → 3 on 2026-08-06), so this window (and therefore
-        // `all_cambox_continuity.overall_pass` specifically) now correctly FAILS again -- this is
+        // 889 re-gate: the fixture's own copies=10 (against frames=30, density ~0.333 -- well
+        // past the frozen_leg density threshold) is FAR over the tolerance (recalibrated
+        // 1 → 2 → 3 on 2026-08-06, walked 3 -> 5 on 2026-08-31 issue 1243), so this window (and
+        // therefore `all_cambox_continuity.overall_pass` specifically) now correctly FAILS again -- this is
         // the re-gate doing its job, not frozen_leg/self_heal_reset (which stay report-only, per
         // the two assertions immediately above). Scoped to `all_cambox_continuity.overall_pass`,
         // NOT the top-level `overall_pass` -- this short synthetic fixture (a few seconds) always
@@ -10075,7 +10083,7 @@ mod tests {
         assert_eq!(
             with_events["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(false),
-            "889 re-gate: copies=5 far exceeds the tolerance -- \
+            "889 re-gate: copies=10 far exceeds the tolerance -- \
              all_cambox_continuity.overall_pass must FAIL again, even though \
              frozen_leg/self_heal_reset themselves stay report-only: {with_events}"
         );
@@ -10091,7 +10099,7 @@ mod tests {
         // `build_and_print_verdict` -- disconnected from `SelfHealAttributionReport::
         // overall_pass_contribution()`, the function that ACTUALLY decides whether these terms
         // fold into `all_pass`) -- but nothing above would catch a regression in that function
-        // itself, because `with_events`'s copies=5 defect ALREADY fails `all_cambox_continuity.
+        // itself, because `with_events`'s copies=10 defect ALREADY fails `all_cambox_continuity.
         // overall_pass` on its own (the re-gate), confounding any differential at that level; the
         // TOP-LEVEL `overall_pass` differential the ORIGINAL (pre-re-gate) #914 test used is
         // ALSO confounded, but by something else entirely (the >=300s `full_chain` span floor,
@@ -10150,7 +10158,7 @@ mod tests {
             "914 regression guard: an unattributed self-heal event ALONE (no frozen defect, no \
              copies/gaps defect) must be a no-op on the TOP-LEVEL overall_pass (report-only, \
              pending cam1 hardware fix issue 909 -- restore path issue 905). Unlike the \
-             `with_events` fixture above (confounded by its own copies=5 re-gate failure), this \
+             `with_events` fixture above (confounded by its own copies=10 re-gate failure), this \
              differential genuinely isolates self_heal_reset's contribution: \
              clean_isolated={clean_isolated}, self_heal_only={self_heal_only}"
         );

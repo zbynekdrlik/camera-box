@@ -786,23 +786,22 @@ mod tests {
     }
 
     #[test]
-    fn gap_of_four_exceeds_tolerance_fails_overall_pass_889_regate() {
-        // cam1 clean; cam2 has a tick that skips by 5 (a real drop at step 1: 502,503,504,505
-        // absent), i.e. gaps=4. Issue 889 (2026-07-30 user decision on issue 883) originally made
-        // `gaps` fully report-only here; the 2026-08-05 RE-GATE (ticket 889 comment 5196190653)
+    fn gap_of_six_exceeds_tolerance_fails_overall_pass_1243() {
+        // cam1 clean; cam2 has a tick that skips by 7 (a real drop at step 1: 502..507 absent),
+        // i.e. gaps=6. Issue 889 (2026-07-30 user decision on issue 883) originally made `gaps`
+        // fully report-only here; the 2026-08-05 RE-GATE (ticket 889 comment 5196190653)
         // re-introduced a per-window tolerance (`crate::window_gate::
         // WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated 1 -> 2 -> 3 on 2026-08-06, ticket 889
-        // comments 5198131539 / 5200533407) — gaps=4 EXCEEDS that tolerance, so this window (and
-        // therefore the run) now correctly FAILS `overall_pass` again. Renamed from
-        // `gap_of_three_exceeds_tolerance_..._889_regate` (itself renamed from
-        // `gap_of_two_exceeds_singleton_tolerance_..._889_regate`, which was renamed from
-        // `..._889_relaxes_overall_pass`) — the literal gaps=4 sits comfortably over the tolerance
-        // (issue 1031 re-tightened it 3 -> 1 on 2026-08-14, so 4 is now well over, still gating);
-        // the STRICT per-window `pass` still
-        // catches it exactly as before (unchanged).
+        // comments 5198131539 / 5200533407, walked 3 -> 5 on 2026-08-31 issue 1243) — gaps=6
+        // EXCEEDS that tolerance, so this window (and therefore the run) now correctly FAILS
+        // `overall_pass` again. Renamed from `gap_of_four_exceeds_tolerance_..._889_regate`
+        // (itself renamed through `gap_of_three_...` / `gap_of_two_...` / `..._889_relaxes_
+        // overall_pass`) — the literal gaps=6 sits comfortably over the walked-up tolerance (5),
+        // still well over the 2026-08-14 3 -> 1 re-tightening too; the STRICT per-window `pass`
+        // still catches it exactly as before (unchanged).
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 6, 1, 100);
-        // cam2: 500,501,506,507 — 502,503,504,505 absent (a real gap), step 1.
+        // cam2: 500,501,508,509 — 502,503,504,505,506,507 absent (a real gap), step 1.
         frames.extend([
             SegmentFrame {
                 frame_index: 100,
@@ -817,18 +816,18 @@ mod tests {
             SegmentFrame {
                 frame_index: 102,
                 gen_ts_ns: 1300,
-                tick: Some(506),
+                tick: Some(508),
             },
             SegmentFrame {
                 frame_index: 103,
                 gen_ts_ns: 1400,
-                tick: Some(507),
+                tick: Some(509),
             },
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert_eq!(
-            v.segments[1].gaps, 4,
-            "isolates a 4-gap window: {:?}",
+            v.segments[1].gaps, 6,
+            "isolates a 6-gap window: {:?}",
             v.segments[1]
         );
         assert!(v.segments[0].pass, "cam1 still clean: {:?}", v.segments[0]);
@@ -839,7 +838,7 @@ mod tests {
         );
         assert!(
             !v.segments[1].relaxed_pass,
-            "889 re-gate: cam2's gaps=4 exceeds the tolerance -- relaxed must fail: {:?}",
+            "889 re-gate: cam2's gaps=6 exceeds the tolerance -- relaxed must fail: {:?}",
             v.segments[1]
         );
         assert!(
@@ -2194,10 +2193,11 @@ mod tests {
 
     #[test]
     fn windows_over_copies_gaps_tolerance_889_regate() {
-        // 3 windows: cam1 clean, cam2 has 4 copies (OVER the tolerance, recalibrated 1 -> 2 -> 3
-        // on 2026-08-06, ticket 889 comments 5198131539 / 5200533407 -- must gate overall_pass
-        // again), cam3 clean. The literal copies=4 stays genuinely over-tolerance across every
-        // recalibration incl. issue 1031's 3 -> 1 re-tightening (2026-08-14) -- 4 is well over 1.
+        // 3 windows: cam1 clean, cam2 has 6 copies (OVER the tolerance, walked 3 -> 5 on
+        // 2026-08-31, issue 1243, walk-back tracked on issue 1242 -- must gate overall_pass
+        // again), cam3 clean. The literal copies=6 stays genuinely over-tolerance across every
+        // recalibration incl. issue 1031's 3 -> 1 re-tightening (2026-08-14) and the 2026-08-31
+        // 3 -> 5 walk-up (issue 1243) -- 6 is well over 1 and just over 5.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 3000),
@@ -2229,16 +2229,26 @@ mod tests {
                 frame_index: 104,
                 gen_ts_ns: 1500,
                 tick: Some(500),
-            }, // cam2 copy #4 -- over the tolerance
+            }, // cam2 copy #4 -- AT the tolerance
             SegmentFrame {
                 frame_index: 105,
                 gen_ts_ns: 1600,
+                tick: Some(500),
+            }, // cam2 copy #5 -- AT the tolerance
+            SegmentFrame {
+                frame_index: 106,
+                gen_ts_ns: 1700,
+                tick: Some(500),
+            }, // cam2 copy #6 -- over the tolerance
+            SegmentFrame {
+                frame_index: 107,
+                gen_ts_ns: 1800,
                 tick: Some(501),
             },
         ]);
         frames.extend(clean_frames(3000, 100, 4, 1, 900));
         let v = segment_continuity(&frames, &schedule, 0, 1);
-        assert_eq!(v.segments[1].copies, 4, "{:?}", v.segments[1]);
+        assert_eq!(v.segments[1].copies, 6, "{:?}", v.segments[1]);
         assert_eq!(
             v.segments[1].gaps, 0,
             "isolates copies alone: {:?}",
@@ -2251,7 +2261,7 @@ mod tests {
         );
         assert!(
             !v.segments[1].relaxed_pass,
-            "889 re-gate: 4 copies exceeds the tolerance -- relaxed must fail too: {:?}",
+            "889 re-gate: 6 copies exceeds the tolerance -- relaxed must fail too: {:?}",
             v.segments[1]
         );
         assert!(

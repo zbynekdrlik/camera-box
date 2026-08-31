@@ -543,36 +543,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tolerance_is_calibrated_at_three_1031() {
+    fn tolerance_is_calibrated_at_five_1243() {
         // Pins the calibrated NUMBER itself, not just its use through the const. Issue 1031
         // walk-down history: 3 -> 1 (2026-08-14 morning, one steady post-fix run) -> back to 2
         // the same day (issue-859 residual produces 2-per-window bursts) -> back to 3
-        // (2026-08-15, issue 1031 comment 5300948461): the cam1 ShadowCast grabber degraded
-        // below the tolerance=2 calibration's assumptions -- 8 of 14 consecutive runs measured
-        // per-window max(copies,gaps) of 3-4, carried by CAM1 gap bursts (replacement card
-        // ordered, issue 728 / issue 1034). 3 is the original ship value and the tightest the
-        // degraded-hardware sample supports; the walk-down resumes after the card swap.
-        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 3);
+        // (2026-08-15, issue 1031 comment 5300948461, the cam1 ShadowCast grabber degradation).
+        // Issue 1243 (2026-08-31, THIRD relax-walk step on this const, walk-back tracked on
+        // issue 1242): three complete post-fix 7-cam verdicts (1629895310, 1230380558,
+        // 1142514714) give per-run worst max(copies,gaps) of {1, 1, 4} -- run 1142514714's
+        // seg3 CAM4 measured 4 separate single-frame duplicates over ~14s (no self-heal events),
+        // the run's sole blocking-gate failure. Stepping to the bare observed ceiling (4) would
+        // leave zero margin given the n=3 variance {1, 1, 4}; 5 gives one event of margin while
+        // staying far under the 9-45/window band every genuine regression on this const has
+        // measured. See issue 1243's design-addendum comment for the full three-run table.
+        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 5);
     }
 
     #[test]
-    fn four_copies_or_gaps_gate_three_absorbed_after_1031() {
-        // Issue 1031 boundary at the stepped-back tolerance=3: FOUR copies (or gaps) must FAIL
-        // the relaxed verdict, while THREE -- the degraded-cam1 burst size dominating the
-        // 2026-08-15 sample -- stays absorbed until the card swap re-tightens the walk. Literal
-        // fixtures on purpose: this locks the concrete boundary, complementing the
-        // const-tracking boundary tests above.
+    fn six_copies_or_gaps_gate_five_absorbed_after_1243() {
+        // Issue 1243 boundary at the walked-up tolerance=5: SIX copies (or gaps) must FAIL
+        // the relaxed verdict, while FIVE -- one event of margin over the worst observed
+        // steady-run window (run 1142514714, max 4) -- stays absorbed. Literal fixtures on
+        // purpose: this locks the concrete boundary, complementing the const-tracking boundary
+        // tests above.
         assert!(
-            !decide(100, 0, 4, 0).relaxed_pass,
-            "1031: four copies must gate the relaxed verdict at tolerance=3"
+            !decide(100, 0, 6, 0).relaxed_pass,
+            "1243: six copies must gate the relaxed verdict at tolerance=5"
         );
         assert!(
-            !decide(100, 0, 0, 4).relaxed_pass,
-            "1031: four gaps must gate the relaxed verdict at tolerance=3"
+            !decide(100, 0, 0, 6).relaxed_pass,
+            "1243: six gaps must gate the relaxed verdict at tolerance=5"
         );
         assert!(
-            decide(100, 0, 3, 3).relaxed_pass,
-            "1031: the degraded-cam1 burst (3 copies + 3 gaps) stays absorbed at tolerance=3"
+            decide(100, 0, 5, 5).relaxed_pass,
+            "1243: the observed worst-window burden (up to 5 copies + 5 gaps) stays absorbed at tolerance=5"
         );
     }
 
@@ -906,9 +910,10 @@ mod tests {
 
     #[test]
     fn four_copies_or_gaps_still_fail_over_the_reactivated_tolerance_1220() {
-        // The upper edge #1220 does NOT touch: `WINDOW_COPIES_GAPS_TOLERANCE + 1` (4 today) must
-        // still FAIL -- this is what keeps the re-arm a real, still-discriminating gate rather
-        // than an open door. Mirrors run 1989954227's still-red CAM7 window (copies=4/gaps=5).
+        // The upper edge #1220 does NOT touch: `WINDOW_COPIES_GAPS_TOLERANCE + 1` (6 today,
+        // walked 3 -> 5 on issue 1243) must still FAIL -- this is what keeps the re-arm a real,
+        // still-discriminating gate rather than an open door. Mirrors run 1989954227's still-red
+        // CAM2 windows (copies=10/gaps=9, copies=19/gaps=18), still well over the walked-up value.
         for &(c, g) in &[
             (WINDOW_COPIES_GAPS_TOLERANCE + 1, 0u32),
             (0, WINDOW_COPIES_GAPS_TOLERANCE + 1),
