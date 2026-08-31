@@ -852,6 +852,20 @@ def _blocking_failures(verdict):
             _OWN_CLAUDE,
         ))
 
+    # 12) Own digital burn absent for a SCHEDULED cam (issue 1247). REPORT-ONLY today
+    #     (own_burn_absent::gates_overall_pass=false → _report_only_tripped); becomes BLOCKING only
+    #     when the seam is flipped LIVE (gates_overall_pass=true). The `is True` guard makes this
+    #     auto-follow the flip without double-counting with the report-only branch below.
+    oba = _g(verdict, "full_chain", "own_burn_absent_gate", default=None)
+    if (isinstance(oba, dict) and oba.get("pass") is False
+            and oba.get("gates_overall_pass") is True):
+        cams = _upper_join(oba.get("absent_cams") or [])
+        out.append((
+            f"Vlastný digitálny burn kamery CHÝBA (kamera bežala, ale bez vlastného burnu): "
+            f"ZLYHALA — {cams}",
+            _OWN_CLAUDE,
+        ))
+
     return out
 
 
@@ -897,6 +911,15 @@ def _report_only_tripped(verdict):
            or _g(verdict, "lipsync_cross_check", default=None))
     if isinstance(lip, dict) and lip.get("gate_pass") is False:
         names.append("lipsync")
+    # issue 1247 — own digital burn absent for a scheduled cam. REPORT-ONLY today (its seam ships
+    # gates_overall_pass=false). The `is not True` guard mirrors the delivery-spread pattern: if the
+    # seam is ever flipped LIVE it routes to _blocking_failures (item 12) instead of double-counting.
+    oba = _g(verdict, "full_chain", "own_burn_absent_gate", default=None)
+    if (isinstance(oba, dict) and oba.get("pass") is False
+            and oba.get("gates_overall_pass") is not True):
+        cams = _upper_join(oba.get("absent_cams") or [])
+        names.append(f"chýbajúci vlastný burn kamery ({cams})" if cams
+                     else "chýbajúci vlastný burn kamery")
     return names
 
 

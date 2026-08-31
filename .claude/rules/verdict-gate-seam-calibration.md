@@ -8,6 +8,7 @@ paths:
   - "src/self_heal_attribution.rs"
   - "src/dup_cadence.rs"
   - "src/burn_hold.rs"
+  - "src/own_burn_absent.rs"
 ---
 
 # Calibrating + wiring a NEW verdict gate seam (the one-line-restorable `gates_overall_pass()` pattern)
@@ -290,3 +291,32 @@ the reusable playbook for turning a blind pixel signal Viable:
   mis-flag it a pulldown). Harmless while report-only, but the full-run recalibration must judge
   whether an UPPER rate bound is needed to separate a ~16.7% pulldown from ~100% static (frozen_leg's
   domain). Not a concern on the animated Vernier/burn test pattern, but note it for the calibration.
+
+## A PRESENCE seam is the same shape but skips §1–§3 (calibration) — `own_burn_absent` (issue 1247)
+
+Not every new `gates_overall_pass()` seam gates a CALIBRATED THRESHOLD mined from the verdict-JSON
+distribution. `src/own_burn_absent.rs` (issue 1247) is a PRESENCE seam: it flags a SCHEDULED cambox
+whose OWN digital burn was entirely absent from the recording (`full_chain.burn_ids_present.<cam> ==
+0`) — the issue-1246 symptom where a cam's leg is live but served by production `camera-box.service`
+(no digital burn), so the per-segment optical-tick verdict can overstate it as a clean pass. It keys
+off the `--switch-schedule` DEPLOYED set (`SwitchWindow.cambox`), NOT a mined metric distribution, so
+§1–§3 (calibrate-from-JSONs, tightest-green-ceiling, honest-margin-threshold) DO NOT APPLY — there is
+no threshold, only present-vs-absent. Everything else is identical: a pure crate-root decision (no
+probe deps, std-only, unit-tests Tier-0 on default features — the pure-module + shell-replica pattern
+below), a thin consumer in `recording-verdict.rs` computing the counts from the same `camN_ids.len()`
+that build `full_chain.burn_ids_present` (so the gate can never disagree with that field), a JSON term
+under `full_chain.own_burn_absent_gate`, and the report-only fold `all_pass &= gate_pass ||
+!gates_overall_pass();` with `gates_overall_pass()` hardcoded `false` (the LIVE `[7b/8]` run-integrity
+check already fails such a run; a one-line flip makes it blocking). The e2e_discord_report branches
+use `is True` / `is not True` on the seam's serialized `gates_overall_pass` so a future flip
+auto-routes report-only → blocking without double-counting (the same convention as
+`e2e-discord-report.md`).
+
+**Lesson (CYCLE-6 review 🔵) — a verdict-JSON field name MUST describe what it ACTUALLY carries.**
+The first cut named the field `scheduled_cams` but it held the ASSESSED subset (scheduled ∩ cams that
+HAVE a burn-count key) — a scheduled-but-unassessed cambox (e.g. `imag`, measured by its own leg
+gate) silently vanished from a field named "scheduled". Because this whole gate family's PURPOSE is
+preventing durable-artifact misreads, a misleadingly-named field in the artifact is itself the bug
+it exists to catch. Renamed to `assessed_cams` + a clarifying `note` clause. General rule for any new
+verdict-JSON key: name it for the set it actually contains, and if that set is a filtered subset, say
+so in the `note`.
