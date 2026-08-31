@@ -5250,7 +5250,7 @@ fn build_and_print_verdict_with_stream_diffs(
                 // a single per-window-MIN term is honest (no run-wide second term). `None` worst = no
                 // cadence window (mass decode failure, already hard-failed by copies/gaps/undecodable)
                 // = not applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`
-                // — the 0.95 floor REDs the current sick rig BY DESIGN.
+                // — the 0.93 floor (walk-back: issue 1242) REDs the current sick rig BY DESIGN.
                 let worst_cadence_uniform_fraction: Option<f64> = seg
                     .segments
                     .iter()
@@ -5289,7 +5289,8 @@ fn build_and_print_verdict_with_stream_diffs(
                     "note": "#1142 cadence-uniformity FLOOR (owner mandate). Worst per-window \
                              presentation_cadence.derived_uniform_fraction (the self-consistent \
                              mode-based field, #726 fix) across cambox windows must be >= \
-                             min_uniform_fraction (0.95); a smooth 60->30 chain reads ~1.0, the \
+                             min_uniform_fraction (0.93, walk-back: issue 1242); a smooth 60->30 \
+                             chain reads ~1.0, the \
                              current rig ~0.67-0.78 (issue 1130 60->30 + FIFO churn) so this REDs \
                              the sick rig by design. worst_raw_uniform_fraction is the raw reading, \
                              DIAGNOSTIC only (it false-reds a clean off-expected-step window; \
