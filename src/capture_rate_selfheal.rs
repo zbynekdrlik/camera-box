@@ -308,8 +308,8 @@ pub fn hold_off_message(
 ) -> String {
     format!(
         "CRITICAL #1248 self-heal HOLD-OFF: {} has SUSPENDED automatic USB resets for capture \
-         device {video_device_path} ({model}) — {futile_resets} USB re-enumeration self-heals \
-         within {}s all failed to hold. Repeatedly re-enumerating a defect that never stays fixed \
+         device {video_device_path} ({model}) — {futile_resets} USB re-enumeration self-heal \
+         attempts within {}s did not hold. Repeatedly re-enumerating a defect that never stays fixed \
          is worse than the defect (each reset is a ~25s NDI outage), so no further resets will run \
          for this device until it recovers for longer than the recurrence window (or the process \
          restarts). The {model}'s over-rate is left to the genlock decimation gate (see \
@@ -1780,6 +1780,22 @@ mod tests {
         // or a dev1 watchdog would mis-count a hold as a reset.
         assert!(!m.contains("USB reset attempt"), "{m}");
         assert!(!m.contains("#663 self-heal: USB reset attempt"), "{m}");
+        // The genuinely dangerous tag is CAPTURE_RATE_SELF_HEAL_MESSAGES, whose
+        // `#663 self-heal` prefix is the one the hard reset grep keys on — pin
+        // that it still cannot form the `#663 self-heal: USB reset attempt`
+        // anchor (the tag here is followed by " has SUSPENDED", never ":").
+        let m663 = hold_off_message(
+            &CAPTURE_RATE_SELF_HEAL_MESSAGES,
+            DEFAULT_HOLD_OFF_HEALS - 1,
+            "/dev/video1",
+            GrabberModel::ShadowCast2,
+        );
+        assert!(m663.contains("#1248 self-heal HOLD-OFF"), "{m663}");
+        assert!(
+            !m663.contains("#663 self-heal: USB reset attempt"),
+            "{m663}"
+        );
+        assert!(!m663.contains("USB reset attempt"), "{m663}");
     }
 
     #[test]

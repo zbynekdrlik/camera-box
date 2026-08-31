@@ -20,7 +20,14 @@ returns `None`. On a hold the returned state ADVANCES `last_heal_epoch_s` (so th
 throttle/floor re-engages and the alert is re-logged at most once per period, never every window) and
 CAPS `recurrence_heal_count` at the threshold; it re-arms to `Heal` only via the existing
 elapsed-past-recurrence-window branch — i.e. after a genuine healthy gap. All four triggers inherit
-it (it lives in the shared decision). WHY (issue 1248): cam2's ShadowCast 2 over-rate re-drifts
+it (it lives in the shared decision). **The streak is SHARED across all four triggers (one physical
+device, one `STATE_PATH`): a futility streak built by ONE trigger returns `HoldOff` to the OTHERS
+too, so once (e.g.) the #1193 over-rate trigger has held off, the #1128 grabber-STUCK trigger's USB
+re-auth cure is ALSO suspended for that device until a > recurrence-window healthy gap.** This is
+deliberate (the resets all hit the same device, so a device that will not stay fixed should stop
+being reset regardless of which detector noticed) and low-exposure today (STUCK ships env-gated OFF;
+over-rate is a cam2-only canary) — but a future "STUCK not healing" investigation should know the
+hold may have been raised by a sibling trigger, not by STUCK's own count. WHY (issue 1248): cam2's ShadowCast 2 over-rate re-drifts
 ~10–30 min after every #1193 reset so the reset never holds and fired every ~30 min forever (each =
 a ~25 s NDI outage) — worse than the over-rate, which the genlock decimation gate already absorbs.
 The `#1248 self-heal HOLD-OFF` marker shares NO substring with the byte-anchored reset greps
