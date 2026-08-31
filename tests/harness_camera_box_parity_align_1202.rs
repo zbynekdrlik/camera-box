@@ -514,3 +514,127 @@ fn orchestrator_excludes_acked_boxes_from_the_deploy_camera_set() {
         "the acked-offline cam4 must NOT appear in the deploy CAMERA_SET: {m}"
     );
 }
+
+// ---- issue 1244 — commit-scoped ci.yml artifact resolution (never "newest on branch") --------
+//
+// ROOT CAUSE: cambox_align_deploy() used to resolve the candidate ci.yml artifact via "newest
+// successful ci.yml run on branch dev" (`gh run list --branch dev ...`). That resolution was
+// PROVEN non-deterministic *inside the E2E job's own runner environment* (self-hosted runner,
+// GITHUB_TOKEN) -- live runs 33400360170/33425283884 both resolved a PREHISTORIC build
+// (.428/.439) while the real newest build (.591/.594) was already published; the identical query
+// from an interactive shell (a different token) resolved correctly. Resolving BY THE CANDIDATE'S
+// OWN COMMIT is deterministic regardless of that anomaly -- a commit has at most ONE successful
+// ci.yml run, or none (not yet published), so "which run is newest" stops being a question that
+// can go wrong. No fallback to the old branch-based query when --commit finds nothing (issue 1244
+// is explicit: that would silently reopen the exact non-determinism this fix removes) -- the
+// existing refuse/self-heal path (candidate's own ci.yml not published yet) covers it.
+//
+// RED before issue 1244 (the lib still resolves via `--branch dev`, so every assertion below that
+// requires `--commit` / rejects `--branch` fails); GREEN after the commit-scoped resolution lands.
+
+/// A fake `gh` that appends every invocation's full argv (one line) to `$GH_ARGV_LOG`, then always
+/// reports "no run found" (empty stdout, exit 0) -- these tests only assert on the EMITTED command
+/// shape, never on a downloaded artifact.
+fn write_fake_gh_logging_argv(dir: &std::path::Path, log: &std::path::Path) -> PathBuf {
+    let p = dir.join("gh");
+    std::fs::write(
+        &p,
+        format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&p).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&p, perms).unwrap();
+    p
+}
+
+/// Runs `cambox_align_deploy CANDIDATE NAMES` with NO `CAMBOX_ALIGN_CANDIDATE_BIN` (forcing the
+/// real `gh`-resolution path) and a PATH-stubbed `gh` that logs its argv. Returns the logged
+/// `gh run list ...` invocation line, or `None` if `gh` was never invoked at all.
+fn resolve_run_list_argv(extra_env: &[(&str, &str)]) -> Option<String> {
+    let lib = manifest_dir().join("scripts/lib/camera-box-parity-align.sh");
+    let d = tempfile::tempdir().unwrap();
+    let bindir = d.path().join("bin");
+    std::fs::create_dir_all(&bindir).unwrap();
+    let log = d.path().join("gh-argv.log");
+    write_fake_gh_logging_argv(&bindir, &log);
+
+    let path_env = format!(
+        "{}:{}",
+        bindir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg("set -euo pipefail\n. \"$LIB\"\ncambox_align_deploy \"$CAND\" \"$NAMES\"\n")
+        .env("LIB", &lib)
+        .env("CAND", "1.7.0-dev.551")
+        .env("NAMES", "cam3")
+        .env("PATH", &path_env)
+        .env_remove("CAMBOX_ALIGN_CANDIDATE_BIN")
+        .env_remove("CAMBOX_ALIGN_DEPLOY_CMD")
+        .env_remove("GITHUB_SHA")
+        .env_remove("CAMBOX_ALIGN_CANDIDATE_SHA");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    // The command is expected to return non-zero (no run "found") -- only the logged argv matters.
+    let _ = cmd.output().unwrap();
+    std::fs::read_to_string(&log).ok().and_then(|s| {
+        s.lines()
+            .find(|l| l.starts_with("run list"))
+            .map(|l| l.to_string())
+    })
+}
+
+#[test]
+fn deploy_resolves_ci_run_by_explicit_candidate_sha_seam_1244() {
+    let line = resolve_run_list_argv(&[("CAMBOX_ALIGN_CANDIDATE_SHA", "deadbeefcafe")])
+        .expect("gh run list must be invoked when no CAMBOX_ALIGN_CANDIDATE_BIN is set");
+    assert!(
+        line.contains("--commit deadbeefcafe"),
+        "the ci.yml run resolution must be scoped to the candidate's own commit sha (issue 1244 \
+         -- 'newest on branch' resolved a prehistoric run inside the E2E runner environment): \
+         {line}"
+    );
+    assert!(
+        !line.contains("--branch"),
+        "the resolution must NEVER fall back to a branch-based 'newest' query (issue 1244 \
+         explicitly rejects a --commit-empty fallback to the old non-deterministic path): {line}"
+    );
+}
+
+#[test]
+fn deploy_resolves_ci_run_by_github_sha_fallback_when_seam_unset_1244() {
+    let line = resolve_run_list_argv(&[("GITHUB_SHA", "cafebabe1234")])
+        .expect("gh run list must be invoked when no CAMBOX_ALIGN_CANDIDATE_BIN is set");
+    assert!(
+        line.contains("--commit cafebabe1234"),
+        "with no CAMBOX_ALIGN_CANDIDATE_SHA override, the resolution must fall back to \
+         $GITHUB_SHA (set by every GitHub Actions job -- recording-e2e.sh runs as a plain \
+         workflow `run:` step and inherits it with no explicit wiring): {line}"
+    );
+    assert!(
+        !line.contains("--branch"),
+        "must never fall back to the branch-based query: {line}"
+    );
+}
+
+#[test]
+fn candidate_sha_prefers_the_explicit_seam_over_github_sha_1244() {
+    let lib = manifest_dir().join("scripts/lib/camera-box-parity-align.sh");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg("set -euo pipefail\n. \"$LIB\"\ncambox_align_candidate_sha\n")
+        .env("LIB", &lib)
+        .env("CAMBOX_ALIGN_CANDIDATE_SHA", "explicit-sha")
+        .env("GITHUB_SHA", "actions-sha")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "explicit-sha");
+}
