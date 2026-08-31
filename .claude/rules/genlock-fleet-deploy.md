@@ -163,3 +163,38 @@ carrying) fast-mode stream program and broke `!p.contains("robocopy")`. Before a
 any emitted block, grep the test file for `!p.contains(` / `!stream.contains(` and keep those words out
 of the comment (reworded to "during the byte copy"). New `# (1b)`/`# (8b)`-style step markers must also
 be UNIQUE in the emitted program (`grep -c` = 1) so an ordering `.find()` anchor can't latch the wrong one.
+
+## GOTCHA — `cp -a "$SRC/." "$DST/"` into a SYSTEM dir stamps the source dir's perms/owner onto $DST (#1236)
+
+The imag leg installs the whole bundle with `cp -a "$BUNDLE/lib/x86_64-linux-gnu/." "$LIBDIR/"`.
+GNU `cp -a` with the `src/.` operand copies the CONTENTS **and** applies the SOURCE directory's own
+mode+ownership onto the DESTINATION. `$BUNDLE` is an scp'd `mktemp -d` (0700, owned newlevel), so on
+the 2026-08-31 fleet deploy of 3eb21b2ed `/usr/lib/x86_64-linux-gnu` itself became
+`drwx------ newlevel:newlevel` and the installed libs landed `0600/0700 root:root` → user-run OBS
+died with `cannot open shared object file: libobs.so.30`, `imag-obs.service` flapped, and the
+supervised-restart verify correctly refused (exit 4). The 2026-08-26 deploys did NOT hit it — the
+trigger is the staging dir's own perms, which vary with how CI/scp left them, so the fix must hold
+REGARDLESS of them.
+
+**The fix (keep `cp -a`, NORMALIZE after + fail-closed ASSERT — never a whole-libdir sweep):**
+`cp -a` STAYS (the issue-1026 whole-bundle contract + its `tests/deploy_genlock_fleet.rs` anchor
+`cp -a "$BUNDLE/lib/x86_64-linux-gnu/."`). After it: reset `$LIBDIR` root:root 0755, then walk the
+BUNDLE source tree (`find . -mindepth 1 -printf '%P\0'`, NUL-safe) and per installed path set
+`chown root:root` + dirs 0755 / files `a+rX` (a 0700 rwx lib → 0755, a 0600 data file → 0644, both
+world-readable; `a+rX` never makes a non-exec file exec). The `share/obs` install (same `cp -a src/.`
+shape) gets the same treatment. Then a fail-closed `(3b)` assert (`assert_installed_perms SRC DST`)
+walks the same set and refuses the restart (`exit 4`) unless `$LIBDIR` is root:root 0755 and every
+installed path is root:root with dirs o+rx / files o+r — same fail-loud spirit as the SONAME/manifest
+guards. Scope to the just-installed set (walk the bundle tree), NOT `chown -R`/`chmod -R` over the
+whole `/usr/lib/x86_64-linux-gnu` (thousands of unrelated distro files).
+
+**`setup-imag.sh` step 12 does NOT share this defect** — its hot-swap uses per-file
+`install -m 0644/0755 -o root -g root "$BUNDLE_LIBOBS" "$LIBOBS_REAL"` (deterministic mode+owner,
+never stamps the containing dir); its only `cp -a` uses are single-FILE backup copies (no `src/.`
+operand). Any FUTURE per-file `install` → `cp -a src/.` change there would reintroduce the class.
+
+**Tier-0 note:** `tests/deploy_genlock_fleet.rs` asserts the EMITTED-program TEXT
+(`build_imag_deploy_program`), so prove RED→GREEN locally by sourcing the script, calling the builder,
+and grepping the emitted text (no cargo). The emitted program uses an UNQUOTED `cat <<EOS` heredoc —
+escape every emitted `$` as `\$` and use NO backticks/`$(...)` in comments (they substitute at emit
+time); `\0` in `-printf '%P\0'` passes through untouched. Verify the EMITTED program with `bash -n`.
