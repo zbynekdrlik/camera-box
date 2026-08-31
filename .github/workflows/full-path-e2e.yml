@@ -260,6 +260,16 @@ jobs:
         if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
         env:
           NDI_RUNTIME_DIR_V6: /usr/lib/ndi
+          # issue 1244 (review fix): cambox_parity_align_before_gate's ci.yml-artifact resolution
+          # is commit-scoped (never "newest on branch") -- but on a `pull_request` event
+          # `$GITHUB_SHA` is the SYNTHETIC merge commit (refs/pull/N/merge), which ci.yml
+          # (push:[dev,main] ONLY, deliberately never pull_request) never builds a run for, so the
+          # lib's own $GITHUB_SHA fallback would resolve NOTHING on every automatic pull_request
+          # run -- a 100% (not merely intermittent) false-refuse. Wire the PR's real HEAD sha
+          # explicitly -- the SAME `github.event.pull_request.head.sha` the #703 fetch step above
+          # already uses, for the identical reason. workflow_dispatch has no pull_request context
+          # (its own checkout IS the candidate), so it falls back to `github.sha` unchanged.
+          CAMBOX_ALIGN_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           # PR-triggered runs use the 300s acceptance-floor profile (no `inputs.duration_secs`
           # on a pull_request event); workflow_dispatch keeps its own default/operator override.
           DURATION: ${{ inputs.duration_secs || '300' }}

@@ -306,3 +306,41 @@ fn full_path_e2e_yml_all_cambox_is_in_the_recording_steps_env_block() {
          env vars set on ITS OWN step. step_block:\n{step_block}"
     );
 }
+
+/// issue 1244 (review fix) — `$GITHUB_SHA` on a `pull_request`-triggered workflow is the
+/// SYNTHETIC merge commit (refs/pull/N/merge), never the PR's real head commit, and ci.yml
+/// (push:[dev,main] only) never builds a run for that merge sha. So
+/// `cambox_align_candidate_sha`'s bare `$GITHUB_SHA` fallback would resolve NOTHING on every
+/// automatic pull_request E2E run -- the align would ALWAYS refuse (a 100%, not merely
+/// intermittent, false-refuse). This step's own env: block must wire
+/// `CAMBOX_ALIGN_CANDIDATE_SHA` explicitly to `github.event.pull_request.head.sha` (the SAME
+/// value the sibling `#703` fetch step above already uses for the identical reason) -- never rely
+/// on the bare $GITHUB_SHA fallback here.
+///
+/// RED before this fix (the env: block carries no CAMBOX_ALIGN_CANDIDATE_SHA line at all); GREEN
+/// after.
+#[test]
+fn full_path_e2e_yml_wires_cambox_align_candidate_sha_to_pr_head_sha_1244() {
+    let s = read_workflow();
+    let step_pos = s
+        .find("name: Recording-based 4-node cam2")
+        .expect("the recording step must exist");
+    let run_pos = s[step_pos..]
+        .find("run: exec bash scripts/recording-e2e.sh")
+        .map(|p| p + step_pos)
+        .expect("the recording step must invoke recording-e2e.sh");
+    let step_block = &s[step_pos..run_pos];
+    assert!(
+        step_block.contains("CAMBOX_ALIGN_CANDIDATE_SHA:"),
+        "issue 1244: CAMBOX_ALIGN_CANDIDATE_SHA must be set inside the recording step's own \
+         env: block (between its `name:` and its `run:` line) -- the parity-align lib's bare \
+         $GITHUB_SHA fallback resolves the wrong (merge) commit on a pull_request-triggered run. \
+         step_block:\n{step_block}"
+    );
+    assert!(
+        step_block.contains("github.event.pull_request.head.sha"),
+        "issue 1244: CAMBOX_ALIGN_CANDIDATE_SHA must resolve to the PR's real HEAD commit \
+         (github.event.pull_request.head.sha), the same value the sibling #703 fetch step above \
+         already uses -- never the pull_request event's synthetic merge sha. step_block:\n{step_block}"
+    );
+}

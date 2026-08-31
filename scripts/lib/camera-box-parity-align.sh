@@ -130,15 +130,21 @@ cambox_align_candidate_version() {
 # 33425283884 both resolved a PREHISTORIC build (dev.428/dev.439) while the real newest build
 # (dev.591/dev.594) was already published; the identical query from an interactive shell (a
 # different token) resolved correctly, so the anomaly is runner-environment/token-scoped, not a
-# logic bug in the query shape. Resolving BY COMMIT sidesteps it entirely: a commit has at most
-# ONE successful ci.yml run, or none (not yet published), so "which run is newest" is no longer a
-# question that can go wrong.
+# logic bug in the query shape. Resolving BY COMMIT sidesteps it entirely: every successful ci.yml
+# run for a given commit builds the SAME source (a `gh run rerun` of an already-successful run can
+# produce more than one successful run sharing that commit's headSha, but they are byte-identical
+# builds), so "which run is newest" stops being a question whose answer can differ in substance.
 #
-# Override for tests via CAMBOX_ALIGN_CANDIDATE_SHA. Falls back to $GITHUB_SHA (set by every
-# GitHub Actions job -- recording-e2e.sh runs as a plain workflow `run:` step and inherits it with
-# no explicit wiring), then to `git rev-parse HEAD` in this lib's own checkout (the harness always
-# runs from a real clone). "" if unresolvable (the caller then refuses cleanly; never a silent
-# wrong sha).
+# Override for tests via CAMBOX_ALIGN_CANDIDATE_SHA. Falls back to $GITHUB_SHA -- but on a
+# `pull_request`-triggered workflow, $GITHUB_SHA is the SYNTHETIC merge commit
+# (refs/pull/N/merge), NOT the PR's head commit, and ci.yml (push:[dev,main] only) never builds a
+# run for that merge sha -- so a `pull_request` CALLER MUST set CAMBOX_ALIGN_CANDIDATE_SHA
+# EXPLICITLY (see full-path-e2e.yml's recording step, which wires
+# `github.event.pull_request.head.sha` -- the SAME value the sibling #703 fetch step already
+# uses). The bare $GITHUB_SHA fallback below is only correct for a `push`/`workflow_dispatch`
+# checkout, where $GITHUB_SHA already IS the real candidate commit. Final fallback: `git rev-parse
+# HEAD` in this lib's own checkout (the harness always runs from a real clone). "" if unresolvable
+# (the caller then refuses cleanly; never a silent wrong sha).
 cambox_align_candidate_sha() {
   if [ -n "${CAMBOX_ALIGN_CANDIDATE_SHA:-}" ]; then
     printf '%s' "$CAMBOX_ALIGN_CANDIDATE_SHA"
