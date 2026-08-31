@@ -2416,4 +2416,106 @@ mod tests {
             "#1220: the singleton mechanism never fires while the tolerance channel is armed: {v:?}"
         );
     }
+
+    #[test]
+    fn per_cambox_override_absorbs_cam2_starvation_but_not_other_boxes_1251() {
+        // #1251: an UPPERCASE `CAM2` window carrying a starvation burst (copies=8 -- the shape of
+        // run 1326320314's cam2 windows, over the default 5, under CAM2's 25 override) is ABSORBED,
+        // while a `CAM3` window over the default 5 still FAILS. Uppercase labels on purpose:
+        // production emits CAMN, and the lowercase-`cam2` fixtures above deliberately keep the
+        // default so the override touches only the real rig.
+        let schedule = vec![win("CAM2", 0, 2000), win("CAM3", 2000, 3000)];
+        // CAM2: tick 500 repeated 9 times -> copies=8, gaps=0 (all-same value dedups to one span).
+        let mut frames: Vec<SegmentFrame> = (0..9)
+            .map(|i| SegmentFrame {
+                frame_index: i,
+                gen_ts_ns: 100 + i as i64 * 100,
+                tick: Some(500),
+            })
+            .collect();
+        // CAM3: 100,101,108,109 -> 102..107 absent -> gaps=6 (over the default 5).
+        frames.extend([
+            SegmentFrame {
+                frame_index: 100,
+                gen_ts_ns: 2100,
+                tick: Some(100),
+            },
+            SegmentFrame {
+                frame_index: 101,
+                gen_ts_ns: 2200,
+                tick: Some(101),
+            },
+            SegmentFrame {
+                frame_index: 102,
+                gen_ts_ns: 2300,
+                tick: Some(108),
+            },
+            SegmentFrame {
+                frame_index: 103,
+                gen_ts_ns: 2400,
+                tick: Some(109),
+            },
+        ]);
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+
+        // CAM2 window: the applied per-window tolerance is the 25 override, carried on the segment
+        // (serialized into the verdict JSON as `copies_gaps_tolerance` so the report shows the
+        // override).
+        assert_eq!(v.segments[0].cambox, "CAM2");
+        assert_eq!(
+            v.segments[0].copies, 8,
+            "CAM2 copies computed: {:?}",
+            v.segments[0]
+        );
+        assert_eq!(
+            v.segments[0].gaps, 0,
+            "CAM2 gaps computed: {:?}",
+            v.segments[0]
+        );
+        assert_eq!(
+            v.segments[0].copies_gaps_tolerance, 25,
+            "CAM2 applied tolerance = the 25 override: {:?}",
+            v.segments[0]
+        );
+        assert!(
+            v.segments[0].relaxed_pass,
+            "CAM2 copies=8 is ABSORBED by its 25 override: {:?}",
+            v.segments[0]
+        );
+        assert!(
+            !v.segments[0].pass,
+            "the STRICT verdict still records CAM2's copies (visible, never masked): {:?}",
+            v.segments[0]
+        );
+
+        // CAM3 window: keeps the default tolerance and still FAILS on gaps=6.
+        assert_eq!(v.segments[1].cambox, "CAM3");
+        assert_eq!(
+            v.segments[1].gaps, 6,
+            "CAM3 gaps computed: {:?}",
+            v.segments[1]
+        );
+        assert_eq!(
+            v.segments[1].copies_gaps_tolerance,
+            crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE,
+            "CAM3 keeps the default tolerance: {:?}",
+            v.segments[1]
+        );
+        assert!(
+            !v.segments[1].relaxed_pass,
+            "CAM3 gaps=6 over the default 5 still fails: {:?}",
+            v.segments[1]
+        );
+
+        // The run still fails -- on the genuinely-broken box (CAM3), never masked by the CAM2 relax.
+        assert!(
+            !v.overall_pass,
+            "run fails on CAM3, not CAM2 (the override never masks a real defect): {v:?}"
+        );
+        // `windows_over_copies_gaps_tolerance` uses each window's OWN tolerance: only CAM3 is over.
+        assert_eq!(
+            v.windows_over_copies_gaps_tolerance, 1,
+            "only CAM3 exceeds its own tolerance; CAM2's 8 is within 25: {v:?}"
+        );
+    }
 }
