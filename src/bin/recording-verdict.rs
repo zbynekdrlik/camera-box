@@ -5267,9 +5267,11 @@ fn build_and_print_verdict_with_stream_diffs(
                             .map(|pc| pc.uniform_fraction)
                     })
                     .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
-                // Diagnostic-only: the self-consistent (mode-derived) reading, surfaced so a future
-                // switch away from the raw field (if it ever false-reds a clean-but-jittery run) is
-                // a one-field change. NOT gated — see src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
+                // The GATED reading: the self-consistent (mode-derived) field fed to
+                // `cadence_uniformity_gate_pass` below (serialized as `worst_uniform_fraction`). The
+                // RAW `worst_cadence_uniform_fraction` above is DIAGNOSTIC only — surfaced so a
+                // future switch away from the derived field (if it ever false-reds a clean-but-jittery
+                // run) is a one-field change. See src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
                 let worst_cadence_derived_uniform_fraction: Option<f64> = seg
                     .segments
                     .iter()
