@@ -349,7 +349,7 @@ else
 fi
 
 # =============================================================================
-step 2 "Network performance tuning (#486): sysctl + EEE/flow-control off on the NDI NIC"
+step 2 "Network performance tuning (#486): sysctl + EEE off, flow-control advertised on the NDI NIC"
 # =============================================================================
 # imag aggregates 6x concurrent NDI 1080p60 streams over a single USB-ethernet NIC on stock
 # buffers/EEE — exactly the jitter the cam fleet already tuned away (setup-device.sh STEP 14).
@@ -381,10 +381,11 @@ net.ipv6.conf.default.disable_ipv6 = 1
 EOF
 sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
 
-# EEE (Green Ethernet) + flow-control off, scoped to $NIC only. Two mechanisms, belt-and-
-# suspenders (some USB-ethernet chipsets don't implement these ioctls at all — `|| true`
-# throughout): (1) a networkd-dispatcher hook for interface-routable/hotplug events, and
-# (2) an immediate one-time apply now (re-applied at every boot via the governor step's rc.local).
+# EEE (Green Ethernet) off + flow-control ADVERTISED (issue 1234), scoped to $NIC only. Two
+# mechanisms, belt-and-suspenders (some USB-ethernet chipsets don't implement these ioctls at
+# all — `|| true` throughout): (1) a networkd-dispatcher hook for interface-routable/hotplug
+# events, and (2) an immediate one-time apply now (re-applied at every boot via the governor
+# step's rc.local).
 mkdir -p /etc/networkd-dispatcher/routable.d
 cat > /etc/networkd-dispatcher/routable.d/optimize-nic <<NICEOF
 #!/bin/bash
