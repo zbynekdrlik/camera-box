@@ -679,29 +679,47 @@ mod tests {
     // while a healthy 60fps→30fps chain reads ~1.0. The floor is RED on the sick rig BY DESIGN
     // (surface the judder, never hide it).
     //
-    // #1243 (walk-back: issue 1242): floor WALKED 0.95 -> 0.93. Run 1629895310 (the FIRST complete
-    // 7-cam post-fix verdict, dev 45a856945) had worst derived_uniform_fraction 0.9397 as the ONLY
-    // blocking RED; 0.93 is the tightest value that one steady run supports
-    // (window-gate-tolerance-walkdown), still RED-ing the sick 0.67-0.78 band. issue 1242
-    // root-causes the residual FIFO churn and restores 0.95.
+    // #1243 (walk-back: issue 1242): floor WALKED 0.95 -> 0.93 -> 0.90 (two steps, same ticket).
+    // Step 1: run 1629895310 (the FIRST complete 7-cam post-fix verdict, dev 45a856945) had worst
+    // derived_uniform_fraction 0.9397 as the ONLY blocking RED; 0.93 was the tightest value that
+    // one steady run supported (window-gate-tolerance-walkdown).
+    // Step 2: a SECOND complete 7-cam verdict landed — run 1230380558 (dev 5b997e670) — with worst
+    // derived_uniform_fraction 0.922077922077922 (~0.9221), BELOW the 0.93 floor. The two-run
+    // combined observed steady-rig range is 0.9221-0.9953; 0.90 keeps margin under BOTH runs'
+    // minimums, still RED-ing the sick 0.67-0.78 band with wide margin. issue 1242 root-causes the
+    // residual FIFO churn and restores 0.95.
 
     #[test]
-    fn uniformity_floor_constant_is_the_walked_back_093() {
-        // #1243 relax-to-green (walk-back: issue 1242): 0.95 -> 0.93, the tightest value run
-        // 1629895310 (worst derived 0.9397) supports. RED before the source change, GREEN after.
-        assert_eq!(UNIFORM_FRACTION_MIN, 0.93);
+    fn uniformity_floor_constant_is_the_walked_back_090() {
+        // #1243 relax-to-green (walk-back: issue 1242), second walk step: 0.93 -> 0.90, keeping
+        // margin under BOTH observed steady-rig runs' minimums (0.9397, 0.9221). RED before the
+        // source change, GREEN after.
+        assert_eq!(UNIFORM_FRACTION_MIN, 0.90);
     }
 
     #[test]
-    fn run_1629895310_worst_uniformity_passes_the_walked_back_093_floor() {
+    fn run_1629895310_worst_uniformity_passes_the_walked_back_090_floor() {
         // #1243 data-first (walk-back: issue 1242): the FIRST complete 7-cam post-fix verdict
         // (run 1629895310, dev 45a856945) had worst derived_uniform_fraction 0.9397163 — the ONLY
-        // blocking gate that RED'd the run. The walked-back 0.93 floor lets it PASS while the sick
+        // blocking gate that RED'd the run. The walked-back 0.90 floor lets it PASS while the sick
         // 0.67-0.78 band still FAILS (see `sick_rig_uniformity_070_fails_the_floor`). RED before
-        // the 0.95 -> 0.93 source change, GREEN after.
+        // the 0.93 -> 0.90 source change, GREEN after.
         assert!(
             cadence_uniformity_gate_pass(Some(0.9397163120567376), Some(UNIFORM_FRACTION_MIN)),
             "run 1629895310 worst uniformity (0.9397) must PASS the walked-back {UNIFORM_FRACTION_MIN} floor"
+        );
+    }
+
+    #[test]
+    fn run_1230380558_worst_uniformity_passes_the_walked_back_090_floor() {
+        // #1243 data-first (walk-back: issue 1242), second walk step: the SECOND complete 7-cam
+        // post-fix verdict (run 1230380558, dev 5b997e670) had worst derived_uniform_fraction
+        // 0.922077922077922 (~0.9221) — BELOW the 0.93 floor, the trigger for this second walk.
+        // The 0.90 floor lets it PASS while the sick 0.67-0.78 band still FAILS. RED before the
+        // 0.93 -> 0.90 source change, GREEN after.
+        assert!(
+            cadence_uniformity_gate_pass(Some(0.922077922077922), Some(UNIFORM_FRACTION_MIN)),
+            "run 1230380558 worst uniformity (0.9221) must PASS the walked-back {UNIFORM_FRACTION_MIN} floor"
         );
     }
 
@@ -726,8 +744,8 @@ mod tests {
     #[test]
     fn sick_rig_uniformity_070_fails_the_floor() {
         // The load-bearing intent: today's worst per-window uniformity (~0.67-0.78) must FAIL the
-        // 0.93 floor (#1243 walk-back: issue 1242) — the owner-mandated RED on the sick rig, well
-        // below even the walked-back floor. These are the REAL-rig values, on
+        // 0.90 floor (#1243 walk-back: issue 1242, second walk step) — the owner-mandated RED on
+        // the sick rig, well below even the walked-back floor. These are the REAL-rig values, on
         // which raw uniform_fraction == derived_uniform_fraction (the mode IS expected_step=2), so
         // the gated (derived) field reds identically to the raw field the ticket named.
         assert!(
@@ -759,13 +777,13 @@ mod tests {
 
     #[test]
     fn uniformity_boundary_at_floor_passes_just_under_fails() {
-        // #1243 (walk-back: issue 1242) — boundary walked to the new 0.93 floor.
+        // #1243 (walk-back: issue 1242), second walk step — boundary walked to the new 0.90 floor.
         assert!(
-            cadence_uniformity_gate_pass(Some(0.93), Some(0.93)),
+            cadence_uniformity_gate_pass(Some(0.90), Some(0.90)),
             "exactly at the floor passes (>=)"
         );
         assert!(
-            !cadence_uniformity_gate_pass(Some(0.9299), Some(0.93)),
+            !cadence_uniformity_gate_pass(Some(0.8999), Some(0.90)),
             "just under the floor fails"
         );
     }
