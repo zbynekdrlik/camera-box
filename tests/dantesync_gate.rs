@@ -1034,9 +1034,19 @@ fn gate_fails_a_win_http_node_with_too_few_distinct_samples_by_default() {
          stdout={stdout} stderr={stderr}"
     );
     assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    // #1130: scope this to the strih node's OWN verdict line (the first strih-prefixed line, the
+    // offset grade printed before PTP/GM/PHASE-SLEW) AND anchor on the distinct-samples wording --
+    // a bare stdout.contains("UNKNOWN") is now tautologically satisfied by the always-printed
+    // report-first "strih PHASE-SLEW UNKNOWN" line, so it could no longer fail for its intended
+    // reason (the insufficient-distinct verdict). Mirrors the node-line scoping at ~:2976.
+    let strih_verdict = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("strih"))
+        .unwrap_or("");
     assert!(
-        stdout.contains("UNKNOWN"),
-        "stdout must show the insufficient-distinct-samples verdict: {stdout}"
+        strih_verdict.contains("UNKNOWN") && strih_verdict.contains("distinct sample"),
+        "the strih node's OWN verdict must be the insufficient-distinct-samples UNKNOWN, not \
+         satisfied by an unrelated report-only line: {stdout}"
     );
 }
 
@@ -4527,4 +4537,205 @@ fn gate_win_http_client_missing_step_threshold_field_falls_back_to_700_1129() {
         stdout.contains("fallback(700us)"),
         "the note must still admit the 700us fallback on a box not serving the field: {stdout}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1130 — phase_slew (dantesync issue 97) is the fleet-wide CURE for the chronic NTP step storm
+// this ticket tracks: a bounded rate-slew that absorbs UTC phase error instead of stepping it.
+// It is a per-box config toggle, so a box that silently reverts to phase_slew=off re-introduces
+// the storm (uncaught until dantesync's own >120/h ntp_step_storm alarm, far above the visible-
+// judder threshold). grade_http_node now checks it REPORT-FIRST, exactly like the #834 gm_check:
+// the PHASE-SLEW ENABLED/DISABLED/UNKNOWN line is ALWAYS printed per HTTP-graded node, but only
+// feeds the node's OK/BAD verdict when DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 (default off) -- so
+// wiring it cannot brick the standing E2E gate before the enforce flip. Reuses the #1215 pure
+// functions (phase_slew_enabled_from_pipe_json/phase_slew_check) already used by verify-imag.sh.
+// ---------------------------------------------------------------------------------------------
+
+/// A single-read HTTP fixture for the phase_slew tests: fresh (updated_ts = now), locked, in-bound
+/// offset, on the rig grandmaster -- so offset+PTP+GM all PASS, isolating the phase_slew behavior.
+/// `ps_fragment` is spliced verbatim, so pass e.g. `",\"phase_slew_enabled\":false"`,
+/// `",\"phase_slew_enabled\":true"`, or `""` (field entirely absent).
+fn write_phase_slew_fixture(name: &str, ps_fragment: &str) -> PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let json = format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{now},\
+         \"is_locked\":true,\"ntp_offset_us\":0,\"mode\":\"NANO\",\"ntp_failed\":false{ps_fragment}}}"
+    );
+    write_win_http_fixture(name, &json)
+}
+
+/// The stream node args used by these tests: only "stream" is configured (no "strih"), so
+/// --ntp-master "" opts OUT of the master-name validation -- grading stream as a plain client,
+/// the same isolation the gm foreign-GM test uses.
+fn phase_slew_stream_args() -> Vec<&'static str> {
+    vec![
+        "--linux",
+        "",
+        "--win-http",
+        "stream=10.77.9.204",
+        "--ntp-master",
+        "",
+        "--samples",
+        "1",
+        "--min-distinct",
+        "1",
+        "--window-s",
+        "0",
+    ]
+}
+
+#[test]
+fn gate_reports_phase_slew_disabled_but_stays_report_only_by_default_1130() {
+    // phase_slew=off (the box would STEP -> visible judder), report-only default -> the gate names
+    // the fault loudly but PASSES (does not brick E2E), byte-identical verdict to pre-#1130.
+    let p = write_phase_slew_fixture("stream_ps_disabled", ",\"phase_slew_enabled\":false");
+    let (code, stdout, stderr) = run_gate_env(
+        &phase_slew_stream_args(),
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "report-only default: disabled phase_slew must NOT block the gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("PHASE-SLEW DISABLED"),
+        "the disabled phase_slew must be reported loudly. stdout={stdout}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_fails_a_phase_slew_disabled_node_when_enforce_is_set_1130() {
+    // DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 flips the report-only check to a hard gate: a box that
+    // would STEP is BAD (exit 20), exactly like a DRIFT/PTP-degraded node -- the future enforce state.
+    let p = write_phase_slew_fixture(
+        "stream_ps_disabled_enforced",
+        ",\"phase_slew_enabled\":false",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &phase_slew_stream_args(),
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string()),
+            ("DANTESYNC_GATE_PHASE_SLEW_ENFORCE", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "enforce: a disabled phase_slew must be a hard failure (20). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("PHASE-SLEW DISABLED"), "stdout={stdout}");
+    assert!(stderr.contains("FAILED"), "stderr={stderr}");
+}
+
+#[test]
+fn gate_passes_a_phase_slew_enabled_node_under_enforce_1130() {
+    // The enforce HAPPY path -- a box on phase_slew (the live fleet state, 2026-09-01) passes even
+    // with enforce on, locking the pass side (complements the enforce-FAIL cases: disabled=>20).
+    let p = write_phase_slew_fixture("stream_ps_enabled_enforced", ",\"phase_slew_enabled\":true");
+    let (code, stdout, stderr) = run_gate_env(
+        &phase_slew_stream_args(),
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string()),
+            ("DANTESYNC_GATE_PHASE_SLEW_ENFORCE", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "enforce + phase_slew enabled must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("PHASE-SLEW ENABLED"), "stdout={stdout}");
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_reports_phase_slew_unknown_report_only_still_passes_1130() {
+    // A payload with NO phase_slew_enabled field: unreadable, which must never look correct
+    // (test-strictness). Report-only default -> reported UNKNOWN but the node still passes on
+    // offset+PTP+GM (complements the absent+enforce INCOMPLETE case below).
+    let p = write_phase_slew_fixture("stream_ps_absent_reportonly", "");
+    let (code, stdout, stderr) = run_gate_env(
+        &phase_slew_stream_args(),
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "report-only: an unreadable phase_slew must NOT block the gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("PHASE-SLEW UNKNOWN"), "stdout={stdout}");
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_reports_phase_slew_unknown_when_absent_and_enforce_set_1130() {
+    // Absent phase_slew_enabled under enforce is INCOMPLETE (11), never a silent pass -- the same
+    // "unreadable is not OK" contract offset/PTP/GM already follow.
+    let p = write_phase_slew_fixture("stream_ps_absent_enforced", "");
+    let (code, stdout, stderr) = run_gate_env(
+        &phase_slew_stream_args(),
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string()),
+            ("DANTESYNC_GATE_PHASE_SLEW_ENFORCE", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 11,
+        "enforce: an unreadable phase_slew must be INCOMPLETE (11), never a silent pass. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("PHASE-SLEW UNKNOWN"), "stdout={stdout}");
+    assert!(stderr.contains("INCOMPLETE"), "stderr={stderr}");
+}
+
+#[test]
+fn gate_rejects_a_mis_set_phase_slew_enforce_flag_1130() {
+    // Mirrors the #834 GM guard: a typo'd enforce value must fail loud, not silently be treated as OFF.
+    let p = write_phase_slew_fixture("stream_ps_badflag", ",\"phase_slew_enabled\":true");
+    let (code, _stdout, stderr) = run_gate_env(
+        &phase_slew_stream_args(),
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string()),
+            ("DANTESYNC_GATE_PHASE_SLEW_ENFORCE", "true"),
+        ],
+    );
+    assert_eq!(
+        code, 1,
+        "a mis-set enforce flag must fail loud (1). stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("DANTESYNC_GATE_PHASE_SLEW_ENFORCE must be 0 or 1"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn help_documents_the_phase_slew_enforce_flag_1130() {
+    let (code, stdout, _e) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.contains("DANTESYNC_GATE_PHASE_SLEW_ENFORCE"),
+        "help must document the #1130 report-first phase_slew enforce flag: {stdout}"
+    );
+}
+
+#[test]
+fn node_verdict_folds_the_optional_phase_slew_rc_1130() {
+    // node_verdict gained an OPTIONAL 4th [PS_RC] arg (default 0): ps=2 => BAD, ps=3 => UNKNOWN,
+    // ps=0/omitted => unchanged. Locks backward-compat (2-arg + 3-arg callers) AND the new fold.
+    for (args, want) in [
+        ("0 0 0 2", "BAD"),
+        ("0 0 0 3", "UNKNOWN"),
+        ("0 0 0 0", "OK"),
+        ("0 0", "OK"),   // pre-#834 2-arg caller unchanged
+        ("0 0 0", "OK"), // #834 3-arg caller unchanged
+        ("2 0 0 0", "BAD"),
+    ] {
+        let out = run_sourced(&format!("node_verdict {args}"), &[]);
+        assert_eq!(
+            out.trim(),
+            want,
+            "node_verdict {args} must be {want}: {out:?}"
+        );
+    }
 }

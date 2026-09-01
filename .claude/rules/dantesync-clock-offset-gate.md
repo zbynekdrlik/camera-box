@@ -275,3 +275,36 @@ structurally cannot catch a pre-step ramp. Local RED→GREEN with NO cargo: `rus
 tests/<file>.rs` standalone (provide `CARGO_MANIFEST_DIR=<worktree>`; the harness tests only use std +
 shell out), then run the binary; OR run the pure bash fn under `bash -c 'set -uo pipefail; . scripts/
 clock-offset-guard.sh; ...'` (`cargo test --no-run` is now hook-blocked too, #477 tightening).
+
+## phase_slew is now ASSERTED at the fleet [0/8] gate, REPORT-FIRST (#1130)
+
+The #1215 section above added `phase_slew_check`/`phase_slew_enabled_from_pipe_json` but wired
+them into `verify-imag.sh` ONLY (imag box). #1130 wired them into `dantesync-gate.sh`'s
+`grade_http_node` too, so EVERY HTTP-graded fleet node's phase_slew state is checked on every
+recording-E2E `[0/8]` run — because phase_slew (dantesync issue 97) is the fleet-wide CURE for the
+chronic NTP step storm, and a box silently reverting to `phase_slew=off` would re-introduce it
+uncaught until dantesync's own >120/h `ntp_step_storm` alarm (far above the visible-judder
+threshold). Mirrors the #834 `gm_check` sibling byte-for-byte:
+
+- **REPORT-FIRST by default.** `GATE_PHASE_SLEW_ENFORCE` (env `DANTESYNC_GATE_PHASE_SLEW_ENFORCE`,
+  default 0). At 0 the `PHASE-SLEW ENABLED/DISABLED/UNKNOWN` line ALWAYS prints per node but
+  `ps_gate_rc` stays 0 → verdict byte-identical to pre-#1130. At 1: DISABLED → BAD/20, UNKNOWN
+  (field absent/unread) → INCOMPLETE/11. Validated must-be-0/1 (same loud-on-typo guard as GM).
+- **`node_verdict` gained an OPTIONAL 4th `[PS_RC]` arg (default 0)** — every 2-/3-arg caller
+  unchanged. HTTP-path only (journal fallback returns before the block; journald has no
+  `phase_slew_enabled`).
+- **The enforce flip is a documented FOLLOW-UP, not done here** — a one-env-prefix change at
+  `recording-e2e.sh`'s `[0/8]` invocation (exactly like GM's #1073), gated on first confirming
+  EVERY graded node (including cam5/6/7 in the 7-cam set — #1130 live-verified only cam1-4+strih+
+  stream) serves `phase_slew_enabled` AND the dantesync version pin (1.8.52) guarantees the field.
+  Verify-before-flip by sourcing `clock-offset-guard.sh` + `phase_slew_check <node>
+  "$(phase_slew_enabled_from_pipe_json "$(curl -fsS http://<ip>:8898/status)")"` on each node.
+
+**Do NOT walk back the #1119/#1123/#1055 widenings just because the step storm is gone (#1130).**
+As of 2026-09-01 the fleet is on 1.8.52 with phase_slew ENABLED everywhere, master
+`ntp_steps_last_hour=0`, offsets µs-grade — so those widenings/rescues are DORMANT (zero steps) and
+harmless (they never gate video). Removing them is a BLIND tightening on single-point evidence
+during a FRESH phase_slew deployment: the owner wants a quiet-window fleet step-census first
+(issue 1130 comment 2026-08-31), and "never re-relax / recalibrate only from post-fix distribution
+data" applies in the tightening direction too. The recording-verdict floor/fold re-tighten is a
+SEPARATE lane (issue 1242, OPEN), never this gate.
