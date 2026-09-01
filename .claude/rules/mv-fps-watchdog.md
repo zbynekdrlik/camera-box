@@ -8,6 +8,8 @@ paths:
   - "systemd/mv-fps-alert-watchdog.*"
   - "tests/harness_mv_fps_preflight_1091.rs"
   - "vendor/obs-studio/libobs/obs-display-budget.h"
+  - "vendor/obs-studio/libobs/obs-display.c"
+  - "vendor/distroav/src/ndi-burn-filter.cpp"
 ---
 
 # MV-fps observability + live alarm (#771 core, #1083 live watchdog)
