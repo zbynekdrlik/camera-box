@@ -68,9 +68,10 @@ fn probe_raw_invocation() -> String {
 fn received_tap_uses_encoded_command_not_naive_quoting_1258() {
     let inv = probe_raw_invocation();
     assert!(
-        inv.contains("-EncodedCommand "),
-        "#1258: the received= tap must invoke PowerShell via -EncodedCommand (cmd.exe-proof), not \
-         the naive -Command \"...\" string Win32-OpenSSH's cmd.exe mangles. Got: {inv}"
+        inv.contains("-NoProfile -NonInteractive -EncodedCommand "),
+        "#1258: the received= tap must invoke PowerShell -NoProfile -NonInteractive -EncodedCommand \
+         (cmd.exe-proof), not the naive -Command \"...\" string Win32-OpenSSH's cmd.exe mangles. \
+         Got: {inv}"
     );
     assert!(
         !inv.contains("-Command \"gc"),
