@@ -105,8 +105,9 @@ pub struct CadenceEvenness {
     pub derived_uniform_fraction: f64,
     /// #1250 BEAT-AWARE correction — the GATED reading since this ticket. Same self-consistent count
     /// as `derived_uniform_steps` PLUS the ONE physically-grounded balanced complementary step pair a
-    /// sampling-phase beat produces: a painted tick captured one refresh EARLY (`derived_expected_step
-    /// - 1`) and its matching one-refresh-LATE compensation (`derived_expected_step + 1`), which
+    /// sampling-phase beat produces: a painted tick captured one refresh EARLY
+    /// (`derived_expected_step - 1`) and its matching one-refresh-LATE compensation
+    /// (`derived_expected_step + 1`), which
     /// together net to exactly `derived_expected_step` per frame with ZERO lost or duplicated content
     /// (the doctrinal dual-QR Vernier "1<->3 = 49/49 -> beat artifact, nets to zero"). Collapsed
     /// COUNT-wise, NOT by strict adjacency: `min(count(step-1), count(step+1))` balanced pairs count
