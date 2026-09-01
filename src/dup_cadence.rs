@@ -86,6 +86,7 @@
 //!   2. **Aux-tick supersede fork (owner, issue 1196).** dup-cadence detection may move to the aux
 //!      Vernier tick-pair signal instead of the content hash; the LIVE direction is owner-gated on
 //!      that decision.
+//!
 //! Full re-entry condition + the redundancy-vs-unique-value analysis (the content near-dup gate is
 //! redundant with the tick `copies` gate for pure duplication and only uniquely valuable for
 //! tick-independent near-dup): `verdict-gate-seam-calibration.md` §14.
