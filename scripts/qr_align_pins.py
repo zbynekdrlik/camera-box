@@ -138,17 +138,25 @@ DEFAULT_ALIGNED_QUANTUM_MS = 1.5 * SOURCE_FRAME_MS   # ~25.0 ms cross-camera spr
 
 # issue 1168 RE-TIGHTEN: the transient/quantum budget that splits the BUDGET-BOUND branch (a run whose
 # additive alignment target exceeds the 94 ms ceiling) into a report-only soft-release (residual WITHIN
-# the budget -- the issue-1161 behaviour, preserved) vs a HARD-FAIL (residual BEYOND it). DATA-CITED
-# (clean regime `--only-uniform --min-cameras 7`, 29 runs 2026-08-28..09-01, dev1): the BUDGET-BOUND
-# surviving residual is CONSISTENTLY ~2 source frames (~33 ms -- the N=2 60->30 lock-phase QUANTUM,
-# issue 1252; live CI runs 33513175938/33472532087/33464013809 = 33.6/33.2/33.4 ms), and the per-box
-# align-set (cam2 excluded, projection probe) floor-spread is p95=31.7 / max=37.2 ms. So 45 ms sits
-# ABOVE the observed healthy band (max 37.2 + ~1/2 source frame of jitter headroom, so NO clean run
-# false-fails) and BELOW 3 source frames (~50 ms) + the 4-source-frame 66 ms spread sanity -> a HARD-FAIL
-# ONLY on a residual >= ~3 source frames, a genuinely-worse cross-camera misalignment neither the
-# quantum nor the observed floor lottery explains. RE-ARMABLE: a future ticket LOWERS this toward the
-# <=1-id parity gate once the N=2 quantum ITSELF is addressed (floor reduction alone does NOT shrink it
-# -- the residual anti-correlates with the floor). --align-retighten-budget-ms overrides it either way.
+# the budget -- the issue-1161 behaviour, preserved) vs a HARD-FAIL (residual BEYOND it).
+# DATA-CITED against the GATED QUANTITY -- the barrier present-age residual `report_only_residual_ms`
+# (`worst` from round_deltas), NOT the jitter-audit floor spread (a DIFFERENT instrument that reads
+# WIDER; see qr-align.md "Mining the align STATUS"). Every reachable green pull_request E2E run is
+# status=budget-bound with this residual at CONSISTENTLY ~2 source frames (~33 ms -- the N=2 60->30
+# lock-phase QUANTUM, issue 1252): live CI 33513175938/33472532087/33464013809 = 33.6/33.2/33.4 ms
+# (max 33.6; reproduce with `gh api repos/zbynekdrlik/camera-box/actions/jobs/<jid>/logs | grep -a
+# report_only_residual_ms`). So 45 ms sits a full source frame ABOVE the observed gated residual band
+# (max 33.6 + ~11 ms headroom, so NO clean run false-fails) and BELOW 3 source frames (~50 ms) and the
+# 4-source-frame 66 ms spread sanity -> a HARD-FAIL ONLY on a residual >= ~3 source frames, a
+# genuinely-worse cross-camera misalignment neither the quantum nor the observed floor lottery explains.
+# CONTEXT (corroborating, NOT the gated quantity): the full-fleet arrival-floor spread is ~8 ms median /
+# ~49 ms run-level MAX over the clean regime (`arrival_floor_decompose.py --multi --only-uniform
+# --min-cameras 7`, 29 runs 2026-08-28..09-01) -- that ~49 ms is the FLOOR spread incl cam2 + transient
+# DQBUF episodes, a wider instrument than the barrier residual, so it does NOT imply a 49 ms gated
+# residual (the gated barrier residual stays bounded at ~2 frames; cam2 is the widest floor and is
+# EXCLUDED from the align gate entirely, issue 1216). RE-ARMABLE: a future ticket LOWERS this toward
+# the <=1-id parity gate once the N=2 quantum ITSELF is addressed (floor reduction alone does NOT shrink
+# it -- the residual anti-correlates with the floor). --align-retighten-budget-ms overrides it either way.
 DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS = 45.0
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
@@ -1575,7 +1583,8 @@ def main(argv=None):
                     help="issue 1168 re-tighten: a BUDGET-BOUND surviving residual ABOVE this HARD-FAILs "
                          "the run; at/below it soft-releases (report-only). Default = the observed "
                          "~2-source-frame N=2 quantum band + headroom; LOWER it toward the parity gate "
-                         "as the quantum improves (default 45)")
+                         "as the quantum improves (default 45). A value >= --max-delta-ms disarms the "
+                         "re-tighten (the spread sanity gate aborts first) -- a WARNING is emitted then.")
     # #1209: persist the raw PNG of any UNDECODABLE align screenshot into this dir (the caller passes
     # the run dir, e.g. recording-e2e's OUTDIR -- the same "caller supplies a path" convention as
     # --jitter-json), so a reproducible [4i/8align] abort can be root-caused from pixels. Absent =
@@ -1596,6 +1605,15 @@ def main(argv=None):
     sources = [s.strip() for s in a.sources.split(",") if s.strip()]
     if not sources:
         raise SystemExit("[qr-align] --sources is empty")
+
+    # issue 1168 review 🔵: a re-tighten budget >= the spread sanity DISARMS the hard-fail (the 66 ms
+    # sanity gate aborts first, so the budget-bound hard-fail branch is unreachable). Warn LOUD rather
+    # than silently claim "a residual above it hard-fails".
+    if a.align_retighten_budget_ms >= a.max_delta_ms:
+        sys.stderr.write(
+            f"WARNING: [qr-align] #1168 --align-retighten-budget-ms {a.align_retighten_budget_ms:.0f} >= "
+            f"--max-delta-ms {a.max_delta_ms:.0f}: the re-tighten hard-fail is DISARMED (the spread sanity "
+            "gate aborts a wider spread first, so no budget-bound residual can exceed this budget).\n")
 
     if a.reset_to_floor:
         n = reset_pins_to_floor(sources, a.host, a.password, a.floor_ms)

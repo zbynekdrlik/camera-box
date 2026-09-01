@@ -28,9 +28,11 @@
 #   Runs the floor-3 aligner against strih. Sources default to camera_align_ndi_sources_csv (the
 #   caller must already have sourced scripts/camera-set.sh — recording-e2e.sh does). Overridable
 #   knobs (all optional): QR_ALIGN_SOURCES (explicit CSV), QR_ALIGN_MAX_DELTA_MS,
-#   QR_ALIGN_PARITY_TOL_IDS, QR_ALIGN_EXTRA_ARGS, and the #1160 stable-tail bounds QR_ALIGN_ROUNDS
-#   (→ the --max-measure-rounds cap) + QR_ALIGN_BUDGET_S (→ --measure-budget-s, the ~150 s wall-clock
-#   bound, #1161). The budget is INTERNAL to qr_align_pins.py, so this step needs NO outer `timeout`
+#   QR_ALIGN_PARITY_TOL_IDS, QR_ALIGN_RETIGHTEN_BUDGET_MS (→ --align-retighten-budget-ms, the issue
+#   1168 budget-bound hard-fail budget; a live re-arm seam), QR_ALIGN_EXTRA_ARGS, and the #1160
+#   stable-tail bounds QR_ALIGN_ROUNDS (→ the --max-measure-rounds cap) + QR_ALIGN_BUDGET_S
+#   (→ --measure-budget-s, the ~150 s wall-clock bound, #1161). The budget is INTERNAL to
+#   qr_align_pins.py, so this step needs NO outer `timeout`
 #   and recording-e2e.sh is untouched. Returns the aligner's exit code (0 = aligned / already-aligned;
 #   non-zero = could not align — the caller ABORTS the run).
 qr_align_run() {

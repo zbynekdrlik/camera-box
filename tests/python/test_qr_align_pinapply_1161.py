@@ -641,8 +641,9 @@ class TestBudgetBoundSoftRelease:
             self._budget_align(monkeypatch, floors, current)
         msg = str(exc.value)
         assert "1168" in msg and "RE-TIGHTEN" in msg
-        assert "55" in msg or "54" in msg or "56" in msg   # the residual is named
-        assert "45" in msg                                  # the budget is named
+        # deterministic report phrases (residual {x:.1f} ms, budget {b:.0f} ms), not loose substrings
+        assert "residual 55.0 ms" in msg                    # the residual is named exactly
+        assert "budget 45 ms" in msg                        # the budget is named exactly
 
     def test_within_budget_still_aligns_never_budget_bound(self, monkeypatch):
         # REGRESSION: a within-budget floor set (max floor 66 <= 94) must still ALIGN, never soft-release.
@@ -663,10 +664,12 @@ class TestBudgetBoundSoftRelease:
 
     def test_main_exits_zero_on_budget_bound(self, monkeypatch, capsys):
         # exit 0 -> the E2E proceeds; the JSON persists the residual (stdout) + a loud summary (stderr).
+        # residual 33.0 is a REACHABLE budget-bound-report-only state (<= the 45 ms budget); a residual
+        # ABOVE the budget now raises in align() and never reaches main()'s budget-bound line (issue 1168).
         fake = {"status": "budget-bound", "budget_bound": True,
-                "over_budget": [{"source": "NDI cam3", "arrival_floor_ms": 79.0, "delta_ms": 50.0,
-                                 "target_ms": 129.0, "bound_ms": 94}],
-                "report_only_residual_ms": 50.0, "plan": {}, "pre_spread_ids": 6,
+                "over_budget": [{"source": "NDI cam3", "arrival_floor_ms": 79.0, "delta_ms": 33.0,
+                                 "target_ms": 112.0, "bound_ms": 94}],
+                "report_only_residual_ms": 33.0, "plan": {}, "pre_spread_ids": 4,
                 "tail_rounds": 3, "measure_rounds_total": 8, "measure_reason": "converged-stable"}
         monkeypatch.setattr(qa, "align", lambda *a, **k: fake)
         rc = qa.main(["--host", "h", "--sources", "NDI cam1,NDI cam3", "--execute"])
@@ -693,6 +696,10 @@ class TestBudgetBoundVerdict:
     def test_above_budget_hard_fails(self):
         # a >= ~3-source-frame residual beyond the observed quantum+transient band -> hard-fail.
         assert qa.budget_bound_verdict(55.0, 45.0) == "hard-fail"
+
+    def test_just_above_budget_hard_fails_strict_gt(self):
+        # the strict-`>` edge: even a hair above the budget hard-fails (== is report-only above).
+        assert qa.budget_bound_verdict(45.01, 45.0) == "hard-fail"
 
     def test_none_residual_never_fabricates_a_fail(self):
         # a missing residual measurement is report-only, never a fabricated abort.

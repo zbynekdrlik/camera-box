@@ -320,10 +320,17 @@ floor gap (it ANTI-correlates with the floor: a low-floor camera carries the LAR
 The additive target `arrival_floor_i + barrier_delta_i` overshoots 94 ms even though every align-set
 floor is ≤ 92.2 ms, so an unconditional flip would false-fail the whole fleet — the rule's own "safe
 ONLY once a green run's align status is NOT budget-bound" (below) is unmet for the naive form.
-`DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS = 45` is DATA-CITED: clean-regime residual ~33.6 ms max (3 live CI
-runs) / align-set (cam2-excluded) floor-spread p95 31.7 / max 37.2 ms (29 runs); 45 ms sits above that
-band and below 3 source frames (50 ms), so it hard-fails ONLY a ≥ ~3-frame misalignment while
-tolerating the structural quantum. RE-ARMABLE (`--align-retighten-budget-ms` /
+`DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS = 45` is DATA-CITED against the GATED quantity — the barrier
+present-age residual `report_only_residual_ms` (`worst`), NOT the jitter floor spread (a wider
+instrument): every reachable green run is budget-bound with this residual ~33 ms (3 CI runs
+33.6/33.2/33.4, max 33.6 = 2 source frames; reproduce via `gh api …/jobs/<jid>/logs | grep -a
+report_only_residual_ms`). 45 ms sits a full source frame above that and below 3 source frames
+(50 ms), so it hard-fails ONLY a ≥ ~3-frame misalignment while tolerating the structural quantum.
+Corroborating CONTEXT (not the gated quantity): the full-fleet arrival-floor spread is ~8 ms median /
+~49 ms run-level MAX (`arrival_floor_decompose.py --multi --only-uniform --min-cameras 7`, the clean
+regime, 28→29 runs as a new clean run landed 2026-09-01) — that ~49 ms is the FLOOR spread incl cam2 +
+transient DQBUF episodes, so it does NOT imply a 49 ms gated residual (cam2, the widest floor, is
+EXCLUDED from the align gate; issue 1216). RE-ARMABLE (`--align-retighten-budget-ms` /
 `QR_ALIGN_RETIGHTEN_BUDGET_MS`): LOWER the budget toward the ≤1-id parity gate ONLY once the N=2
 quantum ITSELF is addressed (a longer / phase-robust barrier audit, or a genlock change) — floor
 reduction alone does NOT shrink it. Tier-0: `budget_bound_verdict` + the hard-fail align()-flow test
