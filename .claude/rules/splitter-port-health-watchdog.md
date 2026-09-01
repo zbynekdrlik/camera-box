@@ -97,48 +97,66 @@ consumers of the line (`splitter-health.sh`, `verify-device.sh::chroma_check`) k
 `-> colour|grayscale` tail with u_dev/v_dev at unchanged positions, so the `rough=` term sitting BEFORE
 the `->` is fully additive — no consumer needed a change beyond the watchdog that reads it.
 
-## Calibration status (#1099) — STILL report-only; blocked on fleet deployment, seam decided
+## Calibration status (#1099) — healthy side CALIBRATED from real telemetry; STILL report-only, flip blocked on the positive class
 
-The `rough=` metric is calibratable but **NOT yet flipped live** — as of 2026-08-18 the data that would
-justify a threshold + a live page does **not exist**, so `is_likely_noise` / `NOISE_ROUGHNESS_THRESHOLD`
-stay DORMANT and `splitter_health_classify` is UNCHANGED. The blocker is deployment, not effort:
+The `rough=` metric is now deployed fleet-wide and producing real telemetry, and the HEALTHY side is
+calibrated from it — but `is_likely_noise` / `NOISE_ROUGHNESS_THRESHOLD` stay DORMANT and
+`splitter_health_classify` is UNCHANGED, because the ONE remaining piece the live flip needs — a real
+Elgato purple-noise `rough=` (the positive class) — still does not exist. The blocker moved from "no
+telemetry at all" (2026-08-18) to "healthy side measured, positive class absent" (2026-09-01):
 
-- **No `rough=` telemetry on the fleet.** #1079 is on `dev` but not `main` and not deployed to any
-  cambox. A live read-only journal probe (2026-08-18) found CAM1/CAM2/CAM3 on `1.7.0-dev.462`, CAM4 on
-  `1.7.0-dev.403` (all BELOW the #1079 `dev.468` bump), CAM5/6/7 off the wire, and **`grep -c rough=`
-  over each box's whole journal = 0** — the boxes still log the OLD `capture chroma:` line with no
-  `rough=`. A frame-grab probe is also not cleanly available: the capture devices are held by lingering
-  processes even while the service reads `inactive` (so grabbing would disturb the rig), and `v4l2-ctl`
-  is not uniformly installed (absent on CAM3).
-- **The separation known today is synthetic/analytic only, NOT a live calibration.** Structured flat
-  colour → `rough ≈ 0`; real structured content typ. `< 15`; pure per-pixel-UNCORRELATED luma on the
-  16-235 video range → `E[|Y0−Y1|] = (235−16)/3 ≈ 73`; the unit-test max-difference extreme = `219`. So
-  the provisional `30.0` sits in the `15..73` gap — the LOWER part of that gap (nearer the ~15 real-content floor than the ~73 noise
-  expectation), so for a `rough > threshold` page it errs toward SENSITIVITY, not conservatism — an
-  untuned placeholder, UNVALIDATED. It is deliberately left UNCHANGED: retuning a page-capable threshold on synthetic-only
-  data is the blind tuning the data-first / window-gate-tolerance-walkdown / no-overstatement discipline
-  forbids.
-- **Calibration RISK that decides the seam:** sharp high-frequency STRUCTURED content — the QR/Vernier
-  TEST pattern the rig displays, fine text, detailed texture — can elevate `rough` even though it is a
-  real picture. So the healthy CEILING must be measured against the WORST-case structured content the
-  boxes show (the test card), not just a scene, and a per-box standalone threshold (a cambox-side label)
-  would false-page whenever the shared source shows such a pattern.
-- **Seam decided for the eventual flip (Approach 2):** route `is_likely_noise` through the SAME
-  self-anchoring sibling-comparison DEAD_PORT already uses — a box is a NOISE suspect only if it reads
-  colour+high-roughness WHILE ≥1 sibling on the same camera+splitter reads colour+LOW-roughness; if
-  EVERY reachable box is equally rough → SOURCE_WIDE (report-only), which neutralizes the shared
-  test-pattern false positive. This adds ONE branch to `splitter_health_classify` (a `NOISE` verdict
-  beside `DEAD_PORT`, same `>=1 proven-good sibling` anchor), reusing the existing dev1 alert framework
-  with no cambox code change — NOT a per-box cambox-side label (rejected: loses the fleet self-anchor).
+- **Real `rough=` telemetry now exists and was mined (2026-09-01, read-only journal probe, active set
+  CAM1-4, ~13.9k `rough=` lines / ~13.6k colour over a ~5-6 h window; cam boxes run UTC).** Every active box runs the #1079
+  binary (`/usr/local/bin/camera-box` mtime 2026-09-01 07:30-07:31) and logs
+  `capture chroma: ... rough=R.R -> colour|grayscale`. **Healthy COLOUR (real-content) roughness ceiling
+  per box: CAM1 max 11.7 (p99 10.9), CAM2 max 16.3 (p99 15.3 — the roughest box), CAM3 max 11.6
+  (p99 10.9), CAM4 max 7.1 (p99 6.4). Fleet healthy-colour ceiling = 16.3.** GRAYSCALE content is even
+  lower (0.4-4.7). NOT ONE colour sample exceeds 16.3 — zero above 20, zero above the current
+  30.0 threshold — so 30.0 clears the measured healthy ceiling by 1.84x (a wide false-positive margin).
+  (CAM2/CAM3 journals are root-readable only; a permission quirk, not a missing-metric signal.)
+- **The QR/test-pattern false-positive fear is structurally moot, and was not observed to elevate
+  `rough` in the mined window.** The earlier design worried that sharp high-frequency STRUCTURED content
+  — the QR/Vernier test card, fine text — would elevate `rough` at 1px spacing and false-page. Two
+  points retire it. (a) STRUCTURAL, window-independent: `is_likely_noise` is COLOUR-gated
+  (`is_color_frame && rough > threshold`, `src/capture.rs`), and a black/white QR/Vernier card reads
+  GRAYSCALE (low chroma), so the test card can NEVER trigger a NOISE page regardless of its roughness.
+  (b) OBSERVED: in the mined window test/grayscale content read LOW roughness (≤4.7) anyway — QR modules
+  are wider than the 1px Y0/Y1 adjacency, so almost every subsample lands inside a module (Y0≈Y1). So a
+  genuinely colourful, highly-detailed real scene is the only content that could reach the classifier at
+  all, and none in the mined ~5-6 h window came near it (colour max 16.3); the sibling self-anchor
+  (Approach 2) is the remaining guard for that case. Caveat: the healthy side is characterized for the
+  observed active-set window, not a full multi-day / all-content sweep.
+- **What is still ABSENT: any purple-noise positive class.** No box shows a noise episode in the mined
+  window, and the fleet has logged none over the collection period (owner W-pushes 2026-08-25..08-30:
+  "ziadna noise epizoda na kalibraciu prahu"). The ~73 analytic noise floor (pure per-pixel-UNCORRELATED
+  luma on the 16-235 range → E[|Y0−Y1|]=(235−16)/3≈73) remains UNMEASURED against a real Elgato event,
+  so criterion 4's "clearly below the noise floor" cannot be verified. `30.0` sits safely above the
+  measured healthy ceiling (16.3) but its distance below the REAL noise floor is an assumption, not a
+  measurement — and the recorded owner stance is "prah bez kalibracneho bodu nehybem" (do not move the
+  threshold without a real noise calibration point). So the value stays UNCHANGED and DORMANT: retuning
+  or flipping a page-capable threshold on an assumed noise floor is the blind tuning the data-first /
+  window-gate-tolerance-walkdown / no-overstatement discipline forbids.
+- **Seam decided for the eventual flip (Approach 2, unchanged):** route `is_likely_noise` through the
+  SAME self-anchoring sibling-comparison DEAD_PORT already uses — a box is a NOISE suspect only if it
+  reads colour+high-roughness WHILE ≥1 sibling on the same camera+splitter reads colour+LOW-roughness;
+  if EVERY reachable box is equally rough → SOURCE_WIDE (report-only), which neutralizes the shared
+  test-pattern false positive (already low per the mined data). This adds ONE branch to
+  `splitter_health_classify` (a `NOISE` verdict beside `DEAD_PORT`, same `>=1 proven-good sibling`
+  anchor), reusing the existing dev1 alert framework with no cambox code change — NOT a per-box
+  cambox-side label (rejected: loses the fleet self-anchor).
 
-**Flip criteria (what the live flip still needs — do NOT flip without all four):** (1) deploy #1079
-(`dev.468`+) to the fleet, especially the Elgato boxes (CAM1/CAM6/CAM7) whose no-signal mode is the
-purple-noise positive class; (2) mine each box's `rough=` over a meaningful window across BOTH real-scene
-AND QR/Vernier TEST-pattern content, recording the healthy ceiling per grabber family; (3) capture a real
-Elgato no-signal `rough=` for the positive class (a genuine event or a reproduction that does NOT unplug
-the live rig signal path) — if it cannot be obtained, the flip STAYS report-only; (4) set the threshold at
-healthy-ceiling + margin AND clearly below the noise floor, then flip via Approach 2 with a RED→GREEN test
-in `tests/harness_splitter_port_*_739.rs`. Full analysis: #1099 design comment.
+**Flip criteria status (do NOT flip until all four are MET):** (1) deploy #1079 to the fleet, especially
+the Elgato boxes (CAM1/CAM6/CAM7) whose no-signal mode is the purple-noise positive class — **MET for the
+active set (incl. Elgato CAM1)**; CAM5/6/7 are off the wire, so re-verify the #1079 binary on Elgato
+CAM6/CAM7 when they rejoin (positive-class boxes — a stale binary there would silently starve criterion 3). (2) mine each box's `rough=` across
+real-scene AND QR/Vernier TEST-pattern content, recording the healthy ceiling — **MET for the observed
+active-set window** (~5-6 h, ceiling 16.3; grayscale/test content ≤4.7, no colourful content came near the
+classifier; the colour-gate above already makes the B/W test card a structural non-risk). (3) capture a real Elgato no-signal `rough=` for the positive
+class (a genuine event or a reproduction that does NOT unplug the live rig signal path) — **NOT MET**;
+if it cannot be obtained, the flip STAYS report-only. (4) set the threshold at healthy-ceiling+margin AND
+clearly below the noise floor, then flip via Approach 2 with a RED→GREEN test in
+`tests/harness_splitter_port_*_739.rs` — **BLOCKED on (3)** (noise floor unmeasured). Full analysis:
+#1099 design comment.
 
 ## Suspect-hardware (technician list, #688)
 
