@@ -128,12 +128,48 @@ def test_analyze_step_dict():
     assert d["verdict"] == "STEP"
     assert d["recent_med_ms"] == 8.0 and d["base_med_ms"] == 68.0
     assert d["pin"] == 926 and d["step_ms"] == -60.0
+    # the full dict carries the fields the shell reads; recovered is None without a recovery_base.
+    assert d["age_s"] == 30 and d["pin_stable"] == "1"
+    assert d["n_recent"] == 20 and d["n_base"] == 20 and d["recovered"] is None
 
 
 def test_analyze_skip_does_not_parse_body():
     d = asd.analyze("garbage-not-json", 0)
     assert d == {"verdict": "SKIP", "recent_med_ms": None, "base_med_ms": None, "pin": None,
-                 "step_ms": None}
+                 "step_ms": None, "age_s": None, "pin_stable": None, "n_recent": None,
+                 "n_base": None, "recovered": None}
+
+
+# ------------------------------------------------------------------ frozen-baseline recovery (#1267 🟡)
+def test_recovered_to_baseline():
+    # the offset physically returned to the frozen pre-step baseline -> recovered.
+    assert asd.recovered_to_baseline(65.0, 68.0) is True
+    assert asd.recovered_to_baseline(68.0, 68.0) is True
+    # still far from the pre-step baseline (a persistent step absorbed into the rolling base) -> not.
+    assert asd.recovered_to_baseline(8.0, 68.0) is False
+    # exactly at the threshold counts as recovered (<=).
+    assert asd.recovered_to_baseline(68.0 - 45, 68.0) is True
+    assert asd.recovered_to_baseline(68.0 - 45.1, 68.0) is False
+    # no judgement possible when either is absent.
+    assert asd.recovered_to_baseline(None, 68.0) is None
+    assert asd.recovered_to_baseline(8.0, None) is None
+
+
+def test_analyze_recovered_flag_only_with_a_recovery_base():
+    # a persistent step that the rolling baseline absorbed (recent==base at the stepped level) reads
+    # HEALTHY, but recovered=0 against the FROZEN pre-step base -> the watchdog HOLDs the alert.
+    absorbed = json.dumps({"av_offset_recent_med_ms": "8.0", "av_offset_base_med_ms": "8.0",
+                           "av_offset_pin": "926", "av_offset_pin_stable": "1", "av_offset_age_s": "30",
+                           "av_offset_n_recent": "20", "av_offset_n_base": "20"})
+    assert asd.analyze(absorbed, 1)["verdict"] == "HEALTHY"
+    assert asd.analyze(absorbed, 1, recovery_base=68.0)["recovered"] == 0     # NOT back to pre-step
+    # a genuine physical recovery: recent returned to the frozen pre-step base -> recovered=1.
+    healed = json.dumps({"av_offset_recent_med_ms": "66.0", "av_offset_base_med_ms": "66.0",
+                         "av_offset_pin": "926", "av_offset_pin_stable": "1", "av_offset_age_s": "30",
+                         "av_offset_n_recent": "20", "av_offset_n_base": "20"})
+    assert asd.analyze(healed, 1, recovery_base=68.0)["recovered"] == 1
+    # without a recovery_base the field stays None (not alerted -> nothing to judge).
+    assert asd.analyze(absorbed, 1)["recovered"] is None
 
 
 # ------------------------------------------------------------------ CLI
@@ -167,3 +203,19 @@ def test_cli_repin():
 def test_cli_skip_needs_no_stdin():
     out = _cli("", 0)
     assert out["verdict"] == "SKIP" and out["recent_med_ms"] == "" and out["pin"] == ""
+    assert out["recovered"] == ""
+
+
+def test_cli_recovery_base_reports_recovered():
+    absorbed = json.dumps({"av_offset_recent_med_ms": "8.0", "av_offset_base_med_ms": "8.0",
+                           "av_offset_pin": "926", "av_offset_pin_stable": "1", "av_offset_age_s": "30",
+                           "av_offset_n_recent": "20", "av_offset_n_base": "20"})
+    # absorbed step, still off the frozen pre-step base -> recovered=0 (the watchdog holds the alert).
+    out = _cli(absorbed, 1, "--recovery-base", "68.0")
+    assert out["verdict"] == "HEALTHY" and out["recovered"] == "0"
+    # physical recovery -> recovered=1.
+    healed = json.dumps({"av_offset_recent_med_ms": "66.0", "av_offset_base_med_ms": "66.0",
+                         "av_offset_pin": "926", "av_offset_pin_stable": "1", "av_offset_age_s": "30",
+                         "av_offset_n_recent": "20", "av_offset_n_base": "20"})
+    out2 = _cli(healed, 1, "--recovery-base", "68.0")
+    assert out2["recovered"] == "1"

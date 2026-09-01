@@ -124,3 +124,48 @@ def test_negative_measured_offset_parses():
     lines.append("18:10:00.000: [obs] head")
     recent, *_ = bsg.av_offset_series_from_log("\n".join(lines) + "\n")
     assert recent == "-31.0"
+
+
+def test_single_midnight_wrap_across_the_analyzed_span():
+    # #1267 review 🟡 (2a): the analyzed span straddles midnight (baseline 23:35-23:43, recent
+    # 00:01-00:09, head 00:10). _recency_gap_s corrects a single wrap, so the pre-midnight baseline
+    # is aged correctly into the 10-40 min window (file order IS time order, never max seconds-of-day).
+    lines = []
+    for m in range(35, 44):
+        lines.append(_suggest(f"23:{m}:00.000", 926, 68.0))
+    for i in range(9):
+        lines.append(_suggest(f"00:0{i}:00.000", 926, 8.0))
+    lines.append("00:10:00.000: [obs] head — new day")
+    recent, base, pin, ps, age, nr, nb = bsg.av_offset_series_from_log("\n".join(lines) + "\n")
+    assert recent == "8.0" and base == "68.0"      # the pre-midnight baseline is correctly aged in
+    assert pin == "926" and ps == "1"
+    assert int(age) < 300                            # freshest dock line ~10 min before the head
+
+
+def test_pin_change_outside_the_40min_span_keeps_pin_stable():
+    # #1267 review 🟡 (2b): a pin change 45 min back (OUTSIDE the 10-40 min baseline window) is
+    # dropped from the span, so every WINDOWED sample shares the current pin -> pin_stable "1" (the
+    # covariate is judged over the analyzed span only, per the docstring).
+    lines = [_suggest(f"17:2{m}:00.000", 976, 55.0) for m in range(0, 5)]   # ~45 min back, old pin, dropped
+    for m in range(35, 44):
+        lines.append(_suggest(f"17:{m}:00.000", 926, 68.0))                 # baseline, current pin
+    for i in range(9):
+        lines.append(_suggest(f"18:0{i}:00.000", 926, 8.0))                 # recent, current pin
+    lines.append("18:10:00.000: [obs] head")
+    recent, base, pin, ps, age, nr, nb = bsg.av_offset_series_from_log("\n".join(lines) + "\n")
+    assert ps == "1" and pin == "926"               # the out-of-span 976 samples never touch pin_stable
+    assert recent == "8.0" and base == "68.0"
+
+
+def test_constant_raw_offset_across_a_pin_jump_is_pin_unstable():
+    # #1267 review 🔵 (7): the DOCUMENTED live shape — the pin jumps 976->1024 while the raw measured
+    # offset stays ~constant (offset+pin ~ const), so `offset - pin` would read a phantom -48 step.
+    # The parser instead reports pin_stable "0" (never subtract the pin) -> the dev1 decision REPINs.
+    lines = [_suggest(f"17:{m}:00.000", 976, 50.0) for m in range(35, 44)]  # baseline pin 976, offset 50
+    lines.append("18:00:00.000: [obs] E2E snapshot-and-set test latency")
+    for i in range(9):
+        lines.append(_suggest(f"18:0{i}:00.000", 1024, 50.0))              # recent pin 1024, SAME offset 50
+    lines.append("18:10:00.000: [obs] head")
+    recent, base, pin, ps, age, nr, nb = bsg.av_offset_series_from_log("\n".join(lines) + "\n")
+    assert ps == "0" and pin == "1024"              # pin moved across the span -> unstable
+    assert recent == "50.0" and base == "50.0"      # raw offset unchanged (offset - pin would be a phantom step)

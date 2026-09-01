@@ -76,8 +76,31 @@ only; add strih via the env var only if that ever changes.
   the same box stays stepped.
 - Each window needs `AV_STEP_MIN_SAMPLES` (default 6 ≈ 3 min at the ~2/min dock cadence) or the box
   is UNKNOWN — never a step off thin data.
-- A recovery ("back to normal") line is logged once (machine-channel) when a box we paged for
-  returns to a healthy median.
+- A recovery ("returned to the pre-step baseline") line is logged once (machine-channel) ONLY when
+  the offset PHYSICALLY returns to the FROZEN pre-step baseline — see the detection-window note
+  below.
+
+## Detection is a ~20-40 min window at onset; recovery is judged against a FROZEN baseline
+
+The baseline is a ROLLING 10-40 min window (bounded above by how far the #1222 bounded log TAIL
+reaches, ~50 min on a long session), so a PERSISTENT step SELF-NORMALIZES: the recent median flips
+~5 min after onset and the rolling baseline absorbs the step ~25-40 min after onset, after which the
+box reports HEALTHY-against-the-rolling-baseline even though the offset never came back. Two
+consequences, both deliberate:
+
+- **The step is an ONSET early-warning** (its whole purpose — flag the 17:50 shift ~3 h before the
+  E2E), detectable for a ~20-40 min window (~4-8 passes). A step whose entire onset window lands on
+  SKIP/STALE/UNKNOWN/REPIN passes (e.g. an E2E test-latency write parks the box in REPIN for its
+  duration) is not caught — but that window is exactly when the #856 controller + the E2E gate own
+  the alignment anyway. Once a shift is the steady state, the aligner owns it, not this early-warning.
+- **Recovery is judged against the FROZEN pre-step baseline, never the rolling one.** On the first
+  confirmed alert the watchdog freezes `alert_base_<box>` (the pre-step median, still visible in the
+  rolling baseline at that moment); thereafter a HEALTHY pass that merely reflects the rolling
+  baseline having absorbed the step is HELD (logged "absorbed … holding alert, no recovery"), and a
+  "returned to the pre-step baseline" recovery fires only when the CURRENT recent median comes back
+  within threshold of that frozen reference — so the machine-channel recovery line can never falsely
+  claim "back to normal" for a step that persisted (the `av_step_decision.recovered_to_baseline`
+  invariant, #1267 review 🟡).
 
 ## Supervisor install + live-verify procedure
 

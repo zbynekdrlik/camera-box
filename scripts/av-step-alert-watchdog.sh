@@ -54,7 +54,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -81,7 +81,8 @@ MIN_SAMPLES="${AV_STEP_MIN_SAMPLES:-6}"
 
 # Staleness bound (s): a dock series whose freshest line sits more than this behind the OBS log head
 # has STOPPED while the log kept advancing -> STALE (surfaced distinctly, NEVER a phone page --
-# absence is #732/#1001 territory). Matches bundle_state_gather.AV_OFFSET_STALE_AFTER_S.
+# absence is #732/#1001 territory). The box reports the raw age; this is the single STALE bound
+# (av_step_decision.DEFAULT_STALE_THRESHOLD_S).
 STALE_THRESHOLD_S="${AV_STEP_STALE_THRESHOLD_S:-300}"
 
 # 2-pass confirm before paging (matches the sibling watchdogs): a single blipped median must never
@@ -156,7 +157,8 @@ clear_box_throttle() {
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip>
 handle_box() {
-  local box="$1" ip="$2" body reachable verdict recent base pin step age pinstable analyze_out
+  local box="$1" ip="$2" body reachable verdict recent base pin step age pinstable recovered analyze_out
+  local alert_base recovery_arg=()
 
   if body="$(fetch_bundle_json "$ip")"; then
     reachable=1
@@ -165,7 +167,13 @@ handle_box() {
     body=""
   fi
 
-  analyze_out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --step-threshold-ms "$STEP_THRESHOLD_MS" --min-samples "$MIN_SAMPLES" --stale-threshold-s "$STALE_THRESHOLD_S" 2>/dev/null)"
+  # While a box is in the alerted state we FROZE the pre-step baseline (alert_base_$box); pass it so
+  # analyze reports an HONEST `recovered` (the offset physically returned to the pre-step level) that
+  # the rolling-baseline self-normalization cannot fake (#1267 review 🟡).
+  alert_base="$(read_state_field "alert_base_${box}" "")"
+  [ -n "$alert_base" ] && recovery_arg=(--recovery-base "$alert_base")
+
+  analyze_out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --step-threshold-ms "$STEP_THRESHOLD_MS" --min-samples "$MIN_SAMPLES" --stale-threshold-s "$STALE_THRESHOLD_S" "${recovery_arg[@]}" 2>/dev/null)"
   verdict="$(printf '%s\n' "$analyze_out" | sed -n 's/^verdict=//p')"
   recent="$(printf '%s\n' "$analyze_out" | sed -n 's/^recent_med_ms=//p')"
   base="$(printf '%s\n' "$analyze_out" | sed -n 's/^base_med_ms=//p')"
@@ -173,6 +181,7 @@ handle_box() {
   step="$(printf '%s\n' "$analyze_out" | sed -n 's/^step_ms=//p')"
   age="$(printf '%s\n' "$analyze_out" | sed -n 's/^age_s=//p')"
   pinstable="$(printf '%s\n' "$analyze_out" | sed -n 's/^pin_stable=//p')"
+  recovered="$(printf '%s\n' "$analyze_out" | sed -n 's/^recovered=//p')"
   log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} recent_med=${recent:-} base_med=${base:-} step_ms=${step:-} pin=${pin:-} pin_stable=${pinstable:-} age_s=${age:-} (threshold=${STEP_THRESHOLD_MS}ms, min_samples=${MIN_SAMPLES}, stale=${STALE_THRESHOLD_S}s)"
 
   case "$verdict" in
@@ -200,18 +209,33 @@ handle_box() {
       return 0
       ;;
     HEALTHY)
-      local was_alerted recover
+      local was_alerted
       was_alerted="$(read_state_field "alerted_${box}" 0)"
-      recover="$(av_step_recovery_decision_local "$was_alerted")"
-      if [ "$recover" = "1" ]; then
+      if [ "$was_alerted" != "1" ]; then
+        # never alerted -> a plain healthy pass; clear the confirm/throttle so a fresh step pages clean.
+        clear_box_throttle "$box"
+        return 0
+      fi
+      # We ALERTED and now read HEALTHY-against-the-rolling-baseline. Distinguish a REAL recovery (the
+      # offset physically returned to the FROZEN pre-step baseline -> recovered=1) from the rolling
+      # baseline merely ABSORBING a persistent step (recovered=0/empty) -- the latter must NOT claim
+      # "back to normal" nor clear the alert (#1267 review 🟡).
+      if [ "${recovered:-}" = "1" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
-          log "[dry-run] WOULD send recovery: $box av-offset step back to normal (recent_med=${recent}ms)"
+          log "[dry-run] WOULD send recovery: $box av-offset returned to the pre-step baseline (recent_med=${recent}ms vs frozen base ${alert_base}ms)"
         else
-          log "RECOVERY: $box av-offset step back to normal (recent_med=${recent}ms) -- machine-channel only (#1206: recovery is not a phone ping)"
+          log "RECOVERY: $box av-offset returned to the pre-step baseline (recent_med=${recent}ms vs frozen base ${alert_base}ms) -- machine-channel only (#1206: recovery is not a phone ping)"
         fi
         write_state_field "alerted_${box}" 0
+        write_state_field "alert_base_${box}" ""
+        clear_box_throttle "$box"
+      else
+        # the step was absorbed into the rolling baseline but never physically recovered -- hold the
+        # alert, do NOT log a false recovery. Clear only the confirm counter (a fresh divergence
+        # re-confirms); KEEP alerted/alert_base/throttle so a genuine later recovery still fires.
+        log "$box av-offset step absorbed into the rolling baseline (recent_med=${recent}ms has not regained the frozen pre-step base ${alert_base}ms) -- holding alert, no recovery (#1267)"
+        write_state_field "confirm_${box}" 0
       fi
-      clear_box_throttle "$box"
       return 0
       ;;
     STEP) : ;;   # fall through to confirm + alert
@@ -236,6 +260,13 @@ handle_box() {
 
   # CONFIRMED upstream step -> latch recovery, throttled report-only alert.
   write_state_field "alerted_${box}" 1
+  # Freeze the pre-step baseline at the FIRST alert (the box's current base_med is still the pre-step
+  # level -- the rolling baseline only absorbs the step ~baseline_window_s later), so recovery is
+  # judged against the true pre-step offset, never the self-normalized rolling baseline (#1267 🟡).
+  if [ -z "$alert_base" ] && [ -n "$base" ]; then
+    write_state_field "alert_base_${box}" "$base"
+    alert_base="$base"
+  fi
 
   local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
   current_sig="avstep:${box}"
@@ -261,13 +292,6 @@ handle_box() {
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- still stepped"
   fi
-}
-
-# av_step_recovery_decision_local <was_alerted> -> "1" iff a recovery latch should fire (was
-# alerted, now healthy). Kept trivially local (a HEALTHY pass IS the "now back to normal" side) so
-# this watchdog needs no extra lib; mirrors audio-lag's own net_reach_recovery_decision_local shape.
-av_step_recovery_decision_local() {
-  [ "${1:-0}" = "1" ] && printf '1' || printf '0'
 }
 
 # require_tools -> exit non-zero (loud) if a REQUIRED external tool OR the decision module is

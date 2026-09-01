@@ -49,8 +49,8 @@ DEFAULT_STEP_THRESHOLD_MS = 45
 # tail (a fresh session) reads UNKNOWN, never a false step.
 DEFAULT_MIN_SAMPLES = 6
 # A dock series whose freshest line is older than this (in-log seconds behind the OBS log head) has
-# STOPPED while the log advanced -> STALE. ~10x the ~30 s SUGGESTED cadence; matches the box-side
-# bundle_state_gather.AV_OFFSET_STALE_AFTER_S.
+# STOPPED while the log advanced -> STALE. ~10x the ~30 s SUGGESTED cadence. The box-side parser
+# reports the raw age; this dev1 threshold is the single place the STALE bound lives.
 DEFAULT_STALE_THRESHOLD_S = 300
 
 
@@ -145,15 +145,38 @@ def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, 
     return "HEALTHY"
 
 
+def recovered_to_baseline(recent_med, recovery_base, step_threshold_ms=DEFAULT_STEP_THRESHOLD_MS):
+    """Given the watchdog ALERTED on a step and FROZE the pre-step baseline (`recovery_base`), has the
+    offset PHYSICALLY returned to it? `True` iff both are present and `|recent - recovery_base| <=
+    step_threshold`, else `False`; `None` when either is absent (no recovery judgement possible).
+
+    WHY (the #1267 review 🟡): the box-side baseline is a ROLLING 10-40 min window, so a PERSISTENT
+    step self-normalizes — ~baseline_window_s after onset the rolling baseline has absorbed the step
+    and the box reports HEALTHY (recent ≈ rolling-base) even though the offset never came back.
+    Judging recovery against the ROLLING baseline would then falsely log "back to normal" and clear
+    the alert. Freezing the pre-step baseline at alert time and comparing the CURRENT recent median
+    against THAT makes recovery mean "the physical offset actually returned", never "the step became
+    the new normal"."""
+    if recent_med is None or recovery_base is None:
+        return None
+    return abs(recent_med - recovery_base) <= step_threshold_ms
+
+
 def analyze(bundle_json_text, box_reachable, step_threshold_ms=DEFAULT_STEP_THRESHOLD_MS,
-            min_samples=DEFAULT_MIN_SAMPLES, stale_threshold_s=DEFAULT_STALE_THRESHOLD_S):
-    """Fetch-result -> `{"verdict","recent_med_ms","base_med_ms","pin","step_ms"}`. When the box was
-    not reachable, returns SKIP WITHOUT parsing the (empty) body, mirroring the caller's
-    no-double-page guard. The age / pin_stable / sample counts drive the verdict internally but are
-    not all echoed in the dict (the shell reads them from separate CLI lines)."""
+            min_samples=DEFAULT_MIN_SAMPLES, stale_threshold_s=DEFAULT_STALE_THRESHOLD_S,
+            recovery_base=None):
+    """Fetch-result -> the FULL decision dict (`verdict`, `recent_med_ms`, `base_med_ms`, `pin`,
+    `step_ms`, `age_s`, `pin_stable`, `n_recent`, `n_base`, `recovered`). This is the ONE parse ->
+    classify path both the pure tests and the shell (`_main` prints this dict) use, so the tested
+    path is the production path. When the box was not reachable, returns SKIP WITHOUT parsing the
+    (empty) body (all fields None), mirroring the caller's no-double-page guard.
+
+    `recovered` is `1`/`0` ONLY when `recovery_base` is supplied (the watchdog passes the FROZEN
+    pre-step baseline while a box is in the alerted state), else `None` — see `recovered_to_baseline`."""
     if box_reachable != 1:
         return {"verdict": "SKIP", "recent_med_ms": None, "base_med_ms": None, "pin": None,
-                "step_ms": None}
+                "step_ms": None, "age_s": None, "pin_stable": None, "n_recent": None,
+                "n_base": None, "recovered": None}
     (recent_med, base_med, pin, pin_stable, age_s, n_recent, n_base) = extract_av_step(
         bundle_json_text)
     verdict = classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base,
@@ -161,8 +184,13 @@ def analyze(bundle_json_text, box_reachable, step_threshold_ms=DEFAULT_STEP_THRE
     step_ms = None
     if recent_med is not None and base_med is not None:
         step_ms = round(recent_med - base_med, 1)
+    recovered = None
+    if recovery_base is not None:
+        r = recovered_to_baseline(recent_med, recovery_base, step_threshold_ms)
+        recovered = None if r is None else (1 if r else 0)
     return {"verdict": verdict, "recent_med_ms": recent_med, "base_med_ms": base_med, "pin": pin,
-            "step_ms": step_ms}
+            "step_ms": step_ms, "age_s": age_s, "pin_stable": pin_stable, "n_recent": n_recent,
+            "n_base": n_base, "recovered": recovered}
 
 
 def _fmt(v):
@@ -180,6 +208,10 @@ def _main(argv):
     a.add_argument("--step-threshold-ms", type=int, default=DEFAULT_STEP_THRESHOLD_MS)
     a.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
     a.add_argument("--stale-threshold-s", type=int, default=DEFAULT_STALE_THRESHOLD_S)
+    # The watchdog passes the FROZEN pre-step baseline (from state) while a box is in the alerted
+    # state, so a `recovered=1/0` line can drive an HONEST recovery (offset physically returned) that
+    # the rolling-baseline self-normalization cannot fake. Omitted -> `recovered=` blank.
+    a.add_argument("--recovery-base", type=float, default=None)
 
     ns = ap.parse_args(argv)
 
@@ -188,18 +220,13 @@ def _main(argv):
         # (the audio_lag #1231 precedent: a strict read that raised was swallowed by the caller's
         # 2>/dev/null and read as SKIP forever). box_reachable=0 needs no stdin.
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        obj = _loads_obj(text) if ns.box_reachable == 1 else None
-        (recent_med, base_med, pin, pin_stable, age_s, n_recent, n_base) = _from_obj(obj)
-        verdict = "SKIP" if ns.box_reachable != 1 else classify_av_step(
-            recent_med, base_med, pin_stable, age_s, n_recent, n_base, ns.box_reachable,
-            ns.step_threshold_ms, ns.min_samples, ns.stale_threshold_s)
-        step_ms = None
-        if recent_med is not None and base_med is not None:
-            step_ms = round(recent_med - base_med, 1)
-        for k, v in (("verdict", verdict), ("recent_med_ms", recent_med), ("base_med_ms", base_med),
-                     ("pin", pin), ("step_ms", step_ms), ("age_s", age_s), ("pin_stable", pin_stable),
-                     ("n_recent", n_recent), ("n_base", n_base)):
-            print(f"{k}={_fmt(v)}")
+        # ONE parse->classify path: `analyze()` is exactly what the pure tests exercise (#1267 review
+        # 🔵 -- the tested path is the production path).
+        d = analyze(text, ns.box_reachable, ns.step_threshold_ms, ns.min_samples,
+                    ns.stale_threshold_s, recovery_base=ns.recovery_base)
+        for k in ("verdict", "recent_med_ms", "base_med_ms", "pin", "step_ms", "age_s",
+                  "pin_stable", "n_recent", "n_base", "recovered"):
+            print(f"{k}={_fmt(d[k])}")
         return 0
 
     return 2

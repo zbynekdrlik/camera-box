@@ -307,11 +307,15 @@ _AV_OFFSET_SUGGEST_RE = re.compile(
 
 # #1267 — rolling-window bounds, in-log seconds behind the log head. RECENT = the freshest 10 min;
 # BASELINE = the 10..40 min region behind it (a rolling reference that predates the recent window).
+# The BASELINE is bounded above by how far the #1222 bounded TAIL reaches (~50 min on a long
+# session), which also bounds the detection window: a rolling baseline ABSORBS a persistent step
+# after ~baseline_window_s, so a step is detectable only for a ~20-40 min window at onset (the
+# dev1 watchdog freezes the pre-step baseline at alert time so it never mis-reads that absorption
+# as a recovery -- av_step_decision.recovered_to_baseline).
 AV_OFFSET_RECENT_WINDOW_S = 600
 AV_OFFSET_BASELINE_WINDOW_S = 2400
-# #1267 — a dock series whose freshest line sits more than this behind the log head has STOPPED while
-# the log kept advancing -> STALE downstream (never a false step). ~10x the ~30 s SUGGESTED cadence.
-AV_OFFSET_STALE_AFTER_S = 300
+# The box-side parser reports the raw in-log freshness age; the STALE threshold is applied dev1-side
+# (av_step_decision.DEFAULT_STALE_THRESHOLD_S), so no box-side stale constant is needed here.
 
 
 def _median(values):
