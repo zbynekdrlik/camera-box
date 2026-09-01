@@ -184,13 +184,13 @@ class TestAlignAttributesTheResidual:
 
 
 # --------------------------------------------------------------------------- #
-# #1161 ALIGNER-SIDE FIX: compute pins ABOVE each source's arrival transport floor.
+# #1161 ALIGNER-SIDE FIX + #1253 ADDITIVE correction: compute the per-camera hold pins.
 #
-# The bug: floor3_pins computes `floor(3) + relative_delta`, which in the transport-dominated regime
-# (frames arrive ~59-66 ms old, deltas ~1 canvas frame) lands the raised pins BELOW each source's
-# arrival floor -> structurally inert (latency = max(pin, transport)). The fix targets an ABSOLUTE
-# achievable latency = arrival_floor_i + delta_i (the slowest camera's floor) so the genlock-C
-# ACQUIRE frame-mover (sibling branch) can actually add the hold, while the slowest keeps pin 3.
+# The FIFO is ADDITIVE (present_age = transport + pin, #1253). The additive-correct plan ADDS each
+# younger camera's present-age gap to its CURRENT pin (new_pin = current_pin + delta); the arrival
+# floors are used ONLY to budget-check the resulting present age (arrival_floor_i + delta_i). The
+# pre-1253 formula wrote that absolute present-age target as the PIN, which OVERSHOT under the additive
+# FIFO -- the max-model "floor3 lands below the arrival floor -> inert" belief was the bug 1253 fixes.
 # The arrival floor is the strih genlock audit's `latency_ms + mean_head_skew_ms` (pin-clock,
 # DanteSync-synced) -- painter-QR gen_ts is CLOCK_REALTIME vs dev1 CLOCK_MONOTONIC t_send, so the
 # painter-QR gives only RELATIVE deltas, never an absolute floor.
@@ -238,7 +238,7 @@ class TestFloorAwarePins:
 
     def test_slowest_camera_keeps_the_minimum_floor_pin(self):
         plan = qa.floor_aware_pins(self.FLOORS, self.DELTAS)
-        assert plan["NDI cam1"] == 3   # slowest (delta 0) -> floor, inert, stays at its natural 66
+        assert plan["NDI cam1"] == 3   # oldest present (delta 0) -> keeps its floor pin, adds no hold
 
     def test_additive_plan_equals_floor3_on_the_reset_path(self):
         # issue 1253: under the ADDITIVE FIFO the floor-aware plan (current_pin + delta, current at the
@@ -277,10 +277,10 @@ class TestFloorAwarePins:
 
 
 # --------------------------------------------------------------------------- #
-# align() FLOW: with the strih audit floors, the plan sets ABOVE-floor pins and the FIFO (modelled
-# as present_age = max(pin, arrival_floor)) actually MOVES the faster cameras into parity -> aligned.
-# RED (pre-fix): align ignores the floors, uses floor3 (below-floor) pins -> the FIFO stays
-# misaligned -> the run FAILS. GREEN: floor-aware pins clear the floor -> the FIFO moves -> aligned.
+# align() FLOW: with the strih audit floors, the plan ADDS each younger camera's present-age gap to
+# its current pin and the ADDITIVE FIFO (present_age = transport + pin) delays it into parity ->
+# aligned. All present ages converge to the oldest (66 ms). #1253: the pins are current + gap, never
+# the old absolute arrival_floor + delta target (which overshot under the additive FIFO).
 # --------------------------------------------------------------------------- #
 _BASE_NS = 30_000 * ID_NS
 
@@ -354,12 +354,13 @@ class TestAlignFloorAwareFlow:
 
 
 # --------------------------------------------------------------------------- #
-# #1161 SECOND-ROUND (review findings): the audit "arrival floor" is the PRESENT AGE
-# (max(pin, transport)) -> it equals the raw transport ONLY from an un-pinned start. Pins persist
-# across runs, so run 2+ plans from a pinned steady state. Fixes: two-phase reset (reset_pins_to_floor
-# so the re-fetched floors are true transports), sanity on PURE deltas when floors are present, a
-# don't-tear-down safety for a pin-dominated co-slowest, a partial-audit graceful fallback, a sub-floor
-# clamp, and a runtime floor_ms in the stuck-abort telemetry.
+# #1161 SECOND-ROUND (review findings), re-expressed for the #1253 ADDITIVE plan: the audit "arrival
+# floor" is the PRESENT AGE (transport + pin), so it equals the raw transport ONLY from an un-pinned
+# start. Pins persist across runs, so run 2+ plans from a pinned steady state. Under the additive plan
+# new_pin = current_pin + gap the old max-model "don't-tear-down a pin-dominated co-slowest" case is
+# SUBSUMED (the oldest camera keeps its pin because its gap is 0). Fixes still exercised: two-phase
+# reset (reset_pins_to_floor), sanity on PURE deltas when floors are present, a partial-audit graceful
+# fallback, a sub-floor clamp, and a runtime floor_ms in the stuck-abort telemetry.
 # --------------------------------------------------------------------------- #
 class TestFloorAwarePinsSecondRound:
     def test_clamp_never_emits_a_sub_floor_pin(self):
