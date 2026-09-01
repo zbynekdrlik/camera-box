@@ -2206,22 +2206,38 @@ else
   cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report --bin phase-sync-active-floor-gate  # airuleset:build-ok
 fi
 
-# [1/8] frame-probe (cam2 painter) sha-pin report (#1138) — the loud PIN that CONFIRMS the [0/8]
-# frame-probe auto-align above. Expected = FRAME_PROBE_ALIGN_CI_BIN (the clean probe-tools CI
-# artifact the [0/8] align fetched + deployed to cam2 — the TRUE deploy source of truth), falling
-# back to $PROBE_BIN_DIR/frame-probe when the align was skipped (--no-main-pin soak) or could not
-# fetch (gh unavailable). Pinning against the CI artifact rather than the dev1 LOCAL build makes the
-# sha compare exact (both sides = the same artifact bytes, so no build-reproducibility dependency).
-# The report-only mode runs ONLY the report (no second camera-box parity table) and ALWAYS exits 0;
-# the `|| true` is belt-and-suspenders — a residually-lagging painter (align could not complete)
-# SCREAMS + names the fix but never fails this run (the hard-gate flip is the supervisor's #758
-# two-step follow-up once the auto-align is rig-proven). cam2-scoped: frame-probe is installed ONLY
-# on the painter box (setup-device.sh STEP 3b, cam2_is_painter_box).
-echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs the candidate CI build (#1138, report-only, confirms the [0/8] align)"
-"$HERE/camera-box-version-gate.sh" \
-  --frame-probe-only \
-  --frame-probe-expected-bin "${FRAME_PROBE_ALIGN_CI_BIN:-$PROBE_BIN_DIR/frame-probe}" \
-  --linux "cam2=root@$PAINTER_IP" || true
+# [1/8] frame-probe (cam2 painter) sha-pin — the PIN that CONFIRMS the [0/8] frame-probe auto-align
+# above deployed the current-build painter to cam2. Flipped from #1138 report-only to a HARD,
+# fail-closed gate (issue 1235) now the [0/8] auto-align is rig-proven to keep cam2 current — the
+# active deploy path (detect lag -> deploy candidate -> deploy complete) AND this pin's OK were
+# observed end-to-end on the first stable green 7-cam E2E series. Per
+# .claude/rules/early-gate-pin-doctrine.md a stale/unverifiable painter must REFUSE the run, not
+# merely SCREAM: --frame-probe-hard exits non-zero on a LAGGING painter (deployed != candidate, 30)
+# AND on any UNKNOWN (painter sha unread, or the candidate CI sha unresolved because the [0/8] align
+# could not source probe-tools, 31) — "couldn't verify" is a failure, never a silent pass. Expected =
+# FRAME_PROBE_ALIGN_CI_BIN, the clean probe-tools CI artifact the [0/8] align fetched + deployed to
+# cam2 (the TRUE deploy source of truth); in HARD mode there is NO $PROBE_BIN_DIR/frame-probe
+# fallback — the dev1 LOCAL frame-probe build is byte-different from the CI artifact
+# (full-path-e2e.yml does not set USE_PREBUILT_PROBE_DIR), so comparing against it would false-ALARM
+# every run, and an empty FRAME_PROBE_ALIGN_CI_BIN is therefore UNKNOWN -> REFUSE (fail-closed),
+# never a local-build compare. The DOCUMENTED ESCAPE is the SAME --no-main-pin operator soak the
+# [0/8] align honours: under it the align is SKIPPED (never realign over a deliberately-deployed
+# painter), so the pin stays #1138 REPORT-ONLY against the $PROBE_BIN_DIR/frame-probe local build
+# (|| true, informational). cam2-scoped: frame-probe is installed ONLY on the painter box
+# (setup-device.sh STEP 3b, cam2_is_painter_box).
+if [ "${CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN:-0}" != "1" ]; then
+  echo "[1/8] frame-probe (cam2 painter) sha-pin — deployed painter vs the candidate CI build (#1235 HARD gate, fail-closed, confirms the [0/8] align)"
+  "$HERE/camera-box-version-gate.sh" \
+    --frame-probe-only --frame-probe-hard \
+    --frame-probe-expected-bin "${FRAME_PROBE_ALIGN_CI_BIN:-}" \
+    --linux "cam2=root@$PAINTER_IP"
+else
+  echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs the local build (#1138, report-only, --no-main-pin operator soak; the [0/8] align was skipped)"
+  "$HERE/camera-box-version-gate.sh" \
+    --frame-probe-only \
+    --frame-probe-expected-bin "${FRAME_PROBE_ALIGN_CI_BIN:-$PROBE_BIN_DIR/frame-probe}" \
+    --linux "cam2=root@$PAINTER_IP" || true
+fi
 
 # #758 item 1 (continued) — per-camera NDI liveness. Needs frozen-camera-gate (just
 # built/fetched above), so it cannot run at true [0/8] — this is still comfortably BEFORE any
