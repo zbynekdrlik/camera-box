@@ -204,10 +204,11 @@ handle_box() {
 
   local raw logid mv_lines gate_out gate_exit verdict prev_logid reset
   raw="$(probe_mv_log "$ip" "$os" | tr -d '\r')"
-  logid="$(printf '%s\n' "$raw" | sed -n 's/^MVFPS_LOGID://p' | tail -1)"
-  # #1262: byte-safe extraction (mv_fps_extract_audit_lines, scripts/lib/mv-fps-health.sh) -- a
-  # PS-5.1-ANSI-reencoded invalid byte from an adjacent genlock-fifo audit line can glue onto this
-  # line at a transport-chunk boundary and blind a plain `grep -F`.
+  # #1262 review (idiom parity, no functional hazard -- a `^literal` anchor with no `.`, first
+  # line, ASCII identity string; worst case is a fail-safe confirm-streak reset, never a page):
+  logid="$(printf '%s\n' "$raw" | LC_ALL=C sed -n 's/^MVFPS_LOGID://p' | tail -1)"
+  # #1262: byte-safe extraction (mv_fps_extract_audit_lines, scripts/lib/mv-fps-health.sh) --
+  # see its own doc comment for the adversarial byte-glue hazard this guards against.
   mv_lines="$(printf '%s\n' "$raw" | mv_fps_extract_audit_lines)"
 
   # Autostart restart-reset: a CHANGED OBS-log identity means OBS restarted -> clear the pending
