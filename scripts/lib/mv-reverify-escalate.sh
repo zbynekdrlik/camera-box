@@ -380,7 +380,13 @@ mv_reverify_or_escalate() {
 # on recovery, 1 on deadline; never exits (caller falls back into its own attempt loop / escalation).
 mv_reverify_resolve_wait() {
   local box="$1" cam_n="$2" call_timeout="${3:-30}"
-  local resolve_s="${PREFLIGHT_MV_REVERIFY_RESOLVE_SETTLE_S:-120}"
+  # #1114 review 🔵-3: coerce to an INTEGER before the $((...)) deadline below (the #1197 finder-heal
+  # precedent, lines ~254-258). RESOLVE_SETTLE_S is documented integer-seconds, but a stray float
+  # override (e.g. 90.5) would make `$((SECONDS + resolve_s))` throw a FATAL arithmetic error that
+  # aborts a non-interactive shell REGARDLESS of the caller's `|| true` (an expansion error is not a
+  # command failure the `||` list can catch) -- exactly the WARN-only hole this + the proactive-reset
+  # doc now claim closed. `${resolve_s%.*}` drops any fractional part; the loop uses only the integer.
+  local resolve_s="${PREFLIGHT_MV_REVERIFY_RESOLVE_SETTLE_S:-120}"; resolve_s="${resolve_s%.*}"
   local cadence="${PREFLIGHT_MV_REVERIFY_RESOLVE_CADENCE_S:-6}"
   # #1114 review 🔵-2: bound the WALL CLOCK, not just the accumulated sleeps. Each iteration also
   # spends one frozen-camera-gate.py probe (~a few s, up to call_timeout), so a sleep-only counter
@@ -405,4 +411,56 @@ mv_reverify_resolve_wait() {
   done
   echo "    [sender-bounce] ${box} still no pixel change ${resolve_s}s (wall clock) after the receiver reset — fresh finder did not re-resolve within the measured window (issue 1114)" >&2
   return 1
+}
+
+# mv_reverify_proactive_reset BOX CAM_N [CALL_TIMEOUT] -> issue 1114 ROOT FIX (deploy-context
+# proactive receiver reset). At a burn-deploy site the strih receiver for this leg is KNOWN-STALE the
+# instant its production sender was stopped (systemctl stop camera-box) and the burn sender came up at
+# a NEW URL under the SAME NDI name -- the DistroAV finder still holds the dead pre-bounce URL, so a
+# pixel poll run FIRST is GUARANTEED to read "no pixel change" until something resets the receiver.
+# preflight_mv_reverify's attempt-1 therefore always fails on a bounced leg (logging the alarming
+# "no pixel change right after its deploy" / "camera leg is dead" line) and only THEN kicks reactively.
+# Fire the CLEAR-then-SET reattach + ride out the fresh finder's bounded re-resolve BEFORE the pixel
+# poll starts counting (owner directive, issuecomment-5335833149: "sequence the burn deploy so the
+# receiver is kicked BEFORE the pixel-change poll starts counting"), so the guarded reverify that
+# follows (mv_reverify_or_escalate -> preflight_mv_reverify) passes attempt-1 CLEANLY -- no guaranteed
+# attempt-1 failure log, no reliance on the reactive escalation path. Reuses the merged CLEAR-then-SET
+# reattach (strih_mv_scenes.py) + mv_reverify_resolve_wait (its own #1197 finder-heal-wait + #795
+# mangle guard). WARN-only: ALWAYS returns 0 -- the guarded reverify that follows is the real gate; a
+# genuinely-dead leg that never re-resolves here still fails there and escalates exactly as before (the
+# only cost is ~1 extra bounded re-resolve window before that already-rare destructive #1093 escalation,
+# an acceptable trade for more recovery chance before a strih-OBS force-kill). DEPLOY context only
+# (PREFLIGHT_MV_REVERIFY_CONTEXT != cleanup): the cleanup trap must stay fast enough never to outlast a
+# GH-Actions cancellation grace window. Opt-out via PREFLIGHT_MV_REVERIFY_PROACTIVE=0. Reads the same
+# $HERE / $STRIH / $PROBE_BIN_DIR globals as preflight_mv_reverify / mv_reverify_resolve_wait. Safe
+# against a fast-recovery regression via the SILENT pre-probe below: a leg already delivering (a later
+# ALL_CAMBOX-loop camera that re-resolved on its own during the preceding cameras' serial reverifies)
+# is left UNTOUCHED, so this reset never tears down an already-delivering receiver. All guards + the
+# pre-probe `if` use the || return / case / if-condition idioms proven set-e-safe in
+# preflight_mv_reverify (the #1133 discipline); the two work calls are `|| true`-hardened and the
+# function ends in an explicit `return 0`, so a caller under `set -euo pipefail` can never be aborted.
+mv_reverify_proactive_reset() {
+  local box="$1" cam_n="$2" call_timeout="${3:-${PREFLIGHT_MV_REVERIFY_CALL_TIMEOUT:-30}}"
+  [ "${ALL_CAMBOX:-0}" = "1" ] || return 0
+  [ "${PREFLIGHT_MV_REVERIFY_CONTEXT:-preflight}" != "cleanup" ] || return 0
+  [ "${PREFLIGHT_MV_REVERIFY_PROACTIVE:-1}" = "1" ] || return 0
+  case " ${PREFLIGHT_EXCLUDED_CAMS:-} " in *" $box "*) return 0 ;; esac
+  # SILENT, UNCOUNTED pre-probe (issue 1114 review 🟡-1): the "known-stale" premise holds at the cam1
+  # site (kick ~4s after its bounce) and for the FIRST ALL_CAMBOX-loop camera, but a LATER loop
+  # camera's receiver may have re-resolved on its own during the preceding cameras' SERIAL reverifies
+  # (each spends its own ~20s-2min window) — the exact ~20s-2min stale-finder timescale of this
+  # ticket. So check FIRST: if this leg is already delivering, do NOT tear down a working receiver —
+  # return without kicking. This probe logs NOTHING as a failure and counts toward NO attempt budget,
+  # so the owner's "kick BEFORE the pixel-change poll starts counting" still holds for a genuinely
+  # stale leg (it is kicked here, before the guarded reverify's counted poll). Same gate flags as
+  # preflight_mv_reverify / mv_reverify_resolve_wait; the `if` condition is set-e-exempt on both arms.
+  if timeout "$call_timeout" python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
+      --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle "${PREFLIGHT_MV_REVERIFY_WARM_SETTLE:-0}" \
+      --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "    [sender-bounce] ${box} (NDI cam${cam_n}) proactive receiver reset right after its deploy bounce — resetting the stale receiver + riding out the fresh finder BEFORE the pixel poll starts counting (issue 1114 root fix)" >&2
+  timeout "$call_timeout" python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
+  mv_reverify_resolve_wait "$box" "$cam_n" "$call_timeout" || true
+  return 0
 }

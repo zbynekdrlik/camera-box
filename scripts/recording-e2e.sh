@@ -2476,6 +2476,13 @@ sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
 # not a longer blind window). ONCE, here only: the ALL_CAMBOX loop below runs while the painter is
 # deliberately stopped ([2b/8] -> [3/8]), so it must not wait on it. WARN-only (never blocks).
 mv_reverify_painter_up_wait "$CAM_PW" "$PAINTER_IP"
+# issue 1114 ROOT FIX: this leg's strih receiver is KNOWN-STALE right after its own deploy bounce
+# (production sender stopped, burn sender up at a new URL under the same NDI name — the DistroAV
+# finder still holds the dead pre-bounce URL). Kick the receiver reset + ride out the fresh finder's
+# bounded re-resolve BEFORE the guarded reverify's pixel poll starts counting, so a bounced leg passes
+# attempt-1 cleanly instead of the reactive kick-after-failure path. WARN-only (always returns 0); the
+# guarded reverify below stays the real gate. ALL_CAMBOX / deploy-context gated inside the helper.
+mv_reverify_proactive_reset "$CAMERA_NAME" "${CAMERA_NAME#cam}"
 mv_reverify_or_escalate "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 
 # #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4 into strih program —
@@ -2557,6 +2564,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # sleep above (a SEPARATE pass over the same box list, so the settle timing above is unchanged).
   for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_burn%%=*}"
+    # issue 1114 ROOT FIX: each box's strih receiver is KNOWN-STALE right after its own deploy bounce
+    # above, so kick its receiver reset + ride out the fresh finder BEFORE the guarded reverify's
+    # pixel poll starts counting (WARN-only, ALL_CAMBOX/deploy-context gated inside the helper).
+    mv_reverify_proactive_reset "$_cn" "${_cn#cam}"
     # #1093 (b): a wedged strih receiver here (issue 1096, cam2/cam3 legs too) escalates to the ONE
     # per-run strih-OBS restart + a single re-check; no painter-up wait (the painter is stopped now).
     mv_reverify_or_escalate "$_cn" "${_cn#cam}" || exit 1
