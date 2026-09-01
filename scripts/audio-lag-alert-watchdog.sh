@@ -83,6 +83,19 @@ STALE_THRESHOLD_S="${AUDIO_LAG_STALE_THRESHOLD_S:-180}"
 CONFIRM_THRESHOLD="${AUDIO_LAG_CONFIRM_THRESHOLD:-2}"
 ALERT_THROTTLE_PASSES="${AUDIO_LAG_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
+# #1265 — the BAND arm: a SECOND, finer detection dimension beside the 5000 ms lag arm above. It
+# reads the per-REFERENCE-source (mbc on stream) ts_lag BAND SHAPE facets bundle_state_gather now
+# exposes (audio_ref_lag_{src,base_ms,high_ms,low_ms,duty_pct,n}) and grades them at tens-of-ms
+# resolution -- DRIFTING when the high mode sits BAND_DEV_THRESHOLD_MS above the flat-start baseline
+# AND at least BAND_DUTY_MIN_PCT of the recent window is up there (a genuine bimodal/creeping flap,
+# not one spike). This catches the exact 107↔180 ms mbc drift the 5000 ms lag arm is 23x blind to
+# (issue 1265). Report-only (detection-only, like the lag arm); its DRIFTING page carries a DISTINCT
+# stable dedup-key `audio-band-$box` (a ⚠️ warning, not the lag arm's 🚨), so the two never collide.
+BAND_DEV_THRESHOLD_MS="${AUDIO_BAND_DEV_THRESHOLD_MS:-40}"
+BAND_DUTY_MIN_PCT="${AUDIO_BAND_DUTY_MIN_PCT:-10}"
+BAND_MIN_SAMPLES="${AUDIO_BAND_MIN_SAMPLES:-8}"
+BAND_CONFIRM_THRESHOLD="${AUDIO_BAND_CONFIRM_THRESHOLD:-$CONFIRM_THRESHOLD}"
+
 DECIDE="${AUDIO_LAG_DECIDE:-$HERE/audio_lag_decision.py}"
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${AUDIO_LAG_ALERT_REPO:-zbynekdrlik/camera-box}"
@@ -146,6 +159,16 @@ clear_box_throttle() {
   write_state_field "confirm_${box}" 0
   write_state_field "alert_sig_${box}" ""
   write_state_field "alert_passes_${box}" 0
+}
+
+# #1265 — the BAND arm's OWN throttle-clear (disjoint state keys from the lag arm's, so a HEALTHY
+# band never resets a live lag confirmation and vice versa). Does NOT clear `band_alerted` (the
+# recovery-ping latch, handled separately).
+clear_band_throttle() {
+  local box="$1"
+  write_state_field "band_confirm_${box}" 0
+  write_state_field "band_alert_sig_${box}" ""
+  write_state_field "band_alert_passes_${box}" 0
 }
 
 # lag_minutes <lag_ms> -> "M.m" minutes (one decimal), for a human-readable alert body.
@@ -256,6 +279,101 @@ handle_box() {
   fi
 }
 
+# #1265 — the BAND arm. Fully self-contained (its OWN fetch + OWN disjoint state keys), so the
+# #1226 lag arm above stays byte-identical. handle_box_band <box> <ip>
+handle_box_band() {
+  local box="$1" ip="$2" body reachable band_out verdict high base low duty n src
+
+  if body="$(fetch_bundle_json "$ip")"; then
+    reachable=1
+  else
+    reachable=0
+    body=""
+  fi
+
+  band_out="$(printf '%s' "$body" | python3 "$DECIDE" band --box-reachable "$reachable" --dev-threshold-ms "$BAND_DEV_THRESHOLD_MS" --duty-min-pct "$BAND_DUTY_MIN_PCT" --min-samples "$BAND_MIN_SAMPLES" 2>/dev/null)"
+  verdict="$(printf '%s\n' "$band_out" | sed -n 's/^band_verdict=//p')"
+  high="$(printf '%s\n' "$band_out" | sed -n 's/^band_high_ms=//p')"
+  base="$(printf '%s\n' "$band_out" | sed -n 's/^band_base_ms=//p')"
+  low="$(printf '%s\n' "$band_out" | sed -n 's/^band_low_ms=//p')"
+  duty="$(printf '%s\n' "$band_out" | sed -n 's/^band_duty_pct=//p')"
+  n="$(printf '%s\n' "$band_out" | sed -n 's/^band_n=//p')"
+  src="$(printf '%s\n' "$band_out" | sed -n 's/^band_src=//p')"
+  log "$box band ($ip): reachable=$reachable verdict=${verdict:-<none>} src=${src:-} base_ms=${base:-} high_ms=${high:-} low_ms=${low:-} duty_pct=${duty:-} n=${n:-} (dev>${BAND_DEV_THRESHOLD_MS}ms & duty>=${BAND_DUTY_MIN_PCT}%)"
+
+  case "$verdict" in
+    SKIP)
+      log "$box band :$BUNDLE_PORT not fetchable this pass -- box/:$BUNDLE_PORT-down is #732/#1001 territory; holding band state, no page"
+      return 0
+      ;;
+    UNKNOWN)
+      log "$box reachable but no ts_lag band facet (no reference source '${src:-mbc}' in the tail, too few samples, or an old bundle-state-server not yet serving it) -- holding band state, no page"
+      return 0
+      ;;
+    HEALTHY)
+      local was_alerted recover
+      was_alerted="$(read_state_field "band_alerted_${box}" 0)"
+      recover="$(net_reach_recovery_decision_local "$was_alerted")"
+      if [ "$recover" = "1" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+          log "[dry-run] WOULD send band recovery: $box '${src}' ts_lag band back to baseline (high=${high}ms base=${base}ms)"
+        else
+          log "RECOVERY: $box '${src}' ts_lag band back to baseline (high=${high}ms base=${base}ms) -- machine-channel only (#1206: recovery is not a phone ping)"
+        fi
+        write_state_field "band_alerted_${box}" 0
+      fi
+      clear_band_throttle "$box"
+      return 0
+      ;;
+    DRIFTING) : ;;   # fall through to confirm + alert
+    *)
+      log "$box band: unexpected verdict '${verdict:-<empty>}' from audio_lag_decision.py band (decide failed?) -- holding band state, no page"
+      return 0
+      ;;
+  esac
+
+  # DRIFTING -> confirm across consecutive passes before paging.
+  local prev_confirm decision confirm act
+  prev_confirm="$(read_state_field "band_confirm_${box}" 0)"
+  decision="$(obs_watchdog_confirm "$prev_confirm" 1 "$BAND_CONFIRM_THRESHOLD")"
+  confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
+  act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
+  write_state_field "band_confirm_${box}" "${confirm:-0}"
+  log "$box band confirm=$prev_confirm -> $confirm act=$act (threshold=$BAND_CONFIRM_THRESHOLD)"
+  if [ "${act:-0}" != "1" ]; then
+    log "$box '${src}' ts_lag band DRIFTING (high=${high}ms vs base=${base:-low $low}ms, duty=${duty}%) this pass but not yet CONFIRMED across $BAND_CONFIRM_THRESHOLD passes -- holding"
+    return 0
+  fi
+
+  # CONFIRMED band drift -> latch recovery, throttled alert.
+  write_state_field "band_alerted_${box}" 1
+
+  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
+  current_sig="audioband:${box}"
+  prior_sig="$(read_state_field "band_alert_sig_${box}" "")"
+  prior_passes="$(read_state_field "band_alert_passes_${box}" 0)"
+  throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
+  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
+  new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
+  new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
+  write_state_field "band_alert_sig_${box}" "$new_sig"
+  write_state_field "band_alert_passes_${box}" "$new_passes"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert (band): $box '${src}' ts_lag CONFIRMED DRIFTING high=${high}ms base=${base:-low $low}ms duty=${duty}% alert_now=$alert_now"
+    return 0
+  fi
+  if [ "${alert_now:-0}" = "1" ]; then
+    log "ALERT: firing Discord band notification for $box '${src}' ts_lag drift (high=${high}ms base=${base:-$low}ms duty=${duty}%)"
+    python3 "$NOTIFY" notify --body \
+      "⚠️ Audio ts_lag band ($REPO_SLUG): **$box** ($ip) — referenčný zdroj '${src}' kolíše: vysoký režim **${high} ms** oproti základni **${base:-$low} ms** (~${duty}% okna hore, n=${n}). A/V reziduál sa tým posúva k ±90 ms hranici (issue 1265). Nie je to výpadok — je to rozkmitanie audio timeline; pomôže reštart OBS na boxe (owner rozhodnutie). Prah drift>${BAND_DEV_THRESHOLD_MS} ms & duty>=${BAND_DUTY_MIN_PCT}%, potvrdené počas ${BAND_CONFIRM_THRESHOLD} kontrol." \
+      --dedup-key "audio-band-$box" \
+      >/dev/null 2>&1 || log "ALERT: airuleset.py notify (band) failed (non-fatal)"
+  else
+    log "ALERT: band alert suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- still drifting"
+  fi
+}
+
 # net_reach_recovery_decision_local <was_alerted> -> "1" iff a recovery latch should fire (was
 # alerted, now healthy). Kept trivially local (a HEALTHY pass IS the "now up" side) so this watchdog
 # needs no extra lib; mirrors net_reach_recovery_decision's was_alerted-AND-up shape.
@@ -294,6 +412,8 @@ main() {
   for pair in $BOXES; do
     box="${pair%%|*}"; ip="${pair##*|}"
     handle_box "$box" "$ip"
+    # #1265 — the BAND arm (self-contained, disjoint state; runs regardless of the lag arm's verdict).
+    handle_box_band "$box" "$ip"
   done
   log "pass end"
 }

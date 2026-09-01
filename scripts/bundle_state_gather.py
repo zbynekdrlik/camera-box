@@ -175,6 +175,17 @@ _AUDIO_TS_LAG_RE = re.compile(r"audio-telemetry #800 '([^']*)': ts_lag_ms=(-?\d+
 # mis-compares a date-less OBS timestamp against a foreign clock (issue 1231 design Prístup 1).
 AUDIO_TS_LAG_STALE_AFTER_S = 180  # ~3x the 60 s emit period: a source silent this long is stale.
 
+# #1265 — the per-REFERENCE-source ts_lag BAND facet. The #1226/#1231 facet is a single
+# MAX-across-sources scalar graded at a 5000 ms page threshold, which is structurally blind to the
+# A/V-gate reference source (`mbc`) going BIMODAL (flat ~107 ms then flapping 107↔180 ms, high mode
+# creeping up) — a 23×-under-threshold drift that still shifts the measured A/V residual past the
+# ±90 gate (issue 1265). `audio_ref_band_from_log` reads the SAME #1222 bounded head+tail log ONCE
+# and, for the named reference source, computes the band SHAPE at tens-of-ms resolution; the dev1
+# `classify_band` decision thresholds it, ships DISABLED like every sibling watchdog.
+AUDIO_REF_BAND_DEFAULT_SRC = "mbc"     # the stream A/V-gate audio reference (cam2 HDMI -> hand1 mic)
+AUDIO_REF_BAND_DUTY_MARGIN_MS = 20     # a tail reading > baseline + this counts as "high mode"
+AUDIO_REF_BAND_WINDOW_CAP = 120        # bound the tail-window readings considered (recent state)
+
 _LOG_LINE_TS_RE = re.compile(r"^\s*(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?")
 
 
@@ -286,6 +297,90 @@ def audio_ts_lag_ms_from_log(text):
     contract."""
     lag, src, _age = audio_telemetry_from_log(text)
     return (lag, src)
+
+
+def _median_int(values):
+    """Plain sorted median of a non-empty int list, rounded to int. (No numpy — small lists.)"""
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return int(s[mid]) if n % 2 else int(round((s[mid - 1] + s[mid]) / 2.0))
+
+
+def _percentile_nearest_rank(sorted_vals, pct):
+    """Nearest-rank percentile of a NON-EMPTY sorted list; `pct` in [0,100]. index =
+    ceil(pct/100 * n) - 1, clamped to [0, n-1]. No interpolation (the band only needs a robust
+    high/low representative that ignores a lone spike, not an exact quantile)."""
+    import math
+    n = len(sorted_vals)
+    k = max(0, min(n - 1, int(math.ceil(pct / 100.0 * n)) - 1))
+    return sorted_vals[k]
+
+
+def _ref_readings(text, ref_src):
+    """Every non-negative `ts_lag_ms` reading for `ref_src` in `text`, in FILE ORDER. A negative
+    reading (-1 == no audio timeline yet) never contributes (matching the #1226 max-side filter)."""
+    out = []
+    for line in (text or "").splitlines():
+        m = _AUDIO_TS_LAG_RE.search(line)
+        if m and m.group(1) == ref_src:
+            v = int(m.group(2))
+            if v >= 0:
+                out.append(v)
+    return out
+
+
+def audio_ref_band_from_log(text, ref_src=AUDIO_REF_BAND_DEFAULT_SRC,
+                            duty_margin_ms=AUDIO_REF_BAND_DUTY_MARGIN_MS,
+                            window_cap=AUDIO_REF_BAND_WINDOW_CAP):
+    """#1265 — the BAND SHAPE of one reference source's `ts_lag_ms` over the #1222 bounded log.
+    Returns `(src, base_ms, high_ms, low_ms, duty_pct, n)` as STRINGS (the omit-when-empty facet
+    contract), or `("", "", "", "", "", "")` when `ref_src` has no readings at all.
+
+    * `base_ms` — the flat-start baseline: median of `ref_src`'s readings in the HEAD (startup)
+      region of the bounded read (the log's own beginning — "the instance's own flat start", the
+      issue's wording). `""` when there is no separator (a small whole log with no distinct startup
+      region) or the head carried no `ref_src` reading — the dev1 decision then falls back to the
+      tail low as its deviation baseline, so a within-window bimodal flap is still caught.
+    * `high_ms`/`low_ms` — p90/p10 (nearest-rank, so a lone spike never widens the band) of the
+      FRESH tail-window readings (the last `window_cap`), the current high/low modes.
+    * `duty_pct` — % of the tail window sitting above `baseline + duty_margin_ms` (baseline = base
+      if present else the tail low), i.e. how much of the recent window is in the high mode. This is
+      what separates a genuine bimodal flap (duty ~50%) from a single transient spike (duty ~few %).
+    * `n` — the fresh tail-window sample count (too few -> the dev1 decision reads UNKNOWN, never a
+      false page).
+
+    Reads the SAME #1222 head+separator+tail bounded text in ONE pass — no second log read. When
+    the separator is present the region BEFORE it is the head (flat start) and the region AFTER it
+    is the tail (current window); a small whole-file log (no separator) has no distinct head, so its
+    whole content is the window and `base_ms` is empty."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        head_text, tail_text = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)
+    else:
+        head_text, tail_text = "", t
+    head_vals = _ref_readings(head_text, ref_src)
+    tail_vals = _ref_readings(tail_text, ref_src)
+    window = (tail_vals or head_vals)[-window_cap:]
+    if not window:
+        return ("", "", "", "", "", "")
+    sw = sorted(window)
+    n = len(window)
+    high = _percentile_nearest_rank(sw, 90)
+    low = _percentile_nearest_rank(sw, 10)
+    base = _median_int(head_vals) if head_vals else None
+    baseline = base if base is not None else low
+    thresh = baseline + duty_margin_ms
+    high_count = sum(1 for v in window if v > thresh)
+    duty_pct = int(round(100.0 * high_count / n))
+    return (
+        ref_src,
+        str(base) if base is not None else "",
+        str(high),
+        str(low),
+        str(duty_pct),
+        str(n),
+    )
 
 
 def distroav_dll_paths(scan_roots):
@@ -551,6 +646,12 @@ def build_bundle_state(
     audio_ts_lag_ms="",
     audio_ts_lag_src="",
     audio_ts_lag_age_s="",
+    audio_ref_lag_src="",
+    audio_ref_lag_base_ms="",
+    audio_ref_lag_high_ms="",
+    audio_ref_lag_low_ms="",
+    audio_ref_lag_duty_pct="",
+    audio_ref_lag_n="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -624,5 +725,16 @@ def build_bundle_state(
         # present ("0" when fresh) whenever ANY #800 line exists, "" only when telemetry is absent.
         # A large value -> the dev1 decision surfaces a STALE (stopped-while-log-advancing) state.
         "audio_ts_lag_age_s": audio_ts_lag_age_s,
+        # #1265 — the per-REFERENCE-source (mbc on stream) ts_lag BAND SHAPE (base/high/low/duty/n),
+        # from `audio_ref_band_from_log`. Same omit-when-empty rule; the dev1 audio-lag watchdog's
+        # BAND arm reads these to catch a tens-of-ms bimodal/creeping drift the 5000 ms MAX-facet is
+        # blind to, and recording-e2e.sh's #856 apply reads the derived verdict to HOLD when the run's
+        # audio timeline was unstable.
+        "audio_ref_lag_src": audio_ref_lag_src,
+        "audio_ref_lag_base_ms": audio_ref_lag_base_ms,
+        "audio_ref_lag_high_ms": audio_ref_lag_high_ms,
+        "audio_ref_lag_low_ms": audio_ref_lag_low_ms,
+        "audio_ref_lag_duty_pct": audio_ref_lag_duty_pct,
+        "audio_ref_lag_n": audio_ref_lag_n,
     }
     return {k: v for k, v in values.items() if v}

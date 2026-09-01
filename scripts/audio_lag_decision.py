@@ -143,6 +143,100 @@ def analyze(bundle_json_text, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS,
     return {"verdict": verdict, "lag_ms": lag, "src": src}
 
 
+# #1265 — the per-REFERENCE-source ts_lag BAND arm (a SECOND, finer dimension beside the #1226 lag
+# arm above). The box exposes the band SHAPE facets (audio_ref_lag_{src,base_ms,high_ms,low_ms,
+# duty_pct,n} from bundle_state_gather.audio_ref_band_from_log); this grades them at tens-of-ms
+# resolution so a bimodal/creeping `mbc` drift (107↔180 ms) that the 5000 ms lag arm is blind to is
+# caught. All thresholds env-overridable at the shell/CLI; ships DISABLED like every sibling.
+BAND_DEV_THRESHOLD_MS = 40   # high mode this far ABOVE the flat-start baseline = a real band shift
+BAND_DUTY_MIN_PCT = 10       # ... AND at least this % of the recent window up there (not one spike)
+BAND_MIN_SAMPLES = 8         # fewer readings than this -> UNKNOWN (too few to judge a band)
+
+
+def _int_or_none(raw):
+    """`raw` (a facet value that is a str/int/None) -> int, or None for absent/empty/non-integer."""
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    try:
+        return int(str(raw).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _band_from_obj(obj):
+    """The band facets `{base_ms,high_ms,low_ms,duty_pct,n,src}` (ints/None) from an already-parsed
+    bundle dict (or None). Every metric is None when absent — an empty `base_ms` (a small whole log
+    with no startup region) is None while high/low/n still parse, so the decision falls back to the
+    tail low as its baseline."""
+    if not isinstance(obj, dict):
+        return {"base_ms": None, "high_ms": None, "low_ms": None, "duty_pct": None, "n": None, "src": None}
+    src = obj.get("audio_ref_lag_src")
+    src = str(src) if src is not None and str(src).strip() != "" else None
+    return {
+        "base_ms": _int_or_none(obj.get("audio_ref_lag_base_ms")),
+        "high_ms": _int_or_none(obj.get("audio_ref_lag_high_ms")),
+        "low_ms": _int_or_none(obj.get("audio_ref_lag_low_ms")),
+        "duty_pct": _int_or_none(obj.get("audio_ref_lag_duty_pct")),
+        "n": _int_or_none(obj.get("audio_ref_lag_n")),
+        "src": src,
+    }
+
+
+def extract_ref_band(bundle_json_text):
+    """Parse a /bundle-state.json body -> the band facets `{base_ms,high_ms,low_ms,duty_pct,n,src}`
+    (ints/None; see `_band_from_obj`)."""
+    return _band_from_obj(_loads_obj(bundle_json_text))
+
+
+def classify_band(base_ms, high_ms, low_ms, duty_pct, n, box_reachable,
+                  dev_threshold_ms=BAND_DEV_THRESHOLD_MS, duty_min_pct=BAND_DUTY_MIN_PCT,
+                  min_samples=BAND_MIN_SAMPLES):
+    """One box's BAND verdict.
+
+      box_reachable != 1            -> SKIP     (defer to #732/#1001; never our page)
+      high_ms/low_ms/n absent       -> UNKNOWN  (no band facet — a box with no such source, or an
+                                                 old bundle-state-server not yet serving it)
+      n < min_samples               -> UNKNOWN  (too few readings to characterize a band)
+      deviation > threshold AND
+        duty_pct >= duty_min_pct    -> DRIFTING (the high mode sits `deviation` above the baseline
+                                                 AND a meaningful fraction of the recent window is up
+                                                 there — a genuine bimodal/creeping flap, not a lone
+                                                 spike). Baseline = the flat-start `base_ms` when
+                                                 present, else the tail low `low_ms` (so a
+                                                 within-window bimodal flap is caught even without a
+                                                 startup region).
+      otherwise                     -> HEALTHY
+    """
+    if box_reachable != 1:
+        return "SKIP"
+    if high_ms is None or low_ms is None or n is None:
+        return "UNKNOWN"
+    if n < min_samples:
+        return "UNKNOWN"
+    baseline = base_ms if base_ms is not None else low_ms
+    deviation = high_ms - baseline
+    duty = duty_pct if duty_pct is not None else 0
+    if deviation > dev_threshold_ms and duty >= duty_min_pct:
+        return "DRIFTING"
+    return "HEALTHY"
+
+
+def analyze_band(bundle_json_text, box_reachable, dev_threshold_ms=BAND_DEV_THRESHOLD_MS,
+                 duty_min_pct=BAND_DUTY_MIN_PCT, min_samples=BAND_MIN_SAMPLES):
+    """Fetch-result -> `{verdict, high_ms, base_ms, low_ms, duty_pct, n, src}`. SKIP without parsing
+    when the box was not reachable this pass (mirrors the lag arm's no-double-page guard)."""
+    if box_reachable != 1:
+        return {"verdict": "SKIP", "high_ms": None, "base_ms": None, "low_ms": None,
+                "duty_pct": None, "n": None, "src": None}
+    band = _band_from_obj(_loads_obj(bundle_json_text))
+    verdict = classify_band(band["base_ms"], band["high_ms"], band["low_ms"], band["duty_pct"],
+                            band["n"], box_reachable, dev_threshold_ms, duty_min_pct, min_samples)
+    return {
+        "verdict": verdict, "high_ms": band["high_ms"], "base_ms": band["base_ms"],
+        "low_ms": band["low_ms"], "duty_pct": band["duty_pct"], "n": band["n"], "src": band["src"],
+    }
+
+
 def _fmt(v):
     return "" if v is None else str(v)
 
@@ -156,6 +250,14 @@ def _main(argv):
     a.add_argument("--box-reachable", type=int, required=True)
     a.add_argument("--threshold-ms", type=int, default=DEFAULT_THRESHOLD_MS)
     a.add_argument("--stale-threshold-s", type=int, default=DEFAULT_STALE_THRESHOLD_S)
+
+    # #1265 — the BAND arm: read /bundle-state.json on stdin -> the per-reference-source band verdict.
+    b = sub.add_parser("band",
+                       help="read /bundle-state.json on stdin -> band_verdict + high/base/low/duty/n/src")
+    b.add_argument("--box-reachable", type=int, required=True)
+    b.add_argument("--dev-threshold-ms", type=int, default=BAND_DEV_THRESHOLD_MS)
+    b.add_argument("--duty-min-pct", type=int, default=BAND_DUTY_MIN_PCT)
+    b.add_argument("--min-samples", type=int, default=BAND_MIN_SAMPLES)
 
     ns = ap.parse_args(argv)
 
@@ -175,6 +277,16 @@ def _main(argv):
         # The freshness age is an ADDITIONAL line (not in the analyze dict) so the existing
         # verdict/lag_ms/src CLI contract is unchanged; the shell logs it and it corroborates STALE.
         print(f"age_s={_fmt(age_s)}")
+        return 0
+
+    if ns.cmd == "band":
+        # #1265 — the BAND arm. Same tolerant read as `analyze` (box_reachable=0 needs no stdin).
+        text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
+        res = analyze_band(text, ns.box_reachable, ns.dev_threshold_ms, ns.duty_min_pct, ns.min_samples)
+        for k, key in (("band_verdict", "verdict"), ("band_high_ms", "high_ms"),
+                       ("band_base_ms", "base_ms"), ("band_low_ms", "low_ms"),
+                       ("band_duty_pct", "duty_pct"), ("band_n", "n"), ("band_src", "src")):
+            print(f"{k}={_fmt(res[key])}")
         return 0
 
     return 2
