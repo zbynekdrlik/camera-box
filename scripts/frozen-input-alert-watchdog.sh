@@ -53,6 +53,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # no top-level statements, and its own $HERE-relative sourcing is call-time only (never triggered by
 # the raw read), so sourcing it here is side-effect-free.
 . "$HERE/lib/mv-reverify-escalate.sh"
+# shellcheck source=scripts/lib/ps-encoded.sh
+. "$HERE/lib/ps-encoded.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -144,19 +146,28 @@ probe_received() {
   if [ -n "${FROZEN_INPUT_PROBE_CMD:-}" ]; then
     raw="$($FROZEN_INPUT_PROBE_CMD "$ip" "$source" 2>/dev/null || true)"
   else
-    # One flat ssh + single (non-nested) powershell: tail the newest OBS log. `$env:APPDATA` has no
-    # spaces (C:\Users\<u>\AppData\Roaming), so no inner double-quotes are needed -> no nesting trap
-    # (win-ssh-vs-mcp / rig-state-inspection). Sourcing the whole tail; grep for the line on dev1.
+    # #1259: -EncodedCommand (base64 UTF-16LE), NEVER the naive -Command "…| sort …| select …".
+    # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|` pipes -> a mangled/blind read (the
+    # issue-1258 root cause). ps_encoded_command (scripts/lib/ps-encoded.sh) encodes the tail command
+    # to a pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> UNKNOWN, never an abort.
+    local _enc _tail
+    _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 800)" # #1259: guard the env count before the payload
+    _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail")"
     # shellcheck disable=SC2086
     raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
-      "powershell -NoProfile -Command \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $OBS_LOG_TAIL\"" \
+      "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
       2>/dev/null || true)"
   fi
   # Newest audit line for THIS source -> the received= integer. Empty if none found.
+  # #1258 layer 2: LC_ALL=C + grep -a -- PowerShell 5.1 `gc` (no -Encoding) reads the UTF-8
+  # strih OBS log as ANSI and re-encodes on output, so an audit line's non-ASCII glyphs come
+  # back as invalid-UTF-8 bytes; in a UTF-8 locale GNU grep then flags stdin BINARY (empty
+  # stdout) and sed's trailing `.*` refuses to consume the invalid byte (line-tail garbage
+  # after the digits) -- byte-safe end to end regardless of what bytes the raw tail carries.
   printf '%s\n' "$raw" \
-    | grep -F "genlock-fifo audit '$source':" \
+    | LC_ALL=C grep -aF "genlock-fifo audit '$source':" \
     | tail -1 \
-    | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' \
+    | LC_ALL=C sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' \
     | tail -1
 }
 

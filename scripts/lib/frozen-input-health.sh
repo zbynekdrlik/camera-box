@@ -98,8 +98,13 @@ frozen_input_cambox_sources() {
   # trailing `|| true` makes "no cambox sources this pass" a NORMAL exit-0 result (grep exits 1 on no
   # match) instead of a pipeline failure -- the callers key on the empty OUTPUT (the enum-blind guard),
   # never on the exit code, and must not treat "nothing matched" as an error under `set -o pipefail`.
-  { grep -oE "genlock-fifo audit '[^']*':" \
-    | sed -E "s/^genlock-fifo audit '(.*)':$/\1/" \
+  # #1258 layer 2: LC_ALL=C + grep -a on the FIRST stage -- the stdin here is the raw PS-fetched
+  # OBS-log tail (mv_reverify_probe_raw), which can carry invalid-UTF-8 bytes (PowerShell 5.1's
+  # `gc` re-encoding ANSI on a non-ASCII glyph elsewhere in the SAME tail); a UTF-8-locale grep
+  # then flags the WHOLE stdin binary and returns nothing, so the enumeration goes blind. Byte-safe
+  # end to end on this stage; the downstream filters only ever see already-extracted plain names.
+  { LC_ALL=C grep -aoE "genlock-fifo audit '[^']*':" \
+    | LC_ALL=C sed -E "s/^genlock-fifo audit '(.*)':$/\1/" \
     | grep -iE -- "$inc" \
     | grep -ivE -- "$exc" \
     | awk '!seen[$0]++'; } || true

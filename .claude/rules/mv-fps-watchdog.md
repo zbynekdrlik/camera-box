@@ -56,10 +56,23 @@ NO floor and re-parses NO audit line. Learnings for the next preflight that cons
 - **Placement is forced by `PROBE_BIN_DIR`.** `PROBE_BIN_DIR` (the CI probe-tools artifact dir holding
   `mv-fps-gate`/`frozen-camera-gate`/`render-budget-gate`) is resolved at ~l.1680 of recording-e2e.sh,
   AFTER the `[0/8]` preflight. A preflight consuming `$PROBE_BIN_DIR/<bin>` must therefore be placed
-  AFTER that, not at `[0/8]`. This one sits at `[4d1/8]`, immediately BEFORE the `[4d/8]` render-budget
-  banner (both are render-health checks; Multiview is already open there).
-- **Anchor discipline near `[4d/8]`.** Insert BEFORE the `[4d/8]` banner (i.e. before `--box "strih=`).
-  The strih→`fi`→`[4e/8]` region is heavily anchored by `harness_render_budget_imag_report_only_888.rs`
+  AFTER that, not at `[0/8]`. This one sits at `[4d1/8]`, immediately BEFORE the `[4b/8]` burns-ON gate
+  (issue 1261: it must measure the burns-OFF, production-shaped Multiview state — the 7-cam burns-ON MV
+  collapse (issue 1260) would otherwise false-abort every run; the `[4d1/8]` label is deliberately kept
+  out of alpha order to avoid breaking static anchors). It originally sat just before the `[4d/8]`
+  render-budget banner (burns-ON); the anchor caution below dates from that first placement.
+- **A probe-tools gate binary is BLIND on CI unless it is in BOTH resolution lists AND ci.yml (issue 1261).**
+  A step calling `$PROBE_BIN_DIR/<bin>` needs `<bin>` in BOTH `recording-e2e.sh` lists — the
+  `USE_PREBUILT_PROBE_DIR` presence/chmod loop (`for b in camera-box …`, ~l.2183) AND the local-build
+  fallback (`cargo build --release --bin …`, ~l.2206) — AND built+uploaded by `ci.yml` (its
+  default-feature gate-bin `cargo build` step + the `probe-tools-linux-amd64` upload list). Miss any one
+  and the gate exec fails → `mv_fps_verdict` maps the non-zero exit to UNKNOWN → a silent report-only
+  NOTE, so the gate NEVER decides on CI. `mv-fps-gate` shipped missing from BOTH `recording-e2e.sh` lists
+  (present only in the `[4d1/8]` call), so it was blind from day one; `full-path-e2e.yml` does NOT set
+  `USE_PREBUILT_PROBE_DIR`, so the local-build branch is the one that bit (NOTE path
+  `target/release/mv-fps-gate`). Mirror how `frozen-camera-gate`/`render-budget-gate` appear in BOTH lists.
+- **Anchor discipline near `[4d/8]` (a general caution — since issue 1261 this preflight sits before `[4b/8]`, not here).**
+  The strih→`fi`→`[4e/8]` region around the `[4d/8]` banner is heavily anchored by `harness_render_budget_imag_report_only_888.rs`
   (which FORBIDS the strings `REPORT-ONLY`/`NOT aborting`/`SKIP_IMAG_RENDER` there) and sliced by
   `harness_imag_topology.rs` from `--box "strih=` — never add report-only WARN text inside it. Use a
   unique banner (`[4d1/8]` — NOT a substring of `[4d/8]`) and keep the call's function name off the

@@ -51,6 +51,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-watchdog-decision.sh"
 # shellcheck source=scripts/lib/mv-fps-health.sh
 . "$HERE/lib/mv-fps-health.sh"
+# shellcheck source=scripts/lib/ps-encoded.sh
+. "$HERE/lib/ps-encoded.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -127,14 +129,19 @@ probe_mv_log() {
       timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" "$remote" 2>/dev/null || true
       ;;
     win)
-      # One flat ssh + single (non-nested) powershell (win-ssh-vs-mcp / rig-state-inspection): tail
-      # the newest OBS log. `$env:APPDATA` has no spaces, so no inner double-quotes are needed -> no
-      # nesting trap. `'MVFPS_LOGID:'` is single-quoted -> literal to powershell. Every `$` powershell
-      # must see is escaped (`\$`) so dev1's bash does not expand it; `$OBS_LOG_TAIL` is NOT escaped
-      # (a dev1 var). `if($f)` guards the no-log-file case.
+      # #1259: -EncodedCommand (base64 UTF-16LE), NEVER the naive -Command "$f=(…| sort …); if(…){…}".
+      # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|`/`;`/`{}` -> a mangled/blind read
+      # (the issue-1258 root cause). ps_encoded_command (scripts/lib/ps-encoded.sh) encodes the whole
+      # program (incl. its MVFPS_LOGID identity line) to a pure-ASCII blob cmd.exe cannot touch; an
+      # empty encode -> empty read -> the caller treats the box as UNKNOWN, never an abort. `'MVFPS_LOGID:'`
+      # stays single-quoted -> literal to powershell; every `$` powershell must see is `\$`-escaped so
+      # dev1 bash keeps it literal, while $OBS_LOG_TAIL (a dev1 var) is spliced. `if($f)` guards no-log.
+      local _enc _tail
+      _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 2000)" # #1259: guard the env count before the payload
+      _enc="$(ps_encoded_command "\$f=(gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1); if(\$f){ 'MVFPS_LOGID:'+\$f.Name; gc \$f.FullName -Tail $_tail }")"
       # shellcheck disable=SC2086
       timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
-        "powershell -NoProfile -Command \"\$f=(gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1); if(\$f){ 'MVFPS_LOGID:'+\$f.Name; gc \$f.FullName -Tail $OBS_LOG_TAIL }\"" \
+        "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
         2>/dev/null || true
       ;;
     *)
@@ -197,8 +204,12 @@ handle_box() {
 
   local raw logid mv_lines gate_out gate_exit verdict prev_logid reset
   raw="$(probe_mv_log "$ip" "$os" | tr -d '\r')"
-  logid="$(printf '%s\n' "$raw" | sed -n 's/^MVFPS_LOGID://p' | tail -1)"
-  mv_lines="$(printf '%s\n' "$raw" | grep -F 'multiview-audit:' 2>/dev/null || true)"
+  # #1262 review (idiom parity, no functional hazard -- a `^literal` anchor with no `.`, first
+  # line, ASCII identity string; worst case is a fail-safe confirm-streak reset, never a page):
+  logid="$(printf '%s\n' "$raw" | LC_ALL=C sed -n 's/^MVFPS_LOGID://p' | tail -1)"
+  # #1262: byte-safe extraction (mv_fps_extract_audit_lines, scripts/lib/mv-fps-health.sh) --
+  # see its own doc comment for the adversarial byte-glue hazard this guards against.
+  mv_lines="$(printf '%s\n' "$raw" | mv_fps_extract_audit_lines)"
 
   # Autostart restart-reset: a CHANGED OBS-log identity means OBS restarted -> clear the pending
   # confirm BEFORE this pass is scored, so a fresh instance's warm-up below-floor read starts a new

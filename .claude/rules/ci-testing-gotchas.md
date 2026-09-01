@@ -36,6 +36,26 @@ or a brand new test scoped to the NEW call's own region (bounded from the first 
 `fi` to the next step's banner, as in `tests/harness_render_budget_imag_report_only_888.rs`) —
 never left as a stale assertion that happens to still pass.
 
+## Appending a word to a `scripts/recording-e2e.sh` banner: the occurrence-count anchor sweep is BLIND to NEGATED (must-not-contain) region assertions (#1263)
+
+The CLAUDE.md static-anchor discipline for `recording-e2e.sh`/`rig-mode.sh` edits recommends a
+python occurrence-count sweep (old vs new: flag any test string-literal whose count went 1→0 or
+1→2). That sweep only catches POSITIVE anchors — it is structurally BLIND to a test that asserts a
+region must **NOT** contain a phrase (`assert!(!window.contains("X"))` / a forbidden-region check).
+Adding a common word to a banner (`REPORT-ONLY`, `WARN`, `ABORT`, `strict`) can newly SATISFY such a
+must-not-contain assertion and break CI even though every positive anchor count is unchanged.
+Concrete: `tests/harness_render_budget_imag_report_only_888.rs` FORBIDS `REPORT-ONLY` inside the
+`[4d/8]` render-budget region (its window slices FORWARD from the first `--box "strih=` / the
+`[4d/8] #405` banner). #1263 appended `REPORT-ONLY` to the EARLIER `[4d1/8]` banner (line ~2871) —
+safe only because both 888 forbidden regions slice forward from lines AFTER it. **So when you add a
+word to a banner, ALSO grep every recording-e2e-reading test for negated
+`.contains(...)`/`!window.contains(...)`/`!s.contains(...)` assertions and confirm the region each
+forbids starts AFTER (or is otherwise disjoint from) your edit** — the positive occurrence-count
+sweep alone cannot prove this, and a full `cargo test` is CI-only under Tier-0. (The sibling
+report-only decoupling seam that added the `[4d1/8]` word is `scripts/lib/mv-fps-preflight.sh`'s
+`mv_fps_preflight_term_is_report_only` per-box term predicate — strih report-only while issue 1260
+open, imag strict, flipped back to strict in the PR closing issue 1260.)
+
 ## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
 
 Several "pure kernel" constants in this repo are deliberately duplicated across THREE places:

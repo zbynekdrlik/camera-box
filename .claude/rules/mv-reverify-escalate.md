@@ -1,8 +1,15 @@
 ---
 paths:
   - "scripts/lib/mv-reverify-escalate.sh"
+  - "scripts/lib/ps-encoded.sh"
   - "tests/harness_mv_reverify_escalate_1093.rs"
   - "tests/harness_mv_reverify_resolve_wait_1114.rs"
+  - "tests/harness_received_tap_encoded_command_1258.rs"
+  - "tests/harness_ps_encoded_fleet_1259.rs"
+  - "tests/harness_received_tap_byte_safety_1258.rs"
+  - "scripts/frozen-input-alert-watchdog.sh"
+  - "scripts/lib/frozen-input-health.sh"
+  - "scripts/cadence-alert-watchdog.sh"
 ---
 
 # Sender-bounce reverify: painter-order proof + receiver-wedge escalation (#1093)
@@ -140,3 +147,128 @@ pixel-change poll starts counting."
   `mv_reverify_proactive_reset "$CAMERA_NAME" "${CAMERA_NAME#cam}"` (cam1) and
   `mv_reverify_proactive_reset "$_cn" "${_cn#cam}"` (ALL_CAMBOX loop), each ordered BEFORE its
   `mv_reverify_or_escalate`; the adjacent comments must never duplicate those literals.
+
+## `mv_reverify_probe_raw` reads strih's OBS log via `-EncodedCommand`, NEVER naive `-Command "..."` (#1258)
+
+strih's Win32-OpenSSH default shell is **cmd.exe**. A naive
+`ssh "powershell -NoProfile -Command \"gc (gci ... | sort ... | select ...).FullName -Tail N\""`
+is MANGLED by the three-layer bash→ssh→cmd.exe→powershell quoting hazard (the same one
+`scripts/lib/win-ssh-exec.sh`'s header documents + solves with `-EncodedCommand`): the unescaped `|`
+pipes leak to cmd.exe, so the read returns non-tail noise. This left the `[4c/8]` frozen-camera gate's
+`received=` tap (which reuses `mv_reverify_probe_raw`) reading `received=none` on EVERY source of EVERY
+attempt of EVERY run — 4/4 INCONCLUSIVE, the abort gate silently never bit (only the QR sweep protected)
+— across all runs since #1233. It is a DETERMINISTIC read bug, not a timing/race: the audit lines exist
+on-box for `NDI cam1`..`NDI cam7` and `gc -Tail 800 | Select-String "genlock-fifo audit 'NDI cam1': "`
+matches 27 lines; `win_ssh_run` (which already uses `-EncodedCommand`) reads strih fine in the SAME
+failing run.
+
+- **The read now base64-UTF16LE-encodes the tail command and sends `-NoProfile -NonInteractive
+  -EncodedCommand <b64>`** — pure ASCII, no shell-special chars, so cmd.exe can't mangle it; PowerShell
+  decodes back to the exact `gc/gci … -Tail N` command with pipes intact.
+- **Inlined `iconv -f UTF-8 -t UTF-16LE | base64 -w0`, NOT `. win-ssh-exec.sh`** — that helper carries
+  its own top-level `set -euo pipefail`, which would leak strict mode into this source-only lib's
+  non-strict callers (the frozen-input watchdog + the Tier-0 harness). Self-guard the encode
+  (`_enc="$(… 2>/dev/null)" || _enc=""`) and numeric-clamp any tail override (`case '' | *[!0-9]* → 400`)
+  so a metachar override can never inject into the encoded payload.
+- **Tier-0 without ssh (`.claude/rules/win-ssh-vs-mcp.md`: agent sessions read strih via win-* MCP, never
+  ssh):** a fake `sshpass` on PATH echoing its argv proves the invocation shape — naive→`-Command "gc`
+  (RED), fixed→`-EncodedCommand` whose payload `base64 -d | iconv -f UTF-16LE -t UTF-8` decodes exactly to
+  the tail command (GREEN), for both the -Tail 400 default and the frozen-cam -Tail 800 override
+  (`tests/harness_received_tap_encoded_command_1258.rs`).
+
+## The fleet sweep landed (#1259) — the SHARED encode helper `scripts/lib/ps-encoded.sh`
+
+#1258 fixed only `mv_reverify_probe_raw`; #1259 migrated the 8 OTHER naive `powershell -Command "…|
+sort …| select …"` over-ssh OBS-log reads to `-EncodedCommand`, extracting the encode into ONE shared
+source-only lib **`scripts/lib/ps-encoded.sh`**:
+
+- **`ps_encoded_command <ps-text>`** — base64-UTF16LE-encode a PowerShell command (`iconv -f UTF-8 -t
+  UTF-16LE | base64 -w0`, self-guarded to `""` on a missing encoder, ALWAYS exits 0). The lib carries
+  **NO top-level `set -euo pipefail`** (source-only, like `mv-reverify-escalate.sh`) so it never leaks
+  strict mode into the non-strict watchdog callers (they run `set -uo pipefail` WITHOUT `-e`) — the
+  same reason #1258 inlined rather than sourcing `win-ssh-exec.sh` (whose top-level `set -euo pipefail`
+  WOULD leak). This is why there are now three-plus copies of the same encode (win-ssh-exec.sh's
+  `win_ssh_run`, the #1258 mv_reverify inline, ps-encoded.sh, and `rig-health-audit.py::_ps_encoded`);
+  each copy has a verified rationale (strict-mode leak / #1258 test-lock / the bash↔python boundary).
+- **`ps_clamp_numeric <value> <default>`** — clamp a caller/env-sourced `-Tail N` to a bare
+  non-negative integer BEFORE it enters the encoded payload (rejects empty / non-digit / negative /
+  decimal → default), so a typo'd/hostile env value can never inject shell/PS metachars. Apply it at
+  EVERY `-Tail $count` splice (the #1259 review 🟡: it must be consistent — all 5 watchdogs, not 2).
+
+Migrated sites (each sources ps-encoded.sh + emits `-NoProfile -NonInteractive -EncodedCommand`):
+`asio-starve-alert-watchdog.sh` (fetch_box_log), `frozen-input-alert-watchdog.sh` (probe_received),
+`ndi-halving-watchdog.sh` / `cadence-alert-watchdog.sh` (fetch_box_log), `mv-fps-alert-watchdog.sh`
+(probe_mv_log win branch), `scripts/lib/mv-fps-preflight.sh` (mv_fps_preflight_read_cmd win branch —
+LIVE in the `[4d1/8]` preflight). Python cannot source a bash lib, so `scripts/rig-health-audit.py`
+gets its own `_ps_encoded` / `_windows_obs_log_tail_cmd` / `_windows_obs_count_cmd` (identical base64
+UTF-16LE; both bash `iconv` and Python `utf-16-le` emit NO BOM → byte-identical).
+
+**KEPT as-is (NOT the mangling class — do not "migrate" these):** `bundle-state-server.py`'s
+LIST-form `subprocess.run(["powershell","-NoProfile","-NonInteractive","-Command",cmd])` runs LOCALLY
+on the box (no ssh, no cmd.exe — argv goes straight to powershell.exe); Task Scheduler XML
+`<Command>powershell</Command>` (a local scheduled task); `-File`-based invocations; and the doc
+comments. `mv_reverify_probe_raw`'s OWN inline encode stays (test-locked, out of #1259's scope).
+
+**Tier-0 test the migrated sites the same fake-sshpass way** (`tests/harness_ps_encoded_fleet_1259.rs`):
+source the watchdog (its `[[ "${BASH_SOURCE[0]}" == "$0" ]] && main` guard means sourcing only defines
+functions), call `fetch_box_log`/`probe_received`/`probe_mv_log` with a fake `sshpass` on PATH that
+appends its argv to a log FILE (probe_received post-processes stdout, so the file — not stdout — is the
+reliable capture surface), and `env_remove` the `*_PROBE_CMD` overrides so the REAL branch runs; assert
+`-EncodedCommand` present + the payload base64-decodes to the intended PS. The pure builders
+(`ps_encoded_command`, `ps_clamp_numeric`, `mv_fps_preflight_read_cmd win`) are tested by direct call.
+
+## Layer 2 (#1258, 2026-09-01) — the EncodedCommand fix was NECESSARY but NOT SUFFICIENT
+
+The layer-1 fix above (`-EncodedCommand`) made `mv_reverify_probe_raw` actually reach the strih OBS
+log. A live proof run (1651316094, dev1 at 1.7.0-dev.607) then found `[4c/8]` STILL 4/4 INCONCLUSIVE
+on every input, every read printing `grep: (standard input): binary file matches` /
+`received= NDI cam1: prev=none curr=none -> UNKNOWN`.
+
+**Root cause:** PowerShell 5.1's `gc` (Get-Content), invoked WITHOUT `-Encoding`, reads the strih OBS
+log (UTF-8) as ANSI/CP1252 and re-encodes on output. Any non-ASCII glyph anywhere in the fetched tail
+(the `≈` in `(≈F frames @ …)`) comes back as invalid-UTF-8 bytes. On a UTF-8-locale box (this fleet
+runs `en_US.UTF-8`), GNU grep then treats stdin as BINARY — stdout goes empty, the notice is
+stderr-only — and even where grep still finds the line, `sed`'s trailing `.*` refuses to consume the
+invalid byte and leaves line-tail garbage after the captured digits. Either failure produces a value
+that is NOT a clean bare integer, so every caller's `case '' | *[!0-9]*` reads it as "none" → UNKNOWN.
+
+**Fix — byte-safe end to end, `LC_ALL=C` on BOTH stages (grep AND sed), plus `-a` on grep:**
+
+```bash
+LC_ALL=C grep -aF "genlock-fifo audit '$1': " | tail -n1 | LC_ALL=C sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p'
+```
+
+`grep -a` alone is not always enough (an ambient locale can still binary-flag some inputs even with
+`-a`, and `sed`'s `.*` needs its OWN `LC_ALL=C` or it silently leaves the tail-garbage failure mode
+even when grep itself found the line) — apply BOTH, on BOTH commands, always. Applied identically to
+every DIRECT consumer of the same `genlock-fifo audit '<src>': received=` tap family:
+
+- `mv_reverify_extract_received` (this file) — the shared extractor `frozen-cam-received.sh` (the
+  `[4c/8]` gate itself, `.claude/rules/frozen-cam-received-gate.md`) and `mv_reverify_probe_received`
+  both reuse, so this ONE fix covers the actual gate path.
+- `probe_received` (`scripts/frozen-input-alert-watchdog.sh`, `.claude/rules/frozen-input-watchdog.md`).
+- `extract_sample` (`scripts/cadence-alert-watchdog.sh`, `.claude/rules/cadence-watchdog.md`) — a
+  sibling #1259-migrated watchdog reading the SAME tap family via the SAME `ps_encoded_command` fetch.
+- `frozen_input_cambox_sources` (`scripts/lib/frozen-input-health.sh`) — the enumeration reader
+  sharing the SAME raw `mv_reverify_probe_raw` stream via `probe_enumerate`; fixed DEFENSIVELY
+  (`grep -aoE` + `LC_ALL=C sed -E`) — its specific `-o`+piped-stdin shape did NOT reproduce a Tier-0
+  RED via a pipe (any fixture size tried), though the IDENTICAL byte DOES trip GNU grep's binary
+  detection through a direct FILE argument on the same grep binary — the hazard class is real even
+  though this one shape resisted pipe-mode reproduction in this sandbox.
+
+**Test recipe (Tier-0, `tests/harness_received_tap_byte_safety_1258.rs`):** write a raw multi-line
+fixture as literal Rust BYTES (`b"...\xa0..."`, never a `&str` — a genuine invalid-UTF-8 byte cannot
+live in a Rust string literal) to a temp FILE, `cat` it into the sourced function via `bash -c`. Two
+lines carry the invalid byte (one of them the TARGET line itself, right after `received=N`) to prove
+BOTH that an EARLIER corrupted line doesn't blind a LATER clean one, and that the target line's OWN
+corruption doesn't leave garbage. RED against the pre-fix code reliably reproduces
+`grep: (standard input): binary file matches` + empty extraction for the 3 direct-pipe consumers
+(`mv_reverify_extract_received`, `probe_received`, `extract_sample`); `frozen_input_cambox_sources`'s
+test is GREEN-only (see above) and is explicitly labeled as such, never overstated as a reproduced
+regression.
+
+**NOT covered by #1258 (deliberately, filed as issue 1262 for someone to verify + apply if warranted):**
+every OTHER `ps_encoded_command` consumer parses a DIFFERENT audit-line family with the SAME
+non-byte-safe grep/sed shape — `mv-fps-alert-watchdog.sh`'s `multiview-audit:` grep, `ndi-halving-
+watchdog.sh`'s `recv-timing` tap, `asio-starve-alert-watchdog.sh`'s `asrc:` tap. Same fetch mechanism,
+same locale, same theoretical exposure — just unverified and out of #1258's `received=`-scoped remit.

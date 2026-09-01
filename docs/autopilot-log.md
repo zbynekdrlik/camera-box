@@ -2,6 +2,49 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-09-01 — #1258 ([4c/8] frozen-camera-gate received= tap blind) — worktree worktree-agent-a79df4cf5f0b599a0, base eb52b62af
+
+- **Root cause: the `received=` tap read strih's OBS log with a NAIVE triple-quoted
+  `ssh "powershell -Command \"gc (gci ... | sort ... | select ...).FullName -Tail N\""`.**
+  strih's Win32-OpenSSH default shell is cmd.exe; the unescaped `|` pipes leak to cmd.exe (the
+  bash→ssh→cmd.exe→powershell three-layer quoting hazard `scripts/lib/win-ssh-exec.sh`'s header
+  already documents + solves with `-EncodedCommand`). So the read returned non-tail noise, every
+  source extracted `received=none` → UNKNOWN → **INCONCLUSIVE on every attempt of every run since the
+  tap landed (issue 1233)** — the `[4c/8]` frozen-camera ABORT gate silently never bit; only the
+  downstream QR sweep protected. Systematic, not a one-off: CI runs 33513175938 + 33496993951 +
+  33477674434 + 33472532087 + 33464013809 are ALL identical 4/4 INCONCLUSIVE `prev=none curr=none`.
+- **Proven it is the READ, not absent lines:** live strih (win-strih MCP, read-only) has 84934
+  `genlock-fifo audit` lines with `NDI cam1`..`NDI cam7` names matching the gate's derived set; the
+  audit lines were present with advancing counters during the exact failing window (same still-open
+  log file); on-box `gc -Tail 800 | Select-String "genlock-fifo audit 'NDI cam1': "` = 27 matches;
+  and `win_ssh_run` (which uses `-EncodedCommand`) reads strih fine in the SAME failing run ([0/8]
+  visibility gate + [4h/8pre] phase-sync). Only the naive quoting fails.
+- **Fix (`scripts/lib/mv-reverify-escalate.sh` `mv_reverify_probe_raw`, the SHARED read used by the
+  [4c/8] gate + the issue-1093 mv-reverify escalation + the issue-1052 frozen-input watchdog):**
+  invoke PowerShell via `-EncodedCommand` (base64 UTF-16LE) — pure ASCII, cmd.exe-proof; PowerShell
+  decodes back to the exact `gc/gci ... -Tail N` command, pipes intact. Inlined the `iconv|base64`
+  encode (NOT sourced win-ssh-exec.sh, whose top-level `set -euo pipefail` would leak strict mode
+  into non-strict callers). Kept the `MV_REVERIFY_RECEIVED_CMD` stub short-circuit + `2>/dev/null || true`.
+- **Review response (0🔴 1🟡 3🔵, all fixed same branch):** guarded `_enc="$(...)" || _enc=""`
+  (never abort a bare set-e caller — this lib's own never-abort contract); numeric-clamped
+  `MV_REVERIFY_RECEIVED_TAIL` (non-digit→400) so the override can't inject into the encoded payload;
+  test asserts `-NoProfile -NonInteractive -EncodedCommand`.
+- **RED→GREEN:** `tests/harness_received_tap_encoded_command_1258.rs`
+  (`received_tap_uses_encoded_command_not_naive_quoting_1258` RED on `ca92bc738`, GREEN on `8642a2b5d`;
+  review hardening `4e580cbd5`). Tier-0 verified (no cargo per #557, no ssh-to-strih per win-ssh-vs-mcp):
+  fake-sshpass-on-PATH replica shows naive→`-Command "gc` (RED), fixed→`-EncodedCommand` decoding
+  exactly to the tail command for both -Tail 400 and the frozen-cam -Tail 800 override; a malicious
+  tail override clamps to 400 (no injection); `bash -n` OK, `shellcheck -S warning` clean, `cargo fmt
+  --all --check` clean. Definitive end-to-end proof is the next E2E run showing ALIVE/FROZEN not
+  INCONCLUSIVE (verified-by-composition: win_ssh_run -EncodedCommand works vs strih + on-box gc -Tail
+  returns the lines).
+- **NOTE (out of scope, not filed):** the SAME naive-form read exists in ~7 other places
+  (asio/ndi-halving/cadence/mv-fps watchdogs — mostly DISABLED — plus `scripts/lib/mv-fps-preflight.sh`
+  which is live in `[4d1/8]` and showed the same could-not-classify blind read in run 33513175938, and
+  `scripts/rig-health-audit.py`, and frozen-input-alert-watchdog.sh's own inline enumeration read at
+  line 152). Filed the fleet-wide sweep as **#1259** (cross-cutting); this fix repaired only the
+  shared `mv_reverify_probe_raw` (the [4c/8] path + the two consumers that reuse it).
+
 ## 2026-08-27 — #1212 (retire the issue-1110 large-area MV-fps sentinel + median-window gate) — worktree worktree-agent-a8e1b09897821d8d9, base 78b03412f (the issue-1110 merge)
 
 - **Reverses a change merged ~20 min earlier (issue 1110, `78b03412f`).** Issue 1110 made
@@ -11085,3 +11128,43 @@ No push/PR/rig touch (worktree worker).
 - **Tests (RED→GREEN):** camera_box_version_gate.rs +4 hard-mode tests (pass on match=0, refuse lag=30, refuse unresolved-sha=31 not-dormant, exclude acked=0). Updated the two recording-e2e anchor tests (frame_probe_deploy_1138.rs, frame_probe_parity_align_1138.rs) that pinned the old `|| true`/local-fallback first-window to the new HARD-first + soak-second structure (`match_indices` for the two `--frame-probe-only` branches).
 - **Verify (Tier-0, no cargo compile per airuleset 557):** `bash -n` + `shellcheck -S warning` clean on both scripts; gate verdicts exercised directly (hard+match=0, hard+mismatch=30, hard+no-sha=31, hard+acked=0, report-only+mismatch=0); recording-e2e anchor windows verified GREEN on NEW + RED on OLD via the occurrence-count sweep + a window replica; `cargo fmt --all --check` clean. No version bump (batch mode — supervisor integrates).
 - Issue 1235 stays OPEN — supervisor closes with evidence after integration + CI green. Do NOT add a close-trigger to the batch PR body for it beyond the normal `Closes` line the supervisor manages.
+
+## issue 1168 (TASK 1 only — per-box arrival-floor decomposition tooling), worktree lane 2026-09-01
+
+- **Scope:** TASK 1 (the measurement tool) ONLY. Tasks 2 (reduce the highest floor) and 3 (re-tighten `[4i/8align]` to hard-fail) are downstream consumers and are NOT this lane — the sibling task-3 data-first pass already concluded the re-tighten is not supportable from the green series yet.
+- **New tool:** `scripts/arrival_floor_decompose.py` (RED `cfee0a707` → GREEN `153441ad3`) — a dev1-side supervisor mining tool that decomposes each camera's arrival floor into strih-config (Δlatency_ms) + upstream (Δmean_head_skew_ms), attributes the upstream term to grabber vs transport via `recv-timing #797` cap_avg uniformity, and corroborates grabber with the cambox `Streaming:`/`#707 DQBUF stall` health. Wired into NO gate.
+- **Model (algebraic):** `floor = latency_ms + mean_head_skew_ms`, so `excess = Δlatency (strih-config) + Δskew (upstream = transport + grabber)`; uniform cap_avg falsifies transport ⇒ upstream excess is grabber-owned.
+- **Reuse, no new skew regex:** total floor via `qr_align_pins.arrival_floors_from_jitter` (issue-1253 samples guard); transport via `ndi_halving_decision.parse_recv_timing` (issue-797-safe); skew/pin consumed from the harness `qr-align-jitter-<RUN>.json` (= `genlock-jitter-report --json`, i.e. `src/jitter_audit.rs`).
+- **Verified over the 3 certified-green runs (1363366080 / 1168855508 / 674135238):** cam1 consistently owns the highest per-box floor (+15..18 ms, grabber/cambox; transport cap_avg uniform ~0.1 ms), cam2's +3 ms is purely its strih `latency_ms=6` pin (its grabber skew is the LOWEST) — mechanizing the hand-mined design finding. This is the data task 2 starts from.
+- **Tier-0 (issue 557):** pure Python, full local RED→GREEN via `pytest tests/python/test_arrival_floor_decompose_1168.py` (16 tests incl. 2 real-data smoke), zero cargo. No version bump (worktree lane — supervisor integrates).
+- **Playbook:** `.claude/rules/arrival-floor-decompose.md` (auto-loads on the tool + test paths).
+- **Supervisor next step:** run `python3 scripts/arrival_floor_decompose.py --run-dir /tmp/recording-e2e-<RUN>` over the just-finished full-path E2E run 33513175938's collected artefacts (once it lands) to confirm cam1 (grabber) still owns the offset before task 2 targets its cambox-side floor.
+
+## issue 1168 task-2 PREP — multi-run floor mining + target-box attribution (worktree lane, 2026-09-01)
+
+- **`--multi` mode added** to `scripts/arrival_floor_decompose.py`: pure `aggregate(list_of_(run_id, decompose_result))` (per-camera floor/excess distribution + mean floor-RANK + latency-pin set + anchor/slowest MODE + STABILITY verdict), a `_keep_run(only_uniform, min_cameras)` stratification predicate, a `mine_run_dir` reuse helper, and the `--multi`/`--runs-glob`/`--only-uniform`/`--min-cameras` CLI. `RANK_MODE_STABLE_FRAC=0.6`. REUSES `decompose()` and every existing parser — no new regex.
+- **RED** `3c9db89d5` (10 failing tests + 2nd real fixture `recording-e2e-659887078`) → **GREEN** (impl + rule + this log). Full local RED→GREEN via `pytest tests/python/test_arrival_floor_decompose_1168.py` (30 tests incl. 2 multi-run real-data smoke over two contrasting fixtures), zero cargo (Tier-0 #557).
+- **Mined 69 run dirs on dev1.** Clean regime (`--only-uniform --min-cameras 7`, 28 runs): **anchor cam4 STABLE (19/28=68%)**, cam5 stable #2; **slowest NOT stable** (cam2 mode only 10/28=36%, then cam3/cam1/cam6). Stable cross-camera MEDIAN-floor spread = **~8 ms (NOT ~50 ms)** — the 50 ms+ values are transient (DQBUF stalls / the old 4-cam fleet era / transport degradation). cam2 is the marginal steady slowest and the ONLY box with a config pin (`latency_pins 3,6`).
+- **Target recommendation:** no single stable slowest box to optimize. Two stable levers: (1) align cam2's strih `latency_ms=6` → 3 (deterministic −3 ms, config); (2) treat the residual ~8 ms band as a FLEET-WIDE grabber-skew difference vs the cam4/cam5 reference, never a single-box fix. Task 3 re-tighten must budget for the RUN-LEVEL transient spread (≤~49 ms even clean), not a fixed per-box offset. The single-run "cam1 owns the floor" note is corrected as a 4-cam-era artifact.
+- **Playbook:** `.claude/rules/arrival-floor-decompose.md` (new `--multi` section + multi-run finding, single-run note marked superseded).
+- **Lane scope:** #1168 stays OPEN (task-2 reduction + task-3 re-tighten remain). No push/PR/merge/version-bump — supervisor integrates the branch; durability backup on `refs/autopilot-wip/worktree-agent-a2bda489bd1425ed4`.
+
+## issue 1259 — fleet-wide powershell -Command → -EncodedCommand migration (worktree lane, 2026-09-01)
+
+- **Root cause (issue 1258 follow-up):** Win32-OpenSSH's default cmd.exe shell on strih/stream mangles a naive `ssh host "powershell -Command \"…| sort …| select …\""` (the unescaped pipes/`$`/`;`/`{}`/`()` leak to cmd.exe) → a blind/empty read. issue 1258 fixed only `mv_reverify_probe_raw`; this migrated the 8 remaining over-ssh reads.
+- **Shared helper extracted:** new source-only `scripts/lib/ps-encoded.sh` — `ps_encoded_command` (base64 UTF-16LE, self-guarded, always exit 0) + `ps_clamp_numeric` (guard a `-Tail N` before the payload). NO top-level `set -euo pipefail` so it never leaks strict mode into the non-strict watchdog callers (the reason issue 1258 inlined vs sourcing win-ssh-exec.sh).
+- **Migrated (6 shell + 2 python):** asio-starve / frozen-input / ndi-halving / cadence / mv-fps-alert watchdogs, `scripts/lib/mv-fps-preflight.sh` (win branch, LIVE `[4d1/8]`), and `scripts/rig-health-audit.py` (its own `_ps_encoded` / `_windows_obs_log_tail_cmd` / `_windows_obs_count_cmd` — Python cannot source the bash lib). KEPT: bundle-state-server.py list-form local subprocess reads, Task Scheduler XML, `-File` scripts, comments; and mv_reverify_probe_raw's own inline encode (test-locked, out of scope).
+- **RED** `bf7502e00` (new `tests/harness_ps_encoded_fleet_1259.rs` + `tests/python/test_rig_health_audit_encoded_1259.py`; python 4-failed proven locally + a bash fake-sshpass replica showing all 6 sites still naive) → **GREEN** `0249d7fbb` (shared lib + 8 migrations + updated `harness_mv_fps_preflight_1091.rs` win-read contract from -Command to -EncodedCommand) → **review** `935504137` (0 crit / 1 warn / 4 sugg — the warn: hoisted `ps_clamp_numeric` to clamp `$OBS_LOG_TAIL` at all 5 watchdog splices, not just 2; + python negative-tail clamp, doc-drift fix, harness env_remove).
+- **Tier-0 (issue 557):** zero cargo. Verified via `bash -n` + `shellcheck -S warning` (7 shell files), `cargo fmt --all --check` (parses new + updated Rust harnesses), the fake-sshpass replica (all 6 sites emit `-EncodedCommand`, payloads decode byte-identical to the intended PS), `ps_clamp_numeric` behaviour, and `pytest tests/python/test_rig_health_audit_encoded_1259.py` (4 passed incl. clamp) + the existing rig-health steprate/cadence/status tests (no regression). The Rust harnesses type-check + run first on CI.
+- **Playbook:** `.claude/rules/mv-reverify-escalate.md` extended (the shared `ps-encoded.sh` doctrine + clamp + KEEP list + fake-sshpass test recipe; `paths:` now covers ps-encoded.sh + the new harness).
+- **Lane scope:** issue 1259 closed by the PR the supervisor opens at integration. No push/PR/merge/version-bump here — supervisor integrates the branch; durability backup on `refs/autopilot-wip/worktree-agent-a3ede6043cbaf98d7`.
+
+## issue 1258 layer 2 — byte-safe received= extraction (worktree lane, 2026-09-01)
+
+- **Root cause (comment 5497028679):** layer-1's `-EncodedCommand` fix (8642a2b5d) made `mv_reverify_probe_raw` reach the strih OBS log fine, but PowerShell 5.1's `gc` (no `-Encoding`) reads the UTF-8 log as ANSI and re-encodes on output — a non-ASCII glyph anywhere in the tail (the `≈` in `(≈F frames @ …)`) comes back as invalid-UTF-8 bytes. In a UTF-8 locale, GNU grep flags stdin BINARY (empty stdout) and sed's trailing `.*` leaves line-tail garbage after the digits — either way `[4c/8]` reads every source as "none" → UNKNOWN, live-verified on run 1651316094 (`prev=none curr=none`).
+- **RED** `4868c19f4` (`tests/harness_received_tap_byte_safety_1258.rs`, an injected-invalid-byte fixture written as literal Rust bytes, fed to the sourced functions via a temp file) → **GREEN** `e7b830c6b` (`LC_ALL=C grep -a` + `LC_ALL=C sed` on every extraction stage).
+- **Fixed 4 sites:** `mv_reverify_extract_received` (mv-reverify-escalate.sh — the shared extractor the `[4c/8]` gate itself + `mv_reverify_probe_received` both reuse), `probe_received` (frozen-input-alert-watchdog.sh), `extract_sample` (cadence-alert-watchdog.sh), and defensively `frozen_input_cambox_sources` (frozen-input-health.sh — could not reproduce an independent Tier-0 RED for its `-o`+piped-stdin shape, though the identical byte trips GNU grep's binary detection via a direct file argument; fixed identically per "the parser must stay byte-safe regardless").
+- **Tier-0 (issue 557):** zero cargo compile. `bash -n` + `shellcheck -S warning` clean on all 4 shell files; `cargo fmt --all --check` clean (parses the new Rust test file). RED/GREEN proven by sourcing the real functions over the exact fixture bytes directly in bash (matches what the Rust harness does). Re-ran 3 pre-existing sibling test fixtures (harness_mv_reverify_escalate_1093, harness_frozen_input_enum_1069, harness_frozen_cam_received_1233) against the fixed code by hand — no regression.
+- **Playbook:** `.claude/rules/mv-reverify-escalate.md` new "Layer 2" section (root cause + fix + the 4 sites + the deliberate scope boundary); short cross-reference notes added to `.claude/rules/frozen-cam-received-gate.md`, `.claude/rules/frozen-input-watchdog.md`, `.claude/rules/cadence-watchdog.md`.
+- **Filed issue 1262** (Scope-gate: cross-cutting) — the SAME hazard class is theoretically present in 3 other `ps_encoded_command` consumers parsing DIFFERENT audit-line families (mv-fps-alert-watchdog.sh's `multiview-audit:`, ndi-halving-watchdog.sh's `recv-timing`, asio-starve-alert-watchdog.sh's `asrc:`) — unverified, out of #1258's `received=`-scoped remit, asks someone to verify + apply the identical fix if warranted.
+- **Lane scope:** #1258 stays OPEN — its closure evidence is a LIVE `[4c/8]` ALIVE pass the supervisor collects at integration (this lane does not push/PR/merge/version-bump/close). Durability backup on `refs/autopilot-wip/worktree-agent-a3dd8f7babd391e1b`.

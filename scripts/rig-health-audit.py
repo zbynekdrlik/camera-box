@@ -387,21 +387,50 @@ def check_imag() -> None:
     emit(verdict, "imag", detail)
 
 
-def windows_obs_log_tail(ip: str, tail: int = 500) -> str | None:
+def _ps_encoded(ps: str) -> str:
+    # #1259: base64 UTF-16LE encode a PowerShell command for `-EncodedCommand`. strih/stream run
+    # Win32-OpenSSH whose default shell is cmd.exe; a naive `-Command "...| Sort-Object ..."` leaks
+    # its `|` pipes (and `$`/`;`/`()`) to cmd.exe BEFORE PowerShell parses them -> a mangled/blind
+    # read (the issue-1258 root cause). The base64 blob is pure ASCII with no shell-special char, so
+    # cmd.exe cannot touch it. Python cannot source scripts/lib/ps-encoded.sh, so this mirrors it
+    # (same base64 UTF-16LE encoding as ps_encoded_command / win_ssh_ps_encoded_command).
+    return base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+
+
+def _windows_obs_log_tail_cmd(tail: int = 500) -> str:
+    # numeric-only tail -> a caller value can never inject shell/PS metachars into the encoded payload.
+    # Reject negatives too (a `-Tail -5` is an invalid PowerShell arg), matching the bash `*[!0-9]*`
+    # ps_clamp_numeric guard (#1259 review).
+    try:
+        n = int(tail)
+    except (TypeError, ValueError):
+        n = 500
+    if n < 0:
+        n = 500
     # HEAD first (the launch-time audio-buffering burst lives in the first ~200 lines -- a
     # tail-only read would report a false-clean audio_buf=0 on a long session), then the tail
     # (the live genlock-fifo audit lines).
-    cmd = ("powershell -NoProfile -Command \"$l = Get-ChildItem $env:APPDATA\\obs-studio\\logs\\*.txt | "
-           "Sort-Object LastWriteTime -Descending | Select-Object -First 1; "
-           "Get-Content $l.FullName -TotalCount 600; "
-           f"Get-Content $l.FullName -Tail {tail}\"")
-    return ssh(ip, cmd, user="newlevel", timeout=30)
+    ps = ("$l = Get-ChildItem $env:APPDATA\\obs-studio\\logs\\*.txt | "
+          "Sort-Object LastWriteTime -Descending | Select-Object -First 1; "
+          "Get-Content $l.FullName -TotalCount 600; "
+          f"Get-Content $l.FullName -Tail {n}")
+    return f"powershell -NoProfile -NonInteractive -EncodedCommand {_ps_encoded(ps)}"
+
+
+def _windows_obs_count_cmd() -> str:
+    # #1259: -EncodedCommand (cmd.exe-proof) -- the `()` grouping + nested quotes in the naive form
+    # are cmd.exe metacharacters (see _ps_encoded).
+    return "powershell -NoProfile -NonInteractive -EncodedCommand " + _ps_encoded(
+        "(Get-Process obs64 -ErrorAction SilentlyContinue).Count")
+
+
+def windows_obs_log_tail(ip: str, tail: int = 500) -> str | None:
+    return ssh(ip, _windows_obs_log_tail_cmd(tail), user="newlevel", timeout=30)
 
 
 def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: float,
                       expect_latency: bool, check_camera_cadence: bool = False) -> None:
-    procs = ssh(ip, "powershell -NoProfile -Command \"(Get-Process obs64 -ErrorAction SilentlyContinue).Count\"",
-                user="newlevel", timeout=20)
+    procs = ssh(ip, _windows_obs_count_cmd(), user="newlevel", timeout=20)
     if procs is None:
         emit("FAIL", name, "unreachable over ssh")
         return

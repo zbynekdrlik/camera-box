@@ -28,6 +28,13 @@
 # block the whole fleet, exactly the mv-fps-health/watchdog fail-safe (the live issue-1083 watchdog
 # owns a sustained collapse either way).
 #
+# PER-BOX TERM (issue 1263): a CONFIRMED collapse is routed per box by
+# mv_fps_preflight_term_is_report_only. The STRIH term is REPORT-ONLY while issue 1260 is open (its
+# 4K divisor-1 MV floor pre-dates the 7-camera fleet, so a healthy strih idles below it) -- a loud
+# `WARNING (issue 1260)` naming the measured line, never an abort. The IMAG term stays STRICT (a
+# confirmed imag collapse still aborts). Walk-back tracked on issue 1263: flip strih back to strict
+# when issue 1260 lands.
+#
 # Reading an OBS LOG FILE over ssh is a session-agnostic FILE read, allowed for the headless dev1 E2E
 # gate (win-ssh-vs-mcp Context B) -- never a GUI atom over ssh.
 #
@@ -36,10 +43,13 @@
 _MVFPS_PREFLIGHT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/mv-fps-health.sh
 . "$_MVFPS_PREFLIGHT_LIB_DIR/mv-fps-health.sh"
+# shellcheck source=scripts/lib/ps-encoded.sh
+. "$_MVFPS_PREFLIGHT_LIB_DIR/ps-encoded.sh"
 
 # mv_fps_preflight_read_cmd <os> <log_tail> -> stdout: a REMOTE command string that prints the newest
 #   OBS log's tail (the caller greps `multiview-audit:` out of it). linux: a bash one-liner tailing the
-#   newest ~/.config/obs-studio/logs/*.txt; win: a single NON-NESTED `powershell -Command` tailing the
+#   newest ~/.config/obs-studio/logs/*.txt; win: a single `powershell -EncodedCommand` (cmd.exe-proof,
+#   issue 1259) tailing the
 #   newest %APPDATA%\obs-studio\logs\*.txt. Mirrors mv-fps-alert-watchdog.sh's probe_mv_log read shape
 #   (without its MVFPS_LOGID identity line -- the synchronous preflight tracks no autostart reset).
 #   Unknown os -> return 1 (the caller then treats the box as unreadable / UNKNOWN).
@@ -50,11 +60,18 @@ mv_fps_preflight_read_cmd() {
       printf '%s' 'F=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); [ -n "$F" ] && tail -n '"$tail_n"' "$F"'
       ;;
     win)
-      # One flat ssh + a single (non-nested) powershell (win-ssh-vs-mcp / rig-state-inspection). Every
-      # `$` powershell must see is escaped (`\$`) so the dev1 bash embedding this string does not
-      # expand it; `$env:APPDATA` has no spaces so no inner double-quotes are needed (no nesting trap);
-      # `$tail_n` is a dev1 value spliced literally.
-      printf '%s' "powershell -NoProfile -Command \"\$f=(gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1); if(\$f){ gc \$f.FullName -Tail $tail_n }\""
+      # #1259: -EncodedCommand (base64 UTF-16LE), NEVER the naive -Command "$f=(…| sort …); if(…){…}".
+      # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|`/`;`/`{}` -> a mangled/blind read
+      # (the issue-1258 root cause). ps_encoded_command (ps-encoded.sh) encodes the whole program to a
+      # pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> the caller treats the box
+      # as UNKNOWN (report-only), never an abort. Every `$` powershell must see is `\$`-escaped so dev1
+      # bash keeps it literal; $tail_n is numeric-clamped so it can never inject shell/PS metachars into
+      # the encoded payload (the #1258 guard).
+      local _tn="$tail_n"
+      case "$_tn" in '' | *[!0-9]*) _tn=2000 ;; esac
+      local _enc
+      _enc="$(ps_encoded_command "\$f=(gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1); if(\$f){ gc \$f.FullName -Tail $_tn }")"
+      printf '%s' "powershell -NoProfile -NonInteractive -EncodedCommand $_enc"
       ;;
     *)
       return 1
@@ -76,14 +93,36 @@ mv_fps_preflight_probe() {
     raw="$(timeout "${MV_FPS_PREFLIGHT_SSH_TIMEOUT:-20}" sshpass -p "$pw" \
       ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "${user}@${ip}" "$rcmd" 2>/dev/null || true)"
   fi
-  printf '%s\n' "$raw" | tr -d '\r' | grep -F 'multiview-audit:' 2>/dev/null || true
+  # #1262: byte-safe extraction (mv_fps_extract_audit_lines, mv-fps-health.sh, sourced above) --
+  # see its own doc comment for the transport-chunk-glue hazard this guards against.
+  printf '%s\n' "$raw" | tr -d '\r' | mv_fps_extract_audit_lines
+}
+
+# mv_fps_preflight_term_is_report_only <box_name> -> exit 0 if this box's CONFIRMED-collapse term is
+#   REPORT-ONLY (a loud WARN, never an abort); exit 1 if it is STRICT (a confirmed collapse aborts).
+#   issue 1260 / issue 1263: the STRIH term is REPORT-ONLY while issue 1260 is open -- the strih 4K
+#   divisor-1 MV floor (28, the issue-776 canvas/2-tol retarget) pre-dates the 2026-08-28 seven-camera
+#   fleet reactivation, so a healthy-core-loop strih now idles the MV below floor and this term would
+#   refuse every run (three aborts the day the gate first actually decided, issue 1261). issue 1263 is
+#   the walk-back tracker: flip strih back to STRICT in the PR that closes issue 1260 (perf fixed, or
+#   the floor honestly recalibrated for the 7-cam era). Every OTHER box -- imag -- stays STRICT (imag
+#   holds its floor reliably; its render-health preflight gates it elsewhere too). Fail-safe: an
+#   unlisted box defaults to STRICT (a new box is never silently report-only).
+mv_fps_preflight_term_is_report_only() {
+  case "${1:-}" in
+    strih) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # mv_fps_preflight_assert <gate_bin> <box>...   (box = "name|ip|os|user|pw")
 #   For each box: probe the newest OBS log's multiview-audit lines, run <gate_bin> over them, map exit
 #   via mv_fps_verdict. PASS -> ok. UNKNOWN -> report-only NOTE (never abort). BELOW -> a grace re-read
-#   (one MV_FPS_PREFLIGHT_REPROBE_SLEEP wait) -> if STILL BELOW, record a CONFIRMED collapse. After all
-#   boxes, if any confirmed collapse -> print a loud ERROR naming each box+monitor and `exit 1`.
+#   (one MV_FPS_PREFLIGHT_REPROBE_SLEEP wait) -> if STILL BELOW, a CONFIRMED collapse. The confirmed
+#   collapse is then routed per box by mv_fps_preflight_term_is_report_only: a REPORT-ONLY box (strih,
+#   while issue 1260 is open) prints a loud `WARNING (issue 1260)` and does NOT abort; a STRICT box
+#   (imag / any other) is recorded in $collapsed. After all boxes, if any STRICT confirmed collapse ->
+#   print a loud ERROR naming each box+monitor and `exit 1`.
 #   Call it as a PLAIN statement (never in a pipeline/$()) so its `exit 1` propagates to the harness.
 mv_fps_preflight_assert() {
   local gate_bin="$1"; shift
@@ -131,8 +170,17 @@ mv_fps_preflight_assert() {
           # the extraction here (structural reuse); `|| detail=…` keeps it `-e`-safe even if the gate
           # ever exited 1 without a FAIL line (a contract violation the real gate never commits).
           detail="$(mv_fps_alert_detail "$name" "$out")" || detail="$name MV render collapsed below floor"
-          collapsed="${collapsed}${detail}
+          if mv_fps_preflight_term_is_report_only "$name"; then
+            # issue 1260: the strih 4K divisor-1 MV floor (28) pre-dates the 2026-08-28 seven-camera
+            # fleet reactivation -- a healthy-core-loop strih now idles the MV below floor, so this
+            # term deterministically refuses every run. REPORT-ONLY while issue 1260 is open
+            # (walk-back tracked on issue 1263): WARN loud, never abort. The imag term stays STRICT
+            # (falls through to $collapsed below). Same report-only-decoupling seam as issue 914/915.
+            echo "    WARNING (issue 1260): $name MV render below floor -- REPORT-ONLY while issue 1260 is open: $detail" >&2
+          else
+            collapsed="${collapsed}${detail}
 "
+          fi
         else
           echo "    ok: [4d1/8] MV-fps preflight — $name recovered on grace re-read (transient), proceeding" >&2
         fi
