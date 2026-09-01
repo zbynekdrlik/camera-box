@@ -11,6 +11,7 @@
 //!   * `scripts/cadence-alert-watchdog.sh` `fetch_box_log`;
 //!   * `scripts/mv-fps-alert-watchdog.sh` `probe_mv_log` (win branch);
 //!   * `scripts/lib/mv-fps-preflight.sh` `mv_fps_preflight_read_cmd` (win branch, LIVE `[4d1/8]`).
+//!
 //! (The 2 Python sites in scripts/rig-health-audit.py are covered by
 //! tests/python/test_rig_health_audit_encoded_1259.py — Python cannot source a bash lib.)
 //!
