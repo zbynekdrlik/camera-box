@@ -9,17 +9,32 @@
 	budget (obs-display-budget.h, #278/#293) and collapsing the MV to 30/(K+1)=7.5 fps
 	while the program render stayed healthy (issue 1260).
 
+	This is an IDIOMATIC per-tick render cache, not a novel one (review 🔵-6): stock
+	OBS filters that go through obs_source_process_filter_begin already cache their
+	target render per tick — filter_texrender is gs_texrender_reset ONCE per tick in
+	obs_source_video_tick (obs-source.c), and gs_texrender_begin early-returns on an
+	already-rendered texrender (texture-render.c). The #404 overlay burn filter drives
+	its OWN texrender and called gs_texrender_reset every DRAW, opting out of that
+	per-tick cache; this restores the per-tick semantics for it. (DistroAV's aux
+	ndi_filter already uses the same shape via its own `f->rendered` flag.)
+
 	This state machine does the expensive prep + advances the burn frame_id EXACTLY
-	ONCE per video tick (the first draw — always the program, since output_frames()
-	runs before render_displays()), and lets the later within-tick draws REUSE the
-	cached base texrender + QR texture (a cheap sprite blit). burn_filter_videotick()
-	clears prepared_this_tick once per tick; the first render sets it.
+	ONCE per video tick (the first draw — NORMALLY the program, since output_frames()
+	runs before render_displays(); the DistroAV preview NDI output is an earlier
+	main-render callback so a program+preview cam can prep in the preview draw, a
+	bounded low-ms gen_ts bias only — see the filter's tick_cache field 🟡-1 note),
+	and lets the later within-tick draws REUSE the cached base texrender + QR texture
+	(a cheap sprite blit). burn_filter_videotick() clears prepared_this_tick once per
+	tick (a benign plain-bool race, 🔵-2 in the filter); the first render sets it.
 
 	Tier-0 authority: src/burn_tick_cache.rs::BurnTickCache (byte-identical results,
-	proven by the C-parity harness in tests/burn_tick_cache_parity.rs). Kept in its
-	own header (no libobs deps — only <stdbool.h>) so the exact decision the shipped
-	filter uses is compiled + unit-checked from a standalone harness, not buried in
-	video_render where CI is its only compile.
+	proven by the C-parity harness in tests/burn_tick_cache_parity.rs). That Rust
+	module has no PRODUCTION consumer (review 🔵-3) — it exists solely as the parity
+	authority + the local RED->GREEN Tier-0 seam the supervisor asked for; the parity
+	test compiles THESE shipped bytes, so the mirror can never silently drift. Kept in
+	its own header (no libobs deps — only <stdbool.h>) so the exact decision the
+	shipped filter uses is compiled + unit-checked from a standalone harness, not
+	buried in video_render where CI is its only compile.
 ******************************************************************************/
 
 #pragma once
@@ -28,16 +43,11 @@
 
 // Per-filter-instance within-tick prepare/reuse state. bzalloc'd with the filter, so all-zero
 // (prepared_this_tick == false) is the correct fresh state: the first render of the tick prepares.
+// (review 🔵-3: no separate _init helper — bzalloc IS the constructor; the Rust authority's new()
+// is the mirror of that all-zero state.)
 struct burn_tick_cache {
 	bool prepared_this_tick;
 };
-
-// A fresh cache: nothing prepared, so the first render prepares. (Redundant after bzalloc — the
-// filter never calls this — but kept for parity with the Rust authority's BurnTickCache::new().)
-static inline void burn_tick_cache_init(struct burn_tick_cache *c)
-{
-	c->prepared_this_tick = false;
-}
 
 // Called once per video tick (the filter's video_tick): invalidate the cached composite so the
 // next render re-preps + re-stamps the burn for the new frame.

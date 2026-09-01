@@ -8,9 +8,11 @@
 //! collapsed the MV to `30/(K+1) = 7.5 fps` (issue 1260) while the program render stayed healthy.
 //!
 //! This models the fix: do the expensive prep + advance the burn `frame_id` EXACTLY ONCE per video
-//! tick (the first draw — always the program, since `output_frames()` runs before
-//! `render_displays()`), and let the later within-tick draws REUSE the cached base texrender + QR
-//! texture (a cheap sprite blit). Cadence safety (verified against the verdict contract, issue
+//! tick (the first draw — NORMALLY the program, since `output_frames()` runs before
+//! `render_displays()`; DistroAV's preview NDI output is an earlier main-render callback so a
+//! program+preview cam can prep in the preview draw — pixels + frame_id unchanged, only a bounded
+//! low-ms `gen_ts` bias, review 🟡-1), and let the later within-tick draws REUSE the cached base
+//! texrender + QR texture (a cheap sprite blit). Cadence safety (verified against the verdict contract, issue
 //! 1260): strih/stream burn contiguity is `node_render_step == 1` gap-ignore (forward gaps are
 //! unconditionally ignored, so a smaller per-recorded-frame step is inert), imag's step is
 //! auto-derived (`imag_tick_gate::calibrate_burn_step`) and its per-frame content gate is
@@ -22,6 +24,11 @@
 //! proven by the C-parity harness in `tests/burn_tick_cache_parity.rs`). Pure `std` so it
 //! unit-tests on default features (Tier-0) via the standalone-rustc recipe
 //! (`vendored-libobs-change-safety.md`).
+//!
+//! This module has NO production Rust consumer (review 🔵-3) — the filter runs the C header, not
+//! this. It exists solely as (a) the parity AUTHORITY the C mirror is diffed against and (b) the
+//! local RED→GREEN Tier-0 seam the supervisor asked for. The parity test compiles the SHIPPED C
+//! bytes and drives them through the same sequences as this module, so the two can never drift.
 
 /// Per-filter-instance within-tick prepare/reuse state. `prepared_this_tick` is cleared once per
 /// video tick (the filter's `video_tick` callback) and set by the first render of that tick, so

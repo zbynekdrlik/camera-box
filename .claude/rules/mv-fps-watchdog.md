@@ -163,10 +163,19 @@ callback (`burn_filter_videotick`) clears a per-instance `struct burn_tick_cache
 `output_frames()` runs before `render_displays()`) does the full prep (base `gs_texrender` +
 `burn_draw_qr` which advances `frame_id`/`gen_ts` + `gs_texture_set_image`), and the later
 within-tick draws (Studio-Mode preview, Multiview cells) REUSE the cached `f->texrender` +
-`f->qr_texture` via the always-run sprite blit. Drops the MV per-source burn cost to a sprite blit
-(→ MV back under budget) AND stamps the recorded `frame_id` once per tick (fixes the pollution). The
-PROGRAM draw path is byte-identical to before (it is the prep draw). A prep failure calls
-`burn_tick_cache_abort_prepare` to re-arm the next within-tick draw (never reuse a stale composite).
+`f->qr_texture` via the always-run sprite blit — an idiomatic per-tick render cache (stock filters
+via `obs_source_process_filter_begin` already cache their target render per tick; the #404 overlay
+burn opted out by resetting its texrender every draw). Stamps the recorded `frame_id` once per tick
+(fixes the pollution). A prep failure calls `burn_tick_cache_abort_prepare` to re-arm the next
+within-tick draw (never reuse a stale composite). **Two honesty caveats the review flagged (🟡):**
+(1) the first draw of a tick is NORMALLY the program but NOT structurally always — DistroAV's preview
+NDI output is an earlier `obs_add_main_render_callback`, so a program+preview cam preps in the preview
+draw and the recorded program frame reuses it: pixels + `frame_id` identical, burn present, NO verdict
+fault, only a bounded low-ms downward `gen_ts` bias on `latency.cam_strih`. (2) Efficacy is PARTIAL —
+only the MV cells of cams ALREADY drawn on program/preview become blits; a MV-ONLY cam's first draw is
+the MV projector itself, so it still preps there. Whether the reduced burn work clears the 30 ms budget
+is UNPROVEN, so the rig validation below is mandatory and a residual throttle is possible (a follow-up
+could decouple the prep from the draw or cut the base 4K composite cost).
 
 **Verdict-cadence safety (verified before touching the cadence — the load-bearing check).** Reducing
 `frame_id` from once-per-DRAW (recorded step ~3, `burn_render_step:3` in old fixtures) to once-per-TICK

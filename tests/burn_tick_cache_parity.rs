@@ -26,20 +26,6 @@ fn burn_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/distroav/src")
 }
 
-fn workdir(tag: &str) -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let d = std::env::temp_dir().join(format!(
-        "burn_tick_cache_1260_{tag}_{}_{}",
-        std::process::id(),
-        stamp
-    ));
-    std::fs::create_dir_all(&d).expect("create temp workdir");
-    d
-}
-
 fn compile(src: &PathBuf, bin: &PathBuf) {
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let out = Command::new(&cc)
@@ -115,9 +101,11 @@ fn c_burn_tick_cache_matches_rust_authority_1260() {
         header.display()
     );
 
-    let work = workdir("parity");
-    let src = work.join("harness.c");
-    let bin = work.join("harness");
+    // tempfile::tempdir() auto-removes on drop (review 🔵-4, ci-testing-gotchas #975); keep `work`
+    // bound for the whole test so the compiled harness stays on disk until after it runs.
+    let work = tempfile::tempdir().expect("create temp workdir");
+    let src = work.path().join("harness.c");
+    let bin = work.path().join("harness");
     std::fs::write(&src, HARNESS).expect("write harness");
     compile(&src, &bin);
 

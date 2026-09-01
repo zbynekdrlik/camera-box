@@ -87,7 +87,12 @@ every run (~50–53% of burn IDs "missing"), and that is a burn-CADENCE / metric
 mismatch on the swapped imag box, NOT frame loss and NOT the observer effect.** On the new box the
 imag burn counter steps ~3 IDs/frame (e.g. span 843742→901990 = 58248 over 19513 expected ≈
 2.985/frame) and the "missing" IDs follow a clean stride-6-dominant pattern (`imag_burn_present_ok`
-true, `burn_unreadable` 0) — random loss would not. The optical-beat term is also not stably green
+true, `burn_unreadable` 0) — random loss would not. **#1260 (post-deploy) CHANGES this ~3 IDs/frame
+baseline:** the DistroAV burn now preps once per video tick, so the imag burn steps ~1/frame (the
+"~3 IDs/frame, stride-6 missing" characterization above is PRE-#1260); `calibrate_burn_step` derives
+the step from the data so `imag_burn_present_ok` stays correct, but issue 1144's healthy-baseline
+characterization (precondition 2 below) MUST be redone on a clean run AFTER the #1260 within-tick
+cache is live — do not carry the ~3/frame numbers forward. The optical-beat term is also not stably green
 (`imag_optical_beat_pass` True in only 1/3; `imag_optical_beat_net_zero` False in all 3).
 
 Consequence for whoever picks up the flip: the healthy CONTENT baseline for the new box has never
