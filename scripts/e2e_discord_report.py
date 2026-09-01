@@ -946,6 +946,12 @@ def _report_only_tripped(verdict):
         cams = _upper_join(oba.get("absent_cams") or [])
         names.append(f"chýbajúci vlastný burn kamery ({cams})" if cams
                      else "chýbajúci vlastný burn kamery")
+    # issue 1196 review-hardening — REPORT-ONLY: the projection-tap tear gate's aux signal is not
+    # operable (aux decoding collapsed), so the LIVE gate cannot fire and is silently blind. Surface
+    # it so the blind spot is visible; it never gates (a genuinely aux-free run is not a failure).
+    tear = _g(verdict, "all_cambox_continuity", "tear", default=None)
+    if isinstance(tear, dict) and tear.get("signal_operable") is False:
+        names.append("tear-gate slepá škvrna (aux nedekóduje)")
     return names
 
 

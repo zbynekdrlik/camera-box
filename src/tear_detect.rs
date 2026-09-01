@@ -1,4 +1,5 @@
-//! Projection-tap scanout-TEAR detector (issue 781) — PURE, report-only.
+//! Projection-tap scanout-TEAR detector (issue 781/1196) — PURE, LIVE gate (`gates_overall_pass()`
+//! returns `true` since issue 1196; one-line disarmable).
 //!
 //! ## What it measures
 //!
@@ -23,7 +24,7 @@
 //! ## Why the PRIMARY band alone is blind (the v1 history — cured by the v2 aux pair below)
 //!
 //! Measured across 5 real `stream-partial-*.json` (~48 000 frames) AND re-confirmed on the
-//! known-torn run 1700989544 (`max primary span = 1` over all 18 613 frames), the per-frame PRIMARY
+//! known-torn run 1700989544 (`max primary span = 1` on every one of the 9,883 stream-partial frames), the per-frame PRIMARY
 //! optical span is exclusively {0,1} and the primary-QR count per frame never exceeds 2 — the "two
 //! generations in one frame" signal NEVER fires in the primary band, even under a REAL induced tear.
 //! The reason is structural (confirmed by reading real captured frames): both dual-QR halves sit in
@@ -95,16 +96,19 @@
 //!
 //! [`gates_overall_pass`] is now `true`: the known-torn calibration run 1700989544 (imag projector
 //! vsync disabled off-air) made the signal [`TearSignalViability::Observed`] on the CAM2 projection
-//! leg and [`TEAR_FRACTION_CEILING`] (0.005) separates the induced tear from the green background.
-//! [`tear_gate_pass`] fails an `Observed` window over the ceiling; the machine-checked flip-readiness
-//! [`window_promotable`] / [`signal_promotable`] (viability `Observed` + single-tile
-//! `multi_path_suspect_fraction <= MULTI_PATH_SUSPECT_CEILING`, mirroring `dup_cadence::signal_promotable`,
-//! `verdict-gate-seam-calibration.md` §12) is retained report-only observability.
+//! leg and the two-term [`tear_gate_pass`] separates the induced tear from the green background. A
+//! window FAILS only if it is `Observed` AND single-tile (`multi_path_suspect_fraction <=
+//! MULTI_PATH_SUSPECT_CEILING` — a MULTI-TILE window is UNSCOREABLE and must never false-fail) AND
+//! over BOTH the rate [`TEAR_FRACTION_CEILING`] (0.005) and the count [`TEAR_FRAME_COUNT_FLOOR`] (6,
+//! since the green background is a 1–3-frame COUNT independent of window length). The machine-checked
+//! flip-readiness [`window_promotable`] / [`signal_promotable`] (viability `Observed` + single-tile,
+//! mirroring `dup_cadence::signal_promotable`, `verdict-gate-seam-calibration.md` §12) and the
+//! report-only blind-spot signal [`signal_operable`] ([`AUX_ANY_OPERABLE_FLOOR`]) are observability.
 //!
 //! **The operative signal is the AUX SINGLE-MARK CROSS-BAND, not the primary band (per-frame data
 //! correction, 2026-09-01, mining the real rqrr decode of run 1700989544 — this SUPERSEDES an earlier
 //! grading that read it as the primary band).** The PRIMARY dual-QR span is ALWAYS ≤ 1 (`max primary
-//! span = 1` over all 18 613 frames) — the primary band is structurally blind to a tear, exactly as
+//! span = 1` on every one of the 9,883 stream-partial frames) — the primary band is structurally blind to a tear, exactly as
 //! the blindness paragraph above says. EVERY one of the 241 torn frames is `primary[X, X+1]` (span 1)
 //! + exactly ONE aux mark `[Y > X+1]` from a LATER generation: the bottom aux band, scanned out later,
 //! captures the newer generation during the un-vsynced tear (union span 2–7). That is the v2 aux
@@ -112,9 +116,12 @@
 //! projection leg, and dropping it from the union would make the gate blind (0 torn on CAM2).
 //!
 //! **`aux_decode_fraction` (BOTH marks) = 0.0 on the CAM2 projection leg is a MISLEADING metric, NOT
-//! a dead aux.** It counts frames with `aux.len() >= 2`; the ~210px marks rarely BOTH survive imag's
-//! projected-then-captured scanout, so it reads 0.0 there (it is ~0.97–0.99 on the SPLITTER legs,
-//! which capture more directly). But the operative cross-band tear needs only ONE aux mark, and
+//! a dead aux.** It counts frames with `aux.len() >= 2`; on the CAM2 projection window imag's OWN
+//! burn (911003, rendered by imag's OBS projector, which cam2 films) OCCLUDES the LEFT (even) aux —
+//! present on ~99% of those frames, so only the RIGHT (odd) aux decodes and the both-mark fraction
+//! reads 0.0 there (it is ~0.97–0.99 on the SPLITTER legs, which do not carry imag's burn). This is
+//! a fixable GEOMETRY defect (the LEFT aux sits in imag's burn zone — issue 1266 relocates it), not
+//! a lossy-chain limitation. But the operative cross-band tear needs only ONE aux mark, and
 //! [`TearStats::aux_any_decode_fraction`] (≥ 1 mark) reads ~0.97–0.999 on the CAM2 windows — the aux
 //! is fully operative there. So an aux-coverage FLOOR on `aux_decode_fraction` was NEVER the right
 //! promotion gate (it would have permanently blocked the projection leg); `aux_decode_fraction` stays
@@ -133,7 +140,7 @@
 //! Mirrors the crate-root `gates_overall_pass()` seam pattern shared by `presentation_cadence` /
 //! `optical_floor` / `e2e_latency_gate` / `imag_leg_gate`: PURE (default features, Tier-0
 //! unit-testable); the probe-gated `recording-verdict.rs` consumer only feeds it the per-frame
-//! optical ids and folds the report-only verdict.
+//! optical ids and folds the LIVE verdict into `overall_pass`.
 
 use serde::Serialize;
 
@@ -152,10 +159,33 @@ pub const VERNIER_MAX_SPREAD: u32 = 1;
 /// (3 torn frames / 846, run 1801923068 CAM2), while the known-torn calibration run 1700989544's
 /// CAM2 projection windows read **0.018846** (16/849) and **0.237308** (201/847). `0.005` sits
 /// ABOVE the green background (ZERO false positives on the 37-run history) and 3.77x BELOW the
-/// smallest induced-tear window — a per-window RATE (the induced tear produces 16–201 torn frames,
-/// far above the ≤3-frame green background, so no run-wide COUNT term is needed). One-line
+/// smallest induced-tear window. This is the RATE term of a TWO-TERM gate — the green background is
+/// a COUNT phenomenon (1–3 aux single-mark cross-band frames regardless of window length), so the
+/// rate alone is thin (a 4–5 frame green window would read ~0.005–0.006 on a short window); the
+/// companion [`TEAR_FRAME_COUNT_FLOOR`] requires the window ALSO carry enough torn frames before it
+/// can fail (`verdict-gate-seam-calibration.md` §4, count-phenomenon → two terms). One-line
 /// re-tighten/relax: change this value (the gate mechanism stays; `CAMERA_BOX_*` is not wired).
 pub const TEAR_FRACTION_CEILING: f64 = 0.005;
+
+/// LIVE per-window tear-COUNT floor — the second term of the two-term [`tear_gate_pass`] gate
+/// (issue 1196, review-hardening). An `Observed` single-tile window fails ONLY if it exceeds BOTH
+/// [`TEAR_FRACTION_CEILING`] (rate) AND this many torn frames (count). The green Observed background
+/// is a COUNT of 1–3 aux single-mark cross-band frames (occasional one-gen-off reads on a healthy
+/// run) INDEPENDENT of window length, so a rate-only gate is thin (a 4–5 frame spike on a short
+/// window false-fails); `6` sits 2x above the green max (3) and 2.7x below the smallest induced-tear
+/// window (16), and also stops a tiny-denominator window (a few torn frames out of few decodable)
+/// from false-failing on a high rate. Change this value to re-tighten/relax the count term.
+pub const TEAR_FRAME_COUNT_FLOOR: u32 = 6;
+
+/// issue 1196 review-hardening — the minimum frame-weighted [`TearStats::aux_any_decode_fraction`]
+/// (≥ 1 aux mark) below which the tear signal is considered NON-OPERABLE. The LIVE gate's operative
+/// signal on the CAM2 projection leg is the aux SINGLE-MARK cross-band; since imag's burn already
+/// occludes the LEFT aux (issue 1266), the gate rides on the RIGHT aux alone — if THAT is ever also
+/// occluded (a new overlay, a projector geometry change), no tear can be Observed and the gate would
+/// silently pass forever (the issue-1101 blind-signal trap). [`signal_operable`] surfaces that as a
+/// report-only observability signal so the blind spot is visible, not silent. `0.5` is well below the
+/// live ~0.97–0.999 any-mark coverage and above zero. Report-only today; does NOT gate.
+pub const AUX_ANY_OPERABLE_FLOOR: f64 = 0.5;
 
 /// issue 1196 — the highest [`TearStats::multi_path_suspect_fraction`] a window may carry and still
 /// be trusted for tear scoring (a promotion guard, per `verdict-gate-seam-calibration.md` §12 and
@@ -164,9 +194,12 @@ pub const TEAR_FRACTION_CEILING: f64 = 0.005;
 /// skew, not a scanout tear, and the window is UNSCOREABLE without pixel positions — it must never
 /// be promoted. Calibrated from the real distribution: across 90 green windows the suspect fraction
 /// is EXACTLY 0.0 (single-tile content), while a multi-tile window reads ~0.998 — a ~10x margin at
-/// this ceiling passes every green run and blocks any genuinely multi-tile window. Used only by the
-/// promotion property ([`window_promotable`] / [`signal_promotable`]); it does NOT gate today
-/// ([`gates_overall_pass`] returns `false`).
+/// this ceiling passes every green run and blocks any genuinely multi-tile window. Used by BOTH the
+/// promotion property ([`window_promotable`] / [`signal_promotable`]) AND the LIVE [`tear_gate_pass`]
+/// (issue 1196 review-hardening): an above-ceiling (multi-tile, UNSCOREABLE) window can NEVER FAIL
+/// the gate — its few single-source residual frames carry inter-path skew, not a real tear, and
+/// their tiny-denominator rate must not false-fail (the real multi-tile run 1859005342 would
+/// otherwise fail 4/10 windows).
 pub const MULTI_PATH_SUSPECT_CEILING: f64 = 0.10;
 
 /// The optical `frame_id` span within ONE band of a captured frame — `max - min` over the given
@@ -205,8 +238,9 @@ pub fn frame_cluster_count(primary_ids: &[u32]) -> u32 {
 /// monitor. Its union span then measures inter-path temporal SKEW, not a scanout tear — and without
 /// pixel positions the ids cannot be attributed to a tile, so the frame is UNSCORABLE for tear
 /// (excluded from the tear count, surfaced via [`TearStats::multi_path_suspect_fraction`]). The aux
-/// arm keeps the guard symmetric across bands (a review-hardening — inert while `aux_decode_fraction`
-/// is 0 on the real rig, but the physical "one band, at most 2 QRs" premise applies to aux too).
+/// arm keeps the guard symmetric across bands — rarely the deciding factor on the projection leg
+/// (only one aux mark decodes there), but aux marks DO decode (~1 mark/frame on CAM2, both on the
+/// splitter legs), and the physical "one band, at most 2 QRs" premise applies to aux too.
 pub fn is_multi_path_suspect(primary_ids: &[u32], aux_ids: &[u32]) -> bool {
     frame_cluster_count(primary_ids) >= 2 || frame_cluster_count(aux_ids) >= 2
 }
@@ -236,7 +270,8 @@ pub enum TearSignalViability {
     Unproven,
 }
 
-/// Per-window tear report (report-only). Derives only `PartialEq` (not `Eq`) — the fractions are
+/// Per-window tear report (a DATA struct — the LIVE gate decision is [`tear_gate_pass`]). Derives
+/// only `PartialEq` (not `Eq`) — the fractions are
 /// `f64` (the #726 Eq-on-f64 trap).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TearStats {
@@ -262,8 +297,9 @@ pub struct TearStats {
     /// issue 1196 — fraction of ALL in-window frames ([`Self::total_frames`]) that decoded BOTH
     /// aux tick marks (>= 2 aux payloads; the bottom burn-gap pair). Report-only DIAGNOSTIC of the
     /// aux BOTH-mark coverage — high on the splitter legs (~0.97–0.99), but **0.0 on the CAM2
-    /// projection leg** (the ~210px marks rarely BOTH survive imag's projected-then-captured
-    /// scanout). This is NOT a "dead aux" signal and is NOT the operative-signal test — see
+    /// projection leg** (imag's OWN burn 911003 occludes the LEFT aux there — a geometry defect,
+    /// issue 1266 — so only the RIGHT aux decodes). This is NOT a "dead aux" signal and is NOT the
+    /// operative-signal test — see
     /// [`Self::aux_any_decode_fraction`]: a SINGLE aux mark decodes ~0.97–0.999 of CAM2-window
     /// frames, and the operative cross-band tear signal needs only ONE. Do NOT gate promotion on
     /// this both-mark fraction (it would permanently block the projection leg). 0.0 on pre-aux
@@ -407,13 +443,22 @@ pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
     }
 }
 
-/// Per-window LIVE pass. The failure is SCOPED to `Observed` windows (issue 1196): only a window
-/// where the tear signal DEMONSTRABLY fired can fail, and it fails when its `tear_fraction` exceeds
-/// [`TEAR_FRACTION_CEILING`]. An `Unproven` window carries `tear_fraction` 0.0 (no torn frame — the
-/// same for a multi-tile-suspect window, whose inter-path skew is excluded from the tear count) and
-/// always passes, so the `Observed` guard is defensive but makes the intent explicit and future-proof.
+/// Per-window LIVE pass. A window FAILS only when it is a TRUSTWORTHY, single-tile, DEMONSTRABLY-torn
+/// window: `Observed` (the signal fired) AND single-tile (`multi_path_suspect_fraction <=
+/// MULTI_PATH_SUSPECT_CEILING`, so its span is a real tear not inter-path skew) AND over BOTH the
+/// rate ([`TEAR_FRACTION_CEILING`]) and the count ([`TEAR_FRAME_COUNT_FLOOR`]). Everything else passes:
+/// - an `Unproven` window (`tear_fraction` 0.0 — no torn frame);
+/// - a MULTI-TILE window (issue 1196 review-hardening — its few single-source residual frames carry
+///   inter-path skew, and their tiny-denominator rate must not false-fail; without this guard the
+///   real multi-tile run 1859005342 fails 4/10 windows, the #1127 "❌ on a passing run" trap);
+/// - a LOW-COUNT window (`tear_frames < TEAR_FRAME_COUNT_FLOOR` — the green background is 1–3 aux
+///   single-mark cross-band frames regardless of window length; the count term stops a 4–5 frame
+///   green spike, or a tiny-denominator window, from false-failing on rate alone).
 pub fn tear_gate_pass(stats: &TearStats) -> bool {
-    stats.viability != TearSignalViability::Observed || stats.tear_fraction <= TEAR_FRACTION_CEILING
+    stats.viability != TearSignalViability::Observed
+        || stats.multi_path_suspect_fraction > MULTI_PATH_SUSPECT_CEILING
+        || stats.tear_frames < TEAR_FRAME_COUNT_FLOOR
+        || stats.tear_fraction <= TEAR_FRACTION_CEILING
 }
 
 /// Whether the tear gate folds into the fused `overall_pass`. LIVE (`true`) since issue 1196: the
@@ -426,7 +471,8 @@ pub fn gates_overall_pass() -> bool {
     true
 }
 
-/// All windows pass — the run-level report-only fold helper for the probe consumer.
+/// All windows pass — the run-level LIVE fold helper for the probe consumer (folds into
+/// `overall_pass` since issue 1196; each window judged by the two-term [`tear_gate_pass`]).
 pub fn run_tear_gate_pass(stats: &[TearStats]) -> bool {
     stats.iter().all(tear_gate_pass)
 }
@@ -436,18 +482,18 @@ pub fn run_tear_gate_pass(stats: &[TearStats]) -> bool {
 /// promotion-readiness a COMPUTED, machine-checked property, not a guess"). A window is promotable
 /// when the tear signal has DEMONSTRABLY fired on it ([`TearSignalViability::Observed`]) AND the
 /// window is trustworthy single-tile content (`multi_path_suspect_fraction <=
-/// MULTI_PATH_SUSPECT_CEILING`). This is deliberately SIGNAL-AGNOSTIC and fail-safe for the
-/// aux-vs-primary operative-signal question the known-torn run resolves: real data shows the CAM2
-/// projection leg decodes NO aux marks (aux_decode_fraction 0.0 in every recorded window — the
-/// small aux QRs are not in imag's projected scanout), so a CAM2 tear surfaces via the PRIMARY band,
-/// while the splitter legs decode aux but are not the projector path. So `aux_decode_fraction` is a
-/// report-only DIAGNOSTIC, NOT a hard promotion floor — a floor on it would permanently block that
-/// leg. Because promotability REQUIRES `Observed`, if neither the primary nor the aux signal can see
-/// the induced tear the viability stays `Unproven` and the flip stays blocked — the honest
-/// fail-closed behaviour. NOT SUFFICIENT for the flip on its own: a LOW background of `Observed`
+/// MULTI_PATH_SUSPECT_CEILING`). This is deliberately SIGNAL-AGNOSTIC: the known-torn run resolved
+/// that on the CAM2 projection leg the operative signal is the AUX SINGLE-MARK CROSS-BAND (the
+/// primary band's own span is always <= 1 = blind; the both-mark `aux_decode_fraction` reads 0.0
+/// only because imag's burn occludes the LEFT aux — issue 1266 — while the RIGHT aux carries every
+/// tear). `aux_decode_fraction` is thus a report-only DIAGNOSTIC, never a promotion floor (a floor on
+/// it would permanently block the projection leg). Because promotability REQUIRES `Observed`, if the
+/// signal cannot see an induced tear the viability stays `Unproven` and the flip stays blocked — the
+/// honest fail-closed behaviour. NOT SUFFICIENT for the flip on its own: a LOW background of `Observed`
 /// single-tile tears (~0.001–0.004 tear_fraction) exists on green runs on both CAM2 and CAM3, so
-/// `window_promotable` is `true` on ~16 routine windows already; the flip additionally requires a
-/// calibrated [`TEAR_FRACTION_CEILING`] above that background. REPORT-ONLY: promotability does not
+/// `window_promotable` is `true` on ~16 routine windows already; the LIVE gate additionally requires a
+/// calibrated [`TEAR_FRACTION_CEILING`] above that background PLUS the [`TEAR_FRAME_COUNT_FLOOR`].
+/// REPORT-ONLY: promotability does not
 /// itself flip [`gates_overall_pass`]; it is emitted so a known-torn run is auto-gradable.
 pub fn window_promotable(stats: &TearStats) -> bool {
     stats.viability == TearSignalViability::Observed
@@ -474,6 +520,26 @@ pub fn signal_promotable(stats: &[TearStats]) -> bool {
         && stats
             .iter()
             .all(|s| s.multi_path_suspect_fraction <= MULTI_PATH_SUSPECT_CEILING)
+}
+
+/// issue 1196 review-hardening — REPORT-ONLY observability that the aux tear signal is OPERABLE on
+/// this run: the frame-weighted [`TearStats::aux_any_decode_fraction`] (≥ 1 aux mark per frame) is
+/// at or above [`AUX_ANY_OPERABLE_FLOOR`]. The LIVE gate rides on the aux single-mark cross-band, so
+/// if aux decoding ever collapses (both marks occluded — the RIGHT one already carries the whole
+/// signal since imag's burn covers the LEFT, issue 1266) the gate would go silently blind (no tear
+/// Observed → passes forever, the issue-1101 trap). This surfaces that blind spot; it does NOT gate
+/// (a genuinely aux-free run is not a failure — the signal is simply unavailable). Empty run, or all
+/// windows carrying no frames → `false` (not operable / nothing to judge).
+pub fn signal_operable(stats: &[TearStats]) -> bool {
+    let total: u64 = stats.iter().map(|s| s.total_frames as u64).sum();
+    if total == 0 {
+        return false;
+    }
+    let covered: f64 = stats
+        .iter()
+        .map(|s| s.aux_any_decode_fraction * s.total_frames as f64)
+        .sum();
+    covered / total as f64 >= AUX_ANY_OPERABLE_FLOOR
 }
 
 #[cfg(test)]
@@ -626,9 +692,13 @@ mod tests {
         assert_eq!(s.multi_path_suspect_frames, 0);
         assert!((s.tear_fraction - 1.0 / 3.0).abs() < 1e-9);
         assert_eq!(s.viability, TearSignalViability::Observed);
+        // A SINGLE torn frame is Observed but BELOW TEAR_FRAME_COUNT_FLOOR (6), so the two-term LIVE
+        // gate PASSES it (a lone torn frame is within the green background; a sustained tear is
+        // 16-201 frames). The rate alone (0.333 here) would fail, but the count term saves it.
+        assert!(s.tear_frames < TEAR_FRAME_COUNT_FLOOR);
         assert!(
-            !tear_gate_pass(&s),
-            "a nonzero tear fraction fails the (report-only) gate"
+            tear_gate_pass(&s),
+            "one torn frame is below the count floor -> the two-term gate passes it"
         );
     }
 
@@ -858,6 +928,79 @@ mod tests {
     }
 
     #[test]
+    fn observed_multi_tile_window_never_fails_the_live_gate_1196() {
+        // THE review-hardening (🔴): a MULTI-TILE window that is ALSO Observed (its few single-source
+        // count-2 residual frames span > 1) must NEVER fail the LIVE gate — those spans are inter-path
+        // skew, not a tear, and their tiny denominator gives a misleadingly high rate. Real multi-tile
+        // run 1859005342 fails 4/10 windows WITHOUT this guard. Build a window that trips the rate AND
+        // the count floor yet is dominated by multi-tile suspects: 8 single-source count-2 "tears" +
+        // 20 multi-tile suspects.
+        let mut frames: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+        for i in 0..8u32 {
+            let b = 100 + i * 4;
+            frames.push(f(&[b, b + 2], &[])); // single-source, span 2 -> counts as a "tear"
+        }
+        for _ in 0..20 {
+            frames.push(f(&[200, 201, 202, 203], &[])); // multi-tile suspect
+        }
+        let s = window_tear_stats(&frames);
+        assert_eq!(s.viability, TearSignalViability::Observed);
+        assert_eq!(s.tear_frames, 8, "8 single-source count-2 frames score");
+        assert!(
+            s.tear_frames >= TEAR_FRAME_COUNT_FLOOR && s.tear_fraction > TEAR_FRACTION_CEILING,
+            "both the count and rate terms are tripped — only the suspect guard saves it"
+        );
+        assert!(
+            s.multi_path_suspect_fraction > MULTI_PATH_SUSPECT_CEILING,
+            "20/28 suspect = 0.714 > the 0.10 ceiling"
+        );
+        assert!(
+            tear_gate_pass(&s),
+            "a multi-tile (unscoreable) window must NEVER fail the live gate (#1127 false-FAIL trap)"
+        );
+    }
+
+    #[test]
+    fn low_count_tear_passes_but_sustained_single_tile_tear_fails_1196() {
+        // The count term (TEAR_FRAME_COUNT_FLOOR = 6): a 5-frame single-tile "tear" on a short window
+        // trips the rate (5/50 = 0.10 >> 0.005) but NOT the count (5 < 6) -> PASSES (the green
+        // background is a count of 1-3 frames; a 4-5 frame spike must not false-fail).
+        let mut five = vec![
+            f(&[100, 102], &[]),
+            f(&[104, 106], &[]),
+            f(&[108, 110], &[]),
+            f(&[112, 114], &[]),
+            f(&[116, 118], &[]),
+        ];
+        for i in 0..45u32 {
+            let b = 1000 + i * 2;
+            five.push(f(&[b, b + 1], &[]));
+        }
+        let s5 = window_tear_stats(&five);
+        assert_eq!(s5.tear_frames, 5);
+        assert!(
+            s5.tear_fraction > TEAR_FRACTION_CEILING,
+            "rate tripped (0.10)"
+        );
+        assert!(s5.tear_frames < TEAR_FRAME_COUNT_FLOOR);
+        assert!(
+            tear_gate_pass(&s5),
+            "5 torn frames is below the count floor -> passes"
+        );
+
+        // A 6th torn frame crosses the count floor -> a sustained single-tile tear FAILS both terms.
+        let mut six = five.clone();
+        six.push(f(&[120, 122], &[]));
+        let s6 = window_tear_stats(&six);
+        assert_eq!(s6.tear_frames, 6);
+        assert_eq!(s6.multi_path_suspect_frames, 0, "all single-tile");
+        assert!(
+            !tear_gate_pass(&s6),
+            "6 torn single-tile frames trip BOTH the count floor and the rate ceiling -> FAIL"
+        );
+    }
+
+    #[test]
     fn window_promotable_requires_observed_and_single_tile_1196() {
         // A GREEN window (no tear observed) is NOT promotable — an all-zero distribution cannot
         // prove the signal works (the issue-1101 blind-signal trap).
@@ -927,6 +1070,28 @@ mod tests {
         assert!(
             !signal_promotable(&[torn, multi]),
             "any multi-tile window blocks run-level promotion"
+        );
+    }
+
+    #[test]
+    fn signal_operable_surfaces_aux_blind_spot_1196() {
+        // Empty run: not operable (nothing to judge).
+        assert!(!signal_operable(&[]));
+        // A run whose windows decode a single aux mark per frame (the live CAM2 shape) is OPERABLE.
+        let live = window_tear_stats(&[f(&[100, 101], &[101]), f(&[102, 103], &[103])]);
+        assert!((live.aux_any_decode_fraction - 1.0).abs() < 1e-9);
+        assert!(
+            signal_operable(std::slice::from_ref(&live)),
+            "single-mark aux coverage ~1.0 is well above the 0.5 operability floor"
+        );
+        // A run where the aux collapsed (no aux mark decodes at all — both occluded) is NON-operable,
+        // surfacing the blind spot even though the window is Unproven (which alone would look green).
+        let blind = window_tear_stats(&[f(&[100, 101], &[]), f(&[102, 103], &[])]);
+        assert_eq!(blind.aux_any_decode_fraction, 0.0);
+        assert_eq!(blind.viability, TearSignalViability::Unproven);
+        assert!(
+            !signal_operable(std::slice::from_ref(&blind)),
+            "zero aux coverage must read NON-operable (the issue-1101 blind-signal trap surfaced)"
         );
     }
 }

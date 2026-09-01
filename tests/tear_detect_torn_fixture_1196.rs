@@ -23,11 +23,14 @@
 //! `decode_qr_luma_all_fast_then_robust_grouped_optical` this test calls).
 //!
 //! HONEST provenance: `frame-8090` is the ONLY torn frame in the run's pixel-proof retention (the
-//! retention flags a bounded set of copies/gaps-suspect frames), but it is the EXACT pixel the
-//! verdict decoded as torn, and the two healthy contrast frames are the retained frames adjacent to
-//! the run's larger torn CAM2 window. The synthetic cross-band logic is covered exhaustively in
-//! `src/tear_detect.rs`'s own unit tests; this file is the real-chain proof for the ONE torn pixel
-//! the retention preserved.
+//! retention flags a bounded set of copies/gaps-suspect frames). It carries the CAM2-leg signature
+//! (primary run_id 1700989544 + one aux mark one generation ahead) and is genuinely torn, but it
+//! sits ~0.2 s before the CAM2 window's `start_ns` (the CAM1→CAM2 switch guard band), so the verdict
+//! attributes it to no window — it is one of the ~24 torn partial frames outside the 217 the CAM2
+//! windows count. The two healthy contrast frames are retained frames adjacent to the run's larger
+//! torn CAM2 window. The synthetic cross-band logic is covered exhaustively in `src/tear_detect.rs`'s
+//! own unit tests; this file is the real-chain proof that a real torn projection-leg pixel decodes
+//! to the aux single-mark cross-band shape and reads TORN.
 
 #![cfg(feature = "probe")]
 

@@ -61,3 +61,39 @@ def test_disarmed_tear_seam_never_blocks():
 def test_missing_tear_block_does_not_crash():
     assert isinstance(edr._blocking_failures({}), list)
     assert isinstance(edr._blocking_failures({"all_cambox_continuity": {}}), list)
+
+
+def test_non_operable_tear_signal_is_report_only_not_blocking():
+    # issue 1196 review-hardening: signal_operable=False (aux collapsed) surfaces as a report-only
+    # info line, NEVER a blocking failure (a genuinely aux-free run is not a failure).
+    v = {
+        "overall_pass": True,
+        "all_cambox_continuity": {
+            "tear": {
+                "gates_overall_pass": True,
+                "signal_operable": False,
+                "windows": [{"cambox": "CAM2", "tear_gate_pass": True}],
+            }
+        },
+    }
+    names = edr._report_only_tripped(v)
+    assert any("slep" in n for n in names), (
+        f"a non-operable tear signal must surface report-only, got {names!r}"
+    )
+    labels = [label for label, _ in edr._blocking_failures(v)]
+    assert not any("slep" in label or "tear" in label.lower() for label in labels), (
+        f"non-operable must never be a blocking failure, got {labels!r}"
+    )
+
+
+def test_operable_tear_signal_is_not_surfaced():
+    v = {
+        "all_cambox_continuity": {
+            "tear": {
+                "gates_overall_pass": True,
+                "signal_operable": True,
+                "windows": [{"cambox": "CAM2", "tear_gate_pass": True}],
+            }
+        }
+    }
+    assert not any("slep" in n for n in edr._report_only_tripped(v))

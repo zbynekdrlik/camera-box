@@ -22,14 +22,19 @@
 //! - RIGHT: x ∈ [1224, 1434) (gap [1120, 1538), ≥104px clearance both sides)
 //! - both:  y ∈ [745, 955)  (21px below the primary band bottom 724, 5px above the sweep band 960)
 //!
-//! **Documented exception:** imag-nb's BottomCenterLeft corner burn zone `[382, 684)` OVERLAPS the
-//! LEFT aux. Accepted deliberately: the run_id census of a real 9683-frame stream partial proves
-//! imag's burn (911003) is NOT in the projected-scene path this detector measures (issue 1196
-//! design synthesis, grounding fact 1), so the stream-recording cam2 window never carries it. The
-//! only cost is on imag's OWN leg recording, where the left aux may be covered — a lower (honest,
-//! report-only) aux coverage reading there. The alternative — cramming BOTH marks into the single
-//! `[1120, 1538)` gap — was rejected: ~190px marks decode worse and one localized artifact would
-//! kill both.
+//! **Documented defect (issue 1196, corrected 2026-09-01 from the known-torn run 1700989544):**
+//! imag-nb's BottomCenterLeft corner burn zone `[382, 684)` OVERLAPS the LEFT aux, and — contrary to
+//! the original design synthesis's "grounding fact 1" — imag's burn (911003) IS in the projected
+//! scene cam2's grabber captures (cam2 films imag-nb's OBS projector output, which renders imag's
+//! own burn). The run_id census of the real stream partial proves it: 911003 is present on ~99% of
+//! the CAM2 projection-window frames (240/241 torn frames carry it), and on those windows the LEFT
+//! (even) aux is OCCLUDED — only the RIGHT (odd) aux decodes (all 241 torn aux marks are odd), so
+//! `aux_decode_fraction` (BOTH marks) reads ~0 on the projection leg while the single RIGHT aux
+//! carries the operative cross-band tear signal. The LIVE tear gate works on that single mark; the
+//! REDUNDANCY the both-mark pair was meant to provide is absent on the projection leg. Relocating
+//! the LEFT aux OUT of `[382, 684)` (to restore both-mark redundancy) is the tracked follow-up
+//! (issue 1266). The rejected alternative — cramming BOTH marks into the single `[1120, 1538)` gap —
+//! stays rejected: ~190px marks decode worse and one localized artifact would kill both.
 //!
 //! ## Why this lives at the crate root (default features)
 //!
@@ -266,12 +271,13 @@ mod tests {
 
     #[test]
     fn left_aux_overlaps_the_imag_burn_zone_by_documented_exception() {
-        // Pin the DELIBERATE exception (module doc): the left aux sits inside imag's
-        // BottomCenterLeft burn zone [382, 684) — accepted because the real-partial run_id census
-        // proves imag's burn is not in the projected-scene path (the stream-recording cam2 window
-        // never carries 911003); only imag's OWN leg recording may cover the left aux there,
-        // lowering that leg's report-only aux coverage honestly. If this placement is ever moved
-        // OUT of the imag zone, update the module doc's exception paragraph together with this pin.
+        // Pin the KNOWN defect (module doc, corrected 2026-09-01): the left aux sits inside imag's
+        // BottomCenterLeft burn zone [382, 684). Contrary to the original design assumption, imag's
+        // burn (911003) IS in the projected scene cam2 captures, so on the CAM2 projection window the
+        // left aux is OCCLUDED (~99% of frames carry 911003) — only the RIGHT aux decodes, which is
+        // the operative single-mark cross-band tear signal. Relocating the left aux out of the imag
+        // zone (to restore both-mark redundancy) is the tracked follow-up (issue 1266). If this
+        // placement is ever moved, update the module doc's defect paragraph together with this pin.
         let [l, r] = rig_rects();
         assert!(
             l.intersects(&BURN_IMAG),

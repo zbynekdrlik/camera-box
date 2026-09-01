@@ -3,10 +3,12 @@ paths:
   - "src/tear_detect.rs"
   - "src/aux_tick.rs"
   - "tests/tear_detect_781.rs"
+  - "tests/tear_detect_torn_fixture_1196.rs"
+  - "tests/aux_tick_fixture_decode_1196.rs"
   - "tests/fixtures/tear-781/**"
 ---
 
-# Projection-tap scanout-TEAR detector (issue 781) — report-only, and PROVEN-BLIND on current content
+# Projection-tap scanout-TEAR detector (issue 781/1196) — LIVE gate; the AUX SINGLE-MARK cross-band is the operative signal (the primary band is blind)
 
 ## The tap already exists — cam2's leg IS the projection path
 
@@ -19,7 +21,7 @@ segment, and reaches the dev1 merge as the per-frame `payloads` already carried 
 NO partial schema bump and NO on-box work (contrast the #1088/#1166 content-hash saga, which needed
 an on-box extract + a schema carry).
 
-## The signal, and why it is currently BLIND
+## The signal, and why the PRIMARY band alone is BLIND (cured by the v2 aux pair — see the LIVE section)
 
 The painted content is cam2's optical **dual-QR Vernier**: LEFT QR = latest EVEN tick, RIGHT = latest
 ODD tick, so a HEALTHY captured frame carries exactly two cam2-optical payloads whose `frame_id`s are
@@ -125,7 +127,7 @@ every splitter leg unproven / 0.0. `multi_path_suspect_fraction` 0.0 everywhere 
 
 **CORRECTION — the operative signal is the AUX SINGLE-MARK CROSS-BAND, not the primary band.**
 Per-frame mining of `stream-partial-1700989544.json` (the real rqrr decode) proves the PRIMARY
-dual-QR span is ALWAYS ≤ 1 (`max primary span = 1` over 18 613 frames — the primary band is
+dual-QR span is ALWAYS ≤ 1 (`max primary span = 1` on every one of the 9,883 stream-partial frames — the primary band is
 structurally blind, as the blindness section says). EVERY one of the 241 torn frames is
 `primary[X, X+1]` (span 1) + exactly ONE aux mark `[Y > X+1]` from a later generation (union span
 2–7): the bottom aux band, scanned out later, catches the newer generation during the un-vsynced
@@ -181,9 +183,12 @@ Re-disarm = one line (`gates_overall_pass()` → `false`); the mechanism stays d
    the ceiling can never be 0.0:**
    - **The aux-coverage FLOOR is REMOVED as a promotion gate — `aux_decode_fraction` (BOTH marks) is
      a report-only DIAGNOSTIC; `aux_any_decode_fraction` (≥ 1 mark) is the operability signal.** The
-     CAM2 PROJECTION leg reads `aux_decode_fraction` = 0.0 (the ~210px marks rarely BOTH survive imag's
-     projected-then-captured scanout) — but this is NOT "aux dead": scoped to the CAM2 windows a
-     SINGLE aux mark decodes 0.967–0.999 of frames, and the operative cross-band tear needs only ONE.
+     CAM2 PROJECTION leg reads `aux_decode_fraction` = 0.0 because imag's OWN burn (911003, rendered
+     by imag's OBS projector, which cam2 films) OCCLUDES the LEFT (even) aux — present on ~99% of the
+     CAM2-window frames (240/241 torn frames carry it; all 241 torn aux marks are ODD/RIGHT). A
+     GEOMETRY defect (the LEFT aux sits in imag's burn zone [382,684); issue 1266 relocates it), NOT a
+     lossy-chain limitation and NOT "aux dead": scoped to the CAM2 windows a SINGLE (right) aux mark
+     decodes 0.967–0.999 of frames, and the operative cross-band tear needs only ONE.
      The known-torn run PROVED the CAM2 tears come from the aux single-mark cross-band (the primary
      band is blind, span always ≤ 1) — CORRECTING the earlier "tears surface via the PRIMARY band"
      reading. A hard both-mark aux floor would have permanently blocked the projection leg;

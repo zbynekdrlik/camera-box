@@ -5276,9 +5276,11 @@ fn build_and_print_verdict_with_stream_diffs(
                     };
                     let aux_any_coverage = frame_weighted(|s| s.aux_any_decode_fraction);
                     let aux_both_coverage = frame_weighted(|s| s.aux_decode_fraction);
+                    let signal_operable = camera_box::tear_detect::signal_operable(&tear_stats);
                     println!(
                         "  #781/#1196 projection-tap tear gate (LIVE): {} torn frame(s) across \
-                         {} window(s); signal viability {}; aux coverage any-mark {:.3} both-mark {:.3}",
+                         {} window(s); signal viability {}; aux coverage any-mark {:.3} both-mark \
+                         {:.3}; operable {}",
                         total_tears,
                         schedule.len(),
                         if any_observed {
@@ -5287,11 +5289,24 @@ fn build_and_print_verdict_with_stream_diffs(
                             "UNPROVEN (no union-span tear seen on this content)"
                         },
                         aux_any_coverage,
-                        aux_both_coverage
+                        aux_both_coverage,
+                        if signal_operable {
+                            "YES"
+                        } else {
+                            "NO -- aux blind spot, tear gate cannot fire (issue-1101 trap)"
+                        }
                     );
                     report["all_cambox_continuity"]["tear"] = serde_json::json!({
                         "gates_overall_pass": camera_box::tear_detect::gates_overall_pass(),
                         "vernier_max_spread": camera_box::tear_detect::VERNIER_MAX_SPREAD,
+                        "tear_fraction_ceiling": camera_box::tear_detect::TEAR_FRACTION_CEILING,
+                        "tear_frame_count_floor": camera_box::tear_detect::TEAR_FRAME_COUNT_FLOOR,
+                        // issue 1196 review-hardening — REPORT-ONLY: is the aux tear signal OPERABLE
+                        // (frame-weighted >=1-aux-mark coverage >= AUX_ANY_OPERABLE_FLOOR)? The LIVE
+                        // gate rides on the aux single-mark cross-band, so if aux decoding collapses
+                        // the gate would go silently blind; this surfaces that. Does NOT gate.
+                        "signal_operable": signal_operable,
+                        "aux_any_operable_floor": camera_box::tear_detect::AUX_ANY_OPERABLE_FLOOR,
                         // issue 1196 — run-level machine-checked flip-readiness (any window
                         // Observed a tear AND every window is single-tile) + the single-tile
                         // promotion ceiling. NECESSARY but NOT SUFFICIENT for the flip: it reads
