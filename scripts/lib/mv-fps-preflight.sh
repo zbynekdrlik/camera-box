@@ -36,10 +36,13 @@
 _MVFPS_PREFLIGHT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/mv-fps-health.sh
 . "$_MVFPS_PREFLIGHT_LIB_DIR/mv-fps-health.sh"
+# shellcheck source=scripts/lib/ps-encoded.sh
+. "$_MVFPS_PREFLIGHT_LIB_DIR/ps-encoded.sh"
 
 # mv_fps_preflight_read_cmd <os> <log_tail> -> stdout: a REMOTE command string that prints the newest
 #   OBS log's tail (the caller greps `multiview-audit:` out of it). linux: a bash one-liner tailing the
-#   newest ~/.config/obs-studio/logs/*.txt; win: a single NON-NESTED `powershell -Command` tailing the
+#   newest ~/.config/obs-studio/logs/*.txt; win: a single `powershell -EncodedCommand` (cmd.exe-proof,
+#   issue 1259) tailing the
 #   newest %APPDATA%\obs-studio\logs\*.txt. Mirrors mv-fps-alert-watchdog.sh's probe_mv_log read shape
 #   (without its MVFPS_LOGID identity line -- the synchronous preflight tracks no autostart reset).
 #   Unknown os -> return 1 (the caller then treats the box as unreadable / UNKNOWN).
@@ -50,11 +53,18 @@ mv_fps_preflight_read_cmd() {
       printf '%s' 'F=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); [ -n "$F" ] && tail -n '"$tail_n"' "$F"'
       ;;
     win)
-      # One flat ssh + a single (non-nested) powershell (win-ssh-vs-mcp / rig-state-inspection). Every
-      # `$` powershell must see is escaped (`\$`) so the dev1 bash embedding this string does not
-      # expand it; `$env:APPDATA` has no spaces so no inner double-quotes are needed (no nesting trap);
-      # `$tail_n` is a dev1 value spliced literally.
-      printf '%s' "powershell -NoProfile -Command \"\$f=(gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1); if(\$f){ gc \$f.FullName -Tail $tail_n }\""
+      # #1259: -EncodedCommand (base64 UTF-16LE), NEVER the naive -Command "$f=(…| sort …); if(…){…}".
+      # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|`/`;`/`{}` -> a mangled/blind read
+      # (the issue-1258 root cause). ps_encoded_command (ps-encoded.sh) encodes the whole program to a
+      # pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> the caller treats the box
+      # as UNKNOWN (report-only), never an abort. Every `$` powershell must see is `\$`-escaped so dev1
+      # bash keeps it literal; $tail_n is numeric-clamped so it can never inject shell/PS metachars into
+      # the encoded payload (the #1258 guard).
+      local _tn="$tail_n"
+      case "$_tn" in '' | *[!0-9]*) _tn=2000 ;; esac
+      local _enc
+      _enc="$(ps_encoded_command "\$f=(gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1); if(\$f){ gc \$f.FullName -Tail $_tn }")"
+      printf '%s' "powershell -NoProfile -NonInteractive -EncodedCommand $_enc"
       ;;
     *)
       return 1

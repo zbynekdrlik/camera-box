@@ -63,6 +63,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-watchdog-decision.sh"
 # shellcheck source=scripts/lib/cadence-health.sh
 . "$HERE/lib/cadence-health.sh"
+# shellcheck source=scripts/lib/ps-encoded.sh
+. "$HERE/lib/ps-encoded.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -149,12 +151,16 @@ fetch_box_log() {
     $CADENCE_PROBE_CMD "$ip" 2>/dev/null || true
     return 0
   fi
-  # One flat ssh + single (non-nested) powershell: tail the newest OBS log. `$env:APPDATA` has no
-  # spaces, so no inner double-quotes are needed -> no nested-PowerShell trap (win-ssh-vs-mcp /
-  # rig-state-inspection). Sourcing the whole tail; grep + extract on dev1.
+  # #1259: -EncodedCommand (base64 UTF-16LE), NEVER the naive -Command "…| sort …| select …".
+  # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|` pipes -> a mangled/blind read (the
+  # issue-1258 root cause). ps_encoded_command (scripts/lib/ps-encoded.sh) encodes the tail command
+  # to a pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> UNKNOWN, never an abort.
+  local _enc _tail
+  _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 800)" # #1259: guard the env count before the payload
+  _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail")"
   # shellcheck disable=SC2086
   timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
-    "powershell -NoProfile -Command \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $OBS_LOG_TAIL\"" \
+    "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
     2>/dev/null || true
 }
 
