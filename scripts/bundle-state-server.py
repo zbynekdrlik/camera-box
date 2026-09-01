@@ -552,11 +552,17 @@ def gather_bundle_state(
             # (max_fresh_lag_str, src, age_s) from the SAME bounded log_text (no second read); the
             # dev1 audio-lag watchdog reads these facets.
             bsg.audio_telemetry_from_log(log_text),
+            # #1267 — the av-sync dock measured-offset trend (recent/base median + pin + pin_stable +
+            # age + per-window counts) from the SAME bounded log_text (no second read); the dev1
+            # upstream-step watchdog reads these facets.
+            bsg.av_offset_series_from_log(log_text),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
-     audio_ts_lag) = _timed(timings, "obs_log_parse", _parse_log_facets)
+     audio_ts_lag, av_offset) = _timed(timings, "obs_log_parse", _parse_log_facets)
     audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
+    (av_offset_recent_med_val, av_offset_base_med_val, av_offset_pin_val, av_offset_pin_stable_val,
+     av_offset_age_s_val, av_offset_n_recent_val, av_offset_n_base_val) = av_offset
 
     def _gather_ndi():
         try:
@@ -638,6 +644,15 @@ def gather_bundle_state(
         # #1231 — the freshness age of that facet (in-log seconds behind the log head); a large value
         # -> the dev1 decision surfaces STALE (telemetry stopped while the log advanced).
         audio_ts_lag_age_s=audio_ts_lag_age_s_val,
+        # #1267 — the av-sync dock measured-offset trend the dev1 upstream-step watchdog reads
+        # (omit-when-empty; absent == UNKNOWN downstream).
+        av_offset_recent_med_ms=av_offset_recent_med_val,
+        av_offset_base_med_ms=av_offset_base_med_val,
+        av_offset_pin=av_offset_pin_val,
+        av_offset_pin_stable=av_offset_pin_stable_val,
+        av_offset_age_s=av_offset_age_s_val,
+        av_offset_n_recent=av_offset_n_recent_val,
+        av_offset_n_base=av_offset_n_base_val,
     )
 
     timings["total"] = time.perf_counter() - t_total0
