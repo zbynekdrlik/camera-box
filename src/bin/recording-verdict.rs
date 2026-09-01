@@ -4701,7 +4701,7 @@ fn build_and_print_verdict_with_stream_diffs(
                                          pre-889 strict rule, but stays within the per-window \
                                          copies/gaps tolerance ({}) and does NOT gate overall_pass \
                                          (see issue #889 for the decision record).",
-                                        s.copies, s.gaps, seg.copies_gaps_tolerance
+                                        s.copies, s.gaps, s.copies_gaps_tolerance
                                     );
                                 } else if camera_box::window_gate::segment_singleton_allowance_consumed(
                                     s.copies, s.gaps,
@@ -4752,12 +4752,17 @@ fn build_and_print_verdict_with_stream_diffs(
                             // issue #905). A window can carry more than one reason at once (e.g.
                             // over-tolerance copies/gaps AND a merely-report-only over-floor
                             // undecodable count) — every applicable reason prints.
-                            let reasons = camera_box::window_gate::relaxed_failure_reasons(
-                                s.frames,
-                                s.undecodable,
-                                s.copies,
-                                s.gaps,
-                            );
+                            // #1251: judge the failure reason at THIS window's applied tolerance
+                            // (the per-cambox override where one exists), so a CAM2 window over the
+                            // default 5 but under its own 25 is not mislabelled OverCopiesGapsTolerance.
+                            let reasons =
+                                camera_box::window_gate::relaxed_failure_reasons_with_tolerance(
+                                    s.frames,
+                                    s.undecodable,
+                                    s.copies,
+                                    s.gaps,
+                                    s.copies_gaps_tolerance,
+                                );
                             for reason in &reasons {
                                 match reason {
                                     camera_box::window_gate::RelaxedFailureReason::EmptyWindow => {
@@ -4773,7 +4778,7 @@ fn build_and_print_verdict_with_stream_diffs(
                                              exceeds the per-window copies/gaps tolerance ({}) — \
                                              this window FAILS overall_pass (see issue #889 for \
                                              the decision record).",
-                                            s.copies, s.gaps, seg.copies_gaps_tolerance
+                                            s.copies, s.gaps, s.copies_gaps_tolerance
                                         );
                                     }
                                     camera_box::window_gate::RelaxedFailureReason::FloorExceededGating => {
@@ -4875,13 +4880,33 @@ fn build_and_print_verdict_with_stream_diffs(
                         "a SUBSET of what now gates under #1132 (see the #1132 line below and issue \
                      #889 for the decision record)"
                     };
+                // #1251: the tolerance printed here is the DEFAULT; a per-cambox override (CAM2 →
+                // 25 while its grabber HW is sick, issue 1249) applies to individual windows. Name
+                // the overrides so this summary can never read "tolerance=5: 0 over" while a CAM2
+                // window at copies=18 sits in the per-window listing above it (each window's own
+                // WARN prints its applied tolerance; the count is per-window).
+                let per_cambox_tol_note = {
+                    let map = camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX;
+                    if map.is_empty() {
+                        String::new()
+                    } else {
+                        let overrides = map
+                            .iter()
+                            .map(|(cb, tol)| format!("{cb}→{tol}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("; per-cambox overrides: {overrides}")
+                    }
+                };
                 println!(
-                    "  ⚠ #889 RE-GATE (per-window tolerance={}): {}/{} cambox window(s) exceed the \
-                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — {}. \
+                    "  ⚠ #889 RE-GATE (default per-window tolerance={}{}): {}/{} cambox window(s) \
+                     exceed THEIR OWN per-window copies/gaps tolerance \
+                     (windows_over_copies_gaps_tolerance) — {}. \
                      NOTE: this is the relaxed tolerance printed above (walked over time, see \
                      issue 1243), NOT the \
                      issue-1169 <=1 SINGLETON allowance (a separate, tighter band; see its own line).",
                     seg.copies_gaps_tolerance,
+                    per_cambox_tol_note,
                     seg.windows_over_copies_gaps_tolerance,
                     seg.segments.len(),
                     copies_gaps_relationship
@@ -4997,9 +5022,11 @@ fn build_and_print_verdict_with_stream_diffs(
                         "copies_gaps_gate".to_string(),
                         serde_json::json!(if copies_gaps_tol_gates {
                             format!(
-                                "gates overall_pass above the per-window copies/gaps tolerance ({}) -- \
-                                 see issue #889 for the decision record",
-                                seg.copies_gaps_tolerance
+                                "gates overall_pass above the per-window copies/gaps tolerance \
+                                 (default {}{}; each window's applied tolerance is on \
+                                 segments[].copies_gaps_tolerance) -- see issue #889 for the \
+                                 decision record",
+                                seg.copies_gaps_tolerance, per_cambox_tol_note
                             )
                         } else {
                             "#1132: the copies/gaps tolerance rescue is DISARMED -- overall_pass \
@@ -5015,6 +5042,21 @@ fn build_and_print_verdict_with_stream_diffs(
                     obj.insert(
                         "copies_gaps_tolerance_gates_overall_pass".to_string(),
                         serde_json::json!(copies_gaps_tol_gates),
+                    );
+                    // #1251: self-describe the per-cambox tolerance OVERRIDE policy so the verdict
+                    // JSON (and any miner) can see that a box like CAM2 goes through a wider band
+                    // than the run-wide default. `copies_gaps_tolerance` above is the DEFAULT; the
+                    // ACTUAL applied tolerance is on each `segments[].copies_gaps_tolerance`. Empty
+                    // map (the issue-1242 walk-back state) serializes as `{}` — the default holds
+                    // for every box. Keyed BTreeMap so the ordering is stable across runs.
+                    obj.insert(
+                        "copies_gaps_tolerance_per_cambox".to_string(),
+                        serde_json::json!(
+                            camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX
+                                .iter()
+                                .map(|(k, v)| (k.to_string(), *v))
+                                .collect::<std::collections::BTreeMap<String, u32>>()
+                        ),
                     );
                     // #1169 (owner, 2026-08-22): the SINGLETON allowance seam, self-describing in
                     // the JSON exactly like the copies_gaps keys above -- a DISTINCT, strictly

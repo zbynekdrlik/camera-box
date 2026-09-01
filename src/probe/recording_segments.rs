@@ -134,6 +134,14 @@ pub struct CamboxSegment {
     /// Real dropped painted frames (a forward skip beyond the by-design decimation step, or a
     /// backward jump). See [`window_segment`].
     pub gaps: u32,
+    /// #1251: the per-window copies/gaps tolerance ACTUALLY applied to THIS window's `relaxed_pass`
+    /// verdict — `crate::window_gate::copies_gaps_tolerance_for_cambox(cambox)`, i.e. the default
+    /// [`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`] for every box EXCEPT one carrying a
+    /// per-cambox override (CAM2 → 25 while its grabber HW is sick, issue 1249; walk-back on issue
+    /// 1242). Serialized into the verdict JSON so the report shows a CAM2 window went through the
+    /// override, and so `SegmentedContinuity::windows_over_copies_gaps_tolerance` /
+    /// `recording-verdict.rs` compare each window against ITS OWN tolerance, not one run-wide value.
+    pub copies_gaps_tolerance: u32,
     /// First / last painted tick seen in-window (informational; `None` ⇒ no readable tick).
     pub first_tick: Option<u32>,
     pub last_tick: Option<u32>,
@@ -268,15 +276,21 @@ pub struct SegmentedContinuity {
     /// even when `true`, so a passing run's headroom is visible too — mirrors
     /// `windows_failed_report_only`'s issue-889 visibility precedent.
     pub run_wide_undecodable_within_floor: bool,
-    /// 2026-08-05 re-gate (ticket 889 comment 5196190653, recalibrated 1 → 2 → 3 on 2026-08-06) —
-    /// the per-window tolerance actually applied when folding `copies`/`gaps` into
-    /// `relaxed_pass`/`overall_pass`
+    /// 2026-08-05 re-gate (ticket 889 comment 5196190653, recalibrated 1 → 2 → 3 on 2026-08-06,
+    /// walked 3 → 5 on 2026-08-31 issue 1243) — the DEFAULT/base per-window tolerance
     /// (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), echoed here so the verdict JSON is
     /// self-describing without needing the binary's source. Always serialized.
+    ///
+    /// **#1251: this is the DEFAULT only.** The tolerance ACTUALLY applied to each window lives on
+    /// `CamboxSegment::copies_gaps_tolerance` (per-window), because a per-cambox override can widen
+    /// it for one box (CAM2 → 25 while its grabber HW is sick, issue 1249). Consumers deciding
+    /// whether a specific window is over tolerance MUST read the per-segment field, not this one.
     pub copies_gaps_tolerance: u32,
     /// 2026-08-05 re-gate — how many windows exceed the per-window tolerance on `copies` AND/OR
-    /// `gaps` (i.e. `copies > copies_gaps_tolerance || gaps > copies_gaps_tolerance`) — these are
-    /// the windows OVER the tolerance. **#1132 (2026-08-19): under the then-disarmed rescue ANY
+    /// `gaps`. **#1251: measured against EACH window's OWN applied tolerance
+    /// (`CamboxSegment::copies_gaps_tolerance`), not the run-wide default** — so a CAM2 window
+    /// within its per-cambox override (25) is correctly NOT counted while a default-5 box over 5 is.
+    /// These are the windows OVER their tolerance. **#1132 (2026-08-19): under the then-disarmed rescue ANY
     /// nonzero copies/gaps window failed `overall_pass`, so this over-tolerance count was a SUBSET
     /// of the windows that gated.** **#1220 (owner mandate, 2026-08-29): the tolerance is RE-ARMED,
     /// so this is now the EXACT set of windows failing on copies/gaps (modulo the independent
@@ -481,9 +495,19 @@ pub fn segment_continuity(
         // `CamboxSegment`), per `.claude/rules/gate-allowance-restore-red-green.md`. Run 1629895310
         // (5/10 windows with 1 copy, all relaxed_pass=true) rides this to green. issue 1242
         // root-causes the ~0.06% residual FIFO churn and RESTORES the strict copies==0 fold.
-        overall_pass &=
-            crate::window_gate::decide(seg.frames, seg.undecodable, seg.copies, seg.gaps)
-                .overall_pass_term;
+        //
+        // #1251: re-derive with the SAME per-window tolerance the segment already applied
+        // (`seg.copies_gaps_tolerance`), so a per-cambox override (CAM2 → 25, issue 1249) folds the
+        // blocking verdict against that window's OWN band — and the fold can never disagree with the
+        // `relaxed_pass` the segment stored (same tolerance, same counts).
+        overall_pass &= crate::window_gate::decide_with_tolerance(
+            seg.frames,
+            seg.undecodable,
+            seg.copies,
+            seg.gaps,
+            seg.copies_gaps_tolerance,
+        )
+        .overall_pass_term;
         all_residual_events.extend(seg.residual_events.iter().cloned());
         segments.push(seg);
     }
@@ -512,10 +536,15 @@ pub fn segment_continuity(
     // gaps (the windows that DO gate `overall_pass` again, per `seg.relaxed_pass` above). Computed
     // directly from the same counts `crate::window_gate::decide` already folded into
     // `relaxed_pass`, so this can never disagree with what actually gated the run.
+    //
+    // #1251: `copies_gaps_tolerance` (the run-wide field echoed into the JSON) is the DEFAULT/base
+    // tolerance — kept back-compatible — but the OVER-tolerance count compares each window against
+    // ITS OWN applied tolerance (`s.copies_gaps_tolerance`), so a CAM2 window within its 25 override
+    // is correctly NOT counted while a default-5 box over 5 still is.
     let copies_gaps_tolerance = crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE;
     let windows_over_copies_gaps_tolerance = segments
         .iter()
-        .filter(|s| s.copies > copies_gaps_tolerance || s.gaps > copies_gaps_tolerance)
+        .filter(|s| s.copies > s.copies_gaps_tolerance || s.gaps > s.copies_gaps_tolerance)
         .count() as u32;
 
     // #1169 (owner, 2026-08-22) -- how many windows had their nonzero copies/gaps ABSORBED by the
@@ -663,7 +692,18 @@ fn window_segment(
     // STRICT, UNCHANGED meaning (`copies == 0 && gaps == 0` still required); the RELAXED verdict
     // that actually feeds `overall_pass` is `relaxed_pass` below — see `crate::window_gate` for
     // the full decision record + restore path.
-    let gate = crate::window_gate::decide(frame_count, undecodable, copies, gaps);
+    // #1251: apply the per-cambox copies/gaps tolerance (default for every box EXCEPT one carrying
+    // an override — CAM2 → 25 while its grabber HW is sick, issue 1249). The applied tolerance is
+    // stored on the segment so `segment_continuity`'s fold + count and `recording-verdict.rs` all
+    // judge this window against ITS OWN tolerance, never one run-wide value.
+    let copies_gaps_tolerance = crate::window_gate::copies_gaps_tolerance_for_cambox(cambox);
+    let gate = crate::window_gate::decide_with_tolerance(
+        frame_count,
+        undecodable,
+        copies,
+        gaps,
+        copies_gaps_tolerance,
+    );
     let pass = gate.strict_pass;
     let relaxed_pass = gate.relaxed_pass;
     // #333: a ZERO-frame window is empty by construction, not chain loss — flag it loudly so it is
@@ -694,6 +734,7 @@ fn window_segment(
         undecodable,
         copies,
         gaps,
+        copies_gaps_tolerance,
         first_tick,
         last_tick,
         pass,
