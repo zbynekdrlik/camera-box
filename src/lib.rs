@@ -441,6 +441,11 @@ pub mod offline_ack;
 // `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
 // together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
 pub mod burn_hold;
+// #1260 — PURE, dependency-free within-tick "prepare once, reuse" state for the DistroAV QR burn
+// filter. The Tier-0 authority the C mirror vendor/distroav/src/burn-tick-cache.hpp is checked
+// against; the filter preps + stamps the burn frame_id ONCE per tick so strih's 4K Multiview
+// stops re-rendering all 7 burns per MV frame (the #278/#293 budget collapse to 7.5fps).
+pub mod burn_tick_cache;
 // #1122 — PURE, dependency-free E2E recordings retention decision (keep newest-N runs UNION
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
 // a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 mirrors.
