@@ -396,3 +396,33 @@ explicit low count is the known phantom). The `within_aligned_quantum` gate is u
 runs before any plan. Tier-0: `tests/python/test_qr_align_pinapply_1161.py` (the `_FifoBarrier` model
 migrated `max` → additive, an additive-overshoot RED→GREEN proof) + `test_qr_align_quantum_1252.py`
 (the phantom-floor filter).
+
+## Mining the align STATUS + per-box floor data from a run (#1168)
+
+Re-tightening `[4i/8align]` (turning the BUDGET-BOUND soft-release into a hard-fail) is a DATA-FIRST
+decision: it is safe ONLY once a green run's align status is NOT `budget-bound`. Where that data
+actually lives is non-obvious — spent-time gotchas:
+
+- **The align STATUS lives in the CI RUN LOG, never the verdict JSON.** `qr_align_pins.py` writes its
+  result JSON + the `[qr-align] host=… BUDGET-BOUND/ALREADY ALIGNED/aligned` line to stdout, captured
+  by `recording-e2e.sh` into the CI job log. The `verdict-<rid>.json` carries NO align/floor/budget
+  field. Read it with `gh run view <run-id> --log | grep -aE '"status": "|qr-align\] host='` — the
+  result JSON there has `median_deltas_ms`, `arrival_floors_ms`, `over_budget` (per-camera
+  `arrival_floor + delta = target > 94`), and `status`.
+- **The align INPUTS/OUTPUTS ARE on-box per run dir** (`/tmp/recording-e2e-<rid>/`): `qr-align-jitter
+  -<rid>.json` = the arrival-floor audit the aligner reads (`mean_head_skew_ms` per source, the
+  transport floor); `qr-align-strih-<rid>.log` = the strih OBS audit dump during the reset-settle
+  window (genlock-fifo `ts_head_skew_ms` + `[distroav] recv-timing #797` lines) — this is the OBS log,
+  NOT the python stdout, so it does NOT contain the align status (a red herring for the status);
+  `reanchor-strih-pins-<rid>.json` = the #900 PREVIEW re-anchor (a SEPARATE step), not the aligner's plan.
+- **`recv-timing #797 'NDI camN' cap_avg` is UNIFORM (~15.9–16.0 ms) across every camera** — it is the
+  60 fps receive cadence, NOT a per-box floor signal. So a cross-camera arrival-floor DIFFERENCE is
+  upstream of strih receive (cambox grabber DQBUF→emit / NDI send), never a strih-side fix; the strih
+  genlock is already at `latency_ms=3`. Diagnose a high per-box floor (e.g. cam1 ~87–89 ms) on the
+  cambox, not on strih.
+- **The align barrier's present-age spread can read WIDER than the recording's.** On the 3× green
+  series (2026-09-01) the barrier read 2 source frames (33 ms) for some cameras while the recording
+  `all_cambox_latency.cross_camera_spread_ms` read ~18 ms (1 frame) — the `#1252` N=2 lock-phase
+  quantum over a short (5–6 round) audit. Before concluding budget-bound reflects a REAL floor gap,
+  check the recording spread on the same run; if they disagree, part of budget-bound may be barrier
+  quantization curable by a longer/phase-robust audit rather than a physical floor reduction.
