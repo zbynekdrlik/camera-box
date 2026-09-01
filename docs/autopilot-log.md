@@ -2,6 +2,49 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-09-01 — #1258 ([4c/8] frozen-camera-gate received= tap blind) — worktree worktree-agent-a79df4cf5f0b599a0, base eb52b62af
+
+- **Root cause: the `received=` tap read strih's OBS log with a NAIVE triple-quoted
+  `ssh "powershell -Command \"gc (gci ... | sort ... | select ...).FullName -Tail N\""`.**
+  strih's Win32-OpenSSH default shell is cmd.exe; the unescaped `|` pipes leak to cmd.exe (the
+  bash→ssh→cmd.exe→powershell three-layer quoting hazard `scripts/lib/win-ssh-exec.sh`'s header
+  already documents + solves with `-EncodedCommand`). So the read returned non-tail noise, every
+  source extracted `received=none` → UNKNOWN → **INCONCLUSIVE on every attempt of every run since the
+  tap landed (issue 1233)** — the `[4c/8]` frozen-camera ABORT gate silently never bit; only the
+  downstream QR sweep protected. Systematic, not a one-off: CI runs 33513175938 + 33496993951 +
+  33477674434 + 33472532087 + 33464013809 are ALL identical 4/4 INCONCLUSIVE `prev=none curr=none`.
+- **Proven it is the READ, not absent lines:** live strih (win-strih MCP, read-only) has 84934
+  `genlock-fifo audit` lines with `NDI cam1`..`NDI cam7` names matching the gate's derived set; the
+  audit lines were present with advancing counters during the exact failing window (same still-open
+  log file); on-box `gc -Tail 800 | Select-String "genlock-fifo audit 'NDI cam1': "` = 27 matches;
+  and `win_ssh_run` (which uses `-EncodedCommand`) reads strih fine in the SAME failing run ([0/8]
+  visibility gate + [4h/8pre] phase-sync). Only the naive quoting fails.
+- **Fix (`scripts/lib/mv-reverify-escalate.sh` `mv_reverify_probe_raw`, the SHARED read used by the
+  [4c/8] gate + the issue-1093 mv-reverify escalation + the issue-1052 frozen-input watchdog):**
+  invoke PowerShell via `-EncodedCommand` (base64 UTF-16LE) — pure ASCII, cmd.exe-proof; PowerShell
+  decodes back to the exact `gc/gci ... -Tail N` command, pipes intact. Inlined the `iconv|base64`
+  encode (NOT sourced win-ssh-exec.sh, whose top-level `set -euo pipefail` would leak strict mode
+  into non-strict callers). Kept the `MV_REVERIFY_RECEIVED_CMD` stub short-circuit + `2>/dev/null || true`.
+- **Review response (0🔴 1🟡 3🔵, all fixed same branch):** guarded `_enc="$(...)" || _enc=""`
+  (never abort a bare set-e caller — this lib's own never-abort contract); numeric-clamped
+  `MV_REVERIFY_RECEIVED_TAIL` (non-digit→400) so the override can't inject into the encoded payload;
+  test asserts `-NoProfile -NonInteractive -EncodedCommand`.
+- **RED→GREEN:** `tests/harness_received_tap_encoded_command_1258.rs`
+  (`received_tap_uses_encoded_command_not_naive_quoting_1258` RED on `ca92bc738`, GREEN on `8642a2b5d`;
+  review hardening `4e580cbd5`). Tier-0 verified (no cargo per #557, no ssh-to-strih per win-ssh-vs-mcp):
+  fake-sshpass-on-PATH replica shows naive→`-Command "gc` (RED), fixed→`-EncodedCommand` decoding
+  exactly to the tail command for both -Tail 400 and the frozen-cam -Tail 800 override; a malicious
+  tail override clamps to 400 (no injection); `bash -n` OK, `shellcheck -S warning` clean, `cargo fmt
+  --all --check` clean. Definitive end-to-end proof is the next E2E run showing ALIVE/FROZEN not
+  INCONCLUSIVE (verified-by-composition: win_ssh_run -EncodedCommand works vs strih + on-box gc -Tail
+  returns the lines).
+- **NOTE (out of scope, not filed):** the SAME naive-form read exists in ~7 other places
+  (asio/ndi-halving/cadence/mv-fps watchdogs — mostly DISABLED — plus `scripts/lib/mv-fps-preflight.sh`
+  which is live in `[4d1/8]` and showed the same could-not-classify blind read in run 33513175938, and
+  `scripts/rig-health-audit.py`, and frozen-input-alert-watchdog.sh's own inline enumeration read at
+  line 152). Filed the fleet-wide sweep as **#1259** (cross-cutting); this fix repaired only the
+  shared `mv_reverify_probe_raw` (the [4c/8] path + the two consumers that reuse it).
+
 ## 2026-08-27 — #1212 (retire the issue-1110 large-area MV-fps sentinel + median-window gate) — worktree worktree-agent-a8e1b09897821d8d9, base 78b03412f (the issue-1110 merge)
 
 - **Reverses a change merged ~20 min earlier (issue 1110, `78b03412f`).** Issue 1110 made
