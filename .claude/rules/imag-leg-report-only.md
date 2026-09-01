@@ -76,6 +76,30 @@ rig-side extract is healthy so imag partials flow (a live E2E — supervisor/rig
 accumulate green imag runs, (3) flip `gates_overall_pass()` to `true`, and (4) fold in the issue-887
 produced-vs-presented ~7% deficit as a blocking term. Do NOT flip it blind.
 
+### 2026-09-01 data-first status (issue 1094 STEP-0) — observer effect GONE, but the CONTENT terms are still red for a DIFFERENT reason; do NOT read `imag_burn_ok=False` as real loss
+
+Mined the 3 green 7-cam verdicts of the first stable series (674135238 / 1363366080 / 1168855508).
+The issue-1143 VAAPI encoder fix is confirmed live IN the E2E runs: `record_render_lagged_pct` is
+now 0.0–0.3% (was ~18.4% under x264) and `imag_optical_stuck_density` fell to 0.004–0.045 (was
+~0.195). So the #1130 observer effect is genuinely gone. BUT `content_gates_overall_pass` still
+`false` and `imag_content_pass` still `False` in all 3 — because **`imag_burn_ok` is `False` in
+every run (~50–53% of burn IDs "missing"), and that is a burn-CADENCE / metric-interpretation
+mismatch on the swapped imag box, NOT frame loss and NOT the observer effect.** On the new box the
+imag burn counter steps ~3 IDs/frame (e.g. span 843742→901990 = 58248 over 19513 expected ≈
+2.985/frame) and the "missing" IDs follow a clean stride-6-dominant pattern (`imag_burn_present_ok`
+true, `burn_unreadable` 0) — random loss would not. The optical-beat term is also not stably green
+(`imag_optical_beat_pass` True in only 1/3; `imag_optical_beat_net_zero` False in all 3).
+
+Consequence for whoever picks up the flip: the healthy CONTENT baseline for the new box has never
+been characterized, so the raw `imag_burn_ok`/beat booleans are not yet meaningful as a gate.
+Flipping `content_gates_overall_pass()` (or folding the #887 `hdmi1_repeated_frames` deficit)
+blocking today would RED every currently-green run. The remaining preconditions live in issue 1144
+(OPEN) — (2) characterize the healthy burn/beat baseline from a clean post-fix run, and (3) a
+deliberately-misconfigured-camera (1/60-shutter) discrimination run, which does not exist yet — and
+both need LIVE rig E2E runs (supervisor/rig-ops scope), never a blind flip off today's red content
+terms. Recalibrating the burn-contiguity metric to the new-box ~3/frame cadence is itself part of
+(2), not a threshold to widen so the red simply passes.
+
 ## The 0/76 root cause was the decode CPU-PIN, not StopRecord/reachability/decode (issue 1094, FIXED)
 
 The `[8/8c]` extract ran `recording-verdict-on-imag.sh`, whose `build_onimag_command` hardcoded

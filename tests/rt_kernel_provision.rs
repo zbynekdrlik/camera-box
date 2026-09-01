@@ -177,6 +177,20 @@ fn step_command_maps_known_tokens_and_flags_unknown() {
         out.contains("remount,rw") && out.contains("remount,ro"),
         "wraps the ro remount"
     );
+    // #899 lane 4: the cam-box appliance image mounts /var/cache (512M) and /tmp (100M) as tmpfs.
+    // The lowlatency-hwe install (~242MB archives + a new HWE generic image) overflows /var/cache,
+    // and the kernel postinst's in-line initramfs build (~78MB initrd) overflows /tmp -- the
+    // supervisor hit both live on cam1/2/3 (issue-899 comment 2026-08-22). The generated command
+    // must cache .debs and build the initrd on the ample rootfs so a copy-paste run on cam4 (the one
+    // box left to upgrade) does not fail the same way.
+    assert!(
+        out.contains("Dir::Cache::archives=/root/apt-tmp"),
+        "install caches .debs on the rootfs (/var/cache is a 512M tmpfs): {out}"
+    );
+    assert!(
+        out.contains("TMPDIR=/root/tmpbig"),
+        "install builds the initrd on the rootfs (/tmp is a 100M tmpfs): {out}"
+    );
 
     // The purge MUST be a supervisor note that never blanket-purges generic (that would remove the
     // new running kernel), and must call out the --allow-change-held-packages requirement.
@@ -206,6 +220,19 @@ fn step_command_maps_known_tokens_and_flags_unknown() {
     assert!(
         confirm.contains("preempt=full"),
         "confirm checks preempt=full is active: {confirm}"
+    );
+
+    // #899 lane 4: safe-grub-regen runs update-initramfs + update-grub, both of which build in /tmp
+    // (a 100M tmpfs on the appliance) -- must redirect TMPDIR to the ample rootfs so the initrd
+    // build does not overflow /tmp (supervisor finding 2026-08-22).
+    let (_c, regen, _e) = run_sourced("rt_kernel_step_command safe-grub-regen");
+    assert!(
+        regen.contains("TMPDIR=/root/tmpbig"),
+        "safe-grub-regen builds the initrd on the rootfs (/tmp is a 100M tmpfs): {regen}"
+    );
+    assert!(
+        regen.contains("update-grub"),
+        "safe-grub-regen still runs update-grub: {regen}"
     );
 
     let (_c, bogus, _e) = run_sourced("rt_kernel_step_command not-a-real-token");

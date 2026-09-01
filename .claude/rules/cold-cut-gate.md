@@ -58,3 +58,28 @@ receiver DOWN: clear its `ndi_source_name` (the same idle discipline `obs_phase2
    PossibleSegfaultWindow, not a genuine cold-cut miss) to exclude a startup-segfault confound.
    All of this is Tier-0 unit-tested in `src/cold_cut.rs`; the flip itself is a one-line change to
    `gates_overall_pass()`.
+
+## Status of the prerequisites (2026-09-01, issue #1086 data-mine)
+
+Mined all 44 local `verdict-*.json` incl. the first 3-run green 7-cam series (1363366080 /
+1168855508 / 674135238):
+
+- **Prereq 1 (warm baseline) — DONE.** Every cold transition across all 44 verdicts is WARM
+  (keep-alive receiver never goes cold): worst wake-up 16.09-47.38 ms, never `any_wakeup_over_max`
+  / `any_wakeup_missing`. So the report-only `WAKEUP_LATENCY_MAX_NS = 66.67 ms` is validated
+  warm-safe — but UNvalidated for the genuine-cold direction it guards.
+- **Prereq 3 (per-cambox tick-decodability) — DONE.** All 7 camboxes decode the shared cam2 Vernier
+  tick in the green series (`undecodable` 0-1 of ~847 per window, populated `presentation_cadence`).
+  No box reads a healthy cold cut black.
+- **Prereq 2 (a genuine-cold run) — STILL OPEN.** No verdict anywhere used `COLD_CUT_BYPASS_CAM`;
+  it needs a rig write + a live E2E run (full-authority). In the CURRENT sweep only the re-appearing
+  boxes CAM1/CAM2/CAM3 get a 2nd cut, so the bypass target MUST be one of those (onset is measured
+  on the 2nd cut).
+- **Prereq 4 caveat — the onset-undecodable bound is NOT warm-calibratable.** A WARM cut can carry
+  a 1/30 optical-glitch undecodable onset frame (run 156174349 CAM2: a healthy 39 ms warm cut
+  flagged `genuine_cold_cut_miss`), so the current 0-tolerance criterion would FALSE-RED on a warm
+  glitch. The LIVE gate needs an onset-undecodable ALLOWANCE, and because a genuine cold onset's
+  first frame(s) are legitimately undecodable during rebind, that allowance is coupled to the cold
+  wake-up — calibrate it WITH the genuine-cold run, never from warm-only data (same trap as the
+  wake-up ceiling). The sustained-fps floor (27.0 = 30 − 3) is warm-safe: healthy min is
+  CAM3/CAM7 ~29.2-29.5, so keep the floor ≤ ~29.2.
