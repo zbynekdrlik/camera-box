@@ -46,8 +46,9 @@ genuinely disagreeing runs.
 
 It auto-discovers the three stage artefacts by their standard names inside the run dir:
 `qr-align-jitter-<RUN>.json`, `qr-align-strih-<RUN>.log`, `cam*-cbox-burn-<RUN>.log`. Override with
-`--jitter-json` / `--strih-log`; restrict cameras with `--cameras "1,2,3"`; the strih source template
-is `--source-template "NDI cam{n}"` (the current 1:1 rig NDI mapping).
+`--jitter-json` / `--strih-log`; restrict cameras with `--cameras "1,2,3"`. The strih source name is
+FIXED at `NDI cam{n}` (the current 1:1 rig NDI mapping) — NOT a CLI knob, because the reused
+`arrival_floors_from_jitter` hardcodes that naming, so any other template resolves zero floors.
 
 ## The model — algebraic, NOT fitted (do not "improve" it into a curve fit)
 

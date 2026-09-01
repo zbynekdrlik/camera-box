@@ -422,6 +422,9 @@ def mine_run_dir(run_dir, cameras=None):
         jitter_json = json.loads(pathlib.Path(d_jit).read_text(errors="replace"))
     except json.JSONDecodeError:
         return None
+    if not isinstance(jitter_json, dict):
+        return None  # a well-formed but non-object artefact (bare 42/null/list) -> honest None,
+        #              never a crash mid-sweep (the genlock-jitter-report shape is always an object)
     return _decompose_artefacts(jitter_json, d_strih, burns, cameras)
 
 
@@ -473,8 +476,12 @@ def _render_multi(agg, runs):
     """Human-readable --multi report: header, per-run digest, per-camera aggregate table (ordered
     by median floor), and the STABILITY verdict."""
     lines = []
-    lines.append("MULTI-RUN arrival-floor aggregate: %d dir(s) scanned, %d usable, %d empty(phantom)"
-                 % (agg.get("n_dirs_scanned", len(runs)), agg["n_usable"], agg["n_empty"]))
+    # honest accounting: scanned == usable + skipped + phantom + stratified-out. n_phantom_mined is
+    # the CLI-tracked count (empty runs are dropped BEFORE aggregate(), so agg["n_empty"] is 0 here).
+    lines.append(
+        "MULTI-RUN arrival-floor aggregate: %d dir(s) scanned, %d usable, %d phantom, %d stratified-out"
+        % (agg.get("n_dirs_scanned", len(runs)), agg["n_usable"],
+           agg.get("n_phantom_mined", agg["n_empty"]), agg.get("n_stratified_out", 0)))
     if agg.get("n_skipped_no_data"):
         lines.append("  (%d dir(s) skipped: no valid qr-align-jitter-*.json)" % agg["n_skipped_no_data"])
 
@@ -528,23 +535,27 @@ def _run_multi(args, ap):
         ap.error("--multi needs run dirs: pass --run-dir <dir> (repeatable) and/or --runs-glob PATTERN")
 
     cam_nums = _parse_cameras(args, ap)
-    runs, n_skipped, n_phantom = [], 0, 0
+    runs, n_skipped, n_phantom, n_stratified = [], 0, 0, 0
     for d in ordered:
         res = mine_run_dir(d, cam_nums)
         if res is None:
-            n_skipped += 1
+            n_skipped += 1                    # no valid jitter JSON at all
             continue
         if not res.get("rows"):
-            n_phantom += 1
+            n_phantom += 1                    # mined, but every camera #1253-phantom
+            continue
         if not _keep_run(res, only_uniform=args.only_uniform, min_cameras=args.min_cameras):
+            n_stratified += 1                 # dropped by --only-uniform / --min-cameras
             continue
         rid = os.path.basename(d.rstrip("/")).replace("recording-e2e-", "")
         runs.append((rid, res))
 
+    # accounting closes exactly: scanned == usable + skipped + phantom + stratified-out.
     agg = aggregate(runs)
     agg["n_dirs_scanned"] = len(ordered)
     agg["n_skipped_no_data"] = n_skipped
     agg["n_phantom_mined"] = n_phantom
+    agg["n_stratified_out"] = n_stratified
 
     if args.as_json:
         print(json.dumps(agg, indent=2, sort_keys=True))
