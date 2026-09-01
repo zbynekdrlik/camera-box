@@ -19,6 +19,7 @@
 //!   * `probe_received` (scripts/frozen-input-alert-watchdog.sh) -- the stream frozen-input tap;
 //!   * `extract_sample` (scripts/cadence-alert-watchdog.sh) -- the non-60 cadence tap (#1259-added,
 //!     same ps_encoded_command fetch mechanism, same `received=` family).
+//!
 //! Plus one DEFENSIVE hardening (not independently reproducible as RED via a Tier-0 pipe fixture --
 //! GNU grep's `-o`/piped-stdin binary-detection heuristic did not trigger on any fixture size tried
 //! here, though the SAME grep binary DOES flag an identical byte via a direct file argument, proving
@@ -34,7 +35,7 @@
 //! pure command-builder, extended to pipe a byte fixture as the sourced function's stdin/arg.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn manifest_dir() -> PathBuf {
@@ -79,7 +80,7 @@ fn raw_tail_fixture() -> Vec<u8> {
     v
 }
 
-fn write_fixture(dir: &PathBuf) -> PathBuf {
+fn write_fixture(dir: &Path) -> PathBuf {
     let f = dir.join("fixture.bin");
     fs::write(&f, raw_tail_fixture()).unwrap();
     f
