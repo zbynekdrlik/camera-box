@@ -44,6 +44,15 @@ SECOND real fixture (`recording-e2e-659887078`, anchor cam4 / slowest cam2) that
 first (`recording-e2e-1363366080`, anchor cam3 / slowest cam1) so the smoke test folds two
 genuinely disagreeing runs.
 
+**Known limitation (issue 1168 review):** `--multi` has NO align-set / per-camera EXCLUSION, so it
+aggregates ALL cameras incl. cam2 (the projection probe, excluded from the align gate). The align-set
+floor view (cam2-excluded) — the one that matters for `[4i/8align]` budget-bound reasoning — is not a
+direct tool output; get it supervisor-side by filtering the `--multi --json` `per_camera` map (drop
+`NDI cam2`) or by post-processing each `mine_run_dir` result's rows. And the FLOOR spread this tool
+reports is a WIDER instrument than the align gate's own `report_only_residual_ms` (the barrier
+present-age residual, CI-log only) — when reasoning about the gate, cite the GATED barrier residual,
+not this floor spread (they disagree; `qr-align.md`).
+
 It auto-discovers the three stage artefacts by their standard names inside the run dir:
 `qr-align-jitter-<RUN>.json`, `qr-align-strih-<RUN>.log`, `cam*-cbox-burn-<RUN>.log`. Override with
 `--jitter-json` / `--strih-log`; restrict cameras with `--cameras "1,2,3"`. The strih source name is
@@ -119,11 +128,24 @@ transport-degraded / rate-halving run (transport NOT uniform, spread 120–191 m
   does NOT hold in aggregate.)
 
 **Task-2 target recommendation (data-backed):** there is NO single stable "slowest box" to optimize —
-so do NOT chase one run's slowest. Two stable, actionable levers instead: (1) align cam2's strih
-`latency_ms=6` pin down to 3 ms (deterministic −3 ms, config only, zero grabber work); (2) treat the
-residual ~8 ms median band as a FLEET-WIDE grabber-skew difference relative to the cam4/cam5 reference
-(the stable anchors — match the non-cam4/cam5 boxes' grabber/format/NDI config toward them), never a
-single-box fix. And re-shape task 3: the run-level transient spread (up to ~49 ms even in the clean
-regime) is what a hard-fail `[4i/8align]` re-tighten must budget for — the aligner's report-only
-residual (issue 1161) reflects that transient band, not a fixed per-box offset. Re-run `--multi` after
-each reduction attempt to confirm the median band and cam2 pin actually moved.
+so do NOT chase one run's slowest. Two stable levers were named: (1) align cam2's strih `latency_ms=6`
+pin down to 3 ms (deterministic −3 ms, config only); (2) the residual ~8 ms median band as a fleet
+grabber-skew difference vs the cam4/cam5 anchors. Re-run `--multi` after each reduction attempt.
+
+**OUTCOME (issue 1168, worktree lane 2026-09-01) — what actually landed + the reshaping:**
+- **Lever 1 DONE (code):** `latency-pins-baseline.json` `NDI cam2` 6→3 (cam2 is the projection probe,
+  EXCLUDED from the align set, so the aligner never floors it — 6 was the only leftover non-floor pin).
+  Supervisor applies live + re-verifies cam2's A/V. Does NOT move the `[4i/8align]` residual (cam2 not
+  in the align gate) — it drops cam2 as the marginal steady slowest in THIS decompose.
+- **Lever 2 is NOT a clean config lever — it is grabber MODEL + per-box variance (deferred to a rig
+  investigation).** Grabber map (run 1556876186): cam1=Cam Link 4K, cam3=ShadowCast 2, cam4=NZXT Signal
+  HD60 (anchor), cam5=Cam Link 4K (anchor), cam6/cam7=Cam Link 4K. The two anchors are DIFFERENT models,
+  and three IDENTICAL Cam Link 4K boxes (cam5/6/7) still span ~3 ms of the band — so "match grabber
+  config toward cam4/cam5" is not a single well-defined lever; it is a per-box rig task.
+- **The ~50 ms was a mis-frame; the align-gate residual is the N=2 QUANTUM, not a floor gap.** Mining
+  the live align status of every green run: `report_only_residual_ms` ≈ 2 source frames (~33 ms), which
+  ANTI-correlates with the floor — so NEITHER lever reduces it. Task 3 therefore landed as a
+  TRANSIENT/QUANTUM-BOUNDED re-tighten (`budget_bound_verdict`, `DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS=45`),
+  not the naive "reduce floors then hard-fail on any residual" the ticket first envisioned. See
+  `qr-align.md` "Re-tighten (issue 1168)". Re-arm (lower the budget toward parity) only once the N=2
+  quantum itself is addressed — floor reduction alone will not move it.

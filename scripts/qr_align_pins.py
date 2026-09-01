@@ -135,6 +135,29 @@ MIN_FLOOR_SAMPLES = 3
 # is the discriminator: a spread that rounds to <= 1 source frame is the quantum, >= 2 is real.
 SOURCE_FRAME_MS = 1000.0 / 60.0                      # ~16.667 ms (one 60 fps source frame)
 DEFAULT_ALIGNED_QUANTUM_MS = 1.5 * SOURCE_FRAME_MS   # ~25.0 ms cross-camera spread = still aligned
+
+# issue 1168 RE-TIGHTEN: the transient/quantum budget that splits the BUDGET-BOUND branch (a run whose
+# additive alignment target exceeds the 94 ms ceiling) into a report-only soft-release (residual WITHIN
+# the budget -- the issue-1161 behaviour, preserved) vs a HARD-FAIL (residual BEYOND it).
+# DATA-CITED against the GATED QUANTITY -- the barrier present-age residual `report_only_residual_ms`
+# (`worst` from round_deltas), NOT the jitter-audit floor spread (a DIFFERENT instrument that reads
+# WIDER; see qr-align.md "Mining the align STATUS"). Every reachable green pull_request E2E run is
+# status=budget-bound with this residual at CONSISTENTLY ~2 source frames (~33 ms -- the N=2 60->30
+# lock-phase QUANTUM, issue 1252): live CI 33513175938/33472532087/33464013809 = 33.6/33.2/33.4 ms
+# (max 33.6; reproduce with `gh api repos/zbynekdrlik/camera-box/actions/jobs/<jid>/logs | grep -a
+# report_only_residual_ms`). So 45 ms sits a full source frame ABOVE the observed gated residual band
+# (max 33.6 + ~11 ms headroom, so NO clean run false-fails) and BELOW 3 source frames (~50 ms) and the
+# 4-source-frame 66 ms spread sanity -> a HARD-FAIL ONLY on a residual >= ~3 source frames, a
+# genuinely-worse cross-camera misalignment neither the quantum nor the observed floor lottery explains.
+# CONTEXT (corroborating, NOT the gated quantity): the full-fleet arrival-floor spread is ~8 ms median /
+# ~49 ms run-level MAX over the clean regime (`arrival_floor_decompose.py --multi --only-uniform
+# --min-cameras 7`, 29 runs 2026-08-28..09-01) -- that ~49 ms is the FLOOR spread incl cam2 + transient
+# DQBUF episodes, a wider instrument than the barrier residual, so it does NOT imply a 49 ms gated
+# residual (the gated barrier residual stays bounded at ~2 frames; cam2 is the widest floor and is
+# EXCLUDED from the align gate entirely, issue 1216). RE-ARMABLE: a future ticket LOWERS this toward
+# the <=1-id parity gate once the N=2 quantum ITSELF is addressed (floor reduction alone does NOT shrink
+# it -- the residual anti-correlates with the floor). --align-retighten-budget-ms overrides it either way.
+DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS = 45.0
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
 DEFAULT_SETTLE_S = 4.0        # let the genlock FIFO re-lock after a pin change before re-measuring
@@ -553,9 +576,44 @@ def budget_bound_report(over_budget, residual_ms, max_abs_latency_ms=DEFAULT_MAX
         + over_budget_arithmetic(over_budget, max_abs_latency_ms)
         + " -- correcting these needs a pin above the achievable-latency ceiling (the deep-pin "
         "doctrine forbids it), so NO alignment pin is applied and the align set stays at its natural "
-        f"floor. REPORT-ONLY RESIDUAL: cross-camera spread ~{residual_ms:.0f}ms survives -- tracked in "
-        "issue 1168 (reduce the per-box arrival floors, then RE-TIGHTEN [4i/8align] to hard-fail). The "
-        "run PROCEEDS (exit 0); the residual is NOT accepted as aligned, and no bound is widened.")
+        f"floor. REPORT-ONLY RESIDUAL: cross-camera spread ~{residual_ms:.0f}ms survives (within the "
+        "transient budget) -- tracked in issue 1168. The run PROCEEDS (exit 0); the residual is NOT "
+        "accepted as aligned, and no bound is widened.")
+
+
+def budget_bound_verdict(residual_ms, retighten_budget_ms=DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS):
+    """issue 1168 RE-TIGHTEN. A BUDGET-BOUND run (>=1 faster camera's additive alignment target
+    exceeds the 94 ms ceiling) is NO LONGER an unconditional soft-release -- it splits by whether the
+    surviving cross-camera residual is within the transient/quantum budget:
+    - residual <= budget -> "report-only": the residual is the structural N=2 lock-phase quantum
+      (~2 source frames ~33 ms, issue 1252) + the observed per-box floor lottery (clean-regime max
+      ~37 ms across 29 runs); SOFT-RELEASE, exit 0 (the issue-1161 behaviour, preserved for the band).
+    - residual > budget -> "hard-fail": the residual is BEYOND the observed quantum+transient band
+      (>= ~3 source frames), a genuinely-worse cross-camera misalignment the quantum/floor lottery
+      does NOT explain; ABORT the run (the issue-1168 re-tighten).
+    PURE (no I/O), Tier-0-testable. A None residual (missing measurement) is treated as report-only --
+    NEVER fabricate a fail from an absent measurement (the honest-None discipline)."""
+    if residual_ms is None:
+        return "report-only"
+    return "hard-fail" if residual_ms > retighten_budget_ms else "report-only"
+
+
+def budget_bound_hard_fail_report(over_budget, residual_ms, retighten_budget_ms,
+                                  max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS):
+    """The LOUD, named ABORT block for the issue-1168 RE-TIGHTEN hard-fail: a BUDGET-BOUND residual
+    that EXCEEDS the transient budget. Reuses over_budget_arithmetic so the per-camera arithmetic
+    reads identically to the soft-release block, then states the residual vs the budget in source
+    frames (the discriminator) -- this is a genuinely-worse misalignment, NOT the tolerated quantum."""
+    frames = residual_ms / SOURCE_FRAME_MS
+    return (
+        "[qr-align] #1168 RE-TIGHTEN HARD-FAIL: the alignment is budget-impossible AND the surviving "
+        f"cross-camera residual {residual_ms:.1f} ms ({frames:.1f} source frames) EXCEEDS the transient "
+        f"budget {retighten_budget_ms:.0f} ms -- beyond the ~2-frame N=2 60->30 lock-phase quantum "
+        "(issue 1252) and the observed clean-regime floor lottery, so this is a genuinely-worse "
+        "cross-camera misalignment, NOT the tolerated quantum: "
+        + over_budget_arithmetic(over_budget, max_abs_latency_ms)
+        + ". Investigate the per-box arrival floor / cambox grabber (issue 1168); do NOT widen this "
+        "budget or the 94 ms ceiling. The run is ABORTED.")
 
 
 def floor_aware_stuck_abort_reason(plan, arrival_floors, post_pins, post_deltas,
@@ -1189,7 +1247,8 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
           min_parity_rounds, max_delta_ms, parity_tol_ids, floor_ms, width, height,
           measure_budget_s, max_measure_rounds, settle_s,
           stable_outlier_tol_ids=DEFAULT_STABLE_OUTLIER_TOL_IDS,
-          jitter_json=None, max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, saver=None):
+          jitter_json=None, max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS,
+          retighten_budget_ms=DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS, saver=None):
     """The full per-run alignment: measure to a STABLE TAIL (#1160) -> (already aligned? PASS) ->
     FLOOR-AWARE plan from the tail (#1161) -> sanity -> apply (execute) -> settle -> RE-MEASURE to a
     stable tail -> PASS iff parity holds. The verdict is always computed from the stabilized tail,
@@ -1385,7 +1444,19 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
                  "target_ms": round(t, 1), "bound_ms": max_abs_latency_ms}
                 for s, fl, hl, t in over_budget]
             result["report_only_residual_ms"] = round(worst, 1)
-            # Report-only: the loud budget_bound_report() marker above + the persisted over_budget
+            result["retighten_budget_ms"] = retighten_budget_ms
+            # issue 1168 RE-TIGHTEN: split the budget-bound branch by whether the surviving residual is
+            # within the transient/quantum budget. WITHIN -> the issue-1161 soft-release (report-only,
+            # exit 0). BEYOND -> a genuinely-worse cross-camera misalignment (>= ~3 source frames, not
+            # the tolerated N=2 quantum) -> HARD-FAIL via AlignmentImpossible (the SAME abort mechanism
+            # every other hard-fail path uses; the per-round table aids the post-mortem). Never widens
+            # the 66 ms sanity or the 94 ms ceiling.
+            if budget_bound_verdict(worst, retighten_budget_ms) == "hard-fail":
+                _emit_fail_diagnostics(rounds_ticks, sources, tail_start)
+                raise AlignmentImpossible(
+                    budget_bound_hard_fail_report(over_budget, worst, retighten_budget_ms,
+                                                  max_abs_latency_ms))
+            # Report-only: the loud budget_bound_report() marker below + the persisted over_budget
             # / report_only_residual_ms JSON fully surface the residual; the per-round frame_id table
             # (_emit_fail_diagnostics) is a FAIL-path debugging aid, not emitted on this PASS (#1161 review).
             sys.stderr.write(budget_bound_report(over_budget, worst, max_abs_latency_ms) + "\n")
@@ -1507,6 +1578,13 @@ def main(argv=None):
     ap.add_argument("--max-abs-latency-ms", type=float, default=DEFAULT_MAX_ABS_LATENCY_MS,
                     help="#1161 absolute achievable-latency ceiling; a target above it FAILs loud "
                          "(transport floor too high) rather than deep-pinning (default 94)")
+    ap.add_argument("--align-retighten-budget-ms", type=float,
+                    default=DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS,
+                    help="issue 1168 re-tighten: a BUDGET-BOUND surviving residual ABOVE this HARD-FAILs "
+                         "the run; at/below it soft-releases (report-only). Default = the observed "
+                         "~2-source-frame N=2 quantum band + headroom; LOWER it toward the parity gate "
+                         "as the quantum improves (default 45). A value >= --max-delta-ms disarms the "
+                         "re-tighten (the spread sanity gate aborts first) -- a WARNING is emitted then.")
     # #1209: persist the raw PNG of any UNDECODABLE align screenshot into this dir (the caller passes
     # the run dir, e.g. recording-e2e's OUTDIR -- the same "caller supplies a path" convention as
     # --jitter-json), so a reproducible [4i/8align] abort can be root-caused from pixels. Absent =
@@ -1527,6 +1605,15 @@ def main(argv=None):
     sources = [s.strip() for s in a.sources.split(",") if s.strip()]
     if not sources:
         raise SystemExit("[qr-align] --sources is empty")
+
+    # issue 1168 review 🔵: a re-tighten budget >= the spread sanity DISARMS the hard-fail (the 66 ms
+    # sanity gate aborts first, so the budget-bound hard-fail branch is unreachable). Warn LOUD rather
+    # than silently claim "a residual above it hard-fails".
+    if a.align_retighten_budget_ms >= a.max_delta_ms:
+        sys.stderr.write(
+            f"WARNING: [qr-align] #1168 --align-retighten-budget-ms {a.align_retighten_budget_ms:.0f} >= "
+            f"--max-delta-ms {a.max_delta_ms:.0f}: the re-tighten hard-fail is DISARMED (the spread sanity "
+            "gate aborts a wider spread first, so no budget-bound residual can exceed this budget).\n")
 
     if a.reset_to_floor:
         n = reset_pins_to_floor(sources, a.host, a.password, a.floor_ms)
@@ -1555,7 +1642,8 @@ def main(argv=None):
             max_delta_ms=a.max_delta_ms, parity_tol_ids=a.parity_tol_ids, floor_ms=a.floor_ms,
             width=a.width, height=a.height, measure_budget_s=a.measure_budget_s,
             max_measure_rounds=a.max_measure_rounds, settle_s=a.settle_s,
-            jitter_json=jitter_json, max_abs_latency_ms=a.max_abs_latency_ms, saver=saver)
+            jitter_json=jitter_json, max_abs_latency_ms=a.max_abs_latency_ms,
+            retighten_budget_ms=a.align_retighten_budget_ms, saver=saver)
     finally:
         # #1209: surface the persisted-screenshot summary on BOTH the success and the
         # AlignmentImpossible abort paths (near the 'decoded per camera:' diagnostics), so the run
@@ -1584,13 +1672,16 @@ def main(argv=None):
         print(f"[qr-align] host={a.host} ALIGNED: set {result['plan']}, re-measured spread "
               f"{result['post_spread_ids']} id (<= {a.parity_tol_ids}); {tail}.", file=sys.stderr)
     elif status == "budget-bound":
-        # #1161 / issue 1168: the correction is physically budget-impossible; PASS with a report-only
-        # residual, exit 0 (the E2E proceeds). The JSON above carries over_budget + report_only_residual_ms.
+        # #1161 / issue 1168: the correction is physically budget-impossible AND the surviving residual
+        # is WITHIN the transient budget (a residual ABOVE it now HARD-FAILs via AlignmentImpossible and
+        # never reaches here) -> PASS with a report-only residual, exit 0 (the E2E proceeds). The JSON
+        # above carries over_budget + report_only_residual_ms + retighten_budget_ms.
         over = ", ".join(o["source"] for o in result.get("over_budget", []))
         print(f"[qr-align] host={a.host} BUDGET-BOUND (issue 1168): correction budget-impossible for "
               f"{over} (target > {a.max_abs_latency_ms:.0f}ms ceiling); no pins applied, report-only "
-              f"residual ~{result.get('report_only_residual_ms')} ms survives; {tail}. Re-tighten to "
-              "hard-fail is tracked in issue 1168 (reduce per-box arrival floors first).",
+              f"residual ~{result.get('report_only_residual_ms')} ms survives WITHIN the "
+              f"{a.align_retighten_budget_ms:.0f} ms transient budget (issue 1168 re-tighten: a residual "
+              f"ABOVE it hard-fails); {tail}.",
               file=sys.stderr)
     return 0
 

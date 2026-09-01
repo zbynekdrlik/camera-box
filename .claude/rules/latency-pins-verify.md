@@ -135,10 +135,16 @@ carries the concrete values. When promoting/re-tuning pins, `grep -n "NDI cam1" 
 run `pytest tests/python/test_latency_pins_verify.py` before pushing (Tier-0: pytest runs freely,
 no cargo). #1003's deep promotion changed strih 3/6/20→90/160/184 + stream 915→791 and updated this
 fixture; the owner-rework REVERT (`0aaa2fc93`) then changed the baseline VALUES back to 3/6/20 + 915
-but LEFT this fixture (and `test_apply_latency_pins_1003.py::TestPromotedBaseline`) asserting the
+but LEFT this fixture (and `test_apply_latency_pins_1003.py`'s reverted-baseline class) asserting the
 deep numbers — a classic incomplete-revert dangling test. Both were re-pointed to the reverted
-shallow set as part of the floor-3 rework. Lesson restated: a baseline-VALUES change (either
-direction) must update this fixture in the SAME change.
+shallow set as part of the floor-3 rework. **issue 1168 lever 1 (2026-09-01)** then re-tuned cam2
+6→3 (the projection probe's leftover pin — cam2 is EXCLUDED from `CAMERA_ALIGN_SET`, issue 1216, so
+the per-run aligner never floors it), current strih baseline **3/3/20**, and updated exactly two
+file-reading fixtures in the same change: `test_main_drift_exits_1_clean_exits_0`'s clean/drift reads
+and `test_apply_latency_pins_1003.py`'s two reverted-baseline assertions (the ~38 OTHER `cam2:6`
+literals across the suite are independent test data — NOT the file — and were correctly left
+untouched). Lesson restated: a baseline-VALUES change (either direction) must update the file-reading
+fixture(s) in the SAME change, and ONLY those.
 
 ## Local verification of a `vendor/README.md` pin/doc edit — Tier-0 blocks `cargo test`
 
