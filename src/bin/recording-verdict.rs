@@ -5225,6 +5225,17 @@ fn build_and_print_verdict_with_stream_diffs(
                                         stats
                                     )),
                                 );
+                                // issue 1196 — the machine-checked per-window flip-readiness
+                                // (viability Observed + single-tile). Keyed after the PER-WINDOW fn
+                                // (window_promotable), distinct from the run-level tear.signal_promotable
+                                // below (the tear_gate_pass naming convention). REPORT-ONLY: gates
+                                // nothing, makes a known-torn calibration run auto-gradable.
+                                obj.insert(
+                                    "window_promotable".to_string(),
+                                    serde_json::json!(camera_box::tear_detect::window_promotable(
+                                        stats
+                                    )),
+                                );
                             }
                             v
                         })
@@ -5261,17 +5272,34 @@ fn build_and_print_verdict_with_stream_diffs(
                     report["all_cambox_continuity"]["tear"] = serde_json::json!({
                         "gates_overall_pass": camera_box::tear_detect::gates_overall_pass(),
                         "vernier_max_spread": camera_box::tear_detect::VERNIER_MAX_SPREAD,
+                        // issue 1196 — run-level machine-checked flip-readiness (any window
+                        // Observed a tear AND every window is single-tile) + the single-tile
+                        // promotion ceiling. NECESSARY but NOT SUFFICIENT for the flip: it reads
+                        // true on ~12/32 routine (NOT-known-torn) runs because a low background of
+                        // Observed single-tile tears (~0.001-0.004 tear_fraction, 1-3 frames/window)
+                        // occurs on green runs. REPORT-ONLY today.
+                        "signal_promotable": camera_box::tear_detect::signal_promotable(&tear_stats),
+                        "multi_path_suspect_ceiling":
+                            camera_box::tear_detect::MULTI_PATH_SUSPECT_CEILING,
                         "tear_gate": "report-only -- the tear span is the UNION of the primary \
                             dual-QR ids and the issue-1196 bottom aux tick pair's ids (span > \
-                            vernier_max_spread = >= 2 paint generations captured); the aux pair \
-                            gives the vertical redundancy the single-band primary content lacks \
-                            (a seam through the primary band alone reads undecodable, never two \
-                            clean generations -- see issue 781). Ships report-only with a computed \
-                            signal_viability plus aux_decode_fraction (aux chain-survival \
-                            coverage) and primary_dark_aux_alive_fraction (band-localized \
-                            corruption discriminator); flip gates_overall_pass to true only once \
-                            the signal is Observed on a known-torn run + a bound AND an \
-                            aux-coverage floor are calibrated from the mined real-frame fixture.",
+                            vernier_max_spread = >= 2 paint generations captured). Ships report-only \
+                            with a computed signal_viability plus the promotion property \
+                            signal_promotable (any window viability Observed + every window \
+                            multi_path_suspect_fraction <= multi_path_suspect_ceiling), and \
+                            report-only DIAGNOSTICS aux_decode_fraction (aux chain-survival \
+                            coverage) and primary_dark_aux_alive_fraction (band-localized corruption \
+                            discriminator). NOTE (real-data, 2026-09-01, mined across 44 local \
+                            verdicts): aux_decode_fraction is a DIAGNOSTIC, NOT a promotion floor -- \
+                            the CAM2 projection leg (which captures imag's HDMI scanout) decodes NO \
+                            aux marks, so its tears surface via the PRIMARY band; the aux pair \
+                            decodes only on the splitter legs. Observed single-tile tears occur at a \
+                            LOW background (~0.001-0.004, 1-3 frames/window) on green runs on BOTH \
+                            CAM2 and CAM3, so signal_promotable=true is NOT itself proof of a \
+                            known-torn run. Flip gates_overall_pass to true only once a tear_fraction \
+                            bound calibrated from a known-torn run's torn distribution -- which must \
+                            sit ABOVE this ~0.004 green background and cannot be 0.0 -- separates the \
+                            induced tear from that background (verdict-gate-seam-calibration.md).",
                         "windows": windows_json,
                     });
                     // Report-only fold (no-op while gates_overall_pass()==false): one-line LIVE flip.

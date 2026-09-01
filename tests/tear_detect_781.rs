@@ -14,7 +14,9 @@
 //! from the first rig run after the painter redeploy (a promotion precondition — see
 //! `.claude/rules/projection-tap-tear-detect.md`).
 
-use camera_box::tear_detect::{window_tear_stats, TearSignalViability};
+use camera_box::tear_detect::{
+    signal_promotable, window_promotable, window_tear_stats, TearSignalViability,
+};
 
 /// Parse a fixture file: one line per in-window captured frame, space-separated optical `frame_id`s
 /// (a blank line = an undecodable frame, no optical QR). `#`-prefixed lines are the provenance
@@ -71,6 +73,16 @@ fn real_cam2_window_is_tear_free_and_unproven() {
     assert_eq!(stats.primary_dark_aux_alive_fraction, 0.0);
     // The signal never fired on this real content -> Unproven, NOT a promotable Observed.
     assert_eq!(stats.viability, TearSignalViability::Unproven);
+    // issue 1196: real green content is NEVER promotable — an all-zero distribution cannot prove
+    // the signal works (the blind-signal trap). A LIVE flip must gate on a known-torn run.
+    assert!(
+        !window_promotable(&stats),
+        "real green content is not promotable"
+    );
+    assert!(
+        !signal_promotable(std::slice::from_ref(&stats)),
+        "a green run cannot promote the tear gate"
+    );
 }
 
 #[test]
@@ -100,6 +112,13 @@ fn a_synthetic_tear_spliced_into_the_real_window_is_detected() {
         TearSignalViability::Observed,
         "one real tear makes the signal Observed"
     );
+    // issue 1196: a real window with one observed single-tile tear IS promotable (the shape a
+    // known-torn calibration run must produce on the CAM2 projection leg).
+    assert!(
+        window_promotable(&stats),
+        "an observed single-tile tear on real content is promotable"
+    );
+    assert!(signal_promotable(std::slice::from_ref(&stats)));
 }
 
 #[test]
@@ -163,6 +182,14 @@ fn real_multitile_window_is_multi_path_skew_not_torn_1196() {
         TearSignalViability::Unproven,
         "a fully multi-tile window has no scoreable tear -> Unproven, never a false Observed"
     );
+    // issue 1196: a real MULTI-TILE window is NEVER promotable — both because it is Unproven AND
+    // because its suspect fraction (~0.998) is far above MULTI_PATH_SUSPECT_CEILING. The suspect
+    // ceiling is what keeps a multi-tile window from ever being promoted.
+    assert!(
+        !window_promotable(&stats),
+        "a multi-tile window is not promotable"
+    );
+    assert!(!signal_promotable(std::slice::from_ref(&stats)));
 }
 
 #[test]
