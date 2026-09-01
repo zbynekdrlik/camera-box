@@ -58,8 +58,8 @@ floor, it never proves loss.
 Pure decision core (`decompose`, `parse_streaming`, `parse_dqbuf_stalls`, `cap_avg_by_source`,
 `floors_and_fields`) with no I/O below the CLI, so `python3 -m pytest
 tests/python/test_arrival_floor_decompose_1168.py` gives a complete local RED→GREEN with zero cargo —
-the issue-1199/1203/1226 python-mirror precedent. The two real-data smoke tests skip when the green-run
-artefacts are absent.
+the issue-1199/1203/1226 python-mirror precedent. The two real-data smoke tests run over a COMMITTED fixture
+(`tests/fixtures/arrival_floor_1168/`), so they always run (test-strictness: no skips).
 
 ## Finding on the green series (as of 2026-09-01, verdicts 1363366080 / 1168855508)
 

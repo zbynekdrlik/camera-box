@@ -217,12 +217,14 @@ def test_attribute_supra_noise_but_subthreshold_is_mixed_not_within_noise():
     assert "mixed sub-threshold" in owner
 
 
-# --------------------------------------------------------------- real green-run smoke (skip if absent)
+# ------------------------------------------------- real green-run smoke (committed fixture, always runs)
 _RUN = "1363366080"
-_RUN_DIR = pathlib.Path(f"/tmp/recording-e2e-{_RUN}")
+_RUN_DIR = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "fixtures" / "arrival_floor_1168" / f"recording-e2e-{_RUN}"
+)
 
 
-@pytest.mark.skipif(not _RUN_DIR.is_dir(), reason="green-run artefacts not present on this box")
 def test_real_green_run_reproduces_cam1_grabber_and_cam2_strih_config():
     jj = json.loads((_RUN_DIR / f"qr-align-jitter-{_RUN}.json").read_text())
     strih = (_RUN_DIR / f"qr-align-strih-{_RUN}.log").read_text(errors="replace")
@@ -238,7 +240,6 @@ def test_real_green_run_reproduces_cam1_grabber_and_cam2_strih_config():
     assert "strih-config" in rows["NDI cam2"]["owner"].lower()
 
 
-@pytest.mark.skipif(not _RUN_DIR.is_dir(), reason="green-run artefacts not present on this box")
 def test_cli_runs_over_run_dir_and_prints_table_and_summary():
     out = subprocess.run(
         [sys.executable, str(_TOOL), "--run-dir", str(_RUN_DIR)],
