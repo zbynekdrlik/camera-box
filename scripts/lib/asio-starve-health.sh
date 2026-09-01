@@ -34,11 +34,19 @@
 #   UNKNOWN, never a false page). Pure text (no I/O). The trailing `'` in the fixed-string match
 #   anchors the exact name (`source 'mbc'` never matches a `source 'mbc2'` line). Always exits 0 (a
 #   grep no-match must be a normal "no sample this pass", not a pipeline failure under pipefail).
+#   #1262: `LC_ALL=C` on BOTH greps AND the sed -- `-a` alone already stops the "binary file
+#   matches" abort (a PS-5.1-ANSI-reencoded invalid byte from an adjacent genlock-fifo audit line
+#   glued onto this line at a transport-chunk boundary, #1258's root cause), but WITHOUT `LC_ALL=C`
+#   the sed's `.*` refuses to consume that invalid byte in a UTF-8 locale and returns GARBAGE (the
+#   whole glued line's leading text), not a clean empty string -- worse than "none", since a
+#   differently-byte-shaped garble would not by chance still contain the right digits. Verified
+#   live: on the adversarial fixture, `-a`-only extracts
+#   "...late_hold=0 (<0xA0>2946" (garbage); `LC_ALL=C` on both stages extracts "2946" (clean).
 asio_starve_parse_blocks() {
   local source="${1:-}" line blocks
-  line="$(grep -aF "asrc: source '$source'" 2>/dev/null | grep -aF 'starved_blocks=' | tail -1)" || true
+  line="$(LC_ALL=C grep -aF "asrc: source '$source'" 2>/dev/null | LC_ALL=C grep -aF 'starved_blocks=' | tail -1)" || true
   if [ -n "$line" ]; then
-    blocks="$(printf '%s\n' "$line" | sed -n 's/.*starved_blocks=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+    blocks="$(printf '%s\n' "$line" | LC_ALL=C sed -n 's/.*starved_blocks=\([0-9][0-9]*\).*/\1/p' | tail -1)"
     [ -n "$blocks" ] && printf '%s\n' "$blocks"
   fi
   return 0

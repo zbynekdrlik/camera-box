@@ -205,7 +205,10 @@ handle_box() {
   local raw logid mv_lines gate_out gate_exit verdict prev_logid reset
   raw="$(probe_mv_log "$ip" "$os" | tr -d '\r')"
   logid="$(printf '%s\n' "$raw" | sed -n 's/^MVFPS_LOGID://p' | tail -1)"
-  mv_lines="$(printf '%s\n' "$raw" | grep -F 'multiview-audit:' 2>/dev/null || true)"
+  # #1262: byte-safe extraction (mv_fps_extract_audit_lines, scripts/lib/mv-fps-health.sh) -- a
+  # PS-5.1-ANSI-reencoded invalid byte from an adjacent genlock-fifo audit line can glue onto this
+  # line at a transport-chunk boundary and blind a plain `grep -F`.
+  mv_lines="$(printf '%s\n' "$raw" | mv_fps_extract_audit_lines)"
 
   # Autostart restart-reset: a CHANGED OBS-log identity means OBS restarted -> clear the pending
   # confirm BEFORE this pass is scored, so a fresh instance's warm-up below-floor read starts a new

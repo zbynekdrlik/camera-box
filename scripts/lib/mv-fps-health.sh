@@ -71,6 +71,22 @@ mv_fps_recovery_decision() {
   fi
 }
 
+# mv_fps_extract_audit_lines -- stdin: the RAW PS-fetched OBS-log tail; stdout: every
+#   `multiview-audit:` line in it (empty if none). #1262: byte-safe extraction (`LC_ALL=C grep -a`)
+#   -- PowerShell 5.1's `gc` (no `-Encoding`) re-encodes the WHOLE fetched tail as ANSI, and a
+#   missing `\n` at a PS->ssh transport-chunk boundary can glue a corrupted `genlock-fifo audit`
+#   line's invalid-UTF-8 byte (the ANSI-mangled `≈` glyph, the #1258 root cause) directly onto the
+#   FOLLOWING clean `multiview-audit:` line with no separator -- a plain `grep -F` then hits GNU
+#   grep's binary-content detection on that glued "line" and returns EMPTY (verdict UNKNOWN /
+#   eventual "tap blind" WARN) even though the multiview-audit line itself is pure ASCII. Shared by
+#   BOTH consumers of the raw tail (mv-fps-alert-watchdog.sh's handle_box AND mv-fps-preflight.sh's
+#   mv_fps_preflight_probe) so the fix lives in ONE place -- mirrors #1258's own
+#   `mv_reverify_probe_raw` "fix the read path once" precedent. Always exits 0 (`|| true`) so a
+#   no-match never trips a strict-mode caller under `set -e`.
+mv_fps_extract_audit_lines() {
+  LC_ALL=C grep -aF 'multiview-audit:' 2>/dev/null || true
+}
+
 # mv_fps_alert_detail <box> <gate_output> -> stdout: one human line for the Discord alert body,
 #   naming the box and every `FAIL monitor=…` line the gate printed (the collapsed projector(s),
 #   their rendered_fps and floor). If the gate printed no FAIL line, falls back to a bare box name so

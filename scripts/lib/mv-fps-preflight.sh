@@ -93,7 +93,9 @@ mv_fps_preflight_probe() {
     raw="$(timeout "${MV_FPS_PREFLIGHT_SSH_TIMEOUT:-20}" sshpass -p "$pw" \
       ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "${user}@${ip}" "$rcmd" 2>/dev/null || true)"
   fi
-  printf '%s\n' "$raw" | tr -d '\r' | grep -F 'multiview-audit:' 2>/dev/null || true
+  # #1262: byte-safe extraction (mv_fps_extract_audit_lines, mv-fps-health.sh, sourced above) --
+  # see its own doc comment for the transport-chunk-glue hazard this guards against.
+  printf '%s\n' "$raw" | tr -d '\r' | mv_fps_extract_audit_lines
 }
 
 # mv_fps_preflight_term_is_report_only <box_name> -> exit 0 if this box's CONFIRMED-collapse term is
