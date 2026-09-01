@@ -104,10 +104,11 @@ def _align_run(monkeypatch, *, execute):
         def close(self):
             pass
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, pw: _WS())
-    return qa.align(SRC, "h", "pw", execute=execute, stable_tail_rounds=3, stable_tol_ids=1,
-                    min_valid_rounds=5, min_parity_rounds=3, max_delta_ms=66.0, parity_tol_ids=1,
-                    floor_ms=3, width=1920, height=1080, measure_budget_s=1e9,
-                    max_measure_rounds=60, settle_s=0, jitter_json=RUN_JITTER)
+    result = qa.align(SRC, "h", "pw", execute=execute, stable_tail_rounds=3, stable_tol_ids=1,
+                      min_valid_rounds=5, min_parity_rounds=3, max_delta_ms=66.0, parity_tol_ids=1,
+                      floor_ms=3, width=1920, height=1080, measure_budget_s=1e9,
+                      max_measure_rounds=60, settle_s=0, jitter_json=RUN_JITTER)
+    return result, applied   # `applied` = every pin the plan actually wrote (empty if none)
 
 
 class TestRunDeltasAreOneSourceFrame:
@@ -148,13 +149,15 @@ class TestAlignReproducesTheRun:
     def test_run_is_recognized_already_aligned_no_pins_dry_run(self, monkeypatch):
         # RED: current code takes the floor-aware path and returns status "plan-only" with the +83 ms
         # phantom plan. GREEN: the quantum gate fires -> already-aligned, empty plan, PASS.
-        result = _align_run(monkeypatch, execute=False)
+        result, _applied = _align_run(monkeypatch, execute=False)
         assert result["status"] == "already-aligned-quantum"
         assert result["plan"] == {}
 
     def test_run_applies_no_pins_on_execute(self, monkeypatch):
         # RED: on --execute the current code applies the +83 ms pins and the verify FAILs
         # (AlignmentImpossible). GREEN: the gate short-circuits before apply -> nothing is pinned.
-        result = _align_run(monkeypatch, execute=True)
+        result, applied = _align_run(monkeypatch, execute=True)
         assert result["status"] == "already-aligned-quantum"
         assert result["plan"] == {}
+        assert applied == {}                 # DIRECT proof no pin was written, not just plan == {}
+        assert "applied" not in result       # the apply branch was never reached

@@ -351,9 +351,21 @@ align test that must reach the plan, use a spread ≥ 2 source frames (≥ ~34 m
 frame. Tier-0: `within_aligned_quantum` + an `align()` flow test reproducing the run from its REAL
 recorded deltas + arrival-floor audit (`tests/python/test_qr_align_quantum_1252.py`), pytest, no rig.
 
-**Latent, out of this lane:** the measured `post ≈ pre + pin_delta` means the live FIFO adds the pin
-ADDITIVELY on top of the transport, which is NOT the `max(pin, transport)` model the issue-1161
-above-floor formula (`pin_i = arrival_floor_i + delta_i`) assumes — so for a GENUINE ≥ 2-source-frame
-spread that formula would also overshoot. That case has never been observed on this single-splitter
-rig (all cameras identical; a degraded card = 66 ms sanity FAIL) and the existing plan tests model the
-`max` FIFO, so it is a separate follow-up, not this fix.
+**Aliasing blind band (16.7 ms, 25 ms) — the one honest cost.** The lock phase is PERSISTENT while
+locked (it does not average out over the tail), so a measured spread = the real spread ± < 1 source
+frame. A GENUINE 2-source-frame lag (33.3 ms) whose phase biases it DOWN can therefore alias into
+(16.7, 25) ms and be quantum-suppressed — a PASS with a real 2-frame offset left standing. This is
+inherent to ANY threshold between 1 and 2 frames (1.5 frames is the max-separation cut); the backstop
+is DOWNSTREAM — the recording-verdict SOURCE cross-camera spread gate still blocks a large real
+spread. So if a run PASSES `[4i/8align]` but later FAILs the recording SOURCE-spread gate, suspect a
+real 2-frame lag aliased low here — do NOT read the align PASS as "cameras are frame-perfect".
+
+**Latent, tracked as issue 1253 (needs an owner decision):** the measured `post ≈ pre + pin_delta`
+means the live FIFO adds the pin ADDITIVELY on top of the transport, which is NOT the
+`max(pin, transport)` model the issue-1161 above-floor formula (`pin_i = arrival_floor_i + delta_i`)
+assumes — so for a GENUINE ≥ 2-source-frame spread that formula would OVERSHOOT (a loud hold-inert
+abort, never a silent pass). That case has never been observed on this single-splitter rig (all
+cameras identical; a degraded card = 66 ms sanity FAIL) and the existing plan tests model the `max`
+FIFO, so it is out of this lane. Reverting the above-floor plan toward the additive `floor + hold`
+model risks regressing whatever inert case issue 1161 was added for — an architecture decision, filed
+as issue 1253, not this fix. (The `samples=2` phantom arrival floor is untreated there too.)

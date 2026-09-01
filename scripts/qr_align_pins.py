@@ -353,9 +353,12 @@ def floor3_pins(deltas, floor_ms=DEFAULT_FLOOR_MS):
 def within_aligned_quantum(deltas, quantum_ms=DEFAULT_ALIGNED_QUANTUM_MS):
     """#1252 -- True iff the cross-camera present-age SPREAD is within the N=2 lock-phase quantum, so
     the rig is ALREADY aligned to the floor-3 achievable limit and NO above-floor pins must be
-    applied. `deltas`: {src: ms >= 0} the cross-camera present-age spread (the slowest anchors to 0 --
-    round_deltas' output; pure_deltas on the floor-aware path, the folded deltas on the fallback).
-    The spread is max(deltas) (the slowest is 0). A spread within one source frame + hysteresis
+    applied. `deltas`: {src: ms >= 0} the PURE cross-camera present-age spread (round_deltas over ZERO
+    pins). The CALLER must pass PURE deltas on BOTH paths, never the pin-FOLDED deltas -- folded
+    deltas can UNDER-read a real spread to ~0 when non-uniform leftover pins compensate the transport,
+    masking a genuine misalignment as a quantum (#1252 review). Spread = max - min (coherent with
+    sanity_ok's worst_delta_ms; robust to a median set not perfectly min-anchored). A spread within
+    one source frame + hysteresis
     (default 1.5 source frames, ~25 ms) is presentation-phase jitter around zero that the pin lever
     CANNOT close (it only ADDS delay -> post = pre + pin_delta; no consistent slowest to pin against;
     no sub-floor pin to pull a camera earlier; the measurement itself carries the same quantum), so
@@ -365,7 +368,7 @@ def within_aligned_quantum(deltas, quantum_ms=DEFAULT_ALIGNED_QUANTUM_MS):
     is planned normally (and a degraded grabber still FAILs the 66 ms sanity bound upstream)."""
     if not deltas:
         return False
-    return max(deltas.values()) < quantum_ms
+    return (max(deltas.values()) - min(deltas.values())) < quantum_ms
 
 
 # ---------------------------------------------------------------------------
@@ -1284,31 +1287,27 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
             f"widest gap is on {widest_src!r}; the anomaly is most likely the slowest card). "
             f"Per-camera deltas (ms off the slowest): {result['sanity_deltas_ms']}.")
 
-    # #1252 QUANTUM GATE: if the cross-camera present-age spread is within the N=2 (60-into-30)
-    # lock-phase quantum (one source frame + hysteresis), the rig is ALREADY aligned to the floor-3
-    # achievable limit -- the "spread" is presentation-phase jitter around zero, NOT a real transport
-    # lag, and the pin lever provably cannot close it (it only ADDS delay: post_residual =
-    # pre_residual + pin_delta; there is no consistent slowest to pin against; no pin can go below the
-    # floor; the measurement itself carries the same quantum). Applying the above-floor plan to a
-    # sub-frame phantom only DOUBLES the spread (run 1899055119: +83 ms pins turned a 16.7 ms spread
-    # into ~84-100 ms). So classify already-aligned, apply NOTHING, and PASS -- BEFORE building or
-    # applying any plan. Placed AFTER the 66 ms sanity gate (a degraded grabber still FAILs first) and
-    # BELOW it (the quantum is ~25 ms), and gates on sanity_deltas = the PURE present-age spread when
-    # floors are available (the folded deltas on the fallback). This does NOT widen the same-frame
-    # parity bar: it suppresses the plan when its own input is a sub-frame phantom, nothing else.
-    if within_aligned_quantum(sanity_deltas):
+    # #1252 QUANTUM GATE (full rationale: the SOURCE_FRAME_MS / DEFAULT_ALIGNED_QUANTUM_MS constant
+    # block above). If the PURE cross-camera present-age spread is within the N=2 lock-phase quantum,
+    # the rig is already aligned at the floor-3 limit and the pin lever cannot close it -> apply
+    # NOTHING and PASS, BEFORE any plan. Placed AFTER the 66 ms sanity gate (a degraded grabber FAILs
+    # first). Gate on PURE deltas on BOTH paths: pure_deltas on the floor-aware path, a zero-pin
+    # recompute on the fallback -- the pin-FOLDED deltas can UNDER-read a real spread to ~0 when
+    # non-uniform leftover pins compensate the transport, masking a genuine misalignment (#1252 review).
+    quantum_deltas = (pure_deltas if arrival_floors
+                      else robust_deltas(tail, {s: 0 for s in sources}, min_valid_rounds)[0])
+    if within_aligned_quantum(quantum_deltas):
         result["status"] = "already-aligned-quantum"
         result["plan"] = {}
         result["aligned_quantum_ms"] = round(DEFAULT_ALIGNED_QUANTUM_MS, 1)
-        result["present_age_spread_ms"] = round(max(sanity_deltas.values()), 2)
+        result["present_age_spread_ms"] = round(
+            max(quantum_deltas.values()) - min(quantum_deltas.values()), 2)
         sys.stderr.write(
             f"[qr-align] #1252 ALREADY ALIGNED at the floor-3 quantum: cross-camera present-age "
-            f"spread {result['present_age_spread_ms']:.1f} ms is within one source frame + hysteresis "
-            f"({DEFAULT_ALIGNED_QUANTUM_MS:.1f} ms = the N=2 60-into-30 lock-phase quantum). The pin "
-            "lever cannot close a sub-source-frame quantum (it only ADDS delay -> post = pre + "
-            "pin_delta, no consistent slowest to pin against, no sub-floor pin); applying above-floor "
-            "pins would only DOUBLE the spread (run 1899055119). No pins applied; same-frame parity "
-            "bar NOT widened.\n")
+            f"spread {result['present_age_spread_ms']:.1f} ms is within the N=2 60-into-30 lock-phase "
+            f"quantum ({DEFAULT_ALIGNED_QUANTUM_MS:.1f} ms). The pin lever cannot close a "
+            "sub-source-frame quantum; applying above-floor pins would only DOUBLE the spread (run "
+            "1899055119). No pins applied; same-frame parity bar NOT widened.\n")
         return result
 
     # FLOOR-AWARE: raise each faster camera ABOVE its arrival floor to the alignment target so the
@@ -1542,7 +1541,7 @@ def main(argv=None):
         # #1252: the cross-camera present-age spread is within the N=2 lock-phase quantum -> already
         # aligned to the floor-3 achievable limit; no pins applied, exit 0 (the E2E proceeds).
         print(f"[qr-align] host={a.host} ALREADY ALIGNED at the floor-3 quantum (present-age spread "
-              f"{result.get('present_age_spread_ms')} ms <= {result.get('aligned_quantum_ms')} ms = "
+              f"{result.get('present_age_spread_ms')} ms < {result.get('aligned_quantum_ms')} ms = "
               f"one source frame + hysteresis; {tail}); no pins applied.", file=sys.stderr)
     elif status == "plan-only":
         print(f"[qr-align] host={a.host} DRY-RUN floor-3 plan (spread {result['pre_spread_ids']} id; "
