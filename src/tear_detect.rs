@@ -687,6 +687,100 @@ mod tests {
         assert!(!gates_overall_pass(), "issue 781/1196 ships report-only");
     }
 
+    // ---- issue 1196 LIVE-gate promotion (RED against the report-only placeholder) ----
+
+    #[test]
+    fn the_tear_seam_is_live_1196() {
+        // issue 1196: the projection-tap tear gate is PROMOTED to a LIVE blocking seam once the
+        // known-torn run (1700989544) proved the signal fires and TEAR_FRACTION_CEILING is
+        // calibrated. RED against the report-only placeholder (`gates_overall_pass()` == false).
+        assert!(
+            gates_overall_pass(),
+            "issue 1196: the tear gate is promoted to a LIVE blocking gate"
+        );
+    }
+
+    #[test]
+    fn green_background_window_passes_the_calibrated_live_gate_1196() {
+        // The REAL green Observed background mined across 37 v2.1 verdicts: the aux single-mark
+        // cross-band occasionally reads one generation off on a healthy run — 3 such torn frames
+        // out of 846 decodable = tear_fraction 0.003546 (the mined green MAX). The calibrated
+        // ceiling (0.005) must PASS this (ZERO false positives on history). RED against the 0.0
+        // placeholder ceiling, which would fail every Observed green window.
+        let mut frames = vec![
+            f(&[100, 101], &[103]), // primary[X,X+1] + one aux mark one gen ahead -> union span 3
+            f(&[200, 201], &[203]),
+            f(&[300, 301], &[303]),
+        ];
+        for i in 0..843u32 {
+            let b = 1000 + i * 2;
+            frames.push(f(&[b, b + 1], &[b, b + 1])); // healthy, aux in sync with primary
+        }
+        let s = window_tear_stats(&frames);
+        assert_eq!(s.tear_frames, 3);
+        assert_eq!(s.decodable_frames, 846);
+        assert!(
+            (s.tear_fraction - 3.0 / 846.0).abs() < 1e-9,
+            "the mined green Observed MAX = 0.003546"
+        );
+        assert_eq!(s.viability, TearSignalViability::Observed);
+        assert!(
+            tear_gate_pass(&s),
+            "the real green Observed background (0.00355) must PASS the calibrated 0.005 ceiling"
+        );
+        assert!(
+            window_promotable(&s),
+            "an Observed single-tile window is promotable (necessary, not sufficient)"
+        );
+    }
+
+    #[test]
+    fn known_torn_window_fails_the_calibrated_live_gate_1196() {
+        // The known-torn run's smaller CAM2 projection window: 16 aux single-mark cross-band tears
+        // out of 849 decodable = tear_fraction 0.018846, well above the 0.005 ceiling. Must FAIL
+        // the live gate (a real induced scanout tear). Also a regression pin on the calibration
+        // separation (green MAX 0.00355 << this 0.0188).
+        let mut frames = Vec::new();
+        for i in 0..16u32 {
+            let b = 100 + i * 8;
+            frames.push(f(&[b, b + 1], &[b + 3])); // cross-band tear, union span 3
+        }
+        for i in 0..833u32 {
+            let b = 5000 + i * 2;
+            frames.push(f(&[b, b + 1], &[b, b + 1]));
+        }
+        let s = window_tear_stats(&frames);
+        assert_eq!(s.tear_frames, 16);
+        assert_eq!(s.decodable_frames, 849);
+        assert!(
+            (s.tear_fraction - 16.0 / 849.0).abs() < 1e-9,
+            "matches the known-torn run's 0.018846 window"
+        );
+        assert!(
+            s.tear_fraction > TEAR_FRACTION_CEILING,
+            "the induced tear sits above the calibrated ceiling"
+        );
+        assert!(
+            !tear_gate_pass(&s),
+            "a 0.0188 induced-tear window must FAIL the calibrated live gate"
+        );
+    }
+
+    #[test]
+    fn unproven_window_always_passes_the_scoped_gate_1196() {
+        // The gate failure is SCOPED to Observed windows: an Unproven window carries tear_fraction
+        // 0.0 (no torn frame) and always passes, regardless of the ceiling. A multi-tile suspect
+        // window (Unproven, unscoreable) likewise passes — its inter-path skew is never a tear.
+        let green = window_tear_stats(&[f(&[100, 101], &[100, 101]), f(&[102, 103], &[102, 103])]);
+        assert_eq!(green.viability, TearSignalViability::Unproven);
+        assert!(tear_gate_pass(&green));
+        let multi_frames: Vec<(Vec<u32>, Vec<u32>)> =
+            (0..5).map(|_| f(&[200, 201, 202, 203], &[])).collect();
+        let multi = window_tear_stats(&multi_frames);
+        assert_eq!(multi.viability, TearSignalViability::Unproven);
+        assert!(tear_gate_pass(&multi), "a fully-suspect window has no scoreable tear");
+    }
+
     #[test]
     fn window_promotable_requires_observed_and_single_tile_1196() {
         // A GREEN window (no tear observed) is NOT promotable — an all-zero distribution cannot
