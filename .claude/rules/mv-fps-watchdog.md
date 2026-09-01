@@ -156,18 +156,41 @@ discriminator (`calibrate-artifact-vs-fix-robustness`), a fixable collapse is FI
 recalibrating floor 28 down to accept 7.5 is the gate-weakening the owner rejects ("multiview musí byť
 plynulé"). Keep floor 28 (issue 1263 is the report-only stopgap + walk-back tracker).
 
-**The chosen fix (issue 1260 design comment): within-tick burn composite cache in the DistroAV
-filter** — stamp `frame_id`/`gen_ts` and render the base+QR composite ONCE per video tick (first draw,
-which is always the program), cache the composite texture, reuse it on the within-tick preview + MV
-draws, invalidate in the filter's `video_tick`. Drops the MV per-source burn cost to a sprite draw
-(→ MV back under budget) AND stamps `frame_id` once per tick (fixes the pollution). Extract the pure
-stamp-once-per-tick decision to a crate-root Rust seam + a C parity header (the `render_budget.rs` ↔
-`obs-display-budget.h` pattern) for Tier-0 unit proof; the graphics glue is CI-first-compile
-(`linux-genlock.yml`) + MANDATORY rig validation (E2E verdict clean + `multiview-audit` back ≥ 28)
-before merge. **Do NOT ship it blind** — a wrong cache-invalidation → STALE recorded QR → corrupts
-every future E2E verdict; a graphics-context slip → live OBS graphics-thread crash. High blast radius
-on the core measurement infra; it belongs in a rig-capable follow-up with CI, not a blind worktree
-push.
+**The fix (IMPLEMENTED, issue 1260): within-tick burn cache in the DistroAV filter.** A `video_tick`
+callback (`burn_filter_videotick`) clears a per-instance `struct burn_tick_cache tick_cache`
+(`vendor/distroav/src/burn-tick-cache.hpp`) once per video tick; `burn_filter_videorender` calls
+`burn_tick_cache_on_render()` — the FIRST draw of the tick (always the PROGRAM, since
+`output_frames()` runs before `render_displays()`) does the full prep (base `gs_texrender` +
+`burn_draw_qr` which advances `frame_id`/`gen_ts` + `gs_texture_set_image`), and the later
+within-tick draws (Studio-Mode preview, Multiview cells) REUSE the cached `f->texrender` +
+`f->qr_texture` via the always-run sprite blit. Drops the MV per-source burn cost to a sprite blit
+(→ MV back under budget) AND stamps the recorded `frame_id` once per tick (fixes the pollution). The
+PROGRAM draw path is byte-identical to before (it is the prep draw). A prep failure calls
+`burn_tick_cache_abort_prepare` to re-arm the next within-tick draw (never reuse a stale composite).
+
+**Verdict-cadence safety (verified before touching the cadence — the load-bearing check).** Reducing
+`frame_id` from once-per-DRAW (recorded step ~3, `burn_render_step:3` in old fixtures) to once-per-TICK
+(step ~1) is SAFE for every node: **strih/stream** use `node_render_step == 1` gap-ignore
+(`src/bin/recording-verdict.rs::node_render_step` returns a hardcoded `1` — the strih burn is a
+free-running render tick with an irregular step the verdict must NOT charge; forward gaps are
+unconditionally ignored, so a smaller step is inert; only a delivered frame with NO readable burn or a
+BACKWARD jump faults, and per-tick stamping stays monotonic → no backward jump). **imag** derives its
+step from the data (`src/imag_tick_gate.rs::calibrate_burn_step` → `burn_step_contiguity`) AND its
+per-frame content gate is report-only (`imag-leg-report-only.md`, imag leg flows 0/76) → it adapts and
+cannot flip a verdict. **Holds** (`burn_hold.rs` MAX_HOLD_FRAMES=4) detect a repeated id on a genuinely
+repeated frame; strih records 1:1 so per-tick stamping creates no false holds. If you ever change the
+burn cadence again, re-verify these three before assuming green.
+
+**Tier-0 seam + local nets.** The pure prepare-once-per-tick decision is `src/burn_tick_cache.rs`
+(`BurnTickCache`, pure std, RED→GREEN via the `#771`/`#1026` standalone-rustc recipe) mirrored
+byte-identically by the C header, locked by `tests/burn_tick_cache_parity.rs` (compiles the header +
+drives the same event sequences, `render_budget.rs ↔ obs-display-budget.h` pattern). Local proof with
+NO cargo: `rustc --test src/burn_tick_cache.rs` (5/5), `gcc -Wall -Wextra -Wconversion -Wformat=2` the
+header + a truth-table selftest, the parity harness's 7 sequences C-vs-Rust, `cargo fmt --all --check`,
+and the brace-delta-vs-origin structural check. The FULL filter compiles only on CI (`linux-genlock.yml`
++ `windows-genlock*.yml`) — a TYPE error surfaces there. **Still MANDATORY before it reaches the rig:**
+the supervisor's genlock-fleet deploy + rig validation (burns-ON `multiview-audit rendered_fps` back
+≥ 28 AND a clean E2E recording-verdict burns-ON — proving the cache didn't corrupt the recorded stamp).
 
 **The log does NOT carry the budget-gate terms — this is the profiling gap.** The `multiview-audit:`
 line reports only `rendered_fps` (the outcome); `program-render-audit:` reports program `render_fps` +
