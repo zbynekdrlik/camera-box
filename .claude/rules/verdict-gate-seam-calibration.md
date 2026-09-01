@@ -200,6 +200,21 @@ EQUAL (mode IS 2; verified across every mined verdict, worst 0.67–0.78 on both
 metric offers a caller-`expected_step` field AND a data-mode-`derived` field, gate on the derived
 one and surface the raw as diagnostic.
 
+**SUPERSEDED (#1250): the uniformity gate now reads `beat_corrected_uniform_fraction`, and the mined
+`cadence_uniformity_gate.worst_uniform_fraction` key CHANGED SEMANTICS across that boundary.** #1250
+found the "0.67–0.78 sick rig" was mostly a benign sampling-phase BEAT (balanced 1↔3 net-zero pairs
+around the mode), not FIFO churn — `derived` counted each 1 and 3 as non-uniform. `beat_corrected_
+uniform_fraction` collapses the ±1-refresh pair `min(count(mode-1), count(mode+1))` back to uniform,
+so the gated worst is 0.916/0.947 on the two mined post-fix runs (PASS 0.90) instead of 0.566/0.769
+derived. The verdict JSON `worst_uniform_fraction` key now carries the BEAT-CORRECTED value (pre-#1250
+runs carry the derived value under the SAME key); `worst_derived_uniform_fraction` (pre-beat) +
+`worst_raw_uniform_fraction` are diagnostics. **Cross-era mining caveat:** when comparing
+`worst_uniform_fraction` across historical verdicts, a run from before the #1250 deploy carries the
+derived reading and a run after carries the beat-corrected reading under the identical key — read
+`worst_derived_uniform_fraction` (present only post-#1250) to compare apples-to-apples, or segregate
+by the #1250 deploy time. The "gate on derived, not raw" rule above generalizes: gate on the
+BEAT-CORRECTED field, surface derived + raw as diagnostics.
+
 ### Owner-mandated RED-on-current-rig OVERRIDES gates-green-first (§3)
 The standard "a bound that would fail a recent green run is wrong" is REVERSED when the owner
 declares the green runs FALSELY green (hiding visual degradation). #1142's cadence-uniformity 0.95

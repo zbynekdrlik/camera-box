@@ -5324,7 +5324,8 @@ fn build_and_print_verdict_with_stream_diffs(
                 // the mode 2) that net to zero, which the pre-#1250 `derived_uniform_fraction` counted
                 // as non-uniform (0.57-0.92 on a copies==0/gaps==0 chain — the "sick 0.67-0.78" was
                 // mostly this beat). The beat-corrected reading collapses those balanced pairs back
-                // to uniform, so the healthy rig reads 0.92-0.99 and the floor now REDs only a GENUINE
+                // to uniform, so the healthy rig's GATED worst window reads 0.916/0.947 on the two
+                // mined runs (typical windows 0.92-0.99) and the floor now REDs only a GENUINE
                 // non-uniformity beyond the beat. A per-window RATE (like the judder gate) so a single
                 // per-window-MIN term is honest (no run-wide second term). `None` worst = no cadence
                 // window (mass decode failure, already hard-failed by copies/gaps/undecodable) = not
@@ -5383,9 +5384,11 @@ fn build_and_print_verdict_with_stream_diffs(
                              windows, which must be >= min_uniform_fraction (0.90, walk-back: issue \
                              1242). A sampling-phase beat emits balanced complementary steps (1<->3 \
                              around the mode 2) that net to zero; #1250 collapses them so a smooth \
-                             60->30 chain reads ~1.0 and the healthy-but-beating rig reads 0.92-0.99 \
-                             (PASS) instead of the pre-#1250 derived 0.57-0.92 (the '0.67-0.78 sick \
-                             rig' was mostly this beat, not FIFO churn) — the floor now REDs only \
+                             60->30 chain reads ~1.0 and the healthy-but-beating rig's GATED worst \
+                             window reads 0.916/0.947 on the two mined runs (typical windows \
+                             0.92-0.99, above the floor) instead of the pre-#1250 derived 0.57-0.92 \
+                             (the '0.67-0.78 sick rig' was mostly this beat, not FIFO churn) — the \
+                             floor now REDs only \
                              genuine non-uniformity beyond the beat. worst_derived_uniform_fraction \
                              (pre-beat mode-based) and worst_raw_uniform_fraction (caller-step) are \
                              DIAGNOSTIC only. None = no cadence window (not applicable, passes). \
