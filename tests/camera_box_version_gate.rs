@@ -836,3 +836,122 @@ fn frame_probe_only_mode_is_dormant_without_an_expected_sha() {
         "with no expected sha the report must stay dormant (silent): {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1235 — --frame-probe-hard: the HARD, fail-closed flip of --frame-probe-only. Report-only
+// (the tests above) SCREAMs but always exits 0; hard mode EXITS NON-ZERO on a lagging (30) or
+// unverifiable (31) painter, per .claude/rules/early-gate-pin-doctrine.md. The report-only mode is
+// unchanged (it stays the default, and the --no-main-pin operator soak keeps using it).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frame_probe_hard_mode_passes_when_deployed_matches_the_candidate() {
+    // --frame-probe-only --frame-probe-hard + a matching sha: OK row, exit 0 (a current painter
+    // must not block the run).
+    let (code, out, _err) = run_gate_env(
+        &[
+            "--frame-probe-only",
+            "--frame-probe-hard",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "d47e43f896917dca",
+        ],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(code, 0, "hard mode must pass a current painter: out={out}");
+    assert!(
+        out.contains("frame-probe (cam2 painter) sha-pin") && out.contains("OK"),
+        "the hard-gate report must still print the OK row: {out}"
+    );
+    assert!(
+        !out.contains("GATE PASS"),
+        "frame-probe-only (hard) must NOT run the camera-box parity layer: {out}"
+    );
+}
+
+#[test]
+fn frame_probe_hard_mode_refuses_a_lagging_painter() {
+    // A lagging painter (deployed != candidate) under --frame-probe-hard: ALARM row + a REFUSING
+    // stderr banner, and exit 30 (the report-only mode would exit 0 here — that is the whole flip).
+    let (code, out, err) = run_gate_env(
+        &[
+            "--frame-probe-only",
+            "--frame-probe-hard",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "beefface00000000",
+        ],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(
+        code, 30,
+        "a lagging painter under --frame-probe-hard must REFUSE (exit 30): out={out} err={err}"
+    );
+    assert!(
+        out.contains("ALARM"),
+        "the lag must still be screamed in the report: {out}"
+    );
+    assert!(
+        err.contains("FRAME-PROBE PIN FAIL") && err.contains("REFUSING"),
+        "a loud REFUSING stderr banner must fire on the hard-gate lag: {err}"
+    );
+}
+
+#[test]
+fn frame_probe_hard_mode_refuses_when_the_candidate_sha_is_unresolved_not_dormant() {
+    // The KEY doctrine contrast with frame_probe_only_mode_is_dormant_without_an_expected_sha:
+    // report-only goes DORMANT (silent, exit 0) with no expected sha; HARD mode treats an
+    // unresolvable candidate sha (the [0/8] align could not source probe-tools) as UNKNOWN and
+    // REFUSES (exit 31) — "couldn't verify" is a failure, never a silent pass.
+    let (code, out, err) = run_gate_env(
+        &[
+            "--frame-probe-only",
+            "--frame-probe-hard",
+            "--linux",
+            "cam2=root@10.77.9.62",
+        ],
+        &[("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca")],
+    );
+    assert_eq!(
+        code, 31,
+        "hard mode with no candidate sha must FAIL CLOSED (exit 31), not go dormant: out={out} err={err}"
+    );
+    assert!(
+        out.contains("UNKNOWN"),
+        "the unresolved-candidate row must be printed (never silent): {out}"
+    );
+    assert!(
+        err.contains("FRAME-PROBE PIN FAIL") && err.contains("REFUSING"),
+        "a loud REFUSING stderr banner must fire on the fail-closed UNKNOWN: {err}"
+    );
+}
+
+#[test]
+fn frame_probe_hard_mode_excludes_an_acked_offline_box() {
+    // An acked-offline cam2 is EXCLUDED from the hard gate (the SAME CAMBOX_OFFLINE_ACK mechanism
+    // every other gate uses) — a knowingly-offline painter must not refuse the run.
+    let (code, out, _err) = run_gate_env(
+        &[
+            "--frame-probe-only",
+            "--frame-probe-hard",
+            "--linux",
+            "cam2=root@10.77.9.62",
+            "--frame-probe-expected-sha",
+            "beefface00000000",
+        ],
+        &[
+            ("FRAME_PROBE_GATE_SHA_CAM2", "d47e43f896917dca"),
+            ("CAMBOX_OFFLINE_ACK", "cam2"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "an acked-offline painter must be excluded from the hard gate (exit 0): out={out}"
+    );
+    assert!(
+        !out.contains("ALARM") && !out.contains("UNKNOWN"),
+        "an excluded box must produce NO verdict row: {out}"
+    );
+}

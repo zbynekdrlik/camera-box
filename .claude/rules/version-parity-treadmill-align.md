@@ -6,6 +6,8 @@ paths:
   - "scripts/deploy-fleet.sh"
   - "tests/harness_camera_box_parity_align_1202.rs"
   - "tests/frame_probe_parity_align_1138.rs"
+  - "tests/camera_box_version_gate.rs"
+  - "tests/frame_probe_deploy_1138.rs"
 ---
 
 # camera-box version-parity treadmill + the pre-[0/8] auto-align (issue 1202)
@@ -123,10 +125,19 @@ Key differences from the camera-box align (do NOT copy them across blindly):
 - **The gh-downloaded artifact dir is age-swept at the orchestrator's entry** (the mktemp runs in a
   `$(...)` subshell, so its path can't be reclaimed by the caller — a >2h age-bounded sweep of
   `frame-probe-align-ci.*` bounds the /tmp leak without racing a concurrent run).
-- **Still REPORT-ONLY** (the pin never exits non-zero): the exit-code hard-gate flip is the
-  supervisor's #758 two-step follow-up, only after the auto-align is rig-proven — unlike camera-box
-  (whose gate hard-refuses), there is NO hard gate behind this pin yet, so that follow-up must be
-  tracked or the "orphan SCREAMS" becomes a new dormant log line.
+- **Now a HARD gate (issue 1235), was REPORT-ONLY.** The report-only->hard two-step landed once
+  the [0/8] auto-align was rig-proven (the active deploy path + the [1/8] pin OK observed end-to-end
+  on the first green 7-cam series). The [1/8] pin runs `camera-box-version-gate.sh --frame-probe-only
+  --frame-probe-hard` and EXITS NON-ZERO on a lagging (30) or unverifiable (31) painter — fail-closed
+  per early-gate-pin-doctrine. **The KEY design trap: in HARD mode the expected sha is
+  `FRAME_PROBE_ALIGN_CI_BIN` ONLY, never the `$PROBE_BIN_DIR/frame-probe` local fallback** — the dev1
+  LOCAL build is byte-different from the CI artifact (full-path-e2e.yml sets no `USE_PREBUILT_PROBE_DIR`),
+  so a hard compare against it would false-ALARM every run; an empty `FRAME_PROBE_ALIGN_CI_BIN`
+  (align could not source probe-tools) is therefore UNKNOWN->REFUSE (fail-closed), NOT a local compare.
+  The `--no-main-pin` operator soak keeps the old #1138 report-only local-build pin (`|| true`), the
+  same escape the [0/8] align honours (soak => align skipped => no CI source of truth to hard-pin
+  against). The gate's `frame_probe_pin_gate` is the hard sibling of `frame_probe_pin_report`; the
+  full-parity supplement + report-only mode are byte-unchanged.
 
 Same Tier-0 seams idea as camera-box (`.claude/rules/*` + `tests/frame_probe_parity_align_1138.rs`):
 `FRAME_PROBE_ALIGN_ARTIFACT_DIR` (pre-fetched dir, skip gh), `FRAME_PROBE_ALIGN_SKIP_VERSION_GUARD`,
@@ -152,6 +163,25 @@ decision matrix + the orchestrator + the real deploy path via the seams — `CAM
 gate's own `CAMERA_BOX_VERSION_GATE_VERSION_<NAME>` read seam (a file of raw `--version` output). A
 green bash-level RED→GREEN predicts the `tests/harness_camera_box_parity_align_1202.rs` pass at CI;
 `cargo fmt --all --check` is the only local Rust parse check (CI is the first type-check).
+
+### A gate function's always-printed BANNER can silently break a `!out.contains(WORD)` negative row-assertion (issue 1235)
+
+`camera-box-version-gate.sh`'s frame-probe pin functions print a `-- ... sha-pin ... --` BANNER
+to stdout BEFORE the per-node verdict loop. When a subprocess test (`run_gate_env`) exercises a
+case that produces NO verdict row — an acked-offline box, or a dormant/skip path — and asserts the
+ABSENCE of a verdict word (`!out.contains("ALARM") && !out.contains("UNKNOWN")`), that assertion
+matches the BANNER if the banner text happens to contain those bare words, so the test is
+GUARANTEED-RED even though the gate behaved correctly. This is INVISIBLE under Tier-0 (the gate's
+exit code + stdout look right when you run it by hand; only the Rust substring assertion trips, and
+`cargo test` cannot run locally) — it surfaces for the first time on CI. It bit the issue-1235
+hard-gate flip: `frame_probe_pin_gate`'s banner said `fail-closed on UNKNOWN/ALARM`, and the
+acked-offline test's `!out.contains("UNKNOWN")` matched it. **Rule: keep a gate BANNER's wording
+DISTINCT from the exact words a per-node verdict ROW prints** (reworded to `fail-closed on an
+unverified or lagging painter`), so a positive `out.contains("ALARM")` can only be satisfied by a
+real row and a negative `!out.contains("ALARM")` genuinely proves no row — OR assert row-SHAPES
+(no line whose trimmed start is the node name) instead of a bare word. When you add/reword any
+banner or verdict-row string in this gate, `grep -n 'out.contains\|!out.contains'
+tests/camera_box_version_gate.rs` and check every word your banner now shares with a row.
 
 ## Artifact resolution is COMMIT-SCOPED, never "newest ci.yml run on a branch" (issue 1245)
 

@@ -49,14 +49,18 @@ fn run_lib(body: &str) -> String {
 #[test]
 fn recording_e2e_engages_the_frame_probe_report_after_the_probe_build() {
     let s = read("scripts/recording-e2e.sh");
-    let engage = s.find("--frame-probe-only").expect(
-        "#1138: recording-e2e.sh must engage the frame-probe report via --frame-probe-only",
-    );
-    // The current-build expected bin is $PROBE_BIN_DIR/frame-probe, resolved at [1/8].
+    // #1235: the DEFAULT (first) engagement is now the HARD gate (--frame-probe-hard), pinning
+    // against the aligned CI artifact FRAME_PROBE_ALIGN_CI_BIN (NOT the byte-different $PROBE_BIN_DIR
+    // local build — that fallback lives only in the --no-main-pin soak branch, below).
+    let engage = s
+        .find("--frame-probe-only")
+        .expect("#1235: recording-e2e.sh must engage the frame-probe pin via --frame-probe-only");
     let window = &s[engage..(engage + 300).min(s.len())];
     assert!(
-        window.contains("--frame-probe-expected-bin") && window.contains("PROBE_BIN_DIR/frame-probe"),
-        "#1138: the engagement must pass the current-build frame-probe as --frame-probe-expected-bin. window={window:?}"
+        window.contains("--frame-probe-hard")
+            && window.contains("--frame-probe-expected-bin")
+            && window.contains("FRAME_PROBE_ALIGN_CI_BIN"),
+        "#1235: the default engagement must be the HARD gate pinning against the aligned CI artifact. window={window:?}"
     );
     // The engagement must run AFTER $PROBE_BIN_DIR is resolved ([1/8]) — else the bin doesn't exist
     // yet and the report would be silently dormant (the exact trap this ticket exists to kill).
@@ -79,27 +83,43 @@ fn recording_e2e_engages_the_frame_probe_report_after_the_probe_build() {
 }
 
 #[test]
-fn recording_e2e_frame_probe_engagement_is_cam2_scoped_and_report_only() {
+fn recording_e2e_frame_probe_engagement_is_cam2_scoped_hard_by_default_report_only_under_soak() {
     let s = read("scripts/recording-e2e.sh");
-    let engage = s
-        .find("--frame-probe-only")
-        .expect("#1138: recording-e2e.sh must engage the frame-probe report");
-    let window = &s[engage..(engage + 300).min(s.len())];
+    // #1235: the pin has TWO branches — the DEFAULT hard gate (first --frame-probe-only) and the
+    // --no-main-pin operator-soak report-only fallback (second --frame-probe-only).
+    let mut occ = s.match_indices("--frame-probe-only");
+    let hard = occ
+        .next()
+        .expect("#1235: recording-e2e.sh must engage the frame-probe pin")
+        .0;
+    let soak = occ
+        .next()
+        .expect("#1235: the --no-main-pin soak branch must keep a report-only frame-probe pin")
+        .0;
+    let hard_win = &s[hard..(hard + 300).min(s.len())];
+    let soak_win = &s[soak..(soak + 300).min(s.len())];
+
     // frame-probe lives ONLY on cam2 (setup-device STEP 3b). Engaging the whole fleet would
-    // UNKNOWN-spam every non-painter box — so the report is cam2/PAINTER_IP scoped, NOT the
+    // UNKNOWN-spam every non-painter box — so the pin is cam2/PAINTER_IP scoped, NOT the
     // fleet-wide $CAMBOX_VERSION_LINUX list the [0/8] parity gate uses.
     assert!(
-        window.contains("PAINTER_IP"),
-        "#1138: the frame-probe report must be cam2/PAINTER_IP-scoped. window={window:?}"
+        hard_win.contains("PAINTER_IP") && !hard_win.contains("CAMBOX_VERSION_LINUX"),
+        "#1235: the hard-gate pin must be cam2/PAINTER_IP-scoped, not fleet-wide. window={hard_win:?}"
     );
+    // The DEFAULT branch is a HARD gate: NO `|| true` (a non-zero exit must abort the E2E).
     assert!(
-        !window.contains("CAMBOX_VERSION_LINUX"),
-        "#1138: the frame-probe report must NOT run over the whole fleet (frame-probe is cam2-only). window={window:?}"
+        !hard_win.contains("|| true"),
+        "#1235: the default frame-probe pin is a HARD gate — it must NOT be `|| true`-guarded. window={hard_win:?}"
     );
-    // Report-only: the call must be `|| true`-guarded so it never aborts the E2E run.
+    // The soak branch is the #1138 report-only fallback: `|| true`-guarded + the local build fallback.
     assert!(
-        window.contains("|| true"),
-        "#1138: the frame-probe report is report-only — its call must be `|| true` guarded. window={window:?}"
+        soak_win.contains("|| true") && soak_win.contains("PROBE_BIN_DIR/frame-probe"),
+        "#1235: the --no-main-pin soak branch must stay report-only (`|| true`) against the local build. window={soak_win:?}"
+    );
+    // The soak branch is guarded by the --no-main-pin env (the same escape the [0/8] align honours).
+    assert!(
+        s[..soak].contains("CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN"),
+        "#1235: the soak report-only branch must sit under a CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN guard"
     );
 }
 
