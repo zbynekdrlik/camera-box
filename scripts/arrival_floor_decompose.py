@@ -49,6 +49,13 @@ EXCESS_NOISE_MS = 2.0              # per-camera floor excess at/below this => wi
 STRIH_CONFIG_MIN_MS = 1.0         # Delta latency_ms above this => a real strih-config pin difference
 SOURCE_TEMPLATE = "NDI cam{n}"
 
+# ---- multi-run aggregation (#1168 task 2) ----
+# A run-POSITION (anchor=fastest / slowest) held by ONE camera in at least this fraction of the
+# usable runs is a STABLE per-box property; below it, the run-to-run variance (transient grabber
+# DQBUF stalls / load) dominates and NO single box owns the position. 0.6 = a clear majority, not a
+# bare plurality -- so a 2-run disagreement (0.5) and a shuffled slowest correctly read UNSTABLE.
+RANK_MODE_STABLE_FRAC = 0.6
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _STREAMING_RE = re.compile(
     r"Streaming:\s*([0-9.]+)\s*fps\s*emitted\s*/\s*([0-9.]+)\s*fps\s*captured\s*"
@@ -257,6 +264,100 @@ def decompose(jitter_json, cap_avgs, grabber_by_src, sources):
     return {"rows": rows, "anchor_src": anchor_src, "summary": summary}
 
 
+# --------------------------------------------------------------- MULTI-RUN: aggregate -------------
+def _keep_run(result, only_uniform=False, min_cameras=0):
+    """Stratification predicate for --multi. A run is kept only if it has >= min_cameras non-phantom
+    rows AND, when only_uniform is set, its transport_uniform verdict is True (the clean ~50 ms
+    constant-offset regime -- a transport-degraded / halving run is a DIFFERENT fault). An empty
+    (all-#1253-phantom) run or a None result is NEVER kept. Pure predicate -- no I/O."""
+    if not result or not result.get("rows"):
+        return False
+    if len(result["rows"]) < min_cameras:
+        return False
+    if only_uniform and (result.get("summary", {}) or {}).get("transport_uniform") is not True:
+        return False
+    return True
+
+
+def _mode(counts):
+    """(src, count) of the most common camera in a {src: n} tally; deterministic tie-break by src
+    name (lowest sorts first); (None, 0) for an empty tally."""
+    if not counts:
+        return None, 0
+    best = max(sorted(counts), key=lambda s: counts[s])
+    return best, counts[best]
+
+
+def aggregate(runs):
+    """Fold a list of (run_id, decompose_result) into a cross-run summary so the target box is
+    chosen from MANY runs, not one. Returns per-camera floor/excess distribution (median/min/max/
+    pstdev), mean+median floor-RANK (1=fastest), the latency-pin set, anchor/slowest MODE counts,
+    a median-floor ranking, and a STABILITY verdict (is one camera the anchor/slowest in >=
+    RANK_MODE_STABLE_FRAC of usable runs?). Empty (all-phantom) runs are COUNTED (n_empty) but
+    contribute no camera data. Pure -- consumes decompose() output, never re-parses a log."""
+    import statistics as _st
+
+    n_runs = len(runs)
+    usable = [(rid, res) for (rid, res) in runs if res and res.get("rows")]
+    n_usable = len(usable)
+    n_empty = n_runs - n_usable
+
+    percam = {}  # src -> {"floors": [], "excess": [], "ranks": [], "pins": set()}
+    anchor_counts, slowest_counts = {}, {}
+    for _rid, res in usable:
+        s = res["summary"]
+        a, sl = s.get("anchor_src"), s.get("slowest_src")
+        if a is not None:
+            anchor_counts[a] = anchor_counts.get(a, 0) + 1
+        if sl is not None:
+            slowest_counts[sl] = slowest_counts.get(sl, 0) + 1
+        # rank 1 = fastest (lowest floor); deterministic tie-break by src, matching decompose().
+        ordered = sorted(res["rows"], key=lambda r: (r["floor_ms"], r["src"]))
+        for pos, r in enumerate(ordered, 1):
+            d = percam.setdefault(r["src"], {"floors": [], "excess": [], "ranks": [], "pins": set()})
+            d["floors"].append(r["floor_ms"])
+            d["excess"].append(r["excess_ms"])
+            d["ranks"].append(pos)
+            if r.get("latency_ms") is not None:
+                d["pins"].add(r["latency_ms"])
+
+    per_camera = {}
+    for c, d in percam.items():
+        fl, ex, rk = d["floors"], d["excess"], d["ranks"]
+        per_camera[c] = {
+            "n": len(fl),
+            "floor_median": _st.median(fl), "floor_min": min(fl), "floor_max": max(fl),
+            "floor_pstdev": _st.pstdev(fl) if len(fl) > 1 else 0.0,
+            "excess_median": _st.median(ex), "excess_min": min(ex), "excess_max": max(ex),
+            "excess_pstdev": _st.pstdev(ex) if len(ex) > 1 else 0.0,
+            "mean_floor_rank": _st.mean(rk), "median_floor_rank": _st.median(rk),
+            "latency_pins": sorted(d["pins"]),
+        }
+
+    ranking = sorted(per_camera, key=lambda c: (per_camera[c]["floor_median"], c))
+
+    def _stab(counts):
+        src, cnt = _mode(counts)
+        frac = (cnt / n_usable) if n_usable else 0.0
+        return {"src": src, "count": cnt, "fraction": frac,
+                "stable": bool(n_usable) and frac >= RANK_MODE_STABLE_FRAC}
+
+    med_spread = None
+    if per_camera:
+        med_spread = per_camera[ranking[-1]]["floor_median"] - per_camera[ranking[0]]["floor_median"]
+
+    return {
+        "n_runs": n_runs, "n_usable": n_usable, "n_empty": n_empty,
+        "per_camera": per_camera,
+        "anchor_counts": anchor_counts, "slowest_counts": slowest_counts,
+        "ranking_by_median_floor": ranking,
+        "stability": {
+            "anchor": _stab(anchor_counts), "slowest": _stab(slowest_counts),
+            "median_floor_spread_ms": med_spread,
+        },
+    }
+
+
 # --------------------------------------------------------------- CLI --------------------------------
 def _read(path):
     return pathlib.Path(path).read_text(errors="replace") if path and os.path.isfile(path) else None
@@ -284,6 +385,44 @@ def _sources_from_jitter(jitter_json, template):
         if m and k == template.format(n=int(m.group(1))):
             out.append((int(m.group(1)), k))
     return [k for _n, k in sorted(out)]
+
+
+def _decompose_artefacts(jitter_json, strih_path, burns, cameras=None):
+    """Shared per-run glue: resolve sources, read strih cap_avgs + cambox grabber health, and
+    decompose(). REUSES every existing derivation (arrival_floors_from_jitter via decompose,
+    parse_recv_timing via cap_avg_by_source, grabber_health) -- no new skew regex. Both the
+    single-run CLI path and mine_run_dir (the --multi miner) call this, so the two can never drift."""
+    if cameras:
+        sources = [SOURCE_TEMPLATE.format(n=n) for n in cameras]
+    else:
+        sources = _sources_from_jitter(jitter_json, SOURCE_TEMPLATE)
+    strih_text = _read(strih_path)
+    cap_avgs = cap_avg_by_source(strih_text, sources) if strih_text else {}
+    grabber_by_src = {}
+    for s in sources:
+        m = re.search(r"(\d+)$", s)
+        if not m:
+            continue
+        burn = burns.get(int(m.group(1))) if burns else None
+        btext = _read(burn) if burn else None
+        if btext:
+            grabber_by_src[s] = grabber_health(btext)
+    return decompose(jitter_json, cap_avgs, grabber_by_src, sources)
+
+
+def mine_run_dir(run_dir, cameras=None):
+    """Mine ONE E2E run dir -> its decompose() result, or None when no valid jitter JSON is present
+    (honest absence -- a missing/empty/corrupt qr-align-jitter-*.json, never a crash). This is the
+    per-run unit --multi folds; it reuses the SAME _discover + _decompose_artefacts the single-run
+    CLI uses."""
+    d_jit, d_strih, burns = _discover(run_dir)
+    if not d_jit or not os.path.isfile(d_jit):
+        return None
+    try:
+        jitter_json = json.loads(pathlib.Path(d_jit).read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return None
+    return _decompose_artefacts(jitter_json, d_strih, burns, cameras)
 
 
 def _fmt(v, spec="%.1f"):
@@ -318,19 +457,131 @@ def _render_table(result):
     return "\n".join(lines)
 
 
+def _parse_cameras(args, ap):
+    """--cameras "1,2,3,4" -> [1,2,3,4], or None. NOTE: SOURCE_TEMPLATE is fixed, NOT a CLI knob --
+    the reused arrival_floors_from_jitter hardcodes the "NDI cam<N>" strih naming, so any other
+    template would resolve zero floors (review W1)."""
+    if not args.cameras:
+        return None
+    try:
+        return [int(x) for x in args.cameras.replace(" ", "").split(",") if x]
+    except ValueError:
+        ap.error('--cameras must be comma-separated integers, e.g. "1,2,3,4"')
+
+
+def _render_multi(agg, runs):
+    """Human-readable --multi report: header, per-run digest, per-camera aggregate table (ordered
+    by median floor), and the STABILITY verdict."""
+    lines = []
+    lines.append("MULTI-RUN arrival-floor aggregate: %d dir(s) scanned, %d usable, %d empty(phantom)"
+                 % (agg.get("n_dirs_scanned", len(runs)), agg["n_usable"], agg["n_empty"]))
+    if agg.get("n_skipped_no_data"):
+        lines.append("  (%d dir(s) skipped: no valid qr-align-jitter-*.json)" % agg["n_skipped_no_data"])
+
+    lines.append("")
+    lines.append("%-13s %-8s %-8s %8s" % ("run", "anchor", "slowest", "spread"))
+    for rid, res in runs:
+        s = res["summary"]
+        lines.append("%-13s %-8s %-8s %8s" % (
+            rid, (s["anchor_src"] or "-").replace("NDI ", ""),
+            (s["slowest_src"] or "-").replace("NDI ", ""), _fmt(s["floor_spread_ms"])))
+
+    lines.append("")
+    hdr = "%-8s %4s %8s %8s %8s %8s %9s %8s  %s" % (
+        "camera", "n", "flr_med", "flr_min", "flr_max", "flr_std", "mean_rank", "ex_med", "lat_pins")
+    lines.append(hdr)
+    lines.append("-" * len(hdr))
+    for c in agg["ranking_by_median_floor"]:
+        d = agg["per_camera"][c]
+        lines.append("%-8s %4d %8.1f %8.1f %8.1f %8.1f %9.2f %8.1f  %s" % (
+            c.replace("NDI ", ""), d["n"], d["floor_median"], d["floor_min"], d["floor_max"],
+            d["floor_pstdev"], d["mean_floor_rank"], d["excess_median"],
+            ",".join(str(p) for p in d["latency_pins"])))
+
+    lines.append("")
+    st = agg["stability"]
+    a, sl = st["anchor"], st["slowest"]
+    lines.append("STABILITY VERDICT (position held by ONE camera in >= %.0f%% of usable runs = stable):"
+                 % (100 * RANK_MODE_STABLE_FRAC))
+    lines.append("  anchor (fastest): %s in %d/%d runs (%.0f%%) -> %s" % (
+        (a["src"] or "-").replace("NDI ", ""), a["count"], agg["n_usable"], 100 * a["fraction"],
+        "STABLE" if a["stable"] else "NOT stable (run-level variance dominates)"))
+    lines.append("  slowest:          %s in %d/%d runs (%.0f%%) -> %s" % (
+        (sl["src"] or "-").replace("NDI ", ""), sl["count"], agg["n_usable"], 100 * sl["fraction"],
+        "STABLE" if sl["stable"] else "NOT stable (run-level variance dominates)"))
+    lines.append("  median-floor spread across cameras = %s ms" % _fmt(st["median_floor_spread_ms"]))
+    return "\n".join(lines)
+
+
+def _run_multi(args, ap):
+    """--multi: mine several run dirs (repeated --run-dir and/or --runs-glob), stratify with
+    _keep_run, aggregate, and report. Reuses mine_run_dir (the SAME per-run path as single mode)."""
+    dirs = list(args.run_dir or [])
+    if args.runs_glob:
+        dirs.extend(sorted(glob.glob(args.runs_glob)))
+    seen, ordered = set(), []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            ordered.append(d)
+    if not ordered:
+        ap.error("--multi needs run dirs: pass --run-dir <dir> (repeatable) and/or --runs-glob PATTERN")
+
+    cam_nums = _parse_cameras(args, ap)
+    runs, n_skipped, n_phantom = [], 0, 0
+    for d in ordered:
+        res = mine_run_dir(d, cam_nums)
+        if res is None:
+            n_skipped += 1
+            continue
+        if not res.get("rows"):
+            n_phantom += 1
+        if not _keep_run(res, only_uniform=args.only_uniform, min_cameras=args.min_cameras):
+            continue
+        rid = os.path.basename(d.rstrip("/")).replace("recording-e2e-", "")
+        runs.append((rid, res))
+
+    agg = aggregate(runs)
+    agg["n_dirs_scanned"] = len(ordered)
+    agg["n_skipped_no_data"] = n_skipped
+    agg["n_phantom_mined"] = n_phantom
+
+    if args.as_json:
+        print(json.dumps(agg, indent=2, sort_keys=True))
+    else:
+        print(_render_multi(agg, runs))
+    return 0
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Per-box arrival-floor stage decomposition (#1168 task 1)")
-    ap.add_argument("--run-dir", help="an E2E run dir (/tmp/recording-e2e-<RUN>) to auto-discover from")
+    ap = argparse.ArgumentParser(description="Per-box arrival-floor stage decomposition (#1168 tasks 1-2)")
+    ap.add_argument("--run-dir", action="append",
+                    help="an E2E run dir (/tmp/recording-e2e-<RUN>); repeat for --multi")
     ap.add_argument("--jitter-json", help="qr-align-jitter-<RUN>.json (overrides --run-dir discovery)")
     ap.add_argument("--strih-log", help="qr-align-strih-<RUN>.log (overrides --run-dir discovery)")
     ap.add_argument("--cameras", help='explicit camera numbers, e.g. "1,2,3,4"')
+    ap.add_argument("--multi", action="store_true",
+                    help="aggregate several run dirs (per-camera floor distribution + stability verdict)")
+    ap.add_argument("--runs-glob", help="(--multi) glob of run dirs, e.g. '/tmp/recording-e2e-*'")
+    ap.add_argument("--only-uniform", action="store_true",
+                    help="(--multi) keep only transport-uniform runs (the clean ~50ms-offset regime)")
+    ap.add_argument("--min-cameras", type=int, default=0,
+                    help="(--multi) keep only runs with >= N non-phantom cameras")
     ap.add_argument("--json", action="store_true", dest="as_json", help="machine-parseable output")
     args = ap.parse_args(argv)
 
+    if args.multi:
+        return _run_multi(args, ap)
+
     burns = {}
-    jitter_path, strih_path = args.jitter_json, args.strih_log
+    run_dir = None
     if args.run_dir:
-        d_jit, d_strih, burns = _discover(args.run_dir)
+        if len(args.run_dir) > 1:
+            ap.error("multiple --run-dir given; use --multi to aggregate several run dirs")
+        run_dir = args.run_dir[0]
+    jitter_path, strih_path = args.jitter_json, args.strih_log
+    if run_dir:
+        d_jit, d_strih, burns = _discover(run_dir)
         jitter_path = jitter_path or d_jit
         strih_path = strih_path or d_strih
     if not jitter_path or not os.path.isfile(jitter_path):
@@ -341,32 +592,7 @@ def main(argv=None):
     except json.JSONDecodeError as e:
         ap.error("jitter JSON %s is not valid JSON: %s" % (jitter_path, e))
 
-    # NOTE: SOURCE_TEMPLATE is fixed, NOT a CLI knob -- the reused arrival_floors_from_jitter
-    # (via prerecord_phase_calibrate) hardcodes the "NDI cam<N>" strih naming, so any other
-    # template would resolve zero floors and omit every camera (review W1).
-    if args.cameras:
-        try:
-            nums = [int(x) for x in args.cameras.replace(" ", "").split(",") if x]
-        except ValueError:
-            ap.error('--cameras must be comma-separated integers, e.g. "1,2,3,4"')
-        sources = [SOURCE_TEMPLATE.format(n=n) for n in nums]
-    else:
-        sources = _sources_from_jitter(jitter_json, SOURCE_TEMPLATE)
-
-    strih_text = _read(strih_path)
-    cap_avgs = cap_avg_by_source(strih_text, sources) if strih_text else {}
-
-    grabber_by_src = {}
-    for s in sources:
-        m = re.search(r"(\d+)$", s)
-        if not m:
-            continue
-        burn = burns.get(int(m.group(1)))
-        btext = _read(burn) if burn else None
-        if btext:
-            grabber_by_src[s] = grabber_health(btext)
-
-    result = decompose(jitter_json, cap_avgs, grabber_by_src, sources)
+    result = _decompose_artefacts(jitter_json, strih_path, burns, _parse_cameras(args, ap))
 
     if args.as_json:
         print(json.dumps(result, indent=2, sort_keys=True))
