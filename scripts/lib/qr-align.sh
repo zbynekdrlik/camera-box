@@ -123,6 +123,10 @@ qr_align_run() {
   [ -n "${QR_ALIGN_BUDGET_S:-}" ]       && args+=(--measure-budget-s "$QR_ALIGN_BUDGET_S")
   [ -n "${QR_ALIGN_MAX_DELTA_MS:-}" ]   && args+=(--max-delta-ms "$QR_ALIGN_MAX_DELTA_MS")
   [ -n "${QR_ALIGN_PARITY_TOL_IDS:-}" ] && args+=(--parity-tol-ids "$QR_ALIGN_PARITY_TOL_IDS")
+  # issue 1168 re-tighten: the BUDGET-BOUND transient budget (a residual above it HARD-FAILs). The
+  # python default (45 ms) is the E2E default; this env is a live re-arm seam for the supervisor
+  # (LOWER it toward the parity gate as the N=2 quantum improves) with no code change.
+  [ -n "${QR_ALIGN_RETIGHTEN_BUDGET_MS:-}" ] && args+=(--align-retighten-budget-ms "$QR_ALIGN_RETIGHTEN_BUDGET_MS")
   # QR_ALIGN_EXTRA_ARGS is an intentional word-split escape hatch for one-off flags.
   # shellcheck disable=SC2206
   [ -n "${QR_ALIGN_EXTRA_ARGS:-}" ]     && args+=(${QR_ALIGN_EXTRA_ARGS})
