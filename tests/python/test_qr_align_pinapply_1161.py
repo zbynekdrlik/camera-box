@@ -227,26 +227,27 @@ class TestFloorAwarePins:
     FLOORS = {"NDI cam1": 66.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}
     DELTAS = {"NDI cam1": 0.0, "NDI cam2": 3.0, "NDI cam3": 33.0, "NDI cam4": 20.0}  # hold to add
 
-    def test_faster_cameras_are_pinned_at_or_above_their_arrival_floor(self):
+    def test_faster_cameras_get_the_current_pin_plus_their_present_age_gap(self):
+        # issue 1253 ADDITIVE: new_pin_i = current_pin_i + delta_i (current pin defaults to the floor
+        # when unread -- the execute path resets first), NOT the old absolute arrival_floor + delta.
         plan = qa.floor_aware_pins(self.FLOORS, self.DELTAS)
-        # every faster camera's pin >= its own arrival floor -> ABOVE the inert edge (the whole fix)
+        assert plan["NDI cam2"] == 6 and plan["NDI cam3"] == 36 and plan["NDI cam4"] == 23
+        # never the old max-model absolute target (which pinned every faster camera to the slowest's 66)
         for s in ("NDI cam2", "NDI cam3", "NDI cam4"):
-            assert plan[s] >= self.FLOORS[s], f"{s} pin {plan[s]} must clear its floor {self.FLOORS[s]}"
-        # and they all land at the SAME alignment target = the slowest camera's floor (66)
-        assert plan["NDI cam2"] == 66 and plan["NDI cam3"] == 66 and plan["NDI cam4"] == 66
+            assert plan[s] != 66
 
     def test_slowest_camera_keeps_the_minimum_floor_pin(self):
         plan = qa.floor_aware_pins(self.FLOORS, self.DELTAS)
         assert plan["NDI cam1"] == 3   # slowest (delta 0) -> floor, inert, stays at its natural 66
 
-    def test_old_floor3_plan_is_below_the_floor_the_documented_bug(self):
-        # characterizes the bug the fix removes: floor3_pins' faster-camera pins land BELOW their
-        # arrival floors -> inert. (This asserts against the EXISTING function; it documents WHY.)
+    def test_additive_plan_equals_floor3_on_the_reset_path(self):
+        # issue 1253: under the ADDITIVE FIFO the floor-aware plan (current_pin + delta, current at the
+        # floor after the two-phase reset) is IDENTICALLY floor3_pins (floor + delta). The pre-1253
+        # "floor3 lands below the arrival floor -> inert" claim was the max-model BUG this fix removes:
+        # under the additive FIFO every pin adds hold, so floor3 aligns.
         old = qa.floor3_pins(self.DELTAS)
-        assert old["NDI cam3"] < self.FLOORS["NDI cam3"] or old["NDI cam2"] < self.FLOORS["NDI cam2"]
-        # the fix's plan is strictly deeper on the faster cameras than the inert floor3 plan
-        fix = qa.floor_aware_pins(self.FLOORS, self.DELTAS)
-        assert fix["NDI cam2"] > old["NDI cam2"] and fix["NDI cam3"] > old["NDI cam3"]
+        fix = qa.floor_aware_pins(self.FLOORS, self.DELTAS)   # no current_pins -> defaults to the floor
+        assert fix == old
 
     def test_fails_loud_when_floor_plus_delta_exceeds_the_abs_ceiling(self):
         # a transport floor so high that aligning would need a pin beyond the absolute budget ->
@@ -261,10 +262,11 @@ class TestFloorAwarePins:
 
     def test_ceiling_is_the_owner_94ms_line_and_below_it_aligns(self):
         assert qa.DEFAULT_MAX_ABS_LATENCY_MS == 94
-        # floor 60 + delta 33 = 93 <= 94 -> aligns (does NOT fail)
+        # resulting present age 27 + 33 = 60 <= 94 -> within budget, aligns (does NOT fail). issue 1253
+        # additive: the PIN is current(floor 3) + delta 33 = 36 (not the absolute present-age target 60).
         plan = qa.floor_aware_pins({"NDI cam1": 60.0, "NDI cam3": 27.0},
                                    {"NDI cam1": 0.0, "NDI cam3": 33.0})
-        assert plan["NDI cam3"] == 60 and plan["NDI cam1"] == 3
+        assert plan["NDI cam3"] == 36 and plan["NDI cam1"] == 3
 
     def test_fails_when_a_faster_camera_has_no_arrival_floor(self):
         # a faster camera missing from the jitter measurement cannot be pinned honestly -> FAIL,
@@ -284,21 +286,27 @@ _BASE_NS = 30_000 * ID_NS
 
 
 class _FifoBarrier:
-    """A barrier stand-in that MODELS the genlock FIFO's response to the applied pins: each camera
-    presents a frame of age present_age_i = max(applied_pin_i, arrival_floor_i). gen_ts encodes the
-    present age EXACTLY (older present -> smaller gen_ts), so round_deltas reads the true cross-camera
-    present-age spread; a faster camera pinned AT/ABOVE its floor is delayed to that pin (the
-    genlock-C ACQUIRE frame-mover), closing the spread. Reads the live pins from the shared `applied`
-    capture (empty before apply -> the below-floor current pins)."""
+    """A barrier stand-in that MODELS the genlock FIFO's ADDITIVE response to the applied pins (issue
+    1252/1253, supervisor-confirmed from run 1899055119: post_residual = pre_residual + pin_delta):
+    present_age_i = transport_i + live_pin_i, NOT the old max(pin, transport). transport_i is
+    reconstructed from the arrival floor measured at the current pin (transport_i = floor_i -
+    current_pin_i), so raising a pin ADDS its hold on top of the transport and a younger camera pinned
+    by its present-age GAP is delayed into parity. gen_ts encodes present age EXACTLY (older present ->
+    smaller gen_ts). Reads the live pins from the shared `applied` capture (empty before apply -> the
+    current pins).
+
+    (Migrated from the pre-1253 max(pin, arrival_floor) model, which was the very bug issue 1253 fixes
+    -- the FIFO adds the pin, it does not clamp to the floor. Justification: run 1899055119.)"""
 
     def __init__(self, floors, current_pins, applied):
-        self.floors, self.current_pins, self.applied = floors, current_pins, applied
+        self.transport = {s: floors[s] - current_pins[s] for s in floors}
+        self.current_pins, self.applied = current_pins, applied
 
     def __call__(self, sources, host, password, width, height):
         live = self.applied if self.applied else self.current_pins
         shot = {}
         for s in sources:
-            present_ms = max(live.get(s, 0), self.floors[s])
+            present_ms = self.transport[s] + live.get(s, 0)    # ADDITIVE, not max(pin, transport)
             gen_ts = int(_BASE_NS - present_ms * 1e6)          # older present -> smaller gen_ts
             fid = int(round(gen_ts / ID_NS))
             shot[s] = ([_payload(RUN, fid, gen_ts), _payload(RUN, fid - 1, gen_ts - ID_NS)], 0)
@@ -338,9 +346,10 @@ class TestAlignFloorAwareFlow:
         result = _align_with_floors(monkeypatch)
         assert result["status"] == "aligned"
         assert result["post_spread_ids"] == 0
-        # the faster cameras were pinned AT/ABOVE their floor (66), never the inert floor3 plan
+        # issue 1253 additive: each faster camera gets current_pin + its present-age gap so the additive
+        # FIFO delays it into parity (resulting present age all 66). current = {3,6,17,22}, gaps = {3,33,20}.
         plan = result["plan"]
-        assert plan["NDI cam2"] >= 63 and plan["NDI cam3"] >= 33 and plan["NDI cam4"] >= 46
+        assert plan["NDI cam2"] == 9 and plan["NDI cam3"] == 50 and plan["NDI cam4"] == 42
         assert plan["NDI cam1"] == 3
 
 
@@ -367,9 +376,11 @@ class TestFloorAwarePinsSecondRound:
         deltas = {"NDI cam1": 17.0, "NDI cam2": 0.0, "NDI cam3": 0.0, "NDI cam4": 0.0}      # c1 faster
         current = {"NDI cam1": 3, "NDI cam2": 66, "NDI cam3": 66, "NDI cam4": 66}
         plan = qa.floor_aware_pins(floors, deltas, floor_ms=3, current_pins=current)
-        # pin-dominated co-slowest kept at their pin (not torn to 3); faster c1 raised to 49+17=66
+        # co-slowest kept at their pin (hold 0 -> current_pin + 0); issue 1253 additive: faster c1 is
+        # its current pin 3 + present-age gap 17 = 20 (resulting present 46+20=66, aligned), NOT the
+        # old absolute target 66. The don't-tear-down intent is subsumed by current_pin + hold.
         assert plan["NDI cam2"] == 66 and plan["NDI cam3"] == 66 and plan["NDI cam4"] == 66
-        assert plan["NDI cam1"] == 66
+        assert plan["NDI cam1"] == 20
 
     def test_transport_dominated_slowest_still_floors_after_a_reset(self):
         # the reset path: all pins at floor 3 (< transport), so no camera is pin-dominated -> the true
@@ -378,8 +389,9 @@ class TestFloorAwarePinsSecondRound:
         deltas = {"NDI cam1": 14.0, "NDI cam2": 0.0, "NDI cam3": 30.0, "NDI cam4": 17.0}
         current = {"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 3, "NDI cam4": 3}
         plan = qa.floor_aware_pins(floors, deltas, floor_ms=3, current_pins=current)
-        assert plan["NDI cam2"] == 3                       # true slowest -> floor
-        assert plan["NDI cam1"] == 63 and plan["NDI cam3"] == 63 and plan["NDI cam4"] == 63
+        assert plan["NDI cam2"] == 3                       # true slowest (hold 0) -> keeps its floor pin
+        # issue 1253 additive: new_pin = current(floor 3) + present-age gap (resulting present all 63)
+        assert plan["NDI cam1"] == 17 and plan["NDI cam3"] == 33 and plan["NDI cam4"] == 20
 
     def test_pin_dominated_kept_despite_positive_skew_in_the_audit(self):
         # 🔵a: the audit's own +mean_head_skew can read a pin-dominated co-slowest's floor a couple ms
@@ -462,16 +474,16 @@ class TestAlignSecondRound:
         assert "80.0" in msg         # the pure per-camera delta does
 
     def test_partial_audit_falls_back_not_abort(self, monkeypatch):
-        # 🟡3: a jitter JSON missing a FASTER camera must degrade to floor3+warning (like a failed
-        # fetch), never hard-abort the whole run.
+        # 🟡3: a jitter JSON missing a FASTER camera must degrade to the floor3 fallback (+warning),
+        # never the hard floor-aware missing-floor abort. issue 1253: under the ADDITIVE FIFO the floor3
+        # fallback (floor + delta) actually ALIGNS the barrier, so the run PASSES via the fallback path
+        # (the pre-1253 max-model barrier left it misaligned -> a FAIL; the fallback is no longer inert).
         floors = {"NDI cam1": 66.0, "NDI cam2": 63.0, "NDI cam3": 33.0, "NDI cam4": 46.0}
         current = {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 17, "NDI cam4": 22}
         partial = _jitter({"NDI cam1": 66.0, "NDI cam2": 63.0}, {"NDI cam1": 3, "NDI cam2": 6})  # cam3/4 absent
-        # the FIFO barrier stays misaligned under the inert floor3 fallback -> the run FAILS, but with
-        # the floor3-fallback reason, NOT the floor-aware missing-floor abort.
-        with pytest.raises(qa.AlignmentImpossible) as exc:
-            self._align(monkeypatch, floors, current, jitter=partial)
-        assert "no arrival-floor measurement" not in str(exc.value)   # not the hard floor-aware abort
+        result = self._align(monkeypatch, floors, current, jitter=partial)
+        assert result["status"] == "aligned"          # the floor3 fallback aligns under the additive FIFO
+        assert result["post_spread_ids"] == 0
 
 
 class TestResetPinsToFloor:
@@ -513,7 +525,9 @@ class TestFloorAwarePartition:
         obs = {s: t for s, fl, hl, t in over}
         assert set(obs) == {"NDI cam2", "NDI cam3"}         # 100+29=129, 79+50=129 -> over 94
         assert obs["NDI cam3"] == pytest.approx(129.0)
-        assert plan["NDI cam4"] == 60                        # within-budget faster camera keeps its target
+        # issue 1253 additive: within-budget faster camera gets current(floor 3) + delta 20 = 23 (its
+        # resulting present age 40+20=60 <= 94); the over_budget `target` stays the RESULTING present age.
+        assert plan["NDI cam4"] == 23
         assert plan["NDI cam1"] == 3                         # slowest floors
         # over-budget cameras are CLAMPED to the floor (a pin we cannot afford is never written up)
         assert plan["NDI cam2"] == 3 and plan["NDI cam3"] == 3
@@ -632,28 +646,6 @@ class TestBudgetBoundSoftRelease:
 # age. RED here on the current max-model formula (the overshoot leaves the verify tail off-parity ->
 # AlignmentImpossible); GREEN once the formula is additive.
 # --------------------------------------------------------------------------- #
-class _AdditiveFifoBarrier:
-    """Models the genlock FIFO's ADDITIVE response (issue 1252/1253, supervisor-confirmed from run
-    1899055119: post_residual = pre_residual + pin_delta): present_age_i = transport_i + live_pin_i.
-    Constructed from arrival floors (present ages) measured at the current pins -- transport_i =
-    floor_i - current_pin_i -- so a raised pin ADDS its hold on top of the transport (never
-    max(pin, transport)). gen_ts encodes present age EXACTLY (older present -> smaller gen_ts)."""
-
-    def __init__(self, floors, current_pins, applied):
-        self.transport = {s: floors[s] - current_pins[s] for s in floors}
-        self.current_pins, self.applied = current_pins, applied
-
-    def __call__(self, sources, host, password, width, height):
-        live = self.applied if self.applied else self.current_pins
-        shot = {}
-        for s in sources:
-            present_ms = self.transport[s] + live.get(s, 0)     # ADDITIVE, not max(pin, transport)
-            gen_ts = int(_BASE_NS - present_ms * 1e6)
-            fid = int(round(gen_ts / ID_NS))
-            shot[s] = ([_payload(RUN, fid, gen_ts), _payload(RUN, fid - 1, gen_ts - ID_NS)], 0)
-        return shot
-
-
 def _align_additive_overshoot(monkeypatch):
     """A GENUINE >= 2-source-frame cross-camera spread (40 ms, past the #1252 quantum, within the 66 ms
     sanity and the 94 ms ceiling) under the ADDITIVE FIFO. cam1 is the oldest present (63 ms); the
@@ -666,7 +658,7 @@ def _align_additive_overshoot(monkeypatch):
     current = {s: 3 for s in SRC}
     floors = {s: transports[s] + current[s] for s in SRC}       # present ages at the floor: {63,23,33,43}
     applied = {}
-    monkeypatch.setattr(qa, "barrier_screenshot", _AdditiveFifoBarrier(floors, current, applied))
+    monkeypatch.setattr(qa, "barrier_screenshot", _FifoBarrier(floors, current, applied))
 
     def _read_pins(s, h, p):
         return dict(applied) if applied else dict(current)

@@ -133,16 +133,20 @@ class TestWithinAlignedQuantum:
         assert qa.within_aligned_quantum({}) is False
 
 
-class TestFloorAwarePlanDoublesTheQuantum:
-    def test_current_plan_raises_the_runs_phantom_above_floor_pins(self):
-        # documents the DEFECT on the real inputs: floor_aware_pins reproduces the run's byte-identical
-        # +83 ms above-floor plan (post_residual = pre + pin_delta -> the spread doubles). Stays true
-        # after the fix (floor_aware_pins is unchanged); the fix stops it being REACHED for a quantum.
-        floors = qa.arrival_floors_from_jitter(RUN_JITTER, SRC)
-        plan = qa.floor_aware_pins(floors, RUN_DELTAS)
-        assert plan["NDI cam1"] == 86 and plan["NDI cam4"] == 92
-        assert plan["NDI cam5"] == 87 and plan["NDI cam6"] == 87 and plan["NDI cam7"] == 87
-        assert plan["NDI cam3"] == 3
+class TestPhantomFloorFiltered:
+    def test_samples_2_arrival_floors_are_dropped_at_the_source(self):
+        # issue 1253: a floor derived from < 3 samples is one source-frame off (cam3's phantom "84" =
+        # 67 + 16.7 in run 1899055119). Every RUN_JITTER source has samples=2, so arrival_floors_from_
+        # jitter drops them ALL -> no phantom "slowest" reaches the plan at all. (RED before the samples
+        # guard: the phantoms were returned and the max-model plan raised +83 ms pins on them.)
+        assert qa.arrival_floors_from_jitter(RUN_JITTER, SRC) == {}
+
+    def test_a_healthy_audit_window_is_kept(self):
+        # a healthy window (>= 3 samples) is trusted, so a genuine floor still reaches the plan; a
+        # MISSING samples count is also trusted (only an explicit low count is the known phantom).
+        good = {s: {**RUN_JITTER[s], "samples": 40} for s in SRC}
+        floors = qa.arrival_floors_from_jitter(good, SRC)
+        assert set(floors) == set(SRC) and floors["NDI cam3"] == 87.0
 
 
 class TestAlignReproducesTheRun:
