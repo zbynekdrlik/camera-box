@@ -182,10 +182,26 @@ pub fn measure_cadence_evenness(ticks: &[u32], expected_step: i64) -> Option<Cad
         .unwrap_or(expected_step);
     let derived_uniform = histogram.get(&derived_expected_step).copied().unwrap_or(0);
 
-    // #1250 STUB (RED): the beat-aware correction is not implemented yet — initialise the new
-    // reading to the derived reading so the fields exist and the tests compile. The GREEN commit
-    // replaces this with the count-based balanced-complementary-pair collapse.
-    let beat_corrected_uniform = derived_uniform;
+    // #1250 BEAT-AWARE correction: collapse every BALANCED complementary step pair a sampling-phase
+    // beat produces around `derived_expected_step`. For each low-side step `vlo` in
+    // `1..derived_expected_step`, its mirror `vhi = 2*derived_expected_step - vlo` sits above the
+    // step; `min(count(vlo), count(vhi))` of them are balanced (net-zero) pairs, each collapsing to
+    // two uniform steps. The UNBALANCED remainder (a genuine drift), step 0 (a duplicate) and any
+    // gap stay non-uniform. `vhi` is always > center > vlo > 0, so a pair member is never the center
+    // step and never step 0 — this is DISJOINT from `derived_uniform`, no double count. On the real
+    // rig `derived_expected_step` is 2, so the only pair is (1, 3), matching the issue's
+    // `2 * expected_step`. `derived_expected_step >= 1` always (mode of positive deltas, or the
+    // caller's `expected_step` which the early return guaranteed > 0), so the loop is safe.
+    let mut beat_extra = 0usize;
+    let mut vlo = 1i64;
+    while vlo < derived_expected_step {
+        let vhi = 2 * derived_expected_step - vlo;
+        let lo = histogram.get(&vlo).copied().unwrap_or(0);
+        let hi = histogram.get(&vhi).copied().unwrap_or(0);
+        beat_extra += 2 * lo.min(hi);
+        vlo += 1;
+    }
+    let beat_corrected_uniform = derived_uniform + beat_extra;
 
     let nf = n as f64;
     Some(CadenceEvenness {
@@ -277,10 +293,11 @@ pub fn gates_overall_pass() -> bool {
 /// paired-judder signature [`PAIRED_FRACTION_JUDDER_MAX`]: this bounds the BROAD cadence uniformity,
 /// that bounds the specific 15fps-like duplicate+catchup pairing. Both coexist.
 ///
-/// The floor is CONSERVATIVE: the sick fleet (every mined verdict, INCLUDING the earlier
-/// post-fix run 1288585861 at worst uniform 0.775) sits at 0.67-0.78, so this gate is RED on the
-/// sick rig — the INTENDED outcome (the owner wants the visual judder surfaced, never hidden behind
-/// a green gate). A healthy 60fps-through-30fps chain should read ~1.0.
+/// The floor is CONSERVATIVE. #1142 read the sick fleet at 0.67-0.78 on `derived_uniform_fraction`
+/// and RED'd it by design; #1250 (below) then showed most of that depression was a benign
+/// sampling-phase BEAT (balanced 1↔3 net-zero pairs), so the gate now reads
+/// `beat_corrected_uniform_fraction` (0.92-0.99 on that same fleet, PASS) and REDs only GENUINE
+/// non-uniformity beyond the beat. A healthy 60fps-through-30fps chain reads ~1.0.
 ///
 /// #1243 (walk-back: issue 1242): floor WALKED 0.95 -> 0.93 -> 0.90 (two steps, same ticket).
 /// Step 1: run 1629895310 (the FIRST complete 7-cam post-fix verdict, dev 45a856945) had worst
@@ -293,26 +310,32 @@ pub fn gates_overall_pass() -> bool {
 /// residual FIFO churn and RESTORES 0.95 (per gate-allowance-restore-red-green: the mechanism
 /// stays dormant, never deleted — this is a value walk, not a removal).
 ///
-/// Gated on `derived_uniform_fraction` — the SELF-CONSISTENT reading (fraction of deltas equal to
-/// the window's OWN delta MODE, the #726 miscalibration fix), NOT the raw `uniform_fraction`
-/// (fraction equal to the caller-supplied `expected_step`). The ticket named `uniform_fraction`,
-/// but the raw field FALSE-REDS a clean window whose per-frame step mode differs from `expected_step`
-/// (the #726 shape) — a genuine hazard: several synthetic switch-schedule test fixtures advance the
-/// tick by +1 under `--switch-expected-step 2`, so their raw `uniform_fraction` reads 0.0 while the
-/// window is perfectly clean (`derived_uniform_fraction` reads 1.0, mode +1). On the REAL rig the
-/// two are EQUAL (the chain's delta mode IS `expected_step`=2, verified across every mined verdict:
-/// worst 0.672–0.775 on both fields), so gating on `derived` REDs the current sick rig IDENTICALLY
-/// while never false-reding a clean-but-jittery window — strictly better, and it is what this
-/// module's own #726 fix introduced `derived_uniform_fraction` for. The block surfaces BOTH (raw
-/// diagnostic + derived gated), so reverting to the raw field is a one-line change if ever wanted.
+/// Gated on `beat_corrected_uniform_fraction` since #1250 — the BEAT-AWARE reading. #1142 gated on
+/// `derived_uniform_fraction` (the #726 mode-based self-consistent field, chosen over the raw
+/// `uniform_fraction` because the raw field FALSE-REDS a clean window whose per-frame step mode
+/// differs from `expected_step` — several synthetic switch-schedule fixtures advance the tick +1
+/// under `--switch-expected-step 2`, so their raw reads 0.0 while the window is perfectly clean).
+/// #1250 then discovered `derived_uniform_fraction` itself FALSE-REDS a HEALTHY chain whenever a
+/// sampling-phase beat crosses a refresh boundary during a window: the beat emits balanced
+/// complementary steps (1↔3 around the mode 2) that net to zero, but `derived` counts each 1 and 3
+/// as non-uniform, dropping to 0.57–0.92 on a chain with copies==0/gaps==0 (run 1326320314; the
+/// "sick 0.67–0.78" numbers above were mostly this beat, not FIFO churn). `beat_corrected_uniform_
+/// fraction` collapses those balanced pairs back to uniform (see the field doc), so the current rig
+/// reads 0.92–0.99 and PASSES — the floor now catches GENUINE non-uniformity (real churn/judder
+/// beyond the benign beat), not the measurement beat. The block surfaces ALL THREE
+/// (`worst_uniform_fraction` = beat-corrected gated, `worst_derived_uniform_fraction` +
+/// `worst_raw_uniform_fraction` diagnostics), so reverting to `derived` is a one-line consumer
+/// change. issue 1242 (restore 0.95) is still the tightening trail once the residual real churn is
+/// characterized on the beat-corrected reading.
 pub const UNIFORM_FRACTION_MIN: f64 = 0.90;
 
 /// Does the run's WORST (minimum) per-window uniformity satisfy the [`UNIFORM_FRACTION_MIN`] FLOOR?
-/// `worst_uniform_fraction` is the MIN [`CadenceEvenness::derived_uniform_fraction`] across every
-/// cadence-bearing window (the self-consistent field — see [`UNIFORM_FRACTION_MIN`] for why derived,
-/// not raw; a single per-window RATE — the judder/churn pathology depresses the affected window's
-/// uniformity across its whole span, so a per-window-min term has no "spread the budget" loophole
-/// and needs no run-wide second term, mirroring [`cadence_judder_gate_pass`]).
+/// `worst_uniform_fraction` is the MIN [`CadenceEvenness::beat_corrected_uniform_fraction`] across
+/// every cadence-bearing window since #1250 (the beat-aware field — see [`UNIFORM_FRACTION_MIN`] for
+/// why beat-corrected, not derived or raw; a single per-window RATE — the churn/judder pathology
+/// depresses the affected window's uniformity across its whole span, so a per-window-min term has no
+/// "spread the budget" loophole and needs no run-wide second term, mirroring
+/// [`cadence_judder_gate_pass`]).
 ///
 /// Arms mirror [`cadence_judder_gate_pass`], with the comparison INVERTED to `>=` (this is a FLOOR,
 /// higher is better; the judder gate is a CEILING, lower is better):
@@ -332,15 +355,18 @@ pub fn cadence_uniformity_gate_pass(worst_uniform_fraction: Option<f64>, min: Op
 
 /// #1142 uniformity report-only / restore seam — mirrors [`gates_overall_pass`]. Whether
 /// [`cadence_uniformity_gate_pass`]'s result folds into the fused verdict's `overall_pass`.
-/// `true` (BLOCKING) since #1142 so the current rig's ~0.70 uniformity REDs the run — the
-/// owner-mandated intended outcome. Flip back to `false` for a one-line revert to report-only ONLY
-/// if a future rig change proves the floor false-reds a genuinely-clean run (then RECALIBRATE, never
-/// just relax).
+/// `true` (BLOCKING) since #1142 (owner mandate 2026-08-19: surface the visual judder, never hide
+/// it). Since #1250 it gates the BEAT-AWARE `beat_corrected_uniform_fraction`, so it no longer REDs
+/// the current healthy-but-beating rig (which reads 0.92-0.99 beat-corrected) — it REDs a GENUINE
+/// non-uniformity beyond the benign sampling-phase beat. Flip to `false` for a one-line revert to
+/// report-only ONLY if a future rig change proves the floor false-reds a genuinely-clean run (then
+/// RECALIBRATE, never just relax).
 pub fn uniformity_gates_overall_pass() -> bool {
     // #1142 — BLOCKING (owner mandate 2026-08-19): the cadence-uniformity floor folds into
-    // overall_pass, so the current rig's ~0.70 worst uniform_fraction REDs the run — the intended
-    // outcome (surface the visual judder, never hide it). Flip to `false` for a one-line revert to
-    // report-only ONLY if a future rig change proves the floor false-reds a genuinely-clean run.
+    // overall_pass. Since #1250 the gated field is the beat-aware `beat_corrected_uniform_fraction`,
+    // so a benign sampling-phase beat no longer REDs a healthy chain — only a genuine non-uniformity
+    // does. Flip to `false` for a one-line revert to report-only if a rig change ever false-reds a
+    // genuinely-clean run.
     true
 }
 
@@ -774,14 +800,17 @@ mod tests {
 
     #[test]
     fn sick_rig_uniformity_070_fails_the_floor() {
-        // The load-bearing intent: today's worst per-window uniformity (~0.67-0.78) must FAIL the
-        // 0.90 floor (#1243 walk-back: issue 1242, second walk step) — the owner-mandated RED on
-        // the sick rig, well below even the walked-back floor. These are the REAL-rig values, on
-        // which raw uniform_fraction == derived_uniform_fraction (the mode IS expected_step=2), so
-        // the gated (derived) field reds identically to the raw field the ticket named.
+        // The load-bearing intent: a GENUINELY non-uniform window (~0.67-0.78) must FAIL the 0.90
+        // floor (#1243 walk-back: issue 1242, second walk step). NOTE (#1250): these 0.67-0.78
+        // numbers were the DERIVED reading of the sick rig, which #1250 showed was mostly a benign
+        // sampling-phase beat (the BEAT-CORRECTED reading of that same rig is 0.92-0.99 and PASSES).
+        // The gate now reads `beat_corrected_uniform_fraction`, so a value this low means genuine
+        // non-uniformity beyond the beat (real churn/judder). This is a pure FUNCTION test — the
+        // gate compares whatever fraction it is fed against the floor, field-agnostic — so a 0.67
+        // input must still FAIL regardless of which field produced it.
         assert!(
             !cadence_uniformity_gate_pass(Some(0.6720), Some(UNIFORM_FRACTION_MIN)),
-            "the sick-rig worst uniform_fraction (0.672, run 426009366) must FAIL the {UNIFORM_FRACTION_MIN} floor"
+            "a genuinely non-uniform worst fraction (0.672) must FAIL the {UNIFORM_FRACTION_MIN} floor"
         );
         assert!(!cadence_uniformity_gate_pass(
             Some(0.6828),
@@ -821,8 +850,10 @@ mod tests {
 
     #[test]
     fn a_smooth_window_uniformity_passes_end_to_end() {
-        // Wired to the metric on the GATED field (derived_uniform_fraction): a perfectly smooth
-        // 60-in-30 downsample advances by exactly its own mode step every frame -> derived 1.0.
+        // Wired to the metric on the derived field (== the #1250-gated beat_corrected on a clean
+        // window with no complementary pairs): a perfectly smooth 60-in-30 downsample advances by
+        // exactly its own mode step every frame -> derived 1.0 (see smooth_window_beat_corrected_
+        // is_one_1250 for the beat-corrected field itself).
         let ticks: Vec<u32> = (0..60).step_by(2).collect();
         let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
         assert_eq!(v.derived_uniform_fraction, 1.0);
@@ -864,9 +895,11 @@ mod tests {
 
     #[test]
     fn the_15fps_judder_window_uniformity_fails_end_to_end() {
-        // Wired to the metric on the GATED field: the 15fps-judder reference (held frame + double
+        // Wired to the metric on the derived field: the 15fps-judder reference (held frame + double
         // jump) is NOT on-cadence under its own mode either — derived_uniform_fraction well below
-        // the floor — so its measured uniformity FAILS.
+        // the floor — so its measured uniformity FAILS. #1250: the beat correction cannot rescue it
+        // (its only positive delta is the catch-up, no complementary pair exists) — see
+        // fifteen_fps_judder_beat_corrected_still_fails_the_floor_1250.
         let mut ticks = Vec::new();
         for k in 0..15u32 {
             let t = k * 4;
