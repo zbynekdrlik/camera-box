@@ -159,10 +159,15 @@ probe_received() {
       2>/dev/null || true)"
   fi
   # Newest audit line for THIS source -> the received= integer. Empty if none found.
+  # #1258 layer 2: LC_ALL=C + grep -a -- PowerShell 5.1 `gc` (no -Encoding) reads the UTF-8
+  # strih OBS log as ANSI and re-encodes on output, so an audit line's non-ASCII glyphs come
+  # back as invalid-UTF-8 bytes; in a UTF-8 locale GNU grep then flags stdin BINARY (empty
+  # stdout) and sed's trailing `.*` refuses to consume the invalid byte (line-tail garbage
+  # after the digits) -- byte-safe end to end regardless of what bytes the raw tail carries.
   printf '%s\n' "$raw" \
-    | grep -F "genlock-fifo audit '$source':" \
+    | LC_ALL=C grep -aF "genlock-fifo audit '$source':" \
     | tail -1 \
-    | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' \
+    | LC_ALL=C sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' \
     | tail -1
 }
 
