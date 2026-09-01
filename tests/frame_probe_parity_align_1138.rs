@@ -626,19 +626,30 @@ fn recording_e2e_sources_and_calls_the_frame_probe_align_at_step_0() {
 #[test]
 fn recording_e2e_pin_verifies_against_the_aligned_ci_artifact() {
     let s = read("scripts/recording-e2e.sh");
-    let pin = s
-        .find("--frame-probe-only")
-        .expect("the [1/8] pin must exist");
-    let window = &s[pin..(pin + 300).min(s.len())];
-    // The pin must prefer FRAME_PROBE_ALIGN_CI_BIN (the artifact the align fetched + deployed) so
-    // the compare is against the SAME bytes cam2 now runs — with the $PROBE_BIN_DIR fallback for
-    // the align-skipped (--no-main-pin) / gh-unavailable case.
+    // #1235: the DEFAULT (first) pin is the HARD gate, pinning ONLY against FRAME_PROBE_ALIGN_CI_BIN
+    // (the artifact the [0/8] align fetched + deployed) — the SAME bytes cam2 now runs. There is NO
+    // $PROBE_BIN_DIR fallback in HARD mode (the dev1 LOCAL build is byte-different from the CI
+    // artifact, so it would false-ALARM); an empty FRAME_PROBE_ALIGN_CI_BIN is UNKNOWN -> REFUSE.
+    let mut occ = s.match_indices("--frame-probe-only");
+    let hard = occ.next().expect("the [1/8] pin must exist").0;
+    let soak = occ
+        .next()
+        .expect("the --no-main-pin soak report-only pin must exist")
+        .0;
+    let hard_win = &s[hard..(hard + 300).min(s.len())];
+    let soak_win = &s[soak..(soak + 300).min(s.len())];
     assert!(
-        window.contains("FRAME_PROBE_ALIGN_CI_BIN"),
-        "the [1/8] pin must prefer the aligned CI artifact (FRAME_PROBE_ALIGN_CI_BIN); window={window:?}"
+        hard_win.contains("FRAME_PROBE_ALIGN_CI_BIN") && hard_win.contains("--frame-probe-hard"),
+        "the hard [1/8] pin must verify against the aligned CI artifact only; window={hard_win:?}"
     );
     assert!(
-        window.contains("PROBE_BIN_DIR/frame-probe"),
-        "the [1/8] pin must keep the $PROBE_BIN_DIR fallback; window={window:?}"
+        !hard_win.contains("PROBE_BIN_DIR/frame-probe"),
+        "the HARD pin must NOT fall back to the byte-different $PROBE_BIN_DIR local build; window={hard_win:?}"
+    );
+    // The soak (report-only) branch keeps the #1138 local-build fallback for the align-skipped case.
+    assert!(
+        soak_win.contains("FRAME_PROBE_ALIGN_CI_BIN")
+            && soak_win.contains("PROBE_BIN_DIR/frame-probe"),
+        "the soak report-only pin must keep the $PROBE_BIN_DIR fallback; window={soak_win:?}"
     );
 }

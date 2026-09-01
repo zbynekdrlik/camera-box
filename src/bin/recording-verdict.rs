@@ -585,15 +585,24 @@ const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 /// analyzed seconds: a single per-frame delivery SINGLETON (the issue-1167 v3 paced-trickle
 /// absorption + a FIFO stale_replay in the same event; `burn_unreadable` stays 0 — a genuine
 /// delivery singleton, not a burn-readability defect). Per the owner's 2026-07-31 strict-test
-/// revision ("jedna stratená snímka nie je problém"), the band re-widens to the LOUD `<=1`
-/// singleton: a single drop PASSES within the allowance and is reported LOUDLY (never a silent
-/// green), while `>=2` of anything still FAILS and `burn_unreadable` stays an unconditional hard
-/// fail. This is the exact `gate-allowance-restore-red-green.md` shape, inverted. **Issue 1169
-/// stays OPEN as the RE-TIGHTEN trail** — a one-constant flip back to 0 (proven dormant by
-/// `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`), landed once a
-/// zero-singleton green run holds (e.g. after the issue-1168 floor reduction and/or the cam1-card
-/// swap). NEVER widen this band further without a fresh measured incident and its own trail.
-const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 1;
+/// revision ("jedna stratená snímka nie je problém"), the band re-widened to the LOUD `<=1`
+/// singleton while the paced-trickle residual was still being driven out, with an explicit
+/// re-tighten trail.
+///
+/// **Issue 1169 RE-TIGHTENED this DEFAULT back to 0** (2026-09-01) — the named re-tighten event
+/// landed: the first STABLE 3-run green 7-cam series (verdicts 1363366080 / 1168855508 /
+/// 674135238) showed `full_chain.real_drops = 0` and per-node `real_drops = 0` on EVERY node in
+/// EVERY run — the delivery-hop singleton band was never consumed, so the strict absolute-zero
+/// bar is restored (a single real drop again FAILS the headline; the count stays honest, nothing
+/// is masked). The allowance MECHANISM is untouched and DORMANT: the widened band (1) stays
+/// re-armable via one constant flip or the `CAMERA_BOX_REAL_DROPS_ALLOWANCE` env override (proven
+/// by `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar` at explicit allowances),
+/// so a future genuinely-new incident can re-widen it with its own trail. This is the exact
+/// `gate-allowance-restore-red-green.md` shape (RESTORE direction, third instance of the pattern
+/// in this file). Issue 1169 stays OPEN for its remaining two seams (the per-segment `<=1/<=1`
+/// bar and the cam-leg V4L2 band), both still consumed by the current green series. NEVER widen
+/// this band again without a fresh measured incident and its own re-tighten ticket.
+const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 0;
 
 /// #904 — env-overridable read of the per-node `real_drops` allowance (mirrors the
 /// `CAMERA_BOX_DECODE_WORKERS` idiom in `src/probe/recording.rs`: a non-numeric or absent value
@@ -4063,13 +4072,15 @@ fn build_and_print_verdict_with_stream_diffs(
                 );
             } else if all_zero {
                 // #904/#1169 — LOUD: a genuine pass, but NOT a strict zero-loss pass — never let
-                // this look identical to the clean branch above. Issue 1169 (owner, 2026-08-22)
-                // re-widened the default to the <=1 singleton band and is the re-tighten trail.
+                // this look identical to the clean branch above. The DEFAULT was re-tightened back
+                // to 0 (issue 1169, 2026-09-01), so this branch is now reachable ONLY when the
+                // `CAMERA_BOX_REAL_DROPS_ALLOWANCE` env override re-arms the dormant band; the
+                // message interpolates the actual `{real_drops_allowance}` in force.
                 println!(
                     "  >>> ⚠ #1169 REAL-DROPS SINGLETON ALLOWANCE: real-drops singleton allowance \
                      consumed: {total_real} — issue 1169 re-tighten trail. Within the per-node \
                      allowance of {real_drops_allowance} on: {} — 0 BURN-UNREADABLE, everything \
-                     else at the usual strict bar; 2+ of anything still FAILS.",
+                     else at the usual strict bar; anything OVER the allowance still FAILS.",
                     allowance_consumed_nodes.join(", ")
                 );
             } else {
@@ -5225,6 +5236,17 @@ fn build_and_print_verdict_with_stream_diffs(
                                         stats
                                     )),
                                 );
+                                // issue 1196 — the machine-checked per-window flip-readiness
+                                // (viability Observed + single-tile). Keyed after the PER-WINDOW fn
+                                // (window_promotable), distinct from the run-level tear.signal_promotable
+                                // below (the tear_gate_pass naming convention). REPORT-ONLY: gates
+                                // nothing, makes a known-torn calibration run auto-gradable.
+                                obj.insert(
+                                    "window_promotable".to_string(),
+                                    serde_json::json!(camera_box::tear_detect::window_promotable(
+                                        stats
+                                    )),
+                                );
                             }
                             v
                         })
@@ -5261,17 +5283,34 @@ fn build_and_print_verdict_with_stream_diffs(
                     report["all_cambox_continuity"]["tear"] = serde_json::json!({
                         "gates_overall_pass": camera_box::tear_detect::gates_overall_pass(),
                         "vernier_max_spread": camera_box::tear_detect::VERNIER_MAX_SPREAD,
+                        // issue 1196 — run-level machine-checked flip-readiness (any window
+                        // Observed a tear AND every window is single-tile) + the single-tile
+                        // promotion ceiling. NECESSARY but NOT SUFFICIENT for the flip: it reads
+                        // true on ~12/32 routine (NOT-known-torn) runs because a low background of
+                        // Observed single-tile tears (~0.001-0.004 tear_fraction, 1-3 frames/window)
+                        // occurs on green runs. REPORT-ONLY today.
+                        "signal_promotable": camera_box::tear_detect::signal_promotable(&tear_stats),
+                        "multi_path_suspect_ceiling":
+                            camera_box::tear_detect::MULTI_PATH_SUSPECT_CEILING,
                         "tear_gate": "report-only -- the tear span is the UNION of the primary \
                             dual-QR ids and the issue-1196 bottom aux tick pair's ids (span > \
-                            vernier_max_spread = >= 2 paint generations captured); the aux pair \
-                            gives the vertical redundancy the single-band primary content lacks \
-                            (a seam through the primary band alone reads undecodable, never two \
-                            clean generations -- see issue 781). Ships report-only with a computed \
-                            signal_viability plus aux_decode_fraction (aux chain-survival \
-                            coverage) and primary_dark_aux_alive_fraction (band-localized \
-                            corruption discriminator); flip gates_overall_pass to true only once \
-                            the signal is Observed on a known-torn run + a bound AND an \
-                            aux-coverage floor are calibrated from the mined real-frame fixture.",
+                            vernier_max_spread = >= 2 paint generations captured). Ships report-only \
+                            with a computed signal_viability plus the promotion property \
+                            signal_promotable (any window viability Observed + every window \
+                            multi_path_suspect_fraction <= multi_path_suspect_ceiling), and \
+                            report-only DIAGNOSTICS aux_decode_fraction (aux chain-survival \
+                            coverage) and primary_dark_aux_alive_fraction (band-localized corruption \
+                            discriminator). NOTE (real-data, 2026-09-01, mined across 44 local \
+                            verdicts): aux_decode_fraction is a DIAGNOSTIC, NOT a promotion floor -- \
+                            the CAM2 projection leg (which captures imag's HDMI scanout) decodes NO \
+                            aux marks, so its tears surface via the PRIMARY band; the aux pair \
+                            decodes only on the splitter legs. Observed single-tile tears occur at a \
+                            LOW background (~0.001-0.004, 1-3 frames/window) on green runs on BOTH \
+                            CAM2 and CAM3, so signal_promotable=true is NOT itself proof of a \
+                            known-torn run. Flip gates_overall_pass to true only once a tear_fraction \
+                            bound calibrated from a known-torn run's torn distribution -- which must \
+                            sit ABOVE this ~0.004 green background and cannot be 0.0 -- separates the \
+                            induced tear from that background (verdict-gate-seam-calibration.md).",
                         "windows": windows_json,
                     });
                     // Report-only fold (no-op while gates_overall_pass()==false): one-line LIVE flip.
@@ -8895,14 +8934,15 @@ mod tests {
         // (b) 1:1 hop (--capture-fps 60 ⇒ step 1): the SAME gap stays a REAL DROP — the #356
         // SAFETY never-mask invariant, unchanged where the forward-gap signal is valid.
         //
-        // #904 had briefly widened this to require 3 well-separated gaps (one past its default
-        // allowance of 2) so this SAFETY test kept proving loss BEYOND that allowance. #905 item
-        // 1 reverted `REAL_DROPS_ALLOWANCE_DEFAULT` back to 0 (a single gap sufficed then); issue
-        // 1169 (owner, 2026-08-22) RE-WIDENED the default to the <=1 SINGLETON band, so this
-        // SAFETY test now injects TWO well-separated gaps (one PAST the singleton band) to keep
-        // proving the never-mask invariant BEYOND the allowance — the same shape #904 used for
-        // its allowance of 2, re-scaled to the singleton band 1. The allowance mechanism itself
-        // stays overridable via `CAMERA_BOX_REAL_DROPS_ALLOWANCE`.
+        // The allowance default has moved 2 → 0 → 1 → 0. #904 briefly widened this to 3 gaps (one
+        // past its allowance of 2); #905 item 1 reverted `REAL_DROPS_ALLOWANCE_DEFAULT` to 0 (a
+        // single gap sufficed then); issue 1169 (owner, 2026-08-22) RE-WIDENED to the <=1 SINGLETON
+        // band, so this SAFETY test injected TWO gaps (one past the band 1); the issue-1169
+        // RE-TIGHTEN (2026-09-01, after the first zero-singleton green series) restores the default
+        // to 0, so this fixture simplifies back to its pre-relaxation SINGLE-gap shape (one past the
+        // restored zero band) — the same `window(...)` single-gap call part (a) uses, just on the
+        // 1:1 hop — and keeps proving the never-mask invariant BEYOND the allowance. The allowance
+        // MECHANISM itself stays overridable via `CAMERA_BOX_REAL_DROPS_ALLOWANCE` (dormant band 1).
         let args_1to1 = super::Args::parse_from([
             "recording-verdict",
             "--min-secs",
@@ -8910,16 +8950,16 @@ mod tests {
             "--capture-fps",
             "60",
         ]);
-        // TWO well-separated gaps ⇒ 2 REAL DROP ids, one PAST the issue-1169 singleton band (1).
-        let safety_gaps = [5, 300];
+        // ONE forward gap (5005 absent from both recordings) ⇒ exactly 1 REAL DROP id, one PAST the
+        // restored issue-1169 zero band (0). Same single-gap `window(...)` fixture as part (a).
         let (v2, pass2) = build_and_print_verdict(
             &args_1to1,
             Some(DecodedRec {
-                frames: window_multi_gap(N, false, &safety_gaps),
+                frames: window(N, false, Some(5)),
                 rec_path: None,
             }),
             Some(DecodedRec {
-                frames: window_multi_gap(N, true, &safety_gaps),
+                frames: window(N, true, Some(5)),
                 rec_path: None,
             }),
             Cam1Source::Absent,
@@ -8931,32 +8971,38 @@ mod tests {
         .expect("verdict");
         assert!(
             !pass2,
-            "#356/#1169: genuine 1:1-hop cam1 loss BEYOND the singleton band ⇒ overall FAIL"
+            "#356/#1169: genuine 1:1-hop cam1 loss BEYOND the restored zero band ⇒ overall FAIL"
         );
         assert_eq!(v2["full_chain"]["zero_loss"], serde_json::json!(false));
         assert_eq!(
             v2["full_chain"]["real_drops"],
-            serde_json::json!(2),
-            "#356/#1169 SAFETY: on the 1:1 hop, cam1 ids absent from BOTH recordings MUST stay \
-             REAL DROP — 2 (one past the <=1 singleton band) are never masked: {}",
+            serde_json::json!(1),
+            "#356/#1169 SAFETY: on the 1:1 hop, a cam1 id absent from BOTH recordings MUST stay a \
+             REAL DROP — 1 (one past the restored zero band) is never masked: {}",
             v2["full_chain"]
         );
     }
 
     // ---- #904/#905/#1169 — the small, explicit, LOUD real_drops allowance MECHANISM, and the
-    // #1169-re-widened <=1 SINGLETON default (issue 905 item 1's zero bar, re-widened by 1169) ----
+    // re-tightened absolute-zero default (2 -> 0 -> 1 -> 0; issue 1169's 2026-09-01 re-tighten back
+    // to the strict bar, the widened <=1 SINGLETON band kept DORMANT via the mechanism below) ----
 
-    /// #1169 (owner, 2026-08-22) — SECOND SEAM: RE-WIDENS `REAL_DROPS_ALLOWANCE_DEFAULT` back to
-    /// 1 for the sanctioned per-frame delivery SINGLETON (issue-1167 v3 paced-trickle absorption
-    /// plus a FIFO stale_replay in the same event; burn_unreadable stays 0). Owner's 2026-07-31
-    /// strict-test revision: "jedna stratená snímka nie je problém." With the DEFAULT now 1 (no
-    /// env override), a SINGLE genuine 1:1-hop cam1 real drop PASSES the headline WITHIN the
-    /// allowance and is reported LOUDLY (never a silent green) — and 2 drops still FAIL, so the
-    /// band is a strict singleton, never an open door. Inverts the issue-905 zero-bar test per
-    /// `gate-allowance-restore-red-green.md`; the one-constant re-tighten back to 0 is proven
-    /// dormant by `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`.
+    /// #1169 RE-TIGHTEN (owner trail, landed 2026-09-01) — SECOND SEAM back to the STRICT bar:
+    /// `REAL_DROPS_ALLOWANCE_DEFAULT` 1 → 0. The re-widen (2026-08-22) was the sanctioned per-frame
+    /// delivery SINGLETON absorption (issue-1167 v3 paced-trickle + a FIFO stale_replay in the same
+    /// event; burn_unreadable stays 0) while the residual was still being driven out; its re-tighten
+    /// trail said "flip back to 0 once a zero-singleton green run holds." That event NOW happened —
+    /// the first stable 3-run green 7-cam series (verdicts 1363366080 / 1168855508 / 674135238) shows
+    /// `real_drops = 0` on EVERY node in EVERY run (the band was never consumed), so the strict bar
+    /// is restored. With the DEFAULT now 0 (no env override), a SINGLE genuine 1:1-hop cam1 real drop
+    /// FAILS the headline (the absolute-zero bar) — the count stays honest (`real_drops = 1`) and
+    /// nothing is masked. This is the issue-905-style RESTORE per `gate-allowance-restore-red-green.md`;
+    /// the widened band (1) stays DORMANT and proven by
+    /// `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar` (explicit allowance, never
+    /// the default), so a future measured incident can re-arm it via one constant flip or the
+    /// `CAMERA_BOX_REAL_DROPS_ALLOWANCE` env override.
     #[test]
-    fn single_real_drop_passes_loudly_within_the_1169_singleton_allowance() {
+    fn single_real_drop_fails_at_the_re_tightened_zero_bar_1169() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
         const N: u32 = 600;
@@ -8967,7 +9013,7 @@ mod tests {
             "--capture-fps",
             "60",
         ]);
-        // exactly ONE genuine 1:1-hop cam1 real drop ⇒ the sanctioned singleton.
+        // exactly ONE genuine 1:1-hop cam1 real drop ⇒ the singleton that USED to pass on slack.
         let one = [100];
         let (v, pass) = build_and_print_verdict(
             &args,
@@ -8987,76 +9033,58 @@ mod tests {
         )
         .expect("verdict");
         assert!(
-            pass,
-            "#1169: a single real drop must PASS within the re-widened singleton allowance: {v}"
+            !pass,
+            "#1169 RE-TIGHTEN: a single real drop must now FAIL at the restored absolute-zero bar: {v}"
         );
-        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(true));
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(false));
+        // the count stays HONEST — the re-tighten does not mask the drop, it stops excusing it.
         assert_eq!(v["full_chain"]["real_drops"], serde_json::json!(1));
         assert_eq!(
             v["full_chain"]["real_drops_allowance"],
             serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT),
-            "#1169: the DEFAULT allowance (no env override) must read back as the re-widened band: {}",
+            "#1169 RE-TIGHTEN: the DEFAULT allowance (no env override) must read back as the restored \
+             zero bar: {}",
             v["full_chain"]
         );
         assert_eq!(
             super::REAL_DROPS_ALLOWANCE_DEFAULT,
-            1,
-            "#1169: the compiled DEFAULT must be the singleton band 1 (the re-tighten trail on \
-             issue 1169 flips this one constant back to 0)"
+            0,
+            "#1169 RE-TIGHTEN: the compiled DEFAULT must be the restored absolute-zero bar 0 (the \
+             widened singleton band 1 stays DORMANT, re-armable via the one-constant flip or the \
+             CAMERA_BOX_REAL_DROPS_ALLOWANCE env override)"
         );
-        // LOUD, never silent: the run-level consumed signal NAMES the node that only cleared the
-        // gate on slack — a singleton pass must never look identical to a genuine zero-loss pass.
+        // NOTHING is consumed at the restored zero bar: no node cleared the gate on slack, so the
+        // run-level consumed signal is EMPTY (there is no singleton pass to name loudly any more).
         let consumed_nodes = v["full_chain"]["real_drops_allowance_consumed_nodes"]
             .as_array()
             .expect("real_drops_allowance_consumed_nodes must be a JSON array");
-        assert_eq!(
-            consumed_nodes,
-            &vec![serde_json::json!("cam1")],
-            "#1169: the singleton pass must LOUDLY name the node that consumed the allowance: {}",
+        assert!(
+            consumed_nodes.is_empty(),
+            "#1169 RE-TIGHTEN: at the restored zero bar NO node consumes the allowance: {}",
             v["full_chain"]
         );
         let cam1_loss = &v["full_chain"]["loss"]["cam1"];
-        assert_eq!(cam1_loss["zero_loss"], serde_json::json!(true));
+        assert_eq!(
+            cam1_loss["zero_loss"],
+            serde_json::json!(false),
+            "#1169 RE-TIGHTEN: the single-drop node is no longer zero-loss at the restored bar: {cam1_loss}"
+        );
         assert_eq!(
             cam1_loss["consumed_real_drops_allowance"],
-            serde_json::json!(true),
-            "#1169: the singleton node must carry the LOUD consumed flag: {cam1_loss}"
+            serde_json::json!(false),
+            "#1169 RE-TIGHTEN: at band 0 the node never carries the consumed flag: {cam1_loss}"
         );
-
-        // TWO drops STILL FAIL — the band is a strict <=1 singleton, never an open door.
-        let two = [100, 300];
-        let (v2, pass2) = build_and_print_verdict(
-            &args,
-            Some(DecodedRec {
-                frames: window_multi_gap(N, false, &two),
-                rec_path: None,
-            }),
-            Some(DecodedRec {
-                frames: window_multi_gap(N, true, &two),
-                rec_path: None,
-            }),
-            Cam1Source::Absent,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("verdict");
-        assert!(
-            !pass2,
-            "#1169: TWO real drops must STILL FAIL — the allowance is a <=1 singleton band: {v2}"
-        );
-        assert_eq!(v2["full_chain"]["zero_loss"], serde_json::json!(false));
-        assert_eq!(v2["full_chain"]["real_drops"], serde_json::json!(2));
     }
 
-    /// #1169 — DORMANT re-tighten proof: flipping the ONE constant back to 0 (this ticket's
-    /// re-tighten trail, closed only by a zero-singleton green run) restores the STRICT bar.
-    /// Proven at the pure-method level with an EXPLICIT allowance of 0 (what
-    /// `REAL_DROPS_ALLOWANCE_DEFAULT = 0` yields), independent of the compiled default and of
-    /// process env — so the strict path stays regression-tested while the DEFAULT is the
-    /// re-widened 1. Mirrors the issue-905 restore discipline
-    /// (`gate-allowance-restore-red-green.md`), inverted: the mechanism is dormant, never deleted.
+    /// #1169 — re-tighten proof AND the now-DORMANT widened band. The re-tighten has LANDED
+    /// (2026-09-01): `REAL_DROPS_ALLOWANCE_DEFAULT = 0` is the LIVE strict bar, so the EXPLICIT
+    /// `is_zero_within_allowance(0)` path this test asserts is exactly what the compiled default now
+    /// yields (a single real drop FAILS). The widened band (1) is now the DORMANT direction — kept,
+    /// never deleted — and this same test still proves an EXPLICIT allowance of 1 tolerates the
+    /// singleton LOUDLY, so a future measured incident can re-arm it via one constant flip or the
+    /// `CAMERA_BOX_REAL_DROPS_ALLOWANCE` env override. Proven at the pure-method level, independent of
+    /// the compiled default and of process env. Mirrors the issue-905 restore discipline
+    /// (`gate-allowance-restore-red-green.md`): the mechanism is dormant, never deleted.
     #[test]
     fn re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar() {
         let one_drop = window_multi_gap(200, false, &[100]);
@@ -9091,8 +9119,9 @@ mod tests {
         assert!(!v.consumed_real_drops_allowance(0));
     }
 
-    /// #905/#1169 — the #904 allowance MECHANISM itself is untouched by item 1's revert AND by
-    /// issue 1169's re-widen of the DEFAULT (only the default VALUE has ever moved: 2 -> 0 -> 1).
+    /// #905/#1169 — the #904 allowance MECHANISM itself is untouched by item 1's revert, by issue
+    /// 1169's re-widen of the DEFAULT, AND by the 2026-09-01 re-tighten back to strict (only the
+    /// default VALUE has ever moved: 2 -> 0 -> 1 -> 0; the mechanism never changed).
     /// An EXPLICIT nonzero allowance ABOVE the default (e.g. a future incident
     /// re-widening it via `CAMERA_BOX_REAL_DROPS_ALLOWANCE`) must still tolerate real drops
     /// within it, and the pass MUST still be visibly distinguishable from a genuine zero-loss
@@ -11563,8 +11592,9 @@ mod tests {
     /// scheduled camera: its BLOCKING `all_cambox_av_sync` gate fails closed on the
     /// absent-unacked cam3..cam7 (issue 855 / issue 861), so the old shape read
     /// `overall_pass=false` for a reason UNRELATED to the band under test. Mirrors the
-    /// otherwise-green `single_real_drop_passes_loudly_within_the_1169_singleton_allowance`
-    /// sibling's fixture instead (clean `window` frames, no schedule, no A/V inputs) — the
+    /// real_drops-singleton sibling test
+    /// (`single_real_drop_fails_at_the_re_tightened_zero_bar_1169`)'s fixture instead
+    /// (single-camera `window`-family frames, no schedule, no A/V inputs) — the
     /// injected capture-drop sidecar is the ONLY non-zero signal, so the camleg band is the
     /// ONLY term that can flip the verdict.
     #[test]

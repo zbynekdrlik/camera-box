@@ -299,10 +299,19 @@ Options:
   --linux "N=U@IP ..."  one or more SSH-reachable cam boxes (space-separated "name=user@ip" pairs
                     in ONE argument, mirrors dantesync-version-gate.sh's --linux). Repeatable. Read
                     via \`/usr/local/bin/camera-box --version\` over SSH.
+  --frame-probe-only  run ONLY the #1138 frame-probe (cam2 painter) sha-pin over the --linux nodes
+                    (skip the camera-box parity read). Report-only (exit 0) unless --frame-probe-hard.
+  --frame-probe-hard  (issue 1235) flip --frame-probe-only into a HARD, fail-closed gate: exit
+                    non-zero when the deployed painter LAGS the candidate CI build (30) or cannot be
+                    verified (31 — painter sha unread, or the candidate sha unresolved). Used by the
+                    recording-e2e [1/8] pin now the [0/8] auto-align is rig-proven to keep cam2 current.
+  --frame-probe-expected-sha SHA | --frame-probe-expected-bin PATH  the candidate frame-probe sha to
+                    pin against (the clean probe-tools CI artifact the [0/8] align fetched + deployed).
 
 Exit: 0 = active boxes on the main pin (or, with --no-main-pin, agree) — proceed. 20 = a box OFF the
   pin / peers DISAGREE (REFUSED). 11 = a box UNKNOWN/unread, or the pin itself unreadable (fail
-  CLOSED, INCOMPLETE). 1 = usage error.
+  CLOSED, INCOMPLETE). 1 = usage error. Under --frame-probe-hard: 30 = painter LAGS the candidate
+  (REFUSED), 31 = painter unverifiable / candidate sha unresolved (fail CLOSED).
 EOF
 }
 
@@ -372,13 +381,13 @@ read_main_cargo_version() {
 # EXPECTED sha (the current CI probe-tools-linux-amd64 build). It is REPORT-ONLY (SCREAMS but never
 # flips this gate's exit) AND DORMANT unless an expected sha is supplied (--frame-probe-expected-sha
 # / --frame-probe-expected-bin / FRAME_PROBE_EXPECTED_SHA) -- so it is a no-op with no behaviour
-# change until the supervisor enables it TOGETHER with a frame-probe fleet auto-deploy (a pin without
-# a deploy is perpetual noise; the doctrine's camera-box shape is pin + auto-deploy moving together).
-# Report-only, not hard-gate: frame-probe has no auto-deploy yet (a hard block would halt every E2E),
-# and the painter's correctness is separately gated functionally ([0/8] optical non-black #901 +
-# marker CSV growth). Two-step upgrade to a hard-gate is documented on issue 1138: once frame-probe
-# is folded into the fleet auto-deploy (advancing with origin/main), flip the ALARM into the pinned
-# roll-up.
+# change unless an expected sha is supplied. This `frame_probe_pin_report` REMAINS report-only and is
+# still the right shape for the [0/8] full-parity SUPPLEMENT + the --no-main-pin operator soak. The
+# report-only->hard TWO-STEP has since LANDED (issue 1235): frame-probe now HAS a fleet auto-deploy
+# (the [0/8] `frame_probe_parity_align_before_gate`, issue 1138, deploys the candidate painter every
+# run), so the E2E [1/8] pin runs the HARD sibling `frame_probe_pin_gate` (two functions below) via
+# --frame-probe-hard and REFUSES a lagging/unverifiable painter. The painter's correctness is ALSO
+# gated functionally ([0/8] optical non-black #901 + marker CSV growth).
 
 # frame_probe_pin_verdict NAME DEPLOYED_SHA EXPECTED_SHA -> one row + code (mirrors the #1118
 # onimag_upload_decision / dantesync_tray_verdict sha compare).
@@ -462,6 +471,57 @@ frame_probe_pin_report() {
   done
 }
 
+# frame_probe_pin_gate EXPECTED_SHA PAIR... -> HARD, fail-closed sibling of frame_probe_pin_report
+# (issue 1235). Same per-node grading (reuses frame_probe_pin_verdict / read_frame_probe_sha and the
+# SAME CAMBOX_OFFLINE_ACK exclusion) but it PROPAGATES the worst verdict rc instead of swallowing it,
+# and it REFUSES (does NOT go dormant) on an EMPTY expected sha -- "couldn't verify" is a failure, per
+# .claude/rules/early-gate-pin-doctrine.md, never a silent pass. Return codes reuse the verdict codes:
+#   30 = ALARM   (a deployed painter LAGS the candidate CI build)
+#   31 = UNKNOWN (a painter sha unread on the box, OR the candidate CI sha unresolved)
+#    0 = OK      (every read painter matches the candidate)
+# UNKNOWN (31) takes precedence over ALARM (30) -- "couldn't verify" is the strongest refuse (both
+# codes REFUSE the run; in practice this gate is single-node/cam2, so the fold is only ever one code).
+# WHY it can flip hard now: the [0/8] frame-probe auto-align (frame_probe_parity_align_before_gate) deploys
+# the candidate painter to cam2 every E2E run, so a residual lag means a real deploy failure, not the
+# perpetual-noise a pin-without-a-deploy would be -- rig-proven on the first green 7-cam series (the
+# active deploy path + this pin's OK observed end-to-end). set -e safe: the acked-offline test uses the
+# `A && continue` shape (A is never the final && command, so its failure does not trip set -e), exactly
+# as frame_probe_pin_report does; the caller captures the return with `|| rc=$?`.
+frame_probe_pin_gate() {
+  local expected="$1"; shift
+  # NB: the banner must NOT contain the bare words a per-node verdict row prints (ALARM / UNKNOWN),
+  # or a test asserting "no verdict row" (an acked-offline box) would match the banner instead (#1235
+  # review). It also keeps the positive ALARM/UNKNOWN row assertions honest (they can only be
+  # satisfied by a real verdict row, never the banner).
+  echo "-- frame-probe (cam2 painter) sha-pin (#1235, HARD gate, fail-closed on an unverified or lagging painter) --"
+  local worst=0
+  if [ -z "$expected" ]; then
+    printf '  %-14s %-16s UNKNOWN   (candidate CI frame-probe sha unresolved -- the [0/8] align could not source probe-tools; cannot verify -- REFUSING)\n' "cam2" "-"
+    echo "!! FRAME-PROBE PIN FAIL: candidate CI frame-probe sha unresolved (the [0/8] auto-align could not source probe-tools-linux-amd64) -- cannot verify the painter is current; REFUSING the run (fail-closed, issue 1235). Self-heals once ci.yml publishes the candidate / gh recovers; re-run then." >&2
+    return 31
+  fi
+  local pair name target dep frc
+  for pair in "$@"; do
+    name="${pair%%=*}"
+    target="${pair#*=}"
+    cambox_offline_ack_is_acked "$name" && continue
+    dep="$(read_frame_probe_sha "$name" "$target")"
+    frc=0
+    frame_probe_pin_verdict "$name" "$dep" "$expected" || frc=$?
+    case "$frc" in
+      30)
+        echo "!! FRAME-PROBE PIN FAIL: ${name} /usr/local/bin/frame-probe LAGS the candidate CI build -- the painter did not advance with the fleet; REFUSING the run (redeploy via deploy-fleet.sh --frame-probe, issue 1235)." >&2
+        [ "$worst" -lt 30 ] && worst=30
+        ;;
+      31)
+        echo "!! FRAME-PROBE PIN FAIL: could not verify ${name} /usr/local/bin/frame-probe against the candidate CI build (painter sha unread) -- REFUSING the run (fail-closed, issue 1235)." >&2
+        worst=31
+        ;;
+    esac
+  done
+  return "$worst"
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -----------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -481,6 +541,9 @@ main() {
   # expected bin cannot be wired into that earlier call, and re-running the whole parity gate would
   # print a confusing second table). cam2-scoped by its caller (frame-probe lives only on cam2).
   local frame_probe_only=0
+  # #1235 --frame-probe-hard: flip the (otherwise report-only) --frame-probe-only mode into a HARD,
+  # fail-closed gate that exits non-zero on a lagging/unverifiable painter (see frame_probe_pin_gate).
+  local frame_probe_hard=0
   local -a linux_raw=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -491,6 +554,7 @@ main() {
       --frame-probe-expected-sha) shift; fp_expected_sha="${1:-}" ;;
       --frame-probe-expected-bin) shift; fp_expected_bin="${1:-}" ;;
       --frame-probe-only) frame_probe_only=1 ;;
+      --frame-probe-hard) frame_probe_hard=1 ;;
       --linux) shift; linux_raw+=("${1:-}") ;;
       -h | --help)
         usage
@@ -509,6 +573,14 @@ main() {
     esac
     shift || true
   done
+
+  # #1235: --frame-probe-hard hardens ONLY the --frame-probe-only pin (the full parity gate has its
+  # OWN exit code); on the full invocation it would be a silent no-op, so reject the combination loud.
+  if [ "$frame_probe_hard" = "1" ] && [ "$frame_probe_only" != "1" ]; then
+    echo "ERROR: --frame-probe-hard requires --frame-probe-only (it hardens the frame-probe sha-pin, not the camera-box parity gate)." >&2
+    usage >&2
+    exit 1
+  fi
 
   local -a linux_pairs=()
   local raw
@@ -536,6 +608,14 @@ main() {
   if [ "$frame_probe_only" = "1" ]; then
     local fp_only_expected
     fp_only_expected="$(resolve_frame_probe_expected_sha "$fp_expected_sha" "$fp_expected_bin")"
+    # #1235: --frame-probe-hard flips this from report-only (always exit 0) to a fail-closed HARD gate
+    # that exits non-zero on a lagging/unverifiable painter. Report-only stays the default so the
+    # (dormant) [0/8] full-parity supplement and the --no-main-pin operator soak are byte-unchanged.
+    if [ "$frame_probe_hard" = "1" ]; then
+      local fp_rc=0
+      frame_probe_pin_gate "$fp_only_expected" "${linux_pairs[@]}" || fp_rc=$?
+      exit "$fp_rc"
+    fi
     frame_probe_pin_report "$fp_only_expected" "${linux_pairs[@]}"
     exit 0
   fi

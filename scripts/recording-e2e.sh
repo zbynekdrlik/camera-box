@@ -1038,7 +1038,7 @@ cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 # uncompensated QPSK marker + a dark aux tick until a manual redeploy). This deploys the candidate
 # frame-probe (the clean probe-tools CI artifact) to cam2 when stale, so pin+deploy advance together
 # (orphan-PROOF), and exports FRAME_PROBE_ALIGN_CI_BIN so the [1/8] pin below verifies against the
-# SAME artifact bytes. Best-effort (ALWAYS returns 0); the report-only [1/8] pin is the loud signal.
+# SAME artifact bytes. Best-effort (ALWAYS returns 0); the [1/8] HARD pin (#1235) is the loud signal.
 # cam2-only (frame-probe lives only on the painter box) and unconditional (cam2 is the painter
 # regardless of active-set membership); honours CAMBOX_OFFLINE_ACK + the --no-main-pin soak escape.
 frame_probe_parity_align_before_gate "cam2=root@$PAINTER_IP"
@@ -2206,22 +2206,38 @@ else
   cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report --bin phase-sync-active-floor-gate  # airuleset:build-ok
 fi
 
-# [1/8] frame-probe (cam2 painter) sha-pin report (#1138) — the loud PIN that CONFIRMS the [0/8]
-# frame-probe auto-align above. Expected = FRAME_PROBE_ALIGN_CI_BIN (the clean probe-tools CI
-# artifact the [0/8] align fetched + deployed to cam2 — the TRUE deploy source of truth), falling
-# back to $PROBE_BIN_DIR/frame-probe when the align was skipped (--no-main-pin soak) or could not
-# fetch (gh unavailable). Pinning against the CI artifact rather than the dev1 LOCAL build makes the
-# sha compare exact (both sides = the same artifact bytes, so no build-reproducibility dependency).
-# The report-only mode runs ONLY the report (no second camera-box parity table) and ALWAYS exits 0;
-# the `|| true` is belt-and-suspenders — a residually-lagging painter (align could not complete)
-# SCREAMS + names the fix but never fails this run (the hard-gate flip is the supervisor's #758
-# two-step follow-up once the auto-align is rig-proven). cam2-scoped: frame-probe is installed ONLY
-# on the painter box (setup-device.sh STEP 3b, cam2_is_painter_box).
-echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs the candidate CI build (#1138, report-only, confirms the [0/8] align)"
-"$HERE/camera-box-version-gate.sh" \
-  --frame-probe-only \
-  --frame-probe-expected-bin "${FRAME_PROBE_ALIGN_CI_BIN:-$PROBE_BIN_DIR/frame-probe}" \
-  --linux "cam2=root@$PAINTER_IP" || true
+# [1/8] frame-probe (cam2 painter) sha-pin — the PIN that CONFIRMS the [0/8] frame-probe auto-align
+# above deployed the current-build painter to cam2. Flipped from #1138 report-only to a HARD,
+# fail-closed gate (issue 1235) now the [0/8] auto-align is rig-proven to keep cam2 current — the
+# active deploy path (detect lag -> deploy candidate -> deploy complete) AND this pin's OK were
+# observed end-to-end on the first stable green 7-cam E2E series. Per
+# .claude/rules/early-gate-pin-doctrine.md a stale/unverifiable painter must REFUSE the run, not
+# merely SCREAM: --frame-probe-hard exits non-zero on a LAGGING painter (deployed != candidate, 30)
+# AND on any UNKNOWN (painter sha unread, or the candidate CI sha unresolved because the [0/8] align
+# could not source probe-tools, 31) — "couldn't verify" is a failure, never a silent pass. Expected =
+# FRAME_PROBE_ALIGN_CI_BIN, the clean probe-tools CI artifact the [0/8] align fetched + deployed to
+# cam2 (the TRUE deploy source of truth); in HARD mode there is NO $PROBE_BIN_DIR/frame-probe
+# fallback — the dev1 LOCAL frame-probe build is byte-different from the CI artifact
+# (full-path-e2e.yml does not set USE_PREBUILT_PROBE_DIR), so comparing against it would false-ALARM
+# every run, and an empty FRAME_PROBE_ALIGN_CI_BIN is therefore UNKNOWN -> REFUSE (fail-closed),
+# never a local-build compare. The DOCUMENTED ESCAPE is the SAME --no-main-pin operator soak the
+# [0/8] align honours: under it the align is SKIPPED (never realign over a deliberately-deployed
+# painter), so the pin stays #1138 REPORT-ONLY against the $PROBE_BIN_DIR/frame-probe local build
+# (|| true, informational). cam2-scoped: frame-probe is installed ONLY on the painter box
+# (setup-device.sh STEP 3b, cam2_is_painter_box).
+if [ "${CAMERA_BOX_VERSION_GATE_NO_MAIN_PIN:-0}" != "1" ]; then
+  echo "[1/8] frame-probe (cam2 painter) sha-pin — deployed painter vs the candidate CI build (#1235 HARD gate, fail-closed, confirms the [0/8] align)"
+  "$HERE/camera-box-version-gate.sh" \
+    --frame-probe-only --frame-probe-hard \
+    --frame-probe-expected-bin "${FRAME_PROBE_ALIGN_CI_BIN:-}" \
+    --linux "cam2=root@$PAINTER_IP"
+else
+  echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs the local build (#1138, report-only, --no-main-pin operator soak; the [0/8] align was skipped)"
+  "$HERE/camera-box-version-gate.sh" \
+    --frame-probe-only \
+    --frame-probe-expected-bin "${FRAME_PROBE_ALIGN_CI_BIN:-$PROBE_BIN_DIR/frame-probe}" \
+    --linux "cam2=root@$PAINTER_IP" || true
+fi
 
 # #758 item 1 (continued) — per-camera NDI liveness. Needs frozen-camera-gate (just
 # built/fetched above), so it cannot run at true [0/8] — this is still comfortably BEFORE any
@@ -2476,6 +2492,13 @@ sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
 # not a longer blind window). ONCE, here only: the ALL_CAMBOX loop below runs while the painter is
 # deliberately stopped ([2b/8] -> [3/8]), so it must not wait on it. WARN-only (never blocks).
 mv_reverify_painter_up_wait "$CAM_PW" "$PAINTER_IP"
+# issue 1114 ROOT FIX: this leg's strih receiver is KNOWN-STALE right after its own deploy bounce
+# (production sender stopped, burn sender up at a new URL under the same NDI name — the DistroAV
+# finder still holds the dead pre-bounce URL). Kick the receiver reset + ride out the fresh finder's
+# bounded re-resolve BEFORE the guarded reverify's pixel poll starts counting, so a bounced leg passes
+# attempt-1 cleanly instead of the reactive kick-after-failure path. WARN-only (always returns 0); the
+# guarded reverify below stays the real gate. ALL_CAMBOX / deploy-context gated inside the helper.
+mv_reverify_proactive_reset "$CAMERA_NAME" "${CAMERA_NAME#cam}"
 mv_reverify_or_escalate "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 
 # #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4 into strih program —
@@ -2557,6 +2580,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # sleep above (a SEPARATE pass over the same box list, so the settle timing above is unchanged).
   for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_burn%%=*}"
+    # issue 1114 ROOT FIX: each box's strih receiver is KNOWN-STALE right after its own deploy bounce
+    # above, so kick its receiver reset + ride out the fresh finder BEFORE the guarded reverify's
+    # pixel poll starts counting (WARN-only, ALL_CAMBOX/deploy-context gated inside the helper).
+    mv_reverify_proactive_reset "$_cn" "${_cn#cam}"
     # #1093 (b): a wedged strih receiver here (issue 1096, cam2/cam3 legs too) escalates to the ONE
     # per-run strih-OBS restart + a single re-check; no painter-up wait (the painter is stopped now).
     mv_reverify_or_escalate "$_cn" "${_cn#cam}" || exit 1

@@ -88,17 +88,40 @@
 //! design on issue 1196 (Approach: "positions available end-to-end → v2.1 per-cluster union"),
 //! deliberately OUT of this sub-step's scope.
 //!
-//! ## Precondition for a LIVE gate (unchanged — still report-only)
+//! ## Precondition for a LIVE gate (still report-only) — and the per-leg aux correction (issue 1196)
 //!
-//! [`gates_overall_pass`] stays `false` until: (1) the aux marks are proven decodable through the
-//! REAL chain via a mined real-captured-frame fixture (aux_decode_fraction was 0.0 on the first
-//! rig run — the ~210px aux QRs are halved in a tile and did not survive the lossy chain, so this
-//! precondition is currently UNMET; `pattern-change-needs-decode-fixture`), (2) the signal is
-//! observed to actually fire ([`TearSignalViability::Observed`]) on a known-torn calibration run,
-//! and (3) a [`TEAR_FRACTION_CEILING`] + an aux-coverage floor + a `multi_path_suspect_fraction`
-//! ceiling are calibrated from real distributions (`verdict-gate-seam-calibration.md`) — the
-//! suspect ceiling is what keeps a multi-tile window from ever being promoted. The flip itself is
-//! one line, out of this change's scope.
+//! [`gates_overall_pass`] stays `false` until a [`TEAR_FRACTION_CEILING`] is calibrated from a
+//! known-torn run's torn distribution that SEPARATES the induced tear from the green background
+//! (below), AND [`signal_promotable`] holds on that run. The machine-checked flip-readiness is
+//! [`window_promotable`] / [`signal_promotable`] (viability `Observed` + single-tile
+//! `multi_path_suspect_fraction <= MULTI_PATH_SUSPECT_CEILING`), mirroring
+//! `dup_cadence::signal_promotable` (`verdict-gate-seam-calibration.md` §12). `signal_promotable` is
+//! NECESSARY but NOT SUFFICIENT — see the background-rate caveat below.
+//!
+//! **The aux-coverage-floor precondition was found MIS-SHAPED for the projection leg (real-data
+//! correction, 2026-09-01, mined across 44 verdicts).** The CAM2 PROJECTION leg — the leg whose
+//! grabber captures imag's HDMI scanout, the point of this gate — reads `aux_decode_fraction` = 0.0
+//! in EVERY window (the ~210px aux QRs are not present/decodable in imag's projected scanout), so a
+//! CAM2 tear surfaces via the PRIMARY band, not the aux cross-band; the aux marks decode only on the
+//! SPLITTER legs (CAM1/CAM3/CAM6/CAM7, up to ~0.99), which are not the projector-scanout path. So an
+//! aux-coverage FLOOR is NOT the projection-leg promotion gate — it would permanently block that
+//! leg. `aux_decode_fraction` stays a report-only per-leg DIAGNOSTIC; promotion is gated on
+//! `signal_promotable` (which requires `Observed`, so it is fail-closed regardless of which band is
+//! operative) PLUS the calibrated tear ceiling.
+//!
+//! **A LOW background of `Observed` single-tile tears exists on GREEN runs — the ceiling can never
+//! be 0.0.** Mined: v2.1 `observed` single-tile windows occur on BOTH CAM2 (14 windows) and CAM3 (2
+//! windows) across routine runs, `tear_fraction` ~0.00118–0.00355 (1–3 frames/window), so
+//! `signal_promotable` reads `true` on ~12 of 32 v2.1-scored routine runs — it is NOT by itself
+//! evidence of a known-torn run. The known-torn run's value is a HIGH `tear_fraction` well above
+//! this ~0.004 background; `TEAR_FRACTION_CEILING` must be calibrated ABOVE the background and BELOW
+//! the induced distribution (a per-window RATE; a genuine tear can be a single frame, so a run-wide
+//! COUNT term may also be warranted — `verdict-gate-seam-calibration.md` §4). Which band actually
+//! fires under a REAL induced projection tear on CAM2 is resolved by that run, not assumed here.
+//! Also corrected: the current green content is SINGLE-TILE (`multi_path_suspect_fraction` 0.0 across
+//! 90 green windows), superseding the earlier "current multi-tile rig, promotion impossible" note —
+//! promotion IS possible on the current content once the torn datapoint calibrates the ceiling. The
+//! flip itself is one line, out of this change's scope.
 //!
 //! Mirrors the crate-root `gates_overall_pass()` seam pattern shared by `presentation_cadence` /
 //! `optical_floor` / `e2e_latency_gate` / `imag_leg_gate`: PURE (default features, Tier-0
@@ -117,6 +140,18 @@ pub const VERNIER_MAX_SPREAD: u32 = 1;
 /// placeholder. RECALIBRATE from a real known-torn run's distribution (per
 /// `verdict-gate-seam-calibration.md`) before any LIVE flip.
 pub const TEAR_FRACTION_CEILING: f64 = 0.0;
+
+/// issue 1196 — the highest [`TearStats::multi_path_suspect_fraction`] a window may carry and still
+/// be trusted for tear scoring (a promotion guard, per `verdict-gate-seam-calibration.md` §12 and
+/// the projection-tap rule's precondition 3). Above this the recorded scene is MULTI-TILE (a frame
+/// carries the SAME painted monitor from >= 2 grabber paths), so the union span measures inter-path
+/// skew, not a scanout tear, and the window is UNSCOREABLE without pixel positions — it must never
+/// be promoted. Calibrated from the real distribution: across 90 green windows the suspect fraction
+/// is EXACTLY 0.0 (single-tile content), while a multi-tile window reads ~0.998 — a ~10x margin at
+/// this ceiling passes every green run and blocks any genuinely multi-tile window. Used only by the
+/// promotion property ([`window_promotable`] / [`signal_promotable`]); it does NOT gate today
+/// ([`gates_overall_pass`] returns `false`).
+pub const MULTI_PATH_SUSPECT_CEILING: f64 = 0.10;
 
 /// The optical `frame_id` span within ONE band of a captured frame — `max - min` over the given
 /// payload ids (node burns already excluded by the caller). `None` when the band carries no
@@ -351,6 +386,51 @@ pub fn gates_overall_pass() -> bool {
 /// All windows pass — the run-level report-only fold helper for the probe consumer.
 pub fn run_tear_gate_pass(stats: &[TearStats]) -> bool {
     stats.iter().all(tear_gate_pass)
+}
+
+/// issue 1196 — the machine-checked PER-WINDOW flip-readiness property (mirrors
+/// `dup_cadence::signal_promotable`, the `verdict-gate-seam-calibration.md` §12 doctrine: "Make
+/// promotion-readiness a COMPUTED, machine-checked property, not a guess"). A window is promotable
+/// when the tear signal has DEMONSTRABLY fired on it ([`TearSignalViability::Observed`]) AND the
+/// window is trustworthy single-tile content (`multi_path_suspect_fraction <=
+/// MULTI_PATH_SUSPECT_CEILING`). This is deliberately SIGNAL-AGNOSTIC and fail-safe for the
+/// aux-vs-primary operative-signal question the known-torn run resolves: real data shows the CAM2
+/// projection leg decodes NO aux marks (aux_decode_fraction 0.0 in every recorded window — the
+/// small aux QRs are not in imag's projected scanout), so a CAM2 tear surfaces via the PRIMARY band,
+/// while the splitter legs decode aux but are not the projector path. So `aux_decode_fraction` is a
+/// report-only DIAGNOSTIC, NOT a hard promotion floor — a floor on it would permanently block that
+/// leg. Because promotability REQUIRES `Observed`, if neither the primary nor the aux signal can see
+/// the induced tear the viability stays `Unproven` and the flip stays blocked — the honest
+/// fail-closed behaviour. NOT SUFFICIENT for the flip on its own: a LOW background of `Observed`
+/// single-tile tears (~0.001–0.004 tear_fraction) exists on green runs on both CAM2 and CAM3, so
+/// `window_promotable` is `true` on ~16 routine windows already; the flip additionally requires a
+/// calibrated [`TEAR_FRACTION_CEILING`] above that background. REPORT-ONLY: promotability does not
+/// itself flip [`gates_overall_pass`]; it is emitted so a known-torn run is auto-gradable.
+pub fn window_promotable(stats: &TearStats) -> bool {
+    stats.viability == TearSignalViability::Observed
+        && stats.multi_path_suspect_fraction <= MULTI_PATH_SUSPECT_CEILING
+}
+
+/// issue 1196 — the RUN-LEVEL machine-checked flip-readiness: the run analyzed at least one window,
+/// the tear signal FIRED on at least one of them ([`TearSignalViability::Observed`]) AND EVERY
+/// window is trustworthy single-tile content (`multi_path_suspect_fraction <=
+/// MULTI_PATH_SUSPECT_CEILING`). It is NECESSARY but NOT SUFFICIENT for the [`gates_overall_pass`]
+/// flip: because a LOW background of `Observed` single-tile tears (~0.001–0.004 tear_fraction, 1–3
+/// frames/window) occurs on routine green runs on both CAM2 and CAM3, this reads `true` on ~12 of 32
+/// v2.1-scored routine runs — so `signal_promotable == true` is NOT by itself evidence of a
+/// known-torn run. The flip is additionally gated on a calibrated [`TEAR_FRACTION_CEILING`] that
+/// separates the known-torn run's HIGH tear_fraction from this green background (see the module-level
+/// caveat). It correctly guards two things regardless: a run with NO observed tear at all cannot
+/// promote (the issue-1101 blind-signal trap), and a run with ANY multi-tile window is not promotable
+/// (a LIVE flip would gate that unscoreable window). REPORT-ONLY companion to [`window_promotable`].
+pub fn signal_promotable(stats: &[TearStats]) -> bool {
+    !stats.is_empty()
+        && stats
+            .iter()
+            .any(|s| s.viability == TearSignalViability::Observed)
+        && stats
+            .iter()
+            .all(|s| s.multi_path_suspect_fraction <= MULTI_PATH_SUSPECT_CEILING)
 }
 
 #[cfg(test)]
@@ -605,5 +685,78 @@ mod tests {
     #[test]
     fn report_only_seam_is_disarmed() {
         assert!(!gates_overall_pass(), "issue 781/1196 ships report-only");
+    }
+
+    #[test]
+    fn window_promotable_requires_observed_and_single_tile_1196() {
+        // A GREEN window (no tear observed) is NOT promotable — an all-zero distribution cannot
+        // prove the signal works (the issue-1101 blind-signal trap).
+        let green = window_tear_stats(&[f(&[100, 101], &[]), f(&[102, 103], &[])]);
+        assert_eq!(green.viability, TearSignalViability::Unproven);
+        assert!(
+            !window_promotable(&green),
+            "green/unproven is never promotable"
+        );
+
+        // A TORN SINGLE-TILE window (a genuine 2-generation frame, suspect 0) IS promotable.
+        let torn = window_tear_stats(&[f(&[100, 101], &[]), f(&[102, 104], &[])]);
+        assert_eq!(torn.viability, TearSignalViability::Observed);
+        assert_eq!(torn.multi_path_suspect_fraction, 0.0);
+        assert!(
+            window_promotable(&torn),
+            "observed single-tile tear is promotable"
+        );
+
+        // An OBSERVED-BUT-MULTI-TILE window is NOT promotable: a multi-tile frame is unscoreable,
+        // so even one clean single-source tear in the window cannot lift a suspect-heavy window
+        // over the ceiling. Build a window that is BOTH observed (one single-source tear) and
+        // dominated by multi-tile suspects.
+        let mut frames = vec![f(&[100, 102], &[])]; // 1 single-source tear -> observed
+        for _ in 0..20 {
+            frames.push(f(&[200, 201, 202, 203], &[])); // multi-tile suspects
+        }
+        let mixed = window_tear_stats(&frames);
+        assert_eq!(mixed.viability, TearSignalViability::Observed);
+        assert!(
+            mixed.multi_path_suspect_fraction > MULTI_PATH_SUSPECT_CEILING,
+            "20/21 suspect frames exceed the ceiling"
+        );
+        assert!(
+            !window_promotable(&mixed),
+            "an observed window dominated by multi-tile suspects is not promotable"
+        );
+    }
+
+    #[test]
+    fn signal_promotable_run_level_1196() {
+        // Empty run: not promotable.
+        assert!(!signal_promotable(&[]), "empty run is not promotable");
+
+        // All-green run (every window unproven): not promotable.
+        let g = || window_tear_stats(&[f(&[100, 101], &[]), f(&[102, 103], &[])]);
+        assert!(
+            !signal_promotable(&[g(), g(), g()]),
+            "an all-green run cannot prove the signal fired"
+        );
+
+        // A run where ONE window observed a genuine single-tile tear and the rest are clean
+        // single-tile: promotable (the known-torn run's shape).
+        let torn = window_tear_stats(&[f(&[100, 101], &[]), f(&[102, 104], &[])]);
+        assert!(
+            signal_promotable(&[g(), torn.clone(), g()]),
+            "one observed single-tile window in an otherwise clean run is promotable"
+        );
+
+        // A run with a MULTI-TILE window is NOT promotable even alongside an observed one — a LIVE
+        // flip would gate the unscoreable multi-tile window.
+        let mut multi_frames = vec![f(&[100, 102], &[])];
+        for _ in 0..20 {
+            multi_frames.push(f(&[200, 201, 202, 203], &[]));
+        }
+        let multi = window_tear_stats(&multi_frames);
+        assert!(
+            !signal_promotable(&[torn, multi]),
+            "any multi-tile window blocks run-level promotion"
+        );
     }
 }

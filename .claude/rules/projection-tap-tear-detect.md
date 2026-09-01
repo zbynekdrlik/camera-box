@@ -133,14 +133,37 @@ to the promotion preconditions so a multi-tile window can never be promoted.
    REAL rqrr output for those exact pixels) is the ground truth; `zbarimg` full-frame + the two
    aux design-rect crops is the independent second decoder — zero rig access, zero mkv pulls.
 2. **A known-torn calibration run** (imag pre-1107 build or the projector-vsync env escape —
-   needs owner agreement, asked at that step) making the signal `Observed`.
-3. **Calibrate `TEAR_FRACTION_CEILING` + an aux-coverage floor + a `multi_path_suspect_fraction`
-   ceiling** from real green vs torn distributions (`verdict-gate-seam-calibration.md`) — the
-   coverage floor makes a silent aux loss demote honestly instead of false-greening, and the
-   suspect ceiling (v2.1) is what keeps a MULTI-TILE window (nearly all frames suspect, tear
-   unscoreable) from ever being promoted. On the current multi-tile rig `multi_path_suspect_fraction
-   ~0.998`, so promotion is impossible until the recorded scene is single-tile OR the geometric
-   per-cluster follow-up (schema-carried positions) lands.
+   owner-approved 2026-08-29, off-air) making the signal `Observed` with a HIGH `tear_fraction`
+   SEPARABLE from the green background (see the ceiling caveat below). It must be recorded which
+   band fires on the CAM2 projection leg under a real induced tear — the PRIMARY band (aux is 0.0
+   there) or the aux cross-band — since that decides whether the aux mechanism is even the operative
+   cure on the projection leg.
+3. **Calibrate `TEAR_FRACTION_CEILING` + the `multi_path_suspect_fraction` ceiling (`MULTI_PATH_
+   SUSPECT_CEILING`, LANDED at 0.10, issue 1196) from real green vs torn distributions**
+   (`verdict-gate-seam-calibration.md`). The suspect ceiling keeps a MULTI-TILE window (tear
+   unscoreable) from ever being promoted — calibratable from the current data alone (green
+   `multi_path_suspect_fraction` is 0.0 across 90 windows, a multi-tile window ~0.998, so 0.10 has a
+   ~10x margin). The machine-checked flip-readiness is `tear_detect::signal_promotable` /
+   `window_promotable` (viability `Observed` + suspect ≤ ceiling), emitted per-window
+   (`window_promotable`) and run-level (`tear.signal_promotable`) in the verdict block.
+   **Two real-data corrections (2026-09-01, mined across 44 verdicts) — the aux floor is dropped and
+   the ceiling can never be 0.0:**
+   - **The aux-coverage FLOOR is REMOVED as a promotion gate — `aux_decode_fraction` is a report-only
+     per-leg DIAGNOSTIC instead.** The CAM2 PROJECTION leg (the one this gate exists for) reads
+     `aux_decode_fraction` = 0.0 in 44/44 windows (the ~210px aux QRs are not in imag's projected
+     scanout), so its tears surface via the PRIMARY band; aux decodes only on the SPLITTER legs
+     (CAM1/CAM3/CAM6/CAM7), which are not the projector path. A hard aux floor would permanently block
+     the projection leg. `signal_promotable` (which requires `Observed`) is the fail-closed gate
+     regardless of which band is operative.
+   - **`TEAR_FRACTION_CEILING` cannot be 0.0.** A LOW background of `Observed` single-tile tears
+     (~0.00118–0.00355 `tear_fraction`, 1–3 frames/window) exists on GREEN runs on both CAM2 (14
+     windows) and CAM3 (2 windows), so `signal_promotable` already reads `true` on ~12 of 32
+     v2.1-scored routine runs — it is NECESSARY but NOT SUFFICIENT, and NOT by itself evidence of a
+     known-torn run. The ceiling must be calibrated ABOVE this ~0.004 green background and BELOW the
+     known-torn run's induced-tear distribution (a per-window RATE; a run-wide COUNT term may also be
+     warranted, §4). SUPERSEDES the earlier "current multi-tile rig `multi_path_suspect_fraction
+     ~0.998`, promotion impossible" note: the current green content is SINGLE-TILE, so promotion IS
+     possible on it once the torn ceiling separates the induced tear from the green background.
 4. Then the one-line `gates_overall_pass() → true` flip + the repo-wide re-arm grep
    (`ci-testing-gotchas.md`'s re-arm section).
 
