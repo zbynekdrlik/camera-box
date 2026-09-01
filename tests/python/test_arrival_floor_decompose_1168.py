@@ -257,3 +257,159 @@ def test_cli_runs_over_run_dir_and_prints_table_and_summary():
     assert outj.returncode == 0, outj.stderr
     doc = json.loads(outj.stdout)
     assert doc["summary"]["slowest_src"] == "NDI cam1"
+
+
+# ================================================================= #1168 TASK 2 -- multi-run mining
+# The single-run table disagrees on the slowest box across runs (1363366080 -> cam1@89 slowest;
+# 1556876186 -> cam5@92.2 slowest) -- transient grabber-stall / load shuffles the noisy middle. So
+# the target box must be picked from MANY runs, not one. `aggregate()` folds a list of per-run
+# decompose() results (REUSED, never re-parsed) into per-camera floor/excess distributions, an
+# anchor/slowest mode + fraction, and a STABILITY verdict. `_keep_run` stratifies (transport-uniform,
+# min-cameras) so the ~50 ms clean regime can be scoped without a code change. Pure core -> full
+# local RED->GREEN, Tier-0 #557.
+
+_SRCS4 = ["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam4"]
+
+
+def _mk(jit, srcs=None, caps=None):
+    return afd.decompose(jit, caps or {}, {}, srcs or _SRCS4)
+
+
+def _three_runs_stable_cam4_anchor_cam2_slowest():
+    # anchor: cam3 once, cam4 twice (2/3 = 0.67 -> stable). slowest: cam1 once, cam2 twice -> stable.
+    a = _mk({"NDI cam1": {"latency_ms": 3, "mean_head_skew_ms": 86.0, "samples": 3},  # 89 slowest
+             "NDI cam2": {"latency_ms": 6, "mean_head_skew_ms": 67.0, "samples": 3},  # 73
+             "NDI cam3": {"latency_ms": 3, "mean_head_skew_ms": 67.0, "samples": 3},  # 70 anchor
+             "NDI cam4": {"latency_ms": 3, "mean_head_skew_ms": 72.0, "samples": 3}})  # 75
+    b = _mk({"NDI cam1": {"latency_ms": 3, "mean_head_skew_ms": 69.0, "samples": 3},  # 72
+             "NDI cam2": {"latency_ms": 6, "mean_head_skew_ms": 90.0, "samples": 3},  # 96 slowest
+             "NDI cam3": {"latency_ms": 3, "mean_head_skew_ms": 76.0, "samples": 3},  # 79
+             "NDI cam4": {"latency_ms": 3, "mean_head_skew_ms": 68.0, "samples": 3}})  # 71 anchor
+    c = _mk({"NDI cam1": {"latency_ms": 3, "mean_head_skew_ms": 71.0, "samples": 3},  # 74
+             "NDI cam2": {"latency_ms": 6, "mean_head_skew_ms": 74.0, "samples": 3},  # 80 slowest
+             "NDI cam3": {"latency_ms": 3, "mean_head_skew_ms": 74.0, "samples": 3},  # 77
+             "NDI cam4": {"latency_ms": 3, "mean_head_skew_ms": 68.0, "samples": 3}})  # 71 anchor
+    return [("A", a), ("B", b), ("C", c)]
+
+
+# --------------------------------------------------------------- mine_run_dir reuses decompose()
+def test_mine_run_dir_reuses_decompose_over_fixture():
+    res = afd.mine_run_dir(str(_RUN_DIR))
+    assert res is not None
+    assert res["summary"]["slowest_src"] == "NDI cam1"  # same as the single-run fixture test
+    assert {r["src"] for r in res["rows"]} >= {"NDI cam1", "NDI cam4"}
+
+
+def test_mine_run_dir_none_when_no_jitter(tmp_path):
+    assert afd.mine_run_dir(str(tmp_path)) is None  # empty dir -> honest None, no crash
+
+
+# --------------------------------------------------------------- _keep_run stratification predicate
+def test_keep_run_filters_by_uniform_and_min_cameras():
+    uni = _mk(_JITTER, _SRCS, _CAP_UNIFORM)          # transport_uniform True, 4 non-phantom rows
+    cap_outlier = dict(_CAP_UNIFORM)
+    cap_outlier["NDI cam1"] = 31.0
+    nonuni = _mk(_JITTER, _SRCS, cap_outlier)         # transport_uniform False
+    assert afd._keep_run(uni, only_uniform=True, min_cameras=4) is True
+    assert afd._keep_run(nonuni, only_uniform=True, min_cameras=4) is False
+    assert afd._keep_run(uni, only_uniform=False, min_cameras=5) is False   # only 4 rows present
+    assert afd._keep_run(uni, only_uniform=False, min_cameras=0) is True
+    assert afd._keep_run({"rows": [], "summary": {"transport_uniform": None}},
+                         only_uniform=False, min_cameras=1) is False  # empty run never kept
+
+
+# --------------------------------------------------------------- aggregate(): stability verdict
+def test_aggregate_stable_anchor_and_slowest():
+    agg = afd.aggregate(_three_runs_stable_cam4_anchor_cam2_slowest())
+    assert agg["n_runs"] == 3 and agg["n_usable"] == 3 and agg["n_empty"] == 0
+    assert agg["anchor_counts"] == {"NDI cam3": 1, "NDI cam4": 2}
+    assert agg["slowest_counts"] == {"NDI cam1": 1, "NDI cam2": 2}
+    st_anchor = agg["stability"]["anchor"]
+    assert st_anchor["src"] == "NDI cam4" and st_anchor["count"] == 2
+    assert st_anchor["fraction"] == pytest.approx(2 / 3)
+    assert st_anchor["stable"] is True
+    st_slow = agg["stability"]["slowest"]
+    assert st_slow["src"] == "NDI cam2" and st_slow["stable"] is True
+
+
+def test_aggregate_per_camera_floor_and_excess_stats():
+    agg = afd.aggregate(_three_runs_stable_cam4_anchor_cam2_slowest())
+    pc = agg["per_camera"]
+    assert pc["NDI cam2"]["floor_median"] == pytest.approx(80.0)   # [73,96,80]
+    assert pc["NDI cam2"]["floor_max"] == pytest.approx(96.0)
+    assert pc["NDI cam2"]["latency_pins"] == [6]                   # the stable strih-config pin
+    assert pc["NDI cam4"]["latency_pins"] == [3]
+    # cam4 is fastest (rank 1) in B,C and rank 3 in A -> mean 5/3.
+    assert pc["NDI cam4"]["mean_floor_rank"] == pytest.approx(5 / 3)
+    assert pc["NDI cam4"]["n"] == 3
+    # ranking_by_median_floor is fastest -> slowest; cam4 first, cam2 last.
+    assert agg["ranking_by_median_floor"][0] == "NDI cam4"
+    assert agg["ranking_by_median_floor"][-1] == "NDI cam2"
+
+
+def test_aggregate_no_stable_slowest_when_shuffled():
+    # 5 runs whose slowest cycles cam1,cam2,cam3,cam4,cam1 -> mode cam1 = 2/5 = 0.4 < 0.6 -> unstable.
+    runs = []
+    for i, slow in enumerate(["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam4", "NDI cam1"]):
+        jit = {s: {"latency_ms": 3, "mean_head_skew_ms": 67.0, "samples": 3} for s in _SRCS4}
+        jit[slow] = {"latency_ms": 3, "mean_head_skew_ms": 97.0, "samples": 3}  # this one is slowest
+        runs.append((str(i), _mk(jit)))
+    agg = afd.aggregate(runs)
+    st_slow = agg["stability"]["slowest"]
+    assert st_slow["src"] == "NDI cam1"           # still reports the mode
+    assert st_slow["fraction"] == pytest.approx(0.4)
+    assert st_slow["stable"] is False              # ...but flags it UNSTABLE
+
+
+def test_aggregate_counts_empty_runs_and_ignores_them():
+    good = _three_runs_stable_cam4_anchor_cam2_slowest()
+    phantom = _mk({f"NDI cam{n}": {"latency_ms": 3, "mean_head_skew_ms": 70.0, "samples": 1}
+                   for n in (1, 2, 3, 4)})  # all #1253 phantom -> rows == []
+    agg = afd.aggregate(good + [("EMPTY", phantom)])
+    assert agg["n_runs"] == 4 and agg["n_usable"] == 3 and agg["n_empty"] == 1
+    assert "EMPTY" not in {r for r in agg["anchor_counts"]}  # empty run contributes nothing
+
+
+def test_aggregate_empty_list_is_safe():
+    agg = afd.aggregate([])
+    assert agg["n_runs"] == 0 and agg["n_usable"] == 0
+    assert agg["ranking_by_median_floor"] == []
+    assert agg["stability"]["anchor"]["src"] is None
+    assert agg["stability"]["anchor"]["stable"] is False
+
+
+# --------------------------------------------------------------- CLI --multi over two REAL fixtures
+_RUN2 = "659887078"
+_RUN2_DIR = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "fixtures" / "arrival_floor_1168" / f"recording-e2e-{_RUN2}"
+)
+
+
+def test_cli_multi_over_two_fixtures_json():
+    out = subprocess.run(
+        [sys.executable, str(_TOOL), "--multi",
+         "--run-dir", str(_RUN_DIR), "--run-dir", str(_RUN2_DIR), "--json"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    doc = json.loads(out.stdout)
+    assert doc["n_usable"] == 2
+    # The two fixtures GENUINELY disagree: 1363366080 anchor cam3/slowest cam1, 659887078 anchor
+    # cam4/slowest cam2. So neither anchor nor slowest reaches a >=60% mode -> both flagged unstable.
+    assert doc["stability"]["anchor"]["stable"] is False
+    assert doc["stability"]["slowest"]["stable"] is False
+    assert doc["per_camera"]["NDI cam2"]["latency_pins"] == [6]  # cam2 pin stable across both
+    assert doc["per_camera"]["NDI cam4"]["n"] == 2
+
+
+def test_cli_multi_text_mode_prints_verdict():
+    out = subprocess.run(
+        [sys.executable, str(_TOOL), "--multi",
+         "--run-dir", str(_RUN_DIR), "--run-dir", str(_RUN2_DIR)],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    low = out.stdout.lower()
+    assert "anchor" in low and "slowest" in low
+    assert "stable" in low  # the stability verdict is rendered
