@@ -61,6 +61,17 @@ handlers, so a hardirq can still preempt the prio-90 grab. `verify-device.sh` ch
 therefore keep WARNing "kernel is NOT PREEMPT_RT" after STEP 1 — that is EXPECTED and correct.
 STEP 1 is the free, low-risk first move; STEP 2 closes the remaining gap only if measured to matter.
 
+**Current deployment state (read-only, re-verified 2026-09-01) — STEP 1 is 3/4 done:**
+cam1/cam2/cam3 now run the lowlatency profile — `uname -r` = `7.0.0-30-generic`,
+`/sys/kernel/debug/sched/preempt` = `(full)`, `/etc/default/grub.d/99-lowlatency.cfg` present,
+single-kernel restored (old `6.8.0-134` purged). **cam4 (10.77.9.64) is deliberately still on the
+GA `6.8.0-134-generic` (preempt=none)** — it is the CONTROL box for the issue-1198 grabber-flap
+hypothesis and must NOT be upgraded until that hold is lifted (see issue 1198; the 2026-08-30 finding
+that cam2's 61.3 fps flap is card-internal, not the kernel, weakens that hold — a supervisor/owner
+call, not a code lane's). The xhci capture-IRQ fix (defect 3) is live on ALL FOUR boxes
+(`smp_affinity_list` = `2`, off the grab core 3). So the only box the planner below still plans a
+full upgrade for is cam4; the rest read `noop:already-lowlatency`.
+
 **Live state (read-only, 2026-08-20, cam1/cam2/cam3):** all three run `6.8.0-134-generic`
 (PREEMPT_DYNAMIC); `linux-lowlatency-hwe-24.04` candidate is apt-resolvable from the main archive
 (6.17 on cam1, 7.0 on cam2/cam3) with **no Pro**; `lowlatency-kernel` NOT installed,
@@ -112,6 +123,26 @@ one, never purge the kernel you are still running):
 8. `verify-single-kernel` — re-run `verify-device.sh`: check `(k)` restored; check `(ac)` still
    WARNs "not PREEMPT_RT" (EXPECTED — preempt=full is STEP 1, full RT is STEP 2).
 9. `post-verify` — the full `verify-device.sh` gate + a full E2E + the before/after measurement below.
+
+**Operational gotchas the planner now bakes in (supervisor findings 2026-08-22, cam1/2/3 upgrade).**
+These were hit live on all three boxes and are now folded into the planner's generated commands, so a
+copy-paste of `--commands` is safe on cam4 (do NOT hand-improvise them again):
+
+- **`/var/cache` is a 512M tmpfs** — the lowlatency-hwe install pulls ~242MB of archives plus a new
+  HWE generic image and overflows it. The generated `install-lowlatency` now passes
+  `-o Dir::Cache::archives=/root/apt-tmp` so `.deb`s are cached on the ample rootfs (~51G).
+- **`/tmp` is a 100M tmpfs** — the ~78MB initrd build (both the in-postinst one during install and
+  the `safe-grub-regen` `update-initramfs`/`update-grub`) overflows it. Both generated commands now
+  `export TMPDIR=/root/tmpbig` (rootfs) after `mkdir -p`.
+- **The first `apt-get update` is mandatory** — the on-box apt index was stale (404 on the
+  security.ubuntu.com meta) until refreshed. The generated `install-lowlatency` already runs
+  `apt-get update` before the install.
+- **GA-meta purge caveat (box-specific).** On a box that ALSO has the GA `linux-generic` /
+  `linux-image-generic` / `linux-headers-generic` metas installed (cam2 was such a box), those metas
+  BLOCK the old-image purge and must be purged together with the specific old image. cam1/cam3/**cam4**
+  do NOT have the GA meta (verified 2026-09-01: cam4 has neither), so cam4's `purge-superseded-generic`
+  is the simple specific-image case (`linux-image-6.8.0-134-generic` + `linux-modules-6.8.0-134-generic`,
+  both apt-held → `--allow-change-held-packages`). Still NEVER a wildcard `-generic` purge.
 
 **Canary first, then fleet.** Upgrade ONE cam box, reboot, run `verify-device.sh`, then a full E2E,
 then the measurement below. Only if it holds, roll the rest one box at a time, each behind its own
