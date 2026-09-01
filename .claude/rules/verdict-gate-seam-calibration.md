@@ -215,6 +215,21 @@ derived reading and a run after carries the beat-corrected reading under the ide
 by the #1250 deploy time. The "gate on derived, not raw" rule above generalizes: gate on the
 BEAT-CORRECTED field, surface derived + raw as diagnostics.
 
+**Calibration lessons from #1250 (reusable for any beat-aware / count-collapse metric):**
+- **When a ticket's fix-SHAPE prose contradicts its own DATA-CHECK number, reconstruct the REAL
+  ORDERED per-frame data and gate toward the acceptance number, not the prose.** #1250's ticket said
+  collapse "ADJACENT" complementary pairs, but its own data-check `(479+360)/846 ≈ 0.99` is a COUNT
+  collapse. The per-segment histogram in the verdict JSON is order-BLIND, so it can't tell the two
+  apart — you must rebuild the ordered tick sequence from the `stream-partial-*.json` `frames[].tick`
+  (the STREAM partial reproduces the per-cambox `presentation_cadence` exactly; the STRIH partial does
+  NOT — it is a different tap with a different beat phase). That reconstruction showed only 137/180
+  ones are strictly adjacent to a 3 → strict-adjacent yields 0.864 (RED, fails the ticket's own
+  acceptance) while count-based yields the ticket's 0.9917. Document the resolution + flag it.
+- **Bound a beat collapse to the PHYSICAL ±1-refresh pair `(mode-1, mode+1)`, not the general
+  `x+y == 2*mode` family.** A one-refresh-early/late capture is the exact beat mechanism and the only
+  complementary pair the rig produces (mode 2 → (1,3)); a ±2+-refresh jump is a bigger artifact that
+  SHOULD stay visible. Behavior-identical on-rig, strictly safer off-mode (the #1250 review finding).
+
 ### Owner-mandated RED-on-current-rig OVERRIDES gates-green-first (§3)
 The standard "a bound that would fail a recent green run is wrong" is REVERSED when the owner
 declares the green runs FALSELY green (hiding visual degradation). #1142's cadence-uniformity 0.95
