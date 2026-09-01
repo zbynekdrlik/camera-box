@@ -1038,7 +1038,7 @@ cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 # uncompensated QPSK marker + a dark aux tick until a manual redeploy). This deploys the candidate
 # frame-probe (the clean probe-tools CI artifact) to cam2 when stale, so pin+deploy advance together
 # (orphan-PROOF), and exports FRAME_PROBE_ALIGN_CI_BIN so the [1/8] pin below verifies against the
-# SAME artifact bytes. Best-effort (ALWAYS returns 0); the report-only [1/8] pin is the loud signal.
+# SAME artifact bytes. Best-effort (ALWAYS returns 0); the [1/8] HARD pin (#1235) is the loud signal.
 # cam2-only (frame-probe lives only on the painter box) and unconditional (cam2 is the painter
 # regardless of active-set membership); honours CAMBOX_OFFLINE_ACK + the --no-main-pin soak escape.
 frame_probe_parity_align_before_gate "cam2=root@$PAINTER_IP"
