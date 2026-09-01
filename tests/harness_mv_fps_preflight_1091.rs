@@ -234,20 +234,23 @@ exit "$ec"
 
 const AUDIT_LINE: &str = "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=3840 cy=2160";
 
-/// Run `mv_fps_preflight_assert` for ONE box under `set -euo pipefail` with a fake probe + fake gate.
-/// `probe_out` is what the fake probe prints; `gate_exits` is the space-separated exit sequence.
-/// Returns (exit, stdout, stderr). A trailing `echo PROCEEDED` proves the assert RETURNED (did not
-/// `exit 1`).
-fn run_assert(probe_out: &str, gate_exits: &str) -> (i32, String, String) {
+/// Run `mv_fps_preflight_assert` for ONE box (`box_spec` = "name|ip|os|user|pw") under
+/// `set -euo pipefail` with a fake probe + fake gate. `probe_out` is what the fake probe prints;
+/// `gate_exits` is the space-separated exit sequence. Returns (exit, stdout, stderr). A trailing
+/// `echo PROCEEDED` proves the assert RETURNED (did not `exit 1`). `box_spec` is a parameter (issue
+/// 1263) so the same helper drives the strict-box abort path (imag) and every UNKNOWN/PASS/transient
+/// path — the strih report-only path lives in tests/harness_mv_fps_preflight_strih_report_only_1263.rs.
+fn run_assert(box_spec: &str, probe_out: &str, gate_exits: &str) -> (i32, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let probe = write_fake_probe(dir.path());
     let gate = write_fake_gate(dir.path());
     let counter = dir.path().join("gate.counter");
     let out = Command::new("bash")
         .arg("-c")
-        .arg("set -euo pipefail\n. \"$LIB\"\nmv_fps_preflight_assert \"$GATE\" \"strih|10.0.0.1|win|u|p\"\necho PROCEEDED")
+        .arg("set -euo pipefail\n. \"$LIB\"\nmv_fps_preflight_assert \"$GATE\" \"$BOX\"\necho PROCEEDED")
         .env("LIB", lib_path())
         .env("GATE", &gate)
+        .env("BOX", box_spec)
         .env("MV_FPS_PREFLIGHT_PROBE_CMD", &probe)
         .env("MV_FPS_PREFLIGHT_REPROBE_SLEEP", "0")
         .env("FAKE_PROBE_OUT", probe_out)
@@ -266,7 +269,7 @@ fn run_assert(probe_out: &str, gate_exits: &str) -> (i32, String, String) {
 #[test]
 fn pass_proceeds() {
     // Gate exit 0 (above floor) -> ok, the run proceeds.
-    let (rc, out, err) = run_assert(AUDIT_LINE, "0");
+    let (rc, out, err) = run_assert("strih|10.0.0.1|win|u|p", AUDIT_LINE, "0");
     assert_eq!(
         rc, 0,
         "a PASS box must not abort:\nstdout={out}\nstderr={err}"
@@ -278,7 +281,7 @@ fn pass_proceeds() {
 #[test]
 fn unknown_no_audit_line_proceeds() {
     // No audit line read (box down / pre-issue-771 build / ssh failed) -> UNKNOWN -> NOTE, proceed.
-    let (rc, out, err) = run_assert("", "0");
+    let (rc, out, err) = run_assert("strih|10.0.0.1|win|u|p", "", "0");
     assert_eq!(
         rc, 0,
         "an unreadable box must NOT abort a CI gate:\nstderr={err}"
@@ -294,7 +297,7 @@ fn unknown_no_audit_line_proceeds() {
 fn unknown_unclassifiable_gate_proceeds() {
     // Audit lines present but the gate cannot classify (exit 2) -> UNKNOWN -> NOTE, proceed
     // (a missing/broken gate binary must never false-abort the whole E2E).
-    let (rc, out, err) = run_assert(AUDIT_LINE, "2");
+    let (rc, out, err) = run_assert("strih|10.0.0.1|win|u|p", AUDIT_LINE, "2");
     assert_eq!(
         rc, 0,
         "an unclassifiable gate must NOT abort:\nstderr={err}"
@@ -313,7 +316,7 @@ fn unknown_unclassifiable_gate_proceeds() {
 fn a_single_transient_below_recovers_on_grace_reread_and_proceeds() {
     // Below floor on the FIRST read, back above floor on the grace re-read (a momentary contention
     // spike) -> must NOT abort. This is the "never false-abort a CI gate" guard.
-    let (rc, out, err) = run_assert(AUDIT_LINE, "1 0");
+    let (rc, out, err) = run_assert("strih|10.0.0.1|win|u|p", AUDIT_LINE, "1 0");
     assert_eq!(
         rc, 0,
         "a transient below-floor read that recovers must NOT abort:\nstdout={out}\nstderr={err}"
@@ -329,13 +332,16 @@ fn a_single_transient_below_recovers_on_grace_reread_and_proceeds() {
 }
 
 #[test]
-fn a_sustained_below_floor_collapse_aborts_the_run() {
+fn an_imag_sustained_below_floor_collapse_aborts_the_run() {
     // Below floor on BOTH the first read and the grace re-read (a real sustained collapse) -> exit 1,
-    // loud ERROR, the run does NOT start.
-    let (rc, out, err) = run_assert(AUDIT_LINE, "1 1");
+    // loud ERROR, the run does NOT start. Exercised via IMAG: issue 1263 made the STRIH term
+    // report-only while issue 1260 is open (strih's report-only path is covered in
+    // tests/harness_mv_fps_preflight_strih_report_only_1263.rs), so the STRICT confirmed-collapse
+    // abort path is now demonstrated on imag, which keeps its floor.
+    let (rc, out, err) = run_assert("imag|10.0.0.2|linux|u|p", AUDIT_LINE, "1 1");
     assert_eq!(
         rc, 1,
-        "a CONFIRMED collapse must abort (exit 1):\nstdout={out}\nstderr={err}"
+        "a CONFIRMED collapse on a STRICT box must abort (exit 1):\nstdout={out}\nstderr={err}"
     );
     assert!(
         !out.contains("PROCEEDED"),
@@ -346,7 +352,7 @@ fn a_sustained_below_floor_collapse_aborts_the_run() {
         "the abort must name the confirmed below-floor collapse:\n{err}"
     );
     assert!(
-        err.contains("strih"),
+        err.contains("imag"),
         "the abort must name the collapsed box:\n{err}"
     );
 }
