@@ -105,9 +105,11 @@ scripts/rt-kernel-upgrade.sh --box <ip> --commands   # also print the concrete s
 The ordered atomic plan (the SAFE order — reboot INTO the new kernel BEFORE purging the superseded
 one, never purge the kernel you are still running):
 
-1. `install-lowlatency` — `apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04`
-   (wrapped in a rw/ro remount). Pulls the `lowlatency-kernel` config (preempt=full) and, on a box
-   without the HWE meta, a new HWE generic image.
+1. `install-lowlatency` — `apt-get install -o Dir::Cache::archives=/root/apt-tmp -y --allow-change-held-packages linux-lowlatency-hwe-24.04`
+   (wrapped in a rw/ro remount, with `TMPDIR=/root/tmpbig` exported first — see "Operational gotchas"
+   below for the appliance tmpfs reasons; use the exact `--commands` output, do not hand-type this).
+   Pulls the `lowlatency-kernel` config (preempt=full) and, on a box without the HWE meta, a new HWE
+   generic image.
 2. `verify-lowlatency-config` — assert `/etc/default/grub.d/99-lowlatency.cfg` exists AND carries
    `preempt=full` (refuse to trust the config package otherwise — the `setup-imag.sh` step-7 guard).
 3. `grub-pin:saved` | `grub-pin:menuentry` — pin GRUB to the new HWE image (drift-aware).

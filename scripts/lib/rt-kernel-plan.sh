@@ -116,7 +116,7 @@ rt_kernel_step_command() {
       # and the lowlatency meta depends on the HWE packages, so the install must be allowed to move
       # the hold -- exactly as setup-imag.sh step 7 does (#820). This ADDS the lowlatency config
       # (preempt=full) and, on a box without the HWE generic meta, a new generic HWE image.
-      printf 'mount -o remount,rw / && mkdir -p /root/apt-tmp /root/tmpbig && export TMPDIR=/root/tmpbig && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Cache::archives=/root/apt-tmp install -y --allow-change-held-packages linux-lowlatency-hwe-24.04 && mount -o remount,ro /   # /var/cache+/tmp are tmpfs (512M/100M) -> cache .debs + build initrd on the rootfs (issue 899 supervisor finding 2026-08-22)' ;;
+      printf 'mount -o remount,rw / && mkdir -p /root/apt-tmp /root/tmpbig && export TMPDIR=/root/tmpbig && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -o Dir::Cache::archives=/root/apt-tmp -y --allow-change-held-packages linux-lowlatency-hwe-24.04 && mount -o remount,ro /   # /var/cache+/tmp are tmpfs (512M/100M) -> cache .debs + build initrd on the rootfs (issue 899 supervisor finding 2026-08-22)' ;;
     verify-lowlatency-config)
       printf '# SUPERVISOR: assert the config package landed -- test -f /etc/default/grub.d/99-lowlatency.cfg AND grep -q preempt=full /etc/default/grub.d/99-lowlatency.cfg (refuse to trust it otherwise, mirrors setup-imag.sh step 7)' ;;
     grub-pin:saved)
