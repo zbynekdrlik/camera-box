@@ -136,21 +136,24 @@ pub fn pool_camera_av_sync(
 ///
 /// **2026-09-01 DATA-FIRST RE-CALIBRATION (issue 1003) — the value STAYS 90; the earlier "once
 /// the release phase is pinned to the absolute wall-clock frame grid" precondition is RETIRED.**
-/// That vendored-C grid-pin was durably rejected: the deep-source release phase is already
-/// deterministic (Tier-0 sim ±33 ns across 12 lock phases; the #940 phase-pin deadline + the
-/// #1003 history-anchored relock + the #1049 converge, all deployed), and the live residual is a
-/// PHYSICAL arrival-floor / per-connection sender phenomenon a receiver release-phase pin cannot
-/// remove without adding latency the imag 3 ms mandate forbids. The first stable 7-cam green
-/// series (verdicts 1363366080 / 1168855508 / 674135238 — three fresh lock episodes after fleet
-/// redeploys) re-measured the gate at ±90 and DECOMPOSES cleanly: a per-run COMMON shift
-/// −9.2 / +9.5 / +36.3 ms (span 45.5 ms = 1.36 frames — the still-live per-episode lock lottery)
-/// plus a STABLE per-camera residual (cam3 +17.6 ms above the run mean, cam4 ≈ −8 ms below,
-/// ≈ 26 ms peak-to-peak — the un-equalized production-pin delivery spread). 8/21 measurements
-/// exceed ±20 (worst 57.7 ms), so the data supports NO tighten below the still-accurate
-/// `20 + 2 frames`. The re-tighten to ±20 is now gated on BOTH the production pin-promotion
-/// (collapses the inter-camera spread — its own owner-visual-acceptance lane) AND a viable
-/// removal/absorption of the common lock-episode shift (which #1004 records as UNSTABLE → it
-/// cannot be a constant `--av-expected-ms`); neither exists yet.
+/// That vendored-C grid-pin was durably rejected (the 2026-08-19 supervisor ruling): the
+/// deep-source release phase is already deterministic (Tier-0 sim ±33 ns across 12 lock phases per
+/// that ruling; the committed acceptance test pins ±10 ms across 5 forced relocks; the #940
+/// phase-pin deadline + the #1003 history-anchored relock + the #1049 converge, all deployed), and
+/// the live residual is a PHYSICAL arrival-floor / per-connection sender phenomenon a receiver
+/// release-phase pin cannot remove without adding latency the imag 3 ms mandate forbids. The first
+/// stable 7-cam green series (verdicts 1363366080 / 1168855508 / 674135238 — three fresh lock
+/// episodes after fleet redeploys) re-measured the gate at ±90 and DECOMPOSES cleanly: a per-run
+/// COMMON shift −9.2 / +9.5 / +36.3 ms (span 45.5 ms = 1.36 frames — the still-live per-episode
+/// lock lottery) plus a consistent per-camera residual (cam3 the largest every run, mean +17.6 ms
+/// above the run mean; cam4 the most-negative, ≈ −8 ms; ≈ 26 ms peak-to-peak — the un-equalized
+/// production-pin delivery spread). 8/21 measurements exceed ±20 (worst 57.7 ms), so the data
+/// supports NO tighten below the still-accurate `20 + 2 frames`. The re-tighten to ±20 is now
+/// gated on BOTH the production pin-promotion (collapses the inter-camera spread — its own
+/// owner-visual-acceptance lane) AND a viable removal/absorption of the common lock-episode shift
+/// — which the green series itself shows is per-episode (45.5 ms across 3 episodes), so it cannot
+/// be a constant `--av-expected-ms` (the #1004 ruling forbids compensating an unstable
+/// dock-vs-gate residual with a guessed constant); neither exists yet.
 pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 90.0;
 
 /// #1178 — the fixed video-leg rig offset (ms): the calibrated DEFAULT `expected_ms` the per-camera
