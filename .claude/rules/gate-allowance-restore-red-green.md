@@ -54,27 +54,34 @@ beyond `cargo fmt --all --check`).
 Items 2 and 3 on issue 905 are excellent candidates to follow this exact recipe when their own
 preconditions land.
 
-## The pattern INVERTED (issue 1169, `REAL_DROPS_ALLOWANCE_DEFAULT` 0 → 1)
+## The pattern INVERTED then RE-TIGHTENED (issue 1169, `REAL_DROPS_ALLOWANCE_DEFAULT` 0 → 1 → 0)
 
 Issue 1169 (owner, 2026-08-22) RE-WIDENED `REAL_DROPS_ALLOWANCE_DEFAULT` from the issue-905
-restored 0 back to the LOUD `<=1` SINGLETON band — the SAME recipe run BACKWARDS (a re-relaxation
-with a re-tighten trail, not a restore). Current state:
+restored 0 to the LOUD `<=1` SINGLETON band (the recipe run BACKWARDS — a re-relaxation with a
+re-tighten trail), then RE-TIGHTENED it back to 0 (2026-09-01) once the trail's named event landed.
+Current state:
 
-- **DEFAULT = 1** — a single per-frame delivery singleton (issue-1167 v3 paced-trickle absorption +
-  a FIFO stale_replay in the same event; `burn_unreadable` stays 0) PASSES within the allowance and
-  is reported LOUDLY (per-node + full_chain notes now say "real-drops singleton allowance consumed:
-  N — issue 1169 re-tighten trail"; the JSON already carries `real_drops_allowance` +
-  `real_drops_allowance_consumed_nodes`). `>=2` of anything still FAILS; `burn_unreadable` stays an
-  unconditional hard fail.
-- **Re-tighten = the ONE constant flip back to 0**, landed once a zero-singleton green run holds
-  (e.g. after the issue-1168 floor reduction and/or the cam1-card swap). Issue 1169 stays OPEN as
-  that trail.
-- The inverse of recipe step 4: the issue-356/#571 never-mask SAFETY test's part (b) fixture was
-  LIFTED from 1 gap back to 2 (one PAST the singleton band) so it keeps proving loss BEYOND the
-  allowance — mirroring what issue 904 did for its allowance of 2, re-scaled to band 1.
-- The DORMANT re-tighten proof (`re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`)
-  is the inverse of `single_real_drop_...` above: an EXPLICIT `is_zero_within_allowance(0)` on the
-  same singleton node still FAILS, so flipping the constant back is a proven one-line change.
+- **DEFAULT = 0 (re-tightened 2026-09-01)** — the named re-tighten event landed: the first STABLE
+  3-run green 7-cam series (verdicts 1363366080 / 1168855508 / 674135238) showed
+  `full_chain.real_drops = 0` and per-node `real_drops = 0` on EVERY node in EVERY run — the band
+  was never consumed — so the strict absolute-zero bar is restored (a single real drop again FAILS;
+  the count stays honest, nothing masked). The widened `<=1` band is now DORMANT and re-armable via
+  one constant flip or the `CAMERA_BOX_REAL_DROPS_ALLOWANCE` env override; `burn_unreadable` stays
+  an unconditional hard fail at any band.
+- **The re-tighten was the ONE constant flip back to 0** (green commit dda3cbd99), RED→GREEN per the
+  "pattern that worked" recipe above (RESTORE direction). Issue 1169 STAYS OPEN for its remaining
+  two seams — the per-segment `<=1/<=1` segment bar and the cam-leg V4L2 band — both still consumed
+  by the current green series (segment-level copies/gaps activity persists; cam-leg `v4l2_dropped`
+  = 1/2/2 across the three green runs). Their own re-entry: a green series with each dimension clean.
+- Recipe step 4 in action: the issue-356/#571 never-mask SAFETY test's part (b) fixture, LIFTED to
+  2 gaps for band 1, was RESTORED to its pre-relaxation SINGLE-gap `window(...)` shape (one past the
+  restored zero band) so it keeps proving loss BEYOND the allowance.
+- The DORMANT proof (`re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`) now matches
+  the LIVE default: an EXPLICIT `is_zero_within_allowance(0)` on the singleton node FAILS (the
+  restored strict bar) while an EXPLICIT `is_zero_within_allowance(1)` still PASSES + consumes LOUDLY
+  (the dormant widened band), so re-widening or re-tightening is a proven one-line change either way.
+  The reshaped headline test is `single_real_drop_fails_at_the_re_tightened_zero_bar_1169` (renamed
+  from `single_real_drop_passes_loudly_within_the_1169_singleton_allowance` on the re-tighten).
 - **Blast-radius gotcha when MOVING this default (either direction): the adjacent, untouched
   sibling test region's narrative COMMENTS go factually stale — refresh them IN-BRANCH.** These
   comments are load-bearing in this file, and a default flip silently makes lines like "the DEFAULT

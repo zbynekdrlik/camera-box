@@ -4072,13 +4072,15 @@ fn build_and_print_verdict_with_stream_diffs(
                 );
             } else if all_zero {
                 // #904/#1169 — LOUD: a genuine pass, but NOT a strict zero-loss pass — never let
-                // this look identical to the clean branch above. Issue 1169 (owner, 2026-08-22)
-                // re-widened the default to the <=1 singleton band and is the re-tighten trail.
+                // this look identical to the clean branch above. The DEFAULT was re-tightened back
+                // to 0 (issue 1169, 2026-09-01), so this branch is now reachable ONLY when the
+                // `CAMERA_BOX_REAL_DROPS_ALLOWANCE` env override re-arms the dormant band; the
+                // message interpolates the actual `{real_drops_allowance}` in force.
                 println!(
                     "  >>> ⚠ #1169 REAL-DROPS SINGLETON ALLOWANCE: real-drops singleton allowance \
                      consumed: {total_real} — issue 1169 re-tighten trail. Within the per-node \
                      allowance of {real_drops_allowance} on: {} — 0 BURN-UNREADABLE, everything \
-                     else at the usual strict bar; 2+ of anything still FAILS.",
+                     else at the usual strict bar; anything OVER the allowance still FAILS.",
                     allowance_consumed_nodes.join(", ")
                 );
             } else {
@@ -11590,8 +11592,9 @@ mod tests {
     /// scheduled camera: its BLOCKING `all_cambox_av_sync` gate fails closed on the
     /// absent-unacked cam3..cam7 (issue 855 / issue 861), so the old shape read
     /// `overall_pass=false` for a reason UNRELATED to the band under test. Mirrors the
-    /// otherwise-green `single_real_drop_passes_loudly_within_the_1169_singleton_allowance`
-    /// sibling's fixture instead (clean `window` frames, no schedule, no A/V inputs) — the
+    /// real_drops-singleton sibling test
+    /// (`single_real_drop_fails_at_the_re_tightened_zero_bar_1169`)'s fixture instead
+    /// (single-camera `window`-family frames, no schedule, no A/V inputs) — the
     /// injected capture-drop sidecar is the ONLY non-zero signal, so the camleg band is the
     /// ONLY term that can flip the verdict.
     #[test]
