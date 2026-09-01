@@ -113,6 +113,23 @@ DEFAULT_MAX_DELTA_MS = 66.0
 # well under it (arrival floors ~59-76 ms).
 DEFAULT_MAX_ABS_LATENCY_MS = 94
 DEFAULT_FLOOR_MS = 3          # imag-min-latency floor; the slowest strih camera anchors here
+# #1252 -- the N=2 (60-into-30) lock-phase quantum. The strih canvas is 30 fps and each source is
+# 60 fps, so which of the 2 source frames a canvas frame latches shifts a camera's measured present
+# age by an integer number of SOURCE frames; over a short (N=2) audit the mean can read one source
+# frame off. A cross-camera present-age SPREAD at or below this quantum is presentation-phase jitter
+# around zero (the frame_id tail shows the "slowest" camera alternately AHEAD and behind), NOT a real
+# transport lag, and the pin lever provably CANNOT close it: the lever only ADDS delay so it can only
+# GROW a sub-frame spread (post_residual = pre_residual + pin_delta, proven live on run 1899055119),
+# there is no consistent slowest camera to pin against, no pin can go below the 3 ms floor to pull a
+# camera earlier, and the measurement itself carries the same +/- one-source-frame quantum so a
+# "correction" could not be verified. So a spread within one source frame + hysteresis is
+# ALREADY-ALIGNED at the floor-3 achievable limit and must apply NO above-floor pins. This is NOT a
+# widening of the same-frame parity bar -- it suppresses the ABOVE-FLOOR PIN PLAN when its own input
+# is a sub-frame phantom, and it applies BELOW the 66 ms degraded-grabber sanity bound (a real
+# >= 2-source-frame misalignment, or a degraded card, is never quantum-suppressed). 1.5 source frames
+# is the discriminator: a spread that rounds to <= 1 source frame is the quantum, >= 2 is real.
+SOURCE_FRAME_MS = 1000.0 / 60.0                      # ~16.667 ms (one 60 fps source frame)
+DEFAULT_ALIGNED_QUANTUM_MS = 1.5 * SOURCE_FRAME_MS   # ~25.0 ms cross-camera spread = still aligned
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
 DEFAULT_SETTLE_S = 4.0        # let the genlock FIFO re-lock after a pin change before re-measuring
@@ -331,6 +348,27 @@ def floor3_pins(deltas, floor_ms=DEFAULT_FLOOR_MS):
         return {}
     base = min(deltas.values())
     return {src: max(floor_ms, int(round(floor_ms + (d - base)))) for src, d in deltas.items()}
+
+
+def within_aligned_quantum(deltas, quantum_ms=DEFAULT_ALIGNED_QUANTUM_MS):
+    """#1252 -- True iff the cross-camera present-age SPREAD is within the N=2 lock-phase quantum, so
+    the rig is ALREADY aligned to the floor-3 achievable limit and NO above-floor pins must be
+    applied. `deltas`: {src: ms >= 0} the PURE cross-camera present-age spread (round_deltas over ZERO
+    pins). The CALLER must pass PURE deltas on BOTH paths, never the pin-FOLDED deltas -- folded
+    deltas can UNDER-read a real spread to ~0 when non-uniform leftover pins compensate the transport,
+    masking a genuine misalignment as a quantum (#1252 review). Spread = max - min (coherent with
+    sanity_ok's worst_delta_ms; robust to a median set not perfectly min-anchored). A spread within
+    one source frame + hysteresis
+    (default 1.5 source frames, ~25 ms) is presentation-phase jitter around zero that the pin lever
+    CANNOT close (it only ADDS delay -> post = pre + pin_delta; no consistent slowest to pin against;
+    no sub-floor pin to pull a camera earlier; the measurement itself carries the same quantum), so
+    raising pins for it only DOUBLES the spread (run 1899055119). Empty -> False (nothing measured,
+    never a fabricated aligned verdict). Does NOT widen the same-frame parity bar -- it suppresses the
+    plan when its own input is a sub-frame phantom; a real >= 2-source-frame spread returns False and
+    is planned normally (and a degraded grabber still FAILs the 66 ms sanity bound upstream)."""
+    if not deltas:
+        return False
+    return (max(deltas.values()) - min(deltas.values())) < quantum_ms
 
 
 # ---------------------------------------------------------------------------
@@ -744,8 +782,11 @@ def measure_tail_status(rounds_ticks, sources, *, stable_tail_rounds, stable_tol
 def decode_qr_texts(png_bytes):
     """Every QR text in a PNG's bytes. cv2.detectAndDecodeMulti first; if it yields NO painter-shaped
     payload, retry on a 2x-upscaled, autocontrast-stretched, threshold-swept copy (110/130/150) --
-    raw 1920px screenshots are sometimes missed by cv2's multi-detector. Returns a de-duplicated
-    list of decoded strings (possibly empty). Errors are logged, never silently swallowed."""
+    raw 1920px screenshots are sometimes missed by cv2's multi-detector. If STILL nothing
+    painter-shaped decoded (#1239: monitor-filmed moire/screen-door aliasing breaks the sharpening
+    ladder above), fall through a moire-AVERAGING ladder instead: half-res+Otsu, medianBlur(5)+Otsu,
+    third-res+Otsu, then an L/R-crop+medianBlur+2x+Otsu last resort. Returns a de-duplicated list of
+    decoded strings (possibly empty). Errors are logged, never silently swallowed."""
     import cv2
     import numpy as np
 
@@ -782,6 +823,56 @@ def decode_qr_texts(png_bytes):
             _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
             if has_painter_payload(found_texts):
                 break
+
+    # #1239: monitor-filmed moire/screen-door aliasing (photographing an LCD off-axis through the
+    # cam2 optical loop) breaks cv2's binarizer on the big optical painter QR even after the
+    # sharpening ladder above -- measured 0/29 recovered on a real undecodable-round fixture set
+    # (tests/fixtures/qr-align-moire-1239/). Sharpening amplifies the interference; these four
+    # passes AVERAGE it away instead, in order of measured effectiveness. Each only runs while
+    # nothing painter-shaped has decoded yet, so the common (already-decodable) case pays none of
+    # this extra cv2 work.
+    if not has_painter_payload(found_texts):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # 1) half-res downscale + Otsu -- the single biggest win (20/29 fixture first-hits).
+        # INTER_AREA is an area-averaging resize mode: it suppresses the moire period instead of
+        # re-sharpening the alias the way INTER_CUBIC/LINEAR would.
+        half = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+        _bw = cv2.threshold(half, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
+
+    if not has_painter_payload(found_texts):
+        # 2) medianBlur(5) + Otsu -- a nonlinear low-pass at full resolution recovers a few more
+        # (7/29) that the downscale alone missed.
+        blurred = cv2.medianBlur(gray, 5)
+        _bw = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
+
+    if not has_painter_payload(found_texts):
+        # 3) third-res downscale + Otsu -- a coarser averaging step for the rare frame the two
+        # passes above still miss (1/29).
+        third = cv2.resize(gray, None, fx=1.0 / 3.0, fy=1.0 / 3.0, interpolation=cv2.INTER_AREA)
+        _bw = cv2.threshold(third, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
+
+    if not has_painter_payload(found_texts):
+        # 4) L/R half-crop + medianBlur(5) + 2x upscale + Otsu -- last resort for a QR that only
+        # partially survives the interference. Upper 72% keeps the code above any lower-third
+        # caption/burn-in; the two halves (0-42% / 55-100% width) are tried separately since the
+        # multiview layout places two painter tiles side by side and one quadrant sometimes reads
+        # cleaner alone than the full-width crop would.
+        h, w = gray.shape[:2]
+        top = int(h * 0.72)
+        for lo_frac, hi_frac in ((0.0, 0.42), (0.55, 1.0)):
+            x0, x1 = int(w * lo_frac), int(w * hi_frac)
+            crop = gray[0:top, x0:x1]
+            crop_blur = cv2.medianBlur(crop, 5)
+            crop_up = cv2.resize(crop_blur, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            _bw = cv2.threshold(crop_up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            _collect(cv2.cvtColor(_bw, cv2.COLOR_GRAY2BGR))
+            if has_painter_payload(found_texts):
+                break
+
     return list(found_texts)
 
 
@@ -1196,6 +1287,29 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
             f"widest gap is on {widest_src!r}; the anomaly is most likely the slowest card). "
             f"Per-camera deltas (ms off the slowest): {result['sanity_deltas_ms']}.")
 
+    # #1252 QUANTUM GATE (full rationale: the SOURCE_FRAME_MS / DEFAULT_ALIGNED_QUANTUM_MS constant
+    # block above). If the PURE cross-camera present-age spread is within the N=2 lock-phase quantum,
+    # the rig is already aligned at the floor-3 limit and the pin lever cannot close it -> apply
+    # NOTHING and PASS, BEFORE any plan. Placed AFTER the 66 ms sanity gate (a degraded grabber FAILs
+    # first). Gate on PURE deltas on BOTH paths: pure_deltas on the floor-aware path, a zero-pin
+    # recompute on the fallback -- the pin-FOLDED deltas can UNDER-read a real spread to ~0 when
+    # non-uniform leftover pins compensate the transport, masking a genuine misalignment (#1252 review).
+    quantum_deltas = (pure_deltas if arrival_floors
+                      else robust_deltas(tail, {s: 0 for s in sources}, min_valid_rounds)[0])
+    if within_aligned_quantum(quantum_deltas):
+        result["status"] = "already-aligned-quantum"
+        result["plan"] = {}
+        result["aligned_quantum_ms"] = round(DEFAULT_ALIGNED_QUANTUM_MS, 1)
+        result["present_age_spread_ms"] = round(
+            max(quantum_deltas.values()) - min(quantum_deltas.values()), 2)
+        sys.stderr.write(
+            f"[qr-align] #1252 ALREADY ALIGNED at the floor-3 quantum: cross-camera present-age "
+            f"spread {result['present_age_spread_ms']:.1f} ms is within the N=2 60-into-30 lock-phase "
+            f"quantum ({DEFAULT_ALIGNED_QUANTUM_MS:.1f} ms). The pin lever cannot close a "
+            "sub-source-frame quantum; applying above-floor pins would only DOUBLE the spread (run "
+            "1899055119). No pins applied; same-frame parity bar NOT widened.\n")
+        return result
+
     # FLOOR-AWARE: raise each faster camera ABOVE its arrival floor to the alignment target so the
     # genlock-C ACQUIRE frame-mover can add the hold (a below-floor pin is structurally inert); the
     # slowest keeps floor_ms. current_pins let it never tear down a pin-dominated co-slowest (#1161
@@ -1423,6 +1537,12 @@ def main(argv=None):
     if status == "already-aligned":
         print(f"[qr-align] host={a.host} ALREADY ALIGNED (spread {result['pre_spread_ids']} id; "
               f"{tail}).", file=sys.stderr)
+    elif status == "already-aligned-quantum":
+        # #1252: the cross-camera present-age spread is within the N=2 lock-phase quantum -> already
+        # aligned to the floor-3 achievable limit; no pins applied, exit 0 (the E2E proceeds).
+        print(f"[qr-align] host={a.host} ALREADY ALIGNED at the floor-3 quantum (present-age spread "
+              f"{result.get('present_age_spread_ms')} ms < {result.get('aligned_quantum_ms')} ms = "
+              f"one source frame + hysteresis; {tail}); no pins applied.", file=sys.stderr)
     elif status == "plan-only":
         print(f"[qr-align] host={a.host} DRY-RUN floor-3 plan (spread {result['pre_spread_ids']} id; "
               f"{tail} -> would set {result['plan']}); re-run with --execute to apply.",

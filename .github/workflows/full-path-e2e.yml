@@ -260,6 +260,16 @@ jobs:
         if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
         env:
           NDI_RUNTIME_DIR_V6: /usr/lib/ndi
+          # issue 1244 (review fix): cambox_parity_align_before_gate's ci.yml-artifact resolution
+          # is commit-scoped (never "newest on branch") -- but on a `pull_request` event
+          # `$GITHUB_SHA` is the SYNTHETIC merge commit (refs/pull/N/merge), which ci.yml
+          # (push:[dev,main] ONLY, deliberately never pull_request) never builds a run for, so the
+          # lib's own $GITHUB_SHA fallback would resolve NOTHING on every automatic pull_request
+          # run -- a 100% (not merely intermittent) false-refuse. Wire the PR's real HEAD sha
+          # explicitly -- the SAME `github.event.pull_request.head.sha` the #703 fetch step above
+          # already uses, for the identical reason. workflow_dispatch has no pull_request context
+          # (its own checkout IS the candidate), so it falls back to `github.sha` unchanged.
+          CAMBOX_ALIGN_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           # PR-triggered runs use the 300s acceptance-floor profile (no `inputs.duration_secs`
           # on a pull_request event); workflow_dispatch keeps its own default/operator override.
           DURATION: ${{ inputs.duration_secs || '300' }}
@@ -304,6 +314,16 @@ jobs:
           # root-cause stay open on the ticket.
           PREFLIGHT_MV_REVERIFY_ATTEMPTS: "5"
           PREFLIGHT_MV_REVERIFY_SETTLE_S: "8"
+          # issue 1245: scripts/lib/frame-probe-parity-align.sh's [0/8] pre-gate auto-align
+          # resolves the candidate probe-tools artifact BY THIS RUN'S CANDIDATE COMMIT (never
+          # "newest ci.yml run on branch dev", which repeatedly returned ANCIENT runs inside this
+          # self-hosted runner job). On a `pull_request` event the auto-set GITHUB_SHA is the
+          # SYNTHETIC MERGE COMMIT, not the head -- ci.yml only ever runs+publishes for the REAL
+          # head commit, so a raw GITHUB_SHA here would be a PERMANENT false-refuse. Explicitly
+          # wire the true head sha, the SAME #703 pattern the "Fetch the matching Windows
+          # recording-verdict.exe" step above already uses. push/workflow_dispatch runs never see
+          # this event, so github.sha is already correct there and this only takes effect on PRs.
+          FRAME_PROBE_ALIGN_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         # #832: this workflow never hardcodes an imag-nb address itself — recording-e2e.sh
         # resolves the ACTIVE imag host from scripts/imag-host.sh (the ONE declared source of
         # truth, reversible between the incumbent 10.77.9.182 and the replacement 10.77.9.187).

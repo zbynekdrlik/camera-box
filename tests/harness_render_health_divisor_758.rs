@@ -97,9 +97,21 @@ fn render_health_preflight_polls_multiple_sustained_windows_not_one_average() {
         "#758: must poll across several independent windows (SUSTAINED), never a single \
          averaged measurement — a transient mid-window dip must not be averaged away"
     );
+    // #1232: the fixed `for _rhw in $(seq 1 "$RENDER_HEALTH_WINDOWS")` loop (a fixed TOTAL window
+    // count) became a `while` loop that keeps sampling through a settle-adaptive warm-up phase
+    // (bounded by RENDER_HEALTH_SETTLE_BUDGET_S) until RENDER_HEALTH_WINDOWS STRICT windows have
+    // passed — see tests/harness_render_health_warmup_882.rs for the phase-machine coverage. The
+    // "several independent windows, never one average" property still holds: each iteration is
+    // its own independent render-budget-gate.py call.
     assert!(
-        s.contains("for _rhw in $(seq 1 \"$RENDER_HEALTH_WINDOWS\")"),
-        "#758: the render-health check must loop over RENDER_HEALTH_WINDOWS independent calls"
+        s.contains("while :; do") && s.contains("render_health_phase_outcome"),
+        "#1232: the render-health check must loop (settle-adaptively) calling \
+         render_health_phase_outcome once per independent window"
+    );
+    assert!(
+        s.contains("RENDER_HEALTH_SETTLE_BUDGET_S"),
+        "#1232: the settle-adaptive warm-up phase must be bounded by a wall-clock budget so a \
+         box that never settles still fails loudly instead of retrying forever"
     );
 }
 

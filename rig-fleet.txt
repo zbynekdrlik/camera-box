@@ -20,27 +20,30 @@
 # remove it the moment the notebook is back. (Remote wake / WoL for imag is separate hardware work,
 # tracked apart from this gate change; issue 1053 is its strih/stream counterpart.)
 #
-# Current physical state (2026-08-22, issue 1110 cam1 re-retirement -- this time genuinely the grabber):
-# cam1: RE-RETIRED 2026-08-22 (issue 1110) -- its ShadowCast USB grabber is HARDWARE-DEFECTIVE beyond
-#   software compensation (chronic over-rate 61.5->63.1 fps captured, constant 4 corrupted/5s, -EPROTO;
-#   USB re-auth does not cure). It is the SINGLE deterministic blocker of the green E2E series (cam1
-#   alone oscillates -2..-11 id in [4i/8align] while cam2/cam3/cam4 sit within 0-2 id); the leg-health
-#   gate (issue 1133) refuses every run while it is in the set. cam1 was ALSO the hard-pinned
-#   PRIMARY/source node of the E2E chain, so #1134 made the source role derivable off CAMERA_ACTIVE_SET
-#   (camera_source_box) and dropping cam1 from the default set (now "cam2 cam3") moves the source to
-#   cam3. Like cam4 below, cam1 is acked here yet OUTSIDE camera-set.sh's CAMERA_ACTIVE_SET, so it is
-#   NOT a preflight target and the stale-ack guard never fires on it. The card swap is delivered to the
-#   owner (needs-answer on issue 1110). REMOVE this line (and re-add "cam1" to CAMERA_ACTIVE_SET AND
-#   CAMERA_ALIGN_SET) the moment the grabber is swapped -- the source role follows automatically.
+# Current physical state (2026-08-27, issue 1198 cam1+cam2 restoration -- owner ruling: the cards
+# are fine, they are not being replaced):
+# cam1: RESTORED 2026-08-27 (issue 1198) -- back in CAMERA_ACTIVE_SET (and CAMERA_ALIGN_SET), its
+#   former offline ack REMOVED. The 2026-08-22 "HARDWARE-DEFECTIVE" diagnosis (issue 1110: chronic
+#   over-rate 61.5->63.1 fps captured, constant 4 corrupted/5s, -EPROTO; USB re-auth does not cure)
+#   was built from an EPISODE, not a permanent card state -- a live read-only journal check on
+#   2026-08-27 (production running) showed cam1 at 60.0/61.4 fps, 4 capture-dropped/5s, 1 corrupted,
+#   colour, no STUCK/self-heal/LATCH marker. The owner refused the physical swap outright ("tie dve
+#   karty su vpohode nebudem ich menit za ine lebo su uplne funkcne"). cam1 is again the FIRST
+#   strih-routable member of CAMERA_ACTIVE_SET, so camera_source_box() resolves the source back to
+#   cam1 (byte-identical to the pre-#1110 behaviour). The historical episode stays real; its root
+#   cause is now tracked as OUTSIDE the card (USB/power/splitter/kernel/thermal) on issue 1198 --
+#   re-ack this line + drop "cam1" from CAMERA_ACTIVE_SET/CAMERA_ALIGN_SET again ONLY if a fresh,
+#   reproduced episode demands it.
 # History: cam1 was first retired 2026-08-19 (issue 1134, owner order #1130) and RETURNED the same day
 #   (issue 1130 read the judder as a deployed emit-gate regression, fixed by dev.481, not the card);
-#   that return is now superseded -- the 2026-08-21 E2E series confirmed the grabber IS the fault.
+#   RE-RETIRED 2026-08-22 (issue 1110, the chronic over-rate episode above); RESTORED again 2026-08-27
+#   (issue 1198, this time by owner ruling that the card itself is fine).
 # cam3: RE-ACTIVATED 2026-08-13 (issue 939) -- in CAMERA_ACTIVE_SET, a measured preflight
 #   target again; its former ack line is GONE (a healthy acked box trips the stale-ack guard).
 # cam4: ON AIR but OUTSIDE the measured set -- ack RESTORED 2026-08-07 with this exact reason.
 #   The box is healthy (preflight contract passes on 10.77.9.64) and its feed genuinely renders
 #   on strih, so the 2026-08-06 "removed from rig" reason was stale. BUT cam4 is not in
-#   camera-set.sh's CAMERA_ACTIVE_SET (default "cam1 cam2"), so the burn sweep produces no
+#   camera-set.sh's CAMERA_ACTIVE_SET (default "cam1 cam2 cam3" as of issue 1198), so the burn sweep produces no
 #   delivery samples for it and the all-cambox A/V derivation is STRUCTURALLY impossible --
 #   E2E run 31157261313 proved it live: cam4 judged, windows=0 candidates=0, UNKNOWN, gate FAIL
 #   forever. Until cam4 is deliberately re-entered into CAMERA_ACTIVE_SET (the issue-753-class
@@ -50,8 +53,35 @@
 # Without the remaining acks the re-armed A/V-offset gate (issue 861) fails closed forever on
 # their UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design
 # (#855).
-cam1:grabber-hw-defect-swap-pending-issue-1110
-cam4:on-air-but-outside-measured-set-2026-08-07
-cam5:powered-off-2026-07-27
-cam6:powered-off-2026-07-27
-cam7:powered-off-2026-07-27
+# cam5/cam6/cam7: REACTIVATED 2026-08-28 (issue 1216) -- physically rewired on the bigger HDMI
+#   splitter, redeployed (camera-box + dantesync 1.8.52 + phase_slew), back in CAMERA_ACTIVE_SET.
+#   Their powered-off-2026-07-27 ack lines are REMOVED per this file's own contract ("remove the
+#   line the moment the box is back in the fleet") -- a lingering ack EXCLUDED them from the
+#   version-parity/dantesync gates and the parity auto-align deploy scope (E2E run 33162371597).
+# cam5: OUT AGAIN, same day (issue 1217) -- a DEAD_PORT leg on the new splitter, not a card
+#   fault. Post-deploy `capture chroma` reads a flat static frame (rough=0.1, healthy baseline
+#   7.1-8.0) while siblings cam6/cam7 on the SAME splitter read colour (rough=8.7-9.5/8.8) in the
+#   same minute -- the proven-good-sibling DEAD_PORT signature
+#   (.claude/rules/splitter-port-health-watchdog.md). Live E2E run 33163294977's [1/8]
+#   frozen-camera-gate FAILED on NDI cam5 (identical pixel hash across both 3.5s samples) while
+#   every other camera changed. The box is healthy + reachable (60.0 fps captured, card
+#   registers clean), so acking it WITHOUT dropping it from CAMERA_ACTIVE_SET would trip the
+#   stale-ack guard (`healthy + acked -> stale`) -- this ack line is the cam4-precedent
+#   "outside-measured-set" shape, applied only because cam5 is ALSO out of CAMERA_ACTIVE_SET
+#   (scripts/camera-set.sh) as of this same commit. RE-ENABLE: verify `capture chroma` reads
+#   `-> colour` after the splitter cable/port is fixed, then add "cam5" back to
+#   CAMERA_ACTIVE_SET (and the CAMERA_ALIGN_SET loop) AND delete this ack line -- nothing else.
+# cam4 + cam5: RESTORED 2026-08-30 (issue 1216 completion, owner directive verbatim: "kamery od
+#   1-7 bezia" -- cameras 1 through 7 are running). The owner physically reseated cables on the
+#   rig; a live check (2026-08-30 ~12:30 CEST) confirms both re-entry conditions are met:
+#     cam4: svc active, 60.0 fps captured, capture chroma "u_dev=6.4 v_dev=7.5 rough=2.9 ->
+#           colour" -- the box captures a real colour image steadily; the #947 capture-leg wedge
+#           symptom (uvcvideo -71 bursts) is a separate concern that would need its own fresh
+#           episode to justify re-retiring.
+#     cam5: svc active, capture chroma "u_dev=5.8 v_dev=7.8 rough=7.8 -> colour" -- clears the
+#           ~7 healthy-baseline bar (the DEAD_PORT signature that retired it on issue 1217 was
+#           rough=0.1, a flat static frame; 7.8 is squarely in the 7.1-8.0 healthy range).
+#   Both ack lines above are REMOVED per this file's own contract ("remove the line the moment
+#   the box is back in the fleet") -- a lingering ack on a healthy, in-set box trips the
+#   stale-ack guard (`healthy + acked -> stale`, #758/#827). This is, for the first time, the
+#   FULL seven-camera fleet: cam1/cam2/cam3/cam4/cam5/cam6/cam7 all active, zero acks outstanding.

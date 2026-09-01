@@ -14,14 +14,15 @@
 #   cam7 -> 10.77.9.67 / "CAM7 (usb)"   (#753 — real box built + provisioned 2026-07-14,
 #                                        fleet growing 6->7, Elgato 4K S grabber)
 #
-# #827 (2026-07-27) — cam5/cam6/cam7 RETIRED from the ACTIVE fleet: their USB grabber cards
-# were returned to their owner and those boxes are powered off. Per BINDING owner directive
-# (2026-07-27, posted on #827): the retirement MUST be trivially REVERSIBLE — "dufam ze to
+# #827 (2026-07-27) — cam5/cam6/cam7 were RETIRED from the ACTIVE fleet: their USB grabber cards
+# were returned to their owner and those boxes were powered off. Per BINDING owner directive
+# (2026-07-27, posted on #827): the retirement had to be trivially REVERSIBLE — "dufam ze to
 # odobratie cam5 az cam7 urobis tak aby ked zasa budu k dispozicii si to vedel znova lahko
 # povolit" (when those boxes come back, re-enabling them must be a one-line change, never
 # archaeology through a deleted diff). So EVERY per-camera fact for cam5/cam6/cam7 (IP, NDI
-# source name, genlock fps, strih scene/NDI-input route) stays intact below, fully resolvable —
-# retirement is expressed ONLY as membership in `CAMERA_ACTIVE_SET`, never as a deleted case arm.
+# source name, genlock fps, strih scene/NDI-input route) stayed intact below, fully resolvable —
+# retirement was expressed ONLY as membership in `CAMERA_ACTIVE_SET`, never as a deleted case arm.
+# This history is HISTORICAL now — see issue 1216 below, which is exactly that promised reversal.
 #
 # #898 (2026-07-31) — cam3 ALSO RETIRED from the ACTIVE fleet, same mechanism: its USB grabber
 # card was physically DESTROYED (a 12V USB-C brick put 12V on VBUS during the #728/#688 power
@@ -38,8 +39,9 @@
 # enumeration of "which cams exist right now".
 #
 # **RE-ENABLE PROCEDURE (the whole point of this design):** a retired camera (e.g. cam3, once a
-# replacement grabber card is fitted, or cam5) coming back online is re-activated by adding its
-# name back to CAMERA_ACTIVE_SET below (or overriding the env var for a one-off run:
+# replacement grabber card is fitted, or cam4 once its capture-leg wedge is resolved) coming back
+# online is re-activated by adding its name back to CAMERA_ACTIVE_SET below (or overriding the
+# env var for a one-off run:
 # `CAMERA_ACTIVE_SET="cam1 cam2 cam3 cam4" ...`). Nothing else needs to change —
 # camera_resolve/camera_strih_route already know it fully, and every consumer that derives from
 # CAMERA_ACTIVE_SET (or camera_active_secondary_set below) picks it up automatically on its next
@@ -105,22 +107,116 @@
 # RE-ENABLE (once the card is swapped): add "cam2" back to CAMERA_ACTIVE_SET — every camera-under-test
 # facet (deploy, leg-health, sweep, verdict, and CAMERA_ALIGN_SET membership via camera_is_active)
 # flows back automatically, one line, no other edit (see tests/harness_cam2_camera_under_test_gating_1170.rs).
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam3}"
+#
+# cam1 + cam2 RESTORED 2026-08-27 (issue 1198, owner ruling — SUPERSEDES both retirement
+# diagnoses above): the owner refused the physical card swap outright — verbatim "tie dve karty su
+# vpohode nebudem ich menit za ine lebo su uplne funkcne" ("those two cards are fine, I will not
+# replace them, they are fully functional") — and a live read-only journal check on ALL FOUR cam
+# boxes (2026-08-27 14:59 UTC, production running) confirmed it:
+#   cam1  60.0 fps emitted / 61.4 fps captured (4 capture-dropped/5s, 1 corrupted)  colour
+#   cam2  60.2 fps emitted / 60.0 fps captured (0 capture-dropped/5s, 1 corrupted)  colour
+#   cam3  60.0 fps emitted / 60.0 fps captured (2 capture-dropped/5s, 0 corrupted)  colour
+#   cam4  60.0 fps emitted / 60.0 fps captured (0 capture-dropped/5s, 4 corrupted)  colour
+# with NO STUCK / self-heal / LATCH marker on any box in the ~400 preceding journal lines. Both
+# "hardware-defective" diagnoses above were built from EPISODES (cam1's issue 1110 chronic
+# over-rate window, cam2's issue 1193 cure-decay collapse to ~7min), never a permanent card
+# state — today's steady health falsifies "systematically dying model, 2 of 2" outright.
+#
+# The historical episodes (issue 1110 cam1 ingest churn, issue 1193 cam2 over-rate self-heal,
+# issue 1200 cam3 latch-halving) stay REAL and are not explained away — their root cause is now
+# tracked as OUTSIDE the capture card itself (USB port/hub, cable, power, the HDMI splitter port,
+# kernel/uvcvideo, or thermal), never the model of card. That investigation continues on issue
+# 1198 from a full green E2E run's own verdict + live journals, not from a further edit here.
+#
+# cam5 + cam6 + cam7 RESTORED 2026-08-28 (issue 1216, owner request — "pridal som ti cam 5 6 7 uz
+# mame vacsi spliter cize ich updatni a zarad ich do developmentu"): a bigger splitter is fitted
+# and cam5/cam6/cam7 are physically wired back in, exactly the reversal the #827 retirement
+# above always promised. Supervisor-verified live (2026-08-28 ~11:00 CEST) BEFORE this membership
+# flip: all three boxes updated dev.362 -> dev.569, dantesync 1.8.20 -> 1.8.52 with
+# phase_slew_enabled:true (systemd-timesyncd masked), capture steady 59.9-60.1 fps on all three
+# (cam5 grayscale -- a SEPARATE ticket, unrelated to membership), strih OBS carries `NDI
+# cam5/cam6/cam7` inputs + `Cam 5/6/7` scenes already (live GetInputList/GetSceneList read), and
+# cam7's burn-id integration (911012) was already complete from its original #753 build-out. So
+# the ONLY missing piece was exactly this membership line -- nothing else needed to change,
+# proving the #827 design held. cam4 alone stays out (issue 947, its own unrelated capture-leg
+# wedge) -- see tests/harness_camera_set.rs's
+# `camera_active_set_default_is_exactly_cam1_cam2_cam3_cam5_cam6_cam7_1216` and
+# tests/harness_qr_align_step_1003.rs's `align_set_extends_to_cam5_cam6_cam7_when_active_1216`
+# for the round-trip proof.
+#
+# cam5 OUT AGAIN 2026-08-28 (issue 1217, same day as its own #1216 restoration) — a DEAD_PORT
+# leg, not a card fault: post-deploy, cam5's capture chroma reads a flat static frame
+# (`rough=0.1`, healthy baseline 7.1-8.0) while cam6/cam7 on the SAME new splitter read colour
+# (`rough=8.7-9.5`/`8.8`) in the same minute — the exact proven-good-sibling DEAD_PORT signature
+# from `.claude/rules/splitter-port-health-watchdog.md`. Live E2E run 33163294977's [1/8]
+# frozen-camera-gate FAILED on NDI cam5 (identical pixel hash across both 3.5s samples) while
+# every other camera changed, so leaving it active blocks the WHOLE fleet's E2E gate on one dead
+# leg. The box itself is healthy (60.0 fps captured, card registers clean) and reachable, so a
+# rig-fleet.txt ack alone would trip the stale-ack guard (`healthy + acked -> stale`) — the
+# correct shape is the cam4 precedent again: membership-only removal from BOTH
+# CAMERA_ACTIVE_SET and the CAMERA_ALIGN_SET derivation below (cam6/cam7 stay in both), plus an
+# ack line documenting "healthy box, outside the measured set" (rig-fleet.txt). cam5's facts
+# (IP, NDI source, genlock fps, strih route) stay fully resolvable below — retirement is
+# membership-only, exactly like every camera before it.
+# RE-ENABLE (once the splitter cable/port is fixed): verify `capture chroma` on cam5 reads
+# `-> colour` (rough >= ~7), then add "cam5" back to CAMERA_ACTIVE_SET (and the
+# CAMERA_ALIGN_SET loop below) AND delete cam5's rig-fleet.txt ack line — nothing else.
+# cam4 + cam5 RESTORED 2026-08-30 (issue 1216 completion, owner directive verbatim: "kamery od
+# 1-7 bezia" -- cameras 1 through 7 are running): the owner physically reseated cables on the
+# rig, and a live check (2026-08-30 ~12:30 CEST) confirms BOTH re-entry conditions this umbrella
+# ticket was waiting on are now met:
+#   cam4: svc active, 60.0 fps captured, capture chroma "u_dev=6.4 v_dev=7.5 rough=2.9 -> colour"
+#         -- its own #947 capture-leg wedge (uvcvideo -71 bursts within minutes of every start)
+#         is a SEPARATE symptom from the frame content itself; the box now captures a real colour
+#         image steadily, so the membership-only exclusion is no longer warranted. If the #947
+#         wedge symptom reproduces again, that is tracked as its own fresh episode, not a reason
+#         to keep this membership exclusion standing on stale evidence.
+#   cam5: svc active, capture chroma "u_dev=5.8 v_dev=7.8 rough=7.8 -> colour" -- clears the
+#         ~7 healthy-baseline bar from `.claude/rules/splitter-port-health-watchdog.md` (the
+#         DEAD_PORT signature that retired it on issue 1217 was rough=0.1, a flat static frame;
+#         7.8 is squarely in the same 7.1-8.0 range cam6/cam7 read healthy at).
+# cam2 was ALSO rebooted and confirmed healthy after the same cable reseat (already active, no
+# membership change needed for it). Per the RE-ENABLE procedures both cameras' own retirement
+# comments above promised: add both names back to CAMERA_ACTIVE_SET, add cam5 back to the
+# CAMERA_ALIGN_SET derivation loop below (cam4's align membership was already unconditional --
+# see the `_align_out="cam3 cam4"` base below, untouched by this change), and delete both
+# `rig-fleet.txt` ack lines (`cam4:on-air-but-outside-measured-set-2026-08-07` and
+# `cam5:healthy-box-dead-splitter-leg-2026-08-28`) -- nothing else. This is, for the first time,
+# the FULL seven-camera fleet active simultaneously.
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 
 # CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
-# aligned. It is a SUPERSET of the MEASURED set: cam4 stays here (on-air but its capture leg wedges,
-# #947, so it is excluded from CAMERA_ACTIVE_SET yet MUST still be aligned — the owner's rework
-# mandate, issue 1003, 2026-08-20; the offline-ack "outside-measured-set" covers only E2E
-# measurement, never production alignment), and cam3 (the source) is the measured base. cam2's
-# membership, by contrast, DERIVES from CAMERA_ACTIVE_SET (issue 1170): cam2 is aligned ONLY while it
-# is a measured camera. cam2's capture leg is retired until the card swap (issue 1170/1198), so it is
-# NOT aligned now — re-adding "cam2" to CAMERA_ACTIVE_SET above restores its alignment automatically
-# (one line — the whole point). cam1 is out of both sets (issue 1110, dead grabber can't go on-air).
-# The default resolves to "cam3 cam4" (cam2 out) or "cam2 cam3 cam4" (cam2 back). Override to match
-# the on-air reality if the fleet changes (e.g. a cam5 goes on-air): CAMERA_ALIGN_SET="cam2 cam3 cam4 cam5".
-# The inline case is a word-exact match on the space-padded set (same #39-injection-safe posture as
-# camera_is_active — it never evals the value); cam3/cam4 are the explicit on-air base.
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(case " $CAMERA_ACTIVE_SET " in *" cam2 "*) printf 'cam2 cam3 cam4' ;; *) printf 'cam3 cam4' ;; esac)}"
+# aligned. It is a SUPERSET of the MEASURED set: cam4 stays here UNCONDITIONALLY (the explicit
+# `_align_out="cam3 cam4"` base below, untouched regardless of cam4's own CAMERA_ACTIVE_SET
+# membership — the owner's rework mandate, issue 1003, 2026-08-20; the offline-ack
+# "outside-measured-set" covers only E2E measurement, never production alignment), and cam3 is
+# always included as the explicit on-air base. cam1's membership DERIVES from CAMERA_ACTIVE_SET
+# (issue 1170 introduced the derivation for cam2; issue 1198, 2026-08-27, generalized it to cam1;
+# issue 1216, 2026-08-28, then removed cam2 from the derivation OUTRIGHT — see the probe-path
+# comment right above the derivation line). issue 1216 (2026-08-28) extended the SAME derivation
+# to cam5/cam6/cam7 — a trailing loop, each appended only when it is a word in
+# CAMERA_ACTIVE_SET, so the resolved order stays cam1..cam7. issue 1217 (same day) DROPPED cam5
+# out of that trailing loop (its leg was a DEAD_PORT at the time, delivering no real content) —
+# and cam4+cam5 RESTORED 2026-08-30 (issue 1216 completion) puts cam5 BACK into the trailing loop:
+# its leg now reads colour (see the CAMERA_ACTIVE_SET header comment above), so aligning it is
+# worthwhile again, exactly the RE-ENABLE procedure cam5's own retirement comment always promised
+# ("add cam5 back to CAMERA_ACTIVE_SET AND the CAMERA_ALIGN_SET loop below"). cam1/cam5/cam6/cam7
+# ALL derive from CAMERA_ACTIVE_SET now — none is hardcoded true; shrinking the active set drops
+# each of them from the align set again, one line, no other edit. With today's default (the full
+# seven-camera fleet active) the resolved set is "cam1 cam3 cam4 cam5 cam6 cam7" — every
+# alignable on-air camera (cam2 = the projection probe whose view is structurally behind the
+# splitter family, deliberately excluded below regardless of its own active-set membership).
+# Override to match the on-air reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam3 cam4".
+# The inline case matches are word-exact on the space-padded set (same #39-injection-safe posture
+# as camera_is_active — it never evals the value); cam3/cam4 are the explicit always-on-air base.
+# cam2 NEVER derives into the align set (issue 1216/1152 rig-model correction, 2026-08-28):
+# cam2 is the PROJECTION PROBE -- its grabber captures imag-nb's HDMI output, so its view of the
+# painter QR arrives through painter -> cam1 camera -> strih -> imag -> HDMI -> grabber,
+# structurally ~8 painter ids (~130 ms) behind the direct splitter family. The floor-3 MUTUAL
+# align cannot equalize it by design, and its bimodal decode (twice-rescaled optical image)
+# flips the measured spread, failing the stability criterion (run 33166543288 [4i/8align]).
+# Its CAMERA_ACTIVE_SET membership (E2E leg, burn 911009, probe role) is untouched.
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam5 cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

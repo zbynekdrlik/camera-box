@@ -100,34 +100,99 @@ fn qr_align_step_is_gated_and_skips_under_measurement_eq() {
 }
 
 #[test]
-fn align_set_is_a_superset_including_cam4_and_cam2_derives_from_active_1170() {
+fn align_set_is_a_superset_including_cam4_and_cam1_cam2_derive_from_active_1198() {
     // The owner mandate: cam4 is on-air, so it MUST be aligned even though it is excluded from the
-    // measurable E2E sweep (CAMERA_ACTIVE_SET). CAMERA_ALIGN_SET stays a superset of the measured
-    // set. issue 1170 (2026-08-24): cam2's align membership now DERIVES from CAMERA_ACTIVE_SET —
-    // aligned only while it is a measured camera. Default (cam2 out): "cam3 cam4"; re-adding cam2 to
-    // CAMERA_ACTIVE_SET restores it in the align set automatically (one-line reversal).
+    // measurable E2E sweep (CAMERA_ACTIVE_SET). issue 1170 (2026-08-24) introduced cam2's align
+    // membership DERIVING from CAMERA_ACTIVE_SET; issue 1198 (2026-08-27) generalized the
+    // derivation to cam1. issue 1216 (2026-08-28) then removed cam2 from the derivation OUTRIGHT
+    // (projection probe -- see the block comment below), so the align set is a superset of the
+    // ALIGNABLE on-air cameras, deliberately excluding the probe.
     let default_align = resolved_align_set(None);
     assert!(
         align_has_word(&default_align, "cam3") && align_has_word(&default_align, "cam4"),
         "#1003: the default align set must include cam3 (source) + cam4 (on-air, #947): got [{default_align}]"
     );
     assert!(
-        !align_has_word(&default_align, "cam2"),
-        "issue 1170: cam2 must be OUT of the default align set (capture leg retired): got [{default_align}]"
+        align_has_word(&default_align, "cam1"),
+        "issue 1198: cam1 must be IN the default align set (card restored healthy 2026-08-27): \
+         got [{default_align}]"
     );
+    // issue 1216/1152 rig-model correction (2026-08-28, run 33166543288 [4i/8align] evidence):
+    // cam2 is the PROJECTION PROBE -- its grabber captures imag-nb's HDMI OUTPUT, so its view of
+    // the painter QR arrives through painter -> cam1 camera -> strih -> imag -> HDMI -> grabber,
+    // structurally 7-9 painter ids (~120-150 ms) behind the direct splitter family. The floor-3
+    // MUTUAL align cannot equalize it by design, and its bimodal decode (4/17, twice-rescaled
+    // optical image) flips the measured spread 2-3 <-> 6-9 ids, failing the stability criterion.
+    // cam2 therefore NEVER derives into the align set, even while in CAMERA_ACTIVE_SET (its E2E
+    // leg + probe role are untouched).
     assert!(
-        !align_has_word(&default_align, "cam1"),
-        "#1110: cam1 (dead grabber, can't go on-air) must be out of the align set: got [{default_align}]"
+        !align_has_word(&default_align, "cam2"),
+        "issue 1216: cam2 (projection probe) must NOT be in the default align set -- its view is \
+         structurally ~8 painter frames behind the splitter family: got [{default_align}]"
+    );
+    let without_either = resolved_align_set(Some("cam3"));
+    assert!(
+        !align_has_word(&without_either, "cam1") && !align_has_word(&without_either, "cam2"),
+        "issue 1198 reversal check: shrinking CAMERA_ACTIVE_SET back to cam3-alone must drop \
+         cam1 from the align set again (derived, not hardcoded): got [{without_either}]"
     );
     let with_cam2 = resolved_align_set(Some("cam2 cam3"));
     assert!(
-        align_has_word(&with_cam2, "cam2"),
-        "issue 1170 reversal: cam2 back in CAMERA_ACTIVE_SET must flow into the align set: got [{with_cam2}]"
+        !align_has_word(&with_cam2, "cam2"),
+        "issue 1216: cam2 in CAMERA_ACTIVE_SET must STILL not flow into the align set (probe \
+         path, not an alignable view): got [{with_cam2}]"
     );
     let cs = read("scripts/camera-set.sh");
     assert!(
         cs.contains("camera_align_ndi_sources_csv"),
         "camera-set.sh must provide camera_align_ndi_sources_csv (never a literal cam range)."
+    );
+}
+
+#[test]
+fn align_set_extends_to_cam5_cam6_cam7_when_active_1216_completion() {
+    // issue 1216 (2026-08-28): the bigger splitter puts cam5/cam6/cam7 back in the default
+    // CAMERA_ACTIVE_SET -- CAMERA_ALIGN_SET's derivation widened with it, appended after the
+    // cam1..cam4 base. issue 1217 (same day): cam5's leg turns out to be a DEAD_PORT (flat
+    // static frame) -- it is dropped from CAMERA_ACTIVE_SET again, AND from the ALIGN_SET
+    // derivation loop itself. issue 1216 completion (2026-08-30, owner directive "kamery od 1-7
+    // bezia" after a physical cable reseat): cam5's leg now reads colour again (rough=7.8,
+    // clearing the ~7 healthy-baseline bar) -- it REJOINS CAMERA_ACTIVE_SET *and* the
+    // CAMERA_ALIGN_SET trailing loop, exactly the RE-ENABLE procedure its own retirement comment
+    // always promised. cam1/cam5/cam6/cam7 now ALL derive their align membership from
+    // CAMERA_ACTIVE_SET -- none is hardcoded true.
+    let default_align = resolved_align_set(None);
+    for cam in ["cam5", "cam6", "cam7"] {
+        assert!(
+            align_has_word(&default_align, cam),
+            "issue 1216 completion: {cam} must be in the default CAMERA_ALIGN_SET: \
+             got [{default_align}]"
+        );
+    }
+    // Shrinking CAMERA_ACTIVE_SET back to a set without them must drop cam5/cam6/cam7 from the
+    // align set too, derived not hardcoded.
+    let without_them = resolved_align_set(Some("cam1 cam2 cam3"));
+    for cam in ["cam5", "cam6", "cam7"] {
+        assert!(
+            !align_has_word(&without_them, cam),
+            "issue 1216 reversal check: shrinking CAMERA_ACTIVE_SET must drop {cam} from the \
+             align set again: got [{without_them}]"
+        );
+    }
+    // Re-adding cam5 to CAMERA_ACTIVE_SET alone (a shrunk-then-regrown override) DOES bring it
+    // back into the align set now -- issue 1216 completion re-derives it, unlike the temporary
+    // issue-1217 un-derive this test used to pin.
+    let with_cam5_reactivated = resolved_align_set(Some("cam1 cam2 cam3 cam4 cam5 cam6 cam7"));
+    assert!(
+        align_has_word(&with_cam5_reactivated, "cam5"),
+        "issue 1216 completion: re-adding cam5 to CAMERA_ACTIVE_SET must re-align it (the align \
+         loop derives cam5's membership again): got [{with_cam5_reactivated}]"
+    );
+    // cam4 stays the on-air-but-unmeasured base regardless (issue 1003) -- unaffected by any of
+    // the cam5/cam6/cam7 changes.
+    assert!(
+        align_has_word(&default_align, "cam4"),
+        "cam4 must remain in the align set (on-air, #947): got [{default_align}]"
     );
 }
 

@@ -73,6 +73,17 @@ RECORD_LIVENESS_POLL_S = float(os.environ.get("OBS_RECORD_LIVENESS_POLL_S", "2")
 # appear; an output still at 0 bytes after the whole budget is genuinely dead (#627) and aborts.
 RECORD_LIVENESS_BYTES_GRACE_S = float(os.environ.get("OBS_RECORD_LIVENESS_BYTES_GRACE_S", "8"))
 
+# #1180: RECEIVER-liveness sampling window (the LIVENESS term the 2026-08-27 strih NIC-swap
+# aftermath proved was missing from the post-connect verify). A receiver can hold a FROZEN frame
+# with a CORRECT ndi_source_name (the issue-1158 wedged-thread class), so a name-only read-back
+# reports a false HEALED. sample_receiver_liveness takes N GetSourceScreenshot reads spaced by
+# POLL_S over the SAME WS the heal already uses and classifies them (a live NDI feed is never
+# byte-identical across the window; a wedged receiver holding one frame is). Defaults: 3 shots x
+# 2s ~= a 4s window -- 3 all-identical shots is a strong FROZEN signal (the incident held one frame
+# for 45s / 14 rounds). Env-overridable, mirroring RECORD_LIVENESS_* above.
+RECEIVER_LIVENESS_SAMPLES = int(os.environ.get("OBS_RECEIVER_LIVENESS_SAMPLES", "3"))
+RECEIVER_LIVENESS_POLL_S = float(os.environ.get("OBS_RECEIVER_LIVENESS_POLL_S", "2"))
+
 # #63/#149: the probe ndi_source MUST be configured EXACTLY like the live, certified, proven-
 # working genlock camera inputs (NDI cam1/3/5 on strih) so the harness measures the SAME config
 # that ships in production — never a divergent one. _LOCKED_BASELINE_KEYS below are asserted to
@@ -349,6 +360,31 @@ def _measurement_pins_module():
         sys.path.insert(0, here)
     import e2e_measurement_pins  # noqa: E402
     return e2e_measurement_pins
+
+
+def _imag_scenes_module():
+    """issue 1152 M4 follow-up: lazy import of scripts/imag_scenes.py -- SAME lazy + own
+    sys.path insert pattern as _measurement_pins_module() above, so obs_phase2's module-level
+    import graph stays unchanged (tests load obs_phase2 via importlib without scripts/ on
+    sys.path, #358)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import imag_scenes  # noqa: E402
+    return imag_scenes
+
+
+def _drm_lease_connector_for_host(host):
+    """issue 1152 M4 follow-up: the connector name IFF the box's ~/.camera-box/drm-output.json
+    arms the in-OBS DRM-lease HDMI output, else "". Reuses imag_scenes' OWN classifier pair
+    (drm_output_lease_connector / _drm_output_config_text) -- the ONE decision grammar every
+    other lease-aware caller (imag-obs-start.sh's wrapper, imag_scenes.py::projector()) already
+    consults (.claude/rules/obs-drm-output.md), rather than a second, divergent config reader.
+    Any read failure resolves to "" (dormant) -- _drm_output_config_text's own contract never
+    raises, so this preflight step degrades to the pre-#1152 dormant-state assumptions on a
+    transient ssh/read hiccup rather than crashing the gate."""
+    imag_scenes = _imag_scenes_module()
+    return imag_scenes.drm_output_lease_connector(imag_scenes._drm_output_config_text(host))
 
 
 def _latency_delivery_ok(set_ms: int, delivered_ms: int, tolerance_ms: int = 100) -> bool:
@@ -1294,6 +1330,79 @@ def reenforce_ndi_name(ws, input_name, desired_name):
     return REENFORCE_HEALED if back == desired_name else REENFORCE_VERIFY_FAILED
 
 
+# camera-box #1180: the RECEIVER-LIVENESS term. reenforce_ndi_name above (and set-ndi-mapping's
+# --heal, which SKIPS a correct-name input entirely) verify only that the ndi_source_name STRING is
+# right -- they cannot tell a healthy receiver from a wedged thread holding a FROZEN frame under the
+# correct name. That wedge (an issue-1158 permanent receiver death: a `break` never clears
+# s->running, so ndi_source_update can't revive it) is exactly the 2026-08-27 strih NIC-swap
+# aftermath: cam1 held painter frame_id=2912368 for 45s, never appeared in `recv-timing #797`, yet
+# ndi_source_name was `CAM1 (usb)` the whole time -- and --heal + an idle-receiver->restore both
+# "succeeded" while it stayed dead; only an OBS restart cured it. So the post-connect verify needs a
+# LIVENESS term: proof frames are ADVANCING, not that the settings string is right. The signal is a
+# WS screenshot-diff over the SAME connection the heal already uses (the C++ #1180 fix owns the
+# separate IDENTITY/wrong-source half; this owns the correct-name-no-frames half).
+LIVENESS_LIVE = "live"                    # >=2 usable screenshots and at least two differ -> frames advancing
+LIVENESS_FROZEN = "frozen"               # >=2 usable screenshots and ALL byte-identical -> a held frame (wedge)
+LIVENESS_INCONCLUSIVE = "inconclusive"   # <2 usable screenshots -> can't tell (never a false FROZEN)
+
+
+def classify_receiver_liveness(samples):
+    """#1180 PURE decision: given the SEQUENCE of GetSourceScreenshot imageData samples taken over a
+    short window on ONE receiver input, decide LIVE / FROZEN / INCONCLUSIVE. A sample is the raw
+    imageData string (base64 PNG data URI) OBS returned, or None for a failed/empty shot.
+
+    Only the USABLE (non-None) samples are compared, so a transient failed shot in the middle never
+    upgrades a genuine frozen signal to LIVE nor downgrades a live one to FROZEN:
+      - fewer than 2 usable samples -> INCONCLUSIVE. Can't prove frozen from <2 frames, and never a
+        false FROZEN on a can't-confirm (mirrors the C++ #1180 both-URLs-known-and-differ-only rule
+        and the #767/READ_FAIL "absence of evidence is not evidence" discipline).
+      - >= 2 usable, ALL byte-identical -> FROZEN. A live NDI feed is never byte-identical across a
+        multi-second window (sensor noise / the moving painter QR); a wedged receiver presenting one
+        held frame renders byte-identical every shot -- exactly the incident's signal.
+      - >= 2 usable with any two differing -> LIVE. Frames are advancing.
+
+    Returns (state, reason) -- reason is empty when LIVE, else it explains for the caller's log."""
+    usable = [s for s in samples if s]
+    if len(usable) < 2:
+        return LIVENESS_INCONCLUSIVE, (
+            f"only {len(usable)} usable screenshot(s) of {len(samples)} taken -- cannot confirm "
+            f"frame delivery (WS/screenshot failures or too few samples)"
+        )
+    if len(set(usable)) == 1:
+        return LIVENESS_FROZEN, (
+            f"all {len(usable)} screenshots over the window were byte-identical -- the receiver is "
+            f"presenting a single held frame (no new frames arriving)"
+        )
+    return LIVENESS_LIVE, ""
+
+
+def sample_receiver_liveness(ws, input_name, samples=None, interval_s=None,
+                             width=320, height=180, sleep=time.sleep):
+    """#1180 IMPURE: take `samples` GetSourceScreenshot reads of `input_name` spaced by `interval_s`
+    (both default to the RECEIVER_LIVENESS_* module constants) and return
+    classify_receiver_liveness over their imageData. Best-effort at the SCREENSHOT level: a
+    failed/empty screenshot (an OBS request error suppressed by ignore_err, or a missing imageData)
+    contributes a None sample rather than raising, mirroring reenforce_ndi_name's ignore_err
+    discipline; a window that cannot produce >=2 usable samples classifies INCONCLUSIVE. A
+    TRANSPORT-level failure still propagates -- ignore_err does NOT suppress _rpc's own TimeoutError
+    on a hung request, nor a dead-socket send/recv -- so a caller must not assume this never raises;
+    the CLI (_run_verify_live_mode) catches those and maps them to exit 2. `sleep` is injectable so
+    the poll cadence is Tier-0-testable with no real wait."""
+    n = RECEIVER_LIVENESS_SAMPLES if samples is None else samples
+    iv = RECEIVER_LIVENESS_POLL_S if interval_s is None else interval_s
+    shots = []
+    for i in range(n):
+        if i:
+            sleep(iv)
+        res = _rpc(ws, "GetSourceScreenshot",
+                   {"sourceName": input_name, "imageFormat": "png",
+                    "imageWidth": width, "imageHeight": height},
+                   ignore_err=True)
+        data = res.get("imageData") if isinstance(res, dict) else None
+        shots.append(data or None)
+    return classify_receiver_liveness(shots)
+
+
 def _match_full(vals, bare):
     """Map a bare NDI name to its full 'MACHINE (name)' form from `vals`; returns
     `bare` unchanged if it is already full or no candidate matches."""
@@ -2146,7 +2255,9 @@ def switch(a):
             a.program_scene,
             "#312 switch",
             "The cambox feeding it is not delivering frames; aborting the sweep so a black segment "
-            "never wastes the run.",
+            "never wastes the run. (#1223: a dark screen here can ALSO mean the cam2 painter/monitor "
+            "itself already went dark/expired -- check /tmp/painter.log on the painter box before "
+            "assuming the cambox is the culprit.)",
         )
     finally:
         ws.close()
@@ -2402,12 +2513,15 @@ def open_projectors(a):
     eDP-1/HDMI-1 instead of DP-0/HDMI-0, and a box that ever enumerates HDMI as index 0 would have
     silently sent Program to the panel and Multiview to the projector. Mirrors
     imag_scenes.py::projector()'s existing, already-correct selection rule (#522/#488) — the two
-    scripts have no shared module today (a separate #791-class scaffolding gap, out of THIS
-    ticket's scope), so the small selection logic is duplicated here rather than imported. Unlike
-    imag_scenes.py::projector() (an operator-convenience script that only WARNs on a missing
-    panel), this function is a preflight/verify GATE (recording-e2e.sh's `[0/8]`,
-    verify-imag.sh) — it FAILS LOUD (raises) when EITHER expected connector is absent, never
-    silently continues.
+    scripts had no shared module for THIS selection logic when #840 landed (a separate
+    #791-class scaffolding gap), so it stays duplicated here rather than imported; issue 1152 M4
+    follow-up DOES now share a module for the lease-config classifier specifically (see
+    _drm_lease_connector_for_host below), a narrower, later fix, not a retroactive #791 close.
+    Unlike imag_scenes.py::projector() (an operator-convenience script that only WARNs on a
+    missing panel), this function is a preflight/verify GATE called by recording-e2e.sh's
+    `[0/8]` — NOT by verify-imag.sh, which has its OWN separate wmctrl-based projector-COUNT
+    check (check (o) in scripts/verify-imag.sh) rather than calling this action — it FAILS LOUD
+    (raises) when EITHER expected connector is absent, never silently continues.
 
     #882: a failure to even establish the WebSocket session (OBS process not accepting the
     handshake, wrong password, connection dropped mid-negotiation) is caught HERE and re-raised
@@ -2419,7 +2533,19 @@ def open_projectors(a):
     all" — recording-e2e.sh's own preflight now probes process/port liveness separately
     (scripts/lib/imag-obs-reachability.sh) BEFORE calling this, so by the time this raises, the
     remaining real causes are exactly: handshake/auth (this branch) or no matching monitor
-    (below)."""
+    (below).
+
+    issue 1152 M4 follow-up: with the in-OBS DRM-lease HDMI output ENABLED
+    (~/.camera-box/drm-output.json) the connector is leased OUT of the X layout by design --
+    GetMonitorList then genuinely reports no HDMI monitor, and none is wanted (the Program is
+    drawn by the DRM scanout, not an X window). Before opening the Program projector, this
+    function consults the box's OWN lease config (_drm_lease_connector_for_host -- the SAME
+    classifier imag_scenes.py::projector() already uses, per .claude/rules/obs-drm-output.md).
+    Lease enabled + no HDMI monitor -- open ONLY Multiview and return (the healthy lease state).
+    Lease enabled + an HDMI monitor STILL reported -- raise loud: the connector never actually
+    left the X layout (the wrapper's xrandr --off step failed, or a stale config), which is a
+    genuinely inconsistent state this preflight GATE must never silently pass. Lease dormant --
+    byte-identical to the pre-#1152 behaviour below, unconditionally."""
     try:
         ws = _conn(a.host, a.password)
     except Exception as e:
@@ -2442,6 +2568,26 @@ def open_projectors(a):
         })
         print(f"opened/confirmed Multiview projector on monitorIndex {panel[0]['monitorIndex']} "
               f"({panel[0].get('monitorName')}) [panel]")
+
+        # issue 1152 M4 follow-up: DRM-lease mode -- the Program is drawn by the vendored OBS
+        # DRM scanout directly on the leased connector, never an X window, so no HDMI X monitor
+        # is expected OR wanted. See the docstring above for the full contract.
+        lease_connector = _drm_lease_connector_for_host(a.host)
+        if lease_connector:
+            if hdmi:
+                raise RuntimeError(
+                    f"drm-output.json enables the DRM lease on '{lease_connector}' but "
+                    f"GetMonitorList still reports an HDMI X monitor "
+                    f"({[m.get('monitorName') for m in hdmi]}) -- the connector was never "
+                    "actually taken out of the X layout (the wrapper's xrandr --off step "
+                    "failed or never ran, or the config is stale) -- this is NOT the healthy "
+                    "lease state and NOT the dormant 1+1 state either -- fix the box before "
+                    "continuing"
+                )
+            print(f"drm-output lease ENABLED for connector '{lease_connector}' -- Program is "
+                  "served by the DRM-leased HDMI scanout, not an X projector window -- "
+                  "skipping the X Program projector open (opened/confirmed Multiview only)")
+            return
 
         if not hdmi:
             raise RuntimeError(

@@ -169,6 +169,13 @@ static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor,
  * drift-guard all apply the SAME threshold. Clamped to >= 0 (a degenerate target_fps never
  * yields a negative floor).
  *
+ * #1212: the floor is AREA-INDEPENDENT -- the same target - tol at every render area, including
+ * strih's 4K (3840x2160) multiview. The issue-1110 report-only sentinel above 1080p was RETIRED
+ * once the full log history showed strih's 4K MV median rendered_fps is 29.8-30.0 in every window
+ * (max 30.0) -- floor 28 IS achievable at 4K. The bursty single-sample noise that motivated the
+ * sentinel is handled where it belongs, in the gate (src/mv_audit.rs::gate_log judges the median
+ * of the recent window, not one sample), not by un-gating a whole area class.
+ *
  * target_fps = canvas_fps / effective_divisor -- the ~30fps-cell rate the projector actually
  * renders at (both broadcast boxes: strih 30fps canvas / divisor 1, imag 60fps canvas / divisor 2,
  * both -> target 30 -> floor 28). #776: the floor tracks the TARGET, not canvas/2. The pre-#776

@@ -243,7 +243,10 @@ fn projector_count_preflight_fails_loud_on_any_mismatch_never_silently_self_heal
     let idx = s
         .find("projector count must be EXACTLY 1 Multiview + 1 Program")
         .expect("the #756 projector-count preflight step must exist");
-    let block = &s[idx..(idx + 1200).min(s.len())];
+    // Window covers the whole #756 block including the issue-1152 M4 lease-aware case
+    // statement (lease-connector resolve + verdict lib + both fail arms) -- the lease slice
+    // legitimately grew the block past the original 1200 chars, pushing `exit 1` to ~2300.
+    let block = &s[idx..(idx + 3000).min(s.len())];
     assert!(
         block.contains("exit 1"),
         "#756: a projector count other than exactly 1+1 must hard-fail the preflight (exit 1) \

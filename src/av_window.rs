@@ -136,6 +136,49 @@ pub fn pool_camera_av_sync(
 /// a tracked interim, never a silent weakening.
 pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 90.0;
 
+/// #1178 — the fixed video-leg rig offset (ms): the calibrated DEFAULT `expected_ms` the per-camera
+/// A/V gate centres on, so the uniform rig constant no longer eats the whole ±90ms budget.
+///
+/// The measurement chain carries a fixed VIDEO-leg latency the audio path (QPSK marker → Dante →
+/// mbc) does not: cam2 monitor input lag, the BMPCC sensor→HDMI delay, and the USB capture grabber.
+/// The dock being "dialed to 0" nulls the SOURCE A/V, not this measurement-chain leg, so a correctly
+/// aligned rig still MEASURES `av_offset_ms ≈ this constant`, not 0. Gating the raw measured offset
+/// against 0 therefore fails every camera whose leg lands past ±90 (the #1178 body's exact claim).
+///
+/// This is a NAMED, surfaced calibration (`rig_video_leg_offset_ms` in the verdict JSON + the gate
+/// log line), never a silent shift. It is the DEFAULT of `--av-expected-ms`; a mode that PHYSICALLY
+/// compensates the leg (MEASUREMENT_EQ / issue 1003, whose stream-hold rebalance lands the measured
+/// offset at ~0) passes its own explicit `--av-expected-ms 0`, which cleanly REPLACES this default —
+/// so the leg is subtracted by default yet never DOUBLE-counted where it is already physically gone.
+///
+/// ## Calibration — re-derive when the physical video chain changes (grabber / monitor / camera
+/// swap, e.g. the issue-1198 capture-card swap):
+/// take the MEDIAN of the judged per-camera `av_offset_ms` from a full-fleet E2E gate run
+/// (`--av-expected-ms 0`, no physical compensation). Median (not mean) for robustness to a single
+/// per-camera outlier; sub-ms precision is noise (per-camera MAD 5–8ms, cross-camera spread ~18ms).
+/// A non-zero value is legitimate ONLY after such a rig-verified physical video-chain change, cited
+/// with fresh full-fleet verdict evidence — never re-derived from a stale/suspect measurement run.
+///
+/// ## RE-DERIVATION 2026-08-29 (issue 1178) — the −92.0 calibration was STALE, not a real leg.
+/// Verdict 845554984 (run 33176192564) judged offsets cam1 −95.17, cam2 −91.98, cam3 −76.75, cam6
+/// −93.92, cam7 −88.63 → median −92.0, which this constant was briefly calibrated to. That cluster
+/// turned out to be a STALE-PAINTER artifact (the issue-1138 class): the cam2 frame-probe painter
+/// emitting the QPSK marker was an un-pinned, arbitrarily-old build that did not compensate the
+/// marker's own emit delay. The very next full-fleet run AFTER the issue-1138 painter redeploy
+/// (sha f42c66917455) — verdict 576990285 — measured cam1 +2.5, cam2 +7.9, cam3 +24.9, cam6 +9.7,
+/// cam7 +6.7ms: the −92 residual channel correctly flagged this as a +99.9ms median / 22.4ms
+/// spread global shift (proving the report-only residual channel earns its keep — see
+/// [`residual_summary`]). With the marker delay now compensated AT SOURCE there is no fixed
+/// video-leg left to subtract, so the constant returns to 0.0.
+pub const RIG_VIDEO_LEG_OFFSET_MS: f64 = 0.0;
+
+// Compile-time pin (the capture_rate_health.rs `const _` idiom — a runtime assert on a const
+// value trips clippy::assertions_on_constants): the marker delay is compensated at source (issue
+// 1138 painter fix), so no fixed video-leg constant is needed — pinned to 0.0. A rig video-chain
+// change (grabber/monitor/camera swap) is the only reason to re-derive a non-zero value, and it
+// must cite fresh full-fleet verdict evidence, never a stale-painter cluster like 845554984.
+const _: () = assert!(RIG_VIDEO_LEG_OFFSET_MS == 0.0);
+
 /// PASS iff `sync` is [`AvSyncVerdict::Measured`] AND its offset is within
 /// [`AV_OFFSET_GATE_TOLERANCE_MS`] of `expected_ms`. [`AvSyncVerdict::Unknown`] — whether from
 /// zero contributing windows (the camera never appeared in this sweep) or thin/scattered data
@@ -200,6 +243,53 @@ pub fn effective_offset_ms(sync: &CameraAvSync, derived: Option<&DerivedAvSync>)
     match sync.verdict {
         AvSyncVerdict::Measured => sync.av_offset_ms,
         AvSyncVerdict::Unknown => derived.map(|d| d.derived_offset_ms),
+    }
+}
+
+/// #1178 report-only — a camera's RESIDUAL A/V offset: its measured/effective offset with the
+/// expected (calibrated video-leg) removed. ~0 for a correctly aligned camera once the fixed rig
+/// leg is subtracted — the honest per-camera number a dock/report reads. Pure signed convention:
+/// `measured − expected` (the SAME signed delta [`av_offset_gate_pass`] takes the magnitude of).
+pub fn residual_offset_ms(measured_offset_ms: f64, expected_ms: f64) -> f64 {
+    measured_offset_ms - expected_ms
+}
+
+/// #1178 report-only cross-camera residual summary — the diagnostic channel that surfaces whatever
+/// cross-run / cross-camera instability REMAINS after the fixed video-leg is removed (the issue
+/// 952 / issue 1004 residual finding) WITHOUT ever masking a global drift: the BLOCKING gate uses
+/// the FIXED [`RIG_VIDEO_LEG_OFFSET_MS`], never this per-run median, so a whole-fleet shift still
+/// moves every residual and is caught at the gate boundary. `None` when no camera produced a
+/// residual (nothing to summarize) — never a fabricated 0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResidualSummary {
+    pub median_ms: Option<f64>,
+    pub spread_ms: Option<f64>,
+    pub count: usize,
+}
+
+/// PURE (Tier-0): median + full spread (max − min) of the per-camera residuals. Report-only —
+/// never feeds [`av_offset_gate_pass`].
+pub fn residual_summary(residuals_ms: &[f64]) -> ResidualSummary {
+    if residuals_ms.is_empty() {
+        return ResidualSummary {
+            median_ms: None,
+            spread_ms: None,
+            count: 0,
+        };
+    }
+    let mut v: Vec<f64> = residuals_ms.to_vec();
+    v.sort_by(|a, b| a.total_cmp(b));
+    let n = v.len();
+    let median = if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    };
+    let spread = v[n - 1] - v[0];
+    ResidualSummary {
+        median_ms: Some(median),
+        spread_ms: Some(spread),
+        count: n,
     }
 }
 
@@ -836,5 +926,127 @@ mod tests {
         // No measurement AND no derivation (cam2 itself Unknown, or no delivery sample) ⇒ a true
         // null — never fabricated. This is the ONLY case a consumer sees no number.
         assert_eq!(effective_offset_ms(&unknown(), None), None);
+    }
+
+    // -----------------------------------------------------------------
+    // #1178 — fixed video-leg calibration + report-only residual channel
+    // -----------------------------------------------------------------
+
+    /// The STALE-PAINTER cluster from verdict 845554984 (run 33176192564, 2026-08-29): every
+    /// judged camera's measured A/V offset with an un-pinned, uncompensated cam2 frame-probe
+    /// painter (the issue-1138 class). Kept ONLY as a negative fixture: the recalibrated
+    /// RIG_VIDEO_LEG_OFFSET_MS=0.0 must REJECT it (three cameras fall outside ±90) — a stale
+    /// measurement run must never be silently re-accepted as calibration data.
+    const STALE_PAINTER_CLUSTER_845554984: [f64; 5] =
+        [-95.166_666, -91.979_166, -76.75, -93.916_666, -88.625];
+
+    /// The fresh full-fleet cluster from verdict 576990285 — the first complete run AFTER the
+    /// issue-1138 painter redeploy (sha f42c66917455, 2026-08-29): every judged camera's measured
+    /// A/V offset, now delay-compensated at source. All five land comfortably inside ±90 of the
+    /// recalibrated RIG_VIDEO_LEG_OFFSET_MS = 0.0 — no leg subtraction is needed any more.
+    const FRESH_CLUSTER_576990285: [f64; 5] = [2.5, 7.9, 24.9, 9.7, 6.7];
+
+    #[test]
+    fn fresh_cluster_576990285_passes_the_recalibrated_zero_video_leg_1178() {
+        // GREEN: the painter-fix cluster passes the gate against the recalibrated (0.0) leg with
+        // large margin — the video leg is now compensated at the source, not by a calibration
+        // constant.
+        for &off in FRESH_CLUSTER_576990285.iter() {
+            assert!(
+                av_offset_gate_pass(&measured(off), RIG_VIDEO_LEG_OFFSET_MS),
+                "camera at {off}ms must pass vs recalibrated RIG_VIDEO_LEG_OFFSET_MS={RIG_VIDEO_LEG_OFFSET_MS}"
+            );
+        }
+        // REJECTED: the stale-painter cluster (issue 1138 class artifact) must NOT pass any more —
+        // exactly cam1/cam2/cam6 (< -90 from the recalibrated 0.0 leg) fail, documenting that the
+        // stale-painter world is rejected, never silently re-derived into a calibration constant.
+        let fails_now: Vec<f64> = STALE_PAINTER_CLUSTER_845554984
+            .iter()
+            .copied()
+            .filter(|&off| !av_offset_gate_pass(&measured(off), RIG_VIDEO_LEG_OFFSET_MS))
+            .collect();
+        assert_eq!(
+            fails_now.len(),
+            3,
+            "stale-painter cluster: exactly cam1/cam2/cam6 (< -90 from the recalibrated 0.0 leg) must fail, got {fails_now:?}"
+        );
+    }
+
+    // The exact-value pin for RIG_VIDEO_LEG_OFFSET_MS moved to a compile-time
+    // `const _: () = assert!(...)` item beside the const itself (a runtime assert on a const
+    // value trips clippy::assertions_on_constants).
+
+    #[test]
+    fn calibration_still_catches_a_global_drift_never_masks_it_1178() {
+        // A whole-fleet drift PAST the tolerance around the calibrated leg still FAILS — the fixed
+        // constant (not a per-run median) is what preserves global-drift detection.
+        let drifted = RIG_VIDEO_LEG_OFFSET_MS - (AV_OFFSET_GATE_TOLERANCE_MS + 10.0);
+        assert!(
+            !av_offset_gate_pass(&measured(drifted), RIG_VIDEO_LEG_OFFSET_MS),
+            "an offset {drifted}ms (leg − (tol+10)) must still FAIL — calibration must not widen/mask the gate"
+        );
+        // ...and a camera exactly at the leg is a perfect residual-0 PASS.
+        assert!(av_offset_gate_pass(
+            &measured(RIG_VIDEO_LEG_OFFSET_MS),
+            RIG_VIDEO_LEG_OFFSET_MS
+        ));
+    }
+
+    #[test]
+    fn residual_offset_is_measured_minus_expected_1178() {
+        // A camera measured exactly at the calibrated leg has residual 0 — symbolic, so this
+        // stays true across any future re-derivation of RIG_VIDEO_LEG_OFFSET_MS.
+        assert!(
+            (residual_offset_ms(RIG_VIDEO_LEG_OFFSET_MS, RIG_VIDEO_LEG_OFFSET_MS) - 0.0).abs()
+                < 1e-9
+        );
+        assert!((residual_offset_ms(-76.75, -92.0) - 15.25).abs() < 1e-9);
+        assert!((residual_offset_ms(0.0, 0.0) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn residual_summary_reports_median_and_spread_report_only_1178() {
+        assert_eq!(
+            residual_summary(&[]),
+            ResidualSummary {
+                median_ms: None,
+                spread_ms: None,
+                count: 0
+            }
+        );
+        // the fresh cluster's residuals against the recalibrated (0.0) leg — this is the exact
+        // shift the residual channel is meant to catch: it correctly flagged the painter-fix jump
+        // as a +99.9ms median / 22.4ms spread global shift relative to the (then-current) −92
+        // constant; against the recalibrated 0.0 leg the residuals are just the raw measurements.
+        let residuals: Vec<f64> = FRESH_CLUSTER_576990285
+            .iter()
+            .map(|&off| residual_offset_ms(off, RIG_VIDEO_LEG_OFFSET_MS))
+            .collect();
+        let s = residual_summary(&residuals);
+        assert_eq!(s.count, 5);
+        // median residual ~7.9ms (cam2), spread ~22.4ms (cam3 − cam1)
+        assert!(
+            (s.median_ms.unwrap() - 7.9).abs() < 1.0,
+            "median residual ~7.9, got {:?}",
+            s.median_ms
+        );
+        assert!(
+            (s.spread_ms.unwrap() - 22.4).abs() < 0.5,
+            "spread ~22.4ms, got {:?}",
+            s.spread_ms
+        );
+        // even n: median is the average of the two middle values (sorted [-4, 2, 8, 10])
+        let even = residual_summary(&[10.0, -4.0, 2.0, 8.0]);
+        assert_eq!(even.count, 4);
+        assert!(
+            (even.median_ms.unwrap() - 5.0).abs() < 1e-9,
+            "even-n median = (2+8)/2 = 5, got {:?}",
+            even.median_ms
+        );
+        assert!(
+            (even.spread_ms.unwrap() - 14.0).abs() < 1e-9,
+            "even-n spread = 10-(-4) = 14, got {:?}",
+            even.spread_ms
+        );
     }
 }

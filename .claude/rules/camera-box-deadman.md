@@ -2,8 +2,11 @@
 paths:
   - "scripts/lib/camera-box-deadman.sh"
   - "scripts/lib/camera-box-free-device.sh"
+  - "scripts/lib/cam2-painter-deadman.sh"
   - "tests/harness_camera_box_deadman_772.rs"
   - "tests/harness_camera_box_free_device_772.rs"
+  - "tests/harness_recording_e2e_cam2_painter_deadman_872.rs"
+  - "tests/harness_cam2_painter_deadman_run_aware_1246.rs"
 ---
 
 # On-box dead-man for PRODUCTION camera-box.service + the ExecStartPre device-free bake-in (#772)
@@ -71,6 +74,66 @@ Two more review-hardening lessons (adversarial review, 2026-08-17):
 SELF-TERMINATES, guard on its presence (cam2-painter). If the replacement runs FOREVER (a
 Restart=on-failure systemd-run unit), you cannot guard on presence — delay the first fire past the
 run window instead, and never fire during the measurement.**
+
+## The cam2-painter-deadman presence-guard must cover EVERY on-box owner of the measured devices, not just fb0 (#1246)
+
+The "guard on presence" side above (cam2-painter, whose `frame-probe` self-terminates) had a
+SUBTLER trap than "presence guard keeps a forever-runner disarmed". Its guard checked ONLY
+`pgrep -x frame-probe` — the fb0 painter — on the premise "a live run always has a frame-probe".
+That premise has a GAP: in the ALL_CAMBOX `[2b/8]` path the harness stops the deployed cam2-painter
+(its frame-probe exits) and starts the `camera-box-burn-cam2-<id>` capture burn MANY
+seconds/minutes BEFORE it launches its own `[3/8]` `/tmp/frame-probe` painter. A periodic deadman
+fire in that no-frame-probe window passed the guard and ran `systemctl start cam2-painter` — whose
+`Wants=camera-box.service` pulls production camera-box, whose `ExecStartPre=camera-box-free-capture-device.sh`
+stops every `camera-box-burn-*` unit — KILLING the live burn mid-measurement (live 2026-08-31 run
+1635844760: burn Started 19:01:02.787, deadman fired 19:01:49.544 in the gap, burn Stopped
+19:01:49.624; the `[7b/8]` run-integrity check correctly failed an otherwise-green verdict).
+
+**The fix, and the generalized rule: a presence-guard must key on EVERY on-box owner of the
+device(s) the deadman's start would seize — not just the one the deadman itself paints.** cam2's
+deadman now ALSO no-ops when a live capture burn owns `/dev/video`:
+`pgrep -x camera-box-burn` (the exact 15-char comm `camera-box-free-capture-device.sh` itself
+keys on via `pkill -9 -x camera-box-burn`) OR an active/activating `camera-box-burn-*` systemd unit
+— blip-robust against the burn's `Restart=on-failure` auto-restart. The `frame-probe` guard stays
+(fb0 owner).
+
+**The unit check MUST use a unit-NAME pattern argument, never a DESCRIPTION-column grep (#1246
+review 🔴, empirically reproduced).** The first cut wrote
+`systemctl list-units --state=active,activating --plain --no-legend --type=service | grep -q camera-box-burn`
+and it SELF-MATCHED: `systemd-run` with no `--description=` sets the transient unit's Description to
+its own command line, `list-units --plain --no-legend` prints the DESCRIPTION column (unellipsized
+when piped), and while the action runs `cam2-painter-deadman.service` is itself in the
+active/activating set with a description containing `camera-box-burn` (from the `pgrep`/`grep`
+tokens) — so the guard matched its OWN unit on every fire, `exit 0` before the start, permanently
+disarming the deadman (the exact #872 dark-monitor failure, made permanent). The fix is the SAME
+idiom the #772 `camera-box-deadman.sh` already uses: a unit-NAME **pattern argument**, which matches
+NAMES only, never descriptions —
+`systemctl list-units --state=active,activating --plain --no-legend --type=service "camera-box-burn-*" 2>/dev/null | grep -q .`
+(double quotes are legal inside the single-quoted `/bin/bash -c '...'` action) — plus
+`--description=cam2-painter-deadman` on the `systemd-run` arm as belt-and-braces. General lesson for
+ANY on-box guard that greps `systemctl list-units`: filter by the unit-NAME glob argument, never
+grep the free-text description column, or the guard's own transient unit (and its command line) can
+satisfy it.
+
+- **The #281 rig-active heartbeat is NOT usable here.** It is written on DEV1
+  (`$XDG_RUNTIME_DIR/camera-box-rig-active`, `scripts/lib/rig-heartbeat.sh`) and read by the dev1
+  rig-restore watchdog; the cam2-painter-deadman is a transient systemd unit ON cam2, deliberately
+  dev1-independent, and cannot read a dev1 file. The burn's on-box presence IS the on-box
+  equivalent of "a measurement claims the device right now".
+- **TRADE-OFF (accepted):** on a SIGKILLed run the stray burn persists (systemd-owned,
+  `Restart=on-failure`), so with the burn guard the cam2-painter-deadman DEFERS painter recovery to
+  the #772 camera-box-deadman (armed at the same sites) stopping the stray burn first — ~15 min
+  later than the old frame-probe-self-exit path. Acceptable: a corrupted live verdict is far worse
+  than extra monitor-dark minutes on a killed run, and cam2-painter cannot coexist with a burn
+  anyway (both conflict on the device via camera-box). The two deadmen COMPOSE (do not race): #772
+  clears the stray burn + restores production, then the next cam2-painter-deadman tick sees the
+  device free and restores the painter.
+- **Tier-0 test it FUNCTIONALLY** (`tests/harness_cam2_painter_deadman_run_aware_1246.rs`, mirroring
+  `harness_camera_box_deadman_772.rs`): source the lib, extract the `/bin/bash -c '...'` action, run
+  it under fake `pgrep`/`systemctl` stubs (real `grep`) — assert the action does NOT `systemctl
+  start cam2-painter` when a burn PROCESS or an active burn UNIT is present, and DOES when the device
+  is free. Prove RED→GREEN at the bash level first (Tier-0 blocks the cargo compile), then rely on
+  CI for the actual Rust run.
 
 ## Nested-quoting: embedding a `systemd-run ... /bin/bash -c '<action>'` via `$(...)` in an ssh string
 

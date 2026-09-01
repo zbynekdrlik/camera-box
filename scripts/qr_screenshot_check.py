@@ -16,9 +16,13 @@ codes; it is never needed at gather time).
 CLI: `qr_screenshot_check.py --host <ip> --password <pw> --scene <name> [--scene <name> ...]`
 prints ONE JSON object to stdout: `{"<scene>": ["<decoded text>", ...], ...}` -- an empty list
 per scene means the pixel proof passed for that scene. A scene whose screenshot could not be
-decoded at all (a transport/RPC failure) is reported as `null` (never as an empty list -- see
+decoded at all (a transport/RPC failure) is reported as an explicit error record
+`{"error": "<reason>"}` (NEVER as an empty list, and NEVER a bare `null` -- see
 `event_assert.pixel_proof_ok`'s fail-closed contract: the caller must be able to tell "checked,
-found nothing" apart from "could not check").
+found nothing" apart from "could not check". #1225: a bare `null` here crashed
+`event_assert.pixel_proof_ok`'s `len(v)` call live on 2026-08-30 -- an explicit dict record is
+unambiguous and keeps failing closed even for a caller that forgets the None-tolerant check
+event_assert.py now has).
 """
 
 import argparse
@@ -60,8 +64,12 @@ def decode_qr_codes_from_image_bytes(png_bytes: bytes) -> list:
 
 def screenshot_qr_findings(host, password, scenes, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT):
     """Connect to OBS at `host`, screenshot each scene in `scenes`, and decode QR codes from
-    each. Returns {scene: [decoded_text, ...] | None}. None means the screenshot/decode itself
-    could not be obtained (RPC failure) -- distinct from a genuinely empty (clean) result."""
+    each. Returns {scene: [decoded_text, ...] | {"error": "<reason>"}}. An "error" record means
+    the screenshot/decode itself could not be obtained (RPC failure) -- distinct from a
+    genuinely empty (clean) result. #1225: this is NEVER a bare `None` -- a bare None crashed
+    `event_assert.pixel_proof_ok`'s `len(v)` call live on 2026-08-30 (a screenshot RPC failure on
+    one scene); an explicit dict record is unambiguous on its own, in addition to
+    event_assert.py now being None-tolerant too."""
     import obs_phase2  # local import: keeps this module importable (for unit tests) without a
     # live OBS connection ever being attempted at import time.
 
@@ -83,12 +91,12 @@ def screenshot_qr_findings(host, password, scenes, width=DEFAULT_WIDTH, height=D
                 )
                 png_bytes = extract_png_bytes(res.get("imageData") if res else None)
                 if png_bytes is None:
-                    findings[scene] = None
+                    findings[scene] = {"error": "no screenshot data (RPC returned nothing)"}
                     continue
                 findings[scene] = decode_qr_codes_from_image_bytes(png_bytes)
             except Exception as e:  # noqa: BLE001 -- best-effort per scene, never abort the sweep
                 sys.stderr.write(f"WARNING: qr_screenshot_check: scene '{scene}' on {host}: {e}\n")
-                findings[scene] = None
+                findings[scene] = {"error": str(e)}
     finally:
         ws.close()
     return findings
@@ -105,9 +113,10 @@ def main(argv=None):
 
     findings = screenshot_qr_findings(a.host, a.password, a.scenes, a.width, a.height)
     print(json.dumps(findings))
-    # Non-zero exit whenever ANY scene found a QR or could not be checked at all -- a caller that
-    # only cares about the exit code (rather than parsing the JSON) still gets a fail-loud signal.
-    any_problem = any(v is None or len(v) > 0 for v in findings.values())
+    # Non-zero exit whenever ANY scene found a QR or could not be checked at all (an "error"
+    # record, #1225 -- never a bare None any more) -- a caller that only cares about the exit
+    # code (rather than parsing the JSON) still gets a fail-loud signal.
+    any_problem = any(not isinstance(v, list) or len(v) > 0 for v in findings.values())
     sys.exit(1 if any_problem else 0)
 
 

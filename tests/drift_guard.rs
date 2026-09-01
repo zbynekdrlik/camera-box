@@ -3484,6 +3484,7 @@ PICOM_PROC|
 PICOM_SERVICE|disabled
 XRANDR|ok
 PRIMARY_OUTPUT|HDMI-1
+MONITOR_ORIGINS|+0+0 +1920+0
 MAXPERF_APPLICABLE|1
 MAXPERF_MIN|1400
 MAXPERF_RP0|1400
@@ -3509,8 +3510,8 @@ fn check_imag_report_display_path_ok_when_every_facet_clean_780() {
         .filter(|l| l.contains("display_path/"))
         .collect();
     assert!(
-        dp_rows.len() == 6,
-        "expected picom_process/picom_service/hdmi_primary/igpu_maxperf/tap_conf/drm_output \
+        dp_rows.len() == 7,
+        "expected picom_process/picom_service/hdmi_primary/layout/igpu_maxperf/tap_conf/drm_output \
          rows: {out:?}"
     );
     for l in &dp_rows {
@@ -3567,6 +3568,44 @@ fn check_imag_report_display_path_drift_when_panel_is_primary_1146() {
     assert!(
         line.contains("DRIFT") && line.contains("eDP-1"),
         "hdmi_primary must DRIFT naming the wrong primary: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_display_path_drift_when_mirror_layout_1146() {
+    // issue 1146: a MIRROR layout (both outputs at +0+0) is two unsynchronized 60Hz CRTCs -> the
+    // projector tears. hdmi_primary stays OK in a mirror (HDMI genuinely IS primary), so the layout
+    // facet is what catches it — the whole point of adding it. It must flow through check_imag_report
+    // (check #10's generic per-facet loop) as a DRIFT (exit 20).
+    let mirror = DISPLAY_PATH_GATHER_CLEAN
+        .replace("MONITOR_ORIGINS|+0+0 +1920+0", "MONITOR_ORIGINS|+0+0 +0+0");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DP", &mirror)]);
+    assert!(
+        out.contains("RC=20"),
+        "a mirror layout must DRIFT (exit 20): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("display_path/layout"))
+        .unwrap_or_else(|| panic!("no layout row printed: {out:?}"));
+    assert!(
+        line.contains("DRIFT") && line.to_uppercase().contains("MIRROR"),
+        "layout must DRIFT naming the mirror beat: {line:?}"
+    );
+    // the sibling hdmi_primary facet stays OK in a mirror — proving why layout is the facet that
+    // actually catches this drift.
+    let hp = out
+        .lines()
+        .find(|l| l.contains("display_path/hdmi_primary"))
+        .unwrap_or_else(|| panic!("no hdmi_primary row printed: {out:?}"));
+    assert!(
+        hp.contains("OK"),
+        "hdmi_primary is OK in a mirror (HDMI is primary) — layout is what catches it: {hp:?}"
     );
 }
 

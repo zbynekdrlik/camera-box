@@ -192,8 +192,14 @@ def plan_reanchor(desired: dict, current: dict) -> tuple:
 def _active_sources(explicit: "str | None") -> list:
     """Split the active-set string into "NDI camN" source names (the strih source naming the pins
     live under). Mirrors phase_sync_active_floor_check's --active-set convention: a caller passes
-    "cam3" (issue 1170: cam2's camera-under-test role retired [grabber cure-decay]) (space/comma separated); we map each to its "NDI camN" source."""
-    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam3")
+    "cam1 cam2 cam3 cam4 cam5 cam6 cam7" (issue 1198, 2026-08-27: cam1 + cam2 RESTORED, both healthy on
+    a live journal check, owner refused the physical card swap; issue 1216, 2026-08-28:
+    cam5/cam6/cam7 also restored, bigger splitter fitted; issue 1217, same day: cam5 OUT again --
+    a DEAD_PORT leg on the new splitter; issue 1216 completion, 2026-08-30, owner directive
+    "kamery od 1-7 bezia" after a physical cable reseat: cam4 (#947) and cam5 (DEAD_PORT) BOTH
+    rejoin -- the full seven-camera fleet) (space/comma separated); we map each to its
+    "NDI camN" source."""
+    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
     cams = [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
     return [f"NDI {c}" for c in cams]
 

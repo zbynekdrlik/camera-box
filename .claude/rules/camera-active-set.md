@@ -14,20 +14,41 @@ paths:
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and MEASURED TODAY (default `cam3` — cam1 retired #1134/#1110; cam2's CAMERA-UNDER-TEST role
-retired issue 1170 2026-08-24 because its ShadowCast grabber's cure-decay collapsed to ~7 min
-(issue 1193) — cam2 stays the fixed PAINTER but is no longer a measured camera, re-enable = add
-"cam2" back after the issue-1198 card swap; cam1/cam2/cam4/cam5/cam6/cam7 retired-from-measured but
-fully resolvable — see the header comment in `camera-set.sh`). The parallel `CAMERA_ALIGN_SET` (the
-on-air alignment superset) is PARTIALLY DERIVED since issue 1170: its default resolves `cam3 cam4`
-(cam3 source + cam4 on-air-not-measured, both explicit) and includes cam2 ONLY when cam2 is in
-`CAMERA_ACTIVE_SET` (an inline word-exact `case`), so re-adding cam2 to the active set restores its
-alignment one-line. **Every place that needs "the list of
-cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
-literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
-fps, strih scene/route) stay fully resolvable forever (`camera_resolve`/`camera_strih_route` never
-gate on the active set) — only membership in `CAMERA_ACTIVE_SET` decides whether a camera is
-currently swept/checked.
+installed and MEASURED TODAY (default `cam1 cam2 cam3 cam4 cam5 cam6 cam7` — the FULL seven-camera
+fleet, for the first time simultaneously — cam1+cam2 restored issue 1198 2026-08-27 — the owner
+ruled the two prior "hardware-defective" diagnoses behind cam1's retirement (#1134/#1110) and
+cam2's CAMERA-UNDER-TEST retirement (issue 1170 2026-08-24, its ShadowCast grabber's cure-decay
+collapsed to ~7 min, issue 1193) were both built from EPISODES, not a permanent card state, and
+refused the physical card swap outright ("tie dve karty su vpohode nebudem ich menit za ine lebo
+su uplne funkcne") — a live read-only journal check on all four cam boxes confirmed both cards
+healthy today; cam5+cam6+cam7 restored issue 1216 2026-08-28 — a bigger splitter fitted,
+physically wired back in, boxes updated + verified healthy; cam5 OUT AGAIN the SAME day (issue
+1217) — its leg on the new splitter was a DEAD_PORT (flat static frame, proven-good cam6/cam7
+siblings on the same splitter read colour), failing the [1/8] frozen-camera-gate for the whole
+fleet, temporary + membership-only exactly like every prior retirement; cam4 stayed
+retired-from-measured for its own unrelated reason (issue 947, capture-leg wedge) but fully
+resolvable — see the header comment in `camera-set.sh`; cam4+cam5 RESTORED 2026-08-30 (issue 1216
+completion, owner directive "kamery od 1-7 bezia" — cameras 1 through 7 are running — after a
+physical cable reseat): a live check confirmed cam4's capture chroma reads colour
+(`rough=2.9 -> colour`) and cam5's clears the ~7 healthy-baseline bar (`rough=7.8 -> colour`,
+vs the DEAD_PORT `rough=0.1` that retired it), so both re-entry conditions are met and both
+`rig-fleet.txt` acks are removed). The parallel `CAMERA_ALIGN_SET` (the on-air alignment
+superset) is FULLY DERIVED for cam1, cam5, cam6, AND cam7 (issue 1170 built this derivation for
+cam2 alone; issue 1198 generalized it to cam1; issue 1216 extended the same pattern to
+cam5/cam6/cam7; issue 1217 REMOVED cam5 from that trailing loop the same day cam5 itself dropped
+out of CAMERA_ACTIVE_SET; issue 1216 completion 2026-08-30 puts cam5 BACK into the trailing loop
+now that its leg reads colour again): its default resolves `cam1 cam3 cam4 cam5 cam6 cam7`
+(cam3+cam4 the explicit always-on-air base — cam4 UNCONDITIONALLY, regardless of its own
+CAMERA_ACTIVE_SET membership; cam1/cam5/cam6/cam7 each included via their own inline word-exact
+`case`/loop against `CAMERA_ACTIVE_SET`), so dropping any of cam1/cam5/cam6/cam7 from the active
+set drops it from the align set too, automatically, one line. cam2 is the ONE camera that never
+derives into the align set at all (the projection-probe exclusion below, issue 1216/1152) — every
+other on-air camera's align membership now tracks CAMERA_ACTIVE_SET directly. **Every place that
+needs "the list of cameras to check/sample/sweep right now" must derive it from
+`CAMERA_ACTIVE_SET`, not from a literal range or its own hardcoded list.** A retired camera's
+facts (IP, NDI source name, genlock fps, strih scene/route) stay fully resolvable forever
+(`camera_resolve`/`camera_strih_route` never gate on the active set) — only membership in
+`CAMERA_ACTIVE_SET` decides whether a camera is currently swept/checked.
 
 ## The bug shape, twice now
 

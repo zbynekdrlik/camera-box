@@ -695,6 +695,75 @@ fn imag_program_ships_full_bundle_and_verifies_bytes() {
     );
 }
 
+/// issue 1236: the emitted on-imag deploy runs `cp -a "$BUNDLE/lib/x86_64-linux-gnu/." "$LIBDIR/"`,
+/// and GNU `cp -a` with the `src/.` operand stamps the SOURCE dir's mode+ownership onto the
+/// DESTINATION -- a 0700 newlevel mktemp staging dir made /usr/lib/x86_64-linux-gnu itself
+/// drwx------ newlevel:newlevel and installed 0700 root:root libs, so a runtime uid could not open
+/// libobs.so.30. The program must NORMALIZE the just-installed payload after the copy, robustly,
+/// regardless of the staging dir's perms.
+#[test]
+fn imag_program_normalizes_installed_perms_after_cp_a_1236() {
+    let p = imag_program();
+    // reset the clobbered destination libdir itself to root:root 0755
+    assert!(
+        p.contains("chown root:root \"$LIBDIR\"") && p.contains("chmod 0755 \"$LIBDIR\""),
+        "must reset $LIBDIR to root:root 0755 after the cp -a clobber (issue 1236):\n{p}"
+    );
+    // normalize the just-installed set: files a+rX (world-readable), scoped by walking the bundle
+    // source tree -- never a whole-libdir sweep.
+    assert!(
+        p.contains("chmod a+rX \"$dst\"") && p.contains("find . -mindepth 1 -printf '%P\\0'"),
+        "must set files a+rX over the just-installed set, scoped to the bundle tree (issue 1236):\n{p}"
+    );
+    // the sibling share/obs install (same cp -a src/. shape) is normalized too
+    assert!(
+        p.contains("chmod 0755 /usr/share/obs"),
+        "must normalize the share/obs install too (issue 1236):\n{p}"
+    );
+    // the whole-bundle install contract (issue 1026) is preserved -- cp -a stays, normalize after.
+    assert!(
+        p.contains("cp -a \"$BUNDLE/lib/x86_64-linux-gnu/.\""),
+        "keeps the whole-bundle cp -a install (issue 1026) -- normalize after, do not drop it:\n{p}"
+    );
+}
+
+/// issue 1236: after normalizing, the emitted program must FAIL CLOSED (refuse the supervised
+/// restart) if the destination libdir is not root:root 0755 or any just-installed lib is
+/// world-unreadable -- the same fail-loud spirit as the SONAME/manifest guards.
+#[test]
+fn imag_program_fail_closed_perms_assert_1236() {
+    let p = imag_program();
+    assert!(
+        p.contains("stat -c '%U:%G' \"$LIBDIR\"") && p.contains("stat -c '%a' \"$LIBDIR\""),
+        "must stat-assert $LIBDIR owner+mode after install (issue 1236):\n{p}"
+    );
+    assert!(
+        p.contains("want root:root") && p.contains("want 755"),
+        "must assert $LIBDIR is root:root 0755 (issue 1236):\n{p}"
+    );
+    // scan the just-installed set for any file lacking the world-read bit
+    assert!(
+        p.contains("-perm -o+r"),
+        "must scan the just-installed set for world-unreadable files (issue 1236):\n{p}"
+    );
+    // the assert covers the WHOLE just-installed set: dirs world-traversable (o+rx) + ownership,
+    // over BOTH the lib tree and the share/obs data subtree -- not just $LIBDIR + top-level file o+r.
+    assert!(
+        p.contains("-perm -o+rx"),
+        "must assert installed dirs are world-traversable (issue 1236):\n{p}"
+    );
+    assert!(
+        p.contains("assert_installed_perms \"$BUNDLE/lib/x86_64-linux-gnu\" \"$LIBDIR\"")
+            && p.contains("assert_installed_perms \"$BUNDLE/share/obs\" /usr/share/obs"),
+        "must run the fail-closed perms assert over BOTH the lib tree and the share/obs subtree (issue 1236):\n{p}"
+    );
+    // refuse the restart on any violation
+    assert!(
+        p.contains("post-install perms assert") && p.contains("exit 4"),
+        "must exit 4 (refuse the restart) on a perms violation (issue 1236):\n{p}"
+    );
+}
+
 #[test]
 fn imag_program_keeps_the_abi_guards_and_graceful_restart() {
     let p = imag_program();

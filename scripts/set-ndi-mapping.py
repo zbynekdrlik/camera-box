@@ -99,8 +99,13 @@ DEFAULT_MAP = FULL_MAP
 # #827: the ACTIVE camera set default -- mirrors scripts/camera-set.sh's CAMERA_ACTIVE_SET
 # exactly (this module is invoked as a standalone subprocess, so it reads the SAME env var rather
 # than re-declaring its own separate default; when unset, falls back to the identical literal
-# camera-set.sh itself defaults to, so the two can never silently disagree).
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam3")
+# camera-set.sh itself defaults to, so the two can never silently disagree). issue 1216
+# (2026-08-28): bigger splitter fitted, cam5/cam6/cam7 back in. issue 1217 (same day): cam5 OUT
+# again -- a DEAD_PORT leg on the new splitter (flat static frame, siblings cam6/cam7 read
+# colour). issue 1216 completion (2026-08-30, owner directive "kamery od 1-7 bezia" after a
+# physical cable reseat): cam4 (#947) and cam5 (DEAD_PORT) BOTH rejoin -- the full
+# seven-camera fleet is active, for the first time simultaneously.
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
 
 
 def _camera_name_of(ndi_input):
@@ -344,6 +349,101 @@ def _heal_wait_exit_code(done, waiting, failed):
     return 0
 
 
+# ─── #1180: RECEIVER-liveness verify (the LIVENESS term the name-only verify misses) ─────────
+# WHY (2026-08-27 strih NIC-swap aftermath): --heal / reenforce_ndi_name verify only that the
+# ndi_source_name STRING is right. A receiver can hold a FROZEN frame with the CORRECT name (an
+# issue-1158 wedged receiver thread) -- --heal then reports "nothing healable" (the name never
+# drifted) and the input stays dead, indistinguishable from a live camera that is momentarily
+# still. This mode samples frame-delivery liveness over WS (obs_phase2.sample_receiver_liveness, a
+# screenshot-diff) and FAILS LOUD (exit 1) on a FROZEN input so the caller escalates to an OBS
+# restart -- the only cure for the wedge. It runs over the active inputs REGARDLESS of name drift
+# (the whole point: the frozen cam1 had a correct name). The C++ #1180 fix owns the separate
+# wrong-source IDENTITY half; this owns the correct-name-no-frames LIVENESS half.
+
+def verify_live_mapping(op, ws, want, sampler, log_err):
+    """#1180 liveness verify over `want` [(input, baseline), ...]: sample each input's receiver
+    frame-delivery liveness via `sampler(ws, input) -> (state, reason)` and count LIVE / FROZEN /
+    INCONCLUSIVE. A FROZEN input is the wedge a name-only verify misses -- logged LOUD, pointing the
+    caller at the real cure (an OBS restart), because the name may be correct all along. An
+    INCONCLUSIVE input (could not sample enough frames) is left as-is + logged, never torn down on a
+    can't-confirm. Pure/dependency-injected (op, ws, sampler, log_err) so it is Tier-0 pytest-able
+    with fakes, no live OBS. Returns (live, frozen, inconclusive)."""
+    live = frozen = inconclusive = 0
+    for inp, _snd in want:
+        state, reason = sampler(ws, inp)
+        if state == op.LIVENESS_LIVE:
+            live += 1
+        elif state == op.LIVENESS_FROZEN:
+            log_err(f"#1180 liveness: '{inp}' FROZEN -- no new frames are being presented "
+                    f"({reason}); ndi_source_name may be correct all along. Two causes produce the "
+                    f"SAME byte-identical signal: (a) a WEDGED receiver thread (issue 1158 class) -- "
+                    f"an OBS RESTART is the cure, a name re-set / --heal cannot revive it; (b) an "
+                    f"upstream SENDER outage (dead camera / cambox down / paused) -- an OBS restart "
+                    f"will NOT help. Confirm which via `recv-timing #797` (a frozen SENDER keeps "
+                    f"advancing received=; a wedged RECEIVER freezes it) or a sibling box before "
+                    f"restarting OBS")
+            frozen += 1
+        else:  # LIVENESS_INCONCLUSIVE
+            log_err(f"#1180 liveness: '{inp}' INCONCLUSIVE ({reason}) -- left as-is, never torn "
+                    f"down on a can't-confirm")
+            inconclusive += 1
+    return live, frozen, inconclusive
+
+
+def _verify_live_exit_code(live, frozen, inconclusive):
+    """#1180 --verify-live exit contract (pure, testable): 1 iff >=1 input is FROZEN (a
+    name-correct-but-no-frames wedge -- the caller escalates to an OBS restart, loud); 0 iff every
+    sampled input is LIVE (or nothing to verify); 3 iff none FROZEN but >=1 INCONCLUSIVE (could not
+    confirm frame delivery -- the caller proceeds, never a false FROZEN). (2 is reserved by the
+    caller for a WS connect/request error, mirroring --heal / --heal-wait.)"""
+    if frozen > 0:
+        return 1
+    if inconclusive > 0:
+        return 3
+    return 0
+
+
+def _run_verify_live_mode(args, want):
+    """#1180 --verify-live: connect via the shared obs_phase2 client and run verify_live_mapping over
+    the active inputs. Exits per _verify_live_exit_code (0 all live / 1 >=1 FROZEN / 2 WS error / 3
+    could-not-confirm). Kept out of main()'s normal enforce path, mirroring _run_heal_mode /
+    _run_heal_wait_mode, so rig-activation behaviour is unchanged."""
+    # Empty active set: nothing to verify -> exit 0 BEFORE importing obs_phase2, which imports
+    # websocket EAGERLY (sys.exit on a websocket-less host); the contract is 0 for an empty set,
+    # not a missing-dep failure, and no socket is opened here regardless.
+    if not want:
+        print("#1180 verify-live: no active inputs to verify (empty active set)")
+        sys.exit(0)
+    import obs_phase2 as op  # lazy: the pure helpers above stay importable without websocket/obs_phase2
+    try:
+        ws = op._conn(args.host, args.password)
+    except Exception as e:
+        print(f"ERROR: OBS WS connect {args.host}: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    def _sampler(ws_, inp):
+        return op.sample_receiver_liveness(
+            ws_, inp, args.verify_live_samples, args.verify_live_interval)
+
+    try:
+        live, frozen, inconclusive = verify_live_mapping(
+            op, ws, want, _sampler, lambda m: print(m, file=sys.stderr))
+    except Exception as e:
+        print(f"ERROR: OBS WS request: {e}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            # airuleset:script-ok best-effort ws.close() on an already-torn-down socket -- mirrors
+            # _run_heal_mode's own close pattern; a close failure has no recovery path and no signal.
+            pass
+
+    print(f"#1180 verify-live: {live} live, {frozen} FROZEN, {inconclusive} inconclusive "
+          f"(of {len(want)} active inputs)")
+    sys.exit(_verify_live_exit_code(live, frozen, inconclusive))
+
+
 def _run_heal_wait_mode(args, want):
     """#1197 --heal-wait: connect via the shared obs_phase2 client and run heal_wait_active_mapping
     over the active baselines, bounded by --heal-wait SECONDS. Exits per _heal_wait_exit_code
@@ -459,12 +559,38 @@ def main():
         metavar="SECONDS",
         help="#1197 poll cadence for --heal-wait (default 4s).",
     )
+    ap.add_argument(
+        "--verify-live",
+        action="store_true",
+        help="#1180 RECEIVER-liveness verify: for each active input, sample frame delivery over WS "
+        "(a screenshot-diff -- proof frames ADVANCE, not just that the name is right, the term a "
+        "name-only --heal misses). exit 0 all live, 1 >=1 FROZEN (name-correct-but-wedged receiver "
+        "-> escalate to an OBS restart), 2 WS error, 3 could-not-confirm.",
+    )
+    ap.add_argument(
+        "--verify-live-samples",
+        type=int,
+        default=None,
+        metavar="N",
+        help="#1180 screenshots per input for --verify-live (default: OBS_RECEIVER_LIVENESS_SAMPLES, 3).",
+    )
+    ap.add_argument(
+        "--verify-live-interval",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="#1180 poll cadence for --verify-live (default: OBS_RECEIVER_LIVENESS_POLL_S, 2s).",
+    )
     args = ap.parse_args()
 
     try:
         want = parse_map_args(args.map, args.active)
     except ValueError as e:
         sys.exit(f"ERROR: {e}")
+
+    if args.verify_live:
+        _run_verify_live_mode(args, want)  # exits
+        return
 
     if args.heal_wait is not None:
         _run_heal_wait_mode(args, want)  # exits

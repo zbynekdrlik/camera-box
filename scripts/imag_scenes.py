@@ -113,6 +113,78 @@ CANONICAL_NDI_SOURCES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# issue 1230: imag NDI-name enforcement (owner ruling 2026-08-30 -- NO idle policy).
+#
+# #1218 idled INACTIVE cameras' receivers (ndi_source_name "" + genlock_fifo off) so imag
+# stopped decoding them -- but it made physically-returned cameras invisible on imag (cam4/cam5,
+# 2026-08-30). The owner ruling removes the idle behaviour outright: EVERY camera in CAMS is
+# always kept NAMED + alive. What is KEPT from that lineage is the #1158 name-healing via the
+# shared #795-safe obs_phase2.reenforce_ndi_name (discoverable -> set + read-back-verify -> else
+# OFFLINE), applied to ALL seven cameras through the ONE enforce_ndi_names point below.
+
+
+def _obs_phase2_module():
+    """Lazy import of the sibling obs_phase2.py (the SHARED #795-safe reenforce_ndi_name policy).
+    Returns the module, or None when it is not importable on this host: the imag box installs
+    imag_scenes.py (+ imag_record_encoder.py) and, since issue 1218, obs_phase2.py -- but an
+    older box may not carry it yet, so the on-box --bootstrap enforce must DEGRADE to a direct set
+    rather than crash the boot seed (the #1156 import-dependency class). Never imported at module
+    load (imag-obs-start.sh's launch preflight only imports imag_scenes)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import obs_phase2  # noqa: E402
+        return obs_phase2
+    except Exception as e:  # noqa: BLE001 -- absence is expected on an older box; degrade, never crash
+        print("#1230: obs_phase2 not importable (%s) -- imag NDI-name heal uses a direct set "
+              "(the discoverability gate is unavailable on this host)" % e)
+        return None
+
+
+def enforce_ndi_names(obs):
+    """issue 1230 (revert of #1218's behavioural half): the ONE imag NDI-name enforcement point.
+    Owner ruling 2026-08-30 ("no idle policy") -- EVERY camera in CAMS is ALWAYS kept NAMED + alive;
+    there is no active/inactive split and no idle payload. For each camera the KEPT #1158 healing is
+    applied: the shared #795-safe obs_phase2.reenforce_ndi_name (discoverable -> set + read-back
+    verify; not in the finder -> left as-is, never a #795 mangle). On the gated path, when the name
+    HEALED, genlock_fifo True is restored too -- reenforce_ndi_name writes ONLY ndi_source_name, so a
+    camera whose saved scene carried genlock_fifo False (e.g. an older #1218 idle persisted in the
+    scene collection) would otherwise decode again but silently BYPASS the genlock FIFO. When
+    obs_phase2 is unavailable (older box) OR the connection exposes no raw `ws` (a unit-test fake), it
+    degrades to a direct overlay SetInputSettings of the baseline name + genlock_fifo True. overlay:True
+    on every write preserves the per-source genlock_latency_ms_src 3ms pin. Best-effort per camera
+    (ignore_err); never raises. Returns {n: status} for the caller's log."""
+    op = _obs_phase2_module()
+    ws = getattr(obs, "ws", None)
+    gated = op is not None and ws is not None
+    result = {}
+    for n in CAMS:
+        inp = "NDI CAM%d" % n
+        name = "CAM%d (usb)" % n
+        if gated:
+            status = op.reenforce_ndi_name(ws, inp, name)
+            if status == op.REENFORCE_HEALED:
+                # reenforce_ndi_name set ONLY the name; restore genlock_fifo True so a healed camera
+                # genlocks again instead of silently bypassing the FIFO (an OFFLINE/unhealed name is
+                # NOT touched -- no empty-queue consume path, #70).
+                obs.req("SetInputSettings", {
+                    "inputName": inp,
+                    "inputSettings": {"genlock_fifo": True},
+                    "overlay": True,
+                }, ignore_err=True)
+            result[n] = "name:%s" % status
+        else:
+            # ungated fallback (older box without obs_phase2, or a unit-test fake with no raw ws):
+            # a direct overlay set of the baseline name + genlock_fifo True.
+            obs.req("SetInputSettings", {
+                "inputName": inp,
+                "inputSettings": {"ndi_source_name": name, "genlock_fifo": True},
+                "overlay": True,
+            }, ignore_err=True)
+            result[n] = "name:set(ungated)"
+    return result
+
+
 class Obs:
     def __init__(self, host: str, port: int, password: str | None):
         self.ws = create_connection(f"ws://{host}:{port}", timeout=10)
@@ -306,10 +378,15 @@ def seed(obs: Obs) -> None:
         # #785: source-binding/mute "self-healing" runs ONLY on --bootstrap (boot/recovery
         # path) or on a just-created input — a plain reseed must NEVER overwrite whatever
         # the OPERATOR set on an existing input (the "skripty mi kazia nastavenia" class).
+        # issue 1230: the ndi_source_name / genlock_fifo enforcement lives at the ONE heal point
+        # (enforce_ndi_names, called after the loop on --bootstrap) — every camera is always named
+        # (no idle policy). Here we re-arm only the name-INDEPENDENT settings: DistroAV low-latency
+        # mode + mute (overlay:True merges, leaving the name for the heal point to own).
         if BOOTSTRAP or not item_existed:
             obs.req("SetInputSettings", {
                 "inputName": inp,
-                "inputSettings": {"ndi_source_name": ndi_name, "latency": 1},
+                "inputSettings": {"latency": 1},
+                "overlay": True,
             }, ignore_err=True)
             obs.req("SetInputMute", {"inputName": inp, "inputMuted": True}, ignore_err=True)
         item = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
@@ -324,6 +401,16 @@ def seed(obs: Obs) -> None:
                     "positionX": 0, "positionY": 0,
                 },
             }, ignore_err=True)
+
+    # issue 1230: NDI-name enforcement — the ONE heal point. On --bootstrap (autostart + watchdog
+    # reseed) heal every camera's baseline name (discoverability-gated #795-safe when obs_phase2 is
+    # available; the #1158 healing). Owner ruling 2026-08-30: NO idle policy — all seven cameras are
+    # always named + alive. A bare (non-bootstrap) reseed never enforces here (the #785
+    # operator-wins discipline).
+    if BOOTSTRAP:
+        statuses = enforce_ndi_names(obs)
+        print("ndi names (heal-all): %s"
+              % ", ".join("CAM%d=%s" % (n, s) for n, s in sorted(statuses.items())))
 
     # #501→SAME-SOURCE pivot (2026-07-15, user-driven): the "MV Cam N" cells now nest the SAME
     # full-bw "NDI CAMx" main inputs the program uses — identical frames, identical genlock
@@ -752,7 +839,10 @@ def scene_order_mismatch(actual_order: list, expected_order: list = None) -> str
 def ndi_source_mismatches(actual: dict, expected: dict = None) -> list:
     """actual/expected are {inputName: ndi_source_name}. Returns a list of human-readable problem
     strings (empty list = every expected binding present and correct). expected defaults to
-    CANONICAL_NDI_SOURCES."""
+    CANONICAL_NDI_SOURCES.
+
+    issue 1230: every camera is always NAMED (no idle policy), so an empty/wrong binding is always a
+    problem -- checked against the canonical baseline name for all seven cameras."""
     exp = CANONICAL_NDI_SOURCES if expected is None else expected
     problems = []
     for name, want in exp.items():
@@ -789,6 +879,8 @@ def verify_parity(obs: Obs) -> None:
         settings = obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
         actual_ndi[name] = settings.get("inputSettings", {}).get("ndi_source_name")
     ndi_problems = ndi_source_mismatches(actual_ndi)
+    # keep "ndi sources: OK" its OWN whole line (verify-imag.sh's imag_parity_output_ok matches it
+    # with grep -qxF); issue 1230 -- every camera is always named, so there is no idle line.
     print("ndi sources: " + ("; ".join(ndi_problems) if ndi_problems else "OK"))
 
     if order_problem or ndi_problems:

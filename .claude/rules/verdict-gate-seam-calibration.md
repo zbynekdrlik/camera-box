@@ -8,6 +8,7 @@ paths:
   - "src/self_heal_attribution.rs"
   - "src/dup_cadence.rs"
   - "src/burn_hold.rs"
+  - "src/own_burn_absent.rs"
 ---
 
 # Calibrating + wiring a NEW verdict gate seam (the one-line-restorable `gates_overall_pass()` pattern)
@@ -199,6 +200,36 @@ EQUAL (mode IS 2; verified across every mined verdict, worst 0.67–0.78 on both
 metric offers a caller-`expected_step` field AND a data-mode-`derived` field, gate on the derived
 one and surface the raw as diagnostic.
 
+**SUPERSEDED (#1250): the uniformity gate now reads `beat_corrected_uniform_fraction`, and the mined
+`cadence_uniformity_gate.worst_uniform_fraction` key CHANGED SEMANTICS across that boundary.** #1250
+found the "0.67–0.78 sick rig" was mostly a benign sampling-phase BEAT (balanced 1↔3 net-zero pairs
+around the mode), not FIFO churn — `derived` counted each 1 and 3 as non-uniform. `beat_corrected_
+uniform_fraction` collapses the ±1-refresh pair `min(count(mode-1), count(mode+1))` back to uniform,
+so the gated worst is 0.916/0.947 on the two mined post-fix runs (PASS 0.90) instead of 0.566/0.769
+derived. The verdict JSON `worst_uniform_fraction` key now carries the BEAT-CORRECTED value (pre-#1250
+runs carry the derived value under the SAME key); `worst_derived_uniform_fraction` (pre-beat) +
+`worst_raw_uniform_fraction` are diagnostics. **Cross-era mining caveat:** when comparing
+`worst_uniform_fraction` across historical verdicts, a run from before the #1250 deploy carries the
+derived reading and a run after carries the beat-corrected reading under the identical key — read
+`worst_derived_uniform_fraction` (present only post-#1250) to compare apples-to-apples, or segregate
+by the #1250 deploy time. The "gate on derived, not raw" rule above generalizes: gate on the
+BEAT-CORRECTED field, surface derived + raw as diagnostics.
+
+**Calibration lessons from #1250 (reusable for any beat-aware / count-collapse metric):**
+- **When a ticket's fix-SHAPE prose contradicts its own DATA-CHECK number, reconstruct the REAL
+  ORDERED per-frame data and gate toward the acceptance number, not the prose.** #1250's ticket said
+  collapse "ADJACENT" complementary pairs, but its own data-check `(479+360)/846 ≈ 0.99` is a COUNT
+  collapse. The per-segment histogram in the verdict JSON is order-BLIND, so it can't tell the two
+  apart — you must rebuild the ordered tick sequence from the `stream-partial-*.json` `frames[].tick`
+  (the STREAM partial reproduces the per-cambox `presentation_cadence` exactly; the STRIH partial does
+  NOT — it is a different tap with a different beat phase). That reconstruction showed only 137/180
+  ones are strictly adjacent to a 3 → strict-adjacent yields 0.864 (RED, fails the ticket's own
+  acceptance) while count-based yields the ticket's 0.9917. Document the resolution + flag it.
+- **Bound a beat collapse to the PHYSICAL ±1-refresh pair `(mode-1, mode+1)`, not the general
+  `x+y == 2*mode` family.** A one-refresh-early/late capture is the exact beat mechanism and the only
+  complementary pair the rig produces (mode 2 → (1,3)); a ±2+-refresh jump is a bigger artifact that
+  SHOULD stay visible. Behavior-identical on-rig, strictly safer off-mode (the #1250 review finding).
+
 ### Owner-mandated RED-on-current-rig OVERRIDES gates-green-first (§3)
 The standard "a bound that would fail a recent green run is wrong" is REVERSED when the owner
 declares the green runs FALSELY green (hiding visual degradation). #1142's cadence-uniformity 0.95
@@ -290,3 +321,32 @@ the reusable playbook for turning a blind pixel signal Viable:
   mis-flag it a pulldown). Harmless while report-only, but the full-run recalibration must judge
   whether an UPPER rate bound is needed to separate a ~16.7% pulldown from ~100% static (frozen_leg's
   domain). Not a concern on the animated Vernier/burn test pattern, but note it for the calibration.
+
+## A PRESENCE seam is the same shape but skips §1–§3 (calibration) — `own_burn_absent` (issue 1247)
+
+Not every new `gates_overall_pass()` seam gates a CALIBRATED THRESHOLD mined from the verdict-JSON
+distribution. `src/own_burn_absent.rs` (issue 1247) is a PRESENCE seam: it flags a SCHEDULED cambox
+whose OWN digital burn was entirely absent from the recording (`full_chain.burn_ids_present.<cam> ==
+0`) — the issue-1246 symptom where a cam's leg is live but served by production `camera-box.service`
+(no digital burn), so the per-segment optical-tick verdict can overstate it as a clean pass. It keys
+off the `--switch-schedule` DEPLOYED set (`SwitchWindow.cambox`), NOT a mined metric distribution, so
+§1–§3 (calibrate-from-JSONs, tightest-green-ceiling, honest-margin-threshold) DO NOT APPLY — there is
+no threshold, only present-vs-absent. Everything else is identical: a pure crate-root decision (no
+probe deps, std-only, unit-tests Tier-0 on default features — the pure-module + shell-replica pattern
+below), a thin consumer in `recording-verdict.rs` computing the counts from the same `camN_ids.len()`
+that build `full_chain.burn_ids_present` (so the gate can never disagree with that field), a JSON term
+under `full_chain.own_burn_absent_gate`, and the report-only fold `all_pass &= gate_pass ||
+!gates_overall_pass();` with `gates_overall_pass()` hardcoded `false` (the LIVE `[7b/8]` run-integrity
+check already fails such a run; a one-line flip makes it blocking). The e2e_discord_report branches
+use `is True` / `is not True` on the seam's serialized `gates_overall_pass` so a future flip
+auto-routes report-only → blocking without double-counting (the same convention as
+`e2e-discord-report.md`).
+
+**Lesson (CYCLE-6 review 🔵) — a verdict-JSON field name MUST describe what it ACTUALLY carries.**
+The first cut named the field `scheduled_cams` but it held the ASSESSED subset (scheduled ∩ cams that
+HAVE a burn-count key) — a scheduled-but-unassessed cambox (e.g. `imag`, measured by its own leg
+gate) silently vanished from a field named "scheduled". Because this whole gate family's PURPOSE is
+preventing durable-artifact misreads, a misleadingly-named field in the artifact is itself the bug
+it exists to catch. Renamed to `assessed_cams` + a clarifying `note` clause. General rule for any new
+verdict-JSON key: name it for the set it actually contains, and if that set is a filtered subset, say
+so in the `note`.

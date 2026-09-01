@@ -1166,6 +1166,69 @@ fn gm_check_ok_foreign_and_unknown() {
     );
 }
 
+// --- phase_slew_enabled_from_pipe_json / phase_slew_check (#1215) ---------------------------
+//
+// #1215: imag-nb shipped with NO /etc/dantesync/config.json at all, so it ran on dantesync's
+// built-in default (system.phase_slew.enabled=false) and corrected phase error by STEPPING
+// (16 steps/hour of 6-7ms each -- a visible ~4-minute hitch on the projected output) instead of
+// SLEWING it smoothly like the cam1-4 fleet. dantesync reports which mode is active via the SAME
+// `/status` JSON blob offset_us_from_pipe_json/ptp_locked_from_pipe_json/gm_source_ip_from_pipe_
+// json already read -- these two functions/tests follow their EXACT shape.
+
+#[test]
+fn phase_slew_enabled_from_pipe_json_reads_the_real_field() {
+    let out = run_sourced(
+        "phase_slew_enabled_from_pipe_json \"$JSON\"",
+        &[("JSON", "{\"phase_slew_enabled\":true,\"mode\":\"LOCK\"}")],
+    );
+    assert_eq!(
+        out.trim(),
+        "true",
+        "must read a true phase_slew_enabled: {out:?}"
+    );
+
+    let out = run_sourced(
+        "phase_slew_enabled_from_pipe_json \"$JSON\"",
+        &[("JSON", "{\"phase_slew_enabled\":false,\"mode\":\"PROD\"}")],
+    );
+    assert_eq!(
+        out.trim(),
+        "false",
+        "must read a false phase_slew_enabled (imag-nb's pre-#1215 state): {out:?}"
+    );
+}
+
+#[test]
+fn phase_slew_enabled_from_pipe_json_empty_when_field_absent() {
+    let out = run_sourced(
+        "phase_slew_enabled_from_pipe_json \"$JSON\"",
+        &[("JSON", "{\"is_locked\":true,\"mode\":\"NANO\"}")],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "no phase_slew_enabled field -> UNKNOWN (empty), never a guessed true/false: {out:?}"
+    );
+}
+
+#[test]
+fn phase_slew_check_maps_state_to_exit_code() {
+    // true -> rc 0 (ENABLED), false -> rc 2 (DISABLED, box will STEP), anything else
+    // (UNKNOWN/empty/garbage) -> rc 3. An unread field must NEVER map to OK (test-strictness: a
+    // box we can't confirm is slewing must never look correct).
+    let cases = [("true", 0), ("false", 2), ("", 3), ("garbage", 3)];
+    for (state, want) in cases {
+        let out = run_sourced(
+            "set +e; phase_slew_check imag \"$S\"; echo \"rc=$?\"",
+            &[("S", state)],
+        );
+        assert!(
+            out.contains(&format!("rc={want}")),
+            "phase_slew_check({state:?}) must exit {want}: {out:?}"
+        );
+    }
+}
+
 // --- updated_ts_from_pipe_json / pipe_json_freshness_verdict (#648) -------------------------
 //
 // dantesync#47 gave every managed box a network status endpoint (http://<box>:8898/status)

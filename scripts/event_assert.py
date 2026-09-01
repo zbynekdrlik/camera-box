@@ -59,10 +59,17 @@ ITEM_LABELS_SK = {
 
 
 def paint_processes_ok(fleet_counts: dict) -> bool:
-    """fleet_counts: {box_name: int (pgrep match count)}. PASS iff every box reports 0."""
+    """fleet_counts: {box_name: int (pgrep match count) | None}. PASS iff every box reports a
+    numeric 0. A box's own value being None/non-numeric (a per-box gather failure) fails
+    CLOSED for that box, never raises a TypeError (#1225)."""
     if not fleet_counts:
         return False
-    return all(int(v) == 0 for v in fleet_counts.values())
+    for v in fleet_counts.values():
+        if v is None:
+            return False
+        if int(v) != 0:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -71,12 +78,36 @@ def paint_processes_ok(fleet_counts: dict) -> bool:
 
 
 def pixel_proof_ok(qr_findings: dict) -> bool:
-    """qr_findings: {scene_name: [decoded_qr_text, ...]}. PASS iff every scene's list is empty.
-    Fails CLOSED on an empty dict -- that means the gather step produced nothing (e.g. a
-    screenshot/decode failure), never "nothing was checked, so nothing was found"."""
+    """qr_findings: {scene_name: [decoded_qr_text, ...] | None}. PASS iff every scene's value is
+    a list AND that list is empty. Fails CLOSED on an empty dict -- that means the gather step
+    produced nothing at all (e.g. every scene's screenshot/decode failed), never "nothing was
+    checked, so nothing was found". A scene whose OWN value is None
+    (scripts/qr_screenshot_check.py's explicit "this one scene could not be checked" signal)
+    ALSO fails CLOSED as an unreadable facet, never raises (#1225 live incident: a
+    screenshot/decode RPC failure on ONE scene crashed the whole aggregate assert with
+    `TypeError: object of type 'NoneType' has no len()` instead of an honest FAIL)."""
     if not qr_findings:
         return False
-    return all(len(v) == 0 for v in qr_findings.values())
+    return all(isinstance(v, list) and len(v) == 0 for v in qr_findings.values())
+
+
+def pixel_proof_detail(qr_findings: dict) -> str:
+    """Slovak-facing detail string for the pixel_proof item's summary line, when there is
+    something worth naming: any scene(s) that could not be read at all come first (#1225 -- an
+    UNKNOWN/unreadable facet, fail-closed, never a crash -- named "facet unreadable" so an
+    operator can tell "a QR was live" apart from "we couldn't even check"); scene(s) where a QR
+    *was* found come second. Returns "" when there is nothing extra to add (e.g. every scene was
+    cleanly checked and found empty)."""
+    if not qr_findings:
+        return ""
+    unreadable = sorted(s for s, v in qr_findings.items() if not isinstance(v, list))
+    found = sorted(s for s, v in qr_findings.items() if isinstance(v, list) and len(v) > 0)
+    parts = []
+    if unreadable:
+        parts.append(f"facet unreadable: {', '.join(unreadable)}")
+    if found:
+        parts.append(f"QR najdeny: {', '.join(found)}")
+    return "; ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +128,13 @@ def burns_off_ok(burn_states: dict) -> bool:
 
 
 def no_recordings_ok(rec_states: dict) -> bool:
-    """rec_states: {"<box>:record"|"<box>:stream": bool (active)}. PASS iff every value is
-    False. An empty dict is NOT a failure here (a box legitimately not covered, e.g. imag has no
-    recording output) -- callers only include the targets that actually apply."""
+    """rec_states: {"<box>:record"|"<box>:stream": bool (active)} | None. PASS iff every value
+    is False. An empty dict is NOT a failure here (a box legitimately not covered, e.g. imag has
+    no recording output) -- callers only include the targets that actually apply. The WHOLE
+    facet being None (couldn't gather at all) fails CLOSED instead of raising on `.values()`
+    (#1225) -- distinct from the legitimate "no applicable targets" empty-dict case."""
+    if rec_states is None:
+        return False
     return all(v is False for v in rec_states.values())
 
 
@@ -109,13 +144,17 @@ def no_recordings_ok(rec_states: dict) -> bool:
 
 
 def services_healthy_ok(service_active: dict, stray_units: dict) -> bool:
-    """service_active: {box: bool}; stray_units: {box: [unit_name, ...]}. PASS iff every box is
-    active AND no box has any stray unit."""
+    """service_active: {box: bool}; stray_units: {box: [unit_name, ...] | None} | None. PASS
+    iff every box is active AND no box has any stray unit. A box's stray_units value being None
+    (a per-box gather failure), or the whole stray_units facet being None, fails CLOSED rather
+    than raising on `len()`/`.values()` (#1225)."""
     if not service_active:
         return False
     if not all(v is True for v in service_active.values()):
         return False
-    return all(len(v) == 0 for v in stray_units.values())
+    if stray_units is None:
+        return False
+    return all(isinstance(v, list) and len(v) == 0 for v in stray_units.values())
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +178,11 @@ def latency_calibrated_ok(current_ms, calibrated_ms) -> bool:
 
 
 def ndi_mapping_ok(mismatches: list) -> bool:
-    """mismatches: [(input, actual_sender, wanted_sender), ...] from set-ndi-mapping.py
-    --verify-only. PASS iff the list is empty."""
+    """mismatches: [(input, actual_sender, wanted_sender), ...] | None from set-ndi-mapping.py
+    --verify-only. PASS iff the list is empty. A None value (the facet could not be gathered)
+    fails CLOSED, never raises on `len()` (#1225)."""
+    if mismatches is None:
+        return False
     return len(mismatches) == 0
 
 
@@ -150,7 +192,10 @@ def ndi_mapping_ok(mismatches: list) -> bool:
 
 
 def artifacts_cleared_ok(existing_paths: list) -> bool:
-    """existing_paths: paths that STILL EXIST after cleanup. PASS iff the list is empty."""
+    """existing_paths: paths that STILL EXIST after cleanup, or None if unreadable. PASS iff the
+    list is empty. A None value fails CLOSED, never raises on `len()` (#1225)."""
+    if existing_paths is None:
+        return False
     return len(existing_paths) == 0
 
 
@@ -239,7 +284,13 @@ def main(argv=None):
 
     item_results = compute_item_results(facts)
     overall_pass, failed = aggregate(item_results)
-    details = facts.get("details", {})
+    details = dict(facts.get("details") or {})
+    # #1225: name WHICH scene was unreadable (or found a live QR) in the summary, rather than
+    # just marking pixel_proof CHYBA with no further explanation -- an operator seeing "facet
+    # unreadable: Cam 2" can tell "we couldn't check" apart from "a QR is actually on air".
+    qr_detail = pixel_proof_detail(facts.get("qr_findings") or {})
+    if qr_detail:
+        details.setdefault("pixel_proof", qr_detail)
     summary = format_summary_sk(overall_pass, item_results, details)
     print(summary)
 

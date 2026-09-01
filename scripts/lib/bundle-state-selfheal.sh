@@ -62,7 +62,7 @@ bundle_state_selfheal_fetch() {
   fi
   local i
   for i in $(seq 1 "$tries"); do
-    if curl -fsS --max-time 10 -o "$dest" "http://${host}:${port}/bundle-state.json" 2>/dev/null; then
+    if curl -fsS --max-time 30 -o "$dest" "http://${host}:${port}/bundle-state.json" 2>/dev/null; then
       return 0
     fi
     [ "$i" -lt "$tries" ] && sleep "$sleep_s"

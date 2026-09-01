@@ -170,6 +170,17 @@ the reshuffle reproduces only live) — the offline gate proves the DECISION log
 is confirmed by the supervisor's post-deploy rig verification. NOT in scope for #1180: the NIC
 hardware root cause (separate owned lane) and Studio Monitor on the TVs (stock NewTek code).
 
+**The C++ verify above is the IDENTITY (wrong-source) half ONLY — the LIVENESS half lives in the
+python receiver-policy layer.** This name→URL check catches "wrong camera, frames flowing"; it does
+NOT prove frames are flowing at all. The 2026-08-27 strih NIC-swap aftermath showed the other
+failure: a receiver holding a FROZEN frame with the CORRECT name (a `break`-wedged thread, above) —
+`recv-timing #797` never listed it, but `ndi_source_name` was right, so every name-only verify
+(`--heal`, `reenforce_ndi_name` read-back) reported a false success and only an OBS restart cured
+it. That LIVENESS term — a WS screenshot-diff (`obs_phase2.sample_receiver_liveness` /
+`classify_receiver_liveness`, exposed as `set-ndi-mapping.py --verify-live`, exit 1 on FROZEN →
+escalate to an OBS restart) — is documented in `.claude/rules/ndi-name-recovery.md`'s "#1180
+LIVENESS term" section, not here (it is a receiver-policy/WS concern, not a vendored-receiver one).
+
 ### #1181 — SENDER-side port-map stability: operator doctrine + a dev1 baseline watchdog (stock-receiver protection)
 
 **Operator doctrine — adding/removing a dedicated NDI output mid-session reshuffles the NEXT
@@ -220,3 +231,41 @@ ports today. Creating the main output's send at `obs_module_post_load` to grab :
 as a genuine vendored refactor (pre-create + reuse the send instance) and carries a real
 early-idle-sender caveat; it is tracked as a standalone CI+rig-validated follow-up, never bundled
 into this cheap-layer lane.
+
+## #1224 — the PROPERTIES path is the ONLY route to `obs.dll!new_prop`, and its async finder callback is a detached-thread lifetime hazard
+
+A c0000005 dump whose distroav frames name `ndi_source_update` / `new_ndi_receiver_name` reaching
+`obs.dll!new_prop` is **offset-symbolized** ("nearest export"): `ndi_source_update` NEVER builds
+`obs_properties` (it only reads/writes settings + drives the receiver thread), so it has NO path to
+`new_prop`. In distroav `new_prop` (`vendor/obs-studio/libobs/obs-properties.c`, reached only by
+`obs_properties_add_*`) is reachable ONLY from **`ndi_source_getproperties`**. So when a `new_prop`
+crash points "into distroav", the true function is `ndi_source_getproperties`, full stop — don't
+chase the named frames.
+
+Two facts that kill the naive NULL-guard theory (verify before claiming a props-NULL fix "closes"
+a `new_prop` crash):
+- **`obs_properties_create()` NEVER returns NULL on stock libobs** — `bmalloc` `bcrash()`es on OOM
+  (`libobs/util/bmem.c`), it does not return NULL. So a `if (!props) return` guard in
+  `ndi_source_getproperties` is DEAD belt-and-braces (harmless, but do not credit it with the fix).
+- **Even a hypothetical NULL `props` can't reach `new_prop`** — every `obs_properties_add_*`
+  early-returns on `!props` (and `has_prop`) BEFORE calling `new_prop`. For `new_prop+0xa2`
+  (`HASH_ADD_STR(props->properties, …)`) to AV, `props` must be non-NULL GARBAGE = a UAF/corruption
+  no NULL guard catches. `obs_property_list_add_string/item_count/item_string` are all NULL-`p`-safe
+  too (via `get_list_data`'s `!p` check), so a NULL `source_list` degrades silently on the sync path.
+
+The real reachable NULL sub-class (and the guard-at-consumer that closes it): `ndi_source_getproperties`'s
+finder callback runs on a **DETACHED thread** (`ndi-finder.cpp`: `std::thread(refreshNDISourceList,
+callback).detach()`), firing 5+ s later (5 s throttle + a `find_wait_for_sources(…,1000)` loop) —
+after `ndi_source_getproperties` returned. The lambda captures raw `source_list`/`s` and calls
+`obs_source_update_properties(s->obs_source)`; libobs also calls `get_properties(data=NULL)` for
+type-level builds, so **`s == NULL` is a real live case** → a NULL deref on the finder thread (in
+distroav.dll — matching the dump). Guard `if (!source_list || !s || !s->obs_source) return;` at the
+TOP of the lambda (before any deref) — that is the crash-closing guard. **RESIDUAL not fixable here:**
+a freed-but-non-NULL `s`/`source_list` UAF (captured-by-value raw pointer, can't become NULL) sails
+through — un-catchable without lifetime tracking (weak-ref/refcount = a redesign). Do NOT add a
+`config_mutex` lock around the properties build: `ndi_source_update`'s `#93` comment warns of a
+`config_mutex`-vs-`pthread_join` deadlock, and `ndi_source_getproperties` runs on the UI thread.
+Test = std-only Rust source-anchor ONLY (pure crash/NULL-safety guard → no windows-genlock*.yml pwsh
+mirror, per `vendored-obs-frontend-crash-safety.md`); the two `genlock_ensure_saved_source_listed(source_list, s)`
+CALL sites (lines ~650/657) ARE pwsh-anchored in both ymls, so keep the call text byte-identical
+(put guards in the function body / lambda head, never on the call line). See #1224.

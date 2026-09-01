@@ -344,6 +344,18 @@ live #771: `src/mv_audit.rs`'s 7 unit tests (floor/parse/classify/gate) ran GREE
 proves the vendored C still carries the change, the pure-std module proves the mirror LOGIC is
 right — both with plain rustc, zero cargo/OOM contention with sibling workers.
 
+**STALE-CLAIM CORRECTION (#1110, 2026-08-27): `src/mv_audit.rs` is NO LONGER purely std** — its
+`floor_tracks_the_effective_target_not_canvas_over_two` test gained a `use
+crate::render_budget::effective_render_divisor;` import, so a plain `rustc --test src/mv_audit.rs`
+now FAILS with `unresolved import crate::render_budget` (that module doesn't exist in a single-file
+compile). To still get the local RED→GREEN, run a HARNESS that substitutes a byte-identical LOCAL
+copy of the one imported fn for the `use crate::…` line before compiling (a ~15-line python/sed
+splice, then `rustc --test` the result) — this verifies the mirror LOGIC while CI compiles the real
+file. `tests/mv_audit_emit.rs` (the vendored-source ANCHOR guard) stays genuinely std-only and runs
+via the plain recipe above unchanged. General rule: before trusting "run `src/<mod>.rs` standalone",
+grep the module for any `use crate::` (incl. inside `#[cfg(test)] mod tests`) — one such import in a
+test makes the plain recipe fail, and the substitute-the-import harness is the fix.
+
 ### Adding a NEW observability audit line to the render loop (#771)
 
 The `multiview-audit:` line pattern is the reusable shape for surfacing a render-loop signal to the

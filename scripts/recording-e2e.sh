@@ -265,6 +265,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # treadmill). Mixed/unread fleets are NEVER auto-deployed — the gate keeps deciding those.
 # shellcheck source=scripts/lib/camera-box-parity-align.sh
 . "$HERE/lib/camera-box-parity-align.sh"
+# shellcheck source=scripts/lib/frame-probe-parity-align.sh
+. "$HERE/lib/frame-probe-parity-align.sh"   # #1138: pre-gate auto-align of cam2's steady-state painter to the candidate
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -298,13 +300,15 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # not at decode time.
 # shellcheck source=scripts/lib/live-freeze-watch.sh
 . "$HERE/lib/live-freeze-watch.sh"
-# #882: restart-and-settle for the [1/8] imag render-health sweep -- window 1 (right after a
-# fresh OBS start) can measure a real, transient warm-up dip that is not a regression; the pure
+# #882/#1232: restart-and-settle for the [1/8] imag render-health sweep -- the leading windows
+# (right after a fresh OBS start) can measure a real, transient warm-up dip that is not a
+# regression; a settle-adaptive PHASE (bounded by a wall budget) absorbs however many leading
+# windows it actually takes, then the same strict windows as before must all pass. The pure
 # decision lives here so classify() itself (src/render_budget.rs) stays untouched/strict.
 # shellcheck source=scripts/lib/render-health-warmup.sh
 . "$HERE/lib/render-health-warmup.sh"
 # issue 1091 (issue 771 point 3): synchronous MV-fps floor preflight — read each OBS box's newest
-# log's latest `multiview-audit:` sample and fail loud (only on a CONFIRMED sustained collapse) before
+# log's recent `multiview-audit:` window median and fail loud (only on a CONFIRMED sustained collapse) before
 # the run, so the gate never wastes a ~40-min recording on a box whose Multiview render already
 # collapsed. Consumes the same mv-fps-gate binary + mv_audit::gate_log the issue-1083 live watchdog
 # uses; the #675 sourced-lib pattern (source + ONE call line below, no anchored line edited).
@@ -484,13 +488,23 @@ CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=$(( (DURATION + 59) / 60 + CAMERA_BOX_DEADMAN_
 # the recording ended and the last ~1.5 verdict windows went dark (windows 8-9 all-undecodable).
 # Size the slack to cover the WORST-CASE pre-record budget that still records: the frozen-camera
 # gate can burn up to its full attempts-times-retry-sleep (~4x45s) before it passes, plus routing/
-# burn/scene-warm plus record start+stop ~40s. 240s covers that with cushion. Used LOCK-STEP by
-# BOTH the painter --duration-secs AND the PAINTER_EXIT_DEADLINE self-exit wait (a drift makes the
-# wait give up before self-exit, pulling a stale CSV). The painter-CSV freshness gate has NO upper
-# span bound (it fails only on span < DURATION/2), so a larger margin is safe.
+# burn/scene-warm plus record start+stop ~40s. Used LOCK-STEP by BOTH the painter --duration-secs
+# AND the PAINTER_EXIT_DEADLINE self-exit wait (a drift makes the wait give up before self-exit,
+# pulling a stale CSV). The painter-CSV freshness gate has NO upper span bound (it fails only on
+# span < DURATION/2), so a larger margin is safe.
+# #1223: 240s stopped being enough margin -- two of three overnight E2E aborts (2026-08-29/30)
+# were the painter expiring BEFORE the recording even started, because today's worst-case
+# pre-record budget grew past it: the frozen-camera gate above, PLUS a new settle-wait between the
+# align pins and the record step (its own budget, up to its own multi-minute ceiling), PLUS the
+# render/multiview gates and the align/heal/routing steps that already ran before it, together
+# exceeded 9 minutes on a degraded attempt. Every future gate added to the pre-record path only
+# grows this budget further, so the slack is sized with generous headroom rather than tight to a
+# single measured worst case. A companion fix sends the painter a graceful shutdown right after
+# the recording is stopped (see the #359 comment below) so this larger slack never actually
+# lengthens a normal run's tail -- only a genuinely slow/degraded pre-record phase consumes it.
 # (Comment deliberately avoids the bracketed phase labels + FROZEN_CAM_* identifiers other
 # tests string-anchor on -- the recording-e2e.sh static-anchor GOTCHA, project CLAUDE.md.)
-PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-240}"
+PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1200}"
 QR_SIZE="${QR_SIZE:-700}"
 # Topology v2 (#459, EPIC #466, SUPERSEDES the #11 60fps-end-to-end framing below): the 60fps
 # low-latency IMAG role moved OFF strih onto the new imag-nb box (10.77.9.182, #458/#463); strih
@@ -624,6 +638,56 @@ echo "   [ ] FOCUS: MANUAL, locked on the cam2 monitor (no autofocus hunting)"
 echo "   [ ] EXPOSURE: FIXED / manual gain (no auto-exposure drift)"
 echo " A 1/60 shutter caused the #216 ~175s optical-read gap. Fix the camera, THEN run."
 echo "=================================================================================="
+
+# issue 808 (bkshading epic): automated report-only check of the checklist above, via the
+# bkshading-relay running on the SOURCE cambox (USB-PTP/gphoto2 -> the camera BODY, see
+# .claude/rules/bkshading.md). REPORT-ONLY by design (owner M3 decision on issue 808) -- an
+# unreachable relay or an absent camera (the shading camera is ONE portable unit, cabled to
+# only one box at a time) is a quiet skip, never an abort; a genuinely slow shutter is a loud
+# WARNING, never a hard gate. Never fails the run (bkshading_preflight_report always returns 0).
+# shellcheck source=scripts/lib/bkshading-preflight.sh
+. "$HERE/lib/bkshading-preflight.sh"
+bkshading_preflight_report "$CAMERA_NAME" "$CAM1_IP"
+
+# issue 808 (bkshading epic): PAUSE bkshading-relay on the two MEASUREMENT-CRITICAL camboxes
+# (the SOURCE camera + cam2/painter) for the duration of THIS run -- causally proven to degrade
+# capture/emit on both (cam1 Cam Link 58.6 vs 60.0 fps stop/start isolation; cam2 dual-QR window
+# quality correlation, a 3-core box already running camera-box RT + the painter). Declared BEFORE
+# cleanup()'s own EXIT trap (`trap ... EXIT HUP INT TERM`) installs further below (recording-e2e-cleanup-composition.md's own
+# convention) so a cleanup() fired by an EARLY abort still reads the safe pre-trap default (0 =
+# do not restore) instead of an uninitialized variable. Records each box's PRIOR active state so
+# cleanup() only re-starts the relay where THIS run actually found it running -- never on a box
+# the operator deliberately silenced (the current interim manual mitigation on cam1/cam2).
+BKSH_PAUSE_CAM1_WAS_ACTIVE=0
+BKSH_PAUSE_PAINTER_WAS_ACTIVE=0
+# shellcheck source=scripts/lib/bkshading-e2e-pause.sh
+. "$HERE/lib/bkshading-e2e-pause.sh"
+BKSH_PAUSE_CAM1_WAS_ACTIVE="$(bkshading_e2e_pause_stop "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW")"
+echo "    bkshading-relay pause ($CAMERA_NAME, $CAM1_IP): was-active=$BKSH_PAUSE_CAM1_WAS_ACTIVE, now stopped for the run"
+BKSH_PAUSE_PAINTER_WAS_ACTIVE="$(bkshading_e2e_pause_stop cam2 "$PAINTER_IP" "$CAM_PW")"
+echo "    bkshading-relay pause (cam2/painter, $PAINTER_IP): was-active=$BKSH_PAUSE_PAINTER_WAS_ACTIVE, now stopped for the run"
+# review finding (issue 808): cleanup()'s own EXIT trap does not install until far below (the
+# ONLY other `trap ... EXIT` statement in this file) -- the many ordinary `exit 1` sites in the
+# `[0/8]` preflight gates between here and there (reachability, optical-injection-leg, DanteSync,
+# version/parity, clock-offset, leg-health, and more) would otherwise leave the relay stopped
+# with NO restore for the rest of THIS run. Installing a SECOND `trap ... EXIT` completely
+# REPLACES the handler for that signal (standard bash semantics) -- so this TEMPORARY trap is
+# automatically superseded the instant cleanup()'s own real `trap ... EXIT HUP INT TERM` installs
+# later, and covers every ordinary exit in between until then. (A genuine SIGKILL of the whole harness
+# stays structurally untrappable by ANY mechanism, same accepted residual risk this file already
+# carries for other pre-trap state, e.g. the #878 startup self-heal comment above -- the NEXT
+# run's own preflight is where that class of loss is caught, not this one.)
+# ANCHOR NOTE: this temporary handler is deliberately INDENTED one space -- ten-plus
+# static-anchor tests (harness_cam2_painter_coordination.rs and siblings) slice the cleanup body
+# via a newline-plus-column-0 keyword search, i.e. an UNINDENTED first word here is this file's
+# reserved marker for the REAL install of the cleanup handler far below. The leading space keeps
+# this TEMPORARY handler out of that namespace (plain valid bash) so those extractions still land
+# on the real install. Do NOT de-indent it. (Wording here also deliberately avoids the literal
+# keyword-plus-function-name adjacency other tests anchor on -- the CLAUDE.md anchor gotcha.)
+ trap '
+  bkshading_e2e_pause_restore "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW" "${BKSH_PAUSE_CAM1_WAS_ACTIVE:-0}"
+  bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
+' EXIT HUP INT TERM
 
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
 for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
@@ -788,7 +852,7 @@ fetch_box_state() {
     *)         _bs_user="$STRIH_USER";  _bs_pw="$STRIH_PW" ;;
   esac
   [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
-  if curl -fsS --max-time 10 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
+  if curl -fsS --max-time 30 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
     echo "    fetched version-integrity state from ${host}:${WIN_BUNDLE_STATE_PORT} -> $dest"
   else
     # #817: :8899 is not answering — self-heal (schtasks /run over ssh) + a bounded re-fetch, then an
@@ -809,7 +873,7 @@ fetch_box_state "$STREAM" "$VERSION_STREAM_STATE" || true
 RECORDINGS_BUDGET_GB="${RECORDINGS_BUDGET_GB:-50}"
 check_recordings_budget() {
   local label="$1" host="$2" stats total_gb
-  stats=$(curl -fsS --max-time 10 "http://${host}:${WIN_BUNDLE_STATE_PORT}/record-dir-stats.json" 2>/dev/null) || {
+  stats=$(curl -fsS --max-time 30 "http://${host}:${WIN_BUNDLE_STATE_PORT}/record-dir-stats.json" 2>/dev/null) || {
     echo "    NOTE: could not fetch $label recordings-dir stats (bundle-state-server unreachable) — skipping disk-budget check" >&2
     return 0
   }
@@ -942,12 +1006,15 @@ fi
 # explicitly excluded via the SAME CAMBOX_OFFLINE_ACK/rig-fleet.txt mechanism the fleet preflight and
 # the version-parity gate above already use, never a silent skip.
 echo "[0/8] camera-box version-parity gate — every active cam box must run the SAME camera-box build (issue 875)"
-# issue 1170: cam2's camera-box BINARY is version-gated ONLY while cam2 is a MEASURED camera. As a
-# painter-only box it is NOT redeployed for the run (it stays on the fleet-deployed build, not this
-# run's candidate), so grading it here refuses every run on a spurious version mismatch (live: a
-# candidate dev build vs cam2's deployed build). Its PAINTER-role clock IS still gated (the
-# dantesync clock version gate above keeps cam2 — that pins the run's timebase). Re-adding "cam2" to
-# CAMERA_ACTIVE_SET restores this grading, one line. Same set-membership gate as the [2b/8] deploy.
+# issue 1170 (derivation generalized to cam1 by issue 1198): cam2's camera-box BINARY is
+# version-gated ONLY while cam2 is a MEASURED camera — gated on the SAME set-membership check the
+# [2b/8] deploy uses, currently TRUE (cam2 is in the default CAMERA_ACTIVE_SET as of issue 1198).
+# WHEN cam2 sits outside the active set it is painter-only and NOT redeployed for the run (it stays
+# on the fleet-deployed build, not this run's candidate) — grading it unconditionally would refuse
+# every run on a spurious version mismatch against that stale build. Its PAINTER-role clock is
+# gated UNCONDITIONALLY either way (the dantesync clock version gate above keeps cam2 regardless —
+# that pins the run's timebase). Dropping "cam2" from CAMERA_ACTIVE_SET drops this grading too, one
+# line, no other edit needed.
 CAMBOX_VERSION_LINUX="$CAMERA_NAME=root@$CAM1_IP"
 if camera_is_active cam2; then
   CAMBOX_VERSION_LINUX="$CAMBOX_VERSION_LINUX cam2=root@$PAINTER_IP"
@@ -963,6 +1030,18 @@ cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
   --linux "$CAMBOX_VERSION_LINUX" \
   --candidate-pin "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$HERE/../Cargo.toml" | head -1)"
+
+# issue 1138: pre-gate auto-align of the cam2 STEADY-STATE painter (/usr/local/bin/frame-probe,
+# cam2-painter.service) to THIS run's candidate build — the frame-probe sibling of the camera-box
+# parity align above. Between dev->main merges the painter is auto-deployed by NOTHING (ci.yml
+# deploy-fleet is main-only), so it silently LAGS the current build (the 2026-08-29 incident: an
+# uncompensated QPSK marker + a dark aux tick until a manual redeploy). This deploys the candidate
+# frame-probe (the clean probe-tools CI artifact) to cam2 when stale, so pin+deploy advance together
+# (orphan-PROOF), and exports FRAME_PROBE_ALIGN_CI_BIN so the [1/8] pin below verifies against the
+# SAME artifact bytes. Best-effort (ALWAYS returns 0); the report-only [1/8] pin is the loud signal.
+# cam2-only (frame-probe lives only on the painter box) and unconditional (cam2 is the painter
+# regardless of active-set membership); honours CAMBOX_OFFLINE_ACK + the --no-main-pin soak escape.
+frame_probe_parity_align_before_gate "cam2=root@$PAINTER_IP"
 
 # dev1<->painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326, #312 Phase-2 robustness). The
 # all-cambox sweep ([6/8] below) stamps each program-switch WINDOW boundary on dev1's
@@ -1306,12 +1385,37 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     "${IMAG_USER:-newlevel}@$IMAG_IP" \
     "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true" \
     2>/dev/null || true)"
-  if [ "${_mv_count:-0}" -eq 1 ] 2>/dev/null && [ "${_pgm_count:-0}" -eq 1 ] 2>/dev/null; then
-    echo "    ok: imag-nb shows exactly 1 Multiview + 1 Program projector"
-  else
-    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}) projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1+1 — stray projector windows are accumulating (check BasicWindow.CloseExistingProjectors=true in ~/.config/obs-studio/{global,user}.ini on imag-nb, or close the extras: DISPLAY=:0 wmctrl -l | grep Projector)." >&2
-    exit 1
-  fi
+  # issue 1152 M4 lease-tolerance slice: in DRM-lease mode the Program is drawn by the vendored
+  # OBS DRM output directly onto the leased CRTC (.claude/rules/obs-drm-output.md), never an X
+  # window -- so the expected Program window count is 0, not 1, while Multiview stays required
+  # at exactly 1 either way. Consult the box's OWN lease config via imag_scenes' shared
+  # classifier (the SAME grammar open_projectors/imag-obs-start.sh already use, per the M4
+  # follow-up rule doc) rather than a second, divergent config reader.
+  _lease_connector="$(python3 -c "
+import sys
+sys.path.insert(0, '$HERE')
+import imag_scenes
+print(imag_scenes.drm_output_lease_connector(imag_scenes._drm_output_config_text('$IMAG_IP')))
+" 2>/dev/null || true)"
+  # shellcheck source=lib/imag-projector-lease-count.sh
+  . "$HERE/lib/imag-projector-lease-count.sh"
+  _lease_verdict="$(imag_projector_lease_count_verdict "$_lease_connector" "${_mv_count:-}" "${_pgm_count:-}")"
+  case "$_lease_verdict" in
+    ok-lease)
+      echo "    ok: imag-nb drm-output lease ENABLED for '${_lease_connector}' -- exactly 1 Multiview projector, 0 X Program windows (Program is on the DRM-leased scanout, issue 1152)"
+      ;;
+    ok-dormant)
+      echo "    ok: imag-nb shows exactly 1 Multiview + 1 Program projector"
+      ;;
+    fail-lease)
+      echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}) drm-output lease ENABLED for '${_lease_connector}' but projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1 Multiview + 0 Program (issue 1152 -- the Program is DRM scanout; an X Program window here means the connector never actually left the X layout, or a stray reappeared)." >&2
+      exit 1
+      ;;
+    *)
+      echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}) projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1+1 — stray projector windows are accumulating (check BasicWindow.CloseExistingProjectors=true in ~/.config/obs-studio/{global,user}.ini on imag-nb, or close the extras: DISPLAY=:0 wmctrl -l | grep Projector)." >&2
+      exit 1
+      ;;
+  esac
 
   # imag Studio Mode must be ON — INVERTED from the former #758 force-OFF step (user hard rule,
   # 2026-07-15: without Studio Mode the multiview's Preview cell is DEAD, so Studio is "MUST BE"
@@ -1369,15 +1473,20 @@ echo "    ok: no sustained capture-rate defect in $CAMERA_NAME's recent journal"
 # DEFECTIVE WARN, which never fires for the #1130/#1110-class defect (cam1 delivered 61-63fps —
 # inside the ShadowCast 2 tolerance — while it stalled/skipped/EPROTO'd for HOURS, and the #656
 # preflight still said "ok"). This step reads the OTHER, orthogonal degradation signals the box
-# genuinely emits (#707 V4L2 DEQUEUE STALL + emit-gate SKIPPED aggregates in the last 5 min, and
-# kernel uvcvideo -EPROTO in the last hour) and ABORTS the run naming the box + signal, so a sick
-# capture leg is a named escalation (fix the hardware, or drop the box from CAMERA_ACTIVE_SET /
-# CAMBOX_OFFLINE_ACK) rather than a 30-minute run measured on a broken tool. cap-1s over-rate is
-# read too but is REPORT-ONLY (the chronic ShadowCast over-rate is absorbed by the genlock
-# decimation, issue #909 — hard-failing it would recreate that mistake). All logic lives in the
-# sourced scripts/lib/leg-health-guard.sh (thresholds calibrated from the #1130/#1110 incident +
-# a live cam1 read; the classifier + patterns are unit-tested in tests/harness_leg_health_guard_1133.rs).
-echo "[0/8] leg-health preflight — every active capture leg must be free of USB EPROTO / DQBUF stalls / emit-gate skips (#1133)"
+# genuinely emits and ABORTS the run naming the box + signal, so a sick capture leg is a named
+# escalation (drop the box from CAMERA_ACTIVE_SET / CAMBOX_OFFLINE_ACK, or fix the leg) rather than
+# a 30-minute run measured on a broken tool. The HARD signals are: sustained CAPTURE FRAME LOSS
+# (sent-vs-captured from the `Streaming:` lines, calibrated 1.90% gate with a sustain guard — the
+# #1133 replacement for the DEQUEUE STALL gate), emit-gate SKIPPED aggregates (last 5 min), and
+# kernel uvcvideo -EPROTO (last hour). REPORT-ONLY (never abort): the #707 DEQUEUE STALL COUNT
+# (issue 1198 proved it ANTI-correlated with real frame loss — VIDIOC_DQBUF is a blocking wait, so
+# a well-protected fast thread reports MORE stalls than a lossy one; its old "replace cable/port/
+# grabber" wording was a misattribution) and the cap-1s over-rate (chronic ShadowCast over-rate is
+# absorbed by the genlock decimation, issue #909 — hard-failing it would recreate that mistake).
+# All logic lives in the sourced scripts/lib/leg-health-guard.sh (frame-loss threshold calibrated
+# from the supervisor's 2026-08-20 live-fleet read; the classifiers + patterns are unit-tested in
+# tests/harness_leg_health_guard_1133.rs).
+echo "[0/8] leg-health preflight — every active capture leg must be free of sustained frame loss / emit-gate skips / USB EPROTO (DQBUF stall count is now report-only, issue 1198) (#1133)"
 # Always check the SOURCE camera (its feed drives the whole verdict); under ALL_CAMBOX also check
 # the reachable+healthy+non-acked secondaries the fleet preflight already vetted
 # (PREFLIGHT_DANTESYNC_LINUX = "box=ip" pairs, so an acked/unreachable box is already absent).
@@ -1401,12 +1510,14 @@ for _lht in $LEG_HEALTH_TARGETS; do
     echo "    skip: $_lhbox — operator-acknowledged offline, leg-health not checked"
     continue
   fi
-  # issue 1170: cam2's CAPTURE leg is excluded from measurement until the card swap — its grabber
-  # cure-decay collapsed (issue 1193/1198). cam2 stays a PAINTER (its reachability + DanteSync clock
-  # are still gated above), but its sick capture leg must NEVER abort the run, so skip its leg-health
-  # check whenever cam2 is not a measured camera. cam2 is only a leg-health target because it is a
-  # hardcoded painter reachability entry that flows into the healthy-node list; the check returns
-  # automatically once "cam2" is re-added to CAMERA_ACTIVE_SET (camera-set.sh).
+  # issue 1170: cam2's CAPTURE leg is checked ONLY while cam2 is a MEASURED camera (gated on
+  # `camera_is_active cam2`, currently TRUE — cam2 is back in the default CAMERA_ACTIVE_SET as of
+  # issue 1198; the owner ruled the grabber "hardware-defective" diagnosis wrong and refused the
+  # card swap the ticket originally tracked). cam2 stays a PAINTER (its reachability + DanteSync
+  # clock are ALWAYS gated above, regardless of this leg's status). Should a REAL capture-leg
+  # regression reproduce on cam2 in the future, dropping it from CAMERA_ACTIVE_SET again skips this
+  # check automatically (never a hardcoded literal here) — cam2 is only a leg-health target because
+  # it is a hardcoded painter reachability entry that flows into the healthy-node list.
   if [ "$_lhbox" = cam2 ] && ! camera_is_active cam2; then
     echo "    skip: cam2 — capture leg excluded from measurement (issue 1170, not in CAMERA_ACTIVE_SET); painter clock/reachability still gated"
     continue
@@ -1426,13 +1537,27 @@ for _lht in $LEG_HEALTH_TARGETS; do
   _lhstall="$(leg_health_extract STALL "$_lhout")"
   _lhskip="$(leg_health_extract SKIP "$_lhout")"
   _lheproto="$(leg_health_extract EPROTO "$_lhout")"
-  if ! _lhmsg="$(leg_health_classify "$_lhbox" "$_lhstall" "$_lhskip" "$_lheproto")"; then
+  _lhstreaming="$(leg_health_extract_streaming "$_lhout")"
+  # HARD signal A (count-based): emit-gate SKIP aggregates + kernel uvcvideo -EPROTO. #1133 DROPPED
+  # the DEQUEUE STALL count from this classify — it gated on a quantity ANTI-correlated with real
+  # frame loss (issue 1198: the arm losing 4.5x FEWER frames reported MORE stalls).
+  if ! _lhmsg="$(leg_health_classify "$_lhbox" "$_lhskip" "$_lheproto")"; then
+    echo "ERROR: $_lhmsg" >&2
+    exit 1
+  fi
+  # HARD signal B (#1133): sustained CAPTURE FRAME LOSS (sent-vs-captured from the `Streaming:`
+  # lines) — the quantity the DEQUEUE STALL count only correlated with backwards. Calibrated 1.90%
+  # gate with a sustain guard (leg_health_frame_loss_*); over-rate is benign (issue #909).
+  if ! _lhmsg="$(leg_health_frame_loss_classify "$_lhbox" "$_lhstreaming")"; then
     echo "ERROR: $_lhmsg" >&2
     exit 1
   fi
   # Report-only: surface a sustained cap-1s over-rate for diagnostics (never aborts, issue #909).
   leg_health_cap1s_band_warn "$_lhbox" "$(leg_health_extract_cap1s "$_lhout")"
-  echo "    ok: $_lhbox capture leg healthy (stall=$_lhstall skip=$_lhskip eproto=$_lheproto in-window)"
+  # Report-only (#1133): the DEQUEUE STALL count is now diagnostics-only (anti-correlated with real
+  # frame loss, issue 1198 — never aborts).
+  leg_health_dequeue_stall_report "$_lhbox" "$_lhstall"
+  echo "    ok: $_lhbox capture leg healthy (loss-ok skip=$_lhskip eproto=$_lheproto, stall=$_lhstall report-only in-window)"
 done
 # #1141: head-end OPTICAL blur/shutter fail-fast. The capture-RATE gate above (#656) proves the
 # source camera captures at the right RATE, but is BLIND to a camera capturing at that rate yet
@@ -1891,6 +2016,13 @@ fi"
   fi
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" \
     "$(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP FINAL")" || true
+  # issue 808: RESTORE bkshading-relay on the two boxes the [0/8] pause step above stopped, but
+  # ONLY where it found the relay genuinely ACTIVE beforehand -- never re-activates a relay the
+  # operator deliberately silenced. Best-effort (never blocks the trap, #328/#649/#712/#713) and
+  # placed LAST so this non-safety-critical restore never delays the device-restore phase above.
+  echo "[cleanup] #808 bkshading-relay restore (was-active: $CAMERA_NAME=$BKSH_PAUSE_CAM1_WAS_ACTIVE, cam2=$BKSH_PAUSE_PAINTER_WAS_ACTIVE)"
+  bkshading_e2e_pause_restore "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW" "${BKSH_PAUSE_CAM1_WAS_ACTIVE:-0}"
+  bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
 }
 # #657: a plain foreground `sleep N` defers ALL signal handling — trapped OR default — until
 # that `wait4()` syscall returns on its own, i.e. until the sleep completes naturally. This is
@@ -2074,18 +2206,21 @@ else
   cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report --bin phase-sync-active-floor-gate  # airuleset:build-ok
 fi
 
-# [1/8] frame-probe (cam2 painter) sha-pin report (#1138) — engage the merged report-only alarm now
-# that the current-build frame-probe exists on $PROBE_BIN_DIR (built/fetched in the [1/8] step just
-# above). It could NOT be wired into the [0/8] camera-box parity gate: that gate runs BEFORE this
-# build, so $PROBE_BIN_DIR/frame-probe does not exist yet there and the report would stay silently
-# dormant. The report-only mode runs ONLY the report (no second camera-box parity table) and ALWAYS
-# exits 0; the `|| true` is belt-and-suspenders — a lagging painter SCREAMS but never fails this run.
-# cam2-scoped: frame-probe is installed ONLY on the painter box (setup-device.sh STEP 3b,
-# cam2_is_painter_box), so a fleet-wide read would UNKNOWN-spam every non-painter box.
-echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs this run's CI build (#1138, report-only)"
+# [1/8] frame-probe (cam2 painter) sha-pin report (#1138) — the loud PIN that CONFIRMS the [0/8]
+# frame-probe auto-align above. Expected = FRAME_PROBE_ALIGN_CI_BIN (the clean probe-tools CI
+# artifact the [0/8] align fetched + deployed to cam2 — the TRUE deploy source of truth), falling
+# back to $PROBE_BIN_DIR/frame-probe when the align was skipped (--no-main-pin soak) or could not
+# fetch (gh unavailable). Pinning against the CI artifact rather than the dev1 LOCAL build makes the
+# sha compare exact (both sides = the same artifact bytes, so no build-reproducibility dependency).
+# The report-only mode runs ONLY the report (no second camera-box parity table) and ALWAYS exits 0;
+# the `|| true` is belt-and-suspenders — a residually-lagging painter (align could not complete)
+# SCREAMS + names the fix but never fails this run (the hard-gate flip is the supervisor's #758
+# two-step follow-up once the auto-align is rig-proven). cam2-scoped: frame-probe is installed ONLY
+# on the painter box (setup-device.sh STEP 3b, cam2_is_painter_box).
+echo "[1/8] frame-probe (cam2 painter) sha-pin report — deployed painter vs the candidate CI build (#1138, report-only, confirms the [0/8] align)"
 "$HERE/camera-box-version-gate.sh" \
   --frame-probe-only \
-  --frame-probe-expected-bin "$PROBE_BIN_DIR/frame-probe" \
+  --frame-probe-expected-bin "${FRAME_PROBE_ALIGN_CI_BIN:-$PROBE_BIN_DIR/frame-probe}" \
   --linux "cam2=root@$PAINTER_IP" || true
 
 # #758 item 1 (continued) — per-camera NDI liveness. Needs frozen-camera-gate (just
@@ -2142,37 +2277,79 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     imag_leg_skip_note "[1/8] imag render-health + MV-divisor capability" "$IMAG_OFFLINE_ACK_REASON"
   else
+  # issue 1230: the #1218 imag active-set NDI idle enforce pass was REMOVED here (owner ruling
+  # 2026-08-30: no idle policy). imag now keeps all seven cameras named + alive; name recovery is
+  # the on-box --bootstrap seed's enforce_ndi_names + the existing name-heal paths, not an E2E pass.
   # #1143: make VAAPI-tex the LIVE record encoder BEFORE the render-health windows (software x264
   # overloads the render thread → the #1130 observer effect). The make-it-live OBS restart fires
   # only when the disk config drifted from the target (a no-op on the steady state); its settle is
-  # absorbed by window 1's #882 warm-up. Best-effort — a nonzero return WARNs, never aborts.
+  # absorbed by the #882/#1232 settle-adaptive warm-up phase below. Best-effort — a nonzero return
+  # WARNs, never aborts.
   if ! python3 "$HERE/imag_scenes.py" --ensure-rec-encoder --host "$IMAG_IP"; then
     echo "    WARNING: #1143 imag ensure-rec-encoder nonzero (best-effort) — continuing; the render-health preflight below still catches a down OBS, record_render_lagged_pct a stale encoder" >&2
   fi
   echo "[1/8] imag render-health preflight — PROGRAM must hold its 60fps budget with MV open, sustained (#758)"
-  RENDER_HEALTH_WINDOWS="${RENDER_HEALTH_WINDOWS:-5}"
+  # #1232: RENDER_HEALTH_WINDOWS is now the number of STRICT windows required to FOLLOW the
+  # settle-adaptive warm-up phase (was: the fixed TOTAL window count, of which window 1 alone was
+  # the non-counting warm-up) -- so the default drops from 5 (1 warm-up + 4 strict) to 4 (the same
+  # 4 strict windows, now following a phase that can absorb more than one leading failure).
+  RENDER_HEALTH_WINDOWS="${RENDER_HEALTH_WINDOWS:-4}"
   RENDER_HEALTH_WINDOW_S="${RENDER_HEALTH_WINDOW_S:-6}"
-  for _rhw in $(seq 1 "$RENDER_HEALTH_WINDOWS"); do
-    # #882: capture the REAL python exit code via PIPESTATUS (not the pipeline's own `sed`-decided
-    # status) inside an `if`, which is exempt from `set -e` regardless of AND/OR position -- so a
-    # failing window 1 never aborts the script before render_health_window_outcome gets to decide.
+  RENDER_HEALTH_SETTLE_BUDGET_S="${RENDER_HEALTH_SETTLE_BUDGET_S:-60}"
+  _rhw=0
+  _rhw_first_pass_seen=0
+  _rhw_strict_passed=0
+  _rhw_start_s="$(date +%s)"
+  while :; do
+    _rhw=$((_rhw + 1))
+    # #882/#1232: capture the REAL python exit code via PIPESTATUS (not the pipeline's own
+    # `sed`-decided status) inside an `if`, which is exempt from `set -e` regardless of AND/OR
+    # position -- so a failing warm-up window never aborts the script before
+    # render_health_phase_outcome gets to decide.
     if OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
         python3 "$HERE/render-budget-gate.py" \
         --box "imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}" \
         --window-s "$RENDER_HEALTH_WINDOW_S" --verdict-bin "$PROBE_BIN_DIR/render-budget-gate" \
-        2>&1 | sed "s/^/    [imag render-health w${_rhw}\/${RENDER_HEALTH_WINDOWS}] /"; then
+        2>&1 | sed "s/^/    [imag render-health w${_rhw}] /"; then
       _rhw_rc=0
     else
       _rhw_rc="${PIPESTATUS[0]}"
     fi
-    _rhw_outcome="$(render_health_window_outcome "$_rhw" "$_rhw_rc" | sed -n 's/^outcome=//p')"
+    _rhw_elapsed_s=$(( $(date +%s) - _rhw_start_s ))
+    # #1232 review finding (🟡): capture the PRE-call phase state so the FAIL branch below can
+    # tell apart its two distinct causes (a strict-phase regression vs a warm-up that never
+    # settled) -- render_health_phase_outcome overwrites _rhw_first_pass_seen on the next line.
+    _rhw_pre_seen="$_rhw_first_pass_seen"
+    _rhw_phase="$(render_health_phase_outcome "$_rhw_rc" "$_rhw_first_pass_seen" "$_rhw_elapsed_s" "$RENDER_HEALTH_SETTLE_BUDGET_S")"
+    _rhw_outcome="$(printf '%s\n' "$_rhw_phase" | sed -n 's/^outcome=//p')"
+    _rhw_first_pass_seen="$(printf '%s\n' "$_rhw_phase" | sed -n 's/^first_pass_seen=//p')"
+    _rhw_counts_as_strict="$(printf '%s\n' "$_rhw_phase" | sed -n 's/^counts_as_strict=//p')"
     case "$_rhw_outcome" in
-      PASS) : ;;
+      PASS)
+        if [ "$_rhw_counts_as_strict" = "1" ]; then
+          _rhw_strict_passed=$((_rhw_strict_passed + 1))
+        fi
+        if [ "$_rhw_strict_passed" -ge "$RENDER_HEALTH_WINDOWS" ]; then
+          echo "[preflight] imag render-health settled after ${_rhw} total window(s) (${_rhw_strict_passed}/${RENDER_HEALTH_WINDOWS} strict passes, #882/#1232)."
+          break
+        fi
+        ;;
       WARMUP)
-        echo "WARN: [preflight] imag render-health window ${_rhw}/${RENDER_HEALTH_WINDOWS} FAILED but is the non-counting WARM-UP window (post-restart NDI-lock/shader settle, #882) — tolerated, continuing to the remaining (strict) windows." >&2
+        echo "WARN: [preflight] imag render-health window ${_rhw} FAILED but is still inside the settle-adaptive WARM-UP phase (post-restart NDI-lock/shader settle, elapsed ${_rhw_elapsed_s}s of ${RENDER_HEALTH_SETTLE_BUDGET_S}s budget — #882/#1232) — tolerated, continuing until the first PASS." >&2
         ;;
       *)
-        echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (window ${_rhw}/${RENDER_HEALTH_WINDOWS}, NOT the warm-up window — #882) — skontroluj divisor/projektory/zataz." >&2
+        # #1232 review finding (🟡): the two FAIL causes get a DIFFERENT diagnostic context --
+        # _rhw_pre_seen=1 means a strict window regressed after warm-up already ended cleanly;
+        # _rhw_pre_seen=0 means the box never achieved a single PASS before the settle budget ran
+        # out. The operator-facing FAIL wording below stays a SINGLE occurrence in this file
+        # (tests/harness_render_health_divisor_758.rs anchors it verbatim) -- only the
+        # parenthetical context differs at runtime, never the fixed prefix/suffix text.
+        if [ "$_rhw_pre_seen" = "1" ]; then
+          _rhw_fail_context="window ${_rhw}, strict-phase regression after ${_rhw_strict_passed} clean strict window(s)"
+        else
+          _rhw_fail_context="window ${_rhw}, box NEVER settled within the ${RENDER_HEALTH_SETTLE_BUDGET_S}s warm-up budget (elapsed ${_rhw_elapsed_s}s)"
+        fi
+        echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (${_rhw_fail_context} — #882/#1232) — skontroluj divisor/projektory/zataz." >&2
         exit 1
         ;;
     esac
@@ -2263,6 +2440,12 @@ echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #17
 # PERMANENTLY at 1/FAILURE -- even after the device becomes free again. Unlimited retry means the
 # burn unit's next scheduled attempt (every RestartSec=3) reclaims the device instead of dying
 # forever, once the #894 udev fix stops production from re-stealing it.
+# issue 1198: this burn-transient unit must also carry the issue-1193 over-rate self-heal
+# env, mirroring cam2's production overrate-selfheal-canary drop-in -- a burn session that
+# opens the ShadowCast grabber in its sustained over-rate mode (roughly 61.3 fps) must
+# self-heal (USB reset + exit 77 + this unit's own on-failure restart policy) exactly like
+# production does, instead of degrading every cadence window for the rest of the run
+# (three burn runs on 2026-08-30 stayed degraded the whole session for lack of this env).
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 CAM1_BURN_UNIT="camera-box-burn-${RUN_ID}"
 # #749: sweep stale binaries BEFORE the scp below -- a full /tmp (a prior run's own cleanup()
@@ -2284,7 +2467,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
      --property=Restart=on-failure --property=RestartSec=3 --property=StartLimitIntervalSec=0 \
      --property=StandardOutput=append:/tmp/cbox-burn.log --property=StandardError=append:/tmp/cbox-burn.log \
      \$CPU_AFFINITY_BURN_PROPERTY \
-     --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
+     --setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
      --setenv=CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      $CAM1_BURN_BIN"
 sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
@@ -2319,12 +2502,14 @@ mv_reverify_or_escalate "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 # Re-enabling a retired camera (e.g. cam5) is adding it to CAMERA_ACTIVE_SET there; this loop
 # picks it up automatically, no change needed here.
 # issue 1170: cam2 is deployed as a camera-under-test node ONLY while it is a MEASURED camera
-# (cam2 in CAMERA_ACTIVE_SET). Its ShadowCast capture leg is retired until the card swap (issue
-# 1198), so with the default active set it is NOT seeded here — its PAINTER role (the painter step
-# below, keyed off PAINTER_IP) is UNAFFECTED. Re-adding "cam2" to CAMERA_ACTIVE_SET (camera-set.sh)
-# restores this deploy automatically, one line. The list starts EMPTY and is conditionally seeded so
-# a plain default run genuinely excludes cam2 (before this the cam2 seed was unconditional, keyed off
-# PAINTER_IP, so plain set-removal did not exclude it).
+# (cam2 in CAMERA_ACTIVE_SET) — gated on the exact same `camera_is_active cam2` check just below,
+# currently TRUE (cam2 is back in the default active set as of issue 1198: the owner ruled the
+# ShadowCast "hardware-defective" diagnosis wrong and refused the card swap this section used to
+# describe). Its PAINTER role (the painter step below, keyed off PAINTER_IP) is UNAFFECTED either
+# way. Dropping "cam2" from CAMERA_ACTIVE_SET (camera-set.sh) again would drop this deploy too, one
+# line, no other edit needed. The list starts EMPTY and is conditionally seeded so a run whose
+# active set excludes cam2 genuinely excludes it here too (before this the cam2 seed was
+# unconditional, keyed off PAINTER_IP, so plain set-removal did not exclude it).
 CAMBOX_SECONDARY_DEPLOY=()
 if camera_is_active cam2; then
   CAMBOX_SECONDARY_DEPLOY+=("cam2=$PAINTER_IP=$BURN_CAM2_RUN_ID")
@@ -2363,7 +2548,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
          --property=Restart=on-failure --property=RestartSec=3 --property=StartLimitIntervalSec=0 \
          --property=StandardOutput=append:/tmp/cbox-burn-${_cn}.log --property=StandardError=append:/tmp/cbox-burn-${_cn}.log \
          \$CPU_AFFINITY_BURN_PROPERTY \
-         ${_cnodisplay_setenv}--setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$_cburn \
+         ${_cnodisplay_setenv}--setenv=CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL=1 --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$_cburn \
          --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
          $_cbin"
   done
@@ -2825,28 +3010,84 @@ fi
 # healable, and under this script's `set -euo pipefail` a bare non-zero would abort the whole run
 # (the #1133 report-only-probe class); an `if` suppresses `set -e` inside it.
 . "$HERE/lib/ndi-name-selfheal.sh"
+# #1233: content-INDEPENDENT leg liveness — the abort signal is now strih's `genlock-fifo audit
+# received=` counter DELTA per input (the #797/#1052 tap), NOT the old pixel-hash of preview
+# screenshots (which false-aborted during the [2b/8] deploy wave: a re-attaching receiver holds the
+# last frame → identical hashes even on a live leg). The lib reuses mv_reverify_probe_raw /
+# mv_reverify_extract_received (mv-reverify-escalate.sh, already sourced above) + frozen_input_classify.
+. "$HERE/lib/frozen-cam-received.sh"
+_FROZEN_CAM_SOURCES_EFFECTIVE="${FROZEN_CAM_SOURCES:-$(camera_active_ndi_sources_csv)}"
+
+# #1233 REPORT-ONLY: run the OLD pixel-hash gate (frozen-camera-gate.py) ONCE as a diagnostic line
+# only — it warms each input onto PREVIEW (#747 side-effect, preserved) and its FROZEN/PASS verdict
+# is logged, but it NEVER aborts (a static-but-live receiver frame reads FROZEN). Bounded by a
+# timeout so its per-source warm-up cannot dominate the pre-record budget (#747/#1223 painter slack).
+# #1233 review 🟡: the per-source PREVIEW warm-up (3s) + 8×1s samples + screenshots across the ~7
+# active sources is ≥ ~80-100s on a loaded 4K strih, so a 90s bound routinely mislabelled a genuine
+# TIMEOUT as FROZEN (polluting the pixel-vs-received disagreement evidence this report exists to
+# collect) and truncated the #747 warm-up for tail-of-list sources. Capture the rc, label 124 as a
+# distinct TIMEOUT, and default the bound to 180s (report-only, well under the #1223 painter slack).
+frozen_pixel_verdict=PASS
+frozen_pixel_rc=0
+timeout "${FROZEN_CAM_PIXEL_REPORT_TIMEOUT_S:-180}" python3 "$HERE/frozen-camera-gate.py" \
+    --host "$STRIH" \
+    --threshold   "${FROZEN_CAM_THRESHOLD:-3}" \
+    --samples     "${FROZEN_CAM_SAMPLES:-8}" \
+    --sources     "$_FROZEN_CAM_SOURCES_EFFECTIVE" \
+    --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}" >/dev/null 2>&1 || frozen_pixel_rc=$?
+if   [ "$frozen_pixel_rc" -eq 0 ];   then frozen_pixel_verdict=PASS
+elif [ "$frozen_pixel_rc" -eq 124 ]; then frozen_pixel_verdict=TIMEOUT
+else                                      frozen_pixel_verdict=FROZEN
+fi
+echo "    [frozen-camera-gate] #1233 pixel-hash REPORT-ONLY: ${frozen_pixel_verdict} (content-dependent screenshot check — NOT the abort signal)"
+
+# #1233 ABORT SIGNAL: received= delta per input, BOUNDED RETRY (FROZEN_CAM_ATTEMPTS) still covers the
+# post-[3/8] / deploy-wave reconnect — a source whose sender is briefly down reads FROZEN/INCONCLUSIVE,
+# settles (+#1158 self-heal), then RECOVERS to ALIVE (breaks out, PASS). A GENUINELY stuck camera
+# never reaches ALIVE. #1233 review 🟡: the abort keys on whether ANY attempt PROVED a freeze
+# (frozen_proven) — NOT the final attempt alone — so a transient glitch (a timed-out ssh read →
+# READ_FAIL/INCONCLUSIVE) on the last attempt can never ERASE a freeze already proven across earlier
+# attempts. An all-INCONCLUSIVE run (never once proven FROZEN, never ALIVE) still WARN_PASSes.
 frozen_ok=0
+frozen_recv_verdict=""
+frozen_proven=""
 for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
-  if python3 "$HERE/frozen-camera-gate.py" \
-      --host "$STRIH" \
-      --threshold   "${FROZEN_CAM_THRESHOLD:-3}" \
-      --samples     "${FROZEN_CAM_SAMPLES:-8}" \
-      --sources     "${FROZEN_CAM_SOURCES:-$(camera_active_ndi_sources_csv)}" \
-      --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}"; then
-    frozen_ok=1
-    break
-  fi
+  frozen_recv_verdict="$(frozen_cam_received_read_and_verdict "$STRIH" "$_FROZEN_CAM_SOURCES_EFFECTIVE")"
+  case "$frozen_recv_verdict" in
+    ALIVE)
+      echo "    [frozen-camera-gate] received= ALIVE — every checked strih input advanced across the window (#1233)"
+      frozen_ok=1
+      break
+      ;;
+    FROZEN:*)
+      frozen_proven="$frozen_recv_verdict"
+      echo "    [frozen-camera-gate] received= not advancing on ${frozen_recv_verdict#FROZEN:} (counter stuck — a leg is not delivering)"
+      ;;
+    *)
+      echo "    [frozen-camera-gate] received= ${frozen_recv_verdict} — could not PROVE liveness this attempt (no audit line / unreadable log; not a proven freeze)"
+      ;;
+  esac
   if [ "$frozen_attempt" -lt "$FROZEN_CAM_ATTEMPTS" ]; then
     if ndi_name_selfheal_run "$STRIH" "$CAMERA_ACTIVE_SET" "$HERE"; then
       echo "    [frozen-camera-gate] #1158 auto-revive re-enforced an emptied/drifted NDI mapping — re-sampling after the settle"
     fi
-    echo "    [frozen-camera-gate] attempt ${frozen_attempt}/${FROZEN_CAM_ATTEMPTS} FROZEN — settling ${FROZEN_CAM_RETRY_SLEEP}s for the post-[3/8] NDI reconnect, then re-sampling"
+    echo "    [frozen-camera-gate] attempt ${frozen_attempt}/${FROZEN_CAM_ATTEMPTS} not ALIVE — settling ${FROZEN_CAM_RETRY_SLEEP}s for the post-[3/8] NDI reconnect, then re-sampling"
     sleep "$FROZEN_CAM_RETRY_SLEEP"
   fi
 done
 if [ "$frozen_ok" -ne 1 ]; then
-  echo "    [frozen-camera-gate] FROZEN on every one of ${FROZEN_CAM_ATTEMPTS} attempts — a camera is GENUINELY stuck; aborting (#365)"
-  exit 1
+  # #1233 review 🟡: decide on the PROVEN-freeze verdict if any attempt proved one, else the final
+  # attempt's verdict — so a proven freeze aborts even when the last read glitched, while an
+  # all-INCONCLUSIVE/READ_FAIL run (nothing ever proven) WARN_PASSes.
+  case "$(frozen_cam_gate_should_abort "$frozen_ok" "${frozen_proven:-$frozen_recv_verdict}")" in
+    ABORT)
+      echo "    [frozen-camera-gate] received= FROZEN on every one of ${FROZEN_CAM_ATTEMPTS} attempts — a camera is GENUINELY stuck; aborting (#365/#1233)"
+      exit 1
+      ;;
+    *)
+      echo "    [frozen-camera-gate] WARN (#1233): could NOT prove leg liveness via received= after ${FROZEN_CAM_ATTEMPTS} attempts (verdict='${frozen_recv_verdict:-none}') — NOT a proven freeze, so NOT aborting (the leg is re-proven downstream by the QR sweep). Investigate the strih OBS-log tap if this recurs." >&2
+      ;;
+  esac
 fi
 
 echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors must not already be rendering below floor (target − tolerance) before we commit a ~40-min run; an unreadable box / a box not yet on the #771 genlock build is report-only, only a CONFIRMED sustained collapse aborts (never false-abort a CI gate)"
@@ -3661,6 +3902,31 @@ else
   echo "[4i/8align] #1003 floor-3 camera alignment — SKIPPED (QR_ALIGN=$QR_ALIGN, ALL_CAMBOX=${ALL_CAMBOX:-0}, measurement_eq opt-in profile owns strih pins when on)"
 fi
 
+# [4j/8settle] issue 1221 — measured genlock-FIFO settle-wait between the [4i/8align] pin writes and
+# the record step below. Each per-source latency pin write in [4i/8align] re-parameterises that
+# input's genlock FIFO -> a relock/drain/regain era (the genlock-fifo-limit-cycle class); recording
+# immediately after measured that transient, not steady-state (verdict 950927573: per-window
+# derived_uniform_fraction 0.644 -> 0.967 monotone convergence, strict-contiguity faults
+# concentrated in the head windows, tail already >= the issue-1142 floor). This step POLLS strih's
+# genlock-fifo audit relock/underrun/dropped_due/late_hold DELTAS and proceeds once every aligned
+# input SEEN in the log has gone quiet for N consecutive passes -- a WAIT ON A MEASURED signal, not
+# a blind sleep (no-timeout-band-aids). BOUNDED by a budget and FAIL-OPEN with a loud WARN: it never
+# aborts the run and never waits unbounded (downstream gates judge the recording). Runs on the
+# ALL_CAMBOX path (same path [4i/8align] + the sweep run on); E2E_GENLOCK_SETTLE=0 disables it.
+# Placed BEFORE the freeze-watch arm below so the watcher never logs the pre-record relock era. New
+# lines only, via the sourced-helper pattern (issue 675) -- no existing anchor line is edited.
+E2E_GENLOCK_SETTLE="${E2E_GENLOCK_SETTLE:-1}"
+if [ "$E2E_GENLOCK_SETTLE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  # shellcheck source=scripts/lib/genlock-settle.sh
+  . "$HERE/lib/genlock-settle.sh"
+  GENLOCK_SETTLE_WATCHED="$(camera_align_ndi_sources_excluding_csv "${PREFLIGHT_EXCLUDED_CAMS:-}")"
+  echo "[4j/8settle] issue 1221 waiting for genlock FIFO to settle after the align pin writes (inputs: ${GENLOCK_SETTLE_WATCHED:-<none>}, budget ${E2E_GENLOCK_SETTLE_BUDGET_S:-180}s)"
+  genlock_settle_wait "$STRIH_USER" "$STRIH_PW" "$STRIH" "$GENLOCK_SETTLE_WATCHED" \
+    "${E2E_GENLOCK_SETTLE_QUIET_PASSES:-2}" "${E2E_GENLOCK_SETTLE_BUDGET_S:-180}" "${E2E_GENLOCK_SETTLE_POLL_S:-7}"
+else
+  echo "[4j/8settle] issue 1221 genlock-FIFO settle-wait — SKIPPED (E2E_GENLOCK_SETTLE=$E2E_GENLOCK_SETTLE, ALL_CAMBOX=${ALL_CAMBOX:-0})"
+fi
+
 # #758 item 3 — arm the in-run freeze watch for the WHOLE recording window (StartRecord through
 # StopRecord), right before StartRecord. ALL_CAMBOX only (mirrors the [0/8]/[1/8] preflight + [2/8]/[2b/8] reverify's
 # own gating) — excludes any acked-offline camera.
@@ -4204,13 +4470,25 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "    ok: secondary-camera capture-rate sweep complete (#994, report-only) — any WARNING #994 / WARNING #992 lines above are informational and did not fail this gate"
 fi
 
-# #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
-# --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here
-# fired at ~DURATION, BEFORE the painter's DURATION+PAINTER_PRE_RECORD_SLACK_SECS self-exit, so it never wrote a fresh CSV and
-# a STALE leftover got pulled → a fake catastrophic FAIL (run 354002). WAIT for the painter to
-# self-exit: poll until its PROCESS is gone AND a non-empty /tmp/painter.csv freshly written THIS
-# run exists (remote mtime >= run start), bounded by its --duration-secs deadline + grace. A
-# backstop kill only fires if it overran, so the painter can never be left holding /dev/fb0.
+# #359: an UNCONDITIONAL early kill is still wrong -- frame-probe writes the ground-truth CSV
+# ONLY on a clean self-exit or a graceful shutdown (src/probe/run.rs); the old unconditional
+# `pkill -x frame-probe` here fired at ~DURATION, BEFORE the painter's own
+# DURATION+PAINTER_PRE_RECORD_SLACK_SECS self-exit deadline, so it never wrote a fresh CSV and a
+# STALE leftover got pulled → a fake catastrophic FAIL (run 354002). That history is why this
+# stayed a pure WAIT for a long time. #1223 revises it: since issue 1186, frame-probe installs a
+# SIGTERM handler that runs the SAME teardown as a clean self-exit (writes the CSV + marker log,
+# blanks fb0) -- live-proven by a systemd stop of the permanent painter unit producing the
+# identical teardown sequence. So a GRACEFUL term sent AFTER the recording has already stopped is
+# safe and deliberate (never an early/mid-recording kill, which would still be wrong): it makes
+# the wait below succeed within seconds regardless of how large the pre-record slack above is,
+# instead of the wait idling out that whole slack on every normal run.
+sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+  "pkill -TERM -x frame-probe 2>/dev/null; true"
+# WAIT for the painter to self-exit (whether from the graceful term just sent, or its own
+# --duration-secs deadline): poll until its PROCESS is gone AND a non-empty /tmp/painter.csv
+# freshly written THIS run exists (remote mtime >= run start), bounded by its --duration-secs
+# deadline + grace. A backstop kill only fires if it overran, so the painter can never be left
+# holding /dev/fb0.
 PAINTER_EXIT_DEADLINE=$(( PAINTER_LAUNCH_EPOCH + DURATION + PAINTER_PRE_RECORD_SLACK_SECS ))
 PAINTER_WAIT_UNTIL=$(( PAINTER_EXIT_DEADLINE + 45 ))   # 45s grace past the painter self-exit
 echo "    #359 waiting for the cam2 painter to self-exit + write a fresh CSV (until $(date -d "@$PAINTER_WAIT_UNTIL" '+%H:%M:%S' 2>/dev/null || echo "$PAINTER_WAIT_UNTIL"))"
@@ -4255,11 +4533,19 @@ fi
 # against stale ground truth (a stale /tmp/painter.csv produced a fake 14.9h-offset catastrophic
 # FAIL on run 354002). The CSV (header `tick,gen_ts_ns,flip_ts_ns`; gen_ts_ns = CLOCK_REALTIME
 # epoch ns) must be present+non-empty, span ≈ DURATION (not a tiny ~40s stale file), and its
-# gen_ts_ns must overlap THIS run's wall clock (not hours off from RUN_START_EPOCH). set +e is
+# gen_ts_ns must overlap the painter's OWN launch moment (issue 1241: anchored to
+# PAINTER_LAUNCH_EPOCH, falling back to RUN_START_EPOCH if that was never set) — not hours off from
+# when the painter itself started painting. A long-but-legitimate pre-[3/8] phase (cold [1/8] build
+# after a version bump, a longer #1233 frozen-gate settle with more cameras) can push the painter
+# launch well past the harness's own start, and the old RUN_START_EPOCH-anchored comparison
+# false-FATALed a genuinely fresh CSV on exactly that shape (run 33392043681, against the CI
+# workflow's DURATION=300 default — full-path-e2e.yml: painter launched 1005s after harness start,
+# span 845s fully covering the actual recording window, so the old bound of dur+600=900s
+# false-rejected an offset of 1005s). set +e is
 # active here, so the gate exits non-zero EXPLICITLY (the EXIT trap still restores the rig). The
 # verdict logic lives in the pure, unit-tested painter_csv_freshness() (lib sourced above).
 read -r PAINTER_VERDICT PAINTER_SPAN PAINTER_OFFSET <<EOF
-$(painter_csv_freshness "$PAINTER_CSV" "$RUN_START_EPOCH" "$DURATION")
+$(painter_csv_freshness "$PAINTER_CSV" "${PAINTER_LAUNCH_EPOCH:-$RUN_START_EPOCH}" "$DURATION")
 EOF
 if [ "$PAINTER_VERDICT" != "OK" ]; then
   echo "FATAL #359: painter ground-truth CSV not fresh ($PAINTER_VERDICT): span=${PAINTER_SPAN}s" >&2
@@ -4366,11 +4652,16 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
   VERDICT_ARGS+=(--av-marker-log "$MARKER_CSV")
   echo "    #312 item 2: --av-marker-log $MARKER_CSV (fused all_cambox_av_sync)"
 fi
-# #624 deliverable 4 / #312 item 2 PR B: the +/-20ms per-camera A/V-offset gate measures each
-# camera's DEVIATION from AV_EXPECTED_MS (default 0 -- the operator's live #398 dock dialed to
-# ~0 in practice), not from a hardcoded 0. Override when the dock is intentionally dialed to a
-# nonzero value. Always passed (matches the CLI's own default) so the gate is explicit in the
-# printed command, not silently implicit.
+# #624 deliverable 4 / #312 item 2 PR B: the per-camera A/V-offset gate measures each camera's
+# DEVIATION from AV_EXPECTED_MS -- the EXPECTED MEASURED offset. #1178 RE-DERIVATION (2026-08-29):
+# the -92 default was a STALE-PAINTER artifact (issue 1138 class -- an un-pinned cam2 frame-probe
+# painter emitted the QPSK marker without its own emit-delay compensation). With the marker delay
+# now compensated AT SOURCE (issue-1138 painter redeploy sha f42c66917455), a correctly aligned rig
+# MEASURES ~0 again, so the default returns to 0. This value MIRRORS recording-verdict's
+# av_window::RIG_VIDEO_LEG_OFFSET_MS (the source of truth; drift-guarded by
+# tests/harness_av_expected_calibration_parity_1178.rs). Override for an operator-dialed value, or
+# after a rig-verified physical video-chain change re-derives a genuine non-zero leg.
+# Always passed so the gate is explicit in the printed command, not silently implicit.
 AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
 # #1003: in measurement-eq mode the A/V gate must expect the value the pin+hold DESIGN implies
 # (the profile's coherent av_expected — derived so the equalized-deep pins + rebalanced hold land

@@ -53,9 +53,14 @@ GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 
 def active_camera_numbers() -> tuple:
     """#893 -- the camera numbers to sweep, derived from CAMERA_ACTIVE_SET (env var, default
-    "cam3" -- issue 1170: cam2's camera-under-test role retired [grabber cure-decay] -- same read convention
-    set-ndi-mapping.py's DEFAULT_ACTIVE_SET already uses), NEVER a literal N=1..7 range
-    (.claude/rules/camera-active-set.md).
+    "cam1 cam2 cam3 cam4 cam5 cam6 cam7" -- issue 1198 (2026-08-27): cam1 + cam2 RESTORED, both
+    healthy on a live journal check, owner refused the physical card swap; issue 1216
+    (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter fitted; issue 1217 (same day):
+    cam5 OUT again -- a DEAD_PORT leg on the new splitter (flat static frame, siblings cam6/cam7
+    read colour); issue 1216 completion (2026-08-30, owner directive "kamery od 1-7 bezia" after
+    a physical cable reseat): cam4 (#947) and cam5 (DEAD_PORT) BOTH rejoin -- the full
+    seven-camera fleet -- same read convention set-ndi-mapping.py's DEFAULT_ACTIVE_SET already
+    uses), NEVER a literal N=1..7 range (.claude/rules/camera-active-set.md).
 
     This used to be a hardcoded `CAMERAS = (1, 2, 3, 4, 5, 6, 7)` tuple -- the exact bug shape
     that let this script sweep+report RETIRED cameras' pins (cam5/6/7) as if they meant
@@ -64,7 +69,7 @@ def active_camera_numbers() -> tuple:
     upward). Read FRESH on every call (never cached at import time) so a caller/test can
     override the env var per-invocation.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam3")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
     out = []
     for tok in raw.replace(",", " ").split():
         tok = tok.strip()

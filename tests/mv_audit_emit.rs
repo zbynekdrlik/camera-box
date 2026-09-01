@@ -66,7 +66,11 @@ fn budget_header_carries_the_pure_floor_and_window_constants() {
     let hdr = read(OBS_BUDGET);
     assert!(
         hdr.contains("static inline double obs_multiview_floor_fps(double target_fps)"),
-        "{OBS_BUDGET}: #771/#776 pure target floor helper gone — the C log line and the Rust gate would diverge."
+        "{OBS_BUDGET}: #771/#776/#1212 pure target floor helper gone (or grew params back) — the C log line and the Rust gate would diverge. #1212 retired the issue-1110 area sentinel, so the helper takes only target_fps."
+    );
+    assert!(
+        !hdr.contains("MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX"),
+        "{OBS_BUDGET}: #1212 issue-1110 area sentinel constant is back — the floor must be area-independent (a 4K MV holds median 30fps, floor 28), so the constant and its report-only branch must be gone."
     );
     assert!(
         hdr.contains("#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL"),
@@ -75,6 +79,27 @@ fn budget_header_carries_the_pure_floor_and_window_constants() {
     assert!(
         hdr.contains("#define MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS 2.0"),
         "{OBS_BUDGET}: #771 floor tolerance constant gone."
+    );
+}
+
+#[test]
+fn render_display_floor_call_is_area_independent_1212() {
+    // #1212: the emit site feeds ONLY target_fps into the area-independent floor (the issue-1110
+    // render-area sentinel is retired). The cx=/cy= fields stay on the printed audit line for
+    // observability, but they no longer enter the floor computation.
+    let src = read(OBS_DISPLAY);
+    assert!(
+        src.contains("obs_multiview_floor_fps(target_fps)"),
+        "{OBS_DISPLAY}: #1212 emit site floor call must take only target_fps (the area sentinel is retired)."
+    );
+    assert!(
+        !src.contains("obs_multiview_floor_fps(target_fps, display->cx, display->cy)"),
+        "{OBS_DISPLAY}: #1212 the issue-1110 area-aware floor call (passing display->cx/cy) is back — the floor must be area-independent."
+    );
+    // The audit line itself must still carry the render area for observability.
+    assert!(
+        src.contains("cx=%u cy=%u"),
+        "{OBS_DISPLAY}: #771/#1212 the multiview-audit line no longer prints cx=/cy= — the render area is still useful observability."
     );
 }
 

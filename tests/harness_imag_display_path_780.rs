@@ -90,7 +90,7 @@ fn verdict_emits_one_row_per_facet_780() {
     // HDMI the xrandr primary, maxperf pinned+up, tap on, and (issue 1152 M4) the DRM-lease
     // output dormant (config absent -- the fleet DEFAULT-OFF state).
     let g = "PICOM_PGREP|ok\nPICOM_PROC|\nPICOM_SERVICE|disabled\n\
-             XRANDR|ok\nPRIMARY_OUTPUT|HDMI-1\n\
+             XRANDR|ok\nPRIMARY_OUTPUT|HDMI-1\nMONITOR_ORIGINS|+0+0 +1920+0\n\
              MAXPERF_APPLICABLE|1\nMAXPERF_MIN|1400\nMAXPERF_RP0|1400\n\
              MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\n\
              TAPCONF|present\nTAPCONF_TAPPING|on\n\
@@ -100,6 +100,7 @@ fn verdict_emits_one_row_per_facet_780() {
         "picom_process",
         "picom_service",
         "hdmi_primary",
+        "layout",
         "igpu_maxperf",
         "tap_conf",
         "drm_output",
@@ -219,6 +220,65 @@ fn hdmi_primary_unknown_when_not_gathered_1146() {
     assert_eq!(status_of(&lines, "hdmi_primary"), "UNKNOWN");
 }
 
+// ---- layout (issue 1146): the eDP panel + HDMI projector must be EXTENDED (distinct xrandr
+// origins), never MIRROR (both outputs at the SAME origin). A mirror is two independent 60 Hz CRTCs
+// at one position: present-vsync (#1107 EGL swapInterval(1)) locks to only ONE, the other free-runs
+// -> a walking tear line on the projector. hdmi_primary stayed OK through the whole mirror drift
+// (HDMI genuinely WAS primary), so THIS facet is what actually catches it. --------------------------
+
+#[test]
+fn layout_ok_when_extended_distinct_origins_1146() {
+    // Two active outputs at DISTINCT origins = the committed extended layout -> OK.
+    let lines = verdict("XRANDR|ok\nMONITOR_ORIGINS|+0+0 +1920+0");
+    let l = facet_line(&lines, "layout");
+    assert_eq!(status_of(&lines, "layout"), "OK", "{l}");
+}
+
+#[test]
+fn layout_drift_when_mirror_shared_origin_1146() {
+    // Both active outputs at the SAME origin (+0+0) = MIRROR -> the dual-CRTC tearing beat -> DRIFT.
+    let lines = verdict("XRANDR|ok\nMONITOR_ORIGINS|+0+0 +0+0");
+    let l = facet_line(&lines, "layout");
+    assert!(l.contains("|DRIFT|"), "a mirror layout must DRIFT: {l}");
+    assert!(
+        l.to_uppercase().contains("MIRROR"),
+        "the drift message must name the mirror beat: {l}"
+    );
+}
+
+#[test]
+fn layout_unknown_when_xrandr_missing_never_a_false_verdict_1146() {
+    // #833 discipline: a missing xrandr must be UNKNOWN by name, never a false OK/DRIFT.
+    let lines = verdict("XRANDR|missing");
+    let l = facet_line(&lines, "layout");
+    assert!(
+        l.contains("|UNKNOWN|"),
+        "missing xrandr must be UNKNOWN: {l}"
+    );
+    assert!(l.to_lowercase().contains("xrandr"), "must name xrandr: {l}");
+}
+
+#[test]
+fn layout_unknown_when_origins_not_gathered_1146() {
+    // xrandr present but the origins line was not gathered (truncated gather) -> UNKNOWN, never DRIFT.
+    let lines = verdict("XRANDR|ok");
+    assert_eq!(status_of(&lines, "layout"), "UNKNOWN");
+}
+
+#[test]
+fn layout_unknown_when_single_output_1146() {
+    // A single active output (X unreachable over ssh, or a genuinely single-monitor box) is not a
+    // proven mirror -> UNKNOWN, never a false DRIFT.
+    let lines = verdict("XRANDR|ok\nMONITOR_ORIGINS|+0+0");
+    assert_eq!(status_of(&lines, "layout"), "UNKNOWN");
+}
+
+#[test]
+fn layout_unknown_when_not_gathered_1146() {
+    let lines = verdict("");
+    assert_eq!(status_of(&lines, "layout"), "UNKNOWN");
+}
+
 // ---- igpu_maxperf (the Intel GPUPowerMizerMode=1 counterpart, #841) ----------------------------
 
 #[test]
@@ -328,6 +388,11 @@ fn gather_remote_snippet_is_nonempty_and_names_the_sources_780() {
     assert!(
         out.contains("xrandr") && out.contains("XRANDR") && out.contains("PRIMARY_OUTPUT"),
         "snippet must probe xrandr and gather the primary output (issue 1146): {out}"
+    );
+    // issue 1146 (MIRROR facet): the snippet must gather the per-output origins for the layout facet.
+    assert!(
+        out.contains("MONITOR_ORIGINS"),
+        "snippet must gather the monitor origins for the layout facet (issue 1146): {out}"
     );
 }
 

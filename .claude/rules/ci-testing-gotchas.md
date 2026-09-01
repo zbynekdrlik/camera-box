@@ -732,3 +732,105 @@ Two things make this a recurring trap for ANY new sourced-lib helper that greps:
    the lib under `bash -c 'set -euo pipefail; . lib; …'`, never only `-uo` — a `-uo`-only local
    check reproduces the harness's blind spot. (Caught here only by a fresh-context reviewer running
    the lib under the real `-e` context; the `-uo` runner + harness both passed while the bug was live.)
+
+## A NEW real state mutation added BEFORE `cleanup()`'s own EXIT trap installs needs its OWN temporary trap (issue 808, 🔴 review finding)
+
+`scripts/recording-e2e.sh`'s `trap cleanup EXIT HUP INT TERM` doesn't install until far down the
+file (behind ~1400 lines of `[0/8]` preflight, all of it before `cleanup()` is even armed). That
+region has ~30 ordinary `exit 1` sites (reachability, DanteSync, version/parity, clock-offset,
+leg-health, and more — common expected failure modes, not edge cases). Adding a NEW step in that
+region that performs a REAL, must-be-undone state mutation (issue 808: `systemctl stop
+bkshading-relay` on two boxes) silently breaks the restore promise the moment ANY of those 30+
+sites fires — every prior pre-trap-declared variable in this file (`IMAG_PREV_SCENE`,
+`AV_SYNC_APPLY_OFFSET_MS`, `STRIH_PROG_SOURCE`/`STREAM_PROG_SOURCE`) only ever gets its actual
+MUTATION performed AFTER the trap installs; issue 808's pause was the first to mutate real
+external state (not just declare a variable) before line ~2100, and a fresh-context reviewer
+caught the gap a self-review missed.
+
+**Fix pattern, reusable for any future pre-trap mutation:** install a TEMPORARY, single-quoted
+`trap '...' EXIT HUP INT TERM` immediately after the mutating step, whose body undoes exactly
+that mutation. A later `trap ... EXIT` on the SAME signal set completely REPLACES the earlier
+handler (standard bash semantics) — so this temporary trap is automatically superseded the
+instant `cleanup()`'s own real trap installs further down, and it needs no explicit teardown.
+Pin the ordering with a static-anchor test (`s.find("bkshading_e2e_pause_stop ") < s.find("trap
+'\n") < s.find("' EXIT HUP INT TERM") < s.find("trap cleanup EXIT HUP INT TERM")` — see
+`tests/harness_bkshading_e2e_pause_808.rs`'s two ordering tests for the worked pattern), not just
+a functional test of the mutation/restore pair in isolation.
+
+**What this does NOT fix, and doesn't need to:** a genuine SIGKILL of the whole harness stays
+structurally untrappable by ANY mechanism (the file's own `#878`-area comment already documents
+this as an accepted risk for other pre-trap state, e.g. `camera-box.service` itself) — recovery
+from THAT class of loss is the existing NEXT-RUN startup-self-heal pattern, not something an
+in-run trap can ever cover. Don't over-scope a pre-trap-mutation fix into also solving SIGKILL
+recovery; that is separate, pre-existing, accepted scope.
+
+## Generating a `.rs` test file's contents via a Python script: a plain `'\t'`/`'\n'` inside a Python (non-raw) triple-quoted string silently becomes a REAL tab/newline BYTE in the written Rust source (#1216 completion)
+
+Since Tier-0 blocks all local cargo compilation, editing a large `tests/*.rs` file in this repo
+often goes through a small `python3 <script>.py` that does a string `.replace()` on the file's
+text (the pattern this whole CLAUDE.md/rules-file family already recommends for surgical,
+`old.count(...) == 1`-verified edits). When the NEW Rust text you're inserting itself contains a
+Rust string literal meant to hold `\t`/`\n` (e.g. a `printf 'ACTIVE\t%s\n'` line inside an `r#"..."#`
+raw-string bash harness, or a `line.split_once('\t')` char literal), writing that text as a
+PLAIN Python string (`"printf 'ACTIVE\t%s\n' ..."` or a non-`r`-prefixed triple-quoted block) has
+Python itself interpret `\t`/`\n` as escape sequences and write the ACTUAL tab/newline BYTE into
+the `.rs` file — not the two-character sequence `\` + `t` the Rust source is supposed to contain.
+
+Two different failure shapes result, and only ONE of them is caught by `cargo fmt --all --check`:
+
+1. **Inside a Rust CHAR LITERAL** (`'\t'`) — a real tab byte breaks Rust syntax outright
+   (`character constant must be escaped: \`\t\``), so `cargo fmt --all --check` (the Tier-0-legal
+   syntax-check net this repo relies on when `cargo build`/`test` are blocked) DOES catch it —
+   but only because char literals are strict; this is the lucky case.
+2. **Inside an `r#"..."#` RAW STRING** (e.g. a bash heredoc's own `printf 'FOO\t%s\n' "$VAR"`
+   line) — a raw string accepts ANY byte including a literal tab/newline, so `cargo fmt` reports
+   NOTHING wrong; the file "compiles clean" while silently embedding the wrong shell text (a
+   multi-line single-quoted bash string with an embedded raw newline instead of the intended
+   `\n` escape sequence functions similarly in bash today, since printf still copies a literal
+   newline through unchanged — but it is fragile, differs from every sibling helper's own style
+   in the same file, and the NEXT accidental Python-side round-trip through this same bug could
+   land the raw byte somewhere printf-semantics do NOT tolerate it).
+
+**Fix: when a Python `.replace()` script's `new` string must contain a LITERAL `\t`/`\n` destined
+for the Rust source (not an actual tab/newline you want Python itself to act on), write it as a
+Python RAW string** (`r"printf 'ACTIVE\t%s\n' ..."` or `r'''...'''`) so Python passes the two
+characters `\` + `t` straight through unmodified. **Verify after writing, every time:** `cat -A
+<file> | grep -n '\^I'` (shows a literal tab as `^I` under `cat -A`) must return NOTHING for any
+line that is supposed to hold a Rust/bash `\t` escape sequence — a hit means the Python script
+wrote a raw byte instead of the two-char escape, exactly this bug. `cargo fmt --all --check`
+alone is NOT sufficient proof the generated Rust text is correct; it only catches shape 1 above.
+
+## `$GITHUB_SHA` on a `pull_request`-triggered job is the SYNTHETIC merge commit, never the PR's head — any commit-scoped `gh run list --commit` resolution wired into a `pull_request` workflow needs `github.event.pull_request.head.sha` instead (issue 1244 review catch)
+
+Any script that resolves a CI artifact "for THIS run's own commit" via `gh run list --commit
+"$GITHUB_SHA" ...` is silently WRONG the moment it runs inside a `pull_request`-triggered job
+(this repo's `full-path-e2e.yml` is exactly that: `on.pull_request: branches: [main]`). GitHub
+Actions sets `$GITHUB_SHA` on a `pull_request` event to the **synthetic merge commit**
+(`refs/pull/N/merge`), not the PR's real head commit — and a workflow that (like `ci.yml`) triggers
+only on `push: [dev, main]` NEVER produces a run whose `headSha` is that merge sha. So a bare
+`$GITHUB_SHA` fallback in a commit-scoped resolution doesn't just occasionally miss — it resolves
+NOTHING, ever, on every automatic `pull_request` run, turning what might have been an intermittent
+gap into a 100% permanent one.
+
+**Confirmed live (issue 1244, 2026-08-31):** a fresh commit-scoped fix to
+`scripts/lib/camera-box-parity-align.sh`'s `cambox_align_deploy()` (replacing a "newest on branch"
+`gh run list --branch dev` resolution — itself proven non-deterministic inside the E2E job's own
+runner environment) added a `$GITHUB_SHA` fallback with the comment "set by every GitHub Actions
+job … recording-e2e.sh … inherits it with no explicit wiring". A fresh-context adversarial review
+caught this before merge: `gh run view` on the two incident runs showed `event: pull_request`;
+`gh run list --commit <merge_sha>` on the then-open PR #1211 returned EMPTY (`gh run list --commit
+<head_sha>` found the run). The existing `#703` step in the SAME `full-path-e2e.yml` ALREADY solves
+this exact problem — `SHA="${{ github.event.pull_request.head.sha }}"` in its own shell env, wired
+explicitly in the calling step's `env:` block, precisely because the same anomaly bites there too.
+
+**Fix + the rule going forward:** any NEW (or edited) commit-scoped `gh run list --commit`
+resolution that a `pull_request`-triggered workflow step invokes MUST have its candidate sha wired
+EXPLICITLY from that step's own `env:` block — `SOME_VAR: ${{ github.event_name == 'pull_request'
+&& github.event.pull_request.head.sha || github.sha }}` (the `|| github.sha` arm keeps a
+`workflow_dispatch`/`push` trigger correct, where `$GITHUB_SHA` already IS the real candidate) —
+never rely on a bare `$GITHUB_SHA`-reading fallback inside the sourced script/lib itself to cover
+the `pull_request` case. Pin the wiring with a static-anchor test reading the workflow YAML text
+(the existing `tests/harness_full_path_e2e_workflow.rs` `step_block` pattern — slice between the
+step's `name:` and its `run:` line, assert the new env var name AND
+`github.event.pull_request.head.sha` both appear inside that slice) so a future edit that drops the
+wiring fails loudly instead of silently reintroducing the 100%-refuse trap.

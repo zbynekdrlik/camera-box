@@ -764,8 +764,10 @@ jobs:
           if ($disp -notmatch [regex]::Escape('if (audit_elapsed >= MULTIVIEW_AUDIT_WINDOW_NS)')) { Write-Error "obs-display.c: #771 ~5s audit-window gate gone -- the multiview-audit line no longer emits periodically"; exit 1 }
           if ($disp -notmatch [regex]::Escape('display->render_audit_render_count++;')) { Write-Error "obs-display.c: #771 real-render counter not bumped -- rendered_fps would always read 0"; exit 1 }
           if ($disp -notmatch [regex]::Escape('display->render_audit_id = ++next_audit_id;')) { Write-Error "obs-display.c: #771 stable per-projector audit id assignment gone -- monitor=N would be unstable"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('obs_multiview_floor_fps(target_fps)')) { Write-Error "obs-display.c: #1212 emit site floor call must take only target_fps (the issue-1110 area sentinel is retired) -- else the C log line and the Rust gate would diverge"; exit 1 }
           $bud = (Get-Content "vendor/obs-studio/libobs/obs-display-budget.h" -Raw) -replace '\s+', ' '
-          if ($bud -notmatch [regex]::Escape('static inline double obs_multiview_floor_fps(double target_fps)')) { Write-Error "obs-display-budget.h: #771/#776 pure target floor helper gone -- the C log line and the Rust gate would diverge"; exit 1 }
+          if ($bud -notmatch [regex]::Escape('static inline double obs_multiview_floor_fps(double target_fps)')) { Write-Error "obs-display-budget.h: #771/#776/#1212 pure target floor helper gone (or grew params back) -- the C log line and the Rust gate would diverge (#1212 retired the issue-1110 area sentinel)"; exit 1 }
+          if ($bud -match [regex]::Escape('MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX')) { Write-Error "obs-display-budget.h: #1212 the issue-1110 area sentinel constant is back -- the floor must be area-independent (a 4K MV holds median 30fps, floor 28), so the constant and its report-only branch must be gone"; exit 1 }
           if ($bud -notmatch [regex]::Escape('#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL')) { Write-Error "obs-display-budget.h: #771 5s audit-window constant gone"; exit 1 }
           $hdr = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
           if ($hdr -notmatch [regex]::Escape('uint32_t render_audit_id;')) { Write-Error "obs-internal.h: #771 obs_display.render_audit_id missing"; exit 1 }

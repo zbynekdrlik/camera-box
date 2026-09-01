@@ -1,9 +1,9 @@
 //! #771 — mv-fps-gate binary exit-code contract (mirrors tests/harness_render_budget_gate.rs).
 //!
 //! Locks the cross-boundary behaviour of the built `mv-fps-gate` binary: a healthy
-//! `multiview-audit:` log passes (exit 0), a projector whose LATEST sample fell below its
-//! printed floor fails (exit 1), and a log with no audit line fails CLOSED (exit 2) — never a
-//! silent pass. The decision itself lives in `camera_box::mv_audit::gate_log` (unit-tested
+//! `multiview-audit:` log passes (exit 0), a projector whose window-MEDIAN cadence fell below its
+//! printed floor fails (exit 1, #1212), and a log with no audit line fails CLOSED (exit 2) — never
+//! a silent pass. The decision itself lives in `camera_box::mv_audit::gate_log` (unit-tested
 //! Tier-0); this proves the binary wires it to the right exit codes.
 
 use std::path::Path;
@@ -45,11 +45,11 @@ fn gate_binary_passes_a_healthy_log() {
     assert_eq!(run(bin, healthy), 0, "healthy MV fps must exit 0 (pass)");
 }
 
-/// A projector whose LATEST sample collapsed below its floor fails with exit 1.
+/// A projector whose window-MEDIAN cadence fell below its floor fails with exit 1 (#1212).
 #[test]
 fn gate_binary_fails_a_below_floor_collapse() {
     let bin = env!("CARGO_BIN_EXE_mv-fps-gate");
-    // monitor=1's newest sample is 9.0fps < floor 28.0 (freeze / budget starvation).
+    // monitor=1's 2-sample window median is 19.5 ((30 + 9)/2) < floor 28.0 (freeze / starvation).
     let breach = "multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080\n\
                   multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=1920 cy=1080\n";
     assert_eq!(

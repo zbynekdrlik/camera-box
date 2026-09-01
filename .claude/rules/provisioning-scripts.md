@@ -9,6 +9,18 @@ paths:
 
 # `setup-device.sh` / `verify-device.sh` — companion-script conventions (#863)
 
+## The header comment list and `usage()`'s Checks block can DISAGREE — grep BOTH, trust neither alone (issue 1213)
+
+The "document in three places" rule below assumes all three sites stay in lock-step, but they can
+drift: `(x)` ffmpeg and `(x2)` mpv are documented in the top-of-file header "Checks (all must
+pass)" comment list, but were NEVER added to `usage()`'s own heredoc Checks: doc block (found while
+adding `(af)`, issue 1213) — `usage()` jumps straight from `(o)` to `(q)` with no `(x)`/`(x2)`
+line. Two consequences: (1) `usage()`'s doc block ALONE is not proof a check does or doesn't exist
+— always cross-check the header comment list AND grep the live-flow exec section directly before
+concluding a letter is free or a check is missing; (2) when you find a gap like this while adding
+your OWN new check, backfilling the missing older entry is optional polish, not required scope —
+note it (as this entry does) rather than silently expanding your diff to fix unrelated drift.
+
 ## `setup-device.sh` never starts/restarts services live — it only writes files + `enable`s
 
 Every STEP that touches a systemd unit (camera-box.service at STEP 7, cam2-painter.service at

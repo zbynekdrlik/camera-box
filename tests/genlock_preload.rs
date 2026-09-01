@@ -2613,8 +2613,15 @@ mod vendored_source {
         let bud = squish(&vendor_file(OBS_DISPLAY_BUDGET));
         assert!(
             bud.contains("static inline double obs_multiview_floor_fps(double target_fps)"),
-            "{OBS_DISPLAY_BUDGET}: #771/#776 — the pure target floor helper is gone; the C log line \
-             and the Rust gate (src/mv_audit.rs) would diverge."
+            "{OBS_DISPLAY_BUDGET}: #771/#776/#1212 — the pure target floor helper is gone (or grew \
+             params back); the C log line and the Rust gate (src/mv_audit.rs) would diverge. #1212 \
+             retired the issue-1110 area sentinel, so the helper takes only target_fps."
+        );
+        assert!(
+            !bud.contains("MULTIVIEW_FLOOR_MAX_CALIBRATED_AREA_PX"),
+            "{OBS_DISPLAY_BUDGET}: #1212 — the issue-1110 area sentinel constant is back; the floor \
+             must be area-independent (a 4K MV holds median 30fps, floor 28), so the constant and its \
+             report-only branch must be gone."
         );
         assert!(
             bud.contains("#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL"),

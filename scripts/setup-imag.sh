@@ -349,7 +349,7 @@ else
 fi
 
 # =============================================================================
-step 2 "Network performance tuning (#486): sysctl + EEE/flow-control off on the NDI NIC"
+step 2 "Network performance tuning (#486): sysctl + EEE off, flow-control advertised on the NDI NIC"
 # =============================================================================
 # imag aggregates 6x concurrent NDI 1080p60 streams over a single USB-ethernet NIC on stock
 # buffers/EEE — exactly the jitter the cam fleet already tuned away (setup-device.sh STEP 14).
@@ -381,23 +381,24 @@ net.ipv6.conf.default.disable_ipv6 = 1
 EOF
 sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
 
-# EEE (Green Ethernet) + flow-control off, scoped to $NIC only. Two mechanisms, belt-and-
-# suspenders (some USB-ethernet chipsets don't implement these ioctls at all — `|| true`
-# throughout): (1) a networkd-dispatcher hook for interface-routable/hotplug events, and
-# (2) an immediate one-time apply now (re-applied at every boot via the governor step's rc.local).
+# EEE (Green Ethernet) off + flow-control ADVERTISED (issue 1234), scoped to $NIC only. Two
+# mechanisms, belt-and-suspenders (some USB-ethernet chipsets don't implement these ioctls at
+# all — `|| true` throughout): (1) a networkd-dispatcher hook for interface-routable/hotplug
+# events, and (2) an immediate one-time apply now (re-applied at every boot via the governor
+# step's rc.local).
 mkdir -p /etc/networkd-dispatcher/routable.d
 cat > /etc/networkd-dispatcher/routable.d/optimize-nic <<NICEOF
 #!/bin/bash
-# Disable EEE (Green Ethernet) and flow control for low latency — scoped to imag's NDI NIC only.
+# Disable EEE (Green Ethernet); advertise flow control for low latency (issue 1234) — scoped to imag's NDI NIC only.
 if [ "\$IFACE" = "${NIC}" ]; then
     ethtool --set-eee "${NIC}" eee off 2>/dev/null || true
-    ethtool -A "${NIC}" rx off tx off 2>/dev/null || true
+    ethtool -A "${NIC}" rx on tx on 2>/dev/null || true
 fi
 NICEOF
 chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
 ethtool --set-eee "$NIC" eee off 2>/dev/null || true
-ethtool -A "$NIC" rx off tx off 2>/dev/null || true
-echo "  sysctl: buffers+BBR+nodelay+IPv6-off applied; EEE/flow-control off on $NIC"
+ethtool -A "$NIC" rx on tx on 2>/dev/null || true
+echo "  sysctl: buffers+BBR+nodelay+IPv6-off applied; EEE off, flow-control advertised on $NIC"
 
 # =============================================================================
 step 3 "DanteSync (#479): pin imag's system clock to the cluster master (genlock needs it)"
@@ -426,6 +427,42 @@ if [ ! -x /usr/local/bin/dantesync ]; then
     chmod +x /usr/local/bin/dantesync
 fi
 [ -x /usr/local/bin/dantesync ] || fail "dantesync binary missing after install attempt"
+
+# #1215: install the phase_slew canary config (dantesync issue 97) so dantesync SLEWS phase
+# error smoothly instead of STEPPING it in discrete jumps on a from-scratch provision. imag-nb was
+# the ONE box on the rig that never received this -- it had no /etc/dantesync/ directory at all
+# and stepped 16x/hour of 6-7ms each, a visible hitch on the projected output every ~4 minutes.
+# The cam1-4 fleet got its copy through an out-of-band canary rollout, never this script -- this
+# is written BEFORE the systemd unit/restart below so the same restart that proves PTP re-lock
+# also picks up phase_slew on a first provision. RIG_GRANDMASTER_IP mirrors the SAME override
+# verify-imag.sh already uses (#834) so one env var controls the grandmaster everywhere.
+RIG_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
+install -d -m 755 /etc/dantesync
+cat > /etc/dantesync/config.json <<DANTECFGEOF
+{
+  "_ntp_server_examples": "sk.pool.ntp.org, europe.pool.ntp.org, time.google.com, time.cloudflare.com",
+  "http_status": {
+    "enabled": true,
+    "port": 8898
+  },
+  "ntp_server_mode": {
+    "enabled": false,
+    "max_step_us": 100000,
+    "port": 123,
+    "stratum": 3
+  },
+  "system": {
+    "gm_allowlist": [
+      "${RIG_GRANDMASTER_IP}"
+    ],
+    "phase_slew": {
+      "enabled": true
+    }
+  }
+}
+DANTECFGEOF
+chmod 644 /etc/dantesync/config.json
+echo "  #1215: /etc/dantesync/config.json installed (phase_slew.enabled=true, gm_allowlist=${RIG_GRANDMASTER_IP}) -- reprovision-durable"
 
 cat > /etc/systemd/system/dantesync.service <<EOF
 [Unit]
@@ -495,10 +532,11 @@ cat > /etc/rc.local <<EOF
 for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "\$g"; done
 for u in /sys/bus/usb/devices/*/power/control; do echo on > "\$u" 2>/dev/null; done
 for n in /sys/class/net/*/device/power/control; do echo on > "\$n" 2>/dev/null; done
-# #486: EEE/flow-control off on the rig NDI NIC — reapplied every boot (belt-and-suspenders
-# alongside step 2's networkd-dispatcher hook; some USB-ethernet chipsets reset EEE state).
+# #486/#1234: EEE off, flow-control advertised on the rig NDI NIC — reapplied every boot
+# (belt-and-suspenders alongside step 2's networkd-dispatcher hook; some USB-ethernet
+# chipsets reset EEE/pause state on power cycle).
 ethtool --set-eee ${NIC} eee off 2>/dev/null || true
-ethtool -A ${NIC} rx off tx off 2>/dev/null || true
+ethtool -A ${NIC} rx on tx on 2>/dev/null || true
 exit 0
 EOF
 chmod +x /etc/rc.local
@@ -1616,6 +1654,23 @@ gh api -H "Accept: application/vnd.github.raw" \
     > "$REC_ENC" \
     || fail "could not fetch scripts/imag_record_encoder.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$REC_ENC"
+# issue 1218/1230: imag_scenes.py LAZILY imports the obs_phase2 sibling (the shared, issue-795-safe
+# reenforce_ndi_name policy) inside enforce_ndi_names -- the ONE imag NDI-name heal point (issue 1230
+# removed the idle policy; the #1158 name-healing stays). Ride it on the SAME on-box deploy list (same
+# gh-api fetch + chmod, the #1156 sibling-install discipline) so the on-box --bootstrap heal gets the
+# discoverability-gated name recovery.
+# The import is LAZY + degrades to a direct set if this file is ever absent, so a stale box never
+# crash-loops OBS -- but a fresh provision installs it for the gated path.
+OBS_PHASE2="/usr/local/bin/obs_phase2.py"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/obs_phase2.py?ref=dev" \
+    > "$OBS_PHASE2" \
+    || fail "could not fetch scripts/obs_phase2.py from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$OBS_PHASE2"
+# issue 1230: the #1218 active-cams state file (~/.config/camera-box/imag-active-cams) was REMOVED
+# (owner ruling 2026-08-30: no idle policy). imag keeps all seven cameras named + alive, so there is
+# no active set to persist. The obs_phase2 sibling install above STAYS — the #1158 name-healing in
+# imag_scenes.enforce_ndi_names still uses the shared #795-safe obs_phase2.reenforce_ndi_name.
 
 
 # #840: install the operator start/stop scripts onto the box too -- the openbox autostart below

@@ -224,8 +224,10 @@ class TestAlignJudgesTheStableTail:
         assert res["measure_rounds_total"] <= 4        # stopped fast, no long wait
 
     def test_stable_but_not_aligned_tail_re_derives_a_floor3_plan(self, monkeypatch):
-        # converges to a static residual spread 2 -> re-derive floor-3 pins FROM THE TAIL (plan-only).
-        res = _align(monkeypatch, [10, 8, 5, 3, 2, 2, 2, 2, 2, 2, 2])
+        # converges to a static residual spread 4 -> re-derive floor-3 pins FROM THE TAIL (plan-only).
+        # #1252: 4 ids (~33 ms = 2 source frames) is a CLEARLY-real misalignment, so the plan runs;
+        # a 2-id (~16.7 ms = one source frame) spread is now the already-aligned lock-phase quantum.
+        res = _align(monkeypatch, [10, 8, 6, 4, 4, 4, 4, 4, 4, 4, 4])
         assert res["status"] == "plan-only"
         assert res["plan"]["NDI cam1"] == 3            # slowest camera floors to 3
         assert all(3 <= v <= 66 for v in res["plan"].values())  # shallow, never a deep pin
@@ -233,9 +235,11 @@ class TestAlignJudgesTheStableTail:
     def test_execute_applies_then_verifies_a_stable_aligned_tail(self, monkeypatch):
         import apply_latency_pins
         import obs_phase2
-        # phase1 converges to stable-not-aligned spread 2 (re-derive); phase2 (verify) converges aligned.
+        # phase1 converges to stable-not-aligned spread 4 (re-derive); phase2 (verify) converges aligned.
+        # #1252: spread 4 (~33 ms = 2 source frames) is a CLEARLY-real misalignment so the plan runs;
+        # a 2-id (one source frame) spread is now the already-aligned lock-phase quantum (quantum gate).
         monkeypatch.setattr(qa, "barrier_screenshot",
-                            _ScriptedBarrier([10, 8, 5, 3, 2, 2, 2, 2, 1, 0, 1, 0, 1]))
+                            _ScriptedBarrier([10, 8, 6, 4, 4, 4, 4, 4, 1, 0, 1, 0, 1]))
         monkeypatch.setattr(qa, "read_current_pins", lambda s, h, p: {x: 3 for x in SRC})
         monkeypatch.setattr(apply_latency_pins, "apply_pins", lambda ws, plan, execute: plan)
 

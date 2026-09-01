@@ -204,6 +204,51 @@ class TestBlockingClassification:
         }
         assert edr._blocking_failures(v) == []
 
+    def test_continuity_per_cambox_tolerance_override_1251(self):
+        # #1251: CAM2 carries a per-cambox tolerance override (25) because its grabber HW starves
+        # (issue 1249). When the run fails on ANOTHER box, the continuity blocking line must read
+        # each segment's OWN copies_gaps_tolerance -- so a CAM2 window at copies=18 (over the
+        # run-wide default 5, UNDER its own 25) is NOT attributed as "over tolerance", while a CAM3
+        # window over its default 5 IS named.
+        v = {
+            "overall_pass": False,
+            "all_cambox_continuity": {
+                "overall_pass": False,
+                "copies_gaps_tolerance": 5,
+                "segments": [
+                    {"cambox": "CAM2", "copies": 18, "gaps": 17, "undecodable": 0,
+                     "pass": False, "copies_gaps_tolerance": 25},
+                    {"cambox": "CAM3", "copies": 6, "gaps": 6, "undecodable": 0,
+                     "pass": False, "copies_gaps_tolerance": 5},
+                ],
+            },
+        }
+        failures = edr._blocking_failures(v)
+        cont = [lbl for lbl, _ in failures if "kontinuita" in lbl.lower()]
+        assert cont, f"continuity must still be a blocking failure: {failures}"
+        assert "CAM3" in cont[0], f"the genuinely-over box must be named: {cont[0]}"
+        assert "CAM2" not in cont[0], (
+            f"CAM2's 18 is within its own 25 override -- must NOT be attributed over-tolerance: "
+            f"{cont[0]}"
+        )
+
+    def test_continuity_per_cambox_tolerance_override_falls_back_for_old_verdicts_1251(self):
+        # An OLD verdict predating the per-window field: a segment without its own
+        # copies_gaps_tolerance falls back to the run-wide default, so classification is unchanged.
+        v = {
+            "overall_pass": False,
+            "all_cambox_continuity": {
+                "overall_pass": False,
+                "copies_gaps_tolerance": 5,
+                "segments": [
+                    {"cambox": "CAM3", "copies": 0, "gaps": 6, "undecodable": 0, "pass": False},
+                ],
+            },
+        }
+        failures = edr._blocking_failures(v)
+        cont = [lbl for lbl, _ in failures if "kontinuita" in lbl.lower()]
+        assert cont and "CAM3" in cont[0], f"fallback to run-wide tol must still name CAM3: {failures}"
+
 
 # ---------------------------------------------------------------------------
 # Ownership derivation — physical vs Claude

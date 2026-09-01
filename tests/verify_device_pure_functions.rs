@@ -1951,3 +1951,143 @@ fn verify_device_checks_mpv_present_before_q_1187() {
         "(x2) must FAIL loud (never merely warn) when mpv is missing/unrunnable: {mpv_block}"
     );
 }
+
+/// issue 1213 -- `v4l2-ctl` (package `v4l-utils`) is listed in setup-device.sh's STEP 16 apt-get
+/// install line but was found MISSING on cam3/cam4 live: the whole install line is guarded by
+/// `2>/dev/null || true`, so a per-box apt failure is swallowed silently and nothing downstream
+/// ever checks the tool actually landed. `verify-device.sh` must acceptance-check `v4l2-ctl` the
+/// same way it already does for ffmpeg (x) / mpv (x2) -- present AND runnable, not just that apt
+/// didn't error -- inserted BEFORE the (q) block so (q) stays the intentionally-LAST check, and it
+/// must FAIL loud (never merely warn) naming the missing package when the tool is absent.
+#[test]
+fn verify_device_checks_v4l2_ctl_present_before_q_1213() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let live_flow = &body[guard_pos..];
+    let af_at = live_flow
+        .find("# (af) v4l2-ctl installed")
+        .expect("(af) v4l2-ctl acceptance-check block must be present in the live flow");
+    let q_at = live_flow
+        .rfind("# (q) .bak cruft drift")
+        .expect("(q) implementation block");
+    assert!(
+        af_at < q_at,
+        "the v4l2-ctl (af) check must precede the (q) block so (q) stays last (af={af_at} q={q_at})"
+    );
+    // Scope the slice to the (af) block ALONE -- it is inserted directly before (q), with no other
+    // lettered check between them, so the block simply runs up to the (q) marker itself.
+    let af_block = &live_flow[af_at..q_at];
+    assert!(
+        af_block.contains("v4l2-ctl --version"),
+        "(af) must actually probe v4l2-ctl via `v4l2-ctl --version`: {af_block}"
+    );
+    assert!(
+        af_block.contains("fail "),
+        "(af) must FAIL loud (never merely warn) when v4l2-ctl is missing/unrunnable: {af_block}"
+    );
+    assert!(
+        af_block.contains("v4l-utils"),
+        "(af)'s FAIL message must name the missing package (v4l-utils) by name -- \
+never a measured zero (.claude/rules/imag-ssh-remote-tool-preflight.md): {af_block}"
+    );
+}
+
+/// Companion to the live-flow test above: the (af) letter must also be documented in the
+/// top-of-file header "Checks (all must pass)" list AND in `usage()`'s own Checks doc block --
+/// the THREE-place documentation convention `.claude/rules/provisioning-scripts.md` establishes
+/// for every new check letter.
+#[test]
+fn verify_device_documents_af_in_header_and_usage_1213() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let header = &body[..guard_pos];
+    assert!(
+        header.contains("(af)") && header.contains("v4l2-ctl"),
+        "the top-of-file header Checks list must document (af) v4l2-ctl -- header text: {header}"
+    );
+    let usage_start = body.find("usage() {").expect("usage() function definition");
+    let usage_end = body[usage_start..]
+        .find("\nEOF\n")
+        .map(|i| usage_start + i)
+        .expect("usage() heredoc terminator");
+    let usage_block = &body[usage_start..usage_end];
+    assert!(
+        usage_block.contains("(af)") && usage_block.contains("v4l2-ctl"),
+        "usage()'s own Checks doc block must document (af) v4l2-ctl: {usage_block}"
+    );
+}
+
+/// issue 1240 -- `ethtool` is listed in setup-device.sh's STEP 16 apt-get install line (same
+/// silently-swallowed `2>/dev/null || true` class as (af) v4l2-ctl, issue 1213), but nothing ever
+/// acceptance-checks it landed. Worse than v4l2-ctl: setup-device.sh's OWN EEE/flow-control
+/// tuning (`ethtool --set-eee` / `ethtool -A`, STEP 2) is ALSO `|| true`-guarded, so a box missing
+/// ethtool silently ran with NO NIC tuning at all -- cam3 was found live missing it entirely,
+/// having run for years with the optimize-nic hook a permanent silent no-op. `verify-device.sh`
+/// must acceptance-check `ethtool` the same minimal way it already does for fuser (t) -- present
+/// on PATH via `command -v` -- inserted BEFORE the (q) block so (q) stays the intentionally-LAST
+/// check, and it must FAIL loud (never merely warn) naming the missing package when absent.
+#[test]
+fn verify_device_checks_ethtool_present_before_q_1240() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let live_flow = &body[guard_pos..];
+    let ag_at = live_flow
+        .find("# (ag) ethtool installed")
+        .expect("(ag) ethtool acceptance-check block must be present in the live flow");
+    let q_at = live_flow
+        .rfind("# (q) .bak cruft drift")
+        .expect("(q) implementation block");
+    assert!(
+        ag_at < q_at,
+        "the ethtool (ag) check must precede the (q) block so (q) stays last (ag={ag_at} q={q_at})"
+    );
+    // Scope the slice to the (ag) block ALONE -- it is inserted directly before (q), with no other
+    // lettered check between them, so the block simply runs up to the (q) marker itself.
+    let ag_block = &live_flow[ag_at..q_at];
+    assert!(
+        ag_block.contains("command -v ethtool"),
+        "(ag) must actually probe ethtool via `command -v ethtool`: {ag_block}"
+    );
+    assert!(
+        ag_block.contains("fail "),
+        "(ag) must FAIL loud (never merely warn) when ethtool is missing: {ag_block}"
+    );
+    assert!(
+        ag_block.contains("ethtool"),
+        "(ag)'s FAIL message must name the missing package (ethtool) by name -- \
+never a measured zero (.claude/rules/imag-ssh-remote-tool-preflight.md): {ag_block}"
+    );
+}
+
+/// Companion to the live-flow test above: the (ag) letter must also be documented in the
+/// top-of-file header "Checks (all must pass)" list AND in `usage()`'s own Checks doc block --
+/// the THREE-place documentation convention `.claude/rules/provisioning-scripts.md` establishes
+/// for every new check letter.
+#[test]
+fn verify_device_documents_ag_in_header_and_usage_1240() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let header = &body[..guard_pos];
+    assert!(
+        header.contains("(ag)") && header.contains("ethtool"),
+        "the top-of-file header Checks list must document (ag) ethtool -- header text: {header}"
+    );
+    let usage_start = body.find("usage() {").expect("usage() function definition");
+    let usage_end = body[usage_start..]
+        .find("\nEOF\n")
+        .map(|i| usage_start + i)
+        .expect("usage() heredoc terminator");
+    let usage_block = &body[usage_start..usage_end];
+    assert!(
+        usage_block.contains("(ag)") && usage_block.contains("ethtool"),
+        "usage()'s own Checks doc block must document (ag) ethtool: {usage_block}"
+    );
+}

@@ -126,25 +126,27 @@ assert m.duplicates({"NDI cam1": "CAM4 (usb)", "NDI cam2": "CAM4 (usb)"}), "must
 }
 
 #[test]
-fn active_map_defaults_to_exactly_the_active_camera_1170() {
-    // #827/issue 947/issue 939/#1110/issue 1170: with no override, active_map() (and therefore
-    // parse_map_args(None), the no-`--map` path main() takes) must resolve to exactly cam3 --
-    // the DEFAULT_ACTIVE_SET fallback (cam3 re-activated 2026-08-13 with the Cam Link 4K card;
-    // cam4 retired 2026-08-02; cam1 RE-RETIRED 2026-08-22 issue 1110; cam2 camera-under-test
-    // retired 2026-08-24 issue 1170, grabber cure-decay -- cam2 stays the PAINTER, not a mapped
-    // measured camera).
+fn active_map_defaults_to_exactly_the_full_seven_camera_fleet_1216() {
+    // #827/issue 947/issue 939/#1110/issue 1170/issue 1198/issue 1216/issue 1217: with no
+    // override, active_map() (and therefore parse_map_args(None), the no-`--map` path main()
+    // takes) must resolve to the DEFAULT_ACTIVE_SET fallback. issue 1198 (2026-08-27): cam1 +
+    // cam2 RESTORED. issue 1216 (2026-08-28): cam5/cam6/cam7 RESTORED (bigger splitter fitted);
+    // cam5 dropped back out the SAME day (issue 1217, a DEAD_PORT splitter leg). issue 1216
+    // completion (2026-08-30, owner directive "kamery od 1-7 bezia" after a physical cable
+    // reseat): cam4 (#947) and cam5 (DEAD_PORT) both rejoin -- the resolved default is now the
+    // FULL seven-camera fleet.
     let (stdout, stderr) = run_py_check(
         r#"import os
 os.environ.pop("CAMERA_ACTIVE_SET", None)
 want = m.active_map()
 senders = sorted(s.split(" ", 1)[0] for _, s in want)
-assert senders == ["CAM3"], senders
+assert senders == ["CAM1", "CAM2", "CAM3", "CAM4", "CAM5", "CAM6", "CAM7"], senders
 assert m.parse_map_args(None) == want, "no --map -> active_map()"
 "#,
     );
     assert!(
         stdout.contains("OK"),
-        "#1110 active_map default checks failed:\nstdout:{stdout}\nstderr:{stderr}"
+        "issue 1216 completion active_map default checks failed:\nstdout:{stdout}\nstderr:{stderr}"
     );
 }
 
@@ -163,24 +165,26 @@ assert m.parse_map_args(override, "cam1 cam2") == [("NDI cam5", "CAM5 (usb)")], 
     );
 }
 
-/// #827 REVERSIBILITY PROOF: widening the active set to include a retired camera (cam5) must
-/// make active_map() cover it -- with ZERO code changes beyond the active-set argument. This is
-/// the actual proof the reversal works, not a comment claiming it does.
+/// #827 REVERSIBILITY PROOF: the derivation still tracks CAMERA_ACTIVE_SET both ways, even
+/// though the default is now the full seven-camera fleet (issue 1216 completion, 2026-08-30) --
+/// this is the actual proof the mechanism works, not a comment claiming it does.
 #[test]
-fn active_map_reactivates_a_retired_camera_when_the_active_set_widens() {
+fn active_map_reactivates_a_camera_when_the_active_set_widens() {
+    // cam4's own #947/issue-1216-completion history proves it is genuinely retirable/restorable,
+    // so it stays the proof camera here even though it is default-active today too.
     let (stdout, stderr) = run_py_check(
-        r#"want = m.active_map("cam1 cam2 cam3 cam4 cam5")
-assert ("NDI cam5", "CAM5 (usb)") in want, want
+        r#"want = m.active_map("cam1 cam2 cam3 cam4 cam5 cam6 cam7")
+assert ("NDI cam4", "CAM4 (usb)") in want, want
 senders = sorted(s.split(" ", 1)[0] for _, s in want)
-assert senders == ["CAM1", "CAM2", "CAM3", "CAM4", "CAM5"], senders
+assert senders == ["CAM1", "CAM2", "CAM3", "CAM4", "CAM5", "CAM6", "CAM7"], senders
 # And shrinking it back out un-reactivates it, just as easily.
-want_shrunk = m.active_map("cam1 cam2 cam3")
-assert ("NDI cam5", "CAM5 (usb)") not in want_shrunk, want_shrunk
+want_shrunk = m.active_map("cam1 cam2 cam3 cam5 cam6 cam7")
+assert ("NDI cam4", "CAM4 (usb)") not in want_shrunk, want_shrunk
 "#,
     );
     assert!(
         stdout.contains("OK"),
-        "#827 reactivation-proof checks failed:\nstdout:{stdout}\nstderr:{stderr}"
+        "#827/#1216 reactivation-proof checks failed:\nstdout:{stdout}\nstderr:{stderr}"
     );
 }
 
@@ -192,12 +196,16 @@ fn default_active_set_env_var_matches_camera_set_sh_exactly() {
     let py = read("scripts/set-ndi-mapping.py");
     let sh = read("scripts/camera-set.sh");
     assert!(
-        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam3")"#),
-        "issue 1170: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
-         fallback camera-set.sh itself defaults to (cam2 camera-under-test retired, grabber cure-decay)"
+        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")"#),
+        "issue 1216 completion: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the \
+         identical literal fallback camera-set.sh itself defaults to (cam4+cam5 rejoined \
+         2026-08-30)"
     );
     assert!(
-        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam3}""#),
-        "issue 1170: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
+        sh.contains(
+            r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}""#
+        ),
+        "issue 1216 completion: camera-set.sh must default CAMERA_ACTIVE_SET to the identical \
+         literal"
     );
 }

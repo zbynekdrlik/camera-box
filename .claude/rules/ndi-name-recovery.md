@@ -8,6 +8,8 @@ paths:
   - "tests/python/test_ndi_mapping_heal_1158.py"
   - "tests/python/test_obs_phase2_reenforce_ndi_name_1158.py"
   - "tests/harness_ndi_name_selfheal_1158.rs"
+  - "tests/python/test_obs_phase2_receiver_liveness_1180.py"
+  - "tests/python/test_ndi_mapping_verify_live_1180.py"
 ---
 
 # NDI `ndi_source_name` recovery — an EMPTY name is a PERMANENT wedge the in-loop watchdogs can't fix (#1158)
@@ -101,3 +103,54 @@ because a sender is ALWAYS absent from the finder during its own `[2/8]`/`[2b/8]
   `|| true`-guarded and its harness has a `run_under_set_e` case (sources under the real
   `set -euo pipefail`, calls the runner as a BARE statement, asserts the next line runs) — a
   `set -uo`-only harness is blind to a set-e abort.
+
+## Every name-layer verify is NAME-ONLY — a receiver can be FROZEN with a CORRECT name (#1180 LIVENESS term)
+
+Everything above verifies that the `ndi_source_name` STRING is right. None of it proves frames are
+actually ARRIVING. The 2026-08-27 strih NIC-swap aftermath exposed the gap: `NDI cam1` on strih
+held one old painter `frame_id=2912368` for ~45 s, never appeared in `recv-timing #797`, yet its
+`ndi_source_name` was `CAM1 (usb)` the whole time — a wedged receiver thread (the
+`distroav-receiver-lifecycle.md` `break`-never-clears-`s->running` permanent-death class). Because
+the name never drifted, `heal_active_mapping` SKIPPED it (`cur == snd`), `--heal` returned "nothing
+healable" (exit 3), an `idle-receiver`→`--restore` "succeeded" — and it stayed dead. Only an OBS
+restart cured it. So the post-connect verify needs a LIVENESS term: proof frames ADVANCE, not that
+the settings string is right. (The C++ #1180 fix in `vendor/distroav` owns the SEPARATE wrong-source
+IDENTITY half — name→URL; this owns the correct-name-no-frames LIVENESS half, at the WS
+receiver-policy layer.)
+
+- **The signal is a WS screenshot-diff** — `obs_phase2.sample_receiver_liveness(ws, input)` takes N
+  `GetSourceScreenshot`s (default 3 × 2 s ≈ a 4 s window, `OBS_RECEIVER_LIVENESS_SAMPLES`/`_POLL_S`)
+  over the SAME WS the heal already uses, and feeds the pure `classify_receiver_liveness(samples)`:
+  ≥2 usable shots ALL byte-identical → `LIVENESS_FROZEN`; any two differ → `LIVENESS_LIVE`; <2 usable
+  → `LIVENESS_INCONCLUSIVE` (never a false FROZEN on a can't-confirm — the C++ #1180
+  both-known-and-differ-only rule + the #767/READ_FAIL discipline). A live NDI feed is never
+  byte-identical across the window (sensor noise / the moving painter QR); a wedged receiver holding
+  one frame is. This works in BOTH E2E-test and live contexts (no QR dependency), and is exactly the
+  signal the owner used to confirm the cure ("2 WS screenshoty 2 s od seba potvrdili CHANGING").
+- **`set-ndi-mapping.py --verify-live`** runs it over the ACTIVE inputs REGARDLESS of name drift
+  (the whole point — the frozen cam1 had a correct name), via `verify_live_mapping` (DI:
+  op/ws/sampler/log) + `_verify_live_exit_code`: **0** all live, **1** ≥1 FROZEN, **2** WS connect
+  error, **3** could-not-confirm. A FROZEN verdict (loud `#1180 liveness` line) means "no new frames
+  presented" — which the SAME byte-identical screenshot cannot tell apart into (a) a WEDGED receiver
+  thread (issue 1158, an OBS restart cures) vs (b) an upstream SENDER outage (dead camera/cambox, an
+  OBS restart does NOT help); the log names both and points at `recv-timing #797` / a sibling box to
+  disambiguate before bouncing OBS (a frozen SENDER keeps advancing `received=`; a wedged RECEIVER
+  freezes it — `mv-reverify-escalate.md`). It DETECTS + reports — it never restarts OBS itself; the
+  escalation-to-restart machinery is `mv-reverify-escalate.sh`'s existing job (kill+sentinel over
+  ssh + AHK respawn, never an ssh GUI launch — `win-ssh-vs-mcp.md`). REJECTED as the liveness signal:
+  the authoritative `recv-timing #797 n=` OBS-log tap (needs an ssh log read + `LC_ALL=C grep -a`
+  mojibake/SIGPIPE handling #1183/#1184 — a much bigger surface on a WS-only tool; noted as the
+  stronger signal a future ticket could add), and baking the check into `reenforce_ndi_name` (would
+  add a multi-second blocking screenshot-diff to every re-enforce AND still miss the incident, since
+  reenforce is not called when the name is already correct).
+- **NOT wired into `recording-e2e.sh [4c/8]`** in the #1180 change — that touches the static-anchor
+  minefield and changes live-gate behaviour on the zero-loss path (a separate rig-validated wiring
+  step). The immediate consumer is the supervisor's live adversarial verify. If wiring it later,
+  add it via the `scripts/lib/ndi-name-selfheal.sh` sourced lib (#675-safe, invisible to
+  recording-e2e.sh's static anchors), never an inline edit to the anchored file.
+- **Tier-0:** `classify_receiver_liveness` + `sample_receiver_liveness` (injected `sleep`, fake
+  `_rpc`) and `verify_live_mapping` + `_verify_live_exit_code` (injected op/ws/sampler) are pure/
+  DI, pytest-able with zero WS/rig — `tests/python/test_obs_phase2_receiver_liveness_1180.py`,
+  `tests/python/test_ndi_mapping_verify_live_1180.py`. The live wrong-camera/frozen cure is not
+  offline-verifiable (the wedge reproduces only live) — the offline tests prove the decision logic;
+  the live confirmation is the supervisor's post-deploy rig verify.

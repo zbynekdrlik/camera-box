@@ -870,17 +870,19 @@ net.ipv6.conf.default.disable_ipv6 = 1
 EOF
 sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
 
-# Disable EEE (Energy Efficient Ethernet / Green Ethernet) and flow control
-# This reduces latency by preventing power-saving mode transitions
+# Disable EEE (Energy Efficient Ethernet / Green Ethernet); ADVERTISE flow control
+# (issue 1234: cam5/6/7 sit behind an unmanaged QNAP switch aggregator that needs to be
+# able to backpressure line-rate NDI bursts -- advertising pause is negotiated per-link, so
+# a direct CRS310 port still negotiates it off; only the aggregator link actually changes).
 cat > /etc/networkd-dispatcher/routable.d/optimize-nic << 'NICEOF'
 #!/bin/bash
-# Disable EEE (Green Ethernet) and flow control for low latency
+# Disable EEE (Green Ethernet); advertise flow control for low latency (issue 1234)
 IFACE="$IFACE"
 if [ -n "$IFACE" ] && [ "$IFACE" != "lo" ]; then
     # Disable Energy Efficient Ethernet
     ethtool --set-eee "$IFACE" eee off 2>/dev/null || true
-    # Disable flow control (pause frames)
-    ethtool -A "$IFACE" rx off tx off 2>/dev/null || true
+    # Advertise flow control (pause frames) -- negotiated per-link, see issue 1234
+    ethtool -A "$IFACE" rx on tx on 2>/dev/null || true
 fi
 NICEOF
 chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
@@ -889,14 +891,14 @@ chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
 for iface in /sys/class/net/*/device; do
     IFACE=$(basename "$(dirname "$iface")")
     ethtool --set-eee "$IFACE" eee off 2>/dev/null || true
-    ethtool -A "$IFACE" rx off tx off 2>/dev/null || true
+    ethtool -A "$IFACE" rx on tx on 2>/dev/null || true
 done
 
 echo "  Network buffers: optimized"
 echo "  TCP congestion: BBR"
 echo "  IPv6: disabled"
 echo "  EEE (Green Ethernet): disabled"
-echo "  Flow control: disabled"
+echo "  Flow control: advertised"
 
 # =============================================================================
 # #599: ensure root is writable before STEP 15-18 apply package/config changes -- a no-op on a

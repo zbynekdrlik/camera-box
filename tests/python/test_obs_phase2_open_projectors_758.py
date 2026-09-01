@@ -46,7 +46,14 @@ _MONITORS_REPLACEMENT_NOTEBOOK = [
 def _patch(monkeypatch, monitors=None, rpc_side_effect=None):
     """Patches `_rpc`/`_conn` to avoid a real websocket connection. Returns the captured calls
     list. `monitors`, if given, is the list returned for a GetMonitorList request. `rpc_side_effect`
-    (called with (op, payload) for every OTHER _rpc call) may raise to simulate a failed request."""
+    (called with (op, payload) for every OTHER _rpc call) may raise to simulate a failed request.
+
+    issue 1152 M4 follow-up (review finding): also stubs `_drm_lease_connector_for_host` to the
+    dormant "" -- WITHOUT this, open_projectors calls the real helper, which shells out over ssh
+    (via imag_scenes._drm_output_config_text) to read the box's OWN live drm-output.json. This
+    file's tests are about the DORMANT monitor-selection contract and must never depend on, or
+    reach out to, live rig state -- every test here stays dormant unless it explicitly overrides
+    this stub."""
     calls = []
     mons = monitors if monitors is not None else _MONITORS_REPLACEMENT_NOTEBOOK
 
@@ -64,6 +71,7 @@ def _patch(monkeypatch, monitors=None, rpc_side_effect=None):
 
     monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setattr(obs_phase2, "_drm_lease_connector_for_host", lambda host: "")
     return calls
 
 

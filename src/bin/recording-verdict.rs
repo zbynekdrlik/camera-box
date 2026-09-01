@@ -370,12 +370,22 @@ struct Args {
     /// parse as a bare `-N` value (clap 4 otherwise reads a leading `-` as a new flag).
     #[arg(long, allow_negative_numbers = true)]
     syncnet_offset_ms: Option<f64>,
-    /// #624 deliverable 4 / #312 item 2 PR B: the expected/dialed A/V offset (ms) — the
-    /// operator's live #398 dock reading (nominally ~0, since the dock is dialed to align video
-    /// and audio). The per-camera A/V-offset gate measures each camera's DEVIATION from this
-    /// value, never from a hardcoded 0 — so a rig intentionally dialed to a nonzero offset still
-    /// gates correctly. Default 0.0 (the "operator dials to ~0 in practice" default case).
-    #[arg(long, default_value_t = 0.0)]
+    /// #624 deliverable 4 / #312 item 2 PR B: the expected MEASURED A/V offset (ms) the per-camera
+    /// gate centres on — each camera's `av_offset_ms` must land within ±AV_OFFSET_GATE_TOLERANCE_MS
+    /// of this value.
+    ///
+    /// #1178: the DEFAULT is the calibrated fixed rig video-leg
+    /// (`av_window::RIG_VIDEO_LEG_OFFSET_MS`) — RE-DERIVED 2026-08-29 to 0.0: the −92 calibration
+    /// briefly derived from verdict 845554984 turned out to be a stale-painter artifact (issue 1138
+    /// class, an un-pinned cam2 frame-probe painter emitting the QPSK marker without its own
+    /// emit-delay compensation); with the marker delay now compensated AT SOURCE a correctly
+    /// aligned rig MEASURES ~0, so this default is 0 again. A mode that PHYSICALLY compensates a
+    /// leg (MEASUREMENT_EQ / issue 1003, whose stream-hold rebalance lands the measured offset at
+    /// ~0) passes its own explicit `--av-expected-ms 0`, which is numerically the same today but
+    /// stays an explicit override so a future non-zero recalibration (a rig-verified video-chain
+    /// change) never silently double-counts; an operator dialing a nonzero source offset overrides
+    /// it the same way.
+    #[arg(long, allow_negative_numbers = true, default_value_t = camera_box::av_window::RIG_VIDEO_LEG_OFFSET_MS)]
     av_expected_ms: f64,
     /// #855: operator-acknowledged offline boxes, threaded from the shell-side
     /// `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt` ack (`scripts/lib/cambox-offline-ack.sh`) across
@@ -3511,6 +3521,70 @@ fn build_and_print_verdict_with_stream_diffs(
                 report["full_chain"]["cam1_unmeasured"] = serde_json::json!(true);
             }
 
+            // issue 1247 — per-cam "own digital burn absent" REPORT-ONLY gate. The #133 WARN above
+            // fires only when EVERY camera-under-test burn is absent (OR-logic); under the
+            // ALL-CAMBOX sweep a SINGLE scheduled cam whose OWN digital burn is entirely absent
+            // (`burn_ids_present.<cam> == 0`) — its leg live but served by production camera-box,
+            // which emits no burn (the issue-1246 cam2-painter-deadman symptom) — slipped through,
+            // and the per-segment optical-tick verdict can read that cam as a clean pass. Key off
+            // the switch-schedule DEPLOYED set (NOT `expected_burns`, which lists all cams
+            // regardless of deployment) so a single absent scheduled-cam burn is surfaced in the
+            // durable artifact. REPORT-ONLY (does not change PASS/FAIL) — the LIVE `[7b/8]`
+            // run-integrity check already fails such a run; a one-line seam flip makes it blocking.
+            if let Some(schedule) = switch_schedule.as_ref() {
+                let scheduled_cams: Vec<String> =
+                    schedule.iter().map(|w| w.cambox.clone()).collect();
+                let own_burn_counts: [(&str, usize); 7] = [
+                    ("cam1", cam1_ids.len()),
+                    ("cam2", cam2_ids.len()),
+                    ("cam3", cam3_ids.len()),
+                    ("cam4", cam4_ids.len()),
+                    ("cam5", cam5_ids.len()),
+                    ("cam6", cam6_ids.len()),
+                    ("cam7", cam7_ids.len()),
+                ];
+                let own_burn =
+                    camera_box::own_burn_absent::evaluate(&scheduled_cams, &own_burn_counts);
+                let own_burn_gate_pass = own_burn.pass();
+                let own_burn_gates_overall = camera_box::own_burn_absent::gates_overall_pass();
+                let mut own_burn_per_cam = serde_json::Map::new();
+                for (cam, absent) in &own_burn.per_cam_absent {
+                    own_burn_per_cam.insert(cam.clone(), serde_json::Value::Bool(*absent));
+                }
+                report["full_chain"]["own_burn_absent_gate"] = serde_json::json!({
+                    "assessed_cams": own_burn.assessed_cams,
+                    "absent_cams": own_burn.absent_cams,
+                    "per_cam": serde_json::Value::Object(own_burn_per_cam),
+                    "pass": own_burn_gate_pass,
+                    "gates_overall_pass": own_burn_gates_overall,
+                    "note": "issue 1247: a SCHEDULED cam (in the --switch-schedule deployed set) \
+                             whose OWN digital burn (full_chain.burn_ids_present.<cam>) was \
+                             ENTIRELY ABSENT from the recording — its leg was live but served by \
+                             the wrong emitter (production camera-box, no digital burn; the \
+                             issue-1246 cam2-painter-deadman symptom), so the per-segment \
+                             optical-tick verdict can overstate it as a clean pass. REPORT-ONLY \
+                             (own_burn_absent::gates_overall_pass); the LIVE [7b/8] burn-unit \
+                             run-integrity check already fails such a run. PASS/FAIL unchanged. \
+                             assessed_cams = the scheduled cams carrying a burn-count key (a \
+                             scheduled cam without one, e.g. imag, is excluded from assessment — \
+                             never a false warning).",
+                });
+                if !own_burn_gate_pass {
+                    eprintln!(
+                        "WARNING: scheduled cam(s) with their OWN digital burn ENTIRELY ABSENT \
+                         from the recording: {} — leg live but served by the wrong emitter \
+                         (production, no burn; issue-1246 deadman symptom). The per-segment \
+                         optical-tick verdict can overstate these as a clean pass. REPORT-ONLY \
+                         (does not change PASS/FAIL); [7b/8] run-integrity already fails such a run.",
+                        own_burn.absent_cams.join(", ")
+                    );
+                }
+                // Fold: report-only today — `gates_overall_pass()` is false, so `!own_burn_gates_
+                // overall` is true and this never fails the run. Flip the seam to `true` (one line)
+                // to make an absent scheduled-cam own burn FAIL overall_pass.
+                all_pass &= own_burn_gate_pass || !own_burn_gates_overall;
+            }
+
             // ===========================================================================
             // #186 — the ONE trustworthy, binary LOSS verdict (REPLACES the muddled
             // dropped/phantom/gap/painter-beat metrics). For EACH node, is its DIGITAL
@@ -4625,9 +4699,9 @@ fn build_and_print_verdict_with_stream_diffs(
                                     println!(
                                         "      ⚠ #889 WITHIN TOLERANCE: copies={} gaps={} fails the \
                                          pre-889 strict rule, but stays within the per-window \
-                                         singleton tolerance ({}) and does NOT gate overall_pass \
+                                         copies/gaps tolerance ({}) and does NOT gate overall_pass \
                                          (see issue #889 for the decision record).",
-                                        s.copies, s.gaps, seg.copies_gaps_tolerance
+                                        s.copies, s.gaps, s.copies_gaps_tolerance
                                     );
                                 } else if camera_box::window_gate::segment_singleton_allowance_consumed(
                                     s.copies, s.gaps,
@@ -4678,12 +4752,17 @@ fn build_and_print_verdict_with_stream_diffs(
                             // issue #905). A window can carry more than one reason at once (e.g.
                             // over-tolerance copies/gaps AND a merely-report-only over-floor
                             // undecodable count) — every applicable reason prints.
-                            let reasons = camera_box::window_gate::relaxed_failure_reasons(
-                                s.frames,
-                                s.undecodable,
-                                s.copies,
-                                s.gaps,
-                            );
+                            // #1251: judge the failure reason at THIS window's applied tolerance
+                            // (the per-cambox override where one exists), so a CAM2 window over the
+                            // default 5 but under its own 25 is not mislabelled OverCopiesGapsTolerance.
+                            let reasons =
+                                camera_box::window_gate::relaxed_failure_reasons_with_tolerance(
+                                    s.frames,
+                                    s.undecodable,
+                                    s.copies,
+                                    s.gaps,
+                                    s.copies_gaps_tolerance,
+                                );
                             for reason in &reasons {
                                 match reason {
                                     camera_box::window_gate::RelaxedFailureReason::EmptyWindow => {
@@ -4696,10 +4775,10 @@ fn build_and_print_verdict_with_stream_diffs(
                                     camera_box::window_gate::RelaxedFailureReason::OverCopiesGapsTolerance => {
                                         println!(
                                             "      ⚠ #889 RE-GATE FAIL: copies={} gaps={} \
-                                             exceeds the per-window singleton tolerance ({}) — \
+                                             exceeds the per-window copies/gaps tolerance ({}) — \
                                              this window FAILS overall_pass (see issue #889 for \
                                              the decision record).",
-                                            s.copies, s.gaps, seg.copies_gaps_tolerance
+                                            s.copies, s.gaps, s.copies_gaps_tolerance
                                         );
                                     }
                                     camera_box::window_gate::RelaxedFailureReason::FloorExceededGating => {
@@ -4757,11 +4836,14 @@ fn build_and_print_verdict_with_stream_diffs(
                         // sample_deltas even when the line above's `uniform` is near 0 — see
                         // src/presentation_cadence.rs).
                         println!(
-                            "      cadence(derived): step={} uniform={}/{} ({:.3}) histogram={:?}",
+                            "      cadence(derived): step={} uniform={}/{} ({:.3}) beat_corrected={}/{} ({:.3}) histogram={:?}",
                             pc.derived_expected_step,
                             pc.derived_uniform_steps,
                             pc.sample_deltas,
                             pc.derived_uniform_fraction,
+                            pc.beat_corrected_uniform_steps,
+                            pc.sample_deltas,
+                            pc.beat_corrected_uniform_fraction,
                             pc.delta_histogram
                         );
                     }
@@ -4785,15 +4867,52 @@ fn build_and_print_verdict_with_stream_diffs(
                     seg.windows_failed_report_only,
                     seg.segments.len()
                 );
+                // #1220 (owner mandate, 2026-08-29) review finding: this line used to
+                // unconditionally claim "a SUBSET of what now gates under #1132 (see the #1132
+                // line below)" -- but that #1132 line only prints while the tolerance rescue is
+                // DISARMED (see the `if !copies_gaps_tolerance_gates_overall_pass()` guard below).
+                // While it is ARMED (today, per #1220), no such line follows, and this count is no
+                // longer a subset -- it IS the exact set of windows gating on copies/gaps (modulo
+                // the independent frame_count==0 case). Key the relationship prose off the live
+                // seam so it can never point at a line that never printed.
+                let copies_gaps_relationship =
+                    if camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass() {
+                        "the EXACT set of windows that gate overall_pass on copies/gaps today (the \
+                     tolerance rescue is ARMED -- issue #1220)"
+                    } else {
+                        "a SUBSET of what now gates under #1132 (see the #1132 line below and issue \
+                     #889 for the decision record)"
+                    };
+                // #1251: the tolerance printed here is the DEFAULT; a per-cambox override (CAM2 →
+                // 25 while its grabber HW is sick, issue 1249) applies to individual windows. Name
+                // the overrides so this summary can never read "tolerance=5: 0 over" while a CAM2
+                // window at copies=18 sits in the per-window listing above it (each window's own
+                // WARN prints its applied tolerance; the count is per-window).
+                let per_cambox_tol_note = {
+                    let map = camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX;
+                    if map.is_empty() {
+                        String::new()
+                    } else {
+                        let overrides = map
+                            .iter()
+                            .map(|(cb, tol)| format!("{cb}→{tol}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("; per-cambox overrides: {overrides}")
+                    }
+                };
                 println!(
-                    "  ⚠ #889 RE-GATE (per-window tolerance={}): {}/{} cambox window(s) exceed the \
-                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — a \
-                     SUBSET of what now gates under #1132 (see the #1132 line below and issue #889 \
-                     for the decision record). NOTE: this is the <=3 relaxed tolerance, NOT the \
+                    "  ⚠ #889 RE-GATE (default per-window tolerance={}{}): {}/{} cambox window(s) \
+                     exceed THEIR OWN per-window copies/gaps tolerance \
+                     (windows_over_copies_gaps_tolerance) — {}. \
+                     NOTE: this is the relaxed tolerance printed above (walked over time, see \
+                     issue 1243), NOT the \
                      issue-1169 <=1 SINGLETON allowance (a separate, tighter band; see its own line).",
                     seg.copies_gaps_tolerance,
+                    per_cambox_tol_note,
                     seg.windows_over_copies_gaps_tolerance,
-                    seg.segments.len()
+                    seg.segments.len(),
+                    copies_gaps_relationship
                 );
                 // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance (`<=3`) rescue is
                 // DISARMED. #1169 (owner, 2026-08-22) then RE-INTRODUCED a strictly-tighter
@@ -4906,9 +5025,11 @@ fn build_and_print_verdict_with_stream_diffs(
                         "copies_gaps_gate".to_string(),
                         serde_json::json!(if copies_gaps_tol_gates {
                             format!(
-                                "gates overall_pass above the per-window singleton tolerance ({}) -- \
-                                 see issue #889 for the decision record",
-                                seg.copies_gaps_tolerance
+                                "gates overall_pass above the per-window copies/gaps tolerance \
+                                 (default {}{}; each window's applied tolerance is on \
+                                 segments[].copies_gaps_tolerance) -- see issue #889 for the \
+                                 decision record",
+                                seg.copies_gaps_tolerance, per_cambox_tol_note
                             )
                         } else {
                             "#1132: the copies/gaps tolerance rescue is DISARMED -- overall_pass \
@@ -4925,11 +5046,30 @@ fn build_and_print_verdict_with_stream_diffs(
                         "copies_gaps_tolerance_gates_overall_pass".to_string(),
                         serde_json::json!(copies_gaps_tol_gates),
                     );
+                    // #1251: self-describe the per-cambox tolerance OVERRIDE policy so the verdict
+                    // JSON (and any miner) can see that a box like CAM2 goes through a wider band
+                    // than the run-wide default. `copies_gaps_tolerance` above is the DEFAULT; the
+                    // ACTUAL applied tolerance is on each `segments[].copies_gaps_tolerance`. Empty
+                    // map (the issue-1242 walk-back state) serializes as `{}` — the default holds
+                    // for every box. Keyed BTreeMap so the ordering is stable across runs.
+                    obj.insert(
+                        "copies_gaps_tolerance_per_cambox".to_string(),
+                        serde_json::json!(
+                            camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX
+                                .iter()
+                                .map(|(k, v)| (k.to_string(), *v))
+                                .collect::<std::collections::BTreeMap<String, u32>>()
+                        ),
+                    );
                     // #1169 (owner, 2026-08-22): the SINGLETON allowance seam, self-describing in
                     // the JSON exactly like the copies_gaps keys above -- a DISTINCT, strictly
-                    // tighter (<=1/<=1) band than the disarmed <=3 tolerance. `armed=true` = a
-                    // <=1/<=1 singleton is absorbed into overall_pass (loudly, strict stays false);
-                    // >=2 of either still fails. Re-tighten to absolute zero = flip the arm to false.
+                    // tighter (<=1/<=1) band than the (originally disarmed) <=3 tolerance.
+                    // `armed=true` alone does NOT mean this band is actually absorbing anything --
+                    // #1220 (owner mandate, 2026-08-29) review finding: this flag stays `true`
+                    // (untouched) even while `copies_gaps_tol_gates` (above) is ALSO `true`, in
+                    // which case `decide()`'s `if`/`else if` precedence makes the singleton band
+                    // DORMANT (the wider tolerance channel absorbs first). The prose below checks
+                    // BOTH flags so it never claims an absorption that cannot actually happen.
                     let singleton_armed =
                         camera_box::window_gate::segment_singleton_allowance_gates_overall_pass();
                     obj.insert(
@@ -4950,7 +5090,21 @@ fn build_and_print_verdict_with_stream_diffs(
                     );
                     obj.insert(
                         "segment_singleton_gate".to_string(),
-                        serde_json::json!(if singleton_armed {
+                        serde_json::json!(if singleton_armed && copies_gaps_tol_gates {
+                            format!(
+                                "#1169: the <= {}/{} copies/gaps SINGLETON band is armed but \
+                                 currently DORMANT -- superseded by the wider issue-1220 \
+                                 copies/gaps tolerance channel (see copies_gaps_tolerance above; \
+                                 also armed), which governs \
+                                 overall_pass instead via decide()'s if/else-if precedence; \
+                                 segment_singleton_allowance_consumed/singleton_allowance_note \
+                                 never fire while that wider channel stays armed. Kept wired as \
+                                 the graduated fallback for a future walk-down step. Issue 1169's \
+                                 own re-tighten trail (this flag to false) is independent.",
+                                camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE,
+                                camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE
+                            )
+                        } else if singleton_armed {
                             format!(
                                 "#1169: a <= {}/{} copies/gaps SINGLETON is absorbed into \
                                  overall_pass (the designed issue-1167 paced-trickle + FIFO \
@@ -4987,6 +5141,13 @@ fn build_and_print_verdict_with_stream_diffs(
                     );
                 }
                 report["all_cambox_continuity"] = seg_json;
+                // #1243 (walk-back: issue 1242): the cambox per-segment blocking headline fold.
+                // `seg.overall_pass` already folds the RELAXED per-window verdict
+                // (`overall_pass_term` == `relaxed_pass` while #1220's tolerance seam is armed —
+                // see `recording_segments::segment_continuity`), NOT the strict `pass`
+                // (which stays computed + reported in `windows_failed_report_only` + each segment).
+                // issue 1242 restores the strict copies==0 fold once the residual FIFO churn is
+                // root-caused.
                 all_pass &= seg.overall_pass;
 
                 // #781 — REPORT-ONLY projection-tap scanout-TEAR surface. cam2's USB grabber
@@ -5197,17 +5358,21 @@ fn build_and_print_verdict_with_stream_diffs(
                 // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
                 all_pass &= cadence_gate_pass || !cadence_gates_overall;
 
-                // #1142 — the NEW cadence-UNIFORMITY floor gate (owner mandate 2026-08-19): a broad
+                // #1142 — the cadence-UNIFORMITY floor gate (owner mandate 2026-08-19): a broad
                 // companion to the paired-judder gate above. Bound the WORST (minimum) per-window
-                // `derived_uniform_fraction` (the self-consistent mode-based field, #726 fix — NOT
-                // the raw `uniform_fraction`, which false-reds a clean off-expected-step window; on
-                // the real rig the two are equal) across every cadence-bearing cambox window — a
-                // smooth 60→30 downsample reads ~1.0; the 60→30 + FIFO limit-cycle churn drops it to
-                // ~0.67-0.78 on today's rig (issue 1130). A per-window RATE (like the judder gate) so
-                // a single per-window-MIN term is honest (no run-wide second term). `None` worst = no
-                // cadence window (mass decode failure, already hard-failed by copies/gaps/undecodable)
-                // = not applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`
-                // — the 0.95 floor REDs the current sick rig BY DESIGN.
+                // uniformity across every cadence-bearing cambox window — a smooth 60→30 downsample
+                // reads ~1.0. #1250 makes the GATED field BEAT-AWARE (`beat_corrected_uniform_
+                // fraction`): a sampling-phase beat emits balanced complementary steps (1↔3 around
+                // the mode 2) that net to zero, which the pre-#1250 `derived_uniform_fraction` counted
+                // as non-uniform (0.57-0.92 on a copies==0/gaps==0 chain — the "sick 0.67-0.78" was
+                // mostly this beat). The beat-corrected reading collapses those balanced pairs back
+                // to uniform, so the healthy rig's GATED worst window reads 0.916/0.947 on the two
+                // mined runs (typical windows 0.92-0.99) and the floor now REDs only a GENUINE
+                // non-uniformity beyond the beat. A per-window RATE (like the judder gate) so a single
+                // per-window-MIN term is honest (no run-wide second term). `None` worst = no cadence
+                // window (mass decode failure, already hard-failed by copies/gaps/undecodable) = not
+                // applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`;
+                // floor 0.90 (walk-back: issue 1242) UNCHANGED.
                 let worst_cadence_uniform_fraction: Option<f64> = seg
                     .segments
                     .iter()
@@ -5217,9 +5382,8 @@ fn build_and_print_verdict_with_stream_diffs(
                             .map(|pc| pc.uniform_fraction)
                     })
                     .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
-                // Diagnostic-only: the self-consistent (mode-derived) reading, surfaced so a future
-                // switch away from the raw field (if it ever false-reds a clean-but-jittery run) is
-                // a one-field change. NOT gated — see src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
+                // The DERIVED reading (mode-based, #726) — DIAGNOSTIC since #1250 (the pre-beat
+                // reading; surfaced so reverting the gate to it is a one-field change).
                 let worst_cadence_derived_uniform_fraction: Option<f64> = seg
                     .segments
                     .iter()
@@ -5229,32 +5393,54 @@ fn build_and_print_verdict_with_stream_diffs(
                             .map(|pc| pc.derived_uniform_fraction)
                     })
                     .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                // #1250 the GATED reading: the BEAT-AWARE field fed to `cadence_uniformity_gate_pass`
+                // below and serialized as `worst_uniform_fraction`. The derived + raw readings above
+                // are DIAGNOSTIC only. See src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
+                let worst_cadence_beat_corrected_uniform_fraction: Option<f64> = seg
+                    .segments
+                    .iter()
+                    .filter_map(|s| {
+                        s.presentation_cadence
+                            .as_ref()
+                            .map(|pc| pc.beat_corrected_uniform_fraction)
+                    })
+                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
                 let uniformity_floor = camera_box::presentation_cadence::UNIFORM_FRACTION_MIN;
                 let uniformity_gate_pass =
                     camera_box::presentation_cadence::cadence_uniformity_gate_pass(
-                        worst_cadence_derived_uniform_fraction,
+                        worst_cadence_beat_corrected_uniform_fraction,
                         Some(uniformity_floor),
                     );
                 let uniformity_gates_overall =
                     camera_box::presentation_cadence::uniformity_gates_overall_pass();
                 report["all_cambox_continuity"]["cadence_uniformity_gate"] = serde_json::json!({
                     "min_uniform_fraction": uniformity_floor,
-                    "worst_uniform_fraction": worst_cadence_derived_uniform_fraction,
+                    "worst_uniform_fraction": worst_cadence_beat_corrected_uniform_fraction,
+                    "worst_derived_uniform_fraction": worst_cadence_derived_uniform_fraction,
                     "worst_raw_uniform_fraction": worst_cadence_uniform_fraction,
                     "pass": uniformity_gate_pass,
                     "gates_overall_pass": uniformity_gates_overall,
-                    "note": "#1142 cadence-uniformity FLOOR (owner mandate). Worst per-window \
-                             presentation_cadence.derived_uniform_fraction (the self-consistent \
-                             mode-based field, #726 fix) across cambox windows must be >= \
-                             min_uniform_fraction (0.95); a smooth 60->30 chain reads ~1.0, the \
-                             current rig ~0.67-0.78 (issue 1130 60->30 + FIFO churn) so this REDs \
-                             the sick rig by design. worst_raw_uniform_fraction is the raw reading, \
-                             DIAGNOSTIC only (it false-reds a clean off-expected-step window; \
-                             derived does not). None = no cadence window (not applicable, passes). \
+                    "note": "#1142 cadence-uniformity FLOOR (owner mandate). Since #1250 the GATED \
+                             value worst_uniform_fraction is the BEAT-AWARE worst per-window \
+                             presentation_cadence.beat_corrected_uniform_fraction across cambox \
+                             windows, which must be >= min_uniform_fraction (0.90, walk-back: issue \
+                             1242). A sampling-phase beat emits balanced complementary steps (1<->3 \
+                             around the mode 2) that net to zero; #1250 collapses them so a smooth \
+                             60->30 chain reads ~1.0 and the healthy-but-beating rig's GATED worst \
+                             window reads 0.916/0.947 on the two mined runs (typical windows \
+                             0.92-0.99, above the floor) instead of the pre-#1250 derived 0.57-0.92 \
+                             (the '0.67-0.78 sick rig' was mostly this beat, not FIFO churn) — the \
+                             floor now REDs only \
+                             genuine non-uniformity beyond the beat. worst_derived_uniform_fraction \
+                             (pre-beat mode-based) and worst_raw_uniform_fraction (caller-step) are \
+                             DIAGNOSTIC only. None = no cadence window (not applicable, passes). \
                              LIVE via presentation_cadence::uniformity_gates_overall_pass.",
                 });
                 println!(
- "  #1142 CADENCE-UNIFORMITY gate: worst derived_uniform_fraction={} (raw={}, floor {}, pass={}, gates_overall_pass={})",
+ "  #1142 CADENCE-UNIFORMITY gate: worst beat_corrected_uniform_fraction={} (#1250 gated; derived={}, raw={}, floor {}, pass={}, gates_overall_pass={})",
+                    worst_cadence_beat_corrected_uniform_fraction
+                        .map(|p| format!("{p:.5}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
                     worst_cadence_derived_uniform_fraction
                         .map(|p| format!("{p:.5}"))
                         .unwrap_or_else(|| "n/a".to_string()),
@@ -6229,6 +6415,9 @@ fn build_and_print_verdict_with_stream_diffs(
                     // verdict to pass — folded into `all_pass` below, alongside
                     // all_cambox_continuity + all_cambox_latency.
                     let mut av_all_pass = true;
+                    // #1178: per-camera residuals (measured/effective − expected calibrated
+                    // video-leg) collected for the report-only cross-camera residual summary.
+                    let mut av_residuals: Vec<f64> = Vec::new();
                     // #855/#861 fail-closed floor: how many cameras were actually JUDGED (not
                     // ack-excluded). An ack list covering EVERY camera would otherwise leave the
                     // AND-fold vacuously true — the one lever that could silently disable the
@@ -6403,6 +6592,10 @@ fn build_and_print_verdict_with_stream_diffs(
                             (AvSyncVerdict::Unknown, Some(_)) => "derived",
                             (AvSyncVerdict::Unknown, None) => "unknown",
                         };
+                        // #1178 (review finding): compute the effective offset ONCE so the JSON
+                        // `effective_offset_ms` and the residual below can never diverge.
+                        let cam_effective_offset =
+                            av_window::effective_offset_ms(cam_sync, derived.as_ref());
                         let mut cam_json = serde_json::json!({
                             "node": camera,
                             "windowing": if whole_recording { "whole_recording" } else { "per_window" },
@@ -6419,9 +6612,16 @@ fn build_and_print_verdict_with_stream_diffs(
                             // never a bare `av_offset_ms=null` for a camera we DO have a number for
                             // (the "silent cam2-only" the #714 one-full-test mandate forbids). The
                             // `verdict` label above still says which kind of value this is.
-                            "effective_offset_ms":
-                                av_window::effective_offset_ms(cam_sync, derived.as_ref()),
+                            "effective_offset_ms": cam_effective_offset,
                         });
+                        // #1178 report-only: this camera's RESIDUAL A/V offset — its
+                        // measured/effective offset with the expected calibrated video-leg removed
+                        // (~0 for an aligned camera). Collected for the cross-camera summary below.
+                        if let Some(eff) = cam_effective_offset {
+                            let residual = av_window::residual_offset_ms(eff, args.av_expected_ms);
+                            cam_json["residual_offset_ms"] = serde_json::json!(residual);
+                            av_residuals.push(residual);
+                        }
                         if let Some(d) = &derived {
                             // #714: a DERIVED estimate is reported under its OWN fields, never
                             // written into `av_offset_ms`/`mad_ms` (which stay null — those are
@@ -6464,6 +6664,10 @@ fn build_and_print_verdict_with_stream_diffs(
                     // per-source ASRC landed. That precondition is now met, so this term folds
                     // into `all_pass` again, mirroring the issue-914/915 `gates_overall_pass()`
                     // seam exactly (applied in reverse: re-blocking, not relaxing).
+                    // #1178: whether expected_ms is the calibrated fixed video-leg default or an
+                    // explicit override (MEASUREMENT_EQ / issue 1003, or an operator-dialed value).
+                    let av_expected_is_calibrated_default =
+                        (args.av_expected_ms - av_window::RIG_VIDEO_LEG_OFFSET_MS).abs() < 1e-9;
                     let av_gate_blocking = av_window::gates_overall_pass();
                     println!(
                         "  >>> #624 deliverable 4 A/V-offset gate: expected={:.1}ms tolerance=±{:.1}ms → {} \
@@ -6477,6 +6681,16 @@ fn build_and_print_verdict_with_stream_diffs(
                             "report-only — does NOT gate overall_pass, pending ASRC, see #861"
                         }
                     );
+                    println!(
+                        "  >>> #1178 rig_video_leg_offset_ms={:.1}ms (calibrated fixed video-leg: monitor lag + sensor→HDMI + grabber); expected_ms={:.1}ms {}",
+                        av_window::RIG_VIDEO_LEG_OFFSET_MS,
+                        args.av_expected_ms,
+                        if av_expected_is_calibrated_default {
+                            "= calibrated video-leg default (subtracted before the ±tolerance band)"
+                        } else {
+                            "= explicit override (physical compensation / operator-dialed; calibration replaced)"
+                        }
+                    );
                     av_json.insert(
                         "expected_ms".to_string(),
                         serde_json::json!(args.av_expected_ms),
@@ -6484,6 +6698,31 @@ fn build_and_print_verdict_with_stream_diffs(
                     av_json.insert(
                         "gate_tolerance_ms".to_string(),
                         serde_json::json!(av_window::AV_OFFSET_GATE_TOLERANCE_MS),
+                    );
+                    // #1178: the NAMED, surfaced fixed video-leg calibration (never a silent
+                    // shift) + whether the current expected_ms is that calibrated default or an
+                    // explicit override (e.g. MEASUREMENT_EQ / issue 1003, or an operator-dialed
+                    // value).
+                    av_json.insert(
+                        "rig_video_leg_offset_ms".to_string(),
+                        serde_json::json!(av_window::RIG_VIDEO_LEG_OFFSET_MS),
+                    );
+                    av_json.insert(
+                        "expected_ms_is_calibrated_default".to_string(),
+                        serde_json::json!(av_expected_is_calibrated_default),
+                    );
+                    // #1178 report-only: cross-camera residual (measured − expected) median +
+                    // spread — surfaces whatever cross-run instability REMAINS after the fixed
+                    // video-leg is removed (issue 952 / issue 1004) WITHOUT masking a global drift
+                    // (the BLOCKING gate uses the fixed constant, never this per-run median).
+                    let av_residual_summary = av_window::residual_summary(&av_residuals);
+                    av_json.insert(
+                        "residual_median_ms".to_string(),
+                        serde_json::json!(av_residual_summary.median_ms),
+                    );
+                    av_json.insert(
+                        "residual_spread_ms".to_string(),
+                        serde_json::json!(av_residual_summary.spread_ms),
                     );
                     av_json.insert("gate_pass".to_string(), serde_json::json!(av_all_pass));
                     // #861: unambiguous machine-readable flag alongside `gate_pass` — whether this
@@ -9255,14 +9494,17 @@ mod tests {
     /// 1 → 2 → 3 on 2026-08-06, ticket 889 comments 5198131539 / 5200533407) — it must still be
     /// COMPUTED and printed in the verdict JSON and must still fail that window's STRICT `pass`.
     /// (Issue 1132, 2026-08-19) made a bare copy ALSO fail `all_cambox_continuity.overall_pass` —
-    /// the `<=3` tolerance rescue is disarmed (dormant, reported-only). **SUPERSEDED by issue 1169
-    /// (owner, 2026-08-22): a `<=1/<=1` copies/gaps SINGLETON is now ABSORBED back into
-    /// `overall_pass` (the designed issue-1167 paced-trickle + FIFO stale_replay residual) —
-    /// loudly, through its OWN tighter seam, never a re-arm of the disarmed `<=3` rescue** — and
-    /// `windows_failed_report_only` must still report it (strict-zero visibility is unaffected by
-    /// either seam). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
-    /// implied copies never gate at all, which stopped being true once the re-gate landed; a
-    /// single copy still passes because 1 <= the tolerance, not because the term is inert.
+    /// the `<=3` tolerance rescue was disarmed. Issue 1169 (owner, 2026-08-22) then absorbed a
+    /// `<=1/<=1` SINGLETON back in through its OWN tighter seam, never a re-arm of the `<=3`
+    /// rescue. **SUPERSEDED by issue 1220 (owner mandate, 2026-08-29): the `<=3` tolerance channel
+    /// IS re-armed** (see `camera_box::window_gate::copies_gaps_tolerance_gates_overall_pass` for
+    /// the full decision record) — a single copy is absorbed through THAT channel now, and the
+    /// issue-1169 singleton band is dormant (superseded by `decide()`'s `if`/`else if`
+    /// precedence, never deleted). `windows_failed_report_only` must still report it
+    /// (strict-zero visibility is unaffected by any of the three seams). Renamed from
+    /// `..._copy_alone_is_report_only_end_to_end_889` — the old name implied copies never gate at
+    /// all, which stopped being true once the re-gate landed; a single copy still passes because
+    /// 1 <= the tolerance, not because the term is inert.
     #[test]
     fn all_cambox_continuity_single_copy_within_tolerance_passes_overall_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
@@ -9365,19 +9607,18 @@ mod tests {
         assert_eq!(
             seg["overall_pass"],
             serde_json::json!(true),
-            "1169: a single copy is now ABSORBED into overall_pass via the issue-1169 <=1/<=1 \
-             singleton allowance (the designed issue-1167 paced-trickle + FIFO stale_replay \
-             residual) -- loudly, through its OWN tighter seam; the issue-1132 disarmed <=3 \
-             tolerance rescue stays dormant, this is NOT a re-arm of it: {seg}"
+            "1220: a single copy is now ABSORBED into overall_pass via the RE-ARMED issue-1220 \
+             tolerance channel (owner mandate, 2026-08-29) -- the issue-1169 <=1/<=1 \
+             singleton band is dormant (superseded by precedence), not what did the absorbing: {seg}"
         );
         assert_eq!(
             seg["windows_singleton_allowance_consumed"],
-            serde_json::json!(1),
-            "1169: exactly the one window consumed the singleton allowance: {seg}"
+            serde_json::json!(0),
+            "1220: the singleton mechanism never fires while the tolerance channel is armed: {seg}"
         );
         assert!(
-            !seg["segments"][0]["singleton_allowance_note"].is_null(),
-            "1169: the absorbed copy carries a LOUD per-segment note (never silent): {seg}"
+            seg["segments"][0]["singleton_allowance_note"].is_null(),
+            "1220: no singleton note -- the tolerance channel absorbed this, not the singleton: {seg}"
         );
         assert_eq!(
             seg["windows_failed_report_only"],
@@ -9411,6 +9652,11 @@ mod tests {
     /// an accurate description once the tolerance moved past 1; the fixtures below build AT the
     /// tolerance and tolerance+1 through the const instead of hardcoded literals, so this test
     /// tracks whatever the tolerance is calibrated to across every recalibration.
+    ///
+    /// **This invariant was briefly NOT what governed `overall_pass` between #1132 (2026-08-19,
+    /// disarmed the tolerance rescue for the blocking verdict) and #1220 (owner mandate,
+    /// 2026-08-29, re-armed it)** — fixture (a) below tracked that disarmed reality in between.
+    /// #1220 restores this doc's original framing exactly.
     #[test]
     fn copies_gaps_tolerance_boundary_gates_overall_pass_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
@@ -9555,9 +9801,10 @@ mod tests {
         );
         assert_eq!(
             at_seg["overall_pass"],
-            serde_json::json!(false),
-            "1132 strict: copies AND gaps at the (dormant) tolerance now FAIL overall_pass -- \
-             the rescue is disarmed: clean={clean}, at_tolerance={at_tolerance}"
+            serde_json::json!(true),
+            "1220: copies AND gaps AT the re-armed tolerance must NOT swing overall_pass -- the \
+             tolerance channel is armed again (owner mandate, 2026-08-29): \
+             clean={clean}, at_tolerance={at_tolerance}"
         );
         assert_eq!(
             at_seg["windows_over_copies_gaps_tolerance"],
@@ -9752,10 +9999,10 @@ mod tests {
     /// CLASSIFIERS themselves are report-only annotations layered on TOP of the underlying
     /// per-window `copies`/`gaps`/`undecodable` data -- their own `gates_overall_pass` JSON
     /// fields must read `false`, always. **2026-08-05 RE-GATE (ticket 889 comment 5196190653):**
-    /// this fixture's "genuinely HARD-FROZEN" window is built from `copies=5` (density-based,
+    /// this fixture's "genuinely HARD-FROZEN" window is built from `copies=10` (density-based,
     /// see the `frozen` block below) -- FAR over the per-window tolerance (recalibrated 1 → 2 → 3
-    /// on 2026-08-06, ticket 889 comments 5198131539 / 5200533407:
-    /// `crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
+    /// on 2026-08-06, ticket 889 comments 5198131539 / 5200533407, walked 3 -> 5 on 2026-08-31
+    /// issue 1243: `crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
     /// correctly fails `overall_pass` again via the re-gate, independent of whatever
     /// `frozen_leg`/`self_heal_reset` report. Renamed from `..._no_longer_gate_the_overall_
     /// verdict_914` -- that claim is no longer true for a window this badly frozen; the
@@ -9829,14 +10076,22 @@ mod tests {
                 });
             }
             if frozen {
-                // 5 consecutive duplicates of index 9's tick (1018), inserted right after index
-                // 9 -- `copies=5` against `frames=25` -> density 0.20, ABOVE
-                // `frozen_leg::FROZEN_DENSITY_THRESHOLD` (0.10) -> genuinely HARD-FROZEN (not
-                // merely stale_replay, whose isolated-copy allowance is also 5 -- this proves
-                // DENSITY, not just count, is what trips it here). The real present-tick
-                // sequence around the duplicates stays perfectly contiguous (step 2), isolating
-                // this fixture's ONLY defect to the copies/frozen classification.
-                for k in 0..5u64 {
+                // 10 consecutive duplicates of index 9's tick (1018), inserted right after index
+                // 9 -- `copies=10` against `frames=30` -> density ~0.333, ABOVE
+                // `frozen_leg::FROZEN_DENSITY_THRESHOLD` (0.10) -> genuinely HARD-FROZEN. Walked
+                // up from the original 5 on 2026-08-31 (issue 1243): now that
+                // `window_gate::WINDOW_COPIES_GAPS_TOLERANCE` also sits at 5, a copies value that
+                // stays at/under `frozen_leg::STALE_REPLAY_MAX_ISOLATED` (also 5) can no longer
+                // ALSO exceed the walked-up window_gate tolerance -- those two constraints now
+                // conflict at the shared boundary, so this fixture no longer isolates "density
+                // alone trips it" from "count alone would too" (both trip independently at
+                // copies=10; see `frozen_leg::isolated_allowance_boundary_is_stale_replay_not_
+                // frozen` for the count-only boundary kept isolated in its own module). What this
+                // test still needs -- genuinely HARD-FROZEN AND genuinely over the continuity
+                // tolerance -- both hold. The real present-tick sequence around the duplicates
+                // stays perfectly contiguous (step 2), isolating this fixture's ONLY defect to
+                // the copies/frozen classification.
+                for k in 0..10u64 {
                     let dup_gen_ts = base + 9 * (ONE_S / 10) + (k as i64 + 1) * (ONE_S / 1000);
                     stream_frames.insert(
                         10 + k as usize,
@@ -9942,10 +10197,10 @@ mod tests {
             serde_json::json!(false),
             "914: same for self_heal_reset: {with_events}"
         );
-        // 889 re-gate: the fixture's own copies=5 (against frames=25, density 0.20 -- the exact
-        // shape the frozen_leg classifier needs to prove DENSITY, not just count) is FAR over the
-        // tolerance (recalibrated 1 → 2 → 3 on 2026-08-06), so this window (and therefore
-        // `all_cambox_continuity.overall_pass` specifically) now correctly FAILS again -- this is
+        // 889 re-gate: the fixture's own copies=10 (against frames=30, density ~0.333 -- well
+        // past the frozen_leg density threshold) is FAR over the tolerance (recalibrated
+        // 1 → 2 → 3 on 2026-08-06, walked 3 -> 5 on 2026-08-31 issue 1243), so this window (and
+        // therefore `all_cambox_continuity.overall_pass` specifically) now correctly FAILS again -- this is
         // the re-gate doing its job, not frozen_leg/self_heal_reset (which stay report-only, per
         // the two assertions immediately above). Scoped to `all_cambox_continuity.overall_pass`,
         // NOT the top-level `overall_pass` -- this short synthetic fixture (a few seconds) always
@@ -9960,7 +10215,7 @@ mod tests {
         assert_eq!(
             with_events["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(false),
-            "889 re-gate: copies=5 far exceeds the tolerance -- \
+            "889 re-gate: copies=10 far exceeds the tolerance -- \
              all_cambox_continuity.overall_pass must FAIL again, even though \
              frozen_leg/self_heal_reset themselves stay report-only: {with_events}"
         );
@@ -9976,7 +10231,7 @@ mod tests {
         // `build_and_print_verdict` -- disconnected from `SelfHealAttributionReport::
         // overall_pass_contribution()`, the function that ACTUALLY decides whether these terms
         // fold into `all_pass`) -- but nothing above would catch a regression in that function
-        // itself, because `with_events`'s copies=5 defect ALREADY fails `all_cambox_continuity.
+        // itself, because `with_events`'s copies=10 defect ALREADY fails `all_cambox_continuity.
         // overall_pass` on its own (the re-gate), confounding any differential at that level; the
         // TOP-LEVEL `overall_pass` differential the ORIGINAL (pre-re-gate) #914 test used is
         // ALSO confounded, but by something else entirely (the >=300s `full_chain` span floor,
@@ -10035,7 +10290,7 @@ mod tests {
             "914 regression guard: an unattributed self-heal event ALONE (no frozen defect, no \
              copies/gaps defect) must be a no-op on the TOP-LEVEL overall_pass (report-only, \
              pending cam1 hardware fix issue 909 -- restore path issue 905). Unlike the \
-             `with_events` fixture above (confounded by its own copies=5 re-gate failure), this \
+             `with_events` fixture above (confounded by its own copies=10 re-gate failure), this \
              differential genuinely isolates self_heal_reset's contribution: \
              clean_isolated={clean_isolated}, self_heal_only={self_heal_only}"
         );

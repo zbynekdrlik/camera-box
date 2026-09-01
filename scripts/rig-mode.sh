@@ -949,6 +949,8 @@ set_imag_test_program() {
     echo "[obs imag ${IMAG_IP}] SKIP #462 route PROGRAM: imag acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) a nedosiahnutelny -- routing sa preskakuje"
     return 0
   fi
+  # issue 1230: the #1218 imag active-set NDI idle enforce pass was REMOVED here (owner ruling
+  # 2026-08-30: no idle policy). imag keeps all seven cameras named + alive via the on-box boot seed.
   echo "[obs imag ${IMAG_IP}] #462 route PROGRAM to '${IMAG_PROG_SCENE}' (shows ${RIG_SOURCE_BOX} via '${IMAG_PROG_SOURCE}')"
   python3 "$here/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" \
     --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [imag program] /' || rc=$?

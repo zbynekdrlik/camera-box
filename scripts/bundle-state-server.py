@@ -43,7 +43,9 @@ that env var is set on-box).
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
+import io
 import json
 import os
 import subprocess
@@ -93,6 +95,15 @@ DEFAULT_STARTUP_SHORTCUT = r"C:\ProgramData\Microsoft\Windows\Start Menu\Program
 # does not apply here" rather than a failure (see version-integrity-gate.sh's startup_chain scope).
 DEFAULT_AHK_PATH = r"D:\_APPS\NL_STARTUP.ahk"
 
+# #1222 — port4455_owner()'s PID-keyed cache (see that function's own doc comment). Guarded by a
+# lock because ThreadingHTTPServer dispatches each request on its own thread — same pattern as
+# the _State class below for the record-directory cache.
+PORT4455_PID_PROBE_TIMEOUT_S = 5  # #1222b: netstat, no interpreter cold-start —
+                                   # should never need anywhere near this long
+PORT4455_FULL_RESOLVE_TIMEOUT_S = 15  # unchanged; now rare (only on an actual PID change)
+_PORT4455_CACHE_LOCK = threading.Lock()
+_port4455_cache = {"pid": None, "path": "", "version": ""}
+
 
 def log(msg):
     # A hidden Scheduled-Task context can hand this process a DEAD stdout pipe (the #650 supervisor's
@@ -108,29 +119,60 @@ def log(msg):
         pass
 
 
-def newest_obs_log_text(log_dir):
-    """The raw text of the newest *.txt OBS log in *log_dir* ("" if none/unreadable — the callers
-    already treat an unreadable log as every derived key coming back empty/UNKNOWN)."""
+def newest_obs_log_text(log_dir, head_bytes=bsg.LOG_HEAD_BYTES, tail_bytes=bsg.LOG_TAIL_BYTES):
+    """The raw text of the newest *.txt OBS log in *log_dir*, BOUNDED to at most
+    `head_bytes + tail_bytes` (#1222 — a growing multi-hour OBS session's log made every
+    *_from_log parser re-scan the WHOLE file on every request, ~0.25 s/MB measured, pushing
+    gather latency past recording-e2e.sh's `curl --max-time 30` and failing the [0/8]
+    version-integrity gate). "" if none/unreadable — the callers already treat an unreadable log
+    as every derived key coming back empty/UNKNOWN. See bsg.read_bounded_log_text for the actual
+    bounded-read implementation (shared, PURE, testable without a live box)."""
     try:
         candidates = glob.glob(os.path.join(log_dir, "*.txt"))
         if not candidates:
             log(f"WARNING: no OBS log files found under {log_dir}")
             return ""
         newest = max(candidates, key=os.path.getmtime)
-        with open(newest, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
+        return bsg.read_bounded_log_text(newest, head_bytes, tail_bytes)
     except OSError as e:
         log(f"WARNING: could not read OBS log dir {log_dir}: {e}")
         return ""
 
 
+# #1222c — ndi_runtime_version()'s process-lifetime cache, keyed by the runtime DLL's own
+# (mtime_ns, size). The NDI runtime version is static per install and only changes when the DLL
+# itself is replaced (an NDI SDK upgrade) — live evidence: ~8.3s under OBS render load to read
+# what is otherwise a static value on every single request.
+_NDI_RUNTIME_CACHE_LOCK = threading.Lock()
+_ndi_runtime_cache = {"path": None, "stat_key": None, "version": ""}
+
+
 def ndi_runtime_version(dll_path):
     """Get-Item's VersionInfo.FileVersion, shelled to PowerShell (there is no stdlib way to read a
     Windows PE VERSIONINFO resource) — the exact one-liner drift-guard.md step 1 documents. ""
-    on any failure (missing file, powershell error) — never a guessed value."""
+    on any failure (missing file, powershell error) — never a guessed value.
+
+    #1222c: CACHED, keyed by *dll_path*'s own `(mtime_ns, size)` (see `_ndi_runtime_cache` above).
+    A changed stat (an NDI SDK upgrade replacing the DLL) re-resolves and re-caches; a missing DLL
+    is never cached (the existing `os.path.isfile` guard already short-circuits before any
+    subprocess call at all). Same "never cache a failed or empty resolve" discipline as the #1222
+    port4455 cache — a transient PowerShell hiccup must keep retrying, never freeze this facet
+    blind for the rest of the process lifetime."""
     if not os.path.isfile(dll_path):
         log(f"WARNING: NDI runtime DLL not found at {dll_path}")
         return ""
+
+    try:
+        st = os.stat(dll_path)
+        stat_key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stat_key = None
+
+    if stat_key is not None:
+        with _NDI_RUNTIME_CACHE_LOCK:
+            if _ndi_runtime_cache["path"] == dll_path and _ndi_runtime_cache["stat_key"] == stat_key:
+                return _ndi_runtime_cache["version"]
+
     try:
         out = subprocess.run(
             [
@@ -139,9 +181,86 @@ def ndi_runtime_version(dll_path):
             ],
             capture_output=True, text=True, timeout=15, check=True,
         )
-        return out.stdout.strip()
+        version = out.stdout.strip()
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not read NDI runtime version: {e}")
+        return ""
+
+    if version and stat_key is not None:
+        with _NDI_RUNTIME_CACHE_LOCK:
+            _ndi_runtime_cache["path"] = dll_path
+            _ndi_runtime_cache["stat_key"] = stat_key
+            _ndi_runtime_cache["version"] = version
+    return version
+
+
+def _parse_netstat_listening_pid(text, port=4455):
+    """#1222b — parse `netstat -ano -p tcp` output *text* and return the PID (as a string) of the
+    FIRST row whose local address ends with `:<port>` and whose state is LISTENING. "" if no such
+    row exists, or *text* is empty/malformed (never a guessed value — same never-a-false-clean
+    discipline as every other facet in this file).
+
+    Defensive parsing (PURE — no subprocess, no live box needed, testable with a canned fixture):
+    every genuine TCP row has exactly 5 whitespace-separated columns (Proto, Local Address,
+    Foreign Address, State, PID); the "Active Connections" banner and the column-header row are
+    naturally skipped because they do not have exactly 5 columns (7 tokens for the header row,
+    fewer for the banner), and a UDP row (which itself has only 4 columns — no State — since the
+    caller intentionally passes NO `-p` filter, see `_port4455_owning_pid`'s own doc comment on
+    why) is also skipped defensively by both the column-count check and the explicit proto check.
+    The `:<port>` check is an exact suffix match on the LOCAL address column only — a `:4455`
+    mention in the FOREIGN address column of an unrelated ESTABLISHED connection, or a longer port
+    like `:44551`, can never match. Works unchanged for an IPv6 row (`[::]:4455` still ends with
+    the plain `:4455` suffix)."""
+    suffix = f":{port}"
+    for line in (text or "").splitlines():
+        cols = line.split()
+        if len(cols) != 5:
+            continue
+        proto, local_addr, _foreign_addr, state, pid = cols
+        if proto.upper() != "TCP":
+            continue
+        if state.upper() != "LISTENING":
+            continue
+        if not local_addr.endswith(suffix):
+            continue
+        return pid
+    return ""
+
+
+def _port4455_owning_pid():
+    """#1222 / #1222b — a CHEAP round-trip that reads ONLY the PID of whatever process is
+    LISTENING on TCP :4455 right now — no WMI/CIM query, no VersionInfo read. Live strih evidence
+    showed the FULL port4455_owner() resolution below (which folds this same listener lookup
+    together with a Get-CimInstance Win32_Process query) regularly hitting its 15s subprocess
+    timeout on EVERY /bundle-state.json request; this cheap probe lets port4455_owner() skip that
+    expensive WMI round-trip entirely whenever the owning PID has not changed since last time.
+
+    #1222b: this probe was FIRST implemented as its own PowerShell one-liner
+    (`Get-NetTCPConnection`), but a live post-deploy timing on strih showed that command alone
+    costing ~4.1s plus PowerShell's own interpreter cold-start (~5-10s under load) — the "cheap"
+    probe still cost ~10-15s per request there, defeating its own purpose (the cache in
+    port4455_owner() never got a chance to help). Replaced with `netstat -ano -p tcp` — a native
+    Windows tool with no interpreter startup cost — parsed by the PURE `_parse_netstat_listening_pid`
+    above. Same signature, same "" on-failure/no-listener contract, so port4455_owner()'s cache
+    logic (unchanged by this swap) never needed to know which probe implementation feeds it.
+
+    Returns the numeric PID as a string, or "" if there is no listener / the probe itself fails
+    (never a guessed value — the caller then must not trust any cached identity either)."""
+    try:
+        # #1222b review finding: Windows `-p tcp` and `-p tcpv6` are DISTINCT address-family
+        # filters -- `-p tcp` silently returns IPv4 rows ONLY, even though both families display
+        # literally "TCP" in the Proto column when unfiltered. Passing it here would make this
+        # probe permanently blind to a :4455 listener bound on IPv6 (a silent regression to ""
+        # forever, not just a performance issue) -- so no `-p` filter is passed at all; the pure
+        # parser's own proto/state check already does the real filtering correctly for BOTH
+        # families (and skips UDP rows, which have only 4 columns with no filter applied).
+        out = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True, text=True, timeout=PORT4455_PID_PROBE_TIMEOUT_S, check=True,
+        )
+        return _parse_netstat_listening_pid(out.stdout, port=4455)
+    except (subprocess.SubprocessError, OSError) as e:
+        log(f"WARNING: could not read the :4455 listener PID: {e}")
         return ""
 
 
@@ -162,7 +281,31 @@ def port4455_owner():
     (Get-Item .VersionInfo.FileVersion) only needs read access to the on-disk exe, so it works once
     the path resolves (which is why the version was ALSO missing before — downstream of the null
     path, not a separate failure). Get-Process.Path is kept as a fallback for any box where CIM is
-    unavailable."""
+    unavailable.
+
+    #1222 — CACHED, keyed by the CURRENT owning PID (read via the cheap `_port4455_owning_pid()`
+    probe above, no WMI). Live strih evidence: this function's single PowerShell round-trip
+    (Get-NetTCPConnection + Get-CimInstance Win32_Process + Get-Item VersionInfo) was regularly
+    hitting its 15s subprocess timeout on EVERY /bundle-state.json request — ~15s of the
+    ~18.7s fresh-log gather baseline (issue-1222 comment). Since a PID never changes identity
+    mid-life on Windows, an UNCHANGED pid means the same process is still there and the
+    already-resolved (path, version) is not a guess — it is re-served instead of re-resolved. Only
+    a CHANGED pid (a genuine OBS restart, or a different process taking the port — rare, not a
+    per-request event) pays for the expensive WMI resolution again. An unresolvable current PID
+    (no listener, or even the cheap probe failing) CLEARS the cache and returns ("", "") — never
+    serves a stale identity for a port nothing currently proves to still be owned by that process."""
+    pid = _port4455_owning_pid()
+    if not pid:
+        with _PORT4455_CACHE_LOCK:
+            _port4455_cache["pid"] = None
+            _port4455_cache["path"] = ""
+            _port4455_cache["version"] = ""
+        return "", ""
+
+    with _PORT4455_CACHE_LOCK:
+        if _port4455_cache["pid"] == pid:
+            return _port4455_cache["path"], _port4455_cache["version"]
+
     try:
         out = subprocess.run(
             [
@@ -180,31 +323,82 @@ def port4455_owner():
                 'if ($path) { $path; '
                 '(Get-Item -LiteralPath $path -ErrorAction SilentlyContinue).VersionInfo.FileVersion } }',
             ],
-            capture_output=True, text=True, timeout=15, check=True,
+            capture_output=True, text=True, timeout=PORT4455_FULL_RESOLVE_TIMEOUT_S, check=True,
         )
         lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
         path = lines[0].strip() if len(lines) >= 1 else ""
         version = lines[1].strip() if len(lines) >= 2 else ""
-        return path, version
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not read the :4455 port owner: {e}")
+        # #1222 review: a failed resolve must CLEAR the cache, not leave a previous entry
+        # standing -- a later PID reuse (Windows recycles PIDs) must never serve an identity
+        # resolved before this failure under a pid that may since belong to a different process.
+        with _PORT4455_CACHE_LOCK:
+            _port4455_cache["pid"] = None
+            _port4455_cache["path"] = ""
+            _port4455_cache["version"] = ""
         return "", ""
+
+    if path:
+        # #1222 review: only cache a NON-EMPTY path. A resolve that succeeds (exit 0) but returns
+        # nothing (the #1067 access-denied shape, or a transient CIM flake) must NOT be cached --
+        # caching it would serve ("", "") for the rest of the OBS session with no chance to
+        # recover, whereas the pre-fix uncached code retried on every single request.
+        with _PORT4455_CACHE_LOCK:
+            _port4455_cache["pid"] = pid
+            _port4455_cache["path"] = path
+            _port4455_cache["version"] = version
+    return path, version
+
+
+def _parse_tasklist_obs_process_names(text):
+    """#1222c — parse `tasklist /FO CSV /NH` output *text* and return a newline-joined list of
+    every OBS-shaped process NAME (matches `obs<digits>` case-insensitively via the shared
+    `bsg.OBS_PROCESS_NAME_RE` — #1222c review: this used to carry its own duplicate copy of that
+    regex, a DRY violation the shared constant now closes; `.exe` suffix stripped) — the EXACT
+    same shape `Get-Process -Name 'obs*' | Select-Object -ExpandProperty Name` used to produce, so
+    `bsg.obs_process_count_from_listing` (UNCHANGED by this ticket) keeps working on it verbatim.
+    Each CSV row is `"Image Name","PID","Session Name","Session#","Mem Usage"` (tasklist's own
+    quoted-CSV format); `/NH` already suppresses the header row, but this parser tolerates one
+    anyway (it simply never matches the obs<digits> pattern).
+
+    "" if *text* is empty/malformed (never a guessed/zero count downstream — the same
+    never-a-false-clean discipline every other facet in this file follows)."""
+    if not (text or "").strip():
+        return ""
+    names = []
+    try:
+        for row in csv.reader(io.StringIO(text)):
+            if not row:
+                continue
+            image_name = row[0]
+            base = image_name[:-4] if image_name.lower().endswith(".exe") else image_name
+            if bsg.OBS_PROCESS_NAME_RE.match(base):
+                names.append(base)
+    except csv.Error as e:
+        log(f"WARNING: could not parse tasklist CSV output: {e}")
+        return ""
+    return "\n".join(names)
 
 
 def obs_process_list():
-    """#826 — every running process NAME matching an OBS-shaped filter (Get-Process -Name obs*),
-    newline-joined — feeds bsg.obs_process_count_from_listing. "" on any failure (never a guessed
-    count; the gate then reads this box's process count as UNKNOWN, not "zero confirmed")."""
+    """#826 / #1222c — every running process NAME matching an OBS-shaped filter, newline-joined —
+    feeds bsg.obs_process_count_from_listing. "" on any failure (never a guessed count; the gate
+    then reads this box's process count as UNKNOWN, not "zero confirmed").
+
+    #1222c: was a PowerShell `Get-Process -Name 'obs*'` round-trip. Live per-facet timing on strih
+    showed this regularly TIMING OUT at its own 15s subprocess ceiling under sustained OBS render
+    load ("WARNING: could not list OBS-class processes: ... timed out after 15 seconds"), the same
+    PowerShell-interpreter-cold-start tax the #1222b port4455 fix already replaced with netstat.
+    Replaced here with a native `tasklist /FO CSV /NH` subprocess (no interpreter startup cost at
+    all), parsed by the PURE `_parse_tasklist_obs_process_names` above — same "" on-failure
+    contract, so `bsg.obs_process_count_from_listing` needed zero changes."""
     try:
         out = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "Get-Process -Name 'obs*' -ErrorAction SilentlyContinue "
-                "| Select-Object -ExpandProperty Name",
-            ],
+            ["tasklist", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=15, check=True,
         )
-        return out.stdout
+        return _parse_tasklist_obs_process_names(out.stdout)
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not list OBS-class processes: {e}")
         return ""
@@ -222,11 +416,39 @@ def read_ahk_text(ahk_path):
         return ""
 
 
+# #1222c — resolve_shortcut()'s process-lifetime cache, keyed by the target .lnk file's own
+# (mtime_ns, size). A Start-Menu shortcut is static until an operator re-points it, so paying for
+# a fresh COM/PowerShell round-trip on EVERY request (live evidence: ~6.6s under OBS render load)
+# is wasted once the file has not changed. Guarded by a lock for the same ThreadingHTTPServer
+# per-request-thread reason as every other cache in this file.
+_SHORTCUT_CACHE_LOCK = threading.Lock()
+_shortcut_cache = {"path": None, "stat_key": None, "target": "", "workdir": ""}
+
+
 def resolve_shortcut(lnk_path):
     """#826 — a Windows .lnk shortcut's own TargetPath + WorkingDirectory, via the same
     WScript.Shell COM technique scripts/launch-obs-genlock.sh already uses to launch OBS through
     its Start-Menu shortcut. Returns (target, workdir), each "" on any failure (missing shortcut,
-    powershell error) — never a guessed value."""
+    powershell error) — never a guessed value.
+
+    #1222c: CACHED, keyed by *lnk_path*'s own `(mtime_ns, size)` (see `_shortcut_cache` above). A
+    changed stat (the operator re-points the shortcut, or replaces the target file) re-resolves
+    and re-caches; a file that cannot be stat'd (missing, unreadable) is never cached at all, so it
+    keeps retrying every request rather than freezing on a stale/empty result. Same "never cache a
+    failed or empty resolve" discipline as the #1222 port4455 cache — a transient PowerShell hiccup
+    must keep retrying next request, not freeze this facet blind for the rest of the process
+    lifetime."""
+    try:
+        st = os.stat(lnk_path)
+        stat_key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stat_key = None
+
+    if stat_key is not None:
+        with _SHORTCUT_CACHE_LOCK:
+            if _shortcut_cache["path"] == lnk_path and _shortcut_cache["stat_key"] == stat_key:
+                return _shortcut_cache["target"], _shortcut_cache["workdir"]
+
     try:
         out = subprocess.run(
             [
@@ -239,10 +461,17 @@ def resolve_shortcut(lnk_path):
         lines = out.stdout.splitlines()
         target = lines[0].strip() if len(lines) >= 1 else ""
         workdir = lines[1].strip() if len(lines) >= 2 else ""
-        return target, workdir
     except (subprocess.SubprocessError, OSError) as e:
         log(f"WARNING: could not resolve shortcut {lnk_path!r}: {e}")
         return "", ""
+
+    if target and stat_key is not None:
+        with _SHORTCUT_CACHE_LOCK:
+            _shortcut_cache["path"] = lnk_path
+            _shortcut_cache["stat_key"] = stat_key
+            _shortcut_cache["target"] = target
+            _shortcut_cache["workdir"] = workdir
+    return target, workdir
 
 
 def gather_ndi_inputs(host, password):
@@ -277,6 +506,17 @@ def gather_record_directory(host, password):
         ws.close()
 
 
+def _timed(timings, key, fn, *args, **kwargs):
+    """#1222 — run fn(*args, **kwargs), recording its wall-clock duration under *key* in the
+    *timings* dict (the opt-in BUNDLE_STATE_TIMING=1 per-facet breakdown — see
+    gather_bundle_state's own doc comment). Never swallows an exception; only measures."""
+    t0 = time.perf_counter()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        timings[key] = time.perf_counter() - t0
+
+
 def gather_bundle_state(
     obs_host, password, obs_log_dir, ndi_runtime_dll, distroav_scan_roots,
     genlock_build_sha_file=DEFAULT_GENLOCK_BUILD_SHA_FILE,
@@ -288,19 +528,52 @@ def gather_bundle_state(
     """Build the fresh bundle-state dict for THIS request — every gather is attempted
     independently so one failing facet (e.g. OBS-WS momentarily unreachable) does not blank out
     the log-derived facets that still read fine; each key that could not be read is simply
-    omitted (UNKNOWN downstream), never guessed."""
-    log_text = newest_obs_log_text(obs_log_dir)
-    ndi_inputs = {}
-    try:
-        ndi_inputs = gather_ndi_inputs(obs_host, password)
-    except Exception as e:  # noqa: BLE001 - any WS/RPC failure must not crash the whole response
-        log(f"WARNING: could not gather NDI input latency over obs-websocket: {e}")
+    omitted (UNKNOWN downstream), never guessed.
+
+    #1222: every facet gather is timed into a per-request breakdown, logged as ONE line
+    ("gather timing: key=Xs ...") when BUNDLE_STATE_TIMING=1 is set in the environment — opt-in
+    so the normal request path pays only a cheap perf_counter() call per facet. This gives the
+    NEXT session real per-facet data to attack the remaining ~18.7s cold-log baseline (measured
+    2026-08-29 AFTER a fresh-log restart, so it is NOT the log-size problem this ticket's bounded
+    read already fixes) instead of guessing which facet is slow."""
+    timings = {}
+    t_total0 = time.perf_counter()
+
+    log_text = _timed(timings, "obs_log_read", newest_obs_log_text, obs_log_dir)
+
+    def _parse_log_facets():
+        return (
+            bsg.obs_version_from_log(log_text),
+            bsg.distroav_version_from_log(log_text),
+            bsg.output_fps_from_log(log_text),
+            bsg.genlock_wall_clock_from_log(log_text),
+            bsg.genlock_capability_from_log(log_text),
+            # #1226/#1231 — MAX per-source audio-timeline lag + freshness age
+            # (max_fresh_lag_str, src, age_s) from the SAME bounded log_text (no second read); the
+            # dev1 audio-lag watchdog reads these facets.
+            bsg.audio_telemetry_from_log(log_text),
+        )
+
+    (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
+     audio_ts_lag) = _timed(timings, "obs_log_parse", _parse_log_facets)
+    audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
+
+    def _gather_ndi():
+        try:
+            return gather_ndi_inputs(obs_host, password)
+        except Exception as e:  # noqa: BLE001 - any WS/RPC failure must not crash the whole response
+            log(f"WARNING: could not gather NDI input latency over obs-websocket: {e}")
+            return {}
+
+    ndi_inputs = _timed(timings, "ndi_inputs", _gather_ndi)
 
     # #826 — the strih OBS-identity machine-check facet (each gather independent, same
     # never-let-one-failure-blank-the-rest discipline as every other facet here).
-    port_owner_path, port_owner_version = port4455_owner()
-    ahk_text = read_ahk_text(ahk_path)
-    shortcut_target, shortcut_workdir = resolve_shortcut(startup_shortcut)
+    port_owner_path, port_owner_version = _timed(timings, "port4455_owner", port4455_owner)
+    ahk_text = _timed(timings, "ahk_text", read_ahk_text, ahk_path)
+    shortcut_target, shortcut_workdir = _timed(
+        timings, "shortcut", resolve_shortcut, startup_shortcut
+    )
 
     # #770 — the DEPLOYED plugin/core byte identity the [0/8] version-integrity gate compares
     # against the #120 BUNDLE_MANIFEST. distroav.dll: hash the FIRST located copy (scan order:
@@ -313,34 +586,65 @@ def gather_bundle_state(
     # hashing it here is exactly the byte the version-integrity gate compares by basename.
     # Each hash degrades to "" (UNKNOWN downstream, never a guessed/zero SHA) when the file is
     # missing/unreadable — the opt-in landing (#756-shape): a box with no genlock DLL is skipped.
-    distroav_paths_csv = bsg.distroav_dll_paths(distroav_scan_roots)
+    distroav_paths_csv = _timed(
+        timings, "distroav_dll_paths", bsg.distroav_dll_paths, distroav_scan_roots
+    )
     first_distroav = distroav_paths_csv.split(",")[0] if distroav_paths_csv else ""
 
-    return bsg.build_bundle_state(
-        obs_version=bsg.obs_version_from_log(log_text),
-        distroav_version=bsg.distroav_version_from_log(log_text),
-        ndi_runtime=ndi_runtime_version(ndi_runtime_dll),
-        output_fps=bsg.output_fps_from_log(log_text),
-        genlock_wall_clock=bsg.genlock_wall_clock_from_log(log_text),
+    obs_installs_val = _timed(
+        timings, "obs_installs", bsg.obs_installs_under, obs_install_scan_roots
+    )
+    obs_dll_sha256_val = _timed(timings, "obs_dll_sha256", bsg.component_sha256, obs_dll_path)
+    distroav_dll_sha256_val = _timed(
+        timings, "distroav_dll_sha256", bsg.component_sha256, first_distroav
+    )
+    genlock_build_sha_val = _timed(
+        timings, "genlock_build_sha", bsg.genlock_build_sha_from_file, genlock_build_sha_file
+    )
+    ndi_runtime_val = _timed(timings, "ndi_runtime", ndi_runtime_version, ndi_runtime_dll)
+    obs_process_count_val = _timed(
+        timings,
+        "obs_process_count",
+        lambda: bsg.obs_process_count_from_listing(obs_process_list()),
+    )
+
+    result = bsg.build_bundle_state(
+        obs_version=obs_version,
+        distroav_version=distroav_version,
+        ndi_runtime=ndi_runtime_val,
+        output_fps=output_fps,
+        genlock_wall_clock=genlock_wall_clock,
         ndi_input_latency=bsg.ndi_input_latency_csv(ndi_inputs),
         distroav_dll_paths=distroav_paths_csv,
-        genlock_capability=bsg.genlock_capability_from_log(log_text),
+        genlock_capability=genlock_capability,
         # #770 — deployed core/plugin byte sha256 (the truth the marker only POINTS at).
-        obs_dll_sha256=bsg.component_sha256(obs_dll_path),
-        distroav_dll_sha256=bsg.component_sha256(first_distroav),
+        obs_dll_sha256=obs_dll_sha256_val,
+        distroav_dll_sha256=distroav_dll_sha256_val,
         # #756 — the deployed genlock build SHA for the cross-box parity gate.
-        genlock_build_sha=bsg.genlock_build_sha_from_file(genlock_build_sha_file),
+        genlock_build_sha=genlock_build_sha_val,
         # #826 — the strih OBS-identity machine-check facet.
-        obs_installs=bsg.obs_installs_under(obs_install_scan_roots),
+        obs_installs=obs_installs_val,
         port4455_owner_path=port_owner_path,
         port4455_owner_version=port_owner_version,
-        obs_process_count=bsg.obs_process_count_from_listing(obs_process_list()),
+        obs_process_count=obs_process_count_val,
         ahk_app1_shortcut_path=bsg.ahk_app1_shortcut_path(ahk_text),
         ahk_app1_run=bsg.ahk_app1_run(ahk_text),
         ahk_dead_config_present=bsg.ahk_dead_config_present(ahk_text),
         shortcut_target_path=shortcut_target,
         shortcut_workdir=shortcut_workdir,
+        # #1226 — the audio-timeline-lag facet (omit-when-empty; absent == UNKNOWN downstream).
+        audio_ts_lag_ms=audio_ts_lag_ms_val,
+        audio_ts_lag_src=audio_ts_lag_src_val,
+        # #1231 — the freshness age of that facet (in-log seconds behind the log head); a large value
+        # -> the dev1 decision surfaces STALE (telemetry stopped while the log advanced).
+        audio_ts_lag_age_s=audio_ts_lag_age_s_val,
     )
+
+    timings["total"] = time.perf_counter() - t_total0
+    if os.environ.get("BUNDLE_STATE_TIMING") == "1":
+        breakdown = " ".join(f"{k}={v:.3f}s" for k, v in timings.items())
+        log(f"gather timing: {breakdown}")
+    return result
 
 
 class _State:
