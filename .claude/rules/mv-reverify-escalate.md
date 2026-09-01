@@ -3,6 +3,7 @@ paths:
   - "scripts/lib/mv-reverify-escalate.sh"
   - "tests/harness_mv_reverify_escalate_1093.rs"
   - "tests/harness_mv_reverify_resolve_wait_1114.rs"
+  - "tests/harness_received_tap_encoded_command_1258.rs"
 ---
 
 # Sender-bounce reverify: painter-order proof + receiver-wedge escalation (#1093)
@@ -140,3 +141,32 @@ pixel-change poll starts counting."
   `mv_reverify_proactive_reset "$CAMERA_NAME" "${CAMERA_NAME#cam}"` (cam1) and
   `mv_reverify_proactive_reset "$_cn" "${_cn#cam}"` (ALL_CAMBOX loop), each ordered BEFORE its
   `mv_reverify_or_escalate`; the adjacent comments must never duplicate those literals.
+
+## `mv_reverify_probe_raw` reads strih's OBS log via `-EncodedCommand`, NEVER naive `-Command "..."` (#1258)
+
+strih's Win32-OpenSSH default shell is **cmd.exe**. A naive
+`ssh "powershell -NoProfile -Command \"gc (gci ... | sort ... | select ...).FullName -Tail N\""`
+is MANGLED by the three-layer bash→ssh→cmd.exe→powershell quoting hazard (the same one
+`scripts/lib/win-ssh-exec.sh`'s header documents + solves with `-EncodedCommand`): the unescaped `|`
+pipes leak to cmd.exe, so the read returns non-tail noise. This left the `[4c/8]` frozen-camera gate's
+`received=` tap (which reuses `mv_reverify_probe_raw`) reading `received=none` on EVERY source of EVERY
+attempt of EVERY run — 4/4 INCONCLUSIVE, the abort gate silently never bit (only the QR sweep protected)
+— across all runs since #1233. It is a DETERMINISTIC read bug, not a timing/race: the audit lines exist
+on-box for `NDI cam1`..`NDI cam7` and `gc -Tail 800 | Select-String "genlock-fifo audit 'NDI cam1': "`
+matches 27 lines; `win_ssh_run` (which already uses `-EncodedCommand`) reads strih fine in the SAME
+failing run.
+
+- **The read now base64-UTF16LE-encodes the tail command and sends `-NoProfile -NonInteractive
+  -EncodedCommand <b64>`** — pure ASCII, no shell-special chars, so cmd.exe can't mangle it; PowerShell
+  decodes back to the exact `gc/gci … -Tail N` command with pipes intact.
+- **Inlined `iconv -f UTF-8 -t UTF-16LE | base64 -w0`, NOT `. win-ssh-exec.sh`** — that helper carries
+  its own top-level `set -euo pipefail`, which would leak strict mode into this source-only lib's
+  non-strict callers (the frozen-input watchdog + the Tier-0 harness). Self-guard the encode
+  (`_enc="$(… 2>/dev/null)" || _enc=""`) and numeric-clamp any tail override (`case '' | *[!0-9]* → 400`)
+  so a metachar override can never inject into the encoded payload.
+- **Tier-0 without ssh (`.claude/rules/win-ssh-vs-mcp.md`: agent sessions read strih via win-* MCP, never
+  ssh):** a fake `sshpass` on PATH echoing its argv proves the invocation shape — naive→`-Command "gc`
+  (RED), fixed→`-EncodedCommand` whose payload `base64 -d | iconv -f UTF-16LE -t UTF-8` decodes exactly to
+  the tail command (GREEN), for both the -Tail 400 default and the frozen-cam -Tail 800 override
+  (`tests/harness_received_tap_encoded_command_1258.rs`). The same naive-form read still lives in ~7 other
+  files (mostly disabled watchdogs + the live `scripts/lib/mv-fps-preflight.sh`) — a fleet sweep is #1259.

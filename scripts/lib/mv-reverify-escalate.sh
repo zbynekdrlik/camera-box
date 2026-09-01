@@ -121,9 +121,31 @@ mv_reverify_probe_raw() {
   if [ -n "${MV_REVERIFY_RECEIVED_CMD:-}" ]; then
     $MV_REVERIFY_RECEIVED_CMD "$ip" "$source" 2>/dev/null || true
   else
+    # #1258: invoke PowerShell via -EncodedCommand (base64 UTF-16LE), NEVER the naive
+    # `-Command "gc (gci ... | sort ... | select ...)..."` string. Win32-OpenSSH's default cmd.exe
+    # shell MANGLES the naive triple-quoted form (the bash -> ssh -> cmd.exe -> powershell three-layer
+    # quoting hazard win-ssh-exec.sh documents + live-verified): the unescaped `|` pipes leak to
+    # cmd.exe, so the read returned non-tail noise and EVERY source read `received=none` on EVERY
+    # [4c/8] frozen-camera-gate attempt of EVERY run since #1233 (run 33513175938 + the 4 prior green
+    # runs all 4/4 INCONCLUSIVE) -> the abort gate silently never bit; only the QR sweep protected.
+    # The base64 blob is pure ASCII with no shell-special chars, so cmd.exe cannot mangle it and
+    # PowerShell decodes it back to the exact command -- the same mechanism win_ssh_run already uses.
+    # Inlined (rather than sourcing win-ssh-exec.sh) so this source-only lib never imports that
+    # helper's own top-level `set -euo pipefail`, which would leak strict mode into non-strict
+    # callers (the frozen-input watchdog + the Tier-0 harness). iconv + base64 are required (present
+    # fleet-wide -- win_ssh_ps_encoded_command uses the same pair); if either is somehow absent the
+    # encode yields "" -> an empty -EncodedCommand -> an empty read -> INCONCLUSIVE, NEVER an abort
+    # (the `|| _enc=""` guard keeps this line self-contained under a future set -e caller, the #266
+    # never-abort discipline this lib documents).
+    local _ps _enc _tail
+    # numeric-only tail -> the override can never inject shell/PS metachars into the encoded payload.
+    _tail="${MV_REVERIFY_RECEIVED_TAIL:-400}"
+    case "$_tail" in '' | *[!0-9]*) _tail=400 ;; esac
+    _ps="gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail"
+    _enc="$(printf '%s' "$_ps" | iconv -f UTF-8 -t UTF-16LE | base64 -w0 2>/dev/null)" || _enc=""
     timeout "${MV_REVERIFY_RECEIVED_SSH_TIMEOUT:-20}" sshpass -p "${STRIH_PW:-newlevel}" \
       ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "${STRIH_USER:-newlevel}@$ip" \
-      "powershell -NoProfile -Command \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail ${MV_REVERIFY_RECEIVED_TAIL:-400}\"" \
+      "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
       2>/dev/null || true
   fi
 }
