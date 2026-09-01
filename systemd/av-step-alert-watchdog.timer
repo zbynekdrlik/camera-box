@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1267 stream OBS upstream-audio-latency step check every 5 min (dev1-side), matching the
+# audio-lag / network-reach / bundle-state / obs-liveness / cadence alert-timer cadence so the
+# fleet's dev1 alert timers stay in lockstep. An upstream A/V step (the 2026-09-01 mastered-Dante
+# shift) is caught within ~10 min of crossing the threshold (2-pass confirm) and paged report-only —
+# hours before the E2E A/V gate would have failed on it.
+Description=Run the camera-box stream OBS upstream-audio-latency step check every 5 min (#1267)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
