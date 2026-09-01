@@ -610,21 +610,39 @@ class TestBudgetBoundSoftRelease:
         return result, applied
 
     def test_stable_over_budget_tail_soft_releases_not_fails(self, monkeypatch):
-        # present ages {129,100,79,90}: spread 50 <= 66 passes sanity, but every faster camera would
-        # need a pin == 129 > 94 -> budget-impossible. RED (pre-fix): align() RAISES AlignmentImpossible
-        # -> the run FAILS. GREEN: budget-bound soft-release, applies nothing, exit-0-shaped result.
-        floors = {"NDI cam1": 129.0, "NDI cam2": 100.0, "NDI cam3": 79.0, "NDI cam4": 90.0}
+        # present ages {112,100,79,90}: spread 33 <= 66 passes sanity AND is WITHIN the issue-1168
+        # transient budget (45 ms >= the ~2-source-frame N=2 quantum), but every faster camera would
+        # need a pin == 112 > 94 -> budget-impossible. So this is the budget-bound SOFT-RELEASE path
+        # (issue 1161, PRESERVED by the issue-1168 re-tighten for a within-budget residual): applies
+        # nothing, exit-0-shaped result. A residual ABOVE the budget instead HARD-FAILS -- see the
+        # sibling test below.
+        floors = {"NDI cam1": 112.0, "NDI cam2": 100.0, "NDI cam3": 79.0, "NDI cam4": 90.0}
         current = {"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 3, "NDI cam4": 3}   # two-phase reset -> floor
         result, applied = self._budget_align(monkeypatch, floors, current)
         assert result["status"] == "budget-bound"
         assert result["budget_bound"] is True
         assert result["plan"] == {}          # apply NONE
         assert applied == {}                  # nothing written to the rig
-        assert result["report_only_residual_ms"] == pytest.approx(50.0, abs=1.0)   # surviving spread
+        assert result["report_only_residual_ms"] == pytest.approx(33.0, abs=1.0)   # surviving spread
         srcs = {o["source"] for o in result["over_budget"]}
         assert "NDI cam3" in srcs
         for o in result["over_budget"]:
             assert o["target_ms"] > o["bound_ms"]     # every entry genuinely exceeds the ceiling
+
+    def test_budget_bound_residual_beyond_transient_budget_hard_fails(self, monkeypatch):
+        # issue 1168 RE-TIGHTEN. present ages {129,100,74,90}: spread 55 <= 66 passes sanity, budget-
+        # impossible (target 129 > 94), BUT the surviving residual 55 EXCEEDS the 45 ms transient budget
+        # (>= ~3 source frames -- beyond the ~2-frame N=2 quantum + observed floor lottery). RED (pre-
+        # fix): align() SOFT-RELEASES (exit-0 budget-bound), no raise. GREEN: it HARD-FAILS with the
+        # named #1168 reason -> the run ABORTS (a genuinely-worse cross-camera misalignment).
+        floors = {"NDI cam1": 129.0, "NDI cam2": 100.0, "NDI cam3": 74.0, "NDI cam4": 90.0}
+        current = {"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 3, "NDI cam4": 3}
+        with pytest.raises(qa.AlignmentImpossible) as exc:
+            self._budget_align(monkeypatch, floors, current)
+        msg = str(exc.value)
+        assert "1168" in msg and "RE-TIGHTEN" in msg
+        assert "55" in msg or "54" in msg or "56" in msg   # the residual is named
+        assert "45" in msg                                  # the budget is named
 
     def test_within_budget_still_aligns_never_budget_bound(self, monkeypatch):
         # REGRESSION: a within-budget floor set (max floor 66 <= 94) must still ALIGN, never soft-release.
@@ -656,6 +674,42 @@ class TestBudgetBoundSoftRelease:
         out = capsys.readouterr()
         assert '"status": "budget-bound"' in out.out     # persisted into the align JSON (stdout)
         assert "1168" in out.err                          # loud summary names the tracking ticket
+
+
+class TestBudgetBoundVerdict:
+    """issue 1168 RE-TIGHTEN, PURE seam. budget_bound_verdict splits a BUDGET-BOUND run by whether
+    the surviving cross-camera residual is within the transient/quantum budget. These use EXPLICIT
+    budget values (never the module default) so re-arming the budget in EITHER direction stays a
+    proven one-line change -- the dormant-proof pattern (gate-allowance-restore-red-green.md)."""
+
+    def test_within_budget_is_report_only(self):
+        # the ~2-source-frame N=2 quantum (~33 ms) at the default 45 ms budget -> soft-release.
+        assert qa.budget_bound_verdict(33.0, 45.0) == "report-only"
+
+    def test_boundary_at_budget_is_report_only(self):
+        # exactly AT the budget stays report-only (only STRICTLY above hard-fails).
+        assert qa.budget_bound_verdict(45.0, 45.0) == "report-only"
+
+    def test_above_budget_hard_fails(self):
+        # a >= ~3-source-frame residual beyond the observed quantum+transient band -> hard-fail.
+        assert qa.budget_bound_verdict(55.0, 45.0) == "hard-fail"
+
+    def test_none_residual_never_fabricates_a_fail(self):
+        # a missing residual measurement is report-only, never a fabricated abort.
+        assert qa.budget_bound_verdict(None, 45.0) == "report-only"
+
+    def test_re_arm_direction_is_a_one_constant_flip(self):
+        # LOWERING the budget toward the parity gate (as the quantum improves) flips the SAME residual
+        # from report-only to hard-fail with no other change -- proves the seam is re-armable.
+        assert qa.budget_bound_verdict(33.0, 45.0) == "report-only"
+        assert qa.budget_bound_verdict(33.0, 25.0) == "hard-fail"
+
+    def test_default_budget_is_between_two_and_three_source_frames(self):
+        # data-cited: above the observed ~2-frame quantum band (~33 ms, clean-regime max 37.2 ms),
+        # below 3 source frames (~50 ms) -> hard-fails only a >= ~3-frame misalignment.
+        two_frames = 2 * qa.SOURCE_FRAME_MS
+        three_frames = 3 * qa.SOURCE_FRAME_MS
+        assert two_frames < qa.DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS < three_frames
 
 
 # --------------------------------------------------------------------------- #
