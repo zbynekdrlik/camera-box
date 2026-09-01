@@ -543,7 +543,11 @@ fn recording_e2e_execute_mode_runs_the_merge_and_propagates_its_exit_code() {
     // (measurement-eq staleness note + edge-oscillation classifier, both fail-open and
     // $GATE-untouched) legitimately added ~820 bytes between the merge call and the exit,
     // same justified-growth pattern as above (measured distance 8319).
-    let window = &s[exec_merge_block..(exec_merge_block + 9000).min(s.len())];
+    // #1265: widened from 9000 to 9600 bytes -- the [8/8g] stream mbc ts_lag BAND-verdict gather
+    // (the #856 apply-guard input; a fail-open sourced-helper call + its report line, $GATE-untouched)
+    // legitimately added ~640 bytes between the merge call and the exit, same justified-growth
+    // pattern as above (measured distance 8949).
+    let window = &s[exec_merge_block..(exec_merge_block + 9600).min(s.len())];
     assert!(
         window.contains(r#"exit "$GATE""#),
         "#703: after running the real merge, the branch must `exit \"$GATE\"` (the merge's own \

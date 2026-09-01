@@ -161,6 +161,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # swaps (preflight_mv_reverify -> mv_reverify_or_escalate at the deploy sites; the #675 pattern).
 # shellcheck source=scripts/lib/mv-reverify-escalate.sh
 . "$HERE/lib/mv-reverify-escalate.sh"
+# #1265: the I/O gather + orchestration for the #856 rig-wide A/V apply STABILITY GUARD (HOLD the
+# apply when THIS run's audio timeline was unstable). Pure decision in scripts/av_sync_apply_guard.py;
+# this lib is invoked with function-CALL lines below (the #675 sourced-lib pattern -- no anchored
+# line edited, and the #856 apply block itself stays byte-identical).
+# shellcheck source=scripts/lib/av-sync-apply-guard.sh
+. "$HERE/lib/av-sync-apply-guard.sh"
 # #860: the SHARED pure optical-chain decision core + its [0/8] preflight fail-fast (the #675
 # sourced-lib pattern -- the preflight is invoked with ONE line below, no anchored line edited).
 # shellcheck source=scripts/lib/optical-chain-health.sh
@@ -1927,6 +1933,29 @@ fi"
   # restore instead of fighting it, per the #856 issue text. Empty (unset) by default: an early
   # abort, or a run where [8/8g]'s combiner refused (too few measured cameras / spread too
   # wide), never touches the stream box's genlock latency here at all.
+  # #1265: HOLD the #856 apply when THIS run's audio timeline was unstable -- a DRIFTING stream mbc
+  # ts_lag band ($AV_SYNC_BAND_VERDICT from [8/8g]), a residual median beyond the green-series
+  # sanity band, or a correction that JUMPS from the last-applied value -- so the controller
+  # composes with a live OBS restart instead of walking the prod pin toward a flapping timeline
+  # (the 926->976 walk, issue 1265). Sourced-helper (#675, inserted BEFORE the anchored apply `if`
+  # below -- that apply block stays byte-identical); a HOLD clears the offset so the apply is
+  # skipped and persists the reason. An empty offset (no correction computed) has nothing to guard.
+  if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
+    _avs_hold="$(av_sync_apply_guard_decide "$REPORT_JSON" "$AV_SYNC_BAND_VERDICT" "$AV_SYNC_APPLY_OFFSET_MS" "$HERE/av_sync_apply_guard.py")"
+    if [ -n "$_avs_hold" ]; then
+      echo "[cleanup] #1265 HOLD #856 apply: $_avs_hold -- stream genlock latency left at the just-restored prod value" >&2
+      printf '%s\n' "$_avs_hold" > "$OUTDIR/av-sync-apply-hold-${RUN_ID}.txt" 2>/dev/null || true
+      av_sync_persist_hold_reason "$_avs_hold"   # #1265: durable ~/.camera-box surface (the $OUTDIR copy is swept)
+      AV_SYNC_APPLY_OFFSET_MS=""
+    fi
+  fi
+  # #1265b: persist THIS run's measured residual (HELD or APPLIED, EVERY run) to the dev1
+  # residual-last reference, so the NEXT run's SUSTAINED two-run confirmation has a prev to compare
+  # against -- a genuine sustained upstream step (residual agrees run-to-run) then PROCEEDS instead
+  # of being HELD forever (supervisor 2026-09-02: the guard must not make a real step un-appliable).
+  # MUST run AFTER the guard decide above (which read the PREVIOUS run's value) and BEFORE the
+  # apply-persist below (so pin_at_measure reads the measure-time pin). Sourced-helper (#675).
+  av_sync_persist_residual "$REPORT_JSON" "$RUN_ID"
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     echo "[cleanup] #856: applying this run's own computed rig-wide A/V correction (${AV_SYNC_APPLY_OFFSET_MS}ms) to '$STREAM_PROG_SOURCE' on stream (av_sync_calibrate.py --apply, read-back verified)"
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/av_sync_calibrate.py" --host "$STREAM" \
@@ -1934,6 +1963,15 @@ fi"
       --offset-ms "$AV_SYNC_APPLY_OFFSET_MS" --apply \
       --json-path "$OUTDIR/av-sync-last-${RUN_ID}.json" \
       || echo "WARNING: #856 av_sync_calibrate.py --apply failed -- stream genlock latency left at the just-restored prod value; the NEXT run recomputes from its own fresh measurement" >&2
+  fi
+  # #1265: persist the last-applied reference for the NEXT run's jump-vs-last-applied guard condition
+  # by COPYING the calibrate-written success file (FULL schema, incl. the applied_latency_ms key the
+  # live pins-snapshot / rig-mode / drift-guard readers depend on) to the dev1 ~/.camera-box home --
+  # finding 1: NOT a re-written source/offset/ts-only schema, which would strip applied_latency_ms.
+  # Gated on that OUTDIR success file existing (calibrate writes it ONLY on a landed apply), so a
+  # HELD/skipped or FAILED apply never records a value that did not take. Sourced-helper (#675).
+  if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ] && [ -f "$OUTDIR/av-sync-last-${RUN_ID}.json" ]; then
+    av_sync_persist_applied_offset "$OUTDIR/av-sync-last-${RUN_ID}.json"
   fi
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # #682: restore imag's program scene to whatever it was BEFORE [4a/8] routed it to the
@@ -2088,6 +2126,12 @@ AV_SYNC_CALIBRATED_MS="${AV_SYNC_CALIBRATED_MS:-}"
 # apply must happen THERE (last), not at [8/8g] itself: the delivery-verify snapshot/restore
 # that ALWAYS runs on exit would otherwise silently overwrite whatever [8/8g] computed.
 AV_SYNC_APPLY_OFFSET_MS="${AV_SYNC_APPLY_OFFSET_MS:-}"
+# #1265: THIS run's stream reference-source (mbc) ts_lag BAND verdict, gathered at [8/8g] from the
+# stream :8899 facet (DRIFTING/HEALTHY/UNKNOWN/SKIP/""). Declared HERE (empty default, BEFORE the
+# cleanup trap) so cleanup()'s #856 apply-guard never `set -u`-aborts referencing it on an early
+# abort. A DRIFTING band HOLDs the #856 apply (the run's A/V measurement was corrupted by a flapping
+# audio timeline); empty/UNKNOWN/SKIP is dormant (the residual-ceiling / jump conditions still apply).
+AV_SYNC_BAND_VERDICT="${AV_SYNC_BAND_VERDICT:-}"
 # #462 (EPIC #466): imag-nb's program-feeding NDI input — the #399-style 1:1 mapping from Phase 1
 # (setup-imag.sh) pins 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)' 1:1. issue 1204: DERIVE this per
 # camera-under-test via imag_source_for_camera "$CAMERA_NAME" (the SAME resolution IMAG_PROG_SCENE
@@ -5095,6 +5139,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "    [8/8g] #856: refusing to compute a rig-wide A/V correction this run (see $AV_SYNC_COMBINE_LOG) -- stream genlock latency left untouched"
       AV_SYNC_APPLY_OFFSET_MS=""
     fi
+    # #1265: gather THIS run's stream reference-source (mbc) ts_lag BAND verdict from the stream :8899
+    # facet, right after the run (the OBS log tail reflects the recording window). cleanup()'s #856
+    # apply-guard HOLDs the apply if it is DRIFTING. Best-effort/fail-open (a curl/facet miss -> "" ->
+    # dormant; the residual-ceiling + jump conditions still guard). Sourced-helper call (#675).
+    AV_SYNC_BAND_VERDICT="$(av_sync_stream_band_verdict "$STREAM" "$HERE/audio_lag_decision.py")"
+    echo "    [8/8g] #1265: stream mbc ts_lag band verdict = ${AV_SYNC_BAND_VERDICT:-<none>} (DRIFTING would HOLD the #856 apply in cleanup)"
     # #756 Member 3 — live per-source genlock latency pins + recommended pins, gathered AFTER
     # the verdict JSON exists (it needs this run's OWN delivery-latency table) and BEFORE the
     # Discord report composes (so the pins land in the SAME report, not a follow-up message).
