@@ -621,3 +621,86 @@ class TestBudgetBoundSoftRelease:
         out = capsys.readouterr()
         assert '"status": "budget-bound"' in out.out     # persisted into the align JSON (stdout)
         assert "1168" in out.err                          # loud summary names the tracking ticket
+
+
+# --------------------------------------------------------------------------- #
+# issue 1253 -- the FIFO is ADDITIVE (present_age = transport + pin), NOT max(pin, transport).
+# The issue-1161 formula wrote an ABSOLUTE present-age target (arrival_floor_i + delta_i) as the PIN,
+# which under the additive FIFO adds ON TOP of the transport -> overshoot by ~the arrival-floor
+# baseline (the run 1899055119 +83 ms doubling). The additive-correct plan ADDS the present-age gap to
+# the CURRENT pin (new_pin_i = current_pin_i + delta_i) so every camera converges to the max present
+# age. RED here on the current max-model formula (the overshoot leaves the verify tail off-parity ->
+# AlignmentImpossible); GREEN once the formula is additive.
+# --------------------------------------------------------------------------- #
+class _AdditiveFifoBarrier:
+    """Models the genlock FIFO's ADDITIVE response (issue 1252/1253, supervisor-confirmed from run
+    1899055119: post_residual = pre_residual + pin_delta): present_age_i = transport_i + live_pin_i.
+    Constructed from arrival floors (present ages) measured at the current pins -- transport_i =
+    floor_i - current_pin_i -- so a raised pin ADDS its hold on top of the transport (never
+    max(pin, transport)). gen_ts encodes present age EXACTLY (older present -> smaller gen_ts)."""
+
+    def __init__(self, floors, current_pins, applied):
+        self.transport = {s: floors[s] - current_pins[s] for s in floors}
+        self.current_pins, self.applied = current_pins, applied
+
+    def __call__(self, sources, host, password, width, height):
+        live = self.applied if self.applied else self.current_pins
+        shot = {}
+        for s in sources:
+            present_ms = self.transport[s] + live.get(s, 0)     # ADDITIVE, not max(pin, transport)
+            gen_ts = int(_BASE_NS - present_ms * 1e6)
+            fid = int(round(gen_ts / ID_NS))
+            shot[s] = ([_payload(RUN, fid, gen_ts), _payload(RUN, fid - 1, gen_ts - ID_NS)], 0)
+        return shot
+
+
+def _align_additive_overshoot(monkeypatch):
+    """A GENUINE >= 2-source-frame cross-camera spread (40 ms, past the #1252 quantum, within the 66 ms
+    sanity and the 94 ms ceiling) under the ADDITIVE FIFO. cam1 is the oldest present (63 ms); the
+    others are 40/30/20 ms younger. The additive-correct plan holds each younger camera by exactly its
+    present-age gap -> all converge to 63 ms. The max-model plan would pin them to 63 ms ABSOLUTE ->
+    additive present 83/93/103 ms -> overshoot -> off-parity abort."""
+    import apply_latency_pins
+    import obs_phase2
+    transports = {"NDI cam1": 60, "NDI cam2": 20, "NDI cam3": 30, "NDI cam4": 40}
+    current = {s: 3 for s in SRC}
+    floors = {s: transports[s] + current[s] for s in SRC}       # present ages at the floor: {63,23,33,43}
+    applied = {}
+    monkeypatch.setattr(qa, "barrier_screenshot", _AdditiveFifoBarrier(floors, current, applied))
+
+    def _read_pins(s, h, p):
+        return dict(applied) if applied else dict(current)
+    monkeypatch.setattr(qa, "read_current_pins", _read_pins)
+
+    def _apply(ws, plan, execute):
+        applied.update(plan)
+        return plan
+    monkeypatch.setattr(apply_latency_pins, "apply_pins", _apply)
+
+    class _WS:
+        def close(self):
+            pass
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, pw: _WS())
+    return qa.align(SRC, "h", "pw", execute=True, stable_tail_rounds=3, stable_tol_ids=1,
+                    min_valid_rounds=5, min_parity_rounds=3, max_delta_ms=66.0, parity_tol_ids=1,
+                    floor_ms=3, width=1920, height=1080, measure_budget_s=1e9,
+                    max_measure_rounds=60, settle_s=0, jitter_json=_jitter(floors, current))
+
+
+class TestAdditiveFifoNoOvershoot:
+    def test_additive_plan_aligns_without_overshoot(self, monkeypatch):
+        # RED (max-model pin = arrival_floor + delta): under the ADDITIVE FIFO the pin adds ON TOP of
+        # the transport, so an absolute present-age target overshoots -> the verify tail stays
+        # off-parity -> AlignmentImpossible. GREEN (pin = current_pin + delta): each younger camera is
+        # delayed by exactly its present-age gap -> all present ages converge to 63 ms -> aligned.
+        result = _align_additive_overshoot(monkeypatch)
+        assert result["status"] == "aligned"
+        assert result["post_spread_ids"] == 0
+        plan = result["plan"]
+        # the plan ADDS the present-age gap to the CURRENT pin, never the absolute present-age target
+        assert plan["NDI cam1"] == 3                        # oldest present -> keeps the floor
+        assert plan["NDI cam2"] == 43                       # 3 + gap 40
+        assert plan["NDI cam3"] == 33                       # 3 + gap 30
+        assert plan["NDI cam4"] == 23                       # 3 + gap 20
+        # never the max-model absolute target (which would be 63 for every younger camera)
+        assert plan["NDI cam2"] != 63 and plan["NDI cam3"] != 63 and plan["NDI cam4"] != 63
