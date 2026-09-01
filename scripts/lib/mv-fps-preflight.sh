@@ -28,6 +28,13 @@
 # block the whole fleet, exactly the mv-fps-health/watchdog fail-safe (the live issue-1083 watchdog
 # owns a sustained collapse either way).
 #
+# PER-BOX TERM (issue 1263): a CONFIRMED collapse is routed per box by
+# mv_fps_preflight_term_is_report_only. The STRIH term is REPORT-ONLY while issue 1260 is open (its
+# 4K divisor-1 MV floor pre-dates the 7-camera fleet, so a healthy strih idles below it) -- a loud
+# `WARNING (issue 1260)` naming the measured line, never an abort. The IMAG term stays STRICT (a
+# confirmed imag collapse still aborts). Walk-back tracked on issue 1263: flip strih back to strict
+# when issue 1260 lands.
+#
 # Reading an OBS LOG FILE over ssh is a session-agnostic FILE read, allowed for the headless dev1 E2E
 # gate (win-ssh-vs-mcp Context B) -- never a GUI atom over ssh.
 #
@@ -89,11 +96,31 @@ mv_fps_preflight_probe() {
   printf '%s\n' "$raw" | tr -d '\r' | grep -F 'multiview-audit:' 2>/dev/null || true
 }
 
+# mv_fps_preflight_term_is_report_only <box_name> -> exit 0 if this box's CONFIRMED-collapse term is
+#   REPORT-ONLY (a loud WARN, never an abort); exit 1 if it is STRICT (a confirmed collapse aborts).
+#   issue 1260 / issue 1263: the STRIH term is REPORT-ONLY while issue 1260 is open -- the strih 4K
+#   divisor-1 MV floor (28, the issue-776 canvas/2-tol retarget) pre-dates the 2026-08-28 seven-camera
+#   fleet reactivation, so a healthy-core-loop strih now idles the MV below floor and this term would
+#   refuse every run (three aborts the day the gate first actually decided, issue 1261). issue 1263 is
+#   the walk-back tracker: flip strih back to STRICT in the PR that closes issue 1260 (perf fixed, or
+#   the floor honestly recalibrated for the 7-cam era). Every OTHER box -- imag -- stays STRICT (imag
+#   holds its floor reliably; its render-health preflight gates it elsewhere too). Fail-safe: an
+#   unlisted box defaults to STRICT (a new box is never silently report-only).
+mv_fps_preflight_term_is_report_only() {
+  case "${1:-}" in
+    strih) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # mv_fps_preflight_assert <gate_bin> <box>...   (box = "name|ip|os|user|pw")
 #   For each box: probe the newest OBS log's multiview-audit lines, run <gate_bin> over them, map exit
 #   via mv_fps_verdict. PASS -> ok. UNKNOWN -> report-only NOTE (never abort). BELOW -> a grace re-read
-#   (one MV_FPS_PREFLIGHT_REPROBE_SLEEP wait) -> if STILL BELOW, record a CONFIRMED collapse. After all
-#   boxes, if any confirmed collapse -> print a loud ERROR naming each box+monitor and `exit 1`.
+#   (one MV_FPS_PREFLIGHT_REPROBE_SLEEP wait) -> if STILL BELOW, a CONFIRMED collapse. The confirmed
+#   collapse is then routed per box by mv_fps_preflight_term_is_report_only: a REPORT-ONLY box (strih,
+#   while issue 1260 is open) prints a loud `WARNING (issue 1260)` and does NOT abort; a STRICT box
+#   (imag / any other) is recorded in $collapsed. After all boxes, if any STRICT confirmed collapse ->
+#   print a loud ERROR naming each box+monitor and `exit 1`.
 #   Call it as a PLAIN statement (never in a pipeline/$()) so its `exit 1` propagates to the harness.
 mv_fps_preflight_assert() {
   local gate_bin="$1"; shift
@@ -141,8 +168,17 @@ mv_fps_preflight_assert() {
           # the extraction here (structural reuse); `|| detail=…` keeps it `-e`-safe even if the gate
           # ever exited 1 without a FAIL line (a contract violation the real gate never commits).
           detail="$(mv_fps_alert_detail "$name" "$out")" || detail="$name MV render collapsed below floor"
-          collapsed="${collapsed}${detail}
+          if mv_fps_preflight_term_is_report_only "$name"; then
+            # issue 1260: the strih 4K divisor-1 MV floor (28) pre-dates the 2026-08-28 seven-camera
+            # fleet reactivation -- a healthy-core-loop strih now idles the MV below floor, so this
+            # term deterministically refuses every run. REPORT-ONLY while issue 1260 is open
+            # (walk-back tracked on issue 1263): WARN loud, never abort. The imag term stays STRICT
+            # (falls through to $collapsed below). Same report-only-decoupling seam as issue 914/915.
+            echo "    WARNING (issue 1260): $name MV render below floor -- REPORT-ONLY while issue 1260 is open: $detail" >&2
+          else
+            collapsed="${collapsed}${detail}
 "
+          fi
         else
           echo "    ok: [4d1/8] MV-fps preflight — $name recovered on grace re-read (transient), proceeding" >&2
         fi
