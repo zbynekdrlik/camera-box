@@ -1,9 +1,11 @@
 ---
 paths:
   - "scripts/lib/mv-reverify-escalate.sh"
+  - "scripts/lib/ps-encoded.sh"
   - "tests/harness_mv_reverify_escalate_1093.rs"
   - "tests/harness_mv_reverify_resolve_wait_1114.rs"
   - "tests/harness_received_tap_encoded_command_1258.rs"
+  - "tests/harness_ps_encoded_fleet_1259.rs"
 ---
 
 # Sender-bounce reverify: painter-order proof + receiver-wedge escalation (#1093)
@@ -168,5 +170,45 @@ failing run.
   ssh):** a fake `sshpass` on PATH echoing its argv proves the invocation shape — naive→`-Command "gc`
   (RED), fixed→`-EncodedCommand` whose payload `base64 -d | iconv -f UTF-16LE -t UTF-8` decodes exactly to
   the tail command (GREEN), for both the -Tail 400 default and the frozen-cam -Tail 800 override
-  (`tests/harness_received_tap_encoded_command_1258.rs`). The same naive-form read still lives in ~7 other
-  files (mostly disabled watchdogs + the live `scripts/lib/mv-fps-preflight.sh`) — a fleet sweep is #1259.
+  (`tests/harness_received_tap_encoded_command_1258.rs`).
+
+## The fleet sweep landed (#1259) — the SHARED encode helper `scripts/lib/ps-encoded.sh`
+
+#1258 fixed only `mv_reverify_probe_raw`; #1259 migrated the 8 OTHER naive `powershell -Command "…|
+sort …| select …"` over-ssh OBS-log reads to `-EncodedCommand`, extracting the encode into ONE shared
+source-only lib **`scripts/lib/ps-encoded.sh`**:
+
+- **`ps_encoded_command <ps-text>`** — base64-UTF16LE-encode a PowerShell command (`iconv -f UTF-8 -t
+  UTF-16LE | base64 -w0`, self-guarded to `""` on a missing encoder, ALWAYS exits 0). The lib carries
+  **NO top-level `set -euo pipefail`** (source-only, like `mv-reverify-escalate.sh`) so it never leaks
+  strict mode into the non-strict watchdog callers (they run `set -uo pipefail` WITHOUT `-e`) — the
+  same reason #1258 inlined rather than sourcing `win-ssh-exec.sh` (whose top-level `set -euo pipefail`
+  WOULD leak). This is why there are now three-plus copies of the same encode (win-ssh-exec.sh's
+  `win_ssh_run`, the #1258 mv_reverify inline, ps-encoded.sh, and `rig-health-audit.py::_ps_encoded`);
+  each copy has a verified rationale (strict-mode leak / #1258 test-lock / the bash↔python boundary).
+- **`ps_clamp_numeric <value> <default>`** — clamp a caller/env-sourced `-Tail N` to a bare
+  non-negative integer BEFORE it enters the encoded payload (rejects empty / non-digit / negative /
+  decimal → default), so a typo'd/hostile env value can never inject shell/PS metachars. Apply it at
+  EVERY `-Tail $count` splice (the #1259 review 🟡: it must be consistent — all 5 watchdogs, not 2).
+
+Migrated sites (each sources ps-encoded.sh + emits `-NoProfile -NonInteractive -EncodedCommand`):
+`asio-starve-alert-watchdog.sh` (fetch_box_log), `frozen-input-alert-watchdog.sh` (probe_received),
+`ndi-halving-watchdog.sh` / `cadence-alert-watchdog.sh` (fetch_box_log), `mv-fps-alert-watchdog.sh`
+(probe_mv_log win branch), `scripts/lib/mv-fps-preflight.sh` (mv_fps_preflight_read_cmd win branch —
+LIVE in the `[4d1/8]` preflight). Python cannot source a bash lib, so `scripts/rig-health-audit.py`
+gets its own `_ps_encoded` / `_windows_obs_log_tail_cmd` / `_windows_obs_count_cmd` (identical base64
+UTF-16LE; both bash `iconv` and Python `utf-16-le` emit NO BOM → byte-identical).
+
+**KEPT as-is (NOT the mangling class — do not "migrate" these):** `bundle-state-server.py`'s
+LIST-form `subprocess.run(["powershell","-NoProfile","-NonInteractive","-Command",cmd])` runs LOCALLY
+on the box (no ssh, no cmd.exe — argv goes straight to powershell.exe); Task Scheduler XML
+`<Command>powershell</Command>` (a local scheduled task); `-File`-based invocations; and the doc
+comments. `mv_reverify_probe_raw`'s OWN inline encode stays (test-locked, out of #1259's scope).
+
+**Tier-0 test the migrated sites the same fake-sshpass way** (`tests/harness_ps_encoded_fleet_1259.rs`):
+source the watchdog (its `[[ "${BASH_SOURCE[0]}" == "$0" ]] && main` guard means sourcing only defines
+functions), call `fetch_box_log`/`probe_received`/`probe_mv_log` with a fake `sshpass` on PATH that
+appends its argv to a log FILE (probe_received post-processes stdout, so the file — not stdout — is the
+reliable capture surface), and `env_remove` the `*_PROBE_CMD` overrides so the REAL branch runs; assert
+`-EncodedCommand` present + the payload base64-decodes to the intended PS. The pure builders
+(`ps_encoded_command`, `ps_clamp_numeric`, `mv_fps_preflight_read_cmd win`) are tested by direct call.
