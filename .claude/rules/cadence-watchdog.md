@@ -81,3 +81,16 @@ DISABLED #477) — prove behaviour by running `scripts/cadence-alert-watchdog.sh
 `CADENCE_PROBE_CMD` stub (seed → WRONG-confirm → alert → throttle → recovery), and by sourcing the
 lib directly; CI runs the Rust assertions. Units are committed but NOT enabled — install/enable per
 `systemd/cadence-alert-watchdog.README.md` (the supervisor sets the live `CADENCE_SOURCES` first).
+
+## Byte-safety of the received= extraction (#1258 layer 2)
+
+`extract_sample` (in `scripts/cadence-alert-watchdog.sh`, NOT `scripts/lib/cadence-health.sh`) reads
+the `genlock-fifo audit '<source>': received=` line from the raw `ps_encoded_command`-fetched tail
+via `LC_ALL=C grep -aF ... | LC_ALL=C sed -n ...` on every stage (the line-find grep, the received=
+digit sed, and the leading-timestamp sed) — NOT plain grep/sed. PowerShell 5.1's `gc` (no
+`-Encoding`) re-encodes a non-ASCII glyph anywhere in the fetched tail as invalid UTF-8; in this
+fleet's UTF-8 locale, plain grep then flags stdin BINARY (empty extraction) and plain sed's trailing
+`.*` leaves line-tail garbage after the digits — either way the sample is worthless. Full root cause
++ the fix pattern: `.claude/rules/mv-reverify-escalate.md` "Layer 2" section (this watchdog is one of
+its 3 proven-RED consumers, verified via a Tier-0 fixture with an injected invalid byte). Never
+re-add a plain (non-`LC_ALL=C`) grep/sed on this extraction.

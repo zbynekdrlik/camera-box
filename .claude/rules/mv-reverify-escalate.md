@@ -6,6 +6,10 @@ paths:
   - "tests/harness_mv_reverify_resolve_wait_1114.rs"
   - "tests/harness_received_tap_encoded_command_1258.rs"
   - "tests/harness_ps_encoded_fleet_1259.rs"
+  - "tests/harness_received_tap_byte_safety_1258.rs"
+  - "scripts/frozen-input-alert-watchdog.sh"
+  - "scripts/lib/frozen-input-health.sh"
+  - "scripts/cadence-alert-watchdog.sh"
 ---
 
 # Sender-bounce reverify: painter-order proof + receiver-wedge escalation (#1093)
@@ -212,3 +216,59 @@ appends its argv to a log FILE (probe_received post-processes stdout, so the fil
 reliable capture surface), and `env_remove` the `*_PROBE_CMD` overrides so the REAL branch runs; assert
 `-EncodedCommand` present + the payload base64-decodes to the intended PS. The pure builders
 (`ps_encoded_command`, `ps_clamp_numeric`, `mv_fps_preflight_read_cmd win`) are tested by direct call.
+
+## Layer 2 (#1258, 2026-09-01) — the EncodedCommand fix was NECESSARY but NOT SUFFICIENT
+
+The layer-1 fix above (`-EncodedCommand`) made `mv_reverify_probe_raw` actually reach the strih OBS
+log. A live proof run (1651316094, dev1 at 1.7.0-dev.607) then found `[4c/8]` STILL 4/4 INCONCLUSIVE
+on every input, every read printing `grep: (standard input): binary file matches` /
+`received= NDI cam1: prev=none curr=none -> UNKNOWN`.
+
+**Root cause:** PowerShell 5.1's `gc` (Get-Content), invoked WITHOUT `-Encoding`, reads the strih OBS
+log (UTF-8) as ANSI/CP1252 and re-encodes on output. Any non-ASCII glyph anywhere in the fetched tail
+(the `≈` in `(≈F frames @ …)`) comes back as invalid-UTF-8 bytes. On a UTF-8-locale box (this fleet
+runs `en_US.UTF-8`), GNU grep then treats stdin as BINARY — stdout goes empty, the notice is
+stderr-only — and even where grep still finds the line, `sed`'s trailing `.*` refuses to consume the
+invalid byte and leaves line-tail garbage after the captured digits. Either failure produces a value
+that is NOT a clean bare integer, so every caller's `case '' | *[!0-9]*` reads it as "none" → UNKNOWN.
+
+**Fix — byte-safe end to end, `LC_ALL=C` on BOTH stages (grep AND sed), plus `-a` on grep:**
+
+```bash
+LC_ALL=C grep -aF "genlock-fifo audit '$1': " | tail -n1 | LC_ALL=C sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p'
+```
+
+`grep -a` alone is not always enough (an ambient locale can still binary-flag some inputs even with
+`-a`, and `sed`'s `.*` needs its OWN `LC_ALL=C` or it silently leaves the tail-garbage failure mode
+even when grep itself found the line) — apply BOTH, on BOTH commands, always. Applied identically to
+every DIRECT consumer of the same `genlock-fifo audit '<src>': received=` tap family:
+
+- `mv_reverify_extract_received` (this file) — the shared extractor `frozen-cam-received.sh` (the
+  `[4c/8]` gate itself, `.claude/rules/frozen-cam-received-gate.md`) and `mv_reverify_probe_received`
+  both reuse, so this ONE fix covers the actual gate path.
+- `probe_received` (`scripts/frozen-input-alert-watchdog.sh`, `.claude/rules/frozen-input-watchdog.md`).
+- `extract_sample` (`scripts/cadence-alert-watchdog.sh`, `.claude/rules/cadence-watchdog.md`) — a
+  sibling #1259-migrated watchdog reading the SAME tap family via the SAME `ps_encoded_command` fetch.
+- `frozen_input_cambox_sources` (`scripts/lib/frozen-input-health.sh`) — the enumeration reader
+  sharing the SAME raw `mv_reverify_probe_raw` stream via `probe_enumerate`; fixed DEFENSIVELY
+  (`grep -aoE` + `LC_ALL=C sed -E`) — its specific `-o`+piped-stdin shape did NOT reproduce a Tier-0
+  RED via a pipe (any fixture size tried), though the IDENTICAL byte DOES trip GNU grep's binary
+  detection through a direct FILE argument on the same grep binary — the hazard class is real even
+  though this one shape resisted pipe-mode reproduction in this sandbox.
+
+**Test recipe (Tier-0, `tests/harness_received_tap_byte_safety_1258.rs`):** write a raw multi-line
+fixture as literal Rust BYTES (`b"...\xa0..."`, never a `&str` — a genuine invalid-UTF-8 byte cannot
+live in a Rust string literal) to a temp FILE, `cat` it into the sourced function via `bash -c`. Two
+lines carry the invalid byte (one of them the TARGET line itself, right after `received=N`) to prove
+BOTH that an EARLIER corrupted line doesn't blind a LATER clean one, and that the target line's OWN
+corruption doesn't leave garbage. RED against the pre-fix code reliably reproduces
+`grep: (standard input): binary file matches` + empty extraction for the 3 direct-pipe consumers
+(`mv_reverify_extract_received`, `probe_received`, `extract_sample`); `frozen_input_cambox_sources`'s
+test is GREEN-only (see above) and is explicitly labeled as such, never overstated as a reproduced
+regression.
+
+**NOT covered by #1258 (deliberately, filed as issue 1262 for someone to verify + apply if warranted):**
+every OTHER `ps_encoded_command` consumer parses a DIFFERENT audit-line family with the SAME
+non-byte-safe grep/sed shape — `mv-fps-alert-watchdog.sh`'s `multiview-audit:` grep, `ndi-halving-
+watchdog.sh`'s `recv-timing` tap, `asio-starve-alert-watchdog.sh`'s `asrc:` tap. Same fetch mechanism,
+same locale, same theoretical exposure — just unverified and out of #1258's `received=`-scoped remit.
