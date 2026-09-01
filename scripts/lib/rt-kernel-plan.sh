@@ -116,7 +116,7 @@ rt_kernel_step_command() {
       # and the lowlatency meta depends on the HWE packages, so the install must be allowed to move
       # the hold -- exactly as setup-imag.sh step 7 does (#820). This ADDS the lowlatency config
       # (preempt=full) and, on a box without the HWE generic meta, a new generic HWE image.
-      printf 'mount -o remount,rw / && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04 && mount -o remount,ro /' ;;
+      printf 'mount -o remount,rw / && mkdir -p /root/apt-tmp /root/tmpbig && export TMPDIR=/root/tmpbig && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -o Dir::Cache::archives=/root/apt-tmp install -y --allow-change-held-packages linux-lowlatency-hwe-24.04 && mount -o remount,ro /   # /var/cache+/tmp are tmpfs (512M/100M) -> cache .debs + build initrd on the rootfs (issue 899 supervisor finding 2026-08-22)' ;;
     verify-lowlatency-config)
       printf '# SUPERVISOR: assert the config package landed -- test -f /etc/default/grub.d/99-lowlatency.cfg AND grep -q preempt=full /etc/default/grub.d/99-lowlatency.cfg (refuse to trust it otherwise, mirrors setup-imag.sh step 7)' ;;
     grub-pin:saved)
@@ -126,7 +126,7 @@ rt_kernel_step_command() {
     safe-grub-regen)
       # The #295 safe pattern: guarantee every installed kernel has an initrd BEFORE update-grub,
       # then update-grub once (the preempt=full grub.d drop applies to every entry).
-      printf 'mount -o remount,rw / && for v in /boot/vmlinuz-*; do k="${v#/boot/vmlinuz-}"; [ -e "/boot/initrd.img-$k" ] || update-initramfs -c -k "$k"; done && update-grub && mount -o remount,ro /   # #295: initrd-guarantee before grub' ;;
+      printf 'mount -o remount,rw / && mkdir -p /root/tmpbig && export TMPDIR=/root/tmpbig && for v in /boot/vmlinuz-*; do k="${v#/boot/vmlinuz-}"; [ -e "/boot/initrd.img-$k" ] || update-initramfs -c -k "$k"; done && update-grub && mount -o remount,ro /   # #295: initrd-guarantee before grub; /tmp tmpfs (100M) -> TMPDIR on the rootfs (issue 899, 2026-08-22)' ;;
     reboot-into-lowlatency)
       printf '# SUPERVISOR: reboot the box (reboot-class, one box at a time, in a window with NO live E2E; the old generic entry stays in GRUB as rollback)' ;;
     confirm-running-lowlatency)
