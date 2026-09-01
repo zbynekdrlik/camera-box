@@ -121,6 +121,61 @@ holds only when strih runs OBS alone; a non-OBS app stealing GPU/CPU (observed: 
 IS the collapse the floor catches — not a broken multiview; never "fix" strih MV by lowering its floor to
 accommodate a contended dev-box reading.
 
+## ROOT CAUSE of the 7-cam burns-ON collapse to exactly 30/4 = 7.5 fps (issue 1260)
+
+The collapse is the #278 budget gate + #293 anti-starvation floor doing exactly what they were
+designed to — the MV render genuinely exceeds the per-tick budget, so it is throttled. It is NOT a
+broken code path, a vsync/present artifact, or a mis-calibrated floor. Trace (file:line, dev tip):
+
+- The MV is NOT on its own thread. `render_displays()` (`obs-video.c:1334`) runs on the SAME single
+  graphics thread, AFTER `output_frames()` (the PROGRAM, `obs-video.c:1322`), within one canvas tick.
+  Issue-508's "decouple" == the #278 budget gate on the shared thread (`obs-display.c:282–351`).
+- On strih's 30 fps canvas the derived `effective_divisor = 1` (`obs-display.c:298–305`), so there is
+  NO cadence skipping — the MV is PURELY budget-gated: skipped when `program_elapsed + MV_ewma > 90%
+  of 33.3ms (= 30ms)`. Over budget EVERY tick → skipped up to `OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS = 3`
+  in a row (`obs-display-budget.h:57`,`:121`), the 4th tick FORCED → renders 1-in-4 = **exactly 7.5
+  fps**. Borderline (fits ~half the ticks) → ~15–21 fps. The observed 7.4–7.6 / 13–21 are these two
+  regimes, not noise.
+- WHY over budget with burns ON: `obs-source.c:2990` — a source's filter chain re-runs on EVERY draw;
+  there is NO within-tick cache of a filtered source's output. The MV re-draws all 7 cam sources, and
+  each redraw re-runs the burn filter's FULL render — a `gs_texrender` of the 1080p source + CPU QR
+  raster + `gs_texture_set_image` upload (`ndi-burn-filter.cpp:436–464`). Studio-Mode-always-on means
+  program + preview + MV = 3 full burn renders per source per tick; the MV alone adds 7, pushing the
+  MV `render_ewma` past the ~5–11 ms of slack (live: `program-render-audit: avg_frame_ms=18.94–24.81`
+  of the 30 ms budget). Burns OFF the filter is a pass-through (`ndi-burn-filter.cpp:411`), so the MV
+  is only borderline (17–21 fps, confirmed live burns-OFF, warmed instance).
+- Latent correctness point in the same path: `burn_draw_qr` does `f->frame_id++` on EVERY call
+  (`ndi-burn-filter.cpp:370`), so the monitoring re-renders (preview + MV) pollute the recorded
+  (program) frame_id sequence.
+
+**The fix is cost REDUCTION, not floor recalibration.** 7.5 fps is a fixable perf defect (a juddery
+monitoring MV the operator watches), not a physical optical artifact — per the calibrate-vs-fix
+discriminator (`calibrate-artifact-vs-fix-robustness`), a fixable collapse is FIXED, never masked, and
+recalibrating floor 28 down to accept 7.5 is the gate-weakening the owner rejects ("multiview musí byť
+plynulé"). Keep floor 28 (issue 1263 is the report-only stopgap + walk-back tracker).
+
+**The chosen fix (issue 1260 design comment): within-tick burn composite cache in the DistroAV
+filter** — stamp `frame_id`/`gen_ts` and render the base+QR composite ONCE per video tick (first draw,
+which is always the program), cache the composite texture, reuse it on the within-tick preview + MV
+draws, invalidate in the filter's `video_tick`. Drops the MV per-source burn cost to a sprite draw
+(→ MV back under budget) AND stamps `frame_id` once per tick (fixes the pollution). Extract the pure
+stamp-once-per-tick decision to a crate-root Rust seam + a C parity header (the `render_budget.rs` ↔
+`obs-display-budget.h` pattern) for Tier-0 unit proof; the graphics glue is CI-first-compile
+(`linux-genlock.yml`) + MANDATORY rig validation (E2E verdict clean + `multiview-audit` back ≥ 28)
+before merge. **Do NOT ship it blind** — a wrong cache-invalidation → STALE recorded QR → corrupts
+every future E2E verdict; a graphics-context slip → live OBS graphics-thread crash. High blast radius
+on the core measurement infra; it belongs in a rig-capable follow-up with CI, not a blind worktree
+push.
+
+**The log does NOT carry the budget-gate terms — this is the profiling gap.** The `multiview-audit:`
+line reports only `rendered_fps` (the outcome); `program-render-audit:` reports program `render_fps` +
+whole-tick `avg_frame_ms`. Neither carries the MV `render_ewma_ns`, the program-elapsed-BEFORE-the-MV,
+or the budget — so which cost term dominates (QR raster+upload vs the extra per-draw texrender vs base
+composite) can only be settled by a rig experiment (or by enriching the audit emit with those terms,
+which is a lock-step vendored-C change: format anchor `tests/genlock_preload.rs:2592` + the
+`windows-genlock*.yml` pwsh gates; the `mv_audit.rs:159` parser is already key-based + tolerant of
+added fields).
+
 ## Autostart-aware = reset the confirm streak on an OBS-log IDENTITY change
 
 The audit line carries no cumulative counter, so the watchdog detects an OBS restart (autostart via
