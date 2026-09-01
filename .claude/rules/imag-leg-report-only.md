@@ -100,6 +100,24 @@ both need LIVE rig E2E runs (supervisor/rig-ops scope), never a blind flip off t
 terms. Recalibrating the burn-contiguity metric to the new-box ~3/frame cadence is itself part of
 (2), not a threshold to widen so the red simply passes.
 
+### 2026-09-01 second audit (issue 1142/1144 batch) — CONFIRMED across the full green series + a RED run; the smooth-display proof that `imag_burn_ok=False` is NOT loss
+
+An independent re-mine of the SAME 3 green 7-cam verdicts (1363366080 / 1168855508 / 674135238)
+PLUS the RED 4th run 1700989544 reproduced the addendum above and adds the definitive falsifier:
+the imag optical **beat advances `avg_step ≈ 1.000`** (1.00015 / 1.00103 / 1.00159 / 1.00005) on
+every run, i.e. the imag DISPLAY steps a smooth +1 tick/frame — if ~50% of frames were genuinely
+lost, `beat_avg_step` would be ~2.0 and `stuck_density` high (it is 0.004–0.045 on the green runs).
+So `imag_burn_ok=False` (missing-frac ~0.17, stride-6 share 0.88–1.00, `imag_burn_present_ok=True`,
+`burn_unreadable=0`) is DEFINITIVELY a burn-ID-cadence metric artifact (~3 burn-IDs/frame), not
+content loss — flipping `content_gates_overall_pass()` today reds all 3 green runs. The re-entry
+condition is UNCHANGED: precondition (2) = make burn-contiguity cadence-aware for the ~3/frame box
+(a probe-gated `recording-verdict.rs` metric fix, CI-first compile) + characterize the healthy
+burn/beat baseline; precondition (3) = a deliberately-misconfigured (1/60-shutter) discrimination
+run. Both are rig-ops/probe scope, not a data-first batch flip. (The 3 SIBLING #1142 flips — imag
+PRESENCE, `presentation_cadence` uniformity floor 0.90, delivery-spread bound 24 ms — are all LIVE
++ pinned `_since_1142`, and this same mining confirmed each keeps the 3 green runs green while the
+RED 4th run correctly reds on the uniformity floor at beat-corrected 0.8901 < 0.90.)
+
 ## The 0/76 root cause was the decode CPU-PIN, not StopRecord/reachability/decode (issue 1094, FIXED)
 
 The `[8/8c]` extract ran `recording-verdict-on-imag.sh`, whose `build_onimag_command` hardcoded
