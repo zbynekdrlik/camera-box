@@ -210,3 +210,39 @@ ceiling itself — the n=3 variance already showed the same "flaky at its own ce
 earlier step on this const hit). Full evidence: `src/window_gate.rs`'s own "2026-08-31
 RE-CALIBRATION" module-doc section + the design-addendum comment on issue 1243. Walk-back trail
 stays on issue 1242, unchanged.
+
+## Per-CAMBOX override seam — a FIFTH, orthogonal seam (issue 1251, 2026-09-01)
+
+Distinct from every seam above: those all move ONE global `WINDOW_COPIES_GAPS_TOLERANCE` (or a
+global on/off flag) applied uniformly to every box. Issue 1251 added a per-CAMBOX OVERRIDE so ONE
+sick box can be relaxed without touching the global default — CAM2's grabber HW (issue 1249) starves
+in bursts (copies/gaps up to 18) while cam3+cam5 (same card, same splitter) stay within 5, so a
+single global tolerance cannot tell the sick box from the healthy ones.
+
+- **The seam:** `WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX: &[(&str, u32)] = &[("CAM2", 25)]` +
+  `copies_gaps_tolerance_for_cambox(cambox)` (both `src/window_gate.rs`). `decide` is now a thin
+  wrapper over `decide_with_tolerance(..., tolerance)`; `decide_for_cambox` applies the override;
+  `relaxed_failure_reasons` wraps `relaxed_failure_reasons_with_tolerance`. Behaviour is
+  byte-identical to the pre-1251 `decide` at the default (locked by
+  `decide_with_tolerance_matches_decide_at_the_default_1251`).
+- **EXACT-MATCH on the label — the load-bearing gotcha.** Production emits UPPERCASE `CAMN`
+  (`camera_active_sweep_pairs` → `Cam N:CAMN`; `switch_schedule.py` writes it; the verdict's
+  `cambox` field is `CAM2`), but the `recording_segments.rs` UNIT fixtures use lowercase `cam2`. The
+  match is exact (`*name == cambox`), so the override hits production and DELIBERATELY MISSES the
+  lowercase fixtures — that is what keeps the existing lowercase-`cam2` boundary tests (e.g.
+  `gap_of_six_exceeds_tolerance_fails_overall_pass_1243`) valid. A case-INSENSITIVE match would break
+  them. If you add a NEW per-cambox test, use the UPPERCASE label (`win("CAM2", …)`) or it won't
+  pick up the override.
+- **Per-window applied tolerance is carried on the segment.** `CamboxSegment.copies_gaps_tolerance`
+  (auto-serialized JSON `copies_gaps_tolerance`) is the tolerance ACTUALLY applied to that window;
+  `SegmentedContinuity.copies_gaps_tolerance` (run-wide) stays the DEFAULT for back-compat. The
+  `overall_pass` fold and `windows_over_copies_gaps_tolerance` count read each window's OWN field,
+  NOT the run-wide value; the verdict self-describes the policy via `copies_gaps_tolerance_per_cambox`.
+  `e2e_discord_report.py`'s continuity classifier reads the per-segment field (run-wide fallback for
+  old verdicts). When adding a consumer, read the per-window field, never the run-wide one.
+- **Walk-back = set the map to `&[]`** (one line) when issue 1249's HW swap lands — tracked on issue
+  1242, step recorded on issue 1243. Everything else (the lookup fn, the per-window field, the
+  `decide_with_tolerance` core, the JSON key, the report prose) stays wired and resolves to the
+  default for every box; the map-empty state is the tested walk-back state. Never masks a real
+  defect: a non-overridden box over its default still fails the run (proven by
+  `per_cambox_override_absorbs_cam2_starvation_but_not_other_boxes_1251`).

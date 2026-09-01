@@ -248,6 +248,39 @@
 /// regression on this const has measured.
 pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 5;
 
+/// #1251 (2026-09-01) -- TEMPORARY per-cambox copies/gaps tolerance override, walk-back tracked on
+/// issue 1242 (umbrella) + step recorded on issue 1243 (relax-steps).
+///
+/// CAM2's grabber card/port/cable (issue 1249 HW) under-delivers in sub-second bursts, so the
+/// #1167 v4 slot-fill pacer repeats the last frame (a copy) then skips (a gap): run 1326320314
+/// measured CAM2 windows at copies=8/gaps=8 and copies=18/gaps=17, while every OTHER box stayed
+/// within 5 (max 5/5 on CAM3). cam3+cam5 carry the SAME card model on the SAME splitter and are
+/// rock-solid, so this is a per-CAM2 HARDWARE defect, not a code fault (#1167 v4 slot-fill is
+/// already the graceful degrade). Scoped relax to green per the owner's standing 2026-07-31 mandate
+/// ("jemne uvoľniť gate na zelenú + tickety na pritvrdenie"). The override (25) covers the observed
+/// 18 with a margin band; every other box keeps the default [`WINDOW_COPIES_GAPS_TOLERANCE`].
+///
+/// Keyed by the EXACT runtime cambox label -- production is always UPPERCASE `CAMN`
+/// (`camera_active_sweep_pairs` emits `Cam N:CAMN`; run 1326320314's switch-schedule.json + verdict
+/// both carry `"cambox": "CAM2"`). The lowercase `cam2` used by the `recording_segments.rs` unit
+/// fixtures deliberately does NOT match, so the override only ever touches the real rig (and the
+/// existing lowercase-cam2 boundary tests stay exactly as calibrated).
+///
+/// **Walk-back:** set this to `&[]` when issue 1249's HW swap lands -- tracked on issue 1242.
+pub const WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX: &[(&str, u32)] = &[("CAM2", 25)];
+
+/// The per-window copies/gaps tolerance that applies to `cambox`: the
+/// [`WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX`] override if one is listed for this EXACT label, else
+/// the default [`WINDOW_COPIES_GAPS_TOLERANCE`]. Exact-match on purpose (see the map's own doc).
+pub fn copies_gaps_tolerance_for_cambox(cambox: &str) -> u32 {
+    for (name, tol) in WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX {
+        if *name == cambox {
+            return *tol;
+        }
+    }
+    WINDOW_COPIES_GAPS_TOLERANCE
+}
+
 /// #1132 (owner mandate 2026-08-19): whether the per-window copies/gaps TOLERANCE
 /// ([`WINDOW_COPIES_GAPS_TOLERANCE`]) is allowed to RESCUE the verdict folded into `overall_pass`
 /// ([`WindowGateDecision::overall_pass_term`]). Hardcoded `false` — the owner ordered the relaxed
@@ -435,8 +468,49 @@ impl WindowGateDecision {
 
 /// Decide both verdicts for one window from its already-computed counts (`probe::
 /// recording_segments::window_segment` supplies these — this function re-derives nothing about
-/// frame contents, it only combines counts that are already known).
+/// frame contents, it only combines counts that are already known). Uses the DEFAULT per-window
+/// copies/gaps tolerance ([`WINDOW_COPIES_GAPS_TOLERANCE`]); [`decide_for_cambox`] applies the
+/// #1251 per-cambox override where one is listed.
 pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> WindowGateDecision {
+    decide_with_tolerance(
+        frame_count,
+        undecodable,
+        copies,
+        gaps,
+        WINDOW_COPIES_GAPS_TOLERANCE,
+    )
+}
+
+/// [`decide`] for a specific cambox label -- applies the #1251 per-cambox copies/gaps tolerance
+/// override ([`copies_gaps_tolerance_for_cambox`]) instead of the default. Every other cambox (and
+/// the lowercase test-fixture labels) resolves to [`WINDOW_COPIES_GAPS_TOLERANCE`], so this equals
+/// [`decide`] for them.
+pub fn decide_for_cambox(
+    cambox: &str,
+    frame_count: u32,
+    undecodable: u32,
+    copies: u32,
+    gaps: u32,
+) -> WindowGateDecision {
+    decide_with_tolerance(
+        frame_count,
+        undecodable,
+        copies,
+        gaps,
+        copies_gaps_tolerance_for_cambox(cambox),
+    )
+}
+
+/// The core of [`decide`], parameterized by the per-window copies/gaps `tolerance` so a per-cambox
+/// override ([`decide_for_cambox`]) can widen it for ONE box (#1251) without touching any other
+/// term. [`decide`] passes [`WINDOW_COPIES_GAPS_TOLERANCE`]; behaviour is IDENTICAL at that value.
+pub fn decide_with_tolerance(
+    frame_count: u32,
+    undecodable: u32,
+    copies: u32,
+    gaps: u32,
+    tolerance: u32,
+) -> WindowGateDecision {
     let undecodable_ok = crate::optical_floor::window_within_floor(undecodable, frame_count);
     // Issue 915 (2026-08-01, user decision): the optical undecodable floor (issue 881) becomes
     // report-only while cam1's grabber (issue 909) + the 120Hz monitor (issue 881) are unresolved
@@ -448,9 +522,9 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     // 2026-08-05 RE-GATE: `copies`/`gaps` re-join the relaxed verdict, but only above the
     // per-window tolerance -- see `WINDOW_COPIES_GAPS_TOLERANCE`'s own doc for the decision
     // record (recalibrated 1 -> 2 -> 3 on 2026-08-06, ticket 889 comments 5198131539 /
-    // 5200533407).
-    let within_tolerance =
-        copies <= WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE;
+    // 5200533407). #1251: `tolerance` is the DEFAULT const for `decide`, or the per-cambox
+    // override for `decide_for_cambox` (CAM2 -> 25 while its grabber HW is sick, issue 1249).
+    let within_tolerance = copies <= tolerance && gaps <= tolerance;
     // The optical-floor term is shared by BOTH the relaxed verdict and the #1132 blocking verdict
     // below -- report-only while `gates_overall_pass()` is false (issue 915/905), UNCHANGED by #1132.
     let floor_term = undecodable_ok || !crate::optical_floor::gates_overall_pass();
@@ -552,11 +626,32 @@ pub fn relaxed_failure_reasons(
     copies: u32,
     gaps: u32,
 ) -> Vec<RelaxedFailureReason> {
+    relaxed_failure_reasons_with_tolerance(
+        frames,
+        undecodable,
+        copies,
+        gaps,
+        WINDOW_COPIES_GAPS_TOLERANCE,
+    )
+}
+
+/// The core of [`relaxed_failure_reasons`], parameterized by the per-window copies/gaps `tolerance`
+/// so the per-cambox override (#1251) can be honored: a window judged at the wider CAM2 band is
+/// reported OverCopiesGapsTolerance only when it exceeds THAT band, not the default. Callers on the
+/// per-cambox path pass the segment's applied tolerance; [`relaxed_failure_reasons`] passes the
+/// default const.
+pub fn relaxed_failure_reasons_with_tolerance(
+    frames: u32,
+    undecodable: u32,
+    copies: u32,
+    gaps: u32,
+    tolerance: u32,
+) -> Vec<RelaxedFailureReason> {
     if frames == 0 {
         return vec![RelaxedFailureReason::EmptyWindow];
     }
     let mut reasons = Vec::new();
-    if copies > WINDOW_COPIES_GAPS_TOLERANCE || gaps > WINDOW_COPIES_GAPS_TOLERANCE {
+    if copies > tolerance || gaps > tolerance {
         reasons.push(RelaxedFailureReason::OverCopiesGapsTolerance);
     }
     let floor_ok = crate::optical_floor::window_within_floor(undecodable, frames);
@@ -1136,5 +1231,119 @@ mod tests {
             "#1220: copies=2 is absorbed by the tolerance channel now, not the singleton -- still \
              no singleton note (a genuinely over-tolerance count still gets none either way)"
         );
+    }
+
+    // ---- #1251: per-cambox copies/gaps tolerance override (CAM2 -> 25, walk-back on issue 1242) ----
+
+    #[test]
+    fn per_cambox_tolerance_override_cam2_is_25_others_default_1251() {
+        // #1251: CAM2's grabber HW (issue 1249) starves in sub-second bursts, so the #1167 v4
+        // slot-fill pacer repeats the last frame (a copy) then skips (a gap) -- run 1326320314
+        // measured CAM2 windows at copies=8/gaps=8 and copies=18/gaps=17 while every OTHER box
+        // stayed within 5. The scoped override gives the EXACT production label "CAM2" a tolerance
+        // of 25 (covers the observed 18, one margin band under the ceiling); every other box keeps
+        // the default WINDOW_COPIES_GAPS_TOLERANCE.
+        assert_eq!(copies_gaps_tolerance_for_cambox("CAM2"), 25);
+        assert_eq!(
+            copies_gaps_tolerance_for_cambox("CAM3"),
+            WINDOW_COPIES_GAPS_TOLERANCE
+        );
+        assert_eq!(
+            copies_gaps_tolerance_for_cambox("CAM1"),
+            WINDOW_COPIES_GAPS_TOLERANCE
+        );
+        // Exact-match on purpose: production emits UPPERCASE `CAMN`, but the recording_segments.rs
+        // unit fixtures use lowercase `cam2` -- those must NOT pick up the override, so the
+        // override only ever touches the real rig (and the existing lowercase-cam2 tests stay red
+        // exactly where they were).
+        assert_eq!(
+            copies_gaps_tolerance_for_cambox("cam2"),
+            WINDOW_COPIES_GAPS_TOLERANCE
+        );
+    }
+
+    #[test]
+    fn decide_for_cambox_cam2_absorbs_the_observed_starvation_burst_1251() {
+        // The two CAM2 windows from run 1326320314: copies=8/gaps=8 and copies=18/gaps=17. Under
+        // the per-cambox tolerance (25) both are WITHIN tolerance, so relaxed_pass AND (with the
+        // #1220 tolerance seam armed) overall_pass_term become true.
+        let d1 = decide_for_cambox("CAM2", 846, 0, 8, 8);
+        assert!(d1.relaxed_pass, "CAM2 8/8 within the 25 override: {d1:?}");
+        assert!(
+            d1.overall_pass_term,
+            "CAM2 8/8 gates PASS under the override: {d1:?}"
+        );
+        let d2 = decide_for_cambox("CAM2", 847, 0, 18, 17);
+        assert!(d2.relaxed_pass, "CAM2 18/17 within the 25 override: {d2:?}");
+        assert!(
+            d2.overall_pass_term,
+            "CAM2 18/17 gates PASS under the override: {d2:?}"
+        );
+        // The copies/gaps are still COMPUTED -- the strict verdict still fails, never masked.
+        assert!(
+            !d2.strict_pass,
+            "strict still fails on nonzero copies/gaps: {d2:?}"
+        );
+    }
+
+    #[test]
+    fn decide_for_cambox_cam2_over_the_override_still_fails_1251() {
+        // Over the 25 override the window fails again -- the override is a bounded relax to green,
+        // not a blanket pass for CAM2.
+        let d = decide_for_cambox("CAM2", 847, 0, 26, 0);
+        assert!(
+            !d.relaxed_pass,
+            "CAM2 copies=26 over the 25 override still fails: {d:?}"
+        );
+        assert!(
+            !d.overall_pass_term,
+            "and therefore fails overall_pass: {d:?}"
+        );
+    }
+
+    #[test]
+    fn decide_for_cambox_other_box_keeps_the_default_tolerance_1251() {
+        // A non-overridden box (CAM3) gets NO relaxation beyond the default 5: copies/gaps=6 fails
+        // exactly as `decide` (default) would -- the override is CAM2-scoped, never global.
+        let d = decide_for_cambox("CAM3", 847, 0, 6, 6);
+        assert!(
+            !d.relaxed_pass,
+            "CAM3 6/6 over the default 5 still fails: {d:?}"
+        );
+        let default = decide(847, 0, 6, 6);
+        assert_eq!(
+            d, default,
+            "CAM3 decision == the default decide across the board"
+        );
+    }
+
+    #[test]
+    fn decide_with_tolerance_matches_decide_at_the_default_1251() {
+        // The refactor is behaviour-preserving: `decide` is exactly `decide_with_tolerance` at the
+        // default const across the boundary.
+        for (c, g) in [(0, 0), (5, 5), (6, 0), (0, 6), (25, 25), (26, 0)] {
+            assert_eq!(
+                decide(100, 0, c, g),
+                decide_with_tolerance(100, 0, c, g, WINDOW_COPIES_GAPS_TOLERANCE),
+                "decide == decide_with_tolerance(default) at copies={c} gaps={g}"
+            );
+        }
+    }
+
+    #[test]
+    fn relaxed_failure_reasons_with_tolerance_honors_the_per_cambox_band_1251() {
+        // Judged at the 25 override, copies=20 (over the default 5, UNDER 25) is NOT an
+        // over-tolerance failure reason -- it passes relaxed there.
+        let none = relaxed_failure_reasons_with_tolerance(847, 0, 20, 0, 25);
+        assert!(
+            !none.contains(&RelaxedFailureReason::OverCopiesGapsTolerance),
+            "20 copies is within the 25 override -- not an over-tolerance reason: {none:?}"
+        );
+        // Over the override it IS reported.
+        let over = relaxed_failure_reasons_with_tolerance(847, 0, 26, 0, 25);
+        assert!(over.contains(&RelaxedFailureReason::OverCopiesGapsTolerance));
+        // The default-tolerance wrapper is unchanged (const 5): 20 copies IS over the default.
+        let over_default = relaxed_failure_reasons(847, 0, 20, 0);
+        assert!(over_default.contains(&RelaxedFailureReason::OverCopiesGapsTolerance));
     }
 }

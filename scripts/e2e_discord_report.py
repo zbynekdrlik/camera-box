@@ -770,7 +770,13 @@ def _blocking_failures(verdict):
         for s in segs:
             if not isinstance(s, dict):
                 continue
-            if (s.get("copies", 0) or 0) > tol or (s.get("gaps", 0) or 0) > tol:
+            # #1251: each window is judged against ITS OWN applied tolerance (a per-cambox override
+            # like CAM2 -> 25 while its grabber HW is sick, issue 1249). Fall back to the run-wide
+            # default for verdicts predating the per-segment field, so old runs classify unchanged.
+            seg_tol = s.get("copies_gaps_tolerance", tol)
+            if seg_tol is None:
+                seg_tol = tol
+            if (s.get("copies", 0) or 0) > seg_tol or (s.get("gaps", 0) or 0) > seg_tol:
                 cb = str(s.get("cambox", "")).strip()
                 if cb and cb not in over:
                     over.append(cb)
