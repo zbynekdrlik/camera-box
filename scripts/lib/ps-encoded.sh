@@ -26,3 +26,12 @@ ps_encoded_command() {
   _out="$(printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 -w0 2>/dev/null)" || _out=""
   printf '%s' "$_out"
 }
+
+# ps_clamp_numeric <value> <default> -> stdout: <value> if it is a bare non-negative integer, else
+# <default>. Guard for a caller/env-sourced count (e.g. a `-Tail N`) BEFORE it is spliced into an
+# encoded payload, so a typo'd/hostile value (`800; Remove-Item …`, `-5`, ``) can never inject
+# shell/PowerShell metachars or an invalid -Tail (#1258 injection guard, applied consistently at
+# every splice point). Rejects empty, non-digit, negative (`-`) and decimal (`.`).
+ps_clamp_numeric() {
+  case "$1" in '' | *[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac
+}

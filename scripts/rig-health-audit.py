@@ -399,9 +399,13 @@ def _ps_encoded(ps: str) -> str:
 
 def _windows_obs_log_tail_cmd(tail: int = 500) -> str:
     # numeric-only tail -> a caller value can never inject shell/PS metachars into the encoded payload.
+    # Reject negatives too (a `-Tail -5` is an invalid PowerShell arg), matching the bash `*[!0-9]*`
+    # ps_clamp_numeric guard (#1259 review).
     try:
         n = int(tail)
     except (TypeError, ValueError):
+        n = 500
+    if n < 0:
         n = 500
     # HEAD first (the launch-time audio-buffering burst lives in the first ~200 lines -- a
     # tail-only read would report a false-clean audio_buf=0 on a long session), then the tail

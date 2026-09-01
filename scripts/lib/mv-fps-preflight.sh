@@ -41,7 +41,8 @@ _MVFPS_PREFLIGHT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # mv_fps_preflight_read_cmd <os> <log_tail> -> stdout: a REMOTE command string that prints the newest
 #   OBS log's tail (the caller greps `multiview-audit:` out of it). linux: a bash one-liner tailing the
-#   newest ~/.config/obs-studio/logs/*.txt; win: a single NON-NESTED `powershell -Command` tailing the
+#   newest ~/.config/obs-studio/logs/*.txt; win: a single `powershell -EncodedCommand` (cmd.exe-proof,
+#   issue 1259) tailing the
 #   newest %APPDATA%\obs-studio\logs\*.txt. Mirrors mv-fps-alert-watchdog.sh's probe_mv_log read shape
 #   (without its MVFPS_LOGID identity line -- the synchronous preflight tracks no autostart reset).
 #   Unknown os -> return 1 (the caller then treats the box as unreadable / UNKNOWN).

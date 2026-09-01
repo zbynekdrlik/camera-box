@@ -150,8 +150,9 @@ probe_received() {
     # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|` pipes -> a mangled/blind read (the
     # issue-1258 root cause). ps_encoded_command (scripts/lib/ps-encoded.sh) encodes the tail command
     # to a pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> UNKNOWN, never an abort.
-    local _enc
-    _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $OBS_LOG_TAIL")"
+    local _enc _tail
+    _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 800)" # #1259: guard the env count before the payload
+    _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail")"
     # shellcheck disable=SC2086
     raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
       "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \

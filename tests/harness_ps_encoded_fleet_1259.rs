@@ -68,11 +68,19 @@ fn ssh_invocation(script_rel: &str, call: &str) -> String {
     fs::write(&log, "").unwrap();
     let script = manifest_dir().join(script_rel);
     let bash = format!("set -uo pipefail\n. \"{}\"\n{}\n", script.display(), call);
+    // Force the REAL ssh branch: clear any *_PROBE_CMD stub override that might leak from the CI env
+    // (else the watchdog takes the probe branch and the test fails with a confusing "no
+    // -EncodedCommand payload" — fail-loud, never a silent pass; #1259 review).
     let _ = Command::new("bash")
         .arg("-c")
         .arg(&bash)
         .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
         .env("SSHPASS_ARGV_LOG", &log)
+        .env_remove("ASIO_STARVE_PROBE_CMD")
+        .env_remove("FROZEN_INPUT_PROBE_CMD")
+        .env_remove("NDI_HALVING_PROBE_CMD")
+        .env_remove("CADENCE_PROBE_CMD")
+        .env_remove("MV_FPS_PROBE_CMD")
         .output()
         .expect("run bash");
     let logged = fs::read_to_string(&log).unwrap_or_default();
@@ -165,6 +173,29 @@ fn ps_encoded_command_round_trips_arbitrary_powershell_1259() {
         "#1259: ps_encoded_command must base64-UTF16LE-encode its input so it round-trips exactly \
          (pipes/$/backslashes carried through)."
     );
+}
+
+#[test]
+fn ps_clamp_numeric_guards_the_tail_count_1259() {
+    // A bare non-negative integer passes through; empty / non-digit / negative / decimal -> default.
+    // This is the guard the 5 watchdogs apply to $OBS_LOG_TAIL before it enters the encoded payload.
+    let cases = [
+        ("800", "1200", "800"),
+        ("", "1200", "1200"),
+        ("800; Remove-Item C:\\evil", "1200", "1200"),
+        ("-5", "1200", "1200"),
+        ("12.5", "1200", "1200"),
+    ];
+    for (val, def, want) in cases {
+        let got = stdout_of(
+            "scripts/lib/ps-encoded.sh",
+            &format!("ps_clamp_numeric '{val}' {def}"),
+        );
+        assert_eq!(
+            got, want,
+            "ps_clamp_numeric '{val}' {def} must clamp to {want}"
+        );
+    }
 }
 
 #[test]

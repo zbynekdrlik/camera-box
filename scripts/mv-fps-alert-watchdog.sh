@@ -136,8 +136,9 @@ probe_mv_log() {
       # empty encode -> empty read -> the caller treats the box as UNKNOWN, never an abort. `'MVFPS_LOGID:'`
       # stays single-quoted -> literal to powershell; every `$` powershell must see is `\$`-escaped so
       # dev1 bash keeps it literal, while $OBS_LOG_TAIL (a dev1 var) is spliced. `if($f)` guards no-log.
-      local _enc
-      _enc="$(ps_encoded_command "\$f=(gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1); if(\$f){ 'MVFPS_LOGID:'+\$f.Name; gc \$f.FullName -Tail $OBS_LOG_TAIL }")"
+      local _enc _tail
+      _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 2000)" # #1259: guard the env count before the payload
+      _enc="$(ps_encoded_command "\$f=(gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1); if(\$f){ 'MVFPS_LOGID:'+\$f.Name; gc \$f.FullName -Tail $_tail }")"
       # shellcheck disable=SC2086
       timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
         "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
