@@ -95,22 +95,19 @@ fn read_cmd_linux_tails_the_newest_obs_log() {
 
 #[test]
 fn read_cmd_win_is_a_single_non_nested_powershell() {
+    // #1259: the win read now goes over cmd.exe-proof -EncodedCommand (base64 UTF-16LE), NEVER the
+    // naive -Command "…| sort …" that Win32-OpenSSH's default cmd.exe shell mangles (the issue-1258
+    // root cause — the `|` pipes leak to cmd.exe -> a blind read). The APPDATA/obs-studio path + the
+    // -Tail count now live INSIDE the base64 payload, not the literal command line, so decode it and
+    // assert they survive intact.
     let out = lib_stdout("mv_fps_preflight_read_cmd win 500");
     assert!(
-        out.contains("powershell -NoProfile -Command"),
-        "win read must be a powershell -Command: {out}"
+        out.contains("powershell -NoProfile -NonInteractive -EncodedCommand "),
+        "win read must be a -EncodedCommand powershell (cmd.exe-proof), not naive -Command: {out}"
     );
     assert!(
-        out.to_uppercase().contains("APPDATA"),
-        "win read must target %APPDATA%\\obs-studio\\logs: {out}"
-    );
-    assert!(
-        out.contains("obs-studio\\logs"),
-        "win read must target the OBS log dir (backslash path): {out}"
-    );
-    assert!(
-        out.contains("-Tail 500"),
-        "win read must honour the passed tail count: {out}"
+        !out.contains("-Command \""),
+        "win read must NOT use the naive -Command \"…\" form (its pipes leak to cmd.exe): {out}"
     );
     // win-ssh-vs-mcp / rig-state-inspection: ONE flat, non-nested powershell (a nested powershell
     // over ssh fails SILENTLY on these boxes).
@@ -118,6 +115,26 @@ fn read_cmd_win_is_a_single_non_nested_powershell() {
         out.matches("powershell").count(),
         1,
         "win read must be a SINGLE, non-nested powershell: {out}"
+    );
+    let b64 = out
+        .split("-EncodedCommand ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap_or("");
+    assert!(!b64.is_empty(), "no -EncodedCommand payload: {out}");
+    let decoded = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "printf '%s' '{b64}' | base64 -d | iconv -f UTF-16LE -t UTF-8"
+        ))
+        .output()
+        .expect("decode");
+    let ps = String::from_utf8_lossy(&decoded.stdout).to_string();
+    assert!(
+        ps.to_uppercase().contains("APPDATA")
+            && ps.contains("obs-studio\\logs")
+            && ps.contains("-Tail 500"),
+        "the decoded -EncodedCommand payload must target %APPDATA%\\obs-studio\\logs with -Tail 500: {ps}"
     );
 }
 

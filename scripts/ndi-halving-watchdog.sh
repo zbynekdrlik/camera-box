@@ -57,6 +57,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/ps-encoded.sh
+. "$HERE/lib/ps-encoded.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -160,9 +162,15 @@ fetch_box_log() {
     $NDI_HALVING_PROBE_CMD "$ip" 2>/dev/null || true
     return 0
   fi
+  # #1259: -EncodedCommand (base64 UTF-16LE), NEVER the naive -Command "…| sort …| select …".
+  # Win32-OpenSSH's default cmd.exe shell leaks the unescaped `|` pipes -> a mangled/blind read (the
+  # issue-1258 root cause). ps_encoded_command (scripts/lib/ps-encoded.sh) encodes the tail command
+  # to a pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> UNKNOWN, never an abort.
+  local _enc
+  _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $OBS_LOG_TAIL")"
   # shellcheck disable=SC2086
   timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
-    "powershell -NoProfile -Command \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $OBS_LOG_TAIL\"" \
+    "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
     2>/dev/null || true
 }
 
