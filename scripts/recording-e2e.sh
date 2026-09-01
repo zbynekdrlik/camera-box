@@ -2180,7 +2180,7 @@ if [ -n "${USE_PREBUILT_PROBE_DIR:-}" ]; then
   if [ ! -x "$PROBE_BIN_DIR/camera-box" ] && [ -f "$PROBE_BIN_DIR/camera-box-probe" ]; then
     cp "$PROBE_BIN_DIR/camera-box-probe" "$PROBE_BIN_DIR/camera-box"
   fi
-  for b in camera-box frame-probe recording-verdict frozen-camera-gate render-budget-gate av-restart-sync-gate zero-loss-restart-gate; do
+  for b in camera-box frame-probe recording-verdict frozen-camera-gate render-budget-gate mv-fps-gate av-restart-sync-gate zero-loss-restart-gate; do
     if [ ! -f "$PROBE_BIN_DIR/$b" ]; then
       echo "ERROR: prebuilt probe binary '$b' missing in $PROBE_BIN_DIR — download the CI" >&2
       echo "       probe-tools-linux-amd64 artifact into it, then re-run." >&2
@@ -2203,7 +2203,7 @@ else
   # by #757's new step 4f (a pre-record phase auto-pin, see further down this file)
   # pre-record phase auto-pin step (phase-sync-gate computes the offsets, genlock-jitter-report
   # parses the calibration window's audit log).
-  cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report --bin phase-sync-active-floor-gate  # airuleset:build-ok
+  cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin mv-fps-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report --bin phase-sync-active-floor-gate  # airuleset:build-ok
 fi
 
 # [1/8] frame-probe (cam2 painter) sha-pin — the PIN that CONFIRMS the [0/8] frame-probe auto-align
@@ -2868,6 +2868,17 @@ fi
 echo "    [4a/8] imag burn-target cross-check OK — program renders '$_imag_rendered' == burn target '$IMAG_PROG_SOURCE' (issue 1204)"
 fi
 
+echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors must not already be rendering below floor (target − tolerance) before we commit a ~40-min run; an unreadable box / a box not yet on the #771 genlock build is report-only, only a CONFIRMED sustained collapse aborts (never false-abort a CI gate)"
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[4d1/8] imag MV-fps floor preflight (#771) — strih still checked" "$IMAG_OFFLINE_ACK_REASON"
+  mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
+    "strih|$STRIH|win|$STRIH_USER|$STRIH_PW"
+else
+mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
+  "strih|$STRIH|win|$STRIH_USER|$STRIH_PW" \
+  "imag|$IMAG_IP|linux|${IMAG_USER:-newlevel}|${IMAG_PW:-newlevel}"
+fi
+
 # #195/#257: PRE-RECORD BURN-ON GATE — burns MUST be ON before recording, else the run is wasted.
 # #257 made the burn a per-source `genlock_burn` bool (no OBS_BURN_QR env, no relaunch): the strih
 # (911002) + stream (911004) burns fire only when each box's program input has genlock_burn=true AND
@@ -3115,17 +3126,6 @@ if [ "$frozen_ok" -ne 1 ]; then
       echo "    [frozen-camera-gate] WARN (#1233): could NOT prove leg liveness via received= after ${FROZEN_CAM_ATTEMPTS} attempts (verdict='${frozen_recv_verdict:-none}') — NOT a proven freeze, so NOT aborting (the leg is re-proven downstream by the QR sweep). Investigate the strih OBS-log tap if this recurs." >&2
       ;;
   esac
-fi
-
-echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors must not already be rendering below floor (target − tolerance) before we commit a ~40-min run; an unreadable box / a box not yet on the #771 genlock build is report-only, only a CONFIRMED sustained collapse aborts (never false-abort a CI gate)"
-if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
-  imag_leg_skip_note "[4d1/8] imag MV-fps floor preflight (#771) — strih still checked" "$IMAG_OFFLINE_ACK_REASON"
-  mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
-    "strih|$STRIH|win|$STRIH_USER|$STRIH_PW"
-else
-mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
-  "strih|$STRIH|win|$STRIH_USER|$STRIH_PW" \
-  "imag|$IMAG_IP|linux|${IMAG_USER:-newlevel}|${IMAG_PW:-newlevel}"
 fi
 
 echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, strih+stream MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too); imag is measured too (60fps) and is STRICT as well (issue 888) — the step aborts if any of the three boxes misses its budget"
