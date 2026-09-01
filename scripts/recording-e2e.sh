@@ -822,7 +822,12 @@ echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must AL
 # grandmaster 10.77.9.184 (dantesync election + PTP-interface fix v1.8.42-1.8.46), so a node
 # PTP-locked to a foreign/unreadable GM now HARD-fails here (FOREIGN->20, UNKNOWN->11) instead of
 # only being reported — the stream-on-a-foreign-GM false-green issue 834/1073 is about.
-DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh" \
+# Enforce PHASE-SLEW too (was report-first per issue 1130). phase_slew_check ships report-only in
+# dantesync-gate.sh (DANTESYNC_GATE_PHASE_SLEW_ENFORCE default 0); every graded fleet node now
+# serves phase_slew_enabled=true (the fleet-wide cure for the chronic NTP step storm, verified
+# 2026-09-02 including cam5/cam6/cam7), so a box that silently reverts to phase_slew=off now
+# HARD-fails here (DISABLED->20, UNKNOWN->11) instead of only being reported.
+DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
   --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
@@ -1243,7 +1248,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # call (harmless, already proven clean by the main gate above).
     # Enforce grandmaster identity here too (issue 1073): this call grades strih (the NTP master),
     # whose grandmaster identity must be enforced exactly like the main gate above.
-    DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh" \
+    # Enforce phase_slew here too (issue 1130 enforce follow-up): this call grades strih plus the
+    # active secondary cameras, whose phase_slew state must be enforced exactly like the main
+    # gate above.
+    DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \
       --win-http "strih=$STRIH" \
