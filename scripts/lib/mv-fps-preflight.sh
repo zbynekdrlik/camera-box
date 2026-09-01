@@ -174,7 +174,7 @@ mv_fps_preflight_assert() {
             # term deterministically refuses every run. REPORT-ONLY while issue 1260 is open
             # (walk-back tracked on issue 1263): WARN loud, never abort. The imag term stays STRICT
             # (falls through to $collapsed below). Same report-only-decoupling seam as issue 914/915.
-            echo "    WARNING (issue 1260): strih MV render below floor -- REPORT-ONLY while issue 1260 is open: $detail" >&2
+            echo "    WARNING (issue 1260): $name MV render below floor -- REPORT-ONLY while issue 1260 is open: $detail" >&2
           else
             collapsed="${collapsed}${detail}
 "
