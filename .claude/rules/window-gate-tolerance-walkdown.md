@@ -76,6 +76,15 @@ still far above the sick-rig band 0.67–0.78). A future worker reading THIS rul
 point lands should re-derive the tightest supportable value the same way, not assume 0.90 is final —
 #1242 is still the ticket that root-causes the residual churn and eventually restores 0.95.
 
+**#1250 changed the GATED FIELD — re-derive the floor from `beat_corrected_uniform_fraction`, not
+derived.** #1250 found the depression above was mostly a benign sampling-phase BEAT (balanced 1↔3
+net-zero pairs), so the gate now reads `beat_corrected_uniform_fraction`, which collapses the
+±1-refresh pair. The 0.9221/0.9397 derived numbers above are the PRE-#1250 reading; the beat-corrected
+gated worst of those same runs is higher (0.916/0.947 on the two #1250-mined runs). A third-data-point
+floor re-derivation MUST mine `worst_uniform_fraction` (now beat-corrected) or the new
+`worst_derived_uniform_fraction` (diagnostic), never mix pre/post-#1250 semantics of the shared
+`worst_uniform_fraction` key. #1242's "restore 0.95" trail continues on the beat-corrected reading.
+
 **Reusable shape for a FUTURE seam like this one — "precedence supersession", distinct from every
 flag-flip pattern in `gate-allowance-restore-red-green.md`:** re-arming `copies_gaps_tolerance_
 gates_overall_pass()` needed ZERO change to seam 4's own flag (`segment_singleton_allowance_gates_

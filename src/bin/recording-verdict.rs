@@ -4836,11 +4836,14 @@ fn build_and_print_verdict_with_stream_diffs(
                         // sample_deltas even when the line above's `uniform` is near 0 — see
                         // src/presentation_cadence.rs).
                         println!(
-                            "      cadence(derived): step={} uniform={}/{} ({:.3}) histogram={:?}",
+                            "      cadence(derived): step={} uniform={}/{} ({:.3}) beat_corrected={}/{} ({:.3}) histogram={:?}",
                             pc.derived_expected_step,
                             pc.derived_uniform_steps,
                             pc.sample_deltas,
                             pc.derived_uniform_fraction,
+                            pc.beat_corrected_uniform_steps,
+                            pc.sample_deltas,
+                            pc.beat_corrected_uniform_fraction,
                             pc.delta_histogram
                         );
                     }
@@ -5355,18 +5358,21 @@ fn build_and_print_verdict_with_stream_diffs(
                 // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
                 all_pass &= cadence_gate_pass || !cadence_gates_overall;
 
-                // #1142 — the NEW cadence-UNIFORMITY floor gate (owner mandate 2026-08-19): a broad
+                // #1142 — the cadence-UNIFORMITY floor gate (owner mandate 2026-08-19): a broad
                 // companion to the paired-judder gate above. Bound the WORST (minimum) per-window
-                // `derived_uniform_fraction` (the self-consistent mode-based field, #726 fix — NOT
-                // the raw `uniform_fraction`, which false-reds a clean off-expected-step window; on
-                // the real rig the two are equal) across every cadence-bearing cambox window — a
-                // smooth 60→30 downsample reads ~1.0; the 60→30 + FIFO limit-cycle churn drops it to
-                // ~0.67-0.78 on today's rig (issue 1130). A per-window RATE (like the judder gate) so
-                // a single per-window-MIN term is honest (no run-wide second term). `None` worst = no
-                // cadence window (mass decode failure, already hard-failed by copies/gaps/undecodable)
-                // = not applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`
-                // — the 0.90 floor (walk-back: issue 1242, second walk step) REDs the
-                // current sick rig BY DESIGN.
+                // uniformity across every cadence-bearing cambox window — a smooth 60→30 downsample
+                // reads ~1.0. #1250 makes the GATED field BEAT-AWARE (`beat_corrected_uniform_
+                // fraction`): a sampling-phase beat emits balanced complementary steps (1↔3 around
+                // the mode 2) that net to zero, which the pre-#1250 `derived_uniform_fraction` counted
+                // as non-uniform (0.57-0.92 on a copies==0/gaps==0 chain — the "sick 0.67-0.78" was
+                // mostly this beat). The beat-corrected reading collapses those balanced pairs back
+                // to uniform, so the healthy rig's GATED worst window reads 0.916/0.947 on the two
+                // mined runs (typical windows 0.92-0.99) and the floor now REDs only a GENUINE
+                // non-uniformity beyond the beat. A per-window RATE (like the judder gate) so a single
+                // per-window-MIN term is honest (no run-wide second term). `None` worst = no cadence
+                // window (mass decode failure, already hard-failed by copies/gaps/undecodable) = not
+                // applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`;
+                // floor 0.90 (walk-back: issue 1242) UNCHANGED.
                 let worst_cadence_uniform_fraction: Option<f64> = seg
                     .segments
                     .iter()
@@ -5376,11 +5382,8 @@ fn build_and_print_verdict_with_stream_diffs(
                             .map(|pc| pc.uniform_fraction)
                     })
                     .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
-                // The GATED reading: the self-consistent (mode-derived) field fed to
-                // `cadence_uniformity_gate_pass` below (serialized as `worst_uniform_fraction`). The
-                // RAW `worst_cadence_uniform_fraction` above is DIAGNOSTIC only — surfaced so a
-                // future switch away from the derived field (if it ever false-reds a clean-but-jittery
-                // run) is a one-field change. See src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
+                // The DERIVED reading (mode-based, #726) — DIAGNOSTIC since #1250 (the pre-beat
+                // reading; surfaced so reverting the gate to it is a one-field change).
                 let worst_cadence_derived_uniform_fraction: Option<f64> = seg
                     .segments
                     .iter()
@@ -5390,33 +5393,54 @@ fn build_and_print_verdict_with_stream_diffs(
                             .map(|pc| pc.derived_uniform_fraction)
                     })
                     .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                // #1250 the GATED reading: the BEAT-AWARE field fed to `cadence_uniformity_gate_pass`
+                // below and serialized as `worst_uniform_fraction`. The derived + raw readings above
+                // are DIAGNOSTIC only. See src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
+                let worst_cadence_beat_corrected_uniform_fraction: Option<f64> = seg
+                    .segments
+                    .iter()
+                    .filter_map(|s| {
+                        s.presentation_cadence
+                            .as_ref()
+                            .map(|pc| pc.beat_corrected_uniform_fraction)
+                    })
+                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
                 let uniformity_floor = camera_box::presentation_cadence::UNIFORM_FRACTION_MIN;
                 let uniformity_gate_pass =
                     camera_box::presentation_cadence::cadence_uniformity_gate_pass(
-                        worst_cadence_derived_uniform_fraction,
+                        worst_cadence_beat_corrected_uniform_fraction,
                         Some(uniformity_floor),
                     );
                 let uniformity_gates_overall =
                     camera_box::presentation_cadence::uniformity_gates_overall_pass();
                 report["all_cambox_continuity"]["cadence_uniformity_gate"] = serde_json::json!({
                     "min_uniform_fraction": uniformity_floor,
-                    "worst_uniform_fraction": worst_cadence_derived_uniform_fraction,
+                    "worst_uniform_fraction": worst_cadence_beat_corrected_uniform_fraction,
+                    "worst_derived_uniform_fraction": worst_cadence_derived_uniform_fraction,
                     "worst_raw_uniform_fraction": worst_cadence_uniform_fraction,
                     "pass": uniformity_gate_pass,
                     "gates_overall_pass": uniformity_gates_overall,
-                    "note": "#1142 cadence-uniformity FLOOR (owner mandate). Worst per-window \
-                             presentation_cadence.derived_uniform_fraction (the self-consistent \
-                             mode-based field, #726 fix) across cambox windows must be >= \
-                             min_uniform_fraction (0.90, walk-back: issue 1242, second walk \
-                             step); a smooth 60->30 chain reads ~1.0, the \
-                             current rig ~0.67-0.78 (issue 1130 60->30 + FIFO churn) so this REDs \
-                             the sick rig by design. worst_raw_uniform_fraction is the raw reading, \
-                             DIAGNOSTIC only (it false-reds a clean off-expected-step window; \
-                             derived does not). None = no cadence window (not applicable, passes). \
+                    "note": "#1142 cadence-uniformity FLOOR (owner mandate). Since #1250 the GATED \
+                             value worst_uniform_fraction is the BEAT-AWARE worst per-window \
+                             presentation_cadence.beat_corrected_uniform_fraction across cambox \
+                             windows, which must be >= min_uniform_fraction (0.90, walk-back: issue \
+                             1242). A sampling-phase beat emits balanced complementary steps (1<->3 \
+                             around the mode 2) that net to zero; #1250 collapses them so a smooth \
+                             60->30 chain reads ~1.0 and the healthy-but-beating rig's GATED worst \
+                             window reads 0.916/0.947 on the two mined runs (typical windows \
+                             0.92-0.99, above the floor) instead of the pre-#1250 derived 0.57-0.92 \
+                             (the '0.67-0.78 sick rig' was mostly this beat, not FIFO churn) — the \
+                             floor now REDs only \
+                             genuine non-uniformity beyond the beat. worst_derived_uniform_fraction \
+                             (pre-beat mode-based) and worst_raw_uniform_fraction (caller-step) are \
+                             DIAGNOSTIC only. None = no cadence window (not applicable, passes). \
                              LIVE via presentation_cadence::uniformity_gates_overall_pass.",
                 });
                 println!(
- "  #1142 CADENCE-UNIFORMITY gate: worst derived_uniform_fraction={} (raw={}, floor {}, pass={}, gates_overall_pass={})",
+ "  #1142 CADENCE-UNIFORMITY gate: worst beat_corrected_uniform_fraction={} (#1250 gated; derived={}, raw={}, floor {}, pass={}, gates_overall_pass={})",
+                    worst_cadence_beat_corrected_uniform_fraction
+                        .map(|p| format!("{p:.5}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
                     worst_cadence_derived_uniform_fraction
                         .map(|p| format!("{p:.5}"))
                         .unwrap_or_else(|| "n/a".to_string()),
