@@ -167,3 +167,31 @@ def test_gather_stale_telemetry_flows_age_and_omits_lag(monkeypatch, tmp_path):
     state = _gather_with_log(monkeypatch, tmp_path, log)
     assert state["audio_ts_lag_age_s"] == "600"
     assert "audio_ts_lag_ms" not in state
+
+
+# #1265 — the per-REFERENCE-source ts_lag BAND facet must FLOW through the server's gather from the
+# SAME bounded log_text (still ONE obs_log_parse), so the dev1 BAND arm + the #856 apply-guard read
+# the band SHAPE of the A/V-gate reference source (mbc).
+def test_gather_bundle_state_exposes_audio_ref_band_facet(monkeypatch, tmp_path):
+    lines = ["OBS 32.2.0 (64-bit, windows)"]
+    # 10 mbc readings: a bimodal 107/180 flap -> a real band.
+    for i in range(10):
+        v = 107 if i % 2 == 0 else 180
+        lines.append(f"21:{i:02d}:00.000: audio-telemetry #800 'mbc': ts_lag_ms={v} buffered_ms=193 pending=0 timing_adjust_ms=0")
+    state = _gather_with_log(monkeypatch, tmp_path, "\n".join(lines) + "\n")
+    assert state["audio_ref_lag_src"] == "mbc"
+    assert state["audio_ref_lag_n"] == "10"
+    assert int(state["audio_ref_lag_high_ms"]) >= 180
+    assert int(state["audio_ref_lag_low_ms"]) <= 108
+    assert int(state["audio_ref_lag_duty_pct"]) >= 30   # a genuine flap, not a lone spike
+
+
+def test_gather_bundle_state_omits_audio_ref_band_when_no_ref_source(monkeypatch, tmp_path):
+    # A box whose log has no mbc readings (strih) reports the band facets empty -> omitted.
+    log = (
+        "OBS 32.2.0 (64-bit, windows)\n"
+        "21:00:00.000: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=133 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
+    )
+    state = _gather_with_log(monkeypatch, tmp_path, log)
+    for k in ("audio_ref_lag_src", "audio_ref_lag_high_ms", "audio_ref_lag_n"):
+        assert k not in state
