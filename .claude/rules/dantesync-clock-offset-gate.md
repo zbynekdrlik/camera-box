@@ -276,7 +276,7 @@ tests/<file>.rs` standalone (provide `CARGO_MANIFEST_DIR=<worktree>`; the harnes
 shell out), then run the binary; OR run the pure bash fn under `bash -c 'set -uo pipefail; . scripts/
 clock-offset-guard.sh; ...'` (`cargo test --no-run` is now hook-blocked too, #477 tightening).
 
-## phase_slew is now ASSERTED at the fleet [0/8] gate, REPORT-FIRST (#1130)
+## phase_slew is now ENFORCED at the fleet [0/8] gate (#1130 — report-first landed, then flipped)
 
 The #1215 section above added `phase_slew_check`/`phase_slew_enabled_from_pipe_json` but wired
 them into `verify-imag.sh` ONLY (imag box). #1130 wired them into `dantesync-gate.sh`'s
@@ -286,19 +286,27 @@ chronic NTP step storm, and a box silently reverting to `phase_slew=off` would r
 uncaught until dantesync's own >120/h `ntp_step_storm` alarm (far above the visible-judder
 threshold). Mirrors the #834 `gm_check` sibling byte-for-byte:
 
-- **REPORT-FIRST by default.** `GATE_PHASE_SLEW_ENFORCE` (env `DANTESYNC_GATE_PHASE_SLEW_ENFORCE`,
-  default 0). At 0 the `PHASE-SLEW ENABLED/DISABLED/UNKNOWN` line ALWAYS prints per node but
-  `ps_gate_rc` stays 0 → verdict byte-identical to pre-#1130. At 1: DISABLED → BAD/20, UNKNOWN
-  (field absent/unread) → INCOMPLETE/11. Validated must-be-0/1 (same loud-on-typo guard as GM).
+- **`GATE_PHASE_SLEW_ENFORCE` (env `DANTESYNC_GATE_PHASE_SLEW_ENFORCE`) is the gate's own default-0
+  report-first flag**, unchanged by the flip below: at 0 the `PHASE-SLEW ENABLED/DISABLED/UNKNOWN`
+  line ALWAYS prints per node but `ps_gate_rc` stays 0 → verdict byte-identical to pre-#1130. At 1:
+  DISABLED → BAD/20, UNKNOWN (field absent/unread) → INCOMPLETE/11. Validated must-be-0/1 (same
+  loud-on-typo guard as GM). Standalone/dry-run callers and `verify-imag.sh` (its own direct
+  phase_slew check) still see the default-0 report-first behaviour — only `recording-e2e.sh`'s two
+  invocations flip it, exactly like the GM precedent.
 - **`node_verdict` gained an OPTIONAL 4th `[PS_RC]` arg (default 0)** — every 2-/3-arg caller
   unchanged. HTTP-path only (journal fallback returns before the block; journald has no
   `phase_slew_enabled`).
-- **The enforce flip is a documented FOLLOW-UP, not done here** — a one-env-prefix change at
-  `recording-e2e.sh`'s `[0/8]` invocation (exactly like GM's #1073), gated on first confirming
-  EVERY graded node (including cam5/6/7 in the 7-cam set — #1130 live-verified only cam1-4+strih+
-  stream) serves `phase_slew_enabled` AND the dantesync version pin (1.8.52) guarantees the field.
-  Verify-before-flip by sourcing `clock-offset-guard.sh` + `phase_slew_check <node>
-  "$(phase_slew_enabled_from_pipe_json "$(curl -fsS http://<ip>:8898/status)")"` on each node.
+- **The enforce flip LANDED 2026-09-02** (a one-env-prefix change at BOTH `recording-e2e.sh`
+  `dantesync-gate.sh` invocations — the main `[0/8]` gate ~line 819 and the secondary `#947` sanity
+  gate ~line 1245, exactly like GM's #1073 flipped at both call sites), after re-verifying LIVE that
+  EVERY graded node — all seven active cameras (cam5/6/7 included, extending the ticket's own
+  earlier cam1-4+strih+stream-only check), strih, and stream — serves `phase_slew_enabled=true`.
+  `DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1` now sits alongside the pre-existing
+  `DANTESYNC_GATE_GM_ENFORCE=1` prefix on both invocations: a box that silently reverts to
+  `phase_slew=off` now hard-fails the `[0/8]` gate (DISABLED→20, UNKNOWN→11) instead of only being
+  reported. Verify-before-any-FUTURE-relax the same way: source `clock-offset-guard.sh` +
+  `phase_slew_check <node> "$(phase_slew_enabled_from_pipe_json "$(curl -fsS
+  http://<ip>:8898/status)")"` on each graded node.
 
 **Do NOT walk back the #1119/#1123/#1055 widenings just because the step storm is gone (#1130).**
 As of 2026-09-01 the fleet is on 1.8.52 with phase_slew ENABLED everywhere, master
