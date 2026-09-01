@@ -178,6 +178,45 @@ def test_decompose_summary_floor_spread_and_slowest():
     assert s["anchor_src"] == "NDI cam3"
 
 
+def test_decompose_transport_unknown_owner_when_no_cap_data():
+    # No recv-timing data at all -> transport_uniform is None (unknown), and the upstream excess is
+    # labelled honestly as grabber/transport with the cadence unknown, never falsely "grabber-only".
+    res = afd.decompose(_JITTER, {}, {}, _SRCS)
+    assert res["summary"]["transport_uniform"] is None
+    assert res["summary"]["transport_cap_avg_spread_ms"] is None
+    assert "unknown" in _rows_by_src(res)["NDI cam1"]["owner"].lower()
+
+
+def test_decompose_single_cap_sample_spread_is_none_not_zero():
+    res = afd.decompose(_JITTER, {"NDI cam3": 16.0}, {}, _SRCS)  # only one camera has cap data
+    assert res["summary"]["transport_cap_avg_spread_ms"] is None  # never a fabricated 0.0
+    assert res["summary"]["transport_uniform"] is None
+
+
+def test_decompose_all_omitted_returns_empty_table():
+    phantom = {f"NDI cam{n}": {"latency_ms": 3, "mean_head_skew_ms": 70.0, "samples": 1}
+               for n in (1, 2, 3)}
+    srcs = ["NDI cam1", "NDI cam2", "NDI cam3"]
+    res = afd.decompose(phantom, {}, {}, srcs)
+    assert res["rows"] == []
+    assert res["anchor_src"] is None
+    assert res["summary"]["floor_spread_ms"] is None
+    assert set(res["summary"]["omitted_sources"]) == set(srcs)
+
+
+def test_attribute_supra_noise_but_subthreshold_is_mixed_not_within_noise():
+    # excess 2.5 ms (> EXCESS_NOISE_MS=2.0) but d_lat 1.0 (not > STRIH_CONFIG_MIN_MS) and d_skew 1.5
+    # (not > EXCESS_NOISE_MS): must NOT be mislabelled "within-noise".
+    jj = {
+        "NDI cam3": {"latency_ms": 3, "mean_head_skew_ms": 67.0, "samples": 3},   # anchor 70.0
+        "NDI cam8": {"latency_ms": 4, "mean_head_skew_ms": 68.5, "samples": 3},   # 72.5, excess 2.5
+    }
+    res = afd.decompose(jj, {"NDI cam3": 16.0, "NDI cam8": 16.0}, {}, ["NDI cam3", "NDI cam8"])
+    owner = _rows_by_src(res)["NDI cam8"]["owner"].lower()
+    assert "within-noise" not in owner
+    assert "mixed sub-threshold" in owner
+
+
 # --------------------------------------------------------------- real green-run smoke (skip if absent)
 _RUN = "1363366080"
 _RUN_DIR = pathlib.Path(f"/tmp/recording-e2e-{_RUN}")

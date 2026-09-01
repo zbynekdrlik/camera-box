@@ -173,10 +173,14 @@ def _attribute(is_anchor, excess, d_lat, d_skew, transport_uniform, grabber):
             parts.append("transport +%.0fms (cap_avg NOT uniform) / grabber" % d_skew)
         else:
             parts.append("grabber/transport +%.0fms (transport cadence unknown)" % d_skew)
-    return "; ".join(parts) if parts else "within-noise"
+    if parts:
+        return "; ".join(parts)
+    # supra-noise excess but no single component cleared its own threshold: an honest mixed label,
+    # never a "within-noise" that would contradict excess > EXCESS_NOISE_MS (review S1).
+    return "mixed sub-threshold +%.1fms" % excess
 
 
-def decompose(jitter_json, cap_avgs, grabber_by_src, sources, *, source_template=SOURCE_TEMPLATE):
+def decompose(jitter_json, cap_avgs, grabber_by_src, sources):
     """Decompose each present camera's arrival floor into strih-config (Delta latency) + upstream
     (Delta skew), attribute the upstream term to grabber/transport via cap_avg uniformity, and
     return {rows, anchor_src, summary}. `sources` names the cameras to consider; a source absent or
@@ -209,7 +213,8 @@ def decompose(jitter_json, cap_avgs, grabber_by_src, sources, *, source_template
         transport_spread = max(cap_vals) - min(cap_vals)
         transport_uniform = transport_spread <= TRANSPORT_UNIFORM_SPREAD_MS
     elif len(cap_vals) == 1:
-        transport_spread, transport_uniform = 0.0, None  # one camera can't establish uniformity
+        # one camera can't establish uniformity OR a spread -> None, not a fabricated 0.0 (review S3)
+        transport_spread, transport_uniform = None, None
     else:
         transport_spread, transport_uniform = None, None  # no transport data at all
 
@@ -296,7 +301,7 @@ def _render_table(result):
     for r in rows:
         cam = r["src"].replace("NDI ", "")
         lines.append("%-9s %8s %8s %9s %8s %9s %9s  %s" % (
-            cam, _fmt(r["floor_ms"]), _fmt(r["latency_ms"], "%d") if r["latency_ms"] is not None else "-",
+            cam, _fmt(r["floor_ms"]), _fmt(r["latency_ms"], "%d"),
             _fmt(r["mean_head_skew_ms"]), _fmt(r["cap_avg_ms"], "%.2f"),
             _fmt(r["d_latency_ms"]), _fmt(r["d_skew_ms"]), r["owner"]))
     lines.append("")
@@ -318,7 +323,6 @@ def main(argv=None):
     ap.add_argument("--run-dir", help="an E2E run dir (/tmp/recording-e2e-<RUN>) to auto-discover from")
     ap.add_argument("--jitter-json", help="qr-align-jitter-<RUN>.json (overrides --run-dir discovery)")
     ap.add_argument("--strih-log", help="qr-align-strih-<RUN>.log (overrides --run-dir discovery)")
-    ap.add_argument("--source-template", default=SOURCE_TEMPLATE)
     ap.add_argument("--cameras", help='explicit camera numbers, e.g. "1,2,3,4"')
     ap.add_argument("--json", action="store_true", dest="as_json", help="machine-parseable output")
     args = ap.parse_args(argv)
@@ -332,13 +336,22 @@ def main(argv=None):
     if not jitter_path or not os.path.isfile(jitter_path):
         ap.error("no jitter JSON found (pass --jitter-json or a --run-dir containing qr-align-jitter-*.json)")
 
-    jitter_json = json.loads(pathlib.Path(jitter_path).read_text(errors="replace"))
+    try:
+        jitter_json = json.loads(pathlib.Path(jitter_path).read_text(errors="replace"))
+    except json.JSONDecodeError as e:
+        ap.error("jitter JSON %s is not valid JSON: %s" % (jitter_path, e))
 
+    # NOTE: SOURCE_TEMPLATE is fixed, NOT a CLI knob -- the reused arrival_floors_from_jitter
+    # (via prerecord_phase_calibrate) hardcodes the "NDI cam<N>" strih naming, so any other
+    # template would resolve zero floors and omit every camera (review W1).
     if args.cameras:
-        nums = [int(x) for x in args.cameras.replace(" ", "").split(",") if x]
-        sources = [args.source_template.format(n=n) for n in nums]
+        try:
+            nums = [int(x) for x in args.cameras.replace(" ", "").split(",") if x]
+        except ValueError:
+            ap.error('--cameras must be comma-separated integers, e.g. "1,2,3,4"')
+        sources = [SOURCE_TEMPLATE.format(n=n) for n in nums]
     else:
-        sources = _sources_from_jitter(jitter_json, args.source_template)
+        sources = _sources_from_jitter(jitter_json, SOURCE_TEMPLATE)
 
     strih_text = _read(strih_path)
     cap_avgs = cap_avg_by_source(strih_text, sources) if strih_text else {}
@@ -353,8 +366,7 @@ def main(argv=None):
         if btext:
             grabber_by_src[s] = grabber_health(btext)
 
-    result = decompose(jitter_json, cap_avgs, grabber_by_src, sources,
-                       source_template=args.source_template)
+    result = decompose(jitter_json, cap_avgs, grabber_by_src, sources)
 
     if args.as_json:
         print(json.dumps(result, indent=2, sort_keys=True))
