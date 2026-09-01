@@ -585,15 +585,24 @@ const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 /// analyzed seconds: a single per-frame delivery SINGLETON (the issue-1167 v3 paced-trickle
 /// absorption + a FIFO stale_replay in the same event; `burn_unreadable` stays 0 — a genuine
 /// delivery singleton, not a burn-readability defect). Per the owner's 2026-07-31 strict-test
-/// revision ("jedna stratená snímka nie je problém"), the band re-widens to the LOUD `<=1`
-/// singleton: a single drop PASSES within the allowance and is reported LOUDLY (never a silent
-/// green), while `>=2` of anything still FAILS and `burn_unreadable` stays an unconditional hard
-/// fail. This is the exact `gate-allowance-restore-red-green.md` shape, inverted. **Issue 1169
-/// stays OPEN as the RE-TIGHTEN trail** — a one-constant flip back to 0 (proven dormant by
-/// `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar`), landed once a
-/// zero-singleton green run holds (e.g. after the issue-1168 floor reduction and/or the cam1-card
-/// swap). NEVER widen this band further without a fresh measured incident and its own trail.
-const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 1;
+/// revision ("jedna stratená snímka nie je problém"), the band re-widened to the LOUD `<=1`
+/// singleton while the paced-trickle residual was still being driven out, with an explicit
+/// re-tighten trail.
+///
+/// **Issue 1169 RE-TIGHTENED this DEFAULT back to 0** (2026-09-01) — the named re-tighten event
+/// landed: the first STABLE 3-run green 7-cam series (verdicts 1363366080 / 1168855508 /
+/// 674135238) showed `full_chain.real_drops = 0` and per-node `real_drops = 0` on EVERY node in
+/// EVERY run — the delivery-hop singleton band was never consumed, so the strict absolute-zero
+/// bar is restored (a single real drop again FAILS the headline; the count stays honest, nothing
+/// is masked). The allowance MECHANISM is untouched and DORMANT: the widened band (1) stays
+/// re-armable via one constant flip or the `CAMERA_BOX_REAL_DROPS_ALLOWANCE` env override (proven
+/// by `re_tightening_the_1169_allowance_to_zero_restores_the_strict_bar` at explicit allowances),
+/// so a future genuinely-new incident can re-widen it with its own trail. This is the exact
+/// `gate-allowance-restore-red-green.md` shape (RESTORE direction, third instance of the pattern
+/// in this file). Issue 1169 stays OPEN for its remaining two seams (the per-segment `<=1/<=1`
+/// bar and the cam-leg V4L2 band), both still consumed by the current green series. NEVER widen
+/// this band again without a fresh measured incident and its own re-tighten ticket.
+const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 0;
 
 /// #904 — env-overridable read of the per-node `real_drops` allowance (mirrors the
 /// `CAMERA_BOX_DECODE_WORKERS` idiom in `src/probe/recording.rs`: a non-numeric or absent value
