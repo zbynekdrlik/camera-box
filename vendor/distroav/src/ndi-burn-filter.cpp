@@ -51,6 +51,7 @@
 #include "burn-clock.hpp"
 #include "burn-qr.hpp"
 #include "burn-geom.hpp"
+#include "burn-tick-cache.hpp"
 
 #include <graphics/graphics.h>
 #include <util/platform.h>
@@ -109,8 +110,19 @@ struct burn_filter {
 	uint32_t qr_px;
 	burn_geom::Corner corner; // this node's bottom corner (strih=left, stream=right, imag=BCL)
 
-	// Per-render monotonic frame counter.
+	// Per-render monotonic frame counter. camera-box #1260: advanced ONCE PER TICK (in
+	// burn_draw_qr, gated by tick_cache below), not per draw — see tick_cache.
 	uint32_t frame_id;
+
+	// camera-box #1260: within-tick "prepare once, reuse" state. The burn filter's video_render
+	// runs once per DRAW of this source (PROGRAM + Studio-Mode preview + every Multiview cell).
+	// Doing the full base texrender + QR raster/upload per draw meant strih's 4K MV re-ran all 7
+	// cam burns every MV frame, pushing the MV render_ewma over the per-tick budget and collapsing
+	// it to 7.5fps (#278/#293). We prep the base texrender + QR + advance frame_id ONCE per tick
+	// (the first draw = the PROGRAM, since output_frames() runs before render_displays()); the
+	// later within-tick draws reuse f->texrender + f->qr_texture (a cheap sprite blit).
+	// burn_filter_videotick clears it each tick; bzalloc zeroes it, so the first render preps.
+	struct burn_tick_cache tick_cache;
 };
 
 // camera-box #257: resolve an OBS export by name at RUNTIME (same rationale as ndi-source.cpp:
@@ -433,37 +445,54 @@ static void burn_filter_videorender(void *data, gs_effect_t *)
 		return 0.0;
 	}();
 
-	// 1) Render the target into our texrender (GPU — NO CPU readback).
-	gs_texrender_reset(f->texrender);
-	if (!gs_texrender_begin(f->texrender, width, height)) {
-		obs_source_skip_video_filter(f->context);
-		return;
+	// camera-box #1260: decide ONCE per tick whether to do the expensive PREP. The first draw of
+	// the tick (always the PROGRAM — output_frames() runs before render_displays()) preps + stamps
+	// frame_id; the later within-tick draws (Studio-Mode preview, Multiview cells) REUSE the cached
+	// f->texrender + f->qr_texture (the sprite blit in section 3, always run below). This is what
+	// takes strih's 4K MV out of the #278/#293 budget collapse (7.5fps) — the 7 MV burns no longer
+	// re-render every frame — AND stamps the recorded frame_id once per tick, not per draw.
+	const bool prepare = burn_tick_cache_on_render(&f->tick_cache);
+
+	if (prepare) {
+		// 1) Render the target into our texrender (GPU — NO CPU readback).
+		gs_texrender_reset(f->texrender);
+		if (!gs_texrender_begin(f->texrender, width, height)) {
+			// #1260: the prep FAILED (transient graphics-reset) — do NOT leave the tick marked
+			// prepared, or a later within-tick draw would reuse a stale/empty composite. Re-arm
+			// the next draw this tick, then pass the source through for this frame (as before).
+			burn_tick_cache_abort_prepare(&f->tick_cache);
+			obs_source_skip_video_filter(f->context);
+			return;
+		}
+		struct vec4 clear;
+		vec4_zero(&clear);
+		gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+		gs_ortho(0.0f, (float)width, 0.0f, (float)height, -100.0f, 100.0f);
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+		// Degenerate case (filter directly on a source with no chain): mirrors ndi-filter.cpp.
+		// The texrender stays cleared/transparent and we still overlay the QR — only a
+		// MISCONFIGURATION (the probe scene attaches this filter to a real program source, not
+		// a bare source), so this path is cosmetic, not the intended use.
+		if (target == parent)
+			obs_source_skip_video_filter(f->context);
+		else
+			obs_source_video_render(target);
+		gs_blend_state_pop();
+		gs_texrender_end(f->texrender);
+
+		// 2) CPU-draw ONLY the small QR into the pre-cleared-white overlay buffer, upload to the
+		//    small texture. This is the ONLY per-frame CPU pixel work — ~side² px, not the whole
+		//    1920×1080 frame — and there is NO gs_stagesurface_map readback (#404). Once per tick
+		//    now (#1260), so burn_draw_qr advances frame_id once per tick, not per draw.
+		std::memset(f->work, 0xFF, f->work_size); // white backing fills the overlay square
+		burn_draw_qr(f, f->work, side, pl, fps);
+		gs_texture_set_image(f->qr_texture, f->work, side * 4, false);
 	}
-	struct vec4 clear;
-	vec4_zero(&clear);
-	gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
-	gs_ortho(0.0f, (float)width, 0.0f, (float)height, -100.0f, 100.0f);
-	gs_blend_state_push();
-	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
-	// Degenerate case (filter directly on a source with no chain): mirrors ndi-filter.cpp.
-	// The texrender stays cleared/transparent and we still overlay the QR — only a
-	// MISCONFIGURATION (the probe scene attaches this filter to a real program source, not
-	// a bare source), so this path is cosmetic, not the intended use.
-	if (target == parent)
-		obs_source_skip_video_filter(f->context);
-	else
-		obs_source_video_render(target);
-	gs_blend_state_pop();
-	gs_texrender_end(f->texrender);
 
-	// 2) CPU-draw ONLY the small QR into the pre-cleared-white overlay buffer, upload to the
-	//    small texture. This is the ONLY per-frame CPU pixel work — ~side² px, not the whole
-	//    1920×1080 frame — and there is NO gs_stagesurface_map readback (#404).
-	std::memset(f->work, 0xFF, f->work_size); // white backing fills the overlay square
-	burn_draw_qr(f, f->work, side, pl, fps);
-	gs_texture_set_image(f->qr_texture, f->work, side * 4, false);
-
-	// 3) Draw the base (texrender) full-frame, then overlay the QR sprite at the corner.
+	// 3) Draw the base (texrender) full-frame, then overlay the QR sprite at the corner. ALWAYS
+	//    run (both the prep draw and the reuse draws) — #1260: a reuse draw blits the cached
+	//    f->texrender + f->qr_texture from this tick's prep (a cheap sprite blit).
 	gs_texture_t *base = gs_texrender_get_texture(f->texrender);
 	gs_effect_t *def = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	gs_eparam_t *image = def ? gs_effect_get_param_by_name(def, "image") : nullptr;
@@ -512,6 +541,16 @@ static void burn_filter_videorender(void *data, gs_effect_t *)
 	gs_enable_framebuffer_srgb(prev_srgb);
 }
 
+// camera-box #1260: clear the within-tick prepare flag once per video tick, so the next render
+// re-preps + re-stamps the burn for the new frame. video_tick fires once per tick per source on
+// the graphics thread (tick_sources, obs-video.c), BEFORE output_frames()/render_displays() — the
+// same per-frame cadence obs-filters' crop/scale/scroll/gpu-delay filters rely on.
+static void burn_filter_videotick(void *data, float)
+{
+	auto *f = (burn_filter *)data;
+	burn_tick_cache_on_tick(&f->tick_cache);
+}
+
 struct obs_source_info create_ndi_burn_filter_info()
 {
 	struct obs_source_info info = {};
@@ -524,5 +563,6 @@ struct obs_source_info create_ndi_burn_filter_info()
 	info.destroy = burn_filter_destroy;
 	info.update = burn_filter_update;
 	info.video_render = burn_filter_videorender;
+	info.video_tick = burn_filter_videotick; // #1260: once-per-tick cache invalidation
 	return info;
 }
