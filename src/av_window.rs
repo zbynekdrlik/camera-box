@@ -131,9 +131,26 @@ pub fn pool_camera_av_sync(
 /// around zero with intra-episode mad only 10-13ms; stream log shows relocks=13 in 3.8h), so a
 /// ±20ms bound was a ~30% per-episode lottery that would randomly block unrelated PRs. ±90
 /// still catches every gross regression class (pre-ASRC 160ms/h drift, a mis-set knob, a dead
-/// marker chain, the −57ms dock-bias class of #999). Re-tightening 90 → 20 is issue #1003's
-/// acceptance item 2, once the release phase is pinned to the absolute wall-clock frame grid —
-/// a tracked interim, never a silent weakening.
+/// marker chain, the −57ms dock-bias class of #999). Re-tightening 90 → 20 stays issue #1003's
+/// acceptance item 2 — a tracked interim, never a silent weakening.
+///
+/// **2026-09-01 DATA-FIRST RE-CALIBRATION (issue 1003) — the value STAYS 90; the earlier "once
+/// the release phase is pinned to the absolute wall-clock frame grid" precondition is RETIRED.**
+/// That vendored-C grid-pin was durably rejected: the deep-source release phase is already
+/// deterministic (Tier-0 sim ±33 ns across 12 lock phases; the #940 phase-pin deadline + the
+/// #1003 history-anchored relock + the #1049 converge, all deployed), and the live residual is a
+/// PHYSICAL arrival-floor / per-connection sender phenomenon a receiver release-phase pin cannot
+/// remove without adding latency the imag 3 ms mandate forbids. The first stable 7-cam green
+/// series (verdicts 1363366080 / 1168855508 / 674135238 — three fresh lock episodes after fleet
+/// redeploys) re-measured the gate at ±90 and DECOMPOSES cleanly: a per-run COMMON shift
+/// −9.2 / +9.5 / +36.3 ms (span 45.5 ms = 1.36 frames — the still-live per-episode lock lottery)
+/// plus a STABLE per-camera residual (cam3 +17.6 ms above the run mean, cam4 ≈ −8 ms below,
+/// ≈ 26 ms peak-to-peak — the un-equalized production-pin delivery spread). 8/21 measurements
+/// exceed ±20 (worst 57.7 ms), so the data supports NO tighten below the still-accurate
+/// `20 + 2 frames`. The re-tighten to ±20 is now gated on BOTH the production pin-promotion
+/// (collapses the inter-camera spread — its own owner-visual-acceptance lane) AND a viable
+/// removal/absorption of the common lock-episode shift (which #1004 records as UNSTABLE → it
+/// cannot be a constant `--av-expected-ms`); neither exists yet.
 pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 90.0;
 
 /// #1178 — the fixed video-leg rig offset (ms): the calibrated DEFAULT `expected_ms` the per-camera
