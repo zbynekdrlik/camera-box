@@ -113,3 +113,51 @@ through gather); `bash -n` + `shellcheck -S warning` on the watchdog. The shell 
 (LAGGING/STALE/UNKNOWN/HEALTHY) is proven by a MANUAL stubbed-`curl` `--dry-run` recipe (a fake
 `curl` on `$PATH` echoing a fixture body per case) — same manual convention as #1226 (no committed
 driver; the STALE branch is a 6-line early return). CI runs nothing new for this (pure python/bash).
+
+## #1265 — the per-REFERENCE-source ts_lag BAND arm (a SECOND, tens-of-ms dimension)
+
+The #1226/#1231 arm is BLIND to the 2026-09-01 incident by 23×: the A/V-gate reference source `mbc`
+went BIMODAL on the stream box (flat ~107 ms for 26 h, then flapping 107↔180 ms every 1–2 min, the
+high mode creeping to 180–217 through the day) — a source-timestamp/mix-clock oscillation, NOT the
+buffering step-up (only ONE `adding … buffering` line the whole log). That flap shifts the measured
+A/V residual to −77/−126 ms (past the ±90 gate), but its peak ~217 ms is 23× under the 5000 ms lag
+threshold, AND the single MAX-across-sources scalar facet does not even attribute it to `mbc` (a live
+read mid-flap can report `ASIO Input Capture` as the max). A single instant's value cannot express a
+bimodal band, so the fix is a SHAPE facet + a finer verdict.
+
+- **Box facet (`bundle_state_gather.audio_ref_band_from_log(text, ref_src)`):** for the named
+  reference source (`AUDIO_REF_BAND_SRC`, default `mbc`; a box with no such source omits it — strih),
+  from the SAME #1222 bounded log (ONE read), compute the band SHAPE: `audio_ref_lag_base_ms` (the
+  flat-start baseline = median of the HEAD/startup region's readings — "the instance's own flat
+  start"; `""` when there is no separator/head), `audio_ref_lag_high_ms`/`_low_ms` (p90/p10
+  nearest-rank of the FRESH tail window, so a lone spike never widens the band), `audio_ref_lag_duty_pct`
+  (% of the tail window above `baseline + AUDIO_REF_BAND_DUTY_MARGIN_MS`), `audio_ref_lag_n`. Same
+  omit-when-empty rule; wired through `build_bundle_state` + `bundle-state-server._parse_log_facets`
+  (still ONE `obs_log_parse` timing, no second read — the #1222 caching discipline).
+- **dev1 decision (`audio_lag_decision.classify_band`/`analyze_band` + the `band` CLI):** DRIFTING
+  iff `deviation = high − (base or low) > BAND_DEV_THRESHOLD_MS` (40) AND `duty_pct >= BAND_DUTY_MIN_PCT`
+  (10) AND `n >= BAND_MIN_SAMPLES` (8). The flat-start baseline catches a WHOLE-band creep (both modes
+  up together) that a within-window spread alone would miss; the duty term separates a genuine flap
+  (~50%) from a single spike (~few %). SKIP (unreachable)/UNKNOWN (facet absent or too few samples)
+  never page. All thresholds env-overridable.
+- **Watchdog arm (`handle_box_band` in `audio-lag-alert-watchdog.sh`):** a self-contained SECOND arm
+  (its OWN fetch + DISJOINT state keys, so the #1226 lag arm is byte-unchanged), 2-pass confirm,
+  report-only ⚠️ alert with a STABLE `--dedup-key audio-band-$box` (distinct from the lag arm's 🚨
+  `audio-lag-$box`), machine-channel recovery (no ✅ ping, #1206). Ships DISABLED like the lag arm
+  (same committed-but-unenabled units).
+
+## #1265 — the #856 A/V controller now HOLDs an apply computed from an unstable timeline
+
+The #856 rig-wide A/V controller (`av_sync_combine_offsets.py` → `av_sync_calibrate.py --apply` in
+`recording-e2e.sh cleanup()`) walked `NDI 2ME PGM` 926→976 after the flapping run, because its only
+guards were <2-measured-cams / >100 ms-spread — a rig-wide-CONSISTENT (small-spread) but
+timeline-corrupted run passes both. `scripts/av_sync_apply_guard.py` (pure, pytest Tier-0) +
+`scripts/lib/av-sync-apply-guard.sh` (sourced I/O gather, #675) HOLD the apply on ANY of: (1) the
+run's stream `mbc` band verdict is DRIFTING (gathered at `[8/8g]` into `AV_SYNC_BAND_VERDICT`, the
+root-cause signal — works only once the box band facet is deployed), (2) `|residual_median_ms|`
+exceeds a ±60 ms sanity ceiling (the green series was within ±33, the bad runs −77/−126 — no history
+needed, works before deploy), or (3) `|proposed − last_applied| > 90 ms` vs the dev1-persistent
+`~/.camera-box/av-sync-last.json` (populated after each landed apply). A HOLD clears
+`AV_SYNC_APPLY_OFFSET_MS` (skipping the byte-unchanged apply) with a loud log + a persisted
+`av-sync-apply-hold-<run>.txt` reason; when the guard says proceed, #856 is byte-identical. See
+`.claude/rules/avsync-monitoring.md` for the guard's placement in the cleanup composition.

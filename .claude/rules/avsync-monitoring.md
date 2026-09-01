@@ -10,6 +10,8 @@ paths:
   - "scripts/avsync-lineup-alert-watchdog.sh"
   - "scripts/avsync_lineup.py"
   - "systemd/avsync-lineup-alert-watchdog*"
+  - "scripts/av_sync_apply_guard.py"
+  - "scripts/lib/av-sync-apply-guard.sh"
 ---
 
 # Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (#812/#807)
@@ -262,3 +264,31 @@ AGENT session via the `win-stream-snv` MCP (never ssh for a Windows box in an ag
   live is NORMAL healthy self-skip (nothing to measure off-air), not a fault — same as the `#814`
   no-signal semantics above. A GAP would be a STALE heartbeat (process dead) or `avsync-keepalive`
   `LastResult != 0`.
+
+## The #856 rig-wide A/V controller HOLDs an apply computed from an unstable audio timeline (#1265)
+
+`recording-e2e.sh`'s #856 controller (`av_sync_combine_offsets.py` → `av_sync_calibrate.py --apply`
+in `cleanup()`) auto-tunes `NDI 2ME PGM`'s genlock latency toward the median of THIS run's measured
+per-camera A/V offsets. On 2026-09-01 the stream box's reference source `mbc` ts_lag went bimodal
+(107↔180 ms flap), which shifted the measured residual to −77/−126 ms with a rig-wide-CONSISTENT
+(small-spread) shape — so the combiner's only guards (<2-measured-cams / >100 ms-spread) both passed
+and the controller walked the pin 926→976 toward noise. The #1265 STABILITY GUARD holds it instead:
+
+- **Pure decision `scripts/av_sync_apply_guard.py`** (`hold_reason(...)`, pytest Tier-0) HOLDs on ANY
+  of three fail-safe signals: (1) the run's stream `mbc` ts_lag band is DRIFTING
+  (`.claude/rules/audio-lag-watchdog.md` band arm, gathered at `[8/8g]`), (2) `|residual_median_ms|`
+  beyond a ±60 ms sanity ceiling (green series ±33; the bad runs −77/−126 — no history needed), or
+  (3) `|proposed − last_applied| > 90 ms` vs `~/.camera-box/av-sync-last.json`.
+- **Sourced lib `scripts/lib/av-sync-apply-guard.sh`** (#675) does the I/O gather (verdict residual,
+  last-applied offset, the stream band verdict) + the persist, all `set -euo pipefail`-safe (it runs
+  in the `cleanup()` EXIT trap, so every function ALWAYS returns 0 — the #1133 class).
+- **Composition (`recording-e2e.sh cleanup()`):** the guard block sits AFTER the #358/#691 stream
+  teardown restore and BEFORE the byte-unchanged #856 apply `if` (`.claude/rules/recording-e2e-cleanup-composition.md`).
+  A HOLD clears `AV_SYNC_APPLY_OFFSET_MS` (skipping the apply) with a loud log + a persisted
+  `av-sync-apply-hold-<run>.txt`; a landed apply persists its offset to the dev1 reference for the
+  next run's jump baseline. When the guard says proceed, #856 is byte-identical.
+- **Tier-0:** `pytest tests/python/test_av_sync_apply_guard_1265.py` (the predicate) +
+  `tests/harness_av_sync_apply_guard_1265.rs` / `tests/harness_recording_e2e_av_sync_guard_1265.rs`
+  (the sourced lib + the wiring; CI-run, cross-checked locally by running the python one-liners
+  standalone + a `.find`/window simulation, since a worktree worker cannot `bash -c`-source the lib
+  under the isolation guard and cannot run cargo).
