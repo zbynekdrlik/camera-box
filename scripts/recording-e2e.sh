@@ -1945,6 +1945,7 @@ fi"
     if [ -n "$_avs_hold" ]; then
       echo "[cleanup] #1265 HOLD #856 apply: $_avs_hold -- stream genlock latency left at the just-restored prod value" >&2
       printf '%s\n' "$_avs_hold" > "$OUTDIR/av-sync-apply-hold-${RUN_ID}.txt" 2>/dev/null || true
+      av_sync_persist_hold_reason "$_avs_hold"   # #1265: durable ~/.camera-box surface (the $OUTDIR copy is swept)
       AV_SYNC_APPLY_OFFSET_MS=""
     fi
   fi
@@ -1956,12 +1957,14 @@ fi"
       --json-path "$OUTDIR/av-sync-last-${RUN_ID}.json" \
       || echo "WARNING: #856 av_sync_calibrate.py --apply failed -- stream genlock latency left at the just-restored prod value; the NEXT run recomputes from its own fresh measurement" >&2
   fi
-  # #1265: persist the applied offset to the dev1 last-applied reference (the ~/.camera-box home) so
-  # the NEXT run's jump-vs-last-applied guard condition has a baseline. Gated on the OUTDIR success
-  # file the calibrate --apply step writes ONLY on a landed apply, so a HELD/skipped or FAILED apply
-  # never records a value that did not take. Sourced-helper (#675), best-effort.
+  # #1265: persist the last-applied reference for the NEXT run's jump-vs-last-applied guard condition
+  # by COPYING the calibrate-written success file (FULL schema, incl. the applied_latency_ms key the
+  # live pins-snapshot / rig-mode / drift-guard readers depend on) to the dev1 ~/.camera-box home --
+  # finding 1: NOT a re-written source/offset/ts-only schema, which would strip applied_latency_ms.
+  # Gated on that OUTDIR success file existing (calibrate writes it ONLY on a landed apply), so a
+  # HELD/skipped or FAILED apply never records a value that did not take. Sourced-helper (#675).
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ] && [ -f "$OUTDIR/av-sync-last-${RUN_ID}.json" ]; then
-    av_sync_persist_applied_offset "$AV_SYNC_APPLY_OFFSET_MS"
+    av_sync_persist_applied_offset "$OUTDIR/av-sync-last-${RUN_ID}.json"
   fi
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # #682: restore imag's program scene to whatever it was BEFORE [4a/8] routed it to the

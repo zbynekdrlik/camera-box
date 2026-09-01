@@ -155,17 +155,26 @@ fn decide_holds_a_drifting_band() {
     assert!(out.contains("END"), "{out}");
 }
 
+// #1265 finding 1: persist COPIES the calibrate-written success file (full schema, incl.
+// applied_latency_ms) to the dev1 reference -- it does NOT re-write a {source,offset_ms,ts} schema.
+const OUTDIR_SUCCESS_FILE: &str =
+    r#"{"source": "NDI 2ME PGM", "offset_ms": -283.0, "applied_latency_ms": 976, "ts": 1.0}"#;
+
 #[test]
-fn persist_then_read_round_trips_and_feeds_the_jump_condition() {
+fn persist_copies_the_full_schema_and_feeds_the_jump_condition() {
     let d = tempfile::tempdir().unwrap();
     let last = d.path().join("last.json").to_string_lossy().into_owned();
+    let src = write(d.path(), "av-sync-last-run.json", OUTDIR_SUCCESS_FILE);
     let v = write(d.path(), "verdict.json", STABLE_VERDICT);
-    // 1) persist an applied offset; 2) read it back; 3) a proposed value 200ms away now HOLDs (jump).
+    // 1) persist by COPYING the OUTDIR success file; 2) read offset_ms back; 3) applied_latency_ms is
+    // preserved (finding 1 -- the live data contract latency_pins_snapshot.py/rig-mode.sh/drift-guard
+    // read); 4) a proposed value 200ms away now HOLDs (the jump/anti-oscillation condition).
     let (out, ok) = run_under_set_e(
         d.path(),
         &format!(
-            "av_sync_persist_applied_offset '-283.0' '{last}'\n\
+            "av_sync_persist_applied_offset '{src}' '{last}'\n\
              echo \"lb=$(av_sync_read_last_applied_offset '{last}')\"\n\
+             echo \"al=$(python3 -c \"import json;print(json.load(open('{last}')).get('applied_latency_ms'))\")\"\n\
              r=\"$(av_sync_apply_guard_decide '{v}' 'HEALTHY' '-83.0' \"$GUARD\" '{last}')\"\n\
              echo \"hold=[$r]\"\necho END"
         ),
@@ -176,30 +185,69 @@ fn persist_then_read_round_trips_and_feeds_the_jump_condition() {
         "persisted offset must read back: {out}"
     );
     assert!(
-        out.to_lowercase().contains("jump") || out.to_lowercase().contains("last applied"),
-        "a 200ms jump from the persisted last-applied must HOLD: {out}"
+        out.contains("al=976"),
+        "finding 1: the full schema (applied_latency_ms) must be preserved by the copy: {out}"
+    );
+    assert!(
+        out.to_lowercase().contains("swung") || out.to_lowercase().contains("last applied"),
+        "a 200ms swing from the persisted last-applied must HOLD: {out}"
     );
     assert!(out.contains("END"), "{out}");
 }
 
 #[test]
-fn persist_empty_offset_is_a_noop_never_aborts() {
+fn persist_missing_or_empty_src_is_a_noop_never_aborts() {
     let d = tempfile::tempdir().unwrap();
     let last = d.path().join("last.json").to_string_lossy().into_owned();
+    let empty = write(d.path(), "empty.json", "");
     let (out, ok) = run_under_set_e(
         d.path(),
         &format!(
-            "av_sync_persist_applied_offset '' '{last}'\n\
+            "av_sync_persist_applied_offset '/nonexistent/src.json' '{last}'\n\
+             av_sync_persist_applied_offset '{empty}' '{last}'\n\
+             av_sync_persist_applied_offset '' '{last}'\n\
              echo \"exists=$([ -f '{last}' ] && echo yes || echo no)\"\necho END"
         ),
     );
     assert!(
         ok,
-        "empty-offset persist must not abort under set -e: {out}"
+        "missing/empty-src persist must not abort under set -e: {out}"
     );
     assert!(
         out.contains("exists=no"),
-        "an empty offset must NOT write a file: {out}"
+        "a missing/empty src must NOT write the dest file: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn persist_hold_reason_writes_a_durable_file_finding6a() {
+    let d = tempfile::tempdir().unwrap();
+    let hold = d
+        .path()
+        .join("hold-last.txt")
+        .to_string_lossy()
+        .into_owned();
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        &format!(
+            "av_sync_persist_hold_reason 'run residual median -111.5ms exceeds ...' '{hold}'\n\
+             echo \"hold_has=$(grep -c residual '{hold}' 2>/dev/null || echo 0)\"\n\
+             av_sync_persist_hold_reason '' '{hold}2'\n\
+             echo \"empty_wrote=$([ -f '{hold}2' ] && echo yes || echo no)\"\necho END"
+        ),
+    );
+    assert!(
+        ok,
+        "durable hold-reason write must not abort under set -e: {out}"
+    );
+    assert!(
+        out.contains("hold_has=1"),
+        "the hold reason must be written durably: {out}"
+    );
+    assert!(
+        out.contains("empty_wrote=no"),
+        "an empty reason must NOT write a file: {out}"
     );
     assert!(out.contains("END"), "{out}");
 }

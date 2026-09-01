@@ -13,19 +13,35 @@ independent, fail-safe signals, so the controller composes with a live restart i
 flapping timeline. It never runs OBS/ssh/network — the sourced `scripts/lib/av-sync-apply-guard.sh`
 does the I/O gather (verdict residual, last-applied offset, the stream band verdict) and calls this.
 
+IMPORTANT — the residual anomaly, NOT the ts_lag flap, is the PRIMARY gate (supervisor finding
+2026-09-01): the mbc ts_lag flap is a real OBS audio-timeline HEALTH issue but does NOT by itself
+explain the A/V residuals — a run AFTER the stream-OBS restart, with a FLAT ~85 ms ts_lag band, still
+measured residual -111.5 ms (a real upstream-audio-latency STEP, oscillating, confirmed by the
+av-sync dock). So condition 2 gates on the RESIDUAL and HOLDs REGARDLESS of the band verdict
+(including a HEALTHY/flat band) — chasing that oscillating residual with the pin is exactly the walk
+to prevent, and scoping condition 2 to a non-healthy band would let this real case straight through.
+
 The three HOLD conditions (checked in order; the FIRST match wins the reason):
   1. band DRIFTING   — the run's stream reference-source (mbc) ts_lag band verdict (task 2,
-                       gathered from :8899 at [8/8g]) is DRIFTING: the A/V measurement is corrupted
-                       by the flapping audio timeline. The ROOT-CAUSE signal.
-  2. residual ceiling — |residual_median_ms| exceeds a sanity ceiling (default 60 ms). The green
-                       series measured within ±33 ms; the two failed runs measured -77/-126 ms, so
-                       this cleanly separates "a real small drift to correct" from "an anomalous
-                       off-baseline measurement to hold", with NO history needed. Works even before
-                       the box band facet is deployed (band verdict UNKNOWN).
+                       gathered from :8899 at [8/8g]) is DRIFTING: the audio timeline is UNSTABLE, so
+                       defer tuning until it settles. A supplementary/conservative hold — NOT a claim
+                       that the flap explains the residual (it does not; see above). Absent/UNKNOWN/
+                       HEALTHY band never holds via this condition on its own.
+  2. residual ceiling — |residual_median_ms| exceeds a sanity ceiling (default 60 ms), checked
+                       REGARDLESS of the band verdict. The green series measured within ±33 ms; the
+                       failed runs measured -77/-111/-126 ms, so this cleanly separates "a real small
+                       drift to correct" from "an anomalous/oscillating off-baseline measurement to
+                       hold", with NO history needed. This is the PRIMARY gate and the one that
+                       catches the real upstream-step case (flat band, bad residual). Works before
+                       the box band facet is deployed (band UNKNOWN). Its HOLD is surfaced durably by
+                       the caller (a persisted hold-reason file) so a genuine sustained large offset
+                       is operator-visible and not silently un-corrected forever.
   3. jump vs last     — |proposed_offset_ms - last_applied_offset_ms| exceeds a jump threshold
-                       (default 90 ms) vs the last applied value (~/.camera-box/av-sync-last.json):
-                       the shared-path offset shifted a lot since the last calibration, not a steady
-                       drift. Dormant until the reference file has been populated (last-applied None).
+                       (default 90 ms) vs the last applied value (~/.camera-box/av-sync-last.json).
+                       An anti-oscillation / step guard: the combined offset SWUNG far from what was
+                       last applied (a ping-pong overshoot or an abrupt step), not a steady drift the
+                       controller should track incrementally. Supplementary to condition 2; dormant
+                       until the reference file has been populated (last-applied None).
 
 `residual_spread_ms` is accepted + surfaced (the combiner already hard-refuses a >100 ms spread, so
 it is not re-gated here — it is included in the HOLD reason context only). Every numeric input is
@@ -45,8 +61,8 @@ import sys
 # 60 ms sits comfortably above the green band and below both failures, so it separates a real small
 # drift (correct) from an anomalous off-baseline measurement (hold) with no history.
 DEFAULT_RESIDUAL_CEILING_MS = 60.0
-# A proposed correction this far from the last-applied value is a SHIFT, not a steady drift the
-# controller should track. 90 ms mirrors the ±90 A/V gate tolerance.
+# A combined offset this far from the last-applied value is an abrupt step/oscillation, not a steady
+# drift the controller should track incrementally. 90 ms mirrors the ±90 A/V gate tolerance.
 DEFAULT_JUMP_THRESHOLD_MS = 90.0
 
 
@@ -77,27 +93,29 @@ def hold_reason(residual_median_ms, residual_spread_ms, band_verdict,
     bv = (band_verdict or "").strip().upper()
     spread_ctx = f", spread {spread:.1f}ms" if spread is not None else ""
 
-    # (1) the run's audio timeline was DRIFTING -> the A/V measurement is corrupted.
+    # (1) the run's audio timeline was DRIFTING -> UNSTABLE, defer tuning (supplementary/conservative;
+    # NOT a claim the flap explains the residual -- see module doc / the supervisor finding).
     if bv == "DRIFTING":
         return (
-            "stream mbc ts_lag band DRIFTING during the run -- the A/V measurement is corrupted by "
-            f"the flapping audio timeline (issue 1265){spread_ctx}; not walking the prod pin from it"
+            "stream mbc ts_lag band DRIFTING during the run -- audio timeline UNSTABLE, deferring the "
+            f"tune until it settles (issue 1265){spread_ctx}; not walking the prod pin during a flap"
         )
 
-    # (2) the residual is beyond the sanity ceiling (jumped vs the green series).
+    # (2) the residual is beyond the sanity ceiling -- the PRIMARY gate, checked REGARDLESS of the
+    # band verdict (a flat/HEALTHY band still measured -111.5ms -- a real oscillating upstream step).
     if resid is not None and abs(resid) > residual_ceiling_ms:
         return (
             f"run residual median {resid:.1f}ms exceeds the +/-{residual_ceiling_ms:.0f}ms sanity "
-            f"band (green series was within +/-33ms){spread_ctx} -- likely an unstable-timeline "
-            "measurement, not a real drift to chase"
+            f"band (green series was within +/-33ms){spread_ctx} -- an anomalous/oscillating "
+            "off-baseline measurement, not a steady drift to chase (holds regardless of band)"
         )
 
-    # (3) the proposed correction jumps far from the last-applied value.
+    # (3) the combined offset SWUNG far from the last-applied value -- an anti-oscillation/step guard.
     if last is not None and proposed is not None and abs(proposed - last) > jump_threshold_ms:
         return (
-            f"proposed correction {proposed:.1f}ms jumps {abs(proposed - last):.1f}ms from the last "
-            f"applied {last:.1f}ms (> {jump_threshold_ms:.0f}ms) -- the shared-path offset shifted, "
-            "not a steady drift"
+            f"proposed correction {proposed:.1f}ms swung {abs(proposed - last):.1f}ms from the last "
+            f"applied {last:.1f}ms (> {jump_threshold_ms:.0f}ms) -- an abrupt step/oscillation, "
+            "not a steady drift to track incrementally"
         )
 
     return ""

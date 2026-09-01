@@ -150,7 +150,10 @@ def analyze(bundle_json_text, box_reachable, threshold_ms=DEFAULT_THRESHOLD_MS,
 # caught. All thresholds env-overridable at the shell/CLI; ships DISABLED like every sibling.
 BAND_DEV_THRESHOLD_MS = 40   # high mode this far ABOVE the flat-start baseline = a real band shift
 BAND_DUTY_MIN_PCT = 10       # ... AND at least this % of the recent window up there (not one spike)
-BAND_MIN_SAMPLES = 8         # fewer readings than this -> UNKNOWN (too few to judge a band)
+BAND_MIN_SAMPLES = 10        # fewer readings than this -> UNKNOWN. 10 (not 8) so the p90 nearest-rank
+                             # index (ceil(0.9n)-1) EXCLUDES a lone top spike (at n<=9 p90 IS the
+                             # max -> a single startup spike would read DRIFTING); at n>=10 one spike
+                             # is p90-excluded AND <=10% duty -> HEALTHY (issue 1265 review finding 2)
 
 
 def _int_or_none(raw):
@@ -201,10 +204,12 @@ def classify_band(base_ms, high_ms, low_ms, duty_pct, n, box_reachable,
         duty_pct >= duty_min_pct    -> DRIFTING (the high mode sits `deviation` above the baseline
                                                  AND a meaningful fraction of the recent window is up
                                                  there — a genuine bimodal/creeping flap, not a lone
-                                                 spike). Baseline = the flat-start `base_ms` when
-                                                 present, else the tail low `low_ms` (so a
-                                                 within-window bimodal flap is caught even without a
-                                                 startup region).
+                                                 spike). Baseline = min(base_ms, low_ms) — the LOWER
+                                                 of the flat-start median and the current tail low
+                                                 (falling back to low when base is absent), so a
+                                                 within-window bimodal flap is caught AND a head that
+                                                 is itself elevated (a restart into the bad state)
+                                                 cannot mask the drift (issue 1265 review finding 3).
       otherwise                     -> HEALTHY
     """
     if box_reachable != 1:
@@ -213,7 +218,7 @@ def classify_band(base_ms, high_ms, low_ms, duty_pct, n, box_reachable,
         return "UNKNOWN"
     if n < min_samples:
         return "UNKNOWN"
-    baseline = base_ms if base_ms is not None else low_ms
+    baseline = min(base_ms, low_ms) if base_ms is not None else low_ms
     deviation = high_ms - baseline
     duty = duty_pct if duty_pct is not None else 0
     if deviation > dev_threshold_ms and duty >= duty_min_pct:

@@ -29,6 +29,7 @@ change later.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import sys
@@ -309,9 +310,10 @@ def _median_int(values):
 
 def _percentile_nearest_rank(sorted_vals, pct):
     """Nearest-rank percentile of a NON-EMPTY sorted list; `pct` in [0,100]. index =
-    ceil(pct/100 * n) - 1, clamped to [0, n-1]. No interpolation (the band only needs a robust
-    high/low representative that ignores a lone spike, not an exact quantile)."""
-    import math
+    ceil(pct/100 * n) - 1, clamped to [0, n-1]. No interpolation. NOTE: for a small n the p90 index
+    IS the max (n<=9 -> ceil(0.9n)-1 == n-1), so this only ignores a lone top spike once the window
+    has enough samples — the dev1 decision's BAND_MIN_SAMPLES (10) is what guarantees p90!=max, not
+    this function alone (issue 1265 review finding 2)."""
     n = len(sorted_vals)
     k = max(0, min(n - 1, int(math.ceil(pct / 100.0 * n)) - 1))
     return sorted_vals[k]
@@ -342,18 +344,25 @@ def audio_ref_band_from_log(text, ref_src=AUDIO_REF_BAND_DEFAULT_SRC,
       issue's wording). `""` when there is no separator (a small whole log with no distinct startup
       region) or the head carried no `ref_src` reading — the dev1 decision then falls back to the
       tail low as its deviation baseline, so a within-window bimodal flap is still caught.
-    * `high_ms`/`low_ms` — p90/p10 (nearest-rank, so a lone spike never widens the band) of the
-      FRESH tail-window readings (the last `window_cap`), the current high/low modes.
-    * `duty_pct` — % of the tail window sitting above `baseline + duty_margin_ms` (baseline = base
-      if present else the tail low), i.e. how much of the recent window is in the high mode. This is
-      what separates a genuine bimodal flap (duty ~50%) from a single transient spike (duty ~few %).
+    * `high_ms`/`low_ms` — p90/p10 (nearest-rank) of the FRESH tail-window readings (the last
+      `window_cap`), the current high/low modes. p90 ignores a lone top spike only once the window
+      has >= ~10 samples; the dev1 decision's BAND_MIN_SAMPLES guards the small-n case (finding 2).
+    * `duty_pct` — % of the tail window sitting above `baseline + duty_margin_ms`, where
+      `baseline = min(base, low)` (the flat-start median AND the current low mode, whichever is
+      LOWER). Using the MIN matters when the head is ALSO in the high mode (a restart straight into
+      the bad state): a `base` that is itself elevated would mask the drift, so the tail low keeps
+      the duty honest (issue 1265 review finding 3). This separates a genuine bimodal flap (duty
+      ~50%) from a single transient spike (duty ~few %).
     * `n` — the fresh tail-window sample count (too few -> the dev1 decision reads UNKNOWN, never a
       false page).
 
     Reads the SAME #1222 head+separator+tail bounded text in ONE pass — no second log read. When
     the separator is present the region BEFORE it is the head (flat start) and the region AFTER it
-    is the tail (current window); a small whole-file log (no separator) has no distinct head, so its
-    whole content is the window and `base_ms` is empty."""
+    is the tail (current window); the window is the TAIL only — if the tail carries no `ref_src`
+    reading (mbc telemetry stopped hours ago while the log advanced, the #1231 STALE case) the band
+    is all-empty (UNKNOWN downstream), never the hours-old head reported as the current window. A
+    small whole-file log (no separator) has no distinct head, so its whole content is the tail and
+    `base_ms` is empty."""
     t = text or ""
     if LOG_BOUNDED_READ_SEPARATOR in t:
         head_text, tail_text = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)
@@ -361,7 +370,7 @@ def audio_ref_band_from_log(text, ref_src=AUDIO_REF_BAND_DEFAULT_SRC,
         head_text, tail_text = "", t
     head_vals = _ref_readings(head_text, ref_src)
     tail_vals = _ref_readings(tail_text, ref_src)
-    window = (tail_vals or head_vals)[-window_cap:]
+    window = tail_vals[-window_cap:]
     if not window:
         return ("", "", "", "", "", "")
     sw = sorted(window)
@@ -369,7 +378,9 @@ def audio_ref_band_from_log(text, ref_src=AUDIO_REF_BAND_DEFAULT_SRC,
     high = _percentile_nearest_rank(sw, 90)
     low = _percentile_nearest_rank(sw, 10)
     base = _median_int(head_vals) if head_vals else None
-    baseline = base if base is not None else low
+    # baseline = the LOWER of the flat-start median and the current tail low (finding 3): a head
+    # that is itself elevated must never mask a drifting tail.
+    baseline = min(base, low) if base is not None else low
     thresh = baseline + duty_margin_ms
     high_count = sum(1 for v in window if v > thresh)
     duty_pct = int(round(100.0 * high_count / n))

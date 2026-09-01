@@ -70,6 +70,24 @@ def test_classify_band_too_few_samples_is_unknown():
     assert ald.classify_band(107, 181, 107, 50, 5, box_reachable=1, min_samples=8) == "UNKNOWN"
 
 
+def test_classify_band_default_min_samples_is_10_finding2():
+    # #1265 review finding 2: at n<=9 the p90 nearest-rank index IS the max, so a lone startup spike
+    # would read DRIFTING. The default min_samples=10 makes n=8/9 UNKNOWN (not judged) -- a single
+    # spike among 8 (duty 12% > 10%, high=the spike) must NOT page.
+    assert ald.classify_band(107, 300, 107, 12, 8, box_reachable=1) == "UNKNOWN"
+    assert ald.classify_band(107, 300, 107, 11, 9, box_reachable=1) == "UNKNOWN"
+    # at n>=10 a genuine bimodal flap is still DRIFTING (the default now bites at 10, not 8).
+    assert ald.classify_band(107, 181, 107, 50, 10, box_reachable=1) == "DRIFTING"
+
+
+def test_classify_band_head_elevated_uses_min_baseline_finding3():
+    # #1265 review finding 3: a head that is ITSELF in the high mode (a restart straight into the bad
+    # state) must not mask the drift. base=180 (elevated head median) but low=107 (tail low mode) ->
+    # baseline=min(180,107)=107 -> deviation=181-107=74>40 -> DRIFTING. The OLD base-only rule would
+    # have given deviation=181-180=1 -> a false HEALTHY.
+    assert ald.classify_band(180, 181, 107, 50, 14, box_reachable=1) == "DRIFTING"
+
+
 def test_classify_band_bimodal_flap_is_drifting():
     # high 181 vs baseline 107 = +74 > 40 dev threshold, duty 50% >= 10% -> DRIFTING.
     assert ald.classify_band(107, 181, 107, 50, 14, box_reachable=1) == "DRIFTING"

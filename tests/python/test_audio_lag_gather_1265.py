@@ -84,6 +84,31 @@ def test_small_whole_log_has_no_head_baseline_but_still_windows():
 
 
 # ------------------------------------------------------------------ absent / negatives / empty
+def test_stale_head_only_no_tail_readings_is_all_empty_finding4():
+    # #1265 review finding 4: separator present, HEAD has mbc readings, TAIL has NONE (mbc telemetry
+    # stopped hours ago while the log advanced -- the #1231 STALE case). The window is the TAIL only,
+    # so this is all-empty (UNKNOWN downstream) -- never the hours-old head reported as the current
+    # band. (Pre-fix, `tail_vals or head_vals` reported the stale head with n up to 120.)
+    head = "\n".join(f"05:{m:02d}:00.000: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=193 pending=0 timing_adjust_ms=0" for m in range(16, 24))
+    tail = "21:00:00.000: [obs] render tick -- the log advances, mbc telemetry stopped\n"
+    text = head + "\n" + bsg.LOG_BOUNDED_READ_SEPARATOR + tail
+    assert bsg.audio_ref_band_from_log(text, ref_src="mbc") == ("", "", "", "", "", "")
+
+
+def test_head_elevated_duty_uses_tail_low_finding3():
+    # #1265 review finding 3: head all 180 (elevated startup), tail bimodal 107<->180. base=180, but
+    # duty is computed against baseline=min(base=180, tail_low=107)=107, so the 180s in the tail count
+    # as high mode -> duty ~50, NOT 0. (Pre-fix, baseline=base=180 -> thresh 200 -> nothing above ->
+    # duty 0 -> a false HEALTHY masking the drift.)
+    head = "\n".join(f"05:{m:02d}:00.000: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=193 pending=0 timing_adjust_ms=0" for m in range(16, 24))
+    tail = "\n".join(f"21:{i:02d}:00.000: audio-telemetry #800 'mbc': ts_lag_ms={107 if i % 2 else 180} buffered_ms=193 pending=0 timing_adjust_ms=0" for i in range(14))
+    text = head + "\n" + bsg.LOG_BOUNDED_READ_SEPARATOR + tail + "\n"
+    _src, base, high, low, duty, n = bsg.audio_ref_band_from_log(text, ref_src="mbc")
+    assert base == "180"          # head median is elevated...
+    assert low == "107"          # ...but the tail low mode is 107
+    assert int(duty) >= 30       # duty measured vs min(180,107)=107, so the tail highs DO count
+
+
 def test_absent_ref_source_is_all_empty():
     text = "21:00:00.000: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=133 buffered_ms=0 pending=0 timing_adjust_ms=0\n"
     assert bsg.audio_ref_band_from_log(text, ref_src="mbc") == ("", "", "", "", "", "")

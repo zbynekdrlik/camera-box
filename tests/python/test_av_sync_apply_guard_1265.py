@@ -61,6 +61,18 @@ def test_residual_beyond_ceiling_holds_both_incident_runs():
         assert "residual" in r.lower()
 
 
+def test_residual_ceiling_holds_even_with_a_healthy_band_finding6():
+    # #1265 supervisor finding: the mbc ts_lag flap does NOT explain the residual -- a run AFTER the
+    # stream-OBS restart, with a FLAT (HEALTHY) band, still measured residual -111.5ms (a real
+    # oscillating upstream-audio-latency STEP). Condition 2 must HOLD REGARDLESS of the band, or that
+    # real case walks the pin. Scoping condition 2 to a non-healthy band (a rejected review idea)
+    # would let this straight through.
+    r = g.hold_reason(residual_median_ms=-111.5, residual_spread_ms=27.0, band_verdict="HEALTHY",
+                      last_applied_offset_ms=None, proposed_offset_ms=-283.0)
+    assert r != "", "a bad residual with a HEALTHY/flat band must still HOLD"
+    assert "residual" in r.lower()
+
+
 def test_green_series_residuals_within_ceiling_proceed():
     for resid in (-8.6, 6.5, 32.9, -18.6, 16.9, -20.0):
         assert g.hold_reason(residual_median_ms=resid, residual_spread_ms=30.0, band_verdict="HEALTHY",
