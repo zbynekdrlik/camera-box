@@ -240,6 +240,16 @@ class TestFloorAwarePins:
         plan = qa.floor_aware_pins(self.FLOORS, self.DELTAS)
         assert plan["NDI cam1"] == 3   # oldest present (delta 0) -> keeps its floor pin, adds no hold
 
+    def test_base_delta_is_subtracted_not_the_raw_delta(self):
+        # #1253 hardening: the deltas need NOT be min-0-anchored. base = min(deltas); the oldest camera
+        # (min delta) adds no hold, every other gets current + (d - base). A raw `hold = d` (no base
+        # subtraction) would mis-anchor -- this fixture (min delta 10) distinguishes the two.
+        floors = {"NDI cam1": 60.0, "NDI cam2": 60.0}
+        deltas = {"NDI cam1": 10.0, "NDI cam2": 40.0}   # base 10 -> cam1 hold 0, cam2 hold 30
+        plan = qa.floor_aware_pins(floors, deltas, current_pins={"NDI cam1": 3, "NDI cam2": 3})
+        assert plan["NDI cam1"] == 3      # oldest (min delta) -> keeps floor, adds no hold (NOT 3+10)
+        assert plan["NDI cam2"] == 33     # 3 + (40 - 10) = 33  (NOT the raw 3 + 40 = 43)
+
     def test_additive_plan_equals_floor3_on_the_reset_path(self):
         # issue 1253: under the ADDITIVE FIFO the floor-aware plan (current_pin + delta, current at the
         # floor after the two-phase reset) is IDENTICALLY floor3_pins (floor + delta). The pre-1253
@@ -552,6 +562,16 @@ class TestFloorAwarePartition:
                                                  {"NDI cam1": 0.0, "NDI cam3": 50.0}, floor_ms=3)
         assert [s for s, *_ in over] == ["NDI cam3"]
         assert plan["NDI cam3"] == 3
+
+    def test_over_budget_clamp_keeps_an_elevated_current_pin(self):
+        # #1253: an over-budget younger camera adds NO hold and KEEPS its current pin (never torn to
+        # the floor) -- a non-reset call with an elevated pin. On the reset path current == floor,
+        # so this reduces to the clamp-to-floor case above.
+        plan, over, _ = qa.floor_aware_partition(
+            {"NDI cam1": 129.0, "NDI cam3": 79.0}, {"NDI cam1": 0.0, "NDI cam3": 50.0},
+            floor_ms=3, current_pins={"NDI cam1": 3, "NDI cam3": 40})
+        assert [s for s, *_ in over] == ["NDI cam3"]
+        assert plan["NDI cam3"] == 40   # kept its elevated current pin, added no hold
 
     def test_floor_aware_pins_still_raises_over_budget_after_the_refactor(self):
         # the HARD-FAIL direction is byte-unchanged: floor_aware_pins delegates to the partition then
