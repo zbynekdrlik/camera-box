@@ -146,7 +146,9 @@ class TestRevertedBaseline:
     def test_strih_pins_are_the_reverted_shallow_set_not_the_rejected_deep_set(self):
         strih = self._load()["strih"]
         assert strih["NDI cam1"] == 3
-        assert strih["NDI cam2"] == 6
+        # issue 1168 lever 1: cam2 (the projection probe, excluded from the align set) re-tuned 6 -> 3;
+        # it was the ONLY non-floor pin. The reference stays SHALLOW, never the rejected deep set.
+        assert strih["NDI cam2"] == 3
         assert strih["NDI cam3"] == 20
         assert (strih["NDI cam1"], strih["NDI cam2"], strih["NDI cam3"]) != (90, 160, 184)
 
@@ -163,7 +165,7 @@ class TestRevertedBaseline:
     def test_extract_on_the_real_baseline(self):
         base = self._load()
         assert alp.explicit_pins_for_box("strih", base["strih"]) == {
-            "NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}
+            "NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 20}   # issue 1168 lever 1: cam2 6 -> 3
         with pytest.raises(SystemExit):
             alp.explicit_pins_for_box("imag", base["imag"])
 
