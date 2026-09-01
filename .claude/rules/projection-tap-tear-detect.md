@@ -198,3 +198,43 @@ to the promotion preconditions so a multi-tile window can never be promoted.
   and KEEP the `crate::` paths verbatim — a standalone rustc file IS its own crate root, so
   `crate::colour_scale` resolves; a naive `crate::` → `super::` rewrite breaks inside the nested
   `mod tests` (its `super` is the module, not the root — first attempt failed exactly there).
+
+## The aux tick pair's bottom row is GEOMETRICALLY SATURATED — a 210px aux mark cannot be relocated clear of every burn (issue 1266)
+
+Issue 1266 asked to relocate the occluded LEFT aux (`[466,676)`, under imag's burn `[382,684)` on
+the CAM2 leg) to a clear band at the SAME 210px. **It is geometrically infeasible — do not try it,
+and do not shrink the mark as a stopgap.** The evidence:
+
+- The aux y-band is FORCED to `[724,960)` (below the primary band bottom 724, above the sweep band
+  top 960) — it holds exactly ONE 210px mark vertically, no stacking.
+- The bottom row carries FOUR burns on the CAM2 leg (empirically confirmed, run 1700989544:
+  911002/911003/cam-capture/911004 each in 1770/1770 frames): strih `[40,342)`, imag `[382,684)`,
+  cam-capture `[800,1120)`, stream `[1578,1880)`. Plus the fixed RIGHT aux `[1224,1434)`. Free
+  x-gaps: `40 / 116([684,800)) / 104([1120,1224)) / 144([1434,1578)) / 40`. **Widest clear gap =
+  144px; NO ≥210px slot**, and imag's own 302px burn has no alternative slot either — the row is
+  saturated (4 burns 302+302+320+302 = 1226px + 2 aux 420px + quiet zones > the clear budget). The
+  "documented exception" (LEFT overlaps imag) is a SYMPTOM of that saturation, not a free choice.
+- Decodability physics: the aux payload `P{run}.{tick}.0.{crc}` is 26 alphanumeric chars → EC-H
+  version-3 = 37 modules incl. the quiet zone. The RIGHT at 210px = **5.68 px/module** (decodes
+  0.967–0.999 on CAM2, already near the edge through imag-HDMI → grabber → 2×NDI → 4K upscale → mp4,
+  macroblocks ~16px). Any sub-210px mark (≤144px = ≤3.89 px/module) is UNVERIFIED and likely
+  marginal/near-zero — never report it as "expected to decode".
+
+**Two further reasons relocation is the WRONG call (they bit issue 1266):**
+
+1. The painted pattern is ONE pattern every leg films. The LEFT at 210px decodes 0.99 on the
+   SPLITTER legs (cam1/cam3…, which carry no imag burn). Shrinking it everywhere REGRESSES that
+   working control for a maybe-mark on one leg.
+2. Both aux marks share the SAME y-band `[745,955)`, so a horizontal scanout tear cuts every mark at
+   the same rows — correlated, **near-zero redundancy against the dominant failure (a tear)**. A
+   second same-row mark helps only a LOCALIZED non-tear loss of the RIGHT, which is rare and the
+   count-floor gate absorbs: the 8/1770 zero-aux CAM2 frames are 7 healthy span-1 primary (NOT
+   tears) + 1 whole-frame blur.
+
+**Consequence:** the single-mark gate is sufficient (RIGHT 0.995, `TEAR_FRAME_COUNT_FLOOR` 6). The
+real fix is DE-CONFLICTING the painted aux band and the OBS burn layout — cross-cutting
+(`vendor/distroav/src/burn-geom.hpp` `Corner` assignment + `src/aux_tick.rs` + decoder ROIs +
+`tests/fixtures/tear-781/` + the `scripts/qr_align_pins.py`/`mv_skew_snapshot.py` mirrors), tracked
+as issue 1270. If a painted best-effort is ever demanded, it must be ADDITIVE (a THIRD mark, LEFT
+and RIGHT byte-identical/untouched so the splitter control + committed fixtures are safe) with a
+written post-deploy kill criterion — NEVER a relocation.
