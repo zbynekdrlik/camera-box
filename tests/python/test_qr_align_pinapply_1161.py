@@ -128,16 +128,20 @@ class TestAbortReason:
 # PRECISE genlock-FIFO attribution (not the generic "did NOT hold"), and never widens tolerance.
 # --------------------------------------------------------------------------- #
 def _align_stuck_after_apply(monkeypatch):
-    """Phase1 converges stable-but-not-aligned at spread 2 (the aligner re-derives a floor-3 plan
+    """Phase1 converges stable-but-not-aligned at spread 4 (the aligner re-derives a floor-3 plan
     that RAISES cam2/3/4's pins); the pin change never moves the frame, so phase2 (verify) STAYS at
-    spread 2. This models the LIVE #1161 dichotomy end-to-end: the config pin MOVES (the post-apply
-    read-back echoes the applied plan) but the presented frame does NOT (verify still spread 2). So
+    spread 4. This models the LIVE #1161 dichotomy end-to-end: the config pin MOVES (the post-apply
+    read-back echoes the applied plan) but the presented frame does NOT (verify still spread 4). So
     the read_current_pins stub returns floor-3 on the PRE-apply read and the applied plan on every
     later read-back, and apply_pins echoes + records the plan (the real writer is read-back-verified,
-    so a live post-apply read returns exactly what was written)."""
+    so a live post-apply read returns exactly what was written).
+
+    #1252: the stable spread is 4 ids (~33 ms = 2 source frames), a CLEARLY-real misalignment, so the
+    plan runs and the hold-inert path is exercised. A 2-id (~16.7 ms = one source frame) spread is
+    now the already-aligned lock-phase quantum (within_aligned_quantum) and never reaches the plan."""
     import apply_latency_pins
     import obs_phase2
-    monkeypatch.setattr(qa, "barrier_screenshot", _ScriptedBarrier([10, 8, 5, 3, 2] + [2] * 20))
+    monkeypatch.setattr(qa, "barrier_screenshot", _ScriptedBarrier([10, 8, 6, 4] + [4] * 20))
 
     applied = {}                       # captures the plan apply_pins wrote (the live rig's read-back)
 
@@ -433,10 +437,13 @@ class TestAlignSecondRound:
                         max_measure_rounds=60, settle_s=0, jitter_json=jj)
 
     def test_pinned_state_does_not_spuriously_fail_sanity(self, monkeypatch):
-        # 🔴2: from a pinned steady state, a legit drift (true present spread 19 <= 66) must NOT hard
-        # FAIL as "degraded grabber" on the pin-FOLDED metric (which over-reads ~82). With sanity on
-        # PURE deltas, the run re-aligns (present ages {85,66,66,66} -> plan brings all to 85).
-        floors = {"NDI cam1": 85.0, "NDI cam2": 66.0, "NDI cam3": 66.0, "NDI cam4": 66.0}
+        # 🔴2: from a pinned steady state, a legit drift (true present spread 27 <= 66) must NOT hard
+        # FAIL as "degraded grabber" on the pin-FOLDED metric (which over-reads past the 66 ms bound).
+        # With sanity on PURE deltas, the run re-aligns (present ages {93,66,66,66} -> plan brings all
+        # to 93). #1252: the spread is 27 ms (> the 25 ms lock-phase quantum, so the plan runs) yet the
+        # target 66+27 = 93 stays <= the 94 ms ceiling (so it aligns, never budget-bound); a
+        # <= one-source-frame spread would now be already-aligned (quantum gate).
+        floors = {"NDI cam1": 93.0, "NDI cam2": 66.0, "NDI cam3": 66.0, "NDI cam4": 66.0}
         current = {"NDI cam1": 3, "NDI cam2": 66, "NDI cam3": 66, "NDI cam4": 66}
         result = self._align(monkeypatch, floors, current)
         assert result["status"] == "aligned"     # NOT AlignmentImpossible("degraded/underrun grabber")

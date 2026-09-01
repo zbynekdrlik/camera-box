@@ -306,3 +306,66 @@ Tier-0: `floor_aware_partition`, the budget-bound `align()` flow (FIFO-modelling
 byte-unchanged within-budget/unstable/hold-inert regression guards are pytest-verified with no rig
 (`tests/python/test_qr_align_pinapply_1161.py`); the live soft-release is the supervisor's E2E
 acceptance instrument.
+
+## A one-source-frame spread is the N=2 lock-phase QUANTUM, not a lag — never pin it (#1252)
+
+Run 1899055119 aborted `[4i/8align]`: the floor-aware plan raised +83 ms pins on cam1/4/5/6/7 and
+the re-measured residual DOUBLED (16.7 ms → ~84–100 ms), with `post_residual ≈ pre_residual +
+pin_delta` on every camera. The genlock-C frame-mover was EXONERATED (the setter cleared anchor +
+boundary; the ACQUIRE-bracket logged HOLD then ACQUIRE at oldest ≥ reserve) — it moved each frame
+exactly as far as the (wrong) pin told it to.
+
+**Root cause — the plan chased a phantom quantum.** ONE camera → splitter → every box sees the
+IDENTICAL image, so there is no real cross-cambox transport spread. The ~16.7 ms cross-camera
+"residual" is exactly ONE 60 fps source frame (1000/60 = 16.67 ms) = the N=2 (60-into-30) lock-phase
+quantum: which of the 2 source frames a 30 fps canvas frame latches shifts a camera's measured
+present age by an integer number of source frames, and over a short (N=2) audit the mean reads one
+frame off. cam3's arrival floor read 84 (= 67 + 16.7) from only `samples=2` — a PHANTOM "slowest"
+reference. The pin lever provably cannot close such a quantum: (1) it is presentation-phase jitter
+around zero — the frame_id tail shows the "slowest" camera alternately AHEAD and behind, so there is
+no consistent slowest to pin against; (2) the lever only ADDS delay (`post = pre + pin_delta`), so it
+can only GROW a sub-frame spread; (3) no pin can go below the 3 ms floor to pull a camera earlier;
+(4) the measurement itself carries the same ±one-source-frame quantum, so a "correction" could not be
+verified. So `within_aligned_quantum(deltas)` (spread < `DEFAULT_ALIGNED_QUANTUM_MS` = 1.5 source
+frames ≈ 25 ms) classifies the rig ALREADY ALIGNED at the floor-3 achievable limit and applies NO
+pins — a new PASS status `already-aligned-quantum`, gated on the PURE present-age spread AFTER the
+66 ms degraded-grabber sanity gate (a degraded card still FAILs; a real ≥ 2-source-frame spread is
+still planned). This does NOT widen the same-frame parity bar — it suppresses the ABOVE-FLOOR PIN
+PLAN when its own input is a sub-frame phantom, nothing else. `1.5` source frames is the
+discriminator: a spread that rounds to ≤ 1 source frame is the quantum, ≥ 2 is real.
+
+**Two quantities that DISAGREE at this precision — do not reconcile them.** The pin plan's "residual"
+comes from `round_deltas` (the `gen_ts_ns` + `t_send` compensated present-age delta, ms); the
+per-round table prints raw `frame_id`. At the sub-frame precision that matters here they are
+DIFFERENT quantities and DISAGREE (the run's frame_id tail spread was 2–4 painter ticks with cam3
+sometimes AHEAD, while the present-age residual was one source frame with cam3 the "slowest"). That
+disagreement is itself the tell that there is no real offset to resolve — only noise around zero. A
+future worker chasing a mismatch between the frame_id table and the ms residual is chasing the
+quantum; do not "fix" it by widening the parity bar or deepening pins.
+
+**Fixture note:** the issue-1161 / issue-1160 align tests that used a 2-id (~16.7 ms) or 19 ms spread
+to exercise the plan / hold-inert / re-derive paths were superseded — a sub-quantum spread is now
+already-aligned, so those fixtures were bumped to a CLEARLY-real spread (4 ids ≈ 33 ms = 2 source
+frames; the pinned-state sanity test to 27 ms, target 93 ≤ the 94 ms ceiling). When writing a NEW
+align test that must reach the plan, use a spread ≥ 2 source frames (≥ ~34 ms), never one source
+frame. Tier-0: `within_aligned_quantum` + an `align()` flow test reproducing the run from its REAL
+recorded deltas + arrival-floor audit (`tests/python/test_qr_align_quantum_1252.py`), pytest, no rig.
+
+**Aliasing blind band (16.7 ms, 25 ms) — the one honest cost.** The lock phase is PERSISTENT while
+locked (it does not average out over the tail), so a measured spread = the real spread ± < 1 source
+frame. A GENUINE 2-source-frame lag (33.3 ms) whose phase biases it DOWN can therefore alias into
+(16.7, 25) ms and be quantum-suppressed — a PASS with a real 2-frame offset left standing. This is
+inherent to ANY threshold between 1 and 2 frames (1.5 frames is the max-separation cut); the backstop
+is DOWNSTREAM — the recording-verdict SOURCE cross-camera spread gate still blocks a large real
+spread. So if a run PASSES `[4i/8align]` but later FAILs the recording SOURCE-spread gate, suspect a
+real 2-frame lag aliased low here — do NOT read the align PASS as "cameras are frame-perfect".
+
+**Latent, tracked as issue 1253 (needs an owner decision):** the measured `post ≈ pre + pin_delta`
+means the live FIFO adds the pin ADDITIVELY on top of the transport, which is NOT the
+`max(pin, transport)` model the issue-1161 above-floor formula (`pin_i = arrival_floor_i + delta_i`)
+assumes — so for a GENUINE ≥ 2-source-frame spread that formula would OVERSHOOT (a loud hold-inert
+abort, never a silent pass). That case has never been observed on this single-splitter rig (all
+cameras identical; a degraded card = 66 ms sanity FAIL) and the existing plan tests model the `max`
+FIFO, so it is out of this lane. Reverting the above-floor plan toward the additive `floor + hold`
+model risks regressing whatever inert case issue 1161 was added for — an architecture decision, filed
+as issue 1253, not this fix. (The `samples=2` phantom arrival floor is untreated there too.)
