@@ -276,17 +276,26 @@ and the controller walked the pin 926→976 toward noise. The #1265 STABILITY GU
 
 - **Pure decision `scripts/av_sync_apply_guard.py`** (`hold_reason(...)`, pytest Tier-0) HOLDs on ANY
   of three fail-safe signals: (1) the run's stream `mbc` ts_lag band is DRIFTING
-  (`.claude/rules/audio-lag-watchdog.md` band arm, gathered at `[8/8g]`), (2) `|residual_median_ms|`
-  beyond a ±60 ms sanity ceiling (green series ±33; the bad runs −77/−126 — no history needed), or
-  (3) `|proposed − last_applied| > 90 ms` vs `~/.camera-box/av-sync-last.json`.
+  (`.claude/rules/audio-lag-watchdog.md` band arm, gathered at `[8/8g]`) — a supplementary
+  "defer tuning while the timeline is unstable" hold, NOT the residual explanation; (2)
+  `|residual_median_ms|` beyond a ±60 ms sanity ceiling (green series ±33; the bad runs −77/−111/−126
+  — no history needed) — the PRIMARY gate, checked **REGARDLESS of the band** (supervisor finding: a
+  flat/HEALTHY band still measured −111.5, a real oscillating upstream-audio-latency step, so the
+  residual — not the flap — is what must gate; band-scoping condition 2 was rejected); or (3)
+  `|proposed − last_applied| > 90 ms` vs `~/.camera-box/av-sync-last.json` — an anti-oscillation/step
+  guard. The residual EARLY-WARNING (before the E2E runs) is the separate upstream-step detector,
+  issue 1267.
 - **Sourced lib `scripts/lib/av-sync-apply-guard.sh`** (#675) does the I/O gather (verdict residual,
   last-applied offset, the stream band verdict) + the persist, all `set -euo pipefail`-safe (it runs
   in the `cleanup()` EXIT trap, so every function ALWAYS returns 0 — the #1133 class).
 - **Composition (`recording-e2e.sh cleanup()`):** the guard block sits AFTER the #358/#691 stream
   teardown restore and BEFORE the byte-unchanged #856 apply `if` (`.claude/rules/recording-e2e-cleanup-composition.md`).
-  A HOLD clears `AV_SYNC_APPLY_OFFSET_MS` (skipping the apply) with a loud log + a persisted
-  `av-sync-apply-hold-<run>.txt`; a landed apply persists its offset to the dev1 reference for the
-  next run's jump baseline. When the guard says proceed, #856 is byte-identical.
+  A HOLD clears `AV_SYNC_APPLY_OFFSET_MS` (skipping the apply) with a loud log + a per-run
+  `av-sync-apply-hold-<run>.txt` AND a durable `~/.camera-box/av-sync-apply-hold-last.txt` reason
+  (the per-run copy is swept); a landed apply COPIES the calibrate full-schema success file to the
+  dev1 reference (preserving `applied_latency_ms` — a live data contract, not a rewritten
+  offset-only schema) for the next run's jump baseline. When the guard says proceed, #856 is
+  byte-identical.
 - **Tier-0:** `pytest tests/python/test_av_sync_apply_guard_1265.py` (the predicate) +
   `tests/harness_av_sync_apply_guard_1265.rs` / `tests/harness_recording_e2e_av_sync_guard_1265.rs`
   (the sourced lib + the wiring; CI-run, cross-checked locally by running the python one-liners
