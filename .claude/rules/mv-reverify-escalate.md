@@ -104,3 +104,39 @@ ONE place and returns success early, removing the false "camera leg is dead" FAI
   so the #758 "reattach once" body-count invariant holds — and a comment inside
   `preflight_mv_reverify` must NEVER contain the literal `strih_mv_scenes.py` (it would become a 2nd
   body occurrence and break that count).
+
+## ROOT FIX — kick the KNOWN-stale receiver PROACTIVELY, before the counted poll (#1114)
+
+The resolve-wait above still fires REACTIVELY: `preflight_mv_reverify`'s attempt-1 pixel check is
+spent FIRST against a receiver still holding the dead pre-bounce URL, so a bounced leg ALWAYS fails
+attempt-1 (logging the alarming "no pixel change right after its deploy" / "camera leg is dead"
+line) and only THEN kicks. `mv_reverify_proactive_reset` (a new sourced helper in
+`mv-reverify-escalate.sh`, called at BOTH deploy sites in `recording-e2e.sh` — the cam1 `[2/8]` site
+between `mv_reverify_painter_up_wait` and `mv_reverify_or_escalate`, and inside the ALL_CAMBOX
+`[2b/8]` reverify loop before its `mv_reverify_or_escalate`) fires the CLEAR-then-SET reattach +
+`mv_reverify_resolve_wait` PROACTIVELY, so the guarded reverify's attempt-1 then passes CLEANLY
+(no counted failure, no alarming log, no reliance on the reactive escalation path). Owner directive
+(issuecomment-5335833149): "sequence the burn deploy so the receiver is kicked BEFORE the
+pixel-change poll starts counting."
+
+- **DOMINANT kick is now proactive; the reactive path in `preflight_mv_reverify` stays the FALLBACK**
+  for a genuinely-dead leg whose proactive resolve-wait timed out. `preflight_mv_reverify` is BYTE-
+  IDENTICAL (the #758 body-count `strih_mv_scenes.py == 1` invariant is untouched — the helper's
+  reattach lives in the lib).
+- **SILENT pre-probe guards against a fast-recovery regression (#1114 review 🟡-1).** A LATER
+  ALL_CAMBOX-loop camera may have re-resolved on its OWN during the preceding cameras' serial
+  reverifies, so the helper first runs one UNCOUNTED `frozen-camera-gate.py` check: if the leg is
+  already delivering it returns WITHOUT kicking (never tears down a working receiver). The pre-probe
+  logs nothing as a failure and counts toward no attempt budget, so "kick before the counted poll"
+  still holds for a genuinely stale leg.
+- **WARN-only:** the helper ALWAYS returns 0 (deploy-context only via `!= "cleanup"`, ALL_CAMBOX-
+  gated, opt-out `PREFLIGHT_MV_REVERIFY_PROACTIVE=0`); every guard is a set-e-safe `|| return`/`case`/
+  `if`-condition idiom + `|| true`-hardened work calls (#1133). `call_timeout` chains through
+  `PREFLIGHT_MV_REVERIFY_CALL_TIMEOUT` like `preflight_mv_reverify` (review 🔵-2).
+- **`mv_reverify_resolve_wait` now coerces `RESOLVE_SETTLE_S` to an integer** (`${resolve_s%.*}`, the
+  #1197 finder-heal precedent) so a float override cannot fatally abort the arithmetic even through
+  `|| true` (review 🔵-3).
+- **The two deploy-site call-line literals are THEMSELVES test anchors now** (`tests/harness_mv_reverify_proactive_reset_1114.rs`):
+  `mv_reverify_proactive_reset "$CAMERA_NAME" "${CAMERA_NAME#cam}"` (cam1) and
+  `mv_reverify_proactive_reset "$_cn" "${_cn#cam}"` (ALL_CAMBOX loop), each ordered BEFORE its
+  `mv_reverify_or_escalate`; the adjacent comments must never duplicate those literals.
