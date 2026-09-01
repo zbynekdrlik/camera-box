@@ -57,10 +57,12 @@ impl BurnTickCache {
     /// upload + advance `frame_id`); `false` iff it may REUSE the cached composite. Exactly ONE
     /// render per tick returns `true`.
     pub fn on_render(&mut self) -> bool {
-        // #1260 [red] STUB — the within-tick cache is not yet wired; every draw still "prepares"
-        // (the pre-fix per-draw behaviour), so the MV re-renders all 7 burns every frame. Replaced
-        // by the once-per-tick state machine in the [green] commit.
-        true
+        if self.prepared_this_tick {
+            false
+        } else {
+            self.prepared_this_tick = true;
+            true
+        }
     }
 
     /// A prep that FAILED (a transient graphics-reset window) must not leave the tick marked
