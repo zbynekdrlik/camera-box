@@ -334,6 +334,12 @@ wrong PR with no review of it.
   "obsolete ticket" verdict per `verify-issue-still-valid.md`), first confirm `git log HEAD --not
   origin/dev --oneline` is EMPTY (no unique commits of your own yet) and, if so, `git merge --ff-only
   origin/dev` — a missing file on a stale worktree branch is NOT evidence the ticket is invalid.
+  **A lane's worktree can also be based on `origin/main` instead of `dev`** (confirmed 2026-09-02:
+  the issue-1130 lane returned 3 commits on top of main's `Merge pull request #1257` commit while
+  three sibling lanes dispatched the same way sat on `origin/dev`). Before EVERY integration merge
+  run `git merge-base <lane-branch> dev` / `git log --oneline dev..<lane-branch>`: if main-side merge
+  commits show up in that range, `git cherry-pick` the lane's own commits onto `dev` instead of
+  `git merge` — a merge would drag main's merge commits into dev's history.
 - **A red "CI" run on the OTHER worker's push can be YOUR OWN not-yet-fixed RED commit riding
   along, not a real regression in their code.** Confirmed live (2026-07-30, #854/#881 vs #878):
   worker A committed a TDD RED commit (failing-on-purpose, per `regression-test-first.md`) while
@@ -730,7 +736,11 @@ the Rust test's pass at CI; (3) a python occurrence-count anchor sweep (OLD `git
 vs NEW, flag any test string-literal whose count went 1→0 or 1→2 — the `camera-active-set.md` net);
 (4) `cargo fmt --all --check` (rustfmt parses even probe-gated + new test files → proves the Rust
 compiles-shaped OK / is brace-balanced). CI is the FIRST place the Rust test actually type-checks +
-runs — expect a TYPE mistake to surface there, not locally.
+runs — expect a TYPE mistake to surface there, not locally. (5) clippy is CI-only too, and its DOC
+lints bite prose: a `//!`/`///` line that starts with `+ `/`- `/`* `/`1. ` is a Markdown list item
+and the next unindented line fails `doc_lazy_continuation` under `-D warnings` (killed a release
+PR's Lint + E2E, 2026-09-02) — `grep -nE '^\s*//[/!] ?([-+*]|[0-9]+\.) '` over every touched `.rs`
+before pushing (details: `.claude/rules/ci-testing-gotchas.md`).
 
 **No bypass exists for `src/bin/recording-verdict.rs` or any `src/probe/*.rs` file itself** — the
 bin has `required-features = ["probe"]` and every file under `src/probe/` is behind the SAME

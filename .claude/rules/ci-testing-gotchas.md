@@ -881,3 +881,14 @@ proof when `cargo test` is Tier-0-blocked); (3) `bash -n` + `shellcheck -S warni
 (4) `cargo fmt --all --check` (parses the `.rs`); (5) the notify-dedup sweep pytest. The Rust
 harness (`run_under_set_e` sourcing the lib) then runs at CI / for the supervisor. Note this in the
 evidence block so the supervisor runs the sourced-lib harness + any stubbed dry-run at integration.
+
+## Clippy `doc_lazy_continuation` is a CI-only failure under Tier-0 — a doc line starting with `+ ` (or `- `/`* `/`1. `) is a Markdown LIST ITEM (issue 1196 integration, 2026-09-02)
+
+`cargo clippy -D warnings` cannot run locally (Tier-0 #557), `cargo fmt --check` does not lint doc
+prose, so this class surfaces only in CI's Lint job — and it blocked the whole release PR's E2E
+(the E2E fetches the CI artifacts and fails closed when `ci.yml` is red). The trap: a `//!`/`///`
+paragraph that WRAPS so a line begins with `+ exactly ONE aux mark …` — clippy reads `+ ` as a
+Markdown bullet and every following unindented line as a "list item without indentation". Fix by
+rewording (`plus …`), never by indenting prose that is not a list. Pre-push local net (cheap,
+run over every touched `.rs`): `grep -nE '^\s*//[/!] ?([-+*]|[0-9]+\.) ' <files>` and check that
+each hit is a REAL list item whose continuation lines are indented by 2+ spaces.
