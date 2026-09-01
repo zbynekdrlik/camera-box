@@ -8,6 +8,8 @@ paths:
   - "systemd/mv-fps-alert-watchdog.*"
   - "tests/harness_mv_fps_preflight_1091.rs"
   - "vendor/obs-studio/libobs/obs-display-budget.h"
+  - "vendor/obs-studio/libobs/obs-display.c"
+  - "vendor/distroav/src/ndi-burn-filter.cpp"
 ---
 
 # MV-fps observability + live alarm (#771 core, #1083 live watchdog)
@@ -120,6 +122,93 @@ holds only when strih runs OBS alone; a non-OBS app stealing GPU/CPU (observed: 
 236k CPU-s) drops the 4K multiview to a wide 8–18fps band with deep 9–11fps dips. That contention drop
 IS the collapse the floor catches — not a broken multiview; never "fix" strih MV by lowering its floor to
 accommodate a contended dev-box reading.
+
+## ROOT CAUSE of the 7-cam burns-ON collapse to exactly 30/4 = 7.5 fps (issue 1260)
+
+The collapse is the #278 budget gate + #293 anti-starvation floor doing exactly what they were
+designed to — the MV render genuinely exceeds the per-tick budget, so it is throttled. It is NOT a
+broken code path, a vsync/present artifact, or a mis-calibrated floor. Trace (file:line, dev tip):
+
+- The MV is NOT on its own thread. `render_displays()` (`obs-video.c:1334`) runs on the SAME single
+  graphics thread, AFTER `output_frames()` (the PROGRAM, `obs-video.c:1322`), within one canvas tick.
+  Issue-508's "decouple" == the #278 budget gate on the shared thread (`obs-display.c:282–351`).
+- On strih's 30 fps canvas the derived `effective_divisor = 1` (`obs-display.c:298–305`), so there is
+  NO cadence skipping — the MV is PURELY budget-gated: skipped when `program_elapsed + MV_ewma > 90%
+  of 33.3ms (= 30ms)`. Over budget EVERY tick → skipped up to `OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS = 3`
+  in a row (`obs-display-budget.h:57`,`:121`), the 4th tick FORCED → renders 1-in-4 = **exactly 7.5
+  fps**. Borderline (fits ~half the ticks) → ~15–21 fps. The observed 7.4–7.6 / 13–21 are these two
+  regimes, not noise.
+- WHY over budget with burns ON: `obs-source.c:2990` — a source's filter chain re-runs on EVERY draw;
+  there is NO within-tick cache of a filtered source's output. The MV re-draws all 7 cam sources, and
+  each redraw re-runs the burn filter's FULL render — a `gs_texrender` of the 1080p source + CPU QR
+  raster + `gs_texture_set_image` upload (`ndi-burn-filter.cpp:436–464`). Studio-Mode-always-on means
+  program + preview + MV = 3 full burn renders per source per tick; the MV alone adds 7, pushing the
+  MV `render_ewma` past the ~5–11 ms of slack (live: `program-render-audit: avg_frame_ms=18.94–24.81`
+  of the 30 ms budget). Burns OFF the filter is a pass-through (`ndi-burn-filter.cpp:411`), so the MV
+  is only borderline (17–21 fps, confirmed live burns-OFF, warmed instance).
+- Latent correctness point in the same path: `burn_draw_qr` does `f->frame_id++` on EVERY call
+  (`ndi-burn-filter.cpp:370`), so the monitoring re-renders (preview + MV) pollute the recorded
+  (program) frame_id sequence.
+
+**The fix is cost REDUCTION, not floor recalibration.** 7.5 fps is a fixable perf defect (a juddery
+monitoring MV the operator watches), not a physical optical artifact — per the calibrate-vs-fix
+discriminator (`calibrate-artifact-vs-fix-robustness`), a fixable collapse is FIXED, never masked, and
+recalibrating floor 28 down to accept 7.5 is the gate-weakening the owner rejects ("multiview musí byť
+plynulé"). Keep floor 28 (issue 1263 is the report-only stopgap + walk-back tracker).
+
+**The fix (IMPLEMENTED, issue 1260): within-tick burn cache in the DistroAV filter.** A `video_tick`
+callback (`burn_filter_videotick`) clears a per-instance `struct burn_tick_cache tick_cache`
+(`vendor/distroav/src/burn-tick-cache.hpp`) once per video tick; `burn_filter_videorender` calls
+`burn_tick_cache_on_render()` — the FIRST draw of the tick (always the PROGRAM, since
+`output_frames()` runs before `render_displays()`) does the full prep (base `gs_texrender` +
+`burn_draw_qr` which advances `frame_id`/`gen_ts` + `gs_texture_set_image`), and the later
+within-tick draws (Studio-Mode preview, Multiview cells) REUSE the cached `f->texrender` +
+`f->qr_texture` via the always-run sprite blit — an idiomatic per-tick render cache (stock filters
+via `obs_source_process_filter_begin` already cache their target render per tick; the #404 overlay
+burn opted out by resetting its texrender every draw). Stamps the recorded `frame_id` once per tick
+(fixes the pollution). A prep failure calls `burn_tick_cache_abort_prepare` to re-arm the next
+within-tick draw (never reuse a stale composite). **Two honesty caveats the review flagged (🟡):**
+(1) the first draw of a tick is NORMALLY the program but NOT structurally always — DistroAV's preview
+NDI output is an earlier `obs_add_main_render_callback`, so a program+preview cam preps in the preview
+draw and the recorded program frame reuses it: pixels + `frame_id` identical, burn present, NO verdict
+fault, only a bounded low-ms downward `gen_ts` bias on `latency.cam_strih`. (2) Efficacy is PARTIAL —
+only the MV cells of cams ALREADY drawn on program/preview become blits; a MV-ONLY cam's first draw is
+the MV projector itself, so it still preps there. Whether the reduced burn work clears the 30 ms budget
+is UNPROVEN, so the rig validation below is mandatory and a residual throttle is possible (a follow-up
+could decouple the prep from the draw or cut the base 4K composite cost).
+
+**Verdict-cadence safety (verified before touching the cadence — the load-bearing check).** Reducing
+`frame_id` from once-per-DRAW (recorded step ~3, `burn_render_step:3` in old fixtures) to once-per-TICK
+(step ~1) is SAFE for every node: **strih/stream** use `node_render_step == 1` gap-ignore
+(`src/bin/recording-verdict.rs::node_render_step` returns a hardcoded `1` — the strih burn is a
+free-running render tick with an irregular step the verdict must NOT charge; forward gaps are
+unconditionally ignored, so a smaller step is inert; only a delivered frame with NO readable burn or a
+BACKWARD jump faults, and per-tick stamping stays monotonic → no backward jump). **imag** derives its
+step from the data (`src/imag_tick_gate.rs::calibrate_burn_step` → `burn_step_contiguity`) AND its
+per-frame content gate is report-only (`imag-leg-report-only.md`, imag leg flows 0/76) → it adapts and
+cannot flip a verdict. **Holds** (`burn_hold.rs` MAX_HOLD_FRAMES=4) detect a repeated id on a genuinely
+repeated frame; strih records 1:1 so per-tick stamping creates no false holds. If you ever change the
+burn cadence again, re-verify these three before assuming green.
+
+**Tier-0 seam + local nets.** The pure prepare-once-per-tick decision is `src/burn_tick_cache.rs`
+(`BurnTickCache`, pure std, RED→GREEN via the `#771`/`#1026` standalone-rustc recipe) mirrored
+byte-identically by the C header, locked by `tests/burn_tick_cache_parity.rs` (compiles the header +
+drives the same event sequences, `render_budget.rs ↔ obs-display-budget.h` pattern). Local proof with
+NO cargo: `rustc --test src/burn_tick_cache.rs` (5/5), `gcc -Wall -Wextra -Wconversion -Wformat=2` the
+header + a truth-table selftest, the parity harness's 7 sequences C-vs-Rust, `cargo fmt --all --check`,
+and the brace-delta-vs-origin structural check. The FULL filter compiles only on CI (`linux-genlock.yml`
++ `windows-genlock*.yml`) — a TYPE error surfaces there. **Still MANDATORY before it reaches the rig:**
+the supervisor's genlock-fleet deploy + rig validation (burns-ON `multiview-audit rendered_fps` back
+≥ 28 AND a clean E2E recording-verdict burns-ON — proving the cache didn't corrupt the recorded stamp).
+
+**The log does NOT carry the budget-gate terms — this is the profiling gap.** The `multiview-audit:`
+line reports only `rendered_fps` (the outcome); `program-render-audit:` reports program `render_fps` +
+whole-tick `avg_frame_ms`. Neither carries the MV `render_ewma_ns`, the program-elapsed-BEFORE-the-MV,
+or the budget — so which cost term dominates (QR raster+upload vs the extra per-draw texrender vs base
+composite) can only be settled by a rig experiment (or by enriching the audit emit with those terms,
+which is a lock-step vendored-C change: format anchor `tests/genlock_preload.rs:2592` + the
+`windows-genlock*.yml` pwsh gates; the `mv_audit.rs:159` parser is already key-based + tolerant of
+added fields).
 
 ## Autostart-aware = reset the confirm streak on an OBS-log IDENTITY change
 

@@ -16,6 +16,11 @@
 //! The burn `frame_id` (`vendor/distroav/src/ndi-burn-filter.cpp`, `f->frame_id++`) increments
 //! once per `video_render` of that filter — Program plus the Multiview grid's own throttled pass —
 //! so its rate is unwritable (41.7–147.9 ids/s across the ten program segments of ONE run, #870).
+//! **#1260 (post-deploy):** the DistroAV burn is now prepped ONCE per video tick, so `frame_id`
+//! advances ~1/tick (≈ the emit rate), not per draw — the 41.7–147.9 ids/s figure above is the
+//! PRE-#1260 per-draw cadence and drops to ~emit-rate once the within-tick-cache build is live.
+//! This metric is UNAFFECTED either way: it counts REPEATED ids (a duplicate delivered frame),
+//! which is rate-independent — the reasoning below holds at any cadence.
 //! But the burn is COMPOSITED into the image, so the SAME `(run_id, frame_id)` pair on two
 //! consecutive recorded frames means the identical upstream RENDERED IMAGE was delivered twice.
 //! That inference holds regardless of the counter's rate. So the metric is the run-length
