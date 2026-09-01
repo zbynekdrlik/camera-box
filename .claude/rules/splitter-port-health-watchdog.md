@@ -106,20 +106,26 @@ Elgato purple-noise `rough=` (the positive class) — still does not exist. The 
 telemetry at all" (2026-08-18) to "healthy side measured, positive class absent" (2026-09-01):
 
 - **Real `rough=` telemetry now exists and was mined (2026-09-01, read-only journal probe, active set
-  CAM1-4, ~13,900 samples over a ~5-6 h window; cam boxes run UTC).** Every active box runs the #1079
+  CAM1-4, ~13.9k `rough=` lines / ~13.6k colour over a ~5-6 h window; cam boxes run UTC).** Every active box runs the #1079
   binary (`/usr/local/bin/camera-box` mtime 2026-09-01 07:30-07:31) and logs
   `capture chroma: ... rough=R.R -> colour|grayscale`. **Healthy COLOUR (real-content) roughness ceiling
   per box: CAM1 max 11.7 (p99 10.9), CAM2 max 16.3 (p99 15.3 — the roughest box), CAM3 max 11.6
   (p99 10.9), CAM4 max 7.1 (p99 6.4). Fleet healthy-colour ceiling = 16.3.** GRAYSCALE content is even
-  lower (0.4-4.7). NOT ONE of ~13,900 samples exceeds 16.3 — zero above 20, zero above the current
+  lower (0.4-4.7). NOT ONE colour sample exceeds 16.3 — zero above 20, zero above the current
   30.0 threshold — so 30.0 clears the measured healthy ceiling by 1.84x (a wide false-positive margin).
   (CAM2/CAM3 journals are root-readable only; a permission quirk, not a missing-metric signal.)
-- **The QR/test-pattern false-positive fear is EMPIRICALLY DISPROVEN.** The earlier design worried that
-  sharp high-frequency STRUCTURED content — the QR/Vernier test card, fine text — would elevate `rough`
-  at 1px spacing. The mined data shows the opposite: test/grayscale content reads LOW roughness (≤4.7),
-  because QR modules are wider than the 1px Y0/Y1 adjacency, so almost every subsample lands inside a
-  module (Y0≈Y1). The worst-case structured content does NOT approach the noise regime — so the healthy
-  ceiling is genuinely characterized, not merely a quiet-scene reading.
+- **The QR/test-pattern false-positive fear is structurally moot, and was not observed to elevate
+  `rough` in the mined window.** The earlier design worried that sharp high-frequency STRUCTURED content
+  — the QR/Vernier test card, fine text — would elevate `rough` at 1px spacing and false-page. Two
+  points retire it. (a) STRUCTURAL, window-independent: `is_likely_noise` is COLOUR-gated
+  (`is_color_frame && rough > threshold`, `src/capture.rs`), and a black/white QR/Vernier card reads
+  GRAYSCALE (low chroma), so the test card can NEVER trigger a NOISE page regardless of its roughness.
+  (b) OBSERVED: in the mined window test/grayscale content read LOW roughness (≤4.7) anyway — QR modules
+  are wider than the 1px Y0/Y1 adjacency, so almost every subsample lands inside a module (Y0≈Y1). So a
+  genuinely colourful, highly-detailed real scene is the only content that could reach the classifier at
+  all, and none in the mined ~5-6 h window came near it (colour max 16.3); the sibling self-anchor
+  (Approach 2) is the remaining guard for that case. Caveat: the healthy side is characterized for the
+  observed active-set window, not a full multi-day / all-content sweep.
 - **What is still ABSENT: any purple-noise positive class.** No box shows a noise episode in the mined
   window, and the fleet has logged none over the collection period (owner W-pushes 2026-08-25..08-30:
   "ziadna noise epizoda na kalibraciu prahu"). The ~73 analytic noise floor (pure per-pixel-UNCORRELATED
@@ -139,10 +145,13 @@ telemetry at all" (2026-08-18) to "healthy side measured, positive class absent"
   anchor), reusing the existing dev1 alert framework with no cambox code change — NOT a per-box
   cambox-side label (rejected: loses the fleet self-anchor).
 
-**Flip criteria status (do NOT flip until all four are MET):** (1) deploy #1079 to the fleet — **MET**
-(all active boxes on the #1079 binary, real `rough=` telemetry). (2) mine each box's `rough=` across
-real-scene AND QR/Vernier TEST-pattern content, recording the healthy ceiling — **MET** (ceiling 16.3;
-test-pattern content is LOW roughness). (3) capture a real Elgato no-signal `rough=` for the positive
+**Flip criteria status (do NOT flip until all four are MET):** (1) deploy #1079 to the fleet, especially
+the Elgato boxes (CAM1/CAM6/CAM7) whose no-signal mode is the purple-noise positive class — **MET for the
+active set (incl. Elgato CAM1)**; CAM5/6/7 are off the wire, so re-verify the #1079 binary on Elgato
+CAM6/CAM7 when they rejoin (positive-class boxes — a stale binary there would silently starve criterion 3). (2) mine each box's `rough=` across
+real-scene AND QR/Vernier TEST-pattern content, recording the healthy ceiling — **MET for the observed
+active-set window** (~5-6 h, ceiling 16.3; grayscale/test content ≤4.7, no colourful content came near the
+classifier; the colour-gate above already makes the B/W test card a structural non-risk). (3) capture a real Elgato no-signal `rough=` for the positive
 class (a genuine event or a reproduction that does NOT unplug the live rig signal path) — **NOT MET**;
 if it cannot be obtained, the flip STAYS report-only. (4) set the threshold at healthy-ceiling+margin AND
 clearly below the noise floor, then flip via Approach 2 with a RED→GREEN test in
