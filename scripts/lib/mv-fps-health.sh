@@ -71,6 +71,30 @@ mv_fps_recovery_decision() {
   fi
 }
 
+# mv_fps_extract_audit_lines -- stdin: the RAW PS-fetched OBS-log tail; stdout: every
+#   `multiview-audit:` line in it (empty if none), guaranteed VALID UTF-8. #1262 (review-caught):
+#   byte-safe extraction, defensive against an adversarially-constructed invalid byte co-resident on
+#   a `multiview-audit:` line (e.g. a corrupted `genlock-fifo audit` line's invalid-UTF-8 byte glued
+#   onto it with no `\n` separator at a PS->ssh transport-chunk boundary -- constructed, not observed
+#   live) -- a plain `grep -F` hits GNU grep's binary-content detection on such a "line" and returns
+#   EMPTY (verdict UNKNOWN / eventual "tap blind" WARN); separate, cleanly `\n`-terminated corrupted
+#   lines never blind it (verified empirically, STEP-0 comment on #1262). `LC_ALL=C grep -a` alone
+#   only fixes the SHELL side -- the real `mv-fps-gate` binary reads stdin via `read_to_string`,
+#   which REJECTS any invalid byte outright, so an extracted line still carrying one would still
+#   error the gate (exit 2 -> UNKNOWN, same verdict but a MISLEADING "gate binary broken?" log
+#   line). `multiview-audit:` lines are pure ASCII by construction (`monitor=%u divisor=%u
+#   rendered_fps=%.2f ...`, render_display() -- no operator-controlled string field), so stripping
+#   any byte >= 0x80 is LOSSLESS for legitimate content and neutralises any invalid byte wherever it
+#   sits on the line; `mv_audit::parse_audit_line` finds the marker via `line.find(MARKER)`, so a
+#   stripped/garbled PREFIX before the real marker is harmless. Shared by BOTH consumers of the raw
+#   tail (mv-fps-alert-watchdog.sh's handle_box AND mv-fps-preflight.sh's mv_fps_preflight_probe) so
+#   the fix lives in ONE place -- mirrors #1258's own `mv_reverify_probe_raw` "fix the read path
+#   once" precedent. Always exits 0 (`|| true`) so a no-match never trips a strict-mode caller under
+#   `set -e`.
+mv_fps_extract_audit_lines() {
+  LC_ALL=C grep -aF 'multiview-audit:' 2>/dev/null | LC_ALL=C tr -d '\200-\377' || true
+}
+
 # mv_fps_alert_detail <box> <gate_output> -> stdout: one human line for the Discord alert body,
 #   naming the box and every `FAIL monitor=…` line the gate printed (the collapsed projector(s),
 #   their rendered_fps and floor). If the gate printed no FAIL line, falls back to a bare box name so
