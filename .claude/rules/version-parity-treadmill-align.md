@@ -6,6 +6,8 @@ paths:
   - "scripts/deploy-fleet.sh"
   - "tests/harness_camera_box_parity_align_1202.rs"
   - "tests/frame_probe_parity_align_1138.rs"
+  - "tests/camera_box_version_gate.rs"
+  - "tests/frame_probe_deploy_1138.rs"
 ---
 
 # camera-box version-parity treadmill + the pre-[0/8] auto-align (issue 1202)
@@ -161,6 +163,25 @@ decision matrix + the orchestrator + the real deploy path via the seams — `CAM
 gate's own `CAMERA_BOX_VERSION_GATE_VERSION_<NAME>` read seam (a file of raw `--version` output). A
 green bash-level RED→GREEN predicts the `tests/harness_camera_box_parity_align_1202.rs` pass at CI;
 `cargo fmt --all --check` is the only local Rust parse check (CI is the first type-check).
+
+### A gate function's always-printed BANNER can silently break a `!out.contains(WORD)` negative row-assertion (issue 1235)
+
+`camera-box-version-gate.sh`'s frame-probe pin functions print a `-- ... sha-pin ... --` BANNER
+to stdout BEFORE the per-node verdict loop. When a subprocess test (`run_gate_env`) exercises a
+case that produces NO verdict row — an acked-offline box, or a dormant/skip path — and asserts the
+ABSENCE of a verdict word (`!out.contains("ALARM") && !out.contains("UNKNOWN")`), that assertion
+matches the BANNER if the banner text happens to contain those bare words, so the test is
+GUARANTEED-RED even though the gate behaved correctly. This is INVISIBLE under Tier-0 (the gate's
+exit code + stdout look right when you run it by hand; only the Rust substring assertion trips, and
+`cargo test` cannot run locally) — it surfaces for the first time on CI. It bit the issue-1235
+hard-gate flip: `frame_probe_pin_gate`'s banner said `fail-closed on UNKNOWN/ALARM`, and the
+acked-offline test's `!out.contains("UNKNOWN")` matched it. **Rule: keep a gate BANNER's wording
+DISTINCT from the exact words a per-node verdict ROW prints** (reworded to `fail-closed on an
+unverified or lagging painter`), so a positive `out.contains("ALARM")` can only be satisfied by a
+real row and a negative `!out.contains("ALARM")` genuinely proves no row — OR assert row-SHAPES
+(no line whose trimmed start is the node name) instead of a bare word. When you add/reword any
+banner or verdict-row string in this gate, `grep -n 'out.contains\|!out.contains'
+tests/camera_box_version_gate.rs` and check every word your banner now shares with a row.
 
 ## Artifact resolution is COMMIT-SCOPED, never "newest ci.yml run on a branch" (issue 1245)
 
