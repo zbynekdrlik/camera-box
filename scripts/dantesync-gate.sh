@@ -180,6 +180,13 @@ GATE_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
 # foreign grandmaster (a rig/dantesync BMCA/subnet fix tracked separately, out of #834's scope). Flip
 # to 1 once every node holds the rig grandmaster. Overridable via DANTESYNC_GATE_GM_ENFORCE.
 GATE_GM_ENFORCE="${DANTESYNC_GATE_GM_ENFORCE:-0}"
+# #1130 REPORT-FIRST (mirrors #834): the phase_slew check ALWAYS prints a loud PHASE-SLEW
+# ENABLED/DISABLED/UNKNOWN line per HTTP-graded node (phase_slew = the fleet-wide NTP-step-storm
+# cure, dantesync issue 97), but only feeds the node's OK/BAD verdict (i.e. can FAIL the gate) when
+# this is 1. Default 0 -- so wiring the check cannot brick the standing E2E gate; flip to 1 (a
+# one-prefix change in recording-e2e.sh, like GM's #1073) once every graded node is confirmed to
+# serve phase_slew_enabled. Overridable via DANTESYNC_GATE_PHASE_SLEW_ENFORCE.
+GATE_PHASE_SLEW_ENFORCE="${DANTESYNC_GATE_PHASE_SLEW_ENFORCE:-0}"
 
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
@@ -672,7 +679,24 @@ grade_http_node() {
   gm_actual="$(gm_source_ip_from_pipe_json "$status")"
   gm_check "$name" "$gm_actual" "$GATE_GRANDMASTER_IP" || rc_gm=$?
   [ "$GATE_GM_ENFORCE" = 1 ] && gm_gate_rc="$rc_gm"
-  printf '%s' "$(node_verdict "$rc_off" "$rc_ptp" "$gm_gate_rc")" > "$verdictfile"
+  # #1130: phase_slew (dantesync issue 97) is the fleet-wide CURE for the chronic NTP step storm this
+  # ticket tracks -- a bounded rate-slew that absorbs UTC phase error instead of stepping it (proven
+  # live 2026-09-01: every graded node phase_slew_enabled=true, master ntp_steps_last_hour=0). It is a
+  # per-box config toggle, so a box that silently reverts to phase_slew=off would re-introduce the
+  # storm, uncaught until dantesync's own >120/h ntp_step_storm alarm (far above the visible-judder
+  # threshold). REPORT-FIRST like gm_check (#834): the PHASE-SLEW ENABLED/DISABLED/UNKNOWN line is
+  # ALWAYS printed per HTTP-graded node, but its rc feeds node_verdict ONLY when
+  # GATE_PHASE_SLEW_ENFORCE=1 (default 0 -> ps_gate_rc stays 0, verdict byte-identical to today). The
+  # enforce flip is a one-prefix follow-up (cf. gm #834->#1073) once the full graded node set is
+  # confirmed to serve phase_slew_enabled. HTTP-path only, same freshest $status the offset/PTP/GM
+  # checks graded; the journal FALLBACK returns before here (journald carries no phase_slew_enabled,
+  # verify-imag.sh:1239 documents the same). phase_slew_enabled_from_pipe_json/phase_slew_check are the
+  # #1215 pure functions in clock-offset-guard.sh, already used by verify-imag.sh for the imag box.
+  local ps_actual rc_ps=0 ps_gate_rc=0
+  ps_actual="$(phase_slew_enabled_from_pipe_json "$status")"
+  phase_slew_check "$name" "$ps_actual" || rc_ps=$?
+  [ "$GATE_PHASE_SLEW_ENFORCE" = 1 ] && ps_gate_rc="$rc_ps"
+  printf '%s' "$(node_verdict "$rc_off" "$rc_ptp" "$gm_gate_rc" "$ps_gate_rc")" > "$verdictfile"
 }
 
 # resolve_node_grading NAME -> sets node_mode (bash's dynamic scoping means this is the CALLER's
@@ -764,6 +788,14 @@ Options:
                        like a DRIFT/PTP-degraded node. Kept report-first so wiring the check does not
                        brick the standing E2E gate while a rig-side grandmaster mis-election is still
                        being fixed; flip to 1 once every node holds RIG_GRANDMASTER_IP.
+    DANTESYNC_GATE_PHASE_SLEW_ENFORCE  0 (default) = REPORT-FIRST: a PHASE-SLEW
+                       ENABLED/DISABLED/UNKNOWN line is printed per HTTP-graded node but does NOT
+                       affect the verdict. 1 = a DISABLED/unreadable phase_slew is a hard node
+                       failure (DISABLED => BAD/20, UNKNOWN => INCOMPLETE/11). phase_slew (dantesync
+                       issue 97) is the fleet-wide cure for the chronic NTP step storm (#1130) --
+                       a box reverting to stepping re-introduces visible judder; report-first
+                       surfaces it every run, flip to 1 once every graded node serves
+                       phase_slew_enabled (a one-prefix change in recording-e2e.sh, cf. GM's #1073).
   --deadband-margin-us N  #1021 (dantesync PR #84/#86, closes dantesync issue 83): when the NTP
                        master's own /status reports a numeric "ntp_deadband_us" (its currently
                        active PTP-locked step-deferral threshold), the master's median bound
@@ -1012,6 +1044,11 @@ main() {
     echo "ERROR: DANTESYNC_GATE_GM_ENFORCE must be 0 or 1 (got '${GATE_GM_ENFORCE}')." >&2
     exit 1
   fi
+  # #1130: same loud-on-typo guard for the phase_slew enforce flag (mirrors #834's GM check).
+  if [ "$GATE_PHASE_SLEW_ENFORCE" != 0 ] && [ "$GATE_PHASE_SLEW_ENFORCE" != 1 ]; then
+    echo "ERROR: DANTESYNC_GATE_PHASE_SLEW_ENFORCE must be 0 or 1 (got '${GATE_PHASE_SLEW_ENFORCE}')." >&2
+    exit 1
+  fi
   if [ -z "$GATE_GRANDMASTER_IP" ]; then
     echo "ERROR: RIG_GRANDMASTER_IP must be non-empty (the rig grandmaster #834 gates every node against)." >&2
     exit 1
@@ -1186,17 +1223,19 @@ main() {
   exit 0
 }
 
-# node_verdict OFFSET_RC PTP_RC [GM_RC] -> OK | BAD | UNKNOWN. A node passes ONLY when the offset
-# check (rc 0) AND the PTP-lock check (rc 0) AND the OPTIONAL grandmaster-identity check (rc 0) all
-# pass. A DRIFT/DEGRADED/FOREIGN-GM (rc 2) on any => BAD. Any UNKNOWN (rc 3) with no hard failure =>
-# UNKNOWN. (Hard failure dominates UNKNOWN so a degraded node is reported as the actionable failure,
-# not masked as merely "unknown".) GM_RC is optional and defaults to 0 (#834): every pre-#834 caller
-# passing only two args is unchanged, and the report-only default passes 0 here so the GM check never
-# affects the verdict unless GATE_GM_ENFORCE=1.
+# node_verdict OFFSET_RC PTP_RC [GM_RC] [PS_RC] -> OK | BAD | UNKNOWN. A node passes ONLY when the
+# offset check (rc 0) AND the PTP-lock check (rc 0) AND the OPTIONAL grandmaster-identity check (rc 0)
+# AND the OPTIONAL phase_slew check (rc 0) all pass. A DRIFT/DEGRADED/FOREIGN-GM/PHASE-SLEW-DISABLED
+# (rc 2) on any => BAD. Any UNKNOWN (rc 3) with no hard failure => UNKNOWN. (Hard failure dominates
+# UNKNOWN so a degraded node is reported as the actionable failure, not masked as merely "unknown".)
+# GM_RC is optional and defaults to 0 (#834); PS_RC is optional and defaults to 0 (#1130): every
+# pre-#834 caller passing only two args is unchanged, and the report-only defaults pass 0 here so
+# neither the GM check nor the phase_slew check affects the verdict unless its enforce flag is set
+# (GATE_GM_ENFORCE=1 / GATE_PHASE_SLEW_ENFORCE=1).
 node_verdict() {
-  local off="$1" ptp="$2" gm="${3:-0}"
-  if [ "$off" = 2 ] || [ "$ptp" = 2 ] || [ "$gm" = 2 ]; then printf 'BAD'; return 0; fi
-  if [ "$off" = 3 ] || [ "$ptp" = 3 ] || [ "$gm" = 3 ]; then printf 'UNKNOWN'; return 0; fi
+  local off="$1" ptp="$2" gm="${3:-0}" ps="${4:-0}"
+  if [ "$off" = 2 ] || [ "$ptp" = 2 ] || [ "$gm" = 2 ] || [ "$ps" = 2 ]; then printf 'BAD'; return 0; fi
+  if [ "$off" = 3 ] || [ "$ptp" = 3 ] || [ "$gm" = 3 ] || [ "$ps" = 3 ]; then printf 'UNKNOWN'; return 0; fi
   printf 'OK'
 }
 
