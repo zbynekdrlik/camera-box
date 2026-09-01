@@ -350,3 +350,42 @@ preventing durable-artifact misreads, a misleadingly-named field in the artifact
 it exists to catch. Renamed to `assessed_cams` + a clarifying `note` clause. General rule for any new
 verdict-JSON key: name it for the set it actually contains, and if that set is a filtered subset, say
 so in the `note`.
+
+## 14. A CONTENT/pixel gate can be VIABLE yet still NOT promotable — check redundancy + the upper bound (#1101 / #1166 promote cycle)
+
+§13 turned the #1088 dup-cadence content signal from `Blind` to `Viable` (the codec-tolerant MAD
+fix). When the promote cycle finally had real green-run data (the 2026-09-01 green 7-cam series:
+`signal_viability="viable"`, `signal_promotable=true`, and the signal correctly caught a real
+2026-08-25 30→60 duplication — CAM3 `duplicate_fraction`≈0.50, `gap_mean`≈2, `coverage`≈0.999,
+`inferred_source_fps`≈30), the LIVE flip STILL did not happen. Two calibration gaps that a bare
+"viable ⇒ flip" plan misses, both learned mining all 44 post-fix verdicts:
+
+- **A tick-based `copies` gate SUBSUMES a content near-dup gate for PURE duplication — so calibrate
+  where the content gate is UNIQUE, not where it is redundant.** The dup-cadence classification floor
+  `DUP_RATE_PULLDOWN_MIN = 0.10` = ~85 near-dup pairs in an ~845-frame window; the per-segment
+  `copies` gate fails at `copies_gaps_tolerance` = 3–5. For a PURE-duplication pulldown a duplicated
+  frame is BOTH a content near-dup AND a repeated Vernier tick, so ~85 near-dups ⇒ ~85 tick-copies ≫
+  tolerance → `copies` already hard-fails it (the only masked event in the corpus, the 08-25 30→60,
+  was independently failed by `copies` + `cadence_uniformity_gate` + `cadence_judder_gate`). The
+  content gate is UNIQUE only where near-dups do NOT coincide with tick-copies — a content freeze with
+  a LIVE tick, or a blended/interpolated pulldown (`content_near_dup_pairs` ≫ `copies_observed_by_content`;
+  e.g. run 2034201093 CAM7 had 59 near-dups vs 6 tick-copies). Verify from the JSON whether a masked
+  window's near-dups are tick-copies (redundant with `copies`) or not (the real unique value) BEFORE
+  arguing a LIVE flip adds coverage. And note: the floor cannot simply be lowered to add unique
+  coverage — the green worst raw fraction (~0.007 ≈ the copies tolerance) sits right where lowering
+  would start false-flagging green windows on the rate floor alone.
+
+- **A near-dup signal fires on a FREEZE too — an upper RATE bound (or a report-only hold) is needed
+  before LIVE, else you re-expose the frozen_leg cam1-grabber (issue 909) false-positive class.** The
+  `DUP_COVERAGE_MIN` veto excludes a LOCALIZED freeze, but a window-SPANNING content freeze
+  (`duplicate_fraction`→1.0, regular, spanning) is masked exactly like a pulldown — there is no upper
+  bound separating a ~0.167 pulldown from a ~1.0 static freeze (frozen_leg's domain). Promoting LIVE
+  without it means dup-cadence hard-fails a spanning freeze, which is precisely why the freeze-adjacent
+  gates (`frozen_leg`/`optical_floor`/`av_window`) stay report-only (§5). With no spanning-freeze
+  datapoint to calibrate the boundary (0/44 green runs masked, incl. all cam1 windows), the honest
+  disposition is NO-FLIP-WITH-DATA: keep report-only (observability is retained in the verdict JSON),
+  correct the seam's own now-stale doc (a `gates_overall_pass()` doc that still cites a since-satisfied
+  precondition MISLEADS the next worker into a naive flip), and record the re-entry condition (viable
+  on ≥2 green runs + `worst_masked` null on green + the upper-bound resolved on real spanning data or
+  frozen_leg promoted first + any owner supersede direction, e.g. issue 1196's aux-tick-pair signal,
+  resolved). "Viable" is necessary, not sufficient, for a content/pixel LIVE flip.
