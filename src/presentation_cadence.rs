@@ -113,9 +113,9 @@ pub struct CadenceEvenness {
     /// as uniform. The UNBALANCED remainder (a genuine drift), a step 0 (a duplicate) and any other
     /// step (a bigger jump / ±2+-refresh artifact) stay non-uniform, so real cadence faults remain
     /// visible (copies/gaps are gated on their own channel). Only the ±1-refresh pair collapses — the
-    /// exact physical beat mechanism, and the ONLY complementary pair the rig produces (delta mode is
-    /// 2 there → the pair is (1, 3), matching the issue's `2 * expected_step`); a ±2+-refresh jump is
-    /// deliberately left visible (#1250 review). Centered on `derived_expected_step` — the SAME step
+    /// exact physical beat mechanism, and the ONLY complementary pair the rig produces (the delta
+    /// mode there is 2 → the pair is (1, 3), matching the issue's `2 * expected_step`); a
+    /// ±2+-refresh jump is deliberately left visible (#1250 review). Centered on `derived_expected_step` — the SAME step
     /// `derived_uniform_steps` uses (self-consistent), == the caller's `expected_step` on the real rig,
     /// never false-collapsing an off-step-mode clean window. Never below `derived_uniform_steps`
     /// (collapsing only ADDS); a NO-OP when the step is 1.
@@ -1028,12 +1028,8 @@ mod tests {
             deltas.push(1);
             deltas.push(3);
         }
-        for _ in 0..4 {
-            deltas.push(0);
-        }
-        for _ in 0..3 {
-            deltas.push(4);
-        }
+        deltas.extend([0i64; 4]);
+        deltas.extend([4i64; 3]);
         assert_eq!(deltas.len(), 846);
         let v = measure_cadence_evenness(&ticks_from_deltas(&deltas), 2).expect("plenty");
         assert_eq!(v.sample_deltas, 846);
