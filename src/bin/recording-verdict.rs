@@ -5225,6 +5225,15 @@ fn build_and_print_verdict_with_stream_diffs(
                                         stats
                                     )),
                                 );
+                                // issue 1196 — the machine-checked per-window flip-readiness
+                                // (viability Observed + single-tile). REPORT-ONLY: gates nothing,
+                                // makes a known-torn calibration run auto-gradable.
+                                obj.insert(
+                                    "signal_promotable".to_string(),
+                                    serde_json::json!(camera_box::tear_detect::window_promotable(
+                                        stats
+                                    )),
+                                );
                             }
                             v
                         })
@@ -5261,17 +5270,29 @@ fn build_and_print_verdict_with_stream_diffs(
                     report["all_cambox_continuity"]["tear"] = serde_json::json!({
                         "gates_overall_pass": camera_box::tear_detect::gates_overall_pass(),
                         "vernier_max_spread": camera_box::tear_detect::VERNIER_MAX_SPREAD,
+                        // issue 1196 — run-level machine-checked flip-readiness + the single-tile
+                        // promotion ceiling. signal_promotable == true (a window Observed a tear AND
+                        // every window is single-tile) on a known-torn run is the precondition the
+                        // one-line gates_overall_pass() flip is gated on. REPORT-ONLY today.
+                        "signal_promotable": camera_box::tear_detect::signal_promotable(&tear_stats),
+                        "multi_path_suspect_ceiling":
+                            camera_box::tear_detect::MULTI_PATH_SUSPECT_CEILING,
                         "tear_gate": "report-only -- the tear span is the UNION of the primary \
                             dual-QR ids and the issue-1196 bottom aux tick pair's ids (span > \
-                            vernier_max_spread = >= 2 paint generations captured); the aux pair \
-                            gives the vertical redundancy the single-band primary content lacks \
-                            (a seam through the primary band alone reads undecodable, never two \
-                            clean generations -- see issue 781). Ships report-only with a computed \
-                            signal_viability plus aux_decode_fraction (aux chain-survival \
-                            coverage) and primary_dark_aux_alive_fraction (band-localized \
-                            corruption discriminator); flip gates_overall_pass to true only once \
-                            the signal is Observed on a known-torn run + a bound AND an \
-                            aux-coverage floor are calibrated from the mined real-frame fixture.",
+                            vernier_max_spread = >= 2 paint generations captured). Ships report-only \
+                            with a computed signal_viability plus the promotion property \
+                            signal_promotable (per-window: viability Observed + \
+                            multi_path_suspect_fraction <= multi_path_suspect_ceiling), and \
+                            report-only DIAGNOSTICS aux_decode_fraction (aux chain-survival \
+                            coverage) and primary_dark_aux_alive_fraction (band-localized corruption \
+                            discriminator). NOTE (real-data, 2026-09-01): aux_decode_fraction is a \
+                            DIAGNOSTIC, NOT a promotion floor -- the CAM2 projection leg (the one \
+                            that captures imag's HDMI scanout) decodes NO aux marks yet is where the \
+                            genuine tears appear via the PRIMARY band; the aux pair decodes only on \
+                            the splitter legs, which are not the projector path. Flip \
+                            gates_overall_pass to true only once signal_promotable is true on a \
+                            known-torn run AND a tear_fraction bound is calibrated from that run's \
+                            torn distribution (verdict-gate-seam-calibration.md).",
                         "windows": windows_json,
                     });
                     // Report-only fold (no-op while gates_overall_pass()==false): one-line LIVE flip.
