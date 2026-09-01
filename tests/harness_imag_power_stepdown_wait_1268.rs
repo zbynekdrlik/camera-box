@@ -82,7 +82,10 @@ fn lib_defines_the_functions() {
         "imag_power_guard_stepped_from_state",
     ] {
         let out = stdout_of(&format!("type {f} >/dev/null 2>&1 && echo DEFINED"));
-        assert_eq!(out, "DEFINED", "{f} must be defined (directly or via the sourced shared lib)");
+        assert_eq!(
+            out, "DEFINED",
+            "{f} must be defined (directly or via the sourced shared lib)"
+        );
     }
 }
 
@@ -116,7 +119,7 @@ fn pl1_from_block_reads_the_marker_line() {
     assert_eq!(pl1(""), ""); // empty block
     assert_eq!(pl1("IMAGPWR_PL1|x"), ""); // non-numeric -> empty
     assert_eq!(pl1("HOT=0\nSTEPPED=1"), ""); // no marker line -> empty
-    // a full block: pl1 line first, then the guard state body -> reads only the pl1 line
+                                             // a full block: pl1 line first, then the guard state body -> reads only the pl1 line
     assert_eq!(
         stdout_of("imag_power_stepdown_pl1_from_block $'IMAGPWR_PL1|1\\nHOT=1\\nSTEPPED=1\\nGUARD_STEPDOWN_W=25'"),
         "1"
@@ -137,19 +140,22 @@ fn state_core_classifies_the_two_signals() {
     assert_eq!(state("stepped", ""), "clamped");
     assert_eq!(state("not-stepped", "1"), "clamped"); // #880 silent punit clamp, no guard step-down
     assert_eq!(state("unknown", "1"), "clamped");
-    // clear: guard not-stepped AND pl1==0 (RESTORE + throttle 0).
+    // clear: NOT guard-stepped AND pl1==0 -- pl1=0 is a real no-clamp reading, so it reads clear even
+    // when the guard state file is unreadable (guard "unknown"; the live production case).
     assert_eq!(state("not-stepped", "0"), "clear");
-    // unknown: an unreadable read -> fail-open (proceed).
-    assert_eq!(state("unknown", "0"), "unknown"); // the live reality (state file absent) + pl1 clean
+    assert_eq!(state("unknown", "0"), "clear"); // the live reality (state file absent) + pl1 clean
+                                                // unknown: pl1 ITSELF unreadable and not confirmed stepped -> fail-open (proceed).
     assert_eq!(state("unknown", ""), "unknown");
-    assert_eq!(state("not-stepped", ""), "unknown"); // pl1 unreadable -> cannot confirm clear
+    assert_eq!(state("not-stepped", ""), "unknown"); // pl1 unreadable -> cannot confirm no-clamp
 }
 
 // ---------------------------------------------------------------------------------------------
 // imag_power_stepdown_verdict_from_block — fuse the pl1 sample with the shared guard parser
 // ---------------------------------------------------------------------------------------------
 fn verdict(block: &str) -> String {
-    stdout_of(&format!("imag_power_stepdown_verdict_from_block \"$(printf '%b' '{block}')\""))
+    stdout_of(&format!(
+        "imag_power_stepdown_verdict_from_block \"$(printf '%b' '{block}')\""
+    ))
 }
 
 #[test]
@@ -157,12 +163,15 @@ fn verdict_from_block_fuses_pl1_and_guard_state() {
     // pl1=1, no state file (the live reality) -> clamped
     assert_eq!(verdict("IMAGPWR_PL1|1"), "clamped");
     // pl1=0 but guard STEPPED=1 -> clamped (wait for RESTORE)
-    assert_eq!(verdict("IMAGPWR_PL1|0\\nSTEPPED=1\\nGUARD_STEPDOWN_W=25"), "clamped");
+    assert_eq!(
+        verdict("IMAGPWR_PL1|0\\nSTEPPED=1\\nGUARD_STEPDOWN_W=25"),
+        "clamped"
+    );
     // pl1=0 and guard not-stepped -> clear
     assert_eq!(verdict("IMAGPWR_PL1|0\\nSTEPPED=0"), "clear");
-    // pl1=0, no state file -> unknown (proceed; the state file is unreadable to the non-root ssh)
-    assert_eq!(verdict("IMAGPWR_PL1|0"), "unknown");
-    // empty (ssh failed) -> unknown
+    // pl1=0, no state file (the live reality) -> clear (pl1=0 IS a real no-clamp reading; proceed)
+    assert_eq!(verdict("IMAGPWR_PL1|0"), "clear");
+    // empty block (ssh failed) -> unknown (pl1 itself unreadable) -> fail-open proceed
     assert_eq!(verdict(""), "unknown");
 }
 
@@ -197,7 +206,10 @@ fn runner_proceeds_immediately_when_no_episode() {
     let setup = "export IMAG_POWER_STEPDOWN_READER_CMD='printf \"IMAGPWR_PL1|0\\n\"' IMAG_POWER_STEPDOWN_NOW_CMD='echo 100'";
     let (rc, out) = run_runner(setup, "imag_power_stepdown_wait u p h 1200 30 ''");
     assert_eq!(rc, 0, "no episode must proceed (rc0): {out}");
-    assert!(out.contains("no 25W clamp episode") && out.contains("waited 0s"), "got: {out}");
+    assert!(
+        out.contains("no 25W clamp episode") && out.contains("waited 0s"),
+        "got: {out}"
+    );
 }
 
 #[test]
@@ -212,8 +224,14 @@ export IMAG_POWER_STEPDOWN_NOW_CMD='c=$(cat "'"$W"'/clk"); echo $((c+1)) > "'"$W
 "#;
     let (rc, out) = run_runner(setup, "imag_power_stepdown_wait u p h 1200 5 ''");
     assert_eq!(rc, 0, "a clearing clamp must proceed (rc0): {out}");
-    assert!(out.contains("clamp cleared") && out.contains("state=clear"), "got: {out}");
-    assert!(!out.contains("ERROR:"), "a clearing clamp must NOT abort: {out}");
+    assert!(
+        out.contains("clamp cleared") && out.contains("state=clear"),
+        "got: {out}"
+    );
+    assert!(
+        !out.contains("ERROR:"),
+        "a clearing clamp must NOT abort: {out}"
+    );
 }
 
 #[test]
@@ -227,7 +245,9 @@ export IMAG_POWER_STEPDOWN_NOW_CMD='c=$(cat "'"$W"'/clk"); echo $((c+5)) > "'"$W
     let (rc, out) = run_runner(setup, "imag_power_stepdown_wait u p h 20 1 ''");
     assert_eq!(rc, 1, "a stuck clamp at budget must ABORT (rc1): {out}");
     assert!(
-        out.contains("ERROR:") && out.contains("STILL in the 25W thermal step-down clamp") && out.contains("aborting BEFORE"),
+        out.contains("ERROR:")
+            && out.contains("STILL in the 25W thermal step-down clamp")
+            && out.contains("aborting BEFORE"),
         "the abort must name the clamp + the duration (never a silent pass): {out}"
     );
 }
@@ -242,8 +262,14 @@ export IMAG_POWER_STEPDOWN_READER_CMD='i=$(cat "'"$W"'/idx"); f="'"$W"'/t$i"; [ 
 export IMAG_POWER_STEPDOWN_NOW_CMD='c=$(cat "'"$W"'/clk"); echo $((c+1)) > "'"$W"'/clk"; echo "$c"'
 "#;
     let (rc, out) = run_runner(setup, "imag_power_stepdown_wait u p h 1200 5 ''");
-    assert_eq!(rc, 0, "an unreadable read must fail-open (proceed rc0), never abort: {out}");
-    assert!(out.contains("state=unknown") && !out.contains("ERROR:"), "got: {out}");
+    assert_eq!(
+        rc, 0,
+        "an unreadable read must fail-open (proceed rc0), never abort: {out}"
+    );
+    assert!(
+        out.contains("state=unknown") && !out.contains("ERROR:"),
+        "got: {out}"
+    );
 }
 
 #[test]
@@ -251,8 +277,14 @@ fn runner_cannot_hang_with_a_stuck_clock_pass_ceiling_terminates() {
     // clamp forever + a clock frozen at 0 -> only the hard pass ceiling can terminate (ABORT rc1).
     let setup = "export IMAG_POWER_STEPDOWN_READER_CMD='printf \"IMAGPWR_PL1|1\\n\"' IMAG_POWER_STEPDOWN_NOW_CMD='echo 0' IMAG_POWER_STEPDOWN_MAX_PASSES=4";
     let (rc, out) = run_runner(setup, "imag_power_stepdown_wait u p h 100000 0 ''");
-    assert_eq!(rc, 1, "a stuck clock must terminate via the pass ceiling (rc1): {out}");
-    assert!(out.contains("ERROR:") && out.contains("aborting BEFORE"), "got: {out}");
+    assert_eq!(
+        rc, 1,
+        "a stuck clock must terminate via the pass ceiling (rc1): {out}"
+    );
+    assert!(
+        out.contains("ERROR:") && out.contains("aborting BEFORE"),
+        "got: {out}"
+    );
 }
 
 #[test]
@@ -264,7 +296,10 @@ export IMAG_POWER_STEPDOWN_READER_CMD='printf "IMAGPWR_PL1|1\n"'
 export IMAG_POWER_STEPDOWN_NOW_CMD='c=$(cat "'"$W"'/clk"); echo $((c+700)) > "'"$W"'/clk"; echo "$c"'
 "#;
     let (rc, out) = run_runner(setup, "imag_power_stepdown_wait u p h xyz bogus ''");
-    assert_eq!(rc, 1, "malformed args must sanitize (default budget 1200) and still terminate: {out}");
+    assert_eq!(
+        rc, 1,
+        "malformed args must sanitize (default budget 1200) and still terminate: {out}"
+    );
     assert!(out.contains("ERROR:"), "got: {out}");
 }
 

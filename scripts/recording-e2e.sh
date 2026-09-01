@@ -2868,6 +2868,39 @@ fi
 echo "    [4a/8] imag burn-target cross-check OK — program renders '$_imag_rendered' == burn target '$IMAG_PROG_SOURCE' (issue 1204)"
 fi
 
+# [4d0/8] issue 1268 (branch A) — guard-state-aware pre-gate WAIT for the imag 25W thermal step-down
+# clamp, run BEFORE the imag render-budget family below (the [4d1/8] MV-fps floor preflight + the
+# render-budget gate at [4d/8], both of which read imag STRICT). The #1162 imag-nb flaps into a 25W PL1
+# step-down ~18x/day (~20% duty, median ~12 min, #1040/#1188); at 25W the iGPU is pinned ~400MHz so a
+# burns-ON render read is ~57.7fps/15.6ms -> UNDER the 58fps/16.67ms budget -> a false abort of the
+# whole ~40-min run. This step polls the live clamp signal (throttle_reason_pl1, plus the guard's
+# STEPPED= state when readable) and proceeds the instant the clamp clears (RESTORE + pl1=0), so the
+# STRICT gates read steady-state -- a WAIT ON A MEASURED precondition, NOT a threshold relaxation and
+# NOT a blind sleep (the same shape as the [4j/8settle] genlock-FIFO settle + the DanteSync settle).
+# Bounded (default ~20 min = 1.7x median episode, env-overridable); on budget exhaustion it ABORTS
+# with a clamp-specific message (never a silent pass); an unreadable state/ssh failure FAILS OPEN on
+# the wait (proceed immediately -- the gate itself still decides, never a false abort, never a hang).
+# New lines only via the sourced-helper pattern (issue 675); skipped cleanly when imag is acked
+# offline (issue 1013). Runs whenever imag is measured (not gated on ALL_CAMBOX -- the imag render
+# terms below aren't either), so both a full and a single-cam run get the precondition.
+E2E_IMAG_POWER_WAIT="${E2E_IMAG_POWER_WAIT:-1}"
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[4d0/8] imag 25W step-down pre-gate wait (issue 1268)" "$IMAG_OFFLINE_ACK_REASON"
+elif [ "$E2E_IMAG_POWER_WAIT" = "1" ]; then
+  # shellcheck source=scripts/lib/imag-power-stepdown-wait.sh
+  . "$HERE/lib/imag-power-stepdown-wait.sh"
+  if ! imag_power_stepdown_wait "${IMAG_USER:-newlevel}" "${IMAG_PW:-newlevel}" "$IMAG_IP" \
+      "${E2E_IMAG_POWER_WAIT_BUDGET_S:-1200}" "${E2E_IMAG_POWER_WAIT_POLL_S:-30}" \
+      "$OUTDIR/imag-power-stepdown-wait.txt"; then
+    echo "    [4d0/8] imag stayed in the 25W thermal step-down clamp for the whole wait budget — aborting BEFORE the imag render gates (issue 1268)." >&2
+    echo "    A gate read in this state reads imag's iGPU at ~400MHz (57-58fps, misses the 60fps budget) — the thermal clamp, not a render regression." >&2
+    echo "    The physical fix (cooling) is issue 1268 branch B (owner decision); see .claude/rules/imag-power-envelope.md." >&2
+    exit 1
+  fi
+else
+  echo "[4d0/8] issue 1268 imag 25W step-down pre-gate wait — SKIPPED (E2E_IMAG_POWER_WAIT=$E2E_IMAG_POWER_WAIT)"
+fi
+
 echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors must not already be rendering below floor (target − tolerance) before we commit a ~40-min run; an unreadable box / a box not yet on the #771 genlock build is report-only, only a CONFIRMED sustained collapse aborts (never false-abort a CI gate). issue 1260: the strih term is REPORT-ONLY (a loud WARN, never an abort) while issue 1260 is open — the 4K divisor-1 MV floor pre-dates the 7-camera fleet and a healthy strih now idles below it; the imag term stays STRICT. Walk-back tracked on issue 1263."
 if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
   imag_leg_skip_note "[4d1/8] imag MV-fps floor preflight (#771) — strih still checked" "$IMAG_OFFLINE_ACK_REASON"
