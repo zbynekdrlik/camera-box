@@ -113,6 +113,11 @@ DEFAULT_MAX_DELTA_MS = 66.0
 # well under it (arrival floors ~59-76 ms).
 DEFAULT_MAX_ABS_LATENCY_MS = 94
 DEFAULT_FLOOR_MS = 3          # imag-min-latency floor; the slowest strih camera anchors here
+# #1253 -- an arrival floor derived from fewer than this many audit samples is one source-frame off
+# (run 1899055119's phantom cam3 "84" = 67 + 16.7 came from samples=2). arrival_floors_from_jitter
+# DROPS a floor whose explicit samples < this (mirrors the "omit malformed, never fabricate" rule);
+# a MISSING samples count is trusted (only an explicit low count is the known phantom).
+MIN_FLOOR_SAMPLES = 3
 # #1252 -- the N=2 (60-into-30) lock-phase quantum. The strih canvas is 30 fps and each source is
 # 60 fps, so which of the 2 source frames a canvas frame latches shifts a camera's measured present
 # age by an integer number of SOURCE frames; over a short (N=2) audit the mean can read one source
@@ -372,126 +377,152 @@ def within_aligned_quantum(deltas, quantum_ms=DEFAULT_ALIGNED_QUANTUM_MS):
 
 
 # ---------------------------------------------------------------------------
-# #1161 -- FLOOR-AWARE pins: raise the faster cameras ABOVE their arrival floor
+# #1161 / #1253 -- the pin plan (ADDITIVE FIFO) + the arrival-floor audit for the budget check
 # ---------------------------------------------------------------------------
-# WHY floor3_pins (floor + delta) is INERT and this replaces it on --execute:
-#   The genlock FIFO is latency = max(pin, transport), NOT pin + transport. In the
-#   transport-dominated regime the live rig is in (frames arrive ~59-66 ms old, deltas ~1 canvas
-#   frame), floor3_pins' `floor(3) + delta` (= ~3-50 ms) lands BELOW each source's arrival floor,
-#   so the reserve has no leverage -- the FIFO cannot present a frame younger than what arrived, and
-#   a pin below the arrival edge is structurally inert (root cause: issue 1161, off-rig-proven). The
-#   sibling genlock-C ACQUIRE frame-mover CAN add hold on a pin RISE, but ONLY when the pin sits
-#   ABOVE the arrival floor. So the aligner must target an ABSOLUTE achievable latency =
-#   arrival_floor_i + delta_i (the slowest camera's floor), raising each faster camera's pin above
-#   its own floor; the slowest (max present age) keeps the minimum pin (floor_ms), inert at its
-#   natural floor. The absolute floor is NOT measurable from the painter QR (gen_ts is CLOCK_REALTIME
-#   on the painter box, t_send is dev1 CLOCK_MONOTONIC -- cross-clock, RELATIVE deltas only); it
-#   comes from the strih genlock audit `latency_ms + mean_head_skew_ms` (the pin's own DanteSync-
-#   synced OBS clock), reconstructed by the SAME prerecord_phase_calibrate helper.
-def arrival_floors_from_jitter(jitter_json, sources):
+# THE FIFO IS ADDITIVE (#1253, supersedes the #1161 max-model rationale):
+#   The genlock FIFO is present_age = transport + pin, NOT max(pin, transport). Run 1899055119
+#   proved it (supervisor-confirmed): applying a pin shifts the present age ADDITIVELY,
+#   post_residual = pre_residual + pin_delta on every pinned camera. The old #1161 belief that
+#   `floor(3) + delta` lands "below the arrival floor -> inert" was the max-model misdiagnosis this
+#   fix removes -- under the additive FIFO EVERY pin adds hold, floor3 is not inert, and writing an
+#   ABSOLUTE present-age target (arrival_floor_i + delta_i) as the pin OVERSHOOTS by the arrival-floor
+#   baseline (the +83 ms doubling issue 1252/1253 observed). So the additive-correct plan ADDS the
+#   present-age gap to the CURRENT pin: new_pin_i = current_pin_i + delta_i. The oldest-present camera
+#   (delta 0) keeps its pin (floor after the two-phase reset); every younger camera is delayed by
+#   exactly its present-age gap so all converge to the oldest present age (relative-only -- no net
+#   chain latency beyond the physical floor).
+# WHY the arrival-floor audit is STILL needed (only for the BUDGET CHECK now, not the pin value):
+#   the additive plan aligns UP to the oldest present age. If THAT present age (= max arrival_floor)
+#   exceeds the 94 ms ceiling, aligning is budget-impossible (pins only add; we cannot bring the
+#   oldest camera down) -> the #1161/1168 BUDGET-BOUND soft-release. The resulting present age per
+#   camera is `arrival_floor_i + delta_i`, so the budget test keeps that arithmetic (re-read as the
+#   RESULTING present age, not the pin). The absolute floor is NOT measurable from the painter QR
+#   (gen_ts CLOCK_REALTIME on the painter box, t_send dev1 CLOCK_MONOTONIC -- cross-clock, RELATIVE
+#   deltas only); it comes from the strih genlock audit `latency_ms + mean_head_skew_ms` (the pin's
+#   own DanteSync-synced OBS clock), reconstructed by the SAME prerecord_phase_calibrate helper.
+def arrival_floors_from_jitter(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES):
     """{src: arrival_floor_ms} for the given strih sources, from a `genlock-jitter-report --json`
     dict. arrival_floor = latency_ms + mean_head_skew_ms (the effective pin during the sampled
     window plus the SIGNED mean deviation of actual arrival from that pin's own schedule = the actual
     present age, in the pin's own OBS clock). Reuses prerecord_phase_calibrate.measured_by_camera /
     source_names_by_template (never a second copy of the reconstruction). A source absent or
     malformed in the jitter JSON is simply OMITTED -- never a fabricated floor; the caller FAILs loud
-    if a FASTER camera lacks one."""
+    (or falls back to floor3) if a FASTER camera lacks one.
+
+    #1253 -- the samples=2 PHANTOM FLOOR is dropped at the source: a floor derived from fewer than
+    `min_samples` audit samples is one source-frame off (run 1899055119's cam3 read 84 = 67 + 16.7
+    from samples=2, a phantom "slowest"). A source whose EXPLICIT `samples` is below `min_samples` is
+    OMITTED (same "omit, never fabricate" honesty as a malformed entry); a MISSING samples count (an
+    older / partial report) is TRUSTED -- only an explicit low count is the known phantom."""
     from prerecord_phase_calibrate import measured_by_camera, source_names_by_template
     by_cam = measured_by_camera(jitter_json)                    # {cam_num: latency_ms + mean_head_skew}
     by_src = source_names_by_template(by_cam, "NDI cam{n}")     # {"NDI cam<N>": arrival_floor_ms}
-    return {s: by_src[s] for s in sources if s in by_src}
+    out = {}
+    for s in sources:
+        if s not in by_src:
+            continue
+        entry = jitter_json.get(s) if isinstance(jitter_json, dict) else None
+        samples = entry.get("samples") if isinstance(entry, dict) else None
+        if (isinstance(samples, (int, float)) and not isinstance(samples, bool)
+                and samples < min_samples):
+            continue                                           # #1253 phantom-floor guard
+        out[s] = by_src[s]
+    return out
 
 
 def floor_aware_partition(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
                           max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
-    """The PURE core of the floor-aware plan (#1161) that PARTITIONS instead of raising -- returns
-    ``(plan, over_budget, missing)`` so a caller can either HARD-FAIL (floor_aware_pins, below) or
-    SOFT-RELEASE the BUDGET_BOUND case (align(), issue 1168's re-tighten path). The slowest /
-    pin-dominated / clamp / faster-target semantics are EXACTLY floor_aware_pins' -- see its docstring:
-      * ``plan`` -- {src: pin_ms(int)}: the slowest (or pin-dominated co-slowest) camera at floor_ms
-        (or its held pin), every WITHIN-budget faster camera at its alignment target, and every
-        OVER-budget faster camera CLAMPED to floor_ms (a pin we cannot afford is NEVER written up
-        above the ceiling).
-      * ``over_budget`` -- [(src, floor_i, hold, target)] faster cameras whose target
-        (arrival_floor + hold) exceeds ``max_abs_latency_ms``.
-      * ``missing`` -- [src] faster cameras with no arrival-floor measurement.
-    ``floor_aware_pins`` wraps this and RAISES on ``missing``/``over_budget`` (the HARD-FAIL
-    direction, byte-unchanged); ``align`` uses it directly to soft-release the budget-bound case."""
+    """The PURE core of the ADDITIVE plan (#1161 mechanism, #1253 additive fix) that PARTITIONS
+    instead of raising -- returns ``(plan, over_budget, missing)`` so a caller can either HARD-FAIL
+    (floor_aware_pins, below) or SOFT-RELEASE the BUDGET_BOUND case (align(), issue 1168's re-tighten
+    path). #1253: the FIFO is ADDITIVE (present_age = transport + pin), so the plan ADDS each younger
+    camera's present-age gap to its CURRENT pin (new_pin = current_pin + hold), never the old absolute
+    arrival_floor + delta target -- see floor_aware_pins' docstring:
+      * ``plan`` -- {src: pin_ms(int)}: the oldest-present camera (hold 0) at its current pin (floor_ms
+        after the reset), every WITHIN-budget younger camera at ``current_pin + hold`` (clamped never
+        sub-floor), and every OVER-budget younger camera CLAMPED to its current pin / the floor (a
+        camera we cannot align within budget adds NO hold).
+      * ``over_budget`` -- [(src, floor_i, hold, present_age_target)] younger cameras whose RESULTING
+        present age (``arrival_floor_i + hold``) exceeds ``max_abs_latency_ms``.
+      * ``missing`` -- [src] younger cameras with no arrival-floor measurement (the budget is
+        unknowable without it).
+    ``current_pins`` supplies the additive base (a source's current pin); a source unread defaults to
+    ``floor_ms`` (the execute path resets to the floor first). ``floor_aware_pins`` wraps this and
+    RAISES on ``missing``/``over_budget`` (the HARD-FAIL direction); ``align`` uses it directly to
+    soft-release the budget-bound case."""
     plan = {}
     over_budget = []
     missing = []
     if not deltas:
         return plan, over_budget, missing
-    base = min(deltas.values())          # the slowest (max present age / min hold-to-add) anchor
+    base = min(deltas.values())          # the OLDEST-present (max present age / min hold-to-add) anchor
     for src, d in sorted(deltas.items()):
         hold = d - base
-        if hold < 0.5:                   # co-slowest by present age -> minimum pin, UNLESS pin-dominated
-            cur = current_pins.get(src) if current_pins else None
-            fl = arrival_floors.get(src)
-            # pin-dominated: this camera's present age is held by its OWN pin, not the transport (its
-            # true transport is below and unobservable). Do NOT tear the pin down to the floor (that
-            # would drop it to that lower transport -> break parity). Keep the pin. The 3 ms slack
-            # absorbs the audit's own +mean_head_skew noise (a floor read a couple ms ABOVE the pin is
-            # still pin-dominated, #1161 review 🔵); a source pinned UP but ABSENT from the audit
-            # (fl None) is kept too (its transport is unknowable, flooring it can only misalign). All
-            # no-ops on the two-phase-reset path, where every pin is at the floor (cur == floor_ms).
-            if cur is not None and cur > floor_ms and (fl is None or cur >= fl - 3.0):
-                plan[src] = max(floor_ms, int(round(cur)))
-            else:
-                plan[src] = floor_ms     # transport-dominated slowest -> floor (inert at its floor)
+        # #1253 ADDITIVE FIFO (supervisor-confirmed from run 1899055119: post_residual = pre_residual
+        # + pin_delta): present_age = transport + pin, NOT max(pin, transport). So the additive-correct
+        # pin is `current_pin + hold`: the oldest-present camera (hold 0) keeps its pin, every younger
+        # camera is delayed by exactly its present-age gap so all converge to the oldest present age.
+        # current_pin defaults to floor_ms when unread (the execute path resets every pin to the floor
+        # first). This SUBSUMES the old max-model "pin-dominated co-slowest don't-tear-down" case: the
+        # oldest camera keeps its pin because its hold is 0, never a special branch.
+        cur = current_pins.get(src) if current_pins else None
+        if cur is None:
+            cur = floor_ms
+        if hold < 0.5:                   # oldest-present anchor -> add nothing, keep its (reset=floor) pin
+            plan[src] = max(floor_ms, int(round(cur)))
             continue
         floor_i = arrival_floors.get(src)
         if floor_i is None:
-            missing.append(src)
+            missing.append(src)          # a younger camera with no arrival floor -> the budget is unknowable
             continue
-        target = floor_i + hold
-        if target > max_abs_latency_ms:
-            # #1161 over budget: the align pin would exceed the achievable-latency ceiling. Record it
-            # and CLAMP this camera to its floor (never write a pin we cannot afford) -- the caller
-            # (floor_aware_pins) RAISES on this, while align() SOFT-RELEASES it (BUDGET_BOUND).
-            over_budget.append((src, floor_i, hold, target))
-            plan[src] = floor_ms
+        # The RESULTING present age under the additive FIFO (current present age arrival_floor_i + the
+        # added hold). This is what the budget ceiling bounds -- NOT the pin value (a within-sanity
+        # spread keeps the pin itself well under 94; the concern is aligning UP to a too-old present age).
+        present_age_target = floor_i + hold
+        if present_age_target > max_abs_latency_ms:
+            # #1161 over budget (additive form): aligning this camera to the oldest present age exceeds
+            # the achievable-latency ceiling, and we cannot bring the oldest camera DOWN (pins only
+            # add). Record it and add NO hold (keep the reset floor) -- the caller (floor_aware_pins)
+            # RAISES on this, while align() SOFT-RELEASES it (BUDGET_BOUND).
+            over_budget.append((src, floor_i, hold, present_age_target))
+            plan[src] = max(floor_ms, int(round(cur)))
             continue
-        plan[src] = max(floor_ms, int(round(target)))   # #1161 clamp: never a sub-floor pin
+        plan[src] = max(floor_ms, int(round(cur + hold)))   # #1253 additive: current pin + hold (clamp: never sub-floor)
     return plan, over_budget, missing
 
 
 def floor_aware_pins(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
                      max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
-    """The FLOOR-AWARE pin plan (#1161). `deltas`: {src: ms >= 0} the PURE cross-camera present-age
-    delta (the hold to add to bring each camera up to the slowest; the slowest anchors to ~0 -- from
-    round_deltas over ZERO pins, so the cross-clock offset still cancels). `arrival_floors`: {src: ms}
-    the ABSOLUTE per-source present age (latency_ms + mean_head_skew_ms). Returns {src: pin_ms(int)}:
-    the slowest (min-delta) camera -> floor_ms (inert, stays at its natural floor); every faster
-    camera -> round(arrival_floor_i + delta_i) = the alignment target (the slowest's floor), which
-    sits ABOVE that camera's own floor so the genlock-C ACQUIRE frame-mover can add the hold.
+    """The ADDITIVE pin plan (#1161 mechanism, #1253 additive fix). `deltas`: {src: ms >= 0} the PURE
+    cross-camera present-age gap (the hold to add to bring each camera UP to the oldest present age;
+    the oldest anchors to ~0 -- from round_deltas over ZERO pins, so the cross-clock offset still
+    cancels). `arrival_floors`: {src: ms} the ABSOLUTE per-source present age (latency_ms +
+    mean_head_skew_ms) -- used ONLY for the budget check, not the pin value. `current_pins`: {src: ms}
+    each source's current pin (the additive base; a source unread defaults to floor_ms -- the execute
+    path resets to the floor first). Returns {src: pin_ms(int)}: the oldest-present (min-delta) camera
+    -> its current pin (floor_ms after the reset); every younger camera -> round(current_pin_i +
+    delta_i) so the ADDITIVE FIFO delays it by exactly its present-age gap and all converge to the
+    oldest present age (relative-only, no net latency beyond the physical floor). #1253: this REPLACES
+    the old absolute target round(arrival_floor_i + delta_i), which OVERSHOT under the additive FIFO
+    (present_age = transport + pin, so writing the target as the pin adds it on top of the transport).
 
-    `current_pins` (optional, review-hardening #1161): the audit "arrival floor" is the PRESENT AGE
-    (max(pin, transport)), which equals the raw transport ONLY while the pin sits BELOW it. From a
-    pinned steady state (a prior run left the pins elevated), a co-slowest camera can be held at that
-    present age SOLELY by its own pin (pin-dominated: current_pin >= its present age) -- its TRUE
-    transport is below and UNOBSERVABLE. Flooring such a source to floor_ms would drop it to that
-    lower transport -> misaligned. So a pin-dominated co-slowest keeps its current pin (never torn
-    down); a transport-dominated one (the normal case after the two-phase reset, where every pin is
-    at the floor) floors correctly. The PRIMARY fix is the reset (reset_pins_to_floor makes every
-    floor a true transport); this is the belt-and-suspenders for a direct/no-reset call.
-
-    FAILs loud (AlignmentImpossible) if a faster camera's target exceeds max_abs_latency_ms -- the
-    transport floor is too high to align within the latency budget; NEVER silently pins above the
-    bound, NEVER widens it. Also FAILs if a FASTER camera has no arrival-floor measurement (a pin
-    below its floor would be inert -- never a fabricated floor). The over-budget/missing DETECTION is
-    shared with align()'s BUDGET_BOUND soft-release via floor_aware_partition (same computation, one
-    copy); this wrapper is the HARD-FAIL direction."""
+    FAILs loud (AlignmentImpossible) if a younger camera's RESULTING present age (arrival_floor_i +
+    delta_i) exceeds max_abs_latency_ms -- aligning UP to the oldest present age would blow the
+    achievable-latency budget and the oldest camera cannot be brought down (pins only add); NEVER
+    silently deep-pins, NEVER widens the bound. Also FAILs if a younger camera has no arrival-floor
+    measurement (the budget is unknowable). The over-budget/missing DETECTION is shared with align()'s
+    BUDGET_BOUND soft-release via floor_aware_partition (same computation, one copy); this wrapper is
+    the HARD-FAIL direction."""
     if not deltas:
         return {}
     plan, over_budget, missing = floor_aware_partition(
         arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins)
     if missing:
         raise AlignmentImpossible(
-            "[qr-align] #1161 cannot compute a floor-aware pin for "
+            "[qr-align] #1253 cannot budget-check the additive plan for "
             + ", ".join(repr(s) for s in missing) + ": no arrival-floor measurement (the strih "
-            "genlock audit head_skew is required -- a pin below the arrival transport floor is "
-            "structurally inert). Provide --jitter-json.")
+            "genlock audit head_skew is required to know the RESULTING present age vs the 94 ms "
+            "ceiling). Provide --jitter-json.")
     if over_budget:
         raise AlignmentImpossible(
             "[qr-align] #1161 cannot align within the latency budget: "
@@ -529,12 +560,12 @@ def budget_bound_report(over_budget, residual_ms, max_abs_latency_ms=DEFAULT_MAX
 
 def floor_aware_stuck_abort_reason(plan, arrival_floors, post_pins, post_deltas,
                                    floor_ms=DEFAULT_FLOOR_MS):
-    """The #1161 abort reason for the FLOOR-AWARE path: above-floor pins were applied (read-back
-    confirmed) but the re-measured tail STILL stayed off-parity -- so the genlock-C ACQUIRE
-    frame-mover did not close the residual. Names each RAISED source (pin above the runtime floor)
-    with its target pin and residual, then points at the two live-only causes (the sibling genlock
-    build not deployed on strih, or a mid-run transport-floor shift). NEVER widens the same-frame
-    parity bar -- the run still FAILS."""
+    """The #1161/#1253 abort reason for the ADDITIVE plan path: additive hold pins were applied
+    (read-back confirmed) but the re-measured tail STILL stayed off-parity -- so the FIFO did not add
+    the requested hold additively (post != pre + pin_delta). Names each RAISED source (pin above the
+    runtime floor = got hold added) with its pin and residual, then points at the two live-only causes
+    (the sibling genlock build not deployed on strih, or a mid-run transport-floor shift). NEVER widens
+    the same-frame parity bar -- the run still FAILS."""
     parts = []
     for src in sorted(plan):
         fl = arrival_floors.get(src)
@@ -542,16 +573,15 @@ def floor_aware_stuck_abort_reason(plan, arrival_floors, post_pins, post_deltas,
             continue
         resid = post_deltas.get(src) if isinstance(post_deltas, dict) else None
         rtxt = "" if resid is None else f", residual {resid} ms"
-        parts.append(f"{src!r} pinned to {plan[src]} ms (above its {fl:.0f} ms arrival floor, "
+        parts.append(f"{src!r} pinned to {plan[src]} ms (arrival floor {fl:.0f} ms, "
                      f"read-back {post_pins.get(src)} ms{rtxt})")
     return (
-        "[qr-align] #1161 applied ABOVE-FLOOR pins " + str(plan) + " but the re-measured tail "
-        "STABILIZED off-parity: " + "; ".join(parts) + ". The pins clear each source's arrival "
-        "transport floor, so this is NOT the below-floor inert case -- the genlock-C ACQUIRE "
-        "frame-mover did not close the residual. Live-only causes: the sibling genlock build is not "
-        "deployed on strih (the ACQUIRE-bracket that adds the hold lives in genlock C), OR the "
-        "transport floor shifted mid-run. Parity tolerance is NOT widened; the run FAILS the owner's "
-        "same-frame bar.")
+        "[qr-align] #1253 applied ADDITIVE hold pins " + str(plan) + " but the re-measured tail "
+        "STABILIZED off-parity: " + "; ".join(parts) + ". The pins were applied (read-back confirmed) "
+        "but the residual did not close -- so under the ADDITIVE FIFO the presented frame did not move "
+        "by the added hold (post != pre + pin_delta). Live-only causes: the sibling genlock build that "
+        "moves the frame is not deployed on strih, OR the transport floor shifted mid-run. Parity "
+        "tolerance is NOT widened; the run FAILS the owner's same-frame bar.")
 
 
 def sanity_ok(deltas, max_delta_ms=DEFAULT_MAX_DELTA_MS):
@@ -571,31 +601,29 @@ def sanity_ok(deltas, max_delta_ms=DEFAULT_MAX_DELTA_MS):
 
 
 # ---------------------------------------------------------------------------
-# #1161 -- WHY a floor-3 apply can leave a one-canvas-frame residual: the pin
-# lever cannot ADD hold. The floor-3 model floors the slowest camera and RAISES
-# the faster ones' pins to delay them into parity -- but a per-source
-# genlock_latency_ms INCREASE is structurally inert on a live rig:
-#   * obs_source_set_genlock_latency_ms (vendor/obs-studio/libobs/obs-source.c)
-#     clears genlock_phase_anchor_ns and re-arms the (ms-path-inert) fill latch,
-#     but NEVER clears genlock_locked_next_boundary_ns (the conveyor) and NEVER
-#     forces a re-acquire (the ACQUIRE branch runs only when that boundary == 0).
-#   * The conveyor is a pure FOLLOWER with no restoring force toward the
-#     configured latency; should_converge_phase (src/genlock_backlog.rs) only
-#     SHEDS DOWNWARD toward max(reserve, floor). Raising reserve only raises that
-#     shed threshold -- it never deepens the hold.
-# So a pin increase moves only the CONFIG value, never the presented frame. The
-# frame-mover is #1003's Stage-2 ACQUIRE bracketing gate (a genlock-C change,
-# live-only, gated on #1004). These pure helpers let align() ATTRIBUTE the
-# residual precisely (instead of a generic "did NOT hold") and emit before/after
-# telemetry -- WITHOUT widening the owner's same-frame parity bar.
+# #1161 / #1253 -- WHY a hold-pin apply can STILL leave a residual, and how to
+# attribute it. Under the ADDITIVE FIFO (present_age = transport + pin, #1253) a
+# pin increase SHOULD deepen the hold (post = pre + pin_delta). So if the config
+# pin moved (read-back confirmed) but the presented frame did NOT, that is a
+# live-only ANOMALY -- the frame-mover is not present on the box:
+#   * the sibling genlock build that actually moves the frame on a pin RISE
+#     (#1003's Stage-2 ACQUIRE bracketing gate in genlock-C, gated on #1004) is
+#     not deployed on strih, OR
+#   * the transport floor shifted mid-run.
+# (Historically #1161 read this as "a pin increase is structurally inert" under
+# a max(pin, transport) model; run 1899055119 DISPROVED that -- the FIFO is
+# additive -- so a non-moving frame after a confirmed pin rise is an anomaly to
+# fix on the box, not an expected structural limit.) These pure helpers let
+# align() ATTRIBUTE the residual precisely (instead of a generic "did NOT hold")
+# and emit before/after telemetry -- WITHOUT widening the owner's same-frame bar.
 # ---------------------------------------------------------------------------
 def pins_requiring_more_hold(pre_pins, plan, min_increase_ms=1):
     """{source: increase_ms} for every planned source whose pin EXCEEDS its pre-apply pin by at
-    least `min_increase_ms` -- i.e. the sources the floor-3 plan asks the genlock FIFO to hold LONGER
-    (present an OLDER frame). This is the ONE direction the FIFO cannot execute on a live per-source
-    latency change (see the module note above), so a non-empty result on a persistent post-apply
-    residual is WHY it did not close. A source with an unknown pre-pin is skipped (its delta cannot
-    be computed) -- never fabricated."""
+    least `min_increase_ms` -- i.e. the sources the plan asks the genlock FIFO to hold LONGER
+    (present an OLDER frame). Under the additive FIFO this SHOULD move the frame; a non-empty result
+    on a persistent post-apply residual means the frame did NOT move despite a confirmed pin rise
+    (the live-only anomaly, see the module note above). A source with an unknown pre-pin is skipped
+    (its delta cannot be computed) -- never fabricated."""
     out = {}
     for src, want in plan.items():
         pre = pre_pins.get(src)
@@ -632,13 +660,14 @@ def format_pin_apply_report(pre_pins, post_pins, pre_deltas, post_deltas, inert)
 
 
 def hold_inert_abort_reason(inert, post_pins, post_deltas):
-    """The PRECISE #1161 abort reason: a STABILIZED tail stayed off-parity because the floor-3 plan
-    asked one or more sources to ADD hold (`inert` = pins_requiring_more_hold), which the genlock FIFO
-    cannot execute on a live per-source latency INCREASE. Names each inert source with its requested
-    increase, its read-back-confirmed live pin (so this is provably NOT a WS write failure -- the
-    config DID take), and its residual, then points at the owning fix. Callers use this ONLY when
-    `inert` is non-empty and the tail stabilized but failed parity -- it NEVER widens tolerance, the
-    run still FAILS the owner's same-frame bar."""
+    """The PRECISE #1161/#1253 abort reason: a STABILIZED tail stayed off-parity after the plan asked
+    one or more sources to ADD hold (`inert` = pins_requiring_more_hold) and the pin rose (read-back
+    confirmed) but the frame did NOT move. Under the additive FIFO a pin increase SHOULD deepen the
+    hold, so this is a live-only anomaly (the frame-mover build is not on the box, or the transport
+    floor shifted). Names each source with its requested increase, its read-back-confirmed live pin
+    (so this is provably NOT a WS write failure -- the config DID take), and its residual, then points
+    at the owning fix. Callers use this ONLY when `inert` is non-empty and the tail stabilized but
+    failed parity -- it NEVER widens tolerance, the run still FAILS the owner's same-frame bar."""
     parts = []
     for src in sorted(inert, key=lambda s: (-inert[s], s)):
         resid = post_deltas.get(src) if isinstance(post_deltas, dict) else None
@@ -647,13 +676,13 @@ def hold_inert_abort_reason(inert, post_pins, post_deltas):
                      f"(pin now {post_pins.get(src)} ms, read-back confirmed{rtxt})")
     return (
         "[qr-align] the re-measured tail STABILIZED but stayed off-parity because the genlock FIFO "
-        "did NOT add the requested hold: " + "; ".join(parts) + ". A per-source genlock_latency_ms "
-        "INCREASE cannot deepen the FIFO on a live rig (obs_source_set_genlock_latency_ms clears the "
-        "phase anchor but never the locked conveyor boundary and never forces a re-acquire; "
-        "should_converge_phase only sheds DOWNWARD toward max(reserve, floor)). This "
-        "last-canvas-frame residual is a genlock-FIFO structural limit owned by issue 1003's Stage-2 "
-        "ACQUIRE bracketing gate (a genlock-C change, live-only, gated on issue 1004), NOT the "
-        "aligner -- parity tolerance is NOT widened, the run FAILS the owner's same-frame bar.")
+        "did NOT add the requested hold: " + "; ".join(parts) + ". Under the ADDITIVE FIFO "
+        "(present_age = transport + pin; post = pre + pin_delta) a pin increase SHOULD deepen the "
+        "hold, so a pin that MOVED (read-back confirmed) but a frame that did NOT is a live-only "
+        "anomaly: the sibling genlock build that moves the frame on a pin rise (issue 1003's Stage-2 "
+        "ACQUIRE bracketing gate, a genlock-C change gated on issue 1004) is not deployed on strih, "
+        "OR the transport floor shifted mid-run -- NOT the aligner. Parity tolerance is NOT widened, "
+        "the run FAILS the owner's same-frame bar.")
 
 
 def alignment_ok(round_ticks, tol_frame_ids=DEFAULT_PARITY_TOL_IDS):
@@ -1123,13 +1152,14 @@ def read_current_pins(sources, host, password):
 def reset_pins_to_floor(sources, host, password, floor_ms=DEFAULT_FLOOR_MS):
     """#1161 two-phase reset PHASE 0: force every align source's genlock_latency_ms_src to `floor_ms`
     (read-back verified via apply_latency_pins.apply_pins), so that AFTER a settle the strih genlock
-    audit reads each source's TRUE transport floor instead of a pin-held present age. WHY: a prior
-    aligned run leaves the pins elevated and they PERSIST across runs; the audit `latency_ms +
-    mean_head_skew_ms` is the PRESENT AGE = max(pin, transport), which masks the true transport of a
-    pin-dominated camera. Only lowering every pin to the floor (below the transport) unmasks it. The
-    caller (qr-align.sh) resets -> settles -> RE-FETCHES the audit -> then runs the floor-aware plan.
-    Returns the number of sources reset. Idempotent (a source already at the floor is re-set to the
-    same value; apply_pins is read-back-verified)."""
+    audit reads each source's present age AT THE FLOOR (transport + floor) instead of an inflated
+    pin-held one. WHY: a prior aligned run leaves the pins elevated and they PERSIST across runs; under
+    the additive FIFO (#1253) the audit `latency_ms + mean_head_skew_ms` (present age = transport +
+    pin) is INFLATED by an elevated pin, so re-planning off it would ratchet cross-run latency upward.
+    Resetting every pin to the floor first makes the re-fetched audit a clean transport + floor
+    baseline (and returns the oldest camera to the floor every run). The caller (qr-align.sh) resets
+    -> settles -> RE-FETCHES the audit -> then runs the additive plan. Returns the number of sources
+    reset. Idempotent (a source already at the floor is re-set to the same value; read-back-verified)."""
     from apply_latency_pins import apply_pins
     import obs_phase2
     plan = {src: floor_ms for src in sources}
@@ -1166,13 +1196,14 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     never the post-restart convergence transient; every threshold (66 ms spread sanity, <=1-id
     parity, min-valid/parity rounds) is UNCHANGED, applied to the tail.
 
-    #1161: when `jitter_json` (the strih `genlock-jitter-report --json` per-source measurement) is
-    given, the plan raises each faster camera's pin to arrival_floor_i + delta_i (ABOVE its arrival
-    transport floor) so the genlock-C ACQUIRE frame-mover can add the hold, and FAILs loud if any
-    target exceeds `max_abs_latency_ms`. Without it the plan falls back to the (inert-prone)
-    floor3 plan with a loud warning (a pin below the arrival floor moves only the config, never the
-    frame). Returns a result dict; raises AlignmentImpossible on an un-measurable / never-stabilizing
-    / un-sane / un-alignable / still-misaligned rig."""
+    #1161/#1253: when `jitter_json` (the strih `genlock-jitter-report --json` per-source measurement)
+    is given, the plan ADDS each younger camera's present-age gap to its current pin (new_pin =
+    current_pin + delta, the additive-correct fix -- the FIFO is present_age = transport + pin) and
+    uses the arrival floors ONLY to budget-check the RESULTING present age (arrival_floor_i + delta_i),
+    FAILing loud if that exceeds `max_abs_latency_ms`. Without it the plan falls back to the floor3
+    plan (floor + delta -- under the additive FIFO this aligns on the reset path, but does NO budget
+    check) with a loud warning. Returns a result dict; raises AlignmentImpossible on an un-measurable
+    / never-stabilizing / un-sane / un-alignable / still-misaligned rig."""
     import time
     from apply_latency_pins import apply_pins
 
@@ -1245,10 +1276,10 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     result["median_deltas_ms"] = {s: round(v, 2) for s, v in deltas.items()}
     result["valid_rounds"] = n_valid
 
-    # #1161 FLOOR-AWARE plan basis. Resolve the per-source arrival floors from the strih audit and the
-    # PURE cross-camera present-age deltas (round_deltas over ZERO pins -- cross-clock-safe, the hold
-    # to add). A PARTIAL audit (a FASTER camera missing its floor) degrades GRACEFULLY to the
-    # inert-prone floor+delta fallback (loud warning; the verify re-measure still FAILs a genuine
+    # #1161/#1253 ADDITIVE plan basis. Resolve the per-source arrival floors from the strih audit and
+    # the PURE cross-camera present-age deltas (round_deltas over ZERO pins -- cross-clock-safe, the
+    # hold to add). A PARTIAL audit (a FASTER camera missing its floor) degrades GRACEFULLY to the
+    # budget-unchecked floor+delta fallback (loud warning; the verify re-measure still FAILs a genuine
     # misalignment) -- a partial fetch must never be strictly worse than no fetch (#1161 review).
     arrival_floors = arrival_floors_from_jitter(jitter_json, sources) if jitter_json else {}
     pure_deltas = None
@@ -1259,9 +1290,9 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
                           if pure_deltas.get(s, 0.0) - pbase >= 0.5 and s not in arrival_floors]
         if faster_missing:
             sys.stderr.write(
-                "WARNING: [qr-align] #1161 partial arrival-floor audit -- faster camera(s) "
+                "WARNING: [qr-align] #1253 partial arrival-floor audit -- faster camera(s) "
                 + ", ".join(repr(s) for s in faster_missing) + " missing a floor; falling back to "
-                "the inert-prone floor+delta plan rather than aborting the run.\n")
+                "the budget-unchecked floor+delta plan rather than aborting the run.\n")
             arrival_floors, pure_deltas = {}, None
     result["arrival_floors_ms"] = {s: round(v, 1) for s, v in arrival_floors.items()}
 
@@ -1310,10 +1341,11 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
             "1899055119). No pins applied; same-frame parity bar NOT widened.\n")
         return result
 
-    # FLOOR-AWARE: raise each faster camera ABOVE its arrival floor to the alignment target so the
-    # genlock-C ACQUIRE frame-mover can add the hold (a below-floor pin is structurally inert); the
-    # slowest keeps floor_ms. current_pins let it never tear down a pin-dominated co-slowest (#1161
-    # review). No floors -> the inert-prone floor+delta fallback.
+    # ADDITIVE PLAN (#1253): ADD each younger camera's present-age gap to its current pin (new_pin =
+    # current_pin + delta) so the additive FIFO delays it into parity; the oldest-present camera keeps
+    # its (reset=floor) pin. arrival_floors are used ONLY to budget-check the resulting present age.
+    # No floors -> the floor3 (floor+delta) fallback, which also aligns under additive but is
+    # budget-unchecked.
     if arrival_floors:
         result["present_age_deltas_ms"] = {s: round(v, 2) for s, v in pure_deltas.items()}
         plan, over_budget, missing = floor_aware_partition(
@@ -1362,9 +1394,9 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
         note = ("partial/unusable arrival-floor audit" if jitter_json
                 else "no per-source arrival-floor measurement (--jitter-json absent)")
         sys.stderr.write(
-            f"WARNING: [qr-align] #1161 {note} -- falling back to the floor+delta plan, which is "
-            "INERT when a raised pin lands below the arrival transport floor. The two-phase "
-            "reset+audit (qr-align.sh) enables the floor-aware plan.\n")
+            f"WARNING: [qr-align] #1253 {note} -- falling back to the floor+delta plan (additive: it "
+            "still aligns, but with NO budget check against the 94 ms ceiling). The two-phase "
+            "reset+audit (qr-align.sh) enables the budget-checked plan.\n")
         plan = floor3_pins(deltas, floor_ms)
     result["plan"] = plan
 
@@ -1421,13 +1453,14 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
             # flakiness/settle and sends the next worker chasing ruled-out hypotheses). Parity
             # tolerance is NOT widened either way.
             if arrival_floors:
-                # #1161 fix path: the pins were raised ABOVE each source's arrival floor, so this is
-                # NOT the below-floor inert case -- the genlock-C ACQUIRE frame-mover did not close
-                # the residual (its build is not deployed on strih, or the transport floor shifted).
+                # #1253 additive path: additive hold pins were applied (read-back confirmed) but the
+                # residual did not close -- so under the ADDITIVE FIFO the frame did not move by the
+                # added hold (the frame-mover build is not deployed on strih, or the transport floor
+                # shifted mid-run).
                 raise AlignmentImpossible(
                     floor_aware_stuck_abort_reason(plan, arrival_floors, post_pins, named, floor_ms))
-            # Fallback path (no arrival-floor measurement): the raised pins may sit BELOW the arrival
-            # floor -> structurally inert, the pre-fix reality (issue 1003 Stage-2 genlock limit).
+            # Fallback path (no arrival-floor measurement): the floor3 hold pins were applied but the
+            # frame did not move -- the pre-fix generic hold-inert attribution (issue 1003 Stage-2).
             raise AlignmentImpossible(hold_inert_abort_reason(inert, post_pins, named))
         why = ("did not STABILIZE" if not vstatus.done
                else f"stabilized at frame_id spread {post_spread} (> {parity_tol_ids})")
@@ -1465,12 +1498,12 @@ def main(argv=None):
     ap.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     ap.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
     ap.add_argument("--settle-s", type=float, default=DEFAULT_SETTLE_S)
-    # #1161: the strih genlock audit (genlock-jitter-report --json) that supplies each source's
-    # ABSOLUTE arrival transport floor (latency_ms + mean_head_skew_ms), so the plan can pin the
-    # faster cameras ABOVE their floor. Without it the plan falls back to the inert-prone floor+delta.
+    # #1161/#1253: the strih genlock audit (genlock-jitter-report --json) that supplies each source's
+    # ABSOLUTE arrival present age (latency_ms + mean_head_skew_ms), used to BUDGET-CHECK the additive
+    # plan against the 94 ms ceiling. Without it the plan still aligns (floor+delta) but budget-unchecked.
     ap.add_argument("--jitter-json", default=None,
                     help="genlock-jitter-report --json file (strih audit) -> per-source arrival "
-                         "floor for the #1161 floor-aware plan; without it the plan is inert-prone")
+                         "floor for the #1253 additive plan's budget check; without it, budget-unchecked")
     ap.add_argument("--max-abs-latency-ms", type=float, default=DEFAULT_MAX_ABS_LATENCY_MS,
                     help="#1161 absolute achievable-latency ceiling; a target above it FAILs loud "
                          "(transport floor too high) rather than deep-pinning (default 94)")
@@ -1508,8 +1541,8 @@ def main(argv=None):
                 jitter_json = json.load(f)
         except (OSError, ValueError) as exc:  # unreadable / malformed -> fall back, logged loudly
             sys.stderr.write(
-                f"WARNING: [qr-align] #1161 could not read --jitter-json {a.jitter_json!r} "
-                f"({exc}) -- proceeding without arrival-floor measurement (inert-prone fallback).\n")
+                f"WARNING: [qr-align] #1253 could not read --jitter-json {a.jitter_json!r} "
+                f"({exc}) -- proceeding without arrival-floor measurement (budget-unchecked fallback).\n")
 
     # #1209: a screenshot persister for undecodable align rounds (None = off, byte-identical gate).
     saver = ScreenshotSaver(a.screenshot_dir, a.screenshot_cap) if a.screenshot_dir else None

@@ -33,16 +33,17 @@ model (90/160/184) was owner-REJECTED and REVERTED — never re-derive absolute 
 
 ## The floor-3 model + the two bounds
 
-- **FLOOR-AWARE pins (#1161 — supersedes the old `3 + delta` on `--execute`).** `m_i =
-  current_pin_i − latency_i`; the MAX-transport (slowest) camera has the MIN `m_i` and anchors to
-  pin 3 (inert, stays at its natural floor). Every FASTER camera is pinned to `round(arrival_floor_i
-  + pure_delta_i)` — its own ABSOLUTE arrival transport floor plus the RELATIVE hold it must add to
-  match the slowest (= the slowest's floor). The old `new_pin_i = 3 + delta` was INERT because the
-  genlock FIFO is `latency = max(pin, transport)`, not `pin + transport`: in the transport-dominated
-  regime (frames arrive ~59-66 ms old, deltas ~1 canvas frame) `3 + delta` lands BELOW the arrival
-  floor and has no leverage (see the #1161 section below). Still RELATIVE-only in effect (the faster
-  cameras reach the SLOWEST's NATURAL floor — no net latency beyond the physical transport, never the
-  rejected 90/160/184 absolute depth), just computed ABOVE each floor so it actually moves the frame.
+- **ADDITIVE pins (#1253 — corrects the #1161 formula; the FIFO is `present_age = transport + pin`).**
+  `m_i = current_pin_i − latency_i`; the OLDEST-present (min-delta) camera anchors to its current pin
+  (floor 3 after the reset). Every YOUNGER camera is pinned to `round(current_pin_i + pure_delta_i)` —
+  its CURRENT pin plus the RELATIVE present-age gap it must add to match the oldest — so the additive
+  FIFO delays it into parity. The pre-#1253 formula pinned `round(arrival_floor_i + pure_delta_i)` (an
+  ABSOLUTE present-age target), which OVERSHOT because the FIFO is `transport + pin`, not
+  `max(pin, transport)` (run 1899055119: `post ≈ pre + pin_delta` — see the #1252/#1253 section
+  below). Still RELATIVE-only in effect (the younger cameras reach the OLDEST present age — no net
+  latency beyond the physical transport, never the rejected 90/160/184 absolute depth). The arrival
+  floors are still fetched, but now ONLY to budget-check the RESULTING present age
+  (`arrival_floor_i + delta_i`) against the 94 ms ceiling, never to compute the pin.
 - **Two SEPARATE bounds, both hard, neither ever widened:**
   - The SPREAD sanity `--max-delta-ms` (default `DEFAULT_MAX_DELTA_MS = 66` ms ≈ 2 frames) — the
     cross-camera delta (max−min). MUST stay BELOW the owner's "94 ms between identical cards is
@@ -179,6 +180,16 @@ system.**
 
 ## A pin BELOW the arrival floor is inert — pin ABOVE it (the floor-aware fix, #1161)
 
+> **CORRECTED by issue 1253 — the FIFO is ADDITIVE (`present_age = transport + pin`), NOT
+> `max(pin, transport)`.** This whole section's max-model premise (a below-floor pin is "inert", so
+> the aligner must pin ABOVE the arrival floor via the genlock-C ACQUIRE frame-mover) was a
+> MISDIAGNOSIS. Run 1899055119 proved `post ≈ pre + pin_delta`: EVERY pin adds hold, so `floor + delta`
+> is NOT inert and writing an absolute `arrival_floor + delta` target as the pin OVERSHOOTS. The live
+> plan is now the additive `new_pin_i = current_pin_i + delta_i` (arrival floors kept ONLY for the
+> budget check). The text below is retained for the #1161 history + the two-phase reset + partial-audit
+> fallback mechanics (all still used); read the pin FORMULA + the FIFO model from the #1252/#1253
+> section, not from the max-model claims here.
+
 The genlock FIFO is `latency = max(pin, transport)`, NOT `pin + transport`. So raising a source's
 `genlock_latency_ms` moves the presented frame ONLY when the new pin exceeds that source's arrival
 TRANSPORT floor (how old frames already are when they reach strih). In the transport-dominated regime
@@ -248,7 +259,7 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
   normal E2E path runs the reset+fetch for the actual floor-aware fix.
 - **Tier-0:** `arrival_floors_from_jitter`, `floor_aware_pins` (incl. the clamp + don't-tear-down),
   `floor_aware_stuck_abort_reason`, `reset_pins_to_floor`, and the align() flow (a FIFO-modelling
-  barrier: present_age = max(pin, arrival_floor); pinned-state sanity + partial-audit fallback) are
+  barrier: #1253 additive present_age = transport + pin; pinned-state sanity + partial-audit fallback) are
   pure/monkeypatched — `tests/python/test_qr_align_pinapply_1161.py`. The `qr-align.sh` two-phase
   reset+fetch is best-effort bash (verified by `bash -n` + shellcheck + a 3-case reset/arg smoke; the
   live reset+fetch is supervisor-verified on the rig).
@@ -360,12 +371,28 @@ is DOWNSTREAM — the recording-verdict SOURCE cross-camera spread gate still bl
 spread. So if a run PASSES `[4i/8align]` but later FAILs the recording SOURCE-spread gate, suspect a
 real 2-frame lag aliased low here — do NOT read the align PASS as "cameras are frame-perfect".
 
-**Latent, tracked as issue 1253 (needs an owner decision):** the measured `post ≈ pre + pin_delta`
-means the live FIFO adds the pin ADDITIVELY on top of the transport, which is NOT the
+**FIXED in issue 1253 — the FIFO is ADDITIVE, so the plan ADDS hold to the current pin.** The
+measured `post ≈ pre + pin_delta` means the live FIFO is `present_age = transport + pin`, NOT the
 `max(pin, transport)` model the issue-1161 above-floor formula (`pin_i = arrival_floor_i + delta_i`)
-assumes — so for a GENUINE ≥ 2-source-frame spread that formula would OVERSHOOT (a loud hold-inert
-abort, never a silent pass). That case has never been observed on this single-splitter rig (all
-cameras identical; a degraded card = 66 ms sanity FAIL) and the existing plan tests model the `max`
-FIFO, so it is out of this lane. Reverting the above-floor plan toward the additive `floor + hold`
-model risks regressing whatever inert case issue 1161 was added for — an architecture decision, filed
-as issue 1253, not this fix. (The `samples=2` phantom arrival floor is untreated there too.)
+assumed — so writing an ABSOLUTE present-age target as the pin adds it ON TOP of the transport and
+OVERSHOOTS by ~the arrival-floor baseline (the +83 ms doubling). For run 1899055119 the quantum gate
+catches it first (already-aligned), but a GENUINE ≥ 2-source-frame spread reaches the formula and
+overshoots into a loud hold-inert abort. The supervisor confirmed additivity from run 1899055119
+(a de-facto controlled experiment: pin +84 → residual shifted +84 additively on every pinned camera)
+and ruled option (1): the **additive-correct plan `new_pin_i = current_pin_i + hold_i`** (the PURE
+present-age gap from `round_deltas` over zero pins). The oldest-present camera (hold 0) keeps its pin
+(floor after the reset); every younger camera is delayed by exactly its present-age gap so all present
+ages converge to the OLDEST (relative-only — no net latency beyond the physical floor, exact and
+independent of current-pin uniformity: new present age = present_age_i + (max_present − present_age_i)
+= max_present). The `max`-model "pin-dominated co-slowest don't-tear-down" special case is SUBSUMED
+(hold 0 → keeps the pin). The issue-1161/1168 BUDGET-BOUND soft-release is preserved and re-expressed:
+`arrival_floor_i + hold_i` is now the RESULTING present age (= max_present), so `> 94` still means
+"aligning UP to the oldest present age blows the ceiling" (the oldest camera cannot be brought DOWN —
+pins only add) → apply none, report-only residual, exit 0. Arrival floors are now used ONLY for that
+budget check, never the pin value. The `samples=2` PHANTOM arrival floor is treated at the SOURCE:
+`arrival_floors_from_jitter` DROPS a floor whose explicit `samples < MIN_FLOOR_SAMPLES` (3) — run
+1899055119's cam3 "84" = 67 + 16.7 came from `samples=2` (a MISSING samples count is trusted; only an
+explicit low count is the known phantom). The `within_aligned_quantum` gate is unchanged and still
+runs before any plan. Tier-0: `tests/python/test_qr_align_pinapply_1161.py` (the `_FifoBarrier` model
+migrated `max` → additive, an additive-overshoot RED→GREEN proof) + `test_qr_align_quantum_1252.py`
+(the phantom-floor filter).
