@@ -3,10 +3,12 @@ paths:
   - "src/tear_detect.rs"
   - "src/aux_tick.rs"
   - "tests/tear_detect_781.rs"
+  - "tests/tear_detect_torn_fixture_1196.rs"
+  - "tests/aux_tick_fixture_decode_1196.rs"
   - "tests/fixtures/tear-781/**"
 ---
 
-# Projection-tap scanout-TEAR detector (issue 781) — report-only, and PROVEN-BLIND on current content
+# Projection-tap scanout-TEAR detector (issue 781/1196) — LIVE gate; the AUX SINGLE-MARK cross-band is the operative signal (the primary band is blind)
 
 ## The tap already exists — cam2's leg IS the projection path
 
@@ -19,7 +21,7 @@ segment, and reaches the dev1 merge as the per-frame `payloads` already carried 
 NO partial schema bump and NO on-box work (contrast the #1088/#1166 content-hash saga, which needed
 an on-box extract + a schema carry).
 
-## The signal, and why it is currently BLIND
+## The signal, and why the PRIMARY band alone is BLIND (cured by the v2 aux pair — see the LIVE section)
 
 The painted content is cam2's optical **dual-QR Vernier**: LEFT QR = latest EVEN tick, RIGHT = latest
 ODD tick, so a HEALTHY captured frame carries exactly two cam2-optical payloads whose `frame_id`s are
@@ -116,7 +118,37 @@ named follow-up design on the ticket (Approach: "positions available end-to-end 
 union"), deliberately OUT of this sub-step's scope. A `multi_path_suspect_fraction` ceiling is added
 to the promotion preconditions so a multi-tile window can never be promoted.
 
-**Promotion preconditions (ALL of them, in order — the LIVE flip stays out of scope until then):**
+## PROMOTED TO LIVE — 2026-09-01 (issue 1196), and the OPERATIVE-SIGNAL correction
+
+**`gates_overall_pass()` is now `true` and `TEAR_FRACTION_CEILING` = 0.005.** All preconditions
+below are MET. The known-torn calibration run 1700989544 (imag projector vsync disabled off-air)
+graded CAM2 (projection leg) `observed`, `tear_fraction` 0.018846 (16/849) and 0.237308 (201/847);
+every splitter leg unproven / 0.0. `multi_path_suspect_fraction` 0.0 everywhere (single-tile).
+
+**CORRECTION — the operative signal is the AUX SINGLE-MARK CROSS-BAND, not the primary band.**
+Per-frame mining of `stream-partial-1700989544.json` (the real rqrr decode) proves the PRIMARY
+dual-QR span is ALWAYS ≤ 1 (`max primary span = 1` on every one of the 9,883 stream-partial frames — the primary band is
+structurally blind, as the blindness section says). EVERY one of the 241 torn frames is
+`primary[X, X+1]` (span 1) + exactly ONE aux mark `[Y > X+1]` from a later generation (union span
+2–7): the bottom aux band, scanned out later, catches the newer generation during the un-vsynced
+tear — the v2 aux cross-band cure firing EXACTLY as designed. `zbarimg` independently reads the aux
+mark 37781 on the retained torn `frame-8090` (one gen ahead of the primary 37779/37780). This
+REVERSES the 2026-09-01 grading that read `max_spread` (the primary∪aux UNION span) as "primary
+span" and called the aux dead: dropping the aux from the union would make the gate BLIND (0 torn on
+CAM2). **`aux_decode_fraction` = 0.0 on CAM2 is a MISLEADING BOTH-marks metric** — scoped to the
+CAM2 windows, `≥ 2 aux marks` = 0.0 but `≥ 1 aux mark` (`aux_any_decode_fraction`) = 0.967–0.999.
+The aux is fully operative on the projection leg via single marks; an aux-coverage FLOOR was NEVER
+the right gate. Ceiling 0.005: GREEN Observed max 0.003546 (37 v2.1 verdicts) < 0.005 < the 0.018846
+induced floor — 0 false positives on history, 3.77x margin.
+
+**LIVE lock-step consumers (all landed):** `src/tear_detect.rs` (const + scoped `tear_gate_pass` +
+`gates_overall_pass()` true + `aux_any_decode_fraction` field), `src/bin/recording-verdict.rs`
+(`tear_gate` string + comment + any/both aux coverage line), `scripts/e2e_discord_report.py`
+`_blocking_failures` item 13 (guarded `gates_overall_pass is True`), and the real-frame TORN fixture
+`tests/tear_detect_torn_fixture_1196.rs` + `tests/fixtures/tear-781/stream-1700989544-frame-*.png`.
+Re-disarm = one line (`gates_overall_pass()` → `false`); the mechanism stays dormant.
+
+**Historical promotion preconditions (ALL MET — kept for the audit trail):**
 
 1. **Real-captured-frame fixture WITH aux marks — LANDED** (`tests/fixtures/tear-781/
    stream-2099068429-frame-{1399,4792}.png` + probe-gated `tests/aux_tick_fixture_decode_1196.rs`):
@@ -132,12 +164,13 @@ to the promotion preconditions so a multi-tile window can never be promoted.
    `<partial>-pixels/frame-N.png` retention + the partial's own `frames[]` entry for index N (the
    REAL rqrr output for those exact pixels) is the ground truth; `zbarimg` full-frame + the two
    aux design-rect crops is the independent second decoder — zero rig access, zero mkv pulls.
-2. **A known-torn calibration run** (imag pre-1107 build or the projector-vsync env escape —
-   owner-approved 2026-08-29, off-air) making the signal `Observed` with a HIGH `tear_fraction`
-   SEPARABLE from the green background (see the ceiling caveat below). It must be recorded which
-   band fires on the CAM2 projection leg under a real induced tear — the PRIMARY band (aux is 0.0
-   there) or the aux cross-band — since that decides whether the aux mechanism is even the operative
-   cure on the projection leg.
+2. **A known-torn calibration run — DONE (run 1700989544, 2026-09-01, projector-vsync env escape,
+   off-air).** Made the signal `Observed` on CAM2 with `tear_fraction` 0.018846 / 0.237308, cleanly
+   separable from the green background. **RESOLVED which band fires: the AUX SINGLE-MARK CROSS-BAND**
+   — every torn frame is `primary[X,X+1]` + one aux mark from a later generation; the primary band's
+   own span is always ≤ 1 (blind). So the aux mechanism IS the operative cure on the projection leg
+   (the v2 design is vindicated), and `aux_any_decode_fraction` (≥ 1 mark, ~0.97+ on CAM2) — not the
+   both-mark `aux_decode_fraction` (0.0) — is the honest operability signal.
 3. **Calibrate `TEAR_FRACTION_CEILING` + the `multi_path_suspect_fraction` ceiling (`MULTI_PATH_
    SUSPECT_CEILING`, LANDED at 0.10, issue 1196) from real green vs torn distributions**
    (`verdict-gate-seam-calibration.md`). The suspect ceiling keeps a MULTI-TILE window (tear
@@ -148,13 +181,19 @@ to the promotion preconditions so a multi-tile window can never be promoted.
    (`window_promotable`) and run-level (`tear.signal_promotable`) in the verdict block.
    **Two real-data corrections (2026-09-01, mined across 44 verdicts) — the aux floor is dropped and
    the ceiling can never be 0.0:**
-   - **The aux-coverage FLOOR is REMOVED as a promotion gate — `aux_decode_fraction` is a report-only
-     per-leg DIAGNOSTIC instead.** The CAM2 PROJECTION leg (the one this gate exists for) reads
-     `aux_decode_fraction` = 0.0 in 44/44 windows (the ~210px aux QRs are not in imag's projected
-     scanout), so its tears surface via the PRIMARY band; aux decodes only on the SPLITTER legs
-     (CAM1/CAM3/CAM6/CAM7), which are not the projector path. A hard aux floor would permanently block
-     the projection leg. `signal_promotable` (which requires `Observed`) is the fail-closed gate
-     regardless of which band is operative.
+   - **The aux-coverage FLOOR is REMOVED as a promotion gate — `aux_decode_fraction` (BOTH marks) is
+     a report-only DIAGNOSTIC; `aux_any_decode_fraction` (≥ 1 mark) is the operability signal.** The
+     CAM2 PROJECTION leg reads `aux_decode_fraction` = 0.0 because imag's OWN burn (911003, rendered
+     by imag's OBS projector, which cam2 films) OCCLUDES the LEFT (even) aux — present on ~99% of the
+     CAM2-window frames (240/241 torn frames carry it; all 241 torn aux marks are ODD/RIGHT). A
+     GEOMETRY defect (the LEFT aux sits in imag's burn zone [382,684); issue 1266 relocates it), NOT a
+     lossy-chain limitation and NOT "aux dead": scoped to the CAM2 windows a SINGLE (right) aux mark
+     decodes 0.967–0.999 of frames, and the operative cross-band tear needs only ONE.
+     The known-torn run PROVED the CAM2 tears come from the aux single-mark cross-band (the primary
+     band is blind, span always ≤ 1) — CORRECTING the earlier "tears surface via the PRIMARY band"
+     reading. A hard both-mark aux floor would have permanently blocked the projection leg;
+     `signal_promotable` (which requires `Observed`) is the fail-closed gate. Aux decodes BOTH marks
+     on the splitter legs (CAM1/CAM3/CAM6/CAM7), which are not the projector-scanout path.
    - **`TEAR_FRACTION_CEILING` cannot be 0.0.** A LOW background of `Observed` single-tile tears
      (~0.00118–0.00355 `tear_fraction`, 1–3 frames/window) exists on GREEN runs on both CAM2 (14
      windows) and CAM3 (2 windows), so `signal_promotable` already reads `true` on ~12 of 32
@@ -164,16 +203,20 @@ to the promotion preconditions so a multi-tile window can never be promoted.
      warranted, §4). SUPERSEDES the earlier "current multi-tile rig `multi_path_suspect_fraction
      ~0.998`, promotion impossible" note: the current green content is SINGLE-TILE, so promotion IS
      possible on it once the torn ceiling separates the induced tear from the green background.
-4. Then the one-line `gates_overall_pass() → true` flip + the repo-wide re-arm grep
-   (`ci-testing-gotchas.md`'s re-arm section).
+4. **DONE — the one-line `gates_overall_pass() → true` flip landed** (2026-09-01), with the
+   `_blocking_failures` item 13 + verdict-string re-arm. `ci-testing-gotchas.md`'s re-arm section
+   still applies to any FUTURE re-tighten/disarm of the ceiling.
 
 ## Consequences for anyone touching this
 
-- **It is REPORT-ONLY and stays report-only until proven.** `gates_overall_pass()` returns `false`
-  (mirrors `optical_floor`/`e2e_latency_gate`/`imag_leg_gate`). The emitted `TearSignalViability`
-  (`observed`/`unproven`) is the machine-checked promotion gate — a LIVE flip (`gates_overall_pass →
-  true`, one line) is valid ONLY once every precondition above holds. Do NOT flip it blind: an
-  all-zero green distribution here is the issue-1101 "blind signal" trap, not a tight ceiling.
+- **It is now LIVE (issue 1196, 2026-09-01).** `gates_overall_pass()` returns `true` — an `Observed`
+  window over `TEAR_FRACTION_CEILING` (0.005) FAILS the fused verdict; an `Unproven` window always
+  passes. Re-disarm is one line (`gates_overall_pass()` → `false`), the mechanism stays dormant.
+  Do NOT re-tighten the ceiling below the ~0.004 green Observed background (the aux single-mark
+  cross-band's noise floor) — that would false-fail green runs; and do NOT drop the aux from the
+  union (it is the OPERATIVE signal — the primary band is blind, so dropping it makes the gate blind,
+  the issue-1101 trap). Calibrate any ceiling change from `/tmp/recording-e2e-*/verdict-*.json` per
+  `verdict-gate-seam-calibration.md`.
 - **The pixel-seam detector alternative stays rejected** (heavy; a `src/probe/` decode change +
   schema carry, and per #1166 the lossy `.mp4` may need a codec-tolerant measure to not be blind
   too) — Approach 2 (full-height tick ladder, schema v7 + fleet redeploy) is the named escalation
@@ -183,15 +226,18 @@ to the promotion preconditions so a multi-tile window can never be promoted.
   the tear windows align 1:1 with the strict `all_cambox_continuity.segments`. Do not re-derive a
   different window/optical definition.
 - **Tier-0:** the pure module RED→GREENs via `rustc --edition 2021 --test` with the `serde::Serialize`
-  derive stripped (the imag-leg-report-only rule's recipe); TWO real-frame fixtures prove the
-  detector against real decode output (`pattern-change-needs-decode-fixture`) —
-  `tests/fixtures/tear-781/cam2_window_optical_ids.txt` (a real 847-frame single-band CAM2 window,
-  healthy → tear-free/Unproven) and `tests/fixtures/tear-781/cam2_window_multitile_ids_1196.txt`
-  (a real 846-frame MULTI-TILE window from stream-partial-1859005342 → 844 multi_path_suspect,
-  0 torn under v2.1, ~0.99 torn under v2 = the observed RED→GREEN). `recording-verdict.rs`
-  is probe-gated (CI-first) — verify the wiring with `cargo fmt --all --check` + a hand type-audit;
-  the new `TearStats` fields flow into `all_cambox_continuity.tear.windows[]` via `serde_to_value`
-  with no consumer change.
+  derive stripped (the imag-leg-report-only rule's recipe — the LIVE-flip RED→GREEN used exactly
+  this: `green_background_window_passes_the_calibrated_live_gate_1196` fails at ceiling 0.0, passes
+  at 0.005). Real-frame fixtures prove the detector against real decode output
+  (`pattern-change-needs-decode-fixture`): the id-list txts `cam2_window_optical_ids.txt` (a real
+  847-frame single-band CAM2 window, healthy → tear-free/Unproven) and
+  `cam2_window_multitile_ids_1196.txt` (a real 846-frame MULTI-TILE window → 844 multi_path_suspect,
+  0 torn); the healthy-run aux-decode PNGs `stream-2099068429-frame-{1399,4792}.png`
+  (`aux_tick_fixture_decode_1196.rs`); and the known-torn PNGs `stream-1700989544-frame-8090-torn.png`
+  (+ `-849{7,8}-healthy.png`) proving the aux single-mark cross-band tear on real projection-leg
+  pixels (`tests/tear_detect_torn_fixture_1196.rs`). `recording-verdict.rs` is probe-gated (CI-first)
+  — verify the wiring with `cargo fmt --all --check` + a hand type-audit; the new `TearStats` fields
+  flow into `all_cambox_continuity.tear.windows[]` via `serde_to_value` with no consumer change.
   **Multi-module replica assembly (issue 1196):** when the pure module under test depends on OTHER
   crate-root modules (`aux_tick` needs `colour_scale` + `motion_sweep` + `painter_mode`), assemble
   ONE standalone file that wraps each dependency's test-stripped source as `pub mod <name> { … }`

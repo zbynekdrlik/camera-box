@@ -872,6 +872,26 @@ def _blocking_failures(verdict):
             _OWN_CLAUDE,
         ))
 
+    # 13) Projection-tap scanout TEAR (issue 1196). LIVE since the known-torn calibration run
+    #     (gates_overall_pass=true on the all_cambox_continuity.tear block). An Observed window
+    #     whose tear_fraction exceeds the calibrated ceiling fails tear_gate_pass -> the imag
+    #     projection is tearing on the CAM2 leg (present-vsync broke). The `gates_overall_pass is
+    #     True` guard makes this auto-follow a future disarm (routes to nothing instead of
+    #     double-counting), mirroring the delivery-spread / own_burn_absent flips.
+    tear = _g(verdict, "all_cambox_continuity", "tear", default=None)
+    if isinstance(tear, dict) and tear.get("gates_overall_pass") is True:
+        torn = [
+            w for w in (tear.get("windows") or [])
+            if isinstance(w, dict) and w.get("tear_gate_pass") is False
+        ]
+        if torn:
+            boxes = _upper_join(sorted({w.get("cambox") for w in torn if w.get("cambox")}))
+            out.append((
+                f"Projekčný sken sa TRHÁ (scanout tear na projekčnej vetve): ZLYHAL — {boxes}"
+                if boxes else "Projekčný sken sa TRHÁ (scanout tear): ZLYHAL",
+                _OWN_CLAUDE,
+            ))
+
     return out
 
 
@@ -926,6 +946,12 @@ def _report_only_tripped(verdict):
         cams = _upper_join(oba.get("absent_cams") or [])
         names.append(f"chýbajúci vlastný burn kamery ({cams})" if cams
                      else "chýbajúci vlastný burn kamery")
+    # issue 1196 review-hardening — REPORT-ONLY: the projection-tap tear gate's aux signal is not
+    # operable (aux decoding collapsed), so the LIVE gate cannot fire and is silently blind. Surface
+    # it so the blind spot is visible; it never gates (a genuinely aux-free run is not a failure).
+    tear = _g(verdict, "all_cambox_continuity", "tear", default=None)
+    if isinstance(tear, dict) and tear.get("signal_operable") is False:
+        names.append("tear-gate slepá škvrna (aux nedekóduje)")
     return names
 
 
