@@ -39,17 +39,34 @@
 //!
 //! ## Why report-only (calibration-first) — issue 768
 //!
-//! The onset frames were guarded out of every existing artifact, so there is NO local calibration
-//! data for a wake-up-latency / onset-undecodable bound yet (mirrors
-//! `verdict-gate-seam-calibration.md` step 1, except the field it wants to mine does not exist
-//! until THIS seam starts emitting it). [`gates_overall_pass`] is therefore hardcoded `false`: the
-//! seam SERIALIZES the onset measurement so the next real E2E runs establish the warm baseline, and
-//! a follow-up flips it LIVE once (a) that baseline exists and (b) a deliberate keepalive-bypass
-//! cold cut (issue 768 test-design bod 1) makes at least one cut GENUINELY cold — until then every
-//! measured cut is warm (the CAM KEEPALIVE scene keeps its NDI receiver pulling off-program), so a
-//! warm-only baseline cannot yet set a bound a real cold gap would breach. Same crate-root
-//! pure-seam pattern as `optical_floor.rs` / `presentation_cadence.rs` (default features, Tier-0
-//! unit-testable); the probe-gated `recording-verdict.rs` is only a thin consumer.
+//! The onset frames were guarded out of every existing artifact, so there was NO local calibration
+//! data for a wake-up-latency / onset-undecodable bound when this seam shipped (mirrors
+//! `verdict-gate-seam-calibration.md` step 1, except the field it wants to mine did not exist until
+//! THIS seam started emitting it). [`gates_overall_pass`] is STILL hardcoded `false`, but the
+//! calibration story has advanced (issue 1086, 2026-09-01):
+//!
+//! - Warm baseline -- ESTABLISHED. Across 44 local E2E verdicts every cold transition is WARM (the
+//!   issue-767 keep-alive receiver never goes cold): worst wake-up 16.09-47.38 ms, never
+//!   `any_wakeup_over_max` / `any_wakeup_missing`. So the report-only ceiling `WAKEUP_LATENCY_MAX_NS`
+//!   = 66.67 ms does not false-flag any warm cut -- validated warm-safe, but UNvalidated for the
+//!   genuine-cold direction it actually guards.
+//! - Per-cambox tick-decodability -- RE-CONFIRMED (the LIVE-flip precondition below): in the 3-run
+//!   green series all 7 camboxes decode the shared cam2 Vernier tick (`undecodable` 0-1 of ~847 per
+//!   window, populated `presentation_cadence`), so no box reads a healthy cold cut black.
+//! - Onset-undecodable 0-tolerance is TOO STRICT. A WARM cut can carry a 1/30 optical-glitch
+//!   undecodable onset frame (observed: a healthy 39 ms warm cut flagged `genuine_cold_cut_miss`),
+//!   so the LIVE gate needs an onset-undecodable ALLOWANCE; because a genuine cold onset's first
+//!   frame(s) are legitimately undecodable during rebind, that allowance is coupled to the cold
+//!   wake-up and MUST be calibrated with the cold run, not from warm-only data.
+//!
+//! What STILL blocks the LIVE flip: a deliberate keepalive-bypass GENUINELY-cold cut (issue 768
+//! test-design bod 1 / issue 1086 `COLD_CUT_BYPASS_CAM`) -- until then every measured cut is warm
+//! (the CAM KEEPALIVE scene keeps its NDI receiver pulling off-program), a warm-only baseline
+//! cannot set a bound a real cold gap would breach, and the gate must be shown to RED on an
+//! issue-767 revert before it can gate. That run calibrates `WAKEUP_LATENCY_MAX_NS` + the new
+//! onset-undecodable allowance; the flip is then the one-line change this seam exists to make. Same
+//! crate-root pure-seam pattern as `optical_floor.rs` / `presentation_cadence.rs` (default features,
+//! Tier-0 unit-testable); the probe-gated `recording-verdict.rs` is only a thin consumer.
 //!
 //! ## The onset decodability signal is the SHARED cam2 Vernier tick — cross-cambox on THIS rig
 //!
