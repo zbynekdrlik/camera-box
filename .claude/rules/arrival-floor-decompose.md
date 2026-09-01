@@ -44,6 +44,15 @@ SECOND real fixture (`recording-e2e-659887078`, anchor cam4 / slowest cam2) that
 first (`recording-e2e-1363366080`, anchor cam3 / slowest cam1) so the smoke test folds two
 genuinely disagreeing runs.
 
+**Known limitation (issue 1168 review):** `--multi` has NO align-set / per-camera EXCLUSION, so it
+aggregates ALL cameras incl. cam2 (the projection probe, excluded from the align gate). The align-set
+floor view (cam2-excluded) — the one that matters for `[4i/8align]` budget-bound reasoning — is not a
+direct tool output; get it supervisor-side by filtering the `--multi --json` `per_camera` map (drop
+`NDI cam2`) or by post-processing each `mine_run_dir` result's rows. And the FLOOR spread this tool
+reports is a WIDER instrument than the align gate's own `report_only_residual_ms` (the barrier
+present-age residual, CI-log only) — when reasoning about the gate, cite the GATED barrier residual,
+not this floor spread (they disagree; `qr-align.md`).
+
 It auto-discovers the three stage artefacts by their standard names inside the run dir:
 `qr-align-jitter-<RUN>.json`, `qr-align-strih-<RUN>.log`, `cam*-cbox-burn-<RUN>.log`. Override with
 `--jitter-json` / `--strih-log`; restrict cameras with `--cameras "1,2,3"`. The strih source name is
