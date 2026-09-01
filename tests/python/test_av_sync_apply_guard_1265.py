@@ -109,6 +109,75 @@ def test_absent_last_applied_skips_jump_condition():
                          last_applied_offset_ms=None, proposed_offset_ms=-999.0) == ""
 
 
+# ------------------------------------------------------------------ SUSTAINED two-run confirmation (supervisor 2026-09-02)
+def test_sustained_step_proceeds_a_confirmed_real_offset():
+    # a REAL upstream step confirmed by a 2nd consistent run: residual -111 now, prev -111 (fresh) ->
+    # SUSTAINED -> conditions 2/3 STAND DOWN, the apply proceeds (the #856 +/-50 clamp bounds it).
+    assert g.hold_reason(residual_median_ms=-111.0, residual_spread_ms=25.0, band_verdict="HEALTHY",
+                         last_applied_offset_ms=-283.0, proposed_offset_ms=-111.0,
+                         prev_residual_ms=-111.0, prev_residual_age_s=3600) == ""
+
+
+def test_first_off_baseline_run_holds_outlier_protection():
+    # first anomalous run (prev None) -> HOLD, awaiting a 2nd consistent run.
+    r = g.hold_reason(residual_median_ms=-111.0, residual_spread_ms=25.0, band_verdict="HEALTHY",
+                      last_applied_offset_ms=-283.0, proposed_offset_ms=-111.0,
+                      prev_residual_ms=None, prev_residual_age_s=None)
+    assert r != "" and "2nd consistent run" in r and "no prior run" in r
+
+
+def test_disagreeing_prev_holds():
+    # prev -60 vs now -111 differ by 51ms > 33 tol -> NOT sustained -> HOLD (an outlier/oscillation).
+    r = g.hold_reason(residual_median_ms=-111.0, residual_spread_ms=25.0, band_verdict="HEALTHY",
+                      last_applied_offset_ms=-283.0, proposed_offset_ms=-111.0,
+                      prev_residual_ms=-60.0, prev_residual_age_s=3600)
+    assert r != "" and "disagrees" in r
+
+
+def test_stale_prev_holds():
+    # prev agrees in value but is >24h old -> not a valid confirmation basis -> HOLD.
+    r = g.hold_reason(residual_median_ms=-111.0, residual_spread_ms=25.0, band_verdict="HEALTHY",
+                      last_applied_offset_ms=-283.0, proposed_offset_ms=-111.0,
+                      prev_residual_ms=-111.0, prev_residual_age_s=90000)
+    assert r != "" and "stale" in r
+
+
+def test_band_drifting_holds_even_when_sustained():
+    # condition 1 is independent of SUSTAINED: never tune during a flapping timeline, even a confirmed one.
+    r = g.hold_reason(residual_median_ms=-111.0, residual_spread_ms=25.0, band_verdict="DRIFTING",
+                      last_applied_offset_ms=-283.0, proposed_offset_ms=-111.0,
+                      prev_residual_ms=-111.0, prev_residual_age_s=3600)
+    assert r != "" and ("DRIFTING" in r or "band" in r.lower())
+
+
+def test_sustained_bypasses_the_jump_condition_too():
+    # a confirmed step also stands down the jump condition (proposed swings far from last-applied).
+    assert g.hold_reason(residual_median_ms=-111.0, residual_spread_ms=25.0, band_verdict="HEALTHY",
+                         last_applied_offset_ms=-283.0, proposed_offset_ms=-111.0,  # 172ms jump
+                         prev_residual_ms=-111.0, prev_residual_age_s=3600) == ""
+
+
+def test_the_real_2026_09_01_series_converges_not_holds_forever():
+    # -77 -> -126 -> -111 across three runs (the supervisor's real upstream step). The first two
+    # disagree > tol (HOLD, outlier protection), the third agrees with the second within tol
+    # (SUSTAINED -> PROCEED, so #856 applies instead of the rig staying ~90ms mis-aligned forever).
+    common = dict(residual_spread_ms=25.0, band_verdict="HEALTHY",
+                  last_applied_offset_ms=-283.0, proposed_offset_ms=-283.0)
+    assert g.hold_reason(residual_median_ms=-77.0, prev_residual_ms=-20.0, prev_residual_age_s=3600, **common) != ""
+    assert g.hold_reason(residual_median_ms=-126.0, prev_residual_ms=-77.0, prev_residual_age_s=3600, **common) != ""
+    assert g.hold_reason(residual_median_ms=-111.0, prev_residual_ms=-126.0, prev_residual_age_s=3600, **common) == ""
+
+
+def test_sustained_tol_is_configurable():
+    # a 40ms run-to-run delta is sustained under a wider tol, held under the default.
+    assert g.hold_reason(residual_median_ms=-111.0, residual_spread_ms=25.0, band_verdict="HEALTHY",
+                         last_applied_offset_ms=None, proposed_offset_ms=-111.0,
+                         prev_residual_ms=-71.0, prev_residual_age_s=3600, sustained_tol_ms=50.0) == ""
+    assert g.hold_reason(residual_median_ms=-111.0, residual_spread_ms=25.0, band_verdict="HEALTHY",
+                         last_applied_offset_ms=None, proposed_offset_ms=-111.0,
+                         prev_residual_ms=-71.0, prev_residual_age_s=3600, sustained_tol_ms=33.0) != ""
+
+
 # ------------------------------------------------------------------ fail-safe numeric parsing
 def test_unparseable_numerics_do_not_crash_and_skip_their_condition():
     # a garbage residual just skips condition 2 (never a crash, never a false hold from it).
@@ -142,6 +211,28 @@ def test_cli_decide_proceed():
         capture_output=True, text=True, check=True,
     ).stdout
     assert "hold_reason=\n" in out or out.strip().endswith("hold_reason=")
+
+
+def test_cli_decide_sustained_proceeds():
+    # a confirmed step via the CLI (prev args) -> empty hold_reason (proceed).
+    out = subprocess.run(
+        [sys.executable, str(_GUARD), "decide", "--residual-median-ms", "-111.0",
+         "--residual-spread-ms", "25.0", "--band-verdict", "HEALTHY",
+         "--last-applied-offset-ms", "-283.0", "--proposed-offset-ms", "-111.0",
+         "--prev-residual-ms", "-111.0", "--prev-residual-age-s", "3600"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "hold_reason=\n" in out or out.strip().endswith("hold_reason=")
+
+
+def test_cli_decide_first_offbaseline_holds():
+    out = subprocess.run(
+        [sys.executable, str(_GUARD), "decide", "--residual-median-ms", "-111.0",
+         "--band-verdict", "HEALTHY", "--proposed-offset-ms", "-111.0"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    line = next(l for l in out.splitlines() if l.startswith("hold_reason="))
+    assert line != "hold_reason=" and "2nd consistent run" in line
 
 
 def test_cli_always_exits_zero_even_on_garbage():

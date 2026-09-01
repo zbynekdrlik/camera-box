@@ -1949,6 +1949,13 @@ fi"
       AV_SYNC_APPLY_OFFSET_MS=""
     fi
   fi
+  # #1265b: persist THIS run's measured residual (HELD or APPLIED, EVERY run) to the dev1
+  # residual-last reference, so the NEXT run's SUSTAINED two-run confirmation has a prev to compare
+  # against -- a genuine sustained upstream step (residual agrees run-to-run) then PROCEEDS instead
+  # of being HELD forever (supervisor 2026-09-02: the guard must not make a real step un-appliable).
+  # MUST run AFTER the guard decide above (which read the PREVIOUS run's value) and BEFORE the
+  # apply-persist below (so pin_at_measure reads the measure-time pin). Sourced-helper (#675).
+  av_sync_persist_residual "$REPORT_JSON" "$RUN_ID"
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     echo "[cleanup] #856: applying this run's own computed rig-wide A/V correction (${AV_SYNC_APPLY_OFFSET_MS}ms) to '$STREAM_PROG_SOURCE' on stream (av_sync_calibrate.py --apply, read-back verified)"
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/av_sync_calibrate.py" --host "$STREAM" \

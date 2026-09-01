@@ -130,3 +130,25 @@ fn cleanup_persists_the_applied_offset_after_the_apply() {
          success file)"
     );
 }
+
+#[test]
+fn cleanup_persists_this_runs_residual_after_the_guard_before_the_apply() {
+    // #1265b: EVERY run's residual is persisted for the NEXT run's SUSTAINED check. It must run
+    // AFTER the guard decide (which read the PREVIOUS run's residual) and BEFORE the apply (so
+    // pin_at_measure reads the pre-apply/measure-time pin, and the guard didn't read this run's own
+    // residual as "prev").
+    let s = recording_e2e();
+    let body = cleanup_body(&s);
+    let guard = body
+        .find("av_sync_apply_guard_decide")
+        .expect("cleanup() must call the apply-guard");
+    let persist_resid = body.find("av_sync_persist_residual").expect(
+        "#1265b: cleanup() must persist this run's residual for the next run's SUSTAINED check",
+    );
+    let apply = body.find("av_sync_calibrate.py").expect("apply call");
+    assert!(
+        guard < persist_resid && persist_resid < apply,
+        "#1265b: av_sync_persist_residual must run AFTER av_sync_apply_guard_decide and BEFORE the \
+         av_sync_calibrate.py apply (guard={guard} persist={persist_resid} apply={apply})"
+    );
+}

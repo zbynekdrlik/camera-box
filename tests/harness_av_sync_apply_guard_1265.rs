@@ -51,6 +51,8 @@ fn write(dir: &std::path::Path, name: &str, content: &str) -> String {
 
 const UNSTABLE_VERDICT: &str = r#"{"all_cambox_av_sync": {"residual_median_ms": -126.0, "residual_spread_ms": 20.8, "gate_pass": false, "gate_tolerance_ms": 90, "expected_ms": 0}}"#;
 const STABLE_VERDICT: &str = r#"{"all_cambox_av_sync": {"residual_median_ms": 16.9, "residual_spread_ms": 20.0, "gate_pass": true, "gate_tolerance_ms": 90, "expected_ms": 0}}"#;
+// #1265b: a sustained real upstream step -- residual -111 both this run and the persisted prev.
+const STEP_VERDICT: &str = r#"{"all_cambox_av_sync": {"residual_median_ms": -111.0, "residual_spread_ms": 25.0, "gate_pass": false, "gate_tolerance_ms": 90, "expected_ms": 0}}"#;
 
 #[test]
 fn read_verdict_residual_reads_median_and_spread() {
@@ -248,6 +250,130 @@ fn persist_hold_reason_writes_a_durable_file_finding6a() {
     assert!(
         out.contains("empty_wrote=no"),
         "an empty reason must NOT write a file: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+// -------- #1265b SUSTAINED two-run confirmation (supervisor 2026-09-02): persist EVERY run's
+// residual, and let a confirmed real step PROCEED instead of holding forever. --------
+
+#[test]
+fn persist_residual_then_read_prev_round_trips() {
+    let d = tempfile::tempdir().unwrap();
+    let v = write(d.path(), "verdict.json", STEP_VERDICT);
+    let last = write(
+        d.path(),
+        "last.json",
+        r#"{"source": "NDI 2ME PGM", "offset_ms": -283.0, "applied_latency_ms": 926}"#,
+    );
+    let rlast = d
+        .path()
+        .join("residual-last.json")
+        .to_string_lossy()
+        .into_owned();
+    // persist THIS run's residual (reads residual from the verdict, pin from av-sync-last.json),
+    // then read it back via av_sync_read_prev_residual -> "<residual>\t<age>".
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        &format!(
+            "av_sync_persist_residual '{v}' 'run-42' '{last}' '{rlast}'\n\
+             echo \"pin=$(python3 -c \"import json;print(json.load(open('{rlast}')).get('pin_at_measure'))\")\"\n\
+             pr=\"$(av_sync_read_prev_residual '{rlast}')\"\n\
+             echo \"resid=$(printf '%s' \"$pr\" | cut -f1)\"\n\
+             echo \"age_ok=$([ -n \"$(printf '%s' \"$pr\" | cut -f2)\" ] && echo yes || echo no)\"\necho END"
+        ),
+    );
+    assert!(ok, "persist/read-prev must not abort under set -e: {out}");
+    assert!(
+        out.contains("resid=-111.0"),
+        "the persisted residual must read back: {out}"
+    );
+    assert!(
+        out.contains("pin=926"),
+        "pin_at_measure must be recorded from av-sync-last.json: {out}"
+    );
+    assert!(
+        out.contains("age_ok=yes"),
+        "a persisted ts must yield a computable age: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn decide_sustained_via_the_persisted_prev_file_proceeds() {
+    let d = tempfile::tempdir().unwrap();
+    let v = write(d.path(), "verdict.json", STEP_VERDICT);
+    let last = write(
+        d.path(),
+        "last.json",
+        r#"{"source": "NDI 2ME PGM", "offset_ms": -283.0, "applied_latency_ms": 926}"#,
+    );
+    let rlast = d
+        .path()
+        .join("residual-last.json")
+        .to_string_lossy()
+        .into_owned();
+    // 1) persist THIS run's residual (-111); 2) decide the NEXT run (also -111, so it agrees with the
+    // just-persisted prev within tol, fresh ts) -> SUSTAINED -> PROCEED (empty), even though
+    // |residual|>60. Proves the real-step convergence path end-to-end through the sourced lib.
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        &format!(
+            "av_sync_persist_residual '{v}' 'run-1' '{last}' '{rlast}'\n\
+             r=\"$(av_sync_apply_guard_decide '{v}' 'HEALTHY' '-111.0' \"$GUARD\" '{last}' '{rlast}')\"\n\
+             echo \"hold=[$r]\"\necho END"
+        ),
+    );
+    assert!(ok, "decide with prev must not abort under set -e: {out}");
+    assert!(
+        out.contains("hold=[]"),
+        "a residual matching the persisted prev must PROCEED (sustained): {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn decide_first_run_no_prev_file_holds() {
+    let d = tempfile::tempdir().unwrap();
+    let v = write(d.path(), "verdict.json", STEP_VERDICT);
+    // no residual-last file exists yet -> first off-baseline run -> HOLD (outlier protection).
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        &format!(
+            "r=\"$(av_sync_apply_guard_decide '{v}' 'HEALTHY' '-111.0' \"$GUARD\" /nope/last.json /nope/residual.json)\"\n\
+             echo \"hold=[$r]\"\necho END"
+        ),
+    );
+    assert!(
+        ok,
+        "decide with no prev file must not abort under set -e: {out}"
+    );
+    assert!(
+        out.to_lowercase().contains("2nd consistent run"),
+        "a first off-baseline run with no prev must HOLD awaiting confirmation: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn persist_residual_missing_verdict_is_a_noop_never_aborts() {
+    let d = tempfile::tempdir().unwrap();
+    let rlast = d
+        .path()
+        .join("residual-last.json")
+        .to_string_lossy()
+        .into_owned();
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        &format!(
+            "av_sync_persist_residual '/nope/verdict.json' 'run-x' '/nope/last.json' '{rlast}'\n\
+             echo \"wrote=$([ -f '{rlast}' ] && echo yes || echo no)\"\necho END"
+        ),
+    );
+    assert!(ok, "a missing verdict must not abort under set -e: {out}");
+    assert!(
+        out.contains("wrote=no"),
+        "no residual_median_ms -> no residual-last file written: {out}"
     );
     assert!(out.contains("END"), "{out}");
 }

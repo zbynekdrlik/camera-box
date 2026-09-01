@@ -275,16 +275,20 @@ per-camera A/V offsets. On 2026-09-01 the stream box's reference source `mbc` ts
 and the controller walked the pin 926→976 toward noise. The #1265 STABILITY GUARD holds it instead:
 
 - **Pure decision `scripts/av_sync_apply_guard.py`** (`hold_reason(...)`, pytest Tier-0) HOLDs on ANY
-  of three fail-safe signals: (1) the run's stream `mbc` ts_lag band is DRIFTING
+  of: (1) the run's stream `mbc` ts_lag band is DRIFTING
   (`.claude/rules/audio-lag-watchdog.md` band arm, gathered at `[8/8g]`) — a supplementary
   "defer tuning while the timeline is unstable" hold, NOT the residual explanation; (2)
-  `|residual_median_ms|` beyond a ±60 ms sanity ceiling (green series ±33; the bad runs −77/−111/−126
-  — no history needed) — the PRIMARY gate, checked **REGARDLESS of the band** (supervisor finding: a
-  flat/HEALTHY band still measured −111.5, a real oscillating upstream-audio-latency step, so the
-  residual — not the flap — is what must gate; band-scoping condition 2 was rejected); or (3)
-  `|proposed − last_applied| > 90 ms` vs `~/.camera-box/av-sync-last.json` — an anti-oscillation/step
-  guard. The residual EARLY-WARNING (before the E2E runs) is the separate upstream-step detector,
-  issue 1267.
+  `|residual_median_ms|` beyond a ±60 ms sanity ceiling (green series ±33; the bad runs −77/−111/−126)
+  — checked **REGARDLESS of the band** (a flat/HEALTHY band still measured −111.5, a real upstream
+  step; band-scoping was rejected); or (3) `|proposed − last_applied| > 90 ms` vs
+  `~/.camera-box/av-sync-last.json` — an anti-oscillation guard. **But (2) and (3) are SUSTAINED-gated
+  (supervisor 2026-09-02, the #1265b 🔴 fix):** every run's residual is persisted to
+  `~/.camera-box/av-sync-residual-last.json`, and a step confirmed by a 2nd consecutive run (prev
+  fresh ≤ 24 h AND agrees within 33 ms) STANDS DOWN (2)/(3) so the apply proceeds — the ±50 ms/run
+  clamp bounds each step, so a GENUINE sustained upstream step converges instead of being held forever
+  (the un-appliable-forever inversion of the #856 "gate aligns, never the operator" contract). A first
+  anomalous / disagreeing / stale-prev run still HOLDs (outlier protection); (1) is SUSTAINED-independent.
+  The residual EARLY-WARNING (before the E2E runs) is the separate upstream-step detector, issue 1267.
 - **Sourced lib `scripts/lib/av-sync-apply-guard.sh`** (#675) does the I/O gather (verdict residual,
   last-applied offset, the stream band verdict) + the persist, all `set -euo pipefail`-safe (it runs
   in the `cleanup()` EXIT trap, so every function ALWAYS returns 0 — the #1133 class).

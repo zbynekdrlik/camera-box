@@ -164,15 +164,28 @@ timeline-corrupted run passes both. `scripts/av_sync_apply_guard.py` (pure, pyte
 `scripts/lib/av-sync-apply-guard.sh` (sourced I/O gather, #675) HOLD the apply on ANY of: (1) the
 run's stream `mbc` band verdict is DRIFTING (gathered at `[8/8g]` into `AV_SYNC_BAND_VERDICT`) — a
 supplementary "audio timeline UNSTABLE, defer tuning" hold, NOT a claim the flap explains the
-residual; (2) `|residual_median_ms|` exceeds a ±60 ms sanity ceiling (the green series was within
-±33, the bad runs −77/−111/−126 — no history needed, works before the band facet deploys) — **the
-PRIMARY gate, checked REGARDLESS of the band verdict** (a flat/HEALTHY band still measured −111.5,
-the real oscillating upstream step, so scoping condition 2 to a non-healthy band was REJECTED); or
-(3) `|proposed − last_applied| > 90 ms` vs the dev1-persistent `~/.camera-box/av-sync-last.json`
-(populated by COPYING the calibrate full-schema success file after each landed apply, preserving its
-`applied_latency_ms` data contract) — an anti-oscillation/step guard. A HOLD clears
-`AV_SYNC_APPLY_OFFSET_MS` (skipping the byte-unchanged apply) with a loud log + a persisted
-`av-sync-apply-hold-<run>.txt` AND a durable `~/.camera-box/av-sync-apply-hold-last.txt` reason;
-when the guard says proceed, #856 is byte-identical. The residual EARLY-WARNING (before the E2E even
-runs) is the separate upstream-step detector, issue 1267. See
+residual (holds even when a step is sustained); (2) `|residual_median_ms|` exceeds a ±60 ms sanity
+ceiling, checked REGARDLESS of the band (a flat/HEALTHY band still measured −111.5, a real upstream
+step, so band-scoping was REJECTED) — **but ONLY while the step is not yet SUSTAINED**; or (3)
+`|proposed − last_applied| > 90 ms` vs the dev1-persistent `~/.camera-box/av-sync-last.json`
+(populated by COPYING the calibrate full-schema success file, preserving its `applied_latency_ms`
+data contract) — an anti-oscillation/step guard, also SUSTAINED-gated.
+
+**SUSTAINED two-run confirmation (supervisor 2026-09-02 — the #1265b 🔴 fix).** Conditions 2 and 3
+alone would make a GENUINE sustained upstream step (2026-09-01: −77 → −126 → −111 across three runs,
+agreeing within ~25 ms while the pin held 926 — the 926→976 step was CORRECT) UN-APPLIABLE FOREVER,
+leaving the rig ~90 ms mis-aligned until a human hand-edits the pin — inverting the #856 "the gate
+aligns, never the operator" contract. So the caller persists EVERY run's residual (held OR applied)
+to `~/.camera-box/av-sync-residual-last.json` (`{run_id, ts, residual_median_ms, residual_spread_ms,
+pin_at_measure}`), and the guard treats a step as SUSTAINED when the previous run's persisted residual
+exists, is ≤ 24 h old, and agrees with this run within `SUSTAINED_TOL_MS` (default 33 = one 30 fps
+frame). When SUSTAINED, conditions 2 and 3 STAND DOWN and the apply proceeds — the existing #856
+±50 ms/run clamp bounds each step, so a two-run-confirmed step converges over a few runs instead of
+never. A first anomalous run (or a prev that disagrees > tol, or a stale/missing prev) still HOLDs
+("awaiting a 2nd consistent run" — outlier protection). Condition 1 is independent of SUSTAINED.
+
+A HOLD clears `AV_SYNC_APPLY_OFFSET_MS` (skipping the byte-unchanged apply) with a loud log + a
+per-run `av-sync-apply-hold-<run>.txt` AND a durable `~/.camera-box/av-sync-apply-hold-last.txt`
+reason; when the guard says proceed, #856 is byte-identical. The residual EARLY-WARNING (before the
+E2E even runs) is the separate upstream-step detector, issue 1267. See
 `.claude/rules/avsync-monitoring.md` for the guard's placement in the cleanup composition.
