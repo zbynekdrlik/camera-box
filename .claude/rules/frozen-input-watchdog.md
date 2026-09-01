@@ -85,6 +85,17 @@ with `FROZEN_INPUT_PROBE_CMD` (run with `<receiver_ip> <source>`, stdout = raw l
   TCP-probes), retiring the ssh read. Deferred: it needs an updated `bundle-state-server.py` deployed
   to BOTH Windows boxes — extra surface not needed while the box is reachable by definition.
 
+## Byte-safety of the received= extraction (#1258 layer 2)
+
+`probe_received`'s extraction (grep the newest `genlock-fifo audit '<source>':` line, then sed out
+the `received=` digits) runs `LC_ALL=C grep -aF ... | LC_ALL=C sed -n ...` — NOT plain grep/sed.
+PowerShell 5.1's `gc` (no `-Encoding`) re-encodes a non-ASCII glyph anywhere in the fetched tail
+(e.g. the approx-sign in `(approx F frames @ ...)`) as invalid UTF-8; in this fleet's UTF-8 locale,
+plain grep then flags stdin BINARY (empty extraction) and plain sed's trailing `.*` leaves line-tail
+garbage after the digits -- either way the value reads as "none" downstream. Full root cause + the
+fix pattern: `.claude/rules/mv-reverify-escalate.md` “Layer 2” section. Never re-add a plain
+(non-`LC_ALL=C`) grep/sed on this extraction.
+
 ## Install
 
 Install on dev1 like the siblings: `systemctl --user enable --now frozen-input-alert-watchdog.timer`

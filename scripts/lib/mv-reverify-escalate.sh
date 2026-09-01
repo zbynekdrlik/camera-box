@@ -153,7 +153,13 @@ mv_reverify_probe_raw() {
 # mv_reverify_extract_received <source> -- stdin: raw OBS-log text; stdout: newest cumulative
 # `received=` for the named source, or empty (raw read but no audit line = genuine "no recv").
 mv_reverify_extract_received() {
-  grep -F "genlock-fifo audit '$1': " | tail -n1 | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p'
+  # #1258 layer 2: byte-safe end-to-end. PowerShell 5.1 `gc` (no -Encoding) reads the UTF-8 OBS
+  # log as ANSI and re-encodes on output -- audit lines' non-ASCII glyphs (the approx-sign glyph
+  # in "(approx F frames @ ...)") come back as invalid-UTF-8 bytes. In a UTF-8 locale GNU grep
+  # then flags stdin BINARY (empty stdout, "binary file matches" on stderr) and sed's trailing
+  # `.*` refuses to consume the invalid byte (leaves line-tail garbage after the captured digits)
+  # -- LC_ALL=C on BOTH grep (+ -a) and sed makes the whole extraction byte-agnostic.
+  LC_ALL=C grep -aF "genlock-fifo audit '$1': " | tail -n1 | LC_ALL=C sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p'
 }
 
 # mv_reverify_probe_received <strih_ip> <source> -> the newest `received=` (raw read + extract in

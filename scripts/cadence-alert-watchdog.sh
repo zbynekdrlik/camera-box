@@ -169,12 +169,17 @@ fetch_box_log() {
 # (the seam then returns UNKNOWN -- never a false page). Pure text (no I/O), fed the once-fetched log.
 extract_sample() {
   local raw="$1" source="$2" line recv ts
-  line="$(printf '%s\n' "$raw" | grep -F "genlock-fifo audit '$source':" | tail -1)"
+  # #1258 layer 2: LC_ALL=C + grep -a -- the stdin here is the raw PS-fetched OBS-log tail
+  # (fetch_box_log, ps_encoded_command), which can carry invalid-UTF-8 bytes (PowerShell 5.1's
+  # `gc` re-encoding ANSI on a non-ASCII glyph elsewhere in the SAME tail); a UTF-8-locale grep
+  # then flags the WHOLE stdin binary (empty stdout) and sed's trailing `.*` refuses to consume
+  # the invalid byte (line-tail garbage after the digits) -- byte-safe end to end.
+  line="$(printf '%s\n' "$raw" | LC_ALL=C grep -aF "genlock-fifo audit '$source':" | tail -1)"
   [ -n "$line" ] || return 0
-  recv="$(printf '%s\n' "$line" | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+  recv="$(printf '%s\n' "$line" | LC_ALL=C sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' | tail -1)"
   # The OBS log prefix: `HH:MM:SS.mmm: <message>`. Extract the leading clock time (its trailing colon
   # is stripped by cadence_ts_to_seconds). An absent prefix -> empty ts -> a NOT-usable sample below.
-  ts="$(printf '%s\n' "$line" | sed -n 's/^\([0-9][0-9]:[0-9][0-9]:[0-9][0-9][.0-9]*\).*/\1/p' | tail -1)"
+  ts="$(printf '%s\n' "$line" | LC_ALL=C sed -n 's/^\([0-9][0-9]:[0-9][0-9]:[0-9][0-9][.0-9]*\).*/\1/p' | tail -1)"
   [ -n "$recv" ] || return 0
   printf '%s %s\n' "$recv" "$ts"
 }

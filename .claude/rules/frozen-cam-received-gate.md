@@ -40,6 +40,15 @@ INCONCLUSIVE:<srcs> / READ_FAIL, precedence READ_FAIL>FROZEN>INCONCLUSIVE>ALIVE)
 `frozen_cam_received_read_and_verdict`. Any further leg-liveness check should reuse these, not a
 fourth copy.
 
+## Byte-safety of the received= tap (#1258 layer 2)
+
+Since this lib reuses `mv_reverify_extract_received` unchanged, it inherits the layer-2 byte-safety
+fix for free — a PowerShell-side ANSI re-encode of a non-ASCII glyph in the fetched OBS-log tail can
+otherwise make GNU grep flag stdin BINARY (empty extraction → every source reads "none" →
+INCONCLUSIVE, exactly the 4/4-INCONCLUSIVE failure this gate exists to avoid producing false PASSes
+for). Full root cause + fix: `.claude/rules/mv-reverify-escalate.md` “Layer 2” section. Never
+re-add a plain (non-`LC_ALL=C`) grep/sed on the raw tail anywhere in this lib.
+
 ## The two load-bearing invariants
 
 - **#797 — never divide an audit-counter delta by a wall-clock sleep.** Compare the raw counter
