@@ -91,3 +91,24 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
 - Defect 2 (the process-wide `CPUSchedulingPolicy=fifo` puts all threads FIFO-50 on the grab core,
   not `SCHED_OTHER`) is runbook **Step B** — a stock per-thread rework that needs a live emit
   measurement (#728-style), independent of the kernel choice; the unit comment is already corrected.
+- **Appliance tmpfs layout — a provisioning install/regen must redirect cache + TMPDIR to the
+  ROOTFS.** On the cam boxes `/var/cache` (512M), `/tmp` (100M) AND `/var/tmp` (50M) are ALL tmpfs;
+  only `/` (rootfs, ~51G) is ample. The lowlatency-hwe install (~242MB archives + a new HWE image)
+  overflows `/var/cache` and the in-postinst/`safe-grub-regen` initramfs build (~78MB initrd)
+  overflows `/tmp`. The planner's `install-lowlatency`/`safe-grub-regen` commands therefore carry
+  `apt-get install -o Dir::Cache::archives=/root/apt-tmp` + `export TMPDIR=/root/tmpbig` (both on the
+  rootfs, `mkdir -p` first). `/var/tmp` is NOT a safe fallback — it is a 50M tmpfs, smaller than
+  `/var/cache`. A `_apt`-sandbox `W: Download is performed unsandboxed as root` warning from a
+  root-owned cache dir under `/root` (0700) is NON-blocking (the install succeeds; the whole step is
+  root-run on a ro-root appliance), so `/root/apt-tmp` is the proven value — do not "fix" it into a
+  tmpfs path. Supervisor-proven live on cam1/2/3 (issue-899 comment 2026-08-22), re-verified on cam4.
+- **Static-anchor self-collision on a MULTI-WORD substring (a sharper #832 case).**
+  `tests/rt_kernel_provision.rs` asserts the generated commands via `out.contains("apt-get install")`
+  — a MULTI-WORD literal. Inserting an apt option BETWEEN the words (`apt-get -o ... install`) breaks
+  that assertion even though `apt-get` and `install` are both still present. Keep any inserted flag
+  AFTER the verb (`apt-get install -o Dir::Cache::archives=... -y ...`; apt accepts it identically).
+  CRITICAL for the Tier-0 bash-source RED→GREEN check (no cargo compile here): verify the EXACT
+  literal substrings each `.contains(...)` uses — multi-word included, with `grep -F "apt-get
+  install"` — NEVER the tokens separately (`grep -q apt-get && grep -q install`), which passes while
+  the real single-`assert!` is RED. A separate-token check is exactly how a self-collision slips past
+  a "GREEN" bash-source pass (caught in #899 review, 2026-09-01).
