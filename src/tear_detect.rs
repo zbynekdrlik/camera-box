@@ -110,7 +110,7 @@
 //! grading that read it as the primary band).** The PRIMARY dual-QR span is ALWAYS ≤ 1 (`max primary
 //! span = 1` on every one of the 9,883 stream-partial frames) — the primary band is structurally blind to a tear, exactly as
 //! the blindness paragraph above says. EVERY one of the 241 torn frames is `primary[X, X+1]` (span 1)
-//! + exactly ONE aux mark `[Y > X+1]` from a LATER generation: the bottom aux band, scanned out later,
+//! plus exactly ONE aux mark `[Y > X+1]` from a LATER generation: the bottom aux band, scanned out later,
 //! captures the newer generation during the un-vsynced tear (union span 2–7). That is the v2 aux
 //! cross-band cure firing EXACTLY as issue 1196 designed. So the aux is the OPERATIVE signal on the
 //! projection leg, and dropping it from the union would make the gate blind (0 torn on CAM2).
