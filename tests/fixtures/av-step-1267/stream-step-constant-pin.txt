@@ -1,0 +1,49 @@
+17:34:00.000: [obs] some unrelated startup-ish line proving the log advances
+17:35:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 860ms (measured offset=66.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:35:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 858ms (measured offset=68.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:36:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 856ms (measured offset=70.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:36:03.000: [obs-websocket] client request served
+17:36:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 860ms (measured offset=66.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:37:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 858ms (measured offset=68.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:37:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 856ms (measured offset=70.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:38:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 860ms (measured offset=66.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:38:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 858ms (measured offset=68.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:38:33.000: [obs-websocket] client request served
+17:39:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 856ms (measured offset=70.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:39:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 860ms (measured offset=66.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:40:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 858ms (measured offset=68.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:40:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 856ms (measured offset=70.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:41:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 860ms (measured offset=66.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:41:03.000: [obs-websocket] client request served
+17:41:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 858ms (measured offset=68.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:42:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 856ms (measured offset=70.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:42:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 860ms (measured offset=66.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:43:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 858ms (measured offset=68.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:43:30.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 856ms (measured offset=70.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+17:43:33.000: [obs-websocket] client request served
+17:50:00.000: [distroav] render tick
+18:00:00.000: [obs] scene changed
+18:01:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 920ms (measured offset=6.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:01:28.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 918ms (measured offset=8.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:01:30.000: [obs] output frame
+18:01:56.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 916ms (measured offset=10.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:02:24.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 920ms (measured offset=6.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:02:52.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 918ms (measured offset=8.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:03:20.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 916ms (measured offset=10.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:03:22.000: [obs] output frame
+18:03:48.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 920ms (measured offset=6.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:04:16.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 918ms (measured offset=8.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:04:44.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 916ms (measured offset=10.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:05:12.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 920ms (measured offset=6.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:05:14.000: [obs] output frame
+18:05:40.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 918ms (measured offset=8.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:06:08.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 916ms (measured offset=10.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:06:36.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 920ms (measured offset=6.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:07:04.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 918ms (measured offset=8.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:07:06.000: [obs] output frame
+18:07:32.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 916ms (measured offset=10.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:08:00.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 920ms (measured offset=6.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:08:28.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 918ms (measured offset=8.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:08:56.000: [obs-audio-video-sync-dock] av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 926 -> 916ms (measured offset=10.0ms) [monitor-only -- the E2E gate is the only continuous writer]
+18:08:58.000: [obs] output frame
+18:10:00.000: [obs] render tick — the log write head
