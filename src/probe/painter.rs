@@ -669,10 +669,24 @@ mod tests {
         assert_eq!(ar.gen_ts_ns, 0);
         // And the blit target is the pure module's proven layout (the painter passes the same
         // qr_size/top_margin, so the rendered marks sit inside the machine-proven rectangles).
+        // issue 1270: both marks are co-located in the RIGHT burn-free gap [1120, 1578), clear of
+        // imag's BottomCenterLeft burn [382, 684) that occluded the old LEFT slot on the CAM2 leg.
         let rects = crate::aux_tick::aux_tick_rects(w, h, qr, crate::probe::qr::TOP_MARGIN_PX)
             .expect("rig aux layout fits");
-        assert_eq!(rects[0].y, 745, "left aux at the design y");
-        assert_eq!(rects[1].y, 745, "right aux at the design y");
+        assert_eq!(rects[0].y, 745, "left (even) aux at the design y");
+        assert_eq!(rects[1].y, 745, "right (odd) aux at the design y");
+        // The exact x pins prove the painter (probe path) blits at the pure module's co-located
+        // geometry — both marks in the RIGHT gap, fully right of imag's BCL burn's right edge (684)
+        // so there is no occlusion on the CAM2 projection leg. (The pure-module geometry itself is
+        // pinned in src/aux_tick.rs::canonical_rects_are_the_design_values / …clear_the_imag_burn…)
+        assert_eq!(
+            rects[0].x, 1137,
+            "left (even) aux co-located in the RIGHT gap (issue 1270)"
+        );
+        assert_eq!(
+            rects[1].x, 1351,
+            "right (odd) aux co-located in the RIGHT gap (issue 1270)"
+        );
     }
 
     /// #1179: the dual-QR must still encode→render→decode cleanly at the 2560×1080 override canvas
