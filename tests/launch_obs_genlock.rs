@@ -625,6 +625,68 @@ fn redraw_relaunch_also_prefers_lnk_775() {
     );
 }
 
+/// #1272 — `--force` on strih (has_ahk=1): the fleet-deploy-restored AHK watchdog must be stopped
+/// BEFORE the force-kill's own obs64 kill (else AHK respawns a duplicate obs64 within seconds of
+/// the kill, landing #978's "expected exactly 1 obs64 process" fail — the live 2026-09-02 incident)
+/// and restarted only AFTER the launch+audio-verify sequence completes, before the (3c) session
+/// gate (which itself asserts AHK's own SessionId and would otherwise find it missing).
+#[test]
+fn force_stops_ahk_before_obs64_kill_and_restarts_after_verify_1272() {
+    let p = program_force(); // has_ahk=1 default (strih)
+    let ahk_stop_pos = p
+        .find("Stop-Process -Name AutoHotkey64 -Force")
+        .expect("#1272: --force must stop AHK before killing obs64. Program follows.");
+    let obs64_kill_pos = p
+        .find("Get-Process obs64 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force }")
+        .expect("#1272: the --force obs64 kill line must exist");
+    assert!(
+        ahk_stop_pos < obs64_kill_pos,
+        "#1272: AHK must be stopped BEFORE the --force obs64 kill (else the fleet-deploy-restored \
+         AHK respawns a duplicate obs64 mid-kill -> #978 fail). ahk_stop_pos={ahk_stop_pos} \
+         obs64_kill_pos={obs64_kill_pos}. Program:\n{p}"
+    );
+
+    let ahk_relaunch_pos = p
+        .find("AHK watchdog restarted via")
+        .expect("#1272: the AHK relaunch confirmation log line must exist");
+    let session_gate_pos = p
+        .find("# (3c) #978 SESSION-VISIBILITY GATE")
+        .expect("the (3c) session-visibility gate comment must exist");
+    assert!(
+        obs64_kill_pos < ahk_relaunch_pos,
+        "#1272: the AHK relaunch must come AFTER the obs64 kill+launch, not before it. \
+         obs64_kill_pos={obs64_kill_pos} ahk_relaunch_pos={ahk_relaunch_pos}. Program:\n{p}"
+    );
+    assert!(
+        ahk_relaunch_pos < session_gate_pos,
+        "#1272: AHK must be restarted BEFORE the (3c) session-visibility gate (which asserts AHK's \
+         own SessionId and would otherwise find it missing). ahk_relaunch_pos={ahk_relaunch_pos} \
+         session_gate_pos={session_gate_pos}. Program:\n{p}"
+    );
+}
+
+/// #1272 — the AHK stop/restart must happen exactly ONCE per launch (not once around the initial
+/// force-kill AND again around a #786 redraw) — a second `$ahkStopped = $false` declaration would
+/// silently wipe out the force-kill's own stop flag before the single restart point runs, and a
+/// second restart point risks two AHK relaunch attempts.
+#[test]
+fn ahk_stopped_declared_once_and_restart_emitted_once_1272() {
+    let p = program_force();
+    assert_eq!(
+        p.matches("$ahkStopped = $false").count(),
+        1,
+        "#1272: $ahkStopped must be declared exactly ONCE (a second declaration right before the \
+         #786 redraw loop would silently reset it to false after the force-kill's own stop). \
+         Program:\n{p}"
+    );
+    assert_eq!(
+        p.matches("AHK watchdog restarted via").count(),
+        1,
+        "#1272: the AHK relaunch-confirmation line must be emitted exactly ONCE (one restart point \
+         covering both the plain force-kill launch and any #786 redraw), not duplicated. Program:\n{p}"
+    );
+}
+
 /// #775 (item 2a) — the #411 self-heal recovery relaunch must inherit the SAME .lnk-primary launch
 /// program, never re-derive its own. It does so by reusing `launch-obs-genlock.sh`'s
 /// `build_launch_program` verbatim — pin that reuse so a self-heal refactor can't fork the launch
