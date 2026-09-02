@@ -909,6 +909,28 @@ def _blocking_failures(verdict):
             _OWN_CLAUDE,
         ))
 
+    # 15) frozen_leg / self_heal_reset — RESTORED to blocking by issue 905 item 2 (were report-only
+    #     under issue 914 pending cam1's ShadowCast grabber, issue 909). Each node ships its own
+    #     `gates_overall_pass`. Mirror the recording-verdict.rs SelfHealAttributionReport gate
+    #     EXACTLY: `frozen` (hard-frozen windows) gates overall_pass, but `stale_replay` does NOT
+    #     (`any_frozen()` reads only `frozen`); self-heal gates on `attributed` OR
+    #     `unattributed_events` (`any_self_heal()` reads both), never `attributed` alone. The
+    #     `is True` guard auto-follows a future re-decouple without double-counting the report-only
+    #     branch (which stays for stale_replay + a pre-flip frozen/self-heal).
+    fl = _g(verdict, "frozen_leg", default={}) or {}
+    if fl.get("frozen") and fl.get("gates_overall_pass") is True:
+        out.append((
+            "Zamrznutá kamera (vetva zamrzla, žiadny self-heal reset): ZLYHALA",
+            _OWN_CLAUDE,
+        ))
+    sh = _g(verdict, "self_heal_reset", default={}) or {}
+    if ((sh.get("attributed") or sh.get("unattributed_events"))
+            and sh.get("gates_overall_pass") is True):
+        out.append((
+            "Self-heal reset počas merania (integrita behu, nie chyba kamery): ZLYHAL",
+            _OWN_CLAUDE,
+        ))
+
     return out
 
 
@@ -937,11 +959,17 @@ def _report_only_tripped(verdict):
         names.append("rozptyl doručenia (strih)")
     if _g(verdict, "all_cambox_continuity", "cold_cut_onset", "any_genuine_cold_cut_miss") is True:
         names.append("cold-cut")
+    # issue 905 item 2 — frozen_leg/self_heal_reset RESTORED to blocking (→ _blocking_failures item
+    # 15). `frozen` (hard-frozen) and self-heal (attributed OR unattributed_events) now gate when
+    # the node ships gates_overall_pass=true, so they stay report-only ONLY on a pre-flip verdict
+    # (guarded `is not True`, the delivery-spread pattern). stale_replay NEVER gates overall_pass
+    # (it is not in any_frozen()), so it stays report-only regardless of the flip.
     fl = _g(verdict, "frozen_leg", default={}) or {}
-    if fl.get("frozen") or fl.get("stale_replay"):
+    if fl.get("stale_replay") or (fl.get("frozen") and fl.get("gates_overall_pass") is not True):
         names.append("zamrznutá/stale vetva")
     sh = _g(verdict, "self_heal_reset", default={}) or {}
-    if sh.get("attributed"):
+    if ((sh.get("attributed") or sh.get("unattributed_events"))
+            and sh.get("gates_overall_pass") is not True):
         names.append("self-heal reset")
     # issue 1166 — LIVE since the promote (its seam ships gates_overall_pass=true), so it moves to
     # _blocking_failures (item 14). The `is not True` guard mirrors the delivery-spread /
