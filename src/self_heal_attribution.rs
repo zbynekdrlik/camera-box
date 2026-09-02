@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_report_also_contributes_no_failure_914() {
+    fn a_clean_report_also_contributes_no_failure() {
         let report = SelfHealAttributionReport::default();
         assert!(!report.any_frozen());
         assert!(!report.any_self_heal());

@@ -9702,8 +9702,8 @@ mod tests {
     /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, recalibrated 1 → 2 → 3 on 2026-08-06, ticket 889
     /// comments 5198131539 / 5200533407) differential proof: `overall_pass` must swing from PASS
     /// to FAIL exactly at the tolerance boundary, and must NOT swing at all when copies/gaps stay
-    /// AT the tolerance (even combined). Uses the SAME differential-fixture technique issue 914's
-    /// `frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914` established: build
+    /// AT the tolerance (even combined). Uses the SAME differential-fixture technique the
+    /// `frozen_leg_and_self_heal_reset_restored_to_blocking_905` fixture uses: build
     /// otherwise-IDENTICAL fixtures varying only the defect under test, and diff `overall_pass`
     /// against a clean baseline, rather than asserting an absolute value (many other unrelated
     /// gates also fold into `overall_pass`). Renamed from
@@ -10359,7 +10359,7 @@ mod tests {
         assert_eq!(
             clean_isolated["overall_pass"],
             serde_json::json!(true),
-            "sanity: with --min-secs 1 clearing the span-floor confound, the isolated clean \
+            "sanity: with --min-secs 0 clearing the span-floor confound, the isolated clean \
              fixture's top-level overall_pass must genuinely read true: {clean_isolated}"
         );
         assert_ne!(

@@ -161,9 +161,10 @@ impl StaleReplayLeg {
 /// `crate::self_heal_attribution::attribute_self_heal` (which calls [`classify_leg`] directly, not
 /// this function), whose own report additionally re-attributes a hard-frozen window to
 /// `self_heal_reset` when a correlating USB-reset event fired (issue 895). See
-/// `self_heal_attribution::SelfHealAttributionReport::overall_pass_contribution` for issue 914
-/// (2026-08-01): the caller no longer folds either `any_frozen`/`any_self_heal()` into
-/// `overall_pass` while cam1's grabber defect (issue 909) remains physically unresolved.
+/// `self_heal_attribution::SelfHealAttributionReport::overall_pass_contribution`: issue 914
+/// (2026-08-01) temporarily decoupled `any_frozen`/`any_self_heal()` from `overall_pass` while
+/// cam1's grabber defect (issue 909) was unresolved; issue 905 item 2 (2026-09-02) RESTORED the
+/// fold once a green E2E series proved both dimensions clean, so the caller gates on them again.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FrozenLegReport {
     pub frozen: Vec<FrozenLeg>,
@@ -182,7 +183,7 @@ impl FrozenLegReport {
 /// [`FrozenLeg::message`] / [`StaleReplayLeg::message`] for each entry. See this module's own
 /// struct-level doc above for why the real `recording-verdict.rs` attribution path calls
 /// `self_heal_attribution::attribute_self_heal` (which uses [`classify_leg`] directly) instead of
-/// this aggregator, and why neither folds into `overall_pass` as of issue 914.
+/// this aggregator; that path DOES fold into `overall_pass` again since issue 905 item 2.
 pub fn frozen_leg_report(segments: &[SegmentLeg<'_>]) -> FrozenLegReport {
     let mut frozen = Vec::new();
     let mut stale_replay = Vec::new();
