@@ -294,6 +294,45 @@ mod tests {
     }
 
     #[test]
+    fn diffuse_copies_below_both_thresholds_are_stale_replay_not_frozen_905() {
+        // issue 905 item 2 follow-up: the .615 live evidence shape (verdict-611325119.json,
+        // CAM2 window since 1788388542251771245) -- 18 copies out of 847 frames over a ~30.2s
+        // window: density=18/847≈0.0213 (well under FROZEN_DENSITY_THRESHOLD 0.10),
+        // approx_stale=0.0213*30.2≈0.64s (well under FROZEN_SUSTAINED_SECS 5.0). Neither #758
+        // threshold trips. The `residual_events` for this exact window show all 18 copies as
+        // ISOLATED single-frame duplicates (kind=copy, tick_before==tick_after) spread across
+        // offsets 1.2s/6.07s/6.5s/7.57s/8.34s/9.47s/10.9s... -- a diffuse FIFO-jitter signature,
+        // not a contiguous stuck run -- and the window sits comfortably inside CAM2's own
+        // per-cambox copies/gaps tolerance (25, issue 1249). This must classify StaleReplay, not
+        // Frozen: the removed conservative branch (copies=18 > the old
+        // STALE_REPLAY_MAX_ISOLATED=5 allowance) used to force Frozen here even though neither
+        // real threshold ever tripped.
+        match classify_leg(18, 847, 30.2) {
+            LegHealth::StaleReplay { copies } => assert_eq!(copies, 18),
+            other => panic!(
+                "905: diffuse below-threshold copies must be StaleReplay, not {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn copies_just_over_the_old_isolated_allowance_at_low_density_is_stale_replay_not_frozen_905() {
+        // issue 905 item 2 follow-up boundary case: copies=6 is one MORE than the removed
+        // STALE_REPLAY_MAX_ISOLATED allowance (5), but at a LOW density/duration (6 copies out of
+        // 9000 frames over a 30s window: density=6/9000≈0.00067, approx_stale≈0.02s) -- nowhere
+        // near either #758 threshold. Under the old conservative branch this classified Frozen
+        // purely on the count (6 > 5); it must now classify StaleReplay, since the count no
+        // longer participates in the decision at all once the two real thresholds don't trip.
+        match classify_leg(6, 9000, 30.0) {
+            LegHealth::StaleReplay { copies } => assert_eq!(copies, 6),
+            other => panic!(
+                "905: a count one over the old isolated allowance, at low density, must be \
+                 StaleReplay, not {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn isolated_allowance_boundary_is_stale_replay_not_frozen() {
         // copies=5 (exactly at STALE_REPLAY_MAX_ISOLATED) with negligible density/duration.
         match classify_leg(5, 9000, 30.0) {
