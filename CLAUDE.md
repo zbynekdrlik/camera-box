@@ -346,6 +346,18 @@ wrong PR with no review of it.
   run `git merge-base <lane-branch> dev` / `git log --oneline dev..<lane-branch>`: if main-side merge
   commits show up in that range, `git cherry-pick` the lane's own commits onto `dev` instead of
   `git merge` — a merge would drag main's merge commits into dev's history.
+- **A worker's OWN local `origin/dev` tracking ref can drift AHEAD mid-session too** (confirmed
+  live, issue 1278, 2026-09-02: a lane's local `origin/dev` moved from its own fork point
+  `85ee75632` to `ddf43a3a8` — a SIBLING lane's merge — sometime between the lane's initial fetch
+  and a mid-session `git diff`, with no `git fetch` run by the lane itself in between). A naive
+  `git diff origin/dev..HEAD` at that point is NOT "my branch's diff" — it also reverses whatever
+  the sibling lane added/removed since the fork point (deleted test files, changed `Cargo.toml`,
+  etc. all show up as noise), which is actively dangerous when handing that diff to a fresh-context
+  review dispatch (it would review changes that aren't yours). **Always diff against the actual
+  fork point, not a bare `origin/dev`:** `git merge-base HEAD origin/dev` then
+  `git diff <that-sha>..HEAD` — this is the SAME fix the integration-merge bullet above already
+  recommends for a different symptom (main-side merge commits polluting a cherry-pick range); here
+  it applies to a plain review/audit diff a worker prepares for itself mid-lane.
 - **A red "CI" run on the OTHER worker's push can be YOUR OWN not-yet-fixed RED commit riding
   along, not a real regression in their code.** Confirmed live (2026-07-30, #854/#881 vs #878):
   worker A committed a TDD RED commit (failing-on-purpose, per `regression-test-first.md`) while
