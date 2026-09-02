@@ -13,28 +13,43 @@
 //! ## Placement (1920×1080 design space, derived from the REAL obstacle model)
 //!
 //! The free vertical strip is `[top_margin + qr_size, canvas_h − sweep BAND_HEIGHT_PX)` =
-//! `[724, 960)` at the rig defaults. The downstream overlays cover that strip's bottom rows in
-//! fixed x-ranges (all y∈[736,1056)): strih's bottom-left corner burn `[40, 342)`, the cambox's
-//! own center capture burn `[800, 1120)`, stream's bottom-right corner burn `[1538, 1840)`. The
-//! two aux marks sit centered in the two WIDE gaps between them:
+//! `[724, 960)` at the rig defaults. The downstream burns cover that strip's bottom rows in fixed
+//! x-ranges (all y∈[736,1056)): strih's bottom-left corner burn `[40, 342)`, imag's
+//! BottomCenterLeft burn `[382, 684)`, the cambox's own center capture burn `[800, 1120)`,
+//! stream's bottom-right corner burn `[1578, 1880)`. That leaves two ~458px burn-free gaps:
+//! `[342, 800)` (LEFT) and `[1120, 1578)` (RIGHT).
 //!
-//! - LEFT:  x ∈ [466, 676)  (gap [342, 800), ≥124px clearance both sides)
-//! - RIGHT: x ∈ [1224, 1434) (gap [1120, 1538), ≥104px clearance both sides)
-//! - both:  y ∈ [745, 955)  (21px below the primary band bottom 724, 5px above the sweep band 960)
+//! **Both aux marks are CO-LOCATED in the RIGHT gap `[1120, 1578)` (issue 1270 de-confliction),
+//! and imag's burn is untouched in the LEFT gap.** The packing is forced: imag's own 302px burn
+//! plus one 210px aux = 512 > 458, so NO gap holds imag alongside an aux; the only arrangement
+//! that fits imag + both aux across the two gaps is BOTH aux in ONE gap (420 ≤ 458) and imag
+//! ALONE in the other. So the pair sits in the RIGHT gap, clear of every burn on every leg
+//! including imag's:
 //!
-//! **Documented defect (issue 1196, corrected 2026-09-01 from the known-torn run 1700989544):**
-//! imag-nb's BottomCenterLeft corner burn zone `[382, 684)` OVERLAPS the LEFT aux, and — contrary to
-//! the original design synthesis's "grounding fact 1" — imag's burn (911003) IS in the projected
-//! scene cam2's grabber captures (cam2 films imag-nb's OBS projector output, which renders imag's
-//! own burn). The run_id census of the real stream partial proves it: 911003 is present on ~99% of
-//! the CAM2 projection-window frames (240/241 torn frames carry it), and on those windows the LEFT
-//! (even) aux is OCCLUDED — only the RIGHT (odd) aux decodes (all 241 torn aux marks are odd), so
-//! `aux_decode_fraction` (BOTH marks) reads ~0 on the projection leg while the single RIGHT aux
-//! carries the operative cross-band tear signal. The LIVE tear gate works on that single mark; the
-//! REDUNDANCY the both-mark pair was meant to provide is absent on the projection leg. Relocating
-//! the LEFT aux OUT of `[382, 684)` (to restore both-mark redundancy) is the tracked follow-up
-//! (issue 1266). The rejected alternative — cramming BOTH marks into the single `[1120, 1538)` gap —
-//! stays rejected: ~190px marks decode worse and one localized artifact would kill both.
+//! - LEFT (even):  x ∈ [1137, 1347)  (17px clear of the cam1 center burn's right edge 1120)
+//! - RIGHT (odd):  x ∈ [1351, 1561)  (17px clear of the stream BR burn's left edge 1578)
+//! - both:         y ∈ [745, 955)  (21px below the primary band bottom 724, 5px above the sweep band 960)
+//!
+//! The two marks are 4px apart, and each 210px box already contains its own 4-module quiet zone
+//! (`render_payload_qr` renders with `quiet_zone(true)`; a 26-char alphanumeric EC-H payload is a
+//! version-3 QR = 37 modules incl. quiet zone at 5.68 px/module, data region ≈165px), so the pair
+//! has ≈45px of white between the two data regions and decodes as two independent grids — the SAME
+//! two-QRs-in-one-band shape the primary dual-QR and the burn row already rely on.
+//!
+//! **History (issue 1196 → 1266 → 1270).** The aux pair originally sat one-per-gap (LEFT even at
+//! `[466, 676)`, RIGHT odd at `[1224, 1434)`). On the CAM2 projection leg imag's burn `[382, 684)`
+//! OCCLUDED the LEFT even aux (cam2 films imag-nb's OBS projector output, which renders imag's own
+//! burn — 911003 is present on ~99% of CAM2-window frames), so only the RIGHT odd aux decoded
+//! there and `aux_decode_fraction` (BOTH marks) read a misleading 0.0 while the single RIGHT mark
+//! carried the LIVE cross-band tear signal. Issue 1266 proved a same-size relocation of ONLY the
+//! LEFT mark to a clear band is geometrically infeasible (no ≥210px burn-free slot exists). Issue
+//! 1270 resolves it by co-locating BOTH marks in the RIGHT gap above — painter-only, imag's burn
+//! and the run_id-keyed tear detector both untouched. HONEST residual: both marks share one
+//! y-band, so a horizontal scanout tear still cuts both (near-zero EXTRA tear redundancy over the
+//! single mark); the value is a truthful `aux_decode_fraction` on the projection leg plus
+//! redundancy against a localized one-sided loss. The co-located pair's real-chain decodability is
+//! a post-deploy CAM2-fixture precondition (`pattern-change-needs-decode-fixture`), with a
+//! rollback criterion: the odd mark must hold its current ≥0.995 decode rate.
 //!
 //! ## Why this lives at the crate root (default features)
 //!
@@ -58,11 +73,15 @@ pub const AUX_QR_SIZE_PX: u32 = 210;
 /// 5px above the motion-sweep band top (1080 − 120 = 960).
 pub const AUX_TOP_Y_PX: u32 = 745;
 
-/// LEFT aux horizontal center (px, design space) — the middle of the `[342, 800)` burn-free gap.
-pub const AUX_LEFT_CENTER_X_PX: u32 = 571;
+/// LEFT (even) aux horizontal center (px, design space) — the LEFT slot of the co-located pair in
+/// the RIGHT burn-free gap `[1120, 1578)` (issue 1270 de-confliction); rect `[1137, 1347)`, 17px
+/// clear of the cam1 center burn's right edge 1120.
+pub const AUX_LEFT_CENTER_X_PX: u32 = 1242;
 
-/// RIGHT aux horizontal center (px, design space) — the middle of the `[1120, 1538)` gap.
-pub const AUX_RIGHT_CENTER_X_PX: u32 = 1329;
+/// RIGHT (odd) aux horizontal center (px, design space) — the RIGHT slot of the co-located pair;
+/// rect `[1351, 1561)`, 17px clear of the stream BR burn's left edge 1578 and 4px from the LEFT
+/// slot's right edge.
+pub const AUX_RIGHT_CENTER_X_PX: u32 = 1456;
 
 /// `v * num / den` in u64 (no overflow for canvas-scale values).
 fn scale(v: u32, num: u32, den: u32) -> u32 {
@@ -175,22 +194,22 @@ mod tests {
         assert_eq!(
             l,
             Rect {
-                x: 466,
+                x: 1137,
                 y: 745,
                 w: 210,
                 h: 210
             },
-            "left aux: centered in the [342, 800) gap"
+            "left (even) aux: LEFT slot of the co-located pair in the [1120, 1578) gap (issue 1270)"
         );
         assert_eq!(
             r,
             Rect {
-                x: 1224,
+                x: 1351,
                 y: 745,
                 w: 210,
                 h: 210
             },
-            "right aux: centered in the [1120, 1538) gap"
+            "right (odd) aux: RIGHT slot of the co-located pair in the [1120, 1578) gap (issue 1270)"
         );
         assert!(!l.intersects(&r));
     }
@@ -248,13 +267,16 @@ mod tests {
     #[test]
     fn aux_avoids_the_downstream_burn_overlays_on_the_stream_path() {
         // The overlays that ARE in the stream-recording cam2 window: strih's BL corner burn, the
-        // cambox's own center capture burn, stream's BR corner burn. An aux mark under any of
-        // them would be covered downstream and never decode.
+        // cambox's own center capture burn, stream's BR corner burn, AND imag's BCL burn (issue
+        // 1270 — now that both aux marks are co-located clear of imag, imag joins the obstacle set
+        // this test enforces). An aux mark under any of them would be covered downstream and never
+        // decode.
         let aux = rig_rects();
         for (name, burn) in [
             ("cambox center burn", CAM_CENTER_BURN),
             ("strih BL burn", BURN_BL),
             ("stream BR burn", BURN_BR),
+            ("imag BCL burn", BURN_IMAG),
         ] {
             for a in &aux {
                 assert!(
