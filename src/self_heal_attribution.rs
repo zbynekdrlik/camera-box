@@ -542,10 +542,14 @@ mod tests {
         assert!(report.unattributed_events.is_empty());
     }
 
-    // ---- issue 914 (2026-08-01): frozen_leg/self_heal_reset become report-only ----
+    // ---- issue 905 item 2 (2026-09-02): frozen_leg/self_heal_reset RESTORED to blocking ----
+    // (originally decoupled report-only by issue 914 on 2026-08-01, pending cam1's ShadowCast
+    // grabber defect, issue 909; restored once a stable green E2E series showed both dimensions
+    // genuinely clean -- frozen_leg.frozen==[] and self_heal_reset attributed/unattributed==[]
+    // across three consecutive runs, see the ticket's own validated comment).
 
     #[test]
-    fn a_genuinely_frozen_window_no_longer_contributes_a_failure_914() {
+    fn a_genuinely_frozen_window_now_fails_overall_pass_905() {
         // Same fixture shape as `no_events_behaves_like_frozen_leg_report` above -- a genuinely
         // HARD-FROZEN window, no correlating self-heal event.
         let segments = vec![SegmentLeg {
@@ -561,13 +565,13 @@ mod tests {
             "sanity: this fixture must genuinely classify Frozen: {report:?}"
         );
         assert!(
-            report.overall_pass_contribution(),
-            "#914: a genuinely frozen leg must no longer contribute a failure to overall_pass: {report:?}"
+            !report.overall_pass_contribution(),
+            "905: restored -- a genuinely frozen leg must fail overall_pass again: {report:?}"
         );
     }
 
     #[test]
-    fn an_unattributed_self_heal_event_no_longer_contributes_a_failure_914() {
+    fn an_unattributed_self_heal_event_now_fails_overall_pass_905() {
         // Same fixture shape as `an_event_with_no_frozen_window_at_all_still_gates_via_unattributed`
         // above -- a self-heal reset that never correlates to any window.
         let segments = vec![SegmentLeg {
@@ -588,8 +592,8 @@ mod tests {
             "sanity: this fixture must genuinely trip any_self_heal: {report:?}"
         );
         assert!(
-            report.overall_pass_contribution(),
-            "#914: a self-heal reset event must no longer contribute a failure to overall_pass: {report:?}"
+            !report.overall_pass_contribution(),
+            "905: restored -- a self-heal reset event must fail overall_pass again: {report:?}"
         );
     }
 
