@@ -1065,10 +1065,17 @@ mod tests {
     }
 
     #[test]
-    fn gates_overall_pass_is_report_only() {
+    fn gates_overall_pass_is_live() {
+        // #1166 promote cycle (2026-09-02): the supervisor's 14-run mine of the retained
+        // /tmp/recording-e2e-*/verdict-*.json corpus (31.8.-2.9., incl. both post-issue-1260 runs)
+        // reads masked_windows=0 on ALL 14 runs (zero false-positive exposure over the whole
+        // measured distribution) and signal_promotable=true on 11/14 including both post-1260
+        // runs. The promotion precondition (viable on real runs, empirically zero FP) is met, so
+        // the seam flips LIVE — see verdict-gate-seam-calibration.md section 15 for the full table.
         assert!(
-            !gates_overall_pass(),
-            "the dup-cadence surface ships REPORT-ONLY until the #1166 promotion gate is met"
+            gates_overall_pass(),
+            "the dup-cadence surface is LIVE since the #1166 promote (0/44 pre-flip green-window \
+             false positives across the mined corpus)"
         );
     }
 
