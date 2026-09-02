@@ -5182,6 +5182,10 @@ fn build_and_print_verdict_with_stream_diffs(
                 // frame = primary[X,X+1] + ONE aux mark from a later generation; the aux single-mark
                 // cross-band, NOT the primary band). aux_any_decode_fraction (>= 1 mark) is the honest
                 // operability diagnostic; aux_decode_fraction (both marks) is ~0 on CAM2 and is NOT.
+                // issue 1144 (#887 fold) -- deferred init: assigned unconditionally inside the tear
+                // block below (where tear_stats is in scope), read in the imag facet. No `mut`/None
+                // init (which would be a dead store -> clippy `unused_assignments` under -D warnings).
+                let projection_tap_summary: camera_box::tear_detect::ProjectionProof;
                 {
                     // issue 1196 (v2): per frame, the PRIMARY dual-QR ids (non-reserved run_ids —
                     // the aux run_id sits IN NODE_BURN_RUN_IDS, so this filter excludes it
@@ -5279,6 +5283,18 @@ fn build_and_print_verdict_with_stream_diffs(
                     let aux_any_coverage = frame_weighted(|s| s.aux_any_decode_fraction);
                     let aux_both_coverage = frame_weighted(|s| s.aux_decode_fraction);
                     let signal_operable = camera_box::tear_detect::signal_operable(&tear_stats);
+                    // issue 1144 (#887 fold) -- summarize the CAM2 (projection-leg) tear windows for
+                    // the imag content facet. CAM2's window IS the projection path (imag HDMI ->
+                    // grabber); the tear gate already blocks on it, this is the report-only
+                    // cross-reference read below.
+                    let cam2_tear: Vec<&camera_box::tear_detect::TearStats> = schedule
+                        .iter()
+                        .zip(&tear_stats)
+                        .filter(|(w, _)| w.cambox == "CAM2")
+                        .map(|(_, s)| s)
+                        .collect();
+                    projection_tap_summary =
+                        camera_box::tear_detect::summarize_projection_leg(&cam2_tear);
                     println!(
                         "  #781/#1196 projection-tap tear gate (LIVE): {} torn frame(s) across \
                          {} window(s); signal viability {}; aux coverage any-mark {:.3} both-mark \
@@ -6011,9 +6027,17 @@ fn build_and_print_verdict_with_stream_diffs(
                         imag_burn_step
                     );
                     let mut imag_overall_pass = !schedule.is_empty();
+                    // issue 1144 -- the RAW per-segment content AND (no switch-in-transient excusal),
+                    // surfaced alongside `overall_pass` so the honest raw signal is never lost.
+                    let mut imag_content_overall_pass_raw = !schedule.is_empty();
+                    // issue 1144 -- switch-in transients attributed to the cold-cut measurement
+                    // (surfaced under `cold_cut_onset.imag_switch_in_transients`, never silently dropped).
+                    let mut imag_switch_in_transients: Vec<serde_json::Value> = Vec::new();
                     let mut imag_segments_json: Vec<serde_json::Value> =
                         Vec::with_capacity(schedule.len());
-                    for (w, win_frames) in schedule.iter().zip(imag_windows.iter()) {
+                    for (wi, (w, win_frames)) in
+                        schedule.iter().zip(imag_windows.iter()).enumerate()
+                    {
                         let ticks: Vec<u32> = win_frames.iter().filter_map(|f| f.tick).collect();
                         let burn_ids = burn_ids_in(win_frames, BURN_RUN_ID_IMAG);
                         let facts = optical_span_facts(win_frames, &[BURN_RUN_ID_IMAG], cam2_pin);
@@ -6026,7 +6050,47 @@ fn build_and_print_verdict_with_stream_diffs(
                             imag_optical_step,
                         );
                         let pass = zl.is_zero_loss(OPTICAL_UNDECODABLE_RATE_MAX);
-                        imag_overall_pass &= pass;
+                        // issue 1144 -- classify a switch-in transient (a leading burn-loss burst that
+                        // recovers, correlated with a change of the active program camera; the real
+                        // positive is verdict-276174336 CAM3 window 1, precise imag-side mechanism
+                        // unverified). cut_adjacent is DERIVED: the window boundary is a program cut to
+                        // this camera iff its cambox differs from the previous window's (the first
+                        // window, or a repeated same-cambox window, is not a cut). A classified
+                        // transient is attributed to the cold-cut measurement and excused from the
+                        // REPORT-ONLY content fold rather than failing on it; a raw content failure
+                        // that is NOT a transient stays a failure (fail-closed).
+                        // `content_gates_overall_pass()` is still false, so this changes no blocking
+                        // outcome today.
+                        let cut_adjacent = wi == 0 || schedule[wi - 1].cambox != w.cambox;
+                        let sit = camera_box::switch_in_transient::classify(
+                            zl.burn.first_id,
+                            zl.burn.last_id,
+                            &zl.burn.missing_ids,
+                            zl.undecodable,
+                            zl.burn_present_ok,
+                            zl.optical.avg_step,
+                            imag_optical_step,
+                            zl.optical.stuck_density,
+                            zl.optical.max_stuck_run,
+                            zl.optical_span_frames,
+                            cut_adjacent,
+                        );
+                        let content_pass = pass || sit.is_transient;
+                        imag_content_overall_pass_raw &= pass;
+                        imag_overall_pass &= content_pass;
+                        if sit.is_transient {
+                            imag_switch_in_transients.push(serde_json::json!({
+                                "cambox": w.cambox,
+                                "start_ns": w.start_ns,
+                                "end_ns": w.end_ns,
+                                "reason": sit.reason,
+                                "first_offset": sit.first_offset,
+                                "burst_len": sit.burst_len,
+                                "burst_end_offset": sit.burst_end_offset,
+                                "residual": sit.residual,
+                                "burst_density": sit.burst_density,
+                            }));
+                        }
                         // #333: a frames==0 window is empty by construction (imag not emitting in that
                         // slice). Unlike the swept camboxes (an empty window there = the painter box),
                         // imag is never scene-switched, so an empty imag window IS a real gap in its
@@ -6058,7 +6122,13 @@ fn build_and_print_verdict_with_stream_diffs(
                             zl.optical.no_localized_stuck_density(),
                             zl.burn_present_ok,
                             zl.burn.missing_ids.len(),
-                            if pass { "PASS" } else { "FAIL" }
+                            if pass {
+                                "PASS"
+                            } else if sit.is_transient {
+                                "FAIL(raw) -> switch-in transient attributed to cold-cut (content-excused, issue 1144)"
+                            } else {
+                                "FAIL"
+                            }
                         );
                         if let Some(note) = &note {
                             println!("      ⚠ {note}");
@@ -6086,7 +6156,15 @@ fn build_and_print_verdict_with_stream_diffs(
                             "burn_first_id": zl.burn.first_id,
                             "burn_last_id": zl.burn.last_id,
                             "burn_missing_ids": zl.burn.missing_ids,
+                            // issue 1144 -- `pass` is the RAW per-frame content verdict; a segment
+                            // whose failure is a switch-in transient carries `switch_in_transient:
+                            // true` and is excused from the content fold (attributed to cold-cut).
+                            // `switch_in_transient_reason` names the FIRST failing criterion for a
+                            // non-excused failure (or the positive label) so the flip re-validation
+                            // can see WHY each red window was / was not excused.
                             "pass": pass,
+                            "switch_in_transient": sit.is_transient,
+                            "switch_in_transient_reason": sit.reason,
                             "note": note,
                         }));
                     }
@@ -6104,9 +6182,49 @@ fn build_and_print_verdict_with_stream_diffs(
                             "NOT clean — see the per-window detail above."
                         }
                     );
+                    // issue 1144 (#887 fold) -- REPORT-ONLY projection-tap cross-reference: the tear
+                    // detector (all_cambox_continuity.tear) is already LIVE + BLOCKING on the CAM2
+                    // projection leg, so #887's DETECTION gap (nothing verifies what leaves HDMI-1) is
+                    // closed independently. This carries the projection-leg tear verdict INTO the imag
+                    // facet so "does the imag proof reach HDMI-1?" is answerable here, and makes the
+                    // flip-time precondition (require hdmi1_proof_backed) machine-checkable. Gates
+                    // nothing; the CAM2 frame CONTINUITY is separately blocking via the stream sweep.
+                    let pp = &projection_tap_summary;
+                    let projection_tap_json = serde_json::json!({
+                        "gates_overall_pass": false,
+                        "hdmi1_proof_backed": pp.hdmi1_proof_backed,
+                        "windows": pp.windows,
+                        "observed_fraction": pp.observed_fraction,
+                        "tear_gate_clean": pp.tear_gate_clean,
+                        "worst_tear_fraction": pp.worst_tear_fraction,
+                        "aux_any_coverage": pp.aux_any_coverage,
+                        "premise": "cam2's grabber is fed by imag-nb's HDMI output, so the CAM2 sweep \
+                                    leg IS the projection path (imag render -> DRM scanout -> HDMI -> \
+                                    grabber). Runtime-unverifiable cabling premise -- a re-cable would \
+                                    silently make hdmi1_proof_backed a lie.",
+                        "note": "issue 1144 (#887 fold), REPORT-ONLY: the projection-tap tear gate \
+                                 (all_cambox_continuity.tear) is already LIVE + BLOCKING on the CAM2 \
+                                 leg, so #887's detection gap is closed independently; \
+                                 hdmi1_proof_backed records whether the projection tap was OPERABLE \
+                                 (aux marks decoded) AND clean (no tear over the ceiling) this run. \
+                                 The CAM2 leg's frame CONTINUITY is separately BLOCKING via the stream \
+                                 per-cambox sweep. At the content flip, require hdmi1_proof_backed.",
+                    });
                     report["all_cambox_continuity"]["imag"] = serde_json::json!({
                         "segments": imag_segments_json,
                         "overall_pass": imag_overall_pass,
+                        // issue 1144 -- `overall_pass` now EXCUSES a switch-in transient (attributed
+                        // to cold-cut); `content_overall_pass_raw` is the un-excused raw AND, so the
+                        // honest raw signal is never lost. Both fold through the REPORT-ONLY content
+                        // seam, so neither reds a run today.
+                        "content_overall_pass_raw": imag_content_overall_pass_raw,
+                        "switch_in_transient_count": imag_switch_in_transients.len(),
+                        // issue 1144 -- the transient extents ALSO live here (belt-and-suspenders with
+                        // cold_cut_onset.imag_switch_in_transients) so they never vanish if the
+                        // cold-cut facet is ever absent.
+                        "switch_in_transients": imag_switch_in_transients.clone(),
+                        // issue 1144 (#887 fold) -- projection-tap cross-reference (report-only).
+                        "projection_tap": projection_tap_json,
                         "guard_ns": args.switch_guard_ns.max(0),
                         "optical_expected_step": imag_optical_step,
                         "burn_render_step": imag_burn_step,
@@ -6127,6 +6245,18 @@ fn build_and_print_verdict_with_stream_diffs(
                                              imag encoder fix (issue 1130 x264 record-load observer \
                                              effect). Presence/verification is separately BLOCKING.",
                     });
+                    // issue 1144 -- surface the switch-in transients under the cold-cut facet (the
+                    // #768/#1086 measurement they belong to), so the attribution is never silently
+                    // dropped. Report-only, like the cold-cut facet itself; `cold_cut_onset` was
+                    // written earlier in this sweep so it is present here.
+                    if let Some(cc) =
+                        report["all_cambox_continuity"]["cold_cut_onset"].as_object_mut()
+                    {
+                        cc.insert(
+                            "imag_switch_in_transients".to_string(),
+                            serde_json::json!(imag_switch_in_transients),
+                        );
+                    }
                     // issue 798 -> #1142 — REPORT-ONLY per-frame CONTENT fold: a no-op while
                     // `imag_leg_gate::content_gates_overall_pass()` is `false`. The per-segment imag
                     // continuity is confounded by the issue 1130 observer effect, so it stays
