@@ -180,40 +180,44 @@ fn recovery_decision_reuses_self_heal_gate_binary_never_reimplements_state_machi
     );
 }
 
-/// #411: the AHK-race fix — strih's script must stop AutoHotkey64 BEFORE ever touching obs64,
-/// and restart it only AFTER the post-recovery verify.
+/// #411 AHK-race fix, preserved through the issue-1273 single-owner restructure: AutoHotkey64 is
+/// stopped (inside the reused embedded launch program, the single owner of the bracket) BEFORE
+/// obs64 is ever killed, and the outer failure-path AHK backstop comes only AFTER the
+/// post-recovery verify.
 #[test]
 fn strih_recovery_script_stops_ahk_before_kill_and_restarts_after_verify() {
     let p = recovery_script_strih();
 
+    // The ONLY AutoHotkey64 stop is now the embedded launch program's own (single-owner, issue
+    // 1273); it still sits before the obs64 force-kill within that program.
     let stop_ahk_pos = p
         .find("Stop-Process -Name AutoHotkey64")
-        .expect("strih script must contain a real AutoHotkey64 stop command");
+        .expect("script must contain the embedded launch program's AutoHotkey64 stop");
     let kill_obs_pos = p
         .find("Stop-Process -Id $_.Id -Force")
         .expect("strih script must contain the obs64 force-kill (from build_launch_program)");
     let verify_pos = p
         .find("VerifyRecovered:")
         .expect("strih script must contain the explicit VerifyRecovered step");
-    // #867: anchor on the Step 4/4 marker rather than the raw relaunch text — the same
-    // ahk_resolve_and_relaunch_ps() block is ALSO embedded earlier (inside the reused
-    // launch-obs-genlock.sh program's own Step 2/4), so a bare text anchor would be ambiguous.
-    let start_ahk_pos = p
-        .find("Step 4/4: RestartAhk")
-        .expect("strih script must contain the Step 4/4 AutoHotkey64 restart step");
+    // Anchor on the unique OUTER `RestartAhk backstop` marker rather than the raw relaunch text —
+    // the same ahk_resolve_and_relaunch_ps() block is ALSO embedded earlier (inside the reused
+    // launch-obs-genlock.sh program), so a bare text anchor would be ambiguous (#867/#1272).
+    let backstop_pos = p
+        .find("RestartAhk backstop")
+        .expect("strih script must contain the outer failure-path RestartAhk backstop");
 
     assert!(
         stop_ahk_pos < kill_obs_pos,
-        "#411 AHK-race fix: AutoHotkey64 must be stopped BEFORE obs64 is ever touched. \
-         stop_ahk@{stop_ahk_pos} kill_obs@{kill_obs_pos}"
+        "#411 AHK-race fix: AutoHotkey64 must be stopped (by the embedded launch program) BEFORE \
+         obs64 is killed. stop_ahk@{stop_ahk_pos} kill_obs@{kill_obs_pos}"
     );
     assert!(
         kill_obs_pos < verify_pos,
         "the kill+relaunch must happen before the explicit post-recovery verify"
     );
     assert!(
-        verify_pos < start_ahk_pos,
-        "#411 AHK-race fix: AutoHotkey64 must be restarted only AFTER the post-recovery \
+        verify_pos < backstop_pos,
+        "issue 1273: the outer failure-path AHK backstop must come only AFTER the post-recovery \
          verify, never before"
     );
 }
@@ -277,23 +281,30 @@ fn verify_step_checks_exactly_one_obs64_and_relaunch_exit_code() {
     );
 }
 
-/// RestartAhk must run unconditionally after VerifyRecovered (see obs_self_heal.rs doc: AHK's
-/// crash-respawn duty is more valuable always-on than conditionally withheld on a failed verify).
+/// The AutoHotkey64 restart is NEVER withheld on a false `$verified` (obs_self_heal.rs doc: AHK's
+/// crash-respawn duty is more valuable always-on). Issue 1273: on a clean recovery the embedded
+/// program restarts it (independent of obs64's own render-verify); on a failure the outer backstop
+/// does — gated on `$relaunchExit`, never on `$verified`.
 #[test]
 fn restart_ahk_runs_regardless_of_verify_outcome() {
     let p = recovery_script_strih();
     let verify_pos = p
         .find("$verified  = ")
         .expect("verify assignment must exist");
-    let restart_pos = p
-        .find("Step 4/4: RestartAhk")
-        .expect("restart step must exist");
-    // No `if ($verified)` gate wraps the restart — the restart line appears unconditionally
-    // right after the verify block, not inside a conditional branch on $verified.
-    let between = &p[verify_pos..restart_pos];
+    let backstop_pos = p
+        .find("RestartAhk backstop")
+        .expect("backstop step must exist");
+    // No `if ($verified)` gate wraps the AHK restart — the backstop between the verify and the
+    // lock-clear gates on $relaunchExit, never on $verified.
+    let between = &p[verify_pos..backstop_pos];
     assert!(
         !between.contains("if ($verified)") && !between.contains("if (-not $verified)"),
-        "#411: RestartAhk must NOT be gated on $verified — it always runs. Between:\n{between}"
+        "issue 1273: the AHK restart must NOT be gated on $verified. Between:\n{between}"
+    );
+    assert!(
+        p.contains("if ($relaunchExit -ne 0)"),
+        "issue 1273: the failure-path backstop gates on the embedded program's exit code, never \
+         on $verified. Program:\n{p}"
     );
 }
 
@@ -316,8 +327,10 @@ fn strih_ahk_restart_never_uses_bare_exe_name_867() {
     );
 }
 
-/// #867: the restart must be VERIFIED (poll `Get-Process AutoHotkey64`) and log an explicit
-/// FATAL line — never a blind unconditional success claim — when it does not come back.
+/// #867 discipline preserved through the issue-1273 restructure: the OUTER failure-path AHK
+/// restart (backstop) must be VERIFIED (poll `Get-Process AutoHotkey64` / `$ahkRelaunchVerified`)
+/// and log an explicit FATAL line — never a blind success claim — when AutoHotkey64 does not come
+/// back.
 #[test]
 fn strih_ahk_restart_is_verified_and_logs_fatal_on_failure_867() {
     let p = recovery_script_strih();
@@ -326,16 +339,16 @@ fn strih_ahk_restart_is_verified_and_logs_fatal_on_failure_867() {
         "#867: the AHK restart must poll Get-Process AutoHotkey64 and record whether it \
          verified. Program:\n{p}"
     );
-    let step4_pos = p
-        .find("Step 4/4: RestartAhk")
-        .expect("Step 4/4 marker must exist");
-    let success_pos = p[step4_pos..]
-        .find("RestartAhk: AutoHotkey64 relaunched via")
-        .map(|off| off + step4_pos)
+    let backstop_pos = p
+        .find("RestartAhk backstop")
+        .expect("RestartAhk backstop marker must exist");
+    let success_pos = p[backstop_pos..]
+        .find("RestartAhk backstop: AutoHotkey64 relaunched via")
+        .map(|off| off + backstop_pos)
         .expect("a success log line naming the relaunch target must exist");
-    let fatal_pos = p[step4_pos..]
-        .find("FATAL: RestartAhk failed")
-        .map(|off| off + step4_pos)
+    let fatal_pos = p[backstop_pos..]
+        .find("FATAL: RestartAhk backstop failed")
+        .map(|off| off + backstop_pos)
         .expect("an explicit FATAL log line must exist when the relaunch is not verified");
     assert!(
         success_pos < fatal_pos,
@@ -409,24 +422,26 @@ fn recovery_lock_merge_precedes_steps_and_explicit_clear_follows_them() {
     let merge_pos = p
         .find("$state.recovery_in_progress = $decision.next_state.recovery_in_progress")
         .expect("the next_state merge must exist");
+    // The recovery plan's first real step is the embedded launch program's own AutoHotkey64 stop
+    // (single owner, issue 1273).
     let stop_ahk_pos = p
         .find("Stop-Process -Name AutoHotkey64")
-        .expect("StopAhk step must exist");
+        .expect("the embedded launch program's AutoHotkey64 stop must exist");
     let lock_clear_pos = p
         .find("$state.recovery_in_progress = $false")
         .expect("explicit lock-clear line must exist");
-    let restart_ahk_pos = p
-        .find("Step 4/4: RestartAhk")
-        .expect("RestartAhk step must exist");
+    let backstop_pos = p
+        .find("RestartAhk backstop")
+        .expect("RestartAhk backstop step must exist");
     assert!(
         merge_pos < stop_ahk_pos,
         "the next_state merge (which sets the lock when decide() returns Recover) must happen \
-         BEFORE the recovery plan's first step (StopAhk)"
+         BEFORE the recovery plan's first step (the embedded launch program's AutoHotkey64 stop)"
     );
     assert!(
-        restart_ahk_pos < lock_clear_pos,
+        backstop_pos < lock_clear_pos,
         "the explicit lock-clear must happen only AFTER the recovery plan's last step \
-         (RestartAhk)"
+         (the RestartAhk backstop)"
     );
 }
 
