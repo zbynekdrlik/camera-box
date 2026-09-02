@@ -16,8 +16,9 @@
 //! `[724, 960)` at the rig defaults. The downstream burns cover that strip's bottom rows in fixed
 //! x-ranges (all y∈[736,1056)): strih's bottom-left corner burn `[40, 342)`, imag's
 //! BottomCenterLeft burn `[382, 684)`, the cambox's own center capture burn `[800, 1120)`,
-//! stream's bottom-right corner burn `[1578, 1880)`. That leaves two ~458px burn-free gaps:
-//! `[342, 800)` (LEFT) and `[1120, 1578)` (RIGHT).
+//! stream's bottom-right corner burn `[1578, 1880)` (`W − margin − side = 1920 − 40 − 302`;
+//! a pre-1270 doc typo wrote a stale `[1538, 1840)` — the code const has always been 1578).
+//! That leaves two ~458px burn-free gaps: `[342, 800)` (LEFT) and `[1120, 1578)` (RIGHT).
 //!
 //! **Both aux marks are CO-LOCATED in the RIGHT gap `[1120, 1578)` (issue 1270 de-confliction),
 //! and imag's burn is untouched in the LEFT gap.** The packing is forced: imag's own 302px burn
@@ -26,15 +27,17 @@
 //! ALONE in the other. So the pair sits in the RIGHT gap, clear of every burn on every leg
 //! including imag's:
 //!
-//! - LEFT (even):  x ∈ [1137, 1347)  (17px clear of the cam1 center burn's right edge 1120)
+//! - LEFT (even):  x ∈ [1137, 1347)  (17px clear of the cambox center-capture burn's right edge 1120)
 //! - RIGHT (odd):  x ∈ [1351, 1561)  (17px clear of the stream BR burn's left edge 1578)
 //! - both:         y ∈ [745, 955)  (21px below the primary band bottom 724, 5px above the sweep band 960)
 //!
 //! The two marks are 4px apart, and each 210px box already contains its own 4-module quiet zone
 //! (`render_payload_qr` renders with `quiet_zone(true)`; a 26-char alphanumeric EC-H payload is a
-//! version-3 QR = 37 modules incl. quiet zone at 5.68 px/module, data region ≈165px), so the pair
-//! has ≈45px of white between the two data regions and decodes as two independent grids — the SAME
-//! two-QRs-in-one-band shape the primary dual-QR and the burn row already rely on.
+//! version-3 QR = 37 modules incl. quiet zone at 5.68 px/module ≈ 22.7px quiet each side, data
+//! region ≈165px), so ≥8 modules (≈49px = 22.7 + 4 + 22.7) of white separate the two data regions
+//! and rqrr detects them as two independent grids — the quiet zone, not the raw px gap, is what a
+//! neighbouring QR needs, so this is the same multi-grid-in-one-band decode the primary dual-QR and
+//! the burn row already rely on (just more tightly packed).
 //!
 //! **History (issue 1196 → 1266 → 1270).** The aux pair originally sat one-per-gap (LEFT even at
 //! `[466, 676)`, RIGHT odd at `[1224, 1434)`). On the CAM2 projection leg imag's burn `[382, 684)`
@@ -42,7 +45,8 @@
 //! burn — 911003 is present on ~99% of CAM2-window frames), so only the RIGHT odd aux decoded
 //! there and `aux_decode_fraction` (BOTH marks) read a misleading 0.0 while the single RIGHT mark
 //! carried the LIVE cross-band tear signal. Issue 1266 proved a same-size relocation of ONLY the
-//! LEFT mark to a clear band is geometrically infeasible (no ≥210px burn-free slot exists). Issue
+//! LEFT mark (RIGHT mark fixed) to a clear band is geometrically infeasible — no ≥210px burn-free
+//! slot exists for a single mark while the RIGHT mark holds its own slot. Issue
 //! 1270 resolves it by co-locating BOTH marks in the RIGHT gap above — painter-only, imag's burn
 //! and the run_id-keyed tear detector both untouched. HONEST residual: both marks share one
 //! y-band, so a horizontal scanout tear still cuts both (near-zero EXTRA tear redundancy over the
@@ -75,7 +79,7 @@ pub const AUX_TOP_Y_PX: u32 = 745;
 
 /// LEFT (even) aux horizontal center (px, design space) — the LEFT slot of the co-located pair in
 /// the RIGHT burn-free gap `[1120, 1578)` (issue 1270 de-confliction); rect `[1137, 1347)`, 17px
-/// clear of the cam1 center burn's right edge 1120.
+/// clear of the cambox center-capture burn's right edge 1120.
 pub const AUX_LEFT_CENTER_X_PX: u32 = 1242;
 
 /// RIGHT (odd) aux horizontal center (px, design space) — the RIGHT slot of the co-located pair;

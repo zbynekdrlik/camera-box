@@ -675,6 +675,10 @@ mod tests {
             .expect("rig aux layout fits");
         assert_eq!(rects[0].y, 745, "left (even) aux at the design y");
         assert_eq!(rects[1].y, 745, "right (odd) aux at the design y");
+        // The exact x pins prove the painter (probe path) blits at the pure module's co-located
+        // geometry — both marks in the RIGHT gap, fully right of imag's BCL burn's right edge (684)
+        // so there is no occlusion on the CAM2 projection leg. (The pure-module geometry itself is
+        // pinned in src/aux_tick.rs::canonical_rects_are_the_design_values / …clear_the_imag_burn…)
         assert_eq!(
             rects[0].x, 1137,
             "left (even) aux co-located in the RIGHT gap (issue 1270)"
@@ -682,12 +686,6 @@ mod tests {
         assert_eq!(
             rects[1].x, 1351,
             "right (odd) aux co-located in the RIGHT gap (issue 1270)"
-        );
-        // Both marks fully right of imag's BCL burn's right edge (684) — no occlusion on the CAM2
-        // projection leg any more.
-        assert!(
-            rects[0].x >= 684 && rects[1].x >= 684,
-            "both aux marks must clear imag's burn zone [382, 684): {rects:?}"
         );
     }
 
