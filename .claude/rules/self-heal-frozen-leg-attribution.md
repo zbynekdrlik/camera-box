@@ -62,11 +62,18 @@ LABEL changes from "camera fault" to "run-integrity event" (see `recording-verdi
 `report["self_heal_reset"]` JSON block). Never change this module to unconditionally swallow a
 self-heal event just because it also correlates to a window — the underlying rate defect (#728) is
 real and unresolved, and silently tolerating it would be exactly the "suppress" branch the ticket's
-own design note rejected. (`any_self_heal()`/`any_frozen()` no longer fold into `all_pass` as of
-#914 below — but they still stay true/computed for exactly this reason: the run-integrity signal
-must never be silently dropped, only decoupled from the pass/fail decision.)
+own design note rejected. (`any_self_heal()`/`any_frozen()` fold into `all_pass` AGAIN as of issue
+905 item 2 — #914 below temporarily decoupled them while cam1's grabber was unresolved; either way
+they stay true/computed for exactly this reason: the run-integrity signal must never be silently
+dropped.)
 
 ## #914 (2026-08-01) — frozen_leg/self_heal_reset became report-only; the pure-decision seam this created
+
+**RESTORED by issue 905 item 2 (2026-09-02): `overall_pass_contribution()` is `!any_frozen() &&
+!any_self_heal()` again and the JSON `gates_overall_pass` reads `true`. The account below describes
+the #914 report-only ERA; the restore precondition — a green E2E series with `frozen == []` and a
+clean `self_heal_reset` — is now met, and the seam described here is exactly what made the restore
+a one-line flip.**
 
 cam1's ShadowCast 2 grabber hardware defect (#909) fails the fused verdict's `overall_pass` on a
 hardware fault completely unrelated to whatever the PR's own diff changed (a ~5.5min E2E window has
@@ -92,7 +99,7 @@ term-under-test firing, one WITHOUT — and assert `overall_pass` is IDENTICAL b
 exactly `#861`'s own precedent
 (`all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861`) and it fully
 sidesteps needing to know or guess the absolute pass/fail value of the OTHER gates — see
-`frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914` in
+`frozen_leg_and_self_heal_reset_restored_to_blocking_905` in
 `src/bin/recording-verdict.rs` for the worked example (a genuinely HARD-FROZEN window forced via 5
 duplicate-tick frames at density 0.20, well above `frozen_leg::FROZEN_DENSITY_THRESHOLD`, plus an
 unattributed self-heal event on a cambox name that never appears in the schedule).
@@ -232,8 +239,9 @@ line, looping `CAMBOX_SECONDARY_DEPLOY` the same way the #910 restart-event scan
 box's journald window + its own burn log, HARD band + #717 SUSTAINED band grepped separately.
 
 **It is REPORT-ONLY (`WARNING #994:`, never aborts) — this was a deliberate architectural decision,
-not laziness.** A secondary's reset events (`#663`) are already threaded report-only into the
-verdict by the #910 restart-event scan + the #914 `frozen_leg`/`self_heal_reset` decoupling.
+not laziness.** A secondary's capture-RATE band stays report-only because the genlock decimation
+gate absorbs a chronic rate wobble (a secondary's `#663` RESET events, a DISTINCT signal, now gate
+via `self_heal_reset` since issue 905 — #914 had decoupled them while cam1's grabber was unresolved).
 Hard-failing a secondary's capture-rate band here would re-introduce the exact permanently-red-gate
 mistake #909/#914 spent three tickets eliminating: cam2 IS a secondary, so a chronic secondary
 grabber quirk (the ShadowCast class) would abort every `ALL_CAMBOX` run before a verdict is ever

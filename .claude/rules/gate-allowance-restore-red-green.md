@@ -7,9 +7,12 @@ paths:
 
 `recording-verdict.rs` carries several deliberate, tracked, LOUDLY-reported relaxations of an
 originally-strict verdict gate — `REAL_DROPS_ALLOWANCE_DEFAULT` (issue 904, restored to 0 by
-issue 905 item 1); issue 905 items 2/3 still pending (`frozen_leg`/`self_heal_reset` back to
-blocking, per issue 914; the optical undecodable floor's `gates_overall_pass()` back to `true`,
-per issue 915 — see `optical-undecodable-floor-report-only.md`); and the per-segment `<=1/<=1`
+issue 905 item 1); issue 905 item 2 DONE (2026-09-02 — `frozen_leg`/`self_heal_reset` restored to
+blocking once a 3-run green E2E series proved both clean; the
+`SelfHealAttributionReport::overall_pass_contribution` seam + the recording-verdict.rs JSON
+`gates_overall_pass` literals + the `e2e_discord_report.py` classifier all read blocking now);
+issue 905 item 3 still pending (the optical undecodable floor's `gates_overall_pass()` back to
+`true`, per issue 915 — see `optical-undecodable-floor-report-only.md`); and the per-segment `<=1/<=1`
 SINGLETON allowance `window_gate::segment_singleton_allowance_gates_overall_pass()` (issue 1169,
 owner 2026-08-22 — the segment-bar copies/gaps soft-release; re-tighten to absolute zero = flip
 that one fn to `false`, the consts `SEGMENT_SINGLETON_{COPIES,GAPS}_ALLOWANCE` stay as the band —
