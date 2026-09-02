@@ -639,10 +639,13 @@ mod tests {
         assert_eq!(aux_right3.gen_ts_ns, 0);
     }
 
-    /// issue 1196 — the aux Vernier tick pair round-trips through the SAME production decode
-    /// path (`decode_qr_luma_all`) alongside the primary dual-QR at the rig geometry: all four
-    /// marks decode, the aux pair carries the reserved run_id + the primary pair's own even/odd
-    /// frame_ids + a constant `gen_ts_ns = 0`. This is the painter-level render→decode
+    /// issue 1196 — the aux Vernier tick pair round-trips through the shared `decode_payload`
+    /// helper alongside the primary dual-QR at the rig geometry: all four marks decode, the aux
+    /// pair carries the reserved run_id + the primary pair's own even/odd frame_ids + a constant
+    /// `gen_ts_ns = 0`. (The helper decodes through the robust `decode_qr_luma_all_robust_optical`
+    /// — a strict superset of the production `decode_qr_luma_all` — since #1280; a crisp 4-code
+    /// canvas is the one decode with no other recovery. The wire format + geometry + decoder reach
+    /// the round-trip proves are unchanged by that.) This is the painter-level render→decode
     /// round-trip the decode-fixture rule requires for a pattern change; the REAL-captured-frame
     /// fixture is mined from the first rig run after the painter redeploy (a promotion
     /// precondition — `.claude/rules/projection-tap-tear-detect.md`).
@@ -701,9 +704,10 @@ mod tests {
 
     /// #1179: the dual-QR must still encode→render→decode cleanly at the 2560×1080 override canvas
     /// with the proportionally-scaled QR (700 → 933). The half positions are `canvas_w/2`-relative
-    /// in `render_qr_dual_bgra`, so they auto-scale; only `qr_size` changes. Decoded via the SAME
-    /// production path (`decode_qr_luma_all`, through the test's `decode_payload` helper) the
-    /// recording verdict uses — a real-captured-frame fixture is deferred to adoption time.
+    /// in `render_qr_dual_bgra`, so they auto-scale; only `qr_size` changes. Decoded through the
+    /// test's `decode_payload` helper (the robust `decode_qr_luma_all_robust_optical`, a strict
+    /// superset of the production `decode_qr_luma_all` the recording verdict uses; #1280) — a
+    /// real-captured-frame fixture is deferred to adoption time.
     #[test]
     fn dual_qr_round_trips_at_the_scaled_2560_canvas_geometry_1179() {
         let (w, h) = (2560u32, 1080u32);
