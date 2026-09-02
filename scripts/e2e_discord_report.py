@@ -706,9 +706,10 @@ def _blocking_failures(verdict):
 
     'Blocking' == folds into recording-verdict.rs's `all_pass` and is LIVE today. A LIVE-toggleable
     seam is honored via its own `gates_overall_pass` field (so if a seam is ever flipped to
-    report-only, this report auto-follows). The report-only seams (imag leg, delivery-side spread,
-    cold_cut, frozen_leg, self_heal, dup_cadence, undecodable_floor, lipsync) are NEVER returned
-    here — see `_report_only_tripped`. Ownership follows the #1117 convention: agent-recoverable ->
+    report-only, this report auto-follows). The report-only seams (imag leg PER-FRAME CONTENT,
+    cold_cut, frozen_leg, self_heal, undecodable_floor, lipsync — dup_cadence LIVE since issue
+    1166) are NEVER returned here — see `_report_only_tripped`. Ownership follows the #1117
+    convention: agent-recoverable ->
     "Rieši Claude."; a genuine physical fault (capture card, silent mbc chain) -> a "Treba fyzicky
     skontrolovať …" human step.
 
@@ -892,6 +893,22 @@ def _blocking_failures(verdict):
                 _OWN_CLAUDE,
             ))
 
+    # 14) Duplication-masked 50->60 source cadence (issue 1088, signal fixed + promoted LIVE by
+    #     issue 1166). A per-cambox window whose content near-duplicate rate is sustained +
+    #     regular + window-spanning (a 50->60 pulldown masked as a clean 60fps NDI stream — the
+    #     issue-794 received= rate tap is structurally blind to it). The `gates_overall_pass is
+    #     True` guard mirrors the delivery-spread / own_burn_absent / tear pattern: an OLD verdict
+    #     (pre-flip, gates_overall_pass=false on its own node) stays report-only below; only a
+    #     post-flip verdict routes here.
+    dmc = _g(verdict, "all_cambox_continuity", "duplication_masked_cadence", default=None)
+    if (isinstance(dmc, dict) and (dmc.get("masked_windows") or 0) > 0
+            and dmc.get("gates_overall_pass") is True):
+        out.append((
+            "Duplikačne maskovaná kadencia zdroja (50->60 pulldown skrytý duplikátmi snímok): "
+            "ZLYHALA",
+            _OWN_CLAUDE,
+        ))
+
     return out
 
 
@@ -926,8 +943,14 @@ def _report_only_tripped(verdict):
     sh = _g(verdict, "self_heal_reset", default={}) or {}
     if sh.get("attributed"):
         names.append("self-heal reset")
-    if (_g(verdict, "all_cambox_continuity", "duplication_masked_cadence", "masked_windows",
-           default=0) or 0) > 0:
+    # issue 1166 — LIVE since the promote (its seam ships gates_overall_pass=true), so it moves to
+    # _blocking_failures (item 14). The `is not True` guard mirrors the delivery-spread /
+    # own_burn_absent pattern: only a PRE-flip verdict (no gates_overall_pass=true on its own node)
+    # stays report-only here.
+    if ((_g(verdict, "all_cambox_continuity", "duplication_masked_cadence", "masked_windows",
+            default=0) or 0) > 0
+            and _g(verdict, "all_cambox_continuity", "duplication_masked_cadence",
+                   "gates_overall_pass") is not True):
         names.append("duplikačná kadencia")
     if _g(verdict, "all_cambox_continuity", "run_wide_undecodable_within_floor") is False:
         names.append("optická čitateľnosť (floor)")

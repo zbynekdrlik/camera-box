@@ -67,29 +67,42 @@
 //! frames), spread across the WHOLE window. [`measure_dup_cadence`] sets `duplication_masked` only
 //! when the rate floor AND the spacing-regularity AND the window-coverage checks all hold.
 //!
-//! ## Report-only (calibration-first) — NO-FLIP-WITH-DATA (issue 1101 / issue 1166, 2026-09-01)
+//! ## LIVE since the #1166 promote (2026-09-02) — the unpark event landed
 //!
-//! [`gates_overall_pass`] is `false`: the metric ships REPORT-ONLY. The #1166 near-duplicate MAD
-//! signal is now VALIDATED Viable on REAL full green runs (not just the earlier biased PNG corpus):
-//! the 2026-09-01 green 7-cam series reads `signal_viability="viable"` / `signal_promotable=true`,
-//! and the signal correctly caught the real 2026-08-25 30→60 duplication (CAM3 `duplicate_fraction`
-//! ≈0.50, `gap_mean`≈2, `coverage`≈0.999, `inferred_source_fps`≈30). So the ≥2-consecutive-viable
-//! precondition is MET. The flip nonetheless STAYS `false` for two data-gated reasons the earlier
-//! "biased sample / not yet on a green run" note did not anticipate (mined across all 44 post-fix
-//! verdicts; 0/44 green runs have any masked window):
-//!   1. **Upper-bound unvalidated.** [`DUP_COVERAGE_MIN`] vetoes a LOCALIZED freeze, but there is no
-//!      upper RATE bound separating a ~0.167 pulldown from a ~1.0 window-spanning content freeze
-//!      (frozen_leg's domain). A LIVE flip would hard-fail a spanning freeze too, re-exposing the
-//!      cam1 ShadowCast-grabber (issue 909) false-positive class that keeps the freeze-adjacent
-//!      gates (frozen_leg / optical_floor / av_window) report-only. No spanning-freeze datapoint
-//!      exists to calibrate that boundary.
-//!   2. **Aux-tick supersede fork (owner, issue 1196).** dup-cadence detection may move to the aux
-//!      Vernier tick-pair signal instead of the content hash; the LIVE direction is owner-gated on
-//!      that decision.
+//! [`gates_overall_pass`] is `true`. The 2026-09-01 NO-FLIP-WITH-DATA hold (below, kept for
+//! archaeology) named a concrete re-entry event: the issue-1260 tick-cache deploy, then re-mine the
+//! distribution. That event landed and the re-mine (14 real verdicts, 31.8.–2.9., incl. both
+//! post-1260 runs 269576128/.610 and 255477892/.611) reads `masked_windows=0` on ALL 14 runs — ZERO
+//! false-positive exposure over the whole measured distribution — and `signal_promotable=true` on
+//! 11/14 (incl. both post-1260 runs). The positive class (a real masked 50→60 pulldown) never
+//! appeared in the corpus, and it does not need to: the LIVE flip protects against a FUTURE masked
+//! halving the `received=` rate tap (issue 1203) is structurally blind to, and the measured FP risk
+//! of flipping now is 0. Neither of the two blockers below was independently resolved by NEW data —
+//! the disposition is that the empirically-zero FP exposure over the full measured range outweighs
+//! them:
+//!   1. **Upper-bound STILL unvalidated** — [`DUP_COVERAGE_MIN`] vetoes a LOCALIZED freeze, but no
+//!      upper RATE bound separates a ~0.167 pulldown from a ~1.0 window-spanning content freeze
+//!      (frozen_leg's domain, cam1 ShadowCast-grabber issue-909 false-positive class). Untouched by
+//!      this flip — `DUP_RATE_PULLDOWN_MIN`/`DUP_GAP_CV_MAX`/`DUP_COVERAGE_MIN` are unchanged.
+//!   2. **Aux-tick supersede fork (owner, issue 1196)** — dup-cadence detection may move to the aux
+//!      Vernier tick-pair signal instead of the content hash; unresolved, but does not block THIS
+//!      flip (the content signal stays the live tap until/unless that migration happens).
 //!
-//! Full re-entry condition + the redundancy-vs-unique-value analysis (the content near-dup gate is
+//! Full calibration table + the redundancy-vs-unique-value analysis (the content near-dup gate is
 //! redundant with the tick `copies` gate for pure duplication and only uniquely valuable for
-//! tick-independent near-dup): `verdict-gate-seam-calibration.md` §14.
+//! tick-independent near-dup): `verdict-gate-seam-calibration.md` §14 (the NO-FLIP hold) + §15 (the
+//! promote decision + the 14-run table).
+//!
+//! ### Archived: the 2026-09-01 NO-FLIP-WITH-DATA hold (issue 1101 / issue 1166)
+//!
+//! The #1166 near-duplicate MAD signal was VALIDATED Viable on REAL full green runs (not just the
+//! earlier biased PNG corpus): the 2026-09-01 green 7-cam series read `signal_viability="viable"` /
+//! `signal_promotable=true`, and the signal correctly caught the real 2026-08-25 30→60 duplication
+//! (CAM3 `duplicate_fraction`≈0.50, `gap_mean`≈2, `coverage`≈0.999, `inferred_source_fps`≈30). The
+//! ≥2-consecutive-viable precondition was MET, yet the flip held `false` for two data-gated reasons
+//! (mined across all 44 post-fix verdicts at the time; 0/44 green runs had any masked window): (1)
+//! upper-bound unvalidated (see above) and (2) the aux-tick supersede fork (see above). This section
+//! is preserved as the reasoning trail; superseded by the LIVE promote above.
 
 /// Target canvas rate the source is padded UP to. A duplication-masked source runs at
 /// `TARGET_FPS * (1 - duplicate_fraction)`; for a 5:6 pulldown that is `60 * (1 - 1/6) = 50`.
@@ -358,26 +371,24 @@ pub fn dup_cadence_gate_pass(
 
 /// #1088 report-only / restore seam — mirrors [`crate::optical_floor::gates_overall_pass`] /
 /// [`crate::presentation_cadence::gates_overall_pass`]. Whether [`dup_cadence_gate_pass`]'s result
-/// folds into the fused verdict's `overall_pass`. `false` today: the metric ships REPORT-ONLY.
+/// folds into the fused verdict's `overall_pass`. **LIVE since the #1166 promote (2026-09-02).**
 ///
-/// **NO-FLIP-WITH-DATA (issue 1101 / issue 1166, 2026-09-01) — the #1166 fix is proven, but the
-/// flip is data-gated on more than viability.** #1101 proved the OLD byte-exact tap was
-/// [`SignalViability::Blind`] (observed 2 of 147 tick-proven copies); #1166 replaced it with the
-/// codec-tolerant near-duplicate MAD signal, which is now VALIDATED Viable on REAL green runs
-/// (2026-09-01 green 7-cam series: `signal_promotable=true`; the real 2026-08-25 30→60 duplication
-/// was caught at `inferred_source_fps`≈30). So the ≥2-consecutive-viable precondition
-/// ([`signal_promotable`]([`signal_viability`])) is MET. The flip STAYS `false` for two reasons
-/// mined across all 44 post-fix verdicts (0/44 green runs masked):
-/// (1) **Upper-bound unvalidated** — [`DUP_COVERAGE_MIN`] vetoes a LOCALIZED freeze, but no upper
-/// RATE bound separates a ~0.167 pulldown from a ~1.0 window-spanning content freeze (frozen_leg's
-/// domain); a LIVE flip would hard-fail a spanning freeze, re-exposing the cam1 grabber (issue 909)
-/// false-positive class that keeps frozen_leg / optical_floor / av_window report-only, and no
-/// spanning-freeze datapoint exists to calibrate the boundary.
-/// (2) **Aux-tick supersede fork** (owner, issue 1196) — dup-cadence may move to the aux
-/// Vernier-tick-pair signal instead of the content hash; the LIVE direction is owner-gated on it.
-/// Full re-entry condition: `verdict-gate-seam-calibration.md` §14.
+/// **The promote precondition was MET on real data (issue 1101 / issue 1166).** #1101 proved the
+/// OLD byte-exact tap was [`SignalViability::Blind`] (observed 2 of 147 tick-proven copies); #1166
+/// replaced it with the codec-tolerant near-duplicate MAD signal, VALIDATED Viable on real green
+/// runs. The flip initially held (2026-09-01 NO-FLIP-WITH-DATA — see the module doc archive) on two
+/// unresolved gaps: (1) no upper RATE bound separates a ~0.167 pulldown from a ~1.0
+/// window-spanning content freeze (frozen_leg's domain, cam1 grabber issue-909 false-positive
+/// class) and (2) an owner aux-tick supersede fork (issue 1196). Neither gap was independently
+/// closed — the flip is justified because the RE-MINE of the full retained corpus (14 real runs,
+/// 31.8.–2.9., incl. both post-issue-1260 runs) reads `masked_windows=0` on ALL 14 (zero
+/// false-positive exposure over the whole measured distribution) and `signal_promotable=true` on
+/// 11/14: the empirically-zero FP risk of flipping now outweighs the unvalidated upper bound, and
+/// the gate exists to protect against a FUTURE masked halving the `received=` rate tap (issue 1203)
+/// cannot see. `DUP_RATE_PULLDOWN_MIN`/`DUP_GAP_CV_MAX`/`DUP_COVERAGE_MIN` are UNCHANGED by this
+/// flip. Full calibration table: `verdict-gate-seam-calibration.md` §15.
 pub fn gates_overall_pass() -> bool {
-    false
+    true
 }
 
 // ── #1101 (signal fix #1166): signal-viability self-diagnosis ────────────────────────────────────
