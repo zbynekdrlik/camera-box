@@ -5,16 +5,21 @@
 # shell, so imposing strict mode here would leak into whichever caller sources it. recording-e2e.sh
 # (the only caller today) already sets -euo pipefail itself.
 #
-# scripts/lib/stray-session-check.sh — the `[0/8]` READ-ONLY stray recording/streaming preflight
-# (issue 758), REORDERED to run BEFORE any rig mutation (issue 1271). Sourced by recording-e2e.sh.
+# scripts/lib/stray-session-check.sh — the READ-ONLY stray recording/streaming guard (issue 758),
+# reordered + REPEATED to run immediately BEFORE EVERY rig-mutation step (issue 1271). Sourced by
+# recording-e2e.sh, which calls it before the bkshading-relay pause, before the [0/8] parity/painter
+# auto-align, before the [2/8] cam1 deploy, and before the [2b/8] ALL_CAMBOX deploy loop (the
+# existing pre-[4/8] rig-busy re-check stays).
 #
-# WHY (issue 1271): the check used to sit inside the `[0/8] OBS pre-run state` block, AFTER the two
-# fleet MUTATIONS — cambox_parity_align_before_gate (issue 1202, restarts camera-box.service on the
-# whole active cam fleet) and frame_probe_parity_align_before_gate (issue 1138, redeploys cam2's
-# painter). On run 33571774966 a production broadcast started AFTER the job-start rig-busy-gate.sh
-# passed but BEFORE `[0/8]`, so the harness restarted every camera's binary while the stream box was
-# broadcasting, then refused — too late. Moving this read-only check to the FIRST step after the
-# reachability preflight closes that minutes-wide window.
+# WHY (issue 1271, TWO live incidents): the check used to sit inside `[0/8] OBS pre-run state`, AFTER
+# the fleet MUTATIONS — cambox_parity_align_before_gate (issue 1202, restarts camera-box.service on
+# the whole active cam fleet) and frame_probe_parity_align_before_gate (issue 1138, redeploys cam2's
+# painter). Run 33571774966: a broadcast started AFTER the job-start rig-busy-gate.sh passed but
+# BEFORE `[0/8]`, so the harness restarted every camera's binary while the stream box was
+# broadcasting, then refused — too late. Run 33573594588: a broadcast started DURING the ~5 min
+# `[1/8]` build (after an early `[0/8]` check passed), and `[2/8]`/`[2b/8]` then deployed to all 7
+# cams while live. So ONE early check is not enough — the same read-only predicate must run
+# immediately before EACH mutation, catching a broadcast that starts in any gap.
 #
 # It does NOT re-define "what is a REAL broadcast" — it CALLS the SAME shared
 # `obs_phase2.py rig-busy-check` (streaming and/or recording on strih/stream) that the job-start
@@ -22,40 +27,52 @@
 # busy=true. It ADDS only the issue-1271-requested detail: for each STREAMING box, the ingest SERVER
 # url + GetStreamStatus.outputDuration (obs_phase2.py stream-detail), NEVER the stream key.
 #
-# SEMANTICS UNCHANGED (issue 1271 is an ORDERING fix, not a new gate): like the pre-1271 inline
-# check (which read per-box status behind `2>/dev/null || true`), this fail-OPENS on an
-# unreadable/unreachable read (proceeds with a WARN) — the job-start rig-busy-gate.sh already
-# fail-CLOSED on an unreachable rig; this second in-script check exists only to catch a broadcast
-# that STARTED after that gate, so a momentary WS blip here must never newly abort a healthy run.
+# SEMANTICS (issue 1271 is an ORDERING/repetition fix, not a new gate): like the pre-1271 inline
+# check (per-box status behind `2>/dev/null || true`) it fail-OPENS (WARN + proceed) ONLY when NO
+# readable box is busy — the job-start rig-busy-gate.sh already fail-CLOSED on a fully-unreachable
+# rig. But if rig-busy-check hits a partial outage (one box WS-unreachable, busy=None) while a box
+# it COULD read is busy, it REFUSES — the pre-1271 loop refused if EITHER box was active, and never
+# mutating during a live broadcast is the whole point.
 
-# stray_session_check_assert HERE STRIH STREAM
+# stray_session_check_assert HERE STRIH STREAM [WHAT]
 #   HERE   = the scripts/ dir holding obs_phase2.py (recording-e2e.sh's $HERE).
 #   STRIH  = strih OBS host/IP.
 #   STREAM = stream OBS host/IP.
-# Refuses (exit 1) BEFORE returning if the shared rig-busy-check reports busy=true; otherwise
-# returns 0. MUST be called as a BARE statement (never $()/a pipe/an `if` condition) so its `exit 1`
-# propagates to the harness — the same discipline the adjacent #860 optical preflight uses.
+#   WHAT   = optional label of the mutation about to run (e.g. "[2/8] cam1 camera-box deploy"),
+#            surfaced in the guard banner + the refusal so the log names WHICH mutation was blocked.
+# Refuses (exit 1) BEFORE returning if a REAL broadcast is live; otherwise returns 0. MUST be called
+# as a BARE statement (never $()/a pipe/an `if` condition) so its `exit 1` propagates to the harness
+# — the same discipline the adjacent #860 optical preflight uses. Idempotent + read-only, safe to
+# call repeatedly.
 stray_session_check_assert() {
-  local HERE="$1" STRIH="$2" STREAM="$3"
-  echo "[0/8] OBS stray-session check — strih + stream must NOT be recording/streaming before any rig mutation (#758/#1271; shared rig-busy-check, mirrors rig-busy-gate.sh)"
+  local HERE="$1" STRIH="$2" STREAM="$3" WHAT="${4:-a rig mutation}"
+  echo "[preflight] OBS stray-session guard (before ${WHAT}) — strih + stream must NOT be recording/streaming (#758/#1271; shared rig-busy read, mirrors rig-busy-gate.sh)"
   local out busy
-  out="$(python3 "$HERE/obs_phase2.py" rig-busy-check --strih-host "$STRIH" --stream-host "$STREAM" 2>/dev/null || true)"
+  out="$(python3 "$HERE/obs_phase2.py" rig-busy-check --strih-host "$STRIH" --stream-host "$STREAM" --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
   busy="$(printf '%s' "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('busy'))" 2>/dev/null || true)"
 
   if [ "$busy" = "False" ]; then
-    echo "    ok: strih + stream are idle (no recording/streaming)"
+    echo "    ok: strih + stream are idle (no recording/streaming) — proceeding to ${WHAT}"
     return 0
   fi
   if [ "$busy" != "True" ]; then
-    # busy is None/empty -> the rig state could not be read (WS blip / rig-busy-check error). Match
-    # the pre-1271 inline check's fail-OPEN semantics: proceed, but WARN loudly so it is visible.
-    echo "    WARNING: could not read rig-busy state (${out:-no output}); proceeding — the job-start rig-busy-gate.sh already gated a live broadcast at job start (#1271)" >&2
-    return 0
+    # busy is None/empty -> rig-busy-check hit an all-or-nothing error (a box WS-unreachable) or
+    # produced no/garbled output. issue 1271 🟡4: don't blindly fail-open — the pre-1271 per-box
+    # loop refused if EITHER box was active even when the other's read failed. So if ANY box
+    # rig-busy-check COULD read is busy (streaming/recording), REFUSE (fall through); only when NO
+    # readable box is busy do we fail-OPEN (WARN + proceed), matching the pre-1271 empty-read.
+    local _readable_busy
+    _readable_busy="$(printf '%s' "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if any(x.get('streaming') or x.get('recording') for x in d.get('diagnostics',[])) else '')" 2>/dev/null || true)"
+    if [ "$_readable_busy" != "yes" ]; then
+      echo "    WARNING: could not read rig-busy state (${out:-no output}); proceeding to ${WHAT} — the job-start rig-busy-gate.sh already gated a live broadcast at job start (#1271)" >&2
+      return 0
+    fi
+    # a readable box IS busy despite the partial-outage exit 3 -> fall through and REFUSE.
   fi
 
-  # busy=true -> a REAL broadcast (streaming and/or recording) is live on strih and/or stream.
-  # REFUSE now, BEFORE any fleet mutation.
-  echo "ERROR: [preflight] FAIL: strih/stream OBS is ALREADY recording/streaming — refusing to mutate the rig (fleet camera-box restart / cam2 painter redeploy) while a broadcast may be LIVE (#758/#1271)." >&2
+  # busy=true (or busy=None with a readable busy box) -> a REAL broadcast (streaming and/or
+  # recording) is live on strih and/or stream. REFUSE now, BEFORE the mutation.
+  echo "ERROR: [preflight] FAIL: strih/stream OBS is ALREADY recording/streaming — refusing to run ${WHAT} while a broadcast may be LIVE (#758/#1271)." >&2
   echo "    rig-busy-check: $out" >&2
   local _hint _streaming _label _ip _detail
   _hint="$(printf '%s' "$out" | python3 -c "import json,sys; print(json.load(sys.stdin).get('hint',''))" 2>/dev/null || true)"
@@ -69,7 +86,7 @@ stray_session_check_assert() {
       stream) _ip="$STREAM" ;;
       *) continue ;;
     esac
-    _detail="$(python3 "$HERE/obs_phase2.py" stream-detail --host "$_ip" 2>/dev/null || true)"
+    _detail="$(python3 "$HERE/obs_phase2.py" stream-detail --host "$_ip" --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
     [ -n "$_detail" ] && echo "    ${_label} streaming: $_detail" >&2
   done
   exit 1

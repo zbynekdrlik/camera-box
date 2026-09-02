@@ -2179,16 +2179,37 @@ def stream_status(a):
 
 
 def redact_stream_server(server, key):
-    """issue 1271: return the ingest SERVER url with any occurrence of the stream KEY removed, so a
-    stray/production-broadcast refusal log can name WHERE a stream is going without EVER leaking the
-    secret key -- even if a service embeds the key in the server url. OBS's rtmp_custom/rtmp_common
-    services keep server + key as SEPARATE fields, so the common case is a key-free server that
-    passes through verbatim; this is a defensive redaction for the embedded-key case."""
+    """issue 1271: return the ingest SERVER url safe to print in a stray/production-broadcast
+    refusal log — WHERE a stream is going, without EVER leaking a secret, even partially.
+
+    Two layers, because a secret does NOT only live in the separate `key` field: some custom
+    SRT/RIST services carry it in the server url's query (``srt://h:9000?streamid=SECRET``, with the
+    `key` field empty), and an rtmp url can carry credentials in its userinfo
+    (``rtmp://user:pass@h/app``). So:
+      1. STRUCTURAL — parse the url and keep only ``scheme://host[:port]/path``, dropping the query,
+         fragment, and userinfo (where an unknown secret hides). A url with no scheme/netloc is left
+         as-is for layer 2.
+      2. SUBSTRING — strip any literal occurrence of the known `key` that survived (e.g. a key in
+         the PATH), replacing it with ``<redacted-key>``.
+    OBS's rtmp_custom/rtmp_common services keep server + key as SEPARATE fields, so the common
+    ``rtmp://host:port/app`` server passes through unchanged."""
     server = server or ""
     key = key or ""
-    if key and key in server:
-        server = server.replace(key, "<redacted-key>")
-    return server
+    safe = server
+    try:
+        import urllib.parse as _u
+
+        parts = _u.urlsplit(server)
+        if parts.scheme and parts.netloc:
+            host = parts.hostname or ""
+            if parts.port:
+                host = f"{host}:{parts.port}"
+            safe = f"{parts.scheme}://{host}{parts.path}"
+    except Exception:  # noqa: BLE001 - a weird/unparseable url falls back to the substring pass
+        safe = server
+    if key and key in safe:
+        safe = safe.replace(key, "<redacted-key>")
+    return safe
 
 
 def stream_detail(a):
@@ -2512,7 +2533,13 @@ def rig_busy_check(a):
             reasons.append(f"{label} is recording (GetRecordStatus.outputActive=true{tc_suffix})")
 
     if errors:
-        print(json.dumps({"busy": None, "reasons": errors}))
+        # issue 1271: emit the diagnostics for the box(es) we COULD read even on this
+        # all-or-nothing error path. rig-busy-gate.sh only prints this output on exit 3 (it then
+        # exits 43 without parsing it), but the [0/8] stray-session check (scripts/lib/
+        # stray-session-check.sh) inspects these diagnostics so a live broadcast on a READABLE box
+        # is refused even when the OTHER box's WS is momentarily unreachable (the pre-1271 per-box
+        # loop refused if EITHER box was active) — never silently proceeding to mutate the fleet.
+        print(json.dumps({"busy": None, "reasons": errors, "diagnostics": diagnostics}))
         sys.exit(3)
 
     busy = bool(reasons)

@@ -675,6 +675,12 @@ BKSH_PAUSE_CAM1_WAS_ACTIVE=0
 BKSH_PAUSE_PAINTER_WAS_ACTIVE=0
 # shellcheck source=scripts/lib/bkshading-e2e-pause.sh
 . "$HERE/lib/bkshading-e2e-pause.sh"
+# issue 1271: guard BEFORE the bkshading-relay pause — the FIRST rig mutation (it stops
+# bkshading-relay on the source cam + cam2). A live broadcast must never have its shading relay
+# dropped, so the read-only rig-busy guard runs here first. Bare statement (never $()/pipeline) so
+# its `exit 1` propagates; this runs before the reachability preflight, so it fail-opens if
+# strih/stream WS is momentarily unreadable (the reachability preflight then owns that abort).
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the bkshading-relay pause"
 BKSH_PAUSE_CAM1_WAS_ACTIVE="$(bkshading_e2e_pause_stop "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW")"
 echo "    bkshading-relay pause ($CAMERA_NAME, $CAM1_IP): was-active=$BKSH_PAUSE_CAM1_WAS_ACTIVE, now stopped for the run"
 BKSH_PAUSE_PAINTER_WAS_ACTIVE="$(bkshading_e2e_pause_stop cam2 "$PAINTER_IP" "$CAM_PW")"
@@ -722,15 +728,6 @@ for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "st
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then echo "    ok: $_name ($_ip)"; else
     echo "ERROR: $_name ($_ip) UNREACHABLE from dev1 — fix route/host, then re-run." >&2; exit 1; fi
 done
-
-# issue 1271: READ-ONLY stray recording/streaming check — the FIRST [0/8] step after reachability,
-# BEFORE any rig mutation (the cambox/frame-probe parity auto-align further below). Bare statement
-# (never $()/pipeline) so its `exit 1` propagates to the harness (same discipline as the #860
-# optical preflight below). Reuses the SAME shared rig-busy state read the job-start
-# scripts/rig-busy-gate.sh uses (the one REAL-broadcast definition) and, on refusal, names WHAT is
-# streaming (ingest server url + GetStreamStatus.outputDuration, key-free). See
-# scripts/lib/stray-session-check.sh.
-stray_session_check_assert "$HERE" "$STRIH" "$STREAM"
 
 # #860: optical-injection-leg fail-fast. A STANDING cam2 painter (rig-mode.sh test's
 # /run/rig-painter.pid, or the permanent cam2-painter.service) that a previous run's cleanup left
@@ -1053,6 +1050,10 @@ done
 # is uniformly stale-vs-candidate (deploys the candidate to /usr/local/bin/camera-box so the gate's
 # candidate-pin accept passes). Best-effort: mixed/unread fleets are never auto-deployed, and the
 # gate below is the authority (it REFUSES if the fleet is not on the candidate).
+# issue 1271: guard immediately BEFORE this fleet MUTATION (it deploys + restarts camera-box.service
+# on the whole active fleet, and the painter align below redeploys cam2). A broadcast that started
+# during the read-only [0/8] gates above must be caught here, before the fleet's binary is touched.
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the camera-box + painter parity auto-align"
 cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
   --linux "$CAMBOX_VERSION_LINUX" \
@@ -2479,6 +2480,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   fi   # issue 1013: end of the IMAG_OFFLINE_ACKED skip-guard over the imag render-health + divisor leg
 fi
 
+# issue 1271: guard immediately BEFORE the cam1 camera-box deploy below — a broadcast can start
+# during the build step above (run 33573594588: it started at 00:47:43Z mid-build), so re-check the
+# shared rig-busy predicate here before pushing the probe-featured binary to cam1.
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the cam1 camera-box deploy"
 echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ $CAMERA_NAME mark, NO grab #179)"
 # #174 + #179: deploy the freshly-built PROBE-featured camera-box (carries the #174 capture
 # burn) to a $CAMERA_NAME-LOCAL /tmp path and launch THAT — NOT the prod
@@ -2597,6 +2602,9 @@ for _scn in $(camera_active_secondary_set); do
   CAMBOX_SECONDARY_DEPLOY+=("${_scn}=$(camera_secondary_ip "$_scn")=$(camera_secondary_burn_run_id "$_scn")")
 done
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  # issue 1271: guard immediately BEFORE the ALL_CAMBOX secondary deploy loop — the same
+  # broadcast-started-mid-run risk as the cam1 deploy above, now across every secondary cam box.
+  stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the ALL_CAMBOX camera-box deploy loop"
   for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_burn%%=*}"; _crest="${_cn_ip_burn#*=}"; _cip="${_crest%%=*}"; _cburn="${_crest#*=}"
     echo "[2b/8] $_cn (${_cip}) — probe-featured camera-box with its OWN capture BURN (run_id=$_cburn, #624/#312 ALL_CAMBOX)"
