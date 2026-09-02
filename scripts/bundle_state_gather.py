@@ -28,7 +28,9 @@ change later.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import math
 import os
 import re
@@ -612,6 +614,89 @@ def obs_process_count_from_listing(text):
     return str(count)
 
 
+# #1227 — VB-Audio Matrix presence, for the `vb_matrix_running` facet the dev1 VB-Matrix alert
+# watchdog reads. The process image name after its `.exe` is stripped (tasklist prints e.g.
+# `VBAudioMatrix_x64.exe`); the pattern enumerates the actual HOSTS — the stream build
+# `VBAudioMatrix_x64` and strih's `VBAudioMatrixCoconut_x64` (+ their non-x64 variants), NOT a
+# left-open `VBAudioMatrix_Setup` installer that shares the same folder (case-insensitive, anchored
+# at both ends so `NotVBAudioMatrix…` / `…_Setup` never match). The exe pattern is derived from the
+# SAME base so the two can never drift apart (a #1222c-style DRY finding).
+_VB_MATRIX_NAME_BASE = r"(?i)^VBAudioMatrix(Coconut)?(_x64)?"
+VB_MATRIX_PROCESS_NAME_RE = re.compile(_VB_MATRIX_NAME_BASE + r"$")
+VB_MATRIX_EXE_RE = re.compile(_VB_MATRIX_NAME_BASE + r"\.exe$")
+
+
+def vb_matrix_process_from_listing(text):
+    """#1227 — the running VB-Matrix process from `tasklist /FO CSV /NH` output *text* (each row
+    `"Image Name","PID","Session Name","Session#","Mem Usage"`). A `csv.reader` is REQUIRED — the
+    Mem Usage column carries a thousands separator INSIDE its quotes (`"18,236 K"`), so a naive
+    comma split would mis-column the PID. The image name has its `.exe` stripped before matching
+    `VB_MATRIX_PROCESS_NAME_RE`, so a returned `name` is e.g. `VBAudioMatrix_x64`.
+
+    THREE-state return so the caller never reads a FAILED read as a measured absence (issue 1227
+    review 🔴, the #833 / `obs_process_count_from_listing` class):
+      None       -- the listing is UNREADABLE (empty/whitespace text = a tasklist subprocess
+                    failure, since a live box always lists SOME processes; or a `csv.Error`). The
+                    caller must treat this as UNKNOWN (facet omitted), NEVER a DOWN.
+      ("", "")   -- a VALID listing with no VB-Matrix HOST row (genuinely absent -> the caller reads
+                    DOWN when the install is present on disk).
+      (name,pid) -- the first VB-Matrix host process found."""
+    if not (text or "").strip():
+        return None
+    try:
+        for row in csv.reader(io.StringIO(text)):
+            if not row:
+                continue
+            image_name = row[0]
+            base = image_name[:-4] if image_name.lower().endswith(".exe") else image_name
+            if VB_MATRIX_PROCESS_NAME_RE.match(base):
+                pid = row[1].strip() if len(row) > 1 else ""
+                return (base, pid)
+    except csv.Error:
+        return None
+    return ("", "")
+
+
+def vb_matrix_install_present_under(scan_dirs):
+    """#1227 — True iff any `VBAudioMatrix*.exe` exists (recursively) under any of *scan_dirs* — the
+    disk-install gate that distinguishes a box that HAS VB-Matrix but its process is dead (stream
+    after a reboot with no host -> the facet must read running="0", a real DOWN) from a box that
+    never had VB-Matrix at all (imag -> the facet is omitted, never a false negative). Mirrors
+    `obs_installs_under`'s walk-and-match shape. False for a missing/empty dir list (never guessed)."""
+    for root in scan_dirs or []:
+        if not root or not os.path.isdir(root):
+            continue
+        for _dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                if VB_MATRIX_EXE_RE.match(name):
+                    return True
+    return False
+
+
+def vb_matrix_running_facet(install_present, proc):
+    """#1227 — the 3-state `(running, name, pid)` facet composition from the disk-install gate + the
+    `vb_matrix_process_from_listing` result *proc* (None | ("", "") | (name, pid)):
+
+      install_present False        -> ("", "", "")     (no VB-Matrix box, e.g. imag: OMITTED
+                                                        downstream -> UNKNOWN, never a page)
+      proc is None                 -> ("", "", "")     (the tasklist read FAILED — UNKNOWN, NEVER a
+                                                        false DOWN off a failed read; issue 1227 🔴)
+      install_present, proc ("","")-> ("0", "", "")    (a good read, host genuinely absent -> present
+                                                        in JSON as running="0" -> DOWN -> page)
+      install_present, (name,pid)  -> ("1", name, pid) (RUNNING)
+
+    `"0"` is a truthy string, so `build_bundle_state`'s omit-when-empty filter KEEPS it (DOWN must
+    surface); only the not-installed / unread `""` is dropped."""
+    if not install_present:
+        return ("", "", "")
+    if proc is None:
+        return ("", "", "")
+    proc_name, proc_pid = proc
+    if proc_name:
+        return ("1", proc_name, proc_pid or "")
+    return ("0", "", "")
+
+
 # #826 — NL_STARTUP.ahk's own variable syntax (confirmed live on strih, issue #826 comments):
 #   app1_run  := 1
 #   app1_path := "C:\ProgramData\...\OBS Studio.lnk"
@@ -793,6 +878,10 @@ def build_bundle_state(
     av_offset_age_s="",
     av_offset_n_recent="",
     av_offset_n_base="",
+    vb_matrix_running="",
+    vb_matrix_name="",
+    vb_matrix_pid="",
+    vb_matrix_start="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -889,5 +978,14 @@ def build_bundle_state(
         "av_offset_age_s": av_offset_age_s,
         "av_offset_n_recent": av_offset_n_recent,
         "av_offset_n_base": av_offset_n_base,
+        # #1227 — the VB-Matrix presence facet the dev1 VB-Matrix alert watchdog reads. Same
+        # omit-when-empty rule: running="0" (installed but the VBAudioMatrix* process is DEAD) is a
+        # truthy string and is KEPT (surfaces as DOWN); running="" (a box with no VB-Matrix install,
+        # e.g. imag) is dropped -> UNKNOWN downstream, never a false negative. name/pid/start are
+        # context only (pid free from the tasklist parse; start best-effort, PID-keyed-cached CIM).
+        "vb_matrix_running": vb_matrix_running,
+        "vb_matrix_name": vb_matrix_name,
+        "vb_matrix_pid": vb_matrix_pid,
+        "vb_matrix_start": vb_matrix_start,
     }
     return {k: v for k, v in values.items() if v}
