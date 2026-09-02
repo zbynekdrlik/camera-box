@@ -137,22 +137,88 @@ pub fn classify(
     span_frames: u32,
     cut_adjacent: bool,
 ) -> SwitchInTransient {
-    // issue 1144 RED stub -- classify not implemented yet; always returns not-transient so the
-    // positive `real_switch_in_transient_is_classified` test (and the reason diagnostics) FAIL here.
-    let _ = (
-        first_id,
-        last_id,
-        missing_ids,
-        undecodable,
-        burn_present_ok,
-        avg_step,
-        expected_step,
-        stuck_density,
-        span_frames,
-        cut_adjacent,
-    );
     let mut out = SwitchInTransient::default();
-    out.reason = "RED stub -- classify not implemented";
+
+    let (first, last) = match (first_id, last_id) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            out.reason = "no decoded burn range";
+            return out;
+        }
+    };
+    if missing_ids.is_empty() {
+        out.reason = "no burn loss";
+        return out;
+    }
+    if !cut_adjacent {
+        out.reason = "window not cut-adjacent";
+        return out;
+    }
+    if !burn_present_ok {
+        out.reason = "burn not present";
+        return out;
+    }
+    if undecodable != 0 {
+        out.reason = "undecodable frames present";
+        return out;
+    }
+    if (avg_step - expected_step as f64).abs() > AVG_STEP_DEV_MAX {
+        out.reason = "optical drift (avg_step off expected)";
+        return out;
+    }
+    let span = last.saturating_sub(first);
+    if span == 0 {
+        out.reason = "degenerate id span";
+        return out;
+    }
+
+    let onset = missing_ids[0].saturating_sub(first);
+    out.first_offset = onset;
+    if onset > ONSET_OFFSET_MAX_IDS {
+        out.reason = "loss onset not at the window start";
+        return out;
+    }
+
+    // Leading burst = the maximal prefix run of missing ids whose consecutive gap is <= RECOVERY_GAP.
+    let mut burst_len = 1usize;
+    for w in missing_ids.windows(2) {
+        if w[1].saturating_sub(w[0]) <= RECOVERY_GAP_IDS {
+            burst_len += 1;
+        } else {
+            break;
+        }
+    }
+    let burst_end = missing_ids[burst_len - 1];
+    let burst_id_span = burst_end.saturating_sub(missing_ids[0]).saturating_add(1);
+    out.burst_len = burst_len;
+    out.burst_end_offset = burst_end.saturating_sub(first);
+    out.residual = missing_ids.len() - burst_len;
+    out.burst_density = burst_len as f64 / burst_id_span as f64;
+
+    if burst_len < MIN_TRANSIENT_MISSING {
+        out.reason = "leading burst too small (a few drops, not a spin-up)";
+        return out;
+    }
+    if out.burst_end_offset as f64 > MAX_TRANSIENT_SPAN_FRAC * span as f64 {
+        out.reason = "transient region exceeds the leading bound";
+        return out;
+    }
+    if out.burst_density < BURST_DENSITY_MIN {
+        out.reason = "leading burst not dense (sparse leading loss)";
+        return out;
+    }
+    if out.residual > MAX_RESIDUAL_AFTER_BURST {
+        out.reason = "does not recover (residual loss after the burst)";
+        return out;
+    }
+    let stuck_frames = stuck_density * span_frames as f64;
+    if stuck_frames > missing_ids.len() as f64 * (1.0 + STUCK_VS_MISSING_TOL) {
+        out.reason = "optical stuck exceeds the burn transient (independent stuck)";
+        return out;
+    }
+
+    out.is_transient = true;
+    out.reason = "switch-in transient (NDI receiver spin-up after program cut)";
     out
 }
 
