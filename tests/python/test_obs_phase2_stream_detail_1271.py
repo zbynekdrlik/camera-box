@@ -78,6 +78,19 @@ def test_redact_tolerates_empty_key_and_empty_server():
     assert obs_phase2.redact_stream_server(None, None) == ""
 
 
+def test_redact_drops_a_query_secret_even_with_an_empty_key_field():
+    # SRT/RIST custom services put the secret in the url query, `key` field empty (issue 1271 🟡2).
+    out = obs_phase2.redact_stream_server("srt://host.example:9000?streamid=SUPERSECRETKEY", "")
+    assert "SUPERSECRETKEY" not in out
+    assert out == "srt://host.example:9000"
+
+
+def test_redact_drops_userinfo_credentials_even_with_an_empty_key_field():
+    out = obs_phase2.redact_stream_server("rtmp://user:PASSWORDSECRET@host.example:1935/app", "")
+    assert "PASSWORDSECRET" not in out
+    assert out == "rtmp://host.example:1935/app"
+
+
 # ---------------------------------------------------------------------------
 # stream_detail (read-only)
 # ---------------------------------------------------------------------------
