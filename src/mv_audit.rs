@@ -400,6 +400,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_tolerates_appended_1260_budget_fields() {
+        // camera-box #1260: the emitter appends budget-gate phase-split fields
+        // (pre_mv_ms/pre_mv_max_ms/mv_ewma_ms/budget_ms) after cx/cy so which phase eats the
+        // per-tick budget is readable from the log. The parser ignores unknown keys (the
+        // jitter_audit token-scan convention, `_ => {}`), so an enriched line still parses to the
+        // SAME seven core fields the gate reads — this PROVES the append is backward-compatible
+        // rather than asserting it in prose.
+        let line = "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=7.5 target=30 floor=28.0 cx=3840 cy=2160 pre_mv_ms=24.70 pre_mv_max_ms=31.20 mv_ewma_ms=12.40 budget_ms=30.00";
+        let s = parse_audit_line(line).expect("an enriched line must still parse the core fields");
+        assert_eq!(s.monitor, 1);
+        assert_eq!(s.divisor, 1);
+        assert!((s.rendered_fps - 7.5).abs() < 1e-9);
+        assert!((s.target_fps - 30.0).abs() < 1e-9);
+        assert!((s.floor_fps - 28.0).abs() < 1e-9);
+        assert_eq!(s.cx, 3840);
+        assert_eq!(s.cy, 2160);
+        // The appended fields never affect the gate: this enriched line still classifies BELOW floor.
+        assert!(!classify(s.rendered_fps, s.floor_fps).is_pass());
+    }
+
+    #[test]
     fn parser_rejects_the_genlock_lines_and_noise_771() {
         // The two directions the jitter_audit family requires: the MV parser must reject the
         // genlock lines, and (asserted in jitter_audit's own tests) they reject ours — the

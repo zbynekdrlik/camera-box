@@ -353,6 +353,21 @@ struct obs_display {
 	uint64_t render_audit_window_start_ns;
 	uint32_t render_audit_render_count;
 
+	/* camera-box #1260: budget-gate PHASE split for the multiview-audit line. The MV collapse
+	 * (rendered_fps below floor) is the #278 budget gate skipping when the pre-MV cost (ns
+	 * already consumed on the graphics thread THIS tick before this display: tick_sources +
+	 * output_frames + earlier displays) plus this display's render EWMA exceeds the ~30ms
+	 * budget. Only rendered_fps (the outcome) was ever logged, never the terms, so which phase
+	 * ate the budget could not be read from the log. Accumulate the pre-MV elapsed per tick
+	 * (sum + max over the window; tick_count is the mean divisor) and print
+	 * pre_mv_ms/pre_mv_max_ms alongside mv_ewma_ms/budget_ms at emit. Per-instance,
+	 * graphics-thread-only, reset each audit window exactly like render_audit_render_count
+	 * above. REPORT-ONLY observability: the skip DECISION (obs_display_should_skip) is
+	 * untouched, so this changes what is LOGGED, never the throttle behaviour. */
+	uint64_t render_audit_pre_mv_sum_ns;
+	uint64_t render_audit_pre_mv_max_ns;
+	uint32_t render_audit_tick_count;
+
 	struct obs_display *next;
 	struct obs_display **prev_next;
 };

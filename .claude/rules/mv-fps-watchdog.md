@@ -201,14 +201,58 @@ and the brace-delta-vs-origin structural check. The FULL filter compiles only on
 the supervisor's genlock-fleet deploy + rig validation (burns-ON `multiview-audit rendered_fps` back
 ≥ 28 AND a clean E2E recording-verdict burns-ON — proving the cache didn't corrupt the recorded stamp).
 
-**The log does NOT carry the budget-gate terms — this is the profiling gap.** The `multiview-audit:`
-line reports only `rendered_fps` (the outcome); `program-render-audit:` reports program `render_fps` +
-whole-tick `avg_frame_ms`. Neither carries the MV `render_ewma_ns`, the program-elapsed-BEFORE-the-MV,
-or the budget — so which cost term dominates (QR raster+upload vs the extra per-draw texrender vs base
-composite) can only be settled by a rig experiment (or by enriching the audit emit with those terms,
-which is a lock-step vendored-C change: format anchor `tests/genlock_preload.rs:2592` + the
-`windows-genlock*.yml` pwsh gates; the `mv_audit.rs:159` parser is already key-based + tolerant of
-added fields).
+**The budget-gate terms are now ON the `multiview-audit:` line (issue 1260 lane, LANDED — CI-compile
++ supervisor deploy pending).** The line was enriched (APPEND-only) with `pre_mv_ms` (window mean) +
+`pre_mv_max_ms` + `mv_ewma_ms` + `budget_ms` — the #278 budget-gate terms `render_display()` already
+computes each tick (`elapsed = now - graphics_frame_start_ns`, `render_ewma_ns`, 90%-of-interval),
+now printed so which phase eats the budget is READABLE from the log (a `rendered_fps` below floor with
+`pre_mv_ms` already near `budget_ms` = a heavy PRE-MV phase, not the MV). REPORT-ONLY: the skip
+decision (`obs_display_should_skip`) is untouched; accumulated in the audit block only; three new
+`obs_display` fields (`render_audit_pre_mv_sum_ns`/`_max_ns`/`render_audit_tick_count`), reset per
+window. `mv_audit.rs` ignores unknown keys so every consumer is unaffected (proven by
+`parse_tolerates_appended_1260_budget_fields`). Lock-step anchors updated: `tests/genlock_preload.rs`
++ `tests/mv_audit_emit.rs` + BOTH `windows-genlock*.yml` (the format string) — verify a further field
+add the same way (lift-compile the `blog` under `-Wformat=2`, offline `re.sub`-squish pwsh check,
+`mv_audit_emit.rs` via `rustc --test`, the #1212 substitute-import harness for `mv_audit.rs`).
+
+## Contention profile (issue 1260 hard-debug lane, 2026-09-02) — CPU-SIDE-DOMINATED, not GPU-bound, not scheduling-starved
+
+Read-only profile of obs64 on strih during the live E2E (one ~12 s window, one OBS session, build
+a0b6cac7f, burns-OFF regime; Ryzen 7 5800X 8C/16T, NVIDIA RTX 2070 SUPER). The tick-cache (c62fb9bbe)
+did NOT cure the collapse because burns-OFF is ALSO below floor (14–27 fps) — the base cost, not the
+burns, is the issue. Per-role CPU (`GetThreadTimes` deltas; threads NAMED via `GetThreadDescription`
++ Win32-start-address→module, NEVER by CPU rank — the top thread `video-io: video thread` is NOT the
+graphics thread):
+
+- `libobs: graphics thread` **0.534 core**; `nvwgf2umx.dll` D3D driver workers (Threaded-Optimization
+  ON, 74 threads) **0.259 core** → render-submission CPU ≈ **0.793 core**; NDI receive/decode
+  (`Processing.NDI.Lib.x64.dll`, ~180 threads, 7×60fps, CPU-decoded — GPU VideoDecode 0%) **4.43 core**
+  (largest, but SEPARATE threads); video-io outputs (2ME PGM/PVW + aux) **1.0 core**.
+- GPU 3D engine **38.7%** (obs64 28.4%, Arena 9%) → ~61% IDLE; graphics-thread ThreadState (45 samples)
+  Running 40% / Wait-other-blocked 44% / **Ready-starved 0%**; processor-queue not sustained.
+- `avg_frame_ms` = 26 ms whole-tick; program render lossless (renderSkipped 0). MV budget-gated.
+
+**Attribution (honest): CPU-side-dominated** — GPU 61% idle rules out GPU-fill-bound; graphics-thread
+Ready=0% + no queue backlog rules out run-queue scheduling-starvation; the render WORK is CPU-side
+draw-call submission (graphics thread + its NVIDIA driver workers, GPU idle). The graphics thread's
+~44% in-tick blocked time (driver-submission wait vs GPU-fence latency vs lock) is UNRESOLVED by
+`GetThreadTimes` — needs an ETW (`wpr`/`xperf` CSwitch+stacks) trace to split. The pre-MV phase (strih
+renders TWO mixes 2ME PGM+PVW + aux MULTIVIEW + 7×1080p60 uploads + genlock FIFO before the 4K MV) is
+the budget consumer (est. ~16–17 ms of the 30 ms budget, UNMEASURED until the enrichment deploys).
+
+**LEVERS (Fable-ranked; all need a rig deploy/config = supervisor steps):** (1) instrument → deploy →
+read the pre-MV/MV split → reduce the fat pre-MV phase (the only path to ≥28 if the model holds);
+(2) MV 4K→1080p A/B — near-free, LOW expected benefit (submission is resolution-INDEPENDENT, GPU
+idle) but FALSIFIES the CPU-side story if it fixes it — run FIRST as an experiment; (3) fewer MV
+cells (owner-stake); (4) move `bkshading` off strih (#808, marginal); (5) MV divisor 2 — FLAGGED:
+structurally FAILS ≥28 (caps MV at 15 fps) + reverses #776, an owner call not a lever. Leave NVIDIA
+Threaded-Optimization ON (it offloads submission off the single graphics thread).
+
+**Re-arm scope: the `[4d1/8]` preflight measures BURNS-OFF** (issue 1261, production-shaped), so the
+re-arm condition is **burns-OFF median rendered_fps ≥ 28** (~4 ms/tick from the current ~24), NOT
+burns-ON. The burns-ON 7.5 fps is a measurement-window observer-effect artifact (burns are OFF in
+event/production). NEVER widen floor 28 or re-loosen the strih term (issue 1263 report-only is the
+stopgap; the goal is to re-arm it strict).
 
 ## Autostart-aware = reset the confirm streak on an OBS-log IDENTITY change
 
