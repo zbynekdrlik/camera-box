@@ -111,8 +111,31 @@ def _read_holder(lease_dir: str):
         if not isinstance(data, dict):
             return True, None
         return True, data
+    except FileNotFoundError:
+        # A concurrent release (scripts/lib/rig-lease.sh's #857 atomic rename-aside teardown) can
+        # remove the file in the TOCTOU window between the isfile() check above and this open() --
+        # treat this exactly like "absent" (forces stale=True upstream), never "corrupt" (which
+        # stays heartbeat-driven and could otherwise report stale=False for a lease already gone).
+        return False, None
     except (OSError, ValueError):
         return True, None
+
+
+def fail_closed_state(now: datetime) -> dict:
+    """The shape scripts/rig-lease-server.py serves when lease_state() itself raises (should never
+    happen -- it is pure and catches its own I/O errors -- but a request handler must NEVER 500 on
+    bad lease contents). Kept here, not duplicated in the server, so both the schema this function
+    returns and lease_state()'s own schema have exactly ONE source of truth."""
+    return {
+        "schema": SCHEMA_VERSION,
+        "now": format_ts(now),
+        "held": True,
+        "holder": None,
+        "heartbeat_age_s": None,
+        "stale": None,
+        "expected_release_at": None,
+        "ttl_s": None,
+    }
 
 
 def lease_state(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_SECS) -> dict:

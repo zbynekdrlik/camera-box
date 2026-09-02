@@ -45,8 +45,8 @@ def _touch_heartbeat(lease_dir: pathlib.Path, age_s: int = 0):
 
 
 # --------------------------------------------------------------------------- free (no dir)
-def test_free_lease_dir_absent_is_not_held():
-    missing = "/nonexistent/rig-lease-1277-test-dir"
+def test_free_lease_dir_absent_is_not_held(tmp_path):
+    missing = str(tmp_path / "does-not-exist")
     state = rls.lease_state(missing, _NOW, 5400)
     assert state["held"] is False
     assert state["holder"] is None
@@ -194,3 +194,53 @@ def test_parse_ts_none_and_empty_and_garbage_all_return_none():
     assert rls.parse_ts(None) is None
     assert rls.parse_ts("") is None
     assert rls.parse_ts("garbage") is None
+
+
+# --------------------------------------------------------------------------- extra holder.json keys
+def test_extra_holder_json_keys_are_dropped_not_leaked(tmp_path):
+    """Only the six fields rig_lease_write_holder actually writes are ever surfaced -- an
+    unexpected extra key in holder.json (a future field, or a foreign writer) must never leak
+    through to an unauthenticated HTTP caller unfiltered."""
+    holder = _write_holder(tmp_path, secret_internal_note="do-not-leak-this")
+    _touch_heartbeat(tmp_path, age_s=5)
+
+    state = rls.lease_state(str(tmp_path), _NOW, 5400)
+
+    assert "secret_internal_note" not in state["holder"]
+    assert set(state["holder"].keys()) == {
+        "repo", "run_id", "run_url", "job", "acquired_at", "expected_release_at",
+    }
+
+
+# --------------------------------------------------------------------------- fail_closed_state
+def test_fail_closed_state_shape_matches_the_held_true_holder_null_contract():
+    state = rls.fail_closed_state(_NOW)
+    assert state["schema"] == rls.SCHEMA_VERSION
+    assert state["now"] == "2026-09-02T12:00:00Z"
+    assert state["held"] is True
+    assert state["holder"] is None
+    assert state["heartbeat_age_s"] is None
+    assert state["stale"] is None
+    assert state["expected_release_at"] is None
+    assert state["ttl_s"] is None
+
+
+# --------------------------------------------------------------------------- #857 TOCTOU race
+def test_read_holder_toctou_race_between_isfile_and_open_is_treated_as_absent(tmp_path, monkeypatch):
+    """A concurrent release (scripts/lib/rig-lease.sh's #857 atomic rename-aside teardown) can
+    remove holder.json in the window between os.path.isfile() and open() -- this must be treated
+    exactly like a genuinely ABSENT holder.json (forces stale=True), never like a CORRUPT one
+    (which stays heartbeat-driven and could otherwise report stale=False for a lease already
+    gone). Simulated by making isfile() lie (report True for a file that does not exist)."""
+    real_isfile = os.path.isfile
+
+    def _lying_isfile(path):
+        if path == str(tmp_path / "holder.json"):
+            return True
+        return real_isfile(path)
+
+    monkeypatch.setattr(os.path, "isfile", _lying_isfile)
+    # deliberately no holder.json ever written to tmp_path -- open() will raise FileNotFoundError
+    exists, data = rls._read_holder(str(tmp_path))
+    assert exists is False
+    assert data is None

@@ -36,7 +36,11 @@ curl -sS http://127.0.0.1:18890/rig-lease.json   # genuinely free lockdir -> {"h
 curl -sS http://127.0.0.1:18890/healthz          # -> ok
 kill %1
 
-# 2. Install the --user unit (dev1):
+# 2. Install the --user unit (dev1) — REQUIRES linger enabled, or the unit stops the moment the
+#    installing user's last login session ends (a --user manager without linger is torn down on
+#    logout). Confirm/enable it once:
+loginctl show-user "$USER" -p Linger   # must read "Linger=yes"; if not:
+sudo loginctl enable-linger "$USER"
 mkdir -p ~/.config/systemd/user
 cp systemd/rig-lease-server.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -70,6 +74,23 @@ curl -sS http://10.77.9.103:8890/rig-lease.json   # during: held=true, holder={.
   "is the holder's run still alive" checker, unset in every real deployment) — the HTTP mirror's
   staleness verdict rests on the heartbeat age alone. See `scripts/rig_lease_state.py`'s own module
   doc for the full mirror contract.
+- It does **not** provide real mount-namespace isolation on dev1 today — see the unit file's own
+  `VERIFIED-INERT ON DEV1 TODAY` comment above `NoNewPrivileges=`/`PrivateTmp=`/`ProtectHome=`:
+  under this box's current `--user`-unit + kernel-policy combination, systemd silently skips
+  namespacing rather than failing the unit, so those directives are currently declared intent, not
+  an active guarantee (re-verify against the live kernel policy before relying on them).
+
+## Known cross-unit gotcha — `~/.config/environment.d/*.conf` is GLOBAL, not per-unit
+
+Any file under `~/.config/environment.d/` (including this unit's own `rig-lease-server.conf`, if
+you ever create one) is ingested by the systemd **user manager itself** at login and applied to
+**every** `--user` unit on this box, not just this one — the SAME mechanism the sibling
+`bundle-state-alert-watchdog.README.md` documents. If you add a `RIG_LEASE_DIR` override there to
+point this server at a non-default lockdir (e.g. for a local test), it will ALSO leak into every
+other `--user` unit dev1 runs, including any that happens to read the same-named variable for an
+unrelated purpose. Prefer the unit's own `EnvironmentFile=` (already wired to
+`rig-lease-server.conf` specifically) or the CLI flags for anything that must stay scoped to this
+one service.
 
 ## Tunables (env, override via `~/.config/environment.d/rig-lease-server.conf` or the unit's own
 `EnvironmentFile=`)

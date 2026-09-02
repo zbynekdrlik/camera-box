@@ -33,11 +33,26 @@ SyslogIdentifier=rig-lease-server
 
 # Security hardening: a read-only stdlib HTTP server that only ever stat()s/reads files under
 # RIG_LEASE_DIR (/var/tmp/rig-lease by default) and never writes anything itself.
-# PrivateTmp MUST stay "no" -- systemd's PrivateTmp namespaces BOTH /tmp AND /var/tmp, and
+#
+# PrivateTmp MUST stay "no" (declared intent -- see the VERIFIED-INERT note below for why it does
+# not currently DO anything on dev1): systemd's PrivateTmp namespaces BOTH /tmp AND /var/tmp, and
 # RIG_LEASE_DIR lives under /var/tmp/rig-lease, the SAME host path scripts/lib/rig-lease.sh writes
 # to from the E2E gate (a completely separate, non-systemd process). PrivateTmp=yes would put this
 # server in its OWN private /var/tmp, permanently isolated from the real lockdir -- it would always
-# report held=false regardless of the actual lease state. Never flip this.
+# report held=false regardless of the actual lease state, IF mount-namespacing were actually
+# engaging (see below, it currently is not). Never flip PrivateTmp to "yes" regardless.
+#
+# VERIFIED-INERT ON DEV1 TODAY (#1277 review, live-checked): as a `--user` unit under dev1's
+# current kernel policy (`kernel.apparmor_restrict_unprivileged_userns=1`, systemd 255, Ubuntu
+# 24.04), an UNPRIVILEGED user manager cannot create the mount namespace PrivateTmp/ProtectHome
+# rely on -- systemd silently SKIPS the namespacing rather than failing the unit. Live-checked: a
+# process under this unit's directives still saw the real /home/newlevel/devel AND a real host
+# /var/tmp marker even with PrivateTmp=yes forced on for the test. So right now neither directive
+# provides real isolation -- they are kept as DECLARED INTENT (harmless, and correct if this unit
+# is ever promoted to a system-level unit, or if dev1's kernel policy changes) rather than an
+# active guarantee. Do not read their mere presence here as proof of sandboxing without re-checking
+# against the live kernel policy at the time (this is `.claude/rules/rig-standing-services.md`'s
+# own §4 doctrine: verify a gate's premise live, don't trust a comment's claim).
 NoNewPrivileges=yes
 PrivateTmp=no
 ProtectHome=read-only

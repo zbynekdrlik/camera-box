@@ -14,17 +14,26 @@ contract for restreamer#349: `.claude/rules/rig-lease-http.md`.
                           never a cached/timer-refreshed snapshot (a stale snapshot is exactly the
                           race window a coordination lock must never introduce). Schema + staleness
                           rules: see scripts/rig_lease_state.py's own module doc (the pure decision
-                          this handler is a thin transport wrapper around).
+                          this handler is a thin transport wrapper around). A trailing query string
+                          (e.g. a client cache-buster `?t=1`) is stripped before matching.
   GET /healthz          -> 200 "ok" liveness probe.
-  anything else         -> 404. This server accepts GET only -- no state-mutating verb, no write
-                          surface at all; restreamer's own "streaming in progress" state is ITS
-                          lease signal toward camera-box (see rig-busy-gate.sh), so this endpoint
-                          only ever needs to be READ.
+  HEAD /rig-lease.json, HEAD /healthz -> same routing/status as the GET form, headers only, no body
+                          (a cheap liveness probe for an external checker).
+  any other PATH        -> 404.
+  any other METHOD (POST/PUT/DELETE/OPTIONS/...) -> the stdlib default 501 Not Implemented (this
+                          server implements no do_POST/do_PUT/etc. handler at all -- never a write
+                          surface, never a 5xx from application code). This server accepts GET/HEAD
+                          only; restreamer's own "streaming in progress" state is ITS lease signal
+                          toward camera-box (see rig-busy-gate.sh), so this endpoint only ever needs
+                          to be READ.
 
 No authentication: the payload is a boolean + holder metadata (repo/run_id/job/timestamps) + a TTL
-number -- nothing secret, matching the issue's own explicit call. Bind to a private interface only
-(LAN 10.77.9.103 or tailscale 100.104.8.125; NEVER a public IP) -- dev1's firewall is already LAN-
-open (verified in the issue before this was designed), so this widens reachable SURFACE, not access.
+number -- nothing secret, matching the issue's own explicit call. The default bind (0.0.0.0) is
+safe here ONLY because dev1 has no public IP exposure -- it is reachable exclusively via the two
+private interfaces (LAN 10.77.9.103, tailscale 100.104.8.125), and its firewall is already LAN-open
+(verified in the issue before this was designed), so this widens reachable SURFACE on an already-
+open box, never actual internet access. NEVER deploy this on a box that DOES have a public IP
+without narrowing --bind to a private interface explicitly.
 
 Usage:
   python3 rig-lease-server.py [--bind 0.0.0.0] [--port 8890] [--lease-dir DIR] [--stale-secs N]
@@ -74,69 +83,70 @@ def log(msg: str) -> None:
         pass
 
 
-def _fail_closed_state() -> dict:
-    """The shape served when lease_state() itself raises (should never happen -- it is pure and
-    catches its own I/O errors -- but a request handler must NEVER 500 on bad lease contents)."""
-    now = datetime.now(timezone.utc)
-    return {
-        "schema": rls.SCHEMA_VERSION,
-        "now": rls.format_ts(now),
-        "held": True,
-        "holder": None,
-        "heartbeat_age_s": None,
-        "stale": None,
-        "expected_release_at": None,
-        "ttl_s": None,
-    }
-
-
 class RigLeaseHandler(BaseHTTPRequestHandler):
     # Overridden per-instance by make_server() via a bound subclass -- see make_server() below.
     lease_dir = "/var/tmp/rig-lease"
     stale_secs = rls.DEFAULT_STALE_SECS
 
     server_version = "rig-lease-server/1277"
+    # Suppress the interpreter version from the Server: response header (BaseHTTPRequestHandler's
+    # version_string() concatenates server_version + " " + sys_version) -- no reason to advertise
+    # the exact Python patch version to an unauthenticated caller.
+    sys_version = ""
 
-    def log_message(self, fmt, *args):  # noqa: A003 -- BaseHTTPRequestHandler's own hook name
+    def log_message(self, fmt, *args):
         log(f"{self.address_string()} {fmt % args}")
 
-    def _write_json(self, status: int, payload: dict) -> None:
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
+    def _request_path(self) -> str:
+        # Strip a query string before matching -- `GET /rig-lease.json?t=1` (a common client-side
+        # cache-buster) must still hit the real route, not fall through to 404 (which would make
+        # restreamer's consumer contract fail-open and silently drop the lease check).
+        return self.path.split("?", 1)[0]
+
+    def _send(self, status: int, content_type: str, body: bytes, *, no_store: bool = False) -> None:
+        # The WHOLE response (status line + headers + body) is wrapped in ONE try/except -- a
+        # client that disconnects between send_response() and end_headers() would otherwise raise
+        # an unguarded BrokenPipeError/ConnectionResetError (only the body write used to be
+        # guarded), which socketserver logs as a traceback even though it is not a real fault.
         try:
-            self.wfile.write(body)
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            if no_store:
+                self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass  # a client that disconnected mid-response is not this server's problem
 
-    def do_GET(self):  # noqa: N802 -- BaseHTTPRequestHandler's own hook name
-        if self.path == "/rig-lease.json":
+    def _handle(self):
+        path = self._request_path()
+
+        if path == "/rig-lease.json":
             try:
                 state = rls.lease_state(self.lease_dir, datetime.now(timezone.utc), self.stale_secs)
             except Exception as exc:  # pragma: no cover -- lease_state() is designed never to raise
                 log(f"lease_state() raised {exc!r} -- serving fail-closed held=true")
-                state = _fail_closed_state()
-            self._write_json(200, state)
+                state = rls.fail_closed_state(datetime.now(timezone.utc))
+            self._send(200, "application/json", json.dumps(state).encode("utf-8"), no_store=True)
             return
 
-        if self.path == "/healthz":
-            body = b"ok"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            try:
-                self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+        if path == "/healthz":
+            self._send(200, "text/plain", b"ok")
             return
 
-        self.send_response(404)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        self._send(404, "text/plain", b"")
+
+    def do_GET(self):
+        self._handle()
+
+    def do_HEAD(self):
+        # A cheap liveness probe an external checker can use without paying for a JSON body --
+        # routes through the SAME path matching as do_GET (_handle() suppresses the body write
+        # via self.command == "HEAD" inside _send()), so the two can never drift on which paths
+        # are recognized.
+        self._handle()
 
 
 def make_server(bind: str, port: int, lease_dir: str, stale_secs: int) -> ThreadingHTTPServer:

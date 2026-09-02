@@ -51,9 +51,12 @@ class _RunningServer:
         self._thread.join(timeout=5)
 
     def get(self, path: str):
+        return self.request("GET", path)
+
+    def request(self, method: str, path: str):
         conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
         try:
-            conn.request("GET", path)
+            conn.request(method, path)
             resp = conn.getresponse()
             body = resp.read()
             return resp.status, dict(resp.getheaders()), body
@@ -133,3 +136,44 @@ def test_lease_state_is_computed_fresh_per_request_never_cached(tmp_path):
 
         status2, _h2, body2 = srv.get("/rig-lease.json")
         assert json.loads(body2)["held"] is True
+
+
+def test_query_string_is_stripped_before_route_matching(tmp_path):
+    """A client-side cache-buster (`?t=1`) must still hit the real route -- a naive exact-path
+    match would 404 this and silently make restreamer's consumer contract fail-open."""
+    with _RunningServer(str(tmp_path / "does-not-exist")) as srv:
+        status, _headers, body = srv.get("/rig-lease.json?t=1")
+    assert status == 200
+    assert json.loads(body)["held"] is False
+
+
+def test_post_method_is_never_a_write_and_never_a_5xx(tmp_path):
+    """This server implements no do_POST -- BaseHTTPRequestHandler's stdlib default (501 Not
+    Implemented) is the honest behavior for an unsupported verb, never an application-level 500,
+    and (per the module's own GET-only contract) never any state mutation."""
+    lease_dir = tmp_path / "does-not-exist"
+    with _RunningServer(str(lease_dir)) as srv:
+        status, _headers, _body = srv.request("POST", "/rig-lease.json")
+        assert status == 501
+        # confirm no write side effect occurred -- the lockdir must still be genuinely absent
+        assert not lease_dir.exists()
+
+
+def test_head_rig_lease_json_returns_headers_no_body(tmp_path):
+    lease_dir = tmp_path / "does-not-exist"
+    with _RunningServer(str(lease_dir)) as srv:
+        status, headers, body = srv.request("HEAD", "/rig-lease.json")
+    assert status == 200
+    assert headers.get("Content-Type") == "application/json"
+    assert headers.get("Cache-Control") == "no-store"
+    assert body == b""
+
+
+def test_server_response_header_does_not_leak_python_version(tmp_path):
+    with _RunningServer(str(tmp_path / "does-not-exist")) as srv:
+        _status, headers, _body = srv.get("/healthz")
+    server_header = headers.get("Server", "")
+    assert "rig-lease-server" in server_header
+    # BaseHTTPRequestHandler's default Server header is "<server_version> Python/<version>" --
+    # sys_version="" on RigLeaseHandler must remove the trailing Python/<version> segment.
+    assert "Python/" not in server_header
