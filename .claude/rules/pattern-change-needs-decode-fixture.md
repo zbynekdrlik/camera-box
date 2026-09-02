@@ -6,6 +6,7 @@ paths:
   - "src/av_sync_dock.rs"
   - "src/aux_tick.rs"
   - "src/probe/painter.rs"
+  - "src/probe/qr.rs"
 ---
 
 # Zmena vzoru => decode fixture test (#921, #690, #751/#754)
@@ -137,3 +138,57 @@ order meaningful even when no PRODUCTION line changes between RED and GREEN — 
 "which geometry am I decoding at" pivots. Worked example: `tests/aux_tick_colocated_fixture_decode_1270.rs`
 + `tests/fixtures/tear-781/stream-255477892-frame-{2422,2423}.png` (RED `test(#1270): [red] ...`,
 GREEN `fix(#1270): [green] ...`).
+
+## A synthetic MULTI-QR canvas render→decode test must decode through the ROBUST region-isolating path, NEVER the plain `decode_qr_luma_all` (#1280)
+
+The "A NEW painted-pattern ELEMENT" section above says the synthetic round-trip uses the
+`CapturingPresenter` + `decode_qr_luma_all` pattern. **#1280 amends that for a canvas carrying
+MORE THAN ONE QR code (the dual-QR primaries + the issue-1270 aux pair = FOUR codes): decode
+through `crate::probe::qr::decode_qr_luma_all_robust_optical`, a strict SUPERSET of
+`decode_qr_luma_all`, not the plain pass.** The three painter tests
+(`settled_left_half_payload_is_byte_identical_across_the_next_tick`,
+`aux_tick_pair_round_trips_alongside_the_dual_qr_1196`,
+`dual_qr_round_trips_at_the_scaled_2560_canvas_geometry_1179`) all decode via the shared
+`decode_payload` helper, which routes through the robust path since #1280 — change that ONE helper,
+never re-hardcode a decode call per test.
+
+**Why (the rqrr-0.9.3 mechanism, traced from the crate source):** the plain full-frame pass
+(`decode_qr_luma_all` → `rqrr_decode_all_catch`, #673) wraps ALL of rqrr's `detect_grids` in ONE
+`catch_unwind`. So a caught internal panic — the silenced `assert!(scan >= 1)` in
+`identify/grid.rs`, or the `Perspective::map` assert in `geometry.rs` — raised by a single
+bogus/near-degenerate capstone grouping EMPTIES THE WHOLE PASS (drops every code at once, not "one
+of four"). On the crisp 4-code canvas the degenerate geometry comes from the two 210px aux marks
+co-located ~4px apart (issue 1270) — the "pathologically small / near-degenerate" case #673
+documents — and it is per-run because the primary payloads bake a varying `gen_ts_ns` into the QR
+content. Symptom: `settled_left_half…` panicked on its FIRST decode with "run_id 7 frame_id 2 not
+found" (CI 33660119672) while passing in adjacent runs — a nondeterministic per-mask flake, not a
+regression. A plain-pass decode of a crisp bilevel multi-QR canvas is deterministic PER IMAGE, so
+this only surfaces because `Instant::now()`-derived `gen_ts_ns` varies the pixels every run.
+
+**Why the robust path fixes it (and a plain top-band crop alone does NOT):** an adversarial review
+proved the top-band crop is byte-identical to the full frame for the primaries (row-causal binarize
++ row-major capstone scan + content-independent finder/timing/alignment reads), so it CANNOT recover
+a primary the full frame drops on the primary's own pixels. Recovery must ISOLATE each code into a
+region where no degenerate cross-code group can form: `decode_qr_luma_all_robust_optical` unions the
+plain pass with the #202 bottom-band upscaled tiles (the aux — the 2× upscale enlarges the small
+modules past rqrr's degeneracy edge), the #754 full-width top-band crop, AND a per-HALF top-band
+crop (`robust_optical_half_passes` — each 700px primary alone in `[0,w/2)` / `[w/2,w)`; a lone crisp
+code decodes content-independently, the never-flaked `dual_render_places_two_decodable_qrs_left_and_right`
+proof). Production is untouched: the RECORDING decode
+(`decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`) already fires the same region
+recoveries conditionally, so the rig optical read is protected from the same whole-pass panic; only
+the synthetic test's unconditional plain pass was the coverage gap.
+
+**Byte-identity assertions stay EXACTLY as they are** — routing through the robust path is decode
+COVERAGE only. `merge_payloads` de-dupes by `(run_id, frame_id)` keeping the first, and one atomic
+CRC-valid QR string carries one `gen_ts_ns`, so a given `(run_id, frame_id)` always decodes the same
+full `Payload` whichever pass found it. Never loosen an assertion, never `#[ignore]`, never a retry
+loop (a per-region isolated decode is coverage, not a blind retry).
+
+**Follow-up (deferred, needs a CI run):** the RED→GREEN diagnostic
+(`dual_qr_plus_aux_four_code_canvas_decodes_all_four_across_masks_1280` in `src/probe/qr.rs`) uses
+FIXED `gen_ts_ns` seeds so it is deterministic, but it reproduces the plain-pass miss only
+PROBABILISTICALLY across a seed set — a DETERMINISTIC RED needs the real failing canvas captured as a
+committed fixture, mineable only from a CI run (per this rule's own "mine the real-frame fixture"
+section). Keep the seed loop bounded well under the nextest slow-test kill (`.config/nextest.toml`,
+8×60 s) since each robust decode runs ~12 rqrr passes.
