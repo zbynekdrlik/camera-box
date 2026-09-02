@@ -230,18 +230,19 @@ capture_rate_burn_log_sustained_band_warn_message() {
 # diagnostic for a HARD capture-rate defect band (#656 jitter / #971 chronic / #663 self-heal
 # reset) that matched on a SECONDARY camera's journald window during an ALL_CAMBOX recording.
 # Unlike capture_rate_recurrence_message (the SOURCE-camera HARD-fail sibling, which precedes an
-# abort), this NEVER aborts the run: a secondary's reset events are already threaded report-only
-# into the verdict by the issue-910 restart-event scan + the issue-914 frozen_leg/self_heal_reset
-# decoupling, and hard-failing on a chronic secondary quirk (cam2 IS a secondary) would recreate
-# the issue-909 permanently-red-gate mistake -- so a secondary defect is surfaced loudly for
-# diagnostics, never gated. "WARNING #994:" prefix makes it greppable without being mistaken for an
+# abort), this capture-RATE sweep NEVER aborts the run: hard-failing THIS rate band on a chronic
+# secondary quirk (cam2 IS a secondary), which the genlock decimation gate absorbs into exact NDI
+# output, would recreate the issue-909 permanently-red-gate mistake -- so a secondary capture-rate
+# defect is surfaced loudly for diagnostics, never gated. (A secondary's RESET events are a
+# distinct signal that DOES gate via self_heal_reset since issue 905; issue 914 had decoupled it
+# while cam1's grabber was unresolved.) "WARNING #994:" prefix makes it greppable without being mistaken for an
 # ERROR line. Reuses the same captured/configured-fps extraction as the source-camera messages.
 capture_rate_secondary_recurrence_warn_message() {
   local cam="$1" line="$2" captured configured
   captured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps captured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
   configured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps configured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
   if [ -n "$captured" ] && [ -n "$configured" ]; then
-    echo "WARNING #994: ${cam} (secondary camera) capture-rate HARD defect during this recording, per its journal (~${captured}fps, expected ${configured}fps) -- see #656/#663/#971/#994; report-only for a SECONDARY camera (the source camera above is the hard gate; a secondary's reset events are also threaded report-only by the issue-910 restart-event scan + issue 914), does NOT fail this gate"
+    echo "WARNING #994: ${cam} (secondary camera) capture-rate HARD defect during this recording, per its journal (~${captured}fps, expected ${configured}fps) -- see #656/#663/#971/#994; report-only for a SECONDARY camera (the source camera above is the hard gate; this capture-RATE band stays report-only so a chronic rate wobble the decimation gate absorbs never aborts every run -- a secondary's RESET events, by contrast, now gate via self_heal_reset since issue 905), does NOT fail this gate"
   else
     echo "WARNING #994: ${cam} (secondary camera) capture-rate HARD defect during this recording, per its journal (see #656/#663/#971/#994); report-only for a SECONDARY camera, does NOT fail this gate: ${line}"
   fi

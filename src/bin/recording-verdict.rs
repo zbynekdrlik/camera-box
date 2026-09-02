@@ -67,7 +67,9 @@ use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
 use camera_box::qpsk_marker::{av_offset_candidates_deduped, DEDUPE_SAME_FID_WINDOW_S};
-use camera_box::self_heal_attribution::{attribute_self_heal, SelfHealResetEvent};
+use camera_box::self_heal_attribution::{
+    attribute_self_heal, SelfHealAttributionReport, SelfHealResetEvent,
+};
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -5863,19 +5865,21 @@ fn build_and_print_verdict_with_stream_diffs(
                         ev.at_ns
                     );
                 }
-                // #914 (2026-08-01, user decision -- mirrors issue 889's report-only pattern and
-                // issue 861's caller-only decoupling): frozen_leg/self_heal_reset no longer gate
-                // `overall_pass` while cam1's ShadowCast 2 grabber defect (issue 909) remains
-                // physically unresolved -- restore path on issue 905 (flip
-                // `SelfHealAttributionReport::overall_pass_contribution` back to
-                // `!any_frozen() && !any_self_heal()` once cam1 is physically replaced and a
-                // stable week passes with no self-heal escalations). `gates_overall_pass` below
-                // mirrors the exact field name/shape `all_cambox_av_sync` already established for
-                // issue 861 -- an unambiguous machine-readable flag alongside the still-fully-
-                // computed frozen/self-heal findings.
-                let frozen_self_heal_gate_note = "report-only -- does NOT gate overall_pass, \
-                     pending cam1 hardware fix (see issue #914 for the decision record and issue \
-                     #905 for the restore path)";
+                // issue 905 item 2 (2026-09-02): frozen_leg/self_heal_reset RESTORED to blocking.
+                // issue 914 (2026-08-01) had decoupled them from `overall_pass` (the issue-889
+                // report-only pattern / issue-861 caller-only decoupling) while cam1's ShadowCast 2
+                // grabber defect (issue 909) was physically unresolved and tripping frozen_leg on
+                // otherwise-healthy runs. That restore precondition is now met: three consecutive
+                // green Full-path E2E runs (.611/.612/.613) showed a genuinely empty
+                // frozen_leg.frozen AND a clean self_heal_reset (both attributed and
+                // unattributed_events empty), so `SelfHealAttributionReport::overall_pass_contribution`
+                // was flipped back to `!any_frozen() && !any_self_heal()` (the `all_pass &=` fold
+                // below), and the `gates_overall_pass` machine-readable flags here now honestly read
+                // `true` to match -- the issue-861 `all_cambox_av_sync` re-arm shape. The findings
+                // themselves are still fully computed, printed, and JSON-reported either way.
+                let frozen_self_heal_gate_note = "blocking -- a genuinely frozen leg or a \
+                     self-heal reset event fails overall_pass (issue 905 item 2 restored blocking; \
+                     issue 914 had decoupled it while cam1's grabber, issue 909, was unresolved)";
                 report["frozen_leg"] = serde_json::json!({
                     "frozen": leg_report.frozen.iter().map(|f| serde_json::json!({
                         "cambox": f.cambox,
@@ -5913,25 +5917,32 @@ fn build_and_print_verdict_with_stream_diffs(
                     })).collect::<Vec<_>>(),
                 });
                 if let Some(obj) = report["frozen_leg"].as_object_mut() {
-                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    obj.insert(
+                        "gates_overall_pass".to_string(),
+                        serde_json::json!(SelfHealAttributionReport::gates_overall_pass()),
+                    );
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(frozen_self_heal_gate_note),
                     );
                 }
                 if let Some(obj) = report["self_heal_reset"].as_object_mut() {
-                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    obj.insert(
+                        "gates_overall_pass".to_string(),
+                        serde_json::json!(SelfHealAttributionReport::gates_overall_pass()),
+                    );
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(frozen_self_heal_gate_note),
                     );
                 }
-                // #914 visibility requirement (mirrors issue 889 requirement 3): prints
+                // issue-889-requirement-3 visibility requirement (kept from issue 914): prints
                 // UNCONDITIONALLY, whether or not anything fired, so silence is never mistaken
-                // for strictness.
+                // for strictness. issue 905 item 2 restored these to blocking, so the line no
+                // longer claims report-only.
                 println!(
-                    "  >>> #914 REPORT-ONLY: frozen_leg={} self_heal_reset={} \
-                     unattributed_events={} -- {frozen_self_heal_gate_note}",
+                    "  >>> #905 BLOCKING (frozen_leg/self_heal_reset): frozen_leg={} \
+                     self_heal_reset={} unattributed_events={} -- {frozen_self_heal_gate_note}",
                     leg_report.frozen.len(),
                     leg_report.self_heal.len(),
                     leg_report.unattributed_events.len()
@@ -9699,8 +9710,8 @@ mod tests {
     /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, recalibrated 1 → 2 → 3 on 2026-08-06, ticket 889
     /// comments 5198131539 / 5200533407) differential proof: `overall_pass` must swing from PASS
     /// to FAIL exactly at the tolerance boundary, and must NOT swing at all when copies/gaps stay
-    /// AT the tolerance (even combined). Uses the SAME differential-fixture technique issue 914's
-    /// `frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914` established: build
+    /// AT the tolerance (even combined). Uses the SAME differential-fixture technique the
+    /// `frozen_leg_and_self_heal_reset_restored_to_blocking_905` fixture uses: build
     /// otherwise-IDENTICAL fixtures varying only the defect under test, and diff `overall_pass`
     /// against a clean baseline, rather than asserting an absolute value (many other unrelated
     /// gates also fold into `overall_pass`). Renamed from
@@ -10050,22 +10061,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Issue 914 (2026-08-01, user decision -- mirrors issue 889's report-only shape and issue
-    /// 861's caller-only decoupling): the `frozen_leg` (issue 758) and `self_heal_reset`
-    /// CLASSIFIERS themselves are report-only annotations layered on TOP of the underlying
-    /// per-window `copies`/`gaps`/`undecodable` data -- their own `gates_overall_pass` JSON
-    /// fields must read `false`, always. **2026-08-05 RE-GATE (ticket 889 comment 5196190653):**
-    /// this fixture's "genuinely HARD-FROZEN" window is built from `copies=10` (density-based,
-    /// see the `frozen` block below) -- FAR over the per-window tolerance (recalibrated 1 → 2 → 3
-    /// on 2026-08-06, ticket 889 comments 5198131539 / 5200533407, walked 3 -> 5 on 2026-08-31
-    /// issue 1243: `crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
-    /// correctly fails `overall_pass` again via the re-gate, independent of whatever
-    /// `frozen_leg`/`self_heal_reset` report. Renamed from `..._no_longer_gate_the_overall_
-    /// verdict_914` -- that claim is no longer true for a window this badly frozen; the
-    /// re-gate is SUPPOSED to catch exactly this class of regression. What issue 914 actually
-    /// established (the classifiers' OWN report-only status) is unchanged and still asserted.
+    /// Issue 905 item 2 (2026-09-02, RESTORE): the `frozen_leg` (issue 758) and `self_heal_reset`
+    /// CLASSIFIERS are now RESTORED to blocking -- their `gates_overall_pass` JSON fields read
+    /// `true`, and a genuinely-frozen window or a self-heal reset event fails `overall_pass`
+    /// again, mirroring issue 861's `av_window` re-arm. Originally decoupled report-only by issue
+    /// 914 (2026-08-01) while cam1's ShadowCast 2 grabber defect (issue 909) remained physically
+    /// unresolved; the restore precondition (a green E2E series with no self-heal escalations,
+    /// AND every member's `frozen_leg.frozen` genuinely empty) is now met -- see the ticket's own
+    /// validated comment for the three cited runs. Renamed from
+    /// `frozen_leg_classifier_stays_report_only_but_its_copies_now_gate_overall_pass_889_regate`
+    /// -- the "stays report-only" framing that name pinned no longer holds.
+    ///
+    /// This fixture's "genuinely HARD-FROZEN" window is still built from `copies=10`
+    /// (density-based, see the `frozen` block below) -- FAR over the per-window tolerance (walked
+    /// 1 → 2 → 3 → 5, `crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`, ticket 889 comments
+    /// 5198131539 / 5200533407, issue 1243), so `all_cambox_continuity.overall_pass` ALREADY fails
+    /// via the copies/gaps re-gate independent of frozen_leg -- kept exactly as before so this
+    /// test still isolates frozen_leg's/self_heal_reset's OWN contribution (the differential
+    /// technique below), rather than relying on that unrelated confound.
     #[test]
-    fn frozen_leg_classifier_stays_report_only_but_its_copies_now_gate_overall_pass_889_regate() {
+    fn frozen_leg_and_self_heal_reset_restored_to_blocking_905() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -10245,24 +10260,35 @@ mod tests {
         );
         assert_eq!(
             with_events["frozen_leg"]["gates_overall_pass"],
-            serde_json::json!(false),
-            "914: the JSON must say plainly this term does not gate overall_pass: {with_events}"
+            serde_json::json!(true),
+            "905: restored -- the JSON must say plainly this term gates overall_pass again: {with_events}"
         );
         assert_eq!(
             with_events["self_heal_reset"]["gates_overall_pass"],
-            serde_json::json!(false),
-            "914: same for self_heal_reset: {with_events}"
+            serde_json::json!(true),
+            "905: restored -- same for self_heal_reset: {with_events}"
+        );
+        assert!(
+            !with_events["frozen_leg"]["gate"]
+                .as_str()
+                .unwrap()
+                .contains("report-only"),
+            "905: the gate string must NOT say report-only anymore (restored): {with_events}"
         );
         // 889 re-gate: the fixture's own copies=10 (against frames=30, density ~0.333 -- well
         // past the frozen_leg density threshold) is FAR over the tolerance (recalibrated
         // 1 → 2 → 3 on 2026-08-06, walked 3 -> 5 on 2026-08-31 issue 1243), so this window (and
-        // therefore `all_cambox_continuity.overall_pass` specifically) now correctly FAILS again -- this is
-        // the re-gate doing its job, not frozen_leg/self_heal_reset (which stay report-only, per
-        // the two assertions immediately above). Scoped to `all_cambox_continuity.overall_pass`,
-        // NOT the top-level `overall_pass` -- this short synthetic fixture (a few seconds) always
-        // fails the UNRELATED `full_chain` 300s duration floor regardless of copies/gaps, so the
-        // top-level field is not a valid proxy for what this test is isolating (the same reason
-        // the ORIGINAL 914 test used a differential rather than an absolute assertion).
+        // therefore `all_cambox_continuity.overall_pass` specifically) FAILS via the re-gate too --
+        // this is `all_cambox_continuity.overall_pass`, set from `seg.overall_pass`
+        // (window_gate's copies/gaps tolerance) BEFORE the frozen_leg/self_heal_reset fold runs,
+        // so it is UNAFFECTED by the issue 905 restore either way (it was already failing before
+        // the restore, and stays failing after it, for the SAME copies/gaps reason -- the restore
+        // adds a SEPARATE, additional failure path on the TOP-level `overall_pass`, proven by the
+        // differential below). Scoped to `all_cambox_continuity.overall_pass`, NOT the top-level
+        // `overall_pass` -- this short synthetic fixture (a few seconds) always fails the
+        // UNRELATED `full_chain` 300s duration floor regardless of copies/gaps, so the top-level
+        // field is not a valid proxy for what this test is isolating (the same reason the
+        // ORIGINAL 914 test used a differential rather than an absolute assertion).
         assert_eq!(
             clean["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(true),
@@ -10272,8 +10298,9 @@ mod tests {
             with_events["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(false),
             "889 re-gate: copies=10 far exceeds the tolerance -- \
-             all_cambox_continuity.overall_pass must FAIL again, even though \
-             frozen_leg/self_heal_reset themselves stay report-only: {with_events}"
+             all_cambox_continuity.overall_pass must FAIL, independent of the issue 905 \
+             frozen_leg/self_heal_reset restore (a different fold, see the comment above): \
+             {with_events}"
         );
         assert_eq!(
             with_events["all_cambox_continuity"]["windows_over_copies_gaps_tolerance"],
@@ -10281,29 +10308,31 @@ mod tests {
             "889 re-gate: exactly the frozen window exceeds the tolerance: {with_events}"
         );
 
-        // Finding 3 of the issue-889 re-gate deep review: everything above proves frozen_leg/
-        // self_heal_reset's OWN `gates_overall_pass` JSON field reads `false` (a hardcoded
-        // literal, see the `obj.insert("gates_overall_pass", ...)` call sites in
-        // `build_and_print_verdict` -- disconnected from `SelfHealAttributionReport::
-        // overall_pass_contribution()`, the function that ACTUALLY decides whether these terms
-        // fold into `all_pass`) -- but nothing above would catch a regression in that function
+        // Finding 3 of the issue-889 re-gate deep review, updated for the issue 905 restore:
+        // everything above proves frozen_leg/self_heal_reset's OWN `gates_overall_pass` JSON
+        // field reads `true` (a hardcoded literal, see the `obj.insert("gates_overall_pass",
+        // ...)` call sites in `build_and_print_verdict` -- an INDEPENDENT literal from
+        // `SelfHealAttributionReport::overall_pass_contribution()`, the function that ACTUALLY
+        // decides whether these terms fold into `all_pass`) -- but nothing above would catch a
+        // regression in that function
         // itself, because `with_events`'s copies=10 defect ALREADY fails `all_cambox_continuity.
         // overall_pass` on its own (the re-gate), confounding any differential at that level; the
         // TOP-LEVEL `overall_pass` differential the ORIGINAL (pre-re-gate) #914 test used is
         // ALSO confounded, but by something else entirely (the >=300s `full_chain` span floor,
         // which fails unconditionally on this ~2s synthetic recording regardless of self-heal).
         //
-        // The frozen term is no longer isolable on its own (a genuinely HARD-FROZEN window needs
-        // `copies` far past the tolerance, which by itself already fails
-        // `all_cambox_continuity.overall_pass`). `self_heal_reset` IS still isolable: build a
-        // fixture IDENTICAL to a clean baseline except for ONE unattributed self-heal event, with
-        // the confounding span floor cleared via `--min-secs 0` (the fixture's `strih` node
-        // analyzed span, 20 ids at the default 30fps `--stream-capture-fps`, is only ~0.667s --
-        // even `--min-secs 1` still fails it; `--min-secs 0` removes the floor entirely, which is
-        // all this differential needs: it is isolating self_heal_reset's own contribution, not
-        // proving anything about the span floor itself) so the top-level `overall_pass`
-        // differential actually isolates `self_heal_reset`'s own decoupling instead of always
-        // reading `false` regardless of it.
+        // The frozen term is still not isolable on its own here (a genuinely HARD-FROZEN window
+        // needs `copies` far past the tolerance, which by itself already fails
+        // `all_cambox_continuity.overall_pass` via the re-gate above -- a separate confound).
+        // `self_heal_reset` IS isolable: build a fixture IDENTICAL to a clean baseline except for
+        // ONE unattributed self-heal event, with the confounding span floor cleared via
+        // `--min-secs 0` (the fixture's `strih` node analyzed span, 20 ids at the default 30fps
+        // `--stream-capture-fps`, is only ~0.667s -- even `--min-secs 1` still fails it;
+        // `--min-secs 0` removes the floor entirely, which is all this differential needs: it is
+        // isolating self_heal_reset's own contribution, not proving anything about the span floor
+        // itself) so the top-level `overall_pass` differential actually isolates
+        // `self_heal_reset`'s own restored contribution instead of confounding it with an
+        // unrelated always-false span floor.
         let clean_isolated =
             build_fixture_with_min_secs("clean-isolated", base, &sched, false, None, Some("0"));
         let self_heal_only = build_fixture_with_min_secs(
@@ -10338,17 +10367,24 @@ mod tests {
         assert_eq!(
             clean_isolated["overall_pass"],
             serde_json::json!(true),
-            "sanity: with --min-secs 1 clearing the span-floor confound, the isolated clean \
+            "sanity: with --min-secs 0 clearing the span-floor confound, the isolated clean \
              fixture's top-level overall_pass must genuinely read true: {clean_isolated}"
         );
-        assert_eq!(
+        assert_ne!(
             clean_isolated["overall_pass"], self_heal_only["overall_pass"],
-            "914 regression guard: an unattributed self-heal event ALONE (no frozen defect, no \
-             copies/gaps defect) must be a no-op on the TOP-LEVEL overall_pass (report-only, \
-             pending cam1 hardware fix issue 909 -- restore path issue 905). Unlike the \
-             `with_events` fixture above (confounded by its own copies=10 re-gate failure), this \
-             differential genuinely isolates self_heal_reset's contribution: \
-             clean_isolated={clean_isolated}, self_heal_only={self_heal_only}"
+            "905 regression guard (restored, was the 914 report-only no-op guard): an \
+             unattributed self-heal event ALONE (no frozen defect, no copies/gaps defect) must \
+             now swing the TOP-LEVEL overall_pass to FAIL again -- issue 914's report-only \
+             decoupling (pending cam1 hardware fix issue 909) was restored by issue 905 item 2. \
+             Unlike the `with_events` fixture above (confounded by its own copies=10 re-gate \
+             failure), this differential genuinely isolates self_heal_reset's own restored \
+             contribution: clean_isolated={clean_isolated}, self_heal_only={self_heal_only}"
+        );
+        assert_eq!(
+            self_heal_only["overall_pass"],
+            serde_json::json!(false),
+            "905: restored -- an unattributed self-heal event alone must fail the TOP-LEVEL \
+             overall_pass: {self_heal_only}"
         );
     }
 

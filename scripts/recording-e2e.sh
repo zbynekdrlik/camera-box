@@ -4571,9 +4571,10 @@ echo "    ok: no capture-rate defect recurrence in $CAMERA_NAME's journal during
 # invisible: the source-camera step above only ever read $CAMERA_NAME. Sweep every secondary the
 # SAME way the issue-910 restart-event scan already does (CAMBOX_SECONDARY_DEPLOY, journald window
 # + each box's own burn log, HARD band + #717 SUSTAINED band grepped separately). REPORT-ONLY (a
-# loud WARNING #994:, never aborts): a secondary's reset events are already threaded report-only to
-# the verdict by the issue-910 scan + issue-914 frozen_leg/self_heal_reset decoupling, and
-# hard-failing here on a chronic secondary quirk (cam2 is a secondary) would recreate the exact
+# loud WARNING #994:, never aborts): this capture-RATE band stays report-only because the genlock
+# decimation gate absorbs a chronic rate wobble into exact NDI output (a secondary's RESET events,
+# a distinct signal, now DO gate via self_heal_reset since issue 905), so hard-failing THIS band on
+# a chronic secondary quirk (cam2 is a secondary) would recreate the exact
 # permanently-red-gate mistake issue-909/914 fixed -- a hard secondary gate, if ever wanted, is its
 # own ticket (green-gate-first). Option 2 of #994 (the reset-EVENT sweep across secondaries) is
 # already delivered by issue 910; this closes option 1 for the capture-rate defect-declaration
