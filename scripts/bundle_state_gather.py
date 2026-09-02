@@ -616,24 +616,33 @@ def obs_process_count_from_listing(text):
 
 # #1227 — VB-Audio Matrix presence, for the `vb_matrix_running` facet the dev1 VB-Matrix alert
 # watchdog reads. The process image name after its `.exe` is stripped (tasklist prints e.g.
-# `VBAudioMatrix_x64.exe`); the pattern covers the stream build `VBAudioMatrix_x64` AND strih's
-# `VBAudioMatrixCoconut_x64` (case-insensitive, anchored at start so `NotVBAudioMatrix...` never
-# matches). The disk-install pattern is the same name plus `.exe`.
-VB_MATRIX_PROCESS_NAME_RE = re.compile(r"(?i)^VBAudioMatrix\w*$")
-VB_MATRIX_EXE_RE = re.compile(r"(?i)^VBAudioMatrix\w*\.exe$")
+# `VBAudioMatrix_x64.exe`); the pattern enumerates the actual HOSTS — the stream build
+# `VBAudioMatrix_x64` and strih's `VBAudioMatrixCoconut_x64` (+ their non-x64 variants), NOT a
+# left-open `VBAudioMatrix_Setup` installer that shares the same folder (case-insensitive, anchored
+# at both ends so `NotVBAudioMatrix…` / `…_Setup` never match). The exe pattern is derived from the
+# SAME base so the two can never drift apart (a #1222c-style DRY finding).
+_VB_MATRIX_NAME_BASE = r"(?i)^VBAudioMatrix(Coconut)?(_x64)?"
+VB_MATRIX_PROCESS_NAME_RE = re.compile(_VB_MATRIX_NAME_BASE + r"$")
+VB_MATRIX_EXE_RE = re.compile(_VB_MATRIX_NAME_BASE + r"\.exe$")
 
 
 def vb_matrix_process_from_listing(text):
-    """#1227 — `(name, pid)` of the first running VB-Matrix process, parsed from `tasklist /FO CSV
-    /NH` output *text* (each row `"Image Name","PID","Session Name","Session#","Mem Usage"`). A
-    `csv.reader` is REQUIRED — the Mem Usage column carries a thousands separator INSIDE its quotes
-    (`"18,236 K"`), so a naive comma split would mis-column the PID. The image name has its `.exe`
-    stripped before matching `VB_MATRIX_PROCESS_NAME_RE`, so `name` is e.g. `VBAudioMatrix_x64`.
+    """#1227 — the running VB-Matrix process from `tasklist /FO CSV /NH` output *text* (each row
+    `"Image Name","PID","Session Name","Session#","Mem Usage"`). A `csv.reader` is REQUIRED — the
+    Mem Usage column carries a thousands separator INSIDE its quotes (`"18,236 K"`), so a naive
+    comma split would mis-column the PID. The image name has its `.exe` stripped before matching
+    `VB_MATRIX_PROCESS_NAME_RE`, so a returned `name` is e.g. `VBAudioMatrix_x64`.
 
-    `("", "")` when *text* is empty/malformed or no VB-Matrix row is present (never a guessed value;
-    the caller pairs this with the disk install-present check to decide running=1/0/absent)."""
+    THREE-state return so the caller never reads a FAILED read as a measured absence (issue 1227
+    review 🔴, the #833 / `obs_process_count_from_listing` class):
+      None       -- the listing is UNREADABLE (empty/whitespace text = a tasklist subprocess
+                    failure, since a live box always lists SOME processes; or a `csv.Error`). The
+                    caller must treat this as UNKNOWN (facet omitted), NEVER a DOWN.
+      ("", "")   -- a VALID listing with no VB-Matrix HOST row (genuinely absent -> the caller reads
+                    DOWN when the install is present on disk).
+      (name,pid) -- the first VB-Matrix host process found."""
     if not (text or "").strip():
-        return ("", "")
+        return None
     try:
         for row in csv.reader(io.StringIO(text)):
             if not row:
@@ -644,7 +653,7 @@ def vb_matrix_process_from_listing(text):
                 pid = row[1].strip() if len(row) > 1 else ""
                 return (base, pid)
     except csv.Error:
-        return ("", "")
+        return None
     return ("", "")
 
 
@@ -664,20 +673,25 @@ def vb_matrix_install_present_under(scan_dirs):
     return False
 
 
-def vb_matrix_running_facet(install_present, proc_name, proc_pid):
+def vb_matrix_running_facet(install_present, proc):
     """#1227 — the 3-state `(running, name, pid)` facet composition from the disk-install gate + the
-    tasklist process parse:
+    `vb_matrix_process_from_listing` result *proc* (None | ("", "") | (name, pid)):
 
-      install_present False              -> ("", "", "")     (no VB-Matrix box, e.g. imag: OMITTED
-                                                              downstream -> UNKNOWN, never a page)
-      install_present True,  proc found  -> ("1", name, pid) (RUNNING)
-      install_present True,  no proc     -> ("0", "", "")    (installed but DEAD -> present in JSON
-                                                              as running="0" -> DOWN -> page)
+      install_present False        -> ("", "", "")     (no VB-Matrix box, e.g. imag: OMITTED
+                                                        downstream -> UNKNOWN, never a page)
+      proc is None                 -> ("", "", "")     (the tasklist read FAILED — UNKNOWN, NEVER a
+                                                        false DOWN off a failed read; issue 1227 🔴)
+      install_present, proc ("","")-> ("0", "", "")    (a good read, host genuinely absent -> present
+                                                        in JSON as running="0" -> DOWN -> page)
+      install_present, (name,pid)  -> ("1", name, pid) (RUNNING)
 
     `"0"` is a truthy string, so `build_bundle_state`'s omit-when-empty filter KEEPS it (DOWN must
-    surface); only the not-installed `""` is dropped."""
+    surface); only the not-installed / unread `""` is dropped."""
     if not install_present:
         return ("", "", "")
+    if proc is None:
+        return ("", "", "")
+    proc_name, proc_pid = proc
     if proc_name:
         return ("1", proc_name, proc_pid or "")
     return ("0", "", "")

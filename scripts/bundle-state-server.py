@@ -398,36 +398,14 @@ def _parse_tasklist_obs_process_names(text):
     return "\n".join(names)
 
 
-def obs_process_list():
-    """#826 / #1222c — every running process NAME matching an OBS-shaped filter, newline-joined —
-    feeds bsg.obs_process_count_from_listing. "" on any failure (never a guessed count; the gate
-    then reads this box's process count as UNKNOWN, not "zero confirmed").
-
-    #1222c: was a PowerShell `Get-Process -Name 'obs*'` round-trip. Live per-facet timing on strih
-    showed this regularly TIMING OUT at its own 15s subprocess ceiling under sustained OBS render
-    load ("WARNING: could not list OBS-class processes: ... timed out after 15 seconds"), the same
-    PowerShell-interpreter-cold-start tax the #1222b port4455 fix already replaced with netstat.
-    Replaced here with a native `tasklist /FO CSV /NH` subprocess (no interpreter startup cost at
-    all), parsed by the PURE `_parse_tasklist_obs_process_names` above — same "" on-failure
-    contract, so `bsg.obs_process_count_from_listing` needed zero changes."""
-    try:
-        out = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15, check=True,
-        )
-        return _parse_tasklist_obs_process_names(out.stdout)
-    except (subprocess.SubprocessError, OSError) as e:
-        log(f"WARNING: could not list OBS-class processes: {e}")
-        return ""
-
-
-def vb_matrix_process_list():
-    """#1227 — the RAW `tasklist /FO CSV /NH` output, for `bsg.vb_matrix_process_from_listing` (which
-    needs the PID column, so it parses the raw CSV rather than the name-only list obs_process_list
-    returns). A SEPARATE native tasklist call from obs_process_list's — deliberately, so the obs
-    process-count path stays byte-identical (its two pinned tests): a second native tasklist is
-    cheap and BOUNDED (proportional to process count), unlike the PowerShell interpreter cold-start
-    the #1222 obs_process swap eliminated. "" on any failure (never a guessed value)."""
+def tasklist_csv():
+    """#1222c / #1227 — the RAW `tasklist /FO CSV /NH` output (a native subprocess, no PowerShell
+    interpreter cold-start — the #1222 tax the obs_process swap eliminated). ONE call feeds BOTH the
+    obs process-count facet (via `_parse_tasklist_obs_process_names`) AND the VB-Matrix presence
+    facet (via `bsg.vb_matrix_process_from_listing`, which needs the raw PID column) — gather it once
+    per request in `gather_bundle_state` and pass the text to both, never two native tasklist spawns
+    (issue 1227 review 🟡). "" on any failure — a live box always lists SOME processes, so an empty
+    result means the subprocess failed (both consumers treat "" as UNKNOWN, never a guessed count)."""
     try:
         out = subprocess.run(
             ["tasklist", "/FO", "CSV", "/NH"],
@@ -435,8 +413,39 @@ def vb_matrix_process_list():
         )
         return out.stdout
     except (subprocess.SubprocessError, OSError) as e:
-        log(f"WARNING: could not list processes for VB-Matrix presence: {e}")
+        log(f"WARNING: could not list processes (tasklist): {e}")
         return ""
+
+
+def obs_process_list():
+    """#826 / #1222c — every running process NAME matching an OBS-shaped filter, newline-joined —
+    feeds bsg.obs_process_count_from_listing. "" on any failure (never a guessed count; the gate
+    then reads this box's process count as UNKNOWN, not "zero confirmed"). Uses the shared native
+    `tasklist_csv()` (issue 1227 review 🟡 folds the once-separate VB-Matrix tasklist into it);
+    behaviour is unchanged — still a native `tasklist` parsed by `_parse_tasklist_obs_process_names`,
+    so `bsg.obs_process_count_from_listing` and the pinned tests need zero changes."""
+    return _parse_tasklist_obs_process_names(tasklist_csv())
+
+
+def vb_matrix_process_list():
+    """#1227 — the RAW `tasklist /FO CSV /NH` output, for `bsg.vb_matrix_process_from_listing` (which
+    needs the raw PID column). Thin alias over the shared `tasklist_csv()` so a single native tasklist
+    per request feeds both this and the obs process-count facet (review 🟡)."""
+    return tasklist_csv()
+
+
+def gather_vb_matrix_facet(install_present, tasklist_text, start_fn):
+    """#1227 — compose the `(running, name, pid, start)` VB-Matrix facet from the disk-install gate,
+    the shared tasklist output, and a start-time resolver. Module-level (not a gather closure) so the
+    "a failed tasklist read must NOT become a false DOWN" path is directly testable.
+
+    `start_fn(pid)` is called UNCONDITIONALLY (review 🔵): a falsy pid clears the PID-keyed cache and
+    returns "" WITHOUT spawning PowerShell, so imag / a DOWN box still never pays a CIM query, while a
+    DOWN->UP restart that reuses the same Windows pid no longer serves a stale cached start time."""
+    running, name, pid = bsg.vb_matrix_running_facet(
+        install_present, bsg.vb_matrix_process_from_listing(tasklist_text)
+    )
+    return running, name, pid, start_fn(pid)
 
 
 def vb_matrix_start_time(pid):
@@ -453,7 +462,10 @@ def vb_matrix_start_time(pid):
     degrade there leaves the running/pid facet fully intact.
 
     Same never-cache-empty / clear-on-failure discipline as port4455_owner() (#1222 review)."""
-    if not pid:
+    # A falsy OR non-numeric pid clears the cache and returns "" with NO subprocess (review 🔵: a
+    # non-numeric pid would otherwise resolve to "" every request -> a PowerShell cold start each
+    # time; the pid comes from tasklist so it is normally numeric, this is cheap insurance).
+    if not pid or not str(pid).isdigit():
         with _VB_MATRIX_START_CACHE_LOCK:
             _vb_matrix_start_cache["pid"] = None
             _vb_matrix_start_cache["start"] = ""
@@ -468,11 +480,13 @@ def vb_matrix_start_time(pid):
             [
                 "powershell", "-NoProfile", "-NonInteractive", "-Command",
                 # Single-quoted Python literals so the PowerShell double-quoted WQL filter embeds
-                # cleanly; format the DateTime explicitly to a locale-stable ISO-8601 string
-                # (the bare .CreationDate would print in the box's locale, e.g. 09/02/2026 14:01:40).
+                # cleanly; `.ToString("s")` is the .NET SORTABLE (ISO-8601, invariant-culture) format
+                # = exactly `yyyy-MM-ddTHH:mm:ss`, and unlike a custom `HH:mm:ss` pattern its `:` is
+                # NOT the locale time separator (review 🔵), so it is fully locale-stable. `pid` is
+                # numeric-guarded above before it reaches this WQL filter.
                 f'$p = Get-CimInstance Win32_Process -Filter "ProcessId={pid}" '
                 '-ErrorAction SilentlyContinue | Select-Object -First 1; '
-                'if ($p -and $p.CreationDate) { $p.CreationDate.ToString("yyyy-MM-ddTHH:mm:ss") }',
+                'if ($p -and $p.CreationDate) { $p.CreationDate.ToString("s") }',
             ],
             capture_output=True, text=True, timeout=VB_MATRIX_START_RESOLVE_TIMEOUT_S, check=True,
         )
@@ -709,25 +723,26 @@ def gather_bundle_state(
         timings, "genlock_build_sha", bsg.genlock_build_sha_from_file, genlock_build_sha_file
     )
     ndi_runtime_val = _timed(timings, "ndi_runtime", ndi_runtime_version, ndi_runtime_dll)
+    # #1227 review 🟡 — ONE native tasklist per request feeds BOTH the obs process-count facet and
+    # the VB-Matrix presence facet (never two spawns).
+    tasklist_text = _timed(timings, "tasklist", tasklist_csv)
     obs_process_count_val = _timed(
         timings,
         "obs_process_count",
-        lambda: bsg.obs_process_count_from_listing(obs_process_list()),
+        lambda: bsg.obs_process_count_from_listing(_parse_tasklist_obs_process_names(tasklist_text)),
     )
 
     # #1227 — the VB-Matrix presence facet (the dev1 VB-Matrix alert watchdog reads it). The disk
-    # install gate + the native tasklist parse compose the 3-state running facet; the start time is
-    # a best-effort PID-keyed-cached CIM read, gathered ONLY when a process is present (so it never
-    # runs on imag or on a DOWN box). Each gather independent, same never-blank-the-rest discipline.
-    def _gather_vb_matrix():
-        install_present = bsg.vb_matrix_install_present_under(DEFAULT_VB_MATRIX_INSTALL_DIRS)
-        proc_name, proc_pid = bsg.vb_matrix_process_from_listing(vb_matrix_process_list())
-        running, name, pid = bsg.vb_matrix_running_facet(install_present, proc_name, proc_pid)
-        start = vb_matrix_start_time(pid) if running == "1" else ""
-        return running, name, pid, start
-
-    (vb_matrix_running_val, vb_matrix_name_val, vb_matrix_pid_val,
-     vb_matrix_start_val) = _timed(timings, "vb_matrix", _gather_vb_matrix)
+    # install gate + the shared tasklist parse compose the 3-state running facet; the start time is a
+    # best-effort PID-keyed-cached CIM read gathered via start_fn (a falsy pid = no subprocess, so
+    # imag / a DOWN box never pays a CIM query). A FAILED tasklist read is UNKNOWN, never a false DOWN.
+    (vb_matrix_running_val, vb_matrix_name_val, vb_matrix_pid_val, vb_matrix_start_val) = _timed(
+        timings, "vb_matrix",
+        lambda: gather_vb_matrix_facet(
+            bsg.vb_matrix_install_present_under(DEFAULT_VB_MATRIX_INSTALL_DIRS),
+            tasklist_text, vb_matrix_start_time,
+        ),
+    )
 
     result = bsg.build_bundle_state(
         obs_version=obs_version,

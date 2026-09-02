@@ -64,14 +64,16 @@ def _reset_start_cache():
     bss._vb_matrix_start_cache["start"] = ""
 
 
-def test_start_time_falsy_pid_is_empty_no_query(monkeypatch):
+def test_start_time_falsy_or_nonnumeric_pid_is_empty_no_query(monkeypatch):
     _reset_start_cache()
     calls = []
     monkeypatch.setattr(bss.subprocess, "run",
                         lambda cmd, **_kw: calls.append(cmd) or types.SimpleNamespace(stdout="x"))
     assert bss.vb_matrix_start_time("") == ""
     assert bss.vb_matrix_start_time(None) == ""
-    assert calls == [], "a falsy pid must never spawn the CIM query"
+    # review 🔵: a non-numeric pid must also short-circuit (never a WQL cold-start every request)
+    assert bss.vb_matrix_start_time("notapid") == ""
+    assert calls == [], "a falsy / non-numeric pid must never spawn the CIM query"
 
 
 def test_start_time_resolves_and_caches_by_pid(monkeypatch):
@@ -88,10 +90,10 @@ def test_start_time_resolves_and_caches_by_pid(monkeypatch):
     assert first == "2026-09-02T14:01:40"
     assert second == first
     assert len(calls) == 1, "an unchanged pid must not re-pay for the CIM resolve"
-    # the CIM query must scope by ProcessId and format the DateTime (locale-stable)
+    # the CIM query must scope by ProcessId and format the DateTime locale-stably via ToString("s")
     joined = " ".join(calls[0])
     assert "Win32_Process" in joined and "ProcessId=8144" in joined
-    assert "yyyy-MM-ddTHH:mm:ss" in joined
+    assert '.ToString("s")' in joined
 
 
 def test_start_time_re_resolves_when_pid_changes(monkeypatch):
@@ -131,3 +133,53 @@ def test_start_time_clears_cache_on_failure(monkeypatch):
     assert bss.vb_matrix_start_time("8144") == ""
     assert len(calls) == 2, "a failed resolve must clear the cache -- keep retrying"
     assert bss._vb_matrix_start_cache["pid"] is None
+
+
+# ---------------------------------------------------------------- gather_vb_matrix_facet (wiring)
+# A stub start-time resolver that records every pid it was called with (so we can assert it is
+# only ever a real spawn when running=1, and short-circuits otherwise).
+def _stub_start():
+    seen = []
+
+    def fn(pid):
+        seen.append(pid)
+        return "2026-09-02T14:01:40" if pid else ""
+
+    return fn, seen
+
+
+def test_gather_facet_failed_tasklist_is_unknown_never_down():
+    # issue 1227 review 🔴 (WIRING): a FAILED tasklist ("") with an install present must produce an
+    # OMITTED facet (running=""), NEVER running="0" (a false DOWN). The whole gather chain, not just
+    # the pure parser, must honor it.
+    fn, seen = _stub_start()
+    running, name, pid, start = bss.gather_vb_matrix_facet(True, "", fn)
+    assert (running, name, pid, start) == ("", "", "", "")
+    assert seen == [""], "start_fn is called unconditionally, with the empty pid (no subprocess)"
+
+
+def test_gather_facet_running_resolves_start():
+    fn, seen = _stub_start()
+    running, name, pid, start = bss.gather_vb_matrix_facet(True, TASKLIST_CSV, fn)
+    assert (running, name, pid, start) == ("1", "VBAudioMatrix_x64", "8144", "2026-09-02T14:01:40")
+    assert seen == ["8144"]
+
+
+def test_gather_facet_installed_but_absent_is_down():
+    # a GOOD tasklist read with no VB-Matrix host row -> running "0" (DOWN), start "" (falsy pid).
+    good_no_vbm = (
+        '"Image Name","PID","Session Name","Session#","Mem Usage"\r\n'
+        '"obs64.exe","4321","Console","1","512,000 K"\r\n'
+    )
+    fn, seen = _stub_start()
+    running, name, pid, start = bss.gather_vb_matrix_facet(True, good_no_vbm, fn)
+    assert (running, name, pid, start) == ("0", "", "", "")
+    assert seen == [""], "a DOWN box calls start_fn with the empty pid -> no subprocess"
+
+
+def test_gather_facet_no_install_omits_and_never_spawns():
+    # imag: no install -> everything "" and start_fn only ever sees an empty pid (no CIM query).
+    fn, seen = _stub_start()
+    running, name, pid, start = bss.gather_vb_matrix_facet(False, TASKLIST_CSV, fn)
+    assert (running, name, pid, start) == ("", "", "", "")
+    assert seen == [""]
