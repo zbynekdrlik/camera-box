@@ -111,3 +111,27 @@ works to diff an OLD committed version against the new one: `git show <sha>:scri
 /tmp/old.sh && bash /tmp/old.sh --box strih` runs the historical version standalone (if it sources
 a sibling lib via a `HERE`-relative path, recreate that relative layout under `/tmp` first — copy
 the lib file(s) to the same relative subpath before running).
+
+## An embedded `powershell.exe -File` child owns its OWN `$ahkStopped` — an outer pre-stop is invisible to it (#1273)
+
+`obs-self-heal-install.sh`'s `build_recovery_script` REUSES `build_launch_program`'s output but runs
+it as a genuinely SEPARATE `powershell.exe -File <tmp>.ps1` CHILD process (not inline). That child
+has its OWN `$ahkStopped` (starts fresh `$false`). Post-#1272 the embedded launch program is the
+SINGLE OWNER of the whole AutoHotkey64 stop/restart bracket — it stops AHK before killing obs64
+(its `--force` kill covers the wedge-kill race), restarts + verifies AHK after the launch, then runs
+its own `(3c)` #978 session gate. So an OUTER script that ALSO pre-stops AHK before invoking that
+child is a bug, not defense-in-depth: the child then finds AHK already stopped, never sets
+`$ahkStopped=$true`, its own restart-gate (`if ($ahkStopped)`) never fires, and its #978 gate finds
+0 AutoHotkey64 → `exit 8` — force-falsing the outer
+`$verified = ($postCount -eq 1) -and ($relaunchExit -eq 0)` on an otherwise-clean recovery (a
+diagnostics false-negative; #1273's live incident). **Rule: never pre-touch AHK outside the embedded
+program. The outer script may only run a FAILURE-PATH backstop — `if ($relaunchExit -ne 0)` +
+`if (-not (Get-Process AutoHotkey64 ...))` then a best-effort relaunch — to cover an embedded exit
+that aborted BEFORE its own restart point (audio-buffering `exit 7`, redraw-relaunch `exit 6`),
+idempotent so it never double-launches what the embedded program already restored on the success
+path.** Rejected fixes: injecting `$ahkStopped=$true` into the child (two owners of one bracket,
+brittle coupling on a private variable name), and whitelisting `exit 8` in `$verified` (exit 8 is
+ALSO the genuine #978 session-visibility FAILURE, so it would hide a real recovery failure). One
+honest residual stays: a pass that STARTS with AHK already dead legitimately `exit 8`s
+("watcher missing") and reads `verified=False`, then the outer backstop restores AHK — expected, not
+a false-negative.
