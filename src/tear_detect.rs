@@ -583,16 +583,47 @@ pub struct ProjectionProof {
 /// issue 1144 (#887 fold) -- summarize the projection (CAM2) leg's tear windows into a
 /// [`ProjectionProof`]. Pure / Tier-0. See [`ProjectionProof`] for the scope + the report-only note.
 pub fn summarize_projection_leg(cam2_windows: &[&TearStats]) -> ProjectionProof {
-    // issue 1144 RED stub -- summarize not implemented; always returns not-backed / vacuous so
-    // the positive backed_when_observed_and_clean + not_backed_when_torn tests FAIL here.
-    let _ = cam2_windows;
+    let windows = cam2_windows.len();
+    if windows == 0 {
+        return ProjectionProof {
+            windows: 0,
+            observed_fraction: 0.0,
+            tear_gate_clean: true,
+            worst_tear_fraction: 0.0,
+            aux_any_coverage: 0.0,
+            hdmi1_proof_backed: false,
+        };
+    }
+    let observed = cam2_windows
+        .iter()
+        .filter(|s| s.viability == TearSignalViability::Observed)
+        .count();
+    let observed_fraction = observed as f64 / windows as f64;
+    let tear_gate_clean = cam2_windows.iter().all(|s| tear_gate_pass(s));
+    let worst_tear_fraction = cam2_windows
+        .iter()
+        .map(|s| s.tear_fraction)
+        .fold(0.0_f64, f64::max);
+    let total_frames: u64 = cam2_windows.iter().map(|s| s.total_frames as u64).sum();
+    let aux_any_coverage = if total_frames > 0 {
+        cam2_windows
+            .iter()
+            .map(|s| s.aux_any_decode_fraction * s.total_frames as f64)
+            .sum::<f64>()
+            / total_frames as f64
+    } else {
+        0.0
+    };
+    // Report-only: at least one live (Observed) + clean projection window backs the HDMI-1 SCANOUT
+    // proof. observed_fraction is carried so a stricter flip can demand more than "any".
+    let hdmi1_proof_backed = observed_fraction > 0.0 && tear_gate_clean;
     ProjectionProof {
-        windows: 0,
-        observed_fraction: 0.0,
-        tear_gate_clean: true,
-        worst_tear_fraction: 0.0,
-        aux_any_coverage: 0.0,
-        hdmi1_proof_backed: false,
+        windows,
+        observed_fraction,
+        tear_gate_clean,
+        worst_tear_fraction,
+        aux_any_coverage,
+        hdmi1_proof_backed,
     }
 }
 
