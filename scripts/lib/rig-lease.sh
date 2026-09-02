@@ -26,6 +26,14 @@
 # OBS-state busy-check (scripts/rig-busy-gate.sh, #406/#312/#657) stays wired in as the FALLBACK
 # for a busy rig with no lease participant on the other side -- never weakened by this file.
 #
+# PREMISE CORRECTION (#1277): the "both runners are literally the same machine" premise above is
+# TRUE for camera-box's own full-path-e2e.yml runner, but FALSE for restreamer's OBS-driving E2E
+# jobs, which run on the Windows STREAM BOX (10.77.9.204, SYSTEM-level self-hosted runner) -- a
+# different host that can never see this lockdir on dev1's local filesystem. restreamer's
+# pre-StartStream check reads the SAME lockdir over LAN HTTP instead: scripts/rig-lease-server.py
+# (:8890/rig-lease.json), a read-only window with zero write surface and zero new credentials.
+# See .claude/rules/rig-lease-http.md for the full consumer contract.
+#
 # Source-only: this file defines functions and runs nothing on its own. Callers:
 #   - scripts/rig-busy-gate.sh   (acquires before the first OBS-touching action; wait/fail-fast
 #                                 decision; releases on ITS OWN failure paths via trap)
