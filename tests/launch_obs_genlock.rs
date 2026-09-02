@@ -242,8 +242,13 @@ fn program_ahk_restart_is_verified_and_fails_loud_867() {
         "#867: the AHK restart must poll Get-Process AutoHotkey64 and record whether it verified. \
          Program:\n{p}"
     );
+    // #1272: ahk_relaunch_ps (which embeds "$ahkRelaunchVerified = $false") is now ALSO reused by
+    // the two early-exit best-effort restart snippets (exe-not-found / obs64-never-started), so
+    // this string is no longer unique in the program — anchor on the LAST occurrence, which is
+    // guaranteed to be the real verify+fail-loud restart block (positioned after the whole
+    // launch+audio-verify sequence, strictly later in the text than either early-exit site).
     let verified_pos = p
-        .find("$ahkRelaunchVerified = $false")
+        .rfind("$ahkRelaunchVerified = $false")
         .expect("the verify flag must be initialized before the poll loop");
     let fail_branch = p[verified_pos..]
         .find("Write-Error")
@@ -253,6 +258,20 @@ fn program_ahk_restart_is_verified_and_fails_loud_867() {
         .find("exit 9")
         .expect("the failure branch must exit non-zero (9), not just warn");
     let _ = exit_after_fail;
+    // The real restart block's own success-log marker must sit between the LAST verify-flag
+    // occurrence and the fail branch, proving verified_pos genuinely anchored on the intended
+    // (real restart) occurrence, not merely on the last of several unrelated ones by coincidence.
+    let success_marker_pos = p[verified_pos..]
+        .find("AHK watchdog restarted via")
+        .map(|off| off + verified_pos)
+        .expect(
+            "the real restart block's success log line must follow the LAST verify-flag occurrence",
+        );
+    assert!(
+        success_marker_pos < fail_branch,
+        "#1272: the real restart block's success branch must precede its own fail branch \
+         (verified_pos={verified_pos} success_marker_pos={success_marker_pos} fail_branch={fail_branch})"
+    );
 }
 
 /// #978/#958 — SESSION-VISIBILITY GATE: an obs64 launched via ssh+Invoke-CimMethod lands in
@@ -662,6 +681,69 @@ fn force_stops_ahk_before_obs64_kill_and_restarts_after_verify_1272() {
         "#1272: AHK must be restarted BEFORE the (3c) session-visibility gate (which asserts AHK's \
          own SessionId and would otherwise find it missing). ahk_relaunch_pos={ahk_relaunch_pos} \
          session_gate_pos={session_gate_pos}. Program:\n{p}"
+    );
+}
+
+/// #1272 (review finding) — the fix moved the AHK stop from "only inside the #786 redraw loop" to
+/// "unconditionally before the --force kill", which widened the window where a program that exits
+/// EARLY (before the single shared restart point is reached) would leave AHK permanently stopped —
+/// a regression these two specific exit sites never had before this fix (exe-not-found / obs64
+/// never starting on the INITIAL launch). Both must attempt a best-effort AHK restart before
+/// exiting, without stealing the exit 5 / exit 6 codes those failures must still report.
+#[test]
+fn early_exit_failures_attempt_best_effort_ahk_restart_before_exiting_1272() {
+    let p = program_default(); // has_ahk=1, force=0 (the initial-launch path both early exits sit on)
+    let exit5_pos = p
+        .find("obs64 not found at")
+        .expect("the exe-not-found exit 5 message must exist");
+    let exit6_pos = p.find("obs64 did not start\"").expect(
+        "the obs64-never-started exit 6 message must exist (first occurrence, initial launch)",
+    );
+
+    // A best-effort restart attempt must sit IMMEDIATELY before each early-exit message (within a
+    // tight local window, never merely "somewhere earlier in the file").
+    let before_exit5 = &p[exit5_pos.saturating_sub(400)..exit5_pos];
+    assert!(
+        before_exit5.contains("best-effort AHK restart"),
+        "#1272: the exe-not-found exit 5 must attempt a best-effort AHK restart first (else the \
+         --force AHK-stop this fix added leaves AHK dead on a failure that never touched it \
+         before). Region:\n{before_exit5}"
+    );
+    let before_exit6 = &p[exit6_pos.saturating_sub(400)..exit6_pos];
+    assert!(
+        before_exit6.contains("best-effort AHK restart"),
+        "#1272: the initial obs64-never-started exit 6 must attempt a best-effort AHK restart \
+         first. Region:\n{before_exit6}"
+    );
+
+    // The primary exit code must still be the ONE reported — the best-effort attempt must be
+    // silent about verification outcome (Write-Warning only), never fail-loud/exit itself (that
+    // would steal the real exit 5/6 codes this failure must report).
+    assert!(
+        !p.contains("best-effort AHK restart") || !before_exit5.contains("exit 9"),
+        "#1272: the best-effort restart before exit 5 must never itself exit — exit 5 stays the \
+         reported code. Region:\n{before_exit5}"
+    );
+    assert!(
+        !before_exit6.contains("exit 9"),
+        "#1272: the best-effort restart before exit 6 must never itself exit — exit 6 stays the \
+         reported code. Region:\n{before_exit6}"
+    );
+}
+
+/// #1272 — a box with NO AutoHotkey64 watcher (stream) must NOT carry a real best-effort AHK
+/// restart at the early-exit sites either — same #786/#411 has_ahk=0 no-op convention.
+#[test]
+fn program_without_ahk_watcher_early_exits_have_no_real_best_effort_restart_1272() {
+    let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0 0");
+    assert!(
+        p.contains("AutoHotkey64 best-effort restart: no-op"),
+        "has_ahk=0 must document the best-effort restart snippet as a no-op. Program:\n{p}"
+    );
+    assert!(
+        !p.contains("$ahkRelaunchVerified"),
+        "has_ahk=0 must not embed any real AHK relaunch machinery, including at the early-exit \
+         best-effort sites. Program:\n{p}"
     );
 }
 
