@@ -216,21 +216,21 @@ impl SelfHealAttributionReport {
         !self.self_heal.is_empty() || !self.unattributed_events.is_empty()
     }
 
-    /// #914 (2026-08-01, user decision -- mirrors the issue-889 report-only pattern / issue-861's
-    /// caller-only decoupling): whether this report's `frozen_leg`/`self_heal_reset` findings
-    /// should fold into the fused verdict's `overall_pass`. `any_frozen()`/`any_self_heal()` above
-    /// are UNCHANGED -- still fully computed, printed, and JSON-reported; only the caller
-    /// (`recording-verdict.rs`) stops ANDing them into `all_pass`, exactly like issue 861 did for
-    /// `av_window::av_offset_gate_pass`.
+    /// Whether this report's `frozen_leg`/`self_heal_reset` findings fold into the fused verdict's
+    /// `overall_pass`. `any_frozen()`/`any_self_heal()` above are UNCHANGED regardless of this
+    /// method's own state -- still fully computed, printed, and JSON-reported either way.
     ///
-    /// Report-only (hardcoded `true` = never contributes a failure) while cam1's ShadowCast 2
-    /// grabber defect (issue 909) remains physically unresolved. No env knob -- same no-knob
-    /// discipline issue 889 established. Restore path tracked on issue 905: once cam1 is
-    /// physically replaced and a stable week passes with no self-heal escalations, flip this
-    /// back to `!self.any_frozen() && !self.any_self_heal()` -- a one-line change, exactly the
-    /// shape this method exists to make possible.
+    /// RESTORED to blocking by issue 905 item 2 (2026-09-02): issue 914 (2026-08-01) had hardcoded
+    /// this to `true` (report-only, never contributes a failure) while cam1's ShadowCast 2 grabber
+    /// defect (issue 909) remained physically unresolved -- exactly mirroring the issue-889
+    /// report-only pattern / issue-861's caller-only decoupling for `av_window::
+    /// av_offset_gate_pass`. That restore condition (a stable green series with no self-heal
+    /// escalations) is now met: three consecutive Full-path E2E runs showed a genuinely empty
+    /// `frozen_leg.frozen` array AND a genuinely clean `self_heal_reset` (both `attributed` and
+    /// `unattributed_events` empty) on every member. No env knob -- same no-knob discipline
+    /// issue 889 established; this is a plain one-way flip, not a re-armable allowance.
     pub fn overall_pass_contribution(&self) -> bool {
-        true
+        !self.any_frozen() && !self.any_self_heal()
     }
 }
 
