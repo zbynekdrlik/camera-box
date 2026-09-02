@@ -270,22 +270,22 @@ mod tests {
     }
 
     #[test]
-    fn left_aux_overlaps_the_imag_burn_zone_by_documented_exception() {
-        // Pin the KNOWN defect (module doc, corrected 2026-09-01): the left aux sits inside imag's
-        // BottomCenterLeft burn zone [382, 684). Contrary to the original design assumption, imag's
-        // burn (911003) IS in the projected scene cam2 captures, so on the CAM2 projection window the
-        // left aux is OCCLUDED (~99% of frames carry 911003) — only the RIGHT aux decodes, which is
-        // the operative single-mark cross-band tear signal. Relocating the left aux out of the imag
-        // zone (to restore both-mark redundancy) is the tracked follow-up (issue 1266). If this
-        // placement is ever moved, update the module doc's defect paragraph together with this pin.
+    fn both_aux_marks_clear_the_imag_burn_zone_1270() {
+        // issue 1270 — the DE-CONFLICTION pin. Both aux marks are co-located in the RIGHT burn-free
+        // gap [1120, 1578), so BOTH now sit fully clear of imag's BottomCenterLeft burn zone
+        // [382, 684). This REPLACES the former `left_aux_overlaps_the_imag_burn_zone_by_documented_
+        // exception` pin: the occlusion it documented (imag's 911003 burn covered the LEFT even aux
+        // on the CAM2 projection leg, so aux_decode_fraction read a misleading 0.0 there) is the
+        // exact defect this ticket removes. If the aux placement is ever moved, update the module
+        // doc's placement paragraph together with this pin.
         let [l, r] = rig_rects();
         assert!(
-            l.intersects(&BURN_IMAG),
-            "the left aux deliberately shares the imag burn zone (documented exception)"
+            !l.intersects(&BURN_IMAG),
+            "the left (even) aux must now clear imag's burn zone [382, 684): {l:?}"
         );
         assert!(
             !r.intersects(&BURN_IMAG),
-            "the right aux stays clear of every burn zone including imag's"
+            "the right (odd) aux must clear imag's burn zone [382, 684): {r:?}"
         );
     }
 
