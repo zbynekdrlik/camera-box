@@ -268,8 +268,11 @@ only ONE of the two restart mechanisms used that exact string) was replaced by a
 unique now appears twice.
 
 **Fix: anchor on a comment/log-line that is UNIQUE to the specific call site you mean** (e.g. the
-outer script's own `# --- Step 4/4: RestartAhk ---` marker comment, never present inside the
-reused inner program), not on any part of the shared helper's own body. Before trusting a
+outer script's own `RestartAhk backstop` marker/log lines — issue 1273 restructured the outer AHK
+step into a failure-path backstop and RETIRED the old `# --- Step 4/4: RestartAhk ---` marker, so
+that phrase no longer exists in the emitted text; anchor on `RestartAhk backstop` instead, never
+present inside the reused inner program), not on any part of the shared helper's own body. Before
+trusting a
 `.find()`-based ordering test after extracting shared logic into a lib, grep the FULL generated
 output for your anchor string and confirm it is genuinely unique — `grep -c` on the harness's
 captured stdout, not just eyeballing the source.

@@ -291,20 +291,27 @@ fn restart_ahk_runs_regardless_of_verify_outcome() {
     let verify_pos = p
         .find("$verified  = ")
         .expect("verify assignment must exist");
-    let backstop_pos = p
-        .find("RestartAhk backstop")
-        .expect("backstop step must exist");
-    // No `if ($verified)` gate wraps the AHK restart — the backstop between the verify and the
-    // lock-clear gates on $relaunchExit, never on $verified.
-    let between = &p[verify_pos..backstop_pos];
+    // Scan the WHOLE region from the verify assignment through the explicit lock-clear (which
+    // follows the last recovery step) — not just up to the backstop COMMENT marker — so a future
+    // `if ($verified) { … }` wrap placed anywhere around the real backstop block is caught, not
+    // only one sitting before the marker.
+    let lock_clear_pos = p
+        .find("$state.recovery_in_progress = $false")
+        .expect("explicit lock-clear line must exist");
+    let between = &p[verify_pos..lock_clear_pos];
     assert!(
-        !between.contains("if ($verified)") && !between.contains("if (-not $verified)"),
-        "issue 1273: the AHK restart must NOT be gated on $verified. Between:\n{between}"
+        between.contains("RestartAhk backstop"),
+        "sanity: the scanned region must actually contain the backstop. Region:\n{between}"
     );
     assert!(
-        p.contains("if ($relaunchExit -ne 0)"),
+        !between.contains("if ($verified)") && !between.contains("if (-not $verified)"),
+        "issue 1273: the AHK restart must NOT be gated on $verified anywhere between the verify \
+         and the lock-clear. Between:\n{between}"
+    );
+    assert!(
+        between.contains("if ($relaunchExit -ne 0)"),
         "issue 1273: the failure-path backstop gates on the embedded program's exit code, never \
-         on $verified. Program:\n{p}"
+         on $verified. Region:\n{between}"
     );
 }
 
@@ -653,20 +660,45 @@ fn outer_self_heal_never_pre_stops_ahk_embedded_program_owns_the_bracket_1273() 
 #[test]
 fn strih_failure_path_ahk_backstop_is_gated_and_idempotent_1273() {
     let p = recovery_script_strih();
-    assert!(
-        p.contains("RestartAhk backstop"),
-        "issue 1273: the outer script must carry a failure-path RestartAhk backstop. Program:\n{p}"
+    // Strip the embedded launch program (which carries its OWN ahk_resolve_and_relaunch_ps copies)
+    // so the assertions below concern ONLY the outer script's own backstop, not the embedded one —
+    // otherwise a whole-program `.contains` could be satisfied by the embedded relaunch machinery
+    // even if the outer backstop's guard were broken.
+    let embedded = expected_kill_relaunch_program();
+    let outer = p.replace(embedded.trim(), "<<EMBEDDED LAUNCH PROGRAM>>");
+    let gate = outer.find("if ($relaunchExit -ne 0)").expect(
+        "issue 1273: the outer backstop must be gated on the embedded program's non-zero \
+                 exit — never unconditional, never on $verified",
     );
-    assert!(
-        p.contains("if ($relaunchExit -ne 0)"),
-        "issue 1273: the backstop must be gated on the embedded program's non-zero exit — never \
-         unconditional, never on $verified. Program:\n{p}"
+    let idempotent = outer
+        .find("if (-not (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue))")
+        .expect(
+            "issue 1273: the backstop must be idempotent AHK-present — only relaunch when \
+                 AutoHotkey64 is genuinely down, never double-launching what the embedded program \
+                 restored",
+        );
+    let relaunch = outer.find("$ahkScriptPath = ").expect(
+        "issue 1273: the backstop must actually invoke the ahk_resolve_and_relaunch_ps \
+                 machinery",
     );
+    let lock_clear = outer
+        .find("$state.recovery_in_progress = $false")
+        .expect("explicit lock-clear line must exist");
+    // The relaunch machinery must sit INSIDE both guards (exit-code gate, then AHK-present guard),
+    // and the whole backstop must precede the explicit lock-clear.
     assert!(
-        p.contains("if (-not (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue))"),
-        "issue 1273: the backstop must be idempotent AHK-present — only relaunch when AutoHotkey64 \
-         is genuinely down, never double-launching what the embedded program already restored. \
-         Program:\n{p}"
+        gate < idempotent && idempotent < relaunch && relaunch < lock_clear,
+        "issue 1273: the outer backstop must be `if ($relaunchExit -ne 0)` -> `if (-not \
+         (Get-Process AutoHotkey64 ...))` -> relaunch, all before the lock-clear. \
+         gate@{gate} idempotent@{idempotent} relaunch@{relaunch} lock_clear@{lock_clear}"
+    );
+    // Exactly ONE relaunch invocation in the outer script — proving the relaunch lives ONLY inside
+    // the guarded backstop, never leaked to an unguarded outer site.
+    assert_eq!(
+        outer.matches("$ahkScriptPath = ").count(),
+        1,
+        "issue 1273: the outer script must invoke the AHK relaunch machinery exactly once (inside \
+         the guarded backstop). Outer remainder:\n{outer}"
     );
 }
 
