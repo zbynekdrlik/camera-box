@@ -62,14 +62,17 @@ build_launch_program() {
   local obs_dir="$1" force="$2" has_ahk="${3:-1}"
 
   # #786/#411 — the AHK bracket is emitted ONLY for a box that actually runs the AHK watcher.
-  local ahk_decl ahk_stop_ps ahk_restart_ps
+  local ahk_decl ahk_stop_ps ahk_restart_ps ahk_best_effort_restart_ps
   if [ "$has_ahk" = "1" ]; then
     ahk_decl='$ahkStopped = $false'
     ahk_stop_ps=$(cat <<'PSAHK'
   # Stop AHK BEFORE killing obs64 (strih only; no-op elsewhere): NL_STARTUP.ahk respawns obs64 via
   # the BARE exe within seconds of the window vanishing, which would drop the shortcut params
   # (--enable-media-stream --verbose -> interkom "Permissions denied") AND race a double-launch.
-  # Same stop-first/restart-last structure as the #411 self-heal. Restarted after the loop.
+  # Same stop-first/restart-last structure as the #411 self-heal. This snippet is embedded at every
+  # obs64-kill site in the program (the --force kill_block AND the #786 redraw loop) — idempotent
+  # (a no-op once AHK is already stopped), restarted exactly ONCE at the single shared point after
+  # the whole launch+audio-verify sequence (issue 1272).
   if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
     Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
     $ahkStopped = $true
@@ -95,10 +98,28 @@ ${ahk_relaunch_ps}
 }
 PSAHK
 )
+    # issue 1272 (review finding): the single shared restart point above sits AFTER the whole
+    # launch+audio-verify sequence, so an EARLY failure exit that fires before it is reached
+    # (exe not found, obs64 never starts on the initial launch) would otherwise leave AHK
+    # permanently stopped -- a genuine regression this fix's own --force AHK-stop introduces at
+    # those two sites (they never touched AHK at all before this fix). A best-effort, NON-fail-loud
+    # attempt (no verify/log/exit -- the primary exit code 5/6 must stay the reported failure) is
+    # inserted right before each of those two exits. Deliberately reuses ONLY the resolve+relaunch
+    # primitive (ahk_resolve_and_relaunch_ps), never ahk_restart_ps's own log lines, so the
+    # "AHK watchdog restarted via ..." text -- and its exactly-once invariant -- stays scoped to the
+    # single success-path restart point.
+    ahk_best_effort_restart_ps=$(cat <<PSAHK
+if (\$ahkStopped) {
+${ahk_relaunch_ps}
+  Write-Warning "issue 1272: best-effort AHK restart before failing loud (verified=\$ahkRelaunchVerified, target=\$ahkRelaunchTarget)."
+}
+PSAHK
+)
   else
     ahk_decl='# (no AutoHotkey64 watcher on this box -- the #786 AHK stop/restart bracket is a no-op)'
     ahk_stop_ps='  # AutoHotkey64: no-op (this box has no AHK auto-respawn watcher -- nothing to stop)'
     ahk_restart_ps='# AutoHotkey64 restart: no-op (no AHK watcher on this box)'
+    ahk_best_effort_restart_ps='# AutoHotkey64 best-effort restart: no-op (no AHK watcher on this box)'
   fi
   # #978/#958 -- the SESSION-VISIBILITY GATE fragments. An obs64 launched via ssh+Invoke-CimMethod
   # lands in Windows SessionId=0 (invisible on the console) yet passes every OTHER check in this
@@ -145,12 +166,26 @@ PSAHKSESS
   # The kill branch (only when --force) — documented obs-ops recovery for a wedged OBS.
   local kill_block=""
   if [ "$force" = "1" ]; then
-    kill_block=$(cat <<'PSKILL'
+    local kill_body
+    kill_body=$(cat <<'PSKILL'
 # --force: documented obs-ops recovery -- force-kill a wedged obs64 before relaunch (DEV rig).
 Get-Process obs64 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force }
 Start-Sleep -Seconds 2
 PSKILL
 )
+    if [ "$has_ahk" = "1" ]; then
+      # issue 1272: stop AHK BEFORE killing obs64 (strih only). scripts/deploy-genlock-fleet.sh's
+      # own step 8 already restarted+verified AHK before this planner even runs, and NL_STARTUP.ahk
+      # respawns a BARE obs64 within seconds of the kill if left running -- racing this wrapper's
+      # own .lnk relaunch into a duplicate obs64 that fails the session-visibility gate's "expected
+      # exactly 1 obs64 process" check (the live 2026-09-02 incident this fixes). AHK is restarted
+      # exactly once, later, after the whole launch+audio-verify sequence -- see the single
+      # ${ahk_restart_ps} emission point below (never here, and never per-kill).
+      kill_block="${ahk_stop_ps}
+${kill_body}"
+    else
+      kill_block="${kill_body}"
+    fi
   else
     kill_block=$(cat <<'PSNOKILL'
 # No --force: refuse to double-launch a running obs64 (relaunch deliberately; use --force for a wedged one).
@@ -167,6 +202,12 @@ PSNOKILL
 # OBS_GENLOCK_*/OBS_BURN_* env. The measurement burn is a per-source genlock_burn bool over WebSocket
 # (scripts/obs_burn_filter.py), toggled WITHOUT a relaunch -- this wrapper never touches it.
 \$ErrorActionPreference = 'Stop'
+
+# issue 1272: \$ahkStopped is declared ONCE, here -- so both the --force kill below (kill_block,
+# wired in via the has_ahk check above) and the #786 redraw loop further down share the SAME flag
+# across the whole program. Never re-declare it later (a second "= \$false" would silently wipe out
+# the --force branch's own stop before the single restart point below runs).
+${ahk_decl}
 
 ${kill_block}
 
@@ -186,7 +227,10 @@ Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction Silent
 \$obsDir = '${obs_dir_ps}'
 \$exe    = '${exe_ps}'
 \$lnk    = "\$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\OBS Studio.lnk"
-if (-not (Test-Path \$exe)) { Write-Error "obs64 not found at \$exe"; exit 5 }
+if (-not (Test-Path \$exe)) {
+${ahk_best_effort_restart_ps}
+  Write-Error "obs64 not found at \$exe"; exit 5
+}
 if (Test-Path \$lnk) {
   Start-Process -FilePath \$lnk
 } else {
@@ -201,7 +245,10 @@ for (\$i = 0; \$i -lt 30; \$i++) {
   \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Select-Object -First 1
   if (\$proc -and \$proc.WorkingSet64 -gt 100MB) { break }
 }
-if (-not \$proc) { Write-Error "obs64 did not start"; exit 6 }
+if (-not \$proc) {
+${ahk_best_effort_restart_ps}
+  Write-Error "obs64 did not start"; exit 6
+}
 Start-Sleep -Seconds 3
 
 # (3b) #786 AUDIO-BUFFERING LAUNCH-GATE (hotfix; the OBS-level fix is #786's real deliverable).
@@ -253,7 +300,6 @@ if (\$guardedLnk) {
   }
 } else {
 \$maxLaunchAttempts = 3
-${ahk_decl}
 for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
   Start-Sleep -Seconds 10   # ASIO starts right after module load; a bad burst completes within ~5 s
   \$d = Get-BufDraw
@@ -286,8 +332,13 @@ ${ahk_stop_ps}
   if (-not \$proc) { Write-Error "obs64 did not start on #786 relaunch"; exit 6 }
   Start-Sleep -Seconds 3
 }
-${ahk_restart_ps}
 }
+
+# issue 1272: restart AHK exactly ONCE here -- after the launch + #786 audio-verify sequence has
+# fully settled (whichever branch above ran: the guarded-launcher verify-only wait, or this
+# wrapper's own redraw loop) -- and BEFORE the (3c) session-visibility gate below, which itself
+# asserts AHK's own SessionId and would otherwise find it missing.
+${ahk_restart_ps}
 
 # (3c) #978 SESSION-VISIBILITY GATE -- an obs64 launched via ssh+Invoke-CimMethod into Windows
 #     session 0 is fully healthy on every OTHER check above (log render tick, audio buffering) yet
