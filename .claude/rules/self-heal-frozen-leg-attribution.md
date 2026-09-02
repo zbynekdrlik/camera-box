@@ -262,3 +262,23 @@ is followed by an `echo`, never `for _acn in`, so the `#286` ALL_CAMBOX-adjacenc
 is unaffected. Two new pure report-only formatters
 (`capture_rate_secondary_recurrence_warn_message` / `..._burn_log_recurrence_warn_message`) mirror
 the #992 sustained-band warn formatters' shape.
+
+## The e2e_discord_report.py classifier mirror must key on the GATE set, not the report-only trip set (issue 905 item 2)
+
+When `frozen_leg`/`self_heal_reset` flip report-only↔blocking, `scripts/e2e_discord_report.py` is a
+SEPARATE consumer (see `e2e-discord-report.md` / `verdict-gate-seam-calibration.md` §15) whose
+`_blocking_failures` branch must key on EXACTLY what folds into `overall_pass` — which is NARROWER
+than the report-only trip condition. The naive "mirror the report-only branch" gets it wrong twice:
+
+- `frozen_leg` BLOCKS on `frozen` non-empty ONLY. `stale_replay` NEVER gates (`any_frozen()` reads
+  only `self.frozen`), so a blocking branch keyed on `frozen or stale_replay` would wrongly red a
+  stale-replay-only run; `stale_replay` stays report-only regardless of the flag.
+- `self_heal_reset` BLOCKS on `attributed` OR `unattributed_events` (`any_self_heal()` reads BOTH).
+  The pre-905 report-only branch checked only `attributed`, silently missing an unattributed-only
+  run — the blocking mirror must check both.
+
+Guard both blocking branches `gates_overall_pass is True` and both report-only branches `is not
+True` (the delivery-spread pattern) so a pre/post-flip verdict routes to exactly ONE list (no
+double-count). And when a flip moves ONE sub-signal of a COMBINED report-only label to blocking
+(e.g. `frozen` out of the old `"zamrznutá/stale vetva"`), SPLIT the label — else the report-only
+line echoes a now-blocking term (`zamrznutá`) directly under its own FAIL bullet.
