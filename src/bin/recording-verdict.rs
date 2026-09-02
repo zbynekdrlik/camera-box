@@ -67,7 +67,9 @@ use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
 use camera_box::qpsk_marker::{av_offset_candidates_deduped, DEDUPE_SAME_FID_WINDOW_S};
-use camera_box::self_heal_attribution::{attribute_self_heal, SelfHealResetEvent};
+use camera_box::self_heal_attribution::{
+    attribute_self_heal, SelfHealAttributionReport, SelfHealResetEvent,
+};
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -5915,14 +5917,20 @@ fn build_and_print_verdict_with_stream_diffs(
                     })).collect::<Vec<_>>(),
                 });
                 if let Some(obj) = report["frozen_leg"].as_object_mut() {
-                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(true));
+                    obj.insert(
+                        "gates_overall_pass".to_string(),
+                        serde_json::json!(SelfHealAttributionReport::gates_overall_pass()),
+                    );
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(frozen_self_heal_gate_note),
                     );
                 }
                 if let Some(obj) = report["self_heal_reset"].as_object_mut() {
-                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(true));
+                    obj.insert(
+                        "gates_overall_pass".to_string(),
+                        serde_json::json!(SelfHealAttributionReport::gates_overall_pass()),
+                    );
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(frozen_self_heal_gate_note),

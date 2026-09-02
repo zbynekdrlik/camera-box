@@ -216,6 +216,18 @@ impl SelfHealAttributionReport {
         !self.self_heal.is_empty() || !self.unattributed_events.is_empty()
     }
 
+    /// The ONE machine-readable flag for whether `frozen_leg`/`self_heal_reset` fold into the fused
+    /// verdict's `overall_pass` -- the single source of truth read by BOTH
+    /// [`overall_pass_contribution`](Self::overall_pass_contribution) AND the recording-verdict.rs
+    /// per-node JSON `gates_overall_pass` literals, so the JSON annotation can never silently drift
+    /// from the actual pass/fail decision. This is the shape every sibling seam already exposes
+    /// (`optical_floor`/`e2e_latency_gate`/`presentation_cadence`/`own_burn_absent`/`av_window`).
+    /// `true` == BLOCKING (RESTORED by issue 905 item 2, 2026-09-02); a future report-only
+    /// re-decouple flips this ONE const back to `false`.
+    pub const fn gates_overall_pass() -> bool {
+        true
+    }
+
     /// Whether this report's `frozen_leg`/`self_heal_reset` findings fold into the fused verdict's
     /// `overall_pass`. `any_frozen()`/`any_self_heal()` above are UNCHANGED regardless of this
     /// method's own state -- still fully computed, printed, and JSON-reported either way.
@@ -228,9 +240,10 @@ impl SelfHealAttributionReport {
     /// escalations) is now met: three consecutive Full-path E2E runs showed a genuinely empty
     /// `frozen_leg.frozen` array AND a genuinely clean `self_heal_reset` (both `attributed` and
     /// `unattributed_events` empty) on every member. No env knob -- same no-knob discipline
-    /// issue 889 established; this is a plain one-way flip, not a re-armable allowance.
+    /// issue 889 established; this is a plain one-way flip of
+    /// [`gates_overall_pass`](Self::gates_overall_pass), not a re-armable allowance.
     pub fn overall_pass_contribution(&self) -> bool {
-        !self.any_frozen() && !self.any_self_heal()
+        !Self::gates_overall_pass() || (!self.any_frozen() && !self.any_self_heal())
     }
 }
 
