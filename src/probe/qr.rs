@@ -1730,6 +1730,80 @@ mod tests {
         );
     }
 
+    /// #1280 RED→GREEN vehicle — DETERMINISTIC despite the phenomenon being random per CI run.
+    /// The painter's dual-QR + aux canvas carries FOUR crisp QR codes: two 700px primary Vernier
+    /// halves (`y in [24,724]`) plus the two 210px aux marks co-located ~4px apart in the right
+    /// gap (`y in [745,955]`, issue 1270). rqrr 0.9.3's greedy full-frame `detect_grids` (capstone
+    /// grouping + the 251-entry region cache) intermittently drops exactly ONE of the four for an
+    /// unlucky primary mask, so the UNCONDITIONAL plain pass (`decode_qr_luma_all`) that the three
+    /// painter tests used misses a code nondeterministically across CI runs — the #1280 flake
+    /// (`settled_left_half_payload_is_byte_identical_across_the_next_tick` panicked
+    /// "run_id 7 frame_id 2 not found").
+    ///
+    /// This renders 64 canvases with FIXED, diverse primary `gen_ts_ns` seeds (NOT
+    /// `Instant::now()`), so pass/fail is a deterministic function of the pixels then the rqrr
+    /// pipeline — the test is never itself flaky. Exact painter composition (`render_qr_dual_bgra`
+    /// then `blit_aux_tick_bgra`), tick-2 ids (left fresh frame_id 2, right settled frame_id 1).
+    /// RED: pinned to `decode_qr_luma_all` (plain) so at least one fixed seed reproduces the miss
+    /// and this FAILS on CI. GREEN (next commit) switches the decode to
+    /// `decode_qr_luma_all_robust_optical` (plain then bottom-tiles then top-band). RED cannot be
+    /// observed locally (probe-gated, Tier-0 #557 — CI is the first compile); the commit order is
+    /// preserved by construction.
+    #[test]
+    fn dual_qr_plus_aux_four_code_canvas_decodes_all_four_across_masks_1280() {
+        let (w, h, qr) = (1920u32, 1080u32, 700u32);
+        let run_id = 7u32;
+        let aux = crate::probe::recording_latency::AUX_TICK_RUN_ID;
+        for seed in 0..64u64 {
+            // Distinct, diverse primary payloads per seed give distinct QR content (the per-run
+            // `gen_ts_ns` variation the real flake rides). The aux marks are constant (gen_ts 0),
+            // exactly as the painter bakes them.
+            let gen_left = 4_096_i64 + seed as i64 * 1_000_003;
+            let gen_right = 8_192_i64 + seed as i64 * 999_983;
+            let left = Payload {
+                run_id,
+                frame_id: 2,
+                gen_ts_ns: gen_left,
+            };
+            let right = Payload {
+                run_id,
+                frame_id: 1,
+                gen_ts_ns: gen_right,
+            };
+            let aux_left = Payload {
+                run_id: aux,
+                frame_id: 2,
+                gen_ts_ns: 0,
+            };
+            let aux_right = Payload {
+                run_id: aux,
+                frame_id: 1,
+                gen_ts_ns: 0,
+            };
+
+            let mut canvas = render_qr_dual_bgra(&left, &right, w, h, qr);
+            blit_aux_tick_bgra(&mut canvas, w, h, qr, TOP_MARGIN_PX, &aux_left, &aux_right);
+            let luma = bgra_to_luma(&canvas, w, h, w * 4);
+
+            // #1280 RED: pinned to the PLAIN pass — a fixed seed reproduces the drop.
+            let got = decode_qr_luma_all(luma);
+            for want in [&left, &right, &aux_left, &aux_right] {
+                assert!(
+                    got.iter()
+                        .any(|p| p.run_id == want.run_id && p.frame_id == want.frame_id),
+                    "seed {seed}: (run_id {}, frame_id {}) missing from the 4-code canvas — \
+                     decoded {} payloads: {:?}",
+                    want.run_id,
+                    want.frame_id,
+                    got.len(),
+                    got.iter()
+                        .map(|p| (p.run_id, p.frame_id))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
     // ---- #367 colour-reference scale blit ----
 
     #[test]
