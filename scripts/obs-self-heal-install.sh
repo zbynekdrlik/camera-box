@@ -103,32 +103,48 @@ build_recovery_script() {
   kill_relaunch_program="$(build_launch_program "$obs_dir" "1" "$launch_has_ahk")"
 
   # AHK auto-respawn only exists on strih (.claude/skills/obs-ops "AHK on strih") — stream has no
-  # second watcher to race, so its Stop/RestartAhk steps are documented no-ops, never a guess at a
-  # script path that doesn't exist there.
-  local ahk_stop_block ahk_start_block
+  # second watcher to race.
+  #
+  # issue 1273 — SINGLE OWNER of the AutoHotkey64 stop/restart bracket. The embedded launch program
+  # ($kill_relaunch_program, built with has_ahk=1 on strih) already owns the WHOLE bracket: it stops
+  # AutoHotkey64 BEFORE killing obs64 (its own --force kill_block prepends the stop, so it covers the
+  # wedge-kill race), restarts + VERIFIES it AFTER the launch+audio-verify sequence, then runs its own
+  # #978 session-visibility gate. So the outer self-heal script must NOT ALSO pre-stop AHK: that ran
+  # in a SEPARATE `powershell.exe -File` child process, so the embedded program's own $ahkStopped
+  # always started fresh $false — it found AHK already stopped, never set $ahkStopped=$true, so its
+  # own restart-gate never fired and its #978 gate then found 0 AutoHotkey64 and exit-8'd, forcing
+  # $relaunchExit != 0 and misreporting verified=False on an otherwise-clean recovery (a diagnostics
+  # false-negative). The ONLY outer AHK action left is a FAILURE-PATH backstop: if the embedded
+  # program exited non-zero it may have aborted BEFORE its own restart point (an audio-buffering
+  # exit 7, or the #786-relaunch exit 6, both sit before it), so — and only then — if AutoHotkey64
+  # is genuinely down, best-effort relaunch it so a wedged box never ends with NO respawn watcher.
+  # Idempotent AHK-present: never double-launches what the embedded program already restored on a
+  # clean recovery. stream (has_ahk=0) has no watcher, so its backstop is a documented no-op.
+  local ahk_backstop_block
   if [ "$box" = "strih" ]; then
-    ahk_stop_block=$(cat <<'PS1'
-Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
-Write-SelfHealLog "StopAhk: AutoHotkey64 stopped (or was not running) — obs64 is now safe to touch"
-PS1
-)
     local ahk_relaunch_ps
     ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
-    # #867: log an explicit FATAL line when the relaunch is not verified, never a blind success
-    # claim — this recovery pass otherwise keeps running (a scheduled task retries ~every 2 min
-    # regardless), so this is log-only, not a hard exit.
-    ahk_start_block=$(cat <<PS1
+    # #867: the backstop restart is VERIFIED ($ahkRelaunchVerified) and logs an explicit FATAL line
+    # when it does not come back — never a blind success claim. It is log-only, not a hard exit (a
+    # scheduled task retries ~every 2 min regardless).
+    ahk_backstop_block=$(cat <<PS1
+if (\$relaunchExit -ne 0) {
+  if (-not (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)) {
+    Write-SelfHealLog "RestartAhk backstop: embedded launch program exited \$relaunchExit and AutoHotkey64 is down -- best-effort relaunch so strih keeps a respawn watcher"
 ${ahk_relaunch_ps}
-if (\$ahkRelaunchVerified) {
-  Write-SelfHealLog "RestartAhk: AutoHotkey64 relaunched via \$ahkRelaunchTarget (crash/reboot auto-respawn restored)"
-} else {
-  Write-SelfHealLog "FATAL: RestartAhk failed -- AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher until this is fixed"
+    if (\$ahkRelaunchVerified) {
+      Write-SelfHealLog "RestartAhk backstop: AutoHotkey64 relaunched via \$ahkRelaunchTarget (crash/reboot auto-respawn restored)"
+    } else {
+      Write-SelfHealLog "FATAL: RestartAhk backstop failed -- AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher until this is fixed"
+    }
+  } else {
+    Write-SelfHealLog "RestartAhk backstop: embedded launch program exited \$relaunchExit but AutoHotkey64 is already running -- no action (embedded program restored it)"
+  }
 }
 PS1
 )
   else
-    ahk_stop_block='Write-SelfHealLog "StopAhk: no-op ('"$box"' has no AutoHotkey64 auto-respawn watcher)"'
-    ahk_start_block='Write-SelfHealLog "RestartAhk: no-op ('"$box"' has no AutoHotkey64 auto-respawn watcher)"'
+    ahk_backstop_block='Write-SelfHealLog "RestartAhk backstop: no-op ('"$box"' has no AutoHotkey64 auto-respawn watcher)"'
   fi
 
   cat <<PS
@@ -338,12 +354,15 @@ switch (\$decision.decision) {
     # branching exactly. The ORIGINAL #411 process-wedge plan (KillAndRelaunchObs present) is
     # checked FIRST so its step sequence/log text below is completely untouched by this change.
     if (\$decision.steps -contains 'KillAndRelaunchObs') {
-    Write-SelfHealLog "RECOVER: obs-self-heal-gate.exe says ACT — starting the 4-step recovery plan (\$(\$decision.steps -join ' -> '))"
+    Write-SelfHealLog "RECOVER: obs-self-heal-gate.exe says ACT — running the recovery plan (\$(\$decision.steps -join ' -> ')). The embedded launch-obs-genlock program OWNS the AutoHotkey64 stop/restart bracket (issue 1273); the outer script only backstops AHK on a failure exit."
 
-    # --- Step 1/4: StopAhk — MUST run before obs64 is ever touched (the AHK-race fix, #411) ---
-${ahk_stop_block}
-
-    # --- Step 2/4: KillAndRelaunchObs — the SAME launch-obs-genlock.sh program, --force ---
+    # --- KillAndRelaunchObs — the SAME launch-obs-genlock.sh program, --force. Built with has_ahk=1
+    # ---   on strih, so it OWNS the whole AutoHotkey64 bracket: it stops AHK BEFORE killing obs64
+    # ---   (its own --force kill covers the wedge-kill race), restarts + verifies it AFTER the
+    # ---   launch, then runs its own #978 session gate. The outer script must NOT pre-stop AHK —
+    # ---   that ran in a SEPARATE child process, leaving this embedded program's own \$ahkStopped
+    # ---   false, so its restart never fired and its session gate exit-8'd on a clean recovery,
+    # ---   force-falsing \$verified below (issue 1273). ---
     \$tmpPs1 = Join-Path \$env:TEMP "camera-box-self-heal-relaunch-\$PID.ps1"
     @'
 ${kill_relaunch_program}
@@ -353,16 +372,21 @@ ${kill_relaunch_program}
     Remove-Item \$tmpPs1 -ErrorAction SilentlyContinue
     Write-SelfHealLog "KillAndRelaunchObs: launch-obs-genlock program exited \$relaunchExit"
 
-    # --- Step 3/4: VerifyRecovered — exactly one obs64 AND the launch program's own log-verify ---
-    # ---            passed (obs_self_heal::recovery_verified — the SAME rule both sides check) ---
+    # --- VerifyRecovered — exactly one obs64 AND the launch program's own log-verify passed
+    # ---   (obs_self_heal::recovery_verified — the SAME rule both sides check). With the AHK bracket
+    # ---   now owned by the embedded program, a clean recovery exits 0, so \$verified is HONEST — no
+    # ---   longer force-false by a nested-process AutoHotkey64 session-gate exit 8 (issue 1273). ---
     Start-Sleep -Seconds 2
     \$postCount = @(Get-Process obs64 -ErrorAction SilentlyContinue).Count
     \$verified  = (\$postCount -eq 1) -and (\$relaunchExit -eq 0)
     Write-SelfHealLog "VerifyRecovered: obs64_count=\$postCount relaunchExit=\$relaunchExit -> verified=\$verified"
 
-    # --- Step 4/4: RestartAhk — ALWAYS runs, regardless of \$verified (obs_self_heal.rs doc: ---
-    # ---           AHK's crash-respawn duty is more valuable always-on than conditional)      ---
-${ahk_start_block}
+    # --- RestartAhk backstop — FAILURE PATH ONLY. On a clean recovery the embedded program already
+    # ---   restarted + verified AutoHotkey64 (regardless of obs64's own render-verify, so AHK is
+    # ---   NEVER withheld on a false \$verified). Only if the embedded program exited non-zero (it
+    # ---   may have aborted before its own restart point) AND AHK is genuinely down does the outer
+    # ---   script best-effort relaunch it — idempotent, never double-launching (issue 1273). ---
+${ahk_backstop_block}
 
     \$state.recovery_in_progress = \$false
     Save-SelfHealState \$state
