@@ -122,26 +122,40 @@ fn recording_e2e_no_longer_carries_the_inline_stray_loop_1271() {
 //    cannot run a sourced-bash-lib test locally (see .claude/rules/ci-testing-gotchas.md #1265).
 // ---------------------------------------------------------------------------
 
-/// Write a fake obs_phase2.py into `dir` whose record/stream status is driven by env vars:
-///   FAKE_ACTIVE_HOST — the --host value that should report active
-///   FAKE_ACTIVE_KIND — "record" | "stream"
-///   FAKE_STREAM_DETAIL — the line `stream-detail` prints (defaults to a redacted sample)
+/// Write a fake obs_phase2.py into `dir`. The lib REUSES the shared `rig-busy-check` (the same
+/// REAL-broadcast definition rig-busy-gate.sh uses) + `stream-detail`, so the fake answers those two
+/// actions, driven by env vars:
+///   FAKE_BUSY          — "idle" | "recording" | "streaming" (shapes the rig-busy-check JSON)
+///   FAKE_STREAM_DETAIL — the line `stream-detail` prints (an already-redacted, key-free sample)
 fn write_fake_obs(dir: &PathBuf) {
     let fake = r#"#!/usr/bin/env python3
-import sys, os
+import sys, os, json
 args = sys.argv[1:]
-host = ""
-for i, a in enumerate(args):
-    if a == "--host" and i + 1 < len(args):
-        host = args[i + 1]
-active_host = os.environ.get("FAKE_ACTIVE_HOST", "")
-kind = os.environ.get("FAKE_ACTIVE_KIND", "")
-if "record" in args and "status" in args:
-    on = host == active_host and kind == "record"
-    print("active=%s path=" % ("True" if on else "False"))
-elif "stream-status" in args:
-    on = host == active_host and kind == "stream"
-    print("active=%s path=" % ("True" if on else "False"))
+if "rig-busy-check" in args:
+    mode = os.environ.get("FAKE_BUSY", "idle")
+    if mode == "recording":
+        print(json.dumps({
+            "busy": True,
+            "reasons": ["strih is recording (GetRecordStatus.outputActive=true, outputTimecode=00:05:00)"],
+            "diagnostics": [
+                {"host": "strih", "streaming": False, "recording": True, "recordTimecode": "00:05:00"},
+                {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None}],
+            "hint": "strih: our own stray recording (recording ON, streaming OFF)"}))
+    elif mode == "streaming":
+        print(json.dumps({
+            "busy": True,
+            "reasons": ["stream is streaming (GetStreamStatus.outputActive=true)"],
+            "diagnostics": [
+                {"host": "strih", "streaming": False, "recording": False, "recordTimecode": None},
+                {"host": "stream", "streaming": True, "recording": True, "recordTimecode": "00:12:34"}],
+            "hint": "stream: REAL broadcast (streaming+recording)"}))
+    else:
+        print(json.dumps({
+            "busy": False,
+            "reasons": [],
+            "diagnostics": [
+                {"host": "strih", "streaming": False, "recording": False, "recordTimecode": None},
+                {"host": "stream", "streaming": False, "recording": False, "recordTimecode": None}]}))
 elif "stream-detail" in args:
     print(os.environ.get("FAKE_STREAM_DETAIL",
           "active=True server=rtmp://127.0.0.1:1234/live duration_ms=754123 timecode=00:12:34"))
@@ -195,19 +209,16 @@ fn stray_check_passes_when_strih_and_stream_are_idle_1271() {
 fn stray_check_aborts_on_an_active_recording_1271() {
     let d = scratch("rec");
     write_fake_obs(&d);
-    let (ok, err) = run_check(
-        &d,
-        "10.0.0.2",
-        "10.0.0.4",
-        &[
-            ("FAKE_ACTIVE_HOST", "10.0.0.2"),
-            ("FAKE_ACTIVE_KIND", "record"),
-        ],
-    );
+    let (ok, err) = run_check(&d, "10.0.0.2", "10.0.0.4", &[("FAKE_BUSY", "recording")]);
     assert!(!ok, "issue 1271: an active recording must ABORT (exit 1)");
     assert!(
-        err.contains("ALREADY recording") && err.contains("strih"),
-        "issue 1271: the recording refusal must name the box + say ALREADY recording. stderr:\n{err}"
+        err.contains("ALREADY recording/streaming"),
+        "issue 1271: the refusal must say the rig is ALREADY recording/streaming. stderr:\n{err}"
+    );
+    assert!(
+        err.contains("recording") && err.contains("strih"),
+        "issue 1271: the refusal must surface the shared rig-busy-check reason/hint naming the \
+         recording box (strih). stderr:\n{err}"
     );
 }
 
@@ -220,8 +231,7 @@ fn stray_check_aborts_on_active_stream_and_names_what_is_streaming_without_a_key
         "10.0.0.2",
         "10.0.0.4",
         &[
-            ("FAKE_ACTIVE_HOST", "10.0.0.4"),
-            ("FAKE_ACTIVE_KIND", "stream"),
+            ("FAKE_BUSY", "streaming"),
             (
                 "FAKE_STREAM_DETAIL",
                 "active=True server=rtmp://127.0.0.1:1234/live duration_ms=754123 timecode=00:12:34",
@@ -230,15 +240,16 @@ fn stray_check_aborts_on_active_stream_and_names_what_is_streaming_without_a_key
     );
     assert!(!ok, "issue 1271: an active stream must ABORT (exit 1)");
     assert!(
-        err.contains("ALREADY streaming") && err.contains("stream"),
-        "issue 1271: the streaming refusal must name the box + say ALREADY streaming. stderr:\n{err}"
+        err.contains("ALREADY recording/streaming"),
+        "issue 1271: the refusal must say the rig is ALREADY recording/streaming. stderr:\n{err}"
     );
     assert!(
         err.contains("server=rtmp://127.0.0.1:1234/live") && err.contains("duration_ms=754123"),
         "issue 1271: on a streaming refusal the log must show WHAT is streaming — the ingest server \
          url + GetStreamStatus.outputDuration (so a LIVE production broadcast is obvious). stderr:\n{err}"
     );
-    // A stream KEY must NEVER leak, even partially — the detail read redacts it upstream.
+    // A stream KEY must NEVER leak, even partially — the real stream-detail redacts it upstream
+    // (covered directly in tests/python/test_obs_phase2_stream_detail_1271.py::redact_*).
     assert!(
         !err.contains("SUPERSECRETKEY"),
         "issue 1271: the stream key must never appear in the refusal. stderr:\n{err}"
