@@ -2589,7 +2589,7 @@ mod vendored_source {
         let disp = squish(&vendor_file(OBS_DISPLAY));
         assert!(
             disp.contains(
-                "\"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u\""
+                "\"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f\""
             ),
             "{OBS_DISPLAY}: #771 — the multiview-audit blog line is gone; the multiview render fps \
              is no longer visible in the OBS log."
