@@ -273,6 +273,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/camera-box-parity-align.sh"
 # shellcheck source=scripts/lib/frame-probe-parity-align.sh
 . "$HERE/lib/frame-probe-parity-align.sh"   # #1138: pre-gate auto-align of cam2's steady-state painter to the candidate
+# issue 1271: the READ-ONLY stray recording/streaming preflight, extracted so it can run as the
+# FIRST [0/8] step (right after reachability), BEFORE the two fleet MUTATIONS above (cambox +
+# frame-probe parity auto-align). It reuses the SAME shared rig-busy state read (obs_phase2.py) that
+# scripts/rig-busy-gate.sh runs at job start — the one REAL-broadcast definition — never a
+# duplicated per-box loop. See scripts/lib/stray-session-check.sh for the actual call.
+# shellcheck source=scripts/lib/stray-session-check.sh
+. "$HERE/lib/stray-session-check.sh"
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -715,6 +722,15 @@ for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "st
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then echo "    ok: $_name ($_ip)"; else
     echo "ERROR: $_name ($_ip) UNREACHABLE from dev1 — fix route/host, then re-run." >&2; exit 1; fi
 done
+
+# issue 1271: READ-ONLY stray recording/streaming check — the FIRST [0/8] step after reachability,
+# BEFORE any rig mutation (the cambox/frame-probe parity auto-align further below). Bare statement
+# (never $()/pipeline) so its `exit 1` propagates to the harness (same discipline as the #860
+# optical preflight below). Reuses the SAME shared rig-busy state read the job-start
+# scripts/rig-busy-gate.sh uses (the one REAL-broadcast definition) and, on refusal, names WHAT is
+# streaming (ingest server url + GetStreamStatus.outputDuration, key-free). See
+# scripts/lib/stray-session-check.sh.
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM"
 
 # #860: optical-injection-leg fail-fast. A STANDING cam2 painter (rig-mode.sh test's
 # /run/rig-painter.pid, or the permanent cam2-painter.service) that a previous run's cleanup left
@@ -1270,7 +1286,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # clear it itself, the same idempotent `obs_burn_filter.py remove` the #844/#878 startup
   # self-heal above already trusts. NORMALIZE, don't abort -- strih/stream must still not already
   # be recording/streaming below (a stray session this harness cannot safely take over itself).
-  echo "[0/8] OBS pre-run state — normalizing genlock_burn OFF on every strih NDI input (#924), no stray recording/streaming (#758)"
+  echo "[0/8] OBS pre-run state — normalizing genlock_burn OFF on every strih NDI input (#924); the stray recording/streaming check (#758) now runs earlier, before any rig mutation (#1271)"
   # #827 follow-up: derive the checked camera list from CAMERA_ACTIVE_SET (camera-set.sh) minus
   # any acked-offline box -- never a literal 1..7 range (a retired camera must never be checked
   # here, regardless of what its strih OBS input still looks like).
@@ -1294,24 +1310,12 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_nsip" 2>&1 \
       | sed "s/^/    [normalize sweep] /" || true
   done
-  for _pfhs in "strih=$STRIH" "stream=$STREAM"; do
-    _pfhbox="${_pfhs%%=*}"
-    _pfhip="${_pfhs#*=}"
-    _pfrec="$(python3 "$HERE/obs_phase2.py" record --action status --host "$_pfhip" 2>/dev/null || true)"
-    case "$_pfrec" in
-      *active=True*)
-        echo "ERROR: [preflight] FAIL: ${_pfhbox}: OBS is ALREADY recording (a stray session from an aborted prior run) — stop it before starting: ${_pfrec}" >&2
-        exit 1
-        ;;
-    esac
-    _pfstream="$(python3 "$HERE/obs_phase2.py" stream-status --host "$_pfhip" 2>/dev/null || true)"
-    case "$_pfstream" in
-      *active=True*)
-        echo "ERROR: [preflight] FAIL: ${_pfhbox}: OBS is ALREADY streaming (a stray session from an aborted prior run) — stop it before starting: ${_pfstream}" >&2
-        exit 1
-        ;;
-    esac
-  done
+  # issue 1271: the read-only stray recording/streaming check that USED to live here now runs as the
+  # FIRST [0/8] step (stray_session_check_assert, right after the reachability preflight), BEFORE the
+  # cambox/frame-probe parity auto-align mutations — a broadcast that started after the job-start
+  # rig-busy-gate.sh must be caught before the fleet is touched, not after. See
+  # scripts/lib/stray-session-check.sh. The genlock_burn OFF normalization above stays here (it is a
+  # strih OBS mutation the harness is entitled to make on its own default TEST-mode rig).
 
   # #882: distinguish process-absent / port-not-listening BEFORE ever attempting to open the
   # projectors. The 2026-07-30 outage left every subsequent preflight failure reading a WRONG

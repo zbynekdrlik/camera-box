@@ -2178,6 +2178,46 @@ def stream_status(a):
         ws.close()
 
 
+def redact_stream_server(server, key):
+    """issue 1271: return the ingest SERVER url with any occurrence of the stream KEY removed, so a
+    stray/production-broadcast refusal log can name WHERE a stream is going without EVER leaking the
+    secret key -- even if a service embeds the key in the server url. OBS's rtmp_custom/rtmp_common
+    services keep server + key as SEPARATE fields, so the common case is a key-free server that
+    passes through verbatim; this is a defensive redaction for the embedded-key case."""
+    server = server or ""
+    key = key or ""
+    if key and key in server:
+        server = server.replace(key, "<redacted-key>")
+    return server
+
+
+def stream_detail(a):
+    """issue 1271 refusal detail (read-only): when the reordered `[0/8]` stray-session check
+    (scripts/lib/stray-session-check.sh) finds a stray/production stream on strih/stream, this names
+    WHAT is streaming -- the ingest SERVER url (with any stream KEY defensively redacted, NEVER
+    printed even partially) + the current GetStreamStatus.outputDuration (ms) -- so a LIVE
+    production broadcast is obvious straight from the log. Separate, ADDITIVE action: it does NOT
+    touch stream_status (whose exact `active=<bool> path=` output the EVENT-contract tests pin and
+    rig-mode.sh/event_assert.py/avsync-lineup-alert-watchdog.sh consume). Never starts/stops
+    anything -- pure read (GetStreamStatus + GetStreamServiceSettings)."""
+    ws = _conn(a.host, a.password)
+    try:
+        st = _rpc(ws, "GetStreamStatus")
+        active = st.get("outputActive", False)
+        dur = st.get("outputDuration", 0)
+        tc = st.get("outputTimecode", "")
+        server = ""
+        try:
+            svc = _rpc(ws, "GetStreamServiceSettings")
+            settings = svc.get("streamServiceSettings", {}) or {}
+            server = redact_stream_server(settings.get("server", ""), settings.get("key", ""))
+        except Exception:  # noqa: BLE001 - best-effort detail; the refusal fires regardless
+            server = ""
+        print(f"active={active} server={server} duration_ms={dur} timecode={tc}")
+    finally:
+        ws.close()
+
+
 def latency_check(a):
     """#722 EVENT-mode CONTRACT item 6: is *a.source*'s `genlock_latency_ms_src` (on *a.host*)
     equal to the CALIBRATED value from av-sync-last.json (the #691 stomp-protection prod source
@@ -2880,7 +2920,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
-        "stream-status", "latency-check", "open-projectors", "open-multiview",
+        "stream-status", "stream-detail", "latency-check", "open-projectors", "open-multiview",
         "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
         "republish-black-check", "idle-receiver", "apply-measurement-pins",
@@ -3029,7 +3069,8 @@ def main():
     {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
-     "stream-status": stream_status, "latency-check": latency_check,
+     "stream-status": stream_status, "stream-detail": stream_detail,
+     "latency-check": latency_check,
      "open-projectors": open_projectors,
      "open-multiview": open_multiview,
      "ensure-studio-mode-on": ensure_studio_mode_on,

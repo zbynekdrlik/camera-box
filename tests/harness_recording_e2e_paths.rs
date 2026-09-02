@@ -406,9 +406,12 @@ fn recording_e2e_burn_off_preflight_normalizes_instead_of_aborting_924() {
         .find("[0/8] OBS pre-run state")
         .expect("recording-e2e.sh must have the [0/8] OBS pre-run state preflight banner");
     let end = s[start..]
-        .find("for _pfhs in \"strih=$STRIH\"")
+        .find("# #882: distinguish process-absent")
         .map(|i| start + i)
-        .expect("expected the stray recording/streaming check to follow the burn-normalize loop");
+        .expect(
+            "expected the #882 process-absent step to follow the burn-normalize loop (the stray \
+             recording/streaming check moved to the FIRST [0/8] step, before any mutation — issue 1271)",
+        );
     let region = &s[start..end];
     assert!(
         region.contains("obs_burn_filter.py") && region.contains("remove"),
