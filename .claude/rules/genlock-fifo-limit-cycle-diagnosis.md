@@ -108,3 +108,28 @@ is futile and gating it off is the fix, not widening its threshold.**
 `holds` climbing in lockstep (one pair per ~throttle interval) with `dropped_due` pairing them,
 `relocks=0`, `depth` stable, and `ts_head_skew_ms` CONSTANT and ABOVE `latency_ms` — the shed is
 fighting a stable natural hold it cannot move.
+
+## The deep-latency release-phase QUANTUM (#1003) is STRUCTURAL — do NOT re-attempt the "grid pin"
+
+`#1003`'s title asks to "pin the release to an absolute wall-clock frame grid" to remove the
+±1–2-frame cross-camera A/V spread. That mechanism is REFUTED and already present — do not build it
+(re-dispatched 5+ times, each concluding the same; supervisor decision 2026-08-19 "Stage-2
+vendored-C grid-pin sa NEPÍŠE"). The grid pin ITSELF is `phase_pinned_deadline` (#940, floors the
+reserve deadline to the receiver grid); it did not remove the residual, and no receiver-side change
+can:
+
+- The release cadence is a WHOLE-FRAME conveyor: it moves a source's on-air age `S` only in
+  `interval/n` steps, so `S mod (interval/n)` is INVARIANT under every selection/shed — "pin the
+  phase to a grid" / "converge the phase modulo the source interval" names a quantity the cadence
+  physically cannot touch. After `should_converge_phase` the integer-frame part is already
+  deterministic (each camera settles in the one-source-frame band `(floor+5, floor+21.7]` above
+  its OWN floor), so the cross-camera residual is `Δskew` quantized to source frames (~33 ms = the
+  #1168 budget-bound residual, ANTI-correlated with the floor — low-floor cams carry the largest).
+- Equalizing needs a COMMON target ≥ max floor = ADDING latency (a frame can't present before it
+  arrives) = the owner-rejected production-pin promotion. The only lever is pin/config-layer, owned
+  by #1168's re-arm trail — never a receiver-side code change.
+
+Full reasoning lives in code, where a worker lands first: the extended "WHY the #940 grid pin was
+not enough" narrative block in `src/genlock_backlog.rs` (MECHANISM half) + the
+`AV_OFFSET_GATE_TOLERANCE_MS` doc in `src/av_window.rs` (GATE half, why the A/V tolerance stays ±90,
+not ±20).
