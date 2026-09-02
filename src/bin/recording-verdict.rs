@@ -5863,19 +5863,21 @@ fn build_and_print_verdict_with_stream_diffs(
                         ev.at_ns
                     );
                 }
-                // #914 (2026-08-01, user decision -- mirrors issue 889's report-only pattern and
-                // issue 861's caller-only decoupling): frozen_leg/self_heal_reset no longer gate
-                // `overall_pass` while cam1's ShadowCast 2 grabber defect (issue 909) remains
-                // physically unresolved -- restore path on issue 905 (flip
-                // `SelfHealAttributionReport::overall_pass_contribution` back to
-                // `!any_frozen() && !any_self_heal()` once cam1 is physically replaced and a
-                // stable week passes with no self-heal escalations). `gates_overall_pass` below
-                // mirrors the exact field name/shape `all_cambox_av_sync` already established for
-                // issue 861 -- an unambiguous machine-readable flag alongside the still-fully-
-                // computed frozen/self-heal findings.
-                let frozen_self_heal_gate_note = "report-only -- does NOT gate overall_pass, \
-                     pending cam1 hardware fix (see issue #914 for the decision record and issue \
-                     #905 for the restore path)";
+                // issue 905 item 2 (2026-09-02): frozen_leg/self_heal_reset RESTORED to blocking.
+                // issue 914 (2026-08-01) had decoupled them from `overall_pass` (the issue-889
+                // report-only pattern / issue-861 caller-only decoupling) while cam1's ShadowCast 2
+                // grabber defect (issue 909) was physically unresolved and tripping frozen_leg on
+                // otherwise-healthy runs. That restore precondition is now met: three consecutive
+                // green Full-path E2E runs (.611/.612/.613) showed a genuinely empty
+                // frozen_leg.frozen AND a clean self_heal_reset (both attributed and
+                // unattributed_events empty), so `SelfHealAttributionReport::overall_pass_contribution`
+                // was flipped back to `!any_frozen() && !any_self_heal()` (the `all_pass &=` fold
+                // below), and the `gates_overall_pass` machine-readable flags here now honestly read
+                // `true` to match -- the issue-861 `all_cambox_av_sync` re-arm shape. The findings
+                // themselves are still fully computed, printed, and JSON-reported either way.
+                let frozen_self_heal_gate_note = "blocking -- a genuinely frozen leg or a \
+                     self-heal reset event fails overall_pass (issue 905 item 2 restored blocking; \
+                     issue 914 had decoupled it while cam1's grabber, issue 909, was unresolved)";
                 report["frozen_leg"] = serde_json::json!({
                     "frozen": leg_report.frozen.iter().map(|f| serde_json::json!({
                         "cambox": f.cambox,
@@ -5913,25 +5915,26 @@ fn build_and_print_verdict_with_stream_diffs(
                     })).collect::<Vec<_>>(),
                 });
                 if let Some(obj) = report["frozen_leg"].as_object_mut() {
-                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(true));
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(frozen_self_heal_gate_note),
                     );
                 }
                 if let Some(obj) = report["self_heal_reset"].as_object_mut() {
-                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(true));
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(frozen_self_heal_gate_note),
                     );
                 }
-                // #914 visibility requirement (mirrors issue 889 requirement 3): prints
+                // issue-889-requirement-3 visibility requirement (kept from issue 914): prints
                 // UNCONDITIONALLY, whether or not anything fired, so silence is never mistaken
-                // for strictness.
+                // for strictness. issue 905 item 2 restored these to blocking, so the line no
+                // longer claims report-only.
                 println!(
-                    "  >>> #914 REPORT-ONLY: frozen_leg={} self_heal_reset={} \
-                     unattributed_events={} -- {frozen_self_heal_gate_note}",
+                    "  >>> #905 BLOCKING (frozen_leg/self_heal_reset): frozen_leg={} \
+                     self_heal_reset={} unattributed_events={} -- {frozen_self_heal_gate_note}",
                     leg_report.frozen.len(),
                     leg_report.self_heal.len(),
                     leg_report.unattributed_events.len()
