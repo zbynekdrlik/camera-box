@@ -542,6 +542,60 @@ pub fn signal_operable(stats: &[TearStats]) -> bool {
     covered / total as f64 >= AUX_ANY_OPERABLE_FLOOR
 }
 
+/// issue 1144 (#887 fold) -- a REPORT-ONLY summary of the PROJECTION (CAM2) leg's tear verdict, so
+/// the imag content facet can carry the answer to issue 887 ("imag zero-loss proof stops at OBS's
+/// compositor -- nothing verifies what leaves HDMI-1 to the projector"). cam2's grabber is fed by
+/// imag-nb's HDMI output, so the CAM2 sweep leg IS the physical projection path (imag render -> DRM
+/// scanout -> HDMI -> grabber), and the tear detector is already LIVE + BLOCKING on it via
+/// [`gates_overall_pass`] / [`run_tear_gate_pass`]. So issue 887's DETECTION gap is ALREADY closed
+/// by that gate; this cross-reference only makes the HDMI-1 proof answerable FROM the imag facet and
+/// the flip-time precondition ([`ProjectionProof::hdmi1_proof_backed`]) machine-checkable. It gates
+/// nothing.
+///
+/// SCOPE: `hdmi1_proof_backed` proves the SCANOUT-coherence (tear) signal was LIVE and CLEAN on the
+/// projection leg. The CAM2 leg's own frame CONTINUITY (copies/gaps) is a SEPARATE signal, already
+/// BLOCKING via the stream per-cambox sweep (`all_cambox_continuity.segments[cam2]`); the later flip
+/// should additionally require that. The cam2 <- imag-nb HDMI cabling is a runtime-unverifiable
+/// premise (a re-cable would silently make the flag a lie), surfaced as an explicit note by the
+/// caller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectionProof {
+    /// CAM2 (projection-leg) tear windows analyzed this run.
+    pub windows: usize,
+    /// Fraction of CAM2 windows on which the tear signal was DEMONSTRABLY live
+    /// ([`TearSignalViability::Observed`]) -- carried so the flip can require a higher-than-"any" bar.
+    pub observed_fraction: f64,
+    /// True iff EVERY CAM2 window passes the tear gate ([`tear_gate_pass`]) -- no Observed window
+    /// over the ceiling. Vacuously true for zero windows (guarded by `hdmi1_proof_backed`).
+    pub tear_gate_clean: bool,
+    /// The worst per-window `tear_fraction` across the CAM2 windows (0.0 for zero windows).
+    pub worst_tear_fraction: f64,
+    /// Frame-weighted >= 1-aux-mark coverage across the CAM2 windows -- the operability signal on the
+    /// projection leg (the aux single-mark cross-band is what actually catches a projection tear).
+    pub aux_any_coverage: f64,
+    /// The issue-887 answer: is the imag HDMI-1 projection SCANOUT proof BACKED this run? True iff at
+    /// least one CAM2 window proved the tear signal live (`observed_fraction > 0`) AND every CAM2
+    /// window is tear-clean. Report-only today; the flip should require this AND the separately-
+    /// blocking CAM2 frame-continuity.
+    pub hdmi1_proof_backed: bool,
+}
+
+/// issue 1144 (#887 fold) -- summarize the projection (CAM2) leg's tear windows into a
+/// [`ProjectionProof`]. Pure / Tier-0. See [`ProjectionProof`] for the scope + the report-only note.
+pub fn summarize_projection_leg(cam2_windows: &[&TearStats]) -> ProjectionProof {
+    // issue 1144 RED stub -- summarize not implemented; always returns not-backed / vacuous so
+    // the positive backed_when_observed_and_clean + not_backed_when_torn tests FAIL here.
+    let _ = cam2_windows;
+    ProjectionProof {
+        windows: 0,
+        observed_fraction: 0.0,
+        tear_gate_clean: true,
+        worst_tear_fraction: 0.0,
+        aux_any_coverage: 0.0,
+        hdmi1_proof_backed: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,6 +1146,91 @@ mod tests {
         assert!(
             !signal_operable(std::slice::from_ref(&blind)),
             "zero aux coverage must read NON-operable (the issue-1101 blind-signal trap surfaced)"
+        );
+    }
+
+    // issue 1144 (#887 fold) -- summarize_projection_leg tests.
+
+    fn proj_win(
+        viability: TearSignalViability,
+        tear_fraction: f64,
+        tear_frames: u32,
+        aux_any: f64,
+        total_frames: u32,
+    ) -> TearStats {
+        TearStats {
+            total_frames,
+            decodable_frames: total_frames,
+            tear_frames,
+            tear_fraction,
+            max_spread: if tear_frames > 0 { 3 } else { 1 },
+            aux_decode_fraction: 0.0,
+            aux_any_decode_fraction: aux_any,
+            primary_dark_aux_alive_fraction: 0.0,
+            multi_path_suspect_frames: 0,
+            multi_path_suspect_fraction: 0.0,
+            max_cluster_count: 1,
+            max_multi_path_spread: 0,
+            viability,
+        }
+    }
+
+    #[test]
+    fn projection_leg_backed_when_observed_and_clean_1144() {
+        // A green CAM2 projection run: one window Observed + clean (tear_fraction below the ceiling),
+        // one Unproven (signal blind on that window). The HDMI-1 scanout proof IS backed.
+        let obs = proj_win(TearSignalViability::Observed, 0.003, 3, 0.98, 848);
+        let unp = proj_win(TearSignalViability::Unproven, 0.0, 0, 0.99, 847);
+        let p = summarize_projection_leg(&[&obs, &unp]);
+        assert_eq!(p.windows, 2);
+        assert_eq!(p.observed_fraction, 0.5);
+        assert!(p.tear_gate_clean);
+        assert!(
+            p.hdmi1_proof_backed,
+            "an Observed + clean projection window backs HDMI-1: {p:?}"
+        );
+        let expect_aux = (0.98 * 848.0 + 0.99 * 847.0) / (848.0 + 847.0);
+        assert!((p.aux_any_coverage - expect_aux).abs() < 1e-9);
+    }
+
+    #[test]
+    fn projection_leg_not_backed_when_all_unproven_1144() {
+        // No CAM2 window ever proved the tear signal live -> the HDMI-1 proof is NOT backed (a
+        // signal-blind run cannot claim the projection was verified) even though the tear gate is
+        // vacuously clean.
+        let a = proj_win(TearSignalViability::Unproven, 0.0, 0, 0.99, 847);
+        let b = proj_win(TearSignalViability::Unproven, 0.0, 0, 0.98, 848);
+        let p = summarize_projection_leg(&[&a, &b]);
+        assert_eq!(p.observed_fraction, 0.0);
+        assert!(p.tear_gate_clean);
+        assert!(
+            !p.hdmi1_proof_backed,
+            "an all-Unproven (blind) projection run is not backed: {p:?}"
+        );
+    }
+
+    #[test]
+    fn projection_leg_not_backed_when_torn_1144() {
+        // A real projection tear: Observed, tear_fraction over the ceiling, count over the floor,
+        // single-tile -> the tear gate fails and the HDMI-1 proof is NOT backed.
+        let torn = proj_win(TearSignalViability::Observed, 0.02, 20, 0.97, 849);
+        let p = summarize_projection_leg(&[&torn]);
+        assert!(
+            !p.tear_gate_clean,
+            "a torn CAM2 window fails the tear gate: {p:?}"
+        );
+        assert!(!p.hdmi1_proof_backed);
+        assert!((p.worst_tear_fraction - 0.02).abs() < 1e-9);
+    }
+
+    #[test]
+    fn projection_leg_empty_not_backed_1144() {
+        let p = summarize_projection_leg(&[]);
+        assert_eq!(p.windows, 0);
+        assert!(p.tear_gate_clean, "vacuously clean for zero windows");
+        assert!(
+            !p.hdmi1_proof_backed,
+            "no projection window analyzed -> not backed"
         );
     }
 }
