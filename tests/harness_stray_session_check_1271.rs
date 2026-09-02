@@ -17,7 +17,7 @@
 //!     outage with a readable busy box→abort, and a fully-unreadable rig→fail-OPEN (WARN + proceed).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn manifest_dir() -> PathBuf {
@@ -170,7 +170,7 @@ fn recording_e2e_no_longer_carries_the_inline_stray_loop_1271() {
 ///                 streaming (issue 1271 🟡4 — must still refuse)
 ///   unreachable — busy:null + exit 3, NO diagnostics (both unreachable) → fail-OPEN
 /// FAKE_STREAM_DETAIL is the (already key-free) line `stream-detail` prints.
-fn write_fake_obs(dir: &PathBuf) {
+fn write_fake_obs(dir: &Path) {
     let fake = r#"#!/usr/bin/env python3
 import sys, os, json
 args = sys.argv[1:]
@@ -227,7 +227,7 @@ fn scratch(name: &str) -> PathBuf {
 /// Source the lib under the caller's REAL `set -euo pipefail` (proves the bare-statement call is
 /// #1133-safe on the happy path AND aborts correctly), call stray_session_check_assert, and return
 /// (success, stderr). HERE points at `dir` so the lib's `python3 "$HERE/obs_phase2.py"` hits the fake.
-fn run_check(dir: &PathBuf, busy: &str) -> (bool, String) {
+fn run_check(dir: &Path, busy: &str) -> (bool, String) {
     let snippet = format!(
         "set -euo pipefail\n. \"{lib}\"\nstray_session_check_assert \"{here}\" 10.0.0.2 10.0.0.4 \"the test mutation\"\n",
         lib = lib_script().display(),
