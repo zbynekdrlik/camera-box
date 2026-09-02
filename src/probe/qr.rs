@@ -771,6 +771,69 @@ pub fn decode_qr_luma_all_robust(img: GrayImage) -> Vec<Payload> {
     out
 }
 
+/// #1280 — the MAXIMALLY robust still-frame decode for the painter's dual-QR + aux layout:
+/// [`decode_qr_luma_all_robust`] (plain full-frame ∪ Otsu ∪ the #202 bottom-band upscaled tiles)
+/// UNION the #754 top-band optical crop ([`robust_optical_top_band`]) UNION a per-HALF top-band
+/// crop ([`robust_optical_half_passes`]).
+///
+/// Root cause of the #1280 flake it recovers (traced in the rqrr-0.9.3 source, confirmed by an
+/// adversarial review of the crate): the plain full-frame pass wraps ALL of rqrr's `detect_grids`
+/// in ONE `catch_unwind` ([`rqrr_decode_all_catch`], #673), so a caught internal panic — the
+/// silenced `assert!(scan >= 1)` in `identify/grid.rs`, or the `Perspective::map` assert in
+/// `geometry.rs` — raised by a single bogus/near-degenerate capstone grouping empties the WHOLE
+/// pass, dropping every code at once (not "one of four"). On the crisp 4-code canvas the degenerate
+/// geometry comes from the two 210px aux marks co-located ~4px apart (issue 1270) and their
+/// interplay with the primary finders — small, adjacent codes are exactly the "pathologically small
+/// / near-degenerate" case #673 documents. It is per-run because the primary payloads bake a
+/// varying `gen_ts_ns` into the QR content.
+///
+/// Every recovery region runs UNCONDITIONALLY, so a dropped code is recovered from a region-isolated
+/// look where the degenerate grouping cannot form: each 700px primary from its OWN top-band HALF
+/// crop (a lone crisp code — no cross-code triple can form, and rqrr reads its fixed finder/timing/
+/// alignment patterns content-independently), the aux marks from their upscaled bottom-band tile
+/// (the 2× upscale enlarges the small modules past rqrr's degeneracy edge). The full-width top-band
+/// crop is a cheap extra look (it recovers BOTH primaries at once when the panic was aux-rooted).
+/// Each pass merges by `(run_id, frame_id)` ([`merge_payloads`]), so the result is a strict SUPERSET
+/// of the plain pass and a given `(run_id, frame_id)` always carries the SAME `gen_ts_ns` — byte
+/// identity is preserved. This composes the EXISTING production recovery passes the RECORDING decode
+/// already fires conditionally
+/// ([`decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`], which likewise protects the rig
+/// optical read from the same whole-pass panic); it exists for the synthetic multi-QR painter/qr
+/// tests, whose crisp 4-code canvas is the one decode with no other recovery (#1280). No production
+/// caller is changed.
+pub fn decode_qr_luma_all_robust_optical(img: GrayImage) -> Vec<Payload> {
+    let mut out = decode_qr_luma_all_robust(img.clone());
+    robust_optical_top_band(&img, &mut out);
+    robust_optical_half_passes(&img, &mut out);
+    out
+}
+
+/// #1280 — recover each dual-QR PRIMARY from its OWN top-band HALF crop. [`render_qr_dual_bgra`]
+/// centres the two halves in `[0, w/2)` and `[w/2, w)`; cropping ONE half of the top band
+/// ([`OPTICAL_TOP_BAND_FRAC`], which excludes the bottom aux marks entirely) leaves a SINGLE crisp
+/// primary. A lone finder triple can form no degenerate cross-code group, so the caught-panic /
+/// whole-pass-empty failure of the multi-code full-frame pass (see [`decode_qr_luma_all_robust_optical`])
+/// cannot reproduce, and rqrr decodes the primary from its fixed patterns content-independently.
+/// Each half's CRC-valid payloads merge into `out` (de-duped by `(run_id, frame_id)`), so `out` is
+/// always a SUPERSET of what it carried on entry — never fewer. (On the 2560-wide override canvas
+/// the width-scaled primary is taller than the top band, so a half crop bisects it and simply adds
+/// nothing; the full-frame pass covers that 2-code, aux-free geometry.)
+fn robust_optical_half_passes(img: &GrayImage, out: &mut Vec<Payload>) {
+    let (w, h) = (img.width(), img.height());
+    if w < 2 || h < 2 {
+        return;
+    }
+    let band_h = crate::colour_scale::top_band_crop_height(h, OPTICAL_TOP_BAND_FRAC);
+    let half = w / 2;
+    for (x0, wpart) in [(0u32, half), (half, w - half)] {
+        if wpart == 0 {
+            continue;
+        }
+        let crop = image::imageops::crop_imm(img, x0, 0, wpart, band_h).to_image();
+        merge_payloads(out, decode_qr_luma_all(crop));
+    }
+}
+
 /// The expensive part of the robust decode: the bottom-band tiled+upscaled rqrr passes that
 /// recover the small node burns the plain full-frame pass missed. Factored out of
 /// [`decode_qr_luma_all_robust`] so the #207 fast path can run it CONDITIONALLY (only when a
@@ -1728,6 +1791,88 @@ mod tests {
             decode_capture_dual(fourcc, &blanked, cw, ch, cw * 4, 620),
             Some(l)
         );
+    }
+
+    /// #1280 RED→GREEN vehicle. The painter's dual-QR + aux canvas carries FOUR crisp QR codes: two
+    /// 700px primary Vernier halves in the top band plus the two 210px aux marks co-located ~4px
+    /// apart in the right gap (`y in [745,955]`, issue 1270). The plain full-frame pass wraps ALL of
+    /// rqrr's `detect_grids` in one `catch_unwind` (`rqrr_decode_all_catch`, #673), so a caught
+    /// internal panic from a single near-degenerate capstone grouping (the adjacent small aux pair
+    /// is the "pathologically small" case #673 documents) EMPTIES the whole pass — so
+    /// `decode_qr_luma_all` misses a code nondeterministically across CI runs (the primary payloads
+    /// bake a varying `gen_ts_ns`), the #1280 flake
+    /// (`settled_left_half_payload_is_byte_identical_across_the_next_tick` panicked on its FIRST
+    /// decode, "run_id 7 frame_id 2 not found"). Full mechanism: `decode_qr_luma_all_robust_optical`.
+    ///
+    /// This renders canvases with FIXED, diverse primary `gen_ts_ns` seeds (NOT `Instant::now()`),
+    /// so pass/fail is a deterministic function of the pixels then the rqrr pipeline — the test is
+    /// never itself flaky. Exact painter composition (`render_qr_dual_bgra` then `blit_aux_tick_bgra`),
+    /// tick-2 ids (left fresh frame_id 2, right settled frame_id 1). GREEN asserts the robust path
+    /// (`decode_qr_luma_all_robust_optical` — plain ∪ bottom-tiles ∪ top-band ∪ per-half top crops)
+    /// recovers all four on every seed. RED was this same loop pinned to `decode_qr_luma_all`; it
+    /// reproduces the miss only PROBABILISTICALLY across a fixed seed set and cannot be observed
+    /// locally (probe-gated, Tier-0 #557 — CI is the first compile), so the RED→GREEN commit order is
+    /// preserved by construction, not by a locally-observed red. A deterministic RED needs the real
+    /// failing canvas captured as a fixture (`pattern-change-needs-decode-fixture.md`) — mineable only
+    /// from a CI run, tracked as a follow-up. Seed count is bounded well under the nextest slow-test
+    /// kill (`.config/nextest.toml`).
+    #[test]
+    fn dual_qr_plus_aux_four_code_canvas_decodes_all_four_across_masks_1280() {
+        let (w, h, qr) = (1920u32, 1080u32, 700u32);
+        let run_id = 7u32;
+        let aux = crate::probe::recording_latency::AUX_TICK_RUN_ID;
+        for seed in 0..12u64 {
+            // Distinct, diverse primary payloads per seed give distinct QR content (the per-run
+            // `gen_ts_ns` variation the real flake rides). The aux marks are constant (gen_ts 0),
+            // exactly as the painter bakes them.
+            let gen_left = 4_096_i64 + seed as i64 * 1_000_003;
+            let gen_right = 8_192_i64 + seed as i64 * 999_983;
+            let left = Payload {
+                run_id,
+                frame_id: 2,
+                gen_ts_ns: gen_left,
+            };
+            let right = Payload {
+                run_id,
+                frame_id: 1,
+                gen_ts_ns: gen_right,
+            };
+            let aux_left = Payload {
+                run_id: aux,
+                frame_id: 2,
+                gen_ts_ns: 0,
+            };
+            let aux_right = Payload {
+                run_id: aux,
+                frame_id: 1,
+                gen_ts_ns: 0,
+            };
+
+            let mut canvas = render_qr_dual_bgra(&left, &right, w, h, qr);
+            blit_aux_tick_bgra(&mut canvas, w, h, qr, TOP_MARGIN_PX, &aux_left, &aux_right);
+            let luma = bgra_to_luma(&canvas, w, h, w * 4);
+
+            // #1280 GREEN: the maximally-robust path — plain full-frame ∪ bottom-tiles ∪ top-band
+            // crop ∪ per-half top crops — recovers every dropped code from a region-isolated look
+            // (each primary alone in a top-band half, the aux upscaled in a bottom tile). (RED was
+            // this same loop pinned to the plain `decode_qr_luma_all`, whose whole-pass panic drops
+            // codes on an unlucky fixed seed.)
+            let got = decode_qr_luma_all_robust_optical(luma);
+            for want in [&left, &right, &aux_left, &aux_right] {
+                assert!(
+                    got.iter()
+                        .any(|p| p.run_id == want.run_id && p.frame_id == want.frame_id),
+                    "seed {seed}: (run_id {}, frame_id {}) missing from the 4-code canvas — \
+                     decoded {} payloads: {:?}",
+                    want.run_id,
+                    want.frame_id,
+                    got.len(),
+                    got.iter()
+                        .map(|p| (p.run_id, p.frame_id))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 
     // ---- #367 colour-reference scale blit ----
