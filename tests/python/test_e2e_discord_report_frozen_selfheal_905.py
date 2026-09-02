@@ -75,7 +75,10 @@ def test_frozen_live_is_blocking_and_not_report_only():
     assert _has(edr._blocking_failures(v), "zamrzn"), edr._blocking_failures(v)
     assert not any("zamrzn" in n.lower() or "stale" in n.lower()
                    for n in edr._report_only_tripped(v)), edr._report_only_tripped(v)
-    assert "❌" in edr.compose_summary(v, {"run_id": "905"})
+    # exercise routing through compose_summary, not just the overall_pass headline
+    summary = edr.compose_summary(v, {"run_id": "905"})
+    assert "❌" in summary
+    assert "Zamrznutá kamera" in summary, summary
 
 
 def test_self_heal_attributed_live_is_blocking_and_not_report_only():
@@ -85,6 +88,9 @@ def test_self_heal_attributed_live_is_blocking_and_not_report_only():
     assert _has(edr._blocking_failures(v), "self-heal"), edr._blocking_failures(v)
     assert not any("self-heal" in n.lower() for n in edr._report_only_tripped(v)), \
         edr._report_only_tripped(v)
+    summary = edr.compose_summary(v, {"run_id": "905"})
+    assert "❌" in summary
+    assert "Self-heal reset" in summary, summary
 
 
 def test_self_heal_UNattributed_only_live_is_blocking():

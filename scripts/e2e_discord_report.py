@@ -965,8 +965,14 @@ def _report_only_tripped(verdict):
     # (guarded `is not True`, the delivery-spread pattern). stale_replay NEVER gates overall_pass
     # (it is not in any_frozen()), so it stays report-only regardless of the flip.
     fl = _g(verdict, "frozen_leg", default={}) or {}
-    if fl.get("stale_replay") or (fl.get("frozen") and fl.get("gates_overall_pass") is not True):
-        names.append("zamrznutá/stale vetva")
+    # Split the two sub-signals (issue 905 item 2): `frozen` (hard-frozen) is report-only ONLY on a
+    # pre-flip verdict -- post-flip it is a BLOCKING failure (item 15) and must NOT also read as a
+    # report-only "zamrznutá" line directly under its own FAIL bullet. `stale_replay` never gates,
+    # so it stays report-only with its own distinct label regardless of the flag.
+    if fl.get("frozen") and fl.get("gates_overall_pass") is not True:
+        names.append("zamrznutá vetva")
+    if fl.get("stale_replay"):
+        names.append("stale vetva (replay)")
     sh = _g(verdict, "self_heal_reset", default={}) or {}
     if ((sh.get("attributed") or sh.get("unattributed_events"))
             and sh.get("gates_overall_pass") is not True):
