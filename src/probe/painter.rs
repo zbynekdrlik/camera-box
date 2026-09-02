@@ -547,7 +547,17 @@ mod tests {
         frame_id: u32,
     ) -> crate::probe::payload::Payload {
         let luma = crate::probe::luma::bgra_to_luma(bgra, w, h, w * 4);
-        crate::probe::qr::decode_qr_luma_all(luma)
+        // #1280: decode through the MAXIMALLY robust path (plain full-frame ∪ #202 bottom-band
+        // upscaled tiles ∪ #754 top-band optical crop), NOT the bare plain pass. The synthetic
+        // canvas carries FOUR crisp QRs (two 700px primary halves + the two 210px co-located aux
+        // marks, issue 1270); rqrr's greedy full-frame `detect_grids` intermittently drops exactly
+        // one of them for an unlucky per-run primary mask, which flaked
+        // `settled_left_half_payload_is_byte_identical_across_the_next_tick` on CI
+        // ("run_id 7 frame_id 2 not found"). The robust path recovers a dropped primary from the
+        // top-band crop and a dropped aux from its upscaled bottom-band tile. This is decode
+        // COVERAGE only — a given `(run_id, frame_id)` always decodes the SAME `gen_ts_ns`, so
+        // every byte-identity assertion below is unchanged.
+        crate::probe::qr::decode_qr_luma_all_robust_optical(luma)
             .into_iter()
             .find(|p| p.run_id == run_id && p.frame_id == frame_id)
             .unwrap_or_else(|| {

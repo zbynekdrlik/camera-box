@@ -771,6 +771,26 @@ pub fn decode_qr_luma_all_robust(img: GrayImage) -> Vec<Payload> {
     out
 }
 
+/// #1280 — the MAXIMALLY robust still-frame decode: [`decode_qr_luma_all_robust`] (plain
+/// full-frame ∪ Otsu ∪ the #202 bottom-band upscaled tiles) UNION the #754 top-band optical crop
+/// ([`robust_optical_top_band`]). Every recovery region runs UNCONDITIONALLY, so a code that
+/// rqrr's full-frame `detect_grids` intermittently drops when four crisp QRs share one frame (the
+/// two 700px primary Vernier halves in the TOP band plus the two 210px aux marks co-located in the
+/// BOTTOM band, issue 1270) is recovered from a region-isolated look: a primary from the top-band
+/// crop (the confounding aux + region-cache pressure removed), an aux from its upscaled bottom-band
+/// column tile. Each pass merges by `(run_id, frame_id)` ([`merge_payloads`]), so the result is a
+/// strict SUPERSET of the plain pass and a given `(run_id, frame_id)` always carries the SAME
+/// `gen_ts_ns` — byte identity is preserved. This composes the two EXISTING production recovery
+/// passes the RECORDING decode already fires conditionally
+/// ([`decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`]); it exists for the synthetic
+/// multi-QR painter/qr tests, whose crisp 4-code canvas is the one decode with no other recovery
+/// (#1280). No production caller is changed.
+pub fn decode_qr_luma_all_robust_optical(img: GrayImage) -> Vec<Payload> {
+    let mut out = decode_qr_luma_all_robust(img.clone());
+    robust_optical_top_band(&img, &mut out);
+    out
+}
+
 /// The expensive part of the robust decode: the bottom-band tiled+upscaled rqrr passes that
 /// recover the small node burns the plain full-frame pass missed. Factored out of
 /// [`decode_qr_luma_all_robust`] so the #207 fast path can run it CONDITIONALLY (only when a
@@ -1785,8 +1805,11 @@ mod tests {
             blit_aux_tick_bgra(&mut canvas, w, h, qr, TOP_MARGIN_PX, &aux_left, &aux_right);
             let luma = bgra_to_luma(&canvas, w, h, w * 4);
 
-            // #1280 RED: pinned to the PLAIN pass — a fixed seed reproduces the drop.
-            let got = decode_qr_luma_all(luma);
+            // #1280 GREEN: the maximally-robust path — plain full-frame ∪ bottom-tiles ∪
+            // top-band crop — recovers every dropped code from a region-isolated look. (RED was
+            // this same test pinned to the plain `decode_qr_luma_all`, which drops one code on an
+            // unlucky fixed seed.)
+            let got = decode_qr_luma_all_robust_optical(luma);
             for want in [&left, &right, &aux_left, &aux_right] {
                 assert!(
                     got.iter()
