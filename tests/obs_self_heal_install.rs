@@ -601,6 +601,60 @@ fn corrupt_state_file_falls_back_to_safe_defaults() {
     );
 }
 
+// ─── issue 1273: single-owner AHK bracket + failure-path backstop ─────────────────────────────
+
+/// issue 1273: the embedded launch-obs-genlock program (built with has_ahk=1 on strih) is the
+/// SINGLE OWNER of the AutoHotkey64 stop/restart bracket — it stops AHK before killing obs64,
+/// restarts + verifies it after the launch, then runs its own #978 session gate. Because that
+/// embedded program runs in a SEPARATE `powershell.exe -File` child, an OUTER pre-stop left its
+/// own `$ahkStopped` false, so its restart never fired and its #978 session gate exit-8'd on a
+/// clean recovery — force-falsing the outer `$verified`. After the fix, the ONLY AutoHotkey64
+/// stop in the whole emitted program is the ONE inside the embedded launch program itself.
+#[test]
+fn outer_self_heal_never_pre_stops_ahk_embedded_program_owns_the_bracket_1273() {
+    let p = recovery_script_strih();
+    let embedded = expected_kill_relaunch_program();
+    assert!(
+        p.contains(embedded.trim()),
+        "sanity: the embedded launch program must be embedded verbatim so it can be stripped"
+    );
+    // Strip the embedded launch program (which legitimately owns the AHK stop); any AutoHotkey64
+    // stop left in the OUTER remainder is an illegitimate outer pre-stop (the issue-1273 bug).
+    let outer_only = p.replace(embedded.trim(), "<<EMBEDDED LAUNCH PROGRAM>>");
+    assert!(
+        !outer_only.contains("Stop-Process -Name AutoHotkey64"),
+        "issue 1273: the OUTER self-heal script must not pre-stop AutoHotkey64 — the embedded \
+         launch-obs-genlock program owns the whole AHK bracket. Outer remainder (embedded \
+         stripped):\n{outer_only}"
+    );
+}
+
+/// issue 1273: the outer script's ONLY AutoHotkey64 action is a FAILURE-PATH backstop — if the
+/// embedded launch program exited non-zero (it may have aborted before its own restart point,
+/// e.g. an audio-buffering exit 7 that sits before it) AND AutoHotkey64 is genuinely down,
+/// best-effort relaunch it so a wedged box never ends with no respawn watcher. It is gated on
+/// `$relaunchExit -ne 0` (never on `$verified`, never unconditional) and idempotent AHK-present
+/// (only acts when AutoHotkey64 is down, never double-launching what the embedded program restored).
+#[test]
+fn strih_failure_path_ahk_backstop_is_gated_and_idempotent_1273() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("RestartAhk backstop"),
+        "issue 1273: the outer script must carry a failure-path RestartAhk backstop. Program:\n{p}"
+    );
+    assert!(
+        p.contains("if ($relaunchExit -ne 0)"),
+        "issue 1273: the backstop must be gated on the embedded program's non-zero exit — never \
+         unconditional, never on $verified. Program:\n{p}"
+    );
+    assert!(
+        p.contains("if (-not (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue))"),
+        "issue 1273: the backstop must be idempotent AHK-present — only relaunch when AutoHotkey64 \
+         is genuinely down, never double-launching what the embedded program already restored. \
+         Program:\n{p}"
+    );
+}
+
 // ─── build_task_xml ──────────────────────────────────────────────────────────────────────────
 
 fn task_xml() -> String {
