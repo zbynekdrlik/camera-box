@@ -5182,6 +5182,11 @@ fn build_and_print_verdict_with_stream_diffs(
                 // frame = primary[X,X+1] + ONE aux mark from a later generation; the aux single-mark
                 // cross-band, NOT the primary band). aux_any_decode_fraction (>= 1 mark) is the honest
                 // operability diagnostic; aux_decode_fraction (both marks) is ~0 on CAM2 and is NOT.
+                // issue 1144 (#887 fold) -- captured inside the tear block below (where tear_stats is
+                // in scope) and read in the imag facet, so the imag content facet answers "does the
+                // imag proof reach HDMI-1?". Report-only.
+                let mut projection_tap_summary: Option<camera_box::tear_detect::ProjectionProof> =
+                    None;
                 {
                     // issue 1196 (v2): per frame, the PRIMARY dual-QR ids (non-reserved run_ids —
                     // the aux run_id sits IN NODE_BURN_RUN_IDS, so this filter excludes it
@@ -5279,6 +5284,19 @@ fn build_and_print_verdict_with_stream_diffs(
                     let aux_any_coverage = frame_weighted(|s| s.aux_any_decode_fraction);
                     let aux_both_coverage = frame_weighted(|s| s.aux_decode_fraction);
                     let signal_operable = camera_box::tear_detect::signal_operable(&tear_stats);
+                    // issue 1144 (#887 fold) -- summarize the CAM2 (projection-leg) tear windows for
+                    // the imag content facet. CAM2's window IS the projection path (imag HDMI ->
+                    // grabber); the tear gate already blocks on it, this is the report-only
+                    // cross-reference read below.
+                    let cam2_tear: Vec<&camera_box::tear_detect::TearStats> = schedule
+                        .iter()
+                        .zip(&tear_stats)
+                        .filter(|(w, _)| w.cambox == "CAM2")
+                        .map(|(_, s)| s)
+                        .collect();
+                    projection_tap_summary = Some(
+                        camera_box::tear_detect::summarize_projection_leg(&cam2_tear),
+                    );
                     println!(
                         "  #781/#1196 projection-tap tear gate (LIVE): {} torn frame(s) across \
                          {} window(s); signal viability {}; aux coverage any-mark {:.3} both-mark \
@@ -6156,6 +6174,41 @@ fn build_and_print_verdict_with_stream_diffs(
                             "NOT clean — see the per-window detail above."
                         }
                     );
+                    // issue 1144 (#887 fold) -- REPORT-ONLY projection-tap cross-reference: the tear
+                    // detector (all_cambox_continuity.tear) is already LIVE + BLOCKING on the CAM2
+                    // projection leg, so #887's DETECTION gap (nothing verifies what leaves HDMI-1) is
+                    // closed independently. This carries the projection-leg tear verdict INTO the imag
+                    // facet so "does the imag proof reach HDMI-1?" is answerable here, and makes the
+                    // flip-time precondition (require hdmi1_proof_backed) machine-checkable. Gates
+                    // nothing; the CAM2 frame CONTINUITY is separately blocking via the stream sweep.
+                    let projection_tap_json = match &projection_tap_summary {
+                        Some(pp) => serde_json::json!({
+                            "gates_overall_pass": false,
+                            "hdmi1_proof_backed": pp.hdmi1_proof_backed,
+                            "windows": pp.windows,
+                            "observed_fraction": pp.observed_fraction,
+                            "tear_gate_clean": pp.tear_gate_clean,
+                            "worst_tear_fraction": pp.worst_tear_fraction,
+                            "aux_any_coverage": pp.aux_any_coverage,
+                            "premise": "cam2's grabber is fed by imag-nb's HDMI output, so the CAM2 \
+                                        sweep leg IS the projection path (imag render -> DRM scanout \
+                                        -> HDMI -> grabber). Runtime-unverifiable cabling premise -- a \
+                                        re-cable would silently make hdmi1_proof_backed a lie.",
+                            "note": "issue 1144 (#887 fold), REPORT-ONLY: the projection-tap tear gate \
+                                     (all_cambox_continuity.tear) is already LIVE + BLOCKING on the \
+                                     CAM2 leg, so #887's detection gap is closed independently; \
+                                     hdmi1_proof_backed records whether the SCANOUT (tear) proof was \
+                                     live (Observed) + clean this run. The CAM2 leg's frame CONTINUITY \
+                                     is separately BLOCKING via the stream per-cambox sweep. At the \
+                                     content flip, require hdmi1_proof_backed.",
+                        }),
+                        None => serde_json::json!({
+                            "gates_overall_pass": false,
+                            "hdmi1_proof_backed": false,
+                            "note": "issue 1144 (#887 fold): projection-tap summary not computed (no \
+                                     tear block ran this sweep).",
+                        }),
+                    };
                     report["all_cambox_continuity"]["imag"] = serde_json::json!({
                         "segments": imag_segments_json,
                         "overall_pass": imag_overall_pass,
@@ -6165,6 +6218,8 @@ fn build_and_print_verdict_with_stream_diffs(
                         // seam, so neither reds a run today.
                         "content_overall_pass_raw": imag_content_overall_pass_raw,
                         "switch_in_transient_count": imag_switch_in_transients.len(),
+                        // issue 1144 (#887 fold) -- projection-tap cross-reference (report-only).
+                        "projection_tap": projection_tap_json,
                         "guard_ns": args.switch_guard_ns.max(0),
                         "optical_expected_step": imag_optical_step,
                         "burn_render_step": imag_burn_step,
