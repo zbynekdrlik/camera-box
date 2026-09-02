@@ -6,9 +6,13 @@
 #
 # scripts/lib/ahk-watchdog.sh — SINGLE SOURCE OF TRUTH for robustly relaunching + VERIFYING the
 # strih-only NL_STARTUP.ahk AutoHotkey64 auto-respawn watcher (#411/#786's stop-first/restart-last
-# AHK-race fix). Sourced by scripts/obs-self-heal-install.sh and scripts/launch-obs-genlock.sh —
-# both stop AutoHotkey64 before touching obs64 and must restart it afterward; this is the ONE
-# place that does the restart + confirms it actually worked.
+# AHK-race fix). Sourced by scripts/obs-self-heal-install.sh and scripts/launch-obs-genlock.sh.
+# Ownership of the stop/restart bracket (issue 1273): launch-obs-genlock.sh's build_launch_program
+# is the SINGLE OWNER — it stops AutoHotkey64 before touching obs64 and restarts it afterward.
+# obs-self-heal-install.sh REUSES that program verbatim (so the embedded child owns the bracket)
+# and no longer pre-stops AHK itself; it only calls this relaunch primitive from a FAILURE-PATH
+# backstop (when the embedded child exited non-zero AND AutoHotkey64 is down). Either way, this is
+# the ONE place that does the relaunch + confirms it actually worked.
 #
 # WHY (#867): both callers used to just fire-and-forget the restart and unconditionally claim
 # success:

@@ -273,6 +273,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/camera-box-parity-align.sh"
 # shellcheck source=scripts/lib/frame-probe-parity-align.sh
 . "$HERE/lib/frame-probe-parity-align.sh"   # #1138: pre-gate auto-align of cam2's steady-state painter to the candidate
+# issue 1271: the READ-ONLY stray recording/streaming preflight, extracted so it can run as the
+# FIRST [0/8] step (right after reachability), BEFORE the two fleet MUTATIONS above (cambox +
+# frame-probe parity auto-align). It reuses the SAME shared rig-busy state read (obs_phase2.py) that
+# scripts/rig-busy-gate.sh runs at job start — the one REAL-broadcast definition — never a
+# duplicated per-box loop. See scripts/lib/stray-session-check.sh for the actual call.
+# shellcheck source=scripts/lib/stray-session-check.sh
+. "$HERE/lib/stray-session-check.sh"
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -668,6 +675,12 @@ BKSH_PAUSE_CAM1_WAS_ACTIVE=0
 BKSH_PAUSE_PAINTER_WAS_ACTIVE=0
 # shellcheck source=scripts/lib/bkshading-e2e-pause.sh
 . "$HERE/lib/bkshading-e2e-pause.sh"
+# issue 1271: guard BEFORE the bkshading-relay pause — the FIRST rig mutation (it stops
+# bkshading-relay on the source cam + cam2). A live broadcast must never have its shading relay
+# dropped, so the read-only rig-busy guard runs here first. Bare statement (never $()/pipeline) so
+# its `exit 1` propagates; this runs before the reachability preflight, so it fail-opens if
+# strih/stream WS is momentarily unreadable (the reachability preflight then owns that abort).
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the bkshading-relay pause"
 BKSH_PAUSE_CAM1_WAS_ACTIVE="$(bkshading_e2e_pause_stop "$CAMERA_NAME" "$CAM1_IP" "$CAM_PW")"
 echo "    bkshading-relay pause ($CAMERA_NAME, $CAM1_IP): was-active=$BKSH_PAUSE_CAM1_WAS_ACTIVE, now stopped for the run"
 BKSH_PAUSE_PAINTER_WAS_ACTIVE="$(bkshading_e2e_pause_stop cam2 "$PAINTER_IP" "$CAM_PW")"
@@ -1037,6 +1050,10 @@ done
 # is uniformly stale-vs-candidate (deploys the candidate to /usr/local/bin/camera-box so the gate's
 # candidate-pin accept passes). Best-effort: mixed/unread fleets are never auto-deployed, and the
 # gate below is the authority (it REFUSES if the fleet is not on the candidate).
+# issue 1271: guard immediately BEFORE this fleet MUTATION (it deploys + restarts camera-box.service
+# on the whole active fleet, and the painter align below redeploys cam2). A broadcast that started
+# during the read-only [0/8] gates above must be caught here, before the fleet's binary is touched.
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the camera-box + painter parity auto-align"
 cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
   --linux "$CAMBOX_VERSION_LINUX" \
@@ -1270,7 +1287,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # clear it itself, the same idempotent `obs_burn_filter.py remove` the #844/#878 startup
   # self-heal above already trusts. NORMALIZE, don't abort -- strih/stream must still not already
   # be recording/streaming below (a stray session this harness cannot safely take over itself).
-  echo "[0/8] OBS pre-run state — normalizing genlock_burn OFF on every strih NDI input (#924), no stray recording/streaming (#758)"
+  echo "[0/8] OBS pre-run state — normalizing genlock_burn OFF on every strih NDI input (#924); the stray recording/streaming check (#758) now runs earlier, before any rig mutation (#1271)"
   # #827 follow-up: derive the checked camera list from CAMERA_ACTIVE_SET (camera-set.sh) minus
   # any acked-offline box -- never a literal 1..7 range (a retired camera must never be checked
   # here, regardless of what its strih OBS input still looks like).
@@ -1294,24 +1311,12 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_nsip" 2>&1 \
       | sed "s/^/    [normalize sweep] /" || true
   done
-  for _pfhs in "strih=$STRIH" "stream=$STREAM"; do
-    _pfhbox="${_pfhs%%=*}"
-    _pfhip="${_pfhs#*=}"
-    _pfrec="$(python3 "$HERE/obs_phase2.py" record --action status --host "$_pfhip" 2>/dev/null || true)"
-    case "$_pfrec" in
-      *active=True*)
-        echo "ERROR: [preflight] FAIL: ${_pfhbox}: OBS is ALREADY recording (a stray session from an aborted prior run) — stop it before starting: ${_pfrec}" >&2
-        exit 1
-        ;;
-    esac
-    _pfstream="$(python3 "$HERE/obs_phase2.py" stream-status --host "$_pfhip" 2>/dev/null || true)"
-    case "$_pfstream" in
-      *active=True*)
-        echo "ERROR: [preflight] FAIL: ${_pfhbox}: OBS is ALREADY streaming (a stray session from an aborted prior run) — stop it before starting: ${_pfstream}" >&2
-        exit 1
-        ;;
-    esac
-  done
+  # issue 1271: the read-only stray recording/streaming check that USED to live here now runs as the
+  # FIRST [0/8] step (stray_session_check_assert, right after the reachability preflight), BEFORE the
+  # cambox/frame-probe parity auto-align mutations — a broadcast that started after the job-start
+  # rig-busy-gate.sh must be caught before the fleet is touched, not after. See
+  # scripts/lib/stray-session-check.sh. The genlock_burn OFF normalization above stays here (it is a
+  # strih OBS mutation the harness is entitled to make on its own default TEST-mode rig).
 
   # #882: distinguish process-absent / port-not-listening BEFORE ever attempting to open the
   # projectors. The 2026-07-30 outage left every subsequent preflight failure reading a WRONG
@@ -2475,6 +2480,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   fi   # issue 1013: end of the IMAG_OFFLINE_ACKED skip-guard over the imag render-health + divisor leg
 fi
 
+# issue 1271: guard immediately BEFORE the cam1 camera-box deploy below — a broadcast can start
+# during the build step above (run 33573594588: it started at 00:47:43Z mid-build), so re-check the
+# shared rig-busy predicate here before pushing the probe-featured binary to cam1.
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the cam1 camera-box deploy"
 echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ $CAMERA_NAME mark, NO grab #179)"
 # #174 + #179: deploy the freshly-built PROBE-featured camera-box (carries the #174 capture
 # burn) to a $CAMERA_NAME-LOCAL /tmp path and launch THAT — NOT the prod
@@ -2593,6 +2602,9 @@ for _scn in $(camera_active_secondary_set); do
   CAMBOX_SECONDARY_DEPLOY+=("${_scn}=$(camera_secondary_ip "$_scn")=$(camera_secondary_burn_run_id "$_scn")")
 done
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  # issue 1271: guard immediately BEFORE the ALL_CAMBOX secondary deploy loop — the same
+  # broadcast-started-mid-run risk as the cam1 deploy above, now across every secondary cam box.
+  stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the ALL_CAMBOX camera-box deploy loop"
   for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_burn%%=*}"; _crest="${_cn_ip_burn#*=}"; _cip="${_crest%%=*}"; _cburn="${_crest#*=}"
     echo "[2b/8] $_cn (${_cip}) — probe-featured camera-box with its OWN capture BURN (run_id=$_cburn, #624/#312 ALL_CAMBOX)"

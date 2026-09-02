@@ -43,3 +43,95 @@ latent footgun ONLY if it were ever made **strih's** launcher (it would drop
 Standing docs already covering related facts: obs-ops SKILL §144 ("every relaunch MUST go through
 `launch-obs-genlock.sh`; do NOT hand-roll a Start-Process"); `.claude/rules/rig-state-inspection.md`
 (the per-box `.lnk` TargetPath+Arguments live-resolve, the box-specific `.lnk` locations differ).
+
+## AHK stop-first/restart-last MUST wrap EVERY obs64-kill site, not just the redraw loop (#1272)
+
+`build_launch_program`'s AHK bracket (`$ahkStopped`/`ahk_stop_ps`/`ahk_restart_ps`, has_ahk=1 only)
+used to wrap ONLY the #786 audio-buffering redraw loop's own kill+relaunch — the `--force`
+kill_block at the very TOP of the program had zero AHK involvement. On strih, right after
+`scripts/deploy-genlock-fleet.sh`'s own step 8 restarts+verifies AHK, a `--force` relaunch killed
+obs64 with AHK still watching: `NL_STARTUP.ahk` respawned a duplicate obs64 within seconds via the
+same `.lnk`, racing this wrapper's own relaunch and failing the `(3c)` `#978` session-visibility
+gate ("expected exactly 1 obs64 process, found 2") — the live 2026-09-02 incident.
+
+**Fixed contract, test-pinned by `tests/launch_obs_genlock.rs`
+(`force_stops_ahk_before_obs64_kill_and_restarts_after_verify_1272`,
+`ahk_stopped_declared_once_and_restart_emitted_once_1272`):** `$ahkStopped = $false` is declared
+ONCE, at the very top of the program (right after `$ErrorActionPreference = 'Stop'`) — never
+re-declare it deeper in the file, a second declaration silently wipes out an earlier stop. The
+`--force` kill_block prepends the existing `ahk_stop_ps` snippet (has_ahk=1 only) before its own
+obs64 kill line. The AHK restart (`ahk_restart_ps`) fires exactly ONCE, after the WHOLE
+launch+audio-verify sequence closes (covering both the `$guardedLnk` verify-only branch and this
+wrapper's own redraw-loop branch), before the `(3c)` session-visibility gate — which itself asserts
+AHK's own SessionId and needs AHK back by then. The pre-existing per-iteration `ahk_stop_ps` call
+inside the redraw loop stays as a harmless idempotent no-op safety net (its own
+`if (Get-Process AutoHotkey64 ...)` guard).
+
+**Follow-up fix (same ticket, review finding):** moving the AHK-stop to the top widened the window
+where an EARLY failure exit (exe not found = `exit 5`, obs64 never starting on the INITIAL launch =
+the first `exit 6`) would now permanently disable the AHK respawn watcher — a regression those two
+exits never had before (only the pre-existing redraw-loop exit paths had that accepted limitation).
+Fixed with `ahk_best_effort_restart_ps` — reuses ONLY `ahk_resolve_and_relaunch_ps` (never the
+fail-loud/`exit 9` wrapper, so the real exit 5/6 code stays the one reported) — emitted immediately
+before each of those two exits. Pinned by
+`early_exit_failures_attempt_best_effort_ahk_restart_before_exiting_1272`.
+
+**Gotcha this surfaced — reusing a shared PS primitive at a NEW call site can retroactively make a
+PREVIOUSLY-unique `.find()` anchor ambiguous (the same class `ci-testing-gotchas.md` already
+documents for #867, now a third instance).** `ahk_relaunch_ps` (embedding the literal
+`"$ahkRelaunchVerified = $false"`) is reused by `ahk_restart_ps` (the real, success-logging,
+fail-loud restart) AND now also by every `ahk_best_effort_restart_ps` call site — so a test that
+used to `.find()` that string (there was only ONE occurrence) had to switch to `.rfind()` (the real
+restart block is always the LAST occurrence, since the early-exit sites sit earlier in the text)
+PLUS an explicit check that its own unique success marker (`"AHK watchdog restarted via"` — never
+duplicated, since the best-effort snippet deliberately uses a different `Write-Warning` line) sits
+between the anchor and the fail branch, proving `.rfind()` genuinely landed on the intended
+occurrence rather than merely the last of several by coincidence
+(`program_ahk_restart_is_verified_and_fails_loud_867`, updated in the same PR). **Before reusing
+ANY existing PS/bash snippet at a new call site, grep the whole file for every LITERAL string that
+snippet contains and check every test's `.find()`/`.rfind()` anchor on those strings still targets
+the intended occurrence — not just "does the assertion still technically pass".**
+
+## Verifying a launch-obs-genlock.sh / obs-self-heal-install.sh change from a worktree-isolated worker: EXECUTE the script, don't just source it
+
+`.claude/rules/ci-testing-gotchas.md`'s "worktree-isolated worker cannot run a sourced-bash-lib
+test" section already documents that `bash -c '…source lib…'` is refused inside a worktree.
+**What that section does NOT call out: running the script FILE DIRECTLY as an executable — `bash
+scripts/launch-obs-genlock.sh --box strih --force` (or `scripts/obs-self-heal-install.sh --box
+strih`) — is NOT refused**, and both scripts have a real CLI `main()` that prints their FULL emitted
+plan/program to stdout (they need no rig, no MCP, no network — pure string builders). This is a much
+stronger local verification path than the `python3 -c` fallbacks the ci-testing-gotchas.md section
+lists: capture the plan to a file, then Python-simulate every `.find()`/`.rfind()`/`.count()`
+assertion in the corresponding `tests/*.rs` file against the REAL emitted text (extract the raw
+program block between the plan's own two `# ----...` delimiter lines to get exactly what
+`run_sourced("build_launch_program ...")` would return). This proved BOTH a genuine pre-fix RED
+(exact byte offsets showing the bug) and a genuine post-fix GREEN for issue 1272 without any cargo
+compile, and caught the `.find()`-anchor-ambiguity gotcha above before it ever reached CI. Also
+works to diff an OLD committed version against the new one: `git show <sha>:scripts/foo.sh >
+/tmp/old.sh && bash /tmp/old.sh --box strih` runs the historical version standalone (if it sources
+a sibling lib via a `HERE`-relative path, recreate that relative layout under `/tmp` first — copy
+the lib file(s) to the same relative subpath before running).
+
+## An embedded `powershell.exe -File` child owns its OWN `$ahkStopped` — an outer pre-stop is invisible to it (#1273)
+
+`obs-self-heal-install.sh`'s `build_recovery_script` REUSES `build_launch_program`'s output but runs
+it as a genuinely SEPARATE `powershell.exe -File <tmp>.ps1` CHILD process (not inline). That child
+has its OWN `$ahkStopped` (starts fresh `$false`). Post-#1272 the embedded launch program is the
+SINGLE OWNER of the whole AutoHotkey64 stop/restart bracket — it stops AHK before killing obs64
+(its `--force` kill covers the wedge-kill race), restarts + verifies AHK after the launch, then runs
+its own `(3c)` #978 session gate. So an OUTER script that ALSO pre-stops AHK before invoking that
+child is a bug, not defense-in-depth: the child then finds AHK already stopped, never sets
+`$ahkStopped=$true`, its own restart-gate (`if ($ahkStopped)`) never fires, and its #978 gate finds
+0 AutoHotkey64 → `exit 8` — force-falsing the outer
+`$verified = ($postCount -eq 1) -and ($relaunchExit -eq 0)` on an otherwise-clean recovery (a
+diagnostics false-negative; #1273's live incident). **Rule: never pre-touch AHK outside the embedded
+program. The outer script may only run a FAILURE-PATH backstop — `if ($relaunchExit -ne 0)` +
+`if (-not (Get-Process AutoHotkey64 ...))` then a best-effort relaunch — to cover an embedded exit
+that aborted BEFORE its own restart point (audio-buffering `exit 7`, redraw-relaunch `exit 6`),
+idempotent so it never double-launches what the embedded program already restored on the success
+path.** Rejected fixes: injecting `$ahkStopped=$true` into the child (two owners of one bracket,
+brittle coupling on a private variable name), and whitelisting `exit 8` in `$verified` (exit 8 is
+ALSO the genuine #978 session-visibility FAILURE, so it would hide a real recovery failure). One
+honest residual stays: a pass that STARTS with AHK already dead legitimately `exit 8`s
+("watcher missing") and reads `verified=False`, then the outer backstop restores AHK — expected, not
+a false-negative.

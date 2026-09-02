@@ -1,0 +1,61 @@
+[Unit]
+Description=camera-box rig-lease read-only HTTP exposure (#1277) — GET /rig-lease.json on :8890
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target
+Wants=network-online.target
+
+# Bound any runaway restart storm (mirrors camera-box.service #828 / bkshading-relay.service).
+# StartLimit* are UNIT-level directives (placing them in [Service] silently no-ops).
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+# %h = the installing user's home on dev1 (newlevel). Adjust if the checkout lives elsewhere.
+# --bind 0.0.0.0: dev1's firewall is already LAN-open (verified before this was designed, see the
+# issue's own design comment) -- the two reachable private interfaces are LAN 10.77.9.103 and
+# tailscale 100.104.8.125; NEVER bind the box's public IP. Restreamer's stream-box runner has no
+# tailscale address, so the LAN path is the one it actually uses (address-by-tailscale rule: LAN is
+# the primary path here ONLY because the consumer cannot reach tailscale, not the general default).
+ExecStart=/usr/bin/python3 %h/devel/camera-box/scripts/rig-lease-server.py --bind 0.0.0.0 --port 8890
+Restart=on-failure
+RestartSec=5
+
+# EnvironmentFile is OPTIONAL (leading `-`): RIG_LEASE_DIR / RIG_LEASE_STALE_SECS both already
+# default correctly (see scripts/rig-lease-server.py's own doc comment) -- this file only matters
+# if a future deploy ever needs to override them without editing the unit.
+EnvironmentFile=-%h/.config/environment.d/rig-lease-server.conf
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rig-lease-server
+
+# Security hardening: a read-only stdlib HTTP server that only ever stat()s/reads files under
+# RIG_LEASE_DIR (/var/tmp/rig-lease by default) and never writes anything itself.
+#
+# PrivateTmp MUST stay "no" (declared intent -- see the VERIFIED-INERT note below for why it does
+# not currently DO anything on dev1): systemd's PrivateTmp namespaces BOTH /tmp AND /var/tmp, and
+# RIG_LEASE_DIR lives under /var/tmp/rig-lease, the SAME host path scripts/lib/rig-lease.sh writes
+# to from the E2E gate (a completely separate, non-systemd process). PrivateTmp=yes would put this
+# server in its OWN private /var/tmp, permanently isolated from the real lockdir -- it would always
+# report held=false regardless of the actual lease state, IF mount-namespacing were actually
+# engaging (see below, it currently is not). Never flip PrivateTmp to "yes" regardless.
+#
+# VERIFIED-INERT ON DEV1 TODAY (#1277 review, live-checked): as a `--user` unit under dev1's
+# current kernel policy (`kernel.apparmor_restrict_unprivileged_userns=1`, systemd 255, Ubuntu
+# 24.04), an UNPRIVILEGED user manager cannot create the mount namespace PrivateTmp/ProtectHome
+# rely on -- systemd silently SKIPS the namespacing rather than failing the unit. Live-checked: a
+# process under this unit's directives still saw the real /home/newlevel/devel AND a real host
+# /var/tmp marker even with PrivateTmp=yes forced on for the test. So right now neither directive
+# provides real isolation -- they are kept as DECLARED INTENT (harmless, and correct if this unit
+# is ever promoted to a system-level unit, or if dev1's kernel policy changes) rather than an
+# active guarantee. Do not read their mere presence here as proof of sandboxing without re-checking
+# against the live kernel policy at the time (this is `.claude/rules/rig-standing-services.md`'s
+# own §4 doctrine: verify a gate's premise live, don't trust a comment's claim).
+NoNewPrivileges=yes
+PrivateTmp=no
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

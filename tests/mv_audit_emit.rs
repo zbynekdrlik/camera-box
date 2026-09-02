@@ -38,7 +38,7 @@ fn render_display_emits_the_multiview_audit_line() {
     // The exact format string the drift-guard / rig-health-audit / E2E preflight parse.
     assert!(
         src.contains(
-            "\"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u\""
+            "\"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f\""
         ),
         "{OBS_DISPLAY}: #771 multiview-audit blog line gone — MV render fps is no longer visible in the OBS log."
     );
@@ -110,10 +110,14 @@ fn display_struct_carries_the_audit_window_fields() {
         "uint32_t render_audit_id;",
         "uint64_t render_audit_window_start_ns;",
         "uint32_t render_audit_render_count;",
+        // camera-box #1260: budget-gate phase-split accumulators for pre_mv_ms/pre_mv_max_ms.
+        "uint64_t render_audit_pre_mv_sum_ns;",
+        "uint64_t render_audit_pre_mv_max_ns;",
+        "uint32_t render_audit_tick_count;",
     ] {
         assert!(
             hdr.contains(field),
-            "{OBS_INTERNAL}: #771 obs_display.{field} missing — the per-projector audit window has nowhere to live."
+            "{OBS_INTERNAL}: #771/#1260 obs_display.{field} missing — the per-projector audit window has nowhere to live."
         );
     }
 }

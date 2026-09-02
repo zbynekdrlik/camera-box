@@ -316,6 +316,16 @@ void render_display(struct obs_display *display)
 			const uint64_t audit_now = os_gettime_ns();
 			if (display->render_audit_window_start_ns == 0)
 				display->render_audit_window_start_ns = audit_now;
+			/* camera-box #1260: accumulate this tick's PRE-MV elapsed (graphics-thread ns
+			 * consumed before this display this tick: tick_sources + output_frames + earlier
+			 * displays -- the SAME `elapsed` the budget gate below tests against `budget`) for
+			 * the windowed mean/max printed at emit. Runs every tick this display is
+			 * throttleable, BEFORE the skip decision; REPORT-ONLY, never touches the skip. */
+			const uint64_t pre_mv_ns = (audit_now > tick_start) ? (audit_now - tick_start) : 0;
+			display->render_audit_pre_mv_sum_ns += pre_mv_ns;
+			if (pre_mv_ns > display->render_audit_pre_mv_max_ns)
+				display->render_audit_pre_mv_max_ns = pre_mv_ns;
+			display->render_audit_tick_count++;
 			const uint64_t audit_elapsed = audit_now - display->render_audit_window_start_ns;
 			if (audit_elapsed >= MULTIVIEW_AUDIT_WINDOW_NS) {
 				const double win_s = (double)audit_elapsed / 1000000000.0;
@@ -331,12 +341,33 @@ void render_display(struct obs_display *display)
 				 * like any other; the bursty-sample tolerance now lives in the gate. The
 				 * cx=/cy= fields stay on the printed line below for observability. */
 				const double floor_fps = obs_multiview_floor_fps(target_fps);
+				/* camera-box #1260: budget-gate PHASE split. pre_mv_ms (window mean) +
+				 * pre_mv_max_ms are the graphics-thread ns consumed BEFORE this display each
+				 * tick; mv_ewma_ms is this display's own render-cost EWMA; budget_ms is the
+				 * 90%-of-interval the skip gate tests `pre_mv + ewma` against. Together they
+				 * show WHICH phase eats the budget (a rendered_fps below floor with pre_mv
+				 * already near budget = a heavy pre-MV phase, not the MV), closing the
+				 * profiling gap `rendered_fps` alone left. mv_audit.rs ignores unknown keys, so
+				 * this is an APPEND-only line change. */
+				const double pre_mv_ms =
+					(display->render_audit_tick_count != 0)
+						? ((double)display->render_audit_pre_mv_sum_ns /
+						   (double)display->render_audit_tick_count) /
+							  1000000.0
+						: 0.0;
+				const double pre_mv_max_ms = (double)display->render_audit_pre_mv_max_ns / 1000000.0;
+				const double mv_ewma_ms = (double)ewma / 1000000.0;
+				const double budget_ms =
+					(interval != 0) ? (double)(interval - interval / 10) / 1000000.0 : 0.0;
 				blog(LOG_INFO,
-				     "multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u",
+				     "multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f",
 				     display->render_audit_id, effective_divisor, rendered_fps, target_fps, floor_fps,
-				     display->cx, display->cy);
+				     display->cx, display->cy, pre_mv_ms, pre_mv_max_ms, mv_ewma_ms, budget_ms);
 				display->render_audit_window_start_ns = audit_now;
 				display->render_audit_render_count = 0;
+				display->render_audit_pre_mv_sum_ns = 0;
+				display->render_audit_pre_mv_max_ns = 0;
+				display->render_audit_tick_count = 0;
 			}
 		}
 		if (ewma != 0 && interval != 0 && tick_start != 0) {

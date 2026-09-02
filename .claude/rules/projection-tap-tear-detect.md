@@ -47,17 +47,18 @@ Approach 1 of the design synthesis on that ticket):
 
 - **Painter:** `paint_one_frame`'s dual-QR branch additionally blits two SMALL (~210px,
   payload-minimal) QRs into the burn-free bottom gaps — geometry in the pure crate-root
-  `src/aux_tick.rs` (left x[466,676), right x[1224,1434), y[745,955) at the rig 1920×1080/700/24
-  layout; machine-proven disjoint from the primary halves, colour column, motion sweep, and the
-  strih-BL/cambox-center/stream-BR burn overlays; returns `None` → no aux where the layout can't
-  fit, e.g. the 2560-wide override canvas). LEFT = latest EVEN tick, RIGHT = latest ODD tick
+  `src/aux_tick.rs`. **Positions since issue 1270 (de-confliction): BOTH marks are CO-LOCATED in
+  the RIGHT gap `[1120,1578)` — even x[1137,1347), odd x[1351,1561), y[745,955) at the rig
+  1920×1080/700/24 layout** (was one-per-gap, even x[466,676) / odd x[1224,1434), before 1270; see
+  the SATURATED section at the bottom for why co-location is forced). Machine-proven disjoint from
+  the primary halves, colour column, motion sweep, and ALL four burn overlays (strih-BL / imag-BCL
+  / cambox-center / stream-BR); returns `None` → no aux where the layout can't fit, e.g. the
+  2560-wide override canvas. LEFT slot = latest EVEN tick, RIGHT slot = latest ODD tick
   (`vernier_ids`), reserved run_id `recording_latency::AUX_TICK_RUN_ID` (911013), `gen_ts_ns = 0`
   (constant → the settled aux mark is byte-identical across ticks by construction, the #854
-  property with zero state). **Documented exception:** the LEFT aux sits inside imag's
-  BottomCenterLeft burn zone [382,684) — accepted because the real-partial run_id census proves
-  imag's burn is NOT in the projected-scene path; only imag's OWN leg recording may cover it
-  (lower report-only aux coverage there). Pinned by `left_aux_overlaps_the_imag_burn_zone_by_
-  documented_exception` in `src/aux_tick.rs`.
+  property with zero state). Pinned by `both_aux_marks_clear_the_imag_burn_zone_1270` +
+  `canonical_rects_are_the_design_values` in `src/aux_tick.rs` (the former replaced the pre-1270
+  `left_aux_overlaps_the_imag_burn_zone_by_documented_exception` occlusion pin).
 - **Decoder: NO changes** — the existing passes find the aux QRs; they flow into the partial's
   per-frame `payloads` with zero schema change. `AUX_TICK_RUN_ID` joined `NODE_BURN_RUN_IDS`
   (`[u32; 11]`) so tick/split/optical/cadence/copies/latency all ignore the aux marks
@@ -245,11 +246,35 @@ Re-disarm = one line (`gates_overall_pass()` → `false`); the mechanism stays d
   `crate::colour_scale` resolves; a naive `crate::` → `super::` rewrite breaks inside the nested
   `mod tests` (its `super` is the module, not the root — first attempt failed exactly there).
 
-## The aux tick pair's bottom row is GEOMETRICALLY SATURATED — a 210px aux mark cannot be relocated clear of every burn (issue 1266)
+## The aux tick pair's bottom row is GEOMETRICALLY SATURATED — a 210px aux mark cannot be relocated clear of every burn (issue 1266) → RESOLVED by co-location (issue 1270)
+
+**RESOLVED (issue 1270, painter-only): both aux marks are now CO-LOCATED in the RIGHT gap
+`[1120,1578)` (even x[1137,1347), odd x[1351,1561)), clear of imag's burn, with imag untouched.**
+The packing is forced (this section's own numbers): imag's own 302px burn + one 210px aux = 512 >
+458, so no gap holds imag alongside an aux — the ONLY arrangement is BOTH aux in ONE gap (420 ≤
+458) and imag ALONE in the other. That is why 1266's "relocate ONLY the LEFT mark at 210px to a
+clear band" was infeasible (a single mark still had no ≥210px slot while the RIGHT mark held its
+own), but co-locating BOTH is not. Each 210px box carries its own 4-module quiet zone
+(`render_payload_qr`'s `quiet_zone(true)`; version-3 EC-H = 37 modules, 5.68 px/module), so the
+pair 4px apart has ≥8 modules of white between data regions and decodes as two independent rqrr
+grids. **HONEST residuals (design comment on 1270):** both marks share one y-band, so a horizontal
+scanout tear still cuts both → near-zero EXTRA tear redundancy over the single mark; the value is a
+truthful `aux_decode_fraction` on the projection leg (was a misleading 0.0) + redundancy vs a
+localized one-sided loss. Framing tolerance drops from ~104px to ~17px. So the co-located pair's
+real-chain decodability is a **post-deploy CAM2-fixture precondition** — mine a CAM2-window real
+frame from the first rig E2E after the painter redeploy and commit the frame + a decode assertion
+(`pattern-change-needs-decode-fixture`). **Acceptance / rollback:** CAM2 `aux_any_decode_fraction ≥
+0.995` (the LIVE gate must not lose sensitivity), CAM2 `aux_decode_fraction > 0`, CAM1/CAM3
+`aux_decode_fraction` non-regressing (the sharper canary — both marks already decode there),
+`tear_fraction ≤ 0.005` on the healthy run; roll back if the odd mark drops below its current
+0.995. Safe by construction against FALSE reds meanwhile (garbled mark → CRC/EC reject; a healthy
+frame's even+odd aux ids are Vernier-adjacent, union span ≤ 1). The rest of this section is kept as
+the geometric proof that co-location is the ONLY fit.
 
 Issue 1266 asked to relocate the occluded LEFT aux (`[466,676)`, under imag's burn `[382,684)` on
-the CAM2 leg) to a clear band at the SAME 210px. **It is geometrically infeasible — do not try it,
-and do not shrink the mark as a stopgap.** The evidence:
+the CAM2 leg) to a clear band at the SAME 210px. **A SINGLE-mark relocation is geometrically
+infeasible — do not try it, and do not shrink the mark as a stopgap** (co-location of BOTH per 1270
+above is the fit). The evidence:
 
 - The aux y-band is FORCED to `[724,960)` (below the primary band bottom 724, above the sweep band
   top 960) — it holds exactly ONE 210px mark vertically, no stacking.

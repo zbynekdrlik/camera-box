@@ -428,6 +428,41 @@ pub fn should_converge_phase(
 // QUALIFY due-ness and still trigger the backlog branch — they simply no longer SELECT), the
 // reserve computation, [`backlog_relock_threshold`] (issue 859), [`drain_target_frames`]
 // (issue 998) and [`BackwardStepGuard`] (issue 1009).
+//
+// WHY the DISPATCHED "pin the release to an ABSOLUTE wall-clock frame grid" (issue 1003's own
+// TITLE) will NOT be written — the residual ~33 ms cross-camera quantum is STRUCTURAL, not a
+// missing pin (re-confirmed 2026-09-02, gated Fable design consult + this code trace). If you are
+// here because a ticket says "implement the grid pin", read this first — it is already present in
+// one form ([`phase_pinned_deadline`], issue 940) and durably refuted as the fix for the residual:
+//
+//   * The whole-frame conveyor moves a source's on-air age `S` only in steps of exactly one
+//     source interval (`interval/n` — present the OLDER or the FRESHER of the 60→30 pair), so
+//     `S mod (interval/n)` is INVARIANT under every selection/shed action. "Pin the phase to a
+//     grid" / "converge the phase modulo the source interval" names a quantity the release cadence
+//     cannot touch AT ALL — it is set purely by the sender stamp grid vs the receiver tick phase.
+//   * The controllable integer-frame part is ALREADY deterministic after convergence:
+//     [`should_converge_phase`] sheds `S` down until it lands in `(floor + hysteresis,
+//     floor + interval/n + hysteresis]` — a band exactly one source frame wide — so each camera
+//     settles at the unique grid position above its OWN achievable floor. The cross-camera residual
+//     is therefore `Δskew_ij` (transport skew) quantized to source frames (~20 ms rig skew spread →
+//     1–2 frames = the ~33 ms budget-bound residual issue 1168 measured, ANTI-correlated with the
+//     floor — low-floor cams carry the LARGEST barrier delta, because their band above `target =
+//     reserve` is widest). Floor reduction cannot shrink it (issue 1168); it is not a floor gap.
+//   * A naive absolute grid pin (snap the target/selection to `nearest_grid(wall − reserve)`) fails
+//     three independent ways: (a) it snaps to the RECEIVER grid (33,333,333 ns) while stamps live
+//     on the SENDER grid (33,333,300 ns) — 33 ns/frame beat, wrong grid; (b) `nearest_grid(...)` is
+//     a function of tick phase, so ±2 ms render slew at the wrap flips a whole frame (Edge 1 above,
+//     relocated into the shed); (c) it must keep the FLOOR term of `max(reserve, floor)`, so it does
+//     not touch the cause — safe only if it keeps the floor, useless because it keeps the floor.
+//   * EQUALIZING the cross-camera quantum requires a COMMON target `>= max_i floor_i`, i.e. raising
+//     the fast cameras' `S` = ADDING latency (the owner-rejected production-pin promotion, 2026-08-20
+//     ODMIETNUTÉ, only hidden inside libobs where it cannot be seen or accepted). A frame cannot
+//     present before it arrives, so the receiver can only REMOVE latency per camera down to that
+//     camera's own floor — it can NEVER equalize across cameras receiver-side without adding latency.
+//     The only remaining lever lives in the pin/config layer (place each pin so the band straddles
+//     one grid line for every camera) — the supervisor's data-first campaign under issue 1168, not a
+//     receiver-side code change. The A/V GATE half (why `AV_OFFSET_GATE_TOLERANCE_MS` stays 90, not
+//     20) is recorded at that const in `src/av_window.rs`; this block records the MECHANISM half.
 // ---------------------------------------------------------------------------------------------
 
 /// The age (ns) the relock selection should target: the tracked phase anchor, FLOORED at the

@@ -287,7 +287,9 @@ mod tests {
         h: 320,
     };
     // strih/stream corner burns — mirror probe::colour_sample (side = 0.28·h = 302, margin = 40):
-    // top = 1080-40-302 = 738; bottom-left [40,342) x [738,1040); bottom-right [1538,1840) x same.
+    // top = 1080-40-302 = 738; bottom-left [40,342) x [738,1040); bottom-right [1578,1880) x same
+    // (W - margin - side = 1920 - 40 - 302 = 1578; the const below is authoritative — this comment
+    // previously carried a stale [1538,1840), corrected with issue 1270).
     const CORNER_SIDE: u32 = 302;
     const CORNER_MARGIN: u32 = 40;
     const BURN_BL: Rect = Rect {

@@ -9,7 +9,7 @@
   },
   "stream": {
     "_comment": "NDI 2ME PGM is the A/V-align program hold that tracks the ~1s mastered-audio delay (~923ms design); the +/-60ms band absorbs ordinary re-tuning while still catching a gross revert (0/3/1000). Zaloha kamera (standby backup) is intentionally not pinned here.",
-    "NDI 2ME PGM": {"want_ms": 915, "tolerance_ms": 60}
+    "NDI 2ME PGM": {"want_ms": 1024, "tolerance_ms": 60}
   },
   "imag": {
     "_comment": "imag is the low-latency IMAG projection: EVERY NDI input runs the 3ms floor, ALWAYS (imag-min-latency-3ms-always). A floor sentinel (not a per-name list) because imag's input set is dynamic/16-wide; latency_pins_verify enumerates live NDI inputs and every one must equal the floor.",

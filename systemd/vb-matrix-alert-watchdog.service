@@ -1,0 +1,19 @@
+[Unit]
+# stream/strih VB-Audio Matrix down alert (#1227), DEV1-SIDE. ONE fetch -> decide -> alert pass.
+# Reads the `vb_matrix_running` facet bundle_state_gather (#1227) exposes on :8899/bundle-state.json
+# and pages when a box that HAS a VB-Matrix install is not running its VBAudioMatrix* process (the
+# 2026-08-30 -> 09-02 incident: VB-Matrix was down 3 days after a reboot because StartVBMatrix has no
+# AtLogon trigger; its VASIO-8 ASIO driver had no host, so the stream OBS ASIO inputs starved and
+# nothing alarmed). DETECTION ONLY — no auto-action (the cure is `schtasks /run /tn StartVBMatrix`,
+# an owner/supervisor step). SAME dev1 topology as audio-lag-alert-watchdog.service (#1226) /
+# bundle-state-alert-watchdog.service (#732) / network-reach-alert-watchdog.service (#1001).
+Description=camera-box stream/strih VB-Matrix down alert (#1227) — one fetch/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/vb-matrix-alert-watchdog.sh
+# Per pass: 2 boxes × one :8899 curl (VB_MATRIX_CURL_TIMEOUT, default 10 s each) + a local python
+# decision. Generous ceiling so a slow event-day link never hangs the timer.
+TimeoutStartSec=60

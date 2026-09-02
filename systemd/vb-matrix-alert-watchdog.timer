@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1227 stream/strih VB-Matrix presence check every 5 min (dev1-side), matching the
+# audio-lag / network-reach / bundle-state / obs-liveness / cadence alert-timer cadence so the
+# fleet's dev1 alert timers stay in lockstep. A VB-Matrix that stopped (e.g. after a reboot with no
+# AtLogon trigger, starving the OBS ASIO inputs) is caught within ~10 min of going down (2-pass
+# confirm) and paged — no more the 3-day silent outage of 2026-08-30.
+Description=Run the camera-box stream/strih VB-Matrix presence check every 5 min (#1227)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
