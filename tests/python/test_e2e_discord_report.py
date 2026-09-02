@@ -677,3 +677,44 @@ class TestAvPresentUndecodedFixture:
         av_section = self.report.split("4️⃣")[1].split("5️⃣")[0]
         assert "tichá stopa" not in av_section
         assert "značka nedekódovaná" in av_section
+
+
+class TestSwitchInTransientAnnotation1144:
+    """issue 1144 -- the detailed imag rendering annotates a cam whose failing segment(s) carry a
+    switch-in transient (a raw content FAIL the imag content gate excuses / attributes to cold-cut),
+    so an excused ❌ on the detailed view is explained rather than reading as an unexplained failure."""
+
+    def test_aggregate_carries_the_switch_in_transient_flag(self):
+        segs = [
+            {"cambox": "CAM3", "pass": False, "switch_in_transient": True, "frames": 1682},
+            {"cambox": "CAM1", "pass": True, "switch_in_transient": False, "frames": 1697},
+        ]
+        agg = edr._aggregate_segments(segs)
+        assert agg["cam3"]["switch_in_transient"] is True
+        assert agg["cam1"]["switch_in_transient"] is False
+
+    def test_absent_field_defaults_false_no_annotation(self):
+        # A pre-issue-1144 verdict (no switch_in_transient field) must aggregate to False and add no
+        # annotation -- guards the existing real fixtures against a spurious note.
+        agg = edr._aggregate_segments([{"cambox": "CAM3", "pass": False, "frames": 1682}])
+        assert agg["cam3"]["switch_in_transient"] is False
+
+    def test_imag_line_is_annotated_when_a_transient_is_present(self):
+        verdict = {
+            "overall_pass": True,
+            "full_chain": {"loss": {"cam3": {"zero_loss": True}}},
+            "all_cambox_continuity": {
+                "imag": {
+                    "segments": [
+                        {
+                            "cambox": "CAM3",
+                            "pass": False,
+                            "switch_in_transient": True,
+                            "frames": 1682,
+                        }
+                    ]
+                }
+            },
+        }
+        report = edr.compose_report(verdict, {"run_id": "1144", "event": "unit"})
+        assert "switch-in transient → cold-cut, report-only" in report

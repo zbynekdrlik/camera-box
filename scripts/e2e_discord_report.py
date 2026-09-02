@@ -141,13 +141,27 @@ def _aggregate_segments(segments, cambox_key="cambox"):
     for seg in segments or []:
         cam = str(seg.get(cambox_key, "")).lower()
         if cam not in agg:
-            agg[cam] = {"pass": True, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 0}
+            agg[cam] = {
+                "pass": True,
+                "copies": 0,
+                "gaps": 0,
+                "undecodable": 0,
+                "frames": 0,
+                # issue 1144 -- a per-cam flag: did any of this cam's segments carry a switch-in
+                # transient (a raw content FAIL that the imag content gate excuses / attributes to
+                # cold-cut)? The raw `pass` glyph stays honest; the imag rendering annotates it so an
+                # excused ❌ on the detailed view is explained (report-only, matches overall_pass).
+                "switch_in_transient": False,
+            }
         a = agg[cam]
         a["pass"] = a["pass"] and bool(seg.get("pass"))
         a["copies"] += seg.get("copies", 0) or 0
         a["gaps"] += seg.get("gaps", 0) or 0
         a["undecodable"] += seg.get("undecodable", 0) or 0
         a["frames"] += seg.get("frames", 0) or 0
+        a["switch_in_transient"] = a["switch_in_transient"] or bool(
+            seg.get("switch_in_transient")
+        )
     return agg
 
 
@@ -179,9 +193,15 @@ def _section_zero_loss(verdict):
             a = agg.get(cam)
             if a is None:
                 continue
+            sit_note = (
+                " (switch-in transient → cold-cut, report-only)"
+                if a.get("switch_in_transient")
+                else ""
+            )
             lines.append(
                 f"  {_pass_glyph(a['pass'])} {cam}: {a['frames']} snímok, "
                 f"{a['copies']} kópií, {a['gaps']} medzier, {a['undecodable']} nečitateľných"
+                f"{sit_note}"
             )
         missing = [c for c in cams if c not in agg]
         for cam in missing:

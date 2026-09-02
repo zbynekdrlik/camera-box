@@ -3,17 +3,20 @@
 //! ## What this is
 //!
 //! The all-cambox per-segment sweep gates each imag ~28 s window with the honest #580v2 content gate
-//! (burn-id contiguity + optical beat). A **switch-in transient** is the imag NDI-receiver spin-up
-//! right after the program cuts to a camera: for ~10 s the receiver has not locked, so its digital
-//! corner-burn ids are missing (and the optical tick stalls), THEN it recovers and the rest of the
-//! window is clean. The real example (verdict-276174336, CAM3 window 1): `burn_first_id=146197`, the
-//! FIRST missing id is at offset 1 (right at the cut), 320 of 326 missing ids sit in the dense leading
-//! block 146198–146781 (~35 % of the 1673-id span), the body is clean but for 6 trailing ids,
-//! `optical_avg_step=1.010`, `stuck_density=0.201` (≈ the 326 missing burns), `undecodable=0`. Strih's
-//! own CAM3 window is 0/0 — so this is purely an imag-branch spin-up transient, NOT a delivery loss.
-//! It is sporadic (0 of 3 healthy runs reproduced it), which is why a blind boundary trim (branch a of
-//! issue 1144) would wrongly cut healthy windows too and HIDE real leading loss — the reason branch
-//! (b) attributes the transient to the cold-cut measurement instead.
+//! (burn-id contiguity + optical beat). A **switch-in transient** is an imag burn-loss burst right
+//! after the active program camera changes: for ~10 s the imag corner-burn ids are missing (and the
+//! optical tick jitters), THEN it recovers and the rest of the window is clean. The real example
+//! (verdict-276174336, CAM3 window 1): `burn_first_id=146197`, the FIRST missing id is at offset 1
+//! (right at the boundary), 320 of 326 missing ids sit in the dense leading block 146198–146781
+//! (~35 % of the 1673-id span, ~55 % missing), the body is clean but for 6 trailing ids,
+//! `optical_avg_step=1.010`, `optical_stuck_density=0.201` (≈ the 326 missing burns),
+//! `optical_max_stuck_run=5`, `undecodable=0`. Strih's own CAM3 window is 0/0 — so this is purely an
+//! imag-branch artifact, NOT a delivery loss. It is sporadic (0 of 3 healthy runs reproduced it),
+//! which is why a blind boundary trim (issue 1144 branch a) would wrongly cut healthy windows too and
+//! HIDE real leading loss — branch (b) attributes the transient to the cold-cut measurement instead.
+//! (The precise imag-side mechanism is UNVERIFIED — the imag box is routed once and "never
+//! scene-switched", #462, so this is a leading burn-loss burst correlated with the program cut, not a
+//! confirmed NDI-receiver spin-up. The classifier keys on the observed SHAPE, not the cause.)
 //!
 //! ## The gate stays REPORT-ONLY
 //!
@@ -21,59 +24,67 @@
 //! blocking outcome — this is preparatory for the later blocking flip (issue 1144 item 2, a deliberate
 //! sick-camera rig run, supervisor scope). The classifier is deliberately CONSERVATIVE / FAIL-CLOSED:
 //! any criterion failing leaves the segment a content failure (the cheap direction while report-only).
-//! Only ONE real positive example exists (n=1); the thresholds are calibrated from it + the 38 healthy
-//! zero-loss segments, and the later flip MUST re-validate against the item-2 sick-camera run that a
-//! mid-window / sustained / frozen fault is NOT excused.
-//!
-//! ## Why it lives at the crate root (default features)
-//!
-//! Same reasoning as `imag_leg_gate` / `tear_detect`: the whole `probe` module is
-//! `#[cfg(feature = "probe")]`, so `recording-verdict.rs` is CI-only. This is the PURE shape decision
-//! (no probe deps), so it unit-tests Tier-0. `recording-verdict` only CALLS `classify`; the excusal
-//! (`content_pass = raw_pass || is_transient`) folds ONLY through the REPORT-ONLY content seam, never
-//! the blocking presence/verification side of the #1142 split.
+//! Only ONE real positive example exists (n=1); the thresholds are calibrated TIGHTLY around it + the
+//! 38 healthy zero-loss segments (a review found the first-cut thresholds excused shapes far from the
+//! positive — a hard freeze, a small drop, a periodic loss, a total burn blackout, an independent
+//! optical stuck — so the constants are now a BAND around the positive, not loose floors). The later
+//! flip MUST re-validate against the item-2 sick-camera run that a mid-window / sustained / frozen /
+//! blackout fault is NOT excused, and re-confirm the positive's real values before pinning the band.
 
 /// Within-burst grouping distance AND the burst-vs-residual separation, in burn ids. The real
 /// transient's internal gaps are <= 7 ids while the gap to any trailing residual is hundreds, so 60
 /// (~1 s at 60 fps with burn step 1) groups the spin-up burst without swallowing a later event.
 pub const RECOVERY_GAP_IDS: u32 = 60;
 
-/// The loss ONSET must sit within this many ids of the window start (the program cut). The receiver
-/// spin-up begins the moment the program cuts; the real positive's first missing id is at offset 1.
-/// 60 (~1 s) gives margin without admitting a mid-window burst. n=1 calibrated — re-validate at flip.
+/// The loss ONSET must sit within this many ids of the window start (the program cut). The burst
+/// begins at the boundary; the real positive's first missing id is at offset 1. 60 (~1 s) gives
+/// margin without admitting a mid-window burst. n=1 calibrated — re-validate at flip.
 pub const ONSET_OFFSET_MAX_IDS: u32 = 60;
 
-/// The leading burst must be SUBSTANTIAL — a genuine seconds-long spin-up, not a handful of real
-/// drops. The real positive's burst is 320 ids; a single dropped frame (#583) is 1. 30 (~0.5 s) is a
-/// conservative floor well below the positive and well above any few-frame delivery drop.
-pub const MIN_TRANSIENT_MISSING: usize = 30;
+/// The leading burst must be SUBSTANTIAL — a genuine seconds-long transient, not a handful of real
+/// drops. The real positive's burst is 320 ids; a single dropped frame (#583) is 1. 100 rejects a
+/// sub-second real drop (review shape B: a 30-id contiguous drop) while sitting well below the
+/// positive. n=1 calibrated — re-validate at flip.
+pub const MIN_TRANSIENT_MISSING: usize = 100;
 
 /// The leading burst must be BOUNDED to the leading region — a camera dead/flapping for the first
 /// half of a window is NOT a switch-in transient. The real positive's burst ends at ~35 % of the
 /// span; 0.40 gives a small margin. n=1 calibrated — re-validate at flip.
 pub const MAX_TRANSIENT_SPAN_FRAC: f64 = 0.40;
 
-/// The leading burst must be DENSE (a real receiver-not-locked stretch drops a large fraction of
-/// burns) — a sparse leading loss is a different fault. The real positive's burst density is ~0.55;
-/// 0.30 separates it from a sparse-but-grouped leading loss.
-pub const BURST_DENSITY_MIN: f64 = 0.30;
+/// The leading burst density (`burst_len / burst_id_span`) must sit in a BAND around the positive's
+/// ~0.55 (jittery ~half-rate delivery). Below the floor is a sparse / periodic loss (review shape C:
+/// every-3rd-frame, density ~0.33), a different fault. Above the ceiling is a near-total burn
+/// blackout (a solid contiguous block, density ~1.0 — review shape A/blackout), which is not the
+/// observed jittery shape and is left fail-closed. n=1 calibrated — re-validate at flip.
+pub const BURST_DENSITY_MIN: f64 = 0.40;
+/// Upper edge of the burst-density band (see [`BURST_DENSITY_MIN`]).
+pub const BURST_DENSITY_MAX: f64 = 0.75;
 
 /// After the leading burst the window must RECOVER — near-zero residual missing ids. The baseline is
-/// ZERO missing across all 38 healthy segments; the real positive has 6 trailing residual ids. 10 is
-/// a tight recovery bound just above the observed residual. n=1 calibrated — re-validate at flip.
-pub const MAX_RESIDUAL_AFTER_BURST: usize = 10;
+/// ZERO missing across all 38 healthy segments; the real positive has 6 trailing residual ids. 6 is
+/// the tightest bound that still accepts the positive (a review noted a looser bound masks that many
+/// unrelated real drops appended after a transient). n=1 calibrated — re-validate at flip.
+pub const MAX_RESIDUAL_AFTER_BURST: usize = 6;
 
-/// `avg_step` guards optical DRIFT only (not a localized freeze): a genuinely collapsed/net-advancing
-/// leg reads far from the expected step. Healthy spread is +-0.0012, the positive is +0.010; 0.05 is
-/// a coarse guard. NOT freeze protection — the stuck-vs-missing consistency below is what ties the
-/// optical stuck to the burn transient.
+/// `avg_step` guards optical DRIFT only (not a localized freeze): a net-collapsed / net-advancing leg
+/// reads far from the expected step. Healthy spread is +-0.0012, the positive is +0.010; 0.05 is a
+/// coarse guard. A localized freeze that CATCHES UP leaves `avg_step ≈ 1` and is caught by
+/// [`MAX_STUCK_RUN_ALLOWED`] instead, not this term.
 pub const AVG_STEP_DEV_MAX: f64 = 0.05;
 
-/// The optical stuck must be EXPLAINED by the burn transient (each spin-up frame that is repeated is
-/// also a missing burn), not an independent freeze. `stuck_density * span_frames` (~ stuck frames)
+/// The optical must not STALL in a long run — a hard freeze/blackout at the cut (review shape A) has
+/// a `max_stuck_run` of hundreds even while `avg_step ≈ 1` (it catches up), whereas the positive's
+/// jittery half-rate has `max_stuck_run = 5`. 15 (3x the positive) rejects a freeze while accepting
+/// the positive. n=1 calibrated — re-validate at flip.
+pub const MAX_STUCK_RUN_ALLOWED: u32 = 15;
+
+/// The optical stuck must be EXPLAINED by the burn transient (each transient frame that is repeated
+/// is also a missing burn), not an independent freeze. `stuck_density * span_frames` (~ stuck frames)
 /// must not exceed the missing-burn count by more than this fraction. The real positive: ~338 stuck
-/// frames vs 326 missing burns (ratio 1.03) << 1.25.
-pub const STUCK_VS_MISSING_TOL: f64 = 0.25;
+/// frames vs 326 missing burns (ratio 1.037). 0.10 rejects an independent stuck stacked on the burst
+/// (review shape E) while accepting the positive. n=1 calibrated — re-validate at flip.
+pub const STUCK_VS_MISSING_TOL: f64 = 0.10;
 
 /// The classification of one imag content-gate segment. `is_transient == true` means the segment's
 /// content failure is a switch-in transient (attributed to the cold-cut measurement, excused from the
@@ -83,7 +94,7 @@ pub const STUCK_VS_MISSING_TOL: f64 = 0.25;
 pub struct SwitchInTransient {
     /// Is this segment's content failure a switch-in transient (excused from the content gate)?
     pub is_transient: bool,
-    /// The first criterion that failed (or the positive label) — surfaced in the segment JSON note.
+    /// The first criterion that failed (or the positive label) — surfaced in the segment JSON.
     pub reason: &'static str,
     /// `min(missing_ids) - first_id` — how far into the window the loss begins (0/1 = at the cut).
     pub first_offset: u32,
@@ -115,15 +126,14 @@ impl Default for SwitchInTransient {
 ///
 /// `missing_ids` MUST be sorted ascending (as `BurnStepContiguity::missing_ids` already is). The
 /// verdict is a CONJUNCTION of criteria (fail-closed — the first failing one names the `reason`):
-/// cut-adjacent window; burns present + nothing undecodable; optical not drifting; loss onset at the
-/// cut; a substantial + bounded + dense leading burst; a clean recovery after it; and the optical
-/// stuck explained by (not exceeding) the burn transient. See the module docstring for the calibration
-/// and the flip-time re-validation requirement.
+/// cut-adjacent window; burns present + nothing undecodable; optical not drifting AND not stalling in
+/// a long run; loss onset at the cut; a substantial + bounded + BAND-dense leading burst; a clean
+/// recovery after it; and the optical stuck explained by (not exceeding) the burn transient. See the
+/// module docstring for the calibration and the flip-time re-validation requirement.
 ///
 /// `first_id`/`last_id` are the DECODED burn range (as `BurnStepContiguity` reports). A total-black
 /// onset with zero decodes before the first lock is invisible here (no missing ids in the pre-lock
-/// gap) — that shape is handled by the span / undecodable terms, not this classifier, and is a
-/// flip-time re-validation item.
+/// gap) — that shape is handled by the span / undecodable terms, not this classifier.
 #[allow(clippy::too_many_arguments)]
 pub fn classify(
     first_id: Option<u32>,
@@ -134,6 +144,7 @@ pub fn classify(
     avg_step: f64,
     expected_step: u32,
     stuck_density: f64,
+    max_stuck_run: u32,
     span_frames: u32,
     cut_adjacent: bool,
 ) -> SwitchInTransient {
@@ -166,6 +177,10 @@ pub fn classify(
         out.reason = "optical drift (avg_step off expected)";
         return out;
     }
+    if max_stuck_run > MAX_STUCK_RUN_ALLOWED {
+        out.reason = "optical stuck run too long (freeze, not a transient)";
+        return out;
+    }
     let span = last.saturating_sub(first);
     if span == 0 {
         out.reason = "degenerate id span";
@@ -196,7 +211,7 @@ pub fn classify(
     out.burst_density = burst_len as f64 / burst_id_span as f64;
 
     if burst_len < MIN_TRANSIENT_MISSING {
-        out.reason = "leading burst too small (a few drops, not a spin-up)";
+        out.reason = "leading burst too small (a few drops, not a transient)";
         return out;
     }
     if out.burst_end_offset as f64 > MAX_TRANSIENT_SPAN_FRAC * span as f64 {
@@ -204,7 +219,12 @@ pub fn classify(
         return out;
     }
     if out.burst_density < BURST_DENSITY_MIN {
-        out.reason = "leading burst not dense (sparse leading loss)";
+        out.reason = "leading burst not dense enough (sparse / periodic loss)";
+        return out;
+    }
+    if out.burst_density > BURST_DENSITY_MAX {
+        out.reason =
+            "leading burst too dense (near-total blackout, not the observed jittery shape)";
         return out;
     }
     if out.residual > MAX_RESIDUAL_AFTER_BURST {
@@ -218,7 +238,8 @@ pub fn classify(
     }
 
     out.is_transient = true;
-    out.reason = "switch-in transient (NDI receiver spin-up after program cut)";
+    out.reason =
+        "switch-in transient (leading burn-loss burst that recovers after the program cut)";
     out
 }
 
@@ -227,11 +248,14 @@ mod tests {
     use super::*;
 
     const EXPECTED_STEP: u32 = 1;
+    // The real positive's optical max_stuck_run (verdict-276174336 CAM3 window 1).
+    const POSITIVE_MAX_STUCK_RUN: u32 = 5;
 
-    /// Build the real CAM3-window-1 switch-in transient shape (verdict-276174336): a dense every-2
-    /// leading burst starting at the cut, then a clean body but for 6 trailing residual ids.
+    /// Build the real CAM3-window-1 switch-in transient shape (verdict-276174336): a jittery
+    /// (~half-rate) leading burst of ~320 ids starting at the cut, then a clean body but for 6
+    /// trailing residual ids. Total 326 missing, matching the real run.
     fn positive_missing(first: u32) -> Vec<u32> {
-        let mut m: Vec<u32> = ((first + 1)..=(first + 585)).step_by(2).collect(); // ~293 ids, density ~0.5
+        let mut m: Vec<u32> = ((first + 1)..=(first + 639)).step_by(2).collect(); // 320 ids, density ~0.5
         m.extend([
             first + 1450,
             first + 1460,
@@ -257,33 +281,39 @@ mod tests {
             1.010, // avg_step
             EXPECTED_STEP,
             0.201, // stuck_density
-            1682,  // span_frames
-            true,  // cut_adjacent
+            POSITIVE_MAX_STUCK_RUN,
+            1682, // span_frames
+            true, // cut_adjacent
         );
         assert!(
             sit.is_transient,
-            "issue 1144: the real CAM3-w1 spin-up burst must classify as a switch-in transient: {sit:?}"
+            "issue 1144: the real CAM3-w1 transient must classify as a switch-in transient: {sit:?}"
         );
         assert_eq!(sit.first_offset, 1);
         assert!(sit.burst_len >= MIN_TRANSIENT_MISSING);
         assert_eq!(sit.residual, 6);
-        assert!(sit.burst_density >= BURST_DENSITY_MIN);
+        assert!(sit.burst_density >= BURST_DENSITY_MIN && sit.burst_density <= BURST_DENSITY_MAX);
     }
 
-    #[test]
-    fn healthy_zero_loss_is_not_transient() {
-        let sit = classify(
-            Some(1000),
-            Some(2673),
-            &[],
+    fn healthy(first: u32, last: u32, m: &[u32], stuck: f64, run: u32) -> SwitchInTransient {
+        classify(
+            Some(first),
+            Some(last),
+            m,
             0,
             true,
             1.0,
             EXPECTED_STEP,
-            0.005,
+            stuck,
+            run,
             1682,
             true,
-        );
+        )
+    }
+
+    #[test]
+    fn healthy_zero_loss_is_not_transient() {
+        let sit = healthy(1000, 2673, &[], 0.005, 1);
         assert!(!sit.is_transient);
         assert_eq!(sit.reason, "no burn loss");
     }
@@ -291,46 +321,100 @@ mod tests {
     #[test]
     fn single_frame_drop_is_not_transient() {
         // #583 shape: one dropped frame near the window start — a REAL loss, must NOT be excused.
-        let sit = classify(
-            Some(1000),
-            Some(2673),
-            &[1015],
-            0,
-            true,
-            1.0,
-            EXPECTED_STEP,
-            0.005,
-            1682,
-            true,
-        );
+        let sit = healthy(1000, 2673, &[1015], 0.005, 1);
         assert!(
             !sit.is_transient,
             "a single real drop must stay a content failure: {sit:?}"
         );
         assert_eq!(
             sit.reason,
-            "leading burst too small (a few drops, not a spin-up)"
+            "leading burst too small (a few drops, not a transient)"
         );
     }
 
     #[test]
-    fn half_window_dead_camera_is_not_transient() {
-        // Dense loss through the first ~60 % of the span — bounded check must reject it.
-        let first = 1000u32;
-        let last = first + 1673;
-        let m: Vec<u32> = ((first + 1)..=(first + 1000)).step_by(2).collect();
+    fn small_hard_drop_at_cut_is_not_transient() {
+        // Review shape B: a ~0.5 s hard contiguous drop at the cut (30 ids) — 10x smaller than the
+        // positive's 320-id burst. Must NOT be excused.
+        let m: Vec<u32> = (1001..=1030).collect();
+        let sit = healthy(1000, 1000 + 1673, &m, 0.02, 1);
+        assert!(
+            !sit.is_transient,
+            "a small hard drop must not be excused: {sit:?}"
+        );
+        assert_eq!(
+            sit.reason,
+            "leading burst too small (a few drops, not a transient)"
+        );
+    }
+
+    #[test]
+    fn hard_freeze_at_cut_is_not_transient() {
+        // Review shape A: a ~10 s hard freeze at the cut — a long contiguous burst whose optical
+        // STALLED (large max_stuck_run) even though avg_step catches up. The max-stuck-run cap must
+        // reject it. The mandate: a frozen leg must NOT be excused.
+        let first = 146197u32;
+        let m: Vec<u32> = ((first + 1)..=(first + 600)).step_by(2).collect(); // 300 ids
         let sit = classify(
             Some(first),
-            Some(last),
+            Some(first + 1673),
+            &m,
+            0,
+            true,
+            1.0, // net catches up
+            EXPECTED_STEP,
+            0.30,
+            600, // a long optical stall
+            1682,
+            true,
+        );
+        assert!(
+            !sit.is_transient,
+            "a hard freeze at the cut must not be excused: {sit:?}"
+        );
+        assert_eq!(
+            sit.reason,
+            "optical stuck run too long (freeze, not a transient)"
+        );
+    }
+
+    #[test]
+    fn total_burn_blackout_is_not_transient() {
+        // A solid contiguous burn blackout at the cut (density ~1.0) — denser than the observed
+        // jittery ~0.55 shape. The density ceiling must reject it (fail-closed on an unobserved
+        // shape).
+        let first = 146197u32;
+        let m: Vec<u32> = ((first + 1)..=(first + 600)).collect(); // contiguous, density ~1.0
+        let sit = classify(
+            Some(first),
+            Some(first + 1673),
             &m,
             0,
             true,
             1.0,
             EXPECTED_STEP,
             0.30,
+            3, // optical advancing (short stall runs)
             1682,
             true,
         );
+        assert!(
+            !sit.is_transient,
+            "a total burn blackout must not be excused: {sit:?}"
+        );
+        assert_eq!(
+            sit.reason,
+            "leading burst too dense (near-total blackout, not the observed jittery shape)"
+        );
+    }
+
+    #[test]
+    fn half_window_dead_camera_is_not_transient() {
+        // Dense loss through the first ~60 % of the span — the bounded check must reject it.
+        let first = 1000u32;
+        let last = first + 1673;
+        let m: Vec<u32> = ((first + 1)..=(first + 1000)).step_by(2).collect();
+        let sit = healthy(first, last, &m, 0.30, 3);
         assert!(
             !sit.is_transient,
             "a half-window-dead camera must not be excused: {sit:?}"
@@ -344,18 +428,7 @@ mod tests {
         let first = 1000u32;
         let last = first + 1673;
         let m: Vec<u32> = ((first + 700)..=(first + 900)).step_by(2).collect();
-        let sit = classify(
-            Some(first),
-            Some(last),
-            &m,
-            0,
-            true,
-            1.0,
-            EXPECTED_STEP,
-            0.12,
-            1682,
-            true,
-        );
+        let sit = healthy(first, last, &m, 0.12, 1);
         assert!(
             !sit.is_transient,
             "a mid-window burst must not be excused: {sit:?}"
@@ -364,32 +437,26 @@ mod tests {
     }
 
     #[test]
-    fn scattered_loss_is_not_transient() {
-        // ~3 % loss spread across the whole window with big gaps — not a leading burst.
+    fn periodic_sparse_loss_is_not_transient() {
+        // Review shape C: every-3rd-frame periodic loss over the leading region (density ~0.33) — a
+        // bandwidth/cadence fault, not a jittery transient. The density floor must reject it.
         let first = 1000u32;
         let last = first + 1673;
-        let m: Vec<u32> = ((first + 5)..=(first + 1650)).step_by(33).collect(); // ~50 ids, gaps 33
-        let sit = classify(
-            Some(first),
-            Some(last),
-            &m,
-            0,
-            true,
-            1.0,
-            EXPECTED_STEP,
-            0.03,
-            1682,
-            true,
-        );
+        let m: Vec<u32> = ((first + 1)..=(first + 660)).step_by(3).collect(); // density ~0.33
+        let sit = healthy(first, last, &m, 0.10, 2);
         assert!(
             !sit.is_transient,
-            "scattered whole-window loss must not be excused: {sit:?}"
+            "a periodic sparse loss must not be excused: {sit:?}"
+        );
+        assert_eq!(
+            sit.reason,
+            "leading burst not dense enough (sparse / periodic loss)"
         );
     }
 
     #[test]
     fn net_frozen_leg_is_not_transient() {
-        // avg_step far from expected — drift guard rejects it before any burst analysis.
+        // avg_step far from expected — the drift guard rejects it before any burst analysis.
         let first = 146197u32;
         let m = positive_missing(first);
         let sit = classify(
@@ -398,9 +465,10 @@ mod tests {
             &m,
             0,
             true,
-            1.6,
+            1.6, // net drift
             EXPECTED_STEP,
             0.201,
+            POSITIVE_MAX_STUCK_RUN,
             1682,
             true,
         );
@@ -413,19 +481,21 @@ mod tests {
 
     #[test]
     fn independent_optical_stuck_is_not_transient() {
-        // A small leading burst but a large optical stuck NOT explained by the missing burns.
-        let first = 1000u32;
-        let last = first + 1673;
-        let m: Vec<u32> = ((first + 1)..=(first + 80)).step_by(2).collect(); // 40 ids
+        // The positive burst PLUS extra independent optical stuck NOT explained by the missing burns
+        // (review shape E). The stuck-consistency term (tol 0.10) must reject it.
+        let first = 146197u32;
+        let m = positive_missing(first); // 326 missing
+                                         // stuck_density * span_frames = 0.40 * 1682 = 673 stuck frames >> 326 * 1.10 = 358.6.
         let sit = classify(
             Some(first),
-            Some(last),
+            Some(first + 1673),
             &m,
             0,
             true,
-            1.0,
+            1.010,
             EXPECTED_STEP,
-            0.60,
+            0.40, // an independent optical stuck stacked on the transient
+            POSITIVE_MAX_STUCK_RUN,
             1682,
             true,
         );
@@ -446,18 +516,7 @@ mod tests {
         let last = first + 1673;
         let mut m: Vec<u32> = ((first + 1)..=(first + 400)).step_by(2).collect();
         m.extend(((first + 900)..=(first + 1100)).step_by(2)); // second burst, ~100 residual
-        let sit = classify(
-            Some(first),
-            Some(last),
-            &m,
-            0,
-            true,
-            1.0,
-            EXPECTED_STEP,
-            0.30,
-            1682,
-            true,
-        );
+        let sit = healthy(first, last, &m, 0.30, 3);
         assert!(
             !sit.is_transient,
             "a double burst must not be excused: {sit:?}"
@@ -481,8 +540,9 @@ mod tests {
             1.010,
             EXPECTED_STEP,
             0.201,
+            POSITIVE_MAX_STUCK_RUN,
             1682,
-            false,
+            false, // not cut-adjacent (a consecutive same-cambox window)
         );
         assert!(
             !sit.is_transient,
@@ -499,11 +559,12 @@ mod tests {
             Some(first),
             Some(first + 1673),
             &m,
-            3,
+            3, // undecodable frames present
             true,
             1.010,
             EXPECTED_STEP,
             0.201,
+            POSITIVE_MAX_STUCK_RUN,
             1682,
             true,
         );
@@ -512,31 +573,5 @@ mod tests {
             "undecodable frames present must not be excused: {sit:?}"
         );
         assert_eq!(sit.reason, "undecodable frames present");
-    }
-
-    #[test]
-    fn sparse_leading_within_gap_is_not_transient() {
-        // 35 missing grouped into one leading burst (gaps 14 <= RECOVERY_GAP, within the bound) but
-        // NOT dense (~0.07) — the density check must reject it even though it is substantial + bounded.
-        let first = 1000u32;
-        let last = first + 1673;
-        let m: Vec<u32> = ((first + 1)..=(first + 477)).step_by(14).collect(); // 35 ids over a 476 span
-        let sit = classify(
-            Some(first),
-            Some(last),
-            &m,
-            0,
-            true,
-            1.0,
-            EXPECTED_STEP,
-            0.01,
-            1682,
-            true,
-        );
-        assert!(
-            !sit.is_transient,
-            "a sparse leading loss must not be excused: {sit:?}"
-        );
-        assert_eq!(sit.reason, "leading burst not dense (sparse leading loss)");
     }
 }

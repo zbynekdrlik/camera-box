@@ -573,10 +573,12 @@ pub struct ProjectionProof {
     /// Frame-weighted >= 1-aux-mark coverage across the CAM2 windows -- the operability signal on the
     /// projection leg (the aux single-mark cross-band is what actually catches a projection tear).
     pub aux_any_coverage: f64,
-    /// The issue-887 answer: is the imag HDMI-1 projection SCANOUT proof BACKED this run? True iff at
-    /// least one CAM2 window proved the tear signal live (`observed_fraction > 0`) AND every CAM2
-    /// window is tear-clean. Report-only today; the flip should require this AND the separately-
-    /// blocking CAM2 frame-continuity.
+    /// The issue-887 answer: is the imag HDMI-1 projection SCANOUT proof BACKED this run? True iff the
+    /// projection tap was OPERABLE (`aux_any_coverage >= AUX_ANY_OPERABLE_FLOOR` -- the aux marks
+    /// decoded, so a tear WOULD have been caught) AND every CAM2 window is tear-clean. Deliberately
+    /// NOT keyed on `Observed` (which requires a tear to have actually happened, so the CLEANEST
+    /// projection reads Unproven and would falsely be "not backed"). Report-only today; the flip
+    /// should require this AND the separately-blocking CAM2 frame-continuity.
     pub hdmi1_proof_backed: bool,
 }
 
@@ -614,9 +616,13 @@ pub fn summarize_projection_leg(cam2_windows: &[&TearStats]) -> ProjectionProof 
     } else {
         0.0
     };
-    // Report-only: at least one live (Observed) + clean projection window backs the HDMI-1 SCANOUT
-    // proof. observed_fraction is carried so a stricter flip can demand more than "any".
-    let hdmi1_proof_backed = observed_fraction > 0.0 && tear_gate_clean;
+    // Report-only: the HDMI-1 scanout proof is BACKED when the projection tap was OPERABLE this run
+    // (the aux marks decoded, so a tear WOULD have been caught -- the operability signal, NOT
+    // `Observed` which requires a tear to have actually occurred, so a perfectly clean run reads
+    // Unproven) AND every CAM2 window is tear-clean. `observed_fraction` is carried separately so a
+    // stricter flip can require it too.
+    let hdmi1_proof_backed =
+        windows > 0 && aux_any_coverage >= AUX_ANY_OPERABLE_FLOOR && tear_gate_clean;
     ProjectionProof {
         windows,
         observed_fraction,
@@ -1207,9 +1213,10 @@ mod tests {
     }
 
     #[test]
-    fn projection_leg_backed_when_observed_and_clean_1144() {
-        // A green CAM2 projection run: one window Observed + clean (tear_fraction below the ceiling),
-        // one Unproven (signal blind on that window). The HDMI-1 scanout proof IS backed.
+    fn projection_leg_backed_when_operable_and_clean_1144() {
+        // A green CAM2 projection run: aux operable (marks decode ~0.98), tear-clean. Backed --
+        // regardless of Observed vs Unproven (a perfectly clean projection reads Unproven, which is
+        // exactly why hdmi1_proof_backed keys on aux OPERABILITY, not on a tear having occurred).
         let obs = proj_win(TearSignalViability::Observed, 0.003, 3, 0.98, 848);
         let unp = proj_win(TearSignalViability::Unproven, 0.0, 0, 0.99, 847);
         let p = summarize_projection_leg(&[&obs, &unp]);
@@ -1218,25 +1225,42 @@ mod tests {
         assert!(p.tear_gate_clean);
         assert!(
             p.hdmi1_proof_backed,
-            "an Observed + clean projection window backs HDMI-1: {p:?}"
+            "an operable + clean projection run backs HDMI-1: {p:?}"
         );
         let expect_aux = (0.98 * 848.0 + 0.99 * 847.0) / (848.0 + 847.0);
         assert!((p.aux_any_coverage - expect_aux).abs() < 1e-9);
     }
 
     #[test]
-    fn projection_leg_not_backed_when_all_unproven_1144() {
-        // No CAM2 window ever proved the tear signal live -> the HDMI-1 proof is NOT backed (a
-        // signal-blind run cannot claim the projection was verified) even though the tear gate is
-        // vacuously clean.
+    fn projection_leg_backed_when_clean_even_if_no_tear_observed_1144() {
+        // The CLEANEST projection: 0 tears anywhere (both windows Unproven) but the aux marks decode
+        // (~0.98 -> operable). This MUST be backed -- the fix for keying on aux operability rather
+        // than `Observed`; the old logic (observed_fraction > 0) falsely called the healthiest run
+        // "not backed".
         let a = proj_win(TearSignalViability::Unproven, 0.0, 0, 0.99, 847);
         let b = proj_win(TearSignalViability::Unproven, 0.0, 0, 0.98, 848);
         let p = summarize_projection_leg(&[&a, &b]);
         assert_eq!(p.observed_fraction, 0.0);
         assert!(p.tear_gate_clean);
         assert!(
+            p.hdmi1_proof_backed,
+            "a clean, aux-operable projection is backed even with no tear observed: {p:?}"
+        );
+    }
+
+    #[test]
+    fn projection_leg_not_backed_when_aux_blind_1144() {
+        // The projection tap is BLIND (aux marks did not decode, coverage ~0 < the operable floor) --
+        // a tear would go unseen, so the HDMI-1 proof is NOT backed even though the tear gate is
+        // vacuously clean (the issue-1101 blind-signal trap).
+        let a = proj_win(TearSignalViability::Unproven, 0.0, 0, 0.0, 847);
+        let b = proj_win(TearSignalViability::Unproven, 0.0, 0, 0.01, 848);
+        let p = summarize_projection_leg(&[&a, &b]);
+        assert!(p.tear_gate_clean);
+        assert!(p.aux_any_coverage < AUX_ANY_OPERABLE_FLOOR);
+        assert!(
             !p.hdmi1_proof_backed,
-            "an all-Unproven (blind) projection run is not backed: {p:?}"
+            "an aux-blind projection run cannot back HDMI-1: {p:?}"
         );
     }
 
