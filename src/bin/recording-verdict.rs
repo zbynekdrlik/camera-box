@@ -6011,6 +6011,12 @@ fn build_and_print_verdict_with_stream_diffs(
                         imag_burn_step
                     );
                     let mut imag_overall_pass = !schedule.is_empty();
+                    // issue 1144 -- the RAW per-segment content AND (no switch-in-transient excusal),
+                    // surfaced alongside `overall_pass` so the honest raw signal is never lost.
+                    let mut imag_content_overall_pass_raw = !schedule.is_empty();
+                    // issue 1144 -- switch-in transients attributed to the cold-cut measurement
+                    // (surfaced under `cold_cut_onset.imag_switch_in_transients`, never silently dropped).
+                    let mut imag_switch_in_transients: Vec<serde_json::Value> = Vec::new();
                     let mut imag_segments_json: Vec<serde_json::Value> =
                         Vec::with_capacity(schedule.len());
                     for (w, win_frames) in schedule.iter().zip(imag_windows.iter()) {
@@ -6026,7 +6032,43 @@ fn build_and_print_verdict_with_stream_diffs(
                             imag_optical_step,
                         );
                         let pass = zl.is_zero_loss(OPTICAL_UNDECODABLE_RATE_MAX);
-                        imag_overall_pass &= pass;
+                        // issue 1144 -- classify a switch-in transient (an imag NDI-receiver spin-up
+                        // burst right after the program cut to this camera: a dense leading burn-loss
+                        // burst that recovers). Every imag sweep window begins at a schedule program
+                        // cut, so cut_adjacent is structurally true here (the parameter encodes the
+                        // classifier's precondition). A classified transient is attributed to the
+                        // cold-cut measurement and excused from the REPORT-ONLY content fold rather
+                        // than failing on it; a raw content failure that is NOT a transient stays a
+                        // failure (fail-closed). `content_gates_overall_pass()` is still false, so
+                        // this changes no blocking outcome today.
+                        let sit = camera_box::switch_in_transient::classify(
+                            zl.burn.first_id,
+                            zl.burn.last_id,
+                            &zl.burn.missing_ids,
+                            zl.undecodable,
+                            zl.burn_present_ok,
+                            zl.optical.avg_step,
+                            imag_optical_step,
+                            zl.optical.stuck_density,
+                            zl.optical_span_frames,
+                            true,
+                        );
+                        let content_pass = pass || sit.is_transient;
+                        imag_content_overall_pass_raw &= pass;
+                        imag_overall_pass &= content_pass;
+                        if sit.is_transient {
+                            imag_switch_in_transients.push(serde_json::json!({
+                                "cambox": w.cambox,
+                                "start_ns": w.start_ns,
+                                "end_ns": w.end_ns,
+                                "reason": sit.reason,
+                                "first_offset": sit.first_offset,
+                                "burst_len": sit.burst_len,
+                                "burst_end_offset": sit.burst_end_offset,
+                                "residual": sit.residual,
+                                "burst_density": sit.burst_density,
+                            }));
+                        }
                         // #333: a frames==0 window is empty by construction (imag not emitting in that
                         // slice). Unlike the swept camboxes (an empty window there = the painter box),
                         // imag is never scene-switched, so an empty imag window IS a real gap in its
@@ -6058,7 +6100,13 @@ fn build_and_print_verdict_with_stream_diffs(
                             zl.optical.no_localized_stuck_density(),
                             zl.burn_present_ok,
                             zl.burn.missing_ids.len(),
-                            if pass { "PASS" } else { "FAIL" }
+                            if pass {
+                                "PASS"
+                            } else if sit.is_transient {
+                                "FAIL(raw) -> switch-in transient attributed to cold-cut (content-excused, issue 1144)"
+                            } else {
+                                "FAIL"
+                            }
                         );
                         if let Some(note) = &note {
                             println!("      ⚠ {note}");
@@ -6086,7 +6134,11 @@ fn build_and_print_verdict_with_stream_diffs(
                             "burn_first_id": zl.burn.first_id,
                             "burn_last_id": zl.burn.last_id,
                             "burn_missing_ids": zl.burn.missing_ids,
+                            // issue 1144 -- `pass` is the RAW per-frame content verdict; a segment
+                            // whose failure is a switch-in transient carries `switch_in_transient:
+                            // true` and is excused from the content fold (attributed to cold-cut).
                             "pass": pass,
+                            "switch_in_transient": sit.is_transient,
                             "note": note,
                         }));
                     }
@@ -6107,6 +6159,12 @@ fn build_and_print_verdict_with_stream_diffs(
                     report["all_cambox_continuity"]["imag"] = serde_json::json!({
                         "segments": imag_segments_json,
                         "overall_pass": imag_overall_pass,
+                        // issue 1144 -- `overall_pass` now EXCUSES a switch-in transient (attributed
+                        // to cold-cut); `content_overall_pass_raw` is the un-excused raw AND, so the
+                        // honest raw signal is never lost. Both fold through the REPORT-ONLY content
+                        // seam, so neither reds a run today.
+                        "content_overall_pass_raw": imag_content_overall_pass_raw,
+                        "switch_in_transient_count": imag_switch_in_transients.len(),
                         "guard_ns": args.switch_guard_ns.max(0),
                         "optical_expected_step": imag_optical_step,
                         "burn_render_step": imag_burn_step,
@@ -6127,6 +6185,18 @@ fn build_and_print_verdict_with_stream_diffs(
                                              imag encoder fix (issue 1130 x264 record-load observer \
                                              effect). Presence/verification is separately BLOCKING.",
                     });
+                    // issue 1144 -- surface the switch-in transients under the cold-cut facet (the
+                    // #768/#1086 measurement they belong to), so the attribution is never silently
+                    // dropped. Report-only, like the cold-cut facet itself; `cold_cut_onset` was
+                    // written earlier in this sweep so it is present here.
+                    if let Some(cc) =
+                        report["all_cambox_continuity"]["cold_cut_onset"].as_object_mut()
+                    {
+                        cc.insert(
+                            "imag_switch_in_transients".to_string(),
+                            serde_json::json!(imag_switch_in_transients),
+                        );
+                    }
                     // issue 798 -> #1142 — REPORT-ONLY per-frame CONTENT fold: a no-op while
                     // `imag_leg_gate::content_gates_overall_pass()` is `false`. The per-segment imag
                     // continuity is confounded by the issue 1130 observer effect, so it stays
