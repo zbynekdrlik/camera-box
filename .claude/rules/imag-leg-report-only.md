@@ -123,6 +123,51 @@ PRESENCE, `presentation_cadence` uniformity floor 0.90, delivery-spread bound 24
 + pinned `_since_1142`, and this same mining confirmed each keeps the 3 green runs green while the
 RED 4th run correctly reds on the uniformity floor at beat-corrected 0.8901 < 0.90.)
 
+### 2026-09-03 (issue 1144 code lane) — items (0) + (3) LANDED (report-only); the flip prerequisites narrow to (2) + a clean lane
+
+Two of the flip prerequisites are now IMPLEMENTED, both REPORT-ONLY (the content seam
+`content_gates_overall_pass()` STAYS `false` — none of this reds a run):
+
+- **(0) switch-in transient classifier** — `src/switch_in_transient.rs` (pure, Tier-0). The imag
+  per-segment sweep classifies each window; a window whose failure is a switch-in transient (an imag
+  NDI-receiver spin-up burst right after the program cut: a SUBSTANTIAL + BOUNDED + DENSE leading
+  burn-loss burst that RECOVERS, with the optical stuck explained by the burn transient) is
+  EXCUSED from `imag_overall_pass` (attributed to the cold-cut measurement) rather than counted as a
+  content failure. Fail-closed: a mid-window / sustained / frozen / few-drop / sparse failure stays a
+  content failure. Data-first from the ONE real positive (verdict-276174336 CAM3 window 1) + the 38
+  healthy zero-loss segments (n=1, so the thresholds are conservative). Verdict JSON (all
+  report-only): per-segment `switch_in_transient` (the raw `pass` stays honest), imag facet
+  `content_overall_pass_raw` (un-excused raw AND) + `switch_in_transient_count`,
+  `cold_cut_onset.imag_switch_in_transients` (the attributed extent — never silently dropped).
+- **(3) issue-887 projection-tap fold** — `tear_detect::summarize_projection_leg` +
+  `all_cambox_continuity.imag.projection_tap` (report-only cross-reference). The projection-tap tear
+  gate (`all_cambox_continuity.tear`) is ALREADY LIVE + BLOCKING on the CAM2 leg (cam2's grabber is
+  fed by imag-nb's HDMI, so the CAM2 sweep leg IS the projection path), so issue 887's DETECTION gap
+  is closed independently. The cross-reference carries the projection-leg tear verdict INTO the imag
+  facet (`observed_fraction`, `tear_gate_clean`, `worst_tear_fraction`, `aux_any_coverage`,
+  `hdmi1_proof_backed`) so the HDMI-1 proof is answerable from the imag facet.
+
+**Flip prerequisites, updated to the post-lane state:**
+
+1. **(2) healthy CONTENT baseline + the burn-cadence metric** — with #1260 within-tick cache live
+   (`burn_render_step=1` now), the .611/.613/.614 baseline runs read 10/10 imag segments clean
+   (`burn_missing_ids=[]`, `optical_avg_step ≈ 1.0`), so the ~3-IDs/frame cadence artifact above is
+   GONE; ≥3 healthy baseline runs are in hand (the unpark series). The remaining (2) work is a
+   **DELIBERATE SICK-CAMERA discrimination run** (cam1 shutter 1/60 via the bkshading relay, or a
+   deliberately-dropped imag burn) — a supervisor/rig-ops step OUTSIDE the release-chain E2E — to
+   PROVE the content gate (and the item-(0) classifier) reject a genuinely-broken leg: a mid-window /
+   sustained loss must NOT be excused as a switch-in transient, and a real freeze must red.
+2. **The clean item-(0)+(3) code lane** (this lane) has landed report-only.
+3. **THEN flip** `content_gates_overall_pass()` -> `true` (RED->GREEN), AND require
+   `all_cambox_continuity.imag.projection_tap.hdmi1_proof_backed` (a run where the projection tear
+   signal was blind can't claim imag content verified), AND fold the issue-887 produced-vs-presented
+   deficit as a blocking term if still warranted. Re-validate the item-(0) classifier thresholds
+   against the sick-camera run BEFORE the flip — never widen them so a red simply passes.
+
+Do NOT flip blind: today the content terms would still red a green run for reasons the sick-camera
+run has not yet separated (the item-(0) n=1 calibration + the CAM2-window marginal stuck, e.g.
+verdict-276174336 CAM2 window 1 at 0.0112).
+
 ## The 0/76 root cause was the decode CPU-PIN, not StopRecord/reachability/decode (issue 1094, FIXED)
 
 The `[8/8c]` extract ran `recording-verdict-on-imag.sh`, whose `build_onimag_command` hardcoded
