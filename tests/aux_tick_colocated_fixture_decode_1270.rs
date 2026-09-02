@@ -42,7 +42,8 @@
 
 #![cfg(feature = "probe")]
 
-use camera_box::colour_scale::Rect;
+use camera_box::aux_tick::aux_tick_rects;
+use camera_box::colour_scale::{Rect, DEFAULT_QR_SIZE, TOP_MARGIN_PX};
 use camera_box::probe::payload::Payload;
 use camera_box::probe::qr::{decode_qr_luma, decode_qr_luma_all_fast_then_robust_grouped_optical};
 use camera_box::probe::recording_latency::{
@@ -83,26 +84,21 @@ fn crop(luma: &GrayImage, r: Rect) -> GrayImage {
     image::imageops::crop_imm(luma, r.x, r.y, r.w, r.h).to_image()
 }
 
-/// The two aux rects the assertion below decodes at. **RED (pre-1270): the HISTORICAL,
-/// pre-de-confliction positions** — LEFT (even) `x[466,676)`, RIGHT (odd) `x[1224,1434)`, both
-/// `y[745,955)` (`src/aux_tick.rs`'s module-doc "History" note). On the new co-located fixture
-/// content these positions carry NOTHING (independently confirmed with `zbarimg` — see module
-/// doc), so the decode assertion below FAILS at this geometry: `[left, right]`, even first.
+/// The two aux rects the assertion below decodes at. **GREEN: the LIVE geometry** —
+/// `aux_tick::aux_tick_rects()`, the actual production source of truth the painter (and any
+/// future geometry change) both flow through. This resolves to `[1137,745,210,210]` (even/LEFT)
+/// and `[1351,745,210,210]` (odd/RIGHT) at the rig's canvas/QR-size/margin defaults — the SAME
+/// values `src/aux_tick.rs`'s own `canonical_rects_are_the_design_values` test pins. (Was, on the
+/// RED commit: the HISTORICAL, pre-de-confliction positions — LEFT `x[466,676)`, RIGHT
+/// `x[1224,1434)` — which decode to nothing on this fixture; see git history for that state.)
 fn rects_under_test() -> [Rect; 2] {
-    [
-        Rect {
-            x: 466,
-            y: 745,
-            w: 210,
-            h: 210,
-        },
-        Rect {
-            x: 1224,
-            y: 745,
-            w: 210,
-            h: 210,
-        },
-    ]
+    aux_tick_rects(
+        camera_box::aux_tick::DESIGN_W,
+        camera_box::aux_tick::DESIGN_H,
+        DEFAULT_QR_SIZE,
+        TOP_MARGIN_PX,
+    )
+    .expect("the rig aux layout must be non-degenerate")
 }
 
 /// Both co-located aux marks decode INDIVIDUALLY at FULL SIZE — a tight `crop_imm` at exactly
