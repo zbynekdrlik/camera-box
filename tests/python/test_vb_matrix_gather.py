@@ -53,21 +53,40 @@ def test_process_from_listing_finds_strih_coconut():
     assert bsg.vb_matrix_process_from_listing(TASKLIST_STRIH) == ("VBAudioMatrixCoconut_x64", "4210")
 
 
-def test_process_from_listing_absent_is_empty():
+def test_process_from_listing_parsed_no_match_is_empty_tuple():
+    # A VALID listing that simply has no VB-Matrix row -> ("", "") (genuinely absent). This is
+    # DISTINCT from an UNREADABLE listing (None below), so an installed-but-dead box reads DOWN
+    # while a tasklist FAILURE reads UNKNOWN, never a false DOWN page (issue 1227 review 🔴).
     assert bsg.vb_matrix_process_from_listing(TASKLIST_NO_VBMATRIX) == ("", "")
 
 
-def test_process_from_listing_empty_text_is_empty():
-    assert bsg.vb_matrix_process_from_listing("") == ("", "")
-    assert bsg.vb_matrix_process_from_listing(None) == ("", "")
+def test_process_from_listing_unreadable_is_none():
+    # Empty/None input = a tasklist subprocess FAILURE (a live box always lists SOME processes) ->
+    # None (unreadable), NOT ("", ""). Never a false "process absent" from a failed read.
+    assert bsg.vb_matrix_process_from_listing("") is None
+    assert bsg.vb_matrix_process_from_listing(None) is None
+    assert bsg.vb_matrix_process_from_listing("   \n  ") is None
 
 
-def test_process_name_re_matches_both_builds_and_nothing_else():
+def test_process_name_re_matches_hosts_and_rejects_installers():
     assert bsg.VB_MATRIX_PROCESS_NAME_RE.match("VBAudioMatrix_x64")
     assert bsg.VB_MATRIX_PROCESS_NAME_RE.match("VBAudioMatrixCoconut_x64")
     assert bsg.VB_MATRIX_PROCESS_NAME_RE.match("vbaudiomatrix_x64")  # case-insensitive
+    assert bsg.VB_MATRIX_PROCESS_NAME_RE.match("VBAudioMatrix")  # non-x64 host variant
     assert not bsg.VB_MATRIX_PROCESS_NAME_RE.match("obs64")
     assert not bsg.VB_MATRIX_PROCESS_NAME_RE.match("NotVBAudioMatrix_x64")  # must anchor at start
+    # a left-open installer must NOT read as a running host (issue 1227 review 🔵 false-negative dir)
+    assert not bsg.VB_MATRIX_PROCESS_NAME_RE.match("VBAudioMatrix_Setup")
+    assert not bsg.VB_MATRIX_PROCESS_NAME_RE.match("VBAudioMatrixCoconut_Setup")
+
+
+def test_process_from_listing_ignores_installer_row():
+    text = (
+        '"Image Name","PID","Session Name","Session#","Mem Usage"\r\n'
+        '"VBAudioMatrix_Setup.exe","7000","Console","1","5,000 K"\r\n'
+    )
+    # a valid listing with only an installer (no host) -> ("", "") (parsed, no host match), not found
+    assert bsg.vb_matrix_process_from_listing(text) == ("", "")
 
 
 # ------------------------------------------------------------------ vb_matrix_install_present_under
@@ -95,20 +114,36 @@ def test_install_present_false_for_missing_dir():
 
 
 # ------------------------------------------------------------------ vb_matrix_running_facet
+# vb_matrix_running_facet(install_present, proc) where proc is None (unreadable listing) |
+# ("", "") (parsed, no host) | (name, pid) (found).
 def test_running_facet_no_install_omits_everything():
     # imag: no install -> running "" (omitted downstream), never a false "0" that would page.
-    assert bsg.vb_matrix_running_facet(False, "VBAudioMatrix_x64", "8144") == ("", "", "")
-    assert bsg.vb_matrix_running_facet(False, "", "") == ("", "", "")
+    assert bsg.vb_matrix_running_facet(False, ("VBAudioMatrix_x64", "8144")) == ("", "", "")
+    assert bsg.vb_matrix_running_facet(False, ("", "")) == ("", "", "")
+    assert bsg.vb_matrix_running_facet(False, None) == ("", "", "")
 
 
 def test_running_facet_install_and_process_is_one():
-    assert bsg.vb_matrix_running_facet(True, "VBAudioMatrix_x64", "8144") == \
+    assert bsg.vb_matrix_running_facet(True, ("VBAudioMatrix_x64", "8144")) == \
         ("1", "VBAudioMatrix_x64", "8144")
 
 
 def test_running_facet_install_no_process_is_zero():
-    # the 3-day outage shape: install present, process dead -> running "0" (present in JSON = DOWN).
-    assert bsg.vb_matrix_running_facet(True, "", "") == ("0", "", "")
+    # the 3-day outage shape: install present, process genuinely absent -> running "0" (DOWN).
+    assert bsg.vb_matrix_running_facet(True, ("", "")) == ("0", "", "")
+
+
+def test_running_facet_unreadable_listing_is_unknown_never_down():
+    # issue 1227 review 🔴: a tasklist FAILURE (proc None) with an install present must OMIT the
+    # facet (UNKNOWN), NEVER read as running "0" (a false DOWN page). This is the "never read a
+    # failed read as a measured zero" class (#833 / obs_process_count_from_listing).
+    assert bsg.vb_matrix_running_facet(True, None) == ("", "", "")
+
+
+def test_running_facet_from_failed_tasklist_is_unknown():
+    # end-to-end composition: a failed tasklist ("") -> parse None -> facet omitted, never DOWN.
+    proc = bsg.vb_matrix_process_from_listing("")
+    assert bsg.vb_matrix_running_facet(True, proc) == ("", "", "")
 
 
 # ------------------------------------------------------------------ build_bundle_state wiring
