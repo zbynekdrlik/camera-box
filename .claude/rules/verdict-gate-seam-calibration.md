@@ -420,3 +420,66 @@ it only proves the WRONG shape was absent. Before any report-only→LIVE flip:
    via the AUX single-mark cross-band, not the primary band which is structurally blind — mining the
    partial's per-frame `payloads` reversed the grading). Mine the raw partial, don't trust the field
    name.
+
+## 15. Zero-FP-over-the-whole-distribution CAN outweigh an unvalidated upper bound — the #1166 promote's actual flip (2026-09-02)
+
+§14 held dup-cadence report-only because two calibration gaps were unresolved: no upper RATE bound
+separating a pulldown from a spanning freeze, and an owner aux-tick supersede fork (issue 1196). The
+LIVE flip that finally happened did NOT resolve either gap with new data — it happened because a
+THIRD, independently-sufficient signal accumulated: the measured FALSE-POSITIVE risk of flipping,
+across the ENTIRE retained corpus, stayed at zero. This is a distinct, reusable calibration mode from
+§3's "gates-green-first" (a threshold bound) and §5's "LIVE vs report-only" cam1-grabber test (a
+SPECIFIC false-positive CLASS) — here the whole-distribution FP count is the promotion evidence, even
+though a SPECIFIC known-risky shape (a spanning freeze) was never independently cleared.
+
+**The re-entry event + the re-mine (named in a prior W-park comment, closed by this one):**
+
+| run | overall_pass | masked_windows | worst_raw | copies_by_content / tick_proven | viability | promotable |
+|---|---|---|---|---|---|---|
+| 1363366080 | ✅ | 0 | 0.0012 | 2/3 (0.67) | viable | true |
+| 1168855508 | ✅ | 0 | 0.0024 | 7/7 (1.0) | viable | true |
+| 674135238 | ✅ | 0 | 0.0071 | 9/9 (1.0) | viable | true |
+| 1973834759 | ✅ | 0 | 0.0036 | 8/8 (1.0) | viable | true |
+| 1556876186 | ✅ | 0 | 0.0012 | 3/3 (1.0) | viable | true |
+| 1574770780 | ✅ | 0 | 0.0047 | 8/8 (1.0) | viable | true |
+| 269576128 (post-issue-1260, .610) | ✅ | 0 | 0.0095 | 12/13 (0.92) | viable | true |
+| 255477892 (post-issue-1260, .611) | ✅ | 0 | 0.0024 | 5/5 (1.0) | viable | true |
+| 1347045170 / 659887078 / 300823397 | ❌ (other gates) | 0 | 0.012 / 0.039 / 0.022 | 16/17, 50/51, 21/21 | viable | true |
+| 1326320314 / 1700989544 / 722076375 | ❌ (other gates) | 0 | 0.006 / 0.0024 / 0.0012 | 8/44, 2/14, 3/20 | blind | false |
+
+14 runs total; **0/14 masked** on the DISCRIMINATED signal (`worst_masked_duplicate_fraction` — see
+§8, gated on windows the classifier flagged `duplication_masked`, never the raw worst); the 3
+`viability=blind` rows are FAILED runs with frozen/torn content, where there is nothing left for the
+content signal to observe (not a signal defect — see §12's `SignalViability::Indeterminate`/`Blind`
+split). `signal_promotable` (§12's `signal_viability(...) == Viable`) reads `true` on 11/14, including
+BOTH post-issue-1260 runs, so the promotion precondition holds on the freshest data too, not just the
+older mine.
+
+**Why zero-FP-over-the-distribution is sufficient evidence here, even with an unvalidated upper
+bound:** the two §14 gaps are about a HYPOTHETICAL shape (a window-spanning freeze) that has never
+actually appeared masked in 44+ mined runs across weeks of rig operation — including every cam1
+ShadowCast-grabber window and every known frozen/torn run in the corpus (the `blind` rows above are
+frozen/torn and STILL read `masked_windows=0`, because a frozen window's near-dups fail
+`DUP_COVERAGE_MIN`/`DUP_GAP_CV_MAX` exactly as designed). A bound that is theoretically unvalidated
+but has produced ZERO false positives over the FULL observed operating range is a materially
+different risk than an untested bound on a shape the rig actually produces often. The gate's whole
+PURPOSE is also asymmetric: it exists to catch a FUTURE masked halving that issue 1203's `received=`
+rate tap is structurally blind to — sitting report-only produces zero protection against that future
+event, so the downside of NOT flipping (an undetected future pulldown) is weighed against a
+downside (a freeze false-fail) that has never once materialized.
+
+**What did NOT change:** `DUP_RATE_PULLDOWN_MIN=0.10` / `DUP_GAP_CV_MAX=0.35` / `DUP_COVERAGE_MIN=0.5`
+are untouched — only the one-line `gates_overall_pass()` seam flipped. The upper-bound gap from §14
+is still genuinely open (a real spanning-freeze datapoint would still be the right way to close it
+properly); this promotion is a risk-accepted flip on empirical zero-FP evidence, not a claim that the
+gap is resolved. The aux-tick supersede fork (issue 1196) is also still open and independent of this
+flip — the content MAD signal stays the live tap unless/until that migration happens.
+
+**Consumer-side lesson (generalizes the delivery-spread/own-burn-absent/tear pattern from §11):** the
+Python `e2e_discord_report.py` classifier must ALSO be updated at the same flip — it is a SEPARATE
+consumer of the same `gates_overall_pass` field with its OWN hardcoded report-only routing
+(`_report_only_tripped`'s unconditional `masked_windows > 0` check, with no `gates_overall_pass`
+guard at all before this flip, unlike the delivery-spread branch which already had one). A gate flip
+in `recording-verdict.rs` alone is NOT sufficient — grep `tests/`/`scripts/` for the seam's field name
+before declaring a promote cycle done; see `e2e-discord-report.md` for the routing rule this fix
+brought into line with its siblings.
