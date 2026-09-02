@@ -854,3 +854,41 @@ the `pull_request` case. Pin the wiring with a static-anchor test reading the wo
 step's `name:` and its `run:` line, assert the new env var name AND
 `github.event.pull_request.head.sha` both appear inside that slice) so a future edit that drops the
 wiring fails loudly instead of silently reintroducing the 100%-refuse trap.
+
+## A `.log` test fixture is GITIGNORED (`*.log`) — it silently won't commit; use `.txt` (#1265)
+
+`.gitignore` has `*.log`, so a committed test fixture named `<name>.log` (e.g. an anonymized OBS-log
+sample a `tests/python/*.py` parser test reads at runtime) is NEVER added — `git status` shows it as
+neither `??` nor staged (it's ignored), the RED/GREEN passes LOCALLY (the file is on disk), then CI
+fails file-not-found because the fixture was never in the commit. Confirmed live (#1265: a
+`fixtures/audio_ref_band_mbc_1265.log` sample). Fix: name any committed log-shaped fixture `.txt`
+(not gitignored) and reference that from the test. Before trusting a new fixture is committed,
+`git check-ignore <path>` (a hit = it will be silently dropped) — never assume `git add` took it.
+
+## A worktree-isolated worker CANNOT locally run a sourced-bash-lib test or a PATH-stubbed dry-run (#1265)
+
+The worktree-isolation guard refuses `bash -c '…source lib…'`, `ENV=x bash <script>`, and any
+`PATH=<stub> … | grep` pipeline ("what it reads/is handed as shell text cannot be shown not to run
+git"). So the two established local Tier-0 recipes for this repo's `scripts/lib/*.sh` + watchdogs —
+(a) sourcing a lib under `set -euo pipefail` and calling its functions, and (b) the manual
+stubbed-`curl` `--dry-run` of a `*-alert-watchdog.sh` — are BOTH unrunnable from a worktree worker
+(they DO run for the SUPERVISOR / a non-isolated session). What a worktree worker CAN still do
+locally, and should rely on instead: (1) run the load-bearing python one-liners STANDALONE via
+`python3 -c '…' <args>` (the guard allows `python3 -c`, only not `bash -c`), proving the real logic;
+(2) `python3` a `.find`/`.split`/window SIMULATION of each Rust static-anchor assertion against the
+edited script (reproduce the harness's exact slice logic — this is the authoritative anchor-safety
+proof when `cargo test` is Tier-0-blocked); (3) `bash -n` + `shellcheck -S warning` on the `.sh`;
+(4) `cargo fmt --all --check` (parses the `.rs`); (5) the notify-dedup sweep pytest. The Rust
+harness (`run_under_set_e` sourcing the lib) then runs at CI / for the supervisor. Note this in the
+evidence block so the supervisor runs the sourced-lib harness + any stubbed dry-run at integration.
+
+## Clippy `doc_lazy_continuation` is a CI-only failure under Tier-0 — a doc line starting with `+ ` (or `- `/`* `/`1. `) is a Markdown LIST ITEM (issue 1196 integration, 2026-09-02)
+
+`cargo clippy -D warnings` cannot run locally (Tier-0 #557), `cargo fmt --check` does not lint doc
+prose, so this class surfaces only in CI's Lint job — and it blocked the whole release PR's E2E
+(the E2E fetches the CI artifacts and fails closed when `ci.yml` is red). The trap: a `//!`/`///`
+paragraph that WRAPS so a line begins with `+ exactly ONE aux mark …` — clippy reads `+ ` as a
+Markdown bullet and every following unindented line as a "list item without indentation". Fix by
+rewording (`plus …`), never by indenting prose that is not a list. Pre-push local net (cheap,
+run over every touched `.rs`): `grep -nE '^\s*//[/!] ?([-+*]|[0-9]+\.) ' <files>` and check that
+each hit is a REAL list item whose continuation lines are indented by 2+ spaces.

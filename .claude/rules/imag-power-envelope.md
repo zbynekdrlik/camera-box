@@ -8,6 +8,8 @@ paths:
   - "tests/python/test_imag_obs_watchdog_snapshot_849.py"
   - "tests/harness_imag_power_envelope_1040.rs"
   - "tests/harness_imag_power_dedup_preserve_1076.rs"
+  - "scripts/lib/imag-power-stepdown-wait.sh"
+  - "tests/harness_imag_power_stepdown_wait_1268.rs"
   - "systemd/imag-power-envelope-alert-watchdog.service"
   - "systemd/imag-power-envelope-alert-watchdog.timer"
 ---
@@ -285,3 +287,26 @@ or the producer's own recorded state) — never let each side default independen
 (`imag_power_guard_stepped_from_state` / `imag_power_guard_stepdown_w_from_state`) are Tier-0 tested
 by sourcing; use a state-file key (`GUARD_STEPDOWN_W`) distinct from the guard's own live vars
 (`STEPDOWN_W`/`STEPDOWN_UW`) so the guard's `. "$STATE"` source-back never clobbers them.
+
+## The E2E pre-gate WAIT for a live clamp episode — key on the RAPL long_term, NOT throttle_reason_pl1 (#1268)
+
+`scripts/lib/imag-power-stepdown-wait.sh` is the E2E harness's PRE-GATE WAIT: before the imag
+render-budget family (`recording-e2e.sh`'s `[4d1/8]` MV-fps preflight AND `[4d/8]` render-budget
+gate, both STRICT on imag), it waits out an in-progress 25 W thermal step-down so the strict read
+lands on steady-state, not the ~57.7 fps/15.6 ms the clamp produces (the `genlock-settle.sh` /
+DanteSync precondition-wait shape — a wait, never a threshold relaxation). Two copies run (a fresh
+episode can start in the ~1.5-3 min window between the two gates); each is bounded (default 720 s =
+~median, kept under the 75-min job timeout since the runner runs twice before the ~40-min recording),
+aborts loudly on budget exhaustion, and FAILS OPEN on an unreadable read.
+
+**The load-bearing signal choice: the PRIMARY is the MMIO RAPL PL1 `package-0` `long_term`
+power_limit_uw (the guard's OWN actuator), NOT `throttle_reason_pl1`.** The RAPL value is
+DETERMINISTIC (25000000 while stepped down, 45000000 = pinned `IMAG_PL1_W` after RESTORE),
+world-readable at mode 644 (unlike the root-600 `/run` guard state file on a pre-#1188 guard), and
+reused via the shared `imag_power_zone_select`. `clamped` = long_term != pinned; `clear` = long_term
+== pinned. This is exactly "wait for the guard RESTORE" and — critically — does NOT conflate the #880
+chronic punit under-floor clamp (which sits AT the full 45 W envelope with `throttle_reason_pl1=1`
+and NO RESTORE to wait for): keying on `throttle_reason_pl1=1` alone would false-wait-then-abort a
+run whose gate would pass (#1116 documents that under-floor condition as chronic + render-healthy).
+The guard `STEPPED=` state is a supplement (ORs into clamped; the RAPL-unreadable fallback);
+`throttle_reason_pl1` is logged context only.

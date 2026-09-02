@@ -22,9 +22,10 @@
 //! Provenance note (honest scope): run 2099068429 was an all-CAM3-window run — these frames come
 //! from cam3's grabber leg of the splitter rig, which traverses the full optical + 2×NDI + 4K +
 //! mp4 chain but not the imag-projection HDMI hop (cam2's leg). They prove the small-QR
-//! chain-survival question the fixture exists for; the projection-leg (cam2-window) confirmation
-//! stays inside the remaining promotion preconditions, and the tear gate stays REPORT-ONLY
-//! (`tear_detect::gates_overall_pass()` = false) regardless of this fixture.
+//! chain-survival question the fixture exists for; the projection-leg (cam2-window) TORN
+//! confirmation landed later via the known-torn run 1700989544 (`tests/tear_detect_torn_fixture_
+//! 1196.rs`), which promoted the gate to LIVE (`tear_detect::gates_overall_pass()` = true, issue
+//! 1196). This healthy-run fixture is unaffected by the flip (it reads not-torn / Unproven).
 //!
 //! What is pinned, per fixture frame:
 //!   * the PRODUCTION stream-extraction decode shape (`decode_qr_luma_all_fast_then_robust_

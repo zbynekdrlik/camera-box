@@ -541,6 +541,11 @@ def gather_bundle_state(
 
     log_text = _timed(timings, "obs_log_read", newest_obs_log_text, obs_log_dir)
 
+    # #1265 — the reference source whose ts_lag BAND is watched (mbc on stream; env-overridable so a
+    # future box with a different A/V reference can set it). A box that has no such source (strih)
+    # simply reports the band facets empty -> omitted, never a false band.
+    ref_band_src = os.environ.get("AUDIO_REF_BAND_SRC", bsg.AUDIO_REF_BAND_DEFAULT_SRC)
+
     def _parse_log_facets():
         return (
             bsg.obs_version_from_log(log_text),
@@ -552,11 +557,22 @@ def gather_bundle_state(
             # (max_fresh_lag_str, src, age_s) from the SAME bounded log_text (no second read); the
             # dev1 audio-lag watchdog reads these facets.
             bsg.audio_telemetry_from_log(log_text),
+            # #1265 — the per-REFERENCE-source ts_lag BAND SHAPE (src, base, high, low, duty, n) from
+            # the SAME bounded log_text (still ONE obs_log_parse timing, no second read).
+            bsg.audio_ref_band_from_log(log_text, ref_src=ref_band_src),
+            # #1267 — the av-sync dock measured-offset trend (recent/base median + pin + pin_stable +
+            # age + per-window counts) from the SAME bounded log_text (no second read); the dev1
+            # upstream-step watchdog reads these facets.
+            bsg.av_offset_series_from_log(log_text),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
-     audio_ts_lag) = _timed(timings, "obs_log_parse", _parse_log_facets)
+     audio_ts_lag, audio_ref_band, av_offset) = _timed(timings, "obs_log_parse", _parse_log_facets)
     audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
+    (audio_ref_lag_src_val, audio_ref_lag_base_ms_val, audio_ref_lag_high_ms_val,
+     audio_ref_lag_low_ms_val, audio_ref_lag_duty_pct_val, audio_ref_lag_n_val) = audio_ref_band
+    (av_offset_recent_med_val, av_offset_base_med_val, av_offset_pin_val, av_offset_pin_stable_val,
+     av_offset_age_s_val, av_offset_n_recent_val, av_offset_n_base_val) = av_offset
 
     def _gather_ndi():
         try:
@@ -638,6 +654,24 @@ def gather_bundle_state(
         # #1231 — the freshness age of that facet (in-log seconds behind the log head); a large value
         # -> the dev1 decision surfaces STALE (telemetry stopped while the log advanced).
         audio_ts_lag_age_s=audio_ts_lag_age_s_val,
+        # #1265 — the per-REFERENCE-source ts_lag BAND SHAPE (omit-when-empty; a box with no such
+        # source reports them empty). The dev1 audio-lag watchdog's BAND arm + recording-e2e.sh's
+        # #856 apply-guard read these.
+        audio_ref_lag_src=audio_ref_lag_src_val,
+        audio_ref_lag_base_ms=audio_ref_lag_base_ms_val,
+        audio_ref_lag_high_ms=audio_ref_lag_high_ms_val,
+        audio_ref_lag_low_ms=audio_ref_lag_low_ms_val,
+        audio_ref_lag_duty_pct=audio_ref_lag_duty_pct_val,
+        audio_ref_lag_n=audio_ref_lag_n_val,
+        # #1267 — the av-sync dock measured-offset trend the dev1 upstream-step watchdog reads
+        # (omit-when-empty; absent == UNKNOWN downstream).
+        av_offset_recent_med_ms=av_offset_recent_med_val,
+        av_offset_base_med_ms=av_offset_base_med_val,
+        av_offset_pin=av_offset_pin_val,
+        av_offset_pin_stable=av_offset_pin_stable_val,
+        av_offset_age_s=av_offset_age_s_val,
+        av_offset_n_recent=av_offset_n_recent_val,
+        av_offset_n_base=av_offset_n_base_val,
     )
 
     timings["total"] = time.perf_counter() - t_total0

@@ -161,6 +161,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # swaps (preflight_mv_reverify -> mv_reverify_or_escalate at the deploy sites; the #675 pattern).
 # shellcheck source=scripts/lib/mv-reverify-escalate.sh
 . "$HERE/lib/mv-reverify-escalate.sh"
+# #1265: the I/O gather + orchestration for the #856 rig-wide A/V apply STABILITY GUARD (HOLD the
+# apply when THIS run's audio timeline was unstable). Pure decision in scripts/av_sync_apply_guard.py;
+# this lib is invoked with function-CALL lines below (the #675 sourced-lib pattern -- no anchored
+# line edited, and the #856 apply block itself stays byte-identical).
+# shellcheck source=scripts/lib/av-sync-apply-guard.sh
+. "$HERE/lib/av-sync-apply-guard.sh"
 # #860: the SHARED pure optical-chain decision core + its [0/8] preflight fail-fast (the #675
 # sourced-lib pattern -- the preflight is invoked with ONE line below, no anchored line edited).
 # shellcheck source=scripts/lib/optical-chain-health.sh
@@ -816,7 +822,12 @@ echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must AL
 # grandmaster 10.77.9.184 (dantesync election + PTP-interface fix v1.8.42-1.8.46), so a node
 # PTP-locked to a foreign/unreadable GM now HARD-fails here (FOREIGN->20, UNKNOWN->11) instead of
 # only being reported — the stream-on-a-foreign-GM false-green issue 834/1073 is about.
-DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh" \
+# Enforce PHASE-SLEW too (was report-first per issue 1130). phase_slew_check ships report-only in
+# dantesync-gate.sh (DANTESYNC_GATE_PHASE_SLEW_ENFORCE default 0); every graded fleet node now
+# serves phase_slew_enabled=true (the fleet-wide cure for the chronic NTP step storm, verified
+# 2026-09-02 including cam5/cam6/cam7), so a box that silently reverts to phase_slew=off now
+# HARD-fails here (DISABLED->20, UNKNOWN->11) instead of only being reported.
+DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
   --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
@@ -1237,7 +1248,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # call (harmless, already proven clean by the main gate above).
     # Enforce grandmaster identity here too (issue 1073): this call grades strih (the NTP master),
     # whose grandmaster identity must be enforced exactly like the main gate above.
-    DANTESYNC_GATE_GM_ENFORCE=1 "$HERE/dantesync-gate.sh" \
+    # Enforce phase_slew here too (issue 1130 enforce follow-up): this call grades strih plus the
+    # active secondary cameras, whose phase_slew state must be enforced exactly like the main
+    # gate above.
+    DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \
       --win-http "strih=$STRIH" \
@@ -1927,6 +1941,29 @@ fi"
   # restore instead of fighting it, per the #856 issue text. Empty (unset) by default: an early
   # abort, or a run where [8/8g]'s combiner refused (too few measured cameras / spread too
   # wide), never touches the stream box's genlock latency here at all.
+  # #1265: HOLD the #856 apply when THIS run's audio timeline was unstable -- a DRIFTING stream mbc
+  # ts_lag band ($AV_SYNC_BAND_VERDICT from [8/8g]), a residual median beyond the green-series
+  # sanity band, or a correction that JUMPS from the last-applied value -- so the controller
+  # composes with a live OBS restart instead of walking the prod pin toward a flapping timeline
+  # (the 926->976 walk, issue 1265). Sourced-helper (#675, inserted BEFORE the anchored apply `if`
+  # below -- that apply block stays byte-identical); a HOLD clears the offset so the apply is
+  # skipped and persists the reason. An empty offset (no correction computed) has nothing to guard.
+  if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
+    _avs_hold="$(av_sync_apply_guard_decide "$REPORT_JSON" "$AV_SYNC_BAND_VERDICT" "$AV_SYNC_APPLY_OFFSET_MS" "$HERE/av_sync_apply_guard.py")"
+    if [ -n "$_avs_hold" ]; then
+      echo "[cleanup] #1265 HOLD #856 apply: $_avs_hold -- stream genlock latency left at the just-restored prod value" >&2
+      printf '%s\n' "$_avs_hold" > "$OUTDIR/av-sync-apply-hold-${RUN_ID}.txt" 2>/dev/null || true
+      av_sync_persist_hold_reason "$_avs_hold"   # #1265: durable ~/.camera-box surface (the $OUTDIR copy is swept)
+      AV_SYNC_APPLY_OFFSET_MS=""
+    fi
+  fi
+  # #1265b: persist THIS run's measured residual (HELD or APPLIED, EVERY run) to the dev1
+  # residual-last reference, so the NEXT run's SUSTAINED two-run confirmation has a prev to compare
+  # against -- a genuine sustained upstream step (residual agrees run-to-run) then PROCEEDS instead
+  # of being HELD forever (supervisor 2026-09-02: the guard must not make a real step un-appliable).
+  # MUST run AFTER the guard decide above (which read the PREVIOUS run's value) and BEFORE the
+  # apply-persist below (so pin_at_measure reads the measure-time pin). Sourced-helper (#675).
+  av_sync_persist_residual "$REPORT_JSON" "$RUN_ID"
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     echo "[cleanup] #856: applying this run's own computed rig-wide A/V correction (${AV_SYNC_APPLY_OFFSET_MS}ms) to '$STREAM_PROG_SOURCE' on stream (av_sync_calibrate.py --apply, read-back verified)"
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/av_sync_calibrate.py" --host "$STREAM" \
@@ -1934,6 +1971,15 @@ fi"
       --offset-ms "$AV_SYNC_APPLY_OFFSET_MS" --apply \
       --json-path "$OUTDIR/av-sync-last-${RUN_ID}.json" \
       || echo "WARNING: #856 av_sync_calibrate.py --apply failed -- stream genlock latency left at the just-restored prod value; the NEXT run recomputes from its own fresh measurement" >&2
+  fi
+  # #1265: persist the last-applied reference for the NEXT run's jump-vs-last-applied guard condition
+  # by COPYING the calibrate-written success file (FULL schema, incl. the applied_latency_ms key the
+  # live pins-snapshot / rig-mode / drift-guard readers depend on) to the dev1 ~/.camera-box home --
+  # finding 1: NOT a re-written source/offset/ts-only schema, which would strip applied_latency_ms.
+  # Gated on that OUTDIR success file existing (calibrate writes it ONLY on a landed apply), so a
+  # HELD/skipped or FAILED apply never records a value that did not take. Sourced-helper (#675).
+  if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ] && [ -f "$OUTDIR/av-sync-last-${RUN_ID}.json" ]; then
+    av_sync_persist_applied_offset "$OUTDIR/av-sync-last-${RUN_ID}.json"
   fi
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # #682: restore imag's program scene to whatever it was BEFORE [4a/8] routed it to the
@@ -2088,6 +2134,12 @@ AV_SYNC_CALIBRATED_MS="${AV_SYNC_CALIBRATED_MS:-}"
 # apply must happen THERE (last), not at [8/8g] itself: the delivery-verify snapshot/restore
 # that ALWAYS runs on exit would otherwise silently overwrite whatever [8/8g] computed.
 AV_SYNC_APPLY_OFFSET_MS="${AV_SYNC_APPLY_OFFSET_MS:-}"
+# #1265: THIS run's stream reference-source (mbc) ts_lag BAND verdict, gathered at [8/8g] from the
+# stream :8899 facet (DRIFTING/HEALTHY/UNKNOWN/SKIP/""). Declared HERE (empty default, BEFORE the
+# cleanup trap) so cleanup()'s #856 apply-guard never `set -u`-aborts referencing it on an early
+# abort. A DRIFTING band HOLDs the #856 apply (the run's A/V measurement was corrupted by a flapping
+# audio timeline); empty/UNKNOWN/SKIP is dormant (the residual-ceiling / jump conditions still apply).
+AV_SYNC_BAND_VERDICT="${AV_SYNC_BAND_VERDICT:-}"
 # #462 (EPIC #466): imag-nb's program-feeding NDI input — the #399-style 1:1 mapping from Phase 1
 # (setup-imag.sh) pins 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)' 1:1. issue 1204: DERIVE this per
 # camera-under-test via imag_source_for_camera "$CAMERA_NAME" (the SAME resolution IMAG_PROG_SCENE
@@ -2868,6 +2920,47 @@ fi
 echo "    [4a/8] imag burn-target cross-check OK — program renders '$_imag_rendered' == burn target '$IMAG_PROG_SOURCE' (issue 1204)"
 fi
 
+# [4d0/8] issue 1268 (branch A) — pre-gate WAIT for the imag 25W thermal step-down clamp, run BEFORE
+# the imag render-budget family (the [4d1/8] MV-fps floor preflight; a SECOND copy runs before the
+# render-budget gate at [4d/8], since a fresh episode can start in the window between them). Both
+# read imag STRICT. The #1162 imag-nb flaps into a 25W PL1 step-down ~18x/day (~20% duty, median
+# ~12 min, #1040/#1188); at 25W the iGPU is pinned ~400MHz so a burns-ON render read is ~57.7fps/15.6ms
+# -> UNDER the 58fps floor / 16.67ms budget -> a false abort of the whole ~40-min run. This step polls
+# the guard's OWN actuator -- the MMIO RAPL PL1 package-0 long_term value (world-readable at mode 644;
+# 25000000 while stepped down, 45000000 = the pinned full envelope after RESTORE; identity-selected by
+# the SHARED imag_power_zone_select). It proceeds the instant PL1 is back at the full envelope (the
+# guard RESTORE), so the STRICT gates read steady-state -- a WAIT ON A MEASURED precondition, NOT a
+# threshold relaxation and NOT a blind sleep (the same shape as the [4j/8settle] genlock-FIFO settle +
+# the DanteSync settle). It deliberately does NOT wait for the #880 chronic punit under-floor clamp
+# (which sits AT the full 45W envelope with no RESTORE). The guard STEPPED= state is a supplement
+# (the DEPLOYED guard predates the #1188 chmod so its /run state is root-600, mostly inert until the
+# guard is redeployed); throttle_reason_pl1 is logged context. Bounded default 720s (12 min ~ the
+# issue-1268 median; NOT the issue's 20-min/1.7x figure): both reads happen BEFORE the ~40-min
+# recording under the 75-min job timeout and this runner runs TWICE, so 2x720 + recording + settle
+# stays clear of the runner kill while an abort is early+cheap; env-overridable. On budget exhaustion
+# it ABORTS with a clamp-specific message (never a silent pass); an unreadable RAPL/guard read FAILS
+# OPEN on the wait (proceed immediately -- the gate itself still decides, never a false abort, never a
+# hang). New lines only via the sourced-helper pattern (issue 675); skipped cleanly when imag is acked
+# offline (issue 1013). Runs whenever imag is measured (not gated on ALL_CAMBOX -- the imag render
+# terms below aren't either), so both a full and a single-cam run get the precondition.
+E2E_IMAG_POWER_WAIT="${E2E_IMAG_POWER_WAIT:-1}"
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[4d0/8] imag 25W step-down pre-gate wait (issue 1268)" "$IMAG_OFFLINE_ACK_REASON"
+elif [ "$E2E_IMAG_POWER_WAIT" = "1" ]; then
+  # shellcheck source=scripts/lib/imag-power-stepdown-wait.sh
+  . "$HERE/lib/imag-power-stepdown-wait.sh"
+  if ! imag_power_stepdown_wait "${IMAG_USER:-newlevel}" "${IMAG_PW:-newlevel}" "$IMAG_IP" \
+      "${E2E_IMAG_POWER_WAIT_BUDGET_S:-720}" "${E2E_IMAG_POWER_WAIT_POLL_S:-30}" \
+      "$OUTDIR/imag-power-stepdown-wait.txt"; then
+    echo "    [4d0/8] imag stayed in the 25W thermal step-down clamp for the whole wait budget — aborting BEFORE the imag render gates (issue 1268)." >&2
+    echo "    A gate read in this state reads imag's iGPU at ~400MHz (~57.7fps, misses the 58fps floor / 16.67ms budget) — the thermal clamp, not a render regression." >&2
+    echo "    The physical fix (cooling) is issue 1268 branch B (owner decision); see .claude/rules/imag-power-envelope.md." >&2
+    exit 1
+  fi
+else
+  echo "[4d0/8] issue 1268 imag 25W step-down pre-gate wait — SKIPPED (E2E_IMAG_POWER_WAIT=$E2E_IMAG_POWER_WAIT)"
+fi
+
 echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors must not already be rendering below floor (target − tolerance) before we commit a ~40-min run; an unreadable box / a box not yet on the #771 genlock build is report-only, only a CONFIRMED sustained collapse aborts (never false-abort a CI gate). issue 1260: the strih term is REPORT-ONLY (a loud WARN, never an abort) while issue 1260 is open — the 4K divisor-1 MV floor pre-dates the 7-camera fleet and a healthy strih now idles below it; the imag term stays STRICT. Walk-back tracked on issue 1263."
 if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
   imag_leg_skip_note "[4d1/8] imag MV-fps floor preflight (#771) — strih still checked" "$IMAG_OFFLINE_ACK_REASON"
@@ -3126,6 +3219,29 @@ if [ "$frozen_ok" -ne 1 ]; then
       echo "    [frozen-camera-gate] WARN (#1233): could NOT prove leg liveness via received= after ${FROZEN_CAM_ATTEMPTS} attempts (verdict='${frozen_recv_verdict:-none}') — NOT a proven freeze, so NOT aborting (the leg is re-proven downstream by the QR sweep). Investigate the strih OBS-log tap if this recurs." >&2
       ;;
   esac
+fi
+
+# [4d0b/8] issue 1268 (branch A) — the SECOND copy of the imag 25W step-down pre-gate WAIT, run
+# immediately BEFORE the render-budget gate at [4d/8] (its imag read). The first copy ([4d0/8]) covered the
+# [4d1/8] MV-fps preflight, but a fresh 25W episode can start in the ~1.5-3 min between the two reads
+# ([4b/8] burn-ON + the [4b2/8] audio probe + the [4c/8] frozen gate sit between), and the live guard
+# journal shows a new STEP-DOWN every ~6-11 min under load, so [4d/8] would still read a fresh clamp
+# a meaningful fraction of the time. Same runner, same budget, same fail-open/abort semantics; a
+# clear box makes this a single cheap ssh that proceeds instantly. Sourced-helper pattern (issue 675).
+E2E_IMAG_POWER_WAIT="${E2E_IMAG_POWER_WAIT:-1}"
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[4d0b/8] imag 25W step-down re-check before render-budget (issue 1268)" "$IMAG_OFFLINE_ACK_REASON"
+elif [ "$E2E_IMAG_POWER_WAIT" = "1" ]; then
+  # shellcheck source=scripts/lib/imag-power-stepdown-wait.sh
+  . "$HERE/lib/imag-power-stepdown-wait.sh"
+  if ! imag_power_stepdown_wait "${IMAG_USER:-newlevel}" "${IMAG_PW:-newlevel}" "$IMAG_IP" \
+      "${E2E_IMAG_POWER_WAIT_BUDGET_S:-720}" "${E2E_IMAG_POWER_WAIT_POLL_S:-30}" \
+      "$OUTDIR/imag-power-stepdown-wait-4d.txt"; then
+    echo "    [4d0b/8] imag stayed in the 25W thermal step-down clamp for the whole wait budget — aborting BEFORE the render-budget gate (issue 1268)." >&2
+    echo "    A gate read in this state reads imag's iGPU at ~400MHz (~57.7fps, misses the 58fps floor / 16.67ms budget) — the thermal clamp, not a render regression." >&2
+    echo "    The physical fix (cooling) is issue 1268 branch B (owner decision); see .claude/rules/imag-power-envelope.md." >&2
+    exit 1
+  fi
 fi
 
 echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, strih+stream MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too); imag is measured too (60fps) and is STRICT as well (issue 888) — the step aborts if any of the three boxes misses its budget"
@@ -5095,6 +5211,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "    [8/8g] #856: refusing to compute a rig-wide A/V correction this run (see $AV_SYNC_COMBINE_LOG) -- stream genlock latency left untouched"
       AV_SYNC_APPLY_OFFSET_MS=""
     fi
+    # #1265: gather THIS run's stream reference-source (mbc) ts_lag BAND verdict from the stream :8899
+    # facet, right after the run (the OBS log tail reflects the recording window). cleanup()'s #856
+    # apply-guard HOLDs the apply if it is DRIFTING. Best-effort/fail-open (a curl/facet miss -> "" ->
+    # dormant; the residual-ceiling + jump conditions still guard). Sourced-helper call (#675).
+    AV_SYNC_BAND_VERDICT="$(av_sync_stream_band_verdict "$STREAM" "$HERE/audio_lag_decision.py")"
+    echo "    [8/8g] #1265: stream mbc ts_lag band verdict = ${AV_SYNC_BAND_VERDICT:-<none>} (DRIFTING would HOLD the #856 apply in cleanup)"
     # #756 Member 3 — live per-source genlock latency pins + recommended pins, gathered AFTER
     # the verdict JSON exists (it needs this run's OWN delivery-latency table) and BEFORE the
     # Discord report composes (so the pins land in the SAME report, not a follow-up message).

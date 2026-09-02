@@ -441,6 +441,11 @@ pub mod offline_ack;
 // `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
 // together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
 pub mod burn_hold;
+// #1260 — PURE, dependency-free within-tick "prepare once, reuse" state for the DistroAV QR burn
+// filter. The Tier-0 authority the C mirror vendor/distroav/src/burn-tick-cache.hpp is checked
+// against; the filter preps + stamps the burn frame_id ONCE per tick so strih's 4K Multiview
+// stops re-rendering all 7 burns per MV frame (the #278/#293 budget collapse to 7.5fps).
+pub mod burn_tick_cache;
 // #1122 — PURE, dependency-free E2E recordings retention decision (keep newest-N runs UNION
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
 // a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 mirrors.
@@ -462,11 +467,12 @@ pub mod e2e_latency_gate;
 // thinly by recording-verdict.
 pub mod imag_leg_gate;
 pub mod optical_floor;
-// issue 781 — REPORT-ONLY projection-tap scanout-TEAR detector: pure crate-root classifier (Tier-0)
-// over the cam2-optical dual-QR Vernier span per captured frame, consumed thinly by
-// recording-verdict's all-cambox sweep. `gates_overall_pass()` is `false` (the payload-level signal
-// is proven-blind on the current single-vertical-band content) with a computed `TearSignalViability`;
-// one-line-flippable to LIVE once the signal is Observed on a known-torn run + a bound is calibrated.
+// issue 781/1196 — LIVE projection-tap scanout-TEAR gate: pure crate-root classifier (Tier-0) over
+// the cam2-optical dual-QR + bottom aux tick-pair span per captured frame, consumed thinly by
+// recording-verdict's all-cambox sweep. `gates_overall_pass()` is `true` since #1196 (the known-torn
+// run 1700989544 proved the AUX SINGLE-MARK cross-band fires — the primary band is blind, span ≤1);
+// the two-term gate (TEAR_FRACTION_CEILING + TEAR_FRAME_COUNT_FLOOR, scoped to Observed single-tile
+// windows) folds into overall_pass. One-line disarmable (`gates_overall_pass()` → `false`).
 pub mod tear_detect;
 // issue 1196 — the aux Vernier tick pair's PURE geometry (bottom burn-gap placement + the Tier-0
 // no-overlap proofs vs the primary dual-QR / colour column / motion sweep / downstream burn

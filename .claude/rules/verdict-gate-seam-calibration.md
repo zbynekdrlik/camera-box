@@ -389,3 +389,34 @@ fix). When the promote cycle finally had real green-run data (the 2026-09-01 gre
   on ≥2 green runs + `worst_masked` null on green + the upper-bound resolved on real spanning data or
   frozen_leg promoted first + any owner supersede direction, e.g. issue 1196's aux-tick-pair signal,
   resolved). "Viable" is necessary, not sufficient, for a content/pixel LIVE flip.
+
+## Flipping a report-only seam LIVE: re-audit for a LATENT report-only false-positive that becomes a live false-FAIL (issue 1196)
+
+A gate can ride REPORT-ONLY for weeks producing a wrong reading on a scene shape that just does not
+occur in the recent green window — and the moment you flip `gates_overall_pass()` LIVE that latent
+wrong reading turns into a false-FAIL on the next run of that shape (the #1127 "❌ on a passing run"
+trap the owner hates). The report-only era's all-green history is NOT proof the gate is safe LIVE —
+it only proves the WRONG shape was absent. Before any report-only→LIVE flip:
+
+1. **Re-run the LIVE gate over EVERY historical verdict, incl. the runs the calibration EXCLUDED**
+   (multi-tile, dead-painter, convergence-transient — `window-gate-tolerance-walkdown.md`). If any
+   would fail, that shape is a live false-fail waiting to happen. Issue 1196: the tear gate's own
+   module doc admitted a count-2 multi-tile skew residual scores as a single-source "tear", but the
+   green window was all single-tile (`multi_path_suspect_fraction` 0.0), so it read clean report-only
+   — the LIVE gate would have failed 4/10 windows on the real multi-tile run 1859005342.
+2. **The LIVE gate must EXCLUDE the same UNSCOREABLE class the promotion property excludes.** If
+   `signal_promotable`/`window_promotable` already guards on a "this window is untrustworthy" flag
+   (a suspect fraction, a coverage floor), the gate (`*_gate_pass`) MUST carry the SAME guard — a
+   promotion property that's stricter than the live gate is a bug: the gate fails windows the
+   promotion property already declared unscoreable.
+3. **A noise floor that is a COUNT (N frames irrespective of window length — an occasional 1–3-frame
+   artifact) needs a COUNT term, not just a rate ceiling** (§4). A rate-only ceiling calibrated on
+   long windows false-fails a short window with the same few artifact frames. Issue 1196's tear gate
+   is TWO-TERM: `Observed AND single-tile AND tear_fraction > rate_ceiling AND tear_frames >=
+   count_floor`.
+4. **Verify a verdict field's SEMANTICS from the per-frame data before building the flip on its
+   NAME.** A grading that reads `max_spread` as "the primary-band span" when the field is actually the
+   primary∪aux UNION span can invert the operative-mechanism conclusion (issue 1196: the tear fires
+   via the AUX single-mark cross-band, not the primary band which is structurally blind — mining the
+   partial's per-frame `payloads` reversed the grading). Mine the raw partial, don't trust the field
+   name.

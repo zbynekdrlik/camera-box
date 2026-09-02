@@ -309,9 +309,32 @@ flows unchanged through `qr-align.sh` and `recording-e2e.sh`, so neither needs a
 residual into the composed Discord report TEXT would need the report composer / verdict JSON — a
 separate report lane).
 
-**Re-tighten (issue 1168).** When the per-box arrival floors are reduced so the max cross-camera floor
-delta drops under the correction budget (94 − floor), REVERT this soft-release: turn the BUDGET-BOUND
-branch back into a hard-FAIL on unalignment. Tracked there.
+**Re-tighten (issue 1168) — LANDED as a TRANSIENT/QUANTUM-BOUNDED budget, not a naive flip.** The
+BUDGET-BOUND branch no longer unconditionally soft-releases: `budget_bound_verdict(residual,
+DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS)` splits it — residual **≤ budget** → the soft-release above
+(report-only, exit 0); residual **> budget** → HARD-FAIL via `AlignmentImpossible`
+(`budget_bound_hard_fail_report`, the run ABORTS). Why NOT a naive "budget-bound → always fail" flip:
+mining every green run's live align status showed EVERY green zero-loss run is `budget-bound` with
+`report_only_residual_ms` ≈ **2 source frames (~33 ms)** — the N=2 lock-phase quantum (#1252), NOT a
+floor gap (it ANTI-correlates with the floor: a low-floor camera carries the LARGEST barrier delta).
+The additive target `arrival_floor_i + barrier_delta_i` overshoots 94 ms even though every align-set
+floor is ≤ 92.2 ms, so an unconditional flip would false-fail the whole fleet — the rule's own "safe
+ONLY once a green run's align status is NOT budget-bound" (below) is unmet for the naive form.
+`DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS = 45` is DATA-CITED against the GATED quantity — the barrier
+present-age residual `report_only_residual_ms` (`worst`), NOT the jitter floor spread (a wider
+instrument): every reachable green run is budget-bound with this residual ~33 ms (3 CI runs
+33.6/33.2/33.4, max 33.6 = 2 source frames; reproduce via `gh api …/jobs/<jid>/logs | grep -a
+report_only_residual_ms`). 45 ms sits a full source frame above that and below 3 source frames
+(50 ms), so it hard-fails ONLY a ≥ ~3-frame misalignment while tolerating the structural quantum.
+Corroborating CONTEXT (not the gated quantity): the full-fleet arrival-floor spread is ~8 ms median /
+~49 ms run-level MAX (`arrival_floor_decompose.py --multi --only-uniform --min-cameras 7`, the clean
+regime, 28→29 runs as a new clean run landed 2026-09-01) — that ~49 ms is the FLOOR spread incl cam2 +
+transient DQBUF episodes, so it does NOT imply a 49 ms gated residual (cam2, the widest floor, is
+EXCLUDED from the align gate; issue 1216). RE-ARMABLE (`--align-retighten-budget-ms` /
+`QR_ALIGN_RETIGHTEN_BUDGET_MS`): LOWER the budget toward the ≤1-id parity gate ONLY once the N=2
+quantum ITSELF is addressed (a longer / phase-robust barrier audit, or a genlock change) — floor
+reduction alone does NOT shrink it. Tier-0: `budget_bound_verdict` + the hard-fail align()-flow test
+in `tests/python/test_qr_align_pinapply_1161.py`.
 
 Tier-0: `floor_aware_partition`, the budget-bound `align()` flow (FIFO-modelling barrier), and the
 byte-unchanged within-budget/unstable/hold-inert regression guards are pytest-verified with no rig
@@ -399,9 +422,13 @@ migrated `max` → additive, an additive-overshoot RED→GREEN proof) + `test_qr
 
 ## Mining the align STATUS + per-box floor data from a run (#1168)
 
-Re-tightening `[4i/8align]` (turning the BUDGET-BOUND soft-release into a hard-fail) is a DATA-FIRST
-decision: it is safe ONLY once a green run's align status is NOT `budget-bound`. Where that data
-actually lives is non-obvious — spent-time gotchas:
+Re-tightening `[4i/8align]` is a DATA-FIRST decision. A NAIVE flip (turning the BUDGET-BOUND
+soft-release into an UNCONDITIONAL hard-fail) is safe ONLY once a green run's align status is NOT
+`budget-bound` — which is NOT yet true (every green run is budget-bound at the ~2-frame N=2 quantum,
+below). The LANDED re-tighten (issue 1168) is therefore the TRANSIENT/QUANTUM-BOUNDED form above
+(`budget_bound_verdict`): it keeps the quantum budget-bound residual report-only and hard-fails only a
+residual BEYOND the transient budget — a genuinely-worse ≥ ~3-source-frame misalignment. Where the
+status data lives is non-obvious — spent-time gotchas:
 
 - **The align STATUS lives in the CI RUN LOG, never the verdict JSON.** `qr_align_pins.py` writes its
   result JSON + the `[qr-align] host=… BUDGET-BOUND/ALREADY ALIGNED/aligned` line to stdout, captured

@@ -1,0 +1,19 @@
+[Unit]
+# stream OBS upstream-audio-latency STEP alert (#1267), DEV1-SIDE. ONE fetch -> decide -> alert pass.
+# Reads the `av_offset_*` facets bundle_state_gather (#1267) exposes on :8899/bundle-state.json (the
+# av-sync dock's measured-offset trend) and pages a REPORT-ONLY alert when the RECENT-vs-BASELINE
+# median offset STEPS beyond a threshold at a CONSTANT genlock pin — the 2026-09-01 incident: the
+# mastered Dante feed into the stream box's DVS `mbc` source got ~-60..-90 ms later 3 h before the
+# E2E A/V gate failed, and nothing off the box read the dock line that measured it. DETECTION ONLY —
+# no auto-action (the cure is a live-box OBS restart / upstream Dante investigation, an owner call).
+# SAME dev1 topology as audio-lag-alert-watchdog.service (#1226) / bundle-state (#732) / #1001.
+Description=camera-box stream OBS upstream-audio-latency step alert (#1267) — one fetch/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/av-step-alert-watchdog.sh
+# Per pass: one box (stream) × one :8899 curl (AV_STEP_CURL_TIMEOUT, default 10 s) + a local python
+# decision. Generous ceiling so a slow event-day link never hangs the timer.
+TimeoutStartSec=60
