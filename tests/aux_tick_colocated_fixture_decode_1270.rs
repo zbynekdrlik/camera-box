@@ -42,7 +42,7 @@
 
 #![cfg(feature = "probe")]
 
-use camera_box::aux_tick::aux_tick_rects;
+use camera_box::aux_tick::{aux_tick_rects, DESIGN_H, DESIGN_W};
 use camera_box::colour_scale::{Rect, DEFAULT_QR_SIZE, TOP_MARGIN_PX};
 use camera_box::probe::payload::Payload;
 use camera_box::probe::qr::{decode_qr_luma, decode_qr_luma_all_fast_then_robust_grouped_optical};
@@ -92,13 +92,8 @@ fn crop(luma: &GrayImage, r: Rect) -> GrayImage {
 /// RED commit: the HISTORICAL, pre-de-confliction positions — LEFT `x[466,676)`, RIGHT
 /// `x[1224,1434)` — which decode to nothing on this fixture; see git history for that state.)
 fn rects_under_test() -> [Rect; 2] {
-    aux_tick_rects(
-        camera_box::aux_tick::DESIGN_W,
-        camera_box::aux_tick::DESIGN_H,
-        DEFAULT_QR_SIZE,
-        TOP_MARGIN_PX,
-    )
-    .expect("the rig aux layout must be non-degenerate")
+    aux_tick_rects(DESIGN_W, DESIGN_H, DEFAULT_QR_SIZE, TOP_MARGIN_PX)
+        .expect("the rig aux layout must be non-degenerate")
 }
 
 /// Both co-located aux marks decode INDIVIDUALLY at FULL SIZE — a tight `crop_imm` at exactly

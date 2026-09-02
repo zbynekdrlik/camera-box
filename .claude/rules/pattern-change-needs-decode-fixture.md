@@ -101,3 +101,39 @@ dock UPTIME, not a constant miss rate) pointed instead at an allocator-churn bug
 pixels at all (`quirc_resize()` called unconditionally every frame for an unchanging size — see
 the `CbQrResizeCache`/`QrResizeCache` fix). **A live "it doesn't decode well" complaint is not
 proof the decode ALGORITHM is at fault — measure against real frames before touching geometry.**
+
+## Picking WHICH window/frame from the retention when the fixture must be leg-specific (issue 1270)
+
+The #1196 worked example above mines any decodable frame; a fixture that must prove a SPECIFIC leg
+(e.g. the CAM2 projection leg, not just "some window") needs one more cross-reference step: read
+the run's own `switch-schedule.json` (`{cambox, start_ns, end_ns}` per window) and, for each
+retained `<partial>-pixels/frame-N.png`, compare `frame_index`'s own PRIMARY payload `gen_ts_ns`
+(the E2E `RUN_ID`'s own entry in that frame's `payloads[]`) against the target cambox's window
+range — a frame whose primary `gen_ts_ns` falls inside `[start_ns, end_ns)` for `cambox: "CAM2"`
+is genuinely from that leg. Confirm leg identity a second, independent way too: a leg-specific
+digital burn co-present in the SAME frame's payload list (e.g. imag's own burn run_id 911003
+appearing alongside the aux marks proves the frame is the CAM2 projection leg — that burn is
+composited only there) is a stronger tell than the window-time cross-reference alone.
+
+**Proving a RELOCATED element decodes "at full size" (its own design rect, no extra quiet-zone
+margin) — cross-check pad=0, not just a padded crop.** When the claim under test is that a moved
+painted element decodes AT ITS EXACT design rectangle (not merely "somewhere nearby with generous
+margin"), verify with zbar at `pad=0` (crop exactly `[x, y, w, h]`, nothing added) before writing
+the Rust assertion — a crop that only decodes with padding proves a weaker claim than "full size".
+Confirmed live (issue 1270's co-located aux pair, `AUX_QR_SIZE_PX=210`): `zbarimg --raw` decoded
+both marks cleanly at pad=0 on every mined frame, because the design already renders the quiet
+zone INSIDE the box (`render_payload_qr(...).quiet_zone(true)`, box size == qr_px) — so the Rust
+test's `image::imageops::crop_imm` can safely use the bare design rect too, matching the sibling
+`dual_render_places_two_decodable_qrs_left_and_right` pattern in `src/probe/qr.rs`.
+
+**A geometry-only pattern change (no algorithm/decode-parameter tweak) can still use the RED→GREEN
+staging this rule mandates, by staging the TEST's OWN crop source, not production code.** When the
+production geometry already shipped (e.g. in an earlier PR) and only the fixture test is still
+owed, RED = crop at the HISTORICAL (pre-change) literal rect (documented from git history/the
+module doc's own "History" note) and assert the decode that the new fixture cannot satisfy there;
+GREEN = swap the crop source to the LIVE geometry function (e.g. `aux_tick::aux_tick_rects(...)`,
+never re-hardcoded literals) and the same assertion passes. This keeps the standard TDD commit
+order meaningful even when no PRODUCTION line changes between RED and GREEN — only the test's own
+"which geometry am I decoding at" pivots. Worked example: `tests/aux_tick_colocated_fixture_decode_1270.rs`
++ `tests/fixtures/tear-781/stream-255477892-frame-{2422,2423}.png` (RED `test(#1270): [red] ...`,
+GREEN `fix(#1270): [green] ...`).
