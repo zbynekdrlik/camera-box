@@ -609,6 +609,21 @@ mod tests {
     }
 
     #[test]
+    fn gates_overall_pass_static_read_is_true_905() {
+        // issue 905 item 2 (review 🔵8): pin the ONE public static flag that both the fold
+        // (`overall_pass_contribution`) and the recording-verdict.rs per-node JSON
+        // `gates_overall_pass` literals read from, so the JSON annotation can never silently drift
+        // from the actual pass/fail decision (the fixture comment in recording-verdict.rs itself
+        // warned they were independent hardcoded literals). `true` == blocking (a frozen leg or a
+        // self-heal reset fails overall_pass); a hypothetical future report-only re-decouple flips
+        // this ONE const, and every sibling seam already exposes exactly this shape.
+        assert!(
+            SelfHealAttributionReport::gates_overall_pass(),
+            "905 item 2: the static gates_overall_pass flag must read true (blocking)"
+        );
+    }
+
+    #[test]
     fn message_shape_is_distinct_and_never_reads_as_a_camera_fault() {
         let leg = SelfHealAttributedLeg {
             kind: RestartEventKind::SelfHealReset,
