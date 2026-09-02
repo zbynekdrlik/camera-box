@@ -5516,8 +5516,9 @@ fn build_and_print_verdict_with_stream_diffs(
                 // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
                 all_pass &= uniformity_gate_pass || !uniformity_gates_overall;
 
-                // #1088/#1112 — REPORT-ONLY duplication-masked 50→60 dup-rate seam (the #794 hard
-                // layer). The cadence watchdog (#794) reads strih's genlock-fifo `received=` rate
+                // #1088/#1112 — LIVE duplication-masked 50→60 dup-rate seam (the #794 hard
+                // layer; LIVE since the issue-1166 promote, 2026-09-02). The cadence watchdog
+                // (#794) reads strih's genlock-fifo `received=` rate
                 // and is STRUCTURALLY BLIND to a grabber that upconverts a 50fps source to 60 by
                 // frame DUPLICATION: it delivers a padded genuine 60 NDI frames/s, so `received=`
                 // reads a clean 60. The surviving signal is per-frame CONTENT identity — a
@@ -5531,8 +5532,9 @@ fn build_and_print_verdict_with_stream_diffs(
                 // `--stream` path still has the recording here and recomputes it from `stream_rec`.
                 // Either way the SAME windowing + classifier runs — this closes the #1101 finding
                 // that the surface was structurally unreachable in the merge gate (0/81 verdicts
-                // carried it). Report-only / calibration-first: `gates_overall_pass()` is false (no
-                // calibrated bound yet — #1166 owns the LIVE flip), so the fold below is a no-op.
+                // carried it). LIVE since the issue-1166 promote: `gates_overall_pass()` is true
+                // (bound DUP_RATE_PULLDOWN_MIN=0.10 unchanged; 0/44 mined pre-flip verdicts
+                // masked), so a genuinely `duplication_masked` window now fails the run.
                 // Each skip REASON is logged HERE during source resolution (accurately — a diff
                 // FAILURE prints its own {e}, a genuine no-source prints the no-carry/no-recording
                 // line), so the consuming match's None arm is a no-op and never double-logs a
@@ -5686,17 +5688,18 @@ fn build_and_print_verdict_with_stream_diffs(
                                  worst_raw_duplicate_fraction (a freeze/glitch has a \
                                  high raw fraction but is coverage/regularity vetoed → \
                                  excluded, no double-jeopardy with frozen_leg). \
-                                 REPORT-ONLY / calibration-first via \
-                                 dup_cadence::gates_overall_pass (false). #1101 \
+                                 LIVE since the #1166 promote (2026-09-02) via \
+                                 dup_cadence::gates_overall_pass (true) — 14-run mine, \
+                                 0/14 masked (zero false-positive exposure), \
+                                 signal_promotable=true on 11/14. #1101 \
                                  signal_viability cross-checks the content near-duplicates \
                                  against tick_proven_copies (repeated Vernier tick = a \
                                  byte-duplicate frame): blind = copies present but the \
                                  signal observed <50% of them; viable = >=50% observed \
-                                 (the #1166 fix); signal_promotable (viable on >=2 real \
-                                 runs + a recalibrated bound) is the LIVE-flip precondition.",
+                                 (the #1166 fix).",
                     });
                     println!(
-"  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
+"  #1088 DUP-CADENCE: masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
                                 masked_windows,
                                 worst_masked_fraction
                                     .map(|p| format!("{p:.5}"))
@@ -5720,7 +5723,8 @@ fn build_and_print_verdict_with_stream_diffs(
                                     .unwrap_or_else(|| "n/a".to_string()),
                             );
                     // Fold: a FAIL only fails the run while the seam gates overall_pass
-                    // (report-only today, so this is a no-op).
+                    // (LIVE since the issue-1166 promote — a genuine masked window now fails
+                    // the run).
                     all_pass &= dup_gate_pass || !dup_gates_overall;
                 }
 

@@ -44,16 +44,20 @@ lists the report-only ones for the `ℹ️` line.
   (`gate_pass`), `latency.cam_strih_gate`, `all_cambox_continuity.cadence_judder_gate`, and — since
   **#1142** — `all_cambox_continuity.cadence_uniformity_gate` (NEW uniformity floor),
   `all_cambox_delivery_latency` (`spread_gate_pass` + `gates_overall_pass` — the DELIVERY spread,
-  flipped BLOCKING; the block now surfaces `gates_overall_pass` so the classifier auto-follows), and
-  the imag PRESENCE/VERIFICATION terms (`full_chain.imag_leg_verified` not-acked +
-  `full_chain.loss.imag.imag_presence_pass`, both guarded by their `gates_overall_pass`).
+  flipped BLOCKING; the block now surfaces `gates_overall_pass` so the classifier auto-follows), the
+  imag PRESENCE/VERIFICATION terms (`full_chain.imag_leg_verified` not-acked +
+  `full_chain.loss.imag.imag_presence_pass`, both guarded by their `gates_overall_pass`), and — since
+  **#1166** — `all_cambox_continuity.duplication_masked_cadence` (`masked_windows > 0` +
+  `gates_overall_pass` — the duplication-masked 50→60 pulldown detector, flipped BLOCKING at the
+  promote cycle; see `verdict-gate-seam-calibration.md` §15 for the calibration table).
 - **REPORT-ONLY** (`gates_overall_pass=false`, NEVER a `❌`): the imag PER-FRAME CONTENT terms only
   since #1142 (`all_cambox_continuity.imag` continuity + `full_chain.loss.imag.imag_content_pass` —
   the observer-effect-confounded burn/beat; the imag PRESENCE terms are now BLOCKING above),
-  `cold_cut_onset`, `frozen_leg`, `self_heal_reset`, `duplication_masked_cadence`, the optical
-  undecodable floor (`run_wide_undecodable_within_floor`), lipsync. **NOTE (#1142):** the delivery
-  spread stays report-only ONLY on a PRE-#1142 verdict (no `gates_overall_pass` on its block); the
-  `_report_only_tripped` branch is guarded `gates_overall_pass is not True` so a #1142-shape verdict
+  `cold_cut_onset`, `frozen_leg`, `self_heal_reset`, the optical undecodable floor
+  (`run_wide_undecodable_within_floor`), lipsync. **NOTE (#1142 + #1166):** the delivery spread and
+  duplication_masked_cadence stay report-only ONLY on a PRE-flip verdict (no `gates_overall_pass` —
+  or `gates_overall_pass=false` — on the respective block); each `_report_only_tripped` branch is
+  guarded `gates_overall_pass is not True` so a post-flip verdict
   routes it to blocking instead (no double-count).
 
 **When you add a NEW gate to recording-verdict.rs:** if it folds into `all_pass`, add it to
