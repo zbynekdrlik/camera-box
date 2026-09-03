@@ -359,15 +359,45 @@ void render_display(struct obs_display *display)
 				const double mv_ewma_ms = (double)ewma / 1000000.0;
 				const double budget_ms =
 					(interval != 0) ? (double)(interval - interval / 10) / 1000000.0 : 0.0;
+				/* camera-box #1260 lever (1): per-cell MV instrumentation, APPEND-only.
+				 * cell_ms is the window MEAN of the per-render scene-cell CPU sum (the
+				 * frontend publishes it via obs_display_report_multiview_cells); it is
+				 * directly comparable to mv_ewma_ms, so `mv_ewma_ms - mv_cell_ms` is the
+				 * present/GPU-sync tail. top1/top2 are the two fattest cells of the window's
+				 * worst render (name already sanitized to be whitespace/`:`-free); "-" when
+				 * no cells were reported this window. REPORT-ONLY. */
+				const double cell_ms =
+					(display->render_audit_cell_render_count != 0)
+						? ((double)display->render_audit_cell_sum_ns /
+						   (double)display->render_audit_cell_render_count) /
+							  1000000.0
+						: 0.0;
+				const double cell_max_ms = (double)display->render_audit_cell_max_ns / 1000000.0;
+				const double top1_ms = (double)display->render_audit_top1_ns / 1000000.0;
+				const double top2_ms = (double)display->render_audit_top2_ns / 1000000.0;
+				const char *top1_name =
+					display->render_audit_top1_name[0] ? display->render_audit_top1_name : "-";
+				const char *top2_name =
+					display->render_audit_top2_name[0] ? display->render_audit_top2_name : "-";
 				blog(LOG_INFO,
-				     "multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f",
+				     "multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f mv_cells=%u mv_cell_ms=%.2f mv_cell_max_ms=%.2f mv_top1=%s:%.2f mv_top2=%s:%.2f",
 				     display->render_audit_id, effective_divisor, rendered_fps, target_fps, floor_fps,
-				     display->cx, display->cy, pre_mv_ms, pre_mv_max_ms, mv_ewma_ms, budget_ms);
+				     display->cx, display->cy, pre_mv_ms, pre_mv_max_ms, mv_ewma_ms, budget_ms,
+				     display->render_audit_cell_count, cell_ms, cell_max_ms, top1_name, top1_ms, top2_name,
+				     top2_ms);
 				display->render_audit_window_start_ns = audit_now;
 				display->render_audit_render_count = 0;
 				display->render_audit_pre_mv_sum_ns = 0;
 				display->render_audit_pre_mv_max_ns = 0;
 				display->render_audit_tick_count = 0;
+				display->render_audit_cell_sum_ns = 0;
+				display->render_audit_cell_max_ns = 0;
+				display->render_audit_cell_render_count = 0;
+				display->render_audit_cell_count = 0;
+				display->render_audit_top1_ns = 0;
+				display->render_audit_top2_ns = 0;
+				display->render_audit_top1_name[0] = '\0';
+				display->render_audit_top2_name[0] = '\0';
 			}
 		}
 		if (ewma != 0 && interval != 0 && tick_start != 0) {
@@ -514,6 +544,57 @@ void obs_display_set_vsync(obs_display_t *display, bool vsync)
 		blog(LOG_INFO,
 		     "projector-vsync: present-vsync %s (GL/EGL swap interval %d; no-op on D3D11)",
 		     vsync ? "ARMED" : "cleared", vsync ? 1 : 0);
+}
+
+/* camera-box #1260 lever (1): copy a scene name into a bounded audit-line buffer, replacing every
+ * character that would break the whitespace-tokenized multiview-audit line (space/tab/other
+ * whitespace, '=', ':', DEL) with '_'. This is the SINGLE place cell names are sanitized (the
+ * frontend passes the raw obs_source_get_name), so the emitted mv_top1=name:ms / mv_top2=name:ms
+ * tokens are always parseable. dst_cap includes the NUL. NULL src -> empty string. */
+static void obs_audit_copy_cell_name(char *dst, size_t dst_cap, const char *src)
+{
+	if (!dst || dst_cap == 0)
+		return;
+	if (!src) {
+		dst[0] = '\0';
+		return;
+	}
+	size_t i = 0;
+	for (; src[i] && i < dst_cap - 1; i++) {
+		unsigned char c = (unsigned char)src[i];
+		dst[i] = (c <= ' ' || c == '=' || c == ':' || c == 0x7f) ? '_' : (char)c;
+	}
+	dst[i] = '\0';
+}
+
+/* camera-box #1260 lever (1): fold ONE multiview render's per-cell CPU-timing aggregate into this
+ * display's #771 audit window. Called ONCE per real multiview render by the frontend draw callback
+ * (OBSProjector, after Multiview::Render), on the graphics thread — the SAME single-writer thread
+ * that reads/emits/resets the audit window in render_display(), so no locks (same discipline as
+ * the render_audit_* fields, obs-internal.h). No-op for a non-throttleable display (render_divisor
+ * <= 1) which has no audit window. REPORT-ONLY: it never touches obs_display_should_skip; it only
+ * feeds the logged line. top1/top2 are kept together from the render with the largest per-render
+ * cell sum, so they always describe the SAME (worst) render's two fattest cells. */
+void obs_display_report_multiview_cells(obs_display_t *display, uint32_t cells, uint64_t cell_sum_ns,
+					uint64_t top1_ns, const char *top1_name, uint64_t top2_ns,
+					const char *top2_name)
+{
+	if (!display || display->render_divisor <= 1)
+		return;
+
+	display->render_audit_cell_sum_ns += cell_sum_ns;
+	display->render_audit_cell_render_count++;
+	display->render_audit_cell_count = cells;
+
+	if (cell_sum_ns > display->render_audit_cell_max_ns) {
+		display->render_audit_cell_max_ns = cell_sum_ns;
+		display->render_audit_top1_ns = top1_ns;
+		display->render_audit_top2_ns = top2_ns;
+		obs_audit_copy_cell_name(display->render_audit_top1_name, sizeof(display->render_audit_top1_name),
+					 top1_name);
+		obs_audit_copy_cell_name(display->render_audit_top2_name, sizeof(display->render_audit_top2_name),
+					 top2_name);
+	}
 }
 
 void obs_display_size(obs_display_t *display, uint32_t *width, uint32_t *height)

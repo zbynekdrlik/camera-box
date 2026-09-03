@@ -2,6 +2,7 @@
 
 #include <obs.hpp>
 
+#include <string>
 #include <vector>
 
 enum class MultiviewLayout : uint8_t {
@@ -23,9 +24,24 @@ public:
 	~Multiview();
 	void Update(MultiviewLayout multiviewLayout, bool drawLabel, bool drawSafeArea);
 	void Render(uint32_t cx, uint32_t cy);
+	// camera-box #1260 lever (1): publish the LAST Render()'s per-cell CPU-timing aggregate into
+	// the projector's display audit window. Called by OBSProjector::OBSRenderMultiview right after
+	// Render(), on the graphics thread (see obs_display_report_multiview_cells).
+	void ReportCellStats(obs_display_t *display);
 	OBSSource GetSourceByPosition(int x, int y);
 
 private:
+	// camera-box #1260: per-cell scene-render CPU timing captured during Render() (reset at the
+	// top of every Render, published by ReportCellStats). cellRenderCount = populated scene cells
+	// timed this render; cellSumNs = sum of their obs_source_video_render CPU ns; top1/top2 = the
+	// two fattest cells (ns + name, captured while the strong ref is held).
+	uint32_t cellRenderCount = 0;
+	uint64_t cellSumNs = 0;
+	uint64_t top1Ns = 0;
+	uint64_t top2Ns = 0;
+	std::string top1Name;
+	std::string top2Name;
+
 	bool drawLabel, drawSafeArea;
 	MultiviewLayout multiviewLayout;
 	size_t maxSrcs;

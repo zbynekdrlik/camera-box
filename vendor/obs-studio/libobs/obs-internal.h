@@ -368,6 +368,32 @@ struct obs_display {
 	uint64_t render_audit_pre_mv_max_ns;
 	uint32_t render_audit_tick_count;
 
+	/* camera-box #1260 lever (1): per-cell MV render instrumentation. The #1260 budget-split
+	 * above showed the MV PHASE itself is the variable cost (mv_ewma_ms 15-16 healthy vs 21-22
+	 * collapsed) while pre_mv stays flat, and the 4K->1080p A/B falsified fill-rate as the
+	 * lever — so the open question is WHICH cells cost what, and whether the phase is per-cell
+	 * CPU draw-submission or a GPU/present-wait tail. render_display() cannot break this down:
+	 * the cells are iterated one TU away, in the FRONTEND multiview draw callback
+	 * (Multiview::Render, frontend/components/Multiview.cpp). That callback times each
+	 * scene-cell obs_source_video_render on the graphics thread and publishes the per-render
+	 * aggregate via obs_display_report_multiview_cells(), which folds it into these window
+	 * accumulators; render_display() emits mv_cells / mv_cell_ms / mv_cell_max_ms / mv_top1 /
+	 * mv_top2 alongside mv_ewma_ms, so `mv_ewma_ms - mv_cell_ms` is the present/GPU-sync tail.
+	 * Per-instance, graphics-thread-only (the frontend callback runs inside render_display() on
+	 * the single graphics thread — same single-writer discipline as the fields above, NO
+	 * locks), reset each audit window exactly like render_audit_render_count. REPORT-ONLY: the
+	 * skip DECISION is untouched. cell_render_count counts the renders that reported cells this
+	 * window (the mean divisor for cell_sum_ns); top1/top2 hold the two fattest cells (ns +
+	 * sanitized name, <= 63 chars) of the window's WORST render (largest per-render cell sum). */
+	uint64_t render_audit_cell_sum_ns;
+	uint64_t render_audit_cell_max_ns;
+	uint32_t render_audit_cell_render_count;
+	uint32_t render_audit_cell_count;
+	uint64_t render_audit_top1_ns;
+	uint64_t render_audit_top2_ns;
+	char render_audit_top1_name[64];
+	char render_audit_top2_name[64];
+
 	struct obs_display *next;
 	struct obs_display **prev_next;
 };

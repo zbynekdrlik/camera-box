@@ -199,6 +199,12 @@ pub fn parse_audit_line(line: &str) -> Option<MvAuditSample> {
     let mut floor_fps: Option<f64> = None;
     let mut cx: Option<u32> = None;
     let mut cy: Option<u32> = None;
+    // camera-box #1260: optional per-cell MV instrumentation tokens (append-only).
+    let mut cells: Option<u32> = None;
+    let mut cell_ms: Option<f64> = None;
+    let mut cell_max_ms: Option<f64> = None;
+    let mut top1: Option<(String, f64)> = None;
+    let mut top2: Option<(String, f64)> = None;
 
     for tok in rest.split_whitespace() {
         let Some((key, val)) = tok.split_once('=') else {
@@ -212,6 +218,11 @@ pub fn parse_audit_line(line: &str) -> Option<MvAuditSample> {
             "floor" => floor_fps = val.parse().ok(),
             "cx" => cx = val.parse().ok(),
             "cy" => cy = val.parse().ok(),
+            "mv_cells" => cells = val.parse().ok(),
+            "mv_cell_ms" => cell_ms = val.parse().ok(),
+            "mv_cell_max_ms" => cell_max_ms = val.parse().ok(),
+            "mv_top1" => top1 = parse_top_cell(val),
+            "mv_top2" => top2 = parse_top_cell(val),
             _ => {}
         }
     }
@@ -224,13 +235,26 @@ pub fn parse_audit_line(line: &str) -> Option<MvAuditSample> {
         floor_fps: floor_fps?,
         cx: cx?,
         cy: cy?,
-        // camera-box #1260: not yet parsed (RED — the enriched-line test expects these populated).
-        cells: None,
-        cell_ms: None,
-        cell_max_ms: None,
-        top1: None,
-        top2: None,
+        cells,
+        cell_ms,
+        cell_max_ms,
+        top1,
+        top2,
     })
+}
+
+/// Parse an `mv_top1=`/`mv_top2=` value `name:ms` into `(name, ms)`. camera-box #1260: the emitter
+/// sanitizes the cell name (space/`=`/`:` → `_`) so the value carries exactly ONE `:` separating a
+/// `:`-free name from the ms float; split on that LAST `:`. The `-` placeholder (emitted when zero
+/// cells rendered) and an unparseable/empty value yield `None`, so a reader never mistakes the
+/// placeholder for a real cell.
+fn parse_top_cell(val: &str) -> Option<(String, f64)> {
+    let (name, ms) = val.rsplit_once(':')?;
+    if name.is_empty() || name == "-" {
+        return None;
+    }
+    let ms: f64 = ms.parse().ok()?;
+    Some((name.to_string(), ms))
 }
 
 /// The LATEST `multiview-audit` sample per monitor id, in ascending monitor order — the current

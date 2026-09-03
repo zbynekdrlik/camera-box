@@ -4,6 +4,9 @@
 #include <widgets/OBSBasic.hpp>
 
 #include <obs-frontend-api.h>
+#include <util/platform.h> // camera-box #1260: os_gettime_ns for per-cell MV render timing
+
+#include <utility>
 
 Multiview::Multiview()
 {
@@ -219,6 +222,15 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 {
 	OBSBasic *main = (OBSBasic *)obs_frontend_get_main_window();
 
+	// camera-box #1260 lever (1): reset this render's per-cell scene-render timing accumulators;
+	// the scene-cell loop below fills them and ReportCellStats() publishes them after Render().
+	cellRenderCount = 0;
+	cellSumNs = 0;
+	top1Ns = 0;
+	top2Ns = 0;
+	top1Name.clear();
+	top2Name.clear();
+
 	uint32_t targetCX, targetCY;
 	int x, y;
 	float scale;
@@ -427,7 +439,26 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 		gs_matrix_translate3f(siX, siY, 0.0f);
 		gs_matrix_scale3f(siScaleX, siScaleY, 1.0f);
 		setRegion(siX, siY, siCX, siCY);
-		obs_source_video_render(src);
+		// camera-box #1260 lever (1): time this scene cell's CPU render (async-texture upload +
+		// convert + draw submission) so the MV phase can be attributed per cell. Report-only.
+		{
+			const uint64_t cell_t0 = os_gettime_ns();
+			obs_source_video_render(src);
+			const uint64_t now = os_gettime_ns();
+			const uint64_t cell_dt = (now > cell_t0) ? (now - cell_t0) : 0;
+			cellSumNs += cell_dt;
+			cellRenderCount++;
+			const char *nm = obs_source_get_name(src);
+			if (cell_dt >= top1Ns) {
+				top2Ns = top1Ns;
+				top2Name = std::move(top1Name);
+				top1Ns = cell_dt;
+				top1Name = nm ? nm : "";
+			} else if (cell_dt > top2Ns) {
+				top2Ns = cell_dt;
+				top2Name = nm ? nm : "";
+			}
+		}
 		endRegion();
 		gs_matrix_pop();
 
@@ -554,6 +585,16 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 	}
 
 	endRegion();
+}
+
+void Multiview::ReportCellStats(obs_display_t *display)
+{
+	// camera-box #1260 lever (1): hand the last Render()'s per-cell aggregate to libobs, which
+	// folds it into this projector's #771 audit window and prints mv_cells/mv_cell_ms/... on the
+	// multiview-audit line. libobs sanitizes the names (space/'='/':' -> '_') so the whitespace-
+	// tokenized line stays parseable; it is a no-op for a non-throttleable display. Report-only.
+	obs_display_report_multiview_cells(display, cellRenderCount, cellSumNs, top1Ns, top1Name.c_str(), top2Ns,
+					   top2Name.c_str());
 }
 
 OBSSource Multiview::GetSourceByPosition(int x, int y)

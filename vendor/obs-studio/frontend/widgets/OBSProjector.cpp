@@ -175,6 +175,10 @@ void OBSProjector::OBSRenderMultiview(void *data, uint32_t cx, uint32_t cy)
 	}
 
 	window->multiview->Render(cx, cy);
+	// camera-box #1260 lever (1): publish this render's per-cell CPU-timing aggregate into the
+	// projector's display audit window (mv_cells/mv_cell_ms/mv_top1/... on the multiview-audit
+	// line). Same graphics thread as Render + render_display, so no locks. Report-only.
+	window->multiview->ReportCellStats(window->GetDisplay());
 }
 
 void OBSProjector::OBSRender(void *data, uint32_t cx, uint32_t cy)
