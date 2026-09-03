@@ -185,6 +185,31 @@ jobs:
           echo "docs_only=$DOCS_ONLY" >> "$GITHUB_OUTPUT"
           echo "Docs-only PR: $DOCS_ONLY"
 
+      - name: Cold-cut keepalive-bypass arm check (#1086)
+        # #1086: full-path-e2e.yml sources COLD_CUT_BYPASS_CAM / COLD_CUT_BYPASS_INPUT from
+        # repository VARIABLES (see the recording step's env: block below) so a deliberate
+        # keepalive-bypass GENUINE-cold run is a variable flip with no code change. A repository
+        # variable is GLOBAL — it applies to EVERY dev→main PR gate run until cleared — so a
+        # stuck/typo'd value would silently idle a LIVE strih receiver run after run. This step is
+        # PURE (no rig, no lease, no network), so it runs FIRST — before the ~30-min rig-busy poll
+        # and the ~20-min #703 artifact fetch — and, via scripts/lib/cold-cut-bypass-guard.sh,
+        # prints a LOUD ARMED banner when armed on the ALL_CAMBOX fused sweep (silent when both
+        # variables are unset — the default; an INERT warning when armed on a non-sweep run) and
+        # FAILS CLOSED on a target outside the current-sweep 2nd-cut set {CAM1,CAM2,CAM3} or a set
+        # target with an empty input — catching a stuck variable before ANY rig time is spent.
+        if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
+        env:
+          COLD_CUT_BYPASS_CAM: ${{ vars.COLD_CUT_BYPASS_CAM }}
+          COLD_CUT_BYPASS_INPUT: ${{ vars.COLD_CUT_BYPASS_INPUT }}
+          # The cold-cut hooks fire ONLY inside recording-e2e.sh's ALL_CAMBOX=1 fused sweep, so the
+          # guard needs the SAME value the recording step computes to tell an ARMED sweep run from an
+          # INERT single-camera / workflow_dispatch run (and only reject an invalid target on the
+          # former). Same ternary as the recording step's ALL_CAMBOX.
+          ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+        run: |
+          . scripts/lib/cold-cut-bypass-guard.sh
+          cold_cut_bypass_arm_check
+
       - name: Rig-busy gate — refuse to reroute prod OBS while a REAL broadcast is live (#406/#312)
         # Polls OBS WebSocket on strih+stream (GetStreamStatus/GetRecordStatus) for up to 30 min.
         # Distinct exit codes: 0 = free (proceed), 42 = still busy after the budget, 43 = rig
@@ -324,6 +349,14 @@ jobs:
           # recording-verdict.exe" step above already uses. push/workflow_dispatch runs never see
           # this event, so github.sha is already correct there and this only takes effect on PRs.
           FRAME_PROBE_ALIGN_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          # #1086: the deliberate keepalive-bypass cold-cut target, sourced from REPOSITORY
+          # VARIABLES (empty/unset by default -> scripts/lib/cold-cut-step.sh is an inert no-op and
+          # a normal gate run is byte-for-byte unchanged). recording-e2e.sh only sees env vars set
+          # on THIS step, so both must live here. A future genuine-cold run for issue 1086's LIVE
+          # flip is a repository-variable flip with NO code change; the preceding "Cold-cut
+          # keepalive-bypass arm check" step makes an armed value LOUD and fail-CLOSED first.
+          COLD_CUT_BYPASS_CAM: ${{ vars.COLD_CUT_BYPASS_CAM }}
+          COLD_CUT_BYPASS_INPUT: ${{ vars.COLD_CUT_BYPASS_INPUT }}
         # #832: this workflow never hardcodes an imag-nb address itself — recording-e2e.sh
         # resolves the ACTIVE imag host from scripts/imag-host.sh (the ONE declared source of
         # truth, reversible between the incumbent 10.77.9.182 and the replacement 10.77.9.187).
