@@ -478,25 +478,48 @@ dantesync_locked_from_log() {
 # caught the exact failure it should: a genlock change merged to main that NOBODY deployed to imag.
 # The #530 disaster: imag-nb ran a STALE genlock build at a live event -> 45fps. The authoritative
 # "what SHOULD be deployed" is origin/main's vendored-genlock HEAD, so the impure caller
-# ([`gather_and_check_imag`]) runs `git log <BOX_SHA>..origin/main -- vendor/obs-studio
-# vendor/distroav` and passes its output (RANGE_LOG) + exit status (GIT_RC) here; THIS pure function
-# decides. NO I/O — directly unit-testable (tests/drift_guard.rs) by mocking BOX_SHA / GIT_RC /
-# RANGE_LOG, no live box or real git repo needed.
+# ([`gather_and_check_imag`]) runs `imag_genlock_range_log`/`imag_genlock_ahead_log`/
+# `imag_genlock_on_dev` and passes their output here; THIS pure function decides. NO I/O — directly
+# unit-testable (tests/drift_guard.rs) by mocking every input, no live box or real git repo needed.
 #
 #   BOX_SHA    the commit SHA read from /opt/obs-genlock/GENLOCK_BUILD_SHA.txt on imag-nb ("" = unread)
-#   GIT_RC     the `git log` range command's exit status ("0" = ran OK; non-zero = git failed, e.g.
-#              BOX_SHA is not a commit in this checkout, or a shallow clone / unreachable fetch)
-#   RANGE_LOG  the `git log --oneline BOX_SHA..origin/main -- vendor/obs-studio vendor/distroav`
-#              output — one `<short-sha> <subject>` line per genlock-touching commit the box is
-#              BEHIND ("" = none = the box is at/after origin/main's genlock HEAD = current)
+#   GIT_RC     imag_genlock_range_log's exit status ("0" = ran OK; non-zero = git failed, e.g. BOX_SHA
+#              is not a commit in this checkout, or a shallow clone / unreachable fetch)
+#   RANGE_LOG  imag_genlock_range_log's output — one `<short-sha> <subject>` line per genlock-
+#              touching commit origin/main carries that BOX_SHA's OWN lineage never received ("" =
+#              none = BOX_SHA already carries every genlock commit main has, whether that makes it
+#              CURRENT or AHEAD — see AHEAD_LOG below)
+#   AHEAD_LOG  (#1292, optional — "" for a caller that predates this ticket, preserving the old 5-arg
+#              call shape byte-for-byte) imag_genlock_ahead_log's output — one line per genlock-
+#              touching commit BOX_SHA carries that origin/main does not (a release-candidate build
+#              on the dev line, deployed before its own content merged to main)
+#   ON_DEV     (#1292, optional) "1" when the impure caller confirmed BOX_SHA is reachable from
+#              origin/dev (imag_genlock_on_dev); anything else ("" / "0") means NOT confirmed — the
+#              caller must fail-CLOSED to "0" on any git error of its own, never leave this ambiguous
+#
+# #1292 root cause this whole function exists to fix: RANGE_LOG used to be a plain ancestry range
+# (BOX_SHA..origin/main), which reads STALE for a box that is genuinely AHEAD of main on the dev
+# candidate line — this repo's two-branch model never merges main's own merge commits back into dev
+# (top-level CLAUDE.md GOTCHA), so a box's dev-side lineage is never a git-ancestor of main's merge
+# commits even when it is a CONTENT superset of them. imag_genlock_range_log now scopes RANGE_LOG to
+# `git merge-base(BOX_SHA, origin/main)..origin/main`, which reads correctly empty for a superset box
+# — RANGE_LOG non-empty still means a REAL missing commit, never a false positive. AHEAD_LOG/ON_DEV
+# then distinguish "box is a recognized release-candidate build" (OK) from "box carries vendored
+# commits nobody can account for" (orphan build — DRIFT, the early-gate-pin doctrine's "an orphan
+# release must SCREAM").
 #
 # Two-tier, mirroring the rest of the engine (never a silent clean): BOX_SHA empty -> UNKNOWN (we
 # never read the box), GIT_RC != 0 -> UNKNOWN (we could not COMPUTE the drift — never a false OK for
-# a git error), RANGE_LOG empty -> OK (current), RANGE_LOG non-empty -> DRIFT (box is behind — FAIL
-# LOUD with the count + the stale-commit SHAs + the exact operator action). Returns 0 OK / 20 DRIFT /
-# 11 UNKNOWN (the engine's exit-code contract).
+# a git error), RANGE_LOG non-empty -> DRIFT (box is genuinely behind — FAIL LOUD with the count + the
+# stale-commit SHAs + the exact operator action). RANGE_LOG empty + AHEAD_LOG empty -> OK (current).
+# RANGE_LOG empty + AHEAD_LOG non-empty + ON_DEV=1 -> OK (box is N vendored-genlock commit(s) AHEAD
+# of main on the dev candidate line — the exact false-STALE this ticket fixes). RANGE_LOG empty +
+# AHEAD_LOG non-empty + ON_DEV!=1 -> DRIFT (orphan build: vendored-genlock commits reachable from
+# NEITHER origin/main NOR origin/dev). Returns 0 OK / 20 DRIFT / 11 UNKNOWN (the engine's exit-code
+# contract).
 genlock_build_drift_report() {
   local box_label="$1" deploy_action="$2" box_sha="$3" git_rc="$4" range_log="$5"
+  local ahead_log="${6:-}" on_dev="${7:-}"
   if [ -z "$box_sha" ]; then
     printf '  %-22s UNKNOWN  (genlock build SHA not read on %s)\n' "genlock_build" "$box_label"
     return 11
@@ -506,20 +529,36 @@ genlock_build_drift_report() {
       "genlock_build" "$box_sha" "$git_rc" "$box_sha"
     return 11
   fi
-  if [ -z "$range_log" ]; then
-    printf '  %-22s OK       (box=%s is current with origin/main vendored-genlock HEAD)\n' \
-      "genlock_build" "$box_sha"
-    return 0
+  if [ -n "$range_log" ]; then
+    # Behind: count the genlock-touching commits the box is missing + list their short SHAs.
+    # Drain-safe (grep/awk read the whole here-string, never grep -q; `|| true` keeps a no-match
+    # from tripping the caller's set -e/pipefail — though range_log is non-empty here by
+    # construction).
+    local n shas
+    n="$(printf '%s\n' "$range_log" | grep -c . || true)"
+    shas="$(printf '%s\n' "$range_log" | awk 'NF{print $1}' | paste -sd, - || true)"
+    printf '  %-22s DRIFT    (%s genlock STALE: box=%s is %s genlock-commit(s) behind origin/main [%s]; %s)\n' \
+      "genlock_build" "$box_label" "$box_sha" "$n" "$shas" "$deploy_action"
+    return 20
   fi
-  # Behind: count the genlock-touching commits the box is missing + list their short SHAs. Drain-safe
-  # (grep/awk read the whole here-string, never grep -q; `|| true` keeps a no-match from tripping the
-  # caller's set -e/pipefail — though range_log is non-empty here by construction).
-  local n shas
-  n="$(printf '%s\n' "$range_log" | grep -c . || true)"
-  shas="$(printf '%s\n' "$range_log" | awk 'NF{print $1}' | paste -sd, - || true)"
-  printf '  %-22s DRIFT    (%s genlock STALE: box=%s is %s genlock-commit(s) behind origin/main [%s]; %s)\n' \
-    "genlock_build" "$box_label" "$box_sha" "$n" "$shas" "$deploy_action"
-  return 20
+  if [ -n "$ahead_log" ]; then
+    # #1292: box has no MISSING vendor commits but carries EXTRA ones — a release-candidate build on
+    # the dev line, or an unrecognized/orphan build. Same drain-safe convention as the DRIFT branch.
+    local n shas
+    n="$(printf '%s\n' "$ahead_log" | grep -c . || true)"
+    shas="$(printf '%s\n' "$ahead_log" | awk 'NF{print $1}' | paste -sd, - || true)"
+    if [ "$on_dev" = "1" ]; then
+      printf '  %-22s OK       (box=%s is %s vendored-genlock commit(s) AHEAD of origin/main on the dev candidate line [%s])\n' \
+        "genlock_build" "$box_sha" "$n" "$shas"
+      return 0
+    fi
+    printf '  %-22s DRIFT    (%s genlock ORPHAN: box=%s carries %s vendored-genlock commit(s) reachable from NEITHER origin/main NOR origin/dev [%s]; %s)\n' \
+      "genlock_build" "$box_label" "$box_sha" "$n" "$shas" "$deploy_action"
+    return 20
+  fi
+  printf '  %-22s OK       (box=%s is current with origin/main vendored-genlock HEAD)\n' \
+    "genlock_build" "$box_sha"
+  return 0
 }
 
 # #531 imag-nb caller + tests use imag_build_drift_report(box_sha, git_rc, range_log); it is now a
@@ -1067,26 +1106,73 @@ check_imag_report() {
   return 0
 }
 
-# imag_genlock_range_log REPO_ROOT BOX_SHA -> prints `git log --oneline BOX_SHA..origin/main --
-# vendor/obs-studio vendor/distroav` (one genlock-touching commit per line the box is BEHIND);
-# exit status mirrors that `git log` call. #531 review: BOX_SHA comes from a file READ OVER SSH
-# from imag-nb (`GENLOCK_BUILD_SHA.txt`) and is used UNVALIDATED — normally a clean 40-hex commit
-# SHA, but a truncated/corrupted write (a crash mid-write, disk corruption, a future setup-imag.sh
-# bug) could leave it shaped like a git long-option, e.g. `--grep=x`. WITHOUT `--end-of-options`,
-# `git log "${box_sha}..origin/main" ...` would silently CONSUME such a value as a real git FLAG
-# instead of a revision range, exiting 0 with EMPTY output — the exact "box is current, OK" verdict
-# in imag_build_drift_report, i.e. a FALSE OK, precisely the failure mode this whole #531 check
-# exists to eliminate. `--end-of-options` (git >= 2.24, well within this repo's toolchain) marks the
-# end of git's own option parsing so any value here is ALWAYS treated as a revision, never a flag —
-# a malformed value now fails LOUD (`fatal: bad revision`, non-zero exit) instead of silently
-# succeeding empty. Mirrors the SAME OpenSSH-argument-injection defense `gather_and_check_imag`
-# already applies to `$target` via ssh's own `--` below. Isolated into its own function (rather than
-# inlined in gather_and_check_imag) so it is independently testable against THIS repo's own local
-# checkout — no live SSH to imag-nb needed (tests/drift_guard.rs).
+# imag_genlock_range_log REPO_ROOT BOX_SHA -> prints `git log --oneline
+# $(git merge-base BOX_SHA origin/main)..origin/main -- vendor/obs-studio vendor/distroav` (one
+# genlock-touching commit per line origin/main carries that BOX_SHA's own lineage never received —
+# i.e. BOX_SHA is genuinely STALE relative to it); exit status mirrors the FIRST failing git call
+# (the merge-base resolve, then the log). #531 review: BOX_SHA comes from a file READ OVER SSH from
+# imag-nb (`GENLOCK_BUILD_SHA.txt`) and is used UNVALIDATED — normally a clean 40-hex commit SHA,
+# but a truncated/corrupted write (a crash mid-write, disk corruption, a future setup-imag.sh bug)
+# could leave it shaped like a git long-option, e.g. `--grep=x`. WITHOUT `--end-of-options`, git
+# would silently CONSUME such a value as a real FLAG instead of a revision, exiting 0 with EMPTY
+# output — the exact "box is current, OK" verdict in imag_build_drift_report, i.e. a FALSE OK,
+# precisely the failure mode this whole #531 check exists to eliminate. `--end-of-options` (git >=
+# 2.24, well within this repo's toolchain) marks the end of git's own option parsing so any value
+# here is ALWAYS treated as a revision, never a flag — a malformed value now fails LOUD (non-zero
+# exit from the merge-base resolve) instead of silently succeeding empty.
+#
+# #1292: this used to be a plain ANCESTRY range (`BOX_SHA..origin/main`), which reads FALSELY STALE
+# for a box that is genuinely AHEAD of main on the dev candidate line — a release-candidate build
+# deployed before its own content merged to main (e.g. box=3ffe2fbc5, a dev descendant that already
+# CONTAINS cfdbdb003+e5b46ab60's whole vendor content, still read "2 genlock-commit(s) behind
+# origin/main [cfdbdb003,e5b46ab60]" — those two are MERGE commits on main, not reachable from box's
+# own dev-side ancestry at all, per this repo's two-branch model where dev never pulls main's own
+# merge commits back in (top-level CLAUDE.md GOTCHA), even though their vendor CONTENT is already a
+# subset of what box has). Scoping the range to start at `git merge-base BOX_SHA origin/main` (the
+# real common ancestor, not box_sha's own straight ancestry) fixes this: for a box that is a content
+# superset of main, the merge-base already sits at the point past which main gained nothing box
+# doesn't already have, so the range reads correctly EMPTY. A genuinely stale box (its own
+# merge-base is far behind) still shows every real missing vendor commit — this change removes ONLY
+# the false positive on the AHEAD direction, it never hides a real stale box. Empirically verified
+# against this repo's own real history AND a synthetic two-branch repo isolating the exact DAG shape
+# (tests/drift_guard.rs).
+#
+# Isolated into its own function (rather than inlined in gather_and_check_imag) so it is
+# independently testable against THIS repo's own local checkout — no live SSH to imag-nb needed
+# (tests/drift_guard.rs). See imag_genlock_ahead_log (the AHEAD-direction counterpart) and
+# imag_genlock_on_dev (the orphan-build guard) immediately below.
 imag_genlock_range_log() {
-  local repo_root="$1" box_sha="$2"
-  git -C "$repo_root" log --oneline --end-of-options "${box_sha}..origin/main" \
+  local repo_root="$1" box_sha="$2" base
+  base="$(git -C "$repo_root" merge-base --end-of-options "$box_sha" origin/main 2>/dev/null)" \
+    || return $?
+  git -C "$repo_root" log --oneline --end-of-options "${base}..origin/main" \
     -- vendor/obs-studio vendor/distroav 2>/dev/null
+}
+
+# imag_genlock_ahead_log REPO_ROOT BOX_SHA -> prints `git log --oneline origin/main..BOX_SHA --
+# vendor/obs-studio vendor/distroav` (one genlock-touching commit per line BOX_SHA carries that
+# origin/main does not); exit status mirrors that `git log` call. #1292: the AHEAD-direction
+# counterpart to imag_genlock_range_log's (now merge-base-scoped) STALE range — this is how
+# genlock_build_drift_report tells "box carries vendored-genlock commits main hasn't merged yet" (a
+# release-candidate build on the dev line) apart from "box is current" (both ranges empty). Same
+# `--end-of-options` defense as imag_genlock_range_log, identical rationale (an unvalidated box_sha
+# read over SSH must never be silently consumed as a git option).
+imag_genlock_ahead_log() {
+  local repo_root="$1" box_sha="$2"
+  git -C "$repo_root" log --oneline --end-of-options "origin/main..${box_sha}" \
+    -- vendor/obs-studio vendor/distroav 2>/dev/null
+}
+
+# imag_genlock_on_dev REPO_ROOT BOX_SHA -> exit 0 when BOX_SHA is reachable from origin/dev (an
+# expected build on the dev candidate line — a release-candidate bundle deployed ahead of main),
+# non-zero otherwise (unreachable, or box_sha itself unresolvable) — fail CLOSED, never a silent
+# "yes" on an unresolvable check. #1292: the orphan-build guard genlock_build_drift_report's AHEAD
+# branch consults — a box that carries vendored-genlock commits reachable from NEITHER origin/main
+# NOR origin/dev is an unrecognized/orphan build (early-gate-pin doctrine: "an orphan release must
+# SCREAM"), never a quiet OK just because it happens to be a content superset of main.
+imag_genlock_on_dev() {
+  local repo_root="$1" box_sha="$2"
+  git -C "$repo_root" merge-base --is-ancestor --end-of-options "$box_sha" origin/dev 2>/dev/null
 }
 
 # gather_and_check_imag HOST USER README -> SSH-gathers the observed values from the LIVE
@@ -1150,7 +1236,7 @@ gather_and_check_imag() {
   # at all) on the essentially-never-but-possible case that the script's own parent directory can't
   # be `cd`'d into. `|| repo_root=""` neutralizes errexit; an empty repo_root then short-circuits to
   # UNKNOWN below instead of silently running `git` against the wrong (cwd) directory.
-  local repo_root git_range="" git_rc=0
+  local repo_root git_range="" git_rc=0 git_ahead="" on_dev=0
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || repo_root=""
   if [ -z "$repo_root" ]; then
     git_rc=1
@@ -1164,6 +1250,15 @@ gather_and_check_imag() {
       || echo "WARN: git fetch origin failed (or timed out) — comparing imag build against a possibly-stale origin/main" >&2
     if [ -n "$obs_build_sha" ]; then
       git_range="$(imag_genlock_range_log "$repo_root" "$obs_build_sha")" || git_rc=$?
+      # #1292: only bother computing the AHEAD-direction facts when the STALE range came back clean
+      # (empty) — a genuinely-behind box stays DRIFT regardless of what it also carries ahead, so
+      # these two extra git calls are skipped on the (already fail-loud) STALE path.
+      if [ "$git_rc" = "0" ] && [ -z "$git_range" ]; then
+        git_ahead="$(imag_genlock_ahead_log "$repo_root" "$obs_build_sha" 2>/dev/null || true)"
+        if [ -n "$git_ahead" ]; then
+          imag_genlock_on_dev "$repo_root" "$obs_build_sha" && on_dev=1 || on_dev=0
+        fi
+      fi
     fi
   fi
   # #463 review: derive `plugin_present` from THIS SAME sha256sum call instead of a separate
@@ -1247,7 +1342,10 @@ gather_and_check_imag() {
   # runs FIRST — it is the #530 recurrence guard, the one check that can catch a merged-but-never-
   # deployed genlock change. Then the SSH-gathered live-state pins.
   local rc_build=0 rc_report=0
-  imag_build_drift_report "$obs_build_sha" "$git_rc" "$git_range" || rc_build=$?
+  # #1292: the 4th/5th args (git_ahead, on_dev) are the AHEAD-direction facts computed above,
+  # "" / 0 when never computed (a stale-or-unread box never needs them) — imag_build_drift_report
+  # forwards all positional args straight into the box-agnostic genlock_build_drift_report.
+  imag_build_drift_report "$obs_build_sha" "$git_rc" "$git_range" "$git_ahead" "$on_dev" || rc_build=$?
   # #463 review: pass the RAW `$obs_log` text (not a pre-extracted capability flag) — see
   # check_imag_report's doc comment for why pre-extracting collapsed "log unreadable" and "log
   # read, no marker" into the same false-DRIFT signal. #489: `$obs_dantesync_log` is passed RAW
@@ -1885,8 +1983,11 @@ compare_observed() {
   local o_av_sync_calibrated_ms="${25:-}"
   # #548 dynamic genlock-BUILD staleness for strih/stream (opt-in when genlock_build_sha= supplied):
   # the git range vs origin/main is computed by the IMPURE caller (main) and passed in, keeping this
-  # function pure + unit-testable exactly like the imag gather/report split (#531).
+  # function pure + unit-testable exactly like the imag gather/report split (#531). #1292: args 29/30
+  # are the SAME AHEAD-direction facts imag_build_drift_report now consumes ("" / 0 when never
+  # computed — a stale-or-unread box never needs them).
   local o_gl_build_sha="${26:-}" o_gl_build_rc="${27:-0}" o_gl_build_range="${28:-}"
+  local o_gl_build_ahead="${29:-}" o_gl_build_on_dev="${30:-0}"
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -2068,7 +2169,7 @@ compare_observed() {
     rc=0
     genlock_build_drift_report "$host" \
       "redeploy the current genlock bundle to this box (see .claude/skills/obs-ops + the #548 Windows deploy) at a safe off-event time" \
-      "$o_gl_build_sha" "$o_gl_build_rc" "$o_gl_build_range" || rc=$?
+      "$o_gl_build_sha" "$o_gl_build_rc" "$o_gl_build_range" "$o_gl_build_ahead" "$o_gl_build_on_dev" || rc=$?
     [ "$rc" -eq 20 ] && drift=$((drift + 1))
     [ "$rc" -eq 11 ] && unknown=$((unknown + 1))
   fi
@@ -2257,6 +2358,7 @@ main() {
   # gather/report split (git I/O in the caller, verdict in the pure fn). The 15s timeout bounds the
   # fetch the same way the imag path does (never blocks going live).
   local o_gl_build_rc=0 o_gl_build_range="" repo_root_c
+  local o_gl_build_ahead="" o_gl_build_on_dev=0
   if [ -n "$o_genlock_build_sha" ]; then
     repo_root_c="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || repo_root_c=""
     if [ -z "$repo_root_c" ] || [ ! -d "$repo_root_c/.git" ]; then
@@ -2266,6 +2368,14 @@ main() {
       timeout 15 git -C "$repo_root_c" fetch origin --quiet 2>/dev/null \
         || echo "WARN: git fetch origin failed (or timed out) — comparing ${host} build against a possibly-stale origin/main" >&2
       o_gl_build_range="$(imag_genlock_range_log "$repo_root_c" "$o_genlock_build_sha")" || o_gl_build_rc=$?
+      # #1292: the SAME AHEAD-direction facts imag's gather computes — skipped on the (already
+      # fail-loud) STALE path, computed only when the box has nothing genuinely missing.
+      if [ "$o_gl_build_rc" = "0" ] && [ -z "$o_gl_build_range" ]; then
+        o_gl_build_ahead="$(imag_genlock_ahead_log "$repo_root_c" "$o_genlock_build_sha" 2>/dev/null || true)"
+        if [ -n "$o_gl_build_ahead" ]; then
+          imag_genlock_on_dev "$repo_root_c" "$o_genlock_build_sha" && o_gl_build_on_dev=1 || o_gl_build_on_dev=0
+        fi
+      fi
     fi
   fi
 
@@ -2273,7 +2383,7 @@ main() {
     "$o_obs" "$o_distroav" "$o_ndi" "$o_fps" "$o_genlock" "$o_latency" "$o_plugin" \
     "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn" \
     "$p_src_lat_strih" "$p_src_lat_stream" "$o_src_latency" "$o_av_sync_calibrated_ms" \
-    "$o_genlock_build_sha" "$o_gl_build_rc" "$o_gl_build_range"
+    "$o_genlock_build_sha" "$o_gl_build_rc" "$o_gl_build_range" "$o_gl_build_ahead" "$o_gl_build_on_dev"
 }
 
 main "$@"
