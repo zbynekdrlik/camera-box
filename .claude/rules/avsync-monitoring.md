@@ -338,7 +338,13 @@ known to stabilize the loop, only bounded away from 1.
   (`av_sync_apply_guard.py`, UNCHANGED — its jump-vs-last now sees the damped value) → ±50 clamp
   (`av_sync_calibrate.py::required_delay_ms`, UNCHANGED) → apply → persist. The `cleanup()`
   composition (`recording-e2e-cleanup-composition.md`) is NOT reordered — only the offset VALUE
-  changes and the calibrate call gains logging/persist args.
+  changes and the calibrate call gains logging/persist args. **NOTE the guard sees the DAMPED
+  value:** its jump-vs-last (condition 3, 90 ms) and its ±60 residual ceiling now compare a value
+  scaled by the gain, so at gain 0.4 the 90 ms jump threshold is effectively 90 ms of DAMPED offset
+  ≈ 225 ms of RAW combined — condition 3 is therefore near-unreachable in normal operation (within
+  the ±60 raw ceiling, |Δdamped| ≤ 48 < 90), which is CORRECT: the gain IS the anti-oscillation term
+  now, and condition 3 is a residual backstop for a huge sustained swing. (The SUSTAINED check and
+  the residual ceiling still key on the RAW residual from the verdict JSON, unaffected by the gain.)
 - **Persist + observability:** `av-sync-last.json` gains `loop_gain` + `combined_offset_ms_raw`
   (ADDED keys — the existing `source`/`offset_ms`/`applied_latency_ms`/`ts` contract is unchanged;
   `offset_ms` is the DAMPED applied value). `av_sync_calibrate.py` emits ONE grep-able line at apply

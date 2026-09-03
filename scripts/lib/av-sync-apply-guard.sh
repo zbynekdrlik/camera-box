@@ -232,7 +232,11 @@ except Exception:
 # empty damped so the caller's `[ -n ... ]` skips the apply (fail-safe: no correction over a wrong one).
 av_sync_apply_loop_gain() {
   local combined="${1:-}" gain_py="${2:-}" out=""
-  [ -n "$gain_py" ] && [ -f "$gain_py" ] || { printf ''; return 0; }
+  [ -n "$gain_py" ] && [ -f "$gain_py" ] || {
+    echo "[av-sync] WARNING: loop-gain helper missing ($gain_py) -- offset left UNDAMPED-then-empty, #856 apply skipped this run" >&2
+    printf ''
+    return 0
+  }
   out="$(python3 "$gain_py" damp --combined-ms "$combined" || true)"
   printf '%s' "$out"
   return 0
@@ -249,8 +253,12 @@ av_sync_default_history_path() {
 #   controller history. The pure record build + append (append-only, dir/file-tolerant, run-id-mismatch
 #   no-op) live in av_sync_history.py (pytest Tier-0); this passes the two state-file paths (so env
 #   overrides flow through) + the run context. MUST run AFTER av_sync_persist_residual (which wrote
-#   THIS run's residual-last) AND after av_sync_persist_applied_offset (so applied_pin reads the pin
-#   that landed). Always returns 0 (bare statement in the cleanup EXIT trap).
+#   THIS run's residual-last). Pass the PER-RUN success file ($OUTDIR/av-sync-last-<run>.json) as arg 8
+#   (last_applied) -- it exists ONLY on a landed apply, so a FAILED/held/no-correction run records NO
+#   applied_pin (honest) instead of a stale prior pin; it defaults to the persistent last-applied only
+#   when the caller omits arg 8. Always returns 0 (bare statement in the cleanup EXIT trap). The
+#   python's own "could not append" WARNING is NOT swallowed (silent corpus loss on a disk/perm error
+#   in an unattended controller would be worse than the log line).
 av_sync_append_history() {
   local run_id="${1:-}" proposed="${2:-}" hold_reason="${3:-}" loop_gain="${4:-}"
   local combined_raw="${5:-}" history_py="${6:-}"
@@ -262,7 +270,7 @@ av_sync_append_history() {
     --run-id "$run_id" --proposed-offset-ms "$proposed" --hold-reason "$hold_reason" \
     --loop-gain "$loop_gain" --combined-offset-ms-raw "$combined_raw" \
     --residual-last "$residual_last" --last-applied "$last_applied" --dest "$dest" \
-    2>/dev/null || true
+    || true
   return 0
 }
 

@@ -24,6 +24,18 @@ fn guard_py() -> PathBuf {
     p
 }
 
+fn gain_py() -> PathBuf {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/av_sync_loop_gain.py");
+    assert!(p.exists(), "{} not found", p.display());
+    p
+}
+
+fn history_py() -> PathBuf {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/av_sync_history.py");
+    assert!(p.exists(), "{} not found", p.display());
+    p
+}
+
 /// Source the lib under the CALLER's EXACT `set -euo pipefail` context (what recording-e2e.sh uses)
 /// and run `body`. Returns (stdout, success). A non-zero exit here means a function `set -e`-aborted
 /// on some input — exactly the phantom-fail this harness exists to catch.
@@ -34,6 +46,8 @@ fn run_under_set_e(work: &std::path::Path, body: &str) -> (String, bool) {
         .arg(&harness)
         .env("SCRIPT", lib_script())
         .env("GUARD", guard_py())
+        .env("GAIN", gain_py())
+        .env("HIST", history_py())
         .env("WORK", work)
         .output()
         .expect("failed to run bash harness");
@@ -374,6 +388,173 @@ fn persist_residual_missing_verdict_is_a_noop_never_aborts() {
     assert!(
         out.contains("wrote=no"),
         "no residual_median_ms -> no residual-last file written: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+// -------- #1265 loop-gain damping (av_sync_apply_loop_gain) + per-run history (av_sync_append_history):
+// both run as bare statements / `$(...)` in the cleanup() EXIT trap, so they MUST be set -euo pipefail
+// safe (the #1133 class) -- committed proof, not just a local bash run. --------
+
+#[test]
+fn apply_loop_gain_default_damps_and_never_aborts() {
+    let d = tempfile::tempdir().unwrap();
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        "unset AV_SYNC_LOOP_GAIN\n\
+         p=\"$(av_sync_apply_loop_gain '-61.354' \"$GAIN\")\"\n\
+         echo \"d=$(printf '%s' \"$p\" | cut -f1)\"\n\
+         echo \"g=$(printf '%s' \"$p\" | cut -f2)\"\necho END",
+    );
+    assert!(ok, "apply_loop_gain must not abort under set -e: {out}");
+    assert!(
+        out.contains("d=-24.5416"),
+        "default gain 0.4 must damp -61.354 -> -24.5416: {out}"
+    );
+    assert!(out.contains("g=0.4000"), "default gain 0.4: {out}");
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn apply_loop_gain_env_override_never_aborts() {
+    let d = tempfile::tempdir().unwrap();
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        "p=\"$(AV_SYNC_LOOP_GAIN=0.5 av_sync_apply_loop_gain '-61.354' \"$GAIN\")\"\n\
+         echo \"g=$(printf '%s' \"$p\" | cut -f2)\"\necho END",
+    );
+    assert!(ok, "apply_loop_gain env override must not abort: {out}");
+    assert!(
+        out.contains("g=0.5000"),
+        "AV_SYNC_LOOP_GAIN override must flow through: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn apply_loop_gain_missing_helper_is_empty_and_warns_never_aborts() {
+    let d = tempfile::tempdir().unwrap();
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        "p=\"$(av_sync_apply_loop_gain '-61.354' /nope/gain.py 2>\"$WORK/err\")\"\n\
+         echo \"d=[$p]\"\n\
+         grep -qi warning \"$WORK/err\" && echo WARNED || echo NOWARN\necho END",
+    );
+    assert!(
+        ok,
+        "a missing gain helper must not abort under set -e: {out}"
+    );
+    assert!(
+        out.contains("d=[]"),
+        "a missing helper -> empty damped (the apply is skipped): {out}"
+    );
+    assert!(
+        out.contains("WARNED"),
+        "a missing helper must WARN (never silently disable the #856 apply): {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn append_history_proceed_records_applied_pin_never_aborts() {
+    let d = tempfile::tempdir().unwrap();
+    let rlast = write(
+        d.path(),
+        "residual-last.json",
+        r#"{"run_id": "run-9", "ts": 1788390000.0, "residual_median_ms": -61.35, "residual_spread_ms": 36.7, "pin_at_measure": 913.0}"#,
+    );
+    // the PER-RUN success file (exists ONLY on a landed apply) carries applied_latency_ms 976.
+    let landed = write(d.path(), "av-sync-last-run.json", OUTDIR_SUCCESS_FILE);
+    let dest = d
+        .path()
+        .join("history.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        &format!(
+            "av_sync_append_history 'run-9' '-24.54' '' '0.4' '-61.35' \"$HIST\" '{rlast}' '{landed}' '{dest}'\n\
+             echo \"n=$(wc -l < '{dest}')\"\n\
+             echo \"pin=$(python3 -c \"import json;print(json.loads(open('{dest}').read().strip()).get('applied_pin'))\")\"\necho END"
+        ),
+    );
+    assert!(ok, "append_history must not abort under set -e: {out}");
+    assert!(out.contains("n=1"), "exactly one history line: {out}");
+    assert!(
+        out.contains("pin=976"),
+        "a landed apply records applied_pin from the per-run success file: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn append_history_no_landed_file_omits_applied_pin() {
+    let d = tempfile::tempdir().unwrap();
+    let rlast = write(
+        d.path(),
+        "residual-last.json",
+        r#"{"run_id": "run-9", "ts": 1.0, "residual_median_ms": -61.35, "pin_at_measure": 913.0}"#,
+    );
+    let dest = d
+        .path()
+        .join("history.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    // last_applied points at a MISSING per-run file (a failed/pending apply) -> applied_pin omitted
+    // (honest), never last run's stale pin (#1265 review 🟡).
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        &format!(
+            "av_sync_append_history 'run-9' '-24.54' '' '0.4' '-61.35' \"$HIST\" '{rlast}' '/nope/landed.json' '{dest}'\n\
+             echo \"has_pin=$(python3 -c \"import json;print('applied_pin' in json.loads(open('{dest}').read().strip()))\")\"\necho END"
+        ),
+    );
+    assert!(ok, "append_history must not abort under set -e: {out}");
+    assert!(
+        out.contains("has_pin=False"),
+        "a proceed with no landed per-run file must NOT record applied_pin: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn append_history_runid_mismatch_is_a_noop_never_aborts() {
+    let d = tempfile::tempdir().unwrap();
+    let rlast = write(
+        d.path(),
+        "residual-last.json",
+        r#"{"run_id": "OLD", "ts": 1.0, "residual_median_ms": -1.0, "pin_at_measure": 900.0}"#,
+    );
+    let dest = d
+        .path()
+        .join("history.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        &format!(
+            "av_sync_append_history 'run-NEW' '' '' '' '' \"$HIST\" '{rlast}' '/nope/x.json' '{dest}'\n\
+             echo \"wrote=$([ -f '{dest}' ] && echo yes || echo no)\"\necho END"
+        ),
+    );
+    assert!(ok, "a run_id mismatch must not abort under set -e: {out}");
+    assert!(
+        out.contains("wrote=no"),
+        "a run with no measurement (residual-last run_id mismatch) writes no history line: {out}"
+    );
+    assert!(out.contains("END"), "{out}");
+}
+
+#[test]
+fn append_history_missing_helper_never_aborts() {
+    let d = tempfile::tempdir().unwrap();
+    let (out, ok) = run_under_set_e(
+        d.path(),
+        "av_sync_append_history 'r' '' '' '' '' /nope/history.py\necho END",
+    );
+    assert!(
+        ok,
+        "a missing history helper must not abort under set -e: {out}"
     );
     assert!(out.contains("END"), "{out}");
 }

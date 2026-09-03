@@ -1996,8 +1996,13 @@ fi"
   # block -- AFTER the applied-offset persist so it reads the pin that actually LANDED, and reads
   # this run's own measured state from the residual-last the persist above wrote. A no-op when this
   # run had no measurement (residual-last is a prior run's). Sourced-helper (#675), always exit 0.
+  # applied_pin (arg 8) reads the PER-RUN success file (the apply writes it ONLY on a landed apply),
+  # NOT the persistent av-sync-last.json -- so a FAILED apply / a combiner refusal records NO
+  # applied_pin (honest) instead of last run's pin; residual-last (arg 7 "") uses its default (this
+  # run's measured state). #1265.
   av_sync_append_history "$RUN_ID" "$AV_SYNC_PROPOSED_OFFSET_MS" "$AV_SYNC_HELD_REASON" \
-    "$AV_SYNC_LOOP_GAIN_VALUE" "$AV_SYNC_COMBINED_OFFSET_MS_RAW" "$HERE/av_sync_history.py"
+    "$AV_SYNC_LOOP_GAIN_VALUE" "$AV_SYNC_COMBINED_OFFSET_MS_RAW" "$HERE/av_sync_history.py" \
+    "" "$OUTDIR/av-sync-last-${RUN_ID}.json"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # #682: restore imag's program scene to whatever it was BEFORE [4a/8] routed it to the
   # camera-under-test. A NO-OP if [4a/8] never ran (IMAG_PREV_SCENE stays its "" pre-trap safe

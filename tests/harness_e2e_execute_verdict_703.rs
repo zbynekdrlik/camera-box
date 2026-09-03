@@ -547,7 +547,11 @@ fn recording_e2e_execute_mode_runs_the_merge_and_propagates_its_exit_code() {
     // (the #856 apply-guard input; a fail-open sourced-helper call + its report line, $GATE-untouched)
     // legitimately added ~640 bytes between the merge call and the exit, same justified-growth
     // pattern as above (measured distance 8949).
-    let window = &s[exec_merge_block..(exec_merge_block + 9600).min(s.len())];
+    // #1265: widened from 9600 to 10800 bytes -- the [8/8g] loop-gain damp block (the #856 controller
+    // damping term; a fail-open sourced-helper call + its report line, $GATE-untouched) legitimately
+    // added ~1150 bytes between the merge call and the exit, same justified-growth pattern as above
+    // (measured distance 10106).
+    let window = &s[exec_merge_block..(exec_merge_block + 10800).min(s.len())];
     assert!(
         window.contains(r#"exit "$GATE""#),
         "#703: after running the real merge, the branch must `exit \"$GATE\"` (the merge's own \

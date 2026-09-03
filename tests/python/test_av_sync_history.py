@@ -88,6 +88,22 @@ class TestBuildRecord:
         )
         assert rec is None
 
+    def test_proceed_but_no_landed_file_omits_applied_pin(self):
+        # #1265 review 🟡: the caller passes the PER-RUN success file as last_applied; a FAILED apply
+        # (or a run still pending) leaves that file ABSENT -> last_applied None -> applied_pin MUST be
+        # omitted (honest) even though a correction WAS proposed and the run did not HOLD. Recording
+        # the persistent last-applied's stale pin here would falsely read "proposed X, applied at Y".
+        rec = av_sync_history.build_record(
+            residual_last=_residual_last(run_id="616", pin=913.0, resid=-61.35),
+            last_applied=None,  # the per-run OUTDIR success file is absent -> apply did not land
+            run_id="616", proposed_offset_ms="-24.54", hold_reason="",
+            loop_gain="0.4", combined_offset_ms_raw="-61.35",
+        )
+        assert rec is not None
+        assert rec["held"] is False
+        assert "applied_pin" not in rec, "a proceed with no landed file must NOT record a pin"
+        assert rec["proposed_offset_ms"] == pytest.approx(-24.54)  # the intent IS recorded
+
     def test_no_correction_run_omits_proposed_and_applied(self):
         # combiner refused -> no proposed, not held -> a bare measurement line.
         rec = av_sync_history.build_record(
