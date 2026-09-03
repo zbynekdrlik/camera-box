@@ -542,6 +542,67 @@ fn setup_device_calls_ensure_root_writable_before_step_1_hostname_1289() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// #1289 (second re-run defect) -- STEP 17's dantesync download does `curl -fsSL $URL -o
+// /usr/local/bin/dantesync` straight onto the path of a RUNNING dantesync.service binary. The
+// kernel refuses to open a currently-executing file for write (ETXTBSY), so curl fails and the
+// whole STEP fail()s even though the release URL itself answers 200 (live, cam5/cam6/cam7,
+// 2026-09-03 11:52-11:56Z -- right after the STEP-1 fix above let a re-run reach STEP 17). The
+// SAME overwrite-in-place shape existed in STEP 3's camera-box URL branch and STEP 3b's
+// frame-probe URL branch (both `curl -fsSL ... -o /usr/local/bin/...`) -- only the LOCAL-path /
+// CI-artifact branches were already safe, since they use `install -m 0755 src dest` (rename-
+// into-place semantics, which works over a running executable because the old inode stays open
+// under the running process until it exits).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_never_downloads_straight_onto_a_live_binary_path_1289() {
+    let body = read_script();
+    assert!(
+        !on_noncomment_line(&body, "-o /usr/local/bin/"),
+        "setup-device.sh must never `curl ... -o /usr/local/bin/<name>` -- that truncates the \
+         destination IN PLACE, which the kernel refuses (ETXTBSY) when the path is a currently- \
+         running executable, and fails the whole step on a re-run (#1289). Download to a mktemp \
+         temp file, verify it non-empty, then `install -m 0755 tmp dest` (rename-into-place, \
+         safe over a running executable) instead."
+    );
+}
+
+#[test]
+fn setup_device_step17_skips_dantesync_download_when_already_at_target_version_1289() {
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, "DANTESYNC_TARGET_VERSION"),
+        "STEP 17 must derive the release's target version from the download URL (#1289) -- an \
+         idempotent re-run needs this to decide whether a download is even necessary"
+    );
+    assert!(
+        on_noncomment_line(&body, "DANTESYNC_CURRENT_VERSION")
+            && on_noncomment_line(&body, "dantesync --version"),
+        "STEP 17 must read the currently-installed dantesync's own version via \
+         `dantesync --version` (#1289, per .claude/rules/dantesync-version-reading.md) before \
+         deciding whether to download"
+    );
+    let compare_idx = body
+        .lines()
+        .position(|l| {
+            l.contains("DANTESYNC_CURRENT_VERSION") && l.contains("DANTESYNC_TARGET_VERSION")
+        })
+        .expect(
+            "a line comparing DANTESYNC_CURRENT_VERSION against DANTESYNC_TARGET_VERSION must \
+             exist -- that comparison is what lets an idempotent re-run skip the download",
+        );
+    let download_idx = first_noncomment_idx(&body, r#"curl -fsSL "$DANTESYNC_URL""#).expect(
+        "the dantesync curl download must still be present, for the not-yet-installed case",
+    );
+    assert!(
+        compare_idx < download_idx,
+        "the version comparison (line {compare_idx}) must GATE the dantesync download (line \
+         {download_idx}), not just follow it -- otherwise a re-run at the target version still \
+         re-downloads and re-installs needlessly (#1289)"
+    );
+}
+
 #[test]
 fn setup_device_calls_restore_root_mode_after_the_fstab_rewrite() {
     let body = read_script();
