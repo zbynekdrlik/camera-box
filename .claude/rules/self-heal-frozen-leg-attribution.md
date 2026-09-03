@@ -308,7 +308,9 @@ signature change for no benefit; a contiguity-based freeze metric from `residual
 bigger root-cause-lane change, deferred to issue 1242):** `classify_leg` is now strictly two-tier —
 `Frozen` ⇔ one of the two `#758` thresholds trips; everything else with `copies > 0` is
 `StaleReplay { copies }`, regardless of the count. `frozen_leg` now measures EXACTLY what the
-`#758` acceptance criteria named (sustained ≥5s or ≥10% of the window); the diffuse class has
+`#758` acceptance criteria named (sustained MORE than 5s or MORE than 10% of the window — strict
+`>`, exactly-at-the-boundary is still `StaleReplay`, see `frozen_leg.rs`'s own
+`exactly_at_both_thresholds_is_not_yet_frozen` test); the diffuse class has
 exactly ONE owner again (the per-cambox tolerance). `STALE_REPLAY_MAX_ISOLATED` stays as a
 documented, now genuinely UNUSED informational constant (see `frozen_leg.rs`'s own doc). No new
 parameters, no probe-gated call-site change — the fix is entirely confined to the one pure

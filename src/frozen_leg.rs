@@ -248,10 +248,22 @@ mod tests {
     }
 
     #[test]
+    fn stale_replay_max_isolated_stays_pinned_to_its_original_758_wording() {
+        // issue 905 item 2 follow-up (review 🔵): STALE_REPLAY_MAX_ISOLATED no longer
+        // participates in `classify_leg` at all -- nothing else in the repo reads it as a real
+        // value (only comment mentions), so nothing would notice a silent drift. Pin it so this
+        // documented-informational constant's own value stays truthful to the #758 wording it
+        // records ("AT MOST 5 isolated stale/duplicate frames").
+        assert_eq!(STALE_REPLAY_MAX_ISOLATED, 5);
+    }
+
+    #[test]
     fn a_handful_of_isolated_copies_is_stale_replay_not_frozen() {
         // 3 copies out of 9000 frames over a 30s window: density ~0.03%, approx_stale ~0.01s --
-        // nowhere near either sustained threshold, and copies <= STALE_REPLAY_MAX_ISOLATED (5).
-        // Mirrors the #674 vendor warm-up-latch single-frame replay this tier exists for.
+        // nowhere near either #758 threshold (the only thing that decides Frozen/StaleReplay
+        // since the issue 905 item 2 follow-up removed the count-based branch -- STALE_REPLAY_
+        // MAX_ISOLATED no longer participates). Mirrors the #674 vendor warm-up-latch
+        // single-frame replay this tier exists for.
         match classify_leg(3, 9000, 30.0) {
             LegHealth::StaleReplay { copies } => assert_eq!(copies, 3),
             other => panic!("expected StaleReplay, got {other:?}"),
@@ -305,6 +317,22 @@ mod tests {
         // "genuinely wrong test now" case the item-2 follow-up design flagged. With that branch
         // gone, a boundary that sits AT (not over) both thresholds now correctly stays
         // StaleReplay, finally matching what the name always said.
+        //
+        // `LegHealth::StaleReplay` carries only `copies`, not the density/approx_stale that used
+        // to be asserted here -- so re-derive them from the SAME inputs the fixture passes, to
+        // prove this fixture genuinely sits AT the boundary rather than having silently drifted
+        // to a value that is merely "somewhere under both thresholds" (review finding, 905).
+        let density = 6.0_f64 / 60.0;
+        let approx_stale_secs = density * 50.0;
+        assert!(
+            (density - FROZEN_DENSITY_THRESHOLD).abs() < 1e-9,
+            "fixture sanity: density must sit EXACTLY at the threshold, got {density}"
+        );
+        assert!(
+            (approx_stale_secs - FROZEN_SUSTAINED_SECS).abs() < 1e-9,
+            "fixture sanity: approx_stale_secs must sit EXACTLY at the threshold, got \
+             {approx_stale_secs}"
+        );
         match classify_leg(6, 60, 50.0) {
             LegHealth::StaleReplay { copies } => assert_eq!(copies, 6),
             other => panic!(
@@ -354,13 +382,16 @@ mod tests {
     }
 
     #[test]
-    fn isolated_allowance_boundary_is_stale_replay_not_frozen() {
-        // copies=5 (exactly at STALE_REPLAY_MAX_ISOLATED) with negligible density/duration.
+    fn five_copies_at_negligible_density_is_stale_replay_not_frozen() {
+        // copies=5 -- historically "exactly at STALE_REPLAY_MAX_ISOLATED", but since the issue
+        // 905 item 2 follow-up removed the count-based branch, that boundary no longer exists in
+        // the classification at all; this is just another low-count, negligible-density/duration
+        // sanity point (distinct from `copies_just_over_the_old_isolated_allowance_at_low_
+        // density_is_stale_replay_not_frozen_905`'s copies=6, which specifically documents the
+        // OLD allowance's one-over boundary).
         match classify_leg(5, 9000, 30.0) {
             LegHealth::StaleReplay { copies } => assert_eq!(copies, 5),
-            other => panic!(
-                "expected StaleReplay at the exact isolated-allowance boundary, got {other:?}"
-            ),
+            other => panic!("expected StaleReplay at negligible density/duration, got {other:?}"),
         }
     }
 
