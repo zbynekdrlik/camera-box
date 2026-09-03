@@ -48,6 +48,28 @@ fn run_sourced(body: &str) -> (i32, String, String) {
     )
 }
 
+fn driver() -> PathBuf {
+    let s = manifest_dir().join("scripts/rt-kernel-upgrade.sh");
+    assert!(s.exists(), "{} not found", s.display());
+    s
+}
+
+/// Run the DRY-RUN driver `scripts/rt-kernel-upgrade.sh` with `args` (offline `--facts` mode, no
+/// ssh). Returns (exit_code, stdout, stderr).
+fn run_driver(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new("bash")
+        .arg(driver())
+        .args(args)
+        .current_dir(manifest_dir())
+        .output()
+        .expect("failed to run rt-kernel-upgrade.sh");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 // --- rt_kernel_flavour -------------------------------------------------------------------------
 
 #[test]
@@ -161,6 +183,73 @@ fn plan_skips_install_when_installed_and_skips_purge_when_no_superseded() {
     assert!(steps.contains(&"verify-lowlatency-config"));
 }
 
+// --- issue 899 planner gap: purge on the OBSERVED superseded-generic set, not the prediction ----
+// cam5 (2026-09-03) ran preempt=full (run=1) with a stale 6.8.0-134-generic image + the
+// linux-image-generic meta STILL installed, yet GEN read 0 (HWE meta present -> the pre-install
+// prediction said "no purge"). The old plan collapsed to `noop:already-lowlatency` and never
+// emitted the purge -> the single-kernel invariant silently stayed violated. The 6th `STALE` arg
+// is the OBSERVED stale set gather_facts read off the box (comma-joined `<ver>` entries + the
+// literal `linux-image-generic` meta; `-`/empty = none).
+
+#[test]
+fn plan_purges_observed_superseded_generic_when_already_lowlatency_899() {
+    // run=1 inst=1 gen=0 grub=0 cand=1, observed stale = {6.8.0-134-generic, the generic meta}.
+    let (code, out, err) =
+        run_sourced("rt_kernel_upgrade_plan 1 1 0 0 1 6.8.0-134-generic,linux-image-generic");
+    assert_eq!(code, 0, "stderr: {err}");
+    let steps: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        steps.contains(&"purge-superseded-generic"),
+        "an OBSERVED stale generic on an already-lowlatency box MUST still be purged: {out}"
+    );
+    assert!(
+        steps.contains(&"verify-single-kernel"),
+        "and the single-kernel invariant (check (k)) re-verified: {out}"
+    );
+    assert!(
+        !steps.contains(&"install-lowlatency"),
+        "already lowlatency => never re-install: {out}"
+    );
+    assert!(
+        !steps.contains(&"noop:already-lowlatency"),
+        "stale present => NOT a plain noop: {out}"
+    );
+}
+
+#[test]
+fn plan_stays_noop_when_already_lowlatency_and_no_stale_899() {
+    // run=1 with NO observed stale set (both the empty and the `-` sentinel) => unchanged noop.
+    for stale in ["", "-"] {
+        let (code, out, err) = run_sourced(&format!("rt_kernel_upgrade_plan 1 1 0 0 1 {stale}"));
+        assert_eq!(code, 0, "stderr: {err}");
+        assert_eq!(
+            out.trim(),
+            "noop:already-lowlatency",
+            "already lowlatency + no observed stale generic => noop (stale={stale:?})"
+        );
+    }
+}
+
+#[test]
+fn stale_set_does_not_affect_the_pre_install_branch_899() {
+    // The observed-stale set ("installed image != uname -r") is ONLY meaningful once the box has
+    // rebooted into the new kernel (run=1, uname -r IS the new kernel). BEFORE the install (run=0,
+    // uname -r is still the OLD kernel), a "!= uname -r" reading would flag the NEW desired image
+    // as stale -> the plan must NOT consult it in the pre-install branch; GEN (the prediction)
+    // decides the purge there, exactly as before.
+    let with_stale = run_sourced("rt_kernel_upgrade_plan 0 0 1 saved 1 7.0.0-30-generic").1;
+    let without = run_sourced("rt_kernel_upgrade_plan 0 0 1 saved 1").1;
+    assert_eq!(
+        with_stale, without,
+        "a stale arg must not change the pre-install (run=0) plan"
+    );
+    let steps: Vec<&str> = without.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        steps.contains(&"purge-superseded-generic"),
+        "run=0 gen=1 still purges on the prediction (unchanged): {without}"
+    );
+}
+
 // --- rt_kernel_step_command --------------------------------------------------------------------
 
 #[test]
@@ -243,6 +332,88 @@ fn step_command_maps_known_tokens_and_flags_unknown() {
     );
 }
 
+#[test]
+fn purge_command_names_the_observed_stale_packages_899() {
+    // With the OBSERVED stale set (2nd arg), the purge note names the CONCRETE packages the
+    // supervisor purges: image + modules + modules-extra for each stale ver, plus the generic meta.
+    let (_c, cmd, _e) = run_sourced(
+        "rt_kernel_step_command purge-superseded-generic 6.8.0-134-generic,linux-image-generic",
+    );
+    for pkg in [
+        "linux-image-6.8.0-134-generic",
+        "linux-modules-6.8.0-134-generic",
+        "linux-modules-extra-6.8.0-134-generic",
+        "linux-image-generic",
+    ] {
+        assert!(cmd.contains(pkg), "purge command must name {pkg}: {cmd}");
+    }
+    assert!(
+        cmd.contains("--allow-change-held-packages"),
+        "the held pre-upgrade packages need --allow-change-held-packages: {cmd}"
+    );
+    assert!(
+        cmd.contains("remount,rw") && cmd.contains("remount,ro"),
+        "wraps the ro remount: {cmd}"
+    );
+    assert!(
+        cmd.trim_start().starts_with('#'),
+        "still a SUPERVISOR note (reboot-class, supervisor applies): {cmd}"
+    );
+    assert!(
+        !cmd.contains("linux-image-*generic"),
+        "never a wildcard generic purge — that removes the new running kernel: {cmd}"
+    );
+    // Back-compat: with NO observed set, the step keeps the generic <OLD_VER> supervisor note.
+    let (_c, note, _e) = run_sourced("rt_kernel_step_command purge-superseded-generic");
+    assert!(
+        note.contains("linux-image-<OLD_VER>"),
+        "no-arg keeps the placeholder note: {note}"
+    );
+    assert!(!note.contains("linux-image-6.8.0-134-generic"), "{note}");
+}
+
+// --- driver (scripts/rt-kernel-upgrade.sh) offline --facts wiring ------------------------------
+
+#[test]
+fn driver_facts_accepts_legacy_4_and_5_field_facts_899() {
+    // Back-compat: a pre-#899 --facts with only 4 or 5 fields (no observed-stale 6th field) still
+    // parses; the new field defaults to none, so the run=0 plan is unchanged (GEN still purges).
+    for facts in ["0 0 1 saved", "0 0 1 saved 1"] {
+        let (code, out, err) = run_driver(&["--facts", facts]);
+        assert_eq!(code, 0, "facts={facts:?} stderr: {err}");
+        assert!(out.contains("install-lowlatency"), "facts={facts:?}: {out}");
+        assert!(
+            out.contains("purge-superseded-generic"),
+            "facts={facts:?}: {out}"
+        );
+        assert!(
+            out.contains("superseded_installed=-"),
+            "legacy facts default the observed-stale field to none: {out}"
+        );
+    }
+}
+
+#[test]
+fn driver_facts_carries_the_observed_stale_set_end_to_end_899() {
+    // cam5 shape through the driver: run=1 inst=1 gen=0 cand=1 + the observed stale 6th field.
+    let (code, out, err) = run_driver(&[
+        "--facts",
+        "1 1 0 0 1 6.8.0-134-generic,linux-image-generic",
+        "--commands",
+    ]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("superseded_installed=6.8.0-134-generic,linux-image-generic"),
+        "the facts line surfaces the observed stale set: {out}"
+    );
+    assert!(out.contains("purge-superseded-generic"), "{out}");
+    assert!(
+        out.contains("linux-image-6.8.0-134-generic"),
+        "--commands names the concrete observed stale image: {out}"
+    );
+    assert!(!out.contains("noop:already-lowlatency"), "{out}");
+}
+
 // --- sourcing has no side effects --------------------------------------------------------------
 
 #[test]
@@ -270,6 +441,9 @@ fn functions_never_abort_a_set_e_caller() {
          rt_kernel_upgrade_plan 0 0 1 saved 0 >/dev/null; \
          rt_kernel_upgrade_plan 0 0 1 saved 1 >/dev/null; \
          rt_kernel_step_command purge-superseded-generic >/dev/null; \
+         rt_kernel_upgrade_plan 1 1 0 0 1 6.8.0-134-generic,linux-image-generic >/dev/null; \
+         rt_kernel_upgrade_plan 1 1 0 0 1 - >/dev/null; \
+         rt_kernel_step_command purge-superseded-generic 6.8.0-134-generic,linux-image-generic >/dev/null; \
          rt_kernel_step_command not-a-real-token >/dev/null; \
          echo ALIVE",
     );
