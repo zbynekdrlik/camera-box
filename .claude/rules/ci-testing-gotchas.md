@@ -56,6 +56,25 @@ report-only decoupling seam that added the `[4d1/8]` word is `scripts/lib/mv-fps
 `mv_fps_preflight_term_is_report_only` per-box term predicate — strih report-only while issue 1260
 open, imag strict, flipped back to strict in the PR closing issue 1260.)
 
+## Adding a STEP between the merge call and `exit "$GATE"`: the occurrence-count sweep is BLIND to the 703 byte-DISTANCE window too (#1265)
+
+Sibling blind-spot to the #1263 negated-region one above, hit live on #1265. `tests/harness_e2e_execute_verdict_703.rs` does NOT anchor on a literal — it slices a FIXED BYTE WINDOW from the
+merge call (`"$VERDICT_BIN" "${MERGE_ARGS[@]}" || GATE=$?`) and asserts `exit "$GATE"` is *inside*
+it (`&s[exec_merge_block..(exec_merge_block + 9600).min(s.len())]`). Any NEW step you insert between
+the merge call and that exit grows the DISTANCE, which is not a literal-count change at all — so the
+occurrence-count anchor sweep (old-vs-new literal counts) passes completely clean while the 703
+window silently goes RED at CI (cargo blocked → Tier-0-invisible). #1265's `[8/8g]` loop-gain damp
+block pushed the distance 8949 → 10106 > the then-current 9600 window; the count sweep flagged
+nothing, a fresh-context reviewer caught it. **So when you add/remove ANY step in the
+`recording-e2e.sh` region between the `[8/8]` merge call and `exit "$GATE"` (a report step, a
+combine step, a gain damp, a snapshot), explicitly re-measure that distance and WIDEN the 703
+window** — the sweep and the harness anchor simulations do NOT cover it (it is a distance, not an
+anchor). Measure it directly:
+`python3 -c "s=open('scripts/recording-e2e.sh').read(); mb=s.find('\"\$VERDICT_BIN\" \"\${MERGE_ARGS[@]}\" || GATE=\$?'); print(s.find('exit \"\$GATE\"', mb)-mb)"`
+then set the window above that with headroom + the file's own `// #NNNN: widened from A to B bytes
+... (measured distance N)` convention comment. `recording-e2e-cleanup-composition.md` documents the
+widening itself; THIS entry is the reason the count sweep won't remind you to.
+
 ## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
 
 Several "pure kernel" constants in this repo are deliberately duplicated across THREE places:
