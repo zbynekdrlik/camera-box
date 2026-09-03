@@ -3282,7 +3282,9 @@ fn imag_genlock_range_log_merge_base_never_false_stale_for_a_box_ahead_of_main_1
 #[test]
 fn imag_genlock_range_log_still_reports_a_genuinely_stale_box_1292() {
     // The merge-base fix must never mask a REAL stale box; it only removes the false positive on
-    // the AHEAD direction. C1 (main's own pre-merge base) is genuinely missing M1's vendor content.
+    // the AHEAD direction. C1 (main's own pre-merge base) is genuinely missing M1's vendor content
+    // -- git's own history simplification shows this as the two underlying non-merge commits (C2,
+    // C3) that make up M1's diff for these paths (M1 is TREESAME to C3 here), never zero.
     let (_origin, _repo_holder, repo, c1, _c4, _c5) = build_two_branch_ahead_repo();
     let body = r#"
         out="$(imag_genlock_range_log "$SYN_REPO" "$BOX")"
@@ -3300,9 +3302,9 @@ fn imag_genlock_range_log_still_reports_a_genuinely_stale_box_1292() {
         "range command must resolve cleanly: {out:?}"
     );
     assert!(
-        out.contains("N=1"),
-        "a genuinely-behind box must still report the real missing vendor-touching commit \
-         (M1, the merge commit that carries C2+C3's content): {out:?}"
+        out.contains("N=2"),
+        "a genuinely-behind box must still report the real missing vendor-touching commits \
+         (C2+C3, the commits M1's vendor content came from), never an empty range: {out:?}"
     );
 }
 
