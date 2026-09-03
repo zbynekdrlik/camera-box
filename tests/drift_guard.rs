@@ -3100,6 +3100,570 @@ fn imag_genlock_range_log_rejects_option_shaped_box_sha_never_a_false_ok_531() {
     );
 }
 
+// ---- #1292 — a box AHEAD of origin/main (a release-candidate build deployed before its own
+// content merged to main) must never read falsely STALE. imag_genlock_range_log's ancestry range
+// (`BOX_SHA..origin/main`) reported "behind" for a box whose own dev-side lineage is a CONTENT
+// superset of main, because this repo's two-branch workflow never merges main's own merge commits
+// back into dev — a merge commit on main is simply not a git-ancestor of ANY later dev commit, even
+// though its vendor CONTENT already sits inside that dev lineage via the commits that were merged.
+// The fix scopes the range to `git merge-base(BOX_SHA, origin/main)..origin/main`; the new
+// imag_genlock_ahead_log/imag_genlock_on_dev functions + genlock_build_drift_report's extended
+// verdict then tell a recognized release-candidate build (OK) apart from an unrecognized/orphan one
+// (DRIFT — the early-gate-pin doctrine's "an orphan release must SCREAM").
+//
+// These tests build a small, throwaway two-branch (main/dev) git repo per test — NOT hardcoded
+// against THIS repo's own live history. origin/main only ever GROWS (the two-branch workflow), so a
+// test pinned to a real box_sha's relationship with today's live tip would silently stop holding
+// the moment a new vendor-touching PR merges — exactly what happened to the incident's own
+// box=3ffe2fbc5, which was "ahead" only because origin/main had not yet caught up (see the
+// top-level CLAUDE.md GOTCHA on main's monotonic growth). A synthetic repo isolates the exact DAG
+// shape permanently. (Empirically also verified against this repo's real live history + a manual
+// synthetic-repo build during development — see the #1292 STEP-0 validation comment on the ticket.)
+
+fn run_git(cwd: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {args:?} in {cwd:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {cwd:?} failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn run_git_out(cwd: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {args:?} in {cwd:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {cwd:?} failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Builds the exact incident DAG shape in a throwaway bare "origin" + working clone: `main` gains a
+/// MERGE commit (M1, second parent = dev's earlier tip C3) whose vendor content is already a subset
+/// of dev's LATER tip (C4) via C2->C3 — the case a box on C4 must read as `OK ... AHEAD ...`, never
+/// STALE. `C1` (main's own pre-merge base) is genuinely behind M1's content — the case that must
+/// stay STALE. `C5` is a further dev-only commit built on C4 but never pushed to either branch — the
+/// orphan-build case. Returns (origin tempdir guard, repo tempdir guard, repo path, C1, C4, C5) —
+/// keep BOTH tempdir guards alive for the caller's whole test body.
+fn build_two_branch_ahead_repo() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    PathBuf,
+    String,
+    String,
+    String,
+) {
+    let origin_holder = tempfile::tempdir().expect("origin tempdir");
+    let repo_holder = tempfile::tempdir().expect("repo tempdir");
+    let origin = origin_holder.path().join("origin.git");
+    let repo = repo_holder.path().to_path_buf();
+
+    run_git(
+        origin_holder.path(),
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    run_git(
+        repo_holder.path(),
+        &["init", "--quiet", repo.to_str().unwrap()],
+    );
+    run_git(&repo, &["config", "user.email", "t@example.com"]);
+    run_git(&repo, &["config", "user.name", "T"]);
+    run_git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+
+    std::fs::create_dir_all(repo.join("vendor/obs-studio")).expect("mkdir vendor/obs-studio");
+    std::fs::create_dir_all(repo.join("vendor/distroav")).expect("mkdir vendor/distroav");
+    std::fs::write(repo.join("vendor/obs-studio/a.txt"), "1\n").expect("write a.txt");
+    run_git(&repo, &["add", "-A"]);
+    run_git(&repo, &["commit", "-q", "-m", "C1: base vendor content"]);
+    run_git(&repo, &["branch", "-M", "main"]);
+    run_git(&repo, &["push", "-q", "origin", "main:main"]);
+    let c1 = run_git_out(&repo, &["rev-parse", "HEAD"]);
+
+    run_git(&repo, &["checkout", "-q", "-b", "dev"]);
+    std::fs::write(repo.join("vendor/obs-studio/a.txt"), "2\n").expect("write a.txt");
+    run_git(&repo, &["add", "-A"]);
+    run_git(
+        &repo,
+        &["commit", "-q", "-m", "C2: dev-only obs-studio change"],
+    );
+    std::fs::write(repo.join("vendor/distroav/b.txt"), "1\n").expect("write b.txt");
+    run_git(&repo, &["add", "-A"]);
+    run_git(
+        &repo,
+        &["commit", "-q", "-m", "C3: dev-only distroav change"],
+    );
+
+    run_git(&repo, &["checkout", "-q", "main"]);
+    run_git(
+        &repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "dev",
+            "-m",
+            "M1: Merge pull request (dev->main)",
+        ],
+    );
+    run_git(&repo, &["push", "-q", "origin", "main:main"]);
+
+    run_git(&repo, &["checkout", "-q", "dev"]);
+    std::fs::write(repo.join("vendor/obs-studio/a.txt"), "3\n").expect("write a.txt");
+    run_git(&repo, &["add", "-A"]);
+    run_git(
+        &repo,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "C4: dev-only NEW obs-studio change (post-merge)",
+        ],
+    );
+    let c4 = run_git_out(&repo, &["rev-parse", "HEAD"]);
+    run_git(&repo, &["push", "-q", "origin", "dev:dev"]);
+
+    run_git(&repo, &["checkout", "-q", "--detach", &c4]);
+    std::fs::write(repo.join("vendor/obs-studio/a.txt"), "orphanchange\n").expect("write a.txt");
+    run_git(&repo, &["add", "-A"]);
+    run_git(
+        &repo,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "C5: orphan build, never pushed to either branch",
+        ],
+    );
+    let c5 = run_git_out(&repo, &["rev-parse", "HEAD"]);
+
+    run_git(&repo, &["fetch", "-q", "origin"]);
+
+    (origin_holder, repo_holder, repo, c1, c4, c5)
+}
+
+#[test]
+fn imag_genlock_range_log_merge_base_never_false_stale_for_a_box_ahead_of_main_1292() {
+    let (_origin, _repo_holder, repo, _c1, c4, _c5) = build_two_branch_ahead_repo();
+    let body = r#"
+        out="$(imag_genlock_range_log "$SYN_REPO" "$BOX")"
+        rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(
+        body,
+        &[("SYN_REPO", repo.to_str().unwrap()), ("BOX", c4.as_str())],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "merge-base range must resolve cleanly: {out:?}"
+    );
+    assert!(
+        out.contains("OUT=[]"),
+        "a box that is a content SUPERSET of main via independent dev lineage must read an EMPTY \
+         (never-stale) range — this is the exact #1292 false-STALE fix: {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_range_log_still_reports_a_genuinely_stale_box_1292() {
+    // The merge-base fix must never mask a REAL stale box; it only removes the false positive on
+    // the AHEAD direction. C1 (main's own pre-merge base) is genuinely missing M1's vendor content
+    // -- git's own history simplification shows this as the two underlying non-merge commits (C2,
+    // C3) that make up M1's diff for these paths (M1 is TREESAME to C3 here), never zero.
+    let (_origin, _repo_holder, repo, c1, _c4, _c5) = build_two_branch_ahead_repo();
+    let body = r#"
+        out="$(imag_genlock_range_log "$SYN_REPO" "$BOX")"
+        rc=$?
+        echo "RC=$rc"
+        n="$(printf '%s\n' "$out" | grep -c . || true)"
+        echo "N=$n"
+    "#;
+    let out = run_sourced(
+        body,
+        &[("SYN_REPO", repo.to_str().unwrap()), ("BOX", c1.as_str())],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "range command must resolve cleanly: {out:?}"
+    );
+    assert!(
+        out.contains("N=2"),
+        "a genuinely-behind box must still report the real missing vendor-touching commits \
+         (C2+C3, the commits M1's vendor content came from), never an empty range: {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_ahead_log_reports_the_commits_the_box_carries_past_main_1292() {
+    let (_origin, _repo_holder, repo, _c1, c4, _c5) = build_two_branch_ahead_repo();
+    let body = r#"
+        out="$(imag_genlock_ahead_log "$SYN_REPO" "$BOX")"
+        rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(
+        body,
+        &[("SYN_REPO", repo.to_str().unwrap()), ("BOX", c4.as_str())],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "ahead-log command must resolve cleanly: {out:?}"
+    );
+    assert!(
+        out.contains(&c4[..7]),
+        "must list the AHEAD commit (box's own C4) by its short sha: {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_ahead_log_rejects_option_shaped_box_sha_never_a_false_ok_1292() {
+    // #1292 counterpart to the #531 imag_genlock_range_log guard above — the SAME unvalidated-SSH-
+    // read threat model applies to the AHEAD direction too. Review finding S7: with `--grep=x`
+    // embedded as `origin/main..--grep=x`, git already rejects it as a malformed revision even
+    // WITHOUT `--end-of-options` (it is never a standalone argv token here) -- what this test
+    // actually pins is the fail-CLOSED outcome (non-zero, empty output never silently "OK"), which
+    // is what genlock_build_drift_report's callers rely on; `--end-of-options` is still present on
+    // the function for defense-in-depth / consistency with its siblings, not because THIS specific
+    // shape needs it to fail.
+    let body = r#"
+        rc=0
+        out="$(imag_genlock_ahead_log "$(pwd)" "--grep=x")" || rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !(out.contains("RC=0") && out.contains("OUT=[]")),
+        "an option-shaped box_sha must never silently succeed with an empty ahead-log: {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_ahead_log_fails_closed_on_empty_box_sha_1292() {
+    // Review finding S3: an empty box_sha would otherwise silently resolve `origin/main..` as
+    // `origin/main..HEAD` (git's own "empty right side means HEAD" range convention) instead of
+    // failing — must fail LOUD (non-zero), matching imag_genlock_range_log's own fail-closed-on-
+    // empty behavior (its merge-base call already rejects an empty box_sha).
+    let body = r#"
+        rc=0
+        out="$(imag_genlock_ahead_log "$(pwd)" "")" || rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !out.contains("RC=0"),
+        "an empty box_sha must fail closed (non-zero), never silently resolve origin/main..HEAD: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_on_dev_fails_closed_on_empty_box_sha_1292() {
+    // Review finding S3: consistency with its two siblings above — an empty box_sha must never be
+    // treated as a resolvable revision.
+    let body = r#"
+        rc=0
+        imag_genlock_on_dev "$(pwd)" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !out.contains("RC=0"),
+        "an empty box_sha must fail closed (non-zero), never read as a silent 'yes' ancestor: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_ahead_log_fails_closed_on_an_unreadable_repo_root_1292() {
+    // Review finding W1's building block: the caller-side fix (scripts/drift-guard.sh's
+    // gather_and_check_imag / main()'s --compare branch) now does `|| git_rc=$?` on this call
+    // instead of the old `|| true` -- a swallowed ahead-log failure used to fall through to a
+    // FALSE "OK, current" verdict (range_log empty + ahead_log empty from the swallowed error looks
+    // identical to a genuinely current box). This proves the function itself, called against a
+    // path with no git repo at all, fails LOUD (non-zero) rather than silently returning empty
+    // output that a careless caller could mistake for "nothing ahead" -- exactly the shape the
+    // caller-side fix now correctly routes to the UNKNOWN branch via genlock_build_drift_report's
+    // existing `git_rc != "0" -> UNKNOWN` check (see
+    // imag_build_drift_report_unknown_when_git_failed_never_a_false_ok_531 above for that half).
+    let body = r#"
+        rc=0
+        out="$(imag_genlock_ahead_log "/nonexistent/not-a-git-repo-1292" "80dac432")" || rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !(out.contains("RC=0") && out.contains("OUT=[]")),
+        "a repo_root with no git repo must fail loud (non-zero), never a false-empty 'nothing \
+         ahead': {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_on_dev_true_for_a_box_reachable_from_origin_dev_1292() {
+    let (_origin, _repo_holder, repo, _c1, c4, _c5) = build_two_branch_ahead_repo();
+    let body = r#"
+        rc=0
+        imag_genlock_on_dev "$SYN_REPO" "$BOX" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(
+        body,
+        &[("SYN_REPO", repo.to_str().unwrap()), ("BOX", c4.as_str())],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "a box on the dev tip must read reachable from origin/dev: {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_on_dev_false_for_an_orphan_box_never_pushed_to_either_branch_1292() {
+    let (_origin, _repo_holder, repo, _c1, _c4, c5) = build_two_branch_ahead_repo();
+    let body = r#"
+        rc=0
+        imag_genlock_on_dev "$SYN_REPO" "$BOX" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(
+        body,
+        &[("SYN_REPO", repo.to_str().unwrap()), ("BOX", c5.as_str())],
+    );
+    assert!(
+        !out.contains("RC=0"),
+        "an orphan commit (never pushed to dev or main) must NOT read as reachable from \
+         origin/dev — fail CLOSED, never a silent yes: {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_on_dev_fails_closed_on_option_shaped_box_sha_1292() {
+    // Review finding S7: without `--end-of-options` git would still exit non-zero here (an unknown
+    // `--is-ancestor` flag), so this test's real job is pinning the fail-CLOSED CONTRACT (non-zero,
+    // never a silent "yes"), not proving `--end-of-options` is what makes it fail.
+    let body = r#"
+        rc=0
+        imag_genlock_on_dev "$(pwd)" "--grep=x" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !out.contains("RC=0"),
+        "an option-shaped box_sha must never resolve as a silent 'yes' ancestor: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_full_pipeline_ok_ahead_against_a_real_two_branch_repo_1292() {
+    // The FULL #1292 fix, end-to-end: gather (range/ahead/on_dev) + verdict against a REAL git repo
+    // reproducing the exact incident DAG shape. Direct regression proof for the issue's own
+    // acceptance criterion: "s rigom na kandidátovi ... dáva genlock_build OK (... AHEAD ...)".
+    let (_origin, _repo_holder, repo, _c1, c4, _c5) = build_two_branch_ahead_repo();
+    let body = r#"
+        rc=0
+        range="$(imag_genlock_range_log "$SYN_REPO" "$BOX")" || rc=$?
+        ahead="$(imag_genlock_ahead_log "$SYN_REPO" "$BOX")"
+        ondev=0
+        imag_genlock_on_dev "$SYN_REPO" "$BOX" && ondev=1 || ondev=0
+        vrc=0
+        imag_build_drift_report "$BOX" "$rc" "$range" "$ahead" "$ondev" || vrc=$?
+        echo "VRC=$vrc"
+    "#;
+    let out = run_sourced(
+        body,
+        &[("SYN_REPO", repo.to_str().unwrap()), ("BOX", c4.as_str())],
+    );
+    assert!(
+        out.contains("VRC=0"),
+        "AHEAD-on-dev box must be OK, exit 0: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_build") && out.contains("OK") && out.contains("AHEAD"),
+        "must report genlock_build OK ... AHEAD ...: {out:?}"
+    );
+    assert!(
+        !out.contains("DRIFT"),
+        "no drift for a recognized release-candidate build: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_full_pipeline_stays_stale_for_a_genuinely_behind_box_1292() {
+    let (_origin, _repo_holder, repo, c1, _c4, _c5) = build_two_branch_ahead_repo();
+    let body = r#"
+        rc=0
+        range="$(imag_genlock_range_log "$SYN_REPO" "$BOX")" || rc=$?
+        ahead="$(imag_genlock_ahead_log "$SYN_REPO" "$BOX")"
+        ondev=0
+        imag_genlock_on_dev "$SYN_REPO" "$BOX" && ondev=1 || ondev=0
+        vrc=0
+        imag_build_drift_report "$BOX" "$rc" "$range" "$ahead" "$ondev" || vrc=$?
+        echo "VRC=$vrc"
+    "#;
+    let out = run_sourced(
+        body,
+        &[("SYN_REPO", repo.to_str().unwrap()), ("BOX", c1.as_str())],
+    );
+    assert!(
+        out.contains("VRC=20"),
+        "genuinely-behind box must still DRIFT, exit 20: {out:?}"
+    );
+    assert!(
+        out.contains("genlock STALE") && out.contains("behind origin/main"),
+        "must FAIL LOUD with the STALE wording rig-mode.sh keys on: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_full_pipeline_drifts_on_an_orphan_build_1292() {
+    let (_origin, _repo_holder, repo, _c1, _c4, c5) = build_two_branch_ahead_repo();
+    let body = r#"
+        rc=0
+        range="$(imag_genlock_range_log "$SYN_REPO" "$BOX")" || rc=$?
+        ahead="$(imag_genlock_ahead_log "$SYN_REPO" "$BOX")"
+        ondev=0
+        imag_genlock_on_dev "$SYN_REPO" "$BOX" && ondev=1 || ondev=0
+        vrc=0
+        imag_build_drift_report "$BOX" "$rc" "$range" "$ahead" "$ondev" || vrc=$?
+        echo "VRC=$vrc"
+    "#;
+    let out = run_sourced(
+        body,
+        &[("SYN_REPO", repo.to_str().unwrap()), ("BOX", c5.as_str())],
+    );
+    assert!(
+        out.contains("VRC=20"),
+        "an orphan build must DRIFT, exit 20: {out:?}"
+    );
+    assert!(
+        out.contains("genlock ORPHAN") && out.contains("NEITHER origin/main NOR origin/dev"),
+        "must FAIL LOUD naming the orphan-build reason (early-gate-pin doctrine — an orphan \
+         release must SCREAM): {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_drift_report_ok_ahead_when_box_carries_extra_vendor_commits_on_dev_1292() {
+    let body = r#"
+        rc=0
+        AHEAD="318a779 C4: dev-only NEW obs-studio change (post-merge)"
+        genlock_build_drift_report "imag-nb" "deploy the latest build via setup-imag.sh step-12 at a safe off-event time" "80dac432" "0" "" "$AHEAD" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=0"),
+        "recognized release-candidate build -> OK, exit 0: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_build")
+            && out.contains("OK")
+            && out.contains("AHEAD of origin/main on the dev candidate line"),
+        "must report the exact OK ... AHEAD wording: {out:?}"
+    );
+    assert!(
+        out.contains("318a779"),
+        "must name the ahead commit's short sha: {out:?}"
+    );
+    assert!(
+        !out.contains("DRIFT"),
+        "no drift for a recognized release-candidate build: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_drift_report_orphan_drift_when_ahead_but_not_on_dev_1292() {
+    let body = r#"
+        rc=0
+        AHEAD="74a21fd C5: orphan build, never pushed to either branch
+318a779 C4: dev-only NEW obs-studio change (post-merge)"
+        genlock_build_drift_report "imag-nb" "deploy the latest build via setup-imag.sh step-12 at a safe off-event time" "80dac432" "0" "" "$AHEAD" "0" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=20"),
+        "orphan build -> DRIFT, exit 20: {out:?}"
+    );
+    assert!(
+        out.contains("genlock ORPHAN")
+            && out.contains("2 vendored-genlock commit(s)")
+            && out.contains("NEITHER origin/main NOR origin/dev"),
+        "must FAIL LOUD naming the orphan-build shape: {out:?}"
+    );
+    assert!(
+        out.contains("74a21fd") && out.contains("318a779"),
+        "must list every ahead commit's short sha: {out:?}"
+    );
+    assert!(
+        out.contains("setup-imag.sh"),
+        "must name the operator's deploy action even for an orphan build: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_drift_report_stale_wins_over_ahead_when_box_has_diverged_1292() {
+    // A box that is simultaneously BEHIND (missing real vendor commits) and carrying its own extra
+    // ones must stay DRIFT via the STALE branch — the AHEAD/ORPHAN logic must never override a
+    // genuinely-behind verdict just because the box also happens to carry something extra.
+    let body = r#"
+        rc=0
+        RANGE="cb64631fd feat:[green] #501 genlock_monitor low-bandwidth NDI exception"
+        AHEAD="af02f9bc3 feat:[green] #505 orphan the Linux GL PBO"
+        genlock_build_drift_report "imag-nb" "deploy the latest build via setup-imag.sh step-12 at a safe off-event time" "80dac432" "0" "$RANGE" "$AHEAD" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=20"), "diverged box stays DRIFT: {out:?}");
+    assert!(
+        out.contains("genlock STALE") && out.contains("cb64631fd"),
+        "must report the STALE wording naming the MISSING commit: {out:?}"
+    );
+    assert!(
+        !out.contains("ORPHAN") && !out.contains("AHEAD of origin/main on the dev candidate line"),
+        "must never fall into the AHEAD/ORPHAN wording once the box is genuinely behind: {out:?}"
+    );
+}
+
+#[test]
+fn imag_build_drift_report_stays_backward_compatible_with_the_old_3_arg_call_shape_1292() {
+    // Every pre-#1292 call site only ever passed (box_sha, git_rc, range_log). Args 4/5 (ahead_log,
+    // on_dev) must default safely to "" / unset, preserving the exact pre-#1292 OK-current verdict
+    // for a box with an empty range and no ahead facts ever computed.
+    let body = r#"
+        rc=0
+        imag_build_drift_report "80dac432" "0" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=0"), "3-arg call must still work: {out:?}");
+    assert!(
+        out.contains("genlock_build")
+            && out.contains("OK")
+            && out.contains("current with origin/main"),
+        "must report the pre-#1292 OK-current wording, never the AHEAD phrasing, when ahead_log \
+         was never even computed: {out:?}"
+    );
+}
+
 /// A realistic imag-nb OBS log snippet: header + fps + the #235 genlock latency line + the #484
 /// RT-pin success line (60fps, imag's low-latency IMAG role, EPIC #466 Topology v2).
 const IMAG_LOG_60FPS_3MS: &str = "11:40:39.376: OBS 32.1.2 (64-bit, linux)\n\
