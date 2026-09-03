@@ -246,6 +246,30 @@ dantesync_windows_purge_dead_task_cmd() {
   echo "schtasks /Delete /TN \"$DANTESYNC_DEAD_TASK\" /F"
 }
 
+# dantesync_windows_wait_service_exit_ps -> the PowerShell lines that wait for the dantesync
+# PROCESS to actually exit after `Stop-Service dantesync`, before the exe is touched (#1265).
+# `Stop-Service` returns when the SCM reports STOPPED, but on strih the dantesync.exe process
+# lingers a few seconds after that (its Npcap capture handle on the X520 tears down slowly —
+# .claude/rules/nic-swap-timesync-recovery.md §2, the box where `sc stop` "silently hung"), so an
+# immediate Copy-Item hits "The process cannot access the file ... being used by another process",
+# the self-heal restores the .bak and the canary ABORTS the whole roll (live 2026-09-03 19:02Z).
+# Waits on the REAL resource (the process holding the exe): a bounded Wait-Process, then a forced
+# Stop-Process backstop for a wedged process (the documented cure for a dead-pcap-handle
+# dantesync) + a short re-wait. Exact process NAME only — never a wildcard: `dantesync-tray.exe`
+# (the autostart tray, a separate process) must survive the daemon swap. Shared by the upgrade
+# and the rollback .ps1 so both swap directions get the same guarantee.
+dantesync_windows_wait_service_exit_ps() {
+  cat <<'EOF'
+    # #1265: Stop-Service returns on SCM STOPPED, but the process can linger holding the exe --
+    # wait on the PROCESS (bounded), force-kill a wedged one, then re-wait before the swap.
+    Wait-Process -Name dantesync -Timeout 30 -ErrorAction SilentlyContinue
+    if (Get-Process -Name dantesync -ErrorAction SilentlyContinue) {
+        Stop-Process -Name dantesync -Force
+        Wait-Process -Name dantesync -Timeout 10 -ErrorAction SilentlyContinue
+    }
+EOF
+}
+
 # dantesync_windows_upgrade_ps VERSION -> the CONTENT of a PowerShell .ps1 that upgrades a Windows
 # node to VERSION. Sent as a FILE (scp -O) and run with `-File` — never a nested
 # `powershell -Command "..."` over ssh (which fails SILENTLY, .claude/rules/rig-state-inspection.md
@@ -271,6 +295,7 @@ Copy-Item -Force \$exe \$bak
 # 3. self-heal: any failure during stop/swap/start restores the .bak and restarts before rethrow
 try {
     Stop-Service dantesync
+$(dantesync_windows_wait_service_exit_ps)
     Copy-Item -Force \$tmp \$exe
     Start-Service dantesync
 } catch {
@@ -297,6 +322,7 @@ dantesync_windows_rollback_ps() {
 \$bak = '$DANTESYNC_WIN_BAK'
 if (-not (Test-Path \$bak)) { throw 'no dantesync.exe.bak to roll back to' }
 Stop-Service dantesync
+$(dantesync_windows_wait_service_exit_ps)
 Copy-Item -Force \$bak \$exe
 Start-Service dantesync
 & \$exe --version
