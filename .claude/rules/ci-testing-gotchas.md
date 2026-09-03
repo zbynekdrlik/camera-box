@@ -10,6 +10,7 @@ paths:
   - "scripts/*_calibrate.py"
   - "scripts/recording-e2e.sh"
   - "scripts/rig-mode.sh"
+  - "scripts/*-alert-watchdog.sh"
   - "scripts/lib/rig-lease.sh"
   - "scripts/lib/rig-lease.sh"
 ---
@@ -944,3 +945,26 @@ already-resolved class back out of the built command string via a pure parameter
 reuse it for both the command AND the log line. When adding a NEW test for a validate-and-warn
 function, assert the WARNING's exact occurrence count somewhere in the full flow, not just that it
 appears — this class of bug is invisible to a "does it contain WARNING" check.
+
+## A dev1-watchdog ssh probe wrapped in `timeout <cmd>` BYPASSES a sourced test's `<cmd>` FUNCTION stub → the "hermetic" test hits the LIVE rig (#1290)
+
+The dev1 alert-watchdogs' driver tests (`harness_splitter_port_watchdog_*`, the sibling pattern)
+source the watchdog in `--dry-run` and stub `sshpass()` (and `probe_box()`) as BASH FUNCTIONS to
+stay hermetic — the function stub intercepts the probe so no real network call is made. But
+`timeout N sshpass …` (the form `optical-chain-alert-watchdog.sh` uses for ITS cam2 probe) runs
+`timeout` (a real binary) which execs the REAL `sshpass` binary — a shell FUNCTION is not in
+timeout's exec environment, so the stub is BYPASSED and the probe reaches the live rig from a unit
+test. Confirmed live (#1290): a new `rig_mode_probe` written as `timeout … sshpass … ssh cam2 …`
+made the pre-existing splitter-port 739 driver tests non-hermetic AND rig-state-dependent — a real
+cam2 probe returned TEST/EVENT/UNKNOWN depending on the live rig, which would flip a `WOULD alert`
+assertion.
+
+Two ways the sibling watchdogs avoid it, pick per situation:
+- **optical-chain** overrides the HIGHER-LEVEL function wholesale in its test (`measure()`), so the
+  `timeout sshpass` line is never reached — fine when the whole measure step is one overridable fn.
+- **splitter-port (#1290)** keeps a fine-grained `rig_mode_probe` that the test overrides wholesale,
+  AND writes the production form as `sshpass -p PW timeout N ssh …` — `sshpass` stays the OUTER
+  command (still intercepted by the function stub → hermetic), while `timeout` bounds the ssh
+  itself. NEVER `timeout … sshpass …` on a watchdog whose driver test relies on an `sshpass()`
+  function stub. The rule: any wrapper that must exec the stubbed command (`timeout`, `stdbuf`,
+  `nice`, `env`) put INSIDE the stubbed command, never outside it, or the stub is bypassed.
