@@ -130,6 +130,20 @@ def default_last_json_path() -> Path:
     return Path.home() / ".camera-box" / "av-sync-last.json"
 
 
+def _opt_float(x: "str | float | int | None") -> "float | None":
+    """#1265: parse an optional CLI numeric arg -> float, or None for None/empty/unparseable (the
+    operator/aligner path passes no --loop-gain/--combined-offset-ms, so None means 'not supplied')."""
+    if x is None:
+        return None
+    s = str(x).strip()
+    if s == "":
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
 def required_delay_ms(current_delay_ms: int, offset_ms: float) -> int:
     """Required genlock video-delay to zero the measured offset.
 
@@ -229,7 +243,10 @@ def apply_latency(ws, source: str, current_ms: int, new_ms: int) -> int:
     )
 
 
-def write_last_json(json_path: Path, source: str, offset_ms: float, applied_latency_ms: int) -> dict:
+def write_last_json(
+    json_path: Path, source: str, offset_ms: float, applied_latency_ms: int,
+    loop_gain: "float | None" = None, combined_offset_ms_raw: "float | None" = None,
+) -> dict:
     """Persist the calibrated absolute value: {source, offset_ms, applied_latency_ms, ts}.
 
     Read by the #390 drift-guard `av_sync_calibrated_ms` best-effort pin to track the calibrated
@@ -237,6 +254,13 @@ def write_last_json(json_path: Path, source: str, offset_ms: float, applied_late
     Written atomically (write-tmp + replace) so a reader never observes a partial file. Returns
     the persisted payload so the caller can also feed it to `remote_push_plan()` when this write
     landed on a local (off-box) path instead of the real stream-box ProgramData.
+
+    #1265: when the #856 controller supplies the loop-gain context (`loop_gain`,
+    `combined_offset_ms_raw`), those two keys are ADDED -- never renaming or removing the existing
+    source/offset_ms/applied_latency_ms/ts keys (av-sync-last.json is a live data contract read by
+    latency_pins_snapshot.py / rig-mode.sh / drift-guard). `offset_ms` here is the DAMPED value
+    actually applied; `combined_offset_ms_raw` records the pre-damping median. The operator/aligner
+    path passes neither, keeping the old schema byte-for-byte.
     """
     json_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -245,6 +269,10 @@ def write_last_json(json_path: Path, source: str, offset_ms: float, applied_late
         "applied_latency_ms": applied_latency_ms,
         "ts": time.time(),
     }
+    if loop_gain is not None:
+        payload["loop_gain"] = loop_gain
+    if combined_offset_ms_raw is not None:
+        payload["combined_offset_ms_raw"] = combined_offset_ms_raw
     tmp = json_path.with_suffix(json_path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(json_path)
@@ -420,6 +448,19 @@ def main():
         help="override the av-sync-last.json write path "
              "(default: %%PROGRAMDATA%%/camera-box/av-sync-last.json)",
     )
+    # #1265: loop-gain context supplied by the #856 controller ONLY (recording-e2e.sh [8/8g] already
+    # DAMPED the offset before this call, so --offset-ms IS the damped value). These are for the
+    # apply-time gain log line + the persisted loop_gain/combined_offset_ms_raw keys; the operator/
+    # aligner path omits them and keeps the old schema + no gain line. Parsed fail-safe (empty /
+    # unparseable -> None -> treated as not supplied).
+    ap.add_argument(
+        "--loop-gain", type=str, default=None,
+        help="#1265: the loop gain that damped --offset-ms (for the gain log line + persist)",
+    )
+    ap.add_argument(
+        "--combined-offset-ms", type=str, default=None,
+        help="#1265: the raw (pre-damping) combined median offset (for the gain log line + persist)",
+    )
     # #805 -- offline baseline-calibration mode: no OBS connection, aggregates a JSONL log of
     # SyncNet windows (`av_sync_measure.py --calibration-log`) into a one-shot recommendation.
     ap.add_argument(
@@ -468,6 +509,22 @@ def main():
         f"-> new={new_ms}ms"
     )
 
+    # #1265: the ONE grep-able gain line -- raw combined, gain, damped (= the applied offset), the
+    # +/-50/run step-clamped offset, and the resulting pin. Emitted ONLY when the #856 controller
+    # supplied the gain context (an operator/aligner --offset-ms call has none). `offset` is already
+    # the DAMPED value (the gain was applied upstream at [8/8g]); `clamped` is the offset after the
+    # +/-AV_SYNC_MAX_STEP_MS step clamp (the pin `->` value is the real result incl. the hardware
+    # clamp). The existing `[av-sync] SET ...: A -> B` line (grepped by other consumers) is unchanged.
+    loop_gain = _opt_float(args.loop_gain)
+    combined_offset_ms_raw = _opt_float(args.combined_offset_ms)
+    if loop_gain is not None:
+        clamped = max(-AV_SYNC_MAX_STEP_MS, min(AV_SYNC_MAX_STEP_MS, offset))
+        raw_disp = combined_offset_ms_raw if combined_offset_ms_raw is not None else offset
+        print(
+            f"[av-sync] gain: combined={raw_disp:.2f} gain={loop_gain:.2f} damped={offset:.2f} "
+            f"clamped={clamped:.2f} pin {current} -> {new_ms}"
+        )
+
     if not args.apply:
         print("[av-sync] dry-run (pass --apply to set)")
         return
@@ -475,7 +532,10 @@ def main():
     applied = apply_latency(ws, args.source, current, new_ms)
     used_default_path = args.json_path is None
     json_path = Path(args.json_path) if args.json_path else default_last_json_path()
-    payload = write_last_json(json_path, args.source, offset, applied)
+    payload = write_last_json(
+        json_path, args.source, offset, applied,
+        loop_gain=loop_gain, combined_offset_ms_raw=combined_offset_ms_raw,
+    )
     print(
         f"[av-sync] APPLIED + verified: '{args.source}' {GENLOCK_SRC_LATENCY_KEY}={applied}; "
         f"persisted {json_path}"
