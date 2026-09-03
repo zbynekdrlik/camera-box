@@ -665,17 +665,37 @@ stop_stray_recordings() {
   return $rc
 }
 
+# imag_genlock_stale_banner_needed CHECK_OUTPUT -> #1292 review follow-up: does the captured
+# `drift-guard.sh --check-imag` OUTPUT carry either of the genlock_build facet's TWO DRIFT reasons --
+# "genlock STALE" (box behind origin/main) or "genlock ORPHAN" (box ahead of main, but reachable from
+# NEITHER origin/main NOR origin/dev; see genlock_build_drift_report's #1292 merge-base fix in
+# scripts/drift-guard.sh)? Both are a DRIFT verdict the pre-event operator must SEE -- an unrecognized
+# orphan build is exactly as unsafe to go live on as a stale one, so it gets the SAME advisory banner
+# below, never silence (the gap this predicate exists to close: warn_imag_genlock_stale used to key on
+# "genlock STALE" only, so an ORPHAN-drifted imag-nb build printed no pre-event warning at all). Pure
+# (no I/O), ALWAYS returns 0 (verdict on stdout: "1"/"0") so tests/rig_mode.rs can source rig-mode.sh
+# and exercise both DRIFT reasons deterministically (Tier-0, #477) -- same seam pattern as
+# imag_genlock_gate_verdict (#789) above. The match is a plain bash glob (no pipe -> no grep|head
+# SIGPIPE hazard under rig-mode's set -euo pipefail).
+imag_genlock_stale_banner_needed() {
+  case "$1" in
+    *"genlock STALE"* | *"genlock ORPHAN"*) printf '1\n' ;;
+    *) printf '0\n' ;;
+  esac
+  return 0
+}
+
 # warn_imag_genlock_stale -> #531 pre-event NON-BLOCKING alert: is imag-nb's DEPLOYED genlock build
 # BEHIND origin/main? The #530 disaster was imag-nb running a STALE genlock build at a live event
 # (-> 45fps) because a merged genlock change had never been deployed there and NOTHING alerted. This
 # runs `scripts/drift-guard.sh --check-imag` (#531 made it a DYNAMIC box-vs-origin/main compare) and,
-# if it reports the box STALE, prints a LOUD warning banner so the operator sees it BEFORE going live.
-# ADVISORY ONLY — it NEVER hard-blocks the switch (blocking a live event on a drift check would be far
-# worse than the drift; the operator deploys the current build via setup-imag.sh step-12 at a safe
-# off-event moment). Same advisory shape as the #440 painter-freshness WARN. drift-guard is run as a
-# SUBPROCESS from the repo root (so its own set -e / exit never affect rig-mode, and its CWD-relative
-# vendor/README.md resolves); `|| rc=$?` is belt-and-suspenders. The STALE match is a plain bash glob
-# (no pipe -> no grep|head SIGPIPE hazard under rig-mode's set -euo pipefail).
+# if it reports the box DRIFTED (see imag_genlock_stale_banner_needed above for the two DRIFT reasons,
+# #1292), prints a LOUD warning banner so the operator sees it BEFORE going live. ADVISORY ONLY — it
+# NEVER hard-blocks the switch (blocking a live event on a drift check would be far worse than the
+# drift; the operator deploys the current build via setup-imag.sh step-12 at a safe off-event moment).
+# Same advisory shape as the #440 painter-freshness WARN. drift-guard is run as a SUBPROCESS from the
+# repo root (so its own set -e / exit never affect rig-mode, and its CWD-relative vendor/README.md
+# resolves); `|| rc=$?` is belt-and-suspenders.
 warn_imag_genlock_stale() {
   local here out rc=0
   # #531 review: guard the `cd` itself against this file's `set -e` — this function's whole contract
@@ -696,20 +716,20 @@ warn_imag_genlock_stale() {
   # instead of capturing it into `rc` and never reading it — 0=OK, 20=DRIFT, 11=UNKNOWN, anything
   # else is the drift-guard subprocess itself failing to even run (e.g. bash/script not found).
   echo "    [imag drift] drift-guard --check-imag exit=${rc}"
-  case "$out" in
-    *"genlock STALE"*)
-      cat >&2 <<'BANNER'
+  if [ "$(imag_genlock_stale_banner_needed "$out")" = 1 ]; then
+    cat >&2 <<'BANNER'
 
 ################################################################################
-## WARNING [#531]: imag-nb is running a STALE genlock build (BEHIND origin/main).
-## The last event ran at 45fps because of EXACTLY this. Deploy the current build
-## to imag-nb via `scripts/setup-imag.sh` step-12 at a safe off-event moment
+## WARNING [#531]: imag-nb's DEPLOYED genlock build is DRIFTED -- either STALE
+## (BEHIND origin/main) or an unrecognized ORPHAN build (#1292). See the
+## [imag drift] detail line above for the exact reason. The last event ran at
+## 45fps because of EXACTLY this kind of drift. Deploy the current build to
+## imag-nb via `scripts/setup-imag.sh` step-12 at a safe off-event moment
 ## BEFORE going live. (Advisory — NOT blocking; see the [imag drift] detail above.)
 ################################################################################
 
 BANNER
-      ;;
-  esac
+  fi
   return 0   # advisory: a drift check must NEVER fail rig-mode / block a live event
 }
 
