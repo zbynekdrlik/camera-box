@@ -246,3 +246,30 @@ fix from one script to a "similar" sibling, diff the GATING CONDITION too, not j
 write — a stricter script's fail-loud-on-unreachable premise (setup-device.sh's `[ -n
 "$DANTESYNC_URL" ] || fail ...`, unconditional) does not automatically hold in a sibling that was
 deliberately written to tolerate the same failure differently.**
+
+## Rewriting a provisioning line that OTHER tests in the SAME file anchor on: run the WHOLE file as a rustc replica + the old-vs-new literal sweep over EVERY test reading the script (#1289 CI round 2)
+
+The #1289 STEP 17 rewrite retired the literal `curl ... -o /usr/local/bin/dantesync`. The lane
+added its own tests (all green by replica) into `tests/setup_device_provisioner_hardening.rs` —
+but TWO pre-existing tests in that SAME file (#591 / #597 "purge runs before the dantesync
+install") anchored the install action on exactly that retired literal via
+`first_noncomment_idx(&body, "-o /usr/local/bin/dantesync").expect(...)`, so CI went red on a
+file the lane had just edited, and nextest's fail-fast left 791 tests un-run behind the two
+failures (the entire `setup_imag_guards.rs` binary among them). The occurrence-count anchor
+discipline CLAUDE.md prescribes for `recording-e2e.sh`/`rig-mode.sh` applies to
+`setup-device.sh`/`setup-imag.sh` IDENTICALLY — ~45 test files read them. Two cheap Tier-0 nets,
+both required after ANY edit that rewrites (not merely appends to) a provisioning line:
+
+1. **Replica-run every test FILE you touched, whole, not just your new tests.** These harnesses
+   are std-only, so `CARGO_MANIFEST_DIR=$PWD rustc --edition 2021 --test tests/<file>.rs -o
+   /tmp/x && /tmp/x` runs all of them locally in seconds (the `env!("CARGO_MANIFEST_DIR")` in
+   `read_script()` is a COMPILE-time macro — export the var before `rustc`, not only before
+   running the binary).
+2. **Old-vs-new literal-count sweep across EVERY test file that names the script** — extract each
+   `"..."`/`r#"..."#` literal from every `tests/*.rs` matching `setup-(device|imag)\.sh`, count it
+   in `git show <pre-edit-sha>:scripts/<script>` vs the working tree, and read every `1->0` hit:
+   a POSITIVE anchor (`.expect`/`assert!(on_noncomment_line(...))`) that went to 0 is a
+   guaranteed CI red; a NEGATIVE one (`assert!(!body.contains(...))`) going to 0 is the intended
+   effect. (The #1289 sweep showed exactly two positive `1->0` hits — the two CI failures — and
+   nothing else.) Re-anchor on the NEW install-action line (`install -m 0755 "$_<name>_dl_tmp"
+   /usr/local/bin/<name>`), never on the download itself, which is now a temp path.
