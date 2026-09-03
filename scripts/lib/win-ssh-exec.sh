@@ -27,6 +27,38 @@ win_ssh_ps_encoded_command() {
   printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE | base64 -w0
 }
 
+# onbox_decode_priority_class -- issue 1260. Pure/testable (no network): resolve+validate the
+# on-box `recording-verdict.exe --extract-partial` decode's Windows PriorityClass from
+# $E2E_ONBOX_DECODE_PRIORITY, one shared place both scripts/recording-verdict-on-strih.sh and
+# -on-stream.sh source (they already source this whole file unconditionally at file scope).
+#
+# WHY (issue 1260): the on-strih/on-stream post-E2E decode runs for ~20 minutes, competing 1:1 for
+# CPU with the LIVE `obs64` process on the SAME box -- correlated in the strih OBS
+# `multiview-audit` log with a rendered_fps collapse (supervisor comment 5518052846: 0-3
+# dips/10min idle vs 89-117 dips/10min during exactly the decode windows, program `lagged=0`
+# throughout -- Multiview is the victim, program is not). issue 767 already solved the SAME class
+# for imag-nb (`nice -n 19` in build_onimag_command); this brings the two Windows planners up to
+# that shape via a PowerShell host-process PriorityClass (the &-invoked recording-verdict.exe
+# child inherits it -- Win32 CreateProcess semantics).
+#
+# Default BelowNormal, with NO opt-out -- owner rule: a needed property is default-on, never a
+# forgettable toggle. `${VAR:-BelowNormal}` defaults on BOTH unset and empty (an empty override is
+# silently treated as "not set", never a warning -- only a genuinely non-matching value warns
+# below). An invalid value falls back to BelowNormal too, printing a WARNING naming the rejected
+# value on stderr (fail-safe: never silently swallow a typo'd override, and never let an
+# unrecognized string reach the emitted PowerShell text -- PowerShell would reject an unknown
+# PriorityClass at parse time on the box, aborting the whole decode).
+onbox_decode_priority_class() {
+  local v="${E2E_ONBOX_DECODE_PRIORITY:-BelowNormal}"
+  case "$v" in
+    Idle|BelowNormal|Normal) printf '%s' "$v" ;;
+    *)
+      echo "WARNING: E2E_ONBOX_DECODE_PRIORITY=\"$v\" is not one of Idle|BelowNormal|Normal -- using BelowNormal" >&2
+      printf '%s' "BelowNormal"
+      ;;
+  esac
+}
+
 # win_ssh_basename <windows-path> -- the filename component of a WINDOWS path (backslash- or
 # forward-slash-separated). Plain bash `basename` splits ONLY on `/` -- fed a backslash Windows
 # path (e.g. `C:\camera-box\verdict-out\strih-partial-12345.json`), it finds no `/` and returns
