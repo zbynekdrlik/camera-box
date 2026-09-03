@@ -216,21 +216,34 @@ impl SelfHealAttributionReport {
         !self.self_heal.is_empty() || !self.unattributed_events.is_empty()
     }
 
-    /// #914 (2026-08-01, user decision -- mirrors the issue-889 report-only pattern / issue-861's
-    /// caller-only decoupling): whether this report's `frozen_leg`/`self_heal_reset` findings
-    /// should fold into the fused verdict's `overall_pass`. `any_frozen()`/`any_self_heal()` above
-    /// are UNCHANGED -- still fully computed, printed, and JSON-reported; only the caller
-    /// (`recording-verdict.rs`) stops ANDing them into `all_pass`, exactly like issue 861 did for
-    /// `av_window::av_offset_gate_pass`.
-    ///
-    /// Report-only (hardcoded `true` = never contributes a failure) while cam1's ShadowCast 2
-    /// grabber defect (issue 909) remains physically unresolved. No env knob -- same no-knob
-    /// discipline issue 889 established. Restore path tracked on issue 905: once cam1 is
-    /// physically replaced and a stable week passes with no self-heal escalations, flip this
-    /// back to `!self.any_frozen() && !self.any_self_heal()` -- a one-line change, exactly the
-    /// shape this method exists to make possible.
-    pub fn overall_pass_contribution(&self) -> bool {
+    /// The ONE machine-readable flag for whether `frozen_leg`/`self_heal_reset` fold into the fused
+    /// verdict's `overall_pass` -- the single source of truth read by BOTH
+    /// [`overall_pass_contribution`](Self::overall_pass_contribution) AND the recording-verdict.rs
+    /// per-node JSON `gates_overall_pass` literals, so the JSON annotation can never silently drift
+    /// from the actual pass/fail decision. This is the shape every sibling seam already exposes
+    /// (`optical_floor`/`e2e_latency_gate`/`presentation_cadence`/`own_burn_absent`/`av_window`).
+    /// `true` == BLOCKING (RESTORED by issue 905 item 2, 2026-09-02); a future report-only
+    /// re-decouple flips this ONE const back to `false`.
+    pub const fn gates_overall_pass() -> bool {
         true
+    }
+
+    /// Whether this report's `frozen_leg`/`self_heal_reset` findings fold into the fused verdict's
+    /// `overall_pass`. `any_frozen()`/`any_self_heal()` above are UNCHANGED regardless of this
+    /// method's own state -- still fully computed, printed, and JSON-reported either way.
+    ///
+    /// RESTORED to blocking by issue 905 item 2 (2026-09-02): issue 914 (2026-08-01) had hardcoded
+    /// this to `true` (report-only, never contributes a failure) while cam1's ShadowCast 2 grabber
+    /// defect (issue 909) remained physically unresolved -- exactly mirroring the issue-889
+    /// report-only pattern / issue-861's caller-only decoupling for `av_window::
+    /// av_offset_gate_pass`. That restore condition (a stable green series with no self-heal
+    /// escalations) is now met: three consecutive Full-path E2E runs showed a genuinely empty
+    /// `frozen_leg.frozen` array AND a genuinely clean `self_heal_reset` (both `attributed` and
+    /// `unattributed_events` empty) on every member. No env knob -- same no-knob discipline
+    /// issue 889 established; this is a plain one-way flip of
+    /// [`gates_overall_pass`](Self::gates_overall_pass), not a re-armable allowance.
+    pub fn overall_pass_contribution(&self) -> bool {
+        !Self::gates_overall_pass() || (!self.any_frozen() && !self.any_self_heal())
     }
 }
 
@@ -324,6 +337,20 @@ pub fn attribute_self_heal(
 mod tests {
     use super::*;
 
+    // issue 905 item 2 follow-up (2026-09-03): several fixtures below originally used
+    // copies=149/300 against frames=9000 over a 30s window -- density≈0.017-0.033, well under
+    // both real `#758` thresholds -- and relied on `frozen_leg::classify_leg`'s now-REMOVED
+    // conservative "copies over the old isolated allowance -> Frozen anyway" branch to reach a
+    // classified-Frozen window in the first place, so this module's self-heal REATTRIBUTION logic
+    // had something to reattribute away from. With that branch gone (see `frozen_leg.rs`'s own
+    // module doc), those exact copies counts now classify StaleReplay directly and never even
+    // reach `attribute_self_heal`'s Frozen match arm -- a genuinely wrong fixture now, per the
+    // item-2 follow-up design (not a wrong ASSERTION; these tests' own intent, self-heal
+    // correlation/margin/reattribution, is unchanged). Bumped to copies=1000 (density=1000/9000
+    // ≈0.111, over `FROZEN_DENSITY_THRESHOLD` 0.10) so each fixture still genuinely classifies
+    // Frozen via a REAL `#758` threshold before self-heal reattribution runs on it -- the 30s
+    // window/margin timing every test discusses is untouched.
+
     #[test]
     fn parse_valid_token() {
         let ev = SelfHealResetEvent::parse("cam1:1785439475449374588").unwrap();
@@ -367,10 +394,11 @@ mod tests {
     #[test]
     fn a_reset_inside_the_frozen_window_reattributes_away_from_frozen_leg() {
         // Mirrors #894's own live evidence shape: reset logged a few seconds into the affected
-        // segment window.
+        // segment window. copies=1000 (not the original 149, see the issue-905-item-2 note atop
+        // this mod) so the window genuinely classifies Frozen via the density threshold.
         let segments = vec![SegmentLeg {
             cambox: "cam1",
-            copies: 149,
+            copies: 1000,
             frames: 9000,
             start_ns: 1_785_439_470_000_000_000,
             end_ns: 1_785_439_500_000_000_000, // 30s window
@@ -396,7 +424,7 @@ mod tests {
     fn a_reset_on_a_different_camera_does_not_reattribute() {
         let segments = vec![SegmentLeg {
             cambox: "cam1",
-            copies: 300,
+            copies: 1000, // issue-905-item-2: genuinely Frozen via density (see mod-level note)
             frames: 9000,
             start_ns: 0,
             end_ns: 30_000_000_000,
@@ -422,7 +450,7 @@ mod tests {
     fn a_reset_just_outside_the_window_still_correlates_within_the_margin() {
         let segments = vec![SegmentLeg {
             cambox: "cam1",
-            copies: 300,
+            copies: 1000, // issue-905-item-2: genuinely Frozen via density (see mod-level note)
             frames: 9000,
             start_ns: 10_000_000_000,
             end_ns: 40_000_000_000,
@@ -445,7 +473,7 @@ mod tests {
     fn a_reset_beyond_the_margin_does_not_correlate() {
         let segments = vec![SegmentLeg {
             cambox: "cam1",
-            copies: 300,
+            copies: 1000, // issue-905-item-2: genuinely Frozen via density (see mod-level note)
             frames: 9000,
             start_ns: 10_000_000_000,
             end_ns: 40_000_000_000,
@@ -511,14 +539,14 @@ mod tests {
         let segments = vec![
             SegmentLeg {
                 cambox: "cam1",
-                copies: 300,
+                copies: 1000, // issue-905-item-2: genuinely Frozen via density (mod-level note)
                 frames: 9000,
                 start_ns: 0,
                 end_ns: 30_000_000_000,
             },
             SegmentLeg {
                 cambox: "cam1",
-                copies: 300,
+                copies: 1000,
                 frames: 9000,
                 start_ns: 30_000_000_000,
                 end_ns: 60_000_000_000,
@@ -542,10 +570,14 @@ mod tests {
         assert!(report.unattributed_events.is_empty());
     }
 
-    // ---- issue 914 (2026-08-01): frozen_leg/self_heal_reset become report-only ----
+    // ---- issue 905 item 2 (2026-09-02): frozen_leg/self_heal_reset RESTORED to blocking ----
+    // (originally decoupled report-only by issue 914 on 2026-08-01, pending cam1's ShadowCast
+    // grabber defect, issue 909; restored once a stable green E2E series showed both dimensions
+    // genuinely clean -- frozen_leg.frozen==[] and self_heal_reset attributed/unattributed==[]
+    // across three consecutive runs, see the ticket's own validated comment).
 
     #[test]
-    fn a_genuinely_frozen_window_no_longer_contributes_a_failure_914() {
+    fn a_genuinely_frozen_window_now_fails_overall_pass_905() {
         // Same fixture shape as `no_events_behaves_like_frozen_leg_report` above -- a genuinely
         // HARD-FROZEN window, no correlating self-heal event.
         let segments = vec![SegmentLeg {
@@ -561,13 +593,13 @@ mod tests {
             "sanity: this fixture must genuinely classify Frozen: {report:?}"
         );
         assert!(
-            report.overall_pass_contribution(),
-            "#914: a genuinely frozen leg must no longer contribute a failure to overall_pass: {report:?}"
+            !report.overall_pass_contribution(),
+            "905: restored -- a genuinely frozen leg must fail overall_pass again: {report:?}"
         );
     }
 
     #[test]
-    fn an_unattributed_self_heal_event_no_longer_contributes_a_failure_914() {
+    fn an_unattributed_self_heal_event_now_fails_overall_pass_905() {
         // Same fixture shape as `an_event_with_no_frozen_window_at_all_still_gates_via_unattributed`
         // above -- a self-heal reset that never correlates to any window.
         let segments = vec![SegmentLeg {
@@ -588,19 +620,34 @@ mod tests {
             "sanity: this fixture must genuinely trip any_self_heal: {report:?}"
         );
         assert!(
-            report.overall_pass_contribution(),
-            "#914: a self-heal reset event must no longer contribute a failure to overall_pass: {report:?}"
+            !report.overall_pass_contribution(),
+            "905: restored -- a self-heal reset event must fail overall_pass again: {report:?}"
         );
     }
 
     #[test]
-    fn a_clean_report_also_contributes_no_failure_914() {
+    fn a_clean_report_also_contributes_no_failure() {
         let report = SelfHealAttributionReport::default();
         assert!(!report.any_frozen());
         assert!(!report.any_self_heal());
         assert!(
             report.overall_pass_contribution(),
             "a genuinely clean report must obviously never contribute a failure: {report:?}"
+        );
+    }
+
+    #[test]
+    fn gates_overall_pass_static_read_is_true_905() {
+        // issue 905 item 2 (review 🔵8): pin the ONE public static flag that both the fold
+        // (`overall_pass_contribution`) and the recording-verdict.rs per-node JSON
+        // `gates_overall_pass` literals read from, so the JSON annotation can never silently drift
+        // from the actual pass/fail decision (the fixture comment in recording-verdict.rs itself
+        // warned they were independent hardcoded literals). `true` == blocking (a frozen leg or a
+        // self-heal reset fails overall_pass); a hypothetical future report-only re-decouple flips
+        // this ONE const, and every sibling seam already exposes exactly this shape.
+        assert!(
+            SelfHealAttributionReport::gates_overall_pass(),
+            "905 item 2: the static gates_overall_pass flag must read true (blocking)"
         );
     }
 
@@ -672,7 +719,7 @@ mod tests {
     fn a_capture_wedge_event_reattributes_a_frozen_window_and_labels_it_distinctly() {
         let segments = vec![SegmentLeg {
             cambox: "cam4",
-            copies: 149,
+            copies: 1000, // issue-905-item-2: genuinely Frozen via density (see mod-level note)
             frames: 9000,
             start_ns: 1_785_439_470_000_000_000,
             end_ns: 1_785_439_500_000_000_000, // 30s window

@@ -31,12 +31,11 @@
 //!
 //! ## The freeze bound is elsewhere and already report-only
 //!
-//! The recording-path freeze concept is `frozen_leg` (`recording-verdict.rs`), ALREADY wired as a
-//! report-only seam (`gates_overall_pass=false`) by explicit user decision issue 914 (cam1
-//! ShadowCast grabber defect, issue 909), restore path issue 905. Green runs exist with
-//! `frozen>0`, so a hard freeze gate cannot be live now and must not be duplicated here — the
-//! freeze bound is that existing seam, untouched. This module wires the genuinely-missing LATENCY
-//! bound only.
+//! The recording-path freeze concept is `frozen_leg` (`recording-verdict.rs`), a BLOCKING seam
+//! (`gates_overall_pass=true`) again as of issue 905 item 2 -- it was temporarily report-only
+//! under issue 914 (cam1 ShadowCast grabber defect, issue 909) and was restored once a green E2E
+//! series proved it clean. The freeze bound is that existing seam and must not be duplicated here;
+//! this module wires the genuinely-missing LATENCY bound only.
 //!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!

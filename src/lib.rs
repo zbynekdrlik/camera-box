@@ -268,6 +268,12 @@ pub mod program_render_audit;
 // `--switch-schedule` window) lives in `bin/recording-verdict`.
 pub mod switch_latency;
 
+// issue 1144 — SWITCH-IN TRANSIENT classifier (pure, REPORT-ONLY attribution): recognizes an imag
+// NDI-receiver spin-up burst right after a program cut (a dense leading burn-loss burst that
+// recovers) so the report-only imag content gate attributes it to the cold-cut measurement instead
+// of failing on it. Called by the probe-gated `bin/recording-verdict` imag per-segment sweep.
+pub mod switch_in_transient;
+
 // #312 item 2 (PR A) — per-camera A/V-sync WINDOW POOLING (pure decision): given a camera's
 // per-`--switch-schedule`-window candidate offset lists (`qpsk_marker::av_offset_candidates`,
 // computed per window in the probe-gated `bin/recording-verdict` from that window's decoded

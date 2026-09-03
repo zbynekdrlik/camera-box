@@ -33,9 +33,10 @@ means adding a bound to the RECORDING verdict, not touching differ/frame-probe.
    aligns program video to the ~1s-late mastered audio (the operator A/V-align domain). NEVER bound
    it tightly / never propose reducing it. The honest gate-able "absolute latency" is
    `latency.cam_strih` (cam2 paint gen_ts → strih program, BEFORE the hold): ~210-241 ms p99.
-2. **Freeze in the recording path = `frozen_leg`, already report-only** (`gates_overall_pass=false`,
-   issue 914 / restore issue 905) because cam1's grabber (issue 909) trips it on green runs. Don't
-   add a second hard freeze gate — green runs exist with `frozen>0`.
+2. **Freeze in the recording path = `frozen_leg`, BLOCKING again as of issue 905 item 2**
+   (`gates_overall_pass=true`; issue 914 had made it report-only while cam1's grabber, issue 909,
+   tripped it — restored once a green E2E series proved it clean). Don't add a SECOND freeze gate
+   here — the freeze bound is that existing seam.
 
 ## Calibrate any new recording-path bound from the green verdict JSONs (never guess)
 

@@ -28,10 +28,29 @@
 //! when either that approximate duration exceeds [`FROZEN_SUSTAINED_SECS`], OR the raw density
 //! exceeds [`FROZEN_DENSITY_THRESHOLD`] (catches a short window whose approximate duration is
 //! small in absolute seconds but whose camera was stuck for almost its ENTIRE span). Anything with
-//! copies but neither threshold tripped, at or below [`STALE_REPLAY_MAX_ISOLATED`], is
-//! `StaleReplay` — reported, never gated. A copy count ABOVE that isolated allowance that still
-//! doesn't trip a sustained threshold is conservatively treated as `Frozen` too (err on failing
-//! loud, never silently downgrade a borderline case to "just informational").
+//! copies but NEITHER threshold tripped is `StaleReplay` — reported, never gated — REGARDLESS of
+//! the raw copy count.
+//!
+//! ## issue 905 item 2 follow-up (2026-09-03) — Frozen is EXCLUSIVELY the two `#758` thresholds now
+//!
+//! `classify_leg` originally carried a THIRD, conservative branch: a copy count above
+//! [`STALE_REPLAY_MAX_ISOLATED`] classified `Frozen` even when NEITHER real threshold tripped
+//! ("err on failing loud"). That branch was harmless while issue 914 made `frozen_leg`
+//! report-only; once item 2 restored it to BLOCKING, the branch started failing genuinely healthy
+//! runs. Live evidence (verdict-611325119.json, the ".615" tag, CAM2 window since
+//! `1788388542251771245`): `copies=18`, `frames=847`, window ≈30.2s — `density≈0.0213` and
+//! `approx_stale_secs≈0.64` sit FAR under both `#758` thresholds, yet the old branch forced
+//! `Frozen` purely because 18 > 5. The window's own `residual_events` show all 18 copies as
+//! ISOLATED single-frame duplicates (`kind:"copy"`, `tick_before==tick_after`) spread across
+//! offsets 1.2s/6.07s/6.5s/7.57s/8.34s/9.47s/10.9s… — a diffuse FIFO-jitter signature (see
+//! `genlock-fifo-limit-cycle-diagnosis.md`), not a contiguous stuck run — and the window sits
+//! comfortably inside CAM2's own per-cambox copies/gaps tolerance (25, issue 1249). That diffuse
+//! class is already owned by the per-cambox `copies_gaps_tolerance` gate (issue 1220/1243); two
+//! gates disagreeing over one signal is the bug, not a missing safety margin. `classify_leg` is
+//! now strictly two-tier: `Frozen` ⇔ one of the two `#758` thresholds trips; everything else with
+//! `copies > 0` is `StaleReplay { copies }`, count still visible, never gating. See
+//! `.claude/rules/self-heal-frozen-leg-attribution.md` for the restore-precondition + this
+//! follow-up's own section.
 
 /// #758 acceptance: an approximate sustained staleness of MORE than 5 real seconds in a camera's
 /// active window is a HARD frozen classification — never informational-only.
@@ -43,10 +62,15 @@ pub const FROZEN_SUSTAINED_SECS: f64 = 5.0;
 /// yet have tripped).
 pub const FROZEN_DENSITY_THRESHOLD: f64 = 0.10;
 
-/// #758 acceptance: AT MOST 5 isolated stale/duplicate frames in a window is informational-only
-/// (`StaleReplay`) — the vendored DistroAV warm-up-latch single-frame replay on source
-/// re-activation (documented in `scripts/recording-e2e.sh`'s CLAUDE.md) is exactly this class of
-/// artifact, not a freeze.
+/// #758's ORIGINAL acceptance wording named "AT MOST 5 isolated stale/duplicate frames" as the
+/// informational (`StaleReplay`) boundary — the vendored DistroAV warm-up-latch single-frame
+/// replay on source re-activation (documented in `scripts/recording-e2e.sh`'s CLAUDE.md) is
+/// exactly this class of artifact, not a freeze. **issue 905 item 2 follow-up (2026-09-03):**
+/// `classify_leg` no longer branches on this constant at all — a copy count no longer
+/// participates in the Frozen/StaleReplay decision by itself (see the module-doc section above).
+/// Kept as a DOCUMENTED, unused informational constant recording the original `#758` wording; the
+/// per-cambox `copies_gaps_tolerance` gate (issue 1220/1243) is now the single owner of the
+/// diffuse-copies class this constant used to (mis)gate.
 pub const STALE_REPLAY_MAX_ISOLATED: u32 = 5;
 
 /// The health verdict for ONE camera's ONE program-switch window.
@@ -54,8 +78,9 @@ pub const STALE_REPLAY_MAX_ISOLATED: u32 = 5;
 pub enum LegHealth {
     /// No duplicate/stale frames at all in this window.
     Healthy,
-    /// `copies` at or below [`STALE_REPLAY_MAX_ISOLATED`] and NOT sustained by duration or
-    /// density — informational only, never gates the fused verdict.
+    /// `copies > 0` and NEITHER `#758` threshold (sustained duration or density) tripped —
+    /// informational only, never gates the fused verdict, REGARDLESS of the copy count (issue 905
+    /// item 2 follow-up).
     StaleReplay { copies: u32 },
     /// Sustained staleness — a HARD fail. `approx_stale_secs` and `density` are BOTH reported
     /// (whichever tripped the threshold, or both) so the operator message can name the actual
@@ -93,16 +118,11 @@ pub fn classify_leg(copies: u32, frames: u32, window_secs: f64) -> LegHealth {
             density,
         };
     }
-    if copies <= STALE_REPLAY_MAX_ISOLATED {
-        return LegHealth::StaleReplay { copies };
-    }
-    // More copies than the isolated allowance, yet neither sustained threshold tripped: still
-    // classify Frozen — conservative, never silently downgrade a borderline case.
-    LegHealth::Frozen {
-        copies,
-        approx_stale_secs,
-        density,
-    }
+    // issue 905 item 2 follow-up: NEITHER `#758` threshold tripped -- StaleReplay REGARDLESS of
+    // the copy count. The conservative "count over the isolated allowance -> Frozen anyway"
+    // branch is REMOVED (see the module-doc section above); the diffuse-copies class it used to
+    // (mis)gate is already owned by the per-cambox copies_gaps_tolerance gate.
+    LegHealth::StaleReplay { copies }
 }
 
 /// One camera's one window, as the caller (the probe-gated fused verdict, which owns the real
@@ -161,9 +181,10 @@ impl StaleReplayLeg {
 /// `crate::self_heal_attribution::attribute_self_heal` (which calls [`classify_leg`] directly, not
 /// this function), whose own report additionally re-attributes a hard-frozen window to
 /// `self_heal_reset` when a correlating USB-reset event fired (issue 895). See
-/// `self_heal_attribution::SelfHealAttributionReport::overall_pass_contribution` for issue 914
-/// (2026-08-01): the caller no longer folds either `any_frozen`/`any_self_heal()` into
-/// `overall_pass` while cam1's grabber defect (issue 909) remains physically unresolved.
+/// `self_heal_attribution::SelfHealAttributionReport::overall_pass_contribution`: issue 914
+/// (2026-08-01) temporarily decoupled `any_frozen`/`any_self_heal()` from `overall_pass` while
+/// cam1's grabber defect (issue 909) was unresolved; issue 905 item 2 (2026-09-02) RESTORED the
+/// fold once a green E2E series proved both dimensions clean, so the caller gates on them again.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FrozenLegReport {
     pub frozen: Vec<FrozenLeg>,
@@ -182,7 +203,7 @@ impl FrozenLegReport {
 /// [`FrozenLeg::message`] / [`StaleReplayLeg::message`] for each entry. See this module's own
 /// struct-level doc above for why the real `recording-verdict.rs` attribution path calls
 /// `self_heal_attribution::attribute_self_heal` (which uses [`classify_leg`] directly) instead of
-/// this aggregator, and why neither folds into `overall_pass` as of issue 914.
+/// this aggregator; that path DOES fold into `overall_pass` again since issue 905 item 2.
 pub fn frozen_leg_report(segments: &[SegmentLeg<'_>]) -> FrozenLegReport {
     let mut frozen = Vec::new();
     let mut stale_replay = Vec::new();
@@ -227,10 +248,22 @@ mod tests {
     }
 
     #[test]
+    fn stale_replay_max_isolated_stays_pinned_to_its_original_758_wording() {
+        // issue 905 item 2 follow-up (review 🔵): STALE_REPLAY_MAX_ISOLATED no longer
+        // participates in `classify_leg` at all -- nothing else in the repo reads it as a real
+        // value (only comment mentions), so nothing would notice a silent drift. Pin it so this
+        // documented-informational constant's own value stays truthful to the #758 wording it
+        // records ("AT MOST 5 isolated stale/duplicate frames").
+        assert_eq!(STALE_REPLAY_MAX_ISOLATED, 5);
+    }
+
+    #[test]
     fn a_handful_of_isolated_copies_is_stale_replay_not_frozen() {
         // 3 copies out of 9000 frames over a 30s window: density ~0.03%, approx_stale ~0.01s --
-        // nowhere near either sustained threshold, and copies <= STALE_REPLAY_MAX_ISOLATED (5).
-        // Mirrors the #674 vendor warm-up-latch single-frame replay this tier exists for.
+        // nowhere near either #758 threshold (the only thing that decides Frozen/StaleReplay
+        // since the issue 905 item 2 follow-up removed the count-based branch -- STALE_REPLAY_
+        // MAX_ISOLATED no longer participates). Mirrors the #674 vendor warm-up-latch
+        // single-frame replay this tier exists for.
         match classify_leg(3, 9000, 30.0) {
             LegHealth::StaleReplay { copies } => assert_eq!(copies, 3),
             other => panic!("expected StaleReplay, got {other:?}"),
@@ -272,34 +305,93 @@ mod tests {
 
     #[test]
     fn exactly_at_both_thresholds_is_not_yet_frozen() {
-        // copies=6 (one over the isolated allowance of 5) but frames/window sized so BOTH the
-        // duration and density land EXACTLY at (not over) their thresholds: density = 6/60 = 10%
-        // exactly (not > 10%), approx_stale = 0.10 * 50 = 5.0s exactly (not > 5.0s). Neither
-        // "sustained" branch fires (both use strict >), so it falls to the copies>isolated
-        // conservative-Frozen branch -- confirming the boundary is handled predictably (still
-        // Frozen here because copies=6 > STALE_REPLAY_MAX_ISOLATED=5, NOT because a threshold
-        // was exceeded).
+        // copies=6 (one over the OLD, now-removed isolated allowance of 5) with frames/window
+        // sized so BOTH the duration and density land EXACTLY at (not over) their thresholds:
+        // density = 6/60 = 10% exactly (not > 10%), approx_stale = 0.10 * 50 = 5.0s exactly (not
+        // > 5.0s). Neither "sustained" branch fires (both use strict >).
+        //
+        // issue 905 item 2 follow-up (REWRITTEN, this test's own name was always the intended
+        // behaviour): before the fix this fixture wrongly classified Frozen via the removed
+        // conservative "copies (6) > the old isolated allowance (5) -> Frozen anyway" branch,
+        // directly contradicting the test's own name ("...is_not_yet_frozen") -- exactly the
+        // "genuinely wrong test now" case the item-2 follow-up design flagged. With that branch
+        // gone, a boundary that sits AT (not over) both thresholds now correctly stays
+        // StaleReplay, finally matching what the name always said.
+        //
+        // `LegHealth::StaleReplay` carries only `copies`, not the density/approx_stale that used
+        // to be asserted here -- so re-derive them from the SAME inputs the fixture passes, to
+        // prove this fixture genuinely sits AT the boundary rather than having silently drifted
+        // to a value that is merely "somewhere under both thresholds" (review finding, 905).
+        let density = 6.0_f64 / 60.0;
+        let approx_stale_secs = density * 50.0;
+        assert!(
+            (density - FROZEN_DENSITY_THRESHOLD).abs() < 1e-9,
+            "fixture sanity: density must sit EXACTLY at the threshold, got {density}"
+        );
+        assert!(
+            (approx_stale_secs - FROZEN_SUSTAINED_SECS).abs() < 1e-9,
+            "fixture sanity: approx_stale_secs must sit EXACTLY at the threshold, got \
+             {approx_stale_secs}"
+        );
         match classify_leg(6, 60, 50.0) {
-            LegHealth::Frozen {
-                approx_stale_secs,
-                density,
-                ..
-            } => {
-                assert!((approx_stale_secs - 5.0).abs() < 1e-9);
-                assert!((density - 0.10).abs() < 1e-9);
-            }
-            other => panic!("expected Frozen (copies over isolated allowance), got {other:?}"),
+            LegHealth::StaleReplay { copies } => assert_eq!(copies, 6),
+            other => panic!(
+                "905: a boundary exactly AT (not over) both thresholds must stay StaleReplay, \
+                 not {other:?}"
+            ),
         }
     }
 
     #[test]
-    fn isolated_allowance_boundary_is_stale_replay_not_frozen() {
-        // copies=5 (exactly at STALE_REPLAY_MAX_ISOLATED) with negligible density/duration.
+    fn diffuse_copies_below_both_thresholds_are_stale_replay_not_frozen_905() {
+        // issue 905 item 2 follow-up: the .615 live evidence shape (verdict-611325119.json,
+        // CAM2 window since 1788388542251771245) -- 18 copies out of 847 frames over a ~30.2s
+        // window: density=18/847≈0.0213 (well under FROZEN_DENSITY_THRESHOLD 0.10),
+        // approx_stale=0.0213*30.2≈0.64s (well under FROZEN_SUSTAINED_SECS 5.0). Neither #758
+        // threshold trips. The `residual_events` for this exact window show all 18 copies as
+        // ISOLATED single-frame duplicates (kind=copy, tick_before==tick_after) spread across
+        // offsets 1.2s/6.07s/6.5s/7.57s/8.34s/9.47s/10.9s... -- a diffuse FIFO-jitter signature,
+        // not a contiguous stuck run -- and the window sits comfortably inside CAM2's own
+        // per-cambox copies/gaps tolerance (25, issue 1249). This must classify StaleReplay, not
+        // Frozen: the removed conservative branch (copies=18 > the old
+        // STALE_REPLAY_MAX_ISOLATED=5 allowance) used to force Frozen here even though neither
+        // real threshold ever tripped.
+        match classify_leg(18, 847, 30.2) {
+            LegHealth::StaleReplay { copies } => assert_eq!(copies, 18),
+            other => {
+                panic!("905: diffuse below-threshold copies must be StaleReplay, not {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn copies_just_over_the_old_isolated_allowance_at_low_density_is_stale_replay_not_frozen_905() {
+        // issue 905 item 2 follow-up boundary case: copies=6 is one MORE than the removed
+        // STALE_REPLAY_MAX_ISOLATED allowance (5), but at a LOW density/duration (6 copies out of
+        // 9000 frames over a 30s window: density=6/9000≈0.00067, approx_stale≈0.02s) -- nowhere
+        // near either #758 threshold. Under the old conservative branch this classified Frozen
+        // purely on the count (6 > 5); it must now classify StaleReplay, since the count no
+        // longer participates in the decision at all once the two real thresholds don't trip.
+        match classify_leg(6, 9000, 30.0) {
+            LegHealth::StaleReplay { copies } => assert_eq!(copies, 6),
+            other => panic!(
+                "905: a count one over the old isolated allowance, at low density, must be \
+                 StaleReplay, not {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn five_copies_at_negligible_density_is_stale_replay_not_frozen() {
+        // copies=5 -- historically "exactly at STALE_REPLAY_MAX_ISOLATED", but since the issue
+        // 905 item 2 follow-up removed the count-based branch, that boundary no longer exists in
+        // the classification at all; this is just another low-count, negligible-density/duration
+        // sanity point (distinct from `copies_just_over_the_old_isolated_allowance_at_low_
+        // density_is_stale_replay_not_frozen_905`'s copies=6, which specifically documents the
+        // OLD allowance's one-over boundary).
         match classify_leg(5, 9000, 30.0) {
             LegHealth::StaleReplay { copies } => assert_eq!(copies, 5),
-            other => panic!(
-                "expected StaleReplay at the exact isolated-allowance boundary, got {other:?}"
-            ),
+            other => panic!("expected StaleReplay at negligible density/duration, got {other:?}"),
         }
     }
 

@@ -7,9 +7,12 @@ paths:
 
 `recording-verdict.rs` carries several deliberate, tracked, LOUDLY-reported relaxations of an
 originally-strict verdict gate — `REAL_DROPS_ALLOWANCE_DEFAULT` (issue 904, restored to 0 by
-issue 905 item 1); issue 905 items 2/3 still pending (`frozen_leg`/`self_heal_reset` back to
-blocking, per issue 914; the optical undecodable floor's `gates_overall_pass()` back to `true`,
-per issue 915 — see `optical-undecodable-floor-report-only.md`); and the per-segment `<=1/<=1`
+issue 905 item 1); issue 905 item 2 DONE (2026-09-02 — `frozen_leg`/`self_heal_reset` restored to
+blocking once a 3-run green E2E series proved both clean; the
+`SelfHealAttributionReport::overall_pass_contribution` seam + the recording-verdict.rs JSON
+`gates_overall_pass` literals + the `e2e_discord_report.py` classifier all read blocking now);
+issue 905 item 3 still pending (the optical undecodable floor's `gates_overall_pass()` back to
+`true`, per issue 915 — see `optical-undecodable-floor-report-only.md`); and the per-segment `<=1/<=1`
 SINGLETON allowance `window_gate::segment_singleton_allowance_gates_overall_pass()` (issue 1169,
 owner 2026-08-22 — the segment-bar copies/gaps soft-release; re-tighten to absolute zero = flip
 that one fn to `false`, the consts `SEGMENT_SINGLETON_{COPIES,GAPS}_ALLOWANCE` stay as the band —
@@ -135,3 +138,28 @@ This one is the RAW capture-leg counter path in `recording-verdict.rs`; distinct
 (per-segment copies/gaps in `window_gate.rs`) and seam 2 (per-node `real_drops` delivery counter in
 `recording-verdict.rs`). All three share the ticket + the single re-tighten trail (issue 1169 stays
 OPEN until a zero-singleton green run flips every band back to 0).
+
+## GOTCHA — a restore-RED that only FLIPS the polarity of existing inline asserts is invisible to the pre-push RED→GREEN hook (issue 905 item 2, 2026-09-03)
+
+The airuleset `pre-push-test-check.sh` Gate 2 recognises a "test commit" by PATH (`*test*`/`*spec*`/
+`e2e`) or by ADDED lines matching `#[test]` / `assert!(` / `fn test_`. A restore-pattern RED commit
+(this rule's whole shape: the mechanism already exists, only the EXPECTATION flips) typically
+touches ONLY the inline `#[cfg(test)]` module of a `src/*.rs` file and changes
+`assert!(report.x())` → `assert!(!report.x())` — the `assert!(` keyword line and the `#[test]`
+attribute are UNCHANGED, the added lines are just the operand + message. Zero regex hits → the
+hook reports the following `[green]` commit as "Bug-fix commit appears BEFORE any test commit" and
+BLOCKS the push, even though `git log --reverse` shows the RED first (live: `4138a8089
+test(#905): [red]` at 22:22 before `386ced053 fix(#905): [green]` at 22:23; the 1.7.0-dev.615
+push was blocked). Two ways to stay clear of it:
+
+- **Preferred — make the RED commit ADD a new assertion or test line**, not only flip an operand:
+  e.g. a NEW `#[test] fn …_restored_to_blocking_905()` beside the renamed one, or split the
+  inverted expectation onto its own `assert!(…)` line so the keyword itself is an added line.
+  Costs nothing and keeps the hook truthful for the whole PR.
+- **If the branch is already merged/backed-up (no history rewrite):** land one more commit (a
+  genuine docs/playbook commit like this one) whose message carries a reasoned
+  `[no-test: RED commit <sha> exists but flips existing assert polarity; hook heuristic miss]` —
+  the hook honours it on the LATEST commit only and logs the reason to
+  `~/devel/airuleset/audits/no-test-skips.log`. Never a bare `[no-test]`, never to skip a real
+  test. The hook-side fix (recognise a `test(`/`[red]` SUBJECT, or changes inside a `#[test]`
+  body) is filed on the airuleset repo — this is a shared-hook heuristic, not this repo's code.
