@@ -655,3 +655,109 @@ class TestCLICalibrateMode:
         monkeypatch.setattr(sys, "argv", ["av_sync_calibrate.py", "--offset-ms", "10"])
         with pytest.raises(SystemExit):
             av_sync_calibrate.main()
+
+
+# ---------------------------------------------------------------------------
+# #1265 -- the #856 controller loop-gain damping context: write_last_json ADDS loop_gain +
+# combined_offset_ms_raw when the #856 controller passes them (never renames/removes the existing
+# source/offset_ms/applied_latency_ms/ts keys -- av-sync-last.json is a live data contract), and
+# main() emits ONE grep-able gain log line at apply time showing combined/gain/damped/clamped/pin.
+# The offset_ms this script APPLIES is already the damped value (the gain is applied upstream at
+# [8/8g]); --loop-gain/--combined-offset-ms are passed for logging + persistence only.
+# ---------------------------------------------------------------------------
+
+class TestWriteLastJsonLoopGainKeys:
+    def test_adds_loop_gain_and_raw_when_given(self, tmp_path):
+        json_path = tmp_path / "av-sync-last.json"
+        av_sync_calibrate.write_last_json(
+            json_path, "NDI 2ME PGM", -24.54, 938,
+            loop_gain=0.4, combined_offset_ms_raw=-61.35,
+        )
+        data = json.loads(json_path.read_text())
+        # existing contract keys still present + unchanged shape
+        assert data["source"] == "NDI 2ME PGM"
+        assert data["offset_ms"] == -24.54
+        assert data["applied_latency_ms"] == 938
+        assert "ts" in data
+        # new #1265 keys
+        assert data["loop_gain"] == pytest.approx(0.4)
+        assert data["combined_offset_ms_raw"] == pytest.approx(-61.35)
+
+    def test_omits_new_keys_when_not_given(self, tmp_path):
+        # the operator/aligner path (no gain context) keeps the old schema byte-for-byte -- no
+        # loop_gain / combined_offset_ms_raw keys appear at all.
+        json_path = tmp_path / "av-sync-last.json"
+        av_sync_calibrate.write_last_json(json_path, "NDI 2ME PGM", 12.0, 900)
+        data = json.loads(json_path.read_text())
+        assert "loop_gain" not in data
+        assert "combined_offset_ms_raw" not in data
+        assert set(data) == {"source", "offset_ms", "applied_latency_ms", "ts"}
+
+
+class TestGainLogLineAndApply:
+    def _run_apply(self, monkeypatch, tmp_path, current, offset, extra_args):
+        fake = FakeObs(latency_ms=current)
+        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(av_sync_calibrate, "_conn", lambda host, password="": None)
+        json_path = tmp_path / "av-sync-last.json"
+        monkeypatch.setattr(
+            sys, "argv",
+            ["av_sync_calibrate.py", "--host", "10.77.9.204", "--offset-ms", str(offset),
+             "--apply", "--json-path", str(json_path)] + extra_args,
+        )
+        av_sync_calibrate.main()
+        return fake, json_path
+
+    def test_616_scenario_pin_913_damped_lands_at_938_with_gain_line(self, monkeypatch, tmp_path, capsys):
+        # damped -24.54 (0.4 * combined -61.35) applied at pin 913 -> 938 ~ predicted null 940.
+        fake, json_path = self._run_apply(
+            monkeypatch, tmp_path, current=913, offset=-24.54,
+            extra_args=["--loop-gain", "0.4", "--combined-offset-ms", "-61.35"],
+        )
+        assert fake.latency_ms == 938
+        out = capsys.readouterr().out
+        assert "[av-sync] gain:" in out, f"expected the grep-able gain line, got: {out!r}"
+        assert "combined=-61.35" in out
+        assert "gain=0.40" in out
+        assert "damped=-24.54" in out
+        assert "clamped=-24.54" in out
+        assert "pin 913 -> 938" in out
+        # persists the #1265 keys
+        data = json.loads(json_path.read_text())
+        assert data["loop_gain"] == pytest.approx(0.4)
+        assert data["combined_offset_ms_raw"] == pytest.approx(-61.35)
+        assert data["applied_latency_ms"] == 938
+
+    def test_set_line_stays_byte_identical(self, monkeypatch, tmp_path, capsys):
+        # other consumers grep the exact `[av-sync] SET '...' genlock_latency_ms_src: A -> B` line;
+        # the gain line is ADDITIONAL, never a replacement.
+        self._run_apply(
+            monkeypatch, tmp_path, current=913, offset=-24.54,
+            extra_args=["--loop-gain", "0.4", "--combined-offset-ms", "-61.35"],
+        )
+        out = capsys.readouterr().out
+        assert "[av-sync] SET 'NDI 2ME PGM' genlock_latency_ms_src: 913 -> 938" in out
+
+    def test_gain_line_shows_the_step_clamp_when_it_bites(self, monkeypatch, tmp_path, capsys):
+        # a damped offset larger than the +/-50/run step: clamped shows the +/-50-limited offset,
+        # pin shows the real clamped result.
+        self._run_apply(
+            monkeypatch, tmp_path, current=1000, offset=-80.0,
+            extra_args=["--loop-gain", "0.4", "--combined-offset-ms", "-200.0"],
+        )
+        out = capsys.readouterr().out
+        assert "[av-sync] gain:" in out
+        assert "damped=-80.00" in out
+        assert "clamped=-50.00" in out  # +/-50/run step clamp on the offset
+        assert "pin 1000 -> 1050" in out
+
+    def test_no_gain_line_without_loop_gain_arg(self, monkeypatch, tmp_path, capsys):
+        # the operator/aligner path (no --loop-gain) must NOT emit a gain line or persist the keys.
+        _, json_path = self._run_apply(
+            monkeypatch, tmp_path, current=1000, offset=20.0, extra_args=[],
+        )
+        out = capsys.readouterr().out
+        assert "[av-sync] gain:" not in out
+        data = json.loads(json_path.read_text())
+        assert "loop_gain" not in data
+        assert "combined_offset_ms_raw" not in data

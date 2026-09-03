@@ -1953,12 +1953,16 @@ fi"
   # (the 926->976 walk, issue 1265). Sourced-helper (#675, inserted BEFORE the anchored apply `if`
   # below -- that apply block stays byte-identical); a HOLD clears the offset so the apply is
   # skipped and persists the reason. An empty offset (no correction computed) has nothing to guard.
+  # #1265: remember the DAMPED proposed offset BEFORE the guard runs, so the end-of-#856 history
+  # append can record it even when a HOLD below clears AV_SYNC_APPLY_OFFSET_MS.
+  AV_SYNC_PROPOSED_OFFSET_MS="$AV_SYNC_APPLY_OFFSET_MS"
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     _avs_hold="$(av_sync_apply_guard_decide "$REPORT_JSON" "$AV_SYNC_BAND_VERDICT" "$AV_SYNC_APPLY_OFFSET_MS" "$HERE/av_sync_apply_guard.py")"
     if [ -n "$_avs_hold" ]; then
       echo "[cleanup] #1265 HOLD #856 apply: $_avs_hold -- stream genlock latency left at the just-restored prod value" >&2
       printf '%s\n' "$_avs_hold" > "$OUTDIR/av-sync-apply-hold-${RUN_ID}.txt" 2>/dev/null || true
       av_sync_persist_hold_reason "$_avs_hold"   # #1265: durable ~/.camera-box surface (the $OUTDIR copy is swept)
+      AV_SYNC_HELD_REASON="$_avs_hold"   # #1265: carry the HOLD reason to the end-of-#856 history append
       AV_SYNC_APPLY_OFFSET_MS=""
     fi
   fi
@@ -1975,6 +1979,7 @@ fi"
       --password "${OBS_PASSWORD:-}" --source "$STREAM_PROG_SOURCE" \
       --offset-ms "$AV_SYNC_APPLY_OFFSET_MS" --apply \
       --json-path "$OUTDIR/av-sync-last-${RUN_ID}.json" \
+      --loop-gain "$AV_SYNC_LOOP_GAIN_VALUE" --combined-offset-ms "$AV_SYNC_COMBINED_OFFSET_MS_RAW" \
       || echo "WARNING: #856 av_sync_calibrate.py --apply failed -- stream genlock latency left at the just-restored prod value; the NEXT run recomputes from its own fresh measurement" >&2
   fi
   # #1265: persist the last-applied reference for the NEXT run's jump-vs-last-applied guard condition
@@ -1986,6 +1991,18 @@ fi"
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ] && [ -f "$OUTDIR/av-sync-last-${RUN_ID}.json" ]; then
     av_sync_persist_applied_offset "$OUTDIR/av-sync-last-${RUN_ID}.json"
   fi
+  # #1265: append THIS run's line to the append-only ~/.camera-box/av-sync-history.jsonl controller
+  # history (the Prístup 2 adaptive-slope corpus this lane starts collecting). Runs LAST in the #856
+  # block -- AFTER the applied-offset persist so it reads the pin that actually LANDED, and reads
+  # this run's own measured state from the residual-last the persist above wrote. A no-op when this
+  # run had no measurement (residual-last is a prior run's). Sourced-helper (#675), always exit 0.
+  # applied_pin (arg 8) reads the PER-RUN success file (the apply writes it ONLY on a landed apply),
+  # NOT the persistent av-sync-last.json -- so a FAILED apply / a combiner refusal records NO
+  # applied_pin (honest) instead of last run's pin; residual-last (arg 7 "") uses its default (this
+  # run's measured state). #1265.
+  av_sync_append_history "$RUN_ID" "$AV_SYNC_PROPOSED_OFFSET_MS" "$AV_SYNC_HELD_REASON" \
+    "$AV_SYNC_LOOP_GAIN_VALUE" "$AV_SYNC_COMBINED_OFFSET_MS_RAW" "$HERE/av_sync_history.py" \
+    "" "$OUTDIR/av-sync-last-${RUN_ID}.json"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # #682: restore imag's program scene to whatever it was BEFORE [4a/8] routed it to the
   # camera-under-test. A NO-OP if [4a/8] never ran (IMAG_PREV_SCENE stays its "" pre-trap safe
@@ -2145,6 +2162,17 @@ AV_SYNC_APPLY_OFFSET_MS="${AV_SYNC_APPLY_OFFSET_MS:-}"
 # abort. A DRIFTING band HOLDs the #856 apply (the run's A/V measurement was corrupted by a flapping
 # audio timeline); empty/UNKNOWN/SKIP is dormant (the residual-ceiling / jump conditions still apply).
 AV_SYNC_BAND_VERDICT="${AV_SYNC_BAND_VERDICT:-}"
+# #1265: the loop-gain damping context, set at [8/8g] right after the combiner (empty defaults,
+# BEFORE the cleanup trap, same reasoning as AV_SYNC_APPLY_OFFSET_MS above). The gain DAMPS
+# AV_SYNC_APPLY_OFFSET_MS at [8/8g] so cleanup()'s guard + the +/-50 clamp both see the damped
+# value; these two carry the raw combined median + the resolved gain into cleanup() for the
+# calibrate gain log line + persist. AV_SYNC_PROPOSED_OFFSET_MS/AV_SYNC_HELD_REASON capture what the
+# guard saw (the damped proposed + a HOLD reason) so the end-of-#856 history append records them
+# even after a HOLD clears AV_SYNC_APPLY_OFFSET_MS.
+AV_SYNC_COMBINED_OFFSET_MS_RAW="${AV_SYNC_COMBINED_OFFSET_MS_RAW:-}"
+AV_SYNC_LOOP_GAIN_VALUE="${AV_SYNC_LOOP_GAIN_VALUE:-}"
+AV_SYNC_PROPOSED_OFFSET_MS="${AV_SYNC_PROPOSED_OFFSET_MS:-}"
+AV_SYNC_HELD_REASON="${AV_SYNC_HELD_REASON:-}"
 # #462 (EPIC #466): imag-nb's program-feeding NDI input — the #399-style 1:1 mapping from Phase 1
 # (setup-imag.sh) pins 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)' 1:1. issue 1204: DERIVE this per
 # camera-under-test via imag_source_for_camera "$CAMERA_NAME" (the SAME resolution IMAG_PROG_SCENE
@@ -5223,6 +5251,19 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     else
       echo "    [8/8g] #856: refusing to compute a rig-wide A/V correction this run (see $AV_SYNC_COMBINE_LOG) -- stream genlock latency left untouched"
       AV_SYNC_APPLY_OFFSET_MS=""
+    fi
+    # #1265: DAMP the combined offset with the fixed loop gain (default 0.4, env AV_SYNC_LOOP_GAIN)
+    # BEFORE cleanup()'s #856 apply-guard sees proposed_offset AND before the +/-50/run clamp -- so
+    # the effective loop gain (0.4 * the measured plant gain ~2.31 = 0.92) stays < 1 and the
+    # controller CONVERGES instead of oscillating with growing amplitude (the 33.6/47.4/61.4 walk).
+    # Keeps the raw median + the resolved gain for the cleanup apply's gain log line + persist.
+    # Sourced-helper (#675), always exit 0; a bad damp -> empty offset -> the apply is skipped.
+    if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
+      AV_SYNC_COMBINED_OFFSET_MS_RAW="$AV_SYNC_APPLY_OFFSET_MS"
+      _avs_gain_pair="$(av_sync_apply_loop_gain "$AV_SYNC_APPLY_OFFSET_MS" "$HERE/av_sync_loop_gain.py")"
+      AV_SYNC_APPLY_OFFSET_MS="$(printf '%s' "$_avs_gain_pair" | cut -f1)"
+      AV_SYNC_LOOP_GAIN_VALUE="$(printf '%s' "$_avs_gain_pair" | cut -f2)"
+      echo "    [8/8g] #1265: loop gain ${AV_SYNC_LOOP_GAIN_VALUE} damps combined ${AV_SYNC_COMBINED_OFFSET_MS_RAW}ms -> ${AV_SYNC_APPLY_OFFSET_MS}ms (+/-50-clamped + stability-guarded in cleanup)"
     fi
     # #1265: gather THIS run's stream reference-source (mbc) ts_lag BAND verdict from the stream :8899
     # facet, right after the run (the OBS log tail reflects the recording window). cleanup()'s #856

@@ -223,6 +223,57 @@ except Exception:
   return 0
 }
 
+# av_sync_apply_loop_gain <combined_offset_ms> <gain_py> -> #1265: DAMP the combined offset by the
+# fixed loop gain (default 0.4, env AV_SYNC_LOOP_GAIN) so the #856 controller converges instead of
+# oscillating against the measured plant gain ~2.31. Echoes "<damped>\t<gain>" on stdout (the caller
+# splits with cut -f1/-f2); the pure gain math + validation live in av_sync_loop_gain.py (pytest
+# Tier-0). The python's own stderr (the damp/validation line) flows to the run log. Always returns 0
+# (runs at [8/8g] on the path into the cleanup EXIT trap); a missing helper / unparseable value ->
+# empty damped so the caller's `[ -n ... ]` skips the apply (fail-safe: no correction over a wrong one).
+av_sync_apply_loop_gain() {
+  local combined="${1:-}" gain_py="${2:-}" out=""
+  [ -n "$gain_py" ] && [ -f "$gain_py" ] || {
+    echo "[av-sync] WARNING: loop-gain helper missing ($gain_py) -- offset left UNDAMPED-then-empty, #856 apply skipped this run" >&2
+    printf ''
+    return 0
+  }
+  out="$(python3 "$gain_py" damp --combined-ms "$combined" || true)"
+  printf '%s' "$out"
+  return 0
+}
+
+# The dev1-persistent append-only controller history log (#1265, the Prístup 2 adaptive-slope
+# corpus). Env-overridable for tests, defaulting beside the other ~/.camera-box state files.
+av_sync_default_history_path() {
+  printf '%s' "${AV_SYNC_HISTORY_JSONL:-$HOME/.camera-box/av-sync-history.jsonl}"
+}
+
+# av_sync_append_history <run_id> <proposed_offset_ms> <hold_reason> <loop_gain> <combined_raw> <history_py>
+#   [residual_last_json] [last_applied_json] [dest] -> #1265: append THIS run's line to the append-only
+#   controller history. The pure record build + append (append-only, dir/file-tolerant, run-id-mismatch
+#   no-op) live in av_sync_history.py (pytest Tier-0); this passes the two state-file paths (so env
+#   overrides flow through) + the run context. MUST run AFTER av_sync_persist_residual (which wrote
+#   THIS run's residual-last). Pass the PER-RUN success file ($OUTDIR/av-sync-last-<run>.json) as arg 8
+#   (last_applied) -- it exists ONLY on a landed apply, so a FAILED/held/no-correction run records NO
+#   applied_pin (honest) instead of a stale prior pin; it defaults to the persistent last-applied only
+#   when the caller omits arg 8. Always returns 0 (bare statement in the cleanup EXIT trap). The
+#   python's own "could not append" WARNING is NOT swallowed (silent corpus loss on a disk/perm error
+#   in an unattended controller would be worse than the log line).
+av_sync_append_history() {
+  local run_id="${1:-}" proposed="${2:-}" hold_reason="${3:-}" loop_gain="${4:-}"
+  local combined_raw="${5:-}" history_py="${6:-}"
+  local residual_last="${7:-$(av_sync_default_residual_last_path)}"
+  local last_applied="${8:-$(av_sync_default_last_applied_path)}"
+  local dest="${9:-$(av_sync_default_history_path)}"
+  [ -n "$history_py" ] && [ -f "$history_py" ] || return 0
+  python3 "$history_py" append \
+    --run-id "$run_id" --proposed-offset-ms "$proposed" --hold-reason "$hold_reason" \
+    --loop-gain "$loop_gain" --combined-offset-ms-raw "$combined_raw" \
+    --residual-last "$residual_last" --last-applied "$last_applied" --dest "$dest" \
+    || true
+  return 0
+}
+
 # av_sync_persist_hold_reason <reason> [path] -> write the LATEST #856 apply-HOLD reason to a durable
 # dev1 file (issue 1265 finding 6a), so a genuine sustained large-residual HOLD is operator-visible
 # beyond the per-run $OUTDIR file (swept) and the CI stderr echo. The E2E Discord report is composed
