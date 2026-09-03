@@ -64,9 +64,9 @@ build_onbox_command() {
   # PowerShell DOUBLE quotes verbatim (NOT bash %q, which would double the backslashes and
   # corrupt the Windows path). A literal double-quote in an arg is PowerShell-escaped as `""
   # (rare for file paths; handled for safety).
-  # shellcheck disable=SC2016  # single-quoted PowerShell syntax; $env: must NOT expand in bash
   local prio
   prio="$(onbox_decode_priority_class)"
+  # shellcheck disable=SC2016  # single-quoted PowerShell syntax; $env: must NOT expand in bash
   printf '$env:RUST_LOG="info"; [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = "%s"; & "%s"' "$prio" "$exe"
   local a esc
   for a in "$@"; do
@@ -114,6 +114,13 @@ main() {
   local ONBOX_CMD
   ONBOX_CMD="$(build_onbox_command "$VERDICT_EXE" "${PASS_ARGS[@]}")"
 
+  # issue 1260: read the RESOLVED priority class back out of the already-built $ONBOX_CMD (rather
+  # than calling onbox_decode_priority_class a second time) so the run-log line below never
+  # double-prints an invalid-value WARNING that build_onbox_command's own internal resolve above
+  # already emitted once.
+  local RESOLVED_PRIO="${ONBOX_CMD#*PriorityClass = \"}"
+  RESOLVED_PRIO="${RESOLVED_PRIO%%\"*}"
+
   # #186/#208: in PER-BOX extract mode the on-box --extract-partial writes the pixel-proof PNGs of
   # every flagged / undecodable frame into the SIBLING `<partial>-pixels` dir (beside the --out
   # partial JSON) — so the merge's #186 "SEE the missing frame" guarantee survives the per-box
@@ -148,7 +155,7 @@ main() {
       echo "[recording-verdict-on-stream] deploying $VERDICT_EXE_LOCAL -> ${STREAM_BOX}:${VERDICT_EXE} (always fresh — correctness over speed)"
       win_ssh_upload "$STREAM_USER" "$STREAM_PW" "$STREAM_BOX" "$VERDICT_EXE_LOCAL" "$VERDICT_EXE"
     fi
-    echo "[recording-verdict-on-stream] decode priority: $(onbox_decode_priority_class) (E2E_ONBOX_DECODE_PRIORITY)"
+    echo "[recording-verdict-on-stream] decode priority: $RESOLVED_PRIO (E2E_ONBOX_DECODE_PRIORITY)"
     echo "[recording-verdict-on-stream] running on stream (${STREAM_BOX}): $ONBOX_CMD"
     win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_BOX" "$ONBOX_CMD"
     mkdir -p "$LOCAL_OUT_DIR"

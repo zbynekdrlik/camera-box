@@ -270,16 +270,21 @@ program headroom (idle baseline `obs64` ~42%, ~6.8 of 16 cores, per the same com
 **Mitigation (LANDED, cheap step before lever (b)):** `build_onbox_command` in both
 `scripts/recording-verdict-on-strih.sh` and `-on-stream.sh` now sets the PowerShell host process's
 `PriorityClass` to `BelowNormal` (default, env-overridable via `E2E_ONBOX_DECODE_PRIORITY` —
-`Idle|BelowNormal|Normal` — for the supervisor's A/B) BEFORE the `&`-invoked `recording-verdict.exe`
-call, which inherits it (Win32 `CreateProcess` semantics). Mirrors imag-nb's issue-767 `nice -n 19`
-in `build_onimag_command` for the same class of problem. Resolved by the shared, pure
-`onbox_decode_priority_class()` in `scripts/lib/win-ssh-exec.sh` (both planners already source that
-file unconditionally). This does NOT touch `recording-e2e.sh` or add CPU affinity (strih's OBS
-core-pin mask is not established, unlike imag's — the deferred next lever if BelowNormal proves
-insufficient). Verify on the rig during the next E2E's post-run decode:
-`Get-Process recording-verdict | Select PriorityClass` (should read `BelowNormal`), and re-run the
-dip-vs-decode correlation over a fresh OBS log window to confirm the dip density during decode drops
-toward the idle baseline.
+`Idle|BelowNormal|Normal`) BEFORE the `&`-invoked `recording-verdict.exe` call, which inherits it
+(Win32 `CreateProcess` semantics). The env override is a plain shell var read by the on-box planner
+scripts — it works for a manual/dev1-driven `recording-e2e.sh` run today; `full-path-e2e.yml` does
+NOT currently forward `E2E_ONBOX_DECODE_PRIORITY` in its `env:` blocks, so a PR-triggered CI run
+always gets the BelowNormal default (which is the correct steady state) — reaching Normal/Idle from
+a PR-triggered run needs a one-line workflow `env:` addition first if that A/B is ever wanted there.
+Mirrors imag-nb's issue-767 `nice -n 19` in `build_onimag_command` for the same class of problem.
+Resolved by the shared, pure `onbox_decode_priority_class()` in `scripts/lib/win-ssh-exec.sh` (both
+planners already source that file unconditionally). This does NOT touch `recording-e2e.sh` or add
+CPU affinity (strih's OBS core-pin mask is not established, unlike imag's — the deferred next lever
+if BelowNormal proves insufficient). Verify on the rig during the next E2E's post-run decode:
+`Get-Process recording-verdict,ffmpeg | Select ProcessName,PriorityClass` (both should read
+`BelowNormal` — `ffmpeg` is where the CPU actually burns), and re-run the dip-vs-decode correlation
+over a fresh OBS log window to confirm the dip density during decode drops toward the idle
+baseline.
 
 ## Autostart-aware = reset the confirm streak on an OBS-log IDENTITY change
 

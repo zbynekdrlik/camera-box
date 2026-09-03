@@ -161,8 +161,10 @@ fn invalid_env_value_falls_back_to_belownormal_with_a_stderr_warning_for_strih_a
             stdout.contains("PriorityClass = \"BelowNormal\""),
             "issue 1260: {label} an invalid E2E_ONBOX_DECODE_PRIORITY value must fall back to \
              BelowNormal (fail-safe default), never propagate the invalid string into the \
-             PowerShell text (PowerShell would reject an unrecognized PriorityClass at parse \
-             time on the box). Got: {stdout:?}"
+             PowerShell text — a bad string parses fine as PS syntax, but the string->\
+             ProcessPriorityClass conversion fails at RUNTIME on the box, and under the default \
+             $ErrorActionPreference the assignment fails while the following `&`-call still \
+             runs at Normal, silently defeating the whole fix. Got: {stdout:?}"
         );
         assert!(
             !stdout.contains("SuperFast"),
@@ -175,6 +177,43 @@ fn invalid_env_value_falls_back_to_belownormal_with_a_stderr_warning_for_strih_a
              WARNING on stderr naming the rejected value (never silently ignored — a typo'd \
              override must be visible in the run log). Got stderr: {stderr:?}"
         );
+    }
+}
+
+/// An EMPTY override is treated as "not set" — defaults to BelowNormal SILENTLY (no WARNING,
+/// unlike a genuinely non-matching value). And every VALID value (including the default itself)
+/// must never print a WARNING — that line is reserved for a real typo.
+#[test]
+fn empty_env_value_defaults_silently_and_valid_values_produce_no_stderr_for_strih_and_stream() {
+    for (label, script) in [("strih", strih_script()), ("stream", stream_script())] {
+        let (stdout, stderr, ok) = run_build_onbox_command(&script, EXE, ARGS, Some(""));
+        assert!(
+            ok,
+            "issue 1260: {label} build_onbox_command failed: {stderr}"
+        );
+        assert!(
+            stdout.contains("PriorityClass = \"BelowNormal\""),
+            "issue 1260: {label} an EMPTY E2E_ONBOX_DECODE_PRIORITY must default to BelowNormal \
+             just like unset. Got: {stdout:?}"
+        );
+        assert!(
+            stderr.trim().is_empty(),
+            "issue 1260: {label} an empty override is silently treated as unset — no WARNING \
+             should print. Got stderr: {stderr:?}"
+        );
+
+        for valid in ["BelowNormal", "Normal", "Idle"] {
+            let (_, stderr, ok) = run_build_onbox_command(&script, EXE, ARGS, Some(valid));
+            assert!(
+                ok,
+                "issue 1260: {label} build_onbox_command failed: {stderr}"
+            );
+            assert!(
+                stderr.trim().is_empty(),
+                "issue 1260: {label} a VALID E2E_ONBOX_DECODE_PRIORITY={valid} must never print \
+                 a WARNING. Got stderr: {stderr:?}"
+            );
+        }
     }
 }
 

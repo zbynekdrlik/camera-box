@@ -46,8 +46,11 @@ win_ssh_ps_encoded_command() {
 # silently treated as "not set", never a warning -- only a genuinely non-matching value warns
 # below). An invalid value falls back to BelowNormal too, printing a WARNING naming the rejected
 # value on stderr (fail-safe: never silently swallow a typo'd override, and never let an
-# unrecognized string reach the emitted PowerShell text -- PowerShell would reject an unknown
-# PriorityClass at parse time on the box, aborting the whole decode).
+# unrecognized string reach the emitted PowerShell text -- a bad string DOES parse fine as PS
+# syntax, but the string->ProcessPriorityClass CONVERSION fails at RUNTIME on the box; under the
+# default $ErrorActionPreference the assignment statement fails but the following `&`-call still
+# runs, silently AT NORMAL priority -- i.e. an unvalidated typo would silently defeat the whole
+# fix rather than abort anything, which is exactly why this is validated dev1-side first).
 onbox_decode_priority_class() {
   local v="${E2E_ONBOX_DECODE_PRIORITY:-BelowNormal}"
   case "$v" in
