@@ -31,6 +31,9 @@ fn read(rel: &str) -> String {
 const OBS_DISPLAY: &str = "vendor/obs-studio/libobs/obs-display.c";
 const OBS_BUDGET: &str = "vendor/obs-studio/libobs/obs-display-budget.h";
 const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
+const OBS_H: &str = "vendor/obs-studio/libobs/obs.h";
+const MULTIVIEW_CPP: &str = "vendor/obs-studio/frontend/components/Multiview.cpp";
+const OBS_PROJECTOR_CPP: &str = "vendor/obs-studio/frontend/widgets/OBSProjector.cpp";
 
 #[test]
 fn render_display_emits_the_multiview_audit_line() {
@@ -38,7 +41,7 @@ fn render_display_emits_the_multiview_audit_line() {
     // The exact format string the drift-guard / rig-health-audit / E2E preflight parse.
     assert!(
         src.contains(
-            "\"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f\""
+            "\"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f mv_cells=%u mv_cell_ms=%.2f mv_cell_max_ms=%.2f mv_top1=%s:%.2f mv_top2=%s:%.2f\""
         ),
         "{OBS_DISPLAY}: #771 multiview-audit blog line gone — MV render fps is no longer visible in the OBS log."
     );
@@ -114,10 +117,62 @@ fn display_struct_carries_the_audit_window_fields() {
         "uint64_t render_audit_pre_mv_sum_ns;",
         "uint64_t render_audit_pre_mv_max_ns;",
         "uint32_t render_audit_tick_count;",
+        // camera-box #1260 lever (1): per-cell MV instrumentation accumulators.
+        "uint64_t render_audit_cell_sum_ns;",
+        "uint64_t render_audit_cell_max_ns;",
+        "uint32_t render_audit_cell_render_count;",
+        "uint32_t render_audit_cell_count;",
+        "uint64_t render_audit_top1_ns;",
+        "uint64_t render_audit_top2_ns;",
+        "char render_audit_top1_name[64];",
+        "char render_audit_top2_name[64];",
     ] {
         assert!(
             hdr.contains(field),
             "{OBS_INTERNAL}: #771/#1260 obs_display.{field} missing — the per-projector audit window has nowhere to live."
         );
     }
+}
+
+#[test]
+fn render_display_and_frontend_carry_the_per_cell_instrumentation_1260() {
+    // camera-box #1260 lever (1): the per-cell MV instrumentation spans the frontend (times each
+    // scene cell) + libobs (folds + emits). Guard the whole chain so a subtree pull / a revert of
+    // any leg is caught — the same lock-step discipline as the #771/#1260 audit-line anchors above.
+    let disp = read(OBS_DISPLAY);
+    // libobs emits the appended per-cell tokens on the audit line ...
+    assert!(
+        disp.contains("mv_cells=%u mv_cell_ms=%.2f mv_cell_max_ms=%.2f mv_top1=%s:%.2f mv_top2=%s:%.2f"),
+        "{OBS_DISPLAY}: #1260 per-cell tokens (mv_cells/mv_cell_ms/mv_top1/...) gone from the multiview-audit line — the MV phase can no longer be attributed per cell."
+    );
+    // ... and defines the publish API the frontend feeds.
+    assert!(
+        disp.contains("void obs_display_report_multiview_cells(obs_display_t *display"),
+        "{OBS_DISPLAY}: #1260 obs_display_report_multiview_cells() definition gone — the frontend cannot publish per-cell timing."
+    );
+    assert!(
+        read(OBS_H).contains("EXPORT void obs_display_report_multiview_cells(obs_display_t *display"),
+        "{OBS_H}: #1260 obs_display_report_multiview_cells() EXPORT declaration gone — the frontend TU cannot link against it."
+    );
+    // The FRONTEND times the render draws and publishes the aggregate.
+    let mv = read(MULTIVIEW_CPP);
+    assert!(
+        mv.contains("cellSumNs += dt;"),
+        "{MULTIVIEW_CPP}: #1260 per-item render timing gone — the mv_cell_ms aggregate would always be 0."
+    );
+    // #1260 (review): the preview + program big cells MUST be timed too, or mv_ewma_ms - mv_cell_ms
+    // mis-attributes a fat preview re-render to the GPU/present tail.
+    assert!(
+        mv.contains("timeDraw(\"preview\"") && mv.contains("timeDraw(\"program\""),
+        "{MULTIVIEW_CPP}: #1260 the preview/program big cells are no longer timed — a fat preview would be mis-read as the GPU tail."
+    );
+    assert!(
+        mv.contains("obs_display_report_multiview_cells(display,"),
+        "{MULTIVIEW_CPP}: #1260 ReportCellStats no longer publishes to libobs — the audit line's per-cell tokens would stay empty."
+    );
+    // The projector callback invokes the publish after Render, on the graphics thread.
+    assert!(
+        read(OBS_PROJECTOR_CPP).contains("ReportCellStats(window->GetDisplay())"),
+        "{OBS_PROJECTOR_CPP}: #1260 the multiview draw callback no longer calls ReportCellStats — nothing feeds the per-cell window."
+    );
 }

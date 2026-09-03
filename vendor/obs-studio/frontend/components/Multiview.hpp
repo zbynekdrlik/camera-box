@@ -23,9 +23,28 @@ public:
 	~Multiview();
 	void Update(MultiviewLayout multiviewLayout, bool drawLabel, bool drawSafeArea);
 	void Render(uint32_t cx, uint32_t cy);
+	// camera-box #1260 lever (1): publish the LAST Render()'s per-cell CPU-timing aggregate into
+	// the projector's display audit window. Called by OBSProjector::OBSRenderMultiview right after
+	// Render(), on the graphics thread (see obs_display_report_multiview_cells).
+	void ReportCellStats(obs_display_t *display);
 	OBSSource GetSourceByPosition(int x, int y);
 
 private:
+	// camera-box #1260 lever (1): per-item MV render CPU timing captured during Render() (reset at
+	// the top of every Render, published by ReportCellStats). sceneCellCount = populated SCENE
+	// cells this render (-> mv_cells); cellSumNs = sum of the CPU ns of EVERY timed draw — the
+	// scene cells AND the preview/program big cells AND the labels — so that mv_ewma_ms - cell_ms
+	// is the honest UNtimed tail (begin/clear/region-setup + present/GPU-sync), never a fat preview
+	// re-render mis-attributed to the GPU. top1/top2 = the two fattest timed items (ns + name) of
+	// this render. Fixed char buffers (not std::string) so the in-loop name copy never heap-
+	// allocates inside the very phase mv_ewma_ms measures.
+	uint32_t sceneCellCount = 0;
+	uint64_t cellSumNs = 0;
+	uint64_t top1Ns = 0;
+	uint64_t top2Ns = 0;
+	char top1Name[64] = {0};
+	char top2Name[64] = {0};
+
 	bool drawLabel, drawSafeArea;
 	MultiviewLayout multiviewLayout;
 	size_t maxSrcs;

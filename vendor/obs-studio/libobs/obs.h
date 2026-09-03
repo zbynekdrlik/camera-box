@@ -1041,6 +1041,34 @@ EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divi
 EXPORT void obs_display_set_vsync(obs_display_t *display, bool vsync);
 
 /*
+ * camera-box #1260 lever (1): publish one multiview render's per-item CPU-timing aggregate into
+ * this display's #771 audit window, so render_display() can print mv_cells / mv_cell_ms /
+ * mv_cell_max_ms / mv_top1 / mv_top2 alongside mv_ewma_ms and the MV phase can be attributed
+ * per item. `mv_ewma_ms - mv_cell_ms` is the UNtimed tail (begin/clear/region-setup +
+ * present/GPU-sync) because cell_sum_ns covers EVERY timed draw (scene cells + the preview/program
+ * big cells + labels), not just the scene cells. Called ONCE per real multiview render by the
+ * FRONTEND draw callback (OBSProjector, after Multiview::Render), on the graphics thread — the same
+ * single-writer thread that reads/resets the audit window, so no locks.
+ *
+ *   cells        number of SCENE cells rendered THIS render (labels/preview/program excluded);
+ *                this is the LAST reporting render's count as of the emit.
+ *   cell_sum_ns  sum of the CPU time (ns) of every timed draw this render (cells + preview +
+ *                program + labels).
+ *   top1_ns/name the fattest single timed item of this render (ns + its name — a scene name, or
+ *                "preview"/"program"/"labels"); pass "" for none.
+ *   top2_ns/name the second-fattest timed item of this render.
+ *
+ * The names are copied into a bounded buffer (<= 63 chars) with any byte outside printable ASCII
+ * (<= ' ', >= 0x7f, plus '=' and ':') replaced by '_', so the space-tokenized, pure-ASCII audit
+ * line stays parseable and never emits torn UTF-8. No-op for a display that is not a throttleable
+ * monitoring surface (render_divisor <= 1). REPORT-ONLY: it never touches the skip gate; it only
+ * feeds the logged line.
+ */
+EXPORT void obs_display_report_multiview_cells(obs_display_t *display, uint32_t cells, uint64_t cell_sum_ns,
+					       uint64_t top1_ns, const char *top1_name, uint64_t top2_ns,
+					       const char *top2_name);
+
+/*
  * camera-box #879: aux NDI sender budget gate. Returns true iff a throttleable aux
  * monitoring sender (an ndi_filter republish -- interkom / MULTIVIEW / Grading on strih,
  * render_divisor > 1) should SKIP its render + send this tick because its measured cost
