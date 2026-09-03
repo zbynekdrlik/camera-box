@@ -53,6 +53,10 @@ const TEST_SNAP_SVC: &str =
     "RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|1\nSVC_ACTIVE|1";
 const TEST_SNAP_PID: &str =
     "RIG_MODE_PROBE_OK\nPID_PRESENT|1\nPID_ALIVE|1\nSVC_ENABLED|0\nSVC_ACTIVE|0";
+// A painter that is ACTIVE but DISABLED (an E2E `systemctl start` on a rig last set to EVENT leaves
+// the unit active+disabled until a reboot / `rig-mode.sh test`) -- a running painter, so TEST.
+const TEST_SNAP_ACTIVE_DISABLED: &str =
+    "RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|0\nSVC_ACTIVE|1";
 
 #[test]
 fn event_mode_when_painter_disabled_and_pidfile_absent() {
@@ -87,4 +91,40 @@ fn unknown_when_snapshot_missing_reachability_sentinel() {
     // Defensive: a partial read that somehow carried painter lines but not the RIG_MODE_PROBE_OK
     // sentinel is UNKNOWN, never a false EVENT.
     assert_eq!(classify("PID_PRESENT|0\nSVC_ENABLED|0"), "UNKNOWN");
+}
+
+#[test]
+fn test_mode_when_painter_active_but_service_disabled() {
+    // The active-but-DISABLED painter (a running QR after an E2E `systemctl start` on a rig last set
+    // to EVENT). A running painter is never a clean broadcast (#892), so it must read TEST -- NOT a
+    // false EVENT that would silence real DEAD_PORTs for days. painter_expected=0 but painter_alive=1.
+    assert_eq!(classify(TEST_SNAP_ACTIVE_DISABLED), "TEST");
+}
+
+#[test]
+fn unknown_when_sentinel_present_but_all_painter_lines_missing() {
+    // The sentinel alone is NOT proof of a readable mode: an ssh that connected (echoed the sentinel)
+    // but was torn down before the probe body ran carries no painter fields -> UNKNOWN, never EVENT.
+    assert_eq!(classify("RIG_MODE_PROBE_OK"), "UNKNOWN");
+}
+
+#[test]
+fn unknown_when_partial_snapshot_missing_the_service_lines() {
+    // A truncated read: sentinel + pidfile lines present, but ssh was torn down before the
+    // `systemctl` reads -> SVC_ENABLED / SVC_ACTIVE missing -> UNKNOWN, never a false EVENT.
+    assert_eq!(
+        classify("RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0"),
+        "UNKNOWN"
+    );
+}
+
+#[test]
+fn unknown_when_systemctl_hiccup_emits_question_mark() {
+    // A systemd manager no-answer hiccup (empty is-enabled / is-active output) emits `?`, not a
+    // definite 0/1 -> UNKNOWN. A hiccup must never be misread as a provable EVENT (fail-DEADLY);
+    // this is the `?`-on-empty state the shared optical-chain snippet now emits (#1290).
+    assert_eq!(
+        classify("RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|?\nSVC_ACTIVE|?"),
+        "UNKNOWN"
+    );
 }

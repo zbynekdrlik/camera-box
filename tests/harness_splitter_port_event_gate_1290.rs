@@ -74,6 +74,16 @@ const RIG_EVENT: &str =
 const RIG_TEST: &str =
     r"printf 'RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|1\nSVC_ACTIVE|1\n'";
 const RIG_UNKNOWN: &str = r"printf ''"; // cam2 ssh failed -> empty -> UNKNOWN
+                                        // A running-but-DISABLED painter (E2E `systemctl start` on a rig last set to EVENT) -> TEST, so a
+                                        // real DEAD_PORT is NOT silenced (#1290 review 🔴: a running painter is never a clean broadcast).
+const RIG_TEST_ACTIVE_DISABLED: &str =
+    r"printf 'RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|0\nSVC_ACTIVE|1\n'";
+
+// The full mode-detection log line (anchored so `TEST` never matches the EVENT skip line's
+// `TEST-premise`, and the bare tokens are not non-discriminating — #1290 review 🔵).
+const MODE_LINE_EVENT: &str = "rig mode (cam2 painter probe @ 10.77.9.62): EVENT";
+const MODE_LINE_TEST: &str = "rig mode (cam2 painter probe @ 10.77.9.62): TEST";
+const MODE_LINE_UNKNOWN: &str = "rig mode (cam2 painter probe @ 10.77.9.62): UNKNOWN";
 
 // The mixed fleet that WOULD page a DEAD_PORT: cam2 grey, cam1+cam3 colour.
 fn mixed_dead_port_fleet() -> String {
@@ -83,15 +93,15 @@ fn mixed_dead_port_fleet() -> String {
 #[test]
 fn event_mode_suppresses_dead_port_page_and_logs_report_only() {
     // The production-show false page: cam2 grey (no camera / blank monitor), cam1+cam3 colour. In
-    // provable EVENT mode this must NOT page — it logs the would-be verdict report-only.
+    // provable EVENT mode the cam2 DEAD_PORT verdict must NOT page — it is logged report-only.
     let log = run_driver(&mixed_dead_port_fleet(), RIG_EVENT, 2);
     assert!(
-        log.contains("rig mode") && log.contains("EVENT"),
+        log.contains(MODE_LINE_EVENT),
         "the pass must log the detected EVENT mode: {log}"
     );
     assert!(
-        log.contains("skip: rig in EVENT mode — TEST-premise verdict, no page"),
-        "each box's TEST-premise verdict must be logged report-only in EVENT mode: {log}"
+        log.contains("cam2 DEAD_PORT skip: rig in EVENT mode — TEST-premise verdict, no page"),
+        "the cam2 DEAD_PORT verdict must be logged report-only in EVENT mode: {log}"
     );
     assert!(
         !log.contains("WOULD alert"),
@@ -115,7 +125,7 @@ fn test_mode_still_pages_dead_port_unchanged() {
     // box still confirms + pages DEAD_PORT after 2 passes. The gate must not silence a real fault.
     let log = run_driver(&mixed_dead_port_fleet(), RIG_TEST, 2);
     assert!(
-        log.contains("rig mode") && log.contains("TEST"),
+        log.contains(MODE_LINE_TEST),
         "the pass must log the detected TEST mode: {log}"
     );
     assert!(
@@ -129,12 +139,32 @@ fn test_mode_still_pages_dead_port_unchanged() {
 }
 
 #[test]
+fn active_but_disabled_painter_is_test_and_still_pages() {
+    // #1290 review 🔴: a running-but-DISABLED painter (E2E `systemctl start` on a rig last set to
+    // EVENT) must NOT be misread as EVENT and silence a real DEAD_PORT for days. It reads TEST, so
+    // the grey box still pages.
+    let log = run_driver(&mixed_dead_port_fleet(), RIG_TEST_ACTIVE_DISABLED, 2);
+    assert!(
+        log.contains(MODE_LINE_TEST),
+        "an active-but-disabled painter must read TEST, not EVENT: {log}"
+    );
+    assert!(
+        log.contains("WOULD alert: cam2 CONFIRMED DEAD_PORT"),
+        "a real DEAD_PORT must still page when a painter is running (de-facto TEST): {log}"
+    );
+    assert!(
+        !log.contains("skip: rig in EVENT mode"),
+        "an active-but-disabled painter must not emit the EVENT skip line: {log}"
+    );
+}
+
+#[test]
 fn unknown_mode_pages_dead_port_fail_safe() {
     // cam2 unreachable -> UNKNOWN mode -> behave exactly as today (page). An unreadable mode must
     // NEVER silence a real TEST-mode dead port.
     let log = run_driver(&mixed_dead_port_fleet(), RIG_UNKNOWN, 2);
     assert!(
-        log.contains("rig mode") && log.contains("UNKNOWN"),
+        log.contains(MODE_LINE_UNKNOWN),
         "the pass must log the UNKNOWN mode: {log}"
     );
     assert!(

@@ -20,18 +20,35 @@ camera, so a camera-less cambox is legitimately black and the sibling anchor say
 
 `rig-mode.sh event` STOPS+DISABLES `cam2-painter.service` (#892) and removes `/run/rig-painter.pid`;
 `rig-mode.sh test` enable-`--now`s it (its steady state since #1008/#937 is the ENABLED service).
-So **painter_expected = pidfile present OR `cam2-painter.service` is-enabled** is the durable,
-non-staling TEST/EVENT discriminator — and `scripts/lib/optical-chain-health.sh` ALREADY owns it
-(`optical_chain_painter_expected_from_snapshot` + `optical_chain_painter_probe_remote_snippet`,
+So the painter state is the durable, non-staling TEST/EVENT discriminator — and
+`scripts/lib/optical-chain-health.sh` ALREADY owns it (`optical_chain_painter_expected_from_snapshot`
+= pidfile OR service-enabled; `optical_chain_painter_alive_from_snapshot` = pid-alive OR
+service-active; `optical_chain_painter_probe_remote_snippet`;
 `.claude/rules/optical-chain-health-watchdog.md`). The new `scripts/lib/rig-mode-state.sh`
-**self-sources** it (ONE definition of painter_expected, ONE cam2 probe snippet) and adds a
-`RIG_MODE_PROBE_OK` reachability sentinel → a **3-state** `rig_mode_from_painter_snapshot`:
+**self-sources** it (ONE definition each, ONE cam2 probe snippet) and adds a `RIG_MODE_PROBE_OK`
+reachability sentinel → a **3-state** `rig_mode_from_painter_snapshot`, fail-safe toward UNKNOWN in
+every ambiguous case:
 
-- **UNKNOWN** — no sentinel (cam2 ssh failed / empty / partial). The mode is UNREADABLE → the
-  caller behaves EXACTLY as today. Fail-safe: an unreadable mode must NEVER silence a real
-  TEST-mode fault, and must NEVER be read as EVENT.
-- **TEST** — reachable AND painter_expected.
-- **EVENT** — reachable AND NOT painter_expected.
+- **UNKNOWN** — no sentinel (cam2 ssh failed / empty), OR any of the four painter fields
+  (`PID_PRESENT`/`PID_ALIVE`/`SVC_ENABLED`/`SVC_ACTIVE`) MISSING (a truncated/partial ssh read) or
+  `?` (a systemctl no-answer HICCUP). The mode is UNREADABLE → the caller behaves EXACTLY as today.
+  Fail-safe: an unreadable/partial/hiccup read must NEVER silence a real TEST-mode fault, and must
+  NEVER be misread as a provable EVENT. **The sentinel's PRESENCE alone is NOT proof** — a hiccup
+  after the (first-echoed) sentinel would otherwise read EVENT (#1290 review 🔴), so all four fields
+  are required present + a definite 0/1.
+- **TEST** — reachable AND the painter is **EXPECTED** (pidfile OR service enabled) **OR ALIVE**
+  (pid alive OR service active). The `OR alive` is load-bearing (#1290 review 🔴): an
+  active-but-**DISABLED** painter — an E2E `systemctl start cam2-painter` (start, not `enable --now`;
+  `recording-e2e.sh` + the dead-man) on a rig last set to EVENT leaves the unit active+disabled
+  until a reboot / `rig-mode.sh test` — is a RUNNING painter, and #892 makes a running painter
+  incompatible with a clean broadcast, so it is positive evidence of NOT-EVENT. `expected`-only
+  would have read it EVENT and silenced every real DEAD_PORT for days.
+- **EVENT** — reachable AND the painter is NEITHER expected NOR alive (all four fields a definite 0).
+
+The `?`-on-empty state is emitted by the shared `optical_chain_painter_probe_remote_snippet`
+(`SVC_ENABLED|1` on `enabled`, `|0` on any other NON-EMPTY answer — disabled/not-found/static — and
+`|?` on an EMPTY answer = a systemd-manager hiccup). Backward-compatible for optical-chain (`?` ≠ 1
+→ expected=0 → skip, exactly today); rig-mode-state maps `?` → UNKNOWN.
 
 **Rejected alternatives (do not switch to them):** the rig-test ledger (`rig_test_ledger_*`,
 `/run/camera-box-rig-tests.jsonl`) tracks WHAT a harness STARTED (a kill-by-PID cleanup target),
@@ -43,13 +60,16 @@ heartbeat is the E2E-WINDOW axis (#1117), a different concern from the EVENT/pro
 
 ## The gate (splitter-port-alert-watchdog.sh)
 
-`main()` computes `RIG_MODE` ONCE per pass (`rig_mode_probe` = one cam2 ssh, same shape as
-`probe_box`, overridable wholesale in tests) and passes it to `handle_box`. In **EVENT** mode
-`handle_box` logs each box's would-be verdict report-only
-(`<box> <verdict> skip: rig in EVENT mode — TEST-premise verdict, no page (#1290)`) + clears the
-per-box confirm/throttle and returns before the DEAD_PORT confirm/notify path. TEST/UNKNOWN are
-byte-unchanged. No systemd change (one extra cam2 ssh is well inside the unit's 120s budget); no
-python mirror (the gate lives entirely in the bash orchestrator).
+`main()` computes `RIG_MODE` ONCE per pass (`rig_mode_probe` = one cam2 ssh, `timeout`-bounded and
+`|| true`-guarded so a wedged cam2 `systemctl` can never stall the whole pass, mirroring
+optical-chain's cam2 probe; overridable wholesale in tests) and passes it to `handle_box`. The
+EVENT gate sits **only before the DEAD_PORT confirm block** — DEAD_PORT is the ONE TEST-premise
+verdict; OK/NODATA/NO_CAPTURE/SOURCE_WIDE already return above and are report-only +
+mode-independent, so they must NOT get the skip line. In **EVENT** mode a DEAD_PORT box logs
+`<box> DEAD_PORT skip: rig in EVENT mode — TEST-premise verdict, no page (#1290)` + clears the
+per-box confirm/throttle and returns before notify. TEST/UNKNOWN are byte-unchanged. No systemd
+change (one extra cam2 ssh is well inside the unit's 120s budget); no python mirror (the gate lives
+entirely in the bash orchestrator).
 
 ## Per-watchdog TEST-premise audit — only splitter-port needed the gate
 
@@ -70,6 +90,22 @@ for E2E-window suppression). This is distinct from the E2E-WINDOW (#1117 `rig_he
 splitter-port cam2-grey-mid-E2E edge (transient painter between states, cam2-painter stopped but
 still enabled → classified TEST) is a possible follow-up (mirror optical-chain's rig_busy veto),
 deliberately out of #1290's EVENT-mode scope.
+
+## Residuals (stated, not silently accepted)
+
+- **The gate depends on cam2 being REACHABLE during a show.** cam2 is the fixed painter box
+  (`$PAINTER_IP`, `10.77.9.62`) and was retired as the camera-UNDER-TEST 2026-08-24
+  (`scripts/camera-set.sh`) — its PAINTER role is unrelated and stays live. But if cam2 is powered
+  off during a future production, the mode probe returns empty → UNKNOWN → the fleet false-pages
+  again (fail-safe UNKNOWN pages as today). Acceptable (fail-safe direction is correct: page rather
+  than silence), but worth knowing the fix has a single reachability dependency on cam2.
+- **The per-watchdog audit covers the 5 dev1 watchdogs the ticket named**, out of ~25
+  `scripts/*watchdog*.sh`. The sweep basis: only splitter-port and optical-chain carry a
+  cambox-topology / painter premise; `avsync-lineup` is bound to stream-LIVE state (already
+  EVENT-oriented); the rest are OBS-render / box-reachability / network / bundle-state level and
+  page on faults equally real in production. A NEW dev1 watchdog whose paging verdict assumes the
+  shared-camera-via-splitter topology (or the painter injection leg EVENT disables) must reuse
+  `rig-mode-state.sh`; one that pages on a genuine hardware/timing/receiver fault must NOT gate.
 
 ## Tier-0
 

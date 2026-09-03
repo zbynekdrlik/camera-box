@@ -97,6 +97,12 @@ REPO_SLUG="${SPLITTER_WATCH_REPO:-zbynekdrlik/camera-box}"
 RIG_MODE_PAINTER_IP="${RIG_MODE_PAINTER_IP:-10.77.9.62}"
 RIG_MODE_PAINTER_PIDFILE="${RIG_MODE_PAINTER_PIDFILE:-/run/rig-painter.pid}"
 RIG_MODE_PAINTER_SERVICE="${RIG_MODE_PAINTER_SERVICE:-cam2-painter.service}"
+# Hard wall-clock bound on the cam2 mode probe (mirrors optical-chain-alert-watchdog.sh's own
+# `timeout "$CAM_SSH_TIMEOUT"` around its cam2 ssh). ConnectTimeout bounds only the CONNECT; a
+# session that authenticates then blocks on a wedged remote `systemctl` would otherwise stall the
+# whole pass before any box is probed and get the unit SIGTERM'd at TimeoutStartSec -- a fleet-wide
+# blind spot on a box (cam2) that is not even part of the verdict. On timeout -> empty -> UNKNOWN.
+RIG_MODE_PROBE_TIMEOUT="${RIG_MODE_PROBE_TIMEOUT:-20}"
 
 STATE_DIR="${SPLITTER_WATCH_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-splitter-port-alert.state"
@@ -120,14 +126,22 @@ probe_box() {
 }
 
 # rig_mode_probe -> stdout: the cam2 painter snapshot (RIG_MODE_PROBE_OK + the four painter KEY|value
-# lines), or empty on an ssh failure. ONE ssh to cam2 per pass. Same ssh shape as probe_box (reuses
-# SSH_USER / CAM_PW / SSH_TIMEOUT); an ssh failure -> empty -> rig_mode_from_painter_snapshot UNKNOWN
-# -> today's behaviour (fail-safe). Overridden wholesale by the driver tests (like probe_box) with a
-# canned snapshot; the probe snippet is the SHARED one rig-mode-state.sh builds.
+# lines), or empty on an ssh failure/timeout. ONE ssh to cam2 per pass. Same ssh shape as probe_box
+# (reuses SSH_USER / CAM_PW / SSH_TIMEOUT); an ssh failure/timeout -> empty ->
+# rig_mode_from_painter_snapshot UNKNOWN -> today's behaviour (fail-safe). Overridden wholesale by
+# the driver tests (like probe_box) with a canned snapshot; the probe snippet is the SHARED one
+# rig-mode-state.sh builds.
+#   `timeout` sits INSIDE sshpass (bounds the ssh: ConnectTimeout covers only the connect, a session
+# that authenticates then blocks on a wedged remote `systemctl` would otherwise stall the whole pass
+# and get the unit SIGTERM'd at TimeoutStartSec). It is deliberately NOT `timeout sshpass …` (the
+# optical-chain sibling's form): sshpass MUST stay the OUTER command so the driver tests' `sshpass()`
+# FUNCTION stub still intercepts the whole call and keeps them hermetic (a `timeout sshpass` bypasses
+# the function stub, runs the real sshpass binary, and reaches the LIVE rig from a unit test).
 rig_mode_probe() {
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
+  sshpass -p "$CAM_PW" timeout "$RIG_MODE_PROBE_TIMEOUT" \
+    ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
     -o BatchMode=no "${SSH_USER}@${RIG_MODE_PAINTER_IP}" \
-    "$(rig_mode_state_probe_remote_snippet "$RIG_MODE_PAINTER_PIDFILE" "$RIG_MODE_PAINTER_SERVICE")" 2>/dev/null
+    "$(rig_mode_state_probe_remote_snippet "$RIG_MODE_PAINTER_PIDFILE" "$RIG_MODE_PAINTER_SERVICE")" 2>/dev/null || true
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
@@ -168,18 +182,6 @@ handle_box() {
   local rig_mode="${9:-UNKNOWN}"
   log "$box ($ip): capturing=$capturing colour=$colour u_dev=$u_dev v_dev=$v_dev rough=$rough -> $verdict"
 
-  # #1290: in provable EVENT/production mode the sibling-anchor DEAD_PORT premise (ONE camera through
-  # the HDMI splitter to EVERY cambox) does NOT hold -- each cambox has its OWN camera, so a
-  # camera-less cambox is legitimately black. Log this box's would-be verdict report-only and NEVER
-  # page. TEST and UNKNOWN (cam2 unreadable) behave exactly as today. Clear the per-box confirm/
-  # throttle so a genuine TEST-mode fault later pages fresh (a mode change is not a recovery, so the
-  # `alerted` latch is left as-is -- a still-bad box re-confirms from scratch when TEST resumes).
-  if [ "$rig_mode" = "EVENT" ]; then
-    log "$box $verdict skip: rig in EVENT mode — TEST-premise verdict, no page (#1290)"
-    clear_box_throttle "$box"
-    return 0
-  fi
-
   if [ "$verdict" = "OK" ]; then
     local was_alerted
     was_alerted="$(read_state_field "alerted_${box}" 0)"
@@ -217,6 +219,21 @@ handle_box() {
     # NOT page it (that would false-page every time the source content is legitimately monochrome).
     # Reset the per-port confirm/throttle so a later attributable DEAD_PORT episode pages fresh.
     log "$box grayscale but NO proven-good sibling -> SOURCE_WIDE (shared camera/source or idle rig) -- report-only, not paging"
+    clear_box_throttle "$box"
+    return 0
+  fi
+
+  # #1290: reached here ONLY for a DEAD_PORT verdict (OK/NODATA/NO_CAPTURE/SOURCE_WIDE returned
+  # above, and they are all already report-only + mode-independent). DEAD_PORT is the ONE
+  # TEST-premise verdict: it pages a per-port fault only because a proven-good sibling on the SAME
+  # camera+splitter is assumed to prove the shared camera is delivering. In provable EVENT/production
+  # mode that premise does NOT hold (each cambox has its OWN camera, so a camera-less cambox is
+  # legitimately black), so log it report-only and NEVER page. TEST and UNKNOWN (cam2 unreadable)
+  # fall through unchanged. Clear the per-box confirm/throttle so a genuine TEST-mode fault later
+  # pages fresh (a mode change is not a recovery, so the `alerted` latch is left as-is -- a still-bad
+  # box re-confirms from scratch when TEST resumes).
+  if [ "$rig_mode" = "EVENT" ]; then
+    log "$box DEAD_PORT skip: rig in EVENT mode — TEST-premise verdict, no page (#1290)"
     clear_box_throttle "$box"
     return 0
   fi
