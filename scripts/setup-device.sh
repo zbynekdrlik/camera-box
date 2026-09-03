@@ -215,23 +215,27 @@ root_mount_is_readonly() {
 # fstab; that only takes effect on the NEXT reboot) must never be force-remounted ro early.
 ROOT_WAS_RO=false
 
-# ensure_root_writable -- #599: STEP 15-18 below run apt-get/dpkg/systemctl and write files under
-# /etc, all of which require a writable root. On a FIRST provisioning run root is naturally rw, but
-# on an IN-PLACE RE-RUN against an already-booted ro appliance (the box's own "self-heal on the
-# next provisioning pass"), root is `ro` -- every apt-get/dpkg call in STEP 15-17 then fails and is
-# swallowed by the `|| true`/`2>/dev/null` guards, silently leaving a purge/install that never took
-# effect while the script still reports success. Detect ro root up front and remount rw BEFORE any
-# of those steps run. Stop+mask PackageKit and unattended-upgrades first (rig-timesync-single-
-# authority incident: PackageKit is D-Bus-activated by apt and holds an open write handle on
-# /var/lib/PackageKit/transactions.db, which later blocks `mount -o remount,ro /` with EBUSY) so
-# neither can reactivate mid-run. FAIL LOUD if the remount itself doesn't succeed -- never silently
-# proceed on a still-ro root and claim success afterward.
+# ensure_root_writable -- #599, call site moved by #1289: STEP 1 (hostname) through STEP 18
+# (fstab rewrite) below all write under /etc or /usr at some point, all of which require a
+# writable root. On a FIRST provisioning run root is naturally rw, but on an IN-PLACE RE-RUN
+# against an already-booted ro appliance (the box's own "self-heal on the next provisioning
+# pass"), root is `ro` -- every apt-get/dpkg call in STEP 15-17 then fails and is swallowed by the
+# `|| true`/`2>/dev/null` guards, silently leaving a purge/install that never took effect while
+# the script still reports success (and STEP 1's OWN hostname write, which has no such guard,
+# aborts the whole run outright -- live, cam6 10.77.9.66, 2026-09-03). Detect ro root up front and
+# remount rw BEFORE ANY of those steps run -- the call site sits right after the confirm prompt,
+# before even the pre-flight curl install (#1289; it used to sit right before STEP 15, per #599,
+# which left STEP 1-14 unprotected). Stop+mask PackageKit and unattended-upgrades first (rig-
+# timesync-single-authority incident: PackageKit is D-Bus-activated by apt and holds an open write
+# handle on /var/lib/PackageKit/transactions.db, which later blocks `mount -o remount,ro /` with
+# EBUSY) so neither can reactivate mid-run. FAIL LOUD if the remount itself doesn't succeed --
+# never silently proceed on a still-ro root and claim success afterward.
 #
-# If a fail() call inside STEP 15-17 aborts the script while root is rw (e.g. the STEP 17
-# dantesync download failing), restore_root_mode() never runs and the live mount stays rw until
-# the next reboot -- bounded/self-healing (the ro fstab from the PRIOR successful pass still pins
-# ro on reboot), not the claims-success-while-wrong failure #599 targets, so no explicit trap is
-# added here.
+# If a fail() call anywhere from STEP 1 through STEP 17 aborts the script while root is rw (e.g.
+# the STEP 17 dantesync download failing), restore_root_mode() never runs and the live mount stays
+# rw until the next reboot -- bounded/self-healing (the ro fstab from the PRIOR successful pass
+# still pins ro on reboot), not the claims-success-while-wrong failure #599 targets, so no explicit
+# trap is added here.
 ensure_root_writable() {
     local opts
     # `findmnt` failing outright (missing binary, unreadable /proc) must not silently read as "not
@@ -330,6 +334,19 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Aborted."
     exit 1
 fi
+
+# =============================================================================
+# #1289: ensure root is writable BEFORE the first filesystem write of any kind -- a no-op on a
+# first-provisioning run (root already rw); remounts rw on an IN-PLACE RE-RUN against an
+# already-booted ro appliance. Was previously called right before STEP 15 (#599), but STEP 1
+# (hostname), STEP 2 (netplan), STEP 3 (binary), STEP 4-14 (NDI/ALSA/config/systemd/GRUB/sysctl),
+# and the pre-flight curl install below ALL write under /etc or /usr before that point too -- on
+# a first-provisioning run root is naturally rw so this never showed, but a re-run against an
+# already-booted ro appliance died with "Read-only file system" at STEP 1's hostname write,
+# before ANY of this remount logic ever ran (live, cam6 10.77.9.66, 2026-09-03). Moved here so
+# the rw window covers the WHOLE run; restore_root_mode() still runs after STEP 18 unchanged.
+# =============================================================================
+ensure_root_writable
 
 # =============================================================================
 # Pre-flight: ensure curl + CA certificates BEFORE first use
@@ -899,13 +916,6 @@ echo "  TCP congestion: BBR"
 echo "  IPv6: disabled"
 echo "  EEE (Green Ethernet): disabled"
 echo "  Flow control: advertised"
-
-# =============================================================================
-# #599: ensure root is writable before STEP 15-18 apply package/config changes -- a no-op on a
-# first-provisioning run (root already rw); remounts rw on an in-place re-run against an
-# already-booted ro appliance. Paired with restore_root_mode() after STEP 18.
-# =============================================================================
-ensure_root_writable
 
 # =============================================================================
 # STEP 15: Disable unnecessary services
