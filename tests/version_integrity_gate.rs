@@ -1745,6 +1745,379 @@ fn vendor_pin_ok_when_deployed_at_newest_vendor_head_flow() {
     let _ = std::fs::remove_file(&imag_m);
 }
 
+// ---------------------------------------------------------------------------
+// #1292 review follow-up — the SAME false-LAGS polarity trap the merged drift-guard.sh fix removed
+// (imag_genlock_range_log's merge-base scoping) also existed HERE: the vendor-pin ALARM's own
+// PENDING_LIST used to be computed via a PLAIN ancestry range (`vp_sha..origin/main`), which reads
+// LAGGING for a deployed bundle that is genuinely AHEAD of origin/main on the dev candidate line (a
+// release-candidate build). vendor_pin_range_log/vendor_pin_ahead_log/vendor_pin_on_dev mirror
+// drift-guard.sh's imag_genlock_range_log/imag_genlock_ahead_log/imag_genlock_on_dev exactly, scoped
+// to the WHOLE vendor/ tree; genlock_vendor_pin_verdict's extended AHEAD_LIST/ON_DEV args classify a
+// recognized release-candidate build (OK) apart from an unrecognized orphan one (ALARM, rc 30 —
+// report-only semantics unchanged).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vendor_pin_ok_when_ahead_of_main_on_the_dev_line_1292() {
+    // The exact false-ALARM this ticket's caller-side merge-base fix removes: a deployed bundle
+    // that is genuinely AHEAD of origin/main on the dev candidate line (a recognized
+    // release-candidate build) must be OK, never an ALARM.
+    let out = run_sourced(
+        r#"
+            ahead="$(printf 'abc1234 fix(#1292): vendor change')"
+            o="$(genlock_vendor_pin_verdict "46d868a29a7e" "beefface1234" "" "$ahead" "1")"
+            rc=$?
+            printf '%s\n' "$o"
+            echo "RC=$rc"
+        "#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "an ahead-and-recognized bundle must be OK (rc 0): {out}"
+    );
+    assert!(out.contains("OK"), "must report OK: {out}");
+    assert!(
+        !out.to_uppercase().contains("ALARM"),
+        "an ahead-and-recognized bundle must NOT alarm: {out}"
+    );
+}
+
+#[test]
+fn vendor_pin_orphan_alarm_when_ahead_but_unrecognized_1292() {
+    // The AHEAD-but-UNRECOGNIZED case: vendor commits reachable from neither origin/main nor
+    // origin/dev must still SCREAM (the early-gate-pin doctrine's "an orphan release must SCREAM"),
+    // never a silent pass just because the bundle happens to be a content superset of main.
+    let out = run_sourced(
+        r#"
+            ahead="$(printf 'abc1234 fix(#1292): vendor change\ndef5678 orphan change')"
+            o="$(genlock_vendor_pin_verdict "46d868a29a7e" "beefface1234" "" "$ahead" "0")"
+            rc=$?
+            printf '%s\n' "$o"
+            echo "RC=$rc"
+        "#,
+        &[],
+    );
+    assert!(
+        out.contains("RC=30"),
+        "an orphan bundle must return the report-only ALARM code 30 (unchanged semantics): {out}"
+    );
+    assert!(
+        out.to_uppercase().contains("ALARM"),
+        "must SCREAM ALARM: {out}"
+    );
+    assert!(out.contains("ORPHAN"), "must name the ORPHAN reason: {out}");
+    assert!(
+        out.contains("abc1234") && out.contains("def5678"),
+        "the alarm MUST name the ahead vendor commits: {out}"
+    );
+}
+
+fn run_git_vig(cwd: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {args:?} in {cwd:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {cwd:?} failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn run_git_out_vig(cwd: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {args:?} in {cwd:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {cwd:?} failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// #1292 review follow-up: a throwaway two-branch (main/dev) synthetic repo — the SAME DAG shape as
+/// tests/drift_guard.rs's `build_two_branch_ahead_repo` (duplicated here rather than shared; each
+/// `tests/*.rs` file in this repo is its own compilation unit with no shared test-support module —
+/// see the top-level CLAUDE.md/`.claude/rules/ci-testing-gotchas.md`'s own "never pin against this
+/// repo's live history" rule for WHY a synthetic repo is used at all: origin/main only ever GROWS
+/// under this repo's two-branch workflow, so a test pinned to a real SHA's relationship with today's
+/// live tip would silently stop holding the moment a new vendor-touching PR merges). `main` gains a
+/// MERGE commit (M1, second parent = dev's earlier tip C3) whose vendor/ content is already a subset
+/// of dev's LATER tip (C4) via C2->C3 — the case a deployed SHA=C4 must read as `OK ... AHEAD ...`,
+/// never LAGGING. `C1` (main's own pre-merge base) is genuinely missing M1's content — the case that
+/// must stay LAGGING. `C5` is a further dev-only commit built on C4 but never pushed to either
+/// branch — the orphan-build case. Returns (origin tempdir guard, repo tempdir guard, repo path, C1,
+/// C4, C5) — keep BOTH tempdir guards alive for the whole test body.
+fn build_two_branch_ahead_repo_vig() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    PathBuf,
+    String,
+    String,
+    String,
+) {
+    let origin_holder = tempfile::tempdir().expect("origin tempdir");
+    let repo_holder = tempfile::tempdir().expect("repo tempdir");
+    let origin = origin_holder.path().join("origin.git");
+    let repo = repo_holder.path().to_path_buf();
+
+    run_git_vig(
+        origin_holder.path(),
+        &["init", "--quiet", "--bare", origin.to_str().unwrap()],
+    );
+    run_git_vig(
+        repo_holder.path(),
+        &["init", "--quiet", repo.to_str().unwrap()],
+    );
+    run_git_vig(&repo, &["config", "user.email", "t@example.com"]);
+    run_git_vig(&repo, &["config", "user.name", "T"]);
+    run_git_vig(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+
+    std::fs::create_dir_all(repo.join("vendor")).expect("mkdir vendor");
+    std::fs::write(repo.join("vendor/a.txt"), "1\n").expect("write a.txt");
+    run_git_vig(&repo, &["add", "-A"]);
+    run_git_vig(&repo, &["commit", "-q", "-m", "C1: base vendor content"]);
+    run_git_vig(&repo, &["branch", "-M", "main"]);
+    run_git_vig(&repo, &["push", "-q", "origin", "main:main"]);
+    let c1 = run_git_out_vig(&repo, &["rev-parse", "HEAD"]);
+
+    run_git_vig(&repo, &["checkout", "-q", "-b", "dev"]);
+    std::fs::write(repo.join("vendor/a.txt"), "2\n").expect("write a.txt");
+    run_git_vig(&repo, &["add", "-A"]);
+    run_git_vig(&repo, &["commit", "-q", "-m", "C2: dev-only vendor change"]);
+    std::fs::write(repo.join("vendor/b.txt"), "1\n").expect("write b.txt");
+    run_git_vig(&repo, &["add", "-A"]);
+    run_git_vig(
+        &repo,
+        &["commit", "-q", "-m", "C3: dev-only vendor change 2"],
+    );
+
+    run_git_vig(&repo, &["checkout", "-q", "main"]);
+    run_git_vig(
+        &repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "dev",
+            "-m",
+            "M1: Merge pull request (dev->main)",
+        ],
+    );
+    run_git_vig(&repo, &["push", "-q", "origin", "main:main"]);
+
+    run_git_vig(&repo, &["checkout", "-q", "dev"]);
+    std::fs::write(repo.join("vendor/a.txt"), "3\n").expect("write a.txt");
+    run_git_vig(&repo, &["add", "-A"]);
+    run_git_vig(
+        &repo,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "C4: dev-only NEW vendor change (post-merge)",
+        ],
+    );
+    let c4 = run_git_out_vig(&repo, &["rev-parse", "HEAD"]);
+    run_git_vig(&repo, &["push", "-q", "origin", "dev:dev"]);
+
+    run_git_vig(&repo, &["checkout", "-q", "--detach", &c4]);
+    std::fs::write(repo.join("vendor/a.txt"), "orphanchange\n").expect("write a.txt");
+    run_git_vig(&repo, &["add", "-A"]);
+    run_git_vig(
+        &repo,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "C5: orphan build, never pushed to either branch",
+        ],
+    );
+    let c5 = run_git_out_vig(&repo, &["rev-parse", "HEAD"]);
+
+    run_git_vig(&repo, &["fetch", "-q", "origin"]);
+
+    (origin_holder, repo_holder, repo, c1, c4, c5)
+}
+
+#[test]
+fn vendor_pin_range_log_merge_base_never_false_lags_for_a_bundle_ahead_of_main_1292() {
+    let (_origin, _repo_holder, repo, _c1, c4, _c5) = build_two_branch_ahead_repo_vig();
+    let out = run_sourced(
+        r#"
+            out="$(vendor_pin_range_log "$SYN_REPO" "$SYN_SHA")"
+            rc=$?
+            echo "RC=$rc"
+            echo "OUT=[$out]"
+        "#,
+        &[
+            ("SYN_REPO", repo.to_str().unwrap()),
+            ("SYN_SHA", c4.as_str()),
+        ],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "merge-base range must resolve cleanly: {out:?}"
+    );
+    assert!(
+        out.contains("OUT=[]"),
+        "a bundle that is a content SUPERSET of main via independent dev lineage must read an EMPTY \
+         (never-lagging) range — the exact #1292 false-LAGS fix for version-integrity-gate.sh's own \
+         vendor-pin alarm: {out:?}"
+    );
+}
+
+#[test]
+fn vendor_pin_range_log_still_reports_a_genuinely_lagging_bundle_1292() {
+    // The merge-base fix must never mask a REAL lag; it only removes the false positive on the
+    // AHEAD direction. C1 (main's own pre-merge base) is genuinely missing M1's vendor content.
+    let (_origin, _repo_holder, repo, c1, _c4, _c5) = build_two_branch_ahead_repo_vig();
+    let out = run_sourced(
+        r#"
+            out="$(vendor_pin_range_log "$SYN_REPO" "$SYN_SHA")"
+            rc=$?
+            echo "RC=$rc"
+            n="$(printf '%s\n' "$out" | grep -c . || true)"
+            echo "N=$n"
+        "#,
+        &[
+            ("SYN_REPO", repo.to_str().unwrap()),
+            ("SYN_SHA", c1.as_str()),
+        ],
+    );
+    assert!(
+        out.contains("RC=0"),
+        "range command must resolve cleanly: {out:?}"
+    );
+    assert!(
+        out.contains("N=2"),
+        "a genuinely-behind bundle must still report the real missing vendor commits, never an \
+         empty range: {out:?}"
+    );
+}
+
+#[test]
+fn vendor_pin_ahead_log_and_on_dev_classify_a_release_candidate_build_1292() {
+    let (_origin, _repo_holder, repo, _c1, c4, _c5) = build_two_branch_ahead_repo_vig();
+    let out = run_sourced(
+        r#"
+            ahead="$(vendor_pin_ahead_log "$SYN_REPO" "$SYN_SHA")"
+            echo "AHEAD_N=$(printf '%s\n' "$ahead" | grep -c . || true)"
+            vendor_pin_on_dev "$SYN_REPO" "$SYN_SHA"
+            echo "ON_DEV_RC=$?"
+        "#,
+        &[
+            ("SYN_REPO", repo.to_str().unwrap()),
+            ("SYN_SHA", c4.as_str()),
+        ],
+    );
+    assert!(
+        out.contains("AHEAD_N=1"),
+        "C4 carries exactly one vendor commit ahead of origin/main (its own post-merge change): \
+         {out:?}"
+    );
+    assert!(
+        out.contains("ON_DEV_RC=0"),
+        "C4 is reachable from origin/dev — a recognized release-candidate build: {out:?}"
+    );
+}
+
+#[test]
+fn vendor_pin_ahead_log_and_on_dev_flag_an_orphan_build_1292() {
+    let (_origin, _repo_holder, repo, _c1, _c4, c5) = build_two_branch_ahead_repo_vig();
+    let out = run_sourced(
+        r#"
+            ahead="$(vendor_pin_ahead_log "$SYN_REPO" "$SYN_SHA")"
+            echo "AHEAD_N=$(printf '%s\n' "$ahead" | grep -c . || true)"
+            vendor_pin_on_dev "$SYN_REPO" "$SYN_SHA"
+            echo "ON_DEV_RC=$?"
+        "#,
+        &[
+            ("SYN_REPO", repo.to_str().unwrap()),
+            ("SYN_SHA", c5.as_str()),
+        ],
+    );
+    assert!(
+        out.contains("AHEAD_N=2"),
+        "C5 carries C4's own vendor change plus its own orphan change ahead of origin/main: {out:?}"
+    );
+    assert!(
+        out.contains("ON_DEV_RC=1"),
+        "C5 was never pushed to either branch — must NOT be reachable from origin/dev: {out:?}"
+    );
+}
+
+#[test]
+fn vendor_pin_ahead_seam_flows_through_the_gate_to_ok_never_a_false_alarm_1292() {
+    // Flow-level wiring proof (env fixture seams, no live git — the #1137 hermeticity model): a box
+    // deployed at a bundle the CALLER computed as AHEAD-and-on-dev must reach the gate as OK, never
+    // the report-only ALARM the pre-#1292 caller's plain ancestry range would have produced.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_vendorpin_ahead",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_vendorpin_ahead",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("vendorpin_ahead");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--win-state",
+            &format!("strih={}", s.display()),
+            "--win-state",
+            &format!("stream={}", t.display()),
+            "--genlock-sha",
+            &format!("imag={SHA}"),
+            "--imag-manifest",
+            imag_m.to_str().unwrap(),
+            "--imag-bytes",
+            &imag_b,
+        ],
+        &[
+            ("VERSION_INTEGRITY_GATE_VENDOR_NEWEST", "beefface1234"),
+            ("VERSION_INTEGRITY_GATE_VENDOR_PENDING", ""),
+            (
+                "VERSION_INTEGRITY_GATE_VENDOR_AHEAD",
+                "abc1234 fix(#1292): vendor change",
+            ),
+            ("VERSION_INTEGRITY_GATE_VENDOR_ON_DEV", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "an ahead-and-recognized bundle must still pass: {stdout}"
+    );
+    assert!(stdout.contains("GATE PASS"), "gate must pass: {stdout}");
+    assert!(
+        stdout.contains("vendor_pin")
+            && stdout.contains("OK")
+            && stdout.contains(
+                "vendored vendor/** commit(s) AHEAD of origin/main on the dev candidate line"
+            ),
+        "vendor_pin must report the exact OK/AHEAD phrase, never ALARM: {stdout}"
+    );
+    assert!(
+        !stdout.to_uppercase().contains("ALARM") && !stderr.contains("VENDOR-PIN ALARM"),
+        "an ahead-and-recognized bundle must NEVER fire the ALARM stderr banner (or print ALARM \
+         anywhere in stdout): {stdout} / {stderr}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&imag_m);
+}
+
 // ── #1164 — an operator-acked, physically-absent imag must NOT UNKNOWN-refuse the whole gate.
 // After the #1100 ENFORCED flip, an acked-offline imag (rig-fleet.txt `imag:…`, issue 1013) fed no
 // SHA + no .so bytes made BOTH the cross-box genlock parity AND the imag .so byte facet UNKNOWN(11),
