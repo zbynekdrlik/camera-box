@@ -446,7 +446,10 @@ elif [ -n "$BINARY_SRC" ]; then
         rm -f "$_camera_box_dl_tmp"
         fail "downloaded binary from $BINARY_SRC is empty"
     }
-    install -m 0755 "$_camera_box_dl_tmp" /usr/local/bin/camera-box
+    install -m 0755 "$_camera_box_dl_tmp" /usr/local/bin/camera-box || {
+        rm -f "$_camera_box_dl_tmp"
+        fail "could not install downloaded binary from $BINARY_SRC to /usr/local/bin/camera-box"
+    }
     rm -f "$_camera_box_dl_tmp"
     echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
@@ -502,7 +505,10 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
             rm -f "$_frame_probe_dl_tmp"
             fail "downloaded frame-probe from $FRAME_PROBE_SRC is empty"
         }
-        install -m 0755 "$_frame_probe_dl_tmp" /usr/local/bin/frame-probe
+        install -m 0755 "$_frame_probe_dl_tmp" /usr/local/bin/frame-probe || {
+            rm -f "$_frame_probe_dl_tmp"
+            fail "could not install downloaded frame-probe from $FRAME_PROBE_SRC to /usr/local/bin/frame-probe"
+        }
         rm -f "$_frame_probe_dl_tmp"
     elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
         echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
@@ -1211,7 +1217,10 @@ else
         rm -f "$_dantesync_dl_tmp"
         fail "downloaded dantesync from $DANTESYNC_URL is empty"
     }
-    install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync
+    install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync || {
+        rm -f "$_dantesync_dl_tmp"
+        fail "could not install downloaded dantesync from $DANTESYNC_URL to /usr/local/bin/dantesync"
+    }
     rm -f "$_dantesync_dl_tmp"
 fi
 
