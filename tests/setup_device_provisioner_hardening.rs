@@ -504,6 +504,44 @@ fn setup_device_calls_ensure_root_writable_before_the_fwupd_purge() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// #1289 -- cam5/cam6/cam7 re-provisioning revealed ensure_root_writable() runs too LATE: STEP 1
+// (hostname), STEP 2 (netplan), STEP 3 (binary), and STEP 4-14 (NDI/ALSA/config/systemd/GRUB/
+// sysctl) all write under /etc or /usr BEFORE the #599 call site (previously right before
+// STEP 15). On a FIRST-provisioning run root is naturally rw so this never showed; on an
+// IN-PLACE RE-RUN against an already-booted ro appliance, STEP 1's hostname write is the FIRST
+// write in the whole script and dies with "Read-only file system" before ANY of #599's remount
+// logic ever executes (live, cam6 10.77.9.66, 2026-09-03 -- `setup-device.sh` line 362). The
+// call must move to run BEFORE the pre-flight curl block and STEP 1, not just before STEP 15.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_calls_ensure_root_writable_before_step_1_hostname_1289() {
+    let body = read_script();
+    let call_idx = first_noncomment_exact_idx(&body, "ensure_root_writable").expect(
+        "ensure_root_writable must be CALLED (a bare invocation, not just defined) before STEP 1 \
+         (#1289) -- a re-run against an already-booted ro appliance fails at the very first /etc \
+         write otherwise",
+    );
+    let hostname_write_idx = first_noncomment_idx(&body, r#"echo "$DEVICE_NAME" > /etc/hostname"#)
+        .expect("the STEP 1 hostname write must be present");
+    assert!(
+        call_idx < hostname_write_idx,
+        "the ensure_root_writable call (line {call_idx}) must run BEFORE STEP 1's hostname write \
+         (line {hostname_write_idx}) -- STEP 1 is the FIRST /etc write in the script, so a re-run \
+         against an already-booted ro appliance dies with 'Read-only file system' before the \
+         #599 remount logic (previously gated only before STEP 15) ever runs (#1289)"
+    );
+    let preflight_idx = first_noncomment_idx(&body, "[pre-flight] Ensuring curl + CA certificates")
+        .expect("the pre-flight curl-install block must be present");
+    assert!(
+        call_idx < preflight_idx,
+        "the ensure_root_writable call (line {call_idx}) must also run BEFORE the pre-flight \
+         curl-install block (line {preflight_idx}) -- that block runs `apt-get install` when \
+         curl is missing, which also needs a writable root on a re-run (#1289)"
+    );
+}
+
 #[test]
 fn setup_device_calls_restore_root_mode_after_the_fstab_rewrite() {
     let body = read_script();
