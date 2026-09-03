@@ -113,6 +113,29 @@ pub struct MvAuditSample {
     pub floor_fps: f64,
     pub cx: u32,
     pub cy: u32,
+    /// camera-box #1260 lever (1) — per-cell MV render instrumentation, ALL optional and
+    /// APPEND-only: a pre-#1260 `multiview-audit:` line carries none of these and parses with
+    /// every one `None` (proven by `parse_of_a_pre_1260_line_leaves_cell_fields_none`). The
+    /// emitter (`render_display()`, obs-display.c) appends `mv_cells= mv_cell_ms= mv_cell_max_ms=
+    /// mv_top1= mv_top2=` after `budget_ms=`; the frontend (`Multiview::Render`) times each
+    /// scene-cell `obs_source_video_render` on the graphics thread and publishes the aggregate.
+    ///
+    /// The DECISIVE derived signal is `mv_ewma_ms − cell_ms` (the reader computes it): a small
+    /// `cell_ms` under a large `mv_ewma_ms` = the MV phase tail is present / GPU-sync (thermal),
+    /// a `cell_ms` near `mv_ewma_ms` = per-cell CPU-bound. `top1`/`top2` name the two fattest
+    /// cells of the window's worst render so the cell-reduction lever can target the right cell.
+    pub cells: Option<u32>,
+    /// Window-mean of the per-render scene-cell CPU render sum, ms (directly comparable to
+    /// `mv_ewma_ms`).
+    pub cell_ms: Option<f64>,
+    /// Window-max of the per-render scene-cell CPU render sum, ms (the worst render's cell cost).
+    pub cell_max_ms: Option<f64>,
+    /// `(name, ms)` of the fattest single cell in the window's worst render. `name` is the
+    /// emitter-sanitized scene name (space/`=`/`:` → `_`, so the space-tokenized line stays
+    /// parseable); an absent cell (`-`) parses to `None`.
+    pub top1: Option<(String, f64)>,
+    /// `(name, ms)` of the second-fattest cell in that same worst render.
+    pub top2: Option<(String, f64)>,
 }
 
 impl MvAuditSample {
@@ -201,6 +224,12 @@ pub fn parse_audit_line(line: &str) -> Option<MvAuditSample> {
         floor_fps: floor_fps?,
         cx: cx?,
         cy: cy?,
+        // camera-box #1260: not yet parsed (RED — the enriched-line test expects these populated).
+        cells: None,
+        cell_ms: None,
+        cell_max_ms: None,
+        top1: None,
+        top2: None,
     })
 }
 
@@ -421,6 +450,63 @@ mod tests {
     }
 
     #[test]
+    fn parse_populates_the_1260_per_cell_cell_tokens() {
+        // camera-box #1260 lever (1): the emitter appends per-cell MV instrumentation
+        // (mv_cells / mv_cell_ms / mv_cell_max_ms / mv_top1=name:ms / mv_top2=name:ms) after the
+        // #1260 budget tokens. This RED→GREEN proves the parser READS them (unknown-key tolerance
+        // means an old line ignores them; this asserts a NEW line actually populates them). The
+        // names are emitter-sanitized (spaces/`=`/`:` → `_`) so the space-tokenized line stays
+        // parseable — "CG bridge" arrives as "CG_bridge".
+        let line =
+            "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=14.0 target=30 \
+                    floor=28.0 cx=3840 cy=2160 pre_mv_ms=8.00 pre_mv_max_ms=9.00 mv_ewma_ms=21.50 \
+                    budget_ms=30.00 mv_cells=15 mv_cell_ms=18.40 mv_cell_max_ms=24.10 \
+                    mv_top1=Ableset:6.20 mv_top2=CG_bridge:4.10";
+        let s = parse_audit_line(line).expect("enriched line must still parse the core fields");
+        // core fields unaffected
+        assert_eq!(s.monitor, 1);
+        assert_eq!(s.cx, 3840);
+        // per-cell fields populated
+        assert_eq!(s.cells, Some(15));
+        assert!((s.cell_ms.expect("mv_cell_ms") - 18.40).abs() < 1e-9);
+        assert!((s.cell_max_ms.expect("mv_cell_max_ms") - 24.10).abs() < 1e-9);
+        let (n1, m1) = s.top1.as_ref().expect("mv_top1 must parse");
+        assert_eq!(n1, "Ableset");
+        assert!((m1 - 6.20).abs() < 1e-9);
+        let (n2, m2) = s.top2.as_ref().expect("mv_top2 must parse");
+        assert_eq!(n2, "CG_bridge");
+        assert!((m2 - 4.10).abs() < 1e-9);
+        // The DECISIVE derived signal the ticket needs is `mv_ewma_ms − cell_ms`: here
+        // 21.50 − 18.40 = 3.10 ms → mostly per-cell CPU-bound, not a GPU-wait/present tail.
+    }
+
+    #[test]
+    fn parse_of_a_pre_1260_line_leaves_the_cell_fields_none() {
+        // A pre-#1260 line (no mv_cells/... tokens) parses with every per-cell field None — the
+        // append is backward-compatible (no consumer that ignores the fields is affected).
+        let line = "multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080";
+        let s = parse_audit_line(line).expect("a pre-#1260 line must still parse");
+        assert_eq!(s.cells, None);
+        assert_eq!(s.cell_ms, None);
+        assert_eq!(s.cell_max_ms, None);
+        assert!(s.top1.is_none());
+        assert!(s.top2.is_none());
+    }
+
+    #[test]
+    fn parse_of_mv_top_dash_placeholder_is_none() {
+        // The emitter prints `mv_top1=-:0.00` when zero cells rendered (a degenerate frame). The
+        // parser treats the "-" placeholder as an ABSENT cell (None), never a cell literally
+        // named "-", so a reader never mistakes the placeholder for a real fat cell.
+        let line = "multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 \
+                    cx=1920 cy=1080 mv_cells=0 mv_cell_ms=0.00 mv_cell_max_ms=0.00 mv_top1=-:0.00 mv_top2=-:0.00";
+        let s = parse_audit_line(line).expect("must parse");
+        assert_eq!(s.cells, Some(0));
+        assert!(s.top1.is_none());
+        assert!(s.top2.is_none());
+    }
+
+    #[test]
     fn parser_rejects_the_genlock_lines_and_noise_771() {
         // The two directions the jitter_audit family requires: the MV parser must reject the
         // genlock lines, and (asserted in jitter_audit's own tests) they reject ours — the
@@ -585,6 +671,11 @@ multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=19
                 floor_fps: 28.0,
                 cx: 3840,
                 cy: 2160,
+                cells: None,
+                cell_ms: None,
+                cell_max_ms: None,
+                top1: None,
+                top2: None,
             })
             .collect()
     }
