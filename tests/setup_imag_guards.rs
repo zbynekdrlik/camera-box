@@ -1011,6 +1011,87 @@ fn setup_imag_dantesync_has_gh_release_and_cambox_fallback() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// #1289 (setup-device.sh sibling defect, ported here per coordinator directive) -- the SAME
+// curl-onto-live-path truncation shape as setup-device.sh's STEP 3/3b/17 (fixed in that ticket):
+// setup-imag.sh's dantesync install did `curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync`
+// AND the scp cam1-fallback branch wrote straight to `/usr/local/bin/dantesync` too — both
+// truncate the destination inode IN PLACE, which the kernel refuses (ETXTBSY) when the path is a
+// currently-running dantesync.service executable. The install is also only gated on "does the
+// path exist and is it executable" (`if [ ! -x /usr/local/bin/dantesync ]`), never on whether the
+// installed binary is actually at the release's target version -- mirror setup-device.sh's fix:
+// download to a temp file, verify non-empty, `install -m 0755` into place, and skip the whole
+// download+install when `dantesync --version` already matches the release URL's own tag.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_imag_never_downloads_dantesync_straight_onto_a_live_binary_path_1289() {
+    let body = read(SETUP);
+    assert!(
+        !body.contains("-o /usr/local/bin/dantesync"),
+        "{SETUP} must never `curl ... -o /usr/local/bin/dantesync` -- that truncates the \
+         destination IN PLACE, which the kernel refuses (ETXTBSY) when the path is a currently- \
+         running dantesync.service executable (#1289, mirroring the setup-device.sh fix). \
+         Download to a mktemp temp file, verify it non-empty, then `install -m 0755 tmp dest` \
+         (rename-into-place, safe over a running executable) instead."
+    );
+    assert!(
+        !body.contains(
+            "\"${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dantesync\" /usr/local/bin/dantesync"
+        ),
+        "{SETUP}: the cam1-fallback scp must not copy straight onto the live \
+         /usr/local/bin/dantesync path either -- scp -O truncates its destination in place, the \
+         SAME ETXTBSY hazard as the curl branch above (#1289). Copy to a temp file first, then \
+         `install -m 0755` it into place."
+    );
+}
+
+#[test]
+fn setup_imag_dantesync_install_skips_when_already_at_target_version_1289() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("DANTESYNC_TARGET_VERSION"),
+        "{SETUP} must derive the release's target version from the download URL (#1289) -- an \
+         idempotent re-run needs this to decide whether an install is even necessary"
+    );
+    assert!(
+        body.contains("DANTESYNC_CURRENT_VERSION") && body.contains("dantesync --version"),
+        "{SETUP} must read the currently-installed dantesync's own version via \
+         `dantesync --version` (#1289, per .claude/rules/dantesync-version-reading.md) before \
+         deciding whether to (re)install"
+    );
+    let compare_idx = body
+        .lines()
+        .position(|l| {
+            l.contains("DANTESYNC_CURRENT_VERSION") && l.contains("DANTESYNC_TARGET_VERSION")
+        })
+        .expect(
+            "a line comparing DANTESYNC_CURRENT_VERSION against DANTESYNC_TARGET_VERSION must \
+             exist -- that comparison is what lets an idempotent re-run skip the install (#1289)",
+        );
+    let repo_idx = body
+        .lines()
+        .position(|l| l.contains("DANTESYNC_REPO=\"zbynekdrlik/dantesync\""))
+        .expect("the DANTESYNC_REPO assignment must still be present");
+    assert!(
+        compare_idx > repo_idx,
+        "the version comparison (line {compare_idx}) must come after DANTESYNC_REPO is resolved \
+         (line {repo_idx}) (#1289)"
+    );
+}
+
+#[test]
+fn setup_imag_dantesync_install_from_temp_fails_loud_and_cleans_up_on_failure_1289() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dantesync || {"),
+        "{SETUP}: the `install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dantesync` call must \
+         be guarded by `|| {{ ... }}` so an install failure cleans up the temp file and fails \
+         loud via fail(), matching every other failure path in the same block (#1289, mirroring \
+         the setup-device.sh review-fix)"
+    );
+}
+
 /// #1215: imag-nb shipped with NO /etc/dantesync/config.json at all (a hand-placed fix, never
 /// provisioned by this script), so it ran on dantesync's built-in default (phase_slew.enabled=
 /// false) and corrected phase error by STEPPING (16x/hour of 6-7ms, a visible ~4-minute hitch on
