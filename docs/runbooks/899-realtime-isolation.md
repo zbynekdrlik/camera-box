@@ -162,6 +162,22 @@ one, never purge the kernel you are still running):
    WARNs "not PREEMPT_RT" (EXPECTED — preempt=full is STEP 1, full RT is STEP 2).
 9. `post-verify` — the full `verify-device.sh` gate + a full E2E + the before/after measurement below.
 
+**Purge keys on the OBSERVED stale set, not the pre-install prediction (cam5 miss, 2026-09-03).**
+The `superseded_generic` axis (`GEN`) is a PRE-install PREDICTION (GEN=1 iff the HWE generic meta is
+absent) and drives the purge only in the pre-install branch, where `uname -r` is still the OLD kernel
+so "installed image != uname -r" is not yet a valid stale signal. Once a box is ALREADY running
+`preempt=full` (the STEP-1 install + reboot are done), the planner instead reads an OBSERVED fact:
+`gather_facts` lists the installed `linux-image-<ver>-generic` packages whose `<ver>` != `uname -r`
+plus the `linux-image-generic` meta (surfaced as the `superseded_installed=` field on the `# facts:`
+line), and `rt_kernel_upgrade_plan` emits `purge-superseded-generic` + `verify-single-kernel`
+whenever that observed set is non-empty — naming the exact packages in `--commands` — instead of
+collapsing to `noop:already-lowlatency`. cam5 (10.77.9.65, 2026-09-03) sat exactly here: it ran
+`preempt=full` with GEN=0 (HWE meta present) yet a stale `6.8.0-134-generic` (+ modules/-extra) and
+the `linux-image-generic` meta were still installed; the old planner printed `noop` and never
+emitted the purge, silently leaving the single-kernel invariant (check `(k)`) violated until the
+supervisor purged by hand. So on a re-planned already-lowlatency box, re-run
+`scripts/rt-kernel-upgrade.sh --box <ip> --commands` and apply the purge it now emits.
+
 **Operational gotchas the planner now bakes in (supervisor findings 2026-08-22, cam1/2/3 upgrade).**
 These were hit live on all three boxes and are now folded into the planner's generated commands, so a
 copy-paste of `--commands` is safe on cam4 (do NOT hand-improvise them again):

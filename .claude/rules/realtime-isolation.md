@@ -79,6 +79,19 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   kernel → single-kernel-invariant handling (purge the old one after reboot). The planner's
   `superseded_generic` axis (gather_facts: HWE meta absent → 1) distinguishes them; do not assume
   config-only on the cam fleet.
+- **The purge keys on the OBSERVED stale set on an already-lowlatency box, NOT the prediction
+  (`GEN`) — the cam5 2026-09-03 gap.** `GEN` (gather_facts: HWE meta absent → 1) is a PRE-install
+  PREDICTION and drives the purge ONLY in the pre-install (run=0) branch, where `uname -r` is still
+  the OLD kernel so "installed image != uname -r" is not yet a valid stale signal. Once a box is
+  ALREADY running preempt=full (run=1), the planner instead reads an OBSERVATION — gather_facts's
+  6th `superseded_installed` field (installed `linux-image-<ver>-generic` whose `<ver>` != `uname
+  -r`, plus the `linux-image-generic` meta) — and emits `purge-superseded-generic` +
+  `verify-single-kernel` whenever it is non-empty, instead of collapsing to `noop`. cam5
+  (10.77.9.65) ran preempt=full with `GEN=0` (HWE meta present) yet a stale `6.8.0-134-generic`
+  (+ modules/-extra) and the generic meta still installed → the old prediction-only planner printed
+  `noop:already-lowlatency` and silently left the single-kernel invariant (check `(k)`) violated
+  until a hand purge. Never re-collapse the run=1 branch to a bare noop on the prediction; the
+  observed set is the fail-closed signal (early-gate-pin doctrine: observe, don't predict).
 - **`preempt=full` ≠ PREEMPT_RT.** Check `(ac)` keeps WARNing "not PREEMPT_RT" after STEP 1 — that
   is correct, not a regression. Only STEP 2 makes it read PREEMPT_RT.
 - **Measure before escalating.** STEP 2 (a self-owned kernel) is only justified by data — the
