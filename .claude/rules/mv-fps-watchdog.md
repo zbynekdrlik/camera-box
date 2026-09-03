@@ -224,23 +224,29 @@ enriched AGAIN (still APPEND-only) with WHICH cells cost what. Five more tokens 
 mv_top1=<sanitized-name>:<ms> mv_top2=<sanitized-name>:<ms>`.
 
 - **What it measures.** The FRONTEND multiview draw callback (`Multiview::Render`,
-  `frontend/components/Multiview.cpp` — the ONLY place cells are iterated) wraps each scene-cell
-  `obs_source_video_render(src)` with `os_gettime_ns()` (CPU wall-clock of async-texture upload +
-  convert + draw submission), sums them, tracks the two fattest cells, and publishes the per-render
-  aggregate ONCE per render via the new libobs API `obs_display_report_multiview_cells()` (declared
-  `obs.h`, defined `obs-display.c`); `render_display()` folds it into the #771 audit window and emits.
-  `mv_top1`/`mv_top2` are the two fattest cells of the window's WORST render (largest per-render sum),
-  so they always describe the same render. Names are sanitized (space/`=`/`:` → `_`) at the single
-  libobs copy point so the whitespace-tokenized line stays parseable; `-` = no cells this window.
+  `frontend/components/Multiview.cpp` — the ONLY place the items are iterated) times EVERY draw with
+  `os_gettime_ns()` (CPU wall-clock of async-texture upload + convert + draw submission) — the scene
+  cells AND the preview/program big cells AND the labels (review finding: a fat PREVIEW re-render,
+  Studio-Mode-always-on strih, must NOT be excluded or `mv_ewma_ms − mv_cell_ms` mis-routes the
+  lever) — sums them, tracks the two fattest ITEMS, and publishes the per-render aggregate ONCE per
+  render via the new libobs API `obs_display_report_multiview_cells()` (declared `obs.h`, defined
+  `obs-display.c`); `render_display()` folds it into the #771 audit window and emits. `mv_top1`/
+  `mv_top2` are the two fattest items of the window's WORST render (largest per-render sum), so they
+  always describe the same render (a scene name, or `preview`/`program`/`labels`). `mv_cells` counts
+  SCENE cells only. Names are sanitized (any byte outside printable ASCII / `=` / `:` → `_`) at the
+  single libobs copy point so the whitespace-tokenized, pure-ASCII line stays parseable and never
+  emits torn UTF-8 (the #1258/#1262 byte-safety invariant — the first operator string on this line);
+  `-` = no draws this window.
 - **HOW to read it on the rig (the whole point):** the DECISIVE signal is `mv_ewma_ms − mv_cell_ms`.
-  A SMALL `mv_cell_ms` under a LARGE `mv_ewma_ms` = the MV phase tail is present / GPU-fence / flush
-  wait, i.e. the GPU/thermal path (sub-lever 1b — the RTX 2070 SUPER SW-thermal-slowdown finding).
-  A `mv_cell_ms` NEAR `mv_ewma_ms` = per-cell CPU draw-submission bound (sub-lever 1a — cut cell
-  scenes / skip re-rendering cells with no new frame). `mv_top1`/`mv_top2` name the fat cell(s) to
-  target (a browser/Ableset cell? the dead CG-bridge NDI? a 4K camera?). Mind that `mv_cell_ms`
-  covers ONLY the scene cells, NOT the background box / region setup / labels / `gs_present`, so the
-  residual is "MV overhead + present/GPU-sync tail", not a pure GPU number — good enough to pick 1a
-  vs 1b, not a GPU-timestamp measurement (that is Approach C, deferred as perturbing).
+  Because `mv_cell_ms` covers EVERY timed draw, that residual is the UNtimed tail (begin/clear/region
+  setup + `gs_present`/GPU-fence/flush wait) — NOT skewed by a fat preview. A SMALL `mv_cell_ms`
+  under a LARGE `mv_ewma_ms` = the GPU/present/thermal path (sub-lever 1b — the RTX 2070 SUPER
+  SW-thermal-slowdown finding). A `mv_cell_ms` NEAR `mv_ewma_ms` = per-item CPU draw-submission bound
+  (sub-lever 1a — cut cell scenes / skip re-rendering an item with no new frame). `mv_top1`/`mv_top2`
+  name the fat item to target (a browser/Ableset cell? the dead CG-bridge NDI? a 4K camera? the
+  preview big cell?). The residual is still not a GPU-timestamp measurement (begin/clear/region
+  setup live in it too), so it picks 1a vs 1b, not the exact GPU-execution ms (that is Approach C,
+  deferred as perturbing) — but it is no longer confounded by the big-cell renders.
 - **REPORT-ONLY, thread-safe by construction.** The skip decision (`obs_display_should_skip`) is
   untouched. The frontend timing + the libobs fold + the emit/reset all run on the SINGLE graphics
   thread (the draw callback executes inside `render_display()`), the same single-writer discipline as
@@ -254,9 +260,11 @@ mv_top1=<sanitized-name>:<ms> mv_top2=<sanitized-name>:<ms>`.
   optional `Option<>` fields, unknown-key tolerant — RED→GREEN via the #1212 substitute-import
   rustc replica); the FRONTEND↔libobs chain is guarded by `mv_audit_emit.rs`'s
   `render_display_and_frontend_carry_the_per_cell_instrumentation_1260` test (std-only, runs via the
-  standalone-rustc recipe, reads the vendored source files); the pure name sanitizer
-  (`obs_audit_copy_cell_name`) lift-compiles standalone under `-Wall -Wextra -Wconversion -Wformat=2`
-  with a truth-table selftest; the format string is lock-stepped across `genlock_preload.rs` + BOTH
+  standalone-rustc recipe, reads the vendored source files — it also guards that preview + program
+  are timed, per the review fix); the pure name sanitizer (`obs_audit_copy_cell_name`) has a
+  COMMITTED lift-test `tests/mv_audit_cell_name_sanitizer_1260.rs` (extracts the real static from
+  obs-display.c, `cc -Wall -Wextra -Wconversion -Wformat=2` + a truth table incl. multibyte→`_` and
+  the 63-byte cap); the format string is lock-stepped across `genlock_preload.rs` + BOTH
   `windows-genlock*.yml`. Full frontend+libobs compile is CI-only.
 
 ## Contention profile (issue 1260 hard-debug lane, 2026-09-02) — CPU-SIDE-DOMINATED, not GPU-bound, not scheduling-starved
