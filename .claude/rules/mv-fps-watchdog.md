@@ -379,8 +379,14 @@ baseline. **VERIFIED 2026-09-03 (.617 PR E2E attempt 2, RUN_ID 132866162):** bot
 `decode priority: BelowNormal (E2E_ONBOX_DECODE_PRIORITY)`, the executed remote command carries the
 `PriorityClass = "BelowNormal"` statement verbatim, and the strih on-box decode block 05:50–05:57
 local produced **3 sub-25-fps MV ticks in 8 min** (per-minute 1,0,0,0,0,0,2,0) vs 89–117 per 10 min
-at Normal — ~30× fewer dips. The live `Get-Process … PriorityClass` read-back was MISSED (decode
-finished before the wake) — schedule it at run-start + ~28 min next time, not +37.
+at Normal — ~30× fewer dips. **The live `Get-Process … PriorityClass` read-back is VERIFIED too
+(2026-09-03 07:30 local, during the .618 PR E2E's own post-run decode):** strih
+`recording-verdict.exe` pid 3880 + `ffmpeg.exe` pid 21112 and stream `recording-verdict.exe` pid
+1868 + `ffmpeg.exe` pid 16764 all read `PriorityClass = BelowNormal` (`Win32_Process.Priority = 6`)
+— so the priority genuinely lands on BOTH processes on BOTH boxes, not only in the planner's
+printed command. Scheduling note that made this work: the decode window opens at run-start + ~28
+min, NOT +37 — a wake at +37 finds the decode already finished (that is how the first attempt
+missed it).
 
 ## Autostart-aware = reset the confirm streak on an OBS-log IDENTITY change
 
