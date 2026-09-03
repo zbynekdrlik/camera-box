@@ -224,3 +224,25 @@ genuine in-place re-run against a live box exercises it, which is exactly why bo
 latent since #599 (defect 1) and since the binary was first curl-installed (defect 2) until cam5/
 cam6/cam7's actual re-provisioning surfaced them, one after the other, in the SAME live run
 (2026-09-03 11:52–11:56Z).
+
+**The SAME defect existed in `setup-imag.sh`'s own dantesync install — ported the identical fix,
+plus one edge case unique to that script (#1289 follow-up).** `setup-imag.sh` had the exact same
+`curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync` shape, AND its cam1-fallback `scp -O`
+branch wrote straight onto the live path too (a `curl`-family sibling: `scp -O` also truncates its
+destination in place). Fixed identically (temp file + `install -m 0755`, both branches). **The
+edge case:** `setup-imag.sh`'s pre-existing gate was `if [ ! -x /usr/local/bin/dantesync ]` — a
+DELIBERATELY lenient "already there, don't even try the network" skip, because imag sits on a
+notebook with other network interfaces and "a re-provision cannot fail solely because GitHub is
+unreachable from imag's network" (the file's own pre-existing comment). A naive port of
+setup-device.sh's version-compare skip (`-n TARGET_VERSION && CURRENT = TARGET`) REGRESSED this:
+when the release URL fetch fails, `TARGET_VERSION` comes back empty, so the compare is false and
+the script falls into download-or-fallback-or-fail even for a box with a perfectly good dantesync
+already running — either an unwanted scp copy over the live binary, or a hard fail if `CAM_PW`
+happens to be unset. **Fix: `[ -x dantesync ] && { [ -z TARGET_VERSION ] || [ CURRENT = TARGET ]
+}`** — keep what's there whenever the target could not be determined (restores the old lenient
+behavior) OR when it's known to already match (the new version-aware behavior); only reinstall
+when the binary is missing or the version is KNOWN to differ. **The general lesson: when porting a
+fix from one script to a "similar" sibling, diff the GATING CONDITION too, not just the unsafe
+write — a stricter script's fail-loud-on-unreachable premise (setup-device.sh's `[ -n
+"$DANTESYNC_URL" ] || fail ...`, unconditional) does not automatically hold in a sibling that was
+deliberately written to tolerate the same failure differently.**
