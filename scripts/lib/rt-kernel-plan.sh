@@ -33,8 +33,8 @@
 # Pure functions (source + call directly; the twin is tests/rt_kernel_provision.rs, run_sourced):
 #   rt_kernel_flavour                    -> the decided kernel package (single source of truth)
 #   rt_kernel_readiness_verdict RUN CAND
-#   rt_kernel_upgrade_plan RUN INST GEN GRUBDEF [CAND]
-#   rt_kernel_step_command TOKEN
+#   rt_kernel_upgrade_plan RUN INST GEN GRUBDEF [CAND] [STALE]
+#   rt_kernel_step_command TOKEN [STALE]
 
 # The one decided kernel flavour -- referenced by every other function + the driver + the runbook.
 # STEP 1: the free official-archive low-latency meta (no Ubuntu Pro), matching the imag-nb precedent.
@@ -47,6 +47,34 @@ _rt_truthy() {
     1|y|yes|true|Y|YES|TRUE) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# _rt_stale_present VALUE -> exit 0 iff VALUE is a non-empty OBSERVED-stale token (not the empty or
+# `-` sentinel gather_facts emits when nothing superseded is installed). Set-e-safe: used only as an
+# `if` condition, never bare.
+_rt_stale_present() {
+  case "${1:-}" in
+    ''|'-') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# _rt_purge_pkglist STALE -> the space-joined, double-quoted apt package list for the OBSERVED
+# superseded-generic set. STALE is the comma-joined token gather_facts read off the box: each entry
+# is either a kernel version in `uname -r` form (e.g. 6.8.0-134-generic -> its image + modules +
+# modules-extra) or the literal `linux-image-generic` meta (purged verbatim). Empty / `-` -> "".
+# Pure: reads only its arg, emits to stdout, no side effects; set-e-safe (empty -> no iterations).
+_rt_purge_pkglist() {
+  local stale="${1:-}" out="" e
+  local IFS=','
+  for e in $stale; do
+    case "$e" in
+      ''|'-') continue ;;
+      linux-image-generic) out="$out \"linux-image-generic\"" ;;
+      *) out="$out \"linux-image-$e\" \"linux-modules-$e\" \"linux-modules-extra-$e\"" ;;
+    esac
+  done
+  printf '%s' "${out# }"
 }
 
 # rt_kernel_readiness_verdict RUNNING_LOWLAT LOWLAT_INSTALLED CANDIDATE_PRESENT -> one verdict token.
@@ -68,20 +96,32 @@ rt_kernel_readiness_verdict() {
   printf 'ready'
 }
 
-# rt_kernel_upgrade_plan RUNNING_LOWLAT LOWLAT_INSTALLED SUPERSEDED_GENERIC GRUB_DEFAULT [RT_CANDIDATE]
+# rt_kernel_upgrade_plan RUNNING_LOWLAT LOWLAT_INSTALLED SUPERSEDED_GENERIC GRUB_DEFAULT [RT_CANDIDATE] [STALE]
 # -> the ORDERED atomic per-box plan, one token per line, OR a single noop:/blocked: token.
 #
-# Axes (all 1/0 except GRUB_DEFAULT which is `saved` or a number):
-#   RUNNING_LOWLAT      : preempt=full is already the ACTIVE boot mode (nothing to do).
+# Axes (all 1/0 except GRUB_DEFAULT which is `saved` or a number, and STALE which is a token):
+#   RUNNING_LOWLAT      : preempt=full is already the ACTIVE boot mode.
 #   LOWLAT_INSTALLED    : the `lowlatency-kernel` config package is already installed (skip install).
 #   SUPERSEDED_GENERIC  : the install will pull a NEW generic HWE image alongside the running one, so
 #                         after reboot the OLD image is superseded and must be purged to restore the
 #                         single-kernel invariant. True on today's cam fleet (the HWE generic meta is
 #                         NOT installed -> a new HWE image comes in); FALSE on an imag-like box that
 #                         already tracks the HWE meta (config-only install, no new image, no purge).
+#                         GEN is a PRE-install PREDICTION; it drives the purge ONLY in the pre-install
+#                         (RUNNING_LOWLAT=0) branch, where "installed image != uname -r" is not yet a
+#                         valid stale signal (uname -r is still the OLD kernel before the reboot).
 #   RT_CANDIDATE (5th, default 1 = present): whether linux-lowlatency-hwe-24.04 is apt-resolvable.
 #                         Not installed AND no candidate -> `blocked:no-rt-candidate` (the fail-closed
 #                         shape kept from the pro-attach design), so the plan agrees with readiness.
+#   STALE (6th, default none): the OBSERVED superseded-generic set gather_facts read off the box
+#                         (comma-joined `<ver>` entries + the literal `linux-image-generic` meta; `-`
+#                         / empty = none). Consulted ONLY in the RUNNING_LOWLAT=1 branch, where the
+#                         box has already rebooted into the new kernel so `uname -r` IS the desired
+#                         kernel and "installed image != uname -r" correctly identifies genuinely
+#                         superseded images. When it is non-empty on an already-lowlatency box, the
+#                         plan emits the purge (+ single-kernel re-check) instead of a plain noop --
+#                         the cam5 (2026-09-03) case the predictive GEN could not see (GEN read 0,
+#                         a stale 6.8.0-134-generic still installed, single-kernel invariant violated).
 #
 # The order is the SAFE atomic sequence: install the config meta (which drops preempt=full) + pin
 # GRUB to the new image + regen (initrd-guaranteed, #295) + reboot INTO it, CONFIRM preempt=full is
@@ -89,8 +129,18 @@ rt_kernel_readiness_verdict() {
 # invariant. Never purge the kernel you are still running. Per-box GRUB drift is honoured: `saved`
 # boxes pin via grub-set-default, a numeric GRUB_DEFAULT pins the new menuentry.
 rt_kernel_upgrade_plan() {
-  local run="${1:-}" inst="${2:-}" gen="${3:-}" grubdef="${4:-}" cand="${5:-1}"
-  if _rt_truthy "$run"; then printf 'noop:already-lowlatency\n'; return 0; fi
+  local run="${1:-}" inst="${2:-}" gen="${3:-}" grubdef="${4:-}" cand="${5:-1}" stale="${6:-}"
+  if _rt_truthy "$run"; then
+    # Already preempt=full. GEN (the pre-install prediction) is moot now; decide the purge on the
+    # OBSERVED stale set. A stale generic still installed here means the reboot happened but the old
+    # image was never purged -> restore the single-kernel invariant; otherwise nothing to do.
+    if _rt_stale_present "$stale"; then
+      printf 'purge-superseded-generic\n'
+      printf 'verify-single-kernel\n'
+      return 0
+    fi
+    printf 'noop:already-lowlatency\n'; return 0
+  fi
   if ! _rt_truthy "$inst" && ! _rt_truthy "$cand"; then
     printf 'blocked:no-rt-candidate\n'; return 0
   fi
@@ -105,11 +155,14 @@ rt_kernel_upgrade_plan() {
   printf 'post-verify\n'
 }
 
-# rt_kernel_step_command TOKEN -> the concrete shell the SUPERVISOR runs for one plan token, or a
-# `# SUPERVISOR:` note for the reboot-class / post-reboot gates. Mutating commands wrap the `ro`
+# rt_kernel_step_command TOKEN [STALE] -> the concrete shell the SUPERVISOR runs for one plan token,
+# or a `# SUPERVISOR:` note for the reboot-class / post-reboot gates. Mutating commands wrap the `ro`
 # root remount themselves so each token is self-contained and copy-pasteable. `unknown-token` for
-# anything unrecognised (fail-loud, never a silent empty command).
+# anything unrecognised (fail-loud, never a silent empty command). STALE (optional 2nd arg) is used
+# ONLY by `purge-superseded-generic`: when the OBSERVED stale set is passed, the note names those
+# exact packages; with no STALE arg it keeps the per-box `<OLD_VER>` placeholder note (back-compat).
 rt_kernel_step_command() {
+  local stale="${2:-}"
   case "${1:-}" in
     install-lowlatency)
       # --allow-change-held-packages: the cam boxes hold their kernel packages (issue 295/487),
@@ -133,9 +186,13 @@ rt_kernel_step_command() {
       printf '# SUPERVISOR: after reboot, confirm preempt=full is ACTIVE: grep -qw preempt=full /proc/cmdline AND (cat /sys/kernel/debug/sched/preempt shows "(full)"); uname -r is still *-generic (the config meta keeps the generic image), NOT *-lowlatency' ;;
     purge-superseded-generic)
       # NEVER a wildcard generic purge -- the NEW running kernel is ALSO a generic image, so a glob
-      # would remove the kernel the box is running. Purge only the SPECIFIC pre-upgrade version,
-      # recorded before the upgrade.
-      printf '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the specific pre-upgrade image (the old uname -r noted before the upgrade), e.g.: mount -o remount,rw / && apt-get purge -y --allow-change-held-packages "linux-image-<OLD_VER>" "linux-modules-<OLD_VER>" && mount -o remount,ro / . NEVER a wildcard generic purge (that removes the new running kernel).' ;;
+      # would remove the kernel the box is running. When gather_facts has read the OBSERVED stale set
+      # off the box (2nd arg), name those EXACT packages; otherwise keep the per-box `<OLD_VER>` note.
+      if _rt_stale_present "$stale"; then
+        printf '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the OBSERVED superseded generic package(s): mount -o remount,rw / && apt-get purge -y --allow-change-held-packages %s && mount -o remount,ro / . NEVER a wildcard generic purge (that removes the new running kernel).' "$(_rt_purge_pkglist "$stale")"
+      else
+        printf '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the specific pre-upgrade image (the old uname -r noted before the upgrade), e.g.: mount -o remount,rw / && apt-get purge -y --allow-change-held-packages "linux-image-<OLD_VER>" "linux-modules-<OLD_VER>" && mount -o remount,ro / . NEVER a wildcard generic purge (that removes the new running kernel).'
+      fi ;;
     verify-single-kernel)
       printf '# SUPERVISOR: re-run verify-device.sh -- check (k) single-kernel invariant is restored; check (ac) still WARNs "not PREEMPT_RT" (EXPECTED -- preempt=full is STEP 1, full RT is STEP 2)' ;;
     post-verify)
