@@ -253,8 +253,10 @@ startup_chain_verdict() {
 # vendor-touching commit per line origin/main carries that DEPLOYED_SHA's own lineage never
 # received -- i.e. DEPLOYED_SHA is genuinely LAGGING relative to it); exit status mirrors the FIRST
 # failing git call (the merge-base resolve, then the log). Mirrors drift-guard.sh's
-# imag_genlock_range_log EXACTLY (same #1292 merge-base fix, same `--end-of-options` defense against
-# an unvalidated SHA value shaped like a git flag) -- scoped to the WHOLE `vendor/` tree instead of
+# imag_genlock_range_log's LOGIC exactly (same #1292 merge-base fix, same `--end-of-options` defense
+# against an unvalidated SHA value shaped like a git flag) -- two deliberate differences: `--format=
+# '%h %s'` instead of `--oneline` (identical output shape, consistent with this file's own
+# pre-existing `--format=` style elsewhere), and scoped to the WHOLE `vendor/` tree instead of
 # just `vendor/obs-studio vendor/distroav`, because this facet covers every deployed box (strih,
 # stream, imag), not only imag's own consumed paths (see genlock_parity_consumed_paths for that
 # per-box distinction, which this facet deliberately does NOT apply -- it PINS every box's deployed
@@ -282,9 +284,10 @@ vendor_pin_range_log() {
 # vendor_pin_ahead_log REPO_ROOT DEPLOYED_SHA -> #1292 review follow-up: the AHEAD-direction
 # counterpart to vendor_pin_range_log -- prints `git log --format='%h %s'
 # origin/main..DEPLOYED_SHA -- vendor/` (one vendor-touching commit per line DEPLOYED_SHA carries
-# that origin/main does not). Mirrors drift-guard.sh's imag_genlock_ahead_log exactly (same
+# that origin/main does not). Mirrors drift-guard.sh's imag_genlock_ahead_log's logic (same
 # `--end-of-options` defense, same explicit `-n` empty-SHA guard so an empty DEPLOYED_SHA fails LOUD
-# instead of silently resolving `origin/main..` as `origin/main..HEAD`).
+# instead of silently resolving `origin/main..` as `origin/main..HEAD`; same `--format=` vs
+# `--oneline` style difference as vendor_pin_range_log above).
 vendor_pin_ahead_log() {
   local repo_root="$1" deployed="$2"
   [ -n "$deployed" ] || return 128
@@ -374,7 +377,7 @@ genlock_vendor_pin_verdict() {
         "vendor_pin" "$deployed" "$n_ahead"
       return 0
     fi
-    printf '  %-22s ALARM    (deployed bundle %s genlock ORPHAN -- carries %s vendored vendor/** commit(s) reachable from NEITHER origin/main NOR origin/dev, redeploy the fleet):\n' \
+    printf '  %-22s ALARM    (deployed bundle %s genlock ORPHAN -- reachable from NEITHER origin/main NOR origin/dev; it carries %s vendored vendor/** commit(s) beyond origin/main, redeploy the fleet -- if this is unexpected, confirm origin/dev is fetched in this checkout):\n' \
       "vendor_pin" "$deployed" "$n_ahead"
     printf '%s\n' "$cleaned_ahead" | sed 's/^/                           - /'
     return 30

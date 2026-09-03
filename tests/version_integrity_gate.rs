@@ -2101,12 +2101,17 @@ fn vendor_pin_ahead_seam_flows_through_the_gate_to_ok_never_a_false_alarm_1292()
     );
     assert!(stdout.contains("GATE PASS"), "gate must pass: {stdout}");
     assert!(
-        stdout.contains("vendor_pin") && stdout.contains("OK") && stdout.contains("AHEAD"),
-        "vendor_pin must report OK/AHEAD, never ALARM: {stdout}"
+        stdout.contains("vendor_pin")
+            && stdout.contains("OK")
+            && stdout.contains(
+                "vendored vendor/** commit(s) AHEAD of origin/main on the dev candidate line"
+            ),
+        "vendor_pin must report the exact OK/AHEAD phrase, never ALARM: {stdout}"
     );
     assert!(
-        !stderr.contains("VENDOR-PIN ALARM"),
-        "an ahead-and-recognized bundle must NEVER fire the ALARM stderr banner: {stderr}"
+        !stdout.to_uppercase().contains("ALARM") && !stderr.contains("VENDOR-PIN ALARM"),
+        "an ahead-and-recognized bundle must NEVER fire the ALARM stderr banner (or print ALARM \
+         anywhere in stdout): {stdout} / {stderr}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
