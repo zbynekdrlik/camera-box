@@ -69,7 +69,10 @@ fn arm_check(env: &[(&str, &str)]) -> (String, bool) {
 #[test]
 fn both_unset_is_a_silent_no_op() {
     let (out, ok) = arm_check(&[]);
-    assert!(ok, "#1086: with both variables unset the guard must exit 0; out:\n{out}");
+    assert!(
+        ok,
+        "#1086: with both variables unset the guard must exit 0; out:\n{out}"
+    );
     assert!(
         out.trim().is_empty(),
         "#1086: with both variables unset the guard must print NOTHING (a normal gate run must be \
@@ -103,7 +106,9 @@ fn out_of_set_target_is_rejected_fail_closed() {
         "#1086: an out-of-set COLD_CUT_BYPASS_CAM must FAIL the arm check (fail-closed); out:\n{out}"
     );
     assert!(
-        out.contains("::error::") && out.contains("CAM7") && out.contains("not a valid bypass target"),
+        out.contains("::error::")
+            && out.contains("CAM7")
+            && out.contains("not a valid bypass target"),
         "#1086: the rejection must be a loud ::error:: naming the bad target; got:\n{out}"
     );
     // It must STILL have printed the ARMED banner first (so the operator sees it WAS armed).
