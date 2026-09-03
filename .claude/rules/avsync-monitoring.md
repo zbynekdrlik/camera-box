@@ -305,3 +305,55 @@ and the controller walked the pin 926→976 toward noise. The #1265 STABILITY GU
   (the sourced lib + the wiring; CI-run, cross-checked locally by running the python one-liners
   standalone + a `.find`/window simulation, since a worktree worker cannot `bash -c`-source the lib
   under the isolation guard and cannot run cargo).
+
+## The #856 controller has a FIXED LOOP GAIN 0.4 — the plant gain is ~2.31, so gain 1 diverges (#1265)
+
+The guard above protects against a one-run OUTLIER, but it CANNOT stabilize a loop whose gain > 1.
+The #856 controller applied `-residual` (loop gain 1) directly, and the measured PLANT gain is
+**~2.31 ms of residual per ms of `NDI 2ME PGM` pin** — collinear across three consecutive green
+runs (read from the verdict JSONs, `all_cambox_av_sync.residual_median_ms`):
+
+| run | pin | residual | slope |
+|---|---|---|---|
+| .613 | 925 | −33.6 | — |
+| .614 | 960 | +47.4 | (925→960) +81.0/+35 = **2.31** |
+| .615 | 913 | −61.4 | (960→913) −108.8/−47 = **2.31** |
+
+So the EFFECTIVE loop gain was 1×2.31 = 2.31 > 1, and the pin oscillated with GROWING amplitude
+(|33.6| → |47.4| → |61.4|), never converging. The physics of the 2.31 slope is UNKNOWN (mbc
+`audio_ts_lag_ms` was stable at ~86, strih delivery pins identical, stream OBS not relaunched —
+so it is neither the strih pin nor the mbc lag bundle-state measures) — but it does not need to be
+known to stabilize the loop, only bounded away from 1.
+
+- **The fix (Prístup 1):** a FIXED loop gain (default **0.4**, env `AV_SYNC_LOOP_GAIN`, a value in
+  (0, 1]; non-numeric / ≤0 / >1 → default 0.4 with a loud log line). The combined offset is DAMPED
+  `combined × gain` at `[8/8g]` (pure `scripts/av_sync_loop_gain.py::damped_offset`, pytest Tier-0,
+  via the `av_sync_apply_loop_gain` sourced helper) — BEFORE the #1265 guard sees `proposed_offset`
+  AND before the ±50/run clamp — so the effective loop gain is 0.4×2.31 = **0.92 < 1** and the loop
+  converges (error ×0.076/run: 913 + 0.4×61.4 = **938 ≈ the predicted null 940**; even if the plant
+  gain were really 1 it converges at 0.6/run). One constant, robust to the unknown slope in both
+  directions, no history dependence.
+- **Where the gain applies (topology):** measure (verdict) → combine (median,
+  `av_sync_combine_offsets.py`) → **GAIN (`av_sync_loop_gain.py`, at `[8/8g]`)** → guard
+  (`av_sync_apply_guard.py`, UNCHANGED — its jump-vs-last now sees the damped value) → ±50 clamp
+  (`av_sync_calibrate.py::required_delay_ms`, UNCHANGED) → apply → persist. The `cleanup()`
+  composition (`recording-e2e-cleanup-composition.md`) is NOT reordered — only the offset VALUE
+  changes and the calibrate call gains logging/persist args.
+- **Persist + observability:** `av-sync-last.json` gains `loop_gain` + `combined_offset_ms_raw`
+  (ADDED keys — the existing `source`/`offset_ms`/`applied_latency_ms`/`ts` contract is unchanged;
+  `offset_ms` is the DAMPED applied value). `av_sync_calibrate.py` emits ONE grep-able line at apply
+  time — `[av-sync] gain: combined=<raw> gain=<g> damped=<d> clamped=<c> pin <A> -> <B>` — while the
+  `[av-sync] SET '…' genlock_latency_ms_src: A -> B` line other consumers grep stays byte-identical.
+- **History corpus (Prístup 2 prep, REJECTED for now):** the adaptive slope estimator needs ≥ 5
+  points; this lane STARTS collecting them into the append-only `~/.camera-box/av-sync-history.jsonl`
+  (`scripts/av_sync_history.py`, pytest Tier-0; via the `av_sync_append_history` sourced helper,
+  written LAST in the #856 `cleanup()` block after the applied-offset persist): one JSON object per
+  run — run_id, ts, pin_at_measure, residual_median_ms, residual_spread_ms, proposed_offset_ms,
+  loop_gain, combined_offset_ms_raw, and EITHER applied_pin (a proceed) OR held+hold_reason. It is a
+  no-op when a run produced no measurement (residual-last is a prior run's), append-only, never
+  truncating, dir/file-tolerant.
+- **Tier-0:** `pytest tests/python/test_av_sync_loop_gain.py` (gain math + validation + the
+  pin-913→938 scenario) + `test_av_sync_history.py` (the append) + the loop-gain/persist/log-line
+  additions in `test_av_sync_calibrate.py`; `tests/harness_recording_e2e_av_sync_loop_gain_1265.rs`
+  guards the wiring at CI (cross-checked locally by a `.find`/window python simulation + a real
+  `bash` run of the sourced-lib helpers under `set -euo pipefail`).
