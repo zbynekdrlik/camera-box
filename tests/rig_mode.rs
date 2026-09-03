@@ -184,6 +184,56 @@ fn pre_event_genlock_staleness_check_wired_advisory_on_event_path_531() {
     );
 }
 
+/// Run the pure #1292 banner predicate over a captured `--check-imag` OUTPUT line.
+fn banner_needed(out: &str) -> String {
+    run_sourced(&format!("imag_genlock_stale_banner_needed '{out}'"))
+        .trim()
+        .to_string()
+}
+
+/// #1292 review follow-up: `scripts/drift-guard.sh`'s `genlock_build_drift_report` (the #1292
+/// merge-base fix) reports TWO distinct DRIFT reasons — "genlock STALE" (behind origin/main) and
+/// "genlock ORPHAN" (ahead of main, but reachable from neither origin/main nor origin/dev). The
+/// EVENT-path pre-event advisory banner (`warn_imag_genlock_stale`) used to key on the "genlock
+/// STALE" phrase ONLY, so an ORPHAN-drifted imag-nb build printed no pre-event warning at all — the
+/// operator would go live with an unrecognized genlock build and never see it flagged. The case is
+/// driven by a PURE predicate, `imag_genlock_stale_banner_needed`, so both DRIFT reasons are covered
+/// and the branch is Tier-0 unit-testable (source rig-mode.sh, no live rig/ssh needed, #477) — same
+/// seam pattern as `imag_genlock_gate_verdict` (#789) above.
+#[test]
+fn imag_genlock_stale_banner_covers_orphan_drift_too_1292() {
+    let src = std::fs::read_to_string(script()).expect("read rig-mode.sh");
+    assert!(
+        src.contains("imag_genlock_stale_banner_needed()"),
+        "#1292: rig-mode.sh must define the pure predicate imag_genlock_stale_banner_needed"
+    );
+    assert!(
+        src.contains("genlock ORPHAN"),
+        "#1292: the advisory banner predicate must ALSO key on drift-guard's 'genlock ORPHAN' DRIFT \
+         phrase (an orphan build must warn the operator too, not just a stale one)"
+    );
+
+    let stale = "  genlock_build          DRIFT    (imag-nb genlock STALE: box=abc1234 is 3 genlock-commit(s) behind origin/main [a,b,c]; deploy the latest build via setup-imag.sh step-12 at a safe off-event time)";
+    let orphan = "  genlock_build          DRIFT    (imag-nb genlock ORPHAN: box=abc1234 carries 2 vendored-genlock commit(s) reachable from NEITHER origin/main NOR origin/dev [d,e]; deploy the latest build via setup-imag.sh step-12 at a safe off-event time -- if this is unexpected, confirm origin/dev is fetched in this checkout)";
+    let ok = "  genlock_build          OK       (box=abc1234 is current with origin/main vendored-genlock HEAD)";
+
+    assert_eq!(
+        banner_needed(stale),
+        "1",
+        "#1292: a STALE genlock_build facet must still trigger the pre-event banner"
+    );
+    assert_eq!(
+        banner_needed(orphan),
+        "1",
+        "#1292: an ORPHAN genlock_build facet must ALSO trigger the pre-event banner"
+    );
+    assert_eq!(
+        banner_needed(ok),
+        "0",
+        "#1292: an OK genlock_build facet must NOT trigger the pre-event banner"
+    );
+}
+
 /// The text of do_test's body — from its own definition to do_event's (brace-anchored, the #901
 /// lesson: never a bare `funcname()` that a comment could also carry).
 fn do_test_body(src: &str) -> &str {
