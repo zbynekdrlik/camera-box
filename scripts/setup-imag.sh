@@ -430,8 +430,19 @@ if [ -x /usr/local/bin/dantesync ]; then
     DANTESYNC_CURRENT_VERSION="$(/usr/local/bin/dantesync --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 fi
 
-if [ -n "$DANTESYNC_TARGET_VERSION" ] && [ "$DANTESYNC_CURRENT_VERSION" = "$DANTESYNC_TARGET_VERSION" ]; then
-    echo "  dantesync already at v$DANTESYNC_CURRENT_VERSION -- skipping install"
+# #1289: an ALREADY-installed dantesync is fine to keep even when the release URL could not be
+# determined (imag's other network interfaces mean GitHub is not always reachable, per the
+# pre-existing fallback ladder below) -- only reinstall when we KNOW the target differs, never
+# because we simply couldn't check. Preserves the pre-#1289 behavior for this specific case (the
+# old `if [ ! -x /usr/local/bin/dantesync ]` gate skipped the whole ladder whenever a binary was
+# already present, regardless of network reachability).
+if [ -x /usr/local/bin/dantesync ] \
+    && { [ -z "$DANTESYNC_TARGET_VERSION" ] || [ "$DANTESYNC_CURRENT_VERSION" = "$DANTESYNC_TARGET_VERSION" ]; }; then
+    if [ -n "$DANTESYNC_TARGET_VERSION" ]; then
+        echo "  dantesync already at v$DANTESYNC_CURRENT_VERSION -- skipping install"
+    else
+        echo "  dantesync already installed (release URL unreachable -- keeping existing binary)"
+    fi
 else
     # download/copy to a temp file and `install -m 0755` it into place, never write straight onto
     # the live path (see #1289 rationale above) -- install's rename-into-place semantics are safe
