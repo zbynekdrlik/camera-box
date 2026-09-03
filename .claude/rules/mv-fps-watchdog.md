@@ -215,6 +215,58 @@ window. `mv_audit.rs` ignores unknown keys so every consumer is unaffected (prov
 add the same way (lift-compile the `blog` under `-Wformat=2`, offline `re.sub`-squish pwsh check,
 `mv_audit_emit.rs` via `rustc --test`, the #1212 substitute-import harness for `mv_audit.rs`).
 
+### Per-cell MV instrumentation (issue 1260 lever (1), LANDED — CI-compile + supervisor deploy pending)
+
+Because the budget-split above showed the MV PHASE itself is the variable cost (`mv_ewma_ms` 15-16
+healthy vs 21-22 collapsed) and the 4K→1080p A/B falsified fill-rate as the lever, the audit line was
+enriched AGAIN (still APPEND-only) with WHICH cells cost what. Five more tokens after `budget_ms=`:
+`mv_cells=<N> mv_cell_ms=<window-mean of the per-render scene-cell CPU sum> mv_cell_max_ms=<window-max>
+mv_top1=<sanitized-name>:<ms> mv_top2=<sanitized-name>:<ms>`.
+
+- **What it measures.** The FRONTEND multiview draw callback (`Multiview::Render`,
+  `frontend/components/Multiview.cpp` — the ONLY place the items are iterated) times EVERY draw with
+  `os_gettime_ns()` (CPU wall-clock of async-texture upload + convert + draw submission) — the scene
+  cells AND the preview/program big cells AND the labels (review finding: a fat PREVIEW re-render,
+  Studio-Mode-always-on strih, must NOT be excluded or `mv_ewma_ms − mv_cell_ms` mis-routes the
+  lever) — sums them, tracks the two fattest ITEMS, and publishes the per-render aggregate ONCE per
+  render via the new libobs API `obs_display_report_multiview_cells()` (declared `obs.h`, defined
+  `obs-display.c`); `render_display()` folds it into the #771 audit window and emits. `mv_top1`/
+  `mv_top2` are the two fattest items of the window's WORST render (largest per-render sum), so they
+  always describe the same render (a scene name, or `preview`/`program`/`labels`). `mv_cells` counts
+  SCENE cells only. Names are sanitized (any byte outside printable ASCII / `=` / `:` → `_`) at the
+  single libobs copy point so the whitespace-tokenized, pure-ASCII line stays parseable and never
+  emits torn UTF-8 (the #1258/#1262 byte-safety invariant — the first operator string on this line);
+  `-` = no draws this window.
+- **HOW to read it on the rig (the whole point):** the DECISIVE signal is `mv_ewma_ms − mv_cell_ms`.
+  Because `mv_cell_ms` covers EVERY timed draw, that residual is the UNtimed tail (begin/clear/region
+  setup + `gs_present`/GPU-fence/flush wait) — NOT skewed by a fat preview. A SMALL `mv_cell_ms`
+  under a LARGE `mv_ewma_ms` = the GPU/present/thermal path (sub-lever 1b — the RTX 2070 SUPER
+  SW-thermal-slowdown finding). A `mv_cell_ms` NEAR `mv_ewma_ms` = per-item CPU draw-submission bound
+  (sub-lever 1a — cut cell scenes / skip re-rendering an item with no new frame). `mv_top1`/`mv_top2`
+  name the fat item to target (a browser/Ableset cell? the dead CG-bridge NDI? a 4K camera? the
+  preview big cell?). The residual is still not a GPU-timestamp measurement (begin/clear/region
+  setup live in it too), so it picks 1a vs 1b, not the exact GPU-execution ms (that is Approach C,
+  deferred as perturbing) — but it is no longer confounded by the big-cell renders.
+- **REPORT-ONLY, thread-safe by construction.** The skip decision (`obs_display_should_skip`) is
+  untouched. The frontend timing + the libobs fold + the emit/reset all run on the SINGLE graphics
+  thread (the draw callback executes inside `render_display()`), the same single-writer discipline as
+  the other `render_audit_*` fields — NO locks. New `obs_display` fields:
+  `render_audit_cell_sum_ns`/`_max_ns`/`_render_count`/`_count` + `render_audit_top{1,2}_ns` +
+  `render_audit_top{1,2}_name[64]`, reset per window.
+- **Deferred (not dropped):** a per-cell "had a NEW async frame this tick" count needs a source-
+  internal field (`async_update_texture`) exposed via a new accessor; the per-cell CPU sum already
+  bounds the upload cost, so it was left as a follow-up candidate.
+- **Verify a further token/field the same way:** the pure parser add is Tier-0 (`src/mv_audit.rs`
+  optional `Option<>` fields, unknown-key tolerant — RED→GREEN via the #1212 substitute-import
+  rustc replica); the FRONTEND↔libobs chain is guarded by `mv_audit_emit.rs`'s
+  `render_display_and_frontend_carry_the_per_cell_instrumentation_1260` test (std-only, runs via the
+  standalone-rustc recipe, reads the vendored source files — it also guards that preview + program
+  are timed, per the review fix); the pure name sanitizer (`obs_audit_copy_cell_name`) has a
+  COMMITTED lift-test `tests/mv_audit_cell_name_sanitizer_1260.rs` (extracts the real static from
+  obs-display.c, `cc -Wall -Wextra -Wconversion -Wformat=2` + a truth table incl. multibyte→`_` and
+  the 63-byte cap); the format string is lock-stepped across `genlock_preload.rs` + BOTH
+  `windows-genlock*.yml`. Full frontend+libobs compile is CI-only.
+
 ## Contention profile (issue 1260 hard-debug lane, 2026-09-02) — CPU-SIDE-DOMINATED, not GPU-bound, not scheduling-starved
 
 Read-only profile of obs64 on strih during the live E2E (one ~12 s window, one OBS session, build
@@ -247,7 +299,11 @@ GPU thermal slowdown and box contention each add the missing ~6 ms.
 
 **LEVERS (Fable-ranked; all need a rig deploy/config = supervisor steps):** (1) instrument → deploy →
 read the pre-MV/MV split → reduce the fat phase (now known to be the MV phase itself — per-cell
-source render + async-texture upload + submission; instrument PER CELL next);
+source render + async-texture upload + submission). **PER-CELL instrumentation LANDED (issue 1260
+lane, CI-compile + supervisor deploy pending) — see the "per-cell MV instrumentation" subsection
+below.** The next step after the deploy is a rig read of the new tokens to decide sub-lever (1a)
+CPU-bound (cut per-cell cell scenes / re-render only cells whose source has a new frame) vs (1b)
+GPU/present-wait tail (the thermal/cooling issue);
 (2) MV 4K→1080p A/B — **RUN 2026-09-03, FALSIFIED**: on the idle rig, burns OFF, the same collapsed
 state measured 13.1 fps / `mv_ewma` 21.6 at 3840×2160 fullscreen, 15.3 fps / 20.4 at a 1920×1080
 windowed projector, 17.5 fps / 19.7 back at 4K (n=29/35/34 ticks) — quartering the pixels moved the

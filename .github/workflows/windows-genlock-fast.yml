@@ -512,7 +512,7 @@ jobs:
         shell: pwsh
         run: |
           $disp = (Get-Content "vendor/obs-studio/libobs/obs-display.c" -Raw) -replace '\s+', ' '
-          if ($disp -notmatch [regex]::Escape('"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f"')) { Write-Error "obs-display.c: #771 multiview-audit blog line gone -- the multiview render fps is no longer visible in the OBS log"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u pre_mv_ms=%.2f pre_mv_max_ms=%.2f mv_ewma_ms=%.2f budget_ms=%.2f mv_cells=%u mv_cell_ms=%.2f mv_cell_max_ms=%.2f mv_top1=%s:%.2f mv_top2=%s:%.2f"')) { Write-Error "obs-display.c: #771 multiview-audit blog line gone -- the multiview render fps is no longer visible in the OBS log"; exit 1 }
           if ($disp -notmatch [regex]::Escape('if (audit_elapsed >= MULTIVIEW_AUDIT_WINDOW_NS)')) { Write-Error "obs-display.c: #771 ~5s audit-window gate gone -- the multiview-audit line no longer emits periodically"; exit 1 }
           if ($disp -notmatch [regex]::Escape('display->render_audit_render_count++;')) { Write-Error "obs-display.c: #771 real-render counter not bumped -- rendered_fps would always read 0"; exit 1 }
           if ($disp -notmatch [regex]::Escape('display->render_audit_id = ++next_audit_id;')) { Write-Error "obs-display.c: #771 stable per-projector audit id assignment gone -- monitor=N would be unstable"; exit 1 }
