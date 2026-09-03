@@ -113,11 +113,15 @@ fn no_conn_arm_and_stale_arm_gate_the_force_on_the_helper_result() {
             "#1287: the no_connections==0 sleep+continue close not found after the window check",
         );
     let nc_arm = &src[nc_start..nc_start + nc_end_rel];
+    // Anchor the WHOLE adjacency (the helper gate AND the corrective set it guards) so deleting only
+    // the `force_by_name_next_reset_1180 = true;` line — which the bare flag string tolerates, that
+    // token appears at 3 other unrelated sites — still fails here (review #1287 🟡).
     assert!(
-        nc_arm.contains("if (ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180))"),
-        "{NDI_SOURCE}: #1287 — the no_connections==0 arm does not gate the force on the helper result. \
-         A frame-less BY-URL bind (the ticket's own `systemctl restart camera-box` graceful-FIN case) \
-         is never flipped to BY-NAME:\n{nc_arm}"
+        nc_arm.contains("if (ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;"),
+        "{NDI_SOURCE}: #1287 — the no_connections==0 arm does not gate the force (or drops the \
+         corrective force_by_name_next_reset_1180 set) on the helper result. A frame-less BY-URL bind \
+         (the ticket's own `systemctl restart camera-box` graceful-FIN case) is never flipped to \
+         BY-NAME:\n{nc_arm}"
     );
 
     // The #767 stale-while-connected arm: from its decision call to its `continue;`.
@@ -129,9 +133,10 @@ fn no_conn_arm_and_stale_arm_gate_the_force_on_the_helper_result() {
         .expect("#1287: the #767 arm's last_frame refresh + continue close not found");
     let st_arm = &src[st_start..st_start + st_end_rel];
     assert!(
-        st_arm.contains("if (ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180))"),
-        "{NDI_SOURCE}: #1287 — the #767 stale-while-connected arm does not gate the force on the helper \
-         result, so a connected-but-silent frame-less BY-URL bind (no_conn>0) can loop BY-URL forever:\n{st_arm}"
+        st_arm.contains("if (ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;"),
+        "{NDI_SOURCE}: #1287 — the #767 stale-while-connected arm does not gate the force (or drops the \
+         corrective force_by_name_next_reset_1180 set) on the helper result, so a connected-but-silent \
+         frame-less BY-URL bind (no_conn>0) can loop BY-URL forever:\n{st_arm}"
     );
 }
 
