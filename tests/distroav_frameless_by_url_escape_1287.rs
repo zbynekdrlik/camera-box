@@ -201,7 +201,9 @@ fn frameless_decision_computes_the_spec_truth_table() {
     let helper = lift_helper();
     let vs = vectors();
 
-    let mut c = String::from("#include <stdio.h>\n");
+    // The real ndi-source.cpp is C++ (bool is native); the lift compiles as C, so pull in
+    // <stdbool.h> for bool/true/false. This is a harness prelude, not part of the lifted helper.
+    let mut c = String::from("#include <stdio.h>\n#include <stdbool.h>\n");
     c.push_str(&helper);
     c.push_str("\nint main(void){\n");
     for v in &vs {

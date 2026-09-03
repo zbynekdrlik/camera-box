@@ -233,6 +233,28 @@ static inline bool ndi_by_url_identity_mismatch(const char *connected_url, const
 	return strcmp(connected_url, resolved_url_for_name) != 0; /* both known + differ -> MISMATCH */
 }
 
+/* camera-box #1287: after a rebind delivered ZERO frames, decide whether the NEXT reset should
+ * connect BY-NAME (skip the #1096 fresh-finder BY-URL path). A frame-less BY-URL bind is the
+ * dead-port wedge: after a graceful cambox sender restart the #1096 "fresh" per-reset finder keeps
+ * serving the DYING sender's cached advertisement, so the receiver re-resolves the SAME now-dead
+ * cached port every reset; no frames arrive, so #1180's post-connect identity verify (gated on
+ * frames_seen) never fires and nothing flips the bind mode -- the leg loops BY-URL forever. Forcing
+ * BY-NAME next lets NDI re-resolve the live sender. Because the default un-forced reset connects
+ * BY-URL, forcing BY-NAME ONLY after a frame-less BY-URL bind ALTERNATES BY-URL <-> BY-NAME across
+ * consecutive frame-less rebinds -- so neither this stale-URL wedge nor the #1096 poisoned-name
+ * wedge can pin a leg. A bind that DID deliver frames (frames_seen) never forces anything: steady
+ * state, and the #1180 identity path owns the wrong-sender-with-frames case. Returns true iff the
+ * current bind was BY-URL AND delivered no frames. PURE (only primitives) so it lift-compiles +
+ * truth-table-tests offline -- CI is otherwise the first compiler for this file
+ * (tests/distroav_frameless_by_url_escape_1287.rs). See
+ * .claude/rules/distroav-receiver-lifecycle.md. */
+static inline bool ndi_force_by_name_after_frameless(bool connected_by_url, bool frames_seen_since_reset)
+{
+	if (frames_seen_since_reset)
+		return false; /* frames flowed -> not a wedge; #1180 identity path owns it */
+	return connected_by_url; /* frame-less BY-URL -> force BY-NAME next (alternates; default is BY-URL) */
+}
+
 /* camera-box #257: per-source MEASUREMENT-BURN setter, runtime-resolved by name — same
  * rationale as the fifo/latency setters: the Windows DistroAV build fetches stock OBS SDK
  * headers (no genlock symbols), so a link-time call cannot build; resolve at runtime so
@@ -1229,6 +1251,19 @@ void *ndi_source_thread(void *data)
 				no_conn_since_ns = now_nc;
 			if ((now_nc - no_conn_since_ns) >= GENLOCK_RECONNECT_STALE_NS &&
 			    genlock_source_is_active(s->obs_source)) {
+				// camera-box #1287: a frame-less BY-URL bind is the dead-port wedge -- the #1096
+				// fresh finder kept resolving the restarted sender's stale cached URL to a now-dead
+				// port, frames never arrive, so #1180's frames-gated identity verify never fires and
+				// this arm otherwise loops BY-URL forever. Force the NEXT reset BY-NAME; because the
+				// default reset is BY-URL this ALTERNATES the two modes across consecutive frame-less
+				// rebinds, so neither this stale-URL wedge nor the #1096 poisoned-name wedge pins the
+				// leg. A bind that delivered frames is untouched (#1180 owns it).
+				if (ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) {
+					force_by_name_next_reset_1180 = true;
+					obs_log(LOG_WARNING,
+						"genlock: #1287 frame-less BY-URL bind (dead sender port?) -- forcing BY-NAME on the next rebind '%s'",
+						obs_source_name);
+				}
 				obs_log(LOG_INFO,
 					"genlock: NDI receiver disconnected (no_connections==0) past the stale window -- forcing fresh-finder rebind (sender restart?) '%s'",
 					obs_source_name);
@@ -1276,6 +1311,18 @@ void *ndi_source_thread(void *data)
 		if (genlock_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,
 					       os_gettime_ns(), s->last_frame_timestamp,
 					       GENLOCK_RECONNECT_STALE_NS)) {
+			// camera-box #1287: cover the connected-but-silent (no_conn>0) sibling of the dead-port
+			// wedge too -- a BY-URL bind that established a connection but delivered ZERO frames would
+			// otherwise loop BY-URL here (this arm always took the default BY-URL reset). Same
+			// alternation rule as the no_connections==0 arm: force BY-NAME next only after a frame-less
+			// BY-URL bind. A healthy bind that delivered frames then went silent (the original #767
+			// stuck-connection case) keeps the default BY-URL fresh-finder re-resolve untouched.
+			if (ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) {
+				force_by_name_next_reset_1180 = true;
+				obs_log(LOG_WARNING,
+					"genlock: #1287 frame-less BY-URL bind stale while connected -- forcing BY-NAME on the next rebind '%s'",
+					obs_source_name);
+			}
 			obs_log(LOG_INFO,
 				"genlock: NDI receiver stale while connected -- forcing rebind (sender restart?) '%s'",
 				obs_source_name);
