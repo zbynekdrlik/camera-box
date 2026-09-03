@@ -410,21 +410,59 @@ step 3 "DanteSync (#479): pin imag's system clock to the cluster master (genlock
 # NEVER timesyncd/chrony/ptp4l alongside it. Pin the NIC ($NIC, resolved in step 1) since imag is
 # a notebook with other network interfaces that must not be mistaken for the rig link.
 DANTESYNC_REPO="zbynekdrlik/dantesync"
-if [ ! -x /usr/local/bin/dantesync ]; then
-    DANTESYNC_URL="$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null \
-        | grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' \
-        | grep -o 'https://[^"]*' | head -1 || true)"
+DANTESYNC_URL="$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null \
+    | grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' \
+    | grep -o 'https://[^"]*' | head -1 || true)"
+
+# #1289: derive the release's TARGET version from the download URL's own path
+# (.../releases/download/vX.Y.Z/dantesync-linux-amd64), and read the CURRENTLY-installed
+# dantesync's own version (per .claude/rules/dantesync-version-reading.md: `dantesync --version`
+# answers on every platform, no journal/bundle-state coupling needed). Skip the install entirely
+# when they already agree -- both to avoid a needless replace on an idempotent re-run, and because
+# `curl -o`/`scp -O` straight onto a RUNNING dantesync.service binary fails (the kernel refuses to
+# open a currently-executing file for write, ETXTBSY) -- mirrors the setup-device.sh #1289 fix.
+DANTESYNC_TARGET_VERSION=""
+if [ -n "$DANTESYNC_URL" ]; then
+    DANTESYNC_TARGET_VERSION="$(printf '%s\n' "$DANTESYNC_URL" | grep -oE '/v[0-9]+\.[0-9]+\.[0-9]+/' | head -1 | tr -d '/v' || true)"
+fi
+DANTESYNC_CURRENT_VERSION=""
+if [ -x /usr/local/bin/dantesync ]; then
+    DANTESYNC_CURRENT_VERSION="$(/usr/local/bin/dantesync --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+fi
+
+if [ -n "$DANTESYNC_TARGET_VERSION" ] && [ "$DANTESYNC_CURRENT_VERSION" = "$DANTESYNC_TARGET_VERSION" ]; then
+    echo "  dantesync already at v$DANTESYNC_CURRENT_VERSION -- skipping install"
+else
+    # download/copy to a temp file and `install -m 0755` it into place, never write straight onto
+    # the live path (see #1289 rationale above) -- install's rename-into-place semantics are safe
+    # over a running dantesync.service.
+    _dantesync_dl_tmp="$(mktemp)"
     if [ -n "$DANTESYNC_URL" ]; then
-        curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync || fail "dantesync download failed"
+        curl -fsSL "$DANTESYNC_URL" -o "$_dantesync_dl_tmp" || {
+            rm -f "$_dantesync_dl_tmp"
+            fail "dantesync download failed"
+        }
     elif [ -n "${CAM_PW:-}" ]; then
         command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
         sshpass -p "$CAM_PW" scp -O -o StrictHostKeyChecking=no \
-            "${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dantesync" /usr/local/bin/dantesync \
-            || fail "dantesync copy from cam1 fallback failed"
+            "${DESKTOP_USER}@${NDI_PEER}:/usr/local/bin/dantesync" "$_dantesync_dl_tmp" \
+            || {
+                rm -f "$_dantesync_dl_tmp"
+                fail "dantesync copy from cam1 fallback failed"
+            }
     else
+        rm -f "$_dantesync_dl_tmp"
         fail "dantesync: no GitHub release asset found and CAM_PW unset for the cam-box fallback copy"
     fi
-    chmod +x /usr/local/bin/dantesync
+    [ -s "$_dantesync_dl_tmp" ] || {
+        rm -f "$_dantesync_dl_tmp"
+        fail "downloaded/copied dantesync is empty"
+    }
+    install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync || {
+        rm -f "$_dantesync_dl_tmp"
+        fail "could not install dantesync to /usr/local/bin/dantesync"
+    }
+    rm -f "$_dantesync_dl_tmp"
 fi
 [ -x /usr/local/bin/dantesync ] || fail "dantesync binary missing after install attempt"
 
