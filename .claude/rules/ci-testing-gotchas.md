@@ -914,3 +914,33 @@ Markdown bullet and every following unindented line as a "list item without inde
 rewording (`plus …`), never by indenting prose that is not a list. Pre-push local net (cheap,
 run over every touched `.rs`): `grep -nE '^\s*//[/!] ?([-+*]|[0-9]+\.) ' <files>` and check that
 each hit is a REAL list item whose continuation lines are indented by 2+ spaces.
+
+## Inserting a NEW line right after an existing `# shellcheck disable=SC2XXX` directive silently REBINDS it to the wrong statement (issue 1260)
+
+A shellcheck inline directive comment applies ONLY to the command on the IMMEDIATELY FOLLOWING
+line — not "somewhere nearby". Adding a genuinely-needed new statement (e.g. `local prio;
+prio="$(some_resolver)"`) between an EXISTING `# shellcheck disable=SC2016  # <reason>` comment and
+the `printf`/command it was written for silently detaches the directive from its intended target:
+the directive now suppresses SC2016 on the NEW line (which may not even trigger it), and the
+ORIGINAL line it was meant to protect starts firing the warning again. `shellcheck -S warning`
+(CI's gate level here) stayed clean either way in the live case (SC2016 is style-tier), so this is
+easy to miss — it only surfaced under `shellcheck -S style` in a fresh-context adversarial review.
+**Fix:** when inserting ANY new line between a `# shellcheck disable=...` comment and its target,
+move the directive down to sit immediately above the target again. **Prevention:** after editing
+near a shellcheck directive, run `shellcheck -S style <file> | grep SC<the-disabled-code>` — a hit
+means the directive is no longer covering what it says it covers.
+
+## Calling a validate-and-warn resolver function TWICE (once to build a value, once to log it) double-prints its side effect (issue 1260)
+
+A pure-looking resolver like `onbox_decode_priority_class()` (reads an env var, validates it,
+prints a `WARNING` to stderr on a bad value) is NOT side-effect-free on the invalid path — calling
+it a second time purely to obtain the SAME value for a log line (rather than reusing the value the
+FIRST call already produced) re-runs the validation and re-prints the warning, so an operator sees
+the same typo'd override reported twice in one run's log. Caught by a fresh-context adversarial
+review, not by any test (the RED/GREEN test suite only asserted the value was correct, never that
+stderr appeared exactly once). **Fix pattern:** compute the value ONCE (here: `main()` extracts the
+already-resolved class back out of the built command string via a pure parameter-expansion parse,
+`${ONBOX_CMD#*PriorityClass = \"}` / `${...%%\"*}`, rather than calling the resolver again) and
+reuse it for both the command AND the log line. When adding a NEW test for a validate-and-warn
+function, assert the WARNING's exact occurrence count somewhere in the full flow, not just that it
+appears — this class of bug is invisible to a "does it contain WARNING" check.
