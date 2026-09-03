@@ -328,3 +328,18 @@ disagree with — the gate that already owns that signal's real acceptance bar.*
 "widen the tolerance" or "soften the gate" — it is recognizing that ONE of the two gates should not
 be deciding that signal's fate at all once the other genuinely owns it; scope each gate to what its
 OWN acceptance criteria actually named, never to "anything left over that feels risky".
+
+**Tier-0 verification technique for a fix that spans TWO sibling crate-root modules — a COMBINED
+rustc replica, not two separate ones.** `frozen_leg.rs` and `self_heal_attribution.rs` are both
+pure (no probe deps) but `self_heal_attribution.rs` `use crate::frozen_leg::{...}` — a standalone
+`rustc --test` replica of EITHER file alone (the existing single-file pattern, see
+`verdict-gate-seam-calibration.md` §11) cannot prove the FIX didn't silently break the SIBLING
+module's own tests, which is exactly the risk here (6 `self_heal_attribution.rs` fixtures relied
+on `frozen_leg`'s removed branch to reach a classified-Frozen window). Concatenate both files as
+`pub mod frozen_leg { <frozen_leg.rs verbatim> }` / `pub mod self_heal_attribution { <verbatim,
+its `use crate::frozen_leg::...` line resolves unchanged since `crate` = this ONE combined file>
+}` into one scratch file, then `rustc --edition 2021 --test <file> -o <bin> && <bin>` — this ran
+ALL 35 (later 36) tests from both modules together and genuinely caught nothing broken. Reusable
+whenever a fix to a shared pure module has sibling pure-module consumers with their own test
+suites — never assume the sibling module's tests are unaffected just because you didn't touch its
+file; verify with the combined replica.
