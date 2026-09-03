@@ -282,3 +282,64 @@ True` (the delivery-spread pattern) so a pre/post-flip verdict routes to exactly
 double-count). And when a flip moves ONE sub-signal of a COMBINED report-only label to blocking
 (e.g. `frozen` out of the old `"zamrznutá/stale vetva"`), SPLIT the label — else the report-only
 line echoes a now-blocking term (`zamrznutá`) directly under its own FAIL bullet.
+
+## The FIRST strict run failed on a diffuse-copies shape — `classify_leg`'s conservative branch removed (item 2 follow-up, 2026-09-03)
+
+The item-2 restore above went live and its very FIRST strict E2E run (PR .615, run 33688893588,
+`verdict-611325119.json`, RUN_ID 611325119) failed — but not on a real freeze. `frozen_leg.frozen`
+fired on CAM2's window since `1788388542251771245`: `copies=18`, `frames=847`, ~30.2s window,
+`density≈0.0213`, `approx_stale_secs≈0.64` — BOTH `#758` thresholds (5.0s / 10%) sat FAR under
+their bar. The window's own `residual_events` showed all 18 copies as ISOLATED single-frame
+duplicates (`kind:"copy"`, `tick_before==tick_after`) spread across the window (offsets 1.2s,
+6.07s, 6.5s, 7.57s, 8.34s, 9.47s, 10.9s…) — a diffuse FIFO-jitter signature
+(`genlock-fifo-limit-cycle-diagnosis.md`), not a contiguous stuck run — and the SAME window was
+already `#889 WITHIN TOLERANCE` under CAM2's own per-cambox `copies_gaps_tolerance` (25, issue
+1249): two gates over ONE signal had disagreed.
+
+**Root cause: `frozen_leg::classify_leg` carried a THIRD, conservative branch beyond the two real
+`#758` thresholds** — any window whose `copies` count exceeded `STALE_REPLAY_MAX_ISOLATED` (5)
+classified `Frozen` even when NEITHER real threshold tripped. Harmless while item 2 was
+report-only; the moment item 2 flipped BLOCKING, that branch started failing exactly the diffuse
+class the per-cambox tolerance already owns correctly.
+
+**Fix (supervisor design, comment 5517958915, Approach 1 — the other two rejected: a per-cambox
+allowance threaded into `classify_leg` couples it to the WALKED tolerance and needs a probe-gated
+signature change for no benefit; a contiguity-based freeze metric from `residual_events` is a
+bigger root-cause-lane change, deferred to issue 1242):** `classify_leg` is now strictly two-tier —
+`Frozen` ⇔ one of the two `#758` thresholds trips; everything else with `copies > 0` is
+`StaleReplay { copies }`, regardless of the count. `frozen_leg` now measures EXACTLY what the
+`#758` acceptance criteria named (sustained MORE than 5s or MORE than 10% of the window — strict
+`>`, exactly-at-the-boundary is still `StaleReplay`, see `frozen_leg.rs`'s own
+`exactly_at_both_thresholds_is_not_yet_frozen` test); the diffuse class has
+exactly ONE owner again (the per-cambox tolerance). `STALE_REPLAY_MAX_ISOLATED` stays as a
+documented, now genuinely UNUSED informational constant (see `frozen_leg.rs`'s own doc). No new
+parameters, no probe-gated call-site change — the fix is entirely confined to the one pure
+Tier-0 crate-root module (see `frozen_leg.rs`'s own module doc for the full evidence + mechanism).
+
+**Item 2 stays BLOCKING — this is a FIX to the classifier, not a re-decouple.** `.616` = this fix;
+if a FUTURE strict run still fails `frozen_leg` on a genuinely diffuse (tolerance-owned) shape, that
+is evidence AGAINST this fix and warrants revisiting — but a run that fails on an ACTUAL sustained
+freeze (either `#758` threshold genuinely tripped) is item 2 doing its job correctly.
+
+**Generalizable lesson: when TWO gates classify the SAME underlying signal (here: `copies` per
+window) via DIFFERENT mechanisms (a fixed constant vs. a walked/calibrated tolerance), a
+"conservative, fail-loud" branch in the STRICTER-sounding gate can silently duplicate — and
+disagree with — the gate that already owns that signal's real acceptance bar.** The fix is not
+"widen the tolerance" or "soften the gate" — it is recognizing that ONE of the two gates should not
+be deciding that signal's fate at all once the other genuinely owns it; scope each gate to what its
+OWN acceptance criteria actually named, never to "anything left over that feels risky".
+
+**Tier-0 verification technique for a fix that spans TWO sibling crate-root modules — a COMBINED
+rustc replica, not two separate ones.** `frozen_leg.rs` and `self_heal_attribution.rs` are both
+pure (no probe deps) but `self_heal_attribution.rs` `use crate::frozen_leg::{...}` — a standalone
+`rustc --test` replica of EITHER file alone (the existing single-file pattern, see
+`verdict-gate-seam-calibration.md` §11) cannot prove the FIX didn't silently break the SIBLING
+module's own tests, which is exactly the risk here (6 `self_heal_attribution.rs` fixtures relied
+on `frozen_leg`'s removed branch to reach a classified-Frozen window). Concatenate both files as
+`pub mod frozen_leg { <frozen_leg.rs verbatim> }` / `pub mod self_heal_attribution { <verbatim,
+its `use crate::frozen_leg::...` line resolves unchanged since `crate` = this ONE combined file>
+}` into one scratch file, then `rustc --edition 2021 --test <file> -o <bin> && <bin>` — this ran
+ALL 35 (later 36) tests from both modules together and genuinely caught nothing broken. Reusable
+whenever a fix to a shared pure module has sibling pure-module consumers with their own test
+suites — never assume the sibling module's tests are unaffected just because you didn't touch its
+file; verify with the combined replica.

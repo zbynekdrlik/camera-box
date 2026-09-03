@@ -10281,14 +10281,16 @@ mod tests {
                 // 9 -- `copies=10` against `frames=30` -> density ~0.333, ABOVE
                 // `frozen_leg::FROZEN_DENSITY_THRESHOLD` (0.10) -> genuinely HARD-FROZEN. Walked
                 // up from the original 5 on 2026-08-31 (issue 1243): now that
-                // `window_gate::WINDOW_COPIES_GAPS_TOLERANCE` also sits at 5, a copies value that
-                // stays at/under `frozen_leg::STALE_REPLAY_MAX_ISOLATED` (also 5) can no longer
-                // ALSO exceed the walked-up window_gate tolerance -- those two constraints now
-                // conflict at the shared boundary, so this fixture no longer isolates "density
-                // alone trips it" from "count alone would too" (both trip independently at
-                // copies=10; see `frozen_leg::isolated_allowance_boundary_is_stale_replay_not_
-                // frozen` for the count-only boundary kept isolated in its own module). What this
-                // test still needs -- genuinely HARD-FROZEN AND genuinely over the continuity
+                // `window_gate::WINDOW_COPIES_GAPS_TOLERANCE` also sits at 5, copies=10 is needed
+                // so this fixture ALSO stays genuinely over the walked-up window_gate tolerance
+                // (see the `windows_over_copies_gaps_tolerance` assertion below), independent of
+                // `frozen_leg`'s own classification. issue 905 item 2 follow-up (2026-09-03):
+                // `frozen_leg::classify_leg` no longer has a count-only path at all -- Frozen is
+                // EXCLUSIVELY the density/duration thresholds now (`frozen_leg.rs`'s own module
+                // doc) -- so there is nothing left to isolate "density alone" from "count alone"
+                // for; this fixture only needs to genuinely trip the density threshold, which
+                // copies=10/frames=30 does with margin (0.333 vs the 0.10 bar). What this test
+                // still needs -- genuinely HARD-FROZEN AND genuinely over the continuity
                 // tolerance -- both hold. The real present-tick sequence around the duplicates
                 // stays perfectly contiguous (step 2), isolating this fixture's ONLY defect to
                 // the copies/frozen classification.

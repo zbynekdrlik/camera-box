@@ -337,6 +337,20 @@ pub fn attribute_self_heal(
 mod tests {
     use super::*;
 
+    // issue 905 item 2 follow-up (2026-09-03): several fixtures below originally used
+    // copies=149/300 against frames=9000 over a 30s window -- density≈0.017-0.033, well under
+    // both real `#758` thresholds -- and relied on `frozen_leg::classify_leg`'s now-REMOVED
+    // conservative "copies over the old isolated allowance -> Frozen anyway" branch to reach a
+    // classified-Frozen window in the first place, so this module's self-heal REATTRIBUTION logic
+    // had something to reattribute away from. With that branch gone (see `frozen_leg.rs`'s own
+    // module doc), those exact copies counts now classify StaleReplay directly and never even
+    // reach `attribute_self_heal`'s Frozen match arm -- a genuinely wrong fixture now, per the
+    // item-2 follow-up design (not a wrong ASSERTION; these tests' own intent, self-heal
+    // correlation/margin/reattribution, is unchanged). Bumped to copies=1000 (density=1000/9000
+    // ≈0.111, over `FROZEN_DENSITY_THRESHOLD` 0.10) so each fixture still genuinely classifies
+    // Frozen via a REAL `#758` threshold before self-heal reattribution runs on it -- the 30s
+    // window/margin timing every test discusses is untouched.
+
     #[test]
     fn parse_valid_token() {
         let ev = SelfHealResetEvent::parse("cam1:1785439475449374588").unwrap();
@@ -380,10 +394,11 @@ mod tests {
     #[test]
     fn a_reset_inside_the_frozen_window_reattributes_away_from_frozen_leg() {
         // Mirrors #894's own live evidence shape: reset logged a few seconds into the affected
-        // segment window.
+        // segment window. copies=1000 (not the original 149, see the issue-905-item-2 note atop
+        // this mod) so the window genuinely classifies Frozen via the density threshold.
         let segments = vec![SegmentLeg {
             cambox: "cam1",
-            copies: 149,
+            copies: 1000,
             frames: 9000,
             start_ns: 1_785_439_470_000_000_000,
             end_ns: 1_785_439_500_000_000_000, // 30s window
@@ -409,7 +424,7 @@ mod tests {
     fn a_reset_on_a_different_camera_does_not_reattribute() {
         let segments = vec![SegmentLeg {
             cambox: "cam1",
-            copies: 300,
+            copies: 1000, // issue-905-item-2: genuinely Frozen via density (see mod-level note)
             frames: 9000,
             start_ns: 0,
             end_ns: 30_000_000_000,
@@ -435,7 +450,7 @@ mod tests {
     fn a_reset_just_outside_the_window_still_correlates_within_the_margin() {
         let segments = vec![SegmentLeg {
             cambox: "cam1",
-            copies: 300,
+            copies: 1000, // issue-905-item-2: genuinely Frozen via density (see mod-level note)
             frames: 9000,
             start_ns: 10_000_000_000,
             end_ns: 40_000_000_000,
@@ -458,7 +473,7 @@ mod tests {
     fn a_reset_beyond_the_margin_does_not_correlate() {
         let segments = vec![SegmentLeg {
             cambox: "cam1",
-            copies: 300,
+            copies: 1000, // issue-905-item-2: genuinely Frozen via density (see mod-level note)
             frames: 9000,
             start_ns: 10_000_000_000,
             end_ns: 40_000_000_000,
@@ -524,14 +539,14 @@ mod tests {
         let segments = vec![
             SegmentLeg {
                 cambox: "cam1",
-                copies: 300,
+                copies: 1000, // issue-905-item-2: genuinely Frozen via density (mod-level note)
                 frames: 9000,
                 start_ns: 0,
                 end_ns: 30_000_000_000,
             },
             SegmentLeg {
                 cambox: "cam1",
-                copies: 300,
+                copies: 1000,
                 frames: 9000,
                 start_ns: 30_000_000_000,
                 end_ns: 60_000_000_000,
@@ -704,7 +719,7 @@ mod tests {
     fn a_capture_wedge_event_reattributes_a_frozen_window_and_labels_it_distinctly() {
         let segments = vec![SegmentLeg {
             cambox: "cam4",
-            copies: 149,
+            copies: 1000, // issue-905-item-2: genuinely Frozen via density (see mod-level note)
             frames: 9000,
             start_ns: 1_785_439_470_000_000_000,
             end_ns: 1_785_439_500_000_000_000, // 30s window
