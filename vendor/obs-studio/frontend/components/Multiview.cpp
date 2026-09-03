@@ -6,8 +6,6 @@
 #include <obs-frontend-api.h>
 #include <util/platform.h> // camera-box #1260: os_gettime_ns for per-cell MV render timing
 
-#include <utility>
-
 Multiview::Multiview()
 {
 	InitSafeAreas(&actionSafeMargin, &graphicsSafeMargin, &fourByThreeSafeMargin, &leftLine, &topLine, &rightLine);
@@ -222,14 +220,50 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 {
 	OBSBasic *main = (OBSBasic *)obs_frontend_get_main_window();
 
-	// camera-box #1260 lever (1): reset this render's per-cell scene-render timing accumulators;
-	// the scene-cell loop below fills them and ReportCellStats() publishes them after Render().
-	cellRenderCount = 0;
+	// camera-box #1260 lever (1): reset this render's per-item timing accumulators; the render
+	// sites below fill them (via recordDraw/timeDraw) and ReportCellStats() publishes them after
+	// Render().
+	sceneCellCount = 0;
 	cellSumNs = 0;
 	top1Ns = 0;
 	top2Ns = 0;
-	top1Name.clear();
-	top2Name.clear();
+	top1Name[0] = '\0';
+	top2Name[0] = '\0';
+
+	// Bounded copy of a raw source name into a fixed 64-char audit buffer (libobs sanitizes it for
+	// the log line; here we only bound it, allocation-free). A NULL name becomes "unnamed" so a
+	// real fat cell with no name is never confused with the "-" no-draws placeholder.
+	auto mvCopyName = [](char *dst, const char *src) {
+		if (!src)
+			src = "unnamed";
+		size_t i = 0;
+		for (; src[i] && i < 63; i++)
+			dst[i] = src[i];
+		dst[i] = '\0';
+	};
+	// Fold ONE timed draw's ns into the accumulators + the two-fattest race. Called for EVERY draw
+	// whose cost belongs in mv_cell_ms (scene cells, the preview + program big cells, and labels),
+	// so mv_ewma_ms - mv_cell_ms is the honest untimed tail.
+	auto recordDraw = [&](const char *name, uint64_t dt) {
+		cellSumNs += dt;
+		if (dt >= top1Ns) {
+			top2Ns = top1Ns;
+			mvCopyName(top2Name, top1Name);
+			top1Ns = dt;
+			mvCopyName(top1Name, name);
+		} else if (dt > top2Ns) {
+			top2Ns = dt;
+			mvCopyName(top2Name, name);
+		}
+	};
+	// Time a render call and fold it (os_gettime_ns pair around fn only — the region/matrix setup
+	// stays in the untimed tail, consistent across every site).
+	auto timeDraw = [&](const char *name, auto &&fn) {
+		const uint64_t t0 = os_gettime_ns();
+		fn();
+		const uint64_t t1 = os_gettime_ns();
+		recordDraw(name, (t1 > t0) ? (t1 - t0) : 0);
+	};
 
 	uint32_t targetCX, targetCY;
 	int x, y;
@@ -440,24 +474,14 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 		gs_matrix_scale3f(siScaleX, siScaleY, 1.0f);
 		setRegion(siX, siY, siCX, siCY);
 		// camera-box #1260 lever (1): time this scene cell's CPU render (async-texture upload +
-		// convert + draw submission) so the MV phase can be attributed per cell. Report-only.
-		{
-			const uint64_t cell_t0 = os_gettime_ns();
+		// convert + draw submission) so the MV phase can be attributed per cell. Report-only. Only
+		// a live source counts/times as a cell; an expired weak ref (src == NULL) still issues the
+		// original no-op render but is not counted, so mv_cells stays the real rendered-cell count.
+		if (src) {
+			sceneCellCount++;
+			timeDraw(obs_source_get_name(src), [&] { obs_source_video_render(src); });
+		} else {
 			obs_source_video_render(src);
-			const uint64_t now = os_gettime_ns();
-			const uint64_t cell_dt = (now > cell_t0) ? (now - cell_t0) : 0;
-			cellSumNs += cell_dt;
-			cellRenderCount++;
-			const char *nm = obs_source_get_name(src);
-			if (cell_dt >= top1Ns) {
-				top2Ns = top1Ns;
-				top2Name = std::move(top1Name);
-				top1Ns = cell_dt;
-				top1Name = nm ? nm : "";
-			} else if (cell_dt > top2Ns) {
-				top2Ns = cell_dt;
-				top2Name = nm ? nm : "";
-			}
 		}
 		endRegion();
 		gs_matrix_pop();
@@ -483,7 +507,9 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 		gs_matrix_scale3f(ppiScaleX, ppiScaleY, 1.0f);
 		drawBox(obs_source_get_width(label), obs_source_get_height(label) + thicknessx2, labelColor);
 		gs_matrix_translate3f(0, thickness, 0.0f);
-		obs_source_video_render(label);
+		// #1260: labels land in mv_ewma too — fold them into mv_cell_ms (grouped as "labels")
+		// so the untimed-tail residual stays honest.
+		timeDraw("labels", [&] { obs_source_video_render(label); });
 		gs_matrix_pop();
 	}
 
@@ -510,11 +536,16 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 	gs_matrix_translate3f(sourceX, sourceY, 0.0f);
 	gs_matrix_scale3f(ppiScaleX, ppiScaleY, 1.0f);
 	setRegion(sourceX, sourceY, ppiCX, ppiCY);
-	if (studioMode) {
-		obs_source_video_render(previewSrc);
-	} else {
-		obs_render_main_texture();
-	}
+	// #1260: the preview big cell is a full scene re-render (Studio Mode is always ON on strih) —
+	// a prime fat-item candidate; time it as "preview" so a fat preview can't hide in the untimed
+	// tail and mis-route the CPU-vs-GPU read.
+	timeDraw("preview", [&] {
+		if (studioMode) {
+			obs_source_video_render(previewSrc);
+		} else {
+			obs_render_main_texture();
+		}
+	});
 
 	if (drawSafeArea) {
 		RenderSafeAreas(actionSafeMargin, targetCX, targetCY);
@@ -539,7 +570,7 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 		drawBox(obs_source_get_width(previewLabel), obs_source_get_height(previewLabel) + thicknessx2,
 			labelColor);
 		gs_matrix_translate3f(0, thickness, 0.0f);
-		obs_source_video_render(previewLabel);
+		timeDraw("labels", [&] { obs_source_video_render(previewLabel); });
 		gs_matrix_pop();
 	}
 
@@ -557,7 +588,8 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 	gs_matrix_translate3f(sourceX, sourceY, 0.0f);
 	gs_matrix_scale3f(ppiScaleX, ppiScaleY, 1.0f);
 	setRegion(sourceX, sourceY, ppiCX, ppiCY);
-	obs_render_main_texture();
+	// #1260: the program big cell renders the main texture — time it as "program".
+	timeDraw("program", [&] { obs_render_main_texture(); });
 	endRegion();
 	gs_matrix_pop();
 
@@ -572,7 +604,7 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 		drawBox(obs_source_get_width(programLabel), obs_source_get_height(programLabel) + thicknessx2,
 			labelColor);
 		gs_matrix_translate3f(0, thickness, 0.0f);
-		obs_source_video_render(programLabel);
+		timeDraw("labels", [&] { obs_source_video_render(programLabel); });
 		gs_matrix_pop();
 	}
 
@@ -593,8 +625,7 @@ void Multiview::ReportCellStats(obs_display_t *display)
 	// folds it into this projector's #771 audit window and prints mv_cells/mv_cell_ms/... on the
 	// multiview-audit line. libobs sanitizes the names (space/'='/':' -> '_') so the whitespace-
 	// tokenized line stays parseable; it is a no-op for a non-throttleable display. Report-only.
-	obs_display_report_multiview_cells(display, cellRenderCount, cellSumNs, top1Ns, top1Name.c_str(), top2Ns,
-					   top2Name.c_str());
+	obs_display_report_multiview_cells(display, sceneCellCount, cellSumNs, top1Ns, top1Name, top2Ns, top2Name);
 }
 
 OBSSource Multiview::GetSourceByPosition(int x, int y)

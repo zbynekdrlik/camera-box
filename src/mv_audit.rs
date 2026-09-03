@@ -113,28 +113,32 @@ pub struct MvAuditSample {
     pub floor_fps: f64,
     pub cx: u32,
     pub cy: u32,
-    /// camera-box #1260 lever (1) — per-cell MV render instrumentation, ALL optional and
+    /// camera-box #1260 lever (1) — per-item MV render instrumentation, ALL optional and
     /// APPEND-only: a pre-#1260 `multiview-audit:` line carries none of these and parses with
     /// every one `None` (proven by `parse_of_a_pre_1260_line_leaves_cell_fields_none`). The
     /// emitter (`render_display()`, obs-display.c) appends `mv_cells= mv_cell_ms= mv_cell_max_ms=
-    /// mv_top1= mv_top2=` after `budget_ms=`; the frontend (`Multiview::Render`) times each
-    /// scene-cell `obs_source_video_render` on the graphics thread and publishes the aggregate.
+    /// mv_top1= mv_top2=` after `budget_ms=`; the frontend (`Multiview::Render`) times EVERY draw
+    /// (scene cells + the preview/program big cells + labels) on the graphics thread and publishes
+    /// the aggregate.
     ///
-    /// The DECISIVE derived signal is `mv_ewma_ms − cell_ms` (the reader computes it): a small
-    /// `cell_ms` under a large `mv_ewma_ms` = the MV phase tail is present / GPU-sync (thermal),
-    /// a `cell_ms` near `mv_ewma_ms` = per-cell CPU-bound. `top1`/`top2` name the two fattest
-    /// cells of the window's worst render so the cell-reduction lever can target the right cell.
+    /// The DECISIVE derived signal is `mv_ewma_ms − cell_ms` (the reader computes it): because
+    /// `cell_ms` covers every timed draw, a small `cell_ms` under a large `mv_ewma_ms` = the
+    /// UNtimed tail (begin/clear/region-setup + present/GPU-sync, i.e. the GPU/thermal path), and
+    /// a `cell_ms` near `mv_ewma_ms` = per-item CPU draw-submission bound. `top1`/`top2` name the
+    /// two fattest timed items of the window's worst render (a scene name, or
+    /// `preview`/`program`/`labels`) so the reduction lever can target the right one.
     pub cells: Option<u32>,
-    /// Window-mean of the per-render scene-cell CPU render sum, ms (directly comparable to
-    /// `mv_ewma_ms`).
+    /// Window-mean of the per-render sum of EVERY timed draw's CPU time, ms (directly comparable to
+    /// `mv_ewma_ms`). Covers scene cells + preview + program + labels, not just scene cells.
     pub cell_ms: Option<f64>,
-    /// Window-max of the per-render scene-cell CPU render sum, ms (the worst render's cell cost).
+    /// Window-max of the per-render timed-draw CPU sum, ms (the worst render's draw cost).
     pub cell_max_ms: Option<f64>,
-    /// `(name, ms)` of the fattest single cell in the window's worst render. `name` is the
-    /// emitter-sanitized scene name (space/`=`/`:` → `_`, so the space-tokenized line stays
-    /// parseable); an absent cell (`-`) parses to `None`.
+    /// `(name, ms)` of the fattest single timed item in the window's worst render. `name` is the
+    /// emitter-sanitized item name (any non-printable-ASCII / `=` / `:` byte → `_`, so the
+    /// space-tokenized line stays parseable) — a scene name, or `preview`/`program`/`labels`; an
+    /// absent item (`-`) parses to `None`.
     pub top1: Option<(String, f64)>,
-    /// `(name, ms)` of the second-fattest cell in that same worst render.
+    /// `(name, ms)` of the second-fattest timed item in that same worst render.
     pub top2: Option<(String, f64)>,
 }
 

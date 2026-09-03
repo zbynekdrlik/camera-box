@@ -154,11 +154,17 @@ fn render_display_and_frontend_carry_the_per_cell_instrumentation_1260() {
         read(OBS_H).contains("EXPORT void obs_display_report_multiview_cells(obs_display_t *display"),
         "{OBS_H}: #1260 obs_display_report_multiview_cells() EXPORT declaration gone — the frontend TU cannot link against it."
     );
-    // The FRONTEND times the scene-cell render and publishes it.
+    // The FRONTEND times the render draws and publishes the aggregate.
     let mv = read(MULTIVIEW_CPP);
     assert!(
-        mv.contains("cellSumNs += cell_dt;"),
-        "{MULTIVIEW_CPP}: #1260 per-cell scene-render timing gone — the mv_cell_ms aggregate would always be 0."
+        mv.contains("cellSumNs += dt;"),
+        "{MULTIVIEW_CPP}: #1260 per-item render timing gone — the mv_cell_ms aggregate would always be 0."
+    );
+    // #1260 (review): the preview + program big cells MUST be timed too, or mv_ewma_ms - mv_cell_ms
+    // mis-attributes a fat preview re-render to the GPU/present tail.
+    assert!(
+        mv.contains("timeDraw(\"preview\"") && mv.contains("timeDraw(\"program\""),
+        "{MULTIVIEW_CPP}: #1260 the preview/program big cells are no longer timed — a fat preview would be mis-read as the GPU tail."
     );
     assert!(
         mv.contains("obs_display_report_multiview_cells(display,"),

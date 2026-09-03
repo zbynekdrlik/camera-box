@@ -2,7 +2,6 @@
 
 #include <obs.hpp>
 
-#include <string>
 #include <vector>
 
 enum class MultiviewLayout : uint8_t {
@@ -31,16 +30,20 @@ public:
 	OBSSource GetSourceByPosition(int x, int y);
 
 private:
-	// camera-box #1260: per-cell scene-render CPU timing captured during Render() (reset at the
-	// top of every Render, published by ReportCellStats). cellRenderCount = populated scene cells
-	// timed this render; cellSumNs = sum of their obs_source_video_render CPU ns; top1/top2 = the
-	// two fattest cells (ns + name, captured while the strong ref is held).
-	uint32_t cellRenderCount = 0;
+	// camera-box #1260 lever (1): per-item MV render CPU timing captured during Render() (reset at
+	// the top of every Render, published by ReportCellStats). sceneCellCount = populated SCENE
+	// cells this render (-> mv_cells); cellSumNs = sum of the CPU ns of EVERY timed draw — the
+	// scene cells AND the preview/program big cells AND the labels — so that mv_ewma_ms - cell_ms
+	// is the honest UNtimed tail (begin/clear/region-setup + present/GPU-sync), never a fat preview
+	// re-render mis-attributed to the GPU. top1/top2 = the two fattest timed items (ns + name) of
+	// this render. Fixed char buffers (not std::string) so the in-loop name copy never heap-
+	// allocates inside the very phase mv_ewma_ms measures.
+	uint32_t sceneCellCount = 0;
 	uint64_t cellSumNs = 0;
 	uint64_t top1Ns = 0;
 	uint64_t top2Ns = 0;
-	std::string top1Name;
-	std::string top2Name;
+	char top1Name[64] = {0};
+	char top2Name[64] = {0};
 
 	bool drawLabel, drawSafeArea;
 	MultiviewLayout multiviewLayout;

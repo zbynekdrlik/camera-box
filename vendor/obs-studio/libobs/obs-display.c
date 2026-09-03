@@ -360,12 +360,15 @@ void render_display(struct obs_display *display)
 				const double budget_ms =
 					(interval != 0) ? (double)(interval - interval / 10) / 1000000.0 : 0.0;
 				/* camera-box #1260 lever (1): per-cell MV instrumentation, APPEND-only.
-				 * cell_ms is the window MEAN of the per-render scene-cell CPU sum (the
-				 * frontend publishes it via obs_display_report_multiview_cells); it is
+				 * cell_ms is the window MEAN of the per-render sum of EVERY timed draw --
+				 * the scene cells AND the preview/program big cells AND the labels (the
+				 * frontend times them all via obs_display_report_multiview_cells); it is
 				 * directly comparable to mv_ewma_ms, so `mv_ewma_ms - mv_cell_ms` is the
-				 * present/GPU-sync tail. top1/top2 are the two fattest cells of the window's
-				 * worst render (name already sanitized to be whitespace/`:`-free); "-" when
-				 * no cells were reported this window. REPORT-ONLY. */
+				 * UNtimed tail (begin/clear/region-setup + present/GPU-sync), NOT a fat
+				 * preview re-render. top1/top2 are the two fattest timed items of the
+				 * window's worst render (name already sanitized to be whitespace/`:`-free;
+				 * "preview"/"program"/"labels" for the non-cell items); "-" when no draws
+				 * were reported this window. mv_cells counts SCENE cells only. REPORT-ONLY. */
 				const double cell_ms =
 					(display->render_audit_cell_render_count != 0)
 						? ((double)display->render_audit_cell_sum_ns /
@@ -547,10 +550,15 @@ void obs_display_set_vsync(obs_display_t *display, bool vsync)
 }
 
 /* camera-box #1260 lever (1): copy a scene name into a bounded audit-line buffer, replacing every
- * character that would break the whitespace-tokenized multiview-audit line (space/tab/other
- * whitespace, '=', ':', DEL) with '_'. This is the SINGLE place cell names are sanitized (the
- * frontend passes the raw obs_source_get_name), so the emitted mv_top1=name:ms / mv_top2=name:ms
- * tokens are always parseable. dst_cap includes the NUL. NULL src -> empty string. */
+ * character OUTSIDE printable ASCII (anything <= ' ', anything >= 0x7f, plus '=' and ':') with '_'.
+ * This is the SINGLE place cell names are sanitized (the frontend passes the raw obs_source_get_name),
+ * so the emitted mv_top1=name:ms / mv_top2=name:ms tokens are always parseable. The ASCII-only clamp
+ * is load-bearing, not cosmetic: the multiview-audit line is documented pure-ASCII (the downstream
+ * read path does a LOSSLESS high-byte strip, scripts/lib/mv-fps-health.sh + the #1258/#1262 byte-
+ * safety harness), a torn multibyte tail at the 63-char cap would make the whole OBS log invalid
+ * UTF-8 for mv-fps-gate's read_to_string, and a Unicode-whitespace byte (NBSP C2 A0, U+2028, ...)
+ * would slip past a `<= ' '` test yet still split under Rust's split_whitespace() — clamping every
+ * byte >= 0x7f to '_' closes all three. dst_cap includes the NUL. NULL src -> empty string. */
 static void obs_audit_copy_cell_name(char *dst, size_t dst_cap, const char *src)
 {
 	if (!dst || dst_cap == 0)
@@ -562,7 +570,7 @@ static void obs_audit_copy_cell_name(char *dst, size_t dst_cap, const char *src)
 	size_t i = 0;
 	for (; src[i] && i < dst_cap - 1; i++) {
 		unsigned char c = (unsigned char)src[i];
-		dst[i] = (c <= ' ' || c == '=' || c == ':' || c == 0x7f) ? '_' : (char)c;
+		dst[i] = (c <= ' ' || c >= 0x7f || c == '=' || c == ':') ? '_' : (char)c;
 	}
 	dst[i] = '\0';
 }
