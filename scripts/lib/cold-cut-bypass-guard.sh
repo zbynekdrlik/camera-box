@@ -87,7 +87,7 @@ cold_cut_bypass_arm_check() {
   echo ">>> #1086 cold-cut keepalive-bypass ARMED <<< COLD_CUT_BYPASS_CAM='${cam}' COLD_CUT_BYPASS_INPUT='${input}' — this run's ALL_CAMBOX fused sweep will deliberately idle that strih NDI receiver COLD and restore it before its 2nd program cut, to measure a GENUINE cold-cut onset. Clear BOTH repository variables to disarm."
 
   if ! cold_cut_bypass_target_valid "$cam"; then
-    echo "::error::#1086 cold-cut keepalive-bypass: COLD_CUT_BYPASS_CAM='${cam}' is NOT a valid bypass target. Only the current-sweep 2nd-cut cameras ($(cold_cut_bypass_valid_targets)) get a second program cut, so only those yield a genuine cold-cut onset — refusing to idle a receiver whose sweep never re-cuts to it. Set COLD_CUT_BYPASS_CAM to one of those, or clear it to disarm."
+    echo "::error::#1086 cold-cut keepalive-bypass: COLD_CUT_BYPASS_CAM='${cam}' is not a valid bypass target. Only the current-sweep 2nd-cut cameras ($(cold_cut_bypass_valid_targets)) get a second program cut, so only those yield a genuine cold-cut onset — refusing to idle a receiver whose sweep never re-cuts to it. Set COLD_CUT_BYPASS_CAM to one of those, or clear it to disarm."
     return 1
   fi
 
