@@ -239,14 +239,49 @@ draw-call submission (graphics thread + its NVIDIA driver workers, GPU idle). Th
 `GetThreadTimes` — needs an ETW (`wpr`/`xperf` CSwitch+stacks) trace to split. The pre-MV phase (strih
 renders TWO mixes 2ME PGM+PVW + aux MULTIVIEW + 7×1080p60 uploads + genlock FIFO before the 4K MV) is
 the budget consumer (est. ~16–17 ms of the 30 ms budget, UNMEASURED until the enrichment deploys).
+**MEASURED once the enrichment deployed (2026-09-03, issue-1260 comment 5520554898): the estimate
+above was INVERTED** — `pre_mv_ms` is a flat 7.5–9 ms in every state, and the MV PHASE is the
+variable one: `mv_ewma_ms` 15–16 when healthy (29.7 fps) vs 21–22 when collapsed (13–16 fps). The
+collapse is `pre_mv + mv_ewma` crossing the #278 `budget_ms=30` cliff; burns, the post-run decode,
+GPU thermal slowdown and box contention each add the missing ~6 ms.
 
 **LEVERS (Fable-ranked; all need a rig deploy/config = supervisor steps):** (1) instrument → deploy →
-read the pre-MV/MV split → reduce the fat pre-MV phase (the only path to ≥28 if the model holds);
-(2) MV 4K→1080p A/B — near-free, LOW expected benefit (submission is resolution-INDEPENDENT, GPU
-idle) but FALSIFIES the CPU-side story if it fixes it — run FIRST as an experiment; (3) fewer MV
-cells (owner-stake); (4) move `bkshading` off strih (#808, marginal); (5) MV divisor 2 — FLAGGED:
-structurally FAILS ≥28 (caps MV at 15 fps) + reverses #776, an owner call not a lever. Leave NVIDIA
-Threaded-Optimization ON (it offloads submission off the single graphics thread).
+read the pre-MV/MV split → reduce the fat phase (now known to be the MV phase itself — per-cell
+source render + async-texture upload + submission; instrument PER CELL next);
+(2) MV 4K→1080p A/B — **RUN 2026-09-03, FALSIFIED**: on the idle rig, burns OFF, the same collapsed
+state measured 13.1 fps / `mv_ewma` 21.6 at 3840×2160 fullscreen, 15.3 fps / 20.4 at a 1920×1080
+windowed projector, 17.5 fps / 19.7 back at 4K (n=29/35/34 ticks) — quartering the pixels moved the
+MV phase ≤1 ms (inside drift), so the cost is NOT fill-rate/present-bound; (3) fewer MV
+cells (owner-stake); (4) move `bkshading` off strih (#808, marginal — 1.25 cores steady) + the GPU
+share Arena.exe takes (9–38 % 3D); (5) MV divisor 2 — **CLOSED by the same A/B** (renders the same
+cells at half size = the same ≤1 ms; it was always the "unneeded cap" the owner ruled out building
+before the cheaper test — never build it). Leave NVIDIA Threaded-Optimization ON (it offloads
+submission off the single graphics thread).
+
+**The A/B recipe (reusable — no display-mode change, no OBS restart):** the MCP `FocusWindow` fails
+with `SetForegroundWindow` (foreground lock), so close the fullscreen projector by posting `WM_CLOSE`
+(0x0010) to its hwnd from a FILE-based P/Invoke script run via `powershell -File` (inline `Add-Type`
+through the MCP shell prints nothing, a file works — `C:\camera-box\tmp\winmsg.ps1`), open the test
+projector over OBS-WS `OpenVideoMixProjector {videoMixType: OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW,
+projectorGeometry: <base64 Qt saveGeometry>}` (Qt 6 blob: `>IHH` magic 0x1D9D0CB/3/0, frame QRect,
+normal QRect, screen 0, maximized 0, fullScreen 0, screenWidth, geometry QRect — l,t,r,b int32
+big-endian; logical px = physical ÷ 1.5 at strih's 150 % DPI, so 1280×720 logical = `cx=1920
+cy=1080` in the audit line), read `cx=`/`cy=` from `multiview-audit:` as the ground truth, restore
+with `OpenVideoMixProjector {…MULTIVIEW, monitorIndex: 0}` after `WM_CLOSE` on the windowed hwnd,
+and screenshot-verify the operator view. Each `mcp__win-strih__Shell` is a fresh process; `Start-
+Process … -PassThru -RedirectStandardOutput` of a long-running child holds the MCP task past its
+timeout — the child still runs (check `Get-Process`), just do not wait on it.
+
+**Idle collapse with burns OFF and no decode is a REAL state (2026-09-03 06:18→):** after the
+fleet deploy's sender restarts the MV slid from 29.7 to 14–16 fps over four minutes with no OBS-log
+event, while `nvidia-smi` showed `SW Thermal Slowdown: Active` at 73–74 °C / fan 65 % / SM 1740–1875
+of 2115 MHz / 69–88 W, and a cumulative **HW Thermal Slowdown 33 s** since boot (the card has hit its
+hardware limit — a cooling problem: 74 °C at <90 W is far too hot for a 2070 SUPER). Read the
+throttle state with `nvidia-smi --query-gpu=temperature.gpu,fan.speed,clocks.sm,power.draw,
+clocks_throttle_reasons.active --format=csv` (bit 0x20 = SW thermal); a `-l 10` logger to
+`C:\camera-box\tmp\gpu-log.csv` is the correlation tool. `program-render-audit: avg_frame_ms` is NOT
+an independent GPU-slowness signal — it measures the whole tick, so it DROPS (25.5 → 18 ms) when the
+MV skips; do not read it as "program got faster".
 
 **Re-arm scope: the `[4d1/8]` preflight measures BURNS-OFF** (issue 1261, production-shaped), so the
 re-arm condition is **burns-OFF median rendered_fps ≥ 28** (~4 ms/tick from the current ~24), NOT
@@ -284,7 +319,12 @@ if BelowNormal proves insufficient). Verify on the rig during the next E2E's pos
 `Get-Process recording-verdict,ffmpeg | Select ProcessName,PriorityClass` (both should read
 `BelowNormal` — `ffmpeg` is where the CPU actually burns), and re-run the dip-vs-decode correlation
 over a fresh OBS log window to confirm the dip density during decode drops toward the idle
-baseline.
+baseline. **VERIFIED 2026-09-03 (.617 PR E2E attempt 2, RUN_ID 132866162):** both planners printed
+`decode priority: BelowNormal (E2E_ONBOX_DECODE_PRIORITY)`, the executed remote command carries the
+`PriorityClass = "BelowNormal"` statement verbatim, and the strih on-box decode block 05:50–05:57
+local produced **3 sub-25-fps MV ticks in 8 min** (per-minute 1,0,0,0,0,0,2,0) vs 89–117 per 10 min
+at Normal — ~30× fewer dips. The live `Get-Process … PriorityClass` read-back was MISSED (decode
+finished before the wake) — schedule it at run-start + ~28 min next time, not +37.
 
 ## Autostart-aware = reset the confirm streak on an OBS-log IDENTITY change
 

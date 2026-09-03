@@ -269,3 +269,31 @@ Test = std-only Rust source-anchor ONLY (pure crash/NULL-safety guard → no win
 mirror, per `vendored-obs-frontend-crash-safety.md`); the two `genlock_ensure_saved_source_listed(source_list, s)`
 CALL sites (lines ~650/657) ARE pwsh-anchored in both ymls, so keep the call text byte-identical
 (put guards in the function body / lambda head, never on the call line). See #1224.
+
+## A FRAME-LESS BY-URL bind is its own wedge class — #1180's verify never fires without frames (2026-09-03, .617 PR E2E attempt 1)
+
+The #1096 BY-URL path has a second failure shape besides #1180's wrong-sender: **a BY-URL connect to
+a DEAD port.** Live: after the issue-1202 parity-align restarted every cambox sender, strih's
+`'NDI cam7'` sat 6.5 min at `received=` Δ0 / `depth=0` / `underruns +151 per tick` while the #1096
+`no_connections==0` arm fired every ~10 s and EVERY one of ~40 rebinds resolved the SAME
+`connect BY-URL '10.77.9.67:5962'` (the "fresh" per-reset finder kept serving the dying sender's
+cached advertisement); `'NDI cam3'` in the same wave got `fresh finder resolved no URL` → BY-NAME →
+recovered in seconds. The sender itself streamed 60 fps the whole time (cam journal) — the leg was
+dead purely receiver-side, and it came back only when the cleanup's SECOND restart of cam7 happened
+to bind the usb sender on :5962 again. Sender ports are per-restart racy (fleet snapshot: `CAMn (usb)`
+on :5961 for cam1/2/5 vs :5962 for cam3/4/6/7, one hole per box), so a cached URL going dead after a
+restart is an ordinary event, not a freak.
+
+Why nothing self-heals: #1180's `force_by_name_next_reset_1180` is armed ONLY from the post-connect
+identity verify, gated on `frames_seen_since_reset_1180` — a bind that delivers ZERO frames never
+reaches it, and the #767 stale arm is silence-on-a-CONNECTED receiver, so `no_connections==0` just
+loops BY-URL→dead port forever. Reading the log: `connect BY-URL` repeating with the SAME URL every
+stale window + `received=` flat + no `recv-timing #797` line for that input = this class (NOT the
+`break` death above — the thread is alive and rebinding — and NOT #1096's poisoned-name wedge, which
+BY-URL is the cure for). Fix direction (its own ticket — filed when the net-drain gate allows; draft in
+`~/.claude/work-products/camera-box-byurl-deadport-issue-draft-2026-09-03.md`): a frame-less BY-URL
+bind must force BY-NAME on the NEXT reset (extend the #1180 flag to the no-frames case), then
+alternate BY-URL/BY-NAME on consecutive frame-less rebinds so neither wedge class can pin a leg.
+Until then the operational cure is a sender restart that lands on the cached port, or an OBS
+restart (fresh SDK discovery). The `[1/8]` frozen-camera gate (pixel-hash, 2 samples) was RIGHT to
+fail here — cross-check with the `received=` Δ before calling any FROZEN a false positive.
