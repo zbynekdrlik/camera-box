@@ -81,25 +81,59 @@ fn both_unset_is_a_silent_no_op() {
 }
 
 #[test]
-fn valid_target_and_input_prints_armed_banner_and_succeeds() {
+fn valid_target_and_input_on_all_cambox_run_prints_armed_banner_and_succeeds() {
+    // ALL_CAMBOX=1: the cold-cut hooks only fire inside recording-e2e.sh's fused sweep, so an ARMED
+    // banner (rather than an INERT warning) is only honest when that sweep will actually run.
     let (out, ok) = arm_check(&[
         ("COLD_CUT_BYPASS_CAM", "CAM1"),
         ("COLD_CUT_BYPASS_INPUT", "NDI cam1"),
+        ("ALL_CAMBOX", "1"),
     ]);
     assert!(ok, "#1086: a valid armed config must exit 0; out:\n{out}");
     assert!(
         out.contains("ARMED") && out.contains("CAM1") && out.contains("NDI cam1"),
-        "#1086: a valid armed config must print a LOUD banner naming BOTH values; got:\n{out}"
+        "#1086: a valid armed config on an ALL_CAMBOX run must print a LOUD banner naming BOTH \
+         values; got:\n{out}"
     );
 }
 
 #[test]
-fn out_of_set_target_is_rejected_fail_closed() {
+fn armed_but_not_all_cambox_run_is_inert_and_warns() {
+    // CAM+INPUT set but ALL_CAMBOX != 1 (a workflow_dispatch single-camera soak): the cold-cut
+    // hooks never fire, so the bypass is INERT. The guard must WARN LOUDLY (naming both values) —
+    // not print the ARMED banner and not fail-closed — so an operator is not fooled into thinking a
+    // genuine cold cut happened.
+    let (out, ok) = arm_check(&[
+        ("COLD_CUT_BYPASS_CAM", "CAM1"),
+        ("COLD_CUT_BYPASS_INPUT", "NDI cam1"),
+        ("ALL_CAMBOX", "0"),
+    ]);
+    assert!(
+        ok,
+        "#1086: an armed config on a NON-ALL_CAMBOX run is INERT (safe) — must exit 0; out:\n{out}"
+    );
+    assert!(
+        out.contains("::warning::")
+            && out.contains("INERT")
+            && out.contains("CAM1")
+            && out.contains("NDI cam1"),
+        "#1086: an armed-but-inert (non-ALL_CAMBOX) run must warn LOUDLY naming both values; got:\n{out}"
+    );
+    assert!(
+        !out.contains(">>> #1086 cold-cut keepalive-bypass ARMED"),
+        "#1086: a non-ALL_CAMBOX run must NOT print the ARMED banner (nothing is armed); got:\n{out}"
+    );
+}
+
+#[test]
+fn out_of_set_target_on_all_cambox_run_is_rejected_fail_closed() {
     // CAM7 is a real camera but gets NO 2nd program cut in the current sweep, so it can never yield
-    // a genuine cold-cut onset — the guard must REJECT it (fail-closed), not run a meaningless sweep.
+    // a genuine cold-cut onset — on the ALL_CAMBOX sweep run the guard must REJECT it (fail-closed),
+    // not run a meaningless sweep.
     let (out, ok) = arm_check(&[
         ("COLD_CUT_BYPASS_CAM", "CAM7"),
         ("COLD_CUT_BYPASS_INPUT", "NDI cam7"),
+        ("ALL_CAMBOX", "1"),
     ]);
     assert!(
         !ok,
@@ -119,9 +153,9 @@ fn out_of_set_target_is_rejected_fail_closed() {
 }
 
 #[test]
-fn set_cam_but_empty_input_is_rejected_fail_closed() {
+fn set_cam_but_empty_input_on_all_cambox_run_is_rejected_fail_closed() {
     // Mirrors cold_cut_reset_state's own refusal — but caught at arm time, before ~30 min of rig.
-    let (out, ok) = arm_check(&[("COLD_CUT_BYPASS_CAM", "CAM1")]);
+    let (out, ok) = arm_check(&[("COLD_CUT_BYPASS_CAM", "CAM1"), ("ALL_CAMBOX", "1")]);
     assert!(
         !ok,
         "#1086: a set CAM with an empty INPUT must FAIL the arm check (never guess the receiver); \
@@ -137,8 +171,9 @@ fn set_cam_but_empty_input_is_rejected_fail_closed() {
 #[test]
 fn input_only_is_inert_and_warns_but_does_not_fail() {
     // INPUT set, CAM empty: cold-cut-step.sh keys arming on CAM, so the bypass is INERT (idles
-    // nothing) — a loud warning, never a hard failure (an inert bypass is safe).
-    let (out, ok) = arm_check(&[("COLD_CUT_BYPASS_INPUT", "NDI cam1")]);
+    // nothing) — a loud warning, never a hard failure (an inert bypass is safe). Independent of
+    // ALL_CAMBOX (CAM empty is INERT on every run).
+    let (out, ok) = arm_check(&[("COLD_CUT_BYPASS_INPUT", "NDI cam1"), ("ALL_CAMBOX", "1")]);
     assert!(
         ok,
         "#1086: INPUT-only (CAM empty) is INERT and safe — the guard must exit 0, not fail; out:\n{out}"
@@ -146,6 +181,40 @@ fn input_only_is_inert_and_warns_but_does_not_fail() {
     assert!(
         out.contains("::warning::") && out.contains("INERT"),
         "#1086: INPUT-only must warn LOUDLY that the bypass is INERT (not armed); got:\n{out}"
+    );
+}
+
+#[test]
+fn valid_target_match_is_whole_token_not_substring_or_case() {
+    // A refactor to a substring/case-insensitive match (grep -q / case *"$want"*) would silently
+    // widen the guard — pin that CAM10 / cam1 / a multi-token value are all REJECTED on the sweep.
+    for bad in ["CAM10", "cam1", "CAM1 CAM2", "CAM"] {
+        let (out, ok) = arm_check(&[
+            ("COLD_CUT_BYPASS_CAM", bad),
+            ("COLD_CUT_BYPASS_INPUT", "NDI cam1"),
+            ("ALL_CAMBOX", "1"),
+        ]);
+        assert!(
+            !ok && out.contains("not a valid bypass target"),
+            "#1086: {bad:?} must be REJECTED as a whole-token mismatch (never a substring/case \
+             match); out:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn valid_targets_override_widens_the_accepted_set() {
+    // COLD_CUT_BYPASS_VALID_TARGETS is the ONE env-overridable source of truth (a future sweep that
+    // gives more boxes a 2nd cut is a one-line widen, no code hunt) — pin that it actually takes.
+    let (out, ok) = arm_check(&[
+        ("COLD_CUT_BYPASS_CAM", "CAM4"),
+        ("COLD_CUT_BYPASS_INPUT", "NDI cam4"),
+        ("ALL_CAMBOX", "1"),
+        ("COLD_CUT_BYPASS_VALID_TARGETS", "CAM1 CAM2 CAM3 CAM4"),
+    ]);
+    assert!(
+        ok && out.contains("is valid"),
+        "#1086: a target added via COLD_CUT_BYPASS_VALID_TARGETS must be accepted; out:\n{out}"
     );
 }
 
@@ -215,10 +284,16 @@ fn arm_check_step_runs_before_recording_and_calls_the_guard() {
     let recording_pos = s
         .find("name: Recording-based 4-node cam2")
         .expect("the recording step must exist");
+    let busy_gate_pos = s
+        .find("run: bash scripts/rig-busy-gate.sh")
+        .expect("the rig-busy gate step must exist");
+    // The guard is PURE (no rig, no lease, no network), so it must fail-closed BEFORE the ~30-min
+    // rig-busy poll / lease acquire, not just before the recording — catching a stuck variable
+    // without wasting rig time at all.
     assert!(
-        arm_pos < recording_pos,
-        "#1086: the arm-check step must run BEFORE the recording step (fail-closed before rig \
-         time) — arm_pos={arm_pos}, recording_pos={recording_pos}"
+        arm_pos < busy_gate_pos && busy_gate_pos < recording_pos,
+        "#1086: the arm-check step must run BEFORE the rig-busy gate (fail-closed before ANY rig \
+         time) — arm_pos={arm_pos}, busy_gate_pos={busy_gate_pos}, recording_pos={recording_pos}"
     );
     // Slice the arm-check step's block (from its name to the next step's `- name:`).
     let after = &s[arm_pos..];
@@ -227,10 +302,12 @@ fn arm_check_step_runs_before_recording_and_calls_the_guard() {
         .map(|p| p + arm_pos)
         .unwrap_or(recording_pos);
     let step_block = &s[arm_pos..step_end];
+    // Anchor on the SOURCE form `. scripts/lib/...` (call-site-unique), never the bare script name
+    // — the step's own comment also mentions the path, which a bare-name .contains() would match.
     assert!(
-        step_block.contains("scripts/lib/cold-cut-bypass-guard.sh")
+        step_block.contains(". scripts/lib/cold-cut-bypass-guard.sh")
             && step_block.contains("cold_cut_bypass_arm_check"),
-        "#1086: the arm-check step must source scripts/lib/cold-cut-bypass-guard.sh and call \
+        "#1086: the arm-check step must SOURCE scripts/lib/cold-cut-bypass-guard.sh and call \
          cold_cut_bypass_arm_check. step_block:\n{step_block}"
     );
     assert!(
@@ -238,5 +315,13 @@ fn arm_check_step_runs_before_recording_and_calls_the_guard() {
             && step_block.contains("COLD_CUT_BYPASS_INPUT: ${{ vars.COLD_CUT_BYPASS_INPUT }}"),
         "#1086: the arm-check step's OWN env: block must carry both repository variables (a step \
          only sees env vars set on itself). step_block:\n{step_block}"
+    );
+    // The guard needs ALL_CAMBOX (the SAME ternary the recording step uses) to tell an ARMED sweep
+    // run from an INERT single-camera / workflow_dispatch run — so the honest banner is possible.
+    assert!(
+        step_block.contains("ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}"),
+        "#1086: the arm-check step's env: block must carry ALL_CAMBOX (same ternary as the \
+         recording step) so the guard can tell an armed sweep run from an inert one. \
+         step_block:\n{step_block}"
     );
 }
