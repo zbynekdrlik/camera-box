@@ -367,13 +367,18 @@ fn setup_device_purges_every_competing_timesync_daemon() {
 fn setup_device_timesync_purge_runs_before_installing_dantesync() {
     // Order: purge competing daemons BEFORE installing dantesync (the sole authority) — reads as
     // "remove every other clock, then install ours". Both are in the rw window (the ro conversion
-    // is STEP 18, after both). Anchor on the dantesync DOWNLOAD (the actual install action), not
-    // the STEP 17 banner echo which also contains the words "Installing dantesync".
+    // is STEP 18, after both). Anchor on the dantesync INSTALL-INTO-PLACE (the actual install
+    // action -- since #1289 a temp-file download + `install -m 0755` into /usr/local/bin, never a
+    // `curl -o` onto the live path), not the STEP 17 banner echo which also contains the words
+    // "Installing dantesync".
     let body = read_script();
     let purge_idx = first_noncomment_idx(&body, r#"apt-get purge -y "$_ts""#)
         .expect("the #591 competing-timesync purge must be present");
-    let dantesync_idx = first_noncomment_idx(&body, "-o /usr/local/bin/dantesync")
-        .expect("the dantesync download (install action) must be present");
+    let dantesync_idx = first_noncomment_idx(
+        &body,
+        r#"install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync"#,
+    )
+    .expect("the dantesync install-into-place (install action) must be present");
     assert!(
         purge_idx < dantesync_idx,
         "the competing-timesync purge (line {purge_idx}) must run before the dantesync install \
@@ -436,8 +441,12 @@ fn setup_device_linuxptp_purge_runs_before_installing_dantesync() {
     let body = read_script();
     let purge_idx = first_noncomment_idx(&body, "apt-get purge -y linuxptp")
         .expect("the #597 linuxptp purge must be present");
-    let dantesync_idx = first_noncomment_idx(&body, "-o /usr/local/bin/dantesync")
-        .expect("the dantesync download (install action) must be present");
+    // #1289: the install action is the temp-file `install -m 0755` into place (no `curl -o`).
+    let dantesync_idx = first_noncomment_idx(
+        &body,
+        r#"install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync"#,
+    )
+    .expect("the dantesync install-into-place (install action) must be present");
     assert!(
         purge_idx < dantesync_idx,
         "the linuxptp purge (line {purge_idx}) must run before the dantesync install (line \
