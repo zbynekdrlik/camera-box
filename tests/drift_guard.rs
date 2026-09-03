@@ -3334,7 +3334,13 @@ fn imag_genlock_ahead_log_reports_the_commits_the_box_carries_past_main_1292() {
 #[test]
 fn imag_genlock_ahead_log_rejects_option_shaped_box_sha_never_a_false_ok_1292() {
     // #1292 counterpart to the #531 imag_genlock_range_log guard above — the SAME unvalidated-SSH-
-    // read threat model applies to the AHEAD direction too.
+    // read threat model applies to the AHEAD direction too. Review finding S7: with `--grep=x`
+    // embedded as `origin/main..--grep=x`, git already rejects it as a malformed revision even
+    // WITHOUT `--end-of-options` (it is never a standalone argv token here) -- what this test
+    // actually pins is the fail-CLOSED outcome (non-zero, empty output never silently "OK"), which
+    // is what genlock_build_drift_report's callers rely on; `--end-of-options` is still present on
+    // the function for defense-in-depth / consistency with its siblings, not because THIS specific
+    // shape needs it to fail.
     let body = r#"
         rc=0
         out="$(imag_genlock_ahead_log "$(pwd)" "--grep=x")" || rc=$?
@@ -3345,6 +3351,69 @@ fn imag_genlock_ahead_log_rejects_option_shaped_box_sha_never_a_false_ok_1292() 
     assert!(
         !(out.contains("RC=0") && out.contains("OUT=[]")),
         "an option-shaped box_sha must never silently succeed with an empty ahead-log: {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_ahead_log_fails_closed_on_empty_box_sha_1292() {
+    // Review finding S3: an empty box_sha would otherwise silently resolve `origin/main..` as
+    // `origin/main..HEAD` (git's own "empty right side means HEAD" range convention) instead of
+    // failing — must fail LOUD (non-zero), matching imag_genlock_range_log's own fail-closed-on-
+    // empty behavior (its merge-base call already rejects an empty box_sha).
+    let body = r#"
+        rc=0
+        out="$(imag_genlock_ahead_log "$(pwd)" "")" || rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !out.contains("RC=0"),
+        "an empty box_sha must fail closed (non-zero), never silently resolve origin/main..HEAD: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_on_dev_fails_closed_on_empty_box_sha_1292() {
+    // Review finding S3: consistency with its two siblings above — an empty box_sha must never be
+    // treated as a resolvable revision.
+    let body = r#"
+        rc=0
+        imag_genlock_on_dev "$(pwd)" "" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !out.contains("RC=0"),
+        "an empty box_sha must fail closed (non-zero), never read as a silent 'yes' ancestor: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn imag_genlock_ahead_log_fails_closed_on_an_unreadable_repo_root_1292() {
+    // Review finding W1's building block: the caller-side fix (scripts/drift-guard.sh's
+    // gather_and_check_imag / main()'s --compare branch) now does `|| git_rc=$?` on this call
+    // instead of the old `|| true` -- a swallowed ahead-log failure used to fall through to a
+    // FALSE "OK, current" verdict (range_log empty + ahead_log empty from the swallowed error looks
+    // identical to a genuinely current box). This proves the function itself, called against a
+    // path with no git repo at all, fails LOUD (non-zero) rather than silently returning empty
+    // output that a careless caller could mistake for "nothing ahead" -- exactly the shape the
+    // caller-side fix now correctly routes to the UNKNOWN branch via genlock_build_drift_report's
+    // existing `git_rc != "0" -> UNKNOWN` check (see
+    // imag_build_drift_report_unknown_when_git_failed_never_a_false_ok_531 above for that half).
+    let body = r#"
+        rc=0
+        out="$(imag_genlock_ahead_log "/nonexistent/not-a-git-repo-1292" "80dac432")" || rc=$?
+        echo "RC=$rc"
+        echo "OUT=[$out]"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        !(out.contains("RC=0") && out.contains("OUT=[]")),
+        "a repo_root with no git repo must fail loud (non-zero), never a false-empty 'nothing \
+         ahead': {out:?}"
     );
 }
 
@@ -3387,6 +3456,9 @@ fn imag_genlock_on_dev_false_for_an_orphan_box_never_pushed_to_either_branch_129
 
 #[test]
 fn imag_genlock_on_dev_fails_closed_on_option_shaped_box_sha_1292() {
+    // Review finding S7: without `--end-of-options` git would still exit non-zero here (an unknown
+    // `--is-ancestor` flag), so this test's real job is pinning the fail-CLOSED CONTRACT (non-zero,
+    // never a silent "yes"), not proving `--end-of-options` is what makes it fail.
     let body = r#"
         rc=0
         imag_genlock_on_dev "$(pwd)" "--grep=x" || rc=$?
