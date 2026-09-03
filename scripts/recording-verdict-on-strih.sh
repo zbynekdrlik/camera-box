@@ -62,13 +62,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # (no dev1 path, the verdict runs against the LOCAL strih recording).
 build_onbox_command() {
   local exe="$1"; shift
-  # PowerShell: set RUST_LOG for the child, run the exe (call operator `&`) with all forwarded
-  # args. The args are already Windows-style paths (single backslashes — the caller/harness
-  # translates them), so each is wrapped in PowerShell DOUBLE quotes verbatim (NOT bash %q, which
-  # would double the backslashes and corrupt the Windows path). A literal double-quote in an arg
-  # is PowerShell-escaped as `"" (rare for file paths; handled for safety).
+  # PowerShell: set RUST_LOG for the child, set the HOST process's PriorityClass (issue 1260 —
+  # the &-invoked child inherits it, keeping the ~20-min decode from starving the live obs64
+  # process on this box; see onbox_decode_priority_class's own comment in win-ssh-exec.sh), then
+  # run the exe (call operator `&`) with all forwarded args. The args are already Windows-style
+  # paths (single backslashes — the caller/harness translates them), so each is wrapped in
+  # PowerShell DOUBLE quotes verbatim (NOT bash %q, which would double the backslashes and
+  # corrupt the Windows path). A literal double-quote in an arg is PowerShell-escaped as `""
+  # (rare for file paths; handled for safety).
+  local prio
+  prio="$(onbox_decode_priority_class)"
   # shellcheck disable=SC2016  # single-quoted PowerShell syntax; $env: must NOT expand in bash
-  printf '$env:RUST_LOG="info"; & "%s"' "$exe"
+  printf '$env:RUST_LOG="info"; [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = "%s"; & "%s"' "$prio" "$exe"
   local a esc
   for a in "$@"; do
     esc="${a//\"/\"\"}" # PowerShell escapes an embedded " as ""
@@ -115,6 +120,13 @@ main() {
   local ONBOX_CMD
   ONBOX_CMD="$(build_onbox_command "$VERDICT_EXE" "${PASS_ARGS[@]}")"
 
+  # issue 1260: read the RESOLVED priority class back out of the already-built $ONBOX_CMD (rather
+  # than calling onbox_decode_priority_class a second time) so the run-log line below never
+  # double-prints an invalid-value WARNING that build_onbox_command's own internal resolve above
+  # already emitted once.
+  local RESOLVED_PRIO="${ONBOX_CMD#*PriorityClass = \"}"
+  RESOLVED_PRIO="${RESOLVED_PRIO%%\"*}"
+
   # #186/#208: the on-box --extract-partial writes the pixel-proof PNGs of every flagged /
   # undecodable frame into the SIBLING `<partial>-pixels` dir (beside the --out partial JSON), so
   # the merge's #186 "SEE the missing frame" guarantee survives the per-box split. Derive that dir
@@ -149,6 +161,7 @@ main() {
       echo "[recording-verdict-on-strih] deploying $VERDICT_EXE_LOCAL -> ${STRIH_BOX}:${VERDICT_EXE} (always fresh — correctness over speed)"
       win_ssh_upload "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$VERDICT_EXE_LOCAL" "$VERDICT_EXE"
     fi
+    echo "[recording-verdict-on-strih] decode priority: $RESOLVED_PRIO (E2E_ONBOX_DECODE_PRIORITY)"
     echo "[recording-verdict-on-strih] running on strih (${STRIH_BOX}): $ONBOX_CMD"
     win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$ONBOX_CMD"
     mkdir -p "$LOCAL_OUT_DIR"

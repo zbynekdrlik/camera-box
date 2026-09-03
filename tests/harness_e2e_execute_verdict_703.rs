@@ -238,7 +238,10 @@ fn win_ssh_ps_encoded_command_round_trips_utf16le_base64() {
     assert_eq!(
         decoded, ps_cmd,
         "#703: the EncodedCommand round-trip must reproduce the exact original PowerShell text \
-         (including the space-bearing path) — this is the actual on-box command that will run"
+         (including the space-bearing path) — this is a REPRESENTATIVE on-box command shape \
+         (win_ssh_ps_encoded_command itself never inspects the text it encodes; issue 1260 \
+         later added a PriorityClass statement to the REAL build_onbox_command output, which \
+         this fixture intentionally leaves out to keep this test scoped to the encoder alone)"
     );
 }
 

@@ -254,6 +254,38 @@ burns-ON. The burns-ON 7.5 fps is a measurement-window observer-effect artifact 
 event/production). NEVER widen floor 28 or re-loosen the strih term (issue 1263 report-only is the
 stopgap; the goal is to re-arm it strict).
 
+## The post-E2E on-strih/on-stream decode is a CONFIRMED trigger — mitigated at BelowNormal priority (issue 1260)
+
+The supervisor's dip-vs-decode correlation table (issue-1260 comment 5518052846, mining 22:40-01:40
+local strih OBS-log data) proves the on-strih `recording-verdict.exe --extract-partial` decode
+launched by `recording-e2e.sh` `[8/8a]` is one CONCRETE cause of the collapse, not just theoretical
+CPU contention: **0-3 dips/10min idle** (and even **1-9/10min with burns ON but no decode running**,
+TEST-mode windows) vs **89-117 dips/10min during exactly the .613/.614/.615 on-strih partial-decode
+windows** — the decode's ffmpeg-backed CPU load starves the MV render thread of scheduler priority
+on the SAME box, while program `lagged=0` throughout (MV is the victim, program is not — matching
+the ticket title). This is a DIFFERENT mechanism from the contention profile above (which measured
+DURING an E2E run's normal operation, not the post-run decode) — both compete for the same ~5ms of
+program headroom (idle baseline `obs64` ~42%, ~6.8 of 16 cores, per the same comment).
+
+**Mitigation (LANDED, cheap step before lever (b)):** `build_onbox_command` in both
+`scripts/recording-verdict-on-strih.sh` and `-on-stream.sh` now sets the PowerShell host process's
+`PriorityClass` to `BelowNormal` (default, env-overridable via `E2E_ONBOX_DECODE_PRIORITY` —
+`Idle|BelowNormal|Normal`) BEFORE the `&`-invoked `recording-verdict.exe` call, which inherits it
+(Win32 `CreateProcess` semantics). The env override is a plain shell var read by the on-box planner
+scripts — it works for a manual/dev1-driven `recording-e2e.sh` run today; `full-path-e2e.yml` does
+NOT currently forward `E2E_ONBOX_DECODE_PRIORITY` in its `env:` blocks, so a PR-triggered CI run
+always gets the BelowNormal default (which is the correct steady state) — reaching Normal/Idle from
+a PR-triggered run needs a one-line workflow `env:` addition first if that A/B is ever wanted there.
+Mirrors imag-nb's issue-767 `nice -n 19` in `build_onimag_command` for the same class of problem.
+Resolved by the shared, pure `onbox_decode_priority_class()` in `scripts/lib/win-ssh-exec.sh` (both
+planners already source that file unconditionally). This does NOT touch `recording-e2e.sh` or add
+CPU affinity (strih's OBS core-pin mask is not established, unlike imag's — the deferred next lever
+if BelowNormal proves insufficient). Verify on the rig during the next E2E's post-run decode:
+`Get-Process recording-verdict,ffmpeg | Select ProcessName,PriorityClass` (both should read
+`BelowNormal` — `ffmpeg` is where the CPU actually burns), and re-run the dip-vs-decode correlation
+over a fresh OBS log window to confirm the dip density during decode drops toward the idle
+baseline.
+
 ## Autostart-aware = reset the confirm streak on an OBS-log IDENTITY change
 
 The audit line carries no cumulative counter, so the watchdog detects an OBS restart (autostart via
