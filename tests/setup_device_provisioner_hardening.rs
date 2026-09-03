@@ -603,6 +603,44 @@ fn setup_device_step17_skips_dantesync_download_when_already_at_target_version_1
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// #1289 review finding (🔵) -- the three `install -m 0755 "$_..._dl_tmp" dest` calls above had no
+// `|| fail ...` of their own: a real install failure (disk full, an unexpected permission issue)
+// still correctly aborts the script under `set -e`, but leaks the temp file and surfaces bash's
+// raw stderr instead of this script's usual descriptive fail() message. Every OTHER failure path
+// in these same three blocks (the curl download, the empty-file check) already cleans up the temp
+// file and fails loud with a specific message -- the install call is the one gap.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_install_from_temp_fails_loud_and_cleans_up_on_failure_1289() {
+    let body = read_script();
+    for (tmp_var, dest, needle) in [
+        (
+            "_camera_box_dl_tmp",
+            "/usr/local/bin/camera-box",
+            "install -m 0755 \"$_camera_box_dl_tmp\" /usr/local/bin/camera-box || {",
+        ),
+        (
+            "_frame_probe_dl_tmp",
+            "/usr/local/bin/frame-probe",
+            "install -m 0755 \"$_frame_probe_dl_tmp\" /usr/local/bin/frame-probe || {",
+        ),
+        (
+            "_dantesync_dl_tmp",
+            "/usr/local/bin/dantesync",
+            "install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dantesync || {",
+        ),
+    ] {
+        assert!(
+            body.contains(needle),
+            "the `install -m 0755 \"${tmp_var}\" {dest}` call must be guarded by `|| {{ ... }}` \
+             so an install failure also cleans up the temp file and fails loud via fail(), \
+             matching every other failure path in the same block (#1289 review finding)"
+        );
+    }
+}
+
 #[test]
 fn setup_device_calls_restore_root_mode_after_the_fstab_rewrite() {
     let body = read_script();
