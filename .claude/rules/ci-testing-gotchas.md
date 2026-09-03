@@ -944,3 +944,44 @@ already-resolved class back out of the built command string via a pure parameter
 reuse it for both the command AND the log line. When adding a NEW test for a validate-and-warn
 function, assert the WARNING's exact occurrence count somewhere in the full flow, not just that it
 appears — this class of bug is invisible to a "does it contain WARNING" check.
+
+## Testing git-ancestry-dependent logic: build a throwaway synthetic repo, never pin against THIS repo's own live history (issue 1292)
+
+A function that reasons about `git merge-base`/ancestry ranges against `origin/main`/`origin/dev`
+(the `imag_genlock_range_log`/`imag_genlock_ahead_log`/`imag_genlock_on_dev` family in
+`scripts/drift-guard.sh`) needs a REAL git repo to exercise honestly — a mocked/stubbed `git`
+binary can't reproduce genuine DAG topology (merge commits, TREESAME collapse, `--is-ancestor`).
+The naive move is to test against THIS repo's own checkout (`tests/drift_guard.rs`'s existing
+`imag_genlock_range_log_rejects_option_shaped_box_sha_never_a_false_ok_531` already does this, for
+a check that only needs "some real history exists"). But for a test whose EXPECTED RESULT depends
+on the specific relationship between a fixed commit and `origin/main`'s CURRENT tip, pinning
+against live history is a ticking time bomb: `origin/main` only ever GROWS (this repo's two-branch
+workflow), so a box that reads "ahead" today can genuinely become "behind" the moment a new PR
+merges — exactly what made the incident's own reproduction commit (`box=3ffe2fbc5`) only
+transiently ahead. A test asserting `range == empty` against that live sha would eventually flip to
+a real, unrelated CI failure with no code regression behind it.
+
+**Fix: build a small, throwaway, fully-isolated two-branch repo per test** — a bare "origin" (`git
+init --bare`) + a working clone with a real `origin` remote, `tempfile::tempdir()` for both (never
+a hand-rolled pid+timestamp path, per the `#975` entry above), driven via `std::process::Command`.
+See `build_two_branch_ahead_repo()` in `tests/drift_guard.rs` for the worked pattern: commit on
+`main`, branch `dev`, commit twice on `dev` (touching the SAME paths the function under test
+filters on — `vendor/obs-studio`/`vendor/distroav` here), `git merge --no-ff dev` back into `main`
+(reproducing a real PR-merge commit with two parents), push both branches, `git fetch origin` so
+`origin/main`/`origin/dev` are real remote-tracking refs (NOT local branches of the same name — the
+function under test reads the remote-tracking refs, so the test must produce those, not a
+same-named local branch). This is deterministic FOREVER (the DAG shape drives the result, not wall
+time), and it directly reproduces the exact BUG shape (a box on `dev` past the point that got
+merged into `main`) without any dependency on the live repo's ever-advancing tip.
+
+**Before trusting your OWN expected values, verify them empirically in `bash -c`, not by reasoning
+about git internals from memory.** git's default `git log A..B -- <pathspec>` history-simplification
+is genuinely subtle (git 2.43 `revision.c`'s BOTTOM-flag/TREESAME-collapse rule — a merge commit
+that is TREESAME to one parent for the given paths is dropped from the listing in favor of the
+non-treesame parent's own commits). A first draft of this exact test file assumed a 2-commit range
+would collapse to the ONE merge commit; empirically it printed the TWO underlying non-merge commits
+instead. Build the synthetic repo in a throwaway `bash -c` shell first (`git init --bare`, the
+merge, `git log --oneline A..B -- paths`), read the ACTUAL output, THEN write the Rust assertion —
+never assert a count/SHA you haven't seen printed. (And never add `--first-parent`/`--full-history`
+to a `git log` call whose whole point is this collapse — either flag reintroduces the exact false
+positive the collapse exists to avoid.)
