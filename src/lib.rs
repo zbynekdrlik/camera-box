@@ -441,11 +441,11 @@ pub mod optical_payload_check;
 // tests Tier-0.
 pub mod offline_ack;
 
-// #881 (via #854/#707) — the TEMPORARY calibrated floor for the all-cambox segment continuity's
-// optical `undecodable` term (a physical 60Hz temporal-tear artifact of the test camera's
-// monitor, not chain loss). No probe deps, so it unit-tests Tier-0;
-// `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
-// together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
+// #881 (via #854/#707) — the permanent, data-calibrated floor for the all-cambox segment
+// continuity's optical `undecodable` term (a physical 60Hz temporal-tear artifact of the test
+// camera's monitor, not chain loss). No probe deps, so it unit-tests Tier-0;
+// `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. LIVE-gating
+// again since issue 905 item 3 (the "temporary until 120Hz" premise is dead — 60Hz is permanent).
 pub mod burn_hold;
 // #1260 — PURE, dependency-free within-tick "prepare once, reuse" state for the DistroAV QR burn
 // filter. The Tier-0 authority the C mirror vendor/distroav/src/burn-tick-cache.hpp is checked
