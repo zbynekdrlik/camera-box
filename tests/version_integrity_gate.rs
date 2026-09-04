@@ -2108,10 +2108,20 @@ fn vendor_pin_ahead_seam_flows_through_the_gate_to_ok_never_a_false_alarm_1292()
             ),
         "vendor_pin must report the exact OK/AHEAD phrase, never ALARM: {stdout}"
     );
+    // The negative half is scoped to the VERDICT line + the stderr banner, never the whole stdout:
+    // the section header main() always prints (`-- vendor-pin alarm (#1137, report-only) --`)
+    // legitimately spells "alarm", so a whole-stdout `contains("ALARM")` (case-folded) can never
+    // pass -- it would fail this test even on a perfectly OK verdict (caught by the first CI run of
+    // this test; the pure-function sibling tests above have no header line, so their whole-output
+    // negative check is fine).
+    let verdict_line = stdout
+        .lines()
+        .find(|l| l.contains("vendor_pin ") && !l.contains("vendor-pin alarm ("))
+        .unwrap_or_else(|| panic!("no vendor_pin verdict line in stdout: {stdout}"));
     assert!(
-        !stdout.to_uppercase().contains("ALARM") && !stderr.contains("VENDOR-PIN ALARM"),
-        "an ahead-and-recognized bundle must NEVER fire the ALARM stderr banner (or print ALARM \
-         anywhere in stdout): {stdout} / {stderr}"
+        !verdict_line.to_uppercase().contains("ALARM") && !stderr.contains("VENDOR-PIN ALARM"),
+        "an ahead-and-recognized bundle must NEVER fire the ALARM stderr banner (or read ALARM on \
+         its own vendor_pin verdict line): {verdict_line:?} / {stderr}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
