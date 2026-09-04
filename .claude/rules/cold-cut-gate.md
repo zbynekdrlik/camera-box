@@ -43,6 +43,30 @@ receiver DOWN: clear its `ndi_source_name` (the same idle discipline `obs_phase2
   interrupted mid-hold, or a single-appearance sweep). The restore REFUSES an empty captured name
   (`--restore ""` is falsy → would re-idle the input black) — it warns + marks the run skipped.
 
+## Arming it in CI — repository variables + the arm-check guard (`scripts/lib/cold-cut-bypass-guard.sh`, #1086)
+
+`.github/workflows/full-path-e2e.yml` sources both env vars from **repository variables** onto the
+recording step: `COLD_CUT_BYPASS_CAM: ${{ vars.COLD_CUT_BYPASS_CAM }}` /
+`COLD_CUT_BYPASS_INPUT: ${{ vars.COLD_CUT_BYPASS_INPUT }}`. So obtaining the genuine-cold run is a
+**repository-variable flip, no code change** — set `COLD_CUT_BYPASS_CAM=CAM1` +
+`COLD_CUT_BYPASS_INPUT="NDI cam1"` (the strih NDI input feeding CAM1's window) in the repo's
+Actions → Variables, let the pull_request gate run, then CLEAR them. Unset = empty string = the
+runtime lib is an inert no-op, so a normal gate run is byte-for-byte unaffected.
+
+- **Loud + fail-closed pre-flight:** a `Cold-cut keepalive-bypass arm check` step runs FIRST (before
+  the rig-busy poll + artifact fetch — it is pure, no rig), sourcing `cold-cut-bypass-guard.sh`'s
+  `cold_cut_bypass_arm_check`: silent when both vars empty; a LOUD `ARMED` banner naming both values
+  when armed on the sweep run; and it FAILS CLOSED (`::error::`, non-zero) on a
+  `COLD_CUT_BYPASS_CAM` outside the current-sweep 2nd-cut set (`cold_cut_bypass_valid_targets`,
+  default `CAM1 CAM2 CAM3`, env-overridable via `COLD_CUT_BYPASS_VALID_TARGETS`) or a set CAM with
+  an empty INPUT — catching a stuck repo variable before any rig time is spent.
+- **ALL_CAMBOX-INERT gotcha:** the cold-cut hooks fire ONLY inside `recording-e2e.sh`'s
+  `if [ "$ALL_CAMBOX" = "1" ]` fused sweep (a `pull_request` gate run). On a `workflow_dispatch`
+  soak `ALL_CAMBOX='0'`, so an armed bypass is **INERT** (nothing idled, NO cold cut measured) — the
+  arm-check step passes `ALL_CAMBOX` (same ternary as the recording step) and prints an INERT
+  `::warning::` instead of the ARMED banner there. So the genuine-cold run MUST be a `pull_request`
+  gate run, never a manual dispatch.
+
 ## Prerequisites before flipping `gates_overall_pass()` LIVE
 
 1. A WARM baseline from real E2E runs (the seam serializes `all_cambox_continuity.cold_cut_onset`).

@@ -40,7 +40,7 @@ before trusting this table for anything operational.
 | Device | Grabber model | Capture node | Notes |
 |--------|---------------|--------------|-------|
 | CAM1 | Elgato 4K S | /dev/video0 | Swapped in 2026-07-12 (was ShadowCast 2, #728); capture node RENUMBERED from /dev/video1 -> /dev/video0 by 2026-07-13 (#744) — exactly the "can drift" case above; `scripts/recording-e2e.sh` no longer hardcodes a node, see `scripts/lib/v4l2-neutral.sh` |
-| CAM2 | ShadowCast 2 | /dev/video0 | Unchanged |
+| CAM2 | Elgato Cam Link 4K (owner swap 2026-09-03; was ShadowCast 2 — the hostname→model table is stale, runtime detection is authoritative, #728/#729) | /dev/video0 | Swapped |
 | CAM3 | ShadowCast 2 | /dev/video0 | Unchanged |
 | CAM4 | NZXT Signal HD60 | /dev/video0 | Unchanged, no V4L2 picture controls exposed |
 | CAM5 | ShadowCast 2 | /dev/video0 | Swapped in 2026-07-12 (was Elgato 4K S, #728) — this is the SAME physical unit that used to sit in CAM1 |

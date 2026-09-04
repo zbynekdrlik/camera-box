@@ -1011,6 +1011,20 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('force_by_name_next_reset_1180 = true;')) {
             Write-Error "ndi-source.cpp: the #1180 verify no longer sets force_by_name_next_reset_1180 = true on a mismatch -- the wrong-sender feed is never corrected. Re-apply the #1180 corrective reset"; exit 1
           }
+          # camera-box #1287: a BY-URL bind that delivers ZERO frames (a dead cached sender port after
+          # a graceful cambox restart -- the #1096 "fresh" finder keeps serving the dying sender's
+          # cached advertisement) loops BY-URL forever, because #1180's identity verify is frames-gated
+          # so it never fires and both reset-forcing arms take the default BY-URL path. The fix's pure
+          # helper forces BY-NAME on the NEXT reset after a frame-less BY-URL bind (alternating
+          # BY-URL<->BY-NAME so neither this stale-URL wedge nor the #1096 poisoned-name wedge can pin a
+          # leg). This path ships distroav.dll, so re-assert here too -- mirrors
+          # tests/distroav_frameless_by_url_escape_1287.rs.
+          if ($ndi -notmatch [regex]::Escape('static inline bool ndi_force_by_name_after_frameless(')) {
+            Write-Error "ndi-source.cpp: the #1287 ndi_force_by_name_after_frameless decision helper is gone -- a frame-less BY-URL bind (dead cached sender port after a graceful restart) can no longer be forced onto BY-NAME and loops BY-URL forever. Re-apply the #1287 fix"; exit 1
+          }
+          if (([regex]::Matches($ndi, [regex]::Escape('ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;'))).Count -lt 2) {
+            Write-Error "ndi-source.cpp: the #1287 helper-gated corrective set is wired at fewer than 2 reset-forcing arms -- it must gate AND SET force_by_name_next_reset_1180 in BOTH the no_connections==0 arm AND the #767 stale-while-connected arm (anchoring the whole adjacency so deleting only the set is caught), else a frame-less BY-URL bind is never flipped to BY-NAME. Re-apply the #1287 wiring at both sites"; exit 1
+          }
           # camera-box #1097: the framesync_create failure branch in the reset path must retry (not
           # break) -- the dormant sibling of #1080 (framesync forced OFF today, but a break there is
           # the SAME permanent, reattach-proof receiver-thread death). It uses its OWN

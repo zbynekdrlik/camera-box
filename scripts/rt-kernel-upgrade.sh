@@ -21,7 +21,7 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/rt-kernel-upgrade.sh --box <ip> [--commands]      # read the box read-only, print its plan
-#   scripts/rt-kernel-upgrade.sh --facts "RUN INST GEN GRUB" [--commands]  # offline, no ssh
+#   scripts/rt-kernel-upgrade.sh --facts "RUN INST GEN GRUB [CAND] [STALE]" [--commands]  # offline, no ssh
 #   scripts/rt-kernel-upgrade.sh --help
 # SSH password override: RT_KERNEL_SSH_PASS (default `newlevel`, the fleet-wide committed default).
 
@@ -38,7 +38,9 @@ usage() {
 scripts/rt-kernel-upgrade.sh -- issue 899 DRY-RUN low-latency kernel upgrade planner (one cam box).
   --box <ip>                    read the box READ-ONLY over ssh, print its atomic upgrade plan
   --box <ip> --commands         also print the concrete shell the supervisor runs per step
-  --facts "RUN INST GEN GRUB [CAND]"   offline (no ssh); each 1/0, GRUB is `saved` or a number
+  --facts "RUN INST GEN GRUB [CAND] [STALE]"   offline (no ssh); RUN/INST/GEN/CAND are 1/0,
+                                GRUB is `saved` or a number, STALE is the observed superseded-generic
+                                token (comma-joined `<ver>` + `linux-image-generic`; `-` = none)
   --help
 NEVER mutates a box. Apply/reboot is the supervisor's reviewed step (docs/runbooks/899-realtime-isolation.md).
 Kernel: linux-lowlatency-hwe-24.04 (free Ubuntu main archive, no Pro -- owner decision 2026-08-20).
@@ -55,14 +57,22 @@ require_tools() {
   fi
 }
 
-# gather_facts IP -> echoes the 4 planner args "RUN INST GEN GRUBDEF" from READ-ONLY box reads.
+# gather_facts IP -> echoes the planner args "RUN INST GEN GRUBDEF CAND STALE" from READ-ONLY reads.
 #   RUN  : preempt=full is the ACTIVE boot mode (the low-latency profile already running)
 #   INST : the `lowlatency-kernel` config package is installed (provisioned, maybe not rebooted)
 #   GEN  : the HWE generic meta (linux-image-generic-hwe-24.04) is NOT installed -> the lowlatency
 #          install will pull a NEW HWE image and supersede the running one -> a purge is needed to
 #          restore the single-kernel invariant. (1 = superseded-generic-will-remain, needs purge.)
+#          GEN is a PRE-install PREDICTION; the planner uses it only in the pre-install branch.
 #   GRUBDEF : GRUB_DEFAULT, collapsed to its first whitespace token so a titled value cannot shift
 #             the space-delimited split.
+#   CAND : linux-lowlatency-hwe-24.04 has an apt candidate (fail-closed axis).
+#   STALE: the OBSERVED superseded-generic set -- the space-free, comma-joined token of installed
+#          `linux-image-<ver>-generic` packages whose `<ver>` != `uname -r`, plus the literal
+#          `linux-image-generic` meta if installed; `-` when nothing is stale. This is an OBSERVATION
+#          (not the GEN prediction): after the reboot into the new kernel, `uname -r` IS the desired
+#          kernel, so "installed image != uname -r" identifies a genuinely superseded image the
+#          single-kernel invariant still requires purging (the cam5 2026-09-03 gap GEN could not see).
 gather_facts() {
   local ip="$1" raw
   require_tools
@@ -77,7 +87,19 @@ gather_facts() {
     cand=0; apt-cache policy linux-lowlatency-hwe-24.04 2>/dev/null | grep -qE "Candidate: [0-9]" && cand=1
     gd="$(sed -nE "s/^GRUB_DEFAULT=(.*)/\1/p" /etc/default/grub 2>/dev/null | tr -d "\"" | head -1)"
     gd="${gd:-0}"; gd="${gd%% *}"
-    echo "$run $inst ${gen} ${gd} ${cand}"
+    # STALE: OBSERVED superseded-generic set -- installed linux-image-<ver>-generic whose <ver> !=
+    # uname -r, plus the linux-image-generic meta. Only meaningful once rebooted (uname -r == the
+    # desired kernel); the planner consults it only in the run=1 branch. Comma-joined, "-" = none.
+    # No process substitution (portable to a /bin/sh remote); no entry has a space so the
+    # space-delimited fact split downstream holds.
+    kr="$(uname -r)"; stale=""
+    for p in $(dpkg-query -W -f="\${Package} \${Status}\n" "linux-image-*-generic" 2>/dev/null | grep "install ok installed" | cut -d" " -f1); do
+      v="${p#linux-image-}"; [ "$v" = "$kr" ] && continue
+      stale="${stale:+$stale,}$v"
+    done
+    dpkg-query -W -f="\${Status}" linux-image-generic 2>/dev/null | grep -q "install ok installed" && stale="${stale:+$stale,}linux-image-generic"
+    stale="${stale:--}"
+    echo "$run $inst ${gen} ${gd} ${cand} ${stale}"
   ' 2>/dev/null)" || { echo "FATAL: could not read box $ip over ssh (rc=$?)" >&2; exit 4; }
   raw="$(printf '%s' "$raw" | tr -s ' ' | tail -1)"
   [ -n "$raw" ] || { echo "FATAL: empty facts from box $ip" >&2; exit 4; }
@@ -88,17 +110,18 @@ emit_plan() {
   local facts="$1" commands="$2"
   # shellcheck disable=SC2086  # facts is a deliberate word split
   set -- $facts
-  local run="${1:-}" inst="${2:-}" gen="${3:-}" gd="${4:-0}" cand="${5:-1}"
-  echo "# facts: running_lowlat=$run lowlat_installed=$inst superseded_generic=$gen grub_default=$gd rt_candidate=$cand"
+  local run="${1:-}" inst="${2:-}" gen="${3:-}" gd="${4:-0}" cand="${5:-1}" stale="${6:--}"
+  echo "# facts: running_lowlat=$run lowlat_installed=$inst superseded_generic=$gen grub_default=$gd rt_candidate=$cand superseded_installed=$stale"
   echo "# readiness: $(rt_kernel_readiness_verdict "$run" "$inst" "$cand")"
   echo "# kernel choice: $(rt_kernel_flavour)  (free Ubuntu main archive, no Pro -- STEP 1)"
   echo "# ---- atomic per-box plan (SUPERVISOR applies; reboot-class, one box at a time) ----"
   local plan tok
-  plan="$(rt_kernel_upgrade_plan "$run" "$inst" "$gen" "$gd" "$cand")"
+  plan="$(rt_kernel_upgrade_plan "$run" "$inst" "$gen" "$gd" "$cand" "$stale")"
   while IFS= read -r tok; do
     [ -n "$tok" ] || continue
     if [ "$commands" = "1" ]; then
-      printf '%-28s %s\n' "$tok" "$(rt_kernel_step_command "$tok")"
+      # stale is used only by the purge token; every other token ignores the 2nd arg.
+      printf '%-28s %s\n' "$tok" "$(rt_kernel_step_command "$tok" "$stale")"
     else
       printf '%s\n' "$tok"
     fi
@@ -119,7 +142,7 @@ main() {
   local facts=""
   case "$mode" in
     box)   [ -n "$arg" ] || { echo "FATAL: --box needs an IP" >&2; exit 2; }; facts="$(gather_facts "$arg")" ;;
-    facts) [ -n "$arg" ] || { echo "FATAL: --facts needs 4 values" >&2; exit 2; }; facts="$arg" ;;
+    facts) [ -n "$arg" ] || { echo "FATAL: --facts needs at least 4 values (RUN INST GEN GRUB [CAND] [STALE])" >&2; exit 2; }; facts="$arg" ;;
     *)     usage; exit 2 ;;
   esac
   emit_plan "$facts" "$commands"

@@ -9,8 +9,12 @@
 # scripts/lib/optical-chain-health.sh -- #860: the SHARED, PURE decision core for the cam2
 # optical-injection leg (painter -> cam2 monitor -> cam1 camera). No I/O, no ssh, no OBS, no MCP,
 # so it can be unit-tested exhaustively (mirrors scripts/lib/obs-watchdog-decision.sh /
-# imag-power-envelope.sh). TWO dev1-side surfaces consume it: the standing
-# optical-chain-alert-watchdog.sh (systemd timer) AND the recording-e2e.sh [0/8] preflight.
+# imag-power-envelope.sh). THREE dev1-side surfaces consume it: the standing
+# optical-chain-alert-watchdog.sh (systemd timer), the recording-e2e.sh [0/8] preflight, AND
+# (#1290) scripts/lib/rig-mode-state.sh -- which reuses painter_expected + the probe snippet as the
+# rig EVENT/TEST discriminator for the splitter-port watchdog. That third consumer makes the exact
+# `KEY|value` shape, the `= "enabled"`/`= "active"` semantics, and the `?`-on-empty state (below)
+# LOAD-BEARING for a page-SUPPRESSION decision -- a future edit to the snippet must keep them.
 #
 # WHY (#860, live incident 2026-08-14): a chain of FAILED E2E runs whose cleanups each logged
 # `WARNING #712: cam2/painter restore failed/timed out` left the painter DEAD -- cam2's monitor
@@ -140,12 +144,18 @@ optical_chain_alert_condition() {
 
 # optical_chain_painter_probe_remote_snippet [PIDFILE] [SERVICE] -> stdout: REMOTE bash for cam2
 #   that emits exactly four `KEY|value` lines the pure functions above parse:
-#     PID_PRESENT|<0|1>  pidfile exists
-#     PID_ALIVE|<0|1>    pidfile's PID is alive (kill -0)
-#     SVC_ENABLED|<0|1>  the permanent painter service is enabled (systemctl is-enabled == enabled)
-#     SVC_ACTIVE|<0|1>   the permanent painter service is active
-#   A box without the unit installed reports SVC_ENABLED|0 / SVC_ACTIVE|0 (never an error). Emit
-#   this INSIDE an ssh command string to cam2: `ssh root@cam2 "$(optical_chain_painter_probe_remote_snippet)"`.
+#     PID_PRESENT|<0|1>    pidfile exists
+#     PID_ALIVE|<0|1>      pidfile's PID is alive (kill -0)
+#     SVC_ENABLED|<0|1|?>  is-enabled == enabled -> 1; any other NON-EMPTY answer
+#                          (disabled / not-found / static / masked) -> 0; an EMPTY answer
+#                          (systemd manager unresponsive / dbus down mid-shutdown -- a HICCUP, not a
+#                          real state) -> ?  (#1290: for optical-chain a `?` is treated as not-1 = 0
+#                          = skip, exactly as before; rig-mode-state.sh maps `?` -> UNKNOWN so a
+#                          hiccup can never be misread as a provable EVENT and silence a page).
+#     SVC_ACTIVE|<0|1|?>   is-active == active -> 1; other non-empty -> 0; empty answer -> ?.
+#   A box without the unit installed reports SVC_ENABLED|0 / SVC_ACTIVE|0 (never an error -- the
+#   is-enabled/is-active reads print a non-empty `not-found`/`inactive` on this fleet). Emit this
+#   INSIDE an ssh command string to cam2: `ssh root@cam2 "$(optical_chain_painter_probe_remote_snippet)"`.
 optical_chain_painter_probe_remote_snippet() {
   local pidfile="${1:-/run/rig-painter.pid}" service="${2:-cam2-painter.service}"
   cat <<REMOTE
@@ -158,7 +168,9 @@ else
   echo "PID_PRESENT|0"
   echo "PID_ALIVE|0"
 fi
-if [ "\$(systemctl is-enabled '$service' 2>/dev/null)" = "enabled" ]; then echo "SVC_ENABLED|1"; else echo "SVC_ENABLED|0"; fi
-if [ "\$(systemctl is-active '$service' 2>/dev/null)" = "active" ]; then echo "SVC_ACTIVE|1"; else echo "SVC_ACTIVE|0"; fi
+_en="\$(systemctl is-enabled '$service' 2>/dev/null)"
+if [ "\$_en" = "enabled" ]; then echo "SVC_ENABLED|1"; elif [ -n "\$_en" ]; then echo "SVC_ENABLED|0"; else echo "SVC_ENABLED|?"; fi
+_ac="\$(systemctl is-active '$service' 2>/dev/null)"
+if [ "\$_ac" = "active" ]; then echo "SVC_ACTIVE|1"; elif [ -n "\$_ac" ]; then echo "SVC_ACTIVE|0"; else echo "SVC_ACTIVE|?"; fi
 REMOTE
 }

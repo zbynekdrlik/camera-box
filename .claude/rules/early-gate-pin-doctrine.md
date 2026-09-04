@@ -4,9 +4,11 @@ paths:
   - "scripts/dantesync-version-gate.sh"
   - "scripts/version-integrity-gate.sh"
   - "scripts/recording-e2e.sh"
+  - "scripts/drift-guard.sh"
   - "tests/camera_box_version_gate.rs"
   - "tests/dantesync_version_gate.rs"
   - "tests/version_integrity_gate.rs"
+  - "tests/drift_guard.rs"
 ---
 
 # Early-gate PIN doctrine — an early gate PINS to the expected release, fail-closed on UNKNOWN; peer parity is a SUPPLEMENT, never a substitute (#1136)
@@ -91,7 +93,7 @@ REPORTS is a per-component call — justify it:
 |---|---|---|---|---|
 | `dantesync` DAEMON — `dantesync-version-gate.sh` (#862) | every node vs `DANTESYNC_VERSION_PIN`; uniform-stale FAILS; UNKNOWN→refuse | **PIN ✓** (fixed — can lag) | **✓ lag ALARM (report-only, #1139)** | **FIXED #1139**: `dantesync_pin_lag_verdict` SCREAMS (report-only) when the pin lags the newest gh release |
 | `dantesync-tray.exe` (strih+stream) | **sha256 vs the v{PIN} release asset (report-only alarm, #1139)** — GUI app has no console `--version` (verified live), so pin by bytes not version | **PIN ✓ (sha, #1139)** | ✓ (via the daemon lag alarm — same release tag) | **FIXED #1139 (detection)**: `dantesync_tray_verdict` SCREAMS when the deployed tray != the pinned release asset; folding the tray into the fleet-upgrade roll (so it advances with the daemon) is the remaining orphan-PROOF step |
-| `version-integrity-gate.sh` (#123) OBS/genlock bundle | LIVE Windows/imag OBS stack vs vendor/README.md + bundle manifest SHAs; **+ vendor-pin vs main's newest `vendor/**` commit (report-only alarm, #1137)** | **PIN ✓ (report-only vendor pin, #1137)** | **✓ vendor-pin ALARM (#1137)** | **FIXED #1137**: `genlock_vendor_pin_verdict` SCREAMS (report-only — coordinated-restart deploy makes a hard block too blunt) + names the pending vendor commits |
+| `version-integrity-gate.sh` (#123) OBS/genlock bundle | LIVE Windows/imag OBS stack vs vendor/README.md + bundle manifest SHAs; **+ vendor-pin vs main's newest `vendor/**` commit (report-only alarm, #1137; #1292 merge-base scoped)** | **PIN ✓ (report-only vendor pin, #1137)** | **✓ vendor-pin ALARM (#1137)** | **FIXED #1137**: `genlock_vendor_pin_verdict` SCREAMS (report-only — coordinated-restart deploy makes a hard block too blunt) + names the pending vendor commits. **#1292**: the PENDING_LIST range is merge-base-scoped (never a plain ancestry range — see the #1292 addendum below), and a deployed bundle genuinely AHEAD of main on the dev candidate line is classified OK (a recognized release-candidate build) vs ALARM (an unrecognized ORPHAN build), mirroring `genlock_build_drift_report`'s own AHEAD/orphan split |
 | `camera-box-version-gate.sh` (#875) | was relative parity only | **PARITY→PIN ✓ (#1136)** | **✓ orphan-PROOF** — pin = origin/main = newest; auto-deploy closes the gap; any lag → gate screams | fixed here |
 | `frame-probe` (cam2 painter binary) | **sha256 vs the candidate probe-tools CI artifact, with a pre-gate AUTO-ALIGN that deploys it to cam2 (report-only pin, #1138)** — the frame-probe sibling of `camera-box-parity-align.sh` | **PIN ✓ (sha, #1138)** | **✓ pin+deploy advance together** — the E2E `[0/8]` align deploys the candidate every run (`scripts/lib/frame-probe-parity-align.sh`), so cam2's painter can no longer silently lag | **FIXED #1138 (detection + auto-align)**: `frame_probe_parity_align_before_gate` (E2E `[0/8]`) fetches the clean `probe-tools-linux-amd64` CI artifact, version-guards it (co-located `camera-box-probe --version` == candidate), and deploys it to `/usr/local/bin/frame-probe` when stale via `deploy-fleet.sh --frame-probe` (frame-probe-only mode + the #892 enable-state-preserving lifecycle); the `[1/8]` pin then CONFIRMS against the SAME artifact bytes (`FRAME_PROBE_ALIGN_CI_BIN`). **FLIPPED to a HARD gate (issue 1235)**: the auto-align is now rig-proven (active deploy path + `[1/8]` pin OK observed end-to-end on the first green 7-cam series), so the `[1/8]` pin runs `--frame-probe-hard` and REFUSES (exit 30 lag / 31 UNKNOWN, fail-closed) — the report-only->hard two-step is complete. HARD mode pins against `FRAME_PROBE_ALIGN_CI_BIN` ONLY (an empty one = UNKNOWN->refuse); the byte-different `$PROBE_BIN_DIR` local fallback stays only in the `--no-main-pin` operator-soak report-only branch |
 | `recording-verdict-on-imag` sha gate (#1118) | sha256 vs probe-tools artifact | **PIN ✓** | ✓ (sha of the current CI artifact) | clean (refreshed 2026-08-19) |
@@ -120,3 +122,57 @@ orphan and any deploy gap self-alarms.
   advancing the pin + deploying the fleet the MANDATORY final step of the release — never a silent
   "published but not deployed" state. If the pin is a MOVING reference (= the newest source of truth)
   with an auto-deploy, the orphan is structurally impossible and self-alarming (the camera-box shape).
+
+## A box AHEAD of the pin during a release train is a NORMAL state, not a defect — the ancestry-range polarity trap (#1292)
+
+`scripts/drift-guard.sh`'s `imag_genlock_range_log` is the #531 dynamic MOVING-pin gate for the
+`genlock_build` facet (imag-nb's `--check-imag`, AND strih/stream's `--compare genlock_build_sha=`
+— one shared pure verdict, `genlock_build_drift_report`). It is exactly the "camera-box shape" this
+doctrine recommends: pin = origin/main's newest vendored-genlock HEAD, never a hand-bumped SHA. But
+its FIRST implementation still hit the doctrine's own blind spot: **a MOVING pin gate must account
+for the box being legitimately AHEAD of the pin, not just behind it.**
+
+During any active release train, a box can be running a **release-candidate build deployed from
+`origin/dev`** — genuinely ahead of `origin/main`, because the PR that carries its content hasn't
+merged yet. A naive `git log <box>..origin/main -- <paths>` (plain ancestry range) reads this as
+STALE: this repo's two-branch workflow never merges main's own MERGE commits back into dev, so a
+merge commit on main is never a git-ancestor of ANY later dev commit — even one whose independent
+dev-side lineage already contains that merge's entire vendor CONTENT (the merge's second parent was
+an ancestor of the box; the merge commit itself is not). The box read "2 genlock-commit(s) behind
+origin/main" while it was in fact a strict content SUPERSET — the exact false-STALE that HARD-BLOCKED
+`rig-mode.sh test` (issue-789 gate) during every single release train, i.e. whenever the rig ran a
+release-candidate ahead of main (the common, expected case, not an edge case).
+
+**The fix: scope the STALE range to the common ancestor, `git merge-base(box, origin/main)..origin/main`,
+never the box's own straight ancestry.** For a box that is a content superset of main, the merge-base
+already sits at the point past which main gained nothing the box doesn't already have, so the range
+reads correctly empty. A genuinely-behind box (its own merge-base is far back) still shows every real
+missing commit — the fix removes ONLY the false positive on the AHEAD direction. The AHEAD direction
+itself (`git log origin/main..box -- <paths>`) is then a SEPARATE positive fact, and it needs its own
+disposition, not silent tolerance: a box ahead of main that is reachable from `origin/dev`
+(`git merge-base --is-ancestor box origin/dev`) is a recognized release-candidate build → OK; a box
+ahead of main that is reachable from NEITHER `origin/main` NOR `origin/dev` is an **orphan build** and
+must still SCREAM (DRIFT) — this doctrine's own "an orphan release must SCREAM" rule applies just as
+much to the AHEAD direction as to a stale fixed pin lagging a published release.
+
+**The generalizable lesson for any early gate comparing a deployed artifact against a moving
+`origin/<branch>` pin via straight ancestry:** a two-branch (or any multi-branch) workflow where a
+downstream branch's merge commits are never pulled back upstream makes "ahead" and "behind" NOT
+simple opposites of a single `A..B` range — a box can be a strict content superset of the pin while
+reading non-empty on a naive ancestry range in EITHER direction, depending on which side you put the
+merge commit on. Always resolve the actual common ancestor (`git merge-base`) before comparing, and
+treat "ahead but unrecognized" as its own DRIFT case rather than folding it into either OK or STALE
+by default. (Root cause + the merge-base fix: `scripts/drift-guard.sh`'s `imag_genlock_range_log` /
+`imag_genlock_ahead_log` / `imag_genlock_on_dev`; regression coverage against a synthetic two-branch
+repo isolating the exact DAG shape: `tests/drift_guard.rs`.)
+
+**A review follow-up (#1292 too) found + fixed the IDENTICAL bug independently in
+`version-integrity-gate.sh`'s own #1137 report-only vendor-pin ALARM** — its `genlock_vendor_pin_verdict`
+caller computed PENDING_LIST via the same plain `deployed..origin/main` ancestry range. Fixed by
+mirroring the same three-function shape scoped to the whole `vendor/` tree: `vendor_pin_range_log` /
+`vendor_pin_ahead_log` / `vendor_pin_on_dev` (`scripts/version-integrity-gate.sh`), extending
+`genlock_vendor_pin_verdict` with optional AHEAD_LIST/ON_DEV args (rc 30 for both the LAGS and the
+ORPHAN reason — report-only semantics unchanged); regression coverage against its own synthetic
+two-branch repo: `tests/version_integrity_gate.rs`. Two independent gates sharing the exact same
+polarity trap is the tell that ANY new early gate comparing a moving `origin/<branch>` pin via a
+plain ancestry range should be audited for this bug up front, not discovered per-gate.

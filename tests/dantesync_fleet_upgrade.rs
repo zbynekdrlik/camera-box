@@ -1041,3 +1041,85 @@ fn linux_rollback_cmd_detects_ro_root_via_findmnt_with_proc_mounts_fallback() {
         "#1077: a detected ro root must still be remounted rw for the rollback. Got:\n{cmd}"
     );
 }
+
+// --- #1265: wait for the dantesync PROCESS to exit before touching the exe ----------------------
+// `Stop-Service dantesync` returns when the SCM reports STOPPED, but on strih the dantesync.exe
+// PROCESS lingers a few seconds after that (its Npcap capture handle on the X520 tears down
+// slowly), so an immediate `Copy-Item -Force $tmp $exe` hits "The process cannot access the file
+// ... because it is being used by another process", the self-heal restores the .bak, and the
+// canary ABORTS the whole roll (live 2026-09-03 19:02Z: `CANARY strih failed`, exit 10; stream had
+// swapped fine minutes earlier because its process exits promptly). The generated scripts must
+// wait on the REAL resource (the process holding the exe) between stop and copy — a bounded
+// `Wait-Process` plus a forced `Stop-Process` backstop for a wedged process — never a blind sleep.
+
+/// Slice-order helper: the byte offset of `needle` in `hay`, or a loud panic naming what is missing.
+fn offset_of(hay: &str, needle: &str, what: &str) -> usize {
+    hay.find(needle).unwrap_or_else(|| {
+        panic!("#1265: expected {what} ({needle:?}) in the generated script. Got:\n{hay}")
+    })
+}
+
+#[test]
+fn windows_upgrade_ps_waits_for_the_process_to_exit_between_stop_and_swap_1265() {
+    let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.53");
+    let stop = offset_of(&ps, "Stop-Service dantesync", "the service stop");
+    let wait = offset_of(
+        &ps,
+        "Wait-Process -Name dantesync",
+        "a bounded wait for the dantesync PROCESS to exit",
+    );
+    let swap = offset_of(&ps, "Copy-Item -Force $tmp $exe", "the exe swap");
+    assert!(
+        stop < wait && wait < swap,
+        "#1265: the swap must wait for the dantesync process to exit AFTER Stop-Service and BEFORE \
+         Copy-Item (stop={stop} wait={wait} swap={swap}). Got:\n{ps}"
+    );
+    // a process that survives the SCM stop + the bounded wait is wedged (the dead-pcap-handle
+    // dantesync of nic-swap-timesync-recovery.md) — the documented cure is a forced kill, so the
+    // script must fall back to Stop-Process -Force before the swap, never leave the file locked.
+    let kill = offset_of(
+        &ps,
+        "Stop-Process -Name dantesync -Force",
+        "the forced-kill backstop for a wedged process",
+    );
+    assert!(
+        wait < kill && kill < swap,
+        "#1265: the forced-kill backstop must sit between the bounded wait and the swap \
+         (wait={wait} kill={kill} swap={swap}). Got:\n{ps}"
+    );
+    // exact-name process cmdlets only — `dantesync-tray.exe` (the autostart tray, a separate
+    // process) must never be waited on or killed by the daemon swap.
+    assert!(
+        !ps.contains("dantesync*") && !ps.contains("dantesync-tray"),
+        "#1265: the process wait/kill must target the daemon process name EXACTLY, never a wildcard \
+         that would also hit dantesync-tray. Got:\n{ps}"
+    );
+}
+
+#[test]
+fn windows_rollback_ps_waits_for_the_process_to_exit_between_stop_and_restore_1265() {
+    let ps = run_sourced("dantesync_windows_rollback_ps");
+    let stop = offset_of(&ps, "Stop-Service dantesync", "the service stop");
+    let wait = offset_of(
+        &ps,
+        "Wait-Process -Name dantesync",
+        "a bounded wait for the dantesync PROCESS to exit",
+    );
+    let restore = offset_of(&ps, "Copy-Item -Force $bak $exe", "the .bak restore");
+    assert!(
+        stop < wait && wait < restore,
+        "#1265: the rollback must ALSO wait for the process to exit between Stop-Service and the \
+         .bak restore, or a lingering process blocks the restore the same way (stop={stop} \
+         wait={wait} restore={restore}). Got:\n{ps}"
+    );
+    let kill = offset_of(
+        &ps,
+        "Stop-Process -Name dantesync -Force",
+        "the forced-kill backstop for a wedged process",
+    );
+    assert!(
+        wait < kill && kill < restore,
+        "#1265: the rollback's forced-kill backstop must sit between the wait and the restore \
+         (wait={wait} kill={kill} restore={restore}). Got:\n{ps}"
+    );
+}

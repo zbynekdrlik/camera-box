@@ -66,7 +66,7 @@ fresh init block names the NEW adapter and that multicast actually joined:
 Initializing Npcap capture (default-interface hint: {<new-guid>})
 Found device: \Device\NPF_{<new-guid>} (Some("<new adapter>"))
 Using interface IP <rig-ip> for multicast join
-Joined PTP multicast group 224.0.1.129 on ports 319 and 320
+Joined PTP multicast group 224.0.1.129 on <rig-ip> via an ephemeral-port IGMP socket (ports 319/320 left free for a DVS ptp.exe on the same host — dantesync#109)
 Npcap capture initialized with HIGH PRECISION synchronized timestamps
 ```
 

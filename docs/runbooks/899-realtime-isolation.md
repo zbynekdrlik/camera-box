@@ -61,16 +61,52 @@ handlers, so a hardirq can still preempt the prio-90 grab. `verify-device.sh` ch
 therefore keep WARNing "kernel is NOT PREEMPT_RT" after STEP 1 — that is EXPECTED and correct.
 STEP 1 is the free, low-risk first move; STEP 2 closes the remaining gap only if measured to matter.
 
-**Current deployment state (read-only, re-verified 2026-09-01) — STEP 1 is 3/4 done:**
-cam1/cam2/cam3 now run the lowlatency profile — `uname -r` = `7.0.0-30-generic`,
+**Current deployment state (read-only, re-verified 2026-09-03) — STEP 1 is 3/7 done, not 3/4.**
+The 2026-09-01 note above was written for a 4-box active fleet; cam5/cam6/cam7 have since returned
+to `CAMERA_ACTIVE_SET` and were never upgraded, so the real figure is 3/7 and the active fleet the
+fused E2E gate sweeps is currently split across two scheduling models:
+
+```
+cam1  7.0.0-30-generic    preempt=(full) lazy          99-lowlatency.cfg=yes
+cam2  7.0.0-30-generic    preempt=(full) lazy          99-lowlatency.cfg=yes
+cam3  7.0.0-30-generic    preempt=(full) lazy          99-lowlatency.cfg=yes
+cam4  6.8.0-134-generic   preempt=none (voluntary)     99-lowlatency.cfg=no
+cam5  6.8.0-134-generic   preempt=none (voluntary)     99-lowlatency.cfg=no
+cam6  6.8.0-134-generic   preempt=none (voluntary)     99-lowlatency.cfg=no
+cam7  6.8.0-134-generic   preempt=none (voluntary)     99-lowlatency.cfg=no
+```
+
+cam1/cam2/cam3 run the lowlatency profile — `uname -r` = `7.0.0-30-generic`,
 `/sys/kernel/debug/sched/preempt` = `(full)`, `/etc/default/grub.d/99-lowlatency.cfg` present,
 single-kernel restored (old `6.8.0-134` purged). **cam4 (10.77.9.64) is deliberately still on the
 GA `6.8.0-134-generic` (preempt=none)** — it is the CONTROL box for the issue-1198 grabber-flap
 hypothesis and must NOT be upgraded until that hold is lifted (see issue 1198; the 2026-08-30 finding
 that cam2's 61.3 fps flap is card-internal, not the kernel, weakens that hold — a supervisor/owner
-call, not a code lane's). The xhci capture-IRQ fix (defect 3) is live on ALL FOUR boxes
-(`smp_affinity_list` = `2`, off the grab core 3). So the only box the planner below still plans a
-full upgrade for is cam4; the rest read `noop:already-lowlatency`.
+call, not a code lane's). cam5/cam6/cam7 carry no such hold — they simply re-joined the active set
+un-upgraded. The xhci capture-IRQ fix (defect 3) is live on ALL SEVEN active boxes
+(`smp_affinity_list` off the grab core). `scripts/rt-kernel-upgrade.sh --box <ip>` correctly reads
+`noop:already-lowlatency` for cam1/cam2/cam3 and `ready` → `install-lowlatency /
+verify-lowlatency-config / grub-pin:*` for cam4, cam5, cam6 **and** cam7 — the planner itself needed
+no change, only this paragraph was behind reality.
+
+**Finishing STEP 1 is no longer only rollout housekeeping — it doubles as the cheap falsification of
+a candidate covariate for issue 1168's cross-camera constant offset.** Across 39 local verdict JSONs,
+each camera's `residual_offset_ms` (its deviation from that run's own median) averages
+cam1 +4.32 / cam2 +2.54 / cam3 +16.82 ms on the three lowlatency (`preempt=full`) boxes against
+cam4 −2.16 / cam5 −3.35 / cam6 −5.02 / cam7 −4.41 ms on the four GA (`preempt=none`) boxes, and the
+per-run group gap (`mean(cam1..3) − mean(cam4..7)`) is positive in 37 of 39 runs (median +11.0 ms).
+This is correlation, not causation: group membership is historical (which boxes happened to get
+upgraded first), not random, and cam3 — which also carries its own manual NDI upgrade — contributes
+a disproportionate share; drop cam3 and the gap roughly halves, though the sign separation survives.
+So a mid-cluster GA→lowlatency upgrade is now worth doing partly to re-measure that box's constant,
+not only to finish the rollout.
+
+**Recommended canary: cam5, not cam4** (reboot-class — a recommendation for the supervisor/owner,
+per this runbook's own canary-first protocol below; not something a code lane applies). cam5 sits
+mid-cluster and carries no open hold, unlike cam4 (the issue-1198 control box). No new procedure is
+needed — follow the existing "Canary first, then fleet" step and the "Measuring the benefit"
+before/after journal recipe further down this runbook, and additionally note cam5's per-camera
+`residual_offset_ms` before and after the reboot alongside the emit-jitter/underrun windows.
 
 **Live state (read-only, 2026-08-20, cam1/cam2/cam3):** all three run `6.8.0-134-generic`
 (PREEMPT_DYNAMIC); `linux-lowlatency-hwe-24.04` candidate is apt-resolvable from the main archive
@@ -125,6 +161,22 @@ one, never purge the kernel you are still running):
 8. `verify-single-kernel` — re-run `verify-device.sh`: check `(k)` restored; check `(ac)` still
    WARNs "not PREEMPT_RT" (EXPECTED — preempt=full is STEP 1, full RT is STEP 2).
 9. `post-verify` — the full `verify-device.sh` gate + a full E2E + the before/after measurement below.
+
+**Purge keys on the OBSERVED stale set, not the pre-install prediction (cam5 miss, 2026-09-03).**
+The `superseded_generic` axis (`GEN`) is a PRE-install PREDICTION (GEN=1 iff the HWE generic meta is
+absent) and drives the purge only in the pre-install branch, where `uname -r` is still the OLD kernel
+so "installed image != uname -r" is not yet a valid stale signal. Once a box is ALREADY running
+`preempt=full` (the STEP-1 install + reboot are done), the planner instead reads an OBSERVED fact:
+`gather_facts` lists the installed `linux-image-<ver>-generic` packages whose `<ver>` != `uname -r`
+plus the `linux-image-generic` meta (surfaced as the `superseded_installed=` field on the `# facts:`
+line), and `rt_kernel_upgrade_plan` emits `purge-superseded-generic` + `verify-single-kernel`
+whenever that observed set is non-empty — naming the exact packages in `--commands` — instead of
+collapsing to `noop:already-lowlatency`. cam5 (10.77.9.65, 2026-09-03) sat exactly here: it ran
+`preempt=full` with GEN=0 (HWE meta present) yet a stale `6.8.0-134-generic` (+ modules/-extra) and
+the `linux-image-generic` meta were still installed; the old planner printed `noop` and never
+emitted the purge, silently leaving the single-kernel invariant (check `(k)`) violated until the
+supervisor purged by hand. So on a re-planned already-lowlatency box, re-run
+`scripts/rt-kernel-upgrade.sh --box <ip> --commands` and apply the purge it now emits.
 
 **Operational gotchas the planner now bakes in (supervisor findings 2026-08-22, cam1/2/3 upgrade).**
 These were hit live on all three boxes and are now folded into the planner's generated commands, so a

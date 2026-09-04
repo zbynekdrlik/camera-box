@@ -109,9 +109,11 @@ drifted box (redeploy / settings change / OBS restart) is a separate, off-air, *
    # (The `burn_env` key name is kept for the --compare contract; its value is now the genlock_burn state.)
    # #548 DEPLOYED-BUILD currency: the deployed vendored-genlock commit, read from the marker the
    # deploy writes at the install root. The engine dynamically compares it to origin/main's
-   # vendored-genlock HEAD (git log <sha>..origin/main -- vendor/obs-studio vendor/distroav) — the ONLY
-   # check that catches a box left on a STALE genlock build, since the OBS/DistroAV/NDI version strings
-   # are byte-identical old-vs-new. Read the CLEAN 40-hex from BUNDLE_MANIFEST.json .build_sha:
+   # vendored-genlock HEAD (#1292: git merge-base(sha, origin/main)..origin/main -- vendor/obs-studio
+   # vendor/distroav, never a plain sha..origin/main ancestry range — a box AHEAD of main on the dev
+   # candidate line must read OK, not falsely STALE) — the ONLY check that catches a box left on a
+   # STALE genlock build, since the OBS/DistroAV/NDI version strings are byte-identical old-vs-new.
+   # Read the CLEAN 40-hex from BUNDLE_MANIFEST.json .build_sha:
    $mf = "C:\Program Files\obs-studio\BUNDLE_MANIFEST.json"
    if (Test-Path $mf) { "genlock_build_sha=" + ((Get-Content $mf -Raw | ConvertFrom-Json).build_sha) }
    ```
@@ -256,14 +258,19 @@ deploy where even one non-DLL file is stale must never pass — deploy-from-clea
   drift-guard SSHes there itself from dev1). This is the MANUAL imag drift check. **#531: the genlock
   BUILD-STALENESS check is now DYNAMIC** — `--check-imag` compares the box's deployed
   `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt` against **origin/main's vendored-genlock HEAD**
-  (`git fetch` + `git log <box>..origin/main -- vendor/obs-studio vendor/distroav`): a non-empty range
-  = the box is BEHIND merged genlock commits = **STALE = DRIFT (exit 20)**, the #530 recurrence guard
-  (imag-nb ran a stale genlock build at a live event -> 45fps). This replaced the pre-#531 inert
-  empty-static-pin compare (always UNKNOWN, could never FAIL). It is ALSO wired as a **pre-event LOUD
-  WARNING** in `scripts/rig-mode.sh` (both `test` and `event` paths, advisory — never blocks going
-  live). On a STALE report, the operator deploys the current build to imag-nb via
-  `scripts/setup-imag.sh` step-12 at a safe off-event moment (NEVER an auto-redeploy — genlock
-  deploys are user-timed). Run it read-only any time: `./scripts/drift-guard.sh --check-imag`.
+  (`git fetch` + **#1292**: `git merge-base(box, origin/main)..origin/main -- vendor/obs-studio
+  vendor/distroav`, never a plain `box..origin/main` ancestry range — that reads a box AHEAD of main
+  on the dev candidate line as FALSELY stale): a non-empty range = the box is genuinely BEHIND merged
+  genlock commits = **STALE = DRIFT (exit 20)**, the #530 recurrence guard (imag-nb ran a stale
+  genlock build at a live event -> 45fps); an empty range plus commits AHEAD of `origin/main` that
+  ARE reachable from `origin/dev` reads **OK** (a recognized release-candidate build); ahead but
+  reachable from neither `origin/main` nor `origin/dev` reads **ORPHAN = DRIFT (exit 20)**. This
+  replaced the pre-#531 inert empty-static-pin compare (always UNKNOWN, could never FAIL). It is
+  ALSO wired as a **pre-event LOUD WARNING** in `scripts/rig-mode.sh` (both `test` and `event`
+  paths, advisory — never blocks going live). On a STALE report, the operator deploys the current
+  build to imag-nb via `scripts/setup-imag.sh` step-12 at a safe off-event moment (NEVER an
+  auto-redeploy — genlock deploys are user-timed). Run it read-only any time:
+  `./scripts/drift-guard.sh --check-imag`.
 - The OBS **auto-update dialog disabled** (#43) is a *build* property, not runtime-readable off a
   running box, so it is guarded against the vendored source by `tests/obs_updater_disabled.rs`, not
   here. A box running stock OBS 32.2.0 instead of our genlock build USED to be indistinguishable by

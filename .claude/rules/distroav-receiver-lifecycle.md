@@ -5,6 +5,7 @@ paths:
   - "tests/distroav_recv_create_retry_1080.rs"
   - "tests/distroav_fresh_finder_connect_1096.rs"
   - "tests/distroav_by_url_identity_verify_1180.rs"
+  - "tests/distroav_frameless_by_url_escape_1287.rs"
 ---
 
 # DistroAV NDI receiver-thread lifecycle — a `break` is a PERMANENT, reattach-proof death (#1080)
@@ -290,10 +291,24 @@ reaches it, and the #767 stale arm is silence-on-a-CONNECTED receiver, so `no_co
 loops BY-URL→dead port forever. Reading the log: `connect BY-URL` repeating with the SAME URL every
 stale window + `received=` flat + no `recv-timing #797` line for that input = this class (NOT the
 `break` death above — the thread is alive and rebinding — and NOT #1096's poisoned-name wedge, which
-BY-URL is the cure for). Fix direction (its own ticket — filed when the net-drain gate allows; draft in
-`~/.claude/work-products/camera-box-byurl-deadport-issue-draft-2026-09-03.md`): a frame-less BY-URL
-bind must force BY-NAME on the NEXT reset (extend the #1180 flag to the no-frames case), then
-alternate BY-URL/BY-NAME on consecutive frame-less rebinds so neither wedge class can pin a leg.
-Until then the operational cure is a sender restart that lands on the cached port, or an OBS
-restart (fresh SDK discovery). The `[1/8]` frozen-camera gate (pixel-hash, 2 samples) was RIGHT to
-fail here — cross-check with the `received=` Δ before calling any FROZEN a false positive.
+BY-URL is the cure for). Reading the log: `connect BY-URL` repeating with the SAME URL every stale
+window + `received=` flat + no `recv-timing #797` line for that input = this class.
+
+**The fix LANDED (#1287, `ndi_source_thread`, `tests/distroav_frameless_by_url_escape_1287.rs`).** A
+pure decision helper `ndi_force_by_name_after_frameless(connected_by_url, frames_seen_since_reset)`
+returns true iff the current bind was BY-URL AND delivered ZERO frames. BOTH reset-forcing arms —
+the `no_connections==0` arm and the #767 stale-while-connected arm — call it and, when true, set the
+SAME `force_by_name_next_reset_1180` flag #1180 owns, so the NEXT reset connects BY-NAME (loud log
+`genlock: #1287 frame-less BY-URL bind (dead sender port?) -- forcing BY-NAME on the next rebind`).
+Because the un-forced default reset is BY-URL, forcing BY-NAME only after a frame-less BY-URL bind
+ALTERNATES BY-URL↔BY-NAME across consecutive frame-less rebinds, so neither this stale-URL wedge nor
+the #1096 poisoned-name wedge can pin a leg; a bind that DID deliver frames is untouched (#1180's
+identity path owns the wrong-sender-with-frames case). No new state, no counter. The pure helper is
+the std-only lift-compile/truth-table gate; the impure wiring is source-anchored (the WHOLE
+`if (helper) { force_by_name_next_reset_1180 = true;` adjacency per arm, so deleting only the set is
+caught) + pwsh-mirrored in BOTH `windows-genlock*.yml`. The live receive-path cure is NOT
+offline-verifiable — confirmed only by the supervisor's post-deploy rig repro (a graceful
+`systemctl restart camera-box` on a cambox whose usb sender lands on the other port; expect strih
+`#1287 ... forcing BY-NAME` → `#1180 connect BY-NAME` → `received=` Δ>0 within ~2 stale windows).
+The `[1/8]` frozen-camera gate (pixel-hash, 2 samples) was RIGHT to fail on the live incident —
+cross-check with the `received=` Δ before calling any FROZEN a false positive.

@@ -180,3 +180,96 @@ into EVERY cam box over USB, so this trap fires on each box the moment the camer
 - **The dedicated camera-link stanza** (its own subnet / link-local, no default route) belongs to
   the bkshading lane (issue 808), not the LAN pin — it is complementary, not a substitute for the
   pin above.
+
+## `setup-device.sh` re-run on an already-booted box: TWO separate root-writable defects, both live (#1289)
+
+Re-provisioning cam5/cam6/cam7 (they rejoined `CAMERA_ACTIVE_SET` after being retired, so they
+never got the newer STEPs `setup-device.sh` grew in the meantime) exposed the SAME "root must be
+writable BEFORE the first mutating action" class twice in one run, at two different layers:
+
+1. **The rw-remount CALL ran too late.** `ensure_root_writable()` (issue 599) is defined near the
+   top of the file but was CALLED right before STEP 15 — the point issue 599 cared about
+   (apt-get/dpkg/systemctl). It never accounted for STEP 1 through STEP 14 (hostname, netplan, the
+   binary install, NDI/ALSA/config/systemd/GRUB/sysctl writes) ALSO writing under `/etc`/`/usr`
+   BEFORE that point. On a first-provisioning run root is naturally rw so this never showed; on an
+   in-place re-run against an already-booted **read-only** appliance, STEP 1's hostname write (no
+   `|| true` guard) is the FIRST filesystem write in the whole script and aborted with `Read-only
+   file system` before ANY remount logic ran. **Fix: move the bare call to right after the confirm
+   prompt, before the pre-flight curl-install block — i.e. before the first write of any kind.**
+   `restore_root_mode()` stays exactly where it was (after STEP 18).
+
+2. **A `curl -o` download can straight-up truncate a RUNNING binary in place.** Once (1) was fixed
+   and root stayed writable for the whole run, the SAME re-run died again at STEP 17:
+   `curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync` while `dantesync.service` was ACTIVE
+   and had that exact path open — the kernel refuses to open a currently-EXECUTING file for write
+   (`ETXTBSY`), so curl failed and `fail()` aborted, even though the release URL itself answered
+   200. The IDENTICAL shape existed in STEP 3's camera-box URL branch and STEP 3b's frame-probe URL
+   branch (cam2-only) — only the LOCAL-path / CI-artifact branches were already safe, because they
+   use `install -m 0755 src dest`: `install`'s default behavior replaces the destination via a NEW
+   inode (unlink-then-create), which is safe over a running executable (the OLD inode stays open
+   under the still-running process until it exits), unlike `curl -o`'s truncate-in-place onto the
+   SAME inode. **Fix: download to a `mktemp` temp file, verify it non-empty (`[ -s "$tmp" ]`), then
+   `install -m 0755 "$tmp" dest`, `rm -f "$tmp"` — never `curl ... -o /usr/local/bin/<name>`
+   anywhere in this script.** STEP 17 additionally SKIPS the download entirely when
+   `/usr/local/bin/dantesync --version` already reports the release URL's own tag (parsed from the
+   URL path, `.../releases/download/vX.Y.Z/...`, via `grep -oE '/v[0-9]+\.[0-9]+\.[0-9]+/' | tr -d
+   '/v'`) — an idempotent re-run then never touches the live binary/service at all, per
+   `.claude/rules/dantesync-version-reading.md`'s `dantesync --version`-answers-everywhere finding.
+
+**The general lesson for ANY future STEP that installs/replaces an executable this script (or
+`setup-imag.sh`) might be re-run against on an already-provisioned box: `install -m 0755 src dest`
+after downloading to a temp file, never a direct `curl -o`/`wget -O` onto the live path.** A
+first-provisioning run can't tell you this is wrong (root is rw, nothing is running yet) — only a
+genuine in-place re-run against a live box exercises it, which is exactly why both of these sat
+latent since #599 (defect 1) and since the binary was first curl-installed (defect 2) until cam5/
+cam6/cam7's actual re-provisioning surfaced them, one after the other, in the SAME live run
+(2026-09-03 11:52–11:56Z).
+
+**The SAME defect existed in `setup-imag.sh`'s own dantesync install — ported the identical fix,
+plus one edge case unique to that script (#1289 follow-up).** `setup-imag.sh` had the exact same
+`curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync` shape, AND its cam1-fallback `scp -O`
+branch wrote straight onto the live path too (a `curl`-family sibling: `scp -O` also truncates its
+destination in place). Fixed identically (temp file + `install -m 0755`, both branches). **The
+edge case:** `setup-imag.sh`'s pre-existing gate was `if [ ! -x /usr/local/bin/dantesync ]` — a
+DELIBERATELY lenient "already there, don't even try the network" skip, because imag sits on a
+notebook with other network interfaces and "a re-provision cannot fail solely because GitHub is
+unreachable from imag's network" (the file's own pre-existing comment). A naive port of
+setup-device.sh's version-compare skip (`-n TARGET_VERSION && CURRENT = TARGET`) REGRESSED this:
+when the release URL fetch fails, `TARGET_VERSION` comes back empty, so the compare is false and
+the script falls into download-or-fallback-or-fail even for a box with a perfectly good dantesync
+already running — either an unwanted scp copy over the live binary, or a hard fail if `CAM_PW`
+happens to be unset. **Fix: `[ -x dantesync ] && { [ -z TARGET_VERSION ] || [ CURRENT = TARGET ]
+}`** — keep what's there whenever the target could not be determined (restores the old lenient
+behavior) OR when it's known to already match (the new version-aware behavior); only reinstall
+when the binary is missing or the version is KNOWN to differ. **The general lesson: when porting a
+fix from one script to a "similar" sibling, diff the GATING CONDITION too, not just the unsafe
+write — a stricter script's fail-loud-on-unreachable premise (setup-device.sh's `[ -n
+"$DANTESYNC_URL" ] || fail ...`, unconditional) does not automatically hold in a sibling that was
+deliberately written to tolerate the same failure differently.**
+
+## Rewriting a provisioning line that OTHER tests in the SAME file anchor on: run the WHOLE file as a rustc replica + the old-vs-new literal sweep over EVERY test reading the script (#1289 CI round 2)
+
+The #1289 STEP 17 rewrite retired the literal `curl ... -o /usr/local/bin/dantesync`. The lane
+added its own tests (all green by replica) into `tests/setup_device_provisioner_hardening.rs` —
+but TWO pre-existing tests in that SAME file (#591 / #597 "purge runs before the dantesync
+install") anchored the install action on exactly that retired literal via
+`first_noncomment_idx(&body, "-o /usr/local/bin/dantesync").expect(...)`, so CI went red on a
+file the lane had just edited, and nextest's fail-fast left 791 tests un-run behind the two
+failures (the entire `setup_imag_guards.rs` binary among them). The occurrence-count anchor
+discipline CLAUDE.md prescribes for `recording-e2e.sh`/`rig-mode.sh` applies to
+`setup-device.sh`/`setup-imag.sh` IDENTICALLY — ~45 test files read them. Two cheap Tier-0 nets,
+both required after ANY edit that rewrites (not merely appends to) a provisioning line:
+
+1. **Replica-run every test FILE you touched, whole, not just your new tests.** These harnesses
+   are std-only, so `CARGO_MANIFEST_DIR=$PWD rustc --edition 2021 --test tests/<file>.rs -o
+   /tmp/x && /tmp/x` runs all of them locally in seconds (the `env!("CARGO_MANIFEST_DIR")` in
+   `read_script()` is a COMPILE-time macro — export the var before `rustc`, not only before
+   running the binary).
+2. **Old-vs-new literal-count sweep across EVERY test file that names the script** — extract each
+   `"..."`/`r#"..."#` literal from every `tests/*.rs` matching `setup-(device|imag)\.sh`, count it
+   in `git show <pre-edit-sha>:scripts/<script>` vs the working tree, and read every `1->0` hit:
+   a POSITIVE anchor (`.expect`/`assert!(on_noncomment_line(...))`) that went to 0 is a
+   guaranteed CI red; a NEGATIVE one (`assert!(!body.contains(...))`) going to 0 is the intended
+   effect. (The #1289 sweep showed exactly two positive `1->0` hits — the two CI failures — and
+   nothing else.) Re-anchor on the NEW install-action line (`install -m 0755 "$_<name>_dl_tmp"
+   /usr/local/bin/<name>`), never on the download itself, which is now a temp path.

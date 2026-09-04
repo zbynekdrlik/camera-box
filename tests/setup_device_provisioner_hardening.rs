@@ -367,13 +367,18 @@ fn setup_device_purges_every_competing_timesync_daemon() {
 fn setup_device_timesync_purge_runs_before_installing_dantesync() {
     // Order: purge competing daemons BEFORE installing dantesync (the sole authority) — reads as
     // "remove every other clock, then install ours". Both are in the rw window (the ro conversion
-    // is STEP 18, after both). Anchor on the dantesync DOWNLOAD (the actual install action), not
-    // the STEP 17 banner echo which also contains the words "Installing dantesync".
+    // is STEP 18, after both). Anchor on the dantesync INSTALL-INTO-PLACE (the actual install
+    // action -- since #1289 a temp-file download + `install -m 0755` into /usr/local/bin, never a
+    // `curl -o` onto the live path), not the STEP 17 banner echo which also contains the words
+    // "Installing dantesync".
     let body = read_script();
     let purge_idx = first_noncomment_idx(&body, r#"apt-get purge -y "$_ts""#)
         .expect("the #591 competing-timesync purge must be present");
-    let dantesync_idx = first_noncomment_idx(&body, "-o /usr/local/bin/dantesync")
-        .expect("the dantesync download (install action) must be present");
+    let dantesync_idx = first_noncomment_idx(
+        &body,
+        r#"install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync"#,
+    )
+    .expect("the dantesync install-into-place (install action) must be present");
     assert!(
         purge_idx < dantesync_idx,
         "the competing-timesync purge (line {purge_idx}) must run before the dantesync install \
@@ -436,8 +441,12 @@ fn setup_device_linuxptp_purge_runs_before_installing_dantesync() {
     let body = read_script();
     let purge_idx = first_noncomment_idx(&body, "apt-get purge -y linuxptp")
         .expect("the #597 linuxptp purge must be present");
-    let dantesync_idx = first_noncomment_idx(&body, "-o /usr/local/bin/dantesync")
-        .expect("the dantesync download (install action) must be present");
+    // #1289: the install action is the temp-file `install -m 0755` into place (no `curl -o`).
+    let dantesync_idx = first_noncomment_idx(
+        &body,
+        r#"install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync"#,
+    )
+    .expect("the dantesync install-into-place (install action) must be present");
     assert!(
         purge_idx < dantesync_idx,
         "the linuxptp purge (line {purge_idx}) must run before the dantesync install (line \
@@ -502,6 +511,143 @@ fn setup_device_calls_ensure_root_writable_before_the_fwupd_purge() {
          (line {fwupd_purge_idx}) -- every apt-get/dpkg call in STEP 15-17 needs a writable root \
          on an in-place re-run (#599)"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1289 -- cam5/cam6/cam7 re-provisioning revealed ensure_root_writable() runs too LATE: STEP 1
+// (hostname), STEP 2 (netplan), STEP 3 (binary), and STEP 4-14 (NDI/ALSA/config/systemd/GRUB/
+// sysctl) all write under /etc or /usr BEFORE the #599 call site (previously right before
+// STEP 15). On a FIRST-provisioning run root is naturally rw so this never showed; on an
+// IN-PLACE RE-RUN against an already-booted ro appliance, STEP 1's hostname write is the FIRST
+// write in the whole script and dies with "Read-only file system" before ANY of #599's remount
+// logic ever executes (live, cam6 10.77.9.66, 2026-09-03 -- `setup-device.sh` line 362). The
+// call must move to run BEFORE the pre-flight curl block and STEP 1, not just before STEP 15.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_calls_ensure_root_writable_before_step_1_hostname_1289() {
+    let body = read_script();
+    let call_idx = first_noncomment_exact_idx(&body, "ensure_root_writable").expect(
+        "ensure_root_writable must be CALLED (a bare invocation, not just defined) before STEP 1 \
+         (#1289) -- a re-run against an already-booted ro appliance fails at the very first /etc \
+         write otherwise",
+    );
+    let hostname_write_idx = first_noncomment_idx(&body, r#"echo "$DEVICE_NAME" > /etc/hostname"#)
+        .expect("the STEP 1 hostname write must be present");
+    assert!(
+        call_idx < hostname_write_idx,
+        "the ensure_root_writable call (line {call_idx}) must run BEFORE STEP 1's hostname write \
+         (line {hostname_write_idx}) -- STEP 1 is the FIRST /etc write in the script, so a re-run \
+         against an already-booted ro appliance dies with 'Read-only file system' before the \
+         #599 remount logic (previously gated only before STEP 15) ever runs (#1289)"
+    );
+    let preflight_idx = first_noncomment_idx(&body, "[pre-flight] Ensuring curl + CA certificates")
+        .expect("the pre-flight curl-install block must be present");
+    assert!(
+        call_idx < preflight_idx,
+        "the ensure_root_writable call (line {call_idx}) must also run BEFORE the pre-flight \
+         curl-install block (line {preflight_idx}) -- that block runs `apt-get install` when \
+         curl is missing, which also needs a writable root on a re-run (#1289)"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1289 (second re-run defect) -- STEP 17's dantesync download does `curl -fsSL $URL -o
+// /usr/local/bin/dantesync` straight onto the path of a RUNNING dantesync.service binary. The
+// kernel refuses to open a currently-executing file for write (ETXTBSY), so curl fails and the
+// whole STEP fail()s even though the release URL itself answers 200 (live, cam5/cam6/cam7,
+// 2026-09-03 11:52-11:56Z -- right after the STEP-1 fix above let a re-run reach STEP 17). The
+// SAME overwrite-in-place shape existed in STEP 3's camera-box URL branch and STEP 3b's
+// frame-probe URL branch (both `curl -fsSL ... -o /usr/local/bin/...`) -- only the LOCAL-path /
+// CI-artifact branches were already safe, since they use `install -m 0755 src dest` (rename-
+// into-place semantics, which works over a running executable because the old inode stays open
+// under the running process until it exits).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_never_downloads_straight_onto_a_live_binary_path_1289() {
+    let body = read_script();
+    assert!(
+        !on_noncomment_line(&body, "-o /usr/local/bin/"),
+        "setup-device.sh must never `curl ... -o /usr/local/bin/<name>` -- that truncates the \
+         destination IN PLACE, which the kernel refuses (ETXTBSY) when the path is a currently- \
+         running executable, and fails the whole step on a re-run (#1289). Download to a mktemp \
+         temp file, verify it non-empty, then `install -m 0755 tmp dest` (rename-into-place, \
+         safe over a running executable) instead."
+    );
+}
+
+#[test]
+fn setup_device_step17_skips_dantesync_download_when_already_at_target_version_1289() {
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, "DANTESYNC_TARGET_VERSION"),
+        "STEP 17 must derive the release's target version from the download URL (#1289) -- an \
+         idempotent re-run needs this to decide whether a download is even necessary"
+    );
+    assert!(
+        on_noncomment_line(&body, "DANTESYNC_CURRENT_VERSION")
+            && on_noncomment_line(&body, "dantesync --version"),
+        "STEP 17 must read the currently-installed dantesync's own version via \
+         `dantesync --version` (#1289, per .claude/rules/dantesync-version-reading.md) before \
+         deciding whether to download"
+    );
+    let compare_idx = body
+        .lines()
+        .position(|l| {
+            l.contains("DANTESYNC_CURRENT_VERSION") && l.contains("DANTESYNC_TARGET_VERSION")
+        })
+        .expect(
+            "a line comparing DANTESYNC_CURRENT_VERSION against DANTESYNC_TARGET_VERSION must \
+             exist -- that comparison is what lets an idempotent re-run skip the download",
+        );
+    let download_idx = first_noncomment_idx(&body, r#"curl -fsSL "$DANTESYNC_URL""#).expect(
+        "the dantesync curl download must still be present, for the not-yet-installed case",
+    );
+    assert!(
+        compare_idx < download_idx,
+        "the version comparison (line {compare_idx}) must GATE the dantesync download (line \
+         {download_idx}), not just follow it -- otherwise a re-run at the target version still \
+         re-downloads and re-installs needlessly (#1289)"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1289 review finding (🔵) -- the three `install -m 0755 "$_..._dl_tmp" dest` calls above had no
+// `|| fail ...` of their own: a real install failure (disk full, an unexpected permission issue)
+// still correctly aborts the script under `set -e`, but leaks the temp file and surfaces bash's
+// raw stderr instead of this script's usual descriptive fail() message. Every OTHER failure path
+// in these same three blocks (the curl download, the empty-file check) already cleans up the temp
+// file and fails loud with a specific message -- the install call is the one gap.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_install_from_temp_fails_loud_and_cleans_up_on_failure_1289() {
+    let body = read_script();
+    for (tmp_var, dest, needle) in [
+        (
+            "_camera_box_dl_tmp",
+            "/usr/local/bin/camera-box",
+            "install -m 0755 \"$_camera_box_dl_tmp\" /usr/local/bin/camera-box || {",
+        ),
+        (
+            "_frame_probe_dl_tmp",
+            "/usr/local/bin/frame-probe",
+            "install -m 0755 \"$_frame_probe_dl_tmp\" /usr/local/bin/frame-probe || {",
+        ),
+        (
+            "_dantesync_dl_tmp",
+            "/usr/local/bin/dantesync",
+            "install -m 0755 \"$_dantesync_dl_tmp\" /usr/local/bin/dantesync || {",
+        ),
+    ] {
+        assert!(
+            body.contains(needle),
+            "the `install -m 0755 \"${tmp_var}\" {dest}` call must be guarded by `|| {{ ... }}` \
+             so an install failure also cleans up the temp file and fails loud via fail(), \
+             matching every other failure path in the same block (#1289 review finding)"
+        );
+    }
 }
 
 #[test]

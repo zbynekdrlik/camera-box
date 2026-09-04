@@ -215,23 +215,27 @@ root_mount_is_readonly() {
 # fstab; that only takes effect on the NEXT reboot) must never be force-remounted ro early.
 ROOT_WAS_RO=false
 
-# ensure_root_writable -- #599: STEP 15-18 below run apt-get/dpkg/systemctl and write files under
-# /etc, all of which require a writable root. On a FIRST provisioning run root is naturally rw, but
-# on an IN-PLACE RE-RUN against an already-booted ro appliance (the box's own "self-heal on the
-# next provisioning pass"), root is `ro` -- every apt-get/dpkg call in STEP 15-17 then fails and is
-# swallowed by the `|| true`/`2>/dev/null` guards, silently leaving a purge/install that never took
-# effect while the script still reports success. Detect ro root up front and remount rw BEFORE any
-# of those steps run. Stop+mask PackageKit and unattended-upgrades first (rig-timesync-single-
-# authority incident: PackageKit is D-Bus-activated by apt and holds an open write handle on
-# /var/lib/PackageKit/transactions.db, which later blocks `mount -o remount,ro /` with EBUSY) so
-# neither can reactivate mid-run. FAIL LOUD if the remount itself doesn't succeed -- never silently
-# proceed on a still-ro root and claim success afterward.
+# ensure_root_writable -- #599, call site moved by #1289: STEP 1 (hostname) through STEP 18
+# (fstab rewrite) below all write under /etc or /usr at some point, all of which require a
+# writable root. On a FIRST provisioning run root is naturally rw, but on an IN-PLACE RE-RUN
+# against an already-booted ro appliance (the box's own "self-heal on the next provisioning
+# pass"), root is `ro` -- every apt-get/dpkg call in STEP 15-17 then fails and is swallowed by the
+# `|| true`/`2>/dev/null` guards, silently leaving a purge/install that never took effect while
+# the script still reports success (and STEP 1's OWN hostname write, which has no such guard,
+# aborts the whole run outright -- live, cam6 10.77.9.66, 2026-09-03). Detect ro root up front and
+# remount rw BEFORE ANY of those steps run -- the call site sits right after the confirm prompt,
+# before even the pre-flight curl install (#1289; it used to sit right before STEP 15, per #599,
+# which left STEP 1-14 unprotected). Stop+mask PackageKit and unattended-upgrades first (rig-
+# timesync-single-authority incident: PackageKit is D-Bus-activated by apt and holds an open write
+# handle on /var/lib/PackageKit/transactions.db, which later blocks `mount -o remount,ro /` with
+# EBUSY) so neither can reactivate mid-run. FAIL LOUD if the remount itself doesn't succeed --
+# never silently proceed on a still-ro root and claim success afterward.
 #
-# If a fail() call inside STEP 15-17 aborts the script while root is rw (e.g. the STEP 17
-# dantesync download failing), restore_root_mode() never runs and the live mount stays rw until
-# the next reboot -- bounded/self-healing (the ro fstab from the PRIOR successful pass still pins
-# ro on reboot), not the claims-success-while-wrong failure #599 targets, so no explicit trap is
-# added here.
+# If a fail() call anywhere from STEP 1 through STEP 17 aborts the script while root is rw (e.g.
+# the STEP 17 dantesync download failing), restore_root_mode() never runs and the live mount stays
+# rw until the next reboot -- bounded/self-healing (the ro fstab from the PRIOR successful pass
+# still pins ro on reboot), not the claims-success-while-wrong failure #599 targets, so no explicit
+# trap is added here.
 ensure_root_writable() {
     local opts
     # `findmnt` failing outright (missing binary, unreadable /proc) must not silently read as "not
@@ -332,6 +336,19 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 # =============================================================================
+# #1289: ensure root is writable BEFORE the first filesystem write of any kind -- a no-op on a
+# first-provisioning run (root already rw); remounts rw on an IN-PLACE RE-RUN against an
+# already-booted ro appliance. Was previously called right before STEP 15 (#599), but STEP 1
+# (hostname), STEP 2 (netplan), STEP 3 (binary), STEP 4-14 (NDI/ALSA/config/systemd/GRUB/sysctl),
+# and the pre-flight curl install below ALL write under /etc or /usr before that point too -- on
+# a first-provisioning run root is naturally rw so this never showed, but a re-run against an
+# already-booted ro appliance died with "Read-only file system" at STEP 1's hostname write,
+# before ANY of this remount logic ever ran (live, cam6 10.77.9.66, 2026-09-03). Moved here so
+# the rw window covers the WHOLE run; restore_root_mode() still runs after STEP 18 unchanged.
+# =============================================================================
+ensure_root_writable
+
+# =============================================================================
 # Pre-flight: ensure curl + CA certificates BEFORE first use
 # =============================================================================
 # STEP 3 (binary) and STEP 17 (dantesync) download via curl, but the minimal
@@ -414,9 +431,26 @@ if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
     echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif [ -n "$BINARY_SRC" ]; then
     echo "  Downloading binary from: $BINARY_SRC"
-    curl -fsSL "$BINARY_SRC" -o /usr/local/bin/camera-box \
-        || fail "could not download binary from $BINARY_SRC"
-    chmod +x /usr/local/bin/camera-box
+    # #1289: download to a temp file, never `curl -o` straight onto the live path -- that
+    # truncates the destination inode IN PLACE, which the kernel refuses (ETXTBSY) when
+    # camera-box.service is currently running the old binary on a re-run. `install -m 0755` (like
+    # the local-path branch above) replaces the path via a NEW inode instead, which is safe over
+    # a running executable.
+    _camera_box_dl_tmp="$(mktemp)"
+    curl -fsSL "$BINARY_SRC" -o "$_camera_box_dl_tmp" \
+        || {
+            rm -f "$_camera_box_dl_tmp"
+            fail "could not download binary from $BINARY_SRC"
+        }
+    [ -s "$_camera_box_dl_tmp" ] || {
+        rm -f "$_camera_box_dl_tmp"
+        fail "downloaded binary from $BINARY_SRC is empty"
+    }
+    install -m 0755 "$_camera_box_dl_tmp" /usr/local/bin/camera-box || {
+        rm -f "$_camera_box_dl_tmp"
+        fail "could not install downloaded binary from $BINARY_SRC to /usr/local/bin/camera-box"
+    }
+    rm -f "$_camera_box_dl_tmp"
     echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
     echo "  Fetching latest CI dev-build artifact (branch: $CI_BRANCH)..."
@@ -458,9 +492,24 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
         install -m 0755 "$FRAME_PROBE_SRC" /usr/local/bin/frame-probe
     elif [ -n "$FRAME_PROBE_SRC" ]; then
         echo "  Downloading frame-probe from: $FRAME_PROBE_SRC"
-        curl -fsSL "$FRAME_PROBE_SRC" -o /usr/local/bin/frame-probe \
-            || fail "could not download frame-probe from $FRAME_PROBE_SRC"
-        chmod +x /usr/local/bin/frame-probe
+        # #1289: same fix as STEP 3's camera-box URL branch above -- download to a temp file and
+        # `install -m 0755` it into place, never `curl -o` straight onto the live path (unsafe
+        # over a running frame-probe/cam2-painter.service process on a re-run).
+        _frame_probe_dl_tmp="$(mktemp)"
+        curl -fsSL "$FRAME_PROBE_SRC" -o "$_frame_probe_dl_tmp" \
+            || {
+                rm -f "$_frame_probe_dl_tmp"
+                fail "could not download frame-probe from $FRAME_PROBE_SRC"
+            }
+        [ -s "$_frame_probe_dl_tmp" ] || {
+            rm -f "$_frame_probe_dl_tmp"
+            fail "downloaded frame-probe from $FRAME_PROBE_SRC is empty"
+        }
+        install -m 0755 "$_frame_probe_dl_tmp" /usr/local/bin/frame-probe || {
+            rm -f "$_frame_probe_dl_tmp"
+            fail "could not install downloaded frame-probe from $FRAME_PROBE_SRC to /usr/local/bin/frame-probe"
+        }
+        rm -f "$_frame_probe_dl_tmp"
     elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
         echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
         PROBE_RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
@@ -901,13 +950,6 @@ echo "  EEE (Green Ethernet): disabled"
 echo "  Flow control: advertised"
 
 # =============================================================================
-# #599: ensure root is writable before STEP 15-18 apply package/config changes -- a no-op on a
-# first-provisioning run (root already rw); remounts rw on an in-place re-run against an
-# already-booted ro appliance. Paired with restore_root_mode() after STEP 18.
-# =============================================================================
-ensure_root_writable
-
-# =============================================================================
 # STEP 15: Disable unnecessary services
 # =============================================================================
 echo ""
@@ -1145,9 +1187,42 @@ DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/relea
 # provisioned without it silently free-runs its own clock instead of the fleet's shared reference.
 [ -n "$DANTESYNC_URL" ] || fail "could not get dantesync release URL from GitHub -- dantesync is required for cluster clock sync (#8), not optional"
 
-curl -fsSL "$DANTESYNC_URL" -o /usr/local/bin/dantesync 2>/dev/null \
-    || fail "failed to download dantesync from $DANTESYNC_URL"
-chmod +x /usr/local/bin/dantesync
+# #1289: derive the release's TARGET version from the download URL's own path
+# (.../releases/download/vX.Y.Z/dantesync-linux-amd64), and read the CURRENTLY-installed
+# dantesync's own version (per .claude/rules/dantesync-version-reading.md: `dantesync --version`
+# answers on every platform, no journal/bundle-state coupling needed). When they already agree,
+# SKIP the download entirely -- both to avoid a needless replace on an idempotent re-run, and
+# because `curl -o` straight onto a RUNNING dantesync.service binary fails with ETXTBSY (the
+# kernel refuses to open a currently-executing file for write) -- live, cam5/cam6/cam7,
+# 2026-09-03 11:52-11:56Z.
+DANTESYNC_TARGET_VERSION="$(printf '%s\n' "$DANTESYNC_URL" | grep -oE '/v[0-9]+\.[0-9]+\.[0-9]+/' | head -1 | tr -d '/v' || true)"
+DANTESYNC_CURRENT_VERSION=""
+if [ -x /usr/local/bin/dantesync ]; then
+    DANTESYNC_CURRENT_VERSION="$(/usr/local/bin/dantesync --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+fi
+
+if [ -n "$DANTESYNC_TARGET_VERSION" ] && [ "$DANTESYNC_CURRENT_VERSION" = "$DANTESYNC_TARGET_VERSION" ]; then
+    echo "  dantesync already at v$DANTESYNC_CURRENT_VERSION -- skipping download"
+else
+    # download to a temp file and `install -m 0755` it into place, never `curl -o` straight onto
+    # the live path (see #1289 rationale above) -- install's rename-into-place semantics are safe
+    # over a running dantesync.service.
+    _dantesync_dl_tmp="$(mktemp)"
+    curl -fsSL "$DANTESYNC_URL" -o "$_dantesync_dl_tmp" 2>/dev/null \
+        || {
+            rm -f "$_dantesync_dl_tmp"
+            fail "failed to download dantesync from $DANTESYNC_URL"
+        }
+    [ -s "$_dantesync_dl_tmp" ] || {
+        rm -f "$_dantesync_dl_tmp"
+        fail "downloaded dantesync from $DANTESYNC_URL is empty"
+    }
+    install -m 0755 "$_dantesync_dl_tmp" /usr/local/bin/dantesync || {
+        rm -f "$_dantesync_dl_tmp"
+        fail "could not install downloaded dantesync from $DANTESYNC_URL to /usr/local/bin/dantesync"
+    }
+    rm -f "$_dantesync_dl_tmp"
+fi
 
 # Create systemd service
 cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
