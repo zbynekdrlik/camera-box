@@ -4692,11 +4692,17 @@ fn build_and_print_verdict_with_stream_diffs(
                                 s.frames,
                             );
                             if !floor_ok {
+                                // Reachable only while the floor is DORMANT (re-disarmed for a
+                                // future artifact class): once re-gated (issue 905 item 3, today's
+                                // state) an over-floor window fails `relaxed_pass`, so it takes the
+                                // `else` branch below (FloorExceededGating) instead. Keep the
+                                // wording keyed to the report-only STATE, not to the (now closed)
+                                // issue 909/881 blockers.
                                 println!(
-                                    "      ⚠ #915 REPORT-ONLY: undecodable={} exceeds the \
-                                     issue-881 per-window floor, but does NOT gate overall_pass \
-                                     while issue 909 (cam1 grabber) + issue 881 (120Hz monitor) \
-                                     are unresolved (see issue #915).",
+                                    "      ⚠ REPORT-ONLY: undecodable={} exceeds the issue-881 \
+                                     per-window floor, but does NOT gate overall_pass while the \
+                                     floor is report-only (optical_floor::gates_overall_pass() == \
+                                     false) (see issue #915/#905).",
                                     s.undecodable
                                 );
                             }
@@ -4760,11 +4766,11 @@ fn build_and_print_verdict_with_stream_diffs(
                             // over-tolerance copies/gaps failure is OverCopiesGapsTolerance, and
                             // an over-floor undecodable count is worded as actually gating
                             // (FloorExceededGating) ONLY when `optical_floor::gates_overall_pass()`
-                            // is genuinely `true` — never unconditionally, since that flag is
-                            // hardcoded `false` today (see issue #915 for the restore path on
-                            // issue #905). A window can carry more than one reason at once (e.g.
-                            // over-tolerance copies/gaps AND a merely-report-only over-floor
-                            // undecodable count) — every applicable reason prints.
+                            // is genuinely `true` — never unconditionally. That flag is `true`
+                            // today (LIVE since issue 905 item 3; was `false` under issue 915). A
+                            // window can carry more than one reason at once (e.g. over-tolerance
+                            // copies/gaps AND an over-floor undecodable count) — every applicable
+                            // reason prints.
                             // #1251: judge the failure reason at THIS window's applied tolerance
                             // (the per-cambox override where one exists), so a CAM2 window over the
                             // default 5 but under its own 25 is not mislabelled OverCopiesGapsTolerance.
@@ -4796,18 +4802,20 @@ fn build_and_print_verdict_with_stream_diffs(
                                     }
                                     camera_box::window_gate::RelaxedFailureReason::FloorExceededGating => {
                                         println!(
-                                            "      ⚠ undecodable={} exceeds the issue-881 \
-                                             per-window floor and currently gates overall_pass \
-                                             (see issue #915 for the restore-path state).",
+                                            "      ⚠ #905 FLOOR FAIL: undecodable={} exceeds the \
+                                             issue-881 per-window floor and gates overall_pass \
+                                             (LIVE since issue 905 item 3 -- see issue #915 for \
+                                             the decision record).",
                                             s.undecodable
                                         );
                                     }
                                     camera_box::window_gate::RelaxedFailureReason::FloorWithinReportOnly => {
                                         println!(
-                                            "      ⚠ #915 REPORT-ONLY: undecodable={} exceeds \
-                                             the issue-881 per-window floor, but does NOT gate \
-                                             overall_pass while issue 909 (cam1 grabber) + issue \
-                                             881 (120Hz monitor) are unresolved (see issue #915).",
+                                            "      ⚠ REPORT-ONLY: undecodable={} exceeds the \
+                                             issue-881 per-window floor, but does NOT gate \
+                                             overall_pass while the floor is report-only \
+                                             (optical_floor::gates_overall_pass() == false) \
+                                             (see issue #915/#905).",
                                             s.undecodable
                                         );
                                     }
@@ -4967,16 +4975,16 @@ fn build_and_print_verdict_with_stream_diffs(
                         seg.segments.len()
                     );
                 }
-                // Issue 915 (2026-08-01 user decision) visibility requirement, mirrors #889
-                // requirement 3 — prints UNCONDITIONALLY whether or not the run-wide floor was
-                // exceeded, so silence is never mistaken for strictness. Hardcoded,
-                // one-line-deletable — see `camera_box::optical_floor::gates_overall_pass` for
-                // the restore path on issue 905.
+                // Issue 915 (2026-08-01) visibility requirement, mirrors #889 requirement 3 —
+                // prints UNCONDITIONALLY whether or not the run-wide floor was exceeded, so silence
+                // is never mistaken for strictness. Issue 905 item 3 (2026-09-04) re-gated the
+                // floor (`camera_box::optical_floor::gates_overall_pass()` is `true` again), so
+                // this is now a LIVE gate, not report-only.
                 println!(
-                    "  ⚠ #915 REPORT-ONLY: run-wide undecodable={} (floor {}, within_floor={}) \
-                     -- no longer gates overall_pass while issue 909 (cam1 grabber) + issue 881 \
-                     (120Hz monitor) are unresolved (see issue #915 for the decision record and \
-                     issue #905 for the restore path).",
+                    "  #905 LIVE GATE: run-wide undecodable={} (floor {}, within_floor={}) \
+                     -- gates overall_pass again (report-only period over: issue 909/881/1179 \
+                     closed, 60Hz baseline permanent; floor recalibrated 8->6). See issue #915 \
+                     for the decision record and issue #905 for the restore.",
                     seg.total_undecodable,
                     camera_box::optical_floor::RUN_UNDECODABLE_FLOOR,
                     seg.run_wide_undecodable_within_floor
@@ -5009,9 +5017,9 @@ fn build_and_print_verdict_with_stream_diffs(
                     // Issue 915 (2026-08-01 user decision): an unambiguous machine-readable flag
                     // scoped to the optical undecodable floor specifically (NOT a blanket
                     // "gates_overall_pass" on the whole object — frame_count/schedule-non-empty
-                    // still gate this object's `overall_pass`, only the floor term stopped).
-                    // Mirrors the field name/shape issue 861/914 already established for their
-                    // fully-decoupled terms.
+                    // always gate this object's `overall_pass`; the floor term is the one whose
+                    // gating toggled, now LIVE again since issue 905 item 3). Mirrors the field
+                    // name/shape issue 861/914 already established for their scoped terms.
                     obj.insert(
                         "undecodable_floor_gates_overall_pass".to_string(),
                         serde_json::json!(camera_box::optical_floor::gates_overall_pass()),
@@ -5019,10 +5027,10 @@ fn build_and_print_verdict_with_stream_diffs(
                     obj.insert(
                         "undecodable_floor_gate".to_string(),
                         serde_json::json!(
-                            "report-only -- the issue-881 optical undecodable floor (per-window \
-                             + run-wide) does NOT gate overall_pass, pending issue 909 (cam1 \
-                             grabber) + issue 881 (120Hz monitor) (see issue #915 for the \
-                             decision record and issue #905 for the restore path)"
+                            "LIVE -- the issue-881 optical undecodable floor (per-window + \
+                             run-wide, floor 6) gates overall_pass again since issue 905 item 3 \
+                             (report-only period over: issue 909/881/1179 closed, 60Hz baseline \
+                             permanent; see issue #915 for the decision record)"
                         ),
                     );
                     // Finding 5 of the issue-889 re-gate deep review — a self-describing prose
@@ -10068,13 +10076,13 @@ mod tests {
         );
     }
 
-    /// Issue 915 (2026-08-01, user decision) end-to-end: a single all-cambox window whose
-    /// undecodable count exceeds the issue-881 per-window floor (5 > 4) must still be COMPUTED
-    /// and printed in the verdict JSON, must still fail that window's STRICT `pass`, but must NO
-    /// LONGER fail `all_cambox_continuity.overall_pass` -- and the JSON must carry the new
-    /// `undecodable_floor_gates_overall_pass` machine-readable flag.
+    /// Issue 905 item 3 (2026-09-04) end-to-end: a single all-cambox window whose undecodable
+    /// count exceeds the issue-881 per-window floor (5 > 4) is still COMPUTED and printed in the
+    /// verdict JSON, still fails that window's STRICT `pass` -- and, since the floor is RE-GATED
+    /// (report-only period over), it now ALSO fails `all_cambox_continuity.overall_pass`, with the
+    /// `undecodable_floor_gates_overall_pass` machine-readable flag reading `true`.
     #[test]
-    fn all_cambox_continuity_undecodable_over_floor_is_report_only_end_to_end_915() {
+    fn all_cambox_continuity_undecodable_over_floor_gates_end_to_end_905() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -10098,7 +10106,7 @@ mod tests {
             // whole-window net-span gap this creates (1008 -> 1020) is exactly credited by the 5
             // undecodable slots (painted_tick_gaps, issue 625), so copies=0 and gaps=0 stay
             // clean and this fixture isolates the floor term alone. 5 exceeds the per-window
-            // floor (4) but stays within the run-wide floor (8).
+            // floor (4) but stays within the run-wide floor (6) -- so the failure is per-window.
             let mut payloads = vec![Payload {
                 run_id: STRIH,
                 frame_id: 1670 + i as u32,
@@ -10169,8 +10177,8 @@ mod tests {
         );
         assert_eq!(
             seg["overall_pass"],
-            serde_json::json!(true),
-            "915: an over-floor undecodable count alone no longer fails overall_pass: {seg}"
+            serde_json::json!(false),
+            "905: the re-gated over-floor per-window count now fails overall_pass: {seg}"
         );
         assert_eq!(
             seg["total_undecodable"],
@@ -10180,12 +10188,12 @@ mod tests {
         assert_eq!(
             seg["run_wide_undecodable_within_floor"],
             serde_json::json!(true),
-            "915: 5 stays within the run-wide floor (8) -- isolates the per-window term: {seg}"
+            "905: 5 stays within the run-wide floor (6) -- isolates the per-window term: {seg}"
         );
         assert_eq!(
             seg["undecodable_floor_gates_overall_pass"],
-            serde_json::json!(false),
-            "915: the verdict JSON must carry the machine-readable report-only flag: {seg}"
+            serde_json::json!(true),
+            "905: the verdict JSON must carry the machine-readable LIVE-gating flag: {seg}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
