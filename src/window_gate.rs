@@ -831,23 +831,23 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_over_floor_now_passes_relaxed_but_fails_strict_915() {
-        // Issue 915 (2026-08-01, user decision): the optical undecodable floor is now
-        // report-only -- an over-floor undecodable count no longer fails the RELAXED verdict
-        // (only frame_count==0 does), even though the STRICT verdict still fails on it exactly
-        // as before.
+    fn undecodable_over_floor_now_fails_both_verdicts_905() {
+        // Issue 905 item 3 (2026-09-04): the optical undecodable floor is re-gated (the report-only
+        // period is over -- `optical_floor::gates_overall_pass()` is `true` again). An over-floor
+        // undecodable count now fails the RELAXED verdict too, not just the STRICT one -- so it is
+        // no longer a "#889 relaxation rescue" case.
         let d = decide(10, 5, 0, 0); // 5 undecodable of 10 frames -- past the #881 per-window floor (4)
         assert!(
             !d.strict_pass,
-            "the optical floor still fails the STRICT verdict, unchanged: {d:?}"
+            "the optical floor fails the STRICT verdict, unchanged: {d:?}"
         );
         assert!(
-            d.relaxed_pass,
-            "#915: undecodable over floor no longer fails the relaxed verdict: {d:?}"
+            !d.relaxed_pass,
+            "issue 905: undecodable over floor now fails the relaxed verdict too: {d:?}"
         );
         assert!(
-            d.relaxed_by_889(),
-            "#915's floor relaxation is now what's rescuing this window: {d:?}"
+            !d.relaxed_by_889(),
+            "issue 905: over-floor is no longer rescued by relaxation -- both verdicts fail: {d:?}"
         );
     }
 
@@ -917,29 +917,29 @@ mod tests {
     }
 
     #[test]
-    fn relaxed_failure_reasons_over_floor_is_report_only_today_889_regate() {
-        // Mirrors `undecodable_over_floor_now_passes_relaxed_but_fails_strict_915` above:
-        // undecodable=5 over the per-window floor (4), frames=10. `gates_overall_pass()` is
-        // hardcoded false today (issue 905's restore path is not yet landed), so this is
-        // FloorWithinReportOnly, never FloorExceededGating.
+    fn relaxed_failure_reasons_over_floor_now_gates_905() {
+        // Mirrors `undecodable_over_floor_now_fails_both_verdicts_905` above: undecodable=5 over
+        // the per-window floor (4), frames=10. Issue 905 item 3 re-gated the floor
+        // (`gates_overall_pass()` is `true` again), so this is now FloorExceededGating (the LIVE
+        // gating reason), no longer merely FloorWithinReportOnly.
         let reasons = relaxed_failure_reasons(10, 5, 0, 0);
-        assert_eq!(reasons, vec![RelaxedFailureReason::FloorWithinReportOnly]);
+        assert_eq!(reasons, vec![RelaxedFailureReason::FloorExceededGating]);
     }
 
     #[test]
     fn relaxed_failure_reasons_over_tolerance_and_over_floor_both_reported_889_regate() {
         // Finding 2's "else-arm" scenario: a window can fail overall_pass via OverCopiesGapsTolerance
         // while ALSO carrying an over-floor undecodable count that is merely report-only today --
-        // both reasons are returned so the caller can print both, instead of the old code's
-        // misleading "currently gates overall_pass" wording for the floor half. 2026-08-06 second
-        // recalibration: fixture tracks tolerance+1 (4) instead of the prior-recalibration
-        // hardcoded 3.
+        // both reasons are returned so the caller can print both. Issue 905 item 3 re-gated the
+        // floor (`gates_overall_pass()` is `true`), so the floor half is now FloorExceededGating
+        // (a LIVE second gating reason) alongside OverCopiesGapsTolerance. 2026-08-06 second
+        // recalibration: fixture tracks tolerance+1 instead of the prior-recalibration hardcoded 3.
         let reasons = relaxed_failure_reasons(10, 5, WINDOW_COPIES_GAPS_TOLERANCE + 1, 0);
         assert_eq!(
             reasons,
             vec![
                 RelaxedFailureReason::OverCopiesGapsTolerance,
-                RelaxedFailureReason::FloorWithinReportOnly,
+                RelaxedFailureReason::FloorExceededGating,
             ]
         );
     }
@@ -1090,24 +1090,25 @@ mod tests {
     }
 
     #[test]
-    fn overall_pass_term_keeps_the_optical_floor_report_only_1132() {
-        // CRITICAL separation: neither #1132 nor #1220 touch the optical undecodable floor. A
-        // window OVER the optical undecodable floor but clean on copies/gaps must STILL pass the
-        // blocking verdict -- the optical floor stays report-only exactly as `relaxed_pass` has it
-        // (issue 915/905). `strict_pass` fails (it gates the floor); `overall_pass_term` does NOT.
+    fn over_floor_fails_overall_pass_term_via_905_floor_regate() {
+        // CRITICAL separation, updated for issue 905 item 3: the optical undecodable floor now
+        // gates via its OWN seam (`optical_floor::gates_overall_pass()` re-armed), INDEPENDENT of
+        // the #1132/#1220 copies/gaps seam. A window OVER the optical floor but CLEAN on
+        // copies/gaps (so `copies_gaps_ok` is true) now fails the blocking verdict -- the failure
+        // is attributable to the floor term alone, proving the two seams stay independent.
         let d = decide(10, 5, 0, 0); // 5 undecodable of 10 -- past the per-window floor (4)
         assert!(
             !d.strict_pass,
-            "strict still gates the optical floor, unchanged: {d:?}"
+            "strict gates the optical floor, unchanged: {d:?}"
         );
         assert!(
-            d.overall_pass_term,
-            "neither #1132 nor #1220 re-gate the optical floor -- over-floor + clean copies/gaps \
-             still passes the blocking verdict: {d:?}"
+            !d.overall_pass_term,
+            "issue 905: the re-gated optical floor now fails the blocking verdict even with clean \
+             copies/gaps: {d:?}"
         );
         assert!(
-            d.relaxed_pass,
-            "relaxed also treats the floor as report-only: {d:?}"
+            !d.relaxed_pass,
+            "relaxed now gates the floor too (issue 905): {d:?}"
         );
     }
 

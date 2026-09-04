@@ -163,15 +163,30 @@ mod tests {
     // --- run_within_floor ------------------------------------------------------------------
 
     #[test]
-    fn run_wide_floor_boundary_eight_passes_nine_fails() {
+    fn run_wide_floor_boundary_six_passes_seven_fails() {
+        // issue 905 item 3 recalibration (2026-09-04): the run-wide floor is now 6 (down from 8,
+        // which was calibrated for the cam1(909)+cam2 combined era; post-cam1-fix the residual is
+        // cam2-only, steady max 4 across 30 dev1 verdicts -> 6 = 50% headroom, still below the
+        // pre-#707 regression level 10).
         assert!(
-            run_within_floor(8),
-            "8 is exactly the run-wide floor -> within"
+            run_within_floor(6),
+            "6 is exactly the run-wide floor -> within"
         );
         assert!(
-            !run_within_floor(9),
-            "9 exceeds the run-wide floor of 8 -> FAIL"
+            !run_within_floor(7),
+            "7 exceeds the run-wide floor of 6 -> FAIL"
         );
+    }
+
+    #[test]
+    fn run_wide_floor_recalibrated_to_six_905() {
+        // Pins the calibrated NUMBER itself (issue 905 item 3, data-first, 2026-09-04). Post-
+        // cam1-fix (issue 909 card swap) dev1 window: 31 full-path verdicts, steady run-wide
+        // total_undecodable max 4 / mean 1.3 / p90 3, residual now cam2-only (the 60Hz optical
+        // temporal tear, owner-ruled permanent -- no 120Hz per issue 881, no 100Hz per issue
+        // 1179). 6 sits at 50% headroom over the steady max and stays below the pre-#707
+        // regression level (10). See issue 905 comment for the full mined table.
+        assert_eq!(RUN_UNDECODABLE_FLOOR, 6);
     }
 
     #[test]
@@ -201,16 +216,17 @@ mod tests {
     // --- gates_overall_pass (issue 915) ---------------------------------------------------
 
     #[test]
-    fn gates_overall_pass_is_report_only_915() {
-        // #915 (2026-08-01, user decision): cam1's ShadowCast 2 grabber defect (issue 909) trips
-        // the run-wide floor on a hardware fault unrelated to any PR's own diff (run 30671860323:
-        // 10 undecodable, all in CAM1 windows, CAM2/CAM4 measured 0). The floor's own math
-        // (`window_within_floor`/`run_within_floor` above) stays UNCHANGED; only whether it can
-        // fail the run changes.
+    fn gates_overall_pass_is_live_gating_again_905() {
+        // issue 905 item 3 (2026-09-04): the physical blockers issue 915 waited on are ALL closed
+        // -- issue 909 (cam1 grabber card replaced), issue 881 (120Hz monitor, owner-ruled never),
+        // issue 1179 (100Hz, closed). The 60Hz baseline is permanent, so the optical undecodable
+        // floor is re-gated to a data-justified value (`RUN_UNDECODABLE_FLOOR` = 6). The floor's
+        // own math (`window_within_floor`/`run_within_floor` above) stays UNCHANGED; only whether
+        // it can fail the run flips back on.
         assert!(
-            !gates_overall_pass(),
-            "#915: the optical undecodable floor must be report-only while issue 909 (cam1 \
-             grabber) + issue 881 (120Hz monitor) remain unresolved"
+            gates_overall_pass(),
+            "issue 905: the optical undecodable floor gates overall_pass again (report-only period \
+             over -- all physical blockers closed, 60Hz baseline permanent)"
         );
     }
 }
