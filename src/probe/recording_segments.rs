@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn single_undecodable_frame_within_calibrated_floor_passes_881() {
         // #881 calibrated floor: cam2 has ONE delivered frame with no painted tick (None) —
-        // 1 undecodable is within the per-window floor (<=4) and the run-wide floor (<=8), and
+        // 1 undecodable is within the per-window floor (<=4) and the run-wide floor (<=6), and
         // copies/gaps are both 0, so this window (and the whole run) now PASSES. Before #881
         // this exact sequence FAILED on the optical `undecodable` term alone; it must not
         // anymore — the residual is a physical 60Hz temporal-tear artifact of the test camera's
@@ -2078,8 +2078,8 @@ mod tests {
             );
         }
         // The segment still correctly FAILS: 15 undecodable is FAR beyond even #881's calibrated
-        // per-window floor (<=4 -- a temporary allowance for a physical 60Hz temporal-tear
-        // artifact, not a licence for a genuinely low-confidence window like this one) -- an
+        // per-window floor (<=4 -- a permanent, data-calibrated allowance for a physical 60Hz
+        // temporal-tear artifact, not a licence for a genuinely low-confidence window like this) -- an
         // independent, deliberate `pass` criterion (real confidence in zero-loss, not just "no
         // PROVEN hole") -- `gaps==0` alone is necessary but not sufficient. This is NOT a false
         // negative.

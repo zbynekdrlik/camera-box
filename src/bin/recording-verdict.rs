@@ -4976,19 +4976,26 @@ fn build_and_print_verdict_with_stream_diffs(
                     );
                 }
                 // Issue 915 (2026-08-01) visibility requirement, mirrors #889 requirement 3 —
-                // prints UNCONDITIONALLY whether or not the run-wide floor was exceeded, so silence
-                // is never mistaken for strictness. Issue 905 item 3 (2026-09-04) re-gated the
-                // floor (`camera_box::optical_floor::gates_overall_pass()` is `true` again), so
-                // this is now a LIVE gate, not report-only.
-                println!(
-                    "  #905 LIVE GATE: run-wide undecodable={} (floor {}, within_floor={}) \
-                     -- gates overall_pass again (report-only period over: issue 909/881/1179 \
-                     closed, 60Hz baseline permanent; floor recalibrated 8->6). See issue #915 \
-                     for the decision record and issue #905 for the restore.",
-                    seg.total_undecodable,
-                    camera_box::optical_floor::RUN_UNDECODABLE_FLOOR,
-                    seg.run_wide_undecodable_within_floor
-                );
+                // prints on EVERY run so silence is never mistaken for strictness. Issue 905 item 3
+                // (2026-09-04) re-gated the floor (`camera_box::optical_floor::gates_overall_pass()`
+                // is `true` again), so an over-floor run prints a loud FAIL-worded line while a
+                // within-floor run prints an OK line (never the same wording for both).
+                if seg.run_wide_undecodable_within_floor {
+                    println!(
+                        "  #905 optical floor OK: run-wide undecodable={} within floor {} \
+                         (LIVE gate since issue 905 item 3).",
+                        seg.total_undecodable,
+                        camera_box::optical_floor::RUN_UNDECODABLE_FLOOR,
+                    );
+                } else {
+                    println!(
+                        "  ✗ #905 FLOOR FAIL: run-wide undecodable={} exceeds floor {} -- FAILS \
+                         overall_pass (LIVE gate since issue 905 item 3; see issue #915 for the \
+                         decision record).",
+                        seg.total_undecodable,
+                        camera_box::optical_floor::RUN_UNDECODABLE_FLOOR,
+                    );
+                }
                 if no_anchor > 0 {
                     println!(
                         "  ({no_anchor} recorded frame(s) had no burn/optical gen_ts anchor — not placed)"
@@ -5024,14 +5031,28 @@ fn build_and_print_verdict_with_stream_diffs(
                         "undecodable_floor_gates_overall_pass".to_string(),
                         serde_json::json!(camera_box::optical_floor::gates_overall_pass()),
                     );
+                    // Numeric floor values, so the calibration is machine-readable and the prose
+                    // message below never becomes the sole (rot-prone) source of the numbers
+                    // (issue 905 item 3 review 🔵1). The Discord classifier reads these to name a
+                    // per-window-only floor red.
+                    obj.insert(
+                        "per_window_undecodable_floor".to_string(),
+                        serde_json::json!(camera_box::optical_floor::PER_WINDOW_UNDECODABLE_FLOOR),
+                    );
+                    obj.insert(
+                        "run_undecodable_floor".to_string(),
+                        serde_json::json!(camera_box::optical_floor::RUN_UNDECODABLE_FLOOR),
+                    );
                     obj.insert(
                         "undecodable_floor_gate".to_string(),
-                        serde_json::json!(
-                            "LIVE -- the issue-881 optical undecodable floor (per-window + \
-                             run-wide, floor 6) gates overall_pass again since issue 905 item 3 \
+                        serde_json::json!(format!(
+                            "LIVE -- the issue-881 optical undecodable floor (per-window {}, \
+                             run-wide {}) gates overall_pass again since issue 905 item 3 \
                              (report-only period over: issue 909/881/1179 closed, 60Hz baseline \
-                             permanent; see issue #915 for the decision record)"
-                        ),
+                             permanent; see issue #915 for the decision record)",
+                            camera_box::optical_floor::PER_WINDOW_UNDECODABLE_FLOOR,
+                            camera_box::optical_floor::RUN_UNDECODABLE_FLOOR,
+                        )),
                     );
                     // Finding 5 of the issue-889 re-gate deep review — a self-describing prose
                     // gate key, mirroring `undecodable_floor_gate`'s idiom immediately above but

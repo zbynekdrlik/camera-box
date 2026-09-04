@@ -187,8 +187,9 @@ mod tests {
 
     #[test]
     fn gate_is_live_today() {
-        // #1035: the latency bound folds into overall_pass (LIVE), unlike the optical/freeze
-        // floors which are report-only pending hardware. It passes every green run with margin.
+        // #1035: the latency bound folds into overall_pass (LIVE), like the freeze floor (issue
+        // 905 item 2) and the optical undecodable floor (issue 905 item 3). It passes every green
+        // run with margin.
         assert!(
             gates_overall_pass(),
             "#1035: the absolute cam→strih latency bound must gate overall_pass (LIVE)"

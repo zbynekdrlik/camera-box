@@ -1,5 +1,5 @@
-//! #881 (via #854/#707) — the TEMPORARY calibrated floor for the all-cambox segment continuity's
-//! optical `undecodable` term.
+//! #881 (via #854/#707) — the permanent, data-calibrated floor for the all-cambox segment
+//! continuity's optical `undecodable` term (LIVE-gating again since issue 905 item 3).
 //!
 //! ## Why this exists
 //!
@@ -183,7 +183,7 @@ mod tests {
     fn run_wide_floor_boundary_six_passes_seven_fails() {
         // issue 905 item 3 recalibration (2026-09-04): the run-wide floor is now 6 (down from 8,
         // which was calibrated for the cam1(909)+cam2 combined era; post-cam1-fix the residual is
-        // cam2-only, steady max 4 across 30 dev1 verdicts -> 6 = 50% headroom, still below the
+        // cam2-only, steady max 4 across 31 dev1 verdicts -> 6 = 50% headroom, still below the
         // pre-#707 regression level 10).
         assert!(
             run_within_floor(6),
