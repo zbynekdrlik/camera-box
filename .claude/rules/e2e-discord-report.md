@@ -56,9 +56,12 @@ lists the report-only ones for the `ℹ️` line.
 - **REPORT-ONLY** (`gates_overall_pass=false`, NEVER a `❌`): the imag PER-FRAME CONTENT terms only
   since #1142 (`all_cambox_continuity.imag` continuity + `full_chain.loss.imag.imag_content_pass` —
   the observer-effect-confounded burn/beat; the imag PRESENCE terms are now BLOCKING above),
-  `cold_cut_onset`, the optical undecodable floor (`run_wide_undecodable_within_floor`), lipsync,
-  and `frozen_leg.stale_replay` (which NEVER gates — the `frozen`/self-heal terms flipped BLOCKING
-  by **#905**, see LIVE above; only the milder stale-replay signal stays report-only). **NOTE (#1142
+  `cold_cut_onset`, lipsync, and `frozen_leg.stale_replay` (which NEVER gates — the `frozen`/
+  self-heal terms flipped BLOCKING by **#905** item 2, see LIVE above; only the milder stale-replay
+  signal stays report-only). The optical undecodable floor
+  (`run_wide_undecodable_within_floor` / `undecodable_floor_gates_overall_pass`) is now BLOCKING
+  too — RE-GATED at floor 6 by **#905 item 3** (guarded `is not True` in `_report_only_tripped`, so
+  a pre-flip verdict still classifies report-only without double-counting). **NOTE (#1142
   + #1166):** the delivery spread and
   duplication_masked_cadence stay report-only ONLY on a PRE-flip verdict (no `gates_overall_pass` —
   or `gates_overall_pass=false` — on the respective block); each `_report_only_tripped` branch is

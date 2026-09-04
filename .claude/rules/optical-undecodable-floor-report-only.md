@@ -5,7 +5,21 @@ paths:
   - "src/probe/recording_segments.rs"
 ---
 
-# The #881 optical undecodable floor became report-only (issue 915, 2026-08-01)
+# The #881 optical undecodable floor: report-only (issue 915) → RE-GATED (issue 905 item 3)
+
+> **SUPERSEDED — issue 905 item 3 (2026-09-04): the floor is LIVE-GATING again.**
+> `optical_floor::gates_overall_pass()` is now hardcoded **`true`** (was `false`), and
+> `RUN_UNDECODABLE_FLOOR` was recalibrated **8 → 6** (per-window kept 4). All the physical
+> blockers issue 915 waited on are closed: issue 909 (cam1 grabber card replaced), issue 881
+> (120Hz monitor — owner ruled it will NEVER be installed), issue 1179 (100Hz declined). The 60Hz
+> baseline — and its irreducible optical temporal tear — is PERMANENT, so the floor is no longer
+> "temporary until 120Hz"; it is a permanent, data-calibrated gate. Data: 31 post-cam1-fix dev1
+> verdicts, steady run-wide max 4 / mean 1.3 / p90 3 (residual cam2-only), one genuine cam2 fault
+> outlier 27; floor 6 = 50% headroom over steady max, below the pre-#707 regression level 10.
+> **Everything BELOW documents the report-only ERA (issue 915) — it is HISTORY.** Read
+> "gates_overall_pass() is false / report-only / temporary until 120Hz" throughout as the pre-905
+> state; today the seam is `true` and a nonzero over-floor run FAILS `overall_pass`. Re-disarm
+> (a future new artifact class) is the inverse one-line flip back to `false`.
 
 ## The seam — `optical_floor::gates_overall_pass()`, mirrors issue 914 exactly
 
