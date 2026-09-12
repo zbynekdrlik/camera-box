@@ -2229,3 +2229,90 @@ fn gate_still_refuses_absent_imag_without_the_ack_flag_1164() {
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
 }
+
+// #1296 — a --win-state-report-only box (RESOLUME-SNV) is SURFACED as an informational row but
+// NEVER enters the pass/fail roll-up, so it can never block the run (it stays OUT of the [0/8]
+// blocking set — targets.md: a traveling CG box, not a measured cam->strih->stream source).
+const SHA_1296: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+
+/// The canonical GATE-PASS invocation (strih+stream pinned + imag clean), as owned arg strings.
+/// Returns the two strih/stream state paths (to clean up) + the full arg vector. The imag manifest
+/// temp file persists on disk for the subprocess (written by clean_imag_bytes_1100), not deleted.
+fn pinned_pass_args_1296(tag: &str) -> (PathBuf, PathBuf, Vec<String>) {
+    let s = write_state(
+        &format!("strih_ro_{tag}"),
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA_1296), true),
+    );
+    let t = write_state(
+        &format!("stream_ro_{tag}"),
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA_1296), false),
+    );
+    let (imag_m, imag_b) = clean_imag_bytes_1100(tag);
+    let args = vec![
+        "--win-state".to_string(),
+        format!("strih={}", s.display()),
+        "--win-state".to_string(),
+        format!("stream={}", t.display()),
+        "--genlock-sha".to_string(),
+        format!("imag={SHA_1296}"),
+        "--imag-manifest".to_string(),
+        imag_m.to_str().unwrap().to_string(),
+        "--imag-bytes".to_string(),
+        imag_b,
+    ];
+    (s, t, args)
+}
+
+#[test]
+fn report_only_box_is_surfaced_but_never_blocks_a_passing_gate_1296() {
+    // The passing fixture PLUS a report-only resolume whose genlock sha DELIBERATELY does NOT match
+    // the fleet (a value that WOULD be DRIFT if it were a blocking --win-state box). The gate must
+    // still GATE PASS (0): a report-only box is never drift-checked, never counted.
+    let (s, t, mut args) = pinned_pass_args_1296("surface");
+    let ro = write_state(
+        "resolume_ro_surface",
+        "{\"genlock_build_sha\":\"deadbeefresolumeNOTthefleetSHA\",\"obs_process_count\":\"1\",\"port4455_owner_version\":\"31.0.0\"}",
+    );
+    args.push("--win-state-report-only".to_string());
+    args.push(format!("resolume={}", ro.display()));
+    let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let (code, stdout, stderr) = run_gate(&argrefs);
+    assert_eq!(
+        code, 0,
+        "a report-only box (even with a non-matching sha) must NEVER block a passing gate. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "must still pass: {stdout}");
+    assert!(
+        stdout.contains("report-only boxes") && stdout.contains("resolume"),
+        "the resolume report-only row must be surfaced: {stdout}"
+    );
+    assert!(
+        stdout.contains("genlock_build_sha=deadbeefresolumeNOTthefleetSHA"),
+        "the resolume row must carry its observed genlock sha: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&ro);
+}
+
+#[test]
+fn report_only_box_with_unread_file_prints_unread_row_and_never_blocks_1296() {
+    // A report-only box whose state file is missing: an "unread (report-only)" row, still exit 0.
+    let (s, t, mut args) = pinned_pass_args_1296("unread");
+    args.push("--win-state-report-only".to_string());
+    args.push("resolume=/nonexistent/resolume-state-1296.json".to_string());
+    let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let (code, stdout, stderr) = run_gate(&argrefs);
+    assert_eq!(
+        code, 0,
+        "an UNREAD report-only box must never block. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "must still pass: {stdout}");
+    assert!(
+        stdout.contains("resolume") && stdout.contains("unread"),
+        "an unread report-only box must print an 'unread' row: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}

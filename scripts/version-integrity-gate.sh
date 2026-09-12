@@ -480,6 +480,10 @@ Options:
                     pre-fetches it -- #701 proved plain scp/ssh reaches strih/stream, not migrated
                     here). Repeatable. A box with no
                     file is UNKNOWN -> the gate refuses.
+  --win-state-report-only N=FILE  #1296 -- a box whose observed stack is PRINTED as an
+                    informational row but NEVER blocks (never enters the pass/fail roll-up).
+                    RESOLUME-SNV (a traveling CG box, not a measured [0/8] source) uses this so it
+                    is version-surfaced without ever refusing the run. Repeatable.
   --imag-manifest PATH  #1082 -- the CI-authoritative linux BUNDLE_MANIFEST.json for imag's build,
                     against which imag's DEPLOYED .so bytes are compared. ENFORCED (#1100).
   --imag-bytes LABEL=path=sha,...  #1082 -- imag's DEPLOYED libobs.so.30 / distroav.so /
@@ -514,11 +518,20 @@ main() {
   # (which then certifies the remaining fleet strih+stream). WITHOUT this flag the gate is
   # byte-identical to before -- an absent imag is still fail-closed UNKNOWN(11) (the #1100 contract).
   local imag_acked_offline=""
+  # #1296 -- REPORT-ONLY boxes (NAME=FILE, same state-JSON shape as --win-state): a box whose
+  # observed stack is PRINTED as an informational row but NEVER enters the bad/unknown/ok roll-up,
+  # so it can never block the run. RESOLUME-SNV uses this: it is a TRAVELING CG box, NOT a measured
+  # source in the cam->strih->stream recording path, so it stays OUT of the [0/8] blocking set
+  # (targets.md: "Not in the E2E [0/8] version gate") while still surfacing its genlock build + OBS
+  # identity in the gate output. Repeatable. A report-only box with no/empty file prints an
+  # "unread (report-only)" row and still never blocks.
+  local -a win_state_report_only=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --readme)             shift; readme="${1:-}" ;;
       --manifest)           shift; manifest="${1:-}" ;;
       --win-state)          shift; win_state+=("${1:-}") ;;
+      --win-state-report-only) shift; win_state_report_only+=("${1:-}") ;;
       --genlock-sha)        shift; genlock_sha+=("${1:-}") ;;
       --imag-manifest)      shift; imag_manifest="${1:-}" ;;
       --imag-bytes)         shift; imag_bytes="${1:-}" ;;
@@ -888,6 +901,29 @@ main() {
         30) echo "!! VENDOR-PIN ALARM: deployed genlock bundle ${vp_sha} is DRIFTED from origin/main vendor HEAD (LAGS, or an unrecognized ORPHAN build reachable from neither origin/main nor origin/dev) -- see the vendor_pin detail line above for the exact reason; redeploy the fleet (report-only, does NOT block this run)." >&2 ;;
         31) echo "!! VENDOR-PIN ALARM: could not verify deployed genlock bundle ${vp_sha} against origin/main vendor HEAD (report-only)." >&2 ;;
       esac
+    done
+  fi
+
+  # #1296 — REPORT-ONLY boxes (RESOLUME-SNV): surface each one's observed genlock build + OBS
+  # identity as an informational row, but NEVER touch bad/unknown/ok, so a report-only box can
+  # never block the run. This is deliberately OUTSIDE the [0/8] blocking set (targets.md: resolume
+  # is a traveling CG box, not a measured cam->strih->stream source). An unread/empty state file
+  # prints an "unread (report-only)" row and still never blocks.
+  if [ "${#win_state_report_only[@]}" -gt 0 ]; then
+    echo
+    echo "  -- report-only boxes (#1296: surfaced, NEVER gate the run) --"
+    local ro_entry ro_name ro_file ro_sha ro_obs ro_port4455
+    for ro_entry in "${win_state_report_only[@]}"; do
+      ro_name="${ro_entry%%=*}"; ro_file="${ro_entry#*=}"
+      if [ -z "$ro_file" ] || [ ! -s "$ro_file" ]; then
+        printf '  %-14s report-only  (unread — no state file %s; does NOT block)\n' "$ro_name" "${ro_file:-<none>}"
+        continue
+      fi
+      ro_sha="$(genlock_build_sha_from_state "$ro_file")"
+      ro_obs="$(state_json_value "$ro_file" obs_process_count)"
+      ro_port4455="$(state_json_value "$ro_file" port4455_owner_version)"
+      printf '  %-14s report-only  genlock_build_sha=%s obs64=%s obs_version=%s (does NOT block)\n' \
+        "$ro_name" "${ro_sha:-n/a}" "${ro_obs:-n/a}" "${ro_port4455:-n/a}"
     done
   fi
 
