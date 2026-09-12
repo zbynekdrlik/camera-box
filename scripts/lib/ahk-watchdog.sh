@@ -47,9 +47,23 @@
 # it (a scheduled task retries every ~2 min regardless); launch-obs-genlock.sh's one-shot relaunch
 # treats it as fatal (Write-Error + a distinct non-zero exit), matching how that script already
 # fails loud on its other post-launch verifications (obs64 not started, #786 audio buffering).
+# Per-box AHK identity (issue 1295): two OPTIONAL args keep EVERY existing caller byte-identical.
+#   $1 AHK_SCRIPT  -- the NL_STARTUP.ahk path to pass to the resolved exe (default: strih's
+#                     D:\_APPS\NL_STARTUP.ahk). The CG box (RESOLUME-SNV) passes its own v2 path
+#                     'C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk' -- it has
+#                     a SPACE, which is why the ArgumentList wraps $ahkScriptPath in double quotes.
+#   $2 PREFER      -- 'exe' (default, strih) resolves the exe FIRST then the Startup .lnk; 'lnk'
+#                     (resolume) tries the Startup shortcut FIRST. resolume prefers the .lnk because
+#                     it is a TRAVELING box whose install path can move -- the Startup shortcut
+#                     always resolves the running watcher, so it is the more durable relaunch target
+#                     (the exe candidates still back it up). Called with no args -> strih's exact
+#                     pre-1295 output (obs-self-heal-install.sh + the strih deploy/launch arms).
 ahk_resolve_and_relaunch_ps() {
+  local ahk_script="${1:-D:\\_APPS\\NL_STARTUP.ahk}"
+  local prefer="${2:-exe}"
+  local ahk_script_ps="${ahk_script//\'/\'\'}"  # double any ' for the PS single-quoted literal
+  printf "%s\n" "\$ahkScriptPath = '${ahk_script_ps}'"
   cat <<'PS'
-$ahkScriptPath = 'D:\_APPS\NL_STARTUP.ahk'
 $ahkCandidates = @(
   (Join-Path $env:LOCALAPPDATA 'Programs\AutoHotkey\v2\AutoHotkey64.exe'),
   (Join-Path $env:ProgramFiles 'AutoHotkey\v2\AutoHotkey64.exe'),
@@ -57,6 +71,19 @@ $ahkCandidates = @(
 )
 $ahkExe = $ahkCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 $ahkLnk = Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -Filter "*NL_STARTUP*" -ErrorAction SilentlyContinue | Select-Object -First 1
+PS
+  if [ "$prefer" = "lnk" ]; then
+    cat <<'PS'
+if ($ahkLnk) {
+  Start-Process -FilePath $ahkLnk.FullName
+  $ahkRelaunchTarget = $ahkLnk.FullName
+} elseif ($ahkExe) {
+  Start-Process -FilePath $ahkExe -ArgumentList "`"$ahkScriptPath`""
+  $ahkRelaunchTarget = $ahkExe
+} else {
+PS
+  else
+    cat <<'PS'
 if ($ahkExe) {
   Start-Process -FilePath $ahkExe -ArgumentList "`"$ahkScriptPath`""
   $ahkRelaunchTarget = $ahkExe
@@ -64,6 +91,9 @@ if ($ahkExe) {
   Start-Process -FilePath $ahkLnk.FullName
   $ahkRelaunchTarget = $ahkLnk.FullName
 } else {
+PS
+  fi
+  cat <<'PS'
   $ahkCmd = Get-Command AutoHotkey64.exe -ErrorAction SilentlyContinue
   if ($ahkCmd) {
     Start-Process -FilePath $ahkCmd.Source -ArgumentList "`"$ahkScriptPath`""

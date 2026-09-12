@@ -33,9 +33,7 @@ fn lib_script() -> PathBuf {
 /// Source the lib and call `ahk_resolve_and_relaunch_ps` with the given (already shell-quoted)
 /// argument string appended. Returns stdout.
 fn relaunch_ps_with(arg_str: &str) -> String {
-    let harness = format!(
-        "set -uo pipefail\n. \"$SCRIPT\"\nahk_resolve_and_relaunch_ps {arg_str}"
-    );
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\nahk_resolve_and_relaunch_ps {arg_str}");
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)

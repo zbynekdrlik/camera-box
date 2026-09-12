@@ -471,7 +471,8 @@ fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
     // the #978 session gate must cover AutoHotkey64 too (a session-0 AHK respawns obs64 into
     // session 0 forever), not just obs64.
     assert!(
-        out.contains("$ahkSessProcs") && out.contains("$ahkSessProcs[0].SessionId -ne $activeSession"),
+        out.contains("$ahkSessProcs")
+            && out.contains("$ahkSessProcs[0].SessionId -ne $activeSession"),
         "resolume (has_ahk=1) must gate AutoHotkey64's SessionId in the #978 session gate:\n{out}"
     );
     // the relaunch target is resolume's OWN v2 .ahk path, never strih's D:\_APPS path.

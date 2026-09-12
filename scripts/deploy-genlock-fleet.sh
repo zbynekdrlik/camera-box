@@ -128,15 +128,25 @@ fleet_pick_run_at_sha() {
   jq -r --arg s "$sha" '[.[] | select(.headSha == $s and .conclusion == "success")][0].databaseId // empty'
 }
 
-# fleet_box_mcp / fleet_box_ip / fleet_box_has_ahk -- per-box constants (only strih runs the
-# NL_STARTUP.ahk auto-respawn watcher, so only strih's program stops AutoHotkey64). resolume
-# (issue 1295) = win-resolume, has_ahk=0 (no AHK watcher on the CG box), and its "ip" is the
-# HOSTNAME resolume.lan -- NEVER a pinned literal IP: resolume.lan is DHCP-drifting and currently
-# collides with `bridge` at .201 (targets.md), so the plan resolves + identity-confirms it live
-# (emit_windows_plan prints that step for resolume; the planner emits it, never runs it).
+# fleet_box_mcp / fleet_box_ip / fleet_box_has_ahk -- per-box constants. BOTH strih AND resolume
+# run an NL_STARTUP.ahk AutoHotkey auto-respawn watcher (SafeLoop), so both programs stop+restart
+# AutoHotkey64 around the copy; stream/imag have none. resolume (issue 1295) = win-resolume, and its
+# "ip" is the HOSTNAME resolume.lan -- NEVER a pinned literal IP: resolume.lan is DHCP-drifting and
+# currently collides with `bridge` at .201 (targets.md), so the plan resolves + identity-confirms it
+# live (emit_windows_plan prints that step for resolume; the planner emits it, never runs it).
 fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
 fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; *) return 2 ;; esac; }
-fleet_box_has_ahk() { case "${1:-}" in strih) echo "1" ;; *) echo "0" ;; esac; }
+fleet_box_has_ahk() { case "${1:-}" in strih|resolume) echo "1" ;; *) echo "0" ;; esac; }
+
+# fleet_box_ahk_script / fleet_box_ahk_prefer -- the PER-BOX AHK relaunch identity passed into the
+# shared scripts/lib/ahk-watchdog.sh primitive (issue 1295). strih keeps its current values
+# (D:\_APPS\NL_STARTUP.ahk + exe-first, byte-identical to before). resolume (RESOLUME-SNV) is a
+# TRAVELING box whose AHK is AutoHotkey v2 running its OWN NL_STARTUP.ahk (the path has a SPACE --
+# the relaunch PS wraps it in double quotes), and it PREFERS the Startup .lnk as the relaunch
+# target ('lnk') so a future path move on the box cannot break the relaunch (the exe candidates
+# still back it up). Only meaningful when fleet_box_has_ahk <box> = 1.
+fleet_box_ahk_script() { case "${1:-}" in resolume) echo 'C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk' ;; *) echo 'D:\_APPS\NL_STARTUP.ahk' ;; esac; }
+fleet_box_ahk_prefer() { case "${1:-}" in resolume) echo "lnk" ;; *) echo "exe" ;; esac; }
 
 # fleet_resolume_identity_confirm_note -> the IDENTITY-CONFIRM preamble the resolume plan prints
 # (issue 1295). RESOLUME-SNV is a TRAVELING box addressed by HOSTNAME, and resolume.lan currently
@@ -170,6 +180,8 @@ NOTE
 # lists none. The emitted program disables+restores ONLY a task that is PRESENT and ENABLED, so a
 # name absent (or deliberately disabled) on the box is a harmless skip -- adding another box's
 # keep-alive here later is a one-line change, not a hardcoded pile inline at the call site.
+# resolume (issue 1295) is like strih: its respawner IS the AHK watcher (has_ahk path), so it
+# lists no keep-alive scheduled task either.
 # Task names MUST be whitespace-free: the emitter word-splits this space-separated list.
 fleet_box_keepalive_tasks() {
   case "${1:-}" in
@@ -196,7 +208,7 @@ build_windows_deploy_program() {
   local ahk_stop ahk_restart
   if [ "$has_ahk" = "1" ]; then
     ahk_stop=$(cat <<'PSAHK'
-# (1) Stop the strih AHK watchdog FIRST -- NL_STARTUP.ahk respawns obs64 via the bare exe within
+# (1) Stop the box's AHK watchdog FIRST -- NL_STARTUP.ahk respawns obs64 via the bare exe within
 #     seconds of the window vanishing, which would re-lock data\ + obs-plugins\ files mid-copy
 #     (robocopy exit >= 8) AND drop the shortcut params. This program RESTARTS it at the end (step 8)
 #     so the box is left consistent and launch-obs-genlock.sh's #978 session gate (AHK count == 1)
@@ -207,17 +219,19 @@ if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
 PSAHK
 )
     # #789 review #1: restart AHK VERIFIED via the ONE shared helper launch-obs-genlock.sh uses
-    # (scripts/lib/ahk-watchdog.sh) -- never a fork. Fail loud if it does not come back.
-    local ahk_relaunch_ps; ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
+    # (scripts/lib/ahk-watchdog.sh) -- never a fork. Fail loud if it does not come back. issue 1295:
+    # the relaunch identity (script path + prefer order) is PER-BOX -- strih keeps D:\_APPS +
+    # exe-first (byte-identical), resolume passes its own v2 .ahk path + lnk-first.
+    local ahk_relaunch_ps; ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps "$(fleet_box_ahk_script "$box")" "$(fleet_box_ahk_prefer "$box")")"
     ahk_restart=$(cat <<PSAHKR
-# (8) Restart the strih AHK watchdog we stopped in step (1), VERIFIED (leaves AHK running so the
+# (8) Restart the ${box} AHK watchdog we stopped in step (1), VERIFIED (leaves AHK running so the
 #     STEP-2 launch-obs-genlock.sh session gate passes). AHK's app1_run then keeps obs64 alive via
 #     the .lnk; the STEP-2 launch (--force) does the deterministic relaunch + render-tick verify.
 ${ahk_relaunch_ps}
 if (\$ahkRelaunchVerified) {
   Write-Host "#789: AHK watchdog restarted via \$ahkRelaunchTarget."
 } else {
-  Write-Error "#789 FAIL: AutoHotkey64 did not come back after the deploy (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher; investigate before trusting this box."
+  Write-Error "#789 FAIL: AutoHotkey64 did not come back after the deploy (target=\$ahkRelaunchTarget) -- ${box} has NO respawn watcher; investigate before trusting this box."
   exit 9
 }
 PSAHKR
