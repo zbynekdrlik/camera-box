@@ -15,6 +15,42 @@
 | songs | 10.77.9.212 | Active | SSH: newlevel/newlevel |
 | piano | 10.77.9.236 | Offline | SSH: newlevel/newlevel |
 
+### RESOLUME-SNV — dev1 fleet membership + the `:8899` on-box install (#1296)
+
+RESOLUME-SNV is registered in the ONE declared managed-OBS-box list
+`scripts/lib/obs-fleet.sh` (`OBS_FLEET`, class `windows-genlock`, host `resolume.lan`, home-check
+`traveling`), from which the dev1-side watchdogs derive their box rosters
+(`.claude/rules/obs-fleet-list.md`). Where it is watched:
+
+- **bundle-state** (`:8899` health + auto-restart) and **obs-liveness** (`render_advanced`) — carries
+  the facet; obs-liveness polls it only while `obs_fleet_is_home resolume` (OBS-WS `:4455` answers).
+- **network-reach** — REPORT-ONLY by default (a traveling box's absence is normal), PROMOTED to a
+  paging node only while it is home (`obs_fleet_is_home`).
+- **NOT** audio-lag / av-step / vb-matrix (no mbc audio, no VB-Matrix on the CG box).
+- **version-integrity-gate** — surfaced REPORT-ONLY (`--win-state-report-only resolume=…`); it stays
+  OUT of the `[0/8]` blocking set (a traveling box, not a measured source). **rig-health-audit** —
+  genlock-build + bundle-state facets rendered when present, rate-EXEMPT (#787).
+
+**SUPERVISOR on-box install checklist — the `:8899` BundleStateServer on RESOLUME-SNV** (mirrors the
+strih/stream install in `.claude/skills/genlock` / `.claude/skills/ops`; a rig step, NOT a code-PR
+step). Run it when the box is home + its identity is CONFIRMED (`getent hosts resolume.lan` + its OBS
+profile name, `.claude/rules/rig-state-inspection.md` §2 — it currently resolves to `10.77.9.201`,
+which collides with `bridge`):
+
+1. Deploy `C:\ProgramData\camera-box\{bundle-state-server.py, bundle_state_gather.py, obs_phase2.py,
+   run-bundle-state-server.ps1}` by having the box `Invoke-WebRequest` each raw file at a pinned
+   commit SHA (`https://raw.githubusercontent.com/zbynekdrlik/camera-box/<sha>/scripts/<file>`) — never
+   transfer file content through an agent's context. Keep `run-bundle-state-server.ps1` pure ASCII
+   (`grep -nP '[^\x00-\x7F]'` before deploy — the em-dash parse trap).
+2. `FileWrite` the OBS-WS password to `C:\ProgramData\camera-box\obs-ws-password.txt` (one line, the
+   local `rig-obs-ws-credentials` memory value) — never fetched from GitHub, never committed.
+3. Register the Scheduled Task `BundleStateServer` (ONSTART trigger, InteractiveToken as `newlevel`,
+   session-agnostic — mirrors the existing `StartOBS` / the strih/stream `BundleStateServer` task),
+   whose action runs `run-bundle-state-server.ps1` (the restart-loop supervisor).
+4. Verify from dev1: `curl http://resolume.lan:8899/bundle-state.json` returns the facets (OBS
+   identity / `obs_process_count` / `genlock_build_sha`), and a forced `obs64` kill pages via the
+   existing obs-liveness / bundle-state path within 2 passes + the auto-restart brings `:8899` back.
+
 ## Camera Targets (camera-box)
 
 | Device | IP Address | Status | Notes |

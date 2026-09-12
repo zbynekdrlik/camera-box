@@ -114,13 +114,24 @@ because it carried no dantesync — this brings it under the fleet clock-discipl
   adaptation are NOT gated; the frame-jump signal `backward_regime_ticks` IS). For the 24h
   acceptance (skew flat ±20 ms), sample a long OBS-log window and raise `--min-samples`. The
   supervisor owns the live deploy + the 24h run; this is a verify tool, not a hard E2E gate.
-- **Reachability watchdog — REPORT-ONLY (#811).** resolume is in the dev1-side network-reach
-  watchdog's `BOXES` roster + `NETWORK_REACH_REPORT_ONLY_BOXES` (default `resolume`), so it is
-  probed (ping OR :4455) + logged + per-box state-tracked but **NEVER pages** — its absence is the
-  normal state for a traveling box, so a page would be noise (`.claude/rules/network-reach-watchdog.md`).
-  Once it becomes a permanent fixture, flip it to a paging node by removing `resolume` from
-  `NETWORK_REACH_REPORT_ONLY_BOXES` (it stays in `BOXES`). The watchdog ships DISABLED — enable on
-  dev1 with `systemctl --user enable --now network-reach-alert-watchdog.timer`, unchanged by this.
+- **Dev1 fleet registration — the ONE declared OBS_FLEET list (#1296).** resolume is now a member of
+  `scripts/lib/obs-fleet.sh` (`OBS_FLEET`, class `windows-genlock`, host `resolume.lan`, home-check
+  `traveling`), from which all six dev1 watchdogs DERIVE their box rosters (`.claude/rules/obs-fleet-list.md`).
+  It is watched by **bundle-state** (`:8899` health + auto-restart) and **obs-liveness**
+  (`render_advanced`, polled only while home); surfaced REPORT-ONLY by **version-integrity-gate**
+  (`--win-state-report-only`, out of the `[0/8]` blocking set) and **rig-health-audit** (genlock-build
+  + bundle-state facets, rate-EXEMPT #787). It is NOT in audio-lag/av-step/vb-matrix (no mbc audio, no
+  VB-Matrix). The on-box `:8899` BundleStateServer install is a SUPERVISOR checklist in `targets.md`
+  (RESOLUME-SNV section).
+- **Reachability watchdog — REPORT-ONLY unless HOME (#811/#1296).** resolume is in the dev1-side
+  network-reach watchdog's `BOXES` roster (derived from `obs_fleet_boxes network-reach`), probed
+  (ping OR :4455) + logged + per-box state-tracked. By default it is REPORT-ONLY — **NEVER pages**
+  while away (the normal state for a traveling box, so a page would be noise) — and #1296 AUTO-PROMOTES
+  it to a paging node ONLY while `obs_fleet_is_home resolume` holds (it resolves AND its OBS-WS :4455
+  answers; NOT dantesync :8898 — resolume carries none). To force it permanently required regardless
+  of home-state, set `NETWORK_REACH_REPORT_ONLY_BOXES=""` (the explicit env override still wins). The
+  watchdog ships DISABLED — enable on dev1 with `systemctl --user enable --now
+  network-reach-alert-watchdog.timer`. (`.claude/rules/network-reach-watchdog.md` / `.claude/rules/obs-fleet-list.md`.)
 - **Remote wake (#811).** resolume's WoL MACs are in `scripts/wol-targets.txt` as TWO rows —
   `resolume` (primary NIC) + `resolume-alt` (2nd NIC, same `.201`, different MAC). `scripts/wake-box.sh
   resolume` fires ONLY the primary row's MAC, so when the active NIC is unknown wake BOTH before a
