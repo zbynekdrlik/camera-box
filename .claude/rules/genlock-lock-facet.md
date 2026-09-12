@@ -70,3 +70,23 @@ that Qt widget; it is NOT reachable from the obs-websocket RequestHandler. So:
   (README §supervisor procedure). This is ALSO the worktree/CI Tier-0 seam (the #1265 rule: a
   worktree worker cannot source the `.sh` or run a stubbed dry-run locally; the supervisor runs it
   at integration).
+
+## Reusable patterns this lane established
+
+- **A vendored-C++ PRODUCER ↔ python CONSUMER JSON contract gets a MECHANICAL round-trip gate, not
+  a hand-mirrored fixture.** `tests/python/test_genlock_lock_json_roundtrip_1299.py` LIFTS the pure
+  builder (`genlock_build_lock_json` + `genlock_json_append_escaped`, sliced by signature → first
+  `\n}\n`, the vendored-libobs / qpsk-marker lift pattern), compiles it under `g++ -Wformat=2
+  -Werror`, RUNS it to emit real `genlock-lock-json:` lines, and feeds each through the ACTUAL
+  `genlock_lock_facet_from_log` parser — asserting key names/values + the inputs-by-name reshape.
+  This is what catches a C++ key rename/reorder that every text-anchor + symbol-presence gate
+  misses. Make the builder pure `std::string` (no obs_data/Qt) precisely so it lifts; FAIL LOUD
+  (pytest.fail, never skip) when no compiler. Reuse this shape for ANY vendored-emitter/py-reader
+  JSON contract. (Closed the #1299 YELLOW-1 review finding.)
+- **A NEW dev1 alert-watchdog `.sh` opens `set -euo pipefail` then `set +e` then `set -uo
+  pipefail`.** The sibling watchdogs use `set -uo pipefail` (NOT -e, so one box's hiccup never
+  aborts the pass), but `pre-write-script-check.sh` blocks a NEW shebang'd `.sh` lacking a literal
+  `set -euo pipefail` in the first 15 lines (no `# airuleset:script-ok` bypass for that check). The
+  three-line open satisfies the hook (`-euo` present) and nets exactly `-uo pipefail` (the `set +e`
+  turns `-e` back off). Document the `set +e` with a one-line reason so a reviewer sees it is
+  deliberate.
