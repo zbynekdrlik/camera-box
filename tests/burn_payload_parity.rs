@@ -1197,6 +1197,41 @@ int main(int argc, char **argv) {{
 }
 
 #[test]
+fn songplayer_origin_burn_911014_round_trips_through_the_production_decoder_1301() {
+    // #1301 GENERATED decode fixture (pattern-change-needs-decode-fixture.md "A NEW painted-pattern
+    // ELEMENT" rule): the SongPlayer-origin burn (run_id 911014) is painted by SongPlayer itself
+    // (zbynekdrlik/songplayer#151, UNSHIPPED), so NO real captured cg-OBS frame carrying it can
+    // exist yet. This synthetic round-trip — render the 911014 payload with the SAME production QR
+    // renderer (render_qr_bgra → the Payload wire format SongPlayer will emit) and decode it with
+    // the SAME production recorded-file decoder (decode_qr_luma_all) — proves the fleet decode path
+    // READS BACK the new origin run_id end-to-end. It is a STAND-IN, NOT proof the burn decodes
+    // through the real lossy chain (projection → grabber → NDI → re-encode): per the rule, a REAL
+    // captured cg-OBS frame with the SP burn MUST replace this fixture, mined from the first
+    // CG_CHAIN=1 rig run after songplayer#151 deploys (a supervisor/rig-ops step).
+    let sp = Payload {
+        run_id: 911014,
+        frame_id: 4242,
+        gen_ts_ns: 1_718_600_200_000_000_000,
+    };
+    // A 1920×1080 white canvas with the SP payload rendered at a readable ~302px (the fleet
+    // corner-burn size; the exact on-wall geometry is SongPlayer's, #151 — this only proves the
+    // decode path reads the run_id, never the real-chain readability).
+    const W: u32 = 1920;
+    const H: u32 = 1080;
+    let bgra = camera_box::probe::qr::render_qr_bgra(&sp, W, H, 302);
+    let luma = bgra_to_luma(&bgra, W, H, W * 4);
+    let decoded: Vec<String> = decode_qr_luma_all(luma)
+        .iter()
+        .map(|p| p.encode())
+        .collect();
+    assert!(
+        decoded.contains(&sp.encode()),
+        "#1301: the SongPlayer-origin burn (run_id 911014) must decode through the production \
+         decoder; got {decoded:?}"
+    );
+}
+
+#[test]
 fn burn_geom_corner_from_string_and_tiny_frame_clamp() {
     // Compile + run a tiny C++ harness over burn-geom.hpp asserting:
     //   1. corner_from_string parses EVERY documented OBS_BURN_CORNER form correctly —
