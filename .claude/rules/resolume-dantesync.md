@@ -108,3 +108,12 @@ helpers over fixtures (via a scratch `bash <file>`, never the guarded `bash -c '
 worktree); `pytest tests/python/test_dantesync_config_patch_1297.py`; `cargo fmt --all --check`. The
 Rust harnesses (`tests/dantesync_maintenance_gate.rs`, the issue-1297 block in
 `tests/dantesync_fleet_upgrade.rs`) compile + run at CI (cargo is Tier-0-blocked locally).
+
+## Gotcha — `Restart-Service dantesync` on RESOLUME-SNV reports `stop failed` and leaves the service STOPPED
+
+Live 2026-09-12 (win-resolume MCP, elevated session): `Restart-Service -Name dantesync` threw `StopServiceFailed`
+after the stop had actually completed (~10 s), so the start half never ran and the clock daemon sat STOPPED until a
+manual `Start-Service`. The emitted apply program therefore uses `Stop-Service -Force` → wait for `Stopped` →
+`Start-Service` (never `Restart-Service`). After ANY dantesync restart on this box expect `mode=ACQ` for 1–3 min
+before PTP re-locks — and remember a PTP-less LAN (rig off, GM silent) keeps it in ACQ legitimately; check `pktmon`
+counters for 224.0.1.129 before suspecting the box (dantesync#112 covers the frozen-LOCK failure on the OTHER side).

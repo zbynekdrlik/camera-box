@@ -85,7 +85,7 @@ def patch_config(text, ntp_server=None):
 # patched JSON is embedded in a SINGLE-quoted here-string (@'...'@) so no $ / backtick inside the
 # JSON is ever interpolated, and written with an explicit no-BOM UTF-8 encoder (serde_json does
 # not skip a BOM). Mirrors the mbc phase_slew flip recorded on issue 1265: backup -> write ->
-# Restart-Service -> read back :PORT/status.
+# Stop-Service (wait for Stopped) + Start-Service -> read back :PORT/status.
 _APPLY_PROGRAM_TEMPLATE = r"""$ErrorActionPreference = 'Stop'
 $cfg = '{config_path}'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -97,7 +97,12 @@ $json = @'
 '@
 [System.IO.File]::WriteAllText($cfg, $json, (New-Object System.Text.UTF8Encoding $false))
 Write-Host "wrote patched config -> $cfg"
-Restart-Service -Name '{service}'
+# Restart-Service reports 'stop failed' on this service (the stop takes ~10 s) and then never
+# starts it again -- observed live on RESOLUME-SNV 2026-09-12, service left STOPPED. Stop, wait, start.
+Stop-Service -Name '{service}' -Force -ErrorAction SilentlyContinue
+$i = 0; while ((Get-Service -Name '{service}').Status -ne 'Stopped' -and $i -lt 30) {{ Start-Sleep -Seconds 1; $i++ }}
+Start-Service -Name '{service}'
+Write-Host "service {service}: $((Get-Service -Name '{service}').Status) after ${{i}}s stop-wait"
 Write-Host "restarted service {service}; settling {settle}s before read-back"
 Start-Sleep -Seconds {settle}
 $status = Invoke-RestMethod -Uri 'http://localhost:{status_port}/status' -TimeoutSec 10

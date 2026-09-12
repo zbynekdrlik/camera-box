@@ -125,7 +125,7 @@ def test_emit_apply_program_has_backup_write_restart_readback():
     prog = dcp.emit_apply_program(r"C:\ProgramData\dantesync\config.json", patched)
     assert "Copy-Item" in prog and ".bak-" in prog  # backup
     assert "UTF8Encoding" in prog  # no-BOM write
-    assert "Restart-Service" in prog and "dantesync" in prog  # restart
+    assert "Stop-Service" in prog and "Start-Service" in prog and "Restart-Service -Name" not in prog and "dantesync" in prog  # restart
     assert "8898/status" in prog  # read-back
     # the patched JSON is embedded verbatim in the single-quoted here-string
     assert '"enabled": true' in prog

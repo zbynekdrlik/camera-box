@@ -446,10 +446,15 @@ fn cli_box_resolume_selects_win_resolume_no_ahk_1295() {
         out.contains("win-resolume") && out.contains("resolume.lan"),
         "resolume -> win-resolume plan at the resolume.lan hostname:\n{out}"
     );
-    // no pinned IP in the resolume plan
+    // no pinned IP in the resolume plan's HOST/CONNECTION positions (the identity-confirm caveat
+    // MAY name 10.77.9.201 in prose -- that is the collision it warns about, not a pin)
     assert!(
-        !out.contains("10.77.9.201"),
-        "resolume plan must use the hostname, never a pinned IP:\n{out}"
+        !out.contains("--host 10.77.9.201") && !out.contains("http://10.77.9.201") && !out.contains("ws://10.77.9.201"),
+        "resolume plan must use the hostname in every --host/URL position, never a pinned IP:\n{out}"
+    );
+    assert!(
+        out.contains("--host resolume.lan"),
+        "resolume plan addresses the box by hostname in its --host args:\n{out}"
     );
     // has_ahk=0 -> no real AutoHotkey64 stop in its program (the #411 self-heal stream guard class)
     assert!(
