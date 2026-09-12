@@ -142,6 +142,19 @@ def fmt_rates(rates: dict[str, float]) -> str:
     return ",".join(f"{src.replace('NDI ', '')}={fps:.0f}" for src, fps in sorted(rates.items()))
 
 
+# #1299: the NEWEST `genlock-lock: state=X ...` line's state (the #1298 statusbar's decided verdict,
+# change-driven so the last one is current) — a report-only feeder facet rig-status renders as a
+# generic `genlock_lock=<state>` chip (rig-status-page.md: the facet lives in the FEEDER, not the
+# renderer). "" when no such line is in the fetched log window (a stock OBS, or startup state not in
+# the tail) -> the caller OMITS the token (UNKNOWN, never a fabricated state).
+_GENLOCK_LOCK_STATE_RE = re.compile(r"genlock-lock: state=(\w+)")
+
+
+def genlock_lock_state_from_log(log_text: str) -> str:
+    matches = _GENLOCK_LOCK_STATE_RE.findall(log_text or "")
+    return matches[-1] if matches else ""
+
+
 def audit_samples(log_text: str) -> dict[str, list[tuple[str, int]]]:
     """Per-source (raw_ts, received) samples from EVERY genlock-fifo audit line, in file
     (chronological) order. raw_ts is the 'HH:MM:SS.mmm' clock prefix, passed VERBATIM to the
@@ -348,7 +361,9 @@ def check_imag() -> None:
                     "journalctl -u dantesync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
                     "cut -d' ' -f1 /proc/loadavg; "
                     "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
-                    "tail -400 \"$(ls -t ~/.config/obs-studio/logs/*.txt | head -1)\" | grep 'genlock-fifo audit'",
+                    # #1299: also surface the newest genlock-lock: verdict line (ignored by AUDIT_RE;
+                    # parsed only by genlock_lock_state_from_log for the report-only facet chip).
+                    "tail -400 \"$(ls -t ~/.config/obs-studio/logs/*.txt | head -1)\" | grep -E 'genlock-fifo audit|genlock-lock:'",
               user="newlevel", timeout=25)
     if out is None:
         emit("FAIL", "imag", "unreachable over ssh")
@@ -390,9 +405,12 @@ def check_imag() -> None:
     ntp_steps = int(steps_m.group(1)) if (steps_m and off_us is not None) else None
     _, steprate_disp, steprate_problems = grade_ntp_steprate(ntp_steps)
     problems += steprate_problems
+    # #1299: the #1298 genlock LOCK verdict (report-only chip); omit when absent -> UNKNOWN.
+    gl = genlock_lock_state_from_log(out)
+    gl_tok = f" genlock_lock={gl}" if gl else ""
     verdict = box_verdict(problems)
-    detail = (f"render={render} arrivals[{fmt_rates(rates)}] isolcpus=none dante={off_us:+d}us steprate={steprate_disp}"
-              if off_us is not None else f"render={render} arrivals[{fmt_rates(rates)}] steprate={steprate_disp}")
+    detail = (f"render={render} arrivals[{fmt_rates(rates)}] isolcpus=none dante={off_us:+d}us steprate={steprate_disp}{gl_tok}"
+              if off_us is not None else f"render={render} arrivals[{fmt_rates(rates)}] steprate={steprate_disp}{gl_tok}")
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
     emit(verdict, "imag", detail)
@@ -561,8 +579,12 @@ def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: 
     w_steps, w_storm = parse_ntp_status(http_get(f"http://{ip}:8898/"))
     _, steprate_disp, steprate_problems = grade_ntp_steprate(w_steps, w_storm)
     problems += steprate_problems
+    # #1299: the #1298 genlock LOCK verdict, report-only — rig-status renders it as a generic chip.
+    # Omit when absent (no genlock-lock: line in the window) so it is UNKNOWN, never a fabricated state.
+    gl = genlock_lock_state_from_log(log)
+    gl_tok = f" genlock_lock={gl}" if gl else ""
     verdict = box_verdict(problems)
-    detail = f"obs64={obs_count} render={render} audio_buf={buf_peak}ms arrivals[{fmt_rates(rates)}]{cad} steprate={steprate_disp}{lat}"
+    detail = f"obs64={obs_count} render={render} audio_buf={buf_peak}ms arrivals[{fmt_rates(rates)}]{cad} steprate={steprate_disp}{gl_tok}{lat}"
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
     emit(verdict, name, detail)
