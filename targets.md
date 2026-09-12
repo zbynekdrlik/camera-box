@@ -51,6 +51,18 @@ which collides with `bridge`):
    identity / `obs_process_count` / `genlock_build_sha`), and a forced `obs64` kill pages via the
    existing obs-liveness / bundle-state path within 2 passes + the auto-restart brings `:8899` back.
 
+**dantesync on RESOLUME-SNV (issue 1297).** The box runs dantesync (1.8.53 = fleet pin) and answers
+`:8898/status` whenever up. Config lives at `C:\ProgramData\dantesync\config.json`; `ntp_server`
+pointed at `strih.lan` (unresolvable while strih is off) so NTP phase discipline is dead
+(`ntp_failed=true`, 0 samples, a −14 ms phase walk) and `system.phase_slew` was ABSENT (the box
+STEPS, not slews). The on-box fix = the SUPERVISOR runbook in `.claude/rules/resolume-dantesync.md`
+(emit the PS apply program with `scripts/dantesync_config_patch.py --emit-apply`, run it via the
+`win-resolume` MCP, read back `:8898/status`); the NTP-failover feature is zbynekdrlik/dantesync#111.
+Version-parity + lock/NTP/phase are checked STANDALONE (never `[0/8]`): `scripts/dantesync-version-gate.sh
+--win "resolume=newlevel@<ip>"` and `scripts/dantesync-maintenance-gate.sh --box resolume` (REPORT-ONLY,
+SKIP while away). A fleet roll adds it via `scripts/dantesync-fleet-upgrade.sh --win` using
+`dantesync_resolume_win_spec "$(getent hosts resolume.lan | awk 'NR==1{print $1}')"`.
+
 ## Camera Targets (camera-box)
 
 | Device | IP Address | Status | Notes |

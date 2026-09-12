@@ -1426,3 +1426,35 @@ tries to grant GROUP-based access instead, because ONCE an ACL exists on a file,
 over the group bits entirely. Any headless service (not tied to a login session) that needs to
 open such a device needs its own `TAG-="uaccess"` rule numbered after `70-`, not just a
 `GROUP=`/`MODE=` rule alone.
+
+## RESOLUME-SNV dantesync maintenance tier (issue 1297)
+
+RESOLUME-SNV is a **traveling** dantesync box (powered off/away between events). It drifted: its
+`config.json` `ntp_server` pointed at `strih.lan` (unresolvable while strih is off), so NTP phase
+discipline died (`ntp_failed=true`, 0 samples, a −14 ms accumulated phase walk), and
+`system.phase_slew` was ABSENT so it STEPS the clock — the issue-1130 storm the rig boxes + mbc
+already cured by enabling phase_slew. Full mechanism + the supervisor RUNBOOK live in
+`.claude/rules/resolume-dantesync.md`; the maintenance tier in brief:
+
+- **Maintenance-tier health check (REPORT-ONLY, never `[0/8]`):** `scripts/dantesync-maintenance-gate.sh
+  --box resolume` asserts, from `:8898/status` + `dantesync --version`, that resolume is on the pin,
+  `is_locked`, `ntp_failed=false`, `ntp_age_s<120`, `|ntp_offset_us|<2000`, `phase_slew_enabled=true`.
+  Prints ONE honest row — **SKIP when away** (`obs_fleet_is_home resolume` false — never a false
+  red), OK / ALARM / UNKNOWN when home. Exit 0 OK|SKIP, 30 ALARM, 11 UNKNOWN. Run it on the same
+  maintenance cadence as the version-parity check (`scripts/dantesync-version-gate.sh --win
+  "resolume=newlevel@<ip>"`) — it is the lock/NTP/phase complement the version gate does not cover.
+- **The on-box phase_slew flip (SUPERVISOR rig step, via `win-resolume` MCP — never from a code
+  lane):** read the config, generate the apply program on dev1 — `Get-Content the config | ... |
+  python3 scripts/dantesync_config_patch.py --emit-apply` — and paste the emitted PowerShell into the
+  win-resolume MCP Shell (it backs up `config.json.bak-<date>`, writes the patched config,
+  `Restart-Service dantesync`, reads back `:8898/status`). The helper sets `system.phase_slew.enabled=
+  true`, NEVER touches `ntp_server_mode` ("never two masters"), and leaves `ntp_server` UNCHANGED by
+  default — the repoint target (dev1 secondary vs public pool) is deferred to zbynekdrlik/dantesync#111.
+- **Fleet roll:** add resolume to the Windows node list with `dantesync_resolume_win_spec "$(getent
+  hosts resolume.lan | awk 'NR==1{print $1}')"`; an away traveling box is SKIPPED from the roll
+  (`dantesync_skip_away_traveling`), never a failed node. Always confirm identity first (the .201 /
+  `bridge` DHCP collision, `.claude/rules/rig-state-inspection.md` §2).
+- **Acceptance (with strih OFF vs ON):** see `.claude/rules/resolume-dantesync.md` — with strih OFF
+  the phase_slew flip alone converts the re-lock from a STEP storm to a smooth slew (the shippable-now
+  half; `ntp_failed` stays true until dantesync#111 repoints `ntp_server`); with strih ON all fields
+  green and no `[NTP] Stepped` storm on either box during the hand-back.
