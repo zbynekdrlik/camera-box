@@ -178,7 +178,7 @@ pub struct RecordingFrame {
 /// the strict gates are calibrated on. Only the report-only tear surface (`crate::tear_detect`
 /// v2) reads them, by run_id, explicitly. Appended LAST so index-based test uses (`N[0]` = cam1)
 /// stay stable.
-pub const NODE_BURN_RUN_IDS: [u32; 11] = [
+pub const NODE_BURN_RUN_IDS: [u32; 13] = [
     crate::probe::recording_latency::BURN_RUN_ID_CAM1,
     crate::probe::recording_latency::BURN_RUN_ID_CAM2,
     crate::probe::recording_latency::BURN_RUN_ID_CAM3,
@@ -189,6 +189,11 @@ pub const NODE_BURN_RUN_IDS: [u32; 11] = [
     crate::probe::recording_latency::BURN_RUN_ID_STRIH,
     crate::probe::recording_latency::BURN_RUN_ID_STREAM,
     crate::probe::recording_latency::BURN_RUN_ID_IMAG,
+    // #1301: the SongPlayer-origin (911014) + cg-OBS-hop (911015) CG-chain burns can ride into a
+    // strih/stream recording during a CG_CHAIN run, so they MUST be tick-excluded like every other
+    // node burn (the #463/#312 gotcha) — a stray CG frame_id must never hijack the cam2 Vernier tick.
+    crate::probe::recording_latency::BURN_RUN_ID_SONGPLAYER,
+    crate::probe::recording_latency::BURN_RUN_ID_CG,
     crate::probe::recording_latency::AUX_TICK_RUN_ID,
 ];
 
@@ -1225,6 +1230,26 @@ mod tests {
             "AUX_TICK_RUN_ID must be in NODE_BURN_RUN_IDS so the aux marks never hijack the \
              Vernier tick"
         );
+    }
+
+    #[test]
+    fn node_burn_run_ids_includes_the_cg_chain_burns_1301() {
+        // #1301: the SongPlayer-origin (911014) + cg-OBS-hop (911015) CG-chain burns can ride into
+        // a strih/stream recording during a CG_CHAIN run, so both MUST be tick-excluded exactly
+        // like the camera/strih/stream/imag burns (the #463/#312 gotcha) — a stray CG frame_id
+        // must never hijack the cam2 Vernier tick.
+        for (label, id) in [
+            (
+                "SONGPLAYER",
+                crate::probe::recording_latency::BURN_RUN_ID_SONGPLAYER,
+            ),
+            ("CG", crate::probe::recording_latency::BURN_RUN_ID_CG),
+        ] {
+            assert!(
+                NODE_BURN_RUN_IDS.contains(&id),
+                "#1301: BURN_RUN_ID_{label} ({id}) must be in NODE_BURN_RUN_IDS"
+            );
+        }
     }
 
     #[test]

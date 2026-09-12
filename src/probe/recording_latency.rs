@@ -132,6 +132,23 @@ pub const BURN_RUN_ID_CAM6: u32 = 911011;
 /// [`BURN_RUN_ID_CAM4`]'s doc — same role, same mutual exclusivity, fresh id outside every id
 /// already in use (911001..911004/911007..911011).
 pub const BURN_RUN_ID_CAM7: u32 = 911012;
+/// #1301 — the SongPlayer-originated content burn run_id. This is a chain ORIGIN role, like the
+/// cam2 painter is for the camera chain: SongPlayer (the song-lyrics / CG source) paints this
+/// payload into its OWN output (sender half = zbynekdrlik/songplayer#151), and the id is tracked
+/// THROUGH the CG chain (cg OBS → strih → stream) for contiguity + hold. It is NOT a
+/// camera-under-test node (never added to `CAMERA_UNDER_TEST_NODES`), but it IS tick-excluded
+/// ([`crate::probe::recording::NODE_BURN_RUN_IDS`]) + excluded from every `all_burns` array, since
+/// it can ride into the strih/stream recordings during a CG run and must never hijack the cam2
+/// Vernier tick (the #463/#312 gotcha). Reserved fresh, outside every id already in use
+/// (911001..911004/911007..911013; 911005/911006/911099 are test-fixture-only synthetics).
+pub const BURN_RUN_ID_SONGPLAYER: u32 = 911014;
+/// #1301 — the cg OBS (RESOLUME-SNV) box's OWN corner burn run_id. A HOP node, like strih/stream:
+/// the DistroAV burn filter composites this id into cg OBS's rendered output at the new
+/// `burn_geom::Corner::BottomCenterRight` (`vendor/distroav/src/ndi-burn-filter.cpp` host-role
+/// map, hostname contains "resolume"), proving the cg OBS box rendered the SongPlayer content
+/// continuously. Tick-excluded + `all_burns`-excluded exactly like
+/// [`BURN_RUN_ID_SONGPLAYER`]. Reserved fresh, outside every id already in use.
+pub const BURN_RUN_ID_CG: u32 = 911015;
 /// issue 1196 — the aux Vernier tick pair's reserved run_id. UNLIKE every `BURN_RUN_ID_*` above,
 /// this is NOT a digital burn: it is PAINTED optical content — two small QRs the cam2 painter
 /// blits into the bottom burn-free gaps (`crate::aux_tick` geometry; left = latest EVEN tick,
