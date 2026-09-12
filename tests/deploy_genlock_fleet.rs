@@ -480,8 +480,11 @@ fn windows_fast_does_not_touch_programdata_distroav_1115() {
     );
 }
 
+// issue 1295: the AHK stop/restart bracket is emitted for any has_ahk=1 box (strih AND now
+// resolume), never for stream (has_ahk=0). This test pins the strih-vs-stream split; the resolume
+// arm is pinned by resolume_windows_program_carries_ahk_and_no_keepalive_1295.
 #[test]
-fn windows_ahk_bracket_only_on_strih() {
+fn windows_ahk_bracket_on_ahk_box_not_stream() {
     let strih = win_program("strih", "full", "1");
     let stream = win_program("stream", "full", "0");
     assert!(
@@ -987,7 +990,7 @@ fn normalize_accepts_resolume_explicit_only_not_default_1295() {
 }
 
 #[test]
-fn resolume_box_constants_mcp_hostname_no_ahk_1295() {
+fn resolume_box_constants_mcp_hostname_with_ahk_1295() {
     assert_eq!(
         run_sourced(&script(), "fleet_box_mcp resolume").trim(),
         "win-resolume"
@@ -998,11 +1001,34 @@ fn resolume_box_constants_mcp_hostname_no_ahk_1295() {
         run_sourced(&script(), "fleet_box_ip resolume").trim(),
         "resolume.lan"
     );
+    // issue 1295 correction (supervisor pre-deploy inventory): RESOLUME-SNV RUNS an AutoHotkey v2
+    // safe-loop (NL_STARTUP.ahk, SafeLoop:=1) that respawns OBS -- the SAME pattern as strih -- so
+    // has_ahk MUST be 1, or a deploy/relaunch that does not stop it first races a SECOND obs64.
     assert_eq!(
         run_sourced(&script(), "fleet_box_has_ahk resolume").trim(),
-        "0"
+        "1"
     );
-    // no OBS keep-alive scheduled-task respawner on the CG box
+    // the per-box AHK identity: resolume's own v2 .ahk path (the traveling CG box), and it PREFERS
+    // the Startup .lnk as the relaunch target (a future path move must not break the relaunch).
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_script resolume").trim(),
+        "C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk"
+    );
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_prefer resolume").trim(),
+        "lnk"
+    );
+    // strih keeps its current identity (byte-neutral): the D:\_APPS path + the exe-first order.
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_script strih").trim(),
+        "D:\\_APPS\\NL_STARTUP.ahk"
+    );
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_prefer strih").trim(),
+        "exe"
+    );
+    // no OBS keep-alive SCHEDULED-TASK respawner on the CG box -- its respawner IS the AHK watcher
+    // (handled by the has_ahk stop/restart path), exactly like strih, so it lists no keepalive task.
     assert_eq!(
         run_sourced(&script(), "fleet_box_keepalive_tasks resolume").trim(),
         ""
@@ -1010,11 +1036,24 @@ fn resolume_box_constants_mcp_hostname_no_ahk_1295() {
 }
 
 #[test]
-fn resolume_windows_program_carries_no_ahk_and_no_keepalive_1295() {
-    let p = win_program("resolume", "full", "0");
+fn resolume_windows_program_carries_ahk_and_no_keepalive_1295() {
+    let p = win_program("resolume", "full", "1");
+    // issue 1295: the AHK watcher MUST be stopped before the byte copy (it respawns obs64), and
+    // restarted + VERIFIED afterward (the issue-789 restart guard), exactly like strih.
     assert!(
-        !p.contains("Stop-Process -Name AutoHotkey64"),
-        "resolume has NO AHK watcher -- its program must carry no real AutoHotkey64 stop:\n{p}"
+        p.contains("Stop-Process -Name AutoHotkey64"),
+        "resolume runs the AHK watcher -- its program must stop AutoHotkey64 before the copy:\n{p}"
+    );
+    assert!(
+        p.contains("ahkRelaunchVerified") && p.contains("exit 9"),
+        "resolume must restart AHK VERIFIED + fail loud if it doesn't come back (issue 789):\n{p}"
+    );
+    // the relaunch target is resolume's OWN .ahk path (never strih's D:\_APPS path).
+    assert!(
+        p.contains(
+            "$ahkScriptPath = 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk'"
+        ) && !p.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
+        "resolume's deploy program must relaunch via its OWN .ahk path, not strih's:\n{p}"
     );
     assert!(
         !p.contains("schtasks /Change"),

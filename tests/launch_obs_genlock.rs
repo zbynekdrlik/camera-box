@@ -436,10 +436,12 @@ fn cli_box_selects_correct_mcp_and_emits_program() {
 }
 
 /// #1295: RESOLUME-SNV (the traveling cg OBS box) is a valid --box: win-resolume MCP, hostname
-/// resolume.lan (never a pinned IP), has_ahk=0 (no AutoHotkey64 command in its program), and the
-/// emitted plan still carries the render-tick verify + the #978 SessionId/MainWindowTitle gate.
+/// resolume.lan (never a pinned IP), has_ahk=1 (it RUNS an AutoHotkey v2 safe-loop respawning OBS,
+/// confirmed live by the supervisor pre-deploy inventory), so its program carries the AHK
+/// stop/restart-verified bracket + the #978 SessionId/MainWindowTitle gate over BOTH obs64 AND
+/// AutoHotkey64, and the render-tick verify.
 #[test]
-fn cli_box_resolume_selects_win_resolume_no_ahk_1295() {
+fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
     let (code, out, _err) = run_script(&["--box", "resolume"]);
     assert_eq!(code, 0, "--box resolume must print the plan (exit 0)");
     assert!(
@@ -456,10 +458,28 @@ fn cli_box_resolume_selects_win_resolume_no_ahk_1295() {
         out.contains("--host resolume.lan"),
         "resolume plan addresses the box by hostname in its --host args:\n{out}"
     );
-    // has_ahk=0 -> no real AutoHotkey64 stop in its program (the #411 self-heal stream guard class)
+    // has_ahk=1 -> the AHK watcher is stopped before obs64 is touched and restarted + VERIFIED
+    // afterward (issue 867 / 1272) -- the same bracket strih gets.
     assert!(
-        !out.contains("Stop-Process -Name AutoHotkey64"),
-        "resolume has no AHK watcher -- its program carries no real AutoHotkey64 stop:\n{out}"
+        out.contains("Stop-Process -Name AutoHotkey64"),
+        "resolume runs the AHK watcher -- its program must stop AutoHotkey64:\n{out}"
+    );
+    assert!(
+        out.contains("$ahkRelaunchVerified") && out.contains("Get-Process AutoHotkey64"),
+        "resolume must carry the VERIFIED AHK restart machinery (issue 867):\n{out}"
+    );
+    // the #978 session gate must cover AutoHotkey64 too (a session-0 AHK respawns obs64 into
+    // session 0 forever), not just obs64.
+    assert!(
+        out.contains("$ahkSessProcs") && out.contains("$ahkSessProcs[0].SessionId -ne $activeSession"),
+        "resolume (has_ahk=1) must gate AutoHotkey64's SessionId in the #978 session gate:\n{out}"
+    );
+    // the relaunch target is resolume's OWN v2 .ahk path, never strih's D:\_APPS path.
+    assert!(
+        out.contains(
+            "$ahkScriptPath = 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk'"
+        ) && !out.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
+        "resolume must relaunch via its OWN .ahk path, not strih's:\n{out}"
     );
     // the build-proof verify + the session-visibility gate still apply
     assert!(
