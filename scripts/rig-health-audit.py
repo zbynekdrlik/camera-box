@@ -34,6 +34,11 @@ CAMS = {f"cam{n}": f"10.77.9.6{n}" for n in range(1, 8)}
 IMAG = "10.77.9.182"
 STRIH = "10.77.9.202"
 STREAM = "10.77.9.204"
+# #1296: RESOLUME-SNV, a TRAVELING genlock cg-obs box. Addressed by HOSTNAME (not a pinned IP) — it
+# currently resolves to 10.77.9.201 (event-LAN DHCP, collides with `bridge`; see scripts/lib/obs-fleet.sh
+# + targets.md). Surfaced on the status page as a REPORT-ONLY, rate-EXEMPT node (#787) — see
+# grade_resolume_bundle / check_resolume.
+RESOLUME = "resolume.lan"
 DANTE_BOUND_US = 2000          # clock-offset-guard verdict bound
 AUDIO_BUF_BOUND_MS = 100       # #786 launch-gate bound (box standard 64/85)
 # issue-1108 dantesync NTP step-rate facet: how often dantesync STEPPED the clock in the last hour.
@@ -563,6 +568,46 @@ def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: 
     emit(verdict, name, detail)
 
 
+def grade_resolume_bundle(state: dict | None) -> tuple[str | None, str | None]:
+    """#1296/#787: grade RESOLUME-SNV's bundle-state facets for the status page.
+
+    RESOLUME-SNV is a REPORT-ONLY, rate-EXEMPT (#787) TRAVELING CG box: it is NOT a gated node and
+    its non-60 NDI feed is never cadence-graded, so this NEVER produces FAIL/WARN. When the box is
+    serving :8899 (`state` is a non-empty dict) it renders its genlock build + OBS identity as a
+    PASS row; when it is away / not serving (`state` is None/empty/not a dict) it returns
+    (None, None) so check_resolume OMITS it entirely (a traveling box's absence is normal, never a
+    red/stale row). Returns (verdict, detail) — verdict is None to mean "omit".
+    """
+    if not isinstance(state, dict) or not state:
+        return None, None
+    sha = state.get("genlock_build_sha") or "n/a"
+    obs = state.get("obs_process_count") or "n/a"
+    ver = state.get("port4455_owner_version") or "n/a"
+    return "PASS", (f"genlock_build_sha={sha} obs64={obs} obs_version={ver} "
+                    f"(report-only, #787 rate-exempt, not gated)")
+
+
+def check_resolume() -> None:
+    """#1296: surface RESOLUME-SNV's genlock build + bundle-state facets on the status page.
+
+    Read-only dev1-side HTTP fetch of its :8899 bundle-state (the #732 BundleStateServer the
+    supervisor installs on the box). When present -> a PASS facet row; when away / not serving ->
+    omit (never a FAIL, never a stale row) per grade_resolume_bundle. The box's NDI rate is NEVER
+    graded here (the #787 exemption stays)."""
+    body = http_get(f"http://{RESOLUME}:8899/bundle-state.json")
+    state: dict | None = None
+    if body:
+        try:
+            parsed = json.loads(body)
+            state = parsed if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            state = None
+    verdict, detail = grade_resolume_bundle(state)
+    if verdict is None:
+        return  # away / not serving :8899 — a traveling box's absence is normal (report-only)
+    emit(verdict, "resolume", detail or "")
+
+
 def main() -> int:
     pw_file = os.path.expanduser("~/.config/camera-box/obs-ws-pass")
     strih_pw = open(pw_file).read().strip() if os.path.exists(pw_file) else None
@@ -573,6 +618,7 @@ def main() -> int:
                       check_camera_cadence=True)
     check_windows_box("stream", STREAM, strih_pw, program_fps=30.0, expect_latency=True)
     check_cg_chain()  # #1300 report-only CG-chain verdict row (NOTE; never affects the exit code)
+    check_resolume()  # #1296: report-only, #787 rate-exempt; omitted when the traveling box is away
     fails = results.count("FAIL")
     warns = results.count("WARN")
     print(f"\n=== RIG AUDIT: {results.count('PASS')} PASS / {warns} WARN / {fails} FAIL "
