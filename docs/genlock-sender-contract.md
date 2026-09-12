@@ -38,7 +38,8 @@ line.
   `vendor/obs-studio/libobs/obs-source.c:4735-4741`; consulted at `:5998`). A frame is released
   once it has aged to the shared deadline `present_ts = wall_now − latency_ms`
   (`genlock_present_ts_reserve`, `:4906`). `latency_ms` has a floor/default of **3 ms**
-  (`GENLOCK_LATENCY_MS_MIN_INIT`, `:292`) and an operator override up to **2000 ms** (`:4594`).
+  (`#define GENLOCK_LATENCY_MS_MIN_INIT 3`, `:230`, seeded at init `:292`) and an operator
+  override up to **2000 ms** (`:4594`).
   Because the release instant is the same shared wall-clock instant for every source, all
   sources that stamp the same grid are in sync by construction.
 - **A non-wall-clock stamp falls back to the weak gate.** A sender that stamps
@@ -195,5 +196,5 @@ window cannot read as "flat" (`:47`).
 | §8 Acceptance | `genlock-fifo audit` counters + verdict | `src/jitter_audit.rs:41-52`; `src/resolume_playback.rs:46,47,56,71-75,91` |
 | Receiver gate | `PROP_SYNC_NDI_SOURCE_TIMECODE` ×100 → ns | `vendor/distroav/src/ndi-source.cpp:723,1619-1626,1680-1687,1959-1960` |
 | Receiver gate | `genlock_is_wallclock_ts` epoch bounds | `vendor/obs-studio/libobs/obs-source.c:4735-4741` |
-| Receiver gate | `present_ts = wall_now − latency_ms`, floor 3 ms / ≤ 2000 ms | `vendor/obs-studio/libobs/obs-source.c:292,4594,4906` |
+| Receiver gate | `present_ts = wall_now − latency_ms`, floor 3 ms / ≤ 2000 ms | `vendor/obs-studio/libobs/obs-source.c:230,292,4594,4906` |
 | Receiver gate | weak count gate (~300 ms spread) when stamp is not wall-clock | `vendor/obs-studio/libobs/obs-source.c:4673,4715-4726` |
