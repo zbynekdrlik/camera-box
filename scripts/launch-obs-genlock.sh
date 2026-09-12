@@ -32,6 +32,7 @@
 # Usage (planner mode — prints the PowerShell launch+verify program + the MCP plan):
 #   scripts/launch-obs-genlock.sh --box strih            # uses the strih defaults
 #   scripts/launch-obs-genlock.sh --box stream           # uses the stream defaults
+#   scripts/launch-obs-genlock.sh --box resolume         # RESOLUME-SNV cg OBS (win-resolume, no AHK) -- issue 1295
 #   scripts/launch-obs-genlock.sh --box strih --force    # force-kill a wedged obs64 first (obs-ops recovery)
 #   scripts/launch-obs-genlock.sh --box strih \
 #       --obs-dir 'C:\Program Files\obs-studio'          # override the OBS install dir
@@ -422,10 +423,11 @@ Toggling the measurement burn does NOT relaunch OBS — it is a per-source genlo
 OBS WebSocket: scripts/obs_burn_filter.py add|remove (driven by rig-mode.sh test|event).
 
 Usage:
-  scripts/launch-obs-genlock.sh --box strih|stream [--force] [--obs-dir 'C:\Program Files\obs-studio']
+  scripts/launch-obs-genlock.sh --box strih|stream|resolume [--force] [--obs-dir 'C:\Program Files\obs-studio']
   scripts/launch-obs-genlock.sh --help
 
-  --box     strih (win-strih, 10.77.9.202) or stream (win-stream-snv, 10.77.9.204) — selects the MCP.
+  --box     strih (win-strih, 10.77.9.202), stream (win-stream-snv, 10.77.9.204), or resolume
+            (win-resolume, resolume.lan — the traveling cg OBS box, issue 1295) — selects the MCP.
   --force   force-kill a wedged obs64 first (documented obs-ops recovery; DEV rig).
   --obs-dir override the OBS install root (default 'C:\Program Files\obs-studio'; its bin\64bit is cwd).
 
@@ -451,11 +453,17 @@ main() {
 
   # has_ahk: only strih runs the NL_STARTUP.ahk auto-respawn watcher (obs-ops "AHK on strih") —
   # stream's program must not carry a real AutoHotkey64 command (#411 self-heal guard pins this).
+  # resolume (issue 1295) = RESOLUME-SNV, the traveling CG box running the `cg` OBS: a
+  # windows-genlock box with NO AHK watcher (has_ahk=0, same program shape as stream), driven via
+  # the win-resolume MCP. Its host is the HOSTNAME resolume.lan, NEVER a pinned IP -- resolume.lan
+  # DHCP-drifts and currently collides with `bridge` at .201 (targets.md), so the emitted STEP-3/3b
+  # WS ops resolve it live via `--host resolume.lan`; confirm the box identity before trusting it.
   local mcp box_ip has_ahk
   case "$box" in
-    strih)  mcp="win-strih";       box_ip="10.77.9.202"; has_ahk=1 ;;
-    stream) mcp="win-stream-snv";  box_ip="10.77.9.204"; has_ahk=0 ;;
-    *) echo "ERROR: --box must be 'strih' or 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
+    strih)    mcp="win-strih";       box_ip="10.77.9.202"; has_ahk=1 ;;
+    stream)   mcp="win-stream-snv";  box_ip="10.77.9.204"; has_ahk=0 ;;
+    resolume) mcp="win-resolume";    box_ip="resolume.lan"; has_ahk=0 ;;
+    *) echo "ERROR: --box must be 'strih', 'stream' or 'resolume' (got '${box}')" >&2; usage >&2; exit 2 ;;
   esac
 
   local PROGRAM

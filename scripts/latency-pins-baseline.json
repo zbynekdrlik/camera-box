@@ -14,5 +14,9 @@
   "imag": {
     "_comment": "imag is the low-latency IMAG projection: EVERY NDI input runs the 3ms floor, ALWAYS (imag-min-latency-3ms-always). A floor sentinel (not a per-name list) because imag's input set is dynamic/16-wide; latency_pins_verify enumerates live NDI inputs and every one must equal the floor.",
     "_all_ndi_inputs_ms": 3
+  },
+  "resolume": {
+    "_comment": "#1295 RESOLUME-SNV cg OBS: the SongPlayer `sp-*_video` inputs ride the genlock FIFO at the 3ms floor. REPORT-ONLY drift reference (latency_pins_verify.py --box resolume), same as every box here. NOTE the genlock build DEFAULTS every ndi_source to genlock_fifo=true + genlock_latency_ms_src=3 (vendor/distroav/src/ndi-source.cpp) + auto-forces the certified coercion (ndi_sync=2 timecode / ndi_bw_mode=0 highest), so this pin is CONFIRMED by the build, not written by a tool; a hand re-pin uses `apply_latency_pins.py --box resolume --host <ip> --pins '{...}' --execute` with the live sp-* names. A PREFIX-MATCH sentinel (not a fixed name list and not the all-inputs floor): only the sp-*_video inputs are in scope; the box's NDIAr/VBAN overlays may legitimately differ and must NOT be drift-reported. The regex mirrors scripts/lib/cg-chain-verify.sh's operator-overridable `sp-.*_video` (CASE-INSENSITIVE) -- the sp-* name set is a pattern, never a hardcoded list.",
+    "_ndi_inputs_matching": {"regex": "(?i)^sp-.*_video$", "ms": 3}
   }
 }

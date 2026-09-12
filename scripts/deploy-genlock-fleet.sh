@@ -28,18 +28,19 @@ set -euo pipefail
 #
 # Usage (planner mode -- print the whole fleet deploy plan, no network, from a pre-staged bundle):
 #   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-#       [--full|--fast] [--boxes strih,stream,imag]
+#       [--full|--fast] [--boxes strih,stream,imag,resolume]
 #
 # Usage (execute mode -- resolve + download the same-SHA artifacts, emit the Windows plan, ssh-deploy
 # imag, append the fleet log; drive Windows via the printed win-* MCP program):
-#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag] [--yes]
+#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag,resolume] [--yes]
 #
 #   --run-id   the ANCHOR CI run id (any of the three genlock workflows) -- its headSha is the ONE
 #              canonical version every box converges to.
 #   --full     deploy the full windows-genlock bundle (obs.dll + data + obs-plugins) -- the default;
 #              required for any vendor/<plugin>/** or frontend change (fast has no deploy path for it).
 #   --fast     deploy only the libobs hot-swap dll (obs.dll) -- a libobs-only change (§5b).
-#   --boxes    comma list of strih,stream,imag (default: all three).
+#   --boxes    comma list of strih,stream,imag,resolume (default: strih,stream,imag -- resolume is a
+#              TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly named).
 #   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha (no network).
 #   --stage    local dir holding the (pre-)downloaded artifact bytes (plan mode / test seam).
 #   --sha      the canonical build SHA to stamp into the markers (plan mode override).
@@ -65,25 +66,32 @@ RETENTION_KEEP=3
 # PURE functions (no network / MCP / Windows -- unit-tested by sourcing this file).
 # ============================================================================================
 
-# fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih,stream,imag), deduped
-# and validated. Empty -> the whole fleet. An unknown box is a fail-loud usage error (return 2).
+# fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih,stream,imag,resolume),
+# deduped and validated. Empty -> the DEFAULT fleet strih,stream,imag ONLY. An unknown box is a
+# fail-loud usage error (return 2). resolume = RESOLUME-SNV, the traveling CG box (issue 1295): a
+# windows-genlock box like strih/stream, so it rides the SAME Windows emit-only plan path -- but it
+# is a traveling maintenance target (often off/away, NOT a measured E2E source, targets.md), so it
+# is deployed ONLY when explicitly named (`--boxes resolume`), never pulled into the empty-default
+# "whole fleet".
 fleet_normalize_boxes() {
-  local csv="${1:-}" b out="" has_strih=0 has_stream=0 has_imag=0
+  local csv="${1:-}" b out="" has_strih=0 has_stream=0 has_imag=0 has_resolume=0
   [ -n "$csv" ] || csv="strih,stream,imag"
   local IFS=','
   for b in $csv; do
     b="${b//[[:space:]]/}"
     [ -z "$b" ] && continue
     case "$b" in
-      strih)  has_strih=1 ;;
-      stream) has_stream=1 ;;
-      imag)   has_imag=1 ;;
-      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih, stream, imag)" >&2; return 2 ;;
+      strih)    has_strih=1 ;;
+      stream)   has_stream=1 ;;
+      imag)     has_imag=1 ;;
+      resolume) has_resolume=1 ;;
+      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih, stream, imag, resolume)" >&2; return 2 ;;
     esac
   done
-  [ "$has_strih" = 1 ]  && out="strih"
-  [ "$has_stream" = 1 ] && out="${out:+$out,}stream"
-  [ "$has_imag" = 1 ]   && out="${out:+$out,}imag"
+  [ "$has_strih" = 1 ]    && out="strih"
+  [ "$has_stream" = 1 ]   && out="${out:+$out,}stream"
+  [ "$has_imag" = 1 ]     && out="${out:+$out,}imag"
+  [ "$has_resolume" = 1 ] && out="${out:+$out,}resolume"
   [ -n "$out" ] || { echo "fleet_normalize_boxes: empty box set" >&2; return 2; }
   printf '%s\n' "$out"
 }
@@ -121,10 +129,37 @@ fleet_pick_run_at_sha() {
 }
 
 # fleet_box_mcp / fleet_box_ip / fleet_box_has_ahk -- per-box constants (only strih runs the
-# NL_STARTUP.ahk auto-respawn watcher, so only strih's program stops AutoHotkey64).
-fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; *) return 2 ;; esac; }
-fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; *) return 2 ;; esac; }
+# NL_STARTUP.ahk auto-respawn watcher, so only strih's program stops AutoHotkey64). resolume
+# (issue 1295) = win-resolume, has_ahk=0 (no AHK watcher on the CG box), and its "ip" is the
+# HOSTNAME resolume.lan -- NEVER a pinned literal IP: resolume.lan is DHCP-drifting and currently
+# collides with `bridge` at .201 (targets.md), so the plan resolves + identity-confirms it live
+# (emit_windows_plan prints that step for resolume; the planner emits it, never runs it).
+fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
+fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; *) return 2 ;; esac; }
 fleet_box_has_ahk() { case "${1:-}" in strih) echo "1" ;; *) echo "0" ;; esac; }
+
+# fleet_resolume_identity_confirm_note -> the IDENTITY-CONFIRM preamble the resolume plan prints
+# (issue 1295). RESOLUME-SNV is a TRAVELING box addressed by HOSTNAME, and resolume.lan currently
+# resolves to 10.77.9.201 -- the SAME IP `bridge` lists in targets.md (an event-LAN DHCP collision)
+# -- so before uploading/deploying to it the supervisor MUST resolve it live AND confirm the box
+# IDENTITY (its cg OBS profile), never "the shared OBS-WS password worked" (targets.md /
+# rig-state-inspection.md §2). The PLANNER only EMITS this step (it runs no network/MCP itself); the
+# supervisor runs it in the win-resolume MCP before STEP 0. PURE (no I/O) so it is unit-tested by
+# sourcing this file.
+fleet_resolume_identity_confirm_note() {
+  cat <<'NOTE'
+# STEP -1 (resolume ONLY -- box IDENTITY confirm, issue 1295): resolume.lan is a TRAVELING box on a
+#         DHCP lease that currently resolves to 10.77.9.201 -- the SAME IP `bridge` lists in
+#         targets.md (event-LAN collision). Resolve it LIVE and confirm it is REALLY the CG box
+#         before touching it (never a pinned IP, never "the OBS-WS password worked" -- targets.md /
+#         rig-state-inspection.md §2):
+#           1. on dev1:           getent hosts resolume.lan      # the live address
+#           2. in win-resolume MCP Shell, confirm the cg OBS identity (ONE of):
+#                (gci "$env:APPDATA\obs-studio\basic\profiles" -Directory).Name   # expect 'cg'
+#                # or over OBS-WS: GetVersion + the 'cg' profile / cg_scenes collection
+#         Proceed to STEP 0 ONLY once the resolved address is confirmed to be RESOLUME-SNV.
+NOTE
+}
 
 # fleet_box_keepalive_tasks BOX -> the OBS keep-alive SCHEDULED-TASK names the deploy must disable so
 # NONE of them respawns obs64 while the bytes are being copied (#1140). Per-box + CURATED, never all
@@ -670,21 +705,23 @@ fi
 usage() {
   cat <<'EOF'
 deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across strih + stream + imag
-from ONE anchor CI run id (issue 789 bod 4 + bod 5). Resolves the same-SHA artifacts, emits the
-Windows deploy program for the win-* MCP Shell, ssh-deploys imag, applies box-backup retention, and
-writes one durable fleet-deploy log line.
+(+ resolume, the traveling CG box, when explicitly named -- issue 1295) from ONE anchor CI run id
+(issue 789 bod 4 + bod 5). Resolves the same-SHA artifacts, emits the Windows deploy program for the
+win-* MCP Shell, ssh-deploys imag, applies box-backup retention, and writes one durable fleet-deploy
+log line.
 
 Usage (plan -- print the whole fleet plan, no network, from a pre-staged bundle):
   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-      [--full|--fast] [--boxes strih,stream,imag]
+      [--full|--fast] [--boxes strih,stream,imag,resolume]
 
 Usage (execute -- resolve + download the same-SHA artifacts, emit the Windows plan, ssh-deploy imag):
-  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag] [--yes]
+  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag,resolume] [--yes]
 
   --run-id   the ANCHOR CI run id -- its headSha is the ONE canonical version every box converges to.
   --full     full windows-genlock bundle (default; required for any plugin/frontend change).
   --fast     libobs-only obs.dll hot-swap.
-  --boxes    comma list of strih,stream,imag (default: all three).
+  --boxes    comma list of strih,stream,imag,resolume (default: strih,stream,imag -- resolume
+             (RESOLUME-SNV, the traveling CG box) deploys ONLY when explicitly named).
   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha.
   --stage    local dir holding the (pre-)downloaded artifact bytes.
   --sha      the canonical build SHA to stamp into the markers (plan mode).
@@ -702,8 +739,11 @@ emit_windows_plan() {
   artifact="$(fleet_windows_artifact "$mode")"
   win_stage="C:\\stage-genlock-${gsha}"
   program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha" "$confirm")"
+  echo "# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} ================="
+  # resolume (issue 1295): emit the box-IDENTITY confirm preamble (STEP -1) before STEP 0 -- a
+  # traveling DHCP box colliding with `bridge` at .201 must be resolved + identity-confirmed live.
+  [ "$box" = "resolume" ] && fleet_resolume_identity_confirm_note
   cat <<PLAN
-# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} =================
 # STEP 0 (once per box): upload the downloaded '${artifact}' bytes (staged locally at ${stage}) to
 #         the box at ${win_stage} via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip +
 #         Expand-Archive on the box), then run the program below in the ${mcp} MCP Shell
@@ -771,8 +811,8 @@ main() {
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
       case "$b" in
-        strih|stream) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
-        imag)         emit_imag_plan "$stage" "$sha" "$sha" ;;
+        strih|stream|resolume) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
+        imag)                  emit_imag_plan "$stage" "$sha" "$sha" ;;
       esac
     done )
     echo "# fleet-deploy log line (append to ${FLEET_LOG_DEFAULT} once the deploy is done):"
@@ -799,7 +839,7 @@ main() {
   # detect requested box classes without a `local IFS=','` that would leak past a brace group
   # (a { …; } group is not a new scope) -- match the comma-list directly.
   local want_win=0 want_imag=0
-  case ",$boxes," in *,strih,*|*,stream,*) want_win=1 ;; esac
+  case ",$boxes," in *,strih,*|*,stream,*|*,resolume,*) want_win=1 ;; esac
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
@@ -813,7 +853,7 @@ main() {
     echo "# Windows artifact $win_art (run $win_run) downloaded to $workdir/win"
     echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
-    ( IFS=','; for b in $boxes; do case "$b" in strih|stream) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
+    ( IFS=','; for b in $boxes; do case "$b" in strih|stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
   fi
 
   # --- imag: download the same-SHA linux artifacts, scp the WHOLE bundle + ssh-run (issue 1026) -----

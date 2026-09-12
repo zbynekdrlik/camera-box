@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -47,6 +48,15 @@ from imag_latency_enforce import list_ndi_inputs  # noqa: E402
 
 GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 FLOOR_KEY = "_all_ndi_inputs_ms"
+# #1295: a PREFIX/pattern-scoped floor sentinel, the middle ground between the explicit-named pins
+# (strih/stream) and the all-inputs floor (imag). Value: {"regex": "<ere>", "ms": <int>}. Every live
+# NDI input whose name matches `regex` (re.search, the baseline supplies its own case flag) must
+# equal `ms`; NON-matching inputs are left alone. The resolume cg-OBS box uses it: the genlock build
+# defaults every NDI source to genlock_latency_ms_src=3, but only the SongPlayer `sp-*_video` inputs
+# are in this ticket's scope -- NDIAr/VBAN overlays may legitimately differ, so a plain FLOOR_KEY
+# would false-report on them. The regex mirrors cg-chain-verify.sh's operator-overridable
+# `sp-.*_video` (the sp-* name set is a pattern, never a fixed list).
+NDI_MATCH_KEY = "_ndi_inputs_matching"
 DEFAULT_BASELINE = os.path.join(_HERE, "latency-pins-baseline.json")
 
 
@@ -85,18 +95,56 @@ def diff_pin(name: str, got, spec) -> "str | None":
     return f'LATENCY-PIN DRIFT input="{name}" got={got}ms want={want}ms (tol +/-{tol}ms)'
 
 
+def parse_match_spec(baseline_box: dict) -> "tuple | None":
+    """#1295: if `baseline_box` carries the `_ndi_inputs_matching` prefix-floor sentinel, return
+    (compiled_regex, want_ms); else None. Raises ValueError on a malformed sentinel (missing/empty
+    regex, a non-int ms, a bad pattern) rather than silently degrading to "matches nothing"."""
+    spec = baseline_box.get(NDI_MATCH_KEY)
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError(f"{NDI_MATCH_KEY} must be an object {{regex, ms}}: {spec!r}")
+    regex = spec.get("regex")
+    ms = spec.get("ms")
+    if not isinstance(regex, str) or not regex:
+        raise ValueError(f"{NDI_MATCH_KEY}.regex must be a non-empty string: {spec!r}")
+    if isinstance(ms, bool) or not isinstance(ms, int):
+        raise ValueError(f"{NDI_MATCH_KEY}.ms must be an int: {spec!r}")
+    try:
+        compiled = re.compile(regex)
+    except re.error as e:
+        raise ValueError(f"{NDI_MATCH_KEY}.regex is not a valid regex ({e}): {spec!r}") from e
+    return (compiled, ms)
+
+
+def matching_names(compiled, names) -> list:
+    """Pure: the subset of `names` the compiled regex matches (re.search), sorted. The baseline's
+    own pattern supplies any case flag (e.g. `(?i)`)."""
+    return sorted(n for n in names if compiled.search(n))
+
+
 def verify_box(box: str, baseline_box: dict, live_pins: dict) -> list:
     """Pure: diff every baseline pin for `box` against `live_pins` ({name: int|None}).
 
-    Two baseline shapes: a FLOOR sentinel (`_all_ndi_inputs_ms`) means every LIVE NDI input must
-    equal the floor (imag -- its input set is dynamic); explicit `{name: spec}` entries pin those
-    named inputs. Underscore-prefixed keys (comments, the sentinel) are never treated as named
-    pins. Returns a list of `box=<box> <drift msg>` strings (empty = every pin on-baseline)."""
+    Three baseline shapes: a FLOOR sentinel (`_all_ndi_inputs_ms`) means every LIVE NDI input must
+    equal the floor (imag -- its input set is dynamic); a PREFIX-MATCH sentinel
+    (`_ndi_inputs_matching` {regex, ms}, #1295) means every live NDI input whose name matches the
+    regex must equal ms (resolume -- only the sp-* inputs, non-matching inputs untouched); explicit
+    `{name: spec}` entries pin those named inputs. Underscore-prefixed keys (comments, the
+    sentinels) are never treated as named pins. Returns a list of `box=<box> <drift msg>` strings
+    (empty = every pin on-baseline)."""
     drifts = []
     floor = baseline_box.get(FLOOR_KEY)
     if floor is not None:
         for name in sorted(live_pins):
             msg = diff_pin(name, live_pins[name], floor)
+            if msg:
+                drifts.append(f"box={box} " + msg)
+    match = parse_match_spec(baseline_box)
+    if match is not None:
+        compiled, ms = match
+        for name in matching_names(compiled, live_pins):
+            msg = diff_pin(name, live_pins[name], ms)
             if msg:
                 drifts.append(f"box={box} " + msg)
     for name in sorted(baseline_box):
@@ -110,8 +158,9 @@ def verify_box(box: str, baseline_box: dict, live_pins: dict) -> list:
 
 def baseline_names(baseline_box: dict) -> "list | None":
     """The live inputs to read for a box: None (enumerate every live NDI input) when the box is a
-    floor box, else the explicit named pins (underscore keys excluded)."""
-    if FLOOR_KEY in baseline_box:
+    floor box OR a prefix-match box (#1295 -- we must enumerate to find the matching subset), else
+    the explicit named pins (underscore keys excluded)."""
+    if FLOOR_KEY in baseline_box or NDI_MATCH_KEY in baseline_box:
         return None
     return sorted(n for n in baseline_box if not n.startswith("_"))
 
@@ -170,7 +219,7 @@ def load_baseline(path: str) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--box", required=True, choices=["strih", "stream", "imag"])
+    ap.add_argument("--box", required=True, choices=["strih", "stream", "imag", "resolume"])
     ap.add_argument("--host", required=True)
     ap.add_argument("--password", default=os.environ.get("OBS_PASSWORD", ""))
     ap.add_argument("--baseline", default=DEFAULT_BASELINE)
@@ -200,6 +249,24 @@ def main(argv=None) -> int:
         print(
             f"ERROR: latency_pins_verify: enumerated ZERO NDI inputs on floor box '{args.box}' "
             f"({args.host}) -- cannot confirm the {baseline_box[FLOOR_KEY]}ms floor. FAIL-CLOSED.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # #1295: a prefix-match box (resolume) that matched ZERO live inputs is NOT a clean pass either
+    # -- it means the sp-* inputs the regex targets could not be found/read, so the scoped pin is
+    # unconfirmed. Fail CLOSED, same discipline as the floor-zero check above (the
+    # burn-target-enumeration.md / camera-active-set.md fail-open ban).
+    try:
+        _match = parse_match_spec(baseline_box)
+    except ValueError as e:
+        print(f"ERROR: latency_pins_verify: malformed '{NDI_MATCH_KEY}' sentinel for '{args.box}': {e}", file=sys.stderr)
+        return 2
+    if _match is not None and not matching_names(_match[0], live_pins):
+        print(
+            f"ERROR: latency_pins_verify: ZERO live NDI inputs on '{args.box}' ({args.host}) match "
+            f"the '{_match[0].pattern}' sentinel -- cannot confirm the {_match[1]}ms pin on the "
+            f"scoped inputs. FAIL-CLOSED.",
             file=sys.stderr,
         )
         return 2
