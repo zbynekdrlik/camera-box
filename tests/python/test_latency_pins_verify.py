@@ -336,3 +336,83 @@ def test_baseline_file_has_resolume_prefix_match_sentinel_1295():
     compiled, ms = lpv.parse_match_spec(data["resolume"])
     assert ms == 3 and spec["regex"] == "(?i)^sp-.*_video$"
     assert compiled.search("sp-fast_video") and not compiled.search("NDIAr ppt")
+
+
+# ---------------------------------------------------------------------------
+# #1295 follow-up B -- an ABSENT genlock_latency_ms_src on a GENLOCK BUILD box is the build
+# DEFAULT (ndi-source.cpp ndi_source_getdefaults registers genlock_latency_ms_src=3), NOT drift.
+# The build identity is read over the EXISTING WS via GetInputDefaultSettings(ndi_source); a stock
+# build has no such default key -> keep N/A + DRIFT.
+# ---------------------------------------------------------------------------
+def _fake_rpc_with_default(default_settings):
+    """A _rpc fake whose GetInputDefaultSettings(ndi_source) returns default_settings (a dict) or,
+    when default_settings is None, an empty defaults dict (stock build)."""
+    def _rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        if rtype == "GetInputDefaultSettings":
+            assert (rdata or {}).get("inputKind") == "ndi_source"
+            return {"defaultInputSettings": dict(default_settings or {})}
+        if rtype == "GetInputList":
+            return {"inputs": [{"inputName": n, "inputKind": v["inputKind"]} for n, v in ws._inputs.items()]}
+        if rtype == "GetInputSettings":
+            name = (rdata or {}).get("inputName")
+            node = ws._inputs.get(name, {})
+            return {"inputSettings": dict(node.get("settings", {}))}
+        raise AssertionError(f"unexpected rpc {rtype}")
+    return _rpc
+
+
+class TestGenlockBuildDefault1295:
+    def test_read_genlock_default_ms_genlock_build(self, monkeypatch):
+        # GetInputDefaultSettings carries the fork-registered default -> that int (genlock build).
+        monkeypatch.setattr(lpv, "_rpc", _fake_rpc_with_default({"genlock_latency_ms_src": 3, "genlock_fifo": True}))
+        assert lpv.read_genlock_default_ms(_FakeWs({})) == 3
+
+    def test_read_genlock_default_ms_stock_build_is_none(self, monkeypatch):
+        # stock DistroAV has no such default key -> None (not a genlock build).
+        monkeypatch.setattr(lpv, "_rpc", _fake_rpc_with_default({"ndi_sync": 2, "ndi_bw_mode": 0}))
+        assert lpv.read_genlock_default_ms(_FakeWs({})) is None
+
+    def test_read_genlock_default_ms_read_failure_is_none(self, monkeypatch):
+        def _boom(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+            raise RuntimeError("ws error")
+        monkeypatch.setattr(lpv, "_rpc", _boom)
+        assert lpv.read_genlock_default_ms(_FakeWs({})) is None
+
+    def test_diff_pin_absent_on_genlock_build_is_ok_not_drift(self):
+        # got=None (absent key) + build_default=3 matching want=3 -> OK (None), not N/A DRIFT.
+        assert lpv.diff_pin("sp-fast_video", None, 3, build_default=3) is None
+
+    def test_diff_pin_absent_on_genlock_build_wrong_default_is_drift_named(self):
+        msg = lpv.diff_pin("sp-fast_video", None, 3, build_default=6)
+        assert msg is not None and "default(6)" in msg and "want=3ms" in msg
+
+    def test_diff_pin_absent_stock_still_na_drift(self):
+        # build_default=None (stock) keeps the N/A drift path verbatim.
+        msg = lpv.diff_pin("sp-fast_video", None, 3, build_default=None)
+        assert msg is not None and "got=N/A" in msg
+
+    def test_verify_box_threads_build_default(self):
+        RES = {"_ndi_inputs_matching": {"regex": "(?i)^sp-.*_video$", "ms": 3}}
+        live = {"sp-fast_video": None, "sp-slow_video": None, "NDIAr ppt": None}
+        # genlock build (default 3): every sp-* absent-key resolves to default(3)=OK -> no drift.
+        assert lpv.verify_box("resolume", RES, live, build_default=3) == []
+        # stock (no default): every sp-* absent-key -> N/A DRIFT.
+        drifts = lpv.verify_box("resolume", RES, live, build_default=None)
+        assert len(drifts) == 2 and all("got=N/A" in d for d in drifts)
+
+    def test_main_resolume_genlock_default_absent_keys_exit_0(self, monkeypatch):
+        # read_live_pins now returns (pins, build_default); a genlock box with absent sp-* keys + a
+        # build default of 3 is a CLEAN pass (exit 0), not the false N/A DRIFT exit 1.
+        monkeypatch.setattr(
+            lpv, "read_live_pins",
+            lambda host, pw, names: ({"sp-fast_video": None, "sp-slow_video": None, "NDIAr ppt": None}, 3),
+        )
+        assert lpv.main(["--box", "resolume", "--host", "resolume.lan"]) == 0
+
+    def test_main_resolume_stock_absent_keys_exit_1(self, monkeypatch):
+        # a STOCK box (build_default None) with absent sp-* keys is still DRIFT (exit 1).
+        monkeypatch.setattr(
+            lpv, "read_live_pins",
+            lambda host, pw, names: ({"sp-fast_video": None, "sp-slow_video": None}, None),
+        )
+        assert lpv.main(["--box", "resolume", "--host", "resolume.lan"]) == 1

@@ -863,3 +863,40 @@ fn self_heal_reuses_wrapper_launch_program_775() {
          (so its recovery relaunch inherits the .lnk-primary contract), never re-derive its own launch."
     );
 }
+
+
+/// #1295 follow-up A -- the emitted #978 session gate (and the obs64 wait-picks) must IGNORE
+/// dead/zombie process objects (a stale `Get-Process obs64` handle: `HasExited`=True / 0 threads,
+/// the live 2026-09-12 RESOLUME-SNV pid-58560 case), counting only LIVE instances and LOGGING the
+/// ignored zombies -- never failing "expected exactly 1 obs64 process, found 2" off a 45 KB handle.
+#[test]
+fn session_gate_ignores_dead_obs64_process_objects_1295() {
+    let p = program_default();
+    // the live-instance filter is applied wherever obs64 is counted/picked.
+    assert!(
+        p.contains("HasExited") && p.contains("Threads.Count"),
+        "the #978 obs64 count + wait-picks must filter to LIVE instances \
+         (-not HasExited -and Threads.Count -gt 0):\n{p}"
+    );
+    // the count gate keeps its exact shape, now over the live-filtered array.
+    assert!(
+        p.contains("$sessObsProcs.Count -ne 1"),
+        "the #978 count gate must keep $sessObsProcs.Count -ne 1 (over the live-filtered array):\n{p}"
+    );
+    // ignored zombies are LOGGED (not failed on) with their pid + start time.
+    assert!(
+        p.to_lowercase().contains("dead obs64"),
+        "an ignored dead/zombie obs64 handle must be LOGGED (pid + start time), not failed on:\n{p}"
+    );
+}
+
+/// #1295 follow-up A -- the force path (kill + relaunch) shares the SAME builder, so its obs64
+/// wait-pick is live-filtered too (a zombie must never be latched as the launched $proc).
+#[test]
+fn force_path_obs64_wait_pick_is_live_filtered_1295() {
+    let p = program_force();
+    assert!(
+        p.contains("HasExited") && p.contains("Threads.Count"),
+        "the force-path obs64 wait-pick must filter to LIVE instances:\n{p}"
+    );
+}

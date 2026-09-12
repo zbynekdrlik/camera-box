@@ -649,3 +649,36 @@ def test_read_bounded_log_text_crlf_log_still_parses(tmp_path):
     assert bsg.distroav_version_from_log(whole) == "6.2.1"
     assert bsg.output_fps_from_log(whole) == "30"
     assert bsg.genlock_wall_clock_from_log(whole) == "1"
+
+
+# ---------------------------------------------------------------------------
+# #1295 follow-up A -- the obs64-count health signal (issue 1296) must not count a DEAD/zombie
+# process object as a live instance. tasklist has no HasExited column, so a row's Mem Usage is the
+# honest liveness proxy: a live OBS sits in the hundreds of MB, a stale/exited handle ~0-45 KB.
+# ---------------------------------------------------------------------------
+def test_tasklist_mem_kb_parses_thousands_separator():
+    assert bsg.tasklist_mem_kb("512,000 K") == 512000
+    assert bsg.tasklist_mem_kb("45 K") == 45
+    assert bsg.tasklist_mem_kb("1,234 K") == 1234
+
+
+def test_tasklist_mem_kb_none_for_na_or_blank():
+    assert bsg.tasklist_mem_kb("N/A") is None
+    assert bsg.tasklist_mem_kb("") is None
+    assert bsg.tasklist_mem_kb("   ") is None
+    assert bsg.tasklist_mem_kb(None) is None
+
+
+def test_tasklist_row_is_live_obs_true_for_a_real_obs():
+    assert bsg.tasklist_row_is_live_obs("512,000 K") is True
+
+
+def test_tasklist_row_is_live_obs_false_for_a_zombie_handle():
+    # the live 2026-09-12 RESOLUME-SNV pid-58560 zombie read ~45 KB.
+    assert bsg.tasklist_row_is_live_obs("45 K") is False
+
+
+def test_tasklist_row_is_live_obs_false_for_unparseable_mem():
+    # an absent/N/A Mem is NOT trusted as live (fail-safe: a live OBS always reports a real Mem).
+    assert bsg.tasklist_row_is_live_obs("N/A") is False
+    assert bsg.tasklist_row_is_live_obs("") is False

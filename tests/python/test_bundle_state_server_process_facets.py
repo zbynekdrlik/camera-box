@@ -308,3 +308,31 @@ def test_ndi_runtime_version_missing_dll_is_empty(monkeypatch):
     monkeypatch.setattr(bss.subprocess, "run", fake_run)
     assert bss.ndi_runtime_version("/nonexistent/path/to.dll") == ""
     assert len(calls) == 0, "a missing DLL must never even attempt the PowerShell resolve"
+
+
+# ---------------------------------------------------------------------------------------------
+# #1295 follow-up A -- a DEAD/zombie obs64 handle (tiny Mem Usage) must NOT inflate the count.
+# tasklist normally omits a fully-exited process, but a mid-exit / near-zero-Mem obs row is
+# excluded by the shared bsg.tasklist_row_is_live_obs liveness proxy before the name is emitted.
+# ---------------------------------------------------------------------------------------------
+TASKLIST_CSV_WITH_ZOMBIE = (
+    '"Image Name","PID","Session Name","Session#","Mem Usage"\r\n'
+    '"obs64.exe","4321","Console","1","512,000 K"\r\n'
+    '"obs64.exe","58560","Console","1","45 K"\r\n'
+    '"notepad.exe","9999","Console","1","10,000 K"\r\n'
+)
+
+
+def test_parse_tasklist_excludes_a_zombie_obs_row_by_mem_usage():
+    import bundle_state_gather as bsg
+
+    result = bss._parse_tasklist_obs_process_names(TASKLIST_CSV_WITH_ZOMBIE)
+    # only the LIVE obs64 (512,000 K) is emitted; the 45 KB zombie handle is dropped.
+    assert result.splitlines() == ["obs64"], result
+    assert bsg.obs_process_count_from_listing(result) == "1"
+
+
+def test_parse_tasklist_keeps_two_genuinely_live_obs():
+    # regression guard: two LIVE obs instances still count as 2 (the TASKLIST_CSV_SAMPLE case).
+    result = bss._parse_tasklist_obs_process_names(TASKLIST_CSV_SAMPLE)
+    assert result.splitlines() == ["obs64", "OBS32"], result

@@ -1122,3 +1122,29 @@ fn non_resolume_plan_has_no_identity_confirm_preamble_1295() {
         "strih plan must NOT carry the resolume-only identity-confirm preamble:\n{out}"
     );
 }
+
+
+/// #1295 follow-up C -- the #789 AHK-restart-failure Write-Error is emitted ONLY for has_ahk=1
+/// boxes (strih AND resolume), which DO run an AHK respawn watcher; the failure means the watcher
+/// did not come BACK after the deploy, not that the box lacks one. The inherited strih text
+/// "<box> has NO respawn watcher" was wrong for every such box. It must now say the watcher failed
+/// to restart, for BOTH strih and resolume.
+#[test]
+fn ahk_restart_failure_message_does_not_falsely_claim_no_watcher_1295() {
+    for box_name in ["strih", "resolume"] {
+        let p = win_program(box_name, "full", "1");
+        assert!(
+            !p.contains("has NO respawn watcher"),
+            "{box_name}: the #789 failure must not claim a has_ahk box 'has NO respawn watcher':\n{p}"
+        );
+        assert!(
+            p.contains("failed to restart"),
+            "{box_name}: the #789 failure must say the AHK respawn watcher failed to restart:\n{p}"
+        );
+        // the fail-loud exit is unchanged.
+        assert!(
+            p.contains("exit 9"),
+            "{box_name}: the #789 AHK-restart failure must stay fail-loud (exit 9):\n{p}"
+        );
+    }
+}
