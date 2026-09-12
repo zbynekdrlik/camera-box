@@ -952,3 +952,134 @@ fn usage_errors_exit_two() {
     let (c4, _o, _e) = run_script(&["--plan", "--stage", "/tmp", "--sha", "S"]);
     assert_eq!(c4, 2, "missing --run-id");
 }
+
+// ============================================================================================
+// #1295 -- RESOLUME-SNV (the traveling CG box) joins the genlock deploy fleet as a
+// windows-genlock box: win-resolume MCP, has_ahk=0, hostname not a pinned IP, explicit-only
+// (never the empty-default fleet), with a live box-identity confirm preamble.
+// ============================================================================================
+#[test]
+fn normalize_accepts_resolume_explicit_only_not_default_1295() {
+    // resolume is accepted + appended last in canonical order
+    assert_eq!(
+        run_sourced(
+            &script(),
+            "fleet_normalize_boxes strih,stream,imag,resolume"
+        )
+        .trim(),
+        "strih,stream,imag,resolume"
+    );
+    assert_eq!(
+        run_sourced(&script(), "fleet_normalize_boxes resolume").trim(),
+        "resolume"
+    );
+    // dedup
+    assert_eq!(
+        run_sourced(&script(), "fleet_normalize_boxes resolume,strih,resolume").trim(),
+        "strih,resolume"
+    );
+    // the empty default is strih,stream,imag ONLY -- resolume (traveling maintenance box) is never
+    // pulled into the whole-fleet default; it deploys only when explicitly named.
+    assert_eq!(
+        run_sourced(&script(), "fleet_normalize_boxes ''").trim(),
+        "strih,stream,imag"
+    );
+}
+
+#[test]
+fn resolume_box_constants_mcp_hostname_no_ahk_1295() {
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_mcp resolume").trim(),
+        "win-resolume"
+    );
+    // the "ip" is the HOSTNAME resolume.lan, NEVER a pinned literal IP (targets.md; .201 collides
+    // with `bridge`).
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ip resolume").trim(),
+        "resolume.lan"
+    );
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_has_ahk resolume").trim(),
+        "0"
+    );
+    // no OBS keep-alive scheduled-task respawner on the CG box
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_keepalive_tasks resolume").trim(),
+        ""
+    );
+}
+
+#[test]
+fn resolume_windows_program_carries_no_ahk_and_no_keepalive_1295() {
+    let p = win_program("resolume", "full", "0");
+    assert!(
+        !p.contains("Stop-Process -Name AutoHotkey64"),
+        "resolume has NO AHK watcher -- its program must carry no real AutoHotkey64 stop:\n{p}"
+    );
+    assert!(
+        !p.contains("schtasks /Change"),
+        "resolume has no OBS keep-alive scheduled task -- no disable/enable:\n{p}"
+    );
+    // it is still a real fail-loud PowerShell deploy (the shared byte-verify / marker machinery)
+    assert!(
+        p.contains("$ErrorActionPreference = 'Stop'") && p.contains("VERIFY obs.dll"),
+        "resolume rides the same fail-loud windows deploy program:\n{p}"
+    );
+}
+
+#[test]
+fn resolume_plan_emits_identity_confirm_and_win_resolume_mcp_1295() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (code, out, err) = run_script(&[
+        "--plan",
+        "--run-id",
+        "R1",
+        "--sha",
+        "deadbeef",
+        "--stage",
+        tmp.path().to_str().unwrap(),
+        "--boxes",
+        "resolume",
+        "--full",
+    ]);
+    assert_eq!(
+        code, 0,
+        "--plan resolume must succeed.\nstdout={out}\nstderr={err}"
+    );
+    assert!(
+        out.contains("win-resolume"),
+        "names the win-resolume MCP:\n{out}"
+    );
+    // the live box-IDENTITY confirm preamble (a traveling DHCP box colliding with `bridge` at .201)
+    assert!(
+        out.contains("box IDENTITY confirm") && out.contains("getent hosts resolume.lan"),
+        "resolume plan emits the identity-confirm step:\n{out}"
+    );
+    // never a pinned IP in the resolume plan header
+    assert!(
+        out.contains("(win-resolume, resolume.lan)") && !out.contains("win-resolume, 10.77.9.201"),
+        "resolume plan uses the hostname, never a pinned IP:\n{out}"
+    );
+}
+
+#[test]
+fn non_resolume_plan_has_no_identity_confirm_preamble_1295() {
+    // the identity-confirm STEP -1 is resolume-only -- strih/stream plans must not carry it.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_c, out, _e) = run_script(&[
+        "--plan",
+        "--run-id",
+        "R1",
+        "--sha",
+        "deadbeef",
+        "--stage",
+        tmp.path().to_str().unwrap(),
+        "--boxes",
+        "strih",
+        "--full",
+    ]);
+    assert!(
+        !out.contains("box IDENTITY confirm"),
+        "strih plan must NOT carry the resolume-only identity-confirm preamble:\n{out}"
+    );
+}

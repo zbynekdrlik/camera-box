@@ -435,6 +435,39 @@ fn cli_box_selects_correct_mcp_and_emits_program() {
     );
 }
 
+/// #1295: RESOLUME-SNV (the traveling cg OBS box) is a valid --box: win-resolume MCP, hostname
+/// resolume.lan (never a pinned IP), has_ahk=0 (no AutoHotkey64 command in its program), and the
+/// emitted plan still carries the render-tick verify + the #978 SessionId/MainWindowTitle gate.
+#[test]
+fn cli_box_resolume_selects_win_resolume_no_ahk_1295() {
+    let (code, out, _err) = run_script(&["--box", "resolume"]);
+    assert_eq!(code, 0, "--box resolume must print the plan (exit 0)");
+    assert!(
+        out.contains("win-resolume") && out.contains("resolume.lan"),
+        "resolume -> win-resolume plan at the resolume.lan hostname:\n{out}"
+    );
+    // no pinned IP in the resolume plan
+    assert!(
+        !out.contains("10.77.9.201"),
+        "resolume plan must use the hostname, never a pinned IP:\n{out}"
+    );
+    // has_ahk=0 -> no real AutoHotkey64 stop in its program (the #411 self-heal stream guard class)
+    assert!(
+        !out.contains("Stop-Process -Name AutoHotkey64"),
+        "resolume has no AHK watcher -- its program carries no real AutoHotkey64 stop:\n{out}"
+    );
+    // the build-proof verify + the session-visibility gate still apply
+    assert!(
+        out.contains("render tick ENABLED") && out.contains("SESSION-VISIBILITY"),
+        "resolume plan keeps the render-tick verify + the #978 session gate:\n{out}"
+    );
+    // STEP 3b wires the report-only latency verify for the resolume box
+    assert!(
+        out.contains("latency_pins_verify.py --box resolume --host resolume.lan"),
+        "resolume plan wires the report-only latency verify-read-back at its own host:\n{out}"
+    );
+}
+
 /// A trailing value-taking flag with no value is a clean usage error (exit 2), not a set -e abort.
 #[test]
 fn trailing_flag_without_value_is_usage_error_exit_2() {

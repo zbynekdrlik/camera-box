@@ -261,3 +261,78 @@ class TestEnumerationFailsClosed:
             lambda host, pw, names: {"NDI cam1": 90, "NDI cam2": 3, "NDI cam3": 20},
         )
         assert lpv.main(["--box", "strih", "--host", "x"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# #1295 -- the RESOLUME-SNV prefix-match sentinel (_ndi_inputs_matching): every live NDI input
+# whose name matches the regex must equal ms; NON-matching inputs (NDIAr/VBAN overlays) untouched.
+# ---------------------------------------------------------------------------
+class TestPrefixMatchSentinel1295:
+    _RES = {"_comment": "x", "_ndi_inputs_matching": {"regex": "(?i)^sp-.*_video$", "ms": 3}}
+
+    def test_parse_match_spec_none_when_absent(self):
+        assert lpv.parse_match_spec({"NDI cam1": 3}) is None
+
+    def test_parse_match_spec_returns_regex_and_ms(self):
+        compiled, ms = lpv.parse_match_spec(self._RES)
+        assert ms == 3 and compiled.search("sp-fast_video") and compiled.search("SP-Slow_video")
+        assert not compiled.search("NDIAr ppt")
+
+    def test_parse_match_spec_rejects_malformed(self):
+        for bad in ({"_ndi_inputs_matching": {"regex": "", "ms": 3}},
+                    {"_ndi_inputs_matching": {"regex": "x", "ms": "3"}},
+                    {"_ndi_inputs_matching": {"regex": "x", "ms": True}},
+                    {"_ndi_inputs_matching": {"regex": "(", "ms": 3}},
+                    {"_ndi_inputs_matching": [1, 2]}):
+            with pytest.raises(ValueError):
+                lpv.parse_match_spec(bad)
+
+    def test_matching_names_case_insensitive_prefix(self):
+        compiled, _ = lpv.parse_match_spec(self._RES)
+        got = lpv.matching_names(compiled, ["sp-fast_video", "SP-Slow_video", "NDIAr ppt", "VBAN cg"])
+        assert got == ["SP-Slow_video", "sp-fast_video"]
+
+    def test_baseline_names_enumerates_for_match_box(self):
+        # must enumerate every live NDI input (None) so the regex can pick the matching subset.
+        assert lpv.baseline_names(self._RES) is None
+
+    def test_verify_flags_only_matching_inputs_off_ms(self):
+        live = {"sp-fast_video": 3, "sp-slow_video": 99, "NDIAr ppt": 50, "VBAN cg-resolume": 7}
+        drifts = lpv.verify_box("resolume", self._RES, live)
+        assert len(drifts) == 1 and 'input="sp-slow_video"' in drifts[0] and "got=99ms want=3ms" in drifts[0]
+        assert all("NDIAr" not in d and "VBAN" not in d for d in drifts)
+
+    def test_verify_all_matching_at_ms_is_clean(self):
+        assert lpv.verify_box("resolume", self._RES, {"sp-fast_video": 3, "NDIAr ppt": 50}) == []
+
+    def test_verify_missing_matching_na_is_drift(self):
+        drifts = lpv.verify_box("resolume", self._RES, {"sp-fast_video": None})
+        assert len(drifts) == 1 and "got=N/A" in drifts[0]
+
+    def test_main_clean_exits_0(self, monkeypatch):
+        monkeypatch.setattr(lpv, "read_live_pins",
+                            lambda host, pw, names: {"sp-fast_video": 3, "sp-slow_video": 3, "NDIAr ppt": 99})
+        assert lpv.main(["--box", "resolume", "--host", "resolume.lan"]) == 0
+
+    def test_main_drift_exits_1(self, monkeypatch):
+        monkeypatch.setattr(lpv, "read_live_pins",
+                            lambda host, pw, names: {"sp-fast_video": 3, "sp-slow_video": 33})
+        assert lpv.main(["--box", "resolume", "--host", "resolume.lan"]) == 1
+
+    def test_main_zero_matching_inputs_fails_closed_exit_2(self, monkeypatch):
+        # the sp-* inputs could not be found/read -> the scoped pin is unconfirmed -> FAIL CLOSED,
+        # never a vacuous green (the burn-target-enumeration / camera-active-set fail-open ban).
+        monkeypatch.setattr(lpv, "read_live_pins",
+                            lambda host, pw, names: {"NDIAr ppt": 3, "VBAN cg-resolume": 3})
+        assert lpv.main(["--box", "resolume", "--host", "resolume.lan"]) == 2
+
+
+# #1295 -- the baseline file carries a resolume prefix-match block (resolume is the 4th managed box).
+def test_baseline_file_has_resolume_prefix_match_sentinel_1295():
+    path = _SCRIPTS / "latency-pins-baseline.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert {"strih", "stream", "imag", "resolume"}.issubset(data.keys())
+    spec = data["resolume"]["_ndi_inputs_matching"]
+    compiled, ms = lpv.parse_match_spec(data["resolume"])
+    assert ms == 3 and spec["regex"] == "(?i)^sp-.*_video$"
+    assert compiled.search("sp-fast_video") and not compiled.search("NDIAr ppt")
