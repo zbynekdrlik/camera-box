@@ -762,7 +762,7 @@ compiles-shaped OK / is brace-balanced). CI is the FIRST place the Rust test act
 runs — expect a TYPE mistake to surface there, not locally. (5) clippy is CI-only too, and its DOC
 lints bite prose: a `//!`/`///` line that starts with `+ `/`- `/`* `/`1. ` is a Markdown list item
 and the next unindented line fails `doc_lazy_continuation` under `-D warnings` (killed a release
-PR's Lint + E2E, 2026-09-02) — `grep -nE '^\s*//[/!] ?([-+*]|[0-9]+\.) '` over every touched `.rs`
+PR's Lint + E2E, 2026-09-02) — `grep -nE '^\s*//[/!]\s*([-+*]|[0-9]+\.) '` over every touched `.rs`
 before pushing (details: `.claude/rules/ci-testing-gotchas.md`).
 
 **No bypass exists for `src/bin/recording-verdict.rs` or any `src/probe/*.rs` file itself** — the

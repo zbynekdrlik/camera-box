@@ -10,6 +10,7 @@
 //!   * `cg_chain_verdict` (bash) vs `camera_box::resolume_playback::evaluate` -- SAME window,
 //!     identical PASS/FAIL across clean, skew, drop, underrun, relock, late-hold, backward-regime,
 //!     too-few-samples, and absent cases.
+//!
 //! Plus sourced-bash unit tests of the pure lib (run_sourced style, like
 //! tests/harness_asio_starve_health_1023.rs) and static-anchor assertions of the orchestrator +
 //! the rig-health-audit.py report-only wiring.

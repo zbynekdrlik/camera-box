@@ -913,7 +913,7 @@ prose, so this class surfaces only in CI's Lint job — and it blocked the whole
 paragraph that WRAPS so a line begins with `+ exactly ONE aux mark …` — clippy reads `+ ` as a
 Markdown bullet and every following unindented line as a "list item without indentation". Fix by
 rewording (`plus …`), never by indenting prose that is not a list. Pre-push local net (cheap,
-run over every touched `.rs`): `grep -nE '^\s*//[/!] ?([-+*]|[0-9]+\.) ' <files>` and check that
+run over every touched `.rs`): `grep -nE '^\s*//[/!]\s*([-+*]|[0-9]+\.) ' <files>` and check that
 each hit is a REAL list item whose continuation lines are indented by 2+ spaces.
 
 ## Inserting a NEW line right after an existing `# shellcheck disable=SC2XXX` directive silently REBINDS it to the wrong statement (issue 1260)
