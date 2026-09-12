@@ -209,6 +209,43 @@ jobs:
           if ($src -notmatch [regex]::Escape("genlock-acquire-bracket '%s':") -or $src -notmatch [regex]::Escape('oldest_queued_age_ms=') -or $src -notmatch [regex]::Escape('decision=')) { Write-Error "the #1161 ACQUIRE-bracket observability marker (genlock-acquire-bracket, reserve vs oldest_queued_age + HOLD/ACQUIRE) is gone — a live pin-rise re-acquire leaves no trace, a below-floor inert pin cannot be diagnosed (#1161)"; exit 1 }
           Write-Output "#1161 Stage-2 ACQUIRE bracketing gate present — OK"
 
+      # #1298: the fast path builds obs.dll + the frontend from the real vendored source, so a
+      # `git subtree pull` (#44) that reverts the in-OBS genlock LOCK indicator would hot-swap a
+      # bundle with no lock UI un-gated. Mirror the slow windows-genlock.yml #1298 gate + the
+      # Linux-CI tests/genlock_lock_indicator_guards.rs here. Pure source-text guard (no build).
+      - name: Assert in-OBS genlock LOCK indicator present (#1298)
+        shell: pwsh
+        run: |
+          $obs = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($obs -notmatch [regex]::Escape('static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_stats *stats)')) {
+            Write-Error "obs-source.c: genlock_fill_stats (the shared stats snapshot) missing — #1298 reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('struct obs_genlock_stats gs; genlock_fill_stats(source, &gs);')) {
+            Write-Error "obs-source.c: the genlock-fifo audit no longer routes through the shared fill — #1298 API/log divergence risk"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('bool obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock_stats *stats)')) {
+            Write-Error "obs-source.c: obs_source_get_genlock_stats missing — #1298 reverted"; exit 1
+          }
+          $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
+          if ($api -notmatch [regex]::Escape('struct obs_genlock_stats {')) {
+            Write-Error "obs.h: struct obs_genlock_stats missing — #1298 reverted"; exit 1
+          }
+          if ($api -notmatch [regex]::Escape('struct obs_genlock_output_stats {') -or $api -notmatch [regex]::Escape('obs_output_set_genlock_wall_stamping(obs_output_t *output, bool stamping)')) {
+            Write-Error "obs.h: the per-output genlock stats API (struct + wall-stamping setter) missing — #1298 reverted"; exit 1
+          }
+          $ndi = (Get-Content "vendor/distroav/src/ndi-output.cpp" -Raw) -replace '\s+', ' '
+          if ($ndi -notmatch [regex]::Escape('obs_output_set_genlock_wall_stamping(o->output, true);')) {
+            Write-Error "ndi-output.cpp: the genlock NDI sender no longer registers wall-clock stamping — #1298 reverted"; exit 1
+          }
+          $sb = (Get-Content "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp" -Raw) -replace '\s+', ' '
+          if ($sb -notmatch [regex]::Escape('#include "GenlockLockState.hpp"') -or $sb -notmatch [regex]::Escape('genlock_decide_lock_state(&f, &reason)')) {
+            Write-Error "OBSBasicStatusBar.cpp: the statusbar genlock indicator (GenlockLockState.hpp / genlock_decide_lock_state) is gone — #1298 reverted"; exit 1
+          }
+          if ($sb -notmatch [regex]::Escape('genlock-lock: state=%s inputs=%d/%d')) {
+            Write-Error "OBSBasicStatusBar.cpp: the genlock-lock: log line is gone — #1298 reverted"; exit 1
+          }
+          Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log) — OK"
+
       # #249: the fast path builds obs.dll from the real vendored source, so a `git subtree pull`
       # (#44) that reverts #245 to inert-but-still-compiling would hot-swap an INERT obs.dll un-gated
       # (the #235 regression: latency collapsed to one GLOBAL env knob, no per-source override). The
