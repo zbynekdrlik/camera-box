@@ -64,6 +64,14 @@ set -euo pipefail
 # per-class default (every member must be in the fleet). --dry-run reads + reports the plan,
 # changes nothing. --force allows a downgrade (target OLDER than installed).
 #
+# TRAVELING CG box RESOLUME-SNV (issue 1297): it is a windows-class obs-fleet member whose DHCP
+# lease drifts (resolume.lan, colliding with `bridge` on 10.77.9.201 -- targets.md), so resolve +
+# identity-confirm it live and format its --win spec with `dantesync_resolume_win_spec "$(getent
+# hosts resolume.lan | awk 'NR==1{print $1}')"`, e.g.
+#   scripts/dantesync-fleet-upgrade.sh --win "strih=newlevel@10.77.9.202 $(...)"
+# A traveling box that is currently AWAY (obs_fleet_is_home false, #1296) is SKIPPED from the roll
+# -- never a failed node -- so a fleet roll may always list it; it joins only while home.
+#
 # Env: SSH_PASS (default newlevel; also the sudo password fed to sudo -S on non-root Linux nodes),
 #      DANTESYNC_GATE_BOUND_US (offset bound, passed to the gate),
 #      GATE_WAIT_TRIES/GATE_WAIT_SECS (post-restart settle poll for a SLAVE node's verification gate),
@@ -85,6 +93,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/dantesync-version-gate.sh"   # dantesync_version_from_version_output + DANTESYNC_VERSION_PIN (source-safe)
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$HERE/lib/cambox-offline-ack.sh"   # cambox_offline_ack_is_acked/_reason (shared exclusion)
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"            # obs_fleet_is_home / obs_fleet_home_check (#1296 traveling-box gate, issue 1297)
 
 # The GitHub release download base for the (Claude-stewarded) dantesync repo. Releases are
 # ALL-OR-NOTHING (dantesync #56): a published tag always carries BOTH the Linux and Windows
@@ -415,6 +425,35 @@ dantesync_is_ntp_master() {
   [ -n "$2" ] && [ "$1" = "$2" ]
 }
 
+# --- traveling CG box (RESOLUME-SNV) support (issue 1297) -------------------------------------
+
+# dantesync_resolume_win_spec IP -> the `--win` node spec "resolume=<user>@IP" for the CG box.
+# resolume.lan's DHCP lease drifts and COLLIDES with `bridge` on 10.77.9.201 (targets.md), so the
+# CALLER resolves it live (`getent hosts resolume.lan`) and confirms the box IDENTITY before passing
+# the IP here; this helper only formats the spec so the drifting IP + the newlevel@ user are never
+# hand-typed into a roll. Empty IP -> empty output (the caller then knows resolume was unresolvable
+# and must not be rolled). User overridable via DANTESYNC_RESOLUME_USER (default newlevel).
+dantesync_resolume_win_spec() {
+  local ip="${1:-}"
+  [ -n "$ip" ] || { printf ''; return 0; }
+  printf 'resolume=%s@%s' "${DANTESYNC_RESOLUME_USER:-newlevel}" "$ip"
+}
+
+# dantesync_skip_away_traveling NAME -> 0 (TRUE: SKIP this node) iff NAME is an obs-fleet
+# `traveling` box (home-check=traveling) AND it is NOT currently home (obs_fleet_is_home false).
+# Reuses the #1296 obs-fleet home gate so a fleet roll that INCLUDES a traveling box (resolume)
+# simply SKIPS it while it is powered off/away, instead of failing the whole roll on an unreachable
+# node. Returns 1 (do NOT skip) for an always-home box, a home traveling box, OR an unknown name
+# (fail-safe: never silently skip a box we cannot classify -- it proceeds and fails loudly on its
+# own reachability check if it really is unreachable).
+dantesync_skip_away_traveling() {
+  local name="${1:-}" check
+  check="$(obs_fleet_home_check "$name" 2>/dev/null || true)"
+  [ "$check" = "traveling" ] || return 1
+  obs_fleet_is_home "$name" && return 1
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), stop here ----------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -730,6 +769,12 @@ declare -a NODES=()
 add_node() {  # NAME KIND ADDR
   if cambox_offline_ack_is_acked "$1"; then
     log "  $1 EXCLUDED (acked offline: $(cambox_offline_ack_reason "$1"))"
+    return 0
+  fi
+  # issue 1297: a TRAVELING obs-fleet box (resolume) that is currently AWAY is SKIPPED from the
+  # roll (never a failed node) -- a fleet roll may always list it; it joins only while home.
+  if dantesync_skip_away_traveling "$1"; then
+    log "  $1 SKIPPED (traveling box away -- obs_fleet_is_home false; will roll when home)"
     return 0
   fi
   NODES+=("$1|$2|$3")
