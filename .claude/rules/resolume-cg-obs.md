@@ -39,6 +39,23 @@ hand the TVs a frameless ghost. For cg OBS the same ordering discipline applies 
 confirm `RESOLUME-SNV (cg-obs)` is the sender the downstream consumers resolve (the NDI port-map
 watchdog baseline, `.claude/rules/ndi-portmap-watchdog.md`, is the durable guard once registered).
 
+## AHK v2 safe-loop on this box — `has_ahk=1` (issue 1295 correction)
+
+RESOLUME-SNV RUNS an AutoHotkey **v2** auto-respawn watcher, exactly like strih (the code half
+wrongly assumed `has_ahk=0`; the supervisor's 2026-09-13 pre-deploy inventory corrected it):
+`C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe` runs `C:\Users\Resolume\Documents\_NLMEDIA
+resolume\_APPS\NL_STARTUP.ahk` (Startup shortcut `NL_STARTUP.ahk - Shortcut.lnk`, `SafeLoop := 1`),
+respawning **both Resolume Arena AND OBS**. So both planners set `has_ahk=1` for resolume and emit
+the strih-shape **stop AutoHotkey64 → deploy/relaunch → verify → restart-AHK-verified** program,
+and the `SessionId=1` / `MainWindowTitle` acceptance gate covers BOTH `obs64` and `AutoHotkey64`.
+A deploy/relaunch that does NOT stop the watcher first races a **SECOND obs64** (the likely origin
+of the dead 0-thread pid seen 2026-09-12). The relaunch identity is per-box: resolume passes its own
+v2 `.ahk` path (the space is double-quoted in the `ArgumentList`) and PREFERS the Startup `.lnk` as
+the relaunch target, so a future path move on this traveling box cannot break the relaunch (the
+`%ProgramFiles%\AutoHotkey\v2\` exe candidates still back it up). The `.ahk` ALSO RunAs-launches an
+`Arena-Bridge` app under a second user — it embeds a credential; the planner NEVER reads, echoes, or
+copies the `.ahk` body, it only stops/relaunches the watcher by process name / the `.lnk`.
+
 ## SUPERVISOR RUNBOOK — the exact ordered commands for the live sitting
 
 Run when the box is home + its IDENTITY is CONFIRMED (the plan prints this step; `resolume.lan`
@@ -56,8 +73,10 @@ live `getent hosts resolume.lan` address.
 
    Follow the emitted plan: the STEP -1 identity-confirm, then upload the staged bytes to
    `C:\stage-genlock-<sha>` via the **win-resolume MCP** FileUpload, then paste the emitted deploy
-   program into the **win-resolume MCP Shell** (timeout ≥ 240 s). It stops obs64, backs up, swaps
-   the bytes, writes the markers, and byte-verifies the deployed obs.dll/distroav.dll.
+   program into the **win-resolume MCP Shell** (timeout ≥ 240 s). It stops the AutoHotkey64 watcher
+   (so it can't respawn obs64 mid-copy) + obs64, backs up, swaps the bytes, writes the markers,
+   byte-verifies the deployed obs.dll/distroav.dll, and restarts the AHK watcher VERIFIED (failing
+   loud if it doesn't come back — the STEP-2 launch session gate expects it running).
 
 2. **RELAUNCH** OBS in the interactive session (NEVER over ssh — `win-ssh-vs-mcp`):
 
@@ -65,8 +84,11 @@ live `getent hosts resolume.lan` address.
    bash scripts/launch-obs-genlock.sh --box resolume --force
    ```
 
-   Paste its emitted program into the **win-resolume MCP Shell**. It verifies `render tick ENABLED`
-   + DistroAV loaded + the SessionId/MainWindowTitle session-visibility gate, failing loud otherwise.
+   Paste its emitted program into the **win-resolume MCP Shell**. It stops AutoHotkey64 before the
+   obs64 force-kill (so the watcher can't race a duplicate obs64), relaunches via the box's
+   `OBS Studio.lnk`, restarts AutoHotkey64 VERIFIED, then verifies `render tick ENABLED` + DistroAV
+   loaded + the SessionId/MainWindowTitle session-visibility gate over BOTH obs64 AND AutoHotkey64,
+   failing loud otherwise.
 
 3. **CONFIRM the pins** (NOT a write — the build defaulted them). From dev1 (read-only OBS-WS,
    session-agnostic):

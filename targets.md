@@ -76,9 +76,20 @@ supervisor runbook is `.claude/rules/resolume-cg-obs.md`). Box facts:
 - **NDI main output** `RESOLUME-SNV (cg-obs)` — the name strih's `cg` input and the stock LED TVs
   cache; the #1185 `:5961` creation-order pin semantics apply to this box too (see
   `.claude/rules/distroav-sender-output-lifecycle.md`).
-- **Exactly ONE `obs64`** is the fleet bar (the session-visibility gate asserts it). A dead SECOND
-  `obs64` (pid 58560, 0 threads, parent 31700) was seen listed beside the live one 2026-09-12 — a
-  stale/dead process handle; kill the 0-thread one, keep the live instance.
+- **AHK v2 safe-loop (like strih) — `has_ahk=1` in the deploy/launch planners (issue 1295).** The
+  box runs `C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe` executing `C:\Users\Resolume\Documents\
+  _NLMEDIA resolume\_APPS\NL_STARTUP.ahk` (Startup shortcut `NL_STARTUP.ahk - Shortcut.lnk`,
+  `SafeLoop := 1`) which **respawns Resolume Arena AND OBS** — the same respawn pattern as strih's
+  `scripts/strih/NL_STARTUP.ahk`. So `deploy-genlock-fleet.sh --boxes resolume` and
+  `launch-obs-genlock.sh --box resolume` STOP AutoHotkey64 first, then deploy/relaunch, then restart
+  + verify it (the relaunch PREFERS the Startup `.lnk`; its exe/path is per-box). **A force-kill
+  relaunch that does NOT stop the watcher first spawns a SECOND obs64** (the likely origin of the
+  dead 0-thread pid 58560 below). The `.ahk` also RunAs-launches an `Arena-Bridge` app under a second
+  user — it holds a credential; never read, echo, or copy the `.ahk` body.
+- **Exactly ONE `obs64`** is the fleet bar (the session-visibility gate asserts it, over BOTH obs64
+  and AutoHotkey64). A dead SECOND `obs64` (pid 58560, 0 threads, parent 31700) was seen listed
+  beside the live one 2026-09-12 — a stale/dead process handle; kill the 0-thread one, keep the live
+  instance.
 - **Crash dir** — `Crash <ts>.txt` files (e.g. `Crash 2026-09-12 19-05-41.txt`) under the OBS
   crash-log location; read via the win-resolume MCP FileRead, never ssh.
 - **NOT in the E2E `[0/8]` version gate** (a traveling box, not a measured cam→strih→stream source)
