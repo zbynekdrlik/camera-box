@@ -83,14 +83,29 @@ impl HopContiguity {
 
 /// Presence-only contiguity over a burn-id list. Empty input ⇒ `first_id == None` ⇒ NOT
 /// contiguous (nothing proven).
-pub fn hop_contiguity(_ids: &[u32]) -> HopContiguity {
-    // [red] stub — not yet implemented (GREEN fills the real first..=last/missing computation).
+pub fn hop_contiguity(ids: &[u32]) -> HopContiguity {
+    let present: BTreeSet<u32> = ids.iter().copied().collect();
+    let (first, last) = match (present.iter().next().copied(), present.iter().next_back().copied())
+    {
+        (Some(f), Some(l)) => (f, l),
+        _ => {
+            return HopContiguity {
+                first_id: None,
+                last_id: None,
+                present_count: 0,
+                expected_count: 0,
+                missing_ids: Vec::new(),
+            }
+        }
+    };
+    let missing_ids: Vec<u32> = (first..=last).filter(|id| !present.contains(id)).collect();
     HopContiguity {
-        first_id: None,
-        last_id: None,
-        present_count: 0,
-        expected_count: 0,
-        missing_ids: Vec::new(),
+        first_id: Some(first),
+        last_id: Some(last),
+        present_count: present.len() as u32,
+        // last >= first by construction, and both are u32 ids well under u32::MAX.
+        expected_count: last - first + 1,
+        missing_ids,
     }
 }
 
