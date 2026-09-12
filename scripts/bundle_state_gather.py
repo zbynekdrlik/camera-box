@@ -122,7 +122,6 @@ def genlock_lock_facet_from_log(text):
 
     `state`/`reason` are the verdict the widget ALREADY decided (so the facet can never disagree
     with the statusbar). The per-input array is keyed by name; a duplicate name keeps the last."""
-    return None  # #1299 RED stub -- the GREEN commit removes this line; the parse follows below.
     t = text or ""
     if _GENLOCK_LOCK_JSON_MARKER not in t:
         return None

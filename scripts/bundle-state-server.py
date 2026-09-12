@@ -669,10 +669,16 @@ def gather_bundle_state(
             # age + per-window counts) from the SAME bounded log_text (no second read); the dev1
             # upstream-step watchdog reads these facets.
             bsg.av_offset_series_from_log(log_text),
+            # #1299 — the fleet-visible genlock LOCK facet (the decided state the #1298 statusbar
+            # emits on its genlock-lock-json: line) from the SAME bounded log_text (no second read);
+            # the dev1 genlock-lock watchdog + rig-status read it. None -> facet omitted (a stock OBS
+            # / no line yet), never a false UNLOCKED.
+            bsg.genlock_lock_facet_from_log(log_text),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
-     audio_ts_lag, audio_ref_band, av_offset) = _timed(timings, "obs_log_parse", _parse_log_facets)
+     audio_ts_lag, audio_ref_band, av_offset, genlock_lock) = _timed(
+        timings, "obs_log_parse", _parse_log_facets)
     audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
     (audio_ref_lag_src_val, audio_ref_lag_base_ms_val, audio_ref_lag_high_ms_val,
      audio_ref_lag_low_ms_val, audio_ref_lag_duty_pct_val, audio_ref_lag_n_val) = audio_ref_band
@@ -799,6 +805,14 @@ def gather_bundle_state(
         vb_matrix_pid=vb_matrix_pid_val,
         vb_matrix_start=vb_matrix_start_val,
     )
+
+    # #1299 — the genlock_lock facet is a NESTED object, not a flat string, so it is attached here
+    # rather than through build_bundle_state (whose every-value-is-a-quoted-string contract the
+    # version-integrity gate's regex depends on; it simply ignores this extra key). Omit-when-absent:
+    # a stock OBS / no genlock-lock-json: line yields None -> the facet never appears (UNKNOWN
+    # downstream), never a false UNLOCKED.
+    if genlock_lock is not None:
+        result["genlock_lock"] = genlock_lock
 
     timings["total"] = time.perf_counter() - t_total0
     if os.environ.get("BUNDLE_STATE_TIMING") == "1":
