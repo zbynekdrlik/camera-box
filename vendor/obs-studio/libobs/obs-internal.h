@@ -1513,7 +1513,13 @@ struct obs_output {
 	char *last_error_message;
 
 	float audio_data[MAX_AUDIO_CHANNELS][AUDIO_OUTPUT_FRAMES];
-};
+
+	/* camera-box #1298: genlock wall-clock stamping state for the in-OBS statusbar lock
+	 * indicator. Set by DistroAV's genlock NDI sender via obs_output_set_genlock_wall_stamping;
+	 * bzalloc zero-inits both to false, so a non-genlock output reports is_genlock_output=false
+	 * (facet ABSENT — never forces the indicator to UNLOCKED). */
+	bool genlock_is_genlock_output;
+	bool genlock_wall_stamping;
 
 static inline void do_output_signal(struct obs_output *output, const char *signal)
 {

@@ -1637,6 +1637,41 @@ EXPORT uint32_t obs_source_get_genlock_latency_ms(const obs_source_t *source);
 EXPORT void obs_source_set_genlock_burn(obs_source_t *source, bool enabled);
 EXPORT bool obs_source_get_genlock_burn(const obs_source_t *source);
 
+/* camera-box #1298: a per-source genlock FIFO stats snapshot, read by BOTH the
+ * `genlock-fifo audit` log line AND the in-OBS statusbar lock indicator (and the issue-1299
+ * bundle-state facet over obs-websocket) so the logged numbers and the UI can never disagree
+ * — both route through one internal fill (genlock_fill_stats). Additive + versioned: grow it
+ * ONLY by appending fields and bumping OBS_GENLOCK_STATS_VERSION; a consumer reads `version`
+ * before touching any field added after v1. */
+#define OBS_GENLOCK_STATS_VERSION 1
+struct obs_genlock_stats {
+	uint32_t version;             /* = OBS_GENLOCK_STATS_VERSION */
+	bool genlock_fifo;            /* this source is genlock-FIFO enabled */
+	bool locked;                  /* cadence locked onto a boundary (genlock_locked_next_boundary_ns != 0) */
+	uint64_t frames_received;     /* video frames queued onto the FIFO */
+	uint64_t frames_consumed;     /* frames handed to the compositor (one per tick) */
+	uint64_t underruns;           /* TRUE-EMPTY FIFO starvation */
+	uint64_t holds;               /* benign source-early / build-fill repeats */
+	uint64_t overruns;            /* drop-cap drains */
+	uint64_t backward_steps;      /* #147 wall-clock backward-step re-anchors (events) */
+	uint64_t backward_regime_ticks; /* #1009 cumulative re-anchored ticks */
+	uint64_t dropped_due;         /* #401 frames discarded by the release */
+	uint64_t relocks;             /* #401 backlog re-locks */
+	uint64_t late_holds;          /* #401 holds because the due frame never arrived */
+	uint32_t converge_sheds;      /* #1049 settle-back phase-convergence sheds */
+	size_t depth;                 /* async_frames.num at the snapshot */
+	uint32_t peak_depth;          /* high-water depth */
+	uint32_t latency_ms;          /* effective per-source latency (override else global) */
+	int64_t ts_head_skew_ms;      /* last ts-align head-frame skew, ms */
+	int64_t wall_qpc_drift_ms;    /* process-global wall-vs-monotonic clock drift, ms (#800) */
+};
+
+/* Fill `stats` from `source`'s live genlock counters (version-stamped). Returns true for a
+ * valid source; false (with `stats` zero-filled, version set) for an invalid handle. Safe
+ * from any thread — reads the source under async_mutex. The numbers are the SAME ones the
+ * `genlock-fifo audit` line prints. */
+EXPORT bool obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock_stats *stats);
+
 /* camera-box #803: per-source ASRC (async sample-rate conversion) toggle -- continuously holds
  * this source's audio timeline on the video master clock via a servo (media-io/asrc-compensator.h)
  * driving a soft libswresample resample-ratio nudge (audio_resampler_set_compensation_ppm()), so a
@@ -2077,6 +2112,28 @@ EXPORT void obs_output_force_stop(obs_output_t *output);
 
 /** Returns whether the output is active */
 EXPORT bool obs_output_active(const obs_output_t *output);
+
+/* camera-box #1298: per-output genlock stamping stats for the in-OBS statusbar lock
+ * indicator. The genlock DistroAV NDI sender stamps every outgoing frame's timecode with the
+ * real DanteSync wall clock (ndi-output.cpp) and registers that via
+ * obs_output_set_genlock_wall_stamping, so the indicator can distinguish a wall-stamped
+ * genlock output (strih/stream) from a box with NO genlock sender at all (imag, a pure
+ * receiver) — the latter must NOT read as UNLOCKED. Additive + versioned, same contract as
+ * obs_genlock_stats. */
+#define OBS_GENLOCK_OUTPUT_STATS_VERSION 1
+struct obs_genlock_output_stats {
+	uint32_t version;            /* = OBS_GENLOCK_OUTPUT_STATS_VERSION */
+	bool is_genlock_output;      /* a genlock-aware NDI sender registered via the setter */
+	bool wall_timecode_stamping; /* currently stamping real wall-clock timecodes */
+};
+
+/* Register (stamping=true at output start) / clear (stamping=false at stop) this output as a
+ * genlock wall-clock-stamping NDI sender. Called by DistroAV's genlock output; `is_genlock_output`
+ * latches true on the first call so a later stamping=false still reports "present, not stamping". */
+EXPORT void obs_output_set_genlock_wall_stamping(obs_output_t *output, bool stamping);
+/* Fill `stats` from `output`. Returns true for a valid output; false (with `stats` zero-filled,
+ * version set) for an invalid handle. */
+EXPORT bool obs_output_get_genlock_stats(const obs_output_t *output, struct obs_genlock_output_stats *stats);
 
 /** Returns output capability flags */
 EXPORT uint32_t obs_output_get_flags(const obs_output_t *output);

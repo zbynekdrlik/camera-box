@@ -5098,6 +5098,45 @@ static inline void genlock_clear_ts_sample(obs_source_t *source)
 	source->genlock_last_head_skew_ns = 0;
 }
 
+/* camera-box #1298: fill `stats` from the source's live genlock counters. This is the ONE
+ * place the per-source health counters are snapshotted; BOTH the `genlock-fifo audit` log
+ * line (genlock_audit_log, below) and the public API (obs_source_get_genlock_stats) read it,
+ * so the logged numbers and the numbers the in-OBS statusbar indicator shows can NEVER
+ * disagree. Lock-free field copy (no mutex here) — the public getter wraps it under
+ * async_mutex for the UI thread; genlock_audit_log is already on the A/V thread where these
+ * fields are written, exactly like its prior direct reads. `effective_latency_ms` = the
+ * source's own override when set (>0) else the global default, matching the audit's headline
+ * latency. Version-stamped + additive: grow obs_genlock_stats only by APPENDING fields and
+ * bumping OBS_GENLOCK_STATS_VERSION (the statusbar + the issue-1299 bundle-state facet read
+ * `version` before touching any field added after v1). */
+static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_stats *stats)
+{
+	memset(stats, 0, sizeof(*stats));
+	stats->version = OBS_GENLOCK_STATS_VERSION;
+	if (!source)
+		return;
+	const uint32_t effective_latency_ms =
+		source->genlock_latency_ms > 0 ? source->genlock_latency_ms : genlock_latency_ms();
+	stats->genlock_fifo = source->genlock_fifo;
+	stats->locked = source->genlock_locked_next_boundary_ns != 0;
+	stats->frames_received = source->genlock_frames_received;
+	stats->frames_consumed = source->genlock_frames_consumed;
+	stats->underruns = source->genlock_underruns;
+	stats->holds = source->genlock_holds;
+	stats->overruns = source->genlock_overruns;
+	stats->backward_steps = source->genlock_backward_steps;
+	stats->backward_regime_ticks = source->genlock_backward_regime_ticks;
+	stats->dropped_due = source->genlock_dropped_due;
+	stats->relocks = source->genlock_relocks;
+	stats->late_holds = source->genlock_late_holds;
+	stats->converge_sheds = source->genlock_converge_sheds;
+	stats->depth = source->async_frames.num;
+	stats->peak_depth = source->genlock_peak_depth;
+	stats->latency_ms = effective_latency_ms;
+	stats->ts_head_skew_ms = (int64_t)(source->genlock_last_head_skew_ns / 1000000);
+	stats->wall_qpc_drift_ms = (int64_t)genlock_wall_qpc_drift_ms();
+}
+
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
  * visible in the OBS log before AND after the fix (the verification evidence).
  * `now_ns` is the monotonic render-tick stamp (obs->video.video_time). */
@@ -5108,6 +5147,12 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	if (now_ns - source->genlock_last_log_ns < GENLOCK_AUDIT_LOG_INTERVAL_NS)
 		return;
 	source->genlock_last_log_ns = now_ns;
+	/* camera-box #1298: snapshot the health counters through the ONE shared fill so this
+	 * log line and obs_source_get_genlock_stats (the statusbar indicator) can never disagree.
+	 * The audit's extra fields (cap, preload, empty_run, ts present/due) stay read directly —
+	 * they are audit-only and not part of the public stats struct. */
+	struct obs_genlock_stats gs;
+	genlock_fill_stats(source, &gs);
 	/* camera-box #97: print the per-source preload AND its ms-equivalent video
 	 * delay (preload=N (=M ms @ Ffps)) so the live delay is visible in the OBS log
 	 * for the operator + post-deploy verification. */
@@ -5166,22 +5211,23 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     "wall_qpc_drift_ms=%lld "
 	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800)",
 	     source->context.name ? source->context.name : "?",
-	     (unsigned long long)source->genlock_frames_received,
-	     (unsigned long long)source->genlock_frames_consumed,
-	     (unsigned long long)source->genlock_underruns,
-	     (unsigned long long)source->genlock_holds,
-	     (unsigned long long)source->genlock_overruns,
-	     (unsigned long long)source->genlock_backward_steps,
+	     /* camera-box #1298: the health counters now come from the shared snapshot `gs`
+	      * (genlock_fill_stats) so this line and obs_source_get_genlock_stats cannot
+	      * disagree; format string + field names + order unchanged. */
+	     (unsigned long long)gs.frames_received,
+	     (unsigned long long)gs.frames_consumed,
+	     (unsigned long long)gs.underruns,
+	     (unsigned long long)gs.holds,
+	     (unsigned long long)gs.overruns,
+	     (unsigned long long)gs.backward_steps,
 	     /* camera-box #401: the phase-locked cadence's honest loss/state signals —
 	      * dropped_due (frames the release DISCARDED — the pre-#401 silent erase),
 	      * relocks (drift-guard catch-up jumps), late_holds (boundary matured but the
 	      * frame never arrived — upstream late/lost, distinct from the benign
 	      * source-early holds=), locked (0 = cadence unlocked / re-acquiring). */
-	     (unsigned long long)source->genlock_dropped_due, (unsigned long long)source->genlock_relocks,
-	     (unsigned long long)source->genlock_late_holds,
-	     source->genlock_locked_next_boundary_ns != 0 ? 1 : 0, source->async_frames.num,
-	     source->genlock_peak_depth, latency_ms, latency_frames, fps,
-	     source->genlock_latency_ms, global_latency_ms,
+	     (unsigned long long)gs.dropped_due, (unsigned long long)gs.relocks,
+	     (unsigned long long)gs.late_holds, gs.locked ? 1 : 0, gs.depth, gs.peak_depth, latency_ms,
+	     latency_frames, fps, source->genlock_latency_ms, global_latency_ms,
 	     source->genlock_preload, (unsigned long long)genlock_preload_ms(source->genlock_preload),
 	     latency_ms /* reserve_ms == effective latency_ms; kept for the #128 log verify */,
 	     genlock_source_drop_cap(source), source->genlock_empty_run,
@@ -5193,10 +5239,12 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * this never prints a STALE sample from an earlier ts-align tick. */
 	     (unsigned long long)source->genlock_last_present_ts,
 	     source->genlock_last_due,
-	     (long long)(source->genlock_last_head_skew_ns / 1000000),
-	     (unsigned long long)source->genlock_backward_regime_ticks,
-	     source->genlock_converge_sheds,
-	     genlock_wall_qpc_drift_ms());
+	     /* camera-box #1298: skew / regime-ticks / converge-sheds / wall-qpc-drift also from
+	      * the shared snapshot `gs` — same values, one source of truth. */
+	     (long long)gs.ts_head_skew_ms,
+	     (unsigned long long)gs.backward_regime_ticks,
+	     gs.converge_sheds,
+	     (long long)gs.wall_qpc_drift_ms);
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
@@ -8121,6 +8169,27 @@ double obs_source_get_asrc_estimated_ppm(const obs_source_t *source)
 double obs_source_get_asrc_applied_ppm(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_get_asrc_applied_ppm") ? source->asrc.applied_ppm : 0.0;
+}
+
+/* camera-box #1298: public snapshot of this source's genlock FIFO stats for the in-OBS
+ * statusbar lock indicator. Reads the SAME counters the `genlock-fifo audit` log line prints
+ * (both route through genlock_fill_stats) so the UI and the log can never disagree. Wrapped
+ * under async_mutex because the UI thread calls this while the A/V thread writes the fields
+ * (cast away const for the lock op only, exactly like obs_source_get_genlock_latency_ms).
+ * An invalid handle zero-fills `stats` (version included) and returns false. */
+bool obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock_stats *stats)
+{
+	if (!stats)
+		return false;
+	if (!obs_source_valid(source, "obs_source_get_genlock_stats")) {
+		memset(stats, 0, sizeof(*stats));
+		stats->version = OBS_GENLOCK_STATS_VERSION;
+		return false;
+	}
+	pthread_mutex_lock(&((obs_source_t *)source)->async_mutex);
+	genlock_fill_stats(source, stats);
+	pthread_mutex_unlock(&((obs_source_t *)source)->async_mutex);
+	return true;
 }
 
 void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)

@@ -3338,3 +3338,34 @@ void obs_output_set_reconnect_callback(obs_output_t *output,
 		output->reconnect_callback.param = param;
 	}
 }
+
+/* camera-box #1298: register / clear this output as a genlock wall-clock-stamping NDI sender.
+ * DistroAV's genlock output calls this with stamping=true once the send path is live and
+ * stamping=false on stop. `is_genlock_output` latches true on the first call so a later
+ * stamping=false still reads "present, not stamping" (the UNLOCKED `output` reason) rather than
+ * "absent". A plain bool pair (same torn-read tolerance as obs_source_set_genlock_burn). */
+void obs_output_set_genlock_wall_stamping(obs_output_t *output, bool stamping)
+{
+	if (!obs_output_valid(output, "obs_output_set_genlock_wall_stamping"))
+		return;
+	output->genlock_is_genlock_output = true;
+	output->genlock_wall_stamping = stamping;
+	blog(LOG_INFO, "genlock: output '%s' wall-clock timecode stamping %s (#1298)",
+	     obs_output_get_name(output), stamping ? "ON" : "off");
+}
+
+/* camera-box #1298: public snapshot of this output's genlock stamping state for the in-OBS
+ * statusbar lock indicator. An invalid handle zero-fills `stats` (version included) and
+ * returns false. */
+bool obs_output_get_genlock_stats(const obs_output_t *output, struct obs_genlock_output_stats *stats)
+{
+	if (!stats)
+		return false;
+	memset(stats, 0, sizeof(*stats));
+	stats->version = OBS_GENLOCK_OUTPUT_STATS_VERSION;
+	if (!obs_output_valid(output, "obs_output_get_genlock_stats"))
+		return false;
+	stats->is_genlock_output = output->genlock_is_genlock_output;
+	stats->wall_timecode_stamping = output->genlock_wall_stamping;
+	return true;
+}
