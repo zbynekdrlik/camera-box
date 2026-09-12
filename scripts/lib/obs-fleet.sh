@@ -42,11 +42,12 @@
 #   * bundle-state defers a fully-unreachable box to #1001 already (no page/restart against a dark
 #     box), so it is traveling-safe without an is_home gate.
 #
-# home-check PORT (#1296): the ticket's example home-check was "resolves + :8898/status answers", but
-# RESOLUME-SNV carries NO dantesync (:8898 is dantesync's status port, dantesync#47) per
-# tests/harness_network_reach_watchdog_811.rs -- so :8898 would never answer even when home, making
-# the gate inert. The honest home signal is the genlock cg-obs's OBS-WebSocket port :4455 (live when
-# home, #1295), overridable via OBS_FLEET_HOME_PORT. CAVEAT: resolume.lan currently resolves to
+# home-check PORT (#1296): the ticket's example home-check was "resolves + :8898/status answers".
+# RESOLUME-SNV DOES run dantesync (1.8.53, :8898 answers whenever the box is up -- supervisor read-back
+# 2026-09-12; the older harness_network_reach_watchdog_811.rs "no dantesync" premise predates the
+# issue-811 deploy), but :8898 alone would read "home" with the cg OBS DOWN -- and every watchdog that
+# consults this gate cares about the OBS being up. So the home+serving signal is the genlock cg-obs's
+# OBS-WebSocket port :4455 (live when home, #1295), overridable via OBS_FLEET_HOME_PORT. CAVEAT: resolume.lan currently resolves to
 # 10.77.9.201, the SAME IP `bridge` lists in targets.md (event-LAN DHCP collision) -- if `bridge`
 # answers :4455 at .201 while resolume is off, is_home may read a FALSE home, but network-reach then
 # also classifies that address REACHABLE so it still never pages; always confirm box IDENTITY

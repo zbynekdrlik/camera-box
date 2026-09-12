@@ -34,8 +34,9 @@ tests/ops). Three helpers consume it:
 - **`obs_fleet_is_home <name>`** — the traveling-box gate. `always` boxes (strih/stream/imag) are
   unconditionally home. A `traveling` box (resolume) is home iff it resolves AND its OBS-WS
   (`OBS_FLEET_HOME_PORT`, default 4455) answers. **NOT the ticket's `:8898`/dantesync example —
-  RESOLUME-SNV carries no dantesync (issue 811), so :8898 would be inert; OBS-WS :4455 is the honest
-  "home + serving" signal** (resolume runs a genlock cg-obs). The `OBS_FLEET_HOME` env force-list
+  RESOLUME-SNV DOES run dantesync 1.8.53 (:8898 answers whenever the box is up, supervisor read-back
+  2026-09-12), but :8898 alone would read "home" with the cg OBS down; OBS-WS :4455 is the honest
+  "home + serving" signal** (resolume runs a genlock cg-obs; the watchdogs need the OBS, not just the box). The `OBS_FLEET_HOME` env force-list
   (space-separated names) short-circuits the live probe for tests/ops and keeps the offline tests
   offline.
 - **`obs_fleet_host`/`obs_fleet_class`/`obs_fleet_home_check <name>`** — plain fact lookups.
