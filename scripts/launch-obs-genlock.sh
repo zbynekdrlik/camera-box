@@ -228,9 +228,9 @@ Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction Silent
 #     for camera/mic access; a bare exe launch dropped them and rendered a "Permissions denied"
 #     box on program output, user-caught live). Fallback to the bare exe ONLY if the shortcut is
 #     genuinely absent (fail-open recovery beats no OBS at all -- the verify below still gates).
-#     NB on strih: D:\\_APPS\\NL_STARTUP.ahk auto-respawns obs64 from this same dir, but it won't
-#     double-launch once one is running, so this Start-Process wins; the log verify below fails loud
-#     on a non-genlock build regardless. See obs-ops skill.
+#     NB on an AHK box (strih/resolume): its NL_STARTUP.ahk auto-respawns obs64 from this same dir,
+#     but it won't double-launch once one is running, so this Start-Process wins; the log verify
+#     below fails loud on a non-genlock build regardless. See obs-ops skill.
 \$obsDir = '${obs_dir_ps}'
 \$exe    = '${exe_ps}'
 \$lnk    = "\$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\OBS Studio.lnk"
