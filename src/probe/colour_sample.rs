@@ -156,10 +156,10 @@ pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
     let right_burn_x = canvas_w.saturating_sub(margin).saturating_sub(side); // bottom-right band_x
     let bcr_x = if right_burn_x > margin.saturating_add(side) {
         right_burn_x - margin - side // tier 1
-    } else if right_burn_x > side {
-        right_burn_x - side // tier 2: flush against bottom-right's left edge
     } else {
-        0 // tier 3
+        // tier 2: flush against bottom-right's left edge; saturates to tier 3 (frame-left, 0)
+        // on a degenerate canvas -- same three tiers as burn_geom, clippy-clean shape.
+        right_burn_x.saturating_sub(side)
     };
     rects.push(Rect {
         x: bcr_x,
