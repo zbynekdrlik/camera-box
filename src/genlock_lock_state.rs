@@ -106,8 +106,38 @@ pub struct GenlockFacets {
 /// some-input-unlocked > recent-event > ntp-failed > qpc-drift. Otherwise LOCKED.
 ///
 /// Mirror of `genlock_decide_lock_state` in `GenlockLockState.hpp` — keep both in lock-step.
-pub fn decide(_f: &GenlockFacets) -> (LockState, LockReason) {
-    // RED stub — replaced by the real decision in the GREEN commit.
+pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
+    // --- UNLOCKED (red): clock > output > no-input-locked -------------------------
+    if !f.clock_present || !f.clock_locked {
+        return (LockState::Unlocked, LockReason::Clock);
+    }
+    if f.output_present && !f.output_stamping {
+        return (LockState::Unlocked, LockReason::Output);
+    }
+    if f.n_locked == 0 {
+        let reason = if f.n_inputs == 0 {
+            LockReason::NoGenlock
+        } else {
+            LockReason::NoInputLocked
+        };
+        return (LockState::Unlocked, reason);
+    }
+
+    // --- DEGRADED (amber): some-unlocked > recent-event > ntp > qpc ----------------
+    if f.n_locked < f.n_inputs {
+        return (LockState::Degraded, LockReason::InputUnlocked);
+    }
+    if f.recent_event {
+        return (LockState::Degraded, LockReason::RecentEvent);
+    }
+    if f.clock_ntp_failed {
+        return (LockState::Degraded, LockReason::NtpFailed);
+    }
+    if f.qpc_drift_beyond_bound {
+        return (LockState::Degraded, LockReason::QpcDrift);
+    }
+
+    // --- LOCKED (green) -----------------------------------------------------------
     (LockState::Locked, LockReason::None)
 }
 
