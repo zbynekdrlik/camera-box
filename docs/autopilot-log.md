@@ -11307,3 +11307,45 @@ The traveling CG box's `ntp_server` pointed at `strih.lan` (unresolvable while s
 - **Docs:** targets.md cg-OBS AHK facts (v2 exe, `.ahk` path, Startup shortcut, respawns Arena AND OBS, force-kill-without-stop → second obs64, Arena-Bridge credential never copied), `.claude/rules/resolume-cg-obs.md` AHK section + runbook steps 1/2, CLAUDE.md router line (`has_ahk=0`→`has_ahk=1`), this log.
 - **Verify (Tier-0):** `bash -n` + `shellcheck -S warning` on all three scripts; strih no-args relaunch output diffed BYTE-IDENTICAL vs the committed lib; resolume deploy + launch plans EXECUTED standalone and grepped for the AHK stop/restart-verified bracket, the resolume `.ahk` path (not strih's), lnk-first, the AutoHotkey64 SessionId gate, no keepalive schtasks, identity-confirm + no pinned IP; `cargo fmt --all --check` clean.
 - **UNVERIFIED (CI / supervisor rig):** the Rust test suite TYPE-checks + runs at CI (Tier-0 blocks all local cargo compile); the live deploy/relaunch on RESOLUME-SNV is the supervisor rig step. Durability backup on `refs/autopilot-wip/worktree-agent-a68cef26a220dfa99`.
+
+## #1295 post-deploy follow-ups A/B/C (worktree lane, RED `6ad6a742d` → GREEN `d54706308`)
+
+Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS onto RESOLUME-SNV.
+
+- **A — session gate / obs64 count ignores DEAD process objects.** `scripts/launch-obs-genlock.sh`'s
+  `#978` gate false-failed `expected exactly 1 obs64 process, found 2` off a STALE `Get-Process`
+  handle (pid 58560, `HasExited`, 0 threads, ~45 KB). Now counts only LIVE obs64
+  (`-not $_.HasExited -and $_.Threads.Count -gt 0`), LOGs each ignored zombie (pid + start time),
+  keeps `$sessObsProcs.Count -ne 1` over the live array; both obs64 wait-picks (initial + `#786`
+  relaunch) are live-filtered. `deploy-genlock-fleet.sh` only STOPs obs64 (no count gate) → no
+  obs64-filter there. Bundle-state obs64-count facet (the issue-1296 health signal): new pure
+  `OBS_LIVE_MIN_MEM_KB`/`tasklist_mem_kb`/`tasklist_row_is_live_obs` (tasklist has no HasExited
+  column → Mem Usage is the liveness proxy); `bundle-state-server._parse_tasklist_obs_process_names`
+  excludes a ~0-KB zombie row so the count stops inflating to 2.
+- **B — `latency_pins_verify.py`: an ABSENT `genlock_latency_ms_src` on a GENLOCK BUILD is the build
+  DEFAULT, not DRIFT.** The stock-saved resolume collection has the key absent on every `sp-*_video`
+  input → 9× `got=N/A want=3ms` false DRIFT. New `read_genlock_default_ms` reads the ndi_source type
+  default over the EXISTING WS (`GetInputDefaultSettings`) — the DistroAV fork registers
+  `genlock_latency_ms_src=3` as an obs_data default (`ndi-source.cpp ndi_source_getdefaults`), so a
+  non-None default == genlock build; `read_live_pins` now returns `(pins, build_default)` and
+  `diff_pin`/`verify_box` thread an optional `build_default` so an absent key resolves to
+  `default(3)=OK` on a genlock box and stays N/A DRIFT on stock. No new transport.
+- **C — cosmetic.** `deploy-genlock-fleet.sh`'s `#789` AHK-restart failure no longer claims a
+  has_ahk box "has NO respawn watcher" (it HAS one) — now "the AHK respawn watcher on `${box}`
+  failed to restart". `exit 9` fail-loud unchanged.
+- **Tests (RED → GREEN):** `tests/launch_obs_genlock.rs` (live filter + DEAD-obs64 log + kept count
+  gate, force path too); `tests/deploy_genlock_fleet.rs` (no "has NO respawn watcher", says "failed
+  to restart"); `tests/python/test_latency_pins_verify.py` (`read_genlock_default_ms`,
+  `diff_pin`/`verify_box` build_default, main exit-0-on-genlock-default / exit-1-on-stock; 5 existing
+  main monkeypatches updated to the `(pins, build_default)` tuple contract);
+  `tests/python/test_bundle_state_gather.py` + `test_bundle_state_server_process_facets.py`
+  (Mem-Usage liveness + a zombie-row CSV fixture).
+- **Verify (Tier-0):** `bash -n` + `shellcheck -S warning` clean on both scripts; the launch program
+  emitted standalone for strih+resolume (default AND force) shows the live filter, the DEAD-obs64
+  log, the kept count gate, and filtered wait-picks; `py_compile` clean; 206 python tests pass;
+  `cargo fmt --all --check` clean. Design addendum + validated comment on the ticket.
+- **UNVERIFIED (CI / supervisor rig):** the Rust test suite TYPE-checks + runs at CI (Tier-0 blocks
+  all local cargo compile); a live `latency_pins_verify --box resolume` read-back + a relaunch on
+  RESOLUME-SNV are supervisor rig steps. Followup_candidate: `scripts/lib/obs-session-visibility.sh`
+  (the `[0/8]` preflight + issue-979 watchdog) counts obs64 by name with the SAME zombie-blind class
+  — not in the A-spec's enumerated set, returned for the supervisor to fold or file.

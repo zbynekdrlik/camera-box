@@ -98,7 +98,11 @@ live `getent hosts resolume.lan` address.
    ```
 
    exit 0 = every live `sp-*_video` input is at `genlock_latency_ms_src=3` (REPORT-ONLY drift check;
-   `.claude/rules/latency-pins-verify.md`). A re-pin, only if an sp-* input drifted, is
+   `.claude/rules/latency-pins-verify.md`). #1295: the stock-saved `cg_scenes` collection has that
+   key ABSENT from every sp-* input, but the verifier reads the box's build identity over the same
+   WS (`GetInputDefaultSettings` ndi_source) and reports an absent key on a genlock build as
+   `got=default(3)` = OK — NOT a false `N/A`/DRIFT (the genlock build defaults the key to 3). A
+   re-pin, only if an sp-* input was explicitly set OFF 3, is
    `apply_latency_pins.py --box resolume --host <ip> --pins '{"<live sp-* name>":3, ...}' --execute`.
 
 4. **VERIFY the CG chain FIFO lock** end-to-end (#1300). cg OBS `genlock-fifo audit 'sp-*_video'`
