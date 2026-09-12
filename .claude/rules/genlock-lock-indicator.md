@@ -61,6 +61,16 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
   mutually non-substring with `genlock-fifo audit '`, `genlock-ndi-output audit '`,
   `genlock-ndi-filter audit '`, `genlock-relock`, `genlock-acquire-bracket '%s':` (guarded by
   `tests/genlock_lock_indicator_guards.rs`, per `jitter-audit-parser.md`).
+- **The parity gate's lift anchor must NOT appear in the header's own doc comment (#1298 session
+  trap).** `tests/genlock_lock_state_parity.rs` (and any future lift of a pure decision from a
+  `.hpp`) slices from `typedef enum genlock_lock_state {` through the function's closing brace. The
+  header's OWN explanatory comment originally quoted those literal strings (`typedef enum
+  genlock_lock_state {`, `genlock_decide_lock_state(`), so `.find()` grabbed the COMMENT occurrence
+  (earlier in the file) and the lifted "C" started mid-sentence → a stray-backtick compile error.
+  Fix applied + the rule: anchor the function lift on the FULL DEFINITION signature (`static inline
+  genlock_lock_state_t genlock_decide_lock_state(`), and keep the header comment from reproducing
+  the enum/struct anchor literals verbatim. Same self-collision class the top-level CLAUDE.md +
+  `vendored-libobs-change-safety.md` document for `recording-e2e.sh`/`obs-source.c` anchors.
 - **This is a vendored FRONTEND change ⇒ FULL-BUNDLE deploy** (not a fast obs.dll hot-swap), per
   `vendored-obs-frontend-crash-safety.md`. CI is the first place the C/Qt compiles — locally only
   `cargo fmt --all --check` + the pure Rust module (`rustc --test`) + the parity/guard tests
