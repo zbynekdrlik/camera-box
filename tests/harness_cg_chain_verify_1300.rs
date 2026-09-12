@@ -177,6 +177,10 @@ fn summary_parity_with_jitter_audit() {
             sum.delta_backward_regime_ticks,
             "d_backward_regime {source}"
         );
+        // field 9 = last_locked (the LOCK display column) -- no AuditSummary field mirrors it, so
+        // cross-check against the LAST raw sample's `locked` flag directly (1=locked, 0=not).
+        let last_locked_rust = if grp.last().unwrap().locked { "1" } else { "0" };
+        assert_eq!(f[8], last_locked_rust, "last_locked {source}");
     }
 }
 

@@ -34,7 +34,10 @@ cg_chain_strip_high_bytes() {
 # cg_chain_enumerate_sources [name_regex] -- stdin: OBS-log text; stdout: the distinct
 #   `genlock-fifo audit '<name>'` source names, one per line, in FIRST-SEEN order (never a static
 #   list -- the burn-target-enumeration discipline). An optional ERE filters the names (e.g.
-#   'sp-.*_video' for the cg-obs hop). Always exits 0.
+#   'sp-.*_video' for the cg-obs hop); the match is CASE-INSENSITIVE (both source and regex are
+#   tolower()'d) so a SongPlayer input named `SP-1_video`/`sp-1_video` matches either way -- the
+#   exact live RESOLUME-SNV source name is operator-overridable at the orchestrator
+#   (`CG_CHAIN_CGOBS_SRC_RE`), this just avoids a case-only miss. Always exits 0.
 cg_chain_enumerate_sources() {
   local re="${1:-}"
   cg_chain_strip_high_bytes | awk -v RE="$re" '
@@ -46,7 +49,7 @@ cg_chain_enumerate_sources() {
       q = index(rest, "'\''")
       if (q == 0) next
       src = substr(rest, 1, q - 1)
-      if (RE != "" && src !~ RE) next
+      if (RE != "" && tolower(src) !~ tolower(RE)) next
       if (!(src in seen)) { seen[src] = 1; order[++n] = src }
     }
     END { for (i = 1; i <= n; i++) print order[i] }
@@ -71,10 +74,11 @@ cg_chain_summarize_window() {
         k = substr(toks[i], 1, eq - 1)
         if (k != key) continue
         v = substr(toks[i], eq + 1)
-        # strip a trailing non-numeric tail (e.g. a stray "," never expected here) -- keep an
-        # optional leading minus then digits.
+        # STRICT integer only -- mirror Rust jitter_audit set-macro val.parse, which leaves the
+        # field 0 on any non-integer value. A lenient leading-digit extraction would diverge from
+        # the Rust source of truth on a malformed token; the real genlock-fifo audit line only ever
+        # emits clean integer tokens, so a non-match returns empty.
         if (v ~ /^-?[0-9]+$/) return v
-        if (match(v, /^-?[0-9]+/)) return substr(v, RSTART, RLENGTH)
         return ""
       }
       return ""
@@ -173,7 +177,10 @@ cg_chain_parse_asrc_ppm() {
 # cg_chain_asrc_in_band <ppm> <band_ppm> -- stdout: `1` (|ppm| <= band), `0` (out of band), or
 #   `UNKNOWN` (ppm empty / non-numeric -- no asrc line this pass, never a false out-of-band). band
 #   defaults to 10 (the `.claude/rules/asrc-residual-floor.md` "far outside +/-10" boundary; +8 is
-#   the physical floor and passes, the -18 port-collision signature fails). Always exits 0.
+#   the physical floor and passes, the -18 port-collision signature fails). This is a single
+#   newest-sample gate (cg_chain_parse_asrc_ppm reads `tail -1`), but `estimated=` is itself an
+#   EMA-smoothed servo output, so one read is a settled value, not an instantaneous spike; the ~2
+#   ppm margin over the +8 floor is deliberate per the floor rule. Always exits 0.
 cg_chain_asrc_in_band() {
   local ppm="${1:-}" band="${2:-10}"
   case "$band" in '' | *[!0-9.]*) band=10 ;; esac

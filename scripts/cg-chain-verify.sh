@@ -65,12 +65,16 @@ CG_CHAIN_SLEEP_CMD="${CG_CHAIN_SLEEP_CMD:-sleep}"
 # UTC timestamp for CSV rows -- also a seam so a test gets a deterministic value.
 _now_utc() { if [ -n "${CG_CHAIN_NOW:-}" ]; then printf '%s\n' "$CG_CHAIN_NOW"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi; }
 
-# Sources per hop: cg-obs enumerates `sp-*_video` dynamically (never a static list); the downstream
-# hops carry exactly one CG source each.
+# Sources per hop: cg-obs enumerates the SongPlayer video inputs dynamically (never a static list).
+# The name pattern is an operator-overridable ERE (CASE-INSENSITIVE match in the lib) --
+# CG_CHAIN_CGOBS_SRC_RE, default `sp-.*_video` (the issue-1300 Work spec) -- so the EXACT live
+# RESOLUME-SNV source name, once confirmed from a real OBS log, is pinned without a code change.
+# The downstream hops carry exactly one CG source each.
+CG_CHAIN_CGOBS_SRC_RE="${CG_CHAIN_CGOBS_SRC_RE:-sp-.*_video}"
 _hop_sources() {
   local hop="$1" log="$2"
   case "$hop" in
-    cg-obs) printf '%s\n' "$log" | cg_chain_enumerate_sources 'sp-.*_video' ;;
+    cg-obs) printf '%s\n' "$log" | cg_chain_enumerate_sources "$CG_CHAIN_CGOBS_SRC_RE" ;;
     strih)  printf 'cg\n' ;;
     stream) printf 'NDI obs hudba\n' ;;
     *) : ;;

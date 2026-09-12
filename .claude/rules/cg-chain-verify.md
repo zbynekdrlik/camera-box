@@ -32,9 +32,14 @@ match, never let them drift.** Do not re-derive thresholds in bash from scratch.
 
 ## Hops, sources, and the reader seam
 
-- `cg-obs` → each `sp-*_video` input, ENUMERATED dynamically from the log
-  (`cg_chain_enumerate_sources 'sp-.*_video'`), never a static list (burn-target-enumeration
-  discipline). `strih` → `cg`. `stream` → `NDI obs hudba`.
+- `cg-obs` → each SongPlayer video input, ENUMERATED dynamically from the log (never a static list
+  — burn-target-enumeration discipline). The name pattern is an operator-overridable ERE,
+  `CG_CHAIN_CGOBS_SRC_RE` (default `sp-.*_video`, the issue-1300 Work spec), matched
+  CASE-INSENSITIVELY (so `SP-1_video`/`sp-1_video` both match). **The EXACT live RESOLUME-SNV source
+  name is NOT yet confirmed against a real OBS log (the rig is off) — confirm it at the first live
+  run and either pin it via `CG_CHAIN_CGOBS_SRC_RE` or update this default; a pattern that matches
+  nothing makes the cg-obs hop report `NO SOURCES` and FAIL (fail-closed, never a false PASS).**
+  `strih` → `cg`. `stream` → `NDI obs hudba`.
 - The log tail per hop is supplied explicitly so the tool is self-contained and ships no untested
   ssh/MCP default: `CG_CHAIN_<HOP>_LOG=<file>` (tests; and the supervisor's path for cg-obs — paste
   the win-resolume MCP FileRead of the RESOLUME-SNV OBS log to a file) or `CG_CHAIN_<HOP>_CMD="<cmd>"`
