@@ -317,6 +317,18 @@ mod tests {
         w: CORNER_SIDE,
         h: CORNER_SIDE,
     };
+    // #1301 — cg OBS's bottom-center-right corner burn: mirrors
+    // `burn_geom::corner_placement`'s new `Corner::BottomCenterRight` case from the RIGHT —
+    // one `CORNER_MARGIN` clear of BURN_BR's left edge (1920-40-302-40-302=1236), same side/row
+    // as the other corner burns. [1236,1538) x [738,1040): 40px clear of BURN_BR's left edge
+    // (1578) and 116px clear of CAM1_BURN's right edge (1120) — no overlap, and (bottom-anchored)
+    // no overlap with the colour column (ends at QR_BOTTOM=724, above row 738).
+    const BURN_CG: Rect = Rect {
+        x: CANVAS_W - CORNER_MARGIN - CORNER_SIDE - CORNER_MARGIN - CORNER_SIDE,
+        y: CANVAS_H - CORNER_MARGIN - CORNER_SIDE,
+        w: CORNER_SIDE,
+        h: CORNER_SIDE,
+    };
 
     fn default_patches() -> Vec<(Rect, Rgb)> {
         colour_scale_patches(CANVAS_W, CANVAS_H, QR_SIZE, TOP_MARGIN)
@@ -383,9 +395,12 @@ mod tests {
     fn no_patch_intersects_a_qr_half_or_any_burn() {
         let patches = default_patches();
         assert!(!patches.is_empty());
-        // #463: BURN_IMAG (imag's new bottom-center-left corner burn) joins the obstacle set —
-        // every colour patch must stay samplable with FOUR burns now, not three.
-        let obstacles = [QR_LEFT, QR_RIGHT, CAM1_BURN, BURN_BL, BURN_BR, BURN_IMAG];
+        // #463: BURN_IMAG (imag's bottom-center-left corner burn) + #1301: BURN_CG (cg OBS's
+        // bottom-center-right corner burn) join the obstacle set — every colour patch must stay
+        // samplable with FIVE burns now.
+        let obstacles = [
+            QR_LEFT, QR_RIGHT, CAM1_BURN, BURN_BL, BURN_BR, BURN_IMAG, BURN_CG,
+        ];
         for (rect, _) in &patches {
             for ob in &obstacles {
                 assert!(
@@ -398,15 +413,16 @@ mod tests {
 
     #[test]
     fn four_burns_do_not_overlap_each_other_463() {
-        // #463 — imag's new bottom-center-left burn must not collide with EITHER of its bottom-row
-        // neighbours (BURN_BL / BURN_BR) NOR the horizontally-centered cam1 capture burn. This is
-        // the "third burn must not collide with the other 3 burns" requirement, checked pairwise
-        // across all four (not just vs the colour patches, which the test above already covers).
+        // #463 — imag's bottom-center-left burn + #1301 — cg OBS's bottom-center-right burn must
+        // not collide with each other, their bottom-row neighbours (BURN_BL / BURN_BR), NOR the
+        // horizontally-centered cam1 capture burn. Checked pairwise across all FIVE node burns
+        // (not just vs the colour patches, which the test above already covers).
         let burns = [
             ("cam1", CAM1_BURN),
             ("strih (BL)", BURN_BL),
             ("stream (BR)", BURN_BR),
             ("imag (BCL)", BURN_IMAG),
+            ("cg (BCR)", BURN_CG),
         ];
         for i in 0..burns.len() {
             for j in (i + 1)..burns.len() {

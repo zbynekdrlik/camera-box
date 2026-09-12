@@ -83,6 +83,11 @@
 // a source camera, not this OBS filter). Mirror of `BURN_RUN_ID_IMAG` in
 // src/probe/recording_latency.rs (renamed from `BURN_RUN_ID_CAM3` — see #463 / issue #24).
 #define BURN_RUN_ID_DEFAULT_IMAG 911003u
+// camera-box #1301: the cg OBS (RESOLUME-SNV) box's reserved burn run_id — a CG-chain HOP node,
+// composited at bottom-center-right. Mirror of `BURN_RUN_ID_CG` in
+// src/probe/recording_latency.rs. (The SongPlayer-origin burn 911014 is painted by SongPlayer
+// itself, zbynekdrlik/songplayer#151 — NOT by this OBS filter, so it has no default here.)
+#define BURN_RUN_ID_DEFAULT_CG_OBS 911015u
 
 struct burn_filter {
 	obs_source_t *context;
@@ -225,11 +230,34 @@ static bool burn_host_is_imag()
 	return strstr(name, "imag") != nullptr;
 }
 
-// camera-box #257/#463: this box's reserved burn run_id from the host role (no OBS_BURN_RUN_ID
-// env). imag is checked FIRST and returns early so burn_host_is_stream() (unchanged) is only
-// ever consulted for a non-imag host, exactly its original strih/stream/anomaly-WARN behaviour.
+// camera-box #1301: is THIS box the cg OBS node (RESOLUME-SNV)? Same hostname-substring style as
+// burn_host_is_imag, checked before burn_host_is_stream in resolve_run_id so a "resolume" host
+// never falls through into burn_host_is_stream's stream/strih-only WARN (it legitimately matches
+// neither "stream" nor "strih" and must NOT be treated as a host-rename anomaly).
+static bool burn_host_is_cg_obs()
+{
+	char name[256] = {0};
+#ifdef _WIN32
+	DWORD n = (DWORD)sizeof(name);
+	if (!GetComputerNameA(name, &n))
+		name[0] = '\0';
+#else
+	if (gethostname(name, sizeof(name) - 1) != 0)
+		name[0] = '\0';
+#endif
+	for (char *p = name; *p; ++p)
+		*p = (char)tolower((unsigned char)*p);
+	return strstr(name, "resolume") != nullptr;
+}
+
+// camera-box #257/#463/#1301: this box's reserved burn run_id from the host role (no
+// OBS_BURN_RUN_ID env). cg OBS (resolume) and imag are each checked FIRST and return early so
+// burn_host_is_stream() (unchanged) is only ever consulted for a non-cg/non-imag host, exactly
+// its original strih/stream/anomaly-WARN behaviour.
 static uint32_t resolve_run_id()
 {
+	if (burn_host_is_cg_obs())
+		return BURN_RUN_ID_DEFAULT_CG_OBS;
 	if (burn_host_is_imag())
 		return BURN_RUN_ID_DEFAULT_IMAG;
 	return burn_host_is_stream() ? BURN_RUN_ID_DEFAULT_STREAM : BURN_RUN_ID_DEFAULT_STRIH;
@@ -245,6 +273,8 @@ static burn_geom::Corner resolve_corner(uint32_t run_id)
 		return burn_geom::Corner::BottomRight;
 	if (run_id == BURN_RUN_ID_DEFAULT_IMAG)
 		return burn_geom::Corner::BottomCenterLeft;
+	if (run_id == BURN_RUN_ID_DEFAULT_CG_OBS)
+		return burn_geom::Corner::BottomCenterRight; // #1301 — cg OBS slot
 	return burn_geom::Corner::BottomLeft;
 }
 
@@ -257,6 +287,8 @@ static const char *corner_tag(burn_geom::Corner corner)
 		return "bottom-right";
 	case burn_geom::Corner::BottomCenterLeft:
 		return "bottom-center-left";
+	case burn_geom::Corner::BottomCenterRight:
+		return "bottom-center-right"; // #1301 — cg OBS
 	default:
 		return "bottom-left";
 	}
@@ -286,9 +318,10 @@ static void *burn_filter_create(obs_data_t *, obs_source_t *source)
 	obs_log(LOG_INFO,
 		"[burn] filter created: run_id=%u (host role) corner=%s qr_px=auto — burn is gated LIVE "
 		"by the parent source's per-source genlock_burn flag (#257, no env, no restart). "
-		"run_ids %u/%u/%u strih/stream/imag → bottom-left/bottom-right/bottom-center-left (#463)",
+		"run_ids %u/%u/%u/%u strih/stream/imag/cg → "
+		"bottom-left/bottom-right/bottom-center-left/bottom-center-right (#463/#1301)",
 		f->run_id, corner_tag(f->corner), BURN_RUN_ID_DEFAULT_STRIH, BURN_RUN_ID_DEFAULT_STREAM,
-		BURN_RUN_ID_DEFAULT_IMAG);
+		BURN_RUN_ID_DEFAULT_IMAG, BURN_RUN_ID_DEFAULT_CG_OBS);
 	return f;
 }
 

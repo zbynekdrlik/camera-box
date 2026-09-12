@@ -76,7 +76,7 @@ inline uint32_t burn_margin_for_canvas(uint32_t frame_h)
 // bottom-center-left (#463 — the decided per-node assignment); the env OBS_BURN_CORNER
 // selected it for strih/stream historically (see resolve_corner; #257 removed the env for the
 // host-role-derived nodes, so BottomCenterLeft is only ever reached via the host-role path).
-enum class Corner { BottomLeft, BottomRight, BottomCenterLeft };
+enum class Corner { BottomLeft, BottomRight, BottomCenterLeft, BottomCenterRight };
 
 // Case-insensitive substring search (ASCII only, no <cctype> locale dependence).
 inline bool ci_contains(const char *hay, const char *needle)
@@ -165,6 +165,25 @@ inline Placement corner_placement(uint32_t frame_w, uint32_t frame_h, Corner cor
 		p.band_x = margin;
 	} else if (corner == Corner::BottomRight) {
 		p.band_x = (frame_w > margin + side) ? (frame_w - margin - side) : 0;
+	} else if (corner == Corner::BottomCenterRight) {
+		// BottomCenterRight (cg OBS, #1301): the MIRROR of BottomCenterLeft from the RIGHT —
+		// one `margin` clear of the BottomRight burn's LEFT edge, so cg never collides with
+		// stream's corner burn. On the production 1920x1080 canvas (margin=40, side=302) this
+		// lands at x=[1236,1538): 40px clear of the BottomRight burn at [1578,1880) and 116px
+		// clear of the SEPARATE Rust-side cam1 center burn at x=[800,1120). 3-tier fallback
+		// mirrors BottomCenterLeft's (from the right) so a narrow canvas degrades to flush /
+		// last-resort exactly like imag's slot, never overlapping BottomRight on 16:9 canvases.
+		// BottomRight's own band_x (tier 1), guarded against uint32 underflow.
+		uint32_t br_x = (frame_w > margin + side) ? (frame_w - margin - side) : 0;
+		uint32_t x;
+		if (br_x > margin + side) {
+			x = br_x - margin - side; // tier 1: one full margin gap left of BottomRight
+		} else if (br_x > side) {
+			x = br_x - side; // tier 2: flush against BottomRight's left edge (zero gap)
+		} else {
+			x = 0; // tier 3: last resort (degenerate tiny canvas)
+		}
+		p.band_x = x;
 	} else { // BottomCenterLeft (#463): one `margin` clear of the BottomLeft burn's right
 		 // edge (`margin + side`), so imag never collides with strih's corner burn. On the
 		 // production 1920×1080 canvas (margin=40, side=302) this lands at x=[382,684) —
