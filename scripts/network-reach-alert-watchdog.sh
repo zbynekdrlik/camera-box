@@ -51,6 +51,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-watchdog-decision.sh"
 # shellcheck source=scripts/lib/network-reach-health.sh
 . "$HERE/lib/network-reach-health.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -65,20 +67,33 @@ esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
 # The boxes to watch, as "name|ip" pairs (space-separated). strih/stream are permanent PAGING boxes;
-# resolume (#811) is a TRAVELING CG box (RESOLUME-SNV) added here as a REPORT-ONLY node (see below)
-# so it is monitored without false-paging while it is powered off/away between events. resolume.lan
-# currently resolves to 10.77.9.201 (event-LAN DHCP -- may drift, and collides with `bridge`, an
+# resolume (#811) is a TRAVELING CG box (RESOLUME-SNV) monitored here as a REPORT-ONLY node (see
+# below) so it is watched without false-paging while powered off/away between events. Default
+# DERIVED from the ONE declared fleet list (scripts/lib/obs-fleet.sh, #1296): strih, stream AND
+# resolume. The fleet list carries resolume's HOST as the HOSTNAME `resolume.lan` (not a pinned IP):
+# it currently resolves to 10.77.9.201 (event-LAN DHCP -- may drift, and collides with `bridge`, an
 # ACTIVE box, in targets.md) -- harmless for a report-only node: a wrong/colliding IP may LOG a
 # FALSE reachable (e.g. bridge answering at .201 while resolume is off) or a false unreachable, but
-# NEVER pages. Always confirm box identity with `getent hosts resolume.lan` + its OBS profile
-# (rig-state-inspection.md §2) before ever flipping it to a paging node.
-BOXES="${NETWORK_REACH_BOXES:-strih|10.77.9.202 stream|10.77.9.204 resolume|10.77.9.201}"
+# NEVER pages while report-only. Always confirm box identity with `getent hosts resolume.lan` + its
+# OBS profile (rig-state-inspection.md §2) before ever relying on it as a paging node.
+BOXES="${NETWORK_REACH_BOXES:-$(obs_fleet_boxes network-reach)}"
 # Report-only boxes (space-separated NAMES): probed + classified + logged + per-box state-tracked
 # exactly like any other, but they NEVER page (no alert, no recovery ping) -- for a TRAVELING box
-# whose absence is the NORMAL state (resolume, #811). A supervisor "flips one required" by removing
-# its name here (it stays in BOXES), at which point it pages like strih/stream with all
-# confirm/throttle/recovery state already warm. net_reach_box_is_report_only (lib) is the pure test.
-REPORT_ONLY_BOXES="${NETWORK_REACH_REPORT_ONLY_BOXES:-resolume}"
+# whose absence is the NORMAL state (resolume, #811). net_reach_box_is_report_only (lib) is the pure test.
+# #1296: resolume is PROMOTED from report-only to a PAGING node automatically, ONLY while
+# obs_fleet_is_home resolume holds (it resolves AND its OBS-WS :4455 answers -- the honest "home +
+# serving" signal; RESOLUME-SNV carries no dantesync so the ticket's :8898 example is inert). When
+# away, it STAYS report-only exactly as before #1296, so its normal absence never pages. The
+# obs_fleet_is_home probe is computed ONLY when NETWORK_REACH_REPORT_ONLY_BOXES is UNSET, so an
+# explicit env override (tests, or a supervisor forcing a state) wins byte-compatibly AND keeps the
+# offline tests offline (no live probe).
+if [ -z "${NETWORK_REACH_REPORT_ONLY_BOXES+set}" ]; then
+  _nr_report_only_default="resolume"
+  if obs_fleet_is_home resolume; then _nr_report_only_default=""; fi
+  REPORT_ONLY_BOXES="$_nr_report_only_default"
+else
+  REPORT_ONLY_BOXES="$NETWORK_REACH_REPORT_ONLY_BOXES"
+fi
 OBS_WS_PORT="${NETWORK_REACH_OBS_WS_PORT:-4455}"       # OBS WebSocket, live on both OBS boxes
 BUNDLE_PORT="${NETWORK_REACH_BUNDLE_PORT:-8899}"       # bundle-state HTTP, on strih/stream only (#650)
 # Reference rig nodes that share the rig's network fate (cam1 cam2 imag-nb) -- the dev1-side-outage

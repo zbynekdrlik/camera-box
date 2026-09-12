@@ -38,6 +38,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -58,6 +60,10 @@ STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
 # (#458/#463). stream is unaffected, still 30fps.
 STRIH_TARGET_FPS="${STRIH_TARGET_FPS:-30}"
 STREAM_TARGET_FPS="${STREAM_TARGET_FPS:-30}"
+# #1296: resolume (RESOLUME-SNV, a genlock cg-obs box) renders at 60fps when live. It is polled for
+# render liveness ONLY while obs_fleet_is_home resolume holds (a traveling box away must never be
+# probed -> never a false wedge verdict); see measure_boxes below.
+RESOLUME_TARGET_FPS="${RESOLUME_TARGET_FPS:-60}"
 WINDOW_S="${OBS_WATCHDOG_WINDOW_S:-4}"
 CONFIRM_THRESHOLD="${OBS_WATCHDOG_CONFIRM_THRESHOLD:-2}"
 ALERT_THROTTLE_PASSES="${OBS_WATCHDOG_ALERT_THROTTLE_PASSES:-10}"
@@ -74,10 +80,30 @@ log() { printf '%s [obs-liveness-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')
 # ── measure (delegates to the python probe + the obs-watchdog-gate binary) ──
 # measure_boxes -> sets $VERDICT_LINES to one "<VERDICT> <box>: <reasons>" line per box (the
 # obs-watchdog-gate stdout, one line per box regardless of exit code — see its own doc comment).
+# #1296: the box SET is DERIVED from the ONE declared fleet list (scripts/lib/obs-fleet.sh) —
+# obs_fleet_boxes obs-liveness = strih, stream, resolume. strih/stream keep their own
+# STRIH_HOST/STREAM_HOST (+ per-box target fps) exactly as before; resolume (a genlock cg-obs box)
+# is added ONLY while obs_fleet_is_home resolume holds, so a traveling box that is away is never
+# polled and never produces a false wedge verdict (the #391 "no probe output = nothing to decide"
+# short-circuit only covers a box the probe TRIED and couldn't reach).
 measure_boxes() {
-  VERDICT_LINES="$(python3 "$PROBE_PY" \
-    --box "strih=${STRIH_HOST}:${STRIH_TARGET_FPS}" \
-    --box "stream=${STREAM_HOST}:${STREAM_TARGET_FPS}" \
+  local -a box_args=()
+  local pair name host fps
+  for pair in $(obs_fleet_boxes obs-liveness); do
+    name="${pair%%|*}"
+    host="${pair##*|}"
+    case "$name" in
+      strih)  host="$STRIH_HOST";  fps="$STRIH_TARGET_FPS" ;;
+      stream) host="$STREAM_HOST"; fps="$STREAM_TARGET_FPS" ;;
+      resolume)
+        obs_fleet_is_home resolume || continue   # away -> do not poll a traveling box
+        fps="$RESOLUME_TARGET_FPS"
+        ;;
+      *) fps="${OBS_LIVENESS_DEFAULT_FPS:-30}" ;;
+    esac
+    box_args+=(--box "${name}=${host}:${fps}")
+  done
+  VERDICT_LINES="$(python3 "$PROBE_PY" "${box_args[@]}" \
     --window-s "$WINDOW_S" 2>>/dev/stderr)" || true
 }
 

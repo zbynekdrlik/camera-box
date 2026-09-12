@@ -48,6 +48,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -61,8 +63,11 @@ case "${1:-}" in
 esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
-# The two OBS boxes to watch, as "name|ip" pairs (space-separated).
-BOXES="${AUDIO_LAG_BOXES:-strih|10.77.9.202 stream|10.77.9.204}"
+# The OBS boxes to watch, as "name|ip" pairs (space-separated). Default DERIVED from the ONE
+# declared fleet list (scripts/lib/obs-fleet.sh, #1296) — resolume is NOT an audio-lag box (no mbc
+# audio chain on the CG box), so obs_fleet_boxes audio-lag yields exactly strih+stream, byte-
+# identical to the pre-#1296 literal. The AUDIO_LAG_BOXES env override still wins unchanged.
+BOXES="${AUDIO_LAG_BOXES:-$(obs_fleet_boxes audio-lag)}"
 BUNDLE_PORT="${AUDIO_LAG_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
 BUNDLE_PATH="${AUDIO_LAG_BUNDLE_PATH:-/bundle-state.json}"
 CURL_TIMEOUT="${AUDIO_LAG_CURL_TIMEOUT:-10}"          # :8899 HTTP fetch (s); server has answered ~6.6s

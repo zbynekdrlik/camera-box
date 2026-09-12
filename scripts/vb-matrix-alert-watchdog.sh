@@ -45,6 +45,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -59,8 +61,11 @@ esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
 # The boxes to watch, as "name|ip" pairs (space-separated). Both strih and stream run VB-Matrix;
-# a box with no install (imag) simply omits the facet -> UNKNOWN -> never a page.
-BOXES="${VB_MATRIX_BOXES:-strih|10.77.9.202 stream|10.77.9.204}"
+# a box with no install (imag) simply omits the facet -> UNKNOWN -> never a page. Default DERIVED
+# from the ONE declared fleet list (scripts/lib/obs-fleet.sh, #1296) — resolume is NOT a vb-matrix
+# box (no VB-Matrix install on the CG box), so obs_fleet_boxes vb-matrix yields exactly strih+stream,
+# byte-identical to the pre-#1296 literal. The VB_MATRIX_BOXES env override still wins unchanged.
+BOXES="${VB_MATRIX_BOXES:-$(obs_fleet_boxes vb-matrix)}"
 BUNDLE_PORT="${VB_MATRIX_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
 BUNDLE_PATH="${VB_MATRIX_BUNDLE_PATH:-/bundle-state.json}"
 CURL_TIMEOUT="${VB_MATRIX_CURL_TIMEOUT:-10}"          # :8899 HTTP fetch (s); server has answered ~6.6s
