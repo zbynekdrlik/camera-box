@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1299 fleet genlock-LOCK-state health-check every 5 min (dev1-side), matching the
+# audio-lag / network-reach / bundle-state / obs-liveness / cadence alert-timer cadence so the
+# fleet's dev1 alert timers stay in lockstep. A box silently leaving LOCKED (clock undisciplined,
+# a genlock output not stamping wall time, inputs unlocked) is caught within ~10 min (2-pass
+# confirm) and paged -- no more relying on an operator happening to glance at the statusbar.
+Description=Run the camera-box fleet genlock-LOCK-state health-check every 5 min (#1299)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
