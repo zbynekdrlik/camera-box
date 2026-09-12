@@ -32,6 +32,9 @@
 #   bundle-state  = strih stream resolume
 #   network-reach = strih stream resolume   (resolume report-only unless obs_fleet_is_home -- below)
 #   obs-liveness  = strih stream resolume   (resolume polled only while obs_fleet_is_home -- below)
+#   genlock-lock  = strih stream imag resolume  (#1299: the genlock LOCKED/DEGRADED/UNLOCKED facet
+#                   is fleet-wide -- imag is a pure receiver that still locks every input to the
+#                   fleet clock, so it IS in scope; resolume is paged only while obs_fleet_is_home)
 #
 # TRAVELING-BOX SAFETY (resolume is home only sometimes): a naive add to the PAGING watchdogs would
 # false-page whenever resolume is away (the owner's hardest sensitivity -- the #739 5x false-page
@@ -114,8 +117,9 @@ obs_fleet_facet_members() {
     bundle-state)  printf 'strih stream resolume' ;;
     network-reach) printf 'strih stream resolume' ;;
     obs-liveness)  printf 'strih stream resolume' ;;
+    genlock-lock)  printf 'strih stream imag resolume' ;;
     *)
-      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness)" >&2
+      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock)" >&2
       return 1
       ;;
   esac

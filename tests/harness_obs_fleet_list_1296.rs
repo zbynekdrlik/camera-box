@@ -150,6 +150,25 @@ fn fleet_boxes_carries_resolume_only_where_the_facet_applies_1296() {
 }
 
 #[test]
+fn fleet_boxes_genlock_lock_carries_all_four_incl_imag_1299() {
+    // #1299: the genlock LOCKED/DEGRADED/UNLOCKED facet is fleet-wide — the two Windows genlock
+    // boxes, the Linux imag receiver (it still locks every input to the fleet clock), and the
+    // traveling resolume cg box (paged only while obs_fleet_is_home, gated by the consumer).
+    assert_eq!(
+        boxes("genlock-lock"),
+        "strih|10.77.9.202 stream|10.77.9.204 imag|10.77.9.182 resolume|resolume.lan"
+    );
+    // imag carries genlock-lock but NOT the audio/vb facets (it is a pure receiver, no mbc chain).
+    for facet in ["audio-lag", "av-step", "vb-matrix"] {
+        assert!(
+            !boxes(facet).contains("imag"),
+            "facet {facet} must NOT carry imag: {}",
+            boxes(facet)
+        );
+    }
+}
+
+#[test]
 fn fleet_boxes_unknown_facet_fails_closed_1296() {
     let (rc, out, _err) = run_fleet("obs_fleet_boxes bogus-facet", &[]);
     assert_ne!(
