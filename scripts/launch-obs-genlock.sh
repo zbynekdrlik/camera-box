@@ -469,8 +469,24 @@ main() {
   local PROGRAM
   PROGRAM="$(build_launch_program "$obs_dir" "$force" "$has_ahk")"
 
+  echo "# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) ====="
+  # resolume (issue 1295): the STEP-3/3b dev1-side WS ops below are keyed on the HOSTNAME
+  # resolume.lan, which currently resolves to 10.77.9.201 -- the SAME IP `bridge` lists in
+  # targets.md (event-LAN DHCP collision). STEP 3 is a WRITE (burn sweep-off), so before running
+  # the dev1-side WS ops confirm the resolved address is REALLY RESOLUME-SNV (getent + its cg OBS
+  # profile / OBS-WS identity, rig-state-inspection.md §2) and substitute the confirmed live
+  # address for `resolume.lan` if in doubt -- mirrors the deploy plan's STEP -1 identity-confirm.
+  if [ "$box" = "resolume" ]; then
+    cat <<'RESCAVEAT'
+# STEP -1 (resolume ONLY -- box IDENTITY confirm, issue 1295): resolume.lan is a TRAVELING DHCP box
+#         currently resolving to 10.77.9.201 = the SAME IP `bridge` lists (targets.md). The dev1-side
+#         STEP 3 below is a WRITE (burn sweep-off) -- before ANY STEP-3/3b WS op, confirm the live
+#         address is RESOLUME-SNV (getent hosts resolume.lan + its cg OBS profile over the
+#         win-resolume MCP, rig-state-inspection.md §2), and use that confirmed address in place of
+#         `resolume.lan` in the --host args if the lease has drifted.
+RESCAVEAT
+  fi
   cat <<PLAN
-# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) =====
 # Run the program below via the ${mcp} MCP Shell — a GUI relaunch + on-screen log verification is
 # exactly what the win-* MCP is for (#701: plain scp/ssh DOES work against strih/stream with the
 # targets.md creds, but that doesn't help drive/verify a GUI app).

@@ -466,6 +466,26 @@ fn cli_box_resolume_selects_win_resolume_no_ahk_1295() {
         out.contains("latency_pins_verify.py --box resolume --host resolume.lan"),
         "resolume plan wires the report-only latency verify-read-back at its own host:\n{out}"
     );
+    // #1295 review (YELLOW): the resolume launch plan carries the box-IDENTITY confirm caveat
+    // before its STEP-3 dev1-side WS ops (resolume.lan collides with `bridge` at .201, and STEP 3
+    // is a burn-sweep WRITE) -- mirroring the deploy plan's STEP -1.
+    assert!(
+        out.contains("box IDENTITY confirm"),
+        "resolume launch plan must carry the identity-confirm caveat before the STEP-3 WS write:\n{out}"
+    );
+}
+
+/// #1295 review (YELLOW): the identity-confirm caveat is resolume-ONLY -- the strih/stream launch
+/// plans (fixed IPs, no bridge collision) must NOT carry it.
+#[test]
+fn non_resolume_launch_plan_has_no_identity_confirm_1295() {
+    for box_name in ["strih", "stream"] {
+        let (_c, out, _e) = run_script(&["--box", box_name]);
+        assert!(
+            !out.contains("box IDENTITY confirm"),
+            "{box_name} launch plan must NOT carry the resolume-only identity-confirm caveat:\n{out}"
+        );
+    }
 }
 
 /// A trailing value-taking flag with no value is a clean usage error (exit 2), not a set -e abort.
