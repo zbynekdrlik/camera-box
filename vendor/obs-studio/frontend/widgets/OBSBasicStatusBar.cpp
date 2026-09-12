@@ -32,7 +32,23 @@ static constexpr float badThreshold = 1.0f;
  * DEGRADED; 100 ms is generous (the #800 drift is the concern over a day, not a tick). */
 static constexpr int64_t GENLOCK_QPC_DRIFT_BOUND_MS = 100;
 
+/* camera-box #1299: the machine-readable genlock-lock-json: line is emitted on every state/reason
+ * change AND at least this often (the 1 Hz timer -> ~30 s), so bundle-state's #1222 bounded TAIL
+ * always holds a fresh one even on a box whose state has not changed since startup. */
+static constexpr int GENLOCK_JSON_HEARTBEAT_TICKS = 30;
+
 namespace {
+/* camera-box #1299: the structured per-input record the genlock-lock-json: line carries (the
+ * tooltip `rows` above are pre-formatted human strings; this is the machine-readable sibling). */
+struct GenlockInputRow {
+	std::string name;
+	bool locked = false;
+	uint32_t latency_ms = 0;
+	uint64_t underruns = 0;
+	uint64_t relocks = 0;
+	uint64_t late_holds = 0;
+	uint32_t depth = 0;
+};
 struct GenlockScan {
 	int n_inputs = 0;
 	int n_locked = 0;
@@ -43,6 +59,7 @@ struct GenlockScan {
 	bool any_input = false;
 	std::vector<std::string> unlocked_names;
 	std::vector<std::string> rows; /* per-input tooltip rows */
+	std::vector<GenlockInputRow> inputs; /* #1299 per-input machine-readable records */
 };
 struct GenlockOutScan {
 	bool present = false;
@@ -77,6 +94,16 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 		 st.locked ? "LOCKED" : "UNLOCKED", st.latency_ms, st.depth, (unsigned long long)st.underruns,
 		 (unsigned long long)st.relocks, (unsigned long long)st.late_holds);
 	scan->rows.emplace_back(row);
+	/* #1299: the structured sibling of the tooltip row above (same snapshot). */
+	GenlockInputRow rec;
+	rec.name = nm;
+	rec.locked = st.locked;
+	rec.latency_ms = st.latency_ms;
+	rec.underruns = st.underruns;
+	rec.relocks = st.relocks;
+	rec.late_holds = st.late_holds;
+	rec.depth = (uint32_t)st.depth;
+	scan->inputs.push_back(std::move(rec));
 	return true;
 }
 
@@ -133,6 +160,89 @@ const char *genlock_reason_key(genlock_lock_reason_t r)
 	default:
 		return "qpc_drift";
 	}
+}
+
+/* camera-box #1299: append *s* as a JSON string (quotes + minimal escaping) to *out*. Pure
+ * std::string — NO obs_data dependency — so it lift-compiles under g++ and is Tier-0 testable
+ * (tests/genlock_lock_json_guards.rs Facet B). Rig source names are ASCII ("NDI cam1", "mbc"),
+ * but escape defensively so a stray quote/backslash/control char can never corrupt the line. */
+void genlock_json_append_escaped(std::string &out, const char *s)
+{
+	out += '"';
+	for (const char *p = s ? s : ""; *p; ++p) {
+		const unsigned char c = (unsigned char)*p;
+		switch (c) {
+		case '"':
+			out += "\\\"";
+			break;
+		case '\\':
+			out += "\\\\";
+			break;
+		case '\n':
+			out += "\\n";
+			break;
+		case '\r':
+			out += "\\r";
+			break;
+		case '\t':
+			out += "\\t";
+			break;
+		default:
+			if (c < 0x20) {
+				char u[8];
+				snprintf(u, sizeof(u), "\\u%04x", c);
+				out += u;
+			} else {
+				out += (char)c;
+			}
+		}
+	}
+	out += '"';
+}
+
+/* camera-box #1299: build the versioned genlock-lock-json: payload from the widget's ALREADY
+ * decided verdict + the scalar facets it read this tick (so the fleet facet can never disagree
+ * with the statusbar). clock_str/output_str are the SAME tokens the #1298 key=value line uses
+ * (absent|locked|unlocked / absent|stamping|not-stamping). Pure — no Qt, no obs_data. */
+std::string genlock_build_lock_json(const char *state_name, const char *reason_key, int n_inputs,
+				    int n_locked, uint32_t latency_ms, const char *clock_str,
+				    const char *output_str, bool recent_event, int64_t qpc_drift_ms,
+				    const std::vector<GenlockInputRow> &inputs)
+{
+	std::string j = "{\"v\":1,\"state\":";
+	genlock_json_append_escaped(j, state_name);
+	j += ",\"reason\":";
+	genlock_json_append_escaped(j, reason_key);
+	char num[96];
+	snprintf(num, sizeof(num), ",\"n_inputs\":%d,\"n_locked\":%d,\"latency_ms\":%u,", n_inputs,
+		 n_locked, latency_ms);
+	j += num;
+	j += "\"clock\":";
+	genlock_json_append_escaped(j, clock_str);
+	j += ",\"output\":";
+	genlock_json_append_escaped(j, output_str);
+	j += ",\"recent_event\":";
+	j += recent_event ? "true" : "false";
+	snprintf(num, sizeof(num), ",\"qpc_drift_ms\":%lld,\"inputs\":[", (long long)qpc_drift_ms);
+	j += num;
+	bool first = true;
+	for (const GenlockInputRow &r : inputs) {
+		if (!first)
+			j += ",";
+		first = false;
+		j += "{\"name\":";
+		genlock_json_append_escaped(j, r.name.c_str());
+		snprintf(num, sizeof(num), ",\"locked\":%s,\"latency_ms\":%u,",
+			 r.locked ? "true" : "false", r.latency_ms);
+		j += num;
+		snprintf(num, sizeof(num),
+			 "\"underruns\":%llu,\"relocks\":%llu,\"late_holds\":%llu,\"depth\":%u}",
+			 (unsigned long long)r.underruns, (unsigned long long)r.relocks,
+			 (unsigned long long)r.late_holds, r.depth);
+		j += num;
+	}
+	j += "]}";
+	return j;
 }
 } // namespace
 
@@ -917,5 +1027,27 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		     genlock_state_name(state), f.n_locked, f.n_inputs, scan.any_input ? scan.min_latency_ms : 0u,
 		     !clock_present ? "absent" : (f.clock_locked ? "locked" : "unlocked"),
 		     !out.present ? "absent" : (out.stamping ? "stamping" : "not-stamping"), genlock_reason_key(reason));
+	}
+
+	/* camera-box #1299: the machine-readable genlock-lock-json: line the dev1 fleet watchdog +
+	 * bundle-state read. Emitted on a state/reason CHANGE and on a heartbeat every
+	 * GENLOCK_JSON_HEARTBEAT_TICKS ticks, so bundle-state's #1222 bounded TAIL always holds a fresh
+	 * one (the change-only line above can fall into the omitted middle on a long-stable box). It
+	 * carries the SAME verdict + clock/output tokens the widget decided this tick, so the fleet
+	 * facet can never disagree with the statusbar. A state change short-circuits the ++heartbeat
+	 * (not incremented this tick) but the emit resets the counter to 0 either way. */
+	const bool genlock_json_changed =
+		(int)state != genlockJsonLastState || (int)reason != genlockJsonLastReason;
+	if (genlock_json_changed || ++genlockJsonHeartbeatTicks >= GENLOCK_JSON_HEARTBEAT_TICKS) {
+		genlockJsonHeartbeatTicks = 0;
+		genlockJsonLastState = (int)state;
+		genlockJsonLastReason = (int)reason;
+		const std::string gl_json = genlock_build_lock_json(
+			genlock_state_name(state), genlock_reason_key(reason), f.n_inputs, f.n_locked,
+			scan.any_input ? scan.min_latency_ms : 0u,
+			!clock_present ? "absent" : (f.clock_locked ? "locked" : "unlocked"),
+			!out.present ? "absent" : (out.stamping ? "stamping" : "not-stamping"), recent_event,
+			scan.max_abs_qpc_drift_ms, scan.inputs);
+		blog(LOG_INFO, "genlock-lock-json: %s (#1299)", gl_json.c_str());
 	}
 }

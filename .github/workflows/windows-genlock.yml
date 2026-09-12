@@ -203,7 +203,11 @@ jobs:
           if ($sb -notmatch [regex]::Escape('genlock-lock: state=%s inputs=%d/%d')) {
             Write-Error "OBSBasicStatusBar.cpp: the genlock-lock: log line is gone — #1298 reverted"; exit 1
           }
-          Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log) — OK"
+          # #1299: the fleet-visible machine-readable genlock-lock-json: emission + its pure builder.
+          if ($sb -notmatch [regex]::Escape('genlock-lock-json: %s (#1299)') -or $sb -notmatch [regex]::Escape('std::string genlock_build_lock_json(')) {
+            Write-Error "OBSBasicStatusBar.cpp: the genlock-lock-json: emission / builder is gone — #1299 reverted"; exit 1
+          }
+          Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log + genlock-lock-json: fleet facet) — OK"
 
       # #245: assert the PER-SOURCE genlock latency (ms) override is present in the
       # vendored source BEFORE the 150-min build, so a `git subtree pull` (#44) that

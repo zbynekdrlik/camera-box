@@ -86,6 +86,14 @@ private:
 	/* genlock-lock: log-on-change de-dup */
 	int genlockLastLoggedState = -1;
 	int genlockLastLoggedReason = -1;
+	/* camera-box #1299: the machine-readable genlock-lock-json: line is emitted on every
+	 * state/reason change AND every GENLOCK_JSON_HEARTBEAT_TICKS ticks, so bundle-state's
+	 * #1222 bounded TAIL always holds a fresh one despite the change-only de-dup above. Its
+	 * own change-tracking is SEPARATE from genlockLastLogged* (which the key=value block
+	 * updates before the json block runs). */
+	int genlockJsonHeartbeatTicks = 0;
+	int genlockJsonLastState = -1;
+	int genlockJsonLastReason = -1;
 
 	void UpdateGenlockLabel();
 	void PollGenlockClock();
