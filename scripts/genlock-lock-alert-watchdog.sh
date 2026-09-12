@@ -153,10 +153,10 @@ clear_box_throttle() {
   write_state_field "alert_passes_${box}" 0
 }
 
-# net_reach_recovery_decision_local <was_alerted> -> "1" iff a recovery latch should fire (was
+# genlock_lock_recovery_decision <was_alerted> -> "1" iff a recovery latch should fire (was
 # alerted, now healthy). Kept trivially local (a HEALTHY pass IS the "now locked" side); mirrors the
 # audio-lag sibling's was_alerted-AND-up shape.
-net_reach_recovery_decision_local() {
+genlock_lock_recovery_decision() {
   [ "${1:-0}" = "1" ] && printf '1' || printf '0'
 }
 
@@ -197,7 +197,7 @@ handle_box() {
     HEALTHY)
       local was_alerted recover
       was_alerted="$(read_state_field "alerted_${box}" 0)"
-      recover="$(net_reach_recovery_decision_local "$was_alerted")"
+      recover="$(genlock_lock_recovery_decision "$was_alerted")"
       if [ "$recover" = "1" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
           log "[dry-run] WOULD send recovery: $box genlock back to LOCKED"
