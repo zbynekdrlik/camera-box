@@ -31,6 +31,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import math
 import os
 import re
@@ -94,6 +95,96 @@ def genlock_capability_from_log(text):
     pattern = re.compile(r"genlock:.*(render tick ENABLED|sub-frame jitter reserve|timestamp-aligned release)")
     matches = [line for line in (text or "").splitlines() if pattern.search(line)]
     return "\n".join(matches)
+
+
+# #1299 — the fleet-visible genlock LOCK facet. The #1298 statusbar widget is the ONE place the
+# three genlock producers (per-source FIFO counters, the NDI output's wall-stamping flag, the
+# dantesync :8898 clock facet) are joined into one decided verdict; it emits that verdict as a
+# versioned `genlock-lock-json: {…} (#1299)` line (a heartbeat + on-change, so the #1222 bounded
+# TAIL always holds a fresh one). This parser reads the NEWEST such line and reshapes the widget's
+# payload into the nested `genlock_lock` facet the dev1 watchdog + rig-status read. Reusing the
+# SAME already-bounded log_text as every other facet (no second read, no subprocess -> no new
+# #1222 cache needed). "" / a stock OBS with no such line -> None (facet OMITTED downstream, never a
+# false UNLOCKED).
+_GENLOCK_LOCK_JSON_MARKER = "genlock-lock-json:"
+
+
+def genlock_lock_facet_from_log(text):
+    """The nested `genlock_lock` facet dict from the NEWEST `genlock-lock-json:` line in *text*, or
+    None when the line is absent / unparseable (a stock OBS, or no such line in the bounded window
+    yet — UNKNOWN downstream, NEVER a fabricated UNLOCKED).
+
+    Shape:
+      {state, reason, n_inputs, n_locked, latency_ms, recent_event, qpc_drift_ms,
+       clock:{state}, output:{present, stamping_wallclock},
+       inputs:{<name>:{locked, latency_ms, underruns, relocks, late_holds, depth}},
+       source:"log"}
+
+    `state`/`reason` are the verdict the widget ALREADY decided (so the facet can never disagree
+    with the statusbar). The per-input array is keyed by name; a duplicate name keeps the last."""
+    return None  # #1299 RED stub -- the GREEN commit removes this line; the parse follows below.
+    t = text or ""
+    if _GENLOCK_LOCK_JSON_MARKER not in t:
+        return None
+    # Newest line wins (the widget heartbeats this, so the last occurrence is the current state).
+    newest = None
+    for line in t.splitlines():
+        if _GENLOCK_LOCK_JSON_MARKER in line:
+            newest = line
+    if newest is None:
+        return None
+    # The payload is a JSON object; slice from its first "{" to its last "}" so a leading log-time
+    # prefix and the trailing " (#1299)" tag are both ignored. A malformed line -> None.
+    start = newest.find("{")
+    end = newest.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(newest[start:end + 1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    # Reshape the widget payload into the facet. Every field is tolerant of absence (a future
+    # widget that drops a field must degrade, never crash this gather).
+    clock_str = payload.get("clock")
+    output_str = payload.get("output")
+    inputs_map = {}
+    raw_inputs = payload.get("inputs")
+    if isinstance(raw_inputs, list):
+        for row in raw_inputs:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            inputs_map[name] = {
+                "locked": bool(row.get("locked")),
+                "latency_ms": row.get("latency_ms"),
+                "underruns": row.get("underruns"),
+                "relocks": row.get("relocks"),
+                "late_holds": row.get("late_holds"),
+                "depth": row.get("depth"),
+            }
+
+    facet = {
+        "state": payload.get("state"),
+        "reason": payload.get("reason"),
+        "n_inputs": payload.get("n_inputs"),
+        "n_locked": payload.get("n_locked"),
+        "latency_ms": payload.get("latency_ms"),
+        "recent_event": bool(payload.get("recent_event")),
+        "qpc_drift_ms": payload.get("qpc_drift_ms"),
+        "clock": {"state": clock_str} if isinstance(clock_str, str) else {},
+        "output": {
+            "present": output_str != "absent",
+            "stamping_wallclock": output_str == "stamping",
+        } if isinstance(output_str, str) else {},
+        "inputs": inputs_map,
+        "source": "log",
+    }
+    return facet
 
 
 # #1222 — the strih bundle-state gather's latency grew LINEARLY with the live OBS log size: a
