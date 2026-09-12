@@ -98,6 +98,19 @@ measure_boxes() {
       resolume)
         obs_fleet_is_home resolume || continue   # away -> do not poll a traveling box
         fps="$RESOLUME_TARGET_FPS"
+        # RESIDUAL (#1296 review): unlike network-reach (whose promotion AND page condition are BOTH
+        # keyed on .201 liveness, so they cannot contradict), THIS is a PAGING watchdog whose
+        # promotion signal (is_home = OBS-WS :4455 answers) DIFFERS from its page condition (render
+        # wedged). resolume.lan currently resolves to 10.77.9.201 — the SAME IP `bridge` lists in
+        # targets.md (event-LAN DHCP collision) — so if a render-wedged, password-authenticating OBS
+        # answered :4455 at .201 while resolume is off, this could page "resolume WEDGED" for a box
+        # that is not resolume. NARROW (needs .201 to be an authenticating OBS-WS that is
+        # render-wedged) and GUARDED operationally: this watchdog ships DISABLED, and the supervisor
+        # CONFIRMS resolume's identity (getent hosts resolume.lan + its OBS profile / its own :8899
+        # bundle-state name, rig-state-inspection.md §2 — never "the shared OBS-WS password worked")
+        # BEFORE enabling it (targets.md RESOLUME-SNV checklist, .claude/skills/ops). A future
+        # identity-confirm-before-poll (read resolume's own :8899 bundle-state profile name) would
+        # close it in code; until then it is a documented, supervisor-gated residual.
         ;;
       *) fps="${OBS_LIVENESS_DEFAULT_FPS:-30}" ;;
     esac

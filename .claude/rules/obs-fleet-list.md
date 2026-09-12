@@ -57,6 +57,16 @@ tests/ops). Three helpers consume it:
   - `obs-liveness` polls resolume ONLY while home (away → not in the `--box` set → no false wedge).
   - `bundle-state` needs no is-home gate — a fully-unreachable box is already deferred to the reach
     watchdog (no page / no restart against a dark box).
+- **obs-liveness collision residual (#1296 review, narrow + supervisor-gated).** The is-home gate is
+  collision-SAFE for `network-reach` (its promotion AND page condition both key on .201 liveness, so
+  they cannot contradict), but `obs-liveness` is a PAGING watchdog whose promotion signal (is_home =
+  :4455 answers) DIFFERS from its page condition (render wedged). Because `resolume.lan` currently
+  resolves to 10.77.9.201 (= `bridge`), a render-wedged, password-authenticating OBS at .201 that is
+  NOT resolume could page "resolume WEDGED". It is NARROW (needs .201 to be an authenticating OBS-WS
+  that is render-wedged) and GUARDED: obs-liveness ships DISABLED and the supervisor confirms
+  resolume identity (its OBS profile / its own :8899 bundle-state name — never "the shared OBS-WS
+  password worked") before enabling (targets.md RESOLUME-SNV checklist). A future
+  identity-confirm-before-poll (read resolume's own :8899 profile name) closes it in code.
 - **resolume's host is the HOSTNAME `resolume.lan`, not a pinned IP** — it currently resolves to
   10.77.9.201, the SAME IP `bridge` lists in `targets.md` (event-LAN DHCP collision). A report-only
   node tolerates a false reachable; confirm box IDENTITY (`getent hosts resolume.lan` + its OBS

@@ -65,3 +65,33 @@ def test_never_returns_fail_or_warn_for_any_input():
                   {"genlock_build_sha": "x", "obs_process_count": "2", "port4455_owner_version": "30"}):
         verdict, _ = grade(state)
         assert verdict in (None, "PASS"), f"report-only grader must never FAIL/WARN: {verdict!r}"
+
+
+# --- check_resolume(): the HTTP/JSON-parse wrapper (#1296 review 🔵3) ------------------------------
+# Exercises the http_get -> json.loads -> isinstance branch by stubbing http_get and capturing the
+# module's `results` buffer (what emit() appends to). No real network.
+
+def _run_check_resolume_with(body, monkeypatch):
+    monkeypatch.setattr(_mod, "http_get", lambda *a, **k: body)
+    _mod.results.clear()
+    _mod.check_resolume()
+    return list(_mod.results)
+
+
+def test_check_resolume_serving_emits_one_pass_row(monkeypatch):
+    res = _run_check_resolume_with(
+        '{"genlock_build_sha":"abc123live","obs_process_count":"1","port4455_owner_version":"31.0.0"}',
+        monkeypatch,
+    )
+    assert res == ["PASS"], f"a serving resolume must emit exactly one PASS row: {res}"
+
+
+def test_check_resolume_away_emits_nothing(monkeypatch):
+    # http_get returns None on any fetch error (unreachable/timeout/non-200) -> node OMITTED.
+    assert _run_check_resolume_with(None, monkeypatch) == []
+
+
+def test_check_resolume_malformed_body_emits_nothing_never_crashes(monkeypatch):
+    # A non-JSON body, and a JSON non-object body, must both be treated as away (no row, no crash).
+    assert _run_check_resolume_with("not json at all {", monkeypatch) == []
+    assert _run_check_resolume_with("[1,2,3]", monkeypatch) == []

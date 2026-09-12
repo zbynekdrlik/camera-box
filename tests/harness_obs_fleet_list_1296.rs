@@ -314,7 +314,12 @@ fn boxes_env_override_still_wins_byte_compatibly_1296() {
         watchdog_var(
             "network-reach-alert-watchdog.sh",
             "BOXES",
-            &[("NETWORK_REACH_BOXES", "strih|127.0.0.1 resolume|127.0.0.2")]
+            // OBS_FLEET_HOME forces is_home deterministically so sourcing network-reach never fires a
+            // live getent/:4455 probe — keeps this Tier-0 case offline + fast (#1296 review 🔵2).
+            &[
+                ("NETWORK_REACH_BOXES", "strih|127.0.0.1 resolume|127.0.0.2"),
+                ("OBS_FLEET_HOME", "strih"),
+            ]
         ),
         "strih|127.0.0.1 resolume|127.0.0.2"
     );

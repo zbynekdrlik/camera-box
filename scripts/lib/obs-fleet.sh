@@ -52,6 +52,14 @@
 # also classifies that address REACHABLE so it still never pages; always confirm box IDENTITY
 # (getent hosts resolume.lan + its OBS profile, rig-state-inspection.md §2) before a supervisor flips
 # resolume to a permanent paging fixture.
+#
+# COLLISION RESIDUAL per CONSUMER (#1296 review): the above collision-safety argument holds for
+# NETWORK-REACH only, because its is_home promotion AND its page condition are BOTH keyed on .201
+# liveness (they cannot contradict). OBS-LIVENESS is different: its promotion signal (is_home =
+# :4455 answers) DIFFERS from its page condition (render wedged), so on the .201 collision it could
+# page a render-wedged non-resolume OBS as "resolume". That residual is NARROW + supervisor-gated
+# (obs-liveness ships DISABLED; identity is confirmed before enabling) and is documented at the
+# resolume branch in obs-liveness-watchdog.sh + .claude/rules/obs-fleet-list.md.
 
 # OBS_FLEET -- the table (env-overridable as a whole for tests/ops). One row per line,
 # `name|host-or-ip|class|home-check`. Blank lines are ignored by the parser below.
