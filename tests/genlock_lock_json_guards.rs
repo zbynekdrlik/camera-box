@@ -45,11 +45,17 @@ fn genlock_lock_json_emission_present() {
     assert_has(STATUSBAR_CPP, "genlock-lock-json: %s (#1299)");
     // the pure builder + escaper (no obs_data dependency -> Facet B lift-compilable)
     assert_has(STATUSBAR_CPP, "std::string genlock_build_lock_json(");
-    assert_has(STATUSBAR_CPP, "void genlock_json_append_escaped(std::string &out, const char *s)");
+    assert_has(
+        STATUSBAR_CPP,
+        "void genlock_json_append_escaped(std::string &out, const char *s)",
+    );
     // the structured per-input record the builder walks
     assert_has(STATUSBAR_CPP, "struct GenlockInputRow {");
     // the heartbeat constant + its own change-tracking state (separate from genlockLastLogged*)
-    assert_has(STATUSBAR_CPP, "static constexpr int GENLOCK_JSON_HEARTBEAT_TICKS = 30;");
+    assert_has(
+        STATUSBAR_CPP,
+        "static constexpr int GENLOCK_JSON_HEARTBEAT_TICKS = 30;",
+    );
     assert_has(STATUSBAR_HPP, "int genlockJsonHeartbeatTicks = 0;");
     assert_has(STATUSBAR_HPP, "int genlockJsonLastState = -1;");
 }
