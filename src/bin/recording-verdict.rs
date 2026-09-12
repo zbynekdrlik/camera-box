@@ -3015,40 +3015,9 @@ fn stream_diag_cfg(base: &VerdictConfig, stream_capture_fps: f64) -> VerdictConf
 /// below immediately tripped `-D warnings` in the `--all-features` Lint CI job (never visible
 /// locally — Tier-0 policy bans compiling `--features probe` on this box). Moved to the correct
 /// item.
-/// #1112 back-compat wrapper — preserves the original 8-arg signature so every existing (test +
-/// fused-`main`) call site is byte-for-byte unchanged. The fused path carries no per-frame
-/// near-duplicate diffs (the #1088 dup-cadence block recomputes them from the LOCAL `stream_rec`
-/// there), so it delegates with `None`; only the #208 merge path (`run_merge`, which has no
-/// recording on dev1) calls [`build_and_print_verdict_with_stream_diffs`] with the vector carried in
-/// the stream partial (`RecordingPartial::frame_prev_diffs`).
-#[allow(clippy::too_many_arguments)]
-fn build_and_print_verdict(
-    args: &Args,
-    strih: Option<DecodedRec>,
-    stream: Option<DecodedRec>,
-    cam1: Cam1Source,
-    strih_colour: Option<camera_box::colour_verify::NodeColourSummary>,
-    stream_colour: Option<camera_box::colour_verify::NodeColourSummary>,
-    imag: Option<DecodedRec>,
-    stream_av_sync: Option<AvMarkerInputs>,
-) -> Result<(serde_json::Value, bool)> {
-    build_and_print_verdict_with_stream_diffs(
-        args,
-        strih,
-        stream,
-        cam1,
-        strih_colour,
-        stream_colour,
-        imag,
-        stream_av_sync,
-        None,
-        None, // issue 1118: the fused/test path never degrades an imag partial (no schema skip)
-        None, // #1143: the fused/test path carries no OBS record-render stats
-        None, // #1301: the 8-arg wrapper (tests) supplies no cg OBS recording
-    )
-}
-
-/// [`build_and_print_verdict`] + the STREAM recording's per-frame near-duplicate MAD-to-predecessor
+/// The verdict builder (the issue-1112 8-arg `build_and_print_verdict` wrapper was retired by
+/// issue 1301 once the fused path started threading the cg OBS recording through directly) + the
+/// STREAM recording's per-frame near-duplicate MAD-to-predecessor
 /// vector carried from the #208 merge. `stream_frame_prev_diffs` is `Some` ONLY in the merge path on
 /// an all-cambox stream extract (see `run_merge` / `RecordingPartial::frame_prev_diffs`); `None` on
 /// the fused path (there the #1088 dup-cadence block recomputes it from the local `stream_rec`) and
