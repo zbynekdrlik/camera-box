@@ -45,7 +45,13 @@ MAINT_BOUND_US="${DANTESYNC_MAINT_BOUND_US:-2000}"
 MAINT_STATUS_PORT="${DANTESYNC_MAINT_STATUS_PORT:-8898}"
 MAINT_SSH_TIMEOUT="${DANTESYNC_MAINT_SSH_TIMEOUT:-10}"
 MAINT_HTTP_TIMEOUT="${DANTESYNC_MAINT_HTTP_TIMEOUT:-6}"
-DANTESYNC_MAINT_WIN_EXE='C:\Program Files\DanteSync\dantesync.exe'
+# The Windows dantesync.exe path for read_maint_version's OWN thin ssh reader. We write our own
+# transport (not dantesync-version-gate.sh's read_dantesync_version_output) because that function
+# lives BELOW that gate's source-guard and is UNDEFINED when we source the gate for its pure parser
+# (dantesync-version-reading.md's documented split). To keep the two readers from drifting, DEFAULT
+# this (and the ssh pass, below) from the version-gate's OWN override env vars when they are set, so
+# an operator who repoints one repoints both; overridable in its own right for tests/ops.
+DANTESYNC_MAINT_WIN_EXE="${DANTESYNC_MAINT_WIN_EXE:-${DANTESYNC_VERSION_GATE_WIN_EXE:-C:\\Program Files\\DanteSync\\dantesync.exe}}"
 
 # --- PURE verdict (no network/ssh -- unit-tested by sourcing this file) -------------------------
 
@@ -152,7 +158,7 @@ read_maint_version() {
   local name="$1" host="$2" key
   key="DANTESYNC_MAINT_VERSION_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
   if [ -n "${!key:-}" ]; then printf '%s' "${!key}"; return 0; fi
-  sshpass -p "${SSH_PASS:-newlevel}" ssh -o StrictHostKeyChecking=no \
+  sshpass -p "${SSH_PASS:-${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}}" ssh -o StrictHostKeyChecking=no \
     -o "ConnectTimeout=${MAINT_SSH_TIMEOUT}" "${DANTESYNC_MAINT_SSH_USER:-newlevel}@${host}" \
     "\"${DANTESYNC_MAINT_WIN_EXE}\" --version" 2>/dev/null || true
 }

@@ -5,6 +5,7 @@ paths:
   - "scripts/dantesync-fleet-upgrade.sh"
   - "scripts/dantesync-version-gate.sh"
   - "tests/dantesync_maintenance_gate.rs"
+  - "tests/dantesync_fleet_upgrade.rs"
   - "tests/python/test_dantesync_config_patch_1297.py"
 ---
 
@@ -90,6 +91,15 @@ confirm identity first (`getent hosts resolume.lan` + its OBS profile, `rig-stat
   hand-back (the phase_slew slew replaces the step).
 - The upgrade script lists resolume: `dantesync_resolume_win_spec "$(getent hosts resolume.lan |
   awk 'NR==1{print $1}')"` → a `resolume=newlevel@<ip>` `--win` entry.
+
+**Do NOT wire the maintenance gate to a PAGING dev1 watchdog until dantesync#111 lands.** Until the
+`ntp_server` repoint ships, a correctly-phase_slew-fixed resolume STILL reads `ntp_failed=true`
+whenever strih is off (its only NTP master) — so the gate grades ALARM on most runs BY DESIGN. That
+is fine for a MANUALLY-run maintenance check, but a paging watchdog over it would be chronic Discord
+noise (the "Discord objem blízko nuly" rule). This gate ships as a standalone manual check ONLY
+(nothing in this lane wires it to a watchdog); promote it to a paged facet only once dantesync#111
+gives the box a phase reference that exists while strih is off — then a strih-off ALARM becomes a
+genuine anomaly, not the expected state.
 
 ## Tier-0 verification (this lane)
 
