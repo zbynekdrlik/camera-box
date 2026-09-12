@@ -864,7 +864,6 @@ fn self_heal_reuses_wrapper_launch_program_775() {
     );
 }
 
-
 /// #1295 follow-up A -- the emitted #978 session gate (and the obs64 wait-picks) must IGNORE
 /// dead/zombie process objects (a stale `Get-Process obs64` handle: `HasExited`=True / 0 threads,
 /// the live 2026-09-12 RESOLUME-SNV pid-58560 case), counting only LIVE instances and LOGGING the

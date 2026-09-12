@@ -1123,7 +1123,6 @@ fn non_resolume_plan_has_no_identity_confirm_preamble_1295() {
     );
 }
 
-
 /// #1295 follow-up C -- the #789 AHK-restart-failure Write-Error is emitted ONLY for has_ahk=1
 /// boxes (strih AND resolume), which DO run an AHK respawn watcher; the failure means the watcher
 /// did not come BACK after the deploy, not that the box lacks one. The inherited strih text

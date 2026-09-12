@@ -231,7 +231,7 @@ ${ahk_relaunch_ps}
 if (\$ahkRelaunchVerified) {
   Write-Host "#789: AHK watchdog restarted via \$ahkRelaunchTarget."
 } else {
-  Write-Error "#789 FAIL: AutoHotkey64 did not come back after the deploy (target=\$ahkRelaunchTarget) -- ${box} has NO respawn watcher; investigate before trusting this box."
+  Write-Error "#789 FAIL: AutoHotkey64 did not come back after the deploy (target=\$ahkRelaunchTarget) -- the AHK respawn watcher on ${box} failed to restart; investigate before trusting this box."
   exit 9
 }
 PSAHKR

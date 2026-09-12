@@ -704,6 +704,38 @@ def obs_process_count_from_listing(text):
     return str(count)
 
 
+# #1295 — the minimum RAM (KB) an OBS process must report to count as a LIVE instance. A real OBS
+# sits in the hundreds of MB; a DEAD/mid-exit Get-Process/zombie handle reads ~0-45 KB (the live
+# 2026-09-12 RESOLUME-SNV pid-58560: WorkingSet64 ~45 KB, 0 threads). tasklist has NO HasExited /
+# thread column, so the honest liveness proxy available from a tasklist row is its Mem Usage; a row
+# at/below this floor is a zombie, never a live obs64. 1 MB is a wide, safe separator (a live OBS
+# never sits below ~45 MB; the zombie was 45 KB), and this limitation is documented because tasklist
+# cannot distinguish a truly-exited process from a live one any other way.
+OBS_LIVE_MIN_MEM_KB = 1024
+
+
+def tasklist_mem_kb(field):
+    """#1295 — parse a `tasklist /FO CSV /NH` Mem-Usage field ("512,000 K", "45 K", "N/A", "") to
+    an int of KB, or None when it carries no usable number (N/A / blank / unparseable). tasklist
+    prints memory in KB with a thousands separator and a trailing " K"."""
+    if not isinstance(field, str):
+        return None
+    s = field.strip().replace(" ", " ").rstrip("Kk").strip().replace(",", "")
+    if not s or not s.lstrip("-").isdigit():
+        return None
+    return int(s)
+
+
+def tasklist_row_is_live_obs(mem_field, min_kb=OBS_LIVE_MIN_MEM_KB):
+    """#1295 — True iff a tasklist obs-row's Mem-Usage field proves a LIVE instance (>= min_kb KB).
+    An unparseable/absent Mem (None) reads NOT-live: a live OBS always reports a real Mem value, so
+    excluding an ambiguous row is the fail-safe that keeps a zombie handle from inflating the
+    'exactly one obs64' health signal (#1296). tasklist's limitation (no HasExited column, Mem is
+    the only liveness proxy) is documented at OBS_LIVE_MIN_MEM_KB."""
+    kb = tasklist_mem_kb(mem_field)
+    return kb is not None and kb >= min_kb
+
+
 # #1227 — VB-Audio Matrix presence, for the `vb_matrix_running` facet the dev1 VB-Matrix alert
 # watchdog reads. The process image name after its `.exe` is stripped (tasklist prints e.g.
 # `VBAudioMatrix_x64.exe`); the pattern enumerates the actual HOSTS — the stream build

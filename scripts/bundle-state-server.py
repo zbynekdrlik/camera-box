@@ -377,7 +377,10 @@ def _parse_tasklist_obs_process_names(text):
     `bsg.obs_process_count_from_listing` (UNCHANGED by this ticket) keeps working on it verbatim.
     Each CSV row is `"Image Name","PID","Session Name","Session#","Mem Usage"` (tasklist's own
     quoted-CSV format); `/NH` already suppresses the header row, but this parser tolerates one
-    anyway (it simply never matches the obs<digits> pattern).
+    anyway (it simply never matches the obs<digits> pattern). #1295: a matching row whose Mem Usage
+    proves it is a DEAD/zombie handle (`bsg.tasklist_row_is_live_obs` False — tasklist has no
+    HasExited column, so Mem Usage is the liveness proxy) is EXCLUDED, so a stale ~0-KB obs handle
+    never inflates the downstream "exactly one obs64" count (#1296).
 
     "" if *text* is empty/malformed (never a guessed/zero count downstream — the same
     never-a-false-clean discipline every other facet in this file follows)."""
@@ -391,6 +394,12 @@ def _parse_tasklist_obs_process_names(text):
             image_name = row[0]
             base = image_name[:-4] if image_name.lower().endswith(".exe") else image_name
             if bsg.OBS_PROCESS_NAME_RE.match(base):
+                # #1295: exclude a DEAD/mid-exit zombie obs row by its Mem Usage (tasklist has no
+                # HasExited column) — a ~0-KB handle must not inflate the "exactly one obs64" count
+                # health signal (#1296). Mem Usage is row[4]; a missing column reads NOT-live.
+                mem_field = row[4] if len(row) > 4 else ""
+                if not bsg.tasklist_row_is_live_obs(mem_field):
+                    continue
                 names.append(base)
     except csv.Error as e:
         log(f"WARNING: could not parse tasklist CSV output: {e}")

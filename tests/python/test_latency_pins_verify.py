@@ -233,7 +233,7 @@ class TestEnumerationFailsClosed:
 
     def test_main_floor_box_empty_enumeration_exits_2(self, monkeypatch):
         # imag (floor box) that reads ZERO inputs is FAIL-CLOSED (exit 2), never a green exit 0.
-        monkeypatch.setattr(lpv, "read_live_pins", lambda host, pw, names: {})
+        monkeypatch.setattr(lpv, "read_live_pins", lambda host, pw, names: ({}, None))
         rc = lpv.main(["--box", "imag", "--host", "10.77.9.182"])
         assert rc == 2
 
@@ -253,12 +253,12 @@ class TestEnumerationFailsClosed:
         # scripts/qr_align_pins.py; this verify path stays the report-only drift check.)
         monkeypatch.setattr(
             lpv, "read_live_pins",
-            lambda host, pw, names: {"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 20},
+            lambda host, pw, names: ({"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 20}, None),
         )
         assert lpv.main(["--box", "strih", "--host", "x"]) == 0
         monkeypatch.setattr(
             lpv, "read_live_pins",
-            lambda host, pw, names: {"NDI cam1": 90, "NDI cam2": 3, "NDI cam3": 20},
+            lambda host, pw, names: ({"NDI cam1": 90, "NDI cam2": 3, "NDI cam3": 20}, None),
         )
         assert lpv.main(["--box", "strih", "--host", "x"]) == 1
 
@@ -311,19 +311,19 @@ class TestPrefixMatchSentinel1295:
 
     def test_main_clean_exits_0(self, monkeypatch):
         monkeypatch.setattr(lpv, "read_live_pins",
-                            lambda host, pw, names: {"sp-fast_video": 3, "sp-slow_video": 3, "NDIAr ppt": 99})
+                            lambda host, pw, names: ({"sp-fast_video": 3, "sp-slow_video": 3, "NDIAr ppt": 99}, None))
         assert lpv.main(["--box", "resolume", "--host", "resolume.lan"]) == 0
 
     def test_main_drift_exits_1(self, monkeypatch):
         monkeypatch.setattr(lpv, "read_live_pins",
-                            lambda host, pw, names: {"sp-fast_video": 3, "sp-slow_video": 33})
+                            lambda host, pw, names: ({"sp-fast_video": 3, "sp-slow_video": 33}, None))
         assert lpv.main(["--box", "resolume", "--host", "resolume.lan"]) == 1
 
     def test_main_zero_matching_inputs_fails_closed_exit_2(self, monkeypatch):
         # the sp-* inputs could not be found/read -> the scoped pin is unconfirmed -> FAIL CLOSED,
         # never a vacuous green (the burn-target-enumeration / camera-active-set fail-open ban).
         monkeypatch.setattr(lpv, "read_live_pins",
-                            lambda host, pw, names: {"NDIAr ppt": 3, "VBAN cg-resolume": 3})
+                            lambda host, pw, names: ({"NDIAr ppt": 3, "VBAN cg-resolume": 3}, None))
         assert lpv.main(["--box", "resolume", "--host", "resolume.lan"]) == 2
 
 

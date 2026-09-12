@@ -249,7 +249,7 @@ if (Test-Path \$lnk) {
 \$proc = \$null
 for (\$i = 0; \$i -lt 30; \$i++) {
   Start-Sleep -Seconds 1
-  \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Select-Object -First 1
+  \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not \$_.HasExited -and \$_.Threads.Count -gt 0 } | Select-Object -First 1
   if (\$proc -and \$proc.WorkingSet64 -gt 100MB) { break }
 }
 if (-not \$proc) {
@@ -333,7 +333,7 @@ ${ahk_stop_ps}
   \$proc = \$null
   for (\$i = 0; \$i -lt 30; \$i++) {
     Start-Sleep -Seconds 1
-    \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Select-Object -First 1
+    \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not \$_.HasExited -and \$_.Threads.Count -gt 0 } | Select-Object -First 1
     if (\$proc -and \$proc.WorkingSet64 -gt 100MB) { break }
   }
   if (-not \$proc) { Write-Error "obs64 did not start on #786 relaunch"; exit 6 }
@@ -365,9 +365,17 @@ if (\$activeSessProcs.Count -lt 1) {
 }
 \$activeSession = \$activeSessProcs[0].SessionId
 \$ownSession = (Get-Process -Id \$PID).SessionId
-\$sessObsProcs = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+\$allObsProcs = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+# #1295: Get-Process can enumerate a STALE handle for an already-EXITED obs64 (HasExited=True,
+# 0 threads, ~45 KB -- the live 2026-09-12 RESOLUME-SNV pid-58560 case). Count only LIVE instances
+# and LOG the ignored zombies (pid + start time); never FAIL "found 2" off a dead handle.
+foreach (\$z in @(\$allObsProcs | Where-Object { \$_.HasExited -or \$_.Threads.Count -eq 0 })) {
+  \$zStart = try { \$z.StartTime.ToString('s') } catch { 'unknown' }
+  Write-Host "#1295 NOTE: ignoring a DEAD obs64 process object PID \$(\$z.Id) (HasExited/0-threads, start=\$zStart) -- a stale zombie handle, not a live instance."
+}
+\$sessObsProcs = @(\$allObsProcs | Where-Object { -not \$_.HasExited -and \$_.Threads.Count -gt 0 })
 if (\$sessObsProcs.Count -ne 1) {
-  Write-Error "#978 FAIL: expected exactly 1 obs64 process, found \$(\$sessObsProcs.Count) -- investigate before trusting this box."
+  Write-Error "#978 FAIL: expected exactly 1 LIVE obs64 process, found \$(\$sessObsProcs.Count) (dead/zombie handles already excluded) -- investigate before trusting this box."
   exit 8
 }
 \$sessProc = \$sessObsProcs[0]

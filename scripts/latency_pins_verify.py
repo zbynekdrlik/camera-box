@@ -84,11 +84,25 @@ def normalize_spec(spec) -> tuple:
     raise ValueError(f"pin spec must be an int or a dict: {spec!r}")
 
 
-def diff_pin(name: str, got, spec) -> "str | None":
+def diff_pin(name: str, got, spec, build_default=None) -> "str | None":
     """Return None when `got` (an int, or None for an honest N/A live read) is within the
-    baseline `spec`'s tolerance band, else a LOUD drift message naming input+got+want+tol."""
+    baseline `spec`'s tolerance band, else a LOUD drift message naming input+got+want+tol.
+
+    #1295: `build_default` (int | None) is the box's GENLOCK-build ndi_source DEFAULT for
+    `genlock_latency_ms_src`, read over the existing WS via GetInputDefaultSettings (None on a
+    STOCK build, which registers no such default). When `got` is None (the per-input key is
+    ABSENT from the saved settings) AND the box is a genlock build, the absent key means the
+    build DEFAULT is in effect (the DistroAV fork defaults every ndi_source to
+    genlock_latency_ms_src=3, genlock_fifo=true -- vendor/distroav/src/ndi-source.cpp), so it is
+    reported `got=default(N)` and is OK when it matches the agreed pin -- NOT a false N/A DRIFT.
+    On a stock build (build_default None) an absent key stays N/A DRIFT, unchanged."""
     want, tol = normalize_spec(spec)
     if got is None:
+        if build_default is not None:
+            if abs(int(build_default) - want) <= tol:
+                return None
+            return (f'LATENCY-PIN DRIFT input="{name}" got=default({build_default})ms '
+                    f'want={want}ms (tol +/-{tol}ms)')
         return f'LATENCY-PIN DRIFT input="{name}" got=N/A want={want}ms (tol +/-{tol}ms)'
     if abs(int(got) - want) <= tol:
         return None
@@ -123,7 +137,7 @@ def matching_names(compiled, names) -> list:
     return sorted(n for n in names if compiled.search(n))
 
 
-def verify_box(box: str, baseline_box: dict, live_pins: dict) -> list:
+def verify_box(box: str, baseline_box: dict, live_pins: dict, build_default=None) -> list:
     """Pure: diff every baseline pin for `box` against `live_pins` ({name: int|None}).
 
     Three baseline shapes: a FLOOR sentinel (`_all_ndi_inputs_ms`) means every LIVE NDI input must
@@ -132,25 +146,30 @@ def verify_box(box: str, baseline_box: dict, live_pins: dict) -> list:
     regex must equal ms (resolume -- only the sp-* inputs, non-matching inputs untouched); explicit
     `{name: spec}` entries pin those named inputs. Underscore-prefixed keys (comments, the
     sentinels) are never treated as named pins. Returns a list of `box=<box> <drift msg>` strings
-    (empty = every pin on-baseline)."""
+    (empty = every pin on-baseline).
+
+    #1295: `build_default` (int | None) is the genlock-build ndi_source default; it is threaded
+    into every `diff_pin` so an ABSENT per-input key on a genlock build resolves to that default
+    (OK when it matches the agreed pin) instead of a false N/A DRIFT. None (stock build) keeps the
+    prior N/A-DRIFT behaviour."""
     drifts = []
     floor = baseline_box.get(FLOOR_KEY)
     if floor is not None:
         for name in sorted(live_pins):
-            msg = diff_pin(name, live_pins[name], floor)
+            msg = diff_pin(name, live_pins[name], floor, build_default=build_default)
             if msg:
                 drifts.append(f"box={box} " + msg)
     match = parse_match_spec(baseline_box)
     if match is not None:
         compiled, ms = match
         for name in matching_names(compiled, live_pins):
-            msg = diff_pin(name, live_pins[name], ms)
+            msg = diff_pin(name, live_pins[name], ms, build_default=build_default)
             if msg:
                 drifts.append(f"box={box} " + msg)
     for name in sorted(baseline_box):
         if name.startswith("_"):
             continue
-        msg = diff_pin(name, live_pins.get(name), baseline_box[name])
+        msg = diff_pin(name, live_pins.get(name), baseline_box[name], build_default=build_default)
         if msg:
             drifts.append(f"box={box} " + msg)
     return drifts
@@ -200,11 +219,35 @@ def read_pins_over_ws(ws, names) -> dict:
     return {name: _read_one_pin(ws, name) for name in names}
 
 
-def read_live_pins(host: str, password: str, names) -> dict:
-    """Connect to `host` and read pins (raises on a connect failure -> caller fail-closes)."""
+def read_genlock_default_ms(ws) -> "int | None":
+    """#1295: the box's GENLOCK-build ndi_source DEFAULT for `genlock_latency_ms_src`, read over
+    the ALREADY-connected `ws` via GetInputDefaultSettings(inputKind=ndi_source) -- the SAME call
+    obs_phase2._effective_input_settings uses, so NO new transport. The DistroAV fork registers
+    this as an obs_data default (ndi_source_getdefaults: obs_data_set_default_int
+    genlock_latency_ms_src=3, vendor/distroav/src/ndi-source.cpp), so a non-None return == this box
+    runs the genlock build and an absent per-input key means that default is in effect. Stock
+    DistroAV has no such default key -> None (absent truly means "no genlock"; the verifier then
+    keeps N/A + DRIFT). Best-effort: any read failure -> None (conservatively treated as stock)."""
+    try:
+        d = _rpc(ws, "GetInputDefaultSettings", {"inputKind": "ndi_source"}, ignore_err=True)
+    except Exception as e:  # noqa: BLE001 -- a build-identity read failure is non-fatal: treat as stock
+        print(f"WARNING: latency_pins_verify: GetInputDefaultSettings(ndi_source) failed: {e}", file=sys.stderr)
+        return None
+    if not isinstance(d, dict):
+        return None
+    defaults = d.get("defaultInputSettings", {})
+    v = defaults.get(GENLOCK_SRC_LATENCY_KEY) if isinstance(defaults, dict) else None
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def read_live_pins(host: str, password: str, names) -> tuple:
+    """Connect to `host` and read (pins, build_default) (raises on a connect failure -> caller
+    fail-closes). #1295: `build_default` is the genlock-build ndi_source default (int | None,
+    read over the SAME connection) so the caller can resolve an absent per-input key to the build
+    default instead of a false N/A DRIFT."""
     ws = _conn(host, password)
     try:
-        return read_pins_over_ws(ws, names)
+        return read_pins_over_ws(ws, names), read_genlock_default_ms(ws)
     finally:
         ws.close()
 
@@ -233,7 +276,7 @@ def main(argv=None) -> int:
 
     names = baseline_names(baseline_box)
     try:
-        live_pins = read_live_pins(args.host, args.password, names)
+        live_pins, build_default = read_live_pins(args.host, args.password, names)
     except Exception as e:  # noqa: BLE001 -- fail-CLOSED: an unreachable box is loud, never a silent clean
         print(
             f"ERROR: latency_pins_verify: could not read {args.box} pins over WS at {args.host}: {e}\n"
@@ -271,7 +314,7 @@ def main(argv=None) -> int:
         )
         return 2
 
-    drifts = verify_box(args.box, baseline_box, live_pins)
+    drifts = verify_box(args.box, baseline_box, live_pins, build_default=build_default)
     if drifts:
         print(
             f"LATENCY-PIN DRIFT on {args.box} ({args.host}) -- {len(drifts)} input(s) off the agreed "
