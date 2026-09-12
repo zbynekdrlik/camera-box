@@ -2491,3 +2491,36 @@ cam5/6/7 powered off). Two fixes, both in `scripts/lib/cambox-offline-ack.sh`:
 - `cambox_offline_ack_excluded_json(boxes)` builds the `[{"box":..,"reason":..}]` array
   jq-merged into the run's verdict JSON as `.excluded_cams` right after the merge writes it — so a
   partial-fleet run can never be misread as full-fleet-clean from the JSON alone.
+
+## CG-chain receiver-side verdict (#1300) — `scripts/cg-chain-verify.sh`
+
+The FIFO-audit-level equivalent of this harness for the CG chain (SongPlayer `SP-*` → cg OBS /
+RESOLUME-SNV → strih `cg` / stream `NDI obs hudba`). It runs the cadence-agnostic
+`resolume_playback` verdict per hop off one aligned `genlock-fifo audit` window + the per-source
+`asrc:` ppm residual, prints a per-hop table + overall PASS/FAIL, and exits non-zero (3) on FAIL.
+This is what ACCEPTS the songplayer genlock series (songplayer 146–151) from the RECEIVER side
+(sender contract = issue 1294 §8); pixel-level burn-id contiguity is issue 1301. Full detail:
+`.claude/rules/cg-chain-verify.md`.
+
+The per-hop log tail is supplied explicitly (the tool ships no untested ssh/MCP default):
+
+```bash
+# LIVE run (rig ON) — wire each hop's reader, then run:
+#   strih / stream: a byte-safe PowerShell gc tail over ssh (or a bundle-state :8899 fetch)
+#   cg-obs (RESOLUME-SNV): paste the win-resolume MCP FileRead of its OBS log to a file
+export CG_CHAIN_CG_OBS_LOG=/tmp/cg-obs-obs.log     # from win-resolume MCP FileRead
+export CG_CHAIN_STRIH_CMD='ssh -o StrictHostKeyChecking=no newlevel@10.77.9.202 "powershell -c \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName | select -last 4000\""'
+export CG_CHAIN_STREAM_CMD='ssh -o StrictHostKeyChecking=no newlevel@10.77.9.204 "powershell -c \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName | select -last 4000\""'
+scripts/cg-chain-verify.sh                          # one window, all 3 hops → table + OVERALL, exit 3 on FAIL
+
+# 24 h soak → CSV (issue 1294 §8 flatness plot), then share the CSV:
+scripts/cg-chain-verify.sh --soak-hours 24 --interval-s 300 --csv /tmp/cg-chain-soak.csv
+python3 ~/devel/airuleset/airuleset.py share /tmp/cg-chain-soak.csv
+
+# tune the bounds if needed (defaults mirror resolume_playback: skew 20 ms, min-samples 2, asrc ±10 ppm):
+scripts/cg-chain-verify.sh --hops "cg-obs strih" --skew-bound-ms 20 --asrc-floor-ppm 10
+```
+
+Acceptance (#1300): with SongPlayer still on synthesized timecodes the cg-obs hop FAILs with the
+count-gate signature (the BEFORE picture); after songplayer 146–151 land, all hops PASS over a 1 h
+window and the 24 h CSV is flat within ±20 ms.
