@@ -453,6 +453,11 @@ pub mod offline_ack;
 // `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. LIVE-gating
 // again since issue 905 item 3 (the "temporary until 120Hz" premise is dead — 60Hz is permanent).
 pub mod burn_hold;
+// #1301 — PURE crate-root decision for the CG chain (SongPlayer-originated content): per-hop
+// SongPlayer(911014)/cg-OBS(911015) burn-id contiguity + max-hold, mirroring imag_tick_gate +
+// reusing burn_hold. REPORT-ONLY (gates_overall_pass()==false) until a real captured cg-OBS frame
+// + a green CG_CHAIN run calibrate it LIVE; the probe-gated recording-verdict binary calls it.
+pub mod cg_chain_gate;
 // #1260 — PURE, dependency-free within-tick "prepare once, reuse" state for the DistroAV QR burn
 // filter. The Tier-0 authority the C mirror vendor/distroav/src/burn-tick-cache.hpp is checked
 // against; the filter preps + stamps the burn frame_id ONCE per tick so strih's 4K Multiview
