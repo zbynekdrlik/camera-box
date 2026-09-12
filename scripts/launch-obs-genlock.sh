@@ -196,7 +196,10 @@ ${kill_body}"
   else
     kill_block=$(cat <<'PSNOKILL'
 # No --force: refuse to double-launch a running obs64 (relaunch deliberately; use --force for a wedged one).
-if (Get-Process obs64 -ErrorAction SilentlyContinue) {
+# #1295: count only LIVE obs64 here too -- a stale/exited Get-Process handle (HasExited / 0 threads)
+# must not falsely report "already running" and refuse a legitimate launch (same zombie-blind class
+# as the #978 gate + the wait-picks below).
+if (Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }) {
   Write-Error "obs64 already running -- relaunch deliberately (--force to recover a wedged one)."; exit 3
 }
 PSNOKILL

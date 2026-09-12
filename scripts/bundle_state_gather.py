@@ -720,7 +720,7 @@ def tasklist_mem_kb(field):
     prints memory in KB with a thousands separator and a trailing " K"."""
     if not isinstance(field, str):
         return None
-    s = field.strip().replace(" ", " ").rstrip("Kk").strip().replace(",", "")
+    s = field.strip().replace(" ", " ").rstrip("Kk").replace(",", "").replace(" ", "")
     if not s or not s.lstrip("-").isdigit():
         return None
     return int(s)

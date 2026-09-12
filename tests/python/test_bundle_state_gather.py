@@ -682,3 +682,10 @@ def test_tasklist_row_is_live_obs_false_for_unparseable_mem():
     # an absent/N/A Mem is NOT trusted as live (fail-safe: a live OBS always reports a real Mem).
     assert bsg.tasklist_row_is_live_obs("N/A") is False
     assert bsg.tasklist_row_is_live_obs("") is False
+
+
+def test_tasklist_mem_kb_handles_space_and_nbsp_thousands_separator():
+    # #1295 review 🔵: a space / non-breaking-space grouped thousands separator (a non-en-US
+    # locale) must not parse to None (which would read not-live -> an obs undercount).
+    assert bsg.tasklist_mem_kb("512 000 K") == 512000
+    assert bsg.tasklist_mem_kb("512 000 K") == 512000
