@@ -66,6 +66,11 @@ out-of-band present reading folds into the hop verdict; `UNKNOWN` never fails.
 - `rig-health-audit.py` calls `check_cg_chain()` REPORT-ONLY: it emits the `CG_CHAIN_REPORT_VERDICT
   = "NOTE"` row (never PASS/WARN/FAIL, so it never changes the audit exit code). The `#787
   resolume-rate exemption` (`CAMERA_SRC_RE = ^NDI cam\d+$`) is unchanged.
+- **Gotcha — an awk comment inside the single-quoted awk program must carry NO apostrophe.** The
+  `cg_chain_summarize_window` / `cg_chain_enumerate_sources` awk bodies are bash single-quoted
+  (`awk '…'`), so a `#`-comment line containing an apostrophe (`jitter_audit's`) terminates the
+  bash string mid-program → `bash -n` / `shellcheck` syntax error (cost a cycle this session). Keep
+  awk-internal comments apostrophe-free (and mind bare `(`/`)` after a stray quote).
 - **Tier-0 (#557, no cargo of any compiling shape):** `bash -n` + `shellcheck -S warning`; source
   the lib and drive the pure functions over fixtures; pytest for the python part
   (`tests/python/test_cg_chain_rig_health_1300.py`); `cargo fmt --all --check`. The Rust parity
