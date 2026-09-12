@@ -41,9 +41,32 @@ which is a **no-op while `gates_overall_pass() == false`** — so the camera-cha
 
 **It is REPORT-ONLY on purpose.** There is no real SongPlayer burn yet (songplayer#151 unshipped),
 so the hold/decimation behaviour is uncalibrated. The flip to LIVE is the standard one-line seam
-(`gates_overall_pass() -> true`, `verdict-gate-seam-calibration.md`) AFTER: (1) a real captured
-cg-OBS frame with the SP burn replaces the generated decode fixture
-(`pattern-change-needs-decode-fixture.md`), and (2) a green CG_CHAIN=1 run series calibrates it.
+(`gates_overall_pass() -> true`, `verdict-gate-seam-calibration.md`) — but the checklist is MORE
+than "calibrate the hold". Before the flip:
+
+1. A real captured cg-OBS frame with the SP burn replaces the generated decode fixture
+   (`pattern-change-needs-decode-fixture.md`).
+2. **The strih + stream `cg_chain` hops must DECODE sp/cg on the real decode path — they do NOT
+   today.** The strih/stream recordings are decoded via `decode_for_grouped` with expected-burn
+   lists of `[strih]` / `[strih,stream]` (recording-verdict.rs `main()`) — sp/cg (911014/911015)
+   are in NEITHER, so the #207 robust tiling never chases the cg/sp corners on those recordings;
+   only whatever the cheap plain+Otsu full-frame pass happens to read shows up. So the "a dropped
+   SongPlayer frame shows the SAME missing id at strih AND stream" propagation is proven ONLY in
+   the `cg_chain_gate.rs` unit test, NOT end-to-end. The flip MUST first add sp/cg to the
+   strih/stream expected-burn decode sets (without regressing the #463 GENERIC_DIAGNOSTIC fast-path
+   on normal runs — they are not present there, so gate it to CG_CHAIN runs / a dedicated decode).
+3. **Model the cg→strih 60→30 DECIMATION on the strih hop.** strih records at 30fps, so the SP id
+   (painted per cg-OBS render) lands DECIMATED in the strih recording — a strict `first..=last`
+   presence check would false-FAIL it exactly like the cam-chain #571 case. The strih (and
+   stream) hop needs the same decimation-aware treatment (step-aware, or gap-ignore) the camera
+   chain already applies, NOT the raw presence check `cg_chain_gate::hop_contiguity` does today
+   (which is correct only for the cg-OBS ORIGIN recording, 1:1).
+4. A green CG_CHAIN=1 run series calibrates the hold bound (`MAX_HOLD_FRAMES`) against real data.
+
+Until all four hold, flipping `gates_overall_pass()` true would enable a STRUCTURALLY-RED gate
+(the strih/stream hops would fail on decode gaps + decimation), not a calibrated one — do NOT flip
+blind. The cg-OBS ORIGIN hop (decoded WITH sp/cg in its expected set, 1:1) is the only one
+currently honest end-to-end.
 
 ## The decode fixture is GENERATED — a real cg-OBS frame MUST replace it
 

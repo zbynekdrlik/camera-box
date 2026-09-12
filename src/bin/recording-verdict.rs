@@ -3279,11 +3279,14 @@ fn build_and_print_verdict_with_stream_diffs(
             Some(p) => parse_painter_flip(p)?,
             None => (HashMap::new(), HashMap::new()),
         };
-    // strih recording: node burn = strih; no foreign burn forwarded INTO strih.
+    // strih recording: node burn = strih. No camera-chain foreign burn is forwarded INTO strih,
+    // but during a CG_CHAIN run the SongPlayer-origin (911014) + cg-OBS-hop (911015) burns flow
+    // cg OBS → strih, so exclude them here too (#1301 belt-and-braces) — they must never be read
+    // as cam2 in the UNPINNED fallback (the `--cam2-run-id` pin already protects the normal path).
     let strih_ids = RunIds {
         node_burn: args.burn_strih_run_id,
         cam2: cam2_pin,
-        other_burns: vec![],
+        other_burns: vec![args.burn_songplayer_run_id, args.burn_cg_run_id],
     };
     // cam→strih ABSOLUTE latency needs the strih recording (its in-frame strih-burn +
     // cam2 stamps). Skipped in cam1-only optical-readability mode.
@@ -3381,7 +3384,14 @@ fn build_and_print_verdict_with_stream_diffs(
         let stream_ids = RunIds {
             node_burn: args.burn_stream_run_id,
             cam2: cam2_pin,
-            other_burns: vec![args.burn_strih_run_id],
+            // #1301: the CG-chain burns can ride into the stream recording during a CG_CHAIN run —
+            // exclude them alongside the forwarded strih burn so they are never read as cam2 in the
+            // UNPINNED fallback (the `--cam2-run-id` pin already protects the normal path).
+            other_burns: vec![
+                args.burn_strih_run_id,
+                args.burn_songplayer_run_id,
+                args.burn_cg_run_id,
+            ],
         };
         // #111 PART A: prefer the WHOLE strih→stream hop from the STREAM recording
         // ALONE — the stream frames carry the FORWARDED strih burn + stream's own burn,

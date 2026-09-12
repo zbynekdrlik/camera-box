@@ -184,7 +184,7 @@ inline Placement corner_placement(uint32_t frame_w, uint32_t frame_h, Corner cor
 			x = 0; // tier 3: last resort (degenerate tiny canvas)
 		}
 		p.band_x = x;
-	} else { // BottomCenterLeft (#463): one `margin` clear of the BottomLeft burn's right
+	} else if (corner == Corner::BottomCenterLeft) { // (#463): one `margin` clear of the BottomLeft burn's right
 		 // edge (`margin + side`), so imag never collides with strih's corner burn. On the
 		 // production 1920×1080 canvas (margin=40, side=302) this lands at x=[382,684) —
 		 // 116px clear of the SEPARATE Rust-side cam1 center burn at x=[800,1120)
@@ -210,6 +210,12 @@ inline Placement corner_placement(uint32_t frame_w, uint32_t frame_h, Corner cor
 				x = (frame_w > side) ? (frame_w - side) : 0; // tier 3: last resort
 		}
 		p.band_x = x;
+	} else {
+		// #1301 review: defensive default — a FUTURE Corner variant not handled above would
+		// otherwise silently have rendered as BottomCenterLeft (when BCL was the bare `else`).
+		// Fall back to the BottomLeft in-frame x so a new unhandled variant lands somewhere valid
+		// (never off-frame) and is obvious in a recording, rather than colliding with imag's slot.
+		p.band_x = margin;
 	}
 	// Vertical center so the bottom edge sits at frame_h - margin.
 	const uint32_t half = side / 2;

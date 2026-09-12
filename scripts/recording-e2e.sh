@@ -4201,7 +4201,7 @@ if cg_chain_enabled; then
   echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON + cg OBS StartRecord (UNVERIFIED until songplayer#151 ships)"
   cg_chain_songplayer_burn on
   if CG_HOST_IP="$(cg_chain_resolve_host)" \
-    && cg_chain_record_start "$CG_HOST_IP" "$HERE/obs_phase2.py" "${OBS_CLEANUP_TIMEOUT:-30}"; then
+    && cg_chain_record_start "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"; then
     CG_RECORDING_STARTED=1
   fi
 fi
@@ -5157,7 +5157,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   # recording transport is env-configured via CG_CHAIN_PULL_CMD (pending songplayer#151); with it
   # unset the pull is a loud no-op. Pure no-op unless CG_CHAIN=1.
   if cg_chain_enabled && [ "$CG_RECORDING_STARTED" = 1 ]; then
-    cg_chain_record_stop "$CG_HOST_IP" "$HERE/obs_phase2.py" "${OBS_CLEANUP_TIMEOUT:-30}"
+    cg_chain_record_stop "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"
     cg_chain_pull_recording "$CG_HOST_IP" "$CG_RECORDING" || true
   fi
   # The merge reads ONLY the small JSONs (+ the small painter CSV / capture-stats already on dev1)
