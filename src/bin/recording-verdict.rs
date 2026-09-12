@@ -55,8 +55,8 @@ use camera_box::probe::recording_latency::{
     n_camera_strih_samples, painter_internal_gen_to_flip, per_frame_latency_csv_rows,
     strih_stream_samples, strih_stream_samples_from_stream, write_latency_csv, HopLatency,
     LatencySample, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
-    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM,
-    BURN_RUN_ID_STRIH,
+    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_CG, BURN_RUN_ID_IMAG,
+    BURN_RUN_ID_SONGPLAYER, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -95,6 +95,14 @@ struct Args {
     /// --strih/--stream; may be supplied alone or alongside them.
     #[arg(long)]
     imag: Option<PathBuf>,
+    /// #1301 cg OBS (RESOLUME-SNV) OBS-program recording for the CG chain. When supplied, the
+    /// verdict emits a REPORT-ONLY `cg_chain` section: the SongPlayer-origin burn
+    /// ([`BURN_RUN_ID_SONGPLAYER`] = 911014) contiguity + hold across this cg OBS recording →
+    /// strih → stream, plus the cg OBS box's own corner burn ([`BURN_RUN_ID_CG`] = 911015). It
+    /// NEVER changes the camera-chain overall_pass (report-only until songplayer#151 + a green
+    /// CG_CHAIN run calibrate it LIVE). Independent of --strih/--stream; a normal run omits it.
+    #[arg(long)]
+    cg: Option<PathBuf>,
     /// cam1 GRAB recording (#105 node 2) — the camera-box `--record-grab` mkv of
     /// cam1's filmed frames. Enables the STRICT cam1→strih hop verdict and the HONEST
     /// cam2→cam1 optical assessment (and, with --cam1-grab-ts, the cam2→cam1 latency).
@@ -207,6 +215,15 @@ struct Args {
     /// #755: cam7's capture-burn run_id (fleet growth 6→7, #753). See `--burn-cam3-run-id`.
     #[arg(long, default_value_t = BURN_RUN_ID_CAM7)]
     burn_cam7_run_id: u32,
+    /// #1301: the SongPlayer-origin burn run_id for the CG chain (painted by SongPlayer itself,
+    /// zbynekdrlik/songplayer#151). Tracked for contiguity + hold across the cg OBS → strih →
+    /// stream recordings. Defaults to the reserved [`BURN_RUN_ID_SONGPLAYER`].
+    #[arg(long, default_value_t = BURN_RUN_ID_SONGPLAYER)]
+    burn_songplayer_run_id: u32,
+    /// #1301: the cg OBS (RESOLUME-SNV) box's own corner-burn run_id. Defaults to the reserved
+    /// [`BURN_RUN_ID_CG`].
+    #[arg(long, default_value_t = BURN_RUN_ID_CG)]
+    burn_cg_run_id: u32,
     /// #108: cam2's painter run_id (the `--run-id` the cam2 painter used). When set,
     /// cam2's QR is matched EXACTLY by this run_id, so the strih burn forwarded into
     /// the stream recording can NEVER be mistaken for cam2. Strongly recommended for
@@ -2933,6 +2950,14 @@ fn main() -> Result<()> {
     // burn at all (a build predating #463) simply decodes with none found, and the verdict falls
     // back to the cam2 optical tick's own contiguity (see `node_verdict_for_imag`).
     let imag = decode_for(args.imag.as_deref(), &[BURN_RUN_ID_IMAG])?;
+    // #1301: the cg OBS box's OWN recording for the CG chain — decode for BOTH the SongPlayer
+    // origin burn (911014, painted upstream by SongPlayer) and the cg OBS hop burn (911015,
+    // composited locally) so the #207 fast/robust gate looks for both. `None` when --cg is not
+    // supplied (a normal camera-chain run), so the cg_chain section is simply omitted.
+    let cg = decode_for(
+        args.cg.as_deref(),
+        &[args.burn_songplayer_run_id, args.burn_cg_run_id],
+    )?;
     // #187: a cam1 grab decode failure is NON-FATAL — the stream-only hops still run, and the
     // failure is recorded in nodes.cam1 (never silent). The grab is OPTIONAL (#179).
     let cam1 = match args.cam1.as_deref() {
@@ -2950,8 +2975,12 @@ fn main() -> Result<()> {
     // directly. Same for A/V-sync (`None`, #312 item 2 PR A): the fused path decodes it directly
     // from `args.av_marker_log` + `args.stream` INSIDE `build_and_print_verdict` when both are
     // given — there is nothing to carry here (carrying only applies to the #208 merge path).
-    let (_report, all_pass) =
-        build_and_print_verdict(&args, strih, stream, cam1, None, None, imag, None)?;
+    // #1301: call `_with_stream_diffs` directly (not the 8-arg `build_and_print_verdict` wrapper)
+    // so the fused path can thread the cg OBS recording through as the new trailing `cg` param —
+    // the 3 middle trailing args are the same `None`s the wrapper passes on the fused/test path.
+    let (_report, all_pass) = build_and_print_verdict_with_stream_diffs(
+        &args, strih, stream, cam1, None, None, imag, None, None, None, None, cg,
+    )?;
     if !all_pass {
         std::process::exit(1);
     }
@@ -3015,6 +3044,7 @@ fn build_and_print_verdict(
         None,
         None, // issue 1118: the fused/test path never degrades an imag partial (no schema skip)
         None, // #1143: the fused/test path carries no OBS record-render stats
+        None, // #1301: the 8-arg wrapper (tests) supplies no cg OBS recording
     )
 }
 
@@ -3060,6 +3090,12 @@ fn build_and_print_verdict_with_stream_diffs(
     // (drawn/attempted/lagged% + max in-record ms) so a stale x264 encoder's observer effect is
     // attributed to the recorder, never to the delivery chain. `None` on every run without it.
     imag_record_render: Option<camera_box::record_render_stats::RecordRenderStats>,
+    // #1301 — the cg OBS (RESOLUME-SNV) box's OWN recording for the CG chain. `Some` only when
+    // `--cg` was supplied (fused path) or a cg partial was merged (`run_merge`). Drives the
+    // REPORT-ONLY `cg_chain` section (SongPlayer-origin 911014 + cg-hop 911015 contiguity + hold
+    // across cg OBS → strih → stream); NEVER folds into the camera-chain overall_pass while
+    // `cg_chain_gate::gates_overall_pass()` is false. `None` on every normal run.
+    cg: Option<DecodedRec>,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -3616,6 +3652,10 @@ fn build_and_print_verdict_with_stream_diffs(
                 args.burn_cam7_run_id,
                 args.burn_strih_run_id,
                 args.burn_stream_run_id,
+                // #1301: the CG-chain burns can ride into this recording during a CG_CHAIN run —
+                // exclude them from the cam2 optical detection like every other node burn.
+                args.burn_songplayer_run_id,
+                args.burn_cg_run_id,
             ];
             println!();
             println!(
@@ -4644,6 +4684,10 @@ fn build_and_print_verdict_with_stream_diffs(
                     args.burn_cam7_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
+                    // #1301: exclude the CG-chain burns from the cam2 optical anchor like every
+                    // other node burn (they can ride in during a CG_CHAIN run).
+                    args.burn_songplayer_run_id,
+                    args.burn_cg_run_id,
                 ];
                 let (seg_frames, no_anchor) = segment_frames_from_recording(
                     stream_frames,
@@ -6330,6 +6374,10 @@ fn build_and_print_verdict_with_stream_diffs(
                     args.burn_cam7_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
+                    // #1301: exclude the CG-chain burns from the cam2 optical anchor like every
+                    // other node burn (they can ride in during a CG_CHAIN run).
+                    args.burn_songplayer_run_id,
+                    args.burn_cg_run_id,
                 ];
                 let (latency_windows, latency_no_anchor) = partition_frames_by_window(
                     stream_frames,
@@ -7047,6 +7095,85 @@ fn build_and_print_verdict_with_stream_diffs(
         }
     }
 
+    // #1301 — CG chain (SongPlayer-originated content) verdict. Gated on `--cg` (the cg OBS box's
+    // OWN recording) being supplied, so a normal camera-chain run never emits this section.
+    // REPORT-ONLY: `cg_chain_gate::gates_overall_pass()` is `false`, so the fold is a no-op and the
+    // camera-chain `overall_pass` is PROVABLY unaffected (the acceptance criterion). Held
+    // report-only until a REAL captured cg-OBS frame (songplayer#151) + a green CG_CHAIN run
+    // calibrate the hold/decimation behaviour LIVE.
+    if let Some(cg_rec) = cg {
+        use camera_box::cg_chain_gate;
+        use camera_box::recording_boundary_trim::{
+            trim_boundary_pairs, BOUNDARY_TRIM_LEAD_FRAMES, BOUNDARY_TRIM_TAIL_FRAMES,
+        };
+        let cg_frames = cg_rec.frames;
+        let sp_id = args.burn_songplayer_run_id;
+        let cg_id = args.burn_cg_run_id;
+        // One hop's CgHop from a recording's frames: #575-boundary-trim the recorded-ORDER
+        // (frame_index,id) pairs before the hold walk, exactly like the imag leg + node-burn hold
+        // (so a recording-boundary freeze never false-fires the hold term).
+        let build_hop = |hop: &str, frames: &[RecordingFrame]| -> cg_chain_gate::CgHop {
+            let (first_idx, last_idx) = match (frames.first(), frames.last()) {
+                (Some(f), Some(l)) => (f.frame_index, l.frame_index),
+                _ => (0, 0),
+            };
+            let sp_pairs = trim_boundary_pairs(
+                &burn_ids_with_frame_index_in(frames, sp_id),
+                first_idx,
+                last_idx,
+                BOUNDARY_TRIM_LEAD_FRAMES,
+                BOUNDARY_TRIM_TAIL_FRAMES,
+            );
+            let cg_pairs = trim_boundary_pairs(
+                &burn_ids_with_frame_index_in(frames, cg_id),
+                first_idx,
+                last_idx,
+                BOUNDARY_TRIM_LEAD_FRAMES,
+                BOUNDARY_TRIM_TAIL_FRAMES,
+            );
+            cg_chain_gate::cg_hop(hop, &sp_pairs, &cg_pairs)
+        };
+        let verdict = cg_chain_gate::CgChainVerdict {
+            cg_obs: Some(build_hop("cg_obs", &cg_frames)),
+            strih: strih_data.as_ref().map(|(f, _)| build_hop("strih", f)),
+            stream: stream_frames_opt.as_ref().map(|f| build_hop("stream", f)),
+        };
+        let hop_json = |h: &cg_chain_gate::CgHop| {
+            let cont_json =
+                |cont: &cg_chain_gate::HopContiguity, max_hold: Option<u32>, ok: bool| {
+                    serde_json::json!({
+                        "first_id": cont.first_id,
+                        "last_id": cont.last_id,
+                        "present_count": cont.present_count,
+                        "expected_count": cont.expected_count,
+                        "missing_ids": cont.missing_ids,
+                        "contiguous": cont.is_contiguous(),
+                        "max_hold_frames": max_hold,
+                        "ok": ok,
+                    })
+                };
+            serde_json::json!({
+                "songplayer": cont_json(&h.songplayer, h.songplayer_max_hold, h.songplayer_ok()),
+                "cg": cont_json(&h.cg, h.cg_max_hold, h.cg_ok()),
+                "pass": h.pass(),
+            })
+        };
+        let contiguous = verdict.contiguous();
+        report["cg_chain"] = serde_json::json!({
+            "contiguous": contiguous,
+            "gated_live": cg_chain_gate::gates_overall_pass(),
+            "hold_bound": camera_box::burn_hold::MAX_HOLD_FRAMES,
+            "songplayer_run_id": sp_id,
+            "cg_run_id": cg_id,
+            "cg_obs": verdict.cg_obs.as_ref().map(hop_json),
+            "strih": verdict.strih.as_ref().map(hop_json),
+            "stream": verdict.stream.as_ref().map(hop_json),
+        });
+        // REPORT-ONLY fold: `folds_into_overall_pass` is always `true` while
+        // `gates_overall_pass()` is `false`, so this never changes the camera-chain result.
+        all_pass &= cg_chain_gate::folds_into_overall_pass(contiguous);
+    }
+
     // Record the headline verdict and write the machine-readable report (BEFORE any
     // exit, so a FAIL run still produces the JSON the report renderer consumes).
     report["overall_pass"] = serde_json::Value::Bool(all_pass);
@@ -7193,6 +7320,10 @@ fn extract_partial_flagged_frames(
     let mut all_burns = camera_under_test_burn_ids(args);
     all_burns.push(args.burn_strih_run_id);
     all_burns.push(args.burn_stream_run_id);
+    // #1301: the CG-chain burns (SongPlayer origin + cg OBS hop) can ride into this recording
+    // during a CG_CHAIN run — exclude them from the cam2 optical detection like every other burn.
+    all_burns.push(args.burn_songplayer_run_id);
+    all_burns.push(args.burn_cg_run_id);
     // UNDECODABLE frames (no readable QR at all) — the exact set `report_recording_diag` extracts.
     let ticks = FrameTick::from_recording_frames(frames);
     let cfg = VerdictConfig {
@@ -7762,6 +7893,14 @@ fn run_merge(args: &Args) -> Result<()> {
         painter = ?args.painter.as_ref().map(|p| p.display().to_string()),
         "merge: building the full-chain verdict from per-box partials (#208 — no recording on dev1)"
     );
+    // #1301: the cg OBS recording for the CG chain is passed as a full recording via `--cg` (the
+    // CG_CHAIN E2E pulls it to dev1 and points `--cg` at it — an on-box cg partial is a follow-up).
+    // `None` on every normal merge (no --cg), so the cg_chain section is omitted. Decoded for BOTH
+    // the SongPlayer origin burn (911014) and the cg OBS hop burn (911015).
+    let cg = decode_for(
+        args.cg.as_deref(),
+        &[args.burn_songplayer_run_id, args.burn_cg_run_id],
+    )?;
     // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
     // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
     let (_report, all_pass) = build_and_print_verdict_with_stream_diffs(
@@ -7776,6 +7915,7 @@ fn run_merge(args: &Args) -> Result<()> {
         stream_frame_prev_diffs, // #1112/#1166: carried from the stream partial's all-cambox extract
         imag_skip_reason, // issue 1118: Some when a schema-mismatched imag partial was dropped (degrade)
         imag_record_render, // #1143: carried from the imag partial's --record-render-stats extract
+        cg,               // #1301: cg OBS recording for the REPORT-ONLY cg_chain section
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
@@ -7989,9 +8129,11 @@ mod tests {
     const CAM1B: u32 = 911001; // cam1 per-EMIT capture burn run_id
     const STRIH: u32 = 911002; // strih per-render burn run_id
     const STREAM: u32 = 911004; // stream per-render burn run_id
-                                // #273: a CURRENT-run cam2 painter run_id (the `--cam2-run-id` pin) and a FOREIGN one — a
-                                // previous run's residual paint still on the cam2 monitor when the recording started. Mirrors
-                                // the real run 2706001 (current) vs 2606010 (the prior run's lead-in residue).
+    const SP: u32 = super::BURN_RUN_ID_SONGPLAYER; // #1301 CG-chain SongPlayer origin burn (911014)
+    const CGB: u32 = super::BURN_RUN_ID_CG; // #1301 CG-chain cg OBS hop burn (911015)
+                                            // #273: a CURRENT-run cam2 painter run_id (the `--cam2-run-id` pin) and a FOREIGN one — a
+                                            // previous run's residual paint still on the cam2 monitor when the recording started. Mirrors
+                                            // the real run 2706001 (current) vs 2606010 (the prior run's lead-in residue).
     const CAM2_PIN: u32 = 2706001;
     const CAM2_FOREIGN: u32 = 2606010;
 
@@ -8424,6 +8566,122 @@ mod tests {
             serde_json::json!(60),
             "#312: all 60 cam6 burn ids decoded: {}",
             v["full_chain"]["burn_ids_present"]
+        );
+    }
+
+    /// #1301 — a cg OBS recording window: N frames each carrying the SongPlayer-origin burn
+    /// (`SP` = 911014) + the cg OBS hop burn (`CGB` = 911015), contiguous end-to-end. `drop_sp_at`
+    /// drops the SongPlayer burn on that ONE frame (a killed/restarted SongPlayer mid-run) so its
+    /// id goes missing (a gap at the cg OBS hop). The SP/CG ids (5000/6000+) deliberately exceed
+    /// the cam2 optical id (100+i) — harmless here since these frames feed ONLY the `--cg` param
+    /// (the cg_chain section reads SP/CG by run_id, not the tick).
+    fn cg_window(n: u32, drop_sp_at: Option<u32>) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = Vec::new();
+                if drop_sp_at != Some(i) {
+                    ps.push((SP, 5000 + i));
+                }
+                ps.push((CGB, 6000 + i));
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #1301 — a clean CG_CHAIN run (cg OBS recording supplied alone) emits a `cg_chain` section
+    /// that reports CONTIGUOUS, is REPORT-ONLY (`gated_live=false`), and does NOT change the
+    /// camera-chain `overall_pass` (the acceptance criterion).
+    #[test]
+    fn cg_chain_reports_contiguous_report_only_without_touching_overall_pass_1301() {
+        use super::{build_and_print_verdict_with_stream_diffs, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let cg = Some(DecodedRec {
+            frames: cg_window(60, None),
+            rec_path: None,
+        });
+        let (v, pass) = build_and_print_verdict_with_stream_diffs(
+            &args,
+            None,
+            None,
+            Cam1Source::Absent,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            cg,
+        )
+        .expect("verdict");
+
+        assert_eq!(
+            v["cg_chain"]["contiguous"],
+            serde_json::json!(true),
+            "#1301: a clean cg OBS recording ⇒ cg_chain.contiguous=true: {}",
+            v["cg_chain"]
+        );
+        assert_eq!(
+            v["cg_chain"]["gated_live"],
+            serde_json::json!(false),
+            "#1301: cg_chain ships REPORT-ONLY"
+        );
+        assert_eq!(
+            v["cg_chain"]["cg_obs"]["songplayer"]["contiguous"],
+            serde_json::json!(true),
+            "#1301: the SongPlayer origin is contiguous on the cg OBS recording"
+        );
+        assert!(
+            pass,
+            "#1301: a clean cg_chain (and an empty camera chain) ⇒ overall PASS"
+        );
+    }
+
+    /// #1301 — a dropped SongPlayer frame is REPORTED as a gap at the cg OBS hop, but because the
+    /// gate ships REPORT-ONLY it does NOT fail the run (the camera-chain overall_pass is
+    /// unaffected either way).
+    #[test]
+    fn cg_chain_dropped_songplayer_frame_is_reported_but_report_only_does_not_fail_1301() {
+        use super::{build_and_print_verdict_with_stream_diffs, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let cg = Some(DecodedRec {
+            frames: cg_window(60, Some(30)), // SongPlayer id 5030 dropped mid-run
+            rec_path: None,
+        });
+        let (v, pass) = build_and_print_verdict_with_stream_diffs(
+            &args,
+            None,
+            None,
+            Cam1Source::Absent,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            cg,
+        )
+        .expect("verdict");
+
+        assert_eq!(
+            v["cg_chain"]["contiguous"],
+            serde_json::json!(false),
+            "#1301: a dropped SongPlayer frame ⇒ cg_chain.contiguous=false: {}",
+            v["cg_chain"]
+        );
+        assert_eq!(
+            v["cg_chain"]["cg_obs"]["songplayer"]["missing_ids"],
+            serde_json::json!([5030]),
+            "#1301: the dropped SongPlayer id is reported as a gap at the cg OBS hop"
+        );
+        assert!(
+            pass,
+            "#1301: REPORT-ONLY — a dropped SongPlayer frame is reported but does NOT fail the run"
         );
     }
 
