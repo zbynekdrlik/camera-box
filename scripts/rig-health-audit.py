@@ -57,6 +57,12 @@ CADENCE_LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "c
 # strih CAMERA source labels only (`NDI cam1..7`); excludes `NDI 2ME PGM (mv)` / `NDI 2ME PVW`,
 # which are 30 fps by design and must NOT be graded against 60 fps.
 CAMERA_SRC_RE = re.compile(r"^NDI\s+cam\d+$", re.I)
+# issue-1300 CG-chain receiver-side verdict, wired here REPORT-ONLY: the row NEVER emits
+# PASS/WARN/FAIL (so it can never change the audit exit code) -- only this NOTE verdict, which
+# main()'s PASS/WARN/FAIL counting ignores. The #787 resolume-rate exemption (CAMERA_SRC_RE above)
+# is unchanged: resolume's non-60 cadence is still never graded by the arrival/cadence checks.
+CG_CHAIN_REPORT_VERDICT = "NOTE"
+CG_CHAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cg-chain-verify.sh")
 
 results = []
 
@@ -428,6 +434,71 @@ def windows_obs_log_tail(ip: str, tail: int = 500) -> str | None:
     return ssh(ip, _windows_obs_log_tail_cmd(tail), user="newlevel", timeout=30)
 
 
+def cg_chain_detail_from_output(stdout: str) -> str:
+    """Pure: fold cg-chain-verify.sh's table output into ONE report-only detail line.
+
+    Counts the per-hop source verdicts (the last token of each data row is PASS/FAIL) and echoes
+    the tool's own OVERALL verdict. No I/O -- unit-testable. The detail never implies a rig fault
+    of its own; the audit's PASS/WARN/FAIL exit is untouched (this row is always emitted as NOTE).
+    """
+    passes = fails = 0
+    overall = "?"
+    for ln in stdout.splitlines():
+        s = ln.strip()
+        if s.startswith("OVERALL:"):
+            overall = s.split(":", 1)[1].strip()
+            continue
+        parts = s.split()
+        if parts and parts[-1] in ("PASS", "FAIL"):
+            if parts[-1] == "PASS":
+                passes += 1
+            else:
+                fails += 1
+    return (f"overall={overall} sources_pass={passes} sources_fail={fails} "
+            f"(report-only #1300; #787 resolume-rate exemption unchanged)")
+
+
+def check_cg_chain() -> None:
+    """REPORT-ONLY CG-chain row (#1300): fetch strih + stream OBS log tails, run cg-chain-verify.sh
+    --report-only over them, and emit ONE NOTE row. Never PASS/WARN/FAIL -> never changes the audit
+    exit code. A box that is off / unreachable yields a NOTE 'log unreadable', never a page."""
+    import tempfile
+
+    logs: dict[str, str] = {}
+    for hop, ip in (("strih", STRIH), ("stream", STREAM)):
+        tail = windows_obs_log_tail(ip)
+        if tail is None:
+            emit(CG_CHAIN_REPORT_VERDICT, "cg-chain",
+                 f"{hop} OBS log unreadable -- CG-chain verdict skipped (report-only #1300)")
+            return
+        logs[hop] = tail
+
+    env = dict(os.environ)
+    tmp: list[str] = []
+    try:
+        for hop, text in logs.items():
+            fd, path = tempfile.mkstemp(prefix=f"cg-chain-{hop}-", suffix=".log")
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+            tmp.append(path)
+            env[f"CG_CHAIN_{hop.upper()}_LOG"] = path
+        try:
+            out = subprocess.run(
+                ["bash", CG_CHAIN_SCRIPT, "--hops", "strih stream", "--report-only"],
+                env=env, capture_output=True, text=True, timeout=30,
+            ).stdout
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            emit(CG_CHAIN_REPORT_VERDICT, "cg-chain", f"verdict tool error: {exc} (report-only #1300)")
+            return
+        emit(CG_CHAIN_REPORT_VERDICT, "cg-chain", cg_chain_detail_from_output(out))
+    finally:
+        for path in tmp:
+            try:
+                os.unlink(path)
+            except OSError as exc:  # airuleset:script-ok best-effort temp cleanup, nothing actionable
+                print(f"[NOTE] cg-chain  temp cleanup failed for {path}: {exc}", file=sys.stderr)
+
+
 def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: float,
                       expect_latency: bool, check_camera_cadence: bool = False) -> None:
     procs = ssh(ip, _windows_obs_count_cmd(), user="newlevel", timeout=20)
@@ -501,6 +572,7 @@ def main() -> int:
     check_windows_box("strih", STRIH, strih_pw, program_fps=30.0, expect_latency=False,
                       check_camera_cadence=True)
     check_windows_box("stream", STREAM, strih_pw, program_fps=30.0, expect_latency=True)
+    check_cg_chain()  # #1300 report-only CG-chain verdict row (NOTE; never affects the exit code)
     fails = results.count("FAIL")
     warns = results.count("WARN")
     print(f"\n=== RIG AUDIT: {results.count('PASS')} PASS / {warns} WARN / {fails} FAIL "
