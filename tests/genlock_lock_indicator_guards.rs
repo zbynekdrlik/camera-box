@@ -1,0 +1,151 @@
+//! #1298 — vendored-source anchor guards for the in-OBS genlock lock indicator.
+//!
+//! The libobs genlock-stats API, the DistroAV output hook, and the Qt statusbar widget are
+//! all in the vendored tree, compiled only by the Windows/Linux genlock workflows. These
+//! guards (the `tests/genlock_preload.rs` convention) assert the new symbols + log strings are
+//! PRESENT so a future `git subtree pull` can't silently revert them, and that the new
+//! `genlock-lock:` OBS-log marker stays mutually non-substring with every existing `genlock-*`
+//! / `*-audit:` family (the `.claude/rules/jitter-audit-parser.md` rule). They are the Linux-CI
+//! twin of the 3-copy pwsh source-anchor gates in both `windows-genlock{,-fast}.yml`
+//! (`.claude/rules/obs-titlebar-build-id.md`) — keep all three in lock-step.
+//!
+//! Std-only + path via a runtime env lookup (not the `env!` macro) so it runs both under cargo
+//! and standalone (`rustc --test tests/genlock_lock_indicator_guards.rs` from the repo root).
+
+use std::path::PathBuf;
+
+fn vendor_file(rel: &str) -> String {
+    let base = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = PathBuf::from(base).join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// Collapse all runs of whitespace to a single space — the Rust twin of the pwsh gates'
+/// `-replace '\s+', ' '`, so the same pinned substring works in both.
+fn squish(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+const OBS_API: &str = "vendor/obs-studio/libobs/obs.h";
+const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
+const OBS_OUTPUT: &str = "vendor/obs-studio/libobs/obs-output.c";
+const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
+const HEADER: &str = "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp";
+const STATUSBAR_CPP: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp";
+const STATUSBAR_HPP: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.hpp";
+const NDI_OUTPUT: &str = "vendor/distroav/src/ndi-output.cpp";
+
+fn assert_has(file: &str, needle: &str) {
+    let src = squish(&vendor_file(file));
+    assert!(
+        src.contains(needle),
+        "{file}: #1298 anchor `{needle}` is GONE — the genlock lock indicator was partially \
+         reverted (e.g. a subtree pull). Re-apply it and keep the windows-genlock{{,-fast}}.yml \
+         pwsh gates in lock-step."
+    );
+}
+
+#[test]
+fn source_stats_api_present() {
+    assert_has(OBS_API, "#define OBS_GENLOCK_STATS_VERSION 1");
+    assert_has(OBS_API, "struct obs_genlock_stats {");
+    assert_has(
+        OBS_API,
+        "obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock_stats *stats)",
+    );
+    assert_has(OBS_SOURCE, "static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_stats *stats)");
+    assert_has(OBS_SOURCE, "bool obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock_stats *stats)");
+}
+
+#[test]
+fn audit_routes_through_the_shared_fill() {
+    // The `genlock-fifo audit` log line must read the SAME snapshot the API does, or the two
+    // can disagree — #1298's core invariant.
+    assert_has(
+        OBS_SOURCE,
+        "struct obs_genlock_stats gs; genlock_fill_stats(source, &gs);",
+    );
+    assert_has(OBS_SOURCE, "(unsigned long long)gs.frames_received");
+    assert_has(OBS_SOURCE, "(long long)gs.wall_qpc_drift_ms);");
+}
+
+#[test]
+fn output_stats_api_present() {
+    assert_has(OBS_API, "#define OBS_GENLOCK_OUTPUT_STATS_VERSION 1");
+    assert_has(OBS_API, "struct obs_genlock_output_stats {");
+    assert_has(
+        OBS_API,
+        "obs_output_set_genlock_wall_stamping(obs_output_t *output, bool stamping)",
+    );
+    assert_has(OBS_API, "obs_output_get_genlock_stats(const obs_output_t *output, struct obs_genlock_output_stats *stats)");
+    assert_has(
+        OBS_OUTPUT,
+        "void obs_output_set_genlock_wall_stamping(obs_output_t *output, bool stamping)",
+    );
+    assert_has(OBS_OUTPUT, "bool obs_output_get_genlock_stats(const obs_output_t *output, struct obs_genlock_output_stats *stats)");
+    assert_has(OBS_INTERNAL, "bool genlock_is_genlock_output;");
+    assert_has(OBS_INTERNAL, "bool genlock_wall_stamping;");
+}
+
+#[test]
+fn distroav_registers_wall_stamping() {
+    assert_has(
+        NDI_OUTPUT,
+        "obs_output_set_genlock_wall_stamping(o->output, true);",
+    );
+    assert_has(
+        NDI_OUTPUT,
+        "obs_output_set_genlock_wall_stamping(o->output, false);",
+    );
+}
+
+#[test]
+fn statusbar_indicator_present() {
+    assert_has(STATUSBAR_CPP, "#include \"GenlockLockState.hpp\"");
+    assert_has(STATUSBAR_CPP, "genlock_decide_lock_state(&f, &reason)");
+    assert_has(STATUSBAR_CPP, "genlock-lock: state=%s inputs=%d/%d");
+    assert_has(STATUSBAR_CPP, "GENLOCK ● LOCKED");
+    assert_has(STATUSBAR_HPP, "void UpdateGenlockLabel();");
+}
+
+#[test]
+fn decision_header_present_and_pure() {
+    assert_has(
+        HEADER,
+        "static inline genlock_lock_state_t genlock_decide_lock_state(",
+    );
+    assert_has(HEADER, "typedef enum genlock_lock_state {");
+    assert_has(HEADER, "typedef struct genlock_lock_facets {");
+    // pure: the decision header must NOT pull OBS/Qt — it is a byte-for-byte port liftable by cc.
+    let raw = vendor_file(HEADER);
+    assert!(
+        !raw.contains("#include <obs") && !raw.contains("#include <Q"),
+        "{HEADER}: #1298 the decision header gained an OBS/Qt include — it must stay pure so the \
+         parity gate can lift + compile it standalone with cc."
+    );
+}
+
+#[test]
+fn genlock_lock_marker_is_mutually_non_substring() {
+    // The new OBS-log family `genlock-lock:` must be mutually non-substring with every existing
+    // marker (jitter-audit-parser.md), so a grep / parser keyed on one never matches another.
+    const NEW: &str = "genlock-lock:";
+    let existing = [
+        "genlock-fifo audit '",
+        "genlock-ndi-output audit '",
+        "genlock-ndi-filter audit '",
+        "genlock-relock",
+        "genlock-acquire-bracket '%s':",
+        "multiview-audit:",
+        "program-render-audit:",
+        "recv-timing #797 '",
+        "asrc: source '",
+    ];
+    for m in existing {
+        assert!(
+            !NEW.contains(m) && !m.contains(NEW),
+            "#1298: the new `genlock-lock:` marker collides (substring) with existing marker `{m}` \
+             — pick a marker mutually non-substring with every genlock-* / *-audit: family."
+        );
+    }
+}
