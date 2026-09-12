@@ -62,6 +62,27 @@ Version-parity + lock/NTP/phase are checked STANDALONE (never `[0/8]`): `scripts
 --win "resolume=newlevel@<ip>"` and `scripts/dantesync-maintenance-gate.sh --box resolume` (REPORT-ONLY,
 SKIP while away). A fleet roll adds it via `scripts/dantesync-fleet-upgrade.sh --win` using
 `dantesync_resolume_win_spec "$(getent hosts resolume.lan | awk 'NR==1{print $1}')"`.
+### RESOLUME-SNV — cg OBS genlock build + launch facts (#1295)
+
+The `cg` OBS on RESOLUME-SNV runs the SAME vendored genlock build as strih/stream, deployed +
+launched through the one canonical fleet path (`scripts/deploy-genlock-fleet.sh --boxes resolume`
+/ `scripts/launch-obs-genlock.sh --box resolume`, both via the **win-resolume MCP**; the full
+supervisor runbook is `.claude/rules/resolume-cg-obs.md`). Box facts:
+
+- **OBS profile** `cg` (1920×1080@30, RGB/709); **scene collection** `cg_scenes` — 7 `ndi_source`
+  inputs `sp-*_video` → `RESOLUME-SNV (SP-*)` (the SongPlayer SP-* feeds), plus `NDIAr ppt` /
+  `NDIAr alex` / `VBAN cg-resolume`. On the genlock build every `ndi_source` defaults
+  `genlock_fifo=true` + `genlock_latency_ms_src=3` + the certified coercion (no hand WS pin needed).
+- **NDI main output** `RESOLUME-SNV (cg-obs)` — the name strih's `cg` input and the stock LED TVs
+  cache; the #1185 `:5961` creation-order pin semantics apply to this box too (see
+  `.claude/rules/distroav-sender-output-lifecycle.md`).
+- **Exactly ONE `obs64`** is the fleet bar (the session-visibility gate asserts it). A dead SECOND
+  `obs64` (pid 58560, 0 threads, parent 31700) was seen listed beside the live one 2026-09-12 — a
+  stale/dead process handle; kill the 0-thread one, keep the live instance.
+- **Crash dir** — `Crash <ts>.txt` files (e.g. `Crash 2026-09-12 19-05-41.txt`) under the OBS
+  crash-log location; read via the win-resolume MCP FileRead, never ssh.
+- **NOT in the E2E `[0/8]` version gate** (a traveling box, not a measured cam→strih→stream source)
+  — deploy/version-check it as a STANDALONE maintenance step.
 
 ## Camera Targets (camera-box)
 

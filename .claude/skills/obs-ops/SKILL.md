@@ -2,11 +2,12 @@
 name: obs-ops
 description: >
   OBS launch, recovery, and management on the dev-rig Windows boxes (strih 10.77.9.202,
-  stream 10.77.9.204). Load when launching, restarting, or recovering OBS on either box,
-  or when interacting with OBS WebSocket on the rig.
+  stream 10.77.9.204, resolume RESOLUME-SNV/resolume.lan — the traveling cg OBS, #1295). Load
+  when launching, restarting, or recovering OBS on any box, or when interacting with OBS
+  WebSocket on the rig.
 ---
 
-# OBS Ops (strih + stream)
+# OBS Ops (strih + stream + resolume)
 
 Canonical extended reference: `/home/newlevel/devel/restreamer/.claude/skills/stream-lan-operations.md`
 
@@ -16,9 +17,12 @@ The genlock build no longer uses ANY `OBS_GENLOCK_*` / `OBS_BURN_*` env (removed
 PEB-env-verify sections below are HISTORY — `launch-obs-genlock.sh` no longer carries or checks env.
 Current ops:
 
-- **Relaunch OBS:** `scripts/launch-obs-genlock.sh --box strih|stream [--force]` — env-free; it
-  clears sentinels, launches cwd=bin\64bit, and log-verifies `genlock: … render tick ENABLED` (the
-  build-default proof) + DistroAV. There is no `--mode`, no PEB env check.
+- **Relaunch OBS:** `scripts/launch-obs-genlock.sh --box strih|stream|resolume [--force]` — env-free;
+  it clears sentinels, launches cwd=bin\64bit, and log-verifies `genlock: … render tick ENABLED` (the
+  build-default proof) + DistroAV. There is no `--mode`, no PEB env check. `resolume` = RESOLUME-SNV's
+  `cg` OBS (win-resolume MCP, `resolume.lan`, no AHK watcher; profile `cg`, scene collection
+  `cg_scenes`, NDI output `RESOLUME-SNV (cg-obs)`) — a traveling CG box, full runbook in
+  `.claude/rules/resolume-cg-obs.md` (#1295).
 - **Genlock config:** render tick + ts-align are build defaults (always on); latency is a build
   const (3 ms, floor 3) with the per-source override in the DistroAV source UI ("Latency (ms)").
 - **Measurement burn:** a per-source `genlock_burn` bool toggled over OBS WebSocket with NO relaunch
