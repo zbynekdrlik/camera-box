@@ -89,6 +89,10 @@ bool genlock_scan_output(void *param, obs_output_t *output)
 	if (!st.is_genlock_output || !obs_output_active(output))
 		return true; /* a stopped / non-genlock output: facet ABSENT, never forces UNLOCKED */
 	scan->present = true;
+	/* Optimistic OR across active genlock outputs: ANY one stamping marks the box as stamping.
+	 * Correct for the single-2ME-PGM rig topology (one genlock NDI sender). If a SECOND genlock
+	 * output is ever added, a non-stamping one would be hidden behind a stamping sibling here —
+	 * revisit to an ALL-must-stamp rule at that point. */
 	if (st.wall_timecode_stamping)
 		scan->stamping = true;
 	return true;
