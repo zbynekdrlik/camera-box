@@ -85,8 +85,10 @@ impl HopContiguity {
 /// contiguous (nothing proven).
 pub fn hop_contiguity(ids: &[u32]) -> HopContiguity {
     let present: BTreeSet<u32> = ids.iter().copied().collect();
-    let (first, last) = match (present.iter().next().copied(), present.iter().next_back().copied())
-    {
+    let (first, last) = match (
+        present.iter().next().copied(),
+        present.iter().next_back().copied(),
+    ) {
         (Some(f), Some(l)) => (f, l),
         _ => {
             return HopContiguity {
