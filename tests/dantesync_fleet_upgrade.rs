@@ -1123,3 +1123,98 @@ fn windows_rollback_ps_waits_for_the_process_to_exit_between_stop_and_restore_12
          (wait={wait} kill={kill} restore={restore}). Got:\n{ps}"
     );
 }
+
+// ======================================================================================
+// issue 1297 — traveling CG box RESOLUME-SNV support (resolume win-spec + away-skip gate)
+// ======================================================================================
+
+/// Source + run `body` with extra env, capturing stdout (asserts the harness exited 0 — callers
+/// that exercise a non-zero-returning pure fn capture its rc INSIDE the body via `|| rc=$?`).
+fn run_sourced_env(env: &[(&str, &str)], body: &str) -> String {
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&harness).env("SCRIPT", script());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "env harness exited non-zero.\nstdout={:?}\nstderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn resolume_win_spec_formats_name_user_at_resolved_ip() {
+    let spec = run_sourced("dantesync_resolume_win_spec 10.77.9.201");
+    assert_eq!(spec, "resolume=newlevel@10.77.9.201", "got: {spec:?}");
+}
+
+#[test]
+fn resolume_win_spec_honours_user_override() {
+    let spec = run_sourced_env(
+        &[("DANTESYNC_RESOLUME_USER", "operator")],
+        "dantesync_resolume_win_spec 10.77.9.201",
+    );
+    assert_eq!(spec, "resolume=operator@10.77.9.201", "got: {spec:?}");
+}
+
+#[test]
+fn resolume_win_spec_empty_ip_is_empty_never_rolled() {
+    // an unresolvable resolume.lan -> empty spec, so the caller knows not to roll it.
+    let spec = run_sourced(r#"dantesync_resolume_win_spec """#);
+    assert_eq!(spec, "", "an empty IP must yield an empty spec: {spec:?}");
+}
+
+#[test]
+fn skip_away_traveling_true_when_traveling_and_away() {
+    // OBS_FLEET_HOME lists only strih/stream -> resolume (home-check=traveling) is AWAY -> SKIP.
+    let out = run_sourced_env(
+        &[("OBS_FLEET_HOME", "strih stream")],
+        "rc=0\ndantesync_skip_away_traveling resolume || rc=$?\necho \"RC=$rc\"",
+    );
+    assert!(
+        out.contains("RC=0"),
+        "away traveling box must be SKIPPED (rc 0): {out}"
+    );
+}
+
+#[test]
+fn skip_away_traveling_false_when_traveling_but_home() {
+    // resolume listed home -> NOT skipped (it joins the roll).
+    let out = run_sourced_env(
+        &[("OBS_FLEET_HOME", "resolume")],
+        "rc=0\ndantesync_skip_away_traveling resolume || rc=$?\necho \"RC=$rc\"",
+    );
+    assert!(
+        out.contains("RC=1"),
+        "a home traveling box is NOT skipped (rc 1): {out}"
+    );
+}
+
+#[test]
+fn skip_away_traveling_false_for_always_home_box() {
+    // strih is home-check=always -> never skipped regardless of the OBS_FLEET_HOME list.
+    let out = run_sourced_env(
+        &[("OBS_FLEET_HOME", "resolume")],
+        "rc=0\ndantesync_skip_away_traveling strih || rc=$?\necho \"RC=$rc\"",
+    );
+    assert!(
+        out.contains("RC=1"),
+        "an always-home box is never skipped (rc 1): {out}"
+    );
+}
+
+#[test]
+fn skip_away_traveling_false_for_unknown_box() {
+    // fail-safe: an untracked name is never silently skipped (it proceeds + fails loudly later).
+    let out =
+        run_sourced("rc=0\ndantesync_skip_away_traveling nosuchbox || rc=$?\necho \"RC=$rc\"");
+    assert!(
+        out.contains("RC=1"),
+        "an unknown box is never skipped (rc 1): {out}"
+    );
+}
