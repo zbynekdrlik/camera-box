@@ -5134,7 +5134,9 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	stats->peak_depth = source->genlock_peak_depth;
 	stats->latency_ms = effective_latency_ms;
 	stats->ts_head_skew_ms = (int64_t)(source->genlock_last_head_skew_ns / 1000000);
-	stats->wall_qpc_drift_ms = (int64_t)genlock_wall_qpc_drift_ms();
+	/* keep the literal `genlock_wall_qpc_drift_ms());` anchor the #800 gates pin
+	 * (windows-genlock*.yml pwsh + tests/genlock_preload.rs + genlock_wall_qpc_emit.rs). */
+	stats->wall_qpc_drift_ms = (int64_t)(genlock_wall_qpc_drift_ms());
 }
 
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are

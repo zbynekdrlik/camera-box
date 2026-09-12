@@ -1520,6 +1520,7 @@ struct obs_output {
 	 * (facet ABSENT — never forces the indicator to UNLOCKED). */
 	bool genlock_is_genlock_output;
 	bool genlock_wall_stamping;
+};
 
 static inline void do_output_signal(struct obs_output *output, const char *signal)
 {
