@@ -29,6 +29,17 @@
 #
 # Source-only: this file defines pure functions and performs no side effects on its own.
 
+# audio_preflight_default_threshold_db -> the canonical measurement-audio SILENCE bar in dB
+# (-60 dB: well above true digital silence ~-91 dB, far below any real signal ~-5 dB). This is the
+# ONE source of the -60 literal — the default-arg sites below reference it, and the #1310 dev1
+# measurement-audio presence watchdog (scripts/measurement-audio-alert-watchdog.sh) sources this lib
+# and passes this value into its pure decision (scripts/measurement_audio_decision.py) so the bar is
+# NEVER retyped anywhere. Distinct from the -80 dB DEAD floor (audio_preflight_tier), which is the
+# separate, wider rig-mode.sh TEST-restore cutoff (#901).
+audio_preflight_default_threshold_db() {
+  printf '%s\n' "-60"
+}
+
 # audio_preflight_volumedetect_ps WIN_PATH -> the PowerShell command text (for win_ssh_run) that
 # runs ffmpeg volumedetect on the probe recording ON the stream box and streams volumedetect's
 # output back. ffmpeg writes the `max_volume: -X.X dB` line to stderr; `2>&1` merges it into the
@@ -68,7 +79,7 @@ audio_preflight_parse_max_db() {
 # audible, not silent. Float-safe (levels are like -5.4 / -91.0) via awk. DB MUST already be a
 # validated numeric (the caller routes an unparseable value to the unreadable diagnostic first).
 audio_preflight_is_silent() {
-  local db="$1" threshold="${2:--60}"
+  local db="$1" threshold="${2:-$(audio_preflight_default_threshold_db)}"
   if awk -v d="$db" -v t="$threshold" 'BEGIN { exit !((d + 0) < (t + 0)) }'; then
     echo "true"
   else
@@ -80,7 +91,7 @@ audio_preflight_is_silent() {
 # string formatter (no I/O) so it is directly unit-testable — names the measured level, the
 # threshold, and the exact chain link to check (the mbc Ableton mic channel + Dante routing).
 audio_preflight_silent_message() {
-  local db="$1" threshold="${2:--60}"
+  local db="$1" threshold="${2:-$(audio_preflight_default_threshold_db)}"
   echo "measurement audio SILENT — the stream program recording measured max_volume ${db} dB (< ${threshold} dB threshold; digital silence is ~-91 dB, a live QPSK marker reads ~-5 dB). The mbc measurement-mic chain is dead: check the mbc Ableton mic channel is UNMUTED and the Dante routing into stream OBS (targets.md mbc row has the checklist). Fix the chain, then re-run — the A/V-sync leg reads this audio, so a run on a silent measurement instrument burns a full cycle for nothing (#748)."
 }
 
@@ -109,7 +120,7 @@ audio_preflight_norec_message() {
 # on both boundaries (mirrors audio_preflight_is_silent's own strict-< convention): exactly at a
 # boundary counts as the HEALTHIER side. Float-safe via awk (levels are like -5.4 / -91.0).
 audio_preflight_tier() {
-  local db="$1" dead_db="${2:--80}" warn_db="${3:--60}"
+  local db="$1" dead_db="${2:--80}" warn_db="${3:-$(audio_preflight_default_threshold_db)}"
   if awk -v d="$db" -v t="$dead_db" 'BEGIN { exit !((d + 0) < (t + 0)) }'; then
     echo "dead"
   elif awk -v d="$db" -v t="$warn_db" 'BEGIN { exit !((d + 0) < (t + 0)) }'; then
@@ -133,6 +144,6 @@ audio_preflight_dead_message() {
 # and moves on; never aborts rig-mode.sh test. Names the known issue-976 degradation so an
 # operator reading the log isn't left guessing whether this is a new problem.
 audio_preflight_quiet_message() {
-  local db="$1" warn_db="${2:--60}"
+  local db="$1" warn_db="${2:-$(audio_preflight_default_threshold_db)}"
   echo "WARN: measurement audio QUIET — measured max_volume ${db} dB (< ${warn_db} dB healthy bar, but above the DEAD floor — a real signal, just degraded). Matches the known, currently-open issue-976 mbc chain degradation (~26 dB below nominal); rig-mode.sh test PROCEEDS (non-blocking) — this is a report, not a failure."
 }
