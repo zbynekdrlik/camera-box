@@ -209,7 +209,11 @@ if (Test-Path \$StateFile) {
 \$now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
 # ---- gather the LOCAL sample — process signals ONLY, no OBS WebSocket round-trip ----
-\$procs      = Get-Process obs64 -ErrorAction SilentlyContinue
+# #1295: count only LIVE obs64 -- a STALE handle for an already-EXITED obs64 (HasExited/0-threads/
+# ~45 KB, the 2026-09-12 RESOLUME-SNV pid-58560 case) would otherwise make obs64_count=2, which
+# obs_watchdog::classify reads as the DECISIVE ObsCountWrong verdict and triggers a FALSE
+# kill+relaunch of a perfectly healthy OBS.
+\$procs      = @(Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not \$_.HasExited -and \$_.Threads.Count -gt 0 })
 \$obs64Count = @(\$procs).Count
 \$responding = \$null
 \$cpuPercent = \$null
@@ -377,7 +381,7 @@ ${kill_relaunch_program}
     # ---   now owned by the embedded program, a clean recovery exits 0, so \$verified is HONEST — no
     # ---   longer force-false by a nested-process AutoHotkey64 session-gate exit 8 (issue 1273). ---
     Start-Sleep -Seconds 2
-    \$postCount = @(Get-Process obs64 -ErrorAction SilentlyContinue).Count
+    \$postCount = @(Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not \$_.HasExited -and \$_.Threads.Count -gt 0 }).Count  # #1295: LIVE only (ignore zombie handles)
     \$verified  = (\$postCount -eq 1) -and (\$relaunchExit -eq 0)
     Write-SelfHealLog "VerifyRecovered: obs64_count=\$postCount relaunchExit=\$relaunchExit -> verified=\$verified"
 

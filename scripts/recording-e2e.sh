@@ -807,6 +807,13 @@ if [ -n "$_svg_stream_msg" ]; then
   exit 1
 fi
 echo "    ok: stream obs64 visible on the console (SessionId=1, window present)"
+# #1295: report-only -- name any DEAD obs64 handle the probe ignored (a stale zombie object, NOT a
+# live instance: HasExited/0-threads/~45 KB, the 2026-09-12 RESOLUME-SNV pid-58560 case) so an
+# operator can reap it; this NEVER gates the preflight above (a zombie is not an invisibility).
+_svg_strih_znote="$(obs_session_visibility_zombie_note "$_svg_strih_out")"
+[ -n "$_svg_strih_znote" ] && echo "    strih $_svg_strih_znote"
+_svg_stream_znote="$(obs_session_visibility_zombie_note "$_svg_stream_out")"
+[ -n "$_svg_stream_znote" ] && echo "    stream $_svg_stream_znote"
 
 # Disk preflight (#179): the 7.3GB cam1 grab is GONE — only the two downloaded OBS program
 # recordings land on dev1 (~3 MB/s each, strih .mkv + stream .mp4). FAIL EARLY if $OUTDIR's

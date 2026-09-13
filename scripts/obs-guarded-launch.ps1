@@ -67,7 +67,10 @@ if ($CheckOnly) {
     exit 0
 }
 
-$running = Get-Process obs64 -ErrorAction SilentlyContinue
+# #1295: count only LIVE obs64 -- a STALE handle for an already-EXITED obs64 (HasExited/0-threads/
+# ~45 KB, the 2026-09-12 RESOLUME-SNV pid-58560 case) would otherwise make $running truthy and this
+# guard skip a genuinely needed launch (leaving the box with no live OBS).
+$running = Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }
 if ($running) {
     # Same as today's .lnk double-click on a running OBS: do not touch the live process.
     $d = Get-BufferDraw
@@ -86,7 +89,7 @@ for ($draw = 1; $draw -le $maxDraws; $draw++) {
     $proc = $null
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 1
-        $proc = Get-Process obs64 -ErrorAction SilentlyContinue | Select-Object -First 1
+        $proc = Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 } | Select-Object -First 1  # #1295: LIVE only
         if ($proc -and $proc.WorkingSet64 -gt 100MB) { break }
     }
     if (-not $proc) {
