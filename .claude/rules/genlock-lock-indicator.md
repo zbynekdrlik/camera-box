@@ -20,7 +20,7 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 |---|---|---|
 | The DECISION (pure) | `src/genlock_lock_state.rs` (`decide`) | Tier-0 authority, crate-root, std-only. |
 | The DECISION (C port) | `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` (`genlock_decide_lock_state`) | Byte-for-byte mirror; OBS/Qt-free so the parity gate lifts + `cc`-compiles it. Keep the two enums + struct + fn CONTIGUOUS (the lift slices from the first enum through the fn's closing brace). |
-| C-vs-Rust parity gate | `tests/genlock_lock_state_parity.rs` | Lifts the C block, `cc`-compiles it, compares `(state, reason)` over all 2^7 flag combos × 10 input/locked pairs. |
+| C-vs-Rust parity gate | `tests/genlock_lock_state_parity.rs` | Lifts the C block, `cc`-compiles it, compares `(state, reason)` over all 2^8 flag combos × 10 input/locked pairs (the 8th flag is #1303's `audio_unpaired`). |
 | Per-source stats API | `obs.h` (`struct obs_genlock_stats`, `obs_source_get_genlock_stats`) + `obs-source.c` (`genlock_fill_stats`) | The `genlock-fifo audit` log line and the API BOTH route through `genlock_fill_stats` — they can never disagree. Additive + versioned (`OBS_GENLOCK_STATS_VERSION`). |
 | Per-output stats API | `obs.h` (`struct obs_genlock_output_stats`, `obs_output_set_genlock_wall_stamping`, `obs_output_get_genlock_stats`) + `obs-output.c` + `obs-internal.h` (two bool fields, bzalloc-zeroed) | DistroAV's `ndi-output.cpp` sets `wall_stamping=true` at `begin_data_capture` success, `false` at stop. |
 | The widget | `OBSBasicStatusBar.{hpp,cpp}` (`UpdateGenlockLabel`, `PollGenlockClock`) | A permanent `QLabel` + an ALWAYS-ON 1 Hz `QTimer` (NOT the stream-only `refreshTimer`). |
@@ -31,14 +31,22 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 
 `genlock_decide_lock_state(facets, &reason)` — UNLOCKED (red) takes precedence clock > output >
 no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-event > ntp-failed
-> qpc-drift; else LOCKED (green).
+> qpc-drift > **audio-pairing (#1303, lowest)**; else LOCKED (green).
 
 - **UNLOCKED:** clock absent/not-locked (`no clock discipline` / `clock not locked`); OR a genlock
   NDI output is present but not stamping wall time (`output not stamping`); OR inputs exist but
   none locked (`no input locked`) / none configured (`no genlock inputs`).
 - **DEGRADED:** some (not all) inputs unlocked (names the input, e.g. `NDI cam7`); OR a
   relock/underrun/late-hold/backward-step in the last 60 s (`recent relock/underrun`); OR clock
-  `ntp_failed`; OR `wall_qpc_drift` beyond `GENLOCK_QPC_DRIFT_BOUND_MS` (100 ms).
+  `ntp_failed`; OR `wall_qpc_drift` beyond `GENLOCK_QPC_DRIFT_BOUND_MS` (100 ms); OR (#1303, lowest
+  precedence) an audio-ENABLED genlock source whose `|audio_pairing_offset_ms|` breaches
+  `GENLOCK_AUDIO_PAIRING_BOUND_MS` (33 ms / one 30 fps frame) — `audio unpaired: <src>`. The widget
+  aggregates the per-source breach into `GenlockFacets.audio_unpaired` (the twin of how it reduces
+  per-input qpc drift), surfacing the pairing-offset branch of
+  `genlock_audio_pairing::decide_audio_health`. Audio disabled/absent NEVER degrades (the
+  `audio_enabled` guard), so a camera input with `ndi_audio=false` is silent by design; the
+  AudioDisabledOnProgram + AsrcSaturated branches (which need is-program-source / asrc-ppm data the
+  v2 stats don't carry) are a deferred followup.
 - **LOCKED:** `GENLOCK ● LOCKED n/m @ L ms` (n=locked, m=genlock inputs, L=min latency or a range).
 
 ## Gotchas

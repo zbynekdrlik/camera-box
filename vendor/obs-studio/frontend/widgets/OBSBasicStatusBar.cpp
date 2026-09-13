@@ -32,6 +32,16 @@ static constexpr float badThreshold = 1.0f;
  * DEGRADED; 100 ms is generous (the #800 drift is the concern over a day, not a tick). */
 static constexpr int64_t GENLOCK_QPC_DRIFT_BOUND_MS = 100;
 
+/* camera-box #1303: the A/V pairing-offset bound that trips the audio DEGRADE term. An
+ * audio-ENABLED genlock source whose |audio_pairing_offset_ms| (from obs_genlock_stats v2)
+ * exceeds this — i.e. its audio is not held to match its video FIFO latency, which also catches a
+ * deep-latency source whose hold never fired (offset = -latency_ms) — degrades the indicator. One
+ * 30 fps frame (33 ms) is the coarsest frame interval on the fleet, so a sub-frame mispairing (the
+ * inaudible 3 ms-floor case) never false-degrades. Audio disabled/absent never trips it (guarded by
+ * audio_enabled). This is the widget-side reduction feeding GenlockFacets.audio_unpaired, mirroring
+ * the pairing-offset branch of camera_box::genlock_audio_pairing::decide_audio_health. */
+static constexpr int64_t GENLOCK_AUDIO_PAIRING_BOUND_MS = 33;
+
 /* camera-box #1299: the machine-readable genlock-lock-json: line is emitted on every state/reason
  * change AND at least this often (the 1 Hz timer -> ~30 s), so bundle-state's #1222 bounded TAIL
  * always holds a fresh one even on a box whose state has not changed since startup. */
@@ -57,7 +67,9 @@ struct GenlockScan {
 	uint32_t min_latency_ms = 0;
 	uint32_t max_latency_ms = 0;
 	bool any_input = false;
+	bool audio_unpaired = false;                    /* #1303: an audio-enabled genlock source is unpaired with its video FIFO hold */
 	std::vector<std::string> unlocked_names;
+	std::vector<std::string> audio_unpaired_names;  /* #1303: which sources tripped the audio pairing bound */
 	std::vector<std::string> rows; /* per-input tooltip rows */
 	std::vector<GenlockInputRow> inputs; /* #1299 per-input machine-readable records */
 };
@@ -88,6 +100,18 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	const std::string nm = name ? name : "?";
 	if (!st.locked)
 		scan->unlocked_names.push_back(nm);
+	/* #1303: the audio DEGRADE term — an audio-ENABLED source whose A/V pairing offset breaches the
+	 * bound (v2 stats only; audio disabled/absent never trips it). Mirrors the pairing-offset branch
+	 * of genlock_audio_pairing::decide_audio_health, reduced to one aggregate facet exactly as the
+	 * qpc-drift bound above reduces to qpc_drift_beyond_bound. */
+	if (st.version >= 2 && st.audio_enabled) {
+		const int64_t aoff = st.audio_pairing_offset_ms < 0 ? -st.audio_pairing_offset_ms
+								    : st.audio_pairing_offset_ms;
+		if (aoff > GENLOCK_AUDIO_PAIRING_BOUND_MS) {
+			scan->audio_unpaired = true;
+			scan->audio_unpaired_names.push_back(nm);
+		}
+	}
 	char row[320];
 	snprintf(row, sizeof(row),
 		 "%s: %s  latency=%u ms  depth=%zu  underruns=%llu relocks=%llu late=%llu", nm.c_str(),
@@ -157,6 +181,8 @@ const char *genlock_reason_key(genlock_lock_reason_t r)
 		return "recent_event";
 	case GENLOCK_LOCK_REASON_NTP_FAILED:
 		return "ntp_failed";
+	case GENLOCK_LOCK_REASON_AUDIO_PAIRING:
+		return "audio_pairing";
 	default:
 		return "qpc_drift";
 	}
@@ -943,6 +969,7 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	f.clock_ntp_failed = (clock_present && genlockClockNtpFailed) ? 1 : 0;
 	f.output_present = out.present ? 1 : 0;
 	f.output_stamping = out.stamping ? 1 : 0;
+	f.audio_unpaired = scan.audio_unpaired ? 1 : 0;
 
 	genlock_lock_reason_t reason;
 	const genlock_lock_state_t state = genlock_decide_lock_state(&f, &reason);
@@ -981,6 +1008,16 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		break;
 	case GENLOCK_LOCK_REASON_QPC_DRIFT:
 		reasonText = QString("clock drift %1 ms").arg(scan.max_abs_qpc_drift_ms);
+		break;
+	case GENLOCK_LOCK_REASON_AUDIO_PAIRING:
+		if (!scan.audio_unpaired_names.empty()) {
+			reasonText = QString("audio unpaired: %1")
+					     .arg(QString::fromStdString(scan.audio_unpaired_names.front()));
+			if (scan.audio_unpaired_names.size() > 1)
+				reasonText += QString(" +%1 more").arg(scan.audio_unpaired_names.size() - 1);
+		} else {
+			reasonText = "audio unpaired";
+		}
 		break;
 	}
 

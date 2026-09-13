@@ -53,10 +53,10 @@ fn lift_decision() -> String {
     src[start..end].to_string()
 }
 
-/// The facet grid both sides must agree on: an exhaustive sweep of all 2^7 boolean-flag
-/// combinations crossed with a small set of (n_inputs, n_locked) pairs — including the
-/// impossible `n_locked > n_inputs` (the decision is total and both ports must treat it
-/// identically).
+/// The facet grid both sides must agree on: an exhaustive sweep of all 2^8 boolean-flag
+/// combinations (the #1303 `audio_unpaired` is the 8th flag, bit 128) crossed with a small set of
+/// (n_inputs, n_locked) pairs — including the impossible `n_locked > n_inputs` (the decision is
+/// total and both ports must treat it identically).
 fn vectors() -> Vec<GenlockFacets> {
     let counts = [
         (0u32, 0u32),
@@ -72,7 +72,7 @@ fn vectors() -> Vec<GenlockFacets> {
     ];
     let mut v = Vec::new();
     for &(n_inputs, n_locked) in &counts {
-        for bits in 0u32..(1 << 7) {
+        for bits in 0u32..(1 << 8) {
             v.push(GenlockFacets {
                 n_inputs,
                 n_locked,
@@ -83,6 +83,7 @@ fn vectors() -> Vec<GenlockFacets> {
                 clock_ntp_failed: bits & 16 != 0,
                 output_present: bits & 32 != 0,
                 output_stamping: bits & 64 != 0,
+                audio_unpaired: bits & 128 != 0,
             });
         }
     }
@@ -101,7 +102,7 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
     for g in &vs {
         c.push_str(&format!(
             "    f.n_inputs={}; f.n_locked={}; f.recent_event={}; f.qpc_drift_beyond_bound={}; \
-             f.clock_present={}; f.clock_locked={}; f.clock_ntp_failed={}; f.output_present={}; f.output_stamping={};\n\
+             f.clock_present={}; f.clock_locked={}; f.clock_ntp_failed={}; f.output_present={}; f.output_stamping={}; f.audio_unpaired={};\n\
              \x20   s=genlock_decide_lock_state(&f,&r); printf(\"%d %d\\n\",(int)s,(int)r);\n",
             g.n_inputs,
             g.n_locked,
@@ -112,6 +113,7 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
             g.clock_ntp_failed as i32,
             g.output_present as i32,
             g.output_stamping as i32,
+            g.audio_unpaired as i32,
         ));
     }
     c.push_str("    return 0;\n}\n");

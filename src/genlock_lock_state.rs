@@ -57,6 +57,9 @@ pub enum LockReason {
     NtpFailed = 7,
     /// Wall-clock vs monotonic (QPC) drift is beyond the allowed bound.
     QpcDrift = 8,
+    /// #1303 — an audio-enabled genlock source's audio is not paired with its video FIFO hold
+    /// (residual A/V pairing offset beyond one frame). The lowest-precedence DEGRADED reason.
+    AudioPairing = 9,
 }
 
 impl LockState {
@@ -97,6 +100,15 @@ pub struct GenlockFacets {
     pub output_present: bool,
     /// …and it is currently stamping real wall-clock timecodes.
     pub output_stamping: bool,
+    /// #1303 — an audio-ENABLED genlock source's audio is NOT paired with its video FIFO hold:
+    /// the residual `|pairing_offset_ms|` breaches the bound (which also captures a deep-latency
+    /// source whose hold never fired — its offset is `-latency_ms`). Audio disabled/absent never
+    /// sets this (a camera input with `ndi_audio=false` is silent by design), so it can only
+    /// DEGRADE, never take a healthy box off LOCKED spuriously. The widget aggregates the
+    /// per-source audio-parity condition into this one scalar — the same reduction it applies to
+    /// per-input wall-vs-monotonic drift for [`GenlockFacets::qpc_drift_beyond_bound`] — surfacing
+    /// the pairing-offset branch of [`crate::genlock_audio_pairing::decide_audio_health`].
+    pub audio_unpaired: bool,
 }
 
 /// Decide the genlock lock state and its dominant reason from the scalarised facets.
@@ -136,6 +148,12 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     if f.qpc_drift_beyond_bound {
         return (LockState::Degraded, LockReason::QpcDrift);
     }
+    // #1303 — audio parity is the LOWEST-precedence DEGRADED axis: only an audio-enabled genlock
+    // source with a material pairing-offset breach trips it (audio disabled/absent never sets the
+    // facet). Additive: an all-false `audio_unpaired` leaves every pre-#1303 verdict unchanged.
+    if f.audio_unpaired {
+        return (LockState::Degraded, LockReason::AudioPairing);
+    }
 
     // --- LOCKED (green) -----------------------------------------------------------
     (LockState::Locked, LockReason::None)
@@ -157,6 +175,7 @@ mod tests {
             clock_ntp_failed: false,
             output_present: true,
             output_stamping: true,
+            audio_unpaired: false,
         }
     }
 
@@ -240,6 +259,25 @@ mod tests {
         assert_eq!(decide(&f), (LockState::Degraded, LockReason::QpcDrift));
     }
 
+    #[test]
+    fn audio_unpaired_is_degraded_audio() {
+        // #1303: an audio-enabled genlock source mispaired with its video FIFO hold degrades an
+        // otherwise-LOCKED box.
+        let mut f = healthy();
+        f.audio_unpaired = true;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::AudioPairing));
+    }
+
+    #[test]
+    fn audio_unpaired_never_leaves_unlocked() {
+        // #1303: audio is a DEGRADE-only axis — it never rescues an UNLOCKED box (clock down),
+        // and never fires while an input is still unlocked (that reason takes precedence).
+        let mut f = healthy();
+        f.audio_unpaired = true;
+        f.clock_locked = false;
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::Clock));
+    }
+
     // ---- precedence ----------------------------------------------------------------
 
     #[test]
@@ -288,6 +326,16 @@ mod tests {
     }
 
     #[test]
+    fn qpc_beats_audio_pairing() {
+        // #1303: audio parity is the lowest-precedence DEGRADED reason — every existing DEGRADED
+        // reason (here qpc) wins over it.
+        let mut f = healthy();
+        f.qpc_drift_beyond_bound = true;
+        f.audio_unpaired = true;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::QpcDrift));
+    }
+
+    #[test]
     fn codes_match_the_c_enum_values() {
         assert_eq!(LockState::Unlocked.code(), 0);
         assert_eq!(LockState::Degraded.code(), 1);
@@ -301,5 +349,6 @@ mod tests {
         assert_eq!(LockReason::RecentEvent.code(), 6);
         assert_eq!(LockReason::NtpFailed.code(), 7);
         assert_eq!(LockReason::QpcDrift.code(), 8);
+        assert_eq!(LockReason::AudioPairing.code(), 9);
     }
 }

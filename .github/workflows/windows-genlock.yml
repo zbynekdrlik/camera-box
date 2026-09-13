@@ -207,6 +207,10 @@ jobs:
           if ($sb -notmatch [regex]::Escape('genlock-lock-json: %s (#1299)') -or $sb -notmatch [regex]::Escape('std::string genlock_build_lock_json(')) {
             Write-Error "OBSBasicStatusBar.cpp: the genlock-lock-json: emission / builder is gone — #1299 reverted"; exit 1
           }
+          # #1303 3b: the audio DEGRADE term in the LOCK decision — an audio-enabled genlock source whose A/V pairing offset breaches the bound turns the indicator DEGRADED (audio disabled/absent never degrades). Mirror of src/genlock_lock_state.rs (audio_unpaired facet + LockReason::AudioPairing) + tests/genlock_lock_indicator_guards.rs::audio_parity_lock_term_present_1303.
+          if ($sb -notmatch [regex]::Escape('f.audio_unpaired = scan.audio_unpaired ? 1 : 0;') -or $sb -notmatch [regex]::Escape('GENLOCK_LOCK_REASON_AUDIO_PAIRING')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1303 audio-parity LOCK-indicator DEGRADE term is gone — an unpaired audio leg would no longer show DEGRADED; re-apply"; exit 1
+          }
           Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log + genlock-lock-json: fleet facet) — OK"
 
       # #245: assert the PER-SOURCE genlock latency (ms) override is present in the

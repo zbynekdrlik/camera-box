@@ -2117,6 +2117,21 @@ mod vendored_source {
              (audio_enabled=/audio_delay_ms=/audio_pairing_offset_ms=); it is invisible in the log \
              and in obs_genlock_stats. Re-apply."
         );
+        // #1303 3b: the AUDIO parity health also surfaces as a DEGRADE term in the LOCK decision.
+        // The pure decision + its C mirror gained an additive `audio_unpaired` facet + an
+        // `AudioPairing` reason (parity-gated), and the statusbar widget aggregates the per-source
+        // pairing-offset breach into that facet. (Full LOCK-term anchors: the #1298 3-copy
+        // lock-step in tests/genlock_lock_indicator_guards.rs + both windows-genlock*.yml.)
+        let hdr = squish(&vendor_file(
+            "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+        ));
+        assert!(
+            hdr.contains("GENLOCK_LOCK_REASON_AUDIO_PAIRING = 9,")
+                && hdr.contains("int audio_unpaired;"),
+            "GenlockLockState.hpp: #1303 3b — the audio DEGRADE term in the LOCK decision (the \
+             audio_unpaired facet + the AudioPairing reason) is gone; an unpaired audio leg would \
+             no longer show DEGRADED. Re-apply."
+        );
     }
 
     #[test]

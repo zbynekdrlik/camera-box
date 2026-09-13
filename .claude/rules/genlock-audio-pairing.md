@@ -57,13 +57,27 @@ update all three.
   `libserde_json-*.rlib`.
 - The parity gate + genlock_preload guard run on CI (they `use camera_box::…` / are probe-gated).
 
+## LOCK-indicator audio DEGRADE term (#1303 part 3b — DONE)
+
+Landed as an additive term in the parity-gated LOCK decision: `GenlockFacets` (Rust
+`src/genlock_lock_state.rs` + the C `genlock_lock_facets_t` in `GenlockLockState.hpp`) gained a bool
+`audio_unpaired`; `decide` / `genlock_decide_lock_state` gained a lowest-precedence DEGRADED branch
+mapping it to a new `LockReason::AudioPairing` (=9); the statusbar widget `OBSBasicStatusBar.cpp`
+aggregates the per-source pairing-offset breach (`st.version >= 2 && st.audio_enabled &&
+|audio_pairing_offset_ms| > GENLOCK_AUDIO_PAIRING_BOUND_MS`, 33 ms) into that one facet — the twin of
+its existing qpc-drift reduction — so an unpaired audio leg turns the indicator DEGRADED (`audio
+unpaired: <src>`). The C↔Rust decision stays parity-gated (`tests/genlock_lock_state_parity.rs`, now
+a 2^8 flag sweep), lock-stepped by `tests/genlock_lock_indicator_guards.rs` +
+`tests/genlock_preload.rs` + the #1298 pwsh gate in BOTH `windows-genlock{,-fast}.yml`. Per the
+scope, audio disabled/absent never degrades (the `audio_enabled` guard); `decide_audio_health`'s
+AudioDisabledOnProgram + AsrcSaturated branches are NOT surfaced here (they need is-program-source /
+asrc-ppm data the v2 stats don't carry) — a followup. Full contract: `genlock-lock-indicator.md`.
+
 ## Deferred followups (NOT in the #1303 code lane)
 
-- **LOCK-indicator audio term** — surfacing `decide_audio_health` in `genlock_decide_lock_state`
-  requires adding audio facet fields to `GenlockFacets` (a struct the frontend widget
-  `OBSBasicStatusBar.cpp` fills field-by-field), so the DECISION and the WIDGET WIRING are coupled
-  — a frontend-compile-only (`windows-genlock.yml`) change. The pure `decide_audio_health` decision
-  already exists here ready to consume. See `genlock-lock-indicator.md`.
+- **Audio DEGRADE full taxonomy** — surface `decide_audio_health`'s AudioDisabledOnProgram +
+  AsrcSaturated branches in the LOCK indicator (part 3b only wired the pairing-offset branch);
+  needs the widget to know is-program-source + per-source asrc-saturation, neither in `obs_genlock_stats` v2.
 - **Per-box certified-table audit + `deploy-genlock-fleet.sh` preflight** (part 4) — a report-only
   per-box `ndi_audio`/`yuv_*` audit + a pre-swap input listing; a separable large shell piece.
 - Live A/V soak acceptance (±20 ms over 1 h, cg OBS `locked=1` + audio facet green) is a

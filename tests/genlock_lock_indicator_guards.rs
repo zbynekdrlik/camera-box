@@ -132,6 +132,24 @@ fn decision_header_present_and_pure() {
 }
 
 #[test]
+fn audio_parity_lock_term_present_1303() {
+    // #1303: the audio DEGRADE term in the LOCK decision. The pure decision + its C mirror gain an
+    // additive `audio_unpaired` facet + a new `AudioPairing` reason, and the widget aggregates the
+    // per-source audio pairing-offset breach into that facet. Linux-CI twin of the #1298 pwsh gate's
+    // #1303 anchor in BOTH windows-genlock{,-fast}.yml — keep all three in lock-step.
+    assert_has(HEADER, "GENLOCK_LOCK_REASON_AUDIO_PAIRING = 9,");
+    assert_has(HEADER, "int audio_unpaired;");
+    // the widget fills the facet from the per-source v2 stats aggregate, and the reason token flows
+    // through genlock_reason_key into the genlock-lock: log + genlock-lock-json: line.
+    assert_has(
+        STATUSBAR_CPP,
+        "f.audio_unpaired = scan.audio_unpaired ? 1 : 0;",
+    );
+    assert_has(STATUSBAR_CPP, "return \"audio_pairing\";");
+    assert_has(STATUSBAR_CPP, "aoff > GENLOCK_AUDIO_PAIRING_BOUND_MS");
+}
+
+#[test]
 fn genlock_lock_marker_is_mutually_non_substring() {
     // The new OBS-log family `genlock-lock:` must be mutually non-substring with every existing
     // marker (jitter-audit-parser.md), so a grep / parser keyed on one never matches another.

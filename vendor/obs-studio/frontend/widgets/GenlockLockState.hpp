@@ -35,6 +35,7 @@ typedef enum genlock_lock_reason {
 	GENLOCK_LOCK_REASON_RECENT_EVENT = 6,    /* relock/underrun/late-hold/backward-step in last 60 s */
 	GENLOCK_LOCK_REASON_NTP_FAILED = 7,      /* clock up but NTP phase failed */
 	GENLOCK_LOCK_REASON_QPC_DRIFT = 8,       /* wall-vs-monotonic drift beyond bound */
+	GENLOCK_LOCK_REASON_AUDIO_PAIRING = 9,   /* #1303 audio-enabled source unpaired with its video FIFO hold */
 } genlock_lock_reason_t;
 
 typedef struct genlock_lock_facets {
@@ -47,6 +48,7 @@ typedef struct genlock_lock_facets {
 	int clock_ntp_failed;       /* bool: ntp_failed */
 	int output_present;         /* bool: a genlock NDI sender is active here */
 	int output_stamping;        /* bool: ...and it is stamping wall-clock timecodes */
+	int audio_unpaired;         /* bool: #1303 an audio-enabled genlock source's audio is unpaired with its video FIFO hold */
 } genlock_lock_facets_t;
 
 /* Mirror of camera_box::genlock_lock_state::decide (src/genlock_lock_state.rs) — keep
@@ -79,6 +81,9 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 		state = GENLOCK_LOCK_DEGRADED;
 	} else if (f->qpc_drift_beyond_bound) {
 		reason = GENLOCK_LOCK_REASON_QPC_DRIFT;
+		state = GENLOCK_LOCK_DEGRADED;
+	} else if (f->audio_unpaired) {
+		reason = GENLOCK_LOCK_REASON_AUDIO_PAIRING; /* #1303 lowest-precedence DEGRADED axis */
 		state = GENLOCK_LOCK_DEGRADED;
 	} else {
 		reason = GENLOCK_LOCK_REASON_NONE;
