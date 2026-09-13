@@ -90,6 +90,7 @@ fn lib_defines_the_pure_functions() {
         "cg_chain_verdict",
         "cg_chain_parse_asrc_ppm",
         "cg_chain_asrc_in_band",
+        "cg_chain_parse_audio_facet",
         "cg_chain_csv_header",
         "cg_chain_csv_row",
     ] {
@@ -281,8 +282,70 @@ fn asrc_floor_band_passes_the_physical_floor_and_fails_the_port_collision_signat
 }
 
 // ---------------------------------------------------------------------------------------------
+// #1303 audio parity facet
+// ---------------------------------------------------------------------------------------------
+// A window whose newest line carries the #1303 audio facet (audio_enabled/delay/pairing) plus an
+// older line without it (pre-#1303) — the newest audio-carrying line must win.
+const FIX_AUDIO: &str = "\
+14:00:00.001: genlock-fifo audit 'sp-1_video': received=1000 consumed=999 underruns=0 holds=2 overruns=0 backward_steps=0 dropped_due=0 relocks=0 late_holds=0 locked=1 depth=3 peak=5 latency_ms=3 ts_head_skew_ms=-4 backward_regime_ticks=0 wall_qpc_drift_ms=0
+14:00:05.001: genlock-fifo audit 'sp-1_video': received=1215 consumed=1214 underruns=0 holds=4 overruns=0 backward_steps=0 dropped_due=0 relocks=0 late_holds=0 locked=1 depth=3 peak=5 latency_ms=3 ts_head_skew_ms=8 backward_regime_ticks=0 wall_qpc_drift_ms=0 audio_enabled=1 audio_delay_ms=3 audio_pairing_offset_ms=0
+14:00:00.050: genlock-fifo audit 'sp-2_video': received=900 consumed=900 underruns=0 holds=1 overruns=0 backward_steps=0 dropped_due=0 relocks=0 late_holds=0 locked=1 depth=2 peak=4 latency_ms=923 ts_head_skew_ms=3 backward_regime_ticks=0 wall_qpc_drift_ms=0 audio_enabled=0 audio_delay_ms=0 audio_pairing_offset_ms=-923
+";
+
+#[test]
+fn parse_audio_facet_reads_the_newest_facet_line_per_source() {
+    // sp-1: audio on, held at the video latency (offset 0 = paired). The older line has no audio
+    // tokens and must be ignored (the newest facet-carrying line wins).
+    let body = format!(
+        "{}printf '%s\\n' \"$LOG\" | cg_chain_parse_audio_facet 'sp-1_video'",
+        log_var(FIX_AUDIO)
+    );
+    assert_eq!(stdout_of(&body), "1|3|0");
+    // sp-2: a program source with audio OFF and the hold never applied (offset = -latency) — the
+    // "audio not held / disabled" signal.
+    let body2 = format!(
+        "{}printf '%s\\n' \"$LOG\" | cg_chain_parse_audio_facet 'sp-2_video'",
+        log_var(FIX_AUDIO)
+    );
+    assert_eq!(stdout_of(&body2), "0|0|-923");
+}
+
+#[test]
+fn parse_audio_facet_is_empty_on_a_pre_1303_log() {
+    // FIX_CGOBS predates #1303 (no audio_* tokens) — the facet parse yields nothing, never a false 0.
+    let body = format!(
+        "{}printf '%s\\n' \"$LOG\" | cg_chain_parse_audio_facet 'sp-1_video'",
+        log_var(FIX_CGOBS)
+    );
+    assert_eq!(stdout_of(&body), "");
+}
+
+// ---------------------------------------------------------------------------------------------
 // CSV
 // ---------------------------------------------------------------------------------------------
+#[test]
+fn csv_row_with_audio_columns_matches_the_header_count() {
+    // the #1303 audio columns are appended; a row supplying them must still match the header count.
+    let header = stdout_of("cg_chain_csv_header");
+    let row =
+        stdout_of("cg_chain_csv_row '2026-09-12T20:00:00Z' strih cg PASS 8 0 0 0 0 0 7.62 1 3 0");
+    assert_eq!(
+        header.split(',').count(),
+        row.split(',').count(),
+        "csv header/row column mismatch:\n{header}\n{row}"
+    );
+    assert!(
+        header
+            .trim_end()
+            .ends_with(",audio_enabled,audio_delay_ms,audio_pairing_offset_ms"),
+        "header must append the audio columns: {header}"
+    );
+    assert!(
+        row.trim_end().ends_with(",1,3,0"),
+        "row must carry the audio values: {row}"
+    );
+}
+
 #[test]
 fn csv_header_and_row_have_matching_column_counts() {
     let header = stdout_of("cg_chain_csv_header");

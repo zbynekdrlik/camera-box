@@ -55,6 +55,19 @@ line.
   audio ARRIVAL rate versus sample count, not the sender's audio timecodes; a sender MUST
   therefore deliver audio at real-time rate. The audio `timecode` only feeds OBS's own A/V
   pairing for that one source.
+- **Audio is HELD to match the video FIFO (issue 1303).** The video FIFO holds every frame to
+  `present_ts = wall_now − latency_ms`, so on the receiver the SAME source's audio is delayed by
+  the same effective `latency_ms` at ingest (`source_output_audio_data`,
+  `vendor/obs-studio/libobs/obs-source.c`, gated on `genlock_fifo`), so the A/V pair is presented
+  at the same wall instant and survives the hold. This is a per-source PHASE hold, orthogonal to
+  the ASRC servo's sample-clock RATE (ppm) discipline above — the two together are what makes the
+  audio leg a first-class genlocked signal with the same evidence bar as video. The decision is
+  the pure `src/genlock_audio_pairing.rs` (`genlock_audio_delay_ns` = `latency_ms`), mirrored
+  byte-for-byte in the C and pinned by `tests/genlock_audio_pairing_parity.rs`. Receiver
+  observability: the `genlock-fifo audit` line and `obs_genlock_stats` (v2) carry
+  `audio_enabled` / `audio_delay_ms` / `audio_pairing_offset_ms` (0 = paired); a program source
+  with audio disabled, an ASRC-saturated clock, or a pairing offset over one frame are the
+  audio-leg DEGRADED reasons (`decide_audio_health`).
 
 ## The contract
 

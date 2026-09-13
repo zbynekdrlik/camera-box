@@ -174,6 +174,48 @@ cg_chain_parse_asrc_ppm() {
   return 0
 }
 
+# cg_chain_parse_audio_facet <source> -- stdin: OBS-log text; stdout: the NEWEST audio parity facet
+#   for <source> as ONE pipe line `enabled|delay_ms|pairing_offset_ms`, or EMPTY if the source has
+#   no `genlock-fifo audit` line carrying the #1303 audio tokens (a pre-#1303 log). Mirrors the
+#   src/jitter_audit.rs AuditSample.audio_* parse: last-seen line wins, the tokens are read by the
+#   same whitespace key=value scan (a strict-integer match; a missing token -> its default 0). Always
+#   exits 0.
+cg_chain_parse_audio_facet() {
+  local source="${1:-}"
+  cg_chain_strip_high_bytes | awk -v SRC="$source" '
+    function getval(line, key,    toks, n, i, eq, k, v) {
+      n = split(line, toks, /[ \t]+/)
+      for (i = 1; i <= n; i++) {
+        eq = index(toks[i], "=")
+        if (eq == 0) continue
+        k = substr(toks[i], 1, eq - 1)
+        if (k != key) continue
+        v = substr(toks[i], eq + 1)
+        if (v ~ /^-?[0-9]+$/) return v
+        return ""
+      }
+      return ""
+    }
+    {
+      mark = "genlock-fifo audit '\''"
+      idx = index($0, mark)
+      if (idx == 0) next
+      rest = substr($0, idx + length(mark))
+      q = index(rest, "'\''")
+      if (q == 0) next
+      src = substr(rest, 1, q - 1)
+      if (src != SRC) next
+      # only a line that carries the #1303 audio facet counts (pre-#1303 lines have none)
+      if (index($0, "audio_delay_ms=") == 0) next
+      en = getval($0, "audio_enabled");        if (en  == "") en  = 0
+      dl = getval($0, "audio_delay_ms");        if (dl  == "") dl  = 0
+      po = getval($0, "audio_pairing_offset_ms"); if (po == "") po = 0
+      have = 1; l_en = en; l_dl = dl; l_po = po
+    }
+    END { if (have) printf "%d|%d|%d\n", l_en, l_dl, l_po }
+  ' || true
+}
+
 # cg_chain_asrc_in_band <ppm> <band_ppm> -- stdout: `1` (|ppm| <= band), `0` (out of band), or
 #   `UNKNOWN` (ppm empty / non-numeric -- no asrc line this pass, never a false out-of-band). band
 #   defaults to 10 (the `.claude/rules/asrc-residual-floor.md` "far outside +/-10" boundary; +8 is
@@ -192,18 +234,25 @@ cg_chain_asrc_in_band() {
   return 0
 }
 
-# cg_chain_csv_header -- the soak CSV column header (one source-window row per line).
+# cg_chain_csv_header -- the soak CSV column header (one source-window row per line). The #1303
+# audio parity columns (enabled/delay/pairing) are APPENDED after asrc_ppm so an existing consumer's
+# earlier columns are byte-stable.
 cg_chain_csv_header() {
-  printf 'ts_utc,hop,source,verdict,max_abs_skew_ms,d_dropped,d_underruns,d_relocks,d_late_holds,d_backward_regime,asrc_ppm\n'
+  printf 'ts_utc,hop,source,verdict,max_abs_skew_ms,d_dropped,d_underruns,d_relocks,d_late_holds,d_backward_regime,asrc_ppm,audio_enabled,audio_delay_ms,audio_pairing_offset_ms\n'
 }
 
 # cg_chain_csv_row <ts> <hop> <source> <verdict> <maxskew> <d_dropped> <d_underruns> <d_relocks>
-#   <d_late_holds> <d_backward_regime> <asrc_ppm> -- one CSV data line matching cg_chain_csv_header.
-#   Commas in a source name are replaced with ';' so the row never gains a column.
+#   <d_late_holds> <d_backward_regime> <asrc_ppm> [audio_enabled] [audio_delay_ms]
+#   [audio_pairing_offset_ms] -- one CSV data line matching cg_chain_csv_header. The three #1303
+#   audio columns are OPTIONAL (default empty) so a caller that has no audio facet still emits a
+#   column-count-matching row. Commas in a source name are replaced with ';' so the row never gains
+#   a column.
 cg_chain_csv_row() {
   local ts="${1:-}" hop="${2:-}" source="${3:-}" verdict="${4:-}" maxskew="${5:-}" \
-    d_drop="${6:-}" d_und="${7:-}" d_rel="${8:-}" d_late="${9:-}" d_brt="${10:-}" asrc="${11:-}"
+    d_drop="${6:-}" d_und="${7:-}" d_rel="${8:-}" d_late="${9:-}" d_brt="${10:-}" asrc="${11:-}" \
+    aud_en="${12:-}" aud_dl="${13:-}" aud_po="${14:-}"
   source="${source//,/;}"
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-    "$ts" "$hop" "$source" "$verdict" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrc"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$ts" "$hop" "$source" "$verdict" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrc" \
+    "$aud_en" "$aud_dl" "$aud_po"
 }

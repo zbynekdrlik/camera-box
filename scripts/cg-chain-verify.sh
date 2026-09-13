@@ -107,8 +107,8 @@ _iterations() {
   }'
 }
 
-printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %s\n' \
-  HOP SOURCE LOCK SAMP SKEWms dDROP dUND dREL dLATE dBRT ASRCppm VERDICT
+printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %s\n' \
+  HOP SOURCE LOCK SAMP SKEWms dDROP dUND dREL dLATE dBRT ASRCppm AUDIO VERDICT
 
 overall_fail=0
 if [ -n "$CSV_PATH" ] && [ ! -s "$CSV_PATH" ]; then
@@ -152,15 +152,28 @@ run_one_window() {
       fi
       local lockw="no"; [ "${lck:-0}" = "1" ] && lockw="yes"
       local asrcw="${asrc:-n/a}"; [ -z "$asrc" ] && asrcw="n/a"
-      printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %s\n' \
-        "$hop" "$src" "$lockw" "$samples" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrcw" "$verdict"
+      # #1303: receiver-side audio parity facet, REPORT-ONLY (a column, never folded into the
+      # verdict) -- until the SongPlayer sender half (songplayer#151) ships, the sp-* audio is
+      # uncalibrated, so a facet fault must not FAIL the CG-chain FIFO verdict. `n/a` = a pre-#1303
+      # log with no audio tokens.
+      local audio_facet aud_en aud_dl aud_po audiow
+      audio_facet="$(printf '%s\n' "$log" | cg_chain_parse_audio_facet "$src")"
+      if [ -n "$audio_facet" ]; then
+        IFS='|' read -r aud_en aud_dl aud_po <<<"$audio_facet"
+        local audonoff="off"; [ "${aud_en:-0}" = "1" ] && audonoff="on"
+        audiow="${audonoff}/d${aud_dl}/p${aud_po}"
+      else
+        aud_en=""; aud_dl=""; aud_po=""; audiow="n/a"
+      fi
+      printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %s\n' \
+        "$hop" "$src" "$lockw" "$samples" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrcw" "$audiow" "$verdict"
       if [ "$verdict" != "PASS" ]; then
         overall_fail=1
         printf '%s\n' "$verdict_out" | tail -n +2 | sed 's/^/         reason: /'
       fi
       if [ -n "$CSV_PATH" ]; then
         ts="$(_now_utc)"
-        cg_chain_csv_row "$ts" "$hop" "$src" "$verdict" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "${asrc:-}" >> "$CSV_PATH"
+        cg_chain_csv_row "$ts" "$hop" "$src" "$verdict" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "${asrc:-}" "${aud_en:-}" "${aud_dl:-}" "${aud_po:-}" >> "$CSV_PATH"
       fi
     done <<<"$sources"
   done
