@@ -1628,6 +1628,36 @@ static inline bool source_muted(obs_source_t *source, uint64_t os_time)
 	       (source->push_to_talk_enabled && !push_to_talk_active);
 }
 
+/* camera-box #1303 — receiver-side AUDIO <-> video-FIFO pairing (pure helpers).
+ * Byte-for-byte mirror of src/genlock_audio_pairing.rs; held identical by the committed
+ * parity gate tests/genlock_audio_pairing_parity.rs (the #1003 lift-and-compile recipe,
+ * which slices this contiguous block by the three signatures below). Keep the three
+ * functions CONTIGUOUS and their bodies numerically identical to the Rust authority. */
+static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)
+{
+	/* audio held by the SAME latency_ms the video FIFO holds video, so the A/V pair
+	 * survives the hold (present_ts = wall_now - latency_ms). */
+	return (uint64_t)latency_ms * 1000000ull;
+}
+static inline int64_t genlock_audio_pairing_offset_ms(int64_t applied_audio_delay_ns, uint32_t video_latency_ms)
+{
+	/* residual A/V offset (ms, signed): applied audio delay minus the video latency; 0 = paired. */
+	return applied_audio_delay_ns / 1000000 - (int64_t)video_latency_ms;
+}
+/* genlock_audio_health: 0=Ok 1=AudioDisabledOnProgram 2=AsrcSaturated 3=PairingOffsetExceeded.
+ * Precedence matches decide_audio_health() in the Rust authority. */
+static inline int genlock_audio_decide_health(int audio_enabled, int is_program_source, int asrc_saturated,
+					      int64_t pairing_offset_ms, int64_t frame_interval_ms)
+{
+	if (is_program_source && !audio_enabled)
+		return 1;
+	if (audio_enabled && asrc_saturated)
+		return 2;
+	if (audio_enabled && (pairing_offset_ms < 0 ? -pairing_offset_ms : pairing_offset_ms) > frame_interval_ms)
+		return 3;
+	return 0;
+}
+
 static void source_output_audio_data(obs_source_t *source, const struct audio_data *data)
 {
 	size_t sample_rate = audio_output_get_sample_rate(obs->audio.audio);
@@ -1697,6 +1727,19 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	sync_offset = source->sync_offset;
 	in.timestamp += sync_offset;
 	in.timestamp -= source->resample_offset;
+
+	/* camera-box #1303: genlock AUDIO parity. For a genlock_fifo source the video FIFO holds
+	 * every frame to present_ts = wall_now - latency_ms; delay this source's audio by the SAME
+	 * effective latency (a pure duration shift on OBS's converted timeline — the timeline basis
+	 * is irrelevant to a fixed delay) so the A/V pair is presented at the same wall instant.
+	 * genlock_latency_ms is always >= GENLOCK_LATENCY_MS_MIN_INIT (seeded at create, clamped by
+	 * obs_source_set_genlock_latency_ms), so the effective value is the field itself; the >0
+	 * guard is a defensive no-op-delay default. The store feeds the audit line's audio facet
+	 * (genlock_fill_stats). */
+	if (source->genlock_fifo && source->genlock_latency_ms > 0) {
+		in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);
+		source->genlock_audio_delay_ms = source->genlock_latency_ms;
+	}
 
 	source->next_audio_sys_ts_min = source->next_audio_ts_min + source->timing_adjust;
 

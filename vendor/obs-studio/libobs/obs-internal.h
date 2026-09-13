@@ -1120,6 +1120,7 @@ struct obs_source {
 	uint64_t genlock_last_present_ts;  /* most recent ts-align presentation deadline (ns); 0 = not sampled this tick */
 	uint32_t genlock_last_due;         /* most recent ts-align due-frame count; 0 = not sampled this tick */
 	int64_t genlock_last_head_skew_ns; /* most recent (wall_now - head frame->timestamp) skew (ns); 0 = not sampled this tick */
+	uint32_t genlock_audio_delay_ms;   /* camera-box #1303: the audio hold (ms) last applied in source_output_audio_data so this source's audio pairs with its video FIFO hold (= genlock_latency_ms for a genlock_fifo source; 0 = never applied / audio not held). Written on the audio thread, read by genlock_fill_stats on the render thread for the audit line's audio facet — a benign single-word cross-thread read (stable in steady state, self-corrects at transitions). Zeroed at create (bzalloc). Mirror/decision: src/genlock_audio_pairing.rs. */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
 	DARRAY(struct obs_source_frame *) async_frames;
