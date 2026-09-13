@@ -971,12 +971,17 @@ fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
             out.contains("NEVER writes and NEVER gates"),
             "preflight is report-only for {boxes}:\n{out}"
         );
-        // the preflight is a PRE-swap step: it must come before the box's STEP 0 upload/deploy.
+        // the preflight is a PRE-swap step: it must come before the box's REAL deploy program.
+        // Anchor on the Windows program's first line ($ErrorActionPreference = 'Stop') -- both box
+        // sets here include a Windows box and that string never appears in the preflight text, so
+        // this is a genuine ordering check, not the preflight's own "STEP 0 below" phrase.
         let pf = out.find("PREFLIGHT (report-only, #1303 part 4)").unwrap();
-        let step0 = out.find("STEP 0").unwrap();
+        let deploy = out
+            .find("$ErrorActionPreference = 'Stop'")
+            .expect("plan carries a Windows deploy program");
         assert!(
-            pf < step0,
-            "preflight must precede STEP 0 for {boxes}:\n{out}"
+            pf < deploy,
+            "preflight must precede the deploy program for {boxes}:\n{out}"
         );
     }
     // one preflight per requested box (2 for strih,imag).

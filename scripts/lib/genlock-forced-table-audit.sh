@@ -87,8 +87,14 @@ genlock_forced_table_audit() {
     total=$((total + 1))
     exp="$(genlock_forced_table_expected "$box" "$name")"
     verdict="$(genlock_forced_table_verdict "$box" "$name" "$ndi_audio")"
-    local note=""
-    if [ "$exp" = "audio" ] && [ "$(printf '%s' "${yuv_range:-}" | tr '[:upper:]' '[:lower:]')" = "partial" ]; then
+    local note="" yr
+    # trim leading/trailing whitespace then lowercase -- matches the Rust module's
+    # yuv_partial_on_program (`yuv_range.trim().eq_ignore_ascii_case("partial")`).
+    yr="${yuv_range:-}"
+    yr="${yr#"${yr%%[![:space:]]*}"}"
+    yr="${yr%"${yr##*[![:space:]]}"}"
+    yr="$(printf '%s' "$yr" | tr '[:upper:]' '[:lower:]')"
+    if [ "$exp" = "audio" ] && [ "$yr" = "partial" ]; then
       note="  NOTE yuv_range=partial on a program source (verify the sender's declared range)"
     fi
     case "$verdict" in
