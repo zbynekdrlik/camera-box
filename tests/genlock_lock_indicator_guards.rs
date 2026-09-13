@@ -47,7 +47,9 @@ fn assert_has(file: &str, needle: &str) {
 
 #[test]
 fn source_stats_api_present() {
-    assert_has(OBS_API, "#define OBS_GENLOCK_STATS_VERSION 1");
+    // #1303 bumped the stats struct to v2 (append-only: +audio_enabled/audio_delay_ms/
+    // audio_pairing_offset_ms). The API is still present; pin the current version.
+    assert_has(OBS_API, "#define OBS_GENLOCK_STATS_VERSION 2");
     assert_has(OBS_API, "struct obs_genlock_stats {");
     assert_has(
         OBS_API,
@@ -66,7 +68,11 @@ fn audit_routes_through_the_shared_fill() {
         "struct obs_genlock_stats gs; genlock_fill_stats(source, &gs);",
     );
     assert_has(OBS_SOURCE, "(unsigned long long)gs.frames_received");
-    assert_has(OBS_SOURCE, "(long long)gs.wall_qpc_drift_ms);");
+    // #1303 appended the audio facet args after wall_qpc_drift_ms, so the audit line no longer
+    // CLOSES on it — it now closes on the audio pairing offset. Pin both: wall_qpc_drift_ms is
+    // still routed through the shared fill, and the audio facet rides the SAME line.
+    assert_has(OBS_SOURCE, "(long long)gs.wall_qpc_drift_ms,");
+    assert_has(OBS_SOURCE, "(long long)gs.audio_pairing_offset_ms);");
 }
 
 #[test]
