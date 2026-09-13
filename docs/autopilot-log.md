@@ -11507,3 +11507,45 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
 - **What stays open / unverified:** the live per-box redeploy of the new unit+binary and the `verify-device.sh` acceptance proof are a SUPERVISOR rig step (cam1 gets it via its re-provisioning run today); never hand-patched a live unit from this lane. The (ah) check is an UPPER-bound (catches the ~27-thread regression); a lower-bound "grab is actually FIFO / setcap present" check is a possible follow-up. The deeper Approach-2 (move NDI emit threads off core 3) stays staged (needs a #728-style emit measurement).
 - **Playbook:** updated `.claude/rules/realtime-isolation.md` (defect 2 now code-fixed, not runbook Step B) + the CLAUDE.md router line.
 - **Lane scope:** worktree lane — no push/PR/merge/version-bump/close. Durability backup on `refs/autopilot-wip/worktree-agent-a5c9cc1d3c7d33a5d`.
+
+## #1307 slice — headless no-clock alerting via dev1 (worktree lane, 2026-09-13, base ac838ae4b)
+
+- **Scope:** ONLY the "headless no-clock alerting via dev1" deliverable of #1307. The DNS-named
+  grandmaster resolver (`scripts/lib/rig-grandmaster.sh`, commit `6e81adb57`) was already done; the
+  dantesync#113/#114 + fleet allowlist rollout are owned elsewhere. Owner ruling ROZHODNUTÉ #1307
+  (2026-09-13) landed mid-lane: PRODUCTION-CRITICAL class → re-ping repeatedly while the fault
+  persists (umbrella #1308).
+- **Deliverable:** a new dev1 alert-watchdog sibling that reads EVERY dantesync node's `:8898/status`
+  (cam1-7 via camera-set.sh `camera_resolve` incl. retired-but-powered cam5-7, + strih/stream/imag/
+  resolume via obs-fleet.sh `obs_fleet_host`; resolume paged only while `obs_fleet_is_home`) and pages
+  on NO_CLOCK (not-locked / foreign-gm / `ntp_step_storm`) / DNS_UNRESOLVABLE (`video-clock.lan` won't
+  resolve) / GM_CHANGED (resolved grandmaster IP moved between passes — today's „ip sa zmenila").
+- **Commits (mine, after ac838ae4b):** `fc24616d6` (test RED — pure decision) → `62607f4de` (feat
+  GREEN — `scripts/dantesync_clock_decision.py`: analyze mirrors clock-offset-guard.sh field
+  semantics + dantesync#114 `clock_alarm` forward-compat single-constant; `dedup_key` time-bucketed;
+  `grandmaster_change`) → `4125952e8` (feat orchestrator `scripts/dantesync-clock-alert-watchdog.sh`
+  reusing obs-watchdog-decision.sh 2-pass confirm + rig-grandmaster.sh + camera-set.sh + obs-fleet.sh)
+  → `50b75363f` (systemd --user units, ship DISABLED) → the rule/router/log commit → the
+  watchdog-notify-dedup.md + #1206 sweep allowlist commit (production-critical time-bucket exception).
+- **#1119 storm signal:** dantesync's OWN `ntp_step_storm` boolean (its 120/h alarm) — there is NO
+  numeric steps-per-hour literal in `dantesync-gate.sh` to reuse (its verdict IS the boolean), so we
+  page on the boolean and carry `ntp_steps_last_hour` in the reason (never a re-hardcoded 120).
+- **Re-ping (owner ruling):** `--dedup-key dante-clock-<box>-<floor(now/REPING_INTERVAL_S)>`
+  (600s default, floor 60) computed in the pure module (deterministic now injected → unit-tested:
+  t / t+599 → same key, t+600 → new key, healed → no key). Recovery is ONE machine-channel log line.
+  Deliberate exception to watchdog-notify-dedup.md, allowlisted in the #1206 sweep — its own commit.
+- **RED→GREEN (Tier-0, no cargo):** 22/22 pytest on the pure module (RED = module absent; one RED
+  fixture had off-by-bucket arithmetic — code correct, fixture fixed in GREEN with justification).
+  `bash -n` + `shellcheck -S warning` clean on the orchestrator. Stubbed `--dry-run` (inline literal
+  `DANTE_CLOCK_FETCH_CMD`/`RIG_GRANDMASTER_IP`/`DANTE_CLOCK_NODES`/`DANTE_CLOCK_NOW` — a worktree lane
+  cannot run `bash -c`/variable-value shapes) exercised: per-node OK/NO_CLOCK/SKIP/UNKNOWN, 2-pass
+  confirm → bucketed alert, DNS_UNRESOLVABLE (per-node grading continues), GM_CHANGED
+  seed/candidate/confirm/normalize, resolume home-gate away/home.
+- **What stays for the SUPERVISOR (integration):** install the --user units on dev1, a live `--dry-run`
+  against the reachable fleet, then `systemctl --user enable --now` the timer + a live-verify page.
+  No box-side change from this lane; no ssh to 10.77.9.x, no Discord send.
+- **Playbook:** new `.claude/rules/dantesync-clock-alert-watchdog.md` (paths-scoped) + one CLAUDE.md
+  router line + the watchdog-notify-dedup.md production-critical-class paragraph.
+- **Lane scope:** worktree lane — no push/PR/merge/close. No version bump (dev already 1.7.0-dev.626 >
+  main .624; dev1-side scripts/tests/docs only). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a3dc5a6fe78ef70a2`.
