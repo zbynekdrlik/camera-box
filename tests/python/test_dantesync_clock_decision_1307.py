@@ -27,11 +27,13 @@ _spec.loader.exec_module(dc)
 
 # A realistic healthy :8898/status body (the shape read live off the fleet, cf. tests/dantesync_gate.rs).
 def _status(is_locked="true", mode="NANO", gm="10.77.9.230", storm="false",
-            steps="0", alarm=None):
+            steps="0", alarm=None, updated_ts=1783647854):
     parts = [
         '"offset_ns":164707', '"ntp_offset_us":1249', '"drift_ppm":-7.68',
-        '"settled":true', '"updated_ts":1783647854',
+        '"settled":true',
     ]
+    if updated_ts is not None:
+        parts.append(f'"updated_ts":{updated_ts}')
     if is_locked is not None:
         parts.append(f'"is_locked":{is_locked}')
     if mode is not None:
@@ -137,6 +139,50 @@ def test_clock_alarm_inactive_but_derived_no_clock_still_pages():
 
 def test_clock_alarm_field_name_is_a_single_constant():
     assert dc.CLOCK_ALARM_FIELD == "clock_alarm"
+
+
+# ------------------------------------------------------------------ updated_ts freshness (mirror the gate)
+# The E2E gate FAILS a reachable-but-STALE :8898/status (clock-offset-guard.sh pipe_json_freshness_
+# verdict, #550/#591/#595): a wedged dantesync (HTTP thread alive, servo dead) serving a FROZEN
+# is_locked:true must not read OK forever -- exactly the silent clock-loss the owner banned.
+_FRESH = 300  # DANTE_CLOCK_FRESHNESS_S default (mirrors the gate's DANTESYNC_OFFSET_FRESHNESS_S)
+
+
+def test_stale_updated_ts_is_no_clock_even_when_locked():
+    # is_locked:true + mode NANO + correct gm, but updated_ts is far older than now -> STALE -> the
+    # frozen "locked" reading is untrustworthy -> NO_CLOCK.
+    body = _status(updated_ts=1000)
+    r = dc.analyze(body, 1, GM, now=1000 + _FRESH + 60, freshness_s=_FRESH)
+    assert r["verdict"] == "NO_CLOCK", r
+    assert dc.R_STALE in r["reason"]
+
+
+def test_fresh_updated_ts_within_window_is_ok():
+    body = _status(updated_ts=1000)
+    r = dc.analyze(body, 1, GM, now=1000 + 30, freshness_s=_FRESH)
+    assert r["verdict"] == "OK", r
+
+
+def test_absent_updated_ts_never_pages_on_freshness():
+    # No updated_ts field -> freshness UNKNOWN -> never a stale page (false-page-safe); falls through
+    # to the lock/gm/storm checks (healthy here -> OK).
+    body = _status(updated_ts=None)
+    assert dc.analyze(body, 1, GM, now=9_999_999_999, freshness_s=_FRESH)["verdict"] == "OK"
+
+
+def test_no_now_skips_freshness_backward_compatible():
+    # now omitted -> freshness not graded (the 3-arg call the sibling watchdogs use); a very old
+    # updated_ts alone does not page.
+    assert dc.analyze(_status(updated_ts=1000), 1, GM)["verdict"] == "OK"
+
+
+def test_stale_minimal_payload_is_no_clock_not_unknown():
+    # A payload carrying ONLY updated_ts (no is_locked/mode/storm/alarm) that is STALE is a judgeable
+    # fault (NO_CLOCK stale), NOT UNKNOWN -- a frozen daemon serving a skeleton payload still pages.
+    body = '{"updated_ts":1000}'
+    r = dc.analyze(body, 1, GM, now=1000 + _FRESH + 60, freshness_s=_FRESH)
+    assert r["verdict"] == "NO_CLOCK", r
+    assert dc.R_STALE in r["reason"]
 
 
 # ------------------------------------------------------------------ time-bucketed dedup cadence
