@@ -188,9 +188,12 @@ write_state_field() {
 # now_epoch -> seconds since the epoch (injectable for tests via DANTE_CLOCK_NOW).
 now_epoch() { printf '%s' "${DANTE_CLOCK_NOW:-$(date +%s)}"; }
 
-# bucketed_key <base> -> the time-bucketed --dedup-key from the pure module (deterministic now).
+# bucketed_key <base> -> the time-bucketed --dedup-key. #1308: this now delegates to the ONE shared
+# watchdog_notify_key bash twin (sourced from obs-watchdog-decision.sh), the SAME helper every other
+# production-critical watchdog uses -- not the private python dedup-key path (identical output, one
+# source of truth). now_epoch stays injectable via DANTE_CLOCK_NOW for deterministic tests.
 bucketed_key() {
-  python3 "$DECIDE" dedup-key --base "$1" --now "$(now_epoch)" --interval "$REPING_INTERVAL_S" 2>/dev/null || printf '%s' "$1"
+  watchdog_notify_key "$1" "$(now_epoch)" "$REPING_INTERVAL_S" 2>/dev/null || printf '%s\n' "$1"
 }
 
 # fire_alert <dedup-base> <emoji-body...> -- the ONE ALERT emit seam. Always computes a time-bucketed

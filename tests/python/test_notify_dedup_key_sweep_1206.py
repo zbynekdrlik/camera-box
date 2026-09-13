@@ -126,43 +126,103 @@ def test_no_recovery_or_status_message_is_phone_pinged():
 
 
 # --------------------------------------------------------------------------------------------------
-# #1307 -- PRODUCTION-CRITICAL class: the ONE sanctioned exception to invariant "no per-pass component".
+# #1307/#1308 -- PRODUCTION-CRITICAL class: the ONE sanctioned exception to invariant "no per-pass
+# component".
 #
 # Owner ruling (ROZHODNUTÉ on #1307, 2026-09-13, verbatim): „aj ntp aj ostatne veci bez ktorych nevie
 # produkcia bezat spravne musi notifikovat ... nech kazdu minutu chodia notifikacie ze nemaju dante
 # clock ... byt o tom dokolecka notifikovany". A production-critical condition (a lost dante clock, a
-# foreign/missing grandmaster, an NTP step-storm) whose loss is INVISIBLE without a page must be
-# RE-pinged while it PERSISTS -- reversing rule 1's one-ping-per-incident default for THIS class only.
-# The mechanism is a TIME-BUCKETED --dedup-key (dante-clock-<box>-<floor(now/interval)>): within a
-# bucket it still card-edits (no flood), each new bucket re-pings. See
-# .claude/rules/watchdog-notify-dedup.md "Production-critical class".
+# wedged OBS, a dead bundle-state server, a missing VB-Matrix, an unreachable box ...) whose loss is
+# INVISIBLE without a page must be RE-pinged while it PERSISTS -- reversing rule 1's one-ping-per-
+# incident default for THIS class only. The mechanism is a TIME-BUCKETED --dedup-key
+# (<incident-key>-<floor(now/interval)>) built by the ONE shared helper (watchdog_notify_key /
+# scripts/watchdog_reping.py, #1308): within a bucket it still card-edits (no flood), each new bucket
+# re-pings. See .claude/rules/watchdog-notify-dedup.md "Production-critical class".
 #
-# This allowlist makes the exception EXPLICIT: these files intentionally use a time-varying key, so a
-# future stricter "no timestamp/per-pass component in the key" hardening must exempt them BY NAME --
-# never silently. It does NOT weaken invariant A (a --dedup-key is still present) or B (no recovery
-# ping) for these files or any other watchdog; the default stable-key rule stands for everything else.
+# This allowlist is CLASS-based (#1308): it names EVERY production-critical watchdog whose keys may
+# carry the time bucket. It makes the exception EXPLICIT -- these files intentionally rotate the key,
+# so a future stricter "no timestamp/per-pass component in the key" hardening must exempt them BY NAME
+# -- never silently. It does NOT weaken invariant A (a --dedup-key is still present) or B (no recovery
+# ping) for these files or any other watchdog; the default stable-key rule stands for everything else,
+# and the sweep below REJECTS a bucketed key in any NON-allowlisted script.
 _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     "dantesync-clock-alert-watchdog.sh",   # #1307 -- dev1 dante-clock loss / DNS / GM-move paging
+    "genlock-lock-alert-watchdog.sh",      # #1299 -- fleet genlock LOCK facet
+    "network-reach-alert-watchdog.sh",     # #1001 -- strih/stream unreachable
+    "bundle-state-alert-watchdog.sh",      # #732  -- :8899 bundle-state server down
+    "obs-liveness-watchdog.sh",            # #391  -- broadcast-OBS render wedge
+    "audio-lag-alert-watchdog.sh",         # #1226 -- OBS audio-timeline lag / band drift
+    "asio-starve-alert-watchdog.sh",       # #1023 -- ASIO source starved
+    "vb-matrix-alert-watchdog.sh",         # #1227 -- VB-Matrix down
+    "ndi-portmap-alert-watchdog.sh",       # #1181 -- NDI sender port-map moved
+    "avsync-heartbeat-alert-watchdog.sh",  # #812  -- A/V-sync heartbeat stale
+    "imag-obs-alert-watchdog.sh",          # #882  -- imag OBS down / latency-drift / restart-storm
 }
 
+# The bucketing markers an inline --dedup-key carries when it time-buckets: the shared bash helper
+# call, its python-CLI form, or a raw timestamp. Any of these in a notify --body line's key means the
+# key rotates by time -- allowed ONLY for the allowlisted class above.
+_BUCKET_MARKERS = ("watchdog_notify_key", "watchdog_reping", "dedup-key --now", "$(date")
 
-def test_production_critical_watchdog_is_swept_and_carries_a_key():
-    """The production-critical watchdog is still discovered by the sweep (so invariants A + B apply to
-    it too) -- the time-bucket exception is about the key's VALUE rotating, never about escaping the
+
+def test_production_critical_watchdogs_are_swept_and_carry_a_key():
+    """Every production-critical watchdog is still discovered by the sweep (so invariants A + B apply
+    to it too) -- the time-bucket exception is about the key's VALUE rotating, never about escaping the
     presence + no-recovery-ping invariants."""
     names = {p.name for p in _iter_notify_scripts()}
     for allowed in _PRODUCTION_CRITICAL_TIME_BUCKETED:
         assert allowed in names, (
-            f"#1307 production-critical allowlist names '{allowed}' but the sweep did not discover it "
+            f"#1308 production-critical allowlist names '{allowed}' but the sweep did not discover it "
             "(it must still emit a `notify --body ... --dedup-key` to be covered)"
         )
 
 
+def test_only_allowlisted_watchdogs_time_bucket_their_key():
+    """The class exception is NARROW: only an allowlisted production-critical watchdog may rotate its
+    --dedup-key by time. A NON-allowlisted script that inlines a bucketing marker into a notify key is
+    a regression of rule 1 ("no per-pass/timestamp component") -- fail loudly, naming the file, so the
+    exception can never spread silently to a diagnostic/TEST-mode watchdog."""
+    offenders = []
+    for p in _iter_notify_scripts():
+        if p.name in _PRODUCTION_CRITICAL_TIME_BUCKETED:
+            continue
+        for ln in _notify_body_logical_lines(p):
+            for marker in _BUCKET_MARKERS:
+                if marker in ln:
+                    offenders.append(f"{p.relative_to(_ROOT)}: [{marker}] {ln.strip()[:140]}")
+    assert not offenders, (
+        "#1308: these NON-production-critical notify call-sites time-bucket their --dedup-key "
+        "(a per-pass/timestamp component -- only the allowlisted class may; see "
+        ".claude/rules/watchdog-notify-dedup.md):\n" + "\n".join(offenders)
+    )
+
+
+def test_production_critical_watchdogs_actually_bucket_their_inline_key():
+    """The 10 bash watchdogs that wrap an INLINE --dedup-key (all but dante-clock, which buckets via a
+    variable from bucketed_key) must actually carry the shared helper on their notify line -- proof
+    the #1308 rollout landed, not just that the allowlist names them. dante-clock is exempt here (its
+    key is built earlier into $key, off the notify line) but is pinned behaviorally below."""
+    names_to_paths = {p.name: p for p in _iter_notify_scripts()}
+    inline_bucketers = _PRODUCTION_CRITICAL_TIME_BUCKETED - {"dantesync-clock-alert-watchdog.sh"}
+    missing = []
+    for name in sorted(inline_bucketers):
+        p = names_to_paths.get(name)
+        assert p is not None, f"#1308: {name} not discovered by the sweep"
+        if not any("watchdog_notify_key" in ln for ln in _notify_body_logical_lines(p)):
+            missing.append(name)
+    assert not missing, (
+        "#1308: these production-critical watchdogs no longer time-bucket their inline --dedup-key "
+        "(the shared watchdog_notify_key wrap was dropped -- re-pinging is silently broken):\n"
+        + "\n".join(missing)
+    )
+
+
 def test_production_critical_key_is_intentionally_time_bucketed():
-    """Pin the sanctioned exception behaviorally: the dante-clock watchdog's pure decision module
-    rotates the --dedup-key by time bucket (a fresh ping per interval while the fault persists), the
-    DELIBERATE reversal of rule 1 for this class (owner ruling #1307). If this ever stops rotating,
-    the production-critical re-ping is silently broken -- fail loudly here."""
+    """Pin the sanctioned exception behaviorally: the shared re-ping helper (via dante-clock's pure
+    decision module, which delegates to scripts/watchdog_reping.py) rotates the --dedup-key by time
+    bucket (a fresh ping per interval while the fault persists), the DELIBERATE reversal of rule 1 for
+    this class (owner ruling #1307/#1308). If this ever stops rotating, the production-critical
+    re-ping is silently broken -- fail loudly here."""
     import importlib.util
     mod_path = _ROOT / "scripts" / "dantesync_clock_decision.py"
     spec = importlib.util.spec_from_file_location("dantesync_clock_decision", mod_path)

@@ -254,7 +254,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $box genlock $verdict (reason '${reason}')"
     python3 "$NOTIFY" notify --body \
       "🚨 Genlock-lock ($REPO_SLUG): **$box** ($ip) opustil LOCKED -- stav **$verdict** (dôvod '${reason}'). Box nie je zosynchronizovaný na fleet clock; na streame to môže rozhodiť A/V aj zosúladenie kamier. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol. Skontroluj genlock indikátor na boxe (dantesync / NDI vstupy / wall-stamping); náprava je rig-ops rozhodnutie (reštart OBS/dantesync alebo NDI reattach)." \
-      --dedup-key "genlock-lock-$box" \
+      --dedup-key "$(watchdog_notify_key "genlock-lock-$box" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- still $verdict"

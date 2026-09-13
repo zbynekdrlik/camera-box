@@ -155,7 +155,7 @@ main() {
     log "ALERT: firing Discord notification for NDI port-map change"
     python3 "$NOTIFY" notify --body \
       "🚨 #1181 NDI port-map: sender-porty STRIH-SNV OBS sa ZMENILI oproti baseline ($REPO_SLUG) — stock NDI prijímače (TV / NDI Studio Monitor) môžu teraz ukazovať NESPRÁVNY zdroj pod pôvodným menom (pripojené na zapamätaný port). ${summary}. Akcia: na TV/Studio Monitor prijímačoch znovu otvoriť zdroj; ak je zmena zámerná (pridaný/odobraný výstup + reštart OBS), obnoviť baseline \`scripts/ndi-portmap-audit.sh --capture\` a commitnúť v PR." \
-      --dedup-key "ndi-portmap" \
+      --dedup-key "$(watchdog_notify_key "ndi-portmap" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

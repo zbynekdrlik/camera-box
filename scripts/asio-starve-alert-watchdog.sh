@@ -248,7 +248,7 @@ handle_source() {
           log "ALERT: firing Discord notification for '$source' tap broken"
           python3 "$NOTIFY" notify --body \
             "⚠️ #1023 asio-starve: no \`asrc: source '$source'\` sample on $ASIO_STARVE_NAME for $unk consecutive passes ($REPO_SLUG). The ASIO-starve TAP for this source is BLIND (source renamed / dropped from the scene, or ASIO_STARVE_SOURCES drifted) -- silent-audio coverage for '$source' is OFF until fixed." \
-            --dedup-key "asio-starve-tap-$source" \
+            --dedup-key "$(watchdog_notify_key "asio-starve-tap-$source" "$(date +%s)")" \
             >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
         fi
         write_state_field "tap_broken_${k}" 1
@@ -317,7 +317,7 @@ handle_source() {
     log "ALERT: firing Discord notification for '$source' starved"
     python3 "$NOTIFY" notify --body \
       "🚨 #1023 asio-starve: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes -- the ASIO source is silent (OBS likely started before the ASIO device/matrix was ready). LIEK: resetni (reštartni) OBS na $ASIO_STARVE_NAME: \`$RECOVERY_PLAN\`" \
-      --dedup-key "asio-starve-$source" \
+      --dedup-key "$(watchdog_notify_key "asio-starve-$source" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

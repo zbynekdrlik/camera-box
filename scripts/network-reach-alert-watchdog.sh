@@ -273,7 +273,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $box unreachable"
     python3 "$NOTIFY" notify --body \
       "🚨 nedostupný box ($REPO_SLUG): **$box** ($ip) je NEDOSTUPNÝ z dev1. ${detail}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol. Pravdepodobne mŕtvy NIC / vypnutý box / odpojený kábel — OBS-WS aj ssh aj MCP sú tmavé. Potrebný fyzický zásah — skontroluj box fyzicky (napájanie, sieťový kábel)." \
-      --dedup-key "network-reach-$box" \
+      --dedup-key "$(watchdog_notify_key "network-reach-$box" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
