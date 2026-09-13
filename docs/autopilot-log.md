@@ -11472,3 +11472,30 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
   refusal — not touchable in-lane (no ssh to any cambox). The restart that adopts a new binary
   stays a separate rig-idle-only supervisor step. Cross-ref issue 1228 (relay Restart= lifecycle) —
   systemd unit untouched.
+## 2026-09-13 — #1303 part 4 (per-box forced-table AUDIO audit + deploy preflight) + issue 1295 planner exit-0 nit — worktree lane, base origin/dev e2d651bc3
+- **#1303 part 4** (deferred by the parts-1/2/3a/5 lane): a REPORT-ONLY per-box-class certified-table
+  AUDIO/yuv audit. Root cause — the DistroAV fork forces `ndi_audio=false` on every NDI input (values
+  read off a camera input), so a genlock build onboarded onto a PROGRAM-audio box (cg OBS: `sp-*`/`cg`/
+  music inputs) silently shipped program audio OFF and only surfaced on air (event morning). New pure
+  crate-root module `src/genlock_forced_table_audit.rs` (Tier-0, `genlock_lock_state.rs` pattern) owns
+  the per-box-class expectation table + classification (camera=silent, `sp-*`/`cg`/`pgm`/music=audio,
+  box default) + a report-only `yuv_range=partial on a program source` advisory. Byte-for-byte bash
+  replica `scripts/lib/genlock-forced-table-audit.sh` (source-only lib) is the deploy-preflight
+  classifier; `deploy-genlock-fleet.sh` `emit_forced_table_audit_preflight` prints it before STEP 0 of
+  every box's plan (never a write, never a gate). Commits d8b47e17f (module+classifier+tests) +
+  57b6b661e (preflight wiring). Tier-0: pure rustc 12/12, 88-vector Rust↔bash parity diff clean,
+  bash -n + shellcheck, `cargo fmt --all --check`, doc-lint grep.
+- **issue 1295 planner nit**: `deploy-genlock-fleet.sh --plan` emitted the fleet-log record as a BARE
+  tab-separated line after the last box program's `exit 0`; a saved `.ps1` parsed whole in file mode
+  then failed (owner: "At C:\deploy2.ps1:170"). Fix — emit the record as a `#`-comment + a trailing
+  `exit 0` so the plan's last non-empty line is clean. RED 13f08c6f3 (test) → GREEN b2352a601 (fix);
+  RED proven against origin/dev's planner (its last line was the bare record). `fleet_log_line`
+  unchanged (execute-mode file append still writes the raw record).
+- Docs: 6aa89caf6 (sender-contract per-box table section + genlock-fleet-deploy rule preflight section).
+- OVERLAP-BYPASS with release PR #1293: `scripts/deploy-genlock-fleet.sh` + `docs/genlock-sender-contract.md`
+  touched ADDITIVELY only (a new emit function + two call sites + a commented log line + a trailing
+  echo; one appended doc section) — no existing content reordered/rewritten.
+- UNVERIFIED (post-merge supervisor rig steps): the LIVE audit read on real boxes (win-* MCP / OBS-WS
+  enumeration + the classifier) and the sourced-bash `run_under_set_e`/cargo test suite (Tier-0 blocks
+  cargo compile in this worktree; the Rust harness runs at CI). Followup deferred: #1303 part 3b
+  (LOCK-indicator audio DEGRADED term, frontend-coupled).
