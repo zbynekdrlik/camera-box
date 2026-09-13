@@ -11393,3 +11393,21 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
   (RED->GREEN proven); CI is the first real compile. Two fresh-context reviews (0 blockers/majors;
   findings fixed same-branch). Rig-verify UNVERIFIED: live cam1/cam2 panel + the d003/--summary
   emit order (fail-safe either way).
+  #1303 (code lane, worktree): receiver-side AUDIO genlock parity. Part 1 = the audio HOLD wired at
+  the source_output_audio_data ingest seam (obs-source.c) — a genlock_fifo source's audio delayed by
+  the same effective latency_ms the video FIFO holds video; pure decision src/genlock_audio_pairing.rs
+  (delay/offset/decide_audio_health) + 3 static-inline C mirrors + parity gate
+  tests/genlock_audio_pairing_parity.rs (C↔Rust byte-identical, cc -Wconversion -Wformat2 -Werror).
+  Part 2 = ASRC confirmed unchanged (rate servo, orthogonal) + docs (genlock-sender-contract receiver
+  section + rules/genlock-audio-pairing.md); corrected the stale ASRC_TIME_CONSTANT_S/MIN_LOCK_S names
+  to ASRC_REGRESSION_*. Part 3a = audio facet (audio_enabled/audio_delay_ms/audio_pairing_offset_ms)
+  in obs_genlock_stats v1->v2 + the genlock-fifo audit line + jitter_audit parser (additive,
+  forward-compat) + genlock_preload anchor + both windows-genlock*.yml pwsh gates. Part 5 =
+  cg-chain-verify audio column (cg_chain_parse_audio_facet + CSV cols + report-only AUDIO column).
+  Commits f78d4421d (pure) + 3a7441eac (C mirror/wire/parity) + 8d742fb97 (facet) + 2ae7b69e5 (docs +
+  cg-chain) + 022608752 (review fix: else-zero stale audio_delay_ms). Tier-0: pure rustc 14/14,
+  jitter_audit 28/28 (RED proven), gcc lift-compile, python awk/CSV sim, bash -n + shellcheck, fmt.
+  Fresh-context review 0R/0Y/3B (1 fixed, 2 dropped-with-reason). Parts 3b (LOCK-indicator audio term,
+  frontend-coupled) + 4 (per-box certified-table audit) returned as followup_candidates. Overlap
+  files genlock_lock_state.rs / obs-fleet.sh UNTOUCHED. UNVERIFIED: live A/V soak (±20ms/1h, deep
+  latency) = post-merge supervisor rig step.
