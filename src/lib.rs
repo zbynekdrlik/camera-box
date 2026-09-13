@@ -366,6 +366,13 @@ pub mod genlock_lock_state;
 // committed parity gate `tests/genlock_audio_pairing_parity.rs`.
 pub mod genlock_audio_pairing;
 
+// #1303 part 4 — the report-only per-box-class certified-table AUDIO-parity audit (camera inputs
+// silent, sp-*/cg/program inputs audio). Deploy-time preflight logic (no runtime OBS path, no C
+// mirror); crate-root + std-only so it is Tier-0 verifiable and is the canonical table the bash
+// replica `scripts/lib/genlock-forced-table-audit.sh` mirrors (pinned by
+// `tests/genlock_forced_table_audit_1303.rs`).
+pub mod genlock_forced_table_audit;
+
 // #660 — the fbdev "visible page" byte range to BLANK on `probe::kms::KmsPresenter` teardown, so
 // releasing DRM master reveals a deterministic black frame instead of whatever ARBITRARILY OLD
 // content another writer (the fbdev-fallback presenter, or camera-box's own `--display` module)
