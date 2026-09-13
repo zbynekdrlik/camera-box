@@ -11411,3 +11411,24 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
   frontend-coupled) + 4 (per-box certified-table audit) returned as followup_candidates. Overlap
   files genlock_lock_state.rs / obs-fleet.sh UNTOUCHED. UNVERIFIED: live A/V soak (±20ms/1h, deep
   latency) = post-merge supervisor rig step.
+
+- #1229 (bkshading relay deploy — 2026-09-13 escalation piece: gate deploy/restart on rig-not-busy):
+  RED 101c7eb8f → GREEN 5d13d3332 → docs 496298ad2 → review-fix 0670b32b7 (branch
+  worktree-agent-a42d469b9f564addb, off origin/dev e2d651bc3). Root cause: a relay deploy DURING
+  live production fork-wedged cam1 (gphoto2 PTP on the single shared xHCI controller → D-state +
+  fork-exhaustion, owner power-cycle). Fix in scripts/bkshading-deploy-relay.sh: (1) rig-busy
+  PREFLIGHT before the first cambox ssh/scp, REUSING the shared stray_session_check_assert guard
+  (obs_phase2.py rig-busy-check, never a duplicated WS loop) — refuses on busy, --force-live
+  supervisor-only bypass (logged loudly), fail-OPEN only when no box readable; (2) ETXTBSY fix — scp
+  to a same-dir staging path (.deploy.<pid>) then atomic mv -f over the running binary (rename swaps
+  the inode), enable-only invariant untouched, ro root always restored + stage cleaned on failure.
+  Tests: tests/python/test_bkshading_deploy_relay_808.py +5 (rig-busy refuse / --force-live bypass /
+  unreadable fail-open / staged-mv shape / ro-restore+stage-cleanup on scp fail), all proven RED
+  against pre-fix then GREEN; _fake_deploy_env now seeds a fake idle obs_phase2 so the whole suite
+  stays hermetic. Doctrine appended to .claude/rules/bkshading.md (append-only vs the open release
+  PR). Tier-0: bash -n + shellcheck -S warning clean, 21/21 python tests pass, fork-point diff for
+  the review dispatch. Fresh-context adversarial review CLEAN (0R/0Y/2B, both fixed in-branch).
+  UNVERIFIED (supervisor rig step): live A/B clean-watch on cam1 (relay-on vs off) + a real busy-rig
+  refusal — not touchable in-lane (no ssh to any cambox). The restart that adopts a new binary
+  stays a separate rig-idle-only supervisor step. Cross-ref issue 1228 (relay Restart= lifecycle) —
+  systemd unit untouched.
