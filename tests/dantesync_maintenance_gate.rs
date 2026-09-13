@@ -168,6 +168,10 @@ fn full_script_home_broken_exits_30() {
             ("OBS_FLEET_HOME", "resolume"),
             ("DANTESYNC_MAINT_STATUS_RESOLUME", BROKEN),
             ("DANTESYNC_MAINT_VERSION_RESOLUME", "dantesync 1.8.53"),
+            // pin-agnostic: the fixture version must EQUAL the pin the script grades against,
+            // never the moving default DANTESYNC_VERSION_PIN (a fleet roll bumps that and would
+            // otherwise turn this "healthy" fixture into a false version mismatch).
+            ("DANTESYNC_VERSION_PIN", "1.8.53"),
         ],
         &["--box", "resolume"],
     );
@@ -185,6 +189,10 @@ fn full_script_home_healthy_exits_zero() {
             ("OBS_FLEET_HOME", "resolume"),
             ("DANTESYNC_MAINT_STATUS_RESOLUME", GOOD),
             ("DANTESYNC_MAINT_VERSION_RESOLUME", "dantesync 1.8.53"),
+            // pin-agnostic: the fixture version must EQUAL the pin the script grades against,
+            // never the moving default DANTESYNC_VERSION_PIN (a fleet roll bumps that and would
+            // otherwise turn this "healthy" fixture into a false version mismatch).
+            ("DANTESYNC_VERSION_PIN", "1.8.53"),
         ],
         &["--box", "resolume"],
     );
