@@ -1026,6 +1026,120 @@ fn rt_irq_placement_verdict_grades_by_kernel_and_core() {
 }
 
 #[test]
+fn rt_thread_policy_verdict_grades_the_899_defect2_states() {
+    // issue 899 defect 2: a unit that still sets a process-wide policy is ALWAYS a FAIL
+    // (config wrong, independent of the live count); a clean unit with a small live FIFO
+    // count passes; a clean unit with too many FIFO threads (the pre-899 ~27) fails; an
+    // unreadable live count (camera-box not running) is config-only (WARN); a malformed
+    // input is unknown (WARN).
+    let (code, out, err) = run_sourced(
+        r#"CEIL="$(rt_fifo_thread_ceiling)"
+           rt_thread_policy_verdict 1 1 "$CEIL"; echo
+           rt_thread_policy_verdict 1 99 "$CEIL"; echo
+           rt_thread_policy_verdict 0 1 "$CEIL"; echo
+           rt_thread_policy_verdict 0 "$CEIL" "$CEIL"; echo
+           rt_thread_policy_verdict 0 27 "$CEIL"; echo
+           rt_thread_policy_verdict 0 "" "$CEIL"; echo
+           rt_thread_policy_verdict 2 1 "$CEIL"; echo
+           rt_thread_policy_verdict 0 1 ""; echo
+"#,
+    );
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "unit-has-process-wide-fifo\nunit-has-process-wide-fifo\nok\nok\ntoo-many-fifo-threads:27\nok-config-only\nunknown\nunknown"
+    );
+}
+
+#[test]
+fn rt_fifo_thread_ceiling_catches_the_process_wide_regression() {
+    // Production runs exactly 1 SCHED_FIFO thread (the capture+emit hot path); the pre-899
+    // process-wide policy put ~27 on the core. The ceiling must be >= 1 (a healthy box passes)
+    // and well below 27 (the regression is caught).
+    let (code, out, err) = run_sourced("rt_fifo_thread_ceiling");
+    assert_eq!(code, 0, "stderr: {err}");
+    let ceil: i64 = out
+        .trim()
+        .parse()
+        .expect("rt_fifo_thread_ceiling prints a number");
+    assert!(
+        ceil >= 1,
+        "ceiling must allow the single capture+emit FIFO thread: {ceil}"
+    );
+    assert!(
+        ceil < 10,
+        "ceiling must be well below the pre-899 ~27-FIFO-thread regression: {ceil}"
+    );
+}
+
+/// issue 899 defect 2 — the (ah) per-thread realtime policy check must be wired into the live
+/// flow BEFORE the (q) block (so (q) stays the intentionally-LAST check), grade via the pure
+/// `rt_thread_policy_verdict`, probe BOTH facets (the deployed unit's process-wide
+/// CPUSchedulingPolicy and the live SCHED_FIFO thread count via `ps` class), and FAIL loud.
+#[test]
+fn check_ah_per_thread_realtime_is_wired_before_q_899() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let live_flow = &body[guard_pos..];
+    let ah_at = live_flow
+        .find("# (ah) per-thread realtime policy")
+        .expect("(ah) per-thread realtime policy block must be present in the live flow");
+    let q_at = live_flow
+        .rfind("# (q) .bak cruft drift")
+        .expect("(q) implementation block");
+    assert!(
+        ah_at < q_at,
+        "the (ah) check must precede the (q) block so (q) stays last (ah={ah_at} q={q_at})"
+    );
+    // Scope the slice to the (ah) block ALONE -- it is inserted directly before (q), so it runs
+    // up to the (q) marker itself.
+    let ah_block = &live_flow[ah_at..q_at];
+    assert!(
+        ah_block.contains("rt_thread_policy_verdict"),
+        "(ah) must grade via the pure rt_thread_policy_verdict: {ah_block}"
+    );
+    assert!(
+        ah_block.contains("CPUSchedulingPolicy"),
+        "(ah) must probe the deployed unit for a process-wide CPUSchedulingPolicy: {ah_block}"
+    );
+    assert!(
+        ah_block.contains("-o class="),
+        "(ah) must count the live camera-box process's SCHED_FIFO threads via ps class: {ah_block}"
+    );
+    assert!(
+        ah_block.contains("fail "),
+        "(ah) must FAIL loud on the pre-899 process-wide policy / too many FIFO threads: {ah_block}"
+    );
+}
+
+/// Companion: the (ah) letter must also be documented in the top-of-file header "Checks (all
+/// must pass)" list AND in usage()'s own Checks doc block (the three-place convention).
+#[test]
+fn verify_device_documents_ah_in_header_and_usage_899() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let header = &body[..guard_pos];
+    assert!(
+        header.contains("(ah)") && header.contains("realtime policy"),
+        "the top-of-file header Checks list must document (ah) per-thread realtime policy"
+    );
+    let usage_start = body.find("usage() {").expect("usage() function definition");
+    let usage_end = body[usage_start..]
+        .find("\nEOF\n")
+        .map(|i| usage_start + i)
+        .expect("usage() heredoc terminator");
+    let usage_block = &body[usage_start..usage_end];
+    assert!(
+        usage_block.contains("(ah)") && usage_block.contains("realtime policy"),
+        "usage()'s own Checks doc block must document (ah) per-thread realtime policy"
+    );
+}
+
+#[test]
 fn ndi_symlink_version_extracts_from_canonical_target() {
     let (code, out, err) = run_sourced(&format!(
         "TEXT='{}'\nndi_symlink_version \"$TEXT\"",
