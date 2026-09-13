@@ -62,6 +62,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-fleet.sh"
 # shellcheck source=scripts/lib/rig-grandmaster.sh
 . "$HERE/lib/rig-grandmaster.sh"
+# shellcheck source=scripts/lib/watchdog-tcp-probe.sh
+. "$HERE/lib/watchdog-tcp-probe.sh"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"
 
@@ -90,6 +92,13 @@ STATUS_PORT="${DANTE_CLOCK_STATUS_PORT:-8898}"          # dantesync#47 network s
 STATUS_PATH="${DANTE_CLOCK_STATUS_PATH:-/status}"
 CURL_TIMEOUT="${DANTE_CLOCK_CURL_TIMEOUT:-10}"          # :8898 HTTP fetch (s)
 
+# #1308: when :8898 is unreachable, probe box UP-ness (a cheap TCP connect, watchdog-tcp-probe.sh) to
+# discriminate a live box with dead dantesync HTTP (NO_DANTESYNC page) from a box genuinely down
+# (SKIP, defer #1001). Cams (Linux) -> ssh :22; OBS boxes (Windows/imag) -> OBS-WS :4455 / bundle
+# :8899 / ssh :22 (network-reach's own REACHABLE-iff-ANY rule). All false-page-safe: no port open ->
+# box_up=0 -> SKIP, never a false NO_DANTESYNC.
+TCP_TIMEOUT="${DANTE_CLOCK_TCP_TIMEOUT:-4}"             # per box-up TCP connect (s)
+
 # updated_ts freshness: a reachable-but-STALE payload (HTTP alive, servo/updated_ts frozen) is a
 # silent clock loss the E2E gate already fails on -- page it. Default 300s (mirrors the gate's
 # DANTESYNC_OFFSET_FRESHNESS_S), generous over the ~30s updated_ts cadence.
@@ -106,6 +115,12 @@ REPING_INTERVAL_S="${DANTE_CLOCK_REPING_INTERVAL_S:-600}"
 DECIDE="${DANTE_CLOCK_DECIDE:-$HERE/dantesync_clock_decision.py}"
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${DANTE_CLOCK_ALERT_REPO:-zbynekdrlik/camera-box}"
+
+# #1308: the ONE dantesync version pin (dantesync-version-reading.md / early-gate-pin-doctrine). The
+# gate is source-guarded (exposes DANTESYNC_VERSION_PIN above its own BASH_SOURCE guard), so sourcing
+# it in a SUBSHELL yields the pin without leaking its `set -e` into this watchdog. A mismatch is
+# REPORTED in the card/log text, never a page. DANTE_CLOCK_VERSION_PIN overrides (Tier-0 fixtures).
+VERSION_GATE="${DANTE_CLOCK_VERSION_GATE:-$HERE/dantesync-version-gate.sh}"
 
 STATE_DIR="${DANTE_CLOCK_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-dantesync-clock-alert.state"
@@ -160,6 +175,38 @@ fetch_status_json() {
     \{*) printf '%s' "$body"; return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# box_up_probe <name> <ip> <homegate> -> stdout: 1 (box proven up via a TCP connect) | 0 (no probed
+# port answered -> treated as down). Consulted ONLY when :8898 is unreachable (#1308). Cams probe
+# ssh :22; OBS boxes probe OBS-WS :4455 / bundle :8899 / ssh :22 (up iff ANY answers, mirroring
+# network-reach's REACHABLE-iff-ANY rule). false-page-safe: nothing open -> 0 -> SKIP. Reuses the
+# shared watchdog-tcp-probe.sh mechanism, never a novel probe. DANTE_CLOCK_BOX_UP_CMD (Tier-0 seam,
+# mirrors DANTE_CLOCK_FETCH_CMD): when set, invoked as `<cmd> <name> <ip> <homegate>`, stdout REPLACES
+# the real probe so a --dry-run needs no live box.
+box_up_probe() {
+  local name="$1" ip="$2" homegate="$3"
+  if [ -n "${DANTE_CLOCK_BOX_UP_CMD:-}" ]; then
+    "$DANTE_CLOCK_BOX_UP_CMD" "$name" "$ip" "$homegate" 2>/dev/null || printf '0'
+    return 0
+  fi
+  if [ "$homegate" = "obsfleet" ]; then
+    [ "$(watchdog_probe_tcp "$ip" 4455 "$TCP_TIMEOUT")" = "1" ] && { printf '1'; return 0; }
+    [ "$(watchdog_probe_tcp "$ip" 8899 "$TCP_TIMEOUT")" = "1" ] && { printf '1'; return 0; }
+    [ "$(watchdog_probe_tcp "$ip" 22 "$TCP_TIMEOUT")" = "1" ] && { printf '1'; return 0; }
+    printf '0'; return 0
+  fi
+  watchdog_probe_tcp "$ip" 22 "$TCP_TIMEOUT"
+}
+
+# resolve_version_pin -> the ONE dantesync version pin on stdout (empty if unresolvable). Sourced from
+# dantesync-version-gate.sh in a SUBSHELL (isolates its `set -e`; the gate's source-guard exposes only
+# the pin + pure parser). DANTE_CLOCK_VERSION_PIN overrides (Tier-0). A mismatch is report-only.
+resolve_version_pin() {
+  if [ -n "${DANTE_CLOCK_VERSION_PIN:-}" ]; then printf '%s' "$DANTE_CLOCK_VERSION_PIN"; return 0; fi
+  [ -r "$VERSION_GATE" ] || { printf ''; return 0; }
+  # shellcheck source=scripts/dantesync-version-gate.sh
+  ( . "$VERSION_GATE" >/dev/null 2>&1; printf '%s' "${DANTESYNC_VERSION_PIN:-}" ) 2>/dev/null || printf ''
 }
 
 # -- persisted per-key state (key=value lines) -- verbatim shape from the genlock-lock sibling -----
@@ -246,26 +293,43 @@ confirm_then_alert() {
 }
 
 # -- per-node decision --------------------------------------------------------------------------
-# handle_node <name> <ip> <homegate> <grandmaster_ip>
+# handle_node <name> <ip> <homegate> <grandmaster_ip> <version_pin>
 handle_node() {
-  local name="$1" ip="$2" homegate="$3" gm="$4" body reachable out verdict reason steps
+  local name="$1" ip="$2" homegate="$3" gm="$4" vpin="${5:-}" body reachable out verdict reason steps vnote box_up
 
   if [ "$homegate" = "obsfleet" ] && ! obs_fleet_is_home "$name"; then
     log "$name away (obs_fleet_is_home false) -- traveling box, skipping this pass (no fetch, no page)"
     return 0
   fi
 
-  if body="$(fetch_status_json "$ip")"; then reachable=1; else reachable=0; body=""; fi
+  local -a extra=()
+  if body="$(fetch_status_json "$ip")"; then
+    reachable=1
+  else
+    reachable=0; body=""
+    # :8898 dead this pass -- probe box up-ness so a live box with dead dantesync HTTP pages
+    # NO_DANTESYNC, while a genuinely-down box stays SKIP (defer #1001). #1308.
+    box_up="$(box_up_probe "$name" "$ip" "$homegate")"
+    extra+=(--box-up "${box_up:-0}")
+  fi
+  [ -n "$vpin" ] && extra+=(--version-pin "$vpin")
 
-  out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --grandmaster-ip "$gm" --now "$(now_epoch)" --freshness-s "$FRESHNESS_S" 2>/dev/null)"
+  out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --grandmaster-ip "$gm" --now "$(now_epoch)" --freshness-s "$FRESHNESS_S" "${extra[@]}" 2>/dev/null)"
   verdict="$(printf '%s\n' "$out" | sed -n 's/^verdict=//p')"
   reason="$(printf '%s\n' "$out" | sed -n 's/^reason=//p')"
   steps="$(printf '%s\n' "$out" | sed -n 's/^ntp_steps_last_hour=//p')"
-  log "$name ($ip): reachable=$reachable verdict=${verdict:-<none>} reason=${reason:-}"
+  vnote="$(printf '%s\n' "$out" | sed -n 's/^version_note=//p')"
+  log "$name ($ip): reachable=$reachable verdict=${verdict:-<none>} reason=${reason:-}${vnote:+ ${vnote}}"
+
+  # A version note is report-only text carried on the alert body; build the suffix once.
+  local vnote_txt=""
+  [ -n "$vnote" ] && vnote_txt=" (dantesync ${vnote})"
 
   case "$verdict" in
     SKIP)
-      log "$name :$STATUS_PORT not fetchable this pass -- box/:$STATUS_PORT-down is #1001 territory; holding, no page"
+      log "$name :$STATUS_PORT not fetchable + box not proven up (or up-ness unprobed) -- box/:$STATUS_PORT-down is #1001 territory; holding, no page"
+      # box back / clock ok elsewhere -> clear both fault latches (recovery log-only). SKIP holds
+      # neither, matching the pre-#1308 behavior for the clock latch.
       return 0
       ;;
     UNKNOWN)
@@ -274,6 +338,15 @@ handle_node() {
       ;;
     OK)
       confirm_then_alert "node_${name}" 0 "dante-clock-${name}"
+      confirm_then_alert "http_${name}" 0 "dante-clock-nohttp-${name}"
+      return 0
+      ;;
+    NO_DANTESYNC)
+      # box UP, :8898 dead -> the dantesync daemon crashed/wedged on a live box. Clear any clock-fault
+      # latch (we cannot measure the clock this pass) and page the HTTP-dead fault. #1308.
+      confirm_then_alert "node_${name}" 0 "dante-clock-${name}"
+      confirm_then_alert "http_${name}" 1 "dante-clock-nohttp-${name}" \
+        "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) je HORE, ale dantesync HTTP na :$STATUS_PORT NEODPOVEDÁ -- démon dantesync spadol/zamrzol na živom boxe.${vnote_txt} Bez neho uzol nemá dante clock a pri produkcii to potichu rozhodí A/V aj genlock. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. Náprava: reštartuj dantesync na $name a over :$STATUS_PORT."
       return 0
       ;;
     NO_CLOCK) : ;;
@@ -283,10 +356,13 @@ handle_node() {
       ;;
   esac
 
+  # NO_CLOCK: :8898 answered but the node lost the clock -> clear the HTTP-dead latch (HTTP is alive)
+  # and page the clock fault.
+  confirm_then_alert "http_${name}" 0 "dante-clock-nohttp-${name}"
   local steps_note=""
   [ -n "$steps" ] && [ "$steps" != "null" ] && steps_note=", ${steps} NTP krokov/h"
   confirm_then_alert "node_${name}" 1 "dante-clock-${name}" \
-    "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) STRATIL dante clock -- dôvod **${reason}**${steps_note}. Uzol nie je PTP-zosynchronizovaný na rig grandmaster (${gm:-<neznámy>}); pri produkcii to potichu rozhodí A/V aj genlock celej fleet. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. Náprava: over grandmaster (DNS video-clock.lan / DHCP), dantesync na boxe, gm_allowlist."
+    "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) STRATIL dante clock -- dôvod **${reason}**${steps_note}.${vnote_txt} Uzol nie je PTP-zosynchronizovaný na rig grandmaster (${gm:-<neznámy>}); pri produkcii to potichu rozhodí A/V aj genlock celej fleet. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. Náprava: over grandmaster (DNS video-clock.lan / DHCP), dantesync na boxe, gm_allowlist."
 }
 
 # handle_grandmaster <resolved_ok 0|1> <grandmaster_ip> -> DNS_UNRESOLVABLE + GM_CHANGED global pages.
@@ -366,13 +442,22 @@ main() {
   fi
   handle_grandmaster "$resolved" "$gm"
 
+  # Resolve the ONE dantesync version pin ONCE per pass (#1308, report-only). Empty -> version note
+  # simply omitted; never a page, never a hard failure.
+  local vpin; vpin="$(resolve_version_pin)"
+  if [ -n "$vpin" ]; then
+    log "dantesync version pin: $vpin (report-only; a per-node mismatch is noted in the card, never a page)"
+  else
+    log "dantesync version pin UNRESOLVED (dantesync-version-gate.sh unreadable / DANTE_CLOCK_VERSION_PIN unset) -- version reporting disabled this pass (never a page)"
+  fi
+
   local triple name ip homegate
   while IFS= read -r triple; do
     [ -n "$triple" ] || continue
     name="${triple%%|*}"
     homegate="${triple##*|}"
     ip="${triple#*|}"; ip="${ip%%|*}"
-    handle_node "$name" "$ip" "$homegate" "$gm"
+    handle_node "$name" "$ip" "$homegate" "$gm" "$vpin"
   done < <(build_roster)
   log "pass end"
 }

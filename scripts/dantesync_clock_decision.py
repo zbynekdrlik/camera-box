@@ -60,6 +60,10 @@ V_SKIP = "SKIP"
 V_UNKNOWN = "UNKNOWN"
 V_OK = "OK"
 V_NO_CLOCK = "NO_CLOCK"
+# #1308: box is UP (a cheap TCP probe answered) but :8898 (dantesync HTTP) is dead -- the daemon is
+# down/wedged on a live box, a production-critical page. Distinct from SKIP (box genuinely down ->
+# defer #1001) and from NO_CLOCK (daemon answering but not locked).
+V_NO_DANTESYNC = "NO_DANTESYNC"
 
 # --- reason classes ---------------------------------------------------------------------------
 R_NONE = "none"
@@ -68,6 +72,7 @@ R_WRONG_GM = "wrong_gm"
 R_STORM = "storm"
 R_STALE = "stale"
 R_CLOCK_ALARM = "clock_alarm"
+R_NO_HTTP = "no_dantesync_http"  # #1308: box up, :8898 unreachable
 
 # updated_ts freshness (mirror clock-offset-guard.sh pipe_json_freshness_verdict, #550/#591/#595): a
 # reachable-but-STALE :8898/status (HTTP thread alive, servo/updated_ts frozen) is a silent clock loss
@@ -133,17 +138,31 @@ def _ptp_locked(is_locked, mode):
 
 
 def analyze(status_json_text, box_reachable, grandmaster_ip, now=None, freshness_s=None,
-            clock_alarm_field=CLOCK_ALARM_FIELD):
+            clock_alarm_field=CLOCK_ALARM_FIELD, box_up=None, version_pin=None):
     """One node's verdict from its :8898/status body.
 
     `box_reachable` is 1 iff the orchestrator fetched a 200 JSON body this pass. `grandmaster_ip` is
     the rig grandmaster resolved from video-clock.lan (empty => the gm comparison is skipped, so gm
     never triggers a page -- the DNS_UNRESOLVABLE page is fired by the orchestrator instead). `now`
     (epoch s) + `freshness_s` grade the payload's `updated_ts` age (mirror the E2E gate): a STALE
-    reading is NO_CLOCK. `now` omitted (None) => freshness is not graded (the 3-arg call)."""
+    reading is NO_CLOCK. `now` omitted (None) => freshness is not graded (the 3-arg call).
+
+    `box_up` (#1308) is consulted ONLY when :8898 is unreachable, to discriminate a live box whose
+    dantesync HTTP is dead (box_up == 1 -> NO_DANTESYNC, production-critical page) from a box that is
+    genuinely down (box_up 0/None -> SKIP, defer to the #1001 network-reach watchdog; None = up-ness
+    not probed / probe errored, the false-page-safe direction). `version_pin` (#1308), when set,
+    populates a REPORT-ONLY `version_note` if the daemon's `version` field differs from it -- a version
+    mismatch is surfaced in the card/log text, never a page on its own (a stale-but-locked node still
+    has the clock); an absent `version` field is silent."""
     base = {"verdict": V_SKIP, "reason": None, "is_locked": None, "mode": None,
-            "gm_source_ip": None, "ntp_step_storm": None, "ntp_steps_last_hour": None}
+            "gm_source_ip": None, "ntp_step_storm": None, "ntp_steps_last_hour": None,
+            "version": None, "version_note": None}
     if box_reachable != 1:
+        # :8898 not fetchable this pass. Discriminate a live box with dead dantesync HTTP from a box
+        # that is simply down. Only a PROVEN-up box (box_up == 1) pages NO_DANTESYNC; a down box, or an
+        # unprobed/errored up-ness (None), stays SKIP -- never a false page.
+        if box_up == 1:
+            return {**base, "verdict": V_NO_DANTESYNC, "reason": R_NO_HTTP}
         return base
 
     obj = _loads_obj(status_json_text)
@@ -164,6 +183,12 @@ def analyze(status_json_text, box_reachable, grandmaster_ip, now=None, freshness
         alarm_active = alarm.get("active")
         alarm_reason = alarm.get("reason")
 
+    # Version reporting (#1308): report-only, never a page. Absent field or no pin => silent.
+    version = obj.get("version")
+    version_note = None
+    if version_pin and version is not None and str(version) != str(version_pin):
+        version_note = f"version={version} (pin {version_pin})"
+
     out = {
         "verdict": V_OK, "reason": R_NONE,
         "is_locked": None if is_locked is None else ("true" if is_locked else "false"),
@@ -171,6 +196,8 @@ def analyze(status_json_text, box_reachable, grandmaster_ip, now=None, freshness
         "gm_source_ip": gm or None,
         "ntp_step_storm": None if storm is None else ("true" if storm else "false"),
         "ntp_steps_last_hour": None if steps is None else str(steps),
+        "version": None if version is None else str(version),
+        "version_note": version_note,
     }
 
     ptp = _ptp_locked(is_locked, mode)
@@ -234,6 +261,10 @@ def _main(argv):
     a.add_argument("--grandmaster-ip", default="")
     a.add_argument("--now", type=int, default=None, help="epoch s for updated_ts freshness (omit = skip)")
     a.add_argument("--freshness-s", type=int, default=FRESHNESS_DEFAULT_S)
+    a.add_argument("--box-up", type=int, default=None,
+                   help="#1308: 1/0 box up-ness when :8898 unreachable (omit = not probed -> SKIP)")
+    a.add_argument("--version-pin", default=None,
+                   help="#1308: expected dantesync version; a mismatch is reported, never a page")
 
     d = sub.add_parser("dedup-key", help="time-bucketed --dedup-key for a base + now + interval")
     d.add_argument("--base", required=True)
@@ -248,11 +279,16 @@ def _main(argv):
 
     if ns.cmd == "analyze":
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        res = analyze(text, ns.box_reachable, ns.grandmaster_ip, now=ns.now, freshness_s=ns.freshness_s)
+        res = analyze(text, ns.box_reachable, ns.grandmaster_ip, now=ns.now, freshness_s=ns.freshness_s,
+                      box_up=ns.box_up, version_pin=ns.version_pin)
+        # Stable key ORDER (existing keys first, new #1308 keys appended) so the orchestrator's
+        # `sed -n 's/^KEY=//p'` reads keep working and a new key is purely additive.
         for k in ("verdict", "reason", "is_locked", "mode", "gm_source_ip",
                   "ntp_step_storm", "ntp_steps_last_hour"):
             print(f"{k}={_fmt(res.get(k))}")
         print(f"alarm_reason={_fmt(res.get('alarm_reason'))}")
+        print(f"version={_fmt(res.get('version'))}")
+        print(f"version_note={_fmt(res.get('version_note'))}")
         return 0
 
     if ns.cmd == "dedup-key":
