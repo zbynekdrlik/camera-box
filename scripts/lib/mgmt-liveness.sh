@@ -36,7 +36,14 @@ MGMT_LIVENESS_SSH_PORT="${MGMT_LIVENESS_SSH_PORT:-22}"
 MGMT_LIVENESS_BANNER_TIMEOUT_S="${MGMT_LIVENESS_BANNER_TIMEOUT_S:-5}"
 MGMT_LIVENESS_TIMER_INTERVAL="${MGMT_LIVENESS_TIMER_INTERVAL:-2min}"
 MGMT_LIVENESS_STATE_FILE="/run/camera-box/mgmt-selfcheck.state"
-MGMT_LIVENESS_SELFHEAL_UNITS="ssh remoteos-mcp"                        # restarted (best-effort) on RESTART_ALLOWED
+# restarted (best-effort, in order) on RESTART_ALLOWED. `ssh.socket` FIRST: Ubuntu 24.04 (noble)
+# socket-activates OpenSSH (the cam-box provisioning "noble ssh.socket" gotcha), so the LISTENER is
+# ssh.socket -- `systemctl restart ssh` alone restarts the (possibly inactive) ssh.service and does
+# NOT re-arm a listener-level wedge, i.e. the headline recovery would no-op on exactly the boxes this
+# ticket targets (#1309 review 🟡). Restart the socket to re-arm the listener, then ssh.service (for a
+# non-socket box), then the MCP surface. A unit that does not exist on a given box just logs a
+# harmless failure (the restart loop is `... || log`), so this is correct on BOTH activation models.
+MGMT_LIVENESS_SELFHEAL_UNITS="ssh.socket ssh remoteos-mcp"
 MGMT_LIVENESS_SCRIPT_PATH="/usr/local/sbin/cambox-mgmt-selfcheck.sh"
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + verify-device.sh (aj)
 MGMT_LIVENESS_SERVICE_PATH="/etc/systemd/system/cambox-mgmt-selfcheck.service"
@@ -176,6 +183,10 @@ HEADER
 log() { printf '%s cambox-mgmt-selfcheck %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 # --- read the ssh banner off loopback (fork-free: /dev/tcp + read are bash builtins) --------------
+# NB (#1309 review 🔵): assumes bash was built WITH /dev/tcp net-redirection (the Ubuntu default). A
+# bash built --disable-net-redirections would read every probe as "dead" -> a false restart cycle,
+# but that is bounded by the 3/hour backoff to snapshot-only and does not apply to the fleet's stock
+# Ubuntu bash.
 banner=""
 if timeout "$BANNER_TIMEOUT_S" bash -c '
   exec 3<>/dev/tcp/127.0.0.1/"$0" || exit 1
@@ -199,6 +210,9 @@ case "$prev_consecutive" in *[!0-9]* | '') prev_consecutive=0 ;; esac
 now="$(date +%s)"
 pruned=""
 n_restarts=0
+set -f  # #1309 review 🔵: disable globbing so a stray '*' in the /run state file can never expand
+        # against the filesystem before the numeric guard below rejects it (defensive; state is
+        # root-only /run, so not attacker-writable -- this just removes the surprise).
 for e in $restart_epochs; do
   case "$e" in *[!0-9]* | '') continue ;; esac
   if [ $((now - e)) -lt "$WINDOW_S" ]; then
@@ -206,6 +220,7 @@ for e in $restart_epochs; do
     n_restarts=$((n_restarts + 1))
   fi
 done
+set +f
 
 # --- decide ---------------------------------------------------------------------------------------
 decision="$(mgmt_liveness_decide "$ok" "$prev_consecutive" "$FAIL_THRESHOLD" "$n_restarts" "$MAX_RESTARTS")"

@@ -137,6 +137,19 @@ fn generated_script_probes_loopback_and_restarts_the_selfheal_units() {
         s.contains("ssh remoteos-mcp"),
         "must self-heal both sshd and the remoteos MCP surface: {s}"
     );
+    // #1309 review 🟡: ssh.socket must be restarted FIRST -- on socket-activated (noble) sshd, a
+    // plain `restart ssh` (the service) does not re-arm the LISTENER, so the recovery would no-op on
+    // exactly the target boxes. Pin the socket unit + its ordering before ssh.service.
+    let sock = s
+        .find("ssh.socket")
+        .expect("must restart ssh.socket (socket-activated sshd)");
+    let svc = s
+        .find("ssh remoteos-mcp")
+        .expect("must also restart ssh.service + the MCP");
+    assert!(
+        sock < svc,
+        "ssh.socket (the listener) must be re-armed BEFORE ssh.service: {s}"
+    );
 }
 
 #[test]
