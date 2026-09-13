@@ -11611,3 +11611,53 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
 - **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version bump to
   1.7.0-dev.627. Durability backup on `refs/autopilot-wip/worktree-agent-a7e35bcbdc9225c31`.
 - Items 2 (owner decision: permanent measurement mic) + 3 (rig-status chip) NOT in this lane.
+## #1309 — P0 cambox half-dead after bkshading-relay (re)start (worktree lane, 2026-09-13, base 92ddd5a14, v1.7.0-dev.627)
+
+Owner directive 13.9.: a cambox goes half-dead after a relay (re)start — sshd + remoteos-mcp +
+gphoto2 unreachable while dantesync `:8898` + relay `:8771` stay up and the box pings (cam1 during a
+LIVE production, cam2 after the E2E cleanup). Root cause traced: anything needing a FORK fails while
+already-running processes answer; the healthy-box baseline showed NO relay leak, so "fork exhaustion"
+stays a hypothesis — the one PROVABLE defect is the diagnosis gap (runtime-only journal on a ro-root/
+tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence across 4 sub-deliverables:
+
+- **Persistent journal (step 2):** `scripts/lib/log-diet.sh::log_diet_journald_dropin` now emits
+  `Storage=persistent` + `SystemMaxUse=200M` (keeps the #762 `RuntimeMaxUse=20M`); a NEW
+  `log_diet_journal_persistent_verdict` + `log_diet_journal_fstab_line`. create-usb-linux.sh lays a
+  dedicated ext4 p3 (`LABEL=cambox-journal`, last 512MiB; root sized `-513MiB` so it is NOT last and
+  #369 auto-grow-root skips it) mounted `nofail` at `/var/log/journal`; setup-device.sh STEP 18
+  conditionally mounts it (blkid-guarded, comment on an un-reflashed box). `nofail` = a box without
+  the partition still boots (volatile fallback). verify-device `(ai)` HARD-FAILs a still-volatile
+  journal with a reflash hint. RED→GREEN in verify_device_pure_functions.rs.
+- **On-box mgmt self-heal (step 4a):** NEW `scripts/lib/mgmt-liveness.sh` — pure banner classifier +
+  MGMT_OK/MGMT_DEAD/RESTART_ALLOWED/BACKOFF decision + forensic snapshot text + generated
+  self-contained on-box script (EMBEDS the pure fns via `declare -f`, one source of truth, no repo-lib
+  on the box). A `cambox-mgmt-selfcheck.timer` (every 2 min) reads sshd's loopback `SSH-` banner
+  (fork-free /dev/tcp) and, after N=3 consecutive dead reads, dumps the snapshot to the (now
+  persistent) journal then restarts ssh+remoteos-mcp with a 3/hour backoff. setup-device.sh installs
+  it enable-only (unnumbered block before STEP 18, the remoteos-mcp precedent); verify-device `(aj)`
+  HARD-FAILs if missing/not-enabled. RED→GREEN in harness_mgmt_liveness_1309.rs.
+- **dev1 MGMT_DEAD page (step 4b):** `dantesync_clock_decision.py` gained `V_MGMT_DEAD`/`R_SSH_DEAD`
+  on a NEW orthogonal axis (`mgmt_ssh_ok`, default None = every prior verdict/test byte-identical);
+  `analyze` wraps the renamed `_analyze_clock` — `:8898` reachable + ssh banner dead (mgmt_ssh_ok=0)
+  → MGMT_DEAD, carrying the clock verdict as context, taking precedence over the clock axis.
+  `watchdog-tcp-probe.sh` gained `watchdog_probe_ssh_banner` (reads the banner, discriminates a
+  kex-reset from a plain accept). `dantesync-clock-alert-watchdog.sh` probes the banner for CAM
+  nodes only, feeds `--mgmt-ssh-ok`, pages via a `dante-clock-<box>-mgmt` bucketed key reusing the
+  2-pass confirm. RED→GREEN in the 1307 pytest (44 pass).
+- **Relay blast-radius (step 3):** `systemd/bkshading-relay.service` `TasksMax=512` — a real ceiling
+  above the measured 5 / normal peak <10 but below pid_max, so a relay runaway cannot starve sshd's
+  forks. `Restart=on-failure`+`RestartSec=5` already present (issue 1228); `.output()` already
+  waits+reaps every gphoto2 (no zombie), so NO per-invocation timeout added (evidence-first; that is
+  the separate #1229 polling ticket). Test in test_bkshading_relay_provision_808.py.
+
+- **Tier-0 (worktree lane):** 2 pytest files green (44 dante-clock + 16 relay-provision); `bash -n`
+  + `shellcheck -S warning` clean on every touched `.sh` + the generated on-box script; the pure
+  bash fns exercised via scratch drivers (banner/decide/verdict/fstab-line); `cargo fmt --all
+  --check` clean; occurrence-count anchor sweep clean (the ` ext4 `/`absent`/`journalctl`/`reasons`
+  1→2 flags are all `.contains()` checks or my own comments, no positional `.find()` collision).
+  NOT runnable in a worktree lane (supervisor runs at integration): the sourced-lib Rust harnesses
+  (`harness_mgmt_liveness_1309`, the verify/setup provisioner tests) + a stubbed `--dry-run` of the
+  dante watchdog's new `--mgmt-ssh-ok` path.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord; NEVER probed the wedged
+  cam2. Version bumped 1.7.0-dev.627. Durability backup on
+  `refs/autopilot-wip/worktree-agent-af4cfff39ce542684`.
