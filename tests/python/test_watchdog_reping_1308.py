@@ -106,11 +106,14 @@ def test_dante_delegates_to_the_shared_twin():
 
 
 def test_dante_dedup_key_is_the_shared_function_object():
-    # the delegation must be a true reuse, not a copy-pasted body -- pin that dante's dedup_key/
-    # reping_interval resolve INTO watchdog_reping (a re-implemented copy would drift).
+    # the delegation must be a true reuse, not a copy-pasted body -- pin that dante's reping_interval
+    # / dedup_key ARE the shared twin's function objects (a re-implemented copy would drift). Compare
+    # against dante's OWN imported `_reping` (its module graph), not a separately importlib-exec'd
+    # instance -- two exec's of the same file yield distinct function objects, so the identity must be
+    # taken within one graph.
     dc = _dante()
-    r = _reping()
-    assert dc.reping_interval is r.reping_interval
+    assert dc.reping_interval is dc._reping.reping_interval
+    assert dc.dedup_key is dc._reping.notify_key
 
 
 # --------------------------------------------------------------------- python CLI mirror

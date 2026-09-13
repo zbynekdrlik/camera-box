@@ -44,7 +44,16 @@ Per-node verdicts (analyze):
 """
 import argparse
 import json
+import os
 import sys
+
+# The re-ping cadence + key builder live in the ONE shared scripts/watchdog_reping.py twin (#1308) --
+# this module delegates to it so there is a SINGLE implementation across every production-critical
+# watchdog, never a second copy. The path insert makes `import watchdog_reping` resolve whether this
+# file is run as a script (sys.path[0] = scripts/) OR exec'd via importlib in pytest (scripts/ absent
+# from sys.path) -- __file__ is the real path in both cases.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import watchdog_reping as _reping  # noqa: E402
 
 # --- verdicts ---------------------------------------------------------------------------------
 V_SKIP = "SKIP"
@@ -75,9 +84,10 @@ MODES_LOCKED = ("NANO", "LOCK")
 CLOCK_ALARM_FIELD = "clock_alarm"
 
 # Time-bucketed re-ping cadence (owner ruling #1307). Default 600s (10 min); floored at 60s so a
-# mis-set interval can never become a per-pass phone flood.
-REPING_INTERVAL_DEFAULT_S = 600
-REPING_INTERVAL_FLOOR_S = 60
+# mis-set interval can never become a per-pass phone flood. Re-exported from the shared twin (#1308)
+# so this module keeps the names while there is ONE source of truth.
+REPING_INTERVAL_DEFAULT_S = _reping.REPING_INTERVAL_DEFAULT_S
+REPING_INTERVAL_FLOOR_S = _reping.REPING_INTERVAL_FLOOR_S
 
 
 def _loads_obj(text):
@@ -198,28 +208,11 @@ def analyze(status_json_text, box_reachable, grandmaster_ip, now=None, freshness
     return out
 
 
-def reping_interval(interval_s):
-    """The effective re-ping bucket size in seconds: the given value, clamped to >= the 60s floor;
-    a non-numeric value falls back to the 600s default (never a crash, never a per-pass flood)."""
-    try:
-        iv = int(interval_s)
-    except (ValueError, TypeError):
-        return REPING_INTERVAL_DEFAULT_S
-    return iv if iv >= REPING_INTERVAL_FLOOR_S else REPING_INTERVAL_FLOOR_S
-
-
-def dedup_key(base, now, interval_s):
-    """The TIME-BUCKETED airuleset --dedup-key (owner ruling #1307): base-<floor(now/interval)>.
-
-    Same state within one interval -> same key (airuleset edits the card, no re-ping); the next
-    interval -> a new key (a fresh ping while the fault persists). `now` is injected so the cadence
-    is deterministic + unit-tested."""
-    iv = reping_interval(interval_s)
-    try:
-        bucket = int(now) // iv
-    except (ValueError, TypeError):
-        bucket = 0
-    return f"{base}-{bucket}"
+# reping_interval / dedup_key delegate to the shared scripts/watchdog_reping.py twin (#1308) -- NOT
+# a second implementation. `reping_interval` IS the shared function object (so a `is` identity test
+# pins the delegation); `dedup_key` is the shared `notify_key` under its historical #1307 name.
+reping_interval = _reping.reping_interval
+dedup_key = _reping.notify_key
 
 
 def grandmaster_change(prev_ip, cur_ip):
