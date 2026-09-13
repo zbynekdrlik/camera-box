@@ -160,9 +160,22 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
 }
 
 # The bucketing markers an inline --dedup-key carries when it time-buckets: the shared bash helper
-# call, its python-CLI form, or a raw timestamp. Any of these in a notify --body line's key means the
-# key rotates by time -- allowed ONLY for the allowlisted class above.
+# call, its python-CLI form, or a raw timestamp. Any of these in the --dedup-key VALUE means the key
+# rotates by time -- allowed ONLY for the allowlisted class above. Scanned against the KEY SEGMENT
+# (everything from `--dedup-key` to end of the logical line), NOT the whole line, so a legitimate
+# `$(date ...)` in a notify BODY (a timestamp in the message text) never false-positives (#1308 review).
 _BUCKET_MARKERS = ("watchdog_notify_key", "watchdog_reping", "dedup-key --now", "$(date")
+
+
+def _dedup_key_segment(ln):
+    """The `--dedup-key ...` portion of a notify logical line (bash `--dedup-key` or py `"--dedup-key"`),
+    or "" if the line has no dedup-key. Isolates the KEY from the BODY so a marker scan only judges the
+    key's value, never the message text."""
+    for tok in ("--dedup-key", '"--dedup-key"'):
+        i = ln.find(tok)
+        if i != -1:
+            return ln[i:]
+    return ""
 
 
 def test_production_critical_watchdogs_are_swept_and_carry_a_key():
@@ -187,8 +200,9 @@ def test_only_allowlisted_watchdogs_time_bucket_their_key():
         if p.name in _PRODUCTION_CRITICAL_TIME_BUCKETED:
             continue
         for ln in _notify_body_logical_lines(p):
+            seg = _dedup_key_segment(ln)
             for marker in _BUCKET_MARKERS:
-                if marker in ln:
+                if marker in seg:
                     offenders.append(f"{p.relative_to(_ROOT)}: [{marker}] {ln.strip()[:140]}")
     assert not offenders, (
         "#1308: these NON-production-critical notify call-sites time-bucket their --dedup-key "

@@ -116,6 +116,11 @@ obs_watchdog_clear_hysteresis() {
 #     - floored at 60 s: a smaller value (incl. a negative, matching int()'s clamp) is CLAMPED to 60,
 #       so a mis-set interval can never become a per-pass phone flood (warned once per shell).
 #   Delivery-layer only: it builds a key, it never decides whether a fault exists.
+#   PARITY CONTRACT DOMAIN (#1308 review): byte-identical to watchdog_reping.notify_key over the
+#   PRODUCTION-reachable inputs -- `now` is always a positive `date +%s` epoch, `interval` a clean
+#   int. A negative/whitespace `now` (never emitted here) can diverge from python's floor-division
+#   (bash `$(( ))` truncates toward zero) and is out of contract, not a bug; the parity pytest covers
+#   the whole production domain.
 watchdog_notify_key() {
   local base="${1:-}" now="${2:-0}" interval="${3:-${REPING_INTERVAL_S:-600}}"
   local floor=60 default=600 iv_digits
