@@ -211,3 +211,35 @@ window cannot read as "flat" (`:47`).
 | Receiver gate | `genlock_is_wallclock_ts` epoch bounds | `vendor/obs-studio/libobs/obs-source.c:4735-4741` |
 | Receiver gate | `present_ts = wall_now − latency_ms`, floor 3 ms / ≤ 2000 ms | `vendor/obs-studio/libobs/obs-source.c:230,292,4594,4906` |
 | Receiver gate | weak count gate (~300 ms spread) when stamp is not wall-clock | `vendor/obs-studio/libobs/obs-source.c:4673,4715-4726` |
+
+## Per-box forced-table audit — audio + colour (#1303 part 4)
+
+The receiver's DistroAV fork forces a certified `GENLOCK_FORCED_SETTINGS` table on every NDI input
+at every `ndi_source_update` (`vendor/distroav/src/ndi-source.cpp`). Those values were read off a
+CAMERA input on strih (where audio is irrelevant), so `ndi_audio` was forced `false` fleet-wide.
+On a box whose NDI inputs carry PROGRAM audio (the cg OBS on RESOLUME-SNV, whose `sp-*_video`
+inputs carry SongPlayer audio+video) that certified `false` silently disabled program audio and
+only surfaced on air (2026-09-13 event morning). `43de2f16f` moved `PROP_AUDIO` back to the
+per-source whitelist (stock default true), so the audio knob is operator-visible again — but a
+genlock build onboarded onto a NEW box needs its forced table reviewed against THAT box's sources
+BEFORE the swap, because the certified values were derived from camera inputs only.
+
+The per-box-class AUDIO expectation (the canonical table is
+`src/genlock_forced_table_audit.rs`; the deploy-preflight bash replica is
+`scripts/lib/genlock-forced-table-audit.sh`, pinned byte-for-byte by
+`tests/genlock_forced_table_audit_1303.rs`):
+
+| Box class | Role | Camera inputs (`CAM* (usb)`) | Program / music / SongPlayer inputs (`sp-*`, `cg`, `NDI 2ME PGM`, `mbc`, `NDI obs hudba`, `NDIAr *`, `VBAN *`) | Unknown-name default |
+|---|---|---|---|---|
+| strih | camera switcher | `ndi_audio=false` (expected-silent) | `ndi_audio=true` (expected-audio: the `cg` program input) | silent |
+| stream | program encoder | expected-silent | expected-audio (`NDI 2ME PGM` program + `mbc` / music) | silent |
+| imag | 60fps projection | expected-silent | expected-audio | silent |
+| resolume | cg OBS | expected-silent | expected-audio (SongPlayer `sp-*`, `NDIAr`, `VBAN`) | audio |
+
+A MISMATCH is either an expected-audio source with `ndi_audio=false` (the #1303 live defect: silent
+program audio) or an expected-silent camera source with `ndi_audio=true` (audio bleeding into the
+camera chain). A program source with a forced `yuv_range=partial` gets a report-only advisory (a
+full-range sender then colour-shifts — the owner's "distorted picture" secondary symptom). The
+audit is REPORT-ONLY: `scripts/deploy-genlock-fleet.sh` prints it BEFORE the swap (never a write,
+never a gate) so the operator sets `ndi_audio`/`yuv_*` per source over OBS-WS before deploying; it
+never blocks the deploy.
