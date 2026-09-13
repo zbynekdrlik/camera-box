@@ -404,6 +404,25 @@ jobs:
           cargo build --release --bins -p bkshading-relay
           cargo build --release --features ndi --bins -p bkshading
 
+      # issue 1304: real-browser E2E of the operator panel +/- step buttons. Runs the JUST-BUILT
+      # service (above) against a stdlib stub relay (bkshading/service/tests/stub_relay.py) and
+      # drives the panel with Playwright (chromium only, one spec — small CI budget). Playwright's
+      # webServer manages BOTH the stub and the service and tears them down.
+      - name: Setup Node (bkshading panel E2E, issue 1304)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright chromium (bkshading panel E2E, issue 1304)
+        working-directory: bkshading/service/tests/e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: bkshading panel +/- step buttons E2E (issue 1304)
+        working-directory: bkshading/service/tests/e2e
+        env:
+          BKSHADING_BIN: ${{ github.workspace }}/target/release/bkshading
+        run: npx playwright test
+
       # Upload the deployable relay + service binaries (issue 808 M3), mirroring the appliance's
       # camera-box-linux-amd64 / probe-tools-linux-amd64 upload pattern. scripts/bkshading-deploy-relay.sh
       # downloads bkshading-relay from this artifact and places it on a cambox (/usr/local/bin).
