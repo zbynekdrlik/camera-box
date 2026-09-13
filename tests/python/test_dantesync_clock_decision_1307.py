@@ -309,3 +309,55 @@ def test_version_note_present_even_on_no_clock():
                    version_pin="1.8.53")
     assert r["verdict"] == "NO_CLOCK", r
     assert r["version_note"] is not None
+
+
+# ------------------------------------------------------------------ MGMT_DEAD (#1309)
+# The 13.9. P0 wedge: a cambox goes half-dead after a bkshading-relay (re)start -- dantesync :8898
+# keeps answering (already-running process) but the ssh MANAGEMENT banner is dead (kex reset /
+# timeout: anything that needs a fork fails). The dev1 watchdog probes the ssh banner and passes
+# mgmt_ssh_ok; a :8898-reachable box with a dead banner is MGMT_DEAD (production-critical page), a
+# NEW axis orthogonal to the clock verdict. mgmt_ssh_ok defaults to None so every pre-#1309 call is
+# unchanged.
+def test_mgmt_dead_when_8898_reachable_but_ssh_banner_dead():
+    r = dc.analyze(_status(), 1, GM, mgmt_ssh_ok=0)
+    assert r["verdict"] == "MGMT_DEAD", r
+    assert r["reason"] == dc.R_SSH_DEAD
+
+
+def test_mgmt_dead_verdict_and_reason_constants_exist():
+    assert dc.V_MGMT_DEAD == "MGMT_DEAD"
+    assert isinstance(dc.R_SSH_DEAD, str) and dc.R_SSH_DEAD
+
+
+def test_mgmt_dead_takes_precedence_over_a_lost_clock():
+    # even when the clock is ALSO lost, an unmanageable box is the salient P0 -- MGMT_DEAD wins, and
+    # the underlying clock verdict is carried as context.
+    r = dc.analyze(_status(is_locked="false", mode="ACQ"), 1, GM, mgmt_ssh_ok=0)
+    assert r["verdict"] == "MGMT_DEAD", r
+    assert r["clock_verdict"] == "NO_CLOCK", r
+
+
+def test_mgmt_ssh_ok_true_never_overrides_the_clock_verdict():
+    assert dc.analyze(_status(), 1, GM, mgmt_ssh_ok=1)["verdict"] == "OK"
+    assert dc.analyze(_status(is_locked="false", mode="ACQ"), 1, GM,
+                      mgmt_ssh_ok=1)["verdict"] == "NO_CLOCK"
+
+
+def test_mgmt_ssh_none_is_backward_compatible():
+    # not probed (default None) -> the pre-#1309 clock verdict, byte-for-byte.
+    assert dc.analyze(_status(), 1, GM)["verdict"] == "OK"
+    assert dc.analyze(_status(), 1, GM, mgmt_ssh_ok=None)["verdict"] == "OK"
+
+
+def test_mgmt_dead_not_fired_when_8898_unreachable():
+    # ssh dead on a box whose :8898 is ALSO dead is NOT MGMT_DEAD: that is SKIP (box down, #1001) or
+    # NO_DANTESYNC (box up, :8898 dead) -- the mgmt axis is consulted ONLY when :8898 answered.
+    assert dc.analyze("", 0, GM, box_up=0, mgmt_ssh_ok=0)["verdict"] == "SKIP"
+    assert dc.analyze("", 0, GM, box_up=1, mgmt_ssh_ok=0)["verdict"] == "NO_DANTESYNC"
+
+
+def test_mgmt_dead_even_when_body_unparseable():
+    # :8898 answered a non-JSON body (UNKNOWN clock) but ssh banner dead -> still MGMT_DEAD.
+    r = dc.analyze("not json", 1, GM, mgmt_ssh_ok=0)
+    assert r["verdict"] == "MGMT_DEAD", r
+    assert r["clock_verdict"] == "UNKNOWN", r
