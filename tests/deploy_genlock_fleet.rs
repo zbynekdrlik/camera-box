@@ -1000,6 +1000,58 @@ fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
     );
 }
 
+// issue 1295 — a saved .ps1 of the --plan output is PARSED whole in file mode, so the plan must end
+// on a clean `exit 0` and must NOT trail a bare (non-comment) tab-separated fleet-log record after
+// the last box program's exit 0 (owner incident: "At C:\deploy2.ps1:170").
+#[test]
+fn plan_last_nonempty_line_is_exit_0_and_no_bare_log_record_1295() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stage = tmp.path();
+    for boxes in ["resolume", "strih,imag"] {
+        let (code, out, err) = run_script(&[
+            "--plan",
+            "--run-id",
+            "RUN123",
+            "--sha",
+            "abcdef1234",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--boxes",
+            boxes,
+            "--full",
+        ]);
+        assert_eq!(
+            code, 0,
+            "--plan {boxes} must succeed.\nstdout={out}\nstderr={err}"
+        );
+        let last = out
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .expect("plan has content");
+        assert_eq!(
+            last.trim(),
+            "exit 0",
+            "the plan's last non-empty line must be `exit 0` for {boxes}:\n...{}",
+            &out[out.len().saturating_sub(400)..]
+        );
+        // the fleet-log record (a tab-separated line) must be COMMENTED — no bare record survives.
+        for line in out.lines() {
+            if line.contains('\t') {
+                assert!(
+                    line.trim_start().starts_with('#'),
+                    "a tab-separated fleet-log record must be a #-comment (file-mode PS parse), got: {line:?}"
+                );
+            }
+        }
+        // the record itself is still present (run id + sha), just commented.
+        assert!(
+            out.contains("RUN123") && out.contains("abcdef1234"),
+            "the fleet-log record stays visible:\n{out}"
+        );
+    }
+}
+
 #[test]
 fn usage_errors_exit_two() {
     // --fast and --full are mutually exclusive
