@@ -2,6 +2,46 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-09-13 — #1303 part 3b (LOCK-indicator audio DEGRADE term) — worktree worktree-agent-a4cfdaa804a08e476, base e2d651bc3
+
+- **Scope:** surface the audio-parity health (landed in 3a as `genlock_audio_pairing::decide_audio_health`,
+  consumed by nothing but its own parity test) as a DEGRADE term in the in-OBS GENLOCK LOCK
+  indicator. Parts 1/2/3a/5 already on dev; 3b + part 4 (per-box certified-table audit) were the
+  deferred followups in the prior lane's LANE-RETURN.
+- **Design (additive, aggregate-bool):** `GenlockFacets` (Rust `src/genlock_lock_state.rs` + C
+  `genlock_lock_facets_t` in `GenlockLockState.hpp`) gains a bool `audio_unpaired`; `LockReason`
+  gains `AudioPairing = 9`; `decide`/`genlock_decide_lock_state` gains a lowest-precedence DEGRADED
+  branch. The widget (`OBSBasicStatusBar.cpp`) computes it per source from the v2 stats
+  (`version>=2 && audio_enabled && |audio_pairing_offset_ms| > GENLOCK_AUDIO_PAIRING_BOUND_MS`, 33 ms)
+  — the exact twin of the existing qpc-drift reduction. This is the ONLY parity-safe shape: the C
+  `genlock_decide_lock_state` is lifted+cc-compiled STANDALONE by the parity gate, so it cannot call
+  the obs-source.c `genlock_audio_decide_health` static-inline, and duplicating that decision into
+  the header would be a lock-step hazard. Chose it over (2) threading full AudioPairingFacets into
+  `decide` (forces C duplication) and (3) a decided u8 health code in `obs_genlock_stats` (needs
+  is-program-source/asrc data not in the fill path).
+- **Scope-line vs issue-body reconciliation:** the dispatch scope narrows the degrade to
+  "audio-enabled + pairing-offset breach; audio disabled/absent NEVER degrades" — deliberately
+  EXCLUDING `decide_audio_health`'s AudioDisabledOnProgram + AsrcSaturated branches (they need
+  is-program-source / asrc-ppm data the v2 stats do not carry). Followed the scope line; recorded
+  the excluded branches as a followup in `genlock-audio-pairing.md`.
+- **RED→GREEN:** pure module 20/20 (standalone rustc); removing the branch fails
+  `audio_unpaired_is_degraded_audio` (RED proven). C↔Rust parity replica: 2560 vectors, 0
+  divergence, 12 exercise the audio branch, C clean under `cc -Wall -Wextra -Werror`. Guards 8/8
+  (standalone rustc). g++ `-Wconversion -Wsign-compare -Werror` on the header + a widget-snippet
+  replica. pwsh + preload anchors simulated matching the squish. `cargo fmt --all --check` clean.
+- **OVERLAP-BYPASS:** edits to the 3 files flagged as overlapping release PR #1293
+  (`src/genlock_lock_state.rs` + both `windows-genlock*.yml`) are STRICTLY additive (appended
+  field/variant/branch/anchors; the trailing `Write-Output` on both yml left byte-identical) →
+  clean rebase after #1293.
+- **Review:** fresh-context model-less pass → 0 R / 0 Y / 2 B. 🔵-2 (stale precedence list in the C
+  header doc comment) FIXED in-lane (81ec49ad0). 🔵-1 (fixed 33 ms bound vs per-source frame
+  interval) dropped-with-reason: DEGRADE-only conservative, needs a v3 stats bump = followup.
+- **Commits:** 96f89bd09 (the term + tests + gates + rule updates) → 81ec49ad0 (review fix). No
+  version bump (dev already > main; lane protocol). wip backup at
+  `refs/autopilot-wip/worktree-agent-a4cfdaa804a08e476`.
+- **UNVERIFIED (post-merge supervisor rig step):** the live three-state screenshot + DEGRADED-on-
+  program-audio-off acceptance (needs the full-bundle frontend deploy; CI is the first C++/Qt compile).
+
 ## 2026-09-01 — #1258 ([4c/8] frozen-camera-gate received= tap blind) — worktree worktree-agent-a79df4cf5f0b599a0, base eb52b62af
 
 - **Root cause: the `received=` tap read strih's OBS log with a NAIVE triple-quoted

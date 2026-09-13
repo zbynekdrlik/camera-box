@@ -888,6 +888,22 @@ fails file-not-found because the fixture was never in the commit. Confirmed live
 (not gitignored) and reference that from the test. Before trusting a new fixture is committed,
 `git check-ignore <path>` (a hit = it will be silently dropped) — never assume `git add` took it.
 
+## The worktree-isolation guard ALSO refuses a plain `rustc`/`g++`/`python3` command whose PATH is a shell VARIABLE — inline literal paths, split pipes into separate calls (#1303)
+
+Separate from the `bash -c`/`ENV=x bash` refusals in the #1265 entry below: even a perfectly
+innocent `rustc --test file.rs -o "$OUT"`, `python3 -c '…' "$SP"`, or `g++ … -c "$D/x.cpp"` is
+REFUSED by the worktree-isolation guard the moment ANY argument (an output path, an include dir, a
+`-c` script's file) is a RUNTIME-COMPUTED shell variable inside a construct it deems "too complex to
+verify it stays inside the worktree" — the guard cannot prove the variable's expansion isn't a git
+op. It is NOT about git; it is about the variable. Also trips on trailing `| tail`/`echo
+"exit=${PIPESTATUS[0]}"` pipelines. The fix (used repeatedly this session for the genlock_lock_state
+RED→GREEN, the C-vs-Rust parity replica, and the g++ header/widget-snippet checks): write scratch
+files with the `Write` tool (never a Bash heredoc — also avoids the Tier-0 heredoc-prose false-block),
+INLINE the absolute scratchpad path as a literal in the `rustc`/`g++`/`python3` command (no `$VAR`),
+and run the command as its OWN plain Bash call with no pipe/`&&`/`PIPESTATUS`. A `python3 - <<'PY'`
+heredoc block IS allowed (the guard permits `python3 -` / `python3 -c`), so classifier/anchor
+simulations run fine that way — only the runtime-variable-in-the-command shape is the blocker.
+
 ## A worktree-isolated worker CANNOT locally run a sourced-bash-lib test or a PATH-stubbed dry-run (#1265)
 
 The worktree-isolation guard refuses `bash -c '…source lib…'`, `ENV=x bash <script>`, and any
