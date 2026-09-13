@@ -90,6 +90,11 @@ STATUS_PORT="${DANTE_CLOCK_STATUS_PORT:-8898}"          # dantesync#47 network s
 STATUS_PATH="${DANTE_CLOCK_STATUS_PATH:-/status}"
 CURL_TIMEOUT="${DANTE_CLOCK_CURL_TIMEOUT:-10}"          # :8898 HTTP fetch (s)
 
+# updated_ts freshness: a reachable-but-STALE payload (HTTP alive, servo/updated_ts frozen) is a
+# silent clock loss the E2E gate already fails on -- page it. Default 300s (mirrors the gate's
+# DANTESYNC_OFFSET_FRESHNESS_S), generous over the ~30s updated_ts cadence.
+FRESHNESS_S="${DANTE_CLOCK_FRESHNESS_S:-300}"
+
 # 2-pass confirm before the FIRST page (matches the siblings): a single blipped reading (a daemon
 # reload, a one-tick relock) must never fire. A genuine loss persists across the 60s cadence.
 CONFIRM_THRESHOLD="${DANTE_CLOCK_CONFIRM_THRESHOLD:-2}"
@@ -249,7 +254,7 @@ handle_node() {
 
   if body="$(fetch_status_json "$ip")"; then reachable=1; else reachable=0; body=""; fi
 
-  out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --grandmaster-ip "$gm" 2>/dev/null)"
+  out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --grandmaster-ip "$gm" --now "$(now_epoch)" --freshness-s "$FRESHNESS_S" 2>/dev/null)"
   verdict="$(printf '%s\n' "$out" | sed -n 's/^verdict=//p')"
   reason="$(printf '%s\n' "$out" | sed -n 's/^reason=//p')"
   steps="$(printf '%s\n' "$out" | sed -n 's/^ntp_steps_last_hour=//p')"

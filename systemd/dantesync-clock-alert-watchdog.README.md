@@ -30,6 +30,7 @@ endpoint, the SAME signal the E2E gate `scripts/dantesync-gate.sh` grades), with
 | node reachable but not PTP-locked | `not_locked` | `is_locked` false OR `mode` ∉ {NANO, LOCK} |
 | node locked to a **foreign** grandmaster | `wrong_gm` | `gm_source_ip` present and ≠ the resolved grandmaster (#834 class) |
 | node in an NTP **step-storm** | `storm` | dantesync's own `ntp_step_storm=true` (its 120/h alarm — NOT a re-hardcoded camera-box literal); `ntp_steps_last_hour` carried in the reason |
+| node payload **STALE** | `stale` | `updated_ts` older than `DANTE_CLOCK_FRESHNESS_S` (default 300 s) — a wedged dantesync (HTTP alive, servo frozen) serving a stuck `is_locked:true`; the E2E gate fails this too. Absent `updated_ts` never pages |
 | dantesync#114 clock alarm | `clock_alarm` | forward-compat: `clock_alarm.active` is authoritative when present; the derived checks fold in as the cross-check |
 | grandmaster DNS won't resolve | `dante-clock-dns` | `rig_grandmaster_ip` fails on `video-clock.lan` — the exact silent-failure class the owner banned |
 | grandmaster IP **moved** between passes | `dante-clock-gm-change` | persisted last IP → a change pages "A → B" (today's „ip sa zmenila"), even if every node follows it |
@@ -104,6 +105,7 @@ none are declared here — the sibling units carry none either.
 |---|---|---|
 | `DANTE_CLOCK_REPING_INTERVAL_S` | `600` | re-ping bucket size (s); floored at 60 in the pure module |
 | `DANTE_CLOCK_CONFIRM_THRESHOLD` | `2` | consecutive fault readings before the first page |
+| `DANTE_CLOCK_FRESHNESS_S` | `300` | `updated_ts` age (s) above which a payload is STALE (mirrors the gate) |
 | `DANTE_CLOCK_CAM_NODES` | `cam1 … cam7` | cam names to watch (resolved via camera-set.sh) |
 | `DANTE_CLOCK_OBS_NODES` | `strih stream imag resolume` | OBS-box names (resolved via obs-fleet.sh) |
 | `DANTE_CLOCK_NODES` | *(unset)* | full `name\|ip[\|homegate]` roster override (wins over the two above) |

@@ -35,8 +35,16 @@ production-critical watchdog class (umbrella **#1308**).
   `ntp_steps_last_hour` in the reason text only. Never introduce a `> 120` literal here.
 - **The grading MIRRORS `clock-offset-guard.sh`'s field semantics** (`ptp_locked_from_pipe_json`:
   `is_locked` + `mode` in {NANO,LOCK}; `gm_matches_expected`: `gm_source_ip` == the grandmaster;
-  `ntp_master_step_storm_verdict`). Keep the field NAMES identical to the `:8898/status` schema so it
-  can never disagree with the E2E gate; a schema change updates both sides.
+  `ntp_master_step_storm_verdict`; AND `pipe_json_freshness_verdict`: `updated_ts` age). Keep the
+  field NAMES identical to the `:8898/status` schema so it can never disagree with the E2E gate; a
+  schema change updates both sides.
+- **`updated_ts` FRESHNESS is graded (`reason=stale`), not just the instantaneous fields.** A wedged
+  dantesync (HTTP thread alive, servo/`updated_ts` frozen) serving a stuck `is_locked:true` is a
+  SILENT clock loss the E2E gate already fails on — so the watchdog pages it too. `DANTE_CLOCK_FRESHNESS_S`
+  default 300 s (mirrors the gate's `DANTESYNC_OFFSET_FRESHNESS_S`), generous over the ~30 s
+  `updated_ts` cadence. An ABSENT `updated_ts` (or `now` not passed) → freshness not graded (never a
+  false stale page); only a PRESENT-and-old `updated_ts` fires. `now` is injected (`DANTE_CLOCK_NOW`)
+  so the check is deterministic + unit-tested.
 - **gm identity is report-first (false-page-safe).** Page `wrong_gm` ONLY on a PRESENT-and-different
   `gm_source_ip` (the #834 foreign-master case). A gm that is simply ABSENT while the node is
   otherwise locked is OK — mirrors the gate's `DANTESYNC_GATE_GM_ENFORCE=0` default; a genuinely lost

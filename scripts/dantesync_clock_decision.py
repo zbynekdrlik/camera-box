@@ -57,7 +57,15 @@ R_NONE = "none"
 R_NOT_LOCKED = "not_locked"
 R_WRONG_GM = "wrong_gm"
 R_STORM = "storm"
+R_STALE = "stale"
 R_CLOCK_ALARM = "clock_alarm"
+
+# updated_ts freshness (mirror clock-offset-guard.sh pipe_json_freshness_verdict, #550/#591/#595): a
+# reachable-but-STALE :8898/status (HTTP thread alive, servo/updated_ts frozen) is a silent clock loss
+# the E2E gate already fails on, so this watchdog pages it too. Default 300s (the gate's
+# DANTESYNC_OFFSET_FRESHNESS_S default) -- generous over the ~30s updated_ts cadence, so only a genuine
+# freeze trips it.
+FRESHNESS_DEFAULT_S = 300
 
 # The :8898/status modes that count as PTP-locked (mirror clock-offset-guard.sh ptp_locked_from_pipe_json).
 MODES_LOCKED = ("NANO", "LOCK")
@@ -84,6 +92,25 @@ def _loads_obj(text):
     return obj if isinstance(obj, dict) else None
 
 
+def _is_stale(updated_ts, now, freshness_s):
+    """Mirror clock-offset-guard.sh pipe_json_freshness_verdict:
+      None  -- cannot judge (updated_ts absent, or now/freshness not usable ints) -> never a stale
+               page (false-page-safe; falls through to the lock/gm/storm checks)
+      True  -- |now - updated_ts| exceeds freshness_s (a frozen HTTP payload)
+      False -- within freshness_s (fresh)
+    """
+    if updated_ts is None or now is None:
+        return None
+    try:
+        delta = abs(int(now) - int(updated_ts))
+        fresh = int(freshness_s) if freshness_s is not None else FRESHNESS_DEFAULT_S
+    except (ValueError, TypeError):
+        return None
+    if fresh < 0:
+        return None
+    return delta > fresh
+
+
 def _ptp_locked(is_locked, mode):
     """Mirror clock-offset-guard.sh ptp_locked_from_pipe_json:
       None   -- neither is_locked nor mode readable (UNKNOWN; nothing to judge)
@@ -95,12 +122,15 @@ def _ptp_locked(is_locked, mode):
     return is_locked is True and mode in MODES_LOCKED
 
 
-def analyze(status_json_text, box_reachable, grandmaster_ip, clock_alarm_field=CLOCK_ALARM_FIELD):
+def analyze(status_json_text, box_reachable, grandmaster_ip, now=None, freshness_s=None,
+            clock_alarm_field=CLOCK_ALARM_FIELD):
     """One node's verdict from its :8898/status body.
 
     `box_reachable` is 1 iff the orchestrator fetched a 200 JSON body this pass. `grandmaster_ip` is
     the rig grandmaster resolved from video-clock.lan (empty => the gm comparison is skipped, so gm
-    never triggers a page -- the DNS_UNRESOLVABLE page is fired by the orchestrator instead)."""
+    never triggers a page -- the DNS_UNRESOLVABLE page is fired by the orchestrator instead). `now`
+    (epoch s) + `freshness_s` grade the payload's `updated_ts` age (mirror the E2E gate): a STALE
+    reading is NO_CLOCK. `now` omitted (None) => freshness is not graded (the 3-arg call)."""
     base = {"verdict": V_SKIP, "reason": None, "is_locked": None, "mode": None,
             "gm_source_ip": None, "ntp_step_storm": None, "ntp_steps_last_hour": None}
     if box_reachable != 1:
@@ -116,6 +146,7 @@ def analyze(status_json_text, box_reachable, grandmaster_ip, clock_alarm_field=C
     storm = obj.get("ntp_step_storm")
     steps = obj.get("ntp_steps_last_hour")
     alarm = obj.get(clock_alarm_field)
+    stale = _is_stale(obj.get("updated_ts"), now, freshness_s)
 
     alarm_active = None
     alarm_reason = None
@@ -135,12 +166,16 @@ def analyze(status_json_text, box_reachable, grandmaster_ip, clock_alarm_field=C
     ptp = _ptp_locked(is_locked, mode)
 
     # Nothing readable at all -> UNKNOWN, never a fabricated NO_CLOCK (a stock/partial payload must
-    # never false-page). storm/alarm being readable is enough of a signal to proceed.
-    if ptp is None and storm is None and alarm_active is None:
+    # never false-page). A STALE reading, storm, or alarm each count as a judgeable signal, so a
+    # frozen daemon serving a skeleton payload still pages rather than reading UNKNOWN.
+    if ptp is None and storm is None and alarm_active is None and stale is not True:
         return {**out, "verdict": V_UNKNOWN, "reason": None}
 
     # --- derived cross-check (the E2E gate's field semantics) --------------------------------
     reasons = []
+    if stale is True:
+        # A frozen payload is untrustworthy for every other field -- stale leads the reason.
+        reasons.append(R_STALE)
     if storm is True:
         reasons.append(R_STORM)
     if ptp is False:
@@ -204,6 +239,8 @@ def _main(argv):
     a = sub.add_parser("analyze", help="read :8898/status on stdin -> verdict + reason + fields")
     a.add_argument("--box-reachable", type=int, required=True)
     a.add_argument("--grandmaster-ip", default="")
+    a.add_argument("--now", type=int, default=None, help="epoch s for updated_ts freshness (omit = skip)")
+    a.add_argument("--freshness-s", type=int, default=FRESHNESS_DEFAULT_S)
 
     d = sub.add_parser("dedup-key", help="time-bucketed --dedup-key for a base + now + interval")
     d.add_argument("--base", required=True)
@@ -218,7 +255,7 @@ def _main(argv):
 
     if ns.cmd == "analyze":
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        res = analyze(text, ns.box_reachable, ns.grandmaster_ip)
+        res = analyze(text, ns.box_reachable, ns.grandmaster_ip, now=ns.now, freshness_s=ns.freshness_s)
         for k in ("verdict", "reason", "is_locked", "mode", "gm_source_ip",
                   "ntp_step_storm", "ntp_steps_last_hour"):
             print(f"{k}={_fmt(res.get(k))}")
