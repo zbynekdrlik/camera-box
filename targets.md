@@ -61,7 +61,7 @@ which collides with `bridge`):
    identity / `obs_process_count` / `genlock_build_sha`), and a forced `obs64` kill pages via the
    existing obs-liveness / bundle-state path within 2 passes + the auto-restart brings `:8899` back.
 
-**dantesync on RESOLUME-SNV (issue 1297).** The box runs dantesync (1.8.53 = fleet pin) and answers
+**dantesync on RESOLUME-SNV (issue 1297).** The box runs dantesync (1.8.54 = fleet pin) and answers
 `:8898/status` whenever up. Config lives at `C:\ProgramData\dantesync\config.json`; `ntp_server`
 pointed at `strih.lan` (unresolvable while strih is off) so NTP phase discipline is dead
 (`ntp_failed=true`, 0 samples, a −14 ms phase walk) and `system.phase_slew` was ABSENT (the box

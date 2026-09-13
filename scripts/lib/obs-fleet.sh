@@ -46,7 +46,7 @@
 #     box), so it is traveling-safe without an is_home gate.
 #
 # home-check PORT (#1296): the ticket's example home-check was "resolves + :8898/status answers".
-# RESOLUME-SNV DOES run dantesync (1.8.53, :8898 answers whenever the box is up -- supervisor read-back
+# RESOLUME-SNV DOES run dantesync (1.8.54, :8898 answers whenever the box is up -- supervisor read-back
 # 2026-09-12; the older harness_network_reach_watchdog_811.rs "no dantesync" premise predates the
 # issue-811 deploy), but :8898 alone would read "home" with the cg OBS DOWN -- and every watchdog that
 # consults this gate cares about the OBS being up. So the home+serving signal is the genlock cg-obs's

@@ -13,7 +13,7 @@ paths:
 
 RESOLUME-SNV (the CG / graphics PC — Resolume Arena → strih via Spout/NDI, plus a `cg-obs`) is a
 **traveling** `windows-genlock` box in `scripts/lib/obs-fleet.sh`, under the fleet dantesync
-clock-discipline umbrella since issue 811. It runs dantesync (1.8.53 = the fleet pin) and answers
+clock-discipline umbrella since issue 811. It runs dantesync (1.8.54 = the fleet pin) and answers
 `:8898/status` whenever it is up. Issue 1297 added the CODE + DOCS half of closing a specific
 drift; the on-box config flip + the dantesync failover FEATURE are NOT in this repo (see below).
 
