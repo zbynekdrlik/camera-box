@@ -44,6 +44,11 @@ fail() {
                            # verify-device.sh's (u) check and create-usb-linux.sh, single source
                            # of truth for the journald RuntimeMaxUse cap path/value
 
+# shellcheck source=scripts/lib/mgmt-liveness.sh
+. "$HERE/lib/mgmt-liveness.sh"  # mgmt_liveness_selfcheck_script / _service_unit / _timer_unit (#1309)
+                                # -- the on-box ssh-banner self-heal; ONE source of truth shared with
+                                # verify-device.sh's (aj) check (the pure decision embedded via declare -f)
+
 # shellcheck source=scripts/lib/udev-camera-box.sh
 . "$HERE/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/udev_camera_box_helper_script_content
                                    # (#894) -- also sourced (unmodified) by verify-device.sh's (w)
@@ -1362,6 +1367,29 @@ REMOTEOS_MCP_ENABLED_STATE="$(systemctl is-enabled remoteos-mcp 2>/dev/null || t
 [ "$REMOTEOS_MCP_ENABLED_STATE" = "enabled" ] \
     || fail "remoteos-mcp.service is not enabled (is-enabled='${REMOTEOS_MCP_ENABLED_STATE:-<none>}') after install -- the linux-camN MCP surface would be dead on next boot (#1066)"
 echo "  #1066: remoteos-mcp agent installed + enabled (linux-camN MCP surface :8092; proven live post-reboot by verify-device.sh (ab))"
+
+# =============================================================================
+# #1309: on-box management-liveness self-heal (unnumbered sub-step, enable-only). Mirrors the
+# remoteos-mcp block above: writes files + enables, defers to the next reboot (never a live start,
+# per .claude/rules/provisioning-scripts.md). MUST sit in the rw window, BEFORE STEP 18 flips root
+# ro (it writes under /usr/local/sbin + /etc/systemd/system). A tiny timer probes sshd's own loopback
+# banner every 2 min and, once it is dead N times in a row, dumps a forensic snapshot to the (now
+# persistent, #1309) journal then restarts ssh + remoteos-mcp with a per-hour backoff -- the local
+# recovery path the 2026-09-13 half-dead wedge had none of. Proven live post-reboot by
+# verify-device.sh's (aj) check.
+# =============================================================================
+echo ""
+echo -e "${GREEN}[mgmt-selfcheck] Installing management-liveness self-heal (#1309)...${NC}"
+mgmt_liveness_selfcheck_script > "$MGMT_LIVENESS_SCRIPT_PATH"
+chmod +x "$MGMT_LIVENESS_SCRIPT_PATH"
+mgmt_liveness_service_unit > "$MGMT_LIVENESS_SERVICE_PATH"
+mgmt_liveness_timer_unit > "$MGMT_LIVENESS_TIMER_PATH"
+systemctl daemon-reload
+systemctl enable "$MGMT_LIVENESS_TIMER_UNIT_NAME" 2>/dev/null || true
+MGMT_TIMER_ENABLED_STATE="$(systemctl is-enabled "$MGMT_LIVENESS_TIMER_UNIT_NAME" 2>/dev/null || true)"
+[ "$MGMT_TIMER_ENABLED_STATE" = "enabled" ] \
+    || fail "cambox-mgmt-selfcheck.timer is not enabled (is-enabled='${MGMT_TIMER_ENABLED_STATE:-<none>}') after install -- the box would have NO local ssh self-heal for the #1309 half-dead wedge"
+echo "  #1309: cambox-mgmt-selfcheck.timer installed + enabled (ssh-banner self-heal every ${MGMT_LIVENESS_TIMER_INTERVAL}; proven live post-reboot by verify-device.sh (aj))"
 
 # =============================================================================
 # STEP 17c: DSCP-mark outgoing NTP client packets (dantesync issue 52)

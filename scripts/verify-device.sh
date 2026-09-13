@@ -152,6 +152,10 @@
 #       (LABEL cambox-journal), not the volatile /var/log tmpfs -- so `journalctl -b -1` survives
 #       the owner's emergency power-cycle and the next half-dead wedge is diagnosable. FAILs (with a
 #       "reflash via create-usb-linux.sh" hint) on a box whose journal is still volatile.
+#   (aj) on-box management-liveness self-heal (#1309) -- HARD FAIL: the generated
+#       cambox-mgmt-selfcheck.sh exists+executable AND cambox-mgmt-selfcheck.timer is-enabled ==
+#       enabled -- the local ssh-banner probe + restart-ssh/remoteos-mcp safety net the 2026-09-13
+#       half-dead wedge had none of. FAILs if the script is missing or the timer is not enabled.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -173,6 +177,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/log-bound.sh"       # log_bound_verdict/log_bound_gather_remote_snippet (#679)
 # shellcheck source=scripts/lib/log-diet.sh
 . "$HERE/lib/log-diet.sh"        # log_diet_provision_verdict/log_diet_gather_remote_snippet (#762)
+                                 # + log_diet_journal_persistent_verdict (#1309, the (ai) check)
+# shellcheck source=scripts/lib/mgmt-liveness.sh
+. "$HERE/lib/mgmt-liveness.sh"   # MGMT_LIVENESS_* paths/unit name (#1309, the (aj) check)
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"  # invocation-id-scoped journalctl builder (#694, shared
                                      # with deploy-fleet.sh + upgrade-fleet-ndi.sh)
@@ -792,6 +799,8 @@ Checks:
   (ai) persistent journal effective (#1309): Storage=persistent + bounded SystemMaxUse drop-in AND
       /var/log/journal is a real ext4 partition (not the tmpfs) so journalctl -b -1 survives a
       power-cycle -- FAILs with a "reflash via create-usb-linux.sh" hint if the journal is volatile
+  (aj) on-box mgmt-liveness self-heal (#1309): cambox-mgmt-selfcheck.sh present+executable AND
+      cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1602,6 +1611,32 @@ else
     while IFS= read -r _reason; do
       [ -n "$_reason" ] && fail "persistent journal: ${_reason#FAIL: }"
     done <<< "$JOURNAL_PERSIST_VERDICT"
+  fi
+fi
+
+# (aj) on-box management-liveness self-heal installed + enabled (#1309) -- HARD FAIL ------------
+# The 2026-09-13 half-dead wedge left the box unreachable/unrepairable remotely with no local
+# recovery path. setup-device.sh now installs a systemd timer that probes sshd's own loopback banner
+# every 2 min and self-heals (restart ssh + remoteos-mcp) once it is dead N times in a row. This
+# check certifies that safety net is present + enabled (reboot-survival): the generated script exists
+# and is executable, AND cambox-mgmt-selfcheck.timer reports is-enabled == enabled (enable-only per
+# provisioning-scripts.md, so we assert ENABLED, not is-active). Inserted BEFORE (q) per the
+# (q)-last invariant.
+ajrc=0
+MGMT_STATE="$(ssh_box "
+  printf 'SCRIPT_X=%s\n' \"\$(test -x '$MGMT_LIVENESS_SCRIPT_PATH' && echo yes || echo no)\"
+  printf 'TIMER_ENABLED=%s\n' \"\$(systemctl is-enabled '$MGMT_LIVENESS_TIMER_UNIT_NAME' 2>/dev/null)\"
+")" || ajrc=$?
+if [ "$ajrc" -ne 0 ] || [ -z "$MGMT_STATE" ]; then
+  fail "could not read the #1309 mgmt-selfcheck state over SSH (ssh rc=$ajrc) -- cannot certify the on-box ssh self-heal is installed"
+else
+  MGMT_SCRIPT_X="$(printf '%s\n' "$MGMT_STATE" | sed -n 's/^SCRIPT_X=//p')"
+  MGMT_TIMER_ENABLED="$(printf '%s\n' "$MGMT_STATE" | sed -n 's/^TIMER_ENABLED=//p')"
+  if [ "$MGMT_SCRIPT_X" = "yes" ] && [ "$MGMT_TIMER_ENABLED" = "enabled" ]; then
+    ok "on-box mgmt-liveness self-heal installed + enabled (${MGMT_LIVENESS_TIMER_UNIT_NAME}, ssh-banner probe every ${MGMT_LIVENESS_TIMER_INTERVAL}) -- #1309"
+  else
+    [ "$MGMT_SCRIPT_X" = "yes" ] || fail "the #1309 mgmt-selfcheck script is missing/not executable at ${MGMT_LIVENESS_SCRIPT_PATH} -- re-provision with the current setup-device.sh"
+    [ "$MGMT_TIMER_ENABLED" = "enabled" ] || fail "${MGMT_LIVENESS_TIMER_UNIT_NAME} is not enabled (is-enabled='${MGMT_TIMER_ENABLED:-<none>}') -- the box has NO local ssh self-heal for the #1309 half-dead wedge"
   fi
 fi
 
