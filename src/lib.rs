@@ -360,6 +360,12 @@ pub mod genlock_backlog;
 // committed parity gate `tests/genlock_lock_state_parity.rs`.
 pub mod genlock_lock_state;
 
+// #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (audio held by the same
+// latency_ms the video FIFO holds video). Crate-root + std-only so it is Tier-0 verifiable; the C
+// mirror (`genlock_audio_*` in `vendor/obs-studio/libobs/obs-source.c`) is held identical by the
+// committed parity gate `tests/genlock_audio_pairing_parity.rs`.
+pub mod genlock_audio_pairing;
+
 // #660 — the fbdev "visible page" byte range to BLANK on `probe::kms::KmsPresenter` teardown, so
 // releasing DRM master reveals a deterministic black frame instead of whatever ARBITRARILY OLD
 // content another writer (the fbdev-fallback presenter, or camera-box's own `--display` module)
