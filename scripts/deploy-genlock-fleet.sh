@@ -855,8 +855,14 @@ main() {
         imag)                  emit_imag_plan "$stage" "$sha" "$sha" ;;
       esac
     done )
+    # issue 1295: emit the fleet-deploy log record as a COMMENT and end the printed plan on `exit 0`.
+    # A saved .ps1 is PARSED in full (file mode) before executing, so a bare (non-comment)
+    # tab-separated record after the last box program's `exit 0` breaks the parse (owner incident:
+    # the cg deploy saved as deploy2.ps1 -> "At C:\deploy2.ps1:170"). Commenting the record keeps it
+    # visible; the trailing `exit 0` makes the plan's last non-empty line clean + self-terminating.
     echo "# fleet-deploy log line (append to ${FLEET_LOG_DEFAULT} once the deploy is done):"
-    fleet_log_line "$run_id" "$sha" "$boxes" "$mode"
+    echo "#   $(fleet_log_line "$run_id" "$sha" "$boxes" "$mode")"
+    echo "exit 0"
     exit 0
   fi
 
