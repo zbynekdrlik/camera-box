@@ -61,6 +61,13 @@ production-critical watchdog class (umbrella **#1308**).
   `CAMERA_ACTIVE_SET` but still powered + running dantesync) + strih/stream/imag/resolume. resolume is
   traveling → paged only while `obs_fleet_is_home`. An OFF box → UNREACHABLE → SKIP (defers to #1001),
   never a page.
+- **Known narrow blind spot (documented, not a false page):** a box that is UP but whose `:8898`
+  (dantesync HTTP) is down while the daemon otherwise runs reads UNREACHABLE → SKIP here, and the
+  `network-reach-alert-watchdog` (#1001) it defers to probes ping/`:4455`/`:8899`, NOT `:8898` — so a
+  `:8898`-specific outage on a live box is not paged by either. The E2E gate covers this via a
+  journal-over-ssh fallback this watchdog intentionally lacks (a dev1 lane does not ssh the camboxes).
+  Accepted as a follow-up (umbrella #1308); adding a `:8898`-liveness page risks false pages on an
+  HTTP flap, so it needs its own calibration.
 - **Ships DISABLED.** The supervisor installs + live-verifies + enables the timer on dev1; this repo
   makes no box-side change. Tier-0: pytest on the pure module + a stubbed `--dry-run` (fetch seam);
   no cargo (#557).
