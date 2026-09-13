@@ -155,10 +155,11 @@ def test_dedup_key_changes_at_next_bucket():
 
 
 def test_dedup_key_interval_floor_60():
-    # an interval below the floor is clamped to 60, never a per-pass ping.
-    a = dc.dedup_key("b", 100, 10)
-    b = dc.dedup_key("b", 159, 10)
-    c = dc.dedup_key("b", 160, 10)
+    # an interval below the floor is clamped to 60, never a per-pass ping. 120 and 179 fall in the
+    # same clamped 60s bucket (floor(t/60) == 2); 180 starts the next bucket (3).
+    a = dc.dedup_key("b", 120, 10)
+    b = dc.dedup_key("b", 179, 10)
+    c = dc.dedup_key("b", 180, 10)
     assert a == b and a != c, (a, b, c)
 
 
