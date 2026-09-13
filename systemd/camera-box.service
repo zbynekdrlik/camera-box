@@ -28,10 +28,8 @@ ExecStart=/usr/local/bin/camera-box
 Restart=always
 RestartSec=3
 
-# Run with real-time priority for low latency
+# Run with a mild niceness boost for low latency.
 Nice=-10
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=50
 
 # #289 — belt-and-braces realtime CPU isolation: confine the process to the
 # isolated core (isolcpus=3 on the cam-box fleet) so the SCHED_FIFO grab runs on
@@ -42,20 +40,22 @@ CPUSchedulingPriority=50
 # the capture+emit thread to the /sys-derived isolated core (authoritative — this
 # static value just matches the fleet's isolcpus=3).
 #
-# HONEST NOTE (issue 899): `CPUSchedulingPolicy=fifo` above applies to the WHOLE
-# process, so every thread the binary does NOT re-pin (the tokio runtime workers,
-# the NDI SDK internals: ndis:*/disc:*) inherits SCHED_FIFO prio 50 on core 3 —
-# NOT SCHED_OTHER, as an earlier version of this comment wrongly claimed (the
-# fleet has never been in that state; measured on cam1: 27 FIFO threads on core
-# 3). The binary raises the capture+emit thread to FIFO prio 90, so those FIFO-50
-# siblings cannot preempt the grab — but on this non-PREEMPT_RT kernel a
-# non-threaded hardirq still can. issue 899's capture-IRQ fix (src/affinity.rs
-# select_irq_target_cores) now routes the xhci IRQ OFF this core on a stock
-# kernel. The two deeper resolution paths — a PREEMPT_RT kernel, or an honest
-# per-thread stock policy (drop the process-wide FIFO, keep only the grab on core
-# 3) — both need a live capture/emit measurement, so they are STAGED in
-# docs/runbooks/899-realtime-isolation.md, not applied here. If the in-binary pin
-# ever fails, this keeps the FIFO grab on the isolated core regardless.
+# REALTIME SCHEDULING (issue 899 defect 2): there is deliberately NO process-wide
+# `CPUSchedulingPolicy=fifo` here. It used to be — and it applied to the WHOLE
+# process, so every thread the binary did NOT re-pin (the tokio runtime workers,
+# the NDI SDK internals: ndis:*/disc:*) inherited SCHED_FIFO prio 50 on core 3,
+# NOT the SCHED_OTHER the design intended (measured on cam1: 27 FIFO threads on
+# core 3). It is now dropped: the process starts SCHED_OTHER and the binary raises
+# SCHED_FIFO prio 90 PER THREAD only on the capture+emit hot path
+# (src/affinity.rs set_current_thread_realtime, needs CAP_SYS_NICE — granted by the
+# fleet's `setcap cap_sys_nice,cap_ipc_lock`). So the reserved core now carries only
+# the grab under FIFO; every auxiliary thread stays SCHED_OTHER (idle slack), which
+# is finally the true state. On this non-PREEMPT_RT kernel a non-threaded hardirq
+# can still preempt the grab; issue 899's capture-IRQ fix (src/affinity.rs
+# select_irq_target_cores) routes the xhci IRQ OFF this core on a stock kernel, and
+# the remaining PREEMPT_RT/lowlatency kernel path is STAGED in
+# docs/runbooks/899-realtime-isolation.md. `Nice=-10` above still gives the
+# SCHED_OTHER auxiliaries a mild CFS boost without letting them preempt the FIFO grab.
 CPUAffinity=3
 
 # Environment for NDI SDK

@@ -646,10 +646,13 @@ ExecStart=/usr/local/bin/camera-box
 Restart=always
 RestartSec=3
 
-# Run with real-time priority for low latency
+# Run with a mild niceness boost for low latency. NOTE (issue 899 defect 2): the
+# process-wide CPUSchedulingPolicy=fifo was REMOVED here -- it forced EVERY thread to
+# SCHED_FIFO prio 50 on the isolated core (measured: 27 on cam1), not the SCHED_OTHER the
+# design intended. The binary now raises SCHED_FIFO PER THREAD (via CAP_SYS_NICE, STEP 9
+# setcap) only on the capture+emit hot path (src/affinity.rs set_current_thread_realtime);
+# every other thread stays SCHED_OTHER. See docs/runbooks/899-realtime-isolation.md.
 Nice=-10
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=50
 
 # Environment for NDI SDK
 Environment=NDI_RUNTIME_DIR_V6=/usr/lib/ndi
