@@ -899,3 +899,24 @@ fn force_path_obs64_wait_pick_is_live_filtered_1295() {
         "the force-path obs64 wait-pick must filter to LIVE instances:\n{p}"
     );
 }
+
+/// #1295 -- obs-guarded-launch.ps1's "is OBS already running?" presence check (`$running`) and its
+/// obs64 wait-pick must filter to LIVE instances. A stale zombie handle (HasExited / 0 threads --
+/// the 2026-09-12 RESOLUME-SNV pid-58560 class) would otherwise make `$running` truthy so a
+/// genuinely needed launch is skipped, or be latched as the launched `$proc`.
+#[test]
+fn guarded_launch_presence_and_pick_are_live_filtered_1295() {
+    let body = std::fs::read_to_string(manifest_dir().join("scripts/obs-guarded-launch.ps1"))
+        .expect("read obs-guarded-launch.ps1");
+    let n = body.matches("HasExited").count();
+    assert!(
+        n >= 2,
+        "#1295: the presence check AND the obs64 wait-pick must filter to LIVE instances \
+         (-not $_.HasExited -and $_.Threads.Count -gt 0); found {n} HasExited filters (want >= 2). \
+         Script:\n{body}"
+    );
+    assert!(
+        body.contains("Threads.Count -gt 0"),
+        "#1295: the live filter must use the Threads.Count -gt 0 liveness predicate. Script:\n{body}"
+    );
+}

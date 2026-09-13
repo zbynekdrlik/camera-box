@@ -1041,3 +1041,32 @@ fn real_binary_confirmed_wedge_returns_recover_with_the_ahk_safe_step_order() {
          (StopAhk first, RestartAhk last). out={out}"
     );
 }
+
+/// #1295 -- Get-Process obs64 can enumerate a STALE handle for an already-EXITED obs64 (HasExited=
+/// True / 0 threads / ~45 KB, the 2026-09-12 RESOLUME-SNV pid-58560 case). BOTH the LOCAL wedge
+/// sample count (which feeds obs_watchdog::classify's DECISIVE count!=1 -> ObsCountWrong rule) and
+/// the VerifyRecovered post-count must filter to LIVE instances -- otherwise a zombie count=2
+/// triggers a FALSE self-heal kill+relaunch of a perfectly healthy OBS. The exactly-one-LIVE gate
+/// shape (`$postCount -eq 1`) is preserved.
+#[test]
+fn obs64_sample_and_verify_count_only_live_instances_1295() {
+    let body = std::fs::read_to_string(script()).expect("read obs-self-heal-install.sh");
+    let n = body.matches("HasExited").count();
+    assert!(
+        n >= 2,
+        "#1295: BOTH the obs64 wedge sample AND the VerifyRecovered post-count must live-filter \
+         (-not HasExited -and Threads.Count -gt 0); found {n} HasExited filters (want >= 2). \
+         Script:\n{body}"
+    );
+    assert!(
+        body.contains("Threads.Count -gt 0"),
+        "#1295: the live filter must use the Threads.Count -gt 0 liveness predicate. Script:\n{body}"
+    );
+    // The exactly-one-LIVE gate shape must survive the filter (the reused obs_self_heal::
+    // recovery_verified contract).
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("$postCount -eq 1"),
+        "#1295: VerifyRecovered's exactly-one gate shape must be preserved. Program:\n{p}"
+    );
+}
