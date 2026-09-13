@@ -202,6 +202,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"  # offset_us_from_journal/offset_check/ptp_locked_from_journal/
                                  # _short_iso_epoch/dantesync_offset_verdict/freshest_offset_us (#595)
+# shellcheck source=scripts/lib/ndi-provision.sh
+. "$HERE/lib/ndi-provision.sh"   # NDI_VERSION_PIN (#1066, single-sourced -- shared with
+                                 # setup-device.sh STEP 4; the (o) check reads it below)
 # shellcheck source=scripts/lib/dscp-nft.sh
 . "$HERE/lib/dscp-nft.sh"        # dscp_nft_rule_present/dscp_nft_gather_remote_snippet/
                                  # dscp_nft_verdict -- the (ae) NTP-client DSCP nftables rule check
@@ -230,7 +233,9 @@ DANTESYNC_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 # has stopped. Overridable via env like the other bounds.
 DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
 EXPECT_KERNEL="${KERNEL_PIN:-}"                 # optional: also require running kernel == this exact version
-NDI_VERSION_PIN="${NDI_VERSION_PIN:-6.3.2}"     # fleet NDI runtime pin (#132/#547)
+# NDI_VERSION_PIN is single-sourced from scripts/lib/ndi-provision.sh (sourced above, #1066) so the
+# (o) check here and setup-device.sh STEP 4's download-fallback can never disagree on the pin. An
+# env override still wins (the lib defaults `${NDI_VERSION_PIN:-6.3.2}`, #132/#547).
 
 # =================================================================================================
 # PURE functions (no network, no SSH -- unit-tested from tests/verify_device_pure_functions.rs by

@@ -3,8 +3,11 @@
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance
 #
-# Usage: ./setup-device.sh [--binary <url|path>] DEVICE_NAME
+# Usage: ./setup-device.sh [--binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
 # Example: ./setup-device.sh CAM5        (case-insensitive; cam5 works too)
+#
+# By default the camera-box binary comes from the latest successful ci.yml run on `main` (the
+# fleet's production pin, matching scripts/deploy-fleet.sh) -- NOT the dev tip (#1066/#1136).
 #
 # DEVICE_NAME is resolved via scripts/camera-set.sh (#24/#451 -- the single source of truth for
 # the cam1-6 fleet map): IP address / VBAN stream name / genlock emit-rate are all DERIVED from
@@ -71,13 +74,28 @@ fail() {
                            # create-usb-linux.sh, single source of truth for the NTP-client DSCP
                            # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
 
-# GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
-# runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
+# shellcheck source=scripts/lib/ndi-provision.sh
+. "$HERE/lib/ndi-provision.sh"  # NDI_VERSION_PIN + ndi_bootstrap_peer_list / ndi_runtime_version_matches_pin
+                                # (#1066) -- also sourced by verify-device.sh's (o) check, single source of
+                                # truth for the NDI runtime pin + the STEP 4 fleet-peer bootstrap list
+
+# shellcheck source=scripts/dantesync-version-gate.sh
+. "$HERE/dantesync-version-gate.sh"  # DANTESYNC_VERSION_PIN (#1066, source-safe: its source-guard
+                                     # returns before the gate logic runs) -- the SAME single source
+                                     # scripts/dantesync-fleet-upgrade.sh already uses; STEP 17 installs
+                                     # that pinned release, never releases/latest
+
+# GitHub repo + CI channel for installing the fleet-matching binary. #1066: the fleet's production
+# truth is MAIN's pinned release (early-gate PIN doctrine, issue 1136) -- a fresh provision defaults
+# to the SAME source scripts/deploy-fleet.sh uses (latest successful ci.yml run on `main`), NOT the
+# dev tip. cam1 came up on 1.7.0-dev.626 vs main's dev.624 and tripped the [0/8] PIN-DRIFT gate
+# (2026-09-13). Override with --binary <url|path> / --run <id> / CAMERA_BOX_CI_BRANCH.
 GITHUB_REPO="zbynekdrlik/camera-box"
-CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-dev}"
+CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-main}"
 
 # Fleet NDI runtime source -- the licensed .so is never built by CI, so a fresh box fetches it
 # from a known-good fleet peer instead of requiring a manual per-box scp copy (STEP 4, #457).
+# shellcheck disable=SC2034  # #1066: consumed cross-file by ndi_bootstrap_peer_list (scripts/lib/ndi-provision.sh), which STEP 4 sources
 NDI_PEER="${CAMERA_BOX_NDI_PEER:-10.77.9.61}"
 NDI_PEER_PW="${CAM_PW:-newlevel}"
 
@@ -290,11 +308,19 @@ fi
 # argument (#450 -- name-resolved single-arg invocation; IP/stream/genlock-fps are all DERIVED
 # from it via camera-set.sh, replacing the old free-text 3-positional-arg form).
 BINARY_ARG=""
+CI_RUN_ID_ARG=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --binary)
             BINARY_ARG="${2:?--binary needs a URL or local path}"
+            shift 2
+            ;;
+        --run)
+            # #1066: pin the CI artifact to an EXPLICIT ci.yml run id (mirrors deploy-fleet.sh's
+            # --run), bypassing the default `gh run list` latest-successful lookup -- for a
+            # deliberate bisect/rollback or to match the fleet to one exact run.
+            CI_RUN_ID_ARG="${2:?--run needs a ci.yml run id}"
             shift 2
             ;;
         *)
@@ -315,6 +341,7 @@ if [ -z "$DEVICE_NAME_ARG" ]; then
     echo "Examples:"
     echo "  $0 CAM5"
     echo "  $0 --binary ./dist/camera-box CAM2"
+    echo "  $0 --run <ci.yml run id> CAM1     # pin an exact CI artifact (#1066); default = latest main"
     exit 1
 fi
 
@@ -423,14 +450,18 @@ echo "  Static IP configured: $DEVICE_IP"
 # =============================================================================
 echo ""
 echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
-# The fleet runs CI dev-builds (e.g. 1.7.0-dev.157), never a GitHub release -- installing from
-# releases/latest silently version-drifted a fresh box from the fleet (cam6, #457). Resolution
-# order:
+# The binary is ALWAYS a CI artifact (a `-dev.N` build), never a GitHub release -- installing from
+# releases/latest silently version-drifted a fresh box from the fleet (cam6, #457). #1066: the
+# fleet's production truth is MAIN's pinned release (early-gate PIN doctrine, issue 1136), so the
+# DEFAULT source is the latest successful ci.yml run on `main` -- the SAME source deploy-fleet.sh
+# uses -- NOT the dev tip (cam1 came up on dev.626 vs main's dev.624 and tripped the [0/8] PIN-DRIFT
+# gate, 2026-09-13). Resolution order:
 #   1. --binary <local path>                  - use the file directly (already fetched elsewhere)
 #   2. --binary <url> / CAMERA_BOX_BINARY_URL  - curl this exact URL (a raw camera-box binary)
-#   3. default                                 - gh run download the latest successful CI
-#      artifact on $CI_BRANCH, mirroring scripts/deploy-fleet.sh's own mechanism, so a fresh box
-#      matches the fleet with no manual copy.
+#   3. --run <id>                              - gh run download that EXACT ci.yml run's artifact
+#   4. default                                 - gh run download the latest successful ci.yml
+#      artifact on $CI_BRANCH (=main), mirroring scripts/deploy-fleet.sh's own mechanism, so a
+#      fresh box matches the fleet's pin with no manual copy.
 BINARY_SRC="${BINARY_ARG:-${CAMERA_BOX_BINARY_URL:-}}"
 if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
     echo "  Using local binary: $BINARY_SRC"
@@ -460,10 +491,15 @@ elif [ -n "$BINARY_SRC" ]; then
     rm -f "$_camera_box_dl_tmp"
     echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
-    echo "  Fetching latest CI dev-build artifact (branch: $CI_BRANCH)..."
-    RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
-        --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-    [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+    if [ -n "$CI_RUN_ID_ARG" ]; then
+        echo "  Fetching CI artifact from the explicit --run $CI_RUN_ID_ARG..."
+        RUN_ID="$CI_RUN_ID_ARG"
+    else
+        echo "  Fetching latest CI artifact (branch: $CI_BRANCH = the fleet's production pin)..."
+        RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
+            --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
+        [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- install manually, or re-run with --binary <url|path> / --run <id> / CAMERA_BOX_BINARY_URL"
+    fi
     DIST_DIR="$(mktemp -d)"
     if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
         && [ -f "$DIST_DIR/camera-box" ]; then
@@ -518,10 +554,15 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
         }
         rm -f "$_frame_probe_dl_tmp"
     elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
+        if [ -n "$CI_RUN_ID_ARG" ]; then
+          echo "  Fetching probe-tools-linux-amd64 from the explicit --run $CI_RUN_ID_ARG..."
+          PROBE_RUN_ID="$CI_RUN_ID_ARG"
+        else
         echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
         PROBE_RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
             --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
         [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). Install manually to /usr/local/bin/frame-probe, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+        fi
         PROBE_DIST_DIR="$(mktemp -d)"
         if gh run download "$PROBE_RUN_ID" --repo "$GITHUB_REPO" -n probe-tools-linux-amd64 --dir "$PROBE_DIST_DIR" 2>/dev/null \
             && [ -f "$PROBE_DIST_DIR/frame-probe" ]; then
@@ -559,27 +600,71 @@ echo '/usr/lib/ndi' > /etc/ld.so.conf.d/ndi.conf
 if [ -f /usr/lib/ndi/libndi.so.6 ]; then
     ldconfig
     echo "  NDI library: present and configured"
-elif [ "$DEVICE_IP" = "$NDI_PEER" ]; then
-    echo -e "  ${YELLOW}This box IS the fleet NDI source ($NDI_PEER) -- nothing to fetch${NC}"
-    echo "  Copy libndi.so.* onto it manually before re-running this script"
 else
     # NDI is a licensed runtime -- CI never builds it, so fetch it from a known-good fleet peer
-    # (cam1) instead of requiring a manual per-box scp copy (#457). Mirrors the already-proven
+    # instead of requiring a manual per-box scp copy (#457). Mirrors the already-proven
     # setup-imag.sh step-10 dance: scp the versioned .so, then symlink libndi.so.6/libndi.so onto it.
-    echo "  NDI library not found locally -- fetching from fleet peer $NDI_PEER..."
+    #
+    # #1066: the single hard-coded peer ($NDI_PEER = cam1) WAS the box being re-provisioned when
+    # cam1 itself was rebuilt (2026-09-13) -- the old `elif [ "$DEVICE_IP" = "$NDI_PEER" ]` branch
+    # printed "nothing to fetch" and continued, so STEP 19 correctly refused Setup Complete but the
+    # runbook had no way forward. Derive the ORDERED peer list from camera-set.sh
+    # (ndi_bootstrap_peer_list: NDI_PEER first, then every CAMERA_SET member, MINUS this box's own
+    # IP) and try each reachable one in order; fall back to the version-guarded pinned download;
+    # fail loud naming every peer tried.
+    echo "  NDI library not found locally -- bootstrapping from a fleet peer..."
     command -v sshpass >/dev/null 2>&1 || apt-get install -y -qq sshpass >/dev/null 2>&1 || true
-    if command -v sshpass >/dev/null 2>&1 \
-        && sshpass -p "$NDI_PEER_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-            "root@${NDI_PEER}:/usr/lib/ndi/libndi.so.*.*.*" /usr/lib/ndi/ 2>/dev/null; then
-        REAL="$(cd /usr/lib/ndi && ls libndi.so.*.*.* 2>/dev/null | head -1 || true)"
-        [ -n "$REAL" ] || fail "NDI fetch from $NDI_PEER produced no file -- copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
-        ln -sf "$REAL" /usr/lib/ndi/libndi.so.6
-        ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
-        ldconfig
-        echo "  NDI library fetched from $NDI_PEER and configured ($REAL)"
-    else
-        fail "could not fetch NDI library from fleet peer $NDI_PEER -- copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
+    _ndi_configured=false
+    _ndi_tried=""
+    for NDI_PEER_CANDIDATE in $(ndi_bootstrap_peer_list "$DEVICE_IP"); do
+        _ndi_tried="$_ndi_tried $NDI_PEER_CANDIDATE"
+        echo "  Trying NDI peer $NDI_PEER_CANDIDATE..."
+        if command -v sshpass >/dev/null 2>&1 \
+            && sshpass -p "$NDI_PEER_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+                "root@${NDI_PEER_CANDIDATE}:/usr/lib/ndi/libndi.so.*.*.*" /usr/lib/ndi/ 2>/dev/null; then
+            REAL="$(cd /usr/lib/ndi && ls libndi.so.*.*.* 2>/dev/null | head -1 || true)"
+            if [ -n "$REAL" ]; then
+                ln -sf "$REAL" /usr/lib/ndi/libndi.so.6
+                ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
+                ldconfig
+                echo "  NDI library fetched from $NDI_PEER_CANDIDATE and configured ($REAL)"
+                _ndi_configured=true
+                break
+            fi
+        fi
+    done
+    if [ "$_ndi_configured" != true ]; then
+        # No fleet peer served the runtime -> fall back to the ONE canonical NDI download
+        # (vendor/distroav/CI/libndi-get.sh, download-only -- no `install` arg, so it extracts to a
+        # TMPDIR we control and never touches /usr/local/lib). Install the extracted .so ONLY when
+        # its version matches the fleet pin NDI_VERSION_PIN -- the download fetches the LATEST SDK
+        # v6, so installing it blindly would REINTRODUCE the exact PIN-DRIFT class this batch fixes;
+        # a mismatch fails loud instead (the pinned runtime genuinely lives on the fleet peers).
+        NDI_LIBNDI_GET="${NDI_LIBNDI_GET:-$HERE/../vendor/distroav/CI/libndi-get.sh}"
+        echo "  No fleet peer served libndi -- trying the pinned download fallback (NDI_VERSION_PIN=$NDI_VERSION_PIN)..."
+        if [ -x "$NDI_LIBNDI_GET" ]; then
+            _ndi_dl_work="$(mktemp -d)"
+            if TMPDIR="$_ndi_dl_work" bash "$NDI_LIBNDI_GET" >/dev/null 2>&1; then
+                _ndi_dl_so="$(find "$_ndi_dl_work" -type f -name 'libndi.so.*.*.*' -path '*x86_64-linux-gnu*' 2>/dev/null | head -1 || true)"
+                if [ -n "$_ndi_dl_so" ]; then
+                    _ndi_dl_base="$(basename "$_ndi_dl_so")"
+                    if ndi_runtime_version_matches_pin "$_ndi_dl_base" "$NDI_VERSION_PIN"; then
+                        install -m 0755 "$_ndi_dl_so" "/usr/lib/ndi/$_ndi_dl_base"
+                        ln -sf "$_ndi_dl_base" /usr/lib/ndi/libndi.so.6
+                        ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
+                        ldconfig
+                        echo "  NDI library installed from the pinned download ($_ndi_dl_base)"
+                        _ndi_configured=true
+                    else
+                        echo -e "  ${YELLOW}pinned-download fallback fetched '$_ndi_dl_base' != fleet pin $NDI_VERSION_PIN -- refusing to install a drifting runtime${NC}"
+                    fi
+                fi
+            fi
+            rm -rf "$_ndi_dl_work"
+        fi
     fi
+    [ "$_ndi_configured" = true ] \
+        || fail "could not obtain the NDI runtime -- tried fleet peers [${_ndi_tried# }] and the pinned NDI_VERSION_PIN=$NDI_VERSION_PIN download; copy manually: scp root@<a live cam box>:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
 fi
 
 # =============================================================================
@@ -1188,14 +1273,18 @@ echo "  #762: purged rsyslog + capped journald RuntimeMaxUse=${LOG_DIET_JOURNALD
 
 DANTESYNC_INSTALLED=false
 
-# Get latest release URL from GitHub
-DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null | \
+# #1066: install the PINNED fleet release (DANTESYNC_VERSION_PIN, single-sourced from
+# scripts/dantesync-version-gate.sh -- the same authority dantesync-fleet-upgrade.sh + the
+# version-parity gate use), NEVER releases/latest. A fresh box that installs "latest" drifts ahead
+# of the fleet the moment a newer dantesync ships (the exact PIN-DRIFT class this batch fixes for
+# the camera-box binary too). Resolve the pinned tag's asset URL from GitHub.
+DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/tags/v${DANTESYNC_VERSION_PIN}" 2>/dev/null | \
     grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' | \
     grep -o 'https://[^"]*' | head -1) || true
 
 # #450: fail loud -- dantesync disciplines the cluster wall-clock genlock depends on (#8); a box
 # provisioned without it silently free-runs its own clock instead of the fleet's shared reference.
-[ -n "$DANTESYNC_URL" ] || fail "could not get dantesync release URL from GitHub -- dantesync is required for cluster clock sync (#8), not optional"
+[ -n "$DANTESYNC_URL" ] || fail "could not get dantesync release URL from GitHub for the pinned v${DANTESYNC_VERSION_PIN} (releases/tags/v${DANTESYNC_VERSION_PIN}) -- dantesync is required for cluster clock sync (#8), not optional"
 
 # #1289: derive the release's TARGET version from the download URL's own path
 # (.../releases/download/vX.Y.Z/dantesync-linux-amd64), and read the CURRENTLY-installed
@@ -1235,13 +1324,18 @@ else
 fi
 
 # Create systemd service
-# #1307: write the dantesync config the cam boxes had only ever received out-of-band (a fresh box
-# came up with NO gm_allowlist and locked to a FOREIGN grandmaster, 2026-09-13). Same shape as
-# setup-imag.sh: http_status on :8898, NTP server mode OFF (strih is the fleet NTP master, see the
-# --ntp-server ExecStart below), gm_allowlist pinned to the DNS-named grandmaster (RESOLVED IPv4
-# until zbynekdrlik/dantesync#113), phase_slew on. Written BEFORE the unit so the enable/restart
-# below picks it up on a first provision.
-_RG_GM_IP="$(rig_grandmaster_ip)" || fail "cannot resolve the PTP grandmaster host (video-clock.lan) -- refusing to provision dantesync without a grandmaster pin (#1307)"
+# #1307/#1066: write the dantesync config the cam boxes had only ever received out-of-band (a
+# fresh box came up with NO gm_allowlist and locked to a FOREIGN grandmaster, 2026-09-13). Same
+# shape as setup-imag.sh: http_status on :8898, NTP server mode OFF (strih is the fleet NTP master,
+# see the --ntp-server ExecStart below), phase_slew on. #1066: dantesync >= 1.8.54 (dantesync#113)
+# now accepts a HOSTNAME in gm_allowlist, and the fleet is on ["video-clock.lan"] since 2026-09-13,
+# so write the literal DNS name -- NOT the resolved IPv4, which drifts a fresh box off the fleet the
+# moment the grandmaster's DHCP lease moves (the exact incident rig-grandmaster.sh exists for).
+# rig_grandmaster_ip() is kept ONLY as a loud precondition that the name still resolves (fail
+# closed otherwise); the WRITTEN value is rig_grandmaster_host() = video-clock.lan. Written BEFORE
+# the unit so the enable/restart below picks it up on a first provision.
+_RG_GM_IP="$(rig_grandmaster_ip)" || fail "cannot resolve the PTP grandmaster host (video-clock.lan) -- refusing to provision dantesync without a resolvable grandmaster (#1307)"
+_RG_GM_HOST="$(rig_grandmaster_host)"
 install -d -m 755 /etc/dantesync
 cat > /etc/dantesync/config.json <<DANTECFGEOF
 {
@@ -1258,7 +1352,7 @@ cat > /etc/dantesync/config.json <<DANTECFGEOF
   },
   "system": {
     "gm_allowlist": [
-      "${_RG_GM_IP}"
+      "${_RG_GM_HOST}"
     ],
     "phase_slew": {
       "enabled": true
@@ -1267,7 +1361,7 @@ cat > /etc/dantesync/config.json <<DANTECFGEOF
 }
 DANTECFGEOF
 chmod 644 /etc/dantesync/config.json
-echo "  #1307: /etc/dantesync/config.json installed (gm_allowlist=${_RG_GM_IP} = $(rig_grandmaster_host), phase_slew.enabled=true)"
+echo "  #1307/#1066: /etc/dantesync/config.json installed (gm_allowlist=[\"${_RG_GM_HOST}\"], resolves to ${_RG_GM_IP}, phase_slew.enabled=true)"
 
 cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
 [Unit]
@@ -1352,7 +1446,18 @@ fi
 REMOTEOS_MCP_INSTALLER_TMP="$(mktemp /tmp/remoteos-mcp-install-linux.XXXXXX.sh)"
 curl -fsSL "$REMOTEOS_MCP_INSTALLER_URL" -o "$REMOTEOS_MCP_INSTALLER_TMP" \
     || fail "cannot fetch remoteos-mcp installer from $REMOTEOS_MCP_INSTALLER_URL (#1066)"
-bash "$REMOTEOS_MCP_INSTALLER_TMP" \
+# #1066 (noble pip-vs-debian conflict, cam1 from-scratch 2026-09-13): the installer's internal
+# `pip install git+...` tries to UNINSTALL the debian-packaged typing_extensions / PyYAML, which
+# have no pip RECORD file ("Cannot uninstall ... RECORD file not found ... installed by debian"),
+# and aborts. Export PIP_BREAK_SYSTEM_PACKAGES=1 + PIP_IGNORE_INSTALLED=1 for the installer's OWN
+# pip (pip maps every long option to a PIP_<NAME> env var), so the WHOLE dependency closure is
+# installed FRESH into /usr/local/lib/python3.12/dist-packages, shadowing the RECORD-less debian
+# copies -- pip never touches a debian package again, closing the whack-a-mole (typing_extensions,
+# then PyYAML, ...) by construction. This is the live-proven fix, applied WITHOUT editing the
+# foreign installer and without adding a forbidden inline bare `pip install git+...` of the agent
+# here (the #555 no-inline-pip guard stays honoured).
+PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1 \
+    bash "$REMOTEOS_MCP_INSTALLER_TMP" \
     || fail "canonical remoteos-mcp install-linux.sh failed (#1066)"
 rm -f "$REMOTEOS_MCP_INSTALLER_TMP"
 # Enable-only convention: ensure the reboot-survival symlink exists (idempotent if the installer

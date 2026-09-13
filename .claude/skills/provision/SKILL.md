@@ -100,9 +100,12 @@ sudo ./setup-device.sh CAM5        # case-insensitive: cam5 / Cam5 / CAM5 all re
 GONE). An unknown name fails loud through `camera-set.sh`'s own fail-closed `case` — it will never
 silently provision the wrong box.
 
-`--binary <url|path>` optionally pins a specific camera-box build; by default the script fetches
-the latest successful CI dev-build artifact for the fleet's dev branch (#457) — never a GitHub
-release (the fleet runs CI dev-builds, e.g. `1.7.0-dev.157`, not tagged releases).
+`--binary <url|path>` (or `--run <ci.yml run id>`) optionally pins a specific camera-box build; by
+default the script fetches the latest successful CI artifact from **`main`** — the SAME source
+`scripts/deploy-fleet.sh` uses (`BRANCH=main`) — never a GitHub release, and never the dev tip
+(#1066/#1136: the fleet's production truth is main's pinned release; a fresh box on the dev tip trips
+the `[0/8]` PIN-DRIFT gate, as cam1 did on 2026-09-13). Override the branch with
+`CAMERA_BOX_CI_BRANCH` if you deliberately need a different channel.
 
 The script performs 19 steps (hostname, static IP, binary install, NDI library, ALSA, camera-box
 systemd unit + `cpu-affinity.conf`/`genlock.conf` drop-ins, auto-login, capabilities, GRUB
