@@ -980,7 +980,6 @@ jobs:
             '{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}',
             '{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false}',
             '{PROP_HW_ACCEL, true, 0, true}',
-            '{PROP_AUDIO, true, 0, false}',
             '{PROP_FRAMESYNC, true, 0, false}',
             '{PROP_FIX_ALPHA, true, 0, false}',
             '{PROP_PTZ, true, 0, false}')) {

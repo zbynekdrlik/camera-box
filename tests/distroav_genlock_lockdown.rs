@@ -105,7 +105,6 @@ fn genlock_certified_forcer_exists_and_sets_every_certified_key() {
         "{PROP_YUV_RANGE, false, PROP_YUV_RANGE_PARTIAL, false}",
         "{PROP_YUV_COLORSPACE, false, PROP_YUV_SPACE_BT709, false}",
         "{PROP_HW_ACCEL, true, 0, true}",
-        "{PROP_AUDIO, true, 0, false}",
         "{PROP_FRAMESYNC, true, 0, false}",
         "{PROP_FIX_ALPHA, true, 0, false}",
         "{PROP_PTZ, true, 0, false}",
@@ -164,13 +163,16 @@ fn getproperties_is_the_hard_whitelist() {
         "{NDI_SOURCE}: #257 — apply_genlock_lockdown_visibility is BACK; the hard whitelist \
          REMOVES the forced knobs from the UI, it does not hide them."
     );
-    // getproperties adds EXACTLY the five whitelist props.
+    // getproperties adds EXACTLY the six whitelist props (issue 1295 added PROP_AUDIO).
     for add in [
         "obs_properties_add_list(props, PROP_SOURCE",
         "obs_properties_add_bool(props, PROP_GENLOCK_FIFO",
         "obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC",
         "obs_properties_add_bool(props, PROP_BURN",
         "obs_properties_add_bool(props, PROP_GENLOCK_MONITOR",
+        // issue 1295: NDI audio is a per-source whitelist prop again (the cg OBS consumes
+        // SongPlayer audio over NDI; camera inputs keep their saved false).
+        "obs_properties_add_bool(props, PROP_AUDIO",
     ] {
         assert!(
             body.contains(add),
@@ -185,7 +187,6 @@ fn getproperties_is_the_hard_whitelist() {
         "obs_properties_add_list(props, PROP_LATENCY",
         "obs_properties_add_bool(props, PROP_FRAMESYNC",
         "obs_properties_add_bool(props, PROP_HW_ACCEL",
-        "obs_properties_add_bool(props, PROP_AUDIO",
         "obs_properties_add_list(props, PROP_YUV_RANGE",
         "obs_properties_add_list(props, PROP_YUV_COLORSPACE",
         "obs_properties_add_bool(props, PROP_FIX_ALPHA",

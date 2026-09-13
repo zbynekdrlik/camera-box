@@ -503,6 +503,12 @@ const char *ndi_source_getname(void *)
 	PROP_GENLOCK_LATENCY_MS_SRC,
 	PROP_BURN,
 	PROP_GENLOCK_MONITOR,
+	/* issue 1295 (2026-09-13): NDI AUDIO is a per-source, operator-visible knob again (stock
+	 * default true). It was in the forced table as false since #257 because every camera input on
+	 * strih/stream carries no audio -- but the cg OBS on RESOLUME-SNV CONSUMES SongPlayer audio
+	 * over NDI, and the forced false silently killed it live (event day). Camera inputs keep their
+	 * SAVED false (scene collections written under the forcer), so the fleet behaviour is unchanged. */
+	PROP_AUDIO,
 };
 
 /* camera-box #150/#257: the certified value FORCED into every non-whitelist (hidden) prop
@@ -511,7 +517,8 @@ const char *ndi_source_getname(void *)
  * upstream property the operator could otherwise see is pinned to its zero-loss certified
  * value. The values were read live from the working prod input `NDI cam5`:
  *   ndi_sync=2 (SOURCE_TIMECODE), ndi_behavior=0 (KEEP_ACTIVE, #764), ndi_bw_mode=0 (highest),
- *   latency=0 (NORMAL), ndi_recv_hw_accel=true, ndi_audio=false, ndi_framesync=false,
+ *   latency=0 (NORMAL), ndi_recv_hw_accel=true, ndi_framesync=false,
+ *   (ndi_audio is NOT forced since issue 1295 -- per-source, see GENLOCK_WHITELIST_PROPS),
  *   ndi_fix_alpha_blending=false, yuv_range=partial, yuv_colorspace=BT.709,
  *   timeout=KEEP_CONTENT, ptz=off.
  *
@@ -541,7 +548,6 @@ static const struct genlock_forced_setting GENLOCK_FORCED_SETTINGS[] = {
 	{PROP_YUV_RANGE, false, PROP_YUV_RANGE_PARTIAL, false},
 	{PROP_YUV_COLORSPACE, false, PROP_YUV_SPACE_BT709, false},
 	{PROP_HW_ACCEL, true, 0, true},
-	{PROP_AUDIO, true, 0, false},
 	{PROP_FRAMESYNC, true, 0, false},
 	{PROP_FIX_ALPHA, true, 0, false},
 	{PROP_PTZ, true, 0, false},
@@ -708,6 +714,11 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	 * (every other certified value stays locked). Set true ONLY on a source that feeds the
 	 * built-in OBS multiview and never feeds program. */
 	obs_properties_add_bool(props, PROP_GENLOCK_MONITOR, "Monitor-only (low-bandwidth NDI, camera-box #501)");
+
+	/* (6) PROP_AUDIO -- NDI audio into the OBS mixer (bool, stock default true). issue 1295:
+	 * per-source again (it was forced false by the certified table; the cg OBS on RESOLUME-SNV
+	 * takes SongPlayer audio over NDI). Camera inputs keep their saved false. */
+	obs_properties_add_bool(props, PROP_AUDIO, "Audio (NDI audio into the mixer)");
 
 	obs_log(LOG_DEBUG, "-ndi_source_getproperties(…)");
 
@@ -1780,7 +1791,7 @@ void ndi_source_update(void *data, obs_data_t *settings)
 		obs_log(LOG_INFO,
 			"'%s' ndi_source_update: #150/#257 genlock lockdown ACTIVE — forced certified "
 			"values (ndi_sync=2, ndi_behavior=2, ndi_bw_mode=0, latency=0, "
-			"ndi_recv_hw_accel=true, ndi_audio=false, ndi_framesync=false, "
+			"ndi_recv_hw_accel=true, ndi_audio=per-source, ndi_framesync=false, "
 			"ndi_fix_alpha_blending=false, ptz=off); only source + latency + burn are operator-set",
 			obs_source_name);
 	}
