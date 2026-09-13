@@ -11375,3 +11375,21 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
 - Tier-0: bash -n + shellcheck clean on all edited shell scripts; sourced the lib and ran its pure
   parsers over zombie fixtures (green); `cargo fmt --all --check` clean. Design addendum + validated
   comment on the ticket.
+- #1304 (bkshading panel +/- step buttons) + #1305 (PWA install) + #1306 (off-grid clona f/(null)
+  fix) — ONE worktree lane, v1.7.0-dev.626, branch worktree-agent-a3266d0831e43df76.
+  #1304: proto CameraCaps.fnumber_choices (camelCase, serde default; Eq dropped — Vec<f64>) filled
+  from parse_fnumber_labels via parse_fnumber; panel -/+ per clona (one f-number choice) / biely bod
+  (±100 K) / tint (±1), disabled at bounds / when no choices, one tap = one PUT (no auto-repeat,
+  issue 1229). Commits 4f7f1427c (feat) + 3c7d5cb14 (review: count-parity via the ONE
+  parse_fnumber_labels basis across read-norm/plan_writes/caps). Playwright E2E in the bkshading CI
+  job (stub_relay.py + webServer). Tests: proto serde/parity, relay fake-runner, python static.
+  #1305: manifest.webmanifest + no-cache sw.js + deterministic stdlib gen-icons.py (icon-192/512 +
+  favicon.svg) + http.rs 5 routes (include_bytes/str, pure *_asset helpers) + guarded SW register.
+  Commit 44247321c. Tests: python static + service route/content-type/PNG-magic.
+  #1306: gphoto2 Current:(null) off-grid aperture recovered from --summary raw (0x5007 x100), folded
+  into the d003 session (get_focus_and_summary, still 3 USB sessions — issue 1229); nearest-choice
+  norm; sub-0.5 junk-choice filter in the ONE label basis. RED 9ea0e81db -> GREEN de36cbcc2 -> docs
+  0af7893d5 -> review-fix 56f3a8c3a (off-list Current nearest fallback). Tier-0: fmt + rustc replicas
+  (RED->GREEN proven); CI is the first real compile. Two fresh-context reviews (0 blockers/majors;
+  findings fixed same-branch). Rig-verify UNVERIFIED: live cam1/cam2 panel + the d003/--summary
+  emit order (fail-safe either way).
