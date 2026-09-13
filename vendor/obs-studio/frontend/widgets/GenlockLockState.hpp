@@ -53,7 +53,7 @@ typedef struct genlock_lock_facets {
 
 /* Mirror of camera_box::genlock_lock_state::decide (src/genlock_lock_state.rs) — keep
  * both in lock-step. UNLOCKED precedence: clock > output > no-input-locked. DEGRADED
- * precedence: some-input-unlocked > recent-event > ntp-failed > qpc-drift. Else LOCKED.
+ * precedence: some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing. Else LOCKED.
  * Writes the dominant reason to *reason_out (if non-NULL) and returns the state. */
 static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_facets_t *f,
 							     genlock_lock_reason_t *reason_out)
