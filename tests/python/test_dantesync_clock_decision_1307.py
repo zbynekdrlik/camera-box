@@ -232,3 +232,80 @@ def test_grandmaster_change_false_when_prev_empty():
     # first-ever pass (no persisted prior) is never a change.
     assert dc.grandmaster_change("", "10.77.9.230") is False
     assert dc.grandmaster_change("10.77.9.230", "") is False
+
+
+# ------------------------------------------------------------------ NO_DANTESYNC (#1308)
+# The #1307 blind spot documented in .claude/rules/dantesync-clock-alert-watchdog.md: a box that is
+# UP but whose :8898 (dantesync HTTP) is dead reads UNREACHABLE -> SKIP, so a :8898-specific outage on
+# a live box was paged by NEITHER this watchdog nor #1001. #1308 closes it: when :8898 is unreachable,
+# the orchestrator probes box up-ness (TCP) and passes box_up; a proven-up box with dead :8898 is
+# NO_DANTESYNC (production-critical page), a down/unknown box stays SKIP (defer #1001, never a false
+# page).
+def _status_with_version(version, **kw):
+    """A healthy (or **kw-overridden) :8898 body with a `version` field appended."""
+    body = _status(**kw)
+    return body[:-1] + f',"version":"{version}"}}'
+
+
+def test_no_dantesync_when_box_up_but_8898_unreachable():
+    r = dc.analyze("", 0, GM, box_up=1)
+    assert r["verdict"] == "NO_DANTESYNC", r
+    assert r["reason"] == dc.R_NO_HTTP
+
+
+def test_no_dantesync_verdict_and_reason_constants_exist():
+    assert dc.V_NO_DANTESYNC == "NO_DANTESYNC"
+    assert dc.R_NO_HTTP == "no_dantesync_http"
+
+
+def test_skip_when_box_down_and_8898_unreachable():
+    # box genuinely down -> SKIP (defer #1001), never NO_DANTESYNC.
+    assert dc.analyze("", 0, GM, box_up=0)["verdict"] == "SKIP"
+
+
+def test_skip_when_box_up_unknown_and_8898_unreachable():
+    # up-ness not probed / probe errored (None) -> SKIP, never a false NO_DANTESYNC page.
+    assert dc.analyze("", 0, GM, box_up=None)["verdict"] == "SKIP"
+    # backward-compat: the pre-#1308 3-arg call (no box_up) still SKIPs on unreachable.
+    assert dc.analyze("", 0, GM)["verdict"] == "SKIP"
+
+
+def test_box_up_ignored_when_8898_reachable():
+    # a reachable+healthy :8898 grades normally regardless of box_up (the up-ness probe only runs on
+    # an unreachable :8898).
+    assert dc.analyze(_status(), 1, GM, box_up=0)["verdict"] == "OK"
+
+
+# ------------------------------------------------------------------ version reporting (never a page) #1308
+# A daemon version != DANTESYNC_VERSION_PIN is REPORTED in the card/log text, never a page on its own
+# (a stale-but-locked node still has the clock); an absent `version` field is silent.
+def test_version_mismatch_is_reported_never_changes_the_verdict():
+    r = dc.analyze(_status_with_version("1.8.40"), 1, GM, version_pin="1.8.53")
+    assert r["verdict"] == "OK", r  # a version mismatch alone is never a page
+    assert r["version"] == "1.8.40"
+    assert "1.8.40" in r["version_note"] and "1.8.53" in r["version_note"]
+
+
+def test_version_match_leaves_no_note():
+    r = dc.analyze(_status_with_version("1.8.53"), 1, GM, version_pin="1.8.53")
+    assert r["version"] == "1.8.53"
+    assert r["version_note"] is None
+
+
+def test_version_absent_is_silent():
+    r = dc.analyze(_status(), 1, GM, version_pin="1.8.53")
+    assert r["version"] is None
+    assert r["version_note"] is None
+
+
+def test_no_version_pin_never_notes():
+    r = dc.analyze(_status_with_version("1.8.40"), 1, GM)  # no pin passed
+    assert r["version_note"] is None
+
+
+def test_version_note_present_even_on_no_clock():
+    # a mismatched version is worth reporting whether the clock is OK or lost.
+    r = dc.analyze(_status_with_version("1.8.40", is_locked="false", mode="ACQ"), 1, GM,
+                   version_pin="1.8.53")
+    assert r["verdict"] == "NO_CLOCK", r
+    assert r["version_note"] is not None
