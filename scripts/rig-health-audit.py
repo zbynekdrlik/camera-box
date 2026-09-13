@@ -449,8 +449,10 @@ def _windows_obs_log_tail_cmd(tail: int = 500) -> str:
 def _windows_obs_count_cmd() -> str:
     # #1259: -EncodedCommand (cmd.exe-proof) -- the `()` grouping + nested quotes in the naive form
     # are cmd.exe metacharacters (see _ps_encoded).
+    # issue 1295: count LIVE instances only -- an exited process object (HasExited, 0 threads) still
+    # enumerates by name and would put a false `obs64x2` problem row on the status page.
     return "powershell -NoProfile -NonInteractive -EncodedCommand " + _ps_encoded(
-        "(Get-Process obs64 -ErrorAction SilentlyContinue).Count")
+        "@(Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }).Count")
 
 
 def windows_obs_log_tail(ip: str, tail: int = 500) -> str | None:
