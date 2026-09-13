@@ -745,6 +745,28 @@ Exit codes: 0 ok, 2 usage error, 3 resolution/download failure, 4 a box deploy f
 EOF
 }
 
+# emit_forced_table_audit_preflight BOX HOST -> the REPORT-ONLY per-box forced-table AUDIO/yuv audit
+# step (#1303 part 4), printed as #-comment guidance BEFORE STEP 0 of the box's plan. It NEVER writes
+# and NEVER gates the deploy -- it directs the supervisor to enumerate the box's live NDI inputs over
+# OBS-WS (reusing latency_pins_verify.py's _conn/GetInputList/GetInputSettings) and pipe the TSV into
+# the classifier scripts/lib/genlock-forced-table-audit.sh so a PROGRAM-audio box (cg OBS) is not
+# shipped with ndi_audio=false (the #1303 event-morning live defect) and a camera box is not shipped
+# with audio bleeding into the mixer. Pure (no I/O), emitted only -- the supervisor runs the read.
+emit_forced_table_audit_preflight() {
+  local box="$1" host="$2"
+  cat <<PREFLIGHT
+# PREFLIGHT (report-only, #1303 part 4) -- audit ${box}'s NDI-input forced table (audio + yuv) BEFORE
+#   the swap. Report-only: it NEVER writes and NEVER gates the deploy -- it prints a per-input verdict
+#   so a PROGRAM-audio box (cg OBS: sp-*/cg/music inputs) is not shipped with ndi_audio=false (the
+#   #1303 event-morning live defect) and a camera box is not shipped with audio bleeding into the
+#   mixer. On dev1, enumerate ${box}'s live NDI inputs over OBS-WS -- reuse latency_pins_verify.py's
+#   _conn + GetInputList + GetInputSettings (host ${host}) -- emitting one TSV row per input:
+#   name<TAB>ndi_audio<TAB>yuv_range<TAB>yuv_colorspace. Pipe that into the classifier and review it:
+#     <ws-enumerate ${host} as TSV> | bash -c '. scripts/lib/genlock-forced-table-audit.sh; genlock_forced_table_audit ${box}'
+#   Act on every 'MISMATCH-*' row (and any yuv NOTE) over OBS-WS BEFORE running STEP 0 below.
+PREFLIGHT
+}
+
 # emit the plan for one Windows box (STEP 0 upload -> the deploy program -> STEP 2 relaunch).
 emit_windows_plan() {
   local box="$1" mode="$2" stage="$3" gsha="$4" dsha="$5" confirm="${6:-0}"
@@ -757,6 +779,8 @@ emit_windows_plan() {
   # resolume (issue 1295): emit the box-IDENTITY confirm preamble (STEP -1) before STEP 0 -- a
   # traveling DHCP box colliding with `bridge` at .201 must be resolved + identity-confirmed live.
   [ "$box" = "resolume" ] && fleet_resolume_identity_confirm_note
+  # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
+  emit_forced_table_audit_preflight "$box" "$ip"
   cat <<PLAN
 # STEP 0 (once per box): upload the downloaded '${artifact}' bytes (staged locally at ${stage}) to
 #         the box at ${win_stage} via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip +
@@ -777,6 +801,8 @@ emit_imag_plan() {
   local imag_stage="/tmp/genlock-stage-${gsha}"
   local program
   program="$(build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$gsha" "$dsha" "$RETENTION_KEEP" "$confirm")"
+  # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
+  emit_forced_table_audit_preflight imag imag
   cat <<PLAN
 # ================= FLEET PLAN: box=imag (ssh newlevel@imag) =================
 # STEP 0: scp the FULL linux-genlock bundle (bin/, lib/x86_64-linux-gnu/ incl EVERY obs-plugins/*.so,

@@ -936,6 +936,70 @@ fn plan_mode_emits_all_box_programs_without_network() {
     );
 }
 
+// #1303 part 4 — the report-only per-box forced-table AUDIO/yuv audit preflight is emitted BEFORE
+// STEP 0 of each box's plan, references the classifier lib, and never writes/gates.
+#[test]
+fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stage = tmp.path();
+    for boxes in ["resolume", "strih,imag"] {
+        let (code, out, err) = run_script(&[
+            "--plan",
+            "--run-id",
+            "RUN123",
+            "--sha",
+            "abcdef1234",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--boxes",
+            boxes,
+            "--full",
+        ]);
+        assert_eq!(
+            code, 0,
+            "--plan {boxes} must succeed.\nstdout={out}\nstderr={err}"
+        );
+        assert!(
+            out.contains("PREFLIGHT (report-only, #1303 part 4)"),
+            "emits the forced-table audit preflight for {boxes}:\n{out}"
+        );
+        assert!(
+            out.contains("genlock_forced_table_audit"),
+            "preflight pipes into the classifier for {boxes}:\n{out}"
+        );
+        assert!(
+            out.contains("NEVER writes and NEVER gates"),
+            "preflight is report-only for {boxes}:\n{out}"
+        );
+        // the preflight is a PRE-swap step: it must come before the box's STEP 0 upload/deploy.
+        let pf = out.find("PREFLIGHT (report-only, #1303 part 4)").unwrap();
+        let step0 = out.find("STEP 0").unwrap();
+        assert!(
+            pf < step0,
+            "preflight must precede STEP 0 for {boxes}:\n{out}"
+        );
+    }
+    // one preflight per requested box (2 for strih,imag).
+    let (_c, out2, _e) = run_script(&[
+        "--plan",
+        "--run-id",
+        "RUN123",
+        "--sha",
+        "abcdef1234",
+        "--stage",
+        stage.to_str().unwrap(),
+        "--boxes",
+        "strih,imag",
+        "--full",
+    ]);
+    assert_eq!(
+        out2.matches("PREFLIGHT (report-only, #1303 part 4)")
+            .count(),
+        2,
+        "one preflight per requested box:\n{out2}"
+    );
+}
+
 #[test]
 fn usage_errors_exit_two() {
     // --fast and --full are mutually exclusive
