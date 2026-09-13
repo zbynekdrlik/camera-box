@@ -61,13 +61,30 @@ production-critical watchdog class (umbrella **#1308**).
   `CAMERA_ACTIVE_SET` but still powered + running dantesync) + strih/stream/imag/resolume. resolume is
   traveling → paged only while `obs_fleet_is_home`. An OFF box → UNREACHABLE → SKIP (defers to #1001),
   never a page.
-- **Known narrow blind spot (documented, not a false page):** a box that is UP but whose `:8898`
-  (dantesync HTTP) is down while the daemon otherwise runs reads UNREACHABLE → SKIP here, and the
-  `network-reach-alert-watchdog` (#1001) it defers to probes ping/`:4455`/`:8899`, NOT `:8898` — so a
-  `:8898`-specific outage on a live box is not paged by either. The E2E gate covers this via a
-  journal-over-ssh fallback this watchdog intentionally lacks (a dev1 lane does not ssh the camboxes).
-  Accepted as a follow-up (umbrella #1308); adding a `:8898`-liveness page risks false pages on an
-  HTTP flap, so it needs its own calibration.
+- **NO_DANTESYNC — the `:8898`-down-but-box-up branch (#1308, the former blind spot, now CLOSED).**
+  A box that is UP but whose `:8898` (dantesync HTTP) is dead used to read UNREACHABLE → SKIP, and
+  `network-reach` (#1001) probes ping/`:4455`/`:8899`, NOT `:8898`, so a `:8898`-specific outage on a
+  live box was paged by neither. Now, when `:8898` is unreachable, the orchestrator probes box
+  UP-ness (a cheap TCP connect via `scripts/lib/watchdog-tcp-probe.sh` — the shared extracted form of
+  network-reach's `probe_tcp`, reused not reinvented; cams `ssh :22`, OBS boxes `:4455`/`:8899`/`:22`
+  up-iff-any, network-reach's REACHABLE-iff-ANY rule) and passes `--box-up` to `analyze`:
+  - `box_up == 1` → **`NO_DANTESYNC`** (`reason=no_dantesync_http`) — the daemon crashed/wedged on a
+    live box, a production-critical page with its OWN bucketed key (`dante-clock-nohttp-<box>`), 2-pass
+    confirm. Cure: restart dantesync on that box.
+  - `box_up == 0` (no probed port answered) OR `None` (up-ness unprobed / probe errored) → **SKIP**,
+    exactly as before (defer #1001). false-page-safe: only a PROVEN-up box pages `NO_DANTESYNC`.
+  The `NO_DANTESYNC` and `NO_CLOCK` faults use SEPARATE confirm latches (`http_<box>` vs `node_<box>`)
+  that CLEAR each other on recovery (an `OK` pass clears both; a `NO_CLOCK` pass clears the http latch;
+  a `NO_DANTESYNC` pass clears the clock latch) so a fault-type transition never leaks a stale latch.
+- **Version reporting is REPORT-ONLY, never a page (#1308).** When `:8898` answers, `analyze` compares
+  the daemon's `version` field against the ONE pin (`DANTESYNC_VERSION_PIN`, resolved from
+  `scripts/dantesync-version-gate.sh` in a SUBSHELL so its `set -e` never leaks — the
+  early-gate-pin-doctrine / dantesync-version-reading.md single pin). A mismatch surfaces as
+  `version=<x> (pin <y>)` appended to the OK-log / NO_CLOCK-alert text; it NEVER changes the verdict
+  and NEVER pages on its own (a stale-but-locked node still has the clock). An ABSENT `version` field,
+  or an unresolvable pin, is SILENT. Seams: `DANTE_CLOCK_VERSION_PIN` (Tier-0 pin override),
+  `DANTE_CLOCK_BOX_UP_CMD` (Tier-0 box-up probe stub, mirrors `DANTE_CLOCK_FETCH_CMD`),
+  `DANTE_CLOCK_TCP_TIMEOUT`.
 - **Ships DISABLED.** The supervisor installs + live-verifies + enables the timer on dev1; this repo
   makes no box-side change. Tier-0: pytest on the pure module + a stubbed `--dry-run` (fetch seam);
   no cargo (#557).

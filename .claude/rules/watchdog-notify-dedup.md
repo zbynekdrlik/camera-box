@@ -53,17 +53,54 @@ INVISIBLE without a page (a lost dante clock, a foreign/missing grandmaster, an 
 be **RE-pinged repeatedly while it PERSISTS**, not paged once and then silently card-edited forever.
 
 Mechanism (no new notify channel, no raw webhook): keep `airuleset.py notify --dedup-key`, but make
-the key **time-bucketed** — `dante-clock-<box>-<floor(now/REPING_INTERVAL_S)>` (`REPING_INTERVAL_S`
-default 600 s, floored at 60 s), the bucket computed in the pure decision module so the cadence is
-unit-tested. Within one bucket an identical state still EDITS the card (no flood); every new bucket is
-a FRESH ping. Recovery stays exactly rule 2 — ONE machine-channel log line, never a phone ping.
+the key **time-bucketed** — `<incident-key>-<floor(now/REPING_INTERVAL_S)>` (`REPING_INTERVAL_S`
+default 600 s, floored at 60 s). Within one bucket an identical state still EDITS the card (no flood);
+every new bucket is a FRESH ping. Recovery stays exactly rule 2 — ONE machine-channel log line, never
+a phone ping.
 
-This is the ONLY sanctioned exception, and it is NARROW: only a watchdog whose fault is genuinely
-production-blocking-and-otherwise-invisible qualifies (the umbrella class is tracked in #1308). Do NOT
-time-bucket any other watchdog's key — for everything else the stable one-ping-per-incident key stands.
-The sweep below allowlists the production-critical files EXPLICITLY (`scripts/dantesync-clock-alert-
-watchdog.sh`) and pins the bucketed shape via the pure module, so the exception is intentional and
-visible, never a silently-weakened invariant.
+**The bucket key is built by ONE shared helper — the ONLY sanctioned way to time-bucket (#1308).**
+Never hand-roll the `-<floor(now/interval)>` suffix or a second bucketing implementation:
+- **bash:** `scripts/lib/obs-watchdog-decision.sh :: watchdog_notify_key <incident-key> <now_epoch>
+  [interval_s]` — every alert-watchdog already sources that lib. Wrap the existing stable key:
+  `--dedup-key "$(watchdog_notify_key "network-reach-$box" "$(date +%s)")"` (the interval comes from
+  `$REPING_INTERVAL_S`, the ONE shared env name, default 600, floored 60). (`dantesync-clock-alert-
+  watchdog.sh` buckets via its `bucketed_key` helper, which also calls `watchdog_notify_key`.)
+- **python:** `scripts/watchdog_reping.py :: notify_key(base, now, interval)` — the byte-for-byte twin
+  (a parity pytest diffs the two); `dantesync_clock_decision.dedup_key` delegates to it.
+
+**The production-critical class (#1308) is these 11 dev1 watchdogs** — the faults the fleet cannot run
+production without, invisible without a page:
+
+| watchdog | ticket | fault |
+|---|---|---|
+| `dantesync-clock-alert-watchdog.sh` | #1307 | PTP clock loss / GM move / DNS / NTP storm / dantesync-dead |
+| `genlock-lock-alert-watchdog.sh` | #1299 | fleet genlock UNLOCKED/DEGRADED |
+| `network-reach-alert-watchdog.sh` | #1001 | strih/stream unreachable |
+| `bundle-state-alert-watchdog.sh` | #732 | :8899 bundle-state server down |
+| `obs-liveness-watchdog.sh` | #391 | broadcast-OBS render wedge |
+| `audio-lag-alert-watchdog.sh` | #1226 | OBS audio-timeline lag / band drift |
+| `asio-starve-alert-watchdog.sh` | #1023 | ASIO source starved |
+| `vb-matrix-alert-watchdog.sh` | #1227 | VB-Matrix down |
+| `ndi-portmap-alert-watchdog.sh` | #1181 | NDI sender port-map moved |
+| `avsync-heartbeat-alert-watchdog.sh` | #812 | A/V-sync heartbeat stale |
+| `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
+
+The DIAGNOSTIC / TEST-mode watchdogs stay one-ping-per-incident (a stable key, NO bucket): cadence
+(#794), frozen-input (#1052), splitter-port (#739), grabber-stuck (#1128), imag-power (#1040),
+ndi-halving (#1203), optical-chain (#860), obs-burn-reconcile (#1060), mv-fps (#771), av-step (#1267),
+netcfg-audit (#797), rig-status (#787). Do NOT time-bucket any of these — the exception is NARROW.
+
+The sweep below allowlists the 11 EXPLICITLY (CLASS-based) and **rejects a bucketed key in any
+NON-allowlisted script**, so the exception is intentional and visible, never a silently-weakened
+invariant.
+
+**Delivery-layer caveat (#1308):** wrapping the key does NOT change a watchdog's own confirm/throttle
+detection — the 10 wrapped bash watchdogs still gate their notify CALL through `obs_watchdog_alert_
+throttle`, so their effective re-ping cadence is `max(throttle interval, bucket interval)` (the
+bucketed key just turns each throttled re-fire into a fresh ping instead of a silent card edit). Only
+`dantesync-clock-alert-watchdog.sh` fires every confirmed pass (no throttle), so the bucket alone sets
+its cadence. Tightening a specific watchdog to the exact 600 s cadence is a per-watchdog throttle tune,
+out of #1308's delivery-layer scope.
 
 ## Enforcement
 

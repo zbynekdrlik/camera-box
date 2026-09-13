@@ -11549,3 +11549,36 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
 - **Lane scope:** worktree lane — no push/PR/merge/close. No version bump (dev already 1.7.0-dev.626 >
   main .624; dev1-side scripts/tests/docs only). Durability backup on
   `refs/autopilot-wip/worktree-agent-a3dc5a6fe78ef70a2`.
+
+## 2026-09-13 — issue 1308 step 2 (production-critical re-ping rollout + dantesync-alive) — worktree worktree-agent-acfc75b6bac59c55e, base 2d1b18576
+
+- **Scope (issue 1308 step 2 only; step 3 = supervisor rig enable/live-verify, NOT this lane):**
+  generalise the issue-1307 time-bucketed re-ping into ONE shared helper, roll it across the 11
+  production-critical dev1 watchdogs, and add the dantesync-alive branch to the dante-clock watchdog.
+- **Shared helper:** `scripts/watchdog_reping.py` (pure `notify_key`/`reping_interval` + `dedup-key`
+  CLI) + the byte-for-byte bash twin `watchdog_notify_key` in `scripts/lib/obs-watchdog-decision.sh`
+  (interval env `REPING_INTERVAL_S`, default 600, floor 60). `dantesync_clock_decision` now delegates
+  (`reping_interval` IS the shared object; `dedup_key = notify_key`) — one implementation. RED→GREEN
+  + bash↔python parity in `tests/python/test_watchdog_reping_1308.py`.
+- **11 watchdogs:** each ALERT `--dedup-key` wrapped with `$(watchdog_notify_key "<stable-key>"
+  "$(date +%s)")` (genlock-lock/network-reach/bundle-state/obs-liveness/audio-lag+band/asio-starve
+  tap+main/vb-matrix/ndi-portmap/avsync-heartbeat/imag-obs x3); dante-clock switched its
+  `bucketed_key` to the shared helper. Detection/throttle + recovery (log-only) UNTOUCHED. The #1206
+  sweep allowlist is CLASS-based (11) and rejects a bucketed key in any diagnostic/TEST-mode watchdog.
+  Delivery-layer caveat: the 10 throttled watchdogs re-ping at `max(throttle, bucket)` cadence; only
+  dante-clock fires every pass. Diagnostic/TEST watchdogs left one-ping (unchanged).
+- **NO_DANTESYNC (the documented issue-1307 blind spot, now closed):** on `:8898` unreachable the
+  orchestrator probes box up-ness (shared `scripts/lib/watchdog-tcp-probe.sh` = extracted
+  network-reach `probe_tcp`; cams ssh 22, OBS boxes 4455/8899/22 up-iff-any) → `analyze --box-up`:
+  up = NO_DANTESYNC page (own bucketed key + confirm latch), down/unprobed = SKIP defer #1001 (never
+  a false page). Version != `DANTESYNC_VERSION_PIN` (subshell-sourced from dantesync-version-gate.sh)
+  REPORTED in the card, never a page; absent = silent. RED→GREEN in the 1307 pytest.
+- **Tier-0 (worktree lane):** 3 pytest files green (56 dante + 22 reping/sweep incl. bash↔python
+  parity + CLI smoke); `bash -n` + `shellcheck -S warning` clean on all 11 watchdogs + the 2 libs;
+  CLI smoke-tested NO_DANTESYNC/SKIP/version-note directly. NOT runnable in a worktree lane
+  (supervisor runs at integration): the sourced-lib `run_under_set_e` harnesses + a stubbed
+  `--dry-run` of the dante watchdog (`DANTE_CLOCK_FETCH_CMD`/`DANTE_CLOCK_BOX_UP_CMD`/
+  `DANTE_CLOCK_VERSION_PIN`/`DANTE_CLOCK_NODES`/`DANTE_CLOCK_NOW`).
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. No version bump
+  (dev1-side scripts/tests/docs only). Durability backup on
+  `refs/autopilot-wip/worktree-agent-acfc75b6bac59c55e`.
