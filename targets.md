@@ -2,6 +2,16 @@
 
 ## Windows Targets (DanteSync)
 
+**PTP grandmaster = `video-clock.lan` (DNS name, never a literal IP — #1307, owner directive 2026-09-13).**
+Today it resolves to `10.77.9.230` = the Yamaha console's **AIC128-D Dante card** (primary port MAC
+`00:1D:C1:08:02:15`, mDNS `foh-abl-yamaha-accelerator`), pinned by a MikroTik static DHCP lease +
+static DNS entry. The retired literal `10.77.9.184` was only where that card's DHCP lease used to sit;
+when it moved (2026-09-13) every `gm_allowlist: ["10.77.9.184"]` node silently fell to NTP-only for
+hours. Every consumer resolves the name through `scripts/lib/rig-grandmaster.sh`; the fleet's
+dantesync `system.gm_allowlist` carries the resolved IPv4 until zbynekdrlik/dantesync#113 lets it
+carry the hostname (rollout tracked in #1307). Verify live: `getent hosts video-clock.lan` +
+`tcpdump -i enp2s0 udp port 319` must show PTP from that address only.
+
 | Host | IP Address | Status | Notes |
 |------|------------|--------|-------|
 | stagebox1 | 10.77.9.237 | Active | SSH: newlevel/newlevel |

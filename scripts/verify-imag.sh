@@ -248,7 +248,14 @@ DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
 # #834: the rig's PTP grandmaster every node must agree on. Every DanteSync status-pipe/HTTP
 # payload across this whole codebase (clock_offset_guard.rs's own real fixtures, dantesync-gate.sh's
 # banner "GM = 10.77.9.184") pins this same address.
-RIG_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
+# #1307: DNS-named grandmaster (video-clock.lan) via the shared resolver; explicit RIG_GRANDMASTER_IP
+# still overrides; unresolvable fails CLOSED here rather than grading every node against nothing.
+# shellcheck source=scripts/lib/rig-grandmaster.sh
+. "$HERE/lib/rig-grandmaster.sh"
+RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
+  echo "FAIL: verify-imag: cannot resolve the PTP grandmaster host (see above) -- #1307" >&2
+  exit 2
+}
 # #824: same pin + same default setup-imag.sh itself uses -- a superseded PPA binary breaks every
 # stock plugin (obs-websocket included) if the base version drifts past the genlock build's own.
 IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.2.0-0obsproject1~noble}"

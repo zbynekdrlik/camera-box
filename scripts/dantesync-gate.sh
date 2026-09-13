@@ -173,7 +173,14 @@ GATE_SLEW_MIN_SURVIVING="${DANTESYNC_SLEW_MIN_SURVIVING:-3}"
 # instantaneous offset happens to be small, it PASSES. gm_check (clock-offset-guard.sh) compares each
 # HTTP-graded node's gm_source_ip against this value. Overridable via RIG_GRANDMASTER_IP, mirroring
 # verify-imag.sh's own RIG_GRANDMASTER_IP env seam.
-GATE_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
+# #1307: the grandmaster is addressed by DNS name (video-clock.lan) via the shared resolver; an
+# explicit RIG_GRANDMASTER_IP still overrides. Unresolvable = fail CLOSED (early-gate-pin doctrine).
+# shellcheck source=scripts/lib/rig-grandmaster.sh
+. "$HERE/lib/rig-grandmaster.sh"
+GATE_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
+  echo "!! DanteSync gate: no PTP grandmaster address (see the rig-grandmaster message above) -- failing CLOSED (#1307)" >&2
+  exit 2
+}
 # #834 REPORT-FIRST: the grandmaster-identity check ALWAYS prints a loud GM OK/FOREIGN/UNKNOWN line
 # per node, but only feeds the node's OK/BAD verdict (i.e. can FAIL the gate) when this is 1. Default
 # 0 -- so wiring the check cannot brick the standing E2E gate while the stream box still elects a

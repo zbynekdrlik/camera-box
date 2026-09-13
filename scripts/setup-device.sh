@@ -30,7 +30,9 @@ fail() {
 }
 
 # shellcheck source=scripts/camera-set.sh
-. "$HERE/camera-set.sh"   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
+. "$HERE/camera-set.sh"
+# shellcheck source=scripts/lib/rig-grandmaster.sh
+. "$HERE/lib/rig-grandmaster.sh"  # rig_grandmaster_ip() -- the DNS-named PTP grandmaster (#1307)   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
 
 # shellcheck source=scripts/lib/log-bound.sh
 . "$HERE/lib/log-bound.sh"  # log_bound_logrotate_config/log_bound_timer_dropin (#679) -- also
@@ -1225,6 +1227,40 @@ else
 fi
 
 # Create systemd service
+# #1307: write the dantesync config the cam boxes had only ever received out-of-band (a fresh box
+# came up with NO gm_allowlist and locked to a FOREIGN grandmaster, 2026-09-13). Same shape as
+# setup-imag.sh: http_status on :8898, NTP server mode OFF (strih is the fleet NTP master, see the
+# --ntp-server ExecStart below), gm_allowlist pinned to the DNS-named grandmaster (RESOLVED IPv4
+# until zbynekdrlik/dantesync#113), phase_slew on. Written BEFORE the unit so the enable/restart
+# below picks it up on a first provision.
+_RG_GM_IP="$(rig_grandmaster_ip)" || fail "cannot resolve the PTP grandmaster host (video-clock.lan) -- refusing to provision dantesync without a grandmaster pin (#1307)"
+install -d -m 755 /etc/dantesync
+cat > /etc/dantesync/config.json <<DANTECFGEOF
+{
+  "_ntp_server_examples": "sk.pool.ntp.org, europe.pool.ntp.org, time.google.com, time.cloudflare.com",
+  "http_status": {
+    "enabled": true,
+    "port": 8898
+  },
+  "ntp_server_mode": {
+    "enabled": false,
+    "max_step_us": 100000,
+    "port": 123,
+    "stratum": 3
+  },
+  "system": {
+    "gm_allowlist": [
+      "${_RG_GM_IP}"
+    ],
+    "phase_slew": {
+      "enabled": true
+    }
+  }
+}
+DANTECFGEOF
+chmod 644 /etc/dantesync/config.json
+echo "  #1307: /etc/dantesync/config.json installed (gm_allowlist=${_RG_GM_IP} = $(rig_grandmaster_host), phase_slew.enabled=true)"
+
 cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
 [Unit]
 Description=Dante Time Sync (PTP/NTP Synchronization)

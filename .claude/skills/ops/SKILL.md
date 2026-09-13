@@ -47,7 +47,7 @@ DanteSync (`~/devel/dantetimesync`) is the cluster wall-clock basis for genlock 
 **Topology:** strih.lan (10.77.9.202) = NTP master (`ntp_server_mode`, stratum 3).
 All nodes sync to strih: stream, cam2 (`--ntp-server strih.lan`), dev1.
 
-**PTP (primary):** grandmaster 10.77.9.184 — all nodes LOCK to µs-grade parity.
+**PTP (primary):** grandmaster **`video-clock.lan`** (DNS, #1307 — today → 10.77.9.230, the Yamaha AIC128-D Dante card on a MikroTik static DHCP lease; the retired literal 10.77.9.184 was only that card's old DHCP lease) — all nodes LOCK to µs-grade parity. The address is resolved by ONE helper, `scripts/lib/rig-grandmaster.sh` (`rig_grandmaster_ip`: `RIG_GRANDMASTER_IP` override → `getent video-clock.lan` → fail LOUD).
 **NTP fallback** (when GM absent): ±0.3-1 ms stepping sawtooth — genlock must degrade gracefully.
 
 **Verified node status (2026-06-15 — do NOT re-doubt; VERSIONS in this table are historical):**
