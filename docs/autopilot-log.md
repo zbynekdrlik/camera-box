@@ -11349,3 +11349,29 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
   RESOLUME-SNV are supervisor rig steps. Followup_candidate: `scripts/lib/obs-session-visibility.sh`
   (the `[0/8]` preflight + issue-979 watchdog) counts obs64 by name with the SAME zombie-blind class
   — not in the A-spec's enumerated set, returned for the supervisor to fold or file.
+
+## 2026-09-13 — #1295 (last follow-on): zombie-blind obs64 count in the shared session-visibility probe
+
+- **Issue #1295** (RESOLUME-SNV cg OBS onto the genlock build) — the FINAL follow-on after A/B/C
+  (`6ad6a742d..e8004ad70`): the obs64 by-name counters the A fix did NOT reach.
+- RED `b7813ee3a` (test) → GREEN `9f375326b` (fix).
+- Root cause: `Get-Process obs64` enumerates a STALE handle for an already-EXITED obs64
+  (`HasExited=True` / 0 threads / ~45 KB — the live 2026-09-12 RESOLUME-SNV pid-58560 case), so a
+  raw `.Count` reads 2 and the "exactly one obs64" invariant FALSE-fails on a healthy box.
+- Fixed (LIVE filter `-not HasExited -and Threads.Count -gt 0`):
+  - `scripts/lib/obs-session-visibility.sh` — the ONE detector the issue-977 `[0/8]` preflight +
+    issue-979 dev1 watchdog share: probe counts/picks LIVE only, emits report-only `OBS_ZOMBIES=` +
+    `OBS_ZOMBIE_PIDS=`; new pure `obs_session_visibility_zombie_note` surfaces the dead pid WITHOUT
+    making the health message non-empty (never gates/pages). `obs-session-watchdog.sh` +
+    `recording-e2e.sh [0/8]` LOG the note report-only (recording-e2e change is NEW lines only;
+    anchor occurrence-count sweep unchanged).
+  - `scripts/obs-self-heal-install.sh` — wedge sample + VerifyRecovered post-count (a zombie
+    count=2 else hit `obs_watchdog::classify` `ObsCountWrong` → a FALSE kill+relaunch of healthy OBS).
+  - `scripts/obs-guarded-launch.ps1` — presence check + wait-pick.
+- Grep-sweep verdicts: `Stop-Process -Force` kill-all sites (`deploy-genlock-fleet.sh`,
+  `launch-obs-genlock.sh:179`, `mv-reverify-escalate.sh`) are SAFE (no-op on a dead handle);
+  `rig-health-audit.py`'s raw count is an active issue-1296 surface — left to that lane
+  (followup_candidate), documented in `.claude/rules/win-ssh-vs-mcp.md`.
+- Tier-0: bash -n + shellcheck clean on all edited shell scripts; sourced the lib and ran its pure
+  parsers over zombie fixtures (green); `cargo fmt --all --check` clean. Design addendum + validated
+  comment on the ticket.
