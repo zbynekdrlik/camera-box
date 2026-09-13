@@ -1029,15 +1029,17 @@ fn rt_irq_placement_verdict_grades_by_kernel_and_core() {
 fn rt_thread_policy_verdict_grades_the_899_defect2_states() {
     // issue 899 defect 2: a unit that still sets a process-wide policy is ALWAYS a FAIL
     // (config wrong, independent of the live count); a clean unit with a small live FIFO
-    // count passes; a clean unit with too many FIFO threads (the pre-899 ~27) fails; an
-    // unreadable live count (camera-box not running) is config-only (WARN); a malformed
-    // input is unknown (WARN).
+    // count passes; a clean unit with too many FIFO threads (the pre-899 ~27) fails; a
+    // clean unit but a RUNNING process with ZERO FIFO threads (count "0", per-thread raise
+    // silently failed) fails via the floor; an EMPTY count (camera-box not running) is
+    // config-only (WARN); a malformed input is unknown (WARN).
     let (code, out, err) = run_sourced(
         r#"CEIL="$(rt_fifo_thread_ceiling)"
            rt_thread_policy_verdict 1 1 "$CEIL"; echo
            rt_thread_policy_verdict 1 99 "$CEIL"; echo
            rt_thread_policy_verdict 0 1 "$CEIL"; echo
            rt_thread_policy_verdict 0 "$CEIL" "$CEIL"; echo
+           rt_thread_policy_verdict 0 0 "$CEIL"; echo
            rt_thread_policy_verdict 0 27 "$CEIL"; echo
            rt_thread_policy_verdict 0 "" "$CEIL"; echo
            rt_thread_policy_verdict 2 1 "$CEIL"; echo
@@ -1047,7 +1049,7 @@ fn rt_thread_policy_verdict_grades_the_899_defect2_states() {
     assert_eq!(code, 0, "harness crashed. stderr: {err}");
     assert_eq!(
         out.trim(),
-        "unit-has-process-wide-fifo\nunit-has-process-wide-fifo\nok\nok\ntoo-many-fifo-threads:27\nok-config-only\nunknown\nunknown"
+        "unit-has-process-wide-fifo\nunit-has-process-wide-fifo\nok\nok\nno-fifo-thread\ntoo-many-fifo-threads:27\nok-config-only\nunknown\nunknown"
     );
 }
 
@@ -2090,9 +2092,15 @@ fn verify_device_checks_v4l2_ctl_present_before_q_1213() {
         af_at < q_at,
         "the v4l2-ctl (af) check must precede the (q) block so (q) stays last (af={af_at} q={q_at})"
     );
-    // Scope the slice to the (af) block ALONE -- it is inserted directly before (q), with no other
-    // lettered check between them, so the block simply runs up to the (q) marker itself.
-    let af_block = &live_flow[af_at..q_at];
+    // Scope the slice to the (af) block ALONE -- end it at the NEXT check boundary (# (ag)), not at
+    // (q): other lettered checks ((ag) ethtool, (ah) realtime policy) now sit between (af) and (q),
+    // and each carries its own fail() -- a [af..q] slice would let (af)'s "FAIL loud" assertion pass
+    // on a SIBLING's fail(). Narrow it so the assertion binds to (af)'s own block (issue 899 review).
+    let af_end = live_flow[af_at..]
+        .find("\n# (ag) ")
+        .map(|i| af_at + i)
+        .expect("(ag) block start (the check immediately after the (af) v4l2-ctl check)");
+    let af_block = &live_flow[af_at..af_end];
     assert!(
         af_block.contains("v4l2-ctl --version"),
         "(af) must actually probe v4l2-ctl via `v4l2-ctl --version`: {af_block}"
@@ -2161,9 +2169,15 @@ fn verify_device_checks_ethtool_present_before_q_1240() {
         ag_at < q_at,
         "the ethtool (ag) check must precede the (q) block so (q) stays last (ag={ag_at} q={q_at})"
     );
-    // Scope the slice to the (ag) block ALONE -- it is inserted directly before (q), with no other
-    // lettered check between them, so the block simply runs up to the (q) marker itself.
-    let ag_block = &live_flow[ag_at..q_at];
+    // Scope the slice to the (ag) block ALONE -- end it at the NEXT check boundary (# (ah)), not at
+    // (q): the (ah) realtime-policy check now sits between (ag) and (q) and carries its own fail(),
+    // so a [ag..q] slice would let (ag)'s "FAIL loud" assertion pass on (ah)'s fail() (issue 899
+    // review). Narrow it so the assertion binds to (ag)'s own block.
+    let ag_end = live_flow[ag_at..]
+        .find("\n# (ah) ")
+        .map(|i| ag_at + i)
+        .expect("(ah) block start (the check immediately after the (ag) ethtool check)");
+    let ag_block = &live_flow[ag_at..ag_end];
     assert!(
         ag_block.contains("command -v ethtool"),
         "(ag) must actually probe ethtool via `command -v ethtool`: {ag_block}"

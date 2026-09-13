@@ -144,8 +144,9 @@
 #       NO process-wide CPUSchedulingPolicy (it forced EVERY thread onto SCHED_FIFO on the isolated
 #       core -- 27 on cam1 -- instead of SCHED_OTHER), AND the live camera-box process must have only
 #       a handful of SCHED_FIFO threads (the binary raises FIFO per-thread only on the capture+emit
-#       hot path). FAILs if the policy is still in the unit or the live FIFO thread count exceeds the
-#       small ceiling; WARNs if the live count is unreadable (camera-box not running).
+#       hot path). FAILs if the policy is still in the unit, the live FIFO thread count exceeds the
+#       small ceiling, OR a RUNNING process has ZERO FIFO threads (the per-thread raise silently
+#       failed -- e.g. missing CAP_SYS_NICE); WARNs if the live count is unreadable (not running).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -609,9 +610,14 @@ rt_fifo_thread_ceiling() { printf '4'; }
 #   CEILING -- the max acceptable FIFO thread count (rt_fifo_thread_ceiling).
 # Tokens: "unit-has-process-wide-fifo" (config still wrong -- FAIL, independent of the count),
 # "too-many-fifo-threads:<n>" (unit clean but the live process has > CEILING FIFO threads, so
-# the process-wide policy is still in effect -- FAIL), "ok" (unit clean AND count <= ceiling),
-# "ok-config-only" (unit clean but the live count is unreadable, e.g. camera-box not running --
-# WARN, another check owns liveness), "unknown" (a malformed input -- WARN).
+# the process-wide policy is still in effect -- FAIL), "no-fifo-thread" (unit clean and the
+# process IS running but has ZERO SCHED_FIFO threads -- the binary's per-thread raise silently
+# failed, e.g. CAP_SYS_NICE missing, so the grab lost its realtime priority -- FAIL: this is the
+# floor that keeps the ceiling-only check from greenlighting a silent no-op, issue 899 review),
+# "ok" (unit clean AND 1 <= count <= ceiling), "ok-config-only" (unit clean but the live count is
+# unreadable / EMPTY, e.g. camera-box not running -- WARN, another check owns liveness),
+# "unknown" (a malformed input -- WARN). NOTE the count="" (not running) vs count="0" (running,
+# 0 FIFO) distinction is load-bearing: the caller sets fifo="" ONLY when no pid was found.
 rt_thread_policy_verdict() {
   local has="$1" count="$2" ceiling="$3"
   case "$has" in
@@ -621,6 +627,7 @@ rt_thread_policy_verdict() {
   esac
   case "$ceiling" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   case "$count" in ''|*[!0-9]*) printf 'ok-config-only'; return 0 ;; esac
+  if [ "$count" = "0" ]; then printf 'no-fifo-thread'; return 0; fi
   if [ "$count" -gt "$ceiling" ]; then printf 'too-many-fifo-threads:%s' "$count"; return 0; fi
   printf 'ok'
 }
@@ -1559,6 +1566,8 @@ else
       fail "camera-box.service still sets a process-wide CPUSchedulingPolicy -- every thread inherits SCHED_FIFO on the isolated core (the pre-899 defect 2, ~27 threads on cam1); re-provision with the current setup-device.sh (docs/runbooks/899-realtime-isolation.md, issue 899 defect 2)" ;;
     too-many-fifo-threads:*)
       fail "the live camera-box process has ${RT_POL_VERDICT#too-many-fifo-threads:} SCHED_FIFO threads (> ${RT_CEIL}) -- the process-wide FIFO policy is still in effect (pre-899 defect 2, was ~27 on cam1); only the capture+emit hot path should be FIFO (issue 899 defect 2)" ;;
+    no-fifo-thread)
+      fail "the live camera-box process (pid ${RT_CBPID:-?}) has ZERO SCHED_FIFO threads -- the binary's per-thread FIFO raise silently failed (missing CAP_SYS_NICE? re-run STEP 9 setcap 'cap_sys_nice,cap_ipc_lock+ep'), so the capture+emit grab lost its realtime priority (issue 899 defect 2)" ;;
     *)
       warn "could not grade per-thread realtime policy (haspol='${RT_HASPOL}', fifo='${RT_FIFO}', pid='${RT_CBPID:-none}') -- issue-899 check (ah) incomplete" ;;
   esac
