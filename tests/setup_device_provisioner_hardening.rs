@@ -891,6 +891,50 @@ fn create_usb_linux_sources_log_diet_and_writes_the_journald_dropin_into_the_chr
     );
 }
 
+// #1309 -- persistent journal on the ro-root appliance. create-usb-linux.sh lays a dedicated ext4
+// partition (p3, LABEL cambox-journal) and mounts it `nofail` at /var/log/journal; setup-device.sh
+// mounts it idempotently when the label exists (an already-flashed box). Both use the SAME
+// scripts/lib/log-diet.sh source of truth, so the label + fstab line can never drift.
+#[test]
+fn create_usb_partitions_a_dedicated_persistent_journal_partition_1309() {
+    let body = read_usb_script();
+    // root is no longer 100% -- it leaves 512MiB at the end so p3 exists AND root is not the last
+    // partition (so #369 auto-grow-root correctly refuses to expand it).
+    assert!(
+        body.contains("mkpart \"root\" ext4 513MiB -513MiB"),
+        "create-usb-linux.sh must size root to leave 512MiB tail for the journal partition (#1309)"
+    );
+    assert!(
+        body.contains("mkpart \"$LOG_DIET_JOURNAL_PART_LABEL\" ext4 -513MiB 100%"),
+        "create-usb-linux.sh must create the persistent-journal partition p3 (#1309)"
+    );
+    assert!(
+        body.contains("mkfs.ext4 -L \"$LOG_DIET_JOURNAL_PART_LABEL\""),
+        "create-usb-linux.sh must mkfs the journal partition with the shared label (#1309)"
+    );
+    assert!(
+        on_noncomment_line(&body, "$(log_diet_journal_fstab_line)"),
+        "create-usb-linux.sh base-image fstab must mount the journal partition via the shared \
+         log_diet_journal_fstab_line (#1309)"
+    );
+}
+
+#[test]
+fn setup_device_fstab_conditionally_mounts_the_persistent_journal_partition_1309() {
+    let body = read_script();
+    // setup-device.sh writes the mount line ONLY when the labelled partition exists on THIS box
+    // (an already-flashed box), else a harmless comment -- an old box (no p3) is never given an
+    // unmountable entry, and `nofail` in the shared line means even that can't block boot.
+    assert!(
+        body.contains("blkid -L \"$LOG_DIET_JOURNAL_PART_LABEL\""),
+        "setup-device.sh must guard the journal mount on the partition actually existing (#1309)"
+    );
+    assert!(
+        body.contains("log_diet_journal_fstab_line"),
+        "setup-device.sh must emit the journal fstab line via the shared generator (#1309)"
+    );
+}
+
 /// #930 finding 10 — the STEP 16 ffmpeg install (the lipsync-test-mode runtime dependency) must
 /// FAIL LOUD like the rest of this ticket's fail-loud posture (item 3 above), not swallow a real
 /// apt failure behind `2>/dev/null || true` and then print "Installed: ffmpeg, ..." regardless.
