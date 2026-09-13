@@ -81,9 +81,15 @@ systemctl --user daemon-reload
 #    a) with the marker AUDIBLE -> a manual pass reports PRESENT, no page:
 systemctl --user start measurement-audio-alert-watchdog.service
 journalctl --user -u measurement-audio-alert-watchdog -n 60
-#    b) MUTE the mbc input over WS on stream, run two passes -> a bucketed SILENT page:
-#       (e.g. OBS-WS SetInputMute mbc=true, or mute the Ableton mbc channel), then UNMUTE ->
+#    b) SILENCE the mbc SIGNAL (not the OBS input's mute), run two passes -> a bucketed SILENT page:
+#       mute the Ableton mbc channel on 10.77.7.232, OR OBS-WS SetInputVolume mbc to the minimum
+#       (both keep the input PRESENT in the meter stream with zero levels -> SILENT). Then restore ->
 #       the next pass logs a machine-channel RECOVERY (no phone ping).
+#       DO NOT use SetInputMute for this: muting the OBS INPUT itself typically empties its meter, so
+#       the watchdog reads meter_present=0 -> UNKNOWN (no page, fail-safe) and the verify would NOT
+#       confirm the SILENT path. An OBS-input mute is deliberately UNKNOWN-not-SILENT: it is an
+#       operator toggle, not one of the three chain-failure modes (mic off / Ableton mute / Dante
+#       drop), all of which are UPSTREAM of the OBS input and correctly read SILENT.
 #    c) or stub the fetch seam against a crafted reading (no live box touched):
 MEASUREMENT_AUDIO_FETCH_CMD=/path/to/stub \
   scripts/measurement-audio-alert-watchdog.sh --dry-run     # confirm two passes -> a bucketed alert

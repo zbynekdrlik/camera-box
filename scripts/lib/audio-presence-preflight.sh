@@ -74,7 +74,7 @@ audio_preflight_parse_max_db() {
   printf '%s\n' "$db"
 }
 
-# audio_preflight_is_silent DB [THRESHOLD_DB=-60] -> "true"/"false". Silent (a fail) iff the
+# audio_preflight_is_silent DB [THRESHOLD_DB=audio_preflight_default_threshold_db (-60)] -> "true"/"false". Silent (a fail) iff the
 # measured DB is STRICTLY below the threshold — a track exactly at the threshold is treated as
 # audible, not silent. Float-safe (levels are like -5.4 / -91.0) via awk. DB MUST already be a
 # validated numeric (the caller routes an unparseable value to the unreadable diagnostic first).
@@ -87,7 +87,7 @@ audio_preflight_is_silent() {
   fi
 }
 
-# audio_preflight_silent_message DB [THRESHOLD_DB=-60] -> the operator-facing fail message, a pure
+# audio_preflight_silent_message DB [THRESHOLD_DB=audio_preflight_default_threshold_db (-60)] -> the operator-facing fail message, a pure
 # string formatter (no I/O) so it is directly unit-testable — names the measured level, the
 # threshold, and the exact chain link to check (the mbc Ableton mic channel + Dante routing).
 audio_preflight_silent_message() {
@@ -116,7 +116,7 @@ audio_preflight_norec_message() {
 # silence ~-91 dB, well below any real signal) for the hard fail, and treats anything between the
 # DEAD floor and the existing -60 dB WARN bar as QUIET -- reported, never blocking.
 
-# audio_preflight_tier DB [DEAD_DB=-80] [WARN_DB=-60] -> "dead" | "quiet" | "audible". Strict '<'
+# audio_preflight_tier DB [DEAD_DB=-80] [WARN_DB=audio_preflight_default_threshold_db (-60)] -> "dead" | "quiet" | "audible". Strict '<'
 # on both boundaries (mirrors audio_preflight_is_silent's own strict-< convention): exactly at a
 # boundary counts as the HEALTHIER side. Float-safe via awk (levels are like -5.4 / -91.0).
 audio_preflight_tier() {
@@ -139,7 +139,7 @@ audio_preflight_dead_message() {
   echo "measurement audio DEAD — measured max_volume ${db} dB (< ${dead_db} dB DEAD floor; digital silence is ~-91 dB, a live QPSK marker reads ~-5 dB). The mbc measurement-mic chain is genuinely silent: check the mbc Ableton mic channel is UNMUTED and the Dante routing into stream OBS (targets.md mbc row has the checklist). This is a HARD FAIL — rig-mode.sh test will not proceed on a dead measurement instrument (issue 901)."
 }
 
-# audio_preflight_quiet_message DB [WARN_DB=-60] -> the non-blocking WARN message for a present-
+# audio_preflight_quiet_message DB [WARN_DB=audio_preflight_default_threshold_db (-60)] -> the non-blocking WARN message for a present-
 # but-degraded chain (below the healthy -60 dB bar but above the DEAD floor) — reports the level
 # and moves on; never aborts rig-mode.sh test. Names the known issue-976 degradation so an
 # operator reading the log isn't left guessing whether this is a new problem.

@@ -48,6 +48,19 @@ production-critical dev1 watchdog class (umbrella **#1308**).
   in any event this window → `meter_present=0` → UNKNOWN (a renamed/removed input, or the meter event
   unavailable on the build), never a fabricated SILENT page. The probe's exit code (WS connect) drives
   SKIP separately — a dead stream box defers to #1001/#732.
+- **An OBS-INPUT-LEVEL mute is UNKNOWN, not SILENT — and that is correct.** The three real chain-failure
+  modes (measurement mic off, Ableton mbc channel muted, Dante route dropped) are all UPSTREAM of the
+  stream-OBS input, so the input stays PRESENT in the meter with zero levels → SILENT (paged). Muting
+  the `mbc` OBS INPUT itself typically EMPTIES its meter → `meter_present=0` → UNKNOWN (no page,
+  fail-safe): an OBS-input mute is an operator toggle, not a chain failure. **Consequence for the
+  live-verify:** silence the SIGNAL (Ableton channel mute / `SetInputVolume` to minimum on a present
+  input), NEVER `SetInputMute`, or the verify reads UNKNOWN and fails to confirm the SILENT path
+  (systemd README step 3b).
+- **The -60 dB bar is the #748 VALUE, but the MEASUREMENT differs — both are peak dBFS.** #748 reads
+  `max_volume` from an ffmpeg `volumedetect` over a real recording; this watchdog reads the live
+  `InputVolumeMeters` peak multiplier → dBFS over a ~2 s sample. They are not identical
+  instrumentation, but both are peak dBFS of the same `mbc` signal, so the shared -60 bar transfers.
+  Do not assume identical measurement when reading the "same -60 dB bar as #748" prose.
 - **TEST-premise, EVENT-gated (#1290) — but production-critical.** The QPSK marker only sounds in TEST,
   so EVENT → SKIP the whole check (no page) + clear the latch; TEST/UNKNOWN → proceed (fail-safe). The
   rig-mode gate is ORTHOGONAL to the fault-criticality axis: a silent measurement instrument means the
