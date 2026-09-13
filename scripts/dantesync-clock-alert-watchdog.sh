@@ -99,6 +99,13 @@ CURL_TIMEOUT="${DANTE_CLOCK_CURL_TIMEOUT:-10}"          # :8898 HTTP fetch (s)
 # box_up=0 -> SKIP, never a false NO_DANTESYNC.
 TCP_TIMEOUT="${DANTE_CLOCK_TCP_TIMEOUT:-4}"             # per box-up TCP connect (s)
 
+# #1309: when :8898 IS reachable, ALSO read the ssh MANAGEMENT banner off :22 (CAM/Linux nodes
+# only) to catch the 2026-09-13 half-dead wedge -- dantesync alive but sshd resets at kex (the box
+# is unmanageable while it still looks alive). A plain TCP connect stays UP during that wedge, so we
+# read the BANNER, not just the open port (watchdog_probe_ssh_banner). false-page-safe: only a
+# reset/timeout with :8898 STILL answering pages MGMT_DEAD.
+SSH_BANNER_TIMEOUT="${DANTE_CLOCK_SSH_BANNER_TIMEOUT:-5}"   # per ssh banner read (s)
+
 # updated_ts freshness: a reachable-but-STALE payload (HTTP alive, servo/updated_ts frozen) is a
 # silent clock loss the E2E gate already fails on -- page it. Default 300s (mirrors the gate's
 # DANTESYNC_OFFSET_FRESHNESS_S), generous over the ~30s updated_ts cadence.
@@ -197,6 +204,23 @@ box_up_probe() {
     printf '0'; return 0
   fi
   watchdog_probe_tcp "$ip" 22 "$TCP_TIMEOUT"
+}
+
+# mgmt_ssh_probe <name> <ip> <homegate> -> stdout: 1 (ssh banner read back) | 0 (connect
+# reset/timeout at kex, i.e. the #1309 half-dead signature) | "" (NOT probed). The #1309 management
+# axis is a CAM-node concern (Linux, homegate=always); OBS/Windows boxes ("" -> --mgmt-ssh-ok
+# omitted) keep their #732/#1001 coverage and have different ssh-banner semantics. Consulted ONLY
+# when :8898 answered (see handle_node). Reuses the shared watchdog_probe_ssh_banner -- never a novel
+# probe. DANTE_CLOCK_MGMT_SSH_CMD (Tier-0 seam, mirrors DANTE_CLOCK_BOX_UP_CMD): when set, invoked as
+# `<cmd> <name> <ip> <homegate>`, stdout REPLACES the real probe so a --dry-run needs no live box.
+mgmt_ssh_probe() {
+  local name="$1" ip="$2" homegate="$3"
+  if [ -n "${DANTE_CLOCK_MGMT_SSH_CMD:-}" ]; then
+    "$DANTE_CLOCK_MGMT_SSH_CMD" "$name" "$ip" "$homegate" 2>/dev/null || printf ''
+    return 0
+  fi
+  [ "$homegate" = "always" ] || { printf ''; return 0; }
+  watchdog_probe_ssh_banner "$ip" 22 "$SSH_BANNER_TIMEOUT"
 }
 
 # resolve_version_pin -> the ONE dantesync version pin on stdout (empty if unresolvable). Sourced from
@@ -305,6 +329,12 @@ handle_node() {
   local -a extra=()
   if body="$(fetch_status_json "$ip")"; then
     reachable=1
+    # :8898 alive -- ALSO read the ssh management banner (#1309). A reset/timeout while :8898 still
+    # answers is the half-dead wedge -> MGMT_DEAD. "" (obs/Windows / not probed) omits the flag.
+    local mgmt; mgmt="$(mgmt_ssh_probe "$name" "$ip" "$homegate")"
+    case "$mgmt" in
+      0 | 1) extra+=(--mgmt-ssh-ok "$mgmt") ;;
+    esac
   else
     reachable=0; body=""
     # :8898 dead this pass -- probe box up-ness so a live box with dead dantesync HTTP pages
@@ -339,12 +369,25 @@ handle_node() {
     OK)
       confirm_then_alert "node_${name}" 0 "dante-clock-${name}"
       confirm_then_alert "http_${name}" 0 "dante-clock-nohttp-${name}"
+      confirm_then_alert "mgmt_${name}" 0 "dante-clock-${name}-mgmt"   # #1309
+      return 0
+      ;;
+    MGMT_DEAD)
+      # #1309: :8898 answered but ssh management banner is dead (kex reset/timeout) -> the 13.9.
+      # half-dead wedge, the box is unmanageable while still alive. Clear the clock + http latches
+      # (the clock reading is moot while the box can't be reached/repaired) and page the mgmt fault.
+      confirm_then_alert "node_${name}" 0 "dante-clock-${name}"
+      confirm_then_alert "http_${name}" 0 "dante-clock-nohttp-${name}"
+      local cv; cv="$(printf '%s\n' "$out" | sed -n 's/^clock_verdict=//p')"
+      confirm_then_alert "mgmt_${name}" 1 "dante-clock-${name}-mgmt" \
+        "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) je POL-MŔTVA -- dantesync :$STATUS_PORT žije, ale ssh sa RESETUJE na banneri (kex): box je nedosiahnuteľný cez ssh/MCP -- presne trieda wedgu z 13.9.${vnote_txt} Forenzný snapshot je v jeho PERZISTENTNOM journale (ak on-box self-heal nezabral, treba power-cycle; clock=${cv:-?}). Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá."
       return 0
       ;;
     NO_DANTESYNC)
       # box UP, :8898 dead -> the dantesync daemon crashed/wedged on a live box. Clear any clock-fault
       # latch (we cannot measure the clock this pass) and page the HTTP-dead fault. #1308.
       confirm_then_alert "node_${name}" 0 "dante-clock-${name}"
+      confirm_then_alert "mgmt_${name}" 0 "dante-clock-${name}-mgmt"   # #1309: :8898 dead, mgmt not probed this pass
       confirm_then_alert "http_${name}" 1 "dante-clock-nohttp-${name}" \
         "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) je HORE, ale dantesync HTTP na :$STATUS_PORT NEODPOVEDÁ -- démon dantesync spadol/zamrzol na živom boxe.${vnote_txt} Bez neho uzol nemá dante clock a pri produkcii to potichu rozhodí A/V aj genlock. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. Náprava: reštartuj dantesync na $name a over :$STATUS_PORT."
       return 0
@@ -356,9 +399,10 @@ handle_node() {
       ;;
   esac
 
-  # NO_CLOCK: :8898 answered but the node lost the clock -> clear the HTTP-dead latch (HTTP is alive)
-  # and page the clock fault.
+  # NO_CLOCK: :8898 answered but the node lost the clock -> clear the HTTP-dead + mgmt latches (HTTP
+  # is alive and ssh answered, else this would be MGMT_DEAD) and page the clock fault.
   confirm_then_alert "http_${name}" 0 "dante-clock-nohttp-${name}"
+  confirm_then_alert "mgmt_${name}" 0 "dante-clock-${name}-mgmt"   # #1309
   local steps_note=""
   [ -n "$steps" ] && [ "$steps" != "null" ] && steps_note=", ${steps} NTP krokov/h"
   confirm_then_alert "node_${name}" 1 "dante-clock-${name}" \

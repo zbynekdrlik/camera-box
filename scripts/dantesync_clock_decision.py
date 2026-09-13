@@ -64,6 +64,13 @@ V_NO_CLOCK = "NO_CLOCK"
 # down/wedged on a live box, a production-critical page. Distinct from SKIP (box genuinely down ->
 # defer #1001) and from NO_CLOCK (daemon answering but not locked).
 V_NO_DANTESYNC = "NO_DANTESYNC"
+# #1309: the box's :8898 answered (dantesync HTTP alive) but its ssh MANAGEMENT banner is dead (a
+# kex reset / read timeout: anything that needs a fork -- an sshd session, the remoteos MCP, a
+# gphoto2 spawn -- fails while already-running processes keep answering). This is the 2026-09-13 P0
+# wedge: the box is UNMANAGEABLE while it still looks alive. Orthogonal to the clock axis, so it can
+# co-occur with OK/NO_CLOCK -- and it takes PRECEDENCE (a box you cannot ssh into or repair is the
+# P0; the clock reading, even OK, is moot until the box is reachable again).
+V_MGMT_DEAD = "MGMT_DEAD"
 
 # --- reason classes ---------------------------------------------------------------------------
 R_NONE = "none"
@@ -73,6 +80,7 @@ R_STORM = "storm"
 R_STALE = "stale"
 R_CLOCK_ALARM = "clock_alarm"
 R_NO_HTTP = "no_dantesync_http"  # #1308: box up, :8898 unreachable
+R_SSH_DEAD = "ssh_banner_dead"  # #1309: :8898 up, ssh management banner dead (the 13.9. wedge)
 
 # updated_ts freshness (mirror clock-offset-guard.sh pipe_json_freshness_verdict, #550/#591/#595): a
 # reachable-but-STALE :8898/status (HTTP thread alive, servo/updated_ts frozen) is a silent clock loss
@@ -138,8 +146,30 @@ def _ptp_locked(is_locked, mode):
 
 
 def analyze(status_json_text, box_reachable, grandmaster_ip, now=None, freshness_s=None,
-            clock_alarm_field=CLOCK_ALARM_FIELD, box_up=None, version_pin=None):
-    """One node's verdict from its :8898/status body.
+            clock_alarm_field=CLOCK_ALARM_FIELD, box_up=None, version_pin=None, mgmt_ssh_ok=None):
+    """One node's verdict, with the #1309 MGMT_DEAD axis folded over the clock verdict.
+
+    Delegates the clock/HTTP grading to `_analyze_clock` (unchanged), then applies ONE orthogonal
+    override: `mgmt_ssh_ok` (the dev1 ssh-banner probe result -- 1 banner read, 0 reset/timeout,
+    None not probed) is consulted ONLY when the box's :8898 answered this pass (box_reachable == 1).
+    A :8898-reachable box whose ssh MANAGEMENT banner is dead (mgmt_ssh_ok == 0) is MGMT_DEAD -- the
+    2026-09-13 P0 wedge, an unmanageable-but-alive box -- and this takes PRECEDENCE over the clock
+    verdict (carried on as `clock_verdict` for the alert body). mgmt_ssh_ok == None (the default, and
+    every pre-#1309 caller) never overrides, so all prior behaviour + tests are byte-for-byte intact.
+    """
+    res = _analyze_clock(status_json_text, box_reachable, grandmaster_ip, now=now,
+                         freshness_s=freshness_s, clock_alarm_field=clock_alarm_field,
+                         box_up=box_up, version_pin=version_pin)
+    if box_reachable == 1 and mgmt_ssh_ok == 0:
+        return {**res, "verdict": V_MGMT_DEAD, "reason": R_SSH_DEAD,
+                "clock_verdict": res.get("verdict")}
+    return res
+
+
+def _analyze_clock(status_json_text, box_reachable, grandmaster_ip, now=None, freshness_s=None,
+                   clock_alarm_field=CLOCK_ALARM_FIELD, box_up=None, version_pin=None):
+    """One node's CLOCK/HTTP verdict from its :8898/status body (the #1307/#1308 core; #1309 wraps
+    this with the MGMT_DEAD override in `analyze`).
 
     `box_reachable` is 1 iff the orchestrator fetched a 200 JSON body this pass. `grandmaster_ip` is
     the rig grandmaster resolved from video-clock.lan (empty => the gm comparison is skipped, so gm
@@ -265,6 +295,9 @@ def _main(argv):
                    help="#1308: 1/0 box up-ness when :8898 unreachable (omit = not probed -> SKIP)")
     a.add_argument("--version-pin", default=None,
                    help="#1308: expected dantesync version; a mismatch is reported, never a page")
+    a.add_argument("--mgmt-ssh-ok", type=int, default=None,
+                   help="#1309: 1/0 ssh management-banner probe result (omit = not probed). A "
+                        "reachable :8898 + a dead banner (0) -> MGMT_DEAD (the 13.9. wedge)")
 
     d = sub.add_parser("dedup-key", help="time-bucketed --dedup-key for a base + now + interval")
     d.add_argument("--base", required=True)
@@ -280,7 +313,7 @@ def _main(argv):
     if ns.cmd == "analyze":
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
         res = analyze(text, ns.box_reachable, ns.grandmaster_ip, now=ns.now, freshness_s=ns.freshness_s,
-                      box_up=ns.box_up, version_pin=ns.version_pin)
+                      box_up=ns.box_up, version_pin=ns.version_pin, mgmt_ssh_ok=ns.mgmt_ssh_ok)
         # Stable key ORDER (existing keys first, new #1308 keys appended) so the orchestrator's
         # `sed -n 's/^KEY=//p'` reads keep working and a new key is purely additive.
         for k in ("verdict", "reason", "is_locked", "mode", "gm_source_ip",
@@ -289,6 +322,7 @@ def _main(argv):
         print(f"alarm_reason={_fmt(res.get('alarm_reason'))}")
         print(f"version={_fmt(res.get('version'))}")
         print(f"version_note={_fmt(res.get('version_note'))}")
+        print(f"clock_verdict={_fmt(res.get('clock_verdict'))}")  # #1309: the underlying clock verdict when MGMT_DEAD overrode it
         return 0
 
     if ns.cmd == "dedup-key":

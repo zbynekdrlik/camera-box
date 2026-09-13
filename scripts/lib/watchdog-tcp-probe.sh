@@ -25,3 +25,27 @@ watchdog_probe_tcp() {
     printf '0'
   fi
 }
+
+# watchdog_probe_ssh_banner <ip> [port=22] [timeout_s=5]
+#   -> stdout: 1 (an `SSH-` protocol banner was READ back within timeout_s) | 0 (connect
+#   refused/filtered, OR connected but the banner was NOT read: a reset/timeout at
+#   kex_exchange_identification -- the exact #1309 half-dead signature, where tcp/22 ACCEPTS but
+#   sshd cannot fork a session so the banner never arrives). ALWAYS rc 0 (prints 0 on failure), so a
+#   caller under `set -e` never aborts. This is a strict superset of watchdog_probe_tcp's evidence: a
+#   plain connect stays UP during the wedge (a mis-diagnosis a connect-only probe would make), so the
+#   dev1 MGMT_DEAD watchdog reads the BANNER, not just the open port.
+watchdog_probe_ssh_banner() {
+  local ip="$1" port="${2:-22}" timeout_s="${3:-5}" line
+  # $ip/$port/$timeout_s are positional args to the inner bash ($0/$1/$2), never interpolated into
+  # the -c string (no shell-injection from a config value). Single quotes are DELIBERATE.
+  # shellcheck disable=SC2016
+  line="$(timeout "$timeout_s" bash -c '
+    exec 3<>/dev/tcp/"$0"/"$1" || exit 1
+    IFS= read -r -t "$2" _banner <&3 || exit 1
+    printf "%s" "$_banner"
+  ' "$ip" "$port" "$timeout_s" 2>/dev/null)" || { printf '0'; return 0; }
+  case "$line" in
+    SSH-*) printf '1' ;;
+    *) printf '0' ;;
+  esac
+}
