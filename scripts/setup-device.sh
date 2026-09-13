@@ -1419,6 +1419,12 @@ $(grep '/boot/efi' /etc/fstab.bak 2>/dev/null || echo "# No EFI partition")
 # tmpfs mounts for writable directories
 tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
 tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
+# #1309: persistent journal on the dedicated ext4 partition, mounted OVER the /var/log tmpfs (systemd
+# orders /var/log first by path prefix). `nofail` -> a box WITHOUT the partition (an old box not yet
+# reflashed via create-usb-linux.sh) still boots and journald simply falls back to a volatile journal
+# on the tmpfs above. Emitted only when the labelled partition actually exists, so setup-device.sh on
+# such an old box writes a harmless comment instead of an unmountable entry.
+$(if blkid -L "$LOG_DIET_JOURNAL_PART_LABEL" >/dev/null 2>&1; then log_diet_journal_fstab_line; else echo "# no '$LOG_DIET_JOURNAL_PART_LABEL' partition on this box -- reflash via create-usb-linux.sh for a persistent journal (#1309)"; fi)
 tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
 # #295: size /var/cache >=512M (uniformly across the fleet) so apt can never ENOSPC and leave a
 # freshly-installed kernel without its initrd (a 100M /var/cache filled up and did exactly that).

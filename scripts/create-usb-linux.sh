@@ -162,8 +162,18 @@ partition_drive() {
     parted -s "$DEVICE" mkpart "EFI" fat32 1MiB 513MiB
     parted -s "$DEVICE" set 1 esp on
 
-    # Create root partition (rest of disk, min 30GB)
-    parted -s "$DEVICE" mkpart "root" ext4 513MiB 100%
+    # Create root partition. #1309: leave 512MiB at the END of the disk for the persistent-journal
+    # partition (p3) instead of taking 100%. Root is therefore NOT the last partition, so the #369
+    # auto-grow-root service's growpart correctly REFUSES to expand it (its own fault-tolerant
+    # "root is not the last partition -> non-fatal skip" path, the documented 3-partition overlay
+    # case) -- root stays at this size, p3 survives.
+    parted -s "$DEVICE" mkpart "root" ext4 513MiB -513MiB
+
+    # #1309: persistent-journal partition (p3, last 512MiB). Mounted `nofail` at /var/log/journal so
+    # journald Storage=persistent survives a power-cycle -- the whole point of this ticket: the
+    # 2026-09-13 half-dead wedge must be diagnosable from `journalctl -b -1` after the owner's
+    # power-cycle, not lost with the runtime tmpfs journal.
+    parted -s "$DEVICE" mkpart "$LOG_DIET_JOURNAL_PART_LABEL" ext4 -513MiB 100%
 
     # Wait for kernel to recognize partitions
     partprobe "$DEVICE"
@@ -173,14 +183,19 @@ partition_drive() {
     if [[ "$DEVICE" == *"nvme"* ]]; then
         PART_EFI="${DEVICE}p1"
         PART_ROOT="${DEVICE}p2"
+        PART_JOURNAL="${DEVICE}p3"
     else
         PART_EFI="${DEVICE}1"
         PART_ROOT="${DEVICE}2"
+        PART_JOURNAL="${DEVICE}3"
     fi
 
     log "Creating filesystems..."
     mkfs.vfat -F32 -n "EFI" "$PART_EFI"
     mkfs.ext4 -L "ubuntu-root" "$PART_ROOT"
+    # #1309: the label is the ONE source of truth shared with setup-device.sh's fstab + the
+    # verify-device.sh (ai) acceptance check (log_diet_journal_fstab_line / _persistent_verdict).
+    mkfs.ext4 -L "$LOG_DIET_JOURNAL_PART_LABEL" "$PART_JOURNAL"
 }
 
 # Mount filesystems
@@ -232,7 +247,12 @@ EOF
 UUID=$ROOT_UUID /         ext4  errors=remount-ro 0 1
 UUID=$EFI_UUID  /boot/efi vfat  umask=0077        0 1
 tmpfs           /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
+$(log_diet_journal_fstab_line)
 EOF
+    # #1309: create the mountpoint in the base image so the persistent-journal partition mounts on
+    # first boot (before setup-device.sh ever runs). `nofail` in the line above means a box whose p3
+    # is somehow absent still boots. Single source of truth for the path: LOG_DIET_JOURNAL_DIR.
+    mkdir -p "$MOUNT_ROOT$LOG_DIET_JOURNAL_DIR"
 
     # #679: bound /var/log against runaway growth from ANY chatty logger, baked in from first
     # boot -- this closes the narrow window before setup-device.sh later converts /var/log to a

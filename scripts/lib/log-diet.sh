@@ -41,12 +41,85 @@
 LOG_DIET_JOURNALD_DROPIN_PATH="/etc/systemd/journald.conf.d/99-camera-box-diet.conf"
 LOG_DIET_JOURNALD_RUNTIME_MAX="20M"
 
+# #1309: the appliance is a ro-root box whose /var/log is a 50M tmpfs, so journald runs
+# RUNTIME-only (Storage=auto -> volatile) and the owner's emergency power-cycle DESTROYS the
+# only evidence of the 2026-09-13 half-dead wedge (the ps tree, pids.current, sshd `fork:
+# Resource temporarily unavailable`, the PAM/logind stall). Make the journal PERSISTENT so
+# `journalctl -b -1` after a power-cycle shows the wedge. Persistence needs a runtime-writable
+# non-tmpfs directory, which the ro root cannot provide -- so it lives on a dedicated ext4
+# partition (LABEL below) mounted `nofail` at /var/log/journal by the provisioners; the drop-in
+# turns Storage on and bounds the persistent half with SystemMaxUse (the runtime half keeps its
+# own RuntimeMaxUse cap so the tmpfs can never refill the way rsyslog did, #762). `nofail` means a
+# box with no such partition (an old box not yet reflashed) still boots and simply falls back to a
+# volatile journal -- persistence is a strict, safe upgrade, never a boot risk.
+LOG_DIET_JOURNALD_SYSTEM_MAX="200M"
+LOG_DIET_JOURNAL_DIR="/var/log/journal"
+LOG_DIET_JOURNAL_PART_LABEL="cambox-journal"
+
 # log_diet_journald_dropin -> the full desired content of ${LOG_DIET_JOURNALD_DROPIN_PATH}.
+# #1309: adds Storage=persistent + a bounded SystemMaxUse alongside the #762 RuntimeMaxUse cap.
 log_diet_journald_dropin() {
   cat <<EOF
 [Journal]
+Storage=persistent
 RuntimeMaxUse=${LOG_DIET_JOURNALD_RUNTIME_MAX}
+SystemMaxUse=${LOG_DIET_JOURNALD_SYSTEM_MAX}
 EOF
+}
+
+# log_diet_journal_fstab_line -> the fstab entry mounting the dedicated persistent-journal partition
+# at ${LOG_DIET_JOURNAL_DIR}. `nofail` is LOAD-BEARING: a bad/missing/absent partition (an old box
+# not yet reflashed via create-usb) must NEVER block boot -- systemd skips the mount and journald
+# falls back to a volatile journal on the /var/log tmpfs. nosuid,nodev,noatime mirror the fleet's
+# other tmpfs mounts. The mount is ordered AFTER /var/log by systemd's own path-prefix dependency
+# (/var/log tmpfs mounts first, then this partition mounts over /var/log/journal).
+log_diet_journal_fstab_line() {
+  printf 'LABEL=%s %s ext4 rw,nofail,noatime,nosuid,nodev 0 2\n' \
+    "$LOG_DIET_JOURNAL_PART_LABEL" "$LOG_DIET_JOURNAL_DIR"
+}
+
+# log_diet_journal_persistent_verdict STATE_BLOCK -> "ok" or the newline-joined "FAIL: ..." reasons.
+# STATE_BLOCK is KEY=VALUE-per-line: JOURNAL_MOUNT_FSTYPE (findmnt -no FSTYPE /var/log/journal) +
+# JOURNALD_DROPIN (the '|'-flattened drop-in content). Fail-CLOSED (test-strictness): an empty/tmpfs
+# fstype or a drop-in missing Storage=persistent is a FAIL, never read as "safely persistent" -- a
+# box that would lose its journal on the next power-cycle must FAIL its acceptance gate so the
+# operator knows a reflash (create-usb, which lays the partition) is needed. Separate from
+# log_diet_provision_verdict on purpose: the #762 (u) check + its RuntimeMaxUse-only fixtures stay
+# byte-for-byte unchanged.
+log_diet_journal_persistent_verdict() {
+  local block="$1" fstype dropin fails="" nl
+  nl=$'\n'
+  fstype="$(printf '%s\n' "$block" | sed -n 's/^JOURNAL_MOUNT_FSTYPE=//p')"
+  dropin="$(printf '%s\n' "$block" | sed -n 's/^JOURNALD_DROPIN=//p')"
+
+  case "$dropin" in
+    *"Storage=persistent"*) ;;
+    *)
+      fails="${fails:+$fails$nl}FAIL: journald Storage=persistent drop-in missing at ${LOG_DIET_JOURNALD_DROPIN_PATH} (#1309) -- the journal is volatile and the owner's power-cycle destroys the wedge evidence"
+      ;;
+  esac
+  case "$dropin" in
+    *"SystemMaxUse=${LOG_DIET_JOURNALD_SYSTEM_MAX}"*) ;;
+    *)
+      fails="${fails:+$fails$nl}FAIL: journald SystemMaxUse=${LOG_DIET_JOURNALD_SYSTEM_MAX} drop-in missing/wrong (#1309) -- the persistent journal could grow unbounded on the data partition"
+      ;;
+  esac
+  case "$(printf '%s' "$fstype" | tr -d '[:space:]')" in
+    ext4)
+      ;;
+    '' | tmpfs)
+      fails="${fails:+$fails$nl}FAIL: ${LOG_DIET_JOURNAL_DIR} is not a persistent partition (fstype='${fstype:-<none>}', want ext4) (#1309) -- reflash via create-usb to lay the '${LOG_DIET_JOURNAL_PART_LABEL}' partition; the journal will not survive a power-cycle"
+      ;;
+    *)
+      fails="${fails:+$fails$nl}FAIL: ${LOG_DIET_JOURNAL_DIR} has an unexpected fstype '${fstype}' (want ext4) (#1309)"
+      ;;
+  esac
+
+  if [ -n "$fails" ]; then
+    printf '%s\n' "$fails"
+  else
+    printf 'ok\n'
+  fi
 }
 
 # log_diet_gather_remote_snippet -> the REMOTE bash run over ssh that reports rsyslog's
@@ -58,6 +131,7 @@ echo "RSYSLOG_DPKG=$(dpkg -s rsyslog 2>/dev/null | sed -n 's/^Status: //p')"
 echo "RSYSLOG_ACTIVE=$(systemctl is-active rsyslog 2>/dev/null)"
 echo "RSYSLOG_ENABLED=$(systemctl is-enabled rsyslog 2>/dev/null)"
 echo "JOURNALD_DROPIN=$(cat /etc/systemd/journald.conf.d/99-camera-box-diet.conf 2>/dev/null | tr '\n' '|')"
+echo "JOURNAL_MOUNT_FSTYPE=$(findmnt -no FSTYPE /var/log/journal 2>/dev/null)"
 REMOTE
 }
 

@@ -147,6 +147,11 @@
 #       hot path). FAILs if the policy is still in the unit, the live FIFO thread count exceeds the
 #       small ceiling, OR a RUNNING process has ZERO FIFO threads (the per-thread raise silently
 #       failed -- e.g. missing CAP_SYS_NICE); WARNs if the live count is unreadable (not running).
+#   (ai) persistent journal effective (#1309) -- HARD FAIL: the journald drop-in carries
+#       Storage=persistent + a bounded SystemMaxUse AND /var/log/journal is a real ext4 partition
+#       (LABEL cambox-journal), not the volatile /var/log tmpfs -- so `journalctl -b -1` survives
+#       the owner's emergency power-cycle and the next half-dead wedge is diagnosable. FAILs (with a
+#       "reflash via create-usb-linux.sh" hint) on a box whose journal is still volatile.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -784,6 +789,9 @@ Checks:
   (ah) per-thread realtime policy (issue 899 defect 2): the unit has NO process-wide
       CPUSchedulingPolicy and the live camera-box process shows only a handful of SCHED_FIFO
       threads (FIFO is raised per-thread only on the capture+emit hot path, not process-wide)
+  (ai) persistent journal effective (#1309): Storage=persistent + bounded SystemMaxUse drop-in AND
+      /var/log/journal is a real ext4 partition (not the tmpfs) so journalctl -b -1 survives a
+      power-cycle -- FAILs with a "reflash via create-usb-linux.sh" hint if the journal is volatile
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1571,6 +1579,30 @@ else
     *)
       warn "could not grade per-thread realtime policy (haspol='${RT_HASPOL}', fifo='${RT_FIFO}', pid='${RT_CBPID:-none}') -- issue-899 check (ah) incomplete" ;;
   esac
+fi
+
+# (ai) persistent journal effective (#1309) -- HARD FAIL ----------------------------------------
+# The 2026-09-13 P0 wedge (a cambox goes half-dead after a bkshading-relay (re)start) was diagnosed
+# twice BY INFERENCE ONLY because the journal is runtime-only on this ro-root/tmpfs-/var/log box, so
+# the owner's emergency power-cycle destroys the evidence. This check certifies the journal is now
+# PERSISTENT so `journalctl -b -1` survives a power-cycle: (1) the journald drop-in carries
+# Storage=persistent + a bounded SystemMaxUse, AND (2) /var/log/journal is a real ext4 partition
+# (LABEL cambox-journal), not the volatile tmpfs. Graded by the pure log_diet_journal_persistent_verdict
+# against $LOG_DIET_STATE already gathered at (s)/(u) -- no extra ssh round trip. HARD FAIL: a box
+# that would lose the next wedge to a power-cycle must NOT pass acceptance -- reflash via
+# create-usb-linux.sh (which lays the partition) if it fails. Inserted BEFORE (q) per
+# .claude/rules/provisioning-scripts.md (the (q)-last invariant).
+if [ -z "${LOG_DIET_STATE:-}" ]; then
+  fail "could not read journal-persistence state over SSH -- cannot certify the #1309 persistent journal is applied"
+else
+  JOURNAL_PERSIST_VERDICT="$(log_diet_journal_persistent_verdict "$LOG_DIET_STATE")"
+  if [ "$JOURNAL_PERSIST_VERDICT" = "ok" ]; then
+    ok "persistent journal effective: Storage=persistent + SystemMaxUse=${LOG_DIET_JOURNALD_SYSTEM_MAX} drop-in and /var/log/journal is a real ext4 partition -- \`journalctl -b -1\` survives a power-cycle (#1309)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "persistent journal: ${_reason#FAIL: }"
+    done <<< "$JOURNAL_PERSIST_VERDICT"
+  fi
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
