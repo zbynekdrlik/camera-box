@@ -115,21 +115,17 @@ fn apply_realtime_optimizations() {
     apply_cpu_affinity();
 }
 
-/// Set SCHED_FIFO real-time scheduling with priority 90
+/// Raise the CURRENT (capture + NDI-emit) thread to SCHED_FIFO per-thread (issue 899
+/// defect 2). Delegates to [`camera_box::affinity::set_current_thread_realtime`] so the
+/// per-thread realtime decision lives in ONE tested place: the systemd unit no longer sets
+/// a process-wide `CPUSchedulingPolicy=fifo` (which used to force EVERY thread to FIFO 50
+/// on the isolated core), so the binary raises FIFO only on the hot path here; every other
+/// thread stays SCHED_OTHER. Best-effort — needs CAP_SYS_NICE (the unit's setcap grants
+/// `cap_sys_nice,cap_ipc_lock`), logs + continues on failure.
 fn apply_realtime_scheduling() {
-    unsafe {
-        let param = libc::sched_param { sched_priority: 90 };
-        let result = libc::sched_setscheduler(0, libc::SCHED_FIFO, &param);
-
-        if result == 0 {
-            tracing::info!("Real-time SCHED_FIFO priority 90 enabled");
-        } else {
-            tracing::warn!(
-                "Could not set real-time priority (need CAP_SYS_NICE). \
-                Run: sudo setcap 'cap_sys_nice,cap_ipc_lock+ep' /usr/local/bin/camera-box"
-            );
-        }
-    }
+    camera_box::affinity::set_current_thread_realtime(
+        camera_box::affinity::RtThreadRole::CaptureEmit,
+    );
 }
 
 /// Lock all memory to prevent page faults during capture
@@ -963,6 +959,13 @@ async fn run_capture_loop(
                     // inherits from the capture thread — same core, but explicit + robust to any
                     // future spawn-order change.
                     camera_box::affinity::pin_capture_thread();
+                    // issue 899 defect 2: in burn mode this thread is the EMIT hot path (the NDI
+                    // sender lives here), so raise SCHED_FIFO PER THREAD — it used to inherit FIFO
+                    // from the retired process-wide CPUSchedulingPolicy, now dropped from the unit.
+                    // Only THIS thread is raised; auxiliary threads stay SCHED_OTHER.
+                    camera_box::affinity::set_current_thread_realtime(
+                        camera_box::affinity::RtThreadRole::CaptureEmit,
+                    );
                     // Burn thread: (optionally) render the QR into the copied frame + NDI-send it in
                     // receive (= emit) order. Ends when the capture loop drops the ring (shutdown).
                     camera_box::probe::genlock::run_burn_ring(rx, |mut job: BurnJob| {

@@ -265,6 +265,54 @@ pub fn select_irq_target_cores(
 }
 
 // ---------------------------------------------------------------------------
+// Per-thread realtime scheduling policy (issue 899 defect 2).
+//
+// Before this ticket the systemd unit carried a process-wide `CPUSchedulingPolicy=fifo`,
+// so EVERY thread inherited SCHED_FIFO prio 50 on the isolated core (measured: 27 of them
+// on cam1) — NOT the SCHED_OTHER the #289 design intended. That policy is now dropped from
+// the unit; the binary instead raises SCHED_FIFO PER THREAD only on the capture + NDI-emit
+// hot path, and every auxiliary worker keeps the process default SCHED_OTHER. The pure
+// role→priority decision below is unit-tested; the syscall glue that applies it lives with
+// the other IO glue further down.
+// ---------------------------------------------------------------------------
+
+/// SCHED_FIFO priority for the capture + NDI-emit hot path (issue 899 defect 2). 90
+/// matches the priority the process already raised the grab to before this ticket
+/// (`main.rs::apply_realtime_scheduling`); it sits ABOVE the auxiliary threads, which
+/// now stay SCHED_OTHER once the unit's process-wide `CPUSchedulingPolicy=fifo` is gone.
+pub const CAPTURE_FIFO_PRIORITY: i32 = 90;
+
+/// The realtime scheduling roles a camera-box thread can take (issue 899 defect 2).
+/// The role is implicit in which affinity entry point a thread calls — the capture+emit
+/// hot threads (the ones [`pin_capture_thread`] places on the isolated core) are
+/// `CaptureEmit`; every thread that pins OFF the capture core ([`pin_off_capture_core`])
+/// is `Auxiliary`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RtThreadRole {
+    /// The capture + NDI-emit hot path — the production capture loop thread and the
+    /// cam1-burn EMIT thread (probe/E2E). Raised to SCHED_FIFO so box load on the
+    /// general cores never preempts the grab.
+    CaptureEmit,
+    /// Every other worker — painter / `--display` render / intercom / QPSK-marker /
+    /// publish-30p, plus the NDI SDK and tokio internals. Stays SCHED_OTHER (idle
+    /// slack on the general cores), never FIFO.
+    Auxiliary,
+}
+
+/// The SCHED_FIFO priority a thread ROLE should run at, or `None` to stay SCHED_OTHER
+/// (issue 899 defect 2). Only [`RtThreadRole::CaptureEmit`] is raised to FIFO
+/// ([`CAPTURE_FIFO_PRIORITY`]); every [`RtThreadRole::Auxiliary`] thread returns `None`
+/// and keeps the process default SCHED_OTHER — which is exactly what the unit's own
+/// comment always CLAIMED and, once the process-wide policy is dropped, is finally TRUE.
+/// This pure decision is what the runtime glue [`set_current_thread_realtime`] applies.
+pub fn realtime_fifo_priority(role: RtThreadRole) -> Option<i32> {
+    match role {
+        RtThreadRole::CaptureEmit => Some(CAPTURE_FIFO_PRIORITY),
+        RtThreadRole::Auxiliary => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // IO / syscall glue around the pure logic above (not unit-tested — reads /sys,
 // /proc, calls sched_setaffinity).
 // ---------------------------------------------------------------------------
@@ -375,6 +423,41 @@ pub fn pin_off_capture_core(label: &str) {
         );
     } else {
         tracing::warn!("#289 {label} thread: could not pin to non-capture cores {cores:?}");
+    }
+}
+
+/// Apply the realtime scheduling policy for `role` to the CURRENT thread (issue 899
+/// defect 2). For [`RtThreadRole::CaptureEmit`] this raises the thread to SCHED_FIFO at
+/// [`CAPTURE_FIFO_PRIORITY`] via `sched_setscheduler`; for [`RtThreadRole::Auxiliary`] it
+/// is a no-op (the thread keeps the process default SCHED_OTHER, now that the unit no
+/// longer sets a process-wide `CPUSchedulingPolicy`).
+///
+/// Best-effort, exactly like the affinity pins above: raising FIFO needs `CAP_SYS_NICE`
+/// (granted by the unit's `setcap cap_sys_nice,cap_ipc_lock`), and on failure this logs a
+/// warning and CONTINUES — it never panics and never stops the thread from running. Call
+/// ONCE at the start of a capture/emit thread, before its hot loop.
+pub fn set_current_thread_realtime(role: RtThreadRole) {
+    let Some(prio) = realtime_fifo_priority(role) else {
+        // Auxiliary thread (issue 899): stays SCHED_OTHER. No syscall, nothing to log.
+        return;
+    };
+    // SAFETY: sched_setscheduler(0, ...) targets the CURRENT thread (always permitted for
+    // the caller's own thread when it holds CAP_SYS_NICE) and reads `param` for the passed
+    // struct only; `param` is a plain initialised value with no pointers.
+    let ok = unsafe {
+        let param = libc::sched_param {
+            sched_priority: prio,
+        };
+        libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) == 0
+    };
+    if ok {
+        tracing::info!(
+            "#899 capture+emit thread set SCHED_FIFO prio {prio} per-thread (auxiliary threads stay SCHED_OTHER)"
+        );
+    } else {
+        tracing::warn!(
+            "#899 could not set capture+emit thread SCHED_FIFO prio {prio} (need CAP_SYS_NICE) — thread stays SCHED_OTHER"
+        );
     }
 }
 
@@ -856,6 +939,36 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
                     "irq {irq:?} / painter {painter:?} overlap for {online:?}"
                 );
             }
+        }
+    }
+
+    // --- issue 899 defect 2: per-thread realtime policy decision -----------------
+
+    #[test]
+    fn capture_emit_role_is_raised_to_fifo_90() {
+        // The capture + NDI-emit hot path runs SCHED_FIFO at prio 90 (matching the
+        // pre-899 grab priority) — per-thread, not via the retired process-wide policy.
+        assert_eq!(realtime_fifo_priority(RtThreadRole::CaptureEmit), Some(90));
+        assert_eq!(
+            realtime_fifo_priority(RtThreadRole::CaptureEmit),
+            Some(CAPTURE_FIFO_PRIORITY)
+        );
+    }
+
+    #[test]
+    fn auxiliary_role_stays_sched_other() {
+        // The whole point of issue 899 defect 2: painter/display/intercom/NDI/tokio
+        // workers must NOT be FIFO. None = keep the process default SCHED_OTHER. This is
+        // exactly the process-wide FIFO-50-on-every-thread regression the ticket removes.
+        assert_eq!(realtime_fifo_priority(RtThreadRole::Auxiliary), None);
+    }
+
+    #[test]
+    fn only_the_capture_emit_role_gets_realtime_fifo() {
+        // A strict split: exactly the CaptureEmit role is raised, nothing else.
+        for role in [RtThreadRole::CaptureEmit, RtThreadRole::Auxiliary] {
+            let is_fifo = realtime_fifo_priority(role).is_some();
+            assert_eq!(is_fifo, matches!(role, RtThreadRole::CaptureEmit));
         }
     }
 }
