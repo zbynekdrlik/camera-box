@@ -1025,3 +1025,20 @@ merge, `git log --oneline A..B -- paths`), read the ACTUAL output, THEN write th
 never assert a count/SHA you haven't seen printed. (And never add `--first-parent`/`--full-history`
 to a `git log` call whose whole point is this collapse — either flag reintroduces the exact false
 positive the collapse exists to avoid.)
+
+## Standalone-rustc verification of a pure crate-root module: APPEND `main` to a COPY, never `include!` it (issue 1303 part 4)
+
+The repo's Tier-0 pattern for a pure crate-root module (`genlock_lock_state.rs`, `resolume_playback.rs`,
+`genlock_forced_table_audit.rs`, ...) is to verify it with standalone `rustc` since cargo compile is
+blocked (#557): `rustc --test --edition 2021 -A dead_code <copy>.rs -o t && ./t` runs its
+`#[cfg(test)] mod tests` with no cargo. To ALSO produce a data dump for a Rust↔bash parity diff (feed
+the same vectors to both and `diff`), you need a `fn main()` calling the module's public fns. The trap:
+`include!("…/module.rs")` into a tiny driver file FAILS with `error[E0753]: inner doc comments like
+this (starting with //! …) can only appear before items` — because `include!` inlines the module's
+text (which OPENS with a `//!` module-doc block) at the macro's position, i.e. mid-file, where `//!`
+is illegal. Fix: `cp module.rs parity.rs` and APPEND the `fn main()` + helper fns to the COPY — the
+module's own `//!` stays at file start (legal), and `rustc --edition 2021 -A dead_code parity.rs`
+compiles it as an ordinary program whose `main` can call the module's items directly. (The
+`--test`-run and the append-`main` build are two separate standalone-rustc invocations of the same
+copied source; neither needs cargo.) This is the Rust analogue of the vendored-C lift-and-compile
+recipe and pairs with a bash-replica `diff` to prove the two implementations agree exhaustively.
