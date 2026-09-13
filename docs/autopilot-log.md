@@ -11582,3 +11582,32 @@ Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS on
 - **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. No version bump
   (dev1-side scripts/tests/docs only). Durability backup on
   `refs/autopilot-wip/worktree-agent-acfc75b6bac59c55e`.
+
+## issue 1310 — dev1 measurement-audio presence watchdog (item 1)
+- **What:** new dev1 alert-watchdog paging when the mbc measurement-audio chain reads DIGITAL
+  SILENCE between E2E runs (the instrument the A/V-sync leg reads; silent-checked today only in-RUN
+  by the audio-presence preflight, so a dead chain is invisible until the next ~300 s E2E burns a
+  cycle — release E2E 34764817477 `max_volume -91.0 dB`).
+- **Design/measurement:** reads the `mbc` peak LEVEL off stream OBS via the obs-websocket
+  `InputVolumeMeters` event (no recording, no disk, no rig mutation) — approach 1, chosen over a
+  probe-recording (rejected: mutates the rig every 60 s) and a log-parse (rejected: no per-source
+  level line exists).
+- **Files:** `scripts/measurement_audio_decision.py` (PURE verdict SILENT/PRESENT/SKIP/UNKNOWN,
+  pytest Tier-0), `scripts/measurement_audio_meter_probe.py` (WS meter probe, I/O half),
+  `scripts/measurement-audio-alert-watchdog.sh` (orchestrator: EVENT gate via rig-mode-state.sh,
+  2-pass confirm + time-bucketed re-ping via watchdog_notify_key, threshold sourced from
+  audio-presence-preflight.sh), `systemd/measurement-audio-alert-watchdog.{service,timer,README.md}`,
+  `.claude/rules/measurement-audio-watchdog.md`.
+- **Threshold single-sourcing:** added `audio_preflight_default_threshold_db` to
+  `scripts/lib/audio-presence-preflight.sh` and refactored the -60 dB default-arg sites to it, so the
+  silence bar is one source (never retyped in the python decision).
+- **Class wiring:** added to the production-critical allowlist in
+  `tests/python/test_notify_dedup_key_sweep_1206.py` + the table in
+  `.claude/rules/watchdog-notify-dedup.md` (12th member); TEST-gated like splitter-port but
+  production-critical (rig-mode gate is orthogonal to fault-criticality).
+- **RED->GREEN:** `test(#1310)` RED (module absent) -> `feat(#1310)` GREEN pure decision;
+  `test_measurement_audio_decision_1310.py` 21 tests + the #1206 sweep 7 tests green; sourced-lib
+  dry-run driver exercised EVENT/TEST-SILENT/PRESENT/SKIP/UNKNOWN + 2-pass confirm.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version bump to
+  1.7.0-dev.627. Durability backup on `refs/autopilot-wip/worktree-agent-a7e35bcbdc9225c31`.
+- Items 2 (owner decision: permanent measurement mic) + 3 (rig-status chip) NOT in this lane.

@@ -1,0 +1,25 @@
+[Unit]
+# dev1-side mbc MEASUREMENT-AUDIO presence alert (#1310). ONE probe -> decide -> alert pass: read the
+# stream OBS `mbc` input's peak LEVEL over obs-websocket InputVolumeMeters (NO recording) and page
+# when the measurement-audio chain reads DIGITAL SILENCE. Closes the between-run gap behind the
+# release E2E 34764817477 abort (`max_volume -91.0 dB`) and the 2026-07-12 week-long-muted-mic
+# incident: the mbc chain is verified silent-or-not ONLY inside a full ~300 s E2E cycle today (#748),
+# so a silent instrument is invisible until the next run burns a cycle discovering it. Owner directive
+# 2026-09-13 (the #1308 production-critical class) -> re-ping while the fault persists. TEST-premise
+# (EVENT-gated on rig-mode-state.sh like splitter-port #1290): the QPSK marker only sounds in TEST.
+# DETECTION ONLY -- no auto-action (the cure is a rig-ops decision: unmute the mic/Ableton channel,
+# fix the Dante route). SAME dev1 topology as dantesync-clock (#1307) / audio-lag (#1226).
+Description=camera-box mbc measurement-audio presence alert (#1310) — one probe/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/measurement-audio-alert-watchdog.sh
+# Per pass: one cam2 rig-mode ssh (RIG_MODE_PROBE_TIMEOUT, default 20 s bound) + one stream OBS WS
+# probe (~2 s sample + an 8 s connect timeout) + a local python decision. Generous ceiling so a slow
+# event-day link never hangs the timer.
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

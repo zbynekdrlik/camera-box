@@ -68,7 +68,7 @@ Never hand-roll the `-<floor(now/interval)>` suffix or a second bucketing implem
 - **python:** `scripts/watchdog_reping.py :: notify_key(base, now, interval)` — the byte-for-byte twin
   (a parity pytest diffs the two); `dantesync_clock_decision.dedup_key` delegates to it.
 
-**The production-critical class (#1308) is these 11 dev1 watchdogs** — the faults the fleet cannot run
+**The production-critical class (#1308) is these 12 dev1 watchdogs** — the faults the fleet cannot run
 production without, invisible without a page:
 
 | watchdog | ticket | fault |
@@ -84,6 +84,12 @@ production without, invisible without a page:
 | `ndi-portmap-alert-watchdog.sh` | #1181 | NDI sender port-map moved |
 | `avsync-heartbeat-alert-watchdog.sh` | #812 | A/V-sync heartbeat stale |
 | `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
+| `measurement-audio-alert-watchdog.sh` | #1310 | mbc measurement-audio chain digital-silent (TEST-gated) |
+
+(`measurement-audio-alert-watchdog.sh` is EVENT-gated on `rig-mode-state.sh` like splitter-port #1290
+— the QPSK marker only sounds in TEST — but its FAULT is production-critical: a silent measurement
+instrument means the next production's A/V-sync can't be verified. The rig-mode gate and the
+fault-criticality axis are ORTHOGONAL — this one is TEST-gated AND time-bucketed.)
 
 The DIAGNOSTIC / TEST-mode watchdogs stay one-ping-per-incident (a stable key, NO bucket): cadence
 (#794), frozen-input (#1052), splitter-port (#739), grabber-stuck (#1128), imag-power (#1040),

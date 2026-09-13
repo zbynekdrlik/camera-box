@@ -157,6 +157,7 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     "ndi-portmap-alert-watchdog.sh",       # #1181 -- NDI sender port-map moved
     "avsync-heartbeat-alert-watchdog.sh",  # #812  -- A/V-sync heartbeat stale
     "imag-obs-alert-watchdog.sh",          # #882  -- imag OBS down / latency-drift / restart-storm
+    "measurement-audio-alert-watchdog.sh", # #1310 -- mbc measurement-audio chain reads digital silence
 }
 
 # The bucketing markers an inline --dedup-key carries when it time-buckets: the shared bash helper
