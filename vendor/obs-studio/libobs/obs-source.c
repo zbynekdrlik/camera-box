@@ -5180,6 +5180,15 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	/* keep the literal `genlock_wall_qpc_drift_ms());` anchor the #800 gates pin
 	 * (windows-genlock*.yml pwsh + tests/genlock_preload.rs + genlock_wall_qpc_emit.rs). */
 	stats->wall_qpc_drift_ms = (int64_t)(genlock_wall_qpc_drift_ms());
+	/* camera-box #1303: audio genlock parity facet (v2). audio_delay_ms is the hold the audio
+	 * ingest applied (0 until the first audio callback / for a source that carries no audio);
+	 * the pairing offset is the residual vs the video latency via the pure mirror (0 = paired,
+	 * -latency_ms = audio not held). Parsed by src/jitter_audit.rs; consumed by the LOCK
+	 * indicator's audio health via src/genlock_audio_pairing.rs::decide_audio_health. */
+	stats->audio_enabled = obs_source_audio_active(source);
+	stats->audio_delay_ms = source->genlock_audio_delay_ms;
+	stats->audio_pairing_offset_ms = genlock_audio_pairing_offset_ms(
+		(int64_t)genlock_audio_present_delay_ns(source->genlock_audio_delay_ms), effective_latency_ms);
 }
 
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
@@ -5254,7 +5263,14 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * = wall ran faster than QPC (video deadline ahead of audio). Parsed by the input-side
 	      * AuditSample.wall_qpc_drift_ms in src/jitter_audit.rs. */
 	     "wall_qpc_drift_ms=%lld "
-	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800)",
+	     /* camera-box #1303: receiver-side AUDIO genlock parity facet. audio_enabled= the
+	      * source's NDI audio is active; audio_delay_ms= the hold applied at ingest so the
+	      * audio pairs with the video FIFO (= latency_ms for a genlock_fifo source, 0 = not
+	      * held / no audio); audio_pairing_offset_ms= residual vs the video latency (0 =
+	      * paired). Appended AFTER the existing fields (scripts parse by field name). Parsed by
+	      * src/jitter_audit.rs; the values come from the shared snapshot `gs`. */
+	     "audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld "
+	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800/#1303)",
 	     source->context.name ? source->context.name : "?",
 	     /* camera-box #1298: the health counters now come from the shared snapshot `gs`
 	      * (genlock_fill_stats) so this line and obs_source_get_genlock_stats cannot
@@ -5289,7 +5305,11 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (long long)gs.ts_head_skew_ms,
 	     (unsigned long long)gs.backward_regime_ticks,
 	     gs.converge_sheds,
-	     (long long)gs.wall_qpc_drift_ms);
+	     (long long)gs.wall_qpc_drift_ms,
+	     /* camera-box #1303: the audio parity facet, also from the shared snapshot `gs`. */
+	     gs.audio_enabled ? 1 : 0,
+	     gs.audio_delay_ms,
+	     (long long)gs.audio_pairing_offset_ms);
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 

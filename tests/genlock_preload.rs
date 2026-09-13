@@ -2083,6 +2083,43 @@ mod vendored_source {
     }
 
     #[test]
+    fn audio_genlock_parity_present_1303() {
+        // #1303: the receiver-side AUDIO genlock parity. The audio HOLD must be wired at the
+        // source_output_audio_data ingest seam so a genlock_fifo source's audio is delayed by the
+        // same latency_ms the video FIFO holds video, and the 5s audit line must carry the audio
+        // facet. Pure decision + C-vs-Rust parity: src/genlock_audio_pairing.rs <->
+        // tests/genlock_audio_pairing_parity.rs. Lock-stepped into BOTH windows-genlock*.yml pwsh
+        // gates.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        // the three contiguous static-inline helpers exist (the parity gate lifts this block).
+        assert!(
+            src.contains(
+                "static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)"
+            ),
+            "{OBS_SOURCE}: #1303 — genlock_audio_present_delay_ns() is gone; the audio-pairing C \
+             mirror the parity gate compiles no longer exists. Re-apply."
+        );
+        assert!(
+            src.contains("static inline int genlock_audio_decide_health("),
+            "{OBS_SOURCE}: #1303 — genlock_audio_decide_health() is gone; the audio LOCK-health \
+             decision mirror is missing. Re-apply."
+        );
+        // the HOLD is actually wired into the audio ingest path (not just defined).
+        assert!(
+            src.contains("in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);"),
+            "{OBS_SOURCE}: #1303 — the audio HOLD is no longer applied in source_output_audio_data; \
+             a genlock source's audio would not be delayed to pair with its video FIFO hold. Re-apply."
+        );
+        // the audit line carries the audio parity facet.
+        assert!(
+            src.contains("audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld"),
+            "{OBS_SOURCE}: #1303 — the genlock audit line no longer emits the audio parity facet \
+             (audio_enabled=/audio_delay_ms=/audio_pairing_offset_ms=); it is invisible in the log \
+             and in obs_genlock_stats. Re-apply."
+        );
+    }
+
+    #[test]
     fn fps_read_returns_cached_last_good_pair_on_a_tear() {
         // #269 [0]/[1]/[2]: genlock_video_fps must keep a LAST-GOOD cache and return it on
         // a persistent tear (not false/0), so genlock_source_drop_cap never collapses to the

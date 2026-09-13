@@ -1643,7 +1643,7 @@ EXPORT bool obs_source_get_genlock_burn(const obs_source_t *source);
  * — both route through one internal fill (genlock_fill_stats). Additive + versioned: grow it
  * ONLY by appending fields and bumping OBS_GENLOCK_STATS_VERSION; a consumer reads `version`
  * before touching any field added after v1. */
-#define OBS_GENLOCK_STATS_VERSION 1
+#define OBS_GENLOCK_STATS_VERSION 2
 struct obs_genlock_stats {
 	uint32_t version;             /* = OBS_GENLOCK_STATS_VERSION */
 	bool genlock_fifo;            /* this source is genlock-FIFO enabled */
@@ -1664,6 +1664,12 @@ struct obs_genlock_stats {
 	uint32_t latency_ms;          /* effective per-source latency (override else global) */
 	int64_t ts_head_skew_ms;      /* last ts-align head-frame skew, ms */
 	int64_t wall_qpc_drift_ms;    /* process-global wall-vs-monotonic clock drift, ms (#800) */
+	/* camera-box #1303 — receiver-side AUDIO genlock parity (added in v2; a consumer reads
+	 * `version >= 2` before touching these). The genlock audio HOLD (src/genlock_audio_pairing.rs)
+	 * delays a genlock source's audio by the same latency_ms the video FIFO holds video. */
+	bool audio_enabled;              /* this source's NDI audio is active (obs_source_audio_active) */
+	uint32_t audio_delay_ms;         /* the audio hold last applied at ingest (= latency_ms for a genlock_fifo source; 0 = not held / no audio yet) */
+	int64_t audio_pairing_offset_ms; /* residual A/V offset: audio_delay_ms - latency_ms; 0 = paired, -latency_ms = audio never held */
 };
 
 /* Fill `stats` from `source`'s live genlock counters (version-stamped). Returns true for a

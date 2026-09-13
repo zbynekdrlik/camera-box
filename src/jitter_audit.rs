@@ -80,6 +80,18 @@ pub struct AuditSample {
     /// an instantaneous per-tick value, NOT summarized (like `ts_present`/`ts_due`) — the
     /// forensic answer is the field itself grepped across a captured day.
     pub wall_qpc_drift_ms: i64,
+    /// #1303 — this source's NDI audio is active (`audio_enabled=1` on the line). Absent on
+    /// pre-#1303 logs — parses as `false`. The LOCK-indicator audio-health signal
+    /// "audio disabled on a program source" reads this.
+    pub audio_enabled: bool,
+    /// #1303 — the receiver-side AUDIO HOLD (ms) last applied so this source's audio pairs with
+    /// its video FIFO hold (= `latency_ms` for a genlock_fifo source; 0 = not held / no audio).
+    /// The audit twin of `latency_ms` for the audio leg. Absent on pre-#1303 logs — parses as 0.
+    pub audio_delay_ms: u32,
+    /// #1303 — residual A/V pairing offset (ms, signed): `audio_delay_ms - latency_ms`. 0 =
+    /// paired; `-latency_ms` = audio never held (the wiring did not fire). An instantaneous
+    /// per-tick value, NOT summarized. Absent on pre-#1303 logs — parses as 0.
+    pub audio_pairing_offset_ms: i64,
 }
 
 /// Parse ONE `genlock-fifo audit` log line into an [`AuditSample`].
@@ -153,6 +165,14 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             "ts_head_skew_ms" => set!(ts_head_skew_ms),
             "backward_regime_ticks" => set!(backward_regime_ticks),
             "wall_qpc_drift_ms" => set!(wall_qpc_drift_ms),
+            "audio_enabled" => {
+                if let Ok(v) = val.parse::<i32>() {
+                    s.audio_enabled = v != 0;
+                    saw_any_field = true;
+                }
+            }
+            "audio_delay_ms" => set!(audio_delay_ms),
+            "audio_pairing_offset_ms" => set!(audio_pairing_offset_ms),
             _ => {}
         }
     }
@@ -550,7 +570,8 @@ mod tests {
         (=33 ms) reserve_ms=3 cap=5 empty_run=0 (re-arm@10) ts_present=123456789012 \
         ts_due=987 ts_head_skew_ms=-2 backward_regime_ticks=4 \
         wall_qpc_drift_ms=-252 \
-        (#70/#97/#126/#147/#148/#184/#235/#245/#401)";
+        audio_enabled=1 audio_delay_ms=3 audio_pairing_offset_ms=0 \
+        (#70/#97/#126/#147/#148/#184/#235/#245/#401/#1303)";
 
     #[test]
     fn parses_every_field_from_a_real_audit_line() {
@@ -582,6 +603,39 @@ mod tests {
         assert_eq!(s.backward_regime_ticks, 4);
         // #800: the wall-vs-QPC clock-domain drift term parses, SIGNED.
         assert_eq!(s.wall_qpc_drift_ms, -252);
+        // #1303: the receiver-side audio genlock parity facet parses.
+        assert!(s.audio_enabled);
+        assert_eq!(s.audio_delay_ms, 3);
+        assert_eq!(s.audio_pairing_offset_ms, 0);
+    }
+
+    #[test]
+    fn audio_facet_defaults_to_off_zero_on_a_pre_1303_line() {
+        // A log captured from a pre-#1303 build has no audio_* tokens — the parser must yield
+        // audio_enabled=false + zeros, never fail the line (same forward-compat contract as
+        // wall_qpc_drift_ms / backward_regime_ticks).
+        let old = SAMPLE_LINE_CAM1.replace(
+            "audio_enabled=1 audio_delay_ms=3 audio_pairing_offset_ms=0 ",
+            "",
+        );
+        let s = parse_audit_line(&old).expect("pre-#1303 line must still parse");
+        assert!(!s.audio_enabled);
+        assert_eq!(s.audio_delay_ms, 0);
+        assert_eq!(s.audio_pairing_offset_ms, 0);
+    }
+
+    #[test]
+    fn audio_facet_parses_disabled_and_a_negative_pairing_offset_1303() {
+        // audio_enabled=0 (a program source with NDI audio off) + audio_delay_ms=0 (the hold
+        // never fired) ⇒ audio_pairing_offset_ms = -latency_ms (the "audio not held" signal).
+        let line = SAMPLE_LINE_CAM1.replace(
+            "audio_enabled=1 audio_delay_ms=3 audio_pairing_offset_ms=0",
+            "audio_enabled=0 audio_delay_ms=0 audio_pairing_offset_ms=-3",
+        );
+        let s = parse_audit_line(&line).unwrap();
+        assert!(!s.audio_enabled);
+        assert_eq!(s.audio_delay_ms, 0);
+        assert_eq!(s.audio_pairing_offset_ms, -3);
     }
 
     #[test]
