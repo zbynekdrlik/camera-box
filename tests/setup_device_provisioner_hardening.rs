@@ -213,14 +213,17 @@ fn setup_device_binary_install_fails_loud_never_warns() {
 #[test]
 fn setup_device_ndi_fetch_fails_loud_never_warns() {
     let body = read_script();
-    for needle in [
-        "NDI fetch from $NDI_PEER produced no file",
-        "could not fetch NDI library from fleet peer",
-    ] {
+    // #1066 rewrote STEP 4 from a single hard-coded peer to an ordered fleet-peer bootstrap +
+    // version-guarded pinned-download fallback (see setup_device_provisioning_defects_1066.rs), so
+    // the old single-peer fail messages ("NDI fetch from $NDI_PEER produced no file" / "could not
+    // fetch NDI library from fleet peer") no longer exist. The #450 fail-loud INVARIANT is
+    // unchanged — STEP 4 still `fail`s (never warns-and-continues) when NO source yields the
+    // runtime — only the message moved to the terminal fail that names every peer tried.
+    for needle in ["could not obtain the NDI runtime", "tried fleet peers"] {
         assert!(
             on_noncomment_line(&body, needle),
             "setup-device.sh STEP 4 must fail loud (via fail()) with a message containing \
-             `{needle}` instead of warning and continuing (#450)"
+             `{needle}` instead of warning and continuing (#450/#1066)"
         );
     }
 }

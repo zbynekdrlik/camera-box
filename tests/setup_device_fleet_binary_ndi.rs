@@ -69,11 +69,18 @@ fn setup_device_binary_install_supports_override_and_ci_default() {
     }
 }
 
-/// 3. The default CI lookup must target the fleet's actual channel (`dev`) and filter to
-///    successful runs only — never `main` (the fleet never runs a main build) and never
-///    unfiltered (an in-flight/failed run could otherwise become "latest").
+/// 3. The default CI lookup must target the fleet's PRODUCTION channel (`main`) and filter to
+///    successful runs only — never the dev tip and never unfiltered (an in-flight/failed run could
+///    otherwise become "latest").
+///
+///    CONTRACT REVERSAL (#1066/#1136, was #457): this test used to REQUIRE the `dev` default, on
+///    the premise "the fleet never runs a main build". That premise is now stale — under the
+///    early-gate PIN doctrine (issue 1136) the fleet's production truth is MAIN's pinned release,
+///    and `scripts/deploy-fleet.sh` already defaults to `BRANCH=main`. A dev-tip provision drifted
+///    cam1 to dev.626 vs the fleet's main pin dev.624 and tripped the `[0/8]` PIN-DRIFT gate
+///    (2026-09-13). So this asserts the REVERSED contract (default `main`), matching deploy-fleet.
 #[test]
-fn setup_device_ci_binary_lookup_targets_dev_branch_success_only() {
+fn setup_device_ci_binary_lookup_targets_main_branch_success_only() {
     let body = read_script();
     assert!(
         on_noncomment_line(&body, "--branch \"$CI_BRANCH\"")
@@ -87,9 +94,10 @@ fn setup_device_ci_binary_lookup_targets_dev_branch_success_only() {
          in-flight or failed run must never be picked up as \"latest\" (#457)"
     );
     assert!(
-        body.contains(r#"CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-dev}"#),
-        "CI_BRANCH must default to the fleet's actual channel ('dev') via CAMERA_BOX_CI_BRANCH, \
-         not 'main' — the fleet never runs a main build (#457)"
+        body.contains(r#"CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-main}"#),
+        "CI_BRANCH must default to the fleet's PRODUCTION channel ('main', matching \
+         deploy-fleet.sh's BRANCH=main), not the dev tip — a dev-tip provision trips the [0/8] \
+         PIN-DRIFT gate (#1066/#1136)"
     );
 }
 
