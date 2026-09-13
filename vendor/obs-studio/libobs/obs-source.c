@@ -1739,6 +1739,11 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	if (source->genlock_fifo && source->genlock_latency_ms > 0) {
 		in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);
 		source->genlock_audio_delay_ms = source->genlock_latency_ms;
+	} else {
+		/* #1303 review 🔵3: the source is not holding audio (not genlock_fifo, or the field is
+		 * the unreachable 0) — clear the recorded hold so a source that toggled genlock off at
+		 * runtime never reports a STALE audio_delay_ms on the audit facet. */
+		source->genlock_audio_delay_ms = 0;
 	}
 
 	source->next_audio_sys_ts_min = source->next_audio_ts_min + source->timing_adjust;
