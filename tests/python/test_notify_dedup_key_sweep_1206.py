@@ -123,3 +123,54 @@ def test_no_recovery_or_status_message_is_phone_pinged():
         "#1206: these `notify --body` call-sites still phone-ping a ✅ recovery/status message "
         "(must be machine-channel/log only):\n" + "\n".join(offenders)
     )
+
+
+# --------------------------------------------------------------------------------------------------
+# #1307 -- PRODUCTION-CRITICAL class: the ONE sanctioned exception to invariant "no per-pass component".
+#
+# Owner ruling (ROZHODNUTÉ on #1307, 2026-09-13, verbatim): „aj ntp aj ostatne veci bez ktorych nevie
+# produkcia bezat spravne musi notifikovat ... nech kazdu minutu chodia notifikacie ze nemaju dante
+# clock ... byt o tom dokolecka notifikovany". A production-critical condition (a lost dante clock, a
+# foreign/missing grandmaster, an NTP step-storm) whose loss is INVISIBLE without a page must be
+# RE-pinged while it PERSISTS -- reversing rule 1's one-ping-per-incident default for THIS class only.
+# The mechanism is a TIME-BUCKETED --dedup-key (dante-clock-<box>-<floor(now/interval)>): within a
+# bucket it still card-edits (no flood), each new bucket re-pings. See
+# .claude/rules/watchdog-notify-dedup.md "Production-critical class".
+#
+# This allowlist makes the exception EXPLICIT: these files intentionally use a time-varying key, so a
+# future stricter "no timestamp/per-pass component in the key" hardening must exempt them BY NAME --
+# never silently. It does NOT weaken invariant A (a --dedup-key is still present) or B (no recovery
+# ping) for these files or any other watchdog; the default stable-key rule stands for everything else.
+_PRODUCTION_CRITICAL_TIME_BUCKETED = {
+    "dantesync-clock-alert-watchdog.sh",   # #1307 -- dev1 dante-clock loss / DNS / GM-move paging
+}
+
+
+def test_production_critical_watchdog_is_swept_and_carries_a_key():
+    """The production-critical watchdog is still discovered by the sweep (so invariants A + B apply to
+    it too) -- the time-bucket exception is about the key's VALUE rotating, never about escaping the
+    presence + no-recovery-ping invariants."""
+    names = {p.name for p in _iter_notify_scripts()}
+    for allowed in _PRODUCTION_CRITICAL_TIME_BUCKETED:
+        assert allowed in names, (
+            f"#1307 production-critical allowlist names '{allowed}' but the sweep did not discover it "
+            "(it must still emit a `notify --body ... --dedup-key` to be covered)"
+        )
+
+
+def test_production_critical_key_is_intentionally_time_bucketed():
+    """Pin the sanctioned exception behaviorally: the dante-clock watchdog's pure decision module
+    rotates the --dedup-key by time bucket (a fresh ping per interval while the fault persists), the
+    DELIBERATE reversal of rule 1 for this class (owner ruling #1307). If this ever stops rotating,
+    the production-critical re-ping is silently broken -- fail loudly here."""
+    import importlib.util
+    mod_path = _ROOT / "scripts" / "dantesync_clock_decision.py"
+    spec = importlib.util.spec_from_file_location("dantesync_clock_decision", mod_path)
+    dc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dc)
+    base = "dante-clock-cam1"
+    within = dc.dedup_key(base, 600000, 600)
+    same_bucket = dc.dedup_key(base, 600599, 600)
+    next_bucket = dc.dedup_key(base, 600600, 600)
+    assert within == same_bucket, "same bucket must card-edit (no flood), not re-ping"
+    assert within != next_bucket, "a new bucket MUST produce a fresh key (re-ping while it persists)"

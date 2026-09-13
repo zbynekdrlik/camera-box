@@ -42,6 +42,29 @@ KEYLESS body into a ~5-min window). The doctrine (analyze-not-ping, airuleset #7
 The emoji is the discriminator in practice: **🚨/⚠️/🛟/🧹 = ALERT (keyed ping); ✅ = RECOVERY
 (machine-channel, no ping)**.
 
+## Production-critical class: time-bucketed re-ping (owner ruling 2026-09-13, #1307)
+
+Rule 1 above ("a STABLE per-incident `--dedup-key`, no per-pass component") is the DEFAULT and holds
+for every watchdog EXCEPT one deliberately-carved class. Owner ruling (ROZHODNUTÉ on #1307, verbatim:
+*„aj ntp aj ostatne veci bez ktorych nevie produkcia bezat spravne musi notifikovat … nech kazdu
+minutu chodia notifikacie ze nemaju dante clock … byt o tom dokolecka notifikovany"*): a
+**production-critical** condition — one the fleet cannot run production without, whose loss is
+INVISIBLE without a page (a lost dante clock, a foreign/missing grandmaster, an NTP step-storm) — must
+be **RE-pinged repeatedly while it PERSISTS**, not paged once and then silently card-edited forever.
+
+Mechanism (no new notify channel, no raw webhook): keep `airuleset.py notify --dedup-key`, but make
+the key **time-bucketed** — `dante-clock-<box>-<floor(now/REPING_INTERVAL_S)>` (`REPING_INTERVAL_S`
+default 600 s, floored at 60 s), the bucket computed in the pure decision module so the cadence is
+unit-tested. Within one bucket an identical state still EDITS the card (no flood); every new bucket is
+a FRESH ping. Recovery stays exactly rule 2 — ONE machine-channel log line, never a phone ping.
+
+This is the ONLY sanctioned exception, and it is NARROW: only a watchdog whose fault is genuinely
+production-blocking-and-otherwise-invisible qualifies (the umbrella class is tracked in #1308). Do NOT
+time-bucket any other watchdog's key — for everything else the stable one-ping-per-incident key stands.
+The sweep below allowlists the production-critical files EXPLICITLY (`scripts/dantesync-clock-alert-
+watchdog.sh`) and pins the bucketed shape via the pure module, so the exception is intentional and
+visible, never a silently-weakened invariant.
+
 ## Enforcement
 
 `tests/python/test_notify_dedup_key_sweep_1206.py` is a Tier-0 static sweep that auto-discovers
