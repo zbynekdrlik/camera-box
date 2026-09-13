@@ -935,6 +935,56 @@ fn setup_device_fstab_conditionally_mounts_the_persistent_journal_partition_1309
     );
 }
 
+// #1309 -- on-box mgmt-liveness self-heal: setup-device.sh sources the shared lib and installs the
+// script + units enable-only (never a live start), in the rw window BEFORE STEP 18 flips root ro.
+#[test]
+fn setup_device_installs_the_mgmt_liveness_selfheal_enable_only_1309() {
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, ". \"$HERE/lib/mgmt-liveness.sh\""),
+        "setup-device.sh must source scripts/lib/mgmt-liveness.sh (#1309, one source of truth)"
+    );
+    assert!(
+        on_noncomment_line(
+            &body,
+            "mgmt_liveness_selfcheck_script > \"$MGMT_LIVENESS_SCRIPT_PATH\""
+        ),
+        "setup-device.sh must write the generated self-heal script (#1309)"
+    );
+    assert!(
+        on_noncomment_line(
+            &body,
+            "mgmt_liveness_service_unit > \"$MGMT_LIVENESS_SERVICE_PATH\""
+        ) && on_noncomment_line(
+            &body,
+            "mgmt_liveness_timer_unit > \"$MGMT_LIVENESS_TIMER_PATH\""
+        ),
+        "setup-device.sh must write the .service AND .timer units (#1309)"
+    );
+    assert!(
+        on_noncomment_line(&body, "systemctl enable \"$MGMT_LIVENESS_TIMER_UNIT_NAME\""),
+        "setup-device.sh must ENABLE the timer (#1309)"
+    );
+    // enable-only convention: it must NOT `systemctl start`/`restart`/`enable --now` the self-heal
+    // timer or its units (provisioning-scripts.md -- defer to reboot; verify-device (aj) proves live).
+    assert!(
+        !body.contains("systemctl start cambox-mgmt-selfcheck")
+            && !body.contains("enable --now \"$MGMT_LIVENESS_TIMER_UNIT_NAME\""),
+        "setup-device.sh must be enable-only for the #1309 self-heal, never a live start"
+    );
+    // Must live BEFORE STEP 18's ro-root flip (it writes under /usr/local/sbin + /etc/systemd).
+    let install = body
+        .find("mgmt_liveness_selfcheck_script > ")
+        .expect("mgmt install block present");
+    let step18 = body
+        .find("[18/${TOTAL_STEPS}]")
+        .expect("STEP 18 banner present");
+    assert!(
+        install < step18,
+        "the #1309 mgmt-selfcheck install must run in the rw window, BEFORE STEP 18 flips root ro"
+    );
+}
+
 /// #930 finding 10 — the STEP 16 ffmpeg install (the lipsync-test-mode runtime dependency) must
 /// FAIL LOUD like the rest of this ticket's fail-loud posture (item 3 above), not swallow a real
 /// apt failure behind `2>/dev/null || true` and then print "Installed: ffmpeg, ..." regardless.
