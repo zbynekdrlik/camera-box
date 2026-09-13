@@ -1042,3 +1042,21 @@ compiles it as an ordinary program whose `main` can call the module's items dire
 `--test`-run and the append-`main` build are two separate standalone-rustc invocations of the same
 copied source; neither needs cargo.) This is the Rust analogue of the vendored-C lift-and-compile
 recipe and pairs with a bash-replica `diff` to prove the two implementations agree exhaustively.
+
+## A delegation-parity pytest that loads BOTH modules via `spec_from_file_location` CANNOT assert `is`-identity across them (#1308)
+
+The repo's pure-module tests load a `scripts/*.py` via `importlib.util.spec_from_file_location(...)` +
+`exec_module` (the `dantesync_clock_decision` / `genlock_lock_decision` / `ndi_halving_decision`
+pattern). When a NEW test proves module B delegates to a shared module A (e.g. `dantesync_clock_decision.dedup_key`
+IS `watchdog_reping.notify_key`, #1308), the naive assertion `assert B.fn is A.fn` — where the test
+loads A by ITS OWN separate `spec_from_file_location` — FAILS even though the delegation is real: two
+`exec_module` runs of the same file produce DISTINCT function objects (each exec builds a fresh module
+namespace; `module_from_spec` does not register in `sys.modules`, and B's own `import A` under
+importlib-exec resolves A a SECOND time). The `==` value checks pass; only the `is` check breaks, and
+its failure message (`<function fn at 0xAAA> is <function fn at 0xBBB>`) misreads as "delegation
+broken" when it is a test-harness artifact. **Fix: take the identity WITHIN one module graph** — load
+only B, then assert `B.fn is B._shared_module.fn` (B's own imported reference to A), never `B.fn is
+A_loaded_separately.fn`. For this to work the delegating module must expose its import (`import
+watchdog_reping as _reping` at module scope) so the test can reach `B._reping.notify_key`. Value-parity
+(`B.fn(args) == A.fn(args)` over a vector) is the robust cross-module check; reserve `is` for the
+single-graph identity pin.
