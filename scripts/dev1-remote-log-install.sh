@@ -129,7 +129,7 @@ Receives the cam boxes' off-box logs:
 
 --- apply (run on dev1 as root) ---
   # 1. netconsole sink (rsyslog imudp is commented out in the stock /etc/rsyslog.conf; this drop-in re-enables it)
-  install -d -m 0755 ${DEV1_CAMBOX_LOG_DIR}
+  install -d -m 0755 -o syslog -g adm ${DEV1_CAMBOX_LOG_DIR}   # rsyslog PrivDropToUser syslog must be able to create the per-box files
   scripts/dev1-remote-log-install.sh --emit rsyslog   > ${DEV1_RSYSLOG_DROPIN}
   scripts/dev1-remote-log-install.sh --emit logrotate > ${DEV1_LOGROTATE_CONF}
   systemctl restart rsyslog
@@ -158,7 +158,7 @@ PLAN
 
 apply_on_dev1() {
   [ "$(id -u)" -eq 0 ] || { echo "--apply must run as root (dev1)" >&2; exit 2; }
-  install -d -m 0755 "$DEV1_CAMBOX_LOG_DIR"
+  install -d -m 0755 -o syslog -g adm "$DEV1_CAMBOX_LOG_DIR"
   dev1_rsyslog_dropin_content > "$DEV1_RSYSLOG_DROPIN"
   dev1_logrotate_content > "$DEV1_LOGROTATE_CONF"
   systemctl restart rsyslog

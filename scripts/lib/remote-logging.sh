@@ -249,7 +249,7 @@ else
 fi
 echo "JU_SVC_ENABLED=$(systemctl is-enabled systemd-journal-upload 2>/dev/null)"
 echo "JU_URL=$(grep -E '^URL=' /etc/systemd/journal-upload.conf 2>/dev/null | head -1 | sed 's/^URL=//')"
-echo "JU_STATE_SAVE=$(grep -hoE '[-][-]save-state=[^ ]+' /etc/systemd/system/systemd-journal-upload.service.d/*.conf 2>/dev/null | head -1)"
+echo "JU_STATE_SAVE=$(grep -hE '^ExecStart=.*[-][-]save-state=' /etc/systemd/system/systemd-journal-upload.service.d/*.conf 2>/dev/null | grep -oE '[-][-]save-state=[^ ]+' | tail -1)"
 REMOTE
 }
 
