@@ -11938,3 +11938,43 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
 - **Scope guard:** documentation + a new verify check ONLY; `Transport::SbcRelay` + wire value `"sbc-relay"` + the arm64 artifact name `bkshading-relay-linux-arm64` + the CI `run:` block are byte-UNCHANGED; Bluetooth stays banned.
 - **Local verify (Tier-0, no cargo compile):** 29/29 `tests/python/test_bkshading_sbc_provision_808.py`, 2199 `pytest tests/python`, `shellcheck -S warning` + `bash -n` clean on both scripts, `cargo fmt --all --check` clean, occurrence-count anchor sweep clean. Fresh-context review 0 🔴 / 0 🟡 / 3 🔵 (all fixed) — issuecomment-5665182263.
 - **Lane scope:** worktree lane — no push/PR/merge/version-bump. Durability backup on `refs/autopilot-wip/worktree-agent-a3f48fc0b373db3d8`. INTEGRATION NOTE: this branch is based on origin/main (5ed4e44ad), NOT dev — the supervisor must CHERRY-PICK the four commits above onto dev, never `git merge` the branch (it would drag main's `Merge pull request #N` commits into dev). HARDWARE bench (gphoto2 detect, M1 PD listener, WiFi join, live `--check`) = supervisor once the prototype arrives → UNVERIFIED here.
+
+## issue 1312 (follow-up, 14.9.2026) — 14th handover item `avlatency`: mbc measurement-chain LATENCY vs baseline (worktree lane, base 6c58ca0b6)
+
+- **Scope:** the follow-up from ticket comment 5664462600 — add a read-only 14th item proving, between
+  productions and WITHOUT an E2E run, that the mbc chain (cam2 QPSK marker → speaker → mic → mbc
+  Ableton → Dante → stream OBS `mbc`) is still ALIGNED with the video within the E2E's ±90 ms gate,
+  not merely audible (#1310). The existing 13 items are byte-identical (additive-only).
+- **STEP-0 finding (validation comment):** the ticket assumed the marker log's `emit_ts_ns` is on the
+  DanteSync wall clock, but the PERMANENT painter (`setup-device.sh` `cam2-painter.service`, no
+  `--wall-clock`) emits `start.elapsed()` MONOTONIC-since-start (`clock_ns`, `frame-probe.rs:313`),
+  which resets on every EVENT→TEST switch. A naive `onset_wall − emit_monotonic` would false-DRIFT at
+  exactly the transition this check runs at. Handled: the pure `measure()` GUARDS on the emit-ts SHAPE
+  (`emits_are_wall_clock`, 1e18 floor) → a monotonic/mixed log is never paired → UNKNOWN (reason
+  `monotonic-emit`), never a false forgot. Verified `--wall-clock` would be a SAFE no-op for the A/V
+  verdict (`av_sync_recording.rs:207`; `av_offset_candidates_with_fid` ignores `emit_ts`).
+- **Design (verdict-kind item mirroring `mic`):** RED `1b4a1f58d` → GREEN `2fcb3d0c6` (pure kernel
+  `scripts/measurement_chain_latency.py`: parse/onset(−60 dB rising-edge, threshold single-sourced from
+  `audio-presence-preflight.sh`)/pair(nearest-prior emit within a sub-half-cadence window)/median/
+  classify + baseline r/w + CLI). GREEN `7d308d57d` (I/O half `measurement_chain_latency_probe.py` WS
+  `InputVolumeMeters` sampler reusing #1310's handshake + the thin `measurement-chain-latency.sh`
+  orchestrator with `MC_MARKER_CSV_FILE`/`MC_METER_FILE` Tier-0 seams + `--baseline` write). RED
+  `63524c9db` → GREEN `afc7ec5fe` (the appended `avlatency` `Item` + the `run_probe avlatency` wiring).
+- **Review** `347d44b85` (`fix(#1312)`): fresh-context adversarial review — 0 blocking, the
+  monotonic-emit guard verified sound. Same-branch fixes: two `--write-baseline` refusal tests
+  (monotonic / too-few), `|| OUT=""` `set -e` defensiveness, and the onset-model + truncate-on-start
+  (`qpsk_emit.rs` #431, rules out a mixed-clock tail) doc.
+- **Local verify:** `python3 -m pytest tests/python/test_measurement_chain_latency_1312.py
+  tests/python/test_rig_dev_handover_1312.py` → 39 passed; `bash -n` + `shellcheck -S warning` clean on
+  both `.sh`; standalone probe dry-run over fixtures produced DRIFTED / ALIGNED / SKIP / BASELINE-WRITTEN
+  correctly. The Rust/live paths (the marker-log ssh read, the WS meter sample, the live baseline seed
+  + first read) are the SUPERVISOR's — no rig ssh from this lane (cam2 is down today anyway).
+- **Follow-up for the supervisor (not this lane):** enable the painter `--wall-clock` flag (a SAFE
+  no-op for the A/V verdict) so `avlatency` goes green-capable, then seed
+  `~/.camera-box/measurement-chain-latency-baseline.json` with `--baseline` after a green E2E
+  (confirming ≥3 onsets). Until then `avlatency` reads UNKNOWN (never a false forgot).
+- **Lane scope:** worktree lane, CODE + TESTS + DOCS only. Worktree was based on `origin/main`; my 8
+  work commits are on top of the merge `f5d380fd6` and touch ONLY the 8 new/edited files — INTEGRATE
+  BY CHERRY-PICK of those commits onto `dev` (the merge reconciled an unrelated #1311 file that a
+  `git merge` of this branch would drag into dev). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a28850d39205ac8e6`.
