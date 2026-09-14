@@ -438,11 +438,12 @@ jobs:
             target/release/bkshading
 
       # Cross-build the relay for aarch64 (issue 808 SBC/handheld milestone): the handheld runs on a
-      # mini SBC (Pi Zero 2 W) which is ARM and CANNOT run the amd64 binary. The relay is pure Rust
-      # (axum/tokio/serde/clap; no C link deps — no reqwest/rustls/ring on the relay side), so a
-      # rustup target + the gcc-aarch64-linux-gnu linker cross-compile it cleanly. Target choice
-      # justified (aarch64, not armhf) in scripts/lib/bkshading-sbc-runtime.sh + .claude/rules/bkshading.md.
-      - name: Cross-build relay for aarch64 (SBC / Pi Zero 2 W handheld)
+      # zero-class arm64 SBC (Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W) which is ARM and
+      # CANNOT run the amd64 binary. The relay is pure Rust (axum/tokio/serde/clap; no C link deps —
+      # no reqwest/rustls/ring on the relay side), so a rustup target + the gcc-aarch64-linux-gnu
+      # linker cross-compile it cleanly. Target choice justified (aarch64, not armhf) in
+      # scripts/lib/bkshading-sbc-runtime.sh + .claude/rules/bkshading.md.
+      - name: Cross-build relay for aarch64 (SBC / zero-class arm64 handheld)
         run: |
           rustup target add aarch64-unknown-linux-gnu
           sudo apt-get update
