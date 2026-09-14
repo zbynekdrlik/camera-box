@@ -192,6 +192,12 @@ something `verify-device.sh` should be loosened to tolerate.
   writes `.new` first). Launch every re-run with `--setenv=TMPDIR=/root/.itmp` (the real disk);
   recovery = `mkdir -p /root/.itmp; TMPDIR=/root/.itmp dpkg --configure -a` (rw root), confirm the
   regenerated initrd carries ext4 + usb-storage (`lsinitramfs`), `rm -rf /root/.itmp/*`, re-run.
+  **A re-run that apt-UPGRADED anything (e.g. a systemd point release) leaves the box unable to
+  remount ro without a reboot**: the replaced libraries stay mapped by running daemons as
+  `(deleted)` inodes (`grep -l "(deleted)" /proc/[0-9]*/maps`), the kernel's `s_remove_count` is
+  non-zero and `mount -o remount,ro /` returns `mount point is busy` with NO open-for-write fd or
+  swap to blame. Restarting dbus & co. is worse than the reboot — plan the reboot, and until then
+  expect verify-device `(j)` to fail on that box alone.
   Re-run recipe from dev1: `git archive HEAD scripts systemd` → scp to `/tmp` → `systemd-run
   --unit=cam2-setupN --collect --working-directory=/tmp/<stage>/scripts --setenv=FRAME_PROBE_BINARY_URL=
   /tmp/frame-probe --setenv=TMPDIR=/root/.itmp --property=StandardInput=file:/tmp/yes.txt
