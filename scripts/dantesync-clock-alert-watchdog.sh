@@ -83,10 +83,10 @@ esac
 # cam1-7 -- NOT CAMERA_ACTIVE_SET, which excludes cam5-7 (retired grabbers) that are still powered
 # and still running dantesync (so they can silently lose the clock too). Each name resolves to its IP
 # via camera-set.sh's camera_resolve (single source of truth, no second IP literal).
-DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
+DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 # The OBS-box dantesync nodes (space-separated NAMES); IPs + the resolume home-gate come from
 # obs-fleet.sh. imag(-nb) IS a dantesync node; resolume is the traveling CG box.
-DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES:-strih stream imag resolume}"
+DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-strih stream imag resolume}"
 # #1313: the LOCAL node(s) -- dev1 itself. dev1 runs dantesync too (its clock feeds every dev1-hosted
 # gate: clock-offset-painter-gate.sh, the recording-verdict wall references, every date-stamped gate
 # window), yet it is NOT a probed cam/obs node -- so on 14.9.2026 it silently sat NTP-only for ~a day
@@ -94,7 +94,7 @@ DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES:-strih stream imag resolume}"
 # would have paged it runs ON dev1 and never looked at 127.0.0.1:8898. A local node is probed on the
 # loopback :8898 with NO ssh/TCP reach probe (the box is by definition up -- the watchdog runs on it),
 # graded with the SAME verdicts (analyze_local / the DECIDE --local flag). Space-separated NAMES.
-DANTE_CLOCK_LOCAL_NODES="${DANTE_CLOCK_LOCAL_NODES:-dev1}"
+DANTE_CLOCK_LOCAL_NODES="${DANTE_CLOCK_LOCAL_NODES-dev1}"
 # The loopback address the local node's :8898 is probed on (override for Tier-0 fixtures).
 DANTE_CLOCK_LOCAL_IP="${DANTE_CLOCK_LOCAL_IP:-127.0.0.1}"
 
