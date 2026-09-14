@@ -101,6 +101,31 @@ GENLOCK_UNLOCKED = ("2026-09-14 [genlock-lock-alert-watchdog] strih (10.77.9.202
 GENLOCK_ABSENT = ("2026-09-14 [genlock-lock-alert-watchdog] strih (10.77.9.202): reachable=1 "
                   "verdict=UNKNOWN state= reason=\n")
 
+# #1312 avlatency: the standalone scripts/measurement-chain-latency.sh probe emits a key=value block
+# (carrying the ONE `verdict=` token) + a human log line that uses `result=` (never a 2nd verdict
+# token). The item is verdict-kind: good={ALIGNED}, forgot={DRIFTED}, else (UNKNOWN/SKIP/NO-BASELINE)
+# -> UNKNOWN.
+AVLAT_ALIGNED = ("box_reachable=1\nmarkers=6\nonsets=6\npaired=6\nlatency_ms=118.0\nbaseline_ms=120.0\n"
+                 "tolerance_ms=90.0\ndelta_ms=2.0\nreason=aligned\nverdict=ALIGNED\n"
+                 "2026-09-14T13:00:00Z [measurement-chain-latency] stream (10.77.9.204): reachable=1 "
+                 "result=ALIGNED latency_ms=118.0 baseline_ms=120.0 paired=6 reason=aligned\n")
+AVLAT_DRIFTED = ("box_reachable=1\nmarkers=6\nonsets=6\npaired=6\nlatency_ms=-22.0\nbaseline_ms=118.0\n"
+                 "tolerance_ms=90.0\ndelta_ms=140.0\nreason=latency-step\nverdict=DRIFTED\n"
+                 "2026-09-14T13:00:00Z [measurement-chain-latency] stream (10.77.9.204): reachable=1 "
+                 "result=DRIFTED latency_ms=-22.0 baseline_ms=118.0 paired=6 reason=latency-step\n")
+AVLAT_UNKNOWN_MONO = ("box_reachable=1\nmarkers=6\nonsets=6\npaired=0\nlatency_ms=\nbaseline_ms=120.0\n"
+                      "tolerance_ms=90.0\ndelta_ms=\nreason=monotonic-emit\nverdict=UNKNOWN\n"
+                      "2026-09-14T13:00:00Z [measurement-chain-latency] stream (10.77.9.204): reachable=1 "
+                      "result=UNKNOWN latency_ms= baseline_ms=120.0 paired=0 reason=monotonic-emit\n")
+AVLAT_NO_BASELINE = ("box_reachable=1\nmarkers=6\nonsets=6\npaired=6\nlatency_ms=118.0\nbaseline_ms=\n"
+                     "tolerance_ms=90.0\ndelta_ms=\nreason=no-baseline\nverdict=NO-BASELINE\n"
+                     "2026-09-14T13:00:00Z [measurement-chain-latency] stream (10.77.9.204): reachable=1 "
+                     "result=NO-BASELINE latency_ms=118.0 baseline_ms= paired=6 reason=no-baseline\n")
+AVLAT_SKIP = ("box_reachable=0\nmarkers=0\nonsets=0\npaired=0\nlatency_ms=\nbaseline_ms=120.0\n"
+              "tolerance_ms=90.0\ndelta_ms=\nreason=stream-obs-unreachable\nverdict=SKIP\n"
+              "2026-09-14T13:00:00Z [measurement-chain-latency] stream (10.77.9.204): reachable=0 "
+              "result=SKIP latency_ms= baseline_ms=120.0 paired=0 reason=stream-obs-unreachable\n")
+
 
 # --- low-level parsers ---------------------------------------------------------------------------
 def test_verdict_tokens_extracts_all_in_order():
@@ -245,6 +270,23 @@ def test_clock_obs_net_audiolag_genlock_items():
     assert _item("genlock").decide({"genlock": (GENLOCK_ABSENT, 0)})["status"] == d.UNKNOWN
 
 
+def test_avlatency_item():
+    # #1312 14th item: ALIGNED -> OK, DRIFTED -> FORGOT, everything else -> UNKNOWN (never a false
+    # forgot). The forgot message names the mbc/Ableton chain + the baseline re-seed.
+    assert _item("avlatency").decide({"avlatency": (AVLAT_ALIGNED, 0)})["status"] == d.OK
+    e = _item("avlatency").decide({"avlatency": (AVLAT_DRIFTED, 0)})
+    assert e["status"] == d.FORGOT
+    assert "baseline" in e["message"]
+    # monotonic emit_ts (today's permanent painter) -> UNKNOWN, NEVER forgot
+    assert _item("avlatency").decide({"avlatency": (AVLAT_UNKNOWN_MONO, 0)})["status"] == d.UNKNOWN
+    # not seeded yet -> UNKNOWN
+    assert _item("avlatency").decide({"avlatency": (AVLAT_NO_BASELINE, 0)})["status"] == d.UNKNOWN
+    # stream OBS unreachable -> UNKNOWN (SKIP token is neither good nor forgot)
+    assert _item("avlatency").decide({"avlatency": (AVLAT_SKIP, 0)})["status"] == d.UNKNOWN
+    # a MISSING probe on an older base -> UNKNOWN, forward-compatible
+    assert _item("avlatency").decide({"avlatency": ("MISSING: x\n", d.RC_MISSING)})["status"] == d.UNKNOWN
+
+
 def test_version_items():
     # both version items reuse an existing gate (dantesync-version-gate.sh /
     # camera-box-version-gate.sh) whose exit convention is 0=OK, 20=DRIFT, 11=UNKNOWN
@@ -305,6 +347,7 @@ def test_evaluate_over_a_work_dir(tmp_path):
         "genlock": (GENLOCK_OK, 0),
         "dantesync": ("", 0),
         "cambox": ("", 0),
+        "avlatency": (AVLAT_ALIGNED, 0),
     }
     for name, (text, rc) in caps.items():
         (tmp_path / (name + ".out")).write_text(text, encoding="utf-8")
