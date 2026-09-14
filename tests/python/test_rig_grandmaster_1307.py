@@ -74,6 +74,14 @@ class RigGrandmasterResolver(unittest.TestCase):
         self.assertIn("RIG_GRANDMASTER_IP", r.stderr, "the message must name the deliberate override knob")
         self.assertNotIn("10.77.9.184", r.stdout, "no silent fallback to the retired literal")
 
+    def test_gate_failure_message_never_names_the_retired_literal(self):
+        """The dantesync-gate FAIL hint must name the RESOLVED grandmaster (or the DNS name), never
+        the retired literal -- live 14.9.2026 the gate refused an E2E with 'Bring GM 10.77.9.184 up'
+        while every node was locked to 10.77.9.230 (the message lied about which GM to bring up)."""
+        text = open(os.path.join(REPO, "scripts", "dantesync-gate.sh")).read()
+        self.assertNotIn("Bring GM 10.77.9.184", text, "dantesync-gate.sh still hard-codes the retired GM in its failure hint")
+        self.assertIn('Bring GM ${GATE_GRANDMASTER_IP}', text, "the hint must interpolate the resolved grandmaster")
+
     def test_no_literal_184_default_survives_in_the_consumers(self):
         """The retired literal must not remain as a DEFAULT in any consumer (prose mentions of the
         incident are fine; a `${RIG_GRANDMASTER_IP:-10.77.9.184}` default is not)."""
