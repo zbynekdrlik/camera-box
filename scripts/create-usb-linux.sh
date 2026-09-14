@@ -167,13 +167,14 @@ partition_drive() {
     # auto-grow-root service's growpart correctly REFUSES to expand it (its own fault-tolerant
     # "root is not the last partition -> non-fatal skip" path, the documented 3-partition overlay
     # case) -- root stays at this size, p3 survives.
-    parted -s "$DEVICE" mkpart "root" ext4 513MiB -513MiB
+    # parted parses a leading "-" as an option: every call with a NEGATIVE offset needs "--" first.
+    parted -s "$DEVICE" -- mkpart "root" ext4 513MiB -513MiB
 
     # #1309: persistent-journal partition (p3, last 512MiB). Mounted `nofail` at /var/log/journal so
     # journald Storage=persistent survives a power-cycle -- the whole point of this ticket: the
     # 2026-09-13 half-dead wedge must be diagnosable from `journalctl -b -1` after the owner's
     # power-cycle, not lost with the runtime tmpfs journal.
-    parted -s "$DEVICE" mkpart "$LOG_DIET_JOURNAL_PART_LABEL" ext4 -513MiB 100%
+    parted -s "$DEVICE" -- mkpart "$LOG_DIET_JOURNAL_PART_LABEL" ext4 -513MiB 100%
 
     # Wait for kernel to recognize partitions
     partprobe "$DEVICE"
