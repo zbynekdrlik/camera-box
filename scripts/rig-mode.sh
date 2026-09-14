@@ -193,6 +193,14 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$RIG_MODE_DIR/lib/cambox-offline-ack.sh"
 
+# issue 1311 (Finding 2 -> Mitigations 2b): the bkshading-relay runs ONLY in EVENT mode. TEST mode
+# stops+disables it, EVENT mode enables+starts it -- via the sourced helper below (an additive
+# call from do_test/do_event, no anchored line edited). Every relay start/stop is a PTP-session
+# power change on the shared xHCI hub that also carries the boot stick + grabber; during
+# development the shading panel is not needed. Source-only lib, no side effects at source time.
+# shellcheck source=scripts/lib/bkshading-relay-mode.sh
+. "$RIG_MODE_DIR/lib/bkshading-relay-mode.sh"
+
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
@@ -1274,6 +1282,9 @@ do_test() {
     || echo "WARNING: could not set rig-active heartbeat (#281)" >&2
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
   echo
+  echo "[relay] issue 1311: stop+disable bkshading-relay on the relay boxes (EVENT-only — removes the PTP-session power toggles + the issue-1229 polling noise from the shared USB hub during measurement):"
+  bkshading_relay_mode_apply test "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP"
+  echo
   echo "[cam2 ${PAINTER_IP}] #725 resolve the QPSK audio-marker device from cam2's LIVE aplay -l (never trust the hardcoded default):"
   local resolved_marker_device
   resolved_marker_device="$(resolve_marker_device)"
@@ -1614,6 +1625,9 @@ do_event() {
   fi
   echo
   event_mode_ledger_cleanup
+  echo
+  echo "[relay] issue 1311: enable+start bkshading-relay on the relay boxes (EVENT-only — shading available for the broadcast):"
+  bkshading_relay_mode_apply event "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP"
   echo
   # #721 (live 2026-08-16): the painter stop + the ledger sweep above leave every painter dead, but
   # the marker CSV they wrote (/run/rig-qpsk-markers.csv, root-owned on tmpfs) SURVIVES -- and item 8
