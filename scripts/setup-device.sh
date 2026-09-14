@@ -1626,7 +1626,7 @@ else
         EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
         EFI_ORDER="$(efi_boot_order "$EFI_CUR")"
         if [ -n "$EFI_NUMS" ] && [ -n "$EFI_ORDER" ]; then
-            EFI_FIRST_NUM="$(printf '%s\n' "$EFI_NUMS" | head -1)"
+            EFI_FIRST_NUM="${EFI_NUMS%%$'\n'*}"  # pipe-free first line -- no printf|head SIGPIPE under the caller's set -euo pipefail (.claude/rules/drift-guard-log-parsers.md)
             EFI_NEW_ORDER="$(efi_boot_order_lead "$EFI_FIRST_NUM" "$EFI_ORDER")"
             if efibootmgr -o "$EFI_NEW_ORDER" >/dev/null 2>&1; then
                 echo "  Reordered BootOrder so '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) leads: ${EFI_NEW_ORDER} (#1066 D6)."
