@@ -139,15 +139,6 @@ def test_status_from_exit():
     assert d.status_from_exit("nonsense", {0}, {1}) == d.UNKNOWN
 
 
-def test_cambox_version_status():
-    assert d.cambox_version_status("cam1|1.7.0\ncam3|1.7.0\ncam5|1.7.0") == d.OK
-    assert d.cambox_version_status("cam1|1.7.0\ncam3|1.6.9") == d.FORGOT
-    assert d.cambox_version_status("cam1|?\ncam3|?") == d.UNKNOWN
-    assert d.cambox_version_status("") == d.UNKNOWN
-    # one reachable + one unreachable, same single version -> OK (unreachable ignored)
-    assert d.cambox_version_status("cam1|1.7.0\ncam3|?") == d.OK
-
-
 # --- per-item decisions --------------------------------------------------------------------------
 def _item(key):
     return next(i for i in d.ITEMS if i.key == key)
@@ -221,11 +212,14 @@ def test_clock_obs_net_audiolag_genlock_items():
 
 
 def test_version_items():
+    # both version items reuse an existing gate (dantesync-version-gate.sh /
+    # camera-box-version-gate.sh) whose exit convention is 0=OK, 20=DRIFT, 11=UNKNOWN
     assert _item("dantesync").decide({"dantesync": ("", 0)})["status"] == d.OK
     assert _item("dantesync").decide({"dantesync": ("", 20)})["status"] == d.FORGOT
     assert _item("dantesync").decide({"dantesync": ("", 11)})["status"] == d.UNKNOWN
-    assert _item("cambox").decide({"cambox": ("cam1|1.7.0\ncam3|1.7.0", 0)})["status"] == d.OK
-    assert _item("cambox").decide({"cambox": ("cam1|1.7.0\ncam3|1.6.9", 0)})["status"] == d.FORGOT
+    assert _item("cambox").decide({"cambox": ("", 0)})["status"] == d.OK
+    assert _item("cambox").decide({"cambox": ("", 20)})["status"] == d.FORGOT
+    assert _item("cambox").decide({"cambox": ("", 11)})["status"] == d.UNKNOWN
 
 
 # --- checklist assembly + exit codes -------------------------------------------------------------
@@ -273,7 +267,7 @@ def test_evaluate_over_a_work_dir(tmp_path):
         "audiolag": (AUDIOLAG_OK, 0),
         "genlock": (GENLOCK_OK, 0),
         "dantesync": ("", 0),
-        "cambox": ("cam1|1.7.0\ncam3|1.7.0", 0),
+        "cambox": ("", 0),
     }
     for name, (text, rc) in caps.items():
         (tmp_path / (name + ".out")).write_text(text, encoding="utf-8")
