@@ -11780,3 +11780,35 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   journal stays as shipped; the rule states it is NOT the forensic path for a stick loss.
 - **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version NOT bumped
   (stays 1.7.0-dev.627 per dispatch). Durability backup on `refs/autopilot-wip/worktree-agent-a83408bd1a9d52579`.
+
+## issue 1311 — stop camera-box software provoking USB power/bus events on the cambox shared hub (Finding 2 software half)
+
+- **Deliverable A (capture-rate self-heal → env-gated, default OFF = ALERT-ONLY):** RED
+  `627e0e5a9` → GREEN `8c860b8e3`. `src/capture_rate_selfheal.rs`: `attempt_self_heal` gains an
+  `enabled` first arg; when false it logs the new pure `reset_suppressed_message` (`… ALERT-ONLY:
+  … would USB-reset … (reset suppressed: CAMERA_BOX_CAPTURE_RATE_SELFHEAL unset) …`) and returns
+  `None` before any state read/write. `src/main.rs`: new `CAMERA_BOX_CAPTURE_RATE_SELFHEAL` env
+  gate (default OFF) at the capture-rate call site; the other three triggers pass `enabled=true`
+  (already gated at their own call sites), byte-unchanged. The alert line shares NO substring with
+  the byte-anchored reset greps (no `#663 self-heal: USB reset attempt`, no `succeeded`, no
+  `DEFECTIVE`), so a suppression is never mis-counted as a real reset (proven by a python
+  byte-safety sim + a standalone `rustc --test` replica, 2/2 green).
+- **Deliverable B (bkshading-relay = EVENT-only):** RED `8448f7f11` → GREEN `9dcaccac1`. New
+  `scripts/lib/bkshading-relay-mode.sh` (pure stop+disable / enable+start builders reusing the ONE
+  `bkshading_relay_unit_name`, + a best-effort ssh orchestrator). `rig-mode.sh` sources it +
+  `do_test` calls `bkshading_relay_mode_apply test`, `do_event` calls `… event` (additive pattern,
+  no anchored line edited); roster = derived source box + cam2, matching the E2E-808 pause. The
+  E2E-808 pause becomes a true no-op in TEST mode (`was-active=0`, verified logically). Docs:
+  `4a8a16d34` (`.claude/rules/bkshading.md` + `capture-selfheal-action-sequence.md`).
+- **Tier-0 (worktree lane):** `cargo fmt --all --check` clean on all touched `.rs`; clippy
+  `doc_lazy_continuation` net clean; `bash -n` + `shellcheck -S warning` clean on the new lib +
+  `rig-mode.sh`; the occurrence-count anchor sweep over 42 rig-mode-reading test files shows only
+  ADDITIVE literal changes (no 1→0 / 1→2 on a unique existing anchor); the do_test/do_event
+  body-slice + builder-content simulation green; the `purge < assert` ordering preserved. The
+  sourced-lib Rust harness (`tests/harness_bkshading_relay_mode_1311.rs`) + the
+  `capture_rate_selfheal.rs` unit tests are CI's first real compile (main.rs is not locally
+  compilable under Tier-0).
+- **Lane scope:** worktree lane — CODE + TESTS only, no rig touched (owner ruling „nič čo môže
+  odpáliť disk"), no push/PR/merge/close, no Discord, no dev1 timer. Version NOT bumped (per
+  dispatch, base `7546fa1ff` / 1.7.0-dev.627). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a82aead9864e31051`.
