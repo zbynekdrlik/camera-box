@@ -76,6 +76,8 @@ RDH_TIMEOUT="${RDH_TIMEOUT:-30}"
 # the two version items ssh the WHOLE fleet (many nodes) -> a more generous default timeout
 RDH_DANTESYNC_TIMEOUT="${RDH_DANTESYNC_TIMEOUT:-150}"
 RDH_CAMBOX_TIMEOUT="${RDH_CAMBOX_TIMEOUT:-120}"
+# #1312: avlatency samples the stream mbc meter ~32 s + ssh-reads the cam2 marker log -> generous bound
+RDH_AVLATENCY_TIMEOUT="${RDH_AVLATENCY_TIMEOUT:-100}"
 RC_MISSING=127
 
 MIC_PROBE="${RDH_MIC_PROBE:-$HERE/measurement-audio-alert-watchdog.sh}"
@@ -90,6 +92,7 @@ MAPPING_PROBE="${RDH_MAPPING_PROBE:-$HERE/set-ndi-mapping.py}"
 PINS_PROBE="${RDH_PINS_PROBE:-$HERE/latency_pins_verify.py}"
 DANTESYNC_PROBE="${RDH_DANTESYNC_PROBE:-$HERE/dantesync-version-gate.sh}"
 CAMBOX_PROBE="${RDH_CAMBOX_PROBE:-$HERE/camera-box-version-gate.sh}"
+AVLATENCY_PROBE="${RDH_AVLATENCY_PROBE:-$HERE/measurement-chain-latency.sh}"
 RIGMODE_LIB="${RDH_RIGMODE_LIB:-$HERE/lib/rig-mode-state.sh}"
 DECIDE="${RDH_DECIDE:-$HERE/rig_dev_handover_decision.py}"
 
@@ -214,6 +217,14 @@ else
   printf 'roster lib %s unreadable -- no nodes to gate\n' "$CAMSET_LIB" >"$WORKDIR/cambox.out"
   printf '%s\n' "$RC_MISSING" >"$WORKDIR/cambox.rc"
 fi
+
+# --- item 14: avlatency (mbc measurement-chain latency vs baseline; read-only paired measurement) --
+# measurement-chain-latency.sh reads STREAM_HOST/CAM2_HOST/CAM_PW + OBS_PASSWORD from the env, so export
+# them for the child (OBS_PASSWORD is already exported above). It compares the median chain latency to
+# ~/.camera-box/measurement-chain-latency-baseline.json (seeded by the supervisor with --baseline after
+# a green E2E) and reads UNKNOWN when cam2 is down / no baseline / the painter emit_ts is not wall-clock.
+export STREAM_HOST CAM2_HOST CAM_PW
+run_probe avlatency bash "$AVLATENCY_PROBE"
 
 # --- decide + print ------------------------------------------------------------------------------
 json_flag=()

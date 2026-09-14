@@ -250,6 +250,21 @@ ITEMS = [
          forgot_msg="camera-box build nie je jednotný — nasaď rovnakú verziu (scripts/deploy-fleet.sh)",
          unknown_msg="camera-box verzie sa nepodarilo prečítať (boxy nedostupné)",
          ok_codes={0}, forgot_codes={20}),  # camera-box-version-gate exit 0=pass, 20=drift, 11=unknown
+    # #1312: the mbc measurement-audio chain's LATENCY vs a persisted baseline (a read-only paired
+    # measurement: cam2 marker emit vs stream `mbc` burst onset, median vs baseline, |now-base|>90ms).
+    # Verdict-kind like `mic`: the standalone scripts/measurement-chain-latency.sh probe computes the
+    # verdict token; a monotonic-emit painter / no-baseline / SKIP / missing-probe all read UNKNOWN
+    # (never a false forgot). NOT the pin-relative dock av_offset (which read +17 ms while the gate
+    # read -140 ms on 14.9.) -- this is an independent absolute measurement.
+    Item("avlatency", "meracia zvuková cesta: latencia oproti baseline", ["avlatency"], "verdict",
+         ok_msg="meracia zvuková cesta má latenciu v norme oproti baseline (rozdiel do 90 ms)",
+         forgot_msg="meracia zvuková cesta (mbc/Ableton reťazec) má posunutú latenciu oproti baseline "
+                    "(nad 90 ms) — over DVS/Dante/Ableton mbc cestu; baseline sa prepisuje po zelenom "
+                    "E2E cez `scripts/measurement-chain-latency.sh --baseline`",
+         unknown_msg="latenciu meracej cesty sa nepodarilo zmerať (cam2 dole / marker log chýba / málo "
+                     "onsetov / žiadna baseline / painter emit_ts nie je wall-clock / stream OBS "
+                     "nedostupné) — over v TEST režime",
+         good={"ALIGNED"}, forgot={"DRIFTED"}),
 ]
 
 
