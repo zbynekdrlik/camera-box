@@ -239,7 +239,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $box VB-Matrix down"
     python3 "$NOTIFY" notify --body \
       "🚨 VB-Matrix down ($REPO_SLUG): **$box** ($ip) — VB-Audio Matrix (VBAudioMatrix*) NEBEŽÍ, hoci je na boxe nainštalovaný. Jeho virtuálny ASIO driver 'VB-Matrix VASIO-8' tak nemá hostiteľa → OBS ASIO vstupy naň (napr. 'ASIO Input Capture' zo cam2) hladujú (starved_blocks≈2940/interval) a zvuk z nich nejde. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol. Náprava (owner/supervisor krok): na boxe spusti \`schtasks /run /tn StartVBMatrix\`, potom over že proces beží a starved_blocks spadne na 0. Trvalé riešenie: pridať AtLogon trigger na task StartVBMatrix (po reboote sa inak VB-Matrix nespustí)." \
-      --dedup-key "$(watchdog_notify_key "vb-matrix-$box" "$(date +%s)")" \
+      --dedup-key "vb-matrix-$box" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- still down"

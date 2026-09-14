@@ -68,7 +68,7 @@ Never hand-roll the `-<floor(now/interval)>` suffix or a second bucketing implem
 - **python:** `scripts/watchdog_reping.py :: notify_key(base, now, interval)` — the byte-for-byte twin
   (a parity pytest diffs the two); `dantesync_clock_decision.dedup_key` delegates to it.
 
-**The production-critical class (#1308) is these 12 dev1 watchdogs** — the faults the fleet cannot run
+**The production-critical class (#1308) is these 10 dev1 watchdogs** — the faults the fleet cannot run
 production without, invisible without a page:
 
 | watchdog | ticket | fault |
@@ -79,8 +79,6 @@ production without, invisible without a page:
 | `bundle-state-alert-watchdog.sh` | #732 | :8899 bundle-state server down |
 | `obs-liveness-watchdog.sh` | #391 | broadcast-OBS render wedge |
 | `audio-lag-alert-watchdog.sh` | #1226 | OBS audio-timeline lag / band drift |
-| `asio-starve-alert-watchdog.sh` | #1023 | ASIO source starved |
-| `vb-matrix-alert-watchdog.sh` | #1227 | VB-Matrix down |
 | `ndi-portmap-alert-watchdog.sh` | #1181 | NDI sender port-map moved |
 | `avsync-heartbeat-alert-watchdog.sh` | #812 | A/V-sync heartbeat stale |
 | `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
@@ -94,14 +92,23 @@ fault-criticality axis are ORTHOGONAL — this one is TEST-gated AND time-bucket
 The DIAGNOSTIC / TEST-mode watchdogs stay one-ping-per-incident (a stable key, NO bucket): cadence
 (#794), frozen-input (#1052), splitter-port (#739), grabber-stuck (#1128), imag-power (#1040),
 ndi-halving (#1203), optical-chain (#860), obs-burn-reconcile (#1060), mv-fps (#771), av-step (#1267),
-netcfg-audit (#797), rig-status (#787). Do NOT time-bucket any of these — the exception is NARROW.
+netcfg-audit (#797), rig-status (#787), **asio-starve (#1023)** and **vb-matrix (#1227)**. Do NOT
+time-bucket any of these — the exception is NARROW.
 
-The sweep below allowlists the 11 EXPLICITLY (CLASS-based) and **rejects a bucketed key in any
+**asio-starve (#1023) and vb-matrix (#1227) were RE-classified OUT of production-critical (#1308 step-3,
+owner ruling 14.9.2026 „5 A"):** VB-Matrix on the stream box is NOT production audio — its
+`ASIO Input Capture` input is muted and lives only in scene `party`, and the `StartVBMatrix` task has
+been disabled since 3.9. So the two watchdogs that observe that chain guard a diagnostic signal, not a
+production one; their ALERT `--dedup-key` is back to the stable per-incident form (`vb-matrix-$box`,
+`asio-starve-$source`, `asio-starve-tap-$source`) and both stay DISABLED on dev1 (strih-only enable is
+a supervisor call).
+
+The sweep below allowlists the 10 EXPLICITLY (CLASS-based) and **rejects a bucketed key in any
 NON-allowlisted script**, so the exception is intentional and visible, never a silently-weakened
 invariant.
 
 **Delivery-layer caveat (#1308):** wrapping the key does NOT change a watchdog's own confirm/throttle
-detection — the 10 wrapped bash watchdogs still gate their notify CALL through `obs_watchdog_alert_
+detection — the 9 wrapped bash watchdogs still gate their notify CALL through `obs_watchdog_alert_
 throttle`, so their effective re-ping cadence is `max(throttle interval, bucket interval)` (the
 bucketed key just turns each throttled re-fire into a fresh ping instead of a silent card edit). Only
 `dantesync-clock-alert-watchdog.sh` fires every confirmed pass (no throttle), so the bucket alone sets

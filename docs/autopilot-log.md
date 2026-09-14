@@ -11661,3 +11661,32 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
 - **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord; NEVER probed the wedged
   cam2. Version bumped 1.7.0-dev.627. Durability backup on
   `refs/autopilot-wip/worktree-agent-af4cfff39ce542684`.
+
+## #1308 step 3 — VB-Matrix/asio-starve reclassified back to diagnostic one-ping (worktree lane, 2026-09-14, base 72a357cdd, v1.7.0-dev.627)
+- **Owner ROZHODNUTÉ 14.9.2026 („5 A"):** VB-Matrix on the stream box is NOT production audio (its
+  `ASIO Input Capture` input is muted, only in scene `party`; `StartVBMatrix` task disabled since
+  3.9.). So `vb-matrix-alert-watchdog.sh` (#1227) and `asio-starve-alert-watchdog.sh` (#1023) move
+  OUT of the step-2 production-critical time-bucketed re-ping class BACK to the diagnostic
+  one-ping-per-incident class. Delivery layer ONLY — detection/confirm/throttle/recovery untouched.
+- **Scripts:** reverted exactly the step-2 (`7d14b5d19`) hunks — the two watchdogs' ALERT
+  `--dedup-key` goes from `"$(watchdog_notify_key "<base>" "$(date +%s)")"` back to the stable
+  `"vb-matrix-$box"` / `"asio-starve-$source"` / `"asio-starve-tap-$source"`. `git diff 7d14b5d19^`
+  shows no dedup-key delta = exact pre-step-2 restore. The other 9 production-critical watchdogs
+  (dante-clock, genlock-lock, network-reach, bundle-state, obs-liveness, audio-lag, ndi-portmap,
+  avsync-heartbeat, imag-obs) + measurement-audio (#1310) stay bucketed — a full `git revert` was
+  rejected for that reason.
+- **Sweep test (`test_notify_dedup_key_sweep_1206.py`):** dropped both from
+  `_PRODUCTION_CRITICAL_TIME_BUCKETED`, so a re-added bucket in either now FAILS
+  `test_only_allowlisted_watchdogs_time_bucket_their_key` (that was the RED). Class now 10.
+- **Docs:** `watchdog-notify-dedup.md` table 12→10 rows + prose 12→10 / caveat 10→9 wrapped-bash +
+  the two added to the DIAGNOSTIC one-ping list with the owner-ruling reason; one line each in
+  `vb-matrix-watchdog.md` + `asio-starve-watchdog.md` noting the class + that both stay DISABLED on
+  dev1 (strih-only enable is a supervisor call).
+- **Tier-0 (worktree lane):** full `tests/python` green (2398 passed); `bash -n` + `shellcheck -S
+  warning` clean on both scripts; each `--dry-run` driven end-to-end via its inline-literal env seam
+  (`VB_MATRIX_FETCH_CMD` DOWN body / `ASIO_STARVE_PROBE_CMD` starved-log + healthy-sibling) reaches
+  the CONFIRMED "WOULD alert" branch (the one carrying the reverted stable key) across a 2-pass
+  confirm with no runtime error.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord, no dev1 timer touched.
+  Version NOT bumped (per dispatch). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a2ff5b9742fcfd901`.
