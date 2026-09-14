@@ -87,6 +87,16 @@ DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES:-cam1 cam2 cam3 cam4 cam5 cam6 ca
 # The OBS-box dantesync nodes (space-separated NAMES); IPs + the resolume home-gate come from
 # obs-fleet.sh. imag(-nb) IS a dantesync node; resolume is the traveling CG box.
 DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES:-strih stream imag resolume}"
+# #1313: the LOCAL node(s) -- dev1 itself. dev1 runs dantesync too (its clock feeds every dev1-hosted
+# gate: clock-offset-painter-gate.sh, the recording-verdict wall references, every date-stamped gate
+# window), yet it is NOT a probed cam/obs node -- so on 14.9.2026 it silently sat NTP-only for ~a day
+# (gm_allowlist on the retired literal + a fleet roll that skipped it) unpaged, the dev1 watchdog that
+# would have paged it runs ON dev1 and never looked at 127.0.0.1:8898. A local node is probed on the
+# loopback :8898 with NO ssh/TCP reach probe (the box is by definition up -- the watchdog runs on it),
+# graded with the SAME verdicts (analyze_local / the DECIDE --local flag). Space-separated NAMES.
+DANTE_CLOCK_LOCAL_NODES="${DANTE_CLOCK_LOCAL_NODES:-dev1}"
+# The loopback address the local node's :8898 is probed on (override for Tier-0 fixtures).
+DANTE_CLOCK_LOCAL_IP="${DANTE_CLOCK_LOCAL_IP:-127.0.0.1}"
 
 STATUS_PORT="${DANTE_CLOCK_STATUS_PORT:-8898}"          # dantesync#47 network status endpoint
 STATUS_PATH="${DANTE_CLOCK_STATUS_PATH:-/status}"
@@ -139,13 +149,20 @@ log() { printf '%s [dantesync-clock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:
 # -- roster: NAME|IP|HOMEGATE triples ----------------------------------------------------------
 # HOMEGATE ∈ always (cams: probe unconditionally; an OFF box -> UNREACHABLE -> SKIP) |
 # obsfleet (obs_fleet_is_home decides -- always-true for strih/stream/imag, the traveling gate for
-# resolume). DANTE_CLOCK_NODES (space-separated NAME|IP[|HOMEGATE]) overrides the whole roster.
+# resolume) | local (#1313: dev1 itself -- loopback :8898, NO ssh/TCP reach probe, box up by
+# definition so a dead :8898 is NO_DANTESYNC not SKIP). DANTE_CLOCK_NODES (space-separated
+# NAME|IP[|HOMEGATE]) overrides the whole roster.
 build_roster() {
   if [ -n "${DANTE_CLOCK_NODES:-}" ]; then
     printf '%s\n' $DANTE_CLOCK_NODES
     return 0
   fi
   local n host
+  # #1313: the local node(s) first -- dev1 on the loopback, homegate `local` (no camera_resolve /
+  # obs_fleet_host lookup: the address is the fixed loopback, the box is by definition up).
+  for n in $DANTE_CLOCK_LOCAL_NODES; do
+    printf '%s|%s|local\n' "$n" "$DANTE_CLOCK_LOCAL_IP"
+  done
   for n in $DANTE_CLOCK_CAM_NODES; do
     if camera_resolve "$n" >/dev/null 2>&1; then
       printf '%s|%s|always\n' "$n" "$CAMERA_IP"
@@ -196,6 +213,12 @@ box_up_probe() {
   if [ -n "${DANTE_CLOCK_BOX_UP_CMD:-}" ]; then
     "$DANTE_CLOCK_BOX_UP_CMD" "$name" "$ip" "$homegate" 2>/dev/null || printf '0'
     return 0
+  fi
+  if [ "$homegate" = "local" ]; then
+    # #1313: dev1 is up by definition -- the watchdog runs ON it. No reach probe; a dead :8898 is a
+    # crashed daemon (NO_DANTESYNC), never a down box (SKIP). --local also forces box_up=1 in the
+    # DECIDE, so this is belt-and-suspenders + it skips a pointless connect to 127.0.0.1:22.
+    printf '1'; return 0
   fi
   if [ "$homegate" = "obsfleet" ]; then
     [ "$(watchdog_probe_tcp "$ip" 4455 "$TCP_TIMEOUT")" = "1" ] && { printf '1'; return 0; }
@@ -327,6 +350,10 @@ handle_node() {
   fi
 
   local -a extra=()
+  # #1313: the local node (dev1) grades with analyze_local -- box up by definition (dead :8898 ->
+  # NO_DANTESYNC, never SKIP) + no ssh axis (never MGMT_DEAD). mgmt_ssh_probe already returns "" for a
+  # non-`always` homegate (so no --mgmt-ssh-ok), and box_up_probe returns 1 for `local`.
+  [ "$homegate" = "local" ] && extra+=(--local 1)
   if body="$(fetch_status_json "$ip")"; then
     reachable=1
     # :8898 alive -- ALSO read the ssh management banner (#1309). A reset/timeout while :8898 still
@@ -472,7 +499,7 @@ require_tools() {
 }
 
 main() {
-  log "pass start (dry_run=$DRY_RUN, confirm=$CONFIRM_THRESHOLD, reping=${REPING_INTERVAL_S}s, cams='$DANTE_CLOCK_CAM_NODES', obs='$DANTE_CLOCK_OBS_NODES')"
+  log "pass start (dry_run=$DRY_RUN, confirm=$CONFIRM_THRESHOLD, reping=${REPING_INTERVAL_S}s, local='$DANTE_CLOCK_LOCAL_NODES', cams='$DANTE_CLOCK_CAM_NODES', obs='$DANTE_CLOCK_OBS_NODES')"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
   # Resolve the grandmaster ONCE per pass (the DNS name video-clock.lan -> its IPv4, #1307).

@@ -166,6 +166,29 @@ def analyze(status_json_text, box_reachable, grandmaster_ip, now=None, freshness
     return res
 
 
+def analyze_local(status_json_text, box_reachable, grandmaster_ip, now=None, freshness_s=None,
+                  clock_alarm_field=CLOCK_ALARM_FIELD, version_pin=None):
+    """#1313 -- the dev1 CONTROL box's verdict. dev1 hosts this watchdog and is itself a dantesync
+    node whose clock feeds every dev1-hosted gate, yet it is NOT a probed cam/obs node -- so on
+    14.9.2026 it sat NTP-only for ~a day unpaged (its gm_allowlist on the retired literal + a fleet
+    roll that skipped it). A `local` node is probed at 127.0.0.1:8898 with NO ssh/TCP reach probe.
+    Two policy differences from a remote node, both asserted HERE (ONE tested source of truth,
+    never re-encoded in bash):
+
+      * box is UP by definition -- the watchdog runs ON it -- so a dead :8898 is NO_DANTESYNC (the
+        daemon crashed/wedged on a live box), never SKIP (there is no "box down, defer #1001" case
+        for the box we are running on). Forced via box_up=1.
+      * no ssh MANAGEMENT axis (we ARE the box) -- mgmt_ssh_ok is never probed, so MGMT_DEAD can
+        never fire for the local node. Forced via mgmt_ssh_ok=None.
+
+    Everything else (OK / NO_CLOCK / UNKNOWN / gm / storm / stale / version reporting) is the SAME
+    generic grading, so a local node can never disagree with a remote node about what a lost clock
+    is."""
+    return analyze(status_json_text, box_reachable, grandmaster_ip, now=now, freshness_s=freshness_s,
+                   clock_alarm_field=clock_alarm_field, box_up=1, version_pin=version_pin,
+                   mgmt_ssh_ok=None)
+
+
 def _analyze_clock(status_json_text, box_reachable, grandmaster_ip, now=None, freshness_s=None,
                    clock_alarm_field=CLOCK_ALARM_FIELD, box_up=None, version_pin=None):
     """One node's CLOCK/HTTP verdict from its :8898/status body (the #1307/#1308 core; #1309 wraps
@@ -298,6 +321,10 @@ def _main(argv):
     a.add_argument("--mgmt-ssh-ok", type=int, default=None,
                    help="#1309: 1/0 ssh management-banner probe result (omit = not probed). A "
                         "reachable :8898 + a dead banner (0) -> MGMT_DEAD (the 13.9. wedge)")
+    a.add_argument("--local", type=int, default=0,
+                   help="#1313: 1 = the dev1 CONTROL box (analyze_local). Forces box_up=1 (a dead "
+                        ":8898 -> NO_DANTESYNC, never SKIP) + no ssh axis (never MGMT_DEAD), "
+                        "ignoring --box-up / --mgmt-ssh-ok. Default 0 = a remote node, unchanged.")
 
     d = sub.add_parser("dedup-key", help="time-bucketed --dedup-key for a base + now + interval")
     d.add_argument("--base", required=True)
@@ -312,8 +339,14 @@ def _main(argv):
 
     if ns.cmd == "analyze":
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        res = analyze(text, ns.box_reachable, ns.grandmaster_ip, now=ns.now, freshness_s=ns.freshness_s,
-                      box_up=ns.box_up, version_pin=ns.version_pin, mgmt_ssh_ok=ns.mgmt_ssh_ok)
+        if ns.local == 1:
+            # #1313: the dev1 CONTROL box -- box_up=1 (dead :8898 -> NO_DANTESYNC) + no ssh axis,
+            # ignoring --box-up / --mgmt-ssh-ok (analyze_local is the ONE tested local policy point).
+            res = analyze_local(text, ns.box_reachable, ns.grandmaster_ip, now=ns.now,
+                                freshness_s=ns.freshness_s, version_pin=ns.version_pin)
+        else:
+            res = analyze(text, ns.box_reachable, ns.grandmaster_ip, now=ns.now, freshness_s=ns.freshness_s,
+                          box_up=ns.box_up, version_pin=ns.version_pin, mgmt_ssh_ok=ns.mgmt_ssh_ok)
         # Stable key ORDER (existing keys first, new #1308 keys appended) so the orchestrator's
         # `sed -n 's/^KEY=//p'` reads keep working and a new key is purely additive.
         for k in ("verdict", "reason", "is_locked", "mode", "gm_source_ip",
