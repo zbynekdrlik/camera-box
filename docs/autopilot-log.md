@@ -11978,3 +11978,36 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   BY CHERRY-PICK of those commits onto `dev` (the merge reconciled an unrelated #1311 file that a
   `git merge` of this branch would drag into dev). Durability backup on
   `refs/autopilot-wip/worktree-agent-a28850d39205ac8e6`.
+
+## #1312 — cam2 painter `--wall-clock` (the avlatency monotonic-emit follow-up now SHIPPED)
+
+- **Scope (this lane):** the follow-up the #1312 avlatency lane left open — make the cam2 QPSK painter
+  stamp its marker-log `emit_ts_ns` on the DanteSync wall clock so `measurement-chain-latency.sh` can
+  pair it against dev1 `mbc` onsets. RED `test(#1312)` 6e29ee6c9 → GREEN `fix(#1312)` 2c18b347b →
+  `docs(#1312)` 28a304edc.
+- **Change:** added `--wall-clock` to BOTH painters that write `/run/rig-qpsk-markers.csv` — the
+  PERMANENT `cam2-painter.service` ExecStart (`scripts/setup-device.sh` `cam2_painter_service_unit_content`)
+  and the transient rig-mode TEST painter (`scripts/rig-mode.sh` `painter_launch_remote`). Placed AFTER
+  `--paint-fps`/`--duration-secs` so the pinned contiguous `--paint-only --dual-qr --qr-size N
+  --duration-secs N` vernier anchor (`tests/rig_mode.rs::test_mode_launches_pinned_painter`) stays
+  intact; every other argv byte identical. The E2E burn painter (`recording-e2e.sh:2823`) ALREADY had
+  `--wall-clock` — deliberately untouched. Safe no-op for the A/V verdict path (`av_sync_recording.rs`
+  pairs by fid, ignores `emit_ts`).
+- **Tests:** new `tests/python/test_cam2_painter_wall_clock_1312.py` (sources both scripts, runs the
+  pure builders, asserts the emitted painter argv carries `--wall-clock` + keeps the pinned flags/anchor
+  byte-identical — RED 2-fail→GREEN 4-pass). Rust harness needles updated in lock-step
+  (`harness_cam2_painter_provisioning_863.rs` + `rig_mode.rs`).
+- **Verify (Tier-0, no rig):** 2478/2478 pytest, `bash -n` + `shellcheck -S warning` clean on both
+  scripts, `cargo fmt --all --check` clean, anchor occurrence-count sweep over every `tests/*.rs`
+  `.find`/`.split`/`.contains` literal (no 1→0 / 1→2). Fresh-context adversarial review: CLEAN, 0
+  findings across 6 lenses.
+- **Supervisor step (unverified here):** making it LIVE on cam2 is provisioning/reboot-class —
+  `setup-device.sh` re-run, OR a remount-rw window that rewrites the unit ExecStart + `daemon-reload` +
+  `systemctl restart cam2-painter.service` — then seed the baseline with
+  `measurement-chain-latency.sh --baseline` after the next green E2E. Until the RUNNING painter is
+  restarted with `--wall-clock`, `avlatency` keeps reading the `monotonic-emit` UNKNOWN (the SHAPE
+  guard stays a fail-safe). cam2 is DOWN today; no rig touched.
+- **Lane scope:** worktree lane, CODE + TESTS + DOCS only. Worktree was based on `origin/main`;
+  repointed to `origin/dev` (de31d8ac2) at start via `checkout -B`. 3 work commits on top; INTEGRATE BY
+  CHERRY-PICK of 6e29ee6c9..HEAD onto `dev`. Durability backup on
+  `refs/autopilot-wip/worktree-agent-a478c1a0e9e8f63ad`.
