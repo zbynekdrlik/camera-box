@@ -11721,3 +11721,32 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
 - **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version 1.7.0-dev.627
   (NOT bumped — dev already carries it). Durability backup on
   `refs/autopilot-wip/worktree-agent-a53d11d309eeaacb0`.
+## issue 1312 — "development" handover check (one dev1 command, one Slovak checklist) — worktree lane, 2026-09-14, base 72a357cdd (v1.7.0-dev.627)
+- **What:** `scripts/rig-dev-handover-check.sh` (thin bash orchestrator) + `scripts/rig_dev_handover_decision.py`
+  (pure decision engine) + `tests/python/test_rig_dev_handover_1312.py` + paths-scoped
+  `.claude/rules/rig-dev-handover-check.md` + CLAUDE.md router line. Owner directive 14.9.2026:
+  after every production some operator state stays in production shape (muted `mbc` mic, painter/
+  burns off, EVENT scenes, drifted mapping/pins) and nobody notices until the release E2E burns a
+  cycle (13.9. muted mic -> `[4b2/8]` abort). The check is the supervisor's pre-flight.
+- **Architecture:** orchestrator runs each EXISTING read-only probe (measurement-audio/dantesync-clock/
+  audio-lag/genlock-lock/optical-chain/network-reach/obs-liveness alert-watchdog `--dry-run`s;
+  obs_burn_filter sweep-check; set-ndi-mapping --verify-only; latency_pins_verify; dantesync-version-gate;
+  camera-box-version-gate; lib/rig-mode-state) bounded + drain-safe, captures each `<name>.out`/`.rc`,
+  then the PURE engine parses `verdict=`/`-> REACHABLE` lines + exit codes and maps every item to
+  OK/FORGOT-BY-OWNER/UNKNOWN + a Slovak line, ending `zabudol si: …`. Report-only, NEVER mutates
+  (a `--fix` mode is a followup). A DOWN box (cam2) fails safe to UNKNOWN via `timeout`, never a false
+  OK; absent genlock facet = UNKNOWN-not-forgot (issue 1299 forward-compat); a MISSING probe script =
+  RC_MISSING = UNKNOWN so the orchestrator picks up 1310/1307/1299 the moment they exist.
+- **Reuse decisions:** cambox + dantesync version items reuse the existing 0/20/11 version gates
+  (camera-box-version-gate.sh / dantesync-version-gate.sh) rather than a bespoke sweep. scenes +
+  Studio Mode have no independent read-only probe -> covered transitively by the `mode` item
+  (`rig-mode.sh test` restores scenes/studio/burns/painter in one shot); a dedicated scene/studio
+  read-only probe is a followup_candidate.
+- **Tier-0 (worktree lane):** 18 pytest cases green (parsers + per-item decision table + checklist
+  aggregation + exit codes + evaluate() over a temp work-dir); `bash -n` + `shellcheck -S warning`
+  clean. Verified LIVE from dev1 (read-only, NEVER probed cam2): network-reach + genlock-lock
+  `--dry-run` parser output matches real probe lines (net -> REACHABLE = OK; genlock absent facet
+  -> UNKNOWN).
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig mutation, no Discord. RED test
+  65089bdd2 -> GREEN feat f3dac1f74. Durability backup on
+  `refs/autopilot-wip/worktree-agent-a738efb8847eba521`.
