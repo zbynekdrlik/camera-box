@@ -911,6 +911,14 @@ fn create_usb_partitions_a_dedicated_persistent_journal_partition_1309() {
         body.contains("mkpart \"$LOG_DIET_JOURNAL_PART_LABEL\" ext4 -513MiB 100%"),
         "create-usb-linux.sh must create the persistent-journal partition p3 (#1309)"
     );
+    // issue 1309 follow-up (14.9.2026 live failure): parted parses a leading "-" as an OPTION, so
+    // every mkpart with a NEGATIVE offset must be preceded by "--" — the first stick build with the
+    // journal partition died at `parted: invalid option -- '5'`. Pin the "--" on both calls.
+    assert!(
+        body.contains("-- mkpart \"root\" ext4 513MiB -513MiB")
+            && body.contains("-- mkpart \"$LOG_DIET_JOURNAL_PART_LABEL\" ext4 -513MiB 100%"),
+        "create-usb-linux.sh: parted calls with a negative offset must carry `--` before mkpart"
+    );
     assert!(
         body.contains("mkfs.ext4 -L \"$LOG_DIET_JOURNAL_PART_LABEL\""),
         "create-usb-linux.sh must mkfs the journal partition with the shared label (#1309)"
