@@ -232,7 +232,12 @@ def test_genlock_build_sha_from_file_missing_or_empty_is_blank(tmp_path):
 
 def test_record_dir_stats_empty_dir(tmp_path):
     stats = bsg.record_dir_stats(str(tmp_path))
-    assert stats == {"total_bytes": 0, "file_count": 0, "oldest_mtime": None}
+    assert stats["total_bytes"] == 0
+    assert stats["file_count"] == 0
+    assert stats["oldest_mtime"] is None
+    # #1276: a READABLE volume reports a real (non-negative) free-space figure, never None.
+    assert stats["free_bytes"] is not None
+    assert stats["free_bytes"] >= 0
 
 
 def test_record_dir_stats_sums_files_and_counts(tmp_path):
@@ -285,7 +290,47 @@ def test_record_dir_stats_unreadable_dir_returns_zeros_never_raises():
     # switch) must degrade to a harmless zero result — never crash the /record-dir-stats.json
     # endpoint, and never a false "over budget" WARN from a bogus large number.
     stats = bsg.record_dir_stats("/this/path/does/not/exist/at/all")
-    assert stats == {"total_bytes": 0, "file_count": 0, "oldest_mtime": None}
+    assert stats["total_bytes"] == 0
+    assert stats["file_count"] == 0
+    assert stats["oldest_mtime"] is None
+    # #1276: an unreadable volume reports free_bytes None (UNKNOWN downstream) — never a bogus
+    # number that would fire a false low-free-space WARN.
+    assert stats["free_bytes"] is None
+
+
+# ── #1276: recordings-retention WARNING semantics — free space on the volume, not the file sum ──
+# Owner ruling (14.9.2026, "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): the E2E
+# preflight WARN must fire when the recordings VOLUME has <= 50 GB of FREE space left, NOT when
+# the sum of recording files exceeds a 50 GB budget. recordings_free_verdict is the python mirror
+# of the canonical Rust free_space_verdict (src/recordings_retention.rs); the bash preflight calls
+# it. Threshold in decimal GB (1e9 bytes).
+
+
+def test_recordings_free_verdict_plenty_of_space_is_ok():
+    # 619 GB free (real strih) -> OK: the old file-sum warning was a false alarm here.
+    assert bsg.recordings_free_verdict(619 * 10**9, 50) == "OK"
+    assert bsg.recordings_free_verdict(51 * 10**9, 50) == "OK"
+
+
+def test_recordings_free_verdict_exact_boundary_is_ok_no_warn():
+    # Exactly 50 GB free -> OK (spec: free >= 50 GB -> no warn).
+    assert bsg.recordings_free_verdict(50 * 10**9, 50) == "OK"
+
+
+def test_recordings_free_verdict_below_threshold_warns():
+    # < 50 GB free -> WARN (the owner's "only 50 GB remaining" signal).
+    assert bsg.recordings_free_verdict(49 * 10**9, 50) == "WARN"
+    assert bsg.recordings_free_verdict(0, 50) == "WARN"
+
+
+def test_recordings_free_verdict_unreadable_is_unknown_never_a_false_warn():
+    # free_bytes None (unreadable volume) -> UNKNOWN, never WARN.
+    assert bsg.recordings_free_verdict(None, 50) == "UNKNOWN"
+
+
+def test_recordings_free_verdict_threshold_is_configurable():
+    assert bsg.recordings_free_verdict(80 * 10**9, 100) == "WARN"
+    assert bsg.recordings_free_verdict(120 * 10**9, 100) == "OK"
 
 
 # ── #826: strih OBS-identity machine-check facet — the 2026-07-27 incident (a hand-launched
