@@ -11690,3 +11690,34 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
 - **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord, no dev1 timer touched.
   Version NOT bumped (per dispatch). Durability backup on
   `refs/autopilot-wip/worktree-agent-a2ff5b9742fcfd901`.
+## #1276 — E2E recordings-retention WARNING → low-FREE-space semantics (owner ruling 14.9.2026)
+
+- **Owner ruling (14.9.2026, webterm, verbatim „B varovanie ma byt ked 50gb uz len ostava
+  miesta!!!"):** option B — nothing is deleted; the E2E recordings-retention WARNING changes from
+  "the sum of recording files exceeds a 50 GB budget" to "the recordings VOLUME has ≤ 50 GB of FREE
+  space left". `--execute` deletion stays an owner-only step. The DELETE-set computation is untouched.
+- **Root cause:** the old `#652` preflight warned on `total_bytes > RECORDINGS_BUDGET_GB`, a file-sum
+  budget — a false alarm on strih (137 GB of recordings but 619 GB free). The owner-ruled signal is
+  real disk pressure, i.e. free space on the volume.
+- **GREEN 971c2f81f / RED 9cdebb7d1.** Pure decision `recordings_retention::free_space_verdict`
+  (`src/recordings_retention.rs`, canonical) + `bundle_state_gather.recordings_free_verdict` (python
+  mirror the bash preflight calls): free ≥ threshold → Ok, < threshold → Warn, `free_bytes` None →
+  Unknown (never a false low-space WARN), decimal GB. `record_dir_stats` now also reports `free_bytes`
+  via `shutil.disk_usage(record_dir).free` on the SAME local record dir (no new transport — the
+  ticket's suggested remote PowerShell `Get-PSDrive` mis-modelled the on-box python gather).
+  `recording-e2e.sh` preflight renamed `check_recordings_budget`→`check_recordings_free_space`,
+  `RECORDINGS_BUDGET_GB`→`RECORDINGS_FREE_MIN_GB` (default 50), reads `free_bytes` from
+  `/record-dir-stats.json` and calls the pure verdict; parse via a plain `out=$(...)` (never
+  `read < <()`, the #1133 EOF-set-e-abort trap).
+- **Tier-0 (worktree lane):** Rust pure decision GREEN via standalone `rustc --test` on the real
+  module + tests (5/5); pytest `test_bundle_state_gather.py` 77 pass (10 free-space/free_bytes);
+  `bash -n` + `shellcheck -S warning` clean; the exact preflight python one-liner + bash param-expand
+  parse exercised over WARN/OK/boundary/UNKNOWN(null/absent/malformed) — all correct; `cargo fmt
+  --all --check` clean; occurrence-count anchor sweep clean (the renamed function/constant balanced
+  3→0/0→3, `[8/8]`/`WARNING #652`/`record-dir-stats.json`/`KEEP_RECORDINGS:-0` counts unchanged).
+  NOT runnable in a worktree lane (supervisor runs at integration): the `tests/recordings_retention.rs`
+  + `tests/harness_recording_e2e_cleanup_after_decode.rs` static-anchor binaries, and a live
+  free-space read against strih/stream `:8899`.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version 1.7.0-dev.627
+  (NOT bumped — dev already carries it). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a53d11d309eeaacb0`.

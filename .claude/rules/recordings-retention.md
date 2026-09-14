@@ -12,16 +12,40 @@ paths:
 
 The E2E harness (`scripts/recording-e2e.sh`) records ONE OBS program capture per run into each
 Windows box's LIVE OBS record directory. `[8/8e]` only prints a `Remove-Item` plan for THAT run's
-own file, and the `#652` preflight merely WARNs (`RECORDINGS_BUDGET_GB=50`). So aborted /
-`KEEP_RECORDINGS=1` / early-abort / failed-download runs leak forever. Live strih (2026-08-19):
-`D:\_REC` held **397 files / 691 GiB — 344 `.mkv` runs** back to 2025-10-27, ~15× the 50 GB budget.
+own file, and the `#652` preflight merely WARNs. So aborted / `KEEP_RECORDINGS=1` / early-abort /
+failed-download runs leak forever. Live strih (2026-08-19): `D:\_REC` held **397 files / 691 GiB —
+344 `.mkv` runs** back to 2025-10-27.
+
+## The WARNING trigger = LOW FREE SPACE, not the file-sum budget (owner ruling #1276, 14.9.2026)
+
+The `#652` preflight WARN was ORIGINALLY "the sum of recording files exceeds `RECORDINGS_BUDGET_GB=50`".
+The owner REJECTED that semantics (verbatim: „B varovanie ma byt ked 50gb uz len ostava miesta!!!")
+because it false-alarms on a disk with hundreds of GB free (strih 137 GB of recordings but 619 GB
+free). Since **#1276** the WARN fires when the recordings VOLUME has at most `RECORDINGS_FREE_MIN_GB`
+(default 50, env-overridable) of **FREE space left**:
+
+- Canonical pure decision: **`recordings_retention::free_space_verdict(free_bytes, min_free_gb)`**
+  (`src/recordings_retention.rs`, `tests/recordings_retention.rs`) → `Ok` (free ≥ threshold) /
+  `Warn` (free < threshold) / `Unknown` (`free_bytes` None — never a false low-space WARN). Decimal
+  GB (1e9 B). Exactly `min_free_gb` free is `Ok` (no warn).
+- Python mirror the bash preflight calls: **`bundle_state_gather.recordings_free_verdict`** (same
+  spec, `tests/python/test_bundle_state_gather.py`).
+- The volume's `free_bytes` is served by the box's `:8899 /record-dir-stats.json`
+  (`bundle_state_gather.record_dir_stats` reads it via `shutil.disk_usage(record_dir).free` — the
+  SAME local record-dir read it already does; no new transport; `None` on failure). The preflight is
+  `check_recordings_free_space` in `recording-e2e.sh` (`RECORDINGS_FREE_MIN_GB`); an unreachable
+  server / unreadable free space just skips (NOTE), never a false WARN, never a gate.
+
+The **DELETE-set** computation below is UNCHANGED — the owner ruled only on the warning trigger; a
+`--execute` deletion remains an owner-only step.
 
 ## Where the recordings live
 
 - **strih** live OBS record dir (`GetRecordDirectory`, "light" profile): `D:\_REC`.
 - OBS `FilenameFormatting` = `%CCYY-%MM-%DD %hh-%mm-%ss` → `2026-08-19 02-23-06.mkv`; `RecFormat2=mkv`.
 - The `bundle-state-server` `/record-dir-stats.json` endpoint (curl `http://<box>:8899/…`) reports
-  `total_bytes` / `file_count` / `oldest_mtime` over that dir — the quick way to check current usage.
+  `total_bytes` / `file_count` / `oldest_mtime` / **`free_bytes`** (#1276) over that dir — the quick
+  way to check current usage AND the volume's free space.
 - The stream box records `.mp4`; parameterise `-RecordDir` / `--record-dir` for it.
 
 ## The decision (keep newest-N runs UNION younger-than-D-days)
