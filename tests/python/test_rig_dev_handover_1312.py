@@ -175,9 +175,21 @@ def test_burns_item_two_boxes():
     # one box has no burns -> FORGOT (combine: any FORGOT wins)
     mixed = {"burns_strih": ("", 1), "burns_stream": ("", 0)}
     assert _item("burns").decide(mixed)["status"] == d.FORGOT
+    # one box OK, the other UNVERIFIABLE (enum-fail) -> UNKNOWN, NOT a false OK (finding #2)
+    half = {"burns_strih": ("", 1), "burns_stream": ("", 2)}
+    assert _item("burns").decide(half)["status"] == d.UNKNOWN
     # both unreadable -> UNKNOWN
     unk = {"burns_strih": ("", 2), "burns_stream": ("", d.RC_MISSING)}
     assert _item("burns").decide(unk)["status"] == d.UNKNOWN
+
+
+def test_combine_statuses_strict_no_masking():
+    # FORGOT dominates; a single UNKNOWN makes the item UNKNOWN (never masked by an OK sibling)
+    assert d.combine_statuses([d.OK, d.OK]) == d.OK
+    assert d.combine_statuses([d.OK, d.UNKNOWN]) == d.UNKNOWN
+    assert d.combine_statuses([d.OK, d.FORGOT]) == d.FORGOT
+    assert d.combine_statuses([d.FORGOT, d.UNKNOWN]) == d.FORGOT
+    assert d.combine_statuses([]) == d.UNKNOWN
 
 
 def test_mapping_and_pins_items():
@@ -188,6 +200,9 @@ def test_mapping_and_pins_items():
     assert _item("pins").decide(pins_ok)["status"] == d.OK
     pins_drift = {"pins_strih": ("", 0), "pins_stream": ("", 1), "pins_imag": ("", 0)}
     assert _item("pins").decide(pins_drift)["status"] == d.FORGOT
+    # one box unreadable (connect-fail) among OK boxes -> UNKNOWN, not a false OK (finding #2)
+    pins_half = {"pins_strih": ("", 0), "pins_stream": ("", 0), "pins_imag": ("", 2)}
+    assert _item("pins").decide(pins_half)["status"] == d.UNKNOWN
 
 
 def test_clock_obs_net_audiolag_genlock_items():
@@ -217,9 +232,12 @@ def test_version_items():
     assert _item("dantesync").decide({"dantesync": ("", 0)})["status"] == d.OK
     assert _item("dantesync").decide({"dantesync": ("", 20)})["status"] == d.FORGOT
     assert _item("dantesync").decide({"dantesync": ("", 11)})["status"] == d.UNKNOWN
+    # a usage/env error (exit 1) or any other code -> UNKNOWN, never a false OK (finding #5)
+    assert _item("dantesync").decide({"dantesync": ("", 1)})["status"] == d.UNKNOWN
     assert _item("cambox").decide({"cambox": ("", 0)})["status"] == d.OK
     assert _item("cambox").decide({"cambox": ("", 20)})["status"] == d.FORGOT
     assert _item("cambox").decide({"cambox": ("", 11)})["status"] == d.UNKNOWN
+    assert _item("cambox").decide({"cambox": ("", 1)})["status"] == d.UNKNOWN
 
 
 # --- checklist assembly + exit codes -------------------------------------------------------------

@@ -162,14 +162,19 @@ class Item(object):
 
 
 def combine_statuses(statuses):
-    """FORGOT if any; else OK if any; else UNKNOWN. (An item with several captures -- e.g. burns on
-    strih AND stream -- is FORGOT if either box is FORGOT, OK only when at least one is OK and none
-    FORGOT, UNKNOWN when every capture was unreadable.)"""
+    """Combine an item's per-capture statuses (e.g. burns on strih AND stream; pins on strih,
+    stream AND imag). FORGOT dominates; then a SINGLE unverified box makes the whole item UNKNOWN
+    (never a false OK): OK only when EVERY captured box is OK.
+      - any FORGOT                 -> FORGOT
+      - else any UNKNOWN           -> UNKNOWN  (an unread box is NOT masked by an OK sibling -- the
+                                                honesty the checklist's `neoverené` reporting needs)
+      - else (all OK)              -> OK
+    Single-capture items are unaffected ([OK]->OK, [UNKNOWN]->UNKNOWN, [FORGOT]->FORGOT)."""
     if FORGOT in statuses:
         return FORGOT
-    if OK in statuses:
-        return OK
-    return UNKNOWN
+    if not statuses or UNKNOWN in statuses:
+        return UNKNOWN
+    return OK
 
 
 # The ordered checklist. Every item reuses an EXISTING probe -- no new probes.
@@ -182,7 +187,8 @@ ITEMS = [
     Item("mode", "rig režim (TEST/EVENT)", ["mode"], "bare",
          ok_msg="rig je v TEST režime (development)",
          forgot_msg="rig je v EVENT (produkčnom) režime — spusti `scripts/rig-mode.sh test` "
-                    "(obnoví scény, Studio Mode, burny aj painter naraz)",
+                    "(obnoví scény, Studio Mode, burny aj painter naraz), POTOM spusti túto "
+                    "kontrolu znova (mic/painter sa overia až v TEST režime)",
          unknown_msg="rig režim sa nepodarilo prečítať (cam2 painter probe nedostupné)",
          good={"TEST"}, forgot={"EVENT"}),
     Item("painter", "cam2 painter + optická vetva", ["painter"], "verdict",

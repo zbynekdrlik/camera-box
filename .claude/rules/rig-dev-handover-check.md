@@ -55,6 +55,23 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
   the `mode` item: `rig-mode.sh test` (the action the `mode=EVENT→FORGOT` line names) restores
   scenes, Studio Mode, burns AND painter in one shot. A dedicated read-only scene/studio probe is a
   followup, not this lane.
+- **Two-pass expectation (mic/painter are EVENT-gated).** `measurement-audio-alert-watchdog`
+  SKIPs in EVENT mode and the painter is stopped in EVENT, so on the FIRST pass — run the moment
+  the owner hands the rig back, while it is usually still in EVENT — `mic` and `painter` read
+  UNKNOWN. Switch the rig back with `rig-mode.sh test` (the `mode=EVENT→FORGOT` action) and re-run
+  the check: `mic`/`painter` only verify once the rig is in TEST. The muted-mic that motivated the
+  ticket is caught on the SECOND pass.
+- **Multi-box items are strict (no masking).** For `burns` (strih+stream) and `pins`
+  (strih+stream+imag) the item is OK only when EVERY probed box is OK; a single unreadable box
+  makes the item UNKNOWN (never masked by an OK sibling — the honesty the `neoverené` line needs).
+  FORGOT still dominates. Single-node verdict-watchdog items keep the watchdog's own SKIP-defer
+  semantics (an away/down peripheral box like imag/resolume contributes nothing, so at least one
+  HEALTHY core box reads OK) — matching how the watchdogs themselves defer a SKIP to network-reach.
+- **Version items need fleet node specs.** `dantesync-version-gate.sh` /
+  `camera-box-version-gate.sh` REFUSE (exit 1 → UNKNOWN) with no `--linux/--win` nodes. The
+  orchestrator builds the active-cam `name=root@ip` spec by sourcing `camera-set.sh` in a `$()`
+  subshell (mirrors recording-e2e.sh's [0/8] enumeration) + fixed imag/OBS/dev1 targets; cambox
+  uses `--no-main-pin` (relative peer parity = uniform build, no origin/main read).
 - **Reuse, never re-derive.** Every item runs an EXISTING probe. When a probe's dry-run verdict
   vocabulary changes, update the `good`/`forgot` token sets in `ITEMS` (rig_dev_handover_decision.py)
   and the fixtures in the test — do NOT reimplement the probe's grading here.

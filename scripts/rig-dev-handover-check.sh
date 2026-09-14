@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
     --json) JSON=1 ;;
     --keep) KEEP=1 ;;
     --help | -h)
-      sed -n '2,44p' "${BASH_SOURCE[0]}"
+      sed -n '5,41p' "${BASH_SOURCE[0]}"  # description + Usage + Env (skip shebang/summary/set line)
       exit 0
       ;;
     *)
@@ -66,10 +66,16 @@ STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
 IMAG_HOST="${IMAG_HOST:-10.77.9.182}"
 CAM2_HOST="${CAM2_HOST:-10.77.9.62}"
 CAM_PW="${CAM_PW:-newlevel}"
+IMAG_USER="${IMAG_USER:-newlevel}"
+WIN_SSH_USER="${WIN_SSH_USER:-newlevel}"
+CAMSET_LIB="${RDH_CAMSET_LIB:-$HERE/camera-set.sh}"
 export OBS_PASSWORD="${OBS_PASSWORD:-}"
 
 # --- default per-probe timeouts + script paths (RDH_* stub seams) -------------------------------
 RDH_TIMEOUT="${RDH_TIMEOUT:-30}"
+# the two version items ssh the WHOLE fleet (many nodes) -> a more generous default timeout
+RDH_DANTESYNC_TIMEOUT="${RDH_DANTESYNC_TIMEOUT:-150}"
+RDH_CAMBOX_TIMEOUT="${RDH_CAMBOX_TIMEOUT:-120}"
 RC_MISSING=127
 
 MIC_PROBE="${RDH_MIC_PROBE:-$HERE/measurement-audio-alert-watchdog.sh}"
@@ -171,11 +177,43 @@ run_probe audiolag bash "$AUDIOLAG_PROBE" --dry-run
 # --- item 11: genlock lock (genlock-lock --dry-run) ---------------------------------------------
 run_probe genlock bash "$GENLOCK_PROBE" --dry-run
 
-# --- item 12: dantesync version pin (read-only gate) --------------------------------------------
-run_probe dantesync bash "$DANTESYNC_PROBE"
+# --- version items: build the fleet node specs the gates REQUIRE ---------------------------------
+# The dantesync/camera-box version gates REFUSE (exit 1) with no `--linux/--win` nodes. Build the
+# active-cam `name=root@ip` spec by sourcing the roster lib (camera-set.sh) in a $() SUBSHELL so it
+# never pollutes this shell; mirror recording-e2e.sh's [0/8] enumeration. An acked-offline / down
+# cam is handled by the gate itself (CAMBOX_OFFLINE_ACK / rig-fleet.txt), never by us.
+build_cam_linux_spec() {
+  local lib="$1" spec="" cam
+  [ -e "$lib" ] || return 0
+  # shellcheck source=scripts/camera-set.sh
+  . "$lib" 2>/dev/null || return 0
+  for cam in ${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}; do
+    if camera_resolve "$cam" 2>/dev/null; then
+      spec="$spec $cam=root@${CAMERA_IP}"
+    fi
+  done
+  printf '%s' "${spec# }"
+}
+CAM_LINUX_SPEC="$(build_cam_linux_spec "$CAMSET_LIB")"
 
-# --- item 13: camera-box uniform build (read-only gate) -----------------------------------------
-run_probe cambox bash "$CAMBOX_PROBE"
+# --- item 12: dantesync version pin (read-only gate; cams + imag-nb + dev1 + OBS boxes) ----------
+if [ -n "$CAM_LINUX_SPEC" ]; then
+  run_probe dantesync bash "$DANTESYNC_PROBE" \
+    --linux "$CAM_LINUX_SPEC imag-nb=${IMAG_USER}@${IMAG_HOST}" \
+    --local dev1 \
+    --win "strih=${WIN_SSH_USER}@${STRIH_HOST} stream=${WIN_SSH_USER}@${STREAM_HOST}"
+else
+  printf 'roster lib %s unreadable -- no nodes to gate\n' "$CAMSET_LIB" >"$WORKDIR/dantesync.out"
+  printf '%s\n' "$RC_MISSING" >"$WORKDIR/dantesync.rc"
+fi
+
+# --- item 13: camera-box uniform build (read-only gate; active cam fleet, relative peer parity) --
+if [ -n "$CAM_LINUX_SPEC" ]; then
+  run_probe cambox bash "$CAMBOX_PROBE" --linux "$CAM_LINUX_SPEC" --no-main-pin
+else
+  printf 'roster lib %s unreadable -- no nodes to gate\n' "$CAMSET_LIB" >"$WORKDIR/cambox.out"
+  printf '%s\n' "$RC_MISSING" >"$WORKDIR/cambox.rc"
+fi
 
 # --- decide + print ------------------------------------------------------------------------------
 json_flag=()
