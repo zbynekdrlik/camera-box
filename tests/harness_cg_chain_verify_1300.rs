@@ -49,6 +49,12 @@ fn run_sourced(body: &str) -> (i32, String, String) {
     )
 }
 
+/// Drain-safe "first line" reader for a `stdout_of` body. `| head -1` closes the pipe after one
+/// line and can SIGPIPE the lib's later printf -> rc 141 under `pipefail` (seen on CI 14.9.2026;
+/// the drift-guard-log-parsers.md drain-safety class). `read` takes the first line, `cat` drains.
+const DRAIN_FIRST_LINE: &str =
+    r#"| { IFS= read -r l || true; printf '%s\n' "$l"; cat >/dev/null; }"#;
+
 fn stdout_of(body: &str) -> String {
     let (rc, out, err) = run_sourced(body);
     assert_eq!(rc, 0, "body failed (rc={rc}): {body}\nstderr={err}");
@@ -191,7 +197,11 @@ fn summary_parity_with_jitter_audit() {
 // ---------------------------------------------------------------------------------------------
 fn bash_verdict(summary_line: &str) -> bool {
     // returns true = PASS
-    let out = stdout_of(&format!("cg_chain_verdict '{summary_line}' | head -1"));
+    // Drain-safe first line: `| head -1` closes the pipe early and can SIGPIPE the lib's printf
+    // (rc 141 under pipefail -- seen on CI 14.9.2026, the drift-guard-log-parsers.md class).
+    let out = stdout_of(&format!(
+        "cg_chain_verdict '{summary_line}' {DRAIN_FIRST_LINE}"
+    ));
     out == "PASS"
 }
 
@@ -250,7 +260,7 @@ fn verdict_parity_with_resolume_playback_evaluate() {
 fn absent_source_fails_in_both() {
     // Rust: an absent source has no window -> the orchestrator treats it as FAIL/ABSENT; the bash
     // replica FAILs on an empty summary line (the absent sentinel), matching "not verifiable".
-    let out = stdout_of("cg_chain_verdict '' | head -1");
+    let out = stdout_of(&format!("cg_chain_verdict '' {DRAIN_FIRST_LINE}"));
     assert_eq!(out, "FAIL");
     let reason = stdout_of("cg_chain_verdict '' | tail -n +2");
     assert!(
