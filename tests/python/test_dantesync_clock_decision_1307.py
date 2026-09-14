@@ -18,6 +18,7 @@ Two families of invariant:
 """
 import importlib.util
 import pathlib
+import subprocess
 
 _MOD = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "dantesync_clock_decision.py"
 _spec = importlib.util.spec_from_file_location("dantesync_clock_decision", _MOD)
@@ -361,3 +362,111 @@ def test_mgmt_dead_even_when_body_unparseable():
     r = dc.analyze("not json", 1, GM, mgmt_ssh_ok=0)
     assert r["verdict"] == "MGMT_DEAD", r
     assert r["clock_verdict"] == "UNKNOWN", r
+
+
+# ------------------------------------------------------------------ dev1 as a `local` node (#1313)
+# dev1 is not a probed cam/obs node, yet it runs dantesync and its clock feeds every dev1-hosted gate
+# (clock-offset-painter-gate.sh, the recording-verdict wall references, every date-stamped E2E
+# window). On 14.9.2026 it sat NTP-only for ~a day unpaged (gm_allowlist on the retired literal + a
+# fleet roll that skipped it). `analyze_local` is the ONE tested policy point for the local node:
+# probed at 127.0.0.1:8898 with NO ssh/TCP reach probe, because the box the watchdog runs ON is up by
+# definition. Two policy differences vs a remote node, both asserted HERE (not in bash):
+#   * box UP by definition -> a dead :8898 is NO_DANTESYNC, never SKIP (no "box down, defer #1001").
+#   * no ssh MANAGEMENT axis (we ARE the box) -> MGMT_DEAD can never fire for the local node.
+# Everything else (OK / NO_CLOCK / UNKNOWN / gm / storm / stale / version) is the SAME generic
+# grading, so a local node can never disagree with a remote node about what a lost clock is.
+def test_analyze_local_ok_when_locked_correct_gm():
+    r = dc.analyze_local(_status(), 1, GM)
+    assert r["verdict"] == "OK", r
+    assert r["reason"] == dc.R_NONE
+
+
+def test_analyze_local_no_clock_when_not_locked():
+    r = dc.analyze_local(_status(is_locked="false", mode="ACQ"), 1, GM)
+    assert r["verdict"] == "NO_CLOCK", r
+    assert dc.R_NOT_LOCKED in r["reason"]
+
+
+def test_analyze_local_no_clock_when_gm_foreign():
+    # exactly the 14.9. shape: dev1 fell to a foreign/none GM while the fleet roll skipped it.
+    r = dc.analyze_local(_status(gm="10.77.7.109"), 1, GM)
+    assert r["verdict"] == "NO_CLOCK", r
+    assert dc.R_WRONG_GM in r["reason"]
+
+
+def test_analyze_local_no_clock_on_ntp_step_storm():
+    r = dc.analyze_local(_status(storm="true", steps="165"), 1, GM)
+    assert r["verdict"] == "NO_CLOCK", r
+    assert dc.R_STORM in r["reason"]
+
+
+def test_analyze_local_no_dantesync_when_8898_dead_box_up_by_definition():
+    # THE key local difference: the generic analyze() SKIPs an unreachable :8898 (box may be down,
+    # defer #1001). For the LOCAL box there is no "down" case -- the watchdog runs on it -- so a dead
+    # :8898 is the daemon crashed/wedged on a live box: NO_DANTESYNC, a production-critical page.
+    r = dc.analyze_local("", 0, GM)
+    assert r["verdict"] == "NO_DANTESYNC", r
+    assert r["reason"] == dc.R_NO_HTTP
+    # contrast: the generic remote grading SKIPs the very same unreachable read.
+    assert dc.analyze("", 0, GM)["verdict"] == "SKIP"
+
+
+def test_analyze_local_never_mgmt_dead_no_ssh_axis():
+    # the local box has no ssh MANAGEMENT axis (we ARE the box); analyze_local forces mgmt off, so
+    # even a lost clock stays NO_CLOCK, never MGMT_DEAD.
+    assert dc.analyze_local(_status(), 1, GM)["verdict"] == "OK"
+    assert dc.analyze_local(_status(is_locked="false", mode="ACQ"), 1, GM)["verdict"] == "NO_CLOCK"
+
+
+def test_analyze_local_unknown_when_body_unparseable():
+    # a reachable local :8898 serving an unparseable body is UNKNOWN, never a fabricated NO_CLOCK.
+    assert dc.analyze_local("not json", 1, GM)["verdict"] == "UNKNOWN"
+
+
+def test_analyze_local_version_mismatch_reported_never_a_page():
+    r = dc.analyze_local(_status_with_version("1.8.40"), 1, GM, version_pin="1.8.53")
+    assert r["verdict"] == "OK", r  # a version mismatch alone is never a page (#1308 rule)
+    assert "1.8.40" in r["version_note"] and "1.8.53" in r["version_note"]
+
+
+def test_analyze_local_stale_updated_ts_is_no_clock():
+    # a frozen local :8898 payload (HTTP alive, updated_ts frozen) is a silent clock loss -> NO_CLOCK.
+    r = dc.analyze_local(_status(updated_ts=1000), 1, GM, now=1000 + 10_000, freshness_s=300)
+    assert r["verdict"] == "NO_CLOCK", r
+    assert dc.R_STALE in r["reason"]
+
+
+# ------------------------------------------------------------------ CLI --local flag (#1313)
+# The orchestrator's local arm passes `--local 1` to the analyze subcommand. That flag routes to
+# analyze_local: box_up is forced 1 (a dead :8898 -> NO_DANTESYNC) and the ssh axis is off, regardless
+# of any --box-up / --mgmt-ssh-ok also passed. The flag defaults off, so every remote-node invocation
+# is byte-for-byte unchanged.
+def _cli(args, stdin=""):
+    r = subprocess.run(["python3", str(_MOD), "analyze", *args], input=stdin,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return dict(ln.split("=", 1) for ln in r.stdout.splitlines() if "=" in ln)
+
+
+def test_cli_local_flag_makes_unreachable_8898_a_no_dantesync():
+    out = _cli(["--box-reachable", "0", "--grandmaster-ip", GM, "--local", "1"])
+    assert out["verdict"] == "NO_DANTESYNC", out
+
+
+def test_cli_local_flag_forces_box_up_ignoring_box_up_zero():
+    # even an explicit --box-up 0 cannot turn the local box into a SKIP: it is up by definition.
+    out = _cli(["--box-reachable", "0", "--grandmaster-ip", GM, "--box-up", "0", "--local", "1"])
+    assert out["verdict"] == "NO_DANTESYNC", out
+
+
+def test_cli_without_local_flag_is_unchanged_skip():
+    # the remote path (no --local) still SKIPs an unreachable read with no --box-up -- byte-for-byte.
+    out = _cli(["--box-reachable", "0", "--grandmaster-ip", GM])
+    assert out["verdict"] == "SKIP", out
+
+
+def test_cli_local_flag_never_mgmt_dead_even_with_dead_ssh():
+    # --mgmt-ssh-ok 0 would make a REMOTE reachable box MGMT_DEAD; --local overrides it off.
+    out = _cli(["--box-reachable", "1", "--grandmaster-ip", GM, "--mgmt-ssh-ok", "0", "--local", "1"],
+               stdin=_status())
+    assert out["verdict"] == "OK", out
