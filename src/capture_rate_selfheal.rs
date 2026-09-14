@@ -1838,4 +1838,102 @@ mod tests {
         assert_eq!(saved.last_heal_epoch_s, Some(now));
         std::fs::remove_dir_all(sp.parent().unwrap()).ok();
     }
+
+    // --- #1311: capture-rate self-heal env gate (default OFF = ALERT-ONLY) ---
+    // RED markers: `reset_suppressed_message` and the `enabled` first arg of `attempt_self_heal`
+    // do NOT exist yet — these tests reference the new API, so they prove via compile failure that
+    // the gate is not implemented. Implemented in the immediately-following GREEN commit.
+
+    #[test]
+    fn reset_suppressed_message_names_device_model_and_carries_the_env_suffix_1311() {
+        let msg = reset_suppressed_message(
+            &CAPTURE_RATE_SELF_HEAL_MESSAGES,
+            "/dev/video1",
+            GrabberModel::ShadowCast2,
+        );
+        assert!(msg.contains("/dev/video1"));
+        assert!(msg.contains("ShadowCast 2"));
+        assert!(msg.contains("#663 self-heal"), "the trigger tag");
+        assert!(msg.contains("ALERT-ONLY"));
+        assert!(
+            msg.contains("(reset suppressed: CAMERA_BOX_CAPTURE_RATE_SELFHEAL unset)"),
+            "the alert-only line must carry the exact env-gate suffix"
+        );
+    }
+
+    #[test]
+    fn reset_suppressed_message_shares_no_substring_with_the_byte_anchored_reset_greps_1311() {
+        // The dev1 attribution watchdog + the [7b/8] E2E HARD gate key on
+        // `#663 self-heal: USB reset attempt` (self_heal_reset_grep_pattern /
+        // capture_rate_defect_grep_pattern_hard). An alert-only suppression fired NO reset, so it
+        // must never match those anchors (the same non-collision rule the #1248 HOLD-OFF marker
+        // follows), else a suppressed alert would be mis-counted as a real bus event.
+        let msg = reset_suppressed_message(
+            &CAPTURE_RATE_SELF_HEAL_MESSAGES,
+            "/dev/video1",
+            GrabberModel::ShadowCast2,
+        );
+        assert!(
+            !msg.contains("#663 self-heal: USB reset attempt"),
+            "must not match the reset-event grep anchor"
+        );
+        assert!(
+            !msg.contains("USB reset attempt"),
+            "must not match self_heal_reset_grep_pattern"
+        );
+        assert!(
+            !msg.contains("#656 capture-delivery-rate DEFECTIVE"),
+            "must not match the #656 hard defect anchor"
+        );
+        assert!(
+            !msg.contains("succeeded"),
+            "must never claim a reset succeeded"
+        );
+    }
+
+    #[test]
+    fn attempt_self_heal_disabled_is_alert_only_never_resets_and_returns_none_1311() {
+        // enabled=false: the alert-only path returns None (no process exit) and NEVER calls the
+        // injected reset — it returns BEFORE load_state, so the state path is never touched.
+        let mut reset_calls = 0u32;
+        let code = attempt_self_heal(
+            false, // CAMERA_BOX_CAPTURE_RATE_SELFHEAL unset
+            "/dev/video1",
+            GrabberModel::ShadowCast2,
+            T0,
+            Path::new("/nonexistent/1311/should-never-be-read"),
+            &CAPTURE_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, None, "alert-only must return None (no process exit)");
+        assert_eq!(reset_calls, 0, "alert-only must NEVER fire a USB reset");
+    }
+
+    #[test]
+    fn attempt_self_heal_enabled_still_resets_and_returns_the_exit_code_1311() {
+        // enabled=true (the three other triggers, and CAMERA_BOX_CAPTURE_RATE_SELFHEAL=1) keep
+        // today's behaviour byte-for-byte: a confirmed defect fires the reset and returns
+        // SELF_HEAL_EXIT_CODE. Regression guard: the gate does not change the enabled path.
+        let sp = selfheal_temp_state_path("1311-enabled");
+        let _ = std::fs::remove_dir_all(sp.parent().unwrap());
+        let mut reset_calls = 0u32;
+        let code = attempt_self_heal(
+            true,
+            "/dev/video1",
+            GrabberModel::ShadowCast2,
+            T0,
+            &sp,
+            &CAPTURE_RATE_SELF_HEAL_MESSAGES,
+            |_: &str| {
+                reset_calls += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(code, Some(SELF_HEAL_EXIT_CODE));
+        assert_eq!(reset_calls, 1, "enabled path must fire exactly one reset");
+        std::fs::remove_dir_all(sp.parent().unwrap()).ok();
+    }
 }
