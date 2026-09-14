@@ -152,8 +152,12 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     "bundle-state-alert-watchdog.sh",      # #732  -- :8899 bundle-state server down
     "obs-liveness-watchdog.sh",            # #391  -- broadcast-OBS render wedge
     "audio-lag-alert-watchdog.sh",         # #1226 -- OBS audio-timeline lag / band drift
-    "asio-starve-alert-watchdog.sh",       # #1023 -- ASIO source starved
-    "vb-matrix-alert-watchdog.sh",         # #1227 -- VB-Matrix down
+    # #1308 step-3 (owner ruling 14.9.2026, "5 A"): VB-Matrix on the stream box is NOT production
+    # audio (the `ASIO Input Capture` input is muted, only in scene `party`; `StartVBMatrix` disabled
+    # since 3.9.), so `asio-starve-alert-watchdog.sh` (#1023) and `vb-matrix-alert-watchdog.sh`
+    # (#1227) are DIAGNOSTIC, not production-critical -- back to one-ping-per-incident (a STABLE key,
+    # no time bucket). They are DELIBERATELY absent from this allowlist so a re-added bucket in either
+    # FAILS test_only_allowlisted_watchdogs_time_bucket_their_key.
     "ndi-portmap-alert-watchdog.sh",       # #1181 -- NDI sender port-map moved
     "avsync-heartbeat-alert-watchdog.sh",  # #812  -- A/V-sync heartbeat stale
     "imag-obs-alert-watchdog.sh",          # #882  -- imag OBS down / latency-drift / restart-storm
