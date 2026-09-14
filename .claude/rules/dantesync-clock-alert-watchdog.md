@@ -85,6 +85,14 @@ production-critical watchdog class (umbrella **#1308**).
     `dantesync-fleet-upgrade.sh … --local dev1`, "fleet N/N" counts dev1 (the `.claude/skills/ops`
     DanteSync rollout checklist). This watchdog is the between-rolls backstop, not a substitute for
     including dev1 in the roll itself.
+  - **Cross-consumer coupling — the #1312 "development" handover check reads this watchdog's
+    tokens.** `rig_dev_handover_decision.py`'s `clock` item runs `--dry-run` and reduces the
+    `verdict=` lines. Adding a node to the roster (dev1 here) changes that item's LIVE input — the
+    dev1 `local` node is ALWAYS readable (loopback), so an all-remote-SKIP + dev1-OK pass now reads
+    OK (dev1's real reading; remote unreachability is the handover's `net` item). Any FUTURE
+    node-roster or verdict-vocabulary change here MUST re-pin the handover with a fixture in
+    `tests/python/test_rig_dev_handover_1312.py` (see `CLOCK_DEV1_OK_REMOTES_SKIP` /
+    `CLOCK_DEV1_NODANTESYNC`), not just the watchdog's own tests.
 - **NO_DANTESYNC — the `:8898`-down-but-box-up branch (#1308, the former blind spot, now CLOSED).**
   A box that is UP but whose `:8898` (dantesync HTTP) is dead used to read UNREACHABLE → SKIP, and
   `network-reach` (#1001) probes ping/`:4455`/`:8899`, NOT `:8898`, so a `:8898`-specific outage on a
