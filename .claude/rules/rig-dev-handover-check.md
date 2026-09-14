@@ -62,17 +62,25 @@ catches. It reuses the whole verdict-kind item framework (like `mic`): the stand
   INDEPENDENT paired measurement: the cam2 marker log's emit times vs the stream `mbc` burst ONSETS
   timestamped off the OBS-WS `InputVolumeMeters` peak on dev1 — median per-marker latency vs baseline.
 - **The MONOTONIC-EMIT trap (the standing prerequisite).** The ticket assumed `emit_ts_ns` is on the
-  DanteSync wall clock, but the PERMANENT cam2 painter (`setup-device.sh`'s `cam2-painter.service`, no
-  `--wall-clock`) emits `start.elapsed()` MONOTONIC-since-painter-start ns — NOT comparable to the
-  dev1 onset wall clock, and reset on every painter restart (which happens on every EVENT→TEST switch,
-  i.e. exactly when this check runs). So the pure kernel GUARDS on the emit-ts SHAPE (a wall-clock ns
-  is ~1.7e18; a monotonic elapsed value is orders smaller) and reads UNKNOWN (`neoverené`, reason
-  `monotonic-emit`) when the emits are monotonic — NEVER a false forgot. **`avlatency` therefore reads
-  UNKNOWN today** and goes green-capable the moment the painter is switched to `--wall-clock` — a SAFE
-  no-op for the A/V verdict path (`av_sync_recording.rs:207` "no wall-clock alignment"; `av_offset_candidates_with_fid`
-  pairs by index→frame_id and ignores `emit_ts`). Enabling it is a SUPERVISOR follow-up
-  (add `--wall-clock` to the `cam2-painter.service` ExecStart + the rig-mode.sh painter launch;
-  provisioning/reboot-class; re-seed the baseline after).
+  DanteSync wall clock. Historically the PERMANENT cam2 painter (`setup-device.sh`'s
+  `cam2-painter.service`) emitted `start.elapsed()` MONOTONIC-since-painter-start ns — NOT comparable
+  to the dev1 onset wall clock, and reset on every painter restart (which happens on every EVENT→TEST
+  switch, i.e. exactly when this check runs). So the pure kernel GUARDS on the emit-ts SHAPE (a
+  wall-clock ns is ~1.7e18; a monotonic elapsed value is orders smaller) and reads UNKNOWN
+  (`neoverené`, reason `monotonic-emit`) when the emits are monotonic — NEVER a false forgot. This
+  guard STAYS as a fail-safe.
+- **The `--wall-clock` switch is SHIPPED (#1312).** Both the permanent `cam2-painter.service`
+  ExecStart (`setup-device.sh`) and the transient `painter_launch_remote` (`rig-mode.sh`) now pass
+  `--wall-clock`, so the painter stamps `emit_ts_ns` on `CLOCK_REALTIME` (the DanteSync wall clock).
+  It is a SAFE no-op for the A/V verdict path (`av_sync_recording.rs:207` "no wall-clock alignment";
+  `av_offset_candidates_with_fid` pairs by index→frame_id and ignores `emit_ts`) — the E2E burn
+  painter already carried it. `avlatency` therefore becomes green-capable the moment the SUPERVISOR
+  makes the change LIVE on cam2: `setup-device.sh` re-run, OR a remount-rw window that rewrites the
+  unit ExecStart + `systemctl daemon-reload` + `systemctl restart cam2-painter.service`
+  (provisioning/reboot-class). **Until the LIVE cam2 painter is restarted with `--wall-clock`, the
+  running painter still emits monotonic ns and the item keeps reading `monotonic-emit` UNKNOWN — the
+  code shipping is not the same as the box being re-provisioned.** After the switch is live, seed the
+  baseline (below).
 - **Baseline workflow.** The supervisor seeds `~/.camera-box/measurement-chain-latency-baseline.json`
   with `scripts/measurement-chain-latency.sh --baseline` right AFTER a green E2E (a known-aligned
   chain), and re-seeds it after any deliberate latency change. Until it is seeded the item reads
