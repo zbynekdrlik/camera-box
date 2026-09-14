@@ -38,8 +38,19 @@ relay watchdog for the marker is a FOLLOW-UP (same deferral as the #1193/#1200 w
 The in-process USB-reset action sequence — `load_state → decide_selfheal → match {Healthy/Throttled/Heal/HoldOff} → save_state → perform_usb_reset → pending exit code` — is ONE crate-root helper:
 
 ```
-capture_rate_selfheal::attempt_self_heal(device_path, model, now_epoch_s, state_path, msgs, reset) -> Option<i32>
+capture_rate_selfheal::attempt_self_heal(enabled, device_path, model, now_epoch_s, state_path, msgs, reset) -> Option<i32>
 ```
+
+**#1311 — `enabled` gates the RESET ACTION (not detection).** When `false`, `attempt_self_heal`
+logs the pure ALERT-ONLY `reset_suppressed_message(msgs, device_path, model)` and returns `None`
+IMMEDIATELY (no `load_state`, no state mutation, no `perform_usb_reset`, no process exit). The alert
+line's `(reset suppressed: CAMERA_BOX_CAPTURE_RATE_SELFHEAL unset)` suffix is a greppable marker
+that shares NO substring with the byte-anchored reset greps (`#663 self-heal: USB reset attempt` /
+`succeeded` / `DEFECTIVE`), so a suppression is NEVER mis-counted as a real reset — the same
+non-collision rule the #1248 HOLD-OFF marker follows. The #1193/#1200 floored callers pass
+`enabled=true` to the inner `attempt_self_heal` (they are already gated at the wrapper); the #1128
+caller passes `enabled=true` (gated by its own `if`); ONLY the #656/#971 capture-rate caller passes
+the `CAMERA_BOX_CAPTURE_RATE_SELFHEAL` env gate (default OFF).
 
 Since #1201 the module also holds the TWO shared outer pieces the per-trigger-floored triggers used to duplicate:
 
@@ -51,7 +62,7 @@ capture_rate_selfheal::attempt_floored_self_heal(enabled, pending_is_none, min_i
 `cooldown_elapsed` is the ONE per-trigger cooldown-floor predicate (it was byte-identical in `capture_overrate` + `capture_latch_halving` before #1201; its 3 tests now live here, iterating over BOTH floor consts). `attempt_floored_self_heal` wraps the whole gated sequence the #1193/#1200 main.rs blocks used to copy inline (~35 lines each): env-gate → `pending_is_none` → epoch-now read → `load_state` → `cooldown_elapsed` floor → `attempt_self_heal`; any gate blocking returns `None` SILENTLY (matching the pre-#1201 inline floor check — only the inner helper's Throttled branch logs). The per-trigger floor CONSTS stay in their detector modules (`capture_overrate::OVERRATE_MIN_HEAL_INTERVAL_S`, `capture_latch_halving::HALVING_MIN_HEAL_INTERVAL_S`).
 
 FOUR triggers in `src/main.rs`'s capture loop call it, each keeping its OWN guard + band-WARN line:
-- **#656/#663/#971 capture-rate** — guard `if should_trigger_selfheal(jitter_confirmed, sustained_chronic)`, msgs `CAPTURE_RATE_SELF_HEAL_MESSAGES`.
+- **#656/#663/#971 capture-rate** — guard `if should_trigger_selfheal(jitter_confirmed, sustained_chronic)`, msgs `CAPTURE_RATE_SELF_HEAL_MESSAGES`. **Env gate `CAMERA_BOX_CAPTURE_RATE_SELFHEAL` (default OFF = ALERT-ONLY, #1311)** — passed as `attempt_self_heal`'s `enabled` first arg; when unset the reset is SUPPRESSED (alert-only, above). Default OFF because on a bkshading-relay box the relay's gphoto2 PTP polling starves the grabber on the shared xHCI root hub (issue 1229), so the capture-rate band confirms a FALSE "dying grabber" and the reset re-enumerates the whole hub that also carries the boot stick (issue 1309/1311); the genuine dying-grabber case is already covered by the dev1 attribution watchdog + the E2E leg-health gate, and a box that needs the reset sets the env to `1` in its genlock.conf drop-in. This is the LAST of the four triggers to get a gate.
 - **#1128 grabber-STUCK** — guard `if grabber_stuck_selfheal_enabled && pending_self_heal_exit_code.is_none()`, msgs `GRABBER_STUCK_SELF_HEAL_MESSAGES`.
 - **#1193 sustained OVER-RATE** — the detector is `src/capture_overrate.rs::CaptureOverRateTracker` (over-rate majority of the `cap-1s` buckets AND dupe-victim shed churn, both held ~5 min; the churn band is the discriminator, mirroring #1128's corrupted band). Guard = the shared `attempt_floored_self_heal(over_rate_selfheal_enabled, pending_self_heal_exit_code.is_none(), OVERRATE_MIN_HEAL_INTERVAL_S, ...)` wrapper (#1201; pre-#1201 the env-gate/is_none/`cooldown_elapsed` sequence was inlined), msgs `OVER_RATE_SELF_HEAL_MESSAGES`. Env gate `CAMERA_BOX_GRABBER_OVERRATE_SELFHEAL` (default OFF, canary on cam2 = a supervised post-merge step). It adds a 30-min PER-TRIGGER cooldown FLOOR (checked against the SHARED state file BEFORE the helper) — it deliberately does NOT touch `DEFAULT_MIN_HEAL_INTERVAL_S` (the shared 10-min throttle), so the other triggers are untouched.
 - **#1200 LATCH-HALVING** — the detector is `src/capture_latch_halving.rs::CaptureLatchHalvingTracker` (the capture-side byte-identical dupe FRACTION `>= HALVED_DUPE_FRACTION_MIN`, held ~5 min; the fraction band is the discriminator, mirroring #1128's corrupted band / #1193's shed churn). Guard = the shared `attempt_floored_self_heal(latch_halving_selfheal_enabled, pending_self_heal_exit_code.is_none(), HALVING_MIN_HEAL_INTERVAL_S, ...)` wrapper (#1201, same shape as #1193), msgs `LATCH_HALVING_SELF_HEAL_MESSAGES`. Env gate `CAMERA_BOX_GRABBER_HALVING_SELFHEAL` (default OFF). Adds its OWN 30-min PER-TRIGGER cooldown FLOOR (checked against the SHARED state file BEFORE the helper), the shared throttle untouched — same shape as #1193. **The dupe signal is COUNTED in `src/main.rs` from the SAME `#889` `content_hash` the decimation gate already computes (`prev_capture_hash == Some(content_hash)` per captured frame, per 5s window) — NO change to the decimation gate's behaviour.** The USB re-auth cure is UNPROVEN for this state (it did NOT cure cam3 on 2026-08-25), so the report-only `#1200 grabber LATCH-HALVING` marker (detection) is the primary deliverable; the gated action ships OFF for pattern-symmetry.
