@@ -11750,3 +11750,8 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
 - **Lane scope:** worktree lane — no push/PR/merge/close, no rig mutation, no Discord. RED test
   65089bdd2 -> GREEN feat f3dac1f74. Durability backup on
   `refs/autopilot-wip/worktree-agent-a738efb8847eba521`.
+- **Review:** fresh-context adversarial dispatch found 2 major (version gates invoked with no
+  fleet nodes -> always UNKNOWN; multi-box combine masked an UNKNOWN box behind an OK sibling) +
+  3 minor, ALL fixed same-branch in `fix(#1312)` 3358d67ad (version specs now mirror recording-e2e
+  [0/8]; strict `combine_statuses`; --help/two-pass/test coverage). Post-fix: 19 pytest green,
+  bash -n + shellcheck clean, version-gate specs verified by direct run.

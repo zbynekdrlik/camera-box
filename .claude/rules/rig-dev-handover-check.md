@@ -72,6 +72,12 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
   orchestrator builds the active-cam `name=root@ip` spec by sourcing `camera-set.sh` in a `$()`
   subshell (mirrors recording-e2e.sh's [0/8] enumeration) + fixed imag/OBS/dev1 targets; cambox
   uses `--no-main-pin` (relative peer parity = uniform build, no origin/main read).
+- **The alert-watchdogs log `verdict=`/`reachable=` to STDERR (via `log()`), not stdout** — the
+  pure `*_decision.py` `verdict=` stdout is captured into a shell var inside the watchdog and never
+  reaches the terminal. The orchestrator therefore captures each probe with `2>&1` (merged) and the
+  parser reads the merged text. Dry-run exit is ~always 0 (2=bad arg, 3=require_tools missing); the
+  verdict lives in the log line, never the exit code — that is why the watchdog items are
+  `verdict`-kind (parse the line) and only the OBS/version probes are `exit`-kind.
 - **Reuse, never re-derive.** Every item runs an EXISTING probe. When a probe's dry-run verdict
   vocabulary changes, update the `good`/`forgot` token sets in `ITEMS` (rig_dev_handover_decision.py)
   and the fixtures in the test — do NOT reimplement the probe's grading here.
