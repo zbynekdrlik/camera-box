@@ -171,6 +171,34 @@ something `verify-device.sh` should be loosened to tolerate.
 
 ## Known gotchas (found bringing up cam5/cam6 — all fixed IN THE SCRIPTS, never hand-patched)
 
+- **A fresh stick that boots once, then lands in the FIRMWARE SETUP screen after a WARM `reboot`, is a
+  DETECTION failure, not a stick defect (cam2, 14.9.2026).** The cam boxes boot a stick ONLY through the
+  AMI auto-entry `UEFI: USB, Partition 1` (keyed on USB port + partition GUID) — `create-usb-linux.sh`'s
+  named `cam-box` entry is written into the HOST's NVRAM (dev1 when the stick is built there), never
+  the target's (defect D6 on the provisioning ticket). A SanDisk 3.2Gen1 on the shared USB3 hub may
+  not enumerate at POST after a warm reset → no entry → setup screen. Cure: COLD power-off/on (black
+  USB2 port), boot-menu pick if needed, then ON the box `efibootmgr -c -d /dev/sda -p 1 -L cam-box -l
+  '\EFI\BOOT\BOOTX64.EFI'` so a named entry leads `BootOrder`. Verify the stick itself from dev1
+  READ-ONLY, never by re-flashing: ro-mount + `sgdisk -v` + grub/UUID/fstab reads, the stick's own
+  `cambox-journal` partition (`journalctl --directory=<mount>/<machine-id> --list-boots` proves whether
+  it booted after provisioning), and a QEMU/OVMF boot (`-drive file=/dev/sdX,format=raw,readonly=on,
+  snapshot=on` + `OVMF_CODE_4M.fd`; the `-monitor unix:` socket path must be < 108 bytes) — cam2's
+  stick reached `root@CAM2` auto-login in < 30 s while the box showed the setup screen.
+- **An in-place `setup-device.sh` re-run on a live ro box can wedge dpkg via the 50 MB `/var/tmp`
+  tmpfs (cam2, 14.9.2026).** STEP 16's `apt-get install` may pull a systemd point-upgrade, whose
+  `initramfs-tools` trigger runs `update-initramfs -u` in `/var/tmp` → `No space left on device` →
+  initramfs-tools half-configured → the script fails loud at STEP 16 (the #547 class; the #295
+  postinst hook only covers KERNEL installs). The existing initrd stays intact (update-initramfs
+  writes `.new` first). Launch every re-run with `--setenv=TMPDIR=/root/.itmp` (the real disk);
+  recovery = `mkdir -p /root/.itmp; TMPDIR=/root/.itmp dpkg --configure -a` (rw root), confirm the
+  regenerated initrd carries ext4 + usb-storage (`lsinitramfs`), `rm -rf /root/.itmp/*`, re-run.
+  Re-run recipe from dev1: `git archive HEAD scripts systemd` → scp to `/tmp` → `systemd-run
+  --unit=cam2-setupN --collect --working-directory=/tmp/<stage>/scripts --setenv=FRAME_PROBE_BINARY_URL=
+  /tmp/frame-probe --setenv=TMPDIR=/root/.itmp --property=StandardInput=file:/tmp/yes.txt
+  --property=StandardOutput=append:/tmp/setup-deviceN.log bash ./setup-device.sh --binary
+  /tmp/camera-box CAMn` (the box's own `/usr/local/bin` binaries copied to `/tmp` — no `gh` on the box,
+  defect D5).
+
 - **Boot hangs with no console/SSH** was `systemd-networkd-wait-online.service` blocking
   `network-online.target` on a base image with no bound timeout — `setup-device.sh` STEP 11 now
   **masks** the unit outright (#547; the box has a static IP, so camera-box never needs to wait for
