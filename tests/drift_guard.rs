@@ -5003,6 +5003,31 @@ fn gather_and_check_imag_reads_txt_not_log_obs_glob_1151() {
 }
 
 #[test]
+fn gather_and_check_imag_ships_a_bounded_marker_filtered_read_1151() {
+    // #1151 FOLDED (14.9.2026): the imag OBS-log gather shipped the WHOLE newest
+    // ~/.config/obs-studio/logs/*.txt over ssh (`cat "$f"`); on imag's live 1.2 GB / 4.5 M-line
+    // session log the harness bash SIGSEGVs (exit 139) and `rig-mode.sh test` HARD-BLOCKS at the
+    // issue-789 gate. The gather must ship only the marker families the five OBS-log parsers grade
+    // (union of `genlock:` / `video settings reset:` + `fps:` / `projector-vsync:`), capped —
+    // extracted into the pure drift_guard_imag_obs_log_gather_snippet (mirroring the E2E-side
+    // projector_vsync_gather_remote_snippet, 2e788561b) so it is one source of the anchors AND
+    // unit-testable without ssh (tests/python/test_drift_guard_imag_obs_log_bounded_gather_1151.py).
+    let src = std::fs::read_to_string(script()).expect("read drift-guard.sh");
+    assert!(
+        src.contains("drift_guard_imag_obs_log_gather_snippet() {"),
+        "the bounded gather must live in the pure snippet function (#1151)"
+    );
+    assert!(
+        src.contains(r#"$(drift_guard_imag_obs_log_gather_snippet)"#),
+        "gather_and_check_imag must embed the pure snippet, never inline the whole-file cat (#1151)"
+    );
+    assert!(
+        src.contains(r#"grep -aE "genlock:|projector-vsync:|video settings reset:|fps:""#),
+        "the snippet must grep the UNION of the five parsers' marker families, never cat the whole log (#1151)"
+    );
+}
+
+#[test]
 fn drift_guard_sources_the_shared_projector_vsync_lib_1151() {
     // The facet must run the SHARED verdict, not an inline copy (single marker-string source).
     let src = std::fs::read_to_string(script()).expect("read drift-guard.sh");
