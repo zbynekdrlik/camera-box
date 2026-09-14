@@ -932,7 +932,7 @@ except Exception:
 fb = d.get("free_bytes")
 v = bsg.recordings_free_verdict(fb, float(sys.argv[1]))
 print(v, "-1" if fb is None else "%.1f" % (fb / 1e9))
-' "$RECORDINGS_FREE_MIN_GB") || {
+' "$RECORDINGS_FREE_MIN_GB" 2>/dev/null) || {
     echo "    NOTE: could not parse $label recordings free-space stats — skipping free-space check" >&2
     return 0
   }

@@ -205,10 +205,11 @@ pub fn plan(files: &[RecordingFile], policy: &RetentionPolicy, now_epoch: f64) -
 /// Owner ruling (14.9.2026, verbatim "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): the
 /// E2E preflight WARN must fire when the recordings VOLUME has at most `min_free_gb` of FREE space
 /// left — NOT when the sum of recording files exceeds a budget. A disk with 600 GB free must not
-/// warn just because old test recordings sum past 50 GB. This is the canonical spec; the
-/// `bundle_state_gather.recordings_free_verdict` python mirror (the real runtime consumer the bash
-/// preflight calls) matches it byte-for-byte, and the DELETE-set decision (`plan()`) is untouched —
-/// the owner ruled only on the warning trigger.
+/// warn just because old test recordings sum past 50 GB. This Rust decision is the reference spec
+/// (Tier-0-tested here); the ACTUAL runtime consumer is the byte-identical python mirror
+/// `bundle_state_gather.recordings_free_verdict`, which the bash preflight calls (the free-space
+/// read happens on-box in python, so there is no Rust runtime call site). The DELETE-set decision
+/// (`plan()`) is untouched — the owner ruled only on the warning trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreeSpaceVerdict {
     /// At least `min_free_gb` of free space — no warning.

@@ -882,12 +882,12 @@ def make_handler(args, state):
             self.wfile.write(body)
 
         def _serve_record_dir_stats(self):
-            """#652: read-only disk-usage stats over the box's OWN OBS record directory (total
-            bytes + file count + oldest mtime of its top-level files) — powers
-            recording-e2e.sh's disk-budget preflight WARN (the harness's own E2E test recordings
-            had silently accumulated to ~500 GB on strih / 139 GB on stream). Same resolve-live
-            + last-known-good fallback as the static-file GET path below — never a stale/wrong
-            directory after a profile switch."""
+            """#652/#1276: read-only disk-usage stats over the box's OWN OBS record directory (total
+            bytes + file count + oldest mtime of its top-level files, plus the volume's free_bytes
+            since #1276) — powers recording-e2e.sh's recordings preflight WARN, which since #1276
+            fires when the recordings VOLUME has <= RECORDINGS_FREE_MIN_GB of FREE space left (not
+            when the file sum exceeds a budget). Same resolve-live + last-known-good fallback as the
+            static-file GET path below — never a stale/wrong directory after a profile switch."""
             record_dir = self._resolve_record_dir()
             if record_dir is None:
                 self.send_response(503)
