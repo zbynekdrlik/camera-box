@@ -901,27 +901,59 @@ fetch_box_state() {
 fetch_box_state "$STRIH"  "$VERSION_STRIH_STATE"  || true
 fetch_box_state "$STREAM" "$VERSION_STREAM_STATE" || true
 
-# #652: disk-budget preflight WARN (never fail — informational only). The harness's own E2E test
-# recordings had silently accumulated to ~500 GB on strih / 139 GB on stream (back to
-# 2026-06-17, including a single 266 GB stray), invisible until the disk nearly filled (17 GB
-# free). Best-effort: an unreachable bundle-state-server (the box's :8899 /record-dir-stats.json,
-# same standing service fetch_box_state above already relies on, #650) just skips the check —
-# this is a WARN, never a gate.
-RECORDINGS_BUDGET_GB="${RECORDINGS_BUDGET_GB:-50}"
-check_recordings_budget() {
-  local label="$1" host="$2" stats total_gb
+# #652/#1276: recordings-volume FREE-SPACE preflight WARN (never fail — informational only). Owner
+# ruling (14.9.2026, "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): WARN when the
+# recordings VOLUME has at most RECORDINGS_FREE_MIN_GB of FREE space left — NOT when the sum of
+# recording files exceeds a budget (the old #652 semantics: a disk with 600 GB free must not warn
+# just because old test recordings sum past 50 GB). The volume's free_bytes is served by the box's
+# :8899 /record-dir-stats.json (bundle_state_gather.record_dir_stats -> shutil.disk_usage on the
+# same standing service fetch_box_state above already relies on, #650); the pure verdict is
+# bundle_state_gather.recordings_free_verdict (the python mirror of the canonical Rust
+# recordings_retention::free_space_verdict). An unreachable server / unreadable free space just
+# skips (NOTE), never a false WARN, never a gate. Deletion (--execute) stays an owner-only step.
+RECORDINGS_FREE_MIN_GB="${RECORDINGS_FREE_MIN_GB:-50}"
+check_recordings_free_space() {
+  local label="$1" host="$2" stats out verdict free_gb
   stats=$(curl -fsS --max-time 30 "http://${host}:${WIN_BUNDLE_STATE_PORT}/record-dir-stats.json" 2>/dev/null) || {
-    echo "    NOTE: could not fetch $label recordings-dir stats (bundle-state-server unreachable) — skipping disk-budget check" >&2
+    echo "    NOTE: could not fetch $label recordings-dir stats (bundle-state-server unreachable) — skipping free-space check" >&2
     return 0
   }
-  total_gb=$(printf '%s' "$stats" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("total_bytes",0)/1e9)' 2>/dev/null) || return 0
-  echo "    $label recordings dir: $(printf '%.1f' "$total_gb") GB (budget ${RECORDINGS_BUDGET_GB} GB)"
-  if python3 -c "import sys; sys.exit(0 if float('$total_gb') > float('$RECORDINGS_BUDGET_GB') else 1)" 2>/dev/null; then
-    echo "WARNING #652: $label's OBS recordings directory holds ~$(printf '%.1f' "$total_gb") GB of accumulated recordings (budget ${RECORDINGS_BUDGET_GB} GB) — old E2E test recordings may be piling up; see the cleanup plan this run prints at [8/8] (KEEP_RECORDINGS=1 opts out), or clean up manually via the win-* MCP." >&2
-  fi
+  # Capture into a plain variable (never `read < <(...)`, whose EOF return would set-e-abort the run,
+  # the #1133 class): the python always prints exactly one "<VERDICT> <free_gb>" line and exits 0, so
+  # a pipeline failure here means python itself is broken -> the `|| { ...; return 0; }` skips cleanly.
+  out=$(printf '%s' "$stats" | PYTHONPATH="$HERE" python3 -c '
+import json, sys
+import bundle_state_gather as bsg
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("UNKNOWN -1")
+    sys.exit(0)
+fb = d.get("free_bytes")
+v = bsg.recordings_free_verdict(fb, float(sys.argv[1]))
+print(v, "-1" if fb is None else "%.1f" % (fb / 1e9))
+' "$RECORDINGS_FREE_MIN_GB") || {
+    echo "    NOTE: could not parse $label recordings free-space stats — skipping free-space check" >&2
+    return 0
+  }
+  verdict=${out%% *}
+  free_gb=${out#* }
+  case "$verdict" in
+    WARN)
+      echo "    $label recordings volume: ${free_gb} GB free (warn at <= ${RECORDINGS_FREE_MIN_GB} GB free)"
+      echo "WARNING #652 #1276: $label's OBS recordings volume has only ~${free_gb} GB of FREE space left (warn threshold ${RECORDINGS_FREE_MIN_GB} GB) at ${host}'s record dir — free space is running low; the owner can clear space via the cleanup plan this run prints at [8/8] (KEEP_RECORDINGS=1 opts out), the reviewed --execute retention (owner-only), or the win-* MCP." >&2
+      ;;
+    OK)
+      echo "    $label recordings volume: ${free_gb} GB free (warn at <= ${RECORDINGS_FREE_MIN_GB} GB free)"
+      ;;
+    *)
+      echo "    NOTE: $label recordings volume free space unreadable/unparseable — skipping free-space check (never a false WARN)" >&2
+      return 0
+      ;;
+  esac
 }
-check_recordings_budget strih  "$STRIH"
-check_recordings_budget stream "$STREAM"
+check_recordings_free_space strih  "$STRIH"
+check_recordings_free_space stream "$STREAM"
 # #756 — imag is SSH-reachable, so read its deployed genlock build SHA directly (the Windows boxes'
 # SHAs flow in via their --win-state bundle-state JSON) and hand it to the gate's CROSS-BOX parity
 # assert. Best-effort: an unreachable imag yields "" -> the parity facet stays dormant until >=2

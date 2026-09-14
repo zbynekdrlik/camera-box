@@ -199,3 +199,44 @@ pub fn plan(files: &[RecordingFile], policy: &RetentionPolicy, now_epoch: f64) -
 
     RetentionPlan { keep, delete }
 }
+
+/// #1276 — the E2E recordings-retention free-space WARNING verdict.
+///
+/// Owner ruling (14.9.2026, verbatim "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): the
+/// E2E preflight WARN must fire when the recordings VOLUME has at most `min_free_gb` of FREE space
+/// left — NOT when the sum of recording files exceeds a budget. A disk with 600 GB free must not
+/// warn just because old test recordings sum past 50 GB. This is the canonical spec; the
+/// `bundle_state_gather.recordings_free_verdict` python mirror (the real runtime consumer the bash
+/// preflight calls) matches it byte-for-byte, and the DELETE-set decision (`plan()`) is untouched —
+/// the owner ruled only on the warning trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreeSpaceVerdict {
+    /// At least `min_free_gb` of free space — no warning.
+    Ok,
+    /// Below `min_free_gb` of free space left — warn (space is running low).
+    Warn,
+    /// Free space could not be read (`free_bytes` None) — UNKNOWN, never a false low-space WARN.
+    Unknown,
+}
+
+/// Decimal gigabytes (1e9 bytes) — the same unit the existing warning and the owner's "50gb"
+/// meant, so the threshold is compared in decimal GB, not GiB.
+pub const BYTES_PER_GB: f64 = 1e9;
+
+/// Verdict for the recordings volume's free space. `free_bytes` is the volume's free space (from
+/// `shutil.disk_usage(record_dir).free` on the box), or `None` when it could not be read. WARN iff
+/// the free space is STRICTLY below `min_free_gb` (so exactly `min_free_gb` free is still Ok — the
+/// spec's "free >= threshold -> no warn"). `None` -> Unknown (never a false warn from a bad read).
+pub fn free_space_verdict(free_bytes: Option<u64>, min_free_gb: f64) -> FreeSpaceVerdict {
+    match free_bytes {
+        None => FreeSpaceVerdict::Unknown,
+        Some(fb) => {
+            let free_gb = fb as f64 / BYTES_PER_GB;
+            if free_gb < min_free_gb {
+                FreeSpaceVerdict::Warn
+            } else {
+                FreeSpaceVerdict::Ok
+            }
+        }
+    }
+}

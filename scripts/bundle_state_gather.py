@@ -35,6 +35,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 
 # The three OBS module scan paths that can each shadow-load a `distroav.dll` (#124, EPIC #125) —
@@ -901,7 +902,43 @@ def record_dir_stats(record_dir):
             f"WARNING: record_dir_stats: could not read directory {record_dir!r}: {e}",
             file=sys.stderr,
         )
-    return {"total_bytes": total_bytes, "file_count": file_count, "oldest_mtime": oldest_mtime}
+    # #1276: the volume's FREE space — the owner-ruled (14.9.2026) WARNING signal is "<= 50 GB of
+    # FREE space left on the recordings volume", not the sum of recording files. Read via
+    # shutil.disk_usage on the SAME local record dir already scanned above (no new transport;
+    # works on Windows and imag-Linux). Degrades to None (UNKNOWN downstream — never a false
+    # low-space WARN) on any read failure, mirroring the zero-degrade of the file scan above.
+    free_bytes = None
+    try:
+        free_bytes = shutil.disk_usage(record_dir).free
+    except OSError as e:
+        print(
+            f"WARNING: record_dir_stats: could not read free space of {record_dir!r}: {e}",
+            file=sys.stderr,
+        )
+    return {
+        "total_bytes": total_bytes,
+        "file_count": file_count,
+        "oldest_mtime": oldest_mtime,
+        "free_bytes": free_bytes,
+    }
+
+
+def recordings_free_verdict(free_bytes, min_free_gb):
+    """#1276 — the E2E recordings-retention free-space WARNING verdict, the python mirror of the
+    canonical Rust ``recordings_retention::free_space_verdict``. Owner ruling (14.9.2026, verbatim
+    "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): warn when the recordings VOLUME has at
+    most ``min_free_gb`` of FREE space left, NOT when the sum of recording files exceeds a budget.
+
+    ``free_bytes`` is the volume's free space (from ``record_dir_stats``'s ``free_bytes``), or
+    ``None`` when it could not be read. Returns "WARN" iff the free space is STRICTLY below
+    ``min_free_gb`` (so exactly ``min_free_gb`` free is still "OK" — the spec's "free >= threshold
+    -> no warn"), "UNKNOWN" for ``None`` (never a false low-space WARN from an unreadable stat),
+    else "OK". Threshold + comparison in decimal GB (1e9 bytes), the same unit the existing warning
+    and the owner's "50gb" meant."""
+    if free_bytes is None:
+        return "UNKNOWN"
+    free_gb = free_bytes / 1e9
+    return "WARN" if free_gb < min_free_gb else "OK"
 
 
 def genlock_build_sha_from_file(path):
