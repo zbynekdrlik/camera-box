@@ -1220,7 +1220,10 @@ imag_genlock_on_dev() {
 # lines, the Program-projector ARMED marker) = the EARLIEST filtered lines; a HEAD slice keeps them, a
 # TAIL slice ALSO keeps any late re-arm / hot-apply — so head+tail of the (already tiny) filtered
 # stream preserves every facet's semantics even if a marker family ever grew past the cap (the middle
-# it then drops is redundant repeats, never a first-occurrence line). A missing / empty log yields
+# it then drops is redundant repeats, never a first-occurrence line). (fps_from_log needs the reset
+# block AND its immediately-following output-fps line co-resident in ONE slice; both are emitted
+# during OBS video init = among the FIRST handful of filtered lines, so they always land together in
+# the head slice, never split across the head/tail boundary.) A missing / empty log yields
 # empty output -> the parsers read UNKNOWN, never a false OK (#833). The caller wraps the whole capture
 # in `|| true`, so a remote grep with no matches (exit 1) never trips the caller's set -euo pipefail
 # (the drain-safe convention of .claude/rules/drift-guard-log-parsers.md).
