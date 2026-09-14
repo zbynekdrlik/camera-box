@@ -1,6 +1,6 @@
-//! #1066 (provisioning-defects batch) -- four defects found re-provisioning cam1 from a clean
-//! noble image on 2026-09-13, each fixed in `scripts/setup-device.sh` (+ a `verify-device.sh`
-//! constant move and a new `scripts/lib/ndi-provision.sh`):
+//! #1066 (provisioning-defects batch) -- six defects found re-provisioning cam1/cam2 from a clean
+//! noble image on 2026-09-13/14, each fixed in `scripts/setup-device.sh` (+ a `verify-device.sh`
+//! constant move and a new `scripts/lib/ndi-provision.sh`; D5/D6 add a `scripts/lib/efi-boot-entry.sh`):
 //!
 //!   D1. STEP 17b remoteos-mcp install died on the noble pip-vs-debian RECORD conflict; the fix
 //!       exports `PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1` for the installer's own pip.
@@ -13,6 +13,15 @@
 //!   D4. STEP 17 wrote the RESOLVED grandmaster IPv4 into `gm_allowlist` and installed
 //!       `releases/latest`; the fix writes the literal `video-clock.lan` hostname (dantesync#113,
 //!       kept only as a loud resolve precondition) and installs the pinned `DANTESYNC_VERSION_PIN`.
+//!   D5. STEP 3b (cam2 painter frame-probe) resolved only via `FRAME_PROBE_BINARY_URL` env then
+//!       gh-on-box; the gh-less appliance failed. The fix adds a `--probe-binary <path|url>` CLI arg
+//!       symmetric with `--binary` (env kept as a byte-compatible fallback) and fails loud with the
+//!       exact dev1 staging recipe.
+//!   D6. The named `cam-box` UEFI entry landed in the BUILDER's NVRAM (create-usb-linux.sh); the fix
+//!       guards the host-side entry to the builder's own boot disk, adds an on-box STEP 17d that
+//!       creates the entry in the box's own NVRAM + leads BootOrder, and a verify-device `(al)`
+//!       check (pure fns in `scripts/lib/efi-boot-entry.sh`; D6 is tested in
+//!       `tests/efi_boot_entry_1066.rs`).
 //!
 //! Tier-0: pure functions are driven by sourcing the real shell libs; the script wiring is pinned
 //! by static-text anchors (same convention as `setup_device_fleet_binary_ndi.rs` /
@@ -333,5 +342,95 @@ fn setup_device_dantesync_gm_allowlist_is_the_hostname_1066() {
     assert!(
         on_noncomment_line(&body, ". \"$HERE/lib/rig-grandmaster.sh\""),
         "setup-device.sh must still source the shared grandmaster resolver (#1307/#1066)"
+    );
+}
+
+// ============================================================================
+// D5 -- STEP 3b frame-probe fetch works on a gh-less box via `--probe-binary`
+// ============================================================================
+
+/// D5: the arg parser must accept `--probe-binary <path|url>` symmetric with `--binary`, feeding a
+/// `PROBE_BINARY_ARG` variable. The appliance has no gh/GH_TOKEN, so a from-scratch cam2 provision
+/// can only get frame-probe (#863) via a dev1-staged path -- exactly the way STEP 3 gets camera-box
+/// via `--binary`. Without this arg the operator had to fall back to `FRAME_PROBE_BINARY_URL=` twice
+/// on cam2 (the ticket's live proof).
+#[test]
+fn setup_device_accepts_probe_binary_arg_symmetric_with_binary_1066() {
+    let body = setup();
+    assert!(
+        on_noncomment_line(&body, "--probe-binary)"),
+        "the arg parser must accept `--probe-binary <url|path>` (symmetric with --binary) so a \
+         gh-less box can be handed a dev1-staged frame-probe (#1066 D5)"
+    );
+    assert!(
+        on_noncomment_line(&body, "PROBE_BINARY_ARG"),
+        "the --probe-binary value must feed STEP 3b via PROBE_BINARY_ARG (#1066 D5)"
+    );
+    // The usage/examples must advertise it so an operator discovers the recipe without reading code.
+    assert!(
+        body.contains("--probe-binary"),
+        "usage/examples must mention --probe-binary (#1066 D5)"
+    );
+}
+
+/// D5: STEP 3b resolves FRAME_PROBE_SRC from the CLI arg FIRST, then falls back to the
+/// FRAME_PROBE_BINARY_URL env -- the env override stays byte-compatible (never removed).
+#[test]
+fn setup_device_step3b_prefers_probe_binary_arg_then_env_1066() {
+    let body = setup();
+    assert!(
+        on_noncomment_line(
+            &body,
+            r#"FRAME_PROBE_SRC="${PROBE_BINARY_ARG:-${FRAME_PROBE_BINARY_URL:-}}""#
+        ),
+        "STEP 3b must resolve FRAME_PROBE_SRC as `--probe-binary` arg first, then the \
+         FRAME_PROBE_BINARY_URL env fallback (byte-compatible override kept) (#1066 D5)"
+    );
+    // The env override must still be present (byte-compatible, never dropped).
+    assert!(
+        on_noncomment_line(&body, "FRAME_PROBE_BINARY_URL"),
+        "FRAME_PROBE_BINARY_URL must remain a working env override (#1066 D5)"
+    );
+}
+
+/// D5: both STEP 3b `fail` paths (no CI run found / gh unavailable) must carry the EXACT dev1
+/// staging recipe -- name the `probe-tools-linux-amd64` artifact AND the `--probe-binary` arg the
+/// operator re-runs with. A bare "install manually" is not enough (that is what stranded cam2).
+#[test]
+fn setup_device_step3b_fail_messages_carry_the_staging_recipe_1066() {
+    let body = setup();
+    // Slice the STEP 3b block so the assertion is scoped to it, not STEP 3's camera-box messages.
+    let start = body
+        .find("STEP 3b: cam2 ONLY")
+        .expect("STEP 3b block must exist (#863)");
+    let end = body[start..]
+        .find("STEP 4:")
+        .map(|o| start + o)
+        .unwrap_or(body.len());
+    let block = &body[start..end];
+    // The RESOLUTION-EXHAUSTED `fail` messages (no CI run found / gh unavailable -- "cannot fetch"
+    // / "cannot auto-fetch") must name the actionable --probe-binary staging arg; a bare 'install
+    // manually' there is exactly what stranded cam2. (The URL-download-failed messages -- where the
+    // operator DID pass a --probe-binary URL that just did not resolve -- are a different class and
+    // are correctly excluded: the recipe there is "fix the URL", not "pass --probe-binary".)
+    let recipe_lines: Vec<&str> = block
+        .lines()
+        .filter(|l| l.contains("fail ") && l.contains("frame-probe") && l.contains("fetch"))
+        .collect();
+    assert!(
+        !recipe_lines.is_empty(),
+        "STEP 3b must fail loud when frame-probe cannot be fetched (#1066 D5)"
+    );
+    for l in &recipe_lines {
+        assert!(
+            l.contains("--probe-binary"),
+            "a STEP 3b frame-probe fail message must name the --probe-binary staging arg -- a bare \
+             'install manually' stranded cam2 (#1066 D5): {l}"
+        );
+    }
+    assert!(
+        block.contains("probe-tools-linux-amd64"),
+        "STEP 3b must name the probe-tools-linux-amd64 artifact the operator stages from dev1 \
+         (#1066 D5)"
     );
 }
