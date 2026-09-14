@@ -897,6 +897,21 @@ async fn run_capture_loop(
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        // #1311 — the #656/#971 capture-rate self-heal USB reset is now env-gated too, the LAST of
+        // the four triggers to get a gate (default OFF = ALERT-ONLY). On a box running
+        // bkshading-relay, the relay's gphoto2 PTP polling starves the grabber on the SHARED xHCI
+        // root hub (which also carries the boot stick + the PTP camera, issue 1309/1311 Finding
+        // 1/2), so the capture-rate band confirms a FALSE "dying grabber" and the reset
+        // re-enumerates the whole hub — collateral that can drop the boot stick off the bus. When
+        // unset, attempt_self_heal logs the #663 ALERT-ONLY suppressed line and never calls
+        // perform_usb_reset; the genuine dying-grabber case is already covered by the dev1
+        // attribution watchdog (#895/#1128) + the E2E leg-health gate. A box that needs the reset
+        // sets CAMERA_BOX_CAPTURE_RATE_SELFHEAL=1 in its genlock.conf drop-in. The other three
+        // triggers pass enabled=true (already gated at their own call sites), so byte-unchanged.
+        let capture_rate_selfheal_enabled = std::env::var("CAMERA_BOX_CAPTURE_RATE_SELFHEAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
         // each emitted frame off over a bounded ring, so the heavy per-frame QR render no longer
@@ -1729,6 +1744,7 @@ async fn run_capture_loop(
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0);
                             if let Some(code) = camera_box::capture_rate_selfheal::attempt_self_heal(
+                                capture_rate_selfheal_enabled, // #1311 default OFF = ALERT-ONLY
                                 &device_path_owned,
                                 grabber_model,
                                 now_epoch_s,
@@ -1773,6 +1789,7 @@ async fn run_capture_loop(
                                     .unwrap_or(0);
                                 if let Some(code) =
                                     camera_box::capture_rate_selfheal::attempt_self_heal(
+                                        true, // #1311 grabber-STUCK is gated by its own `if` above
                                         &device_path_owned,
                                         grabber_model,
                                         now_epoch_s,
