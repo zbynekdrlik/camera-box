@@ -58,9 +58,33 @@ production-critical watchdog class (umbrella **#1308**).
   authoritative for NO_CLOCK when present; the derived `is_locked`/gm/storm check folds in as the
   cross-check (page if EITHER fires). Absent field → derived check only.
 - **Node roster = the WHOLE powered dantesync fleet**, cam1–7 (incl. cam5–7 retired from
-  `CAMERA_ACTIVE_SET` but still powered + running dantesync) + strih/stream/imag/resolume. resolume is
-  traveling → paged only while `obs_fleet_is_home`. An OFF box → UNREACHABLE → SKIP (defers to #1001),
-  never a page.
+  `CAMERA_ACTIVE_SET` but still powered + running dantesync) + strih/stream/imag/resolume + **dev1
+  itself** (the `local` node, #1313). resolume is traveling → paged only while `obs_fleet_is_home`. An
+  OFF box → UNREACHABLE → SKIP (defers to #1001), never a page.
+- **dev1 is the `local` node — the control box watches its OWN clock (#1313, the former dev1 blind
+  spot, now CLOSED).** dev1 is NOT a probed cam/obs node, yet it runs dantesync and its clock feeds
+  every dev1-hosted gate (`clock-offset-painter-gate.sh`, the recording-verdict wall references, every
+  `date`-stamped E2E window). On 14.9.2026 dev1 sat NTP-only for ~a day unpaged (its `gm_allowlist` on
+  the retired literal `10.77.9.184` + dantesync 1.8.53 — the 13.9. fleet allowlist patch AND the fleet
+  roll both skipped dev1), its own journal shouting `[CLOCK-ALARM] NO DANTE CLOCK` every minute, and
+  the dev1 watchdog that would have paged it runs ON dev1 and never looked at `127.0.0.1:8898`. Caught
+  only because the E2E `[0/8]` version-parity gate lists dev1. The `local` arm closes it:
+  - **`DANTE_CLOCK_LOCAL_NODES="dev1"`** (+ `DANTE_CLOCK_LOCAL_IP`, the loopback, Tier-0-overridable)
+    builds a `dev1|127.0.0.1|local` roster triple, probed at `127.0.0.1:8898` with **NO ssh / TCP
+    reach probe** — the box is UP by definition (the watchdog runs ON it).
+  - Graded by the SAME verdicts via a pure **`analyze_local()`** (the ONE tested local-node policy
+    point) / the DECIDE `--local 1` flag: it forces **`box_up=1`** (a dead `:8898` on the local box is
+    **`NO_DANTESYNC`**, never SKIP — there is no "box down, defer #1001" case for the box we run on)
+    and **`mgmt_ssh_ok=None`** (no ssh MANAGEMENT axis — we ARE the box — so `MGMT_DEAD` can never fire
+    for dev1). Everything else (OK / NO_CLOCK / UNKNOWN / gm / storm / stale / version) is the SAME
+    generic grading, so the local node can never disagree with a remote node about a lost clock.
+  - The clock fault keeps its bucketed key **`dante-clock-dev1-<bucket>`** (the `NO_DANTESYNC` fault
+    uses `dante-clock-nohttp-dev1-<bucket>`); version drift vs `DANTESYNC_VERSION_PIN` is REPORTED in
+    the card, never a page. Recovery stays a machine-channel log line.
+  - **Every fleet roll AND every config patch (`gm_allowlist` / `phase_slew`) MUST include dev1** —
+    `dantesync-fleet-upgrade.sh … --local dev1`, "fleet N/N" counts dev1 (the `.claude/skills/ops`
+    DanteSync rollout checklist). This watchdog is the between-rolls backstop, not a substitute for
+    including dev1 in the roll itself.
 - **NO_DANTESYNC — the `:8898`-down-but-box-up branch (#1308, the former blind spot, now CLOSED).**
   A box that is UP but whose `:8898` (dantesync HTTP) is dead used to read UNREACHABLE → SKIP, and
   `network-reach` (#1001) probes ping/`:4455`/`:8899`, NOT `:8898`, so a `:8898`-specific outage on a
@@ -91,8 +115,11 @@ production-critical watchdog class (umbrella **#1308**).
 
 ## Tier-0 verification (worktree lane)
 
-`python3 -m pytest tests/python/test_dantesync_clock_decision_1307.py`; `bash -n` +
+`python3 -m pytest tests/python/test_dantesync_clock_decision_1307.py
+tests/python/test_dantesync_clock_dev1_local_1313.py`; `bash -n` +
 `shellcheck -S warning scripts/dantesync-clock-alert-watchdog.sh`; a stubbed `--dry-run` via
-`DANTE_CLOCK_FETCH_CMD` + `RIG_GRANDMASTER_IP` + `DANTE_CLOCK_NODES` + `DANTE_CLOCK_NOW` (inline
-literal env prefixes — a worktree-isolated lane cannot run `bash -c`/variable-value shapes,
-`.claude/rules/ci-testing-gotchas.md`).
+`DANTE_CLOCK_FETCH_CMD` + `RIG_GRANDMASTER_IP` + `DANTE_CLOCK_NODES` + `DANTE_CLOCK_NOW`. The #1313
+dev1-`local` arm is driven end-to-end from `test_dantesync_clock_dev1_local_1313.py` (a pytest that
+subprocesses the watchdog `--dry-run` with `DANTE_CLOCK_LOCAL_NODES="dev1"` + a fetch stub — the
+subprocess runs INSIDE the python process, so the worktree-isolation guard never sees a `bash -c`;
+a lane cannot run the same stub as a bare `bash -c`/inline-env shape, `.claude/rules/ci-testing-gotchas.md`).
