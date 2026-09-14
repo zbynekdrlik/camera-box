@@ -2,6 +2,53 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-09-14 — #1066 D5 + D6 (provisioning defects: gh-less frame-probe fetch + named UEFI entry on the target) — worktree worktree-agent-abf41888552db3de5, base 099a58280
+
+- **D5 (STEP 3b frame-probe on a gh-less box):** RED `930064d6a` → GREEN `b5bea8e6b`.
+  `setup-device.sh` gains a `--probe-binary <path|url>` CLI arg symmetric with `--binary`; STEP 3b
+  resolves `FRAME_PROBE_SRC="${PROBE_BINARY_ARG:-${FRAME_PROBE_BINARY_URL:-}}"` (the env override
+  kept byte-compatible), and the three resolution-exhausted `fail` messages (no CI run / gh
+  unavailable / gh-download-failed) now carry the exact dev1 staging recipe (`gh run download
+  probe-tools-linux-amd64 … && scp … && setup-device.sh --probe-binary /tmp/frame-probe <BOX>`)
+  instead of a bare "install manually" that stranded a from-scratch cam2 provision twice. Design:
+  the resolution SHAPE stays identical to STEP 3's camera-box path (one uniform model for both
+  binaries); a literal shared-helper extraction was REJECTED (breaks the #1289 ETXTBSY anchor tests
+  pinning the inline curl/install lines in both blocks + touches D3-live-proven STEP 3).
+- **D6 (named `cam-box` UEFI entry on the TARGET, not the builder):** RED `8356d8796` → GREEN
+  `8c8f6470e`. New `scripts/lib/efi-boot-entry.sh` — pure decision fns (efi_whole_disk_of /
+  efi_cam_box_bootnums / efi_boot_order / efi_cam_box_leads / efi_boot_order_lead /
+  efi_entry_verdict), ONE source of truth shared by all three provisioning scripts (the
+  ndi-provision.sh convention). `create-usb-linux.sh`'s `create_efi_boot_entry` now runs ONLY when
+  `$DEVICE` == the builder's own boot disk (`findmnt -no SOURCE /` → efi_whole_disk_of), else WARN +
+  skip (no more dev1 NVRAM pollution); efibootmgr baked into the base image. `setup-device.sh`
+  STEP 17d creates the named entry in the box's OWN NVRAM (idempotent, efivars-guarded) and makes it
+  lead BootOrder; efibootmgr added to STEP 16. `verify-device.sh` (al) certifies a `cam-box` entry
+  exists AND leads BootOrder, FAILs (test-strictness) on absent / not-leading / unreadable
+  efibootmgr; documented in all three places (header, usage() Checks, exec) and inserted BEFORE (q).
+  Docs: `4a222efc6` (provision SKILL.md D6 gotcha → the automated STEP 17d + (al), manual efibootmgr
+  kept only as the pre-STEP-17d-window fallback).
+- **Tier-0 (worktree lane):** `cargo fmt --all --check` clean; `bash -n` + `shellcheck -S warning`
+  clean on the new lib + all three scripts; the occurrence-count anchor sweep over every
+  setup/verify/create-usb-reading test file shows only ADDITIVE literal changes (the one 1→0 it
+  would have flagged — the pinned single-arg usage echo — was caught by
+  `setup_device_provisioner_hardening.rs` and fixed by reverting the echo to its pinned form). Rustc
+  replicas run GREEN: `efi_boot_entry_1066` (11/11), `setup_device_provisioning_defects_1066` (14/14),
+  and the regression files `verify_device_pure_functions` (106/106), `setup_device_provisioner_hardening`
+  (41/41), `harness_cam2_painter_provisioning_863` (13/13); the create-usb create_efi anchor +
+  source-only harness verified via a python replica + a live source-only probe. `appliance_boot_hardening.rs`
+  needs the `tempfile` crate (not std-only) so it runs at CI; its create_efi test invariants were
+  replica-verified locally.
+- **Review:** fresh-context adversarial general-purpose read-only review over `099a58280..HEAD` →
+  SHIP, 0 🔴. One 🟡 fixed same-branch (`cad1e2271`): STEP 17d's `printf '%s\n' "$EFI_NUMS" | head -1`
+  was the `printf|head` SIGPIPE-under-pipefail footgun `drift-guard-log-parsers.md` bans → pipe-free
+  `${EFI_NUMS%%$'\n'*}`. Four 🔵s considered + deferred with reasoning (create-usb inline-awk vs lib
+  constants — the pinned literal `cam-box` anchor keeps it out of scope; STEP 16 `|| true` caught
+  fail-closed by (al); ssh PATH; non-EFI setup-skip vs verify-FAIL asymmetry is intentional).
+- **Lane scope:** worktree lane — CODE + TESTS + DOCS only. No rig touched (no ssh to any 10.77.x
+  box; cam2 is live — the supervisor owns the live cam2 re-provision proof). No push/PR/merge/close,
+  no version bump (per dispatch). Durability backup on
+  `refs/autopilot-wip/worktree-agent-abf41888552db3de5`.
+
 ## 2026-09-13 — #1303 part 3b (LOCK-indicator audio DEGRADE term) — worktree worktree-agent-a4cfdaa804a08e476, base e2d651bc3
 
 - **Scope:** surface the audio-parity health (landed in 3a as `genlock_audio_pairing::decide_audio_health`,
