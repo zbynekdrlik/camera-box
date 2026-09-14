@@ -44,6 +44,44 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | genlock | `genlock-lock-alert-watchdog.sh --dry-run` | `verdict=HEALTHY` | DEGRADED/UNLOCKED | **UNKNOWN facet = UNKNOWN, NEVER forgot** |
 | dantesync | `dantesync-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
 | cambox | `camera-box-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
+| avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / <3 onsets / cam2 down / stream OBS down |
+
+## `avlatency` (#1312) — the mbc measurement-chain LATENCY, not just presence
+
+The 14th item proves, between productions and read-only, that the mbc measurement-audio chain (cam2
+painter QPSK marker → HDMI speaker → mic → mbc Ableton → Dante → stream OBS `mbc`) is still ALIGNED
+with the video within the E2E's ±90 ms gate — the −140 ms A/V step of 14.9. is exactly the class it
+catches. It reuses the whole verdict-kind item framework (like `mic`): the standalone
+`scripts/measurement-chain-latency.sh` probe computes the token, the item maps `ALIGNED→OK`,
+`DRIFTED→FORGOT`, everything else `→UNKNOWN`. All decision logic (onset detection at the SAME −60 dB
+`audio-presence-preflight.sh` bar, pairing, median, classify, the wall-clock guard) is the pure
+`scripts/measurement_chain_latency.py` kernel — `python3 -m pytest tests/python/test_measurement_chain_latency_1312.py`.
+
+- **NEVER the dock `av_offset_recent_med_ms`.** That signal is PIN-RELATIVE (it read +17 ms while the
+  recording gate read −140 ms on 14.9.), so it can NOT be used as absolute. `avlatency` does an
+  INDEPENDENT paired measurement: the cam2 marker log's emit times vs the stream `mbc` burst ONSETS
+  timestamped off the OBS-WS `InputVolumeMeters` peak on dev1 — median per-marker latency vs baseline.
+- **The MONOTONIC-EMIT trap (the standing prerequisite).** The ticket assumed `emit_ts_ns` is on the
+  DanteSync wall clock, but the PERMANENT cam2 painter (`setup-device.sh`'s `cam2-painter.service`, no
+  `--wall-clock`) emits `start.elapsed()` MONOTONIC-since-painter-start ns — NOT comparable to the
+  dev1 onset wall clock, and reset on every painter restart (which happens on every EVENT→TEST switch,
+  i.e. exactly when this check runs). So the pure kernel GUARDS on the emit-ts SHAPE (a wall-clock ns
+  is ~1.7e18; a monotonic elapsed value is orders smaller) and reads UNKNOWN (`neoverené`, reason
+  `monotonic-emit`) when the emits are monotonic — NEVER a false forgot. **`avlatency` therefore reads
+  UNKNOWN today** and goes green-capable the moment the painter is switched to `--wall-clock` — a SAFE
+  no-op for the A/V verdict path (`av_sync_recording.rs:207` "no wall-clock alignment"; `av_offset_candidates_with_fid`
+  pairs by index→frame_id and ignores `emit_ts`). Enabling it is a SUPERVISOR follow-up
+  (add `--wall-clock` to the `cam2-painter.service` ExecStart + the rig-mode.sh painter launch;
+  provisioning/reboot-class; re-seed the baseline after).
+- **Baseline workflow.** The supervisor seeds `~/.camera-box/measurement-chain-latency-baseline.json`
+  with `scripts/measurement-chain-latency.sh --baseline` right AFTER a green E2E (a known-aligned
+  chain), and re-seeds it after any deliberate latency change. Until it is seeded the item reads
+  UNKNOWN (`NO-BASELINE`), never a false forgot.
+- **TEST-premise (two-pass, like `mic`/`painter`).** The QPSK marker only sounds in TEST steady state,
+  so on the first EVENT-mode pass `avlatency` reads UNKNOWN; it verifies once the rig is in TEST and
+  the painter is back up. It samples the meter ~30 s then ssh-reads the marker log AFTER (so the
+  just-emitted markers are present); the whole probe is bounded (`RDH_AVLATENCY_TIMEOUT`, default 100 s)
+  so a down cam2 / stream box fails safe to UNKNOWN, never a hang.
 
 ## Gotchas / invariants
 
