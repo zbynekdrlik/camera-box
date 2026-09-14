@@ -319,3 +319,26 @@ copy and no lib dependency on the box. setup-device.sh writes it enable-only (wr
 `daemon-reload` + `enable <timer>`, never a live `start`, in the rw window before STEP 18); a
 verify-device check proves it post-reboot. Tier-0 test the generated script's SHAPE (embeds the fn
 names, has the key action lines) AND that it is valid bash (`bash -n` on the captured output).
+
+## A NEW provisioned systemd unit that uses `StateDirectory=` (or writes under `/var/lib`) FAILS on the read-only root — only `/var/log|tmp|cache|spool` are tmpfs (#1311 review F2)
+
+The cambox is a read-only-root appliance: STEP 18's fstab mounts ONLY `/var/log`, `/var/tmp`,
+`/var/cache`, `/var/spool` (+ `/tmp`) as tmpfs; everything else — including `/var/lib` — is on the
+`ro` root. So ANY unit you provision that needs a writable state path fails at every start on the
+box even though it works on a normal box:
+
+- A `StateDirectory=<name>` directive makes systemd `mkdir /var/lib/<name>` at each start → fails
+  `ReadOnlyFileSystem` on the ro root, failing the whole unit. When you enable a stock upstream unit
+  (or write your own) that carries one, either DROP it (empty `StateDirectory=` in a drop-in resets
+  the list) and point the app's state at a `/run` (tmpfs) path instead, or bake a tmpfs mount for
+  that path into STEP 18's fstab. `systemd-journal-upload` hit exactly this — the stock noble unit
+  carries `StateDirectory=systemd/journal-upload`, cleared in `remote_log_journal_upload_dropin_content`
+  with the cursor redirected to `/run` via `RuntimeDirectory` + `--save-state` (scripts/lib/remote-logging.sh).
+- The same applies to any `--save-state`/cursor/pidfile/cache path a provisioned daemon writes: a
+  default under `/var/lib` (or any non-tmpfs dir) is unwritable. Redirect it to `/run` (fine for
+  runtime-only state — the box's whole point is that it may die) or add a tmpfs mount.
+
+verify-device's acceptance check for such a unit should assert the redirect is in place (a
+`--save-state=/run/...` / a cleared `StateDirectory=`), not just that the unit is enabled — an
+enabled-but-start-failing unit is a silent hole (a check that gates only `is-enabled`, not the
+ro-root-safe config, would pass a box whose service can never actually run).
