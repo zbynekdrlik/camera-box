@@ -67,8 +67,27 @@ All nodes sync to strih: stream, cam2 (`--ntp-server strih.lan`), dev1.
 that pin in the SAME cycle.** The pin's own comment mandates it, but the rollout happens in the
 dantesync repo / on the boxes where nothing re-reads that comment — 2026-08-11 the 1.8.30 rollout
 skipped the bump and EVERY E2E run refused with all 6 nodes "DRIFT" against the stale 1.8.25 pin
-until it was bumped. Rollout checklist: canary → fleet → verify 8/8 → bump `DANTESYNC_VERSION_PIN`
-→ push. **The fleet roll on the Windows boxes (strih+stream) covers TWO binaries: the
+until it was bumped. Rollout checklist: canary → fleet → verify N/N → bump `DANTESYNC_VERSION_PIN`
+→ push.
+
+**dev1 IS a fleet node — every fleet roll AND every config patch MUST include `--local dev1`;
+"fleet N/N" counts dev1 (#1313).** dev1 runs dantesync too (its clock feeds every dev1-hosted
+gate: `clock-offset-painter-gate.sh`, the recording-verdict wall references, every `date`-stamped
+E2E window), so it is NOT optional and NOT "just the control box". On 14.9.2026 the fleet roll AND
+the `gm_allowlist` patch both SKIPPED dev1: it sat NTP-only for ~a day on `gm_allowlist:
+["10.77.9.184"]` (the retired literal) + dantesync 1.8.53 (the fleet version) while its own journal
+shouted `[CLOCK-ALARM] NO DANTE CLOCK` every minute, caught only because the E2E `[0/8]`
+version-parity gate lists dev1. Concretely:
+- **Fleet roll:** `scripts/dantesync-fleet-upgrade.sh --linux "…" --win "…" --local dev1` — the
+  `--local dev1` arm reads+upgrades dantesync ON this box (dev1). Verify counts dev1 in N/N.
+- **Config patch (`gm_allowlist` / `phase_slew`):** apply the SAME patch to dev1's own
+  `~/.config/dantesync/config.toml` (or the box's config path) and restart dantesync there — never
+  patch cam/obs nodes and leave dev1 on a stale allowlist. After ANY allowlist/phase_slew change,
+  re-verify dev1 with `curl -s http://127.0.0.1:8898/status` (locked + correct `gm_source_ip`) —
+  the SAME reading the new dev1 arm of `dantesync-clock-alert-watchdog.sh` now watches between rolls
+  (`.claude/rules/dantesync-clock-alert-watchdog.md`, the `local` node).
+
+**The fleet roll on the Windows boxes (strih+stream) covers TWO binaries: the
 `dantesync.exe` SERVICE and the `dantesync-tray.exe` TRAY** — every upgrade script until
 2026-08-12 swapped only the service, so the tray (the version the USER actually sees in the
 system-tray UI) silently sat months stale (strih's was ~22 releases behind; user-caught). Tray
