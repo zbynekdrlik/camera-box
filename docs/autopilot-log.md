@@ -11901,3 +11901,33 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   fixture material), no push/PR/merge/close, no Discord, no dev1 timer (the supervisor enables it).
   Version NOT bumped (per dispatch). Durability backup on
   `refs/autopilot-wip/worktree-agent-aeef4477305e19536`.
+
+## issue 1151 (FOLDED, 14.9.2026) — bound drift-guard's imag OBS-log gather (net-drain ratchet)
+
+- **Problem:** imag's OBS session log grew to 1.2 GB / 4.5 M lines; `scripts/drift-guard.sh`
+  `gather_and_check_imag` shipped the whole newest `~/.config/obs-studio/logs/*.txt` over ssh into a
+  bash variable (`cat "$f"`), feeding five OBS-log parsers. The harness bash SIGSEGV'd (exit 139) →
+  `drift-guard --check-imag` exited 139 → `rig-mode.sh test` HARD-BLOCKED at its issue-789 fail-closed
+  TEST-entry gate, so the rig could not enter TEST mode. Mirrors the E2E-side fix already shipped in
+  `2e788561b` (`projector_vsync_gather_remote_snippet`).
+- **RED** `c3687abe1` (`test(#1151)`): new `tests/python/test_drift_guard_imag_obs_log_bounded_gather_1151.py`
+  (drives the real snippet against a 300k+-line fake log — middle-line survival + head+tail both-ends +
+  facet parity for all 5 parsers) + a `tests/drift_guard.rs` anchor test
+  (`gather_and_check_imag_ships_a_bounded_marker_filtered_read_1151`). Both fail on the old `cat "$f"`
+  code (snippet function absent).
+- **GREEN** `f53882a79` (`fix(#1151)`): extracted the remote command into a pure
+  `drift_guard_imag_obs_log_gather_snippet` (mirrors `obs-projector-vsync.sh`'s snippet, defined before
+  the source-guard so it is Tier-0-testable without ssh); it greps the UNION of the five parsers'
+  anchors (`genlock:|projector-vsync:|video settings reset:|fps:` — `genlock:` with the colon never
+  matches the 90 MB/day `genlock-fifo` bulk) and keeps head+tail of the tiny filtered stream. Each
+  parser keeps its first-match/presence semantics; empty log → UNKNOWN (#833); caller keeps `|| true`.
+  Doc `.claude/rules/drift-guard-log-parsers.md` gains the general CLASS rule (every remote-OBS-log
+  consumer bounds+filters; whole-file `cat` over ssh banned).
+- **Review** `d08c57f58` (`docs(#1151)`): fresh-context adversarial review PASSED clean (7/7 lenses OK,
+  0 blocking); one non-blocking note (fps reset-block co-residency) addressed by a one-line comment.
+- **Local verify:** `bash -n` + `shellcheck -S warning` clean, `cargo fmt --all --check` clean, the
+  bounded-gather pytest 3/3 + projector-vsync pytest 2/2 green, occurrence-count anchor sweep clean
+  (no test literal 1→0 / 1→2). Live proof (`--check-imag` exit 0 vs 139 against the real 1.2 GB log;
+  `rig-mode.sh test` gate passes) is the SUPERVISOR's — no rig ssh from this lane.
+- **Lane scope:** worktree lane — CODE + TESTS + DOCS only, no rig touched, no push/PR/merge/close, no
+  version bump. Durability backup on `refs/autopilot-wip/worktree-agent-a8c224151e910ed3c`.
