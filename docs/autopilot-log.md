@@ -11755,3 +11755,28 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   3 minor, ALL fixed same-branch in `fix(#1312)` 3358d67ad (version specs now mirror recording-e2e
   [0/8]; strict `combine_statuses`; --help/two-pass/test coverage). Post-fix: 19 pytest green,
   bash -n + shellcheck clean, version-gate specs verified by direct run.
+## issue 1311 (Finding 1 step 2) — off-box remote logging so the NEXT half-dead-stick death is diagnosable (worktree lane, 2026-09-14)
+
+- **What:** two cambox boot sticks died in 24 h (cam1 13.9., cam2 14.9.), both going half-dead first
+  (root fs USB stick dropped off the bus). `/var/log` is tmpfs, rsyslog is purged (762), so the only
+  durable log is the 1309 on-STICK journal partition — which dies WITH the stick. Get kernel + journal
+  messages OFF the box in real time.
+- **New source of truth:** `scripts/lib/remote-logging.sh` — pure content-generators, fail-closed
+  `remote_log_verdict`, gather snippet, and `remote_log_mac_from_neigh` (embedded into the on-box
+  netconsole setup script via `declare -f`).
+- **Transports:** netconsole (kernel printk over UDP from kernel memory — survives the fs dropping
+  out; dynamic configfs target, dev1 MAC resolved at boot via ping/`ip neigh`) + systemd-journal-upload
+  (rich journal to a dev1 sink; ro-root cursor redirected to /run via a drop-in; NO rsyslog reinstall).
+- **Wiring:** setup-device.sh `[remote-logging]` enable-only sub-step + STEP 16 `systemd-journal-remote`
+  pkg; create-usb-linux.sh base-image bake + chroot enable; verify-device.sh `(ak)` check (before `(q)`).
+- **dev1 receiver:** `scripts/dev1-remote-log-install.sh` (pure planner: rsyslog imudp :514 →
+  /var/log/cambox/<ip>-kernel.log + systemd-journal-remote --listen-http :19532) — a SUPERVISOR step;
+  this lane never touched dev1 services. Plus the MGMT_DEAD correlation aid in the plan + rule.
+- **RED->GREEN:** `test(1311)` (tests/harness_remote_logging_1311.rs — RED: base tree lacks the lib +
+  anchors) then `feat(1311)`. Tier-0: bash -n + shellcheck + sourced-lib bash replicas (mac parser,
+  verdict, generators, `bash -n` on the generated setup script) + `--emit` renders + `cargo fmt --check`.
+  The sourced-bash Rust harness cannot run in a worktree (isolation guard) — supervisor runs it at CI.
+- **Docs:** `.claude/rules/cambox-remote-logging.md` + one CLAUDE.md router line. The 1309 on-stick
+  journal stays as shipped; the rule states it is NOT the forensic path for a stick loss.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version NOT bumped
+  (stays 1.7.0-dev.627 per dispatch). Durability backup on `refs/autopilot-wip/worktree-agent-a83408bd1a9d52579`.

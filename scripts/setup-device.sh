@@ -49,6 +49,11 @@ fail() {
 
 # shellcheck source=scripts/lib/mgmt-liveness.sh
 . "$HERE/lib/mgmt-liveness.sh"  # mgmt_liveness_selfcheck_script / _service_unit / _timer_unit (#1309)
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$HERE/lib/remote-logging.sh"  # remote_log_netconsole_setup_script_content / _service_unit_content /
+                                 # remote_log_journal_upload_conf_content / _dropin_content (#1311) --
+                                 # off-box kernel(netconsole)+journal(upload) forensics; also sourced
+                                 # by verify-device.sh's (ak) check + create-usb-linux.sh base image
                                 # -- the on-box ssh-banner self-heal; ONE source of truth shared with
                                 # verify-device.sh's (aj) check (the pure decision embedded via declare -f)
 
@@ -1124,7 +1129,7 @@ apt-get update -qq
 # silently no-op'ing recording-e2e.sh's capture-release busy-wait.
 # dantesync issue 52: nftables provides `nft`, needed by STEP 17c to install the NTP-client
 # DSCP OUTPUT-mangle rule (rsntp cannot setsockopt(IP_TOS) -- see scripts/lib/dscp-nft.sh).
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables 2>/dev/null || true
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables systemd-journal-remote 2>/dev/null || true
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc, nftables"
 
@@ -1519,6 +1524,45 @@ dscp_nft_service_unit_content > "$DSCP_NFT_SERVICE_PATH"
 systemctl daemon-reload
 systemctl enable "$DSCP_NFT_SERVICE_NAME"   # fail-loud (set -e) like the sibling avahi enable -- a freshly-written+reloaded unit must enable cleanly (review 5B2)
 echo "  Installed: $DSCP_NFT_RULESET_PATH (udp dport 123 -> dscp ${DSCP_NFT_CLASS}) + ${DSCP_NFT_SERVICE_NAME}.service (enabled; applies at next boot)"
+
+
+# =============================================================================
+# #1311: off-box remote logging (unnumbered sub-step, enable-only). Get kernel + journal messages
+# OFF the box in REAL TIME so the NEXT #1309 half-dead-stick death is diagnosable -- the on-STICK
+# persistent journal (#1309) dies WITH the stick. Two complementary transports (see
+# scripts/lib/remote-logging.sh): netconsole ships kernel printk over UDP from kernel memory (survives
+# the fs dropping off the bus, the ONLY transport that does), and systemd-journal-upload forwards the
+# rich structured journal to a dev1 sink for the minutes-before-the-drop context. Mirrors the
+# mgmt-selfcheck + 17c blocks: writes files + enables, defers to the next reboot (never a live start,
+# per .claude/rules/provisioning-scripts.md). MUST sit in the rw window, BEFORE STEP 18 flips root
+# ro (it writes under /usr/local/sbin + /etc/systemd). The dev1-side receivers are a SEPARATE
+# supervisor step (scripts/dev1-remote-log-install.sh); this cambox side only SENDS -- and netconsole
+# + journal-upload each need no listener to start, so a cambox is correctly provisioned even before
+# the dev1 sink exists. Proven live post-reboot by verify-device.sh's (ak) check.
+# =============================================================================
+echo ""
+echo -e "${GREEN}[remote-logging] Installing off-box kernel(netconsole)+journal(upload) forensics (#1311)...${NC}"
+# netconsole (kernel path): the boot oneshot + the generated setup script that arms the dynamic
+# configfs target (resolving dev1's next-hop MAC at boot).
+mkdir -p "$(dirname "$REMOTE_LOG_NC_SCRIPT_PATH")" "$(dirname "$REMOTE_LOG_NC_SERVICE_PATH")"
+remote_log_netconsole_setup_script_content > "$REMOTE_LOG_NC_SCRIPT_PATH"
+chmod +x "$REMOTE_LOG_NC_SCRIPT_PATH"
+remote_log_netconsole_service_unit_content > "$REMOTE_LOG_NC_SERVICE_PATH"
+# journal-upload (rich path): the URL conf + the ro-root cursor-redirect drop-in. The
+# systemd-journal-upload.service unit itself ships in the systemd-journal-remote package (STEP 16).
+mkdir -p "$(dirname "$REMOTE_LOG_JU_CONF_PATH")" "$(dirname "$REMOTE_LOG_JU_DROPIN_PATH")"
+remote_log_journal_upload_conf_content > "$REMOTE_LOG_JU_CONF_PATH"
+remote_log_journal_upload_dropin_content > "$REMOTE_LOG_JU_DROPIN_PATH"
+systemctl daemon-reload
+systemctl enable "$REMOTE_LOG_NC_SERVICE_NAME"   # fail-loud (set -e) -- a freshly-written+reloaded unit must enable cleanly
+NC_ENABLED_STATE="$(systemctl is-enabled "$REMOTE_LOG_NC_SERVICE_NAME" 2>/dev/null || true)"
+[ "$NC_ENABLED_STATE" = "enabled" ] \
+    || fail "${REMOTE_LOG_NC_SERVICE_NAME}.service is not enabled (is-enabled='${NC_ENABLED_STATE:-<none>}') after install -- the box would have NO off-box kernel log for the next #1309 stick death"
+systemctl enable "$REMOTE_LOG_JU_SERVICE_NAME" 2>/dev/null || true
+JU_ENABLED_STATE="$(systemctl is-enabled "$REMOTE_LOG_JU_SERVICE_NAME" 2>/dev/null || true)"
+[ "$JU_ENABLED_STATE" = "enabled" ] \
+    || fail "${REMOTE_LOG_JU_SERVICE_NAME}.service is not enabled (is-enabled='${JU_ENABLED_STATE:-<none>}') after install -- the box would not upload its journal to dev1 (#1311)"
+echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_NETCONSOLE_PORT}) + systemd-journal-upload (-> ${REMOTE_LOG_JOURNAL_URL}) installed + enabled; both apply at next boot, proven live by verify-device.sh (ak)"
 
 
 # =============================================================================

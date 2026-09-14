@@ -156,6 +156,13 @@
 #       cambox-mgmt-selfcheck.sh exists+executable AND cambox-mgmt-selfcheck.timer is-enabled ==
 #       enabled -- the local ssh-banner probe + restart-ssh/remoteos-mcp safety net the 2026-09-13
 #       half-dead wedge had none of. FAILs if the script is missing or the timer is not enabled.
+#   (ak) off-box remote logging effective (#1311) -- HARD FAIL: netconsole (cambox-netconsole.service
+#       enabled+active + a live configfs target enabled=1 to dev1:514) AND systemd-journal-upload
+#       (enabled, URL -> the dev1 sink, cursor --save-state redirected to /run for the ro root) -- so
+#       the NEXT half-dead-stick death ships its kernel + journal messages off-box in real time,
+#       instead of dying with the stick like the on-STICK #1309 journal does. FAILs fail-closed on any
+#       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the dev1 sink,
+#       a separate supervisor step); enabled + correct config is the cambox-side bar.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -210,6 +217,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                  # dscp_nft_verdict -- the (ae) NTP-client DSCP nftables rule check
                                  # (dantesync issue 52; SAME source of truth as setup-device.sh /
                                  # create-usb-linux.sh)
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
+                                 # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
+                                 # SAME source of truth as setup-device.sh / create-usb-linux.sh)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -806,6 +817,8 @@ Checks:
       power-cycle -- FAILs with a "reflash via create-usb-linux.sh" hint if the journal is volatile
   (aj) on-box mgmt-liveness self-heal (#1309): cambox-mgmt-selfcheck.sh present+executable AND
       cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
+  (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
+      target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1643,6 +1656,28 @@ else
     [ "$MGMT_SCRIPT_X" = "yes" ] || fail "the #1309 mgmt-selfcheck script is missing/not executable at ${MGMT_LIVENESS_SCRIPT_PATH} -- re-provision with the current setup-device.sh"
     [ "$MGMT_TIMER_ENABLED" = "enabled" ] || fail "${MGMT_LIVENESS_TIMER_UNIT_NAME} is not enabled (is-enabled='${MGMT_TIMER_ENABLED:-<none>}') -- the box has NO local ssh self-heal for the #1309 half-dead wedge"
   fi
+fi
+
+# (ak) off-box remote logging effective: netconsole + systemd-journal-upload (#1311) -- HARD FAIL --
+# The #1309 on-STICK persistent journal (the (ai) check) is useless the moment the stick itself
+# drops off the bus (the half-dead wedge) -- it dies WITH the medium. setup-device.sh's
+# [remote-logging] sub-step arms two off-box transports so the NEXT stick death is diagnosable:
+# netconsole ships kernel printk over UDP from kernel memory (the ONLY transport that survives the
+# fs dropping out), and systemd-journal-upload forwards the rich journal to the dev1 sink. This
+# proves both are LIVE + reboot-surviving: the netconsole oneshot enabled+active with a live configfs
+# target to dev1, and the journal uploader enabled with the right URL + a ro-root-safe /run cursor
+# (see scripts/lib/remote-logging.sh for the fail-closed verdict). Inserted BEFORE (q) -- see
+# .claude/rules/provisioning-scripts.md ((q) stays the LAST check). Uses fail() (a hard FAIL), so it
+# never trips the check_q_is_wired (q)-to-EOF no-fail slice (it is above (q)).
+akrc=0
+REMOTELOG_BLOCK="$(ssh_box "$(remote_log_gather_remote_snippet)")" || akrc=$?
+REMOTELOG_VERDICT="$(remote_log_verdict "$REMOTELOG_BLOCK")"
+if [ "$akrc" -ne 0 ]; then
+  fail "could not reach the box to read the netconsole + systemd-journal-upload state (ssh rc=$akrc, #1311)"
+elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
+  fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
+else
+  ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
