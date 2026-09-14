@@ -11812,3 +11812,45 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   odpáliť disk"), no push/PR/merge/close, no Discord, no dev1 timer. Version NOT bumped (per
   dispatch, base `7546fa1ff` / 1.7.0-dev.627). Durability backup on
   `refs/autopilot-wip/worktree-agent-a82aead9864e31051`.
+
+## issue 1313 — dev1 as a `local` dante-clock node (the control-box blind spot) — worktree lane, 2026-09-14, base 23a9ec716 (v1.7.0-dev.627)
+
+- **Problem (found live 14.9.2026):** the dev1 dante-clock alert watchdog probes cam1-7 + strih/
+  stream/imag/resolume but NOT dev1 itself. dev1 runs dantesync (its clock feeds every dev1-hosted
+  gate: `clock-offset-painter-gate.sh`, the recording-verdict wall references, every `date`-stamped
+  E2E window) and sat NTP-only for ~a day unpaged — its `gm_allowlist` on the retired literal
+  `10.77.9.184` + dantesync 1.8.53 (the 13.9. fleet allowlist patch AND the fleet roll both skipped
+  dev1) — its own journal shouting `[CLOCK-ALARM] NO DANTE CLOCK` every minute; the watchdog that
+  would have paged it runs ON dev1 and never looked at `127.0.0.1:8898`.
+- **STEP-0 validation:** confirmed live — `grep` showed no `local`/dev1 arm in the watchdog and no
+  `analyze_local`/`--local` in the decision module; `curl 127.0.0.1:8898/status` on dev1 answered
+  HEALTHY-but-UNWATCHED (locked, gm 10.77.9.230, alarm inactive). Still valid, not overcome.
+- **Approach (design comment before code):** a third `local` node kind, policy centralised in the
+  pure decision module (rejected: folding dev1 into the cam roster — its ssh/MGMT + SKIP-defer
+  semantics are wrong for the box we run on; and a standalone dev1 script — a diverging second copy
+  of the grading/confirm/dedup/version logic).
+- **Decision (`scripts/dantesync_clock_decision.py`):** RED `07facbebb` → GREEN `0e2886b76`. Pure
+  `analyze_local()` — the ONE tested local policy point — forces `box_up=1` (a dead `:8898` on the
+  local box is NO_DANTESYNC, never SKIP: no down-box case for the box we run on) + `mgmt_ssh_ok=None`
+  (no ssh axis, never MGMT_DEAD), reusing the SAME OK/NO_CLOCK/UNKNOWN/gm/storm/stale/version
+  grading. A CLI `--local` flag routes to it, ignoring `--box-up`/`--mgmt-ssh-ok`; default off keeps
+  every remote node byte-identical.
+- **Watchdog (`scripts/dantesync-clock-alert-watchdog.sh`):** `DANTE_CLOCK_LOCAL_NODES="dev1"` (+
+  `DANTE_CLOCK_LOCAL_IP` loopback) builds a `dev1|127.0.0.1|local` roster triple; `box_up_probe`
+  short-circuits 1 for `local` (no reach probe); `handle_node` passes `--local 1`; `mgmt_ssh_probe`
+  already returns "" for a non-`always` homegate (no ssh banner). Clock fault keeps the bucketed key
+  `dante-clock-dev1-<bucket>` (NO_DANTESYNC → `dante-clock-nohttp-dev1-<bucket>`); version drift vs
+  the pin stays report-only. Every existing node's path unchanged.
+- **Docs:** `14b4f45f0` — the watchdog rule gains the dev1 `local` arm; the `.claude/skills/ops`
+  DanteSync rollout checklist now mandates dev1 in every fleet roll AND config patch
+  (`dantesync-fleet-upgrade.sh … --local dev1`, "fleet N/N" counts dev1), citing the 14.9. incident.
+- **Tier-0 (worktree lane):** `python3 -m pytest tests/python/test_dantesync_clock_decision_1307.py
+  tests/python/test_dantesync_clock_dev1_local_1313.py` — 60 passed (57 decision incl. 12 new local +
+  3 bash `--dry-run` seam); the #1206 notify-dedup sweep 7 passed; `bash -n` + `shellcheck -S warning`
+  clean; `cargo fmt --all --check` clean; live dev1 graded via `--local` = verdict=OK (locked, gm
+  match, version match pin). The Rust side has no `.rs` change; the bash dry-run runs at CI + for the
+  supervisor exactly as it runs in the pytest subprocess here.
+- **Lane scope:** worktree lane — CODE + TESTS + DOCS only, no rig touched (dev1 :8898 read only, as
+  fixture material), no push/PR/merge/close, no Discord, no dev1 timer (the supervisor enables it).
+  Version NOT bumped (per dispatch). Durability backup on
+  `refs/autopilot-wip/worktree-agent-aeef4477305e19536`.
