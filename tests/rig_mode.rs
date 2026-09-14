@@ -374,6 +374,21 @@ fn test_mode_painter_runs_at_60fps_capture_rate() {
     );
 }
 
+/// #1312: the TEST painter writes the SAME /run/rig-qpsk-markers.csv the permanent cam2-painter.service
+/// writes; both must stamp emit_ts_ns on the DanteSync wall clock (--wall-clock) so the dev1
+/// avlatency handover check can pair the markers against dev1's wall-clock mbc onsets (else the
+/// monotonic-emit trap reads UNKNOWN forever). --wall-clock sits AFTER --paint-fps so the pinned
+/// contiguous vernier anchor (test_mode_launches_pinned_painter) stays intact.
+#[test]
+fn test_mode_painter_stamps_wall_clock_1312() {
+    let p = painter_launch();
+    assert!(
+        p.contains("--wall-clock"),
+        "#1312: TEST mode must launch the painter with --wall-clock so its marker emit_ts_ns is on \
+         the DanteSync wall clock (avlatency pairing) — got:\n{p}"
+    );
+}
+
 /// #291: TEST mode frees /dev/fb0 WITHOUT a full `systemctl stop camera-box` (which killed cam2's
 /// capture+emit too). It installs a TRANSIENT systemd drop-in that sets
 /// `Environment=CAMERA_BOX_NO_DISPLAY=1` (#528: the HDMI cameraman preview is unconditional now,

@@ -426,8 +426,13 @@ echo "WARNING: [#440] painter binary $bin build/deploy mtime=\$BIN_MTIME -- if t
 #     --paint-fps $fps pins the rate to the 60fps capture (#290): the painter must paint 60 distinct
 #     ticks/s or no 60fps optical timing can be resolved. Under KMS the painter is vblank-locked at the
 #     monitor refresh and the flag is a documented no-op; on the fbdev fallback it forces the rate.
+#     #1312: --wall-clock stamps each emit_ts_ns on CLOCK_REALTIME (the DanteSync wall clock) instead
+#     of the painter's monotonic start.elapsed(), so the #1312 avlatency handover check can pair this
+#     painter's markers against dev1's wall-clock mbc onsets. It is placed AFTER --paint-fps to keep
+#     the pinned "--paint-only --dual-qr --qr-size N --duration-secs N" vernier anchor contiguous, and
+#     is a safe no-op for the A/V verdict path (av_sync_recording.rs pairs by fid, ignores emit_ts).
 rm -f "$pidfile" 2>/dev/null || true
-nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur --paint-fps $fps \
+nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur --paint-fps $fps --wall-clock \
   --audio-marker --audio-marker-device $audio_dev --audio-marker-cadence-ticks $audio_cadence \
   --marker-log $marker_log $extra >/tmp/rig-painter.log 2>&1 &
 echo \$! > "$pidfile"

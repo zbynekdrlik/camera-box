@@ -117,6 +117,9 @@ fn painter_service_unit_content_pins_the_expected_flags() {
         "--qr-size 700",
         "--paint-fps 60",
         "--duration-secs",
+        // #1312: the permanent painter must stamp emit_ts_ns on the DanteSync wall clock so the
+        // avlatency dev1 handover check can pair its markers (else UNKNOWN forever).
+        "--wall-clock",
         "Restart=always",
         "WantedBy=multi-user.target",
     ] {

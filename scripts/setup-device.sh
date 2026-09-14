@@ -207,6 +207,12 @@ EOF
 # disposable 2h nohup, so the unit itself must write the growing QPSK marker CSV the offline
 # verdict pairs audio->frame from AND the "must-stay-alive" liveness check reads. Promotes the
 # live 2026-08-06 10-marker-log.conf drop-in into the base unit (single source of truth).
+# #1312: --wall-clock stamps each emit_ts_ns on CLOCK_REALTIME (the DanteSync-disciplined wall
+# clock) instead of the painter's monotonic start.elapsed(), so the dev1 avlatency handover check
+# (measurement-chain-latency.sh) can pair this permanent painter's markers against dev1's
+# wall-clock mbc meter onsets instead of reading UNKNOWN forever (the monotonic-emit trap). Safe
+# no-op for the A/V verdict path (av_sync_recording.rs pairs by fid, ignores emit_ts). Takes effect
+# after a cam2 re-provision (or a remount-rw unit edit + daemon-reload + painter restart).
 cam2_painter_service_unit_content() {
     cat <<'EOF'
 [Unit]
@@ -217,7 +223,7 @@ Wants=camera-box.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000 --marker-log /run/rig-qpsk-markers.csv
+ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000 --marker-log /run/rig-qpsk-markers.csv --wall-clock
 Restart=always
 RestartSec=2
 
