@@ -3,7 +3,7 @@
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance
 #
-# Usage: ./setup-device.sh [--binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
+# Usage: ./setup-device.sh [--binary <url|path>] [--probe-binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
 # Example: ./setup-device.sh CAM5        (case-insensitive; cam5 works too)
 #
 # By default the camera-box binary comes from the latest successful ci.yml run on `main` (the
@@ -313,12 +313,21 @@ fi
 # argument (#450 -- name-resolved single-arg invocation; IP/stream/genlock-fps are all DERIVED
 # from it via camera-set.sh, replacing the old free-text 3-positional-arg form).
 BINARY_ARG=""
+PROBE_BINARY_ARG=""
 CI_RUN_ID_ARG=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --binary)
             BINARY_ARG="${2:?--binary needs a URL or local path}"
+            shift 2
+            ;;
+        --probe-binary)
+            # #1066 D5: symmetric with --binary, for STEP 3b's cam2 painter frame-probe. The cam
+            # boxes are a gh-less appliance, so the dev1-side caller stages probe-tools-linux-amd64's
+            # frame-probe and hands it in here -- the SAME way --binary hands in camera-box. The env
+            # override FRAME_PROBE_BINARY_URL is kept (byte-compatible) as a fallback.
+            PROBE_BINARY_ARG="${2:?--probe-binary needs a URL or local path}"
             shift 2
             ;;
         --run)
@@ -339,13 +348,14 @@ set -- "${POSITIONAL[@]}"
 DEVICE_NAME_ARG="${1:-}"
 
 if [ -z "$DEVICE_NAME_ARG" ]; then
-    echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
+    echo -e "${RED}Usage: $0 [--binary <url|path>] [--probe-binary <url|path>] [--run <id>] DEVICE_NAME${NC}"
     echo ""
     echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-6) -- case-insensitive."
     echo ""
     echo "Examples:"
     echo "  $0 CAM5"
     echo "  $0 --binary ./dist/camera-box CAM2"
+    echo "  $0 --binary ./dist/camera-box --probe-binary ./dist/frame-probe CAM2   # cam2: stage BOTH binaries from dev1 (#1066 D5, gh-less box)"
     echo "  $0 --run <ci.yml run id> CAM1     # pin an exact CI artifact (#1066); default = latest main"
     exit 1
 fi
@@ -533,8 +543,10 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
     echo -e "${GREEN}[3b] Installing cam2 permanent dual-QR devel-mode painter (#863)...${NC}"
     # Same resolution shape as STEP 3's camera-box binary fetch (local path / URL override /
     # default CI artifact download), scoped to the probe-tools-linux-amd64 artifact's frame-probe
-    # binary.
-    FRAME_PROBE_SRC="${FRAME_PROBE_BINARY_URL:-}"
+    # binary. #1066 D5: --probe-binary <path|url> (symmetric with --binary) is the FIRST source, so
+    # a gh-less box is handed a dev1-staged frame-probe the SAME way STEP 3 is handed camera-box;
+    # FRAME_PROBE_BINARY_URL stays as a byte-compatible env fallback.
+    FRAME_PROBE_SRC="${PROBE_BINARY_ARG:-${FRAME_PROBE_BINARY_URL:-}}"
     if [ -n "$FRAME_PROBE_SRC" ] && [ -f "$FRAME_PROBE_SRC" ]; then
         echo "  Using local frame-probe: $FRAME_PROBE_SRC"
         install -m 0755 "$FRAME_PROBE_SRC" /usr/local/bin/frame-probe
@@ -566,7 +578,7 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
         echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
         PROBE_RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
             --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). Install manually to /usr/local/bin/frame-probe, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). STAGE IT FROM dev1: gh run download <ci.yml run> -n probe-tools-linux-amd64 --dir /tmp && scp /tmp/frame-probe root@<box>:/tmp/ , then re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (FRAME_PROBE_BINARY_URL=<url|path> also works)."
         fi
         PROBE_DIST_DIR="$(mktemp -d)"
         if gh run download "$PROBE_RUN_ID" --repo "$GITHUB_REPO" -n probe-tools-linux-amd64 --dir "$PROBE_DIST_DIR" 2>/dev/null \
@@ -575,11 +587,11 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
             echo "  frame-probe installed from CI run $PROBE_RUN_ID"
         else
             rm -rf "$PROBE_DIST_DIR"
-            fail "gh run download failed for run $PROBE_RUN_ID -- could not fetch frame-probe (probe-tools-linux-amd64 artifact, #863)"
+            fail "gh run download failed for run $PROBE_RUN_ID -- could not fetch frame-probe (probe-tools-linux-amd64 artifact, #863). Stage it from dev1 and re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (or FRAME_PROBE_BINARY_URL=<url|path>)."
         fi
         rm -rf "$PROBE_DIST_DIR"
     else
-        fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch frame-probe (probe-tools-linux-amd64 CI artifact, #863). Install manually, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+        fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch frame-probe (probe-tools-linux-amd64 CI artifact, #863). The cam box has no gh: STAGE IT FROM dev1 -- gh run download <ci.yml run> -n probe-tools-linux-amd64 --dir /tmp && scp /tmp/frame-probe root@<box>:/tmp/ , then re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (FRAME_PROBE_BINARY_URL=<url|path> also works)."
     fi
 
     # #863: cam2's OWN camera-box must never contest /dev/fb0 -- see the cam2_painter_no_display_
