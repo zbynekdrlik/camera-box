@@ -1227,7 +1227,7 @@ main() {
   if [ "$bad" -gt 0 ]; then
     echo "!! GATE FAILED: ${bad} node(s) DRIFTED or PTP-DEGRADED." >&2
     echo "!! Cross-node latency/timestamps would be MEANINGLESS — recording run REFUSED." >&2
-    echo "!! Bring GM 10.77.9.184 up + let DanteSync re-lock (NANO/LOCK), then re-run." >&2
+    echo "!! Bring GM ${GATE_GRANDMASTER_IP} up + let DanteSync re-lock (NANO/LOCK), then re-run." >&2
     [ "$unknown" -gt 0 ] && echo "!! (${unknown} further node(s) UNREACHABLE/UNKNOWN — also incomplete.)" >&2
     exit 20
   fi
