@@ -162,6 +162,16 @@ echo "$DEV1_IP" > "$CFG/remote_ip"
 echo "$PORT" > "$CFG/remote_port"
 echo "$MAC" > "$CFG/remote_mac"
 echo 1 > "$CFG/enabled"
+
+# Verify the arm actually took (#1311 review F1): under set -uo pipefail (no -e) a failed configfs
+# write does NOT abort, so without this the oneshot would exit 0 and `systemctl is-active` would read
+# `active` even when the netconsole module/configfs was absent and every write above silently failed.
+# netconsole is the death-instant transport, so a truthful is-active matters — fail the unit if the
+# target did not end up enabled.
+if [ "$(cat "$CFG/enabled" 2>/dev/null)" != "1" ]; then
+  echo "cambox-netconsole: arm FAILED (target enabled != 1) -> ${DEV1_IP}:${PORT}" >&2
+  exit 1
+fi
 echo "cambox-netconsole: armed -> ${DEV1_IP}:${PORT} via ${DEV} (dev1 mac ${MAC})"
 SCRIPT_BODY
 }
@@ -209,6 +219,12 @@ remote_log_journal_upload_dropin_content() {
 # ro-root appliance (#1311): the default --save-state=/var/lib/systemd/journal-upload/state is on the
 # read-only root. Point the cursor at a tmpfs /run path so the uploader can persist its cursor.
 RuntimeDirectory=systemd/journal-upload
+# #1311 review F2: the stock noble unit carries StateDirectory=systemd/journal-upload, which systemd
+# tries to mkdir under /var/lib at EVERY start -- and /var/lib is on the READ-ONLY root (only
+# /var/log|tmp|cache|spool are tmpfs), so the unit would FAIL regardless of the --save-state override.
+# Clearing it (empty assignment resets the list) removes that /var/lib dependency; the cursor lives in
+# /run via RuntimeDirectory + --save-state below.
+StateDirectory=
 ExecStart=
 ExecStart=${REMOTE_LOG_JU_BIN} --save-state=${REMOTE_LOG_JU_SAVE_STATE}
 EOF

@@ -141,6 +141,12 @@ fn netconsole_setup_script_embeds_the_mac_parser_and_arms_the_target() {
         s.contains("set -uo pipefail") && !s.contains("set -euo pipefail"),
         "setup script must be set -uo (not -e): {s}"
     );
+    // #1311 review F1: a failed arm must make the oneshot exit non-zero so `systemctl is-active` is
+    // truthful (under set -uo a failed configfs write does not abort on its own).
+    assert!(
+        s.contains("arm FAILED") && s.contains("cat \"$CFG/enabled\""),
+        "setup script must verify the target actually enabled and exit non-zero otherwise (F1): {s}"
+    );
 }
 
 #[test]
@@ -191,6 +197,12 @@ fn journal_upload_dropin_redirects_the_cursor_to_run_for_the_ro_root() {
     assert!(
         d.contains("RuntimeDirectory=systemd/journal-upload"),
         "must create the /run cursor dir with the service user's ownership: {d}"
+    );
+    // #1311 review F2: clear the stock unit's StateDirectory (under /var/lib, on the ro root) so the
+    // unit does not fail trying to mkdir there regardless of the --save-state override.
+    assert!(
+        d.contains("StateDirectory="),
+        "must clear the stock StateDirectory= so the ro-root /var/lib mkdir cannot fail the unit (F2): {d}"
     );
 }
 
