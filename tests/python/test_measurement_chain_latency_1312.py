@@ -245,6 +245,46 @@ def test_cli_write_baseline(tmp_path):
     assert abs(m.read_baseline(str(bl)) - 130.0) < 2.0
 
 
+def test_cli_write_baseline_refuses_monotonic(tmp_path):
+    # --write-baseline must NEVER persist a monotonic-emit measurement (it is not comparable to the
+    # onset wall clock) — the file stays absent and the verdict stays UNKNOWN (reason monotonic-emit).
+    mono = [320_000_000_000 + i * CADENCE_NS for i in range(6)]
+    onsets = [WALL0 + i * CADENCE_NS + 120_000_000 for i in range(6)]
+    mk = tmp_path / "markers.txt"
+    mt = tmp_path / "meter.txt"
+    bl = tmp_path / "baseline.json"
+    mk.write_text(marker_csv(mono))
+    mt.write_text(meter_text(onsets))
+    r = _run_cli(["classify", "--marker-file", str(mk), "--meter-file", str(mt),
+                  "--box-reachable", "1", "--threshold-db", "-60", "--baseline-file", str(bl),
+                  "--write-baseline"])
+    assert r.returncode == 0, r.stderr
+    kv = _kv(r.stdout)
+    assert kv["verdict"] == m.UNKNOWN
+    assert kv["reason"] == "monotonic-emit"
+    assert not bl.exists()  # nothing written
+
+
+def test_cli_write_baseline_refuses_too_few_onsets(tmp_path):
+    # only 2 wall-clock markers -> paired < min_paired (3): --write-baseline must NOT overwrite an
+    # existing baseline, and the verdict is UNKNOWN (too-few), never a persisted bad value.
+    e = emits(2)
+    onsets = [x + 120_000_000 for x in e]
+    mk = tmp_path / "markers.txt"
+    mt = tmp_path / "meter.txt"
+    bl = tmp_path / "baseline.json"
+    mk.write_text(marker_csv(e))
+    mt.write_text(meter_text(onsets))
+    bl.write_text(json.dumps({"baseline_ms": 42.0}))  # a pre-existing baseline that must survive
+    r = _run_cli(["classify", "--marker-file", str(mk), "--meter-file", str(mt),
+                  "--box-reachable", "1", "--threshold-db", "-60", "--baseline-file", str(bl),
+                  "--write-baseline"])
+    assert r.returncode == 0, r.stderr
+    kv = _kv(r.stdout)
+    assert kv["verdict"] == m.UNKNOWN
+    assert m.read_baseline(str(bl)) == 42.0  # NOT overwritten by the too-few measurement
+
+
 def test_cli_skip_when_box_unreachable(tmp_path):
     bl = tmp_path / "baseline.json"
     bl.write_text(json.dumps({"baseline_ms": 5.0}))

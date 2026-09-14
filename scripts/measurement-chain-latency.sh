@@ -124,11 +124,13 @@ fi
 # --- 3) decide (the PURE kernel; --baseline persists the measured latency) ------------------------
 WRITE_FLAG=()
 [ "$BASELINE" -eq 1 ] && WRITE_FLAG=(--write-baseline)
+# `|| OUT=""` so a non-zero CLI exit (should never happen on valid args) does not `set -e`-abort the
+# whole probe -- an empty OUT carries no `verdict=` token, so the handover reads UNKNOWN (fail-safe).
 OUT="$(python3 "$DECIDE" classify \
   --marker-file "$MARKER_FILE" --meter-file "$METER_FILE" \
   --box-reachable "$BOX_REACHABLE" --threshold-db "$THRESH" \
   --max-pair-ms "$MAX_PAIR_MS" --baseline-file "$BASELINE_FILE" \
-  --tolerance-ms "$TOLERANCE_MS" --min-paired "$MIN_PAIRED" "${WRITE_FLAG[@]}")"
+  --tolerance-ms "$TOLERANCE_MS" --min-paired "$MIN_PAIRED" "${WRITE_FLAG[@]}")" || OUT=""
 
 # the key=value block (carries the single `verdict=` token the handover check parses) -> stdout
 printf '%s\n' "$OUT"

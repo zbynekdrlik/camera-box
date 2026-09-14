@@ -82,6 +82,17 @@ catches. It reuses the whole verdict-kind item framework (like `mic`): the stand
   the painter is back up. It samples the meter ~30 s then ssh-reads the marker log AFTER (so the
   just-emitted markers are present); the whole probe is bounded (`RDH_AVLATENCY_TIMEOUT`, default 100 s)
   so a down cam2 / stream box fails safe to UNKNOWN, never a hang.
+- **Onset SIGNAL model (UNVERIFIED — the supervisor's live baseline confirms it).** The onset detector
+  (`detect_onsets`) assumes each marker is a DISCRETE audio burst with the `mbc` peak dropping BELOW
+  −60 dB between bursts so it re-arms per marker. If the measurement mic's ambient floor sits above
+  −60 dB (church-PA noise, a hot input), the detector re-arms rarely → `paired < 3` → the item stays
+  UNKNOWN (`too-few-onsets`) — fail-safe, never a false OK/forgot, but blind. So the supervisor's FIRST
+  `--baseline` run must confirm `onsets >= 3` (and ideally 6) over the 32 s window BEFORE trusting the
+  written baseline; if it reads `too-few-onsets` on a live, audible chain, the ambient floor (not the
+  latency) is the story. The mixed-clock case cannot arise: the permanent painter TRUNCATES the marker
+  log on every start (`qpsk_emit.rs` #431 `File::create`), so a session's log is all-monotonic (today)
+  or all-wall-clock (after the switch), never a mix — the pure kernel's `all()` wall-clock guard is
+  exactly right.
 
 ## Gotchas / invariants
 
