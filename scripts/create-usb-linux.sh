@@ -62,6 +62,10 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
                                        # + remote_log_journal_upload_conf_content/_dropin_content (#1311)
                                        # -- SAME source of truth as setup-device.sh/verify-device.sh for
                                        # off-box kernel(netconsole)+journal(upload) forensics
+# shellcheck source=scripts/lib/efi-boot-entry.sh
+. "$SCRIPT_DIR/lib/efi-boot-entry.sh"  # efi_whole_disk_of / EFI_CAM_BOX_LABEL / EFI_CAM_BOX_LOADER
+                                       # (#1066 D6) -- SAME source of truth as setup-device.sh/
+                                       # verify-device.sh for the named cam-box UEFI entry logic
 
 # Colors for output
 RED='\033[0;31m'
@@ -342,6 +346,7 @@ apt-get update
 apt-get install -y \
     linux-image-generic \
     grub-efi-amd64 \
+    efibootmgr \
     openssh-server \
     sudo \
     vim \
@@ -656,7 +661,24 @@ create_efi_boot_entry() {
         return 0
     fi
 
-    log "Creating named UEFI boot entry 'cam-box' for $DEVICE (ESP = partition 1)..."
+    # #1066 D6: ONLY write the named entry into this HOST's NVRAM when the TARGET disk IS the host's
+    # OWN boot disk (the on-box live-USB install case). When a stick is built on dev1 for another
+    # box, $DEVICE is a removable target whose named entry belongs in the TARGET box's NVRAM, not
+    # dev1's — writing it here pollutes the builder (had to be removed by hand on dev1) and the cam
+    # box still gets nothing. In that case WARN and skip; setup-device.sh STEP 17d creates the entry
+    # ON the box (the reliable place regardless of where the stick was built).
+    local _host_root_src _host_boot_disk
+    _host_root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
+    _host_boot_disk="$(efi_whole_disk_of "$_host_root_src")"
+    if [[ "$DEVICE" != "$_host_boot_disk" ]]; then
+        warn "Target $DEVICE is NOT this builder's own boot disk ($_host_boot_disk, from findmnt / of $_host_root_src)"
+        warn "— NOT writing a 'cam-box' NVRAM entry into THIS host's firmware (that would pollute the"
+        warn "builder, e.g. dev1, and leave the target box with none). The named entry is created ON"
+        warn "the target box by setup-device.sh STEP 17d (idempotent), and certified by verify-device (al)."
+        return 0
+    fi
+
+    log "Creating named UEFI boot entry '$EFI_CAM_BOX_LABEL' for $DEVICE (ESP = partition 1; on-box install: target IS this host's boot disk)..."
 
     # Idempotent: delete any existing cam-box entries so re-runs don't stack duplicates.
     local existing bn

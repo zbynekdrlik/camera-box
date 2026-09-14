@@ -163,6 +163,11 @@
 #       instead of dying with the stick like the on-STICK #1309 journal does. FAILs fail-closed on any
 #       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the dev1 sink,
 #       a separate supervisor step); enabled + correct config is the cambox-side bar.
+#   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: efibootmgr reports a `cam-box`
+#       entry AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
+#       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
+#       creates it on the box; this proves it took effect post-reboot. FAILs (test-strictness) if the
+#       entry is absent, not leading, or efibootmgr is unreadable/absent (a non-EFI box).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -221,6 +226,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
                                  # SAME source of truth as setup-device.sh / create-usb-linux.sh)
+# shellcheck source=scripts/lib/efi-boot-entry.sh
+. "$HERE/lib/efi-boot-entry.sh"  # efi_entry_verdict -- the (al) named cam-box UEFI entry check
+                                 # (#1066 D6; SAME source of truth as setup-device.sh / create-usb-linux.sh)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -819,6 +827,8 @@ Checks:
       cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
   (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
       target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
+  (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a `cam-box` entry that is FIRST
+      in BootOrder -- FAILs if absent / not leading / efibootmgr unreadable (test-strictness)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1678,6 +1688,27 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
+fi
+
+# (al) named `cam-box` UEFI boot entry leads BootOrder (#1066 D6) -- HARD FAIL --------------------
+# The box must boot its internal disk via a named NVRAM entry, NOT the AMI firmware USB auto-entry
+# (which failed on cam2 after a warm reboot -> firmware setup screen). setup-device.sh STEP 17d
+# creates the `cam-box` entry in the box's OWN NVRAM and makes it lead BootOrder; this proves it took
+# effect post-reboot. Graded by the pure efi_entry_verdict. HARD FAIL (test-strictness): the entry
+# absent, not leading, OR efibootmgr unreadable/absent (a non-EFI box) all fail -- a box that would
+# drop to the firmware menu on the next warm reboot must NOT pass acceptance. Inserted BEFORE (q) per
+# .claude/rules/provisioning-scripts.md (the (q)-last invariant).
+alrc=0
+EFI_ENTRIES="$(ssh_box "efibootmgr 2>/dev/null")" || alrc=$?
+if [ "$alrc" -ne 0 ] || [ -z "$EFI_ENTRIES" ]; then
+  fail "could not read UEFI boot entries over SSH (efibootmgr rc=$alrc, empty=$([ -z "$EFI_ENTRIES" ] && echo yes || echo no)) -- cannot certify the named 'cam-box' entry leads BootOrder (#1066 D6). An unreadable/absent efibootmgr output is a FAIL (test-strictness): a non-EFI box, or a missing efibootmgr, must not silently pass."
+else
+  EFI_AL_VERDICT="$(efi_entry_verdict "$EFI_ENTRIES")"
+  if [ "$EFI_AL_VERDICT" = "ok" ]; then
+    ok "named UEFI boot entry 'cam-box' present AND leads BootOrder -- the box boots its internal disk without depending on the AMI USB auto-entry (#1066 D6)"
+  else
+    fail "UEFI boot entry: ${EFI_AL_VERDICT#FAIL: }"
+  fi
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

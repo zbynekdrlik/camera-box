@@ -83,6 +83,10 @@ fail() {
 . "$HERE/lib/ndi-provision.sh"  # NDI_VERSION_PIN + ndi_bootstrap_peer_list / ndi_runtime_version_matches_pin
                                 # (#1066) -- also sourced by verify-device.sh's (o) check, single source of
                                 # truth for the NDI runtime pin + the STEP 4 fleet-peer bootstrap list
+# shellcheck source=scripts/lib/efi-boot-entry.sh
+. "$HERE/lib/efi-boot-entry.sh"  # EFI_CAM_BOX_LABEL/_LOADER + efi_cam_box_bootnums / efi_cam_box_leads /
+                                 # efi_boot_order_lead (#1066 D6) -- shared with create-usb-linux.sh +
+                                 # verify-device.sh (al) for the named cam-box UEFI entry on the box
 
 # shellcheck source=scripts/dantesync-version-gate.sh
 . "$HERE/dantesync-version-gate.sh"  # DANTESYNC_VERSION_PIN (#1066, source-safe: its source-guard
@@ -348,7 +352,8 @@ set -- "${POSITIONAL[@]}"
 DEVICE_NAME_ARG="${1:-}"
 
 if [ -z "$DEVICE_NAME_ARG" ]; then
-    echo -e "${RED}Usage: $0 [--binary <url|path>] [--probe-binary <url|path>] [--run <id>] DEVICE_NAME${NC}"
+    echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
+    echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>)"
     echo ""
     echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-6) -- case-insensitive."
     echo ""
@@ -1141,7 +1146,7 @@ apt-get update -qq
 # silently no-op'ing recording-e2e.sh's capture-release busy-wait.
 # dantesync issue 52: nftables provides `nft`, needed by STEP 17c to install the NTP-client
 # DSCP OUTPUT-mangle rule (rsntp cannot setsockopt(IP_TOS) -- see scripts/lib/dscp-nft.sh).
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables systemd-journal-remote 2>/dev/null || true
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables systemd-journal-remote efibootmgr 2>/dev/null || true
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc, nftables"
 
@@ -1575,6 +1580,64 @@ JU_ENABLED_STATE="$(systemctl is-enabled "$REMOTE_LOG_JU_SERVICE_NAME" 2>/dev/nu
 [ "$JU_ENABLED_STATE" = "enabled" ] \
     || fail "${REMOTE_LOG_JU_SERVICE_NAME}.service is not enabled (is-enabled='${JU_ENABLED_STATE:-<none>}') after install -- the box would not upload its journal to dev1 (#1311)"
 echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_NETCONSOLE_PORT}) + systemd-journal-upload (-> ${REMOTE_LOG_JOURNAL_URL}) installed + enabled; both apply at next boot, proven live by verify-device.sh (ak)"
+
+
+# =============================================================================
+# STEP 17d: named `cam-box` UEFI boot entry, created in THIS box's OWN NVRAM (#1066 D6)
+# =============================================================================
+# #1066 D6: create-usb-linux.sh's host-side create_efi_boot_entry writes the named entry into the
+# BUILDER's NVRAM (dev1 when a stick is built there), never the target box's -- so a freshly
+# flashed box has NO named entry and depends 100% on the AMI firmware auto-generating `UEFI: USB,
+# Partition 1` at POST, which FAILED on cam2 after a warm reboot (dropped to the firmware setup
+# screen). This on-box step creates the named entry idempotently in the box's OWN NVRAM and makes
+# it lead BootOrder, so the box boots its internal disk regardless of the AMI auto-entry.
+# efibootmgr is on the base image + STEP 16's package list. Lettered sub-step (STEP 3b idiom, NO
+# /${TOTAL_STEPS}); it writes only NVRAM (efivars), no filesystem, so it is safe here in the rw
+# window before STEP 18's ro flip. Certified post-reboot by verify-device.sh (al).
+echo ""
+echo -e "${GREEN}[17d] Ensuring named UEFI boot entry '${EFI_CAM_BOX_LABEL}' in this box's NVRAM (#1066 D6)...${NC}"
+if [ ! -d /sys/firmware/efi/efivars ]; then
+    echo "  Box booted in BIOS/CSM mode (/sys/firmware/efi/efivars absent) -- skipping the named UEFI entry (not applicable on a non-EFI boot)."
+elif ! command -v efibootmgr >/dev/null 2>&1; then
+    echo -e "${YELLOW}  efibootmgr not installed -- cannot create the named '${EFI_CAM_BOX_LABEL}' UEFI entry. It is on STEP 16's package list + the base image; install it and re-run.${NC}"
+else
+    EFI_ROOT_SRC="$(findmnt -no SOURCE / 2>/dev/null || true)"
+    EFI_ROOT_DISK="$(efi_whole_disk_of "$EFI_ROOT_SRC")"
+    EFI_CUR="$(efibootmgr 2>/dev/null || true)"
+    EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
+    if [ -z "$EFI_NUMS" ]; then
+        if [ -b "$EFI_ROOT_DISK" ]; then
+            if efibootmgr -c -d "$EFI_ROOT_DISK" -p 1 -L "$EFI_CAM_BOX_LABEL" -l "$EFI_CAM_BOX_LOADER" >/dev/null 2>&1; then
+                echo "  Created named UEFI entry '${EFI_CAM_BOX_LABEL}' -> ${EFI_ROOT_DISK} partition 1 (${EFI_CAM_BOX_LOADER}); efibootmgr -c prepends it, so it leads BootOrder (#1066 D6)."
+            else
+                echo -e "${YELLOW}  efibootmgr failed to create the '${EFI_CAM_BOX_LABEL}' entry on ${EFI_ROOT_DISK} -- the box will fall back to the AMI USB auto-entry (the #1066 D6 fragility). Investigate before relying on a warm reboot.${NC}"
+            fi
+        else
+            echo -e "${YELLOW}  could not derive the root disk from findmnt (source='${EFI_ROOT_SRC}', disk='${EFI_ROOT_DISK}' is not a block device) -- NOT creating a UEFI entry blind. Create it by hand: efibootmgr -c -d <root-disk> -p 1 -L ${EFI_CAM_BOX_LABEL} -l '${EFI_CAM_BOX_LOADER}' (#1066 D6).${NC}"
+        fi
+    else
+        echo "  named UEFI entry '${EFI_CAM_BOX_LABEL}' already present (Boot$(printf '%s' "$EFI_NUMS" | tr '\n' ',' | sed 's/,$//')) -- not recreating (idempotent)."
+    fi
+    # Ensure the entry LEADS BootOrder (a pre-existing entry may have been demoted below another).
+    EFI_CUR="$(efibootmgr 2>/dev/null || true)"
+    if efi_cam_box_leads "$EFI_CUR"; then
+        echo "  '${EFI_CAM_BOX_LABEL}' leads BootOrder (#1066 D6)."
+    else
+        EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
+        EFI_ORDER="$(efi_boot_order "$EFI_CUR")"
+        if [ -n "$EFI_NUMS" ] && [ -n "$EFI_ORDER" ]; then
+            EFI_FIRST_NUM="$(printf '%s\n' "$EFI_NUMS" | head -1)"
+            EFI_NEW_ORDER="$(efi_boot_order_lead "$EFI_FIRST_NUM" "$EFI_ORDER")"
+            if efibootmgr -o "$EFI_NEW_ORDER" >/dev/null 2>&1; then
+                echo "  Reordered BootOrder so '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) leads: ${EFI_NEW_ORDER} (#1066 D6)."
+            else
+                echo -e "${YELLOW}  could not set BootOrder to lead with '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) -- do it by hand: efibootmgr -o ${EFI_NEW_ORDER} (#1066 D6).${NC}"
+            fi
+        else
+            echo -e "${YELLOW}  '${EFI_CAM_BOX_LABEL}' entry not readable after create -- cannot lead BootOrder; verify-device.sh (al) will FAIL until fixed (#1066 D6).${NC}"
+        fi
+    fi
+fi
 
 
 # =============================================================================
