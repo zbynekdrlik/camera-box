@@ -56,6 +56,19 @@ CLOCK_ALL_SKIP = ("2026-09-14 [dantesync-clock-alert-watchdog] cam1 (10.77.9.61)
                   "verdict=SKIP reason=\n"
                   "2026-09-14 [dantesync-clock-alert-watchdog] strih (10.77.9.202): reachable=0 "
                   "verdict=SKIP reason=\n")
+# #1313: the watchdog now ALSO probes dev1 as the `local` node (loopback 127.0.0.1:8898, up by
+# definition -- ALWAYS a real OK/NO_CLOCK/NO_DANTESYNC token, never SKIP). So the clock item's live
+# output now carries a dev1 line. Two intended readings this pins (consistent with the documented
+# single-node-verdict SKIP-defer invariant -- a readable node contributes, remote UNreachability is
+# the `net` item's job):
+CLOCK_DEV1_OK_REMOTES_SKIP = (
+    "2026-09-14 [dantesync-clock-alert-watchdog] dev1 (127.0.0.1): reachable=1 verdict=OK reason=\n"
+    "2026-09-14 [dantesync-clock-alert-watchdog] cam1 (10.77.9.61): reachable=0 verdict=SKIP reason=\n"
+    "2026-09-14 [dantesync-clock-alert-watchdog] strih (10.77.9.202): reachable=0 verdict=SKIP reason=\n")
+CLOCK_DEV1_NODANTESYNC = (
+    "2026-09-14 [dantesync-clock-alert-watchdog] dev1 (127.0.0.1): reachable=0 verdict=NO_DANTESYNC "
+    "reason=no_dantesync_http\n"
+    "2026-09-14 [dantesync-clock-alert-watchdog] cam1 (10.77.9.61): reachable=1 verdict=OK reason=\n")
 
 OBS_ALL_HEALTHY = ("2026-09-14 [obs-liveness-watchdog] strih: verdict=HEALTHY reasons=''\n"
                    "2026-09-14 [obs-liveness-watchdog] stream: verdict=HEALTHY reasons=''\n")
@@ -209,6 +222,12 @@ def test_clock_obs_net_audiolag_genlock_items():
     assert _item("clock").decide({"clock": (CLOCK_ALL_OK, 0)})["status"] == d.OK
     assert _item("clock").decide({"clock": (CLOCK_ONE_NOCLOCK, 0)})["status"] == d.FORGOT
     assert _item("clock").decide({"clock": (CLOCK_ALL_SKIP, 0)})["status"] == d.UNKNOWN
+    # #1313: dev1 is now the `local` node, always readable on the loopback. A pass where every REMOTE
+    # node is unreachable (SKIP) but dev1 is locked reads OK (dev1's real reading), NOT UNKNOWN --
+    # remote UNreachability is the `net` item's job; the clock LOCK item reflects the readable nodes.
+    assert _item("clock").decide({"clock": (CLOCK_DEV1_OK_REMOTES_SKIP, 0)})["status"] == d.OK
+    # and a dev1 daemon crash (NO_DANTESYNC) is a real FORGOT even though a remote node is OK.
+    assert _item("clock").decide({"clock": (CLOCK_DEV1_NODANTESYNC, 0)})["status"] == d.FORGOT
 
     assert _item("obs").decide({"obs": (OBS_ALL_HEALTHY, 0)})["status"] == d.OK
     assert _item("obs").decide({"obs": (OBS_ONE_WEDGED, 0)})["status"] == d.FORGOT

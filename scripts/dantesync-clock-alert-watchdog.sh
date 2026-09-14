@@ -154,6 +154,9 @@ log() { printf '%s [dantesync-clock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:
 # NAME|IP[|HOMEGATE]) overrides the whole roster.
 build_roster() {
   if [ -n "${DANTE_CLOCK_NODES:-}" ]; then
+    # NOTE: a full DANTE_CLOCK_NODES override REPLACES the whole roster -- it drops the `local` node
+    # (dev1) too, exactly as it drops cams/obs. Include dev1 explicitly (e.g. a `dev1|127.0.0.1|local`
+    # triple) when pinning the roster, else the #1313 dev1 blind spot silently reopens.
     printf '%s\n' $DANTE_CLOCK_NODES
     return 0
   fi
