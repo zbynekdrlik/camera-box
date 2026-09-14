@@ -173,12 +173,20 @@ something `verify-device.sh` should be loosened to tolerate.
 
 - **A fresh stick that boots once, then lands in the FIRMWARE SETUP screen after a WARM `reboot`, is a
   DETECTION failure, not a stick defect (cam2, 14.9.2026).** The cam boxes boot a stick ONLY through the
-  AMI auto-entry `UEFI: USB, Partition 1` (keyed on USB port + partition GUID) — `create-usb-linux.sh`'s
-  named `cam-box` entry is written into the HOST's NVRAM (dev1 when the stick is built there), never
-  the target's (defect D6 on the provisioning ticket). A SanDisk 3.2Gen1 on the shared USB3 hub may
-  not enumerate at POST after a warm reset → no entry → setup screen. Cure: COLD power-off/on (black
-  USB2 port), boot-menu pick if needed, then ON the box `efibootmgr -c -d /dev/sda -p 1 -L cam-box -l
-  '\EFI\BOOT\BOOTX64.EFI'` so a named entry leads `BootOrder`. Verify the stick itself from dev1
+  AMI auto-entry `UEFI: USB, Partition 1` (keyed on USB port + partition GUID). **D6 is now FIXED in
+  the scripts (#1066), not hand-patched:** `setup-device.sh` STEP 17d creates the named `cam-box`
+  entry in THIS box's OWN NVRAM (`efibootmgr -c -d <root-disk-of-/> -p 1 -L cam-box -l
+  '\EFI\BOOT\BOOTX64.EFI'`, idempotent) and makes it lead `BootOrder`, and `verify-device.sh` check
+  `(al)` FAILs the box if a `cam-box` entry is absent or not first in `BootOrder` (so a box that would
+  drop to the setup screen never passes acceptance). `create-usb-linux.sh`'s host-side entry is now
+  guarded to run ONLY when the target IS the builder's own boot disk (it no longer pollutes dev1's
+  NVRAM when a stick is built there; the pure decision logic lives in `scripts/lib/efi-boot-entry.sh`).
+  A SanDisk 3.2Gen1 on the shared USB3 hub may still not enumerate at POST after a warm reset → no
+  entry → setup screen on a box whose STEP 17d has NOT yet run (a stick booted for the first time
+  before setup). Cure for THAT window: COLD power-off/on (black USB2 port), boot-menu pick if needed,
+  run `setup-device.sh <BOX>` (STEP 17d then creates the entry), or as a manual fallback run ON the
+  box `efibootmgr -c -d /dev/sda -p 1 -L cam-box -l '\EFI\BOOT\BOOTX64.EFI'` so a named entry leads
+  `BootOrder`. Verify the stick itself from dev1
   READ-ONLY, never by re-flashing: ro-mount + `sgdisk -v` + grub/UUID/fstab reads, the stick's own
   `cambox-journal` partition (`journalctl --directory=<mount>/<machine-id> --list-boots` proves whether
   it booted after provisioning), and a QEMU/OVMF boot (`-drive file=/dev/sdX,format=raw,readonly=on,
