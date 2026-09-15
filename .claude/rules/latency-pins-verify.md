@@ -43,8 +43,14 @@ It reads the SAME baseline json and applies each explicit per-source pin over WS
 **DRY-RUN by default** (prints `live -> want` per source, writes nothing); `--execute` is the only
 path that writes, so a promotion is deliberate + operator-invoked in a **NO-E2E maintenance
 window**, never automatic at launch. Idempotent (a source already on-baseline is a no-op),
-read-back verified, FAIL LOUD on a read-back mismatch (never a half-set source). It REFUSES the
-imag floor-sentinel box (`_all_ndi_inputs_ms`) — imag's 3ms floor is `imag_latency_enforce.py`'s
+read-back verified, FAIL LOUD on a read-back mismatch (never a half-set source). **GOTCHA (#1168):
+`apply_pins` signals its fail-loud read-back mismatch by raising `SystemExit` (a `BaseException`, NOT
+an `Exception`).** So any BEST-EFFORT wrapper around it (a restore/teardown handler that must log and
+continue, never abort) MUST catch `except BaseException`, not `except Exception` — an `except
+Exception` lets the `SystemExit` escape and MASK whatever the caller was doing (the #1168 abort-restore
+bug: a restore-time read-back failure replaced the original per-camera `AlignmentImpossible` with the
+generic writer error; caught by review, fixed to `except BaseException` in `qr_align_pins._restore_after_abort`).
+It REFUSES the imag floor-sentinel box (`_all_ndi_inputs_ms`) — imag's 3ms floor is `imag_latency_enforce.py`'s
 domain (`imag-min-latency-3ms-always`), never promoted. CLI mirrors the verify tool:
 `apply_latency_pins.py --box strih --host 10.77.9.202 [--execute]` (DRY-RUN without `--execute`).
 This is the sanctioned "operator/gate legitimately re-tunes → record in a PR → apply to the rig"
