@@ -119,6 +119,40 @@ class TestRestoreOnAbort:
         # and the live read-back ends on the restored (floor) pins, never the partial plan
         assert applied == {s: pre[s] for s in plan}
 
+    def test_a_restore_failure_never_masks_the_original_abort(self, monkeypatch):
+        # apply_latency_pins.apply_pins raises SystemExit (its fail-loud read-back-mismatch signal,
+        # a BaseException NOT an Exception) -- reachable on exactly the flaky rig that caused the
+        # abort. When that fires on the RESTORE write, the restore failure must be swallowed + logged
+        # and the ORIGINAL AlignmentImpossible re-raised, NEVER replaced by the generic writer error
+        # (the repo's abort-attribution + no-overstatement doctrine; the docstring promises it).
+        import apply_latency_pins
+        import obs_phase2
+        monkeypatch.setattr(qa, "barrier_screenshot", _StuckBarrier([10, 8, 6, 4] + [4] * 20))
+        pre = {s: 3 for s in SRC}
+        applied = {}
+        calls = {"n": 0}
+
+        def _read_pins(s, h, p):
+            return dict(applied) if applied else dict(pre)
+        monkeypatch.setattr(qa, "read_current_pins", _read_pins)
+
+        def _apply(ws, plan, execute):
+            calls["n"] += 1
+            if calls["n"] >= 2:   # the RESTORE write (the plan apply is call 1)
+                raise SystemExit("[apply-latency-pins] FAILED to set ... read-back mismatch")
+            applied.update(plan)
+            return dict(plan)
+        monkeypatch.setattr(apply_latency_pins, "apply_pins", _apply)
+
+        class _WS:
+            def close(self):
+                pass
+        monkeypatch.setattr(obs_phase2, "_conn", lambda host, pw: _WS())
+        with pytest.raises(qa.AlignmentImpossible) as exc:
+            _align(pre)
+        # the ORIGINAL per-camera abort, never the writer's SystemExit
+        assert "apply-latency-pins" not in str(exc.value)
+
     def test_successful_align_does_not_restore(self, monkeypatch):
         pre = {s: 3 for s in SRC}
         applied_ref = {}
