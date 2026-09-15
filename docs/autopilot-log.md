@@ -12272,3 +12272,20 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   lookup at a window edge — both stay fail-closed). Tier-0: pure module RED→GREEN via rustc --test,
   cargo fmt --all --check clean (parses the whole probe-gated bin), doc-lazy-continuation grep clean;
   CI is the first type-check for the probe-gated glue. Docs: .claude/rules/gate-allowance-restore-red-green.md.
+
+- #1096 (reopened 15.9.2026) — strih DistroAV receiver stayed dead 12 min after a cambox sender restart:
+  the SDK finder never re-discovered the restarted `NDI cam7` mDNS record (607 identical BY-NAME cycles at
+  received=Δ0), so the fresh-finder-only BY-URL fix fell to the poisoned by-name resolver forever; imag
+  (finder healthy) recovered BY-URL in 6 s. Lane = vendored DistroAV receiver, candidates (a)+(b); (c) the
+  dev1 watchdog is a sibling lane. Commits: 3e29181d9 test(#1096) [red] → c6dfec49c fix(#1096) [green].
+  Fix (vendor/distroav/src/ndi-source.cpp ndi_source_thread): when the fresh finder resolves nothing and
+  by-name is not force-required, a bounded BY-URL ladder — (b) retry last_delivered_url_1096 (the URL that
+  DELIVERED frames), then (a) after K=3 finder-blind cycles the fleet-map URL from the pure
+  ndi_fleet_url_for_name ("CAMn (usb)"<->10.77.9.6n:5961, false for non-camera names, ports 5961..5963
+  cycled one-per-reset, NO raw sockets), chosen by the pure ndi_fallback_bind_mode_1096. Both route through
+  the same connected_by_url_1180=url_resolved_1096 arming so issue-1180 identity verify + issue-1287
+  frame-less alternation apply unchanged (by-name/last-known/fleet ladder, no dead path pins a leg). RED→GREEN
+  tests/distroav_by_url_fleet_fallback_1096.rs: 10/10 via rustc --test (both pure helpers lift-compile under
+  cc -Werror -Wconversion + truth-table pass); existing issue-1096/1180/1287 anchor tests green; cargo fmt
+  --all --check clean. UNVERIFIED live — CI-only C++ compile, reproduces only live; supervisor rig repro
+  after full-bundle deploy. Docs: .claude/rules/distroav-receiver-lifecycle.md ("finder-blind fallback ladder").

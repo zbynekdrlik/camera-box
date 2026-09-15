@@ -312,3 +312,41 @@ offline-verifiable — confirmed only by the supervisor's post-deploy rig repro 
 `#1287 ... forcing BY-NAME` → `#1180 connect BY-NAME` → `received=` Δ>0 within ~2 stale windows).
 The `[1/8]` frozen-camera gate (pixel-hash, 2 samples) was RIGHT to fail on the live incident —
 cross-check with the `received=` Δ before calling any FROZEN a false positive.
+
+## A FINDER-BLIND sender needs a fallback ladder — by-name/BY-URL both die when discovery itself is blind (#1096 reopen)
+
+**Distinct from every wedge above: this one is not the receiver's fault.** The #1080 `break` death, the
+#1096 poisoned-name wedge, and the #1287 dead-port wedge all assume the local SDK finder will EVENTUALLY
+re-discover the sender's mDNS record — the fresh per-reset finder, the #767 watchdog, and the #1287
+BY-URL↔BY-NAME alternation are all built on that. When strih's finder stays BLIND (the #1199 flaky-NIC /
+multicast-reception class), NONE of them can reach the sender: the fresh finder resolves nothing → the
+`#1096 connect BY-NAME (fresh finder resolved no URL)` path re-consults the poisoned per-process finder →
+black. Live 15.9.2026: strih `NDI cam7` ran **607 identical BY-NAME cycles over 12 min** at `received=` Δ0
+while the sender emitted 60.0 fps and imag (finder healthy) recovered BY-URL in 6 s.
+
+**The fix LANDED (#1096 reopen, `ndi_source_thread`, `tests/distroav_by_url_fleet_fallback_1096.rs`),
+vendored receiver side only.** When a reset's fresh finder resolves nothing and BY-NAME is not
+force-required, escalate through a BOUNDED BY-URL ladder before falling to by-name:
+- **(b) last-known-good:** `last_delivered_url_1096` persists the URL that actually DELIVERED frames on a
+  BY-URL bind; the ladder retries it BY-URL first (a graceful restart usually returns on the same :5961).
+- **(a) fleet map:** after `NDI_FLEET_AFTER_NO_URL_CYCLES`=3 consecutive finder-blind resets, the pure
+  `ndi_fleet_url_for_name(name, port_index, buf, buflen)` synthesizes the address from the naming
+  contract (`CAMn (usb)` ↔ `10.77.9.6n:5961`, cf. `scripts/camera-set.sh`) — returns FALSE for any
+  non-camera name so `cg`/`NDI obs hudba` are NEVER given a guessed URL — cycling ports 5961..5963
+  (`NDI_FLEET_PORT_CANDIDATES`) one-per-reset across consecutive frame-less fleet binds (bounded, never an
+  in-reset socket loop — deliberately NO raw sockets, which would drag winsock2 into a CI-first-compile
+  Windows build). The BY-URL fallback choice is the pure `ndi_fallback_bind_mode_1096(...)` ladder.
+
+**Key invariant — both fallbacks route through the SAME `connected_by_url_1180 = url_resolved_1096`
+arming** (a separate `url_bind_kind_1096` tags fresh/last-known/fleet for the log line ONLY), so #1180
+identity verify (a wrong-sender fleet/last-known guess WITH frames is caught + forced by-name) and #1287
+frame-less alternation (a dead-port guess is caught + forced by-name NEXT) apply UNCHANGED. The three
+coexist as a by-name → last-known → fleet ladder that no single dead path can pin: e.g. finder-blind +
+rotated port → last-known(:5961 dead) → BY-NAME → … → (K reached) fleet(:5961) → BY-NAME → fleet(:5962
+LIVE); first frames record the delivering URL as the new last-known and zero the escalation clock. New
+log markers use `#1096 rebind BY-URL` (mutually non-substring vs the existing `#1096 connect BY-URL`/
+`BY-NAME` lines other tests anchor on). The two pure helpers are the std-only lift-compile/truth-table
+gate; CI is the first real compiler. The live cure reproduces only live — UNVERIFIED until the
+supervisor's post-deploy rig repro (bounce a cambox sender against strih; expect `#1096 rebind BY-URL …
+(last-known good` / `(fleet map …` → `received=` Δ>0 without an OBS restart). Candidate (c), the dev1
+frozen-input watchdog extension to strih camera inputs, is a SEPARATE lane (`scripts/frozen-input-*`).
