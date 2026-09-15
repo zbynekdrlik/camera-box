@@ -556,6 +556,48 @@ pub fn summarize_send_all(samples: &[SendAuditSample]) -> Vec<SendAuditSummary> 
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// #1318 — RELOCK-BURST family: the `genlock-relock '<source>':` per-EVENT line.
+// (RED stub — real bodies land in the following [green] commit.)
+// ---------------------------------------------------------------------------
+
+/// One parsed `genlock-relock '<source>':` per-event line (RED stub).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelockEvent {
+    pub source: String,
+    pub at_ms: u64,
+}
+
+/// Parse ONE `genlock-relock` line into a [`RelockEvent`] (RED stub).
+pub fn parse_relock_line(_line: &str) -> Option<RelockEvent> {
+    None
+}
+
+/// Parse every `genlock-relock` line found in `text`, in order.
+pub fn parse_relock_lines(text: &str) -> Vec<RelockEvent> {
+    text.lines().filter_map(parse_relock_line).collect()
+}
+
+/// Per-source relock-burst summary over a captured window (RED stub struct).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelockBurstSummary {
+    pub source: String,
+    pub total_relocks: u64,
+    pub bursts: u64,
+    pub max_per_second: u64,
+    pub first_at_ms: u64,
+    pub last_at_ms: u64,
+}
+
+/// Cluster each source's relock events into burst episodes (RED stub).
+pub fn summarize_relock_bursts(
+    _events: &[RelockEvent],
+    _min_burst_relocks: usize,
+    _window_ms: u64,
+) -> Vec<RelockBurstSummary> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,5 +1088,117 @@ mod tests {
         assert_eq!(s.delta_offered, 0);
         assert_eq!(s.delta_sent, 0);
         assert_eq!(s.delta_dropped, 0);
+    }
+
+    // ===== #1318 relock-burst family =====
+
+    /// A real `genlock-relock` line from the stream OBS log (issue 1318, 18:27 storm).
+    const RELOCK_LINE: &str = "18:27:28.205: genlock-relock 'NDI 2ME PGM': depth=41 \
+steady_depth_frames=28 due=1 erased=0 head_skew_ms=938 tick_phase_ns=19461 anchor_ns=0 \
+sel_vs_newest_due=0 interval_ns=33333333 latency_ms=925";
+
+    #[test]
+    fn parses_a_real_relock_line_1318() {
+        let ev = parse_relock_line(RELOCK_LINE).expect("should parse");
+        assert_eq!(ev.source, "NDI 2ME PGM");
+        // 18:27:28.205 = ((18*60+27)*60+28)*1000 + 205
+        assert_eq!(ev.at_ms, 66_448_205);
+    }
+
+    #[test]
+    fn relock_parser_rejects_the_input_and_send_audit_lines_1318() {
+        // The relock parser must reject the other two families' lines...
+        assert!(parse_relock_line(SAMPLE_LINE_CAM1).is_none());
+        assert!(parse_relock_line(OUT_LINE).is_none());
+        assert!(parse_relock_line(FIL_LINE).is_none());
+        // ...and both of them must reject a relock line (mutual non-substring).
+        assert!(parse_audit_line(RELOCK_LINE).is_none());
+        assert!(parse_send_audit_line(RELOCK_LINE).is_none());
+    }
+
+    #[test]
+    fn a_relock_line_without_a_timestamp_is_unclusterable_1318() {
+        // No leading HH:MM:SS.mmm -> no timeline position -> None.
+        let bare = "genlock-relock 'NDI 2ME PGM': depth=41 erased=0";
+        assert!(parse_relock_line(bare).is_none());
+    }
+
+    fn ev(source: &str, at_ms: u64) -> RelockEvent {
+        RelockEvent {
+            source: source.into(),
+            at_ms,
+        }
+    }
+
+    #[test]
+    fn clusters_a_relock_storm_into_one_burst_1318() {
+        // 30 events at 33 ms spacing (span 957 ms) — all inside one 1 s window.
+        let evs: Vec<RelockEvent> = (0..30)
+            .map(|i| ev("NDI 2ME PGM", 1_000_000 + i * 33))
+            .collect();
+        let out = summarize_relock_bursts(&evs, 8, 1000);
+        assert_eq!(out.len(), 1);
+        let s = &out[0];
+        assert_eq!(s.total_relocks, 30);
+        assert_eq!(s.bursts, 1);
+        assert_eq!(s.max_per_second, 30);
+        assert_eq!(s.first_at_ms, 1_000_000);
+        assert_eq!(s.last_at_ms, 1_000_000 + 29 * 33);
+    }
+
+    #[test]
+    fn ignores_isolated_single_relocks_below_threshold_1318() {
+        // Four lone relocks 2 s apart: four 1-event clusters, none is a burst.
+        let evs = vec![
+            ev("NDI cam1", 0),
+            ev("NDI cam1", 2000),
+            ev("NDI cam1", 4000),
+            ev("NDI cam1", 6000),
+        ];
+        let out = summarize_relock_bursts(&evs, 8, 1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].total_relocks, 4);
+        assert_eq!(out[0].bursts, 0);
+        assert_eq!(out[0].max_per_second, 1);
+    }
+
+    #[test]
+    fn separates_two_storms_by_a_gap_1318() {
+        let mut evs: Vec<RelockEvent> = (0..10).map(|i| ev("NDI 2ME PGM", 100 + i * 33)).collect();
+        // 5 s idle gap, then a second storm.
+        evs.extend((0..10).map(|i| ev("NDI 2ME PGM", 100 + 5000 + i * 33)));
+        let out = summarize_relock_bursts(&evs, 8, 1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bursts, 2);
+        assert_eq!(out[0].max_per_second, 10);
+        assert_eq!(out[0].total_relocks, 20);
+    }
+
+    #[test]
+    fn groups_bursts_by_source_in_first_seen_order_1318() {
+        let mut evs = vec![ev("NDI 2ME PGM", 0)];
+        evs.extend((1..12).map(|i| ev("NDI 2ME PGM", i * 33)));
+        evs.push(ev("NDI cam1", 500)); // a lone cam1 relock
+        let out = summarize_relock_bursts(&evs, 8, 1000);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].source, "NDI 2ME PGM");
+        assert_eq!(out[0].bursts, 1);
+        assert_eq!(out[1].source, "NDI cam1");
+        assert_eq!(out[1].bursts, 0);
+    }
+
+    #[test]
+    fn a_backward_time_step_starts_a_new_cluster_1318() {
+        // Midnight wrap: a big at_ms then a small one must not be one 86 400 s gap.
+        let evs = vec![
+            ev("NDI 2ME PGM", 86_399_900),
+            ev("NDI 2ME PGM", 86_399_933),
+            ev("NDI 2ME PGM", 33), // wrapped past midnight
+            ev("NDI 2ME PGM", 66),
+        ];
+        let out = summarize_relock_bursts(&evs, 2, 1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bursts, 2); // two 2-event clusters, not one
+        assert_eq!(out[0].max_per_second, 2);
     }
 }
