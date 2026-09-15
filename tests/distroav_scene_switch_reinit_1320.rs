@@ -234,7 +234,13 @@ fn reap_predicate_computes_the_spec_truth_table() {
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.trim() == "1")
         .collect();
-    assert_eq!(got.len(), vs.len(), "#1320: harness printed {} of {} rows", got.len(), vs.len());
+    assert_eq!(
+        got.len(),
+        vs.len(),
+        "#1320: harness printed {} of {} rows",
+        got.len(),
+        vs.len()
+    );
 
     let mut diffs = Vec::new();
     for ((fs_h, recv_h, lib_h, want), g) in vs.iter().zip(&got) {
@@ -244,5 +250,9 @@ fn reap_predicate_computes_the_spec_truth_table() {
             ));
         }
     }
-    assert!(diffs.is_empty(), "#1320: reap-eligibility truth table mismatch:\n{}", diffs.join("\n"));
+    assert!(
+        diffs.is_empty(),
+        "#1320: reap-eligibility truth table mismatch:\n{}",
+        diffs.join("\n")
+    );
 }
