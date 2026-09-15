@@ -1,0 +1,7 @@
+1758000000.010000 CAM4 systemd[1]: Stopping camera-box.service...
+1758000001.020000 CAM4 systemd[1]: camera-box.service: Deactivated successfully.
+1758000002.030000 CAM4 systemd[1]: Started camera-box.service - Camera box streaming.
+1758000300.060000 CAM4 camera-box[4242]: Started streaming pipeline on /dev/video0
+1758000400.070000 CAM4 systemd[1]: Started some-other.service.
+1758000500.040000 CAM4 systemd[1]: Started camera-box-burn-abc123.service.
+1758001000.050000 CAM4 systemd[1]: Stopping camera-box-burn-abc123.service...

@@ -1,0 +1,5 @@
+1758000000.123456 CAM4 kernel: uvcvideo 2-2:1.1: Non-zero status (-71) in video completion handler.
+1758000000.200000 CAM4 kernel: usb 2-2: reset high-speed USB device number 4 using xhci_hcd
+1758000500.500000 CAM4 kernel: uvcvideo 2-2:1.1: Non-zero status (-71) in video completion handler.
+1758001000.100000 CAM4 kernel: uvcvideo 2-2:1.1: Non-zero status (-71) in video completion handler.
+1758001000.900000 CAM4 kernel: audit: type=1400 unrelated
