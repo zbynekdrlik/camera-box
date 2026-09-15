@@ -12366,3 +12366,33 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   green, bash -n + shellcheck clean. New test tests/python/test_av_band_1319.py.
 
 - issue 1309 (relay/service logging + gphoto2 bound + verify (am) + handover shading item): lane/1309-relaylog @ base cfb59a9cf. RED d81511df0 -> GREEN 6ea9bf46f. Five 15.9. decisions: centralised Gphoto2Cli::run info logging + timeout/kill + online-transition; service forward_set logging + reach_transitions/heartbeat (relay-unreachable WARN -> debug); pure SetQueue coalescer (proto); verify-device (am) TasksMax<=512 + info-logging verdict; rig-dev-handover shading item. Tier-0: fmt clean; rustc replicas (proto 5, verify 108) green; handover pytest 21 green; bash -n + shellcheck clean.
+## 2026-09-15 — issue 1303 follow-up: LOCK-indicator AUDIO term (audio_unexpected), lane/1303-lockaudio
+
+The last deferred #1303 followup (the LOCK-indicator audio taxonomy). Base fbd6d105e (1.7.0-dev.631),
+no version bump (worktree lane; supervisor cherry-picks).
+
+- Root cause: the in-OBS genlock LOCK indicator judged audio ONLY via part-3b's `audio_unpaired`
+  (pairing-offset breach on an audio-ENABLED source); its `audio_enabled` guard structurally cannot
+  flag a source AUDIBLE when the certified per-box table expects it SILENT (the double-audio hazard).
+- New pure axis: `GenlockFacets.audio_unexpected` -> `LockReason::AudioUnexpected` (=10), lowest
+  DEGRADED precedence (below audio-pairing). Rust `src/genlock_lock_state.rs` + the C mirror in
+  `GenlockLockState.hpp`, parity sweep extended 2^8 -> 2^9; a new parity gate compiles the header's
+  `genlock_name_is_camera` (mirror of `genlock_forced_table_audit::is_camera_input`) and requires it
+  to agree with the canonical Rust over rig names.
+- Widget: reduces `audio_enabled && genlock_name_is_camera(name)` (box-class-AGNOSTIC, fail-safe:
+  cameras are silent-by-contract on every box) into the facet + names the offender on the human
+  `genlock-lock:` line and the v3->v4 `genlock-lock-json:` line (`audio_unexpected_inputs:[{name}]`).
+- Facet/watchdog: `bundle_state_gather.genlock_lock_facet_from_log` parses the v4 list; 
+  `genlock_lock_decision` gains R_AUDIO_PAIRING + R_AUDIO_UNEXPECTED, the two audio axes in the
+  decide() mirror, and enriches the reason to `audio_unexpected:<name>`.
+- Scoping decision (recorded on the ticket): the box-class-DEPENDENT live cases (non-camera audible
+  on a Dante-fed box; program silent on the cg box) are DEFERRED — the widget has no box identity
+  today, and a hostname match is non-fail-safe (false DEGRADE on the live cg box). They are already
+  covered at DEPLOY time by the #1303 part-4 preflight. followup: a robust deploy-written box-role
+  marker for the live version.
+- 3-copy lock-step: `tests/genlock_lock_json_guards.rs` + `tests/genlock_lock_indicator_guards.rs`
+  + the pwsh anchor in BOTH `windows-genlock{,-fast}.yml`.
+- Tier-0 verified (no cargo): rustc --test on the pure module (37) + both guard files (4+9); gcc/g++
+  -Werror lifts of the C decision/is-camera/JSON builder reproduce the Rust; pytest -k genlock -> 111.
+- Commits: 9ac1ca469 [red] -> 7e2e98c5e [green] pure decision + C mirror; 13547e701 widget+facet+py;
+  cf71d6cfc parity+guards+pwsh; c0e7ba7c4 python tests; 2d15bc03e fmt; docs this commit.
