@@ -12011,3 +12011,33 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   repointed to `origin/dev` (de31d8ac2) at start via `checkout -B`. 3 work commits on top; INTEGRATE BY
   CHERRY-PICK of 6e29ee6c9..HEAD onto `dev`. Durability backup on
   `refs/autopilot-wip/worktree-agent-a478c1a0e9e8f63ad`.
+
+## 2026-09-15 — issue 899 defect 2 follow-up: SCHED_RESET_ON_FORK on the capture+emit FIFO raise
+
+- **Root cause.** `src/affinity.rs::set_current_thread_realtime(CaptureEmit)` raised the CURRENT
+  thread with `sched_setscheduler(0, SCHED_FIFO, ...)`. That thread is a tokio runtime WORKER; a
+  Linux thread's scheduling policy is INHERITED across `clone()` unless `SCHED_RESET_ON_FORK` is
+  set, so the NDI SDK threads (`ndis:recv`/`ndis:send`/`ndir:reconn`) and the tokio blocking pool
+  spawned from that worker came up SCHED_FIFO prio 90 too — re-creating the process-wide-FIFO
+  regression defect 2 removed, through inheritance. Live evidence (ticket comment): boot-time cam2
+  process had 19 SCHED_FIFO threads, a restarted process of the SAME binary had 1 — nondeterministic
+  (depends which worker spawns the NDI threads), so `verify-device.sh` check `(ah)`
+  (`rt_fifo_thread_ceiling`, <= 4) failed nondeterministically.
+- **Fix.** Pure std-only `capture_emit_sched_policy_word()` (crate-root, numeric literals, no
+  `libc`) returns `SCHED_FIFO | SCHED_RESET_ON_FORK` (`0x40000000`); the raise passes it as the
+  `sched_setscheduler` policy word. Children of the hot-path worker now fall back to SCHED_OTHER
+  while the hot-path thread keeps FIFO 90. NO thread moves cores. A libc-parity crate test ties
+  the numeric literals to `libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK`. The two `#899` watchdog
+  log strings are byte-unchanged.
+- **RED sha `fb893e593`** (pure fn returning SCHED_FIFO alone + crate test asserting the
+  RESET_ON_FORK bit) → **GREEN sha `f144b3bfa`** (fn returns the OR + wired into the raise + docs).
+  Verified locally under Tier-0: a std-only `rustc --test` replica FAILED at the RED policy word
+  and PASSED at the GREEN one; `cargo fmt --all --check` clean; doc-lint grep clean on added lines.
+  The crate tests themselves only RUN on CI (Tier-0 bans local cargo).
+- **Follow-up (Finding A, NOT implemented here).** The running fleet units on cam1/3/4/5/6/7 still
+  carry the process-wide FIFO until each box is re-provisioned — nothing in `deploy-fleet.sh`
+  refreshes `camera-box.service`; the M.2 migration re-provisions box by box.
+- **Lane scope.** worktree lane `lane/899-resetonfork` (based on `origin/dev` b5db81dd7), CODE +
+  TESTS + DOCS only, no rig touched, no push (supervisor integrates by cherry-pick). Overlap with
+  release-train PR (append-only `docs/autopilot-log.md` + `.claude/rules/realtime-isolation.md`) is
+  union-resolved at cherry-pick.
