@@ -205,6 +205,7 @@ _mv_fps_preflight_settle_now() {
 mv_fps_preflight_settle_strict() {
   local name="$1" ip="$2" os="$3" user="$4" pw="$5" tail_n="$6" baseline="$7"
   local n="${MV_FPS_PREFLIGHT_SETTLE_N:-3}"
+  local below_n="${MV_FPS_PREFLIGHT_SETTLE_BELOW_N:-2}"
   local budget="${MV_FPS_PREFLIGHT_SETTLE_S:-120}"
   local poll="${MV_FPS_PREFLIGHT_SETTLE_POLL:-6}"
   local max_passes="${MV_FPS_PREFLIGHT_SETTLE_MAX_PASSES:-1000}"
@@ -212,6 +213,9 @@ mv_fps_preflight_settle_strict() {
   # env value flowing into `[ -ge ]`/`$(( ))` under the caller's `set -euo pipefail` would abort the
   # whole E2E run; the same guard genlock_settle_wait applies).
   case "$n" in '' | *[!0-9]*) n=3 ;; esac
+  # below_n must be >= 1 (0 would confirm a collapse on ZERO fresh below samples -> a spurious abort);
+  # clamp a garbage / 0 value to the default 2.
+  case "$below_n" in '' | *[!0-9]* | 0) below_n=2 ;; esac
   case "$budget" in '' | *[!0-9]*) budget=120 ;; esac
   case "$poll" in '' | *[!0-9]*) poll=6 ;; esac
   case "$max_passes" in '' | *[!0-9]*) max_passes=1000 ;; esac
@@ -220,10 +224,10 @@ mv_fps_preflight_settle_strict() {
   baseline_samp="$(printf '%s\n' "$baseline" | mv_fps_preflight_latest_sample)"
   baseline_id="${baseline_samp%%$'\t'*}"
   last_id="$baseline_id"
-  local ok_streak=0 fresh_seen=0 pass=0 start
+  local ok_streak=0 below_streak=0 fresh_seen=0 pass=0 start
   start="$(_mv_fps_preflight_settle_now)"
 
-  echo "    [4d1/8] MV-fps preflight — $name below floor on first read; settling on FRESH multiview-audit samples (need ${n} consecutive ≥floor within ${budget}s) — the window median can straddle a just-recovered clamp (issue 1040), never false-abort a CI gate" >&2
+  echo "    [4d1/8] MV-fps preflight — $name below floor on first read; settling on FRESH multiview-audit samples (need ${n} consecutive ≥floor to recover, ${below_n} consecutive <floor to confirm, within ${budget}s) — the window median can straddle a just-recovered clamp (issue 1040), never false-abort a CI gate" >&2
 
   while :; do
     "${MV_FPS_PREFLIGHT_SETTLE_SLEEP_CMD:-sleep}" "$poll"
@@ -239,10 +243,20 @@ mv_fps_preflight_settle_strict() {
         rest="${samp#*$'\t'}"; fps="${rest%%$'\t'*}"; floor="${rest##*$'\t'}"
         v="$(mv_fps_preflight_sample_verdict "$fps" "$floor")"
         if [ "$v" = "below" ]; then
-          echo "    [4d1/8] MV-fps preflight — $name: fresh sample rendered_fps=$fps < floor=$floor after ${pass} poll(s) — collapse CONFIRMED on fresh data (not a straddling median)" >&2
-          printf '%s\n' "$name MV render collapsed — fresh sample rendered_fps=$fps < floor=$floor (confirmed on fresh data, not a straddling median; issue 1040)"
-          return 0
+          # A collapse is CONFIRMED only after below_n CONSECUTIVE fresh <floor samples — symmetric
+          # with the n-consecutive-≥floor recovery. A SINGLE fresh <floor emit right after the
+          # [4d0/8] clamp clears can be the render still catching up (the individual-sample analogue
+          # of the straddling median this fix targets); requiring a streak stops that boundary emit
+          # from false-aborting a ~40-min run. ok_streak resets (the ≥floor run is broken).
+          ok_streak=0
+          below_streak=$((below_streak + 1))
+          if [ "$below_streak" -ge "$below_n" ]; then
+            echo "    [4d1/8] MV-fps preflight — $name: ${below_streak} consecutive fresh sample(s) below floor (latest rendered_fps=$fps < floor=$floor) after ${pass} poll(s) — collapse CONFIRMED on fresh data (not a straddling median)" >&2
+            printf '%s\n' "$name MV render collapsed — ${below_streak} consecutive fresh samples < floor (latest rendered_fps=$fps < floor=$floor; confirmed on fresh data, not a straddling median; issue 1040)"
+            return 0
+          fi
         elif [ "$v" = "ok" ]; then
+          below_streak=0
           ok_streak=$((ok_streak + 1))
           if [ "$ok_streak" -ge "$n" ]; then
             local now elapsed
@@ -251,8 +265,8 @@ mv_fps_preflight_settle_strict() {
             return 0
           fi
         else
-          # a malformed fresh line breaks the consecutive-≥floor streak (never counts, never confirms)
-          ok_streak=0
+          # a malformed fresh line breaks BOTH consecutive streaks (never counts, never confirms)
+          ok_streak=0; below_streak=0
         fi
       fi
     fi
