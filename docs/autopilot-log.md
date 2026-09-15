@@ -12364,3 +12364,5 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   TIME-BUCKETED `av-band-$box` dedup key, allowlisted in the #1206 sweep). Live dry-run (stream :8899):
   ref −16.7 ms, recent 38.4 → OUT_OF_BAND confirmed → page "obraz mešká za zvukom". Tier-0: pytest 229
   green, bash -n + shellcheck clean. New test tests/python/test_av_band_1319.py.
+
+- issue 1309 (relay/service logging + gphoto2 bound + verify (am) + handover shading item): lane/1309-relaylog @ base cfb59a9cf. RED d81511df0 -> GREEN 6ea9bf46f. Five 15.9. decisions: centralised Gphoto2Cli::run info logging + timeout/kill + online-transition; service forward_set logging + reach_transitions/heartbeat (relay-unreachable WARN -> debug); pure SetQueue coalescer (proto); verify-device (am) TasksMax<=512 + info-logging verdict; rig-dev-handover shading item. Tier-0: fmt clean; rustc replicas (proto 5, verify 108) green; handover pytest 21 green; bash -n + shellcheck clean.
