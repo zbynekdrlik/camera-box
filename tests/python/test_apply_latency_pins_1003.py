@@ -152,11 +152,12 @@ class TestRevertedBaseline:
 
     def test_strih_pins_are_the_reverted_shallow_set_not_the_rejected_deep_set(self):
         strih = self._load()["strih"]
-        assert strih["NDI cam1"] == 3
-        # issue 1168 lever 1: cam2 (the projection probe, excluded from the align set) re-tuned 6 -> 3;
-        # it was the ONLY non-floor pin. The reference stays SHALLOW, never the rejected deep set.
-        assert strih["NDI cam2"] == 3
-        assert strih["NDI cam3"] == 20
+        # issue 1168 (2026-09-15): the report-only strih drift reference is the FLOOR-3 live model --
+        # every on-air strih camera (cam1..cam7, the current CAMERA_ACTIVE_SET) at the 3 ms floor. The
+        # per-run [4i/8align] aligner OWNS any relative offset (re-derived live, never committed here),
+        # so the committed baseline is the floor. This retired the stale cam3=20 drift reference and
+        # extended the cam1..cam3 set to cam1..cam7. Still SHALLOW, never the rejected deep set.
+        assert all(strih[f"NDI cam{n}"] == 3 for n in range(1, 8))
         assert (strih["NDI cam1"], strih["NDI cam2"], strih["NDI cam3"]) != (90, 160, 184)
 
     def test_stream_hold_is_not_the_rejected_deep_reduced_value(self):
@@ -172,7 +173,7 @@ class TestRevertedBaseline:
     def test_extract_on_the_real_baseline(self):
         base = self._load()
         assert alp.explicit_pins_for_box("strih", base["strih"]) == {
-            "NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 20}   # issue 1168 lever 1: cam2 6 -> 3
+            f"NDI cam{n}": 3 for n in range(1, 8)}   # issue 1168: floor-3 live model, cam1..cam7 = 3
         with pytest.raises(SystemExit):
             alp.explicit_pins_for_box("imag", base["imag"])
 
