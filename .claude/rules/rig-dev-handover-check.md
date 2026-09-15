@@ -44,7 +44,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | genlock | `genlock-lock-alert-watchdog.sh --dry-run` | `verdict=HEALTHY` | DEGRADED/UNLOCKED | **UNKNOWN facet = UNKNOWN, NEVER forgot** |
 | dantesync | `dantesync-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
 | cambox | `camera-box-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
-| avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / <3 onsets / cam2 down / stream OBS down |
+| avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` relative onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / chain-silent (all <−60 dB) / <3 onsets / cam2 down / stream OBS down |
 
 ## `avlatency` (#1312) — the mbc measurement-chain LATENCY, not just presence
 
@@ -53,9 +53,10 @@ painter QPSK marker → HDMI speaker → mic → mbc Ableton → Dante → strea
 with the video within the E2E's ±90 ms gate — the −140 ms A/V step of 14.9. is exactly the class it
 catches. It reuses the whole verdict-kind item framework (like `mic`): the standalone
 `scripts/measurement-chain-latency.sh` probe computes the token, the item maps `ALIGNED→OK`,
-`DRIFTED→FORGOT`, everything else `→UNKNOWN`. All decision logic (onset detection at the SAME −60 dB
-`audio-presence-preflight.sh` bar, pairing, median, classify, the wall-clock guard) is the pure
-`scripts/measurement_chain_latency.py` kernel — `python3 -m pytest tests/python/test_measurement_chain_latency_1312.py`.
+`DRIFTED→FORGOT`, everything else `→UNKNOWN`. All decision logic (RELATIVE rolling-floor onset
+detection, the −60 dB `audio-presence-preflight.sh` bar as the SILENT-CHAIN guard only, pairing,
+median, classify, the wall-clock guard) is the pure `scripts/measurement_chain_latency.py` kernel —
+`python3 -m pytest tests/python/test_measurement_chain_latency_1312.py`.
 
 - **NEVER the dock `av_offset_recent_med_ms`.** That signal is PIN-RELATIVE (it read +17 ms while the
   recording gate read −140 ms on 14.9.), so it can NOT be used as absolute. `avlatency` does an
@@ -85,22 +86,42 @@ catches. It reuses the whole verdict-kind item framework (like `mic`): the stand
   with `scripts/measurement-chain-latency.sh --baseline` right AFTER a green E2E (a known-aligned
   chain), and re-seeds it after any deliberate latency change. Until it is seeded the item reads
   UNKNOWN (`NO-BASELINE`), never a false forgot.
+  - **The marker log must be FRESH (cam2-painter.service ACTIVE) or pairing reads 0 even with good
+    onsets (#1312, live 2026-09-15).** A live read read `markers=79 onsets=9 paired=0`: the relative
+    onset detection recovered 9 onsets off the ~−44 dB floor, but `cam2-painter.service` was `inactive`
+    and `/run/rig-qpsk-markers.csv` was frozen ~385 s ago (a transient/leftover painter still sounded
+    the marker), so the log's `emit_ts` were ~330 s behind the live onsets and none paired within the
+    2 s window (cam2↔dev1 clock offset was 0.36 s — NOT the cause). Correct fail-safe (NO-BASELINE), but
+    before `--baseline` confirm the SERVICE is active and the log's newest `emit_ts` is within seconds
+    of `date +%s%N`, not just that onsets ≥ 3.
 - **TEST-premise (two-pass, like `mic`/`painter`).** The QPSK marker only sounds in TEST steady state,
   so on the first EVENT-mode pass `avlatency` reads UNKNOWN; it verifies once the rig is in TEST and
   the painter is back up. It samples the meter ~30 s then ssh-reads the marker log AFTER (so the
   just-emitted markers are present); the whole probe is bounded (`RDH_AVLATENCY_TIMEOUT`, default 100 s)
   so a down cam2 / stream box fails safe to UNKNOWN, never a hang.
-- **Onset SIGNAL model (UNVERIFIED — the supervisor's live baseline confirms it).** The onset detector
-  (`detect_onsets`) assumes each marker is a DISCRETE audio burst with the `mbc` peak dropping BELOW
-  −60 dB between bursts so it re-arms per marker. If the measurement mic's ambient floor sits above
-  −60 dB (church-PA noise, a hot input), the detector re-arms rarely → `paired < 3` → the item stays
-  UNKNOWN (`too-few-onsets`) — fail-safe, never a false OK/forgot, but blind. So the supervisor's FIRST
-  `--baseline` run must confirm `onsets >= 3` (and ideally 6) over the 32 s window BEFORE trusting the
-  written baseline; if it reads `too-few-onsets` on a live, audible chain, the ambient floor (not the
-  latency) is the story. The mixed-clock case cannot arise: the permanent painter TRUNCATES the marker
-  log on every start (`qpsk_emit.rs` #431 `File::create`), so a session's log is all-monotonic (today)
-  or all-wall-clock (after the switch), never a mix — the pure kernel's `all()` wall-clock guard is
-  exactly right.
+- **Onset SIGNAL model — RELATIVE, not the absolute −60 dB bar (#1312, GOTCHA fixed 2026-09-15).**
+  The earlier absolute onset detector armed only after a sample BELOW the −60 dB bar and fired on the
+  next at/above it. That EXACTLY hit the predicted failure: a 45 s live read-only capture of the
+  stream `mbc` peak shows the measurement mic's room/PA floor sits CONTINUOUSLY at ~−41…−47 dB (median
+  −44.5, never below −60), so the detector never armed and returned `markers=145 onsets=0 paired=0
+  verdict=NO-BASELINE` on a LIVE, working chain (the E2E A/V gate paired the same chain at −23 ms
+  minutes earlier). **The mic floor is ~−45 dB on the rig; the absolute −60 dB bar is a SILENCE guard,
+  never an onset bar.** `detect_onsets` now detects onsets RELATIVE to a rolling floor (median of the
+  trailing `ROLLING_FLOOR_WINDOW`=20 samples ≈ 1 s at the ~50 ms WS cadence): a burst rises ≥
+  `ONSET_DELTA_DB`=6 dB above that floor, re-arming with hysteresis at Δ/2. Δ=6 is calibrated from that
+  capture — floor noise stays ≤ 3.8 dB above the rolling median (p99), the ~5 s cadence QPSK bursts
+  rise +7…+25 dB, so 6 dB sits 2.2 dB above noise and catches every real burst (7 onsets on the 45 s
+  fixture, clean ~5 s gaps). The −60 bar is KEPT only as `chain_is_silent`'s guard: every sample below
+  it → 0 onsets, reason `chain-silent` (UNKNOWN, a #1310-class dead-audio problem, never a false
+  drift). A flat but audible floor with no bursts still reads `too-few-onsets` (NOT `chain-silent`).
+  Re-CALIBRATE Δ (`ONSET_DELTA_DB`) only from a fresh live capture if the venue floor/PA level moves
+  the burst-vs-noise margin — never widen it so a marginal chain passes. The fixture
+  `tests/python/fixtures/mbc_meter_live_2026-09-15.txt` is the reference capture.
+- **The mixed-clock case cannot arise:** the permanent painter TRUNCATES the marker log on every start
+  (`qpsk_emit.rs` #431 `File::create`), so a session's log is all-monotonic (today) or all-wall-clock
+  (after the `--wall-clock` switch is live), never a mix — the pure kernel's `all()` wall-clock guard
+  is exactly right. The supervisor's FIRST `--baseline` run must still confirm `onsets >= 3` (ideally
+  6) over the window before trusting the written baseline.
 
 ## Gotchas / invariants
 

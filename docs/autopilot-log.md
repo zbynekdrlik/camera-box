@@ -12089,3 +12089,36 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   floor) → GREEN (protected with the floor); the full-suite replica = 19 passed; the python mirror
   test `test_recordings_retention_mirror_1276.py` = 6 passed; `cargo fmt --all --check` clean;
   doc-lint grep clean. The crate `tests/recordings_retention.rs` runs at CI (no local cargo path).
+## 2026-09-15 — #1312 avlatency: relative rolling-floor onset detection (fix NO-BASELINE on a live chain)
+
+- **Defect:** `scripts/measurement-chain-latency.sh --baseline` returned `markers=145 onsets=0
+  paired=0 verdict=NO-BASELINE` on a LIVE, working mbc chain (the E2E A/V gate paired the same chain
+  at −23 ms minutes earlier). `detect_onsets` armed only after a sample BELOW the absolute −60 dB bar
+  (`audio_preflight_default_threshold_db`, the issue-748 silence guard) and fired on the next at/above.
+- **Root cause (confirmed live):** a 45 s read-only capture of the stream `mbc` peak
+  (`measurement_chain_latency_probe.py --input mbc --sample-s 45 10.77.9.204`, exit 0) shows the
+  room/PA floor through the measurement mic sits continuously at −41…−47 dB (median −44.5), never
+  below −60 → the absolute detector never armed. The −60 bar is the right SILENT-CHAIN guard but the
+  wrong ONSET criterion (the floor moves with PA level / mic gain, so no fixed absolute bar works).
+- **Fix (`scripts/measurement_chain_latency.py`):** onsets detected RELATIVE to a rolling floor —
+  median of the trailing `ROLLING_FLOOR_WINDOW`=20 samples (≈1 s at ~50 ms cadence); a burst rises ≥
+  `ONSET_DELTA_DB`=6 dB above it, re-arm hysteresis at Δ/2. Δ=6 calibrated from the capture (noise ≤
+  3.8 dB rise p99, weakest real burst +7.0 dB, strongest +25 → 2.2 dB margin above noise, catches all
+  7 bursts, clean ~5 s cadence). The −60 bar kept as `chain_is_silent`'s guard: all-below-bar → 0
+  onsets, reason `chain-silent` (UNKNOWN, never a baseline). `measure()` returns `chain_silent`;
+  `reason()` surfaces it; `rig_dev_handover_decision.py`'s `avlatency` UNKNOWN wording names it.
+- **Commits:** RED d6258ebb6 (relative + chain-silent tests + the live fixture
+  `tests/python/fixtures/mbc_meter_live_2026-09-15.txt`), fixture-realism 755948c1a (continuous
+  synthetic meter stream — a sparse fixture defeats the sample-count rolling floor), GREEN af96b0c4d,
+  docs (this entry + the `.claude/rules/rig-dev-handover-check.md` gotcha).
+- **Local verify (Tier-0, pure python):** RED 7 failed / 18 passed → GREEN 25 passed
+  (`test_measurement_chain_latency_1312.py`); broader `-k "measurement_chain or handover"` 45 passed.
+- **Live read-only measure (no `--baseline`):** `markers=79 onsets=9 paired=0 verdict=NO-BASELINE` —
+  the onset FIX is proven live (the defect read `onsets=0`; relative detection now recovers 9 onsets
+  at the ~5–6 s marker cadence off the ~−44 dB room floor). `paired=0` is a SEPARATE rig-state issue,
+  not this fix: `cam2-painter.service` was `inactive` and its persistent marker log
+  `/run/rig-qpsk-markers.csv` was frozen ~385 s ago while marker audio still sounded, so the log's
+  `emit_ts` are ~330 s behind the live onsets (cam2↔dev1 clock offset measured 0.36 s — NOT the cause).
+  The verdict is the correct fail-safe (NO-BASELINE UNKNOWN, never a false forgot). Before seeding the
+  avlatency baseline the supervisor must confirm `cam2-painter.service` is active in TEST steady state
+  with a FRESH marker log so onsets pair (`onsets>=3` AND `paired>=3`).
