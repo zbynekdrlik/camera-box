@@ -12404,3 +12404,19 @@ no version bump (worktree lane; supervisor cherry-picks).
   pin (the 15.9. worked numbers were inverted); production stays floor-3 (no-op, no regression);
   grabber-vs-pin decision raised on the ticket (needs-answer). No production pins applied, recording-e2e.sh
   untouched. 15 new pytest, 260 related green.
+- issue 1320 (RED 4ff188a37 → GREEN 5a846ad4e → feat 9f3305b68 → review-F1 1ffd475f6): strih PROGRAM
+  render freeze on a scene-switch-coincident NDI reattach. ROOT CAUSE (traced + confirmed live,
+  read-only strih OBS logs 15.9.2026 — 7 severe freezes in one afternoon, identical signature): an
+  ASYNC_VIDEO `ndi_source_update` is DEFERRED to `obs_source_video_tick` → runs ON THE GRAPHICS THREAD;
+  a CLEAR-then-SET reattach clears the name to `""` → `ndi_source_thread_stop` → `pthread_join` waits on
+  the av-thread's exit-path `NDIlib_recv_destroy` which blocks ~7.5 s → PROGRAM render freeze
+  (`program-render-audit lagged=228 avg_frame_ms=782`) → 2ME PGM starved → stream FIFO underrun →
+  462-relock storm → +2/+3 frame presented age ~40 min. NOT the scene switch itself (60 switches, incl.
+  a rapid-fire storm, produced exactly ONE lagged>0 window). FIX: hand the exit-path teardown to a
+  DETACHED reaper (`ndi_reap_receiver_detached`, pure `ndi_reap_should_defer` gate) so the join returns
+  in ~ms; existing diag logs byte-identical; new `genlock-reap:` marker; yml mirrors in both
+  windows-genlock*.yml. Report-only `program_render_lagged` bundle-state facet
+  (`scripts/bundle_state_gather.py` + `bundle-state-server.py`). Tests: distroav_scene_switch_reinit_1320.rs
+  (lift-compile + 8-row truth table) + test_program_render_lagged_gather_1320.py. Reviewed clean (7/7
+  lenses OK); F1 (shutdown-race crash-on-exit) accepted + documented, clean reaper-drain = follow-up.
+  Vendored C++ compiles only on CI (Tier-0). Live cure UNVERIFIED — supervisor full-bundle deploy + soak.

@@ -55,3 +55,21 @@ audit line"): lift-compile the `blog()` format string under `-Wformat=2 -Wconver
 (field names `program_render_audit_*`, DISTINCT from the obs_display `render_audit_*` #771 fields to
 avoid the `genlock_preload.rs`/ymls anchor collision). `tests/program_render_audit_emit.rs` is the
 std-only RED→GREEN anchor (run via `rustc --test`, the #1026 recipe).
+
+## #1320 — the `program_render_lagged` bundle-state facet (a `lagged>0` window == a render-thread freeze)
+
+A `program-render-audit` window with `lagged>0` is a PROGRAM render-thread freeze (renderSkipped). The
+issue-1320 live root cause: `ndi_source_update` is DEFERRED to `obs_source_video_tick` for an
+ASYNC_VIDEO source, so it runs on THIS same graphics thread; a CLEAR-then-SET NDI reattach whose
+`ndi_source_thread_stop` → `pthread_join` waited on a ~7.5 s blocking `NDIlib_recv_destroy` froze the
+render for the whole join (see `distroav-receiver-lifecycle.md` → the #1320 section for the cure).
+
+`scripts/bundle_state_gather.py` `program_render_lagged_from_log(text)` exposes this as a report-only
+bundle-state facet `(program_render_lagged, program_render_lagged_age_s)`: the MAX `lagged` over the
+#1222 bounded TAIL + the in-log age (whole seconds) of the MOST RECENT window achieving that max, so a
+dev1 watchdog can page on a RECENT freeze (not one that scrolled out of the tail). Omit-when-empty
+contract: `"0"` (render telemetry live, no freeze) is a truthy string and is KEPT — distinct from `""`
+(no `program-render-audit` line at all → dropped → UNKNOWN downstream, never a fabricated 0). Wired
+through `build_bundle_state` + `bundle-state-server.py` so it appears on `:8899/bundle-state.json`;
+pytest `tests/python/test_program_render_lagged_gather_1320.py`. The dev1 render-freeze watchdog that
+pages on this facet + on `relock_bursts>=1` (issue 1318's `summarize_relock_bursts`) is a follow-up.

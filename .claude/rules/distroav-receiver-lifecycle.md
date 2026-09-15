@@ -350,3 +350,46 @@ gate; CI is the first real compiler. The live cure reproduces only live — UNVE
 supervisor's post-deploy rig repro (bounce a cambox sender against strih; expect `#1096 rebind BY-URL …
 (last-known good` / `(fleet map …` → `received=` Δ>0 without an OBS restart). Candidate (c), the dev1
 frozen-input watchdog extension to strih camera inputs, is a SEPARATE lane (`scripts/frozen-input-*`).
+
+## #1320 — `ndi_source_update` runs on the GRAPHICS thread, so a blocking teardown in its stop-path freezes the PROGRAM render
+
+`ndi_source` is `OBS_SOURCE_ASYNC_VIDEO` (⇒ `OBS_SOURCE_VIDEO`), so `obs_source_update()`
+(`vendor/obs-studio/libobs/obs-source.c`) does NOT run `info.update` inline — it **defers** it
+(`os_atomic_inc_long(&source->defer_update_count)`), and the deferred `ndi_source_update` runs from
+`obs_source_video_tick` → `obs_source_deferred_update`, which `obs-video.c`'s
+`obs_graphics_thread_loop` calls **ON THE OBS GRAPHICS/RENDER THREAD**. So anything `ndi_source_update`
+does synchronously blocks the PROGRAM render, not just the caller's WS/main thread.
+
+The live incident (issue 1320, strih 15.9.2026 — 7 severe freezes in one afternoon, read-only logs):
+a CLEAR-then-SET reattach (a heal/`set-ndi-mapping`-class script, see the #1114 note above) clears the
+NDI source name to `""` → `ndi_source_update` → `ndi_source_thread_stop` → `pthread_join`, and the
+av-thread's EXIT-path `NDIlib_recv_destroy()` blocks **~7.5 s** (an SDK-internal teardown timeout). The
+graphics thread sits in that join the whole time → PROGRAM render freeze (`program-render-audit
+lagged=228 avg_frame_ms=782`, the ONLY `lagged>0` window in a 95 min session) → the `2ME PGM` NDI
+output starves → the stream receive FIFO underruns → a 462-relock storm → the presented video sits
++2/+3 frames late for ~40 min. EVERY freeze has the identical signature: `ndi_source_update: No NDI
+Source selected; Requesting Source Thread Stop` → exit `recv_destroy` → **~7.5 s** → `Reset NDI
+Receiver`, and the freeze window's timestamp == the recv_destroy completion. A scene switch is NOT the
+cause: 60 scene switches in the same session (incl. a 8-switch rapid-fire storm ~1.5 s apart) produced
+exactly ONE `lagged>0` window — the one coincident with the slow reattach.
+
+**The fix (`ndi_reap_receiver_detached` + the pure `ndi_reap_should_defer` gate):** the av-thread's
+EXIT-path framesync+receiver teardown is handed to a DETACHED reaper thread, so the blocking
+`recv_destroy` never holds up the `pthread_join` — the join, and the render thread, return in ~ms. The
+NDI handles are plain instances independent of `ndi_source_t`, so the reaper races nothing in `s` or a
+freshly-started av-thread; a `std::thread` spawn failure falls back to a synchronous destroy (never
+crash). All existing exit-path diagnostic log lines are kept **byte-identical** (they only PRINT now;
+the destroy is deferred — F2 of the review, deliberate) and a new mutually-non-substring `genlock-reap:`
+marker records each handoff. Anchors mirrored into BOTH `windows-genlock*.yml` (the fast path hot-swaps
+`distroav.dll` un-gated). Std-only gate + truth table: `tests/distroav_scene_switch_reinit_1320.rs`.
+
+**Scoped to the EXIT path only.** The in-loop `reset_ndi_receiver` block's `recv_destroy` (a warm-
+receiver recreate) is the SAME defect class but runs on the av-thread and only contributes to the join
+latency in the rare case the stop lands mid-reset (the 17:04 partial, `lagged=61`); it sits in the
+issue-1080/1096 minefield with its own test anchors, so async-reaping it is a bounded FOLLOW-UP, not
+folded here. Accepted shutdown-race (review F1): a detached reaper can outlive `ndiLib->destroy()` on
+OBS process shutdown (a rare crash-on-exit) — accepted vs the live freeze; a clean outstanding-reaper
+drain before `ndiLib->destroy()` is the follow-up. Detection: the report-only `program_render_lagged`
+bundle-state facet (see `program-render-audit.md`); a dev1 watchdog paging on it + `relock_bursts>=1`
+is the supervisor's follow-up. The live cure (20 scene switches, no `lagged>0`, dock ±15 ms ≥2 h) is
+UNVERIFIED until the supervisor's full-bundle deploy + rig soak.
