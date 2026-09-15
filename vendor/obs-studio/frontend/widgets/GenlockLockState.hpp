@@ -15,6 +15,8 @@
 // C++ (the gate compiles it as C; OBSBasicStatusBar.cpp includes it as C++).
 #pragma once
 
+#include <stdint.h> /* #1299 Part 3: uint64_t / UINT64_MAX for genlock_input_phase_events (pure C — not <obs>/<Q>, so the parity-lift + purity guard stay green) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -111,6 +113,30 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 	if (reason_out)
 		*reason_out = reason;
 	return state;
+}
+
+/* #1299 Part 3 — the pure "phase event" count for ONE genlock input feeding recent_event: the
+ * clock/phase class a LOCK verdict owns (relocks + late_holds + backward_steps). UNDERRUNS are
+ * EXCLUDED (a latency-budget miss owned by the genlock-fifo audit + cg-chain-verify / issue 1302,
+ * and bursty) and a DISCONNECTED input contributes 0 (its #1096 rebind churn is idle, not a fault).
+ * Byte-for-byte mirror of camera_box::genlock_lock_state::input_phase_events — the parity gate
+ * tests/genlock_lock_state_parity.rs lifts THIS function too. Saturating so a pathological count can
+ * never wrap (matches the Rust saturating_add). Placed AFTER genlock_decide_lock_state so the
+ * decision-block lift is unaffected. */
+static inline uint64_t genlock_input_phase_events(int connected, uint64_t relocks,
+						  uint64_t late_holds, uint64_t backward_steps)
+{
+	uint64_t sum;
+	if (!connected)
+		return 0;
+	sum = relocks;
+	if (sum > UINT64_MAX - late_holds)
+		return UINT64_MAX;
+	sum += late_holds;
+	if (sum > UINT64_MAX - backward_steps)
+		return UINT64_MAX;
+	sum += backward_steps;
+	return sum;
 }
 
 #ifdef __cplusplus

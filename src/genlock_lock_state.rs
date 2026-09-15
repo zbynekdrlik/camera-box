@@ -185,6 +185,73 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     (LockState::Locked, LockReason::None)
 }
 
+/// #1299 Part 3 — one genlock input's cumulative event counters as the recent-event aggregation
+/// reads them. Plain scalars so the C mirror (`GenlockLockState.hpp`, `genlock_input_phase_events`)
+/// ports byte-for-byte; the committed parity gate `tests/genlock_lock_state_parity.rs` keeps the two
+/// numerically identical.
+#[derive(Debug, Clone, Copy)]
+pub struct InputEventCounts {
+    /// The DistroAV receiver has a live NDI connection (sender running). A disconnected input
+    /// contributes ZERO — its #1096 fresh-finder rebind churn is not a lock event.
+    pub connected: bool,
+    /// FIFO relock count (a boundary was re-acquired — a phase-discipline event).
+    pub relocks: u64,
+    /// Late-hold count (a hold fired after its deadline — a phase-discipline event).
+    pub late_holds: u64,
+    /// Backward-step count (the phase stepped back — a phase-discipline event).
+    pub backward_steps: u64,
+}
+
+/// #1299 Part 3 — the "phase event" count for ONE input feeding `recent_event`: the clock/phase
+/// class a genlock LOCK verdict owns — `relocks + late_holds + backward_steps`.
+///
+/// UNDERRUNS ARE EXCLUDED (decision (c)): an underrun is a LATENCY-BUDGET miss (the FIFO ran dry
+/// because the upstream frame arrived after the certified `latency_ms` pin), which the
+/// `genlock-fifo audit` line + cg-chain-verify (issue 1302) already surface and gate; it is also
+/// bursty, so counting it here latched `recent_event` DEGRADED chronically. An ABSENT input
+/// (`connected == false`) contributes 0 — its rebind/reset churn is idle, not a fault. Saturating
+/// so a synthetic near-`u64::MAX` parity vector can never overflow (the C mirror clamps identically).
+pub fn input_phase_events(c: &InputEventCounts) -> u64 {
+    if !c.connected {
+        return 0;
+    }
+    c.relocks
+        .saturating_add(c.late_holds)
+        .saturating_add(c.backward_steps)
+}
+
+/// #1299 Part 3 — the aggregate phase-event counter (summed over CONNECTED inputs) whose INCREASE
+/// across the widget's 1 Hz samples sets `recent_event`. Absent + underrun contributions are
+/// excluded per [`input_phase_events`], so the existing 60 s recency window ages out normally
+/// instead of latching on a continuously-incrementing underrun / absent-sender rebind driver.
+pub fn connected_phase_event_sum(inputs: &[InputEventCounts]) -> u64 {
+    inputs
+        .iter()
+        .map(input_phase_events)
+        .fold(0u64, |a, e| a.saturating_add(e))
+}
+
+/// #1299 Part 3 (b) — the top recent-event offender: the index of the CONNECTED input carrying the
+/// most phase events, and that count. `None` when no connected input carries any phase event (so the
+/// DEGRADED reason is never enriched with a spurious `:<name>` and the JSON `recent_event_inputs`
+/// list stays empty). Ties resolve to the FIRST (lowest index) in scan order — deterministic,
+/// mirroring the widget's `unlocked_names.front()` selection. The widget maps the index back to the
+/// input's name for `reason=recent_event:<name>`.
+pub fn top_phase_event_offender(inputs: &[InputEventCounts]) -> Option<(usize, u64)> {
+    let mut best: Option<(usize, u64)> = None;
+    for (i, c) in inputs.iter().enumerate() {
+        let e = input_phase_events(c);
+        if e == 0 {
+            continue;
+        }
+        match best {
+            Some((_, be)) if be >= e => {}
+            _ => best = Some((i, e)),
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +513,67 @@ mod tests {
         assert_eq!(LockReason::NtpFailed.code(), 7);
         assert_eq!(LockReason::QpcDrift.code(), 8);
         assert_eq!(LockReason::AudioPairing.code(), 9);
+    }
+
+    // --- #1299 Part 3: the connected-phase-only recent-event feed + offender attribution ----------
+
+    fn ev(connected: bool, relocks: u64, late_holds: u64, backward_steps: u64) -> InputEventCounts {
+        InputEventCounts {
+            connected,
+            relocks,
+            late_holds,
+            backward_steps,
+        }
+    }
+
+    #[test]
+    fn phase_events_sum_the_three_phase_classes() {
+        assert_eq!(input_phase_events(&ev(true, 2, 3, 4)), 9);
+    }
+
+    #[test]
+    fn phase_events_exclude_underruns_by_construction() {
+        // InputEventCounts has NO underrun field — an underrun can never contribute to a phase-event
+        // count. Two inputs differing only in (hypothetical) underruns compute identically here.
+        assert_eq!(input_phase_events(&ev(true, 1, 0, 0)), 1);
+    }
+
+    #[test]
+    fn absent_input_contributes_no_phase_events() {
+        // The #1096 rebind churn of a senderless input (its relocks climb) must NOT count.
+        assert_eq!(input_phase_events(&ev(false, 99, 88, 77)), 0);
+    }
+
+    #[test]
+    fn connected_sum_excludes_absent_inputs() {
+        let inputs = [ev(true, 1, 0, 0), ev(false, 500, 0, 0), ev(true, 0, 2, 0)];
+        assert_eq!(connected_phase_event_sum(&inputs), 3);
+    }
+
+    #[test]
+    fn offender_is_the_top_connected_phase_input() {
+        // cg (index 1) has the most phase events among CONNECTED inputs; the absent input at index 2
+        // has more raw counters but is excluded.
+        let inputs = [ev(true, 1, 0, 0), ev(true, 20, 5, 0), ev(false, 9999, 0, 0)];
+        assert_eq!(top_phase_event_offender(&inputs), Some((1, 25)));
+    }
+
+    #[test]
+    fn no_offender_when_no_connected_phase_event() {
+        // Only an absent input carries counters -> no connected phase event -> None (the reason is
+        // never enriched with a spurious :<name>, the JSON list stays empty).
+        let inputs = [ev(true, 0, 0, 0), ev(false, 50, 0, 0)];
+        assert_eq!(top_phase_event_offender(&inputs), None);
+    }
+
+    #[test]
+    fn offender_ties_resolve_to_the_first_in_scan_order() {
+        let inputs = [ev(true, 3, 0, 0), ev(true, 3, 0, 0)];
+        assert_eq!(top_phase_event_offender(&inputs), Some((0, 3)));
+    }
+
+    #[test]
+    fn saturating_never_overflows_on_a_pathological_count() {
+        assert_eq!(input_phase_events(&ev(true, u64::MAX, 5, 0)), u64::MAX);
     }
 }

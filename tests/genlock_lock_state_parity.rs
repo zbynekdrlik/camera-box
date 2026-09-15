@@ -18,7 +18,7 @@
 //! toolchain is missing — a parity test that silently passes without running is worse than
 //! no test.
 
-use camera_box::genlock_lock_state::{decide, GenlockFacets};
+use camera_box::genlock_lock_state::{decide, input_phase_events, GenlockFacets, InputEventCounts};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -206,6 +206,127 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
          {} of {} vectors. These two are required to be numerically identical — the Rust one is \
          unit-tested and the C one is what ships to the rig, so a divergence means the deployed \
          indicator is not the behaviour any test covers:\n{}",
+        diffs.len(),
+        vs.len(),
+        diffs.join("\n")
+    );
+}
+
+/// #1299 Part 3 — lift the `genlock_input_phase_events` function VERBATIM out of the header (it sits
+/// AFTER `genlock_decide_lock_state`, so [`lift_decision`] never captures it and this is a separate
+/// lift). The parity gate compiles it standalone and sweeps it against the Rust authority.
+fn lift_phase_events() -> String {
+    let path = repo(HEADER);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("static inline uint64_t genlock_input_phase_events(")
+        .unwrap_or_else(|| {
+            panic!("#1299: {HEADER} no longer defines genlock_input_phase_events — the connected-phase recent-event rule's C mirror is gone, nothing to parity-check.")
+        });
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|i| start + i + 3)
+        .expect("#1299: genlock_input_phase_events has no closing brace");
+    src[start..end].to_string()
+}
+
+#[test]
+fn c_input_phase_events_matches_the_rust_authority_1299() {
+    let block = lift_phase_events();
+
+    // The grid both sides must agree on: the connected flag crossed with a spread of per-class
+    // counts including 0, small, and a saturating extreme (UINT64_MAX) to exercise the clamp.
+    let big = u64::MAX;
+    let counts = [0u64, 1, 2, 7, 25, 500, big];
+    let mut vs: Vec<InputEventCounts> = Vec::new();
+    for &connected in &[false, true] {
+        for &r in &counts {
+            for &(l, b) in &[(0u64, 0u64), (3, 0), (0, 4), (2, 5), (big, 0), (0, big)] {
+                vs.push(InputEventCounts {
+                    connected,
+                    relocks: r,
+                    late_holds: l,
+                    backward_steps: b,
+                });
+            }
+        }
+    }
+
+    // --- build the C harness --------------------------------------------------------
+    let mut c = String::from("#include <stdio.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
+    c.push_str(&block);
+    c.push_str("int main(void){\n");
+    for v in &vs {
+        c.push_str(&format!(
+            "    printf(\"%\" PRIu64 \"\\n\", genlock_input_phase_events({},{}ULL,{}ULL,{}ULL));\n",
+            v.connected as i32, v.relocks, v.late_holds, v.backward_steps
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_phase_events_parity_1299");
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("phase.c");
+    let bin = dir.join("phase.bin");
+    fs::write(&cfile, &c).expect("write the parity harness");
+
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "#1299: could not run the C compiler `{cc}` ({e}). This gate compiles the vendored \
+                 genlock_input_phase_events to prove the C and the Rust authority agree; it must \
+                 FAIL rather than skip when the toolchain is absent. Install a C compiler or set CC."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "#1299: genlock_input_phase_events lifted from {HEADER} does NOT COMPILE standalone under \
+         -Wall -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let run = Command::new(&bin)
+        .output()
+        .expect("#1299: the compiled phase-events parity harness failed to execute");
+    assert!(
+        run.status.success(),
+        "#1299: harness exited non-zero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
+    let c_out: Vec<u64> = stdout
+        .lines()
+        .map(|l| l.trim().parse().expect("phase-events u64"))
+        .collect();
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "#1299: harness printed {} lines for {} vectors",
+        c_out.len(),
+        vs.len()
+    );
+
+    let mut diffs = Vec::new();
+    for (v, &got_c) in vs.iter().zip(&c_out) {
+        let got_rs = input_phase_events(v);
+        if got_rs != got_c {
+            diffs.push(format!(
+                "  connected={} relocks={} late={} backward={} -> C {}, Rust {}",
+                v.connected as i32, v.relocks, v.late_holds, v.backward_steps, got_c, got_rs
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "#1299: the vendored C genlock_input_phase_events DIVERGED from the Rust authority on {} of \
+         {} vectors — the connected-phase recent-event rule must be numerically identical on both \
+         ports:\n{}",
         diffs.len(),
         vs.len(),
         diffs.join("\n")

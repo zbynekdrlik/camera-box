@@ -119,7 +119,12 @@ def genlock_lock_facet_from_log(text):
       {state, reason, n_inputs, n_locked, n_absent, latency_ms, recent_event, qpc_drift_ms,
        clock:{state}, output:{present, stamping_wallclock},
        inputs:{<name>:{locked, connected, latency_ms, underruns, relocks, late_holds, depth}},
-       source:"log"}
+       [recent_event_inputs:[{name, events}]], source:"log"}
+
+    #1299 (schema v3, Part 3): `recent_event_inputs` is the top recent-event offender (name+count),
+    present ONLY when the v3 line carries a non-empty list (a DEGRADED/recent_event page names it).
+    Omitted for a v1/v2 line from an older build, or an empty list, so an older line never fabricates
+    an attribution.
 
     #1299 (schema v2): `n_absent` (senderless input count) and per-input `connected` distinguish an
     idle NDI input (no sender) from a connected-but-unlocked one so the fleet watchdog never
@@ -196,6 +201,24 @@ def genlock_lock_facet_from_log(text):
         "inputs": inputs_map,
         "source": "log",
     }
+
+    # #1299 (schema v3, Part 3): the top recent-event offender(s) — [{name, events}] — so a
+    # DEGRADED/recent_event page can NAME the offending input (reason=recent_event:<name>). Omit the
+    # key entirely when absent (a v1/v2 line from an older build) or empty (no offender), so an older
+    # line never fabricates an attribution. Each entry is tolerant: a malformed row is skipped.
+    raw_rei = payload.get("recent_event_inputs")
+    if isinstance(raw_rei, list):
+        rei = []
+        for row in raw_rei:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            rei.append({"name": name, "events": row.get("events")})
+        if rei:
+            facet["recent_event_inputs"] = rei
+
     return facet
 
 

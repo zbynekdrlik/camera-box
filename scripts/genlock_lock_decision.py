@@ -158,8 +158,29 @@ def analyze(bundle_json_text, box_reachable):
     n_locked = facet.get("n_locked")
     n_absent = facet.get("n_absent")  # #1299: senderless inputs (observability; the widget already
                                       # decided `state`, so this never changes the verdict here).
+    reason = _enrich_recent_event_reason(reason, facet)
     return {"verdict": classify(state, box_reachable), "state": state, "reason": reason,
             "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent}
+
+
+def _enrich_recent_event_reason(reason, facet):
+    """#1299 Part 3: for a `recent_event` reason, append the top offending input's name so the
+    watchdog log line + Discord body read `recent_event:<name>` (an actionable page). The widget
+    carries the offender in the v3 `recent_event_inputs` list; when it is absent/empty (a v1/v2 line,
+    or no offender) the bare `recent_event` token is returned unchanged — never `recent_event:` with
+    an empty name. Any other reason is returned verbatim (a stray offender list never corrupts it)."""
+    if reason != R_RECENT_EVENT:
+        return reason
+    rei = facet.get("recent_event_inputs")
+    if not isinstance(rei, list) or not rei:
+        return reason
+    top = rei[0]
+    if not isinstance(top, dict):
+        return reason
+    name = top.get("name")
+    if not isinstance(name, str) or not name:
+        return reason
+    return f"{R_RECENT_EVENT}:{name}"
 
 
 def _fmt(v):

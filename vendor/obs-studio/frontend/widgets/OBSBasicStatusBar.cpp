@@ -58,6 +58,7 @@ struct GenlockInputRow {
 	uint64_t underruns = 0;
 	uint64_t relocks = 0;
 	uint64_t late_holds = 0;
+	uint64_t backward_steps = 0; /* #1299 Part 3: phase-event class (with relocks+late_holds), NOT underruns */
 	uint32_t depth = 0;
 };
 struct GenlockScan {
@@ -89,7 +90,10 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	scan->n_inputs++;
 	if (st.locked)
 		scan->n_locked++;
-	scan->event_sum += st.underruns + st.relocks + st.late_holds + st.backward_steps;
+	/* #1299 Part 3: the recent-event driver (scan->event_sum) is NO LONGER summed here — an
+	 * incremental sum over EVERY input + EVERY event class (incl. underruns + absent-sender rebind
+	 * churn) latched the 60 s window forever. It is recomputed AFTER the scan as the CONNECTED-only,
+	 * PHASE-only aggregate via genlock_input_phase_events (see UpdateGenlockLabel). */
 	const int64_t d = st.wall_qpc_drift_ms < 0 ? -st.wall_qpc_drift_ms : st.wall_qpc_drift_ms;
 	if (d > scan->max_abs_qpc_drift_ms)
 		scan->max_abs_qpc_drift_ms = d;
@@ -136,6 +140,7 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	rec.underruns = st.underruns;
 	rec.relocks = st.relocks;
 	rec.late_holds = st.late_holds;
+	rec.backward_steps = st.backward_steps; /* #1299 Part 3: feeds genlock_input_phase_events */
 	rec.depth = (uint32_t)st.depth;
 	scan->inputs.push_back(std::move(rec));
 	return true;
@@ -242,13 +247,15 @@ void genlock_json_append_escaped(std::string &out, const char *s)
  * (absent|locked|unlocked / absent|stamping|not-stamping). Pure — no Qt, no obs_data. */
 std::string genlock_build_lock_json(const char *state_name, const char *reason_key, int n_inputs,
 				    int n_locked, int n_absent, uint32_t latency_ms, const char *clock_str,
-				    const char *output_str, bool recent_event, int64_t qpc_drift_ms,
-				    const std::vector<GenlockInputRow> &inputs)
+				    const char *output_str, bool recent_event,
+				    const char *recent_event_input_name, uint64_t recent_event_input_events,
+				    int64_t qpc_drift_ms, const std::vector<GenlockInputRow> &inputs)
 {
-	/* #1299: schema v2 adds top-level n_absent + per-input connected (both additive; the
-	 * bundle-state parser defaults n_absent->None and connected->true for a v1 line from an older
-	 * build, so a mixed fleet reads cleanly). */
-	std::string j = "{\"v\":2,\"state\":";
+	/* #1299: schema v2 added top-level n_absent + per-input connected; Part 3 (v3) adds
+	 * recent_event_inputs (the top recent-event offender name+count). All additive: the bundle-state
+	 * parser defaults n_absent->None, connected->true, and OMITS recent_event_inputs when absent/empty,
+	 * so a v1/v2 line from an older build reads cleanly. */
+	std::string j = "{\"v\":3,\"state\":";
 	genlock_json_append_escaped(j, state_name);
 	j += ",\"reason\":";
 	genlock_json_append_escaped(j, reason_key);
@@ -262,6 +269,16 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 	genlock_json_append_escaped(j, output_str);
 	j += ",\"recent_event\":";
 	j += recent_event ? "true" : "false";
+	/* #1299 Part 3: the top recent-event offender (a one-element list; empty when none), so a
+	 * DEGRADED/recent_event page can name the input. The bundle-state parser omits an empty list. */
+	j += ",\"recent_event_inputs\":[";
+	if (recent_event_input_name && recent_event_input_name[0]) {
+		j += "{\"name\":";
+		genlock_json_append_escaped(j, recent_event_input_name);
+		snprintf(num, sizeof(num), ",\"events\":%llu}", (unsigned long long)recent_event_input_events);
+		j += num;
+	}
+	j += "]";
 	snprintf(num, sizeof(num), ",\"qpc_drift_ms\":%lld,\"inputs\":[", (long long)qpc_drift_ms);
 	j += num;
 	bool first = true;
@@ -953,9 +970,29 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	GenlockOutScan out;
 	obs_enum_outputs(genlock_scan_output, &out);
 
+	/* #1299 Part 3: recompute the recent-event driver as the CONNECTED-only, PHASE-only aggregate
+	 * (relocks + late_holds + backward_steps). UNDERRUNS are DROPPED — a latency-budget miss owned
+	 * by the genlock-fifo audit + cg-chain-verify (issue 1302), and bursty, so counting it latched
+	 * the 60 s window chronically; an ABSENT input (its #1096 rebind churn) contributes 0. Also pick
+	 * the top offender — the connected input carrying the most phase events — so a DEGRADED reason
+	 * NAMES the culprit (reason=recent_event:<name>). genlock_input_phase_events is the pure rule
+	 * shared with src/genlock_lock_state.rs (C-vs-Rust parity-gated). */
+	scan.event_sum = 0;
+	std::string recent_event_input_name;
+	uint64_t recent_event_input_events = 0;
+	for (const GenlockInputRow &r : scan.inputs) {
+		const uint64_t pe = genlock_input_phase_events(r.connected ? 1 : 0, r.relocks, r.late_holds,
+							       r.backward_steps);
+		scan.event_sum += pe;
+		if (pe > recent_event_input_events) {
+			recent_event_input_events = pe;
+			recent_event_input_name = r.name;
+		}
+	}
+
 	const qint64 now_ms = genlockClock.elapsed();
 
-	/* recent-event (relock/underrun/late-hold/backward-step in the last 60 s): detect an
+	/* recent-event (relock/late-hold/backward-step on a CONNECTED input in the last 60 s): detect an
 	 * INCREASE of the aggregate cumulative counter across ticks. A decrease (a reconnect reset
 	 * the counters) re-baselines with no event. */
 	if (genlockFirstSample) {
@@ -1015,7 +1052,13 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		}
 		break;
 	case GENLOCK_LOCK_REASON_RECENT_EVENT:
-		reasonText = "recent relock/underrun";
+		/* #1299 Part 3: name the offending input (the connected input with the most phase events);
+		 * "underrun" is no longer a recent-event class, so the text no longer says it. */
+		if (!recent_event_input_name.empty())
+			reasonText = QString("recent event: %1")
+					     .arg(QString::fromStdString(recent_event_input_name));
+		else
+			reasonText = "recent event";
 		break;
 	case GENLOCK_LOCK_REASON_NTP_FAILED:
 		reasonText = "clock NTP failed";
@@ -1074,6 +1117,15 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		tip += "  " + QString::fromStdString(row) + "\n";
 	genlockLabel->setToolTip(tip.trimmed());
 
+	/* #1299 Part 3: the human genlock-lock: line NAMES the offending input for a recent_event
+	 * (reason=recent_event:cg). The JSON reason stays the bare enum token (the decision matches on
+	 * it); the attribution rides recent_event_inputs there. */
+	std::string reason_key_str = genlock_reason_key(reason);
+	if (reason == GENLOCK_LOCK_REASON_RECENT_EVENT && !recent_event_input_name.empty()) {
+		reason_key_str += ":";
+		reason_key_str += recent_event_input_name;
+	}
+
 	/* greppable log on state/reason change (the #1298 genlock-lock: family). */
 	if ((int)state != genlockLastLoggedState || (int)reason != genlockLastLoggedReason) {
 		genlockLastLoggedState = (int)state;
@@ -1082,7 +1134,7 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		     "genlock-lock: state=%s inputs=%d/%d latency_ms=%u clock=%s output=%s reason=%s (#1298)",
 		     genlock_state_name(state), f.n_locked, f.n_inputs, scan.any_input ? scan.min_latency_ms : 0u,
 		     !clock_present ? "absent" : (f.clock_locked ? "locked" : "unlocked"),
-		     !out.present ? "absent" : (out.stamping ? "stamping" : "not-stamping"), genlock_reason_key(reason));
+		     !out.present ? "absent" : (out.stamping ? "stamping" : "not-stamping"), reason_key_str.c_str());
 	}
 
 	/* camera-box #1299: the machine-readable genlock-lock-json: line the dev1 fleet watchdog +
@@ -1098,11 +1150,16 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		genlockJsonHeartbeatTicks = 0;
 		genlockJsonLastState = (int)state;
 		genlockJsonLastReason = (int)reason;
+		/* #1299 Part 3: the offender rides the JSON only when there IS a recent event AND a named
+		 * connected phase offender — otherwise recent_event_inputs is an empty list (the parser
+		 * omits the key), so a v3 line never fabricates an attribution. */
+		const bool has_offender = recent_event && !recent_event_input_name.empty();
 		const std::string gl_json = genlock_build_lock_json(
 			genlock_state_name(state), genlock_reason_key(reason), f.n_inputs, f.n_locked,
 			f.n_absent, scan.any_input ? scan.min_latency_ms : 0u,
 			!clock_present ? "absent" : (f.clock_locked ? "locked" : "unlocked"),
 			!out.present ? "absent" : (out.stamping ? "stamping" : "not-stamping"), recent_event,
+			has_offender ? recent_event_input_name.c_str() : nullptr, recent_event_input_events,
 			scan.max_abs_qpc_drift_ms, scan.inputs);
 		blog(LOG_INFO, "genlock-lock-json: %s (#1299)", gl_json.c_str());
 	}
