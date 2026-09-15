@@ -12122,3 +12122,29 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   The verdict is the correct fail-safe (NO-BASELINE UNKNOWN, never a false forgot). Before seeding the
   avlatency baseline the supervisor must confirm `cam2-painter.service` is active in TEST steady state
   with a FRESH marker log so onsets pair (`onsets>=3` AND `paired>=3`).
+
+## 2026-09-15 — #1299 reopen Part 1: a `connected` term so an absent-sender input never grades the box DEGRADED
+
+- Issue #1299 REOPENED (fleet-visible genlock LOCK facet + dev1 watchdog): the live dry-run after the
+  d55afb726 deploy showed stream graded `DEGRADED reason=input_unlocked` because its 'NDIA cg stream'
+  input has no sender running — a chronic false page on a production-critical time-bucketed key, so
+  the timer stayed OFF. Root cause: `decide()` gated DEGRADED on `n_locked < n_inputs` with no notion
+  of a receiver connection.
+- FIX (Part 1, this lane): propagate the DistroAV receiver connection state through libobs into the
+  pure decision. New `obs_source.genlock_connected` (default true), runtime setter
+  `obs_source_set_genlock_connected`, `obs_genlock_stats.connected` (v2→v3), driven by
+  `ndi-source.cpp`'s receiver loop from `recv_get_no_connections() > 0`. The decision (Rust authority
+  `src/genlock_lock_state.rs` + C mirror `GenlockLockState.hpp`) gains an `n_absent` facet and gates
+  DEGRADED on `n_locked < n_connected` (`n_connected = n_inputs - n_absent`); all-senderless is
+  HEALTHY-idle (LOCKED). Widget emits per-input `connected` + top-level `n_absent`
+  (`genlock-lock-json:` schema v1→v2); python `genlock_lock_decision.py` + `bundle_state_gather.py`
+  carry them (v1 lines default `connected`→True, `n_absent`→None); watchdog logs `n_absent`.
+- Commits: RED `ed843c1ea` (test: absent-sender must not DEGRADE, 7 python decision failures vs HEAD's
+  module) → GREEN `35238fa73` (impl + parity/contract test updates). Local verify: rustc --test on the
+  Rust module (26), a C-vs-Rust parity replica over 4352 vectors incl. the n_absent axis (identical),
+  the g++ -Werror round-trip of the JSON builder, the guard tests (rustc --test, 8), the python suite
+  (45), `cargo fmt --all --check`, `bash -n` + `shellcheck -S warning`. Vendored Qt/OBS compile is
+  CI-only (full-bundle deploy).
+- Part 2 (imag has NO :8899 bundle-state server → coverage hole) returned as a followup_candidate:
+  a Linux `bundle-state-server` install path (a `--user` unit + `setup-imag.sh`/`verify-imag.sh`
+  wiring) with the Windows-only gathers degrading to ABSENT on Linux. Split per the ≤600 LoC gate.

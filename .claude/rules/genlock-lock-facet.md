@@ -41,7 +41,7 @@ that Qt widget; it is NOT reachable from the obs-websocket RequestHandler. So:
 |---|---|---|
 | Producer emission | `vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp` (`genlock_build_lock_json` + `genlock_json_append_escaped` + the `genlock-lock-json: %s (#1299)` blog) | On state/reason change AND a ~30 s heartbeat (`GENLOCK_JSON_HEARTBEAT_TICKS`) so the bounded TAIL always holds a fresh one. Pure `std::string` (no obs_data) → lift-compilable under g++. |
 | Vendored anchors | `tests/genlock_lock_json_guards.rs` + BOTH `windows-genlock{,-fast}.yml` pwsh gates (in the #1298 "Assert in-OBS genlock LOCK indicator present" step) | 3-copy lock-step per `obs-titlebar-build-id.md`. The marker is mutually non-substring with `genlock-lock:` and every `genlock-*`/`*-audit:` family. |
-| Gather parser | `scripts/bundle_state_gather.py` (`genlock_lock_facet_from_log`) + wired in `scripts/bundle-state-server.py` | Reshapes the newest `genlock-lock-json:` line into the nested facet `{state, reason, n_inputs, n_locked, latency_ms, recent_event, qpc_drift_ms, clock:{state}, output:{present, stamping_wallclock}, inputs:{<name>:{...}}, source:"log"}`. Attached AFTER `build_bundle_state` (a nested object, NOT a flat version-integrity string). OMIT-when-absent (a stock OBS → no facet, never a false UNLOCKED). Reuses the already-bounded log_text (no second read → no new #1222 cache). |
+| Gather parser | `scripts/bundle_state_gather.py` (`genlock_lock_facet_from_log`) + wired in `scripts/bundle-state-server.py` | Reshapes the newest `genlock-lock-json:` line into the nested facet `{state, reason, n_inputs, n_locked, n_absent, latency_ms, recent_event, qpc_drift_ms, clock:{state}, output:{present, stamping_wallclock}, inputs:{<name>:{locked, connected, ...}}, source:"log"}`. Attached AFTER `build_bundle_state` (a nested object, NOT a flat version-integrity string). OMIT-when-absent (a stock OBS → no facet, never a false UNLOCKED). Reuses the already-bounded log_text (no second read → no new #1222 cache). #1299 (schema v2) added `n_absent` (senderless input count) + per-input `connected`; both degrade gracefully for a v1 line from an older build (`n_absent`→None, `connected`→True). |
 | Box roster | `scripts/lib/obs-fleet.sh` `genlock-lock` facet = `strih stream imag resolume` | imag is a pure receiver that still locks every input → IN scope. resolume is paged only while `obs_fleet_is_home` (traveling). |
 | Pure decision | `scripts/genlock_lock_decision.py` (`decide` mirror of `src/genlock_lock_state.rs` + `analyze`) | pytest Tier-0 (#1199 mirror). The watchdog trusts the facet's carried `state`; `decide()` is the parity cross-check fed the SAME precedence table as the Rust/C gate. |
 | Watchdog | `scripts/genlock-lock-alert-watchdog.sh` + `systemd/genlock-lock-alert-watchdog.{service,timer,README.md}` | Reuses `obs-watchdog-decision.sh` confirm/throttle. Page UNLOCKED/DEGRADED after 2-pass confirm, stable `--dedup-key genlock-lock-$box` (#1206), recovery machine-channel-only, SKIP when `:8899` unreachable (→ #732/#1001), UNKNOWN when facet absent. SHIPS DISABLED. |
@@ -59,6 +59,18 @@ that Qt widget; it is NOT reachable from the obs-websocket RequestHandler. So:
   to the served `result` dict in bundle-state-server.py, only when present.
 - **`output:"not-stamping"` means the output IS present, just not stamping** — the parser maps it to
   `{present:True, stamping_wallclock:False}`, NOT present:False. Only `"absent"` → present:False.
+- **An absent-sender input does NOT page (#1299 reopen).** The widget's decided `state` (which the
+  watchdog trusts) now excludes a senderless input from the DEGRADED gate via `n_absent` /
+  `n_connected` (see `genlock-lock-indicator.md`), so stream's 'NDIA cg stream' (sender not running)
+  no longer produces a chronic false DEGRADED page. The facet still SHOWS the absent input
+  (`connected:false`, report-only) — a dead sender is #1001/#1052's alarm, not this watchdog's. The
+  watchdog logs `n_absent` per pass for observability.
+- **imag has NO `:8899` bundle-state server (open coverage hole, #1299 Part 2 followup).** `setup-imag.sh`
+  installs no `bundle-state-server` unit and `systemd/` ships none, but `obs-fleet.sh` lists imag in
+  the genlock-lock fleet, so the watchdog SKIPs imag every pass — an imag lock loss is never paged.
+  The fix is a Linux `bundle-state-server` install path (a `--user` unit + `setup-imag.sh`/`verify-imag.sh`
+  wiring, with every Windows-only gather in `bundle_state_gather.py`/`bundle-state-server.py` degrading
+  to an ABSENT facet rather than crashing on Linux). Deferred as a separate lane per the bundling gate.
 - **The watchdog trusts the carried `state`, not per-input deltas.** The widget already folds the
   60 s recent-event window into `state=DEGRADED` (reason `recent_event`); bundle-state is stateless
   per request, so the facet carries CUMULATIVE per-input counters (not `_delta`), for observability.
