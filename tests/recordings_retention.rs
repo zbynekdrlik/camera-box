@@ -17,7 +17,7 @@
 
 use camera_box::recordings_retention::{
     free_space_verdict, is_harness_recording, plan, FreeSpaceVerdict, KeepReason, RecordingFile,
-    RetentionPolicy, SECONDS_PER_DAY,
+    RetentionPolicy, PRODUCTION_SIZE_FLOOR_BYTES, SECONDS_PER_DAY,
 };
 
 fn f(name: &str, size_bytes: u64, mtime_epoch: f64) -> RecordingFile {
@@ -371,4 +371,139 @@ fn free_space_threshold_is_configurable() {
         free_space_verdict(Some(120 * GB_1276), 100.0),
         FreeSpaceVerdict::Ok
     );
+}
+
+// ---- #1276: production-shaped recordings PROTECTED by a SIZE floor ------------------------------
+//
+// Owner ruling (15.9.2026, issue #1276 comment 5678041040): a production recording is PROTECTED by
+// SIZE — any file at or above PRODUCTION_SIZE_FLOOR_BYTES (~1 GiB) is never in the delete set,
+// regardless of age or newest-N rank. Only the small E2E-run files (0.0–0.8 GB in the 2.9. dry-run)
+// stay eligible for deletion; production-shaped files were 5.6 / 7.9 / 17.3 GB. No archive step, no
+// age-based deletion of production files. Below-floor files keep the newest-N ∪ younger-than-D rule.
+
+const GB_DECIMAL_1276: u64 = 1_000_000_000;
+
+#[test]
+fn production_sized_file_is_protected_even_when_ancient_and_beyond_newest_n() {
+    // A 17.3 GB matching run, older than everything and outside the newest-N — under the OLD
+    // rank/age-only rule it would be deleted; now it is PROTECTED with the production-sized reason.
+    let now = 1_000_000.0;
+    let files = vec![
+        f(
+            "2026-01-01 10-00-00.mkv",
+            17_300 * (GB_DECIMAL_1276 / 1000), // 17.3 GB
+            now - 500.0 * SECONDS_PER_DAY,
+        ),
+        f("2026-01-02 10-00-00.mkv", 10, now - 1.0 * SECONDS_PER_DAY), // tiny newest run
+    ];
+    let p = plan(
+        &files,
+        &RetentionPolicy {
+            keep_newest_runs: 1,
+            keep_within_days: 0.0,
+        },
+        now,
+    );
+    // The big production-shaped file is NEVER deleted.
+    assert!(!p.delete.iter().any(|d| d.name == "2026-01-01 10-00-00.mkv"));
+    let prod = p
+        .keep
+        .iter()
+        .find(|k| k.file.name == "2026-01-01 10-00-00.mkv")
+        .expect("production-sized file must be kept");
+    assert_eq!(prod.reason, KeepReason::ProductionSized);
+}
+
+#[test]
+fn sub_floor_e2e_run_in_the_same_position_is_deleted() {
+    // A 0.8 GB E2E-run file (below the ~1 GiB floor), same age/rank position as the protected 17.3
+    // GB file above — this one IS deleted, proving the floor is what protects, not age/rank.
+    let now = 1_000_000.0;
+    let files = vec![
+        f(
+            "2026-01-01 10-00-00.mkv",
+            800 * (GB_DECIMAL_1276 / 1000), // 0.8 GB — the E2E-run max
+            now - 500.0 * SECONDS_PER_DAY,
+        ),
+        f("2026-01-02 10-00-00.mkv", 10, now - 1.0 * SECONDS_PER_DAY),
+    ];
+    let p = plan(
+        &files,
+        &RetentionPolicy {
+            keep_newest_runs: 1,
+            keep_within_days: 0.0,
+        },
+        now,
+    );
+    assert!(p.delete.iter().any(|d| d.name == "2026-01-01 10-00-00.mkv"));
+}
+
+#[test]
+fn file_exactly_at_the_floor_is_protected_inclusive_boundary() {
+    // Boundary: size == PRODUCTION_SIZE_FLOOR_BYTES is PROTECTED (the ruling's "at or above").
+    let now = 1_000_000.0;
+    let files = vec![f(
+        "2026-01-01 10-00-00.mkv",
+        PRODUCTION_SIZE_FLOOR_BYTES,
+        now - 500.0 * SECONDS_PER_DAY,
+    )];
+    let p = plan(
+        &files,
+        &RetentionPolicy {
+            keep_newest_runs: 0,
+            keep_within_days: 0.0,
+        },
+        now,
+    );
+    assert_eq!(p.delete.len(), 0);
+    assert_eq!(p.keep[0].reason, KeepReason::ProductionSized);
+    // One byte below the floor, same position, IS deleted (the other side of the inclusive floor).
+    let below = vec![f(
+        "2026-01-01 10-00-00.mkv",
+        PRODUCTION_SIZE_FLOOR_BYTES - 1,
+        now - 500.0 * SECONDS_PER_DAY,
+    )];
+    let p2 = plan(
+        &below,
+        &RetentionPolicy {
+            keep_newest_runs: 0,
+            keep_within_days: 0.0,
+        },
+        now,
+    );
+    assert_eq!(p2.delete.len(), 1);
+}
+
+#[test]
+fn production_sized_never_deletable_takes_precedence_over_delete_eligibility() {
+    // A production-sized file that is BOTH matching-named AND rank/age-eligible for deletion still
+    // lands in keep (production-sized wins), while a sub-floor sibling in the same cohort is freed.
+    let now = 1_000_000.0;
+    let files = vec![
+        f(
+            "2026-01-01 10-00-00.mkv",
+            7_900 * (GB_DECIMAL_1276 / 1000), // 7.9 GB production-shaped
+            now - 100.0 * SECONDS_PER_DAY,
+        ),
+        f(
+            "2026-01-02 10-00-00.mkv",
+            200 * (GB_DECIMAL_1276 / 1000), // 0.2 GB E2E run
+            now - 100.0 * SECONDS_PER_DAY,
+        ),
+    ];
+    let p = plan(
+        &files,
+        &RetentionPolicy {
+            keep_newest_runs: 0,
+            keep_within_days: 0.0,
+        },
+        now,
+    );
+    let del: Vec<&str> = p.delete.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(del, vec!["2026-01-02 10-00-00.mkv"]);
+    assert!(p
+        .keep
+        .iter()
+        .any(|k| k.file.name == "2026-01-01 10-00-00.mkv"
+            && k.reason == KeepReason::ProductionSized));
 }
