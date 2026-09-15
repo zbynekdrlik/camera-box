@@ -12063,3 +12063,29 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   (3 failed) → GREEN (3 passed) + the existing gather pytest (2 passed) = 5 passed. The Rust harness
   `harness_remote_logging_1311.rs` runs at CI / for the supervisor; audited its substrings survive
   by rendering the generated unit/drop-in/setup-script.
+
+## 2026-09-15 — issue 1276 — production recordings PROTECTED by SIZE floor (retention sweep)
+
+- **Lane:** worktree `lane/1276-sizefloor` (based on `origin/dev` d55afb726). CODE + TESTS + DOCS
+  only; no push (supervisor cherry-picks).
+- **Ruling (owner 15.9.2026, issue 1276 comment 5678041040):** any recording at or above a size
+  floor is PROTECTED, never deleted, regardless of age or newest-N rank; only the small E2E-run
+  files are eligible for the DELETE set. No archive step, no age-based deletion of production files.
+  Calibration from the 2.9. dry-run: E2E runs were 0.0–0.8 GB; production recordings 5.6 / 7.9 /
+  17.3 GB.
+- **Root cause:** the DELETE set (`recordings_retention::plan()` + its `.ps1` mirror) was computed
+  by rank/age only, blind to a file's size — a 17.3 GB production recording that was old and beyond
+  newest-N was eligible for deletion exactly like a 0.8 GB E2E-run file.
+- **Fix:** new `PRODUCTION_SIZE_FLOOR_BYTES = 1_073_741_824` (1 GiB — above the 0.8 GB E2E max, well
+  below the 5.6 GB smallest production file) + a `KeepReason::ProductionSized` reason; `plan()`
+  partitions at/above-floor files into the kept set with that reason (out of the newest-N pool, so a
+  production file never eats an E2E keep slot); below-floor files keep the newest-N ∪ younger-than-D
+  rule. The `.ps1` mirror carries the byte-identical `$ProductionSizeFloorBytes`, a `-ge` PROTECT
+  branch tagging Reason "production-sized", and a `SizeFloor` header line shown in every dry-run.
+- **Commits:** RED 139fcc063 (`tests/recordings_retention.rs` — production-sized protection scenarios),
+  GREEN 59bd72bba (src + ps1 mirror + realistic-scenario test rewrite + the python parity test),
+  docs (this entry + `.claude/rules/recordings-retention.md` paragraph).
+- **Local verify (Tier-0):** a std-only `rustc --test` replica RED (17.3 GB run deleted without the
+  floor) → GREEN (protected with the floor); the full-suite replica = 19 passed; the python mirror
+  test `test_recordings_retention_mirror_1276.py` = 6 passed; `cargo fmt --all --check` clean;
+  doc-lint grep clean. The crate `tests/recordings_retention.rs` runs at CI (no local cargo path).
