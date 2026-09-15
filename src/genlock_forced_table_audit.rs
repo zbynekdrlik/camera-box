@@ -190,10 +190,20 @@ pub fn audio_verdict(expected: AudioExpectation, ndi_audio: bool, is_camera: boo
     }
 }
 
-/// The report-only yuv advisory: a program source with a forced `yuv_range` of `partial`.
-pub fn yuv_partial_on_program(expected: AudioExpectation, yuv_range: &str) -> bool {
-    matches!(expected, AudioExpectation::ExpectedAudio)
-        && yuv_range.trim().eq_ignore_ascii_case("partial")
+/// Whether `name` on `box_class` is a program VIDEO input (a source carrying the program picture) —
+/// the eligibility for the report-only yuv advisory. This is decoupled from the AUDIO expectation:
+/// on the Dante-fed boxes (strih/stream/imag) a program input's NDI audio is silent, but its VIDEO
+/// can still be a forced-partial-range program source, so the advisory must still cover it. A camera
+/// is never a program-video source; a program-keyed source (`is_program_audio_input`) is one on any
+/// box; on the cg box any non-camera input is treated as program video.
+pub fn is_program_video_input(box_class: BoxClass, name: &str) -> bool {
+    !is_camera_input(name) && (is_program_audio_input(name) || box_class == BoxClass::Resolume)
+}
+
+/// The report-only yuv advisory: a program VIDEO source with a forced `yuv_range` of `partial`
+/// (colour-shifts a full-range sender — the owner's "distorted picture" secondary symptom).
+pub fn yuv_partial_on_program(program_video: bool, yuv_range: &str) -> bool {
+    program_video && yuv_range.trim().eq_ignore_ascii_case("partial")
 }
 
 /// Classify one input on `box_class`.
@@ -204,7 +214,10 @@ pub fn classify(box_class: BoxClass, input: &NdiInput) -> InputAudit {
         expected,
         actual_ndi_audio: input.ndi_audio,
         verdict: audio_verdict(expected, input.ndi_audio, is_camera_input(&input.name)),
-        yuv_partial_on_program: yuv_partial_on_program(expected, &input.yuv_range),
+        yuv_partial_on_program: yuv_partial_on_program(
+            is_program_video_input(box_class, &input.name),
+            &input.yuv_range,
+        ),
     }
 }
 
@@ -364,20 +377,25 @@ mod tests {
 
     #[test]
     fn yuv_advisory_only_on_program_partial() {
-        // A camera input at partial range is NOT flagged (partial is correct for cameras).
-        assert!(!yuv_partial_on_program(
-            AudioExpectation::ExpectedSilent,
-            "partial"
-        ));
-        // A program input at full range is fine.
-        assert!(!yuv_partial_on_program(
-            AudioExpectation::ExpectedAudio,
-            "full"
-        ));
-        // A program input forced partial IS flagged.
-        assert!(yuv_partial_on_program(
-            AudioExpectation::ExpectedAudio,
-            "Partial"
-        ));
+        // A non-program-video input (e.g. a camera) at partial range is NOT flagged.
+        assert!(!yuv_partial_on_program(false, "partial"));
+        // A program-video input at full range is fine.
+        assert!(!yuv_partial_on_program(true, "full"));
+        // A program-video input forced partial IS flagged.
+        assert!(yuv_partial_on_program(true, "Partial"));
+    }
+
+    #[test]
+    fn program_video_eligibility_is_decoupled_from_audio() {
+        // A program video input on a Dante-fed box: audio silent, but yuv advisory still eligible.
+        assert!(is_program_video_input(BoxClass::Strih, "cg"));
+        assert!(is_program_video_input(BoxClass::Stream, "NDI 2ME PGM"));
+        // resolume: any non-camera input is program video.
+        assert!(is_program_video_input(BoxClass::Resolume, "some_odd_input"));
+        // a camera is never program video, on any box.
+        assert!(!is_program_video_input(BoxClass::Strih, "CAM3 (usb)"));
+        assert!(!is_program_video_input(BoxClass::Resolume, "NDI cam1"));
+        // a non-program, non-camera input on a Dante-fed box is NOT program video.
+        assert!(!is_program_video_input(BoxClass::Stream, "some_odd_input"));
     }
 }

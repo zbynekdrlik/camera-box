@@ -230,6 +230,25 @@ fn bash_audit_is_report_only_even_when_all_clean() {
 }
 
 #[test]
+fn bash_yuv_advisory_covers_strih_program_video_1303() {
+    // A forced yuv_range=partial on strih `cg` (program VIDEO, silent audio) still gets the NOTE —
+    // the advisory is decoupled from the audio expectation. A camera at partial does NOT.
+    let body = "printf 'cg\tfalse\tpartial\t\nCAM3 (usb)\tfalse\tpartial\t\n' | genlock_forced_table_audit strih";
+    let (rc, out, err) = run_sourced(body);
+    assert_eq!(rc, 0, "report-only.\nstdout={out}\nstderr={err}");
+    assert!(
+        out.contains(
+            "cg: expected=silent ndi_audio=false -> OK  NOTE yuv_range=partial on a program source"
+        ),
+        "yuv NOTE fires for a strih program-video input:\n{out}"
+    );
+    assert!(
+        !out.contains("CAM3 (usb): expected=silent ndi_audio=false -> OK  NOTE"),
+        "no yuv NOTE for a camera at partial:\n{out}"
+    );
+}
+
+#[test]
 fn bash_stream_audible_program_input_is_mismatch_audible_1303() {
     // The double-audio hazard: a program NDI input ENABLED on stream (Dante-fed box) -> the generic
     // MISMATCH-AUDIBLE (not CAMERA-AUDIBLE, it is not a camera). Silent siblings grade OK.

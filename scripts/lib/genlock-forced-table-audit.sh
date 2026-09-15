@@ -42,6 +42,17 @@ genlock_forced_table_is_program() {
   return 1
 }
 
+# genlock_forced_table_is_program_video BOX NAME -> rc 0 iff NAME on BOX is a program VIDEO input
+# (the yuv-advisory eligibility, decoupled from the audio expectation): a non-camera source that is
+# program-keyed on any box, OR any non-camera input on the cg box. Mirror of is_program_video_input.
+genlock_forced_table_is_program_video() {
+  local box="${1:-}" name="${2:-}"
+  genlock_forced_table_is_camera "$name" && return 1
+  genlock_forced_table_is_program "$name" && return 0
+  [ "$box" = "resolume" ] && return 0
+  return 1
+}
+
 # genlock_forced_table_expected BOX NAME -> "audio" | "silent". The per-box CERTIFIED table (owner
 # ruling 2026-09-15): the cg OBS (resolume) is the ONLY program-audio box -- camera inputs silent,
 # program inputs (the 9 keys) audio, otherwise the cg default (audio); strih/stream/imag carry the
@@ -110,7 +121,9 @@ genlock_forced_table_audit() {
     yr="${yr#"${yr%%[![:space:]]*}"}"
     yr="${yr%"${yr##*[![:space:]]}"}"
     yr="$(printf '%s' "$yr" | tr '[:upper:]' '[:lower:]')"
-    if [ "$exp" = "audio" ] && [ "$yr" = "partial" ]; then
+    # yuv advisory is a VIDEO concern, decoupled from the audio expectation (a program video input on
+    # a Dante-fed box is silent but still colour-shifts at partial range).
+    if [ "$yr" = "partial" ] && genlock_forced_table_is_program_video "$box" "$name"; then
       note="  NOTE yuv_range=partial on a program source (verify the sender's declared range)"
     fi
     case "$verdict" in
