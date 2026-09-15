@@ -12168,3 +12168,40 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   comments; recording-verdict.rs 2 comments) and one python display fixture — all updated in GREEN
   (history kept: 8 -> 6 -> 15). Rule `.claude/rules/optical-undecodable-floor-report-only.md` gained
   a 2026-09-15 UPDATE block + retired the "below 10" ceiling in the walk-back data-recipe.
+## 2026-09-15 — #1299 Part 2: imag `:8899` bundle-state-server install path (lane/1299-imag8899)
+
+Closed the coverage hole where `obs-fleet.sh` lists imag in the genlock-lock fleet but imag had no
+`:8899` server, so `genlock-lock-alert-watchdog.sh` SKIPped imag every pass. Base origin/dev
+5405ad653 (v1.7.0-dev.629, no bump — release train already bumped).
+
+- RED 1c92467c5 (test: bundle-state-server must degrade on Linux + imag :8899 install path) → GREEN
+  5a882aa0f (fix).
+- `scripts/bundle-state-server.py`: `IS_WINDOWS = os.name == "nt"` gate at the gather boundary — the
+  Windows-only identity gathers (tasklist/netstat/CIM → obs_process_count/vb_matrix_*, ProgramData
+  distroav_dll_*/obs_dll hashes, obs_installs, AHK/shortcut paths, PowerShell NDI-runtime) skipped on
+  Linux; `genlock_build_sha` lifted out (cross-platform file read) so it keeps serving. Windows path
+  byte-identical (gate is a no-op). `bundle_state_gather.py` unchanged (no Windows subprocess there).
+- `systemd/imag-bundle-state-server.service`: --user unit, canonical server + imag flags,
+  Restart=on-failure, declared-intent hardening (NoNewPrivileges).
+- `scripts/setup-imag.sh` step 28 (TOTAL_STEPS 27→28, bumped in setup_imag_guards.rs /
+  setup_imag_remoteos_mcp_858.rs / setup_imag_obs_watchdog_764.rs): installs the 3 sibling files to
+  /opt/camera-box + the unit, ENABLE-ONLY (supervisor starts it once), #1182 bus-fallback.
+- `scripts/verify-imag.sh` check (ba) (before check (o)): unit enabled+active + :8899 listening +
+  /bundle-state.json carries genlock_build_sha, via the pure imag_bundle_state_facet_ok helper.
+- Docs: `.claude/rules/genlock-lock-facet.md` (hole CLOSED) + `.claude/rules/imag-nb-provisioning.md`
+  (step 28 + check (ba) + supervisor-starts-once).
+
+Tier-0 local verify GREEN: pytest test_bundle_state_server_linux_1299.py 8/8 (RED tree 4 fail) +
+142 sibling bundle-state python tests + 2510-total python suite (1 UNRELATED pre-existing flaky
+bkshading failure, passes in isolation, zero shared files with this diff); rustc --test
+setup_imag_guards 140/140, setup_imag_remoteos_mcp_858 5/5, setup_imag_obs_watchdog_764 3/3,
+verify_imag_pure_functions 81/81 + 4 other verify-imag readers; cargo fmt --all --check clean;
+bash -n + shellcheck -S warning on both scripts clean; systemd-analyze verify --user on the unit
+clean; anchor occurrence-count + negative-anchor sweeps clean.
+
+Supervisor install (imag, once the fleet genlock bundle is deployed):
+  ssh newlevel@10.77.9.182 sudo IMAG_IP=10.77.9.182 -E /path/to/setup-imag.sh --yes   # (or just re-run step 28's fetch+enable)
+  ssh newlevel@10.77.9.182 systemctl --user start imag-bundle-state-server.service
+  scripts/verify-imag.sh    # check (ba) must pass
+  GENLOCK_LOCK_FETCH_CMD=/tmp/fetch.sh scripts/genlock-lock-alert-watchdog.sh --dry-run   # fixture
+  scripts/genlock-lock-alert-watchdog.sh --dry-run    # live: expect a real imag verdict, not SKIP
