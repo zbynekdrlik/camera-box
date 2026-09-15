@@ -164,6 +164,27 @@ fn certified_resolume_is_the_only_program_audio_box_1303() {
     );
 }
 
+#[test]
+fn certified_yuv_advisory_covers_program_video_on_dante_fed_boxes_1303() {
+    // A forced `yuv_range=partial` on a program VIDEO input still colour-shifts a full-range sender
+    // regardless of audio routing, so the report-only yuv advisory must fire on strih/stream/imag
+    // program inputs too (their audio is silent now), not only on resolume — it is a VIDEO concern,
+    // decoupled from the audio expectation.
+    assert!(classify(BoxClass::Strih, &input("cg", false, "partial")).yuv_partial_on_program);
+    assert!(
+        classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "partial")).yuv_partial_on_program
+    );
+    // a camera at partial is still NOT flagged (partial is the correct camera range).
+    assert!(
+        !classify(BoxClass::Strih, &input("CAM3 (usb)", false, "partial")).yuv_partial_on_program
+    );
+    // resolume program input unchanged.
+    assert!(
+        classify(BoxClass::Resolume, &input("sp-slow_video", true, "partial"))
+            .yuv_partial_on_program
+    );
+}
+
 // ---- Bash replica: print shape ----------------------------------------------------------------
 
 #[test]
