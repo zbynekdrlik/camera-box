@@ -12215,3 +12215,20 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   deploy-genlock-fleet.sh preflight reworded to the certified table, anchors intact). Tier-0: rustc
   --test -D warnings on the pure module, bash-vs-Rust parity identical over all 112 vectors,
   shellcheck+bash -n clean, --plan exit 0, cargo fmt clean. Docs: .claude/rules/genlock-audio-pairing.md.
+
+- issue 1168 (2026-09-15, lane/1168-alignabort) — three [4i/8align] follow-ups from the aborted E2E
+  run 34973535496. (a) ABORT-RESTORE: align()'s --execute path now wraps the post-apply re-measure in
+  a try/except and restores the plan's sources to the pre-align current_pins on ANY abort, via new
+  restore_pins/_restore_after_abort (reuse apply_latency_pins.apply_pins, best-effort + LOUD, re-raises
+  the original reason). RED tests/python/test_qr_align_restore_on_abort_1168.py -> GREEN
+  scripts/qr_align_pins.py. cleanup()'s teardown restores only the stream-hold/measurement-eq snapshots
+  (obs_phase2.py ~L600), never the aligner/#900-reanchor pins -- documented. (b) BASELINE: refreshed
+  scripts/latency-pins-baseline.json strih to the floor-3 live model NDI cam1..cam7 = 3 (retired the
+  stale cam3=20, extended to the 7-camera fleet; the per-run aligner owns any relative offset). RED
+  the two file-reading fixtures (test_apply_latency_pins_1003 + test_latency_pins_verify) -> GREEN json.
+  (c) PARTIAL-FLOOR RE-FETCH: new pure floor_samples_sufficient + read-only --floor-samples-ok CLI +
+  a bounded <=2 loop in scripts/lib/qr-align.sh that re-fetches the post-reset audit once more when a
+  source is short on samples (cam4 samples=2 was a transient thin window) before the budget-unchecked
+  fallback. RED tests/python/test_qr_align_floor_samples_1168.py -> GREEN. No .rs touched; Tier-0
+  pytest all green (133 align suite), bash -n + shellcheck clean, anchor occurrence-count sweep clean.
+  Docs: .claude/rules/qr-align.md + .claude/rules/latency-pins-verify.md.
