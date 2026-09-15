@@ -168,3 +168,27 @@ def test_cli_equalization_plan_mode_prints_json(tmp_path):
     assert payload["anchor"] == "NDI cam2"
     assert payload["plan"] == {s: 3 for s in MINING}
     assert "floor_spread_ms" in payload and abs(payload["floor_spread_ms"] - 13.7) < 0.05
+
+
+# ------------------------------------------------ review fix: enforce the issue-998 frac safety -----
+def test_frac_unsafe_above_floor_pin_is_suppressed():
+    """Review finding (design-doctrine): the emitted plan must ENFORCE the issue-998
+    frac(latency/33.333)<0.5 limit-cycle safety the docstring claims -- not merely `post_spread <
+    pre_spread`. A 2-source-frame hold yields pin 36 ms (frac 36/33.333 = 0.08 < 0.5 = limit-cycle
+    band that DOUBLES the on-screen spread), so it MUST be suppressed to the floor even though it would
+    'reduce' the arithmetic spread on paper."""
+    floors = {"NDI cam2": 88.3, "NDI cam4": 55.0}   # ~2 source frames apart; equalized age 88.3 < 94
+    plan, meta = qa.floor_equalization_plan(floors)
+    # the naive (frac-blind) plan would emit pin 36 for cam4 and call it reducible; the frac guard
+    # suppresses it -> floor-only.
+    assert plan == {s: qa.DEFAULT_FLOOR_MS for s in floors}
+    assert meta["reducible"] is False
+
+
+def test_frac_safe_one_frame_pin_is_still_emitted():
+    """A one-source-frame hold yields pin 20 ms (frac 20/33.333 = 0.60 >= 0.5 = frac-SAFE), so it is
+    still emitted -- the frac guard suppresses only the limit-cycle-prone pins."""
+    floors = {"NDI cam2": 88.0, "NDI cam4": 71.3}
+    plan, meta = qa.floor_equalization_plan(floors)
+    assert plan["NDI cam4"] == 20 and qa._frac_of_canvas_frame(20) >= 0.5
+    assert meta["reducible"] is True
