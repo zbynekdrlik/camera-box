@@ -335,8 +335,12 @@ IDENTITY comparison against the first BELOW read's baseline line, never a wall-c
 issue-797 lesson) and `mv_fps_preflight_sample_verdict` (float `ok|below|bad`). Decision:
 - **N (default 3, `MV_FPS_PREFLIGHT_SETTLE_N`) consecutive fresh >= floor -> recovered**, proceed
   (`ok: ... recovered on fresh samples (N/N >= floor) after Ns`).
-- **any fresh < floor sample -> collapse CONFIRMED**, abort exactly as before (`ERROR: [4d1/8] ...
-  CONFIRMED below its floor`).
+- **`MV_FPS_PREFLIGHT_SETTLE_BELOW_N` (default 2, clamped >=1) consecutive fresh < floor samples ->
+  collapse CONFIRMED**, abort (`ERROR: [4d1/8] ... CONFIRMED below its floor`). The streak is
+  symmetric with the recovery streak: a SINGLE fresh below-floor emit right after the `[4d0/8]` clamp
+  clears is the individual-sample analogue of the straddling median (the render still catching up), so
+  it does NOT abort on its own — a fresh >=floor resets the below-streak, a malformed line resets both.
+  A genuine sustained collapse (>=2 consecutive fresh below) still aborts.
 - **< N fresh within a bounded budget (<= 120 s, `MV_FPS_PREFLIGHT_SETTLE_S`), or an unreadable
   re-read -> UNKNOWN -> report-only NOTE**, proceed. NEVER false-abort a CI gate (the user's hardest
   constraint); the live issue-1083 dev1 watchdog owns a genuinely sustained collapse.

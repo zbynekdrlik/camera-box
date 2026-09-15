@@ -12325,3 +12325,9 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   bash -n + shellcheck -S warning clean, cargo fmt --all --check clean, doc-lazy grep clean; CI is
   the first Rust type-check. New test tests/harness_mv_fps_preflight_settle_1040.rs. Docs:
   .claude/rules/imag-power-envelope.md. The PHYSICAL thermal item (cooling) stays open for the owner.
+  - issue 1040 review hardening (RED 7d366874c → GREEN 1e7301ec1): the settle now confirms a
+    collapse only after `MV_FPS_PREFLIGHT_SETTLE_BELOW_N` (default 2) CONSECUTIVE fresh below-floor
+    samples — symmetric with the 3-consecutive-≥floor recovery — so a single recovery-lag below emit
+    right after the `[4d0/8]` clamp clears no longer false-aborts (the fresh-context /review 🟡). A
+    flapping box that reaches neither streak stays UNKNOWN → report-only NOTE. New tests
+    single_fresh_below_then_recovery_does_not_abort_1040 + two_consecutive_fresh_below_confirms_1040.
