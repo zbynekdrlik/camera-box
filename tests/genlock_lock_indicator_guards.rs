@@ -184,7 +184,10 @@ fn audio_unexpected_lock_term_present_1303() {
     // windows-genlock{,-fast}.yml — keep all three in lock-step.
     assert_has(HEADER, "GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED = 10,");
     assert_has(HEADER, "int audio_unexpected;");
-    assert_has(HEADER, "static inline int genlock_name_is_camera(const char *name)");
+    assert_has(
+        HEADER,
+        "static inline int genlock_name_is_camera(const char *name)",
+    );
     assert_has(
         STATUSBAR_CPP,
         "f.audio_unexpected = scan.audio_unexpected ? 1 : 0;",

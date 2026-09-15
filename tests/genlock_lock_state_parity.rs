@@ -336,7 +336,6 @@ fn c_input_phase_events_matches_the_rust_authority_1299() {
     );
 }
 
-
 /// #1303 — lift the `genlock_ci_contains` + `genlock_name_is_camera` helpers VERBATIM out of the
 /// header (they sit AFTER `genlock_input_phase_events`, contiguous). The camera classifier the
 /// statusbar widget uses for the audio_unexpected term must stay byte-for-byte identical to the
@@ -353,7 +352,10 @@ fn lift_is_camera() -> String {
     let cam = src
         .find("static inline int genlock_name_is_camera(")
         .unwrap_or_else(|| panic!("#1303: {HEADER} no longer defines genlock_name_is_camera"));
-    assert!(cam > start, "#1303: genlock_ci_contains + genlock_name_is_camera are no longer contiguous in {HEADER}");
+    assert!(
+        cam > start,
+        "#1303: genlock_ci_contains + genlock_name_is_camera are no longer contiguous in {HEADER}"
+    );
     let end = src[cam..]
         .find("\n}\n")
         .map(|i| cam + i + 3)
@@ -367,8 +369,21 @@ fn c_name_is_camera_matches_the_rust_authority_1303() {
     // Real rig names + edge cases: usb capture cards, cam+digit, program/music sources, no-digit
     // "camera" words, empty. The C mirror must agree with the canonical Rust on every one.
     let names = [
-        "CAM3 (usb)", "CAM1 (usb)", "cam 2", "camera1", "cam7", "sp-fast_video", "cg",
-        "NDI 2ME PGM", "mbc", "NDI obs hudba", "NDIAr cg", "VBAN cg-resolume", "CAMERA", "cam", "",
+        "CAM3 (usb)",
+        "CAM1 (usb)",
+        "cam 2",
+        "camera1",
+        "cam7",
+        "sp-fast_video",
+        "cg",
+        "NDI 2ME PGM",
+        "mbc",
+        "NDI obs hudba",
+        "NDIAr cg",
+        "VBAN cg-resolume",
+        "CAMERA",
+        "cam",
+        "",
     ];
 
     let mut c = String::from("#include <stdio.h>\n");
@@ -377,7 +392,9 @@ fn c_name_is_camera_matches_the_rust_authority_1303() {
     for n in &names {
         // Names are ASCII; escape backslash + quote defensively for the C literal.
         let esc = n.replace('\\', "\\\\").replace('"', "\\\"");
-        c.push_str(&format!("    printf(\"%d\\n\", genlock_name_is_camera(\"{esc}\"));\n"));
+        c.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_name_is_camera(\"{esc}\"));\n"
+        ));
     }
     c.push_str("    return 0;\n}\n");
 
@@ -402,11 +419,23 @@ fn c_name_is_camera_matches_the_rust_authority_1303() {
         "#1303: genlock_name_is_camera lifted from {HEADER} does NOT COMPILE standalone under -Wall -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run = Command::new(&bin).output().expect("#1303: the compiled is-camera parity harness failed to execute");
-    assert!(run.status.success(), "#1303: harness exited non-zero: {}", String::from_utf8_lossy(&run.stderr));
+    let run = Command::new(&bin)
+        .output()
+        .expect("#1303: the compiled is-camera parity harness failed to execute");
+    assert!(
+        run.status.success(),
+        "#1303: harness exited non-zero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
     let c_out: Vec<bool> = stdout.lines().map(|l| l.trim() == "1").collect();
-    assert_eq!(c_out.len(), names.len(), "#1303: harness printed {} lines for {} names", c_out.len(), names.len());
+    assert_eq!(
+        c_out.len(),
+        names.len(),
+        "#1303: harness printed {} lines for {} names",
+        c_out.len(),
+        names.len()
+    );
 
     let mut diffs = Vec::new();
     for (n, &got_c) in names.iter().zip(&c_out) {

@@ -457,7 +457,10 @@ mod tests {
         // (the widget reduces it into audio_unexpected) degrades an otherwise-LOCKED box.
         let mut f = healthy();
         f.audio_unexpected = true;
-        assert_eq!(decide(&f), (LockState::Degraded, LockReason::AudioUnexpected));
+        assert_eq!(
+            decide(&f),
+            (LockState::Degraded, LockReason::AudioUnexpected)
+        );
     }
 
     #[test]
