@@ -539,11 +539,15 @@ _AV_OFFSET_SUGGEST_RE = re.compile(
     r"(\d+) -> \d+ms \(measured offset=(-?\d+(?:\.\d+)?)ms\)"
 )
 
-# #1319 — the dock's per-10s heartbeat line, present whenever the dock is LIVE regardless of the
-# measured offset (`av-sync-dock: diag ... locked=yes state=LIVE`). Its freshness
-# (av_offset_dock_live_age_from_log) lets the dev1 band decision distinguish "dock LIVE, offset in
-# the suggestion dead band" (IN_BAND_QUIET, healthy) from "dock silent" (STALE) — the false-STALE
-# the SUGGESTED-only age read during a dead-band quiet window.
+# #1319 — the dock's per-10s heartbeat line, emitted whenever the dock is LOCKED regardless of the
+# measured offset (`av-sync-dock: diag ... locked=yes state=LIVE`). NOTE (review F3): the diag line
+# prints `locked=%s state=%s` INDEPENDENTLY, and this regex keys on `locked=yes` — NOT the `state`
+# token. A dock that is `locked=no` (still acquiring) is therefore treated as non-live here, so the
+# thin-sample branch reads STALE rather than IN_BAND_QUIET — the SAFE direction (no page; a genuine
+# dock/lock loss is the genlock-lock/frozen-input watchdogs' job), and moot on the samples-present
+# OUT_OF_BAND path. Its freshness (av_offset_dock_live_age_from_log) lets the dev1 band decision
+# distinguish "dock LOCKED, offset in the suggestion dead band" (IN_BAND_QUIET, healthy) from "dock
+# silent" (STALE) — the false-STALE the SUGGESTED-only age read during a dead-band quiet window.
 _AV_OFFSET_DIAG_LOCKED_RE = re.compile(r"av-sync-dock: diag .*\blocked=yes\b")
 
 # #1267 — rolling-window bounds, in-log seconds behind the log head. RECENT = the freshest 10 min;

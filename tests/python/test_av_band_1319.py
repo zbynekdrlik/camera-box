@@ -7,9 +7,11 @@ windows (SUGGESTED lines only emit while |offset| is outside the dead band). Thi
   * bundle_state_gather.av_offset_dock_live_age_from_log -- in-log age of the freshest
     `av-sync-dock: diag ... locked=yes` line, so the decision tells "dock LIVE, offset in the dead
     band" (IN_BAND_QUIET, healthy) from "dock silent" (STALE).
-  * bundle_state_gather.av_offset_series_from_log now folds the raw `UPDATED/LOCKED offset=` lines
-    into the series (dead-band gaps get samples), pin carried from the nearest SUGGESTED line, and
-    stays BYTE-IDENTICAL for a log without such lines (issue 1267 tests).
+  * bundle_state_gather.av_offset_series_from_log is left BYTE-IDENTICAL. ROZHODNUTÉ (issue 1319):
+    the raw `UPDATED/LOCKED offset=` lines are DELIBERATELY NOT folded into the series — folding
+    broke the #1267 exclusion test AND pushed a quiet dead-band window OUT_OF_BAND (its transient
+    lock-acquisition values). The dead-band case is handled by the dock-live-age facet
+    (IN_BAND_QUIET), never by folding — see test_raw_updated_locked_lines_are_deliberately_not...
   * av_step_decision.classify_av_band / analyze_band -- OUT_OF_BAND / IN_BAND / IN_BAND_QUIET /
     STALE / REPIN / SKIP / UNKNOWN against a FIXED E2E-aligned reference.
 """
@@ -222,3 +224,27 @@ def test_realistic_deadband_is_quiet_not_stale_at_head_1950():
                              min_samples=6)
     assert v == "IN_BAND_QUIET", (recent, nr, dla, v)   # NOT STALE (the 19:51 false read)
     assert int(dla) <= 10
+
+
+# ---------------------------------------------------------------- F2: non-finite reference guard
+def test_reference_resolution_rejects_non_finite(tmp_path):
+    # #1319 review F2: json.load accepts a bare NaN; a non-finite reference would blind the band arm
+    # (abs(recent - nan) > band is always False -> never pages). resolve_band_reference must reject
+    # it and fall to the 0 ms fallback; a finite value is returned.
+    import os
+    wd = _SCRIPTS / "av-step-alert-watchdog.sh"
+    f = tmp_path / "resid.json"
+    env = dict(os.environ, AV_BAND_REFERENCE_FILE=str(f))
+    env.pop("AV_BAND_REFERENCE_MS", None)
+
+    def _resolve():
+        p = subprocess.run(["bash", "-c", f'source "{wd}"; resolve_band_reference'],
+                           env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return p.stdout.decode().strip()
+
+    f.write_text('{"residual_median_ms": NaN}')
+    assert _resolve().startswith("0 fallback"), "NaN must fall to the 0 ms fallback"
+    f.write_text('{"residual_median_ms": Infinity}')
+    assert _resolve().startswith("0 fallback"), "Infinity must fall to the 0 ms fallback"
+    f.write_text('{"residual_median_ms": -16.7}')
+    assert _resolve().split()[0] == "-16.7", "a finite reference is returned"

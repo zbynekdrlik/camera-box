@@ -329,14 +329,18 @@ resolve_band_reference() {
   fi
   local f="$BAND_REFERENCE_FILE" v=""
   if [ -r "$f" ]; then
-    v="$(python3 -c 'import json,sys
+    v="$(python3 -c 'import json,math,sys
 try:
     d=json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
 for k in ("residual_median_ms","residual_ms","offset_ms","combined_offset_ms_raw"):
     x=d.get(k)
-    if isinstance(x,(int,float)):
+    # #1319 review F2: json.load accepts a bare NaN/Infinity; a non-finite reference would make
+    # abs(recent - ref) > band ALWAYS false -> the band arm silently NEVER pages (the exact blind
+    # alarm this ticket kills). Reject a non-finite value so resolve falls through to the 0 ms
+    # fallback (stated in the log) instead.
+    if isinstance(x,(int,float)) and not isinstance(x,bool) and math.isfinite(x):
         print(round(float(x),1)); break' "$f" 2>/dev/null)"
     if [ -n "$v" ]; then
       printf '%s file(%s:residual_median_ms)\n' "$v" "$f"
