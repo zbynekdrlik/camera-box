@@ -89,3 +89,31 @@ NDI feed plays frame-loss-free on strih/stream after a dantesync roll (#811). La
   when it is away (the imag-nb #1013 pain). The general rule for ANY new maintenance target: an
   arg-driven fleet gate takes a DOCUMENTED node (targets.md + `.claude/skills/ops`), not a code
   roster; keep a non-measured / traveling box out of the E2E hot path.
+
+## The relock-BURST family (issue 1318)
+
+A THIRD parser family over the same log, beside INPUT (`genlock-fifo audit`) and SEND
+(`genlock-ndi-output/filter`): `parse_relock_line` / `parse_relock_lines` / `RelockEvent`
++ `summarize_relock_bursts` / `RelockBurstSummary` for the per-EVENT
+`genlock-relock '<source>':` line (`vendor/obs-studio/libobs/obs-source.c`). Marker
+`genlock-relock '` is mutually non-substring with all existing markers (asserted both
+directions). It is pure `std` (no serde), so it Tier-0 standalone-rustc tests without the
+serde rlib recipe the input/send families need.
+
+Why a NEW family and not the existing `delta_relocks`: the periodic audit line's `relocks=`
+is a CUMULATIVE counter, so a relock STORM (e.g. issue 1318's 462 relocks in 17 s) freezes
+it — a live watchdog reading the counter later sees a large value with zero window delta and
+cannot tell "a storm happened 50 min ago" from "never". The per-event line carries its own
+OBS `HH:MM:SS.mmm` timestamp, so the burst family clusters events on their OWN timeline:
+`summarize_relock_bursts(events, min_burst_relocks, window_ms)` splits a source's events into
+gap-separated clusters (a new cluster on a gap > `window_ms` OR a backward time step =
+midnight wrap / concatenated log — NEVER an unsigned-underflow negative gap) and counts a
+cluster as a BURST when its densest `window_ms` sliding window holds >= `min_burst_relocks`
+events; `max_per_second` is the peak intensity a watchdog thresholds on.
+
+Landmines: (1) `parse_relock_line` REQUIRES the leading OBS timestamp (it is the clustering
+key) — a line with no `HH:MM:SS.mmm` prefix returns None, unlike the other families which
+ignore the prefix. It takes the LAST timestamp token before the marker, so a journald/SSH
+wrapper prefix is safe. (2) The CLI (`genlock-jitter-report`) surfaces this ONLY as an
+ADDITIVE text-mode table with a `--relock-burst-min N` flag (default 8, window fixed 1000 ms);
+`--json` (`summaries_to_json`) stays byte-locked (#757) — NEVER add a relock key to it.

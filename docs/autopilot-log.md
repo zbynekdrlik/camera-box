@@ -12331,3 +12331,22 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
     right after the `[4d0/8]` clamp clears no longer false-aborts (the fresh-context /review 🟡). A
     flapping box that reaches neither streak stays UNKNOWN → report-only NOTE. New tests
     single_fresh_below_then_recovery_does_not_abort_1040 + two_consecutive_fresh_below_confirms_1040.
+
+## issue 1318 — A/V offset wander at constant pin (relock bursts on strih->stream PGM), 2026-09-15
+- Root cause (read-only live diag, stream 10.77.9.204 + strih 10.77.9.202 OBS logs): a ONE-OFF
+  strih PROGRAM render freeze (`program-render-audit avg_frame_ms=782 lagged=228` at 18:27:27,
+  the only lagged>0 window in 95 min) triggered by `User switched to scene 'Cam 6'` +
+  DistroAV NDI re-init under a tight 4K multiview. It starved the 2ME PGM NDI output -> stream
+  FIFO underran (depth=0) -> catch-up burst -> depth overshoot 41 -> 462-relock storm in 17 s
+  (18:27:28-44) -> presented head-skew +2 frames deep for ~40 min. Baseline +-1-frame wander =
+  issue-1003 structural residual (refuted receiver-side).
+- Delivered (Tier-0, no local cargo): a `relock_bursts` parser family in src/jitter_audit.rs
+  (parse_relock_line/parse_relock_lines/RelockEvent + summarize_relock_bursts/RelockBurstSummary,
+  timestamp-clustered burst episodes + peak/s) — RED 0f2b474dc -> GREEN 459c3f521 (8 tests via
+  std-only rustc replica, 8/8); genlock-jitter-report relock-burst table + `--relock-burst-min`
+  flag (2b667b16f), `--json` byte-lock untouched. Verified on the real 462-relock capture:
+  bursts=1 peak/s=31 18:27:28.205->18:27:44.671.
+- NOT done (followup): the SENDER cure (strih render freeze on scene switch / DistroAV re-init
+  under the 4K multiview) — large vendored OBS/DistroAV change, CI-only compile, needs rig soak.
+- UNVERIFIED: the 2 h <15 ms / <5 relocks/h acceptance needs a live post-deploy soak (no code
+  deploy here — a report-only detection metric).

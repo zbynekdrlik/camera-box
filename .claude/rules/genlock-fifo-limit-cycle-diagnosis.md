@@ -133,3 +133,34 @@ Full reasoning lives in code, where a worker lands first: the extended "WHY the 
 not enough" narrative block in `src/genlock_backlog.rs` (MECHANISM half) + the
 `AV_OFFSET_GATE_TOLERANCE_MS` doc in `src/av_window.rs` (GATE half, why the A/V tolerance stays ±90,
 not ±20).
+
+## Sender render-freeze -> receiver relock STORM + a transient phase excursion (issue 1318, 2026-09-15)
+
+Owner reported "kamery nedržia sync": the stream `NDI 2ME PGM` A/V offset wandered +13..+47 ms
+at a CONSTANT pin. Two distinct phenomena share that symptom — separate them before theorising:
+
+1. **The visible excursion is a SENDER stall, not a receiver policy bug.** strih's OBS PROGRAM
+   render thread froze ~5-9 s once (`program-render-audit avg_frame_ms=782 lagged=228` — the ONLY
+   lagged>0 window in 95 min), triggered by a scene switch (`User switched to scene 'Cam 6'`)
+   kicking off a DistroAV `ndi_source_update` re-init cascade under an already-tight 4K multiview
+   (rendered_fps 23-28 vs 30). Frames were not RENDERED -> not OFFERED to the 2ME PGM NDI output
+   (`genlock-ndi-output` `offered` +43 over 9 s then a +222 catch-up burst, `dropped=0`,
+   `max_send_wait_ms` flat = the SEND path was healthy). The stream receive FIFO underran to
+   `depth=0`, then absorbed the catch-up burst as an overshoot to `depth=41` (13 over steady 28)
+   -> a 462-relock storm in 17 s -> the presented `ts_head_skew_ms` sat +2 frames deep (1005/1038)
+   for ~40 min before decaying. The DISCRIMINATOR: the storm is ONE tight cluster (all 462 relocks
+   in 18:27:28-44), NOT spread — a one-off transition, not a steady limit cycle. Correlate the
+   stream relock-burst window with the strih `program-render-audit lagged>0` window: a match = a
+   sender render freeze; the fix belongs on the SENDER (render-budget / DistroAV re-init), NOT the
+   receiver FIFO. A NETWORK microburst would instead show in stream `recv-timing cap_max`; a
+   receiver bug would show as a persistent (not one-shot) storm.
+2. **The baseline +-1-frame (33 ms) wander (938<->971) is the structural issue-1003 residual**
+   (deep N==1 source, whole-frame conveyor; `S mod (interval/n)` invariant). REFUTED to fix
+   receiver-side. Do NOT chase it with an aggressive relock erase — the phase-continuity
+   "erase-nothing" relock is deliberate.
+
+The detection metric shipped for this: the `relock_bursts` family in `src/jitter_audit.rs` +
+`genlock-jitter-report`'s relock-burst table (a cumulative `relocks=` counter freezes after the
+storm; the per-event burst metric preserves WHEN + HOW-INTENSE). A dev1 watchdog / bundle-state
+facet paging on `bursts>=1` catches the NEXT sender stall in minutes instead of ~90 min via the
+dock offset. The sender-side cure (strih render freeze on scene switch) is a separate scoped lane.
