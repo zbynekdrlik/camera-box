@@ -491,6 +491,17 @@ enum MissingKind {
     /// i.e. the frame was DELIVERED) but the node's burn QR for this id was not decoded.
     /// NOT a frame drop — a burn-readability defect to FIX (bigger / crisper burn).
     BurnUnreadable,
+    /// #904 — a [`Self::BurnUnreadable`] frame RE-CLASSIFIED as PRESENT-BY-ADJACENCY: the frame
+    /// was proven DELIVERED (painter tick pin + another node's burn decoded on it) and the node's
+    /// ids on the two immediately-adjacent frames bracket exactly this one id (`prev+1 == next-1`),
+    /// so the burn was rendered-and-present and only the DECODER missed it (the issue-264 class, 1
+    /// of ~9800). Report-only: `burn_unreadable_inferred()` counts these and the zero-loss fold
+    /// subtracts them, so an inferred miss no longer fails the headline — but the frame is STILL
+    /// counted by `burn_unreadable()` and surfaced loudly, never silently dropped. Evidence-gated
+    /// and fail-closed (see [`camera_box::burn_adjacency`]): a run of two, a non-adjacent neighbour
+    /// (the issue-24/356 real-drop signature), an undelivered frame, or 3+ such frames all stay
+    /// [`Self::BurnUnreadable`].
+    BurnUnreadableInferred,
     /// No recorded frame carries this optical slot — the frame is genuinely ABSENT.
     /// A REAL dropped frame.
     RealDrop,
@@ -813,7 +824,11 @@ impl NodeVerdict {
     fn optical_ok_within_allowance(&self, allowance: u32) -> bool {
         self.imag_optical_beat_pass().unwrap_or_else(|| {
             self.contiguity.first_id.is_some()
-                && self.burn_unreadable() == 0
+                // #904 — only NON-inferable misses count: a present-by-adjacency inferred
+                // burn_unreadable frame no longer fails the headline (it is subtracted here), but
+                // a genuine unreadable burn (never inferred) still hard-fails. `burn_unreadable()`
+                // >= `burn_unreadable_inferred()` always (inferred is a subset), so no underflow.
+                && self.burn_unreadable() - self.burn_unreadable_inferred() == 0
                 && self.real_drops() <= allowance as usize
         })
     }
@@ -823,7 +838,12 @@ impl NodeVerdict {
     /// silently look identical to a genuine zero-loss pass when it only cleared the gate because
     /// of #904's relaxation.
     fn consumed_real_drops_allowance(&self, allowance: u32) -> bool {
-        self.is_zero_within_allowance(allowance) && !self.is_zero()
+        // #904 — SPECIFICALLY the real_drops allowance, never conflated with the present-by-
+        // adjacency inference: the latter can now make `is_zero_within_allowance` diverge from
+        // `is_zero` with ZERO real drops, so require at least one real drop before claiming this
+        // pass consumed the real_drops slack (an inferred-only pass reports via
+        // `burn_unreadable_inferred()`, not here).
+        self.is_zero_within_allowance(allowance) && self.real_drops() >= 1
     }
     /// #580 — the PRIMARY signal's pass/fail: [`Self::imag_optical_beat_pass`] when set (imag's
     /// beat-aware optical verdict), else the UNCHANGED strict `contiguity.is_contiguous()` every
@@ -925,10 +945,30 @@ impl NodeVerdict {
             .filter(|c| c.kind == MissingKind::RealDrop)
             .count()
     }
+    /// The TOTAL count of delivered-but-not-decoded burn frames on this node — BOTH the hard-fail
+    /// [`MissingKind::BurnUnreadable`] AND the #904 present-by-adjacency
+    /// [`MissingKind::BurnUnreadableInferred`] (an inferred miss is a SUBSET, so this is always
+    /// `>= burn_unreadable_inferred()`). Surfaced loudly in the JSON/summary so an inferred pass is
+    /// never invisible; the zero-loss fold subtracts the inferred subset (see
+    /// [`Self::optical_ok_within_allowance`]).
     fn burn_unreadable(&self) -> usize {
         self.classified
             .iter()
-            .filter(|c| c.kind == MissingKind::BurnUnreadable)
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    MissingKind::BurnUnreadable | MissingKind::BurnUnreadableInferred
+                )
+            })
+            .count()
+    }
+    /// #904 — the subset of [`Self::burn_unreadable`] frames re-classified PRESENT-BY-ADJACENCY
+    /// (the issue-264 decoder-miss class). Report-only: the zero-loss fold subtracts these so only
+    /// NON-inferable misses count, but they are still counted by `burn_unreadable()` and reported.
+    fn burn_unreadable_inferred(&self) -> usize {
+        self.classified
+            .iter()
+            .filter(|c| c.kind == MissingKind::BurnUnreadableInferred)
             .count()
     }
 }
@@ -1665,6 +1705,76 @@ fn node_verdict_with_optical(
         }
     }
 
+    // #904 — present-by-adjacency inference: a BURN-UNREADABLE frame is re-classified
+    // BURN-UNREADABLE-INFERRED when the frame was proven DELIVERED (the pinned cam2 painter tick
+    // present AND at least one OTHER node's burn decoded on it) and the node's ids on the two
+    // immediately-adjacent recorded frames bracket exactly this one id. Gated on the cam2 pin
+    // being set (the harness's `--cam2-run-id`): with no pin we have no painter-delivery proof, so
+    // the inference is disabled and every miss stays strict (this is also why every existing
+    // fixture, all `--cam2-run-id 0`, is unaffected). The JUDGMENT is the Tier-0
+    // `camera_box::burn_adjacency` pure module; this glue only builds the ordered per-frame
+    // `(frame_index, id, delivered)` sequence from the SAME source recording and applies the
+    // returned frame_indexes. imag (a different builder) never reaches here, so it is untouched.
+    if let Some(cam2_pin) = spec.cam2_run_id {
+        // This node's decoded burn id per recorded frame (reuse the required (frame_index, id)
+        // extractor — never `burn_ids_in`, which drops the frame position).
+        let id_by_frame: std::collections::BTreeMap<u64, u32> =
+            burn_ids_with_frame_index_in(source, spec.burn_run_id)
+                .into_iter()
+                .collect();
+        // Per-frame delivery proof: the pinned painter tick present AND >= 1 OTHER node burn on
+        // the same recorded frame. Reuses `frame_is_delivered_optical` for the painter-tick half.
+        let frame_by_idx: std::collections::BTreeMap<u64, &RecordingFrame> =
+            source.iter().map(|f| (f.frame_index, f)).collect();
+        let delivered_at = |fi: u64| -> bool {
+            frame_by_idx.get(&fi).copied().is_some_and(|f| {
+                frame_is_delivered_optical(f, all_burn_run_ids, Some(cam2_pin))
+                    && f.payloads.iter().any(|p| {
+                        p.run_id != spec.burn_run_id && all_burn_run_ids.contains(&p.run_id)
+                    })
+            })
+        };
+        // Ordered per-frame sequence: present-burn frames (Some(id)) plus the BURN-UNREADABLE
+        // missing slots (None + their delivery flag), keyed by frame_index so it is in recorded
+        // order. RealDrop slots (absent frames) are correctly excluded — their neighbours then
+        // fail the `next == prev + 2` bracket, keeping them strict.
+        let mut seq_map: std::collections::BTreeMap<u64, (Option<u64>, bool)> =
+            std::collections::BTreeMap::new();
+        for (fi, id) in &id_by_frame {
+            seq_map.insert(*fi, (Some(u64::from(*id)), true));
+        }
+        for c in classified
+            .iter()
+            .filter(|c| c.kind == MissingKind::BurnUnreadable)
+        {
+            if let Some(fi) = c.frame_index {
+                seq_map.insert(fi, (None, delivered_at(fi)));
+            }
+        }
+        let seq: Vec<(u64, Option<u64>, bool)> = seq_map
+            .into_iter()
+            .map(|(fi, (id, d))| (fi, id, d))
+            .collect();
+        let inferable: std::collections::HashSet<u64> =
+            camera_box::burn_adjacency::inferable_frame_indices(
+                &seq,
+                camera_box::burn_adjacency::INFERRED_MISS_CAP_PER_NODE,
+            )
+            .into_iter()
+            .collect();
+        if !inferable.is_empty() {
+            for c in classified.iter_mut() {
+                if c.kind == MissingKind::BurnUnreadable {
+                    if let Some(fi) = c.frame_index {
+                        if inferable.contains(&fi) {
+                            c.kind = MissingKind::BurnUnreadableInferred;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(NodeVerdict {
         contiguity,
         classified,
@@ -2000,8 +2110,20 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool, allowance: u32) -> Vec<Str
             ),
             _ => "burn-id sequence CONTIGUOUS AND cam2 optical read complete".to_string(),
         };
+        // #904 — LOUD, never silent: this pass tolerated N present-by-adjacency inferred
+        // burn_unreadable frame(s) (the issue-264 decoder-miss class). Surfaced right in the
+        // headline per-node line so an inferred pass is visibly distinct from a strictly-contiguous
+        // one (the no-overstatement rule; issue 905 is the re-tighten trail).
+        let inferred_note = if v.burn_unreadable_inferred() > 0 {
+            format!(
+                " ({} burn_unreadable inferred present-by-adjacency)",
+                v.burn_unreadable_inferred()
+            )
+        } else {
+            String::new()
+        };
         lines.push(format!(
-            "  [{}] ZERO loss — {optical_phrase} ({span}){burn_note}.",
+            "  [{}] ZERO loss — {optical_phrase} ({span}){burn_note}{inferred_note}.",
             c.node
         ));
         return lines;
@@ -2161,6 +2283,11 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool, allowance: u32) -> Vec<Str
         let label = match cm.kind {
             MissingKind::RealDrop => "REAL DROP",
             MissingKind::BurnUnreadable => "BURN-UNREADABLE (fix burn, frame delivered)",
+            // #904 — a delivered frame whose crisp burn only the decoder missed, uniquely
+            // bracketed by its neighbours (present-by-adjacency; the zero_loss fold subtracts it).
+            MissingKind::BurnUnreadableInferred => {
+                "BURN-UNREADABLE-INFERRED (present-by-adjacency, #264 decoder miss)"
+            }
         };
         let png = cm.png.as_deref().unwrap_or("<no pixel slot>");
         match cm.frame_index {
@@ -2206,6 +2333,11 @@ fn node_verdict_json(
         "missing_ids": v.contiguity.missing_ids,
         "real_drops": v.real_drops(),
         "burn_unreadable": v.burn_unreadable(),
+        // #904 — the present-by-adjacency subset of `burn_unreadable` (issue-264 decoder misses on
+        // delivered frames, uniquely bracketed by their neighbours). Report-only + LOUD: the
+        // zero_loss fold subtracts these, so `zero_loss: true` beside `burn_unreadable > 0` is
+        // self-explaining when `burn_unreadable_inferred == burn_unreadable` (all misses inferred).
+        "burn_unreadable_inferred": v.burn_unreadable_inferred(),
         // #904 — LOUD, always present (not just when consumed): the allowance THIS node was
         // judged against, and whether this specific pass only cleared the gate because of it.
         // `real_drops_allowance` is 0 for imag (untouched by #904; see its call site) and the
@@ -4100,6 +4232,12 @@ fn build_and_print_verdict_with_stream_diffs(
             let total_real: usize = node_verdicts.iter().map(NodeVerdict::real_drops).sum();
             let total_burn_unreadable: usize =
                 node_verdicts.iter().map(NodeVerdict::burn_unreadable).sum();
+            // #904 — the present-by-adjacency subset (issue-264 decoder misses); loud run-level
+            // signal + the re-tighten trail (issue 905).
+            let total_burn_unreadable_inferred: usize = node_verdicts
+                .iter()
+                .map(NodeVerdict::burn_unreadable_inferred)
+                .sum();
             // #904 — which camera-under-test node(s), if any, only passed because of the
             // real_drops allowance — the LOUD run-level signal (#905 tracks re-tightening).
             let allowance_consumed_nodes: Vec<String> = node_verdicts
@@ -4122,23 +4260,42 @@ fn build_and_print_verdict_with_stream_diffs(
                         cfg.min_secs,
                     )
             });
-            if all_zero && allowance_consumed_nodes.is_empty() {
+            if all_zero
+                && allowance_consumed_nodes.is_empty()
+                && total_burn_unreadable_inferred == 0
+            {
                 println!(
                     "  >>> ZERO loss: all burn-id sequences CONTIGUOUS (no missing id on any node)."
                 );
             } else if all_zero {
                 // #904/#1169 — LOUD: a genuine pass, but NOT a strict zero-loss pass — never let
-                // this look identical to the clean branch above. The DEFAULT was re-tightened back
-                // to 0 (issue 1169, 2026-09-01), so this branch is now reachable ONLY when the
-                // `CAMERA_BOX_REAL_DROPS_ALLOWANCE` env override re-arms the dormant band; the
-                // message interpolates the actual `{real_drops_allowance}` in force.
-                println!(
-                    "  >>> ⚠ #1169 REAL-DROPS SINGLETON ALLOWANCE: real-drops singleton allowance \
-                     consumed: {total_real} — issue 1169 re-tighten trail. Within the per-node \
-                     allowance of {real_drops_allowance} on: {} — 0 BURN-UNREADABLE, everything \
-                     else at the usual strict bar; anything OVER the allowance still FAILS.",
-                    allowance_consumed_nodes.join(", ")
-                );
+                // this look identical to the clean branch above. Each relaxation axis that was
+                // consumed prints its OWN line so the pass is fully self-explaining.
+                if !allowance_consumed_nodes.is_empty() {
+                    // The DEFAULT was re-tightened back to 0 (issue 1169, 2026-09-01), so the
+                    // real-drops axis is reachable ONLY when the `CAMERA_BOX_REAL_DROPS_ALLOWANCE`
+                    // env override re-arms the dormant band; the message interpolates the actual
+                    // `{real_drops_allowance}` in force.
+                    println!(
+                        "  >>> ⚠ #1169 REAL-DROPS SINGLETON ALLOWANCE: real-drops singleton allowance \
+                         consumed: {total_real} — issue 1169 re-tighten trail. Within the per-node \
+                         allowance of {real_drops_allowance} on: {} — everything else at the usual \
+                         strict bar; anything OVER the allowance still FAILS.",
+                        allowance_consumed_nodes.join(", ")
+                    );
+                }
+                if total_burn_unreadable_inferred > 0 {
+                    // #904 — present-by-adjacency: the issue-264 decoder-miss class (a crisp,
+                    // rendered burn the decoder alone missed on a delivered frame), inferred
+                    // PRESENT by its uniquely-bracketing neighbours. Loud + report-only; issue 905
+                    // tracks re-tightening.
+                    println!(
+                        "  >>> ⚠ #904 PRESENT-BY-ADJACENCY: {total_burn_unreadable_inferred} burn_unreadable \
+                         frame(s) inferred PRESENT on delivered frames (neighbours bracket one id, \
+                         issue-264 decoder-miss class) — issue 905 re-tighten trail; everything else \
+                         at the usual strict bar. A run of two, a non-adjacent neighbour, or 3+ still FAILS."
+                    );
+                }
             } else {
                 println!(
                     "  >>> NOT zero: {total_real} REAL DROP + {total_burn_unreadable} BURN-UNREADABLE \
@@ -4153,6 +4310,10 @@ fn build_and_print_verdict_with_stream_diffs(
                 serde_json::json!(allowance_consumed_nodes);
             report["full_chain"]["real_drops"] = serde_json::json!(total_real);
             report["full_chain"]["burn_unreadable"] = serde_json::json!(total_burn_unreadable);
+            // #904 — the present-by-adjacency subset of `burn_unreadable`, carried into the JSON so
+            // the trend stays visible (issue 905 re-tighten trail); 0 on a strictly-contiguous run.
+            report["full_chain"]["burn_unreadable_inferred"] =
+                serde_json::json!(total_burn_unreadable_inferred);
             // (The old cam2-tick-keyed strih→stream/cam1→strih dropped/phantom loss was
             // removed in #186 — the burn-id contiguity above is the single trustworthy
             // loss verdict; latency below is a separate, unchanged measurement.)

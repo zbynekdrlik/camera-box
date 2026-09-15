@@ -31,10 +31,21 @@ pub const INFERRED_MISS_CAP_PER_NODE: usize = 2;
 /// Returns the inferred id (`prev + 1`), or `None` when either neighbour did not decode, the gap is
 /// wider than one id (`next != prev + 2` — a real drop / decimated hop, kept strict), or the frame
 /// was not delivered. `next < prev` (a backward counter jump) also returns `None`.
-pub fn inferable_single_miss(prev: Option<u64>, next: Option<u64>, frame_delivered: bool) -> Option<u64> {
-    // #904 [red] STUB — not yet implemented (the GREEN commit fills this in).
-    let _ = (prev, next, frame_delivered);
-    None
+pub fn inferable_single_miss(
+    prev: Option<u64>,
+    next: Option<u64>,
+    frame_delivered: bool,
+) -> Option<u64> {
+    if !frame_delivered {
+        return None;
+    }
+    let prev = prev?;
+    let next = next?;
+    if next == prev + 2 {
+        Some(prev + 1)
+    } else {
+        None
+    }
 }
 
 /// The per-node cap + no-two-adjacent rule over the ORDERED per-frame sequence
@@ -47,9 +58,34 @@ pub fn inferable_single_miss(prev: Option<u64>, next: Option<u64>, frame_deliver
 /// strict — the fail-closed rule). The neighbours used for each miss are the PREVIOUS and NEXT
 /// entries in this ordered slice, so the caller must present the frames in recorded order.
 pub fn inferable_frame_indices(seq: &[(u64, Option<u64>, bool)], cap: usize) -> Vec<u64> {
-    // #904 [red] STUB — not yet implemented (the GREEN commit fills this in).
-    let _ = (seq, cap);
-    Vec::new()
+    let mut hits: Vec<u64> = Vec::new();
+    if seq.len() < 3 {
+        return hits;
+    }
+    for i in 1..seq.len() - 1 {
+        let (frame_index, decoded_id, delivered) = seq[i];
+        if decoded_id.is_some() {
+            continue; // the burn decoded here — nothing to infer
+        }
+        let prev = seq[i - 1].1;
+        let next = seq[i + 1].1;
+        if inferable_single_miss(prev, next, delivered).is_some() {
+            hits.push(frame_index);
+        }
+    }
+    // FAIL-CLOSED: a pattern of misses (more than the cap) is a real readability defect.
+    if hits.len() > cap {
+        return Vec::new();
+    }
+    // FAIL-CLOSED: never infer two on adjacent recorded frames (a two-frame cluster is not a
+    // lone #264 decoder miss). `inferable_single_miss` already rejects a run of two (a None
+    // neighbour), but this is the explicit guard for any other adjacency shape.
+    let mut sorted = hits.clone();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|w| w[1] == w[0] + 1) {
+        return Vec::new();
+    }
+    hits
 }
 
 #[cfg(test)]
@@ -59,7 +95,10 @@ mod tests {
     #[test]
     fn single_delivered_gap_of_one_is_inferable() {
         // prev=179076, next=179078 → the single missing 179077 is uniquely inferable.
-        assert_eq!(inferable_single_miss(Some(179076), Some(179078), true), Some(179077));
+        assert_eq!(
+            inferable_single_miss(Some(179076), Some(179078), true),
+            Some(179077)
+        );
     }
 
     #[test]
@@ -95,7 +134,10 @@ mod tests {
             (11u64, None, true),
             (12u64, Some(502u64), true),
         ];
-        assert_eq!(inferable_frame_indices(&seq, INFERRED_MISS_CAP_PER_NODE), vec![11]);
+        assert_eq!(
+            inferable_frame_indices(&seq, INFERRED_MISS_CAP_PER_NODE),
+            vec![11]
+        );
     }
 
     #[test]
