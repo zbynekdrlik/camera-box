@@ -107,3 +107,15 @@ RED→GREEN LOCALLY by sourcing the lib and calling the functions directly over 
 helpers (`leg_health_dequeue_stall_report`, `leg_health_cap1s_band_warn`) are called as BARE
 statements under the caller's `set -euo pipefail` → they MUST return 0 on every input (empty read,
 grep no-match) — see `.claude/rules/ci-testing-gotchas.md`'s report-only-under-set-e entry.
+
+To exercise a REMOTE-READ BUILDER (`leg_health_eproto_ts_read_cmd` / `leg_health_restart_ts_read_cmd`,
+which emit a `journalctl … | grep …` string) end-to-end WITHOUT a rig, override `journalctl` as a
+bash FUNCTION that `cat`s a `-o short-unix`-shaped fixture, then `eval` the builder's emitted command:
+`journalctl() { cat fixture.txt; }; CMD=$(leg_health_restart_ts_read_cmd 100 3700); eval "$CMD"`. The
+function shadows the real binary in that shell, so the whole grep pipeline (epoch extraction + the
+systemd-signature/camera-box/lifecycle-verb filter) runs against the fixture — the strongest local
+proof that the reader keeps only the intended epochs (the #1133 harness's fake-journalctl tests do
+exactly this). NOTE: a worktree-isolated worker's guard may refuse a `bash -c '…source lib…'` /
+`eval` shape (`.claude/rules/ci-testing-gotchas.md`, #1265) — the sourced-lib + fake-journalctl
+harness then runs at CI / for the supervisor; a worktree worker falls back to `python3 -c` grep-chain
+simulations of the emitted command.
