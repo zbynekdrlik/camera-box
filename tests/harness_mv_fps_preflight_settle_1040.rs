@@ -300,6 +300,7 @@ fn no_new_lines_is_inconclusive_report_only_never_aborts_1040() {
     // proceeds. Never false-abort a CI gate on inconclusive data (the live issue-1083 watchdog owns a
     // genuinely sustained collapse).
     let seq = [audit("20:15:03.000", "9.0")]; // one chunk, repeated forever by the probe
+    let seq: Vec<&str> = seq.iter().map(String::as_str).collect();
     let (rc, out, err) = run_imag_settle(&seq, "20", "3");
     assert_eq!(
         rc, 0,
@@ -324,8 +325,8 @@ fn unreadable_reread_never_aborts_1040() {
     // The first read is BELOW, then every settle re-read is UNREADABLE (empty) — no fresh sample can
     // ever be collected, so within the budget it is UNKNOWN -> report-only NOTE, proceed. An
     // unreadable box must never false-abort the whole E2E (the grace path's own guarantee, kept).
-    let seq = [audit("20:15:03.000", "9.0"), ""]; // baseline, then empty reads forever
-    let seq: Vec<&str> = seq.iter().copied().collect();
+    let seq = [audit("20:15:03.000", "9.0"), String::new()]; // baseline, then empty reads forever
+    let seq: Vec<&str> = seq.iter().map(String::as_str).collect();
     let (rc, out, err) = run_imag_settle(&seq, "20", "3");
     assert_eq!(
         rc, 0,
