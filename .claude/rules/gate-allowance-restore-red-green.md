@@ -165,3 +165,45 @@ push was blocked). Two ways to stay clear of it:
   `~/devel/airuleset/audits/no-test-skips.log`. Never a bare `[no-test]`, never to skip a real
   test. The hook-side fix (recognise a `test(`/`[red]` SUBJECT, or changes inside a `#[test]`
   body) is filed on the airuleset repo — this is a shared-hook heuristic, not this repo's code.
+
+## A NEW report-only relaxation of a DIFFERENT term — present-by-adjacency burn inference (issue 904 reopen, 15.9.2026)
+
+The issue-904 reopen added a NEW, evidence-gated relaxation of the `burn_unreadable` term itself
+(NOT the `real_drops` allowance — that stays 0, and `burn_unreadable` stays an unconditional hard
+fail for a genuine unreadable burn). A single missing burn id on a DELIVERED frame (the pinned cam2
+painter tick present AND at least one OTHER node's burn decoded on that frame) whose node ids on the
+two immediately-adjacent recorded frames bracket exactly one id (`next == prev + 2`) is
+re-classified `MissingKind::BurnUnreadableInferred` — the #264 readable-QR decoder-miss class (a
+crisp rendered burn only the decoder missed, e.g. verdict 1651388579 strih frame 1044, 1 of 9803).
+
+Key facts for a future change:
+
+- The JUDGMENT is the Tier-0 crate-root pure module `src/burn_adjacency.rs`
+  (`inferable_single_miss` + `inferable_frame_indices`, `rustc --test`), the SAME pure-seam pattern
+  as `e2e_latency_gate.rs` / `optical_floor.rs`. The probe-gated `node_verdict_with_optical` glue
+  only builds the ordered per-frame `(frame_index, id, delivered)` sequence (via
+  `burn_ids_with_frame_index_in` — never `burn_ids_in`, per `burn-hold-uniqueness.md`) and applies
+  the returned frame_indexes.
+- The fold is `NodeVerdict::optical_ok_within_allowance`:
+  `burn_unreadable() - burn_unreadable_inferred() == 0` (only NON-inferable misses count).
+  `burn_unreadable()` counts BOTH `BurnUnreadable | BurnUnreadableInferred`, so it is always
+  `>= burn_unreadable_inferred()` — the subtraction can never usize-underflow. Do NOT change
+  `burn_unreadable()` to exclude the inferred kind, or the fold underflows and panics.
+- Fail-closed + gated on `spec.cam2_run_id.is_some()` (the `--cam2-run-id` pin). Every existing
+  fixture uses `--cam2-run-id 0` (None) → the inference is DISABLED there, so
+  `allowance_zero_matches_pre_904_is_zero_exactly_904`,
+  `burn_unreadable_is_never_excused_by_any_real_drops_allowance_904`, and the #356 never-mask tests
+  all stay strict + green. The positive tests explicitly pass `cam2_run_id: Some(CAM2)`.
+- `consumed_real_drops_allowance` gained `&& self.real_drops() >= 1`: the inference can now make
+  `is_zero_within_allowance` diverge from `is_zero` with ZERO real drops, which would otherwise have
+  false-tripped the old `is_zero_within_allowance && !is_zero` definition on the WRONG (real_drops)
+  axis. The inferred axis reports via `burn_unreadable_inferred()`, never via that flag.
+- REPORT-ONLY + LOUD: `burn_unreadable_inferred` per-node + `full_chain.burn_unreadable_inferred` in
+  the JSON, a per-node ZERO-loss suffix, and a run-level `>>> #904 PRESENT-BY-ADJACENCY` summary
+  line. Re-tighten trail = issue 905. Two non-blocking observations for #905: `INFERRED_MISS_CAP_PER_NODE=2`
+  vs the "single miss is the justified case" doc wording; and the bracket neighbours read from the
+  whole-source id map (a window-edge miss could take an out-of-window neighbour — still fail-closed,
+  a candidate to scope to the in-window analyzed set later).
+- Adding the `BurnUnreadableInferred` variant required the ONE exhaustive `match` on `MissingKind`
+  (the classified-slot printer) to gain an arm — a new variant is a compile error otherwise, and
+  this file is probe-gated (CI is its first compile).

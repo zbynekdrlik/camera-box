@@ -12246,3 +12246,29 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   Tier-0: sourced-lib functional RED->GREEN + fake-journalctl end-to-end readers under set -euo
   pipefail, bash -n + shellcheck -S warning clean, cargo fmt --all --check clean, slice-anchor
   occurrence sweep on recording-e2e.sh (no anchor moved). Docs: .claude/rules/leg-health-frame-loss.md.
+- issue 904 (reopen 15.9.2026, present-by-adjacency burn inference) — lane/904-inferred worktree.
+  RED f9b41c985 → GREEN cf88cba0c. E2E rerun 34977348169 (verdict 1651388579) was a perfect
+  zero-loss run that failed ONLY on full_chain.loss.strih.burn_unreadable=1: stream frame 1044
+  carried the painter tick (17308) + the cam1 burn (911001) + the stream burn (911004) all decoded,
+  the strih burn was crisp in the pixel proof, and the strih neighbour ids were 179076 (1043) /
+  179078 (1045) — the missing 179077 uniquely bracketed. A #264-class decoder miss on a readable QR,
+  1 of 9803. Fix: a NEW crate-root pure module src/burn_adjacency.rs (inferable_single_miss +
+  inferable_frame_indices, Tier-0 rustc --test, 11 tests) decides when a single missing id is
+  inferable-present (next==prev+2 AND the frame delivered). The probe-gated node_verdict_with_optical
+  glue builds the ordered per-frame (frame_index, id, delivered) sequence from
+  burn_ids_with_frame_index_in + frame_is_delivered_optical (painter pin) + a sibling-burn check, and
+  re-classifies the qualifying BurnUnreadable slots to a NEW MissingKind::BurnUnreadableInferred. The
+  per-node zero-loss fold changed from burn_unreadable()==0 to
+  burn_unreadable() - burn_unreadable_inferred() == 0 (burn_unreadable() now counts BOTH kinds so no
+  usize underflow). Fail-closed + evidence-gated: gated on spec.cam2_run_id.is_some() (=--cam2-run-id
+  pin; None in every existing fixture → no inference → all stay strict + green), cap 2 per node, never
+  two adjacent, RealDrops (absent frames) never in the sequence, the issue-24/356 decimated-hop cases
+  fail the +2 bracket. Loud + report-only: per-node + full_chain burn_unreadable_inferred counts in
+  the JSON + a per-node ZERO-loss suffix + a run-level ">>> #904 PRESENT-BY-ADJACENCY" summary line.
+  consumed_real_drops_allowance now also requires real_drops()>=1 so an inferred-only pass never
+  false-signals the real_drops slack axis. imag untouched (node_verdict_for_imag never runs the glue).
+  Review: fresh-context general-purpose /review + /requesting-code-review → SHIP, 0 blocking; 2
+  non-blocking observations tracked for issue 905 (the cap-2-vs-doc wording; the whole-source neighbour
+  lookup at a window edge — both stay fail-closed). Tier-0: pure module RED→GREEN via rustc --test,
+  cargo fmt --all --check clean (parses the whole probe-gated bin), doc-lazy-continuation grep clean;
+  CI is the first type-check for the probe-gated glue. Docs: .claude/rules/gate-allowance-restore-red-green.md.
