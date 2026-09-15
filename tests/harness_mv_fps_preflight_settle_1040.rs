@@ -340,3 +340,64 @@ fn unreadable_reread_never_aborts_1040() {
         "an unreadable re-read must end in the inconclusive report-only NOTE:\n{err}"
     );
 }
+
+#[test]
+fn single_fresh_below_then_recovery_does_not_abort_1040() {
+    // The review-driven hardening (issue 1040 🟡): a collapse is CONFIRMED only after
+    // MV_FPS_PREFLIGHT_SETTLE_BELOW_N (default 2) CONSECUTIVE fresh below-floor samples — symmetric
+    // with the N-consecutive-≥floor recovery. A SINGLE fresh below-floor emit right after the
+    // `[4d0/8]` clamp clears (the individual-sample analogue of the straddling median this whole fix
+    // targets — the render still catching up) must NOT abort if the box then recovers. RED against
+    // the single-fresh-below-confirms lib (which aborts on the first fresh below); GREEN after.
+    let seq = [
+        audit("20:15:03.000", "9.0"),   // first read (baseline, BELOW median)
+        audit("20:15:09.000", "9.0"), // ONE fresh below-floor sample (recovery-lag, not a collapse)
+        audit("20:15:15.000", "30.00"), // fresh #1 >= floor
+        audit("20:15:21.000", "30.00"), // fresh #2 >= floor
+        audit("20:15:27.000", "30.00"), // fresh #3 >= floor -> recovered
+    ];
+    let seq: Vec<&str> = seq.iter().map(String::as_str).collect();
+    let (rc, out, err) = run_imag_settle(&seq, "60", "3");
+    assert_eq!(
+        rc, 0,
+        "a single fresh below-floor sample followed by recovery must NOT abort (the 🟡 hardening):\nstdout={out}\nstderr={err}"
+    );
+    assert!(
+        out.contains("PROCEEDED"),
+        "must proceed after recovery:\n{out}"
+    );
+    assert!(
+        err.contains("recovered on fresh samples") && err.contains("3/3"),
+        "must log recovery on 3/3 fresh >= floor after the lone below sample:\n{err}"
+    );
+    assert!(
+        !err.contains("CONFIRMED below its floor"),
+        "a single fresh below then recovery must NOT reach the abort path:\n{err}"
+    );
+}
+
+#[test]
+fn two_consecutive_fresh_below_confirms_the_collapse_1040() {
+    // The other side of the same streak: TWO consecutive fresh below-floor samples (below_n=2) DO
+    // confirm a genuine collapse and abort. Pins that the streak requirement does not silence a real
+    // sustained collapse — it only tolerates a single recovery-lag emit.
+    let seq = [
+        audit("20:15:03.000", "9.0"),  // baseline BELOW
+        audit("20:15:09.000", "12.0"), // fresh below #1
+        audit("20:15:15.000", "11.0"), // fresh below #2 -> CONFIRMED
+    ];
+    let seq: Vec<&str> = seq.iter().map(String::as_str).collect();
+    let (rc, out, err) = run_imag_settle(&seq, "60", "3");
+    assert_eq!(
+        rc, 1,
+        "two consecutive fresh below-floor samples must confirm + abort:\nstdout={out}\nstderr={err}"
+    );
+    assert!(
+        !out.contains("PROCEEDED"),
+        "a confirmed collapse must NOT proceed:\n{out}"
+    );
+    assert!(
+        err.contains("2 consecutive fresh sample") && err.contains("CONFIRMED below its floor"),
+        "the abort must name the 2-consecutive-below confirmation:\n{err}"
+    );
+}
