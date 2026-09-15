@@ -1277,7 +1277,10 @@ def _restore_after_abort(plan, current_pins, host, password, floor_ms):
         sys.stderr.write(
             f"[qr-align] #1168 ABORT restore: reverted the strih align pins to their pre-align "
             f"values {restored} (the run is still ABORTED -- see the reason above).\n")
-    except Exception as e:  # noqa: BLE001 -- a restore failure is logged, never masks the abort
+    except BaseException as e:  # noqa: BLE001 -- apply_pins signals its fail-loud read-back mismatch
+        # as SystemExit (a BaseException, NOT Exception), so catch BaseException here: a restore
+        # failure is logged, NEVER masks WHY the run aborted (the caller re-raises the ORIGINAL
+        # AlignmentImpossible). The run still aborts non-zero either way, so gate-safety is intact.
         sys.stderr.write(
             f"WARNING: [qr-align] #1168 could NOT restore the strih align pins after the abort "
             f"({e}); the rig may be left on the partial plan pins {plan} -- restore by hand "

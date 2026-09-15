@@ -110,8 +110,9 @@ qr_align_run() {
                 && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
                 && [ -s "$_jj" ]; then
               jitter_json="$_jj"
-              # Re-fetch ONCE more if a floor is still missing/phantom (read-only sufficiency check;
-              # a check hiccup is treated as sufficient so it never blocks progress).
+              # Re-fetch ONCE more if a floor is still missing/phantom (read-only sufficiency check).
+              # Bounded (<=2), so an unreadable/invalid jitter-json (--floor-samples-ok exit 2) simply
+              # spends the one extra window before the same floor+delta fallback -- harmless.
               if [ "$_try" -lt 2 ] && ! python3 "$here/qr_align_pins.py" --floor-samples-ok \
                   --host "$host" --sources "$sources" --jitter-json "$_jj"; then
                 echo "[qr-align] #1168 arrival-floor audit short on samples for >=1 align source; re-fetching once more (+${_window}s) before the budget-unchecked fallback" >&2
