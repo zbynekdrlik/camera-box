@@ -115,6 +115,156 @@ mv_fps_preflight_term_is_report_only() {
   esac
 }
 
+# -----------------------------------------------------------------------------------------------
+# issue 1040 -- the fresh-sample SETTLE for the STRICT (imag) term after a BELOW first read.
+#
+# WHY: mv-fps-gate classifies each projector's WINDOW MEDIAN rendered_fps over its most recent ~12
+# samples (median_recent_rendered_fps, src/mv_audit.rs). Right after a [4d0/8] 25W PL1 step-down the
+# pre-gate just waited out (issue 1268), that recent window STRADDLES the clamp era -- the median
+# reads below floor while the LATEST sample is already at target (run 34986461596: median 23.0 while
+# latest rendered_fps 30.0 >= floor 28.0). The one-shot 6 s grace re-read re-reads the SAME tail and
+# re-runs the SAME median gate, so it cannot move a median dominated by ~45 s of clamp-era samples --
+# a false abort of a ~40-min run on a box that has already recovered. So the strict term SETTLES on
+# FRESH samples instead: it polls for NEW multiview-audit lines and decides from the individual fresh
+# samples (never the backward-looking median). Never false-aborts a CI gate (the user's hardest
+# constraint): < N fresh samples within the bounded budget, or an unreadable re-read, is UNKNOWN ->
+# report-only NOTE. The strih report-only term (issue 1260) keeps its own grace path, unchanged.
+# Same PURE-core-split-from-a-thin-runner shape as scripts/lib/genlock-settle.sh (issue 1221).
+# -----------------------------------------------------------------------------------------------
+
+# mv_fps_preflight_latest_sample -- stdin: multiview-audit lines; stdout: "<id>\t<rendered_fps>\t<floor>"
+#   for the NEWEST (last) multiview-audit line, where <id> is the whole line VERBATIM (its own
+#   identity -- the OBS-log timestamp prefix advances ~every 5 s, so a new emit is a new identity;
+#   issue-797-safe: it is an IDENTITY comparison, never a wall-clock rate). Empty output when there is
+#   no multiview-audit line, or the newest one lacks rendered_fps= / floor= (the caller then treats it
+#   as "no fresh sample this pass"). Always exits 0 (a no-match never trips a strict-mode caller).
+mv_fps_preflight_latest_sample() {
+  LC_ALL=C awk '
+    index($0, "multiview-audit:") > 0 { line = $0 }
+    END {
+      if (line == "") exit 0
+      fps = ""; floor = ""
+      n = split(line, a, /[ \t]+/)
+      for (i = 1; i <= n; i++) {
+        p = index(a[i], "="); if (p == 0) continue
+        k = substr(a[i], 1, p - 1); v = substr(a[i], p + 1)
+        if (k == "rendered_fps") fps = v
+        else if (k == "floor") floor = v
+      }
+      if (fps == "" || floor == "") exit 0
+      printf "%s\t%s\t%s\n", line, fps, floor
+    }' 2>/dev/null || true
+}
+
+# mv_fps_preflight_sample_verdict <rendered_fps> <floor> -> stdout: ok | below | bad
+#   ok    -- rendered_fps >= floor (a healthy fresh sample). below -- rendered_fps < floor (a fresh
+#   below-floor sample -> confirms the collapse). bad -- either value missing / non-numeric (a
+#   malformed line; the caller neither counts it toward the recovery streak nor confirms a collapse
+#   on it). Float-safe compare via awk (rendered_fps=30.00, floor=28.0). Always exits 0.
+mv_fps_preflight_sample_verdict() {
+  local fps="${1:-}" floor="${2:-}"
+  case "$fps" in '' | *[!0-9.]*) printf 'bad\n'; return 0 ;; esac
+  case "$floor" in '' | *[!0-9.]*) printf 'bad\n'; return 0 ;; esac
+  if LC_ALL=C awk -v a="$fps" -v b="$floor" 'BEGIN { exit !(a + 0 >= b + 0) }' 2>/dev/null; then
+    printf 'ok\n'
+  else
+    printf 'below\n'
+  fi
+}
+
+# _mv_fps_preflight_settle_now -> stdout: the current time in seconds (a non-negative integer).
+#   Overridable via MV_FPS_PREFLIGHT_SETTLE_NOW_CMD (a shell command whose stdout is "now") so a
+#   Tier-0 replica can drive a fake clock and exercise budget exhaustion with no real waiting. ALWAYS
+#   exits 0 and ALWAYS prints a valid integer (a failed/garbage read -> 0), so the caller's
+#   `now="$(_mv_fps_preflight_settle_now)"` can never fail-abort the settle under `set -e`; the pass
+#   ceiling in the runner is the independent backstop for a wedged clock. Mirrors genlock-settle.sh.
+_mv_fps_preflight_settle_now() {
+  local t
+  if [ -n "${MV_FPS_PREFLIGHT_SETTLE_NOW_CMD:-}" ]; then
+    # shellcheck disable=SC2294  # test seam: run the caller-provided clock command verbatim
+    t="$(eval "${MV_FPS_PREFLIGHT_SETTLE_NOW_CMD}" 2>/dev/null)" || t=""
+  else
+    t="$(date +%s 2>/dev/null)" || t=""
+  fi
+  case "$t" in '' | *[!0-9]*) t=0 ;; esac
+  printf '%s\n' "$t"
+}
+
+# mv_fps_preflight_settle_strict <name> <ip> <os> <user> <pw> <tail_n> <baseline_lines>
+#   The STRICT-box fresh-sample settle. <baseline_lines> is the first BELOW read's tail -- its newest
+#   multiview-audit line is the BASELINE identity (samples matching it are STALE straddling data, not
+#   counted). Polls (sleep seam) for NEW multiview-audit lines and decides:
+#     - a fresh sample < floor              -> prints the collapse DETAIL to stdout (the caller adds
+#                                              it to $collapsed -> the loud ERROR + exit 1)
+#     - N (default 3) consecutive fresh >= floor -> prints an `ok:` line to stderr, no stdout detail
+#     - < N fresh within the budget / unreadable -> prints a report-only NOTE to stderr, no detail
+#   Prints the collapse DETAIL on stdout ONLY when confirmed (empty otherwise), so the caller
+#   integrates it exactly like the report-only grace path. Emits progress/ok/NOTE to stderr. ALWAYS
+#   returns 0 (never aborts itself; the caller owns the exit). Three termination bounds (wall budget,
+#   est = pass*poll for a wedged clock, hard pass ceiling), mirroring genlock_settle_wait.
+mv_fps_preflight_settle_strict() {
+  local name="$1" ip="$2" os="$3" user="$4" pw="$5" tail_n="$6" baseline="$7"
+  local n="${MV_FPS_PREFLIGHT_SETTLE_N:-3}"
+  local budget="${MV_FPS_PREFLIGHT_SETTLE_S:-120}"
+  local poll="${MV_FPS_PREFLIGHT_SETTLE_POLL:-6}"
+  local max_passes="${MV_FPS_PREFLIGHT_SETTLE_MAX_PASSES:-1000}"
+  # SANITIZE every termination-bound input to a valid non-negative integer (#1133 class: a malformed
+  # env value flowing into `[ -ge ]`/`$(( ))` under the caller's `set -euo pipefail` would abort the
+  # whole E2E run; the same guard genlock_settle_wait applies).
+  case "$n" in '' | *[!0-9]*) n=3 ;; esac
+  case "$budget" in '' | *[!0-9]*) budget=120 ;; esac
+  case "$poll" in '' | *[!0-9]*) poll=6 ;; esac
+  case "$max_passes" in '' | *[!0-9]*) max_passes=1000 ;; esac
+
+  local baseline_samp baseline_id last_id
+  baseline_samp="$(printf '%s\n' "$baseline" | mv_fps_preflight_latest_sample)"
+  baseline_id="${baseline_samp%%$'\t'*}"
+  last_id="$baseline_id"
+  local ok_streak=0 fresh_seen=0 pass=0 start
+  start="$(_mv_fps_preflight_settle_now)"
+
+  echo "    [4d1/8] MV-fps preflight — $name below floor on first read; settling on FRESH multiview-audit samples (need ${n} consecutive ≥floor within ${budget}s) — the window median can straddle a just-recovered clamp (issue 1040), never false-abort a CI gate" >&2
+
+  while :; do
+    "${MV_FPS_PREFLIGHT_SETTLE_SLEEP_CMD:-sleep}" "$poll"
+    pass=$((pass + 1))
+    local lines samp id fps floor v rest
+    lines="$(mv_fps_preflight_probe "$ip" "$os" "$user" "$pw" "$tail_n")"
+    if [ -n "$lines" ]; then
+      samp="$(printf '%s\n' "$lines" | mv_fps_preflight_latest_sample)"
+      id="${samp%%$'\t'*}"
+      if [ -n "$id" ] && [ "$id" != "$last_id" ]; then
+        last_id="$id"
+        fresh_seen=$((fresh_seen + 1))
+        rest="${samp#*$'\t'}"; fps="${rest%%$'\t'*}"; floor="${rest##*$'\t'}"
+        v="$(mv_fps_preflight_sample_verdict "$fps" "$floor")"
+        if [ "$v" = "below" ]; then
+          echo "    [4d1/8] MV-fps preflight — $name: fresh sample rendered_fps=$fps < floor=$floor after ${pass} poll(s) — collapse CONFIRMED on fresh data (not a straddling median)" >&2
+          printf '%s\n' "$name MV render collapsed — fresh sample rendered_fps=$fps < floor=$floor (confirmed on fresh data, not a straddling median; issue 1040)"
+          return 0
+        elif [ "$v" = "ok" ]; then
+          ok_streak=$((ok_streak + 1))
+          if [ "$ok_streak" -ge "$n" ]; then
+            local now elapsed
+            now="$(_mv_fps_preflight_settle_now)"; elapsed=$((now - start))
+            echo "    ok: [4d1/8] MV-fps preflight — $name recovered on fresh samples (${ok_streak}/${n} ≥ floor) after ${elapsed}s, proceeding (issue 1040)" >&2
+            return 0
+          fi
+        else
+          # a malformed fresh line breaks the consecutive-≥floor streak (never counts, never confirms)
+          ok_streak=0
+        fi
+      fi
+    fi
+    local now elapsed est
+    now="$(_mv_fps_preflight_settle_now)"; elapsed=$((now - start)); est=$((pass * poll))
+    if [ "$elapsed" -ge "$budget" ] || [ "$est" -ge "$budget" ] || [ "$pass" -ge "$max_passes" ]; then
+      echo "    NOTE: [4d1/8] MV-fps preflight — $name: only ${fresh_seen} fresh sample(s), ${ok_streak}/${n} ≥floor within the ${budget}s settle budget after ${pass} poll(s) — inconclusive, proceeding report-only (never false-abort a CI gate; the live issue-1083 watchdog owns a sustained collapse)" >&2
+      return 0
+    fi
+  done
+}
+
 # mv_fps_preflight_assert <gate_bin> <box>...   (box = "name|ip|os|user|pw")
 #   For each box: probe the newest OBS log's multiview-audit lines, run <gate_bin> over them, map exit
 #   via mv_fps_verdict. PASS -> ok. UNKNOWN -> report-only NOTE (never abort). BELOW -> a grace re-read
@@ -150,39 +300,43 @@ mv_fps_preflight_assert() {
       UNKNOWN)
         echo "    NOTE: [4d1/8] MV-fps preflight — $name: mv-fps-gate could not classify the audit lines (a missing/broken gate binary at '$gate_bin'?) — nothing to decide, proceeding" >&2 ;;
       BELOW)
-        # Grace re-read before aborting: never false-abort a CI gate on ONE transient below-floor line
-        # (a momentary GPU/CPU contention spike). A sustained collapse stays below floor across a fresh
-        # ~5 s audit period; a transient recovers. Mirrors optical_chain_preflight_assert's grace
-        # re-probe + the watchdog's 2-pass confirm, adapted to a synchronous one-shot preflight.
-        echo "    [4d1/8] MV-fps preflight — $name below floor on first read; grace re-read after ${reprobe_sleep}s before deciding (never false-abort a CI gate)" >&2
-        case "$reprobe_sleep" in ''|*[!0-9]*) reprobe_sleep=0 ;; esac
-        [ "$reprobe_sleep" -gt 0 ] && sleep "$reprobe_sleep"
-        lines="$(mv_fps_preflight_probe "$ip" "$os" "$user" "$pw" "$tail_n")"
-        if [ -z "$lines" ]; then
-          echo "    NOTE: [4d1/8] MV-fps preflight — $name: below on first read but grace re-read unreadable — nothing to decide, proceeding" >&2
-          continue
-        fi
-        gate_ec=0
-        out="$(printf '%s\n' "$lines" | "$gate_bin" 2>/dev/null)" || gate_ec=$?
-        verdict="$(mv_fps_verdict "$gate_ec")"
-        if [ "$verdict" = "BELOW" ]; then
-          # Reuse the health lib's FAIL-line formatter (mv_fps_alert_detail) rather than re-deriving
-          # the extraction here (structural reuse); `|| detail=…` keeps it `-e`-safe even if the gate
-          # ever exited 1 without a FAIL line (a contract violation the real gate never commits).
-          detail="$(mv_fps_alert_detail "$name" "$out")" || detail="$name MV render collapsed below floor"
-          if mv_fps_preflight_term_is_report_only "$name"; then
-            # issue 1260: the strih 4K divisor-1 MV floor (28) pre-dates the 2026-08-28 seven-camera
-            # fleet reactivation -- a healthy-core-loop strih now idles the MV below floor, so this
-            # term deterministically refuses every run. REPORT-ONLY while issue 1260 is open
-            # (walk-back tracked on issue 1263): WARN loud, never abort. The imag term stays STRICT
-            # (falls through to $collapsed below). Same report-only-decoupling seam as issue 914/915.
+        if mv_fps_preflight_term_is_report_only "$name"; then
+          # REPORT-ONLY box (strih, issue 1260): keep the one-shot grace re-read -> WARNING path,
+          # UNCHANGED. issue 1040 changes ONLY the STRICT-box term; the strih 4K-floor term stays a
+          # loud WARN (never an abort) while issue 1260 is open (walk-back tracked on issue 1263).
+          echo "    [4d1/8] MV-fps preflight — $name below floor on first read; grace re-read after ${reprobe_sleep}s before deciding (never false-abort a CI gate)" >&2
+          case "$reprobe_sleep" in ''|*[!0-9]*) reprobe_sleep=0 ;; esac
+          [ "$reprobe_sleep" -gt 0 ] && sleep "$reprobe_sleep"
+          lines="$(mv_fps_preflight_probe "$ip" "$os" "$user" "$pw" "$tail_n")"
+          if [ -z "$lines" ]; then
+            echo "    NOTE: [4d1/8] MV-fps preflight — $name: below on first read but grace re-read unreadable — nothing to decide, proceeding" >&2
+            continue
+          fi
+          gate_ec=0
+          out="$(printf '%s\n' "$lines" | "$gate_bin" 2>/dev/null)" || gate_ec=$?
+          verdict="$(mv_fps_verdict "$gate_ec")"
+          if [ "$verdict" = "BELOW" ]; then
+            # Reuse the health lib's FAIL-line formatter (mv_fps_alert_detail) rather than re-deriving
+            # the extraction here (structural reuse); `|| detail=…` keeps it `-e`-safe even if the gate
+            # ever exited 1 without a FAIL line (a contract violation the real gate never commits).
+            detail="$(mv_fps_alert_detail "$name" "$out")" || detail="$name MV render collapsed below floor"
             echo "    WARNING (issue 1260): $name MV render below floor -- REPORT-ONLY while issue 1260 is open: $detail" >&2
           else
-            collapsed="${collapsed}${detail}
-"
+            echo "    ok: [4d1/8] MV-fps preflight — $name recovered on grace re-read (transient), proceeding" >&2
           fi
         else
-          echo "    ok: [4d1/8] MV-fps preflight — $name recovered on grace re-read (transient), proceeding" >&2
+          # STRICT box (imag) — issue 1040: SETTLE on FRESH samples instead of a one-shot grace
+          # re-read of a window whose median can straddle a [4d0/8]-cleared clamp episode. $lines is
+          # the first BELOW read (its newest multiview-audit line is the settle BASELINE). A confirmed
+          # fresh below-floor sample -> $collapsed (the loud ERROR + exit 1 below); recovered on N
+          # consecutive fresh >=floor, or inconclusive within the budget -> the settle emits its own
+          # ok:/NOTE: line and returns no detail (never false-abort a CI gate).
+          local settle_detail
+          settle_detail="$(mv_fps_preflight_settle_strict "$name" "$ip" "$os" "$user" "$pw" "$tail_n" "$lines")"
+          if [ -n "$settle_detail" ]; then
+            collapsed="${collapsed}${settle_detail}
+"
+          fi
         fi
         ;;
     esac
