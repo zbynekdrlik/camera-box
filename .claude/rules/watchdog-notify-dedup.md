@@ -91,9 +91,17 @@ fault-criticality axis are ORTHOGONAL — this one is TEST-gated AND time-bucket
 
 The DIAGNOSTIC / TEST-mode watchdogs stay one-ping-per-incident (a stable key, NO bucket): cadence
 (#794), frozen-input (#1052), splitter-port (#739), grabber-stuck (#1128), imag-power (#1040),
-ndi-halving (#1203), optical-chain (#860), obs-burn-reconcile (#1060), mv-fps (#771), av-step (#1267),
+ndi-halving (#1203), optical-chain (#860), obs-burn-reconcile (#1060), mv-fps (#771),
 netcfg-audit (#797), rig-status (#787), **asio-starve (#1023)** and **vb-matrix (#1227)**. Do NOT
 time-bucket any of these — the exception is NARROW.
+
+**Split file — `av-step-alert-watchdog.sh` (#1319):** the #1267 STEP arm stays DIAGNOSTIC (a stable
+`av-step-$box` key, one ping per incident), but the SAME file now also carries the production-critical
+absolute A/V-offset BAND arm, whose OUT_OF_BAND page (`av-band-$box`) TIME-BUCKETS via
+`watchdog_notify_key` — A/V-sync measurement is production-critical (issue 1308), so it re-pings
+"dokolečka" while the stream offset stays outside the E2E-aligned band. The file is therefore
+allowlisted in the #1206 sweep; allowlisting the FILE permits the bucketed band line without requiring
+the step line to bucket (the sweep is file-scoped, not key-scoped).
 
 **asio-starve (#1023) and vb-matrix (#1227) were RE-classified OUT of production-critical (#1308 step-3,
 owner ruling 14.9.2026 „5 A"):** VB-Matrix on the stream box is NOT production audio — its

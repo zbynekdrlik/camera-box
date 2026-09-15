@@ -12350,3 +12350,17 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   under the 4K multiview) — large vendored OBS/DistroAV change, CI-only compile, needs rig soak.
 - UNVERIFIED: the 2 h <15 ms / <5 relocks/h acceptance needs a live post-deploy soak (no code
   deploy here — a report-only detection metric).
+- #1319 — absolute A/V offset BAND alarm + dock-live freshness facet (owner 15.9.2026: no
+  notification while the stream dock read a +13→+47 ms wander at a constant pin; the issue-1267 STEP
+  detector is blind to a slow drift and false-read STALE in the dock's dead-band quiet windows).
+  RED 5eaefe660 → GREEN aa6af5248. Box-side: NEW `av_offset_dock_live_age_from_log` →
+  `av_offset_dock_live_age_s` facet (freshness of the `av-sync-dock: diag … locked=yes` heartbeat →
+  IN_BAND_QUIET vs STALE); `av_offset_series_from_log` kept byte-identical (raw UPDATED/LOCKED lines
+  DELIBERATELY not folded — ROZHODNUTÉ on the ticket: broke the #1267 exclusion test + pushed a quiet
+  window OUT_OF_BAND). Decision: NEW `classify_av_band`/`analyze_band` + `analyze-band` CLI
+  (OUT_OF_BAND / IN_BAND / IN_BAND_QUIET / STALE / REPIN / SKIP / UNKNOWN vs a FIXED E2E-aligned
+  reference); the step path untouched. Watchdog: NEW band arm in `av-step-alert-watchdog.sh`
+  (`resolve_band_reference` env→`residual_median_ms`→0 ms fallback; 2-pass confirm; production-critical
+  TIME-BUCKETED `av-band-$box` dedup key, allowlisted in the #1206 sweep). Live dry-run (stream :8899):
+  ref −16.7 ms, recent 38.4 → OUT_OF_BAND confirmed → page "obraz mešká za zvukom". Tier-0: pytest 229
+  green, bash -n + shellcheck clean. New test tests/python/test_av_band_1319.py.
