@@ -106,6 +106,19 @@ pinned by the parity gate is exactly the right shape. The old heuristic assumed 
 carries audio on every box" and produced five false `MISMATCH-PROGRAM-SILENT` rows on strih/stream
 — that assumption is now dead.
 
+### Gotcha — narrowing the audit's classification can silently disable an advisory gated on it
+
+`classify` derives TWO things: the audio verdict AND the report-only `yuv_range=partial` advisory.
+The advisory was originally gated on `expected == ExpectedAudio`. When the certified-table change
+flipped every strih/stream/imag input to `ExpectedSilent`, that advisory silently STOPPED firing
+for those boxes' program VIDEO inputs (`cg`, `NDI 2ME PGM`) — a coverage loss a self-review missed
+and a fresh-context review caught. The advisory is a VIDEO concern; keying it on the AUDIO
+expectation coupled it to a table that legitimately changed. It is now decoupled via
+`is_program_video_input(box, name)` (`!camera && (program_keyed || box==resolume)`), computed
+independently of `expected_audio`. **General rule: when you NARROW a classification (more inputs
+land in a "silent"/"off"/"excluded" bucket), audit every report-only NOTE/advisory/secondary
+signal gated on the OLD classification — a `matches!(expected, …)`-style gate can silently go dark.**
+
 ## Deferred followups (NOT in the #1303 code lane)
 
 - **Audio DEGRADE full taxonomy** — surface `decide_audio_health`'s AudioDisabledOnProgram +
