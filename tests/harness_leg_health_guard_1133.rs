@@ -704,19 +704,22 @@ fn cap1s_band_warn_never_aborts_the_run_under_set_e_on_an_empty_or_nomatch_read(
 fn empty_ssh_read_flows_through_the_whole_wiring_to_ok_under_set_e() {
     // #1133 wiring: extract counts + streaming -> classify(skip,eproto) HARD -> frame_loss HARD ->
     // cap1s report-only -> stall report-only -> ok line. On an empty read everything is healthy.
+    // #1133 reopen: EPROTO is now steady = total − restart-adjacent (empty ts blocks -> "0 0").
     let (out, ok) = run_under_set_e(
         "OUT=''; \
-         S=$(leg_health_extract STALL \"$OUT\"); K=$(leg_health_extract SKIP \"$OUT\"); E=$(leg_health_extract EPROTO \"$OUT\"); \
+         S=$(leg_health_extract STALL \"$OUT\"); K=$(leg_health_extract SKIP \"$OUT\"); \
+         EP=$(leg_health_extract_eproto_ts \"$OUT\"); RS=$(leg_health_extract_restart_ts \"$OUT\"); \
+         PAIR=$(leg_health_eproto_steady_count \"$EP\" \"$RS\"); E=${PAIR%% *}; ADJ=${PAIR##* }; \
          STR=$(leg_health_extract_streaming \"$OUT\"); \
          if ! M=$(leg_health_classify cam1 \"$K\" \"$E\"); then echo \"ABORT:$M\"; exit 1; fi; \
          if ! M=$(leg_health_frame_loss_classify cam1 \"$STR\"); then echo \"ABORT:$M\"; exit 1; fi; \
          leg_health_cap1s_band_warn cam1 \"$(leg_health_extract_cap1s \"$OUT\")\"; \
          leg_health_dequeue_stall_report cam1 \"$S\"; \
-         echo \"OK_LINE stall=$S skip=$K eproto=$E\"",
+         echo \"OK_LINE stall=$S skip=$K eproto=$E adj=$ADJ\"",
     );
     assert!(ok, "an empty ssh read must not fail the run: {out:?}");
     assert!(
-        out.contains("OK_LINE stall=0 skip=0 eproto=0"),
+        out.contains("OK_LINE stall=0 skip=0 eproto=0 adj=0"),
         "empty read -> healthy, ok line reached: {out:?}"
     );
     assert!(
@@ -783,9 +786,16 @@ fn read_all_cmd_embeds_every_signal_read_in_one_script() {
         out.contains("LEGHEALTH_SKIP=$("),
         "must emit a skip count line: {out}"
     );
+    // #1133 reopen: the EPROTO term is no longer a flat count — it is now TWO epoch blocks (the
+    // -71 kernel epochs + the camera-box/burn restart epochs) so leg_health_eproto_steady_count can
+    // exclude the restart-adjacent -71 artifacts client-side.
     assert!(
-        out.contains("LEGHEALTH_EPROTO=$("),
-        "must emit an eproto count line: {out}"
+        out.contains("LEGHEALTH_EPROTO_TS_BEGIN") && out.contains("LEGHEALTH_EPROTO_TS_END"),
+        "must delimit the EPROTO epoch block: {out}"
+    );
+    assert!(
+        out.contains("LEGHEALTH_RESTART_TS_BEGIN") && out.contains("LEGHEALTH_RESTART_TS_END"),
+        "must delimit the restart epoch block: {out}"
     );
     assert!(
         out.contains("LEGHEALTH_CAP1S_BEGIN") && out.contains("LEGHEALTH_CAP1S_END"),
@@ -809,8 +819,14 @@ fn read_all_cmd_embeds_every_signal_read_in_one_script() {
         "journal window: {out}"
     );
     assert!(
-        out.contains("journalctl -k --since=@100 --until=@3700"),
-        "kernel EPROTO window: {out}"
+        out.contains("journalctl -k -o short-unix --since=@100 --until=@3700"),
+        "kernel EPROTO epoch window (short-unix): {out}"
+    );
+    // #1133 reopen: the restart-epoch read is widened by ±the adjacency window (3s) so a -71 at the
+    // EPROTO window edge still sees a restart just outside it.
+    assert!(
+        out.contains("--since=@97") && out.contains("--until=@3703"),
+        "restart epoch window widened by ±adjacency (3s): {out}"
     );
 }
 
@@ -847,6 +863,252 @@ fn extract_cap1s_returns_only_the_lines_between_the_markers() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 5c. #1133 reopen: EPROTO restart-adjacency exclusion. A kernel uvcvideo -71 (EPROTO) is emitted
+//     once per camera-box.service / camera-box-burn-* teardown+reopen (UVC stream artifact), so
+//     chained E2E runs' OWN restart churn tripped the >=6/hr bar and refused a HEALTHY leg. The fix
+//     reads BOTH journals with epoch timestamps and counts only STEADY-STATE -71 (none within ±3s
+//     of a restart line); a genuine wire fault (-71 BETWEEN restarts) still refuses at the same bar.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn eproto_restart_adjacent_secs_is_three() {
+    // the ±window (reopen: one -71 at the SAME second as each restart; ±3s covers the stop→start gap)
+    assert_eq!(
+        run_ok("leg_health_eproto_restart_adjacent_secs").trim(),
+        "3"
+    );
+}
+
+#[test]
+fn eproto_steady_count_excludes_restart_adjacent_71_lines() {
+    // 6 -71 epochs, each within ±3s of a restart epoch (the reopen cam4 case) -> steady 0.
+    let ep = "1000\\n2000\\n3000\\n4000\\n5000\\n6000";
+    let rs = "1001\\n2000\\n2999\\n4002\\n4998\\n6003"; // each within ±3s of a -71
+    let out = run_ok(&format!(
+        "leg_health_eproto_steady_count \"$(printf '%b' '{ep}')\" \"$(printf '%b' '{rs}')\""
+    ));
+    assert_eq!(
+        out.trim(),
+        "0 6",
+        "all six -71 are restart-adjacent -> steady 0, adjacent 6"
+    );
+    // steady 0 passes classify, where the raw total 6 would have aborted (the reopen false-abort).
+    let (_o, ok) = run_sourced_status("leg_health_classify cam4 0 0");
+    assert!(ok, "steady eproto 0 must pass classify");
+    let (_o2, ok2) = run_sourced_status("leg_health_classify cam4 0 6");
+    assert!(
+        !ok2,
+        "the raw total 6 would have (wrongly) aborted before the fix"
+    );
+}
+
+#[test]
+fn eproto_steady_count_keeps_between_restart_71_lines_and_still_refuses() {
+    // 6 -71 epochs, NONE within ±3s of a restart (a genuine wire fault) -> steady 6 -> refuse.
+    let ep = "1000\\n1100\\n1200\\n1300\\n1400\\n1500";
+    let rs = "5000\\n6000"; // far from every -71
+    let out = run_ok(&format!(
+        "leg_health_eproto_steady_count \"$(printf '%b' '{ep}')\" \"$(printf '%b' '{rs}')\""
+    ));
+    assert_eq!(
+        out.trim(),
+        "6 0",
+        "six between-restart -71 -> steady 6, adjacent 0"
+    );
+    let (msg, ok) = run_sourced_status("leg_health_classify cam4 0 6");
+    assert!(
+        !ok,
+        "steady eproto 6 must abort (genuine wire fault still refuses)"
+    );
+    assert!(
+        msg.contains("Non-zero status") || msg.to_lowercase().contains("eproto"),
+        "must name the EPROTO signal: {msg:?}"
+    );
+}
+
+#[test]
+fn eproto_steady_count_mixed_reports_both_counts() {
+    // 2 adjacent + 3 steady -> "3 2" (the report the ok line surfaces: N steady, M ignored).
+    let ep = "1000\\n2000\\n3000\\n4000\\n5000";
+    let rs = "1002\\n1999"; // 1000,2000 adjacent; 3000,4000,5000 steady
+    let out = run_ok(&format!(
+        "leg_health_eproto_steady_count \"$(printf '%b' '{ep}')\" \"$(printf '%b' '{rs}')\""
+    ));
+    assert_eq!(out.trim(), "3 2", "mixed -> 3 steady, 2 restart-adjacent");
+}
+
+#[test]
+fn eproto_steady_count_empty_inputs_are_safe() {
+    assert_eq!(run_ok("leg_health_eproto_steady_count '' ''").trim(), "0 0");
+    // no restart data at all -> every -71 stays STEADY (never a manufactured exclusion).
+    let out = run_ok("leg_health_eproto_steady_count \"$(printf '%b' '100\\n200\\n300')\" ''");
+    assert_eq!(
+        out.trim(),
+        "3 0",
+        "no restart data -> all -71 counted as steady"
+    );
+}
+
+#[test]
+fn eproto_steady_count_never_aborts_under_set_e() {
+    // called from recording-e2e.sh under `set -euo pipefail` — an empty read must not set-e-abort
+    // (empty array under `set -u`, zero-match pipelines).
+    let (out, ok) =
+        run_under_set_e("R=$(leg_health_eproto_steady_count '' ''); echo \"REACHED $R\"");
+    assert!(
+        ok && out.contains("REACHED 0 0"),
+        "steady_count on empty must not set-e abort: {out:?}"
+    );
+}
+
+#[test]
+fn eproto_ts_read_cmd_reads_kernel_epochs_short_unix() {
+    let out = run_ok("leg_health_eproto_ts_read_cmd 100 3700");
+    assert!(
+        out.contains("journalctl -k") && out.contains("-o short-unix"),
+        "must read the kernel log with short-unix epochs: {out}"
+    );
+    assert!(
+        out.contains("--since=@100") && out.contains("--until=@3700"),
+        "kernel window: {out}"
+    );
+    assert!(
+        out.contains("grep -E 'uvcvideo.*Non-zero status'"),
+        "must grep the -71 pattern: {out}"
+    );
+    assert!(
+        out.contains("grep -oE '^[0-9]+'"),
+        "must extract the leading epoch: {out}"
+    );
+    assert!(
+        !out.contains("_SYSTEMD_INVOCATION_ID"),
+        "kernel read is not instance-scoped: {out}"
+    );
+}
+
+#[test]
+fn restart_ts_read_cmd_reads_camera_box_and_burn_lifecycle_epochs() {
+    let out = run_ok("leg_health_restart_ts_read_cmd 100 3700");
+    assert!(out.contains("-o short-unix"), "short-unix epochs: {out}");
+    assert!(
+        out.contains("--since=@100") && out.contains("--until=@3700"),
+        "window: {out}"
+    );
+    // full-journal read (NOT -u scoped): a stopped+reset-failed transient camera-box-burn-* unit is
+    // no longer resolvable by a `-u 'camera-box*'` glob, but its systemd[1] lifecycle line survives.
+    assert!(
+        !out.contains(" -u "),
+        "must be a full-journal read, not -u scoped: {out}"
+    );
+    assert!(
+        out.contains("systemd") && out.contains("camera-box"),
+        "must match camera-box(-burn) systemd lifecycle lines: {out}"
+    );
+    assert!(
+        out.contains("Started") && out.contains("Stopped"),
+        "must match the lifecycle verbs: {out}"
+    );
+    assert!(
+        out.contains("grep -oE '^[0-9]+'"),
+        "must extract the leading epoch: {out}"
+    );
+}
+
+#[test]
+fn eproto_ts_read_cmd_end_to_end_with_fake_journalctl_extracts_only_71_epochs() {
+    // define a fake `journalctl` that replays a short-unix fixture (Tier-0: we can't run journalctl),
+    // then EVAL the exact command the builder emits — proving the whole -71 -> epoch pipeline.
+    let body = format!(
+        "journalctl() {{ cat \"{}\"; }}; CMD=$(leg_health_eproto_ts_read_cmd 100 3700); eval \"$CMD\"",
+        fixture("eproto_ts_kmsg.txt").display()
+    );
+    let out = run_ok(&body);
+    assert_eq!(
+        out.trim(),
+        "1758000000\n1758000500\n1758001000",
+        "only the three -71 epochs, integer seconds: {out:?}"
+    );
+}
+
+#[test]
+fn restart_ts_read_cmd_end_to_end_rejects_app_and_foreign_unit_lines() {
+    // the fixture also carries a camera-box[PID] APP line that says "Started" (not systemd[1]) and a
+    // foreign some-other.service systemd line — both must be rejected, only the camera-box(-burn)
+    // systemd lifecycle epochs survive.
+    let body = format!(
+        "journalctl() {{ cat \"{}\"; }}; CMD=$(leg_health_restart_ts_read_cmd 100 3700); eval \"$CMD\"",
+        fixture("restart_ts_journal.txt").display()
+    );
+    let out = run_ok(&body);
+    assert_eq!(
+        out.trim(),
+        "1758000000\n1758000001\n1758000002\n1758000500\n1758001000",
+        "only camera-box(-burn) systemd lifecycle epochs (app + foreign-unit lines rejected): {out:?}"
+    );
+}
+
+#[test]
+fn extract_ts_returns_only_lines_between_the_markers() {
+    let out = run_ok(
+        "OUT=$(printf '%b' 'LEGHEALTH_EPROTO_TS_BEGIN\\n100\\n200\\nLEGHEALTH_EPROTO_TS_END\\nLEGHEALTH_RESTART_TS_BEGIN\\n300\\nLEGHEALTH_RESTART_TS_END'); \
+         echo EP=$(leg_health_extract_eproto_ts \"$OUT\" | tr '\\n' ,); \
+         echo RS=$(leg_health_extract_restart_ts \"$OUT\" | tr '\\n' ,)",
+    );
+    assert!(out.contains("EP=100,200,"), "eproto ts extracted: {out:?}");
+    assert!(out.contains("RS=300,"), "restart ts extracted: {out:?}");
+    assert!(
+        !out.contains("LEGHEALTH_"),
+        "must strip the marker lines: {out:?}"
+    );
+}
+
+#[test]
+fn restart_adjacent_eproto_flows_through_wiring_to_ok_under_set_e() {
+    // the FULL per-box sequence (extract ts -> steady_count -> classify) on the reopen cam4 case:
+    // 6 -71 all restart-adjacent -> steady 0 -> HEALTHY, ok line reports the excluded count.
+    let out_str = "LEGHEALTH_STALL=0\\nLEGHEALTH_SKIP=0\\n\
+        LEGHEALTH_EPROTO_TS_BEGIN\\n1000\\n2000\\n3000\\n4000\\n5000\\n6000\\nLEGHEALTH_EPROTO_TS_END\\n\
+        LEGHEALTH_RESTART_TS_BEGIN\\n1001\\n2000\\n2999\\n4002\\n4998\\n6003\\nLEGHEALTH_RESTART_TS_END";
+    let (out, ok) = run_under_set_e(&format!(
+        "OUT=$(printf '%b' '{out_str}'); \
+         EP=$(leg_health_extract_eproto_ts \"$OUT\"); RS=$(leg_health_extract_restart_ts \"$OUT\"); \
+         PAIR=$(leg_health_eproto_steady_count \"$EP\" \"$RS\"); STEADY=${{PAIR%% *}}; ADJ=${{PAIR##* }}; \
+         if ! M=$(leg_health_classify cam4 0 \"$STEADY\"); then echo \"ABORT:$M\"; exit 1; fi; \
+         echo \"OK eproto=$STEADY steady ($ADJ restart-adjacent ignored)\""
+    ));
+    assert!(ok, "6 restart-adjacent -71 must NOT abort the run: {out:?}");
+    assert!(
+        out.contains("OK eproto=0 steady (6 restart-adjacent ignored)"),
+        "must reach ok and report the excluded count: {out:?}"
+    );
+    assert!(!out.contains("ABORT:"), "must not abort: {out:?}");
+}
+
+#[test]
+fn between_restart_eproto_still_aborts_the_wiring_under_set_e() {
+    // same sequence, a GENUINE wire fault (6 -71 all between restarts) -> steady 6 -> still aborts.
+    let out_str = "LEGHEALTH_STALL=0\\nLEGHEALTH_SKIP=0\\n\
+        LEGHEALTH_EPROTO_TS_BEGIN\\n1000\\n1100\\n1200\\n1300\\n1400\\n1500\\nLEGHEALTH_EPROTO_TS_END\\n\
+        LEGHEALTH_RESTART_TS_BEGIN\\n9000\\nLEGHEALTH_RESTART_TS_END";
+    let (out, ok) = run_under_set_e(&format!(
+        "OUT=$(printf '%b' '{out_str}'); \
+         EP=$(leg_health_extract_eproto_ts \"$OUT\"); RS=$(leg_health_extract_restart_ts \"$OUT\"); \
+         PAIR=$(leg_health_eproto_steady_count \"$EP\" \"$RS\"); STEADY=${{PAIR%% *}}; \
+         if ! M=$(leg_health_classify cam4 0 \"$STEADY\"); then echo \"ABORT_OK:$M\"; exit 1; fi; \
+         echo \"WRONGLY_PASSED\""
+    ));
+    assert!(
+        !ok,
+        "6 between-restart -71 must still abort the run: {out:?}"
+    );
+    assert!(
+        out.contains("ABORT_OK") && out.contains("Non-zero status"),
+        "must abort naming the EPROTO signal: {out:?}"
+    );
+    assert!(!out.contains("WRONGLY_PASSED"), "{out:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
 // 6. Wiring guard: recording-e2e.sh sources the lib AND has a leg-health preflight block that
 //    respects offline-ack. (Static-anchor style, like harness_capture_rate_guard.rs's wiring test.)
 // ---------------------------------------------------------------------------------------------
@@ -870,6 +1132,12 @@ fn recording_e2e_sources_the_lib_and_wires_the_preflight() {
     assert!(
         s.contains("leg_health_classify"),
         "must call the count-based decision fn (skip/eproto)"
+    );
+    // #1133 reopen: the EPROTO term must go through the restart-adjacency exclusion — a future edit
+    // reverting to a flat count would re-introduce the harness-churn false-abort this fix removes.
+    assert!(
+        s.contains("leg_health_eproto_steady_count"),
+        "must compute steady EPROTO via the restart-adjacency exclusion (#1133 reopen)"
     );
     // #1133: the NEW HARD gate — frame loss — must be wired, or a future edit could silently
     // revert the ticket's core gate while every other test still passes (the set-e tests exercise

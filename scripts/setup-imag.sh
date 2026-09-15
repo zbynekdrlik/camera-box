@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=27
+TOTAL_STEPS=28
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -2508,6 +2508,60 @@ else
 fi
 rm -f "$USER_HOME/.config/systemd/user/graphical-session.target.wants/picom.service"
 echo "  issue 1146 revert: picom provisioned DORMANT (installed+configured, unit disabled — render budget stays with OBS; HDMI stays xrandr primary via step 16)"
+
+# =============================================================================
+step 28 "imag :8899 bundle-state server (issue 1299): install + ENABLE-ONLY so the dev1 genlock-lock watchdog covers imag"
+# =============================================================================
+# imag is listed in scripts/lib/obs-fleet.sh's genlock-lock facet fleet (strih stream imag
+# resolume), but had NO :8899 server, so scripts/genlock-lock-alert-watchdog.sh SKIPped it every
+# pass (":8899 not fetchable") and an imag genlock LOCK loss was never paged. This installs the
+# canonical scripts/bundle-state-server.py under a --user unit; its Windows-only identity gathers
+# degrade to absent facets on Linux (its IS_WINDOWS gate, issue 1299), so on imag it serves
+# genlock_lock, genlock_build_sha, obs_version, audio_ts_lag_* and record-dir-stats. The three
+# sibling files (the server + the bundle_state_gather / obs_phase2 modules it imports) install
+# together under /opt/camera-box so the server's sibling imports resolve.
+#
+# ENABLE-ONLY (never --now): this provisioner never live-starts the server -- the supervisor starts
+# it once after the fleet genlock deploy and runs the verify-imag.sh :8899 check (per
+# systemd/genlock-lock-alert-watchdog.README.md + .claude/rules/provisioning-scripts.md).
+mkdir -p /opt/camera-box
+for f in bundle-state-server.py bundle_state_gather.py obs_phase2.py; do
+    gh api -H "Accept: application/vnd.github.raw" \
+        "repos/${GENLOCK_REPO}/contents/scripts/${f}?ref=dev" \
+        > "/opt/camera-box/${f}" \
+        || fail "issue 1299: could not fetch scripts/${f} from ${GENLOCK_REPO} (dev) via gh api"
+done
+chmod 0644 /opt/camera-box/*.py
+
+sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/systemd/imag-bundle-state-server.service?ref=dev" \
+    > "$USER_HOME/.config/systemd/user/imag-bundle-state-server.service" \
+    || fail "issue 1299: could not fetch systemd/imag-bundle-state-server.service from ${GENLOCK_REPO} (dev) via gh api"
+chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/systemd"
+
+BSS_UID="$(id -u "$DESKTOP_USER")"
+# #1182: same bus-liveness gate as step 21 -- a from-scratch box has no user bus this run, so gate
+# the `systemctl --user` calls and complete the ENABLE bus-free on the deferred path.
+if user_bus_alive; then
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${BSS_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user daemon-reload || fail "issue 1299: systemctl --user daemon-reload failed before enabling imag-bundle-state-server.service"
+    # ENABLE-ONLY (no --now): creates the graphical-session.target.wants symlink so it starts on the
+    # next graphical session; the supervisor starts it now to validate :8899.
+    sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${BSS_UID}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+        systemctl --user enable imag-bundle-state-server.service \
+        || fail "issue 1299: systemctl --user enable imag-bundle-state-server.service failed"
+    echo "  imag-bundle-state-server.service ENABLED (not started -- the supervisor starts it once; verify-imag.sh check (ba) gates :8899)"
+else
+    # #1182: (fresh box) no user bus this run -- complete the ENABLE bus-free by hand-writing the
+    # wants-symlink (the unit is WantedBy=graphical-session.target), exactly like step 21's deferred
+    # imag-obs.service path. The START stays deferred (enable-only convention); the fresh user manager
+    # reads this symlink at the next boot.
+    sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user/graphical-session.target.wants"
+    sudo -u "$DESKTOP_USER" ln -sf "$USER_HOME/.config/systemd/user/imag-bundle-state-server.service" \
+        "$USER_HOME/.config/systemd/user/graphical-session.target.wants/imag-bundle-state-server.service"
+    echo "  #1182: (fresh box) no user bus this run -- imag-bundle-state-server.service ENABLED bus-free (wants-symlink on disk); the supervisor starts it once"
+fi
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

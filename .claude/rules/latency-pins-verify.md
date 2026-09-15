@@ -43,8 +43,14 @@ It reads the SAME baseline json and applies each explicit per-source pin over WS
 **DRY-RUN by default** (prints `live -> want` per source, writes nothing); `--execute` is the only
 path that writes, so a promotion is deliberate + operator-invoked in a **NO-E2E maintenance
 window**, never automatic at launch. Idempotent (a source already on-baseline is a no-op),
-read-back verified, FAIL LOUD on a read-back mismatch (never a half-set source). It REFUSES the
-imag floor-sentinel box (`_all_ndi_inputs_ms`) — imag's 3ms floor is `imag_latency_enforce.py`'s
+read-back verified, FAIL LOUD on a read-back mismatch (never a half-set source). **GOTCHA (#1168):
+`apply_pins` signals its fail-loud read-back mismatch by raising `SystemExit` (a `BaseException`, NOT
+an `Exception`).** So any BEST-EFFORT wrapper around it (a restore/teardown handler that must log and
+continue, never abort) MUST catch `except BaseException`, not `except Exception` — an `except
+Exception` lets the `SystemExit` escape and MASK whatever the caller was doing (the #1168 abort-restore
+bug: a restore-time read-back failure replaced the original per-camera `AlignmentImpossible` with the
+generic writer error; caught by review, fixed to `except BaseException` in `qr_align_pins._restore_after_abort`).
+It REFUSES the imag floor-sentinel box (`_all_ndi_inputs_ms`) — imag's 3ms floor is `imag_latency_enforce.py`'s
 domain (`imag-min-latency-3ms-always`), never promoted. CLI mirrors the verify tool:
 `apply_latency_pins.py --box strih --host 10.77.9.202 [--execute]` (DRY-RUN without `--execute`).
 This is the sanctioned "operator/gate legitimately re-tunes → record in a PR → apply to the rig"
@@ -88,9 +94,17 @@ predates the fork adding these to `get_defaults`; confirmed by the `ndi-source.c
 
 ## Baseline scope
 
-strih baseline (the DRIFT-GUARD reference) covers the default `CAMERA_ACTIVE_SET` (cam1/cam2/cam3);
-retired-grabber pins (cam4..7) are deliberately excluded so a stale pin is never *drift-checked*.
-stream pins `NDI 2ME PGM` with a `{want_ms, tolerance_ms}` band (the A/V-align hold; a band absorbs
+**strih baseline is the FLOOR-3 live model (issue 1168, 2026-09-15): `NDI cam1..cam7 = 3`** — every
+on-air strih camera (the current `CAMERA_ACTIVE_SET`, now 7 cameras) at the 3 ms floor. This retired
+the old `cam1/cam2/cam3` set + the stale `cam3 = 20` reference: the per-run `[4i/8align]` aligner
+(`scripts/qr_align_pins.py`) OWNS any relative offset (re-derived live, NEVER committed here), so the
+report-only reference is the floor for every camera. **A post-align above-floor offset legitimately
+REPORTS drift at OBS start** — the aligner's offsets persist in the scene collection, so a later
+`latency_pins_verify.py` read on an offset camera reads a named `got=Nms want=3ms` DRIFT (report-only,
+never overwritten): that is an align offset, not a real drift. cam2 (the projection probe, EXCLUDED
+from `CAMERA_ALIGN_SET`, issue 1216) is not floored by the aligner but its report-only floor reference
+is 3 (issue 1168 lever 1 recorded cam2 6 → 3; re-verify cam2's A/V before applying live). stream pins
+`NDI 2ME PGM` with a `{want_ms, tolerance_ms}` band (the A/V-align hold; a band absorbs
 ordinary re-tuning while catching a gross revert). imag uses the `_all_ndi_inputs_ms` floor
 sentinel (always 3). **NOTE the split (#1003):** the drift-guard REFERENCE set (this file) ≠ the
 per-run ALIGNMENT set. Alignment covers `CAMERA_ALIGN_SET` (a SUPERSET incl. cam4 — every on-air
@@ -161,12 +175,15 @@ but LEFT this fixture (and `test_apply_latency_pins_1003.py`'s reverted-baseline
 deep numbers — a classic incomplete-revert dangling test. Both were re-pointed to the reverted
 shallow set as part of the floor-3 rework. **issue 1168 lever 1 (2026-09-01)** then re-tuned cam2
 6→3 (the projection probe's leftover pin — cam2 is EXCLUDED from `CAMERA_ALIGN_SET`, issue 1216, so
-the per-run aligner never floors it), current strih baseline **3/3/20**, and updated exactly two
-file-reading fixtures in the same change: `test_main_drift_exits_1_clean_exits_0`'s clean/drift reads
-and `test_apply_latency_pins_1003.py`'s two reverted-baseline assertions (the ~38 OTHER `cam2:6`
-literals across the suite are independent test data — NOT the file — and were correctly left
-untouched). Lesson restated: a baseline-VALUES change (either direction) must update the file-reading
-fixture(s) in the SAME change, and ONLY those.
+the per-run aligner never floors it). **issue 1168 (2026-09-15)** then refreshed strih to the FLOOR-3
+live model **`NDI cam1..cam7 = 3`** (retiring the stale cam3=20 reference + extending the cam1..cam3
+set to the 7-camera on-air fleet), and updated exactly the SAME two file-reading fixtures:
+`test_main_drift_exits_1_clean_exits_0`'s clean/drift reads (now the floor set clean / a single-pin
+drift) and `test_apply_latency_pins_1003.py`'s two reverted-baseline assertions (now
+`all(strih[cam{n}] == 3 for n in 1..8)` / the explicit-pins `{cam{n}: 3}`) — the ~38 OTHER `cam2:6`
+literals across the suite are independent test data (NOT the file) and were correctly left untouched.
+Lesson restated: a baseline-VALUES change (any direction) must update the file-reading fixture(s) in
+the SAME change, and ONLY those.
 
 ## Local verification of a `vendor/README.md` pin/doc edit — Tier-0 blocks `cargo test`
 

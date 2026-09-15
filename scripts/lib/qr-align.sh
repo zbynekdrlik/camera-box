@@ -95,16 +95,36 @@ qr_align_run() {
           ;;
         *)
           sleep "$_window"
-          if _qa_ps="Get-Content ($_newest) | Select-Object -Skip $_start" timeout 120 bash -c \
-              '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
-              "$here" "$STRIH_USER" "$password" "$host" > "$_log" 2>/dev/null && [ -s "$_log" ] \
-              && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
-              && [ -s "$_jj" ]; then
-            jitter_json="$_jj"
-            echo "[qr-align] #1161 post-reset arrival-floor audit fetched -> $_jj (floor-aware plan enabled)" >&2
-          else
-            echo "WARNING: [qr-align] #1161 could not fetch the post-reset strih genlock audit; the plan falls back to the inert-prone floor+delta — see qr_align_pins.py's own warning." >&2
-          fi
+          # #1168: bounded (<=2) fetch loop. A source with < MIN_FLOOR_SAMPLES audit samples yields a
+          # phantom floor qr_align_pins.py DROPS -> the budget-UNCHECKED fallback (run 34973535496:
+          # cam4 had 2 samples in one 12s window). When the first fetch is short, sleep ONE more
+          # window (same pin regime -- the pins are still at the floor, align --execute has not run)
+          # and re-fetch from the SAME post-reset $_start (now with more accrued lines) BEFORE letting
+          # that fallback fire, so a transient thin window is not mistaken for a genuinely-missing
+          # floor. Best-effort throughout: any hiccup keeps whatever fetch succeeded.
+          local _try
+          for _try in 1 2; do
+            if _qa_ps="Get-Content ($_newest) | Select-Object -Skip $_start" timeout 120 bash -c \
+                '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
+                "$here" "$STRIH_USER" "$password" "$host" > "$_log" 2>/dev/null && [ -s "$_log" ] \
+                && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
+                && [ -s "$_jj" ]; then
+              jitter_json="$_jj"
+              # Re-fetch ONCE more if a floor is still missing/phantom (read-only sufficiency check).
+              # Bounded (<=2), so an unreadable/invalid jitter-json (--floor-samples-ok exit 2) simply
+              # spends the one extra window before the same floor+delta fallback -- harmless.
+              if [ "$_try" -lt 2 ] && ! python3 "$here/qr_align_pins.py" --floor-samples-ok \
+                  --host "$host" --sources "$sources" --jitter-json "$_jj"; then
+                echo "[qr-align] #1168 arrival-floor audit short on samples for >=1 align source; re-fetching once more (+${_window}s) before the budget-unchecked fallback" >&2
+                sleep "$_window"
+                continue
+              fi
+              echo "[qr-align] #1161 post-reset arrival-floor audit fetched -> $_jj (floor-aware plan enabled)" >&2
+            else
+              echo "WARNING: [qr-align] #1161 could not fetch the post-reset strih genlock audit; the plan falls back to the inert-prone floor+delta — see qr_align_pins.py's own warning." >&2
+            fi
+            break
+          done
           ;;
       esac
     else

@@ -7,6 +7,25 @@ paths:
 
 # The #881 optical undecodable floor: report-only (issue 915) → RE-GATED (issue 905 item 3)
 
+> **UPDATE — issue 915 reopened (2026-09-15): `RUN_UNDECODABLE_FLOOR` recalibrated 6 → 15**
+> (per-window kept 4, `gates_overall_pass()` kept `true` — still LIVE-gating). Three same-day
+> runs on the permanent 60Hz cam2-monitor optical path read run-wide undecodable **6 / 0 / 10**
+> (one green at the old floor 6, one red on this term alone), per-window max 3; the Sep 1–4
+> baseline (31 runs) read 0–3, outlier 27. The 10 undecodable are ISOLATED single frames ~12–15 s
+> apart whose FAST (left) Vernier QR was captured MID-LCD-transition — the slow beat between the
+> monitor's 60Hz refresh and the filming camera's 60 fps shutter — while the right QR, the grey
+> ramps and all four digital burns stay crisp (pixel proofs frame-433 / frame-2650). This is the
+> irreducible optical temporal tear the floor exists for (issue 854/881), NOT a chain loss
+> (copies/gaps 0, frozen_leg 0, spread/AV PASS; imag's own report-only undecodable rose the same
+> 5 / 0 / 21 → the SOURCE picture, not a receiver). **15 = today's bad-phase max 10 + 50% headroom**,
+> the same margin rule that produced the 6 (4 + 50%). **The old "keep the floor below the pre-#707
+> regression level 10" argument is RETIRED: 10 is now a MEASURED physical value, not a regression
+> threshold.** A #707-class emit-gate skip is caught by the copies/gaps tolerance + the emit-gate-
+> skip triage, and a stuck/frozen leg by frozen_leg/self-heal — NEVER by the run-wide undecodable
+> sum. The 905-item-3 block below is HISTORY for the VALUE (6) but correct for the MECHANISM (the
+> gate went LIVE); `src/optical_floor.rs`'s module doc + `run_wide_floor_recalibrated_to_fifteen_915`
+> carry the current data.
+
 > **SUPERSEDED — issue 905 item 3 (2026-09-04): the floor is LIVE-GATING again.**
 > `optical_floor::gates_overall_pass()` is now hardcoded **`true`** (was `false`), and
 > `RUN_UNDECODABLE_FLOOR` was recalibrated **8 → 6** (per-window kept 4). All the physical
@@ -118,13 +137,13 @@ two) reds:
 
 - **`src/optical_floor.rs`** (pure): the constants + `gates_overall_pass()` + its own tests
   (`gates_overall_pass_is_live_gating_again_905`, `run_wide_floor_boundary_*`,
-  `run_wide_floor_recalibrated_to_six_905`). Tier-0-testable — a `rustc --edition 2021 --test`
+  `run_wide_floor_recalibrated_to_fifteen_915`). Tier-0-testable — a `rustc --edition 2021 --test`
   combined replica with `window_gate.rs` proves RED→GREEN locally.
 - **`src/window_gate.rs`** (pure): `decide_with_tolerance` + `relaxed_failure_reasons` fold on
   `undecodable_ok || !gates_overall_pass()`; tests `undecodable_over_floor_now_fails_both_verdicts_905`,
   `over_floor_fails_overall_pass_term_via_905_floor_regate`, `relaxed_failure_reasons_over_floor_now_gates_905`.
 - **`src/probe/recording_segments.rs`** (probe-gated, NO local compile): the run-wide fold + the
-  three tests `single_window_five_undecodable_..._905` / `pre_707_regression_level_fails_overall_pass_again_905`
+  three tests `single_window_five_undecodable_..._905` / `spread_over_run_wide_floor_fails_overall_pass_915`
   / `undecodable_over_per_window_floor_..._1132`.
 - **`src/bin/recording-verdict.rs`** (probe-gated, NO local compile): the job-log line MUST branch
   on `run_wide_undecodable_within_floor` (a loud `✗ #905 FLOOR FAIL` vs an OK line — a single
@@ -143,6 +162,6 @@ two) reds:
 `all_cambox_continuity.segments[].undecodable` PER cambox; segregate by the last run carrying any
 CAM1 undecodable (cam1's ShadowCast noise, issue 909 — ceases after the card swap) to isolate the
 steady cam2-only 60Hz temporal-tear baseline; pick the floor at ~50% headroom over the steady
-run-wide max, staying below the pre-#707 regression level (10). Two distinct subsystems share the
+run-wide max. The pre-#707 regression level (10) is NO LONGER a ceiling for this floor (issue 915, 2026-09-15): 10 is now a MEASURED physical value the 60Hz-vs-60fps beat can reach, so the current floor (15) sits ABOVE it; a #707-class regression is caught by the copies/gaps tolerance + emit-gate-skip triage / frozen_leg / self-heal, never by this sum. Two distinct subsystems share the
 word "undecodable": THIS floor is `all_cambox_continuity.total_undecodable`/`segments[].undecodable`;
 `full_chain.loss.*.optical_undecodable` is a SEPARATE rate-gated per-node check — don't conflate.

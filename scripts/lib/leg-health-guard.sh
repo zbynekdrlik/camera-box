@@ -32,6 +32,11 @@
 # / EPROTO signals WERE real degraded-state signals either way (the box genuinely stalled/skipped;
 # EPROTO/DQBUF remain a "secondary observation, monitor" item on #1110). So:
 #   * emit-gate SKIPPED aggregates + uvcvideo EPROTO -> HARD FAIL (genuine emit/USB degradation).
+#     #1133 reopen: the EPROTO term counts only STEADY-STATE -71 — a -71 within +-3s of a
+#     camera-box.service / camera-box-burn-* lifecycle line is a UVC stream teardown/re-open
+#     ARTIFACT (the harness's own restart churn, one -71 per restart at the same second) and is
+#     EXCLUDED from the bar; a genuine wire fault (-71 BETWEEN restarts) still refuses. See
+#     leg_health_eproto_restart_adjacent_secs / leg_health_eproto_steady_count.
 #   * captured FRAME LOSS (sent-vs-captured from the `Streaming:` lines), sustained over threshold
 #     -> HARD FAIL (the #1133 replacement for the DEQUEUE STALL gate — the quantity that actually
 #     measures capture health; see leg_health_frame_loss_* + leg_health_streaming_grep_pattern).
@@ -130,6 +135,20 @@ leg_health_eproto_window_secs() { echo 3600; }
 leg_health_skip_fail_threshold() { echo 8; }
 leg_health_eproto_fail_threshold() { echo 6; }
 
+# RESTART-ADJACENCY window for the EPROTO term, in seconds (#1133 reopen). A kernel uvcvideo -71
+# (EPROTO) is emitted once per camera-box.service / camera-box-burn-* stream teardown+reopen (a UVC
+# stream-stop/re-open ARTIFACT, not a wire fault): the reopen cam4 evidence showed one -71 at the
+# SAME second as each of nine restarts across two hours of chained runs, over_current_count 0, and
+# zero -71 in steady state. A -71 whose epoch is within +-this window of a camera-box(-burn)
+# lifecycle line is EXCLUDED from the >=6/hr bar (only steady-state -71 count); a genuine wire fault
+# (-71 BETWEEN restarts) is unaffected and still refuses. 3s covers the parity-align stop->start gap
+# (e.g. 13:24:58 -> 13:25:01) while staying far tighter than the ~minutes between run restarts.
+# NOTE (#1133 review 🔵): both epoch lists are floored to whole seconds (`grep -oE '^[0-9]+'` on the
+# `short-unix` `<sec>.<usec>` form), so the effective window is up to ~4s in real time — this biases
+# toward EXCLUSION of a restart-coincident -71 (exactly the artifact class we drop), never toward
+# hiding a between-restarts wire fault.
+leg_health_eproto_restart_adjacent_secs() { echo 3; }
+
 # REPORT-ONLY threshold for the DEQUEUE STALL diagnostic (was leg_health_stall_fail_threshold, HARD,
 # until #1133). No longer gates anything — leg_health_dequeue_stall_report surfaces a report-only
 # note at/over this count (the value at which it USED to abort) so the datum stays visible.
@@ -204,10 +223,45 @@ leg_health_journal_count_cmd() {
 # -k gives the identical uvcvideo lines with clean absolute-epoch windowing and no dmesg
 # boot-relative-timestamp parsing). No InvocationID here: kernel messages are not scoped to a
 # userspace unit instance; the time window IS the scope.
+#
+# #1133 review 🔵: this generic `journalctl -k` COUNT builder is no longer on the read_all path (the
+# EPROTO term switched to the restart-adjacency epoch readers below). It is retained deliberately as
+# a reusable kernel-count helper (its own unit test pins the shape), not dead-by-accident.
 leg_health_kmsg_count_cmd() {
   local since_epoch="${1:-}" until_epoch="${2:-}" pattern="${3:-}"
   printf 'journalctl -k --since=@%s --until=@%s --no-pager 2>/dev/null | grep -Ec '\''%s'\''' \
     "$since_epoch" "$until_epoch" "$pattern"
+}
+
+# leg_health_eproto_ts_read_cmd SINCE_EPOCH UNTIL_EPOCH -> the remote command that reads the
+# integer-second EPOCHS of every uvcvideo -71 kernel line in [SINCE, UNTIL] (#1133 reopen). Reads
+# `journalctl -k -o short-unix` (the epoch-prefixed kernel ring buffer, replacing the plain -Ec
+# count so the caller can exclude restart-adjacent artifacts), greps the -71 pattern, then extracts
+# the leading integer seconds with `grep -oE '^[0-9]+'` (short-unix prints `<epoch>.<usec> host …`,
+# so `^[0-9]+` stops at the dot). Trailing `|| true` keeps a zero-match pipeline from propagating a
+# non-zero exit into the read_all compound. No InvocationID: kernel messages are not unit-scoped.
+leg_health_eproto_ts_read_cmd() {
+  local since_epoch="${1:-}" until_epoch="${2:-}" pat
+  pat="$(leg_health_eproto_grep_pattern)"
+  printf 'journalctl -k -o short-unix --since=@%s --until=@%s --no-pager 2>/dev/null | grep -E '\''%s'\'' | grep -oE '\''^[0-9]+'\'' || true' \
+    "$since_epoch" "$until_epoch" "$pat"
+}
+
+# leg_health_restart_ts_read_cmd SINCE_EPOCH UNTIL_EPOCH -> the remote command that reads the
+# integer-second EPOCHS of every camera-box.service / camera-box-burn-*.service systemd lifecycle
+# line in [SINCE, UNTIL] (#1133 reopen). This is a FULL-journal read (NOT `-u 'camera-box*'`
+# scoped): a transient camera-box-burn-* unit is stopped + reset-failed after each run, so a `-u`
+# glob may no longer resolve it, but its `systemd[1]` lifecycle line survives in the full journal.
+# On the fleet's Ubuntu-noble systemd 255 the unit NAME is in the Started/Stopped message, so three
+# chained greps — (1) the systemd process signature, (2) mentions camera-box, (3) a lifecycle verb —
+# match in either field order (`Started camera-box.service …` and `camera-box.service: Deactivated
+# successfully.` both pass) while an APP log line (`camera-box[PID]: Started …`, not `systemd[…]:`)
+# and a foreign unit's lifecycle line are both rejected. `grep -oE '^[0-9]+'` extracts the epoch;
+# trailing `|| true` keeps a zero-match pipeline safe in the read_all compound.
+leg_health_restart_ts_read_cmd() {
+  local since_epoch="${1:-}" until_epoch="${2:-}"
+  printf 'journalctl -o short-unix --since=@%s --until=@%s --no-pager 2>/dev/null | grep -E '\''systemd\[[0-9]+\]:'\'' | grep -F camera-box | grep -E '\''Started|Starting|Stopping|Stopped|Deactivated'\'' | grep -oE '\''^[0-9]+'\'' || true' \
+    "$since_epoch" "$until_epoch"
 }
 
 # leg_health_cap1s_read_cmd INVOCATION_ID SINCE_EPOCH UNTIL_EPOCH -> the remote command that reads
@@ -306,14 +360,23 @@ leg_health_fail_message() {
 # leg_health_extract / leg_health_extract_cap1s below.
 leg_health_read_all_cmd() {
   local inv="${1:-}" since="${2:-}" until="${3:-}" ep_since="${4:-}" ep_until="${5:-}"
-  local stall_cmd skip_cmd eproto_cmd cap_cmd stream_cmd
+  # #1133 reopen: the EPROTO term now reads EPOCHS of both the -71 kernel lines and the
+  # camera-box(-burn) restart lines so leg_health_eproto_steady_count can exclude the restart-
+  # adjacent artifacts. Widen the restart read by +-the adjacency window so a -71 at the EPROTO
+  # window edge still sees a restart just outside it.
+  local adj rs_since rs_until
+  adj="$(leg_health_eproto_restart_adjacent_secs)"
+  rs_since=$((ep_since - adj))
+  rs_until=$((ep_until + adj))
+  local stall_cmd skip_cmd eproto_ts_cmd restart_ts_cmd cap_cmd stream_cmd
   stall_cmd="$(leg_health_journal_count_cmd "$inv" "$since" "$until" "$(leg_health_dequeue_stall_grep_pattern)")"
   skip_cmd="$(leg_health_journal_count_cmd "$inv" "$since" "$until" "$(leg_health_emit_skip_grep_pattern)")"
-  eproto_cmd="$(leg_health_kmsg_count_cmd "$ep_since" "$ep_until" "$(leg_health_eproto_grep_pattern)")"
+  eproto_ts_cmd="$(leg_health_eproto_ts_read_cmd "$ep_since" "$ep_until")"
+  restart_ts_cmd="$(leg_health_restart_ts_read_cmd "$rs_since" "$rs_until")"
   cap_cmd="$(leg_health_cap1s_read_cmd "$inv" "$since" "$until")"
   stream_cmd="$(leg_health_streaming_read_cmd "$inv" "$since" "$until")"
-  printf 'echo LEGHEALTH_STALL=$(%s); echo LEGHEALTH_SKIP=$(%s); echo LEGHEALTH_EPROTO=$(%s); echo LEGHEALTH_CAP1S_BEGIN; %s; echo LEGHEALTH_CAP1S_END; echo LEGHEALTH_STREAMING_BEGIN; %s; echo LEGHEALTH_STREAMING_END' \
-    "$stall_cmd" "$skip_cmd" "$eproto_cmd" "$cap_cmd" "$stream_cmd"
+  printf 'echo LEGHEALTH_STALL=$(%s); echo LEGHEALTH_SKIP=$(%s); echo LEGHEALTH_EPROTO_TS_BEGIN; %s; echo LEGHEALTH_EPROTO_TS_END; echo LEGHEALTH_RESTART_TS_BEGIN; %s; echo LEGHEALTH_RESTART_TS_END; echo LEGHEALTH_CAP1S_BEGIN; %s; echo LEGHEALTH_CAP1S_END; echo LEGHEALTH_STREAMING_BEGIN; %s; echo LEGHEALTH_STREAMING_END' \
+    "$stall_cmd" "$skip_cmd" "$eproto_ts_cmd" "$restart_ts_cmd" "$cap_cmd" "$stream_cmd"
 }
 
 # leg_health_extract FIELD OUTPUT -> the integer value of the `LEGHEALTH_<FIELD>=` line in the
@@ -343,6 +406,66 @@ leg_health_extract_streaming() {
   local output="$1"
   printf '%s\n' "$output" | sed -n '/^LEGHEALTH_STREAMING_BEGIN$/,/^LEGHEALTH_STREAMING_END$/p' \
     | sed '/^LEGHEALTH_STREAMING_\(BEGIN\|END\)$/d'
+}
+
+# leg_health_extract_eproto_ts OUTPUT -> just the uvcvideo -71 kernel epoch lines between the
+# EPROTO_TS BEGIN/END markers (#1133 reopen). Empty when the markers/lines are absent.
+leg_health_extract_eproto_ts() {
+  local output="$1"
+  printf '%s\n' "$output" | sed -n '/^LEGHEALTH_EPROTO_TS_BEGIN$/,/^LEGHEALTH_EPROTO_TS_END$/p' \
+    | sed '/^LEGHEALTH_EPROTO_TS_\(BEGIN\|END\)$/d'
+}
+
+# leg_health_extract_restart_ts OUTPUT -> just the camera-box(-burn) lifecycle epoch lines between
+# the RESTART_TS BEGIN/END markers (#1133 reopen). Empty when the markers/lines are absent.
+leg_health_extract_restart_ts() {
+  local output="$1"
+  printf '%s\n' "$output" | sed -n '/^LEGHEALTH_RESTART_TS_BEGIN$/,/^LEGHEALTH_RESTART_TS_END$/p' \
+    | sed '/^LEGHEALTH_RESTART_TS_\(BEGIN\|END\)$/d'
+}
+
+# leg_health_eproto_steady_count EPROTO_TS RESTART_TS -> echoes "STEADY ADJACENT" (#1133 reopen):
+#   STEADY   = number of -71 epochs with NO restart epoch within +-adjacency seconds (the count that
+#              feeds the >=6/hr HARD bar via leg_health_classify) — the genuine steady-state wire
+#              errors between restarts.
+#   ADJACENT = number of -71 epochs EXCLUDED as restart-adjacent artifacts (reported for visibility,
+#              never gates).
+#   EPROTO_TS / RESTART_TS are the newline-separated integer epochs the two _extract_*_ts helpers
+#   returned. Empty EPROTO_TS -> "0 0". A -71 with NO restart data at all stays STEADY (a failed ssh
+#   read of the restart journal must never MANUFACTURE an exclusion that hides a real wire fault).
+#   Pure (no I/O), and safe as a bare statement under the caller's `set -euo pipefail` (empty array
+#   guarded for `set -u`; no failing pipeline).
+leg_health_eproto_steady_count() {
+  local eproto_ts="${1:-}" restart_ts="${2:-}" adj
+  adj="$(leg_health_eproto_restart_adjacent_secs)"
+  local steady=0 adjacent=0 e r found diff
+  local -a restarts=()
+  while IFS= read -r r; do
+    case "$r" in '' | *[!0-9]*) continue ;; esac
+    restarts+=("$r")
+  done <<EOF
+$(printf '%s\n' "$restart_ts")
+EOF
+  while IFS= read -r e; do
+    case "$e" in '' | *[!0-9]*) continue ;; esac
+    found=0
+    for r in "${restarts[@]:-}"; do
+      case "$r" in '' | *[!0-9]*) continue ;; esac
+      if [ "$e" -ge "$r" ]; then diff=$((e - r)); else diff=$((r - e)); fi
+      if [ "$diff" -le "$adj" ]; then
+        found=1
+        break
+      fi
+    done
+    if [ "$found" = 1 ]; then
+      adjacent=$((adjacent + 1))
+    else
+      steady=$((steady + 1))
+    fi
+  done <<EOF
+$(printf '%s\n' "$eproto_ts")
+EOF
+  echo "$steady $adjacent"
 }
 
 # leg_health_cap1s_band_warn BOX CAP1S_TEXT -> a REPORT-ONLY WARN line (to stdout) IFF a sustained

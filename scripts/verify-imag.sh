@@ -170,6 +170,11 @@ set -euo pipefail
 #       imag_display_path_verdict (scripts/lib/imag-display-path.sh) -- the SAME verdict
 #       drift-guard --check-imag and the E2E [0/8] preflight run. A re-provision that drifts any
 #       facet must FAIL here. Pure ssh reads (side-effect free), appended at the END.
+#   (ba) imag :8899 bundle-state server (issue 1299): the imag-bundle-state-server.service unit is
+#       enabled + active, :8899 is listening, and /bundle-state.json carries genlock_build_sha -- so
+#       the dev1 genlock-lock alert watchdog (which lists imag in the obs-fleet genlock-lock facet)
+#       stops SKIPping imag ":8899 not fetchable" and can page an imag genlock LOCK loss. Pure ssh
+#       reads + a bounded on-box curl (side-effect free), so it runs BEFORE check (o)'s OBS restart.
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -858,6 +863,20 @@ imag_lease_tolerance_ok() {
   [ "$start_c" -ge 1 ] && [ "$scn_c" -ge 1 ]
 }
 
+# imag_bundle_state_facet_ok BODY -> 0 iff BODY is the imag :8899 /bundle-state.json carrying a
+# NON-EMPTY "genlock_build_sha" (issue 1299). That facet proves the server is genuinely SERVING
+# imag's own deployed genlock build (read from /opt/obs-genlock/GENLOCK_BUILD_SHA.txt), not an
+# empty/error page or a 404 -- the one facet that must be present on a healthy imag server (the
+# log-derived genlock_lock facet is only present while OBS has emitted a genlock-lock-json line, so
+# it is not the acceptance signal; genlock_build_sha is). Grep-based (no jq on the box) so it stays
+# pure (arg in, exit code out) + unit-testable offline; an empty value OR a missing key both FAIL.
+imag_bundle_state_facet_ok() {
+  local body="${1:-}"
+  case "$body" in *'{'*) ;; *) return 1 ;; esac
+  printf '%s' "$body" | grep -qE '"genlock_build_sha"[[:space:]]*:[[:space:]]*"[^"]+"' || return 1
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -1517,6 +1536,31 @@ else
     ok "full max-performance persistence: imag-maxperf.service active + governor/EPP/turbo/platform-profile all performance (#756/#791)"
   else
     fail "max-performance runtime STATE not performance ($(printf '%s\n' "$MP_GATHER" | grep -E '^(GOVERNOR|EPP|NO_TURBO|PLATFORM_PROFILE)=' | paste -sd' ' -)) -- imag-maxperf did not take effect (#756/#791)"
+  fi
+fi
+
+# (ba) imag :8899 bundle-state server serving (issue 1299) ------------------------------------
+# The unit is enabled + active, :8899 is listening, and /bundle-state.json carries genlock_build_sha
+# -- so the dev1 genlock-lock alert watchdog (which already lists imag in the obs-fleet genlock-lock
+# facet) stops SKIPping imag ":8899 not fetchable" and can page an imag genlock LOCK loss. Pure ssh
+# reads + a bounded on-box curl (side-effect free), so it runs BEFORE check (o)'s OBS restart.
+rc=0
+BSS_ENABLED="$(ssh_box "systemctl --user is-enabled imag-bundle-state-server.service 2>/dev/null || true")" || rc=$?
+BSS_ACTIVE="$(ssh_box "systemctl --user is-active imag-bundle-state-server.service 2>/dev/null || true")" || true
+if [ "$rc" -ne 0 ] || [ -z "$BSS_ENABLED" ]; then
+  fail "imag-bundle-state-server.service enabled/active state unreadable (ssh rc=$rc)"
+elif [ "$BSS_ENABLED" != enabled ] || [ "$BSS_ACTIVE" != active ]; then
+  fail "imag-bundle-state-server.service NOT enabled+active (enabled='${BSS_ENABLED}', active='${BSS_ACTIVE}') -- the dev1 genlock-lock watchdog would keep SKIPping imag ':8899 not fetchable' (issue 1299 coverage hole)"
+else
+  ok "imag-bundle-state-server.service enabled + active (issue 1299)"
+  rc=0
+  BSS_BODY="$(ssh_box "curl -s -m 10 http://127.0.0.1:8899/bundle-state.json 2>/dev/null")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$BSS_BODY" ]; then
+    fail ":8899 /bundle-state.json not fetchable on the box (ssh/curl rc=$rc) -- the server unit is active but not serving (issue 1299)"
+  elif imag_bundle_state_facet_ok "$BSS_BODY"; then
+    ok ":8899 /bundle-state.json serving with a genlock_build_sha -- the dev1 genlock-lock watchdog now covers imag (issue 1299)"
+  else
+    fail ":8899 /bundle-state.json served but carries NO genlock_build_sha -- the server is up but not exposing imag's deployed genlock build (issue 1299)"
   fi
 fi
 

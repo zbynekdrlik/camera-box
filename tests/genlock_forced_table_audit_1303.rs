@@ -8,8 +8,8 @@
 //! bash verdict to the Rust `audio_verdict` over a fixed vector set so the two can never drift.
 
 use camera_box::genlock_forced_table_audit::{
-    any_mismatch, audio_verdict, audit_box, classify, expected_audio, AudioExpectation,
-    AudioVerdict, BoxClass, NdiInput,
+    any_mismatch, audio_verdict, audit_box, classify, expected_audio, is_camera_input,
+    AudioExpectation, AudioVerdict, BoxClass, NdiInput,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -98,6 +98,93 @@ fn rust_any_mismatch_summary() {
     assert!(any_mismatch(&dirty));
 }
 
+// ---- Certified per-box table (#1303 owner ruling 2026-09-15) -----------------------------------
+//
+// „žiadny — zvuk na strih/stream ide cez Dante, NDI audio ostáva vypnuté" — program audio over NDI
+// exists on the cg OBS (resolume) ONLY; strih/stream/imag carry the mastered mix over Dante/ASIO, so
+// EVERY NDI input there is silent and NDI audio ENABLED on any of them is the double-audio defect.
+// These vectors are today's five live deploy-preflight rows (must grade OK), the inverse (audible on
+// a silent box = a mismatch), and the resolume program/camera pins.
+
+#[test]
+fn certified_five_strih_stream_program_rows_are_ok_1303() {
+    // The five FALSE MISMATCH-PROGRAM-SILENT rows from the 15.9 12:08 preflight: with NDI audio OFF
+    // on a strih/stream program input, the certified table grades OK (Dante carries the audio).
+    assert_eq!(
+        classify(BoxClass::Strih, &input("cg", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Strih, &input("NDI 2ME PGM (mv)", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Stream, &input("NDI obs hudba", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Stream, &input("NDIA cg stream", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+}
+
+#[test]
+fn certified_audible_on_a_silent_box_is_a_mismatch_1303() {
+    // The inverse: NDI audio ENABLED on a strih/stream input is the double-audio hazard the owner
+    // named -> a mismatch (not OK). (The specific MISMATCH-AUDIBLE token is pinned in the GREEN
+    // variant test + the parity gate.)
+    assert!(
+        classify(BoxClass::Stream, &input("NDI obs hudba", true, ""))
+            .verdict
+            .is_mismatch()
+    );
+    assert!(classify(BoxClass::Strih, &input("cg", true, ""))
+        .verdict
+        .is_mismatch());
+}
+
+#[test]
+fn certified_resolume_is_the_only_program_audio_box_1303() {
+    // resolume keeps the program->audio / camera->silent table.
+    assert_eq!(
+        classify(BoxClass::Resolume, &input("sp-fast_video", true, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Resolume, &input("sp-fast_video", false, "")).verdict,
+        AudioVerdict::MismatchProgramSilent
+    );
+    assert_eq!(
+        classify(BoxClass::Resolume, &input("NDI cam1", true, "")).verdict,
+        AudioVerdict::MismatchCameraAudible
+    );
+}
+
+#[test]
+fn certified_yuv_advisory_covers_program_video_on_dante_fed_boxes_1303() {
+    // A forced `yuv_range=partial` on a program VIDEO input still colour-shifts a full-range sender
+    // regardless of audio routing, so the report-only yuv advisory must fire on strih/stream/imag
+    // program inputs too (their audio is silent now), not only on resolume — it is a VIDEO concern,
+    // decoupled from the audio expectation.
+    assert!(classify(BoxClass::Strih, &input("cg", false, "partial")).yuv_partial_on_program);
+    assert!(
+        classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "partial")).yuv_partial_on_program
+    );
+    // a camera at partial is still NOT flagged (partial is the correct camera range).
+    assert!(
+        !classify(BoxClass::Strih, &input("CAM3 (usb)", false, "partial")).yuv_partial_on_program
+    );
+    // resolume program input unchanged.
+    assert!(
+        classify(BoxClass::Resolume, &input("sp-slow_video", true, "partial"))
+            .yuv_partial_on_program
+    );
+}
+
 // ---- Bash replica: print shape ----------------------------------------------------------------
 
 #[test]
@@ -142,14 +229,56 @@ fn bash_audit_is_report_only_even_when_all_clean() {
     assert!(out.contains("# summary: 1 input(s), 0 MISMATCH"), "{out}");
 }
 
+#[test]
+fn bash_yuv_advisory_covers_strih_program_video_1303() {
+    // A forced yuv_range=partial on strih `cg` (program VIDEO, silent audio) still gets the NOTE —
+    // the advisory is decoupled from the audio expectation. A camera at partial does NOT.
+    let body = "printf 'cg\tfalse\tpartial\t\nCAM3 (usb)\tfalse\tpartial\t\n' | genlock_forced_table_audit strih";
+    let (rc, out, err) = run_sourced(body);
+    assert_eq!(rc, 0, "report-only.\nstdout={out}\nstderr={err}");
+    assert!(
+        out.contains(
+            "cg: expected=silent ndi_audio=false -> OK  NOTE yuv_range=partial on a program source"
+        ),
+        "yuv NOTE fires for a strih program-video input:\n{out}"
+    );
+    assert!(
+        !out.contains("CAM3 (usb): expected=silent ndi_audio=false -> OK  NOTE"),
+        "no yuv NOTE for a camera at partial:\n{out}"
+    );
+}
+
+#[test]
+fn bash_stream_audible_program_input_is_mismatch_audible_1303() {
+    // The double-audio hazard: a program NDI input ENABLED on stream (Dante-fed box) -> the generic
+    // MISMATCH-AUDIBLE (not CAMERA-AUDIBLE, it is not a camera). Silent siblings grade OK.
+    let body = "printf 'NDI obs hudba\\ttrue\\t\\t\\n\
+NDI 2ME PGM\\tfalse\\t\\t\\n' | genlock_forced_table_audit stream";
+    let (rc, out, err) = run_sourced(body);
+    assert_eq!(rc, 0, "report-only.\nstdout={out}\nstderr={err}");
+    assert!(
+        out.contains("NDI obs hudba: expected=silent ndi_audio=true -> MISMATCH-AUDIBLE"),
+        "audible-program row on a silent box:\n{out}"
+    );
+    assert!(
+        out.contains("NDI 2ME PGM: expected=silent ndi_audio=false -> OK"),
+        "silent program row on stream is OK:\n{out}"
+    );
+    assert!(
+        out.contains("# summary: 2 input(s), 1 MISMATCH"),
+        "summary count:\n{out}"
+    );
+}
+
 // ---- Parity gate: bash verdict == Rust verdict over a fixed vector set -------------------------
 
 /// The Rust verdict rendered as the bash token, so the two are directly comparable.
 fn rust_token(bc: BoxClass, name: &str, ndi_audio: bool) -> &'static str {
-    match audio_verdict(expected_audio(bc, name), ndi_audio) {
+    match audio_verdict(expected_audio(bc, name), ndi_audio, is_camera_input(name)) {
         AudioVerdict::Ok => "OK",
         AudioVerdict::MismatchProgramSilent => "MISMATCH-PROGRAM-SILENT",
         AudioVerdict::MismatchCameraAudible => "MISMATCH-CAMERA-AUDIBLE",
+        AudioVerdict::MismatchAudible => "MISMATCH-AUDIBLE",
     }
 }
 
@@ -165,6 +294,10 @@ fn bash_replica_matches_rust_over_a_fixed_vector_set() {
         "sp-fast_video",
         "cg",
         "NDI 2ME PGM",
+        // today's five live deploy-preflight rows (2026-09-15) — the certified-table exercise set.
+        "NDI 2ME PGM (mv)",
+        "NDIA cg stream",
+        "NDI cam1",
         "mbc",
         "NDI obs hudba",
         "NDIAr ppt",

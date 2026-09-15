@@ -60,7 +60,7 @@ lists the report-only ones for the `ℹ️` line.
   self-heal terms flipped BLOCKING by **#905** item 2, see LIVE above; only the milder stale-replay
   signal stays report-only). The optical undecodable floor
   (`run_wide_undecodable_within_floor` / `undecodable_floor_gates_overall_pass`) is now BLOCKING
-  too — RE-GATED at floor 6 by **#905 item 3** (guarded `is not True` in `_report_only_tripped`, so
+  too — RE-GATED by **#905 item 3** at floor 6, recalibrated to floor 15 by **#915** (the classifier reads the booleans, not the number; guarded `is not True` in `_report_only_tripped`, so
   a pre-flip verdict still classifies report-only without double-counting). **NOTE (#1142
   + #1166):** the delivery spread and
   duplication_masked_cadence stay report-only ONLY on a PRE-flip verdict (no `gates_overall_pass` —

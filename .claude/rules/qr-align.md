@@ -453,3 +453,41 @@ status data lives is non-obvious — spent-time gotchas:
   quantum over a short (5–6 round) audit. Before concluding budget-bound reflects a REAL floor gap,
   check the recording spread on the same run; if they disagree, part of budget-bound may be barrier
   quantization curable by a longer/phase-robust audit rather than a physical floor reduction.
+
+## An ABORTED [4i/8align] restores the pins it wrote + a partial-floor re-fetch (#1168, 2026-09-15)
+
+`align()` reads `current_pins` at its start; in the `--execute` path it now WRAPS the post-apply
+re-measure + verdict in a `try/except`, and on ANY abort (the `AlignmentImpossible` "camera alignment
+FAILED (rc=1)" branch, or an unexpected error) it RESTORES the plan's sources back to `current_pins`
+(the post-reset floor on the two-phase path) via `restore_pins`/`_restore_after_abort` — the SAME
+read-back-verified `apply_latency_pins.apply_pins` writer the aligner + reset use (no #795 name
+mangle). A None (never-read) pre-align pin restores to the floor. It is **best-effort + LOUD**: a
+restore failure logs a `WARNING` but re-raises the ORIGINAL abort reason, so WHY the run aborted is
+never masked. This is the ONLY restore path for the aligner's pins — cleanup()'s `teardown --host
+STRIH` (`scripts/obs_phase2.py`, ~line 600) restores ONLY the stream-hold `_TEST_LATENCY_STATE_KEY`
+/ measurement-eq `_MEASUREMENT_EQ_STATE_KEY` snapshots, never the aligner's or the #900 re-anchor's
+pins (`grep reanchor|qr_align|floor_aware scripts/obs_phase2.py` = nothing). The two-phase reset
+already floored the #900 re-anchor pins BEFORE align runs, so restoring `current_pins` (= floor) also
+lands them at the floor. Before the fix an aborted run left the rig on the partial plan pins (run
+34973535496: cam1 20 / cam4 19 / cam5-7 36/36/37 DIRTY, restored by hand). Only the post-apply block
+is wrapped — a pre-apply abort (sanity / never-stabilize / already-aligned / budget-bound hard-fail)
+wrote no pins, and the reset already left them at the floor. Tier-0: `test_qr_align_restore_on_abort_1168.py`
+exercises the full align() abort against a fake ws/apply stub (asserting the LAST apply restores the
+pre-align pins, and that a SUCCESS path does not restore).
+
+**Partial arrival-floor re-fetch before the budget-unchecked fallback.** `arrival_floors_from_jitter`
+DROPS a source whose explicit `samples < MIN_FLOOR_SAMPLES` (3); a FASTER camera then missing its
+floor collapses `align()` to the budget-UNCHECKED plan. Run 34973535496's cam4 had only 2 samples in
+ONE 12 s window — a TRANSIENT thin window, not a genuinely-missing floor — so the budget check was
+skipped exactly on the run that needed it. `qr-align.sh`'s post-reset audit fetch is now a bounded
+(≤2 iteration) loop gated by the pure `floor_samples_sufficient(jitter_json, sources)` predicate
+(reuses `arrival_floors_from_jitter`'s OWN drop semantics — True iff every source has a KEPT floor;
+a missing samples count is trusted) exposed as the read-only `--floor-samples-ok` CLI mode (exit 0
+sufficient / 1 short / 2 no-jitter). When the first fetch is short the loop sleeps ONE more window
+(same pin regime — the pins are still at the floor, `align --execute` has not run, so more post-reset
+lines accrue from the SAME `$_start`) and re-fetches before letting the fallback fire, so the budget
+check is skipped only when a floor is genuinely unobtainable after two windows. The win_ssh fetch
+pipeline is byte-unchanged (only wrapped in the loop); anchor-safe (all Rust anchors on `qr-align.sh`
+are `.contains()` presence checks; the loop adds no `--box stream`). Tier-0: `floor_samples_sufficient`
++ the `--floor-samples-ok` CLI in `test_qr_align_floor_samples_1168.py`; the live win_ssh re-fetch is
+supervisor-verified on the rig (bash -n + shellcheck are the only local net for the shell half).

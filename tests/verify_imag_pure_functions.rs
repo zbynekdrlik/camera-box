@@ -1977,3 +1977,49 @@ fn verify_imag_reads_1188_guard_state_before_the_840_restart_wipes_it() {
         "the #1188 guard-state read must run BEFORE check (o)'s restart-proof (#840 ordering)"
     );
 }
+
+/// issue 1299: imag_bundle_state_facet_ok is the pure acceptance predicate for check (ba) — it
+/// passes ONLY on a /bundle-state.json body carrying a non-empty "genlock_build_sha", and FAILs on
+/// an empty value, a missing key, or a non-JSON/empty body (an unreadable signal is a FAIL, never a
+/// silent pass — the same #833 discipline as every other check).
+#[test]
+fn imag_bundle_state_facet_ok_requires_a_nonempty_genlock_build_sha() {
+    let (code, out, err) = run_sourced(
+        r#"
+        t(){ if imag_bundle_state_facet_ok "$2"; then r=OK; else r=FAIL; fi; [ "$r" = "$3" ] && echo "OK $1" || echo "MISMATCH $1 got=$r want=$3"; }
+        t has_sha  '{"obs_version":"32.1.2","genlock_build_sha":"deadbeef1299"}' OK
+        t spaced   '{ "genlock_build_sha" : "abc" }'                              OK
+        t empty    '{"genlock_build_sha":""}'                                     FAIL
+        t missing  '{"obs_version":"32.1.2"}'                                     FAIL
+        t emptybody ''                                                            FAIL
+        t notjson  'not a json body'                                             FAIL
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !out.contains("MISMATCH"),
+        "imag_bundle_state_facet_ok mismatch: {out}"
+    );
+}
+
+/// issue 1299: check (ba) must be wired into the live flow and run BEFORE check (o)'s OBS restart —
+/// it reads the imag-bundle-state-server unit state + curls :8899, all side-effect free, but the
+/// #884 ordering rule places every new check before the restart to keep its reads honest.
+#[test]
+fn verify_imag_check_ba_runs_before_the_obs_restart() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let ba = body
+        .find("imag-bundle-state-server.service enabled/active state unreadable")
+        .expect("check (ba) must be wired into the live flow (issue 1299)");
+    assert!(
+        body.contains("imag_bundle_state_facet_ok \"$BSS_BODY\""),
+        "check (ba) must validate the :8899 body via imag_bundle_state_facet_ok (issue 1299)"
+    );
+    let restart_call = body
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("check (o)'s restart must exist");
+    assert!(
+        ba < restart_call,
+        "check (ba) must run BEFORE check (o)'s OBS restart (#884 ordering)"
+    );
+}

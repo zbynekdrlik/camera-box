@@ -65,12 +65,21 @@ that Qt widget; it is NOT reachable from the obs-websocket RequestHandler. So:
   no longer produces a chronic false DEGRADED page. The facet still SHOWS the absent input
   (`connected:false`, report-only) — a dead sender is #1001/#1052's alarm, not this watchdog's. The
   watchdog logs `n_absent` per pass for observability.
-- **imag has NO `:8899` bundle-state server (open coverage hole, #1299 Part 2 followup).** `setup-imag.sh`
-  installs no `bundle-state-server` unit and `systemd/` ships none, but `obs-fleet.sh` lists imag in
-  the genlock-lock fleet, so the watchdog SKIPs imag every pass — an imag lock loss is never paged.
-  The fix is a Linux `bundle-state-server` install path (a `--user` unit + `setup-imag.sh`/`verify-imag.sh`
-  wiring, with every Windows-only gather in `bundle_state_gather.py`/`bundle-state-server.py` degrading
-  to an ABSENT facet rather than crashing on Linux). Deferred as a separate lane per the bundling gate.
+- **imag NOW HAS a `:8899` bundle-state server — the coverage hole is CLOSED (#1299 Part 2).**
+  `systemd/imag-bundle-state-server.service` is a `--user` unit running the CANONICAL
+  `bundle-state-server.py` with imag's flags (`--obs-log-dir %h/.config/obs-studio/logs
+  --genlock-build-sha-file /opt/obs-genlock/GENLOCK_BUILD_SHA.txt`, empty OBS-WS password);
+  `setup-imag.sh` step 28 installs the three sibling files (`bundle-state-server.py` +
+  `bundle_state_gather.py` + `obs_phase2.py`) into `/opt/camera-box` and ENABLES the unit only (never
+  `--now` — **the supervisor starts it once** after the fleet genlock deploy), and `verify-imag.sh`
+  check `(ba)` gates it (unit enabled+active + `:8899` listening + `/bundle-state.json` carries
+  `genlock_build_sha`). The Windows-only IDENTITY gathers (native tasklist/netstat/CIM, ProgramData
+  DLL byte hashes, the AHK/shortcut Start-Menu paths, the PowerShell NDI-runtime read) DEGRADE to
+  absent facets on Linux via a single `IS_WINDOWS = os.name == "nt"` gate at the gather boundary in
+  `bundle-state-server.py` (no Windows-only subprocess spawned, no per-request WARNING);
+  `genlock_build_sha` is lifted out of that gate (a cross-platform file read) so it keeps serving.
+  `bundle_state_gather.py` needed NO change (it holds no Windows-only subprocess gather). So the
+  watchdog now gets a real imag verdict instead of SKIPping it.
 - **The watchdog trusts the carried `state`, not per-input deltas.** The widget already folds the
   60 s recent-event window into `state=DEGRADED` (reason `recent_event`); bundle-state is stateless
   per request, so the facet carries CUMULATIVE per-input counters (not `_delta`), for observability.

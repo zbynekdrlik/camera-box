@@ -148,6 +148,14 @@ pub mod recording_boundary_trim;
 // and applies the returned downgrade to the cam1 node's classification.
 pub mod burn_reconcile;
 
+// #904 — present-by-adjacency inference for a single decoder-missed burn (the #264 class: a crisp
+// rendered burn the DECODER alone missed on a delivered frame). Pure, no probe deps, so it
+// unit-tests Tier-0 (`rustc --edition 2021 --test src/burn_adjacency.rs`); the probe-gated
+// `bin/recording-verdict` builds the per-frame delivered/id sequence and applies the returned
+// inference to re-classify BurnUnreadable → BurnUnreadableInferred (report-only; the zero-loss
+// fold subtracts inferred misses so only NON-inferable ones count).
+pub mod burn_adjacency;
+
 // #365 — frozen-camera freshness gate (pure decision + hash-timeline analysis). Hashes each
 // camera's raw NDI input from OBS GetSourceScreenshot at ~1 s cadence; a camera whose hash is
 // unchanged for > FREEZE_THRESHOLD consecutive samples is FROZEN. Fail-closed: < 2 successful

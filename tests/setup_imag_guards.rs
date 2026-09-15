@@ -1840,9 +1840,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 27,
-        "TOTAL_STEPS must be 27 after issue 1146 added the picom vsync-compositor step (step 27) \
-         on top of #791's imag-maxperf step 26 and #779's touchpad step 25"
+        declared, 28,
+        "TOTAL_STEPS must be 28 after issue 1299 added the imag :8899 bundle-state-server step \
+         (step 28) on top of issue 1146's picom vsync-compositor step 27 and #791's imag-maxperf step 26"
     );
     assert_eq!(
         actual, declared,

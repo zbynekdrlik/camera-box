@@ -42,25 +42,47 @@ genlock_forced_table_is_program() {
   return 1
 }
 
-# genlock_forced_table_expected BOX NAME -> "audio" | "silent". Camera inputs are silent on every
-# box; program inputs are audio on every box; otherwise the box-class default (resolume -> audio,
-# strih/stream/imag -> silent). Mirror of expected_audio in the Rust module.
+# genlock_forced_table_is_program_video BOX NAME -> rc 0 iff NAME on BOX is a program VIDEO input
+# (the yuv-advisory eligibility, decoupled from the audio expectation): a non-camera source that is
+# program-keyed on any box, OR any non-camera input on the cg box. Mirror of is_program_video_input.
+genlock_forced_table_is_program_video() {
+  local box="${1:-}" name="${2:-}"
+  genlock_forced_table_is_camera "$name" && return 1
+  genlock_forced_table_is_program "$name" && return 0
+  [ "$box" = "resolume" ] && return 0
+  return 1
+}
+
+# genlock_forced_table_expected BOX NAME -> "audio" | "silent". The per-box CERTIFIED table (owner
+# ruling 2026-09-15): the cg OBS (resolume) is the ONLY program-audio box -- camera inputs silent,
+# program inputs (the 9 keys) audio, otherwise the cg default (audio); strih/stream/imag carry the
+# mastered mix over Dante/ASIO so EVERY NDI input is silent. Mirror of expected_audio in the Rust
+# module.
 genlock_forced_table_expected() {
   local box="${1:-}" name="${2:-}"
-  if genlock_forced_table_is_camera "$name"; then
-    echo "silent"; return 0
-  fi
-  if genlock_forced_table_is_program "$name"; then
-    echo "audio"; return 0
-  fi
   case "$box" in
-    resolume) echo "audio" ;;
-    *)        echo "silent" ;;
+    resolume)
+      if genlock_forced_table_is_camera "$name"; then
+        echo "silent"; return 0
+      fi
+      if genlock_forced_table_is_program "$name"; then
+        echo "audio"; return 0
+      fi
+      # the cg box's default for an unrecognised input is audio (a program-audio box).
+      echo "audio"
+      ;;
+    *)
+      # strih/stream/imag: every NDI input silent (program audio arrives over Dante/ASIO).
+      echo "silent"
+      ;;
   esac
 }
 
 # genlock_forced_table_verdict BOX NAME NDI_AUDIO -> OK | MISMATCH-PROGRAM-SILENT |
-# MISMATCH-CAMERA-AUDIBLE. NDI_AUDIO is "true"/"false" (case-insensitive). Mirror of audio_verdict.
+# MISMATCH-CAMERA-AUDIBLE | MISMATCH-AUDIBLE. NDI_AUDIO is "true"/"false" (case-insensitive). When a
+# silent-expected input is audible, a CAMERA input yields MISMATCH-CAMERA-AUDIBLE and any other input
+# (a program/music source on a Dante-fed silent box) yields the generic MISMATCH-AUDIBLE (the
+# double-audio defect). Mirror of audio_verdict in the Rust module.
 genlock_forced_table_verdict() {
   local box="${1:-}" name="${2:-}" ndi_audio exp
   ndi_audio="$(printf '%s' "${3:-}" | tr '[:upper:]' '[:lower:]')"
@@ -69,7 +91,12 @@ genlock_forced_table_verdict() {
     echo "MISMATCH-PROGRAM-SILENT"; return 0
   fi
   if [ "$exp" = "silent" ] && [ "$ndi_audio" = "true" ]; then
-    echo "MISMATCH-CAMERA-AUDIBLE"; return 0
+    if genlock_forced_table_is_camera "$name"; then
+      echo "MISMATCH-CAMERA-AUDIBLE"
+    else
+      echo "MISMATCH-AUDIBLE"
+    fi
+    return 0
   fi
   echo "OK"
 }
@@ -94,7 +121,9 @@ genlock_forced_table_audit() {
     yr="${yr#"${yr%%[![:space:]]*}"}"
     yr="${yr%"${yr##*[![:space:]]}"}"
     yr="$(printf '%s' "$yr" | tr '[:upper:]' '[:lower:]')"
-    if [ "$exp" = "audio" ] && [ "$yr" = "partial" ]; then
+    # yuv advisory is a VIDEO concern, decoupled from the audio expectation (a program video input on
+    # a Dante-fed box is silent but still colour-shifts at partial range).
+    if [ "$yr" = "partial" ] && genlock_forced_table_is_program_video "$box" "$name"; then
       note="  NOTE yuv_range=partial on a program source (verify the sender's declared range)"
     fi
     case "$verdict" in

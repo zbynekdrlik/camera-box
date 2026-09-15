@@ -248,7 +248,7 @@ pub struct SegmentedContinuity {
     /// **Issue 915 (2026-08-01) made the run-wide undecodable floor stop gating this field; issue
     /// 905 item 3 (2026-09-04) RE-GATED it — it forces a failure again (see
     /// `run_wide_undecodable_within_floor` and `crate::optical_floor::gates_overall_pass` for the
-    /// decision record; `RUN_UNDECODABLE_FLOOR` recalibrated 8 → 6).**
+    /// decision record; `RUN_UNDECODABLE_FLOOR` recalibrated 8 → 6 → 15).**
     pub overall_pass: bool,
     /// The transition guard applied (ns).
     pub guard_ns: i64,
@@ -272,7 +272,7 @@ pub struct SegmentedContinuity {
     /// [`Self::run_wide_undecodable_within_floor`].
     pub total_undecodable: u32,
     /// Issue 915 visibility requirement — was [`Self::total_undecodable`] within the #881
-    /// run-wide floor (`crate::optical_floor::run_within_floor`, `RUN_UNDECODABLE_FLOOR` = 6)? This
+    /// run-wide floor (`crate::optical_floor::run_within_floor`, `RUN_UNDECODABLE_FLOOR` = 15)? This
     /// is the run-wide term, UNCHANGED in its own computation — it is LIVE GATING again since issue
     /// 905 item 3 (2026-09-04): a `false` here forces `overall_pass` to fail while
     /// `crate::optical_floor::gates_overall_pass()` is `true` (see that function's doc). Always
@@ -523,7 +523,7 @@ pub fn segment_continuity(
     // Issue 915 (2026-08-01) made this report-only; issue 905 item 3 (2026-09-04) RE-GATED it —
     // it FORCES `overall_pass` to fail again now that `crate::optical_floor::gates_overall_pass()`
     // is `true` (all physical blockers closed: cam1 grabber replaced, 120Hz/100Hz ruled out, 60Hz
-    // baseline permanent; `RUN_UNDECODABLE_FLOOR` recalibrated 8 → 6). Re-disarm = flip that one
+    // baseline permanent; `RUN_UNDECODABLE_FLOOR` recalibrated 8 → 6 → 15). Re-disarm = flip that one
     // function back to `false`.
     let total_undecodable: u32 = segments.iter().map(|s| s.undecodable).sum();
     let run_wide_undecodable_within_floor =
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn single_undecodable_frame_within_calibrated_floor_passes_881() {
         // #881 calibrated floor: cam2 has ONE delivered frame with no painted tick (None) —
-        // 1 undecodable is within the per-window floor (<=4) and the run-wide floor (<=6), and
+        // 1 undecodable is within the per-window floor (<=4) and the run-wide floor (<=15), and
         // copies/gaps are both 0, so this window (and the whole run) now PASSES. Before #881
         // this exact sequence FAILED on the optical `undecodable` term alone; it must not
         // anymore — the residual is a physical 60Hz temporal-tear artifact of the test camera's
@@ -1095,22 +1095,22 @@ mod tests {
     }
 
     #[test]
-    fn pre_707_regression_level_fails_overall_pass_again_905() {
-        // THE most important test for issue 881's calibration (acceptance criterion 2, issue 854
-        // design). EACH of 10 windows here carries exactly 1 undecodable frame (well within the
-        // per-window floor of 4) and is individually clean on copies/gaps. The SUM across the
-        // whole run is 10, the pre-#707 regression level (#707's own before/after: 10 -> 3
-        // undecodable) — `run_wide_undecodable_within_floor` computes this as OVER the run-wide cap
-        // (now 6). Issue 915 made the run report-only (it PASSED); issue 905 item 3 (2026-09-04)
-        // RE-GATED the floor, so this run FAILS `overall_pass` again — the run-wide term catching
-        // the pre-#707 regression is exactly what this gate exists to do.
+    fn spread_over_run_wide_floor_fails_overall_pass_915() {
+        // The run-wide cap is STILL load-bearing after the issue-915 recalibration (6 -> 15): a
+        // per-window-only check would tolerate a wide spread of windows each within their own floor.
+        // EACH of 16 windows here carries exactly 1 undecodable frame (well within the per-window
+        // floor of 4) and is individually clean on copies/gaps. The SUM across the whole run is 16,
+        // OVER the run-wide cap (now 15) -- `run_wide_undecodable_within_floor` reads false, so the
+        // run FAILS `overall_pass`. (The old pre-#707 level of 10 is now BELOW the floor and
+        // correctly PASSES -- it is a measured physical value, not a regression: see
+        // run_wide_floor_vector_..._915 in optical_floor.rs.)
         let n = 50;
         let dt = 1000i64;
         let window_span = (n as i64 + 2) * dt;
         let camboxes = ["cam1", "cam2", "cam3", "cam4"];
         let mut schedule = Vec::new();
         let mut frames = Vec::new();
-        for w in 0..10 {
+        for w in 0..16 {
             let start = w as i64 * window_span;
             let end = start + window_span;
             schedule.push(win(camboxes[w % camboxes.len()], start, end));
@@ -1125,8 +1125,8 @@ mod tests {
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert_eq!(
             v.segments.iter().map(|s| s.undecodable).sum::<u32>(),
-            10,
-            "sanity: 10 windows x 1 undecodable each: {v:?}"
+            16,
+            "sanity: 16 windows x 1 undecodable each: {v:?}"
         );
         assert!(
             v.segments.iter().all(|s| s.copies == 0 && s.gaps == 0),
@@ -1137,17 +1137,17 @@ mod tests {
             "every window individually is within the per-window floor: {v:?}"
         );
         assert_eq!(
-            v.total_undecodable, 10,
+            v.total_undecodable, 16,
             "#915: the run-wide sum stays correctly computed: {v:?}"
         );
         assert!(
             !v.run_wide_undecodable_within_floor,
-            "the run-wide floor computation is UNCHANGED -- 10 > 6 reads as over-floor: {v:?}"
+            "the run-wide floor computation is UNCHANGED -- 16 > 15 reads as over-floor: {v:?}"
         );
         assert!(
             !v.overall_pass,
-            "issue 905: the pre-#707 regression level (10 total) FAILS overall_pass again -- the \
-             re-gated run-wide floor (6) catches it: {v:?}"
+            "issue 915: a spread of 16 total undecodable FAILS overall_pass -- the run-wide floor \
+             (15) still catches a wide spread even though each window alone passes: {v:?}"
         );
     }
 
@@ -2186,7 +2186,7 @@ mod tests {
         // band is dormant). The UNDECODABLE-over-floor term is on its OWN seam: issue 915 made it
         // report-only, issue 905 item 3 (2026-09-04) RE-GATED it. So this window's per-window count
         // (5 > 4) now fails the RELAXED verdict AND `overall_pass` -- via the FLOOR seam, not the
-        // copy (which is still absorbed). The run-wide sum (5) is within the run-wide floor (6), so
+        // copy (which is still absorbed). The run-wide sum (5) is within the run-wide floor (15), so
         // the failure is the PER-WINDOW floor. STRICT still fails for BOTH reasons (visible).
         // 1000,1000(copy),1001, then 5x None (undecodable -- over the per-window floor of 4), then 1002.
         let schedule = vec![win("cam2", 0, 10_000)];
@@ -2230,7 +2230,7 @@ mod tests {
         );
         assert!(
             v.run_wide_undecodable_within_floor,
-            "sanity: the run-wide sum (5) is within the run-wide floor (6) -- the failure is the \
+            "sanity: the run-wide sum (5) is within the run-wide floor (15) -- the failure is the \
              PER-WINDOW floor, not the run-wide one: {v:?}"
         );
         assert!(

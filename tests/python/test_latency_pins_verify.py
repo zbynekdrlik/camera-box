@@ -246,20 +246,16 @@ class TestEnumerationFailsClosed:
         assert rc == 2
 
     def test_main_drift_exits_1_clean_exits_0(self, monkeypatch):
-        # #1003 owner rework (2026-08-20): the deep promoted 90/160/184 set was REJECTED + REVERTED
-        # to the shallow drift-guard REFERENCE. issue 1168 lever 1 re-tuned cam2 6 -> 3 (the projection
-        # probe's leftover pin), so the current baseline is 3/3/20. A live read matching it -> 0; any
-        # drift off it -> 1. (Production alignment itself is now the per-run floor-3 auto-align,
-        # scripts/qr_align_pins.py; this verify path stays the report-only drift check.)
-        monkeypatch.setattr(
-            lpv, "read_live_pins",
-            lambda host, pw, names: ({"NDI cam1": 3, "NDI cam2": 3, "NDI cam3": 20}, None),
-        )
+        # issue 1168 (2026-09-15): the report-only strih drift reference is the FLOOR-3 live model --
+        # cam1..cam7 (the current CAMERA_ACTIVE_SET) at the 3 ms floor; the per-run [4i/8align] aligner
+        # owns any relative offset. A live read matching the floor -> 0; any drift off it -> 1.
+        # (Production alignment itself is the per-run floor-3 auto-align, scripts/qr_align_pins.py;
+        # this verify path stays the report-only drift check.)
+        _floor = {f"NDI cam{n}": 3 for n in range(1, 8)}
+        monkeypatch.setattr(lpv, "read_live_pins", lambda host, pw, names: (dict(_floor), None))
         assert lpv.main(["--box", "strih", "--host", "x"]) == 0
-        monkeypatch.setattr(
-            lpv, "read_live_pins",
-            lambda host, pw, names: ({"NDI cam1": 90, "NDI cam2": 3, "NDI cam3": 20}, None),
-        )
+        _drifted = dict(_floor, **{"NDI cam1": 90})
+        monkeypatch.setattr(lpv, "read_live_pins", lambda host, pw, names: (dict(_drifted), None))
         assert lpv.main(["--box", "strih", "--host", "x"]) == 1
 
 

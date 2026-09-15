@@ -779,3 +779,60 @@ bind the desktop click elsewhere and silently orphan the menu, with no gate catc
   FUNCTION** (Claude Code shell integration), but `/usr/bin/grep` is GNU grep 3.11 and CI runs GNU
   grep — verify your exact patterns under `/usr/bin/grep` (GNU), not only the interactive wrapper.
   Both provide -P/PCRE2 and agreed here, but the wrapper is not what the deployed script or CI runs.
+
+## #1299 — imag's `:8899` bundle-state server is provisioned by `setup-imag.sh` (step 28)
+
+imag is listed in `scripts/lib/obs-fleet.sh`'s `genlock-lock` facet fleet (`strih stream imag
+resolume`), but had NO `:8899` bundle-state server, so `scripts/genlock-lock-alert-watchdog.sh`
+SKIPped it every pass (`:8899 not fetchable`) and an imag genlock LOCK loss was never paged. Step
+28 closes that hole:
+
+- **What it installs.** The CANONICAL `scripts/bundle-state-server.py` runs on imag under
+  `systemd/imag-bundle-state-server.service` (a `--user` unit). Its three sibling files
+  (`bundle-state-server.py` + the `bundle_state_gather` / `obs_phase2` modules it imports) install
+  TOGETHER under `/opt/camera-box` so the server's sibling imports resolve; the unit's ExecStart
+  passes imag's flags: `--port 8899 --obs-host 127.0.0.1 --obs-log-dir %h/.config/obs-studio/logs
+  --genlock-build-sha-file /opt/obs-genlock/GENLOCK_BUILD_SHA.txt` (imag's OBS-WS has NO password,
+  so `OBS_PASSWORD` is left unset → `""`).
+- **ENABLE-ONLY — the supervisor starts it once.** Like every other `setup-imag.sh` unit
+  (`provisioning-scripts.md`), step 28 `daemon-reload`s + `systemctl --user enable`s the unit but
+  NEVER `--now`-starts it, with the same #1182 bus-alive-vs-deferred-`graphical-session.target.wants`
+  symlink fallback as step 21. It comes up on the next kiosk boot (the wants-symlink); to validate
+  immediately the supervisor runs `systemctl --user start imag-bundle-state-server.service` once,
+  then the dry-run acceptance (`GENLOCK_LOCK_FETCH_CMD` fixture, then a live
+  `scripts/genlock-lock-alert-watchdog.sh --dry-run` expecting a real imag verdict instead of SKIP).
+- **The Linux degrade gate lives in the server, not the gather module.** Every Windows-only IDENTITY
+  gather (native `tasklist`/`netstat`/CIM process reads → `obs_process_count`/`vb_matrix_*`,
+  ProgramData `distroav_dll_*`/`obs_dll` byte hashes, `obs_installs`, the AHK/shortcut Start-Menu
+  paths, the PowerShell NDI-runtime read) is gated behind `IS_WINDOWS = os.name == "nt"` at the
+  gather boundary in `bundle-state-server.py`; on Linux they are SKIPPED (no Windows-only subprocess,
+  no per-request WARNING) and `build_bundle_state` omits every empty facet. `genlock_build_sha` is a
+  cross-platform file read lifted OUT of the gate so it keeps serving alongside
+  `obs_version`/`genlock_lock`/`audio_ts_lag_*`/record-dir-stats. `scripts/bundle_state_gather.py`
+  needed NO change — it holds no Windows-only subprocess gather (its `distroav_dll_paths` /
+  `obs_installs_under` / `component_sha256` are pure glob/file reads the gate simply never calls on
+  Linux). On Windows the gate is a no-op → served payload byte-identical.
+- **Acceptance.** `verify-imag.sh` check `(ba)` (runs BEFORE check `(o)`'s OBS restart, per the #884
+  ordering rule): the unit is enabled+active, `:8899` is listening, and `/bundle-state.json` carries
+  `genlock_build_sha` (the pure `imag_bundle_state_facet_ok` helper). Step 28 is at the END of the
+  script (`TOTAL_STEPS` 27→28, bumped in the three pinning test literals in lock-step — never
+  renumber, per the anchor-collision rule above).
+
+## Tier-0 local run of the setup-imag / verify-imag anchor tests: `rustc --test` needs `CARGO_MANIFEST_DIR`
+
+`tests/setup_imag_guards.rs`, `tests/setup_imag_remoteos_mcp_858.rs`,
+`tests/setup_imag_obs_watchdog_764.rs`, and `tests/verify_imag_pure_functions.rs` are SELF-CONTAINED
+(std only, no `camera_box` crate dep) — they just `read()` a script and assert. Tier-0 (#557) blocks
+every `cargo` compile, but a direct `rustc --test <file>` is not a `cargo` invocation and is the
+sanctioned Tier-0 path (the #1299/Part-1 precedent). Two gotchas make it work:
+
+- They use `env!("CARGO_MANIFEST_DIR")` to locate the repo, resolved AT COMPILE TIME, so you must
+  pass it: `CARGO_MANIFEST_DIR="$PWD" rustc --edition 2021 --test tests/<file>.rs -o /tmp/x.bin`.
+- The compiled binary reads the script by a path relative to the manifest dir, so run it from the
+  worktree/repo root: `/tmp/x.bin`.
+
+This is how a worktree worker verifies a `TOTAL_STEPS` bump + the ~113 `setup_imag_guards` anchors +
+a new `verify-imag.sh` check locally BEFORE CI — the anchor-collision class (`## Editing these
+scripts` above) surfaces only at RUN time (not `--no-run`, which Tier-0 also blocks now), and this is
+the one way to run it without cargo. (Confirmed live #1299 Part 2: guards 140/140, remoteos 5/5,
+obs-watchdog 3/3, verify_imag_pure_functions 81/81.)

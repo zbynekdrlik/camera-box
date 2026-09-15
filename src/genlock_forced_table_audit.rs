@@ -51,16 +51,6 @@ impl BoxClass {
             _ => None,
         }
     }
-
-    /// The default audio expectation for an input whose name matches NO specific role rule on this
-    /// box. Camera-chain boxes treat an unrecognised input like a camera (silent); the cg box treats
-    /// one like a program source (audio).
-    fn default_expectation(self) -> AudioExpectation {
-        match self {
-            BoxClass::Resolume => AudioExpectation::ExpectedAudio,
-            BoxClass::Strih | BoxClass::Stream | BoxClass::Imag => AudioExpectation::ExpectedSilent,
-        }
-    }
 }
 
 /// Whether a genlock NDI input SHOULD carry audio into the mixer, given its role.
@@ -82,6 +72,10 @@ pub enum AudioVerdict {
     MismatchProgramSilent,
     /// A camera source with audio ENABLED — audio bleeding into the camera chain.
     MismatchCameraAudible,
+    /// A NON-camera input audible on a silent box (strih/stream/imag) — NDI audio bleeding into the
+    /// Dante-fed mix, the double-audio hazard (#1303 owner ruling 2026-09-15: those boxes carry the
+    /// mastered mix over Dante/ASIO, so EVERY NDI input must stay silent).
+    MismatchAudible,
 }
 
 impl AudioVerdict {
@@ -152,32 +146,64 @@ pub fn is_program_audio_input(name: &str) -> bool {
     KEYS.iter().any(|k| n.contains(k))
 }
 
-/// The role-derived audio expectation for `name` on `box_class`. Camera inputs are silent on EVERY
-/// box; program/music/SongPlayer inputs carry audio on every box; anything else falls back to the
-/// box-class default.
+/// The role-derived audio expectation for `name` on `box_class` — the per-box CERTIFIED table
+/// (owner ruling 2026-09-15, verbatim: „žiadny — zvuk na strih/stream ide cez Dante, NDI audio
+/// ostáva vypnuté").
+///
+/// The cg OBS (`resolume`) is the ONLY box carrying program audio over NDI: its
+/// `sp-*`/SongPlayer/music program inputs (the 9 keys of `is_program_audio_input`) expect audio, its
+/// camera inputs expect silent, and any other input defaults to audio (a program-audio box). On the
+/// camera-chain boxes (`strih`/`stream`/`imag`) the mastered mix arrives over Dante/ASIO, NEVER over
+/// NDI, so EVERY NDI input expects silent — cameras, `cg`, `2ME PGM`, music alike; NDI audio enabled
+/// on any of them is the double-audio defect.
 pub fn expected_audio(box_class: BoxClass, name: &str) -> AudioExpectation {
-    if is_camera_input(name) {
-        AudioExpectation::ExpectedSilent
-    } else if is_program_audio_input(name) {
-        AudioExpectation::ExpectedAudio
-    } else {
-        box_class.default_expectation()
+    match box_class {
+        BoxClass::Resolume => {
+            if is_camera_input(name) {
+                AudioExpectation::ExpectedSilent
+            } else if is_program_audio_input(name) {
+                AudioExpectation::ExpectedAudio
+            } else {
+                // The cg box's default for an unrecognised input is audio (a program-audio box).
+                AudioExpectation::ExpectedAudio
+            }
+        }
+        BoxClass::Strih | BoxClass::Stream | BoxClass::Imag => AudioExpectation::ExpectedSilent,
     }
 }
 
-/// The audio verdict for an expectation vs the saved `ndi_audio`.
-pub fn audio_verdict(expected: AudioExpectation, ndi_audio: bool) -> AudioVerdict {
+/// The audio verdict for an expectation vs the saved `ndi_audio`. When a silent-expected input is
+/// audible, `is_camera` picks the direction: a CAMERA input yields `MismatchCameraAudible`, any
+/// other input (a program/music source on a Dante-fed silent box) yields the generic
+/// `MismatchAudible` (both are the "audio bleeding into the mix" defect, named per the input's role).
+pub fn audio_verdict(expected: AudioExpectation, ndi_audio: bool, is_camera: bool) -> AudioVerdict {
     match (expected, ndi_audio) {
         (AudioExpectation::ExpectedAudio, false) => AudioVerdict::MismatchProgramSilent,
-        (AudioExpectation::ExpectedSilent, true) => AudioVerdict::MismatchCameraAudible,
+        (AudioExpectation::ExpectedSilent, true) => {
+            if is_camera {
+                AudioVerdict::MismatchCameraAudible
+            } else {
+                AudioVerdict::MismatchAudible
+            }
+        }
         _ => AudioVerdict::Ok,
     }
 }
 
-/// The report-only yuv advisory: a program source with a forced `yuv_range` of `partial`.
-pub fn yuv_partial_on_program(expected: AudioExpectation, yuv_range: &str) -> bool {
-    matches!(expected, AudioExpectation::ExpectedAudio)
-        && yuv_range.trim().eq_ignore_ascii_case("partial")
+/// Whether `name` on `box_class` is a program VIDEO input (a source carrying the program picture) —
+/// the eligibility for the report-only yuv advisory. This is decoupled from the AUDIO expectation:
+/// on the Dante-fed boxes (strih/stream/imag) a program input's NDI audio is silent, but its VIDEO
+/// can still be a forced-partial-range program source, so the advisory must still cover it. A camera
+/// is never a program-video source; a program-keyed source (`is_program_audio_input`) is one on any
+/// box; on the cg box any non-camera input is treated as program video.
+pub fn is_program_video_input(box_class: BoxClass, name: &str) -> bool {
+    !is_camera_input(name) && (is_program_audio_input(name) || box_class == BoxClass::Resolume)
+}
+
+/// The report-only yuv advisory: a program VIDEO source with a forced `yuv_range` of `partial`
+/// (colour-shifts a full-range sender — the owner's "distorted picture" secondary symptom).
+pub fn yuv_partial_on_program(program_video: bool, yuv_range: &str) -> bool {
+    program_video && yuv_range.trim().eq_ignore_ascii_case("partial")
 }
 
 /// Classify one input on `box_class`.
@@ -187,8 +213,11 @@ pub fn classify(box_class: BoxClass, input: &NdiInput) -> InputAudit {
         name: input.name.clone(),
         expected,
         actual_ndi_audio: input.ndi_audio,
-        verdict: audio_verdict(expected, input.ndi_audio),
-        yuv_partial_on_program: yuv_partial_on_program(expected, &input.yuv_range),
+        verdict: audio_verdict(expected, input.ndi_audio, is_camera_input(&input.name)),
+        yuv_partial_on_program: yuv_partial_on_program(
+            is_program_video_input(box_class, &input.name),
+            &input.yuv_range,
+        ),
     }
 }
 
@@ -296,14 +325,22 @@ mod tests {
     }
 
     #[test]
-    fn stream_program_and_music_expect_audio() {
+    fn stream_ndi_inputs_are_all_silent() {
+        // Certified table (owner ruling 2026-09-15): strih/stream carry program audio over Dante,
+        // never NDI, so a program NDI input with audio OFF is OK, and with audio ON is the
+        // double-audio MismatchAudible (a non-camera audible on a silent box).
         assert_eq!(
-            classify(BoxClass::Stream, &input("NDI 2ME PGM", true, "")).verdict,
+            classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "")).verdict,
             AudioVerdict::Ok
         );
         assert_eq!(
-            classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "")).verdict,
-            AudioVerdict::MismatchProgramSilent
+            classify(BoxClass::Stream, &input("NDI 2ME PGM", true, "")).verdict,
+            AudioVerdict::MismatchAudible
+        );
+        // `cg` on strih is likewise silent-expected now (was a false MISMATCH-PROGRAM-SILENT).
+        assert_eq!(
+            classify(BoxClass::Strih, &input("cg", false, "")).verdict,
+            AudioVerdict::Ok
         );
     }
 
@@ -340,20 +377,25 @@ mod tests {
 
     #[test]
     fn yuv_advisory_only_on_program_partial() {
-        // A camera input at partial range is NOT flagged (partial is correct for cameras).
-        assert!(!yuv_partial_on_program(
-            AudioExpectation::ExpectedSilent,
-            "partial"
-        ));
-        // A program input at full range is fine.
-        assert!(!yuv_partial_on_program(
-            AudioExpectation::ExpectedAudio,
-            "full"
-        ));
-        // A program input forced partial IS flagged.
-        assert!(yuv_partial_on_program(
-            AudioExpectation::ExpectedAudio,
-            "Partial"
-        ));
+        // A non-program-video input (e.g. a camera) at partial range is NOT flagged.
+        assert!(!yuv_partial_on_program(false, "partial"));
+        // A program-video input at full range is fine.
+        assert!(!yuv_partial_on_program(true, "full"));
+        // A program-video input forced partial IS flagged.
+        assert!(yuv_partial_on_program(true, "Partial"));
+    }
+
+    #[test]
+    fn program_video_eligibility_is_decoupled_from_audio() {
+        // A program video input on a Dante-fed box: audio silent, but yuv advisory still eligible.
+        assert!(is_program_video_input(BoxClass::Strih, "cg"));
+        assert!(is_program_video_input(BoxClass::Stream, "NDI 2ME PGM"));
+        // resolume: any non-camera input is program video.
+        assert!(is_program_video_input(BoxClass::Resolume, "some_odd_input"));
+        // a camera is never program video, on any box.
+        assert!(!is_program_video_input(BoxClass::Strih, "CAM3 (usb)"));
+        assert!(!is_program_video_input(BoxClass::Resolume, "NDI cam1"));
+        // a non-program, non-camera input on a Dante-fed box is NOT program video.
+        assert!(!is_program_video_input(BoxClass::Stream, "some_odd_input"));
     }
 }

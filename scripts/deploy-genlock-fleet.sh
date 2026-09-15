@@ -749,17 +749,22 @@ EOF
 # step (#1303 part 4), printed as #-comment guidance BEFORE STEP 0 of the box's plan. It NEVER writes
 # and NEVER gates the deploy -- it directs the supervisor to enumerate the box's live NDI inputs over
 # OBS-WS (reusing latency_pins_verify.py's _conn/GetInputList/GetInputSettings) and pipe the TSV into
-# the classifier scripts/lib/genlock-forced-table-audit.sh so a PROGRAM-audio box (cg OBS) is not
-# shipped with ndi_audio=false (the #1303 event-morning live defect) and a camera box is not shipped
-# with audio bleeding into the mixer. Pure (no I/O), emitted only -- the supervisor runs the read.
+# the classifier scripts/lib/genlock-forced-table-audit.sh, graded against the CERTIFIED per-box table
+# (owner ruling 2026-09-15): the cg OBS (resolume) is the ONLY program-audio box, so it is not shipped
+# with ndi_audio=false (the #1303 event-morning live defect); strih/stream/imag carry the mastered mix
+# over Dante/ASIO so every NDI input stays silent, and a Dante-fed box is not shipped with NDI audio
+# bleeding into the mixer (double audio). Pure (no I/O), emitted only -- the supervisor runs the read.
 emit_forced_table_audit_preflight() {
   local box="$1" host="$2"
   cat <<PREFLIGHT
 # PREFLIGHT (report-only, #1303 part 4) -- audit ${box}'s NDI-input forced table (audio + yuv) BEFORE
 #   the swap. Report-only: it NEVER writes and NEVER gates the deploy -- it prints a per-input verdict
-#   so a PROGRAM-audio box (cg OBS: sp-*/cg/music inputs) is not shipped with ndi_audio=false (the
-#   #1303 event-morning live defect) and a camera box is not shipped with audio bleeding into the
-#   mixer. On dev1, enumerate ${box}'s live NDI inputs over OBS-WS -- reuse latency_pins_verify.py's
+#   against the CERTIFIED per-box table (owner ruling 2026-09-15): the cg OBS (resolume) is the ONLY
+#   program-audio box (its sp-*/SongPlayer/music inputs carry ndi_audio=true); strih/stream/imag carry
+#   the mastered mix over Dante/ASIO, so EVERY NDI input there stays silent and NDI audio ENABLED on
+#   any of them is the double-audio defect. So a program-audio box is not shipped with ndi_audio=false
+#   (the #1303 event-morning live defect) and a Dante-fed box is not shipped with NDI audio bleeding
+#   into the mixer. On dev1, enumerate ${box}'s live NDI inputs over OBS-WS -- reuse latency_pins_verify.py's
 #   _conn + GetInputList + GetInputSettings (host ${host}) -- emitting one TSV row per input:
 #   name<TAB>ndi_audio<TAB>yuv_range<TAB>yuv_colorspace. Pipe that into the classifier and review it:
 #     <ws-enumerate ${host} as TSV> | bash -c '. scripts/lib/genlock-forced-table-audit.sh; genlock_forced_table_audit ${box}'

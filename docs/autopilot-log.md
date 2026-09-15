@@ -12148,3 +12148,127 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
 - Part 2 (imag has NO :8899 bundle-state server → coverage hole) returned as a followup_candidate:
   a Linux `bundle-state-server` install path (a `--user` unit + `setup-imag.sh`/`verify-imag.sh`
   wiring) with the Windows-only gathers degrading to ABSENT on Linux. Split per the ≤600 LoC gate.
+
+## issue 915 (reopened 2026-09-15) — recalibrate the optical run-wide undecodable floor 6 -> 15
+- RED 4cd5393a7 `test(#915)` -> GREEN 0a0f3ab2f `fix(#915)`: `RUN_UNDECODABLE_FLOOR` 6 -> 15 in
+  `src/optical_floor.rs` (per-window kept 4; `gates_overall_pass()` kept `true`, gate stays LIVE).
+  15 = today's observed 60Hz bad-phase run-wide max 10 + 50% headroom (same margin rule as the 6 =
+  4 + 50%). Three same-day runs read run-wide undecodable 6 / 0 / 10; the misses are isolated single
+  frames ~12-15 s apart, the FAST Vernier QR captured mid-LCD-transition (the 60Hz-vs-60fps beat) —
+  the irreducible optical temporal tear, not a chain loss. The "keep the floor below the pre-707
+  regression level 10" argument is retired (10 is now a MEASURED physical value); a 707-class skip is
+  caught by copies/gaps tolerance + emit-gate-skip triage, a stuck leg by frozen_leg/self-heal.
+- RED evidence: the pure `optical_floor` rustc-replica went 4 failing (boundary 15/16, the constant
+  pin, the 10/15/16 + per-window 4/5 vector, the 16-spread cap) -> 9/9 passing after GREEN. The
+  probe-gated run-wide fold test in `recording_segments.rs` reworked pre-707-10 -> a 16-window spread
+  (sum 16 > floor 15). Python `test_e2e_discord_report_optical_floor_905.py` stays 4/4 green.
+- Consumers touched: every Rust consumer reads the constant BY NAME (recording-verdict.rs JSON keys +
+  log lines, the run-wide fold) so the value propagates automatically; the only hardcoded "6" were
+  doc comments (optical_floor.rs module/const/test docs; recording_segments.rs 3 doc spots + 2 test
+  comments; recording-verdict.rs 2 comments) and one python display fixture — all updated in GREEN
+  (history kept: 8 -> 6 -> 15). Rule `.claude/rules/optical-undecodable-floor-report-only.md` gained
+  a 2026-09-15 UPDATE block + retired the "below 10" ceiling in the walk-back data-recipe.
+## 2026-09-15 — #1299 Part 2: imag `:8899` bundle-state-server install path (lane/1299-imag8899)
+
+Closed the coverage hole where `obs-fleet.sh` lists imag in the genlock-lock fleet but imag had no
+`:8899` server, so `genlock-lock-alert-watchdog.sh` SKIPped imag every pass. Base origin/dev
+5405ad653 (v1.7.0-dev.629, no bump — release train already bumped).
+
+- RED 1c92467c5 (test: bundle-state-server must degrade on Linux + imag :8899 install path) → GREEN
+  5a882aa0f (fix).
+- `scripts/bundle-state-server.py`: `IS_WINDOWS = os.name == "nt"` gate at the gather boundary — the
+  Windows-only identity gathers (tasklist/netstat/CIM → obs_process_count/vb_matrix_*, ProgramData
+  distroav_dll_*/obs_dll hashes, obs_installs, AHK/shortcut paths, PowerShell NDI-runtime) skipped on
+  Linux; `genlock_build_sha` lifted out (cross-platform file read) so it keeps serving. Windows path
+  byte-identical (gate is a no-op). `bundle_state_gather.py` unchanged (no Windows subprocess there).
+- `systemd/imag-bundle-state-server.service`: --user unit, canonical server + imag flags,
+  Restart=on-failure, declared-intent hardening (NoNewPrivileges).
+- `scripts/setup-imag.sh` step 28 (TOTAL_STEPS 27→28, bumped in setup_imag_guards.rs /
+  setup_imag_remoteos_mcp_858.rs / setup_imag_obs_watchdog_764.rs): installs the 3 sibling files to
+  /opt/camera-box + the unit, ENABLE-ONLY (supervisor starts it once), #1182 bus-fallback.
+- `scripts/verify-imag.sh` check (ba) (before check (o)): unit enabled+active + :8899 listening +
+  /bundle-state.json carries genlock_build_sha, via the pure imag_bundle_state_facet_ok helper.
+- Docs: `.claude/rules/genlock-lock-facet.md` (hole CLOSED) + `.claude/rules/imag-nb-provisioning.md`
+  (step 28 + check (ba) + supervisor-starts-once).
+
+Tier-0 local verify GREEN: pytest test_bundle_state_server_linux_1299.py 8/8 (RED tree 4 fail) +
+142 sibling bundle-state python tests + 2510-total python suite (1 UNRELATED pre-existing flaky
+bkshading failure, passes in isolation, zero shared files with this diff); rustc --test
+setup_imag_guards 140/140, setup_imag_remoteos_mcp_858 5/5, setup_imag_obs_watchdog_764 3/3,
+verify_imag_pure_functions 81/81 + 4 other verify-imag readers; cargo fmt --all --check clean;
+bash -n + shellcheck -S warning on both scripts clean; systemd-analyze verify --user on the unit
+clean; anchor occurrence-count + negative-anchor sweeps clean.
+
+Supervisor install (imag, once the fleet genlock bundle is deployed):
+  ssh newlevel@10.77.9.182 sudo IMAG_IP=10.77.9.182 -E /path/to/setup-imag.sh --yes   # (or just re-run step 28's fetch+enable)
+  ssh newlevel@10.77.9.182 systemctl --user start imag-bundle-state-server.service
+  scripts/verify-imag.sh    # check (ba) must pass
+  GENLOCK_LOCK_FETCH_CMD=/tmp/fetch.sh scripts/genlock-lock-alert-watchdog.sh --dry-run   # fixture
+  scripts/genlock-lock-alert-watchdog.sh --dry-run    # live: expect a real imag verdict, not SKIP
+- #1303 part 4 (certified-table finalization, lane/1303-certtable): the genlock forced-table AUDIO
+  classifier is now the per-box CERTIFIED table (owner ruling 15.9.2026 15:10 — program audio over
+  NDI on the cg OBS/resolume ONLY; strih/stream/imag all silent, Dante-fed). RED e813fd991
+  (tests/genlock_forced_table_audit_1303.rs: five live strih/stream rows must grade OK + inverse
+  must mismatch — FAILS on the old name heuristic) → GREEN 8aa69aae5 (src/genlock_forced_table_audit.rs
+  expected_audio per-box + new MismatchAudible verdict for a non-camera audible on a silent box;
+  byte-for-byte bash replica scripts/lib/genlock-forced-table-audit.sh; parity vectors extended;
+  deploy-genlock-fleet.sh preflight reworded to the certified table, anchors intact). Tier-0: rustc
+  --test -D warnings on the pure module, bash-vs-Rust parity identical over all 112 vectors,
+  shellcheck+bash -n clean, --plan exit 0, cargo fmt clean. Docs: .claude/rules/genlock-audio-pairing.md.
+
+- issue 1168 (2026-09-15, lane/1168-alignabort) — three [4i/8align] follow-ups from the aborted E2E
+  run 34973535496. (a) ABORT-RESTORE: align()'s --execute path now wraps the post-apply re-measure in
+  a try/except and restores the plan's sources to the pre-align current_pins on ANY abort, via new
+  restore_pins/_restore_after_abort (reuse apply_latency_pins.apply_pins, best-effort + LOUD, re-raises
+  the original reason). RED tests/python/test_qr_align_restore_on_abort_1168.py -> GREEN
+  scripts/qr_align_pins.py. cleanup()'s teardown restores only the stream-hold/measurement-eq snapshots
+  (obs_phase2.py ~L600), never the aligner/#900-reanchor pins -- documented. (b) BASELINE: refreshed
+  scripts/latency-pins-baseline.json strih to the floor-3 live model NDI cam1..cam7 = 3 (retired the
+  stale cam3=20, extended to the 7-camera fleet; the per-run aligner owns any relative offset). RED
+  the two file-reading fixtures (test_apply_latency_pins_1003 + test_latency_pins_verify) -> GREEN json.
+  (c) PARTIAL-FLOOR RE-FETCH: new pure floor_samples_sufficient + read-only --floor-samples-ok CLI +
+  a bounded <=2 loop in scripts/lib/qr-align.sh that re-fetches the post-reset audit once more when a
+  source is short on samples (cam4 samples=2 was a transient thin window) before the budget-unchecked
+  fallback. RED tests/python/test_qr_align_floor_samples_1168.py -> GREEN. No .rs touched; Tier-0
+  pytest all green (133 align suite), bash -n + shellcheck clean, anchor occurrence-count sweep clean.
+  Docs: .claude/rules/qr-align.md + .claude/rules/latency-pins-verify.md.
+- issue 1133 (reopen 15.9.2026, leg-health EPROTO restart-adjacency) — lane/1133-eproto worktree.
+  RED d0c6c8d1d → GREEN 4eecefb7d. The [0/8] leg-health EPROTO term counted every uvcvideo
+  Non-zero status/-71 kernel line in the last hour against the >=6/hr bar, but a -71 is a UVC stream
+  teardown/re-open ARTIFACT emitted once per camera-box.service / camera-box-burn-* restart at the
+  same second — so chained E2E runs' own restart churn refused a healthy cam4 leg (E2E run
+  34977348169: 9 restarts/2h, one -71 each, over_current_count 0, zero -71 steady state). Fix: read
+  both journals with -o short-unix epochs in the one read_all round trip; leg_health_eproto_ts_read_cmd
+  + leg_health_restart_ts_read_cmd (full-journal, systemd-signature + camera-box + lifecycle-verb
+  filter — rejects app + foreign-unit "Started" lines); pure leg_health_eproto_steady_count excludes
+  -71 within +-leg_health_eproto_restart_adjacent_secs (3s) of a restart epoch, feeds STEADY count to
+  leg_health_classify, reports the excluded count. Wire fault (-71 BETWEEN restarts) still refuses.
+  Tier-0: sourced-lib functional RED->GREEN + fake-journalctl end-to-end readers under set -euo
+  pipefail, bash -n + shellcheck -S warning clean, cargo fmt --all --check clean, slice-anchor
+  occurrence sweep on recording-e2e.sh (no anchor moved). Docs: .claude/rules/leg-health-frame-loss.md.
+- issue 904 (reopen 15.9.2026, present-by-adjacency burn inference) — lane/904-inferred worktree.
+  RED f9b41c985 → GREEN cf88cba0c. E2E rerun 34977348169 (verdict 1651388579) was a perfect
+  zero-loss run that failed ONLY on full_chain.loss.strih.burn_unreadable=1: stream frame 1044
+  carried the painter tick (17308) + the cam1 burn (911001) + the stream burn (911004) all decoded,
+  the strih burn was crisp in the pixel proof, and the strih neighbour ids were 179076 (1043) /
+  179078 (1045) — the missing 179077 uniquely bracketed. A #264-class decoder miss on a readable QR,
+  1 of 9803. Fix: a NEW crate-root pure module src/burn_adjacency.rs (inferable_single_miss +
+  inferable_frame_indices, Tier-0 rustc --test, 11 tests) decides when a single missing id is
+  inferable-present (next==prev+2 AND the frame delivered). The probe-gated node_verdict_with_optical
+  glue builds the ordered per-frame (frame_index, id, delivered) sequence from
+  burn_ids_with_frame_index_in + frame_is_delivered_optical (painter pin) + a sibling-burn check, and
+  re-classifies the qualifying BurnUnreadable slots to a NEW MissingKind::BurnUnreadableInferred. The
+  per-node zero-loss fold changed from burn_unreadable()==0 to
+  burn_unreadable() - burn_unreadable_inferred() == 0 (burn_unreadable() now counts BOTH kinds so no
+  usize underflow). Fail-closed + evidence-gated: gated on spec.cam2_run_id.is_some() (=--cam2-run-id
+  pin; None in every existing fixture → no inference → all stay strict + green), cap 2 per node, never
+  two adjacent, RealDrops (absent frames) never in the sequence, the issue-24/356 decimated-hop cases
+  fail the +2 bracket. Loud + report-only: per-node + full_chain burn_unreadable_inferred counts in
+  the JSON + a per-node ZERO-loss suffix + a run-level ">>> #904 PRESENT-BY-ADJACENCY" summary line.
+  consumed_real_drops_allowance now also requires real_drops()>=1 so an inferred-only pass never
+  false-signals the real_drops slack axis. imag untouched (node_verdict_for_imag never runs the glue).
+  Review: fresh-context general-purpose /review + /requesting-code-review → SHIP, 0 blocking; 2
+  non-blocking observations tracked for issue 905 (the cap-2-vs-doc wording; the whole-source neighbour
+  lookup at a window edge — both stay fail-closed). Tier-0: pure module RED→GREEN via rustc --test,
+  cargo fmt --all --check clean (parses the whole probe-gated bin), doc-lazy-continuation grep clean;
+  CI is the first type-check for the probe-gated glue. Docs: .claude/rules/gate-allowance-restore-red-green.md.
