@@ -58,17 +58,21 @@ int main() {
     GenlockInputRow a; a.name="NDI cam1"; a.locked=true; a.connected=true; a.latency_ms=3; a.underruns=0; a.relocks=1; a.late_holds=0; a.backward_steps=0; a.depth=2;
     GenlockInputRow b; b.name="weird \" name \\ x"; b.locked=false; b.connected=false; b.latency_ms=13; b.depth=4;
     ins.push_back(a); ins.push_back(b);
-    // #1299 v3 signature: (state, reason, n_inputs, n_locked, n_absent, latency_ms, clock, output,
-    //   recent_event, recent_event_input_name, recent_event_input_events, qpc_drift, inputs)
-    // no offender (recent_event false / true-but-none) -> recent_event_inputs is []
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,1,3,"locked","stamping",false,nullptr,0,0,ins).c_str());
-    printf("%s\n", genlock_build_lock_json("UNLOCKED","clock",7,0,0,0,"absent","not-stamping",true,nullptr,0,-5,{}).c_str());
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,0,3,"locked","absent",false,nullptr,0,0,{}).c_str());
+    // #1303 v4 signature: (state, reason, n_inputs, n_locked, n_absent, latency_ms, clock, output,
+    //   recent_event, recent_event_input_name, recent_event_input_events, qpc_drift,
+    //   audio_unexpected_input_name, inputs)
+    // no offender (recent_event false / true-but-none) -> recent_event_inputs is []; nullptr audio
+    // offender -> audio_unexpected_inputs is []
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,1,3,"locked","stamping",false,nullptr,0,0,nullptr,ins).c_str());
+    printf("%s\n", genlock_build_lock_json("UNLOCKED","clock",7,0,0,0,"absent","not-stamping",true,nullptr,0,-5,nullptr,{}).c_str());
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,0,3,"locked","absent",false,nullptr,0,0,nullptr,{}).c_str());
     // #1299 Part 3: a DEGRADED/recent_event line NAMING the offender (cg, 25 phase events)
     std::vector<GenlockInputRow> ins2;
     GenlockInputRow c; c.name="cg"; c.locked=true; c.connected=true; c.latency_ms=3; c.underruns=543; c.relocks=25; c.late_holds=0; c.backward_steps=0; c.depth=2;
     ins2.push_back(c);
-    printf("%s\n", genlock_build_lock_json("DEGRADED","recent_event",4,4,0,3,"locked","stamping",true,"cg",25,0,ins2).c_str());
+    printf("%s\n", genlock_build_lock_json("DEGRADED","recent_event",4,4,0,3,"locked","stamping",true,"cg",25,0,nullptr,ins2).c_str());
+    // #1303: a DEGRADED/audio_unexpected line NAMING the audible silent-by-contract source
+    printf("%s\n", genlock_build_lock_json("DEGRADED","audio_unexpected",7,7,0,3,"locked","stamping",false,nullptr,0,0,"CAM3 (usb)",ins).c_str());
     return 0;
 }
 '''
@@ -108,7 +112,7 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
     run = subprocess.run([str(binp)], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     lines = [ln for ln in run.stdout.splitlines() if ln.strip()]
-    assert len(lines) == 4, f"expected 4 emitted lines, got {lines}"
+    assert len(lines) == 5, f"expected 5 emitted lines, got {lines}"
 
     # Each emitted object is valid JSON, and feeding it through the parser (wrapped as a real log
     # line) yields a facet whose NAMES/VALUES match the C++'s own decided fields.
@@ -135,6 +139,12 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
             ]
         else:
             assert "recent_event_inputs" not in facet
+        # #1303 v4: audio_unexpected_inputs round-trips (names-only) when non-empty; omitted when empty.
+        obj_aui = obj.get("audio_unexpected_inputs") or []
+        if obj_aui:
+            assert facet["audio_unexpected_inputs"] == [{"name": r["name"]} for r in obj_aui]
+        else:
+            assert "audio_unexpected_inputs" not in facet
         # clock/output string tokens reshaped consistently
         assert facet["clock"] == {"state": obj["clock"]}
         assert facet["output"]["present"] == (obj["output"] != "absent")
