@@ -9790,6 +9790,110 @@ mod tests {
         );
     }
 
+    /// #904 REOPEN — a SINGLE decoder miss on a DELIVERED frame whose node ids on the two
+    /// immediately-adjacent frames bracket exactly one id is re-classified
+    /// BURN-UNREADABLE-INFERRED (present-by-adjacency, #264 class: a crisp rendered burn the
+    /// DECODER alone missed, 1 of ~9800) and no longer fails the headline. Evidence-gated: it
+    /// fires ONLY because the cam2 painter pin IS set here (the frame is proven delivered) — the
+    /// sibling `burn_unreadable_is_never_excused_by_any_real_drops_allowance_904` runs the SAME
+    /// `window_none` fixture with the pin UNSET and proves it stays a hard fail without that proof.
+    #[test]
+    fn single_delivered_missing_burn_between_adjacent_ids_is_inferred_present_904() {
+        // frame 100 stays DELIVERED (its cam2 optical + strih burn are present), only its cam1
+        // burn is missing; cam1 ids are 5000+i so the neighbours 5099/5101 bracket the missing 5100.
+        let frames = window_none(200, false, 100);
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &frames,
+                rec_path: None,
+                cam2_run_id: Some(CAM2), // the painter pin IS set → the frame is provably delivered
+                step: 1,
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(v.real_drops(), 0, "no frame was dropped: {v:?}");
+        assert_eq!(
+            v.burn_unreadable_inferred(),
+            1,
+            "the single bracketed delivered miss is inferred present-by-adjacency: {v:?}"
+        );
+        assert_eq!(
+            v.burn_unreadable(),
+            1,
+            "the total unreadable count still surfaces the frame LOUDLY (inferred is a subset): {v:?}"
+        );
+        assert!(
+            v.is_zero_within_allowance(0),
+            "an inferred-present single miss clears the gate at allowance 0: {v:?}"
+        );
+        assert!(
+            !v.is_zero(),
+            "strict is_zero() stays FALSE — the id is still non-contiguous: {v:?}"
+        );
+        assert!(
+            !v.consumed_real_drops_allowance(0),
+            "no real drop was consumed — this is inference, NOT the real_drops allowance: {v:?}"
+        );
+        assert_eq!(
+            v.classified
+                .iter()
+                .filter(|c| c.kind == super::MissingKind::BurnUnreadableInferred)
+                .count(),
+            1,
+            "the classified entry carries the new inferred kind: {v:?}"
+        );
+    }
+
+    /// #904 REOPEN — the inference NEVER hides a real loss: a RUN OF TWO adjacent delivered frames
+    /// missing their burns is not uniquely inferable (each has a missing neighbour, so `next` is
+    /// not `prev + 2`), so BOTH stay BURN-UNREADABLE and the node FAILS even against a huge
+    /// allowance. The safety twin of `burn_unreadable_is_never_excused_by_any_real_drops_allowance_904`.
+    #[test]
+    fn burn_unreadable_inferred_never_hides_a_real_drop_904() {
+        let mut frames = window(200, false, None);
+        // two ADJACENT delivered frames lose their cam1 burn → a run of two missing ids (5100, 5101).
+        frames[100].payloads.retain(|p| p.run_id != CAM1B);
+        frames[101].payloads.retain(|p| p.run_id != CAM1B);
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &frames,
+                rec_path: None,
+                cam2_run_id: Some(CAM2),
+                step: 1,
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            v.real_drops(),
+            0,
+            "both frames were delivered → BURN-UNREADABLE, not real drops: {v:?}"
+        );
+        assert_eq!(v.burn_unreadable(), 2, "both misses are counted: {v:?}");
+        assert_eq!(
+            v.burn_unreadable_inferred(),
+            0,
+            "a run of two adjacent misses is never inferable: {v:?}"
+        );
+        assert!(
+            !v.is_zero_within_allowance(1000),
+            "a two-id run stays BURN-UNREADABLE → zero_loss FALSE even against a huge allowance: {v:?}"
+        );
+    }
+
     /// #373 — the headline duration floor must scale each node's span by its SOURCE recording's
     /// capture rate, NOT one shared `--capture-fps`. cam1 is read from the strih recording
     /// (`--capture-fps`, 60 on the rig); strih + stream from the stream recording
