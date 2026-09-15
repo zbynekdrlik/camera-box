@@ -58,8 +58,12 @@ pub enum LockReason {
     /// Wall-clock vs monotonic (QPC) drift is beyond the allowed bound.
     QpcDrift = 8,
     /// #1303 — an audio-enabled genlock source's audio is not paired with its video FIFO hold
-    /// (residual A/V pairing offset beyond one frame). The lowest-precedence DEGRADED reason.
+    /// (residual A/V pairing offset beyond one frame). A DEGRADED reason below the video ones.
     AudioPairing = 9,
+    /// #1303 — a genlock source is AUDIBLE (`ndi_audio=true`) when it is silent-by-contract per the
+    /// certified per-box audio table (a camera on any box; a Dante-fed box's every NDI input) — the
+    /// double-audio hazard. The lowest-precedence DEGRADED reason, below `AudioPairing`.
+    AudioUnexpected = 10,
 }
 
 impl LockState {
@@ -115,6 +119,14 @@ pub struct GenlockFacets {
     /// per-input wall-vs-monotonic drift for [`GenlockFacets::qpc_drift_beyond_bound`] — surfacing
     /// the pairing-offset branch of [`crate::genlock_audio_pairing::decide_audio_health`].
     pub audio_unpaired: bool,
+    /// #1303 — a genlock source is AUDIBLE when the certified per-box audio table
+    /// (`crate::genlock_forced_table_audit`) expects it SILENT: a camera input on ANY box, or (once
+    /// box identity is wired) any NDI input on a Dante-fed box. NDI audio there is the double-audio
+    /// hazard (owner ruling 2026-09-15). The widget reduces the per-source
+    /// `audio_enabled && is-silent-by-contract` condition into this one scalar (the twin of
+    /// [`GenlockFacets::audio_unpaired`]); audio disabled/absent never sets it, so it can only
+    /// DEGRADE, never take a healthy box off LOCKED spuriously.
+    pub audio_unexpected: bool,
 }
 
 /// Decide the genlock lock state and its dominant reason from the scalarised facets.
@@ -270,6 +282,7 @@ mod tests {
             output_present: true,
             output_stamping: true,
             audio_unpaired: false,
+            audio_unexpected: false,
         }
     }
 
@@ -432,6 +445,34 @@ mod tests {
     }
 
     #[test]
+    fn audio_unexpected_is_degraded_audio() {
+        // #1303: an audio-enabled source that is silent-by-contract per the certified table
+        // (the widget reduces it into audio_unexpected) degrades an otherwise-LOCKED box.
+        let mut f = healthy();
+        f.audio_unexpected = true;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::AudioUnexpected));
+    }
+
+    #[test]
+    fn audio_unexpected_never_leaves_unlocked() {
+        // #1303: audio-unexpected is a DEGRADE-only axis — it never rescues an UNLOCKED box.
+        let mut f = healthy();
+        f.audio_unexpected = true;
+        f.clock_locked = false;
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::Clock));
+    }
+
+    #[test]
+    fn audio_pairing_beats_audio_unexpected() {
+        // #1303: audio_unexpected is the lowest-precedence DEGRADED reason — even audio_pairing
+        // (itself the previous lowest) wins over it.
+        let mut f = healthy();
+        f.audio_unpaired = true;
+        f.audio_unexpected = true;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::AudioPairing));
+    }
+
+    #[test]
     fn audio_unpaired_never_leaves_unlocked() {
         // #1303: audio is a DEGRADE-only axis — it never rescues an UNLOCKED box (clock down),
         // and never fires while an input is still unlocked (that reason takes precedence).
@@ -513,6 +554,7 @@ mod tests {
         assert_eq!(LockReason::NtpFailed.code(), 7);
         assert_eq!(LockReason::QpcDrift.code(), 8);
         assert_eq!(LockReason::AudioPairing.code(), 9);
+        assert_eq!(LockReason::AudioUnexpected.code(), 10);
     }
 
     // --- #1299 Part 3: the connected-phase-only recent-event feed + offender attribution ----------
