@@ -12148,3 +12148,23 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
 - Part 2 (imag has NO :8899 bundle-state server → coverage hole) returned as a followup_candidate:
   a Linux `bundle-state-server` install path (a `--user` unit + `setup-imag.sh`/`verify-imag.sh`
   wiring) with the Windows-only gathers degrading to ABSENT on Linux. Split per the ≤600 LoC gate.
+
+## issue 915 (reopened 2026-09-15) — recalibrate the optical run-wide undecodable floor 6 -> 15
+- RED 4cd5393a7 `test(#915)` -> GREEN 0a0f3ab2f `fix(#915)`: `RUN_UNDECODABLE_FLOOR` 6 -> 15 in
+  `src/optical_floor.rs` (per-window kept 4; `gates_overall_pass()` kept `true`, gate stays LIVE).
+  15 = today's observed 60Hz bad-phase run-wide max 10 + 50% headroom (same margin rule as the 6 =
+  4 + 50%). Three same-day runs read run-wide undecodable 6 / 0 / 10; the misses are isolated single
+  frames ~12-15 s apart, the FAST Vernier QR captured mid-LCD-transition (the 60Hz-vs-60fps beat) —
+  the irreducible optical temporal tear, not a chain loss. The "keep the floor below the pre-707
+  regression level 10" argument is retired (10 is now a MEASURED physical value); a 707-class skip is
+  caught by copies/gaps tolerance + emit-gate-skip triage, a stuck leg by frozen_leg/self-heal.
+- RED evidence: the pure `optical_floor` rustc-replica went 4 failing (boundary 15/16, the constant
+  pin, the 10/15/16 + per-window 4/5 vector, the 16-spread cap) -> 9/9 passing after GREEN. The
+  probe-gated run-wide fold test in `recording_segments.rs` reworked pre-707-10 -> a 16-window spread
+  (sum 16 > floor 15). Python `test_e2e_discord_report_optical_floor_905.py` stays 4/4 green.
+- Consumers touched: every Rust consumer reads the constant BY NAME (recording-verdict.rs JSON keys +
+  log lines, the run-wide fold) so the value propagates automatically; the only hardcoded "6" were
+  doc comments (optical_floor.rs module/const/test docs; recording_segments.rs 3 doc spots + 2 test
+  comments; recording-verdict.rs 2 comments) and one python display fixture — all updated in GREEN
+  (history kept: 8 -> 6 -> 15). Rule `.claude/rules/optical-undecodable-floor-report-only.md` gained
+  a 2026-09-15 UPDATE block + retired the "below 10" ceiling in the walk-back data-recipe.
