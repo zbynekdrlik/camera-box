@@ -37,7 +37,8 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
   NDI output is present but not stamping wall time (`output not stamping`); OR inputs exist but
   none locked (`no input locked`) / none configured (`no genlock inputs`).
 - **DEGRADED:** some (not all) inputs unlocked (names the input, e.g. `NDI cam7`); OR a
-  relock/underrun/late-hold/backward-step in the last 60 s (`recent relock/underrun`); OR clock
+  relock/late-hold/backward-step on a CONNECTED input in the last 60 s (#1299 Part 3: underruns are
+  NO LONGER a recent-event class; the label names the offender, `recent event: cg`); OR clock
   `ntp_failed`; OR `wall_qpc_drift` beyond `GENLOCK_QPC_DRIFT_BOUND_MS` (100 ms); OR (#1303, lowest
   precedence) an audio-ENABLED genlock source whose `|audio_pairing_offset_ms|` breaches
   `GENLOCK_AUDIO_PAIRING_BOUND_MS` (33 ms / one 30 fps frame) — `audio unpaired: <src>`. The widget
@@ -75,10 +76,23 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
   (async on the event loop). `clock_present` = a successful `:8898/status` poll within the last 3 s
   — so killing dantesync flips the widget to UNLOCKED within ~3-5 s (the acceptance bar). JSON is
   parsed with OBS's own `obs_data_create_from_json` (no new dependency).
-- **`recent_event` is derived by the WIDGET, not libobs** — it tracks the aggregate cumulative
-  counter (underruns+relocks+late_holds+backward_steps) across its 1 Hz samples and stamps "now"
-  on any increase; a decrease (reconnect reset the counters) re-baselines with no event. This
-  keeps libobs free of a new hot-path remembered-state field.
+- **`recent_event` is derived by the WIDGET, not libobs** — it stamps "now" on any INCREASE of an
+  aggregate cumulative counter across its 1 Hz samples (a decrease = reconnect reset → re-baseline,
+  no event), and `recent_event = (now − last) < 60 s`. This keeps libobs free of a new hot-path
+  remembered-state field.
+  - **#1299 Part 3: that aggregate is CONNECTED inputs' PHASE events only.** The driver is
+    `sum over connected inputs of (relocks + late_holds + backward_steps)` — computed post-scan via
+    the pure `genlock_input_phase_events` (mirrored in `GenlockLockState.hpp`, parity-gated). UNDERRUNS
+    are DROPPED from the lock verdict (a latency-budget miss owned by the `genlock-fifo audit` +
+    cg-chain-verify / issue 1302, and bursty — counting them latched the 60 s window chronically),
+    and an ABSENT input's #1096 rebind churn is excluded (`connected == false` contributes 0).
+    Underruns stay in the per-input facet counters (report-only). The window itself is unchanged and
+    correct — the fix was the FEED, not the window.
+  - **The DEGRADED/recent_event reason NAMES the offender** — the connected input carrying the most
+    phase events. It rides the `genlock-lock-json:` line as `recent_event_inputs:[{name, events}]`
+    (schema v2→v3, additive, omit-when-absent) and the human `genlock-lock:` line as
+    `reason=recent_event:<name>`; `genlock_lock_decision.analyze` enriches the watchdog's reason to
+    `recent_event:<name>` so a page is actionable.
 - **`genlock-lock:` is a new OBS-log family** (emitted on state/reason CHANGE, not every tick) —
   mutually non-substring with `genlock-fifo audit '`, `genlock-ndi-output audit '`,
   `genlock-ndi-filter audit '`, `genlock-relock`, `genlock-acquire-bracket '%s':` (guarded by

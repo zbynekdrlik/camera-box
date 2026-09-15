@@ -12289,3 +12289,23 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   cc -Werror -Wconversion + truth-table pass); existing issue-1096/1180/1287 anchor tests green; cargo fmt
   --all --check clean. UNVERIFIED live — CI-only C++ compile, reproduces only live; supervisor rig repro
   after full-bundle deploy. Docs: .claude/rules/distroav-receiver-lifecycle.md ("finder-blind fallback ladder").
+- #1299 (Part 3): recent_event over CONNECTED inputs + PHASE events only, name the offender.
+  RED a6c3bbe93 (2 python failures: parser drops recent_event_inputs, decision returns the bare
+  recent_event token) -> GREEN 53114ccd4. Root cause: OBSBasicStatusBar.cpp genlock_scan_source
+  summed underruns+relocks+late_holds+backward_steps over EVERY input (connected AND absent), so a
+  per-tick underrun on the cg feed or an absent input's issue-1096 rebind churn refreshed the 60 s
+  recency window forever -> chronic DEGRADED/recent_event false-page on every box (live 18:13, all
+  four). Fix: pure input_phase_events (src/genlock_lock_state.rs, C-mirrored in GenlockLockState.hpp,
+  second-lift parity in genlock_lock_state_parity.rs) = connected-only, relocks+late_holds+
+  backward_steps, underruns DROPPED (latency-budget, issue 1302). Widget recomputes the driver
+  post-scan + picks the top offender; it rides genlock-lock-json: as recent_event_inputs (v2->v3,
+  omit-when-absent) + the human line as reason=recent_event:cg; bundle_state_gather parses it,
+  genlock_lock_decision.analyze enriches the reason for the watchdog. Underruns stay report-only
+  per-input. 60 s window UNCHANGED (fix was the feed). Design decision (c): an underrun on a
+  connected program input is NOT a lock class (clock/phase) — recorded on the ticket + issue 1302.
+  Tier-0: module rustc --test 34/34; C mirror cc -Werror replica matches; json/indicator guards
+  3/3+8/8 via rustc --test; roundtrip lift-compile g++ -Werror 1/1; python recent_event+decision+
+  gather 216/216; cargo fmt --all --check clean; doc-lazy-continuation grep clean; pwsh 3-copy
+  lock-step anchors added to both windows-genlock{,-fast}.yml (YAML valid). Review: fresh-context
+  general-purpose /review + /requesting-code-review. Docs: genlock-lock-indicator.md +
+  genlock-lock-facet.md.
