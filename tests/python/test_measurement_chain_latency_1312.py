@@ -45,15 +45,23 @@ def marker_csv(emit_ts_list):
 
 
 def meter_text(onset_ts_list, latency_ns=None, burst_len=3, dt_ns=50_000_000):
-    """Build an `InputVolumeMeters` sample stream (`sample <t_ns> <db>` rows): a leading SILENT sample
-    (so the detector is armed), then for each onset a short LOUD burst preceded by a SILENT gap.
-    `onset_ts_list` are the burst-start wall times on dev1's clock."""
-    rows = [f"sample {onset_ts_list[0] - 10 * dt_ns} {SILENT}"]  # leading silence → arm the detector
+    """Build a CONTINUOUS `InputVolumeMeters` sample stream (`sample <t_ns> <db>` rows) — a steady
+    SILENT floor sampled every `dt_ns` with a short LOUD burst at each onset. The real WS sampler emits
+    an event every ~50 ms REGARDLESS of level (`measurement_chain_latency_probe.stream_samples`), so a
+    realistic fixture is continuous. #1312: continuity matters for the relative rolling floor — a SPARSE
+    stream (only the burst samples, 5 s apart) would let the 20-sample window span several bursts and
+    flip the median to LOUD; the physical stream never does that."""
+    start = onset_ts_list[0] - 10 * dt_ns
+    end = onset_ts_list[-1] + (burst_len + 10) * dt_ns
+    loud_slots = set()
     for on in onset_ts_list:
-        rows.append(f"sample {on - dt_ns} {SILENT}")             # gap right before the burst
         for k in range(burst_len):
-            rows.append(f"sample {on + k * dt_ns} {LOUD}")       # the burst (first sample IS the onset)
-        rows.append(f"sample {on + burst_len * dt_ns} {SILENT}")  # burst ends
+            loud_slots.add(round((on + k * dt_ns - start) / dt_ns))
+    n = round((end - start) / dt_ns)
+    rows = []
+    for i in range(n + 1):
+        db = LOUD if i in loud_slots else SILENT  # first LOUD slot of each burst IS the onset sample
+        rows.append(f"sample {start + i * dt_ns} {db}")
     return "\n".join(rows) + "\n"
 
 
