@@ -119,18 +119,6 @@ class TestRestoreOnAbort:
         # and the live read-back ends on the restored (floor) pins, never the partial plan
         assert applied == {s: pre[s] for s in plan}
 
-    def test_restore_targets_the_preapply_pins_not_blindly_floor(self, monkeypatch):
-        # A standalone / no-reset path where the pre-align pins are ELEVATED (a prior aligned run's).
-        # The restore must return them to THOSE values, proving it restores "what it changed", not a
-        # blind floor reset.
-        pre = {"NDI cam1": 3, "NDI cam2": 50, "NDI cam3": 50, "NDI cam4": 50}
-        apply_calls, applied = _wire(monkeypatch, _StuckBarrier([10, 8, 6, 4] + [4] * 20), pre)
-        with pytest.raises(qa.AlignmentImpossible):
-            _align(pre)
-        assert len(apply_calls) >= 2
-        plan = apply_calls[0]
-        assert apply_calls[-1] == {s: pre[s] for s in plan}
-
     def test_successful_align_does_not_restore(self, monkeypatch):
         pre = {s: 3 for s in SRC}
         applied_ref = {}

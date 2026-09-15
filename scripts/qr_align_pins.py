@@ -1234,6 +1234,43 @@ def reset_pins_to_floor(sources, host, password, floor_ms=DEFAULT_FLOOR_MS):
     return len(plan)
 
 
+def restore_pins(pins_to_restore, host, password, floor_ms=DEFAULT_FLOOR_MS):
+    """#1168: restore the given per-source strih pins to explicit values over WS, read-back verified
+    via apply_latency_pins.apply_pins -- the SAME writer the aligner + two-phase reset use (no #795
+    name mangle). `pins_to_restore`: {src: ms|None}; a None (a never-read pre-align pin -- an absent
+    genlock_latency_ms_src reads honest-None and its effective value is the build floor) is coerced to
+    `floor_ms`. Returns the applied {src: ms}. Raises on a connect / read-back failure (the caller
+    decides fatality; align()'s abort path treats it as best-effort so the ORIGINAL abort reason is
+    never masked)."""
+    from apply_latency_pins import apply_pins
+    import obs_phase2
+    plan = {s: (int(v) if v is not None else floor_ms) for s, v in pins_to_restore.items()}
+    ws = obs_phase2._conn(host, password)
+    try:
+        return apply_pins(ws, plan, True)
+    finally:
+        ws.close()
+
+
+def _restore_after_abort(plan, current_pins, host, password, floor_ms):
+    """#1168: best-effort LOUD restore of the plan's sources back to their PRE-align pins after an
+    aborted [4i/8align] apply, so the rig is never left on the partial plan pins (run 34973535496).
+    Restores EXACTLY the sources the plan wrote, to `current_pins` (read at align()'s start = the
+    post-reset floor state on the two-phase path). NEVER raises: a restore failure is logged LOUD but
+    must not mask WHY the run aborted (the caller re-raises the original AlignmentImpossible)."""
+    to_restore = {s: current_pins.get(s) for s in plan}
+    try:
+        restored = restore_pins(to_restore, host, password, floor_ms)
+        sys.stderr.write(
+            f"[qr-align] #1168 ABORT restore: reverted the strih align pins to their pre-align "
+            f"values {restored} (the run is still ABORTED -- see the reason above).\n")
+    except Exception as e:  # noqa: BLE001 -- a restore failure is logged, never masks the abort
+        sys.stderr.write(
+            f"WARNING: [qr-align] #1168 could NOT restore the strih align pins after the abort "
+            f"({e}); the rig may be left on the partial plan pins {plan} -- restore by hand "
+            f"(apply_latency_pins.py --box strih --host {host} --pins '<pre-align json>').\n")
+
+
 def _full_round_parity(rounds_ticks, sources, tol_frame_ids, min_parity_rounds):
     """Parity over FULL rounds only (every align source decoded), which is what proves ALL cameras
     (incl. cam4) are aligned. Returns (median_spread|None, aligned_bool). aligned iff there are
@@ -1487,64 +1524,77 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     finally:
         ws.close()
 
-    time.sleep(settle_s)
-    # Re-measure to a STABLE TAIL too, so a pin-change transient is not re-caught (#1160).
-    verify_ticks, _, vstatus = measure_stable_tail(
-        sources, host, password, width=width, height=height, run_id=run_id,
-        stable_tail_rounds=stable_tail_rounds, stable_tol_ids=stable_tol_ids,
-        stable_outlier_tol_ids=stable_outlier_tol_ids,
-        parity_tol_ids=parity_tol_ids, min_parity_rounds=min_parity_rounds,
-        min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds,
-        saver=saver)
-    vtail_start = vstatus.tail_start
-    vtail = verify_ticks[vtail_start:] if vtail_start is not None else verify_ticks
-    post_spread, post_ok = _full_round_parity(vtail, sources, parity_tol_ids, min_parity_rounds)
-    result["post_spread_ids"] = post_spread
-    result["verify_stable"] = vstatus.done
-    if not (vstatus.done and post_ok):
-        # Name the still-offending cameras (post-apply per-camera deltas over the verify tail).
-        post_pins = read_current_pins(sources, host, password)
-        post_deltas = {}
-        for rnd in vtail:
-            d = round_deltas(rnd, post_pins)
-            if d:
-                for s, v in d.items():
-                    post_deltas.setdefault(s, []).append(v)
-        named = {s: round(statistics.median(v), 1) for s, v in post_deltas.items()} if post_deltas \
-            else "unverifiable"
-        # #1161: which sources did the plan ask to ADD hold (the direction the FIFO cannot execute
-        # on a live pin change)? A non-empty set on a STABILIZED-but-off-parity tail is WHY the
-        # residual did not close -- the config pin moved (read-back confirmed) but the presented
-        # frame did not. Record it + emit before/after telemetry so the operator sees where the pin
-        # went (item 4), then attribute the abort precisely rather than a generic "did NOT hold".
-        inert = pins_requiring_more_hold(current_pins, plan)
-        result["post_residual_deltas_ms"] = named
-        result["hold_inert_ms"] = inert
-        sys.stderr.write(format_pin_apply_report(
-            current_pins, post_pins, result.get("median_deltas_ms"), named, inert) + "\n")
-        _emit_fail_diagnostics(verify_ticks, sources, vtail_start)  # the RE-MEASURED rounds
-        if vstatus.done and inert:
-            # The tail STABILIZED but stayed off-parity, and the plan raised pins. Attribute
-            # PRECISELY by WHICH plan was applied, never the generic "did NOT hold" (which reads as
-            # flakiness/settle and sends the next worker chasing ruled-out hypotheses). Parity
-            # tolerance is NOT widened either way.
-            if arrival_floors:
-                # #1253 additive path: additive hold pins were applied (read-back confirmed) but the
-                # residual did not close -- so under the ADDITIVE FIFO the frame did not move by the
-                # added hold (the frame-mover build is not deployed on strih, or the transport floor
-                # shifted mid-run).
-                raise AlignmentImpossible(
-                    floor_aware_stuck_abort_reason(plan, arrival_floors, post_pins, named, floor_ms))
-            # Fallback path (no arrival-floor measurement): the floor3 hold pins were applied but the
-            # frame did not move -- the pre-fix generic hold-inert attribution (issue 1003 Stage-2).
-            raise AlignmentImpossible(hold_inert_abort_reason(inert, post_pins, named))
-        why = ("did not STABILIZE" if not vstatus.done
-               else f"stabilized at frame_id spread {post_spread} (> {parity_tol_ids})")
-        raise AlignmentImpossible(
-            f"[qr-align] applied floor-3 pins {plan} but the re-measured tail {why} -- alignment "
-            f"did NOT hold. Per-camera residual deltas (ms): {named}.")
-    result["status"] = "aligned"
-    return result
+    # #1168: from the moment apply_pins wrote the plan above, ANY abort (the AlignmentImpossible
+    # "camera alignment FAILED (rc=1)" branch, or an unexpected error) must RESTORE the strih pins
+    # this step overwrote back to their pre-align values (current_pins, read at align()'s start =
+    # the post-reset floor on the two-phase path) so the rig is never left on the partial plan pins
+    # (run 34973535496: cam1 20 / cam4 19 / cam5-7 36/36/37 left DIRTY, restored by hand). The
+    # two-phase reset already floored the #900 re-anchor pins BEFORE this run, and cleanup()'s
+    # `teardown --host STRIH` restores only the stream-hold / measurement-eq snapshots (obs_phase2.py
+    # ~line 600 / _MEASUREMENT_EQ_STATE_KEY), NEVER the aligner's pins -- so this is the only restore
+    # path for them. Best-effort + LOUD: a restore failure re-raises the ORIGINAL abort reason.
+    try:
+        time.sleep(settle_s)
+        # Re-measure to a STABLE TAIL too, so a pin-change transient is not re-caught (#1160).
+        verify_ticks, _, vstatus = measure_stable_tail(
+            sources, host, password, width=width, height=height, run_id=run_id,
+            stable_tail_rounds=stable_tail_rounds, stable_tol_ids=stable_tol_ids,
+            stable_outlier_tol_ids=stable_outlier_tol_ids,
+            parity_tol_ids=parity_tol_ids, min_parity_rounds=min_parity_rounds,
+            min_valid_rounds=min_valid_rounds, budget_s=measure_budget_s, max_rounds=max_measure_rounds,
+            saver=saver)
+        vtail_start = vstatus.tail_start
+        vtail = verify_ticks[vtail_start:] if vtail_start is not None else verify_ticks
+        post_spread, post_ok = _full_round_parity(vtail, sources, parity_tol_ids, min_parity_rounds)
+        result["post_spread_ids"] = post_spread
+        result["verify_stable"] = vstatus.done
+        if not (vstatus.done and post_ok):
+            # Name the still-offending cameras (post-apply per-camera deltas over the verify tail).
+            post_pins = read_current_pins(sources, host, password)
+            post_deltas = {}
+            for rnd in vtail:
+                d = round_deltas(rnd, post_pins)
+                if d:
+                    for s, v in d.items():
+                        post_deltas.setdefault(s, []).append(v)
+            named = {s: round(statistics.median(v), 1) for s, v in post_deltas.items()} if post_deltas \
+                else "unverifiable"
+            # #1161: which sources did the plan ask to ADD hold (the direction the FIFO cannot execute
+            # on a live pin change)? A non-empty set on a STABILIZED-but-off-parity tail is WHY the
+            # residual did not close -- the config pin moved (read-back confirmed) but the presented
+            # frame did not. Record it + emit before/after telemetry so the operator sees where the pin
+            # went (item 4), then attribute the abort precisely rather than a generic "did NOT hold".
+            inert = pins_requiring_more_hold(current_pins, plan)
+            result["post_residual_deltas_ms"] = named
+            result["hold_inert_ms"] = inert
+            sys.stderr.write(format_pin_apply_report(
+                current_pins, post_pins, result.get("median_deltas_ms"), named, inert) + "\n")
+            _emit_fail_diagnostics(verify_ticks, sources, vtail_start)  # the RE-MEASURED rounds
+            if vstatus.done and inert:
+                # The tail STABILIZED but stayed off-parity, and the plan raised pins. Attribute
+                # PRECISELY by WHICH plan was applied, never the generic "did NOT hold" (which reads as
+                # flakiness/settle and sends the next worker chasing ruled-out hypotheses). Parity
+                # tolerance is NOT widened either way.
+                if arrival_floors:
+                    # #1253 additive path: additive hold pins were applied (read-back confirmed) but the
+                    # residual did not close -- so under the ADDITIVE FIFO the frame did not move by the
+                    # added hold (the frame-mover build is not deployed on strih, or the transport floor
+                    # shifted mid-run).
+                    raise AlignmentImpossible(
+                        floor_aware_stuck_abort_reason(plan, arrival_floors, post_pins, named, floor_ms))
+                # Fallback path (no arrival-floor measurement): the floor3 hold pins were applied but the
+                # frame did not move -- the pre-fix generic hold-inert attribution (issue 1003 Stage-2).
+                raise AlignmentImpossible(hold_inert_abort_reason(inert, post_pins, named))
+            why = ("did not STABILIZE" if not vstatus.done
+                   else f"stabilized at frame_id spread {post_spread} (> {parity_tol_ids})")
+            raise AlignmentImpossible(
+                f"[qr-align] applied floor-3 pins {plan} but the re-measured tail {why} -- alignment "
+                f"did NOT hold. Per-camera residual deltas (ms): {named}.")
+        result["status"] = "aligned"
+        return result
+    except BaseException:
+        _restore_after_abort(plan, current_pins, host, password, floor_ms)
+        raise
 
 
 def main(argv=None):
