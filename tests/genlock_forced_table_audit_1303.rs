@@ -8,8 +8,8 @@
 //! bash verdict to the Rust `audio_verdict` over a fixed vector set so the two can never drift.
 
 use camera_box::genlock_forced_table_audit::{
-    any_mismatch, audio_verdict, audit_box, classify, expected_audio, AudioExpectation,
-    AudioVerdict, BoxClass, NdiInput,
+    any_mismatch, audio_verdict, audit_box, classify, expected_audio, is_camera_input,
+    AudioExpectation, AudioVerdict, BoxClass, NdiInput,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -208,14 +208,37 @@ fn bash_audit_is_report_only_even_when_all_clean() {
     assert!(out.contains("# summary: 1 input(s), 0 MISMATCH"), "{out}");
 }
 
+#[test]
+fn bash_stream_audible_program_input_is_mismatch_audible_1303() {
+    // The double-audio hazard: a program NDI input ENABLED on stream (Dante-fed box) -> the generic
+    // MISMATCH-AUDIBLE (not CAMERA-AUDIBLE, it is not a camera). Silent siblings grade OK.
+    let body = "printf 'NDI obs hudba\\ttrue\\t\\t\\n\
+NDI 2ME PGM\\tfalse\\t\\t\\n' | genlock_forced_table_audit stream";
+    let (rc, out, err) = run_sourced(body);
+    assert_eq!(rc, 0, "report-only.\nstdout={out}\nstderr={err}");
+    assert!(
+        out.contains("NDI obs hudba: expected=silent ndi_audio=true -> MISMATCH-AUDIBLE"),
+        "audible-program row on a silent box:\n{out}"
+    );
+    assert!(
+        out.contains("NDI 2ME PGM: expected=silent ndi_audio=false -> OK"),
+        "silent program row on stream is OK:\n{out}"
+    );
+    assert!(
+        out.contains("# summary: 2 input(s), 1 MISMATCH"),
+        "summary count:\n{out}"
+    );
+}
+
 // ---- Parity gate: bash verdict == Rust verdict over a fixed vector set -------------------------
 
 /// The Rust verdict rendered as the bash token, so the two are directly comparable.
 fn rust_token(bc: BoxClass, name: &str, ndi_audio: bool) -> &'static str {
-    match audio_verdict(expected_audio(bc, name), ndi_audio) {
+    match audio_verdict(expected_audio(bc, name), ndi_audio, is_camera_input(name)) {
         AudioVerdict::Ok => "OK",
         AudioVerdict::MismatchProgramSilent => "MISMATCH-PROGRAM-SILENT",
         AudioVerdict::MismatchCameraAudible => "MISMATCH-CAMERA-AUDIBLE",
+        AudioVerdict::MismatchAudible => "MISMATCH-AUDIBLE",
     }
 }
 
@@ -231,6 +254,10 @@ fn bash_replica_matches_rust_over_a_fixed_vector_set() {
         "sp-fast_video",
         "cg",
         "NDI 2ME PGM",
+        // today's five live deploy-preflight rows (2026-09-15) — the certified-table exercise set.
+        "NDI 2ME PGM (mv)",
+        "NDIA cg stream",
+        "NDI cam1",
         "mbc",
         "NDI obs hudba",
         "NDIAr ppt",

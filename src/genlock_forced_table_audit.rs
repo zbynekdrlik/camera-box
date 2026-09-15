@@ -51,16 +51,6 @@ impl BoxClass {
             _ => None,
         }
     }
-
-    /// The default audio expectation for an input whose name matches NO specific role rule on this
-    /// box. Camera-chain boxes treat an unrecognised input like a camera (silent); the cg box treats
-    /// one like a program source (audio).
-    fn default_expectation(self) -> AudioExpectation {
-        match self {
-            BoxClass::Resolume => AudioExpectation::ExpectedAudio,
-            BoxClass::Strih | BoxClass::Stream | BoxClass::Imag => AudioExpectation::ExpectedSilent,
-        }
-    }
 }
 
 /// Whether a genlock NDI input SHOULD carry audio into the mixer, given its role.
@@ -82,6 +72,10 @@ pub enum AudioVerdict {
     MismatchProgramSilent,
     /// A camera source with audio ENABLED — audio bleeding into the camera chain.
     MismatchCameraAudible,
+    /// A NON-camera input audible on a silent box (strih/stream/imag) — NDI audio bleeding into the
+    /// Dante-fed mix, the double-audio hazard (#1303 owner ruling 2026-09-15: those boxes carry the
+    /// mastered mix over Dante/ASIO, so EVERY NDI input must stay silent).
+    MismatchAudible,
 }
 
 impl AudioVerdict {
@@ -152,24 +146,46 @@ pub fn is_program_audio_input(name: &str) -> bool {
     KEYS.iter().any(|k| n.contains(k))
 }
 
-/// The role-derived audio expectation for `name` on `box_class`. Camera inputs are silent on EVERY
-/// box; program/music/SongPlayer inputs carry audio on every box; anything else falls back to the
-/// box-class default.
+/// The role-derived audio expectation for `name` on `box_class` — the per-box CERTIFIED table
+/// (owner ruling 2026-09-15, verbatim: „žiadny — zvuk na strih/stream ide cez Dante, NDI audio
+/// ostáva vypnuté").
+///
+/// The cg OBS (`resolume`) is the ONLY box carrying program audio over NDI: its
+/// `sp-*`/SongPlayer/music program inputs (the 9 keys of `is_program_audio_input`) expect audio, its
+/// camera inputs expect silent, and any other input defaults to audio (a program-audio box). On the
+/// camera-chain boxes (`strih`/`stream`/`imag`) the mastered mix arrives over Dante/ASIO, NEVER over
+/// NDI, so EVERY NDI input expects silent — cameras, `cg`, `2ME PGM`, music alike; NDI audio enabled
+/// on any of them is the double-audio defect.
 pub fn expected_audio(box_class: BoxClass, name: &str) -> AudioExpectation {
-    if is_camera_input(name) {
-        AudioExpectation::ExpectedSilent
-    } else if is_program_audio_input(name) {
-        AudioExpectation::ExpectedAudio
-    } else {
-        box_class.default_expectation()
+    match box_class {
+        BoxClass::Resolume => {
+            if is_camera_input(name) {
+                AudioExpectation::ExpectedSilent
+            } else if is_program_audio_input(name) {
+                AudioExpectation::ExpectedAudio
+            } else {
+                // The cg box's default for an unrecognised input is audio (a program-audio box).
+                AudioExpectation::ExpectedAudio
+            }
+        }
+        BoxClass::Strih | BoxClass::Stream | BoxClass::Imag => AudioExpectation::ExpectedSilent,
     }
 }
 
-/// The audio verdict for an expectation vs the saved `ndi_audio`.
-pub fn audio_verdict(expected: AudioExpectation, ndi_audio: bool) -> AudioVerdict {
+/// The audio verdict for an expectation vs the saved `ndi_audio`. When a silent-expected input is
+/// audible, `is_camera` picks the direction: a CAMERA input yields `MismatchCameraAudible`, any
+/// other input (a program/music source on a Dante-fed silent box) yields the generic
+/// `MismatchAudible` (both are the "audio bleeding into the mix" defect, named per the input's role).
+pub fn audio_verdict(expected: AudioExpectation, ndi_audio: bool, is_camera: bool) -> AudioVerdict {
     match (expected, ndi_audio) {
         (AudioExpectation::ExpectedAudio, false) => AudioVerdict::MismatchProgramSilent,
-        (AudioExpectation::ExpectedSilent, true) => AudioVerdict::MismatchCameraAudible,
+        (AudioExpectation::ExpectedSilent, true) => {
+            if is_camera {
+                AudioVerdict::MismatchCameraAudible
+            } else {
+                AudioVerdict::MismatchAudible
+            }
+        }
         _ => AudioVerdict::Ok,
     }
 }
@@ -187,7 +203,7 @@ pub fn classify(box_class: BoxClass, input: &NdiInput) -> InputAudit {
         name: input.name.clone(),
         expected,
         actual_ndi_audio: input.ndi_audio,
-        verdict: audio_verdict(expected, input.ndi_audio),
+        verdict: audio_verdict(expected, input.ndi_audio, is_camera_input(&input.name)),
         yuv_partial_on_program: yuv_partial_on_program(expected, &input.yuv_range),
     }
 }
@@ -296,14 +312,22 @@ mod tests {
     }
 
     #[test]
-    fn stream_program_and_music_expect_audio() {
+    fn stream_ndi_inputs_are_all_silent() {
+        // Certified table (owner ruling 2026-09-15): strih/stream carry program audio over Dante,
+        // never NDI, so a program NDI input with audio OFF is OK, and with audio ON is the
+        // double-audio MismatchAudible (a non-camera audible on a silent box).
         assert_eq!(
-            classify(BoxClass::Stream, &input("NDI 2ME PGM", true, "")).verdict,
+            classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "")).verdict,
             AudioVerdict::Ok
         );
         assert_eq!(
-            classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "")).verdict,
-            AudioVerdict::MismatchProgramSilent
+            classify(BoxClass::Stream, &input("NDI 2ME PGM", true, "")).verdict,
+            AudioVerdict::MismatchAudible
+        );
+        // `cg` on strih is likewise silent-expected now (was a false MISMATCH-PROGRAM-SILENT).
+        assert_eq!(
+            classify(BoxClass::Strih, &input("cg", false, "")).verdict,
+            AudioVerdict::Ok
         );
     }
 
