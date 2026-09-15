@@ -12205,3 +12205,13 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   scripts/verify-imag.sh    # check (ba) must pass
   GENLOCK_LOCK_FETCH_CMD=/tmp/fetch.sh scripts/genlock-lock-alert-watchdog.sh --dry-run   # fixture
   scripts/genlock-lock-alert-watchdog.sh --dry-run    # live: expect a real imag verdict, not SKIP
+- #1303 part 4 (certified-table finalization, lane/1303-certtable): the genlock forced-table AUDIO
+  classifier is now the per-box CERTIFIED table (owner ruling 15.9.2026 15:10 — program audio over
+  NDI on the cg OBS/resolume ONLY; strih/stream/imag all silent, Dante-fed). RED e813fd991
+  (tests/genlock_forced_table_audit_1303.rs: five live strih/stream rows must grade OK + inverse
+  must mismatch — FAILS on the old name heuristic) → GREEN 8aa69aae5 (src/genlock_forced_table_audit.rs
+  expected_audio per-box + new MismatchAudible verdict for a non-camera audible on a silent box;
+  byte-for-byte bash replica scripts/lib/genlock-forced-table-audit.sh; parity vectors extended;
+  deploy-genlock-fleet.sh preflight reworded to the certified table, anchors intact). Tier-0: rustc
+  --test -D warnings on the pure module, bash-vs-Rust parity identical over all 112 vectors,
+  shellcheck+bash -n clean, --plan exit 0, cargo fmt clean. Docs: .claude/rules/genlock-audio-pairing.md.

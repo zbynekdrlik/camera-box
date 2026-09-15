@@ -2,6 +2,9 @@
 paths:
   - "src/genlock_audio_pairing.rs"
   - "tests/genlock_audio_pairing_parity.rs"
+  - "src/genlock_forced_table_audit.rs"
+  - "scripts/lib/genlock-forced-table-audit.sh"
+  - "tests/genlock_forced_table_audit_1303.rs"
 ---
 
 # Receiver-side AUDIO genlock parity (#1303)
@@ -73,12 +76,40 @@ scope, audio disabled/absent never degrades (the `audio_enabled` guard); `decide
 AudioDisabledOnProgram + AsrcSaturated branches are NOT surfaced here (they need is-program-source /
 asrc-ppm data the v2 stats don't carry) — a followup. Full contract: `genlock-lock-indicator.md`.
 
+## Per-box certified AUDIO table (#1303 part 4 — DONE)
+
+**The audit is NOT a name heuristic — it is a per-box CERTIFIED table.** Owner ruling 2026-09-15
+15:10, verbatim: „žiadny — zvuk na strih/stream ide cez Dante, NDI audio ostáva vypnuté (odporúčam,
+inak hrozí dvojitý zvuk)". Program audio over NDI exists on the cg OBS (RESOLUME-SNV) ONLY; on
+strih/stream/imag the mastered mix arrives over Dante/ASIO (VB-Matrix, `mbc`), so NDI audio on ANY
+input there would be DOUBLE audio in the mix.
+
+| box | expected `ndi_audio` |
+|---|---|
+| **resolume** (cg OBS) | camera inputs → silent; `sp-*`/SongPlayer/`cg`/music program inputs (the 9 keys) → **audio**; any other input → audio (the cg-box default). The ONLY program-audio box. |
+| **strih** / **stream** / **imag** | **EVERY** NDI input silent — cameras AND `cg` AND `2ME PGM` AND `NDI obs hudba` alike. Program audio comes from Dante/ASIO, never NDI. |
+
+The classifier `src/genlock_forced_table_audit.rs` (canonical) + the byte-for-byte bash replica
+`scripts/lib/genlock-forced-table-audit.sh` encode exactly this; `tests/genlock_forced_table_audit_1303.rs`
+pins the two together over a fixed vector set (bash verdict == Rust `audio_verdict` for every
+box×name×`ndi_audio`). Verdicts: `OK`, `MISMATCH-PROGRAM-SILENT` (a cg program source with audio off
+— the #1295 event-morning defect), `MISMATCH-CAMERA-AUDIBLE` (a camera audible), and
+`MISMATCH-AUDIBLE` (a NON-camera input audible on a Dante-fed silent box — the double-audio hazard;
+added per the owner's own term). `deploy-genlock-fleet.sh` emits the report-only preflight
+(`PREFLIGHT (report-only, #1303 part 4)`) that pipes the box's live `GetInputList`/`GetInputSettings`
+TSV into the classifier BEFORE the swap; it NEVER writes and NEVER gates.
+
+**Why a static table, not a live WS read or a data file:** the audit is emitted by the plan builder
+as deterministic pre-swap guidance, so it must be pure (no live-box coupling) and self-contained (no
+runtime file lookup); the owner handed down a FIXED per-box table, so a static two-replica table
+pinned by the parity gate is exactly the right shape. The old heuristic assumed "a program input
+carries audio on every box" and produced five false `MISMATCH-PROGRAM-SILENT` rows on strih/stream
+— that assumption is now dead.
+
 ## Deferred followups (NOT in the #1303 code lane)
 
 - **Audio DEGRADE full taxonomy** — surface `decide_audio_health`'s AudioDisabledOnProgram +
   AsrcSaturated branches in the LOCK indicator (part 3b only wired the pairing-offset branch);
   needs the widget to know is-program-source + per-source asrc-saturation, neither in `obs_genlock_stats` v2.
-- **Per-box certified-table audit + `deploy-genlock-fleet.sh` preflight** (part 4) — a report-only
-  per-box `ndi_audio`/`yuv_*` audit + a pre-swap input listing; a separable large shell piece.
 - Live A/V soak acceptance (±20 ms over 1 h, cg OBS `locked=1` + audio facet green) is a
   post-merge SUPERVISOR rig step — never rig-verified from the code lane.
