@@ -27,10 +27,14 @@ reads UNKNOWN (`neoverené`, reason `monotonic-emit`), never a false forgot. It 
 moment the painter is switched to `--wall-clock` (a SAFE no-op for the A/V verdict path, which pairs by
 index→frame_id and ignores `emit_ts`; surfaced as a supervisor follow-up).
 
-THRESHOLD REUSE: the −60 dB burst-onset bar is the SAME `audio_preflight_default_threshold_db` (#748);
-the orchestrator sources `scripts/lib/audio-presence-preflight.sh` and passes it in, so the literal is
-NEVER retyped here (the CLI takes `--threshold-db` as REQUIRED). Onset uses `>=` — an inversion of
-`audio_preflight_is_silent`'s strict `<` (exactly at the bar is PRESENT/onset, not silent).
+ONSET DETECTION (#1312): the −60 dB bar (`audio_preflight_default_threshold_db`, #748; sourced from
+`scripts/lib/audio-presence-preflight.sh` by the orchestrator and passed in as REQUIRED `--threshold-db`,
+never retyped here) is the SILENT-CHAIN guard ONLY — `chain_is_silent` reads chain-silent (UNKNOWN)
+when every sample is below it. It is NOT the onset criterion: on the rig the `mbc` peak sits
+continuously at ~−44 dB (room/PA floor through the measurement mic), always above −60, so an absolute
+onset bar never armed (`markers=145 onsets=0` on a working chain — the #1312 defect). Onsets are
+instead detected RELATIVE to a rolling floor (`detect_onsets`: a burst rises ≥ `ONSET_DELTA_DB` above
+the trailing-window median, re-arming with hysteresis), calibrated from a live capture.
 """
 import argparse
 import bisect
@@ -56,6 +60,16 @@ DEFAULT_MIN_PAIRED = 3  # < 3 paired markers → UNKNOWN (too few onsets to trus
 # a UNIX-epoch ns is ~1.7e18; a monotonic elapsed-since-start value is orders smaller (a painter up a
 # full year ≈ 3.15e16). 1e18 ns ≈ 2001-09 — a clean floor separating wall-clock from monotonic emit_ts.
 WALL_CLOCK_FLOOR_NS = 1_000_000_000_000_000_000
+# --- onset detection (#1312: RELATIVE, not the absolute −60 bar) ---------------------------------
+# the rig room/PA floor through the measurement mic sits CONTINUOUSLY at ~−44.5 dB (a 45 s live
+# capture: p99 rise 3.8 dB above a trailing-20 median; the ~5 s cadence QPSK bursts rise +7…+25 dB).
+# The absolute −60 dB bar never armed on that floor (markers=145 onsets=0 on a working chain), so
+# onsets are detected RELATIVE to a rolling floor. The −60 bar is kept only as the SILENT-CHAIN guard.
+ROLLING_FLOOR_WINDOW = 20   # trailing samples for the rolling floor ≈ 1 s at the ~50 ms WS cadence
+# a burst must rise this far above the rolling floor to be an onset. Calibrated from the live capture:
+# noise stays ≤ 3.8 dB above the floor (p99), the weakest real burst rises +7.0 dB → 6 dB sits 2.2 dB
+# above the noise and catches every real burst. Re-arm hysteresis is ONSET_DELTA_DB / 2.
+ONSET_DELTA_DB = 6.0
 
 
 # --- pure parsers -------------------------------------------------------------------------------
@@ -108,21 +122,44 @@ def emits_are_wall_clock(emits):
 
 
 # --- pure signal processing ---------------------------------------------------------------------
-def detect_onsets(samples, threshold_db):
-    """Burst ONSET times: a RISING edge where the `mbc` peak crosses from below the bar to at/above it.
-    Starts DISarmed so a window that opens mid-burst never counts a partial first burst — the detector
-    arms on the first below-bar sample, then the next at/above sample is an onset (and re-disarms until
-    it drops below again). `>=` matches the −60 dB silence bar's exactly-at-bar-is-present convention."""
+def _median_float(vals):
+    """Median of a non-empty list of floats (a small local helper — `median_ms` is ns→ms scaled)."""
+    xs = sorted(vals)
+    n = len(xs)
+    mid = n // 2
+    return xs[mid] if n % 2 else (xs[mid - 1] + xs[mid]) / 2.0
+
+
+def chain_is_silent(samples, threshold_db):
+    """True iff there are samples and the LOUDEST one never reached the absolute bar — the mbc chain
+    is silent (a #1310-class dead-audio problem, not a latency drift). An EMPTY capture is NOT "silent"
+    (it is a different UNKNOWN — no meter data), so this returns False for no samples."""
+    dbs = [db for _, db in samples if db is not None]
+    return bool(dbs) and max(dbs) < threshold_db
+
+
+def detect_onsets(samples, floor_window=ROLLING_FLOOR_WINDOW, delta_db=ONSET_DELTA_DB):
+    """Burst ONSET times, detected RELATIVE to a rolling floor (#1312). The rolling floor is the median
+    of the trailing `floor_window` PRIOR samples; an onset fires when a sample rises ≥ `delta_db` above
+    that floor while armed, then re-arms (hysteresis) once the level falls back within `delta_db`/2 of
+    the floor. Starts DISarmed and arms on the first at-floor sample, so a window opening mid-burst
+    never counts a partial first burst, and a single loud outlier in the window never moves the median.
+    This replaces the old absolute −60 dB onset bar, which never armed on the rig's ~−44 dB room floor;
+    the −60 bar is now only `chain_is_silent`'s guard."""
+    seq = [(t, db) for t, db in samples if db is not None]
+    vals = [db for _, db in seq]
     onsets = []
     armed = False
-    for t, db in samples:
-        if db is None:
-            continue
-        if db >= threshold_db:
+    rearm = delta_db / 2.0
+    for i, (t, db) in enumerate(seq):
+        window = vals[max(0, i - floor_window):i]
+        floor = _median_float(window) if window else db
+        rise = db - floor
+        if rise >= delta_db:
             if armed:
                 onsets.append(t)
                 armed = False
-        else:
+        elif rise <= rearm:
             armed = True
     return onsets
 
@@ -160,7 +197,10 @@ def measure(marker_text, meter_text, threshold_db, max_pair_ns):
     emits = parse_marker_csv(marker_text)
     samples = parse_meter_samples(meter_text)
     wall_ok = emits_are_wall_clock(emits)
-    onsets = detect_onsets(samples, threshold_db)
+    silent = chain_is_silent(samples, threshold_db)
+    # a silent chain has no real bursts to detect — force 0 onsets so the reason is chain-silent, not a
+    # spurious relative onset off the noise floor.
+    onsets = [] if silent else detect_onsets(samples)
     lat = pair_latencies(emits, onsets, max_pair_ns) if wall_ok else []
     return {
         "markers": len(emits),
@@ -168,6 +208,7 @@ def measure(marker_text, meter_text, threshold_db, max_pair_ns):
         "paired": len(lat),
         "latency_ms": median_ms(lat),
         "wall_clock_ok": wall_ok,
+        "chain_silent": silent,
     }
 
 
@@ -202,7 +243,7 @@ def classify(latency_ms, baseline_ms, paired, box_reachable, markers, wall_clock
     return ALIGNED
 
 
-def reason(verdict, markers, wall_clock_ok, paired, min_paired):
+def reason(verdict, markers, wall_clock_ok, paired, min_paired, chain_silent=False):
     """A short single-token reason for the CLI/log line (never contains a `verdict=` substring)."""
     if verdict == SKIP:
         return "stream-obs-unreachable"
@@ -211,6 +252,8 @@ def reason(verdict, markers, wall_clock_ok, paired, min_paired):
             return "no-markers"
         if not wall_clock_ok:
             return "monotonic-emit"
+        if chain_silent:
+            return "chain-silent"       # #1312: every mbc sample below the −60 bar (dead audio chain)
         if paired < min_paired:
             return "too-few-onsets"
         return "no-median"
@@ -290,7 +333,8 @@ def _main(argv):
     max_pair_ns = int(ns.max_pair_ms * 1e6)
     if reachable != 1:
         # a dead stream box needs no capture parsing — SKIP straight away (#1001/#732 territory).
-        res = {"markers": 0, "onsets": 0, "paired": 0, "latency_ms": None, "wall_clock_ok": False}
+        res = {"markers": 0, "onsets": 0, "paired": 0, "latency_ms": None, "wall_clock_ok": False,
+               "chain_silent": False}
     else:
         res = measure(_read_file(ns.marker_file), _read_file(ns.meter_file),
                       ns.threshold_db, max_pair_ns)
@@ -318,7 +362,8 @@ def _main(argv):
         "baseline_ms": baseline,
         "tolerance_ms": ns.tolerance_ms,
         "delta_ms": delta,
-        "reason": reason(verdict, res["markers"], res["wall_clock_ok"], res["paired"], ns.min_paired),
+        "reason": reason(verdict, res["markers"], res["wall_clock_ok"], res["paired"], ns.min_paired,
+                         chain_silent=res["chain_silent"]),
         "verdict": verdict,
     }
     for k in ("box_reachable", "markers", "onsets", "paired", "latency_ms", "baseline_ms",
