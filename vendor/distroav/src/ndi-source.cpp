@@ -895,7 +895,16 @@ static inline bool ndi_reap_should_defer(bool have_framesync, bool have_receiver
  * frame presented age for ~40 min). framesync is destroyed BEFORE the receiver it was created from.
  * The handles are plain NDI instances, independent of ndi_source_t, so the reaper races nothing in
  * `s` or in a freshly-started av-thread. Falls back to a synchronous destroy if the thread cannot be
- * spawned (never crash; worst case is the pre-fix behaviour). */
+ * spawned (never crash; worst case is the pre-fix behaviour).
+ *
+ * ACCEPTED TRADEOFF (issue 1320 review F1): on OBS process shutdown the join in ndi_source_destroy
+ * now returns in ~ms, so obs_module_unload's ndiLib->destroy() (plugin-main.cpp) could in principle
+ * race ahead of a reaper still mid-recv_destroy and deref an unmapped NDI runtime -> a rare
+ * crash-ON-EXIT. This is deliberately accepted here: it is shutdown-only, needs a teardown in flight
+ * at the exact unload instant, and a crash-on-exit is far less harmful than the ~7.5 s LIVE PROGRAM
+ * render freeze this fixes. A clean drain (an outstanding-reaper atomic counter spin-waited before
+ * ndiLib->destroy()) is left as a bounded follow-up rather than widening this surgical fix into a
+ * second vendored file with its own shutdown-latency tradeoff. */
 static void ndi_reap_receiver_detached(const NDIlib_v6 *lib, NDIlib_framesync_instance_t frame_sync,
 				       NDIlib_recv_instance_t receiver)
 {
