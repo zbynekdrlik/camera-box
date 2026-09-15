@@ -256,6 +256,21 @@ ITEMS = [
     # verdict token; a monotonic-emit painter / no-baseline / SKIP / missing-probe all read UNKNOWN
     # (never a false forgot). NOT the pin-relative dock av_offset (which read +17 ms while the gate
     # read -140 ms on 14.9.) -- this is an independent absolute measurement.
+    # #1309: per-cambox bkshading-relay state so "shading is off on cam1" is REPORTED, never
+    # discovered. verdict-kind like `mic`: SHADING-ON = a box actively shading with camera online
+    # (good); SHADING-DEAD = relay enabled but not running = a crashed relay that should be up
+    # (forgot -- the 2026-09-15 "shading crashol" class). SHADING-OFF (disabled = the TEST-mode
+    # default), SHADING-NO-CAMERA and SHADING-UNREACHABLE are neutral -> UNKNOWN, never a false
+    # forgot (in development the relay is legitimately disabled per bkshading.md, so an all-off
+    # fleet reads UNKNOWN + the per-box detail in the capture, not a page). The `mode` item already
+    # catches a whole rig left in EVENT.
+    Item("shading", "bkshading (clona) relay na camboxoch", ["shading"], "verdict",
+         ok_msg="shading relay beží a kamera je online aspoň na jednom camboxe",
+         forgot_msg="bkshading relay je zapnutý ale spadol na niektorom camboxe (SHADING-DEAD) — "
+                    "reštartuj / preprovizuj relay (issue 1309)",
+         unknown_msg="shading relay je vypnutý / bez kamery / nedostupný na camboxoch — v TEST "
+                     "režime je to správne; pozri capture pre stav per box (issue 1309)",
+         good={"SHADING-ON"}, forgot={"SHADING-DEAD"}),
     Item("avlatency", "meracia zvuková cesta: latencia oproti baseline", ["avlatency"], "verdict",
          ok_msg="meracia zvuková cesta má latenciu v norme oproti baseline (rozdiel do 90 ms)",
          forgot_msg="meracia zvuková cesta (mbc/Ableton reťazec) má posunutú latenciu oproti baseline "

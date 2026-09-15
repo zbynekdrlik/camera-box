@@ -226,6 +226,49 @@ fi
 export STREAM_HOST CAM2_HOST CAM_PW
 run_probe avlatency bash "$AVLATENCY_PROBE"
 
+# --- item 15: shading (per-cambox bkshading-relay enabled/active + camera online, #1309) ----------
+# Read-only per box: systemctl is-enabled/is-active bkshading-relay + curl :8771/api/state for the
+# camera-online flag. Emits ONE `verdict=SHADING-*` line per box for the pure decider:
+#   SHADING-ON   relay enabled+active AND camera online   (good)
+#   SHADING-DEAD relay enabled but NOT active             (forgot: should run, crashed -- #1309)
+#   SHADING-OFF  relay disabled/masked (the TEST-mode default per bkshading.md)   (neutral)
+#   SHADING-NO-CAMERA relay active but online:false       (neutral)
+#   SHADING-UNREACHABLE ssh/curl failed / no /api/state    (neutral -> UNKNOWN, never a false page)
+# The per-box detail lives in the capture; a DOWN box fails safe to SHADING-UNREACHABLE (never OK).
+probe_shading() {
+  local spec="$1" pw="$2" tok label ip en act online verdict body port="${SHADING_RELAY_PORT:-8771}"
+  local t; t="$(_probe_timeout shading)"
+  [ -n "$spec" ] || { printf 'roster empty -- no camboxes to probe\n'; return 0; }
+  command -v sshpass >/dev/null 2>&1 || { printf 'sshpass missing -- cannot probe shading\n'; return 0; }
+  for tok in $spec; do
+    label="${tok%%=*}"; ip="${tok#*=root@}"
+    en=""; act=""; online=""
+    en="$(timeout 8 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=5 "root@$ip" \
+      'systemctl is-enabled bkshading-relay 2>/dev/null; echo ---; systemctl is-active bkshading-relay 2>/dev/null' \
+      2>/dev/null || true)"
+    act="$(printf '%s\n' "$en" | sed -n '/^---$/,$p' | sed '1d' | head -1)"
+    en="$(printf '%s\n' "$en" | sed -n '1p')"
+    body="$(timeout 6 curl -fsS "http://$ip:$port/api/state" 2>/dev/null || true)"
+    online="$(printf '%s' "$body" | grep -o '"online"[[:space:]]*:[[:space:]]*[a-z]*' | grep -o '[a-z]*$' | head -1)"
+    case "$en" in
+      enabled|static|indirect)
+        if [ "$act" = active ]; then
+          if [ "$online" = true ]; then verdict=SHADING-ON; else verdict=SHADING-NO-CAMERA; fi
+        else
+          verdict=SHADING-DEAD
+        fi ;;
+      disabled|masked) verdict=SHADING-OFF ;;
+      *) verdict=SHADING-UNREACHABLE ;;
+    esac
+    printf '%s (%s): enabled=%s active=%s online=%s -> verdict=%s\n' \
+      "$label" "$ip" "${en:-?}" "${act:-?}" "${online:-?}" "$verdict"
+  done
+  return 0
+}
+probe_shading "$CAM_LINUX_SPEC" "$CAM_PW" >"$WORKDIR/shading.out" 2>&1 || true
+echo 0 >"$WORKDIR/shading.rc"
+
 # --- decide + print ------------------------------------------------------------------------------
 json_flag=()
 [ "$JSON" -eq 1 ] && json_flag=(--json)
