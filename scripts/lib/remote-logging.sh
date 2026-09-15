@@ -57,7 +57,8 @@ REMOTE_LOG_JOURNAL_URL="http://${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_JOURNAL_PORT}"
 
 # netconsole (kernel path)
 REMOTE_LOG_NC_TARGET="cambox"                                     # configfs dynamic target dir name
-REMOTE_LOG_NC_CONFIGFS="/sys/kernel/config/netconsole/${REMOTE_LOG_NC_TARGET}"
+# Overridable so a Tier-0 test can point the arm at a temp dir (production never sets it — #1311).
+REMOTE_LOG_NC_CONFIGFS="${REMOTE_LOG_NC_CONFIGFS:-/sys/kernel/config/netconsole/${REMOTE_LOG_NC_TARGET}}"
 REMOTE_LOG_NC_SCRIPT_PATH="/usr/local/sbin/cambox-netconsole-setup.sh"
 REMOTE_LOG_NC_SERVICE_NAME="cambox-netconsole"
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + create-usb-linux.sh (base image)
@@ -65,6 +66,13 @@ REMOTE_LOG_NC_SERVICE_PATH="/etc/systemd/system/cambox-netconsole.service"
 # How long the boot oneshot keeps re-resolving dev1's MAC before giving up (ping + neigh read).
 REMOTE_LOG_NC_MAC_RETRIES="${REMOTE_LOG_NC_MAC_RETRIES:-30}"
 REMOTE_LOG_NC_MAC_RETRY_SLEEP_S="${REMOTE_LOG_NC_MAC_RETRY_SLEEP_S:-2}"
+# How long the boot oneshot waits for the egress ROUTE to dev1 to appear before giving up. A cambox
+# MASKS systemd-networkd-wait-online (setup-device.sh STEP 11 / create-usb-linux.sh — the #547
+# boot-stall fix), so network-online.target is reached INSTANTLY, before systemd-networkd applies
+# the static IP/route. This retry is what makes the oneshot survive a clean boot where the route
+# comes up late (#1311). Generous enough for a static-IP netplan apply (~60s at the defaults).
+REMOTE_LOG_NC_ROUTE_RETRIES="${REMOTE_LOG_NC_ROUTE_RETRIES:-30}"
+REMOTE_LOG_NC_ROUTE_RETRY_SLEEP_S="${REMOTE_LOG_NC_ROUTE_RETRY_SLEEP_S:-2}"
 
 # systemd-journal-upload (rich journal path)
 REMOTE_LOG_JU_SERVICE_NAME="systemd-journal-upload"
@@ -116,6 +124,8 @@ PORT="${REMOTE_LOG_NETCONSOLE_PORT}"
 CFG="${REMOTE_LOG_NC_CONFIGFS}"
 RETRIES="${REMOTE_LOG_NC_MAC_RETRIES}"
 RETRY_SLEEP="${REMOTE_LOG_NC_MAC_RETRY_SLEEP_S}"
+ROUTE_RETRIES="${REMOTE_LOG_NC_ROUTE_RETRIES}"
+ROUTE_RETRY_SLEEP="${REMOTE_LOG_NC_ROUTE_RETRY_SLEEP_S}"
 
 SCRIPT_HEAD
   declare -f remote_log_mac_from_neigh
@@ -127,13 +137,23 @@ modprobe configfs 2>/dev/null || true
 mountpoint -q /sys/kernel/config 2>/dev/null || mount -t configfs none /sys/kernel/config 2>/dev/null || true
 modprobe netconsole 2>/dev/null || true
 
-# Egress interface + local ip toward dev1 (resolved live — no hard-coded NIC name).
-DEV="$(ip -o route get "$DEV1_IP" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)"
-LOCAL_IP="$(ip -o route get "$DEV1_IP" 2>/dev/null | grep -oE 'src [^ ]+' | awk '{print $2}' | head -1)"
+# Egress interface + local ip toward dev1 (resolved live — no hard-coded NIC name). A cambox MASKS
+# systemd-networkd-wait-online (#547 boot-stall fix), so network-online.target is reached BEFORE
+# networkd applies the static IP/route — wait for the route to appear in a bounded retry loop rather
+# than giving up on the first miss (#1311).
+DEV=""
+r=0
+while [ "$r" -lt "$ROUTE_RETRIES" ]; do
+  DEV="$(ip -o route get "$DEV1_IP" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)"
+  [ -n "$DEV" ] && break
+  r=$((r + 1))
+  sleep "$ROUTE_RETRY_SLEEP"
+done
 if [ -z "$DEV" ]; then
-  echo "cambox-netconsole: no egress route to dev1 ($DEV1_IP) — netconsole not armed" >&2
+  echo "cambox-netconsole: no egress route to dev1 ($DEV1_IP) after ${ROUTE_RETRIES} tries — netconsole not armed" >&2
   exit 1
 fi
+LOCAL_IP="$(ip -o route get "$DEV1_IP" 2>/dev/null | grep -oE 'src [^ ]+' | awk '{print $2}' | head -1)"
 
 # Resolve dev1's next-hop MAC (netconsole needs the L2 dest). Ping to populate the neigh cache, then
 # read it; retry until resolved or the bound is hit. dev1 is always up on the venue LAN.
@@ -176,8 +196,10 @@ echo "cambox-netconsole: armed -> ${DEV1_IP}:${PORT} via ${DEV} (dev1 mac ${MAC}
 SCRIPT_BODY
 }
 
-# remote_log_netconsole_service_unit_content -> the boot oneshot that runs the setup script. After
-# network-online (netconsole needs the NIC up + dev1 ARP-resolvable). Type=oneshot + RemainAfterExit
+# remote_log_netconsole_service_unit_content -> the boot oneshot that runs the setup script. Ordered
+# after systemd-networkd.service (netconsole needs the NIC up + the static route/ARP resolvable) —
+# network-online.target is meaningless on this box class (wait-online is MASKED, #547/#1311), so the
+# setup script also retries the egress-route lookup. Type=oneshot + RemainAfterExit
 # so `systemctl is-active` reads `active` after a successful arm (the verify (ak) check keys on that).
 # Pulled in at boot by multi-user.target (reboot survival via `enable`).
 remote_log_netconsole_service_unit_content() {
@@ -185,8 +207,14 @@ remote_log_netconsole_service_unit_content() {
 [Unit]
 Description=netconsole: ship kernel printk to dev1 in real time (camera-box #1311)
 Documentation=https://github.com/zbynekdrlik/camera-box/issues/1311
+# #1311: a cambox MASKS systemd-networkd-wait-online (#547 boot-stall fix), so network-online.target
+# is reached INSTANTLY — before networkd applies the static IP/route. Order after systemd-networkd
+# itself so the arm does not race the static-route apply; the setup script additionally retries the
+# egress-route lookup. The network-online lines stay (documented intent + belt-and-suspenders).
 After=network-online.target
+After=systemd-networkd.service network.target
 Wants=network-online.target
+Wants=systemd-networkd.service
 
 [Service]
 Type=oneshot
@@ -215,7 +243,19 @@ EOF
 # a clean reboot the uploader simply resumes from the current boot.
 remote_log_journal_upload_dropin_content() {
   cat <<EOF
+[Unit]
+# #1311 boot-order: on a cambox network-online.target is reached BEFORE dev1 is reachable (masked
+# wait-online, #547), so the stock unit's Restart=on-failure + default StartLimit exhausts after 5
+# instant "connection refused" restarts and the unit stays FAILED for the whole boot. Disable the
+# start-limit so the uploader keeps retrying until dev1 answers (it is idempotent — the /run cursor
+# resumes; a down sink is harmless).
+StartLimitIntervalSec=0
+
 [Service]
+# #1311: keep retrying the upload until the dev1 sink is reachable; RestartSec spaces the retries so
+# a genuinely-down sink is not hammered.
+Restart=always
+RestartSec=5
 # ro-root appliance (#1311): the default --save-state=/var/lib/systemd/journal-upload/state is on the
 # read-only root. Point the cursor at a tmpfs /run path so the uploader can persist its cursor.
 RuntimeDirectory=systemd/journal-upload
