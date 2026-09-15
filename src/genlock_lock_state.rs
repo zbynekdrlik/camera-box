@@ -133,7 +133,8 @@ pub struct GenlockFacets {
 ///
 /// UNLOCKED precedence: clock (absent/unlocked) > output (present but not stamping) >
 /// no-input-locked. DEGRADED precedence (only once none of the UNLOCKED conditions hold):
-/// some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing. Otherwise LOCKED.
+/// some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing > audio-unexpected.
+/// Otherwise LOCKED.
 ///
 /// #1299 — the DEGRADED/no-input decisions judge only CONNECTED inputs (`n_connected = n_inputs -
 /// n_absent`): an input whose NDI sender is not running (`n_absent`) is idle, not a fault, so it
@@ -191,6 +192,12 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     // facet). Additive: an all-false `audio_unpaired` leaves every pre-#1303 verdict unchanged.
     if f.audio_unpaired {
         return (LockState::Degraded, LockReason::AudioPairing);
+    }
+    // #1303 — the lowest-precedence DEGRADED axis: a source audible when the certified per-box
+    // audio table expects it silent (a camera anywhere; the double-audio hazard). Additive: an
+    // all-false `audio_unexpected` leaves every pre-this-change verdict unchanged.
+    if f.audio_unexpected {
+        return (LockState::Degraded, LockReason::AudioUnexpected);
     }
 
     // --- LOCKED (green) -----------------------------------------------------------
