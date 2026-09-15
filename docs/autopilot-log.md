@@ -12420,3 +12420,13 @@ no version bump (worktree lane; supervisor cherry-picks).
   (lift-compile + 8-row truth table) + test_program_render_lagged_gather_1320.py. Reviewed clean (7/7
   lenses OK); F1 (shutdown-race crash-on-exit) accepted + documented, clean reaper-drain = follow-up.
   Vendored C++ compiles only on CI (Tier-0). Live cure UNVERIFIED — supervisor full-bundle deploy + soak.
+
+- issue 1319 (item 16 `watchdogs` in the development-handover check): the dev1 `--user`
+  production-critical alert-watchdog TIMERS are now verified. RED 04856a2f1 → GREEN 059405f6c.
+  New `scripts/lib/watchdog-roster.sh` (16 timers, imag-scoped marked `:imag` for issue 1316) is the
+  ONE runtime source of truth; pure `classify_watchdogs` + a new `SUPERVISOR` attribution
+  (`nezapnutý watchdog: <names>`, never `zabudol si`, exit 1) in `rig_dev_handover_decision.py`;
+  read-only dev1-local `probe_watchdogs` (systemctl is-enabled/is-active + LastTriggerUSec age) in
+  `rig-dev-handover-check.sh`. Live dev1 dry-run: 16/16 timers OK; a really-disabled timer →
+  SUPERVISOR; a fake timer → UNKNOWN. Tests: test_rig_dev_handover_watchdogs_1319.py (12) + the
+  1312 full-fleet fixture extension. Tier-0: pytest 40 passed + bash -n + shellcheck, zero cargo.
