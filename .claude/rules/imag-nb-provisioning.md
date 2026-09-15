@@ -817,3 +817,22 @@ SKIPped it every pass (`:8899 not fetchable`) and an imag genlock LOCK loss was 
   `genlock_build_sha` (the pure `imag_bundle_state_facet_ok` helper). Step 28 is at the END of the
   script (`TOTAL_STEPS` 27→28, bumped in the three pinning test literals in lock-step — never
   renumber, per the anchor-collision rule above).
+
+## Tier-0 local run of the setup-imag / verify-imag anchor tests: `rustc --test` needs `CARGO_MANIFEST_DIR`
+
+`tests/setup_imag_guards.rs`, `tests/setup_imag_remoteos_mcp_858.rs`,
+`tests/setup_imag_obs_watchdog_764.rs`, and `tests/verify_imag_pure_functions.rs` are SELF-CONTAINED
+(std only, no `camera_box` crate dep) — they just `read()` a script and assert. Tier-0 (#557) blocks
+every `cargo` compile, but a direct `rustc --test <file>` is not a `cargo` invocation and is the
+sanctioned Tier-0 path (the #1299/Part-1 precedent). Two gotchas make it work:
+
+- They use `env!("CARGO_MANIFEST_DIR")` to locate the repo, resolved AT COMPILE TIME, so you must
+  pass it: `CARGO_MANIFEST_DIR="$PWD" rustc --edition 2021 --test tests/<file>.rs -o /tmp/x.bin`.
+- The compiled binary reads the script by a path relative to the manifest dir, so run it from the
+  worktree/repo root: `/tmp/x.bin`.
+
+This is how a worktree worker verifies a `TOTAL_STEPS` bump + the ~113 `setup_imag_guards` anchors +
+a new `verify-imag.sh` check locally BEFORE CI — the anchor-collision class (`## Editing these
+scripts` above) surfaces only at RUN time (not `--no-run`, which Tier-0 also blocks now), and this is
+the one way to run it without cargo. (Confirmed live #1299 Part 2: guards 140/140, remoteos 5/5,
+obs-watchdog 3/3, verify_imag_pure_functions 81/81.)
