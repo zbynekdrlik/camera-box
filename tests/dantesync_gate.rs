@@ -43,11 +43,22 @@ fn run_sourced(body: &str, extra_env: &[(&str, &str)]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// #1307: the grandmaster is resolved from the DNS name `video-clock.lan` at run time (the
+/// `scripts/lib/rig-grandmaster.sh` resolver) -- there is NO literal default any more, and a
+/// GitHub-hosted runner has no rig DNS. Every fixture in this file was recorded when the
+/// grandmaster sat at 10.77.9.184, so the harness injects that address through the resolver's
+/// explicit-override seam (`RIG_GRANDMASTER_IP`) -- the fixture-consistent value, exactly as the
+/// other `DANTESYNC_GATE_*` fixture seams inject their reads. A test that wants the DNS path
+/// passes its own `RIG_GRANDMASTER_IP`="" + `RIG_GRANDMASTER_GETENT` via `run_gate_env` (later
+/// `env` calls override this default).
+const FIXTURE_GRANDMASTER_IP: &str = "10.77.9.184";
+
 /// Run the gate as a subprocess; return (exit_code, stdout, stderr).
 fn run_gate(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(script())
         .args(args)
         .current_dir(manifest_dir())
+        .env("RIG_GRANDMASTER_IP", FIXTURE_GRANDMASTER_IP)
         .output()
         .expect("run dantesync-gate.sh");
     (
@@ -61,7 +72,9 @@ fn run_gate(args: &[&str]) -> (i32, String, String) {
 /// clock_offset_painter_gate.rs's run_gate(args, extra_env).
 fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new(script());
-    cmd.args(args).current_dir(manifest_dir());
+    cmd.args(args)
+        .current_dir(manifest_dir())
+        .env("RIG_GRANDMASTER_IP", FIXTURE_GRANDMASTER_IP);
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -4738,4 +4751,74 @@ fn node_verdict_folds_the_optional_phase_slew_rc_1130() {
             "node_verdict {args} must be {want}: {out:?}"
         );
     }
+}
+
+// #1307: the grandmaster resolve happens INSIDE main(), after argument parsing -- so (a) a usage
+// error / bad flag never depends on rig DNS (the CI runner has none; the whole file used to die on
+// `exit 2` before main even ran, sourced harnesses included), and (b) an UNRESOLVABLE grandmaster
+// with otherwise-valid arguments still fails CLOSED (rc 2), never a silent stale literal.
+fn dead_getent(dir: &std::path::Path) -> PathBuf {
+    let p = dir.join("dead-getent");
+    std::fs::write(&p, "#!/usr/bin/env bash\nexit 2\n").expect("write dead getent");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p
+}
+
+#[test]
+fn gate_usage_error_never_depends_on_grandmaster_dns_1307() {
+    let dir = tempfile::tempdir().unwrap();
+    let dead = dead_getent(dir.path());
+    let (code, _stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--chase-resample-delay-s",
+            "abc",
+        ],
+        &[
+            ("RIG_GRANDMASTER_IP", ""),
+            ("RIG_GRANDMASTER_GETENT", &dead.display().to_string()),
+        ],
+    );
+    assert_eq!(
+        code, 1,
+        "a usage error must be reported as rc 1 BEFORE any grandmaster resolve, even with no rig \
+         DNS. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--chase-resample-delay-s") && !stderr.contains("cannot resolve"),
+        "the usage error must name the flag and must not have tried the DNS resolve: {stderr}"
+    );
+}
+
+#[test]
+fn gate_unresolvable_grandmaster_fails_closed_after_arg_parsing_1307() {
+    let dir = tempfile::tempdir().unwrap();
+    let dead = dead_getent(dir.path());
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "", "--win-http", "strih=10.77.9.202"],
+        &[
+            ("RIG_GRANDMASTER_IP", ""),
+            ("RIG_GRANDMASTER_GETENT", &dead.display().to_string()),
+        ],
+    );
+    assert_eq!(
+        code, 2,
+        "valid arguments + an unresolvable video-clock.lan must fail CLOSED (rc 2). stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("cannot resolve the PTP grandmaster host 'video-clock.lan'")
+            && stderr.contains("failing CLOSED"),
+        "stderr must name the unresolvable host and say it fails closed: {stderr}"
+    );
+    assert!(
+        !stdout.contains("10.77.9.184") && !stderr.contains("10.77.9.184"),
+        "no silent fallback to the retired literal: stdout={stdout} stderr={stderr}"
+    );
 }

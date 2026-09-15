@@ -173,7 +173,13 @@ GATE_SLEW_MIN_SURVIVING="${DANTESYNC_SLEW_MIN_SURVIVING:-3}"
 # instantaneous offset happens to be small, it PASSES. gm_check (clock-offset-guard.sh) compares each
 # HTTP-graded node's gm_source_ip against this value. Overridable via RIG_GRANDMASTER_IP, mirroring
 # verify-imag.sh's own RIG_GRANDMASTER_IP env seam.
-GATE_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
+# #1307: the grandmaster is addressed by DNS name (video-clock.lan) via the shared resolver; an
+# explicit RIG_GRANDMASTER_IP still overrides. Unresolvable = fail CLOSED (early-gate-pin doctrine).
+# shellcheck source=scripts/lib/rig-grandmaster.sh
+. "$HERE/lib/rig-grandmaster.sh"
+# The resolve itself runs in main() AFTER argument validation (never at source/parse time): a usage
+# error must never depend on rig DNS, and the unit tests source this file on runners without it.
+GATE_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-}"
 # #834 REPORT-FIRST: the grandmaster-identity check ALWAYS prints a loud GM OK/FOREIGN/UNKNOWN line
 # per node, but only feeds the node's OK/BAD verdict (i.e. can FAIL the gate) when this is 1. Default
 # 0 -- so wiring the check cannot brick the standing E2E gate while the stream box still elects a
@@ -777,8 +783,8 @@ Options:
                        invocation's nodes at all).
 
   Grandmaster identity (#834, env-controlled -- no CLI flag):
-    RIG_GRANDMASTER_IP          the SINGLE PTP grandmaster every node must agree on (default
-                       ${GATE_GRANDMASTER_IP}). Each HTTP-graded node's gm_source_ip is compared
+    RIG_GRANDMASTER_IP          the SINGLE PTP grandmaster every node must agree on (default:
+                       the DNS name video-clock.lan, resolved at run time -- #1307). Each HTTP-graded node's gm_source_ip is compared
                        against it; a node PTP-locked to a DIFFERENT grandmaster reads is_locked=true
                        while sitting ~15 ms out (the stream box locked to 10.77.7.109, #834), which
                        offset+PTP-lock alone cannot catch.
@@ -1049,10 +1055,6 @@ main() {
     echo "ERROR: DANTESYNC_GATE_PHASE_SLEW_ENFORCE must be 0 or 1 (got '${GATE_PHASE_SLEW_ENFORCE}')." >&2
     exit 1
   fi
-  if [ -z "$GATE_GRANDMASTER_IP" ]; then
-    echo "ERROR: RIG_GRANDMASTER_IP must be non-empty (the rig grandmaster #834 gates every node against)." >&2
-    exit 1
-  fi
   if [ "$min_distinct" -gt "$samples" ]; then
     echo "ERROR: --min-distinct (${min_distinct}) cannot exceed --samples (${samples}) --" \
       "no node could ever gather that many distinct reads (#836)." >&2
@@ -1106,6 +1108,21 @@ main() {
       echo "invocation genuinely has no NTP master among its nodes." >&2
       exit 1
     fi
+  fi
+
+  # #1307: resolve the DNS-named grandmaster (video-clock.lan) HERE -- after every usage-class
+  # check above, so a bad flag / missing tool is reported as rc 1 with no DNS involved -- and fail
+  # CLOSED (rc 2) when it does not resolve: the gate pins to the expected grandmaster and never
+  # falls back to a stale literal (early-gate-pin doctrine). An explicit RIG_GRANDMASTER_IP wins.
+  if [ -z "$GATE_GRANDMASTER_IP" ]; then
+    GATE_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
+      echo "!! DanteSync gate: no PTP grandmaster address (see the rig-grandmaster message above) -- failing CLOSED (#1307)" >&2
+      exit 2
+    }
+  fi
+  if [ -z "$GATE_GRANDMASTER_IP" ]; then
+    echo "ERROR: RIG_GRANDMASTER_IP must be non-empty (the rig grandmaster #834 gates every node against)." >&2
+    exit 1
   fi
 
   # #1022/#1041: prime the MASTER's own /status ONCE, before dispatching any per-node job -- every
@@ -1210,7 +1227,7 @@ main() {
   if [ "$bad" -gt 0 ]; then
     echo "!! GATE FAILED: ${bad} node(s) DRIFTED or PTP-DEGRADED." >&2
     echo "!! Cross-node latency/timestamps would be MEANINGLESS — recording run REFUSED." >&2
-    echo "!! Bring GM 10.77.9.184 up + let DanteSync re-lock (NANO/LOCK), then re-run." >&2
+    echo "!! Bring GM ${GATE_GRANDMASTER_IP} up + let DanteSync re-lock (NANO/LOCK), then re-run." >&2
     [ "$unknown" -gt 0 ] && echo "!! (${unknown} further node(s) UNREACHABLE/UNKNOWN — also incomplete.)" >&2
     exit 20
   fi

@@ -291,9 +291,10 @@ pub fn copies_gaps_tolerance_for_cambox(cambox: &str) -> u32 {
 /// walk-down history — issue 1031/1121 —, and the whole reporting/JSON path) stays DORMANT and
 /// fully computed for observability, it just no longer rescues (the
 /// `gate-allowance-restore-red-green` dormant-mechanism pattern). Mirrors
-/// `crate::optical_floor::gates_overall_pass`'s dormant-seam shape EXACTLY, and is INDEPENDENT of
-/// it — #1132 touches ONLY copies/gaps; the optical undecodable floor stays report-only on its own
-/// separate seam (issue 915/905), never re-gated by this change.
+/// `crate::optical_floor::gates_overall_pass`'s one-line `gates_overall_pass()` seam shape EXACTLY,
+/// and is INDEPENDENT of it — #1132 touches ONLY copies/gaps; the optical undecodable floor is
+/// governed by its OWN separate seam (issue 915/905, LIVE again since issue 905 item 3), never
+/// touched by this change.
 ///
 /// **Restore path (as originally stated):** flip this ONE function back to `true` once the sick
 /// leg is physically fixed/excluded (issue 1110/1134) AND the walk-down (issue 1031) resumes to
@@ -424,9 +425,10 @@ pub struct WindowGateDecision {
     /// `overall_pass` (`crate::probe::recording_segments::segment_continuity`). Originally made
     /// STRICTER than [`Self::relaxed_pass`] on copies/gaps — the copies/gaps tolerance no longer
     /// rescued it (`copies_gaps_tolerance_gates_overall_pass() == false`), so a single copy or gap
-    /// failed. The optical undecodable floor stays report-only here EXACTLY as in `relaxed_pass`
-    /// (the SAME `crate::optical_floor::gates_overall_pass()` term — #1132 does NOT touch the
-    /// floor). Per this field's own original doc: "When `copies_gaps_tolerance_gates_overall_pass()`
+    /// failed. The optical undecodable floor is governed by its OWN seam here EXACTLY as in
+    /// `relaxed_pass` (the SAME `crate::optical_floor::gates_overall_pass()` term, LIVE since issue
+    /// 905 item 3 — #1132 does NOT touch it). Per this field's own original doc: "When
+    /// `copies_gaps_tolerance_gates_overall_pass()`
     /// is flipped back on, this equals `relaxed_pass`."
     ///
     /// **#1220 (owner mandate, 2026-08-29): exactly that flip happened** — see
@@ -512,12 +514,12 @@ pub fn decide_with_tolerance(
     tolerance: u32,
 ) -> WindowGateDecision {
     let undecodable_ok = crate::optical_floor::window_within_floor(undecodable, frame_count);
-    // Issue 915 (2026-08-01, user decision): the optical undecodable floor (issue 881) becomes
-    // report-only while cam1's grabber (issue 909) + the 120Hz monitor (issue 881) are unresolved
-    // -- `undecodable_ok` above is UNCHANGED (still fully computed, still feeds `strict_pass`
-    // below byte-for-byte) but no longer participates in the RELAXED verdict that feeds
-    // `overall_pass` when `crate::optical_floor::gates_overall_pass()` is false. Restore: flip
-    // that one function back to `true` (see its own doc for the full restore path on issue 905).
+    // Issue 915 (2026-08-01) made the optical undecodable floor report-only; issue 905 item 3
+    // (2026-09-04) re-gated it -- `crate::optical_floor::gates_overall_pass()` is `true` again now
+    // that its physical blockers are closed (cam1 card replaced, 120Hz/100Hz ruled out, 60Hz
+    // baseline permanent). So `undecodable_ok` (UNCHANGED, still feeds `strict_pass` byte-for-byte)
+    // once more participates in the RELAXED verdict that feeds `overall_pass`. Re-disarm (a new
+    // artifact class) = flip that one function back to `false` (see its own doc).
     //
     // 2026-08-05 RE-GATE: `copies`/`gaps` re-join the relaxed verdict, but only above the
     // per-window tolerance -- see `WINDOW_COPIES_GAPS_TOLERANCE`'s own doc for the decision
@@ -533,7 +535,8 @@ pub fn decide_with_tolerance(
     // copies/gaps rescue is DISARMED for the blocking verdict -- strict `copies == 0 && gaps == 0`
     // unless `copies_gaps_tolerance_gates_overall_pass()` is restored to `true` (then this equals
     // `relaxed_pass`). The optical-floor term is IDENTICAL to `relaxed_pass` -- #1132 does NOT
-    // touch the floor's report-only status (issue 915/905, its own separate seam).
+    // touch the floor's gating status (issue 915/905, its own separate seam -- LIVE since issue
+    // 905 item 3).
     //
     // #1169 (owner, 2026-08-22): when the (`<=3`) tolerance rescue is disarmed, a `<=1/<=1`
     // SINGLETON is ABSORBED (the designed issue-1167 paced-trickle + FIFO stale_replay residual,
@@ -584,8 +587,9 @@ pub fn decide_with_tolerance(
 /// same conditions inline. The inline version being replaced misclassified a `frame_count == 0`
 /// window as an exceeded optical floor (`crate::optical_floor::window_within_floor`'s defensive
 /// `frame_count == 0` clause is not itself a "floor exceeded" signal), and worded the floor
-/// reason as "currently gates overall_pass" unconditionally even while
-/// `crate::optical_floor::gates_overall_pass()` is hardcoded `false` today.
+/// reason as "currently gates overall_pass" unconditionally rather than deriving Gating vs
+/// ReportOnly from `crate::optical_floor::gates_overall_pass()` (LIVE `true` since issue 905
+/// item 3; was hardcoded `false` under issue 915).
 ///
 /// Call this ONLY on a window whose `relaxed_pass` has already failed -- a window that PASSED its
 /// relaxed verdict has no "failure reason" (see the separate WITHIN-TOLERANCE / REPORT-ONLY
@@ -601,15 +605,15 @@ pub enum RelaxedFailureReason {
     /// `copies` and/or `gaps` exceed the per-window tolerance (the 2026-08-05 re-gate, twice
     /// recalibrated 2026-08-06, [`WINDOW_COPIES_GAPS_TOLERANCE`]).
     OverCopiesGapsTolerance,
-    /// The issue-881 optical undecodable floor is exceeded AND it currently gates `overall_pass`
-    /// (`crate::optical_floor::gates_overall_pass() == true` -- the issue-905 restore-path state).
-    /// Hardcoded `false` today, so this variant cannot fire yet -- kept so the seam stays correct
-    /// once issue 905 restores the floor's gating.
+    /// The issue-881 optical undecodable floor is exceeded AND it gates `overall_pass`
+    /// (`crate::optical_floor::gates_overall_pass() == true`). LIVE since issue 905 item 3
+    /// (2026-09-04) re-gated the floor -- this is now the variant that fires for an over-floor
+    /// window, a genuine gating failure.
     FloorExceededGating,
     /// The issue-881 optical undecodable floor is exceeded but stays REPORT-ONLY
-    /// (`crate::optical_floor::gates_overall_pass() == false`, today's state) -- worth printing
-    /// for context even on a window that already fails for another reason, but not itself why
-    /// the window fails.
+    /// (`crate::optical_floor::gates_overall_pass() == false`). DORMANT since issue 905 item 3
+    /// re-gated the floor (`gates_overall_pass()` is `true` today) -- kept so the seam stays
+    /// correct if the floor is ever re-disarmed for a future new artifact class.
     FloorWithinReportOnly,
 }
 
@@ -831,23 +835,23 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_over_floor_now_passes_relaxed_but_fails_strict_915() {
-        // Issue 915 (2026-08-01, user decision): the optical undecodable floor is now
-        // report-only -- an over-floor undecodable count no longer fails the RELAXED verdict
-        // (only frame_count==0 does), even though the STRICT verdict still fails on it exactly
-        // as before.
+    fn undecodable_over_floor_now_fails_both_verdicts_905() {
+        // Issue 905 item 3 (2026-09-04): the optical undecodable floor is re-gated (the report-only
+        // period is over -- `optical_floor::gates_overall_pass()` is `true` again). An over-floor
+        // undecodable count now fails the RELAXED verdict too, not just the STRICT one -- so it is
+        // no longer a "#889 relaxation rescue" case.
         let d = decide(10, 5, 0, 0); // 5 undecodable of 10 frames -- past the #881 per-window floor (4)
         assert!(
             !d.strict_pass,
-            "the optical floor still fails the STRICT verdict, unchanged: {d:?}"
+            "the optical floor fails the STRICT verdict, unchanged: {d:?}"
         );
         assert!(
-            d.relaxed_pass,
-            "#915: undecodable over floor no longer fails the relaxed verdict: {d:?}"
+            !d.relaxed_pass,
+            "issue 905: undecodable over floor now fails the relaxed verdict too: {d:?}"
         );
         assert!(
-            d.relaxed_by_889(),
-            "#915's floor relaxation is now what's rescuing this window: {d:?}"
+            !d.relaxed_by_889(),
+            "issue 905: over-floor is no longer rescued by relaxation -- both verdicts fail: {d:?}"
         );
     }
 
@@ -917,29 +921,29 @@ mod tests {
     }
 
     #[test]
-    fn relaxed_failure_reasons_over_floor_is_report_only_today_889_regate() {
-        // Mirrors `undecodable_over_floor_now_passes_relaxed_but_fails_strict_915` above:
-        // undecodable=5 over the per-window floor (4), frames=10. `gates_overall_pass()` is
-        // hardcoded false today (issue 905's restore path is not yet landed), so this is
-        // FloorWithinReportOnly, never FloorExceededGating.
+    fn relaxed_failure_reasons_over_floor_now_gates_905() {
+        // Mirrors `undecodable_over_floor_now_fails_both_verdicts_905` above: undecodable=5 over
+        // the per-window floor (4), frames=10. Issue 905 item 3 re-gated the floor
+        // (`gates_overall_pass()` is `true` again), so this is now FloorExceededGating (the LIVE
+        // gating reason), no longer merely FloorWithinReportOnly.
         let reasons = relaxed_failure_reasons(10, 5, 0, 0);
-        assert_eq!(reasons, vec![RelaxedFailureReason::FloorWithinReportOnly]);
+        assert_eq!(reasons, vec![RelaxedFailureReason::FloorExceededGating]);
     }
 
     #[test]
     fn relaxed_failure_reasons_over_tolerance_and_over_floor_both_reported_889_regate() {
         // Finding 2's "else-arm" scenario: a window can fail overall_pass via OverCopiesGapsTolerance
-        // while ALSO carrying an over-floor undecodable count that is merely report-only today --
-        // both reasons are returned so the caller can print both, instead of the old code's
-        // misleading "currently gates overall_pass" wording for the floor half. 2026-08-06 second
-        // recalibration: fixture tracks tolerance+1 (4) instead of the prior-recalibration
-        // hardcoded 3.
+        // while ALSO carrying an over-floor undecodable count --
+        // both reasons are returned so the caller can print both. Issue 905 item 3 re-gated the
+        // floor (`gates_overall_pass()` is `true`), so the floor half is now FloorExceededGating
+        // (a LIVE second gating reason) alongside OverCopiesGapsTolerance. 2026-08-06 second
+        // recalibration: fixture tracks tolerance+1 instead of the prior-recalibration hardcoded 3.
         let reasons = relaxed_failure_reasons(10, 5, WINDOW_COPIES_GAPS_TOLERANCE + 1, 0);
         assert_eq!(
             reasons,
             vec![
                 RelaxedFailureReason::OverCopiesGapsTolerance,
-                RelaxedFailureReason::FloorWithinReportOnly,
+                RelaxedFailureReason::FloorExceededGating,
             ]
         );
     }
@@ -1090,24 +1094,25 @@ mod tests {
     }
 
     #[test]
-    fn overall_pass_term_keeps_the_optical_floor_report_only_1132() {
-        // CRITICAL separation: neither #1132 nor #1220 touch the optical undecodable floor. A
-        // window OVER the optical undecodable floor but clean on copies/gaps must STILL pass the
-        // blocking verdict -- the optical floor stays report-only exactly as `relaxed_pass` has it
-        // (issue 915/905). `strict_pass` fails (it gates the floor); `overall_pass_term` does NOT.
+    fn over_floor_fails_overall_pass_term_via_905_floor_regate() {
+        // CRITICAL separation, updated for issue 905 item 3: the optical undecodable floor now
+        // gates via its OWN seam (`optical_floor::gates_overall_pass()` re-armed), INDEPENDENT of
+        // the #1132/#1220 copies/gaps seam. A window OVER the optical floor but CLEAN on
+        // copies/gaps (so `copies_gaps_ok` is true) now fails the blocking verdict -- the failure
+        // is attributable to the floor term alone, proving the two seams stay independent.
         let d = decide(10, 5, 0, 0); // 5 undecodable of 10 -- past the per-window floor (4)
         assert!(
             !d.strict_pass,
-            "strict still gates the optical floor, unchanged: {d:?}"
+            "strict gates the optical floor, unchanged: {d:?}"
         );
         assert!(
-            d.overall_pass_term,
-            "neither #1132 nor #1220 re-gate the optical floor -- over-floor + clean copies/gaps \
-             still passes the blocking verdict: {d:?}"
+            !d.overall_pass_term,
+            "issue 905: the re-gated optical floor now fails the blocking verdict even with clean \
+             copies/gaps: {d:?}"
         );
         assert!(
-            d.relaxed_pass,
-            "relaxed also treats the floor as report-only: {d:?}"
+            !d.relaxed_pass,
+            "relaxed now gates the floor too (issue 905): {d:?}"
         );
     }
 

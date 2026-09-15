@@ -28,18 +28,19 @@ set -euo pipefail
 #
 # Usage (planner mode -- print the whole fleet deploy plan, no network, from a pre-staged bundle):
 #   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-#       [--full|--fast] [--boxes strih,stream,imag]
+#       [--full|--fast] [--boxes strih,stream,imag,resolume]
 #
 # Usage (execute mode -- resolve + download the same-SHA artifacts, emit the Windows plan, ssh-deploy
 # imag, append the fleet log; drive Windows via the printed win-* MCP program):
-#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag] [--yes]
+#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag,resolume] [--yes]
 #
 #   --run-id   the ANCHOR CI run id (any of the three genlock workflows) -- its headSha is the ONE
 #              canonical version every box converges to.
 #   --full     deploy the full windows-genlock bundle (obs.dll + data + obs-plugins) -- the default;
 #              required for any vendor/<plugin>/** or frontend change (fast has no deploy path for it).
 #   --fast     deploy only the libobs hot-swap dll (obs.dll) -- a libobs-only change (§5b).
-#   --boxes    comma list of strih,stream,imag (default: all three).
+#   --boxes    comma list of strih,stream,imag,resolume (default: strih,stream,imag -- resolume is a
+#              TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly named).
 #   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha (no network).
 #   --stage    local dir holding the (pre-)downloaded artifact bytes (plan mode / test seam).
 #   --sha      the canonical build SHA to stamp into the markers (plan mode override).
@@ -65,25 +66,32 @@ RETENTION_KEEP=3
 # PURE functions (no network / MCP / Windows -- unit-tested by sourcing this file).
 # ============================================================================================
 
-# fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih,stream,imag), deduped
-# and validated. Empty -> the whole fleet. An unknown box is a fail-loud usage error (return 2).
+# fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih,stream,imag,resolume),
+# deduped and validated. Empty -> the DEFAULT fleet strih,stream,imag ONLY. An unknown box is a
+# fail-loud usage error (return 2). resolume = RESOLUME-SNV, the traveling CG box (issue 1295): a
+# windows-genlock box like strih/stream, so it rides the SAME Windows emit-only plan path -- but it
+# is a traveling maintenance target (often off/away, NOT a measured E2E source, targets.md), so it
+# is deployed ONLY when explicitly named (`--boxes resolume`), never pulled into the empty-default
+# "whole fleet".
 fleet_normalize_boxes() {
-  local csv="${1:-}" b out="" has_strih=0 has_stream=0 has_imag=0
+  local csv="${1:-}" b out="" has_strih=0 has_stream=0 has_imag=0 has_resolume=0
   [ -n "$csv" ] || csv="strih,stream,imag"
   local IFS=','
   for b in $csv; do
     b="${b//[[:space:]]/}"
     [ -z "$b" ] && continue
     case "$b" in
-      strih)  has_strih=1 ;;
-      stream) has_stream=1 ;;
-      imag)   has_imag=1 ;;
-      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih, stream, imag)" >&2; return 2 ;;
+      strih)    has_strih=1 ;;
+      stream)   has_stream=1 ;;
+      imag)     has_imag=1 ;;
+      resolume) has_resolume=1 ;;
+      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih, stream, imag, resolume)" >&2; return 2 ;;
     esac
   done
-  [ "$has_strih" = 1 ]  && out="strih"
-  [ "$has_stream" = 1 ] && out="${out:+$out,}stream"
-  [ "$has_imag" = 1 ]   && out="${out:+$out,}imag"
+  [ "$has_strih" = 1 ]    && out="strih"
+  [ "$has_stream" = 1 ]   && out="${out:+$out,}stream"
+  [ "$has_imag" = 1 ]     && out="${out:+$out,}imag"
+  [ "$has_resolume" = 1 ] && out="${out:+$out,}resolume"
   [ -n "$out" ] || { echo "fleet_normalize_boxes: empty box set" >&2; return 2; }
   printf '%s\n' "$out"
 }
@@ -120,11 +128,48 @@ fleet_pick_run_at_sha() {
   jq -r --arg s "$sha" '[.[] | select(.headSha == $s and .conclusion == "success")][0].databaseId // empty'
 }
 
-# fleet_box_mcp / fleet_box_ip / fleet_box_has_ahk -- per-box constants (only strih runs the
-# NL_STARTUP.ahk auto-respawn watcher, so only strih's program stops AutoHotkey64).
-fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; *) return 2 ;; esac; }
-fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; *) return 2 ;; esac; }
-fleet_box_has_ahk() { case "${1:-}" in strih) echo "1" ;; *) echo "0" ;; esac; }
+# fleet_box_mcp / fleet_box_ip / fleet_box_has_ahk -- per-box constants. BOTH strih AND resolume
+# run an NL_STARTUP.ahk AutoHotkey auto-respawn watcher (SafeLoop), so both programs stop+restart
+# AutoHotkey64 around the copy; stream/imag have none. resolume (issue 1295) = win-resolume, and its
+# "ip" is the HOSTNAME resolume.lan -- NEVER a pinned literal IP: resolume.lan is DHCP-drifting and
+# currently collides with `bridge` at .201 (targets.md), so the plan resolves + identity-confirms it
+# live (emit_windows_plan prints that step for resolume; the planner emits it, never runs it).
+fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
+fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; *) return 2 ;; esac; }
+fleet_box_has_ahk() { case "${1:-}" in strih|resolume) echo "1" ;; *) echo "0" ;; esac; }
+
+# fleet_box_ahk_script / fleet_box_ahk_prefer -- the PER-BOX AHK relaunch identity passed into the
+# shared scripts/lib/ahk-watchdog.sh primitive (issue 1295). strih keeps its current values
+# (D:\_APPS\NL_STARTUP.ahk + exe-first, byte-identical to before). resolume (RESOLUME-SNV) is a
+# TRAVELING box whose AHK is AutoHotkey v2 running its OWN NL_STARTUP.ahk (the path has a SPACE --
+# the relaunch PS wraps it in double quotes), and it PREFERS the Startup .lnk as the relaunch
+# target ('lnk') so a future path move on the box cannot break the relaunch (the exe candidates
+# still back it up). Only meaningful when fleet_box_has_ahk <box> = 1.
+fleet_box_ahk_script() { case "${1:-}" in resolume) echo 'C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk' ;; *) echo 'D:\_APPS\NL_STARTUP.ahk' ;; esac; }
+fleet_box_ahk_prefer() { case "${1:-}" in resolume) echo "lnk" ;; *) echo "exe" ;; esac; }
+
+# fleet_resolume_identity_confirm_note -> the IDENTITY-CONFIRM preamble the resolume plan prints
+# (issue 1295). RESOLUME-SNV is a TRAVELING box addressed by HOSTNAME, and resolume.lan currently
+# resolves to 10.77.9.201 -- the SAME IP `bridge` lists in targets.md (an event-LAN DHCP collision)
+# -- so before uploading/deploying to it the supervisor MUST resolve it live AND confirm the box
+# IDENTITY (its cg OBS profile), never "the shared OBS-WS password worked" (targets.md /
+# rig-state-inspection.md §2). The PLANNER only EMITS this step (it runs no network/MCP itself); the
+# supervisor runs it in the win-resolume MCP before STEP 0. PURE (no I/O) so it is unit-tested by
+# sourcing this file.
+fleet_resolume_identity_confirm_note() {
+  cat <<'NOTE'
+# STEP -1 (resolume ONLY -- box IDENTITY confirm, issue 1295): resolume.lan is a TRAVELING box on a
+#         DHCP lease that currently resolves to 10.77.9.201 -- the SAME IP `bridge` lists in
+#         targets.md (event-LAN collision). Resolve it LIVE and confirm it is REALLY the CG box
+#         before touching it (never a pinned IP, never "the OBS-WS password worked" -- targets.md /
+#         rig-state-inspection.md §2):
+#           1. on dev1:           getent hosts resolume.lan      # the live address
+#           2. in win-resolume MCP Shell, confirm the cg OBS identity (ONE of):
+#                (gci "$env:APPDATA\obs-studio\basic\profiles" -Directory).Name   # expect 'cg'
+#                # or over OBS-WS: GetVersion + the 'cg' profile / cg_scenes collection
+#         Proceed to STEP 0 ONLY once the resolved address is confirmed to be RESOLUME-SNV.
+NOTE
+}
 
 # fleet_box_keepalive_tasks BOX -> the OBS keep-alive SCHEDULED-TASK names the deploy must disable so
 # NONE of them respawns obs64 while the bytes are being copied (#1140). Per-box + CURATED, never all
@@ -135,6 +180,8 @@ fleet_box_has_ahk() { case "${1:-}" in strih) echo "1" ;; *) echo "0" ;; esac; }
 # lists none. The emitted program disables+restores ONLY a task that is PRESENT and ENABLED, so a
 # name absent (or deliberately disabled) on the box is a harmless skip -- adding another box's
 # keep-alive here later is a one-line change, not a hardcoded pile inline at the call site.
+# resolume (issue 1295) is like strih: its respawner IS the AHK watcher (has_ahk path), so it
+# lists no keep-alive scheduled task either.
 # Task names MUST be whitespace-free: the emitter word-splits this space-separated list.
 fleet_box_keepalive_tasks() {
   case "${1:-}" in
@@ -161,7 +208,7 @@ build_windows_deploy_program() {
   local ahk_stop ahk_restart
   if [ "$has_ahk" = "1" ]; then
     ahk_stop=$(cat <<'PSAHK'
-# (1) Stop the strih AHK watchdog FIRST -- NL_STARTUP.ahk respawns obs64 via the bare exe within
+# (1) Stop the box's AHK watchdog FIRST -- NL_STARTUP.ahk respawns obs64 via the bare exe within
 #     seconds of the window vanishing, which would re-lock data\ + obs-plugins\ files mid-copy
 #     (robocopy exit >= 8) AND drop the shortcut params. This program RESTARTS it at the end (step 8)
 #     so the box is left consistent and launch-obs-genlock.sh's #978 session gate (AHK count == 1)
@@ -172,17 +219,19 @@ if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
 PSAHK
 )
     # #789 review #1: restart AHK VERIFIED via the ONE shared helper launch-obs-genlock.sh uses
-    # (scripts/lib/ahk-watchdog.sh) -- never a fork. Fail loud if it does not come back.
-    local ahk_relaunch_ps; ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
+    # (scripts/lib/ahk-watchdog.sh) -- never a fork. Fail loud if it does not come back. issue 1295:
+    # the relaunch identity (script path + prefer order) is PER-BOX -- strih keeps D:\_APPS +
+    # exe-first (byte-identical), resolume passes its own v2 .ahk path + lnk-first.
+    local ahk_relaunch_ps; ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps "$(fleet_box_ahk_script "$box")" "$(fleet_box_ahk_prefer "$box")")"
     ahk_restart=$(cat <<PSAHKR
-# (8) Restart the strih AHK watchdog we stopped in step (1), VERIFIED (leaves AHK running so the
+# (8) Restart the ${box} AHK watchdog we stopped in step (1), VERIFIED (leaves AHK running so the
 #     STEP-2 launch-obs-genlock.sh session gate passes). AHK's app1_run then keeps obs64 alive via
 #     the .lnk; the STEP-2 launch (--force) does the deterministic relaunch + render-tick verify.
 ${ahk_relaunch_ps}
 if (\$ahkRelaunchVerified) {
   Write-Host "#789: AHK watchdog restarted via \$ahkRelaunchTarget."
 } else {
-  Write-Error "#789 FAIL: AutoHotkey64 did not come back after the deploy (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher; investigate before trusting this box."
+  Write-Error "#789 FAIL: AutoHotkey64 did not come back after the deploy (target=\$ahkRelaunchTarget) -- the AHK respawn watcher on ${box} failed to restart; investigate before trusting this box."
   exit 9
 }
 PSAHKR
@@ -670,21 +719,23 @@ fi
 usage() {
   cat <<'EOF'
 deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across strih + stream + imag
-from ONE anchor CI run id (issue 789 bod 4 + bod 5). Resolves the same-SHA artifacts, emits the
-Windows deploy program for the win-* MCP Shell, ssh-deploys imag, applies box-backup retention, and
-writes one durable fleet-deploy log line.
+(+ resolume, the traveling CG box, when explicitly named -- issue 1295) from ONE anchor CI run id
+(issue 789 bod 4 + bod 5). Resolves the same-SHA artifacts, emits the Windows deploy program for the
+win-* MCP Shell, ssh-deploys imag, applies box-backup retention, and writes one durable fleet-deploy
+log line.
 
 Usage (plan -- print the whole fleet plan, no network, from a pre-staged bundle):
   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-      [--full|--fast] [--boxes strih,stream,imag]
+      [--full|--fast] [--boxes strih,stream,imag,resolume]
 
 Usage (execute -- resolve + download the same-SHA artifacts, emit the Windows plan, ssh-deploy imag):
-  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag] [--yes]
+  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag,resolume] [--yes]
 
   --run-id   the ANCHOR CI run id -- its headSha is the ONE canonical version every box converges to.
   --full     full windows-genlock bundle (default; required for any plugin/frontend change).
   --fast     libobs-only obs.dll hot-swap.
-  --boxes    comma list of strih,stream,imag (default: all three).
+  --boxes    comma list of strih,stream,imag,resolume (default: strih,stream,imag -- resolume
+             (RESOLUME-SNV, the traveling CG box) deploys ONLY when explicitly named).
   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha.
   --stage    local dir holding the (pre-)downloaded artifact bytes.
   --sha      the canonical build SHA to stamp into the markers (plan mode).
@@ -692,6 +743,28 @@ Usage (execute -- resolve + download the same-SHA artifacts, emit the Windows pl
 
 Exit codes: 0 ok, 2 usage error, 3 resolution/download failure, 4 a box deploy failed.
 EOF
+}
+
+# emit_forced_table_audit_preflight BOX HOST -> the REPORT-ONLY per-box forced-table AUDIO/yuv audit
+# step (#1303 part 4), printed as #-comment guidance BEFORE STEP 0 of the box's plan. It NEVER writes
+# and NEVER gates the deploy -- it directs the supervisor to enumerate the box's live NDI inputs over
+# OBS-WS (reusing latency_pins_verify.py's _conn/GetInputList/GetInputSettings) and pipe the TSV into
+# the classifier scripts/lib/genlock-forced-table-audit.sh so a PROGRAM-audio box (cg OBS) is not
+# shipped with ndi_audio=false (the #1303 event-morning live defect) and a camera box is not shipped
+# with audio bleeding into the mixer. Pure (no I/O), emitted only -- the supervisor runs the read.
+emit_forced_table_audit_preflight() {
+  local box="$1" host="$2"
+  cat <<PREFLIGHT
+# PREFLIGHT (report-only, #1303 part 4) -- audit ${box}'s NDI-input forced table (audio + yuv) BEFORE
+#   the swap. Report-only: it NEVER writes and NEVER gates the deploy -- it prints a per-input verdict
+#   so a PROGRAM-audio box (cg OBS: sp-*/cg/music inputs) is not shipped with ndi_audio=false (the
+#   #1303 event-morning live defect) and a camera box is not shipped with audio bleeding into the
+#   mixer. On dev1, enumerate ${box}'s live NDI inputs over OBS-WS -- reuse latency_pins_verify.py's
+#   _conn + GetInputList + GetInputSettings (host ${host}) -- emitting one TSV row per input:
+#   name<TAB>ndi_audio<TAB>yuv_range<TAB>yuv_colorspace. Pipe that into the classifier and review it:
+#     <ws-enumerate ${host} as TSV> | bash -c '. scripts/lib/genlock-forced-table-audit.sh; genlock_forced_table_audit ${box}'
+#   Act on every 'MISMATCH-*' row (and any yuv NOTE) over OBS-WS BEFORE running STEP 0 below.
+PREFLIGHT
 }
 
 # emit the plan for one Windows box (STEP 0 upload -> the deploy program -> STEP 2 relaunch).
@@ -702,8 +775,13 @@ emit_windows_plan() {
   artifact="$(fleet_windows_artifact "$mode")"
   win_stage="C:\\stage-genlock-${gsha}"
   program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha" "$confirm")"
+  echo "# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} ================="
+  # resolume (issue 1295): emit the box-IDENTITY confirm preamble (STEP -1) before STEP 0 -- a
+  # traveling DHCP box colliding with `bridge` at .201 must be resolved + identity-confirmed live.
+  [ "$box" = "resolume" ] && fleet_resolume_identity_confirm_note
+  # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
+  emit_forced_table_audit_preflight "$box" "$ip"
   cat <<PLAN
-# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} =================
 # STEP 0 (once per box): upload the downloaded '${artifact}' bytes (staged locally at ${stage}) to
 #         the box at ${win_stage} via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip +
 #         Expand-Archive on the box), then run the program below in the ${mcp} MCP Shell
@@ -723,6 +801,8 @@ emit_imag_plan() {
   local imag_stage="/tmp/genlock-stage-${gsha}"
   local program
   program="$(build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$gsha" "$dsha" "$RETENTION_KEEP" "$confirm")"
+  # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
+  emit_forced_table_audit_preflight imag imag
   cat <<PLAN
 # ================= FLEET PLAN: box=imag (ssh newlevel@imag) =================
 # STEP 0: scp the FULL linux-genlock bundle (bin/, lib/x86_64-linux-gnu/ incl EVERY obs-plugins/*.so,
@@ -771,12 +851,18 @@ main() {
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
       case "$b" in
-        strih|stream) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
-        imag)         emit_imag_plan "$stage" "$sha" "$sha" ;;
+        strih|stream|resolume) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
+        imag)                  emit_imag_plan "$stage" "$sha" "$sha" ;;
       esac
     done )
+    # issue 1295: emit the fleet-deploy log record as a COMMENT and end the printed plan on `exit 0`.
+    # A saved .ps1 is PARSED in full (file mode) before executing, so a bare (non-comment)
+    # tab-separated record after the last box program's `exit 0` breaks the parse (owner incident:
+    # the cg deploy saved as deploy2.ps1 -> "At C:\deploy2.ps1:170"). Commenting the record keeps it
+    # visible; the trailing `exit 0` makes the plan's last non-empty line clean + self-terminating.
     echo "# fleet-deploy log line (append to ${FLEET_LOG_DEFAULT} once the deploy is done):"
-    fleet_log_line "$run_id" "$sha" "$boxes" "$mode"
+    echo "#   $(fleet_log_line "$run_id" "$sha" "$boxes" "$mode")"
+    echo "exit 0"
     exit 0
   fi
 
@@ -799,7 +885,7 @@ main() {
   # detect requested box classes without a `local IFS=','` that would leak past a brace group
   # (a { …; } group is not a new scope) -- match the comma-list directly.
   local want_win=0 want_imag=0
-  case ",$boxes," in *,strih,*|*,stream,*) want_win=1 ;; esac
+  case ",$boxes," in *,strih,*|*,stream,*|*,resolume,*) want_win=1 ;; esac
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
@@ -813,7 +899,7 @@ main() {
     echo "# Windows artifact $win_art (run $win_run) downloaded to $workdir/win"
     echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
-    ( IFS=','; for b in $boxes; do case "$b" in strih|stream) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
+    ( IFS=','; for b in $boxes; do case "$b" in strih|stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
   fi
 
   # --- imag: download the same-SHA linux artifacts, scp the WHOLE bundle + ssh-run (issue 1026) -----

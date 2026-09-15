@@ -354,6 +354,25 @@ pub mod painter_pacing;
 // `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
 pub mod genlock_backlog;
 
+// #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
+// indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
+// `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
+// committed parity gate `tests/genlock_lock_state_parity.rs`.
+pub mod genlock_lock_state;
+
+// #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (audio held by the same
+// latency_ms the video FIFO holds video). Crate-root + std-only so it is Tier-0 verifiable; the C
+// mirror (`genlock_audio_*` in `vendor/obs-studio/libobs/obs-source.c`) is held identical by the
+// committed parity gate `tests/genlock_audio_pairing_parity.rs`.
+pub mod genlock_audio_pairing;
+
+// #1303 part 4 — the report-only per-box-class certified-table AUDIO-parity audit (camera inputs
+// silent, sp-*/cg/program inputs audio). Deploy-time preflight logic (no runtime OBS path, no C
+// mirror); crate-root + std-only so it is Tier-0 verifiable and is the canonical table the bash
+// replica `scripts/lib/genlock-forced-table-audit.sh` mirrors (pinned by
+// `tests/genlock_forced_table_audit_1303.rs`).
+pub mod genlock_forced_table_audit;
+
 // #660 — the fbdev "visible page" byte range to BLANK on `probe::kms::KmsPresenter` teardown, so
 // releasing DRM master reveals a deterministic black frame instead of whatever ARBITRARILY OLD
 // content another writer (the fbdev-fallback presenter, or camera-box's own `--display` module)
@@ -441,12 +460,17 @@ pub mod optical_payload_check;
 // tests Tier-0.
 pub mod offline_ack;
 
-// #881 (via #854/#707) — the TEMPORARY calibrated floor for the all-cambox segment continuity's
-// optical `undecodable` term (a physical 60Hz temporal-tear artifact of the test camera's
-// monitor, not chain loss). No probe deps, so it unit-tests Tier-0;
-// `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
-// together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
+// #881 (via #854/#707) — the permanent, data-calibrated floor for the all-cambox segment
+// continuity's optical `undecodable` term (a physical 60Hz temporal-tear artifact of the test
+// camera's monitor, not chain loss). No probe deps, so it unit-tests Tier-0;
+// `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. LIVE-gating
+// again since issue 905 item 3 (the "temporary until 120Hz" premise is dead — 60Hz is permanent).
 pub mod burn_hold;
+// #1301 — PURE crate-root decision for the CG chain (SongPlayer-originated content): per-hop
+// SongPlayer(911014)/cg-OBS(911015) burn-id contiguity + max-hold, mirroring imag_tick_gate +
+// reusing burn_hold. REPORT-ONLY (gates_overall_pass()==false) until a real captured cg-OBS frame
+// + a green CG_CHAIN run calibrate it LIVE; the probe-gated recording-verdict binary calls it.
+pub mod cg_chain_gate;
 // #1260 — PURE, dependency-free within-tick "prepare once, reuse" state for the DistroAV QR burn
 // filter. The Tier-0 authority the C mirror vendor/distroav/src/burn-tick-cache.hpp is checked
 // against; the filter preps + stamps the burn frame_id ONCE per tick so strih's 4K Multiview

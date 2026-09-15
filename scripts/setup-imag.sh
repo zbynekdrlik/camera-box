@@ -485,7 +485,15 @@ fi
 # is written BEFORE the systemd unit/restart below so the same restart that proves PTP re-lock
 # also picks up phase_slew on a first provision. RIG_GRANDMASTER_IP mirrors the SAME override
 # verify-imag.sh already uses (#834) so one env var controls the grandmaster everywhere.
-RIG_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
+_RG_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #1307: DNS-named grandmaster (video-clock.lan) via the shared resolver -- the allowlist written
+# below carries the RESOLVED IPv4 until zbynekdrlik/dantesync#113 lets it carry the hostname.
+# shellcheck source=scripts/lib/rig-grandmaster.sh
+. "$_RG_HERE/lib/rig-grandmaster.sh"
+RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
+  echo "FAIL: setup-imag: cannot resolve the PTP grandmaster host -- refusing to write an empty gm_allowlist (#1307)" >&2
+  exit 1
+}
 install -d -m 755 /etc/dantesync
 cat > /etc/dantesync/config.json <<DANTECFGEOF
 {

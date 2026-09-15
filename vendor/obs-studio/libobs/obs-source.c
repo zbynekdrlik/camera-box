@@ -1628,6 +1628,36 @@ static inline bool source_muted(obs_source_t *source, uint64_t os_time)
 	       (source->push_to_talk_enabled && !push_to_talk_active);
 }
 
+/* camera-box #1303 — receiver-side AUDIO <-> video-FIFO pairing (pure helpers).
+ * Byte-for-byte mirror of src/genlock_audio_pairing.rs; held identical by the committed
+ * parity gate tests/genlock_audio_pairing_parity.rs (the #1003 lift-and-compile recipe,
+ * which slices this contiguous block by the three signatures below). Keep the three
+ * functions CONTIGUOUS and their bodies numerically identical to the Rust authority. */
+static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)
+{
+	/* audio held by the SAME latency_ms the video FIFO holds video, so the A/V pair
+	 * survives the hold (present_ts = wall_now - latency_ms). */
+	return (uint64_t)latency_ms * 1000000ull;
+}
+static inline int64_t genlock_audio_pairing_offset_ms(int64_t applied_audio_delay_ns, uint32_t video_latency_ms)
+{
+	/* residual A/V offset (ms, signed): applied audio delay minus the video latency; 0 = paired. */
+	return applied_audio_delay_ns / 1000000 - (int64_t)video_latency_ms;
+}
+/* genlock_audio_health: 0=Ok 1=AudioDisabledOnProgram 2=AsrcSaturated 3=PairingOffsetExceeded.
+ * Precedence matches decide_audio_health() in the Rust authority. */
+static inline int genlock_audio_decide_health(int audio_enabled, int is_program_source, int asrc_saturated,
+					      int64_t pairing_offset_ms, int64_t frame_interval_ms)
+{
+	if (is_program_source && !audio_enabled)
+		return 1;
+	if (audio_enabled && asrc_saturated)
+		return 2;
+	if (audio_enabled && (pairing_offset_ms < 0 ? -pairing_offset_ms : pairing_offset_ms) > frame_interval_ms)
+		return 3;
+	return 0;
+}
+
 static void source_output_audio_data(obs_source_t *source, const struct audio_data *data)
 {
 	size_t sample_rate = audio_output_get_sample_rate(obs->audio.audio);
@@ -1697,6 +1727,24 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	sync_offset = source->sync_offset;
 	in.timestamp += sync_offset;
 	in.timestamp -= source->resample_offset;
+
+	/* camera-box #1303: genlock AUDIO parity. For a genlock_fifo source the video FIFO holds
+	 * every frame to present_ts = wall_now - latency_ms; delay this source's audio by the SAME
+	 * effective latency (a pure duration shift on OBS's converted timeline — the timeline basis
+	 * is irrelevant to a fixed delay) so the A/V pair is presented at the same wall instant.
+	 * genlock_latency_ms is always >= GENLOCK_LATENCY_MS_MIN_INIT (seeded at create, clamped by
+	 * obs_source_set_genlock_latency_ms), so the effective value is the field itself; the >0
+	 * guard is a defensive no-op-delay default. The store feeds the audit line's audio facet
+	 * (genlock_fill_stats). */
+	if (source->genlock_fifo && source->genlock_latency_ms > 0) {
+		in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);
+		source->genlock_audio_delay_ms = source->genlock_latency_ms;
+	} else {
+		/* #1303 review 🔵3: the source is not holding audio (not genlock_fifo, or the field is
+		 * the unreachable 0) — clear the recorded hold so a source that toggled genlock off at
+		 * runtime never reports a STALE audio_delay_ms on the audit facet. */
+		source->genlock_audio_delay_ms = 0;
+	}
 
 	source->next_audio_sys_ts_min = source->next_audio_ts_min + source->timing_adjust;
 
@@ -5098,6 +5146,56 @@ static inline void genlock_clear_ts_sample(obs_source_t *source)
 	source->genlock_last_head_skew_ns = 0;
 }
 
+/* camera-box #1298: fill `stats` from the source's live genlock counters. This is the ONE
+ * place the per-source health counters are snapshotted; BOTH the `genlock-fifo audit` log
+ * line (genlock_audit_log, below) and the public API (obs_source_get_genlock_stats) read it,
+ * so the logged numbers and the numbers the in-OBS statusbar indicator shows can NEVER
+ * disagree. Lock-free field copy (no mutex here) — the public getter wraps it under
+ * async_mutex for the UI thread; genlock_audit_log is already on the A/V thread where these
+ * fields are written, exactly like its prior direct reads. `effective_latency_ms` = the
+ * source's own override when set (>0) else the global default, matching the audit's headline
+ * latency. Version-stamped + additive: grow obs_genlock_stats only by APPENDING fields and
+ * bumping OBS_GENLOCK_STATS_VERSION (the statusbar + the issue-1299 bundle-state facet read
+ * `version` before touching any field added after v1). */
+static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_stats *stats)
+{
+	memset(stats, 0, sizeof(*stats));
+	stats->version = OBS_GENLOCK_STATS_VERSION;
+	if (!source)
+		return;
+	const uint32_t effective_latency_ms =
+		source->genlock_latency_ms > 0 ? source->genlock_latency_ms : genlock_latency_ms();
+	stats->genlock_fifo = source->genlock_fifo;
+	stats->locked = source->genlock_locked_next_boundary_ns != 0;
+	stats->frames_received = source->genlock_frames_received;
+	stats->frames_consumed = source->genlock_frames_consumed;
+	stats->underruns = source->genlock_underruns;
+	stats->holds = source->genlock_holds;
+	stats->overruns = source->genlock_overruns;
+	stats->backward_steps = source->genlock_backward_steps;
+	stats->backward_regime_ticks = source->genlock_backward_regime_ticks;
+	stats->dropped_due = source->genlock_dropped_due;
+	stats->relocks = source->genlock_relocks;
+	stats->late_holds = source->genlock_late_holds;
+	stats->converge_sheds = source->genlock_converge_sheds;
+	stats->depth = source->async_frames.num;
+	stats->peak_depth = source->genlock_peak_depth;
+	stats->latency_ms = effective_latency_ms;
+	stats->ts_head_skew_ms = (int64_t)(source->genlock_last_head_skew_ns / 1000000);
+	/* keep the literal `genlock_wall_qpc_drift_ms());` anchor the #800 gates pin
+	 * (windows-genlock*.yml pwsh + tests/genlock_preload.rs + genlock_wall_qpc_emit.rs). */
+	stats->wall_qpc_drift_ms = (int64_t)(genlock_wall_qpc_drift_ms());
+	/* camera-box #1303: audio genlock parity facet (v2). audio_delay_ms is the hold the audio
+	 * ingest applied (0 until the first audio callback / for a source that carries no audio);
+	 * the pairing offset is the residual vs the video latency via the pure mirror (0 = paired,
+	 * -latency_ms = audio not held). Parsed by src/jitter_audit.rs; consumed by the LOCK
+	 * indicator's audio health via src/genlock_audio_pairing.rs::decide_audio_health. */
+	stats->audio_enabled = obs_source_audio_active(source);
+	stats->audio_delay_ms = source->genlock_audio_delay_ms;
+	stats->audio_pairing_offset_ms = genlock_audio_pairing_offset_ms(
+		(int64_t)genlock_audio_present_delay_ns(source->genlock_audio_delay_ms), effective_latency_ms);
+}
+
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
  * visible in the OBS log before AND after the fix (the verification evidence).
  * `now_ns` is the monotonic render-tick stamp (obs->video.video_time). */
@@ -5108,6 +5206,12 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	if (now_ns - source->genlock_last_log_ns < GENLOCK_AUDIT_LOG_INTERVAL_NS)
 		return;
 	source->genlock_last_log_ns = now_ns;
+	/* camera-box #1298: snapshot the health counters through the ONE shared fill so this
+	 * log line and obs_source_get_genlock_stats (the statusbar indicator) can never disagree.
+	 * The audit's extra fields (cap, preload, empty_run, ts present/due) stay read directly —
+	 * they are audit-only and not part of the public stats struct. */
+	struct obs_genlock_stats gs;
+	genlock_fill_stats(source, &gs);
 	/* camera-box #97: print the per-source preload AND its ms-equivalent video
 	 * delay (preload=N (=M ms @ Ffps)) so the live delay is visible in the OBS log
 	 * for the operator + post-deploy verification. */
@@ -5164,24 +5268,32 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * = wall ran faster than QPC (video deadline ahead of audio). Parsed by the input-side
 	      * AuditSample.wall_qpc_drift_ms in src/jitter_audit.rs. */
 	     "wall_qpc_drift_ms=%lld "
-	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800)",
+	     /* camera-box #1303: receiver-side AUDIO genlock parity facet. audio_enabled= the
+	      * source's NDI audio is active; audio_delay_ms= the hold applied at ingest so the
+	      * audio pairs with the video FIFO (= latency_ms for a genlock_fifo source, 0 = not
+	      * held / no audio); audio_pairing_offset_ms= residual vs the video latency (0 =
+	      * paired). Appended AFTER the existing fields (scripts parse by field name). Parsed by
+	      * src/jitter_audit.rs; the values come from the shared snapshot `gs`. */
+	     "audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld "
+	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800/#1303)",
 	     source->context.name ? source->context.name : "?",
-	     (unsigned long long)source->genlock_frames_received,
-	     (unsigned long long)source->genlock_frames_consumed,
-	     (unsigned long long)source->genlock_underruns,
-	     (unsigned long long)source->genlock_holds,
-	     (unsigned long long)source->genlock_overruns,
-	     (unsigned long long)source->genlock_backward_steps,
+	     /* camera-box #1298: the health counters now come from the shared snapshot `gs`
+	      * (genlock_fill_stats) so this line and obs_source_get_genlock_stats cannot
+	      * disagree; format string + field names + order unchanged. */
+	     (unsigned long long)gs.frames_received,
+	     (unsigned long long)gs.frames_consumed,
+	     (unsigned long long)gs.underruns,
+	     (unsigned long long)gs.holds,
+	     (unsigned long long)gs.overruns,
+	     (unsigned long long)gs.backward_steps,
 	     /* camera-box #401: the phase-locked cadence's honest loss/state signals —
 	      * dropped_due (frames the release DISCARDED — the pre-#401 silent erase),
 	      * relocks (drift-guard catch-up jumps), late_holds (boundary matured but the
 	      * frame never arrived — upstream late/lost, distinct from the benign
 	      * source-early holds=), locked (0 = cadence unlocked / re-acquiring). */
-	     (unsigned long long)source->genlock_dropped_due, (unsigned long long)source->genlock_relocks,
-	     (unsigned long long)source->genlock_late_holds,
-	     source->genlock_locked_next_boundary_ns != 0 ? 1 : 0, source->async_frames.num,
-	     source->genlock_peak_depth, latency_ms, latency_frames, fps,
-	     source->genlock_latency_ms, global_latency_ms,
+	     (unsigned long long)gs.dropped_due, (unsigned long long)gs.relocks,
+	     (unsigned long long)gs.late_holds, gs.locked ? 1 : 0, gs.depth, gs.peak_depth, latency_ms,
+	     latency_frames, fps, source->genlock_latency_ms, global_latency_ms,
 	     source->genlock_preload, (unsigned long long)genlock_preload_ms(source->genlock_preload),
 	     latency_ms /* reserve_ms == effective latency_ms; kept for the #128 log verify */,
 	     genlock_source_drop_cap(source), source->genlock_empty_run,
@@ -5193,10 +5305,16 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * this never prints a STALE sample from an earlier ts-align tick. */
 	     (unsigned long long)source->genlock_last_present_ts,
 	     source->genlock_last_due,
-	     (long long)(source->genlock_last_head_skew_ns / 1000000),
-	     (unsigned long long)source->genlock_backward_regime_ticks,
-	     source->genlock_converge_sheds,
-	     genlock_wall_qpc_drift_ms());
+	     /* camera-box #1298: skew / regime-ticks / converge-sheds / wall-qpc-drift also from
+	      * the shared snapshot `gs` — same values, one source of truth. */
+	     (long long)gs.ts_head_skew_ms,
+	     (unsigned long long)gs.backward_regime_ticks,
+	     gs.converge_sheds,
+	     (long long)gs.wall_qpc_drift_ms,
+	     /* camera-box #1303: the audio parity facet, also from the shared snapshot `gs`. */
+	     gs.audio_enabled ? 1 : 0,
+	     gs.audio_delay_ms,
+	     (long long)gs.audio_pairing_offset_ms);
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
@@ -8121,6 +8239,27 @@ double obs_source_get_asrc_estimated_ppm(const obs_source_t *source)
 double obs_source_get_asrc_applied_ppm(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_get_asrc_applied_ppm") ? source->asrc.applied_ppm : 0.0;
+}
+
+/* camera-box #1298: public snapshot of this source's genlock FIFO stats for the in-OBS
+ * statusbar lock indicator. Reads the SAME counters the `genlock-fifo audit` log line prints
+ * (both route through genlock_fill_stats) so the UI and the log can never disagree. Wrapped
+ * under async_mutex because the UI thread calls this while the A/V thread writes the fields
+ * (cast away const for the lock op only, exactly like obs_source_get_genlock_latency_ms).
+ * An invalid handle zero-fills `stats` (version included) and returns false. */
+bool obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock_stats *stats)
+{
+	if (!stats)
+		return false;
+	if (!obs_source_valid(source, "obs_source_get_genlock_stats")) {
+		memset(stats, 0, sizeof(*stats));
+		stats->version = OBS_GENLOCK_STATS_VERSION;
+		return false;
+	}
+	pthread_mutex_lock(&((obs_source_t *)source)->async_mutex);
+	genlock_fill_stats(source, stats);
+	pthread_mutex_unlock(&((obs_source_t *)source)->async_mutex);
+	return true;
 }
 
 void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)

@@ -169,8 +169,8 @@ identical on paper.
 
 ## Grandmaster IDENTITY check is REPORT-FIRST and HTTP-path only (#834)
 `grade_http_node` now parses `gm_source_ip` from the freshest `/status` payload and calls
-`gm_check` (clock-offset-guard.sh) against `GATE_GRANDMASTER_IP` (`RIG_GRANDMASTER_IP`, default
-10.77.9.184) — a node PTP-locked to a FOREIGN grandmaster reads `is_locked=true` while ~15 ms out,
+`gm_check` (clock-offset-guard.sh) against `GATE_GRANDMASTER_IP` (`RIG_GRANDMASTER_IP` override, else
+`video-clock.lan` resolved by `scripts/lib/rig-grandmaster.sh` — #1307; the literal 10.77.9.184 is retired) — a node PTP-locked to a FOREIGN grandmaster reads `is_locked=true` while ~15 ms out,
 which offset+PTP-lock alone cannot catch (the stream box on 10.77.7.109, live 2026-08-15). Two hard
 constraints baked in:
 - **REPORT-FIRST by default.** The `GM OK/FOREIGN/UNKNOWN` line ALWAYS prints, but only feeds the
@@ -192,7 +192,7 @@ constraints baked in:
 ## `DANTESYNC_GATE_GM_ENFORCE` — grandmaster IDENTITY enforcement (LIVE since #1073)
 
 `gm_check` (`clock-offset-guard.sh:658`, rc 0 OK / 2 FOREIGN / 3 UNKNOWN) checks every HTTP-graded
-node's `gm_source_ip` against `GATE_GRANDMASTER_IP` (`RIG_GRANDMASTER_IP`, default `10.77.9.184`).
+node's `gm_source_ip` against `GATE_GRANDMASTER_IP` (`RIG_GRANDMASTER_IP` override, else `video-clock.lan` resolved via `scripts/lib/rig-grandmaster.sh`, #1307 — unresolvable fails CLOSED).
 It ALWAYS prints its `GM OK/FOREIGN/UNKNOWN` line, but its rc only feeds `node_verdict` when
 `GATE_GM_ENFORCE=1` (`dantesync-gate.sh:600`). Env: `DANTESYNC_GATE_GM_ENFORCE`, default `0`
 (report-first, `dantesync-gate.sh:169`); `!=0 && !=1` is a hard config error (`:920`).

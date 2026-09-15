@@ -50,6 +50,13 @@ class TestExplicitPinsForBox:
         with pytest.raises(SystemExit):
             alp.explicit_pins_for_box("strih", {"_comment": "only a comment"})
 
+    def test_resolume_prefix_match_sentinel_is_refused_1295(self):
+        # the resolume prefix-match sentinel (#1295) has no explicit named pins; this deliberate
+        # writer refuses it (fail loud -> use --pins with the live sp-* names), mirroring the imag
+        # floor refusal, never a vacuous no-op apply.
+        with pytest.raises(SystemExit):
+            alp.explicit_pins_for_box("resolume", {"_ndi_inputs_matching": {"regex": "(?i)^sp-.*_video$", "ms": 3}})
+
 
 # ---------------------------------------------------------------------------
 # plan_pin_changes -- pure (noop vs set decision; None live = still needs set)

@@ -49,6 +49,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -65,7 +67,10 @@ esac
 # The box(es) to watch, as "name|ip" pairs (space-separated). Stream ONLY by default: the av-sync
 # dock measured-offset series is a STREAM-only signal (strih logs `ASRC section unavailable --
 # source 'mbc' not found on this box`, so it never carries the facet -> always UNKNOWN there).
-BOXES="${AV_STEP_BOXES:-stream|10.77.9.204}"
+# Default DERIVED from the ONE declared fleet list (scripts/lib/obs-fleet.sh, #1296) — resolume is
+# NOT an av-step box (no mbc audio on the CG box), so obs_fleet_boxes av-step yields exactly stream,
+# byte-identical to the pre-#1296 literal. The AV_STEP_BOXES env override still wins unchanged.
+BOXES="${AV_STEP_BOXES:-$(obs_fleet_boxes av-step)}"
 BUNDLE_PORT="${AV_STEP_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
 BUNDLE_PATH="${AV_STEP_BUNDLE_PATH:-/bundle-state.json}"
 CURL_TIMEOUT="${AV_STEP_CURL_TIMEOUT:-10}"          # :8899 HTTP fetch (s); server has answered ~6.6s

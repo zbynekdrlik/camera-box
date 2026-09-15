@@ -140,6 +140,34 @@
 #       too -- cam3 ran for years with NO ethtool at all and the NIC tuning silently never ran.
 #       Checked fleet-wide like (x)/(x2)/(af), never cam2-only. FAILs loud, naming the missing
 #       package (ethtool) by name, never a silent measured zero.
+#   (ah) per-thread realtime policy (issue 899 defect 2) -- HARD FAIL: the appliance unit must set
+#       NO process-wide CPUSchedulingPolicy (it forced EVERY thread onto SCHED_FIFO on the isolated
+#       core -- 27 on cam1 -- instead of SCHED_OTHER), AND the live camera-box process must have only
+#       a handful of SCHED_FIFO threads (the binary raises FIFO per-thread only on the capture+emit
+#       hot path). FAILs if the policy is still in the unit, the live FIFO thread count exceeds the
+#       small ceiling, OR a RUNNING process has ZERO FIFO threads (the per-thread raise silently
+#       failed -- e.g. missing CAP_SYS_NICE); WARNs if the live count is unreadable (not running).
+#   (ai) persistent journal effective (#1309) -- HARD FAIL: the journald drop-in carries
+#       Storage=persistent + a bounded SystemMaxUse AND /var/log/journal is a real ext4 partition
+#       (LABEL cambox-journal), not the volatile /var/log tmpfs -- so `journalctl -b -1` survives
+#       the owner's emergency power-cycle and the next half-dead wedge is diagnosable. FAILs (with a
+#       "reflash via create-usb-linux.sh" hint) on a box whose journal is still volatile.
+#   (aj) on-box management-liveness self-heal (#1309) -- HARD FAIL: the generated
+#       cambox-mgmt-selfcheck.sh exists+executable AND cambox-mgmt-selfcheck.timer is-enabled ==
+#       enabled -- the local ssh-banner probe + restart-ssh/remoteos-mcp safety net the 2026-09-13
+#       half-dead wedge had none of. FAILs if the script is missing or the timer is not enabled.
+#   (ak) off-box remote logging effective (#1311) -- HARD FAIL: netconsole (cambox-netconsole.service
+#       enabled+active + a live configfs target enabled=1 to dev1:514) AND systemd-journal-upload
+#       (enabled, URL -> the dev1 sink, cursor --save-state redirected to /run for the ro root) -- so
+#       the NEXT half-dead-stick death ships its kernel + journal messages off-box in real time,
+#       instead of dying with the stick like the on-STICK #1309 journal does. FAILs fail-closed on any
+#       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the dev1 sink,
+#       a separate supervisor step); enabled + correct config is the cambox-side bar.
+#   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: efibootmgr reports a `cam-box`
+#       entry AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
+#       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
+#       creates it on the box; this proves it took effect post-reboot. FAILs (test-strictness) if the
+#       entry is absent, not leading, or efibootmgr is unreadable/absent (a non-EFI box).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -161,6 +189,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/log-bound.sh"       # log_bound_verdict/log_bound_gather_remote_snippet (#679)
 # shellcheck source=scripts/lib/log-diet.sh
 . "$HERE/lib/log-diet.sh"        # log_diet_provision_verdict/log_diet_gather_remote_snippet (#762)
+                                 # + log_diet_journal_persistent_verdict (#1309, the (ai) check)
+# shellcheck source=scripts/lib/mgmt-liveness.sh
+. "$HERE/lib/mgmt-liveness.sh"   # MGMT_LIVENESS_* paths/unit name (#1309, the (aj) check)
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"  # invocation-id-scoped journalctl builder (#694, shared
                                      # with deploy-fleet.sh + upgrade-fleet-ndi.sh)
@@ -183,11 +214,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"  # offset_us_from_journal/offset_check/ptp_locked_from_journal/
                                  # _short_iso_epoch/dantesync_offset_verdict/freshest_offset_us (#595)
+# shellcheck source=scripts/lib/ndi-provision.sh
+. "$HERE/lib/ndi-provision.sh"   # NDI_VERSION_PIN (#1066, single-sourced -- shared with
+                                 # setup-device.sh STEP 4; the (o) check reads it below)
 # shellcheck source=scripts/lib/dscp-nft.sh
 . "$HERE/lib/dscp-nft.sh"        # dscp_nft_rule_present/dscp_nft_gather_remote_snippet/
                                  # dscp_nft_verdict -- the (ae) NTP-client DSCP nftables rule check
                                  # (dantesync issue 52; SAME source of truth as setup-device.sh /
                                  # create-usb-linux.sh)
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
+                                 # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
+                                 # SAME source of truth as setup-device.sh / create-usb-linux.sh)
+# shellcheck source=scripts/lib/efi-boot-entry.sh
+. "$HERE/lib/efi-boot-entry.sh"  # efi_entry_verdict -- the (al) named cam-box UEFI entry check
+                                 # (#1066 D6; SAME source of truth as setup-device.sh / create-usb-linux.sh)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -211,7 +252,9 @@ DANTESYNC_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 # has stopped. Overridable via env like the other bounds.
 DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
 EXPECT_KERNEL="${KERNEL_PIN:-}"                 # optional: also require running kernel == this exact version
-NDI_VERSION_PIN="${NDI_VERSION_PIN:-6.3.2}"     # fleet NDI runtime pin (#132/#547)
+# NDI_VERSION_PIN is single-sourced from scripts/lib/ndi-provision.sh (sourced above, #1066) so the
+# (o) check here and setup-device.sh STEP 4's download-fallback can never disagree on the pin. An
+# env override still wins (the lib defaults `${NDI_VERSION_PIN:-6.3.2}`, #132/#547).
 
 # =================================================================================================
 # PURE functions (no network, no SSH -- unit-tested from tests/verify_device_pure_functions.rs by
@@ -586,6 +629,45 @@ rt_irq_placement_verdict() {
   fi
 }
 
+# rt_fifo_thread_ceiling -> the max acceptable number of SCHED_FIFO threads on the live
+# camera-box process (issue 899 defect 2). Production runs exactly ONE FIFO thread (the
+# capture+emit hot path); this generous ceiling exists only to catch the pre-899 process-wide
+# `CPUSchedulingPolicy=fifo` regression, which put ~27 threads FIFO on the isolated core -- it
+# is NOT an exact-count pin (a probe/E2E burn adds one more emit thread, but the acceptance
+# gate runs against the production camera-box.service, never a burn unit).
+rt_fifo_thread_ceiling() { printf '4'; }
+
+# rt_thread_policy_verdict HAS_PROCESS_WIDE_FIFO FIFO_THREAD_COUNT CEILING -> a verdict token
+# for the issue-899-defect-2 per-thread realtime policy. Inputs:
+#   HAS_PROCESS_WIDE_FIFO -- "1" if the deployed unit still carries a process-wide
+#     CPUSchedulingPolicy directive (the defect), "0" if it was dropped (the fix).
+#   FIFO_THREAD_COUNT -- number of SCHED_FIFO threads on the live camera-box process (ps
+#     class == FF); "" when the process was not found (camera-box not running).
+#   CEILING -- the max acceptable FIFO thread count (rt_fifo_thread_ceiling).
+# Tokens: "unit-has-process-wide-fifo" (config still wrong -- FAIL, independent of the count),
+# "too-many-fifo-threads:<n>" (unit clean but the live process has > CEILING FIFO threads, so
+# the process-wide policy is still in effect -- FAIL), "no-fifo-thread" (unit clean and the
+# process IS running but has ZERO SCHED_FIFO threads -- the binary's per-thread raise silently
+# failed, e.g. CAP_SYS_NICE missing, so the grab lost its realtime priority -- FAIL: this is the
+# floor that keeps the ceiling-only check from greenlighting a silent no-op, issue 899 review),
+# "ok" (unit clean AND 1 <= count <= ceiling), "ok-config-only" (unit clean but the live count is
+# unreadable / EMPTY, e.g. camera-box not running -- WARN, another check owns liveness),
+# "unknown" (a malformed input -- WARN). NOTE the count="" (not running) vs count="0" (running,
+# 0 FIFO) distinction is load-bearing: the caller sets fifo="" ONLY when no pid was found.
+rt_thread_policy_verdict() {
+  local has="$1" count="$2" ceiling="$3"
+  case "$has" in
+    1) printf 'unit-has-process-wide-fifo'; return 0 ;;
+    0) : ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  case "$ceiling" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  case "$count" in ''|*[!0-9]*) printf 'ok-config-only'; return 0 ;; esac
+  if [ "$count" = "0" ]; then printf 'no-fifo-thread'; return 0; fi
+  if [ "$count" -gt "$ceiling" ]; then printf 'too-many-fifo-threads:%s' "$count"; return 0; fi
+  printf 'ok'
+}
+
 # ndi_symlink_version LS_TEXT -> the version portion of the libndi.so.6 symlink target in an
 # `ls -la /usr/lib/ndi` listing (e.g. "6.3.2.0" from "libndi.so.6 -> libndi.so.6.3.2.0"), "" if
 # the target is not resolvable. Builds on ndi_symlink_target (the root-owned symlink check).
@@ -735,6 +817,18 @@ Checks:
   (ag) ethtool installed (command -v ethtool) -- also in setup-device.sh STEP 16's apt-get line,
       and its OWN EEE/flow-control tuning calls are ALSO "|| true"-guarded, so a missing ethtool
       silently no-ops NIC tuning fleet-wide; cam3 ran for years without it (issue 1240)
+  (ah) per-thread realtime policy (issue 899 defect 2): the unit has NO process-wide
+      CPUSchedulingPolicy and the live camera-box process shows only a handful of SCHED_FIFO
+      threads (FIFO is raised per-thread only on the capture+emit hot path, not process-wide)
+  (ai) persistent journal effective (#1309): Storage=persistent + bounded SystemMaxUse drop-in AND
+      /var/log/journal is a real ext4 partition (not the tmpfs) so journalctl -b -1 survives a
+      power-cycle -- FAILs with a "reflash via create-usb-linux.sh" hint if the journal is volatile
+  (aj) on-box mgmt-liveness self-heal (#1309): cambox-mgmt-selfcheck.sh present+executable AND
+      cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
+  (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
+      target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
+  (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a `cam-box` entry that is FIRST
+      in BootOrder -- FAILs if absent / not leading / efibootmgr unreadable (test-strictness)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1478,6 +1572,143 @@ else
 setup-device.sh's STEP 16 apt-get line lists it (a silently-swallowed apt failure, issue 1240); \
 setup-device.sh's own EEE/flow-control tuning is ALSO guarded by || true, so NIC tuning has been \
 silently skipped on this box; reprovision the box or run: apt-get install -y ethtool"
+fi
+
+# (ah) per-thread realtime policy (issue 899 defect 2) -- HARD FAIL -----------------------------
+# Locks the issue-899-defect-2 fix: the appliance unit must carry NO process-wide
+# CPUSchedulingPolicy (it forced EVERY thread to SCHED_FIFO prio 50 on the isolated core --
+# measured on cam1: 27 FIFO threads -- instead of the SCHED_OTHER the design intended), AND the
+# LIVE camera-box process must show only a handful of SCHED_FIFO threads (the binary now raises
+# FIFO per-thread via src/affinity.rs set_current_thread_realtime only on the capture+emit hot
+# path). Two facts, read in ONE ssh call: (1) does the deployed base unit have an uncommented
+# CPUSchedulingPolicy directive (grep excludes '#'-comment lines -- the corrected honest note
+# mentions it in prose); (2) how many SCHED_FIFO threads (ps -L class == FF) the running
+# camera-box process has. Graded by the pure rt_thread_policy_verdict against rt_fifo_thread_ceiling.
+# Inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the (q)-last invariant).
+ahrc=0
+RT_POL_STATE="$(ssh_box '
+  haspol=0
+  grep -qE "^[[:space:]]*CPUSchedulingPolicy[[:space:]]*=" /etc/systemd/system/camera-box.service 2>/dev/null && haspol=1
+  cbpid="$(pgrep -x camera-box 2>/dev/null | head -1)"
+  fifo=""
+  [ -n "$cbpid" ] && fifo="$(ps -L -o class= -p "$cbpid" 2>/dev/null | awk "\$1==\"FF\"{n++} END{print n+0}")"
+  printf "%s\n%s\n%s\n" "$haspol" "$fifo" "$cbpid"
+')" || ahrc=$?
+if [ "$ahrc" -ne 0 ]; then
+  fail "could not read per-thread realtime policy state (ssh rc=$ahrc) -- issue-899 check (ah) incomplete"
+else
+  RT_HASPOL="$(printf '%s' "$RT_POL_STATE" | sed -n 1p)"
+  RT_FIFO="$(printf '%s' "$RT_POL_STATE" | sed -n 2p)"
+  RT_CBPID="$(printf '%s' "$RT_POL_STATE" | sed -n 3p)"
+  RT_CEIL="$(rt_fifo_thread_ceiling)"
+  RT_POL_VERDICT="$(rt_thread_policy_verdict "$RT_HASPOL" "$RT_FIFO" "$RT_CEIL")"
+  case "$RT_POL_VERDICT" in
+    ok)
+      ok "per-thread realtime policy honest: unit has no process-wide CPUSchedulingPolicy and the camera-box process has ${RT_FIFO} SCHED_FIFO thread(s) (<= ${RT_CEIL}) -- only the capture+emit hot path is FIFO (issue 899 defect 2)" ;;
+    ok-config-only)
+      warn "unit has no process-wide CPUSchedulingPolicy (issue 899 defect 2 fix present), but the live SCHED_FIFO thread count is unreadable (camera-box not running? pid='${RT_CBPID:-none}') -- (ah) live-thread facet incomplete; liveness is another check's job" ;;
+    unit-has-process-wide-fifo)
+      fail "camera-box.service still sets a process-wide CPUSchedulingPolicy -- every thread inherits SCHED_FIFO on the isolated core (the pre-899 defect 2, ~27 threads on cam1); re-provision with the current setup-device.sh (docs/runbooks/899-realtime-isolation.md, issue 899 defect 2)" ;;
+    too-many-fifo-threads:*)
+      fail "the live camera-box process has ${RT_POL_VERDICT#too-many-fifo-threads:} SCHED_FIFO threads (> ${RT_CEIL}) -- the process-wide FIFO policy is still in effect (pre-899 defect 2, was ~27 on cam1); only the capture+emit hot path should be FIFO (issue 899 defect 2)" ;;
+    no-fifo-thread)
+      fail "the live camera-box process (pid ${RT_CBPID:-?}) has ZERO SCHED_FIFO threads -- the binary's per-thread FIFO raise silently failed (missing CAP_SYS_NICE? re-run STEP 9 setcap 'cap_sys_nice,cap_ipc_lock+ep'), so the capture+emit grab lost its realtime priority (issue 899 defect 2)" ;;
+    *)
+      warn "could not grade per-thread realtime policy (haspol='${RT_HASPOL}', fifo='${RT_FIFO}', pid='${RT_CBPID:-none}') -- issue-899 check (ah) incomplete" ;;
+  esac
+fi
+
+# (ai) persistent journal effective (#1309) -- HARD FAIL ----------------------------------------
+# The 2026-09-13 P0 wedge (a cambox goes half-dead after a bkshading-relay (re)start) was diagnosed
+# twice BY INFERENCE ONLY because the journal is runtime-only on this ro-root/tmpfs-/var/log box, so
+# the owner's emergency power-cycle destroys the evidence. This check certifies the journal is now
+# PERSISTENT so `journalctl -b -1` survives a power-cycle: (1) the journald drop-in carries
+# Storage=persistent + a bounded SystemMaxUse, AND (2) /var/log/journal is a real ext4 partition
+# (LABEL cambox-journal), not the volatile tmpfs. Graded by the pure log_diet_journal_persistent_verdict
+# against $LOG_DIET_STATE already gathered at (s)/(u) -- no extra ssh round trip. HARD FAIL: a box
+# that would lose the next wedge to a power-cycle must NOT pass acceptance -- reflash via
+# create-usb-linux.sh (which lays the partition) if it fails. Inserted BEFORE (q) per
+# .claude/rules/provisioning-scripts.md (the (q)-last invariant).
+if [ -z "${LOG_DIET_STATE:-}" ]; then
+  fail "could not read journal-persistence state over SSH -- cannot certify the #1309 persistent journal is applied"
+else
+  JOURNAL_PERSIST_VERDICT="$(log_diet_journal_persistent_verdict "$LOG_DIET_STATE")"
+  if [ "$JOURNAL_PERSIST_VERDICT" = "ok" ]; then
+    ok "persistent journal effective: Storage=persistent + SystemMaxUse=${LOG_DIET_JOURNALD_SYSTEM_MAX} drop-in and /var/log/journal is a real ext4 partition -- \`journalctl -b -1\` survives a power-cycle (#1309)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "persistent journal: ${_reason#FAIL: }"
+    done <<< "$JOURNAL_PERSIST_VERDICT"
+  fi
+fi
+
+# (aj) on-box management-liveness self-heal installed + enabled (#1309) -- HARD FAIL ------------
+# The 2026-09-13 half-dead wedge left the box unreachable/unrepairable remotely with no local
+# recovery path. setup-device.sh now installs a systemd timer that probes sshd's own loopback banner
+# every 2 min and self-heals (restart ssh + remoteos-mcp) once it is dead N times in a row. This
+# check certifies that safety net is present + enabled (reboot-survival): the generated script exists
+# and is executable, AND cambox-mgmt-selfcheck.timer reports is-enabled == enabled (enable-only per
+# provisioning-scripts.md, so we assert ENABLED, not is-active). Inserted BEFORE (q) per the
+# (q)-last invariant.
+ajrc=0
+MGMT_STATE="$(ssh_box "
+  printf 'SCRIPT_X=%s\n' \"\$(test -x '$MGMT_LIVENESS_SCRIPT_PATH' && echo yes || echo no)\"
+  printf 'TIMER_ENABLED=%s\n' \"\$(systemctl is-enabled '$MGMT_LIVENESS_TIMER_UNIT_NAME' 2>/dev/null)\"
+")" || ajrc=$?
+if [ "$ajrc" -ne 0 ] || [ -z "$MGMT_STATE" ]; then
+  fail "could not read the #1309 mgmt-selfcheck state over SSH (ssh rc=$ajrc) -- cannot certify the on-box ssh self-heal is installed"
+else
+  MGMT_SCRIPT_X="$(printf '%s\n' "$MGMT_STATE" | sed -n 's/^SCRIPT_X=//p')"
+  MGMT_TIMER_ENABLED="$(printf '%s\n' "$MGMT_STATE" | sed -n 's/^TIMER_ENABLED=//p')"
+  if [ "$MGMT_SCRIPT_X" = "yes" ] && [ "$MGMT_TIMER_ENABLED" = "enabled" ]; then
+    ok "on-box mgmt-liveness self-heal installed + enabled (${MGMT_LIVENESS_TIMER_UNIT_NAME}, ssh-banner probe every ${MGMT_LIVENESS_TIMER_INTERVAL}) -- #1309"
+  else
+    [ "$MGMT_SCRIPT_X" = "yes" ] || fail "the #1309 mgmt-selfcheck script is missing/not executable at ${MGMT_LIVENESS_SCRIPT_PATH} -- re-provision with the current setup-device.sh"
+    [ "$MGMT_TIMER_ENABLED" = "enabled" ] || fail "${MGMT_LIVENESS_TIMER_UNIT_NAME} is not enabled (is-enabled='${MGMT_TIMER_ENABLED:-<none>}') -- the box has NO local ssh self-heal for the #1309 half-dead wedge"
+  fi
+fi
+
+# (ak) off-box remote logging effective: netconsole + systemd-journal-upload (#1311) -- HARD FAIL --
+# The #1309 on-STICK persistent journal (the (ai) check) is useless the moment the stick itself
+# drops off the bus (the half-dead wedge) -- it dies WITH the medium. setup-device.sh's
+# [remote-logging] sub-step arms two off-box transports so the NEXT stick death is diagnosable:
+# netconsole ships kernel printk over UDP from kernel memory (the ONLY transport that survives the
+# fs dropping out), and systemd-journal-upload forwards the rich journal to the dev1 sink. This
+# proves both are LIVE + reboot-surviving: the netconsole oneshot enabled+active with a live configfs
+# target to dev1, and the journal uploader enabled with the right URL + a ro-root-safe /run cursor
+# (see scripts/lib/remote-logging.sh for the fail-closed verdict). Inserted BEFORE (q) -- see
+# .claude/rules/provisioning-scripts.md ((q) stays the LAST check). Uses fail() (a hard FAIL), so it
+# never trips the check_q_is_wired (q)-to-EOF no-fail slice (it is above (q)).
+akrc=0
+REMOTELOG_BLOCK="$(ssh_box "$(remote_log_gather_remote_snippet)")" || akrc=$?
+REMOTELOG_VERDICT="$(remote_log_verdict "$REMOTELOG_BLOCK")"
+if [ "$akrc" -ne 0 ]; then
+  fail "could not reach the box to read the netconsole + systemd-journal-upload state (ssh rc=$akrc, #1311)"
+elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
+  fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
+else
+  ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
+fi
+
+# (al) named `cam-box` UEFI boot entry leads BootOrder (#1066 D6) -- HARD FAIL --------------------
+# The box must boot its internal disk via a named NVRAM entry, NOT the AMI firmware USB auto-entry
+# (which failed on cam2 after a warm reboot -> firmware setup screen). setup-device.sh STEP 17d
+# creates the `cam-box` entry in the box's OWN NVRAM and makes it lead BootOrder; this proves it took
+# effect post-reboot. Graded by the pure efi_entry_verdict. HARD FAIL (test-strictness): the entry
+# absent, not leading, OR efibootmgr unreadable/absent (a non-EFI box) all fail -- a box that would
+# drop to the firmware menu on the next warm reboot must NOT pass acceptance. Inserted BEFORE (q) per
+# .claude/rules/provisioning-scripts.md (the (q)-last invariant).
+alrc=0
+EFI_ENTRIES="$(ssh_box "efibootmgr 2>/dev/null")" || alrc=$?
+if [ "$alrc" -ne 0 ] || [ -z "$EFI_ENTRIES" ]; then
+  fail "could not read UEFI boot entries over SSH (efibootmgr rc=$alrc, empty=$([ -z "$EFI_ENTRIES" ] && echo yes || echo no)) -- cannot certify the named 'cam-box' entry leads BootOrder (#1066 D6). An unreadable/absent efibootmgr output is a FAIL (test-strictness): a non-EFI box, or a missing efibootmgr, must not silently pass."
+else
+  EFI_AL_VERDICT="$(efi_entry_verdict "$EFI_ENTRIES")"
+  if [ "$EFI_AL_VERDICT" = "ok" ]; then
+    ok "named UEFI boot entry 'cam-box' present AND leads BootOrder -- the box boots its internal disk without depending on the AMI USB auto-entry (#1066 D6)"
+  else
+    fail "UEFI boot entry: ${EFI_AL_VERDICT#FAIL: }"
+  fi
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

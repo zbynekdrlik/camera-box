@@ -9,10 +9,13 @@
 //!
 //! ## The fix these tests lock (static read of the shell script — no rig, no ssh)
 //!
-//! 1. A disk-budget preflight WARN (never fail — informational): recording-e2e.sh curls each
-//!    box's new `/record-dir-stats.json` (bundle-state-server.py + bundle_state_gather.py's pure
-//!    `record_dir_stats()`) and logs a loud WARNING when the accumulated recordings exceed
-//!    RECORDINGS_BUDGET_GB.
+//! 1. A free-space preflight WARN (never fail — informational): recording-e2e.sh curls each
+//!    box's `/record-dir-stats.json` (bundle-state-server.py + bundle_state_gather.py's pure
+//!    `record_dir_stats()`, which reports the recordings volume's `free_bytes`) and logs a loud
+//!    WARNING when the volume has <= RECORDINGS_FREE_MIN_GB of FREE space left. (Owner ruling
+//!    14.9.2026, #1276: the trigger is LOW FREE SPACE on the volume, not the sum of recording
+//!    files exceeding a budget — a disk with 600 GB free must not warn just because old test
+//!    recordings sum past 50 GB.)
 //! 2. After a successful decode+merge (the verdict JSON secured at $REPORT_JSON), the harness
 //!    prints the EXACT, run-scoped deletion plan for ONLY this run's own strih+stream recordings
 //!    — via the box-local `$STRIH_HOST_PATH` / `$STREAM_HOST_PATH` StopRecord returned earlier
@@ -32,29 +35,42 @@ fn read_recording_e2e() -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
-/// The disk-budget preflight must exist: a configurable budget, a curl to the new
+/// The free-space preflight must exist: a configurable free-space threshold, a curl to the
 /// /record-dir-stats.json endpoint on both strih and stream, and a #652-tagged WARNING.
+/// (#1276: the threshold is now RECORDINGS_FREE_MIN_GB — LOW FREE SPACE on the volume — not the
+/// old RECORDINGS_BUDGET_GB file-sum budget.)
 #[test]
 fn recording_e2e_sh_has_disk_budget_preflight_warn() {
     let s = read_recording_e2e();
     assert!(
-        s.contains("RECORDINGS_BUDGET_GB"),
-        "#652: recording-e2e.sh must define an overridable RECORDINGS_BUDGET_GB"
+        s.contains("RECORDINGS_FREE_MIN_GB"),
+        "#1276: recording-e2e.sh must define an overridable RECORDINGS_FREE_MIN_GB free-space \
+         threshold"
+    );
+    // #1276: the OLD file-sum budget constant must be GONE — the semantics changed to free-space.
+    assert!(
+        !s.contains("RECORDINGS_BUDGET_GB"),
+        "#1276: the old file-sum RECORDINGS_BUDGET_GB budget must be replaced, not left behind"
     );
     assert!(
         s.contains("record-dir-stats.json"),
-        "#652: recording-e2e.sh must curl the new /record-dir-stats.json endpoint"
+        "#652: recording-e2e.sh must curl the /record-dir-stats.json endpoint"
+    );
+    // #1276: the decision reads the volume's free space (free_bytes), never the file sum.
+    assert!(
+        s.contains("free_bytes"),
+        "#1276: the preflight must read the volume's free_bytes, never the recording file sum"
     );
     assert!(
         s.contains("WARNING #652"),
-        "#652: an over-budget recordings dir must WARN loudly, tagged #652"
+        "#652/#1276: a low-free-space recordings volume must WARN loudly, tagged #652"
     );
     // Called for BOTH boxes — never just one.
-    let strih_call = s.find("check_recordings_budget strih");
-    let stream_call = s.find("check_recordings_budget stream");
+    let strih_call = s.find("check_recordings_free_space strih");
+    let stream_call = s.find("check_recordings_free_space stream");
     assert!(
         strih_call.is_some() && stream_call.is_some(),
-        "#652: the disk-budget check must run against BOTH strih and stream"
+        "#652/#1276: the free-space check must run against BOTH strih and stream"
     );
 }
 
@@ -64,12 +80,12 @@ fn recording_e2e_sh_has_disk_budget_preflight_warn() {
 fn recording_e2e_sh_disk_budget_check_is_never_fatal() {
     let s = read_recording_e2e();
     let fn_start = s
-        .find("check_recordings_budget()")
-        .expect("#652: recording-e2e.sh must define check_recordings_budget()");
+        .find("check_recordings_free_space()")
+        .expect("#652/#1276: recording-e2e.sh must define check_recordings_free_space()");
     let fn_end = s[fn_start..]
         .find("\n}\n")
         .map(|i| fn_start + i)
-        .expect("check_recordings_budget() must have a closing brace");
+        .expect("check_recordings_free_space() must have a closing brace");
     let body = &s[fn_start..fn_end];
     assert!(
         body.contains("return 0"),

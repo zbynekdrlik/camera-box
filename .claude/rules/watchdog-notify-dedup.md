@@ -42,6 +42,79 @@ KEYLESS body into a ~5-min window). The doctrine (analyze-not-ping, airuleset #7
 The emoji is the discriminator in practice: **🚨/⚠️/🛟/🧹 = ALERT (keyed ping); ✅ = RECOVERY
 (machine-channel, no ping)**.
 
+## Production-critical class: time-bucketed re-ping (owner ruling 2026-09-13, #1307)
+
+Rule 1 above ("a STABLE per-incident `--dedup-key`, no per-pass component") is the DEFAULT and holds
+for every watchdog EXCEPT one deliberately-carved class. Owner ruling (ROZHODNUTÉ on #1307, verbatim:
+*„aj ntp aj ostatne veci bez ktorych nevie produkcia bezat spravne musi notifikovat … nech kazdu
+minutu chodia notifikacie ze nemaju dante clock … byt o tom dokolecka notifikovany"*): a
+**production-critical** condition — one the fleet cannot run production without, whose loss is
+INVISIBLE without a page (a lost dante clock, a foreign/missing grandmaster, an NTP step-storm) — must
+be **RE-pinged repeatedly while it PERSISTS**, not paged once and then silently card-edited forever.
+
+Mechanism (no new notify channel, no raw webhook): keep `airuleset.py notify --dedup-key`, but make
+the key **time-bucketed** — `<incident-key>-<floor(now/REPING_INTERVAL_S)>` (`REPING_INTERVAL_S`
+default 600 s, floored at 60 s). Within one bucket an identical state still EDITS the card (no flood);
+every new bucket is a FRESH ping. Recovery stays exactly rule 2 — ONE machine-channel log line, never
+a phone ping.
+
+**The bucket key is built by ONE shared helper — the ONLY sanctioned way to time-bucket (#1308).**
+Never hand-roll the `-<floor(now/interval)>` suffix or a second bucketing implementation:
+- **bash:** `scripts/lib/obs-watchdog-decision.sh :: watchdog_notify_key <incident-key> <now_epoch>
+  [interval_s]` — every alert-watchdog already sources that lib. Wrap the existing stable key:
+  `--dedup-key "$(watchdog_notify_key "network-reach-$box" "$(date +%s)")"` (the interval comes from
+  `$REPING_INTERVAL_S`, the ONE shared env name, default 600, floored 60). (`dantesync-clock-alert-
+  watchdog.sh` buckets via its `bucketed_key` helper, which also calls `watchdog_notify_key`.)
+- **python:** `scripts/watchdog_reping.py :: notify_key(base, now, interval)` — the byte-for-byte twin
+  (a parity pytest diffs the two); `dantesync_clock_decision.dedup_key` delegates to it.
+
+**The production-critical class (#1308) is these 10 dev1 watchdogs** — the faults the fleet cannot run
+production without, invisible without a page:
+
+| watchdog | ticket | fault |
+|---|---|---|
+| `dantesync-clock-alert-watchdog.sh` | #1307 | PTP clock loss / GM move / DNS / NTP storm / dantesync-dead |
+| `genlock-lock-alert-watchdog.sh` | #1299 | fleet genlock UNLOCKED/DEGRADED |
+| `network-reach-alert-watchdog.sh` | #1001 | strih/stream unreachable |
+| `bundle-state-alert-watchdog.sh` | #732 | :8899 bundle-state server down |
+| `obs-liveness-watchdog.sh` | #391 | broadcast-OBS render wedge |
+| `audio-lag-alert-watchdog.sh` | #1226 | OBS audio-timeline lag / band drift |
+| `ndi-portmap-alert-watchdog.sh` | #1181 | NDI sender port-map moved |
+| `avsync-heartbeat-alert-watchdog.sh` | #812 | A/V-sync heartbeat stale |
+| `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
+| `measurement-audio-alert-watchdog.sh` | #1310 | mbc measurement-audio chain digital-silent (TEST-gated) |
+
+(`measurement-audio-alert-watchdog.sh` is EVENT-gated on `rig-mode-state.sh` like splitter-port #1290
+— the QPSK marker only sounds in TEST — but its FAULT is production-critical: a silent measurement
+instrument means the next production's A/V-sync can't be verified. The rig-mode gate and the
+fault-criticality axis are ORTHOGONAL — this one is TEST-gated AND time-bucketed.)
+
+The DIAGNOSTIC / TEST-mode watchdogs stay one-ping-per-incident (a stable key, NO bucket): cadence
+(#794), frozen-input (#1052), splitter-port (#739), grabber-stuck (#1128), imag-power (#1040),
+ndi-halving (#1203), optical-chain (#860), obs-burn-reconcile (#1060), mv-fps (#771), av-step (#1267),
+netcfg-audit (#797), rig-status (#787), **asio-starve (#1023)** and **vb-matrix (#1227)**. Do NOT
+time-bucket any of these — the exception is NARROW.
+
+**asio-starve (#1023) and vb-matrix (#1227) were RE-classified OUT of production-critical (#1308 step-3,
+owner ruling 14.9.2026 „5 A"):** VB-Matrix on the stream box is NOT production audio — its
+`ASIO Input Capture` input is muted and lives only in scene `party`, and the `StartVBMatrix` task has
+been disabled since 3.9. So the two watchdogs that observe that chain guard a diagnostic signal, not a
+production one; their ALERT `--dedup-key` is back to the stable per-incident form (`vb-matrix-$box`,
+`asio-starve-$source`, `asio-starve-tap-$source`) and both stay DISABLED on dev1 (strih-only enable is
+a supervisor call).
+
+The sweep below allowlists the 10 EXPLICITLY (CLASS-based) and **rejects a bucketed key in any
+NON-allowlisted script**, so the exception is intentional and visible, never a silently-weakened
+invariant.
+
+**Delivery-layer caveat (#1308):** wrapping the key does NOT change a watchdog's own confirm/throttle
+detection — the 9 wrapped bash watchdogs still gate their notify CALL through `obs_watchdog_alert_
+throttle`, so their effective re-ping cadence is `max(throttle interval, bucket interval)` (the
+bucketed key just turns each throttled re-fire into a fresh ping instead of a silent card edit). Only
+`dantesync-clock-alert-watchdog.sh` fires every confirmed pass (no throttle), so the bucket alone sets
+its cadence. Tightening a specific watchdog to the exact 600 s cadence is a per-watchdog throttle tune,
+out of #1308's delivery-layer scope.
+
 ## Enforcement
 
 `tests/python/test_notify_dedup_key_sweep_1206.py` is a Tier-0 static sweep that auto-discovers

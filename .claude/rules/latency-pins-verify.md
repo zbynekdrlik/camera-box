@@ -64,6 +64,28 @@ floor box that read zero inputs is exit 2. A per-INPUT `GetInputSettings` read i
 missing source/key is an honest `None` (N/A), never a fabricated floor value — mirrors
 `latency_pins_snapshot.read_pin`.
 
+## An ABSENT pin on a GENLOCK BUILD is the build DEFAULT, not DRIFT (#1295)
+
+`GetInputSettings` returns only EXPLICITLY-saved settings, so a source whose `genlock_latency_ms_src`
+was never persisted reads honest-`None`. On a STOCK build that absence genuinely means "no genlock"
+→ keep the N/A + DRIFT report. But the genlock DistroAV fork REGISTERS the per-source defaults
+(`vendor/distroav/src/ndi-source.cpp` `ndi_source_getdefaults`: `obs_data_set_default_bool
+genlock_fifo=true`, `obs_data_set_default_int genlock_latency_ms_src=3`), so on a genlock box an
+absent per-input key means the build DEFAULT (3 ms, FIFO on) is in effect — OK, not drift. This bit
+RESOLUME-SNV live (2026-09-13): its `cg_scenes` collection was saved by stock OBS, so all nine
+`sp-*_video` inputs read `got=N/A want=3ms` DRIFT while the FIFO audit proved the default was live.
+
+So `latency_pins_verify.py` reads the box's **build identity over the EXISTING WS** —
+`read_genlock_default_ms(ws)` = `GetInputDefaultSettings(inputKind=ndi_source).genlock_latency_ms_src`
+(the SAME call `obs_phase2._effective_input_settings` uses, so NO new transport: not ssh, not the
+`:8899` bundle-state facet, not a `GENLOCK_BUILD_SHA.txt` file read). A non-None default == genlock
+build. `read_live_pins` returns `(pins, build_default)`; `diff_pin`/`verify_box` take an optional
+`build_default` so an absent key resolves to `got=default(N)` (OK when it matches the agreed pin, a
+named `got=default(N)ms want=...` DRIFT when it does not). `build_default=None` (stock build, or a
+defaults-read failure — best-effort, conservatively treated as stock) keeps the prior N/A-DRIFT path
+verbatim. The #149 obs_phase2 note that "genlock_fifo is NOT in the type defaults" is STALE — it
+predates the fork adding these to `get_defaults`; confirmed by the `ndi-source.cpp` lines above.
+
 ## Baseline scope
 
 strih baseline (the DRIFT-GUARD reference) covers the default `CAMERA_ACTIVE_SET` (cam1/cam2/cam3);

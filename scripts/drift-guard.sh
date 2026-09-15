@@ -1194,6 +1194,43 @@ imag_genlock_on_dev() {
   git -C "$repo_root" merge-base --is-ancestor --end-of-options "$box_sha" origin/dev 2>/dev/null
 }
 
+# drift_guard_imag_obs_log_gather_snippet -> the REMOTE shell command (a string) gather_and_check_imag
+# runs over ssh to read the MOST-RECENT imag OBS log, BOUNDED + marker-family-filtered. Mirrors
+# scripts/lib/obs-projector-vsync.sh's projector_vsync_gather_remote_snippet (the E2E-side #1151 fix,
+# 2e788561b), so the marker anchors live in exactly ONE place and this is unit-testable without ssh
+# (drift-guard.sh's source-guard stops a `.`-source before main).
+#
+# Root cause (#1151, 14.9.2026): the old gather shipped the newest log WHOLE (`[ -n "$f" ] && cat "$f"`)
+# into a bash variable. imag's OBS SESSION LOG reached 1.2 GB / 4.5 M lines (~90 MB/day of
+# `genlock-fifo audit` + `program-render-audit` + `multiview-audit` since 2026-09-01), the harness bash
+# died with SIGSEGV (rc 139) -> `--check-imag` exited 139 -> `scripts/rig-mode.sh test` HARD-BLOCKED at
+# the issue-789 TEST-entry gate (`genlock_build … UNKNOWN [exit=139]`, fail-closed). `.claude/rules/
+# drift-guard-log-parsers.md` made the PARSERS SIGPIPE-safe but nothing bounded the INPUT size — this is
+# that missing bound; the #1222 discipline generalised to EVERY consumer of a remote OBS log.
+#
+# The five parsers gather_and_check_imag feeds this text to only ever match FOUR marker families:
+#   genlock:              -> genlock_capability_from_log / genlock_latency_ms_from_log /
+#                            genlock_rt_pin_from_log (all emit `genlock: …`; NOTE the colon — it can
+#                            never match the 90 MB/day `genlock-fifo` bulk, which has a hyphen)
+#   video settings reset: + fps:  -> fps_from_log (the OUTPUT fps inside the reset block; STARTUP-only)
+#   projector-vsync:      -> projector_vsync_verdict (the issue-1146 present-vsync ARMED marker)
+# so a single `grep -aE` of that union STREAMS the huge file in bounded memory and emits ONLY those
+# lines (`grep -a` byte-literal so a stray binary byte never blanks the read, #1184). Each parser is
+# first-match/presence and its decisive line sits at OBS STARTUP (the fps reset block, the genlock arm
+# lines, the Program-projector ARMED marker) = the EARLIEST filtered lines; a HEAD slice keeps them, a
+# TAIL slice ALSO keeps any late re-arm / hot-apply — so head+tail of the (already tiny) filtered
+# stream preserves every facet's semantics even if a marker family ever grew past the cap (the middle
+# it then drops is redundant repeats, never a first-occurrence line). (fps_from_log needs the reset
+# block AND its immediately-following output-fps line co-resident in ONE slice; both are emitted
+# during OBS video init = among the FIRST handful of filtered lines, so they always land together in
+# the head slice, never split across the head/tail boundary.) A missing / empty log yields
+# empty output -> the parsers read UNKNOWN, never a false OK (#833). The caller wraps the whole capture
+# in `|| true`, so a remote grep with no matches (exit 1) never trips the caller's set -euo pipefail
+# (the drain-safe convention of .claude/rules/drift-guard-log-parsers.md).
+drift_guard_imag_obs_log_gather_snippet() {
+  printf '%s' 'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.txt 2>/dev/null | head -1); [ -n "$f" ] || exit 0; t=$(mktemp 2>/dev/null) || exit 0; [ -n "$t" ] || exit 0; grep -aE "genlock:|projector-vsync:|video settings reset:|fps:" "$f" > "$t" 2>/dev/null; n=$(wc -l < "$t" 2>/dev/null || echo 0); if [ "${n:-0}" -le 2000 ]; then head -n 2000 "$t"; else head -n 1000 "$t"; tail -n 1000 "$t"; fi; rm -f "$t"'
+}
+
 # gather_and_check_imag HOST USER README -> SSH-gathers the observed values from the LIVE
 # imag-nb box (#463) and runs [`check_imag_report`] against the pinned set in README. NOT unit
 # tested (it is pure I/O glue over `ssh` — same convention as the win-* MCP gathering for
@@ -1319,8 +1356,10 @@ gather_and_check_imag() {
   # output_fps / genlock_latency / rt_pin / projector_vsync) read EMPTY -> chronic UNKNOWN. Fixing
   # it makes those facets actually read the log; SAFE because rig-mode's only --check-imag HARD-BLOCK
   # (issue 789) is genlock_build-scoped (the GENLOCK_BUILD_SHA.txt SSH compare), never these facets.
-  obs_log="$("${ssh_cmd[@]}" \
-    'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.txt 2>/dev/null | head -1); [ -n "$f" ] && cat "$f"' \
+  # #1151: BOUNDED, marker-family-filtered read via the shared pure snippet (never the whole 1.2 GB
+  # log — that SIGSEGV'd the harness bash, rc 139, and HARD-BLOCKED the issue-789 gate). `|| true`
+  # keeps a remote grep-no-match (exit 1) from aborting under set -euo pipefail.
+  obs_log="$("${ssh_cmd[@]}" "$(drift_guard_imag_obs_log_gather_snippet)" \
     2>/dev/null || true)"
   obs_fps="$(fps_from_log "$obs_log")"
   obs_latency="$(genlock_latency_ms_from_log "$obs_log")"

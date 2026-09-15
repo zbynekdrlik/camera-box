@@ -44,6 +44,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/network-reach-health.sh"
 # shellcheck source=scripts/lib/bundle-state-health.sh
 . "$HERE/lib/bundle-state-health.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -57,8 +59,13 @@ case "${1:-}" in
 esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
-# The two OBS boxes to watch, as "name|ip" pairs (space-separated).
-BOXES="${BUNDLE_STATE_BOXES:-strih|10.77.9.202 stream|10.77.9.204}"
+# The OBS boxes to watch, as "name|ip" pairs (space-separated). Default DERIVED from the ONE
+# declared fleet list (scripts/lib/obs-fleet.sh, #1296): strih, stream AND resolume (RESOLUME-SNV,
+# a genlock cg-obs box). resolume is TRAVELING-SAFE here with no is-home gate — a fully-unreachable
+# box (ping + :4455 + :8899 all down) is deferred to the #1001 reach watchdog below (no page, no
+# pointless restart against a dark box), which is exactly the normal away state. The
+# BUNDLE_STATE_BOXES env override still wins unchanged.
+BOXES="${BUNDLE_STATE_BOXES:-$(obs_fleet_boxes bundle-state)}"
 OBS_WS_PORT="${BUNDLE_STATE_OBS_WS_PORT:-4455}"       # OBS WebSocket, live on both boxes (box-up signal)
 BUNDLE_PORT="${BUNDLE_STATE_BUNDLE_PORT:-8899}"       # the bundle-state HTTP service under test (#650)
 BUNDLE_PATH="${BUNDLE_STATE_BUNDLE_PATH:-/bundle-state.json}"
@@ -279,7 +286,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $box :$BUNDLE_PORT down"
     python3 "$NOTIFY" notify --body \
       "🚨 BundleStateServer ($REPO_SLUG): **$box** ($ip) :$BUNDLE_PORT je DOLE, hoci box beží. ${detail}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol — Task Scheduler ukončenú úlohu sám nereštartuje. Rieši Claude automaticky (${restart_note}), ty nemusíš nič robiť." \
-      --dedup-key "bundle-state-$box" \
+      --dedup-key "$(watchdog_notify_key "bundle-state-$box" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- restart still attempted every pass"

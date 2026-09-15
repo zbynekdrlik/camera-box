@@ -259,6 +259,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # byte-for-byte unchanged.
 # shellcheck source=scripts/lib/cold-cut-step.sh
 . "$HERE/lib/cold-cut-step.sh"
+# #1301: the opt-in CG_CHAIN=1 profile for the SongPlayer-originated content chain (SongPlayer ->
+# cg OBS (RESOLUME-SNV) -> strih -> stream). OFF by default (CG_CHAIN unset/0 ⇒ every function the
+# harness calls is a pure no-op). The guarded call lines below follow the #675 sourced-lib pattern
+# (added AFTER anchored lines, never editing one). UNVERIFIED until songplayer#151 ships.
+# shellcheck source=scripts/lib/cg-chain-e2e.sh
+. "$HERE/lib/cg-chain-e2e.sh"
 # #707 B1 (freeze+jump discriminator, second prong): the per-cambox TCP-transport + NIC sampler.
 # Pure REMOTE-COMMAND-STRING builders (no ssh at source time) — launched in [5b/8], harvested in
 # [7c/8]. See the lib header for WHY (record Send-Q/retrans/NIC counters during the window so the
@@ -801,6 +807,13 @@ if [ -n "$_svg_stream_msg" ]; then
   exit 1
 fi
 echo "    ok: stream obs64 visible on the console (SessionId=1, window present)"
+# #1295: report-only -- name any DEAD obs64 handle the probe ignored (a stale zombie object, NOT a
+# live instance: HasExited/0-threads/~45 KB, the 2026-09-12 RESOLUME-SNV pid-58560 case) so an
+# operator can reap it; this NEVER gates the preflight above (a zombie is not an invisibility).
+_svg_strih_znote="$(obs_session_visibility_zombie_note "$_svg_strih_out")"
+[ -n "$_svg_strih_znote" ] && echo "    strih $_svg_strih_znote"
+_svg_stream_znote="$(obs_session_visibility_zombie_note "$_svg_stream_out")"
+[ -n "$_svg_stream_znote" ] && echo "    stream $_svg_stream_znote"
 
 # Disk preflight (#179): the 7.3GB cam1 grab is GONE — only the two downloaded OBS program
 # recordings land on dev1 (~3 MB/s each, strih .mkv + stream .mp4). FAIL EARLY if $OUTDIR's
@@ -888,27 +901,59 @@ fetch_box_state() {
 fetch_box_state "$STRIH"  "$VERSION_STRIH_STATE"  || true
 fetch_box_state "$STREAM" "$VERSION_STREAM_STATE" || true
 
-# #652: disk-budget preflight WARN (never fail — informational only). The harness's own E2E test
-# recordings had silently accumulated to ~500 GB on strih / 139 GB on stream (back to
-# 2026-06-17, including a single 266 GB stray), invisible until the disk nearly filled (17 GB
-# free). Best-effort: an unreachable bundle-state-server (the box's :8899 /record-dir-stats.json,
-# same standing service fetch_box_state above already relies on, #650) just skips the check —
-# this is a WARN, never a gate.
-RECORDINGS_BUDGET_GB="${RECORDINGS_BUDGET_GB:-50}"
-check_recordings_budget() {
-  local label="$1" host="$2" stats total_gb
+# #652/#1276: recordings-volume FREE-SPACE preflight WARN (never fail — informational only). Owner
+# ruling (14.9.2026, "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): WARN when the
+# recordings VOLUME has at most RECORDINGS_FREE_MIN_GB of FREE space left — NOT when the sum of
+# recording files exceeds a budget (the old #652 semantics: a disk with 600 GB free must not warn
+# just because old test recordings sum past 50 GB). The volume's free_bytes is served by the box's
+# :8899 /record-dir-stats.json (bundle_state_gather.record_dir_stats -> shutil.disk_usage on the
+# same standing service fetch_box_state above already relies on, #650); the pure verdict is
+# bundle_state_gather.recordings_free_verdict (the python mirror of the canonical Rust
+# recordings_retention::free_space_verdict). An unreachable server / unreadable free space just
+# skips (NOTE), never a false WARN, never a gate. Deletion (--execute) stays an owner-only step.
+RECORDINGS_FREE_MIN_GB="${RECORDINGS_FREE_MIN_GB:-50}"
+check_recordings_free_space() {
+  local label="$1" host="$2" stats out verdict free_gb
   stats=$(curl -fsS --max-time 30 "http://${host}:${WIN_BUNDLE_STATE_PORT}/record-dir-stats.json" 2>/dev/null) || {
-    echo "    NOTE: could not fetch $label recordings-dir stats (bundle-state-server unreachable) — skipping disk-budget check" >&2
+    echo "    NOTE: could not fetch $label recordings-dir stats (bundle-state-server unreachable) — skipping free-space check" >&2
     return 0
   }
-  total_gb=$(printf '%s' "$stats" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("total_bytes",0)/1e9)' 2>/dev/null) || return 0
-  echo "    $label recordings dir: $(printf '%.1f' "$total_gb") GB (budget ${RECORDINGS_BUDGET_GB} GB)"
-  if python3 -c "import sys; sys.exit(0 if float('$total_gb') > float('$RECORDINGS_BUDGET_GB') else 1)" 2>/dev/null; then
-    echo "WARNING #652: $label's OBS recordings directory holds ~$(printf '%.1f' "$total_gb") GB of accumulated recordings (budget ${RECORDINGS_BUDGET_GB} GB) — old E2E test recordings may be piling up; see the cleanup plan this run prints at [8/8] (KEEP_RECORDINGS=1 opts out), or clean up manually via the win-* MCP." >&2
-  fi
+  # Capture into a plain variable (never `read < <(...)`, whose EOF return would set-e-abort the run,
+  # the #1133 class): the python always prints exactly one "<VERDICT> <free_gb>" line and exits 0, so
+  # a pipeline failure here means python itself is broken -> the `|| { ...; return 0; }` skips cleanly.
+  out=$(printf '%s' "$stats" | PYTHONPATH="$HERE" python3 -c '
+import json, sys
+import bundle_state_gather as bsg
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("UNKNOWN -1")
+    sys.exit(0)
+fb = d.get("free_bytes")
+v = bsg.recordings_free_verdict(fb, float(sys.argv[1]))
+print(v, "-1" if fb is None else "%.1f" % (fb / 1e9))
+' "$RECORDINGS_FREE_MIN_GB" 2>/dev/null) || {
+    echo "    NOTE: could not parse $label recordings free-space stats — skipping free-space check" >&2
+    return 0
+  }
+  verdict=${out%% *}
+  free_gb=${out#* }
+  case "$verdict" in
+    WARN)
+      echo "    $label recordings volume: ${free_gb} GB free (warn at <= ${RECORDINGS_FREE_MIN_GB} GB free)"
+      echo "WARNING #652 #1276: $label's OBS recordings volume has only ~${free_gb} GB of FREE space left (warn threshold ${RECORDINGS_FREE_MIN_GB} GB) at ${host}'s record dir — free space is running low; the owner can clear space via the cleanup plan this run prints at [8/8] (KEEP_RECORDINGS=1 opts out), the reviewed --execute retention (owner-only), or the win-* MCP." >&2
+      ;;
+    OK)
+      echo "    $label recordings volume: ${free_gb} GB free (warn at <= ${RECORDINGS_FREE_MIN_GB} GB free)"
+      ;;
+    *)
+      echo "    NOTE: $label recordings volume free space unreadable/unparseable — skipping free-space check (never a false WARN)" >&2
+      return 0
+      ;;
+  esac
 }
-check_recordings_budget strih  "$STRIH"
-check_recordings_budget stream "$STREAM"
+check_recordings_free_space strih  "$STRIH"
+check_recordings_free_space stream "$STREAM"
 # #756 — imag is SSH-reachable, so read its deployed genlock build SHA directly (the Windows boxes'
 # SHAs flow in via their --win-state bundle-state JSON) and hand it to the gate's CROSS-BOX parity
 # assert. Best-effort: an unreachable imag yields "" -> the parity facet stays dormant until >=2
@@ -1931,6 +1976,10 @@ fi"
   # run was interrupted during the cold hold (or a single-appearance sweep) left it idled/black.
   # Inert no-op unless COLD_CUT_BYPASS_CAM was set AND the machine is still at phase=idled.
   cold_cut_cleanup_restore "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
+  # #1301: CG_CHAIN leak-guard — turn the SongPlayer output burn OFF (it must NEVER stay on the LED
+  # wall, the #246/#844 class) and StopRecord cg OBS, even on an early abort. A pure no-op unless
+  # CG_CHAIN=1; ALWAYS returns 0 so it can never trip cleanup()'s own flow.
+  cg_chain_cleanup "${CG_HOST_IP:-}" "$HERE/obs_phase2.py" "${OBS_CLEANUP_TIMEOUT:-30}"
   # #691: pass the calibrated cross-check value through ONLY when the caller supplied one
   # (empty by default — the common unattended-CI case simply skips the check).
   _stream_teardown_args=(teardown --host "$STREAM")
@@ -2210,6 +2259,13 @@ BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOU
 STRIH_RECORDING_STARTED=0
 STREAM_RECORDING_STARTED=0
 IMAG_RECORDING_STARTED=0
+# #1301: CG_CHAIN profile state — all default to the inert values BEFORE the trap arms so
+# cleanup()'s cg leak-guard is a safe no-op on an early abort. CG_HOST_IP is resolved + the flag
+# flipped only once cg OBS StartRecord actually succeeds ([5/8] below); CG_RECORDING is the local
+# path the pulled cg OBS recording lands at (fed to the verdict as --cg only if the pull produced it).
+CG_HOST_IP=""
+CG_RECORDING_STARTED=0
+CG_RECORDING="$OUTDIR/cg-obs-recording.mkv"
 # #286 ALL_CAMBOX — strih's OWN render-time burn (911002) must be present on WHICHEVER strih
 # NDI input the sweep currently has cut into program, not just the single default
 # STRIH_PROG_SOURCE (cam1's mapped input under the plain single-camera path). Without this,
@@ -4176,6 +4232,19 @@ fi
 # only surfacing (mis-attributed) via the eventual zero-loss/A-V verdict.
 CAPTURE_RATE_WINDOW_START_EPOCH="$(date +%s)"
 
+# #1301: CG_CHAIN=1 — turn the SongPlayer output burn ON + StartRecord cg OBS (RESOLUME-SNV) for
+# the run. ALL best-effort (the SongPlayer sender is songplayer#151, unshipped) — a failure is
+# loud but NEVER aborts the camera-chain run; the SongPlayer burn OFF + cg OBS StopRecord run in
+# cleanup() (the #246/#844 leak-guard class). Pure no-op unless CG_CHAIN=1.
+if cg_chain_enabled; then
+  echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON + cg OBS StartRecord (UNVERIFIED until songplayer#151 ships)"
+  cg_chain_songplayer_burn on
+  if CG_HOST_IP="$(cg_chain_resolve_host)" \
+    && cg_chain_record_start "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"; then
+    CG_RECORDING_STARTED=1
+  fi
+fi
+
 # [5b/8] #707 B1 (freeze+jump discriminator, SECOND prong) — arm a lightweight per-cambox TCP-to-
 # strih + NIC-counter sampler for the WHOLE [5/8]->[7/8] recording window (stopped + harvested in
 # [7c/8] below). Prong 1 (the box-side emit_rate_ring 1s WARN, src/emit_rate_ring.rs) answers "did
@@ -5121,6 +5190,15 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
 
   echo "    --- [8/8d] MERGE the small partials ON dev1 (no recording on dev1) ---"
   echo "    After pulling both partials (+ their <partial>-pixels dirs) to dev1, run the merge:"
+  # #1301: CG_CHAIN=1 — StopRecord cg OBS (finalize the file) + pull it to dev1 so the merge can
+  # feed it as --cg below. BEST-EFFORT: a failed stop/pull just omits --cg (the merge runs exactly
+  # as today, no cg_chain section) — it NEVER aborts the camera-chain verdict. The resolume
+  # recording transport is env-configured via CG_CHAIN_PULL_CMD (pending songplayer#151); with it
+  # unset the pull is a loud no-op. Pure no-op unless CG_CHAIN=1.
+  if cg_chain_enabled && [ "$CG_RECORDING_STARTED" = 1 ]; then
+    cg_chain_record_stop "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"
+    cg_chain_pull_recording "$CG_HOST_IP" "$CG_RECORDING" || true
+  fi
   # The merge reads ONLY the small JSONs (+ the small painter CSV / capture-stats already on dev1)
   # and produces the SAME full-chain verdict the fused path would — equivalent fields + PASS.
   MERGE_ARGS=(--merge-partials "strih=$STRIH_PARTIAL" --merge-partials "stream=$STREAM_PARTIAL" \
@@ -5152,6 +5230,10 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   # silently skipping a requested gate. The carried summary is honored regardless; this just catches
   # a stale/forgotten extract. Empty $CG (COLOUR_GATE=0) adds nothing.
   if [ -n "$CG" ]; then MERGE_ARGS+=("$CG"); fi
+  # #1301: feed the pulled cg OBS recording to the verdict so it emits the REPORT-ONLY cg_chain
+  # section. Only when CG_CHAIN=1 AND the pull above actually produced the file — otherwise the
+  # merge runs exactly as today (no --cg, no cg_chain). Never changes the camera-chain pass verdict.
+  if cg_chain_enabled && [ -f "$CG_RECORDING" ]; then MERGE_ARGS+=(--cg "$CG_RECORDING"); fi
   if [ -f "$PAINTER_CSV" ]; then MERGE_ARGS+=(--painter "$PAINTER_CSV"); fi
   if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
   # #1003 review finding 2: raise the LIVE #1035 cam->strih p99 bound by the marker camera's pin

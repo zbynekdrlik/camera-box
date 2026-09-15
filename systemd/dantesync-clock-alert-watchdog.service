@@ -1,0 +1,23 @@
+[Unit]
+# dev1-side fleet DANTE (PTP) CLOCK alert (#1307). ONE fetch -> decide -> alert pass over EVERY
+# dantesync node (cam1-7 + strih/stream/imag/resolume). Closes the 2026-09-13 silent failure: the
+# Yamaha AIC128-D grandmaster's DHCP lease moved, every node's gm_allowlist stopped matching, the
+# WHOLE fleet ran NTP-only for hours and nobody noticed until the release E2E gate failed. The
+# camboxes are HEADLESS -- their only path to a human is dev1 -> Discord. Owner ruling
+# (ROZHODNUTÉ #1307): production-critical class -> re-ping repeatedly while the fault persists.
+# DETECTION ONLY -- no auto-action (the cure is a rig-ops decision). SAME dev1 topology as
+# audio-lag-alert-watchdog.service (#1226) / network-reach-alert-watchdog.service (#1001).
+Description=camera-box fleet dante-clock alert (#1307) — one fetch/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/dantesync-clock-alert-watchdog.sh
+# Per pass: ~11 dantesync nodes × one :8898 curl (DANTE_CLOCK_CURL_TIMEOUT, default 10 s each) + a
+# local python decision + one getent for the grandmaster DNS. Generous ceiling so a slow event-day
+# link never hangs the timer.
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

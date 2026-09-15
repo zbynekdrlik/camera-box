@@ -445,3 +445,134 @@ fn recording_e2e_stream_recovery_message_names_the_correct_mcp_tool() {
         "must not carry the wrong ('win-stream', missing '-snv') tool name. Window:\n{window}"
     );
 }
+
+// ================================================================================================
+// #1295 -- zombie-blind obs64 count: Get-Process can enumerate a STALE handle for an already-EXITED
+// obs64 (HasExited=True / 0 threads / ~45 KB -- the live 2026-09-12 RESOLUME-SNV pid-58560 case).
+// The probe must count/pick only LIVE instances and surface the dead handles as REPORT-ONLY fields
+// (OBS_ZOMBIES / OBS_ZOMBIE_PIDS), consumed by a dedicated note fn that NEVER makes the health
+// message non-empty (a zombie is not an operator-visibility fault -- the live instance is visible).
+// ================================================================================================
+
+/// Run the lib's pure `obs_session_visibility_zombie_note` over a probe fixture (via a real temp
+/// file, for the same real-newline reason as `message()` above) and return its stdout.
+fn zombie_note(probe_out: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("probe.txt");
+    fs::write(&f, probe_out).expect("write probe fixture");
+    let harness = "set -uo pipefail\n. \"$SCRIPT\"\nprobe_out=\"$(cat \"$PROBE_FILE\")\"\nobs_session_visibility_zombie_note \"$probe_out\"".to_string();
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", lib_script())
+        .env("PROBE_FILE", &f)
+        .output()
+        .expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "sourced harness exited non-zero.\nstdout={:?}\nstderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The emitted probe must count/pick only LIVE obs64 (filter out HasExited/0-thread handles) and
+/// emit the ignored dead handles as the new report-only OBS_ZOMBIES / OBS_ZOMBIE_PIDS lines --
+/// mirroring the A fix's own live filter in launch-obs-genlock.sh.
+#[test]
+fn probe_ps_counts_only_live_obs_and_emits_zombie_fields_1295() {
+    let p = run_sourced("obs_session_visibility_probe_ps 1");
+    assert!(
+        p.contains("HasExited") && p.contains("Threads"),
+        "the obs64 probe must filter to LIVE instances (-not HasExited -and Threads.Count -gt 0). \
+         Program:\n{p}"
+    );
+    assert!(
+        p.contains("OBS_ZOMBIES="),
+        "the probe must emit a report-only OBS_ZOMBIES=<n> count of the ignored dead handles. \
+         Program:\n{p}"
+    );
+    assert!(
+        p.contains("OBS_ZOMBIE_PIDS"),
+        "the probe must emit OBS_ZOMBIE_PIDS (pid:start) for the ignored dead handles so an \
+         operator can reap them. Program:\n{p}"
+    );
+    assert!(
+        p.contains("OBS_COUNT="),
+        "the probe must still emit OBS_COUNT (now the LIVE count). Program:\n{p}"
+    );
+}
+
+/// A zombie fixture: exactly one LIVE obs64 (OBS_COUNT=1) plus one dead handle (OBS_ZOMBIES=1). The
+/// health message must be EMPTY (fully visible) -- a stale zombie handle must never be read as a
+/// count!=1 invisibility. This is scope item 4's "one live + one exited row -> PASS".
+#[test]
+fn one_live_plus_one_zombie_is_fully_visible_1295() {
+    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_ZOMBIES=1\nOBS_ZOMBIE_PIDS=58560:2026-09-12T19:05:41\nOBS_SESSION=1\nOBS_TITLE=OBS 30.2.3 - Profile: cg\n";
+    let msg = message(probe, "0");
+    assert_eq!(
+        msg.trim(),
+        "",
+        "a box with one LIVE obs64 + one dead zombie handle must be fully VISIBLE (the zombie is \
+         not a count!=1 fault). msg={msg:?}"
+    );
+}
+
+/// The report-only note must name the dead pid (+ its start) so an operator can reap it -- and
+/// reference #1295. This is the OBS_ZOMBIES=1-in-the-report half of scope item 4.
+#[test]
+fn zombie_note_names_dead_pid_1295() {
+    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_ZOMBIES=1\nOBS_ZOMBIE_PIDS=58560:2026-09-12T19:05:41\nOBS_SESSION=1\nOBS_TITLE=OBS\n";
+    let note = zombie_note(probe);
+    assert!(
+        note.contains("58560") && note.contains("1295"),
+        "the zombie note must name the dead pid (58560) and reference #1295. note={note:?}"
+    );
+    assert!(
+        note.to_lowercase().contains("reap")
+            || note.to_lowercase().contains("dead")
+            || note.to_lowercase().contains("zombie"),
+        "the zombie note must read as a report-only reap hint. note={note:?}"
+    );
+}
+
+/// No zombies (OBS_ZOMBIES=0, or the field absent on a healthy box) -> empty note, never noise.
+#[test]
+fn zombie_note_empty_when_no_zombies_1295() {
+    let zero = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_ZOMBIES=0\nOBS_SESSION=1\nOBS_TITLE=OBS\n";
+    assert_eq!(
+        zombie_note(zero).trim(),
+        "",
+        "OBS_ZOMBIES=0 must give an empty note"
+    );
+    let absent = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\n";
+    assert_eq!(
+        zombie_note(absent).trim(),
+        "",
+        "an absent OBS_ZOMBIES field (older probe / truly none) must give an empty note"
+    );
+}
+
+/// The note parser must tolerate Windows CRLF exactly like the message parser -- same real-hardware
+/// \r class as crlf_line_endings_from_windows_do_not_cause_a_false_invisible above.
+#[test]
+fn zombie_note_tolerates_crlf_1295() {
+    let probe = "ACTIVE_SESSION=1\r\nOWN_SESSION=1\r\nOBS_COUNT=1\r\nOBS_ZOMBIES=1\r\nOBS_ZOMBIE_PIDS=58560:2026-09-12T19:05:41\r\nOBS_SESSION=1\r\nOBS_TITLE=OBS\r\n";
+    let note = zombie_note(probe);
+    assert!(
+        note.contains("58560"),
+        "the zombie note must parse CRLF input identically to LF. note={note:?}"
+    );
+}
+
+/// An empty probe (ssh/connectivity failure) -> empty note (connectivity is the message fn's /
+/// watchdog's job, never a spurious zombie note).
+#[test]
+fn zombie_note_empty_on_empty_probe_1295() {
+    assert_eq!(
+        zombie_note("").trim(),
+        "",
+        "empty probe output must give an empty zombie note"
+    );
+}

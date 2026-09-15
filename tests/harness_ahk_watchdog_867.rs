@@ -30,12 +30,13 @@ fn lib_script() -> PathBuf {
     s
 }
 
-/// Source the lib and call `ahk_resolve_and_relaunch_ps`. Returns stdout.
-fn relaunch_ps() -> String {
-    let harness = "set -uo pipefail\n. \"$SCRIPT\"\nahk_resolve_and_relaunch_ps";
+/// Source the lib and call `ahk_resolve_and_relaunch_ps` with the given (already shell-quoted)
+/// argument string appended. Returns stdout.
+fn relaunch_ps_with(arg_str: &str) -> String {
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\nahk_resolve_and_relaunch_ps {arg_str}");
     let out = Command::new("bash")
         .arg("-c")
-        .arg(harness)
+        .arg(&harness)
         .env("SCRIPT", lib_script())
         .output()
         .expect("failed to run bash harness");
@@ -46,6 +47,11 @@ fn relaunch_ps() -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Source the lib and call `ahk_resolve_and_relaunch_ps` with NO args (the strih default). Returns stdout.
+fn relaunch_ps() -> String {
+    relaunch_ps_with("")
 }
 
 #[test]
@@ -101,6 +107,65 @@ fn polls_get_process_and_sets_verified_and_target_vars() {
     assert!(
         p.contains("$ahkRelaunchTarget"),
         "must record which path/shortcut was used, for the caller's log line. Program:\n{p}"
+    );
+}
+
+/// issue 1295 — the no-args default stays strih's identity: the strih .ahk path and the EXE-first
+/// resolution order, byte-for-byte as before (obs-self-heal-install.sh + the strih deploy/launch
+/// arms call it with no args, so this MUST not drift).
+#[test]
+fn no_args_default_is_strih_identity_exe_first_1295() {
+    let p = relaunch_ps();
+    assert!(
+        p.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
+        "no-args default must keep strih's NL_STARTUP.ahk path. Program:\n{p}"
+    );
+    // exe-first: the $ahkExe branch comes before the $ahkLnk branch in the relaunch if/elseif.
+    let exe_branch = p
+        .find("if ($ahkExe) {")
+        .expect("exe-first default must test $ahkExe first");
+    let lnk_branch = p
+        .find("} elseif ($ahkLnk) {")
+        .expect("exe-first default must fall back to $ahkLnk");
+    assert!(
+        exe_branch < lnk_branch,
+        "strih default must prefer the EXE (exe branch before lnk branch). Program:\n{p}"
+    );
+}
+
+/// issue 1295 — RESOLUME-SNV passes its own v2 .ahk path (which contains a SPACE) and prefers the
+/// Startup .lnk as the relaunch target (the traveling CG box's path may move; the shortcut always
+/// resolves the running watcher). The path is emitted inside a PS single-quoted literal and the
+/// ArgumentList wraps $ahkScriptPath in double quotes so the space is safe.
+#[test]
+fn resolume_identity_prefers_shortcut_and_uses_cg_box_path_1295() {
+    // arg 1 = the resolume .ahk path (single-quoted to bash so the backslashes + space survive);
+    // arg 2 = 'lnk' to prefer the Startup shortcut.
+    let p = relaunch_ps_with(
+        "'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk' lnk",
+    );
+    assert!(
+        p.contains(
+            "$ahkScriptPath = 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk'"
+        ),
+        "resolume must emit its own .ahk path (with the space). Program:\n{p}"
+    );
+    // lnk-first: the $ahkLnk branch now comes BEFORE the $ahkExe branch.
+    let lnk_branch = p
+        .find("if ($ahkLnk) {")
+        .expect("lnk-first must test $ahkLnk first");
+    let exe_branch = p
+        .find("} elseif ($ahkExe) {")
+        .expect("lnk-first must fall back to $ahkExe");
+    assert!(
+        lnk_branch < exe_branch,
+        "resolume must prefer the .lnk (lnk branch before exe branch). Program:\n{p}"
+    );
+    // the ArgumentList double-quotes the path (space-safe) and the verify poll is unchanged.
+    assert!(
+        p.contains("-ArgumentList \"`\"$ahkScriptPath`\"\"")
+            && p.contains("Get-Process AutoHotkey64 -ErrorAction SilentlyContinue"),
+        "resolume relaunch must still double-quote the script arg + verify the process. Program:\n{p}"
     );
 }
 

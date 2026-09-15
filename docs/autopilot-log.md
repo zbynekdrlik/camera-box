@@ -2,6 +2,93 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-09-14 — #1066 D5 + D6 (provisioning defects: gh-less frame-probe fetch + named UEFI entry on the target) — worktree worktree-agent-abf41888552db3de5, base 099a58280
+
+- **D5 (STEP 3b frame-probe on a gh-less box):** RED `930064d6a` → GREEN `b5bea8e6b`.
+  `setup-device.sh` gains a `--probe-binary <path|url>` CLI arg symmetric with `--binary`; STEP 3b
+  resolves `FRAME_PROBE_SRC="${PROBE_BINARY_ARG:-${FRAME_PROBE_BINARY_URL:-}}"` (the env override
+  kept byte-compatible), and the three resolution-exhausted `fail` messages (no CI run / gh
+  unavailable / gh-download-failed) now carry the exact dev1 staging recipe (`gh run download
+  probe-tools-linux-amd64 … && scp … && setup-device.sh --probe-binary /tmp/frame-probe <BOX>`)
+  instead of a bare "install manually" that stranded a from-scratch cam2 provision twice. Design:
+  the resolution SHAPE stays identical to STEP 3's camera-box path (one uniform model for both
+  binaries); a literal shared-helper extraction was REJECTED (breaks the #1289 ETXTBSY anchor tests
+  pinning the inline curl/install lines in both blocks + touches D3-live-proven STEP 3).
+- **D6 (named `cam-box` UEFI entry on the TARGET, not the builder):** RED `8356d8796` → GREEN
+  `8c8f6470e`. New `scripts/lib/efi-boot-entry.sh` — pure decision fns (efi_whole_disk_of /
+  efi_cam_box_bootnums / efi_boot_order / efi_cam_box_leads / efi_boot_order_lead /
+  efi_entry_verdict), ONE source of truth shared by all three provisioning scripts (the
+  ndi-provision.sh convention). `create-usb-linux.sh`'s `create_efi_boot_entry` now runs ONLY when
+  `$DEVICE` == the builder's own boot disk (`findmnt -no SOURCE /` → efi_whole_disk_of), else WARN +
+  skip (no more dev1 NVRAM pollution); efibootmgr baked into the base image. `setup-device.sh`
+  STEP 17d creates the named entry in the box's OWN NVRAM (idempotent, efivars-guarded) and makes it
+  lead BootOrder; efibootmgr added to STEP 16. `verify-device.sh` (al) certifies a `cam-box` entry
+  exists AND leads BootOrder, FAILs (test-strictness) on absent / not-leading / unreadable
+  efibootmgr; documented in all three places (header, usage() Checks, exec) and inserted BEFORE (q).
+  Docs: `4a222efc6` (provision SKILL.md D6 gotcha → the automated STEP 17d + (al), manual efibootmgr
+  kept only as the pre-STEP-17d-window fallback).
+- **Tier-0 (worktree lane):** `cargo fmt --all --check` clean; `bash -n` + `shellcheck -S warning`
+  clean on the new lib + all three scripts; the occurrence-count anchor sweep over every
+  setup/verify/create-usb-reading test file shows only ADDITIVE literal changes (the one 1→0 it
+  would have flagged — the pinned single-arg usage echo — was caught by
+  `setup_device_provisioner_hardening.rs` and fixed by reverting the echo to its pinned form). Rustc
+  replicas run GREEN: `efi_boot_entry_1066` (11/11), `setup_device_provisioning_defects_1066` (14/14),
+  and the regression files `verify_device_pure_functions` (106/106), `setup_device_provisioner_hardening`
+  (41/41), `harness_cam2_painter_provisioning_863` (13/13); the create-usb create_efi anchor +
+  source-only harness verified via a python replica + a live source-only probe. `appliance_boot_hardening.rs`
+  needs the `tempfile` crate (not std-only) so it runs at CI; its create_efi test invariants were
+  replica-verified locally.
+- **Review:** fresh-context adversarial general-purpose read-only review over `099a58280..HEAD` →
+  SHIP, 0 🔴. One 🟡 fixed same-branch (`cad1e2271`): STEP 17d's `printf '%s\n' "$EFI_NUMS" | head -1`
+  was the `printf|head` SIGPIPE-under-pipefail footgun `drift-guard-log-parsers.md` bans → pipe-free
+  `${EFI_NUMS%%$'\n'*}`. Four 🔵s considered + deferred with reasoning (create-usb inline-awk vs lib
+  constants — the pinned literal `cam-box` anchor keeps it out of scope; STEP 16 `|| true` caught
+  fail-closed by (al); ssh PATH; non-EFI setup-skip vs verify-FAIL asymmetry is intentional).
+- **Lane scope:** worktree lane — CODE + TESTS + DOCS only. No rig touched (no ssh to any 10.77.x
+  box; cam2 is live — the supervisor owns the live cam2 re-provision proof). No push/PR/merge/close,
+  no version bump (per dispatch). Durability backup on
+  `refs/autopilot-wip/worktree-agent-abf41888552db3de5`.
+
+## 2026-09-13 — #1303 part 3b (LOCK-indicator audio DEGRADE term) — worktree worktree-agent-a4cfdaa804a08e476, base e2d651bc3
+
+- **Scope:** surface the audio-parity health (landed in 3a as `genlock_audio_pairing::decide_audio_health`,
+  consumed by nothing but its own parity test) as a DEGRADE term in the in-OBS GENLOCK LOCK
+  indicator. Parts 1/2/3a/5 already on dev; 3b + part 4 (per-box certified-table audit) were the
+  deferred followups in the prior lane's LANE-RETURN.
+- **Design (additive, aggregate-bool):** `GenlockFacets` (Rust `src/genlock_lock_state.rs` + C
+  `genlock_lock_facets_t` in `GenlockLockState.hpp`) gains a bool `audio_unpaired`; `LockReason`
+  gains `AudioPairing = 9`; `decide`/`genlock_decide_lock_state` gains a lowest-precedence DEGRADED
+  branch. The widget (`OBSBasicStatusBar.cpp`) computes it per source from the v2 stats
+  (`version>=2 && audio_enabled && |audio_pairing_offset_ms| > GENLOCK_AUDIO_PAIRING_BOUND_MS`, 33 ms)
+  — the exact twin of the existing qpc-drift reduction. This is the ONLY parity-safe shape: the C
+  `genlock_decide_lock_state` is lifted+cc-compiled STANDALONE by the parity gate, so it cannot call
+  the obs-source.c `genlock_audio_decide_health` static-inline, and duplicating that decision into
+  the header would be a lock-step hazard. Chose it over (2) threading full AudioPairingFacets into
+  `decide` (forces C duplication) and (3) a decided u8 health code in `obs_genlock_stats` (needs
+  is-program-source/asrc data not in the fill path).
+- **Scope-line vs issue-body reconciliation:** the dispatch scope narrows the degrade to
+  "audio-enabled + pairing-offset breach; audio disabled/absent NEVER degrades" — deliberately
+  EXCLUDING `decide_audio_health`'s AudioDisabledOnProgram + AsrcSaturated branches (they need
+  is-program-source / asrc-ppm data the v2 stats do not carry). Followed the scope line; recorded
+  the excluded branches as a followup in `genlock-audio-pairing.md`.
+- **RED→GREEN:** pure module 20/20 (standalone rustc); removing the branch fails
+  `audio_unpaired_is_degraded_audio` (RED proven). C↔Rust parity replica: 2560 vectors, 0
+  divergence, 12 exercise the audio branch, C clean under `cc -Wall -Wextra -Werror`. Guards 8/8
+  (standalone rustc). g++ `-Wconversion -Wsign-compare -Werror` on the header + a widget-snippet
+  replica. pwsh + preload anchors simulated matching the squish. `cargo fmt --all --check` clean.
+- **OVERLAP-BYPASS:** edits to the 3 files flagged as overlapping release PR #1293
+  (`src/genlock_lock_state.rs` + both `windows-genlock*.yml`) are STRICTLY additive (appended
+  field/variant/branch/anchors; the trailing `Write-Output` on both yml left byte-identical) →
+  clean rebase after #1293.
+- **Review:** fresh-context model-less pass → 0 R / 0 Y / 2 B. 🔵-2 (stale precedence list in the C
+  header doc comment) FIXED in-lane (81ec49ad0). 🔵-1 (fixed 33 ms bound vs per-source frame
+  interval) dropped-with-reason: DEGRADE-only conservative, needs a v3 stats bump = followup.
+- **Commits:** 96f89bd09 (the term + tests + gates + rule updates) → 81ec49ad0 (review fix). No
+  version bump (dev already > main; lane protocol). wip backup at
+  `refs/autopilot-wip/worktree-agent-a4cfdaa804a08e476`.
+- **UNVERIFIED (post-merge supervisor rig step):** the live three-state screenshot + DEGRADED-on-
+  program-audio-off acceptance (needs the full-bundle frontend deploy; CI is the first C++/Qt compile).
+
 ## 2026-09-01 — #1258 ([4c/8] frozen-camera-gate received= tap blind) — worktree worktree-agent-a79df4cf5f0b599a0, base eb52b62af
 
 - **Root cause: the `received=` tap read strih's OBS log with a NAIVE triple-quoted
@@ -11213,3 +11300,714 @@ No push/PR/rig touch (worktree worker).
 - **Playbook:** `.claude/rules/verdict-gate-seam-calibration.md` §15 (the "zero-FP-over-the-whole-distribution can outweigh an unvalidated upper bound" calibration mode + the full 14-run table); `.claude/rules/e2e-discord-report.md` moved `duplication_masked_cadence` from the REPORT-ONLY bullet to the LIVE seams bullet.
 - **What stays open:** the §14 upper-bound gap (no rate ceiling separating a ~0.167 pulldown from a ~1.0 spanning freeze) is genuinely unresolved — this promotion is a risk-accepted flip on empirical zero-FP evidence, not a claim the gap is closed. The aux-tick supersede fork (owner, issue 1196) is also unresolved and independent of this flip.
 - **Lane scope:** worktree lane — no push/PR/merge/version-bump/close. Durability backup on `refs/autopilot-wip/worktree-agent-aa52579c7a6780e21`.
+
+## issue 905 item 3 — re-gate + recalibrate the optical undecodable floor (worktree lane, 2026-09-04)
+
+- **Goal:** issue 915 made the all-cambox optical undecodable floor report-only (did not gate `overall_pass`) while its physical blockers were open. All are now closed (issue 909 cam1 grabber card replaced; issue 881 120Hz monitor + issue 1179 100Hz both owner-ruled never — 60Hz baseline permanent). Item 3 = data-first decide restore-to-zero (option a) vs a smaller calibrated floor (option b), never a silent keep.
+- **Decision:** option (b). Absolute zero is unsupportable — 22 of 31 post-cam1-fix dev1 verdicts carry a nonzero cam2 60Hz temporal-tear residual (68% would false-red). So re-gate + recalibrate: `optical_floor::gates_overall_pass()` false→true; `RUN_UNDECODABLE_FLOOR` 8→6 (steady post-cam1-fix run-wide max 4 / mean 1.3 / p90 3, 50% headroom, below the pre-#707 regression level 10, catches the one genuine cam2 fault outlier of 27); `PER_WINDOW_UNDECODABLE_FLOOR` kept 4 (steady per-window max 3).
+- **Commits:** [red] `388ee3a59` (pure optical_floor + window_gate test flips + a floor-value pin + a new python test) → [green] `b34139adc` (`src/optical_floor.rs` seam flip + floor 8→6 + doc rewrite; window_gate/recording_segments/recording-verdict comment+probe-gated-test-expectation updates; `scripts/e2e_discord_report.py` `_report_only_tripped` guard + block-4 naming) → review fixes `ad85be740` (0 red 4 yellow 5 blue from a fresh-context Explore/fable review, all fixed).
+- **Consumers had NO logic change** — they already fold `... || !gates_overall_pass()`; only the flag value flips. The probe-gated recording_segments.rs/recording-verdict.rs tests flip their expectations because the dependency flipped (no local compile path; reasoned + covered by the pure rustc-replica RED).
+- **RED→GREEN (Tier-0, no cargo compile):** combined `rustc --edition 2021 --test` replica of `src/optical_floor.rs` + `src/window_gate.rs` — RED exactly the 7 changed tests failed against old production, GREEN 44/44. Python `pytest tests/python` e2e_discord_report suite 143 green (incl. two new floor tests). `cargo fmt --all --check` clean; doc-lazy-continuation grep over all touched .rs — 0 added doc-list lines.
+- **Review fixes:** loud FAIL-worded run-wide floor log line; Discord names a per-window-only floor red (new serialized `per_window_undecodable_floor`/`run_undecodable_floor` keys); both copies/gaps + floor details appended together; test anchors on `nad floor`; stale current-state comments/docs reworded (optical_floor.rs/lib.rs/e2e_latency_gate.rs + 4 rule docs + CLAUDE.md router title); floor literals interpolated from the constants.
+- **Calibration trade (review 🔵5, recorded on the ticket):** 8→6 adds detection only in the 7-8 band (no observed fault lives there; observed faults 10, 27) at ~1%/run false-red exposure vs ~0.1% at 8 on an n=31 over-dispersed sample. Walk-back condition: a false red within N green runs → step back to 8 (its own ticket).
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump/close. Durability backup on `refs/autopilot-wip/worktree-agent-afffc4db7c9721cae`.
+
+## issue 1300 — cg-chain-verify: receiver-side ground-truth verdict for SongPlayer -> cg OBS -> strih/stream (2026-09-12)
+- **What:** new `scripts/cg-chain-verify.sh` + pure `scripts/lib/cg-chain-verify.sh` — per-hop genlock-fifo playback verdict (cg-obs `sp-*_video` enumerated / strih `cg` / stream `NDI obs hudba`) off one aligned audit window, + per-hop `asrc: estimated=` ppm residual band, per-hop table + overall PASS/FAIL, exits non-zero (3) on FAIL, `--soak-hours N --csv` for the 24 h flatness plot. Accepts the songplayer genlock series (146-151) from the RECEIVER side (sender contract = issue 1294 §8); pixel-level burn contiguity is issue 1301.
+- **Design:** self-contained bash/awk REPLICA of `resolume_playback::evaluate` (skew<=20, zero dropped/underrun/relock/late-hold/backward-regime deltas, samples>=2) + `jitter_audit::summarize`, pinned to the Rust sources of truth by `tests/harness_cg_chain_verify_1300.rs` (feeds SAME raw-log + SAME windows to both, asserts identical summaries + PASS/FAIL). Chosen over shelling to the real `genlock-jitter-report --verdict-source` binary (no runtime-binary dependency, Tier-0 testable) and over re-deriving thresholds (drift). asrc band ±10 ppm per asrc-residual-floor rule (+8 floor passes, -18 port-collision fails).
+- **Wiring:** `rig-health-audit.py` `check_cg_chain()` report-only NOTE row (never PASS/WARN/FAIL -> never changes the audit exit code); the 787 resolume-rate exemption (`CAMERA_SRC_RE`) unchanged. Reader seam per hop: `CG_CHAIN_<HOP>_LOG` (tests; cg-obs via win-resolume MCP FileRead) / `CG_CHAIN_<HOP>_CMD` (live byte-safe ssh/bundle-state tail).
+- **Verify (Tier-0, no cargo compile):** `bash -n` + `shellcheck -S warning` clean on both scripts; sourced-lib driver over real audit/asrc fixtures (summarize/verdict/asrc/enumerate/csv all correct); orchestrator end-to-end over fixtures (PASS exit 0, FAIL exit 3, soak 2-window via `:` sleep seam, unreadable FAIL, report-only exit 0); `pytest tests/python/test_cg_chain_rig_health_1300.py` 5/5 + full python suite 2203 green + rig-status 33 green; `cargo fmt --all --check` clean; python anchor-simulation of all 12 Rust static anchors present. The Rust parity harness runs at CI (first place replica-vs-Rust equality executes).
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump/close. Durability backup on `refs/autopilot-wip/worktree-agent-a6febcdcda00c3faa`.
+
+## issue 1298 — in-OBS GENLOCK LOCK indicator (statusbar, all managed OBS) (worktree lane, 2026-09-12)
+- **Goal:** a statusbar item on every managed OBS showing LOCKED/DEGRADED/UNLOCKED at a glance — clock disciplined, NDI inputs FIFO-held, output wall-stamped. Contract + three-state vocabulary: issue 1294 §7. Same structs feed issue 1299's fleet facet — designed once, versioned + additive.
+- **Decision (pure, parity-gated):** `src/genlock_lock_state.rs` (`decide`, Tier-0 authority) ↔ `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` (`genlock_decide_lock_state`, OBS/Qt-free C port). UNLOCKED precedence clock>output>no-input; DEGRADED some-unlocked>recent-event>ntp>qpc; else LOCKED. Committed C-vs-Rust parity gate `tests/genlock_lock_state_parity.rs` (lift → `cc` → compare, 1280 vectors).
+- **libobs:** `struct obs_genlock_stats` + `OBS_GENLOCK_STATS_VERSION` + `obs_source_get_genlock_stats` (obs.h/obs-source.c); `genlock_audit_log` now routes its health counters through the SAME `genlock_fill_stats` (format/field order byte-unchanged → all static + pwsh anchors hold). Per-output `obs_genlock_output_stats` + `obs_output_set_genlock_wall_stamping` / `obs_output_get_genlock_stats` (obs.h/obs-output.c/obs-internal.h).
+- **DistroAV:** `ndi-output.cpp` registers wall-stamping true at begin_data_capture success / false at stop (the fork stamps unconditionally).
+- **Frontend:** permanent `QLabel` + always-on 1 Hz `QTimer` (not the stream-only refreshTimer) in `OBSBasicStatusBar.{hpp,cpp}`; enumerates genlock sources/outputs + an async `QNetworkAccessManager` dantesync `:8898` poll (500 ms transfer timeout, never blocks UI); renders green/amber/red + per-input tooltip; emits a `genlock-lock:` OBS-log line on state/reason change.
+- **Commits:** [red] `4864d26d7` (pure decision module + full unit tests vs a RED stub — 14/17 fail) → [green] `3c6df20ac` (implement `decide` — 17/17) → `cc6385b73` (C port + parity gate; gcc+g++ clean, 1280 vectors 0 diffs) → `c49097136` (libobs API + audit refactor + DistroAV hook + Qt widget; blog refactor lift-compiled under `gcc -Wformat=2 -Werror`) → `f15f6aa2e` (vendored-source + non-substring guards, 7/7) → `d9b8b504f` (3-copy pwsh gates, both ymls YAML-valid + anchors confirmed).
+- **Local verify (Tier-0, no cargo compile):** pure module `rustc --test` RED→GREEN; parity logic cross-checked via a gcc+python grid (1280 vectors, 0 diffs); header gcc+g++ `-Werror` clean; blog `-Wformat=2 -Werror` clean; guard test `rustc --test` 7/7; `cargo fmt --all --check` clean; doc-lazy grep clean; both windows-genlock ymls parse + all 10 pwsh anchors present. CI is the first real C/Qt compile.
+- **Output facet = ABSENT-never-UNLOCKED on a pure receiver (imag)**; only `output_present && !output_stamping` penalizes. Filter-based (`ndi-filter`) senders are not obs_outputs → reported absent (safe); hooking that path is a follow-up.
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump/close. Durability backup on `refs/autopilot-wip/worktree-agent-ae6196922b2e63a88`. SUPERVISOR still owns: FULL-BUNDLE fleet deploy (vendored frontend change) + the three-state acceptance screenshots on strih/imag.
+
+## issue 1296 — register RESOLUME-SNV in the dev1 fleet mechanisms (ONE OBS_FLEET list, worktree lane, 2026-09-12)
+
+- **New single source of truth `scripts/lib/obs-fleet.sh`** (`OBS_FLEET` table + `obs_fleet_boxes <facet>` + `obs_fleet_is_home`) — the camera-set.sh analogue for managed OBS boxes. Replaced SIX duplicated box-roster literals (five watchdog `BOXES=` defaults + obs-liveness's hardcoded pair) with a derivation; every legacy facet default reproduced byte-for-byte, env overrides preserved.
+- **Six watchdogs refactored** to derive `BOXES="${X_BOXES:-$(obs_fleet_boxes <facet>)}"`: audio-lag/av-step/vb-matrix unchanged defaults (resolume excluded — no mbc audio/VB-Matrix); bundle-state + network-reach + obs-liveness carry resolume. resolume traveling-safe: bundle-state defers a dark box to the reach watchdog; network-reach stays REPORT-ONLY unless `obs_fleet_is_home` (promotes to paging), the is-home probe computed only when the report-only env is unset so the issue-811 offline test stays offline; obs-liveness polls resolume only while home.
+- **home-check = OBS-WS :4455, NOT dantesync :8898** — RESOLUME-SNV DOES run dantesync 1.8.53 (:8898 answers whenever the box is up; supervisor read-back 2026-09-12 corrected the lane's "no dantesync" premise), but :8898 alone would read "home" with the cg OBS down; the watchdogs need the OBS up, so :4455 is the home+serving signal.
+- **version-integrity-gate `--win-state-report-only`** — surfaces resolume as an informational row that never enters the pass/fail roll-up (stays out of the `[0/8]` blocking set); **rig-health-audit `grade_resolume_bundle`/`check_resolume`** — renders facets when present, omitted when away, rate-EXEMPT (issue 787 stays), never FAIL/WARN.
+- **RED→GREEN (Tier-0, no cargo compile):** sourced-lib + watchdog sourcing verified via driver scripts (same sourcing the rust harness does) — all facet defaults byte-exact, both is-home branches, env overrides win, obs-liveness polls resolume only when home; `bash -n` + `shellcheck -S warning` clean on all `.sh`; version-integrity report-only proven via the gate subprocess (row prints, exit unchanged, unread-file row); `python3 -m pytest` new resolume grader (5) + existing rig-health-audit/rig-status suites (67) green; `cargo fmt --all --check` clean; doc-lazy-continuation grep clean. Rust harness (`tests/harness_obs_fleet_list_1296.rs`) + `tests/version_integrity_gate.rs` new cases compile+run at CI/integration.
+- **Docs:** new `.claude/rules/obs-fleet-list.md` (paths: the lib + the six watchdogs) + CLAUDE.md router line; `targets.md` RESOLUME-SNV section (fleet membership + supervisor on-box `:8899` install checklist); ops SKILL maintenance list updated.
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump/close; the on-box BundleStateServer install on RESOLUME-SNV is the SUPERVISOR's rig step. Durability backup on `refs/autopilot-wip/worktree-agent-a98f474fdc33099d1`.
+
+## #1301 — CG-path burn-id node role (SONGPLAYER 911014 / CG_OBS 911015) — worktree lane
+- **What:** gave the CG path (SongPlayer → cg OBS (RESOLUME-SNV) → strih → stream) a burn-id node role so `recording-verdict` proves pixel contiguity+hold for SongPlayer-originated content. SONGPLAYER=911014 is a chain ORIGIN (painted by songplayer#151, NEVER a camera-under-test); CG_OBS=911015 is a HOP at the new `burn_geom::Corner::BottomCenterRight` (resolume host-role in the DistroAV burn filter).
+- **Crate-root pure core** `src/cg_chain_gate.rs` (Tier-0, mirrors imag_tick_gate + reuses burn_hold): per-hop SongPlayer/cg contiguity + max-hold; `gates_overall_pass()==false` REPORT-ONLY seam so the camera-chain `overall_pass` is provably unaffected. RED `76c4ae624` (stub) → GREEN `5767723ce` → fmt `c676bfe37`, proven RED→GREEN via a standalone rustc replica.
+- **Lock-step sites:** reserved both ids in `recording_latency.rs` + `NODE_BURN_RUN_IDS` (11→13) + python mirrors (qr_align_pins.py, mv_skew_snapshot.py) [`d508d2177`]; the #463 new-corner FOUR mirrors (burn-geom.hpp + host-role `burn_host_is_cg_obs`, colour_sample.rs, colour_scale.rs, burn_payload_parity.rs 6-corner harness) [`78a0994b2`, geometry proven via a freestanding g++ compile]; recording-verdict `--cg`/`--burn-songplayer-run-id`/`--burn-cg-run-id` + the `cg_chain` section + all four `all_burns` exclusion arrays + push site [`070e36e83`].
+- **E2E** opt-in `CG_CHAIN=1` via sourced `scripts/lib/cg-chain-e2e.sh` (#675 pattern; burn ON + cg StartRecord at [5/8], leak-guard burn OFF + StopRecord in cleanup() per #246/#844, StopRecord+pull+`--cg` at [8/8d]) [`6c4cb28d0`]; anchor occurrence-sweep clean, merge→exit 703-distance unchanged.
+- **Fixture** GENERATED 911014 round-trip [`10c2f859e`], explicitly a STAND-IN — a real captured cg-OBS frame replaces it from the first CG_CHAIN=1 run after songplayer#151 ships.
+- **Docs:** `.claude/rules/cg-burn-node-role.md` + CLAUDE.md router + recording-decode SKILL new-node checklist + this log.
+- **UNVERIFIED:** no live SongPlayer burn exists (songplayer#151 unshipped) — a live CG_CHAIN=1 run is a supervisor/rig-ops step. Sender contract #1294 §8.
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump/close. Durability backup on `refs/autopilot-wip/worktree-agent-a76d1b0fe1d8fa75b`.
+
+## #1299 — fleet-visible genlock LOCK facet + dev1 alert watchdog — worktree lane
+- **What:** made the in-OBS genlock LOCK state (#1298) visible to the FLEET: a `genlock_lock` bundle-state facet + a dev1 alert watchdog that pages once per incident when a managed OBS leaves LOCKED + a rig-status chip. The CONSUMER sibling of #1298.
+- **Transport decision (design comment):** the three genlock producers are joined into one decided verdict only inside the #1298 statusbar widget, and its clock facet is widget-private (NOT reachable from the obs-websocket RequestHandler). A true vendor request is unreachable (no host plugin; linux-genlock is ENABLE_PLUGINS=OFF); a built-in request could not get the clock without a duplicate `:8898` poll that can disagree. CHOSEN: emit the widget's decided verdict on a versioned `genlock-lock-json:` heartbeat log line (the ticket's sanctioned fallback), read by bundle-state's #1222 bounded tail — smallest vendored-C++ surface, clock delivered exactly as the statusbar decided it.
+- **obs-fleet** `genlock-lock` facet = strih stream imag resolume (imag in scope as a locking receiver; resolume home-gated) [`984e337f9`].
+- **Pure decision** `scripts/genlock_lock_decision.py` (decide() mirror of `src/genlock_lock_state.rs` fed the same precedence table as the Rust/C parity gate + analyze()): RED stub `b069c8a15` → GREEN `db6059801`, 27/27 pytest.
+- **Gather parser** `bundle_state_gather.genlock_lock_facet_from_log` (newest genlock-lock-json: line → nested facet, omit-when-absent never a false UNLOCKED) + bundle-state-server wiring (attached AFTER build_bundle_state so the flat version-integrity string contract is intact): RED stub `0e4654c5f` → GREEN `5b2286d30`, 7/7 pytest; producer↔consumer round-trip verified.
+- **Producer** `OBSBasicStatusBar.cpp` emits `genlock-lock-json: <json> (#1299)` on change + ~30 s heartbeat via a pure std::string builder (no obs_data) lift-compiled clean under g++ -Wformat=2 -Werror; guard `tests/genlock_lock_json_guards.rs` (2/2, mutual-non-substring vs genlock-lock:) + pwsh anchors in BOTH windows-genlock{,-fast}.yml [`7e3a53201`]; #1298 guard still 7/7.
+- **Watchdog** `scripts/genlock-lock-alert-watchdog.sh` + systemd oneshot+timer+README, reusing obs-watchdog-decision.sh; page UNLOCKED/DEGRADED after 2-pass confirm, stable dedup `genlock-lock-$box`, recovery machine-channel-only, SKIP/UNKNOWN never page, `GENLOCK_LOCK_FETCH_CMD` dry-run seam for the acceptance fixture; SHIPS DISABLED [`6eb406de6`]; bash -n + shellcheck clean, #1206 notify-dedup sweep green.
+- **Rig-status** chip via a report-only `genlock_lock=<state>` feeder token in rig-health-audit.py (generic render, rig-status-page.md) [`3e57ac011`]; existing rig-status/rig-health suites green + 4 new tests.
+- **Docs:** `.claude/rules/genlock-lock-facet.md` (paths: the new scripts + systemd + tests) + CLAUDE.md router line + this log.
+- **UNVERIFIED (supervisor rig/CI steps):** the vendored C++ compiles only on CI (windows-genlock / the frontend is FULL-BUNDLE deploy); the sourced-bash watchdog harness + the `--dry-run` acceptance (fixture + the live "stop dantesync 30 s → exactly one page + one recovery line") are supervisor/rig steps (a worktree worker cannot source the .sh or run a stubbed dry-run locally, #1265); the on-box BundleStateServer already serves :8899 per #732/#1296.
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump/close; the watchdog install+enable is the SUPERVISOR's rig step. Durability backup on `refs/autopilot-wip/worktree-agent-ac5592051bc3bf604`.
+
+## issue 1297 — RESOLUME-SNV dantesync: phase_slew-flip patcher + maintenance-tier gate + fleet-upgrade traveling support (code + docs half)
+
+The traveling CG box's `ntp_server` pointed at `strih.lan` (unresolvable while strih is off) so NTP phase discipline was dead (`ntp_failed`, 0 samples, −14 ms walk) and `system.phase_slew` was absent (the box STEPS, the issue-1130 storm the rig boxes + mbc already cured). This lane ships the CODE + DOCS half; the on-box flip is the supervisor's rig step and the NTP-failover feature is zbynekdrlik/dantesync#111.
+
+- **Pure config patcher** `scripts/dantesync_config_patch.py` (`patch_config` sets `system.phase_slew.enabled=true` preserving key/order, `ntp_server` parametrised default-unchanged, REFUSES to touch `ntp_server_mode` — "never two masters" round-trip invariant; `emit_apply_program` = the EMIT-only PS apply program mirroring the mbc flip on issue 1265): RED (module hidden → ModuleNotFoundError) → GREEN, 16/16 pytest.
+- **Maintenance-tier gate** `scripts/dantesync-maintenance-gate.sh` (REPORT-ONLY, never `[0/8]`): pure `dantesync_maintenance_verdict` reuses the `clock-offset-guard.sh` parsers + `dantesync-version-gate.sh` pin/parser + `obs_fleet_is_home`; ONE honest row, SKIP-when-away never a false red, OK/ALARM(30)/UNKNOWN(11). Tier-0: bash -n + shellcheck clean; pure verdict + full-flow-via-fixtures exercised over the live-broken/good/drift/unreadable/OOB cases (all expected rc); Rust harness `tests/dantesync_maintenance_gate.rs` (10 tests) runs at CI.
+- **Fleet-upgrade** `scripts/dantesync-fleet-upgrade.sh`: `dantesync_resolume_win_spec <ip>` + `dantesync_skip_away_traveling` (reuses `obs_fleet_is_home`, skips an away traveling box from a roll instead of failing it); sources `obs-fleet.sh`; header usage note. 7 new tests appended to `tests/dantesync_fleet_upgrade.rs`; helpers verified via sourced bash over fixtures.
+- **Docs:** `.claude/rules/resolume-dantesync.md` (paths: the touched scripts) with the supervisor RUNBOOK + strih-OFF/ON acceptance; `targets.md` RESOLUME-SNV dantesync facts; `.claude/skills/ops/SKILL.md` maintenance section (appended at end, keeps the sibling-lane merge trivial); CLAUDE.md router line; this log.
+- **UNVERIFIED (supervisor rig steps):** the on-box phase_slew flip + service restart + `:8898/status` read-back (via win-resolume MCP), and the strih-OFF/ON acceptance, are the supervisor's rig step (this lane touches no box); the Rust harnesses compile+run at CI (cargo Tier-0-blocked locally); the sourced-lib `.sh` verification ran locally via `bash <scratchfile>` (the guarded `bash -c '…source…'` form is refused in a worktree, #1265).
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump/close. Durability backup on `refs/autopilot-wip/worktree-agent-a86915b79091b27bd`.
+
+## 2026-09-12 — #1295 (RESOLUME-SNV cg OBS onto the genlock fleet — CODE half) — worktree worktree-agent-a900aed4571f6e22a, base origin/dev 4ac2a8cfa
+
+- **Scope:** make the `cg` OBS on RESOLUME-SNV (traveling CG box, win-resolume MCP, resolume.lan) a first-class genlock fleet member so the SongPlayer `sp-*` inputs ride the genlock FIFO on the fleet clock. CODE + docs half; live deploy/relaunch/pin/verify is the SUPERVISOR rig step.
+- **Load-bearing finding (shrank scope-3):** `vendor/distroav/src/ndi-source.cpp` DEFAULTS every `ndi_source` to `genlock_fifo=true` (:730) + `genlock_latency_ms_src=3` (:733) + auto-forces the certified coercion. So the "pin every sp-* input" step is a CONFIRM (verify-read-back), NOT a WS write → no new WS client/writer added (honors the "reuse, never a new WS client" constraint).
+- **deploy-genlock-fleet.sh:** a `resolume` arm (fleet_box_mcp=win-resolume, has_ahk=0, keepalive="", fleet_box_ip=hostname resolume.lan never a pinned IP; normalize accepts it but EXCLUDES it from the empty-default fleet — traveling, explicit-only); emit_windows_plan prints a live box-IDENTITY confirm preamble for resolume only (planner emits, never runs); usage strings updated. RED `3c4dcc9ce` → GREEN `ec1a518e2`.
+- **launch-obs-genlock.sh:** `--box resolume` reuses build_launch_program's has_ahk=0 path (stream-shaped); render-tick/DistroAV verify + SessionId/MainWindowTitle gate intact; STEP-3b wires `latency_pins_verify.py --box resolume --host resolume.lan`.
+- **latency_pins_verify.py:** `--box resolume` + a `_ndi_inputs_matching` prefix-floor sentinel {regex `(?i)^sp-.*_video$`, ms 3} — matching inputs must equal ms, overlays untouched, fail-CLOSED on zero matches. apply_latency_pins.py refuses the match sentinel (→ `--pins`). latency-pins-baseline.json gains the resolume block (REPORT-ONLY drift reference).
+- **Docs:** targets.md cg-OBS facts (profile `cg` / `cg_scenes` / output `RESOLUME-SNV (cg-obs)` / exactly-one-obs64 / crash dir / the dead pid 58560 2026-09-12), obs-ops SKILL box list, `.claude/rules/resolume-cg-obs.md` (paths-scoped supervisor RUNBOOK: deploy → relaunch → confirm pins → cg-chain-verify.sh locked=1), CLAUDE.md router line, this log.
+- **Verify (Tier-0):** python verify+apply RED→GREEN (68 pass; 11 RED against pre-change code); deploy/launch emit-only anchors simulated against the real emitted plan/program text; bash -n + shellcheck -S warning + `cargo fmt --all --check` clean.
+- **UNVERIFIED (supervisor rig steps):** the live deploy/relaunch on RESOLUME-SNV (win-resolume MCP), the read-only `latency_pins_verify.py --box resolume` + `cg-chain-verify.sh` runs, and the Rust test suite TYPE-check (CI is the first place the new Rust cases compile). Durability backup on `refs/autopilot-wip/worktree-agent-a900aed4571f6e22a`.
+
+### issue 1295 follow-on — RESOLUME-SNV cg OBS AHK correction (2026-09-13)
+- **Correction:** the code half set `has_ahk=0` for resolume; the supervisor pre-deploy inventory (win-resolume MCP, 2026-09-13) found RESOLUME-SNV RUNS an AutoHotkey v2 safe-loop (`C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe` running its own `NL_STARTUP.ahk`, `SafeLoop:=1`) respawning Arena AND OBS — same pattern as strih. A deploy/relaunch that does not stop it first races a SECOND obs64 (likely origin of the dead 0-thread pid 58560).
+- **scripts/lib/ahk-watchdog.sh:** `ahk_resolve_and_relaunch_ps` gains two OPTIONAL args (AHK_SCRIPT, PREFER). No args = strih `D:\_APPS\NL_STARTUP.ahk` + exe-first, BYTE-IDENTICAL to before (obs-self-heal-install.sh + the 867 harness + the strih arms unchanged); resolume passes its own v2 `.ahk` path (space double-quoted in the ArgumentList) + `prefer=lnk` (Startup shortcut first — path-move-durable on the traveling box).
+- **deploy-genlock-fleet.sh:** `fleet_box_has_ahk resolume=1`; new table-driven `fleet_box_ahk_script` / `fleet_box_ahk_prefer`; `build_windows_deploy_program` threads them into the relaunch + names the box in the restart FAIL message (strih byte-neutral). keepalive stays "" (AHK IS the respawner, like strih).
+- **launch-obs-genlock.sh:** `--box resolume` now `has_ahk=1` + per-box AHK identity passed into `build_launch_program`; the stop→relaunch-verified bracket + the SessionId/MainWindowTitle gate now cover BOTH obs64 AND AutoHotkey64 on resolume; the identity-confirm caveat + every strih/stream plan stay byte-neutral. Box-generic wording for the AHK FAIL/session messages (no "strih" in a resolume plan).
+- **Tests (RED `5351645fe` → GREEN `324851cf4`):** deploy `resolume_box_constants_..._with_ahk`/`..._carries_ahk_and_no_keepalive` flipped negative→positive + assert the per-box AHK identity + strih byte-neutral; launch `cli_box_resolume_selects_win_resolume_with_ahk` flips the negative AHK assertion + asserts the AutoHotkey64 SessionId gate + resolume `.ahk` path; new ahk-watchdog lib tests pin no-args=strih-exe-first + resolume=lnk-first+own-path. `windows_ahk_bracket_only_on_strih` renamed `..._on_ahk_box_not_stream`.
+- **Docs:** targets.md cg-OBS AHK facts (v2 exe, `.ahk` path, Startup shortcut, respawns Arena AND OBS, force-kill-without-stop → second obs64, Arena-Bridge credential never copied), `.claude/rules/resolume-cg-obs.md` AHK section + runbook steps 1/2, CLAUDE.md router line (`has_ahk=0`→`has_ahk=1`), this log.
+- **Verify (Tier-0):** `bash -n` + `shellcheck -S warning` on all three scripts; strih no-args relaunch output diffed BYTE-IDENTICAL vs the committed lib; resolume deploy + launch plans EXECUTED standalone and grepped for the AHK stop/restart-verified bracket, the resolume `.ahk` path (not strih's), lnk-first, the AutoHotkey64 SessionId gate, no keepalive schtasks, identity-confirm + no pinned IP; `cargo fmt --all --check` clean.
+- **UNVERIFIED (CI / supervisor rig):** the Rust test suite TYPE-checks + runs at CI (Tier-0 blocks all local cargo compile); the live deploy/relaunch on RESOLUME-SNV is the supervisor rig step. Durability backup on `refs/autopilot-wip/worktree-agent-a68cef26a220dfa99`.
+
+## #1295 post-deploy follow-ups A/B/C (worktree lane, RED `6ad6a742d` → GREEN `d54706308`)
+
+Three scoped fixes surfaced by the supervisor's LIVE genlock deploy of cg OBS onto RESOLUME-SNV.
+
+- **A — session gate / obs64 count ignores DEAD process objects.** `scripts/launch-obs-genlock.sh`'s
+  `#978` gate false-failed `expected exactly 1 obs64 process, found 2` off a STALE `Get-Process`
+  handle (pid 58560, `HasExited`, 0 threads, ~45 KB). Now counts only LIVE obs64
+  (`-not $_.HasExited -and $_.Threads.Count -gt 0`), LOGs each ignored zombie (pid + start time),
+  keeps `$sessObsProcs.Count -ne 1` over the live array; both obs64 wait-picks (initial + `#786`
+  relaunch) are live-filtered. `deploy-genlock-fleet.sh` only STOPs obs64 (no count gate) → no
+  obs64-filter there. Bundle-state obs64-count facet (the issue-1296 health signal): new pure
+  `OBS_LIVE_MIN_MEM_KB`/`tasklist_mem_kb`/`tasklist_row_is_live_obs` (tasklist has no HasExited
+  column → Mem Usage is the liveness proxy); `bundle-state-server._parse_tasklist_obs_process_names`
+  excludes a ~0-KB zombie row so the count stops inflating to 2.
+- **B — `latency_pins_verify.py`: an ABSENT `genlock_latency_ms_src` on a GENLOCK BUILD is the build
+  DEFAULT, not DRIFT.** The stock-saved resolume collection has the key absent on every `sp-*_video`
+  input → 9× `got=N/A want=3ms` false DRIFT. New `read_genlock_default_ms` reads the ndi_source type
+  default over the EXISTING WS (`GetInputDefaultSettings`) — the DistroAV fork registers
+  `genlock_latency_ms_src=3` as an obs_data default (`ndi-source.cpp ndi_source_getdefaults`), so a
+  non-None default == genlock build; `read_live_pins` now returns `(pins, build_default)` and
+  `diff_pin`/`verify_box` thread an optional `build_default` so an absent key resolves to
+  `default(3)=OK` on a genlock box and stays N/A DRIFT on stock. No new transport.
+- **C — cosmetic.** `deploy-genlock-fleet.sh`'s `#789` AHK-restart failure no longer claims a
+  has_ahk box "has NO respawn watcher" (it HAS one) — now "the AHK respawn watcher on `${box}`
+  failed to restart". `exit 9` fail-loud unchanged.
+- **Tests (RED → GREEN):** `tests/launch_obs_genlock.rs` (live filter + DEAD-obs64 log + kept count
+  gate, force path too); `tests/deploy_genlock_fleet.rs` (no "has NO respawn watcher", says "failed
+  to restart"); `tests/python/test_latency_pins_verify.py` (`read_genlock_default_ms`,
+  `diff_pin`/`verify_box` build_default, main exit-0-on-genlock-default / exit-1-on-stock; 5 existing
+  main monkeypatches updated to the `(pins, build_default)` tuple contract);
+  `tests/python/test_bundle_state_gather.py` + `test_bundle_state_server_process_facets.py`
+  (Mem-Usage liveness + a zombie-row CSV fixture).
+- **Verify (Tier-0):** `bash -n` + `shellcheck -S warning` clean on both scripts; the launch program
+  emitted standalone for strih+resolume (default AND force) shows the live filter, the DEAD-obs64
+  log, the kept count gate, and filtered wait-picks; `py_compile` clean; 206 python tests pass;
+  `cargo fmt --all --check` clean. Design addendum + validated comment on the ticket.
+- **UNVERIFIED (CI / supervisor rig):** the Rust test suite TYPE-checks + runs at CI (Tier-0 blocks
+  all local cargo compile); a live `latency_pins_verify --box resolume` read-back + a relaunch on
+  RESOLUME-SNV are supervisor rig steps. Followup_candidate: `scripts/lib/obs-session-visibility.sh`
+  (the `[0/8]` preflight + issue-979 watchdog) counts obs64 by name with the SAME zombie-blind class
+  — not in the A-spec's enumerated set, returned for the supervisor to fold or file.
+
+## 2026-09-13 — #1295 (last follow-on): zombie-blind obs64 count in the shared session-visibility probe
+
+- **Issue #1295** (RESOLUME-SNV cg OBS onto the genlock build) — the FINAL follow-on after A/B/C
+  (`6ad6a742d..e8004ad70`): the obs64 by-name counters the A fix did NOT reach.
+- RED `b7813ee3a` (test) → GREEN `9f375326b` (fix).
+- Root cause: `Get-Process obs64` enumerates a STALE handle for an already-EXITED obs64
+  (`HasExited=True` / 0 threads / ~45 KB — the live 2026-09-12 RESOLUME-SNV pid-58560 case), so a
+  raw `.Count` reads 2 and the "exactly one obs64" invariant FALSE-fails on a healthy box.
+- Fixed (LIVE filter `-not HasExited -and Threads.Count -gt 0`):
+  - `scripts/lib/obs-session-visibility.sh` — the ONE detector the issue-977 `[0/8]` preflight +
+    issue-979 dev1 watchdog share: probe counts/picks LIVE only, emits report-only `OBS_ZOMBIES=` +
+    `OBS_ZOMBIE_PIDS=`; new pure `obs_session_visibility_zombie_note` surfaces the dead pid WITHOUT
+    making the health message non-empty (never gates/pages). `obs-session-watchdog.sh` +
+    `recording-e2e.sh [0/8]` LOG the note report-only (recording-e2e change is NEW lines only;
+    anchor occurrence-count sweep unchanged).
+  - `scripts/obs-self-heal-install.sh` — wedge sample + VerifyRecovered post-count (a zombie
+    count=2 else hit `obs_watchdog::classify` `ObsCountWrong` → a FALSE kill+relaunch of healthy OBS).
+  - `scripts/obs-guarded-launch.ps1` — presence check + wait-pick.
+- Grep-sweep verdicts: `Stop-Process -Force` kill-all sites (`deploy-genlock-fleet.sh`,
+  `launch-obs-genlock.sh:179`, `mv-reverify-escalate.sh`) are SAFE (no-op on a dead handle);
+  `rig-health-audit.py`'s raw count is an active issue-1296 surface — left to that lane
+  (followup_candidate), documented in `.claude/rules/win-ssh-vs-mcp.md`.
+- Tier-0: bash -n + shellcheck clean on all edited shell scripts; sourced the lib and ran its pure
+  parsers over zombie fixtures (green); `cargo fmt --all --check` clean. Design addendum + validated
+  comment on the ticket.
+- #1304 (bkshading panel +/- step buttons) + #1305 (PWA install) + #1306 (off-grid clona f/(null)
+  fix) — ONE worktree lane, v1.7.0-dev.626, branch worktree-agent-a3266d0831e43df76.
+  #1304: proto CameraCaps.fnumber_choices (camelCase, serde default; Eq dropped — Vec<f64>) filled
+  from parse_fnumber_labels via parse_fnumber; panel -/+ per clona (one f-number choice) / biely bod
+  (±100 K) / tint (±1), disabled at bounds / when no choices, one tap = one PUT (no auto-repeat,
+  issue 1229). Commits 4f7f1427c (feat) + 3c7d5cb14 (review: count-parity via the ONE
+  parse_fnumber_labels basis across read-norm/plan_writes/caps). Playwright E2E in the bkshading CI
+  job (stub_relay.py + webServer). Tests: proto serde/parity, relay fake-runner, python static.
+  #1305: manifest.webmanifest + no-cache sw.js + deterministic stdlib gen-icons.py (icon-192/512 +
+  favicon.svg) + http.rs 5 routes (include_bytes/str, pure *_asset helpers) + guarded SW register.
+  Commit 44247321c. Tests: python static + service route/content-type/PNG-magic.
+  #1306: gphoto2 Current:(null) off-grid aperture recovered from --summary raw (0x5007 x100), folded
+  into the d003 session (get_focus_and_summary, still 3 USB sessions — issue 1229); nearest-choice
+  norm; sub-0.5 junk-choice filter in the ONE label basis. RED 9ea0e81db -> GREEN de36cbcc2 -> docs
+  0af7893d5 -> review-fix 56f3a8c3a (off-list Current nearest fallback). Tier-0: fmt + rustc replicas
+  (RED->GREEN proven); CI is the first real compile. Two fresh-context reviews (0 blockers/majors;
+  findings fixed same-branch). Rig-verify UNVERIFIED: live cam1/cam2 panel + the d003/--summary
+  emit order (fail-safe either way).
+  #1303 (code lane, worktree): receiver-side AUDIO genlock parity. Part 1 = the audio HOLD wired at
+  the source_output_audio_data ingest seam (obs-source.c) — a genlock_fifo source's audio delayed by
+  the same effective latency_ms the video FIFO holds video; pure decision src/genlock_audio_pairing.rs
+  (delay/offset/decide_audio_health) + 3 static-inline C mirrors + parity gate
+  tests/genlock_audio_pairing_parity.rs (C↔Rust byte-identical, cc -Wconversion -Wformat2 -Werror).
+  Part 2 = ASRC confirmed unchanged (rate servo, orthogonal) + docs (genlock-sender-contract receiver
+  section + rules/genlock-audio-pairing.md); corrected the stale ASRC_TIME_CONSTANT_S/MIN_LOCK_S names
+  to ASRC_REGRESSION_*. Part 3a = audio facet (audio_enabled/audio_delay_ms/audio_pairing_offset_ms)
+  in obs_genlock_stats v1->v2 + the genlock-fifo audit line + jitter_audit parser (additive,
+  forward-compat) + genlock_preload anchor + both windows-genlock*.yml pwsh gates. Part 5 =
+  cg-chain-verify audio column (cg_chain_parse_audio_facet + CSV cols + report-only AUDIO column).
+  Commits f78d4421d (pure) + 3a7441eac (C mirror/wire/parity) + 8d742fb97 (facet) + 2ae7b69e5 (docs +
+  cg-chain) + 022608752 (review fix: else-zero stale audio_delay_ms). Tier-0: pure rustc 14/14,
+  jitter_audit 28/28 (RED proven), gcc lift-compile, python awk/CSV sim, bash -n + shellcheck, fmt.
+  Fresh-context review 0R/0Y/3B (1 fixed, 2 dropped-with-reason). Parts 3b (LOCK-indicator audio term,
+  frontend-coupled) + 4 (per-box certified-table audit) returned as followup_candidates. Overlap
+  files genlock_lock_state.rs / obs-fleet.sh UNTOUCHED. UNVERIFIED: live A/V soak (±20ms/1h, deep
+  latency) = post-merge supervisor rig step.
+
+- #1229 (bkshading relay deploy — 2026-09-13 escalation piece: gate deploy/restart on rig-not-busy):
+  RED 101c7eb8f → GREEN 5d13d3332 → docs 496298ad2 → review-fix 0670b32b7 (branch
+  worktree-agent-a42d469b9f564addb, off origin/dev e2d651bc3). Root cause: a relay deploy DURING
+  live production fork-wedged cam1 (gphoto2 PTP on the single shared xHCI controller → D-state +
+  fork-exhaustion, owner power-cycle). Fix in scripts/bkshading-deploy-relay.sh: (1) rig-busy
+  PREFLIGHT before the first cambox ssh/scp, REUSING the shared stray_session_check_assert guard
+  (obs_phase2.py rig-busy-check, never a duplicated WS loop) — refuses on busy, --force-live
+  supervisor-only bypass (logged loudly), fail-OPEN only when no box readable; (2) ETXTBSY fix — scp
+  to a same-dir staging path (.deploy.<pid>) then atomic mv -f over the running binary (rename swaps
+  the inode), enable-only invariant untouched, ro root always restored + stage cleaned on failure.
+  Tests: tests/python/test_bkshading_deploy_relay_808.py +5 (rig-busy refuse / --force-live bypass /
+  unreadable fail-open / staged-mv shape / ro-restore+stage-cleanup on scp fail), all proven RED
+  against pre-fix then GREEN; _fake_deploy_env now seeds a fake idle obs_phase2 so the whole suite
+  stays hermetic. Doctrine appended to .claude/rules/bkshading.md (append-only vs the open release
+  PR). Tier-0: bash -n + shellcheck -S warning clean, 21/21 python tests pass, fork-point diff for
+  the review dispatch. Fresh-context adversarial review CLEAN (0R/0Y/2B, both fixed in-branch).
+  UNVERIFIED (supervisor rig step): live A/B clean-watch on cam1 (relay-on vs off) + a real busy-rig
+  refusal — not touchable in-lane (no ssh to any cambox). The restart that adopts a new binary
+  stays a separate rig-idle-only supervisor step. Cross-ref issue 1228 (relay Restart= lifecycle) —
+  systemd unit untouched.
+## 2026-09-13 — #1303 part 4 (per-box forced-table AUDIO audit + deploy preflight) + issue 1295 planner exit-0 nit — worktree lane, base origin/dev e2d651bc3
+- **#1303 part 4** (deferred by the parts-1/2/3a/5 lane): a REPORT-ONLY per-box-class certified-table
+  AUDIO/yuv audit. Root cause — the DistroAV fork forces `ndi_audio=false` on every NDI input (values
+  read off a camera input), so a genlock build onboarded onto a PROGRAM-audio box (cg OBS: `sp-*`/`cg`/
+  music inputs) silently shipped program audio OFF and only surfaced on air (event morning). New pure
+  crate-root module `src/genlock_forced_table_audit.rs` (Tier-0, `genlock_lock_state.rs` pattern) owns
+  the per-box-class expectation table + classification (camera=silent, `sp-*`/`cg`/`pgm`/music=audio,
+  box default) + a report-only `yuv_range=partial on a program source` advisory. Byte-for-byte bash
+  replica `scripts/lib/genlock-forced-table-audit.sh` (source-only lib) is the deploy-preflight
+  classifier; `deploy-genlock-fleet.sh` `emit_forced_table_audit_preflight` prints it before STEP 0 of
+  every box's plan (never a write, never a gate). Commits d8b47e17f (module+classifier+tests) +
+  57b6b661e (preflight wiring). Tier-0: pure rustc 12/12, 88-vector Rust↔bash parity diff clean,
+  bash -n + shellcheck, `cargo fmt --all --check`, doc-lint grep.
+- **issue 1295 planner nit**: `deploy-genlock-fleet.sh --plan` emitted the fleet-log record as a BARE
+  tab-separated line after the last box program's `exit 0`; a saved `.ps1` parsed whole in file mode
+  then failed (owner: "At C:\deploy2.ps1:170"). Fix — emit the record as a `#`-comment + a trailing
+  `exit 0` so the plan's last non-empty line is clean. RED 13f08c6f3 (test) → GREEN b2352a601 (fix);
+  RED proven against origin/dev's planner (its last line was the bare record). `fleet_log_line`
+  unchanged (execute-mode file append still writes the raw record).
+- Docs: 6aa89caf6 (sender-contract per-box table section + genlock-fleet-deploy rule preflight section).
+- OVERLAP-BYPASS with release PR #1293: `scripts/deploy-genlock-fleet.sh` + `docs/genlock-sender-contract.md`
+  touched ADDITIVELY only (a new emit function + two call sites + a commented log line + a trailing
+  echo; one appended doc section) — no existing content reordered/rewritten.
+- UNVERIFIED (post-merge supervisor rig steps): the LIVE audit read on real boxes (win-* MCP / OBS-WS
+  enumeration + the classifier) and the sourced-bash `run_under_set_e`/cargo test suite (Tier-0 blocks
+  cargo compile in this worktree; the Rust harness runs at CI). Followup deferred: #1303 part 3b
+  (LOCK-indicator audio DEGRADED term, frontend-coupled).
+## issue 899 — defect 2: process-wide FIFO → per-thread SCHED_FIFO (code lane, worktree, 2026-09-13)
+- **Scope:** the ticket body's SECOND defect only (defect 1 lowlatency kernel = supervisor rig step; defect 3 xhci-IRQ-off-grab already merged+deployed). Drops the process-wide `CPUSchedulingPolicy=fifo` (which put every thread FIFO-50 on the isolated core — 27 on cam1) and raises SCHED_FIFO per-thread only on the capture+emit hot path. No thread moves cores (strictly safer than the staged Approach 2 that migrates NDI emit threads and needs a live measurement).
+- **Commits:** `df11e1f8c` (feat: `src/affinity.rs` pure `realtime_fifo_priority(RtThreadRole)` + `set_current_thread_realtime` glue + `CAPTURE_FIFO_PRIORITY`=90; `src/main.rs` wires `apply_realtime_scheduling` + the cam1-burn emit thread through the seam) → `e3c59e732` (fix: drop `CPUSchedulingPolicy`/`CPUSchedulingPriority` from BOTH unit copies — setup-device.sh STEP 7 + systemd/camera-box.service baked by build-image.sh — rewrite the stale HONEST-NOTE comment; lock via realtime_isolation_unit_comment_899.rs + provisioning_realtime_isolation.rs) → `2b837659b` (feat: verify-device.sh check `(ah)` HARD FAIL — no process-wide policy AND live FIFO thread count <= ceiling 4; pure `rt_thread_policy_verdict`/`rt_fifo_thread_ceiling`; tests in verify_device_pure_functions.rs).
+- **setcap:** unchanged — STEP 9 already grants `cap_sys_nice,cap_ipc_lock`, so the binary can set FIFO per-thread from userspace; neither unit declares AmbientCapabilities (file caps, not systemd ambient).
+- **RED→GREEN (Tier-0, no cargo compile):** rustc `--test` replica of the pure decision — RED 1/3 (wrong `Auxiliary→Some(90)`) → GREEN 3/3. Standalone bash replica of `rt_thread_policy_verdict` matches the 8-state test expectation; `ps class==FF` awk parse verified (3/0/0/1/27). git-HEAD-vs-worktree replica proves both units carried the directive pre-fix (the no-policy tests genuinely bite). python simulation of the verify-device slice anchors ((q)/(af)/(ag)/(ah) + header/usage) all PASS; occurrence-count sweep on both scripts clean (setup-device fully stable; verify-device only my additions). `cargo fmt --all --check`, `bash -n`, `shellcheck -S warning` all clean.
+- **What stays open / unverified:** the live per-box redeploy of the new unit+binary and the `verify-device.sh` acceptance proof are a SUPERVISOR rig step (cam1 gets it via its re-provisioning run today); never hand-patched a live unit from this lane. The (ah) check is an UPPER-bound (catches the ~27-thread regression); a lower-bound "grab is actually FIFO / setcap present" check is a possible follow-up. The deeper Approach-2 (move NDI emit threads off core 3) stays staged (needs a #728-style emit measurement).
+- **Playbook:** updated `.claude/rules/realtime-isolation.md` (defect 2 now code-fixed, not runbook Step B) + the CLAUDE.md router line.
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump/close. Durability backup on `refs/autopilot-wip/worktree-agent-a5c9cc1d3c7d33a5d`.
+
+## #1307 slice — headless no-clock alerting via dev1 (worktree lane, 2026-09-13, base ac838ae4b)
+
+- **Scope:** ONLY the "headless no-clock alerting via dev1" deliverable of #1307. The DNS-named
+  grandmaster resolver (`scripts/lib/rig-grandmaster.sh`, commit `6e81adb57`) was already done; the
+  dantesync#113/#114 + fleet allowlist rollout are owned elsewhere. Owner ruling ROZHODNUTÉ #1307
+  (2026-09-13) landed mid-lane: PRODUCTION-CRITICAL class → re-ping repeatedly while the fault
+  persists (umbrella #1308).
+- **Deliverable:** a new dev1 alert-watchdog sibling that reads EVERY dantesync node's `:8898/status`
+  (cam1-7 via camera-set.sh `camera_resolve` incl. retired-but-powered cam5-7, + strih/stream/imag/
+  resolume via obs-fleet.sh `obs_fleet_host`; resolume paged only while `obs_fleet_is_home`) and pages
+  on NO_CLOCK (not-locked / foreign-gm / `ntp_step_storm`) / DNS_UNRESOLVABLE (`video-clock.lan` won't
+  resolve) / GM_CHANGED (resolved grandmaster IP moved between passes — today's „ip sa zmenila").
+- **Commits (mine, after ac838ae4b):** `fc24616d6` (test RED — pure decision) → `62607f4de` (feat
+  GREEN — `scripts/dantesync_clock_decision.py`: analyze mirrors clock-offset-guard.sh field
+  semantics + dantesync#114 `clock_alarm` forward-compat single-constant; `dedup_key` time-bucketed;
+  `grandmaster_change`) → `4125952e8` (feat orchestrator `scripts/dantesync-clock-alert-watchdog.sh`
+  reusing obs-watchdog-decision.sh 2-pass confirm + rig-grandmaster.sh + camera-set.sh + obs-fleet.sh)
+  → `50b75363f` (systemd --user units, ship DISABLED) → the rule/router/log commit → the
+  watchdog-notify-dedup.md + #1206 sweep allowlist commit (production-critical time-bucket exception).
+- **#1119 storm signal:** dantesync's OWN `ntp_step_storm` boolean (its 120/h alarm) — there is NO
+  numeric steps-per-hour literal in `dantesync-gate.sh` to reuse (its verdict IS the boolean), so we
+  page on the boolean and carry `ntp_steps_last_hour` in the reason (never a re-hardcoded 120).
+- **Re-ping (owner ruling):** `--dedup-key dante-clock-<box>-<floor(now/REPING_INTERVAL_S)>`
+  (600s default, floor 60) computed in the pure module (deterministic now injected → unit-tested:
+  t / t+599 → same key, t+600 → new key, healed → no key). Recovery is ONE machine-channel log line.
+  Deliberate exception to watchdog-notify-dedup.md, allowlisted in the #1206 sweep — its own commit.
+- **RED→GREEN (Tier-0, no cargo):** 22/22 pytest on the pure module (RED = module absent; one RED
+  fixture had off-by-bucket arithmetic — code correct, fixture fixed in GREEN with justification).
+  `bash -n` + `shellcheck -S warning` clean on the orchestrator. Stubbed `--dry-run` (inline literal
+  `DANTE_CLOCK_FETCH_CMD`/`RIG_GRANDMASTER_IP`/`DANTE_CLOCK_NODES`/`DANTE_CLOCK_NOW` — a worktree lane
+  cannot run `bash -c`/variable-value shapes) exercised: per-node OK/NO_CLOCK/SKIP/UNKNOWN, 2-pass
+  confirm → bucketed alert, DNS_UNRESOLVABLE (per-node grading continues), GM_CHANGED
+  seed/candidate/confirm/normalize, resolume home-gate away/home.
+- **What stays for the SUPERVISOR (integration):** install the --user units on dev1, a live `--dry-run`
+  against the reachable fleet, then `systemctl --user enable --now` the timer + a live-verify page.
+  No box-side change from this lane; no ssh to 10.77.9.x, no Discord send.
+- **Playbook:** new `.claude/rules/dantesync-clock-alert-watchdog.md` (paths-scoped) + one CLAUDE.md
+  router line + the watchdog-notify-dedup.md production-critical-class paragraph.
+- **Lane scope:** worktree lane — no push/PR/merge/close. No version bump (dev already 1.7.0-dev.626 >
+  main .624; dev1-side scripts/tests/docs only). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a3dc5a6fe78ef70a2`.
+
+## 2026-09-13 — issue 1308 step 2 (production-critical re-ping rollout + dantesync-alive) — worktree worktree-agent-acfc75b6bac59c55e, base 2d1b18576
+
+- **Scope (issue 1308 step 2 only; step 3 = supervisor rig enable/live-verify, NOT this lane):**
+  generalise the issue-1307 time-bucketed re-ping into ONE shared helper, roll it across the 11
+  production-critical dev1 watchdogs, and add the dantesync-alive branch to the dante-clock watchdog.
+- **Shared helper:** `scripts/watchdog_reping.py` (pure `notify_key`/`reping_interval` + `dedup-key`
+  CLI) + the byte-for-byte bash twin `watchdog_notify_key` in `scripts/lib/obs-watchdog-decision.sh`
+  (interval env `REPING_INTERVAL_S`, default 600, floor 60). `dantesync_clock_decision` now delegates
+  (`reping_interval` IS the shared object; `dedup_key = notify_key`) — one implementation. RED→GREEN
+  + bash↔python parity in `tests/python/test_watchdog_reping_1308.py`.
+- **11 watchdogs:** each ALERT `--dedup-key` wrapped with `$(watchdog_notify_key "<stable-key>"
+  "$(date +%s)")` (genlock-lock/network-reach/bundle-state/obs-liveness/audio-lag+band/asio-starve
+  tap+main/vb-matrix/ndi-portmap/avsync-heartbeat/imag-obs x3); dante-clock switched its
+  `bucketed_key` to the shared helper. Detection/throttle + recovery (log-only) UNTOUCHED. The #1206
+  sweep allowlist is CLASS-based (11) and rejects a bucketed key in any diagnostic/TEST-mode watchdog.
+  Delivery-layer caveat: the 10 throttled watchdogs re-ping at `max(throttle, bucket)` cadence; only
+  dante-clock fires every pass. Diagnostic/TEST watchdogs left one-ping (unchanged).
+- **NO_DANTESYNC (the documented issue-1307 blind spot, now closed):** on `:8898` unreachable the
+  orchestrator probes box up-ness (shared `scripts/lib/watchdog-tcp-probe.sh` = extracted
+  network-reach `probe_tcp`; cams ssh 22, OBS boxes 4455/8899/22 up-iff-any) → `analyze --box-up`:
+  up = NO_DANTESYNC page (own bucketed key + confirm latch), down/unprobed = SKIP defer #1001 (never
+  a false page). Version != `DANTESYNC_VERSION_PIN` (subshell-sourced from dantesync-version-gate.sh)
+  REPORTED in the card, never a page; absent = silent. RED→GREEN in the 1307 pytest.
+- **Tier-0 (worktree lane):** 3 pytest files green (56 dante + 22 reping/sweep incl. bash↔python
+  parity + CLI smoke); `bash -n` + `shellcheck -S warning` clean on all 11 watchdogs + the 2 libs;
+  CLI smoke-tested NO_DANTESYNC/SKIP/version-note directly. NOT runnable in a worktree lane
+  (supervisor runs at integration): the sourced-lib `run_under_set_e` harnesses + a stubbed
+  `--dry-run` of the dante watchdog (`DANTE_CLOCK_FETCH_CMD`/`DANTE_CLOCK_BOX_UP_CMD`/
+  `DANTE_CLOCK_VERSION_PIN`/`DANTE_CLOCK_NODES`/`DANTE_CLOCK_NOW`).
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. No version bump
+  (dev1-side scripts/tests/docs only). Durability backup on
+  `refs/autopilot-wip/worktree-agent-acfc75b6bac59c55e`.
+
+## issue 1310 — dev1 measurement-audio presence watchdog (item 1)
+- **What:** new dev1 alert-watchdog paging when the mbc measurement-audio chain reads DIGITAL
+  SILENCE between E2E runs (the instrument the A/V-sync leg reads; silent-checked today only in-RUN
+  by the audio-presence preflight, so a dead chain is invisible until the next ~300 s E2E burns a
+  cycle — release E2E 34764817477 `max_volume -91.0 dB`).
+- **Design/measurement:** reads the `mbc` peak LEVEL off stream OBS via the obs-websocket
+  `InputVolumeMeters` event (no recording, no disk, no rig mutation) — approach 1, chosen over a
+  probe-recording (rejected: mutates the rig every 60 s) and a log-parse (rejected: no per-source
+  level line exists).
+- **Files:** `scripts/measurement_audio_decision.py` (PURE verdict SILENT/PRESENT/SKIP/UNKNOWN,
+  pytest Tier-0), `scripts/measurement_audio_meter_probe.py` (WS meter probe, I/O half),
+  `scripts/measurement-audio-alert-watchdog.sh` (orchestrator: EVENT gate via rig-mode-state.sh,
+  2-pass confirm + time-bucketed re-ping via watchdog_notify_key, threshold sourced from
+  audio-presence-preflight.sh), `systemd/measurement-audio-alert-watchdog.{service,timer,README.md}`,
+  `.claude/rules/measurement-audio-watchdog.md`.
+- **Threshold single-sourcing:** added `audio_preflight_default_threshold_db` to
+  `scripts/lib/audio-presence-preflight.sh` and refactored the -60 dB default-arg sites to it, so the
+  silence bar is one source (never retyped in the python decision).
+- **Class wiring:** added to the production-critical allowlist in
+  `tests/python/test_notify_dedup_key_sweep_1206.py` + the table in
+  `.claude/rules/watchdog-notify-dedup.md` (12th member); TEST-gated like splitter-port but
+  production-critical (rig-mode gate is orthogonal to fault-criticality).
+- **RED->GREEN:** `test(#1310)` RED (module absent) -> `feat(#1310)` GREEN pure decision;
+  `test_measurement_audio_decision_1310.py` 21 tests + the #1206 sweep 7 tests green; sourced-lib
+  dry-run driver exercised EVENT/TEST-SILENT/PRESENT/SKIP/UNKNOWN + 2-pass confirm.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version bump to
+  1.7.0-dev.627. Durability backup on `refs/autopilot-wip/worktree-agent-a7e35bcbdc9225c31`.
+- Items 2 (owner decision: permanent measurement mic) + 3 (rig-status chip) NOT in this lane.
+## #1309 — P0 cambox half-dead after bkshading-relay (re)start (worktree lane, 2026-09-13, base 92ddd5a14, v1.7.0-dev.627)
+
+Owner directive 13.9.: a cambox goes half-dead after a relay (re)start — sshd + remoteos-mcp +
+gphoto2 unreachable while dantesync `:8898` + relay `:8771` stay up and the box pings (cam1 during a
+LIVE production, cam2 after the E2E cleanup). Root cause traced: anything needing a FORK fails while
+already-running processes answer; the healthy-box baseline showed NO relay leak, so "fork exhaustion"
+stays a hypothesis — the one PROVABLE defect is the diagnosis gap (runtime-only journal on a ro-root/
+tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence across 4 sub-deliverables:
+
+- **Persistent journal (step 2):** `scripts/lib/log-diet.sh::log_diet_journald_dropin` now emits
+  `Storage=persistent` + `SystemMaxUse=200M` (keeps the #762 `RuntimeMaxUse=20M`); a NEW
+  `log_diet_journal_persistent_verdict` + `log_diet_journal_fstab_line`. create-usb-linux.sh lays a
+  dedicated ext4 p3 (`LABEL=cambox-journal`, last 512MiB; root sized `-513MiB` so it is NOT last and
+  #369 auto-grow-root skips it) mounted `nofail` at `/var/log/journal`; setup-device.sh STEP 18
+  conditionally mounts it (blkid-guarded, comment on an un-reflashed box). `nofail` = a box without
+  the partition still boots (volatile fallback). verify-device `(ai)` HARD-FAILs a still-volatile
+  journal with a reflash hint. RED→GREEN in verify_device_pure_functions.rs.
+- **On-box mgmt self-heal (step 4a):** NEW `scripts/lib/mgmt-liveness.sh` — pure banner classifier +
+  MGMT_OK/MGMT_DEAD/RESTART_ALLOWED/BACKOFF decision + forensic snapshot text + generated
+  self-contained on-box script (EMBEDS the pure fns via `declare -f`, one source of truth, no repo-lib
+  on the box). A `cambox-mgmt-selfcheck.timer` (every 2 min) reads sshd's loopback `SSH-` banner
+  (fork-free /dev/tcp) and, after N=3 consecutive dead reads, dumps the snapshot to the (now
+  persistent) journal then restarts ssh+remoteos-mcp with a 3/hour backoff. setup-device.sh installs
+  it enable-only (unnumbered block before STEP 18, the remoteos-mcp precedent); verify-device `(aj)`
+  HARD-FAILs if missing/not-enabled. RED→GREEN in harness_mgmt_liveness_1309.rs.
+- **dev1 MGMT_DEAD page (step 4b):** `dantesync_clock_decision.py` gained `V_MGMT_DEAD`/`R_SSH_DEAD`
+  on a NEW orthogonal axis (`mgmt_ssh_ok`, default None = every prior verdict/test byte-identical);
+  `analyze` wraps the renamed `_analyze_clock` — `:8898` reachable + ssh banner dead (mgmt_ssh_ok=0)
+  → MGMT_DEAD, carrying the clock verdict as context, taking precedence over the clock axis.
+  `watchdog-tcp-probe.sh` gained `watchdog_probe_ssh_banner` (reads the banner, discriminates a
+  kex-reset from a plain accept). `dantesync-clock-alert-watchdog.sh` probes the banner for CAM
+  nodes only, feeds `--mgmt-ssh-ok`, pages via a `dante-clock-<box>-mgmt` bucketed key reusing the
+  2-pass confirm. RED→GREEN in the 1307 pytest (44 pass).
+- **Relay blast-radius (step 3):** `systemd/bkshading-relay.service` `TasksMax=512` — a real ceiling
+  above the measured 5 / normal peak <10 but below pid_max, so a relay runaway cannot starve sshd's
+  forks. `Restart=on-failure`+`RestartSec=5` already present (issue 1228); `.output()` already
+  waits+reaps every gphoto2 (no zombie), so NO per-invocation timeout added (evidence-first; that is
+  the separate #1229 polling ticket). Test in test_bkshading_relay_provision_808.py.
+
+- **Tier-0 (worktree lane):** 2 pytest files green (44 dante-clock + 16 relay-provision); `bash -n`
+  + `shellcheck -S warning` clean on every touched `.sh` + the generated on-box script; the pure
+  bash fns exercised via scratch drivers (banner/decide/verdict/fstab-line); `cargo fmt --all
+  --check` clean; occurrence-count anchor sweep clean (the ` ext4 `/`absent`/`journalctl`/`reasons`
+  1→2 flags are all `.contains()` checks or my own comments, no positional `.find()` collision).
+  NOT runnable in a worktree lane (supervisor runs at integration): the sourced-lib Rust harnesses
+  (`harness_mgmt_liveness_1309`, the verify/setup provisioner tests) + a stubbed `--dry-run` of the
+  dante watchdog's new `--mgmt-ssh-ok` path.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord; NEVER probed the wedged
+  cam2. Version bumped 1.7.0-dev.627. Durability backup on
+  `refs/autopilot-wip/worktree-agent-af4cfff39ce542684`.
+
+## #1308 step 3 — VB-Matrix/asio-starve reclassified back to diagnostic one-ping (worktree lane, 2026-09-14, base 72a357cdd, v1.7.0-dev.627)
+- **Owner ROZHODNUTÉ 14.9.2026 („5 A"):** VB-Matrix on the stream box is NOT production audio (its
+  `ASIO Input Capture` input is muted, only in scene `party`; `StartVBMatrix` task disabled since
+  3.9.). So `vb-matrix-alert-watchdog.sh` (#1227) and `asio-starve-alert-watchdog.sh` (#1023) move
+  OUT of the step-2 production-critical time-bucketed re-ping class BACK to the diagnostic
+  one-ping-per-incident class. Delivery layer ONLY — detection/confirm/throttle/recovery untouched.
+- **Scripts:** reverted exactly the step-2 (`7d14b5d19`) hunks — the two watchdogs' ALERT
+  `--dedup-key` goes from `"$(watchdog_notify_key "<base>" "$(date +%s)")"` back to the stable
+  `"vb-matrix-$box"` / `"asio-starve-$source"` / `"asio-starve-tap-$source"`. `git diff 7d14b5d19^`
+  shows no dedup-key delta = exact pre-step-2 restore. The other 9 production-critical watchdogs
+  (dante-clock, genlock-lock, network-reach, bundle-state, obs-liveness, audio-lag, ndi-portmap,
+  avsync-heartbeat, imag-obs) + measurement-audio (#1310) stay bucketed — a full `git revert` was
+  rejected for that reason.
+- **Sweep test (`test_notify_dedup_key_sweep_1206.py`):** dropped both from
+  `_PRODUCTION_CRITICAL_TIME_BUCKETED`, so a re-added bucket in either now FAILS
+  `test_only_allowlisted_watchdogs_time_bucket_their_key` (that was the RED). Class now 10.
+- **Docs:** `watchdog-notify-dedup.md` table 12→10 rows + prose 12→10 / caveat 10→9 wrapped-bash +
+  the two added to the DIAGNOSTIC one-ping list with the owner-ruling reason; one line each in
+  `vb-matrix-watchdog.md` + `asio-starve-watchdog.md` noting the class + that both stay DISABLED on
+  dev1 (strih-only enable is a supervisor call).
+- **Tier-0 (worktree lane):** full `tests/python` green (2398 passed); `bash -n` + `shellcheck -S
+  warning` clean on both scripts; each `--dry-run` driven end-to-end via its inline-literal env seam
+  (`VB_MATRIX_FETCH_CMD` DOWN body / `ASIO_STARVE_PROBE_CMD` starved-log + healthy-sibling) reaches
+  the CONFIRMED "WOULD alert" branch (the one carrying the reverted stable key) across a 2-pass
+  confirm with no runtime error.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord, no dev1 timer touched.
+  Version NOT bumped (per dispatch). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a2ff5b9742fcfd901`.
+## #1276 — E2E recordings-retention WARNING → low-FREE-space semantics (owner ruling 14.9.2026)
+
+- **Owner ruling (14.9.2026, webterm, verbatim „B varovanie ma byt ked 50gb uz len ostava
+  miesta!!!"):** option B — nothing is deleted; the E2E recordings-retention WARNING changes from
+  "the sum of recording files exceeds a 50 GB budget" to "the recordings VOLUME has ≤ 50 GB of FREE
+  space left". `--execute` deletion stays an owner-only step. The DELETE-set computation is untouched.
+- **Root cause:** the old `#652` preflight warned on `total_bytes > RECORDINGS_BUDGET_GB`, a file-sum
+  budget — a false alarm on strih (137 GB of recordings but 619 GB free). The owner-ruled signal is
+  real disk pressure, i.e. free space on the volume.
+- **GREEN 971c2f81f / RED 9cdebb7d1.** Pure decision `recordings_retention::free_space_verdict`
+  (`src/recordings_retention.rs`, canonical) + `bundle_state_gather.recordings_free_verdict` (python
+  mirror the bash preflight calls): free ≥ threshold → Ok, < threshold → Warn, `free_bytes` None →
+  Unknown (never a false low-space WARN), decimal GB. `record_dir_stats` now also reports `free_bytes`
+  via `shutil.disk_usage(record_dir).free` on the SAME local record dir (no new transport — the
+  ticket's suggested remote PowerShell `Get-PSDrive` mis-modelled the on-box python gather).
+  `recording-e2e.sh` preflight renamed `check_recordings_budget`→`check_recordings_free_space`,
+  `RECORDINGS_BUDGET_GB`→`RECORDINGS_FREE_MIN_GB` (default 50), reads `free_bytes` from
+  `/record-dir-stats.json` and calls the pure verdict; parse via a plain `out=$(...)` (never
+  `read < <()`, the #1133 EOF-set-e-abort trap).
+- **Tier-0 (worktree lane):** Rust pure decision GREEN via standalone `rustc --test` on the real
+  module + tests (5/5); pytest `test_bundle_state_gather.py` 77 pass (10 free-space/free_bytes);
+  `bash -n` + `shellcheck -S warning` clean; the exact preflight python one-liner + bash param-expand
+  parse exercised over WARN/OK/boundary/UNKNOWN(null/absent/malformed) — all correct; `cargo fmt
+  --all --check` clean; occurrence-count anchor sweep clean (the renamed function/constant balanced
+  3→0/0→3, `[8/8]`/`WARNING #652`/`record-dir-stats.json`/`KEEP_RECORDINGS:-0` counts unchanged).
+  NOT runnable in a worktree lane (supervisor runs at integration): the `tests/recordings_retention.rs`
+  + `tests/harness_recording_e2e_cleanup_after_decode.rs` static-anchor binaries, and a live
+  free-space read against strih/stream `:8899`.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version 1.7.0-dev.627
+  (NOT bumped — dev already carries it). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a53d11d309eeaacb0`.
+## issue 1312 — "development" handover check (one dev1 command, one Slovak checklist) — worktree lane, 2026-09-14, base 72a357cdd (v1.7.0-dev.627)
+- **What:** `scripts/rig-dev-handover-check.sh` (thin bash orchestrator) + `scripts/rig_dev_handover_decision.py`
+  (pure decision engine) + `tests/python/test_rig_dev_handover_1312.py` + paths-scoped
+  `.claude/rules/rig-dev-handover-check.md` + CLAUDE.md router line. Owner directive 14.9.2026:
+  after every production some operator state stays in production shape (muted `mbc` mic, painter/
+  burns off, EVENT scenes, drifted mapping/pins) and nobody notices until the release E2E burns a
+  cycle (13.9. muted mic -> `[4b2/8]` abort). The check is the supervisor's pre-flight.
+- **Architecture:** orchestrator runs each EXISTING read-only probe (measurement-audio/dantesync-clock/
+  audio-lag/genlock-lock/optical-chain/network-reach/obs-liveness alert-watchdog `--dry-run`s;
+  obs_burn_filter sweep-check; set-ndi-mapping --verify-only; latency_pins_verify; dantesync-version-gate;
+  camera-box-version-gate; lib/rig-mode-state) bounded + drain-safe, captures each `<name>.out`/`.rc`,
+  then the PURE engine parses `verdict=`/`-> REACHABLE` lines + exit codes and maps every item to
+  OK/FORGOT-BY-OWNER/UNKNOWN + a Slovak line, ending `zabudol si: …`. Report-only, NEVER mutates
+  (a `--fix` mode is a followup). A DOWN box (cam2) fails safe to UNKNOWN via `timeout`, never a false
+  OK; absent genlock facet = UNKNOWN-not-forgot (issue 1299 forward-compat); a MISSING probe script =
+  RC_MISSING = UNKNOWN so the orchestrator picks up 1310/1307/1299 the moment they exist.
+- **Reuse decisions:** cambox + dantesync version items reuse the existing 0/20/11 version gates
+  (camera-box-version-gate.sh / dantesync-version-gate.sh) rather than a bespoke sweep. scenes +
+  Studio Mode have no independent read-only probe -> covered transitively by the `mode` item
+  (`rig-mode.sh test` restores scenes/studio/burns/painter in one shot); a dedicated scene/studio
+  read-only probe is a followup_candidate.
+- **Tier-0 (worktree lane):** 18 pytest cases green (parsers + per-item decision table + checklist
+  aggregation + exit codes + evaluate() over a temp work-dir); `bash -n` + `shellcheck -S warning`
+  clean. Verified LIVE from dev1 (read-only, NEVER probed cam2): network-reach + genlock-lock
+  `--dry-run` parser output matches real probe lines (net -> REACHABLE = OK; genlock absent facet
+  -> UNKNOWN).
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig mutation, no Discord. RED test
+  65089bdd2 -> GREEN feat f3dac1f74. Durability backup on
+  `refs/autopilot-wip/worktree-agent-a738efb8847eba521`.
+- **Review:** fresh-context adversarial dispatch found 2 major (version gates invoked with no
+  fleet nodes -> always UNKNOWN; multi-box combine masked an UNKNOWN box behind an OK sibling) +
+  3 minor, ALL fixed same-branch in `fix(#1312)` 3358d67ad (version specs now mirror recording-e2e
+  [0/8]; strict `combine_statuses`; --help/two-pass/test coverage). Post-fix: 19 pytest green,
+  bash -n + shellcheck clean, version-gate specs verified by direct run.
+## issue 1311 (Finding 1 step 2) — off-box remote logging so the NEXT half-dead-stick death is diagnosable (worktree lane, 2026-09-14)
+
+- **What:** two cambox boot sticks died in 24 h (cam1 13.9., cam2 14.9.), both going half-dead first
+  (root fs USB stick dropped off the bus). `/var/log` is tmpfs, rsyslog is purged (762), so the only
+  durable log is the 1309 on-STICK journal partition — which dies WITH the stick. Get kernel + journal
+  messages OFF the box in real time.
+- **New source of truth:** `scripts/lib/remote-logging.sh` — pure content-generators, fail-closed
+  `remote_log_verdict`, gather snippet, and `remote_log_mac_from_neigh` (embedded into the on-box
+  netconsole setup script via `declare -f`).
+- **Transports:** netconsole (kernel printk over UDP from kernel memory — survives the fs dropping
+  out; dynamic configfs target, dev1 MAC resolved at boot via ping/`ip neigh`) + systemd-journal-upload
+  (rich journal to a dev1 sink; ro-root cursor redirected to /run via a drop-in; NO rsyslog reinstall).
+- **Wiring:** setup-device.sh `[remote-logging]` enable-only sub-step + STEP 16 `systemd-journal-remote`
+  pkg; create-usb-linux.sh base-image bake + chroot enable; verify-device.sh `(ak)` check (before `(q)`).
+- **dev1 receiver:** `scripts/dev1-remote-log-install.sh` (pure planner: rsyslog imudp :514 →
+  /var/log/cambox/<ip>-kernel.log + systemd-journal-remote --listen-http :19532) — a SUPERVISOR step;
+  this lane never touched dev1 services. Plus the MGMT_DEAD correlation aid in the plan + rule.
+- **RED->GREEN:** `test(1311)` (tests/harness_remote_logging_1311.rs — RED: base tree lacks the lib +
+  anchors) then `feat(1311)`. Tier-0: bash -n + shellcheck + sourced-lib bash replicas (mac parser,
+  verdict, generators, `bash -n` on the generated setup script) + `--emit` renders + `cargo fmt --check`.
+  The sourced-bash Rust harness cannot run in a worktree (isolation guard) — supervisor runs it at CI.
+- **Docs:** `.claude/rules/cambox-remote-logging.md` + one CLAUDE.md router line. The 1309 on-stick
+  journal stays as shipped; the rule states it is NOT the forensic path for a stick loss.
+- **Lane scope:** worktree lane — no push/PR/merge/close, no rig, no Discord. Version NOT bumped
+  (stays 1.7.0-dev.627 per dispatch). Durability backup on `refs/autopilot-wip/worktree-agent-a83408bd1a9d52579`.
+
+## issue 1311 — stop camera-box software provoking USB power/bus events on the cambox shared hub (Finding 2 software half)
+
+- **Deliverable A (capture-rate self-heal → env-gated, default OFF = ALERT-ONLY):** RED
+  `627e0e5a9` → GREEN `8c860b8e3`. `src/capture_rate_selfheal.rs`: `attempt_self_heal` gains an
+  `enabled` first arg; when false it logs the new pure `reset_suppressed_message` (`… ALERT-ONLY:
+  … would USB-reset … (reset suppressed: CAMERA_BOX_CAPTURE_RATE_SELFHEAL unset) …`) and returns
+  `None` before any state read/write. `src/main.rs`: new `CAMERA_BOX_CAPTURE_RATE_SELFHEAL` env
+  gate (default OFF) at the capture-rate call site; the other three triggers pass `enabled=true`
+  (already gated at their own call sites), byte-unchanged. The alert line shares NO substring with
+  the byte-anchored reset greps (no `#663 self-heal: USB reset attempt`, no `succeeded`, no
+  `DEFECTIVE`), so a suppression is never mis-counted as a real reset (proven by a python
+  byte-safety sim + a standalone `rustc --test` replica, 2/2 green).
+- **Deliverable B (bkshading-relay = EVENT-only):** RED `8448f7f11` → GREEN `9dcaccac1`. New
+  `scripts/lib/bkshading-relay-mode.sh` (pure stop+disable / enable+start builders reusing the ONE
+  `bkshading_relay_unit_name`, + a best-effort ssh orchestrator). `rig-mode.sh` sources it +
+  `do_test` calls `bkshading_relay_mode_apply test`, `do_event` calls `… event` (additive pattern,
+  no anchored line edited); roster = derived source box + cam2, matching the E2E-808 pause. The
+  E2E-808 pause becomes a true no-op in TEST mode (`was-active=0`, verified logically). Docs:
+  `4a8a16d34` (`.claude/rules/bkshading.md` + `capture-selfheal-action-sequence.md`).
+- **Tier-0 (worktree lane):** `cargo fmt --all --check` clean on all touched `.rs`; clippy
+  `doc_lazy_continuation` net clean; `bash -n` + `shellcheck -S warning` clean on the new lib +
+  `rig-mode.sh`; the occurrence-count anchor sweep over 42 rig-mode-reading test files shows only
+  ADDITIVE literal changes (no 1→0 / 1→2 on a unique existing anchor); the do_test/do_event
+  body-slice + builder-content simulation green; the `purge < assert` ordering preserved. The
+  sourced-lib Rust harness (`tests/harness_bkshading_relay_mode_1311.rs`) + the
+  `capture_rate_selfheal.rs` unit tests are CI's first real compile (main.rs is not locally
+  compilable under Tier-0).
+- **Lane scope:** worktree lane — CODE + TESTS only, no rig touched (owner ruling „nič čo môže
+  odpáliť disk"), no push/PR/merge/close, no Discord, no dev1 timer. Version NOT bumped (per
+  dispatch, base `7546fa1ff` / 1.7.0-dev.627). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a82aead9864e31051`.
+
+## issue 1313 — dev1 as a `local` dante-clock node (the control-box blind spot) — worktree lane, 2026-09-14, base 23a9ec716 (v1.7.0-dev.627)
+
+- **Problem (found live 14.9.2026):** the dev1 dante-clock alert watchdog probes cam1-7 + strih/
+  stream/imag/resolume but NOT dev1 itself. dev1 runs dantesync (its clock feeds every dev1-hosted
+  gate: `clock-offset-painter-gate.sh`, the recording-verdict wall references, every `date`-stamped
+  E2E window) and sat NTP-only for ~a day unpaged — its `gm_allowlist` on the retired literal
+  `10.77.9.184` + dantesync 1.8.53 (the 13.9. fleet allowlist patch AND the fleet roll both skipped
+  dev1) — its own journal shouting `[CLOCK-ALARM] NO DANTE CLOCK` every minute; the watchdog that
+  would have paged it runs ON dev1 and never looked at `127.0.0.1:8898`.
+- **STEP-0 validation:** confirmed live — `grep` showed no `local`/dev1 arm in the watchdog and no
+  `analyze_local`/`--local` in the decision module; `curl 127.0.0.1:8898/status` on dev1 answered
+  HEALTHY-but-UNWATCHED (locked, gm 10.77.9.230, alarm inactive). Still valid, not overcome.
+- **Approach (design comment before code):** a third `local` node kind, policy centralised in the
+  pure decision module (rejected: folding dev1 into the cam roster — its ssh/MGMT + SKIP-defer
+  semantics are wrong for the box we run on; and a standalone dev1 script — a diverging second copy
+  of the grading/confirm/dedup/version logic).
+- **Decision (`scripts/dantesync_clock_decision.py`):** RED `07facbebb` → GREEN `0e2886b76`. Pure
+  `analyze_local()` — the ONE tested local policy point — forces `box_up=1` (a dead `:8898` on the
+  local box is NO_DANTESYNC, never SKIP: no down-box case for the box we run on) + `mgmt_ssh_ok=None`
+  (no ssh axis, never MGMT_DEAD), reusing the SAME OK/NO_CLOCK/UNKNOWN/gm/storm/stale/version
+  grading. A CLI `--local` flag routes to it, ignoring `--box-up`/`--mgmt-ssh-ok`; default off keeps
+  every remote node byte-identical.
+- **Watchdog (`scripts/dantesync-clock-alert-watchdog.sh`):** `DANTE_CLOCK_LOCAL_NODES="dev1"` (+
+  `DANTE_CLOCK_LOCAL_IP` loopback) builds a `dev1|127.0.0.1|local` roster triple; `box_up_probe`
+  short-circuits 1 for `local` (no reach probe); `handle_node` passes `--local 1`; `mgmt_ssh_probe`
+  already returns "" for a non-`always` homegate (no ssh banner). Clock fault keeps the bucketed key
+  `dante-clock-dev1-<bucket>` (NO_DANTESYNC → `dante-clock-nohttp-dev1-<bucket>`); version drift vs
+  the pin stays report-only. Every existing node's path unchanged.
+- **Docs:** `14b4f45f0` — the watchdog rule gains the dev1 `local` arm; the `.claude/skills/ops`
+  DanteSync rollout checklist now mandates dev1 in every fleet roll AND config patch
+  (`dantesync-fleet-upgrade.sh … --local dev1`, "fleet N/N" counts dev1), citing the 14.9. incident.
+- **Tier-0 (worktree lane):** `python3 -m pytest tests/python/test_dantesync_clock_decision_1307.py
+  tests/python/test_dantesync_clock_dev1_local_1313.py` — 60 passed (57 decision incl. 12 new local +
+  3 bash `--dry-run` seam); the #1206 notify-dedup sweep 7 passed; `bash -n` + `shellcheck -S warning`
+  clean; `cargo fmt --all --check` clean; live dev1 graded via `--local` = verdict=OK (locked, gm
+  match, version match pin). The Rust side has no `.rs` change; the bash dry-run runs at CI + for the
+  supervisor exactly as it runs in the pytest subprocess here.
+- **Lane scope:** worktree lane — CODE + TESTS + DOCS only, no rig touched (dev1 :8898 read only, as
+  fixture material), no push/PR/merge/close, no Discord, no dev1 timer (the supervisor enables it).
+  Version NOT bumped (per dispatch). Durability backup on
+  `refs/autopilot-wip/worktree-agent-aeef4477305e19536`.
+
+## issue 1151 (FOLDED, 14.9.2026) — bound drift-guard's imag OBS-log gather (net-drain ratchet)
+
+- **Problem:** imag's OBS session log grew to 1.2 GB / 4.5 M lines; `scripts/drift-guard.sh`
+  `gather_and_check_imag` shipped the whole newest `~/.config/obs-studio/logs/*.txt` over ssh into a
+  bash variable (`cat "$f"`), feeding five OBS-log parsers. The harness bash SIGSEGV'd (exit 139) →
+  `drift-guard --check-imag` exited 139 → `rig-mode.sh test` HARD-BLOCKED at its issue-789 fail-closed
+  TEST-entry gate, so the rig could not enter TEST mode. Mirrors the E2E-side fix already shipped in
+  `2e788561b` (`projector_vsync_gather_remote_snippet`).
+- **RED** `c3687abe1` (`test(#1151)`): new `tests/python/test_drift_guard_imag_obs_log_bounded_gather_1151.py`
+  (drives the real snippet against a 300k+-line fake log — middle-line survival + head+tail both-ends +
+  facet parity for all 5 parsers) + a `tests/drift_guard.rs` anchor test
+  (`gather_and_check_imag_ships_a_bounded_marker_filtered_read_1151`). Both fail on the old `cat "$f"`
+  code (snippet function absent).
+- **GREEN** `f53882a79` (`fix(#1151)`): extracted the remote command into a pure
+  `drift_guard_imag_obs_log_gather_snippet` (mirrors `obs-projector-vsync.sh`'s snippet, defined before
+  the source-guard so it is Tier-0-testable without ssh); it greps the UNION of the five parsers'
+  anchors (`genlock:|projector-vsync:|video settings reset:|fps:` — `genlock:` with the colon never
+  matches the 90 MB/day `genlock-fifo` bulk) and keeps head+tail of the tiny filtered stream. Each
+  parser keeps its first-match/presence semantics; empty log → UNKNOWN (#833); caller keeps `|| true`.
+  Doc `.claude/rules/drift-guard-log-parsers.md` gains the general CLASS rule (every remote-OBS-log
+  consumer bounds+filters; whole-file `cat` over ssh banned).
+- **Review** `d08c57f58` (`docs(#1151)`): fresh-context adversarial review PASSED clean (7/7 lenses OK,
+  0 blocking); one non-blocking note (fps reset-block co-residency) addressed by a one-line comment.
+- **Local verify:** `bash -n` + `shellcheck -S warning` clean, `cargo fmt --all --check` clean, the
+  bounded-gather pytest 3/3 + projector-vsync pytest 2/2 green, occurrence-count anchor sweep clean
+  (no test literal 1→0 / 1→2). Live proof (`--check-imag` exit 0 vs 139 against the real 1.2 GB log;
+  `rig-mode.sh test` gate passes) is the SUPERVISOR's — no rig ssh from this lane.
+- **Lane scope:** worktree lane — CODE + TESTS + DOCS only, no rig touched, no push/PR/merge/close, no
+  version bump. Durability backup on `refs/autopilot-wip/worktree-agent-a8c224151e910ed3c`.
+## issue 808 — Design v3 SBC/handheld SOFTWARE half (device-agnostic board + WiFi-link `--check`, worktree lane)
+
+- **Commits (base origin/main 5ed4e44ad, worktree `worktree-agent-a3f48fc0b373db3d8`):** [red] `c97f7b964` (flip the README device pin `"Pi Zero 2 W"` → `"zero-class arm64 SBC"` + add WiFi-link-state / SSID-parse / `--check` SKIP+FAIL tests + a net-sysfs fixture — 5 fail on the old sources) → [green] `c2e59d005` (device-agnostic rename across 10 sources keeping relay/service byte-identical + `bkshading_sbc_wifi_link_state` sysfs `operstate` classifier + `bkshading_sbc_wifi_ssid_from_iw` + `--check` step 5 + `handheld-1..3` config + README/rules rewrite + supervisor bench checklist) → [fix] `563476d88` (review nits: carrier==1 fallback so the Orange Pi Zero 2W out-of-tree `uwe5622` `operstate=unknown` case is not false-FAILed; `bkshading_sbc_first_wifi_iface` for a device-agnostic remediation; test docstring 3 boards) → [docs] `c7e5caea6` (carrier-fallback gotcha into `.claude/rules/bkshading.md`).
+- **Owner rulings (14.9.2026, relayed mid-lane):** Approach 1 = a separately powered zero-class arm64 SBC controlling the camera over one USB cable (Design v3 5664682477 / ROZHODNUTÉ 5664746806); then board NOT finally decided → DEVICE-AGNOSTIC (Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W prototype); then power = cage V-mount 5 V USB splitter (never a power bank / PiSugar / raw 15 V D-tap). All three recorded on the ticket (issuecomment-5664873795).
+- **Scope guard:** documentation + a new verify check ONLY; `Transport::SbcRelay` + wire value `"sbc-relay"` + the arm64 artifact name `bkshading-relay-linux-arm64` + the CI `run:` block are byte-UNCHANGED; Bluetooth stays banned.
+- **Local verify (Tier-0, no cargo compile):** 29/29 `tests/python/test_bkshading_sbc_provision_808.py`, 2199 `pytest tests/python`, `shellcheck -S warning` + `bash -n` clean on both scripts, `cargo fmt --all --check` clean, occurrence-count anchor sweep clean. Fresh-context review 0 🔴 / 0 🟡 / 3 🔵 (all fixed) — issuecomment-5665182263.
+- **Lane scope:** worktree lane — no push/PR/merge/version-bump. Durability backup on `refs/autopilot-wip/worktree-agent-a3f48fc0b373db3d8`. INTEGRATION NOTE: this branch is based on origin/main (5ed4e44ad), NOT dev — the supervisor must CHERRY-PICK the four commits above onto dev, never `git merge` the branch (it would drag main's `Merge pull request #N` commits into dev). HARDWARE bench (gphoto2 detect, M1 PD listener, WiFi join, live `--check`) = supervisor once the prototype arrives → UNVERIFIED here.
+
+## issue 1312 (follow-up, 14.9.2026) — 14th handover item `avlatency`: mbc measurement-chain LATENCY vs baseline (worktree lane, base 6c58ca0b6)
+
+- **Scope:** the follow-up from ticket comment 5664462600 — add a read-only 14th item proving, between
+  productions and WITHOUT an E2E run, that the mbc chain (cam2 QPSK marker → speaker → mic → mbc
+  Ableton → Dante → stream OBS `mbc`) is still ALIGNED with the video within the E2E's ±90 ms gate,
+  not merely audible (#1310). The existing 13 items are byte-identical (additive-only).
+- **STEP-0 finding (validation comment):** the ticket assumed the marker log's `emit_ts_ns` is on the
+  DanteSync wall clock, but the PERMANENT painter (`setup-device.sh` `cam2-painter.service`, no
+  `--wall-clock`) emits `start.elapsed()` MONOTONIC-since-start (`clock_ns`, `frame-probe.rs:313`),
+  which resets on every EVENT→TEST switch. A naive `onset_wall − emit_monotonic` would false-DRIFT at
+  exactly the transition this check runs at. Handled: the pure `measure()` GUARDS on the emit-ts SHAPE
+  (`emits_are_wall_clock`, 1e18 floor) → a monotonic/mixed log is never paired → UNKNOWN (reason
+  `monotonic-emit`), never a false forgot. Verified `--wall-clock` would be a SAFE no-op for the A/V
+  verdict (`av_sync_recording.rs:207`; `av_offset_candidates_with_fid` ignores `emit_ts`).
+- **Design (verdict-kind item mirroring `mic`):** RED `1b4a1f58d` → GREEN `2fcb3d0c6` (pure kernel
+  `scripts/measurement_chain_latency.py`: parse/onset(−60 dB rising-edge, threshold single-sourced from
+  `audio-presence-preflight.sh`)/pair(nearest-prior emit within a sub-half-cadence window)/median/
+  classify + baseline r/w + CLI). GREEN `7d308d57d` (I/O half `measurement_chain_latency_probe.py` WS
+  `InputVolumeMeters` sampler reusing #1310's handshake + the thin `measurement-chain-latency.sh`
+  orchestrator with `MC_MARKER_CSV_FILE`/`MC_METER_FILE` Tier-0 seams + `--baseline` write). RED
+  `63524c9db` → GREEN `afc7ec5fe` (the appended `avlatency` `Item` + the `run_probe avlatency` wiring).
+- **Review** `347d44b85` (`fix(#1312)`): fresh-context adversarial review — 0 blocking, the
+  monotonic-emit guard verified sound. Same-branch fixes: two `--write-baseline` refusal tests
+  (monotonic / too-few), `|| OUT=""` `set -e` defensiveness, and the onset-model + truncate-on-start
+  (`qpsk_emit.rs` #431, rules out a mixed-clock tail) doc.
+- **Local verify:** `python3 -m pytest tests/python/test_measurement_chain_latency_1312.py
+  tests/python/test_rig_dev_handover_1312.py` → 39 passed; `bash -n` + `shellcheck -S warning` clean on
+  both `.sh`; standalone probe dry-run over fixtures produced DRIFTED / ALIGNED / SKIP / BASELINE-WRITTEN
+  correctly. The Rust/live paths (the marker-log ssh read, the WS meter sample, the live baseline seed
+  + first read) are the SUPERVISOR's — no rig ssh from this lane (cam2 is down today anyway).
+- **Follow-up for the supervisor (not this lane):** enable the painter `--wall-clock` flag (a SAFE
+  no-op for the A/V verdict) so `avlatency` goes green-capable, then seed
+  `~/.camera-box/measurement-chain-latency-baseline.json` with `--baseline` after a green E2E
+  (confirming ≥3 onsets). Until then `avlatency` reads UNKNOWN (never a false forgot).
+- **Lane scope:** worktree lane, CODE + TESTS + DOCS only. Worktree was based on `origin/main`; my 8
+  work commits are on top of the merge `f5d380fd6` and touch ONLY the 8 new/edited files — INTEGRATE
+  BY CHERRY-PICK of those commits onto `dev` (the merge reconciled an unrelated #1311 file that a
+  `git merge` of this branch would drag into dev). Durability backup on
+  `refs/autopilot-wip/worktree-agent-a28850d39205ac8e6`.
+
+## #1312 — cam2 painter `--wall-clock` (the avlatency monotonic-emit follow-up now SHIPPED)
+
+- **Scope (this lane):** the follow-up the #1312 avlatency lane left open — make the cam2 QPSK painter
+  stamp its marker-log `emit_ts_ns` on the DanteSync wall clock so `measurement-chain-latency.sh` can
+  pair it against dev1 `mbc` onsets. RED `test(#1312)` 6e29ee6c9 → GREEN `fix(#1312)` 2c18b347b →
+  `docs(#1312)` 28a304edc.
+- **Change:** added `--wall-clock` to BOTH painters that write `/run/rig-qpsk-markers.csv` — the
+  PERMANENT `cam2-painter.service` ExecStart (`scripts/setup-device.sh` `cam2_painter_service_unit_content`)
+  and the transient rig-mode TEST painter (`scripts/rig-mode.sh` `painter_launch_remote`). Placed AFTER
+  `--paint-fps`/`--duration-secs` so the pinned contiguous `--paint-only --dual-qr --qr-size N
+  --duration-secs N` vernier anchor (`tests/rig_mode.rs::test_mode_launches_pinned_painter`) stays
+  intact; every other argv byte identical. The E2E burn painter (`recording-e2e.sh:2823`) ALREADY had
+  `--wall-clock` — deliberately untouched. Safe no-op for the A/V verdict path (`av_sync_recording.rs`
+  pairs by fid, ignores `emit_ts`).
+- **Tests:** new `tests/python/test_cam2_painter_wall_clock_1312.py` (sources both scripts, runs the
+  pure builders, asserts the emitted painter argv carries `--wall-clock` + keeps the pinned flags/anchor
+  byte-identical — RED 2-fail→GREEN 4-pass). Rust harness needles updated in lock-step
+  (`harness_cam2_painter_provisioning_863.rs` + `rig_mode.rs`).
+- **Verify (Tier-0, no rig):** 2478/2478 pytest, `bash -n` + `shellcheck -S warning` clean on both
+  scripts, `cargo fmt --all --check` clean, anchor occurrence-count sweep over every `tests/*.rs`
+  `.find`/`.split`/`.contains` literal (no 1→0 / 1→2). Fresh-context adversarial review: CLEAN, 0
+  findings across 6 lenses.
+- **Supervisor step (unverified here):** making it LIVE on cam2 is provisioning/reboot-class —
+  `setup-device.sh` re-run, OR a remount-rw window that rewrites the unit ExecStart + `daemon-reload` +
+  `systemctl restart cam2-painter.service` — then seed the baseline with
+  `measurement-chain-latency.sh --baseline` after the next green E2E. Until the RUNNING painter is
+  restarted with `--wall-clock`, `avlatency` keeps reading the `monotonic-emit` UNKNOWN (the SHAPE
+  guard stays a fail-safe). cam2 is DOWN today; no rig touched.
+- **Lane scope:** worktree lane, CODE + TESTS + DOCS only. Worktree was based on `origin/main`;
+  repointed to `origin/dev` (de31d8ac2) at start via `checkout -B`. 3 work commits on top; INTEGRATE BY
+  CHERRY-PICK of 6e29ee6c9..HEAD onto `dev`. Durability backup on
+  `refs/autopilot-wip/worktree-agent-a478c1a0e9e8f63ad`.

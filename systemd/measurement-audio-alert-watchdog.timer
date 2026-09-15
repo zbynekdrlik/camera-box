@@ -1,0 +1,18 @@
+[Unit]
+# Fires the #1310 mbc measurement-audio presence check every 60 s (dev1-side). A silent measurement
+# chain (mic off, Ableton mbc channel muted, Dante route dropped) is caught within ~2 min of onset
+# (2-pass confirm at the 60 s cadence) and paged -- and RE-pinged every ~10 min while it persists
+# (owner ruling: „byt o tom dokolecka notifikovany"), never a single silent one-shot. 60 s matches the
+# dantesync-clock sibling: the mbc chain is the instrument the whole A/V-sync leg reads, so a silent
+# one quietly invalidates the next production's verification the moment it happens.
+Description=Run the camera-box mbc measurement-audio presence check every 60s (#1310)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

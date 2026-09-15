@@ -48,6 +48,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -61,8 +63,11 @@ case "${1:-}" in
 esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
-# The two OBS boxes to watch, as "name|ip" pairs (space-separated).
-BOXES="${AUDIO_LAG_BOXES:-strih|10.77.9.202 stream|10.77.9.204}"
+# The OBS boxes to watch, as "name|ip" pairs (space-separated). Default DERIVED from the ONE
+# declared fleet list (scripts/lib/obs-fleet.sh, #1296) — resolume is NOT an audio-lag box (no mbc
+# audio chain on the CG box), so obs_fleet_boxes audio-lag yields exactly strih+stream, byte-
+# identical to the pre-#1296 literal. The AUDIO_LAG_BOXES env override still wins unchanged.
+BOXES="${AUDIO_LAG_BOXES:-$(obs_fleet_boxes audio-lag)}"
 BUNDLE_PORT="${AUDIO_LAG_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
 BUNDLE_PATH="${AUDIO_LAG_BUNDLE_PATH:-/bundle-state.json}"
 CURL_TIMEOUT="${AUDIO_LAG_CURL_TIMEOUT:-10}"          # :8899 HTTP fetch (s); server has answered ~6.6s
@@ -272,7 +277,7 @@ handle_box() {
     log "ALERT: firing Discord notification for $box audio lag ${lag}ms"
     python3 "$NOTIFY" notify --body \
       "🚨 Audio-lag ($REPO_SLUG): **$box** ($ip) — audio v OBS zaostáva za realtime o **${lag} ms (~${mins} min)** (zdroj '${src}'). A/V sa na streame rozíde (YouTube desync). Prah ${THRESHOLD_MS} ms prekročený, potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol. Skontroluj OBS na boxe; ak lag rastie ďalej, pomôže reštart OBS/boxu (owner rozhodnutie)." \
-      --dedup-key "audio-lag-$box" \
+      --dedup-key "$(watchdog_notify_key "audio-lag-$box" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- still lagging"
@@ -367,7 +372,7 @@ handle_box_band() {
     log "ALERT: firing Discord band notification for $box '${src}' ts_lag drift (high=${high}ms base=${base:-$low}ms duty=${duty}%)"
     python3 "$NOTIFY" notify --body \
       "⚠️ Audio ts_lag band ($REPO_SLUG): **$box** ($ip) — referenčný zdroj '${src}' kolíše: vysoký režim **${high} ms** oproti základni **${base:-$low} ms** (~${duty}% okna hore, n=${n}). A/V reziduál sa tým posúva k ±90 ms hranici (issue 1265). Nie je to výpadok — je to rozkmitanie audio timeline; pomôže reštart OBS na boxe (owner rozhodnutie). Prah drift>${BAND_DEV_THRESHOLD_MS} ms & duty>=${BAND_DUTY_MIN_PCT}%, potvrdené počas ${BAND_CONFIRM_THRESHOLD} kontrol." \
-      --dedup-key "audio-band-$box" \
+      --dedup-key "$(watchdog_notify_key "audio-band-$box" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify (band) failed (non-fatal)"
   else
     log "ALERT: band alert suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- still drifting"

@@ -86,7 +86,7 @@ pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
     if canvas_w == 0 || canvas_h == 0 {
         return Vec::new();
     }
-    let mut rects = Vec::with_capacity(4);
+    let mut rects = Vec::with_capacity(5);
 
     // cam1 capture burn — horizontally centered, bottom-anchored (qr::cam1_burn_origin geometry).
     let cam1_px = qr::CAM1_BURN_QR_PX.min(canvas_w).min(canvas_h);
@@ -142,6 +142,27 @@ pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
     };
     rects.push(Rect {
         x: bcl_x,
+        y: top,
+        w: side,
+        h: side,
+    });
+    // bottom-center-right (cg OBS, #1301): the MIRROR of bottom-center-left from the RIGHT — one
+    // `margin` clear of the bottom-right (stream) burn's LEFT edge, so cg never collides with
+    // stream's corner. Mirrors `burn_geom::Corner::BottomCenterRight` exactly, INCLUDING its
+    // right-anchored 3-tier fallback (tier 1 = full margin gap; tier 2 = flush against the
+    // bottom-right rect's left edge; tier 3 = frame-left last resort on a degenerate canvas).
+    // The cg burn can appear on a strih/stream recording during a CG_CHAIN run, so the colour
+    // sampler must dodge it belt-and-braces exactly like the other four corner burns.
+    let right_burn_x = canvas_w.saturating_sub(margin).saturating_sub(side); // bottom-right band_x
+    let bcr_x = if right_burn_x > margin.saturating_add(side) {
+        right_burn_x - margin - side // tier 1
+    } else {
+        // tier 2: flush against bottom-right's left edge; saturates to tier 3 (frame-left, 0)
+        // on a degenerate canvas -- same three tiers as burn_geom, clippy-clean shape.
+        right_burn_x.saturating_sub(side)
+    };
+    rects.push(Rect {
+        x: bcr_x,
         y: top,
         w: side,
         h: side,
@@ -787,7 +808,11 @@ mod tests {
     #[test]
     fn burn_exclusions_cover_the_four_burns_yet_leave_every_patch_samplable_463() {
         let ex = node_burn_exclusions(W, H);
-        assert_eq!(ex.len(), 4, "cam1 + strih + stream + imag (#463) burns");
+        assert_eq!(
+            ex.len(),
+            5,
+            "cam1 + strih + stream + imag (#463) + cg (#1301) burns"
+        );
         // Each excluded rect is bottom-anchored and within the canvas.
         for r in &ex {
             assert!(r.x + r.w <= W && r.y + r.h <= H, "in canvas: {r:?}");

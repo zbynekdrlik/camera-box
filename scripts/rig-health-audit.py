@@ -34,6 +34,11 @@ CAMS = {f"cam{n}": f"10.77.9.6{n}" for n in range(1, 8)}
 IMAG = "10.77.9.182"
 STRIH = "10.77.9.202"
 STREAM = "10.77.9.204"
+# #1296: RESOLUME-SNV, a TRAVELING genlock cg-obs box. Addressed by HOSTNAME (not a pinned IP) — it
+# currently resolves to 10.77.9.201 (event-LAN DHCP, collides with `bridge`; see scripts/lib/obs-fleet.sh
+# + targets.md). Surfaced on the status page as a REPORT-ONLY, rate-EXEMPT node (#787) — see
+# grade_resolume_bundle / check_resolume.
+RESOLUME = "resolume.lan"
 DANTE_BOUND_US = 2000          # clock-offset-guard verdict bound
 AUDIO_BUF_BOUND_MS = 100       # #786 launch-gate bound (box standard 64/85)
 # issue-1108 dantesync NTP step-rate facet: how often dantesync STEPPED the clock in the last hour.
@@ -57,6 +62,12 @@ CADENCE_LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "c
 # strih CAMERA source labels only (`NDI cam1..7`); excludes `NDI 2ME PGM (mv)` / `NDI 2ME PVW`,
 # which are 30 fps by design and must NOT be graded against 60 fps.
 CAMERA_SRC_RE = re.compile(r"^NDI\s+cam\d+$", re.I)
+# issue-1300 CG-chain receiver-side verdict, wired here REPORT-ONLY: the row NEVER emits
+# PASS/WARN/FAIL (so it can never change the audit exit code) -- only this NOTE verdict, which
+# main()'s PASS/WARN/FAIL counting ignores. The #787 resolume-rate exemption (CAMERA_SRC_RE above)
+# is unchanged: resolume's non-60 cadence is still never graded by the arrival/cadence checks.
+CG_CHAIN_REPORT_VERDICT = "NOTE"
+CG_CHAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cg-chain-verify.sh")
 
 results = []
 
@@ -129,6 +140,19 @@ def arrival_rates(log_text: str) -> dict[str, float]:
 
 def fmt_rates(rates: dict[str, float]) -> str:
     return ",".join(f"{src.replace('NDI ', '')}={fps:.0f}" for src, fps in sorted(rates.items()))
+
+
+# #1299: the NEWEST `genlock-lock: state=X ...` line's state (the #1298 statusbar's decided verdict,
+# change-driven so the last one is current) — a report-only feeder facet rig-status renders as a
+# generic `genlock_lock=<state>` chip (rig-status-page.md: the facet lives in the FEEDER, not the
+# renderer). "" when no such line is in the fetched log window (a stock OBS, or startup state not in
+# the tail) -> the caller OMITS the token (UNKNOWN, never a fabricated state).
+_GENLOCK_LOCK_STATE_RE = re.compile(r"genlock-lock: state=(\w+)")
+
+
+def genlock_lock_state_from_log(log_text: str) -> str:
+    matches = _GENLOCK_LOCK_STATE_RE.findall(log_text or "")
+    return matches[-1] if matches else ""
 
 
 def audit_samples(log_text: str) -> dict[str, list[tuple[str, int]]]:
@@ -337,7 +361,9 @@ def check_imag() -> None:
                     "journalctl -u dantesync -n 40 --no-pager | grep -oE 'offset:[+-][0-9]+us' | tail -1; "
                     "cut -d' ' -f1 /proc/loadavg; "
                     "journalctl -u dantesync --since '-1 hour' --no-pager 2>/dev/null | awk '" + NTP_STEP_COUNT_AWK + "'; "
-                    "tail -400 \"$(ls -t ~/.config/obs-studio/logs/*.txt | head -1)\" | grep 'genlock-fifo audit'",
+                    # #1299: also surface the newest genlock-lock: verdict line (ignored by AUDIT_RE;
+                    # parsed only by genlock_lock_state_from_log for the report-only facet chip).
+                    "tail -400 \"$(ls -t ~/.config/obs-studio/logs/*.txt | head -1)\" | grep -E 'genlock-fifo audit|genlock-lock:'",
               user="newlevel", timeout=25)
     if out is None:
         emit("FAIL", "imag", "unreachable over ssh")
@@ -379,9 +405,12 @@ def check_imag() -> None:
     ntp_steps = int(steps_m.group(1)) if (steps_m and off_us is not None) else None
     _, steprate_disp, steprate_problems = grade_ntp_steprate(ntp_steps)
     problems += steprate_problems
+    # #1299: the #1298 genlock LOCK verdict (report-only chip); omit when absent -> UNKNOWN.
+    gl = genlock_lock_state_from_log(out)
+    gl_tok = f" genlock_lock={gl}" if gl else ""
     verdict = box_verdict(problems)
-    detail = (f"render={render} arrivals[{fmt_rates(rates)}] isolcpus=none dante={off_us:+d}us steprate={steprate_disp}"
-              if off_us is not None else f"render={render} arrivals[{fmt_rates(rates)}] steprate={steprate_disp}")
+    detail = (f"render={render} arrivals[{fmt_rates(rates)}] isolcpus=none dante={off_us:+d}us steprate={steprate_disp}{gl_tok}"
+              if off_us is not None else f"render={render} arrivals[{fmt_rates(rates)}] steprate={steprate_disp}{gl_tok}")
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
     emit(verdict, "imag", detail)
@@ -420,12 +449,79 @@ def _windows_obs_log_tail_cmd(tail: int = 500) -> str:
 def _windows_obs_count_cmd() -> str:
     # #1259: -EncodedCommand (cmd.exe-proof) -- the `()` grouping + nested quotes in the naive form
     # are cmd.exe metacharacters (see _ps_encoded).
+    # issue 1295: count LIVE instances only -- an exited process object (HasExited, 0 threads) still
+    # enumerates by name and would put a false `obs64x2` problem row on the status page.
     return "powershell -NoProfile -NonInteractive -EncodedCommand " + _ps_encoded(
-        "(Get-Process obs64 -ErrorAction SilentlyContinue).Count")
+        "@(Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }).Count")
 
 
 def windows_obs_log_tail(ip: str, tail: int = 500) -> str | None:
     return ssh(ip, _windows_obs_log_tail_cmd(tail), user="newlevel", timeout=30)
+
+
+def cg_chain_detail_from_output(stdout: str) -> str:
+    """Pure: fold cg-chain-verify.sh's table output into ONE report-only detail line.
+
+    Counts the per-hop source verdicts (the last token of each data row is PASS/FAIL) and echoes
+    the tool's own OVERALL verdict. No I/O -- unit-testable. The detail never implies a rig fault
+    of its own; the audit's PASS/WARN/FAIL exit is untouched (this row is always emitted as NOTE).
+    """
+    passes = fails = 0
+    overall = "?"
+    for ln in stdout.splitlines():
+        s = ln.strip()
+        if s.startswith("OVERALL:"):
+            overall = s.split(":", 1)[1].strip()
+            continue
+        parts = s.split()
+        if parts and parts[-1] in ("PASS", "FAIL"):
+            if parts[-1] == "PASS":
+                passes += 1
+            else:
+                fails += 1
+    return (f"overall={overall} sources_pass={passes} sources_fail={fails} "
+            f"(report-only #1300; #787 resolume-rate exemption unchanged)")
+
+
+def check_cg_chain() -> None:
+    """REPORT-ONLY CG-chain row (#1300): fetch strih + stream OBS log tails, run cg-chain-verify.sh
+    --report-only over them, and emit ONE NOTE row. Never PASS/WARN/FAIL -> never changes the audit
+    exit code. A box that is off / unreachable yields a NOTE 'log unreadable', never a page."""
+    import tempfile
+
+    logs: dict[str, str] = {}
+    for hop, ip in (("strih", STRIH), ("stream", STREAM)):
+        tail = windows_obs_log_tail(ip)
+        if tail is None:
+            emit(CG_CHAIN_REPORT_VERDICT, "cg-chain",
+                 f"{hop} OBS log unreadable -- CG-chain verdict skipped (report-only #1300)")
+            return
+        logs[hop] = tail
+
+    env = dict(os.environ)
+    tmp: list[str] = []
+    try:
+        for hop, text in logs.items():
+            fd, path = tempfile.mkstemp(prefix=f"cg-chain-{hop}-", suffix=".log")
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+            tmp.append(path)
+            env[f"CG_CHAIN_{hop.upper()}_LOG"] = path
+        try:
+            out = subprocess.run(
+                ["bash", CG_CHAIN_SCRIPT, "--hops", "strih stream", "--report-only"],
+                env=env, capture_output=True, text=True, timeout=30,
+            ).stdout
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            emit(CG_CHAIN_REPORT_VERDICT, "cg-chain", f"verdict tool error: {exc} (report-only #1300)")
+            return
+        emit(CG_CHAIN_REPORT_VERDICT, "cg-chain", cg_chain_detail_from_output(out))
+    finally:
+        for path in tmp:
+            try:
+                os.unlink(path)
+            except OSError as exc:  # airuleset:script-ok best-effort temp cleanup, nothing actionable
+                print(f"[NOTE] cg-chain  temp cleanup failed for {path}: {exc}", file=sys.stderr)
 
 
 def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: float,
@@ -485,11 +581,55 @@ def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: 
     w_steps, w_storm = parse_ntp_status(http_get(f"http://{ip}:8898/"))
     _, steprate_disp, steprate_problems = grade_ntp_steprate(w_steps, w_storm)
     problems += steprate_problems
+    # #1299: the #1298 genlock LOCK verdict, report-only — rig-status renders it as a generic chip.
+    # Omit when absent (no genlock-lock: line in the window) so it is UNKNOWN, never a fabricated state.
+    gl = genlock_lock_state_from_log(log)
+    gl_tok = f" genlock_lock={gl}" if gl else ""
     verdict = box_verdict(problems)
-    detail = f"obs64={obs_count} render={render} audio_buf={buf_peak}ms arrivals[{fmt_rates(rates)}]{cad} steprate={steprate_disp}{lat}"
+    detail = f"obs64={obs_count} render={render} audio_buf={buf_peak}ms arrivals[{fmt_rates(rates)}]{cad} steprate={steprate_disp}{gl_tok}{lat}"
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
     emit(verdict, name, detail)
+
+
+def grade_resolume_bundle(state: dict | None) -> tuple[str | None, str | None]:
+    """#1296/#787: grade RESOLUME-SNV's bundle-state facets for the status page.
+
+    RESOLUME-SNV is a REPORT-ONLY, rate-EXEMPT (#787) TRAVELING CG box: it is NOT a gated node and
+    its non-60 NDI feed is never cadence-graded, so this NEVER produces FAIL/WARN. When the box is
+    serving :8899 (`state` is a non-empty dict) it renders its genlock build + OBS identity as a
+    PASS row; when it is away / not serving (`state` is None/empty/not a dict) it returns
+    (None, None) so check_resolume OMITS it entirely (a traveling box's absence is normal, never a
+    red/stale row). Returns (verdict, detail) — verdict is None to mean "omit".
+    """
+    if not isinstance(state, dict) or not state:
+        return None, None
+    sha = state.get("genlock_build_sha") or "n/a"
+    obs = state.get("obs_process_count") or "n/a"
+    ver = state.get("port4455_owner_version") or "n/a"
+    return "PASS", (f"genlock_build_sha={sha} obs64={obs} obs_version={ver} "
+                    f"(report-only, #787 rate-exempt, not gated)")
+
+
+def check_resolume() -> None:
+    """#1296: surface RESOLUME-SNV's genlock build + bundle-state facets on the status page.
+
+    Read-only dev1-side HTTP fetch of its :8899 bundle-state (the #732 BundleStateServer the
+    supervisor installs on the box). When present -> a PASS facet row; when away / not serving ->
+    omit (never a FAIL, never a stale row) per grade_resolume_bundle. The box's NDI rate is NEVER
+    graded here (the #787 exemption stays)."""
+    body = http_get(f"http://{RESOLUME}:8899/bundle-state.json")
+    state: dict | None = None
+    if body:
+        try:
+            parsed = json.loads(body)
+            state = parsed if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            state = None
+    verdict, detail = grade_resolume_bundle(state)
+    if verdict is None:
+        return  # away / not serving :8899 — a traveling box's absence is normal (report-only)
+    emit(verdict, "resolume", detail or "")
 
 
 def main() -> int:
@@ -501,6 +641,8 @@ def main() -> int:
     check_windows_box("strih", STRIH, strih_pw, program_fps=30.0, expect_latency=False,
                       check_camera_cadence=True)
     check_windows_box("stream", STREAM, strih_pw, program_fps=30.0, expect_latency=True)
+    check_cg_chain()  # #1300 report-only CG-chain verdict row (NOTE; never affects the exit code)
+    check_resolume()  # #1296: report-only, #787 rate-exempt; omitted when the traveling box is away
     fails = results.count("FAIL")
     warns = results.count("WARN")
     print(f"\n=== RIG AUDIT: {results.count('PASS')} PASS / {warns} WARN / {fails} FAIL "

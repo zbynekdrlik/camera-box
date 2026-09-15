@@ -111,6 +111,9 @@ AUX_TICK_RUN_ID = 911013  # issue 1196: the painted aux Vernier tick pair (gen_t
 RESERVED_RUN_IDS = frozenset({
     911001, 911002, 911003, 911004, 911007, 911008, 911009,
     911010, 911011, 911012, AUX_TICK_RUN_ID,
+    # #1301: the CG chain (SongPlayer 911014 origin / cg OBS 911015 hop) node burns -- reserved,
+    # so never auto-detected as "the painter" nor used as a common skew-sample id.
+    911014, 911015,
 })
 
 

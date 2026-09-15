@@ -377,7 +377,10 @@ def _parse_tasklist_obs_process_names(text):
     `bsg.obs_process_count_from_listing` (UNCHANGED by this ticket) keeps working on it verbatim.
     Each CSV row is `"Image Name","PID","Session Name","Session#","Mem Usage"` (tasklist's own
     quoted-CSV format); `/NH` already suppresses the header row, but this parser tolerates one
-    anyway (it simply never matches the obs<digits> pattern).
+    anyway (it simply never matches the obs<digits> pattern). #1295: a matching row whose Mem Usage
+    proves it is a DEAD/zombie handle (`bsg.tasklist_row_is_live_obs` False — tasklist has no
+    HasExited column, so Mem Usage is the liveness proxy) is EXCLUDED, so a stale ~0-KB obs handle
+    never inflates the downstream "exactly one obs64" count (#1296).
 
     "" if *text* is empty/malformed (never a guessed/zero count downstream — the same
     never-a-false-clean discipline every other facet in this file follows)."""
@@ -391,6 +394,12 @@ def _parse_tasklist_obs_process_names(text):
             image_name = row[0]
             base = image_name[:-4] if image_name.lower().endswith(".exe") else image_name
             if bsg.OBS_PROCESS_NAME_RE.match(base):
+                # #1295: exclude a DEAD/mid-exit zombie obs row by its Mem Usage (tasklist has no
+                # HasExited column) — a ~0-KB handle must not inflate the "exactly one obs64" count
+                # health signal (#1296). Mem Usage is row[4]; a missing column reads NOT-live.
+                mem_field = row[4] if len(row) > 4 else ""
+                if not bsg.tasklist_row_is_live_obs(mem_field):
+                    continue
                 names.append(base)
     except csv.Error as e:
         log(f"WARNING: could not parse tasklist CSV output: {e}")
@@ -669,10 +678,16 @@ def gather_bundle_state(
             # age + per-window counts) from the SAME bounded log_text (no second read); the dev1
             # upstream-step watchdog reads these facets.
             bsg.av_offset_series_from_log(log_text),
+            # #1299 — the fleet-visible genlock LOCK facet (the decided state the #1298 statusbar
+            # emits on its genlock-lock-json: line) from the SAME bounded log_text (no second read);
+            # the dev1 genlock-lock watchdog + rig-status read it. None -> facet omitted (a stock OBS
+            # / no line yet), never a false UNLOCKED.
+            bsg.genlock_lock_facet_from_log(log_text),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
-     audio_ts_lag, audio_ref_band, av_offset) = _timed(timings, "obs_log_parse", _parse_log_facets)
+     audio_ts_lag, audio_ref_band, av_offset, genlock_lock) = _timed(
+        timings, "obs_log_parse", _parse_log_facets)
     audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
     (audio_ref_lag_src_val, audio_ref_lag_base_ms_val, audio_ref_lag_high_ms_val,
      audio_ref_lag_low_ms_val, audio_ref_lag_duty_pct_val, audio_ref_lag_n_val) = audio_ref_band
@@ -800,6 +815,14 @@ def gather_bundle_state(
         vb_matrix_start=vb_matrix_start_val,
     )
 
+    # #1299 — the genlock_lock facet is a NESTED object, not a flat string, so it is attached here
+    # rather than through build_bundle_state (whose every-value-is-a-quoted-string contract the
+    # version-integrity gate's regex depends on; it simply ignores this extra key). Omit-when-absent:
+    # a stock OBS / no genlock-lock-json: line yields None -> the facet never appears (UNKNOWN
+    # downstream), never a false UNLOCKED.
+    if genlock_lock is not None:
+        result["genlock_lock"] = genlock_lock
+
     timings["total"] = time.perf_counter() - t_total0
     if os.environ.get("BUNDLE_STATE_TIMING") == "1":
         breakdown = " ".join(f"{k}={v:.3f}s" for k, v in timings.items())
@@ -859,12 +882,12 @@ def make_handler(args, state):
             self.wfile.write(body)
 
         def _serve_record_dir_stats(self):
-            """#652: read-only disk-usage stats over the box's OWN OBS record directory (total
-            bytes + file count + oldest mtime of its top-level files) — powers
-            recording-e2e.sh's disk-budget preflight WARN (the harness's own E2E test recordings
-            had silently accumulated to ~500 GB on strih / 139 GB on stream). Same resolve-live
-            + last-known-good fallback as the static-file GET path below — never a stale/wrong
-            directory after a profile switch."""
+            """#652/#1276: read-only disk-usage stats over the box's OWN OBS record directory (total
+            bytes + file count + oldest mtime of its top-level files, plus the volume's free_bytes
+            since #1276) — powers recording-e2e.sh's recordings preflight WARN, which since #1276
+            fires when the recordings VOLUME has <= RECORDINGS_FREE_MIN_GB of FREE space left (not
+            when the file sum exceeds a budget). Same resolve-live + last-known-good fallback as the
+            static-file GET path below — never a stale/wrong directory after a profile switch."""
             record_dir = self._resolve_record_dir()
             if record_dir is None:
                 self.send_response(503)

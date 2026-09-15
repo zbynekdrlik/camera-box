@@ -952,6 +952,23 @@ per-camera latency — each was independently missed at some point), (5) add the
 `src/` and `scripts/` to find every site that needs the new id added alongside it — that is a
 faster and more reliable check than trying to remember the list above.
 
+**Reserved id map (keep current when adding one):** 911001 cam1 / 911002 strih / 911003 imag /
+911004 stream / 911007 cam4 / 911008 cam3 / 911009 cam2 / 911010 cam5 / 911011 cam6 / 911012 cam7 /
+911013 AUX_TICK (painted aux pair) / **911014 SONGPLAYER / 911015 CG_OBS (#1301)**; 911005/911006/
+911099 are test-fixture-only synthetics. `NODE_BURN_RUN_IDS` is now 13 entries.
+
+**A non-camera node (a chain ORIGIN, or a non-camera HOP) does NOT go in `CAMERA_UNDER_TEST_NODES`
+— step (2) above is CAMERA-ONLY.** The #1301 CG chain is the worked example: SongPlayer (911014) is
+a chain ORIGIN (like the cam2 painter — painted by songplayer#151, its id tracked THROUGH the
+chain, NEVER a camera-under-test), and cg OBS (911015) is a HOP (like strih/stream). BOTH are
+tick-excluded (step 1) + in the two python mirrors (`qr_align_pins.py`, `mv_skew_snapshot.py`) + in
+every `all_burns` array (step 4), but NEITHER is in `CAMERA_UNDER_TEST_NODES`/`OPTICAL_INJECTION_NODES`.
+A HOP that composites its OWN corner burn also needs a new `burn_geom::Corner` synced across the
+#463 FOUR mirrors + the burn-filter host-role map. The per-hop contiguity+hold verdict is the
+crate-root `src/cg_chain_gate.rs` (generic — reuse it, never copy it), wired as a REPORT-ONLY
+`report["cg_chain"]` section gated on its own input so it never touches the camera-chain
+`overall_pass`. Full detail + the LIVE-flip preconditions: `.claude/rules/cg-burn-node-role.md`.
+
 ## The painted (cam2 optical Vernier) `tick` has REAL jitter — never bucket its recorded-order deltas by exact equality (#726)
 
 `RecordingFrame.tick` (this file's doc, ~L128) is "the highest `frame_id` among the decoded

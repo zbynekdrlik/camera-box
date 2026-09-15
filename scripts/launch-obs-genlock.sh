@@ -32,6 +32,7 @@
 # Usage (planner mode — prints the PowerShell launch+verify program + the MCP plan):
 #   scripts/launch-obs-genlock.sh --box strih            # uses the strih defaults
 #   scripts/launch-obs-genlock.sh --box stream           # uses the stream defaults
+#   scripts/launch-obs-genlock.sh --box resolume         # RESOLUME-SNV cg OBS (win-resolume, AHK v2 safe-loop) -- issue 1295
 #   scripts/launch-obs-genlock.sh --box strih --force    # force-kill a wedged obs64 first (obs-ops recovery)
 #   scripts/launch-obs-genlock.sh --box strih \
 #       --obs-dir 'C:\Program Files\obs-studio'          # override the OBS install dir
@@ -53,20 +54,26 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # — this is a DEV rig, "kludne ho killni"); FORCE="0" aborts if obs64 is already running (relaunch
 # deliberately, never double-launch). HAS_AHK (default "1") emits the #786 AHK stop-first/restart-last
 # bracket around the redraw loop — pass "0" for a box with NO AutoHotkey64 auto-respawn watcher
-# (stream; only strih runs NL_STARTUP.ahk, per .claude/skills/obs-ops "AHK on strih") so its program
-# never carries a real AutoHotkey64 command (the #411 self-heal stream guard pins this). Pure string
-# builder so a unit test can assert the program is well-formed without a Windows host. Heredoc body is
-# a literal PowerShell here-string — bash-level interpolation is ONLY $OBS_DIR / the FORCE branch /
+# (stream; strih AND resolume run NL_STARTUP.ahk, per .claude/skills/obs-ops "AHK on strih" + issue
+# 1295) so its program never carries a real AutoHotkey64 command (the #411 self-heal stream guard
+# pins this). AHK_SCRIPT ($4, default strih's path) / AHK_PREFER ($5, 'exe' default | 'lnk') are the
+# PER-BOX relaunch identity (issue 1295) passed to scripts/lib/ahk-watchdog.sh. Pure string builder
+# so a unit test can assert the program is well-formed without a Windows host. Heredoc body is a
+# literal PowerShell here-string — bash-level interpolation is ONLY $OBS_DIR / the FORCE branch /
 # the AHK bracket; everything else (PowerShell $vars) is literal.
 build_launch_program() {
-  local obs_dir="$1" force="$2" has_ahk="${3:-1}"
+  # issue 1295: $4 AHK_SCRIPT / $5 AHK_PREFER = the PER-BOX AHK relaunch identity passed to the
+  # shared scripts/lib/ahk-watchdog.sh primitive. Defaults = strih's values so every existing
+  # caller (obs-self-heal-install.sh, the strih arm, the unit tests) is byte-identical; resolume
+  # passes its own v2 .ahk path + 'lnk' (prefer the Startup shortcut on the traveling CG box).
+  local obs_dir="$1" force="$2" has_ahk="${3:-1}" ahk_script="${4:-D:\\_APPS\\NL_STARTUP.ahk}" ahk_prefer="${5:-exe}"
 
   # #786/#411 — the AHK bracket is emitted ONLY for a box that actually runs the AHK watcher.
   local ahk_decl ahk_stop_ps ahk_restart_ps ahk_best_effort_restart_ps
   if [ "$has_ahk" = "1" ]; then
     ahk_decl='$ahkStopped = $false'
     ahk_stop_ps=$(cat <<'PSAHK'
-  # Stop AHK BEFORE killing obs64 (strih only; no-op elsewhere): NL_STARTUP.ahk respawns obs64 via
+  # Stop AHK BEFORE killing obs64 (AHK boxes only; no-op elsewhere): NL_STARTUP.ahk respawns obs64 via
   # the BARE exe within seconds of the window vanishing, which would drop the shortcut params
   # (--enable-media-stream --verbose -> interkom "Permissions denied") AND race a double-launch.
   # Same stop-first/restart-last structure as the #411 self-heal. This snippet is embedded at every
@@ -80,7 +87,7 @@ build_launch_program() {
 PSAHK
 )
     local ahk_relaunch_ps
-    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
+    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps "$ahk_script" "$ahk_prefer")"
     # #867: the restart must be VERIFIED (Get-Process AutoHotkey64), never just "shortcut file
     # exists -> assume success" — a resolved-but-failed relaunch here means the redraw loop leaves
     # strih with NO respawn watcher, so this is fail-loud (Write-Error + a distinct exit), matching
@@ -92,7 +99,7 @@ ${ahk_relaunch_ps}
   if (\$ahkRelaunchVerified) {
     Write-Host "#786: AHK watchdog restarted via \$ahkRelaunchTarget."
   } else {
-    Write-Error "#867 FAIL: AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher; investigate before trusting this box."
+    Write-Error "#867 FAIL: AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- this box has NO respawn watcher; investigate before trusting this box."
     exit 9
   }
 }
@@ -124,8 +131,8 @@ PSAHK
   # #978/#958 -- the SESSION-VISIBILITY GATE fragments. An obs64 launched via ssh+Invoke-CimMethod
   # lands in Windows SessionId=0 (invisible on the console) yet passes every OTHER check in this
   # program (log render tick, audio buffering) -- issue 958's real incident sat like this for
-  # ~3.5h. has_ahk=1 (strih) also gates AutoHotkey64's session (a session-0 AHK re-spawns obs64
-  # into session 0 forever); has_ahk=0 (stream, no AHK watcher) gets a documented no-op.
+  # ~3.5h. has_ahk=1 (strih/resolume) also gates AutoHotkey64's session (a session-0 AHK re-spawns
+  # obs64 into session 0 forever); has_ahk=0 (stream, no AHK watcher) gets a documented no-op.
   #
   # Deliberately does NOT call scripts/lib/obs-session-visibility.sh's obs_session_visibility_*
   # functions (#977/#979's shared detector) -- that lib's shape (Write-Output field lines, parsed
@@ -141,7 +148,7 @@ PSAHK
     ahk_session_ps=$(cat <<'PSAHKSESS'
 $ahkSessProcs = @(Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)
 if ($ahkSessProcs.Count -ne 1) {
-  Write-Error "#978 FAIL: expected exactly 1 AutoHotkey64 process on strih, found $($ahkSessProcs.Count) -- the respawn watcher is missing/duplicated (issue 958)."
+  Write-Error "#978 FAIL: expected exactly 1 AutoHotkey64 process on this box, found $($ahkSessProcs.Count) -- the respawn watcher is missing/duplicated (issue 958)."
   exit 8
 }
 if ($ahkSessProcs[0].SessionId -ne $activeSession) {
@@ -189,7 +196,10 @@ ${kill_body}"
   else
     kill_block=$(cat <<'PSNOKILL'
 # No --force: refuse to double-launch a running obs64 (relaunch deliberately; use --force for a wedged one).
-if (Get-Process obs64 -ErrorAction SilentlyContinue) {
+# #1295: count only LIVE obs64 here too -- a stale/exited Get-Process handle (HasExited / 0 threads)
+# must not falsely report "already running" and refuse a legitimate launch (same zombie-blind class
+# as the #978 gate + the wait-picks below).
+if (Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }) {
   Write-Error "obs64 already running -- relaunch deliberately (--force to recover a wedged one)."; exit 3
 }
 PSNOKILL
@@ -221,9 +231,9 @@ Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction Silent
 #     for camera/mic access; a bare exe launch dropped them and rendered a "Permissions denied"
 #     box on program output, user-caught live). Fallback to the bare exe ONLY if the shortcut is
 #     genuinely absent (fail-open recovery beats no OBS at all -- the verify below still gates).
-#     NB on strih: D:\\_APPS\\NL_STARTUP.ahk auto-respawns obs64 from this same dir, but it won't
-#     double-launch once one is running, so this Start-Process wins; the log verify below fails loud
-#     on a non-genlock build regardless. See obs-ops skill.
+#     NB on an AHK box (strih/resolume): its NL_STARTUP.ahk auto-respawns obs64 from this same dir,
+#     but it won't double-launch once one is running, so this Start-Process wins; the log verify
+#     below fails loud on a non-genlock build regardless. See obs-ops skill.
 \$obsDir = '${obs_dir_ps}'
 \$exe    = '${exe_ps}'
 \$lnk    = "\$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\OBS Studio.lnk"
@@ -242,7 +252,7 @@ if (Test-Path \$lnk) {
 \$proc = \$null
 for (\$i = 0; \$i -lt 30; \$i++) {
   Start-Sleep -Seconds 1
-  \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Select-Object -First 1
+  \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not \$_.HasExited -and \$_.Threads.Count -gt 0 } | Select-Object -First 1
   if (\$proc -and \$proc.WorkingSet64 -gt 100MB) { break }
 }
 if (-not \$proc) {
@@ -326,7 +336,7 @@ ${ahk_stop_ps}
   \$proc = \$null
   for (\$i = 0; \$i -lt 30; \$i++) {
     Start-Sleep -Seconds 1
-    \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Select-Object -First 1
+    \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not \$_.HasExited -and \$_.Threads.Count -gt 0 } | Select-Object -First 1
     if (\$proc -and \$proc.WorkingSet64 -gt 100MB) { break }
   }
   if (-not \$proc) { Write-Error "obs64 did not start on #786 relaunch"; exit 6 }
@@ -358,9 +368,17 @@ if (\$activeSessProcs.Count -lt 1) {
 }
 \$activeSession = \$activeSessProcs[0].SessionId
 \$ownSession = (Get-Process -Id \$PID).SessionId
-\$sessObsProcs = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+\$allObsProcs = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+# #1295: Get-Process can enumerate a STALE handle for an already-EXITED obs64 (HasExited=True,
+# 0 threads, ~45 KB -- the live 2026-09-12 RESOLUME-SNV pid-58560 case). Count only LIVE instances
+# and LOG the ignored zombies (pid + start time); never FAIL "found 2" off a dead handle.
+foreach (\$z in @(\$allObsProcs | Where-Object { \$_.HasExited -or \$_.Threads.Count -eq 0 })) {
+  \$zStart = try { \$z.StartTime.ToString('s') } catch { 'unknown' }
+  Write-Host "#1295 NOTE: ignoring a DEAD obs64 process object PID \$(\$z.Id) (HasExited/0-threads, start=\$zStart) -- a stale zombie handle, not a live instance."
+}
+\$sessObsProcs = @(\$allObsProcs | Where-Object { -not \$_.HasExited -and \$_.Threads.Count -gt 0 })
 if (\$sessObsProcs.Count -ne 1) {
-  Write-Error "#978 FAIL: expected exactly 1 obs64 process, found \$(\$sessObsProcs.Count) -- investigate before trusting this box."
+  Write-Error "#978 FAIL: expected exactly 1 LIVE obs64 process, found \$(\$sessObsProcs.Count) (dead/zombie handles already excluded) -- investigate before trusting this box."
   exit 8
 }
 \$sessProc = \$sessObsProcs[0]
@@ -422,10 +440,11 @@ Toggling the measurement burn does NOT relaunch OBS — it is a per-source genlo
 OBS WebSocket: scripts/obs_burn_filter.py add|remove (driven by rig-mode.sh test|event).
 
 Usage:
-  scripts/launch-obs-genlock.sh --box strih|stream [--force] [--obs-dir 'C:\Program Files\obs-studio']
+  scripts/launch-obs-genlock.sh --box strih|stream|resolume [--force] [--obs-dir 'C:\Program Files\obs-studio']
   scripts/launch-obs-genlock.sh --help
 
-  --box     strih (win-strih, 10.77.9.202) or stream (win-stream-snv, 10.77.9.204) — selects the MCP.
+  --box     strih (win-strih, 10.77.9.202), stream (win-stream-snv, 10.77.9.204), or resolume
+            (win-resolume, resolume.lan — the traveling cg OBS box, issue 1295) — selects the MCP.
   --force   force-kill a wedged obs64 first (documented obs-ops recovery; DEV rig).
   --obs-dir override the OBS install root (default 'C:\Program Files\obs-studio'; its bin\64bit is cwd).
 
@@ -449,20 +468,44 @@ main() {
     esac
   done
 
-  # has_ahk: only strih runs the NL_STARTUP.ahk auto-respawn watcher (obs-ops "AHK on strih") —
-  # stream's program must not carry a real AutoHotkey64 command (#411 self-heal guard pins this).
-  local mcp box_ip has_ahk
+  # has_ahk: strih AND resolume (issue 1295) run an NL_STARTUP.ahk AutoHotkey auto-respawn watcher
+  # (obs-ops "AHK on strih"; RESOLUME-SNV confirmed live by the supervisor pre-deploy inventory) so
+  # their programs stop+restart-VERIFY AutoHotkey64 around the launch; stream has none (has_ahk=0,
+  # no real AutoHotkey64 command -- the #411 self-heal guard pins this). The relaunch IDENTITY is
+  # PER-BOX: strih keeps D:\_APPS\NL_STARTUP.ahk + exe-first; resolume (the TRAVELING CG box) passes
+  # its own v2 .ahk path and prefers the Startup .lnk ('lnk') so a path move can't break the
+  # relaunch. resolume's host is the HOSTNAME resolume.lan, NEVER a pinned IP -- resolume.lan
+  # DHCP-drifts and currently collides with `bridge` at .201 (targets.md), so the emitted STEP-3/3b
+  # WS ops resolve it live via `--host resolume.lan`; confirm the box identity before trusting it.
+  local mcp box_ip has_ahk ahk_script ahk_prefer
   case "$box" in
-    strih)  mcp="win-strih";       box_ip="10.77.9.202"; has_ahk=1 ;;
-    stream) mcp="win-stream-snv";  box_ip="10.77.9.204"; has_ahk=0 ;;
-    *) echo "ERROR: --box must be 'strih' or 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
+    strih)    mcp="win-strih";       box_ip="10.77.9.202"; has_ahk=1; ahk_script='D:\_APPS\NL_STARTUP.ahk'; ahk_prefer="exe" ;;
+    stream)   mcp="win-stream-snv";  box_ip="10.77.9.204"; has_ahk=0; ahk_script='D:\_APPS\NL_STARTUP.ahk'; ahk_prefer="exe" ;;
+    resolume) mcp="win-resolume";    box_ip="resolume.lan"; has_ahk=1; ahk_script='C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk'; ahk_prefer="lnk" ;;
+    *) echo "ERROR: --box must be 'strih', 'stream' or 'resolume' (got '${box}')" >&2; usage >&2; exit 2 ;;
   esac
 
   local PROGRAM
-  PROGRAM="$(build_launch_program "$obs_dir" "$force" "$has_ahk")"
+  PROGRAM="$(build_launch_program "$obs_dir" "$force" "$has_ahk" "$ahk_script" "$ahk_prefer")"
 
+  echo "# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) ====="
+  # resolume (issue 1295): the STEP-3/3b dev1-side WS ops below are keyed on the HOSTNAME
+  # resolume.lan, which currently resolves to 10.77.9.201 -- the SAME IP `bridge` lists in
+  # targets.md (event-LAN DHCP collision). STEP 3 is a WRITE (burn sweep-off), so before running
+  # the dev1-side WS ops confirm the resolved address is REALLY RESOLUME-SNV (getent + its cg OBS
+  # profile / OBS-WS identity, rig-state-inspection.md §2) and substitute the confirmed live
+  # address for `resolume.lan` if in doubt -- mirrors the deploy plan's STEP -1 identity-confirm.
+  if [ "$box" = "resolume" ]; then
+    cat <<'RESCAVEAT'
+# STEP -1 (resolume ONLY -- box IDENTITY confirm, issue 1295): resolume.lan is a TRAVELING DHCP box
+#         currently resolving to 10.77.9.201 = the SAME IP `bridge` lists (targets.md). The dev1-side
+#         STEP 3 below is a WRITE (burn sweep-off) -- before ANY STEP-3/3b WS op, confirm the live
+#         address is RESOLUME-SNV (getent hosts resolume.lan + its cg OBS profile over the
+#         win-resolume MCP, rig-state-inspection.md §2), and use that confirmed address in place of
+#         `resolume.lan` in the --host args if the lease has drifted.
+RESCAVEAT
+  fi
   cat <<PLAN
-# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) =====
 # Run the program below via the ${mcp} MCP Shell — a GUI relaunch + on-screen log verification is
 # exactly what the win-* MCP is for (#701: plain scp/ssh DOES work against strih/stream with the
 # targets.md creds, but that doesn't help drive/verify a GUI app).

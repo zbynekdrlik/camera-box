@@ -435,6 +435,85 @@ fn cli_box_selects_correct_mcp_and_emits_program() {
     );
 }
 
+/// #1295: RESOLUME-SNV (the traveling cg OBS box) is a valid --box: win-resolume MCP, hostname
+/// resolume.lan (never a pinned IP), has_ahk=1 (it RUNS an AutoHotkey v2 safe-loop respawning OBS,
+/// confirmed live by the supervisor pre-deploy inventory), so its program carries the AHK
+/// stop/restart-verified bracket + the #978 SessionId/MainWindowTitle gate over BOTH obs64 AND
+/// AutoHotkey64, and the render-tick verify.
+#[test]
+fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
+    let (code, out, _err) = run_script(&["--box", "resolume"]);
+    assert_eq!(code, 0, "--box resolume must print the plan (exit 0)");
+    assert!(
+        out.contains("win-resolume") && out.contains("resolume.lan"),
+        "resolume -> win-resolume plan at the resolume.lan hostname:\n{out}"
+    );
+    // no pinned IP in the resolume plan's HOST/CONNECTION positions (the identity-confirm caveat
+    // MAY name 10.77.9.201 in prose -- that is the collision it warns about, not a pin)
+    assert!(
+        !out.contains("--host 10.77.9.201") && !out.contains("http://10.77.9.201") && !out.contains("ws://10.77.9.201"),
+        "resolume plan must use the hostname in every --host/URL position, never a pinned IP:\n{out}"
+    );
+    assert!(
+        out.contains("--host resolume.lan"),
+        "resolume plan addresses the box by hostname in its --host args:\n{out}"
+    );
+    // has_ahk=1 -> the AHK watcher is stopped before obs64 is touched and restarted + VERIFIED
+    // afterward (issue 867 / 1272) -- the same bracket strih gets.
+    assert!(
+        out.contains("Stop-Process -Name AutoHotkey64"),
+        "resolume runs the AHK watcher -- its program must stop AutoHotkey64:\n{out}"
+    );
+    assert!(
+        out.contains("$ahkRelaunchVerified") && out.contains("Get-Process AutoHotkey64"),
+        "resolume must carry the VERIFIED AHK restart machinery (issue 867):\n{out}"
+    );
+    // the #978 session gate must cover AutoHotkey64 too (a session-0 AHK respawns obs64 into
+    // session 0 forever), not just obs64.
+    assert!(
+        out.contains("$ahkSessProcs")
+            && out.contains("$ahkSessProcs[0].SessionId -ne $activeSession"),
+        "resolume (has_ahk=1) must gate AutoHotkey64's SessionId in the #978 session gate:\n{out}"
+    );
+    // the relaunch target is resolume's OWN v2 .ahk path, never strih's D:\_APPS path.
+    assert!(
+        out.contains(
+            "$ahkScriptPath = 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk'"
+        ) && !out.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
+        "resolume must relaunch via its OWN .ahk path, not strih's:\n{out}"
+    );
+    // the build-proof verify + the session-visibility gate still apply
+    assert!(
+        out.contains("render tick ENABLED") && out.contains("SESSION-VISIBILITY"),
+        "resolume plan keeps the render-tick verify + the #978 session gate:\n{out}"
+    );
+    // STEP 3b wires the report-only latency verify for the resolume box
+    assert!(
+        out.contains("latency_pins_verify.py --box resolume --host resolume.lan"),
+        "resolume plan wires the report-only latency verify-read-back at its own host:\n{out}"
+    );
+    // #1295 review (YELLOW): the resolume launch plan carries the box-IDENTITY confirm caveat
+    // before its STEP-3 dev1-side WS ops (resolume.lan collides with `bridge` at .201, and STEP 3
+    // is a burn-sweep WRITE) -- mirroring the deploy plan's STEP -1.
+    assert!(
+        out.contains("box IDENTITY confirm"),
+        "resolume launch plan must carry the identity-confirm caveat before the STEP-3 WS write:\n{out}"
+    );
+}
+
+/// #1295 review (YELLOW): the identity-confirm caveat is resolume-ONLY -- the strih/stream launch
+/// plans (fixed IPs, no bridge collision) must NOT carry it.
+#[test]
+fn non_resolume_launch_plan_has_no_identity_confirm_1295() {
+    for box_name in ["strih", "stream"] {
+        let (_c, out, _e) = run_script(&["--box", box_name]);
+        assert!(
+            !out.contains("box IDENTITY confirm"),
+            "{box_name} launch plan must NOT carry the resolume-only identity-confirm caveat:\n{out}"
+        );
+    }
+}
+
 /// A trailing value-taking flag with no value is a clean usage error (exit 2), not a set -e abort.
 #[test]
 fn trailing_flag_without_value_is_usage_error_exit_2() {
@@ -782,5 +861,62 @@ fn self_heal_reuses_wrapper_launch_program_775() {
         self_heal.contains("build_launch_program"),
         "#775: obs-self-heal-install.sh must reuse launch-obs-genlock.sh's build_launch_program \
          (so its recovery relaunch inherits the .lnk-primary contract), never re-derive its own launch."
+    );
+}
+
+/// #1295 follow-up A -- the emitted #978 session gate (and the obs64 wait-picks) must IGNORE
+/// dead/zombie process objects (a stale `Get-Process obs64` handle: `HasExited`=True / 0 threads,
+/// the live 2026-09-12 RESOLUME-SNV pid-58560 case), counting only LIVE instances and LOGGING the
+/// ignored zombies -- never failing "expected exactly 1 obs64 process, found 2" off a 45 KB handle.
+#[test]
+fn session_gate_ignores_dead_obs64_process_objects_1295() {
+    let p = program_default();
+    // the live-instance filter is applied wherever obs64 is counted/picked.
+    assert!(
+        p.contains("HasExited") && p.contains("Threads.Count"),
+        "the #978 obs64 count + wait-picks must filter to LIVE instances \
+         (-not HasExited -and Threads.Count -gt 0):\n{p}"
+    );
+    // the count gate keeps its exact shape, now over the live-filtered array.
+    assert!(
+        p.contains("$sessObsProcs.Count -ne 1"),
+        "the #978 count gate must keep $sessObsProcs.Count -ne 1 (over the live-filtered array):\n{p}"
+    );
+    // ignored zombies are LOGGED (not failed on) with their pid + start time.
+    assert!(
+        p.to_lowercase().contains("dead obs64"),
+        "an ignored dead/zombie obs64 handle must be LOGGED (pid + start time), not failed on:\n{p}"
+    );
+}
+
+/// #1295 follow-up A -- the force path (kill + relaunch) shares the SAME builder, so its obs64
+/// wait-pick is live-filtered too (a zombie must never be latched as the launched $proc).
+#[test]
+fn force_path_obs64_wait_pick_is_live_filtered_1295() {
+    let p = program_force();
+    assert!(
+        p.contains("HasExited") && p.contains("Threads.Count"),
+        "the force-path obs64 wait-pick must filter to LIVE instances:\n{p}"
+    );
+}
+
+/// #1295 -- obs-guarded-launch.ps1's "is OBS already running?" presence check (`$running`) and its
+/// obs64 wait-pick must filter to LIVE instances. A stale zombie handle (HasExited / 0 threads --
+/// the 2026-09-12 RESOLUME-SNV pid-58560 class) would otherwise make `$running` truthy so a
+/// genuinely needed launch is skipped, or be latched as the launched `$proc`.
+#[test]
+fn guarded_launch_presence_and_pick_are_live_filtered_1295() {
+    let body = std::fs::read_to_string(manifest_dir().join("scripts/obs-guarded-launch.ps1"))
+        .expect("read obs-guarded-launch.ps1");
+    let n = body.matches("HasExited").count();
+    assert!(
+        n >= 2,
+        "#1295: the presence check AND the obs64 wait-pick must filter to LIVE instances \
+         (-not $_.HasExited -and $_.Threads.Count -gt 0); found {n} HasExited filters (want >= 2). \
+         Script:\n{body}"
+    );
+    assert!(
+        body.contains("Threads.Count -gt 0"),
+        "#1295: the live filter must use the Threads.Count -gt 0 liveness predicate. Script:\n{body}"
     );
 }

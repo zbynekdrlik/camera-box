@@ -41,6 +41,22 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   capture IRQ is off the grab core. Deliberately never red-fails the current non-RT fleet. NOTE:
   after STEP 1 (lowlatency/preempt=full) this check STILL WARNs "not PREEMPT_RT" — that is EXPECTED
   and correct (preempt=full is not full RT). It only reads "PREEMPT_RT" after STEP 2.
+- **Defect 2 — per-thread SCHED_FIFO (code-fixed in this lane, replaces the old runbook Step B).**
+  The process-wide `CPUSchedulingPolicy=fifo` is DROPPED from BOTH appliance unit copies
+  (`scripts/setup-device.sh` STEP 7 heredoc + the checked-in `systemd/camera-box.service` that
+  `build-image.sh` bakes) — it forced every thread (tokio/NDI ndis:*/disc:*/self-heal) onto
+  SCHED_FIFO prio 50 on the isolated core (27 on cam1). The binary now raises SCHED_FIFO prio 90
+  PER THREAD only on the capture+emit hot path — `src/affinity.rs::set_current_thread_realtime`
+  (pure decision `realtime_fifo_priority(RtThreadRole)`) called from the production capture loop
+  and the cam1-burn emit thread; every auxiliary thread (painter/display/intercom/qpsk/publish-30p)
+  stays SCHED_OTHER. NO thread moves cores (this is why it is safe without a live measurement,
+  unlike the rejected Approach 2 below). Needs `CAP_SYS_NICE` — the STEP 9 setcap already grants
+  `cap_sys_nice,cap_ipc_lock`. Locked by `verify-device.sh` check `(ah)` (HARD FAIL): the unit must
+  carry no process-wide `CPUSchedulingPolicy` AND the live camera-box process must show only a
+  handful of SCHED_FIFO threads (not ~27). **Live per-box redeploy of the new unit+binary + the
+  `verify-device.sh` proof are a supervisor step** — cam1 gets it via its re-provisioning run.
+  The DEEPER "also move NDI emit threads off core 3" rework (the rejected Approach 2) still needs a
+  live #728-style emit measurement and stays staged; per-thread FIFO here does NOT do that.
 
 ## What is STAGED (reboot-class — SUPERVISOR only, never from a code lane)
 
@@ -101,9 +117,12 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   brick-hardening — one box at a time, canary first, in a window with NO live E2E, generic stays
   pinned in GRUB as rollback until preempt=full is proven. A supervisor deploy step, UNVERIFIED
   from a worktree code lane.
-- Defect 2 (the process-wide `CPUSchedulingPolicy=fifo` puts all threads FIFO-50 on the grab core,
-  not `SCHED_OTHER`) is runbook **Step B** — a stock per-thread rework that needs a live emit
-  measurement (#728-style), independent of the kernel choice; the unit comment is already corrected.
+- Defect 2 (the process-wide `CPUSchedulingPolicy=fifo` put all threads FIFO-50 on the grab core,
+  not `SCHED_OTHER`) is **CODE-FIXED** (see the per-thread SCHED_FIFO bullet in "What is DONE"),
+  NOT the old runbook Step B any more. The stock per-thread FIFO raise moves NO thread between
+  cores, so it needed no live emit measurement; the DEEPER rework that DOES move NDI emit threads
+  off core 3 (the rejected Approach 2) is the piece that still needs a #728-style measurement and
+  stays staged. The unit comment now describes the per-thread reality (no process-wide policy).
 - **Appliance tmpfs layout — a provisioning install/regen must redirect cache + TMPDIR to the
   ROOTFS.** On the cam boxes `/var/cache` (512M), `/tmp` (100M) AND `/var/tmp` (50M) are ALL tmpfs;
   only `/` (rootfs, ~51G) is ample. The lowlatency-hwe install (~242MB archives + a new HWE image)

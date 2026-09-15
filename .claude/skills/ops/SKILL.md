@@ -47,7 +47,7 @@ DanteSync (`~/devel/dantetimesync`) is the cluster wall-clock basis for genlock 
 **Topology:** strih.lan (10.77.9.202) = NTP master (`ntp_server_mode`, stratum 3).
 All nodes sync to strih: stream, cam2 (`--ntp-server strih.lan`), dev1.
 
-**PTP (primary):** grandmaster 10.77.9.184 — all nodes LOCK to µs-grade parity.
+**PTP (primary):** grandmaster **`video-clock.lan`** (DNS, #1307 — today → 10.77.9.230, the Yamaha AIC128-D Dante card on a MikroTik static DHCP lease; the retired literal 10.77.9.184 was only that card's old DHCP lease) — all nodes LOCK to µs-grade parity. The address is resolved by ONE helper, `scripts/lib/rig-grandmaster.sh` (`rig_grandmaster_ip`: `RIG_GRANDMASTER_IP` override → `getent video-clock.lan` → fail LOUD).
 **NTP fallback** (when GM absent): ±0.3-1 ms stepping sawtooth — genlock must degrade gracefully.
 
 **Verified node status (2026-06-15 — do NOT re-doubt; VERSIONS in this table are historical):**
@@ -67,8 +67,27 @@ All nodes sync to strih: stream, cam2 (`--ntp-server strih.lan`), dev1.
 that pin in the SAME cycle.** The pin's own comment mandates it, but the rollout happens in the
 dantesync repo / on the boxes where nothing re-reads that comment — 2026-08-11 the 1.8.30 rollout
 skipped the bump and EVERY E2E run refused with all 6 nodes "DRIFT" against the stale 1.8.25 pin
-until it was bumped. Rollout checklist: canary → fleet → verify 8/8 → bump `DANTESYNC_VERSION_PIN`
-→ push. **The fleet roll on the Windows boxes (strih+stream) covers TWO binaries: the
+until it was bumped. Rollout checklist: canary → fleet → verify N/N → bump `DANTESYNC_VERSION_PIN`
+→ push.
+
+**dev1 IS a fleet node — every fleet roll AND every config patch MUST include `--local dev1`;
+"fleet N/N" counts dev1 (#1313).** dev1 runs dantesync too (its clock feeds every dev1-hosted
+gate: `clock-offset-painter-gate.sh`, the recording-verdict wall references, every `date`-stamped
+E2E window), so it is NOT optional and NOT "just the control box". On 14.9.2026 the fleet roll AND
+the `gm_allowlist` patch both SKIPPED dev1: it sat NTP-only for ~a day on `gm_allowlist:
+["10.77.9.184"]` (the retired literal) + dantesync 1.8.53 (the fleet version) while its own journal
+shouted `[CLOCK-ALARM] NO DANTE CLOCK` every minute, caught only because the E2E `[0/8]`
+version-parity gate lists dev1. Concretely:
+- **Fleet roll:** `scripts/dantesync-fleet-upgrade.sh --linux "…" --win "…" --local dev1` — the
+  `--local dev1` arm reads+upgrades dantesync ON this box (dev1). Verify counts dev1 in N/N.
+- **Config patch (`gm_allowlist` / `phase_slew`):** apply the SAME patch to dev1's own
+  `~/.config/dantesync/config.toml` (or the box's config path) and restart dantesync there — never
+  patch cam/obs nodes and leave dev1 on a stale allowlist. After ANY allowlist/phase_slew change,
+  re-verify dev1 with `curl -s http://127.0.0.1:8898/status` (locked + correct `gm_source_ip`) —
+  the SAME reading the new dev1 arm of `dantesync-clock-alert-watchdog.sh` now watches between rolls
+  (`.claude/rules/dantesync-clock-alert-watchdog.md`, the `local` node).
+
+**The fleet roll on the Windows boxes (strih+stream) covers TWO binaries: the
 `dantesync.exe` SERVICE and the `dantesync-tray.exe` TRAY** — every upgrade script until
 2026-08-12 swapped only the service, so the tray (the version the USER actually sees in the
 system-tray UI) silently sat months stale (strih's was ~22 releases behind; user-caught). Tray
@@ -114,13 +133,24 @@ because it carried no dantesync — this brings it under the fleet clock-discipl
   adaptation are NOT gated; the frame-jump signal `backward_regime_ticks` IS). For the 24h
   acceptance (skew flat ±20 ms), sample a long OBS-log window and raise `--min-samples`. The
   supervisor owns the live deploy + the 24h run; this is a verify tool, not a hard E2E gate.
-- **Reachability watchdog — REPORT-ONLY (#811).** resolume is in the dev1-side network-reach
-  watchdog's `BOXES` roster + `NETWORK_REACH_REPORT_ONLY_BOXES` (default `resolume`), so it is
-  probed (ping OR :4455) + logged + per-box state-tracked but **NEVER pages** — its absence is the
-  normal state for a traveling box, so a page would be noise (`.claude/rules/network-reach-watchdog.md`).
-  Once it becomes a permanent fixture, flip it to a paging node by removing `resolume` from
-  `NETWORK_REACH_REPORT_ONLY_BOXES` (it stays in `BOXES`). The watchdog ships DISABLED — enable on
-  dev1 with `systemctl --user enable --now network-reach-alert-watchdog.timer`, unchanged by this.
+- **Dev1 fleet registration — the ONE declared OBS_FLEET list (#1296).** resolume is now a member of
+  `scripts/lib/obs-fleet.sh` (`OBS_FLEET`, class `windows-genlock`, host `resolume.lan`, home-check
+  `traveling`), from which all six dev1 watchdogs DERIVE their box rosters (`.claude/rules/obs-fleet-list.md`).
+  It is watched by **bundle-state** (`:8899` health + auto-restart) and **obs-liveness**
+  (`render_advanced`, polled only while home); surfaced REPORT-ONLY by **version-integrity-gate**
+  (`--win-state-report-only`, out of the `[0/8]` blocking set) and **rig-health-audit** (genlock-build
+  + bundle-state facets, rate-EXEMPT #787). It is NOT in audio-lag/av-step/vb-matrix (no mbc audio, no
+  VB-Matrix). The on-box `:8899` BundleStateServer install is a SUPERVISOR checklist in `targets.md`
+  (RESOLUME-SNV section).
+- **Reachability watchdog — REPORT-ONLY unless HOME (#811/#1296).** resolume is in the dev1-side
+  network-reach watchdog's `BOXES` roster (derived from `obs_fleet_boxes network-reach`), probed
+  (ping OR :4455) + logged + per-box state-tracked. By default it is REPORT-ONLY — **NEVER pages**
+  while away (the normal state for a traveling box, so a page would be noise) — and #1296 AUTO-PROMOTES
+  it to a paging node ONLY while `obs_fleet_is_home resolume` holds (it resolves AND its OBS-WS :4455
+  answers; NOT dantesync :8898 — resolume carries none). To force it permanently required regardless
+  of home-state, set `NETWORK_REACH_REPORT_ONLY_BOXES=""` (the explicit env override still wins). The
+  watchdog ships DISABLED — enable on dev1 with `systemctl --user enable --now
+  network-reach-alert-watchdog.timer`. (`.claude/rules/network-reach-watchdog.md` / `.claude/rules/obs-fleet-list.md`.)
 - **Remote wake (#811).** resolume's WoL MACs are in `scripts/wol-targets.txt` as TWO rows —
   `resolume` (primary NIC) + `resolume-alt` (2nd NIC, same `.201`, different MAC). `scripts/wake-box.sh
   resolume` fires ONLY the primary row's MAC, so when the active NIC is unknown wake BOTH before a
@@ -1415,3 +1445,35 @@ tries to grant GROUP-based access instead, because ONCE an ACL exists on a file,
 over the group bits entirely. Any headless service (not tied to a login session) that needs to
 open such a device needs its own `TAG-="uaccess"` rule numbered after `70-`, not just a
 `GROUP=`/`MODE=` rule alone.
+
+## RESOLUME-SNV dantesync maintenance tier (issue 1297)
+
+RESOLUME-SNV is a **traveling** dantesync box (powered off/away between events). It drifted: its
+`config.json` `ntp_server` pointed at `strih.lan` (unresolvable while strih is off), so NTP phase
+discipline died (`ntp_failed=true`, 0 samples, a −14 ms accumulated phase walk), and
+`system.phase_slew` was ABSENT so it STEPS the clock — the issue-1130 storm the rig boxes + mbc
+already cured by enabling phase_slew. Full mechanism + the supervisor RUNBOOK live in
+`.claude/rules/resolume-dantesync.md`; the maintenance tier in brief:
+
+- **Maintenance-tier health check (REPORT-ONLY, never `[0/8]`):** `scripts/dantesync-maintenance-gate.sh
+  --box resolume` asserts, from `:8898/status` + `dantesync --version`, that resolume is on the pin,
+  `is_locked`, `ntp_failed=false`, `ntp_age_s<120`, `|ntp_offset_us|<2000`, `phase_slew_enabled=true`.
+  Prints ONE honest row — **SKIP when away** (`obs_fleet_is_home resolume` false — never a false
+  red), OK / ALARM / UNKNOWN when home. Exit 0 OK|SKIP, 30 ALARM, 11 UNKNOWN. Run it on the same
+  maintenance cadence as the version-parity check (`scripts/dantesync-version-gate.sh --win
+  "resolume=newlevel@<ip>"`) — it is the lock/NTP/phase complement the version gate does not cover.
+- **The on-box phase_slew flip (SUPERVISOR rig step, via `win-resolume` MCP — never from a code
+  lane):** read the config, generate the apply program on dev1 — `Get-Content the config | ... |
+  python3 scripts/dantesync_config_patch.py --emit-apply` — and paste the emitted PowerShell into the
+  win-resolume MCP Shell (it backs up `config.json.bak-<date>`, writes the patched config,
+  `Restart-Service dantesync`, reads back `:8898/status`). The helper sets `system.phase_slew.enabled=
+  true`, NEVER touches `ntp_server_mode` ("never two masters"), and leaves `ntp_server` UNCHANGED by
+  default — the repoint target (dev1 secondary vs public pool) is deferred to zbynekdrlik/dantesync#111.
+- **Fleet roll:** add resolume to the Windows node list with `dantesync_resolume_win_spec "$(getent
+  hosts resolume.lan | awk 'NR==1{print $1}')"`; an away traveling box is SKIPPED from the roll
+  (`dantesync_skip_away_traveling`), never a failed node. Always confirm identity first (the .201 /
+  `bridge` DHCP collision, `.claude/rules/rig-state-inspection.md` §2).
+- **Acceptance (with strih OFF vs ON):** see `.claude/rules/resolume-dantesync.md` — with strih OFF
+  the phase_slew flip alone converts the re-lock from a STEP storm to a smooth slew (the shippable-now
+  half; `ntp_failed` stays true until dantesync#111 repoints `ntp_server`); with strih ON all fields
+  green and no `[NTP] Stepped` storm on either box during the hand-back.

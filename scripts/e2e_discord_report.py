@@ -727,8 +727,9 @@ def _blocking_failures(verdict):
     'Blocking' == folds into recording-verdict.rs's `all_pass` and is LIVE today. A LIVE-toggleable
     seam is honored via its own `gates_overall_pass` field (so if a seam is ever flipped to
     report-only, this report auto-follows). The report-only seams (imag leg PER-FRAME CONTENT,
-    cold_cut, frozen_leg, self_heal, undecodable_floor, lipsync — dup_cadence LIVE since issue
-    1166) are NEVER returned here — see `_report_only_tripped`. Ownership follows the #1117
+    cold_cut, lipsync — dup_cadence LIVE since issue 1166; frozen_leg/self_heal LIVE since issue
+    905 item 2; the optical undecodable floor LIVE since issue 905 item 3) are NEVER returned here
+    — see `_report_only_tripped`. Ownership follows the #1117
     convention: agent-recoverable ->
     "Rieši Claude."; a genuine physical fault (capture card, silent mbc chain) -> a "Treba fyzicky
     skontrolovať …" human step.
@@ -801,8 +802,30 @@ def _blocking_failures(verdict):
                 cb = str(s.get("cambox", "")).strip()
                 if cb and cb not in over:
                     over.append(cb)
+        # issue 905 item 3: the re-gated optical undecodable floor (per-window AND run-wide) gates
+        # again. Name a floor red — run-wide OR a single window over the per-window floor — so it is
+        # attributable, not folded into the generic fallback. A copies/gaps red and a floor red can
+        # BOTH be true in one run, so append BOTH details rather than picking one (review 🔵2).
+        floor_gates = _g(verdict, "all_cambox_continuity",
+                         "undecodable_floor_gates_overall_pass") is True
+        run_wide_over = _g(verdict, "all_cambox_continuity",
+                           "run_wide_undecodable_within_floor") is False
+        # per-window floor: read the serialized value, fall back to 4 for pre-#905 verdicts.
+        pw_floor = _g(verdict, "all_cambox_continuity", "per_window_undecodable_floor", default=4)
+        if pw_floor is None:
+            pw_floor = 4
+        per_window_over = any(
+            isinstance(s, dict) and (s.get("frames", 0) or 0) > 0
+            and (s.get("undecodable", 0) or 0) > pw_floor
+            for s in segs
+        )
+        parts = []
         if over:
-            detail = f" — {', '.join(over)} (strata/duplicita snímok nad toleranciou)"
+            parts.append(f"{', '.join(over)} (strata/duplicita snímok nad toleranciou)")
+        if floor_gates and (run_wide_over or per_window_over):
+            parts.append("optická čitateľnosť — nečitateľné snímky nad floor")
+        if parts:
+            detail = " — " + "; ".join(parts)
         else:
             # A segment can fail for a non-copies/gaps reason (empty schedule / frame_count==0,
             # recording-verdict.rs :4638) — don't claim the wrong cause.
@@ -1006,7 +1029,13 @@ def _report_only_tripped(verdict):
             and _g(verdict, "all_cambox_continuity", "duplication_masked_cadence",
                    "gates_overall_pass") is not True):
         names.append("duplikačná kadencia")
-    if _g(verdict, "all_cambox_continuity", "run_wide_undecodable_within_floor") is False:
+    # issue 905 item 3 — the optical undecodable floor is LIVE (its seam ships
+    # undecodable_floor_gates_overall_pass=true), so an over-floor run moves to _blocking_failures
+    # (block 4). The `is not True` guard mirrors the dup_cadence / own_burn_absent pattern: only a
+    # PRE-flip verdict (floor still report-only) stays report-only here, never double-counted.
+    if (_g(verdict, "all_cambox_continuity", "run_wide_undecodable_within_floor") is False
+            and _g(verdict, "all_cambox_continuity",
+                   "undecodable_floor_gates_overall_pass") is not True):
         names.append("optická čitateľnosť (floor)")
     # lipsync cross-check (issue 1032) — report-only; JSON node lives under all_cambox_av_sync or
     # top-level depending on run shape (absent on ~all runs today). Guarded so absent -> no-op.

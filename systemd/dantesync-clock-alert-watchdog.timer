@@ -1,0 +1,19 @@
+[Unit]
+# Fires the #1307 fleet dante-clock health-check every 60s (dev1-side). A production-critical clock
+# loss (a node dropping to NTP-only, a foreign grandmaster, an NTP step-storm, the grandmaster DNS
+# name failing to resolve, or the resolved grandmaster IP moving) is caught within ~2 min of onset
+# (2-pass confirm at the 60s cadence) and paged -- and RE-pinged every ~10 min while it persists
+# (owner ruling: „byt o tom dokolecka notifikovany"), never a single silent one-shot. A tighter
+# cadence than the 5-min siblings because a lost clock silently corrupts A/V + genlock across the
+# whole fleet the moment it happens.
+Description=Run the camera-box fleet dante-clock health-check every 60s (#1307)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

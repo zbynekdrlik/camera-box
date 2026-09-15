@@ -55,6 +55,11 @@ obs process-count facet and this — never two spawns (latency, `bundle-state-ga
 `obs-watchdog-decision.sh` confirm/throttle VERBATIM). Verdicts: SKIP (fetch fail → #732/#1001) /
 UNKNOWN (facet absent = imag/old server) / RUNNING / DOWN (page after 2-pass confirm). Stable
 `--dedup-key vb-matrix-$box`, recovery log-only (#1206), `require_tools` fail-loud, ships DISABLED.
+**Notify CLASS = DIAGNOSTIC one-ping (#1308 step-3, owner ruling 14.9.2026 „5 A"):** VB-Matrix on the
+stream box is NOT production audio (`ASIO Input Capture` muted, only in scene `party`; `StartVBMatrix`
+task disabled since 3.9.), so this watchdog is NOT in the production-critical time-bucketed re-ping
+class — its ALERT key stays the STABLE `vb-matrix-$box` (no time bucket), and it stays DISABLED on dev1
+(a strih-only enable is a supervisor call).
 The cure is **`schtasks /run /tn StartVBMatrix`** on the box (owner/supervisor step — a dev1 timer
 has no session-aware win-* MCP for a GUI app). The DURABLE fix is a supervisor step: add an
 **AtLogon trigger** to `StartVBMatrix` (check its `ExecutionTimeLimit` is not a default 3-day cap

@@ -54,6 +54,11 @@ from latency_pins_verify import normalize_spec  # noqa: E402
 
 GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 FLOOR_KEY = "_all_ndi_inputs_ms"
+# #1295: the resolume prefix-match sentinel (see scripts/latency_pins_verify.py). Like the imag
+# floor it has NO explicit named pins, so this deliberate writer cannot materialize a target set
+# from it -- the genlock build defaults the sp-* inputs to 3 anyway, and a manual re-pin uses the
+# `--pins '{<live sp-* names>:3}'` computed-set path (the sp-* names are operator-overridable).
+NDI_MATCH_KEY = "_ndi_inputs_matching"
 DEFAULT_BASELINE = os.path.join(_HERE, "latency-pins-baseline.json")
 
 
@@ -74,6 +79,12 @@ def explicit_pins_for_box(box: str, baseline_box: dict) -> dict:
             f"[apply-latency-pins] box {box!r} is the imag floor sentinel ({FLOOR_KEY}) -- "
             "this tool never promotes the imag 3ms floor (imag-min-latency-3ms-always); use "
             "scripts/imag_latency_enforce.py for imag.")
+    if NDI_MATCH_KEY in baseline_box:
+        raise SystemExit(
+            f"[apply-latency-pins] box {box!r} is a prefix-match sentinel ({NDI_MATCH_KEY}, #1295) "
+            "-- it has no explicit named pins to apply (the genlock build already defaults the "
+            "matching inputs to their floor). To re-pin the scoped inputs by hand, pass the live "
+            "names via --pins '{\"sp-fast_video\":3,...}'.")
     pins = {}
     for name, spec in baseline_box.items():
         if name.startswith("_"):

@@ -83,7 +83,9 @@ jobs:
           if ($src -notmatch [regex]::Escape('genlock_backward_regime_end(source, reserve_ms);')) { Write-Error "backward-step regime-exit SELF-HEAL gone (#1009) — a hold collapse would be a permanent absorbing state again"; exit 1 }
           if ($src -notmatch [regex]::Escape('backward_regime_ticks=%llu')) { Write-Error "backward_regime_ticks audit exposure gone (#1009) — a sustained hold-bypass regime would be invisible to the E2E/drift gates"; exit 1 }
           if ($src -notmatch [regex]::Escape('wall_qpc_drift_ms=%lld') -or $src -notmatch [regex]::Escape('static long long genlock_wall_qpc_drift_ms(void)') -or $src -notmatch [regex]::Escape('genlock_wall_qpc_drift_ms());')) { Write-Error "wall-vs-QPC clock-drift audit term/helper gone (#800) — the remaining A/V-shift candidate (WALL-slaved video vs QPC-slaved audio) would be invisible"; exit 1 }
-          Write-Output "#136/#257 ts-align + render tick build-default (no env) + #147/#1009 re-qualified backward-step recovery + self-heal + #800 wall-qpc drift present — OK"
+          # #1303: receiver-side AUDIO genlock parity — the audio HOLD wired at the source_output_audio_data ingest seam + the audit facet. Mirror of tests/genlock_preload.rs::audio_genlock_parity_present_1303 + the C-vs-Rust parity gate tests/genlock_audio_pairing_parity.rs.
+          if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)') -or $src -notmatch [regex]::Escape('in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);') -or $src -notmatch [regex]::Escape('audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld')) { Write-Error "receiver-side audio genlock parity gone (#1303) — the audio HOLD is not wired at source_output_audio_data and/or the audit line dropped the audio facet; audio would no longer be genlocked to the video FIFO"; exit 1 }
+          Write-Output "#136/#257 ts-align + render tick build-default (no env) + #147/#1009 re-qualified backward-step recovery + self-heal + #800 wall-qpc drift + #1303 audio genlock parity present — OK"
 
       # #940 piece 1: fail fast if the per-event relock phase-evidence log line is missing —
       # mirrors the Linux-CI guard
@@ -208,6 +210,51 @@ jobs:
           if ($internal -notmatch [regex]::Escape('uint32_t genlock_acquire_bracket_ticks;')) { Write-Error "the ACQUIRE bracket-tick counter field genlock_acquire_bracket_ticks is missing from obs_source (#1161)"; exit 1 }
           if ($src -notmatch [regex]::Escape("genlock-acquire-bracket '%s':") -or $src -notmatch [regex]::Escape('oldest_queued_age_ms=') -or $src -notmatch [regex]::Escape('decision=')) { Write-Error "the #1161 ACQUIRE-bracket observability marker (genlock-acquire-bracket, reserve vs oldest_queued_age + HOLD/ACQUIRE) is gone — a live pin-rise re-acquire leaves no trace, a below-floor inert pin cannot be diagnosed (#1161)"; exit 1 }
           Write-Output "#1161 Stage-2 ACQUIRE bracketing gate present — OK"
+
+      # #1298: the fast path builds obs.dll + the frontend from the real vendored source, so a
+      # `git subtree pull` (#44) that reverts the in-OBS genlock LOCK indicator would hot-swap a
+      # bundle with no lock UI un-gated. Mirror the slow windows-genlock.yml #1298 gate + the
+      # Linux-CI tests/genlock_lock_indicator_guards.rs here. Pure source-text guard (no build).
+      - name: Assert in-OBS genlock LOCK indicator present (#1298)
+        shell: pwsh
+        run: |
+          $obs = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($obs -notmatch [regex]::Escape('static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_stats *stats)')) {
+            Write-Error "obs-source.c: genlock_fill_stats (the shared stats snapshot) missing — #1298 reverted"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('struct obs_genlock_stats gs; genlock_fill_stats(source, &gs);')) {
+            Write-Error "obs-source.c: the genlock-fifo audit no longer routes through the shared fill — #1298 API/log divergence risk"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('bool obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock_stats *stats)')) {
+            Write-Error "obs-source.c: obs_source_get_genlock_stats missing — #1298 reverted"; exit 1
+          }
+          $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
+          if ($api -notmatch [regex]::Escape('struct obs_genlock_stats {')) {
+            Write-Error "obs.h: struct obs_genlock_stats missing — #1298 reverted"; exit 1
+          }
+          if ($api -notmatch [regex]::Escape('struct obs_genlock_output_stats {') -or $api -notmatch [regex]::Escape('obs_output_set_genlock_wall_stamping(obs_output_t *output, bool stamping)')) {
+            Write-Error "obs.h: the per-output genlock stats API (struct + wall-stamping setter) missing — #1298 reverted"; exit 1
+          }
+          $ndi = (Get-Content "vendor/distroav/src/ndi-output.cpp" -Raw) -replace '\s+', ' '
+          if ($ndi -notmatch [regex]::Escape('obs_output_set_genlock_wall_stamping(o->output, true);')) {
+            Write-Error "ndi-output.cpp: the genlock NDI sender no longer registers wall-clock stamping — #1298 reverted"; exit 1
+          }
+          $sb = (Get-Content "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp" -Raw) -replace '\s+', ' '
+          if ($sb -notmatch [regex]::Escape('#include "GenlockLockState.hpp"') -or $sb -notmatch [regex]::Escape('genlock_decide_lock_state(&f, &reason)')) {
+            Write-Error "OBSBasicStatusBar.cpp: the statusbar genlock indicator (GenlockLockState.hpp / genlock_decide_lock_state) is gone — #1298 reverted"; exit 1
+          }
+          if ($sb -notmatch [regex]::Escape('genlock-lock: state=%s inputs=%d/%d')) {
+            Write-Error "OBSBasicStatusBar.cpp: the genlock-lock: log line is gone — #1298 reverted"; exit 1
+          }
+          # #1299: the fleet-visible machine-readable genlock-lock-json: emission + its pure builder.
+          if ($sb -notmatch [regex]::Escape('genlock-lock-json: %s (#1299)') -or $sb -notmatch [regex]::Escape('std::string genlock_build_lock_json(')) {
+            Write-Error "OBSBasicStatusBar.cpp: the genlock-lock-json: emission / builder is gone — #1299 reverted"; exit 1
+          }
+          # #1303 3b: the audio DEGRADE term in the LOCK decision — an audio-enabled genlock source whose A/V pairing offset breaches the bound turns the indicator DEGRADED (audio disabled/absent never degrades). Mirror of src/genlock_lock_state.rs (audio_unpaired facet + LockReason::AudioPairing) + tests/genlock_lock_indicator_guards.rs::audio_parity_lock_term_present_1303.
+          if ($sb -notmatch [regex]::Escape('f.audio_unpaired = scan.audio_unpaired ? 1 : 0;') -or $sb -notmatch [regex]::Escape('GENLOCK_LOCK_REASON_AUDIO_PAIRING')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1303 audio-parity LOCK-indicator DEGRADE term is gone — an unpaired audio leg would no longer show DEGRADED; re-apply"; exit 1
+          }
+          Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log + genlock-lock-json: fleet facet) — OK"
 
       # #249: the fast path builds obs.dll from the real vendored source, so a `git subtree pull`
       # (#44) that reverts #245 to inert-but-still-compiling would hot-swap an INERT obs.dll un-gated

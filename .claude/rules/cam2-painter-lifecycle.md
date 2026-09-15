@@ -59,6 +59,17 @@ since #984, emitting the QPSK marker default-ON.
 - `--marker-log` may be added to the base unit ExecStart WITHOUT tripping the provisioning test's
   `!out.contains("--audio-marker")` assertion (marker-log ≠ audio-marker; the marker stays
   default-ON, flag-free).
+- **`--wall-clock` on BOTH painters (#1312).** Both the permanent unit's ExecStart (setup-device.sh)
+  and the transient `painter_launch_remote` (rig-mode.sh) pass `--wall-clock`, so the QPSK marker
+  CSV's `emit_ts_ns` is stamped on `CLOCK_REALTIME` (the DanteSync wall clock) not the painter's
+  monotonic `start.elapsed()`. This is what lets the dev1 `avlatency` handover check
+  (`measurement-chain-latency.sh`) pair the markers against dev1's wall-clock `mbc` onsets instead
+  of reading the monotonic-emit UNKNOWN forever. Place it AFTER `--paint-fps`/`--duration-secs` so
+  the pinned contiguous `--paint-only --dual-qr --qr-size N --duration-secs N` vernier anchor
+  (`tests/rig_mode.rs::test_mode_launches_pinned_painter`) stays intact. It is a SAFE no-op for the
+  A/V verdict path (`av_sync_recording.rs` pairs by fid, ignores `emit_ts`) — the E2E burn painter
+  in `recording-e2e.sh` already carries it. Both changes take effect only after a cam2 re-provision
+  (or a remount-rw unit edit + `daemon-reload` + painter restart) — a supervisor rig step.
 
 ## Recovering a dead standing painter after a run (#1072)
 

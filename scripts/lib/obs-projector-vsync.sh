@@ -76,5 +76,9 @@ projector_vsync_report_line() {
 # mv-fps-*). Empty output = no readable log (the verdict then reads UNKNOWN, #833). Used by
 # recording-e2e.sh's [0/8] preflight via $(fn) embedding (the issue-675 pattern).
 projector_vsync_gather_remote_snippet() {
-  printf '%s' 'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.txt 2>/dev/null | head -1); [ -n "$f" ] && cat "$f" || true'
+  # BOUNDED read (issue 1151 / the #1222 discipline): ship ONLY the `projector-vsync:` marker lines,
+  # capped -- the notebook's session log reached 1.2 GB on 14.9.2026 and shipping it whole
+  # segfaulted the harness bash (SIGSEGV, rc 139) before [1/8]. `grep -a` so a stray binary byte
+  # never blanks the read.
+  printf '%s' 'f=$(ls -t "$HOME/.config/obs-studio/logs/"*.txt 2>/dev/null | head -1); [ -n "$f" ] && grep -a "projector-vsync: present-vsync" "$f" | tail -n 50 || true'
 }

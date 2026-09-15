@@ -29,6 +29,13 @@ before the `[2b/8]` ALL_CAMBOX deploy loop. The existing pre-`[4/8]` reroute re-
 `a_stray_session_guard_precedes_every_fleet_mutation_1271` pins a guard before each mutation banner;
 add the new mutation's anchor to its `muts` list.
 
+**The SAME shared guard is reused OUTSIDE `recording-e2e.sh` too** — `scripts/bkshading-deploy-relay.sh`
+calls `stray_session_check_assert` as its rig-busy PREFLIGHT before the first cambox ssh/scp (a relay
+deploy DURING live production fork-wedged cam1, issue 1229 2026-09-13). Its `--force-live` flag is the
+ONE sanctioned bypass (supervisor-only, logged). So ANY new dev1-orchestrated tool that MUTATES a
+rig/cambox box (deploy, restart, reconfigure) reuses THIS guard — never a fresh per-box WS loop; when
+editing the guard, remember the deploy tool is a second live caller, not just the E2E harness.
+
 - It does NOT re-define "REAL broadcast" — it CALLS the shared `rig-busy-check` (streaming and/or
   recording on strih/stream), reads `busy`, refuses on `busy=true`. Never duplicate the per-box loop.
 - SEMANTICS: fail-OPEN (WARN + proceed) ONLY when NO readable box is busy. On a partial outage

@@ -321,3 +321,33 @@ fn setup_device_ensures_curl_before_first_download() {
          the pre-flight guard fires (#450). Line: {step16}"
     );
 }
+
+/// 5. issue 899 defect 2 — the STEP 7 unit heredoc must NOT set a process-wide
+///    `CPUSchedulingPolicy`/`CPUSchedulingPriority`. That policy forced EVERY thread to
+///    SCHED_FIFO prio 50 on the isolated core (measured on cam1: 27 FIFO threads), not the
+///    SCHED_OTHER the design intended. The binary now raises SCHED_FIFO PER THREAD only on
+///    the capture+emit hot path (src/affinity.rs `set_current_thread_realtime`, via the
+///    STEP 9 `cap_sys_nice` setcap). The `CPUAffinity=3` drop-in (the grab's isolated-core
+///    pin) is UNCHANGED — only the process-wide scheduling policy is dropped.
+#[test]
+fn setup_device_unit_has_no_process_wide_cpuscheduling_policy_899() {
+    let body = read_script();
+    assert!(
+        !on_noncomment_line(&body, "CPUSchedulingPolicy"),
+        "setup-device.sh STEP 7 must NOT write a process-wide CPUSchedulingPolicy -- it puts \
+         every camera-box thread on SCHED_FIFO on the isolated core (issue 899 defect 2); the \
+         binary raises FIFO per-thread only on the capture+emit hot path instead"
+    );
+    assert!(
+        !on_noncomment_line(&body, "CPUSchedulingPriority"),
+        "setup-device.sh STEP 7 must NOT write a process-wide CPUSchedulingPriority (meaningless \
+         once the policy is dropped -- issue 899 defect 2)"
+    );
+    // The grab's isolated-core pin (the cpu-affinity.conf drop-in) must remain -- only the
+    // process-wide scheduling POLICY is dropped, never the CPUAffinity pin.
+    assert!(
+        on_noncomment_line(&body, "CPUAffinity=3"),
+        "setup-device.sh must still write CPUAffinity=3 (the #289 isolated-core pin) -- issue 899 \
+         defect 2 drops only the process-wide CPUSchedulingPolicy, not the affinity pin"
+    );
+}

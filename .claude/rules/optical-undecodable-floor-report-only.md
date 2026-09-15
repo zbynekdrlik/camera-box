@@ -5,7 +5,21 @@ paths:
   - "src/probe/recording_segments.rs"
 ---
 
-# The #881 optical undecodable floor became report-only (issue 915, 2026-08-01)
+# The #881 optical undecodable floor: report-only (issue 915) → RE-GATED (issue 905 item 3)
+
+> **SUPERSEDED — issue 905 item 3 (2026-09-04): the floor is LIVE-GATING again.**
+> `optical_floor::gates_overall_pass()` is now hardcoded **`true`** (was `false`), and
+> `RUN_UNDECODABLE_FLOOR` was recalibrated **8 → 6** (per-window kept 4). All the physical
+> blockers issue 915 waited on are closed: issue 909 (cam1 grabber card replaced), issue 881
+> (120Hz monitor — owner ruled it will NEVER be installed), issue 1179 (100Hz declined). The 60Hz
+> baseline — and its irreducible optical temporal tear — is PERMANENT, so the floor is no longer
+> "temporary until 120Hz"; it is a permanent, data-calibrated gate. Data: 31 post-cam1-fix dev1
+> verdicts, steady run-wide max 4 / mean 1.3 / p90 3 (residual cam2-only), one genuine cam2 fault
+> outlier 27; floor 6 = 50% headroom over steady max, below the pre-#707 regression level 10.
+> **Everything BELOW documents the report-only ERA (issue 915) — it is HISTORY.** Read
+> "gates_overall_pass() is false / report-only / temporary until 120Hz" throughout as the pre-905
+> state; today the seam is `true` and a nonzero over-floor run FAILS `overall_pass`. Re-disarm
+> (a future new artifact class) is the inverse one-line flip back to `false`.
 
 ## The seam — `optical_floor::gates_overall_pass()`, mirrors issue 914 exactly
 
@@ -95,3 +109,40 @@ per-window fix lands, regardless of whether `recording_segments.rs`'s run-wide f
 yet. Only `pre_707_regression_level_...` (sum=10, over the run-wide floor of 8) is a genuine RED
 against the run-wide fold specifically — verify which of your renamed tests actually probes which
 term before citing them as RED evidence in a commit message.
+
+## Re-calibrating or walking back the floor (issue 905 item 3, 2026-09-04) — the full consumer + data-recipe
+
+Flipping the gate or changing a floor VALUE touches ONE production line (`optical_floor.rs`) but
+its EXPECTATIONS live at five sites — miss one and CI (its first type-check for the probe-gated
+two) reds:
+
+- **`src/optical_floor.rs`** (pure): the constants + `gates_overall_pass()` + its own tests
+  (`gates_overall_pass_is_live_gating_again_905`, `run_wide_floor_boundary_*`,
+  `run_wide_floor_recalibrated_to_six_905`). Tier-0-testable — a `rustc --edition 2021 --test`
+  combined replica with `window_gate.rs` proves RED→GREEN locally.
+- **`src/window_gate.rs`** (pure): `decide_with_tolerance` + `relaxed_failure_reasons` fold on
+  `undecodable_ok || !gates_overall_pass()`; tests `undecodable_over_floor_now_fails_both_verdicts_905`,
+  `over_floor_fails_overall_pass_term_via_905_floor_regate`, `relaxed_failure_reasons_over_floor_now_gates_905`.
+- **`src/probe/recording_segments.rs`** (probe-gated, NO local compile): the run-wide fold + the
+  three tests `single_window_five_undecodable_..._905` / `pre_707_regression_level_fails_overall_pass_again_905`
+  / `undecodable_over_per_window_floor_..._1132`.
+- **`src/bin/recording-verdict.rs`** (probe-gated, NO local compile): the job-log line MUST branch
+  on `run_wide_undecodable_within_floor` (a loud `✗ #905 FLOOR FAIL` vs an OK line — a single
+  unconditional line reads identically for pass/fail, review 🟡1); the JSON emits numeric
+  `per_window_undecodable_floor`/`run_undecodable_floor` keys + the `undecodable_floor_gate` prose
+  (interpolate the constants, never hardcode "6"); the per-window WARN prints key off the seam
+  state; test `all_cambox_continuity_undecodable_over_floor_gates_end_to_end_905`.
+- **`scripts/e2e_discord_report.py`** (Tier-0 pytest): `_report_only_tripped`'s floor branch MUST
+  carry the `undecodable_floor_gates_overall_pass is not True` guard (else a post-flip run is
+  BOTH blocking AND report-only); `_blocking_failures` block 4 names a floor red for run-wide OR
+  per-window over (reads `per_window_undecodable_floor`, falls back to 4 for pre-#905 verdicts);
+  tests in `test_e2e_discord_report_optical_floor_905.py` (anchor on `nad floor`, not the bare
+  `optická čitateľnosť` shared with the imag PRESENCE label).
+
+**Data recipe (mine local verdicts on dev1, `/tmp/recording-e2e-*/verdict-*.json`):** attribute
+`all_cambox_continuity.segments[].undecodable` PER cambox; segregate by the last run carrying any
+CAM1 undecodable (cam1's ShadowCast noise, issue 909 — ceases after the card swap) to isolate the
+steady cam2-only 60Hz temporal-tear baseline; pick the floor at ~50% headroom over the steady
+run-wide max, staying below the pre-#707 regression level (10). Two distinct subsystems share the
+word "undecodable": THIS floor is `all_cambox_continuity.total_undecodable`/`segments[].undecodable`;
+`full_chain.loss.*.optical_undecodable` is a SEPARATE rate-gated per-node check — don't conflate.

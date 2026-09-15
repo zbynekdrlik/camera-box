@@ -108,11 +108,16 @@ process_box() {
     return 0
   fi
 
-  local msg wedged
+  local msg wedged znote
   msg="$(obs_session_visibility_message "$probe_out" "$has_ahk")"
   wedged=0
   [ -n "$msg" ] && wedged=1
   log "$box: probe='$probe_out' wedged=$wedged msg='$msg'"
+  # #1295: report-only -- surface any DEAD obs64 handle the probe ignored so an operator can reap
+  # it, WITHOUT ever treating it as a wedge (a stale zombie handle is not an operator-visibility
+  # fault; the one live instance is visible). Never folds into $wedged / the alert path.
+  znote="$(obs_session_visibility_zombie_note "$probe_out")"
+  [ -n "$znote" ] && log "$box: $znote"
 
   local prev_confirm decision confirm act
   prev_confirm="$(read_state_field "${box}_confirm" 0)"

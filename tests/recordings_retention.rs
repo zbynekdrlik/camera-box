@@ -16,7 +16,8 @@
 //! how large.
 
 use camera_box::recordings_retention::{
-    is_harness_recording, plan, KeepReason, RecordingFile, RetentionPolicy, SECONDS_PER_DAY,
+    free_space_verdict, is_harness_recording, plan, FreeSpaceVerdict, KeepReason, RecordingFile,
+    RetentionPolicy, SECONDS_PER_DAY,
 };
 
 fn f(name: &str, size_bytes: u64, mtime_epoch: f64) -> RecordingFile {
@@ -305,4 +306,69 @@ fn realistic_strih_scenario_brings_under_budget_and_protects_foreign() {
         .any(|k| k.file.name == "2026-01-08 10-00-00.mkv"));
     // Freed bytes are dominated by the two hogs.
     assert!(p.bytes_to_delete() >= 79 * gib);
+}
+
+// ---- #1276: free-space WARNING verdict (the E2E preflight semantics owner-ruled 2026-09-14) ----
+//
+// Owner ruling (14.9.2026, verbatim "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): the
+// E2E recordings-retention WARNING must fire when the recordings VOLUME has <= 50 GB of FREE space
+// left, NOT when the sum of recording files exceeds a 50 GB budget. This pure verdict is the
+// canonical spec behind that preflight; `bundle_state_gather.recordings_free_verdict` is its python
+// mirror (the real runtime consumer the bash preflight calls). Threshold in decimal GB (1e9 bytes),
+// the same unit the owner meant by "50gb" and the existing warning used. The DELETE-set decision
+// (`plan()`) is untouched — the owner ruled only on the warning trigger.
+
+const GB_1276: u64 = 1_000_000_000;
+
+#[test]
+fn free_space_at_or_above_threshold_is_ok_no_warn() {
+    // Plenty of free space -> OK. (strih live: 619 GB free -> the old file-sum warning was a false
+    // alarm; the new free-space warning correctly stays quiet.)
+    assert_eq!(
+        free_space_verdict(Some(619 * GB_1276), 50.0),
+        FreeSpaceVerdict::Ok
+    );
+    assert_eq!(
+        free_space_verdict(Some(51 * GB_1276), 50.0),
+        FreeSpaceVerdict::Ok
+    );
+}
+
+#[test]
+fn free_space_exactly_at_threshold_is_ok_no_warn() {
+    // Boundary: exactly 50 GB free -> OK (ticket spec: free >= 50 GB -> no warn).
+    assert_eq!(
+        free_space_verdict(Some(50 * GB_1276), 50.0),
+        FreeSpaceVerdict::Ok
+    );
+}
+
+#[test]
+fn free_space_below_threshold_warns() {
+    // < 50 GB free -> WARN (the owner's "50 GB already only remaining" signal).
+    assert_eq!(
+        free_space_verdict(Some(49 * GB_1276), 50.0),
+        FreeSpaceVerdict::Warn
+    );
+    assert_eq!(free_space_verdict(Some(0), 50.0), FreeSpaceVerdict::Warn);
+}
+
+#[test]
+fn free_space_unreadable_is_unknown_never_a_false_warn() {
+    // An unreadable volume (free_bytes None) -> UNKNOWN, NEVER WARN — a false low-space warning
+    // from an unreadable stat is worse than staying quiet (mirrors record_dir_stats's zero-degrade).
+    assert_eq!(free_space_verdict(None, 50.0), FreeSpaceVerdict::Unknown);
+}
+
+#[test]
+fn free_space_threshold_is_configurable() {
+    // The threshold is a parameter (RECORDINGS_FREE_MIN_GB, env-overridable at the bash layer).
+    assert_eq!(
+        free_space_verdict(Some(80 * GB_1276), 100.0),
+        FreeSpaceVerdict::Warn
+    );
+    assert_eq!(
+        free_space_verdict(Some(120 * GB_1276), 100.0),
+        FreeSpaceVerdict::Ok
+    );
 }

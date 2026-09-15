@@ -59,6 +59,12 @@ are the reference. ⇒ **≥2 sources must be listed** (`ASIO_STARVE_SOURCES`, d
   code — detect + page (`scripts/launch-obs-genlock.sh --box stream --force`). A dev1 timer has no
   session-aware win-* MCP to restart the live stream OBS, so it never auto-restarts (same as
   obs-liveness #391 / obs-session #979).
+- **Notify CLASS = DIAGNOSTIC one-ping (#1308 step-3, owner ruling 14.9.2026 „5 A").** The stream
+  `ASIO Input Capture` this watches IS the VB-Matrix input, which is NOT production audio (muted, only
+  in scene `party`; `StartVBMatrix` disabled since 3.9.), so this watchdog is NOT in the
+  production-critical time-bucketed re-ping class — its ALERT keys stay the STABLE `asio-starve-$source`
+  / `asio-starve-tap-$source` (no time bucket), and it stays DISABLED on dev1 (a strih-only enable is a
+  supervisor call).
 - **The launch-time #786 guard is COMPLEMENTARY, not a substitute.** `launch-obs-genlock.sh`'s #786
   audio-buffering relaunch loop covers the launch INSTANT; this watchdog covers the whole run (the
   live box passed launch and starved 11.5 h afterward).

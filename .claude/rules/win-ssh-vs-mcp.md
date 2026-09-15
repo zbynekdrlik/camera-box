@@ -57,3 +57,32 @@ NOT lift the session physics:
 
 AHK note: `AutoHotkey64` has an EMPTY `MainWindowTitle` even IN session 1 (tray script, no main
 window) — never assert a title on it in any context; presence + SessionId only.
+
+## The `obs64` process-count signal must filter DEAD handles (#1295)
+
+`Get-Process obs64` can enumerate a STALE handle for an already-EXITED obs64 (`HasExited=True`,
+`Threads.Count=0`, ~45 KB, parent gone) alongside the live instance — the live 2026-09-12
+RESOLUME-SNV pid-58560 case. A raw `.Count` then reads 2 and the "exactly one obs64" invariant
+FALSE-fails on a perfectly healthy box (aborts the issue-977 `[0/8]` preflight, pages the
+issue-979 watchdog, or — in self-heal — triggers a FALSE kill+relaunch). So **every by-name
+obs64 COUNT/presence check must filter to LIVE instances first**:
+`Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }`.
+
+- `scripts/lib/obs-session-visibility.sh`: the probe counts/picks only LIVE obs64 and emits
+  **report-only** `OBS_ZOMBIES=<n>` + `OBS_ZOMBIE_PIDS=<pid:start,…>`. The dead handles are NOT an
+  operator-visibility fault (the live instance is visible), so they NEVER make
+  `obs_session_visibility_message` non-empty — the dedicated pure `obs_session_visibility_zombie_note`
+  surfaces them, which `obs-session-watchdog.sh` and the `[0/8]` preflight LOG so an operator can
+  reap the dead pid at leisure. Zombies never gate / page / abort.
+- Already LIVE-filtered (the A fix, `6ad6a742d..e8004ad70`): `launch-obs-genlock.sh` (#978 gate +
+  both wait-picks), `bundle_state_gather.py`, `bundle-state-server.py`. Filtered by #1295:
+  `obs-self-heal-install.sh` (wedge sample + VerifyRecovered post-count — a zombie count=2 else hits
+  `obs_watchdog::classify`'s decisive `ObsCountWrong`), `obs-guarded-launch.ps1` (presence + wait-pick).
+- **Safe as-is (NOT counters):** `deploy-genlock-fleet.sh:420`, `launch-obs-genlock.sh:179`,
+  `scripts/lib/mv-reverify-escalate.sh:195` are `Stop-Process -Force` kill-ALL sites — stopping a
+  dead handle is a harmless no-op, so no filter is needed.
+- **Known remaining gap (owned elsewhere):** `rig-health-audit.py:_windows_obs_count_cmd` still
+  emits a raw `(Get-Process obs64).Count`, which feeds an `obs64x{count}` problem row — a zombie
+  would false-flag it. It is an active issue-1296 work surface; filtering it there (same
+  `Where-Object` one-liner, plus the `test_rig_health_audit_encoded_1259` exact-string update)
+  avoids a cross-lane collision.

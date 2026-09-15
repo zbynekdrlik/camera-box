@@ -11,8 +11,10 @@ issue 905 item 1); issue 905 item 2 DONE (2026-09-02 — `frozen_leg`/`self_heal
 blocking once a 3-run green E2E series proved both clean; the
 `SelfHealAttributionReport::overall_pass_contribution` seam + the recording-verdict.rs JSON
 `gates_overall_pass` literals + the `e2e_discord_report.py` classifier all read blocking now);
-issue 905 item 3 still pending (the optical undecodable floor's `gates_overall_pass()` back to
-`true`, per issue 915 — see `optical-undecodable-floor-report-only.md`); and the per-segment `<=1/<=1`
+issue 905 item 3 DONE (2026-09-04 — the optical undecodable floor's `gates_overall_pass()` back to
+`true` AND `RUN_UNDECODABLE_FLOOR` recalibrated 8 → 6, per issue 915; the 60Hz baseline is
+permanent so option (b) a smaller calibrated floor, not absolute zero — see
+`optical-undecodable-floor-report-only.md`); and the per-segment `<=1/<=1`
 SINGLETON allowance `window_gate::segment_singleton_allowance_gates_overall_pass()` (issue 1169,
 owner 2026-08-22 — the segment-bar copies/gaps soft-release; re-tighten to absolute zero = flip
 that one fn to `false`, the consts `SEGMENT_SINGLETON_{COPIES,GAPS}_ALLOWANCE` stay as the band —

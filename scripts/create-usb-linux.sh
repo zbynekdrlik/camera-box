@@ -57,6 +57,15 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
                                  # (dantesync issue 52) -- SAME source of truth as
                                  # setup-device.sh/verify-device.sh for the NTP-client DSCP
                                  # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + oneshot
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$SCRIPT_DIR/lib/remote-logging.sh"  # remote_log_netconsole_setup_script_content/_service_unit_content
+                                       # + remote_log_journal_upload_conf_content/_dropin_content (#1311)
+                                       # -- SAME source of truth as setup-device.sh/verify-device.sh for
+                                       # off-box kernel(netconsole)+journal(upload) forensics
+# shellcheck source=scripts/lib/efi-boot-entry.sh
+. "$SCRIPT_DIR/lib/efi-boot-entry.sh"  # efi_whole_disk_of / EFI_CAM_BOX_LABEL / EFI_CAM_BOX_LOADER
+                                       # (#1066 D6) -- SAME source of truth as setup-device.sh/
+                                       # verify-device.sh for the named cam-box UEFI entry logic
 
 # Colors for output
 RED='\033[0;31m'
@@ -162,8 +171,19 @@ partition_drive() {
     parted -s "$DEVICE" mkpart "EFI" fat32 1MiB 513MiB
     parted -s "$DEVICE" set 1 esp on
 
-    # Create root partition (rest of disk, min 30GB)
-    parted -s "$DEVICE" mkpart "root" ext4 513MiB 100%
+    # Create root partition. #1309: leave 512MiB at the END of the disk for the persistent-journal
+    # partition (p3) instead of taking 100%. Root is therefore NOT the last partition, so the #369
+    # auto-grow-root service's growpart correctly REFUSES to expand it (its own fault-tolerant
+    # "root is not the last partition -> non-fatal skip" path, the documented 3-partition overlay
+    # case) -- root stays at this size, p3 survives.
+    # parted parses a leading "-" as an option: every call with a NEGATIVE offset needs "--" first.
+    parted -s "$DEVICE" -- mkpart "root" ext4 513MiB -513MiB
+
+    # #1309: persistent-journal partition (p3, last 512MiB). Mounted `nofail` at /var/log/journal so
+    # journald Storage=persistent survives a power-cycle -- the whole point of this ticket: the
+    # 2026-09-13 half-dead wedge must be diagnosable from `journalctl -b -1` after the owner's
+    # power-cycle, not lost with the runtime tmpfs journal.
+    parted -s "$DEVICE" -- mkpart "$LOG_DIET_JOURNAL_PART_LABEL" ext4 -513MiB 100%
 
     # Wait for kernel to recognize partitions
     partprobe "$DEVICE"
@@ -173,14 +193,19 @@ partition_drive() {
     if [[ "$DEVICE" == *"nvme"* ]]; then
         PART_EFI="${DEVICE}p1"
         PART_ROOT="${DEVICE}p2"
+        PART_JOURNAL="${DEVICE}p3"
     else
         PART_EFI="${DEVICE}1"
         PART_ROOT="${DEVICE}2"
+        PART_JOURNAL="${DEVICE}3"
     fi
 
     log "Creating filesystems..."
     mkfs.vfat -F32 -n "EFI" "$PART_EFI"
     mkfs.ext4 -L "ubuntu-root" "$PART_ROOT"
+    # #1309: the label is the ONE source of truth shared with setup-device.sh's fstab + the
+    # verify-device.sh (ai) acceptance check (log_diet_journal_fstab_line / _persistent_verdict).
+    mkfs.ext4 -L "$LOG_DIET_JOURNAL_PART_LABEL" "$PART_JOURNAL"
 }
 
 # Mount filesystems
@@ -232,7 +257,12 @@ EOF
 UUID=$ROOT_UUID /         ext4  errors=remount-ro 0 1
 UUID=$EFI_UUID  /boot/efi vfat  umask=0077        0 1
 tmpfs           /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
+$(log_diet_journal_fstab_line)
 EOF
+    # #1309: create the mountpoint in the base image so the persistent-journal partition mounts on
+    # first boot (before setup-device.sh ever runs). `nofail` in the line above means a box whose p3
+    # is somehow absent still boots. Single source of truth for the path: LOG_DIET_JOURNAL_DIR.
+    mkdir -p "$MOUNT_ROOT$LOG_DIET_JOURNAL_DIR"
 
     # #679: bound /var/log against runaway growth from ANY chatty logger, baked in from first
     # boot -- this closes the narrow window before setup-device.sh later converts /var/log to a
@@ -270,6 +300,20 @@ EOF
     dscp_nft_ruleset_content > "$MOUNT_ROOT$DSCP_NFT_RULESET_PATH"
     dscp_nft_service_unit_content > "$MOUNT_ROOT$DSCP_NFT_SERVICE_PATH"
 
+    # #1311: bake off-box remote logging into the base image too (same dual-bake as the DSCP writes
+    # above), so a freshly-imaged box ships kernel(netconsole)+journal(upload) forensics from first
+    # boot -- before setup-device.sh ever re-runs. netconsole ships kernel printk over UDP from kernel
+    # memory (survives the #1309 half-dead stick death), systemd-journal-upload forwards the rich
+    # journal to the dev1 sink. Plain host-side file writes; the `systemd-journal-remote` install +
+    # `systemctl enable cambox-netconsole systemd-journal-upload` happen in the chroot setup.sh below.
+    mkdir -p "$MOUNT_ROOT$(dirname "$REMOTE_LOG_NC_SCRIPT_PATH")" "$MOUNT_ROOT$(dirname "$REMOTE_LOG_NC_SERVICE_PATH")"
+    remote_log_netconsole_setup_script_content > "$MOUNT_ROOT$REMOTE_LOG_NC_SCRIPT_PATH"
+    chmod +x "$MOUNT_ROOT$REMOTE_LOG_NC_SCRIPT_PATH"
+    remote_log_netconsole_service_unit_content > "$MOUNT_ROOT$REMOTE_LOG_NC_SERVICE_PATH"
+    mkdir -p "$MOUNT_ROOT$(dirname "$REMOTE_LOG_JU_CONF_PATH")" "$MOUNT_ROOT$(dirname "$REMOTE_LOG_JU_DROPIN_PATH")"
+    remote_log_journal_upload_conf_content > "$MOUNT_ROOT$REMOTE_LOG_JU_CONF_PATH"
+    remote_log_journal_upload_dropin_content > "$MOUNT_ROOT$REMOTE_LOG_JU_DROPIN_PATH"
+
     # #448 (2026-07-18 rescope, event finding #8): force-load the Intel iGPU DRM module at boot so a
     # HEADLESS first boot (no monitor attached) still brings up /dev/dri + /dev/fb0 for the painter /
     # cameraman-monitor framebuffer chain. On cam5-class hardware `i915` is only udev-probed when a
@@ -302,13 +346,15 @@ apt-get update
 apt-get install -y \
     linux-image-generic \
     grub-efi-amd64 \
+    efibootmgr \
     openssh-server \
     sudo \
     vim \
     less \
     dhcpcd-base \
     nftables \
-    cloud-guest-utils
+    cloud-guest-utils \
+    systemd-journal-remote
 
 # #362: bake the NDI/audio RUNTIME deps into the base image so a fresh clone can RUN camera-box
 # without hand-provisioning. The fresh CAM3 clone (#301 re-image) booted but camera-box crash-looped
@@ -456,6 +502,13 @@ systemctl enable systemd-resolved
 # the `nftables` package is installed above). Enable-only -- the rule applies on first boot. rsntp's
 # Linux client cannot setsockopt(IP_TOS), so this marks the request direction (scripts/lib/dscp-nft.sh).
 systemctl enable dantesync-dscp
+
+# #1311: enable off-box remote logging (units + scripts + confs were baked into the image host-side
+# above; the systemd-journal-remote package that ships systemd-journal-upload is installed above).
+# Enable-only -- both apply on first boot. netconsole ships kernel printk to dev1 (survives the #1309
+# half-dead stick death), systemd-journal-upload forwards the rich journal (scripts/lib/remote-logging.sh).
+systemctl enable cambox-netconsole
+systemctl enable systemd-journal-upload
 
 # #448: MASK systemd-networkd-wait-online. The base debootstrap pulls it in with NO
 # `--interface`/`--any` bound, so on first boot it waits for EVERY interface to be fully
@@ -608,7 +661,24 @@ create_efi_boot_entry() {
         return 0
     fi
 
-    log "Creating named UEFI boot entry 'cam-box' for $DEVICE (ESP = partition 1)..."
+    # #1066 D6: ONLY write the named entry into this HOST's NVRAM when the TARGET disk IS the host's
+    # OWN boot disk (the on-box live-USB install case). When a stick is built on dev1 for another
+    # box, $DEVICE is a removable target whose named entry belongs in the TARGET box's NVRAM, not
+    # dev1's — writing it here pollutes the builder (had to be removed by hand on dev1) and the cam
+    # box still gets nothing. In that case WARN and skip; setup-device.sh STEP 17d creates the entry
+    # ON the box (the reliable place regardless of where the stick was built).
+    local _host_root_src _host_boot_disk
+    _host_root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
+    _host_boot_disk="$(efi_whole_disk_of "$_host_root_src")"
+    if [[ "$DEVICE" != "$_host_boot_disk" ]]; then
+        warn "Target $DEVICE is NOT this builder's own boot disk ($_host_boot_disk, from findmnt / of $_host_root_src)"
+        warn "— NOT writing a 'cam-box' NVRAM entry into THIS host's firmware (that would pollute the"
+        warn "builder, e.g. dev1, and leave the target box with none). The named entry is created ON"
+        warn "the target box by setup-device.sh STEP 17d (idempotent), and certified by verify-device (al)."
+        return 0
+    fi
+
+    log "Creating named UEFI boot entry '$EFI_CAM_BOX_LABEL' for $DEVICE (ESP = partition 1; on-box install: target IS this host's boot disk)..."
 
     # Idempotent: delete any existing cam-box entries so re-runs don't stack duplicates.
     local existing bn

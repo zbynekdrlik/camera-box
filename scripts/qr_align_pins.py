@@ -192,6 +192,11 @@ NODE_BURN_RUN_IDS = frozenset({
     # entry it would win painter_run_id's smallest-id tie-break (the exact #1159 class) and its
     # constant gen_ts_ns=0 would poison the alignment spread math.
     911013,  # AUX_TICK_RUN_ID (painted aux tick pair, tick-excluded like the burns)
+    # #1301: the CG chain (SongPlayer-originated content). Both can ride into a strih screenshot
+    # during a CG_CHAIN run; being reserved node-burn ids (id far below the painter's ~1.8e9 epoch),
+    # they must never win painter_run_id's smallest-id tie-break.
+    911014,  # BURN_RUN_ID_SONGPLAYER (CG-chain origin)
+    911015,  # BURN_RUN_ID_CG (cg OBS hop)
 })
 
 

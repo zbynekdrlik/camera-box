@@ -232,7 +232,12 @@ def test_genlock_build_sha_from_file_missing_or_empty_is_blank(tmp_path):
 
 def test_record_dir_stats_empty_dir(tmp_path):
     stats = bsg.record_dir_stats(str(tmp_path))
-    assert stats == {"total_bytes": 0, "file_count": 0, "oldest_mtime": None}
+    assert stats["total_bytes"] == 0
+    assert stats["file_count"] == 0
+    assert stats["oldest_mtime"] is None
+    # #1276: a READABLE volume reports a real (non-negative) free-space figure, never None.
+    assert stats["free_bytes"] is not None
+    assert stats["free_bytes"] >= 0
 
 
 def test_record_dir_stats_sums_files_and_counts(tmp_path):
@@ -285,7 +290,47 @@ def test_record_dir_stats_unreadable_dir_returns_zeros_never_raises():
     # switch) must degrade to a harmless zero result — never crash the /record-dir-stats.json
     # endpoint, and never a false "over budget" WARN from a bogus large number.
     stats = bsg.record_dir_stats("/this/path/does/not/exist/at/all")
-    assert stats == {"total_bytes": 0, "file_count": 0, "oldest_mtime": None}
+    assert stats["total_bytes"] == 0
+    assert stats["file_count"] == 0
+    assert stats["oldest_mtime"] is None
+    # #1276: an unreadable volume reports free_bytes None (UNKNOWN downstream) — never a bogus
+    # number that would fire a false low-free-space WARN.
+    assert stats["free_bytes"] is None
+
+
+# ── #1276: recordings-retention WARNING semantics — free space on the volume, not the file sum ──
+# Owner ruling (14.9.2026, "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): the E2E
+# preflight WARN must fire when the recordings VOLUME has <= 50 GB of FREE space left, NOT when
+# the sum of recording files exceeds a 50 GB budget. recordings_free_verdict is the python mirror
+# of the canonical Rust free_space_verdict (src/recordings_retention.rs); the bash preflight calls
+# it. Threshold in decimal GB (1e9 bytes).
+
+
+def test_recordings_free_verdict_plenty_of_space_is_ok():
+    # 619 GB free (real strih) -> OK: the old file-sum warning was a false alarm here.
+    assert bsg.recordings_free_verdict(619 * 10**9, 50) == "OK"
+    assert bsg.recordings_free_verdict(51 * 10**9, 50) == "OK"
+
+
+def test_recordings_free_verdict_exact_boundary_is_ok_no_warn():
+    # Exactly 50 GB free -> OK (spec: free >= 50 GB -> no warn).
+    assert bsg.recordings_free_verdict(50 * 10**9, 50) == "OK"
+
+
+def test_recordings_free_verdict_below_threshold_warns():
+    # < 50 GB free -> WARN (the owner's "only 50 GB remaining" signal).
+    assert bsg.recordings_free_verdict(49 * 10**9, 50) == "WARN"
+    assert bsg.recordings_free_verdict(0, 50) == "WARN"
+
+
+def test_recordings_free_verdict_unreadable_is_unknown_never_a_false_warn():
+    # free_bytes None (unreadable volume) -> UNKNOWN, never WARN.
+    assert bsg.recordings_free_verdict(None, 50) == "UNKNOWN"
+
+
+def test_recordings_free_verdict_threshold_is_configurable():
+    assert bsg.recordings_free_verdict(80 * 10**9, 100) == "WARN"
+    assert bsg.recordings_free_verdict(120 * 10**9, 100) == "OK"
 
 
 # ── #826: strih OBS-identity machine-check facet — the 2026-07-27 incident (a hand-launched
@@ -649,3 +694,43 @@ def test_read_bounded_log_text_crlf_log_still_parses(tmp_path):
     assert bsg.distroav_version_from_log(whole) == "6.2.1"
     assert bsg.output_fps_from_log(whole) == "30"
     assert bsg.genlock_wall_clock_from_log(whole) == "1"
+
+
+# ---------------------------------------------------------------------------
+# #1295 follow-up A -- the obs64-count health signal (issue 1296) must not count a DEAD/zombie
+# process object as a live instance. tasklist has no HasExited column, so a row's Mem Usage is the
+# honest liveness proxy: a live OBS sits in the hundreds of MB, a stale/exited handle ~0-45 KB.
+# ---------------------------------------------------------------------------
+def test_tasklist_mem_kb_parses_thousands_separator():
+    assert bsg.tasklist_mem_kb("512,000 K") == 512000
+    assert bsg.tasklist_mem_kb("45 K") == 45
+    assert bsg.tasklist_mem_kb("1,234 K") == 1234
+
+
+def test_tasklist_mem_kb_none_for_na_or_blank():
+    assert bsg.tasklist_mem_kb("N/A") is None
+    assert bsg.tasklist_mem_kb("") is None
+    assert bsg.tasklist_mem_kb("   ") is None
+    assert bsg.tasklist_mem_kb(None) is None
+
+
+def test_tasklist_row_is_live_obs_true_for_a_real_obs():
+    assert bsg.tasklist_row_is_live_obs("512,000 K") is True
+
+
+def test_tasklist_row_is_live_obs_false_for_a_zombie_handle():
+    # the live 2026-09-12 RESOLUME-SNV pid-58560 zombie read ~45 KB.
+    assert bsg.tasklist_row_is_live_obs("45 K") is False
+
+
+def test_tasklist_row_is_live_obs_false_for_unparseable_mem():
+    # an absent/N/A Mem is NOT trusted as live (fail-safe: a live OBS always reports a real Mem).
+    assert bsg.tasklist_row_is_live_obs("N/A") is False
+    assert bsg.tasklist_row_is_live_obs("") is False
+
+
+def test_tasklist_mem_kb_handles_space_and_nbsp_thousands_separator():
+    # #1295 review 🔵: a space / non-breaking-space grouped thousands separator (a non-en-US
+    # locale) must not parse to None (which would read not-live -> an obs undercount).
+    assert bsg.tasklist_mem_kb("512 000 K") == 512000
+    assert bsg.tasklist_mem_kb("512 000 K") == 512000

@@ -248,7 +248,14 @@ DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
 # #834: the rig's PTP grandmaster every node must agree on. Every DanteSync status-pipe/HTTP
 # payload across this whole codebase (clock_offset_guard.rs's own real fixtures, dantesync-gate.sh's
 # banner "GM = 10.77.9.184") pins this same address.
-RIG_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
+# #1307: DNS-named grandmaster (video-clock.lan) via the shared resolver; explicit RIG_GRANDMASTER_IP
+# still overrides; unresolvable fails CLOSED here rather than grading every node against nothing.
+# The resolve itself runs in the LIVE flow below (after the BASH_SOURCE guard), never at source
+# time: the pure-function tests source this file on runners with no rig DNS, and a top-level
+# `exit 2` would kill the sourcing harness (#1307 CI incident). An explicit override stays honoured.
+# shellcheck source=scripts/lib/rig-grandmaster.sh
+. "$HERE/lib/rig-grandmaster.sh"
+RIG_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-}"
 # #824: same pin + same default setup-imag.sh itself uses -- a superseded PPA binary breaks every
 # stock plugin (obs-websocket included) if the base version drifts past the genlock build's own.
 IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.2.0-0obsproject1~noble}"
@@ -854,6 +861,15 @@ imag_lease_tolerance_ok() {
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
+fi
+
+# #1307: resolve the DNS-named grandmaster (video-clock.lan) for the live run -- unresolvable fails
+# CLOSED here rather than grading imag-nb against nothing. Sits AFTER the source guard on purpose.
+if [ -z "$RIG_GRANDMASTER_IP" ]; then
+  RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
+    echo "FAIL: verify-imag: cannot resolve the PTP grandmaster host (see above) -- #1307" >&2
+    exit 2
+  }
 fi
 
 # =================================================================================================

@@ -198,3 +198,32 @@ operand). Any FUTURE per-file `install` → `cp -a src/.` change there would rei
 and grepping the emitted text (no cargo). The emitted program uses an UNQUOTED `cat <<EOS` heredoc —
 escape every emitted `$` as `\$` and use NO backticks/`$(...)` in comments (they substitute at emit
 time); `\0` in `-printf '%P\0'` passes through untouched. Verify the EMITTED program with `bash -n`.
+
+## Report-only per-box forced-table AUDIO/yuv audit preflight (#1303 part 4)
+
+`deploy-genlock-fleet.sh` emits a REPORT-ONLY audit step BEFORE STEP 0 of every box's plan
+(`emit_forced_table_audit_preflight BOX HOST`, `#`-comment guidance like the resolume STEP -1
+identity note). It exists because the fork's certified `GENLOCK_FORCED_SETTINGS` values were read
+off a CAMERA input, so a genlock build onboarded onto a PROGRAM-audio box (cg OBS: `sp-*`/`cg`/music
+inputs) silently shipped `ndi_audio=false` and only surfaced on air (2026-09-13 event morning,
+#1295/#1303). The preflight directs the supervisor to enumerate the box's live NDI inputs over
+OBS-WS (reusing `latency_pins_verify.py`'s `_conn` + `GetInputList` + `GetInputSettings`) as a
+`name<TAB>ndi_audio<TAB>yuv_range<TAB>yuv_colorspace` TSV and pipe it into the classifier
+`scripts/lib/genlock-forced-table-audit.sh`'s `genlock_forced_table_audit BOX`, then act on every
+`MISMATCH-*` row (and any yuv NOTE) over OBS-WS BEFORE the swap.
+
+- **The classifier is a byte-for-byte bash REPLICA of the canonical Rust table**
+  `src/genlock_forced_table_audit.rs` (the `cg-chain-verify.sh` shell-replica-pinned-to-Rust idiom);
+  `tests/genlock_forced_table_audit_1303.rs` pins the two together over an 88-vector parity set, so
+  a change to the per-box-class expectations must land in BOTH (the parity test fails otherwise).
+- **Report-only, never a gate.** The preflight prints and never writes; the audit function ALWAYS
+  returns 0 even on a mismatch, so it can never block a deploy (the ticket's own hard constraint,
+  and the "inform, don't force" / "latency is the operator's A/V-align domain" repo rules — an
+  operator's legitimate per-source `ndi_audio`/`yuv` choice must not be overridden by the deploy).
+- **The emit step + the `--plan` tail invariant are anchored** by
+  `tests/deploy_genlock_fleet.rs`: `plan_emits_forced_table_audit_preflight_before_step0_1303`
+  (one preflight per box, before STEP 0, references the classifier, "NEVER writes and NEVER gates")
+  and — for the sibling issue-1295 planner nit — `plan_last_nonempty_line_is_exit_0_and_no_bare_log_record_1295`
+  (a saved `--plan` .ps1 is parsed whole in file mode, so the plan ends on a clean `exit 0` and the
+  fleet-log record is emitted as a `#`-comment, never a bare trailing tab record that breaks the
+  parse).

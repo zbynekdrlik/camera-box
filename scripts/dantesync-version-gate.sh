@@ -83,7 +83,9 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Bumped 2026-09-03: fleet rolled to v1.8.53 (dantesync#109 — the pcap IGMP-join socket no longer
 # binds UDP 319/320, so a Dante Virtual Soundcard ptp.exe on the same host (stream) can lock to the
 # GM; canary stream verified 14:3xZ, rest of the fleet rolled after the owner's production window).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.53}"
+# Bumped 2026-09-13: fleet rolled to v1.8.54 (dantesync#113 hostname gm_allowlist + dantesync#114 per-minute
+# NO-DANTE-CLOCK alarm + clock_alarm /status field -- camera-box issue 1307).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.54}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

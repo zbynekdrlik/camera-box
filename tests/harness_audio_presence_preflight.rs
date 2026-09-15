@@ -82,6 +82,26 @@ fn audible_track_classified_not_silent() {
 }
 
 #[test]
+fn default_threshold_db_single_sources_the_60_bar() {
+    // #1310: the -60 dB SILENCE bar is single-sourced in one getter; the #748 gate's default and the
+    // #1310 dev1 watchdog both read it, never a retyped literal.
+    let (ok, v) = run("audio_preflight_default_threshold_db");
+    assert!(ok, "the getter must succeed");
+    assert_eq!(
+        v, "-60",
+        "the canonical measurement-audio silence bar is -60 dB"
+    );
+    // the is_silent DEFAULT must still resolve to exactly that getter value (strict < at -60):
+    let (_ok, at) = run("audio_preflight_is_silent -60.0");
+    assert_eq!(
+        at, "false",
+        "exactly the default -60 bar is audible (strict <)"
+    );
+    let (_ok, below) = run("audio_preflight_is_silent -60.1");
+    assert_eq!(below, "true", "just below the default -60 bar is silent");
+}
+
+#[test]
 fn silent_message_names_the_mbc_chain_to_check() {
     let (_ok, m) = run("audio_preflight_silent_message -91.0");
     for needle in ["mbc", "Ableton", "Dante", "#748"] {

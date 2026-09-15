@@ -41,8 +41,23 @@ if ($explorerProcs.Count -ge 1) {
   Write-Output "ACTIVE_SESSION="
 }
 Write-Output ("OWN_SESSION=" + (Get-Process -Id $PID).SessionId)
-$obs = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+$allObs = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+# #1295: Get-Process can enumerate a STALE handle for an already-EXITED obs64 (HasExited=True,
+# 0 threads, ~45 KB -- the live 2026-09-12 RESOLUME-SNV pid-58560 case). Count/pick only LIVE
+# instances; surface the ignored dead handles as REPORT-ONLY OBS_ZOMBIES / OBS_ZOMBIE_PIDS (pid:
+# start) so an operator can reap them at leisure -- never a count!=1 false-INVISIBLE off a dead
+# handle (the same live filter the A fix applied to launch-obs-genlock.sh's #978 gate).
+$obs = @($allObs | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 })
+$zombies = @($allObs | Where-Object { $_.HasExited -or $_.Threads.Count -eq 0 })
 Write-Output ("OBS_COUNT=" + $obs.Count)
+Write-Output ("OBS_ZOMBIES=" + $zombies.Count)
+if ($zombies.Count -ge 1) {
+  $zpids = ($zombies | ForEach-Object {
+    $zStart = try { $_.StartTime.ToString('s') } catch { 'unknown' }
+    "$($_.Id):$zStart"
+  }) -join ','
+  Write-Output ("OBS_ZOMBIE_PIDS=" + $zpids)
+}
 if ($obs.Count -ge 1) {
   Write-Output ("OBS_SESSION=" + $obs[0].SessionId)
   Write-Output ("OBS_TITLE=" + $obs[0].MainWindowTitle)
@@ -121,4 +136,28 @@ obs_session_visibility_message() {
     fi
   fi
   printf ''
+}
+
+# obs_session_visibility_zombie_note PROBE_OUTPUT -> a REPORT-ONLY note (#1295) naming any DEAD
+# obs64 handles the probe ignored (OBS_ZOMBIES > 0), or "" when there are none. This is
+# DELIBERATELY separate from obs_session_visibility_message: a stale zombie handle (an already-
+# EXITED obs64 object Get-Process still lists -- the 2026-09-12 RESOLUME-SNV pid-58560 case) is NOT
+# an operator-visibility fault (the one LIVE instance is perfectly visible), so it must NEVER make
+# the health message non-empty -- callers read a non-empty message as a FAIL/alert/abort. Callers
+# LOG this note report-only, so an operator can reap the dead pid when convenient. Tolerates CRLF
+# (Windows line endings) exactly like the message parser; an empty probe yields "" (connectivity is
+# the message fn's / watchdog's concern, never a spurious zombie note).
+obs_session_visibility_zombie_note() {
+  local out="$1"
+  [ -z "$out" ] && { printf ''; return 0; }
+  out="${out//$'\r'/}"
+  local z pids
+  z="$(printf '%s\n' "$out" | sed -n 's/^OBS_ZOMBIES=//p' | tail -1)"
+  if [ -z "${z:-}" ] || [ "${z:-0}" = "0" ]; then
+    printf ''
+    return 0
+  fi
+  pids="$(printf '%s\n' "$out" | sed -n 's/^OBS_ZOMBIE_PIDS=//p' | tail -1)"
+  printf '#1295 NOTE: %s DEAD obs64 process object(s) ignored (stale zombie handle, not a live instance; pid:start=%s) -- reap when convenient, not a fault.' "$z" "${pids:-unknown}"
+  return 0
 }

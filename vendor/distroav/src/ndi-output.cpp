@@ -460,6 +460,11 @@ bool ndi_output_start(void *data)
 	if (o->ndi_sender) {
 		o->started = obs_output_begin_data_capture(o->output, flags);
 		if (o->started) {
+			// camera-box #1298: this genlock fork stamps every outgoing frame's
+			// timecode with the real DanteSync wall clock (genlock_emit_timecode_100ns,
+			// ndi_output_rawvideo below), so register this output as a wall-stamping
+			// genlock sender for the in-OBS statusbar lock indicator.
+			obs_output_set_genlock_wall_stamping(o->output, true);
 			obs_log(LOG_INFO, "NDI Output started successfully. '%s'", name);
 			obs_log(LOG_DEBUG, "'%s' ndi_output_start: ndi output started", name);
 		} else {
@@ -510,6 +515,10 @@ void ndi_output_stop(void *data, uint64_t)
 	obs_log(LOG_DEBUG, "+ndi_output_stop(name='%s', groups='%s', ...)", name, groups);
 	if (o->started) {
 		o->started = false;
+
+		// camera-box #1298: no longer stamping — clear the wall-stamping flag (the output
+		// stays flagged as a genlock output so the indicator reads "present, not stamping").
+		obs_output_set_genlock_wall_stamping(o->output, false);
 
 		obs_output_end_data_capture(o->output);
 

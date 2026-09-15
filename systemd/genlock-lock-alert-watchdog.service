@@ -1,0 +1,19 @@
+[Unit]
+# strih/stream/imag/resolume genlock-LOCK-state alert (#1299), DEV1-SIDE. ONE fetch -> decide ->
+# alert pass. Reads the `genlock_lock` facet bundle_state_gather (#1299) exposes on
+# :8899/bundle-state.json -- the DECIDED three-state verdict the #1298 in-OBS statusbar emits on its
+# genlock-lock-json: line -- and pages when a box leaves LOCKED (UNLOCKED/DEGRADED). DETECTION ONLY,
+# no auto-action (the cure is a rig-ops restart/reattach decision). SAME dev1 topology as
+# audio-lag-alert-watchdog.service (#1226) / network-reach-alert-watchdog.service (#1001). resolume
+# is paged only while obs_fleet_is_home (traveling CG box). SHIPS DISABLED -- enable explicitly.
+Description=camera-box fleet genlock-LOCK-state alert (#1299) -- one fetch/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/genlock-lock-alert-watchdog.sh
+# Per pass: up to 4 boxes (resolume gated on is-home) x one :8899 curl (GENLOCK_LOCK_CURL_TIMEOUT,
+# default 10 s each) + a local python decision. Generous ceiling so a slow event-day link never
+# hangs the timer.
+TimeoutStartSec=60

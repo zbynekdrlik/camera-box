@@ -273,3 +273,72 @@ both required after ANY edit that rewrites (not merely appends to) a provisionin
    effect. (The #1289 sweep showed exactly two positive `1->0` hits — the two CI failures — and
    nothing else.) Re-anchor on the NEW install-action line (`install -m 0755 "$_<name>_dl_tmp"
    /usr/local/bin/<name>`), never on the download itself, which is now a temp path.
+
+## The appliance has NO runtime-writable persistent location — persisting state needs a dedicated `nofail` partition (#1309)
+
+Load-bearing fact for anything that must SURVIVE a reboot/power-cycle: the cam box is a READ-ONLY
+root ext4 (STEP 18 fstab `/ ext4 ro`), `/var/log` + `/var/tmp` + `/var/cache` + `/var/spool` + `/tmp`
+are all volatile **tmpfs**, and `/var/lib` (where the #369 grow-root marker lives) is on the `ro`
+root — readable but NOT writable at runtime. `/root/.itmp` is writable only during PROVISIONING (the
+rw window before STEP 18 flips root ro), never at runtime. camera-box.service itself only gets
+`ReadWritePaths=/dev /sys /run` (all volatile). create-usb-linux.sh partitions ONLY EFI + root (root
+took `100%` of the disk pre-#1309). So a journal / any state that must outlive a power-cycle CANNOT
+live on the existing layout — it needs a **dedicated writable partition**.
+
+The #1309 persistent-journal pattern (reusable for any future persistent-state need):
+- **create-usb-linux.sh** carves the partition from the disk TAIL: root `mkpart "root" ext4 513MiB
+  -513MiB` (leave 512MiB) + `mkpart "<label>" ext4 -513MiB 100%` + `mkfs.ext4 -L <label>`. Root is
+  now NOT the last partition, so the #369 auto-grow-root service's growpart correctly REFUSES to
+  expand it (its documented fault-tolerant "root not last → non-fatal skip" path) — no auto-grow
+  conflict, no code change to grow-root needed.
+- **The mount MUST be `nofail`** (`LABEL=<label> /mount ext4 rw,nofail,noatime,nosuid,nodev 0 2`) —
+  a box WITHOUT the partition (an old box not yet reflashed) then still boots and the consumer falls
+  back gracefully (for the journal: `Storage=persistent` writes to the `/var/log` tmpfs = volatile
+  but harmless). `nofail` is what makes a partition/fstab change SAFE to ship without rig testing.
+- **setup-device.sh** mounts it conditionally (`$(if blkid -L "<label>" …; then <fstab-line>; else
+  echo "# reflash needed"; fi)` inside the STEP 18 fstab heredoc) — an already-flashed box gets the
+  mount, an un-reflashed box gets a harmless comment, never an unmountable entry.
+- **verify-device.sh** HARD-FAILs a still-volatile box (fstype tmpfs, not the real ext4) with a
+  "reflash via create-usb-linux.sh" hint — the acceptance gate for a properly-provisioned box.
+- **The fleet only gets it via a USB REFLASH** (create-usb), not a plain setup-device.sh re-run —
+  because setup-device.sh cannot repartition a live disk non-destructively. That is the accepted
+  reach model (cam1 was re-provisioned-from-scratch after the wedge anyway).
+
+## A pure `scripts/lib/*.sh` whose logic must RUN on a box with no repo libs: generate a self-contained on-box script that EMBEDS the pure fns via `declare -f` (#1309)
+
+The appliance has no checkout of this repo, so an on-box script (a systemd-timer target, a
+self-heal) cannot `source` a `scripts/lib/*.sh` at runtime. Two ways the repo already handles this:
+`camera_box_free_capture_device_script_content` PRINTS the whole script body from a function; #1309's
+`mgmt_liveness_selfcheck_script` does the SAME but keeps ONE source of truth for the PURE logic by
+**embedding the tested functions verbatim via `declare -f`** — `mgmt_liveness_selfcheck_script` cats
+a header (constants) + `declare -f mgmt_liveness_banner_ok mgmt_liveness_decide
+mgmt_liveness_snapshot_cmds` + a `<<'BODY'` I/O/state/action main that CALLS those embedded
+functions. The pure fns are unit-tested at Tier-0 (sourced-bash driver / a `run_sourced` Rust
+harness); the on-box script embeds the EXACT tested definitions, so there is no drifting inlined
+copy and no lib dependency on the box. setup-device.sh writes it enable-only (write files +
+`daemon-reload` + `enable <timer>`, never a live `start`, in the rw window before STEP 18); a
+verify-device check proves it post-reboot. Tier-0 test the generated script's SHAPE (embeds the fn
+names, has the key action lines) AND that it is valid bash (`bash -n` on the captured output).
+
+## A NEW provisioned systemd unit that uses `StateDirectory=` (or writes under `/var/lib`) FAILS on the read-only root — only `/var/log|tmp|cache|spool` are tmpfs (#1311 review F2)
+
+The cambox is a read-only-root appliance: STEP 18's fstab mounts ONLY `/var/log`, `/var/tmp`,
+`/var/cache`, `/var/spool` (+ `/tmp`) as tmpfs; everything else — including `/var/lib` — is on the
+`ro` root. So ANY unit you provision that needs a writable state path fails at every start on the
+box even though it works on a normal box:
+
+- A `StateDirectory=<name>` directive makes systemd `mkdir /var/lib/<name>` at each start → fails
+  `ReadOnlyFileSystem` on the ro root, failing the whole unit. When you enable a stock upstream unit
+  (or write your own) that carries one, either DROP it (empty `StateDirectory=` in a drop-in resets
+  the list) and point the app's state at a `/run` (tmpfs) path instead, or bake a tmpfs mount for
+  that path into STEP 18's fstab. `systemd-journal-upload` hit exactly this — the stock noble unit
+  carries `StateDirectory=systemd/journal-upload`, cleared in `remote_log_journal_upload_dropin_content`
+  with the cursor redirected to `/run` via `RuntimeDirectory` + `--save-state` (scripts/lib/remote-logging.sh).
+- The same applies to any `--save-state`/cursor/pidfile/cache path a provisioned daemon writes: a
+  default under `/var/lib` (or any non-tmpfs dir) is unwritable. Redirect it to `/run` (fine for
+  runtime-only state — the box's whole point is that it may die) or add a tmpfs mount.
+
+verify-device's acceptance check for such a unit should assert the redirect is in place (a
+`--save-state=/run/...` / a cleared `StateDirectory=`), not just that the unit is enabled — an
+enabled-but-start-failing unit is a silent hole (a check that gates only `is-enabled`, not the
+ro-root-safe config, would pass a box whose service can never actually run).

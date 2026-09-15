@@ -57,7 +57,7 @@ def test_windows_obs_log_tail_cmd_is_encoded_1259():
 def test_windows_obs_count_cmd_is_encoded_1259():
     cmd = _mod._windows_obs_count_cmd()
     ps = _decode_encoded_payload(cmd)
-    assert ps == "(Get-Process obs64 -ErrorAction SilentlyContinue).Count", (
+    assert ps == "@(Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }).Count", (
         f"#1259: the obs64-count builder must decode to the exact Get-Process expression, got: {ps!r}")
 
 

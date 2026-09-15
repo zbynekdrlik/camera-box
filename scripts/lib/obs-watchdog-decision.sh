@@ -99,3 +99,44 @@ obs_watchdog_clear_hysteresis() {
       ;;
   esac
 }
+
+# watchdog_notify_key <incident-key> <now_epoch> [interval_s]
+#   -> stdout: <incident-key>-<floor(now/interval)>
+#   The ONE shared re-ping key builder for the PRODUCTION-CRITICAL watchdog class (#1308, owner
+#   ruling ROZHODNUTÉ 2026-09-13: a fault production cannot run without must be re-pinged
+#   „dokolecka" while it PERSISTS, not paged once and card-edited forever). It is the byte-for-byte
+#   bash twin of scripts/watchdog_reping.py::notify_key (a parity pytest diffs the two). Every
+#   production-critical alert-watchdog wraps its EXISTING stable --dedup-key with this:
+#     --dedup-key "$(watchdog_notify_key "genlock-lock-$box" "$(date +%s)")"
+#   Within one interval an identical state yields the SAME key (airuleset edits the card, no ping);
+#   the next interval yields a FRESH key (a new ping while it persists). Recovery is NOT bucketed --
+#   a ✅ recovery stays ONE machine-channel log line per watchdog (watchdog-notify-dedup.md rule 2).
+#     - interval: the 3rd arg, else $REPING_INTERVAL_S (the ONE shared env name), else 600 s;
+#     - a NON-numeric interval falls back to 600 (never a crash);
+#     - floored at 60 s: a smaller value (incl. a negative, matching int()'s clamp) is CLAMPED to 60,
+#       so a mis-set interval can never become a per-pass phone flood (warned once per shell).
+#   Delivery-layer only: it builds a key, it never decides whether a fault exists.
+#   PARITY CONTRACT DOMAIN (#1308 review): byte-identical to watchdog_reping.notify_key over the
+#   PRODUCTION-reachable inputs -- `now` is always a positive `date +%s` epoch, `interval` a clean
+#   int. A negative/whitespace `now` (never emitted here) can diverge from python's floor-division
+#   (bash `$(( ))` truncates toward zero) and is out of contract, not a bug; the parity pytest covers
+#   the whole production domain.
+watchdog_notify_key() {
+  local base="${1:-}" now="${2:-0}" interval="${3:-${REPING_INTERVAL_S:-600}}"
+  local floor=60 default=600 iv_digits
+  case "$now" in *[!0-9]* | "") now=0 ;; esac
+  # strip one leading '-' before the digit test so a negative int is treated as a valid int and
+  # clamped to the floor (matches watchdog_reping.reping_interval / Python int() semantics), while a
+  # genuinely non-numeric interval ("xxx", "") falls back to the 600s default.
+  iv_digits="${interval#-}"
+  case "$iv_digits" in *[!0-9]* | "") interval=$default ;; esac
+  if [ "$interval" -lt "$floor" ]; then
+    if [ -z "${_WATCHDOG_NOTIFY_KEY_FLOOR_WARNED:-}" ]; then
+      printf '%s [watchdog_notify_key] interval %s below floor %ss -- clamped to %ss (set REPING_INTERVAL_S >= %s)\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$interval" "$floor" "$floor" "$floor" >&2
+      _WATCHDOG_NOTIFY_KEY_FLOOR_WARNED=1
+    fi
+    interval=$floor
+  fi
+  printf '%s-%s\n' "$base" "$(( now / interval ))"
+}

@@ -213,14 +213,17 @@ fn setup_device_binary_install_fails_loud_never_warns() {
 #[test]
 fn setup_device_ndi_fetch_fails_loud_never_warns() {
     let body = read_script();
-    for needle in [
-        "NDI fetch from $NDI_PEER produced no file",
-        "could not fetch NDI library from fleet peer",
-    ] {
+    // #1066 rewrote STEP 4 from a single hard-coded peer to an ordered fleet-peer bootstrap +
+    // version-guarded pinned-download fallback (see setup_device_provisioning_defects_1066.rs), so
+    // the old single-peer fail messages ("NDI fetch from $NDI_PEER produced no file" / "could not
+    // fetch NDI library from fleet peer") no longer exist. The #450 fail-loud INVARIANT is
+    // unchanged — STEP 4 still `fail`s (never warns-and-continues) when NO source yields the
+    // runtime — only the message moved to the terminal fail that names every peer tried.
+    for needle in ["could not obtain the NDI runtime", "tried fleet peers"] {
         assert!(
             on_noncomment_line(&body, needle),
             "setup-device.sh STEP 4 must fail loud (via fail()) with a message containing \
-             `{needle}` instead of warning and continuing (#450)"
+             `{needle}` instead of warning and continuing (#450/#1066)"
         );
     }
 }
@@ -888,6 +891,108 @@ fn create_usb_linux_sources_log_diet_and_writes_the_journald_dropin_into_the_chr
         ),
         "create-usb-linux.sh must write the journald RuntimeMaxUse drop-in into the base-image \
          chroot (#762) -- closes the window before setup-device.sh ever runs"
+    );
+}
+
+// #1309 -- persistent journal on the ro-root appliance. create-usb-linux.sh lays a dedicated ext4
+// partition (p3, LABEL cambox-journal) and mounts it `nofail` at /var/log/journal; setup-device.sh
+// mounts it idempotently when the label exists (an already-flashed box). Both use the SAME
+// scripts/lib/log-diet.sh source of truth, so the label + fstab line can never drift.
+#[test]
+fn create_usb_partitions_a_dedicated_persistent_journal_partition_1309() {
+    let body = read_usb_script();
+    // root is no longer 100% -- it leaves 512MiB at the end so p3 exists AND root is not the last
+    // partition (so #369 auto-grow-root correctly refuses to expand it).
+    assert!(
+        body.contains("mkpart \"root\" ext4 513MiB -513MiB"),
+        "create-usb-linux.sh must size root to leave 512MiB tail for the journal partition (#1309)"
+    );
+    assert!(
+        body.contains("mkpart \"$LOG_DIET_JOURNAL_PART_LABEL\" ext4 -513MiB 100%"),
+        "create-usb-linux.sh must create the persistent-journal partition p3 (#1309)"
+    );
+    // issue 1309 follow-up (14.9.2026 live failure): parted parses a leading "-" as an OPTION, so
+    // every mkpart with a NEGATIVE offset must be preceded by "--" — the first stick build with the
+    // journal partition died at `parted: invalid option -- '5'`. Pin the "--" on both calls.
+    assert!(
+        body.contains("-- mkpart \"root\" ext4 513MiB -513MiB")
+            && body.contains("-- mkpart \"$LOG_DIET_JOURNAL_PART_LABEL\" ext4 -513MiB 100%"),
+        "create-usb-linux.sh: parted calls with a negative offset must carry `--` before mkpart"
+    );
+    assert!(
+        body.contains("mkfs.ext4 -L \"$LOG_DIET_JOURNAL_PART_LABEL\""),
+        "create-usb-linux.sh must mkfs the journal partition with the shared label (#1309)"
+    );
+    assert!(
+        on_noncomment_line(&body, "$(log_diet_journal_fstab_line)"),
+        "create-usb-linux.sh base-image fstab must mount the journal partition via the shared \
+         log_diet_journal_fstab_line (#1309)"
+    );
+}
+
+#[test]
+fn setup_device_fstab_conditionally_mounts_the_persistent_journal_partition_1309() {
+    let body = read_script();
+    // setup-device.sh writes the mount line ONLY when the labelled partition exists on THIS box
+    // (an already-flashed box), else a harmless comment -- an old box (no p3) is never given an
+    // unmountable entry, and `nofail` in the shared line means even that can't block boot.
+    assert!(
+        body.contains("blkid -L \"$LOG_DIET_JOURNAL_PART_LABEL\""),
+        "setup-device.sh must guard the journal mount on the partition actually existing (#1309)"
+    );
+    assert!(
+        body.contains("log_diet_journal_fstab_line"),
+        "setup-device.sh must emit the journal fstab line via the shared generator (#1309)"
+    );
+}
+
+// #1309 -- on-box mgmt-liveness self-heal: setup-device.sh sources the shared lib and installs the
+// script + units enable-only (never a live start), in the rw window BEFORE STEP 18 flips root ro.
+#[test]
+fn setup_device_installs_the_mgmt_liveness_selfheal_enable_only_1309() {
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, ". \"$HERE/lib/mgmt-liveness.sh\""),
+        "setup-device.sh must source scripts/lib/mgmt-liveness.sh (#1309, one source of truth)"
+    );
+    assert!(
+        on_noncomment_line(
+            &body,
+            "mgmt_liveness_selfcheck_script > \"$MGMT_LIVENESS_SCRIPT_PATH\""
+        ),
+        "setup-device.sh must write the generated self-heal script (#1309)"
+    );
+    assert!(
+        on_noncomment_line(
+            &body,
+            "mgmt_liveness_service_unit > \"$MGMT_LIVENESS_SERVICE_PATH\""
+        ) && on_noncomment_line(
+            &body,
+            "mgmt_liveness_timer_unit > \"$MGMT_LIVENESS_TIMER_PATH\""
+        ),
+        "setup-device.sh must write the .service AND .timer units (#1309)"
+    );
+    assert!(
+        on_noncomment_line(&body, "systemctl enable \"$MGMT_LIVENESS_TIMER_UNIT_NAME\""),
+        "setup-device.sh must ENABLE the timer (#1309)"
+    );
+    // enable-only convention: it must NOT `systemctl start`/`restart`/`enable --now` the self-heal
+    // timer or its units (provisioning-scripts.md -- defer to reboot; verify-device (aj) proves live).
+    assert!(
+        !body.contains("systemctl start cambox-mgmt-selfcheck")
+            && !body.contains("enable --now \"$MGMT_LIVENESS_TIMER_UNIT_NAME\""),
+        "setup-device.sh must be enable-only for the #1309 self-heal, never a live start"
+    );
+    // Must live BEFORE STEP 18's ro-root flip (it writes under /usr/local/sbin + /etc/systemd).
+    let install = body
+        .find("mgmt_liveness_selfcheck_script > ")
+        .expect("mgmt install block present");
+    let step18 = body
+        .find("[18/${TOTAL_STEPS}]")
+        .expect("STEP 18 banner present");
+    assert!(
+        install < step18,
+        "the #1309 mgmt-selfcheck install must run in the rw window, BEFORE STEP 18 flips root ro"
     );
 }
 

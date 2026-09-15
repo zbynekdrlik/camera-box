@@ -3,8 +3,11 @@
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance
 #
-# Usage: ./setup-device.sh [--binary <url|path>] DEVICE_NAME
+# Usage: ./setup-device.sh [--binary <url|path>] [--probe-binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
 # Example: ./setup-device.sh CAM5        (case-insensitive; cam5 works too)
+#
+# By default the camera-box binary comes from the latest successful ci.yml run on `main` (the
+# fleet's production pin, matching scripts/deploy-fleet.sh) -- NOT the dev tip (#1066/#1136).
 #
 # DEVICE_NAME is resolved via scripts/camera-set.sh (#24/#451 -- the single source of truth for
 # the cam1-6 fleet map): IP address / VBAN stream name / genlock emit-rate are all DERIVED from
@@ -30,7 +33,9 @@ fail() {
 }
 
 # shellcheck source=scripts/camera-set.sh
-. "$HERE/camera-set.sh"   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
+. "$HERE/camera-set.sh"
+# shellcheck source=scripts/lib/rig-grandmaster.sh
+. "$HERE/lib/rig-grandmaster.sh"  # rig_grandmaster_ip() -- the DNS-named PTP grandmaster (#1307)   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
 
 # shellcheck source=scripts/lib/log-bound.sh
 . "$HERE/lib/log-bound.sh"  # log_bound_logrotate_config/log_bound_timer_dropin (#679) -- also
@@ -41,6 +46,16 @@ fail() {
 . "$HERE/lib/log-diet.sh"  # log_diet_journald_dropin (#762) -- also sourced (unmodified) by
                            # verify-device.sh's (u) check and create-usb-linux.sh, single source
                            # of truth for the journald RuntimeMaxUse cap path/value
+
+# shellcheck source=scripts/lib/mgmt-liveness.sh
+. "$HERE/lib/mgmt-liveness.sh"  # mgmt_liveness_selfcheck_script / _service_unit / _timer_unit (#1309)
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$HERE/lib/remote-logging.sh"  # remote_log_netconsole_setup_script_content / _service_unit_content /
+                                 # remote_log_journal_upload_conf_content / _dropin_content (#1311) --
+                                 # off-box kernel(netconsole)+journal(upload) forensics; also sourced
+                                 # by verify-device.sh's (ak) check + create-usb-linux.sh base image
+                                # -- the on-box ssh-banner self-heal; ONE source of truth shared with
+                                # verify-device.sh's (aj) check (the pure decision embedded via declare -f)
 
 # shellcheck source=scripts/lib/udev-camera-box.sh
 . "$HERE/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/udev_camera_box_helper_script_content
@@ -64,13 +79,32 @@ fail() {
                            # create-usb-linux.sh, single source of truth for the NTP-client DSCP
                            # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
 
-# GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
-# runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
+# shellcheck source=scripts/lib/ndi-provision.sh
+. "$HERE/lib/ndi-provision.sh"  # NDI_VERSION_PIN + ndi_bootstrap_peer_list / ndi_runtime_version_matches_pin
+                                # (#1066) -- also sourced by verify-device.sh's (o) check, single source of
+                                # truth for the NDI runtime pin + the STEP 4 fleet-peer bootstrap list
+# shellcheck source=scripts/lib/efi-boot-entry.sh
+. "$HERE/lib/efi-boot-entry.sh"  # EFI_CAM_BOX_LABEL/_LOADER + efi_cam_box_bootnums / efi_cam_box_leads /
+                                 # efi_boot_order_lead (#1066 D6) -- shared with create-usb-linux.sh +
+                                 # verify-device.sh (al) for the named cam-box UEFI entry on the box
+
+# shellcheck source=scripts/dantesync-version-gate.sh
+. "$HERE/dantesync-version-gate.sh"  # DANTESYNC_VERSION_PIN (#1066, source-safe: its source-guard
+                                     # returns before the gate logic runs) -- the SAME single source
+                                     # scripts/dantesync-fleet-upgrade.sh already uses; STEP 17 installs
+                                     # that pinned release, never releases/latest
+
+# GitHub repo + CI channel for installing the fleet-matching binary. #1066: the fleet's production
+# truth is MAIN's pinned release (early-gate PIN doctrine, issue 1136) -- a fresh provision defaults
+# to the SAME source scripts/deploy-fleet.sh uses (latest successful ci.yml run on `main`), NOT the
+# dev tip. cam1 came up on 1.7.0-dev.626 vs main's dev.624 and tripped the [0/8] PIN-DRIFT gate
+# (2026-09-13). Override with --binary <url|path> / --run <id> / CAMERA_BOX_CI_BRANCH.
 GITHUB_REPO="zbynekdrlik/camera-box"
-CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-dev}"
+CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-main}"
 
 # Fleet NDI runtime source -- the licensed .so is never built by CI, so a fresh box fetches it
 # from a known-good fleet peer instead of requiring a manual per-box scp copy (STEP 4, #457).
+# shellcheck disable=SC2034  # #1066: consumed cross-file by ndi_bootstrap_peer_list (scripts/lib/ndi-provision.sh), which STEP 4 sources
 NDI_PEER="${CAMERA_BOX_NDI_PEER:-10.77.9.61}"
 NDI_PEER_PW="${CAM_PW:-newlevel}"
 
@@ -173,6 +207,12 @@ EOF
 # disposable 2h nohup, so the unit itself must write the growing QPSK marker CSV the offline
 # verdict pairs audio->frame from AND the "must-stay-alive" liveness check reads. Promotes the
 # live 2026-08-06 10-marker-log.conf drop-in into the base unit (single source of truth).
+# #1312: --wall-clock stamps each emit_ts_ns on CLOCK_REALTIME (the DanteSync-disciplined wall
+# clock) instead of the painter's monotonic start.elapsed(), so the dev1 avlatency handover check
+# (measurement-chain-latency.sh) can pair this permanent painter's markers against dev1's
+# wall-clock mbc meter onsets instead of reading UNKNOWN forever (the monotonic-emit trap). Safe
+# no-op for the A/V verdict path (av_sync_recording.rs pairs by fid, ignores emit_ts). Takes effect
+# after a cam2 re-provision (or a remount-rw unit edit + daemon-reload + painter restart).
 cam2_painter_service_unit_content() {
     cat <<'EOF'
 [Unit]
@@ -183,7 +223,7 @@ Wants=camera-box.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000 --marker-log /run/rig-qpsk-markers.csv
+ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000 --marker-log /run/rig-qpsk-markers.csv --wall-clock
 Restart=always
 RestartSec=2
 
@@ -283,11 +323,28 @@ fi
 # argument (#450 -- name-resolved single-arg invocation; IP/stream/genlock-fps are all DERIVED
 # from it via camera-set.sh, replacing the old free-text 3-positional-arg form).
 BINARY_ARG=""
+PROBE_BINARY_ARG=""
+CI_RUN_ID_ARG=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --binary)
             BINARY_ARG="${2:?--binary needs a URL or local path}"
+            shift 2
+            ;;
+        --probe-binary)
+            # #1066 D5: symmetric with --binary, for STEP 3b's cam2 painter frame-probe. The cam
+            # boxes are a gh-less appliance, so the dev1-side caller stages probe-tools-linux-amd64's
+            # frame-probe and hands it in here -- the SAME way --binary hands in camera-box. The env
+            # override FRAME_PROBE_BINARY_URL is kept (byte-compatible) as a fallback.
+            PROBE_BINARY_ARG="${2:?--probe-binary needs a URL or local path}"
+            shift 2
+            ;;
+        --run)
+            # #1066: pin the CI artifact to an EXPLICIT ci.yml run id (mirrors deploy-fleet.sh's
+            # --run), bypassing the default `gh run list` latest-successful lookup -- for a
+            # deliberate bisect/rollback or to match the fleet to one exact run.
+            CI_RUN_ID_ARG="${2:?--run needs a ci.yml run id}"
             shift 2
             ;;
         *)
@@ -302,12 +359,15 @@ DEVICE_NAME_ARG="${1:-}"
 
 if [ -z "$DEVICE_NAME_ARG" ]; then
     echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
+    echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>)"
     echo ""
     echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-6) -- case-insensitive."
     echo ""
     echo "Examples:"
     echo "  $0 CAM5"
     echo "  $0 --binary ./dist/camera-box CAM2"
+    echo "  $0 --binary ./dist/camera-box --probe-binary ./dist/frame-probe CAM2   # cam2: stage BOTH binaries from dev1 (#1066 D5, gh-less box)"
+    echo "  $0 --run <ci.yml run id> CAM1     # pin an exact CI artifact (#1066); default = latest main"
     exit 1
 fi
 
@@ -416,14 +476,18 @@ echo "  Static IP configured: $DEVICE_IP"
 # =============================================================================
 echo ""
 echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
-# The fleet runs CI dev-builds (e.g. 1.7.0-dev.157), never a GitHub release -- installing from
-# releases/latest silently version-drifted a fresh box from the fleet (cam6, #457). Resolution
-# order:
+# The binary is ALWAYS a CI artifact (a `-dev.N` build), never a GitHub release -- installing from
+# releases/latest silently version-drifted a fresh box from the fleet (cam6, #457). #1066: the
+# fleet's production truth is MAIN's pinned release (early-gate PIN doctrine, issue 1136), so the
+# DEFAULT source is the latest successful ci.yml run on `main` -- the SAME source deploy-fleet.sh
+# uses -- NOT the dev tip (cam1 came up on dev.626 vs main's dev.624 and tripped the [0/8] PIN-DRIFT
+# gate, 2026-09-13). Resolution order:
 #   1. --binary <local path>                  - use the file directly (already fetched elsewhere)
 #   2. --binary <url> / CAMERA_BOX_BINARY_URL  - curl this exact URL (a raw camera-box binary)
-#   3. default                                 - gh run download the latest successful CI
-#      artifact on $CI_BRANCH, mirroring scripts/deploy-fleet.sh's own mechanism, so a fresh box
-#      matches the fleet with no manual copy.
+#   3. --run <id>                              - gh run download that EXACT ci.yml run's artifact
+#   4. default                                 - gh run download the latest successful ci.yml
+#      artifact on $CI_BRANCH (=main), mirroring scripts/deploy-fleet.sh's own mechanism, so a
+#      fresh box matches the fleet's pin with no manual copy.
 BINARY_SRC="${BINARY_ARG:-${CAMERA_BOX_BINARY_URL:-}}"
 if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
     echo "  Using local binary: $BINARY_SRC"
@@ -453,10 +517,15 @@ elif [ -n "$BINARY_SRC" ]; then
     rm -f "$_camera_box_dl_tmp"
     echo "  Binary installed: $(/usr/local/bin/camera-box --version 2>/dev/null || echo 'unknown version')"
 elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
-    echo "  Fetching latest CI dev-build artifact (branch: $CI_BRANCH)..."
-    RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
-        --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-    [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+    if [ -n "$CI_RUN_ID_ARG" ]; then
+        echo "  Fetching CI artifact from the explicit --run $CI_RUN_ID_ARG..."
+        RUN_ID="$CI_RUN_ID_ARG"
+    else
+        echo "  Fetching latest CI artifact (branch: $CI_BRANCH = the fleet's production pin)..."
+        RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
+            --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
+        [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- install manually, or re-run with --binary <url|path> / --run <id> / CAMERA_BOX_BINARY_URL"
+    fi
     DIST_DIR="$(mktemp -d)"
     if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
         && [ -f "$DIST_DIR/camera-box" ]; then
@@ -485,8 +554,10 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
     echo -e "${GREEN}[3b] Installing cam2 permanent dual-QR devel-mode painter (#863)...${NC}"
     # Same resolution shape as STEP 3's camera-box binary fetch (local path / URL override /
     # default CI artifact download), scoped to the probe-tools-linux-amd64 artifact's frame-probe
-    # binary.
-    FRAME_PROBE_SRC="${FRAME_PROBE_BINARY_URL:-}"
+    # binary. #1066 D5: --probe-binary <path|url> (symmetric with --binary) is the FIRST source, so
+    # a gh-less box is handed a dev1-staged frame-probe the SAME way STEP 3 is handed camera-box;
+    # FRAME_PROBE_BINARY_URL stays as a byte-compatible env fallback.
+    FRAME_PROBE_SRC="${PROBE_BINARY_ARG:-${FRAME_PROBE_BINARY_URL:-}}"
     if [ -n "$FRAME_PROBE_SRC" ] && [ -f "$FRAME_PROBE_SRC" ]; then
         echo "  Using local frame-probe: $FRAME_PROBE_SRC"
         install -m 0755 "$FRAME_PROBE_SRC" /usr/local/bin/frame-probe
@@ -511,10 +582,15 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
         }
         rm -f "$_frame_probe_dl_tmp"
     elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
+        if [ -n "$CI_RUN_ID_ARG" ]; then
+          echo "  Fetching probe-tools-linux-amd64 from the explicit --run $CI_RUN_ID_ARG..."
+          PROBE_RUN_ID="$CI_RUN_ID_ARG"
+        else
         echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
         PROBE_RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
             --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). Install manually to /usr/local/bin/frame-probe, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). STAGE IT FROM dev1: gh run download <ci.yml run> -n probe-tools-linux-amd64 --dir /tmp && scp /tmp/frame-probe root@<box>:/tmp/ , then re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (FRAME_PROBE_BINARY_URL=<url|path> also works)."
+        fi
         PROBE_DIST_DIR="$(mktemp -d)"
         if gh run download "$PROBE_RUN_ID" --repo "$GITHUB_REPO" -n probe-tools-linux-amd64 --dir "$PROBE_DIST_DIR" 2>/dev/null \
             && [ -f "$PROBE_DIST_DIR/frame-probe" ]; then
@@ -522,11 +598,11 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
             echo "  frame-probe installed from CI run $PROBE_RUN_ID"
         else
             rm -rf "$PROBE_DIST_DIR"
-            fail "gh run download failed for run $PROBE_RUN_ID -- could not fetch frame-probe (probe-tools-linux-amd64 artifact, #863)"
+            fail "gh run download failed for run $PROBE_RUN_ID -- could not fetch frame-probe (probe-tools-linux-amd64 artifact, #863). Stage it from dev1 and re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (or FRAME_PROBE_BINARY_URL=<url|path>)."
         fi
         rm -rf "$PROBE_DIST_DIR"
     else
-        fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch frame-probe (probe-tools-linux-amd64 CI artifact, #863). Install manually, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+        fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch frame-probe (probe-tools-linux-amd64 CI artifact, #863). The cam box has no gh: STAGE IT FROM dev1 -- gh run download <ci.yml run> -n probe-tools-linux-amd64 --dir /tmp && scp /tmp/frame-probe root@<box>:/tmp/ , then re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (FRAME_PROBE_BINARY_URL=<url|path> also works)."
     fi
 
     # #863: cam2's OWN camera-box must never contest /dev/fb0 -- see the cam2_painter_no_display_
@@ -552,27 +628,71 @@ echo '/usr/lib/ndi' > /etc/ld.so.conf.d/ndi.conf
 if [ -f /usr/lib/ndi/libndi.so.6 ]; then
     ldconfig
     echo "  NDI library: present and configured"
-elif [ "$DEVICE_IP" = "$NDI_PEER" ]; then
-    echo -e "  ${YELLOW}This box IS the fleet NDI source ($NDI_PEER) -- nothing to fetch${NC}"
-    echo "  Copy libndi.so.* onto it manually before re-running this script"
 else
     # NDI is a licensed runtime -- CI never builds it, so fetch it from a known-good fleet peer
-    # (cam1) instead of requiring a manual per-box scp copy (#457). Mirrors the already-proven
+    # instead of requiring a manual per-box scp copy (#457). Mirrors the already-proven
     # setup-imag.sh step-10 dance: scp the versioned .so, then symlink libndi.so.6/libndi.so onto it.
-    echo "  NDI library not found locally -- fetching from fleet peer $NDI_PEER..."
+    #
+    # #1066: the single hard-coded peer ($NDI_PEER = cam1) WAS the box being re-provisioned when
+    # cam1 itself was rebuilt (2026-09-13) -- the old `elif [ "$DEVICE_IP" = "$NDI_PEER" ]` branch
+    # printed "nothing to fetch" and continued, so STEP 19 correctly refused Setup Complete but the
+    # runbook had no way forward. Derive the ORDERED peer list from camera-set.sh
+    # (ndi_bootstrap_peer_list: NDI_PEER first, then every CAMERA_SET member, MINUS this box's own
+    # IP) and try each reachable one in order; fall back to the version-guarded pinned download;
+    # fail loud naming every peer tried.
+    echo "  NDI library not found locally -- bootstrapping from a fleet peer..."
     command -v sshpass >/dev/null 2>&1 || apt-get install -y -qq sshpass >/dev/null 2>&1 || true
-    if command -v sshpass >/dev/null 2>&1 \
-        && sshpass -p "$NDI_PEER_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-            "root@${NDI_PEER}:/usr/lib/ndi/libndi.so.*.*.*" /usr/lib/ndi/ 2>/dev/null; then
-        REAL="$(cd /usr/lib/ndi && ls libndi.so.*.*.* 2>/dev/null | head -1 || true)"
-        [ -n "$REAL" ] || fail "NDI fetch from $NDI_PEER produced no file -- copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
-        ln -sf "$REAL" /usr/lib/ndi/libndi.so.6
-        ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
-        ldconfig
-        echo "  NDI library fetched from $NDI_PEER and configured ($REAL)"
-    else
-        fail "could not fetch NDI library from fleet peer $NDI_PEER -- copy manually: scp root@${NDI_PEER}:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
+    _ndi_configured=false
+    _ndi_tried=""
+    for NDI_PEER_CANDIDATE in $(ndi_bootstrap_peer_list "$DEVICE_IP"); do
+        _ndi_tried="$_ndi_tried $NDI_PEER_CANDIDATE"
+        echo "  Trying NDI peer $NDI_PEER_CANDIDATE..."
+        if command -v sshpass >/dev/null 2>&1 \
+            && sshpass -p "$NDI_PEER_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+                "root@${NDI_PEER_CANDIDATE}:/usr/lib/ndi/libndi.so.*.*.*" /usr/lib/ndi/ 2>/dev/null; then
+            REAL="$(cd /usr/lib/ndi && ls libndi.so.*.*.* 2>/dev/null | head -1 || true)"
+            if [ -n "$REAL" ]; then
+                ln -sf "$REAL" /usr/lib/ndi/libndi.so.6
+                ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
+                ldconfig
+                echo "  NDI library fetched from $NDI_PEER_CANDIDATE and configured ($REAL)"
+                _ndi_configured=true
+                break
+            fi
+        fi
+    done
+    if [ "$_ndi_configured" != true ]; then
+        # No fleet peer served the runtime -> fall back to the ONE canonical NDI download
+        # (vendor/distroav/CI/libndi-get.sh, download-only -- no `install` arg, so it extracts to a
+        # TMPDIR we control and never touches /usr/local/lib). Install the extracted .so ONLY when
+        # its version matches the fleet pin NDI_VERSION_PIN -- the download fetches the LATEST SDK
+        # v6, so installing it blindly would REINTRODUCE the exact PIN-DRIFT class this batch fixes;
+        # a mismatch fails loud instead (the pinned runtime genuinely lives on the fleet peers).
+        NDI_LIBNDI_GET="${NDI_LIBNDI_GET:-$HERE/../vendor/distroav/CI/libndi-get.sh}"
+        echo "  No fleet peer served libndi -- trying the pinned download fallback (NDI_VERSION_PIN=$NDI_VERSION_PIN)..."
+        if [ -x "$NDI_LIBNDI_GET" ]; then
+            _ndi_dl_work="$(mktemp -d)"
+            if TMPDIR="$_ndi_dl_work" bash "$NDI_LIBNDI_GET" >/dev/null 2>&1; then
+                _ndi_dl_so="$(find "$_ndi_dl_work" -type f -name 'libndi.so.*.*.*' -path '*x86_64-linux-gnu*' 2>/dev/null | head -1 || true)"
+                if [ -n "$_ndi_dl_so" ]; then
+                    _ndi_dl_base="$(basename "$_ndi_dl_so")"
+                    if ndi_runtime_version_matches_pin "$_ndi_dl_base" "$NDI_VERSION_PIN"; then
+                        install -m 0755 "$_ndi_dl_so" "/usr/lib/ndi/$_ndi_dl_base"
+                        ln -sf "$_ndi_dl_base" /usr/lib/ndi/libndi.so.6
+                        ln -sf libndi.so.6 /usr/lib/ndi/libndi.so
+                        ldconfig
+                        echo "  NDI library installed from the pinned download ($_ndi_dl_base)"
+                        _ndi_configured=true
+                    else
+                        echo -e "  ${YELLOW}pinned-download fallback fetched '$_ndi_dl_base' != fleet pin $NDI_VERSION_PIN -- refusing to install a drifting runtime${NC}"
+                    fi
+                fi
+            fi
+            rm -rf "$_ndi_dl_work"
+        fi
     fi
+    [ "$_ndi_configured" = true ] \
+        || fail "could not obtain the NDI runtime -- tried fleet peers [${_ndi_tried# }] and the pinned NDI_VERSION_PIN=$NDI_VERSION_PIN download; copy manually: scp root@<a live cam box>:/usr/lib/ndi/libndi.so.* /usr/lib/ndi/"
 fi
 
 # =============================================================================
@@ -644,10 +764,13 @@ ExecStart=/usr/local/bin/camera-box
 Restart=always
 RestartSec=3
 
-# Run with real-time priority for low latency
+# Run with a mild niceness boost for low latency. NOTE (issue 899 defect 2): the
+# process-wide CPUSchedulingPolicy=fifo was REMOVED here -- it forced EVERY thread to
+# SCHED_FIFO prio 50 on the isolated core (measured: 27 on cam1), not the SCHED_OTHER the
+# design intended. The binary now raises SCHED_FIFO PER THREAD (via CAP_SYS_NICE, STEP 9
+# setcap) only on the capture+emit hot path (src/affinity.rs set_current_thread_realtime);
+# every other thread stays SCHED_OTHER. See docs/runbooks/899-realtime-isolation.md.
 Nice=-10
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=50
 
 # Environment for NDI SDK
 Environment=NDI_RUNTIME_DIR_V6=/usr/lib/ndi
@@ -1029,7 +1152,7 @@ apt-get update -qq
 # silently no-op'ing recording-e2e.sh's capture-release busy-wait.
 # dantesync issue 52: nftables provides `nft`, needed by STEP 17c to install the NTP-client
 # DSCP OUTPUT-mangle rule (rsntp cannot setsockopt(IP_TOS) -- see scripts/lib/dscp-nft.sh).
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables 2>/dev/null || true
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc nftables systemd-journal-remote efibootmgr 2>/dev/null || true
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc, nftables"
 
@@ -1178,14 +1301,18 @@ echo "  #762: purged rsyslog + capped journald RuntimeMaxUse=${LOG_DIET_JOURNALD
 
 DANTESYNC_INSTALLED=false
 
-# Get latest release URL from GitHub
-DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/latest" 2>/dev/null | \
+# #1066: install the PINNED fleet release (DANTESYNC_VERSION_PIN, single-sourced from
+# scripts/dantesync-version-gate.sh -- the same authority dantesync-fleet-upgrade.sh + the
+# version-parity gate use), NEVER releases/latest. A fresh box that installs "latest" drifts ahead
+# of the fleet the moment a newer dantesync ships (the exact PIN-DRIFT class this batch fixes for
+# the camera-box binary too). Resolve the pinned tag's asset URL from GitHub.
+DANTESYNC_URL=$(curl -fsSL "https://api.github.com/repos/${DANTESYNC_REPO}/releases/tags/v${DANTESYNC_VERSION_PIN}" 2>/dev/null | \
     grep -o '"browser_download_url": *"[^"]*dantesync-linux-amd64"' | \
     grep -o 'https://[^"]*' | head -1) || true
 
 # #450: fail loud -- dantesync disciplines the cluster wall-clock genlock depends on (#8); a box
 # provisioned without it silently free-runs its own clock instead of the fleet's shared reference.
-[ -n "$DANTESYNC_URL" ] || fail "could not get dantesync release URL from GitHub -- dantesync is required for cluster clock sync (#8), not optional"
+[ -n "$DANTESYNC_URL" ] || fail "could not get dantesync release URL from GitHub for the pinned v${DANTESYNC_VERSION_PIN} (releases/tags/v${DANTESYNC_VERSION_PIN}) -- dantesync is required for cluster clock sync (#8), not optional"
 
 # #1289: derive the release's TARGET version from the download URL's own path
 # (.../releases/download/vX.Y.Z/dantesync-linux-amd64), and read the CURRENTLY-installed
@@ -1225,6 +1352,45 @@ else
 fi
 
 # Create systemd service
+# #1307/#1066: write the dantesync config the cam boxes had only ever received out-of-band (a
+# fresh box came up with NO gm_allowlist and locked to a FOREIGN grandmaster, 2026-09-13). Same
+# shape as setup-imag.sh: http_status on :8898, NTP server mode OFF (strih is the fleet NTP master,
+# see the --ntp-server ExecStart below), phase_slew on. #1066: dantesync >= 1.8.54 (dantesync#113)
+# now accepts a HOSTNAME in gm_allowlist, and the fleet is on ["video-clock.lan"] since 2026-09-13,
+# so write the literal DNS name -- NOT the resolved IPv4, which drifts a fresh box off the fleet the
+# moment the grandmaster's DHCP lease moves (the exact incident rig-grandmaster.sh exists for).
+# rig_grandmaster_ip() is kept ONLY as a loud precondition that the name still resolves (fail
+# closed otherwise); the WRITTEN value is rig_grandmaster_host() = video-clock.lan. Written BEFORE
+# the unit so the enable/restart below picks it up on a first provision.
+_RG_GM_IP="$(rig_grandmaster_ip)" || fail "cannot resolve the PTP grandmaster host (video-clock.lan) -- refusing to provision dantesync without a resolvable grandmaster (#1307)"
+_RG_GM_HOST="$(rig_grandmaster_host)"
+install -d -m 755 /etc/dantesync
+cat > /etc/dantesync/config.json <<DANTECFGEOF
+{
+  "_ntp_server_examples": "sk.pool.ntp.org, europe.pool.ntp.org, time.google.com, time.cloudflare.com",
+  "http_status": {
+    "enabled": true,
+    "port": 8898
+  },
+  "ntp_server_mode": {
+    "enabled": false,
+    "max_step_us": 100000,
+    "port": 123,
+    "stratum": 3
+  },
+  "system": {
+    "gm_allowlist": [
+      "${_RG_GM_HOST}"
+    ],
+    "phase_slew": {
+      "enabled": true
+    }
+  }
+}
+DANTECFGEOF
+chmod 644 /etc/dantesync/config.json
+echo "  #1307/#1066: /etc/dantesync/config.json installed (gm_allowlist=[\"${_RG_GM_HOST}\"], resolves to ${_RG_GM_IP}, phase_slew.enabled=true)"
+
 cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
 [Unit]
 Description=Dante Time Sync (PTP/NTP Synchronization)
@@ -1308,7 +1474,18 @@ fi
 REMOTEOS_MCP_INSTALLER_TMP="$(mktemp /tmp/remoteos-mcp-install-linux.XXXXXX.sh)"
 curl -fsSL "$REMOTEOS_MCP_INSTALLER_URL" -o "$REMOTEOS_MCP_INSTALLER_TMP" \
     || fail "cannot fetch remoteos-mcp installer from $REMOTEOS_MCP_INSTALLER_URL (#1066)"
-bash "$REMOTEOS_MCP_INSTALLER_TMP" \
+# #1066 (noble pip-vs-debian conflict, cam1 from-scratch 2026-09-13): the installer's internal
+# `pip install git+...` tries to UNINSTALL the debian-packaged typing_extensions / PyYAML, which
+# have no pip RECORD file ("Cannot uninstall ... RECORD file not found ... installed by debian"),
+# and aborts. Export PIP_BREAK_SYSTEM_PACKAGES=1 + PIP_IGNORE_INSTALLED=1 for the installer's OWN
+# pip (pip maps every long option to a PIP_<NAME> env var), so the WHOLE dependency closure is
+# installed FRESH into /usr/local/lib/python3.12/dist-packages, shadowing the RECORD-less debian
+# copies -- pip never touches a debian package again, closing the whack-a-mole (typing_extensions,
+# then PyYAML, ...) by construction. This is the live-proven fix, applied WITHOUT editing the
+# foreign installer and without adding a forbidden inline bare `pip install git+...` of the agent
+# here (the #555 no-inline-pip guard stays honoured).
+PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1 \
+    bash "$REMOTEOS_MCP_INSTALLER_TMP" \
     || fail "canonical remoteos-mcp install-linux.sh failed (#1066)"
 rm -f "$REMOTEOS_MCP_INSTALLER_TMP"
 # Enable-only convention: ensure the reboot-survival symlink exists (idempotent if the installer
@@ -1323,6 +1500,29 @@ REMOTEOS_MCP_ENABLED_STATE="$(systemctl is-enabled remoteos-mcp 2>/dev/null || t
 [ "$REMOTEOS_MCP_ENABLED_STATE" = "enabled" ] \
     || fail "remoteos-mcp.service is not enabled (is-enabled='${REMOTEOS_MCP_ENABLED_STATE:-<none>}') after install -- the linux-camN MCP surface would be dead on next boot (#1066)"
 echo "  #1066: remoteos-mcp agent installed + enabled (linux-camN MCP surface :8092; proven live post-reboot by verify-device.sh (ab))"
+
+# =============================================================================
+# #1309: on-box management-liveness self-heal (unnumbered sub-step, enable-only). Mirrors the
+# remoteos-mcp block above: writes files + enables, defers to the next reboot (never a live start,
+# per .claude/rules/provisioning-scripts.md). MUST sit in the rw window, BEFORE STEP 18 flips root
+# ro (it writes under /usr/local/sbin + /etc/systemd/system). A tiny timer probes sshd's own loopback
+# banner every 2 min and, once it is dead N times in a row, dumps a forensic snapshot to the (now
+# persistent, #1309) journal then restarts ssh + remoteos-mcp with a per-hour backoff -- the local
+# recovery path the 2026-09-13 half-dead wedge had none of. Proven live post-reboot by
+# verify-device.sh's (aj) check.
+# =============================================================================
+echo ""
+echo -e "${GREEN}[mgmt-selfcheck] Installing management-liveness self-heal (#1309)...${NC}"
+mgmt_liveness_selfcheck_script > "$MGMT_LIVENESS_SCRIPT_PATH"
+chmod +x "$MGMT_LIVENESS_SCRIPT_PATH"
+mgmt_liveness_service_unit > "$MGMT_LIVENESS_SERVICE_PATH"
+mgmt_liveness_timer_unit > "$MGMT_LIVENESS_TIMER_PATH"
+systemctl daemon-reload
+systemctl enable "$MGMT_LIVENESS_TIMER_UNIT_NAME" 2>/dev/null || true
+MGMT_TIMER_ENABLED_STATE="$(systemctl is-enabled "$MGMT_LIVENESS_TIMER_UNIT_NAME" 2>/dev/null || true)"
+[ "$MGMT_TIMER_ENABLED_STATE" = "enabled" ] \
+    || fail "cambox-mgmt-selfcheck.timer is not enabled (is-enabled='${MGMT_TIMER_ENABLED_STATE:-<none>}') after install -- the box would have NO local ssh self-heal for the #1309 half-dead wedge"
+echo "  #1309: cambox-mgmt-selfcheck.timer installed + enabled (ssh-banner self-heal every ${MGMT_LIVENESS_TIMER_INTERVAL}; proven live post-reboot by verify-device.sh (aj))"
 
 # =============================================================================
 # STEP 17c: DSCP-mark outgoing NTP client packets (dantesync issue 52)
@@ -1347,6 +1547,103 @@ dscp_nft_service_unit_content > "$DSCP_NFT_SERVICE_PATH"
 systemctl daemon-reload
 systemctl enable "$DSCP_NFT_SERVICE_NAME"   # fail-loud (set -e) like the sibling avahi enable -- a freshly-written+reloaded unit must enable cleanly (review 5B2)
 echo "  Installed: $DSCP_NFT_RULESET_PATH (udp dport 123 -> dscp ${DSCP_NFT_CLASS}) + ${DSCP_NFT_SERVICE_NAME}.service (enabled; applies at next boot)"
+
+
+# =============================================================================
+# #1311: off-box remote logging (unnumbered sub-step, enable-only). Get kernel + journal messages
+# OFF the box in REAL TIME so the NEXT #1309 half-dead-stick death is diagnosable -- the on-STICK
+# persistent journal (#1309) dies WITH the stick. Two complementary transports (see
+# scripts/lib/remote-logging.sh): netconsole ships kernel printk over UDP from kernel memory (survives
+# the fs dropping off the bus, the ONLY transport that does), and systemd-journal-upload forwards the
+# rich structured journal to a dev1 sink for the minutes-before-the-drop context. Mirrors the
+# mgmt-selfcheck + 17c blocks: writes files + enables, defers to the next reboot (never a live start,
+# per .claude/rules/provisioning-scripts.md). MUST sit in the rw window, BEFORE STEP 18 flips root
+# ro (it writes under /usr/local/sbin + /etc/systemd). The dev1-side receivers are a SEPARATE
+# supervisor step (scripts/dev1-remote-log-install.sh); this cambox side only SENDS -- and netconsole
+# + journal-upload each need no listener to start, so a cambox is correctly provisioned even before
+# the dev1 sink exists. Proven live post-reboot by verify-device.sh's (ak) check.
+# =============================================================================
+echo ""
+echo -e "${GREEN}[remote-logging] Installing off-box kernel(netconsole)+journal(upload) forensics (#1311)...${NC}"
+# netconsole (kernel path): the boot oneshot + the generated setup script that arms the dynamic
+# configfs target (resolving dev1's next-hop MAC at boot).
+mkdir -p "$(dirname "$REMOTE_LOG_NC_SCRIPT_PATH")" "$(dirname "$REMOTE_LOG_NC_SERVICE_PATH")"
+remote_log_netconsole_setup_script_content > "$REMOTE_LOG_NC_SCRIPT_PATH"
+chmod +x "$REMOTE_LOG_NC_SCRIPT_PATH"
+remote_log_netconsole_service_unit_content > "$REMOTE_LOG_NC_SERVICE_PATH"
+# journal-upload (rich path): the URL conf + the ro-root cursor-redirect drop-in. The
+# systemd-journal-upload.service unit itself ships in the systemd-journal-remote package (STEP 16).
+mkdir -p "$(dirname "$REMOTE_LOG_JU_CONF_PATH")" "$(dirname "$REMOTE_LOG_JU_DROPIN_PATH")"
+remote_log_journal_upload_conf_content > "$REMOTE_LOG_JU_CONF_PATH"
+remote_log_journal_upload_dropin_content > "$REMOTE_LOG_JU_DROPIN_PATH"
+systemctl daemon-reload
+systemctl enable "$REMOTE_LOG_NC_SERVICE_NAME"   # fail-loud (set -e) -- a freshly-written+reloaded unit must enable cleanly
+NC_ENABLED_STATE="$(systemctl is-enabled "$REMOTE_LOG_NC_SERVICE_NAME" 2>/dev/null || true)"
+[ "$NC_ENABLED_STATE" = "enabled" ] \
+    || fail "${REMOTE_LOG_NC_SERVICE_NAME}.service is not enabled (is-enabled='${NC_ENABLED_STATE:-<none>}') after install -- the box would have NO off-box kernel log for the next #1309 stick death"
+systemctl enable "$REMOTE_LOG_JU_SERVICE_NAME" 2>/dev/null || true
+JU_ENABLED_STATE="$(systemctl is-enabled "$REMOTE_LOG_JU_SERVICE_NAME" 2>/dev/null || true)"
+[ "$JU_ENABLED_STATE" = "enabled" ] \
+    || fail "${REMOTE_LOG_JU_SERVICE_NAME}.service is not enabled (is-enabled='${JU_ENABLED_STATE:-<none>}') after install -- the box would not upload its journal to dev1 (#1311)"
+echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_NETCONSOLE_PORT}) + systemd-journal-upload (-> ${REMOTE_LOG_JOURNAL_URL}) installed + enabled; both apply at next boot, proven live by verify-device.sh (ak)"
+
+
+# =============================================================================
+# STEP 17d: named `cam-box` UEFI boot entry, created in THIS box's OWN NVRAM (#1066 D6)
+# =============================================================================
+# #1066 D6: create-usb-linux.sh's host-side create_efi_boot_entry writes the named entry into the
+# BUILDER's NVRAM (dev1 when a stick is built there), never the target box's -- so a freshly
+# flashed box has NO named entry and depends 100% on the AMI firmware auto-generating `UEFI: USB,
+# Partition 1` at POST, which FAILED on cam2 after a warm reboot (dropped to the firmware setup
+# screen). This on-box step creates the named entry idempotently in the box's OWN NVRAM and makes
+# it lead BootOrder, so the box boots its internal disk regardless of the AMI auto-entry.
+# efibootmgr is on the base image + STEP 16's package list. Lettered sub-step (STEP 3b idiom, NO
+# /${TOTAL_STEPS}); it writes only NVRAM (efivars), no filesystem, so it is safe here in the rw
+# window before STEP 18's ro flip. Certified post-reboot by verify-device.sh (al).
+echo ""
+echo -e "${GREEN}[17d] Ensuring named UEFI boot entry '${EFI_CAM_BOX_LABEL}' in this box's NVRAM (#1066 D6)...${NC}"
+if [ ! -d /sys/firmware/efi/efivars ]; then
+    echo "  Box booted in BIOS/CSM mode (/sys/firmware/efi/efivars absent) -- skipping the named UEFI entry (not applicable on a non-EFI boot)."
+elif ! command -v efibootmgr >/dev/null 2>&1; then
+    echo -e "${YELLOW}  efibootmgr not installed -- cannot create the named '${EFI_CAM_BOX_LABEL}' UEFI entry. It is on STEP 16's package list + the base image; install it and re-run.${NC}"
+else
+    EFI_ROOT_SRC="$(findmnt -no SOURCE / 2>/dev/null || true)"
+    EFI_ROOT_DISK="$(efi_whole_disk_of "$EFI_ROOT_SRC")"
+    EFI_CUR="$(efibootmgr 2>/dev/null || true)"
+    EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
+    if [ -z "$EFI_NUMS" ]; then
+        if [ -b "$EFI_ROOT_DISK" ]; then
+            if efibootmgr -c -d "$EFI_ROOT_DISK" -p 1 -L "$EFI_CAM_BOX_LABEL" -l "$EFI_CAM_BOX_LOADER" >/dev/null 2>&1; then
+                echo "  Created named UEFI entry '${EFI_CAM_BOX_LABEL}' -> ${EFI_ROOT_DISK} partition 1 (${EFI_CAM_BOX_LOADER}); efibootmgr -c prepends it, so it leads BootOrder (#1066 D6)."
+            else
+                echo -e "${YELLOW}  efibootmgr failed to create the '${EFI_CAM_BOX_LABEL}' entry on ${EFI_ROOT_DISK} -- the box will fall back to the AMI USB auto-entry (the #1066 D6 fragility). Investigate before relying on a warm reboot.${NC}"
+            fi
+        else
+            echo -e "${YELLOW}  could not derive the root disk from findmnt (source='${EFI_ROOT_SRC}', disk='${EFI_ROOT_DISK}' is not a block device) -- NOT creating a UEFI entry blind. Create it by hand: efibootmgr -c -d <root-disk> -p 1 -L ${EFI_CAM_BOX_LABEL} -l '${EFI_CAM_BOX_LOADER}' (#1066 D6).${NC}"
+        fi
+    else
+        echo "  named UEFI entry '${EFI_CAM_BOX_LABEL}' already present (Boot$(printf '%s' "$EFI_NUMS" | tr '\n' ',' | sed 's/,$//')) -- not recreating (idempotent)."
+    fi
+    # Ensure the entry LEADS BootOrder (a pre-existing entry may have been demoted below another).
+    EFI_CUR="$(efibootmgr 2>/dev/null || true)"
+    if efi_cam_box_leads "$EFI_CUR"; then
+        echo "  '${EFI_CAM_BOX_LABEL}' leads BootOrder (#1066 D6)."
+    else
+        EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
+        EFI_ORDER="$(efi_boot_order "$EFI_CUR")"
+        if [ -n "$EFI_NUMS" ] && [ -n "$EFI_ORDER" ]; then
+            EFI_FIRST_NUM="${EFI_NUMS%%$'\n'*}"  # pipe-free first line -- no printf|head SIGPIPE under the caller's set -euo pipefail (.claude/rules/drift-guard-log-parsers.md)
+            EFI_NEW_ORDER="$(efi_boot_order_lead "$EFI_FIRST_NUM" "$EFI_ORDER")"
+            if efibootmgr -o "$EFI_NEW_ORDER" >/dev/null 2>&1; then
+                echo "  Reordered BootOrder so '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) leads: ${EFI_NEW_ORDER} (#1066 D6)."
+            else
+                echo -e "${YELLOW}  could not set BootOrder to lead with '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) -- do it by hand: efibootmgr -o ${EFI_NEW_ORDER} (#1066 D6).${NC}"
+            fi
+        else
+            echo -e "${YELLOW}  '${EFI_CAM_BOX_LABEL}' entry not readable after create -- cannot lead BootOrder; verify-device.sh (al) will FAIL until fixed (#1066 D6).${NC}"
+        fi
+    fi
+fi
 
 
 # =============================================================================
@@ -1380,6 +1677,12 @@ $(grep '/boot/efi' /etc/fstab.bak 2>/dev/null || echo "# No EFI partition")
 # tmpfs mounts for writable directories
 tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
 tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
+# #1309: persistent journal on the dedicated ext4 partition, mounted OVER the /var/log tmpfs (systemd
+# orders /var/log first by path prefix). `nofail` -> a box WITHOUT the partition (an old box not yet
+# reflashed via create-usb-linux.sh) still boots and journald simply falls back to a volatile journal
+# on the tmpfs above. Emitted only when the labelled partition actually exists, so setup-device.sh on
+# such an old box writes a harmless comment instead of an unmountable entry.
+$(if blkid -L "$LOG_DIET_JOURNAL_PART_LABEL" >/dev/null 2>&1; then log_diet_journal_fstab_line; else echo "# no '$LOG_DIET_JOURNAL_PART_LABEL' partition on this box -- reflash via create-usb-linux.sh for a persistent journal (#1309)"; fi)
 tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
 # #295: size /var/cache >=512M (uniformly across the fleet) so apt can never ENOSPC and leave a
 # freshly-installed kernel without its initrd (a 100M /var/cache filled up and did exactly that).

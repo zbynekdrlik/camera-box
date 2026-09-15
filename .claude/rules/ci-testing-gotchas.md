@@ -888,6 +888,22 @@ fails file-not-found because the fixture was never in the commit. Confirmed live
 (not gitignored) and reference that from the test. Before trusting a new fixture is committed,
 `git check-ignore <path>` (a hit = it will be silently dropped) — never assume `git add` took it.
 
+## The worktree-isolation guard ALSO refuses a plain `rustc`/`g++`/`python3` command whose PATH is a shell VARIABLE — inline literal paths, split pipes into separate calls (#1303)
+
+Separate from the `bash -c`/`ENV=x bash` refusals in the #1265 entry below: even a perfectly
+innocent `rustc --test file.rs -o "$OUT"`, `python3 -c '…' "$SP"`, or `g++ … -c "$D/x.cpp"` is
+REFUSED by the worktree-isolation guard the moment ANY argument (an output path, an include dir, a
+`-c` script's file) is a RUNTIME-COMPUTED shell variable inside a construct it deems "too complex to
+verify it stays inside the worktree" — the guard cannot prove the variable's expansion isn't a git
+op. It is NOT about git; it is about the variable. Also trips on trailing `| tail`/`echo
+"exit=${PIPESTATUS[0]}"` pipelines. The fix (used repeatedly this session for the genlock_lock_state
+RED→GREEN, the C-vs-Rust parity replica, and the g++ header/widget-snippet checks): write scratch
+files with the `Write` tool (never a Bash heredoc — also avoids the Tier-0 heredoc-prose false-block),
+INLINE the absolute scratchpad path as a literal in the `rustc`/`g++`/`python3` command (no `$VAR`),
+and run the command as its OWN plain Bash call with no pipe/`&&`/`PIPESTATUS`. A `python3 - <<'PY'`
+heredoc block IS allowed (the guard permits `python3 -` / `python3 -c`), so classifier/anchor
+simulations run fine that way — only the runtime-variable-in-the-command shape is the blocker.
+
 ## A worktree-isolated worker CANNOT locally run a sourced-bash-lib test or a PATH-stubbed dry-run (#1265)
 
 The worktree-isolation guard refuses `bash -c '…source lib…'`, `ENV=x bash <script>`, and any
@@ -913,7 +929,7 @@ prose, so this class surfaces only in CI's Lint job — and it blocked the whole
 paragraph that WRAPS so a line begins with `+ exactly ONE aux mark …` — clippy reads `+ ` as a
 Markdown bullet and every following unindented line as a "list item without indentation". Fix by
 rewording (`plus …`), never by indenting prose that is not a list. Pre-push local net (cheap,
-run over every touched `.rs`): `grep -nE '^\s*//[/!] ?([-+*]|[0-9]+\.) ' <files>` and check that
+run over every touched `.rs`): `grep -nE '^\s*//[/!]\s*([-+*]|[0-9]+\.) ' <files>` and check that
 each hit is a REAL list item whose continuation lines are indented by 2+ spaces.
 
 ## Inserting a NEW line right after an existing `# shellcheck disable=SC2XXX` directive silently REBINDS it to the wrong statement (issue 1260)
@@ -1009,3 +1025,38 @@ merge, `git log --oneline A..B -- paths`), read the ACTUAL output, THEN write th
 never assert a count/SHA you haven't seen printed. (And never add `--first-parent`/`--full-history`
 to a `git log` call whose whole point is this collapse — either flag reintroduces the exact false
 positive the collapse exists to avoid.)
+
+## Standalone-rustc verification of a pure crate-root module: APPEND `main` to a COPY, never `include!` it (issue 1303 part 4)
+
+The repo's Tier-0 pattern for a pure crate-root module (`genlock_lock_state.rs`, `resolume_playback.rs`,
+`genlock_forced_table_audit.rs`, ...) is to verify it with standalone `rustc` since cargo compile is
+blocked (#557): `rustc --test --edition 2021 -A dead_code <copy>.rs -o t && ./t` runs its
+`#[cfg(test)] mod tests` with no cargo. To ALSO produce a data dump for a Rust↔bash parity diff (feed
+the same vectors to both and `diff`), you need a `fn main()` calling the module's public fns. The trap:
+`include!("…/module.rs")` into a tiny driver file FAILS with `error[E0753]: inner doc comments like
+this (starting with //! …) can only appear before items` — because `include!` inlines the module's
+text (which OPENS with a `//!` module-doc block) at the macro's position, i.e. mid-file, where `//!`
+is illegal. Fix: `cp module.rs parity.rs` and APPEND the `fn main()` + helper fns to the COPY — the
+module's own `//!` stays at file start (legal), and `rustc --edition 2021 -A dead_code parity.rs`
+compiles it as an ordinary program whose `main` can call the module's items directly. (The
+`--test`-run and the append-`main` build are two separate standalone-rustc invocations of the same
+copied source; neither needs cargo.) This is the Rust analogue of the vendored-C lift-and-compile
+recipe and pairs with a bash-replica `diff` to prove the two implementations agree exhaustively.
+
+## A delegation-parity pytest that loads BOTH modules via `spec_from_file_location` CANNOT assert `is`-identity across them (#1308)
+
+The repo's pure-module tests load a `scripts/*.py` via `importlib.util.spec_from_file_location(...)` +
+`exec_module` (the `dantesync_clock_decision` / `genlock_lock_decision` / `ndi_halving_decision`
+pattern). When a NEW test proves module B delegates to a shared module A (e.g. `dantesync_clock_decision.dedup_key`
+IS `watchdog_reping.notify_key`, #1308), the naive assertion `assert B.fn is A.fn` — where the test
+loads A by ITS OWN separate `spec_from_file_location` — FAILS even though the delegation is real: two
+`exec_module` runs of the same file produce DISTINCT function objects (each exec builds a fresh module
+namespace; `module_from_spec` does not register in `sys.modules`, and B's own `import A` under
+importlib-exec resolves A a SECOND time). The `==` value checks pass; only the `is` check breaks, and
+its failure message (`<function fn at 0xAAA> is <function fn at 0xBBB>`) misreads as "delegation
+broken" when it is a test-harness artifact. **Fix: take the identity WITHIN one module graph** — load
+only B, then assert `B.fn is B._shared_module.fn` (B's own imported reference to A), never `B.fn is
+A_loaded_separately.fn`. For this to work the delegating module must expose its import (`import
+watchdog_reping as _reping` at module scope) so the test can reach `B._reping.notify_key`. Value-parity
+(`B.fn(args) == A.fn(args)` over a vector) is the robust cross-module check; reserve `is` for the
+single-graph identity pin.

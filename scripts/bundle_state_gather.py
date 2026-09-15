@@ -31,9 +31,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import math
 import os
 import re
+import shutil
 import sys
 
 # The three OBS module scan paths that can each shadow-load a `distroav.dll` (#124, EPIC #125) —
@@ -94,6 +96,95 @@ def genlock_capability_from_log(text):
     pattern = re.compile(r"genlock:.*(render tick ENABLED|sub-frame jitter reserve|timestamp-aligned release)")
     matches = [line for line in (text or "").splitlines() if pattern.search(line)]
     return "\n".join(matches)
+
+
+# #1299 — the fleet-visible genlock LOCK facet. The #1298 statusbar widget is the ONE place the
+# three genlock producers (per-source FIFO counters, the NDI output's wall-stamping flag, the
+# dantesync :8898 clock facet) are joined into one decided verdict; it emits that verdict as a
+# versioned `genlock-lock-json: {…} (#1299)` line (a heartbeat + on-change, so the #1222 bounded
+# TAIL always holds a fresh one). This parser reads the NEWEST such line and reshapes the widget's
+# payload into the nested `genlock_lock` facet the dev1 watchdog + rig-status read. Reusing the
+# SAME already-bounded log_text as every other facet (no second read, no subprocess -> no new
+# #1222 cache needed). "" / a stock OBS with no such line -> None (facet OMITTED downstream, never a
+# false UNLOCKED).
+_GENLOCK_LOCK_JSON_MARKER = "genlock-lock-json:"
+
+
+def genlock_lock_facet_from_log(text):
+    """The nested `genlock_lock` facet dict from the NEWEST `genlock-lock-json:` line in *text*, or
+    None when the line is absent / unparseable (a stock OBS, or no such line in the bounded window
+    yet — UNKNOWN downstream, NEVER a fabricated UNLOCKED).
+
+    Shape:
+      {state, reason, n_inputs, n_locked, latency_ms, recent_event, qpc_drift_ms,
+       clock:{state}, output:{present, stamping_wallclock},
+       inputs:{<name>:{locked, latency_ms, underruns, relocks, late_holds, depth}},
+       source:"log"}
+
+    `state`/`reason` are the verdict the widget ALREADY decided (so the facet can never disagree
+    with the statusbar). The per-input array is keyed by name; a duplicate name keeps the last."""
+    t = text or ""
+    if _GENLOCK_LOCK_JSON_MARKER not in t:
+        return None
+    # Newest line wins (the widget heartbeats this, so the last occurrence is the current state).
+    newest = None
+    for line in t.splitlines():
+        if _GENLOCK_LOCK_JSON_MARKER in line:
+            newest = line
+    if newest is None:
+        return None
+    # The payload is a JSON object; slice from its first "{" to its last "}" so a leading log-time
+    # prefix and the trailing " (#1299)" tag are both ignored. A malformed line -> None.
+    start = newest.find("{")
+    end = newest.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(newest[start:end + 1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    # Reshape the widget payload into the facet. Every field is tolerant of absence (a future
+    # widget that drops a field must degrade, never crash this gather).
+    clock_str = payload.get("clock")
+    output_str = payload.get("output")
+    inputs_map = {}
+    raw_inputs = payload.get("inputs")
+    if isinstance(raw_inputs, list):
+        for row in raw_inputs:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            inputs_map[name] = {
+                "locked": bool(row.get("locked")),
+                "latency_ms": row.get("latency_ms"),
+                "underruns": row.get("underruns"),
+                "relocks": row.get("relocks"),
+                "late_holds": row.get("late_holds"),
+                "depth": row.get("depth"),
+            }
+
+    facet = {
+        "state": payload.get("state"),
+        "reason": payload.get("reason"),
+        "n_inputs": payload.get("n_inputs"),
+        "n_locked": payload.get("n_locked"),
+        "latency_ms": payload.get("latency_ms"),
+        "recent_event": bool(payload.get("recent_event")),
+        "qpc_drift_ms": payload.get("qpc_drift_ms"),
+        "clock": {"state": clock_str} if isinstance(clock_str, str) else {},
+        "output": {
+            "present": output_str != "absent",
+            "stamping_wallclock": output_str == "stamping",
+        } if isinstance(output_str, str) else {},
+        "inputs": inputs_map,
+        "source": "log",
+    }
+    return facet
 
 
 # #1222 — the strih bundle-state gather's latency grew LINEARLY with the live OBS log size: a
@@ -614,6 +705,38 @@ def obs_process_count_from_listing(text):
     return str(count)
 
 
+# #1295 — the minimum RAM (KB) an OBS process must report to count as a LIVE instance. A real OBS
+# sits in the hundreds of MB; a DEAD/mid-exit Get-Process/zombie handle reads ~0-45 KB (the live
+# 2026-09-12 RESOLUME-SNV pid-58560: WorkingSet64 ~45 KB, 0 threads). tasklist has NO HasExited /
+# thread column, so the honest liveness proxy available from a tasklist row is its Mem Usage; a row
+# at/below this floor is a zombie, never a live obs64. 1 MB is a wide, safe separator (a live OBS
+# never sits below ~45 MB; the zombie was 45 KB), and this limitation is documented because tasklist
+# cannot distinguish a truly-exited process from a live one any other way.
+OBS_LIVE_MIN_MEM_KB = 1024
+
+
+def tasklist_mem_kb(field):
+    """#1295 — parse a `tasklist /FO CSV /NH` Mem-Usage field ("512,000 K", "45 K", "N/A", "") to
+    an int of KB, or None when it carries no usable number (N/A / blank / unparseable). tasklist
+    prints memory in KB with a thousands separator and a trailing " K"."""
+    if not isinstance(field, str):
+        return None
+    s = field.strip().replace(" ", " ").rstrip("Kk").replace(",", "").replace(" ", "")
+    if not s or not s.lstrip("-").isdigit():
+        return None
+    return int(s)
+
+
+def tasklist_row_is_live_obs(mem_field, min_kb=OBS_LIVE_MIN_MEM_KB):
+    """#1295 — True iff a tasklist obs-row's Mem-Usage field proves a LIVE instance (>= min_kb KB).
+    An unparseable/absent Mem (None) reads NOT-live: a live OBS always reports a real Mem value, so
+    excluding an ambiguous row is the fail-safe that keeps a zombie handle from inflating the
+    'exactly one obs64' health signal (#1296). tasklist's limitation (no HasExited column, Mem is
+    the only liveness proxy) is documented at OBS_LIVE_MIN_MEM_KB."""
+    kb = tasklist_mem_kb(mem_field)
+    return kb is not None and kb >= min_kb
+
+
 # #1227 — VB-Audio Matrix presence, for the `vb_matrix_running` facet the dev1 VB-Matrix alert
 # watchdog reads. The process image name after its `.exe` is stripped (tasklist prints e.g.
 # `VBAudioMatrix_x64.exe`); the pattern enumerates the actual HOSTS — the stream build
@@ -779,7 +902,43 @@ def record_dir_stats(record_dir):
             f"WARNING: record_dir_stats: could not read directory {record_dir!r}: {e}",
             file=sys.stderr,
         )
-    return {"total_bytes": total_bytes, "file_count": file_count, "oldest_mtime": oldest_mtime}
+    # #1276: the volume's FREE space — the owner-ruled (14.9.2026) WARNING signal is "<= 50 GB of
+    # FREE space left on the recordings volume", not the sum of recording files. Read via
+    # shutil.disk_usage on the SAME local record dir already scanned above (no new transport;
+    # works on Windows and imag-Linux). Degrades to None (UNKNOWN downstream — never a false
+    # low-space WARN) on any read failure, mirroring the zero-degrade of the file scan above.
+    free_bytes = None
+    try:
+        free_bytes = shutil.disk_usage(record_dir).free
+    except OSError as e:
+        print(
+            f"WARNING: record_dir_stats: could not read free space of {record_dir!r}: {e}",
+            file=sys.stderr,
+        )
+    return {
+        "total_bytes": total_bytes,
+        "file_count": file_count,
+        "oldest_mtime": oldest_mtime,
+        "free_bytes": free_bytes,
+    }
+
+
+def recordings_free_verdict(free_bytes, min_free_gb):
+    """#1276 — the E2E recordings-retention free-space WARNING verdict, the python mirror of the
+    canonical Rust ``recordings_retention::free_space_verdict``. Owner ruling (14.9.2026, verbatim
+    "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): warn when the recordings VOLUME has at
+    most ``min_free_gb`` of FREE space left, NOT when the sum of recording files exceeds a budget.
+
+    ``free_bytes`` is the volume's free space (from ``record_dir_stats``'s ``free_bytes``), or
+    ``None`` when it could not be read. Returns "WARN" iff the free space is STRICTLY below
+    ``min_free_gb`` (so exactly ``min_free_gb`` free is still "OK" — the spec's "free >= threshold
+    -> no warn"), "UNKNOWN" for ``None`` (never a false low-space WARN from an unreadable stat),
+    else "OK". Threshold + comparison in decimal GB (1e9 bytes), the same unit the existing warning
+    and the owner's "50gb" meant."""
+    if free_bytes is None:
+        return "UNKNOWN"
+    free_gb = free_bytes / 1e9
+    return "WARN" if free_gb < min_free_gb else "OK"
 
 
 def genlock_build_sha_from_file(path):

@@ -1026,6 +1026,122 @@ fn rt_irq_placement_verdict_grades_by_kernel_and_core() {
 }
 
 #[test]
+fn rt_thread_policy_verdict_grades_the_899_defect2_states() {
+    // issue 899 defect 2: a unit that still sets a process-wide policy is ALWAYS a FAIL
+    // (config wrong, independent of the live count); a clean unit with a small live FIFO
+    // count passes; a clean unit with too many FIFO threads (the pre-899 ~27) fails; a
+    // clean unit but a RUNNING process with ZERO FIFO threads (count "0", per-thread raise
+    // silently failed) fails via the floor; an EMPTY count (camera-box not running) is
+    // config-only (WARN); a malformed input is unknown (WARN).
+    let (code, out, err) = run_sourced(
+        r#"CEIL="$(rt_fifo_thread_ceiling)"
+           rt_thread_policy_verdict 1 1 "$CEIL"; echo
+           rt_thread_policy_verdict 1 99 "$CEIL"; echo
+           rt_thread_policy_verdict 0 1 "$CEIL"; echo
+           rt_thread_policy_verdict 0 "$CEIL" "$CEIL"; echo
+           rt_thread_policy_verdict 0 0 "$CEIL"; echo
+           rt_thread_policy_verdict 0 27 "$CEIL"; echo
+           rt_thread_policy_verdict 0 "" "$CEIL"; echo
+           rt_thread_policy_verdict 2 1 "$CEIL"; echo
+           rt_thread_policy_verdict 0 1 ""; echo
+"#,
+    );
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "unit-has-process-wide-fifo\nunit-has-process-wide-fifo\nok\nok\nno-fifo-thread\ntoo-many-fifo-threads:27\nok-config-only\nunknown\nunknown"
+    );
+}
+
+#[test]
+fn rt_fifo_thread_ceiling_catches_the_process_wide_regression() {
+    // Production runs exactly 1 SCHED_FIFO thread (the capture+emit hot path); the pre-899
+    // process-wide policy put ~27 on the core. The ceiling must be >= 1 (a healthy box passes)
+    // and well below 27 (the regression is caught).
+    let (code, out, err) = run_sourced("rt_fifo_thread_ceiling");
+    assert_eq!(code, 0, "stderr: {err}");
+    let ceil: i64 = out
+        .trim()
+        .parse()
+        .expect("rt_fifo_thread_ceiling prints a number");
+    assert!(
+        ceil >= 1,
+        "ceiling must allow the single capture+emit FIFO thread: {ceil}"
+    );
+    assert!(
+        ceil < 10,
+        "ceiling must be well below the pre-899 ~27-FIFO-thread regression: {ceil}"
+    );
+}
+
+/// issue 899 defect 2 — the (ah) per-thread realtime policy check must be wired into the live
+/// flow BEFORE the (q) block (so (q) stays the intentionally-LAST check), grade via the pure
+/// `rt_thread_policy_verdict`, probe BOTH facets (the deployed unit's process-wide
+/// CPUSchedulingPolicy and the live SCHED_FIFO thread count via `ps` class), and FAIL loud.
+#[test]
+fn check_ah_per_thread_realtime_is_wired_before_q_899() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let live_flow = &body[guard_pos..];
+    let ah_at = live_flow
+        .find("# (ah) per-thread realtime policy")
+        .expect("(ah) per-thread realtime policy block must be present in the live flow");
+    let q_at = live_flow
+        .rfind("# (q) .bak cruft drift")
+        .expect("(q) implementation block");
+    assert!(
+        ah_at < q_at,
+        "the (ah) check must precede the (q) block so (q) stays last (ah={ah_at} q={q_at})"
+    );
+    // Scope the slice to the (ah) block ALONE -- it is inserted directly before (q), so it runs
+    // up to the (q) marker itself.
+    let ah_block = &live_flow[ah_at..q_at];
+    assert!(
+        ah_block.contains("rt_thread_policy_verdict"),
+        "(ah) must grade via the pure rt_thread_policy_verdict: {ah_block}"
+    );
+    assert!(
+        ah_block.contains("CPUSchedulingPolicy"),
+        "(ah) must probe the deployed unit for a process-wide CPUSchedulingPolicy: {ah_block}"
+    );
+    assert!(
+        ah_block.contains("-o class="),
+        "(ah) must count the live camera-box process's SCHED_FIFO threads via ps class: {ah_block}"
+    );
+    assert!(
+        ah_block.contains("fail "),
+        "(ah) must FAIL loud on the pre-899 process-wide policy / too many FIFO threads: {ah_block}"
+    );
+}
+
+/// Companion: the (ah) letter must also be documented in the top-of-file header "Checks (all
+/// must pass)" list AND in usage()'s own Checks doc block (the three-place convention).
+#[test]
+fn verify_device_documents_ah_in_header_and_usage_899() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let header = &body[..guard_pos];
+    assert!(
+        header.contains("(ah)") && header.contains("realtime policy"),
+        "the top-of-file header Checks list must document (ah) per-thread realtime policy"
+    );
+    let usage_start = body.find("usage() {").expect("usage() function definition");
+    let usage_end = body[usage_start..]
+        .find("\nEOF\n")
+        .map(|i| usage_start + i)
+        .expect("usage() heredoc terminator");
+    let usage_block = &body[usage_start..usage_end];
+    assert!(
+        usage_block.contains("(ah)") && usage_block.contains("realtime policy"),
+        "usage()'s own Checks doc block must document (ah) per-thread realtime policy"
+    );
+}
+
+#[test]
 fn ndi_symlink_version_extracts_from_canonical_target() {
     let (code, out, err) = run_sourced(&format!(
         "TEXT='{}'\nndi_symlink_version \"$TEXT\"",
@@ -1581,6 +1697,107 @@ fn log_diet_journald_dropin_sets_the_pinned_runtime_max_use() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// #1309 -- persistent journal on the ro-root appliance: the drop-in gains Storage=persistent + a
+// bounded SystemMaxUse (the runtime RuntimeMaxUse cap stays), the journal lives on a dedicated
+// `nofail` ext4 partition (LABEL cambox-journal) mounted at /var/log/journal, and
+// log_diet_journal_persistent_verdict grades a box as truly persistent. This is what lets
+// `journalctl -b -1` survive the owner's emergency power-cycle so the 2026-09-13 half-dead wedge is
+// diagnosable instead of lost with the runtime tmpfs journal.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn log_diet_journald_dropin_now_sets_storage_persistent_and_system_max() {
+    let (code, out, err) = run_sourced("log_diet_journald_dropin");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert!(
+        out.contains("Storage=persistent"),
+        "#1309: drop-in must set Storage=persistent so the journal is not volatile, got: {out}"
+    );
+    assert!(
+        out.contains("SystemMaxUse=200M"),
+        "#1309: drop-in must bound the persistent half with SystemMaxUse=200M, got: {out}"
+    );
+    assert!(
+        out.contains("RuntimeMaxUse=20M"),
+        "#1309: the #762 runtime cap must survive alongside the persistent settings, got: {out}"
+    );
+}
+
+#[test]
+fn log_diet_journal_fstab_line_is_nofail_labelled_ext4() {
+    let (code, out, err) = run_sourced("log_diet_journal_fstab_line");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    let line = out.trim();
+    assert!(
+        line.contains("LABEL=cambox-journal"),
+        "must mount by the shared label, got: {line}"
+    );
+    assert!(
+        line.contains("/var/log/journal"),
+        "must mount at /var/log/journal, got: {line}"
+    );
+    assert!(
+        line.contains(" ext4 "),
+        "must be an ext4 mount, got: {line}"
+    );
+    assert!(
+        line.contains("nofail"),
+        "#1309: `nofail` is load-bearing -- a box without the partition must still boot, got: {line}"
+    );
+}
+
+fn journal_persistent_verdict_of(block: &str) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "BLOCK='{}'\nlog_diet_journal_persistent_verdict \"$BLOCK\"",
+        block.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+#[test]
+fn log_diet_journal_persistent_verdict_ok_when_partition_and_dropin_present() {
+    let block = "JOURNAL_MOUNT_FSTYPE=ext4\n\
+JOURNALD_DROPIN=[Journal]|Storage=persistent|RuntimeMaxUse=20M|SystemMaxUse=200M|";
+    assert_eq!(journal_persistent_verdict_of(block), "ok");
+}
+
+#[test]
+fn log_diet_journal_persistent_verdict_fails_when_journal_is_still_tmpfs() {
+    // an old box not yet reflashed: the drop-in is right but /var/log/journal is the volatile tmpfs
+    // -> FAIL with the reflash hint (the journal would not survive a power-cycle).
+    let block = "JOURNAL_MOUNT_FSTYPE=tmpfs\n\
+JOURNALD_DROPIN=[Journal]|Storage=persistent|RuntimeMaxUse=20M|SystemMaxUse=200M|";
+    let v = journal_persistent_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:"),
+        "a tmpfs journal must FAIL, got: {v}"
+    );
+    assert!(
+        v.contains("create-usb"),
+        "the FAIL must hint a reflash, got: {v}"
+    );
+}
+
+#[test]
+fn log_diet_journal_persistent_verdict_fails_when_storage_persistent_missing() {
+    let block = "JOURNAL_MOUNT_FSTYPE=ext4\nJOURNALD_DROPIN=[Journal]|RuntimeMaxUse=20M|";
+    let v = journal_persistent_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("Storage=persistent"),
+        "a drop-in without Storage=persistent must FAIL naming it, got: {v}"
+    );
+}
+
+#[test]
+fn log_diet_journal_persistent_verdict_fails_closed_on_empty_fstype() {
+    // fail-CLOSED: an unreadable/absent /var/log/journal mount is never read as "safely persistent".
+    let block = "JOURNAL_MOUNT_FSTYPE=\n\
+JOURNALD_DROPIN=[Journal]|Storage=persistent|RuntimeMaxUse=20M|SystemMaxUse=200M|";
+    assert!(journal_persistent_verdict_of(block).starts_with("FAIL:"));
+}
+
+// ---------------------------------------------------------------------------------------------
 // #762 fix -- log_diet_rsyslog_purged: lets (s) supersede its #679 logrotate check once rsyslog
 // is genuinely purged (its own conffile /etc/logrotate.d/rsyslog is removed WITH the package, so
 // the OLD #679 check becomes structurally unsatisfiable on an otherwise-correctly-hardened box).
@@ -1976,9 +2193,15 @@ fn verify_device_checks_v4l2_ctl_present_before_q_1213() {
         af_at < q_at,
         "the v4l2-ctl (af) check must precede the (q) block so (q) stays last (af={af_at} q={q_at})"
     );
-    // Scope the slice to the (af) block ALONE -- it is inserted directly before (q), with no other
-    // lettered check between them, so the block simply runs up to the (q) marker itself.
-    let af_block = &live_flow[af_at..q_at];
+    // Scope the slice to the (af) block ALONE -- end it at the NEXT check boundary (# (ag)), not at
+    // (q): other lettered checks ((ag) ethtool, (ah) realtime policy) now sit between (af) and (q),
+    // and each carries its own fail() -- a [af..q] slice would let (af)'s "FAIL loud" assertion pass
+    // on a SIBLING's fail(). Narrow it so the assertion binds to (af)'s own block (issue 899 review).
+    let af_end = live_flow[af_at..]
+        .find("\n# (ag) ")
+        .map(|i| af_at + i)
+        .expect("(ag) block start (the check immediately after the (af) v4l2-ctl check)");
+    let af_block = &live_flow[af_at..af_end];
     assert!(
         af_block.contains("v4l2-ctl --version"),
         "(af) must actually probe v4l2-ctl via `v4l2-ctl --version`: {af_block}"
@@ -2047,9 +2270,15 @@ fn verify_device_checks_ethtool_present_before_q_1240() {
         ag_at < q_at,
         "the ethtool (ag) check must precede the (q) block so (q) stays last (ag={ag_at} q={q_at})"
     );
-    // Scope the slice to the (ag) block ALONE -- it is inserted directly before (q), with no other
-    // lettered check between them, so the block simply runs up to the (q) marker itself.
-    let ag_block = &live_flow[ag_at..q_at];
+    // Scope the slice to the (ag) block ALONE -- end it at the NEXT check boundary (# (ah)), not at
+    // (q): the (ah) realtime-policy check now sits between (ag) and (q) and carries its own fail(),
+    // so a [ag..q] slice would let (ag)'s "FAIL loud" assertion pass on (ah)'s fail() (issue 899
+    // review). Narrow it so the assertion binds to (ag)'s own block.
+    let ag_end = live_flow[ag_at..]
+        .find("\n# (ah) ")
+        .map(|i| ag_at + i)
+        .expect("(ah) block start (the check immediately after the (ag) ethtool check)");
+    let ag_block = &live_flow[ag_at..ag_end];
     assert!(
         ag_block.contains("command -v ethtool"),
         "(ag) must actually probe ethtool via `command -v ethtool`: {ag_block}"

@@ -404,6 +404,25 @@ jobs:
           cargo build --release --bins -p bkshading-relay
           cargo build --release --features ndi --bins -p bkshading
 
+      # issue 1304: real-browser E2E of the operator panel +/- step buttons. Runs the JUST-BUILT
+      # service (above) against a stdlib stub relay (bkshading/service/tests/stub_relay.py) and
+      # drives the panel with Playwright (chromium only, one spec — small CI budget). Playwright's
+      # webServer manages BOTH the stub and the service and tears them down.
+      - name: Setup Node (bkshading panel E2E, issue 1304)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright chromium (bkshading panel E2E, issue 1304)
+        working-directory: bkshading/service/tests/e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: bkshading panel +/- step buttons E2E (issue 1304)
+        working-directory: bkshading/service/tests/e2e
+        env:
+          BKSHADING_BIN: ${{ github.workspace }}/target/release/bkshading
+        run: npx playwright test
+
       # Upload the deployable relay + service binaries (issue 808 M3), mirroring the appliance's
       # camera-box-linux-amd64 / probe-tools-linux-amd64 upload pattern. scripts/bkshading-deploy-relay.sh
       # downloads bkshading-relay from this artifact and places it on a cambox (/usr/local/bin).
@@ -419,11 +438,12 @@ jobs:
             target/release/bkshading
 
       # Cross-build the relay for aarch64 (issue 808 SBC/handheld milestone): the handheld runs on a
-      # mini SBC (Pi Zero 2 W) which is ARM and CANNOT run the amd64 binary. The relay is pure Rust
-      # (axum/tokio/serde/clap; no C link deps — no reqwest/rustls/ring on the relay side), so a
-      # rustup target + the gcc-aarch64-linux-gnu linker cross-compile it cleanly. Target choice
-      # justified (aarch64, not armhf) in scripts/lib/bkshading-sbc-runtime.sh + .claude/rules/bkshading.md.
-      - name: Cross-build relay for aarch64 (SBC / Pi Zero 2 W handheld)
+      # zero-class arm64 SBC (Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W) which is ARM and
+      # CANNOT run the amd64 binary. The relay is pure Rust (axum/tokio/serde/clap; no C link deps —
+      # no reqwest/rustls/ring on the relay side), so a rustup target + the gcc-aarch64-linux-gnu
+      # linker cross-compile it cleanly. Target choice justified (aarch64, not armhf) in
+      # scripts/lib/bkshading-sbc-runtime.sh + .claude/rules/bkshading.md.
+      - name: Cross-build relay for aarch64 (SBC / zero-class arm64 handheld)
         run: |
           rustup target add aarch64-unknown-linux-gnu
           sudo apt-get update

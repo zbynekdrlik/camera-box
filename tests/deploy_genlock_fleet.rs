@@ -480,8 +480,11 @@ fn windows_fast_does_not_touch_programdata_distroav_1115() {
     );
 }
 
+// issue 1295: the AHK stop/restart bracket is emitted for any has_ahk=1 box (strih AND now
+// resolume), never for stream (has_ahk=0). This test pins the strih-vs-stream split; the resolume
+// arm is pinned by resolume_windows_program_carries_ahk_and_no_keepalive_1295.
 #[test]
-fn windows_ahk_bracket_only_on_strih() {
+fn windows_ahk_bracket_on_ahk_box_not_stream() {
     let strih = win_program("strih", "full", "1");
     let stream = win_program("stream", "full", "0");
     assert!(
@@ -933,6 +936,127 @@ fn plan_mode_emits_all_box_programs_without_network() {
     );
 }
 
+// #1303 part 4 — the report-only per-box forced-table AUDIO/yuv audit preflight is emitted BEFORE
+// STEP 0 of each box's plan, references the classifier lib, and never writes/gates.
+#[test]
+fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stage = tmp.path();
+    for boxes in ["resolume", "strih,imag"] {
+        let (code, out, err) = run_script(&[
+            "--plan",
+            "--run-id",
+            "RUN123",
+            "--sha",
+            "abcdef1234",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--boxes",
+            boxes,
+            "--full",
+        ]);
+        assert_eq!(
+            code, 0,
+            "--plan {boxes} must succeed.\nstdout={out}\nstderr={err}"
+        );
+        assert!(
+            out.contains("PREFLIGHT (report-only, #1303 part 4)"),
+            "emits the forced-table audit preflight for {boxes}:\n{out}"
+        );
+        assert!(
+            out.contains("genlock_forced_table_audit"),
+            "preflight pipes into the classifier for {boxes}:\n{out}"
+        );
+        assert!(
+            out.contains("NEVER writes and NEVER gates"),
+            "preflight is report-only for {boxes}:\n{out}"
+        );
+        // the preflight is a PRE-swap step: it must come before the box's REAL deploy program.
+        // Anchor on the Windows program's first line ($ErrorActionPreference = 'Stop') -- both box
+        // sets here include a Windows box and that string never appears in the preflight text, so
+        // this is a genuine ordering check, not the preflight's own "STEP 0 below" phrase.
+        let pf = out.find("PREFLIGHT (report-only, #1303 part 4)").unwrap();
+        let deploy = out
+            .find("$ErrorActionPreference = 'Stop'")
+            .expect("plan carries a Windows deploy program");
+        assert!(
+            pf < deploy,
+            "preflight must precede the deploy program for {boxes}:\n{out}"
+        );
+    }
+    // one preflight per requested box (2 for strih,imag).
+    let (_c, out2, _e) = run_script(&[
+        "--plan",
+        "--run-id",
+        "RUN123",
+        "--sha",
+        "abcdef1234",
+        "--stage",
+        stage.to_str().unwrap(),
+        "--boxes",
+        "strih,imag",
+        "--full",
+    ]);
+    assert_eq!(
+        out2.matches("PREFLIGHT (report-only, #1303 part 4)")
+            .count(),
+        2,
+        "one preflight per requested box:\n{out2}"
+    );
+}
+
+// issue 1295 — a saved .ps1 of the --plan output is PARSED whole in file mode, so the plan must end
+// on a clean `exit 0` and must NOT trail a bare (non-comment) tab-separated fleet-log record after
+// the last box program's exit 0 (owner incident: "At C:\deploy2.ps1:170").
+#[test]
+fn plan_last_nonempty_line_is_exit_0_and_no_bare_log_record_1295() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let stage = tmp.path();
+    for boxes in ["resolume", "strih,imag"] {
+        let (code, out, err) = run_script(&[
+            "--plan",
+            "--run-id",
+            "RUN123",
+            "--sha",
+            "abcdef1234",
+            "--stage",
+            stage.to_str().unwrap(),
+            "--boxes",
+            boxes,
+            "--full",
+        ]);
+        assert_eq!(
+            code, 0,
+            "--plan {boxes} must succeed.\nstdout={out}\nstderr={err}"
+        );
+        let last = out
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .expect("plan has content");
+        assert_eq!(
+            last.trim(),
+            "exit 0",
+            "the plan's last non-empty line must be `exit 0` for {boxes}:\n...{}",
+            &out[out.len().saturating_sub(400)..]
+        );
+        // the fleet-log record (a tab-separated line) must be COMMENTED — no bare record survives.
+        for line in out.lines() {
+            if line.contains('\t') {
+                assert!(
+                    line.trim_start().starts_with('#'),
+                    "a tab-separated fleet-log record must be a #-comment (file-mode PS parse), got: {line:?}"
+                );
+            }
+        }
+        // the record itself is still present (run id + sha), just commented.
+        assert!(
+            out.contains("RUN123") && out.contains("abcdef1234"),
+            "the fleet-log record stays visible:\n{out}"
+        );
+    }
+}
+
 #[test]
 fn usage_errors_exit_two() {
     // --fast and --full are mutually exclusive
@@ -951,4 +1075,196 @@ fn usage_errors_exit_two() {
     // no --run-id at all
     let (c4, _o, _e) = run_script(&["--plan", "--stage", "/tmp", "--sha", "S"]);
     assert_eq!(c4, 2, "missing --run-id");
+}
+
+// ============================================================================================
+// #1295 -- RESOLUME-SNV (the traveling CG box) joins the genlock deploy fleet as a
+// windows-genlock box: win-resolume MCP, has_ahk=0, hostname not a pinned IP, explicit-only
+// (never the empty-default fleet), with a live box-identity confirm preamble.
+// ============================================================================================
+#[test]
+fn normalize_accepts_resolume_explicit_only_not_default_1295() {
+    // resolume is accepted + appended last in canonical order
+    assert_eq!(
+        run_sourced(
+            &script(),
+            "fleet_normalize_boxes strih,stream,imag,resolume"
+        )
+        .trim(),
+        "strih,stream,imag,resolume"
+    );
+    assert_eq!(
+        run_sourced(&script(), "fleet_normalize_boxes resolume").trim(),
+        "resolume"
+    );
+    // dedup
+    assert_eq!(
+        run_sourced(&script(), "fleet_normalize_boxes resolume,strih,resolume").trim(),
+        "strih,resolume"
+    );
+    // the empty default is strih,stream,imag ONLY -- resolume (traveling maintenance box) is never
+    // pulled into the whole-fleet default; it deploys only when explicitly named.
+    assert_eq!(
+        run_sourced(&script(), "fleet_normalize_boxes ''").trim(),
+        "strih,stream,imag"
+    );
+}
+
+#[test]
+fn resolume_box_constants_mcp_hostname_with_ahk_1295() {
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_mcp resolume").trim(),
+        "win-resolume"
+    );
+    // the "ip" is the HOSTNAME resolume.lan, NEVER a pinned literal IP (targets.md; .201 collides
+    // with `bridge`).
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ip resolume").trim(),
+        "resolume.lan"
+    );
+    // issue 1295 correction (supervisor pre-deploy inventory): RESOLUME-SNV RUNS an AutoHotkey v2
+    // safe-loop (NL_STARTUP.ahk, SafeLoop:=1) that respawns OBS -- the SAME pattern as strih -- so
+    // has_ahk MUST be 1, or a deploy/relaunch that does not stop it first races a SECOND obs64.
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_has_ahk resolume").trim(),
+        "1"
+    );
+    // the per-box AHK identity: resolume's own v2 .ahk path (the traveling CG box), and it PREFERS
+    // the Startup .lnk as the relaunch target (a future path move must not break the relaunch).
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_script resolume").trim(),
+        "C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk"
+    );
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_prefer resolume").trim(),
+        "lnk"
+    );
+    // strih keeps its current identity (byte-neutral): the D:\_APPS path + the exe-first order.
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_script strih").trim(),
+        "D:\\_APPS\\NL_STARTUP.ahk"
+    );
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_prefer strih").trim(),
+        "exe"
+    );
+    // no OBS keep-alive SCHEDULED-TASK respawner on the CG box -- its respawner IS the AHK watcher
+    // (handled by the has_ahk stop/restart path), exactly like strih, so it lists no keepalive task.
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_keepalive_tasks resolume").trim(),
+        ""
+    );
+}
+
+#[test]
+fn resolume_windows_program_carries_ahk_and_no_keepalive_1295() {
+    let p = win_program("resolume", "full", "1");
+    // issue 1295: the AHK watcher MUST be stopped before the byte copy (it respawns obs64), and
+    // restarted + VERIFIED afterward (the issue-789 restart guard), exactly like strih.
+    assert!(
+        p.contains("Stop-Process -Name AutoHotkey64"),
+        "resolume runs the AHK watcher -- its program must stop AutoHotkey64 before the copy:\n{p}"
+    );
+    assert!(
+        p.contains("ahkRelaunchVerified") && p.contains("exit 9"),
+        "resolume must restart AHK VERIFIED + fail loud if it doesn't come back (issue 789):\n{p}"
+    );
+    // the relaunch target is resolume's OWN .ahk path (never strih's D:\_APPS path).
+    assert!(
+        p.contains(
+            "$ahkScriptPath = 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk'"
+        ) && !p.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
+        "resolume's deploy program must relaunch via its OWN .ahk path, not strih's:\n{p}"
+    );
+    assert!(
+        !p.contains("schtasks /Change"),
+        "resolume has no OBS keep-alive scheduled task -- no disable/enable:\n{p}"
+    );
+    // it is still a real fail-loud PowerShell deploy (the shared byte-verify / marker machinery)
+    assert!(
+        p.contains("$ErrorActionPreference = 'Stop'") && p.contains("VERIFY obs.dll"),
+        "resolume rides the same fail-loud windows deploy program:\n{p}"
+    );
+}
+
+#[test]
+fn resolume_plan_emits_identity_confirm_and_win_resolume_mcp_1295() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (code, out, err) = run_script(&[
+        "--plan",
+        "--run-id",
+        "R1",
+        "--sha",
+        "deadbeef",
+        "--stage",
+        tmp.path().to_str().unwrap(),
+        "--boxes",
+        "resolume",
+        "--full",
+    ]);
+    assert_eq!(
+        code, 0,
+        "--plan resolume must succeed.\nstdout={out}\nstderr={err}"
+    );
+    assert!(
+        out.contains("win-resolume"),
+        "names the win-resolume MCP:\n{out}"
+    );
+    // the live box-IDENTITY confirm preamble (a traveling DHCP box colliding with `bridge` at .201)
+    assert!(
+        out.contains("box IDENTITY confirm") && out.contains("getent hosts resolume.lan"),
+        "resolume plan emits the identity-confirm step:\n{out}"
+    );
+    // never a pinned IP in the resolume plan header
+    assert!(
+        out.contains("(win-resolume, resolume.lan)") && !out.contains("win-resolume, 10.77.9.201"),
+        "resolume plan uses the hostname, never a pinned IP:\n{out}"
+    );
+}
+
+#[test]
+fn non_resolume_plan_has_no_identity_confirm_preamble_1295() {
+    // the identity-confirm STEP -1 is resolume-only -- strih/stream plans must not carry it.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_c, out, _e) = run_script(&[
+        "--plan",
+        "--run-id",
+        "R1",
+        "--sha",
+        "deadbeef",
+        "--stage",
+        tmp.path().to_str().unwrap(),
+        "--boxes",
+        "strih",
+        "--full",
+    ]);
+    assert!(
+        !out.contains("box IDENTITY confirm"),
+        "strih plan must NOT carry the resolume-only identity-confirm preamble:\n{out}"
+    );
+}
+
+/// #1295 follow-up C -- the #789 AHK-restart-failure Write-Error is emitted ONLY for has_ahk=1
+/// boxes (strih AND resolume), which DO run an AHK respawn watcher; the failure means the watcher
+/// did not come BACK after the deploy, not that the box lacks one. The inherited strih text
+/// "<box> has NO respawn watcher" was wrong for every such box. It must now say the watcher failed
+/// to restart, for BOTH strih and resolume.
+#[test]
+fn ahk_restart_failure_message_does_not_falsely_claim_no_watcher_1295() {
+    for box_name in ["strih", "resolume"] {
+        let p = win_program(box_name, "full", "1");
+        assert!(
+            !p.contains("has NO respawn watcher"),
+            "{box_name}: the #789 failure must not claim a has_ahk box 'has NO respawn watcher':\n{p}"
+        );
+        assert!(
+            p.contains("failed to restart"),
+            "{box_name}: the #789 failure must say the AHK respawn watcher failed to restart:\n{p}"
+        );
+        // the fail-loud exit is unchanged.
+        assert!(
+            p.contains("exit 9"),
+            "{box_name}: the #789 AHK-restart failure must stay fail-loud (exit 9):\n{p}"
+        );
+    }
 }
