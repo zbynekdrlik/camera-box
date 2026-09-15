@@ -1,0 +1,40 @@
+[Unit]
+# #1299 — imag's :8899 bundle-state HTTP server, the Linux twin of the strih/stream
+# Scheduled-Task bundle-state-server. It serves /bundle-state.json (fresh per request) so the dev1
+# genlock-lock alert watchdog (scripts/genlock-lock-alert-watchdog.sh) — which already lists imag in
+# the obs-fleet genlock-lock facet — stops SKIPping imag ":8899 not fetchable" and can page an imag
+# genlock LOCK loss. The canonical scripts/bundle-state-server.py runs here unchanged; its
+# Windows-only identity gathers degrade to absent facets on Linux (its IS_WINDOWS gate), so on imag
+# it serves genlock_lock, genlock_build_sha, obs_version, audio_ts_lag_* and record-dir-stats.
+Description=imag-nb :8899 bundle-state server (fleet-visible genlock-lock facet, #1299)
+Documentation=https://github.com/zbynekdrlik/camera-box
+# OBS provides the WS (:4455) + the log dir this server reads; start after it, but do not hard-require
+# it (the log-derived genlock_lock facet still serves when OBS is momentarily down — UNKNOWN, never a
+# crash).
+After=imag-obs.service graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+# The three sibling files (bundle-state-server.py + its bundle_state_gather / obs_phase2 imports)
+# are installed together under /opt/camera-box by setup-imag.sh step 28 so the server's sibling
+# imports resolve. imag's OBS-WS has NO password, so OBS_PASSWORD is left unset -> "".
+# %h expands to the user home (/home/newlevel) so the OBS log dir path is home-relative.
+ExecStart=/usr/bin/python3 /opt/camera-box/bundle-state-server.py --port 8899 --obs-host 127.0.0.1 --obs-log-dir %h/.config/obs-studio/logs --genlock-build-sha-file /opt/obs-genlock/GENLOCK_BUILD_SHA.txt
+Restart=on-failure
+RestartSec=5
+# NoNewPrivileges genuinely engages under an unprivileged --user manager (a per-process prctl, not a
+# mount namespace). Mount-namespace hardening (ProtectHome/PrivateTmp/...) is deliberately NOT set:
+# it would block the OBS-log + /opt/obs-genlock marker reads this server needs, and on the
+# unprivileged --user manager those directives are inert anyway (see
+# .claude/rules/dev1-systemd-user-unit-hardening.md) — declared-intent only, no active isolation
+# claimed here.
+NoNewPrivileges=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=imag-bundle-state-server
+
+[Install]
+WantedBy=graphical-session.target

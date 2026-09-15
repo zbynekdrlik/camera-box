@@ -65,6 +65,15 @@ except ImportError:
 
 DEFAULT_PORT = 8899
 DEFAULT_OBS_HOST = "127.0.0.1"
+
+# #1299 — this server was authored for the Windows OBS boxes (strih/stream), but imag runs OBS on
+# Linux and needs the SAME server to expose the fleet-visible genlock-lock facet. Every Windows-only
+# identity gather (native tasklist/netstat/CIM process reads, ProgramData core/plugin DLL byte
+# hashes, the .lnk/AHK Start-Menu paths + PowerShell NDI-runtime read) is gated behind this flag at
+# the gather boundary so on Linux it is SKIPPED — no Windows-only subprocess is spawned, no
+# per-request WARNING is logged, and each such facet is simply OMITTED (absent == UNKNOWN downstream,
+# never a false 0/False). On Windows the gate is a no-op, so the served payload stays byte-identical.
+IS_WINDOWS = os.name == "nt"
 # The documented NDI runtime DLL (.claude/commands/drift-guard.md step 1) — read-only Get-Item.
 DEFAULT_NDI_RUNTIME_DLL = r"C:\Program Files\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll"
 # The two static OBS module scan paths (the third, %APPDATA%\obs-studio\plugins, is resolved from
@@ -703,61 +712,88 @@ def gather_bundle_state(
 
     ndi_inputs = _timed(timings, "ndi_inputs", _gather_ndi)
 
-    # #826 — the strih OBS-identity machine-check facet (each gather independent, same
-    # never-let-one-failure-blank-the-rest discipline as every other facet here).
-    port_owner_path, port_owner_version = _timed(timings, "port4455_owner", port4455_owner)
-    ahk_text = _timed(timings, "ahk_text", read_ahk_text, ahk_path)
-    shortcut_target, shortcut_workdir = _timed(
-        timings, "shortcut", resolve_shortcut, startup_shortcut
-    )
-
-    # #770 — the DEPLOYED plugin/core byte identity the [0/8] version-integrity gate compares
-    # against the #120 BUNDLE_MANIFEST. distroav.dll: hash the FIRST located copy (scan order:
-    # Program Files, then ProgramData, then %APPDATA% — the primary genlock plugin), so a single
-    # observed distroav_dll_sha256 pairs with the manifest's by-basename distroav.dll sha. A
-    # shadowing duplicate is a SEPARATE #124 concern (distroav_dll_paths reports the whole set).
-    # #1115: under Option A the deploy (deploy-genlock-fleet.sh FULL) ships the canonical
-    # genlock distroav.dll TO this ProgramData load path, so the FIRST-located copy IS the
-    # deployed canonical build (Program Files stays /XF-excluded => no shadow ahead of it) —
-    # hashing it here is exactly the byte the version-integrity gate compares by basename.
-    # Each hash degrades to "" (UNKNOWN downstream, never a guessed/zero SHA) when the file is
-    # missing/unreadable — the opt-in landing (#756-shape): a box with no genlock DLL is skipped.
-    distroav_paths_csv = _timed(
-        timings, "distroav_dll_paths", bsg.distroav_dll_paths, distroav_scan_roots
-    )
-    first_distroav = distroav_paths_csv.split(",")[0] if distroav_paths_csv else ""
-
-    obs_installs_val = _timed(
-        timings, "obs_installs", bsg.obs_installs_under, obs_install_scan_roots
-    )
-    obs_dll_sha256_val = _timed(timings, "obs_dll_sha256", bsg.component_sha256, obs_dll_path)
-    distroav_dll_sha256_val = _timed(
-        timings, "distroav_dll_sha256", bsg.component_sha256, first_distroav
-    )
+    # #1299 — the DEPLOYED genlock build SHA is a plain CROSS-PLATFORM file read (imag serves it from
+    # /opt/obs-genlock/GENLOCK_BUILD_SHA.txt; the Windows boxes from the deployed bundle path), so it
+    # is gathered UNCONDITIONALLY — never behind the Windows-identity gate below — alongside the
+    # OBS-WS ndi_inputs and every log-derived facet. It is the #756 cross-box parity value the
+    # version-integrity gate reads off each box's state.
     genlock_build_sha_val = _timed(
         timings, "genlock_build_sha", bsg.genlock_build_sha_from_file, genlock_build_sha_file
     )
-    ndi_runtime_val = _timed(timings, "ndi_runtime", ndi_runtime_version, ndi_runtime_dll)
-    # #1227 review 🟡 — ONE native tasklist per request feeds BOTH the obs process-count facet and
-    # the VB-Matrix presence facet (never two spawns).
-    tasklist_text = _timed(timings, "tasklist", tasklist_csv)
-    obs_process_count_val = _timed(
-        timings,
-        "obs_process_count",
-        lambda: bsg.obs_process_count_from_listing(_parse_tasklist_obs_process_names(tasklist_text)),
-    )
 
-    # #1227 — the VB-Matrix presence facet (the dev1 VB-Matrix alert watchdog reads it). The disk
-    # install gate + the shared tasklist parse compose the 3-state running facet; the start time is a
-    # best-effort PID-keyed-cached CIM read gathered via start_fn (a falsy pid = no subprocess, so
-    # imag / a DOWN box never pays a CIM query). A FAILED tasklist read is UNKNOWN, never a false DOWN.
-    (vb_matrix_running_val, vb_matrix_name_val, vb_matrix_pid_val, vb_matrix_start_val) = _timed(
-        timings, "vb_matrix",
-        lambda: gather_vb_matrix_facet(
-            bsg.vb_matrix_install_present_under(DEFAULT_VB_MATRIX_INSTALL_DIRS),
-            tasklist_text, vb_matrix_start_time,
-        ),
-    )
+    # #1299 — the OBS-box IDENTITY facets below are ALL Windows-specific (native tasklist/netstat/CIM
+    # process reads, ProgramData core/plugin DLL byte hashes, the .lnk/AHK Start-Menu paths +
+    # PowerShell NDI-runtime read). On a Linux OBS box (imag) they do not apply, so they are SKIPPED
+    # at the gather boundary — ONE os.name gate, not scattered per-facet try/excepts — leaving each
+    # value "" so build_bundle_state OMITS it (absent == UNKNOWN downstream, never a false 0/False),
+    # with no Windows-only subprocess spawned and no per-request WARNING. On Windows the gate is a
+    # no-op, so the served payload stays byte-identical to before.
+    if IS_WINDOWS:
+        # #826 — the strih OBS-identity machine-check facet (each gather independent, same
+        # never-let-one-failure-blank-the-rest discipline as every other facet here).
+        port_owner_path, port_owner_version = _timed(timings, "port4455_owner", port4455_owner)
+        ahk_text = _timed(timings, "ahk_text", read_ahk_text, ahk_path)
+        shortcut_target, shortcut_workdir = _timed(
+            timings, "shortcut", resolve_shortcut, startup_shortcut
+        )
+
+        # #770 — the DEPLOYED plugin/core byte identity the [0/8] version-integrity gate compares
+        # against the #120 BUNDLE_MANIFEST. distroav.dll: hash the FIRST located copy (scan order:
+        # Program Files, then ProgramData, then %APPDATA% — the primary genlock plugin), so a single
+        # observed distroav_dll_sha256 pairs with the manifest's by-basename distroav.dll sha. A
+        # shadowing duplicate is a SEPARATE #124 concern (distroav_dll_paths reports the whole set).
+        # #1115: under Option A the deploy (deploy-genlock-fleet.sh FULL) ships the canonical
+        # genlock distroav.dll TO this ProgramData load path, so the FIRST-located copy IS the
+        # deployed canonical build (Program Files stays /XF-excluded => no shadow ahead of it) —
+        # hashing it here is exactly the byte the version-integrity gate compares by basename.
+        # Each hash degrades to "" (UNKNOWN downstream, never a guessed/zero SHA) when the file is
+        # missing/unreadable — the opt-in landing (#756-shape): a box with no genlock DLL is skipped.
+        distroav_paths_csv = _timed(
+            timings, "distroav_dll_paths", bsg.distroav_dll_paths, distroav_scan_roots
+        )
+        first_distroav = distroav_paths_csv.split(",")[0] if distroav_paths_csv else ""
+
+        obs_installs_val = _timed(
+            timings, "obs_installs", bsg.obs_installs_under, obs_install_scan_roots
+        )
+        obs_dll_sha256_val = _timed(timings, "obs_dll_sha256", bsg.component_sha256, obs_dll_path)
+        distroav_dll_sha256_val = _timed(
+            timings, "distroav_dll_sha256", bsg.component_sha256, first_distroav
+        )
+        ndi_runtime_val = _timed(timings, "ndi_runtime", ndi_runtime_version, ndi_runtime_dll)
+        # #1227 review 🟡 — ONE native tasklist per request feeds BOTH the obs process-count facet and
+        # the VB-Matrix presence facet (never two spawns).
+        tasklist_text = _timed(timings, "tasklist", tasklist_csv)
+        obs_process_count_val = _timed(
+            timings,
+            "obs_process_count",
+            lambda: bsg.obs_process_count_from_listing(_parse_tasklist_obs_process_names(tasklist_text)),
+        )
+
+        # #1227 — the VB-Matrix presence facet (the dev1 VB-Matrix alert watchdog reads it). The disk
+        # install gate + the shared tasklist parse compose the 3-state running facet; the start time is
+        # a best-effort PID-keyed-cached CIM read gathered via start_fn (a falsy pid = no subprocess, so
+        # imag / a DOWN box never pays a CIM query). A FAILED tasklist read is UNKNOWN, never a false DOWN.
+        (vb_matrix_running_val, vb_matrix_name_val, vb_matrix_pid_val, vb_matrix_start_val) = _timed(
+            timings, "vb_matrix",
+            lambda: gather_vb_matrix_facet(
+                bsg.vb_matrix_install_present_under(DEFAULT_VB_MATRIX_INSTALL_DIRS),
+                tasklist_text, vb_matrix_start_time,
+            ),
+        )
+    else:
+        # #1299 — Linux (imag): every Windows-only identity facet is left empty so build_bundle_state
+        # omits it. No native tasklist/netstat/CIM/PowerShell/DLL-scan is attempted at all.
+        port_owner_path = port_owner_version = ""
+        ahk_text = ""
+        shortcut_target = shortcut_workdir = ""
+        distroav_paths_csv = ""
+        obs_installs_val = ""
+        obs_dll_sha256_val = ""
+        distroav_dll_sha256_val = ""
+        ndi_runtime_val = ""
+        obs_process_count_val = ""
+        vb_matrix_running_val = vb_matrix_name_val = vb_matrix_pid_val = vb_matrix_start_val = ""
 
     result = bsg.build_bundle_state(
         obs_version=obs_version,
