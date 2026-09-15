@@ -207,6 +207,28 @@ def test_painter_item():
     assert _item("painter").decide({"painter": (OPTICAL_NODATA, 0)})["status"] == d.UNKNOWN
 
 
+SHADING_ON = "cam1 (10.77.9.61): enabled=enabled active=active online=true -> verdict=SHADING-ON\n"
+SHADING_DEAD = "cam1 (10.77.9.61): enabled=enabled active=inactive online=? -> verdict=SHADING-DEAD\n"
+SHADING_OFF = ("cam1 (10.77.9.61): enabled=disabled active=inactive online=? -> verdict=SHADING-OFF\n"
+               "cam2 (10.77.9.62): enabled=disabled active=inactive online=? -> verdict=SHADING-OFF\n")
+SHADING_MIXED = ("cam1 (10.77.9.61): enabled=enabled active=active online=true -> verdict=SHADING-ON\n"
+                 "cam2 (10.77.9.62): enabled=disabled active=inactive online=? -> verdict=SHADING-OFF\n")
+
+
+def test_shading_item():
+    # a box actively shading with a camera online -> OK
+    assert _item("shading").decide({"shading": (SHADING_ON, 0)})["status"] == d.OK
+    assert _item("shading").decide({"shading": (SHADING_MIXED, 0)})["status"] == d.OK
+    # relay enabled but crashed (should be running) -> FORGOT (the 2026-09-15 shading-crashol class)
+    e = _item("shading").decide({"shading": (SHADING_DEAD, 0)})
+    assert e["status"] == d.FORGOT
+    assert "1309" in e["message"]
+    # all relays disabled (the TEST-mode dev default) -> UNKNOWN, never a false forgot
+    assert _item("shading").decide({"shading": (SHADING_OFF, 0)})["status"] == d.UNKNOWN
+    # unreachable / no capture -> UNKNOWN (fail-safe)
+    assert _item("shading").decide({"shading": ("", d.RC_MISSING)})["status"] == d.UNKNOWN
+
+
 def test_burns_item_two_boxes():
     ok = {"burns_strih": ("", 1), "burns_stream": ("", 1)}
     assert _item("burns").decide(ok)["status"] == d.OK
@@ -348,6 +370,7 @@ def test_evaluate_over_a_work_dir(tmp_path):
         "dantesync": ("", 0),
         "cambox": ("", 0),
         "avlatency": (AVLAT_ALIGNED, 0),
+        "shading": (SHADING_ON, 0),
     }
     for name, (text, rc) in caps.items():
         (tmp_path / (name + ".out")).write_text(text, encoding="utf-8")
