@@ -16,7 +16,7 @@ carry the hostname (rollout tracked in #1307). Verify live: `getent hosts video-
 |------|------------|--------|-------|
 | stagebox1 | 10.77.9.237 | Active | SSH: newlevel/newlevel |
 | strih | 10.77.9.202 | Active | SSH: newlevel/newlevel |
-| ableton-foh | 10.77.9.230 | Active | SSH: master/master |
+| ableton-foh | 10.77.7.30 (`fohabl.lan`, audio VLAN) | Active | SSH: master/master — the FOH Ableton PC that HOSTS the AIC128-D card (dantesync client of strih, never a master: it is on another VLAN, owner ruling 15.9.2026 on issue 1297). 10.77.9.230 is NOT this PC — it is the card's own video-VLAN port (see the grandmaster note above); the card's audio-VLAN port is 10.77.7.104 (MAC 00:1D:C1:08:02:14, one card, two ports, one clock) |
 | mbc | 10.77.7.232 | Active | SSH: newlevel/newlevel — Master Broadcast Console: Ableton DAW doing the FINAL stream audio mastering; plugin latency deliberately aligned to EXACTLY 1s (the reason stream PGM's genlock hold ≈ 1000 − camera-path ≈ 925ms); the A/V-sync mic feeds INTO an Ableton channel here (was found muted 2026-07-12 — check this channel first when the measurement audio is silent). IP MOVED 2026-07-13: was 10.77.9.232 (a ping to the OLD IP falsely reads as "box off" — it is normally ON); `mbc.lan` resolves correctly, verify with `getent hosts mbc.lan` before declaring it down |
 | stream | 10.77.9.204 | Active | SSH: newlevel/newlevel |
 | bridge | 10.77.9.201 | Active | SSH: newlevel/newlevel |
