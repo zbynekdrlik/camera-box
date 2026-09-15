@@ -501,11 +501,14 @@ to carry that excess via strih pins + persist as the baseline; task 3 to re-tigh
 **The decisive physics (why the pin lever cannot carry a sub-frame excess).** The strih FIFO is a
 WHOLE-source-frame conveyor (the issue-1049 narrative in `src/genlock_backlog.rs`: it moves a source's
 on-air age `S` only in `interval/n` = 16.667 ms steps, so `S mod 16.667` is INVARIANT under every pin).
-The mining deficits vs the OLDEST camera are all SUB-source-frame (max ~14 ms < 16.667), so the spread
-is IRREDUCIBLE by any pin: a whole-frame hold OVERSHOOTS (does not shrink a sub-frame gap) and a
-sub-frame hold lands in the issue-998 `frac(latency/33.3)<0.5` limit-cycle band that DOUBLES the
-on-screen spread (proven live, run 1899055119). So the correct lever for the ~14 ms per-box offset is
-the CAMBOX GRABBER, not the strih pin.
+The mining deficits vs the OLDEST camera are all SUB-source-frame (max ~14 ms < 16.667). Correcting
+them with the whole-frame conveyor is defeated on two fronts: a whole-frame hold OVERSHOOTS the anchor
+(a 0.5-1.0-frame deficit rounds UP to a full frame, landing PAST the max-floor target), and a hold
+whose `frac(pin/33.3) < 0.5` lands in the issue-998 limit-cycle band that DOUBLES the on-screen spread
+(proven live, run 1899055119). For the ACTUAL 7-camera distribution the overshoot preserves the
+overall max-min (the freshest cameras jump past the anchor while the mid-floor cameras stay the new
+minimum), so no whole-frame plan reduces the spread → floor-only. So the correct lever for the ~14 ms
+per-box offset is the CAMBOX GRABBER, not the strih pin.
 
 **Direction (the shipped/physically-correct anchor).** Equalizing means ADDING latency to the FRESHEST
 (min-floor) cameras to bring them UP to the OLDEST (max-floor) camera, which anchors at the floor —
@@ -515,10 +518,11 @@ inverted mirror of this.)
 
 **What shipped (all pure, Tier-0):**
 - `floor_equalization_plan(arrival_floors, ...)` — anchor = max-floor camera at the floor; each deficit
-  rounded to the NEAREST whole source frame (so a sub-frame deficit → 0, never a limit-cycle-prone
-  sub-frame pin); an above-floor pin is applied ONLY IF a whole-frame hold measurably REDUCES the
-  spread AND stays within the 94 ms ceiling. For the current sub-frame data → floor-only
-  (`reducible=False`, `reason="irreducible"`) = NO production change, no regression.
+  rounded to the NEAREST whole source frame; an above-floor pin is applied ONLY IF (a) a whole-frame
+  hold measurably REDUCES the OVERALL cross-camera spread, (b) it stays within the 94 ms ceiling, AND
+  (c) it clears the issue-998 frac guard (`frac(pin/33.333) >= 0.5`, `_frac_of_canvas_frame`) so it is
+  not a limit-cycle-prone pin. For the current mining data → floor-only (`reducible=False`,
+  `reason="irreducible"`) via (a) = NO production change, no regression.
 - `cross_camera_floor_spread` / `floor_spread_hard_fail(spread, tolerance=33.3 ms)` — the task-3
   re-tighten on the jitter-floor axis. Tolerance = ~one 30 fps canvas frame, NOT the ticket's 15 ms
   (which would false-fail: 13.7 ms median + 8.4 ms anchor std ≈ 22 ms, and below one source frame the

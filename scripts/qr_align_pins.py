@@ -484,15 +484,28 @@ def floor_samples_sufficient(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES
 # THE PHYSICS (issue 1049 narrative in src/genlock_backlog.rs; live run 1899055119): the strih FIFO is
 # a WHOLE-source-frame conveyor -- it moves a source's on-air age S only in interval/n = 16.667 ms
 # (one 60 fps source frame) steps, so `S mod 16.667` is INVARIANT under every pin. A SUB-source-frame
-# cross-camera spread is therefore IRREDUCIBLE by any pin: a whole-frame hold OVERSHOOTS (adds a full
-# frame, does not shrink a sub-frame gap) and a genuinely sub-frame hold lands in the issue-998
-# frac(latency/33.3)<0.5 limit-cycle band that DOUBLES the on-screen spread. So floor_equalization_plan
-# emits an above-floor pin ONLY when a whole-frame hold measurably REDUCES the spread; for the current
-# sub-frame data it returns floor-only (the excess is grabber-owned, task 1 -- not a strih-pin lever).
+# cross-camera spread is HARD to correct: a whole-frame hold OVERSHOOTS (adds a full frame past the
+# anchor, does not land on a sub-frame gap) and a hold whose frac(pin/33.3) < 0.5 lands in the
+# issue-998 limit-cycle band that DOUBLES the on-screen spread (run 1899055119). So
+# floor_equalization_plan emits an above-floor pin ONLY when a whole-frame hold measurably REDUCES the
+# OVERALL cross-camera spread AND clears both the 94 ms budget and the frac guard. For the ACTUAL
+# 7-camera mining distribution it returns floor-only NOT because "a sub-frame deficit rounds to 0" (a
+# 0.5-1.0-frame deficit rounds UP to a frame), but because the whole-frame overshoot PRESERVES the
+# max-min: the freshest cameras round UP PAST the max-floor anchor while the mid-floor cameras
+# (deficit < 0.5 frame) stay unpinned and remain the new minimum. The ~14 ms excess is grabber-owned
+# (task 1) -- not a strih-pin lever.
 # DIRECTION: equalizing means ADDING latency to the FRESHEST (min-floor) cameras to bring them UP to
 # the OLDEST (max-floor) camera, which anchors at the floor -- the shipped floor_aware_partition
 # direction, the MIRROR of the dispatch's inverted worked numbers.
 DEFAULT_FLOOR_SPREAD_TOLERANCE_MS = 33.3   # ~one 30 fps canvas frame (see floor_spread_hard_fail)
+CANVAS_FRAME_MS = 1000.0 / 30.0            # ~33.333 ms, one 30 fps strih canvas frame (issue-998 frac)
+
+
+def _frac_of_canvas_frame(pin_ms):
+    """The issue-998 fractional depth of a pin: `frac(pin_ms / 33.333)`. A value < 0.5 is the
+    limit-cycle band (round undershoots ceil -> a drain drop + late-hold regain every ~2.3 s), which
+    run 1899055119 showed DOUBLES the on-screen spread. Pure."""
+    return (pin_ms / CANVAS_FRAME_MS) % 1.0
 
 
 def cross_camera_floor_spread(arrival_floors):
@@ -527,9 +540,12 @@ def floor_equalization_plan(arrival_floors, floor_ms=DEFAULT_FLOOR_MS, source_fr
     floors {src: present_age_ms}. Anchor = the OLDEST (max-floor) camera at `floor_ms`; each fresher
     camera would need `deficit = max_floor - floor_i` of ADDED latency to reach the common target. The
     strih FIFO adds only WHOLE source frames, so each deficit is rounded to the NEAREST whole source
-    frame (issue-998 frac rule: nearest, so a sub-frame deficit -> 0 = no limit-cycle-prone sub-frame
-    pin), and a pin is applied ONLY IF the resulting configuration measurably REDUCES the cross-camera
-    spread AND stays within `max_abs_latency_ms` (deep-pin doctrine). A spread beyond `sanity_ms` is a
+    frame, and a pin is applied ONLY IF (a) the resulting configuration measurably REDUCES the OVERALL
+    cross-camera spread, (b) it stays within `max_abs_latency_ms` (deep-pin doctrine), AND (c) it
+    clears the issue-998 frac guard (`frac(pin/33.333) >= 0.5` -- a pin in the < 0.5 band limit-cycles
+    and DOUBLES the on-screen spread). A sub-frame deficit (< 0.5 frame) rounds to 0 = no pin; a
+    0.5-1.0-frame deficit rounds UP to a frame and is emitted only if it passes (a)-(c) (for the
+    7-camera mining data the overshoot fails (a) -> floor-only). A spread beyond `sanity_ms` is a
     degraded grabber (not equalizable) -> floor-only.
 
     Returns (plan, meta):
@@ -550,7 +566,7 @@ def floor_equalization_plan(arrival_floors, floor_ms=DEFAULT_FLOOR_MS, source_fr
         return floor_plan, {"anchor": anchor, "pre_spread_ms": round(pre_spread, 2),
                             "post_spread_ms": round(pre_spread, 2), "reducible": False,
                             "sub_frame_only": False, "added_latency_ms": 0.0, "reason": "degraded"}
-    # Candidate whole-source-frame holds (nearest), budget-clamped.
+    # Candidate whole-source-frame holds (nearest), budget-clamped AND issue-998 frac-guarded.
     frames = {}
     sub_frame_only = True
     for s in sources:
@@ -560,6 +576,13 @@ def floor_equalization_plan(arrival_floors, floor_ms=DEFAULT_FLOOR_MS, source_fr
             sub_frame_only = False
         if arrival_floors[s] + f * source_frame_ms > max_abs_latency_ms:
             f = 0                                            # budget clamp: never deep-pin past the ceiling
+        if f > 0:
+            # issue-998 frac guard: an above-floor pin whose frac(pin/33.333) < 0.5 sits in the
+            # limit-cycle band that DOUBLES the on-screen spread (run 1899055119) -- suppress it to the
+            # floor rather than emit a pin that trades a smaller arithmetic spread for on-screen jitter.
+            cand_pin = floor_ms + int(round(f * source_frame_ms))
+            if _frac_of_canvas_frame(cand_pin) < 0.5:
+                f = 0
         frames[s] = max(0, f)
     post_ages = {s: arrival_floors[s] + frames[s] * source_frame_ms for s in sources}
     post_spread = max(post_ages.values()) - min(post_ages.values())
