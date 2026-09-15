@@ -98,6 +98,72 @@ fn rust_any_mismatch_summary() {
     assert!(any_mismatch(&dirty));
 }
 
+// ---- Certified per-box table (#1303 owner ruling 2026-09-15) -----------------------------------
+//
+// „žiadny — zvuk na strih/stream ide cez Dante, NDI audio ostáva vypnuté" — program audio over NDI
+// exists on the cg OBS (resolume) ONLY; strih/stream/imag carry the mastered mix over Dante/ASIO, so
+// EVERY NDI input there is silent and NDI audio ENABLED on any of them is the double-audio defect.
+// These vectors are today's five live deploy-preflight rows (must grade OK), the inverse (audible on
+// a silent box = a mismatch), and the resolume program/camera pins.
+
+#[test]
+fn certified_five_strih_stream_program_rows_are_ok_1303() {
+    // The five FALSE MISMATCH-PROGRAM-SILENT rows from the 15.9 12:08 preflight: with NDI audio OFF
+    // on a strih/stream program input, the certified table grades OK (Dante carries the audio).
+    assert_eq!(
+        classify(BoxClass::Strih, &input("cg", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Strih, &input("NDI 2ME PGM (mv)", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Stream, &input("NDI obs hudba", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Stream, &input("NDIA cg stream", false, "")).verdict,
+        AudioVerdict::Ok
+    );
+}
+
+#[test]
+fn certified_audible_on_a_silent_box_is_a_mismatch_1303() {
+    // The inverse: NDI audio ENABLED on a strih/stream input is the double-audio hazard the owner
+    // named -> a mismatch (not OK). (The specific MISMATCH-AUDIBLE token is pinned in the GREEN
+    // variant test + the parity gate.)
+    assert!(
+        classify(BoxClass::Stream, &input("NDI obs hudba", true, ""))
+            .verdict
+            .is_mismatch()
+    );
+    assert!(classify(BoxClass::Strih, &input("cg", true, ""))
+        .verdict
+        .is_mismatch());
+}
+
+#[test]
+fn certified_resolume_is_the_only_program_audio_box_1303() {
+    // resolume keeps the program->audio / camera->silent table.
+    assert_eq!(
+        classify(BoxClass::Resolume, &input("sp-fast_video", true, "")).verdict,
+        AudioVerdict::Ok
+    );
+    assert_eq!(
+        classify(BoxClass::Resolume, &input("sp-fast_video", false, "")).verdict,
+        AudioVerdict::MismatchProgramSilent
+    );
+    assert_eq!(
+        classify(BoxClass::Resolume, &input("NDI cam1", true, "")).verdict,
+        AudioVerdict::MismatchCameraAudible
+    );
+}
+
 // ---- Bash replica: print shape ----------------------------------------------------------------
 
 #[test]
