@@ -237,7 +237,8 @@ run_probe avlatency bash "$AVLATENCY_PROBE"
 # The per-box detail lives in the capture; a DOWN box fails safe to SHADING-UNREACHABLE (never OK).
 probe_shading() {
   local spec="$1" pw="$2" tok label ip en act online verdict body port="${SHADING_RELAY_PORT:-8771}"
-  local t; t="$(_probe_timeout shading)"
+  # Bounds are PER BOX (timeout 8 ssh / 6 curl below), not the whole-item RDH_*_TIMEOUT budget --
+  # a per-box bound keeps the worst case linear in the small cambox count and never hangs the run.
   [ -n "$spec" ] || { printf 'roster empty -- no camboxes to probe\n'; return 0; }
   command -v sshpass >/dev/null 2>&1 || { printf 'sshpass missing -- cannot probe shading\n'; return 0; }
   for tok in $spec; do
